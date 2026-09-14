@@ -38,4 +38,10 @@ jobs:
 
       - name: Publish @theplenkov/bro
         working-directory: packages/cli
-        run: npm publish --access public
+        run: |
+          v=$(node -p "require('./package.json').version")
+          if npm view "@theplenkov/bro@$v" version >/dev/null 2>&1; then
+            echo "version $v already on npm — skipping publish"
+          else
+            npm publish --access public
+          fi
