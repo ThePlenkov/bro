@@ -18,7 +18,12 @@ jobs:
           node-version: 22
           cache: npm
 
+      - uses: oven-sh/setup-bun@v2
+
       - run: npm ci --no-audit --no-fund
+
+      - name: Build vendored nx plugins
+        run: npm run build:nx-plugins
 
       - name: Build
         run: npx nx run-many -t build
