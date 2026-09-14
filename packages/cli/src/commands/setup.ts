@@ -96,17 +96,27 @@ function setupBeads(): void {
   installFiles(join('.beads', 'formulas'), FORMULA_FILES, 'formula')
 }
 
-export async function runSetupCommand(argv: string[]): Promise<void> {
-  const beads = argv.includes('--beads')
-  const skills = argv.includes('--skills')
+interface SetupArgs {
+  beads: boolean
+  skills: boolean
+  personality?: string
+}
+
+function parseSetupArgs(argv: string[]): SetupArgs {
   const pIdx = argv.indexOf('--personality')
   const pVal = pIdx >= 0 ? argv[pIdx + 1] : undefined
   if (pIdx >= 0 && (!pVal || pVal.startsWith('--'))) {
     console.error('error: --personality requires a value')
     process.exit(2)
   }
-  const personality = pVal
+  return {
+    beads: argv.includes('--beads'),
+    skills: argv.includes('--skills'),
+    personality: pVal,
+  }
+}
 
+function checkPrereqs(needBeads: boolean): void {
   const gh = hasBin('gh')
   const ghOk = gh && ghAuthed()
   const bd = hasBin('bd')
@@ -126,10 +136,15 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
   }
   // Validate prerequisites before writing anything — a config pointing at a
   // store we can't run would strand the repo.
-  if (beads && !bd) {
+  if (needBeads && !bd) {
     console.error('error: --beads requested but bd not found — https://github.com/gastownhall/beads')
     process.exit(1)
   }
+}
+
+export async function runSetupCommand(argv: string[]): Promise<void> {
+  const { beads, skills, personality } = parseSetupArgs(argv)
+  checkPrereqs(beads)
 
   // bd init + formulas land BEFORE the config write — if beads setup fails,
   // no config claiming store=both is left behind.

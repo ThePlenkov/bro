@@ -24,7 +24,7 @@ export function ghJson<T>(args: string[]): T {
  * (`gh pr checks` exits 1 when checks fail while still printing JSON).
  */
 export function ghTry(args: string[]): { code: number; out: string; err: string } {
-  const proc = spawnSync('gh', args, {
+  const proc = spawnSync('gh', args, { // NOSONAR — user-installed CLI; PATH lookup is the contract
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
   })
@@ -32,8 +32,7 @@ export function ghTry(args: string[]): { code: number; out: string; err: string 
 }
 
 export function ensureGhAuth(): void {
-  // NOSONAR — gh is a user-installed CLI; PATH lookup is the contract
-  const proc = spawnSync('gh', ['auth', 'status'], { stdio: 'ignore' })
+  const proc = spawnSync('gh', ['auth', 'status'], { stdio: 'ignore' }) // NOSONAR — PATH lookup is the contract
   if (proc.status !== 0) {
     console.error('error: gh not authenticated — run `gh auth login`')
     process.exit(1)

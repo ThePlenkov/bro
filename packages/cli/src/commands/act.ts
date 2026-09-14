@@ -30,6 +30,7 @@ Commands:
 }
 
 const VALUE_FLAGS = new Set(['--pr', '--thread', '--comment', '--file'])
+const TSV_SEP = String.raw`\t`
 
 /** PR number: --pr flag, first positional, or the current branch's PR. */
 function resolvePr(argv: string[]): { repo: string; owner: string; repoName: string; pr: number } {
@@ -54,7 +55,7 @@ function resolvePr(argv: string[]): { repo: string; owner: string; repoName: str
   if (prRaw === null) {
     // `gh pr view` resolves the PR for the CURRENT branch — `gh pr list
     // --limit 1` would grab an arbitrary open PR instead.
-    let bare = NaN
+    let bare = Number.NaN
     try {
       bare = Number(gh(['pr', 'view', '--json', 'number', '-q', '.number']).trim())
     } catch {
@@ -184,7 +185,7 @@ function cmdReply(argv: string[]): void {
     }
     console.error(`act reply: ${rows.length} repl(ies)`)
     if (skipped > 0) {
-      console.error(`warning: ${skipped} line(s) had no <thread_id>\\t<body> shape — skipped`)
+      console.error(`warning: ${skipped} line(s) had no <thread_id>${TSV_SEP}<body> shape — skipped`)
       process.exitCode = 1
     }
     return
