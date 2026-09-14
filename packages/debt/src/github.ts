@@ -239,7 +239,7 @@ export function fetchMergedPrCandidates(opts: {
     '--limit',
     String(opts.limit),
     '--json',
-    'number,mergedAt,author,labels',
+    'number,mergedAt,updatedAt,author,labels',
   ]
   if (opts.prAuthor) {
     args.push('--author', opts.prAuthor)
@@ -252,6 +252,7 @@ export function fetchMergedPrCandidates(opts: {
     Array<{
       number: number
       mergedAt: string | null
+      updatedAt: string | null
       author?: { login?: string }
       labels?: Array<{ name: string }>
     }>
@@ -262,6 +263,7 @@ export function fetchMergedPrCandidates(opts: {
     .map((row) => ({
       number: row.number,
       mergedAt: row.mergedAt!,
+      updatedAt: row.updatedAt,
       author: row.author?.login ?? 'unknown',
       labels: (row.labels ?? []).map((l) => l.name),
     }))
@@ -278,6 +280,7 @@ function fetchExplicitMergedPrs(opts: {
       const viewed = ghJson<{
         number: number
         mergedAt: string | null
+        updatedAt: string | null
         state: string
         author?: { login?: string }
         labels?: Array<{ name: string }>
@@ -288,7 +291,7 @@ function fetchExplicitMergedPrs(opts: {
         '--repo',
         `${opts.owner}/${opts.repo}`,
         '--json',
-        'number,mergedAt,author,labels,state',
+        'number,mergedAt,updatedAt,author,labels,state',
       ])
       if (viewed.state !== 'MERGED' || !viewed.mergedAt) {
         console.error(`warning: PR #${number} is not merged — skipped`)
@@ -297,6 +300,7 @@ function fetchExplicitMergedPrs(opts: {
       out.push({
         number: viewed.number,
         mergedAt: viewed.mergedAt,
+        updatedAt: viewed.updatedAt,
         author: viewed.author?.login ?? 'unknown',
         labels: (viewed.labels ?? []).map((l) => l.name),
       })

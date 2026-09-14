@@ -76,6 +76,7 @@ export interface DebtSummary {
 export interface MergedPrCandidate {
   number: number
   mergedAt: string
+  updatedAt: string | null
   author: string
   labels: string[]
 }

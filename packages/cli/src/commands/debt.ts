@@ -27,6 +27,8 @@ import {
   prDebtState,
   readDebtRecords,
   readLedgerOverlays,
+  readProcessedAt,
+  markProcessedAt,
   resolveHarvestPrs,
   syncDebtToBeads,
   upsertLedgerOverlays,
@@ -179,11 +181,27 @@ async function cmdCollect(argv: string[]): Promise<void> {
     listLimit,
   })
   const { pending, processed } = partitionByProcessed(matched)
-  const targets = args.reharvest ? matched : pending
+
+  // Review bots can comment AFTER merge+label. A labeled PR whose updatedAt
+  // is newer than our scan timestamp goes back into the queue — except
+  // `debt:skipped`, which is a human opt-out and is never rescanned.
+  const processedAt = readProcessedAt()
+  const stale = processed.filter((pr) => {
+    if (prDebtState(pr.labels) === 'skipped') {
+      return false
+    }
+    const at = processedAt.get(pr.number)
+    // No timestamp = labeled before this feature existed (or manually) —
+    // rescan once to backfill; the scan then writes the timestamp.
+    return at === undefined || (pr.updatedAt !== null && pr.updatedAt > at)
+  })
+  const targets = args.reharvest ? matched : [...pending, ...stale]
 
   console.error(
     `debt collect: ${matched.length} merged PR(s) matched, ` +
-      `${processed.length} already processed (debt:* label), scanning ${targets.length}`
+      `${processed.length - stale.length} already processed (debt:* label)` +
+      (stale.length > 0 ? `, ${stale.length} stale (post-scan activity)` : '') +
+      `, scanning ${targets.length}`
   )
 
   if (args.listOnly) {
@@ -272,6 +290,9 @@ async function cmdCollect(argv: string[]): Promise<void> {
         applyCollectLabel({ repo: args.repo, pr: pr.number, state })
         labeled += 1
       }
+      // Only full scans earn a timestamp — a --thread-author partial scan
+      // must not mask post-scan activity on a labeled PR.
+      markProcessedAt([pr.number], new Date().toISOString())
     }
   }
 

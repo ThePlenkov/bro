@@ -42,6 +42,10 @@ function summaryFile(cwd?: string): string {
   return join(debtDir(cwd), 'debt-summary.json')
 }
 
+function processedFile(cwd?: string): string {
+  return join(debtDir(cwd), 'processed.json')
+}
+
 function configFile(cwd?: string): string {
   return join(debtDir(cwd), 'config.json')
 }
@@ -286,4 +290,31 @@ export function writeSummary(summary: DebtSummary, cwd?: string): void {
   const path = summaryFile(cwd)
   mkdirSync(dirname(path), { recursive: true })
   atomicWrite(path, `${JSON.stringify(summary, null, 2)}\n`)
+}
+
+/**
+ * Per-PR "scanned at" timestamps — the label alone can't tell whether a
+ * review bot commented AFTER we marked the PR processed. `collect` compares
+ * PR `updatedAt` against this map to rescan stale labels.
+ */
+export function readProcessedAt(cwd?: string): Map<number, string> {
+  const path = processedFile(cwd)
+  if (!existsSync(path)) {
+    return new Map()
+  }
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, string>
+    return new Map(Object.entries(raw).map(([k, v]) => [Number(k), v]))
+  } catch {
+    return new Map()
+  }
+}
+
+export function markProcessedAt(prs: number[], at: string, cwd?: string): void {
+  const map = readProcessedAt(cwd)
+  for (const pr of prs) {
+    map.set(pr, at)
+  }
+  const obj = Object.fromEntries([...map.entries()].sort((a, b) => a[0] - b[0]).map(([k, v]) => [String(k), v]))
+  atomicWrite(processedFile(cwd), `${JSON.stringify(obj, null, 2)}\n`)
 }

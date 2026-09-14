@@ -1,11 +1,14 @@
 {
-  "generated_at": "2026-09-14T17:18:00.736Z",
-  "open_count": 1,
+  "generated_at": "2026-09-14T21:24:49.857Z",
+  "open_count": 5,
   "by_area": {
-    "packages/cli": 1
+    "packages/cli": 2,
+    "formulas/debt-pipeline.formula.toml": 1,
+    "packages/act": 1,
+    "packages/debt": 1
   },
   "by_author": {
-    "coderabbitai": 1
+    "coderabbitai": 5
   },
   "duplicate_fingerprints": [],
   "oldest_open": "2026-09-14T15:42:31.488Z"
