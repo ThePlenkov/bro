@@ -7,7 +7,7 @@
  *   list [filters]                   ledger rows
  *   mark PR collected|clean|skipped|none
  */
-import { ensureGhAuth, resolveRepo } from '@bro/core'
+import { ensureGhAuth, loadConfig, resolveRepo } from '@bro/core'
 import {
   applyCollectLabel,
   applyDebtLabel,
@@ -26,6 +26,7 @@ import {
   prDebtState,
   readDebtRecords,
   resolveHarvestPrs,
+  syncDebtToBeads,
   writeHarvestFile,
   writeSummary,
   type DebtPrState,
@@ -53,7 +54,8 @@ Commands:
   prs [--limit N] [--all]         Unprocessed merged PRs (--all: full matrix)
   list [filters]                  Ledger rows (--status, --area, --author,
                                   --priority, --pr, --limit)
-  mark PR <state> [OWNER REPO]    Set debt label: ${[...DEBT_STATES, 'none'].join('|')}`)
+  mark PR <state> [OWNER REPO]    Set debt label: ${[...DEBT_STATES, 'none'].join('|')}
+  sync [--dry-run]                Project the ledger into beads (bd) — idempotent`)
   process.exit(1)
 }
 
@@ -254,6 +256,26 @@ async function cmdCollect(argv: string[]): Promise<void> {
       ? `labeled ${labeled} PR(s)`
       : 'labels disabled'
     console.error(`debt collect: wrote ${totalRows} row(s), ${labeledMsg}`)
+
+    // store: beads|both → also project into bd. Collection results are
+    // already durable; a sync failure is reported as its own error, not
+    // allowed to mask them — but it still fails the run (no silent degrade).
+    // Explicit values only — a typo like "beed" must fall back to jsonl,
+    // not fail in bd after the ledger was already written.
+    const store = loadConfig().store
+    if (store === 'beads' || store === 'both') {
+      try {
+        const res = syncDebtToBeads(readDebtRecords())
+        console.error(
+          `debt sync: ${res.created} created, ${res.closed} closed, ` +
+            `${res.reopened} reopened, ${res.linked} linked`
+        )
+      } catch (err) {
+        console.error(`debt sync FAILED: ${err instanceof Error ? err.message : err}`)
+        console.error('evidence is written; run `bro debt sync` to retry the projection')
+        process.exitCode = 1
+      }
+    }
   }
 }
 
@@ -426,6 +448,20 @@ function cmdMark(argv: string[]): void {
   console.error(`debt mark: #${pr} → debt:${stateRaw}`)
 }
 
+// --- sync ------------------------------------------------------------------
+
+function cmdSync(argv: string[]): void {
+  const dryRun = argv.includes('--dry-run')
+  const records = readDebtRecords()
+  const res = syncDebtToBeads(records, { dryRun })
+  const verb = dryRun ? '[dry-run] ' : ''
+  console.error(
+    `${verb}debt sync: ${records.length} record(s) — ${res.created} created, ` +
+      `${res.closed} closed, ${res.reopened} reopened, ${res.updated} updated, ` +
+      `${res.unchanged} unchanged, ${res.linked} linked`
+  )
+}
+
 // --- entry -----------------------------------------------------------------
 
 const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
@@ -434,6 +470,7 @@ const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
   prs: cmdPrs,
   list: cmdList,
   mark: cmdMark,
+  sync: cmdSync,
 }
 
 export async function runDebtCommand(argv: string[]): Promise<void> {

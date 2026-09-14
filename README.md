@@ -45,6 +45,7 @@ babysit, no config files to confess to.
 | `bro debt status` | Ledger stats: open/done/wontfix, by area, by author, dupes |
 | `bro debt list` | Raw rows, filterable |
 | `bro debt mark <pr> <state>` | Manual override — `skipped` is the human opt-out, bro respects it |
+| `bro debt sync` | Projects the ledger into beads — idempotent (`thread_id` → `external_ref`), so `bd ready -l debt` becomes the work queue. Needs `bd` installed + `bd init` in the repo |
 
 ## Config (optional)
 
@@ -58,7 +59,10 @@ babysit, no config files to confess to.
 }
 ```
 
-`store: "beads"` coming soon — bro already speaks bd on the roadmap.
+`store` picks where debt lives. `jsonl` is the evidence ledger (always written).
+`beads`/`both` additionally project every record into `bd` — JSONL keeps the
+receipts, beads runs the queue. Requires `bd` installed and `bd init` in the
+repo (`bd init --stealth --skip-agents --skip-hooks` keeps it invisible).
 
 ## Labels bro manages
 
