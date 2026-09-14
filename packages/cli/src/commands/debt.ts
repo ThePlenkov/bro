@@ -20,6 +20,7 @@ import {
   ensureDebtLabels,
   fetchMergedPrCandidates,
   fetchPrLabels,
+  fetchPrUpdatedAt,
   hasHarvestSelection,
   parseCsvInts,
   parseCsvStrings,
@@ -27,6 +28,8 @@ import {
   prDebtState,
   readDebtRecords,
   readLedgerOverlays,
+  readProcessedAt,
+  markProcessedAt,
   resolveHarvestPrs,
   syncDebtToBeads,
   upsertLedgerOverlays,
@@ -179,11 +182,37 @@ async function cmdCollect(argv: string[]): Promise<void> {
     listLimit,
   })
   const { pending, processed } = partitionByProcessed(matched)
-  const targets = args.reharvest ? matched : pending
+
+  // Review bots can comment AFTER merge+label. A labeled PR whose updatedAt
+  // is newer than our scan timestamp goes back into the queue — except
+  // `debt:skipped`, which is a human opt-out and is never rescanned.
+  const processedAt = readProcessedAt()
+  const futureBound = new Date(Date.now() + 5 * 60 * 1000).toISOString()
+  const stale = processed.filter((pr) => {
+    if (prDebtState(pr.labels) === 'skipped') {
+      return false
+    }
+    const at = processedAt.get(pr.number)
+    // No timestamp = labeled before this feature existed (or manually) —
+    // rescan once to backfill; the scan then writes the timestamp.
+    // A far-future cursor would suppress rescans forever — treat as stale.
+    // Tolerance: the cursor is server time, so compare against local now+5m
+    // to survive clock skew without flagging every PR.
+    return (
+      at === undefined ||
+      at > futureBound ||
+      (pr.updatedAt !== null && pr.updatedAt > at)
+    )
+  })
+  const targets = args.reharvest
+    ? matched.filter((pr) => prDebtState(pr.labels) !== 'skipped')
+    : [...pending, ...stale]
 
   console.error(
     `debt collect: ${matched.length} merged PR(s) matched, ` +
-      `${processed.length} already processed (debt:* label), scanning ${targets.length}`
+      `${processed.length - stale.length} already processed (debt:* label)` +
+      (stale.length > 0 ? `, ${stale.length} stale (post-scan activity)` : '') +
+      `, scanning ${targets.length}`
   )
 
   if (args.listOnly) {
@@ -209,6 +238,9 @@ async function cmdCollect(argv: string[]): Promise<void> {
   let totalRows = 0
   let labeled = 0
   for (const pr of targets) {
+    // Captured before fetching threads: activity arriving mid-scan is then
+    // newer than the recorded timestamp and gets picked up next run.
+    const scannedAt = new Date().toISOString()
     let result
     try {
       result = await collectPr({
@@ -272,6 +304,18 @@ async function cmdCollect(argv: string[]): Promise<void> {
         applyCollectLabel({ repo: args.repo, pr: pr.number, state })
         labeled += 1
       }
+      // Store the observed updatedAt as the cursor, not the wall clock:
+      // no cross-clock skew, and mid-scan activity bumps the server's
+      // updatedAt past our cursor so the next run catches it. Re-fetched
+      // post-label: our own label write bumps updatedAt, so the pre-scan
+      // snapshot would flag the PR stale again on the next run. Only full
+      // scans earn a cursor — a --thread-author partial scan must not
+      // mask post-scan activity on a labeled PR.
+      const cursor =
+        fetchPrUpdatedAt({ owner: args.owner, repo: args.repoName, pr: pr.number }) ??
+        pr.updatedAt ??
+        scannedAt
+      markProcessedAt([pr.number], cursor)
     }
   }
 

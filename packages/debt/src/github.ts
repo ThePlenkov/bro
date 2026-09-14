@@ -33,7 +33,7 @@ function reviewThreadsQuery(afterClause: string): string {
               isResolved
               isOutdated
               comments(first: 1) {
-                nodes { author { login } path line body }
+                nodes { author { login __typename } path line body }
               }
             }
           }
@@ -141,6 +141,21 @@ export function fetchPrLabels(opts: { owner: string; repo: string; pr: number })
   return (viewed.labels ?? []).map((l) => l.name)
 }
 
+/** Post-write updatedAt: our own label mutation bumps it, so the scan
+ *  cursor must be captured after labeling, not from the pre-scan snapshot. */
+export function fetchPrUpdatedAt(opts: { owner: string; repo: string; pr: number }): string | null {
+  const viewed = ghJson<{ updatedAt?: string }>([
+    'pr',
+    'view',
+    String(opts.pr),
+    '--repo',
+    `${opts.owner}/${opts.repo}`,
+    '--json',
+    'updatedAt',
+  ])
+  return viewed.updatedAt ?? null
+}
+
 // --- merged PR candidates ---------------------------------------------------
 
 function parseCsvParts(value: string | null | undefined): string[] {
@@ -239,7 +254,7 @@ export function fetchMergedPrCandidates(opts: {
     '--limit',
     String(opts.limit),
     '--json',
-    'number,mergedAt,author,labels',
+    'number,mergedAt,updatedAt,author,labels',
   ]
   if (opts.prAuthor) {
     args.push('--author', opts.prAuthor)
@@ -252,6 +267,7 @@ export function fetchMergedPrCandidates(opts: {
     Array<{
       number: number
       mergedAt: string | null
+      updatedAt: string | null
       author?: { login?: string }
       labels?: Array<{ name: string }>
     }>
@@ -262,6 +278,7 @@ export function fetchMergedPrCandidates(opts: {
     .map((row) => ({
       number: row.number,
       mergedAt: row.mergedAt!,
+      updatedAt: row.updatedAt,
       author: row.author?.login ?? 'unknown',
       labels: (row.labels ?? []).map((l) => l.name),
     }))
@@ -278,6 +295,7 @@ function fetchExplicitMergedPrs(opts: {
       const viewed = ghJson<{
         number: number
         mergedAt: string | null
+        updatedAt: string | null
         state: string
         author?: { login?: string }
         labels?: Array<{ name: string }>
@@ -288,7 +306,7 @@ function fetchExplicitMergedPrs(opts: {
         '--repo',
         `${opts.owner}/${opts.repo}`,
         '--json',
-        'number,mergedAt,author,labels,state',
+        'number,mergedAt,updatedAt,author,labels,state',
       ])
       if (viewed.state !== 'MERGED' || !viewed.mergedAt) {
         console.error(`warning: PR #${number} is not merged — skipped`)
@@ -297,6 +315,7 @@ function fetchExplicitMergedPrs(opts: {
       out.push({
         number: viewed.number,
         mergedAt: viewed.mergedAt,
+        updatedAt: viewed.updatedAt,
         author: viewed.author?.login ?? 'unknown',
         labels: (viewed.labels ?? []).map((l) => l.name),
       })

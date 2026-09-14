@@ -6,3 +6,4 @@ dist/
 *.tgz
 packages/cli/README.md
 packages/cli/LICENSE
+.agents/review-debt/

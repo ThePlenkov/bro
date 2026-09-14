@@ -10,6 +10,7 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
@@ -40,6 +41,10 @@ function ledgerFile(cwd?: string): string {
 
 function summaryFile(cwd?: string): string {
   return join(debtDir(cwd), 'debt-summary.json')
+}
+
+function processedFile(cwd?: string): string {
+  return join(debtDir(cwd), 'processed.json')
 }
 
 function configFile(cwd?: string): string {
@@ -286,4 +291,72 @@ export function writeSummary(summary: DebtSummary, cwd?: string): void {
   const path = summaryFile(cwd)
   mkdirSync(dirname(path), { recursive: true })
   atomicWrite(path, `${JSON.stringify(summary, null, 2)}\n`)
+}
+
+/**
+ * Per-PR "scanned at" timestamps — the label alone can't tell whether a
+ * review bot commented AFTER we marked the PR processed. `collect` compares
+ * PR `updatedAt` against this map to rescan stale labels.
+ */
+export function readProcessedAt(cwd?: string): Map<number, string> {
+  const path = processedFile(cwd)
+  if (!existsSync(path)) {
+    return new Map()
+  }
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, string>
+    return new Map(
+      Object.entries(raw)
+        .filter(
+          ([k, v]) =>
+            Number.isInteger(Number(k)) &&
+            typeof v === 'string' &&
+            !Number.isNaN(Date.parse(v))
+        )
+        .map(([k, v]) => [Number(k), v])
+    )
+  } catch {
+    return new Map()
+  }
+}
+
+export function markProcessedAt(prs: number[], at: string, cwd?: string): void {
+  const path = processedFile(cwd)
+  mkdirSync(dirname(path), { recursive: true })
+  // mkdir is atomic on all platforms — a lock dir serializes the
+  // read-modify-write so concurrent collects can't lose each other's
+  // timestamps.
+  const lock = `${path}.lock`
+  for (let i = 0; i < 100; i++) {
+    try {
+      mkdirSync(lock)
+      break
+    } catch {
+      // Steal a stale lock: a killed process never runs the finally, so a
+      // lock dir older than 30s can't be a live write.
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > 30_000) {
+          rmSync(lock, { recursive: true, force: true })
+        }
+      } catch {
+        // lock vanished or unreadable — retry loop handles both
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
+      if (i === 99) {
+        throw new Error(`could not acquire lock ${lock}`)
+      }
+    }
+  }
+  try {
+    const map = readProcessedAt(cwd)
+    for (const pr of prs) {
+      map.set(pr, at)
+    }
+    const obj = Object.fromEntries(
+      [...map.entries()].sort((a, b) => a[0] - b[0]).map(([k, v]) => [String(k), v])
+    )
+    atomicWrite(path, `${JSON.stringify(obj, null, 2)}\n`)
+  } finally {
+    rmSync(lock, { recursive: true, force: true })
+  }
 }

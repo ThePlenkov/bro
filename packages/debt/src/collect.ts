@@ -12,7 +12,11 @@ import { fetchPrMeta, fetchReviewThreads } from './github.ts'
 import { loadAuthorPolicy } from './store.ts'
 import { bodyPreview, deriveArea, fingerprint } from './text.ts'
 
-export function classifyThread(opts: { author: string; config: AuthorPolicy }): {
+export function classifyThread(opts: {
+  author: string
+  authorType?: string
+  config: AuthorPolicy
+}): {
   priority: DebtPriority
   needs: DebtNeeds
   harvest: boolean
@@ -21,7 +25,9 @@ export function classifyThread(opts: { author: string; config: AuthorPolicy }): 
   if (opts.config.excluded_authors.some((a) => a.toLowerCase() === login)) {
     return { priority: 'noise', needs: 'skip', harvest: false }
   }
-  const isBot = login.endsWith('[bot]')
+  // GraphQL reports app actors (coderabbitai, cubic-dev-ai, ...) without
+  // the [bot] suffix — __typename is the reliable discriminator.
+  const isBot = opts.authorType === 'Bot' || login.endsWith('[bot]')
   if (!isBot) {
     return { priority: 'human', needs: 'code_change', harvest: true }
   }
@@ -57,11 +63,16 @@ function classifyThreadAction(opts: {
   if (opts.thread.isResolved || opts.thread.isOutdated) {
     return opts.thread.isOutdated ? { kind: 'skip', reason: 'outdated' } : null
   }
-  const author = opts.thread.comments.nodes[0]?.author?.login ?? 'unknown'
+  const comment = opts.thread.comments.nodes[0]
+  const author = comment?.author?.login ?? 'unknown'
   if (!authorMatchesFilter(author, opts.threadAuthor)) {
     return { kind: 'skip', reason: 'thread_author' }
   }
-  const classification = classifyThread({ author, config: opts.config })
+  const classification = classifyThread({
+    author,
+    authorType: comment?.author?.__typename,
+    config: opts.config,
+  })
   if (!classification.harvest) {
     return { kind: 'skip', reason: 'config' }
   }
