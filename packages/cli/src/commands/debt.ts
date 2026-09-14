@@ -186,6 +186,7 @@ async function cmdCollect(argv: string[]): Promise<void> {
   // is newer than our scan timestamp goes back into the queue — except
   // `debt:skipped`, which is a human opt-out and is never rescanned.
   const processedAt = readProcessedAt()
+  const now = new Date().toISOString()
   const stale = processed.filter((pr) => {
     if (prDebtState(pr.labels) === 'skipped') {
       return false
@@ -193,9 +194,16 @@ async function cmdCollect(argv: string[]): Promise<void> {
     const at = processedAt.get(pr.number)
     // No timestamp = labeled before this feature existed (or manually) —
     // rescan once to backfill; the scan then writes the timestamp.
-    return at === undefined || (pr.updatedAt !== null && pr.updatedAt > at)
+    // A future timestamp would suppress rescans forever — treat as stale.
+    return (
+      at === undefined ||
+      at > now ||
+      (pr.updatedAt !== null && pr.updatedAt > at)
+    )
   })
-  const targets = args.reharvest ? matched : [...pending, ...stale]
+  const targets = args.reharvest
+    ? matched.filter((pr) => prDebtState(pr.labels) !== 'skipped')
+    : [...pending, ...stale]
 
   console.error(
     `debt collect: ${matched.length} merged PR(s) matched, ` +
@@ -227,6 +235,9 @@ async function cmdCollect(argv: string[]): Promise<void> {
   let totalRows = 0
   let labeled = 0
   for (const pr of targets) {
+    // Captured before fetching threads: activity arriving mid-scan is then
+    // newer than the recorded timestamp and gets picked up next run.
+    const scannedAt = new Date().toISOString()
     let result
     try {
       result = await collectPr({
@@ -292,7 +303,7 @@ async function cmdCollect(argv: string[]): Promise<void> {
       }
       // Only full scans earn a timestamp — a --thread-author partial scan
       // must not mask post-scan activity on a labeled PR.
-      markProcessedAt([pr.number], new Date().toISOString())
+      markProcessedAt([pr.number], scannedAt)
     }
   }
 

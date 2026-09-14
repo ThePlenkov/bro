@@ -304,7 +304,11 @@ export function readProcessedAt(cwd?: string): Map<number, string> {
   }
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, string>
-    return new Map(Object.entries(raw).map(([k, v]) => [Number(k), v]))
+    return new Map(
+      Object.entries(raw)
+        .filter(([k, v]) => Number.isInteger(Number(k)) && !Number.isNaN(Date.parse(v)))
+        .map(([k, v]) => [Number(k), v])
+    )
   } catch {
     return new Map()
   }
