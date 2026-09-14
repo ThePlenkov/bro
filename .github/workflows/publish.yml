@@ -34,7 +34,7 @@ jobs:
 
       - name: Tag must match package version
         working-directory: packages/cli
-        run: test "v$(npm pkg get version | tr -d '\"')" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != package version"; exit 1; }
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != package version"; exit 1; }
 
       - name: Publish @theplenkov/bro
         working-directory: packages/cli

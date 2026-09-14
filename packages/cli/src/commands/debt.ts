@@ -249,13 +249,16 @@ async function cmdCollect(argv: string[]): Promise<void> {
       })
       if (reopen.length > 0) {
         upsertLedgerOverlays(
-          reopen.map((r) => ({
-            thread_id: r.thread_id,
-            status: 'open' as const,
-            fix_pr: null,
-            fixed_at: null,
-            notes: 'reopened by reharvest',
-          }))
+          reopen.map((r) => {
+            const prev = overlays.get(r.thread_id)
+            return {
+              thread_id: r.thread_id,
+              status: 'open' as const,
+              fix_pr: null,
+              fixed_at: null,
+              notes: prev?.notes ? `${prev.notes} | reopened by reharvest` : 'reopened by reharvest',
+            }
+          })
         )
         console.error(`debt: reopened ${reopen.length} terminal row(s) — still unresolved`)
       }

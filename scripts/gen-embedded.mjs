@@ -17,19 +17,27 @@ const check = process.argv.includes('--check')
 
 function collect(dir, prefix) {
   const files = {}
-  for (const entry of readdirSync(join(root, dir), { recursive: true, withFileTypes: true })) {
+  // readdir order isn't guaranteed across filesystems — sort for a
+  // deterministic generated file (--check compares byte-for-byte).
+  const entries = readdirSync(join(root, dir), { recursive: true, withFileTypes: true })
+    .sort((a, b) => join(a.parentPath, a.name).localeCompare(join(b.parentPath, b.name)))
+  for (const entry of entries) {
     if (!entry.isFile()) {
       continue
     }
     const abs = join(entry.parentPath, entry.name)
-    files[`${prefix}${relative(join(root, dir), abs)}`] = readFileSync(abs, 'utf8')
+    // POSIX keys — the generated file must be identical on every OS.
+    files[`${prefix}${relative(join(root, dir), abs).replaceAll('\\', '/')}`] = readFileSync(abs, 'utf8')
   }
   return files
 }
 
 const skills = {}
-for (const name of readdirSync(join(root, 'skills'))) {
-  for (const [rel, content] of Object.entries(collect(join('skills', name), `${name}/`))) {
+for (const entry of readdirSync(join(root, 'skills'), { withFileTypes: true })) {
+  if (!entry.isDirectory()) {
+    continue
+  }
+  for (const [rel, content] of Object.entries(collect(join('skills', entry.name), `${entry.name}/`))) {
     skills[rel] = content
   }
 }

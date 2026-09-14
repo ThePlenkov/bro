@@ -30,7 +30,6 @@ Commands:
 }
 
 const VALUE_FLAGS = new Set(['--pr', '--thread', '--comment', '--file'])
-const TSV_SEP = String.raw`\t`
 
 /** PR number: --pr flag, first positional, or the current branch's PR. */
 function resolvePr(argv: string[]): { repo: string; owner: string; repoName: string; pr: number } {
@@ -54,18 +53,19 @@ function resolvePr(argv: string[]): { repo: string; owner: string; repoName: str
 
   if (prRaw === null) {
     // `gh pr view` resolves the PR for the CURRENT branch — `gh pr list
-    // --limit 1` would grab an arbitrary open PR instead.
-    let bare = Number.NaN
+    // --limit 1` would grab an arbitrary open PR instead. It also resolves
+    // CLOSED/MERGED PRs, so state must be checked explicitly.
+    let pr: { number: number; state: string } | null = null
     try {
-      bare = Number(gh(['pr', 'view', '--json', 'number', '-q', '.number']).trim())
+      pr = JSON.parse(gh(['pr', 'view', '--json', 'number,state']))
     } catch {
       /* no PR for this branch */
     }
-    if (!Number.isInteger(bare) || bare <= 0) {
+    if (!pr || pr.state !== 'OPEN') {
       console.error('error: no open PR for current branch — pass a PR number')
       process.exit(2)
     }
-    return { repo, owner: owner!, repoName: repoName!, pr: bare }
+    return { repo, owner: owner!, repoName: repoName!, pr: pr.number }
   }
   const pr = Number(prRaw)
   if (!Number.isInteger(pr) || pr <= 0) {
@@ -185,7 +185,7 @@ function cmdReply(argv: string[]): void {
     }
     console.error(`act reply: ${rows.length} repl(ies)`)
     if (skipped > 0) {
-      console.error(`warning: ${skipped} line(s) had no <thread_id>${TSV_SEP}<body> shape — skipped`)
+      console.error(`warning: ${skipped} line(s) had no <thread_id><TAB><body> shape — skipped`)
       process.exitCode = 1
     }
     return
