@@ -180,7 +180,7 @@ function cmdReply(argv: string[]): void {
     }
     console.error(`act reply: ${rows.length} repl(ies)`)
     if (skipped > 0) {
-      console.error(`warning: ${skipped} line(s) had no <thread_id>${String.raw`\t`}<body> shape — skipped`)
+      console.error(`warning: ${skipped} line(s) had no <thread_id>\\t<body> shape — skipped`)
       process.exitCode = 1
     }
     return
