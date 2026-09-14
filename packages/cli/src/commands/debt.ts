@@ -301,9 +301,12 @@ async function cmdCollect(argv: string[]): Promise<void> {
         applyCollectLabel({ repo: args.repo, pr: pr.number, state })
         labeled += 1
       }
-      // Only full scans earn a timestamp — a --thread-author partial scan
-      // must not mask post-scan activity on a labeled PR.
-      markProcessedAt([pr.number], scannedAt)
+      // Store the observed updatedAt as the cursor, not the wall clock:
+      // no cross-clock skew, and mid-scan activity bumps the server's
+      // updatedAt past our cursor so the next run catches it. Only full
+      // scans earn a cursor — a --thread-author partial scan must not
+      // mask post-scan activity on a labeled PR.
+      markProcessedAt([pr.number], pr.updatedAt ?? scannedAt)
     }
   }
 
