@@ -45,7 +45,27 @@ babysit, no config files to confess to.
 | `bro debt status` | Ledger stats: open/done/wontfix, by area, by author, dupes |
 | `bro debt list` | Raw rows, filterable |
 | `bro debt mark <pr> <state>` | Manual override — `skipped` is the human opt-out, bro respects it |
+| `bro debt set <status> --thread-id ID` | Row status: `claimed` / `done --fix-pr N` / `wontfix` / `duplicate` — feeds `sync` |
 | `bro debt sync` | Projects the ledger into beads — idempotent (`thread_id` → `external_ref`), so `bd ready -l debt` becomes the work queue. Needs `bd` installed + `bd init` in the repo |
+
+| `bro act status [PR]` | **Exit gate as code** — open threads, pending CI, SAST findings, mergeable. Non-zero while blocked. `--json` for machines |
+| `bro act threads [PR]` | Unresolved review threads on the PR |
+| `bro act resolve --thread ID [--comment T]` | Resolve (or `--unresolve`) — replies first if a comment is given |
+| `bro act reply --thread ID --comment T` | Reply without resolving; `--file TSV` for batch |
+
+| `bro setup [--beads] [--skills]` | Wires bro into the current repo: checks `gh` auth + `bd`, writes `bro.config.json`, optionally `bd init --stealth` + installs the debt-pipeline formula and thin skill wrappers |
+
+## The pipeline (beads)
+
+`bro setup --beads` drops `debt-pipeline.formula.toml` into `.beads/formulas/`:
+
+```bash
+bd mol pour debt-pipeline
+#   collect → HUMAN GATE (triage) → fix → PR gate → sync
+```
+
+Every step is a `bro` command; the human gate is the point. bro collects
+and carries — the verdict is yours.
 
 ## Config (optional)
 
@@ -85,8 +105,9 @@ cd bro && npm install
 npm run build && npm test
 ```
 
-Workspace packages live in `packages/*` (`@bro/core`, `@bro/debt`, the CLI
-itself). Skills in `skills/` are thin wrappers — all mechanics are in the
-CLI. Nx inference comes from `vendor/nx.ts` (submodule, we ride the source).
+Workspace packages live in `packages/*` (`@bro/core`, `@bro/debt`, `@bro/act`,
+the CLI itself). Skills in `skills/` are thin wrappers — all mechanics are in
+the CLI. Nx inference comes from `vendor/nx.ts` (submodule, we ride the
+source).
 
 MIT. PRs welcome — bro reviews them anyway.

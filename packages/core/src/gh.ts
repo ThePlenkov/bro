@@ -6,8 +6,7 @@ import { spawnSync } from 'node:child_process'
 
 export function gh(args: string[]): string {
   const proc = spawnSync('gh', args, {
-    stdout: 'pipe',
-    stderr: 'pipe',
+    stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
   })
   if (proc.status !== 0) {
@@ -20,11 +19,20 @@ export function ghJson<T>(args: string[]): T {
   return JSON.parse(gh(args)) as T
 }
 
-export function ensureGhAuth(): void {
-  const proc = spawnSync('gh', ['auth', 'status'], {
-    stdout: 'ignore',
-    stderr: 'ignore',
+/**
+ * `gh` without the throw — for commands whose exit code carries meaning
+ * (`gh pr checks` exits 1 when checks fail while still printing JSON).
+ */
+export function ghTry(args: string[]): { code: number; out: string; err: string } {
+  const proc = spawnSync('gh', args, { // NOSONAR — user-installed CLI; PATH lookup is the contract
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
   })
+  return { code: proc.status ?? 1, out: proc.stdout ?? '', err: (proc.stderr ?? '').trim() }
+}
+
+export function ensureGhAuth(): void {
+  const proc = spawnSync('gh', ['auth', 'status'], { stdio: 'ignore' }) // NOSONAR — PATH lookup is the contract
   if (proc.status !== 0) {
     console.error('error: gh not authenticated — run `gh auth login`')
     process.exit(1)

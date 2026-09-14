@@ -7,6 +7,7 @@
  *   list [filters]                   ledger rows
  *   mark PR collected|clean|skipped|none
  */
+import { readFileSync } from 'node:fs'
 import { ensureGhAuth, loadConfig, resolveRepo } from '@bro/core'
 import {
   applyCollectLabel,
@@ -25,8 +26,10 @@ import {
   partitionByProcessed,
   prDebtState,
   readDebtRecords,
+  readLedgerOverlays,
   resolveHarvestPrs,
   syncDebtToBeads,
+  upsertLedgerOverlays,
   writeHarvestFile,
   writeSummary,
   type DebtPrState,
@@ -55,6 +58,8 @@ Commands:
   list [filters]                  Ledger rows (--status, --area, --author,
                                   --priority, --pr, --limit)
   mark PR <state> [OWNER REPO]    Set debt label: ${[...DEBT_STATES, 'none'].join('|')}
+  set <status> --thread-id ID…    Ledger status: open|claimed|done|wontfix|duplicate
+        [--threads-file PATH] [--fix-pr N] [--notes T]
   sync [--dry-run]                Project the ledger into beads (bd) — idempotent`)
   process.exit(1)
 }
@@ -235,6 +240,28 @@ async function cmdCollect(argv: string[]): Promise<void> {
         records: result.incoming,
       })
       totalRows += result.incoming.length
+      // A reharvested thread that was marked done/wontfix is unresolved again
+      // — the terminal overlay must not shadow the fresh open evidence.
+      const overlays = readLedgerOverlays()
+      const reopen = result.incoming.filter((r) => {
+        const s = overlays.get(r.thread_id)?.status
+        return s === 'done' || s === 'wontfix'
+      })
+      if (reopen.length > 0) {
+        upsertLedgerOverlays(
+          reopen.map((r) => {
+            const prev = overlays.get(r.thread_id)
+            return {
+              thread_id: r.thread_id,
+              status: 'open' as const,
+              fix_pr: null,
+              fixed_at: null,
+              notes: prev?.notes ? `${prev.notes} | reopened by reharvest` : 'reopened by reharvest',
+            }
+          })
+        )
+        console.error(`debt: reopened ${reopen.length} terminal row(s) — still unresolved`)
+      }
     }
     // Never overwrite a human `debt:skipped` opt-out, even under --reharvest.
     // Re-fetch labels: the candidate snapshot predates this PR's collection,
@@ -448,6 +475,88 @@ function cmdMark(argv: string[]): void {
   console.error(`debt mark: #${pr} → debt:${stateRaw}`)
 }
 
+// --- set -------------------------------------------------------------------
+
+const DEBT_ROW_STATUSES = ['open', 'claimed', 'done', 'wontfix', 'duplicate'] as const
+type DebtRowStatus = (typeof DEBT_ROW_STATUSES)[number]
+
+interface SetArgs {
+  threadIds: string[]
+  fixPr: number | null
+  notes: string | null
+}
+
+function parseSetFlags(argv: string[]): SetArgs {
+  const out: SetArgs = { threadIds: [], fixPr: null, notes: null }
+  for (let i = 0; i < argv.length; i += 1) {
+    const value = readOption(argv, i)
+    if (argv[i] === '--thread-id' && value !== null) {
+      out.threadIds.push(value)
+      i += 1
+    } else if (argv[i] === '--threads-file' && value !== null) {
+      out.threadIds.push(
+        ...readFileSync(value, 'utf8')
+          .split('\n')
+          .map((l) => l.trim())
+          .filter((l) => l.length > 0 && !l.startsWith('#'))
+      )
+      i += 1
+    } else if (argv[i] === '--fix-pr' && value !== null) {
+      const n = Number(value)
+      if (!Number.isInteger(n) || n <= 0) {
+        console.error(`error: --fix-pr must be a positive integer, got "${value}"`)
+        process.exit(2)
+      }
+      out.fixPr = n
+      i += 1
+    } else if (argv[i] === '--notes' && value !== null) {
+      out.notes = value
+      i += 1
+    }
+  }
+  return out
+}
+
+function cmdSet(argv: string[]): void {
+  // Status is strictly the first positional — scanning all argv would let a
+  // flag value like --notes "done" get picked up as the status.
+  const status = argv[0] as DebtRowStatus | undefined
+  const { threadIds, fixPr, notes } = parseSetFlags(argv.slice(1))
+
+  if (!status || !(DEBT_ROW_STATUSES as readonly string[]).includes(status) || threadIds.length === 0) {
+    console.error(
+      `Usage: bro debt set <${DEBT_ROW_STATUSES.join('|')}> --thread-id ID… ` +
+        '[--threads-file PATH] [--fix-pr N] [--notes T]'
+    )
+    process.exit(2)
+  }
+
+  const records = readDebtRecords()
+  const byId = new Map(records.map((r) => [r.thread_id, r]))
+  const ids = [...new Set(threadIds)]
+  const missing = ids.filter((id) => !byId.has(id))
+  const terminal = status === 'done' || status === 'wontfix'
+  const now = new Date().toISOString()
+
+  upsertLedgerOverlays(
+    ids
+      .filter((id) => byId.has(id))
+      .map((thread_id) => ({
+        thread_id,
+        status,
+        fix_pr: terminal ? (fixPr ?? byId.get(thread_id)!.fix_pr) : null,
+        fixed_at: terminal ? now : null,
+        notes: notes ?? byId.get(thread_id)!.notes,
+      }))
+  )
+  writeSummary(buildSummary(readDebtRecords()))
+  console.error(`debt set: ${ids.length - missing.length} row(s) → ${status}`)
+  if (missing.length > 0) {
+    console.error(`warning: thread id(s) not in ledger: ${missing.join(', ')}`)
+    process.exitCode = 1
+  }
+}
+
 // --- sync ------------------------------------------------------------------
 
 function cmdSync(argv: string[]): void {
@@ -470,6 +579,7 @@ const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
   prs: cmdPrs,
   list: cmdList,
   mark: cmdMark,
+  set: cmdSet,
   sync: cmdSync,
 }
 

@@ -1,0 +1,41 @@
+name: Publish
+
+# Tag-triggered npm publish via OIDC trusted publishing — no tokens.
+# Setup (one-time, after first placeholder exists on npm):
+#   npm trust github @theplenkov/bro --file publish.yml --repo ThePlenkov/bro
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - run: npm ci --no-audit --no-fund --ignore-scripts
+      - run: npm run build:nx-plugins
+      - run: npm run build
+      - run: npm test
+
+      - name: Tag must match package version
+        working-directory: packages/cli
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != package version"; exit 1; }
+
+      - name: Publish @theplenkov/bro
+        working-directory: packages/cli
+        run: npm publish --access public

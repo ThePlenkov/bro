@@ -3,3 +3,6 @@ dist/
 .nx/
 *.tsbuildinfo
 .DS_Store
+*.tgz
+packages/cli/README.md
+packages/cli/LICENSE
