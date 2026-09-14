@@ -1,0 +1,80 @@
+# bro debt pipeline — merged-PR review debt, end to end.
+#
+#   collect → triage (HUMAN GATE) → fix → pr-gate → sync
+#
+# Install: `bro setup --beads` copies this into .beads/formulas/.
+# Run:     `bd mol pour debt-pipeline`  (add --var scope="--last 20" to narrow)
+
+formula = "debt-pipeline"
+description = "Sweep merged PRs for unresolved review threads, human-triage them into the ledger, fix them on a branch, gate the fix PR, then project results back to beads."
+version = 1
+type = "workflow"
+
+[vars.scope]
+description = "Extra `bro debt collect` args, e.g. \"--last 20\" or \"--merged-since 2025-01-01\""
+required = false
+default = ""
+
+[vars.fix_pr]
+description = "PR number carrying the fixes (filled at the fix step; pr-gate re-checks it)"
+required = false
+default = ""
+
+[[steps]]
+id = "collect"
+title = "bro debt collect — sweep merged PRs"
+type = "agent"
+description = """
+Run `bro debt collect {{scope}}` in the repo. It scans merged PRs without a
+`debt:*` label, writes harvests/*.jsonl, labels PRs collected/clean, and —
+when store=both — projects findings into beads.
+Done when: `bro debt status` shows no unprocessed merged PRs.
+"""
+
+[[steps]]
+id = "triage"
+title = "HUMAN GATE — triage the ledger"
+needs = ["collect"]
+type = "human"
+description = """
+Human reviews `bro debt list`. For each row decide:
+  `bro debt set claimed  --thread-id <id>` — worth fixing, goes to fix step
+  `bro debt set wontfix  --thread-id <id> --notes "<why>"` — reject
+  `bro debt set duplicate --thread-id <id>` — dupe of another row
+Nothing proceeds to fix until every open row has a verdict. Debt rows are
+evidence; a human owns the judgment call.
+"""
+
+[[steps]]
+id = "fix"
+title = "Fix claimed debt on a branch"
+needs = ["triage"]
+type = "agent"
+description = """
+For each `claimed` row: fix on a branch, commit, push, open ONE fix PR.
+Mark rows as they land: `bro debt set done --thread-id <id> --fix-pr {{fix_pr}}`.
+Threads on the *source* PRs are evidence — never resolve them; the fix PR is
+the deliverable.
+"""
+
+[[steps]]
+id = "pr-gate"
+title = "GATE — bro act status on the fix PR"
+needs = ["fix"]
+type = "agent"
+description = """
+Run `bro act status {{fix_pr}}` until exit 0: zero open review threads, no
+pending CI, no pending SAST findings. Any blocker → fix and re-check.
+Exit non-zero = the gate holds; do not merge around it.
+"""
+
+[[steps]]
+id = "sync"
+title = "bro debt sync — close the loop"
+needs = ["pr-gate"]
+type = "agent"
+description = """
+After the fix PR merges: `bro debt sync`. Ledger statuses flow into beads —
+done/wontfix rows close their beads, open ones stay in `bd ready -l debt`.
+Idempotent; safe to re-run.
+"""

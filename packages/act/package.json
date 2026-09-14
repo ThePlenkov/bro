@@ -1,28 +1,18 @@
 {
-  "name": "@theplenkov/bro",
+  "name": "@bro/act",
   "version": "0.1.0",
-  "description": "bro — agent's sidekick CLI: review-debt pipeline, PR triage, fix loops",
+  "private": true,
   "type": "module",
-  "bin": {
-    "bro": "./dist/index.js"
-  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     }
   },
-  "files": [
-    "dist"
-  ],
-  "engines": {
-    "node": ">=22"
-  },
   "scripts": {
     "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
-    "@bro/act": "*",
     "@bro/core": "*",
     "@bro/debt": "*"
   },
