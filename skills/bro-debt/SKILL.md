@@ -1,0 +1,31 @@
+---
+name: bro-debt
+description: "Use when the user invokes /debt or asks about review debt on merged PRs. Thin wrapper over the bro CLI — all mechanics live in `bro debt *` commands; this skill carries policy only. Requires `bro` (npx @theplenkov/bro) and gh."
+---
+
+# /debt (bro)
+
+**All mechanics live in the `bro` CLI.** This skill is policy only — do not
+reimplement what `bro debt` already does.
+
+Prereq: `bro` on PATH or `npx -y @theplenkov/bro`. Requires `gh` auth.
+
+## Commands
+
+| Command | What it does |
+| ------- | ------------ |
+| `bro debt collect [filters]` | Scan merged PRs **without** a `debt:*` label → collect unresolved threads → write `harvests/*.jsonl` → label `debt:collected` / `debt:clean` |
+| `bro debt status` | Ledger summary + unprocessed merged-PR count |
+| `bro debt prs` | Merged PRs still unprocessed — the work queue (`--all`: full matrix) |
+| `bro debt list` | Ledger rows (`--status`, `--area`, `--author`, `--priority`, `--pr`) |
+| `bro debt mark <pr> <state>` | `collected` / `clean` / `skipped` / `none` — manual override |
+
+## Policy
+
+- **`debt:*` labels are the PR-level source of truth** for "processed".
+  `skipped` is a human opt-out and always wins over machine labels.
+- **Label after the file lands.** In CI pipelines run
+  `collect --no-label`, land `harvests/*.jsonl`, then `bro debt mark`.
+- **Collect, don't fix.** Triage → backlog, fixes → the fix loop. bro-debt
+  never edits product code or resolves threads on source PRs.
+- `--reharvest` bypasses the label skip for one run.

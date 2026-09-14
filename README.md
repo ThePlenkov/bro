@@ -1,0 +1,88 @@
+# bro 🤝
+
+> Your agent's sidekick. Skills are instructions — **bro is the hands.**
+
+Your AI agent can read a PR. Can it tell which merged PRs still have
+unresolved review threads rotting in them? Can it say "bro, what's left?"
+
+Now it can.
+
+```bash
+npx @theplenkov/bro debt prs        # merged PRs nobody processed yet
+npx @theplenkov/bro debt collect    # sweep them, label them debt:collected
+npx @theplenkov/bro debt status     # the damage report
+```
+
+## What's the deal
+
+Review bots dump comments on your PRs. You merge, the threads stay
+unresolved, the findings evaporate. `bro` harvests them into a local
+ledger (`.agents/review-debt/`) and slaps `debt:*` labels on the PRs it
+already swept — so nothing gets scanned twice and nothing hides.
+
+```
+PR merged → bro debt collect → findings land in .agents/review-debt/
+                            → PR gets debt:collected (or debt:clean)
+                            → you see exactly what's left: bro debt prs
+```
+
+## Install
+
+```bash
+npx -y @theplenkov/bro --help     # zero install
+npm i -g @theplenkov/bro          # or keep bro around: bro debt status
+```
+
+Requires: `node >= 22`, `gh` authenticated. That's it. No tokens to
+babysit, no config files to confess to.
+
+## Commands
+
+| Command | What bro does |
+| ------- | ------------- |
+| `bro debt collect` | Scans merged PRs missing a `debt:*` label, harvests unresolved threads, labels the PR `debt:collected` or `debt:clean` |
+| `bro debt prs` | The queue — merged PRs still unprocessed (`--all` for the full picture) |
+| `bro debt status` | Ledger stats: open/done/wontfix, by area, by author, dupes |
+| `bro debt list` | Raw rows, filterable |
+| `bro debt mark <pr> <state>` | Manual override — `skipped` is the human opt-out, bro respects it |
+
+## Config (optional)
+
+`bro.config.json` in the repo root — everything's optional:
+
+```json
+{
+  "store": "jsonl",
+  "personality": "terse",
+  "debt": { "dir": ".agents/review-debt" }
+}
+```
+
+`store: "beads"` coming soon — bro already speaks bd on the roadmap.
+
+## Labels bro manages
+
+| Label | Meaning |
+| ----- | ------- |
+| `debt:collected` | Swept, findings in the ledger |
+| `debt:clean` | Swept, nothing found — bro won't look twice |
+| `debt:skipped` | You told bro to chill. bro chills. |
+
+## Philosophy
+
+bro doesn't fix your code. bro doesn't write essays in your PRs. bro
+collects what's owed, keeps the books clean, and waits. bro got you.
+
+## Dev
+
+```bash
+git clone --recursive https://github.com/theplenkov/bro
+cd bro && npm install
+npm run build && npm test
+```
+
+Workspace packages live in `packages/*` (`@bro/core`, `@bro/debt`, the CLI
+itself). Skills in `skills/` are thin wrappers — all mechanics are in the
+CLI. Nx inference comes from `vendor/nx.ts` (submodule, we ride the source).
+
+MIT. PRs welcome — bro reviews them anyway.

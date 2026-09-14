@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/nx/schemas/nx-schema.json",
+  "defaultBase": "main",
+  "plugins": [
+    {
+      "plugin": "@nx-devkit/tsdown",
+      "options": {}
+    },
+    {
+      "plugin": "@nx-devkit/skill",
+      "options": {}
+    },
+    {
+      "plugin": "@nx-devkit/skillspector",
+      "options": {}
+    }
+  ]
+}
