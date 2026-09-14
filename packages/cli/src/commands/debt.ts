@@ -260,7 +260,10 @@ async function cmdCollect(argv: string[]): Promise<void> {
     // store: beads|both → also project into bd. Collection results are
     // already durable; a sync failure is reported as its own error, not
     // allowed to mask them — but it still fails the run (no silent degrade).
-    if (loadConfig().store !== 'jsonl') {
+    // Explicit values only — a typo like "beed" must fall back to jsonl,
+    // not fail in bd after the ledger was already written.
+    const store = loadConfig().store
+    if (store === 'beads' || store === 'both') {
       try {
         const res = syncDebtToBeads(readDebtRecords())
         console.error(

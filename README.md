@@ -45,7 +45,7 @@ babysit, no config files to confess to.
 | `bro debt status` | Ledger stats: open/done/wontfix, by area, by author, dupes |
 | `bro debt list` | Raw rows, filterable |
 | `bro debt mark <pr> <state>` | Manual override — `skipped` is the human opt-out, bro respects it |
-| `bro debt sync` | Projects the ledger into beads — idempotent (`thread_id` → `external_ref`), so `bd ready -l debt` becomes the work queue |
+| `bro debt sync` | Projects the ledger into beads — idempotent (`thread_id` → `external_ref`), so `bd ready -l debt` becomes the work queue. Needs `bd` installed + `bd init` in the repo |
 
 ## Config (optional)
 
