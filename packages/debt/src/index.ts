@@ -37,6 +37,7 @@ export {
 } from './github.ts'
 export type { HarvestPrFilters } from './github.ts'
 export {
+  applyCollectLabel,
   applyDebtLabel,
   clearDebtLabels,
   DEBT_STATES,

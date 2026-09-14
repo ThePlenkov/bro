@@ -9,6 +9,7 @@
  */
 import { ensureGhAuth, resolveRepo } from '@bro/core'
 import {
+  applyCollectLabel,
   applyDebtLabel,
   applyLastN,
   buildSummary,
@@ -239,7 +240,7 @@ async function cmdCollect(argv: string[]): Promise<void> {
     if (labelingEnabled) {
       const current = fetchPrLabels({ owner: args.owner, repo: args.repoName, pr: pr.number })
       if (prDebtState(current) !== 'skipped') {
-        applyDebtLabel({ repo: args.repo, pr: pr.number, state })
+        applyCollectLabel({ repo: args.repo, pr: pr.number, state })
         labeled += 1
       }
     }

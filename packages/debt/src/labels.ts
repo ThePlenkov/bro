@@ -84,6 +84,26 @@ export function applyDebtLabel(opts: { repo: string; pr: number; state: DebtPrSt
   }
 }
 
+/**
+ * Collect-time variant of applyDebtLabel: sets the machine state but never
+ * removes `debt:skipped`. The skipped check and this write are not atomic —
+ * a human can opt out after the re-fetch, and this keeps that late opt-out
+ * intact (precedence resolves it as `skipped` either way).
+ */
+export function applyCollectLabel(opts: { repo: string; pr: number; state: DebtPrState }): void {
+  const target = debtLabel(opts.state)
+  gh(['pr', 'edit', String(opts.pr), '--repo', opts.repo, '--add-label', target])
+  for (const state of DEBT_STATES) {
+    if (state === 'skipped') {
+      continue
+    }
+    const label = debtLabel(state)
+    if (label !== target) {
+      tryRemoveLabel(opts.repo, opts.pr, label)
+    }
+  }
+}
+
 export function clearDebtLabels(opts: { repo: string; pr: number }): void {
   for (const state of DEBT_STATES) {
     tryRemoveLabel(opts.repo, opts.pr, debtLabel(state))
