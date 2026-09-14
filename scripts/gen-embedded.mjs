@@ -33,7 +33,8 @@ function collect(dir, prefix) {
 }
 
 const skills = {}
-for (const entry of readdirSync(join(root, 'skills'), { withFileTypes: true })) {
+for (const entry of readdirSync(join(root, 'skills'), { withFileTypes: true })
+  .sort((a, b) => a.name.localeCompare(b.name))) {
   if (!entry.isDirectory()) {
     continue
   }
