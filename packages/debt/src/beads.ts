@@ -11,6 +11,9 @@ import type { DebtPriority, DebtRecord, DebtStatus } from './types.ts'
 export interface BeadRef {
   id: string
   status: string
+  title?: string
+  priority?: number
+  timesSeen?: number
 }
 
 function bd(args: string[]): string {
@@ -32,7 +35,14 @@ export function checkBeads(): void {
 
 /** external_ref → bead, for every issue labeled `debt` (closed included). */
 export function listDebtBeads(): Map<string, BeadRef> {
-  let rows: Array<{ id: string; status: string; external_ref?: string | null }>
+  let rows: Array<{
+    id: string
+    status: string
+    title?: string
+    priority?: number
+    external_ref?: string | null
+    metadata?: { times_seen?: number } | null
+  }>
   try {
     rows = JSON.parse(bd(['list', '--json', '-n', '0', '--all', '-l', 'debt']))
   } catch (err) {
@@ -42,7 +52,13 @@ export function listDebtBeads(): Map<string, BeadRef> {
   const map = new Map<string, BeadRef>()
   for (const row of rows) {
     if (row.external_ref) {
-      map.set(row.external_ref, { id: row.id, status: row.status })
+      map.set(row.external_ref, {
+        id: row.id,
+        status: row.status,
+        title: row.title,
+        priority: row.priority,
+        timesSeen: row.metadata?.times_seen,
+      })
     }
   }
   return map
@@ -92,6 +108,11 @@ function reconcileStatus(
     }
   } else if (target === 'in_progress' && beadStatus === 'open') {
     bd(['update', beadId, '--status', 'in_progress'])
+    res.updated += 1
+  } else if (target === 'open' && beadStatus !== 'open') {
+    // Ledger is truth: a bead left claimed after the record went back to
+    // open must return to the queue, not sit as in_progress forever.
+    bd(['update', beadId, '--status', 'open'])
     res.updated += 1
   } else {
     res.unchanged += 1
@@ -148,6 +169,27 @@ function syncRecord(
     return
   }
   reconcileStatus(bead.id, bead.status, rec.status, res)
+  reconcileDrift(bead, rec, res)
+}
+
+/** Reharvested fields (title body, times_seen, priority) drift — push them. */
+function reconcileDrift(bead: BeadRef, rec: DebtRecord, res: SyncResult): void {
+  const wantTitle = `${rec.area}: ${rec.body_preview}`
+  const wantPriority = PRIORITY_MAP[rec.priority]
+  const updateArgs = ['update', bead.id]
+  if (bead.title !== undefined && bead.title !== wantTitle) {
+    updateArgs.push('--title', wantTitle)
+  }
+  if (bead.priority !== undefined && bead.priority !== wantPriority) {
+    updateArgs.push('--priority', String(wantPriority))
+  }
+  if (bead.timesSeen !== rec.times_seen) {
+    updateArgs.push('--set-metadata', `times_seen=${rec.times_seen}`)
+  }
+  if (updateArgs.length > 2) {
+    bd(updateArgs)
+    res.updated += 1
+  }
 }
 
 function tryLink(dup: BeadRef, canonical: BeadRef, res: SyncResult, dryRun: boolean): void {
@@ -155,12 +197,9 @@ function tryLink(dup: BeadRef, canonical: BeadRef, res: SyncResult, dryRun: bool
     res.linked += 1
     return
   }
-  try {
-    bd(['link', dup.id, canonical.id, '--type', 'related'])
-    res.linked += 1
-  } catch {
-    // link already exists — fine
-  }
+  // bd link is idempotent on existing edges — failures are real, let them throw.
+  bd(['link', dup.id, canonical.id, '--type', 'related'])
+  res.linked += 1
 }
 
 /** Fingerprint duplicates → `related` links to the canonical bead. */

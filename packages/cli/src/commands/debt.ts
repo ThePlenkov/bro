@@ -269,6 +269,7 @@ async function cmdCollect(argv: string[]): Promise<void> {
         )
       } catch (err) {
         console.error(`debt sync FAILED: ${err instanceof Error ? err.message : err}`)
+        console.error('evidence is written; run `bro debt sync` to retry the projection')
         process.exitCode = 1
       }
     }
