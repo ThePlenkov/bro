@@ -14,8 +14,7 @@ export interface BeadRef {
 }
 
 function bd(args: string[]): string {
-  // NOSONAR — bd is a user-installed CLI; PATH lookup is the contract (same as gh).
-  return execFileSync('bd', args, { encoding: 'utf8' })
+  return execFileSync('bd', args, { encoding: 'utf8' }) // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
 }
 
 export function checkBeads(): void {
@@ -151,6 +150,19 @@ function syncRecord(
   reconcileStatus(bead.id, bead.status, rec.status, res)
 }
 
+function tryLink(dup: BeadRef, canonical: BeadRef, res: SyncResult, dryRun: boolean): void {
+  if (dryRun) {
+    res.linked += 1
+    return
+  }
+  try {
+    bd(['link', dup.id, canonical.id, '--type', 'related'])
+    res.linked += 1
+  } catch {
+    // link already exists — fine
+  }
+}
+
 /** Fingerprint duplicates → `related` links to the canonical bead. */
 function linkFingerprintDupes(
   records: DebtRecord[],
@@ -175,18 +187,8 @@ function linkFingerprintDupes(
     }
     for (const dup of sorted.slice(1)) {
       const dupBead = existing.get(dup.thread_id)
-      if (!dupBead) {
-        continue
-      }
-      if (dryRun) {
-        res.linked += 1
-        continue
-      }
-      try {
-        bd(['link', dupBead.id, canonical.id, '--type', 'related'])
-        res.linked += 1
-      } catch {
-        // link already exists — fine
+      if (dupBead) {
+        tryLink(dupBead, canonical, res, dryRun)
       }
     }
   }
