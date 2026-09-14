@@ -123,6 +123,24 @@ export function fetchPrMeta(opts: {
   }
 }
 
+/**
+ * Fresh label check right before writing — labels captured in the candidate
+ * list can be minutes old by the time collection finishes, and a human may
+ * have set `debt:skipped` meanwhile.
+ */
+export function fetchPrLabels(opts: { owner: string; repo: string; pr: number }): string[] {
+  const viewed = ghJson<{ labels?: Array<{ name: string }> }>([
+    'pr',
+    'view',
+    String(opts.pr),
+    '--repo',
+    `${opts.owner}/${opts.repo}`,
+    '--json',
+    'labels',
+  ])
+  return (viewed.labels ?? []).map((l) => l.name)
+}
+
 // --- merged PR candidates ---------------------------------------------------
 
 function parseCsvParts(value: string | null | undefined): string[] {

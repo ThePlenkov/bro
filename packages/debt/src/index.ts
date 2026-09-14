@@ -25,6 +25,7 @@ export {
 export {
   applyLastN,
   fetchMergedPrCandidates,
+  fetchPrLabels,
   fetchPrMeta,
   fetchReviewThreads,
   filterByLabels,

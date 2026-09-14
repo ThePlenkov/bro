@@ -2,6 +2,7 @@
  * JSONL ledger store — `.agents/review-debt/` in the current working repo.
  * Append-only harvest snapshots + ledger.jsonl status overlays.
  */
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { loadConfig } from '@bro/core'
@@ -75,6 +76,20 @@ function listHarvestFiles(cwd?: string): string[] {
     .map((name) => join(dir, name))
 }
 
+/**
+ * runId lands in a filename — strip anything that could traverse directories.
+ * If sanitizing changed the id, append a short hash so distinct ids like
+ * "a/b" and "a-b" can't collapse into the same file within one second.
+ */
+function sanitizeRunId(runId: string): string {
+  const clean = runId.replace(/[^a-zA-Z0-9_-]/g, '-')
+  if (clean === runId && runId !== '') {
+    return runId
+  }
+  const hash = createHash('sha256').update(runId).digest('hex').slice(0, 8)
+  return `${clean || 'run'}-${hash}`
+}
+
 export function harvestFilename(opts: {
   harvestedAt: string
   pr: number
@@ -85,7 +100,7 @@ export function harvestFilename(opts: {
   const ts =
     `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}` +
     `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`
-  return `${ts}-pr-${opts.pr}-run-${opts.runId}.jsonl`
+  return `${ts}-pr-${opts.pr}-run-${sanitizeRunId(opts.runId)}.jsonl`
 }
 
 /** Append-only harvest snapshot (one new file per PR per run — no merge conflicts). */
