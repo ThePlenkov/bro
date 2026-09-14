@@ -1,0 +1,37 @@
+name: Publish
+
+# Tag-triggered npm publish via OIDC trusted publishing — no tokens.
+# Setup (one-time, after first placeholder exists on npm):
+#   npm trust github @theplenkov/bro --file publish.yml --repo ThePlenkov/bro
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build:nx-plugins
+      - run: npm run build
+      - run: npm test
+
+      - name: Publish @theplenkov/bro
+        working-directory: packages/cli
+        run: npm publish --access public

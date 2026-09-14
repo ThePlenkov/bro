@@ -3,7 +3,7 @@
  * Append-only harvest snapshots + ledger.jsonl status overlays.
  */
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { loadConfig } from '@bro/core'
 import type {
@@ -125,6 +125,14 @@ export function writeHarvestFile(opts: {
   return path
 }
 
+/** tmp+rename so a crashed/concurrent writer can't leave a torn ledger. */
+function atomicWrite(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true })
+  const tmp = `${path}.${process.pid}.tmp`
+  writeFileSync(tmp, content, 'utf8')
+  renameSync(tmp, path)
+}
+
 export function readLedgerOverlays(cwd?: string): Map<string, LedgerOverlay> {
   const map = new Map<string, LedgerOverlay>()
   for (const row of readJsonlLines<LedgerOverlay>(ledgerFile(cwd))) {
@@ -147,7 +155,7 @@ export function upsertLedgerOverlays(
     .sort((a, b) => a.thread_id.localeCompare(b.thread_id))
     .map((r) => JSON.stringify(r))
     .join('\n')
-  writeFileSync(path, lines.length > 0 ? `${lines}\n` : '', 'utf8')
+  atomicWrite(path, lines.length > 0 ? `${lines}\n` : '')
   return map
 }
 
@@ -262,5 +270,5 @@ export function buildSummary(records: DebtRecord[]): DebtSummary {
 export function writeSummary(summary: DebtSummary, cwd?: string): void {
   const path = summaryFile(cwd)
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, `${JSON.stringify(summary, null, 2)}\n`, 'utf8')
+  atomicWrite(path, `${JSON.stringify(summary, null, 2)}\n`)
 }

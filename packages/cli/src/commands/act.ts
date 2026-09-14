@@ -156,13 +156,19 @@ function cmdReply(argv: string[]): void {
       console.error('error: --file requires a path')
       process.exit(2)
     }
-    const rows = readFileSync(file, 'utf8')
+    const lines = readFileSync(file, 'utf8')
       .split('\n')
       .map((l) => l.trim())
       .filter((l) => l.length > 0)
+    let skipped = 0
+    const rows = lines
       .map((l) => {
         const tab = l.indexOf('\t')
-        return tab === -1 ? null : { id: l.slice(0, tab).trim(), body: l.slice(tab + 1).replace(/\\n/g, '\n').replace(/\\t/g, '\t') }
+        if (tab === -1) {
+          skipped += 1
+          return null
+        }
+        return { id: l.slice(0, tab).trim(), body: l.slice(tab + 1).replaceAll('\\n', '\n').replaceAll('\\t', '\t') }
       })
       .filter((r): r is { id: string; body: string } => r !== null)
     for (const row of rows) {
@@ -170,6 +176,10 @@ function cmdReply(argv: string[]): void {
       console.error(`act: replied on ${row.id}`)
     }
     console.error(`act reply: ${rows.length} repl(ies)`)
+    if (skipped > 0) {
+      console.error(`warning: ${skipped} line(s) had no <thread_id>\\t<body> shape — skipped`)
+      process.exitCode = 1
+    }
     return
   }
   const id = threadArg(argv)

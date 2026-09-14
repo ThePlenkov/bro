@@ -98,7 +98,7 @@ policy:
 export const FORMULA_FILES: Record<string, string> = {
   'debt-pipeline.formula.toml': `# bro debt pipeline — merged-PR review debt, end to end.
 #
-#   collect → triage (HUMAN GATE) → fix → pr-gate → sync
+#   collect → triage (HUMAN GATE) → fix → pr-gate → merge (HUMAN GATE) → sync
 #
 # Installed by \`bro setup --beads\`. Run: \`bd mol pour debt-pipeline\`
 # (add --var scope="--last 20" to narrow the sweep)
@@ -161,15 +161,27 @@ title = "GATE — bro act status on the fix PR"
 needs = ["fix"]
 type = "agent"
 description = """
-Run \`bro act status {{fix_pr}}\` until exit 0: zero open review threads, no
+Determine the fix PR: use {{fix_pr}} if set, otherwise
+\`gh pr list --state open --limit 1\` on the fix branch.
+Run \`bro act status <pr>\` until exit 0: zero open review threads, no
 pending CI, no pending SAST findings. Any blocker → fix and re-check.
 Exit non-zero = the gate holds; do not merge around it.
 """
 
 [[steps]]
+id = "merge"
+title = "HUMAN GATE — merge the fix PR"
+needs = ["pr-gate"]
+type = "human"
+description = """
+Gate is green — a human reviews and merges the fix PR. Merge is a human
+decision; agents carry, humans ship.
+"""
+
+[[steps]]
 id = "sync"
 title = "bro debt sync — close the loop"
-needs = ["pr-gate"]
+needs = ["merge"]
 type = "agent"
 description = """
 After the fix PR merges: \`bro debt sync\`. Ledger statuses flow into beads —

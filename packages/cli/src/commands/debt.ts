@@ -457,22 +457,26 @@ function cmdMark(argv: string[]): void {
 const DEBT_ROW_STATUSES = ['open', 'claimed', 'done', 'wontfix', 'duplicate'] as const
 type DebtRowStatus = (typeof DEBT_ROW_STATUSES)[number]
 
-function cmdSet(argv: string[]): void {
-  const status = argv.find((a) => (DEBT_ROW_STATUSES as readonly string[]).includes(a)) as
-    | DebtRowStatus
-    | undefined
-  const threadIds: string[] = []
-  let fixPr: number | null = null
-  let notes: string | null = null
-  let threadsFile: string | null = null
+interface SetArgs {
+  threadIds: string[]
+  fixPr: number | null
+  notes: string | null
+}
 
+function parseSetFlags(argv: string[]): SetArgs {
+  const out: SetArgs = { threadIds: [], fixPr: null, notes: null }
   for (let i = 0; i < argv.length; i += 1) {
     const value = readOption(argv, i)
     if (argv[i] === '--thread-id' && value !== null) {
-      threadIds.push(value)
+      out.threadIds.push(value)
       i += 1
     } else if (argv[i] === '--threads-file' && value !== null) {
-      threadsFile = value
+      out.threadIds.push(
+        ...readFileSync(value, 'utf8')
+          .split('\n')
+          .map((l) => l.trim())
+          .filter((l) => l.length > 0 && !l.startsWith('#'))
+      )
       i += 1
     } else if (argv[i] === '--fix-pr' && value !== null) {
       const n = Number(value)
@@ -480,24 +484,23 @@ function cmdSet(argv: string[]): void {
         console.error(`error: --fix-pr must be a positive integer, got "${value}"`)
         process.exit(2)
       }
-      fixPr = n
+      out.fixPr = n
       i += 1
     } else if (argv[i] === '--notes' && value !== null) {
-      notes = value
+      out.notes = value
       i += 1
     }
   }
+  return out
+}
 
-  if (threadsFile !== null) {
-    threadIds.push(
-      ...readFileSync(threadsFile, 'utf8')
-        .split('\n')
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0 && !l.startsWith('#'))
-    )
-  }
+function cmdSet(argv: string[]): void {
+  // Status is strictly the first positional — scanning all argv would let a
+  // flag value like --notes "done" get picked up as the status.
+  const status = argv[0] as DebtRowStatus | undefined
+  const { threadIds, fixPr, notes } = parseSetFlags(argv.slice(1))
 
-  if (!status || threadIds.length === 0) {
+  if (!status || !(DEBT_ROW_STATUSES as readonly string[]).includes(status) || threadIds.length === 0) {
     console.error(
       `Usage: bro debt set <${DEBT_ROW_STATUSES.join('|')}> --thread-id ID… ` +
         '[--threads-file PATH] [--fix-pr N] [--notes T]'

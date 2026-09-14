@@ -19,16 +19,29 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts"
-  },
-  "dependencies": {
-    "@bro/act": "*",
-    "@bro/core": "*",
-    "@bro/debt": "*"
+    "test": "tsx --test src/**/*.test.ts",
+    "prepack": "node -e \"const{copyFileSync}=require('node:fs');for(const f of['README.md','LICENSE'])copyFileSync('../../'+f,f)\"",
+    "postpack": "node -e \"const{rmSync}=require('node:fs');for(const f of['README.md','LICENSE'])rmSync(f,{force:true})\""
   },
   "devDependencies": {
+    "@bro/act": "*",
+    "@bro/core": "*",
+    "@bro/debt": "*",
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/ThePlenkov/bro#readme",
+  "bugs": {
+    "url": "https://github.com/ThePlenkov/bro/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

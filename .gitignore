@@ -3,3 +3,4 @@ dist/
 .nx/
 *.tsbuildinfo
 .DS_Store
+.package.json.local

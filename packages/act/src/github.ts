@@ -3,8 +3,8 @@
  * thread resolve/reply mutations. Ported from act's pr-state.ts /
  * review-resolve.ts / review-reply.ts — same semantics, node-native.
  */
-import { gh, ghJson } from '@bro/core'
-import { fetchReviewThreads, type ReviewThreadNode } from '@bro/debt'
+import { ghJson } from '@bro/core'
+import { fetchReviewThreads } from '@bro/debt'
 import type { PrActState, PrCheck } from './types.ts'
 
 const AI_REVIEWER_RE = /cubic|code\s*rabbit|amazon\s*q|qodo|chatgpt\s*codex|gemini|kilo|codeant/i
@@ -127,17 +127,16 @@ export async function fetchPrActState(target: {
       !AI_REVIEWER_RE.test(c.name)
   ).length
 
+  // A SAST scan can report "success" while still carrying failure-level
+  // annotations — inspect every non-skipped SAST check, not just pending ones.
+  const sastChecks = checks.filter(
+    (c) => isSast(c.name) && c.state !== 'SKIPPED' && c.state !== 'NEUTRAL'
+  )
   let sastPending = 0
   let sastUnknown = 0
-  if (ciPending > 0) {
+  if (sastChecks.length > 0) {
     const ids = checkRunIds(target.owner, target.repo, meta.headRefOid)
-    for (const check of checks) {
-      if (check.bucket === 'pass' || check.state === 'SKIPPED' || check.state === 'NEUTRAL') {
-        continue
-      }
-      if (!isSast(check.name)) {
-        continue
-      }
+    for (const check of sastChecks) {
       const runId = ids.get(check.name)
       if (!runId) {
         continue
