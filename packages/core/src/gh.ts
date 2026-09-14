@@ -20,6 +20,7 @@ export function ghJson<T>(args: string[]): T {
 }
 
 export function ensureGhAuth(): void {
+  // NOSONAR — gh is a user-installed CLI; PATH lookup is the contract
   const proc = spawnSync('gh', ['auth', 'status'], { stdio: 'ignore' })
   if (proc.status !== 0) {
     console.error('error: gh not authenticated — run `gh auth login`')

@@ -86,9 +86,10 @@ function installFiles(root: string, files: Record<string, string>, what: string)
 
 function setupBeads(): void {
   if (!existsSync(join(process.cwd(), '.beads'))) {
+    // NOSONAR — bd is a user-installed CLI; PATH lookup is the contract (same as gh)
     execFileSync('bd', ['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], {
       stdio: 'inherit',
-    }) // NOSONAR — PATH lookup is the contract
+    })
     console.error('  initialized .beads (stealth — nothing lands in git)')
   } else {
     console.error('  .beads already initialized')

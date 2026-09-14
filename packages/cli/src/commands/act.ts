@@ -168,7 +168,10 @@ function cmdReply(argv: string[]): void {
           skipped += 1
           return null
         }
-        return { id: l.slice(0, tab).trim(), body: l.slice(tab + 1).replaceAll('\\n', '\n').replaceAll('\\t', '\t') }
+        return {
+          id: l.slice(0, tab).trim(),
+          body: l.slice(tab + 1).replaceAll(String.raw`\n`, '\n').replaceAll(String.raw`\t`, '\t'),
+        }
       })
       .filter((r): r is { id: string; body: string } => r !== null)
     for (const row of rows) {
@@ -177,7 +180,7 @@ function cmdReply(argv: string[]): void {
     }
     console.error(`act reply: ${rows.length} repl(ies)`)
     if (skipped > 0) {
-      console.error(`warning: ${skipped} line(s) had no <thread_id>\\t<body> shape — skipped`)
+      console.error(`warning: ${skipped} line(s) had no <thread_id>${String.raw`\t`}<body> shape — skipped`)
       process.exitCode = 1
     }
     return
