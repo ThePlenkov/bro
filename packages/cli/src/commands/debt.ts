@@ -17,6 +17,7 @@ import {
   DEBT_STATES,
   ensureDebtLabels,
   fetchMergedPrCandidates,
+  fetchPrLabels,
   hasHarvestSelection,
   parseCsvInts,
   parseCsvStrings,
@@ -120,7 +121,7 @@ function parseCollectArgs(argv: string[]): CollectArgs {
         else if (arg === '--merged-until') filters.mergedUntil = value
         else if (arg === '--last') {
           const n = Number(value)
-          if (!Number.isFinite(n) || n <= 0) {
+          if (!Number.isInteger(n) || n <= 0) {
             console.error(`error: --last must be a positive integer, got "${value}"`)
             process.exit(2)
           }
@@ -232,8 +233,13 @@ async function cmdCollect(argv: string[]): Promise<void> {
       totalRows += result.incoming.length
     }
     // Never overwrite a human `debt:skipped` opt-out, even under --reharvest.
-    if (labelingEnabled && prDebtState(pr.labels) !== 'skipped') {
-      applyDebtLabel({ repo: args.repo, pr: pr.number, state })
+    // Re-fetch labels: the candidate snapshot predates this PR's collection,
+    // and a human may have opted out while we were scanning.
+    if (labelingEnabled) {
+      const current = fetchPrLabels({ owner: args.owner, repo: args.repoName, pr: pr.number })
+      if (prDebtState(current) !== 'skipped') {
+        applyDebtLabel({ repo: args.repo, pr: pr.number, state })
+      }
     }
   }
 

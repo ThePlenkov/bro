@@ -60,7 +60,8 @@ function tryRemoveLabel(repo: string, pr: number, label: string): void {
     gh(['pr', 'edit', String(pr), '--repo', repo, '--remove-label', label])
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    if (/not found|does not exist|no such label/i.test(msg)) {
+    // Must name THIS label — "repository not found" must not be swallowed.
+    if (msg.includes(label) && /not found|does not exist|no such label/i.test(msg)) {
       return
     }
     throw err
