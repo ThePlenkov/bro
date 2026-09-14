@@ -307,7 +307,12 @@ export function readProcessedAt(cwd?: string): Map<number, string> {
     const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, string>
     return new Map(
       Object.entries(raw)
-        .filter(([k, v]) => Number.isInteger(Number(k)) && !Number.isNaN(Date.parse(v)))
+        .filter(
+          ([k, v]) =>
+            Number.isInteger(Number(k)) &&
+            typeof v === 'string' &&
+            !Number.isNaN(Date.parse(v))
+        )
         .map(([k, v]) => [Number(k), v])
     )
   } catch {
@@ -327,6 +332,15 @@ export function markProcessedAt(prs: number[], at: string, cwd?: string): void {
       mkdirSync(lock)
       break
     } catch {
+      // Steal a stale lock: a killed process never runs the finally, so a
+      // lock dir older than 30s can't be a live write.
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > 30_000) {
+          rmSync(lock, { recursive: true, force: true })
+        }
+      } catch {
+        // lock vanished or unreadable — retry loop handles both
+      }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
       if (i === 99) {
         throw new Error(`could not acquire lock ${lock}`)

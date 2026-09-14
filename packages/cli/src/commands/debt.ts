@@ -20,6 +20,7 @@ import {
   ensureDebtLabels,
   fetchMergedPrCandidates,
   fetchPrLabels,
+  fetchPrUpdatedAt,
   hasHarvestSelection,
   parseCsvInts,
   parseCsvStrings,
@@ -186,7 +187,7 @@ async function cmdCollect(argv: string[]): Promise<void> {
   // is newer than our scan timestamp goes back into the queue — except
   // `debt:skipped`, which is a human opt-out and is never rescanned.
   const processedAt = readProcessedAt()
-  const now = new Date().toISOString()
+  const futureBound = new Date(Date.now() + 5 * 60 * 1000).toISOString()
   const stale = processed.filter((pr) => {
     if (prDebtState(pr.labels) === 'skipped') {
       return false
@@ -194,10 +195,12 @@ async function cmdCollect(argv: string[]): Promise<void> {
     const at = processedAt.get(pr.number)
     // No timestamp = labeled before this feature existed (or manually) —
     // rescan once to backfill; the scan then writes the timestamp.
-    // A future timestamp would suppress rescans forever — treat as stale.
+    // A far-future cursor would suppress rescans forever — treat as stale.
+    // Tolerance: the cursor is server time, so compare against local now+5m
+    // to survive clock skew without flagging every PR.
     return (
       at === undefined ||
-      at > now ||
+      at > futureBound ||
       (pr.updatedAt !== null && pr.updatedAt > at)
     )
   })
@@ -303,10 +306,16 @@ async function cmdCollect(argv: string[]): Promise<void> {
       }
       // Store the observed updatedAt as the cursor, not the wall clock:
       // no cross-clock skew, and mid-scan activity bumps the server's
-      // updatedAt past our cursor so the next run catches it. Only full
+      // updatedAt past our cursor so the next run catches it. Re-fetched
+      // post-label: our own label write bumps updatedAt, so the pre-scan
+      // snapshot would flag the PR stale again on the next run. Only full
       // scans earn a cursor — a --thread-author partial scan must not
       // mask post-scan activity on a labeled PR.
-      markProcessedAt([pr.number], pr.updatedAt ?? scannedAt)
+      const cursor =
+        fetchPrUpdatedAt({ owner: args.owner, repo: args.repoName, pr: pr.number }) ??
+        pr.updatedAt ??
+        scannedAt
+      markProcessedAt([pr.number], cursor)
     }
   }
 

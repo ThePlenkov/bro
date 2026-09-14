@@ -141,6 +141,21 @@ export function fetchPrLabels(opts: { owner: string; repo: string; pr: number })
   return (viewed.labels ?? []).map((l) => l.name)
 }
 
+/** Post-write updatedAt: our own label mutation bumps it, so the scan
+ *  cursor must be captured after labeling, not from the pre-scan snapshot. */
+export function fetchPrUpdatedAt(opts: { owner: string; repo: string; pr: number }): string | null {
+  const viewed = ghJson<{ updatedAt?: string }>([
+    'pr',
+    'view',
+    String(opts.pr),
+    '--repo',
+    `${opts.owner}/${opts.repo}`,
+    '--json',
+    'updatedAt',
+  ])
+  return viewed.updatedAt ?? null
+}
+
 // --- merged PR candidates ---------------------------------------------------
 
 function parseCsvParts(value: string | null | undefined): string[] {
