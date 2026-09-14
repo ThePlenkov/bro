@@ -19,6 +19,18 @@ export function ghJson<T>(args: string[]): T {
   return JSON.parse(gh(args)) as T
 }
 
+/**
+ * `gh` without the throw — for commands whose exit code carries meaning
+ * (`gh pr checks` exits 1 when checks fail while still printing JSON).
+ */
+export function ghTry(args: string[]): { code: number; out: string; err: string } {
+  const proc = spawnSync('gh', args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+  })
+  return { code: proc.status ?? 1, out: proc.stdout ?? '', err: (proc.stderr ?? '').trim() }
+}
+
 export function ensureGhAuth(): void {
   // NOSONAR — gh is a user-installed CLI; PATH lookup is the contract
   const proc = spawnSync('gh', ['auth', 'status'], { stdio: 'ignore' })

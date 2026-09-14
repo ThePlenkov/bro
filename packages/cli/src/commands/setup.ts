@@ -100,7 +100,12 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
   const beads = argv.includes('--beads')
   const skills = argv.includes('--skills')
   const pIdx = argv.indexOf('--personality')
-  const personality = pIdx >= 0 ? argv[pIdx + 1] : undefined
+  const pVal = pIdx >= 0 ? argv[pIdx + 1] : undefined
+  if (pIdx >= 0 && (!pVal || pVal.startsWith('--'))) {
+    console.error('error: --personality requires a value')
+    process.exit(2)
+  }
+  const personality = pVal
 
   const gh = hasBin('gh')
   const ghOk = gh && ghAuthed()
@@ -126,11 +131,13 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
     process.exit(1)
   }
 
-  console.error(`  ${writeConfig({ beads, personality })}`)
-
+  // bd init + formulas land BEFORE the config write — if beads setup fails,
+  // no config claiming store=both is left behind.
   if (beads) {
     setupBeads()
   }
+
+  console.error(`  ${writeConfig({ beads, personality })}`)
 
   if (skills) {
     if (installFiles(join('.agents', 'skills'), SKILL_FILES, 'skill') === 0) {

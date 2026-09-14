@@ -8,7 +8,8 @@ description: "Use when the user invokes /act on an open PR — the review-fix lo
 **All mechanics live in the `bro` CLI.** This skill is policy only — do not
 reimplement what `bro act` already does.
 
-Prereq: `bro` on PATH or `npx -y @theplenkov/bro`. Requires `gh` auth.
+Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
+`gh` auth.
 
 ## Commands
 
@@ -26,5 +27,7 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro`. Requires `gh` auth.
 - **Every thread gets a verdict**: fix → resolve with a commit reference, or
   reject as false-positive **with a stated reason** — never silently resolve.
 - **Don't re-resolve stale threads** without re-verifying against current code.
-- Debt rows from `bro debt list` become work via `bro debt set claimed` →
-  fix → `bro debt set done --fix-pr N` → `bro debt sync` closes the bead.
+- Debt rows from `bro debt list` become work via
+  `bro debt set claimed --thread-id <id>` → fix →
+  `bro debt set done --thread-id <id> --fix-pr N` → `bro debt sync` closes
+  the bead.

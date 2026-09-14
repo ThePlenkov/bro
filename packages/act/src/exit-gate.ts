@@ -15,8 +15,18 @@ export function evaluateExitGate(state: PrActState): ExitGate {
   if (state.sastPending > 0) {
     blockers.push(`${state.sastPending} SAST finding(s)`)
   }
-  if (state.mergeable === 'CONFLICTING') {
-    blockers.push('merge conflicts')
+  // Mergeability is only meaningful while the PR is open — GitHub reports
+  // UNKNOWN forever on merged/closed PRs.
+  if (state.state === 'OPEN') {
+    if (state.mergeable === 'CONFLICTING') {
+      blockers.push('merge conflicts')
+    }
+    if (state.mergeable === 'UNKNOWN') {
+      blockers.push('mergeability still computing — recheck')
+    }
+    if (state.isDraft) {
+      blockers.push('PR is a draft')
+    }
   }
   return {
     ok: blockers.length === 0,

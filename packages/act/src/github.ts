@@ -3,7 +3,7 @@
  * thread resolve/reply mutations. Ported from act's pr-state.ts /
  * review-resolve.ts / review-reply.ts — same semantics, node-native.
  */
-import { ghJson } from '@bro/core'
+import { ghJson, ghTry } from '@bro/core'
 import { fetchReviewThreads } from '@bro/debt'
 import type { PrActState, PrCheck } from './types.ts'
 
@@ -64,23 +64,35 @@ export function fetchPrMeta(target: { owner: string; repo: string; pr: number })
   return pr
 }
 
-function fetchChecks(target: { owner: string; repo: string; pr: number }): PrCheck[] {
-  try {
-    return ghJson<PrCheck[]>([
-      'pr',
-      'checks',
-      String(target.pr),
-      '--repo',
-      `${target.owner}/${target.repo}`,
-      '--json',
-      'name,state,bucket',
-    ])
-  } catch (err) {
-    if (/no checks reported/i.test(String(err))) {
-      return []
-    }
-    throw err
+function fetchChecks(
+  target: { owner: string; repo: string; pr: number },
+  required: boolean
+): PrCheck[] {
+  const args = [
+    'pr',
+    'checks',
+    String(target.pr),
+    '--repo',
+    `${target.owner}/${target.repo}`,
+    '--json',
+    'name,state,bucket',
+  ]
+  if (required) {
+    args.push('--required')
   }
+  // `gh pr checks` exits 1 when any check is pending/failing — the JSON is
+  // still on stdout, so a throwing call would lose exactly the data we need.
+  const res = ghTry(args)
+  if (res.out.trim().startsWith('[')) {
+    return JSON.parse(res.out) as PrCheck[]
+  }
+  if (res.code !== 0 && /no (checks|required checks)/i.test(res.err)) {
+    return []
+  }
+  if (res.code !== 0) {
+    throw new Error(`gh pr checks failed: ${res.err}`)
+  }
+  return []
 }
 
 function checkRunIds(owner: string, repo: string, headSha: string): Map<string, number> {
@@ -101,12 +113,15 @@ function checkRunIds(owner: string, repo: string, headSha: string): Map<string, 
 }
 
 function failureAnnotations(owner: string, repo: string, runId: number): number {
-  const annotations = ghJson<Array<{ annotation_level?: string }>>([
+  // --paginate emits one JSON array per page — --slurp folds them into a
+  // single array-of-arrays that JSON.parse can handle.
+  const pages = ghJson<Array<Array<{ annotation_level?: string }>>>([
     'api',
     '--paginate',
+    '--slurp',
     `repos/${owner}/${repo}/check-runs/${runId}/annotations?per_page=100`,
   ])
-  return annotations.filter((a) => a.annotation_level === 'failure').length
+  return pages.flat().filter((a) => a.annotation_level === 'failure').length
 }
 
 /** Full open-PR state for the act loop — threads + checks + mergeability. */
@@ -117,9 +132,14 @@ export async function fetchPrActState(target: {
 }): Promise<PrActState> {
   const meta = fetchPrMeta(target)
   const threads = await fetchReviewThreads(target)
-  const checks = fetchChecks(target)
+  const checks = fetchChecks(target, false)
 
-  const ciPending = checks.filter(
+  // Optional checks must not hold the gate. When the repo has required
+  // checks configured, only those can block; without branch protection
+  // gh --required fails and every non-AI check counts.
+  const required = fetchChecks(target, true)
+  const gatePool = required.length > 0 ? required : checks
+  const ciPending = gatePool.filter(
     (c) =>
       c.bucket !== 'pass' &&
       c.state !== 'SKIPPED' &&

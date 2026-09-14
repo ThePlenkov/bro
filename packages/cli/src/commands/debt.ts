@@ -26,6 +26,7 @@ import {
   partitionByProcessed,
   prDebtState,
   readDebtRecords,
+  readLedgerOverlays,
   resolveHarvestPrs,
   syncDebtToBeads,
   upsertLedgerOverlays,
@@ -239,6 +240,25 @@ async function cmdCollect(argv: string[]): Promise<void> {
         records: result.incoming,
       })
       totalRows += result.incoming.length
+      // A reharvested thread that was marked done/wontfix is unresolved again
+      // — the terminal overlay must not shadow the fresh open evidence.
+      const overlays = readLedgerOverlays()
+      const reopen = result.incoming.filter((r) => {
+        const s = overlays.get(r.thread_id)?.status
+        return s === 'done' || s === 'wontfix'
+      })
+      if (reopen.length > 0) {
+        upsertLedgerOverlays(
+          reopen.map((r) => ({
+            thread_id: r.thread_id,
+            status: 'open' as const,
+            fix_pr: null,
+            fixed_at: null,
+            notes: 'reopened by reharvest',
+          }))
+        )
+        console.error(`debt: reopened ${reopen.length} terminal row(s) — still unresolved`)
+      }
     }
     // Never overwrite a human `debt:skipped` opt-out, even under --reharvest.
     // Re-fetch labels: the candidate snapshot predates this PR's collection,

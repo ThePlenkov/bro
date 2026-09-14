@@ -52,15 +52,19 @@ function resolvePr(argv: string[]): { repo: string; owner: string; repoName: str
   const [owner, repoName] = repo.split('/')
 
   if (prRaw === null) {
-    // Current branch's open PR
-    const prs = JSON.parse(
-      gh(['pr', 'list', '--state', 'open', '--json', 'number', '--limit', '1'])
-    ) as Array<{ number: number }>
-    if (prs.length === 0) {
+    // `gh pr view` resolves the PR for the CURRENT branch — `gh pr list
+    // --limit 1` would grab an arbitrary open PR instead.
+    let bare = NaN
+    try {
+      bare = Number(gh(['pr', 'view', '--json', 'number', '-q', '.number']).trim())
+    } catch {
+      /* no PR for this branch */
+    }
+    if (!Number.isInteger(bare) || bare <= 0) {
       console.error('error: no open PR for current branch — pass a PR number')
       process.exit(2)
     }
-    return { repo, owner: owner!, repoName: repoName!, pr: prs[0]!.number }
+    return { repo, owner: owner!, repoName: repoName!, pr: bare }
   }
   const pr = Number(prRaw)
   if (!Number.isInteger(pr) || pr <= 0) {
@@ -77,6 +81,9 @@ async function cmdStatus(argv: string[]): Promise<void> {
   const state = await fetchPrActState({ owner: t.owner, repo: t.repoName, pr: t.pr })
   const gate = evaluateExitGate(state)
 
+  if (!gate.ok) {
+    process.exitCode = 1
+  }
   if (json) {
     console.log(JSON.stringify({ pr: state, exit_gate: gate }, null, 2))
     return
@@ -90,9 +97,6 @@ async function cmdStatus(argv: string[]): Promise<void> {
   console.log(`exit_gate=${gate.ok ? 'OK' : 'BLOCKED'}`)
   for (const b of gate.blockers) {
     console.log(`  blocker: ${b}`)
-  }
-  if (!gate.ok) {
-    process.exitCode = 1
   }
 }
 
