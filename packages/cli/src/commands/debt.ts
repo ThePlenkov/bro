@@ -199,6 +199,7 @@ async function cmdCollect(argv: string[]): Promise<void> {
   }
 
   let totalRows = 0
+  let labeled = 0
   for (const pr of targets) {
     let result
     try {
@@ -239,6 +240,7 @@ async function cmdCollect(argv: string[]): Promise<void> {
       const current = fetchPrLabels({ owner: args.owner, repo: args.repoName, pr: pr.number })
       if (prDebtState(current) !== 'skipped') {
         applyDebtLabel({ repo: args.repo, pr: pr.number, state })
+        labeled += 1
       }
     }
   }
@@ -247,7 +249,10 @@ async function cmdCollect(argv: string[]): Promise<void> {
     if (totalRows > 0) {
       writeSummary(buildSummary(readDebtRecords()))
     }
-    console.error(`debt collect: wrote ${totalRows} row(s), labeled ${targets.length} PR(s)`)
+    const labeledMsg = labelingEnabled
+      ? `labeled ${labeled} PR(s)`
+      : 'labels disabled'
+    console.error(`debt collect: wrote ${totalRows} row(s), ${labeledMsg}`)
   }
 }
 

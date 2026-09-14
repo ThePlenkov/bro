@@ -68,16 +68,20 @@ function tryRemoveLabel(repo: string, pr: number, label: string): void {
   }
 }
 
-/** Sets `debt:<state>` on the PR, removing the other debt states first. */
+/**
+ * Sets `debt:<state>` on the PR. Adds the target first, then removes the
+ * others — gh has no atomic multi-label write, and on a mid-removal failure
+ * the precedence rule (`skipped` > machine states) keeps the safer state.
+ */
 export function applyDebtLabel(opts: { repo: string; pr: number; state: DebtPrState }): void {
   const target = debtLabel(opts.state)
+  gh(['pr', 'edit', String(opts.pr), '--repo', opts.repo, '--add-label', target])
   for (const state of DEBT_STATES) {
     const label = debtLabel(state)
     if (label !== target) {
       tryRemoveLabel(opts.repo, opts.pr, label)
     }
   }
-  gh(['pr', 'edit', String(opts.pr), '--repo', opts.repo, '--add-label', target])
 }
 
 export function clearDebtLabels(opts: { repo: string; pr: number }): void {
