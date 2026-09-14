@@ -11,6 +11,10 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -42,6 +46,12 @@ jobs:
           v=$(node -p "require('./package.json').version")
           if npm view "@theplenkov/bro@$v" version >/dev/null 2>&1; then
             echo "version $v already on npm — skipping publish"
-          else
-            npm publish --access public
+            exit 0
           fi
+          # Only a confirmed E404 means "not published" — a transient
+          # registry/network error must not fall through to npm publish.
+          if ! npm view "@theplenkov/bro@$v" version 2>&1 | grep -q E404; then
+            echo "npm view failed without E404 — aborting to avoid double publish"
+            exit 1
+          fi
+          npm publish --access public
