@@ -54,18 +54,26 @@ export function ensureDebtLabels(repo: string): void {
   }
 }
 
+/** Suppress only confirmed absent-label errors; real gh failures propagate. */
+function tryRemoveLabel(repo: string, pr: number, label: string): void {
+  try {
+    gh(['pr', 'edit', String(pr), '--repo', repo, '--remove-label', label])
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/not found|does not exist|no such label/i.test(msg)) {
+      return
+    }
+    throw err
+  }
+}
+
 /** Sets `debt:<state>` on the PR, removing the other debt states first. */
 export function applyDebtLabel(opts: { repo: string; pr: number; state: DebtPrState }): void {
   const target = debtLabel(opts.state)
   for (const state of DEBT_STATES) {
     const label = debtLabel(state)
-    if (label === target) {
-      continue
-    }
-    try {
-      gh(['pr', 'edit', String(opts.pr), '--repo', opts.repo, '--remove-label', label])
-    } catch {
-      // label absent on this PR — fine
+    if (label !== target) {
+      tryRemoveLabel(opts.repo, opts.pr, label)
     }
   }
   gh(['pr', 'edit', String(opts.pr), '--repo', opts.repo, '--add-label', target])
@@ -73,10 +81,6 @@ export function applyDebtLabel(opts: { repo: string; pr: number; state: DebtPrSt
 
 export function clearDebtLabels(opts: { repo: string; pr: number }): void {
   for (const state of DEBT_STATES) {
-    try {
-      gh(['pr', 'edit', String(opts.pr), '--repo', opts.repo, '--remove-label', debtLabel(state)])
-    } catch {
-      // label absent — fine
-    }
+    tryRemoveLabel(opts.repo, opts.pr, debtLabel(state))
   }
 }

@@ -120,7 +120,11 @@ function parseCollectArgs(argv: string[]): CollectArgs {
         else if (arg === '--merged-until') filters.mergedUntil = value
         else if (arg === '--last') {
           const n = Number(value)
-          filters.lastN = Number.isFinite(n) ? n : null
+          if (!Number.isFinite(n) || n <= 0) {
+            console.error(`error: --last must be a positive integer, got "${value}"`)
+            process.exit(2)
+          }
+          filters.lastN = n
         } else if (arg === '--pr-author') filters.prAuthor = value
         else if (arg === '--labels') filters.labels = parseCsvStrings(value)
         else if (arg === '--thread-author') threadAuthor = value
@@ -157,10 +161,13 @@ async function cmdCollect(argv: string[]): Promise<void> {
   const args = parseCollectArgs(argv)
   ensureGhAuth()
 
+  // Fetch at least as many candidates as --last requests, or it silently caps.
+  const listLimit = Math.max(args.filters.lastN ?? 0, 100)
   const matched = resolveHarvestPrs({
     owner: args.owner,
     repo: args.repoName,
     filters: args.filters,
+    listLimit,
   })
   const { pending, processed } = partitionByProcessed(matched)
   const targets = args.reharvest ? matched : pending
@@ -180,7 +187,13 @@ async function cmdCollect(argv: string[]): Promise<void> {
     return
   }
 
-  if (!args.dryRun && !args.noLabel) {
+  // A thread-author-filtered run is a partial scan — a PR-level "processed"
+  // label would hide other authors' unresolved threads from future runs.
+  const labelingEnabled = !args.noLabel && args.threadAuthor === null
+  if (args.threadAuthor !== null && !args.noLabel) {
+    console.error('debt collect: --thread-author is a partial scan — labels disabled')
+  }
+  if (!args.dryRun && labelingEnabled) {
     ensureDebtLabels(args.repo)
   }
 
@@ -218,7 +231,8 @@ async function cmdCollect(argv: string[]): Promise<void> {
       })
       totalRows += result.incoming.length
     }
-    if (!args.noLabel) {
+    // Never overwrite a human `debt:skipped` opt-out, even under --reharvest.
+    if (labelingEnabled && prDebtState(pr.labels) !== 'skipped') {
       applyDebtLabel({ repo: args.repo, pr: pr.number, state })
     }
   }

@@ -75,6 +75,11 @@ function listHarvestFiles(cwd?: string): string[] {
     .map((name) => join(dir, name))
 }
 
+/** runId lands in a filename — strip anything that could traverse directories. */
+function sanitizeRunId(runId: string): string {
+  return runId.replace(/[^a-zA-Z0-9_-]/g, '-') || 'run'
+}
+
 export function harvestFilename(opts: {
   harvestedAt: string
   pr: number
@@ -85,7 +90,7 @@ export function harvestFilename(opts: {
   const ts =
     `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}` +
     `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`
-  return `${ts}-pr-${opts.pr}-run-${opts.runId}.jsonl`
+  return `${ts}-pr-${opts.pr}-run-${sanitizeRunId(opts.runId)}.jsonl`
 }
 
 /** Append-only harvest snapshot (one new file per PR per run — no merge conflicts). */
