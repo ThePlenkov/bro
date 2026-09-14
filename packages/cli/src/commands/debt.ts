@@ -257,14 +257,20 @@ async function cmdCollect(argv: string[]): Promise<void> {
       : 'labels disabled'
     console.error(`debt collect: wrote ${totalRows} row(s), ${labeledMsg}`)
 
-    // store: beads|both → also project into bd. Configured means required —
-    // a silent degrade would repeat the "reported success, did nothing" bug.
+    // store: beads|both → also project into bd. Collection results are
+    // already durable; a sync failure is reported as its own error, not
+    // allowed to mask them — but it still fails the run (no silent degrade).
     if (loadConfig().store !== 'jsonl') {
-      const res = syncDebtToBeads(readDebtRecords())
-      console.error(
-        `debt sync: ${res.created} created, ${res.closed} closed, ` +
-          `${res.reopened} reopened, ${res.linked} linked`
-      )
+      try {
+        const res = syncDebtToBeads(readDebtRecords())
+        console.error(
+          `debt sync: ${res.created} created, ${res.closed} closed, ` +
+            `${res.reopened} reopened, ${res.linked} linked`
+        )
+      } catch (err) {
+        console.error(`debt sync FAILED: ${err instanceof Error ? err.message : err}`)
+        process.exitCode = 1
+      }
     }
   }
 }

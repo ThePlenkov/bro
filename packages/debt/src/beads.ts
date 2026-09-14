@@ -14,6 +14,7 @@ export interface BeadRef {
 }
 
 function bd(args: string[]): string {
+  // NOSONAR — bd is a user-installed CLI; PATH lookup is the contract (same as gh).
   return execFileSync('bd', args, { encoding: 'utf8' })
 }
 
@@ -32,11 +33,13 @@ export function checkBeads(): void {
 
 /** external_ref → bead, for every issue labeled `debt` (closed included). */
 export function listDebtBeads(): Map<string, BeadRef> {
-  const rows = JSON.parse(bd(['list', '--json', '-n', '0', '--all', '-l', 'debt'])) as Array<{
-    id: string
-    status: string
-    external_ref?: string | null
-  }>
+  let rows: Array<{ id: string; status: string; external_ref?: string | null }>
+  try {
+    rows = JSON.parse(bd(['list', '--json', '-n', '0', '--all', '-l', 'debt']))
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(`bd list failed or returned malformed JSON — ${msg}`)
+  }
   const map = new Map<string, BeadRef>()
   for (const row of rows) {
     if (row.external_ref) {
@@ -122,49 +125,39 @@ function beadArgs(rec: DebtRecord): string[] {
   ]
 }
 
-/**
- * Upsert ledger records into bd. Fingerprint duplicates get `related` links
- * to a canonical bead (first by PR) so `bd ready` doesn't show the same
- * finding five times without context.
- */
-export function syncDebtToBeads(
+function syncRecord(
+  rec: DebtRecord,
+  existing: Map<string, BeadRef>,
+  res: SyncResult,
+  dryRun: boolean
+): void {
+  const bead = existing.get(rec.thread_id)
+  if (!bead) {
+    res.created += 1
+    if (dryRun) {
+      return
+    }
+    const id = bd(beadArgs(rec)).trim()
+    existing.set(rec.thread_id, { id, status: 'open' })
+    if (rec.status !== 'open') {
+      reconcileStatus(id, 'open', rec.status, res)
+    }
+    return
+  }
+  if (dryRun) {
+    res.unchanged += 1
+    return
+  }
+  reconcileStatus(bead.id, bead.status, rec.status, res)
+}
+
+/** Fingerprint duplicates → `related` links to the canonical bead. */
+function linkFingerprintDupes(
   records: DebtRecord[],
-  opts: { dryRun?: boolean } = {}
-): SyncResult {
-  checkBeads()
-  const existing = listDebtBeads()
-  const res: SyncResult = {
-    created: 0,
-    updated: 0,
-    closed: 0,
-    reopened: 0,
-    unchanged: 0,
-    linked: 0,
-  }
-
-  for (const rec of records) {
-    const bead = existing.get(rec.thread_id)
-    if (!bead) {
-      res.created += 1
-      if (opts.dryRun) {
-        continue
-      }
-      const id = bd(beadArgs(rec)).trim()
-      const created: BeadRef = { id, status: 'open' }
-      existing.set(rec.thread_id, created)
-      if (rec.status !== 'open') {
-        reconcileStatus(id, 'open', rec.status, res)
-      }
-      continue
-    }
-    if (opts.dryRun) {
-      res.unchanged += 1
-      continue
-    }
-    reconcileStatus(bead.id, bead.status, rec.status, res)
-  }
-
-  // Fingerprint duplicates → related links to the canonical bead.
+  existing: Map<string, BeadRef>,
+  res: SyncResult,
+  dryRun: boolean
+): void {
   const byFingerprint = new Map<string, DebtRecord[]>()
   for (const rec of records) {
     const group = byFingerprint.get(rec.fingerprint) ?? []
@@ -185,7 +178,7 @@ export function syncDebtToBeads(
       if (!dupBead) {
         continue
       }
-      if (opts.dryRun) {
+      if (dryRun) {
         res.linked += 1
         continue
       }
@@ -197,6 +190,27 @@ export function syncDebtToBeads(
       }
     }
   }
+}
 
+/** Upsert ledger records into bd — idempotent via external_ref = thread_id. */
+export function syncDebtToBeads(
+  records: DebtRecord[],
+  opts: { dryRun?: boolean } = {}
+): SyncResult {
+  checkBeads()
+  const existing = listDebtBeads()
+  const res: SyncResult = {
+    created: 0,
+    updated: 0,
+    closed: 0,
+    reopened: 0,
+    unchanged: 0,
+    linked: 0,
+  }
+  const dryRun = opts.dryRun === true
+  for (const rec of records) {
+    syncRecord(rec, existing, res, dryRun)
+  }
+  linkFingerprintDupes(records, existing, res, dryRun)
   return res
 }
