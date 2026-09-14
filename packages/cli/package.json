@@ -4,7 +4,7 @@
   "description": "bro — agent's sidekick CLI: review-debt pipeline, PR triage, fix loops",
   "type": "module",
   "bin": {
-    "bro": "./dist/index.js"
+    "bro": "dist/index.js"
   },
   "exports": {
     ".": {
