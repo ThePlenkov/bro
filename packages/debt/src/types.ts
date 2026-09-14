@@ -47,7 +47,7 @@ export interface AuthorPolicy {
 }
 
 export interface ReviewThreadComment {
-  author: { login?: string }
+  author: { login?: string; __typename?: string }
   path?: string
   line?: number | null
   body?: string

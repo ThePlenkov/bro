@@ -10,6 +10,7 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
@@ -315,10 +316,33 @@ export function readProcessedAt(cwd?: string): Map<number, string> {
 }
 
 export function markProcessedAt(prs: number[], at: string, cwd?: string): void {
-  const map = readProcessedAt(cwd)
-  for (const pr of prs) {
-    map.set(pr, at)
+  const path = processedFile(cwd)
+  mkdirSync(dirname(path), { recursive: true })
+  // mkdir is atomic on all platforms — a lock dir serializes the
+  // read-modify-write so concurrent collects can't lose each other's
+  // timestamps.
+  const lock = `${path}.lock`
+  for (let i = 0; i < 100; i++) {
+    try {
+      mkdirSync(lock)
+      break
+    } catch {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
+      if (i === 99) {
+        throw new Error(`could not acquire lock ${lock}`)
+      }
+    }
   }
-  const obj = Object.fromEntries([...map.entries()].sort((a, b) => a[0] - b[0]).map(([k, v]) => [String(k), v]))
-  atomicWrite(processedFile(cwd), `${JSON.stringify(obj, null, 2)}\n`)
+  try {
+    const map = readProcessedAt(cwd)
+    for (const pr of prs) {
+      map.set(pr, at)
+    }
+    const obj = Object.fromEntries(
+      [...map.entries()].sort((a, b) => a[0] - b[0]).map(([k, v]) => [String(k), v])
+    )
+    atomicWrite(path, `${JSON.stringify(obj, null, 2)}\n`)
+  } finally {
+    rmSync(lock, { recursive: true, force: true })
+  }
 }
