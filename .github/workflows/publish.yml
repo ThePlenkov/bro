@@ -32,6 +32,10 @@ jobs:
       - run: npm run build
       - run: npm test
 
+      - name: Tag must match package version
+        working-directory: packages/cli
+        run: test "v$(npm pkg get version | tr -d '\"')" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != package version"; exit 1; }
+
       - name: Publish @theplenkov/bro
         working-directory: packages/cli
         run: npm publish --access public

@@ -3,7 +3,16 @@
  * Append-only harvest snapshots + ledger.jsonl status overlays.
  */
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { dirname, join } from 'node:path'
 import { loadConfig } from '@bro/core'
 import type {
@@ -130,6 +139,12 @@ function atomicWrite(path: string, content: string): void {
   mkdirSync(dirname(path), { recursive: true })
   const tmp = `${path}.${process.pid}.tmp`
   writeFileSync(tmp, content, 'utf8')
+  // Preserve the existing file's mode (e.g. 0600) — rename would reset it.
+  try {
+    chmodSync(tmp, statSync(path).mode)
+  } catch {
+    /* first write — default mode */
+  }
   renameSync(tmp, path)
 }
 
