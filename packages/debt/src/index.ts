@@ -49,3 +49,5 @@ export {
 export type { DebtPrState } from './labels.ts'
 export { classifyThread, collectPr } from './collect.ts'
 export type { CollectPrResult } from './collect.ts'
+export { checkBeads, listDebtBeads, syncDebtToBeads } from './beads.ts'
+export type { BeadRef, SyncResult } from './beads.ts'
