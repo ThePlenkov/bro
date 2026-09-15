@@ -69,20 +69,23 @@ and carries — the verdict is yours.
 
 ## Config (optional)
 
-`bro.config.json` in the repo root — everything's optional:
+`bro.config.json` in the repo root — written per-clone by `bro setup` and
+gitignored on purpose (store choices like `beads` are machine-local), so
+fresh checkouts run on defaults until they set up. Everything's optional:
 
 ```json
 {
-  "store": "jsonl",
+  "stores": ["jsonl"],
   "personality": "terse",
   "debt": { "dir": ".agents/review-debt" }
 }
 ```
 
-`store` picks where debt lives. `jsonl` is the evidence ledger (always written).
-`beads`/`both` additionally project every record into `bd` — JSONL keeps the
-receipts, beads runs the queue. Requires `bd` installed and `bd init` in the
-repo (`bd init --stealth --skip-agents --skip-hooks` keeps it invisible).
+`stores` lists the backends debt writes to. `jsonl` is the evidence ledger
+(always written — drop it and bro adds it back). Add `"beads"` to also project
+every record into `bd` — JSONL keeps the receipts, beads runs the queue.
+Requires `bd` installed and `bd init` in the repo
+(`bd init --stealth --skip-agents --skip-hooks` keeps it invisible).
 
 ## Labels bro manages
 

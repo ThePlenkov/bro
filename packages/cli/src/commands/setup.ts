@@ -10,7 +10,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { DEFAULT_CONFIG, PERSONALITIES, type BroConfig } from '@bro/core'
+import { loadConfig, PERSONALITIES, type BroConfig } from '@bro/core'
 import { FORMULA_FILES, SKILL_FILES } from '../skills-data.ts'
 
 function hasBin(name: string): boolean {
@@ -47,13 +47,11 @@ function writeConfig(opts: { beads: boolean; personality?: string }): string {
   const path = join(process.cwd(), 'bro.config.json')
   const existed = existsSync(path)
   const existing = readExistingConfig(path)!
-  const merged: BroConfig = {
-    ...DEFAULT_CONFIG,
-    ...existing,
-    debt: { ...DEFAULT_CONFIG.debt, ...existing.debt },
-  }
-  if (opts.beads) {
-    merged.store = 'both'
+  // loadConfig normalizes legacy `store` into `stores`, so writing the
+  // merged shape back migrates v0.1.0 configs in place.
+  const merged: BroConfig = { ...loadConfig() }
+  if (opts.beads && !merged.stores.includes('beads')) {
+    merged.stores = [...merged.stores, 'beads']
   }
   if (opts.personality) {
     merged.personality = opts.personality as BroConfig['personality']
@@ -62,7 +60,7 @@ function writeConfig(opts: { beads: boolean; personality?: string }): string {
     return 'bro.config.json already up to date'
   }
   writeFileSync(path, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
-  return `${existed ? 'updated' : 'wrote'} bro.config.json (store: ${merged.store})`
+  return `${existed ? 'updated' : 'wrote'} bro.config.json (stores: ${merged.stores.join(', ')})`
 }
 
 /** Install files under root; returns installed count. Warns on drift. */
