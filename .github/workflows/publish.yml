@@ -43,6 +43,10 @@ jobs:
         working-directory: packages/cli
         run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != package version"; exit 1; }
 
+      # OIDC trusted publishing requires npm >= 11.5.1; node 22 ships
+      # npm 10, which falls back to token auth and fails with PUT 404.
+      - run: npm install -g --ignore-scripts npm@11.19.1
+
       - name: Publish @theplenkov/bro
         working-directory: packages/cli
         run: |
