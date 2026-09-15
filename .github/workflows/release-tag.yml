@@ -1,14 +1,19 @@
 name: Tag Release
 
 # When a release/* PR merges, packages/cli/package.json carries a
-# version with no matching tag — cut v{version} on main and open the
-# GitHub release. publish.yml picks the tag up for the OIDC npm publish.
+# version with no matching tag — cut v{version} on main, open the
+# GitHub release, and dispatch publish.yml for the OIDC npm publish
+# (a GITHUB_TOKEN tag push does NOT trigger the tag-push event, so
+# publish is invoked explicitly). workflow_dispatch is the manual
+# catch-up path for versions that predate this workflow.
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   tag:
@@ -18,18 +23,30 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Tag v{version} if missing
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        with:
+          node-version: 22
+
+      - name: Tag v{version}, release, dispatch publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          v=$(node -p "require('./packages/cli/package.json').version")
-          if git ls-remote --exit-code --tags origin "refs/tags/v$v" >/dev/null 2>&1; then
-            echo "tag v$v already exists — nothing to do"
+          subject=$(git log -1 --pretty=%s)
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && ! grep -qE '^release: v[0-9]' <<<"$subject"; then
+            echo "not a release merge ($subject) — nothing to do"
             exit 0
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "v$v" -m "release: v$v"
-          git push origin "v$v"
-          gh release create "v$v" --title "v$v" --generate-notes
+          v=$(node -p "require('./packages/cli/package.json').version")
+          if ! git ls-remote --exit-code --tags origin "refs/tags/v$v" >/dev/null 2>&1; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "v$v" -m "release: v$v"
+            git push origin "v$v"
+          else
+            echo "tag v$v already exists"
+          fi
+          if ! gh release view "v$v" >/dev/null 2>&1; then
+            gh release create "v$v" --title "v$v" --generate-notes
+          fi
+          gh workflow run publish.yml --ref "v$v"

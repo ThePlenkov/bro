@@ -57,6 +57,10 @@ jobs:
           DRY: ${{ inputs.dryRun }}
         run: |
           set -e
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "releases are cut from main only (got $GITHUB_REF)"
+            exit 1
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           args=()
@@ -69,11 +73,17 @@ jobs:
             exit 0
           fi
           # nx release version already updated the npm lock file and
-          # staged its changes; commit everything on the release branch.
+          # staged its changes; commit only the manifests it touched.
           v=$(node -p "require('./packages/cli/package.json').version")
           git checkout -B "release/v$v"
-          git add -A
+          git add packages/*/package.json package.json package-lock.json
           git commit -m "release: v$v"
-          git push -u origin "release/v$v"
-          gh pr create --title "release: v$v" --base main \
-            --body "Version bump cut by \`nx release version\` (specifier: $SPEC). Merge → release-tag.yml tags \`v$v\` on main → publish.yml ships it via OIDC trusted publishing."
+          git push -u --force-with-lease origin "release/v$v"
+          if gh pr view "release/v$v" --json number >/dev/null 2>&1; then
+            echo "release PR already exists — branch updated"
+          elif ! gh pr create --title "release: v$v" --base main \
+            --body "Version bump cut by \`nx release version\` (specifier: $SPEC). Merge → release-tag.yml tags \`v$v\` on main → publish.yml ships it via OIDC trusted publishing."; then
+            echo "PR creation failed — deleting remote branch release/v$v"
+            git push origin --delete "release/v$v"
+            exit 1
+          fi

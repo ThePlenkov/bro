@@ -127,7 +127,9 @@ CI-driven, human-gated. `Actions → Release → Run workflow`:
 
 The workflow runs `nx release version` on a `release/vX.Y.Z` branch and
 opens a PR. Merge it → `release-tag.yml` cuts the `v*` tag + GitHub
-release on `main` → `publish.yml` ships to npm via OIDC trusted
-publishing. No tokens, no manual tags.
+release on `main` and dispatches `publish.yml`, which ships to npm via
+OIDC trusted publishing. No tokens, no manual tags. `release-tag.yml`
+can also be run manually (`Actions → Tag Release`) to catch up a version
+that predates the pipeline.
 
 MIT. PRs welcome — bro reviews them anyway.
