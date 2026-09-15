@@ -6,9 +6,14 @@ name: Publish
 on:
   push:
     tags: ['v*']
-  # release-tag.yml dispatches this on a tag ref — GITHUB_TOKEN tag
-  # pushes do not fire the push trigger above.
+  # release-tag.yml dispatches this on main with the tag as an input —
+  # GITHUB_TOKEN tag pushes do not fire the push trigger above, and
+  # dispatching ON the tag would run the stale tagged workflow file.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to publish (e.g. v0.2.0); defaults to the run ref
+        required: false
 
 permissions:
   id-token: write
@@ -24,6 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
+          ref: ${{ inputs.tag || github.ref }}
           submodules: recursive
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
@@ -41,7 +47,7 @@ jobs:
 
       - name: Tag must match package version
         working-directory: packages/cli
-        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != package version"; exit 1; }
+        run: test "v$(node -p "require('./package.json').version")" = "${{ inputs.tag || github.ref_name }}" || { echo "tag ${{ inputs.tag || github.ref_name }} != package version"; exit 1; }
 
       # LTS node ships npm >= 11.5.1 — OIDC trusted publishing built in.
       - name: Publish @theplenkov/bro
