@@ -158,14 +158,13 @@ export async function fetchPrActState(target: {
   if (sastChecks.length > 0) {
     const ids = checkRunIds(target.owner, target.repo, meta.headRefOid)
     for (const check of sastChecks) {
-      // Unknown annotation status can only block required checks — an
-      // optional or not-yet-created run must not hold the gate forever.
+      // Checks reported via commit-status contexts (not check runs) have
+      // no annotations endpoint — nothing is unknown about them. A fetch
+      // failure only counts as unknown for required checks: an optional
+      // SAST must not hold the gate.
       const gates = requiredNames.size === 0 || requiredNames.has(check.name)
       const runId = ids.get(check.name)
       if (!runId) {
-        if (gates) {
-          sastUnknown += 1
-        }
         continue
       }
       try {
