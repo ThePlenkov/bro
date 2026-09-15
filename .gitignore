@@ -7,3 +7,4 @@ dist/
 packages/cli/README.md
 packages/cli/LICENSE
 .agents/review-debt/
+.agents/skills/

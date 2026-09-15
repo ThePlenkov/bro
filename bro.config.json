@@ -1,0 +1,7 @@
+{
+  "store": "both",
+  "personality": "terse",
+  "debt": {
+    "dir": ".agents/review-debt"
+  }
+}
