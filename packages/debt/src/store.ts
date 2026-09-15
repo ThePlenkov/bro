@@ -330,12 +330,11 @@ export function readProcessedAt(cwd?: string): Map<number, string> {
   }
 }
 
-export function markProcessedAt(prs: number[], at: string, cwd?: string): void {
-  const path = processedFile(cwd)
+export function withFileLock<T>(path: string, fn: () => T): T {
   mkdirSync(dirname(path), { recursive: true })
   // mkdir is atomic on all platforms — a lock dir serializes the
-  // read-modify-write so concurrent collects can't lose each other's
-  // timestamps.
+  // read-modify-write so concurrent processes can't lose each other's
+  // updates.
   const lock = `${path}.lock`
   for (let i = 0; i < 100; i++) {
     try {
@@ -358,6 +357,15 @@ export function markProcessedAt(prs: number[], at: string, cwd?: string): void {
     }
   }
   try {
+    return fn()
+  } finally {
+    rmSync(lock, { recursive: true, force: true })
+  }
+}
+
+export function markProcessedAt(prs: number[], at: string, cwd?: string): void {
+  const path = processedFile(cwd)
+  withFileLock(path, () => {
     const map = readProcessedAt(cwd)
     for (const pr of prs) {
       map.set(pr, at)
@@ -366,7 +374,30 @@ export function markProcessedAt(prs: number[], at: string, cwd?: string): void {
       [...map.entries()].sort((a, b) => a[0] - b[0]).map(([k, v]) => [String(k), v])
     )
     atomicWrite(path, `${JSON.stringify(obj, null, 2)}\n`)
-  } finally {
-    rmSync(lock, { recursive: true, force: true })
-  }
+  })
+}
+
+export function claimDebtRecord(threadId: string, cwd?: string): DebtRecord | null {
+  // Compare-and-swap under the ledger lock: two concurrent `debt next
+  // --claim` callers can't both win — the second sees the claimed status
+  // and gets null.
+  return withFileLock(ledgerFile(cwd), () => {
+    const row = readDebtRecords(cwd).find((r) => r.thread_id === threadId)
+    if (!row || row.status !== 'open') {
+      return null
+    }
+    upsertLedgerOverlays(
+      [
+        {
+          thread_id: threadId,
+          status: 'claimed',
+          fix_pr: null,
+          fixed_at: null,
+          notes: row.notes,
+        },
+      ],
+      cwd
+    )
+    return { ...row, status: 'claimed' }
+  })
 }

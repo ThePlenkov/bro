@@ -14,6 +14,7 @@ import {
   applyDebtLabel,
   applyLastN,
   buildSummary,
+  claimDebtRecord,
   clearDebtLabels,
   collectPr,
   DEBT_STATES,
@@ -629,7 +630,7 @@ function cmdNext(argv: string[]): void {
     }
   }
 
-  const row = readDebtRecords()
+  let row = readDebtRecords()
     .filter((r) => r.status === 'open')
     .filter((r) => (filters.area === null || r.area === filters.area))
     .filter((r) => (filters.author === null || r.author === filters.author))
@@ -645,9 +646,15 @@ function cmdNext(argv: string[]): void {
     return
   }
   if (claim) {
-    upsertLedgerOverlays([
-      { thread_id: row.thread_id, status: 'claimed', fix_pr: null, fixed_at: null, notes: row.notes },
-    ])
+    // Atomic compare-and-swap: the claim is written only if the row is
+    // still open under the lock — a concurrent claimer loses and reruns.
+    const claimed = claimDebtRecord(row.thread_id)
+    if (!claimed) {
+      console.error(`debt next: ${row.thread_id.slice(0, 12)} already claimed — rerun`)
+      process.exitCode = 1
+      return
+    }
+    row = claimed
     writeSummary(buildSummary(readDebtRecords()))
     console.error(`debt next: ${row.thread_id.slice(0, 12)} → claimed`)
   }
@@ -674,7 +681,9 @@ async function cmdWatch(argv: string[]): Promise<void> {
     if (argv[i] === '--interval') {
       const value = readOption(argv, i)
       const n = Number(value)
-      if (value === null || !Number.isInteger(n) || n <= 0) {
+      // setTimeout overflows above 2^31-1 ms (~24.8 days) and fires
+      // immediately — bound the interval below that.
+      if (value === null || !Number.isSafeInteger(n) || n <= 0 || n * 1000 > 2_147_483_647) {
         console.error(`error: --interval must be a positive integer (seconds), got "${value}"`)
         process.exit(2)
       }
