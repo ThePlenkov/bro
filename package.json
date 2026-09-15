@@ -19,6 +19,7 @@
     "@nx-devkit/skill": "file:./vendor/nx.ts/packages/skill",
     "@nx-devkit/skillspector": "file:./vendor/nx.ts/packages/skillspector",
     "@nx-devkit/tsdown": "file:./vendor/nx.ts/packages/tsdown",
+    "@nx/js": "^23.2.1",
     "@types/node": "^22.0.0",
     "nx": "^23.1.0",
     "tsdown": "^0.15.0",

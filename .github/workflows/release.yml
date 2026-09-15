@@ -1,0 +1,98 @@
+name: Release
+
+# Human-triggered release: pick a semver bump (or let conventional
+# commits decide), nx release versions @theplenkov/bro on a release
+# branch, a PR opens for the merge gate. Once merged, release-tag.yml
+# cuts the v* tag on main and publish.yml ships it via OIDC.
+on:
+  workflow_dispatch:
+    inputs:
+      specifier:
+        description: Semver bump — auto derives from conventional commits
+        type: choice
+        options: [auto, patch, minor, major, prerelease]
+        default: auto
+        required: true
+      preid:
+        description: Set to force a prerelease (e.g. beta → vX.Y.Z-beta.N)
+        required: false
+        default: ''
+      dryRun:
+        description: Print the plan, change nothing
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - run: npm ci --no-audit --no-fund --ignore-scripts
+      - run: npm run build:nx-plugins
+
+      - name: Version + release PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPEC: ${{ inputs.specifier }}
+          PREID: ${{ inputs.preid }}
+          DRY: ${{ inputs.dryRun }}
+        run: |
+          set -e
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "releases are cut from main only (got $GITHUB_REF)"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          args=()
+          [ "$SPEC" != "auto" ] && args+=("$SPEC")
+          [ -n "$PREID" ] && args+=(--preid "$PREID")
+          [ "$DRY" = "true" ] && args+=(--dry-run)
+          npx nx release version "${args[@]}"
+          if [ "$DRY" = "true" ]; then
+            echo "dry run — no branch, no PR"
+            exit 0
+          fi
+          # nx release version already updated the npm lock file and
+          # staged its changes; commit only the manifests it touched.
+          v=$(node -p "require('./packages/cli/package.json').version")
+          git checkout -B "release/v$v"
+          git add packages/*/package.json package.json package-lock.json
+          if git diff --cached --quiet; then
+            echo "no version change — nothing to release"
+            exit 0
+          fi
+          git commit -m "release: v$v"
+          git push -u --force-with-lease origin "release/v$v"
+          if gh pr view "release/v$v" --json number >/dev/null 2>&1; then
+            echo "release PR already exists — branch updated"
+          elif ! gh pr create --title "release: v$v" --base main \
+            --body "Version bump cut by \`nx release version\` (specifier: $SPEC). Merge → release-tag.yml tags \`v$v\` on main → publish.yml ships it via OIDC trusted publishing."; then
+            echo "PR creation failed"
+            # Delete the orphaned branch only if a successful query
+            # proves no PR exists — a transient API failure must not
+            # delete the head branch of a live release PR.
+            if gh pr list --head "release/v$v" --json number --jq 'length' | grep -qx '0'; then
+              git push origin --delete "release/v$v"
+            fi
+            exit 1
+          fi
