@@ -1,0 +1,35 @@
+name: Tag Release
+
+# When a release/* PR merges, packages/cli/package.json carries a
+# version with no matching tag — cut v{version} on main and open the
+# GitHub release. publish.yml picks the tag up for the OIDC npm publish.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag v{version} if missing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          v=$(node -p "require('./packages/cli/package.json').version")
+          if git ls-remote --exit-code --tags origin "refs/tags/v$v" >/dev/null 2>&1; then
+            echo "tag v$v already exists — nothing to do"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$v" -m "release: v$v"
+          git push origin "v$v"
+          gh release create "v$v" --title "v$v" --generate-notes

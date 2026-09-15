@@ -115,4 +115,19 @@ the CLI itself). Skills in `skills/` are thin wrappers — all mechanics are in
 the CLI. Nx inference comes from `vendor/nx.ts` (submodule, we ride the
 source).
 
+## Releasing
+
+CI-driven, human-gated. `Actions → Release → Run workflow`:
+
+- `specifier` — `auto` derives the bump from conventional commits since
+  the last `v*` tag (`feat:` → minor, fixes → patch, `BREAKING` → major,
+  0.x shifted), or pick `patch` / `minor` / `major` / `prerelease`.
+- `preid` — set (e.g. `beta`) to cut `vX.Y.Z-beta.N` instead.
+- `dryRun` — prints the nx release plan, changes nothing.
+
+The workflow runs `nx release version` on a `release/vX.Y.Z` branch and
+opens a PR. Merge it → `release-tag.yml` cuts the `v*` tag + GitHub
+release on `main` → `publish.yml` ships to npm via OIDC trusted
+publishing. No tokens, no manual tags.
+
 MIT. PRs welcome — bro reviews them anyway.

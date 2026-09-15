@@ -1,0 +1,79 @@
+name: Release
+
+# Human-triggered release: pick a semver bump (or let conventional
+# commits decide), nx release versions @theplenkov/bro on a release
+# branch, a PR opens for the merge gate. Once merged, release-tag.yml
+# cuts the v* tag on main and publish.yml ships it via OIDC.
+on:
+  workflow_dispatch:
+    inputs:
+      specifier:
+        description: Semver bump — auto derives from conventional commits
+        type: choice
+        options: [auto, patch, minor, major, prerelease]
+        default: auto
+        required: true
+      preid:
+        description: Set to force a prerelease (e.g. beta → vX.Y.Z-beta.N)
+        required: false
+        default: ''
+      dryRun:
+        description: Print the plan, change nothing
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - run: npm ci --no-audit --no-fund --ignore-scripts
+      - run: npm run build:nx-plugins
+
+      - name: Version + release PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPEC: ${{ inputs.specifier }}
+          PREID: ${{ inputs.preid }}
+          DRY: ${{ inputs.dryRun }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          args=()
+          [ "$SPEC" != "auto" ] && args+=("$SPEC")
+          [ -n "$PREID" ] && args+=(--preid "$PREID")
+          [ "$DRY" = "true" ] && args+=(--dry-run)
+          npx nx release version "${args[@]}"
+          if [ "$DRY" = "true" ]; then
+            echo "dry run — no branch, no PR"
+            exit 0
+          fi
+          # nx release version already updated the npm lock file and
+          # staged its changes; commit everything on the release branch.
+          v=$(node -p "require('./packages/cli/package.json').version")
+          git checkout -B "release/v$v"
+          git add -A
+          git commit -m "release: v$v"
+          git push -u origin "release/v$v"
+          gh pr create --title "release: v$v" --base main \
+            --body "Version bump cut by \`nx release version\` (specifier: $SPEC). Merge → release-tag.yml tags \`v$v\` on main → publish.yml ships it via OIDC trusted publishing."
