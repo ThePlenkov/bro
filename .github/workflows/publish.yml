@@ -12,8 +12,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Tag to publish (e.g. v0.2.0); defaults to the run ref
-        required: false
+        description: Tag to publish (e.g. v0.2.0)
+        required: true
 
 permissions:
   id-token: write
@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
           submodules: recursive
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
@@ -47,7 +47,9 @@ jobs:
 
       - name: Tag must match package version
         working-directory: packages/cli
-        run: test "v$(node -p "require('./package.json').version")" = "${{ inputs.tag || github.ref_name }}" || { echo "tag ${{ inputs.tag || github.ref_name }} != package version"; exit 1; }
+        env:
+          EXPECTED_TAG: ${{ inputs.tag || github.ref_name }}
+        run: test "v$(node -p "require('./package.json').version")" = "$EXPECTED_TAG" || { echo "tag $EXPECTED_TAG != package version"; exit 1; }
 
       # LTS node ships npm >= 11.5.1 — OIDC trusted publishing built in.
       - name: Publish @theplenkov/bro
