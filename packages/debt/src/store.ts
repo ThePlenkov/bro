@@ -171,7 +171,7 @@ export function readLedgerOverlays(cwd?: string): Map<string, LedgerOverlay> {
   return map
 }
 
-export function upsertLedgerOverlays(
+function upsertLedgerOverlaysUnlocked(
   updates: LedgerOverlay[],
   cwd?: string
 ): Map<string, LedgerOverlay> {
@@ -187,6 +187,13 @@ export function upsertLedgerOverlays(
     .join('\n')
   atomicWrite(path, lines.length > 0 ? `${lines}\n` : '')
   return map
+}
+
+export function upsertLedgerOverlays(
+  updates: LedgerOverlay[],
+  cwd?: string
+): Map<string, LedgerOverlay> {
+  return withFileLock(ledgerFile(cwd), () => upsertLedgerOverlaysUnlocked(updates, cwd))
 }
 
 function applyLedgerOverlays(records: DebtRecord[], cwd?: string): DebtRecord[] {
@@ -330,34 +337,136 @@ export function readProcessedAt(cwd?: string): Map<number, string> {
   }
 }
 
-export function markProcessedAt(prs: number[], at: string, cwd?: string): void {
-  const path = processedFile(cwd)
-  mkdirSync(dirname(path), { recursive: true })
-  // mkdir is atomic on all platforms — a lock dir serializes the
-  // read-modify-write so concurrent collects can't lose each other's
-  // timestamps.
-  const lock = `${path}.lock`
+// Critical sections here are synchronous file writes — an event-loop
+// heartbeat can't fire while the lock is held, so staleness is judged
+// by mtime + owner liveness instead. A live holder (kill(pid,0)) keeps
+// the lock until the abandoned bound, which also caps an orphan whose
+// pid was recycled onto an unrelated live process.
+const LOCK_STALE_MS = 30_000
+const LOCK_ABANDONED_MS = 10 * 60_000
+
+function lockOwnerAlive(lock: string): boolean {
+  try {
+    const pid = Number(readFileSync(join(lock, 'pid'), 'utf8').trim())
+    if (!Number.isInteger(pid) || pid <= 0) {
+      return false
+    }
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch (err) {
+      // ESRCH = dead; EPERM = alive under another user.
+      return (err as NodeJS.ErrnoException).code === 'EPERM'
+    }
+  } catch {
+    return false // no readable pid file
+  }
+}
+
+function lockStealable(lock: string): boolean {
+  let ageMs: number
+  try {
+    ageMs = Date.now() - statSync(lock).mtimeMs
+  } catch {
+    return false // lock vanished — the retry loop's mkdir handles it
+  }
+  if (ageMs <= LOCK_STALE_MS) {
+    return false
+  }
+  return !lockOwnerAlive(lock) || ageMs > LOCK_ABANDONED_MS
+}
+
+// Capture-then-check: rename grabs whatever instance sits at `lock`
+// atomically. Re-check THAT instance — if a fresh lock replaced the
+// stale one mid-race, put it back instead of deleting a live hold.
+function stealLock(lock: string): boolean {
+  if (!lockStealable(lock)) {
+    return false
+  }
+  const dest = `${lock}.stale-${process.pid}-${process.hrtime.bigint()}`
+  try {
+    renameSync(lock, dest)
+  } catch {
+    return false // already stolen or released
+  }
+  if (lockStealable(dest)) {
+    rmSync(dest, { recursive: true, force: true })
+    return true
+  }
+  try {
+    renameSync(dest, lock)
+  } catch {
+    rmSync(dest, { recursive: true, force: true })
+  }
+  return false
+}
+
+// mkdir is atomic on all platforms — a lock dir serializes the
+// read-modify-write so concurrent processes can't lose each other's
+// updates.
+function acquireFileLock(lock: string): void {
   for (let i = 0; i < 100; i++) {
     try {
       mkdirSync(lock)
-      break
     } catch {
-      // Steal a stale lock: a killed process never runs the finally, so a
-      // lock dir older than 30s can't be a live write.
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > 30_000) {
-          rmSync(lock, { recursive: true, force: true })
-        }
-      } catch {
-        // lock vanished or unreadable — retry loop handles both
+      // Held by someone else — steal if stale, otherwise wait and retry.
+      if (!stealLock(lock)) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
       }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
-      if (i === 99) {
-        throw new Error(`could not acquire lock ${lock}`)
-      }
+      continue
+    }
+    try {
+      writeFileSync(join(lock, 'pid'), String(process.pid))
+      return
+    } catch (err) {
+      rmSync(lock, { recursive: true, force: true })
+      throw err
     }
   }
+  throw new Error(`could not acquire lock ${lock}`)
+}
+
+// Capture the lock instance before deleting: only ever remove a dir
+// whose pid file is ours — if our lock was stolen, the dir at `lock`
+// belongs to the stealer and is put back untouched.
+function releaseFileLock(lock: string): void {
+  const dest = `${lock}.release-${process.pid}`
   try {
+    renameSync(lock, dest)
+  } catch {
+    return // lock already gone (stolen or never fully created)
+  }
+  let ours = false
+  try {
+    ours = readFileSync(join(dest, 'pid'), 'utf8').trim() === String(process.pid)
+  } catch {
+    // unreadable owner — treat as not ours
+  }
+  if (ours) {
+    rmSync(dest, { recursive: true, force: true })
+    return
+  }
+  try {
+    renameSync(dest, lock)
+  } catch {
+    rmSync(dest, { recursive: true, force: true })
+  }
+}
+
+export function withFileLock<T>(path: string, fn: () => T): T {
+  mkdirSync(dirname(path), { recursive: true })
+  const lock = `${path}.lock`
+  acquireFileLock(lock)
+  try {
+    return fn()
+  } finally {
+    releaseFileLock(lock)
+  }
+}
+
+export function markProcessedAt(prs: number[], at: string, cwd?: string): void {
+  const path = processedFile(cwd)
+  withFileLock(path, () => {
     const map = readProcessedAt(cwd)
     for (const pr of prs) {
       map.set(pr, at)
@@ -366,7 +475,30 @@ export function markProcessedAt(prs: number[], at: string, cwd?: string): void {
       [...map.entries()].sort((a, b) => a[0] - b[0]).map(([k, v]) => [String(k), v])
     )
     atomicWrite(path, `${JSON.stringify(obj, null, 2)}\n`)
-  } finally {
-    rmSync(lock, { recursive: true, force: true })
-  }
+  })
+}
+
+export function claimDebtRecord(threadId: string, cwd?: string): DebtRecord | null {
+  // Compare-and-swap under the ledger lock: two concurrent `debt next
+  // --claim` callers can't both win — the second sees the claimed status
+  // and gets null.
+  return withFileLock(ledgerFile(cwd), () => {
+    const row = readDebtRecords(cwd).find((r) => r.thread_id === threadId)
+    if (!row || row.status !== 'open') {
+      return null
+    }
+    upsertLedgerOverlaysUnlocked(
+      [
+        {
+          thread_id: threadId,
+          status: 'claimed',
+          fix_pr: null,
+          fixed_at: null,
+          notes: row.notes,
+        },
+      ],
+      cwd
+    )
+    return { ...row, status: 'claimed' }
+  })
 }

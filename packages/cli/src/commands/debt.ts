@@ -14,6 +14,7 @@ import {
   applyDebtLabel,
   applyLastN,
   buildSummary,
+  claimDebtRecord,
   clearDebtLabels,
   collectPr,
   DEBT_STATES,
@@ -63,7 +64,11 @@ Commands:
   mark PR <state> [OWNER REPO]    Set debt label: ${[...DEBT_STATES, 'none'].join('|')}
   set <status> --thread-id ID…    Ledger status: open|claimed|done|wontfix|duplicate
         [--threads-file PATH] [--fix-pr N] [--notes T]
-  sync [--dry-run]                Project the ledger into beads (bd) — idempotent`)
+  sync [--dry-run]                Project the ledger into beads (bd) — idempotent
+  next [--json] [--claim]         Top open finding for an agent to fix
+        [--area A] [--author U]   (--claim marks it claimed atomically)
+  watch [collect flags]           Collect on an interval until Ctrl-C
+        [--interval SEC=300]`)
   process.exit(1)
 }
 
@@ -600,6 +605,112 @@ function cmdSet(argv: string[]): void {
   }
 }
 
+// --- next ------------------------------------------------------------------
+
+const PRIORITY_RANK: Record<DebtRecord['priority'], number> = {
+  blocking: 0,
+  human: 1,
+  nit: 2,
+  scan: 3,
+  noise: 4,
+}
+
+function cmdNext(argv: string[]): void {
+  const json = argv.includes('--json')
+  const claim = argv.includes('--claim')
+  const filters: Record<string, string | null> = { area: null, author: null }
+  for (let i = 0; i < argv.length; i += 1) {
+    const key = argv[i]!.replace(/^--/, '')
+    if (key in filters) {
+      const value = readOption(argv, i)
+      if (value !== null) {
+        filters[key] = value
+        i += 1
+      }
+    }
+  }
+
+  let row = readDebtRecords()
+    .filter((r) => r.status === 'open')
+    .filter((r) => (filters.area === null || r.area === filters.area))
+    .filter((r) => (filters.author === null || r.author === filters.author))
+    .sort(
+      (a, b) =>
+        PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] ||
+        a.harvested_at.localeCompare(b.harvested_at)
+    )[0]
+
+  if (!row) {
+    console.error('debt next: no open findings')
+    process.exitCode = 1
+    return
+  }
+  if (claim) {
+    // Atomic compare-and-swap: the claim is written only if the row is
+    // still open under the lock — a concurrent claimer loses and reruns.
+    const claimed = claimDebtRecord(row.thread_id)
+    if (!claimed) {
+      // CAS lost — report the actual status, not just "claimed": the row
+      // may have been marked done/wontfix/duplicate by another process.
+      const current = readDebtRecords().find((r) => r.thread_id === row!.thread_id)
+      console.error(
+        `debt next: ${row.thread_id.slice(0, 12)} no longer open ` +
+          `(status=${current?.status ?? 'gone'}) — rerun`
+      )
+      process.exitCode = 1
+      return
+    }
+    row = claimed
+    writeSummary(buildSummary(readDebtRecords()))
+    console.error(`debt next: ${row.thread_id.slice(0, 12)} → claimed`)
+  }
+  if (json) {
+    console.log(JSON.stringify(row))
+    return
+  }
+  console.log(`${row.thread_id}\t#${row.source_pr}\t${row.priority}\t${row.area}\t${row.author}`)
+  console.log(`${row.path}:${row.line ?? '?'}`)
+  console.log(row.body)
+  console.log(row.thread_url)
+}
+
+// --- watch -----------------------------------------------------------------
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function cmdWatch(argv: string[]): Promise<void> {
+  let intervalSec = 300
+  const collectArgv: string[] = []
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--interval') {
+      const value = readOption(argv, i)
+      const n = Number(value)
+      // setTimeout overflows above 2^31-1 ms (~24.8 days) and fires
+      // immediately — bound the interval below that.
+      if (value === null || !Number.isSafeInteger(n) || n <= 0 || n * 1000 > 2_147_483_647) {
+        console.error(`error: --interval must be a positive integer (seconds), got "${value}"`)
+        process.exit(2)
+      }
+      intervalSec = n
+      i += 1
+      continue
+    }
+    collectArgv.push(argv[i]!)
+  }
+  console.error(`debt watch: collecting every ${intervalSec}s — Ctrl-C to stop`)
+  for (;;) {
+    try {
+      await cmdCollect(collectArgv)
+    } catch (err) {
+      // A failed pass (network blip, gh outage) must not kill the loop.
+      console.error(`debt watch: collect failed — ${err instanceof Error ? err.message : err}`)
+    }
+    await sleep(intervalSec * 1000)
+  }
+}
+
 // --- sync ------------------------------------------------------------------
 
 function cmdSync(argv: string[]): void {
@@ -624,6 +735,8 @@ const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
   mark: cmdMark,
   set: cmdSet,
   sync: cmdSync,
+  next: cmdNext,
+  watch: cmdWatch,
 }
 
 export async function runDebtCommand(argv: string[]): Promise<void> {

@@ -13,6 +13,7 @@ export type {
 export { bodyPreview, deriveArea, fingerprint } from './text.ts'
 export {
   buildSummary,
+  claimDebtRecord,
   harvestFilename,
   loadAuthorPolicy,
   readDebtRecords,
