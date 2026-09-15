@@ -7,11 +7,20 @@
  *   bro setup        configure a repo for bro
  *   bro --version
  */
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { runActCommand } from './commands/act.ts'
 import { runDebtCommand } from './commands/debt.ts'
 import { runSetupCommand } from './commands/setup.ts'
 
-const VERSION = '0.1.0'
+// Single source of truth is package.json — dist/index.js sits one dir
+// below it in both the workspace and the published tarball.
+const VERSION = (
+  JSON.parse(
+    readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8')
+  ) as { version: string }
+).version
 
 function usage(exitCode = 1): never {
   console.error(`bro — agent's sidekick CLI
