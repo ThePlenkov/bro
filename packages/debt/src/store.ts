@@ -12,7 +12,6 @@ import {
   renameSync,
   rmSync,
   statSync,
-  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -338,33 +337,68 @@ export function readProcessedAt(cwd?: string): Map<number, string> {
   }
 }
 
-function lockStealable(lock: string): boolean {
-  // A live holder's heartbeat refreshes the lock mtime every ~10s, so a
-  // stale lock means the owner crashed — or its pid was recycled onto an
-  // unrelated process, in which case the orphan lock never heartbeats
-  // either. Fresh mtime = actively held, regardless of pid state.
+// Critical sections here are synchronous file writes — an event-loop
+// heartbeat can't fire while the lock is held, so staleness is judged
+// by mtime + owner liveness instead. A live holder (kill(pid,0)) keeps
+// the lock until the abandoned bound, which also caps an orphan whose
+// pid was recycled onto an unrelated live process.
+const LOCK_STALE_MS = 30_000
+const LOCK_ABANDONED_MS = 10 * 60_000
+
+function lockOwnerAlive(lock: string): boolean {
   try {
-    return Date.now() - statSync(lock).mtimeMs > 30_000
+    const pid = Number(readFileSync(join(lock, 'pid'), 'utf8').trim())
+    if (!Number.isInteger(pid) || pid <= 0) {
+      return false
+    }
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch (err) {
+      // ESRCH = dead; EPERM = alive under another user.
+      return (err as NodeJS.ErrnoException).code === 'EPERM'
+    }
   } catch {
-    return false // lock vanished — the retry loop's mkdir handles it
+    return false // no readable pid file
   }
 }
 
-// Steal via atomic rename: two competing stealers can't both move the
-// dir — the loser gets ENOENT and waits on the winner's fresh lock
-// instead of deleting it mid-hold.
+function lockStealable(lock: string): boolean {
+  let ageMs: number
+  try {
+    ageMs = Date.now() - statSync(lock).mtimeMs
+  } catch {
+    return false // lock vanished — the retry loop's mkdir handles it
+  }
+  if (ageMs <= LOCK_STALE_MS) {
+    return false
+  }
+  return !lockOwnerAlive(lock) || ageMs > LOCK_ABANDONED_MS
+}
+
+// Capture-then-check: rename grabs whatever instance sits at `lock`
+// atomically. Re-check THAT instance — if a fresh lock replaced the
+// stale one mid-race, put it back instead of deleting a live hold.
 function stealLock(lock: string): boolean {
   if (!lockStealable(lock)) {
     return false
   }
-  const dest = `${lock}.stale-${process.pid}-${Date.now()}`
+  const dest = `${lock}.stale-${process.pid}-${process.hrtime.bigint()}`
   try {
     renameSync(lock, dest)
   } catch {
-    return false // already stolen or replaced with a live lock
+    return false // already stolen or released
   }
-  rmSync(dest, { recursive: true, force: true })
-  return true
+  if (lockStealable(dest)) {
+    rmSync(dest, { recursive: true, force: true })
+    return true
+  }
+  try {
+    renameSync(dest, lock)
+  } catch {
+    rmSync(dest, { recursive: true, force: true })
+  }
+  return false
 }
 
 export function withFileLock<T>(path: string, fn: () => T): T {
@@ -395,29 +429,36 @@ export function withFileLock<T>(path: string, fn: () => T): T {
   if (!acquired) {
     throw new Error(`could not acquire lock ${lock}`)
   }
-  // Heartbeat while holding so waiters never judge a live-but-slow
-  // holder's lock stale.
-  const beat = setInterval(() => {
-    try {
-      const now = new Date()
-      utimesSync(lock, now, now)
-    } catch {
-      // lock stolen/vanished — nothing to refresh
-    }
-  }, 10_000)
-  beat.unref()
   try {
     return fn()
   } finally {
-    clearInterval(beat)
-    // Remove only if the lock is still ours: a stolen lock's dir was
-    // renamed away, and the dir now at `lock` may belong to the stealer.
+    // Capture the lock instance before deleting: only ever remove a dir
+    // whose pid file is ours — if our lock was stolen, the dir at `lock`
+    // belongs to the stealer and is put back untouched.
+    const dest = `${lock}.release-${process.pid}`
+    let captured = false
     try {
-      if (readFileSync(join(lock, 'pid'), 'utf8').trim() === String(process.pid)) {
-        rmSync(lock, { recursive: true, force: true })
-      }
+      renameSync(lock, dest)
+      captured = true
     } catch {
-      // pid file unreadable — not our lock anymore
+      // lock already gone (stolen or never fully created)
+    }
+    if (captured) {
+      let ours = false
+      try {
+        ours = readFileSync(join(dest, 'pid'), 'utf8').trim() === String(process.pid)
+      } catch {
+        // unreadable owner — treat as not ours
+      }
+      if (ours) {
+        rmSync(dest, { recursive: true, force: true })
+      } else {
+        try {
+          renameSync(dest, lock)
+        } catch {
+          rmSync(dest, { recursive: true, force: true })
+        }
+      }
     }
   }
 }
