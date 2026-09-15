@@ -152,7 +152,14 @@ function atomicWrite(path: string, content: string): void {
   } catch {
     /* first write — default mode */
   }
-  writeFileSync(tmp, content, mode === undefined ? 'utf8' : { encoding: 'utf8', mode })
+  // A temp file left by a crash may carry permissive mode — drop it before
+  // recreating, then chmod explicitly since umask can narrow `mode`.
+  rmSync(tmp, { force: true })
+  writeFileSync(tmp, '', mode === undefined ? 'utf8' : { encoding: 'utf8', mode })
+  if (mode !== undefined) {
+    chmodSync(tmp, mode)
+  }
+  writeFileSync(tmp, content, 'utf8')
   renameSync(tmp, path)
 }
 
