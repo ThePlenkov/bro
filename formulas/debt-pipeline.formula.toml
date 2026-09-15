@@ -63,9 +63,11 @@ title = "GATE — bro act status on the fix PR"
 needs = ["fix"]
 type = "agent"
 description = """
-Determine the fix PR: use {{fix_pr}} if set, otherwise
-`gh pr list --state open --limit 1` on the fix branch.
-Run `bro act status <pr>` until exit 0: zero open review threads, no
+Determine the fix PR: use {{fix_pr}} if set, otherwise run plain
+`bro act status` on the fix branch — its no-arg path resolves the
+current branch's PR and requires it to be OPEN (a stale merged/closed
+PR can never report a green gate).
+Run `bro act status [<pr>]` until exit 0: zero open review threads, no
 pending CI, no pending SAST findings. Any blocker → fix and re-check.
 Exit non-zero = the gate holds; do not merge around it.
 """

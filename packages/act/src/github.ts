@@ -138,6 +138,7 @@ export async function fetchPrActState(target: {
   // checks configured, only those can block; without branch protection
   // gh --required fails and every non-AI check counts.
   const required = fetchChecks(target, true)
+  const requiredNames = new Set(required.map((c) => c.name))
   const gatePool = required.length > 0 ? required : checks
   const ciPending = gatePool.filter(
     (c) =>
@@ -157,6 +158,11 @@ export async function fetchPrActState(target: {
   if (sastChecks.length > 0) {
     const ids = checkRunIds(target.owner, target.repo, meta.headRefOid)
     for (const check of sastChecks) {
+      // Checks reported via commit-status contexts (not check runs) have
+      // no annotations endpoint — nothing is unknown about them. A fetch
+      // failure only counts as unknown for required checks: an optional
+      // SAST must not hold the gate.
+      const gates = requiredNames.size === 0 || requiredNames.has(check.name)
       const runId = ids.get(check.name)
       if (!runId) {
         continue
@@ -164,7 +170,9 @@ export async function fetchPrActState(target: {
       try {
         sastPending += failureAnnotations(target.owner, target.repo, runId)
       } catch {
-        sastUnknown += 1
+        if (gates) {
+          sastUnknown += 1
+        }
       }
     }
   }
