@@ -61,4 +61,9 @@ jobs:
             echo "npm view failed without E404 — aborting to avoid double publish"
             exit 1
           fi
+          # setup-node's registry-url writes an _authToken placeholder
+          # that expands empty and makes npm skip the OIDC exchange
+          # (actions/setup-node#1551). Strip it so trusted publishing
+          # can kick in.
+          sed -i '/_authToken/d' "$NPM_CONFIG_USERCONFIG"
           npm publish --access public
