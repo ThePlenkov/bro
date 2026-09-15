@@ -6,6 +6,9 @@ name: Publish
 on:
   push:
     tags: ['v*']
+  # release-tag.yml dispatches this on a tag ref — GITHUB_TOKEN tag
+  # pushes do not fire the push trigger above.
+  workflow_dispatch:
 
 permissions:
   id-token: write
