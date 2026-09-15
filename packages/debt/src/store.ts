@@ -171,7 +171,7 @@ export function readLedgerOverlays(cwd?: string): Map<string, LedgerOverlay> {
   return map
 }
 
-export function upsertLedgerOverlays(
+function upsertLedgerOverlaysUnlocked(
   updates: LedgerOverlay[],
   cwd?: string
 ): Map<string, LedgerOverlay> {
@@ -187,6 +187,13 @@ export function upsertLedgerOverlays(
     .join('\n')
   atomicWrite(path, lines.length > 0 ? `${lines}\n` : '')
   return map
+}
+
+export function upsertLedgerOverlays(
+  updates: LedgerOverlay[],
+  cwd?: string
+): Map<string, LedgerOverlay> {
+  return withFileLock(ledgerFile(cwd), () => upsertLedgerOverlaysUnlocked(updates, cwd))
 }
 
 function applyLedgerOverlays(records: DebtRecord[], cwd?: string): DebtRecord[] {
@@ -330,6 +337,30 @@ export function readProcessedAt(cwd?: string): Map<number, string> {
   }
 }
 
+function lockStealable(lock: string): boolean {
+  // A live-but-slow holder keeps its lock no matter how old it looks —
+  // steal only from a dead owner. process.kill(pid, 0) throws ESRCH for
+  // a dead pid, EPERM when it exists under another user (alive).
+  try {
+    const pid = Number(readFileSync(join(lock, 'pid'), 'utf8').trim())
+    if (Number.isInteger(pid) && pid > 0) {
+      try {
+        process.kill(pid, 0)
+        return false
+      } catch (err) {
+        return (err as NodeJS.ErrnoException).code === 'ESRCH'
+      }
+    }
+  } catch {
+    // No readable pid file (killed between mkdir and write) — age check.
+  }
+  try {
+    return Date.now() - statSync(lock).mtimeMs > 30_000
+  } catch {
+    return false // lock vanished — the retry loop's mkdir handles it
+  }
+}
+
 export function withFileLock<T>(path: string, fn: () => T): T {
   mkdirSync(dirname(path), { recursive: true })
   // mkdir is atomic on all platforms — a lock dir serializes the
@@ -339,21 +370,23 @@ export function withFileLock<T>(path: string, fn: () => T): T {
   for (let i = 0; i < 100; i++) {
     try {
       mkdirSync(lock)
-      break
     } catch {
-      // Steal a stale lock: a killed process never runs the finally, so a
-      // lock dir older than 30s can't be a live write.
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > 30_000) {
-          rmSync(lock, { recursive: true, force: true })
-        }
-      } catch {
-        // lock vanished or unreadable — retry loop handles both
+      if (lockStealable(lock)) {
+        rmSync(lock, { recursive: true, force: true })
+        continue
       }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
       if (i === 99) {
         throw new Error(`could not acquire lock ${lock}`)
       }
+      continue
+    }
+    try {
+      writeFileSync(join(lock, 'pid'), String(process.pid))
+      break
+    } catch (err) {
+      rmSync(lock, { recursive: true, force: true })
+      throw err
     }
   }
   try {
@@ -386,7 +419,7 @@ export function claimDebtRecord(threadId: string, cwd?: string): DebtRecord | nu
     if (!row || row.status !== 'open') {
       return null
     }
-    upsertLedgerOverlays(
+    upsertLedgerOverlaysUnlocked(
       [
         {
           thread_id: threadId,

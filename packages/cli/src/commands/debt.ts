@@ -650,7 +650,13 @@ function cmdNext(argv: string[]): void {
     // still open under the lock — a concurrent claimer loses and reruns.
     const claimed = claimDebtRecord(row.thread_id)
     if (!claimed) {
-      console.error(`debt next: ${row.thread_id.slice(0, 12)} already claimed — rerun`)
+      // CAS lost — report the actual status, not just "claimed": the row
+      // may have been marked done/wontfix/duplicate by another process.
+      const current = readDebtRecords().find((r) => r.thread_id === row!.thread_id)
+      console.error(
+        `debt next: ${row.thread_id.slice(0, 12)} no longer open ` +
+          `(status=${current?.status ?? 'gone'}) — rerun`
+      )
       process.exitCode = 1
       return
     }
