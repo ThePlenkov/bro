@@ -53,4 +53,6 @@ jobs:
           if ! gh release view "v$v" >/dev/null 2>&1; then
             gh release create "v$v" --title "v$v" --generate-notes
           fi
-          gh workflow run publish.yml --ref "v$v"
+          # Dispatch on main so the *latest* publish.yml runs — the tag
+          # only selects which ref gets checked out and published.
+          gh workflow run publish.yml --ref main -f "tag=v$v"
