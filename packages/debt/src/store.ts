@@ -401,14 +401,11 @@ function stealLock(lock: string): boolean {
   return false
 }
 
-export function withFileLock<T>(path: string, fn: () => T): T {
-  mkdirSync(dirname(path), { recursive: true })
-  // mkdir is atomic on all platforms — a lock dir serializes the
-  // read-modify-write so concurrent processes can't lose each other's
-  // updates.
-  const lock = `${path}.lock`
-  let acquired = false
-  for (let i = 0; i < 100 && !acquired; i++) {
+// mkdir is atomic on all platforms — a lock dir serializes the
+// read-modify-write so concurrent processes can't lose each other's
+// updates.
+function acquireFileLock(lock: string): void {
+  for (let i = 0; i < 100; i++) {
     try {
       mkdirSync(lock)
     } catch {
@@ -420,46 +417,50 @@ export function withFileLock<T>(path: string, fn: () => T): T {
     }
     try {
       writeFileSync(join(lock, 'pid'), String(process.pid))
-      acquired = true
+      return
     } catch (err) {
       rmSync(lock, { recursive: true, force: true })
       throw err
     }
   }
-  if (!acquired) {
-    throw new Error(`could not acquire lock ${lock}`)
+  throw new Error(`could not acquire lock ${lock}`)
+}
+
+// Capture the lock instance before deleting: only ever remove a dir
+// whose pid file is ours — if our lock was stolen, the dir at `lock`
+// belongs to the stealer and is put back untouched.
+function releaseFileLock(lock: string): void {
+  const dest = `${lock}.release-${process.pid}`
+  try {
+    renameSync(lock, dest)
+  } catch {
+    return // lock already gone (stolen or never fully created)
   }
+  let ours = false
+  try {
+    ours = readFileSync(join(dest, 'pid'), 'utf8').trim() === String(process.pid)
+  } catch {
+    // unreadable owner — treat as not ours
+  }
+  if (ours) {
+    rmSync(dest, { recursive: true, force: true })
+    return
+  }
+  try {
+    renameSync(dest, lock)
+  } catch {
+    rmSync(dest, { recursive: true, force: true })
+  }
+}
+
+export function withFileLock<T>(path: string, fn: () => T): T {
+  mkdirSync(dirname(path), { recursive: true })
+  const lock = `${path}.lock`
+  acquireFileLock(lock)
   try {
     return fn()
   } finally {
-    // Capture the lock instance before deleting: only ever remove a dir
-    // whose pid file is ours — if our lock was stolen, the dir at `lock`
-    // belongs to the stealer and is put back untouched.
-    const dest = `${lock}.release-${process.pid}`
-    let captured = false
-    try {
-      renameSync(lock, dest)
-      captured = true
-    } catch {
-      // lock already gone (stolen or never fully created)
-    }
-    if (captured) {
-      let ours = false
-      try {
-        ours = readFileSync(join(dest, 'pid'), 'utf8').trim() === String(process.pid)
-      } catch {
-        // unreadable owner — treat as not ours
-      }
-      if (ours) {
-        rmSync(dest, { recursive: true, force: true })
-      } else {
-        try {
-          renameSync(dest, lock)
-        } catch {
-          rmSync(dest, { recursive: true, force: true })
-        }
-      }
-    }
+    releaseFileLock(lock)
   }
 }
 
