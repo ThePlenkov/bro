@@ -69,7 +69,9 @@ and carries — the verdict is yours.
 
 ## Config (optional)
 
-`bro.config.json` in the repo root — everything's optional:
+`bro.config.json` in the repo root — written per-clone by `bro setup` and
+gitignored on purpose (store choices like `beads` are machine-local), so
+fresh checkouts run on defaults until they set up. Everything's optional:
 
 ```json
 {
