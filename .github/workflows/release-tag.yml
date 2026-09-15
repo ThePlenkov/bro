@@ -32,6 +32,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "release tagging must run from main (got $GITHUB_REF)"
+            exit 1
+          fi
           subject=$(git log -1 --pretty=%s)
           if [ "$GITHUB_EVENT_NAME" = "push" ] && ! grep -qE '^release: v[0-9]' <<<"$subject"; then
             echo "not a release merge ($subject) — nothing to do"
