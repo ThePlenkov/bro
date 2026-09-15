@@ -47,6 +47,8 @@ babysit, no config files to confess to.
 | `bro debt mark <pr> <state>` | Manual override — `skipped` is the human opt-out, bro respects it |
 | `bro debt set <status> --thread-id ID` | Row status: `claimed` / `done --fix-pr N` / `wontfix` / `duplicate` — feeds `sync` |
 | `bro debt sync` | Projects the ledger into beads — idempotent (`thread_id` → `external_ref`), so `bd ready -l debt` becomes the work queue. Needs `bd` installed + `bd init` in the repo |
+| `bro debt next [--claim] [--json]` | The top open finding — priority-ranked, oldest first. The agent-fix primitive: claim it, fix it, `set done --fix-pr N` |
+| `bro debt watch [--interval SEC]` | Collect on a timer (default 300s) — post-merge bot comments get picked up by the stale-rescan without a manual run. All collect flags pass through |
 
 | `bro act status [PR]` | **Exit gate as code** — open threads, pending CI, SAST findings, mergeable. Non-zero while blocked. `--json` for machines |
 | `bro act threads [PR]` | Unresolved review threads on the PR |
