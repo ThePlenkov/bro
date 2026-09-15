@@ -6,12 +6,15 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-export type DebtStore = 'jsonl' | 'beads' | 'both'
+export const STORE_BACKENDS = ['jsonl', 'beads'] as const
+export type StoreBackend = (typeof STORE_BACKENDS)[number]
 export const PERSONALITIES = ['terse', 'mentor', 'sarcastic'] as const
 export type Personality = (typeof PERSONALITIES)[number]
 
 export interface BroConfig {
-  store: DebtStore
+  /** Active stores. The JSONL ledger is always on — extra backends are
+   *  projections written alongside it. */
+  stores: StoreBackend[]
   personality: Personality
   debt: {
     /** Directory holding the review-debt ledger, relative to cwd. */
@@ -20,9 +23,28 @@ export interface BroConfig {
 }
 
 export const DEFAULT_CONFIG: BroConfig = {
-  store: 'jsonl',
+  stores: ['jsonl'],
   personality: 'terse',
   debt: { dir: '.agents/review-debt' },
+}
+
+interface RawConfig extends Partial<Omit<BroConfig, 'stores'>> {
+  /** New: explicit backend list. */
+  stores?: unknown
+  /** Legacy v0.1.0 field — 'beads'/'both' meant jsonl + beads projection. */
+  store?: string
+}
+
+function normalizeStores(raw: RawConfig): StoreBackend[] {
+  const isBackend = (s: unknown): s is StoreBackend =>
+    typeof s === 'string' && (STORE_BACKENDS as readonly string[]).includes(s)
+  if (Array.isArray(raw.stores)) {
+    return [...new Set<StoreBackend>(['jsonl', ...raw.stores.filter(isBackend)])]
+  }
+  if (raw.store === 'beads' || raw.store === 'both') {
+    return ['jsonl', 'beads']
+  }
+  return ['jsonl']
 }
 
 export function loadConfig(cwd: string = process.cwd()): BroConfig {
@@ -31,11 +53,13 @@ export function loadConfig(cwd: string = process.cwd()): BroConfig {
     return DEFAULT_CONFIG
   }
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<BroConfig>
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as RawConfig
+    const { stores: _s, store: _legacy, ...rest } = raw
     return {
       ...DEFAULT_CONFIG,
-      ...parsed,
-      debt: { ...DEFAULT_CONFIG.debt, ...parsed.debt },
+      ...rest,
+      stores: normalizeStores(raw),
+      debt: { ...DEFAULT_CONFIG.debt, ...(rest.debt ?? {}) },
     }
   } catch {
     return DEFAULT_CONFIG

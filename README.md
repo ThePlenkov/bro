@@ -73,16 +73,17 @@ and carries — the verdict is yours.
 
 ```json
 {
-  "store": "jsonl",
+  "stores": ["jsonl"],
   "personality": "terse",
   "debt": { "dir": ".agents/review-debt" }
 }
 ```
 
-`store` picks where debt lives. `jsonl` is the evidence ledger (always written).
-`beads`/`both` additionally project every record into `bd` — JSONL keeps the
-receipts, beads runs the queue. Requires `bd` installed and `bd init` in the
-repo (`bd init --stealth --skip-agents --skip-hooks` keeps it invisible).
+`stores` lists the backends debt writes to. `jsonl` is the evidence ledger
+(always written — drop it and bro adds it back). Add `"beads"` to also project
+every record into `bd` — JSONL keeps the receipts, beads runs the queue.
+Requires `bd` installed and `bd init` in the repo
+(`bd init --stealth --skip-agents --skip-hooks` keeps it invisible).
 
 ## Labels bro manages
 
