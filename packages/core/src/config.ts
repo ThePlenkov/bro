@@ -7,7 +7,8 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 export type DebtStore = 'jsonl' | 'beads' | 'both'
-export type Personality = 'terse' | 'mentor' | 'sarcastic'
+export const PERSONALITIES = ['terse', 'mentor', 'sarcastic'] as const
+export type Personality = (typeof PERSONALITIES)[number]
 
 export interface BroConfig {
   store: DebtStore

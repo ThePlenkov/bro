@@ -143,13 +143,16 @@ export function writeHarvestFile(opts: {
 function atomicWrite(path: string, content: string): void {
   mkdirSync(dirname(path), { recursive: true })
   const tmp = `${path}.${process.pid}.tmp`
-  writeFileSync(tmp, content, 'utf8')
-  // Preserve the existing file's mode (e.g. 0600) — rename would reset it.
+  // Read the destination mode first and create the temp file with it —
+  // chmod-after-write leaves a window where the temp file holds content
+  // under default (broader) permissions. (CWE-377)
+  let mode: number | undefined
   try {
-    chmodSync(tmp, statSync(path).mode)
+    mode = statSync(path).mode
   } catch {
     /* first write — default mode */
   }
+  writeFileSync(tmp, content, mode === undefined ? 'utf8' : { encoding: 'utf8', mode })
   renameSync(tmp, path)
 }
 

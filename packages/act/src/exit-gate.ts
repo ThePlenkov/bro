@@ -15,6 +15,9 @@ export function evaluateExitGate(state: PrActState): ExitGate {
   if (state.sastPending > 0) {
     blockers.push(`${state.sastPending} SAST finding(s)`)
   }
+  if (state.sastUnknown > 0) {
+    blockers.push(`${state.sastUnknown} SAST check(s) with unknown annotation status`)
+  }
   // Mergeability is only meaningful while the PR is open — GitHub reports
   // UNKNOWN forever on merged/closed PRs.
   if (state.state === 'OPEN') {

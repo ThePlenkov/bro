@@ -64,7 +64,7 @@ needs = ["fix"]
 type = "agent"
 description = """
 Determine the fix PR: use {{fix_pr}} if set, otherwise
-`gh pr list --state open --limit 1` on the fix branch.
+`gh pr view --json number --jq .number` on the fix branch.
 Run `bro act status <pr>` until exit 0: zero open review threads, no
 pending CI, no pending SAST findings. Any blocker → fix and re-check.
 Exit non-zero = the gate holds; do not merge around it.

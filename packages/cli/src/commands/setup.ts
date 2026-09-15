@@ -10,7 +10,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { DEFAULT_CONFIG, type BroConfig } from '@bro/core'
+import { DEFAULT_CONFIG, PERSONALITIES, type BroConfig } from '@bro/core'
 import { FORMULA_FILES, SKILL_FILES } from '../skills-data.ts'
 
 function hasBin(name: string): boolean {
@@ -107,6 +107,10 @@ function parseSetupArgs(argv: string[]): SetupArgs {
   const pVal = pIdx >= 0 ? argv[pIdx + 1] : undefined
   if (pIdx >= 0 && (!pVal || pVal.startsWith('--'))) {
     console.error('error: --personality requires a value')
+    process.exit(2)
+  }
+  if (pVal && !(PERSONALITIES as readonly string[]).includes(pVal)) {
+    console.error(`error: --personality must be one of: ${PERSONALITIES.join(', ')}`)
     process.exit(2)
   }
   return {

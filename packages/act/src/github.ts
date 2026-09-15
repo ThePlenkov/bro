@@ -159,6 +159,7 @@ export async function fetchPrActState(target: {
     for (const check of sastChecks) {
       const runId = ids.get(check.name)
       if (!runId) {
+        sastUnknown += 1
         continue
       }
       try {
