@@ -148,6 +148,13 @@ export async function fetchPrActState(target: {
       !AI_REVIEWER_RE.test(c.name)
   ).length
 
+  // A pending AI reviewer can still open threads — declaring the gate OK
+  // while one is running invites exactly the "threads after OK" surprise.
+  // Only pending counts: a failed reviewer (infra flake) posts nothing.
+  const reviewersPending = checks.filter(
+    (c) => AI_REVIEWER_RE.test(c.name) && c.bucket === 'pending'
+  ).length
+
   // A SAST scan can report "success" while still carrying failure-level
   // annotations — inspect every non-skipped SAST check, not just pending ones.
   const sastChecks = checks.filter(
@@ -189,6 +196,7 @@ export async function fetchPrActState(target: {
     openThreads: threads.filter((t) => !t.isResolved).length,
     threads,
     ciPending,
+    reviewersPending,
     sastPending,
     sastUnknown,
   }

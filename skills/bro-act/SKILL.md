@@ -24,8 +24,10 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
 
 - **Loop until the exit gate is green.** `bro act status` returns non-zero
   with named blockers — keep fixing until it passes; do not self-declare done.
-- **Every thread gets a verdict**: fix → resolve with a commit reference, or
-  reject as false-positive **with a stated reason** — never silently resolve.
+  A pending AI reviewer (`reviewers_pending`) blocks the gate — wait for it.
+- **Resolve silently when you fixed it.** The pushed commit is the verdict —
+  do not leave a comment per thread. Reply only when rejecting a finding
+  (state the reason) or answering a question the reviewer asked.
 - **Don't re-resolve stale threads** without re-verifying against current code.
 - Debt rows from `bro debt list` become work via
   `bro debt set claimed --thread-id <id>` → fix →

@@ -93,6 +93,7 @@ async function cmdStatus(argv: string[]): Promise<void> {
   console.log(`mergeable=${state.mergeable} merge_state=${state.mergeState} draft=${state.isDraft}`)
   console.log(
     `open_threads=${gate.open_threads} ci_pending=${gate.ci_pending} ` +
+      `reviewers_pending=${gate.reviewers_pending} ` +
       `sast_pending=${gate.sast_pending} sast_unknown=${gate.sast_unknown}`
   )
   console.log(`exit_gate=${gate.ok ? 'OK' : 'BLOCKED'}`)
