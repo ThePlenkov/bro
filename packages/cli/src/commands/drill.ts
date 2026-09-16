@@ -112,6 +112,11 @@ function cmdDown(rest: string[]): void {
 }
 
 function cmdUp(rest: string[]): void {
+  const extras = positionals(rest)
+  if (extras.length > 0) {
+    console.error(`error: unexpected argument "${extras[0]}"`)
+    process.exit(2)
+  }
   const result = flag(rest, '--result')
   if (!result) {
     console.error('error: drill up requires --result — a frame must return a curated finding')

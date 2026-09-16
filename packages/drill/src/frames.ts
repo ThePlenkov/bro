@@ -42,7 +42,10 @@ export function childrenOf(id: string): DrillRow[] {
   return bdJson<DrillRow[]>(['children', id])
 }
 
-/** One `bd children` sweep: parent→kids and kid→parent in a single pass. */
+/** One `bd children` sweep: parent→kids and kid→parent in a single pass.
+ * Kids are NOT label-filtered — bd refuses to close a parent with ANY open
+ * child, so the leaf test must see non-drill children too. Callers that
+ * render the drill tree filter with `isDrill` themselves. */
 function drillRelations(rows: DrillRow[]): {
   kids: Map<string, DrillRow[]>
   parents: Map<string, string>
@@ -50,13 +53,15 @@ function drillRelations(rows: DrillRow[]): {
   const kids = new Map<string, DrillRow[]>()
   const parents = new Map<string, string>()
   for (const row of rows) {
-    const children = childrenOf(row.id).filter((k) => isDrill(k))
+    const children = childrenOf(row.id)
     if (children.length === 0) {
       continue
     }
     kids.set(row.id, children)
     for (const kid of children) {
-      parents.set(kid.id, row.id)
+      if (isDrill(kid)) {
+        parents.set(kid.id, row.id)
+      }
     }
   }
   return { kids, parents }
@@ -81,9 +86,7 @@ export function currentFrame(): DrillFrame | undefined {
     }
     return d
   }
-  const leaves = rows.filter(
-    (r) => !(kids.get(r.id) ?? []).some((k) => isDrill(k) && isOpen(k))
-  )
+  const leaves = rows.filter((r) => !(kids.get(r.id) ?? []).some(isOpen))
   leaves.sort((a, b) => {
     const d = depthOf(b.id) - depthOf(a.id)
     return d !== 0 ? d : (b.updated_at ?? '').localeCompare(a.updated_at ?? '')
