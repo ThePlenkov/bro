@@ -86,6 +86,71 @@ function positionals(argv: string[]): string[] {
   return out
 }
 
+function parsePriority(raw: string | undefined): number | undefined {
+  const priority = raw ? Number(raw) : undefined
+  if (raw !== undefined && (raw.trim() === '' || !Number.isInteger(priority))) {
+    console.error(`error: --priority must be an integer, got "${raw}"`)
+    process.exit(2)
+  }
+  return priority
+}
+
+function cmdDown(rest: string[]): void {
+  const title = positionals(rest).join(' ')
+  if (!title) {
+    console.error('error: drill down requires a title')
+    process.exit(2)
+  }
+  const row = drillDown(title, {
+    under: flag(rest, '--under'),
+    ephemeral: rest.includes('--ephemeral'),
+    type: flag(rest, '--type'),
+    priority: parsePriority(flag(rest, '--priority')),
+    description: flag(rest, '--description'),
+  })
+  console.log(`drill ↓ ${row.id} ${row.title}`)
+}
+
+function cmdUp(rest: string[]): void {
+  const result = flag(rest, '--result')
+  if (!result) {
+    console.error('error: drill up requires --result — a frame must return a curated finding')
+    process.exit(2)
+  }
+  const res = drillUp({
+    id: flag(rest, '--id'),
+    result,
+    prevent: flagAll(rest, '--prevent'),
+    evidence: flagAll(rest, '--evidence'),
+  })
+  console.log(`drill ↑ ${res.closed} closed`)
+  for (const id of res.preventionIds) {
+    console.log(`  prevention → ${id}`)
+  }
+}
+
+function cmdCurrent(): void {
+  const frame = currentFrame()
+  if (!frame) {
+    console.log('no open drill frame')
+    process.exitCode = 1
+    return
+  }
+  const parent = frame.parentId ? ` parent=${frame.parentId}` : ''
+  console.log(`${frame.id} ${frame.title} [depth=${frame.depth}${parent}]`)
+}
+
+function cmdList(): void {
+  const rows = listDrills().filter((r) => r.status !== 'closed' && r.status !== 'done')
+  if (rows.length === 0) {
+    console.log('no open drill frames')
+    return
+  }
+  for (const row of rows) {
+    console.log(`${row.id}\t${row.status}\t${row.title}`)
+  }
+}
+
 export async function runDrillCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
   if (!sub || sub === '--help' || sub === '-h') {
@@ -94,76 +159,21 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
   checkBeads()
 
   switch (sub) {
-    case 'down': {
-      const title = positionals(rest).join(' ')
-      if (!title) {
-        console.error('error: drill down requires a title')
-        process.exit(2)
-      }
-      const priorityRaw = flag(rest, '--priority')
-      const priority = priorityRaw ? Number(priorityRaw) : undefined
-      if (
-        priorityRaw !== undefined &&
-        (priorityRaw.trim() === '' || !Number.isInteger(priority))
-      ) {
-        console.error(`error: --priority must be an integer, got "${priorityRaw}"`)
-        process.exit(2)
-      }
-      const row = drillDown(title, {
-        under: flag(rest, '--under'),
-        ephemeral: rest.includes('--ephemeral'),
-        type: flag(rest, '--type'),
-        priority,
-        description: flag(rest, '--description'),
-      })
-      console.log(`drill ↓ ${row.id} ${row.title}`)
+    case 'down':
+      cmdDown(rest)
       return
-    }
-    case 'up': {
-      const result = flag(rest, '--result')
-      if (!result) {
-        console.error('error: drill up requires --result — a frame must return a curated finding')
-        process.exit(2)
-      }
-      const res = drillUp({
-        id: flag(rest, '--id'),
-        result,
-        prevent: flagAll(rest, '--prevent'),
-        evidence: flagAll(rest, '--evidence'),
-      })
-      console.log(`drill ↑ ${res.closed} closed`)
-      for (const id of res.preventionIds) {
-        console.log(`  prevention → ${id}`)
-      }
+    case 'up':
+      cmdUp(rest)
       return
-    }
-    case 'current': {
-      const frame = currentFrame()
-      if (!frame) {
-        console.log('no open drill frame')
-        process.exitCode = 1
-        return
-      }
-      console.log(
-        `${frame.id} ${frame.title} [depth=${frame.depth}${frame.parentId ? ` parent=${frame.parentId}` : ''}]`
-      )
+    case 'current':
+      cmdCurrent()
       return
-    }
-    case 'tree': {
+    case 'tree':
       console.log(drillTree())
       return
-    }
-    case 'list': {
-      const rows = listDrills().filter((r) => r.status !== 'closed' && r.status !== 'done')
-      if (rows.length === 0) {
-        console.log('no open drill frames')
-        return
-      }
-      for (const row of rows) {
-        console.log(`${row.id}\t${row.status}\t${row.title}`)
-      }
+    case 'list':
+      cmdList()
       return
-    }
     case 'distill': {
       const id = positionals(rest)[0]
       if (!id) {
