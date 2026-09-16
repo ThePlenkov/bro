@@ -172,12 +172,16 @@ export function drillUp(opts: UpOptions): UpResult {
   if (!opts.result.trim()) {
     throw new Error('drill up requires --result — a frame must return a curated finding')
   }
-  const leaf = opts.id ? requireOpenDrill(opts.id, '--id') : currentFrame()
-  if (!leaf) {
-    throw new Error('no open drill frame — nothing to ascend from')
-  }
-  // `bd list` doesn't carry `ephemeral`; a single show gives the full row
-  const frame = requireOpenDrill(leaf.id, '--id')
+  // `bd list` doesn't carry `ephemeral`; `bd show` gives the full row
+  const frame = opts.id
+    ? requireOpenDrill(opts.id, '--id')
+    : ((): DrillRow => {
+        const leaf = currentFrame()
+        if (!leaf) {
+          throw new Error('no open drill frame — nothing to ascend from')
+        }
+        return requireOpenDrill(leaf.id, '--id')
+      })()
   // bd refuses to close a parent with ANY open children — check before
   // writing the memo so a later failure can't leave partial state.
   const openKids = childrenOf(frame.id).filter(isOpen)

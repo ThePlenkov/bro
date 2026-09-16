@@ -151,12 +151,36 @@ function cmdList(): void {
   }
 }
 
+/** A misspelled option must fail loudly, not dissolve into a title. */
+const KNOWN_FLAGS: Record<string, Set<string>> = {
+  down: new Set(['--under', '--ephemeral', '--type', '--priority', '--description']),
+  up: new Set(['--id', '--result', '--prevent', '--evidence']),
+  current: new Set(),
+  tree: new Set(),
+  list: new Set(),
+  distill: new Set(),
+}
+
+function rejectUnknownFlags(sub: string, argv: string[]): void {
+  const known = KNOWN_FLAGS[sub]
+  if (!known) {
+    return
+  }
+  for (const arg of argv) {
+    if (arg.startsWith('--') && !known.has(arg)) {
+      console.error(`error: unknown option "${arg}" for drill ${sub}`)
+      process.exit(2)
+    }
+  }
+}
+
 export async function runDrillCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
   if (!sub || sub === '--help' || sub === '-h') {
     usage()
   }
   checkBeads()
+  rejectUnknownFlags(sub, rest)
 
   switch (sub) {
     case 'down':
@@ -175,11 +199,12 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
       cmdList()
       return
     case 'distill': {
-      const id = positionals(rest)[0]
-      if (!id) {
-        console.error('error: drill distill requires an epic/bead id')
+      const ids = positionals(rest)
+      if (ids.length !== 1) {
+        console.error('error: drill distill requires exactly one epic/bead id')
         process.exit(2)
       }
+      const id = ids[0]!
       process.stdout.write(bd(['mol', 'distill', id]))
       return
     }
