@@ -101,8 +101,11 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
         process.exit(2)
       }
       const priorityRaw = flag(rest, '--priority')
-      const priority = priorityRaw !== undefined ? Number(priorityRaw) : undefined
-      if (priority !== undefined && !Number.isInteger(priority)) {
+      const priority = priorityRaw ? Number(priorityRaw) : undefined
+      if (
+        priorityRaw !== undefined &&
+        (priorityRaw.trim() === '' || !Number.isInteger(priority))
+      ) {
         console.error(`error: --priority must be an integer, got "${priorityRaw}"`)
         process.exit(2)
       }

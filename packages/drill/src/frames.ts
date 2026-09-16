@@ -21,7 +21,16 @@ function isOpen(row: DrillRow): boolean {
 }
 
 export function listDrills(): DrillRow[] {
-  return bdJson<DrillRow[]>(['list', '-l', DRILL_LABEL, '--all', '-n', '0'])
+  const persistent = bdJson<DrillRow[]>(['list', '-l', DRILL_LABEL, '--all', '-n', '0'])
+  // ephemeral frames live in the wisp namespace, outside `bd list`
+  let wisps: DrillRow[] = []
+  try {
+    const out = bdJson<{ wisps?: DrillRow[] }>(['mol', 'wisp', 'list'])
+    wisps = (out.wisps ?? []).filter(isDrill)
+  } catch {
+    /* older bd without wisp list — persistent frames still work */
+  }
+  return [...persistent, ...wisps]
 }
 
 export function childrenOf(id: string): DrillRow[] {
@@ -83,8 +92,8 @@ export function currentFrame(): DrillFrame | undefined {
 
 /** The bead must be an open drill frame, or an explicit selector is wrong. */
 function requireOpenDrill(id: string, flag: string): DrillRow {
-  const row = bdJson<DrillRow>(['show', id])
-  if (!isDrill(row) || !isOpen(row)) {
+  const row = bdJson<DrillRow[]>(['show', id])[0]
+  if (!row || !isDrill(row) || !isOpen(row)) {
     throw new Error(`${flag} ${id} is not an open drill frame`)
   }
   return row
@@ -116,18 +125,25 @@ export function drillDown(title: string, opts: DownOptions = {}): DrillRow {
     // wisp semantics: no audit trail
     return row
   }
-  bd([
-    'provenance',
-    'record',
-    '--issue',
-    row.id,
-    '--kind',
-    'claim',
-    '--source',
-    'bro drill down',
-    '--at',
-    new Date().toISOString(),
-  ])
+  try {
+    bd([
+      'provenance',
+      'record',
+      '--issue',
+      row.id,
+      '--kind',
+      'claim',
+      '--source',
+      'bro drill down',
+      '--at',
+      new Date().toISOString(),
+    ])
+  } catch (err) {
+    // compensate: an unclaimed frame violates the claim-on-down
+    // invariant, and a retry would create a duplicate
+    bd(['delete', row.id, '--force'])
+    throw err
+  }
   return row
 }
 
@@ -151,10 +167,12 @@ export function drillUp(opts: UpOptions): UpResult {
   if (!opts.result.trim()) {
     throw new Error('drill up requires --result — a frame must return a curated finding')
   }
-  const frame = opts.id ? requireOpenDrill(opts.id, '--id') : currentFrame()
-  if (!frame) {
+  const leaf = opts.id ? requireOpenDrill(opts.id, '--id') : currentFrame()
+  if (!leaf) {
     throw new Error('no open drill frame — nothing to ascend from')
   }
+  // `bd list` doesn't carry `ephemeral`; a single show gives the full row
+  const frame = requireOpenDrill(leaf.id, '--id')
   // bd refuses to close a parent with ANY open children — check before
   // writing the memo so a later failure can't leave partial state.
   const openKids = childrenOf(frame.id).filter(isOpen)
@@ -190,34 +208,38 @@ export function drillUp(opts: UpOptions): UpResult {
     preventionIds.push(row.id)
   }
 
-  for (const ref of opts.evidence ?? []) {
+  if (!frame.ephemeral) {
+    // wisp semantics: ephemeral frames leave no audit trail
+    for (const ref of opts.evidence ?? []) {
+      const kind = refKind(ref)
+      bd([
+        'provenance',
+        'record',
+        '--issue',
+        frame.id,
+        '--kind',
+        kind === 'pr' ? 'land' : 'commit',
+        '--source',
+        'bro drill up',
+        '--ref',
+        ref,
+        '--ref-kind',
+        kind,
+      ])
+    }
     bd([
       'provenance',
       'record',
       '--issue',
       frame.id,
       '--kind',
-      'commit',
+      'handoff',
       '--source',
       'bro drill up',
-      '--ref',
-      ref,
-      '--ref-kind',
-      refKind(ref),
+      '--at',
+      new Date().toISOString(),
     ])
   }
-  bd([
-    'provenance',
-    'record',
-    '--issue',
-    frame.id,
-    '--kind',
-    'handoff',
-    '--source',
-    'bro drill up',
-    '--at',
-    new Date().toISOString(),
-  ])
   bd(['close', frame.id, '--reason', 'drill up — result handed to parent'])
   return { closed: frame.id, preventionIds }
 }

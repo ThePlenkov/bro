@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bd ready 2>/dev/null | head -20; bro drill current 2>/dev/null || true",
+            "command": "bd ready 2>/dev/null | head -20; bro drill current >/dev/null 2>&1 && bro drill current || true",
             "timeout": 10
           }
         ]
