@@ -27,8 +27,13 @@ export function listDrills(): DrillRow[] {
   try {
     const out = bdJson<{ wisps?: DrillRow[] }>(['mol', 'wisp', 'list'])
     wisps = (out.wisps ?? []).filter(isDrill)
-  } catch {
-    /* older bd without wisp list — persistent frames still work */
+  } catch (err) {
+    // tolerate only an explicitly unsupported command (older bd) — a
+    // failed or malformed listing must not silently hide live wisps
+    const msg = err instanceof Error ? err.message : String(err)
+    if (!/unknown command|unrecognized command/i.test(msg)) {
+      throw err
+    }
   }
   return [...persistent, ...wisps]
 }

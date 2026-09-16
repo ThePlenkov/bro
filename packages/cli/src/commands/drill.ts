@@ -38,7 +38,7 @@ Commands:
 /** A value flag's argument must exist and not look like another option. */
 function flagValue(argv: string[], i: number, name: string): string {
   const v = argv[i + 1]
-  if (v === undefined || v.startsWith('--')) {
+  if (v === undefined || v === '' || v.startsWith('--')) {
     console.error(`error: ${name} requires a value`)
     process.exit(2)
   }
