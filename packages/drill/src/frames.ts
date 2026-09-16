@@ -70,7 +70,10 @@ export function currentFrame(): DrillFrame | undefined {
   const leaves = rows.filter(
     (r) => !(kids.get(r.id) ?? []).some((k) => isDrill(k) && isOpen(k))
   )
-  leaves.sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''))
+  leaves.sort((a, b) => {
+    const d = depthOf(b.id) - depthOf(a.id)
+    return d !== 0 ? d : (b.updated_at ?? '').localeCompare(a.updated_at ?? '')
+  })
   const leaf = leaves[0]
   if (!leaf) {
     return undefined
@@ -78,9 +81,20 @@ export function currentFrame(): DrillFrame | undefined {
   return { ...leaf, parentId: parents.get(leaf.id), depth: depthOf(leaf.id) }
 }
 
+/** The bead must be an open drill frame, or an explicit selector is wrong. */
+function requireOpenDrill(id: string, flag: string): DrillRow {
+  const row = bdJson<DrillRow>(['show', id])
+  if (!isDrill(row) || !isOpen(row)) {
+    throw new Error(`${flag} ${id} is not an open drill frame`)
+  }
+  return row
+}
+
 /** Descend: create a child frame under `opts.under` or the current leaf. */
 export function drillDown(title: string, opts: DownOptions = {}): DrillRow {
-  const parent = opts.under ?? currentFrame()?.id
+  const parent = opts.under
+    ? requireOpenDrill(opts.under, '--under').id
+    : currentFrame()?.id
   const args = ['create', title, '-l', DRILL_LABEL]
   if (parent) {
     args.push('--parent', parent)
@@ -98,6 +112,10 @@ export function drillDown(title: string, opts: DownOptions = {}): DrillRow {
     args.push('-d', opts.description)
   }
   const row = bdJson<DrillRow>(args)
+  if (opts.ephemeral) {
+    // wisp semantics: no audit trail
+    return row
+  }
   bd([
     'provenance',
     'record',
@@ -133,16 +151,16 @@ export function drillUp(opts: UpOptions): UpResult {
   if (!opts.result.trim()) {
     throw new Error('drill up requires --result — a frame must return a curated finding')
   }
-  const frame = opts.id
-    ? bdJson<DrillRow>(['show', opts.id])
-    : currentFrame()
+  const frame = opts.id ? requireOpenDrill(opts.id, '--id') : currentFrame()
   if (!frame) {
     throw new Error('no open drill frame — nothing to ascend from')
   }
-  const openKids = childrenOf(frame.id).filter((k) => isDrill(k) && isOpen(k))
+  // bd refuses to close a parent with ANY open children — check before
+  // writing the memo so a later failure can't leave partial state.
+  const openKids = childrenOf(frame.id).filter(isOpen)
   if (openKids.length > 0) {
     throw new Error(
-      `frame ${frame.id} has open child drill(s): ${openKids.map((k) => k.id).join(', ')} — ascend them first`
+      `frame ${frame.id} has open child issue(s): ${openKids.map((k) => k.id).join(', ')} — close them first`
     )
   }
 
@@ -202,11 +220,6 @@ export function drillUp(opts: UpOptions): UpResult {
   ])
   bd(['close', frame.id, '--reason', 'drill up — result handed to parent'])
   return { closed: frame.id, preventionIds }
-}
-
-/** Parent drill of a frame, or undefined for roots. */
-function childrenParentOf(id: string): string | undefined {
-  return drillRelations(listDrills()).parents.get(id)
 }
 
 /** Root frames + rendered tree (indented, roots first). */

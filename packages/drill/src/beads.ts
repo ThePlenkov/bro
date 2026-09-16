@@ -9,7 +9,14 @@ export function bd(args: string[]): string {
 }
 
 export function bdJson<T>(args: string[]): T {
-  return JSON.parse(bd([...args, '--json'])) as T
+  const out = bd([...args, '--json'])
+  try {
+    return JSON.parse(out) as T
+  } catch (err) {
+    throw new Error(
+      `bd returned malformed JSON — ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
 }
 
 export function checkBeads(): void {

@@ -12,9 +12,6 @@
   "scripts": {
     "test": "tsx --test src/**/*.test.ts"
   },
-  "dependencies": {
-    "@bro/core": "*"
-  },
   "devDependencies": {
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",

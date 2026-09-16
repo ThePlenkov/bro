@@ -35,16 +35,26 @@ Commands:
   process.exit(1)
 }
 
+/** A value flag's argument must exist and not look like another option. */
+function flagValue(argv: string[], i: number, name: string): string {
+  const v = argv[i + 1]
+  if (v === undefined || v.startsWith('--')) {
+    console.error(`error: ${name} requires a value`)
+    process.exit(2)
+  }
+  return v
+}
+
 function flag(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name)
-  return i >= 0 ? argv[i + 1] : undefined
+  return i >= 0 ? flagValue(argv, i, name) : undefined
 }
 
 function flagAll(argv: string[], name: string): string[] {
   const out: string[] = []
   for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === name && argv[i + 1]) {
-      out.push(argv[i + 1]!)
+    if (argv[i] === name) {
+      out.push(flagValue(argv, i, name))
       i += 1
     }
   }
@@ -52,7 +62,16 @@ function flagAll(argv: string[], name: string): string[] {
 }
 
 function positionals(argv: string[]): string[] {
-  const valueFlags = new Set(['--under', '--result', '--prevent', '--evidence', '--type', '--priority'])
+  const valueFlags = new Set([
+    '--under',
+    '--result',
+    '--prevent',
+    '--evidence',
+    '--type',
+    '--priority',
+    '--description',
+    '--id',
+  ])
   const out: string[] = []
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!
@@ -69,6 +88,9 @@ function positionals(argv: string[]): string[] {
 
 export async function runDrillCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
+  if (!sub || sub === '--help' || sub === '-h') {
+    usage()
+  }
   checkBeads()
 
   switch (sub) {
@@ -78,11 +100,17 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
         console.error('error: drill down requires a title')
         process.exit(2)
       }
+      const priorityRaw = flag(rest, '--priority')
+      const priority = priorityRaw !== undefined ? Number(priorityRaw) : undefined
+      if (priority !== undefined && !Number.isInteger(priority)) {
+        console.error(`error: --priority must be an integer, got "${priorityRaw}"`)
+        process.exit(2)
+      }
       const row = drillDown(title, {
         under: flag(rest, '--under'),
         ephemeral: rest.includes('--ephemeral'),
         type: flag(rest, '--type'),
-        priority: flag(rest, '--priority') ? Number(flag(rest, '--priority')) : undefined,
+        priority,
         description: flag(rest, '--description'),
       })
       console.log(`drill ↓ ${row.id} ${row.title}`)
