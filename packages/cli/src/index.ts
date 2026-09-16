@@ -12,6 +12,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runActCommand } from './commands/act.ts'
 import { runDebtCommand } from './commands/debt.ts'
+import { runDrillCommand } from './commands/drill.ts'
 import { runSetupCommand } from './commands/setup.ts'
 
 // Single source of truth is package.json — dist/index.js sits one dir
@@ -30,6 +31,8 @@ Usage: bro <command> [args…]
 Commands:
   debt <sub>   Review-debt pipeline: collect|status|prs|list|mark|sync|set
   act <sub>    Open-PR loop: status|threads|resolve|reply
+  drill <sub>  Scoped descent over beads: down|up|current|tree|list|distill
+  unwind       Alias for \`drill up\`
   setup        Wire bro into the current repo
 
 Options:
@@ -65,6 +68,12 @@ async function main(): Promise<void> {
       return
     case 'act':
       await runActCommand(rest)
+      return
+    case 'drill':
+      await runDrillCommand(rest)
+      return
+    case 'unwind':
+      await runDrillCommand(['up', ...rest])
       return
     case 'setup':
       await runSetupCommand(rest)

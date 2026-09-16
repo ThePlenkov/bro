@@ -1,0 +1,232 @@
+/**
+ * Drill frames as beads. A frame is an issue labeled `drill`; nesting uses
+ * bd's native `--parent` hierarchy. bd owns storage — bro owns the
+ * invariants: strictly-narrower descent on the way down, a mandatory
+ * RESULT + PREVENTION memo on the way up, and lifecycle provenance
+ * (`claim` on down, `handoff` on up). No claim.json, no .drills/ tree —
+ * beads IS the memory system.
+ */
+import { bd, bdJson } from './beads.ts'
+import type { DownOptions, DrillFrame, DrillRow, UpOptions, UpResult } from './types.ts'
+
+const DRILL_LABEL = 'drill'
+const PREVENTION_LABEL = 'prevention'
+
+function isDrill(row: DrillRow): boolean {
+  return row.labels?.includes(DRILL_LABEL) ?? false
+}
+
+function isOpen(row: DrillRow): boolean {
+  return row.status !== 'closed' && row.status !== 'done'
+}
+
+export function listDrills(): DrillRow[] {
+  return bdJson<DrillRow[]>(['list', '-l', DRILL_LABEL, '--all', '-n', '0'])
+}
+
+export function childrenOf(id: string): DrillRow[] {
+  return bdJson<DrillRow[]>(['children', id])
+}
+
+/** One `bd children` sweep: parent→kids and kid→parent in a single pass. */
+function drillRelations(rows: DrillRow[]): {
+  kids: Map<string, DrillRow[]>
+  parents: Map<string, string>
+} {
+  const kids = new Map<string, DrillRow[]>()
+  const parents = new Map<string, string>()
+  for (const row of rows) {
+    const children = childrenOf(row.id).filter((k) => isDrill(k))
+    if (children.length === 0) {
+      continue
+    }
+    kids.set(row.id, children)
+    for (const kid of children) {
+      parents.set(kid.id, row.id)
+    }
+  }
+  return { kids, parents }
+}
+
+/**
+ * The active frame: an open drill leaf (no open drill children) on the
+ * deepest path. Ties break on most-recently-updated — the frame the agent
+ * touched last is almost always the live one.
+ */
+export function currentFrame(): DrillFrame | undefined {
+  const rows = listDrills().filter(isOpen)
+  if (rows.length === 0) {
+    return undefined
+  }
+  const { kids, parents } = drillRelations(rows)
+  const depthOf = (id: string): number => {
+    let d = 0
+    let cur: string | undefined = id
+    while ((cur = parents.get(cur)) !== undefined) {
+      d += 1
+    }
+    return d
+  }
+  const leaves = rows.filter(
+    (r) => !(kids.get(r.id) ?? []).some((k) => isDrill(k) && isOpen(k))
+  )
+  leaves.sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''))
+  const leaf = leaves[0]
+  if (!leaf) {
+    return undefined
+  }
+  return { ...leaf, parentId: parents.get(leaf.id), depth: depthOf(leaf.id) }
+}
+
+/** Descend: create a child frame under `opts.under` or the current leaf. */
+export function drillDown(title: string, opts: DownOptions = {}): DrillRow {
+  const parent = opts.under ?? currentFrame()?.id
+  const args = ['create', title, '-l', DRILL_LABEL]
+  if (parent) {
+    args.push('--parent', parent)
+  }
+  if (opts.ephemeral) {
+    args.push('--ephemeral')
+  }
+  if (opts.type) {
+    args.push('-t', opts.type)
+  }
+  if (opts.priority !== undefined) {
+    args.push('-p', String(opts.priority))
+  }
+  if (opts.description) {
+    args.push('-d', opts.description)
+  }
+  const row = bdJson<DrillRow>(args)
+  bd([
+    'provenance',
+    'record',
+    '--issue',
+    row.id,
+    '--kind',
+    'claim',
+    '--source',
+    'bro drill down',
+    '--at',
+    new Date().toISOString(),
+  ])
+  return row
+}
+
+export function refKind(ref: string): string {
+  if (/\/pull\/|\/merge_requests\//.test(ref)) {
+    return 'pr'
+  }
+  if (/^[0-9a-f]{40}$/.test(ref)) {
+    return 'git-sha'
+  }
+  return 'work-id'
+}
+
+/**
+ * Ascend: close the frame with a structured memo. `--result` is mandatory —
+ * a drill that returns nothing teaches nothing. Each `--prevent` item lands
+ * as a task on the parent frame so prevention work lives in the scope that
+ * spawned it.
+ */
+export function drillUp(opts: UpOptions): UpResult {
+  if (!opts.result.trim()) {
+    throw new Error('drill up requires --result — a frame must return a curated finding')
+  }
+  const frame = opts.id
+    ? bdJson<DrillRow>(['show', opts.id])
+    : currentFrame()
+  if (!frame) {
+    throw new Error('no open drill frame — nothing to ascend from')
+  }
+  const openKids = childrenOf(frame.id).filter((k) => isDrill(k) && isOpen(k))
+  if (openKids.length > 0) {
+    throw new Error(
+      `frame ${frame.id} has open child drill(s): ${openKids.map((k) => k.id).join(', ')} — ascend them first`
+    )
+  }
+
+  const memo = [
+    '## Result',
+    '',
+    opts.result,
+    ...(opts.prevent?.length
+      ? ['', '## Prevention', '', ...opts.prevent.map((p) => `- ${p}`)]
+      : []),
+  ].join('\n')
+  bd(['note', frame.id, memo])
+
+  const preventionIds: string[] = []
+  for (const item of opts.prevent ?? []) {
+    // discovered-from, not --parent: prevention is follow-up work found by
+    // this frame, and a child would block the parent's own close.
+    const row = bdJson<DrillRow>([
+      'create',
+      item,
+      '-l',
+      PREVENTION_LABEL,
+      '--no-inherit-labels',
+      '--deps',
+      `discovered-from:${frame.id}`,
+    ])
+    preventionIds.push(row.id)
+  }
+
+  for (const ref of opts.evidence ?? []) {
+    bd([
+      'provenance',
+      'record',
+      '--issue',
+      frame.id,
+      '--kind',
+      'commit',
+      '--source',
+      'bro drill up',
+      '--ref',
+      ref,
+      '--ref-kind',
+      refKind(ref),
+    ])
+  }
+  bd([
+    'provenance',
+    'record',
+    '--issue',
+    frame.id,
+    '--kind',
+    'handoff',
+    '--source',
+    'bro drill up',
+    '--at',
+    new Date().toISOString(),
+  ])
+  bd(['close', frame.id, '--reason', 'drill up — result handed to parent'])
+  return { closed: frame.id, preventionIds }
+}
+
+/** Parent drill of a frame, or undefined for roots. */
+function childrenParentOf(id: string): string | undefined {
+  return drillRelations(listDrills()).parents.get(id)
+}
+
+/** Root frames + rendered tree (indented, roots first). */
+export function drillTree(): string {
+  const rows = listDrills()
+  if (rows.length === 0) {
+    return 'no drill frames'
+  }
+  const { kids, parents } = drillRelations(rows)
+  const roots = rows.filter((r) => !parents.has(r.id))
+  const lines: string[] = []
+  const walk = (row: DrillRow, depth: number): void => {
+    const mark = isOpen(row) ? '●' : '○'
+    lines.push(`${'  '.repeat(depth)}${mark} ${row.id} ${row.title} [${row.status}]`)
+    for (const kid of (kids.get(row.id) ?? []).filter(isDrill)) {
+      walk(kid, depth + 1)
+    }
+  }
+  for (const root of roots) {
+    walk(root, 0)
+  }
+  return lines.join('\n')
+}
