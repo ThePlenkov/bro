@@ -1,7 +1,7 @@
 {
   "name": "@theplenkov/bro",
   "version": "0.2.0",
-  "description": "bro — agent's sidekick CLI: review-debt pipeline, PR triage, fix loops",
+  "description": "bro \u2014 agent's sidekick CLI: review-debt pipeline, PR triage, fix loops",
   "type": "module",
   "bin": {
     "bro": "dist/index.js"
@@ -34,7 +34,8 @@
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
-    "@bro/retro": "*"
+    "@bro/retro": "*",
+    "@bro/convoy": "*"
   },
   "license": "MIT",
   "repository": {

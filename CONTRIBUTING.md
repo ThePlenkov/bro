@@ -10,8 +10,9 @@ packages/core     @bro/core      — gh wrapper, config loader, output printer
 packages/debt     @bro/debt      — review-debt domain: collect, labels, ledger, beads sync
 packages/act      @bro/act       — open-PR loop: state, threads, resolve, exit gate
 packages/drill    @bro/drill     — scoped descent: drill frames as beads
+packages/convoy   @bro/convoy    — molecule scheduling: DAG readiness, next-step, pour
 packages/cli      @theplenkov/bro — published CLI (bin: bro), bundles @bro/*
-skills/act, skills/debt, skills/drill, skills/wtf — thin skills: policy only, call `bro *`
+skills/act, skills/convoy, skills/debt, skills/drill, skills/wtf — thin skills: policy only, call `bro *`
 plugin.json                      — agent-plugins.org manifest (repo root IS the Devin plugin)
 hooks.json + hooks/run.sh        — Devin lifecycle hooks → `bro hooks <event>`
 .claude-plugin/marketplace.json  — marketplace manifest (Claude + Codex + Cursor read it)

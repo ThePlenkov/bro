@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Convoy"
+  short_description: "Agent-internal molecule execution — DAG scheduling over beads via the bro CLI"
+  brand_color: "#6B4FBB"
+  default_prompt: "Use $convoy to get started."
+policy:
+  allow_implicit_invocation: false
