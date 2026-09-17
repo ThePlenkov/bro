@@ -21,14 +21,17 @@ and parallel agents. Gas City is **not** required — bro is the executor.
 ## The loop
 
 ```text
-bro convoy pour <formula>     → prints the molecule root id (once per run)
+bro convoy pour <formula> [--var K=V]…   → prints the molecule root id (once per run)
 bro convoy status [mol]       → DAG: ✓ done / ▸ ready / · blocked
 bro convoy next   [mol]       → JSON: what to do now
 bro convoy claim <step-id>            → atomic claim — do this before starting
 bro convoy done <step-id> --result "…"   → closes the step, emits the new next
 ```
 
-Repeat `next` → work → `done` until `next` reports `"state": "complete"`.
+Repeat `next` → `claim` → work → `done` until `next` reports
+`"state": "complete"`. Every command takes the molecule id (positional or
+`--mol`) — pass it whenever more than one convoy is open; no-arg
+resolution only works with exactly one.
 
 `next` states:
 

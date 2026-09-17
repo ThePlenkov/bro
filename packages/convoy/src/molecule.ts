@@ -103,8 +103,10 @@ export function stepInputs(mol: Molecule, stepId: string): StepInput[] {
   return mol.dependencies
     .filter((d) => d.type === 'blocks' && d.issue_id === stepId && closed.has(d.depends_on_id))
     .map((d) => {
-      const dep = bdJson<{ title: string; close_reason?: string }>(['show', d.depends_on_id])
-      return { id: d.depends_on_id, title: dep.title, reason: dep.close_reason ?? '' }
+      // bd show --json returns a single-element array
+      const rows = bdJson<{ title: string; close_reason?: string }[]>(['show', d.depends_on_id])
+      const dep = rows[0]
+      return { id: d.depends_on_id, title: dep?.title ?? '', reason: dep?.close_reason ?? '' }
     })
 }
 
@@ -129,7 +131,19 @@ export function pourFormula(formula: string, vars: Record<string, string> = {}):
     types.add('agent').add('human')
     bd(['config', 'set', 'types.custom', [...types].join(' ')])
   } catch {
-    // config set unsupported or bd too old — pour still works, types flatten
+    // old bd without types.custom — gates would flatten to task
+  }
+  let registered: string[] = []
+  try {
+    registered = bd(['config', 'get', 'types.custom']).trim().split(/[\s,]+/)
+  } catch {
+    // fall through — registration unverifiable is a failure too
+  }
+  if (!registered.includes('agent') || !registered.includes('human')) {
+    throw new Error(
+      'types.custom could not register agent/human — pouring would flatten declared gates to task. ' +
+        'Upgrade bd or register the types manually: bd config set types.custom "agent human"',
+    )
   }
   const args = ['mol', 'pour', formula]
   for (const [k, v] of Object.entries(vars)) args.push('--var', `${k}=${v}`)

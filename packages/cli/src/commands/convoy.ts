@@ -109,12 +109,28 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
       // membership check before mutation — a mistyped/copied id must not
       // close an unrelated issue
       const mol = resolveMolecule(flag(rest, '--mol'))
-      if (!stepsOf(mol).some((s) => s.id === stepId)) {
+      const step = stepsOf(mol).find((s) => s.id === stepId)
+      if (!step) {
         console.error(`error: ${stepId} is not a step of molecule ${mol.root.id}`)
         process.exit(2)
       }
+      // dependency order is the contract — a blocked step can't be done;
+      // ready or claimed (in_progress) steps can
+      if (step.state !== 'ready' && step.state !== 'in_progress') {
+        console.error(
+          `error: ${stepId} is ${step.state} — only ready or claimed steps can be done` +
+            (step.blockedBy.length > 0 ? ` (waiting on ${step.blockedBy.join(', ')})` : ''),
+        )
+        process.exit(2)
+      }
       const result = flag(rest, '--result')
-      bd(['close', stepId, ...(result ? ['--reason', result] : [])])
+      // the handoff is the contract — close_reason is what downstream
+      // steps read via inputs[]
+      if (!result) {
+        console.error('error: done requires --result — the next steps read it as their input')
+        process.exit(2)
+      }
+      bd(['close', stepId, '--reason', result])
       const fresh = resolveMolecule(mol.root.id)
       console.log(JSON.stringify(withInputs(nextStep(fresh), fresh), null, 2))
       return
@@ -126,8 +142,13 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
         process.exit(2)
       }
       const mol = resolveMolecule(flag(rest, '--mol'))
-      if (!stepsOf(mol).some((s) => s.id === stepId)) {
+      const step = stepsOf(mol).find((s) => s.id === stepId)
+      if (!step) {
         console.error(`error: ${stepId} is not a step of molecule ${mol.root.id}`)
+        process.exit(2)
+      }
+      if (step.state !== 'ready') {
+        console.error(`error: ${stepId} is ${step.state} — only ready steps can be claimed`)
         process.exit(2)
       }
       claimStep(stepId)
