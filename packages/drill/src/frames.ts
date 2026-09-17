@@ -6,7 +6,7 @@
  * (`claim` on down, `handoff` on up). No claim.json, no .drills/ tree —
  * beads IS the memory system.
  */
-import { bd, bdJson } from './beads.ts'
+import { bd, bdJson, evidenceKind, refKind } from '@bro/core'
 import type { DownOptions, DrillFrame, DrillRow, UpOptions, UpResult } from './types.ts'
 
 const DRILL_LABEL = 'drill'
@@ -171,14 +171,80 @@ export function drillDown(title: string, opts: DownOptions = {}): DrillRow {
   return row
 }
 
-export function refKind(ref: string): string {
-  if (/\/pull\/|\/merge_requests\//.test(ref)) {
-    return 'pr'
+export { refKind }
+
+/** One prevention bead per item — discovered-from, not --parent:
+ * prevention is follow-up work found by the frame, and a child would
+ * block the parent's own close. `--title` keeps a `--`-leading item as
+ * data, not a flag. IDs land in `out` as they are created so a partial
+ * failure is still compensatable. */
+function createPreventions(frameId: string, items: string[], out: string[]): void {
+  for (const item of items) {
+    const row = bdJson<DrillRow>([
+      'create',
+      '--title',
+      item,
+      '-l',
+      PREVENTION_LABEL,
+      '--no-inherit-labels',
+      '--deps',
+      `discovered-from:${frameId}`,
+    ])
+    out.push(row.id)
   }
-  if (/^[0-9a-f]{40}$/.test(ref)) {
-    return 'git-sha'
+}
+
+/** `bd note` appends — check the stored notes first so a retry after a
+ * later failure can't duplicate the memo. */
+function noteOnce(frameId: string, memo: string): void {
+  const current = bdJson<DrillRow[]>(['show', frameId])[0]
+  if (current?.notes?.includes(memo)) {
+    return
   }
-  return 'work-id'
+  bd(['note', frameId, memo])
+}
+
+/** Evidence refs + handoff event — skipped for wisps (no audit trail).
+ * Ref'd events are idempotent in bd (deterministic id); the ref-less
+ * handoff gets a fresh `--at` each run, so skip it when already logged. */
+function recordHandoff(frame: DrillRow, evidence: string[]): void {
+  for (const ref of evidence) {
+    const kind = refKind(ref)
+    bd([
+      'provenance',
+      'record',
+      '--issue',
+      frame.id,
+      '--kind',
+      evidenceKind(ref),
+      '--source',
+      'bro drill up',
+      '--ref',
+      ref,
+      '--ref-kind',
+      kind,
+    ])
+  }
+  const logged = bdJson<Array<{ kind?: string; source?: string }>>([
+    'provenance',
+    'log',
+    frame.id,
+  ])
+  if (logged.some((e) => e.kind === 'handoff' && e.source === 'bro drill up')) {
+    return
+  }
+  bd([
+    'provenance',
+    'record',
+    '--issue',
+    frame.id,
+    '--kind',
+    'handoff',
+    '--source',
+    'bro drill up',
+    '--at',
+    new Date().toISOString(),
+  ])
 }
 
 /**
@@ -218,57 +284,27 @@ export function drillUp(opts: UpOptions): UpResult {
       ? ['', '## Prevention', '', ...opts.prevent.map((p) => `- ${p}`)]
       : []),
   ].join('\n')
-  bd(['note', frame.id, memo])
 
+  // bd has no transactions — on any failure after the note lands, delete
+  // the prevention beads we created so a retry can't duplicate them.
   const preventionIds: string[] = []
-  for (const item of opts.prevent ?? []) {
-    // discovered-from, not --parent: prevention is follow-up work found by
-    // this frame, and a child would block the parent's own close.
-    const row = bdJson<DrillRow>([
-      'create',
-      item,
-      '-l',
-      PREVENTION_LABEL,
-      '--no-inherit-labels',
-      '--deps',
-      `discovered-from:${frame.id}`,
-    ])
-    preventionIds.push(row.id)
-  }
-
-  if (!frame.ephemeral) {
-    // wisp semantics: ephemeral frames leave no audit trail
-    for (const ref of opts.evidence ?? []) {
-      const kind = refKind(ref)
-      bd([
-        'provenance',
-        'record',
-        '--issue',
-        frame.id,
-        '--kind',
-        kind === 'pr' ? 'land' : 'commit',
-        '--source',
-        'bro drill up',
-        '--ref',
-        ref,
-        '--ref-kind',
-        kind,
-      ])
+  try {
+    noteOnce(frame.id, memo)
+    createPreventions(frame.id, opts.prevent ?? [], preventionIds)
+    if (!frame.ephemeral) {
+      recordHandoff(frame, opts.evidence ?? [])
     }
-    bd([
-      'provenance',
-      'record',
-      '--issue',
-      frame.id,
-      '--kind',
-      'handoff',
-      '--source',
-      'bro drill up',
-      '--at',
-      new Date().toISOString(),
-    ])
+    bd(['close', frame.id, '--reason', 'drill up — result handed to parent'])
+  } catch (err) {
+    for (const id of preventionIds) {
+      try {
+        bd(['delete', id, '--force'])
+      } catch {
+        // best effort — report the original failure either way
+      }
+    }
+    throw err
   }
-  bd(['close', frame.id, '--reason', 'drill up — result handed to parent'])
   return { closed: frame.id, preventionIds }
 }
 

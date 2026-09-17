@@ -58,6 +58,10 @@ babysit, no config files to confess to.
 | `bro unwind …` | Alias for `drill up` |
 | `bro drill current` / `tree` / `list` | Active leaf frame · all hierarchies · open frames |
 | `bro drill distill <id>` | `bd mol distill` — a good drill tree becomes a reusable proto |
+| `bro wtf <complaint>` | Capture the user's frustration verbatim as a `wtf` bead — timestamp + git snapshot included |
+| `bro retrospect record <plan.toml>` | Validate a TOML retro plan and fan it out: `retro` bead + `prevention` beads per action, linked `discovered-from`, wtf answered |
+| `bro retrospect status` | Exit gate — non-zero while a `wtf` bead is unanswered. The agent can't self-declare "sorry, fixed" |
+| `bro retrospect schema` / `list` | Print the commented TOML template · retros and open wtfs |
 | `bro setup [--beads] [--skills]` | Wires bro into the current repo: checks `gh` auth + `bd`, writes `bro.config.json`, optionally `bd init --stealth` + installs the debt-pipeline formula and thin skill wrappers |
 
 ## The pipeline (beads)

@@ -7,6 +7,7 @@ export interface DrillRow {
   created_at?: string
   updated_at?: string
   labels?: string[]
+  notes?: string
   ephemeral?: boolean
 }
 
