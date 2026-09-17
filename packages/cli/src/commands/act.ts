@@ -2,6 +2,7 @@
  * `bro act <sub>` — the open-PR review loop as mechanics, not prompts.
  *
  *   status [PR] [--json]   PR state + exit gate (open threads, CI, SAST)
+ *   merge [PR]             merge only when the exit gate is green
  *   threads [PR]           unresolved review threads, TSV
  *   resolve --thread ID [--comment TEXT] [--unresolve]
  *   reply   --thread ID --comment TEXT | --file TSV
@@ -22,6 +23,7 @@ function usage(): never {
 Commands:
   status [PR] [--json]              PR state + exit gate JSON
   threads [PR]                      Unresolved review threads (TSV)
+  merge [PR] [--squash|--merge|--rebase] [--admin]  Merge only if the exit gate is green
   resolve --thread ID [--comment T] Resolve thread, optionally reply first
   reply --thread ID --comment T     Reply without resolving
         --file TSV                  Batch reply: <thread_id>\t<body> per line
@@ -101,6 +103,39 @@ async function cmdStatus(argv: string[]): Promise<void> {
   for (const b of gate.blockers) {
     console.log(`  blocker: ${b}`)
   }
+}
+
+/**
+ * `bro act merge` — the exit gate as the merge precondition, not a prompt.
+ * Merging through bro cannot bypass a BLOCKED gate; `gh pr merge` by hand
+ * can. This is the guardrail for "merged without running the gate".
+ */
+async function cmdMerge(argv: string[]): Promise<void> {
+  ensureGhAuth()
+  const t = resolvePr(argv)
+  const state = await fetchPrActState({ owner: t.owner, repo: t.repoName, pr: t.pr })
+  const gate = evaluateExitGate(state)
+
+  if (!gate.ok) {
+    console.error(`exit_gate=BLOCKED — refusing to merge #${t.pr}`)
+    for (const b of gate.blockers) {
+      console.error(`  blocker: ${b}`)
+    }
+    process.exitCode = 1
+    return
+  }
+
+  const method = argv.includes('--rebase')
+    ? '--rebase'
+    : argv.includes('--merge')
+      ? '--merge'
+      : '--squash'
+  const args = ['pr', 'merge', String(t.pr), method, '--delete-branch']
+  if (argv.includes('--admin')) {
+    args.push('--admin')
+  }
+  console.log(gh(args))
+  console.log(`act: merged #${t.pr}`)
 }
 
 async function cmdThreads(argv: string[]): Promise<void> {
@@ -204,6 +239,7 @@ function cmdReply(argv: string[]): void {
 
 const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
   status: cmdStatus,
+  merge: cmdMerge,
   threads: cmdThreads,
   resolve: cmdResolve,
   reply: cmdReply,
