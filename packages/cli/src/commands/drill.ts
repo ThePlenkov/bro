@@ -38,16 +38,25 @@ Commands:
 /** A value flag's argument must exist and not look like another option. */
 function flagValue(argv: string[], i: number, name: string): string {
   const v = argv[i + 1]
-  if (v === undefined || v === '' || v.startsWith('--')) {
+  if (v === undefined || v.trim() === '' || v.startsWith('--')) {
     console.error(`error: ${name} requires a value`)
     process.exit(2)
   }
   return v
 }
 
+/** Scalar flags are not repeatable — a second occurrence can hide a
+ * missing value (`--result ok --result`) that would pass validation. */
 function flag(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name)
-  return i >= 0 ? flagValue(argv, i, name) : undefined
+  if (i < 0) {
+    return undefined
+  }
+  if (argv.indexOf(name, i + 1) >= 0) {
+    console.error(`error: ${name} may be given only once`)
+    process.exit(2)
+  }
+  return flagValue(argv, i, name)
 }
 
 function flagAll(argv: string[], name: string): string[] {
@@ -97,7 +106,7 @@ function parsePriority(raw: string | undefined): number | undefined {
 
 function cmdDown(rest: string[]): void {
   const title = positionals(rest).join(' ')
-  if (!title) {
+  if (!title?.trim()) {
     console.error('error: drill down requires a title')
     process.exit(2)
   }
@@ -112,11 +121,6 @@ function cmdDown(rest: string[]): void {
 }
 
 function cmdUp(rest: string[]): void {
-  const extras = positionals(rest)
-  if (extras.length > 0) {
-    console.error(`error: unexpected argument "${extras[0]}"`)
-    process.exit(2)
-  }
   const result = flag(rest, '--result')
   if (!result) {
     console.error('error: drill up requires --result — a frame must return a curated finding')
@@ -186,6 +190,13 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
   }
   checkBeads()
   rejectUnknownFlags(sub, rest)
+  // these subs take no positional args — a stray one is a typo, not input
+  const noPositionals = new Set(['up', 'current', 'tree', 'list'])
+  const extras = positionals(rest)
+  if (noPositionals.has(sub) && extras.length > 0) {
+    console.error(`error: unexpected argument "${extras[0]}"`)
+    process.exit(2)
+  }
 
   switch (sub) {
     case 'down':

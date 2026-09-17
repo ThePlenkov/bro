@@ -25,7 +25,7 @@ export function listDrills(): DrillRow[] {
   // ephemeral frames live in the wisp namespace, outside `bd list`
   let wisps: DrillRow[] = []
   try {
-    const out = bdJson<{ wisps?: DrillRow[] }>(['mol', 'wisp', 'list'])
+    const out = bdJson<{ wisps?: DrillRow[] }>(['mol', 'wisp', 'list', '--all'])
     wisps = (out.wisps ?? []).filter(isDrill)
   } catch (err) {
     // tolerate only an explicitly unsupported command (older bd) — a
