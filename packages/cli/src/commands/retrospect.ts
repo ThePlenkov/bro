@@ -134,6 +134,40 @@ const KNOWN_FLAGS: Record<string, Set<string>> = {
   schema: new Set(),
 }
 
+/** Reject a misspelled option — capture args are verbatim complaint
+ * text, so they skip flag validation entirely. */
+function rejectUnknownFlags(sub: string, known: Set<string>, rest: string[]): void {
+  if (sub === 'capture') {
+    return
+  }
+  for (const arg of rest) {
+    if (arg.startsWith('--') && !known.has(arg)) {
+      console.error(`error: unknown option "${arg}" for retrospect ${sub}`)
+      process.exit(2)
+    }
+  }
+}
+
+/** --help/-h must work without a beads checkout. For capture only a
+ * leading help token counts — a `--help` inside the complaint is text. */
+function wantsHelp(sub: string, rest: string[]): boolean {
+  return sub === 'capture'
+    ? rest[0] === '--help' || rest[0] === '-h'
+    : rest.includes('--help') || rest.includes('-h')
+}
+
+/** These subs take no positional args — a stray one is a typo, not input. */
+function rejectPositionals(sub: string, rest: string[]): void {
+  if (sub !== 'status' && sub !== 'list' && sub !== 'schema') {
+    return
+  }
+  const pos = retroPositionals(rest)
+  if (pos.length > 0) {
+    console.error(`error: unexpected argument "${pos[0] ?? ''}"`)
+    process.exit(2)
+  }
+}
+
 export async function runRetrospectCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
   if (!sub) {
@@ -147,22 +181,8 @@ export async function runRetrospectCommand(argv: string[]): Promise<void> {
   if (!known) {
     usage()
   }
-  // capture args are verbatim complaint text — no flag validation
-  if (sub !== 'capture') {
-    for (const arg of rest) {
-      if (arg.startsWith('--') && !known.has(arg)) {
-        console.error(`error: unknown option "${arg}" for retrospect ${sub}`)
-        process.exit(2)
-      }
-    }
-  }
-  // --help/-h must work without a beads checkout. For capture only a
-  // leading help token counts — a `--help` inside the complaint is text.
-  const wantsHelp =
-    sub === 'capture'
-      ? rest[0] === '--help' || rest[0] === '-h'
-      : rest.includes('--help') || rest.includes('-h')
-  if (wantsHelp) {
+  rejectUnknownFlags(sub, known, rest)
+  if (wantsHelp(sub, rest)) {
     usage(0)
   }
   // input validation before checkBeads — a bad plan file or missing
@@ -171,12 +191,7 @@ export async function runRetrospectCommand(argv: string[]): Promise<void> {
   if (sub !== 'schema') {
     checkBeads()
   }
-  // these subs take no positional args — a stray one is a typo, not input
-  const pos = retroPositionals(rest)
-  if ((sub === 'status' || sub === 'list' || sub === 'schema') && pos.length > 0) {
-    console.error(`error: unexpected argument "${pos[0] ?? ''}"`)
-    process.exit(2)
-  }
+  rejectPositionals(sub, rest)
 
   switch (sub) {
     case 'capture':
