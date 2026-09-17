@@ -149,6 +149,11 @@ function checkPrereqs(needBeads: boolean): void {
 
 export async function runSetupCommand(argv: string[]): Promise<void> {
   const { beads, skills, personality } = parseSetupArgs(argv)
+  // A malformed bro.config.json must fail BEFORE any mutation (bd init,
+  // file installs) — readExistingConfig exits on a parse error; loadConfig
+  // alone would silently fall back to defaults and setup would init beads
+  // on top of a broken config.
+  readExistingConfig(join(process.cwd(), 'bro.config.json'))
   // beads is a default store — setup needs bd whenever the effective config
   // keeps it on, not only when --beads was passed explicitly.
   const wantsBeads = beads || loadConfig().stores.includes('beads')

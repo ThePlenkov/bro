@@ -42,18 +42,25 @@ function ensureDebtDirExcluded(dir: string): void {
     return
   }
   excludedDebtDirs.add(dir)
+  const git = (args: string[]): string =>
+    execFileSync('git', ['-C', dir, ...args], { // NOSONAR — git is already a hard dependency of the whole flow
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  let root: string
   try {
     mkdirSync(dir, { recursive: true }) // git -C fails on a missing dir
-    const git = (args: string[]): string =>
-      execFileSync('git', ['-C', dir, ...args], { // NOSONAR — git is already a hard dependency of the whole flow
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim()
-    const root = git(['rev-parse', '--show-toplevel'])
-    const rel = relative(root, dir)
-    if (rel === '' || rel.startsWith('..')) {
-      return // debt dir is the repo root or outside the worktree
-    }
+    root = git(['rev-parse', '--show-toplevel'])
+  } catch {
+    return // not a git worktree (or no git) — nothing to exclude
+  }
+  const rel = relative(root, dir)
+  if (rel === '' || rel.startsWith('..')) {
+    return // debt dir is the repo root or outside the worktree
+  }
+  // Inside a worktree from here — exclusion failures are surfaced, since a
+  // silently trackable ledger is exactly what this guard prevents.
+  try {
     try {
       git(['check-ignore', '-q', rel])
       return // already covered by .gitignore / info/exclude / global excludes
@@ -62,14 +69,20 @@ function ensureDebtDirExcluded(dir: string): void {
     }
     const excludePath = git(['rev-parse', '--git-path', 'info/exclude'])
     const path = isAbsolute(excludePath) ? excludePath : join(dir, excludePath)
-    const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
-    if (!existing.split('\n').includes(`${rel}/`)) {
-      const sep = existing === '' || existing.endsWith('\n') ? '' : '\n'
-      mkdirSync(dirname(path), { recursive: true })
-      writeFileSync(path, `${existing}${sep}${rel}/\n`)
-    }
-  } catch {
-    /* not a git worktree (or no git) — nothing to exclude */
+    // Concurrent writers can race the read-modify-write — serialize under
+    // the same lock the ledger uses so a later write can't drop an entry.
+    withFileLock(path, () => {
+      const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
+      if (!existing.split('\n').includes(`${rel}/`)) {
+        const sep = existing === '' || existing.endsWith('\n') ? '' : '\n'
+        writeFileSync(path, `${existing}${sep}${rel}/\n`)
+      }
+    })
+  } catch (err) {
+    console.error(
+      `warning: could not git-exclude ${rel} — ` +
+        `${err instanceof Error ? err.message : err}; the ledger may be trackable`
+    )
   }
 }
 
