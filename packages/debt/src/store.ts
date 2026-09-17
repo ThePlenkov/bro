@@ -54,15 +54,26 @@ function ensureDebtDirExcluded(dir: string): void {
   const git = (args: string[]): string =>
     execFileSync('git', ['-C', dir, ...args], { // NOSONAR — git is already a hard dependency of the whole flow
       encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     }).trim()
   let root: string
   try {
     mkdirSync(dir, { recursive: true }) // git -C fails on a missing dir
     root = git(['rev-parse', '--show-toplevel'])
-  } catch {
-    excludedDebtDirs.add(dir)
-    return // not a git worktree (or no git) — nothing to exclude
+  } catch (err) {
+    // Memoize only a proven "not a worktree" (or missing git) — a transient
+    // git/perm failure must retry exclusion on the next write, not silence
+    // the guard for the rest of the process.
+    const e = err as NodeJS.ErrnoException & { stderr?: string }
+    if (e.code === 'ENOENT' || (e.stderr ?? '').includes('not a git repository')) {
+      excludedDebtDirs.add(dir)
+      return
+    }
+    console.error(
+      `warning: could not resolve git root for ${dir} — ` +
+        `${(e.stderr ?? '').trim() || e.message}; exclusion will retry on next write`
+    )
+    return
   }
   const rel = relative(root, dir)
   // `..` alone or `..<sep>` = outside the worktree; a dir literally named
@@ -70,6 +81,10 @@ function ensureDebtDirExcluded(dir: string): void {
   if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) {
     excludedDebtDirs.add(dir)
     return // debt dir is the repo root or outside the worktree
+  }
+  if (/[\r\n]/.test(rel)) {
+    excludedDebtDirs.add(dir)
+    return // a newline in the dir name would inject extra exclude patterns
   }
   // Inside a worktree from here — exclusion failures are surfaced, since a
   // silently trackable ledger is exactly what this guard prevents.
@@ -97,7 +112,7 @@ function ensureDebtDirExcluded(dir: string): void {
     // Ignores never override the index — files already committed under the
     // dir stay tracked and the exclusion is a no-op for them. Surface it;
     // untracking is a staged change only the repo owner should make.
-    const tracked = execFileSync('git', ['-C', root, 'ls-files', '--', `${rel}/`], {
+    const tracked = execFileSync('git', ['-C', root, 'ls-files', '--', `${rel}/`], { // NOSONAR — git PATH lookup is the contract
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim()

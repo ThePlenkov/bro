@@ -19,10 +19,15 @@ export interface BeadRef {
 export function checkBeads(opts: { autoInit?: boolean } = {}): void {
   try {
     bd(['--version'])
-  } catch {
-    throw new Error(
-      'bd not found — install beads, or opt out with "stores": ["jsonl"] in bro.config.json'
-    )
+  } catch (err) {
+    // ENOENT = the binary is absent; permission/timeout/broken-exec
+    // failures are real and must surface, not masquerade as "not found".
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(
+        'bd not found — install beads, or opt out with "stores": ["jsonl"] in bro.config.json'
+      )
+    }
+    throw err
   }
   // beads is a default store — a repo without .beads gets a stealth init
   // (local exclude, nothing lands in git) instead of a setup error.

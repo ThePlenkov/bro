@@ -4,7 +4,7 @@
  * keeps large `bd list --json` payloads from hitting Node's 1 MiB default.
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { statSync } from 'node:fs'
 import { join } from 'node:path'
 
 export function bd(args: string[]): string {
@@ -56,8 +56,18 @@ export function evidenceKind(ref: string): 'land' | 'commit' | 'used' {
  * flags contract shared by debt sync and `bro setup` (local exclude,
  * nothing lands in git). Returns true when it initialized.
  */
+/** Only a real `.beads` *directory* counts — a file or dangling path must
+ *  not suppress init (it would fail loudly rather than be repaired). */
+function beadsDirExists(): boolean {
+  try {
+    return statSync(join(process.cwd(), '.beads')).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 export function initBeadsStealth(): boolean {
-  if (existsSync(join(process.cwd(), '.beads'))) {
+  if (beadsDirExists()) {
     return false
   }
   try {
@@ -68,7 +78,7 @@ export function initBeadsStealth(): boolean {
     // loser's `bd init` fails while the winner's workspace lands. Tolerate
     // that race — callers verify completeness (`bd list` in checkBeads) —
     // but never swallow a real init failure.
-    if (existsSync(join(process.cwd(), '.beads'))) {
+    if (beadsDirExists()) {
       return false
     }
     throw err
