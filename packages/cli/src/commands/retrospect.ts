@@ -21,6 +21,7 @@ import {
   PLAN_SCHEMA,
   recordRetro,
 } from '@bro/retro'
+import type { RetroPlan } from '@bro/retro'
 import { flag, positionals } from './args.ts'
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set(['--wtf'])
@@ -56,7 +57,8 @@ function cmdCapture(rest: string[]): void {
   console.log(`wtf ${row.id} captured — now analyze, plan, and \`bro retrospect record\``)
 }
 
-function cmdRecord(rest: string[]): void {
+/** Read + validate the plan file — pure input checks, no beads needed. */
+function readPlan(rest: string[]): RetroPlan {
   const files = retroPositionals(rest)
   const wtfFlag = flag(rest, '--wtf')
   if (files.length !== 1) {
@@ -74,7 +76,11 @@ function cmdRecord(rest: string[]): void {
     process.exit(2)
   }
   const plan = parsePlan(text, file)
-  const res = recordRetro(wtfFlag ? { ...plan, wtf: wtfFlag } : plan)
+  return wtfFlag ? { ...plan, wtf: wtfFlag } : plan
+}
+
+function cmdRecord(plan: RetroPlan): void {
+  const res = recordRetro(plan)
   console.log(`retro ${res.retroId} recorded`)
   for (const id of res.actionIds) {
     console.log(`  prevention → ${id}`)
@@ -159,6 +165,9 @@ export async function runRetrospectCommand(argv: string[]): Promise<void> {
   if (wantsHelp) {
     usage(0)
   }
+  // input validation before checkBeads — a bad plan file or missing
+  // complaint must report itself, not a beads setup error
+  const plan = sub === 'record' ? readPlan(rest) : undefined
   if (sub !== 'schema') {
     checkBeads()
   }
@@ -174,7 +183,7 @@ export async function runRetrospectCommand(argv: string[]): Promise<void> {
       cmdCapture(rest)
       return
     case 'record':
-      cmdRecord(rest)
+      cmdRecord(plan as RetroPlan)
       return
     case 'status':
       cmdStatus(rest)
