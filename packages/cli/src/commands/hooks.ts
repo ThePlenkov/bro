@@ -1,0 +1,296 @@
+/**
+ * `bro hooks <event>` — agent lifecycle hooks as bro mechanics. Thin
+ * `hooks.json` at the plugin root calls this; all policy lives here.
+ *
+ *   session-start | post-compaction   rehydrate: beads ready + drill frame + PR gate + debt
+ *   prompt-submit                     drill-frame reminder; PR URL → act snapshot
+ *   post-tool                         exec nudges: gh pr create → act gate; merge → debt sweep
+ *   stop                              block while a drill frame or review threads are open
+ *   permission                        auto-approve bro/bd invocations
+ *
+ * Contract: read the event payload on stdin, print hook control JSON on
+ * stdout, exit 0. Everything is best-effort — hooks only fire in bro-enabled
+ * repos (bro.config.json or .beads/ walking up) and every probe is wrapped so
+ * a missing bd/gh or a dead network can never stall the session.
+ */
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { ghJson, resolveRepo } from '@bro/core'
+import { evaluateExitGate, fetchPrActState } from '@bro/act'
+import { bdJson, currentFrame } from '@bro/drill'
+import { readDebtRecords } from '@bro/debt'
+
+interface HookInput {
+  tool_input?: { command?: unknown }
+  tool_response?: { success?: unknown }
+  prompt?: unknown
+  stop_hook_active?: unknown
+}
+
+/** A repo opts in to bro hooks with bro.config.json or a .beads/ dir. */
+function broEnabled(startDir: string): boolean {
+  let dir = startDir
+  for (;;) {
+    if (existsSync(join(dir, 'bro.config.json')) || existsSync(join(dir, '.beads'))) {
+      return true
+    }
+    const parent = dirname(dir)
+    if (parent === dir) {
+      return false
+    }
+    dir = parent
+  }
+}
+
+function readInput(): HookInput {
+  try {
+    return JSON.parse(readFileSync(0, 'utf8')) as HookInput
+  } catch {
+    return {}
+  }
+}
+
+function emit(out: unknown): void {
+  process.stdout.write(`${JSON.stringify(out)}\n`)
+}
+
+function context(event: string, text: string): void {
+  emit({ hookSpecificOutput: { hookEventName: event, additionalContext: text } })
+}
+
+// --- pure probes (testable without gh/bd) -----------------------------------
+
+/** Which gh lifecycle a shell command belongs to, if any. */
+export function classifyExecCommand(cmd: string): 'pr-merge' | 'pr-create' | null {
+  if (/\bgh\s+pr\s+merge\b/.test(cmd)) {
+    return 'pr-merge'
+  }
+  if (/\bgh\s+pr\s+create\b/.test(cmd)) {
+    return 'pr-create'
+  }
+  return null
+}
+
+/** bro/bd are the plugin's own tools — permission hooks approve them outright. */
+export function isSelfToolCommand(cmd: string): boolean {
+  return /^\s*(bro|bd)(\s|$)/.test(cmd) || /^\s*npx\s+(-y\s+)?@theplenkov\/bro(\s|$)/.test(cmd)
+}
+
+/** First GitHub PR URL in free text → { owner, repo, pr }. */
+export function parsePrUrl(text: string): { owner: string; repo: string; pr: number } | null {
+  const m = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/.exec(text)
+  if (!m) {
+    return null
+  }
+  return { owner: m[1]!, repo: m[2]!, pr: Number(m[3]) }
+}
+
+// --- shared probes ------------------------------------------------------------
+
+interface BeadRow {
+  id: string
+  title?: string
+  status?: string
+}
+
+function drillLine(): string | null {
+  try {
+    const frame = currentFrame()
+    if (!frame) {
+      return null
+    }
+    return `drill frame open: ${frame.id} "${frame.title}" [depth=${frame.depth}] — close with \`bro drill up --result "…"\``
+  } catch {
+    return null
+  }
+}
+
+function readyLines(limit: number): string[] {
+  try {
+    const rows = bdJson<BeadRow[]>(['ready']).slice(0, limit)
+    return rows.map((r) => `  ${r.id} ${r.title ?? ''}`.trimEnd())
+  } catch {
+    return []
+  }
+}
+
+function debtLine(): string | null {
+  try {
+    const open = readDebtRecords().filter((r) => r.status === 'open').length
+    return open > 0 ? `debt: ${open} open finding(s) — \`bro debt next\` picks one` : null
+  } catch {
+    return null
+  }
+}
+
+/** Current branch's open PR → one-line gate summary. Null when no PR/no gh. */
+async function actGateLine(owner?: string, repo?: string, pr?: number): Promise<string | null> {
+  try {
+    let o = owner
+    let r = repo
+    let n = pr
+    if (n === undefined) {
+      const view = ghJson<{ number: number; state: string }>([
+        'pr',
+        'view',
+        '--json',
+        'number,state',
+      ])
+      if (view.state !== 'OPEN') {
+        return null
+      }
+      n = view.number
+      const resolved = resolveRepo([]).split('/')
+      o = resolved[0]
+      r = resolved[1]
+    }
+    const state = await fetchPrActState({ owner: o!, repo: r!, pr: n! })
+    const gate = evaluateExitGate(state)
+    return gate.ok
+      ? `pr #${state.pr}: gate OK`
+      : `pr #${state.pr}: gate BLOCKED (${gate.blockers.join('; ')}) — \`bro act status\``
+  } catch {
+    return null
+  }
+}
+
+// --- event handlers -----------------------------------------------------------
+
+async function emitSessionContext(event: 'SessionStart' | 'PostCompaction'): Promise<void> {
+  const parts: string[] = []
+  const drill = drillLine()
+  if (drill) {
+    parts.push(drill)
+  }
+  const ready = readyLines(8)
+  if (ready.length > 0) {
+    parts.push(`bd ready:\n${ready.join('\n')}`)
+  }
+  const gate = await actGateLine()
+  if (gate) {
+    parts.push(gate)
+  }
+  const debt = debtLine()
+  if (debt) {
+    parts.push(debt)
+  }
+  if (parts.length > 0) {
+    context(event, `bro state — resume from here:\n${parts.join('\n')}`)
+  }
+}
+
+async function emitPromptContext(input: HookInput): Promise<void> {
+  const parts: string[] = []
+  const drill = drillLine()
+  if (drill) {
+    parts.push(drill)
+  }
+  const ref = typeof input.prompt === 'string' ? parsePrUrl(input.prompt) : null
+  if (ref) {
+    const gate = await actGateLine(ref.owner, ref.repo, ref.pr)
+    if (gate) {
+      parts.push(gate)
+    }
+  }
+  if (parts.length > 0) {
+    context('UserPromptSubmit', parts.join('\n'))
+  }
+}
+
+function emitPostTool(input: HookInput): void {
+  if (input.tool_response?.success !== true) {
+    return
+  }
+  const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
+  switch (classifyExecCommand(cmd)) {
+    case 'pr-merge':
+      context(
+        'PostToolUse',
+        'PR merged — sweep review debt with `bro debt collect`; queue: `bro debt prs`'
+      )
+      return
+    case 'pr-create':
+      context(
+        'PostToolUse',
+        'PR created — `bro act status` is the review gate; `bro act threads` lists open threads'
+      )
+      return
+    default:
+  }
+}
+
+/** The exit gate as a hook: don't stop while review threads or a drill frame
+ * stay open. Respects stop_hook_active so a blocked stop can't loop. */
+async function emitStopGate(input: HookInput): Promise<void> {
+  if (input.stop_hook_active === true) {
+    return
+  }
+  const drill = drillLine()
+  if (drill) {
+    emit({ decision: 'block', reason: `bro: ${drill}` })
+    return
+  }
+  try {
+    const view = ghJson<{ number: number; state: string }>(['pr', 'view', '--json', 'number,state'])
+    if (view.state !== 'OPEN') {
+      return
+    }
+    const [owner, repoName] = resolveRepo([]).split('/')
+    const state = await fetchPrActState({ owner: owner!, repo: repoName!, pr: view.number })
+    if (state.openThreads > 0) {
+      emit({
+        decision: 'block',
+        reason:
+          `bro: PR #${view.number} has ${state.openThreads} unresolved review thread(s) — ` +
+          'list with `bro act threads`, fix or reply, then resolve',
+      })
+    }
+  } catch {
+    // no repo/PR/auth — nothing to gate on
+  }
+}
+
+function emitPermission(input: HookInput): void {
+  const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
+  if (isSelfToolCommand(cmd)) {
+    emit({ decision: 'approve' })
+  }
+}
+
+// --- dispatch -----------------------------------------------------------------
+
+export async function runHooksCommand(argv: string[]): Promise<void> {
+  const event = argv[0]
+  const root = process.env.DEVIN_PROJECT_DIR ?? process.cwd()
+  if (!event || !broEnabled(root)) {
+    return
+  }
+  const input = readInput()
+  try {
+    switch (event) {
+      case 'session-start':
+        await emitSessionContext('SessionStart')
+        return
+      case 'post-compaction':
+        await emitSessionContext('PostCompaction')
+        return
+      case 'prompt-submit':
+        await emitPromptContext(input)
+        return
+      case 'post-tool':
+        emitPostTool(input)
+        return
+      case 'stop':
+        await emitStopGate(input)
+        return
+      case 'permission':
+        emitPermission(input)
+        return
+      default:
+        // forward-compat: hooks.json may name events this bro doesn't know
+        return
+    }
+  } catch {
+    // hooks fail open — a bro bug must never break the session
+  }
+}

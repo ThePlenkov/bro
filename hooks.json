@@ -1,0 +1,74 @@
+{
+  "SessionStart": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PLUGIN_ROOT/hooks/run.sh\" session-start",
+          "timeout": 15
+        }
+      ]
+    }
+  ],
+  "PostCompaction": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PLUGIN_ROOT/hooks/run.sh\" post-compaction",
+          "timeout": 15
+        }
+      ]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PLUGIN_ROOT/hooks/run.sh\" prompt-submit",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "^exec$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PLUGIN_ROOT/hooks/run.sh\" post-tool",
+          "timeout": 5
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PLUGIN_ROOT/hooks/run.sh\" stop",
+          "timeout": 20
+        }
+      ]
+    }
+  ],
+  "PermissionRequest": [
+    {
+      "matcher": "^exec$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PLUGIN_ROOT/hooks/run.sh\" permission",
+          "timeout": 5
+        }
+      ]
+    }
+  ]
+}
