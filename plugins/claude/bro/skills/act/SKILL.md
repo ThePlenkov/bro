@@ -25,10 +25,6 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
 
 - **Loop until the exit gate is green.** `bro act status` returns non-zero
   with named blockers — keep fixing until it passes; do not self-declare done.
-- **Merge through `bro act merge`, never `gh pr merge` directly.** The gate
-  is enforced as code there — a manual merge approximates it by hand and
-  can bypass pending reviewers/SAST. Only a user-directed override justifies
-  merging around a BLOCKED gate.
   **Green means every check green** — `ci_pending` counts all non-AI checks,
   not just required ones; a failing optional job is still a red box on the PR.
   A pending AI reviewer (`reviewers_pending`) keeps the gate BLOCKED, and a
@@ -46,6 +42,10 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
   Bot reviewers never resolve their own threads — **you** must give each
   one a verdict and resolve it: fix → resolve silently (the push is the
   verdict), or reject → reply with the reason, then resolve.
+- **Merge through `bro act merge`, never `gh pr merge` directly.** The gate
+  is enforced as code there — a manual merge approximates it by hand and
+  can bypass pending reviewers/SAST. Only a user-directed override justifies
+  merging around a BLOCKED gate.
 - **Wait via a background subagent, never in-session.** The wait primitive
   is `gh pr checks <PR> --watch` — native settle logic, no hand-rolled
   polling. Spawn it as a **background subagent** that then runs
