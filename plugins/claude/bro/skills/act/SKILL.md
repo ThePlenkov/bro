@@ -17,6 +17,7 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
 | ------- | ------------ |
 | `bro act status [PR] [--json]` | PR state + **exit gate** — open threads, CI failures, SAST findings. Exits non-zero while blocked |
 | `bro act threads [PR]` | Unresolved review threads, TSV |
+| `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin]` | Merge **only if the exit gate is green** — BLOCKED refuses and names blockers |
 | `bro act resolve --thread ID [--comment T]` | Resolve a thread (reply first if comment given) |
 | `bro act reply --thread ID --comment T` | Reply without resolving (`--file TSV` for batch) |
 
@@ -41,6 +42,10 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
   Bot reviewers never resolve their own threads — **you** must give each
   one a verdict and resolve it: fix → resolve silently (the push is the
   verdict), or reject → reply with the reason, then resolve.
+- **Merge through `bro act merge`, never `gh pr merge` directly.** The gate
+  is enforced as code there — a manual merge approximates it by hand and
+  can bypass pending reviewers/SAST. Only a user-directed override justifies
+  merging around a BLOCKED gate.
 - **Wait via a background subagent, never in-session.** The wait primitive
   is `gh pr checks <PR> --watch` — native settle logic, no hand-rolled
   polling. Spawn it as a **background subagent** that then runs
