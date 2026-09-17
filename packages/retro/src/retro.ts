@@ -7,7 +7,7 @@
  * done. beads IS the memory system — no sidecar files.
  */
 import { execFileSync } from 'node:child_process'
-import { bd, bdJson } from './beads.ts'
+import { bd, bdJson } from '@bro/core'
 import type { BeadRow, RecordResult, RetroPlan } from './types.ts'
 
 const WTF_LABEL = 'wtf'
@@ -181,10 +181,12 @@ export function recordRetro(plan: RetroPlan): RecordResult {
       ])
     }
 
+    // retro closes before the wtf — if the wtf close fails, compensation
+    // deletes the created beads and the still-open wtf lets a retry land
+    bd(['close', retro.id, '--reason', 'retrospect recorded'])
     if (wtf) {
       bd(['close', wtf.id, '--reason', `answered by retro ${retro.id}`])
     }
-    bd(['close', retro.id, '--reason', 'retrospect recorded'])
   } catch (err) {
     for (const id of created) {
       try {

@@ -21,6 +21,11 @@ import {
   PLAN_SCHEMA,
   recordRetro,
 } from '@bro/retro'
+import { flag, positionals } from './args.ts'
+
+const VALUE_FLAGS: ReadonlySet<string> = new Set(['--wtf'])
+
+const retroPositionals = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
 
 function usage(): never {
   console.error(`Usage: bro retrospect <command> [args…]
@@ -34,41 +39,6 @@ Commands:
 
   bro wtf <complaint…>   alias for \`bro retrospect capture\``)
   process.exit(1)
-}
-
-/** Scalar flags are not repeatable — a second occurrence can hide a
- * missing value that would pass validation. */
-function flag(argv: string[], name: string): string | undefined {
-  const i = argv.indexOf(name)
-  if (i < 0) {
-    return undefined
-  }
-  if (argv.indexOf(name, i + 1) >= 0) {
-    console.error(`error: ${name} may be given only once`)
-    process.exit(2)
-  }
-  const v = argv[i + 1]
-  if (v === undefined || v.trim() === '' || v.startsWith('--')) {
-    console.error(`error: ${name} requires a value`)
-    process.exit(2)
-  }
-  return v
-}
-
-function positionals(argv: string[]): string[] {
-  const valueFlags = new Set(['--wtf'])
-  const out: string[] = []
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i]!
-    if (arg.startsWith('--')) {
-      if (valueFlags.has(arg)) {
-        i += 1
-      }
-      continue
-    }
-    out.push(arg)
-  }
-  return out
 }
 
 function cmdCapture(rest: string[]): void {
@@ -87,7 +57,7 @@ function cmdCapture(rest: string[]): void {
 }
 
 function cmdRecord(rest: string[]): void {
-  const files = positionals(rest)
+  const files = retroPositionals(rest)
   const wtfFlag = flag(rest, '--wtf')
   if (files.length !== 1) {
     console.error('error: retrospect record requires exactly one plan file')
@@ -180,7 +150,7 @@ export async function runRetrospectCommand(argv: string[]): Promise<void> {
     checkBeads()
   }
   // these subs take no positional args — a stray one is a typo, not input
-  const pos = positionals(rest)
+  const pos = retroPositionals(rest)
   if ((sub === 'status' || sub === 'list' || sub === 'schema') && pos.length > 0) {
     console.error(`error: unexpected argument "${pos[0] ?? ''}"`)
     process.exit(2)

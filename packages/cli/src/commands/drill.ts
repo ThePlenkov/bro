@@ -19,6 +19,21 @@ import {
   listDrills,
   bd,
 } from '@bro/drill'
+import { flag, flagAll, positionals } from './args.ts'
+
+/** Flags that consume the next arg as their value. */
+const VALUE_FLAGS: ReadonlySet<string> = new Set([
+  '--under',
+  '--result',
+  '--prevent',
+  '--evidence',
+  '--type',
+  '--priority',
+  '--description',
+  '--id',
+])
+
+const drillPositionals = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
 
 function usage(): never {
   console.error(`Usage: bro drill <command> [args…]
@@ -35,66 +50,6 @@ Commands:
   process.exit(1)
 }
 
-/** A value flag's argument must exist and not look like another option. */
-function flagValue(argv: string[], i: number, name: string): string {
-  const v = argv[i + 1]
-  if (v === undefined || v.trim() === '' || v.startsWith('--')) {
-    console.error(`error: ${name} requires a value`)
-    process.exit(2)
-  }
-  return v
-}
-
-/** Scalar flags are not repeatable — a second occurrence can hide a
- * missing value (`--result ok --result`) that would pass validation. */
-function flag(argv: string[], name: string): string | undefined {
-  const i = argv.indexOf(name)
-  if (i < 0) {
-    return undefined
-  }
-  if (argv.indexOf(name, i + 1) >= 0) {
-    console.error(`error: ${name} may be given only once`)
-    process.exit(2)
-  }
-  return flagValue(argv, i, name)
-}
-
-function flagAll(argv: string[], name: string): string[] {
-  const out: string[] = []
-  for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === name) {
-      out.push(flagValue(argv, i, name))
-      i += 1
-    }
-  }
-  return out
-}
-
-function positionals(argv: string[]): string[] {
-  const valueFlags = new Set([
-    '--under',
-    '--result',
-    '--prevent',
-    '--evidence',
-    '--type',
-    '--priority',
-    '--description',
-    '--id',
-  ])
-  const out: string[] = []
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i]!
-    if (arg.startsWith('--')) {
-      if (valueFlags.has(arg)) {
-        i += 1
-      }
-      continue
-    }
-    out.push(arg)
-  }
-  return out
-}
-
 function parsePriority(raw: string | undefined): number | undefined {
   const priority = raw ? Number(raw) : undefined
   if (raw !== undefined && (raw.trim() === '' || !Number.isInteger(priority))) {
@@ -105,7 +60,7 @@ function parsePriority(raw: string | undefined): number | undefined {
 }
 
 function cmdDown(rest: string[]): void {
-  const title = positionals(rest).join(' ')
+  const title = drillPositionals(rest).join(' ')
   if (!title?.trim()) {
     console.error('error: drill down requires a title')
     process.exit(2)
@@ -192,7 +147,7 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
   rejectUnknownFlags(sub, rest)
   // these subs take no positional args — a stray one is a typo, not input
   const noPositionals = new Set(['up', 'current', 'tree', 'list'])
-  const extras = positionals(rest)
+  const extras = drillPositionals(rest)
   if (noPositionals.has(sub) && extras.length > 0) {
     console.error(`error: unexpected argument "${extras[0]}"`)
     process.exit(2)
@@ -215,7 +170,7 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
       cmdList()
       return
     case 'distill': {
-      const ids = positionals(rest)
+      const ids = drillPositionals(rest)
       if (ids.length !== 1) {
         console.error('error: drill distill requires exactly one epic/bead id')
         process.exit(2)

@@ -1,4 +1,4 @@
-export { bd, bdJson, checkBeads } from './beads.ts'
+export { bd, bdJson, checkBeads } from '@bro/core'
 export {
   childrenOf,
   currentFrame,

@@ -1,6 +1,7 @@
 /**
- * Thin `bd` wrapper for retro beads. Same contract as @bro/drill's
- * projection: bd is a user-installed CLI, PATH lookup is the contract.
+ * Thin `bd` wrapper — the beads CLI is a user-installed runtime dep; PATH
+ * lookup is the contract (same as gh). Shared by the bead-backed domains
+ * (drill frames, retrospection) instead of per-package copies.
  */
 import { execFileSync } from 'node:child_process'
 
