@@ -41,5 +41,7 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0`, `bd init` done.
 - **Drill → distill → formula** is the learning loop: a drill tree that
   solved a problem well can be distilled into a proto and re-poured next
   time (`bd mol pour`/`bd mol wisp`).
-- Lifecycle is auditable: `claim` on down, `handoff` on up, evidence refs
-  as provenance events (`bd provenance log <id>`).
+- Lifecycle is auditable for persistent frames: `claim` on down,
+  `handoff` on up, evidence refs as provenance events
+  (`bd provenance log <id>`). `--ephemeral` wisps skip all provenance —
+  by design they leave no audit trail.

@@ -259,12 +259,21 @@ async function emitStopGate(input: HookInput): Promise<void> {
     }
     const [owner, repoName] = parts
     const state = await fetchPrActState({ owner, repo: repoName!, pr: view.number })
+    // Open threads OR a still-running AI reviewer — the reviewer can open
+    // threads after we stop, so pending counts as unfinished review.
+    const blockers: string[] = []
     if (state.openThreads > 0) {
+      blockers.push(`${state.openThreads} unresolved review thread(s)`)
+    }
+    if (state.reviewersPending > 0) {
+      blockers.push(`${state.reviewersPending} AI reviewer(s) still running`)
+    }
+    if (blockers.length > 0) {
       emit({
         decision: 'block',
         reason:
-          `bro: PR #${view.number} has ${state.openThreads} unresolved review thread(s) — ` +
-          'list with `bro act threads`, fix or reply, then resolve',
+          `bro: PR #${view.number}: ${blockers.join('; ')} — ` +
+          'list with `bro act threads`, fix or reply, then resolve; recheck `bro act status`',
       })
     }
   } catch {

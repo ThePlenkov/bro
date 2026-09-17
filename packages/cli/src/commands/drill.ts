@@ -193,7 +193,11 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
   if (sub === '--help' || sub === '-h') {
     usage(0)
   }
-  checkBeads()
+  // Validate before checkBeads — `bro drill bogus` must report a syntax
+  // error even where beads isn't initialized.
+  if (!KNOWN_FLAGS[sub]) {
+    usage()
+  }
   rejectUnknownFlags(sub, rest)
   // these subs take no positional args — a stray one is a typo, not input
   const noPositionals = new Set(['up', 'current', 'tree', 'list'])
@@ -202,6 +206,7 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
     console.error(`error: unexpected argument "${extras[0]}"`)
     process.exit(2)
   }
+  checkBeads()
 
   switch (sub) {
     case 'down':

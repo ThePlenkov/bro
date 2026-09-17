@@ -25,8 +25,9 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
 - **Loop until the exit gate is green.** `bro act status` returns non-zero
   with named blockers — keep fixing until it passes; do not self-declare done.
   A pending AI reviewer (`reviewers_pending`) keeps the gate BLOCKED.
-  Bot reviewers never resolve their own threads — **you** must fix and
-  resolve every one of them.
+  Bot reviewers never resolve their own threads — **you** must give each
+  one a verdict and resolve it: fix → resolve silently (the push is the
+  verdict), or reject → reply with the reason, then resolve.
 - **Wait via a background subagent, never in-session.** The wait primitive
   is `gh pr checks <PR> --watch` — native settle logic, no hand-rolled
   polling. Spawn it as a **background subagent** chained with

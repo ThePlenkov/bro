@@ -6,10 +6,14 @@
 import { execFileSync } from 'node:child_process'
 
 export function bd(args: string[]): string {
+  // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
   return execFileSync('bd', args, {
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
-  }) // NOSONAR — user-installed CLI; PATH lookup is the contract
+    // a wedged bd must degrade, not stall — hooks call this inline in the
+    // agent lifecycle
+    timeout: 15_000,
+  })
 }
 
 export function bdJson<T>(args: string[]): T {

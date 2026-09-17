@@ -6,7 +6,7 @@
         {
           "type": "command",
           "command": "\"$DEVIN_PLUGIN_ROOT/hooks/run.sh\" session-start",
-          "timeout": 15
+          "timeout": 20
         }
       ]
     }
@@ -18,7 +18,7 @@
         {
           "type": "command",
           "command": "\"$DEVIN_PLUGIN_ROOT/hooks/run.sh\" post-compaction",
-          "timeout": 15
+          "timeout": 20
         }
       ]
     }
@@ -30,7 +30,7 @@
         {
           "type": "command",
           "command": "\"$DEVIN_PLUGIN_ROOT/hooks/run.sh\" prompt-submit",
-          "timeout": 10
+          "timeout": 15
         }
       ]
     }
@@ -42,7 +42,7 @@
         {
           "type": "command",
           "command": "\"$DEVIN_PLUGIN_ROOT/hooks/run.sh\" post-tool",
-          "timeout": 5
+          "timeout": 10
         }
       ]
     }
@@ -54,7 +54,7 @@
         {
           "type": "command",
           "command": "\"$DEVIN_PLUGIN_ROOT/hooks/run.sh\" stop",
-          "timeout": 20
+          "timeout": 25
         }
       ]
     }
@@ -66,7 +66,7 @@
         {
           "type": "command",
           "command": "\"$DEVIN_PLUGIN_ROOT/hooks/run.sh\" permission",
-          "timeout": 5
+          "timeout": 10
         }
       ]
     }
