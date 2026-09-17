@@ -1,4 +1,5 @@
 export {
+  claimStep,
   listMolecules,
   loadMolecule,
   nextStep,

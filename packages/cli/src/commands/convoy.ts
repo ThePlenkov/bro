@@ -13,6 +13,7 @@
  */
 import { bd, checkBeads } from '@bro/core'
 import {
+  claimStep,
   listMolecules,
   nextStep,
   pourFormula,
@@ -30,6 +31,7 @@ Commands:
   status [mol]                    Render the DAG — done/ready/blocked per step
   next [mol]                      Emit the next executable step as JSON
   done <step-id> [--result TEXT] [--mol ID]  Close a step and emit the new next
+  claim <step-id> [--mol ID]               Atomically claim a step (assignee + in_progress)
   pour <formula> [--var K=V]…     Pour a formula into a molecule (registers agent/human types)
   list                            Open molecules in this workspace
 
@@ -41,7 +43,7 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set(['--result', '--var', '--mol'])
 
 const convoyPositionals = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
 
-const GLYPH: Record<StepState, string> = { done: '✓', ready: '▸', blocked: '·' }
+const GLYPH: Record<StepState, string> = { done: '✓', ready: '▸', blocked: '·', in_progress: '◐' }
 
 /** Attach the upstream handoff — closed direct deps' close reasons. */
 function withInputs(next: ConvoyNext, mol: Parameters<typeof stepInputs>[0]): ConvoyNext {
@@ -53,10 +55,19 @@ function withInputs(next: ConvoyNext, mol: Parameters<typeof stepInputs>[0]): Co
 export async function runConvoyCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
   if (!sub || sub === '--help' || sub === '-h') usage()
-  const SUBS = new Set(['list', 'status', 'next', 'done', 'pour'])
+  const SUBS = new Set(['list', 'status', 'next', 'done', 'claim', 'pour'])
   if (!SUBS.has(sub)) {
     console.error(`unknown convoy command: ${sub}`)
     usage()
+  }
+  // reject unknown options — a misspelled flag (e.g. --reslut) must not
+  // silently degrade a `done` into a close with no reason
+  const KNOWN_FLAGS = new Set([...VALUE_FLAGS])
+  for (const a of rest) {
+    if (a.startsWith('--') && !KNOWN_FLAGS.has(a)) {
+      console.error(`error: unknown option ${a}`)
+      process.exit(2)
+    }
   }
   checkBeads()
 
@@ -78,7 +89,8 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
       for (const s of steps) {
         const wait = s.blockedBy.length > 0 ? `  ⟵ ${s.blockedBy.join(', ')}` : ''
         const gate = s.kind === 'human' && s.state !== 'done' ? ' [human gate]' : ''
-        console.log(`  ${GLYPH[s.state]} ${s.id}  ${s.title}${gate}${wait}`)
+        const claimed = s.state === 'in_progress' ? ' [in progress]' : ''
+        console.log(`  ${GLYPH[s.state]} ${s.id}  ${s.title}${gate}${claimed}${wait}`)
       }
       return
     }
@@ -103,6 +115,22 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
       }
       const result = flag(rest, '--result')
       bd(['close', stepId, ...(result ? ['--reason', result] : [])])
+      const fresh = resolveMolecule(mol.root.id)
+      console.log(JSON.stringify(withInputs(nextStep(fresh), fresh), null, 2))
+      return
+    }
+    case 'claim': {
+      const [stepId] = convoyPositionals(rest)
+      if (!stepId) {
+        console.error('error: claim requires a step id')
+        process.exit(2)
+      }
+      const mol = resolveMolecule(flag(rest, '--mol'))
+      if (!stepsOf(mol).some((s) => s.id === stepId)) {
+        console.error(`error: ${stepId} is not a step of molecule ${mol.root.id}`)
+        process.exit(2)
+      }
+      claimStep(stepId)
       const fresh = resolveMolecule(mol.root.id)
       console.log(JSON.stringify(withInputs(nextStep(fresh), fresh), null, 2))
       return

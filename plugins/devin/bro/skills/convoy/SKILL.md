@@ -24,6 +24,7 @@ and parallel agents. Gas City is **not** required — bro is the executor.
 bro convoy pour <formula>     → prints the molecule root id (once per run)
 bro convoy status [mol]       → DAG: ✓ done / ▸ ready / · blocked
 bro convoy next   [mol]       → JSON: what to do now
+bro convoy claim <step-id>            → atomic claim — do this before starting
 bro convoy done <step-id> --result "…"   → closes the step, emits the new next
 ```
 
@@ -36,16 +37,22 @@ Repeat `next` → work → `done` until `next` reports `"state": "complete"`.
 - `gate` — a human step is next. **Ask the user** — do not execute it
   yourself and do not mark it done on their behalf without their answer.
   Their approval is the result; then `done` it with their decision.
-- `blocked` — open steps exist but none are ready (dependency cycle or a
-  gate closed without downstream). Run `bro convoy status` and report.
+- `blocked` — open steps exist but none are ready (a dependency cycle,
+  or remaining steps all waiting on other open work). Run
+  `bro convoy status` and report.
 - `complete` — every step done. Close the molecule root:
   `bd close <mol-id> --reason "convoy complete"`.
 
 `next` also reports `gates[]` — every ready human gate, even while an
 agent step runs. Surface them to the user promptly; a ready gate means
-the convoy is waiting on a human somewhere. And `inputs[]` — the
-`--result` each closed direct dependency was completed with. That is the
-handoff: read it before starting the step.
+the convoy is waiting on a human somewhere. `inProgress[]` lists steps
+already claimed — if yours appears there, another agent owns it; pick a
+different ready step. And `inputs[]` — the `--result` each closed direct
+dependency was completed with. That is the handoff: read it before
+starting the step.
+
+With several open molecules, pass `--mol <id>` explicitly — no-arg
+resolution errors on ambiguity rather than guessing.
 
 ## Policy
 
@@ -57,6 +64,9 @@ handoff: read it before starting the step.
   next step needs (paths, PR urls, verdicts), not a diary entry.
 - **Gates are not optional.** A `human` step exists to stop the machine;
   treating it as an agent step defeats the formula.
+- **Claim before you start.** `bro convoy claim <step>` is an atomic
+  lease (assignee + in_progress, refused if another agent holds it). With
+  parallel agents in the same repo, an unclaimed step is shared work.
 - **Resume is free.** After compaction or a fresh session, `bro convoy
   status` reconstructs everything — there is no in-memory state to lose.
 - **Failures stay visible.** If a step cannot be completed, leave it open

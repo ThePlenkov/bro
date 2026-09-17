@@ -26,9 +26,9 @@ export interface Molecule {
   dependencies: MolDep[]
 }
 
-export type StepKind = 'agent' | 'human' | 'task'
+export type StepKind = 'agent' | 'human'
 
-export type StepState = 'done' | 'ready' | 'blocked'
+export type StepState = 'done' | 'ready' | 'blocked' | 'in_progress'
 
 export interface ConvoyStep {
   id: string
@@ -61,6 +61,8 @@ export interface ConvoyNext {
   step?: ConvoyStep
   /** ready steps that are human gates — always surfaced so none is skipped */
   gates: string[]
+  /** steps claimed (in_progress) — visible so parallel agents don't collide */
+  inProgress: string[]
   /** closed direct dependencies of `step` with their close reasons — the handoff */
   inputs?: StepInput[]
   /** open steps still waiting on dependencies */

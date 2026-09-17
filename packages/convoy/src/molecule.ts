@@ -30,7 +30,7 @@ export function resolveMolecule(id?: string): Molecule {
  * Step classification. bd flattens unregistered custom types to `task`
  * (unless `bd config set types.custom "agent human"` was run before pour),
  * so kind is: declared type if agent|human, else `gate`/`human`-titled
- * task → human, otherwise task → agent-executable.
+ * a gate title → human, otherwise agent-executable.
  */
 export function stepKind(issue: MolIssue): StepKind {
   const t = issue.issue_type
@@ -40,6 +40,7 @@ export function stepKind(issue: MolIssue): StepKind {
 }
 
 const CLOSED = new Set(['closed', 'done'])
+const CLAIMED = new Set(['in_progress'])
 
 /**
  * Flatten a molecule into ordered steps with scheduling state. Children
@@ -59,7 +60,13 @@ export function stepsOf(mol: Molecule): ConvoyStep[] {
       const blockedBy = mol.dependencies
         .filter((d) => d.type === 'blocks' && d.issue_id === i.id && !closed.has(d.depends_on_id))
         .map((d) => d.depends_on_id)
-      const state: StepState = CLOSED.has(i.status) ? 'done' : blockedBy.length > 0 ? 'blocked' : 'ready'
+      const state: StepState = CLOSED.has(i.status)
+        ? 'done'
+        : CLAIMED.has(i.status)
+          ? 'in_progress'
+          : blockedBy.length > 0
+            ? 'blocked'
+            : 'ready'
       return {
         id: i.id,
         title: i.title,
@@ -78,7 +85,8 @@ export function nextStep(mol: Molecule): ConvoyNext {
   const ready = steps.filter((s) => s.state === 'ready')
   const blocked = steps.filter((s) => s.state === 'blocked').map((s) => s.id)
   const gates = ready.filter((s) => s.kind === 'human').map((s) => s.id)
-  const base = { mol: mol.root.id, ready, gates, blocked }
+  const inProgress = steps.filter((s) => s.state === 'in_progress').map((s) => s.id)
+  const base = { mol: mol.root.id, ready, gates, inProgress, blocked }
   if (steps.every((s) => s.state === 'done')) return { ...base, state: 'complete' }
   const step = ready[0]
   if (!step) return { ...base, state: 'blocked' }
@@ -98,6 +106,15 @@ export function stepInputs(mol: Molecule, stepId: string): StepInput[] {
       const dep = bdJson<{ title: string; close_reason?: string }>(['show', d.depends_on_id])
       return { id: d.depends_on_id, title: dep.title, reason: dep.close_reason ?? '' }
     })
+}
+
+/**
+ * `bro convoy claim` — bd's atomic claim: sets assignee + in_progress,
+ * refuses if another actor holds it. Parallel agents coordinate through
+ * this — whoever claims first owns the step.
+ */
+export function claimStep(stepId: string): void {
+  bd(['update', stepId, '--claim'])
 }
 
 /**
