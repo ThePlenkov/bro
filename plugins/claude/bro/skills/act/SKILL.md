@@ -29,6 +29,15 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
   A pending AI reviewer (`reviewers_pending`) keeps the gate BLOCKED, and a
   *failed* reviewer check (`reviewers_failing`) blocks too — the review may
   never have run; re-run it or push to retrigger.
+  **Deterministic infra failure is a terminal state, not a fix.** When a
+  reviewer check fails with the same infra error on consecutive pushes —
+  check *output* shows e.g. "model output limit" or "rate limited", not a
+  code finding — the gate stays BLOCKED by design and `bro act status`
+  never goes green. Resolve every other blocker, then report the blocked
+  gate with the evidence (same error text, N pushes) and let the user
+  merge over the red box. The agent does not merge, does not treat the
+  missing review as done, and files a follow-up to fix the reviewer
+  config durably (REVIEW.md, dashboard settings).
   Bot reviewers never resolve their own threads — **you** must give each
   one a verdict and resolve it: fix → resolve silently (the push is the
   verdict), or reject → reply with the reason, then resolve.
