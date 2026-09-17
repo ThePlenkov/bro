@@ -15,7 +15,7 @@ describe('classifyExecCommand', () => {
   test('ignores unrelated commands', () => {
     assert.equal(classifyExecCommand('git status'), null)
     assert.equal(classifyExecCommand('gh pr view 42'), null)
-    assert.equal(classifyExecCommand('echo "gh pr merge"'), 'pr-merge') // text match — fine
+    assert.equal(classifyExecCommand('echo "gh pr merge"'), null) // text, not a merge
   })
 })
 
@@ -26,6 +26,7 @@ describe('isSelfToolCommand', () => {
     assert.ok(isSelfToolCommand('  bro debt prs'))
     assert.ok(isSelfToolCommand('npx -y @theplenkov/bro debt status'))
     assert.ok(isSelfToolCommand('npx @theplenkov/bro hooks stop'))
+    assert.ok(isSelfToolCommand('npx -y @theplenkov/bro@0 act status'))
   })
 
   test('does not approve lookalikes or other tools', () => {
@@ -33,6 +34,14 @@ describe('isSelfToolCommand', () => {
     assert.ok(!isSelfToolCommand('bdr foo'))
     assert.ok(!isSelfToolCommand('gh pr merge 1'))
     assert.ok(!isSelfToolCommand(''))
+  })
+
+  test('rejects chained/piped/redirected commands — the second stage is unvetted', () => {
+    assert.ok(!isSelfToolCommand('bro act status && rm -rf /'))
+    assert.ok(!isSelfToolCommand('bro act status; rm -rf /'))
+    assert.ok(!isSelfToolCommand('bd ready | sh'))
+    assert.ok(!isSelfToolCommand('bro x $(evil)'))
+    assert.ok(!isSelfToolCommand('bro x > /tmp/out'))
   })
 })
 

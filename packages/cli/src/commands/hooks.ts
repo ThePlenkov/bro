@@ -60,20 +60,29 @@ function context(event: string, text: string): void {
 
 // --- pure probes (testable without gh/bd) -----------------------------------
 
-/** Which gh lifecycle a shell command belongs to, if any. */
+/** Which gh lifecycle a shell command belongs to, if any. `gh` must sit at
+ * a command position — `echo "gh pr merge"` is text, not a merge. */
 export function classifyExecCommand(cmd: string): 'pr-merge' | 'pr-create' | null {
-  if (/\bgh\s+pr\s+merge\b/.test(cmd)) {
+  if (/(^|[;&|]\s*)gh\s+pr\s+merge\b/.test(cmd)) {
     return 'pr-merge'
   }
-  if (/\bgh\s+pr\s+create\b/.test(cmd)) {
+  if (/(^|[;&|]\s*)gh\s+pr\s+create\b/.test(cmd)) {
     return 'pr-create'
   }
   return null
 }
 
-/** bro/bd are the plugin's own tools — permission hooks approve them outright. */
+/** bro/bd are the plugin's own tools — permission hooks approve them
+ * outright. Chained, piped, or redirected commands are NOT self-tool calls:
+ * the second stage could be anything, so it falls through to a prompt. */
 export function isSelfToolCommand(cmd: string): boolean {
-  return /^\s*(bro|bd)(\s|$)/.test(cmd) || /^\s*npx\s+(-y\s+)?@theplenkov\/bro(\s|$)/.test(cmd)
+  if (/[;&|`$()<>\n\\]/.test(cmd)) {
+    return false
+  }
+  return (
+    /^\s*(bro|bd)(\s|$)/.test(cmd) ||
+    /^\s*npx\s+(-y\s+)?@theplenkov\/bro(@[\w.:-]+)?(\s|$)/.test(cmd)
+  )
 }
 
 /** First GitHub PR URL in free text → { owner, repo, pr }. */

@@ -5,7 +5,7 @@
  * queue (`bd ready -l debt`). Upsert key: `external_ref` = `thread_id`, so
  * `bro debt sync` is idempotent. Status reconciles ledger → bead on re-runs.
  */
-import { execFileSync } from 'node:child_process'
+import { bd } from '@bro/core'
 import type { DebtPriority, DebtRecord, DebtStatus } from './types.ts'
 
 export interface BeadRef {
@@ -16,10 +16,6 @@ export interface BeadRef {
   timesSeen?: number
 }
 
-function bd(args: string[]): string {
-  return execFileSync('bd', args, { encoding: 'utf8' }) // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
-}
-
 export function checkBeads(): void {
   try {
     bd(['--version'])
@@ -28,8 +24,13 @@ export function checkBeads(): void {
   }
   try {
     bd(['list', '--json', '-n', '1'])
-  } catch {
-    throw new Error('beads not initialized in this repo — run `bd init` first')
+  } catch (err) {
+    // preserve the real failure — "not initialized" is only one cause
+    const stderr = (err as { stderr?: string }).stderr?.trim()
+    throw new Error(
+      `bd list failed — ${stderr || (err instanceof Error ? err.message : String(err))} ` +
+        '(run `bd init` if beads is not initialized here)'
+    )
   }
 }
 

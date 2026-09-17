@@ -6,10 +6,12 @@ over beads. In a repo with `bro.config.json` or `.beads/`:
 
 - `bro act status` is the PR review gate — check it before declaring done;
   `bro act threads` lists unresolved threads, `bro act resolve`/`reply` mutate.
-- `bro debt` sweeps review debt; `bro debt next` picks the top open finding.
+- `bro debt collect` sweeps review debt on merged PRs; `bro debt next`
+  picks the top open finding.
 - `bro drill down`/`up` creates scoped descent frames; an open frame must be
   closed with `--result` before stopping.
 - Plugin hooks rehydrate state at session start/post-compaction and block
-  Stop while a drill frame or unresolved review threads remain.
+  Stop once while a drill frame or unresolved review threads remain — a
+  repeated stop is let through (gates, not loops).
 
 Developing bro itself: see CONTRIBUTING.md.

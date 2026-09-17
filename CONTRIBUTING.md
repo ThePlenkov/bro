@@ -25,6 +25,9 @@ regenerates it; `npm run check:embedded` verifies freshness.
 
 ## Critical setup step
 
+Prereqs: `node >= 22`, `gh` authenticated, and `bun` — `build:nx-plugins`
+shells out to `bun install`/`bun run build` inside `vendor/nx.ts`.
+
 Nx plugins come from the `vendor/nx.ts` submodule as **TS source**. They must
 be patched and built before nx works:
 

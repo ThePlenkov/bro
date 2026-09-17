@@ -1,4 +1,5 @@
 export { ensureGhAuth, gh, ghJson, ghTry, resolveRepo } from './gh.ts'
+export { bd, bdJson } from './bd.ts'
 export { DEFAULT_CONFIG, loadConfig, PERSONALITIES, STORE_BACKENDS } from './config.ts'
 export type { BroConfig, Personality, StoreBackend } from './config.ts'
 export { makePrinter } from './output.ts'

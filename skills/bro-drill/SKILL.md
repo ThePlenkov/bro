@@ -33,8 +33,9 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0`, `bd init` done.
   not a suggestion.** The CLI can't judge whether a lesson exists — that
   call is yours; when it does, each item becomes follow-up work in beads,
   not a footnote.
-- **Isolation.** A child frame gets only task-relevant context; the parent
-  absorbs only the curated memo — never the raw transcript.
+- **Isolation.** A child frame gets only task-relevant context; the
+  curated memo lands as a `bd note` on the closed child (prevention items
+  become beads linked `discovered-from` it) — never the raw transcript.
 - **Can't ascend past open children** — bd blocks the close; ascend
   bottom-up.
 - **Drill → distill → formula** is the learning loop: a drill tree that

@@ -148,8 +148,17 @@ export function drillDown(title: string, opts: DownOptions = {}): DrillRow {
     ])
   } catch (err) {
     // compensate: an unclaimed frame violates the claim-on-down
-    // invariant, and a retry would create a duplicate
-    bd(['delete', row.id, '--force'])
+    // invariant, and a retry would create a duplicate. A failed cleanup
+    // must not swallow the claim error — report both.
+    try {
+      bd(['delete', row.id, '--force'])
+    } catch (cleanupErr) {
+      throw new Error(
+        `claim failed: ${err instanceof Error ? err.message : err}; ` +
+          `cleanup of ${row.id} also failed (frame left unclaimed): ` +
+          `${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`
+      )
+    }
     throw err
   }
   return row

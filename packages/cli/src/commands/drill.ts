@@ -20,7 +20,7 @@ import {
   bd,
 } from '@bro/drill'
 
-function usage(): never {
+function usage(exitCode = 1): never {
   console.error(`Usage: bro drill <command> [args…]
 
 Commands:
@@ -32,7 +32,7 @@ Commands:
   distill ID                                     Extract a reusable proto from a drill epic
 
   bro unwind …                                   alias for \`bro drill up\``)
-  process.exit(1)
+  process.exit(exitCode)
 }
 
 /** A value flag's argument must exist and not look like another option. */
@@ -176,7 +176,9 @@ function rejectUnknownFlags(sub: string, argv: string[]): void {
     return
   }
   for (const arg of argv) {
-    if (arg.startsWith('--') && !known.has(arg)) {
+    // single-dash typos too — `-p 3` silently becoming a title is worse
+    // than an error (no drill flag uses one dash; bare "-" stays a title)
+    if (arg.length > 1 && arg.startsWith('-') && !known.has(arg)) {
       console.error(`error: unknown option "${arg}" for drill ${sub}`)
       process.exit(2)
     }
@@ -185,8 +187,11 @@ function rejectUnknownFlags(sub: string, argv: string[]): void {
 
 export async function runDrillCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
-  if (!sub || sub === '--help' || sub === '-h') {
+  if (!sub) {
     usage()
+  }
+  if (sub === '--help' || sub === '-h') {
+    usage(0)
   }
   checkBeads()
   rejectUnknownFlags(sub, rest)
