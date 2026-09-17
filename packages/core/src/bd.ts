@@ -51,21 +51,25 @@ export function evidenceKind(ref: string): 'land' | 'commit' | 'used' {
   }
 }
 
-/**
- * Stealth-init `.beads` in the current repo when missing — the single init
- * flags contract shared by debt sync and `bro setup` (local exclude,
- * nothing lands in git). Returns true when it initialized.
- */
 /** Only a real `.beads` *directory* counts — a file or dangling path must
  *  not suppress init (it would fail loudly rather than be repaired). */
 function beadsDirExists(): boolean {
   try {
     return statSync(join(process.cwd(), '.beads')).isDirectory()
-  } catch {
-    return false
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return false
+    }
+    throw err // EACCES/ELOOP etc. are real failures — don't mask as "absent"
   }
 }
 
+/**
+ * Stealth-init `.beads` in the current repo when missing — the single init
+ * flags contract shared by debt sync and `bro setup` (local exclude,
+ * nothing lands in git). Returns true when it initialized.
+ */
 export function initBeadsStealth(): boolean {
   if (beadsDirExists()) {
     return false

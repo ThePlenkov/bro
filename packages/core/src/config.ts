@@ -42,6 +42,14 @@ function normalizeStores(raw: RawConfig): StoreBackend[] {
   if (Array.isArray(raw.stores)) {
     return [...new Set<StoreBackend>(['jsonl', ...raw.stores.filter(isBackend)])]
   }
+  if (raw.stores !== undefined) {
+    // Present but not an array — a malformed config must not silently
+    // widen into the beads projection.
+    console.error(
+      'warning: bro.config.json "stores" must be an array — using jsonl-only'
+    )
+    return ['jsonl']
+  }
   if (raw.store === 'beads' || raw.store === 'both') {
     return ['jsonl', 'beads']
   }
@@ -69,6 +77,9 @@ export function loadConfig(cwd: string = process.cwd()): BroConfig {
       debt: { ...DEFAULT_CONFIG.debt, ...(rest.debt ?? {}) },
     }
   } catch {
-    return DEFAULT_CONFIG
+    // Unparseable config ≠ missing config — don't silently enable beads
+    // (and its `bd init` side effects) on a file the user broke.
+    console.error('warning: bro.config.json is not valid JSON — using jsonl-only stores')
+    return { ...DEFAULT_CONFIG, stores: ['jsonl'] }
   }
 }

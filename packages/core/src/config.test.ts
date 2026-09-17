@@ -50,6 +50,16 @@ describe('loadConfig stores', () => {
     assert.deepEqual(load({ store: 'beed' }).stores, ['jsonl'])
   })
 
+  test('non-array stores field falls back to jsonl-only', () => {
+    assert.deepEqual(load({ stores: 'bead' }).stores, ['jsonl'])
+  })
+
+  test('malformed config file falls back to jsonl-only', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
+    writeFileSync(join(dir, 'bro.config.json'), '{oops')
+    assert.deepEqual(loadConfig(dir).stores, ['jsonl'])
+  })
+
   test('stores array beats legacy store field', () => {
     assert.deepEqual(load({ store: 'beads', stores: ['jsonl'] }).stores, ['jsonl'])
   })

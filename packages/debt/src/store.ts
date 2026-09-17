@@ -75,17 +75,20 @@ function ensureDebtDirExcluded(dir: string): void {
     )
     return
   }
-  const rel = relative(root, dir)
+  const nativeRel = relative(root, dir)
   // `..` alone or `..<sep>` = outside the worktree; a dir literally named
   // `..debt` is a valid in-worktree segment, not an escape.
-  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) {
+  if (nativeRel === '' || nativeRel === '..' || nativeRel.startsWith(`..${sep}`)) {
     excludedDebtDirs.add(dir)
     return // debt dir is the repo root or outside the worktree
   }
-  if (/[\r\n]/.test(rel)) {
+  if (/[\r\n]/.test(nativeRel)) {
     excludedDebtDirs.add(dir)
     return // a newline in the dir name would inject extra exclude patterns
   }
+  // Git pathspecs and ignore patterns are slash-separated — on Windows the
+  // native backslashes would be escaped by gitignoreLiteral and never match.
+  const rel = nativeRel.split(sep).join('/')
   // Inside a worktree from here — exclusion failures are surfaced, since a
   // silently trackable ledger is exactly what this guard prevents.
   try {
@@ -106,7 +109,9 @@ function ensureDebtDirExcluded(dir: string): void {
       const entry = `${gitignoreLiteral(rel)}/`
       if (!existing.split('\n').includes(entry)) {
         const nl = existing === '' || existing.endsWith('\n') ? '' : '\n'
-        writeFileSync(path, `${existing}${nl}${entry}\n`)
+        // atomic write inside the lock — a truncated exclude would drop
+        // unrelated local rules, not just ours
+        atomicWrite(path, `${existing}${nl}${entry}\n`)
       }
     })
     // Ignores never override the index — files already committed under the
