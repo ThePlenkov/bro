@@ -58,29 +58,10 @@ function parseAction(raw: unknown, i: number, errors: string[]): RetroAction | u
   }
 }
 
-/** Parse + validate a plan file. Throws one error listing every problem —
- * the agent fixes the file once instead of iterating on single failures. */
-export function parsePlan(text: string, source = 'plan'): RetroPlan {
-  let doc: unknown
-  try {
-    doc = parse(text)
-  } catch (err) {
-    throw new Error(`${source}: invalid TOML — ${err instanceof Error ? err.message : String(err)}`)
-  }
-
-  const errors: string[] = []
-  if (isRecord(doc)) {
-    // a misspelled `actions`/`retro` key must not silently drop work
-    for (const key of Object.keys(doc)) {
-      if (key !== 'retro' && key !== 'actions') {
-        errors.push(`unknown top-level key "${key}"`)
-      }
-    }
-  }
-  const retro = isRecord(doc) ? doc.retro : undefined
-  if (!isRecord(retro)) {
-    throw new Error(`${source}: [retro] table is required`)
-  }
+function parseRetroSection(
+  retro: Record<string, unknown>,
+  errors: string[]
+): Omit<RetroPlan, 'actions'> {
   for (const key of Object.keys(retro)) {
     if (!RETRO_KEYS.has(key)) {
       errors.push(`retro: unknown key "${key}"`)
@@ -105,32 +86,65 @@ export function parsePlan(text: string, source = 'plan'): RetroPlan {
       evidence = retro.evidence.map((e) => e.trim())
     }
   }
+  return {
+    // guarded: the caller discards this result when errors were collected
+    what: typeof retro.what === 'string' ? retro.what.trim() : '',
+    why: typeof retro.why === 'string' ? retro.why.trim() : '',
+    scope: retroScope,
+    wtf: nonEmpty(retro.wtf) ? retro.wtf.trim() : undefined,
+    evidence,
+  }
+}
 
-  const rawActions = isRecord(doc) ? (doc.actions ?? []) : []
-  const actions: RetroAction[] = []
+function parseActions(rawActions: unknown, errors: string[]): RetroAction[] {
+  if (rawActions === undefined) {
+    return []
+  }
   if (!Array.isArray(rawActions)) {
     errors.push('actions: must be an array of tables ([[actions]])')
-  } else {
-    rawActions.forEach((raw, i) => {
-      const action = parseAction(raw, i, errors)
-      if (action) {
-        actions.push(action)
-      }
-    })
+    return []
   }
+  const actions: RetroAction[] = []
+  rawActions.forEach((raw, i) => {
+    const action = parseAction(raw, i, errors)
+    if (action) {
+      actions.push(action)
+    }
+  })
+  return actions
+}
+
+/** Parse + validate a plan file. Throws one error listing every problem —
+ * the agent fixes the file once instead of iterating on single failures. */
+export function parsePlan(text: string, source = 'plan'): RetroPlan {
+  let doc: unknown
+  try {
+    doc = parse(text)
+  } catch (err) {
+    throw new Error(`${source}: invalid TOML — ${err instanceof Error ? err.message : String(err)}`)
+  }
+
+  const errors: string[] = []
+  if (isRecord(doc)) {
+    // a misspelled `actions`/`retro` key must not silently drop work
+    for (const key of Object.keys(doc)) {
+      if (key !== 'retro' && key !== 'actions') {
+        errors.push(`unknown top-level key "${key}"`)
+      }
+    }
+  }
+  const retro = isRecord(doc) ? doc.retro : undefined
+  if (!isRecord(retro)) {
+    throw new Error(`${source}: [retro] table is required`)
+  }
+  const section = parseRetroSection(retro, errors)
+  const actions = parseActions(isRecord(doc) ? doc.actions : undefined, errors)
 
   if (errors.length > 0) {
     const details = errors.map((e) => `  - ${e}`).join('\n')
     throw new Error(`${source}:\n${details}`)
   }
-  return {
-    what: (retro.what as string).trim(),
-    why: (retro.why as string).trim(),
-    scope: retroScope,
-    wtf: nonEmpty(retro.wtf) ? retro.wtf.trim() : undefined,
-    evidence,
-    actions,
-  }
+  return { ...section, actions }
 }
 
 /** The commented template `bro retrospect schema` prints — keeps the schema

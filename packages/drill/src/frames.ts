@@ -107,6 +107,35 @@ function requireOpenDrill(id: string, flag: string): DrillRow {
   return row
 }
 
+/** Record the claim; on failure delete the frame — an unclaimed frame
+ * violates the claim-on-down invariant and a retry would duplicate it.
+ * The delete itself can fail; surface both so the orphan isn't silent. */
+function claimFrame(row: DrillRow): void {
+  try {
+    bd([
+      'provenance',
+      'record',
+      '--issue',
+      row.id,
+      '--kind',
+      'claim',
+      '--source',
+      'bro drill down',
+      '--at',
+      new Date().toISOString(),
+    ])
+  } catch (err) {
+    try {
+      bd(['delete', row.id, '--force'])
+    } catch (cleanupErr) {
+      const msg = err instanceof Error ? err.message : String(err)
+      const cmsg = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)
+      throw new Error(`${msg} — cleanup of frame ${row.id} also failed: ${cmsg}`)
+    }
+    throw err
+  }
+}
+
 /** Descend: create a child frame under `opts.under` or the current leaf. */
 export function drillDown(title: string, opts: DownOptions = {}): DrillRow {
   const parent = opts.under
@@ -133,32 +162,7 @@ export function drillDown(title: string, opts: DownOptions = {}): DrillRow {
     // wisp semantics: no audit trail
     return row
   }
-  try {
-    bd([
-      'provenance',
-      'record',
-      '--issue',
-      row.id,
-      '--kind',
-      'claim',
-      '--source',
-      'bro drill down',
-      '--at',
-      new Date().toISOString(),
-    ])
-  } catch (err) {
-    // compensate: an unclaimed frame violates the claim-on-down
-    // invariant, and a retry would create a duplicate — but the delete
-    // itself can fail; surface both so the orphan isn't silent
-    try {
-      bd(['delete', row.id, '--force'])
-    } catch (cleanupErr) {
-      const msg = err instanceof Error ? err.message : String(err)
-      const cmsg = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)
-      throw new Error(`${msg} — cleanup of frame ${row.id} also failed: ${cmsg}`)
-    }
-    throw err
-  }
+  claimFrame(row)
   return row
 }
 
@@ -170,6 +174,57 @@ export function refKind(ref: string): string {
     return 'git-sha'
   }
   return 'work-id'
+}
+
+/** One prevention bead per item — discovered-from, not --parent:
+ * prevention is follow-up work found by the frame, and a child would
+ * block the parent's own close. */
+function createPreventions(frameId: string, items: string[]): string[] {
+  return items.map(
+    (item) =>
+      bdJson<DrillRow>([
+        'create',
+        item,
+        '-l',
+        PREVENTION_LABEL,
+        '--no-inherit-labels',
+        '--deps',
+        `discovered-from:${frameId}`,
+      ]).id
+  )
+}
+
+/** Evidence refs + handoff event — skipped for wisps (no audit trail). */
+function recordHandoff(frame: DrillRow, evidence: string[]): void {
+  for (const ref of evidence) {
+    const kind = refKind(ref)
+    bd([
+      'provenance',
+      'record',
+      '--issue',
+      frame.id,
+      '--kind',
+      kind === 'pr' ? 'land' : 'commit',
+      '--source',
+      'bro drill up',
+      '--ref',
+      ref,
+      '--ref-kind',
+      kind,
+    ])
+  }
+  bd([
+    'provenance',
+    'record',
+    '--issue',
+    frame.id,
+    '--kind',
+    'handoff',
+    '--source',
+    'bro drill up',
+    '--at',
+    new Date().toISOString(),
+  ])
 }
 
 /**
@@ -215,53 +270,9 @@ export function drillUp(opts: UpOptions): UpResult {
   const preventionIds: string[] = []
   try {
     bd(['note', frame.id, memo])
-
-    for (const item of opts.prevent ?? []) {
-      // discovered-from, not --parent: prevention is follow-up work found by
-      // this frame, and a child would block the parent's own close.
-      const row = bdJson<DrillRow>([
-        'create',
-        item,
-        '-l',
-        PREVENTION_LABEL,
-        '--no-inherit-labels',
-        '--deps',
-        `discovered-from:${frame.id}`,
-      ])
-      preventionIds.push(row.id)
-    }
-
+    preventionIds.push(...createPreventions(frame.id, opts.prevent ?? []))
     if (!frame.ephemeral) {
-      // wisp semantics: ephemeral frames leave no audit trail
-      for (const ref of opts.evidence ?? []) {
-        const kind = refKind(ref)
-        bd([
-          'provenance',
-          'record',
-          '--issue',
-          frame.id,
-          '--kind',
-          kind === 'pr' ? 'land' : 'commit',
-          '--source',
-          'bro drill up',
-          '--ref',
-          ref,
-          '--ref-kind',
-          kind,
-        ])
-      }
-      bd([
-        'provenance',
-        'record',
-        '--issue',
-        frame.id,
-        '--kind',
-        'handoff',
-        '--source',
-        'bro drill up',
-        '--at',
-        new Date().toISOString(),
-      ])
+      recordHandoff(frame, opts.evidence ?? [])
     }
     bd(['close', frame.id, '--reason', 'drill up — result handed to parent'])
   } catch (err) {
