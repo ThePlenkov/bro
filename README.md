@@ -59,7 +59,7 @@ babysit, no config files to confess to.
 | `bro drill up --result T [--prevent T]… [--evidence R]…` | Ascend. `--result` is mandatory; each `--prevent` becomes a `discovered-from` task; evidence refs land in `bd provenance` |
 | `bro unwind …` | Alias for `drill up` |
 | `bro drill current` / `tree` / `list` | Active leaf frame · all hierarchies · open frames |
-| `bro drill distill <epic>` | `bd mol distill` — a good drill tree becomes a reusable proto |
+| `bro drill distill <id>` | `bd mol distill` — a good drill tree becomes a reusable proto |
 
 | `bro setup [--beads] [--skills]` | Wires bro into the current repo: checks `gh` auth + `bd`, writes `bro.config.json`, optionally `bd init --stealth` + installs the debt-pipeline formula and thin skill wrappers |
 
