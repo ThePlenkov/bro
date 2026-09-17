@@ -49,8 +49,8 @@ resolution only works with exactly one.
 `next` also reports `gates[]` — every ready human gate, even while an
 agent step runs. Surface them to the user promptly; a ready gate means
 the convoy is waiting on a human somewhere. `inProgress[]` lists steps
-already claimed — if yours appears there, another agent owns it; pick a
-different ready step. And `inputs[]` — the `--result` each closed direct
+already claimed — including yours, once you claim. Steps you didn't claim
+that appear here belong to another agent; pick a different ready step. And `inputs[]` — the `--result` each closed direct
 dependency was completed with. That is the handoff: read it before
 starting the step.
 

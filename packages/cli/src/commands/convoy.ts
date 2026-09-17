@@ -28,8 +28,8 @@ function usage(exitCode = 1): never {
   console.error(`Usage: bro convoy <command> [args…]
 
 Commands:
-  status [mol]                    Render the DAG — done/ready/blocked per step
-  next [mol]                      Emit the next executable step as JSON
+  status [mol] [--mol ID]         Render the DAG — done/ready/blocked per step
+  next [mol] [--mol ID]           Emit the next executable step as JSON
   done <step-id> [--result TEXT] [--mol ID]  Close a step and emit the new next
   claim <step-id> [--mol ID]               Atomically claim a step (assignee + in_progress)
   pour <formula> [--var K=V]…     Pour a formula into a molecule (registers agent/human types)
@@ -83,7 +83,7 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
     }
     case 'status': {
       const [id] = convoyPositionals(rest)
-      const mol = resolveMolecule(id)
+      const mol = resolveMolecule(id ?? flag(rest, '--mol'))
       const steps = stepsOf(mol)
       console.log(`${mol.root.id} ${mol.root.title}`)
       for (const s of steps) {
@@ -96,7 +96,7 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
     }
     case 'next': {
       const [id] = convoyPositionals(rest)
-      const mol = resolveMolecule(id)
+      const mol = resolveMolecule(id ?? flag(rest, '--mol'))
       console.log(JSON.stringify(withInputs(nextStep(mol), mol), null, 2))
       return
     }
