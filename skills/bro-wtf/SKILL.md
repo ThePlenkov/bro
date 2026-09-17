@@ -26,8 +26,10 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0`, `bd init` done.
 - **Capture before apologizing.** The first move is
   `bro wtf "<the user's words, verbatim>"` — never a paraphrase, never a
   softened version. The quote is evidence; every arg is captured
-  literally, `--`-leading text included (only a bare `-h`/`--help`
-  prints usage).
+  literally, `--`-leading text included (only a leading `-h`/`--help`
+  prints usage). Invoke it as a single argv value — never interpolate
+  the complaint into a compound shell command where metacharacters or
+  quotes could execute.
 - **Analyze your own actions, not the user.** The wtf is a defect in the
   agent's process. Review your recent turns in context: what you were
   asked, what you assumed, what you skipped. Post-compaction and unsure?
@@ -45,6 +47,7 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0`, `bd init` done.
   update AGENTS.md/rules/skill files directly; `sink:upstream-issue` →
   file it;
   `sink:workaround` → implement the fix now.
-- **Recurrence escalates scope.** `bro retrospect list` before writing —
+- **Recurrence escalates scope.** `bro retrospect list` before writing,
+  then `bd show <id>` on each listed retro to read its `why` memo —
   a repeat root cause moves the fix one scope wider along
   session → agent → user → project → universal.

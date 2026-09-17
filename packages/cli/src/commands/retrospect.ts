@@ -146,8 +146,13 @@ export async function runRetrospectCommand(argv: string[]): Promise<void> {
       }
     }
   }
-  // --help/-h must work without a beads checkout
-  if (rest.includes('--help') || rest.includes('-h')) {
+  // --help/-h must work without a beads checkout. For capture only a
+  // leading help token counts — a `--help` inside the complaint is text.
+  const wantsHelp =
+    sub === 'capture'
+      ? rest[0] === '--help' || rest[0] === '-h'
+      : rest.includes('--help') || rest.includes('-h')
+  if (wantsHelp) {
     usage()
   }
   if (sub !== 'schema') {
