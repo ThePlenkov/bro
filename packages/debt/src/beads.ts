@@ -5,6 +5,8 @@
  * queue (`bd ready -l debt`). Upsert key: `external_ref` = `thread_id`, so
  * `bro debt sync` is idempotent. Status reconciles ledger → bead on re-runs.
  */
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { bd } from '@bro/core'
 import type { DebtPriority, DebtRecord, DebtStatus } from './types.ts'
 
@@ -20,7 +22,14 @@ export function checkBeads(): void {
   try {
     bd(['--version'])
   } catch {
-    throw new Error('bd not found — install beads, or keep store: jsonl')
+    throw new Error(
+      'bd not found — install beads, or opt out with "stores": ["jsonl"] in bro.config.json'
+    )
+  }
+  // beads is a default store — a repo without .beads gets a stealth init
+  // (local exclude, nothing lands in git) instead of a setup error.
+  if (!existsSync(join(process.cwd(), '.beads'))) {
+    bd(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'])
   }
   try {
     bd(['list', '--json', '-n', '1'])

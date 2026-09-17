@@ -139,18 +139,24 @@ function checkPrereqs(needBeads: boolean): void {
   // Validate prerequisites before writing anything — a config pointing at a
   // store we can't run would strand the repo.
   if (needBeads && !bd) {
-    console.error('error: --beads requested but bd not found — https://github.com/gastownhall/beads')
+    console.error(
+      'error: bd not found — install beads (https://github.com/gastownhall/beads) ' +
+        'or opt out with "stores": ["jsonl"] in bro.config.json'
+    )
     process.exit(1)
   }
 }
 
 export async function runSetupCommand(argv: string[]): Promise<void> {
   const { beads, skills, personality } = parseSetupArgs(argv)
-  checkPrereqs(beads)
+  // beads is a default store — setup needs bd whenever the effective config
+  // keeps it on, not only when --beads was passed explicitly.
+  const wantsBeads = beads || loadConfig().stores.includes('beads')
+  checkPrereqs(wantsBeads)
 
   // bd init + formulas land BEFORE the config write — if beads setup fails,
   // no config claiming store=both is left behind.
-  if (beads) {
+  if (wantsBeads) {
     setupBeads()
   }
 

@@ -13,7 +13,8 @@ export type Personality = (typeof PERSONALITIES)[number]
 
 export interface BroConfig {
   /** Active stores. The JSONL ledger is always on — extra backends are
-   *  projections written alongside it. */
+   *  projections written alongside it. beads is on by default; an
+   *  explicit "stores": ["jsonl"] opts out. */
   stores: StoreBackend[]
   personality: Personality
   debt: {
@@ -23,7 +24,7 @@ export interface BroConfig {
 }
 
 export const DEFAULT_CONFIG: BroConfig = {
-  stores: ['jsonl'],
+  stores: ['jsonl', 'beads'],
   personality: 'terse',
   debt: { dir: '.agents/review-debt' },
 }
@@ -44,7 +45,12 @@ function normalizeStores(raw: RawConfig): StoreBackend[] {
   if (raw.store === 'beads' || raw.store === 'both') {
     return ['jsonl', 'beads']
   }
-  return ['jsonl']
+  if (raw.store === 'jsonl') {
+    // Legacy explicit opt-out — without it a v0.1.0 config saying "jsonl
+    // only" would silently re-enable the beads projection.
+    return ['jsonl']
+  }
+  return [...DEFAULT_CONFIG.stores]
 }
 
 export function loadConfig(cwd: string = process.cwd()): BroConfig {
