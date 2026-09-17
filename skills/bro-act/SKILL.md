@@ -15,7 +15,7 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro act status [PR] [--json]` | PR state + **exit gate** — open threads, pending CI, SAST findings. Exits non-zero while blocked |
+| `bro act status [PR] [--json]` | PR state + **exit gate** — open threads, CI failures, SAST findings. Exits non-zero while blocked |
 | `bro act threads [PR]` | Unresolved review threads, TSV |
 | `bro act resolve --thread ID [--comment T]` | Resolve a thread (reply first if comment given) |
 | `bro act reply --thread ID --comment T` | Reply without resolving (`--file TSV` for batch) |
@@ -24,7 +24,11 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
 
 - **Loop until the exit gate is green.** `bro act status` returns non-zero
   with named blockers — keep fixing until it passes; do not self-declare done.
-  A pending AI reviewer (`reviewers_pending`) keeps the gate BLOCKED.
+  **Green means every check green** — `ci_pending` counts all non-AI checks,
+  not just required ones; a failing optional job is still a red box on the PR.
+  A pending AI reviewer (`reviewers_pending`) keeps the gate BLOCKED, and a
+  *failed* reviewer check (`reviewers_failing`) blocks too — the review may
+  never have run; re-run it or push to retrigger.
   Bot reviewers never resolve their own threads — **you** must give each
   one a verdict and resolve it: fix → resolve silently (the push is the
   verdict), or reject → reply with the reason, then resolve.

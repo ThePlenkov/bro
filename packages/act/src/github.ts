@@ -136,13 +136,12 @@ export async function fetchPrActState(target: {
   const threads = await fetchReviewThreads(target)
   const checks = fetchChecks(target, false)
 
-  // Optional checks must not hold the gate. When the repo has required
-  // checks configured, only those can block; without branch protection
-  // gh --required fails and every non-AI check counts.
+  // "CI green" means every check — an optional check that fails is still
+  // a red job on the PR. Required names are only kept to decide whether a
+  // SAST annotation fetch failure counts as unknown below.
   const required = fetchChecks(target, true)
   const requiredNames = new Set(required.map((c) => c.name))
-  const gatePool = required.length > 0 ? required : checks
-  const ciPending = gatePool.filter(
+  const ciPending = checks.filter(
     (c) =>
       c.bucket !== 'pass' &&
       c.state !== 'SKIPPED' &&
@@ -152,9 +151,13 @@ export async function fetchPrActState(target: {
 
   // A pending AI reviewer can still open threads — declaring the gate OK
   // while one is running invites exactly the "threads after OK" surprise.
-  // Only pending counts: a failed reviewer (infra flake) posts nothing.
+  // A failed reviewer check is a red job like any other: the review may
+  // never have run, so it blocks until a re-run turns it green.
   const reviewersPending = checks.filter(
     (c) => AI_REVIEWER_RE.test(c.name) && c.bucket === 'pending'
+  ).length
+  const reviewersFailing = checks.filter(
+    (c) => AI_REVIEWER_RE.test(c.name) && c.bucket === 'fail'
   ).length
 
   // A SAST scan can report "success" while still carrying failure-level
@@ -199,6 +202,7 @@ export async function fetchPrActState(target: {
     threads,
     ciPending,
     reviewersPending,
+    reviewersFailing,
     sastPending,
     sastUnknown,
   }

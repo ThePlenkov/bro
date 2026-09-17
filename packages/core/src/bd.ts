@@ -6,8 +6,7 @@
 import { execFileSync } from 'node:child_process'
 
 export function bd(args: string[]): string {
-  // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
-  return execFileSync('bd', args, {
+  return execFileSync('bd', args, { // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     // a wedged bd must degrade, not stall — hooks call this inline in the

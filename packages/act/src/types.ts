@@ -21,10 +21,12 @@ export interface PrActState {
   mergeState: string
   openThreads: number
   threads: ReviewThreadNode[]
-  /** Non-reviewer checks that are not passing/skipped/neutral. */
+  /** Non-reviewer checks that are not passing/skipped/neutral — all checks, not just required. */
   ciPending: number
   /** AI reviewer checks still running — they may yet open threads. */
   reviewersPending: number
+  /** AI reviewer checks that failed — the review may never have run. */
+  reviewersFailing: number
   /** SAST check runs with failure-level annotations. */
   sastPending: number
   /** SAST checks whose annotations could not be fetched. */
@@ -37,6 +39,7 @@ export interface ExitGate {
   open_threads: number
   ci_pending: number
   reviewers_pending: number
+  reviewers_failing: number
   sast_pending: number
   sast_unknown: number
   is_draft: boolean
