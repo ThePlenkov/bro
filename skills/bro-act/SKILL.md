@@ -24,12 +24,12 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
 
 - **Loop until the exit gate is green.** `bro act status` returns non-zero
   with named blockers — keep fixing until it passes; do not self-declare done.
-  A pending AI reviewer (`reviewers_pending`) blocks the gate — wait for it.
+  A pending AI reviewer (`reviewers_pending`) keeps the gate BLOCKED.
   Bot reviewers never resolve their own threads — **you** must fix and
   resolve every one of them.
-- **Never block the session waiting on CI.** Waiting for checks/reviewers
-  belongs in a background task (`gh pr checks --watch` in a background
-  subagent or shell) — the foreground session stays free for other work.
+- **Wait in the background, not in-session.** A BLOCKED gate does not mean
+  sit idle: spawn a background task (`gh pr checks --watch` in a subagent or
+  shell) and re-check `bro act status` when it settles.
 - **Resolve silently when you fixed it.** The pushed commit is the verdict —
   do not leave a comment per thread. Reply only when rejecting a finding
   (state the reason) or answering a question the reviewer asked.
