@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-}}/..\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" session-start; else command -v bro >/dev/null 2>&1 && bro drill current; fi; exit 0",
+            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-}}/..\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" pre-compact; else command -v bro >/dev/null 2>&1 && bro drill current; fi; exit 0",
             "timeout": 15
           }
         ]

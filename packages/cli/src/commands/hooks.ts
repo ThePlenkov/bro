@@ -2,7 +2,8 @@
  * `bro hooks <event>` — agent lifecycle hooks as bro mechanics. Thin
  * `hooks.json` at the plugin root calls this; all policy lives here.
  *
- *   session-start | post-compaction   rehydrate: beads ready + drill frame + PR gate + debt
+ *   session-start | post-compaction | pre-compact
+ *                                       rehydrate: beads ready + drill frame + PR gate + debt
  *   prompt-submit                     drill-frame reminder; PR URL → act snapshot
  *   post-tool                         exec nudges: gh pr create → act gate; merge → debt sweep
  *   stop                              block while a drill frame or review threads are open
@@ -174,7 +175,9 @@ async function actGateLine(owner?: string, repo?: string, pr?: number): Promise<
 
 // --- event handlers -----------------------------------------------------------
 
-async function emitSessionContext(event: 'SessionStart' | 'PostCompaction'): Promise<void> {
+async function emitSessionContext(
+  event: 'SessionStart' | 'PostCompaction' | 'PreCompact'
+): Promise<void> {
   const parts: string[] = []
   const drill = drillLine()
   if (drill) {
@@ -313,6 +316,10 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
         return
       case 'post-compaction':
         await emitSessionContext('PostCompaction')
+        return
+      case 'pre-compact':
+        // Claude Code requires hookEventName to match the firing event
+        await emitSessionContext('PreCompact')
         return
       case 'prompt-submit':
         await emitPromptContext(input)
