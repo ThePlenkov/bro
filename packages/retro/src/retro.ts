@@ -36,15 +36,15 @@ export function openPreventions(): BeadRow[] {
   return listByLabel(PREVENTION_LABEL).filter(isOpen)
 }
 
+function shorten(text: string): string {
+  return text.length > 72 ? `${text.slice(0, 71)}…` : text
+}
+
 /** Best-effort provenance for the capture — tolerate non-git directories. */
 function gitSnapshot(): string[] {
   try {
-    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-      encoding: 'utf8',
-    }).trim() // NOSONAR — argv array, no shell; PATH lookup is the contract
-    const sha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
-      encoding: 'utf8',
-    }).trim() // NOSONAR — argv array, no shell
+    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).trim() // NOSONAR — argv array, no shell; PATH lookup is the contract
+    const sha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() // NOSONAR — argv array, no shell
     return [`git: ${branch}@${sha}`]
   } catch {
     return []
@@ -69,7 +69,7 @@ export function captureWtf(complaint: string): BeadRow {
     ...gitSnapshot(),
   ].join('\n')
   const first = complaint.trim().split('\n')[0] ?? ''
-  const title = `wtf: ${first.length > 72 ? `${first.slice(0, 71)}…` : first}`
+  const title = `wtf: ${shorten(first)}`
   return bdJson<BeadRow>(['create', title, '-l', WTF_LABEL, '-d', description])
 }
 
@@ -124,7 +124,7 @@ export function recordRetro(plan: RetroPlan): RecordResult {
     `scope: ${plan.scope}`,
   ].join('\n')
   const first = plan.what.split('\n')[0] ?? ''
-  const title = `retro: ${first.length > 72 ? `${first.slice(0, 71)}…` : first}`
+  const title = `retro: ${shorten(first)}`
   const createArgs = ['create', title, '-l', RETRO_LABEL, '-d', memo]
   if (wtf) {
     // discovered-from, not --parent: the wtf is the trigger evidence,

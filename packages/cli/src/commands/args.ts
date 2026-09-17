@@ -19,7 +19,7 @@ export function flag(argv: string[], name: string): string | undefined {
   if (i < 0) {
     return undefined
   }
-  if (argv.indexOf(name, i + 1) >= 0) {
+  if (argv.includes(name, i + 1)) {
     console.error(`error: ${name} may be given only once`)
     process.exit(2)
   }

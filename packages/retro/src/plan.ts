@@ -120,7 +120,8 @@ export function parsePlan(text: string, source = 'plan'): RetroPlan {
   }
 
   if (errors.length > 0) {
-    throw new Error(`${source}:\n${errors.map((e) => `  - ${e}`).join('\n')}`)
+    const details = errors.map((e) => `  - ${e}`).join('\n')
+    throw new Error(`${source}:\n${details}`)
   }
   return {
     what: (retro.what as string).trim(),

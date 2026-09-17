@@ -96,7 +96,7 @@ function cmdStatus(rest: string[]): void {
     console.log(`${open.length} unanswered wtf — record a retro plan to clear`)
   } else {
     console.log(
-      `no unanswered wtf${preventionCount > 0 ? ` · ${preventionCount} open prevention` : ''}`
+      `no unanswered wtf${preventionCount > 0 ? ' · ' + preventionCount + ' open prevention' : ''}`
     )
   }
   if (open.length > 0) {
