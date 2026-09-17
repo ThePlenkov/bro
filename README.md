@@ -36,6 +36,22 @@ npm i -g @theplenkov/bro          # or keep bro around: bro debt status
 Requires: `node >= 22`, `gh` authenticated. That's it. No tokens to
 babysit, no config files to confess to.
 
+## Install as an agent plugin
+
+This repo is a plugin marketplace + registry — one `bro` plugin packaged
+per client:
+
+| Client | Install |
+| ------ | ------- |
+| Devin | `devin plugins install ThePlenkov/bro` (or `…#plugins/devin/bro`) |
+| Claude Code | `/plugin marketplace add ThePlenkov/bro` → `/plugin install bro@bro` |
+| Codex | `codex plugin marketplace add ThePlenkov/bro` → install `bro` |
+
+Every adapter ships the same skills and lifecycle hooks (session
+rehydration, review-gate stop, self-approve for `bro`/`bd`) wired through
+`hooks/run.sh` — local dist → `bro` on PATH → major-pinned `npx`, always
+fail-open.
+
 ## Commands
 
 | Command | What bro does |
