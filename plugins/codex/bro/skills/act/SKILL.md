@@ -29,6 +29,12 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
   A pending AI reviewer (`reviewers_pending`) keeps the gate BLOCKED, and a
   *failed* reviewer check (`reviewers_failing`) blocks too — the review may
   never have run; re-run it or push to retrigger.
+  **Deterministic infra failure = override constant, not a question.** When
+  a reviewer check fails identically on every push with an infra error
+  (model output limit, rate limit, runner outage), it is not fixable from
+  code — say so once, drive the rest of the loop to done, and let the user
+  merge over the red box. Fix the config durably instead (REVIEW.md,
+  dashboard settings) rather than re-asking per PR.
   Bot reviewers never resolve their own threads — **you** must give each
   one a verdict and resolve it: fix → resolve silently (the push is the
   verdict), or reject → reply with the reason, then resolve.
