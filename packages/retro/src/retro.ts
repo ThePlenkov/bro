@@ -59,14 +59,16 @@ export function captureWtf(complaint: string): BeadRow {
   if (!complaint.trim()) {
     throw new Error('wtf capture requires the complaint — quote the user verbatim')
   }
+  // the quote is evidence — the description keeps it byte-for-byte;
+  // only the title is normalized
   const description = [
-    `> ${complaint.trim()}`,
+    `> ${complaint}`,
     '',
     `captured: ${new Date().toISOString()}`,
     `cwd: ${process.cwd()}`,
     ...gitSnapshot(),
   ].join('\n')
-  const first = complaint.trim().split('\n')[0]!
+  const first = complaint.trim().split('\n')[0] ?? ''
   const title = `wtf: ${first.length > 72 ? `${first.slice(0, 71)}…` : first}`
   return bdJson<BeadRow>(['create', title, '-l', WTF_LABEL, '-d', description])
 }
@@ -82,11 +84,24 @@ export function refKind(ref: string): string {
 }
 
 function requireOpenWtf(id: string): BeadRow {
-  const row = bdJson<BeadRow[]>(['show', id])[0]
+  const rows = bdJson<BeadRow[]>(['show', id])
+  const row = rows[0]
   if (!row || !(row.labels?.includes(WTF_LABEL) ?? false) || !isOpen(row)) {
     throw new Error(`wtf ${id} is not an open wtf bead`)
   }
   return row
+}
+
+/** No explicit wtf? The single open wtf bead is the obvious answer;
+ * ambiguity is the caller's problem to resolve. */
+function resolveSingleWtf(): BeadRow | undefined {
+  const open = openWtf()
+  if (open.length > 1) {
+    throw new Error(
+      `${open.length} open wtf beads — set retro.wtf in the plan or pass --wtf to pick one`
+    )
+  }
+  return open[0]
 }
 
 /**
@@ -95,7 +110,7 @@ function requireOpenWtf(id: string): BeadRow {
  * open prevention bead the executor routes by its `sink:` label.
  */
 export function recordRetro(plan: RetroPlan): RecordResult {
-  const wtf = plan.wtf ? requireOpenWtf(plan.wtf) : undefined
+  const wtf = plan.wtf ? requireOpenWtf(plan.wtf) : resolveSingleWtf()
 
   const memo = [
     '## What',
@@ -108,7 +123,7 @@ export function recordRetro(plan: RetroPlan): RecordResult {
     '',
     `scope: ${plan.scope}`,
   ].join('\n')
-  const first = plan.what.split('\n')[0]!
+  const first = plan.what.split('\n')[0] ?? ''
   const title = `retro: ${first.length > 72 ? `${first.slice(0, 71)}…` : first}`
   const createArgs = ['create', title, '-l', RETRO_LABEL, '-d', memo]
   if (wtf) {
@@ -118,52 +133,67 @@ export function recordRetro(plan: RetroPlan): RecordResult {
   }
   const retro = bdJson<BeadRow>(createArgs)
 
+  // bd has no transactions — if anything after the create fails, delete
+  // what we created so a retry can't duplicate beads.
+  const created = [retro.id]
   const actionIds: string[] = []
-  for (const action of plan.actions) {
-    const detail = [
-      action.detail ?? '',
-      '',
-      `sink: ${action.sink}`,
-      `scope: ${action.scope ?? plan.scope}`,
-      `retro: ${retro.id}`,
-    ]
-      .join('\n')
-      .trim()
-    const row = bdJson<BeadRow>([
-      'create',
-      action.title,
-      '-l',
-      `${PREVENTION_LABEL},sink:${action.sink}`,
-      '--no-inherit-labels',
-      '--deps',
-      `discovered-from:${retro.id}`,
-      '-d',
-      detail,
-    ])
-    actionIds.push(row.id)
-  }
+  try {
+    for (const action of plan.actions) {
+      const detail = [
+        action.detail ?? '',
+        '',
+        `sink: ${action.sink}`,
+        `scope: ${action.scope ?? plan.scope}`,
+        `retro: ${retro.id}`,
+      ]
+        .join('\n')
+        .trim()
+      const row = bdJson<BeadRow>([
+        'create',
+        action.title,
+        '-l',
+        `${PREVENTION_LABEL},sink:${action.sink}`,
+        '--no-inherit-labels',
+        '--deps',
+        `discovered-from:${retro.id}`,
+        '-d',
+        detail,
+      ])
+      actionIds.push(row.id)
+      created.push(row.id)
+    }
 
-  for (const ref of plan.evidence) {
-    const kind = refKind(ref)
-    bd([
-      'provenance',
-      'record',
-      '--issue',
-      retro.id,
-      '--kind',
-      kind === 'pr' ? 'land' : 'commit',
-      '--source',
-      'bro retrospect record',
-      '--ref',
-      ref,
-      '--ref-kind',
-      kind,
-    ])
-  }
+    for (const ref of plan.evidence) {
+      const kind = refKind(ref)
+      bd([
+        'provenance',
+        'record',
+        '--issue',
+        retro.id,
+        '--kind',
+        kind === 'pr' ? 'land' : 'commit',
+        '--source',
+        'bro retrospect record',
+        '--ref',
+        ref,
+        '--ref-kind',
+        kind,
+      ])
+    }
 
-  if (wtf) {
-    bd(['close', wtf.id, '--reason', `answered by retro ${retro.id}`])
+    if (wtf) {
+      bd(['close', wtf.id, '--reason', `answered by retro ${retro.id}`])
+    }
+    bd(['close', retro.id, '--reason', 'retrospect recorded'])
+  } catch (err) {
+    for (const id of created) {
+      try {
+        bd(['delete', id, '--force'])
+      } catch {
+        // best effort — report the original failure either way
+      }
+    }
+    throw err
   }
-  bd(['close', retro.id, '--reason', 'retrospect recorded'])
   return { retroId: retro.id, actionIds, closedWtf: wtf?.id }
 }

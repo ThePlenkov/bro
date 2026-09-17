@@ -93,6 +93,16 @@ sink = "backlog"
     assert.throws(() => parsePlan(bad), /actions\[0\]: scope must be one of/)
   })
 
+  test('rejects unknown top-level keys', () => {
+    const bad = '[retro]\nwhat="x"\nwhy="y"\n\n[actionz]\ntitle="t"\n'
+    assert.throws(() => parsePlan(bad), /unknown top-level key "actionz"/)
+  })
+
+  test('trims evidence refs', () => {
+    const plan = parsePlan('[retro]\nwhat="x"\nwhy="y"\nevidence=["  abc123  "]\n')
+    assert.deepEqual(plan.evidence, ['abc123'])
+  })
+
   test('rejects non-array actions', () => {
     const bad = '[retro]\nwhat="x"\nwhy="y"\n\n[actions]\ntitle="t"\n'
     assert.throws(() => parsePlan(bad), /must be an array of tables/)

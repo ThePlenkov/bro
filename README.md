@@ -64,7 +64,7 @@ babysit, no config files to confess to.
 | `bro wtf <complaint>` | Capture the user's frustration verbatim as a `wtf` bead — the trigger artifact |
 | `bro retrospect record <plan.toml>` | Validate a TOML retro plan → close a `retro` bead with the analysis → each action becomes a `prevention` bead labeled `sink:<sink>` |
 | `bro retrospect status` | **Exit gate** — non-zero while a wtf stays unanswered |
-| `bro retrospect schema` / `list` | The commented plan template · retro beads + open wtf |
+| `bro retrospect schema` / `list` | The commented plan template · retro beads + open wtf. All `wtf`/`retrospect` beads need `bd` installed + `bd init` — schema is the exception |
 
 | `bro setup [--beads] [--skills]` | Wires bro into the current repo: checks `gh` auth + `bd`, writes `bro.config.json`, optionally `bd init --stealth` + installs the debt-pipeline formula and thin skill wrappers |
 

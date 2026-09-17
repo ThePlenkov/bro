@@ -69,6 +69,14 @@ export function parsePlan(text: string, source = 'plan'): RetroPlan {
   }
 
   const errors: string[] = []
+  if (isRecord(doc)) {
+    // a misspelled `actions`/`retro` key must not silently drop work
+    for (const key of Object.keys(doc)) {
+      if (key !== 'retro' && key !== 'actions') {
+        errors.push(`unknown top-level key "${key}"`)
+      }
+    }
+  }
   const retro = isRecord(doc) ? doc.retro : undefined
   if (!isRecord(retro)) {
     throw new Error(`${source}: [retro] table is required`)
@@ -93,7 +101,7 @@ export function parsePlan(text: string, source = 'plan'): RetroPlan {
     if (!Array.isArray(retro.evidence) || !retro.evidence.every(nonEmpty)) {
       errors.push('retro: evidence must be a list of refs (sha, PR url, bead id)')
     } else {
-      evidence = retro.evidence
+      evidence = retro.evidence.map((e) => e.trim())
     }
   }
 

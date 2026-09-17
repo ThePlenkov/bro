@@ -72,7 +72,12 @@ function positionals(argv: string[]): string[] {
 }
 
 function cmdCapture(rest: string[]): void {
-  const complaint = positionals(rest).join(' ')
+  // the complaint is verbatim user text — every arg is literal, including
+  // `--`-prefixed tokens; only a leading -h/--help asks for usage
+  if (rest[0] === '-h' || rest[0] === '--help') {
+    usage()
+  }
+  const complaint = rest.join(' ')
   if (!complaint.trim()) {
     console.error('error: wtf capture requires the complaint — quote the user verbatim')
     process.exit(2)
@@ -83,17 +88,23 @@ function cmdCapture(rest: string[]): void {
 
 function cmdRecord(rest: string[]): void {
   const files = positionals(rest)
+  const wtfFlag = flag(rest, '--wtf')
   if (files.length !== 1) {
     console.error('error: retrospect record requires exactly one plan file')
     process.exit(2)
   }
-  const file = files[0]!
-  const plan = parsePlan(readFileSync(file, 'utf8'), file)
-  const wtfFlag = flag(rest, '--wtf')
-  if (wtfFlag) {
-    plan.wtf = wtfFlag
+  const file = files[0] ?? ''
+  let text: string
+  try {
+    text = readFileSync(file, 'utf8')
+  } catch (err) {
+    console.error(
+      `error: cannot read ${file} — ${err instanceof Error ? err.message : String(err)}`
+    )
+    process.exit(2)
   }
-  const res = recordRetro(plan)
+  const plan = parsePlan(text, file)
+  const res = recordRetro(wtfFlag ? { ...plan, wtf: wtfFlag } : plan)
   console.log(`retro ${res.retroId} recorded`)
   for (const id of res.actionIds) {
     console.log(`  prevention → ${id}`)
@@ -152,24 +163,26 @@ export async function runRetrospectCommand(argv: string[]): Promise<void> {
   if (!sub || sub === '--help' || sub === '-h') {
     usage()
   }
-  if (sub === 'schema') {
-    process.stdout.write(PLAN_SCHEMA)
-    return
-  }
-  checkBeads()
   const known = KNOWN_FLAGS[sub]
   if (!known) {
     usage()
   }
-  for (const arg of rest) {
-    if (arg.startsWith('--') && !known.has(arg)) {
-      console.error(`error: unknown option "${arg}" for retrospect ${sub}`)
-      process.exit(2)
+  // capture args are verbatim complaint text — no flag validation
+  if (sub !== 'capture') {
+    for (const arg of rest) {
+      if (arg.startsWith('--') && !known.has(arg)) {
+        console.error(`error: unknown option "${arg}" for retrospect ${sub}`)
+        process.exit(2)
+      }
     }
   }
+  if (sub !== 'schema') {
+    checkBeads()
+  }
   // these subs take no positional args — a stray one is a typo, not input
-  if ((sub === 'status' || sub === 'list') && positionals(rest).length > 0) {
-    console.error(`error: unexpected argument "${positionals(rest)[0]}"`)
+  const pos = positionals(rest)
+  if ((sub === 'status' || sub === 'list' || sub === 'schema') && pos.length > 0) {
+    console.error(`error: unexpected argument "${pos[0] ?? ''}"`)
     process.exit(2)
   }
 
@@ -185,6 +198,9 @@ export async function runRetrospectCommand(argv: string[]): Promise<void> {
       return
     case 'list':
       cmdList()
+      return
+    case 'schema':
+      process.stdout.write(PLAN_SCHEMA)
       return
     default:
       usage()
