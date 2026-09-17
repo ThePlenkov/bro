@@ -22,6 +22,10 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
 
 ## Policy
 
+- **`bro act` is for PRs you did not author.** `resolve`/`reply` refuse to
+  run on your own PR — the author closing their own review threads is
+  self-grading. On your own PR use `status`/`threads` (read-only) and let a
+  human or the reviewer resolve.
 - **Loop until the exit gate is green.** `bro act status` returns non-zero
   with named blockers — keep fixing until it passes; do not self-declare done.
   A pending AI reviewer (`reviewers_pending`) blocks the gate — wait for it.

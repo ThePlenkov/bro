@@ -7,7 +7,7 @@
  *   reply   --thread ID --comment TEXT | --file TSV
  */
 import { readFileSync } from 'node:fs'
-import { ensureGhAuth, gh, resolveRepo } from '@bro/core'
+import { ensureGhAuth, gh, ghJson, resolveRepo } from '@bro/core'
 import {
   evaluateExitGate,
   fetchPrActState,
@@ -135,8 +135,24 @@ function commentArg(argv: string[]): string | null {
   return i >= 0 ? (argv[i + 1] ?? null) : null
 }
 
+/** Resolving your own PR's threads is self-grading — a human/reviewer does it. */
+function guardOwnPr(argv: string[]): void {
+  const t = resolvePr(argv)
+  const author = ghJson<{ author?: { login?: string } }>([
+    'pr', 'view', String(t.pr), '--repo', t.repo, '--json', 'author',
+  ]).author?.login
+  const me = ghJson<{ login?: string }>(['api', 'user']).login
+  if (author && me && author === me) {
+    console.error(
+      `error: PR #${t.pr} is authored by ${me} — cannot resolve/reply on your own PR; a reviewer must close the threads`
+    )
+    process.exit(2)
+  }
+}
+
 function cmdResolve(argv: string[]): void {
   ensureGhAuth()
+  guardOwnPr(argv)
   const id = threadArg(argv)
   const comment = commentArg(argv)
   const unresolve = argv.includes('--unresolve')
@@ -155,6 +171,7 @@ function cmdResolve(argv: string[]): void {
 
 function cmdReply(argv: string[]): void {
   ensureGhAuth()
+  guardOwnPr(argv)
   const fileIdx = argv.indexOf('--file')
   if (fileIdx >= 0) {
     const file = argv[fileIdx + 1]
