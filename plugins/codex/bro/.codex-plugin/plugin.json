@@ -1,7 +1,7 @@
 {
   "name": "bro",
   "version": "0.2.0",
-  "description": "Agent's sidekick: review-debt pipeline, PR review loop, and scoped drill frames — all mechanics in the bro CLI over gh + beads",
+  "description": "Agent's sidekick: review-debt pipeline, PR review loop, scoped drill frames, and wtf→retrospect self-correction — all mechanics in the bro CLI over gh + beads",
   "author": {
     "name": "Petr Plenkov"
   },
@@ -13,6 +13,10 @@
     "pr-review",
     "beads",
     "drill",
+    "retro",
+    "retrospect",
+    "wtf",
+    "self-correction",
     "agent-workflow"
   ],
   "interface": {

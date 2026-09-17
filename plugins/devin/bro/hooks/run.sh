@@ -7,10 +7,12 @@
 #   2. `bro` on PATH — but only if it actually has the hooks subcommand
 #      (`bro hooks` with no event is a silent no-op; an older bro fails
 #      the probe instead of failing every hook)
-#   3. published package via npx, major-pinned (git-installed plugin)
+#   3. published package via npx, pinned to the plugin's own version
+#      (gen:plugins keeps it in sync with plugin.json)
 #
 # Fail-open contract: nothing here may stall or fail the session —
-# commands run (not exec'd) and the script always exits 0.
+# commands run (not exec'd), a failed candidate falls through to the
+# next, and the script always exits 0.
 set -u
 
 # each client exports its own plugin-root var — take whichever exists
@@ -19,17 +21,24 @@ if [ -z "$ROOT" ]; then
   ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 fi
 
-# walk up for a built CLI — adapter dirs live below the repo root
+# walk up for a built CLI — adapter dirs live below the repo root.
+# break on the fixed point so a relative/malformed root can't spin.
 DIR="$ROOT"
-while [ ! -f "$DIR/packages/cli/dist/index.js" ] && [ "$DIR" != / ]; do
-  DIR="$(dirname -- "$DIR")"
+while [ ! -f "$DIR/packages/cli/dist/index.js" ]; do
+  PARENT="$(dirname -- "$DIR")"
+  [ "$PARENT" = "$DIR" ] && break
+  DIR="$PARENT"
 done
 
 if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; then
-  node "$DIR/packages/cli/dist/index.js" hooks "$@" || true
-elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then
-  bro hooks "$@" || true
-elif command -v npx >/dev/null 2>&1; then
-  npx -y @theplenkov/bro@0 hooks "$@" || true
+  node "$DIR/packages/cli/dist/index.js" hooks "$@" && exit 0
+fi
+if command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then
+  bro hooks "$@" && exit 0
+fi
+if command -v npx >/dev/null 2>&1; then
+  # --prefer-offline: warm npm cache wins over the network, so a slow
+  # fetch can't eat the whole hook timeout
+  npx -y --prefer-offline "@theplenkov/bro@0.2.0" hooks "$@" || true
 fi
 exit 0

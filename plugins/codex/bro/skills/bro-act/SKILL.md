@@ -34,8 +34,10 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
   verdict), or reject → reply with the reason, then resolve.
 - **Wait via a background subagent, never in-session.** The wait primitive
   is `gh pr checks <PR> --watch` — native settle logic, no hand-rolled
-  polling. Spawn it as a **background subagent** chained with
-  `bro act status <PR>` and `bro act threads <PR>`: the subagent notifies
+  polling. Spawn it as a **background subagent** that then runs
+  `bro act status <PR>` and `bro act threads <PR>` as separate commands
+  (never `status && threads` — a failing gate must not hide the threads):
+  the subagent notifies
   on completion and returns the gate report; a plain background shell
   stays silent until polled, so it is only a fallback.
 - **Resolve silently when you fixed it.** The pushed commit is the verdict —

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro WTF"
+  short_description: "User frustration → captured wtf bead → structured retro plan → prevention beads"
+  brand_color: "#B60205"
+  default_prompt: "Use $bro-wtf when the user vents at the agent's own work."
+policy:
+  allow_implicit_invocation: false

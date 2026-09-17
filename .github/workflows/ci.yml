@@ -25,6 +25,9 @@ jobs:
       - name: Build vendored nx plugins
         run: npm run build:nx-plugins
 
+      - name: Check generated files are fresh
+        run: npm run check:embedded && npm run check:plugins
+
       - name: Build
         run: npm run build
 

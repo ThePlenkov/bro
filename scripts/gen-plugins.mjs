@@ -41,6 +41,8 @@ const ADAPTERS = {
   },
   'plugins/claude/bro': {
     '.claude-plugin/plugin.json': [clientManifest()],
+    // hand-written (Claude event names) — listed so --check doesn't flag it
+    'hooks/hooks.json': null,
   },
   'plugins/codex/bro': {
     '.codex-plugin/plugin.json': [
@@ -49,11 +51,18 @@ const ADAPTERS = {
   },
 }
 
+// the npx fallback pin always equals plugin.json's version — rewrite it in
+// the hook sources so a version bump can't leave a stale pin behind
+const VERSIONED_SOURCES = [
+  'hooks.json',
+  'hooks/run.sh',
+  'plugins/claude/bro/hooks/hooks.json',
+]
+const PIN_RE = /@theplenkov\/bro@[\w.:-]+/g
+
 const drift = []
-const seen = new Set()
 
 function emit(path, content) {
-  seen.add(path)
   if (CHECK) {
     if (!existsSync(join(ROOT, path)) || readFileSync(join(ROOT, path), 'utf8') !== content) {
       drift.push(path)
@@ -64,18 +73,45 @@ function emit(path, content) {
   writeFileSync(join(ROOT, path), content)
 }
 
+// keep every `@theplenkov/bro@…` npx pin equal to plugin.json's version
+for (const src of VERSIONED_SOURCES) {
+  const p = join(ROOT, src)
+  if (!existsSync(p)) {
+    drift.push(src)
+    continue
+  }
+  const text = readFileSync(p, 'utf8')
+  const synced = text.replace(PIN_RE, `@theplenkov/bro@${manifest.version}`)
+  if (CHECK ? synced !== text : false) {
+    drift.push(src)
+  } else if (!CHECK && synced !== text) {
+    writeFileSync(p, synced)
+  }
+}
+
 for (const [dir, files] of Object.entries(ADAPTERS)) {
+  // expected file set: declared entries + skills/ + hooks/run.sh —
+  // anything else on disk under the adapter is stale generated content
+  const expected = new Set(Object.keys(files).map((rel) => `${dir}/${rel}`))
   for (const [rel, src] of Object.entries(files)) {
+    if (src === null) {
+      if (!existsSync(join(ROOT, `${dir}/${rel}`))) {
+        drift.push(`${dir}/${rel}`)
+      }
+      continue
+    }
     emit(
       `${dir}/${rel}`,
       Array.isArray(src) ? src[0] : readFileSync(join(ROOT, src), 'utf8')
     )
   }
-  // shared payload — identical in every adapter
   const skillsOut = `${dir}/skills`
   const runShOut = `${dir}/hooks/run.sh`
+  for (const f of walk(join(ROOT, 'skills'))) {
+    expected.add(`${skillsOut}/${f}`)
+  }
+  expected.add(runShOut)
   if (CHECK) {
-    // dir copies are checked file-by-file
     for (const f of walk(join(ROOT, 'skills'))) {
       const rel = `${skillsOut}/${f}`
       const want = readFileSync(join(ROOT, 'skills', f), 'utf8')
@@ -86,6 +122,14 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
     const wantSh = readFileSync(join(ROOT, 'hooks/run.sh'), 'utf8')
     if (!existsSync(join(ROOT, runShOut)) || readFileSync(join(ROOT, runShOut), 'utf8') !== wantSh) {
       drift.push(runShOut)
+    }
+    // stale leftovers — files on disk that generation no longer produces
+    if (existsSync(join(ROOT, dir))) {
+      for (const f of walk(join(ROOT, dir))) {
+        if (!expected.has(`${dir}/${f}`)) {
+          drift.push(`${dir}/${f}`)
+        }
+      }
     }
   } else {
     rmSync(join(ROOT, skillsOut), { recursive: true, force: true })

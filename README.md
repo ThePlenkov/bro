@@ -43,7 +43,7 @@ per client:
 
 | Client | Install |
 | ------ | ------- |
-| Devin | `devin plugins install ThePlenkov/bro` (or `…#plugins/devin/bro`) |
+| Devin | `devin plugins install ThePlenkov/bro` (or `ThePlenkov/bro#plugins/devin/bro`) |
 | Claude Code | `/plugin marketplace add ThePlenkov/bro` → `/plugin install bro@bro` |
 | Codex | `codex plugin marketplace add ThePlenkov/bro` → install `bro` |
 
