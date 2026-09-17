@@ -27,9 +27,12 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
   A pending AI reviewer (`reviewers_pending`) keeps the gate BLOCKED.
   Bot reviewers never resolve their own threads — **you** must fix and
   resolve every one of them.
-- **Wait in the background, not in-session.** A BLOCKED gate does not mean
-  sit idle: spawn a background task (`gh pr checks --watch` in a subagent or
-  shell) and re-check `bro act status` when it settles.
+- **Wait via a background subagent, never in-session.** The wait primitive
+  is `gh pr checks <PR> --watch` — native settle logic, no hand-rolled
+  polling. Spawn it as a **background subagent** chained with
+  `bro act status <PR>` and `bro act threads <PR>`: the subagent notifies
+  on completion and returns the gate report; a plain background shell
+  stays silent until polled, so it is only a fallback.
 - **Resolve silently when you fixed it.** The pushed commit is the verdict —
   do not leave a comment per thread. Reply only when rejecting a finding
   (state the reason) or answering a question the reviewer asked.
