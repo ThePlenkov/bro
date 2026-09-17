@@ -20,7 +20,7 @@ unresolved, the findings evaporate. `bro` harvests them into a local
 ledger (`.agents/review-debt/`) and slaps `debt:*` labels on the PRs it
 already swept — so nothing gets scanned twice and nothing hides.
 
-```
+```text
 PR merged → bro debt collect → findings land in .agents/review-debt/
                             → PR gets debt:collected (or debt:clean)
                             → you see exactly what's left: bro debt prs
@@ -54,6 +54,12 @@ babysit, no config files to confess to.
 | `bro act threads [PR]` | Unresolved review threads on the PR |
 | `bro act resolve --thread ID [--comment T]` | Resolve (or `--unresolve`) — replies first if a comment is given |
 | `bro act reply --thread ID --comment T` | Reply without resolving; `--file TSV` for batch |
+
+| `bro drill down <title> [--under ID] [--ephemeral]` | Scoped descent — a child frame under the current leaf, as a `drill`-labeled bead |
+| `bro drill up --result T [--prevent T]… [--evidence R]…` | Ascend. `--result` is mandatory; each `--prevent` becomes a `discovered-from` task; evidence refs land in `bd provenance` |
+| `bro unwind …` | Alias for `drill up` |
+| `bro drill current` / `tree` / `list` | Active leaf frame · all hierarchies · open frames |
+| `bro drill distill <id>` | `bd mol distill` — a good drill tree becomes a reusable proto |
 
 | `bro setup [--beads] [--skills]` | Wires bro into the current repo: checks `gh` auth + `bd`, writes `bro.config.json`, optionally `bd init --stealth` + installs the debt-pipeline formula and thin skill wrappers |
 

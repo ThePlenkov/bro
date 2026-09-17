@@ -1,0 +1,29 @@
+{
+  "$comment": "Client-defined hooks for the bro plugin. SessionStart rehydrates beads context (ready work + active drill frame) so a fresh session or post-compaction agent resumes from bd state, not transcript. Commands are best-effort — every hook exits 0 when bro/bd is absent and is bounded by a timeout so a stalled bd cannot block session start or compaction.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bd ready 2>/dev/null | head -20; bro drill current >/dev/null 2>&1 && bro drill current || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bro drill current >/dev/null 2>&1 && bro drill current && echo 'Active drill frame above — resume with `bro drill up --result ...` when done.' || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

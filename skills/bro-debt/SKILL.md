@@ -1,6 +1,6 @@
 ---
 name: bro-debt
-description: "Use when the user invokes /debt or asks about review debt on merged PRs. Thin wrapper over the bro CLI — all mechanics live in `bro debt *` commands; this skill carries policy only. Requires `bro` (npx @theplenkov/bro) and gh."
+description: "Use when the user invokes /debt or asks about review debt on merged PRs. Thin wrapper over the bro CLI — all mechanics live in `bro debt *` commands; this skill carries policy only. Requires `bro` (npx -y @theplenkov/bro@0) and gh."
 ---
 
 # /debt (bro)
