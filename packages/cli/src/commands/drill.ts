@@ -20,7 +20,7 @@ import {
   bd,
 } from '@bro/drill'
 
-function usage(): never {
+function usage(exitCode = 1): never {
   console.error(`Usage: bro drill <command> [args…]
 
 Commands:
@@ -32,7 +32,7 @@ Commands:
   distill ID                                     Extract a reusable proto from a drill epic
 
   bro unwind …                                   alias for \`bro drill up\``)
-  process.exit(1)
+  process.exit(exitCode)
 }
 
 /** A value flag's argument must exist and not look like another option. */
@@ -104,34 +104,58 @@ function parsePriority(raw: string | undefined): number | undefined {
   return priority
 }
 
-function cmdDown(rest: string[]): void {
+// parse* helpers are pure validation + extraction — they run before
+// checkBeads() so a syntax error always beats a beads setup error.
+
+function parseDown(rest: string[]) {
   const title = positionals(rest).join(' ')
   if (!title?.trim()) {
     console.error('error: drill down requires a title')
     process.exit(2)
   }
-  const row = drillDown(title, {
-    under: flag(rest, '--under'),
-    ephemeral: rest.includes('--ephemeral'),
-    type: flag(rest, '--type'),
-    priority: parsePriority(flag(rest, '--priority')),
-    description: flag(rest, '--description'),
-  })
-  console.log(`drill ↓ ${row.id} ${row.title}`)
+  return {
+    title,
+    opts: {
+      under: flag(rest, '--under'),
+      ephemeral: rest.includes('--ephemeral'),
+      type: flag(rest, '--type'),
+      priority: parsePriority(flag(rest, '--priority')),
+      description: flag(rest, '--description'),
+    },
+  }
 }
 
-function cmdUp(rest: string[]): void {
+function parseUp(rest: string[]) {
   const result = flag(rest, '--result')
   if (!result) {
     console.error('error: drill up requires --result — a frame must return a curated finding')
     process.exit(2)
   }
-  const res = drillUp({
+  return {
     id: flag(rest, '--id'),
     result,
     prevent: flagAll(rest, '--prevent'),
     evidence: flagAll(rest, '--evidence'),
-  })
+  }
+}
+
+function parseDistill(rest: string[]): string {
+  const ids = positionals(rest)
+  if (ids.length !== 1) {
+    console.error('error: drill distill requires exactly one epic/bead id')
+    process.exit(2)
+  }
+  return ids[0]!
+}
+
+function cmdDown(rest: string[]): void {
+  const { title, opts } = parseDown(rest)
+  const row = drillDown(title, opts)
+  console.log(`drill ↓ ${row.id} ${row.title}`)
+}
+
+function cmdUp(rest: string[]): void {
+  const res = drillUp(parseUp(rest))
   console.log(`drill ↑ ${res.closed} closed`)
   for (const id of res.preventionIds) {
     console.log(`  prevention → ${id}`)
@@ -176,7 +200,9 @@ function rejectUnknownFlags(sub: string, argv: string[]): void {
     return
   }
   for (const arg of argv) {
-    if (arg.startsWith('--') && !known.has(arg)) {
+    // single-dash typos too — `-p 3` silently becoming a title is worse
+    // than an error (no drill flag uses one dash; bare "-" stays a title)
+    if (arg.length > 1 && arg.startsWith('-') && !known.has(arg)) {
       console.error(`error: unknown option "${arg}" for drill ${sub}`)
       process.exit(2)
     }
@@ -185,10 +211,17 @@ function rejectUnknownFlags(sub: string, argv: string[]): void {
 
 export async function runDrillCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
-  if (!sub || sub === '--help' || sub === '-h') {
+  if (!sub) {
     usage()
   }
-  checkBeads()
+  if (sub === '--help' || sub === '-h') {
+    usage(0)
+  }
+  // Validate before checkBeads — `bro drill bogus` must report a syntax
+  // error even where beads isn't initialized.
+  if (!KNOWN_FLAGS[sub]) {
+    usage()
+  }
   rejectUnknownFlags(sub, rest)
   // these subs take no positional args — a stray one is a typo, not input
   const noPositionals = new Set(['up', 'current', 'tree', 'list'])
@@ -197,6 +230,16 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
     console.error(`error: unexpected argument "${extras[0]}"`)
     process.exit(2)
   }
+  // command-specific operands/flag values too — all syntax errors must
+  // surface before checkBeads() can mask them with a setup error
+  if (sub === 'down') {
+    parseDown(rest)
+  } else if (sub === 'up') {
+    parseUp(rest)
+  } else if (sub === 'distill') {
+    parseDistill(rest)
+  }
+  checkBeads()
 
   switch (sub) {
     case 'down':
@@ -215,13 +258,7 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
       cmdList()
       return
     case 'distill': {
-      const ids = positionals(rest)
-      if (ids.length !== 1) {
-        console.error('error: drill distill requires exactly one epic/bead id')
-        process.exit(2)
-      }
-      const id = ids[0]!
-      process.stdout.write(bd(['mol', 'distill', id]))
+      process.stdout.write(bd(['mol', 'distill', parseDistill(rest)]))
       return
     }
     default:

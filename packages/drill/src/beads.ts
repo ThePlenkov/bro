@@ -1,23 +1,10 @@
 /**
- * Thin `bd` wrapper for drill frames. Same contract as @bro/debt's
- * projection: bd is a user-installed CLI, PATH lookup is the contract.
+ * beads readiness for drill frames. The `bd` launcher itself lives in
+ * @bro/core — PATH lookup is the contract (same as gh).
  */
-import { execFileSync } from 'node:child_process'
+import { bd } from '@bro/core'
 
-export function bd(args: string[]): string {
-  return execFileSync('bd', args, { encoding: 'utf8' }) // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
-}
-
-export function bdJson<T>(args: string[]): T {
-  const out = bd([...args, '--json'])
-  try {
-    return JSON.parse(out) as T
-  } catch (err) {
-    throw new Error(
-      `bd returned malformed JSON — ${err instanceof Error ? err.message : String(err)}`
-    )
-  }
-}
+export { bd, bdJson } from '@bro/core'
 
 export function checkBeads(): void {
   try {
@@ -27,7 +14,12 @@ export function checkBeads(): void {
   }
   try {
     bd(['list', '--json', '-n', '1'])
-  } catch {
-    throw new Error('beads not initialized in this repo — run `bd init` first')
+  } catch (err) {
+    // preserve the real failure — "not initialized" is only one cause
+    const stderr = (err as { stderr?: string }).stderr?.trim()
+    throw new Error(
+      `bd list failed — ${stderr || (err instanceof Error ? err.message : String(err))} ` +
+        '(run `bd init` if beads is not initialized here)'
+    )
   }
 }

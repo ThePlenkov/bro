@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url'
 import { runActCommand } from './commands/act.ts'
 import { runDebtCommand } from './commands/debt.ts'
 import { runDrillCommand } from './commands/drill.ts'
+import { runHooksCommand } from './commands/hooks.ts'
 import { runSetupCommand } from './commands/setup.ts'
 
 // Single source of truth is package.json — dist/index.js sits one dir
@@ -33,6 +34,8 @@ Commands:
   act <sub>    Open-PR loop: status|threads|resolve|reply
   drill <sub>  Scoped descent over beads: down|up|current|tree|list|distill
   unwind       Alias for \`drill up\`
+  hooks <ev>   Agent lifecycle hooks: session-start|post-compaction|
+               prompt-submit|post-tool|stop|permission
   setup        Wire bro into the current repo
 
 Options:
@@ -74,6 +77,9 @@ async function main(): Promise<void> {
       return
     case 'unwind':
       await runDrillCommand(['up', ...rest])
+      return
+    case 'hooks':
+      await runHooksCommand(rest)
       return
     case 'setup':
       await runSetupCommand(rest)
