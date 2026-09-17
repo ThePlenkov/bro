@@ -123,6 +123,13 @@ function debtLine(): string | null {
   }
 }
 
+/** `owner/repo` for the current clone — null when the split isn't clean. */
+function repoParts(): [string, string] | null {
+  const parts = resolveRepo([]).split('/')
+  const [owner, name] = parts
+  return parts.length === 2 && owner && name ? [owner, name] : null
+}
+
 /** Current branch's open PR → one-line gate summary. Null when no PR/no gh. */
 async function actGateLine(owner?: string, repo?: string, pr?: number): Promise<string | null> {
   try {
@@ -140,9 +147,11 @@ async function actGateLine(owner?: string, repo?: string, pr?: number): Promise<
         return null
       }
       n = view.number
-      const resolved = resolveRepo([]).split('/')
-      o = resolved[0]
-      r = resolved[1]
+      const parts = repoParts()
+      if (!parts) {
+        return null
+      }
+      ;[o, r] = parts
     }
     const state = await fetchPrActState({ owner: o!, repo: r!, pr: n! })
     const gate = evaluateExitGate(state)
@@ -235,8 +244,12 @@ async function emitStopGate(input: HookInput): Promise<void> {
     if (view.state !== 'OPEN') {
       return
     }
-    const [owner, repoName] = resolveRepo([]).split('/')
-    const state = await fetchPrActState({ owner: owner!, repo: repoName!, pr: view.number })
+    const parts = repoParts()
+    if (!parts) {
+      return
+    }
+    const [owner, repoName] = parts
+    const state = await fetchPrActState({ owner, repo: repoName!, pr: view.number })
     if (state.openThreads > 0) {
       emit({
         decision: 'block',
@@ -264,6 +277,15 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   const root = process.env.DEVIN_PROJECT_DIR ?? process.cwd()
   if (!event || !broEnabled(root)) {
     return
+  }
+  // bd/gh probes inherit cwd — run them in the project the hook fired for,
+  // not wherever this process happened to start.
+  if (root !== process.cwd()) {
+    try {
+      process.chdir(root)
+    } catch {
+      return
+    }
   }
   const input = readInput()
   try {

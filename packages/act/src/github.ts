@@ -7,7 +7,9 @@ import { ghJson, ghTry } from '@bro/core'
 import { fetchReviewThreads } from '@bro/debt'
 import type { PrActState, PrCheck } from './types.ts'
 
-const AI_REVIEWER_RE = /cubic|code\s*rabbit|amazon\s*q|qodo|chatgpt\s*codex|gemini|kilo|codeant/i
+// Word boundaries: a check merely *containing* "kilo"/"gemini" (e.g.
+// "kilometer-tests") is not an AI reviewer.
+const AI_REVIEWER_RE = /\b(cubic|code\s*rabbit|amazon\s*q|qodo|chatgpt\s*codex|gemini|kilo|codeant)\b/i
 
 const SAST_NAMES = [
   'sonarcloud',
