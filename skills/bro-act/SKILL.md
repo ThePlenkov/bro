@@ -27,6 +27,9 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
   A pending AI reviewer (`reviewers_pending`) blocks the gate — wait for it.
   Bot reviewers never resolve their own threads — **you** must fix and
   resolve every one of them.
+- **Never block the session waiting on CI.** Waiting for checks/reviewers
+  belongs in a background task (`gh pr checks --watch` in a background
+  subagent or shell) — the foreground session stays free for other work.
 - **Resolve silently when you fixed it.** The pushed commit is the verdict —
   do not leave a comment per thread. Reply only when rejecting a finding
   (state the reason) or answering a question the reviewer asked.
