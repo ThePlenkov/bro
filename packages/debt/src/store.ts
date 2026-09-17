@@ -64,8 +64,9 @@ function ensureDebtDirExcluded(dir: string): void {
     const path = isAbsolute(excludePath) ? excludePath : join(dir, excludePath)
     const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
     if (!existing.split('\n').includes(`${rel}/`)) {
+      const sep = existing === '' || existing.endsWith('\n') ? '' : '\n'
       mkdirSync(dirname(path), { recursive: true })
-      writeFileSync(path, `${existing === '' || existing.endsWith('\n') ? existing : `${existing}\n`}${rel}/\n`)
+      writeFileSync(path, `${existing}${sep}${rel}/\n`)
     }
   } catch {
     /* not a git worktree (or no git) — nothing to exclude */

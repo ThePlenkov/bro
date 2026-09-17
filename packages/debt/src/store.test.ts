@@ -29,7 +29,9 @@ describe('ensureDebtDirExcluded (via writeSummary)', () => {
   test('the exclude actually ignores the ledger dir', () => {
     const repo = tmpRepo()
     writeSummary(buildSummary([]), repo)
-    execFileSync('git', ['-C', repo, 'check-ignore', '-q', '.agents/review-debt'])
+    assert.doesNotThrow(() =>
+      execFileSync('git', ['-C', repo, 'check-ignore', '-q', '.agents/review-debt'])
+    )
   })
 
   test('existing .gitignore coverage is respected — no exclude entry', () => {
