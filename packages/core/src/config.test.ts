@@ -46,6 +46,10 @@ describe('loadConfig stores', () => {
     assert.deepEqual(load({ store: 'both' }).stores, ['jsonl', 'beads'])
   })
 
+  test('mistyped legacy store value falls back to jsonl-only', () => {
+    assert.deepEqual(load({ store: 'beed' }).stores, ['jsonl'])
+  })
+
   test('stores array beats legacy store field', () => {
     assert.deepEqual(load({ store: 'beads', stores: ['jsonl'] }).stores, ['jsonl'])
   })

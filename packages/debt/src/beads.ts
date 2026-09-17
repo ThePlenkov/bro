@@ -5,9 +5,7 @@
  * queue (`bd ready -l debt`). Upsert key: `external_ref` = `thread_id`, so
  * `bro debt sync` is idempotent. Status reconciles ledger → bead on re-runs.
  */
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
-import { bd } from '@bro/core'
+import { bd, initBeadsStealth } from '@bro/core'
 import type { DebtPriority, DebtRecord, DebtStatus } from './types.ts'
 
 export interface BeadRef {
@@ -30,8 +28,8 @@ export function checkBeads(opts: { autoInit?: boolean } = {}): void {
   // (local exclude, nothing lands in git) instead of a setup error.
   // Dry runs must not mutate: they skip init and let `bd list` report
   // the missing workspace instead.
-  if (opts.autoInit !== false && !existsSync(join(process.cwd(), '.beads'))) {
-    bd(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'])
+  if (opts.autoInit !== false) {
+    initBeadsStealth()
   }
   try {
     bd(['list', '--json', '-n', '1'])

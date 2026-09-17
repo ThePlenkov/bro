@@ -111,7 +111,8 @@ run on defaults until they set up. Everything's optional:
 `stores` lists the backends debt writes to. `jsonl` is the evidence ledger
 (always written — drop it and bro adds it back). `beads` is on **by
 default**: a normal collect auto-runs `bd init --stealth --skip-agents
---skip-hooks` when a repo is missing `.beads` (`--dry-run` skips it), and
+--skip-hooks` when a repo is missing `.beads` (skipped by `--dry-run`,
+`--list-only`, and an empty target list), and
 projects every record into `bd` — JSONL keeps the receipts, beads runs the
 queue. Opt out with an explicit `"stores": ["jsonl"]`. Requires `bd`
 installed; a missing bd fails the run after evidence is written.

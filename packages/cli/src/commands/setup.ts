@@ -10,7 +10,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { loadConfig, PERSONALITIES, type BroConfig } from '@bro/core'
+import { initBeadsStealth, loadConfig, PERSONALITIES, type BroConfig } from '@bro/core'
 import { FORMULA_FILES, SKILL_FILES } from '../skills-data.ts'
 
 function hasBin(name: string): boolean {
@@ -96,10 +96,7 @@ function installFiles(root: string, files: Record<string, string>, what: string)
 }
 
 function setupBeads(): void {
-  if (!existsSync(join(process.cwd(), '.beads'))) {
-    execFileSync('bd', ['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], { // NOSONAR — user-installed CLI; PATH lookup is the contract
-      stdio: 'inherit',
-    })
+  if (initBeadsStealth()) {
     console.error('  initialized .beads (stealth — nothing lands in git)')
   } else {
     console.error('  .beads already initialized')

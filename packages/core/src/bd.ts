@@ -4,6 +4,8 @@
  * keeps large `bd list --json` payloads from hitting Node's 1 MiB default.
  */
 import { execFileSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 
 export function bd(args: string[]): string {
   return execFileSync('bd', args, { // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
@@ -47,6 +49,19 @@ export function evidenceKind(ref: string): 'land' | 'commit' | 'used' {
     default:
       return 'used'
   }
+}
+
+/**
+ * Stealth-init `.beads` in the current repo when missing — the single init
+ * flags contract shared by debt sync and `bro setup` (local exclude,
+ * nothing lands in git). Returns true when it initialized.
+ */
+export function initBeadsStealth(): boolean {
+  if (existsSync(join(process.cwd(), '.beads'))) {
+    return false
+  }
+  bd(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'])
+  return true
 }
 
 export function checkBeads(): void {

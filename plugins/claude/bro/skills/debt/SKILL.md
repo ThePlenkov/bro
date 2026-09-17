@@ -29,8 +29,9 @@ bro.config.json is the opt-out).
 - **`debt:*` labels are the PR-level source of truth** for "processed".
   `skipped` is a human opt-out and always wins over machine labels.
 - **beads is a default store.** A normal collect auto-runs
-  `bd init --stealth` when `.beads` is missing (`--dry-run` skips it) and
-  keeps the ledger dir out of git via `.git/info/exclude`.
+  `bd init --stealth` when `.beads` is missing (skipped by `--dry-run`,
+  `--list-only`, and an empty target list) and keeps the ledger dir out of
+  git via `.git/info/exclude`.
   `"stores": ["jsonl"]` in bro.config.json is the opt-out.
 - **Label after the file lands.** In CI pipelines run
   `collect --no-label`, land `harvests/*.jsonl` (`git add -f` — the ledger

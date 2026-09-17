@@ -45,9 +45,10 @@ function normalizeStores(raw: RawConfig): StoreBackend[] {
   if (raw.store === 'beads' || raw.store === 'both') {
     return ['jsonl', 'beads']
   }
-  if (raw.store === 'jsonl') {
-    // Legacy explicit opt-out — without it a v0.1.0 config saying "jsonl
-    // only" would silently re-enable the beads projection.
+  if (raw.store !== undefined) {
+    // Legacy explicit opt-out — and any mistyped value ('beed'): an
+    // unrecognized legacy field must fall back to jsonl-only, not silently
+    // widen into the beads projection.
     return ['jsonl']
   }
   return [...DEFAULT_CONFIG.stores]

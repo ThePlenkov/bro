@@ -37,6 +37,16 @@ const excludedDebtDirs = new Set<string>()
  * .git/info/exclude so harvest evidence can't be committed by accident.
  * Local-only — never a repo diff.
  */
+/**
+ * Literal path → gitignore pattern line. Without this, a debt.dir like
+ * `!ledger` or `foo[bar]` writes a pattern that does not ignore the dir
+ * (negation / character class), silently leaving the ledger trackable.
+ */
+function gitignoreLiteral(p: string): string {
+  const escaped = p.replace(/[\\*?[\]]/g, '\\$&')
+  return /^[!#]/.test(escaped) ? `\\${escaped}` : escaped
+}
+
 function ensureDebtDirExcluded(dir: string): void {
   if (excludedDebtDirs.has(dir)) {
     return
@@ -78,9 +88,10 @@ function ensureDebtDirExcluded(dir: string): void {
         /* not ignored — exclude it locally */
       }
       const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
-      if (!existing.split('\n').includes(`${rel}/`)) {
+      const entry = `${gitignoreLiteral(rel)}/`
+      if (!existing.split('\n').includes(entry)) {
         const nl = existing === '' || existing.endsWith('\n') ? '' : '\n'
-        writeFileSync(path, `${existing}${nl}${rel}/\n`)
+        writeFileSync(path, `${existing}${nl}${entry}\n`)
       }
     })
     // Ignores never override the index — files already committed under the
