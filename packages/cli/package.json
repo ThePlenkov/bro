@@ -30,7 +30,8 @@
     "@bro/drill": "*",
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "@bro/retro": "*"
   },
   "license": "MIT",
   "repository": {
