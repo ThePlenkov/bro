@@ -5,6 +5,21 @@
 import type { ExitGate, PrActState } from './types.ts'
 
 export function evaluateExitGate(state: PrActState): ExitGate {
+  // the gate guards an open PR's merge readiness — on a merged/closed PR
+  // stale pending statuses (e.g. a reviewer that never finished) are
+  // noise, not blockers
+  const base = {
+    open_threads: state.openThreads,
+    ci_pending: state.ciPending,
+    reviewers_pending: state.reviewersPending,
+    reviewers_failing: state.reviewersFailing,
+    sast_pending: state.sastPending,
+    sast_unknown: state.sastUnknown,
+    is_draft: state.isDraft,
+  }
+  if (state.state !== 'OPEN') {
+    return { ok: true, blockers: [], ...base }
+  }
   const blockers: string[] = []
   if (state.openThreads > 0) {
     blockers.push(`${state.openThreads} unresolved review thread(s)`)
@@ -24,28 +39,20 @@ export function evaluateExitGate(state: PrActState): ExitGate {
   if (state.sastUnknown > 0) {
     blockers.push(`${state.sastUnknown} SAST check(s) with unknown annotation status`)
   }
-  // Mergeability is only meaningful while the PR is open — GitHub reports
-  // UNKNOWN forever on merged/closed PRs.
-  if (state.state === 'OPEN') {
-    if (state.mergeable === 'CONFLICTING') {
-      blockers.push('merge conflicts')
-    }
-    if (state.mergeable === 'UNKNOWN') {
-      blockers.push('mergeability still computing — recheck')
-    }
-    if (state.isDraft) {
-      blockers.push('PR is a draft')
-    }
+  if (state.mergeable === 'CONFLICTING') {
+    blockers.push('merge conflicts')
   }
-  return {
-    ok: blockers.length === 0,
-    blockers,
-    open_threads: state.openThreads,
-    ci_pending: state.ciPending,
-    reviewers_pending: state.reviewersPending,
-    reviewers_failing: state.reviewersFailing,
-    sast_pending: state.sastPending,
-    sast_unknown: state.sastUnknown,
-    is_draft: state.isDraft,
+  if (state.mergeable === 'UNKNOWN') {
+    blockers.push('mergeability still computing — recheck')
   }
+  // BEHIND means the merge can't proceed without an update; BLOCKED is not
+  // listed — required-review blocks are intentionally bypassed via --admin,
+  // and UNSTABLE overlaps the all-checks ci_pending count
+  if (state.mergeState === 'BEHIND') {
+    blockers.push('branch is behind the base — update it')
+  }
+  if (state.isDraft) {
+    blockers.push('PR is a draft')
+  }
+  return { ok: blockers.length === 0, blockers, ...base }
 }
