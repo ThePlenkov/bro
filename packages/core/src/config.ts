@@ -69,6 +69,12 @@ export function loadConfig(cwd: string = process.cwd()): BroConfig {
   }
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8')) as RawConfig
+    // a valid-JSON non-object root ("str", […], 42) is not a config —
+    // spreading it would silently produce garbage keys
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      console.error('bro.config.json: root must be a JSON object — using jsonl-only stores')
+      return { ...DEFAULT_CONFIG, stores: ['jsonl'] }
+    }
     const { stores: _s, store: _legacy, ...rest } = raw
     return {
       ...DEFAULT_CONFIG,

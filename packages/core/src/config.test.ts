@@ -68,3 +68,20 @@ describe('loadConfig stores', () => {
     assert.deepEqual(DEFAULT_CONFIG.stores, ['jsonl', 'beads'])
   })
 })
+
+describe('loadConfig root shape', () => {
+  test('non-object JSON roots fall back to jsonl-only', () => {
+    for (const root of ['str', [1, 2], 42, null, true]) {
+      assert.deepEqual(load(root).stores, ['jsonl'], `root ${JSON.stringify(root)}`)
+    }
+  })
+
+  test('empty object is a valid config', () => {
+    assert.deepEqual(load({}), DEFAULT_CONFIG)
+  })
+
+  test('nested debt config merges over defaults', () => {
+    assert.equal(load({ debt: { dir: 'debt-out' } }).debt.dir, 'debt-out')
+    assert.equal(load({ debt: { dir: 'debt-out' } }).personality, 'terse')
+  })
+})
