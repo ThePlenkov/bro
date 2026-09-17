@@ -10,7 +10,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { loadConfig, PERSONALITIES, type BroConfig } from '@bro/core'
+import { initBeadsStealth, loadConfig, PERSONALITIES, type BroConfig } from '@bro/core'
 import { FORMULA_FILES, SKILL_FILES } from '../skills-data.ts'
 
 function hasBin(name: string): boolean {
@@ -35,12 +35,25 @@ function readExistingConfig(path: string): Partial<BroConfig> | null {
   if (!existsSync(path)) {
     return {}
   }
+  let parsed: unknown
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as Partial<BroConfig>
+    parsed = JSON.parse(readFileSync(path, 'utf8'))
   } catch (err) {
     console.error(`error: bro.config.json is not valid JSON — ${(err as Error).message}`)
     process.exit(1)
   }
+  // Valid JSON can still be an invalid config — a non-object or a mistyped
+  // `stores` would silently normalize to defaults and get overwritten by
+  // setup. Fail before anything mutates.
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    console.error('error: bro.config.json must be a JSON object')
+    process.exit(1)
+  }
+  if ('stores' in parsed && !Array.isArray(parsed.stores)) {
+    console.error('error: bro.config.json "stores" must be an array, e.g. ["jsonl", "beads"]')
+    process.exit(1)
+  }
+  return parsed as Partial<BroConfig>
 }
 
 function writeConfig(opts: { beads: boolean; personality?: string }): string {
@@ -83,10 +96,7 @@ function installFiles(root: string, files: Record<string, string>, what: string)
 }
 
 function setupBeads(): void {
-  if (!existsSync(join(process.cwd(), '.beads'))) {
-    execFileSync('bd', ['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], { // NOSONAR — user-installed CLI; PATH lookup is the contract
-      stdio: 'inherit',
-    })
+  if (initBeadsStealth()) {
     console.error('  initialized .beads (stealth — nothing lands in git)')
   } else {
     console.error('  .beads already initialized')
@@ -139,18 +149,29 @@ function checkPrereqs(needBeads: boolean): void {
   // Validate prerequisites before writing anything — a config pointing at a
   // store we can't run would strand the repo.
   if (needBeads && !bd) {
-    console.error('error: --beads requested but bd not found — https://github.com/gastownhall/beads')
+    console.error(
+      'error: bd not found — install beads (https://github.com/gastownhall/beads) ' +
+        'or opt out with "stores": ["jsonl"] in bro.config.json'
+    )
     process.exit(1)
   }
 }
 
 export async function runSetupCommand(argv: string[]): Promise<void> {
   const { beads, skills, personality } = parseSetupArgs(argv)
-  checkPrereqs(beads)
+  // A malformed bro.config.json must fail BEFORE any mutation (bd init,
+  // file installs) — readExistingConfig exits on a parse error; loadConfig
+  // alone would silently fall back to defaults and setup would init beads
+  // on top of a broken config.
+  readExistingConfig(join(process.cwd(), 'bro.config.json'))
+  // beads is a default store — setup needs bd whenever the effective config
+  // keeps it on, not only when --beads was passed explicitly.
+  const wantsBeads = beads || loadConfig().stores.includes('beads')
+  checkPrereqs(wantsBeads)
 
   // bd init + formulas land BEFORE the config write — if beads setup fails,
   // no config claiming store=both is left behind.
-  if (beads) {
+  if (wantsBeads) {
     setupBeads()
   }
 

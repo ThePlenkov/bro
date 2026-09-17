@@ -4,6 +4,8 @@
  * keeps large `bd list --json` payloads from hitting Node's 1 MiB default.
  */
 import { execFileSync } from 'node:child_process'
+import { statSync } from 'node:fs'
+import { join } from 'node:path'
 
 export function bd(args: string[]): string {
   return execFileSync('bd', args, { // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
@@ -46,6 +48,44 @@ export function evidenceKind(ref: string): 'land' | 'commit' | 'used' {
       return 'commit'
     default:
       return 'used'
+  }
+}
+
+/** Only a real `.beads` *directory* counts — a file or dangling path must
+ *  not suppress init (it would fail loudly rather than be repaired). */
+function beadsDirExists(): boolean {
+  try {
+    return statSync(join(process.cwd(), '.beads')).isDirectory()
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return false
+    }
+    throw err // EACCES/ELOOP etc. are real failures — don't mask as "absent"
+  }
+}
+
+/**
+ * Stealth-init `.beads` in the current repo when missing — the single init
+ * flags contract shared by debt sync and `bro setup` (local exclude,
+ * nothing lands in git). Returns true when it initialized.
+ */
+export function initBeadsStealth(): boolean {
+  if (beadsDirExists()) {
+    return false
+  }
+  try {
+    bd(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'])
+    return true
+  } catch (err) {
+    // Two first-time inits can race: both pass the existence check, the
+    // loser's `bd init` fails while the winner's workspace lands. Tolerate
+    // that race — callers verify completeness (`bd list` in checkBeads) —
+    // but never swallow a real init failure.
+    if (beadsDirExists()) {
+      return false
+    }
+    throw err
   }
 }
 

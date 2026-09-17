@@ -3,6 +3,7 @@
  * Append-only harvest snapshots + ledger.jsonl status overlays.
  */
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import {
   chmodSync,
   existsSync,
@@ -14,7 +15,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { loadConfig } from '@bro/core'
 import type {
   AuthorPolicy,
@@ -25,6 +26,116 @@ import type {
 
 function debtDir(cwd: string = process.cwd()): string {
   return process.env.BRO_DEBT_DIR ?? join(cwd, loadConfig(cwd).debt.dir)
+}
+
+const excludedDebtDirs = new Set<string>()
+
+/**
+ * The ledger is machine-local state — same contract as the gitignored
+ * bro.config.json and `bd init --stealth`. When the debt dir sits inside a
+ * git worktree that doesn't already ignore it, append it to
+ * .git/info/exclude so harvest evidence can't be committed by accident.
+ * Local-only — never a repo diff.
+ */
+/**
+ * Literal path → gitignore pattern line. Without this, a debt.dir like
+ * `!ledger` or `foo[bar]` writes a pattern that does not ignore the dir
+ * (negation / character class), silently leaving the ledger trackable.
+ */
+function gitignoreLiteral(p: string): string {
+  const escaped = p.replace(/[\\*?[\]]/g, '\\$&')
+  return /^[!#]/.test(escaped) ? `\\${escaped}` : escaped
+}
+
+function ensureDebtDirExcluded(dir: string): void {
+  if (excludedDebtDirs.has(dir)) {
+    return
+  }
+  const git = (args: string[]): string =>
+    execFileSync('git', ['-C', dir, ...args], { // NOSONAR — git is already a hard dependency of the whole flow
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim()
+  let root: string
+  try {
+    mkdirSync(dir, { recursive: true }) // git -C fails on a missing dir
+    root = git(['rev-parse', '--show-toplevel'])
+  } catch (err) {
+    // Memoize only a proven "not a worktree" (or missing git) — a transient
+    // git/perm failure must retry exclusion on the next write, not silence
+    // the guard for the rest of the process.
+    const e = err as NodeJS.ErrnoException & { stderr?: string }
+    if (e.code === 'ENOENT' || (e.stderr ?? '').includes('not a git repository')) {
+      excludedDebtDirs.add(dir)
+      return
+    }
+    console.error(
+      `warning: could not resolve git root for ${dir} — ` +
+        `${(e.stderr ?? '').trim() || e.message}; exclusion will retry on next write`
+    )
+    return
+  }
+  const nativeRel = relative(root, dir)
+  // `..` alone or `..<sep>` = outside the worktree; a dir literally named
+  // `..debt` is a valid in-worktree segment, not an escape.
+  if (nativeRel === '' || nativeRel === '..' || nativeRel.startsWith(`..${sep}`)) {
+    excludedDebtDirs.add(dir)
+    return // debt dir is the repo root or outside the worktree
+  }
+  if (/[\r\n]/.test(nativeRel)) {
+    excludedDebtDirs.add(dir)
+    return // a newline in the dir name would inject extra exclude patterns
+  }
+  // Git pathspecs and ignore patterns are slash-separated — on Windows the
+  // native backslashes would be escaped by gitignoreLiteral and never match.
+  const rel = nativeRel.split(sep).join('/')
+  // Inside a worktree from here — exclusion failures are surfaced, since a
+  // silently trackable ledger is exactly what this guard prevents.
+  try {
+    const excludePath = git(['rev-parse', '--git-path', 'info/exclude'])
+    const path = isAbsolute(excludePath) ? excludePath : join(dir, excludePath)
+    // Concurrent writers can race the read-modify-write — everything that
+    // decides whether to append runs under the same lock the ledger uses.
+    withFileLock(path, () => {
+      try {
+        // Query from the repo root — pathspecs resolve against cwd, and
+        // `dir` is the ledger dir itself, not the root.
+        execFileSync('git', ['-C', root, 'check-ignore', '-q', rel], { stdio: 'ignore' }) // NOSONAR
+        return // already covered by .gitignore / info/exclude / global excludes
+      } catch {
+        /* not ignored — exclude it locally */
+      }
+      const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
+      const entry = `${gitignoreLiteral(rel)}/`
+      if (!existing.split('\n').includes(entry)) {
+        const nl = existing === '' || existing.endsWith('\n') ? '' : '\n'
+        // atomic write inside the lock — a truncated exclude would drop
+        // unrelated local rules, not just ours
+        atomicWrite(path, `${existing}${nl}${entry}\n`)
+      }
+    })
+    // Ignores never override the index — files already committed under the
+    // dir stay tracked and the exclusion is a no-op for them. Surface it;
+    // untracking is a staged change only the repo owner should make.
+    const tracked = execFileSync('git', ['-C', root, 'ls-files', '--', `${rel}/`], { // NOSONAR — git PATH lookup is the contract
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    if (tracked !== '') {
+      console.error(
+        `warning: ${rel}/ has tracked files — .git/info/exclude can't hide ` +
+          `index entries; run \`git rm -r --cached ${rel}/\` to untrack`
+      )
+    }
+    // Memo only on success — a failed attempt must retry (and re-warn) on
+    // the next write instead of going silent for the rest of the process.
+    excludedDebtDirs.add(dir)
+  } catch (err) {
+    console.error(
+      `warning: could not git-exclude ${rel} — ` +
+        `${err instanceof Error ? err.message : err}; the ledger may be trackable`
+    )
+  }
 }
 
 function harvestDir(cwd?: string): string {
@@ -134,6 +245,7 @@ export function writeHarvestFile(opts: {
     harvestFilename({ harvestedAt: opts.harvestedAt, pr: opts.pr, runId: opts.runId })
   )
   mkdirSync(dir, { recursive: true })
+  ensureDebtDirExcluded(debtDir(opts.cwd))
   const lines = opts.records.map((r) => JSON.stringify(r)).join('\n')
   writeFileSync(path, `${lines}\n`, 'utf8')
   return path
@@ -181,6 +293,7 @@ function upsertLedgerOverlaysUnlocked(
   }
   const path = ledgerFile(cwd)
   mkdirSync(dirname(path), { recursive: true })
+  ensureDebtDirExcluded(debtDir(cwd))
   const lines = [...map.values()]
     .sort((a, b) => a.thread_id.localeCompare(b.thread_id))
     .map((r) => JSON.stringify(r))
@@ -307,6 +420,7 @@ export function buildSummary(records: DebtRecord[]): DebtSummary {
 export function writeSummary(summary: DebtSummary, cwd?: string): void {
   const path = summaryFile(cwd)
   mkdirSync(dirname(path), { recursive: true })
+  ensureDebtDirExcluded(debtDir(cwd))
   atomicWrite(path, `${JSON.stringify(summary, null, 2)}\n`)
 }
 
@@ -466,6 +580,7 @@ export function withFileLock<T>(path: string, fn: () => T): T {
 
 export function markProcessedAt(prs: number[], at: string, cwd?: string): void {
   const path = processedFile(cwd)
+  ensureDebtDirExcluded(debtDir(cwd))
   withFileLock(path, () => {
     const map = readProcessedAt(cwd)
     for (const pr of prs) {

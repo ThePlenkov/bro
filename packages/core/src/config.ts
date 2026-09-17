@@ -13,7 +13,8 @@ export type Personality = (typeof PERSONALITIES)[number]
 
 export interface BroConfig {
   /** Active stores. The JSONL ledger is always on — extra backends are
-   *  projections written alongside it. */
+   *  projections written alongside it. beads is on by default; an
+   *  explicit "stores": ["jsonl"] opts out. */
   stores: StoreBackend[]
   personality: Personality
   debt: {
@@ -23,7 +24,7 @@ export interface BroConfig {
 }
 
 export const DEFAULT_CONFIG: BroConfig = {
-  stores: ['jsonl'],
+  stores: ['jsonl', 'beads'],
   personality: 'terse',
   debt: { dir: '.agents/review-debt' },
 }
@@ -41,10 +42,24 @@ function normalizeStores(raw: RawConfig): StoreBackend[] {
   if (Array.isArray(raw.stores)) {
     return [...new Set<StoreBackend>(['jsonl', ...raw.stores.filter(isBackend)])]
   }
+  if (raw.stores !== undefined) {
+    // Present but not an array — a malformed config must not silently
+    // widen into the beads projection.
+    console.error(
+      'warning: bro.config.json "stores" must be an array — using jsonl-only'
+    )
+    return ['jsonl']
+  }
   if (raw.store === 'beads' || raw.store === 'both') {
     return ['jsonl', 'beads']
   }
-  return ['jsonl']
+  if (raw.store !== undefined) {
+    // Legacy explicit opt-out — and any mistyped value ('beed'): an
+    // unrecognized legacy field must fall back to jsonl-only, not silently
+    // widen into the beads projection.
+    return ['jsonl']
+  }
+  return [...DEFAULT_CONFIG.stores]
 }
 
 export function loadConfig(cwd: string = process.cwd()): BroConfig {
@@ -62,6 +77,9 @@ export function loadConfig(cwd: string = process.cwd()): BroConfig {
       debt: { ...DEFAULT_CONFIG.debt, ...(rest.debt ?? {}) },
     }
   } catch {
-    return DEFAULT_CONFIG
+    // Unparseable config ≠ missing config — don't silently enable beads
+    // (and its `bd init` side effects) on a file the user broke.
+    console.error('warning: bro.config.json is not valid JSON — using jsonl-only stores')
+    return { ...DEFAULT_CONFIG, stores: ['jsonl'] }
   }
 }

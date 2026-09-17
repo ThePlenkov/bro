@@ -5,7 +5,7 @@
  * queue (`bd ready -l debt`). Upsert key: `external_ref` = `thread_id`, so
  * `bro debt sync` is idempotent. Status reconciles ledger → bead on re-runs.
  */
-import { bd } from '@bro/core'
+import { bd, initBeadsStealth } from '@bro/core'
 import type { DebtPriority, DebtRecord, DebtStatus } from './types.ts'
 
 export interface BeadRef {
@@ -16,11 +16,25 @@ export interface BeadRef {
   timesSeen?: number
 }
 
-export function checkBeads(): void {
+export function checkBeads(opts: { autoInit?: boolean } = {}): void {
   try {
     bd(['--version'])
-  } catch {
-    throw new Error('bd not found — install beads, or keep store: jsonl')
+  } catch (err) {
+    // ENOENT = the binary is absent; permission/timeout/broken-exec
+    // failures are real and must surface, not masquerade as "not found".
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(
+        'bd not found — install beads, or opt out with "stores": ["jsonl"] in bro.config.json'
+      )
+    }
+    throw err
+  }
+  // beads is a default store — a repo without .beads gets a stealth init
+  // (local exclude, nothing lands in git) instead of a setup error.
+  // Dry runs must not mutate: they skip init and let `bd list` report
+  // the missing workspace instead.
+  if (opts.autoInit !== false) {
+    initBeadsStealth()
   }
   try {
     bd(['list', '--json', '-n', '1'])
@@ -239,7 +253,8 @@ export function syncDebtToBeads(
   records: DebtRecord[],
   opts: { dryRun?: boolean } = {}
 ): SyncResult {
-  checkBeads()
+  const dryRun = opts.dryRun === true
+  checkBeads({ autoInit: !dryRun })
   const existing = listDebtBeads()
   const res: SyncResult = {
     created: 0,
@@ -249,7 +264,6 @@ export function syncDebtToBeads(
     unchanged: 0,
     linked: 0,
   }
-  const dryRun = opts.dryRun === true
   for (const rec of records) {
     syncRecord(rec, existing, res, dryRun)
   }

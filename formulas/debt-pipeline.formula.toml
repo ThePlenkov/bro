@@ -26,8 +26,9 @@ title = "bro debt collect — sweep merged PRs"
 type = "agent"
 description = """
 Run `bro debt collect {{scope}}` in the repo. It scans merged PRs without a
-`debt:*` label, writes harvests/*.jsonl, labels PRs collected/clean, and —
-when "beads" is in stores — projects findings into beads.
+`debt:*` label, writes harvests/*.jsonl, labels PRs collected/clean, and
+projects findings into beads — bd auto-inits stealth when .beads is missing
+("stores": ["jsonl"] in bro.config.json opts out).
 Done when: `bro debt status` shows no unprocessed merged PRs.
 """
 

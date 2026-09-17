@@ -33,8 +33,11 @@ npx -y @theplenkov/bro --help     # zero install
 npm i -g @theplenkov/bro          # or keep bro around: bro debt status
 ```
 
-Requires: `node >= 22`, `gh` authenticated. That's it. No tokens to
-babysit, no config files to confess to.
+Requires: `node >= 22`, `gh` authenticated, `bd`
+([beads](https://github.com/gastownhall/beads)) — it's a default store, so
+it's required unless you opt out. That's it. No tokens to babysit, no
+config files to confess to. (Zero-beads fallback: `"stores": ["jsonl"]`
+in `bro.config.json`.)
 
 ## Install as an agent plugin
 
@@ -62,7 +65,7 @@ fail-open.
 | `bro debt list` | Raw rows, filterable |
 | `bro debt mark <pr> <state>` | Manual override — `skipped` is the human opt-out, bro respects it |
 | `bro debt set <status> --thread-id ID` | Row status: `claimed` / `done --fix-pr N` / `wontfix` / `duplicate` — feeds `sync` |
-| `bro debt sync` | Projects the ledger into beads — idempotent (`thread_id` → `external_ref`), so `bd ready -l debt` becomes the work queue. Needs `bd` installed + `bd init` in the repo |
+| `bro debt sync` | Projects the ledger into beads — idempotent (`thread_id` → `external_ref`), so `bd ready -l debt` becomes the work queue. Needs `bd` installed; `.beads` auto-inits stealth when missing |
 | `bro debt next [--claim] [--json]` | The top open finding — priority-ranked, oldest first. The agent-fix primitive: claim it, fix it, `set done --fix-pr N` |
 | `bro debt watch [--interval SEC]` | Collect on a timer (default 300s) — post-merge bot comments get picked up by the stale-rescan without a manual run. All collect flags pass through |
 | `bro act status [PR]` | **Exit gate as code** — open threads, pending CI, SAST findings, mergeable. Non-zero while blocked. `--json` for machines |
@@ -95,22 +98,29 @@ and carries — the verdict is yours.
 ## Config (optional)
 
 `bro.config.json` in the repo root — written per-clone by `bro setup` and
-gitignored on purpose (store choices like `beads` are machine-local), so
-fresh checkouts run on defaults until they set up. Everything's optional:
+gitignored on purpose (store choices are machine-local), so fresh checkouts
+run on defaults until they set up. Everything's optional:
 
 ```json
 {
-  "stores": ["jsonl"],
+  "stores": ["jsonl", "beads"],
   "personality": "terse",
   "debt": { "dir": ".agents/review-debt" }
 }
 ```
 
 `stores` lists the backends debt writes to. `jsonl` is the evidence ledger
-(always written — drop it and bro adds it back). Add `"beads"` to also project
-every record into `bd` — JSONL keeps the receipts, beads runs the queue.
-Requires `bd` installed and `bd init` in the repo
-(`bd init --stealth --skip-agents --skip-hooks` keeps it invisible).
+(always written — drop it and bro adds it back). `beads` is on **by
+default**: a normal collect auto-runs `bd init --stealth --skip-agents
+--skip-hooks` when a repo is missing `.beads` (skipped by `--dry-run`,
+`--list-only`, and an empty target list), and
+projects every record into `bd` — JSONL keeps the receipts, beads runs the
+queue. Opt out with an explicit `"stores": ["jsonl"]`. Requires `bd`
+installed; a missing bd fails the run after evidence is written.
+
+The ledger dir is machine-local state too — bro adds it to
+`.git/info/exclude` on first write so harvest evidence can't be committed
+by accident.
 
 ## Labels bro manages
 
