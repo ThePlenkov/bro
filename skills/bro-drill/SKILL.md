@@ -22,7 +22,7 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0`, `bd init` done.
 | `bro drill current` | The active leaf frame (deepest open path) |
 | `bro drill tree` | All drill hierarchies (● open / ○ closed) |
 | `bro drill list` | Open frames |
-| `bro drill distill <id>` | `bd mol distill` — turn a successful drill tree into a reusable proto/formula |
+| `bro drill distill ID` | `bd mol distill` — turn a successful drill tree into a reusable proto/formula |
 
 ## Policy
 
