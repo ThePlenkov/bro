@@ -43,6 +43,7 @@ describe('evaluateExitGate', () => {
     assert.equal(evaluateExitGate(open({ sastUnknown: 1 })).ok, false)
     assert.equal(evaluateExitGate(open({ mergeable: 'CONFLICTING' })).ok, false)
     assert.equal(evaluateExitGate(open({ mergeable: 'UNKNOWN' })).ok, false)
+    assert.equal(evaluateExitGate(open({ mergeState: 'BEHIND' })).ok, false)
     assert.equal(evaluateExitGate(open({ isDraft: true })).ok, false)
   })
 

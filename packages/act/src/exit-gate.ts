@@ -45,6 +45,12 @@ export function evaluateExitGate(state: PrActState): ExitGate {
   if (state.mergeable === 'UNKNOWN') {
     blockers.push('mergeability still computing — recheck')
   }
+  // BEHIND means the merge can't proceed without an update; BLOCKED is not
+  // listed — required-review blocks are intentionally bypassed via --admin,
+  // and UNSTABLE overlaps the all-checks ci_pending count
+  if (state.mergeState === 'BEHIND') {
+    blockers.push('branch is behind the base — update it')
+  }
   if (state.isDraft) {
     blockers.push('PR is a draft')
   }
