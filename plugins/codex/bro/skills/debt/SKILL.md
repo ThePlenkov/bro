@@ -9,8 +9,9 @@ description: "Use when the user invokes /debt or asks about review debt on merge
 reimplement what `bro debt` already does.
 
 Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
-`gh` auth + `bd` (beads is a default store — `"stores": ["jsonl"]` in
-bro.config.json is the opt-out).
+`gh` auth; `bd` is required only with beads enabled (the default) —
+`"stores": ["jsonl"]` in bro.config.json opts out and drops the `bd`
+requirement.
 
 ## Commands
 
