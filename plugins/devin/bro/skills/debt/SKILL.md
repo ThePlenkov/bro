@@ -15,7 +15,7 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro debt collect [filters]` | Scan merged PRs **without** a `debt:*` label → collect unresolved threads → write `harvests/*.jsonl` + project into beads → label `debt:collected` / `debt:clean` |
+| `bro debt collect [filters]` | Scan merged PRs **without** a `debt:*` label → collect unresolved threads → write `harvests/*.jsonl` → label `debt:collected` / `debt:clean` |
 | `bro debt status` | Ledger summary + unprocessed merged-PR count |
 | `bro debt prs` | Merged PRs still unprocessed — the work queue (`--all`: full matrix) |
 | `bro debt list` | Ledger rows (`--status`, `--area`, `--author`, `--priority`, `--pr`) |
@@ -27,12 +27,7 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
 
 - **`debt:*` labels are the PR-level source of truth** for "processed".
   `skipped` is a human opt-out and always wins over machine labels.
-- **beads is a default store.** collect auto-`bd init --stealth`s a repo
-  missing `.beads` (nothing lands in git) and keeps the ledger dir out of
-  git via `.git/info/exclude`. `"stores": ["jsonl"]` in bro.config.json is
-  the opt-out.
 - **Label after the file lands.** In CI pipelines run
   `collect --no-label`, land `harvests/*.jsonl`, then `bro debt mark`.
-- **Collect, don't fix.** Triage → backlog, fixes → the fix loop. bro-debt
-  never edits product code or resolves threads on source PRs.
+- **Collect, don't fix.** Triage → backlog, fixes → the fix loop. `bro debt` never edits product code or resolves threads on source PRs.
 - `--reharvest` bypasses the label skip for one run.

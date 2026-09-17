@@ -11,7 +11,7 @@ packages/debt     @bro/debt      — review-debt domain: collect, labels, ledger
 packages/act      @bro/act       — open-PR loop: state, threads, resolve, exit gate
 packages/drill    @bro/drill     — scoped descent: drill frames as beads
 packages/cli      @theplenkov/bro — published CLI (bin: bro), bundles @bro/*
-skills/act, skills/debt, skills/drill — thin skills: policy only, call `bro *`
+skills/act, skills/debt, skills/drill, skills/wtf — thin skills: policy only, call `bro *`
 plugin.json                      — agent-plugins.org manifest (repo root IS the Devin plugin)
 hooks.json + hooks/run.sh        — Devin lifecycle hooks → `bro hooks <event>`
 .claude-plugin/marketplace.json  — marketplace manifest (Claude + Codex + Cursor read it)

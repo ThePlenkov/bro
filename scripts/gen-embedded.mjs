@@ -1,6 +1,6 @@
 /**
  * Regenerate packages/cli/src/skills-data.ts from the real sources:
- *   skills/bro-*\/\**  → SKILL_FILES (installed by `bro setup --skills`)
+ *   skills/*  → SKILL_FILES (installed by `bro setup --skills`)
  *   formulas/*.toml    → FORMULA_FILES (installed by `bro setup --beads`)
  *
  * The embedded copies are what the published tarball carries — repo-root
