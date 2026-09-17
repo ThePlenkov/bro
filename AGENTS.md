@@ -10,8 +10,9 @@ packages/core     @bro/core      — gh wrapper, config loader, output printer
 packages/debt     @bro/debt      — review-debt domain: collect, labels, ledger, beads sync
 packages/act      @bro/act       — open-PR loop: state, threads, resolve, exit gate
 packages/drill    @bro/drill     — scoped descent: drill frames as beads
+packages/retro    @bro/retro     — self-correction: wtf capture, TOML retro plans → prevention beads
 packages/cli      @theplenkov/bro — published CLI (bin: bro), bundles @bro/*
-skills/bro-debt, skills/bro-act, skills/bro-drill — thin skills: policy only, call `bro *`
+skills/bro-debt, skills/bro-act, skills/bro-drill, skills/bro-wtf — thin skills: policy only, call `bro *`
 plugin.json                      — agent-plugins.org manifest (repo IS the plugin)
 com.github.theplenkov.bro/hooks/ — client extension: session hooks
 formulas/                        — beads formulas (debt-pipeline)
