@@ -1,0 +1,65 @@
+{
+  "$comment": "Claude-layout hooks for the bro plugin. SessionStart/PreCompact rehydrate beads context (ready work + active drill frame) so a fresh or compacted session resumes from bd state, not transcript. Commands resolve the plugin root from whichever var the client exports (CLAUDE_PLUGIN_ROOT/DEVIN_PLUGIN_ROOT/PLUGIN_ROOT), fall back to bro on PATH, then npx \u2014 and always exit 0 so a missing binary can never stall the session.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" session-start || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks session-start || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@theplenkov/bro@0.2.0\" hooks session-start || true; fi; exit 0",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" pre-compact || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks pre-compact || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@theplenkov/bro@0.2.0\" hooks pre-compact || true; fi; exit 0",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" prompt-submit || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks prompt-submit || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@theplenkov/bro@0.2.0\" hooks prompt-submit || true; fi; exit 0",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" post-tool || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks post-tool || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@theplenkov/bro@0.2.0\" hooks post-tool || true; fi; exit 0",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" stop || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks stop || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@theplenkov/bro@0.2.0\" hooks stop || true; fi; exit 0",
+            "timeout": 25
+          }
+        ]
+      }
+    ]
+  }
+}
