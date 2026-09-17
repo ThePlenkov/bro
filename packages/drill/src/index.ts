@@ -6,7 +6,9 @@ export {
   drillTree,
   drillUp,
   listDrills,
+  planPreventions,
 } from './frames.ts'
+export type { PreventionPlan } from './frames.ts'
 export type {
   DownOptions,
   DrillFrame,

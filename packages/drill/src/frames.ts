@@ -173,13 +173,61 @@ export function drillDown(title: string, opts: DownOptions = {}): DrillRow {
 
 export { refKind }
 
+/** Open prevention beads already discovered-from this frame — the
+ * dedupe set that makes prevention creation retry-safe. */
+function priorPreventionRows(frameId: string): DrillRow[] {
+  return bdJson<DrillRow[]>([
+    'dep',
+    'list',
+    frameId,
+    '--direction=up',
+    '--type',
+    'discovered-from',
+    '--json',
+  ])
+}
+
+export interface PreventionPlan {
+  /** Item text → existing bead id, for items already recorded. */
+  reuse: Map<string, string>
+  /** Item texts needing a new bead, in order, deduped. */
+  create: string[]
+}
+
+/** Fold `--prevent` items against what the frame already recorded: an
+ * open prevention bead with the same title is reused, not recreated;
+ * repeated items within the list collapse to one bead. Pure — the
+ * retry-safety core of drillUp: a mid-flight failure followed by a
+ * retry converges instead of duplicating. */
+export function planPreventions(items: string[], prior: DrillRow[]): PreventionPlan {
+  const reuse = new Map<string, string>()
+  for (const row of prior) {
+    if (isOpen(row) && row.labels?.includes(PREVENTION_LABEL) && !reuse.has(row.title)) {
+      reuse.set(row.title, row.id)
+    }
+  }
+  const create = new Set<string>()
+  for (const item of items) {
+    if (!reuse.has(item)) {
+      create.add(item)
+    }
+  }
+  return { create: [...create], reuse }
+}
+
 /** One prevention bead per item — discovered-from, not --parent:
  * prevention is follow-up work found by the frame, and a child would
  * block the parent's own close. `--title` keeps a `--`-leading item as
- * data, not a flag. IDs land in `out` as they are created so a partial
- * failure is still compensatable. */
-function createPreventions(frameId: string, items: string[], out: string[]): void {
-  for (const item of items) {
+ * data, not a flag. `created` holds only beads this call made — the
+ * compensation set; `ids` is the full per-item result (reused + new). */
+function createPreventions(
+  frameId: string,
+  items: string[],
+): { created: string[]; ids: string[] } {
+  const { create, reuse } = planPreventions(items, priorPreventionRows(frameId))
+  const created: string[] = []
+  const newIds = new Map<string, string>()
+  for (const item of create) {
     const row = bdJson<DrillRow>([
       'create',
       '--title',
@@ -190,8 +238,17 @@ function createPreventions(frameId: string, items: string[], out: string[]): voi
       '--deps',
       `discovered-from:${frameId}`,
     ])
-    out.push(row.id)
+    created.push(row.id)
+    newIds.set(item, row.id)
   }
+  const ids = items.map((item) => {
+    const id = reuse.get(item) ?? newIds.get(item)
+    if (!id) {
+      throw new Error(`internal error: no bead id for prevention item "${item}"`)
+    }
+    return id
+  })
+  return { created, ids }
 }
 
 /** `bd note` appends — check the stored notes first so a retry after a
@@ -285,25 +342,39 @@ export function drillUp(opts: UpOptions): UpResult {
       : []),
   ].join('\n')
 
-  // bd has no transactions — on any failure after the note lands, delete
-  // the prevention beads we created so a retry can't duplicate them.
-  const preventionIds: string[] = []
+  // bd has no transactions — the ordering + idempotency contract is the
+  // mitigation: children-check first (fail fast), noteOnce dedupes the
+  // memo, prevention creation reuses open same-title beads, handoff
+  // events are idempotent, close lands last. On any failure mid-flight,
+  // delete only the prevention beads THIS call created — reused ones
+  // predate the call and are never compensation — so a retry converges
+  // instead of duplicating.
+  let created: string[] = []
+  let preventionIds: string[] = []
   try {
     noteOnce(frame.id, memo)
-    createPreventions(frame.id, opts.prevent ?? [], preventionIds)
+    const prev = createPreventions(frame.id, opts.prevent ?? [])
+    created = prev.created
+    preventionIds = prev.ids
     if (!frame.ephemeral) {
       recordHandoff(frame, opts.evidence ?? [])
     }
     bd(['close', frame.id, '--reason', 'drill up — result handed to parent'])
   } catch (err) {
-    for (const id of preventionIds) {
+    const orphans: string[] = []
+    for (const id of created) {
       try {
         bd(['delete', id, '--force'])
       } catch {
-        // best effort — report the original failure either way
+        orphans.push(id)
       }
     }
-    throw err
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(
+      orphans.length > 0
+        ? `${msg} — cleanup incomplete: prevention bead(s) left behind: ${orphans.join(', ')}`
+        : msg,
+    )
   }
   return { closed: frame.id, preventionIds }
 }
