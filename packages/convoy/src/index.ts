@@ -4,6 +4,7 @@ export {
   nextStep,
   pourFormula,
   resolveMolecule,
+  stepInputs,
   stepKind,
   stepsOf,
 } from './molecule.ts'
@@ -14,6 +15,7 @@ export type {
   MolDep,
   MolIssue,
   Molecule,
+  StepInput,
   StepKind,
   StepState,
 } from './types.ts'

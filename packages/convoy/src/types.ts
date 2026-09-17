@@ -45,6 +45,13 @@ export interface ConvoyStep {
 
 export type ConvoyState = 'step' | 'gate' | 'blocked' | 'complete'
 
+/** A closed direct dependency of the current step — its `--result` handoff. */
+export interface StepInput {
+  id: string
+  title: string
+  reason: string
+}
+
 export interface ConvoyNext {
   mol: string
   state: ConvoyState
@@ -52,6 +59,10 @@ export interface ConvoyNext {
   ready: ConvoyStep[]
   /** first ready step in pour order — what `convoy done` should follow */
   step?: ConvoyStep
+  /** ready steps that are human gates — always surfaced so none is skipped */
+  gates: string[]
+  /** closed direct dependencies of `step` with their close reasons — the handoff */
+  inputs?: StepInput[]
   /** open steps still waiting on dependencies */
   blocked: string[]
 }

@@ -1,5 +1,5 @@
 import { bd, bdJson } from '@bro/core'
-import type { ConvoyNext, ConvoyStep, Molecule, MolIssue, StepKind, StepState } from './types.ts'
+import type { ConvoyNext, ConvoyStep, Molecule, MolIssue, StepInput, StepKind, StepState } from './types.ts'
 
 /** `bd mol show <id> --json` — the whole DAG in one call. */
 export function loadMolecule(id: string): Molecule {
@@ -77,11 +77,27 @@ export function nextStep(mol: Molecule): ConvoyNext {
   const steps = stepsOf(mol)
   const ready = steps.filter((s) => s.state === 'ready')
   const blocked = steps.filter((s) => s.state === 'blocked').map((s) => s.id)
-  const base = { mol: mol.root.id, ready, blocked }
+  const gates = ready.filter((s) => s.kind === 'human').map((s) => s.id)
+  const base = { mol: mol.root.id, ready, gates, blocked }
   if (steps.every((s) => s.state === 'done')) return { ...base, state: 'complete' }
   const step = ready[0]
   if (!step) return { ...base, state: 'blocked' }
   return { ...base, state: step.kind === 'human' ? 'gate' : 'step', step }
+}
+
+/**
+ * The handoff into a step: its closed direct dependencies, with the
+ * `--result` each was closed with (bd stores it as close_reason). One
+ * `bd show` per closed blocker — bounded by in-degree, usually 1–2.
+ */
+export function stepInputs(mol: Molecule, stepId: string): StepInput[] {
+  const closed = new Set(mol.issues.filter((i) => CLOSED.has(i.status)).map((i) => i.id))
+  return mol.dependencies
+    .filter((d) => d.type === 'blocks' && d.issue_id === stepId && closed.has(d.depends_on_id))
+    .map((d) => {
+      const dep = bdJson<{ title: string; close_reason?: string }>(['show', d.depends_on_id])
+      return { id: d.depends_on_id, title: dep.title, reason: dep.close_reason ?? '' }
+    })
 }
 
 /**

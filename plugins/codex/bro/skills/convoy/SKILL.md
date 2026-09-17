@@ -41,6 +41,12 @@ Repeat `next` → work → `done` until `next` reports `"state": "complete"`.
 - `complete` — every step done. Close the molecule root:
   `bd close <mol-id> --reason "convoy complete"`.
 
+`next` also reports `gates[]` — every ready human gate, even while an
+agent step runs. Surface them to the user promptly; a ready gate means
+the convoy is waiting on a human somewhere. And `inputs[]` — the
+`--result` each closed direct dependency was completed with. That is the
+handoff: read it before starting the step.
+
 ## Policy
 
 - **Never skip `next`.** Do not pick steps by eyeballing titles — the DAG

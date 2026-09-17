@@ -17,8 +17,10 @@ import {
   nextStep,
   pourFormula,
   resolveMolecule,
+  stepInputs,
   stepsOf,
 } from '@bro/convoy'
+import type { ConvoyNext, StepState } from '@bro/convoy'
 import { flag, flagAll, positionals } from './args.ts'
 
 function usage(exitCode = 1): never {
@@ -39,7 +41,14 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set(['--result', '--var', '--mol'])
 
 const convoyPositionals = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
 
-const GLYPH: Record<string, string> = { done: '✓', ready: '▸', blocked: '·' }
+const GLYPH: Record<StepState, string> = { done: '✓', ready: '▸', blocked: '·' }
+
+/** Attach the upstream handoff — closed direct deps' close reasons. */
+function withInputs(next: ConvoyNext, mol: Parameters<typeof stepInputs>[0]): ConvoyNext {
+  if (!next.step) return next
+  const inputs = stepInputs(mol, next.step.id)
+  return inputs.length > 0 ? { ...next, inputs } : next
+}
 
 export async function runConvoyCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
@@ -76,7 +85,7 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
     case 'next': {
       const [id] = convoyPositionals(rest)
       const mol = resolveMolecule(id)
-      console.log(JSON.stringify(nextStep(mol), null, 2))
+      console.log(JSON.stringify(withInputs(nextStep(mol), mol), null, 2))
       return
     }
     case 'done': {
@@ -85,10 +94,17 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
         console.error('error: done requires a step id')
         process.exit(2)
       }
+      // membership check before mutation — a mistyped/copied id must not
+      // close an unrelated issue
+      const mol = resolveMolecule(flag(rest, '--mol'))
+      if (!stepsOf(mol).some((s) => s.id === stepId)) {
+        console.error(`error: ${stepId} is not a step of molecule ${mol.root.id}`)
+        process.exit(2)
+      }
       const result = flag(rest, '--result')
       bd(['close', stepId, ...(result ? ['--reason', result] : [])])
-      const mol = resolveMolecule(flag(rest, '--mol'))
-      console.log(JSON.stringify(nextStep(mol), null, 2))
+      const fresh = resolveMolecule(mol.root.id)
+      console.log(JSON.stringify(withInputs(nextStep(fresh), fresh), null, 2))
       return
     }
     case 'pour': {
