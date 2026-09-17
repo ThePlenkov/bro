@@ -1,5 +1,5 @@
 {
-  "$comment": "Client-defined hooks for the bro plugin. SessionStart rehydrates beads context (ready work + active drill frame) so a fresh session or post-compaction agent resumes from bd state, not transcript. Commands are best-effort — every hook exits 0 when bro/bd is absent and is bounded by a timeout so a stalled bd cannot block session start or compaction.",
+  "$comment": "Client-defined hooks for the bro plugin. SessionStart rehydrates beads context (ready work + active drill frame) so a fresh session or post-compaction agent resumes from bd state, not transcript. When the client exports a plugin-root var the call routes through hooks/run.sh (PATH → dist → npx resolution, fail-open); otherwise `command -v` guards make every hook a silent no-op without bd/bro.",
   "hooks": {
     "SessionStart": [
       {
@@ -7,8 +7,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bd ready 2>/dev/null | head -20; bro drill current >/dev/null 2>&1 && bro drill current || true",
-            "timeout": 10
+            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-}}/..\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" session-start; else command -v bd >/dev/null 2>&1 && { bd ready 2>/dev/null | head -20; command -v bro >/dev/null 2>&1 && bro drill current; }; fi; exit 0",
+            "timeout": 15
           }
         ]
       }
@@ -19,8 +19,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bro drill current >/dev/null 2>&1 && bro drill current && echo 'Active drill frame above — resume with `bro drill up --result ...` when done.' || true",
-            "timeout": 10
+            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-}}/..\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" pre-compact; else command -v bro >/dev/null 2>&1 && bro drill current; fi; exit 0",
+            "timeout": 15
           }
         ]
       }

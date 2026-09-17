@@ -43,9 +43,8 @@ export function childrenOf(id: string): DrillRow[] {
 }
 
 /** One `bd children` sweep: parent→kids and kid→parent in a single pass.
- * Kids are NOT label-filtered — bd refuses to close a parent with ANY open
- * child, so the leaf test must see non-drill children too. Callers that
- * render the drill tree filter with `isDrill` themselves. */
+ * Kids are NOT label-filtered — drillUp's close check needs every child,
+ * and drillTree renders them. Callers pick which predicate applies. */
 function drillRelations(rows: DrillRow[]): {
   kids: Map<string, DrillRow[]>
   parents: Map<string, string>
@@ -86,7 +85,12 @@ export function currentFrame(): DrillFrame | undefined {
     }
     return d
   }
-  const leaves = rows.filter((r) => !(kids.get(r.id) ?? []).some(isOpen))
+  // leaf = no open DRILL child. A drill frame with an open non-drill child
+  // is still the active frame — close eligibility (any open child) is
+  // enforced separately in drillUp.
+  const leaves = rows.filter(
+    (r) => !(kids.get(r.id) ?? []).some((k) => isOpen(k) && isDrill(k))
+  )
   leaves.sort((a, b) => {
     const d = depthOf(b.id) - depthOf(a.id)
     return d !== 0 ? d : (b.updated_at ?? '').localeCompare(a.updated_at ?? '')
@@ -107,16 +111,16 @@ function requireOpenDrill(id: string, flag: string): DrillRow {
   return row
 }
 
-/** Record the claim; on failure delete the frame — an unclaimed frame
- * violates the claim-on-down invariant and a retry would duplicate it.
- * The delete itself can fail; surface both so the orphan isn't silent. */
-function claimFrame(row: DrillRow): void {
+/** Record the claim provenance; on failure, delete the frame — an
+ * unclaimed frame violates the claim-on-down invariant, and a retry would
+ * create a duplicate. A failed cleanup must not swallow the claim error. */
+function claimFrame(id: string): void {
   try {
     bd([
       'provenance',
       'record',
       '--issue',
-      row.id,
+      id,
       '--kind',
       'claim',
       '--source',
@@ -126,11 +130,13 @@ function claimFrame(row: DrillRow): void {
     ])
   } catch (err) {
     try {
-      bd(['delete', row.id, '--force'])
+      bd(['delete', id, '--force'])
     } catch (cleanupErr) {
-      const msg = err instanceof Error ? err.message : String(err)
-      const cmsg = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)
-      throw new Error(`${msg} — cleanup of frame ${row.id} also failed: ${cmsg}`)
+      throw new Error(
+        `claim failed: ${err instanceof Error ? err.message : err}; ` +
+          `cleanup of ${id} also failed (frame left unclaimed): ` +
+          `${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`
+      )
     }
     throw err
   }
@@ -158,11 +164,10 @@ export function drillDown(title: string, opts: DownOptions = {}): DrillRow {
     args.push('-d', opts.description)
   }
   const row = bdJson<DrillRow>(args)
-  if (opts.ephemeral) {
-    // wisp semantics: no audit trail
-    return row
+  if (!opts.ephemeral) {
+    // wisp semantics: ephemeral frames get no audit trail
+    claimFrame(row.id)
   }
-  claimFrame(row)
   return row
 }
 
@@ -170,7 +175,8 @@ export { refKind }
 
 /** One prevention bead per item — discovered-from, not --parent:
  * prevention is follow-up work found by the frame, and a child would
- * block the parent's own close. */
+ * block the parent's own close. `--title` keeps a `--`-leading item as
+ * data, not a flag. */
 function createPreventions(frameId: string, items: string[]): string[] {
   return items.map(
     (item) =>

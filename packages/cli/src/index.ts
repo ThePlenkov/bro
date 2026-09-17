@@ -2,11 +2,11 @@
 /**
  * bro — agent's sidekick CLI.
  *
- *   bro debt <sub>       review-debt pipeline (collect, status, prs, list, mark, sync, set)
- *   bro act <sub>        open-PR review loop (status, threads, resolve, reply)
+ *   bro debt <sub>   review-debt pipeline (collect, status, prs, list, mark, sync, set)
+ *   bro act <sub>    open-PR review loop (status, threads, resolve, reply)
  *   bro retrospect <sub> self-correction: wtf capture, retro plans → prevention beads
  *   bro wtf <complaint>  alias for `retrospect capture`
- *   bro setup            configure a repo for bro
+ *   bro setup        configure a repo for bro
  *   bro --version
  */
 import { readFileSync } from 'node:fs'
@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { runActCommand } from './commands/act.ts'
 import { runDebtCommand } from './commands/debt.ts'
 import { runDrillCommand } from './commands/drill.ts'
+import { runHooksCommand } from './commands/hooks.ts'
 import { runRetrospectCommand } from './commands/retrospect.ts'
 import { runSetupCommand } from './commands/setup.ts'
 
@@ -38,6 +39,8 @@ Commands:
   unwind       Alias for \`drill up\`
   retrospect <sub>  Self-correction: capture|record|status|list|schema
   wtf <complaint>  Alias for \`retrospect capture\`
+  hooks <ev>   Agent lifecycle hooks: session-start|post-compaction|
+               prompt-submit|post-tool|stop|permission
   setup        Wire bro into the current repo
 
 Options:
@@ -85,6 +88,9 @@ async function main(): Promise<void> {
       return
     case 'wtf':
       await runRetrospectCommand(['capture', ...rest])
+      return
+    case 'hooks':
+      await runHooksCommand(rest)
       return
     case 'setup':
       await runSetupCommand(rest)

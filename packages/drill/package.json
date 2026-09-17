@@ -3,6 +3,9 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "@bro/core": "*"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

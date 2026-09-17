@@ -24,8 +24,13 @@ export function checkBeads(): void {
   }
   try {
     bd(['list', '--json', '-n', '1'])
-  } catch {
-    throw new Error('beads not initialized in this repo — run `bd init` first')
+  } catch (err) {
+    // preserve the real failure — "not initialized" is only one cause
+    const stderr = (err as { stderr?: string }).stderr?.trim()
+    throw new Error(
+      `bd list failed — ${stderr || (err instanceof Error ? err.message : String(err))} ` +
+        '(run `bd init` if beads is not initialized here)'
+    )
   }
 }
 

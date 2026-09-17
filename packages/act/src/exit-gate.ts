@@ -10,10 +10,13 @@ export function evaluateExitGate(state: PrActState): ExitGate {
     blockers.push(`${state.openThreads} unresolved review thread(s)`)
   }
   if (state.ciPending > 0) {
-    blockers.push(`${state.ciPending} pending/failing required check(s)`)
+    blockers.push(`${state.ciPending} pending/failing check(s)`)
   }
   if (state.reviewersPending > 0) {
     blockers.push(`${state.reviewersPending} AI reviewer(s) still running — recheck`)
+  }
+  if (state.reviewersFailing > 0) {
+    blockers.push(`${state.reviewersFailing} AI reviewer check(s) failed — re-run or push`)
   }
   if (state.sastPending > 0) {
     blockers.push(`${state.sastPending} SAST finding(s)`)
@@ -40,6 +43,7 @@ export function evaluateExitGate(state: PrActState): ExitGate {
     open_threads: state.openThreads,
     ci_pending: state.ciPending,
     reviewers_pending: state.reviewersPending,
+    reviewers_failing: state.reviewersFailing,
     sast_pending: state.sastPending,
     sast_unknown: state.sastUnknown,
     is_draft: state.isDraft,

@@ -54,7 +54,7 @@ babysit, no config files to confess to.
 | `bro act resolve --thread ID [--comment T]` | Resolve (or `--unresolve`) — replies first if a comment is given |
 | `bro act reply --thread ID --comment T` | Reply without resolving; `--file TSV` for batch |
 | `bro drill down <title> [--under ID] [--ephemeral]` | Scoped descent — a child frame under the current leaf, as a `drill`-labeled bead |
-| `bro drill up --result T [--prevent T]… [--evidence R]…` | Ascend. `--result` is mandatory; each `--prevent` becomes a `discovered-from` task; evidence refs land in `bd provenance` |
+| `bro drill up --result T [--prevent T]… [--evidence R]…` | Ascend. `--result` is mandatory; each `--prevent` becomes a `discovered-from` task; evidence refs land in `bd provenance` (skipped for `--ephemeral` wisps) |
 | `bro unwind …` | Alias for `drill up` |
 | `bro drill current` / `tree` / `list` | Active leaf frame · all hierarchies · open frames |
 | `bro drill distill <id>` | `bd mol distill` — a good drill tree becomes a reusable proto |

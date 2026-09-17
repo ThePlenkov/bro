@@ -1,14 +1,18 @@
 /**
- * Thin `bd` wrapper — the beads CLI is a user-installed runtime dep; PATH
- * lookup is the contract (same as gh). Shared by the bead-backed domains
- * (drill frames, retrospection) instead of per-package copies.
+ * Thin `bd` (beads) wrapper — the single PATH/exec contract for every
+ * package. PATH lookup is the contract (same as gh); a generous maxBuffer
+ * keeps large `bd list --json` payloads from hitting Node's 1 MiB default.
  */
 import { execFileSync } from 'node:child_process'
 
 export function bd(args: string[]): string {
-  // maxBuffer: unbounded listings (`-n 0`) can exceed execFileSync's 1 MiB
-  // default once a repo accumulates labeled beads
-  return execFileSync('bd', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }) // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
+  return execFileSync('bd', args, { // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    // a wedged bd must degrade, not stall — hooks call this inline in the
+    // agent lifecycle
+    timeout: 15_000,
+  })
 }
 
 export function bdJson<T>(args: string[]): T {
@@ -46,13 +50,11 @@ export function checkBeads(): void {
   try {
     bd(['list', '--json', '-n', '1'])
   } catch (err) {
-    // preserve the underlying failure — a permission or version error is
-    // not "not initialized"
-    const msg = err instanceof Error ? err.message : String(err)
+    // preserve the real failure — "not initialized" is only one cause
+    const stderr = (err as { stderr?: string }).stderr?.trim()
     throw new Error(
-      /not initialized|run `bd init`/i.test(msg)
-        ? 'beads not initialized in this repo — run `bd init` first'
-        : `bd check failed — ${msg}`
+      `bd list failed — ${stderr || (err instanceof Error ? err.message : String(err))} ` +
+        '(run `bd init` if beads is not initialized here)'
     )
   }
 }
