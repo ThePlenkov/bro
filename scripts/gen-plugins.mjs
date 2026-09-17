@@ -95,7 +95,13 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
   const expected = new Set(Object.keys(files).map((rel) => `${dir}/${rel}`))
   for (const [rel, src] of Object.entries(files)) {
     if (src === null) {
+      // hand-written source — generation can't create it, so its absence
+      // is an error in write mode too, not just check drift
       if (!existsSync(join(ROOT, `${dir}/${rel}`))) {
+        if (!CHECK) {
+          console.error(`required hand-written file missing: ${dir}/${rel}`)
+          process.exit(1)
+        }
         drift.push(`${dir}/${rel}`)
       }
       continue
@@ -152,7 +158,7 @@ function* walk(dir, prefix = '') {
 }
 
 if (CHECK && drift.length > 0) {
-  console.error(`plugin adapters out of date — run \`npm run gen:plugins\`:\n  ${drift.join('\n  ')}`)
+  console.error(`plugin adapters out of date — run \`npm run gen:plugins\`:\n  ${[...new Set(drift)].join('\n  ')}`)
   process.exit(1)
 }
 console.log(CHECK ? 'plugin adapters fresh' : 'plugin adapters generated')
