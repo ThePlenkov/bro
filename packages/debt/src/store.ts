@@ -62,7 +62,9 @@ function ensureDebtDirExcluded(dir: string): void {
   // silently trackable ledger is exactly what this guard prevents.
   try {
     try {
-      git(['check-ignore', '-q', rel])
+      // Query from the repo root — pathspecs resolve against cwd, and `dir`
+      // is the ledger dir itself, not the root.
+      execFileSync('git', ['-C', root, 'check-ignore', '-q', rel], { stdio: 'ignore' }) // NOSONAR
       return // already covered by .gitignore / info/exclude / global excludes
     } catch {
       /* not ignored — exclude it locally */
