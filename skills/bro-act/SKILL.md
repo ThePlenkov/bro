@@ -34,8 +34,11 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
   on completion and returns the gate report; a plain background shell
   stays silent until polled, so it is only a fallback.
 - **Resolve silently when you fixed it.** The pushed commit is the verdict —
-  do not leave a comment per thread. Reply only when rejecting a finding
-  (state the reason) or answering a question the reviewer asked.
+  do not leave a comment per thread (the fix is discoverable via the push
+  timeline on the file/line the thread anchors to). Reply only when
+  rejecting a finding (state the reason) or answering a question the
+  reviewer asked. If a thread needs an explicit audit marker, pass
+  `--comment <sha>` — a bare SHA, not prose.
 - **Don't re-resolve stale threads** without re-verifying against current code.
 - Debt rows from `bro debt list` become work via
   `bro debt set claimed --thread-id <id>` → fix →
