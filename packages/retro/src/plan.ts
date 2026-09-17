@@ -93,7 +93,8 @@ export function parsePlan(text: string, source = 'plan'): RetroPlan {
     errors.push('retro: why is required — the root cause')
   }
   const retroScope = scope(retro.scope, 'retro', errors) ?? 'project'
-  if (retro.wtf !== undefined && !nonEmpty(retro.wtf)) {
+  // an empty wtf is the schema template's placeholder — absent, not invalid
+  if (retro.wtf !== undefined && typeof retro.wtf !== 'string') {
     errors.push('retro: wtf must be a bead id')
   }
   let evidence: string[] = []

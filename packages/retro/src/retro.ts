@@ -41,10 +41,10 @@ function gitSnapshot(): string[] {
   try {
     const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
       encoding: 'utf8',
-    }).trim()
+    }).trim() // NOSONAR — argv array, no shell; PATH lookup is the contract
     const sha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
       encoding: 'utf8',
-    }).trim()
+    }).trim() // NOSONAR — argv array, no shell
     return [`git: ${branch}@${sha}`]
   } catch {
     return []

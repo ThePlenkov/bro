@@ -5,7 +5,7 @@
  * queue (`bd ready -l debt`). Upsert key: `external_ref` = `thread_id`, so
  * `bro debt sync` is idempotent. Status reconciles ledger → bead on re-runs.
  */
-import { execFileSync } from 'node:child_process'
+import { bd } from '@bro/core'
 import type { DebtPriority, DebtRecord, DebtStatus } from './types.ts'
 
 export interface BeadRef {
@@ -14,10 +14,6 @@ export interface BeadRef {
   title?: string
   priority?: number
   timesSeen?: number
-}
-
-function bd(args: string[]): string {
-  return execFileSync('bd', args, { encoding: 'utf8' }) // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
 }
 
 export function checkBeads(): void {

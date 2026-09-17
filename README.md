@@ -49,23 +49,19 @@ babysit, no config files to confess to.
 | `bro debt sync` | Projects the ledger into beads — idempotent (`thread_id` → `external_ref`), so `bd ready -l debt` becomes the work queue. Needs `bd` installed + `bd init` in the repo |
 | `bro debt next [--claim] [--json]` | The top open finding — priority-ranked, oldest first. The agent-fix primitive: claim it, fix it, `set done --fix-pr N` |
 | `bro debt watch [--interval SEC]` | Collect on a timer (default 300s) — post-merge bot comments get picked up by the stale-rescan without a manual run. All collect flags pass through |
-
 | `bro act status [PR]` | **Exit gate as code** — open threads, pending CI, SAST findings, mergeable. Non-zero while blocked. `--json` for machines |
 | `bro act threads [PR]` | Unresolved review threads on the PR |
 | `bro act resolve --thread ID [--comment T]` | Resolve (or `--unresolve`) — replies first if a comment is given |
 | `bro act reply --thread ID --comment T` | Reply without resolving; `--file TSV` for batch |
-
 | `bro drill down <title> [--under ID] [--ephemeral]` | Scoped descent — a child frame under the current leaf, as a `drill`-labeled bead |
 | `bro drill up --result T [--prevent T]… [--evidence R]…` | Ascend. `--result` is mandatory; each `--prevent` becomes a `discovered-from` task; evidence refs land in `bd provenance` |
 | `bro unwind …` | Alias for `drill up` |
 | `bro drill current` / `tree` / `list` | Active leaf frame · all hierarchies · open frames |
 | `bro drill distill <id>` | `bd mol distill` — a good drill tree becomes a reusable proto |
-
-| `bro wtf <complaint>` | Capture the user's frustration verbatim as a `wtf` bead — the trigger artifact |
-| `bro retrospect record <plan.toml>` | Validate a TOML retro plan → close a `retro` bead with the analysis → each action becomes a `prevention` bead labeled `sink:<sink>` |
-| `bro retrospect status` | **Exit gate** — non-zero while a wtf stays unanswered |
-| `bro retrospect schema` / `list` | The commented plan template · retro beads + open wtf. All `wtf`/`retrospect` beads need `bd` installed + `bd init` — schema is the exception |
-
+| `bro wtf <complaint>` | Capture the user's frustration verbatim as a `wtf` bead — timestamp + git snapshot included |
+| `bro retrospect record <plan.toml>` | Validate a TOML retro plan and fan it out: `retro` bead + `prevention` beads per action, linked `discovered-from`, wtf answered |
+| `bro retrospect status` | Exit gate — non-zero while a `wtf` bead is unanswered. The agent can't self-declare "sorry, fixed" |
+| `bro retrospect schema` / `list` | Print the commented TOML template · retros and open wtfs |
 | `bro setup [--beads] [--skills]` | Wires bro into the current repo: checks `gh` auth + `bd`, writes `bro.config.json`, optionally `bd init --stealth` + installs the debt-pipeline formula and thin skill wrappers |
 
 ## The pipeline (beads)

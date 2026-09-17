@@ -143,7 +143,11 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
   if (!sub || sub === '--help' || sub === '-h') {
     usage()
   }
-  checkBeads()
+  // syntax errors beat environment errors — a typo'd sub must not report
+  // a missing bd install
+  if (!KNOWN_FLAGS[sub]) {
+    usage()
+  }
   rejectUnknownFlags(sub, rest)
   // these subs take no positional args — a stray one is a typo, not input
   const noPositionals = new Set(['up', 'current', 'tree', 'list'])
@@ -152,6 +156,7 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
     console.error(`error: unexpected argument "${extras[0]}"`)
     process.exit(2)
   }
+  checkBeads()
 
   switch (sub) {
     case 'down':

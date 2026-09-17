@@ -25,8 +25,12 @@ export function bdJson<T>(args: string[]): T {
 export function checkBeads(): void {
   try {
     bd(['--version'])
-  } catch {
-    throw new Error('bd not found — install beads first (https://github.com/gastownhall/beads)')
+  } catch (err) {
+    // ENOENT = the binary is absent; anything else is a real failure to surface
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error('bd not found — install beads first (https://github.com/gastownhall/beads)')
+    }
+    throw err
   }
   try {
     bd(['list', '--json', '-n', '1'])

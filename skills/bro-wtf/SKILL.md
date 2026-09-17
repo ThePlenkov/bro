@@ -1,6 +1,6 @@
 ---
 name: bro-wtf
-description: "Use when the user invokes /wtf or vents sharp frustration at the agent's own work. Thin wrapper over the bro CLI — `bro wtf` captures the complaint as a bead, `bro retrospect record` stores a TOML retro plan and fans prevention actions out to beads. Requires `bro` (npx @theplenkov/bro) and bd."
+description: "Use when the user invokes /wtf or vents sharp frustration at the agent's own work. Thin wrapper over the bro CLI — `bro wtf` captures the complaint as a bead, `bro retrospect record` stores a TOML retro plan and fans prevention actions out to beads. Requires `bro` (npx -y @theplenkov/bro@0) and bd."
 ---
 
 # /wtf (bro)
@@ -46,5 +46,5 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0`, `bd init` done.
   is a skill with a `source:` repo); `sink:upstream-issue` → file it;
   `sink:workaround` → implement the fix now.
 - **Recurrence escalates scope.** `bro retrospect list` before writing —
-  a repeat root cause moves the fix one scope wider (session → project →
-  universal).
+  a repeat root cause moves the fix one scope wider along
+  session → agent → user → project → universal.
