@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Drill"
+  short_description: "Scoped descent over beads — drill frames with mandatory result+prevention memos"
+  brand_color: "#B60205"
+  default_prompt: "Use $drill to start a scoped drill frame."
+policy:
+  allow_implicit_invocation: false

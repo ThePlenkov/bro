@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Act"
+  short_description: "Open-PR review-fix loop via the bro CLI — exit gate as code"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $act to get started."
+policy:
+  allow_implicit_invocation: false
