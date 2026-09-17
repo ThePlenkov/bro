@@ -206,13 +206,13 @@ export function planPreventions(items: string[], prior: DrillRow[]): PreventionP
       reuse.set(row.title, row.id)
     }
   }
-  const create: string[] = []
+  const create = new Set<string>()
   for (const item of items) {
-    if (!reuse.has(item) && !create.includes(item)) {
-      create.push(item)
+    if (!reuse.has(item)) {
+      create.add(item)
     }
   }
-  return { create, reuse }
+  return { create: [...create], reuse }
 }
 
 /** One prevention bead per item — discovered-from, not --parent:
@@ -241,7 +241,13 @@ function createPreventions(
     created.push(row.id)
     newIds.set(item, row.id)
   }
-  const ids = items.map((item) => (reuse.get(item) ?? newIds.get(item)) as string)
+  const ids = items.map((item) => {
+    const id = reuse.get(item) ?? newIds.get(item)
+    if (!id) {
+      throw new Error(`internal error: no bead id for prevention item "${item}"`)
+    }
+    return id
+  })
   return { created, ids }
 }
 
