@@ -75,7 +75,13 @@ function readPlan(rest: string[]): RetroPlan {
     )
     process.exit(2)
   }
-  const plan = parsePlan(text, file)
+  let plan: RetroPlan
+  try {
+    plan = parsePlan(text, file)
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err))
+    process.exit(2)
+  }
   return wtfFlag ? { ...plan, wtf: wtfFlag } : plan
 }
 
@@ -181,10 +187,12 @@ export async function runRetrospectCommand(argv: string[]): Promise<void> {
   if (!known) {
     usage()
   }
-  rejectUnknownFlags(sub, known, rest)
+  // help short-circuits flag validation — `bro retrospect status --help`
+  // must print usage, not "unknown option"
   if (wantsHelp(sub, rest)) {
     usage(0)
   }
+  rejectUnknownFlags(sub, known, rest)
   // input validation before checkBeads — a bad plan file or missing
   // complaint must report itself, not a beads setup error
   const plan = sub === 'record' ? readPlan(rest) : undefined
