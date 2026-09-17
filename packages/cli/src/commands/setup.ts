@@ -35,12 +35,25 @@ function readExistingConfig(path: string): Partial<BroConfig> | null {
   if (!existsSync(path)) {
     return {}
   }
+  let parsed: unknown
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as Partial<BroConfig>
+    parsed = JSON.parse(readFileSync(path, 'utf8'))
   } catch (err) {
     console.error(`error: bro.config.json is not valid JSON — ${(err as Error).message}`)
     process.exit(1)
   }
+  // Valid JSON can still be an invalid config — a non-object or a mistyped
+  // `stores` would silently normalize to defaults and get overwritten by
+  // setup. Fail before anything mutates.
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    console.error('error: bro.config.json must be a JSON object')
+    process.exit(1)
+  }
+  if ('stores' in parsed && !Array.isArray(parsed.stores)) {
+    console.error('error: bro.config.json "stores" must be an array, e.g. ["jsonl", "beads"]')
+    process.exit(1)
+  }
+  return parsed as Partial<BroConfig>
 }
 
 function writeConfig(opts: { beads: boolean; personality?: string }): string {

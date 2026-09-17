@@ -715,6 +715,15 @@ async function cmdWatch(argv: string[]): Promise<void> {
 
 function cmdSync(argv: string[]): void {
   const dryRun = argv.includes('--dry-run')
+  // The explicit jsonl opt-out must hold even for a manual sync — without
+  // this gate `sync` would auto-init .beads and project anyway.
+  if (!loadConfig().stores.includes('beads')) {
+    console.error(
+      'debt sync: beads is not in stores — drop the opt-out or set ' +
+        '"stores": ["jsonl", "beads"] in bro.config.json'
+    )
+    process.exit(1)
+  }
   const records = readDebtRecords()
   const res = syncDebtToBeads(records, { dryRun })
   const verb = dryRun ? '[dry-run] ' : ''

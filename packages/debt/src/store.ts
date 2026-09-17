@@ -15,7 +15,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, isAbsolute, join, relative } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { loadConfig } from '@bro/core'
 import type {
   AuthorPolicy,
@@ -41,7 +41,6 @@ function ensureDebtDirExcluded(dir: string): void {
   if (excludedDebtDirs.has(dir)) {
     return
   }
-  excludedDebtDirs.add(dir)
   const git = (args: string[]): string =>
     execFileSync('git', ['-C', dir, ...args], { // NOSONAR — git is already a hard dependency of the whole flow
       encoding: 'utf8',
@@ -52,10 +51,14 @@ function ensureDebtDirExcluded(dir: string): void {
     mkdirSync(dir, { recursive: true }) // git -C fails on a missing dir
     root = git(['rev-parse', '--show-toplevel'])
   } catch {
+    excludedDebtDirs.add(dir)
     return // not a git worktree (or no git) — nothing to exclude
   }
   const rel = relative(root, dir)
-  if (rel === '' || rel.startsWith('..')) {
+  // `..` alone or `..<sep>` = outside the worktree; a dir literally named
+  // `..debt` is a valid in-worktree segment, not an escape.
+  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) {
+    excludedDebtDirs.add(dir)
     return // debt dir is the repo root or outside the worktree
   }
   // Inside a worktree from here — exclusion failures are surfaced, since a
@@ -76,10 +79,26 @@ function ensureDebtDirExcluded(dir: string): void {
       }
       const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
       if (!existing.split('\n').includes(`${rel}/`)) {
-        const sep = existing === '' || existing.endsWith('\n') ? '' : '\n'
-        writeFileSync(path, `${existing}${sep}${rel}/\n`)
+        const nl = existing === '' || existing.endsWith('\n') ? '' : '\n'
+        writeFileSync(path, `${existing}${nl}${rel}/\n`)
       }
     })
+    // Ignores never override the index — files already committed under the
+    // dir stay tracked and the exclusion is a no-op for them. Surface it;
+    // untracking is a staged change only the repo owner should make.
+    const tracked = execFileSync('git', ['-C', root, 'ls-files', '--', `${rel}/`], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    if (tracked !== '') {
+      console.error(
+        `warning: ${rel}/ has tracked files — .git/info/exclude can't hide ` +
+          `index entries; run \`git rm -r --cached ${rel}/\` to untrack`
+      )
+    }
+    // Memo only on success — a failed attempt must retry (and re-warn) on
+    // the next write instead of going silent for the rest of the process.
+    excludedDebtDirs.add(dir)
   } catch (err) {
     console.error(
       `warning: could not git-exclude ${rel} — ` +
