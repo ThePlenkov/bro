@@ -6,7 +6,7 @@
  * (`claim` on down, `handoff` on up). No claim.json, no .drills/ tree —
  * beads IS the memory system.
  */
-import { bd, bdJson, refKind } from '@bro/core'
+import { bd, bdJson, evidenceKind, refKind } from '@bro/core'
 import type { DownOptions, DrillFrame, DrillRow, UpOptions, UpResult } from './types.ts'
 
 const DRILL_LABEL = 'drill'
@@ -176,24 +176,37 @@ export { refKind }
 /** One prevention bead per item — discovered-from, not --parent:
  * prevention is follow-up work found by the frame, and a child would
  * block the parent's own close. `--title` keeps a `--`-leading item as
- * data, not a flag. */
-function createPreventions(frameId: string, items: string[]): string[] {
-  return items.map(
-    (item) =>
-      bdJson<DrillRow>([
-        'create',
-        '--title',
-        item,
-        '-l',
-        PREVENTION_LABEL,
-        '--no-inherit-labels',
-        '--deps',
-        `discovered-from:${frameId}`,
-      ]).id
-  )
+ * data, not a flag. IDs land in `out` as they are created so a partial
+ * failure is still compensatable. */
+function createPreventions(frameId: string, items: string[], out: string[]): void {
+  for (const item of items) {
+    const row = bdJson<DrillRow>([
+      'create',
+      '--title',
+      item,
+      '-l',
+      PREVENTION_LABEL,
+      '--no-inherit-labels',
+      '--deps',
+      `discovered-from:${frameId}`,
+    ])
+    out.push(row.id)
+  }
 }
 
-/** Evidence refs + handoff event — skipped for wisps (no audit trail). */
+/** `bd note` appends — check the stored notes first so a retry after a
+ * later failure can't duplicate the memo. */
+function noteOnce(frameId: string, memo: string): void {
+  const current = bdJson<DrillRow[]>(['show', frameId])[0]
+  if (current?.notes?.includes(memo)) {
+    return
+  }
+  bd(['note', frameId, memo])
+}
+
+/** Evidence refs + handoff event — skipped for wisps (no audit trail).
+ * Ref'd events are idempotent in bd (deterministic id); the ref-less
+ * handoff gets a fresh `--at` each run, so skip it when already logged. */
 function recordHandoff(frame: DrillRow, evidence: string[]): void {
   for (const ref of evidence) {
     const kind = refKind(ref)
@@ -203,7 +216,7 @@ function recordHandoff(frame: DrillRow, evidence: string[]): void {
       '--issue',
       frame.id,
       '--kind',
-      kind === 'pr' ? 'land' : 'commit',
+      evidenceKind(ref),
       '--source',
       'bro drill up',
       '--ref',
@@ -211,6 +224,14 @@ function recordHandoff(frame: DrillRow, evidence: string[]): void {
       '--ref-kind',
       kind,
     ])
+  }
+  const logged = bdJson<Array<{ kind?: string; source?: string }>>([
+    'provenance',
+    'log',
+    frame.id,
+  ])
+  if (logged.some((e) => e.kind === 'handoff' && e.source === 'bro drill up')) {
+    return
   }
   bd([
     'provenance',
@@ -268,8 +289,8 @@ export function drillUp(opts: UpOptions): UpResult {
   // the prevention beads we created so a retry can't duplicate them.
   const preventionIds: string[] = []
   try {
-    bd(['note', frame.id, memo])
-    preventionIds.push(...createPreventions(frame.id, opts.prevent ?? []))
+    noteOnce(frame.id, memo)
+    createPreventions(frame.id, opts.prevent ?? [], preventionIds)
     if (!frame.ephemeral) {
       recordHandoff(frame, opts.evidence ?? [])
     }

@@ -27,7 +27,7 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set(['--wtf'])
 
 const retroPositionals = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
 
-function usage(): never {
+function usage(exitCode = 1): never {
   console.error(`Usage: bro retrospect <command> [args…]
 
 Commands:
@@ -38,7 +38,7 @@ Commands:
   schema                 Print the commented plan template
 
   bro wtf <complaint…>   alias for \`bro retrospect capture\``)
-  process.exit(1)
+  process.exit(exitCode)
 }
 
 function cmdCapture(rest: string[]): void {
@@ -130,10 +130,14 @@ const KNOWN_FLAGS: Record<string, Set<string>> = {
 
 export async function runRetrospectCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
-  if (!sub || sub === '--help' || sub === '-h') {
+  if (!sub) {
     usage()
   }
-  const known = KNOWN_FLAGS[sub]
+  if (sub === '--help' || sub === '-h') {
+    usage(0)
+  }
+  // own-key lookup — an inherited key like `toString` is not a subcommand
+  const known = Object.hasOwn(KNOWN_FLAGS, sub) ? KNOWN_FLAGS[sub] : undefined
   if (!known) {
     usage()
   }
@@ -153,7 +157,7 @@ export async function runRetrospectCommand(argv: string[]): Promise<void> {
       ? rest[0] === '--help' || rest[0] === '-h'
       : rest.includes('--help') || rest.includes('-h')
   if (wantsHelp) {
-    usage()
+    usage(0)
   }
   if (sub !== 'schema') {
     checkBeads()

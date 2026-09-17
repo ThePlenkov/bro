@@ -37,6 +37,18 @@ export function refKind(ref: string): string {
   return 'work-id'
 }
 
+/** Provenance event kind for an evidence ref — a work-id is not a commit. */
+export function evidenceKind(ref: string): 'land' | 'commit' | 'used' {
+  switch (refKind(ref)) {
+    case 'pr':
+      return 'land'
+    case 'git-sha':
+      return 'commit'
+    default:
+      return 'used'
+  }
+}
+
 export function checkBeads(): void {
   try {
     bd(['--version'])

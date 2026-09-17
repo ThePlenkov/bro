@@ -7,7 +7,7 @@
  * done. beads IS the memory system — no sidecar files.
  */
 import { execFileSync } from 'node:child_process'
-import { bd, bdJson, refKind } from '@bro/core'
+import { bd, bdJson, evidenceKind, refKind } from '@bro/core'
 import type { BeadRow, RecordResult, RetroPlan } from './types.ts'
 
 const WTF_LABEL = 'wtf'
@@ -155,20 +155,19 @@ export function recordRetro(plan: RetroPlan): RecordResult {
     }
 
     for (const ref of plan.evidence) {
-      const kind = refKind(ref)
       bd([
         'provenance',
         'record',
         '--issue',
         retro.id,
         '--kind',
-        kind === 'pr' ? 'land' : 'commit',
+        evidenceKind(ref),
         '--source',
         'bro retrospect record',
         '--ref',
         ref,
         '--ref-kind',
-        kind,
+        refKind(ref),
       ])
     }
 

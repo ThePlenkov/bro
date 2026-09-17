@@ -149,7 +149,8 @@ const KNOWN_FLAGS: Record<string, Set<string>> = {
 }
 
 function rejectUnknownFlags(sub: string, argv: string[]): void {
-  const known = KNOWN_FLAGS[sub]
+  // own-key lookup — an inherited key like `toString` is not a subcommand
+  const known = Object.hasOwn(KNOWN_FLAGS, sub) ? KNOWN_FLAGS[sub] : undefined
   if (!known) {
     return
   }
@@ -173,7 +174,7 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
   }
   // Validate before checkBeads — `bro drill bogus` must report a syntax
   // error even where beads isn't initialized.
-  if (!KNOWN_FLAGS[sub]) {
+  if (!Object.hasOwn(KNOWN_FLAGS, sub)) {
     usage()
   }
   rejectUnknownFlags(sub, rest)
