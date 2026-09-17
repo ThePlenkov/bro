@@ -59,7 +59,7 @@ babysit, no config files to confess to.
 | `bro drill up --result T [--prevent T]… [--evidence R]…` | Ascend. `--result` is mandatory; each `--prevent` becomes a `discovered-from` task; evidence refs land in `bd provenance` |
 | `bro unwind …` | Alias for `drill up` |
 | `bro drill current` / `tree` / `list` | Active leaf frame · all hierarchies · open frames |
-| `bro drill distill <epic>` | `bd mol distill` — a good drill tree becomes a reusable proto |
+| `bro drill distill <id>` | `bd mol distill` — a good drill tree becomes a reusable proto |
 
 | `bro wtf <complaint>` | Capture the user's frustration verbatim as a `wtf` bead — the trigger artifact |
 | `bro retrospect record <plan.toml>` | Validate a TOML retro plan → close a `retro` bead with the analysis → each action becomes a `prevention` bead labeled `sink:<sink>` |

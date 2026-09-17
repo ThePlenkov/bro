@@ -1,6 +1,6 @@
 ---
 name: bro-drill
-description: "Use when the user invokes /drill or /unwind, or when a task needs scoped descent — narrower investigation frames with mandatory result+prevention memos. Thin wrapper over the bro CLI: drill frames are beads; bd owns storage, `bro drill` owns the invariants. Requires `bro` (npx @theplenkov/bro) and bd."
+description: "Use when the user invokes /drill or /unwind, or when a task needs scoped descent — narrower investigation frames with mandatory result+prevention memos. Thin wrapper over the bro CLI: drill frames are beads; bd owns storage, `bro drill` owns the invariants. Requires `bro` (npx -y @theplenkov/bro@0) and bd."
 ---
 
 # /drill (bro)
@@ -22,7 +22,7 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0`, `bd init` done.
 | `bro drill current` | The active leaf frame (deepest open path) |
 | `bro drill tree` | All drill hierarchies (● open / ○ closed) |
 | `bro drill list` | Open frames |
-| `bro drill distill <epic>` | `bd mol distill` — turn a successful drill tree into a reusable proto/formula |
+| `bro drill distill ID` | `bd mol distill` — turn a successful drill tree into a reusable proto/formula |
 
 ## Policy
 
