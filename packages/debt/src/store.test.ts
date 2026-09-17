@@ -13,6 +13,11 @@ delete process.env.BRO_DEBT_DIR
 function tmpRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'bro-debt-'))
   execFileSync('git', ['init', '-q', dir])
+  // A global excludesFile covering the ledger dir would make check-ignore
+  // short-circuit and the exclude assertions flaky — neutralize it.
+  const emptyExcludes = join(dir, '.test-excludes')
+  writeFileSync(emptyExcludes, '')
+  execFileSync('git', ['-C', dir, 'config', 'core.excludesFile', emptyExcludes])
   return dir
 }
 

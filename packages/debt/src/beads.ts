@@ -18,7 +18,7 @@ export interface BeadRef {
   timesSeen?: number
 }
 
-export function checkBeads(): void {
+export function checkBeads(opts: { autoInit?: boolean } = {}): void {
   try {
     bd(['--version'])
   } catch {
@@ -28,7 +28,9 @@ export function checkBeads(): void {
   }
   // beads is a default store — a repo without .beads gets a stealth init
   // (local exclude, nothing lands in git) instead of a setup error.
-  if (!existsSync(join(process.cwd(), '.beads'))) {
+  // Dry runs must not mutate: they skip init and let `bd list` report
+  // the missing workspace instead.
+  if (opts.autoInit !== false && !existsSync(join(process.cwd(), '.beads'))) {
     bd(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'])
   }
   try {
@@ -248,7 +250,8 @@ export function syncDebtToBeads(
   records: DebtRecord[],
   opts: { dryRun?: boolean } = {}
 ): SyncResult {
-  checkBeads()
+  const dryRun = opts.dryRun === true
+  checkBeads({ autoInit: !dryRun })
   const existing = listDebtBeads()
   const res: SyncResult = {
     created: 0,
@@ -258,7 +261,6 @@ export function syncDebtToBeads(
     unchanged: 0,
     linked: 0,
   }
-  const dryRun = opts.dryRun === true
   for (const rec of records) {
     syncRecord(rec, existing, res, dryRun)
   }
