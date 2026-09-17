@@ -3,6 +3,7 @@
  * Append-only harvest snapshots + ledger.jsonl status overlays.
  */
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import {
   chmodSync,
   existsSync,
@@ -14,7 +15,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, relative } from 'node:path'
 import { loadConfig } from '@bro/core'
 import type {
   AuthorPolicy,
@@ -25,6 +26,50 @@ import type {
 
 function debtDir(cwd: string = process.cwd()): string {
   return process.env.BRO_DEBT_DIR ?? join(cwd, loadConfig(cwd).debt.dir)
+}
+
+const excludedDebtDirs = new Set<string>()
+
+/**
+ * The ledger is machine-local state — same contract as the gitignored
+ * bro.config.json and `bd init --stealth`. When the debt dir sits inside a
+ * git worktree that doesn't already ignore it, append it to
+ * .git/info/exclude so harvest evidence can't be committed by accident.
+ * Local-only — never a repo diff.
+ */
+function ensureDebtDirExcluded(dir: string): void {
+  if (excludedDebtDirs.has(dir)) {
+    return
+  }
+  excludedDebtDirs.add(dir)
+  try {
+    mkdirSync(dir, { recursive: true }) // git -C fails on a missing dir
+    const git = (args: string[]): string =>
+      execFileSync('git', ['-C', dir, ...args], { // NOSONAR — git is already a hard dependency of the whole flow
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim()
+    const root = git(['rev-parse', '--show-toplevel'])
+    const rel = relative(root, dir)
+    if (rel === '' || rel.startsWith('..')) {
+      return // debt dir is the repo root or outside the worktree
+    }
+    try {
+      git(['check-ignore', '-q', rel])
+      return // already covered by .gitignore / info/exclude / global excludes
+    } catch {
+      /* not ignored — exclude it locally */
+    }
+    const excludePath = git(['rev-parse', '--git-path', 'info/exclude'])
+    const path = isAbsolute(excludePath) ? excludePath : join(dir, excludePath)
+    const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
+    if (!existing.split('\n').includes(`${rel}/`)) {
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, `${existing === '' || existing.endsWith('\n') ? existing : `${existing}\n`}${rel}/\n`)
+    }
+  } catch {
+    /* not a git worktree (or no git) — nothing to exclude */
+  }
 }
 
 function harvestDir(cwd?: string): string {
@@ -134,6 +179,7 @@ export function writeHarvestFile(opts: {
     harvestFilename({ harvestedAt: opts.harvestedAt, pr: opts.pr, runId: opts.runId })
   )
   mkdirSync(dir, { recursive: true })
+  ensureDebtDirExcluded(debtDir(opts.cwd))
   const lines = opts.records.map((r) => JSON.stringify(r)).join('\n')
   writeFileSync(path, `${lines}\n`, 'utf8')
   return path
@@ -181,6 +227,7 @@ function upsertLedgerOverlaysUnlocked(
   }
   const path = ledgerFile(cwd)
   mkdirSync(dirname(path), { recursive: true })
+  ensureDebtDirExcluded(debtDir(cwd))
   const lines = [...map.values()]
     .sort((a, b) => a.thread_id.localeCompare(b.thread_id))
     .map((r) => JSON.stringify(r))
@@ -307,6 +354,7 @@ export function buildSummary(records: DebtRecord[]): DebtSummary {
 export function writeSummary(summary: DebtSummary, cwd?: string): void {
   const path = summaryFile(cwd)
   mkdirSync(dirname(path), { recursive: true })
+  ensureDebtDirExcluded(debtDir(cwd))
   atomicWrite(path, `${JSON.stringify(summary, null, 2)}\n`)
 }
 
@@ -466,6 +514,7 @@ export function withFileLock<T>(path: string, fn: () => T): T {
 
 export function markProcessedAt(prs: number[], at: string, cwd?: string): void {
   const path = processedFile(cwd)
+  ensureDebtDirExcluded(debtDir(cwd))
   withFileLock(path, () => {
     const map = readProcessedAt(cwd)
     for (const pr of prs) {
