@@ -15,11 +15,17 @@
 # next, and the script always exits 0.
 set -u
 
-# each client exports its own plugin-root var — take whichever exists
+# each client exports its own plugin-root var — take whichever exists.
+# a relative or nonexistent root is untrusted input: canonicalize an
+# absolute root, and fall back to this script's own dir otherwise so the
+# walk-up can't wander off CWD and execute an unrelated dist.
+SCRIPT_ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd)"
 ROOT="${DEVIN_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}"
-if [ -z "$ROOT" ]; then
-  ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
-fi
+case "$ROOT" in
+  /*) ROOT="$(CDPATH='' cd -- "$ROOT" 2>/dev/null && pwd)" ;;
+  *)  ROOT= ;;
+esac
+[ -n "$ROOT" ] || ROOT="$SCRIPT_ROOT"
 
 # walk up for a built CLI — adapter dirs live below the repo root.
 # break on the fixed point so a relative/malformed root can't spin.

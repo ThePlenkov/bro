@@ -138,6 +138,15 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
       }
     }
   } else {
+    // remove stale outputs first so `gen:plugins` repairs what --check
+    // flags; declared hand-written files are in `expected` and survive
+    if (existsSync(join(ROOT, dir))) {
+      for (const f of walk(join(ROOT, dir))) {
+        if (!expected.has(`${dir}/${f}`)) {
+          rmSync(join(ROOT, dir, f))
+        }
+      }
+    }
     rmSync(join(ROOT, skillsOut), { recursive: true, force: true })
     cpSync(join(ROOT, 'skills'), join(ROOT, skillsOut), { recursive: true })
     mkdirSync(join(ROOT, `${dir}/hooks`), { recursive: true })
