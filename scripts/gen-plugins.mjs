@@ -27,6 +27,44 @@ const CHECK = process.argv.includes('--check')
 
 const manifest = JSON.parse(readFileSync(join(ROOT, 'plugin.json'), 'utf8'))
 
+// agent-plugins 1.0 shape — hand-rolled check (no ajv dep): a malformed
+// manifest currently only fails at `devin plugins install` time
+const REQUIRED_STRING_FIELDS = ['name', 'version', 'description']
+const KNOWN_TOP_LEVEL = new Set([
+  '$schema', 'name', 'version', 'description', 'author', 'homepage',
+  'repository', 'license', 'keywords',
+])
+for (const f of REQUIRED_STRING_FIELDS) {
+  if (typeof manifest[f] !== 'string' || manifest[f].trim() === '') {
+    console.error(`plugin.json: "${f}" must be a non-empty string`)
+    process.exit(1)
+  }
+}
+for (const k of Object.keys(manifest)) {
+  if (!KNOWN_TOP_LEVEL.has(k)) {
+    // warn only — the spec can add fields; typos surface here too
+    console.error(`plugin.json: warning — unknown top-level field "${k}"`)
+  }
+}
+if (!/^[a-z0-9][a-z0-9-]*$/.test(manifest.name)) {
+  console.error(`plugin.json: name "${manifest.name}" is not a valid plugin slug`)
+  process.exit(1)
+}
+if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(manifest.version)) {
+  console.error(`plugin.json: version "${manifest.version}" is not semver`)
+  process.exit(1)
+}
+// the published CLI version is the release truth — manifest must match
+const cliVersion = JSON.parse(
+  readFileSync(join(ROOT, 'packages/cli/package.json'), 'utf8')
+).version
+if (manifest.version !== cliVersion) {
+  console.error(
+    `plugin.json: version ${manifest.version} != packages/cli version ${cliVersion}`
+  )
+  process.exit(1)
+}
+
 /** Claude/Codex manifests reuse the agent-plugins fields minus $schema. */
 function clientManifest(extra = {}) {
   const { $schema: _drop, ...fields } = manifest
