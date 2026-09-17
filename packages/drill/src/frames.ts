@@ -6,7 +6,7 @@
  * (`claim` on down, `handoff` on up). No claim.json, no .drills/ tree —
  * beads IS the memory system.
  */
-import { bd, bdJson } from '@bro/core'
+import { bd, bdJson, refKind } from '@bro/core'
 import type { DownOptions, DrillFrame, DrillRow, UpOptions, UpResult } from './types.ts'
 
 const DRILL_LABEL = 'drill'
@@ -166,15 +166,7 @@ export function drillDown(title: string, opts: DownOptions = {}): DrillRow {
   return row
 }
 
-export function refKind(ref: string): string {
-  if (/\/pull\/|\/merge_requests\//.test(ref)) {
-    return 'pr'
-  }
-  if (/^[0-9a-f]{40}$/.test(ref)) {
-    return 'git-sha'
-  }
-  return 'work-id'
-}
+export { refKind }
 
 /** One prevention bead per item — discovered-from, not --parent:
  * prevention is follow-up work found by the frame, and a child would
@@ -184,6 +176,7 @@ function createPreventions(frameId: string, items: string[]): string[] {
     (item) =>
       bdJson<DrillRow>([
         'create',
+        '--title',
         item,
         '-l',
         PREVENTION_LABEL,

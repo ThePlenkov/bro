@@ -146,6 +146,10 @@ export async function runRetrospectCommand(argv: string[]): Promise<void> {
       }
     }
   }
+  // --help/-h must work without a beads checkout
+  if (rest.includes('--help') || rest.includes('-h')) {
+    usage()
+  }
   if (sub !== 'schema') {
     checkBeads()
   }

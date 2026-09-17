@@ -7,7 +7,7 @@
  * done. beads IS the memory system — no sidecar files.
  */
 import { execFileSync } from 'node:child_process'
-import { bd, bdJson } from '@bro/core'
+import { bd, bdJson, refKind } from '@bro/core'
 import type { BeadRow, RecordResult, RetroPlan } from './types.ts'
 
 const WTF_LABEL = 'wtf'
@@ -71,16 +71,6 @@ export function captureWtf(complaint: string): BeadRow {
   const first = complaint.trim().split('\n')[0] ?? ''
   const title = `wtf: ${shorten(first)}`
   return bdJson<BeadRow>(['create', title, '-l', WTF_LABEL, '-d', description])
-}
-
-export function refKind(ref: string): string {
-  if (/\/pull\/|\/merge_requests\//.test(ref)) {
-    return 'pr'
-  }
-  if (/^[0-9a-f]{40}$/.test(ref)) {
-    return 'git-sha'
-  }
-  return 'work-id'
 }
 
 function requireOpenWtf(id: string): BeadRow {
@@ -150,6 +140,7 @@ export function recordRetro(plan: RetroPlan): RecordResult {
         .trim()
       const row = bdJson<BeadRow>([
         'create',
+        '--title',
         action.title,
         '-l',
         `${PREVENTION_LABEL},sink:${action.sink}`,

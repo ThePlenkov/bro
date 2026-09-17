@@ -1,4 +1,4 @@
-export { bd, bdJson, checkBeads } from '@bro/core'
+export { bd, bdJson, checkBeads, refKind } from '@bro/core'
 export { parsePlan, PLAN_SCHEMA } from './plan.ts'
 export {
   captureWtf,
@@ -7,7 +7,6 @@ export {
   openPreventions,
   openWtf,
   recordRetro,
-  refKind,
 } from './retro.ts'
 export { ACTION_SINKS, RETRO_SCOPES } from './types.ts'
 export type {

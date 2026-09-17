@@ -22,6 +22,17 @@ export function bdJson<T>(args: string[]): T {
   }
 }
 
+/** Classify a provenance ref — shared by drill and retro evidence. */
+export function refKind(ref: string): string {
+  if (/\/pull\/|\/merge_requests\//.test(ref)) {
+    return 'pr'
+  }
+  if (/^[0-9a-f]{40}$/.test(ref)) {
+    return 'git-sha'
+  }
+  return 'work-id'
+}
+
 export function checkBeads(): void {
   try {
     bd(['--version'])

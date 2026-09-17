@@ -42,8 +42,8 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0`, `bd init` done.
   `bro retrospect status` exits 0.
 - **Route by sink.** `sink:backlog` stays queued; `sink:memory` → persist
   to user or project memory (scope decides); `sink:agentic-documents` →
-  update AGENTS.md/rules/skill (via $skill{skill-feedback} when the target
-  is a skill with a `source:` repo); `sink:upstream-issue` → file it;
+  update AGENTS.md/rules/skill files directly; `sink:upstream-issue` →
+  file it;
   `sink:workaround` → implement the fix now.
 - **Recurrence escalates scope.** `bro retrospect list` before writing —
   a repeat root cause moves the fix one scope wider along

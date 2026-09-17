@@ -1,4 +1,4 @@
-export { bd, bdJson, checkBeads } from '@bro/core'
+export { bd, bdJson, checkBeads, refKind } from '@bro/core'
 export {
   childrenOf,
   currentFrame,
@@ -6,7 +6,6 @@ export {
   drillTree,
   drillUp,
   listDrills,
-  refKind,
 } from './frames.ts'
 export type {
   DownOptions,
