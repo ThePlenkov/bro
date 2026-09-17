@@ -1,6 +1,14 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { refKind } from './frames.ts'
+import { planPreventions, refKind } from './frames.ts'
+import type { DrillRow } from './types.ts'
+
+const prevention = (id: string, title: string, status = 'open'): DrillRow => ({
+  id,
+  title,
+  status,
+  labels: ['prevention'],
+})
 
 describe('refKind', () => {
   test('pull/merge-request URLs → pr', () => {
@@ -23,5 +31,42 @@ describe('refKind', () => {
 
   test('arbitrary text → work-id', () => {
     assert.equal(refKind('transcript-2026-09-16'), 'work-id')
+  })
+})
+
+describe('planPreventions', () => {
+  test('no priors → everything creates', () => {
+    const plan = planPreventions(['a', 'b'], [])
+    assert.deepEqual(plan.create, ['a', 'b'])
+    assert.equal(plan.reuse.size, 0)
+  })
+
+  test('open same-title prevention bead is reused, not recreated', () => {
+    const plan = planPreventions(['a', 'b'], [prevention('bd-1', 'a')])
+    assert.deepEqual(plan.create, ['b'])
+    assert.equal(plan.reuse.get('a'), 'bd-1')
+  })
+
+  test('closed priors do not block re-filing', () => {
+    const plan = planPreventions(['a'], [prevention('bd-1', 'a', 'closed')])
+    assert.deepEqual(plan.create, ['a'])
+  })
+
+  test('non-prevention beads with the same title are ignored', () => {
+    const other: DrillRow = { id: 'bd-9', title: 'a', status: 'open', labels: ['task'] }
+    const plan = planPreventions(['a'], [other])
+    assert.deepEqual(plan.create, ['a'])
+  })
+
+  test('duplicate items within one call collapse to a single create', () => {
+    const plan = planPreventions(['a', 'a', 'b'], [])
+    assert.deepEqual(plan.create, ['a', 'b'])
+  })
+
+  test('a retry after partial failure converges: created bead is reused', () => {
+    // first attempt created bd-1 for 'a', then died — retry sees it in priors
+    const plan = planPreventions(['a', 'b'], [prevention('bd-1', 'a')])
+    assert.deepEqual(plan.create, ['b'])
+    assert.equal(plan.reuse.get('a'), 'bd-1')
   })
 })
