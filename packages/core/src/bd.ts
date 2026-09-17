@@ -60,8 +60,19 @@ export function initBeadsStealth(): boolean {
   if (existsSync(join(process.cwd(), '.beads'))) {
     return false
   }
-  bd(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'])
-  return true
+  try {
+    bd(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'])
+    return true
+  } catch (err) {
+    // Two first-time inits can race: both pass the existence check, the
+    // loser's `bd init` fails while the winner's workspace lands. Tolerate
+    // that race — callers verify completeness (`bd list` in checkBeads) —
+    // but never swallow a real init failure.
+    if (existsSync(join(process.cwd(), '.beads'))) {
+      return false
+    }
+    throw err
+  }
 }
 
 export function checkBeads(): void {
