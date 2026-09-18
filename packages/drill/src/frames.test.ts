@@ -1,6 +1,9 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { assertHydratedRows, planPreventions, refKind } from './frames.ts'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { assertHydratedRows, drillUp, planPreventions, refKind } from './frames.ts'
 import type { DrillRow } from './types.ts'
 
 const prevention = (id: string, title: string, status = 'open'): DrillRow => ({
@@ -106,6 +109,64 @@ describe('assertHydratedRows', () => {
       () => assertHydratedRows([{ id: 'd1', status: 'open' }] as never, 'f1'),
       /unexpected row shape/,
     )
+  })
+})
+
+/** A scripted `bd` on PATH — PATH lookup is the exec contract
+ * (packages/core bd.ts), so no production seam is needed. `close` always
+ * fails to land mid-flight; FAKE_BD_DELETE_FAIL=1 makes the compensation
+ * `delete` fail too. */
+const FAKE_BD = `#!/bin/sh
+case "$1" in
+  show) echo '[{"id":"f1","title":"t","status":"open","labels":["drill"]}]' ;;
+  children) echo '[]' ;;
+  dep) echo '[]' ;;
+  note) : ;;
+  create) echo '{"id":"bd-new-1","title":"p1","status":"open","labels":["prevention"]}' ;;
+  provenance) echo '[]' ;;
+  close) echo 'close blew up' >&2; exit 1 ;;
+  delete) if [ "$FAKE_BD_DELETE_FAIL" = "1" ]; then echo 'cannot delete' >&2; exit 1; fi ;;
+esac
+`
+
+function withFakeBd(deleteFails: boolean, fn: () => void): void {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
+  writeFileSync(join(dir, 'bd'), FAKE_BD)
+  chmodSync(join(dir, 'bd'), 0o755)
+  const prevPath = process.env.PATH
+  const prevFlag = process.env.FAKE_BD_DELETE_FAIL
+  process.env.PATH = `${dir}:${prevPath}`
+  process.env.FAKE_BD_DELETE_FAIL = deleteFails ? '1' : '0'
+  try {
+    fn()
+  } finally {
+    process.env.PATH = prevPath
+    if (prevFlag === undefined) {
+      delete process.env.FAKE_BD_DELETE_FAIL
+    } else {
+      process.env.FAKE_BD_DELETE_FAIL = prevFlag
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+describe('drillUp compensation', () => {
+  test('failed close + failed cleanup reports the orphan ids', () => {
+    withFakeBd(true, () => {
+      assert.throws(
+        () => drillUp({ id: 'f1', result: 'r', prevent: ['p1'] }),
+        /cleanup incomplete: prevention bead\(s\) left behind: bd-new-1/,
+      )
+    })
+  })
+
+  test('failed close + successful cleanup surfaces only the close error', () => {
+    withFakeBd(false, () => {
+      assert.throws(
+        () => drillUp({ id: 'f1', result: 'r', prevent: ['p1'] }),
+        (err: Error) => !err.message.includes('cleanup incomplete'),
+      )
+    })
   })
 })
 
