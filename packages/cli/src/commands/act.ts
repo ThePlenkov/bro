@@ -8,7 +8,7 @@
  *   reply   --thread ID --comment TEXT | --file TSV
  */
 import { readFileSync } from 'node:fs'
-import { ensureGhAuth, gh, resolveRepo } from '@bro/core'
+import { ensureGhAuth, gh, gitTry, resolveRepo } from '@bro/core'
 import {
   evaluateExitGate,
   fetchPrActState,
@@ -151,9 +151,27 @@ async function cmdMerge(argv: string[]): Promise<void> {
   try {
     console.log(gh(args))
     console.log(`act: merged #${t.pr}`)
+    deleteMergedLocalBranch(state.headRef)
   } catch (err) {
     console.error(`error: merge failed — ${err instanceof Error ? err.message : String(err)}`)
     process.exitCode = 1
+  }
+}
+
+/** Best-effort local-side cleanup after a merge — the remote branch is
+ * already gone via --delete-branch, but the local ref lingers. Never
+ * fails the merge: a branch checked out in a worktree simply reports. */
+function deleteMergedLocalBranch(headRef: string): void {
+  const current = gitTry(['branch', '--show-current']).out.trim()
+  if (headRef === current) {
+    console.error(`cleanup: ${headRef} is checked out — delete it after switching`)
+    return
+  }
+  const res = gitTry(['branch', '-D', headRef])
+  if (res.code === 0) {
+    console.log(`cleanup: deleted local branch ${headRef}`)
+  } else if (!/not found|branch.*not.*exist/i.test(res.err)) {
+    console.error(`cleanup: local branch ${headRef} not deleted (${res.err})`)
   }
 }
 
