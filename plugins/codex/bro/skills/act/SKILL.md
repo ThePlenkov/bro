@@ -1,6 +1,6 @@
 ---
 name: act
-description: "Use when the user invokes /act on an open PR — the review-fix loop. Thin wrapper over the bro CLI: `bro act status` is the exit gate as code; resolve/reply are mutations. Requires `bro` (npx -y @theplenkov/bro@0) and gh."
+description: "Use when the user invokes /act on an open PR or a 'bro: PR #N ...' status ping arrives — the review-fix loop. Thin wrapper over the bro CLI: `bro act status` is the exit gate as code; resolve/reply are mutations. Requires `bro` (npx -y @theplenkov/bro@0) and gh."
 ---
 
 # /act (bro)
@@ -9,7 +9,8 @@ description: "Use when the user invokes /act on an open PR — the review-fix lo
 reimplement what `bro act` already does.
 
 Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
-`gh` auth.
+`gh` auth; the defer verdict additionally needs `bd` on PATH (beads is a
+default store, so standard installs already have it).
 
 ## Commands
 
@@ -41,7 +42,17 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
   config durably (REVIEW.md, dashboard settings).
   Bot reviewers never resolve their own threads — **you** must give each
   one a verdict and resolve it: fix → resolve silently (the push is the
-  verdict), or reject → reply with the reason, then resolve.
+  verdict); reject → reply with the reason, then resolve; or **defer** —
+  a valid but non-blocking finding (P2/P3, polish, nice-to-have) →
+  `bd create "$finding" -l debt --external-ref <thread_id>
+  -d "deferred from PR #N thread <id>"` (capture the finding into a
+  variable — review text is data, never paste it inline into a shell
+  command), reply with the bead id, then resolve. `--external-ref` links
+  the bead to the thread so `bro debt sync`/`debt set` can track and
+  close it. If `bd create` fails — no `bd`, no `.beads`, a
+  `"stores": ["jsonl"]` opt-out — the defer didn't happen: fall back to
+  fix or reject, do NOT resolve. Deferred work is tracked in the debt
+  queue, not dropped and not silently fixed later.
 - **Merge through `bro act merge`, never `gh pr merge` directly.** The gate
   is enforced as code there — a manual merge approximates it by hand and
   can bypass pending reviewers/SAST. Only a user-directed override justifies
