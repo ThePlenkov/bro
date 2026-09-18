@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { planPreventions, refKind } from './frames.ts'
+import { assertHydratedRows, planPreventions, refKind } from './frames.ts'
 import type { DrillRow } from './types.ts'
 
 const prevention = (id: string, title: string, status = 'open'): DrillRow => ({
@@ -68,5 +68,40 @@ describe('planPreventions', () => {
     const plan = planPreventions(['a', 'b'], [prevention('bd-1', 'a')])
     assert.deepEqual(plan.create, ['b'])
     assert.equal(plan.reuse.get('a'), 'bd-1')
+  })
+})
+
+describe('assertHydratedRows', () => {
+  test('passes hydrated rows through', () => {
+    assert.doesNotThrow(() => assertHydratedRows([prevention('d1', 'a')], 'f1'))
+    assert.doesNotThrow(() => assertHydratedRows([], 'f1'))
+  })
+
+  test('throws on dependency-edge shaped rows instead of degrading', () => {
+    const edge = { issue_id: 'f1', depends_on_id: 'p1', type: 'discovered-from' }
+    assert.throws(
+      () => assertHydratedRows([edge] as never, 'f1'),
+      /unexpected row shape/,
+    )
+  })
+
+  test('throws on rows missing title', () => {
+    assert.throws(
+      () => assertHydratedRows([{ id: 'd1', status: 'open' }] as never, 'f1'),
+      /unexpected row shape/,
+    )
+  })
+})
+
+describe('assertHydratedRows status check', () => {
+  test('throws on rows with missing or non-string status', () => {
+    assert.throws(
+      () => assertHydratedRows([{ id: 'd1', title: 'a' }] as never, 'q1'),
+      /unexpected row shape/,
+    )
+    assert.throws(
+      () => assertHydratedRows([{ id: 'd1', title: 'a', status: 1 }] as never, 'q1'),
+      /unexpected row shape/,
+    )
   })
 })
