@@ -211,10 +211,16 @@ export function assertHydratedRows(rows: DrillRow[], context: string): void {
 }
 
 export interface PreventionPlan {
-  /** Item text → existing bead id, for items already recorded. */
+  /** Normalized item key (`titleKey`) → existing bead id. */
   reuse: Map<string, string>
-  /** Item texts needing a new bead, in order, deduped. */
+  /** Item titles needing a new bead, in order, deduped, trimmed. */
   create: string[]
+}
+
+/** Same-title dedupe key: "handle race" and "  Handle Race " are the
+ * same prevention — exact-match would duplicate the bead on retry. */
+function titleKey(title: string): string {
+  return title.trim().toLowerCase()
 }
 
 /** Fold `--prevent` items against what the frame already recorded: an
@@ -225,17 +231,22 @@ export interface PreventionPlan {
 export function planPreventions(items: string[], prior: DrillRow[]): PreventionPlan {
   const reuse = new Map<string, string>()
   for (const row of prior) {
-    if (isOpen(row) && row.labels?.includes(PREVENTION_LABEL) && !reuse.has(row.title)) {
-      reuse.set(row.title, row.id)
+    const key = titleKey(row.title ?? '')
+    if (key && isOpen(row) && row.labels?.includes(PREVENTION_LABEL) && !reuse.has(key)) {
+      reuse.set(key, row.id)
     }
   }
-  const create = new Set<string>()
+  const seen = new Set<string>()
+  const create: string[] = []
   for (const item of items) {
-    if (!reuse.has(item)) {
-      create.add(item)
+    const key = titleKey(item)
+    if (!key || reuse.has(key) || seen.has(key)) {
+      continue
     }
+    seen.add(key)
+    create.push(item.trim())
   }
-  return { create: [...create], reuse }
+  return { create, reuse }
 }
 
 /** One prevention bead per item — discovered-from, not --parent:
@@ -262,15 +273,20 @@ function createPreventions(
       `discovered-from:${frameId}`,
     ])
     created.push(row.id)
-    newIds.set(item, row.id)
+    newIds.set(titleKey(item), row.id)
   }
-  const ids = items.map((item) => {
-    const id = reuse.get(item) ?? newIds.get(item)
+  const ids: string[] = []
+  for (const item of items) {
+    const key = titleKey(item)
+    if (!key) {
+      continue
+    }
+    const id = reuse.get(key) ?? newIds.get(key)
     if (!id) {
       throw new Error(`internal error: no bead id for prevention item "${item}"`)
     }
-    return id
-  })
+    ids.push(id)
+  }
   return { created, ids }
 }
 
