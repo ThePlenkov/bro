@@ -197,7 +197,10 @@ export async function fetchPrActState(target: {
     state: meta.state,
     isDraft: meta.isDraft,
     mergeable: (meta.mergeable || 'UNKNOWN').toUpperCase(),
-    mergeState: meta.mergeStateStatus || 'UNKNOWN',
+    // normalize like mergeable — GraphQL emits uppercase enums, but a
+    // lowercase source (e.g. REST mergeable_state) must not silently
+    // disable the 'BEHIND' blocker downstream
+    mergeState: (meta.mergeStateStatus || 'UNKNOWN').toUpperCase(),
     openThreads: threads.filter((t) => !t.isResolved).length,
     threads,
     ciPending,
