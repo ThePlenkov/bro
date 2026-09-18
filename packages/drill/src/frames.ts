@@ -192,11 +192,15 @@ function priorPreventionRows(frameId: string): DrillRow[] {
   return rows
 }
 
-/** Fail loudly when a bd listing returns rows without `id`/`title` —
+/** Fail loudly when a bd listing returns rows without `id`/`title`/`status` —
  * e.g. dependency-edge objects after a bd upgrade. Exported for tests. */
 export function assertHydratedRows(rows: DrillRow[], context: string): void {
   for (const row of rows) {
-    if (typeof row?.id !== 'string' || typeof row?.title !== 'string') {
+    if (
+      typeof row?.id !== 'string' ||
+      typeof row?.title !== 'string' ||
+      typeof row?.status !== 'string'
+    ) {
       throw new Error(
         `bd dep list returned an unexpected row shape for ${context} ` +
           `(expected hydrated issue rows): ${JSON.stringify(row).slice(0, 160)}`,
