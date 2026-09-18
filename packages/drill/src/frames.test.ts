@@ -150,24 +150,35 @@ function withFakeBd(deleteFails: boolean, fn: () => void): void {
   }
 }
 
-describe('drillUp compensation', () => {
-  test('failed close + failed cleanup reports the orphan ids', () => {
-    withFakeBd(true, () => {
-      assert.throws(
-        () => drillUp({ id: 'f1', result: 'r', prevent: ['p1'] }),
-        /cleanup incomplete: prevention bead\(s\) left behind: bd-new-1/,
-      )
-    })
-  })
+const POSIX_ONLY = process.platform === 'win32'
 
-  test('failed close + successful cleanup surfaces only the close error', () => {
-    withFakeBd(false, () => {
-      assert.throws(
-        () => drillUp({ id: 'f1', result: 'r', prevent: ['p1'] }),
-        (err: Error) => !err.message.includes('cleanup incomplete'),
-      )
-    })
-  })
+describe('drillUp compensation', () => {
+  test(
+    'failed close + failed cleanup reports the orphan ids',
+    { skip: POSIX_ONLY },
+    () => {
+      withFakeBd(true, () => {
+        assert.throws(
+          () => drillUp({ id: 'f1', result: 'r', prevent: ['p1'] }),
+          /cleanup incomplete: prevention bead\(s\) left behind: bd-new-1/,
+        )
+      })
+    },
+  )
+
+  test(
+    'failed close + successful cleanup surfaces only the close error',
+    { skip: POSIX_ONLY },
+    () => {
+      withFakeBd(false, () => {
+        assert.throws(
+          () => drillUp({ id: 'f1', result: 'r', prevent: ['p1'] }),
+          (err: Error) =>
+            err.message.includes('bd close') && !err.message.includes('cleanup incomplete'),
+        )
+      })
+    },
+  )
 })
 
 describe('assertHydratedRows status check', () => {
