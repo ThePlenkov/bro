@@ -69,6 +69,22 @@ describe('planPreventions', () => {
     assert.deepEqual(plan.create, ['b'])
     assert.equal(plan.reuse.get('a'), 'bd-1')
   })
+
+  test('whitespace and case variants collapse to a single create', () => {
+    const plan = planPreventions(['handle race', ' handle race ', 'Handle Race'], [])
+    assert.deepEqual(plan.create, ['handle race'])
+  })
+
+  test('a prior matches after normalization — retry still converges', () => {
+    const plan = planPreventions(['handle race'], [prevention('bd-1', '  Handle Race ')])
+    assert.deepEqual(plan.create, [])
+    assert.equal(plan.reuse.get('handle race'), 'bd-1')
+  })
+
+  test('created titles are trimmed; whitespace-only items are skipped', () => {
+    const plan = planPreventions(['  keep me  ', '   '], [])
+    assert.deepEqual(plan.create, ['keep me'])
+  })
 })
 
 describe('assertHydratedRows', () => {
