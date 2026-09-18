@@ -9,6 +9,7 @@
  */
 import { readFileSync } from 'node:fs'
 import { ensureGhAuth, gh, gitTry, resolveRepo } from '@bro/core'
+import { isAncestor } from './cleanup.ts'
 import {
   evaluateExitGate,
   fetchPrActState,
@@ -151,7 +152,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
   try {
     console.log(gh(args))
     console.log(`act: merged #${t.pr}`)
-    deleteMergedLocalBranch(state.headRef)
+    deleteMergedLocalBranch(state.headRef, state.headSha)
   } catch (err) {
     console.error(`error: merge failed — ${err instanceof Error ? err.message : String(err)}`)
     process.exitCode = 1
@@ -160,11 +161,23 @@ async function cmdMerge(argv: string[]): Promise<void> {
 
 /** Best-effort local-side cleanup after a merge — the remote branch is
  * already gone via --delete-branch, but the local ref lingers. Never
- * fails the merge: a branch checked out in a worktree simply reports. */
-function deleteMergedLocalBranch(headRef: string): void {
+ * fails the merge: a branch checked out in a worktree simply reports.
+ * Deletes only when the local tip IS the merged head (or its ancestor) —
+ * a same-named branch with extra commits is kept, which also covers the
+ * fork-PR case where headRef names a branch we never had. */
+function deleteMergedLocalBranch(headRef: string, headSha: string): void {
   const current = gitTry(['branch', '--show-current']).out.trim()
   if (headRef === current) {
     console.error(`cleanup: ${headRef} is checked out — delete it after switching`)
+    return
+  }
+  const tipRes = gitTry(['rev-parse', '--verify', `refs/heads/${headRef}`])
+  if (tipRes.code !== 0) {
+    return // no local branch — nothing to do
+  }
+  const tip = tipRes.out.trim()
+  if (tip !== headSha && !isAncestor(tip, headSha)) {
+    console.error(`cleanup: ${headRef} has commits beyond the merged head — kept`)
     return
   }
   const res = gitTry(['branch', '-D', headRef])
