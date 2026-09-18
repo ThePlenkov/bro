@@ -164,40 +164,52 @@ export function runCleanupCommand(argv: string[]): void {
 
   const remotes = withRemote ? remoteTips() : new Map<string, string>()
   for (const branch of plan.delete) {
-    const headOid = merged.get(branch) as string
-    if (dryRun) {
-      const hasRemote = remotes.has(branch) && tipIsMerged(remotes.get(branch) as string, headOid, isAncestor)
-      console.log(`  would delete ${branch}${hasRemote ? ' + origin/' + branch : ''}`)
-      continue
-    }
-    // re-verify the tip right before -D — narrows the recreate-between-
-    // snapshot-and-delete race to the syscall itself
-    const tip = git(['rev-parse', branch]).trim()
-    if (!tipIsMerged(tip, headOid, isAncestor)) {
-      console.log(`  keep ${branch} (tip changed since plan)`)
-      continue
-    }
-    const res = gitTry(['branch', '-D', branch])
-    if (res.code !== 0) {
-      console.error(`  error deleting ${branch}: ${res.err}`)
-      process.exitCode = 1
-      continue
-    }
-    console.log(`  deleted ${branch}`)
-    const remoteTip = remotes.get(branch)
-    if (remoteTip !== undefined) {
-      if (!tipIsMerged(remoteTip, headOid, isAncestor)) {
-        console.log(`  keep origin/${branch} (remote tip has commits beyond the merged head)`)
-      } else {
-        const push = gitTry(['push', 'origin', '--delete', branch])
-        if (push.code !== 0) {
-          console.error(`  error deleting origin/${branch}: ${push.err}`)
-          process.exitCode = 1
-        } else {
-          console.log(`  deleted origin/${branch}`)
-        }
-      }
-    }
+    deleteBranch(branch, merged.get(branch) as string, remotes.get(branch), dryRun)
   }
   console.log(`cleanup: ${dryRun ? 'would delete' : 'deleted'} ${plan.delete.length} branch(es)`)
+}
+
+function deleteRemote(branch: string, headOid: string, remoteTip: string | undefined): void {
+  if (remoteTip === undefined) {
+    return
+  }
+  if (!tipIsMerged(remoteTip, headOid, isAncestor)) {
+    console.log(`  keep origin/${branch} (remote tip has commits beyond the merged head)`)
+    return
+  }
+  const push = gitTry(['push', 'origin', '--delete', branch])
+  if (push.code !== 0) {
+    console.error(`  error deleting origin/${branch}: ${push.err}`)
+    process.exitCode = 1
+  } else {
+    console.log(`  deleted origin/${branch}`)
+  }
+}
+
+function deleteBranch(
+  branch: string,
+  headOid: string,
+  remoteTip: string | undefined,
+  dryRun: boolean,
+): void {
+  if (dryRun) {
+    const hasRemote = remoteTip !== undefined && tipIsMerged(remoteTip, headOid, isAncestor)
+    console.log(`  would delete ${branch}${hasRemote ? ' + origin/' + branch : ''}`)
+    return
+  }
+  // re-verify the tip right before -D — narrows the recreate-between-
+  // snapshot-and-delete race to the syscall itself
+  const tip = git(['rev-parse', branch]).trim()
+  if (!tipIsMerged(tip, headOid, isAncestor)) {
+    console.log(`  keep ${branch} (tip changed since plan)`)
+    return
+  }
+  const res = gitTry(['branch', '-D', branch])
+  if (res.code !== 0) {
+    console.error(`  error deleting ${branch}: ${res.err}`)
+    process.exitCode = 1
+    return
+  }
+  console.log(`  deleted ${branch}`)
+  deleteRemote(branch, headOid, remoteTip)
 }
