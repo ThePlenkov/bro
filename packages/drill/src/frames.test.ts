@@ -150,12 +150,12 @@ function withFakeBd(deleteFails: boolean, fn: () => void): void {
   }
 }
 
-const POSIX_ONLY = process.platform === 'win32'
+const WIN32 = process.platform === 'win32'
 
 describe('drillUp compensation', () => {
   test(
     'failed close + failed cleanup reports the orphan ids',
-    { skip: POSIX_ONLY },
+    { skip: WIN32 },
     () => {
       withFakeBd(true, () => {
         assert.throws(
@@ -168,7 +168,7 @@ describe('drillUp compensation', () => {
 
   test(
     'failed close + successful cleanup surfaces only the close error',
-    { skip: POSIX_ONLY },
+    { skip: WIN32 },
     () => {
       withFakeBd(false, () => {
         assert.throws(
