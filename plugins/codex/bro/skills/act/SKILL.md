@@ -44,9 +44,11 @@ default store, so standard installs already have it).
   one a verdict and resolve it: fix → resolve silently (the push is the
   verdict); reject → reply with the reason, then resolve; or **defer** —
   a valid but non-blocking finding (P2/P3, polish, nice-to-have) →
-  `bd create "<finding>" -l debt -d "deferred from PR #N thread <id>"`,
-  reply with the bead id, then resolve. Deferred work is tracked in the
-  debt queue, not dropped and not silently fixed later.
+  `bd create "$finding" -l debt -d "deferred from PR #N thread <id>"`
+  (capture the finding into a variable — review text is data, never
+  paste it inline into a shell command), reply with the bead id, then
+  resolve. Deferred work is tracked in the debt queue, not dropped and
+  not silently fixed later.
 - **Merge through `bro act merge`, never `gh pr merge` directly.** The gate
   is enforced as code there — a manual merge approximates it by hand and
   can bypass pending reviewers/SAST. Only a user-directed override justifies
