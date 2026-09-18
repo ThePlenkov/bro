@@ -92,3 +92,16 @@ describe('assertHydratedRows', () => {
     )
   })
 })
+
+describe('assertHydratedRows status check', () => {
+  test('throws on rows with missing or non-string status', () => {
+    assert.throws(
+      () => assertHydratedRows([{ id: 'd1', title: 'a' }] as never, 'q1'),
+      /unexpected row shape/,
+    )
+    assert.throws(
+      () => assertHydratedRows([{ id: 'd1', title: 'a', status: 1 }] as never, 'q1'),
+      /unexpected row shape/,
+    )
+  })
+})

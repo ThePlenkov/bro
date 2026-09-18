@@ -188,12 +188,13 @@ function priorPreventionRows(frameId: string): DrillRow[] {
     'discovered-from',
     '--json',
   ])
-  assertHydratedRows(rows, frameId)
+  assertHydratedRows(rows, `bd dep list for ${frameId}`)
   return rows
 }
 
 /** Fail loudly when a bd listing returns rows without `id`/`title`/`status` —
- * e.g. dependency-edge objects after a bd upgrade. Exported for tests. */
+ * e.g. dependency-edge objects after a bd upgrade. `context` names the
+ * query so the error identifies its source. Exported for tests. */
 export function assertHydratedRows(rows: DrillRow[], context: string): void {
   for (const row of rows) {
     if (
@@ -202,7 +203,7 @@ export function assertHydratedRows(rows: DrillRow[], context: string): void {
       typeof row?.status !== 'string'
     ) {
       throw new Error(
-        `bd dep list returned an unexpected row shape for ${context} ` +
+        `${context} returned an unexpected row shape ` +
           `(expected hydrated issue rows): ${JSON.stringify(row).slice(0, 160)}`,
       )
     }
