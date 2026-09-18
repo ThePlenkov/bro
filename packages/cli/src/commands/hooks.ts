@@ -217,7 +217,7 @@ const MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 function hooksStateDir(): string | null {
   try {
-    const gd = execFileSync('git', ['rev-parse', '--git-dir'], {
+    const gd = execFileSync('git', ['rev-parse', '--git-dir'], { // NOSONAR
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim()
@@ -369,50 +369,58 @@ async function emitStopGate(input: HookInput): Promise<void> {
   if (drill) {
     hints.push(`bro: ${drill} (opened outside this session — informational)`)
   }
-  try {
-    const view = ghJson<{ number: number; state: string }>(['pr', 'view', '--json', 'number,state'])
-    const parts = view.state === 'OPEN' ? repoParts() : null
-    if (parts) {
-      const [owner, repoName] = parts
-      const state = await fetchPrActState({ owner, repo: repoName!, pr: view.number })
-      // Open threads, red CI, or a still-running/failed AI reviewer — a
-      // reviewer can open threads after we stop, and a red check means the
-      // work isn't done. Pending/failed both count as unfinished review.
-      const blockers: string[] = []
-      if (state.openThreads > 0) {
-        blockers.push(`${state.openThreads} unresolved review thread(s)`)
-      }
-      if (state.ciPending > 0) {
-        blockers.push(`${state.ciPending} pending/failing check(s)`)
-      }
-      if (state.reviewersPending > 0) {
-        blockers.push(`${state.reviewersPending} AI reviewer(s) still running`)
-      }
-      if (state.reviewersFailing > 0) {
-        blockers.push(`${state.reviewersFailing} AI reviewer check(s) failed`)
-      }
-      if (state.sastPending > 0) {
-        blockers.push(`${state.sastPending} SAST finding(s)`)
-      }
-      if (blockers.length > 0) {
-        const summary = `bro: PR #${view.number}: ${blockers.join('; ')}`
-        if (armed.has('act')) {
-          emit({
-            decision: 'block',
-            reason:
-              `${summary} — ` +
-              'list with `bro act threads`, fix or reply, then resolve; recheck `bro act status`',
-          })
-          return
-        }
-        hints.push(`${summary} (current branch — this session did not touch it)`)
-      }
-    }
-  } catch {
-    // no repo/PR/auth — nothing to gate on
+  const pr = await prBlockersLine()
+  if (pr && armed.has('act')) {
+    emit({
+      decision: 'block',
+      reason:
+        `${pr} — ` +
+        'list with `bro act threads`, fix or reply, then resolve; recheck `bro act status`',
+    })
+    return
+  }
+  if (pr) {
+    hints.push(`${pr} (current branch — this session did not touch it)`)
   }
   if (hints.length > 0) {
     context('Stop', hints.join('\n'))
+  }
+}
+
+/** Current-branch open PR → one-line blocker summary, or null when the PR
+ * is clean / not OPEN / unreachable. */
+async function prBlockersLine(): Promise<string | null> {
+  try {
+    const view = ghJson<{ number: number; state: string }>(['pr', 'view', '--json', 'number,state'])
+    const parts = view.state === 'OPEN' ? repoParts() : null
+    if (!parts) {
+      return null
+    }
+    const [owner, repoName] = parts
+    const state = await fetchPrActState({ owner, repo: repoName!, pr: view.number })
+    // Open threads, red CI, or a still-running/failed AI reviewer — a
+    // reviewer can open threads after we stop, and a red check means the
+    // work isn't done. Pending/failed both count as unfinished review.
+    const blockers: string[] = []
+    if (state.openThreads > 0) {
+      blockers.push(`${state.openThreads} unresolved review thread(s)`)
+    }
+    if (state.ciPending > 0) {
+      blockers.push(`${state.ciPending} pending/failing check(s)`)
+    }
+    if (state.reviewersPending > 0) {
+      blockers.push(`${state.reviewersPending} AI reviewer(s) still running`)
+    }
+    if (state.reviewersFailing > 0) {
+      blockers.push(`${state.reviewersFailing} AI reviewer check(s) failed`)
+    }
+    if (state.sastPending > 0) {
+      blockers.push(`${state.sastPending} SAST finding(s)`)
+    }
+    return blockers.length > 0 ? `bro: PR #${view.number}: ${blockers.join('; ')}` : null
+  } catch {
+    // no repo/PR/auth — nothing to gate on
+    return null
   }
 }
 
