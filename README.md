@@ -72,6 +72,8 @@ fail-open.
 | `bro act threads [PR]` | Unresolved review threads on the PR |
 | `bro act resolve --thread ID [--comment T]` | Resolve (or `--unresolve`) — replies first if a comment is given |
 | `bro act reply --thread ID --comment T` | Reply without resolving; `--file TSV` for batch |
+| `bro act merge [PR] [--squash\|--merge\|--rebase]` | Merge **only when the exit gate is green** — refuses and names blockers when BLOCKED. Deletes the merged local branch too |
+| `bro cleanup [--remote] [--dry-run]` | Delete local branches whose PR merged — squash makes `git branch --merged` useless, so merged state comes from `gh pr list --state merged` |
 | `bro drill down <title> [--under ID] [--ephemeral]` | Scoped descent — a child frame under the current leaf, as a `drill`-labeled bead |
 | `bro drill up --result T [--prevent T]… [--evidence R]…` | Ascend. `--result` is mandatory; each `--prevent` becomes a `discovered-from` task; evidence refs land in `bd provenance` (skipped for `--ephemeral` wisps) |
 | `bro unwind …` | Alias for `drill up` |

@@ -5,6 +5,7 @@
  *   bro debt <sub>   review-debt pipeline (collect, status, prs, list, mark, sync, set)
  *   bro act <sub>    open-PR review loop (status, threads, resolve, reply)
  *   bro convoy <sub> agent-internal convoy execution over beads molecules
+ *   bro cleanup      delete local branches whose PR merged
  *   bro retrospect <sub> self-correction: wtf capture, retro plans → prevention beads
  *   bro wtf <complaint>  alias for `retrospect capture`
  *   bro setup        configure a repo for bro
@@ -14,6 +15,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runActCommand } from './commands/act.ts'
+import { runCleanupCommand } from './commands/cleanup.ts'
 import { runConvoyCommand } from './commands/convoy.ts'
 import { runDebtCommand } from './commands/debt.ts'
 import { runDrillCommand } from './commands/drill.ts'
@@ -38,6 +40,7 @@ Commands:
   debt <sub>   Review-debt pipeline: collect|status|prs|list|mark|sync|set
   act <sub>    Open-PR loop: status|threads|resolve|reply
   convoy <sub> Convoy execution over beads molecules: status|next|done|pour|list
+  cleanup      Delete local branches whose PR merged [--remote] [--dry-run]
   drill <sub>  Scoped descent over beads: down|up|current|tree|list|distill
   unwind       Alias for \`drill up\`
   retrospect <sub>  Self-correction: capture|record|status|list|schema
@@ -82,6 +85,9 @@ async function main(): Promise<void> {
       return
     case 'convoy':
       await runConvoyCommand(rest)
+      return
+    case 'cleanup':
+      runCleanupCommand(rest)
       return
     case 'drill':
       await runDrillCommand(rest)
