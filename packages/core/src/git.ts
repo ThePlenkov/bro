@@ -5,7 +5,7 @@
 import { spawnSync } from 'node:child_process'
 
 export function git(args: string[]): string {
-  const proc = spawnSync('git', args, {
+  const proc = spawnSync('git', args, { // NOSONAR — PATH lookup is the contract (same as gh/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
   })
