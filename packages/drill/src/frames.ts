@@ -372,13 +372,14 @@ export function drillUp(opts: UpOptions): UpResult {
     )
   }
 
+  // one normalized list for memo + beads — a whitespace-only item must
+  // not appear in the memo claiming prevention work it never filed
+  const prevents = (opts.prevent ?? []).map((p) => p.trim()).filter((p) => p !== '')
   const memo = [
     '## Result',
     '',
     opts.result,
-    ...(opts.prevent?.length
-      ? ['', '## Prevention', '', ...opts.prevent.map((p) => `- ${p}`)]
-      : []),
+    ...(prevents.length ? ['', '## Prevention', '', ...prevents.map((p) => `- ${p}`)] : []),
   ].join('\n')
 
   // bd has no transactions — the ordering + idempotency contract is the
@@ -392,7 +393,7 @@ export function drillUp(opts: UpOptions): UpResult {
   let preventionIds: string[] = []
   try {
     noteOnce(frame.id, memo)
-    const prev = createPreventions(frame.id, opts.prevent ?? [])
+    const prev = createPreventions(frame.id, prevents)
     created = prev.created
     preventionIds = prev.ids
     if (!frame.ephemeral) {
