@@ -46,7 +46,7 @@ for (const k of Object.keys(manifest)) {
     console.error(`plugin.json: warning — unknown top-level field "${k}"`)
   }
 }
-if (!/^[a-z0-9][a-z0-9-]*$/.test(manifest.name)) {
+if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(manifest.name)) {
   console.error(`plugin.json: name "${manifest.name}" is not a valid plugin slug`)
   process.exit(1)
 }
