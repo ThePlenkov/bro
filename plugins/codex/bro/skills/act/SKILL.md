@@ -1,6 +1,6 @@
 ---
 name: act
-description: "Use when the user invokes /act on an open PR — the review-fix loop. Thin wrapper over the bro CLI: `bro act status` is the exit gate as code; resolve/reply are mutations. Requires `bro` (npx -y @theplenkov/bro@0) and gh."
+description: "Use when the user invokes /act on an open PR or a 'bro: PR #N ...' status ping arrives — the review-fix loop. Thin wrapper over the bro CLI: `bro act status` is the exit gate as code; resolve/reply are mutations. Requires `bro` (npx -y @theplenkov/bro@0) and gh."
 ---
 
 # /act (bro)
@@ -41,7 +41,11 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
   config durably (REVIEW.md, dashboard settings).
   Bot reviewers never resolve their own threads — **you** must give each
   one a verdict and resolve it: fix → resolve silently (the push is the
-  verdict), or reject → reply with the reason, then resolve.
+  verdict); reject → reply with the reason, then resolve; or **defer** —
+  a valid but non-blocking finding (P2/P3, polish, nice-to-have) →
+  `bd create "<finding>" -l debt -d "deferred from PR #N thread <id>"`,
+  reply with the bead id, then resolve. Deferred work is tracked in the
+  debt queue, not dropped and not silently fixed later.
 - **Merge through `bro act merge`, never `gh pr merge` directly.** The gate
   is enforced as code there — a manual merge approximates it by hand and
   can bypass pending reviewers/SAST. Only a user-directed override justifies
