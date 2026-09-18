@@ -12,6 +12,9 @@ over beads. In a repo with `bro.config.json` or `.beads/`:
   closed with `--result` before stopping.
 - Plugin hooks rehydrate state at session start/post-compaction and block
   Stop once while a drill frame or unresolved review threads remain — a
-  repeated stop is let through (gates, not loops).
+  repeated stop is let through (gates, not loops). The stop gate only
+  hard-blocks sessions that touched the PR or drill frame (`bro act`,
+  `gh pr`, `git push`, `bro drill`/`wtf` arm it via a per-session marker);
+  ambient repo state is passive context for everyone else.
 
 Developing bro itself: see CONTRIBUTING.md.
