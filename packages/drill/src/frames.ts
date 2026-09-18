@@ -174,9 +174,12 @@ export function drillDown(title: string, opts: DownOptions = {}): DrillRow {
 export { refKind }
 
 /** Open prevention beads already discovered-from this frame — the
- * dedupe set that makes prevention creation retry-safe. */
+ * dedupe set that makes prevention creation retry-safe. Throws when bd
+ * returns an unexpected row shape (e.g. dependency-edge objects instead
+ * of hydrated issues): a wrong shape would mask as "no priors" and
+ * silently resurrect the duplicate-on-retry bug this query prevents. */
 function priorPreventionRows(frameId: string): DrillRow[] {
-  return bdJson<DrillRow[]>([
+  const rows = bdJson<DrillRow[]>([
     'dep',
     'list',
     frameId,
@@ -185,6 +188,21 @@ function priorPreventionRows(frameId: string): DrillRow[] {
     'discovered-from',
     '--json',
   ])
+  assertHydratedRows(rows, frameId)
+  return rows
+}
+
+/** Fail loudly when a bd listing returns rows without `id`/`title` —
+ * e.g. dependency-edge objects after a bd upgrade. Exported for tests. */
+export function assertHydratedRows(rows: DrillRow[], context: string): void {
+  for (const row of rows) {
+    if (typeof row?.id !== 'string' || typeof row?.title !== 'string') {
+      throw new Error(
+        `bd dep list returned an unexpected row shape for ${context} ` +
+          `(expected hydrated issue rows): ${JSON.stringify(row).slice(0, 160)}`,
+      )
+    }
+  }
 }
 
 export interface PreventionPlan {
