@@ -91,3 +91,16 @@ describe('readArmed', () => {
     assert.equal(readArmed('definitely-no-such-session-id').size, 0)
   })
 })
+
+describe('classifyArmCommand edge cases', () => {
+  test('arms through global flags between binary and subcommand', () => {
+    assert.equal(classifyArmCommand('git -C /path push'), 'act')
+    assert.equal(classifyArmCommand('gh -R owner/repo pr view'), 'act')
+    assert.equal(classifyArmCommand('gh --repo owner/repo pr checks'), 'act')
+  })
+
+  test('quoted separators do not fake a command position', () => {
+    assert.equal(classifyArmCommand('echo "x; bro act status"'), null)
+    assert.equal(classifyArmCommand("echo 'git push'"), null)
+  })
+})

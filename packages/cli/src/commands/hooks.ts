@@ -87,18 +87,34 @@ export function classifyExecCommand(cmd: string): 'pr-merge' | 'pr-create' | nul
   return null
 }
 
+/** Strip single/double-quoted spans so separators inside arguments cannot
+ * fake a command position (`echo "x; gh pr merge"` is one echo, not two
+ * commands). Exported for classifiers; same caveat as classifyExecCommand. */
+function unquoted(cmd: string): string {
+  return cmd.replace(/"[^"]*"|'[^']*'/g, ' ')
+}
+
 /** Which gate aspect a shell command arms for this session. The stop gate
  * only hard-blocks sessions that recorded interaction — `bro act`/`gh pr`/
  * `git push` arm the PR gate, `bro drill`/`bro wtf` arm the drill gate.
- * `gh`/`git` must sit at a command position, same as classifyExecCommand. */
+ * Global flags between binary and subcommand are allowed (`gh -R o/r pr`,
+ * `git -C path push`); the binary must still sit at a command position. */
 export function classifyArmCommand(cmd: string): 'act' | 'drill' | null {
-  if (/(^|[;&|]\s*)(bro|npx\s+(-y\s+)?@theplenkov\/bro(@[\w.:-]+)?)\s+(act)\b/.test(cmd)) {
+  const c = unquoted(cmd)
+  const bro = '(?:bro|npx\\s+(?:-y\\s+)?@theplenkov/bro(?:@[\\w.:-]+)?)'
+  if (new RegExp(`(^|[;&|]\\s*)${bro}\\s+act\\b`).test(c)) {
     return 'act'
   }
-  if (/(^|[;&|]\s*)(bro|npx\s+(-y\s+)?@theplenkov\/bro(@[\w.:-]+)?)\s+(drill|wtf)\b/.test(cmd)) {
+  if (new RegExp(`(^|[;&|]\\s*)${bro}\\s+(?:drill|wtf)\\b`).test(c)) {
     return 'drill'
   }
-  if (/(^|[;&|]\s*)(gh\s+pr\b|git\s+push\b)/.test(cmd)) {
+  // Flag tokens may carry a separate value (`-C path`, `--repo o/r`), so
+  // allow `-\S+` optionally followed by one non-flag token.
+  const flags = '(?:\\s+-\\S+(?:\\s+[^-\\s]\\S*)?)*'
+  if (new RegExp(`(^|[;&|]\\s*)gh${flags}\\s+pr\\b`).test(c)) {
+    return 'act'
+  }
+  if (new RegExp(`(^|[;&|]\\s*)git${flags}\\s+push\\b`).test(c)) {
     return 'act'
   }
   return null
@@ -227,43 +243,45 @@ function hooksStateDir(): string | null {
   }
 }
 
-function markerPath(sessionId: string): string | null {
+/** One marker file per aspect (<session>.<aspect>) — arming is a pure file
+ * create with no read-modify-write, so concurrent post-tool hooks from
+ * parallel tool calls cannot lose an aspect to a torn JSON rewrite. */
+function markerPath(sessionId: string, aspect: 'act' | 'drill'): string | null {
   const dir = hooksStateDir()
   const safe = sessionId.replace(/[^\w.-]/g, '_')
-  return dir && safe ? join(dir, `${safe}.json`) : null
+  return dir && safe ? join(dir, `${safe}.${aspect}`) : null
 }
 
 /** Aspects this session armed, or empty when no marker exists. */
 export function readArmed(sessionId: string): Set<'act' | 'drill'> {
-  try {
-    const path = markerPath(sessionId)
-    if (!path) {
-      return new Set()
+  const armed = new Set<'act' | 'drill'>()
+  for (const aspect of ['act', 'drill'] as const) {
+    try {
+      const path = markerPath(sessionId, aspect)
+      if (path && existsSync(path)) {
+        armed.add(aspect)
+      }
+    } catch {
+      // unreadable marker = unarmed aspect
     }
-    const raw = JSON.parse(readFileSync(path, 'utf8')) as { armed?: unknown }
-    const list = Array.isArray(raw.armed) ? raw.armed : []
-    return new Set(list.filter((a): a is 'act' | 'drill' => a === 'act' || a === 'drill'))
-  } catch {
-    return new Set()
   }
+  return armed
 }
 
 /** Record that this session touched `aspect`. Best-effort; also prunes
  * markers older than a week so stale sessions don't accumulate. */
 function armSession(sessionId: string, aspect: 'act' | 'drill'): void {
   try {
-    const path = markerPath(sessionId)
+    const path = markerPath(sessionId, aspect)
     if (!path) {
       return
     }
     mkdirSync(dirname(path), { recursive: true })
-    const armed = readArmed(sessionId)
-    armed.add(aspect)
-    writeFileSync(path, JSON.stringify({ armed: [...armed] }))
+    writeFileSync(path, String(Date.now()))
     const cutoff = Date.now() - MARKER_TTL_MS
     for (const f of readdirSync(dirname(path))) {
       try {
-        if (f.endsWith('.json') && statSync(join(dirname(path), f)).mtimeMs < cutoff) {
+        if (/\.(act|drill)$/.test(f) && statSync(join(dirname(path), f)).mtimeMs < cutoff) {
           rmSync(join(dirname(path), f))
         }
       } catch {
@@ -398,26 +416,10 @@ async function prBlockersLine(): Promise<string | null> {
     }
     const [owner, repoName] = parts
     const state = await fetchPrActState({ owner, repo: repoName!, pr: view.number })
-    // Open threads, red CI, or a still-running/failed AI reviewer — a
-    // reviewer can open threads after we stop, and a red check means the
-    // work isn't done. Pending/failed both count as unfinished review.
-    const blockers: string[] = []
-    if (state.openThreads > 0) {
-      blockers.push(`${state.openThreads} unresolved review thread(s)`)
-    }
-    if (state.ciPending > 0) {
-      blockers.push(`${state.ciPending} pending/failing check(s)`)
-    }
-    if (state.reviewersPending > 0) {
-      blockers.push(`${state.reviewersPending} AI reviewer(s) still running`)
-    }
-    if (state.reviewersFailing > 0) {
-      blockers.push(`${state.reviewersFailing} AI reviewer check(s) failed`)
-    }
-    if (state.sastPending > 0) {
-      blockers.push(`${state.sastPending} SAST finding(s)`)
-    }
-    return blockers.length > 0 ? `bro: PR #${view.number}: ${blockers.join('; ')}` : null
+    // The same gate `bro act status` enforces: open threads, pending/failed
+    // CI and AI reviewers, SAST findings, unknown mergeability, BEHIND.
+    const gate = evaluateExitGate(state)
+    return gate.ok ? null : `bro: PR #${view.number}: ${gate.blockers.join('; ')}`
   } catch {
     // no repo/PR/auth — nothing to gate on
     return null
