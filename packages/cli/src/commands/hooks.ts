@@ -5,8 +5,12 @@
  *   session-start | post-compaction | pre-compact
  *                                       rehydrate: beads ready + drill frame + PR gate + debt
  *   prompt-submit                     drill-frame reminder; PR URL → act snapshot
- *   post-tool                         exec nudges: gh pr create → act gate; merge → debt sweep
- *   stop                              block while a drill frame or review threads are open
+ *   post-tool                         exec nudges: gh pr create → act gate; merge → debt sweep;
+ *                                       arms the stop gate for this session (bro act/drill,
+ *                                       gh pr, git push) via a per-session marker in .git
+ *   stop                              block while a drill frame or review threads are open —
+ *                                       but only for sessions that armed the gate; ambient
+ *                                       repo state is emitted as passive context, never a block
  *   permission                        auto-approve bro/bd invocations
  *
  * Contract: read the event payload on stdin, print hook control JSON on
@@ -14,7 +18,16 @@
  * repos (bro.config.json or .beads/ walking up) and every probe is wrapped so
  * a missing bd/gh or a dead network can never stall the session.
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { dirname, join } from 'node:path'
 import { ghJson, resolveRepo } from '@bro/core'
 import { evaluateExitGate, fetchPrActState } from '@bro/act'
@@ -26,6 +39,7 @@ interface HookInput {
   tool_response?: { success?: unknown }
   prompt?: unknown
   stop_hook_active?: unknown
+  session_id?: unknown
 }
 
 /** A repo opts in to bro hooks with bro.config.json or a .beads/ dir. */
@@ -69,6 +83,23 @@ export function classifyExecCommand(cmd: string): 'pr-merge' | 'pr-create' | nul
   }
   if (/(^|[;&|]\s*)gh\s+pr\s+create\b/.test(cmd)) {
     return 'pr-create'
+  }
+  return null
+}
+
+/** Which gate aspect a shell command arms for this session. The stop gate
+ * only hard-blocks sessions that recorded interaction — `bro act`/`gh pr`/
+ * `git push` arm the PR gate, `bro drill`/`bro wtf` arm the drill gate.
+ * `gh`/`git` must sit at a command position, same as classifyExecCommand. */
+export function classifyArmCommand(cmd: string): 'act' | 'drill' | null {
+  if (/(^|[;&|]\s*)(bro|npx\s+(-y\s+)?@theplenkov\/bro(@[\w.:-]+)?)\s+(act)\b/.test(cmd)) {
+    return 'act'
+  }
+  if (/(^|[;&|]\s*)(bro|npx\s+(-y\s+)?@theplenkov\/bro(@[\w.:-]+)?)\s+(drill|wtf)\b/.test(cmd)) {
+    return 'drill'
+  }
+  if (/(^|[;&|]\s*)(gh\s+pr\b|git\s+push\b)/.test(cmd)) {
+    return 'act'
   }
   return null
 }
@@ -173,6 +204,77 @@ async function actGateLine(owner?: string, repo?: string, pr?: number): Promise<
   }
 }
 
+// --- session arming -----------------------------------------------------------
+//
+// The stop gate must never convert ambient repo state into a session
+// obligation: a checkout sitting on a branch with an open PR, or a drill
+// frame another session left open, is context — not this agent's work.
+// post-tool records which gate aspects the session touched in
+// <git-dir>/bro/hooks/<session>.json; stop only hard-blocks armed aspects.
+// No session_id or no git dir → unarmed → passive context (fail-open).
+
+const MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+function hooksStateDir(): string | null {
+  try {
+    const gd = execFileSync('git', ['rev-parse', '--git-dir'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    return gd ? join(gd, 'bro', 'hooks') : null
+  } catch {
+    return null
+  }
+}
+
+function markerPath(sessionId: string): string | null {
+  const dir = hooksStateDir()
+  const safe = sessionId.replace(/[^\w.-]/g, '_')
+  return dir && safe ? join(dir, `${safe}.json`) : null
+}
+
+/** Aspects this session armed, or empty when no marker exists. */
+export function readArmed(sessionId: string): Set<'act' | 'drill'> {
+  try {
+    const path = markerPath(sessionId)
+    if (!path) {
+      return new Set()
+    }
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as { armed?: unknown }
+    const list = Array.isArray(raw.armed) ? raw.armed : []
+    return new Set(list.filter((a): a is 'act' | 'drill' => a === 'act' || a === 'drill'))
+  } catch {
+    return new Set()
+  }
+}
+
+/** Record that this session touched `aspect`. Best-effort; also prunes
+ * markers older than a week so stale sessions don't accumulate. */
+function armSession(sessionId: string, aspect: 'act' | 'drill'): void {
+  try {
+    const path = markerPath(sessionId)
+    if (!path) {
+      return
+    }
+    mkdirSync(dirname(path), { recursive: true })
+    const armed = readArmed(sessionId)
+    armed.add(aspect)
+    writeFileSync(path, JSON.stringify({ armed: [...armed] }))
+    const cutoff = Date.now() - MARKER_TTL_MS
+    for (const f of readdirSync(dirname(path))) {
+      try {
+        if (f.endsWith('.json') && statSync(join(dirname(path), f)).mtimeMs < cutoff) {
+          rmSync(join(dirname(path), f))
+        }
+      } catch {
+        // prune is best-effort
+      }
+    }
+  } catch {
+    // arming must never stall a session — unarmed degrades to passive context
+  }
+}
+
 // --- event handlers -----------------------------------------------------------
 
 async function emitSessionContext(
@@ -223,6 +325,11 @@ function emitPostTool(input: HookInput): void {
     return
   }
   const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
+  const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
+  const aspect = classifyArmCommand(cmd)
+  if (sessionId && aspect) {
+    armSession(sessionId, aspect)
+  }
   switch (classifyExecCommand(cmd)) {
     case 'pr-merge':
       context(
@@ -241,56 +348,71 @@ function emitPostTool(input: HookInput): void {
 }
 
 /** The exit gate as a hook: don't stop while review threads or a drill frame
- * stay open. Respects stop_hook_active so a blocked stop can't loop. */
+ * stay open — but only for sessions that armed the matching aspect this
+ * session (see session arming above). Unarmed sessions get the same findings
+ * as passive context: ambient repo state is not their obligation.
+ * Respects stop_hook_active so a blocked stop can't loop. */
 async function emitStopGate(input: HookInput): Promise<void> {
   if (input.stop_hook_active === true) {
     return
   }
+  const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
+  const armed = sessionId ? readArmed(sessionId) : new Set<string>()
   const drill = drillLine()
-  if (drill) {
+  // Armed blocks are evaluated independently — a foreign drill frame must not
+  // shadow an armed PR gate, and vice versa.
+  if (drill && armed.has('drill')) {
     emit({ decision: 'block', reason: `bro: ${drill}` })
     return
   }
+  const hints: string[] = []
+  if (drill) {
+    hints.push(`bro: ${drill} (opened outside this session — informational)`)
+  }
   try {
     const view = ghJson<{ number: number; state: string }>(['pr', 'view', '--json', 'number,state'])
-    if (view.state !== 'OPEN') {
-      return
-    }
-    const parts = repoParts()
-    if (!parts) {
-      return
-    }
-    const [owner, repoName] = parts
-    const state = await fetchPrActState({ owner, repo: repoName!, pr: view.number })
-    // Open threads, red CI, or a still-running/failed AI reviewer — a
-    // reviewer can open threads after we stop, and a red check means the
-    // work isn't done. Pending/failed both count as unfinished review.
-    const blockers: string[] = []
-    if (state.openThreads > 0) {
-      blockers.push(`${state.openThreads} unresolved review thread(s)`)
-    }
-    if (state.ciPending > 0) {
-      blockers.push(`${state.ciPending} pending/failing check(s)`)
-    }
-    if (state.reviewersPending > 0) {
-      blockers.push(`${state.reviewersPending} AI reviewer(s) still running`)
-    }
-    if (state.reviewersFailing > 0) {
-      blockers.push(`${state.reviewersFailing} AI reviewer check(s) failed`)
-    }
-    if (state.sastPending > 0) {
-      blockers.push(`${state.sastPending} SAST finding(s)`)
-    }
-    if (blockers.length > 0) {
-      emit({
-        decision: 'block',
-        reason:
-          `bro: PR #${view.number}: ${blockers.join('; ')} — ` +
-          'list with `bro act threads`, fix or reply, then resolve; recheck `bro act status`',
-      })
+    const parts = view.state === 'OPEN' ? repoParts() : null
+    if (parts) {
+      const [owner, repoName] = parts
+      const state = await fetchPrActState({ owner, repo: repoName!, pr: view.number })
+      // Open threads, red CI, or a still-running/failed AI reviewer — a
+      // reviewer can open threads after we stop, and a red check means the
+      // work isn't done. Pending/failed both count as unfinished review.
+      const blockers: string[] = []
+      if (state.openThreads > 0) {
+        blockers.push(`${state.openThreads} unresolved review thread(s)`)
+      }
+      if (state.ciPending > 0) {
+        blockers.push(`${state.ciPending} pending/failing check(s)`)
+      }
+      if (state.reviewersPending > 0) {
+        blockers.push(`${state.reviewersPending} AI reviewer(s) still running`)
+      }
+      if (state.reviewersFailing > 0) {
+        blockers.push(`${state.reviewersFailing} AI reviewer check(s) failed`)
+      }
+      if (state.sastPending > 0) {
+        blockers.push(`${state.sastPending} SAST finding(s)`)
+      }
+      if (blockers.length > 0) {
+        const summary = `bro: PR #${view.number}: ${blockers.join('; ')}`
+        if (armed.has('act')) {
+          emit({
+            decision: 'block',
+            reason:
+              `${summary} — ` +
+              'list with `bro act threads`, fix or reply, then resolve; recheck `bro act status`',
+          })
+          return
+        }
+        hints.push(`${summary} (current branch — this session did not touch it)`)
+      }
     }
   } catch {
     // no repo/PR/auth — nothing to gate on
+  }
+  if (hints.length > 0) {
+    context('Stop', hints.join('\n'))
   }
 }
 
