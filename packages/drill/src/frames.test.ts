@@ -160,21 +160,26 @@ describe('drillUp compensation', () => {
       withFakeBd(true, () => {
         assert.throws(
           () => drillUp({ id: 'f1', result: 'r', prevent: ['p1'] }),
-          /cleanup incomplete: prevention bead\(s\) left behind: bd-new-1/,
+          (err: Error & { cause?: { stderr?: string } }) =>
+            /cleanup incomplete: prevention bead\(s\) left behind: bd-new-1/.test(err.message) &&
+            (err.cause?.stderr ?? '').includes('close blew up'),
         )
       })
     },
   )
 
   test(
-    'failed close + successful cleanup surfaces only the close error',
+    'failed close + successful cleanup rethrows the original error',
     { skip: WIN32 },
     () => {
       withFakeBd(false, () => {
         assert.throws(
           () => drillUp({ id: 'f1', result: 'r', prevent: ['p1'] }),
-          (err: Error) =>
-            err.message.includes('bd close') && !err.message.includes('cleanup incomplete'),
+          (err: Error & { stderr?: string }) =>
+            err.message.includes('bd close') &&
+            !err.message.includes('cleanup incomplete') &&
+            // stderr present → the raw exec error came through, not a rewrap
+            (err.stderr ?? '').includes('close blew up'),
         )
       })
     },

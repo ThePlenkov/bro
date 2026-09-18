@@ -409,11 +409,15 @@ export function drillUp(opts: UpOptions): UpResult {
         orphans.push(id)
       }
     }
+    // clean cleanup → rethrow the original (same convention as claimFrame);
+    // orphans force a new message — keep the failure debuggable via cause
+    if (orphans.length === 0) {
+      throw err
+    }
     const msg = err instanceof Error ? err.message : String(err)
     throw new Error(
-      orphans.length > 0
-        ? `${msg} — cleanup incomplete: prevention bead(s) left behind: ${orphans.join(', ')}`
-        : msg,
+      `${msg} — cleanup incomplete: prevention bead(s) left behind: ${orphans.join(', ')}`,
+      { cause: err },
     )
   }
   return { closed: frame.id, preventionIds }
