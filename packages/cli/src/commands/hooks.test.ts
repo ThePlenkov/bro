@@ -104,3 +104,16 @@ describe('classifyArmCommand edge cases', () => {
     assert.equal(classifyArmCommand("echo 'git push'"), null)
   })
 })
+
+describe('classifyArmCommand positions', () => {
+  test('leading whitespace and newlines still count as command position', () => {
+    assert.equal(classifyArmCommand('  gh pr view'), 'act')
+    assert.equal(classifyArmCommand('echo hi\nbro act status'), 'act')
+    assert.equal(classifyArmCommand('true && git push'), 'act')
+  })
+
+  test('escaped quotes inside arguments do not open a command position', () => {
+    assert.equal(classifyArmCommand('echo "x\\"; git push"'), null)
+    assert.equal(classifyArmCommand("echo 'a\\'; bro act'"), null)
+  })
+})

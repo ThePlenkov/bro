@@ -89,32 +89,35 @@ export function classifyExecCommand(cmd: string): 'pr-merge' | 'pr-create' | nul
 
 /** Strip single/double-quoted spans so separators inside arguments cannot
  * fake a command position (`echo "x; gh pr merge"` is one echo, not two
- * commands). Exported for classifiers; same caveat as classifyExecCommand. */
+ * commands). Escaped characters inside quotes do not close the span —
+ * `echo "a\"; gh pr"` is still one echo. */
 function unquoted(cmd: string): string {
-  return cmd.replace(/"[^"]*"|'[^']*'/g, ' ')
+  return cmd.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, ' ')
 }
 
 /** Which gate aspect a shell command arms for this session. The stop gate
  * only hard-blocks sessions that recorded interaction — `bro act`/`gh pr`/
  * `git push` arm the PR gate, `bro drill`/`bro wtf` arm the drill gate.
  * Global flags between binary and subcommand are allowed (`gh -R o/r pr`,
- * `git -C path push`); the binary must still sit at a command position. */
+ * `git -C path push`); the binary must sit at a command position — string
+ * start or after `;`, `&`, `|`, or a newline (leading whitespace is fine). */
 export function classifyArmCommand(cmd: string): 'act' | 'drill' | null {
   const c = unquoted(cmd)
+  const at = '(^|[;&|\\n])\\s*'
   const bro = '(?:bro|npx\\s+(?:-y\\s+)?@theplenkov/bro(?:@[\\w.:-]+)?)'
-  if (new RegExp(`(^|[;&|]\\s*)${bro}\\s+act\\b`).test(c)) {
+  if (new RegExp(`${at}${bro}\\s+act\\b`).test(c)) {
     return 'act'
   }
-  if (new RegExp(`(^|[;&|]\\s*)${bro}\\s+(?:drill|wtf)\\b`).test(c)) {
+  if (new RegExp(`${at}${bro}\\s+(?:drill|wtf)\\b`).test(c)) {
     return 'drill'
   }
   // Flag tokens may carry a separate value (`-C path`, `--repo o/r`), so
   // allow `-\S+` optionally followed by one non-flag token.
   const flags = '(?:\\s+-\\S+(?:\\s+[^-\\s]\\S*)?)*'
-  if (new RegExp(`(^|[;&|]\\s*)gh${flags}\\s+pr\\b`).test(c)) {
+  if (new RegExp(`${at}gh${flags}\\s+pr\\b`).test(c)) {
     return 'act'
   }
-  if (new RegExp(`(^|[;&|]\\s*)git${flags}\\s+push\\b`).test(c)) {
+  if (new RegExp(`${at}git${flags}\\s+push\\b`).test(c)) {
     return 'act'
   }
   return null
@@ -226,8 +229,8 @@ async function actGateLine(owner?: string, repo?: string, pr?: number): Promise<
 // obligation: a checkout sitting on a branch with an open PR, or a drill
 // frame another session left open, is context — not this agent's work.
 // post-tool records which gate aspects the session touched in
-// <git-dir>/bro/hooks/<session>.json; stop only hard-blocks armed aspects.
-// No session_id or no git dir → unarmed → passive context (fail-open).
+// <git-dir>/bro/hooks/<session>.<aspect>; stop only hard-blocks armed
+// aspects. No session_id or no git dir → unarmed → passive (fail-open).
 
 const MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
@@ -252,13 +255,15 @@ function markerPath(sessionId: string, aspect: 'act' | 'drill'): string | null {
   return dir && safe ? join(dir, `${safe}.${aspect}`) : null
 }
 
-/** Aspects this session armed, or empty when no marker exists. */
+/** Aspects this session armed, or empty when no marker exists. Markers
+ * older than MARKER_TTL_MS count as unarmed even if still on disk. */
 export function readArmed(sessionId: string): Set<'act' | 'drill'> {
   const armed = new Set<'act' | 'drill'>()
+  const cutoff = Date.now() - MARKER_TTL_MS
   for (const aspect of ['act', 'drill'] as const) {
     try {
       const path = markerPath(sessionId, aspect)
-      if (path && existsSync(path)) {
+      if (path && existsSync(path) && statSync(path).mtimeMs >= cutoff) {
         armed.add(aspect)
       }
     } catch {
