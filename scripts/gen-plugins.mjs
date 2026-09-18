@@ -46,7 +46,12 @@ for (const k of Object.keys(manifest)) {
     console.error(`plugin.json: warning — unknown top-level field "${k}"`)
   }
 }
-if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(manifest.name)) {
+// trim guard first — JS $ matches before a trailing \n, so "bro\n" would
+// pass the pattern alone; surrounding whitespace is never a valid slug
+if (
+  manifest.name !== manifest.name.trim() ||
+  !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(manifest.name)
+) {
   console.error(`plugin.json: name "${manifest.name}" is not a valid plugin slug`)
   process.exit(1)
 }
