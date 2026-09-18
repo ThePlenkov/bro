@@ -9,7 +9,8 @@ description: "Use when the user invokes /act on an open PR or a 'bro: PR #N ...'
 reimplement what `bro act` already does.
 
 Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
-`gh` auth.
+`gh` auth; the defer verdict additionally needs `bd` on PATH (beads is a
+default store, so standard installs already have it).
 
 ## Commands
 
