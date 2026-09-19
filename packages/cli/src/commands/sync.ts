@@ -70,7 +70,9 @@ export function runSyncCommand(argv: string[]): void {
     return // nothing committed — nothing to push
   }
   if (!dataRefPush(root, remote, ref)) {
-    console.error(`warning: could not push ${ref} to ${remote} — local ref is ahead`)
+    console.error(
+      `warning: could not push ${ref} to ${remote} — check network and remote access`
+    )
     return
   }
   console.log(`bro sync: ${ref} pushed to ${remote}`)

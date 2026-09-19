@@ -12,7 +12,7 @@
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { git, gitTry } from './git.ts'
 
 export const DATA_REF = 'refs/bro/data'
@@ -83,7 +83,11 @@ function treeEntries(root: string, sha: string): Map<string, TreeEntry> {
     }
     const tab = rec.indexOf('\t')
     const [mode, , sha] = rec.slice(0, tab).split(' ')
-    map.set(rec.slice(tab + 1), { mode: mode!, sha: sha! })
+    const path = rec.slice(tab + 1)
+    if (tab === -1 || !mode || !sha || !path) {
+      throw new Error(`malformed ls-tree record: ${JSON.stringify(rec.slice(0, 60))}`)
+    }
+    map.set(path, { mode, sha })
   }
   return map
 }
@@ -260,7 +264,13 @@ export function dataRefPull(
   }
   let written = 0
   for (const [path] of treeEntries(root, ref)) {
-    const dest = join(root, path)
+    // a hostile remote could craft tree names that escape the worktree —
+    // nothing stops a raw tree object from carrying '..' segments
+    const dest = resolve(root, path)
+    if (dest !== root && !dest.startsWith(root + sep)) {
+      console.error(`warning: skipping out-of-root data ref path: ${path}`)
+      continue
+    }
     mkdirSync(dirname(dest), { recursive: true })
     writeFileSync(dest, gRaw(root, ['show', `${ref}:${path}`]))
     written += 1
