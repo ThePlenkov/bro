@@ -96,11 +96,18 @@ describe('loadConfig root shape', () => {
   })
 })
 
-function loadTs(source: string, json?: unknown): ReturnType<typeof loadConfig> {
+function loadTs(
+  source: string,
+  json?: unknown,
+  pkg?: unknown
+): ReturnType<typeof loadConfig> {
   const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
   writeFileSync(join(dir, 'bro.config.ts'), source)
   if (json !== undefined) {
     writeFileSync(join(dir, 'bro.config.json'), JSON.stringify(json))
+  }
+  if (pkg !== undefined) {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify(pkg))
   }
   return loadConfig(dir)
 }
@@ -112,9 +119,14 @@ describe('loadConfig bro.config.ts', () => {
     assert.deepEqual(cfg.stores, ['jsonl', 'beads'])
   })
 
-  test('module.exports object loads', () => {
+  test('module.exports object loads in a CJS repo', () => {
     const cfg = loadTs('module.exports = { debt: { dir: "d" } }')
     assert.equal(cfg.debt.dir, 'd')
+  })
+
+  test('module.exports in an ESM repo falls back to jsonl-only', () => {
+    const cfg = loadTs('module.exports = {}', undefined, { type: 'module' })
+    assert.deepEqual(cfg.stores, ['jsonl'])
   })
 
   test('.ts wins over .json when both exist', () => {

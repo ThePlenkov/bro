@@ -1,9 +1,10 @@
 /**
  * bro configuration. Resolution order: bro.config.ts → bro.config.json
  * in cwd → defaults. The .ts file loads synchronously via createRequire —
- * native type stripping handles it on Node ≥22.18 (the repo floor);
- * `export default {…}` and `module.exports = {…}` both work, and no bro
- * import is required so the config resolves under a global install too.
+ * native type stripping handles it on Node ≥22.18. `export default {…}`
+ * is the canonical form (works in ESM and CJS repos); `module.exports`
+ * only works where the repo is CommonJS. No bro import is required, so
+ * the config resolves under a global install too.
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -87,6 +88,15 @@ export function defineConfig(
 function readConfigFile(name: string, path: string): unknown {
   try {
     if (name.endsWith('.ts')) {
+      // the published CLI still installs on Node 22.0–22.17 where type
+      // stripping is absent — detect it up front, not by catching the
+      // require failure
+      if (!(process.features as { typescript?: unknown }).typescript) {
+        console.error(
+          `warning: ${name} needs Node >=22.18 (native type stripping) — using jsonl-only stores`
+        )
+        return undefined
+      }
       // resolving from the config itself keeps any relative imports
       // inside it rooted at the repo, not at the CLI install location
       const mod = createRequire(path)(path) as { default?: unknown }
@@ -94,11 +104,10 @@ function readConfigFile(name: string, path: string): unknown {
     }
     return JSON.parse(readFileSync(path, 'utf8'))
   } catch (err) {
-    const e = err as NodeJS.ErrnoException
-    const hint =
-      e.code === 'ERR_UNKNOWN_FILE_EXTENSION'
-        ? ' (bro.config.ts needs Node >=22.18 — native type stripping)'
-        : ''
+    const msg = (err as Error).message
+    const hint = /module is not defined|exports is not defined/.test(msg)
+      ? ' (this repo is ESM — use `export default`, not module.exports)'
+      : ` (${msg})`
     console.error(`warning: ${name} failed to load — using jsonl-only stores${hint}`)
     return undefined
   }
