@@ -1,7 +1,7 @@
 export { ensureGhAuth, gh, ghJson, ghTry, resolveRepo } from './gh.ts'
 export { git, gitTry } from './git.ts'
 export { bd, bdJson, checkBeads, evidenceKind, initBeadsStealth, refKind } from './bd.ts'
-export { DEFAULT_CONFIG, loadConfig, PERSONALITIES, STORE_BACKENDS } from './config.ts'
+export { DEFAULT_CONFIG, defineConfig, loadConfig, PERSONALITIES, STORE_BACKENDS } from './config.ts'
 export {
   DATA_REF,
   dataRefCommit,

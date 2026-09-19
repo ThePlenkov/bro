@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { DEFAULT_CONFIG, loadConfig } from './config.ts'
+import { DEFAULT_CONFIG, defineConfig, loadConfig } from './config.ts'
 
 function load(raw?: unknown): ReturnType<typeof loadConfig> {
   const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
@@ -93,5 +93,51 @@ describe('loadConfig root shape', () => {
 
   test('non-object sync section falls back to defaults', () => {
     assert.deepEqual(load({ sync: 'x' }).sync, DEFAULT_CONFIG.sync)
+  })
+})
+
+function loadTs(source: string, json?: unknown): ReturnType<typeof loadConfig> {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
+  writeFileSync(join(dir, 'bro.config.ts'), source)
+  if (json !== undefined) {
+    writeFileSync(join(dir, 'bro.config.json'), JSON.stringify(json))
+  }
+  return loadConfig(dir)
+}
+
+describe('loadConfig bro.config.ts', () => {
+  test('export default object loads', () => {
+    const cfg = loadTs('export default { personality: "mentor" }')
+    assert.equal(cfg.personality, 'mentor')
+    assert.deepEqual(cfg.stores, ['jsonl', 'beads'])
+  })
+
+  test('module.exports object loads', () => {
+    const cfg = loadTs('module.exports = { debt: { dir: "d" } }')
+    assert.equal(cfg.debt.dir, 'd')
+  })
+
+  test('.ts wins over .json when both exist', () => {
+    const cfg = loadTs('export default { personality: "sarcastic" }', {
+      personality: 'mentor',
+    })
+    assert.equal(cfg.personality, 'sarcastic')
+  })
+
+  test('broken .ts falls back to jsonl-only, never to .json', () => {
+    const cfg = loadTs('export default {{{', { stores: ['jsonl', 'beads'] })
+    assert.deepEqual(cfg.stores, ['jsonl'])
+  })
+
+  test('non-object .ts export falls back to jsonl-only', () => {
+    const cfg = loadTs('export default 42')
+    assert.deepEqual(cfg.stores, ['jsonl'])
+  })
+
+  test('defineConfig is a pass-through', () => {
+    assert.deepEqual(defineConfig({ personality: 'mentor', extra: 1 }), {
+      personality: 'mentor',
+      extra: 1,
+    })
   })
 })

@@ -1,9 +1,12 @@
 /**
- * bro configuration. Resolution order: bro.config.json in cwd → defaults.
- * Keep it a JSON file — bro runs as a compiled CLI, importing user TS at
- * runtime is not worth the loader dance for v0.
+ * bro configuration. Resolution order: bro.config.ts → bro.config.json
+ * in cwd → defaults. The .ts file loads synchronously via createRequire —
+ * native type stripping handles it on Node ≥22.18 (the repo floor);
+ * `export default {…}` and `module.exports = {…}` both work, and no bro
+ * import is required so the config resolves under a global install too.
  */
 import { existsSync, readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { join } from 'node:path'
 
 export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const
@@ -70,24 +73,58 @@ function normalizeStores(raw: RawConfig): StoreBackend[] {
   return [...DEFAULT_CONFIG.stores]
 }
 
-export function loadConfig(cwd: string = process.cwd()): BroConfig {
-  const path = join(cwd, 'bro.config.json')
-  if (!existsSync(path)) {
-    return DEFAULT_CONFIG
-  }
+/** Identity helper for bro.config.ts: `export default defineConfig({…})`
+ *  gives typed sections when @bro/core is a local dep; a plain object
+ *  works without it. Extra keys are plugin sections (see bro-akl). */
+export function defineConfig(
+  config: Partial<BroConfig> & Record<string, unknown>
+): Record<string, unknown> {
+  return config
+}
+
+/** Reads one config file; undefined = failed (caller falls back to
+ *  jsonl-only — a broken file must not silently enable beads). */
+function readConfigFile(name: string, path: string): unknown {
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8')) as RawConfig
-    // a valid-JSON non-object root ("str", […], 42) is not a config —
-    // spreading it would silently produce garbage keys
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-      console.error('bro.config.json: root must be a JSON object — using jsonl-only stores')
+    if (name.endsWith('.ts')) {
+      // resolving from the config itself keeps any relative imports
+      // inside it rooted at the repo, not at the CLI install location
+      const mod = createRequire(path)(path) as { default?: unknown }
+      return mod.default ?? mod
+    }
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException
+    const hint =
+      e.code === 'ERR_UNKNOWN_FILE_EXTENSION'
+        ? ' (bro.config.ts needs Node >=22.18 — native type stripping)'
+        : ''
+    console.error(`warning: ${name} failed to load — using jsonl-only stores${hint}`)
+    return undefined
+  }
+}
+
+export function loadConfig(cwd: string = process.cwd()): BroConfig {
+  for (const name of ['bro.config.ts', 'bro.config.json']) {
+    const path = join(cwd, name)
+    if (!existsSync(path)) {
+      continue
+    }
+    const raw = readConfigFile(name, path)
+    if (raw === undefined) {
       return { ...DEFAULT_CONFIG, stores: ['jsonl'] }
     }
-    const { stores: _s, store: _legacy, ...rest } = raw
+    // a valid non-object root ("str", […], 42) is not a config —
+    // spreading it would silently produce garbage keys
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      console.error(`${name}: root must be an object — using jsonl-only stores`)
+      return { ...DEFAULT_CONFIG, stores: ['jsonl'] }
+    }
+    const { stores: _s, store: _legacy, ...rest } = raw as RawConfig
     return {
       ...DEFAULT_CONFIG,
       ...rest,
-      stores: normalizeStores(raw),
+      stores: normalizeStores(raw as RawConfig),
       debt: { ...DEFAULT_CONFIG.debt, ...(rest.debt ?? {}) },
       // only string fields may reach git arg construction — a null or
       // non-string sync.ref/sync.remote must fall back to the default
@@ -100,10 +137,6 @@ export function loadConfig(cwd: string = process.cwd()): BroConfig {
           : {}),
       },
     }
-  } catch {
-    // Unparseable config ≠ missing config — don't silently enable beads
-    // (and its `bd init` side effects) on a file the user broke.
-    console.error('warning: bro.config.json is not valid JSON — using jsonl-only stores')
-    return { ...DEFAULT_CONFIG, stores: ['jsonl'] }
   }
+  return DEFAULT_CONFIG
 }
