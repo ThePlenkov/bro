@@ -8,7 +8,15 @@
  *   mark PR collected|clean|skipped|none
  */
 import { readFileSync } from 'node:fs'
-import { ensureGhAuth, loadConfig, resolveRepo } from '@bro/core'
+import { join, relative } from 'node:path'
+import {
+  dataRefCommit,
+  dataRefPush,
+  dataRefRoot,
+  ensureGhAuth,
+  loadConfig,
+  resolveRepo,
+} from '@bro/core'
 import {
   applyCollectLabel,
   applyDebtLabel,
@@ -748,6 +756,32 @@ const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
   watch: cmdWatch,
 }
 
+const MUTATING = new Set(['collect', 'mark', 'set', 'sync', 'next'])
+
+/** Best-effort data-ref sync after ledger mutations — gitref is opt-in;
+ *  sync failures warn but never mask the command's own result. */
+function maybeDataRefSync(): void {
+  const cfg = loadConfig()
+  if (!cfg.stores.includes('gitref')) {
+    return
+  }
+  const root = dataRefRoot()
+  if (root === null) {
+    return
+  }
+  try {
+    const rel = relative(root, join(process.cwd(), cfg.debt.dir))
+    const head = dataRefCommit(root, rel, 'bro debt: ledger update', cfg.sync.ref)
+    if (head !== null) {
+      dataRefPush(root, cfg.sync.remote, cfg.sync.ref)
+    }
+  } catch (err) {
+    console.error(
+      `warning: data ref sync failed — ${err instanceof Error ? err.message : err}`
+    )
+  }
+}
+
 export async function runDebtCommand(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv
   if (!cmd || cmd === '--help' || cmd === '-h') {
@@ -759,4 +793,7 @@ export async function runDebtCommand(argv: string[]): Promise<void> {
     usage()
   }
   await handler(rest)
+  if (MUTATING.has(cmd)) {
+    maybeDataRefSync()
+  }
 }
