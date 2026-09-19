@@ -1,0 +1,16 @@
+{
+  "generated_at": "2026-09-19T21:37:54.710Z",
+  "open_count": 11,
+  "by_area": {
+    "scripts/gen-plugins.mjs": 9,
+    ".github/workflows": 2
+  },
+  "by_author": {
+    "amazon-q-developer": 3,
+    "codeant-ai": 1,
+    "cubic-dev-ai": 5,
+    "coderabbitai": 2
+  },
+  "duplicate_fingerprints": [],
+  "oldest_open": "2026-09-18T08:21:14.608Z"
+}
