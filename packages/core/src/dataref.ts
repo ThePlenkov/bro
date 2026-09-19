@@ -10,7 +10,13 @@
  * leak into the data ref by construction.
  */
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { git, gitTry } from './git.ts'
@@ -262,16 +268,30 @@ export function dataRefPull(
   } else {
     g(root, ['update-ref', ref, theirs])
   }
+  // a polluted ref must not clobber repo content: tracked files are
+  // skipped outright — the ref only ever carries artifacts
+  const tracked = new Set(g(root, ['ls-files', '-z']).split('\0').filter(Boolean))
+  const realRoot = realpathSync(root)
   let written = 0
   for (const [path] of treeEntries(root, ref)) {
-    // a hostile remote could craft tree names that escape the worktree —
-    // nothing stops a raw tree object from carrying '..' segments
+    // hostile remote: '..' segments in tree names could escape the root
     const dest = resolve(root, path)
     if (dest !== root && !dest.startsWith(root + sep)) {
       console.error(`warning: skipping out-of-root data ref path: ${path}`)
       continue
     }
+    if (tracked.has(path)) {
+      console.error(`warning: skipping tracked path in data ref: ${path}`)
+      continue
+    }
     mkdirSync(dirname(dest), { recursive: true })
+    // lexical check isn't enough — a symlinked parent dir still writes
+    // outside the worktree, so verify the real parent too
+    const realParent = realpathSync(dirname(dest))
+    if (realParent !== realRoot && !realParent.startsWith(realRoot + sep)) {
+      console.error(`warning: skipping data ref path through symlinked dir: ${path}`)
+      continue
+    }
     writeFileSync(dest, gRaw(root, ['show', `${ref}:${path}`]))
     written += 1
   }

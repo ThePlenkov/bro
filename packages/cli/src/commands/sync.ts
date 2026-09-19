@@ -26,7 +26,8 @@ function artifactDirs(root: string): string[] {
   if (existsSync(join(root, '.agents'))) {
     dirs.add('.agents')
   }
-  const debt = loadConfig(root).debt.dir
+  // mirror the store's own resolution — BRO_DEBT_DIR wins over config
+  const debt = process.env.BRO_DEBT_DIR ?? loadConfig(root).debt.dir
   if (existsSync(join(root, debt))) {
     dirs.add(debt)
   }

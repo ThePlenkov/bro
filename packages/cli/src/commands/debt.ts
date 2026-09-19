@@ -770,7 +770,9 @@ function maybeDataRefSync(): void {
     return
   }
   try {
-    const rel = relative(root, join(process.cwd(), cfg.debt.dir))
+    // mirror the store's own resolution — BRO_DEBT_DIR wins over config
+    const dir = process.env.BRO_DEBT_DIR ?? cfg.debt.dir
+    const rel = relative(root, join(process.cwd(), dir))
     const head = dataRefCommit(root, rel, 'bro debt: ledger update', cfg.sync.ref)
     if (head !== null) {
       dataRefPush(root, cfg.sync.remote, cfg.sync.ref)

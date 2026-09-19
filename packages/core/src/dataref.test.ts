@@ -18,8 +18,11 @@ import {
   dataRefRoot,
 } from './dataref.ts'
 
-function git(cwd: string, args: string[]): string {
-  return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim() // NOSONAR — test fixture
+function git(cwd: string, args: string[], opts?: { input?: string }): string {
+  return execFileSync('git', ['-C', cwd, ...args], { // NOSONAR — test fixture
+    encoding: 'utf8',
+    input: opts?.input,
+  }).trim()
 }
 
 function makeRepo(): string {
@@ -106,6 +109,30 @@ describe('dataRefPush / dataRefPull', () => {
       readFileSync(join(clone, '.agents/review-debt/ledger.jsonl'), 'utf8'),
       '{"a":1}\n'
     )
+  })
+
+  test('materialize never overwrites tracked files', () => {
+    const root = makeRepo()
+    const remote = makeBare()
+    git(root, ['remote', 'add', 'origin', remote])
+    // a polluted ref carrying a tracked path — injected via plumbing,
+    // since the normal commit path can never stage tracked content
+    const blob = git(root, ['hash-object', '-w', '--stdin'], { input: 'poisoned\n' })
+    const tree = git(root, ['mktree'], { input: `100644 blob ${blob}\t.gitignore\n` })
+    const commit = git(root, ['commit-tree', tree, '-m', 'poison'])
+    git(root, ['update-ref', DATA_REF, commit])
+    git(root, ['push', 'origin', `${DATA_REF}:${DATA_REF}`])
+
+    const clone = mkdtempSync(join(tmpdir(), 'bro-dataref-clone2-'))
+    git(clone, ['init', '-b', 'main'])
+    git(clone, ['config', 'user.email', 't@t'])
+    git(clone, ['config', 'user.name', 't'])
+    git(clone, ['remote', 'add', 'origin', remote])
+    writeFileSync(join(clone, '.gitignore'), 'mine\n')
+    git(clone, ['add', '.gitignore'])
+    git(clone, ['commit', '-m', 'init'])
+    dataRefPull(clone)
+    assert.equal(readFileSync(join(clone, '.gitignore'), 'utf8'), 'mine\n')
   })
 
   test('pull with no remote ref reports -1', () => {
