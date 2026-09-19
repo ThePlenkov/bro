@@ -7,10 +7,10 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "node scripts/gen-embedded.mjs && node scripts/gen-plugins.mjs && nx run-many -t build --exclude=skills-*,plugins-*-skills-*",
-    "check:embedded": "node scripts/gen-embedded.mjs --check",
-    "gen:plugins": "node scripts/gen-plugins.mjs",
-    "check:plugins": "node scripts/gen-plugins.mjs --check",
+    "build": "node scripts/gen-embedded.ts && node scripts/gen-plugins.ts && nx run-many -t build --exclude=skills-*,plugins-*-skills-*",
+    "check:embedded": "node scripts/gen-embedded.ts --check",
+    "gen:plugins": "node scripts/gen-plugins.ts",
+    "check:plugins": "node scripts/gen-plugins.ts --check",
     "test": "nx run-many -t test --exclude=skills-*,plugins-*-skills-*",
     "lint": "nx run-many -t lint",
     "affected": "nx affected -t build test lint --exclude=skills-*,plugins-*-skills-*",
