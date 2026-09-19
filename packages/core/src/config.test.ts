@@ -84,4 +84,14 @@ describe('loadConfig root shape', () => {
     assert.equal(load({ debt: { dir: 'debt-out' } }).debt.dir, 'debt-out')
     assert.equal(load({ debt: { dir: 'debt-out' } }).personality, 'terse')
   })
+
+  test('non-string sync fields fall back to defaults', () => {
+    const cfg = load({ sync: { remote: null, ref: 'refs/bro/custom' } })
+    assert.equal(cfg.sync.remote, 'origin')
+    assert.equal(cfg.sync.ref, 'refs/bro/custom')
+  })
+
+  test('non-object sync section falls back to defaults', () => {
+    assert.deepEqual(load({ sync: 'x' }).sync, DEFAULT_CONFIG.sync)
+  })
 })

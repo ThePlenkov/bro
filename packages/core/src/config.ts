@@ -89,7 +89,16 @@ export function loadConfig(cwd: string = process.cwd()): BroConfig {
       ...rest,
       stores: normalizeStores(raw),
       debt: { ...DEFAULT_CONFIG.debt, ...(rest.debt ?? {}) },
-      sync: { ...DEFAULT_CONFIG.sync, ...(rest.sync ?? {}) },
+      // only string fields may reach git arg construction — a null or
+      // non-string sync.ref/sync.remote must fall back to the default
+      sync: {
+        ...DEFAULT_CONFIG.sync,
+        ...(typeof rest.sync === 'object' && rest.sync !== null
+          ? Object.fromEntries(
+              Object.entries(rest.sync).filter(([, v]) => typeof v === 'string')
+            )
+          : {}),
+      },
     }
   } catch {
     // Unparseable config ≠ missing config — don't silently enable beads
