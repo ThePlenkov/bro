@@ -15,17 +15,34 @@
  * is authored by hand — everything else is generated, so `check:plugins`
  * fails CI when an adapter drifts from its source.
  *
- *   node scripts/gen-plugins.mjs           # write
- *   node scripts/gen-plugins.mjs --check   # verify freshness, exit 1 on drift
+ *   node scripts/gen-plugins.ts           # write
+ *   node scripts/gen-plugins.ts --check   # verify freshness, exit 1 on drift
  */
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CHECK = process.argv.includes('--check')
 
-const manifest = JSON.parse(readFileSync(join(ROOT, 'plugin.json'), 'utf8'))
+function readJson(rel) {
+  try {
+    return JSON.parse(readFileSync(join(ROOT, rel), 'utf8'))
+  } catch (err) {
+    console.error(
+      `${rel}: failed to read or parse — ${err instanceof Error ? err.message : err}`
+    )
+    process.exit(1)
+  }
+}
+
+const manifest = readJson('plugin.json')
+// null/array/index signature all index cleanly per-field — only a plain
+// object may reach the field checks below
+if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) {
+  console.error('plugin.json: top-level value must be an object')
+  process.exit(1)
+}
 
 // agent-plugins 1.0 shape — hand-rolled check (no ajv dep): a malformed
 // manifest currently only fails at `devin plugins install` time
@@ -55,14 +72,17 @@ if (
   console.error(`plugin.json: name "${manifest.name}" is not a valid plugin slug`)
   process.exit(1)
 }
-if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(manifest.version)) {
+// semver 2.0 shape: dot-separated alnum-hyphen identifiers for prerelease
+// AND build metadata — `1.0.0-alpha.1`, `1.0.0+build` valid; `1.0.0-.a`,
+// `1.0.0-a.`, `1.0.0+` invalid
+const SEMVER_RE =
+  /^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/
+if (!SEMVER_RE.test(manifest.version)) {
   console.error(`plugin.json: version "${manifest.version}" is not semver`)
   process.exit(1)
 }
 // the published CLI version is the release truth — manifest must match
-const cliVersion = JSON.parse(
-  readFileSync(join(ROOT, 'packages/cli/package.json'), 'utf8')
-).version
+const cliVersion = readJson('packages/cli/package.json').version
 if (manifest.version !== cliVersion) {
   console.error(
     `plugin.json: version ${manifest.version} != packages/cli version ${cliVersion}`
@@ -106,14 +126,28 @@ const PIN_RE = /@theplenkov\/bro@[\w.:-]+/g
 const drift = []
 
 function emit(path, content) {
+  const p = join(ROOT, path)
+  // lstat, not exists/stat: a stale directory or symlink where a file is
+  // expected must be REPLACED — readFileSync would crash on the dir and
+  // writeFileSync would write through the link to an external target
+  let st
+  try {
+    st = lstatSync(p)
+  } catch {
+    st = undefined
+  }
+  const stale = st !== undefined && (st.isDirectory() || st.isSymbolicLink())
   if (CHECK) {
-    if (!existsSync(join(ROOT, path)) || readFileSync(join(ROOT, path), 'utf8') !== content) {
+    if (st === undefined || stale || readFileSync(p, 'utf8') !== content) {
       drift.push(path)
     }
     return
   }
-  mkdirSync(dirname(join(ROOT, path)), { recursive: true })
-  writeFileSync(join(ROOT, path), content)
+  if (stale) {
+    rmSync(p, { recursive: true, force: true })
+  }
+  mkdirSync(dirname(p), { recursive: true })
+  writeFileSync(p, content)
 }
 
 // keep every `@theplenkov/bro@…` npx pin equal to plugin.json's version
@@ -201,7 +235,11 @@ function* walk(dir, prefix = '') {
   for (const e of readdirSync(dir)) {
     const p = join(dir, e)
     const rel = prefix ? `${prefix}/${e}` : e
-    if (statSync(p).isDirectory()) {
+    // lstat — a symlinked directory is a LEAF: recursing through it would
+    // surface external paths that the stale-cleanup then deletes outside
+    // the repo. rmSync on the yielded link removes the link, not the target.
+    const st = lstatSync(p)
+    if (st.isDirectory() && !st.isSymbolicLink()) {
       yield* walk(p, rel)
     } else {
       yield rel
