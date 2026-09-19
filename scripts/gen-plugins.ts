@@ -72,11 +72,10 @@ if (
   console.error(`plugin.json: name "${manifest.name}" is not a valid plugin slug`)
   process.exit(1)
 }
-// semver 2.0 shape: dot-separated alnum-hyphen identifiers for prerelease
-// AND build metadata — `1.0.0-alpha.1`, `1.0.0+build` valid; `1.0.0-.a`,
-// `1.0.0-a.`, `1.0.0+` invalid
+// semver.org canonical pattern — dot-separated identifiers, no leading
+// zeros in numeric fields, prerelease AND build metadata supported
 const SEMVER_RE =
-  /^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/
 if (!SEMVER_RE.test(manifest.version)) {
   console.error(`plugin.json: version "${manifest.version}" is not semver`)
   process.exit(1)
@@ -194,6 +193,25 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
     expected.add(`${skillsOut}/${f}`)
   }
   expected.add(runShOut)
+  // the adapter dir itself may be a stale file or symlink — never
+  // traverse into it: flag/remove the entry, let emit recreate the real
+  // directory. readdirSync would follow the link and the stale sweep
+  // below would then delete files OUTSIDE the repo.
+  const dirPath = join(ROOT, dir)
+  let dirStat
+  try {
+    dirStat = lstatSync(dirPath)
+  } catch {
+    dirStat = undefined
+  }
+  if (dirStat !== undefined && !dirStat.isDirectory()) {
+    if (CHECK) {
+      drift.push(dir)
+    } else {
+      rmSync(dirPath, { recursive: true, force: true })
+    }
+    dirStat = undefined
+  }
   if (CHECK) {
     for (const f of walk(join(ROOT, 'skills'))) {
       const rel = `${skillsOut}/${f}`
@@ -207,8 +225,8 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
       drift.push(runShOut)
     }
     // stale leftovers — files on disk that generation no longer produces
-    if (existsSync(join(ROOT, dir))) {
-      for (const f of walk(join(ROOT, dir))) {
+    if (dirStat !== undefined) {
+      for (const f of walk(dirPath)) {
         if (!expected.has(`${dir}/${f}`)) {
           drift.push(`${dir}/${f}`)
         }
@@ -217,7 +235,7 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
   } else {
     // remove stale outputs first so `gen:plugins` repairs what --check
     // flags; declared hand-written files are in `expected` and survive
-    if (existsSync(join(ROOT, dir))) {
+    if (dirStat !== undefined) {
       for (const f of walk(join(ROOT, dir))) {
         if (!expected.has(`${dir}/${f}`)) {
           rmSync(join(ROOT, dir, f))
