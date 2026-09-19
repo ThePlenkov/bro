@@ -21,8 +21,9 @@ Developing bro itself: see CONTRIBUTING.md.
 
 ## Conventions
 
-- **Pure TypeScript, no `.mjs`/`.cjs`** — Node runs `.ts` natively; scripts
-  and sources are always `.ts`, invoked directly (`node scripts/x.ts`).
+- **Pure TypeScript, no `.mjs`/`.cjs`** — Node ≥22.18 runs `.ts` natively
+  (unflagged type stripping); scripts and sources are always `.ts`,
+  invoked directly (`node scripts/x.ts`).
 - **Plugin-shaped growth** — each capability ships as a CLI subcommand +
   skill + config section. bro is a plugin system on top of beads (and more):
   agents orchestrate by pushing work into shared, schema-validated plans
