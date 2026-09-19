@@ -72,11 +72,29 @@ if (
   console.error(`plugin.json: name "${manifest.name}" is not a valid plugin slug`)
   process.exit(1)
 }
-// semver.org canonical pattern — dot-separated identifiers, no leading
-// zeros in numeric fields, prerelease AND build metadata supported
-const SEMVER_RE =
-  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/
-if (!SEMVER_RE.test(manifest.version)) {
+// semver.org rules — one monolithic regex trips complexity gates, so
+// split: numeric fields forbid leading zeros; prerelease/build are
+// dot-separated identifiers (prerelease ids can't be all-digit-with-zero)
+const SEMVER_CORE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
+const SEMVER_PRE_ID = /^(0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)$/
+const SEMVER_BUILD_ID = /^[0-9a-zA-Z-]+$/
+function isSemver(v) {
+  const [head, build, ...extra] = v.split('+')
+  if (
+    extra.length > 0 ||
+    (build !== undefined && !build.split('.').every((s) => SEMVER_BUILD_ID.test(s)))
+  ) {
+    return false
+  }
+  const dash = head.indexOf('-')
+  const core = dash === -1 ? head : head.slice(0, dash)
+  const pre = dash === -1 ? undefined : head.slice(dash + 1)
+  return (
+    SEMVER_CORE.test(core) &&
+    (pre === undefined || pre.split('.').every((s) => SEMVER_PRE_ID.test(s)))
+  )
+}
+if (!isSemver(manifest.version)) {
   console.error(`plugin.json: version "${manifest.version}" is not semver`)
   process.exit(1)
 }
