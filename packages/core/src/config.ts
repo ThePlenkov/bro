@@ -85,69 +85,78 @@ export function defineConfig<
   return config
 }
 
+// Unwrap the default export — a real ESM namespace (Module tag) OR tsx's
+// plain {default: …} shape — while `export default null` must still hit
+// the non-object fallback, not leak a wrapper through `??`
+function unwrapDefault(mod: unknown): unknown {
+  if (typeof mod !== 'object' || mod === null) {
+    return mod
+  }
+  const m = mod as Record<string | symbol, unknown>
+  const wrapper =
+    m[Symbol.toStringTag] === 'Module' ||
+    Object.keys(m).every((k) => k === 'default' || k === '__esModule')
+  return wrapper && 'default' in m ? m.default : mod
+}
+
+function loadTsConfig(name: string, path: string): unknown {
+  // the published CLI still installs on Node 22.0–22.17 where type
+  // stripping is absent — detect it up front, not by catching the
+  // require failure
+  if (!(process.features as { typescript?: unknown }).typescript) {
+    console.error(
+      `warning: ${name} needs Node >=22.18 (native type stripping) — using jsonl-only stores`
+    )
+    return undefined
+  }
+  // resolving from the config itself keeps any relative imports inside it
+  // rooted at the repo, not at the CLI install location. createRequire
+  // needs an ABSOLUTE referrer — a relative cwd would throw here while
+  // the .json path happily loads.
+  const abs = resolve(path)
+  const req = createRequire(abs)
+  try {
+    return unwrapDefault(req(abs))
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    // Node ≤24's require() treats every .ts as CJS-TS — `export default`
+    // can't transform there. Fall back to a real ESM import() in a
+    // subprocess: same loader semantics, and `import` statements in the
+    // config keep working. Config values must be JSON-serializable.
+    if (
+      !/Transform failed|Expected identifier|Cannot use export|ERR_REQUIRE/.test(msg)
+    ) {
+      throw err
+    }
+    const out = execFileSync(
+      process.execPath,
+      [
+        '--eval',
+        `import(${JSON.stringify(pathToFileURL(abs).href)}).then(m => process.stdout.write(JSON.stringify(m.default ?? null)))`,
+      ],
+      { encoding: 'utf8' }
+    )
+    return JSON.parse(out)
+  }
+}
+
 /** Reads one config file; undefined = failed (caller falls back to
  *  jsonl-only — a broken file must not silently enable beads). */
 function readConfigFile(name: string, path: string): unknown {
   try {
     if (name.endsWith('.ts')) {
-      // the published CLI still installs on Node 22.0–22.17 where type
-      // stripping is absent — detect it up front, not by catching the
-      // require failure
-      if (!(process.features as { typescript?: unknown }).typescript) {
-        console.error(
-          `warning: ${name} needs Node >=22.18 (native type stripping) — using jsonl-only stores`
-        )
-        return undefined
-      }
-      const abs = resolve(path)
-      // resolving from the config itself keeps any relative imports
-      // inside it rooted at the repo, not at the CLI install location.
-      // createRequire needs an ABSOLUTE referrer — a relative cwd would
-      // throw here while the .json path happily loads.
-      const req = createRequire(abs)
-      // Unwrap the default export — a real ESM namespace (Module tag) OR
-      // tsx's plain {default: …} shape — while `export default null` must
-      // still hit the non-object fallback, not leak a wrapper through `??`
-      const unwrap = (mod: unknown) => {
-        if (typeof mod !== 'object' || mod === null) {
-          return mod
-        }
-        const m = mod as Record<string | symbol, unknown>
-        const wrapper =
-          m[Symbol.toStringTag] === 'Module' ||
-          Object.keys(m).every((k) => k === 'default' || k === '__esModule')
-        return wrapper && 'default' in m ? m.default : mod
-      }
-      try {
-        return unwrap(req(abs))
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        // Node ≤24's require() treats every .ts as CJS-TS — `export default`
-        // can't transform there. Fall back to a real ESM import() in a
-        // subprocess: same loader semantics, and `import` statements in the
-        // config keep working. Config values must be JSON-serializable.
-        if (!/Transform failed|Expected identifier|Cannot use export|ERR_REQUIRE/.test(msg)) {
-          throw err
-        }
-        const out = execFileSync(
-          process.execPath,
-          [
-            '--eval',
-            `import(${JSON.stringify(pathToFileURL(abs).href)}).then(m => process.stdout.write(JSON.stringify(m.default ?? null)))`,
-          ],
-          { encoding: 'utf8' }
-        )
-        return JSON.parse(out)
-      }
+      return loadTsConfig(name, path)
     }
     return JSON.parse(readFileSync(path, 'utf8'))
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    const hint = /module is not defined|exports is not defined/.test(msg)
-      ? ' (this repo is ESM — use `export default`, not module.exports)'
-      : /Transform failed|Expected identifier/.test(msg)
-        ? ' (this dir resolves as CommonJS — use `module.exports` or add `"type": "module"` to package.json)'
-        : ` (${msg})`
+    let hint = ` (${msg})`
+    if (/module is not defined|exports is not defined/.test(msg)) {
+      hint = ' (this repo is ESM — use `export default`, not module.exports)'
+    } else if (/Transform failed|Expected identifier/.test(msg)) {
+      hint =
+        ' (this dir resolves as CommonJS — use `module.exports` or add `"type": "module"` to package.json)'
+    }
     console.error(`warning: ${name} failed to load — using jsonl-only stores${hint}`)
     return undefined
   }
