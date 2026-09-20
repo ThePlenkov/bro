@@ -15,17 +15,34 @@
  * is authored by hand — everything else is generated, so `check:plugins`
  * fails CI when an adapter drifts from its source.
  *
- *   node scripts/gen-plugins.mjs           # write
- *   node scripts/gen-plugins.mjs --check   # verify freshness, exit 1 on drift
+ *   node scripts/gen-plugins.ts           # write
+ *   node scripts/gen-plugins.ts --check   # verify freshness, exit 1 on drift
  */
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CHECK = process.argv.includes('--check')
 
-const manifest = JSON.parse(readFileSync(join(ROOT, 'plugin.json'), 'utf8'))
+function readJson(rel) {
+  try {
+    return JSON.parse(readFileSync(join(ROOT, rel), 'utf8'))
+  } catch (err) {
+    console.error(
+      `${rel}: failed to read or parse — ${err instanceof Error ? err.message : err}`
+    )
+    process.exit(1)
+  }
+}
+
+const manifest = readJson('plugin.json')
+// null/array/index signature all index cleanly per-field — only a plain
+// object may reach the field checks below
+if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) {
+  console.error('plugin.json: top-level value must be an object')
+  process.exit(1)
+}
 
 // agent-plugins 1.0 shape — hand-rolled check (no ajv dep): a malformed
 // manifest currently only fails at `devin plugins install` time
@@ -55,14 +72,34 @@ if (
   console.error(`plugin.json: name "${manifest.name}" is not a valid plugin slug`)
   process.exit(1)
 }
-if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(manifest.version)) {
+// semver.org rules — one monolithic regex trips complexity gates, so
+// split: numeric fields forbid leading zeros; prerelease/build are
+// dot-separated identifiers (prerelease ids can't be all-digit-with-zero)
+const SEMVER_CORE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
+const SEMVER_PRE_ID = /^(0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)$/
+const SEMVER_BUILD_ID = /^[0-9a-zA-Z-]+$/
+function isSemver(v) {
+  const [head, build, ...extra] = v.split('+')
+  if (
+    extra.length > 0 ||
+    (build !== undefined && !build.split('.').every((s) => SEMVER_BUILD_ID.test(s)))
+  ) {
+    return false
+  }
+  const dash = head.indexOf('-')
+  const core = dash === -1 ? head : head.slice(0, dash)
+  const pre = dash === -1 ? undefined : head.slice(dash + 1)
+  return (
+    SEMVER_CORE.test(core) &&
+    (pre === undefined || pre.split('.').every((s) => SEMVER_PRE_ID.test(s)))
+  )
+}
+if (!isSemver(manifest.version)) {
   console.error(`plugin.json: version "${manifest.version}" is not semver`)
   process.exit(1)
 }
 // the published CLI version is the release truth — manifest must match
-const cliVersion = JSON.parse(
-  readFileSync(join(ROOT, 'packages/cli/package.json'), 'utf8')
-).version
+const cliVersion = readJson('packages/cli/package.json').version
 if (manifest.version !== cliVersion) {
   console.error(
     `plugin.json: version ${manifest.version} != packages/cli version ${cliVersion}`
@@ -106,14 +143,28 @@ const PIN_RE = /@theplenkov\/bro@[\w.:-]+/g
 const drift = []
 
 function emit(path, content) {
+  const p = join(ROOT, path)
+  // lstat, not exists/stat: a stale directory or symlink where a file is
+  // expected must be REPLACED — readFileSync would crash on the dir and
+  // writeFileSync would write through the link to an external target
+  let st
+  try {
+    st = lstatSync(p)
+  } catch {
+    st = undefined
+  }
+  const stale = st !== undefined && (st.isDirectory() || st.isSymbolicLink())
   if (CHECK) {
-    if (!existsSync(join(ROOT, path)) || readFileSync(join(ROOT, path), 'utf8') !== content) {
+    if (st === undefined || stale || readFileSync(p, 'utf8') !== content) {
       drift.push(path)
     }
     return
   }
-  mkdirSync(dirname(join(ROOT, path)), { recursive: true })
-  writeFileSync(join(ROOT, path), content)
+  if (stale) {
+    rmSync(p, { recursive: true, force: true })
+  }
+  mkdirSync(dirname(p), { recursive: true })
+  writeFileSync(p, content)
 }
 
 // keep every `@theplenkov/bro@…` npx pin equal to plugin.json's version
@@ -160,6 +211,25 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
     expected.add(`${skillsOut}/${f}`)
   }
   expected.add(runShOut)
+  // the adapter dir itself may be a stale file or symlink — never
+  // traverse into it: flag/remove the entry, let emit recreate the real
+  // directory. readdirSync would follow the link and the stale sweep
+  // below would then delete files OUTSIDE the repo.
+  const dirPath = join(ROOT, dir)
+  let dirStat
+  try {
+    dirStat = lstatSync(dirPath)
+  } catch {
+    dirStat = undefined
+  }
+  if (dirStat !== undefined && !dirStat.isDirectory()) {
+    if (CHECK) {
+      drift.push(dir)
+    } else {
+      rmSync(dirPath, { recursive: true, force: true })
+    }
+    dirStat = undefined
+  }
   if (CHECK) {
     for (const f of walk(join(ROOT, 'skills'))) {
       const rel = `${skillsOut}/${f}`
@@ -173,8 +243,8 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
       drift.push(runShOut)
     }
     // stale leftovers — files on disk that generation no longer produces
-    if (existsSync(join(ROOT, dir))) {
-      for (const f of walk(join(ROOT, dir))) {
+    if (dirStat !== undefined) {
+      for (const f of walk(dirPath)) {
         if (!expected.has(`${dir}/${f}`)) {
           drift.push(`${dir}/${f}`)
         }
@@ -183,7 +253,7 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
   } else {
     // remove stale outputs first so `gen:plugins` repairs what --check
     // flags; declared hand-written files are in `expected` and survive
-    if (existsSync(join(ROOT, dir))) {
+    if (dirStat !== undefined) {
       for (const f of walk(join(ROOT, dir))) {
         if (!expected.has(`${dir}/${f}`)) {
           rmSync(join(ROOT, dir, f))
@@ -201,7 +271,11 @@ function* walk(dir, prefix = '') {
   for (const e of readdirSync(dir)) {
     const p = join(dir, e)
     const rel = prefix ? `${prefix}/${e}` : e
-    if (statSync(p).isDirectory()) {
+    // lstat — a symlinked directory is a LEAF: recursing through it would
+    // surface external paths that the stale-cleanup then deletes outside
+    // the repo. rmSync on the yielded link removes the link, not the target.
+    const st = lstatSync(p)
+    if (st.isDirectory() && !st.isSymbolicLink()) {
       yield* walk(p, rel)
     } else {
       yield rel
