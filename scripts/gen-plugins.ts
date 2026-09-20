@@ -24,6 +24,11 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CHECK = process.argv.includes('--check')
+const SYNC_VERSION = process.argv.includes('--sync-version')
+if (SYNC_VERSION && CHECK) {
+  console.error('--sync-version writes files — cannot combine with --check')
+  process.exit(1)
+}
 
 function readJson(rel) {
   try {
@@ -33,6 +38,31 @@ function readJson(rel) {
       `${rel}: failed to read or parse — ${err instanceof Error ? err.message : err}`
     )
     process.exit(1)
+  }
+}
+
+// the published CLI version is the release truth — every manifest must match
+const cliVersion = readJson('packages/cli/package.json').version
+
+// release bumps packages/*/package.json only; --sync-version stamps that
+// version into every hand-maintained manifest BEFORE the equality checks,
+// so a release PR can't fail check:plugins on a stale version field
+const MARKETPLACES = [
+  '.claude-plugin/marketplace.json',
+  '.agents/plugins/marketplace.json',
+]
+if (SYNC_VERSION) {
+  // surgical replace — reserializing churns unrelated formatting
+  for (const f of ['plugin.json', ...MARKETPLACES]) {
+    const p = join(ROOT, f)
+    const text = readFileSync(p, 'utf8')
+    const synced = text.replace(
+      /"version":\s*"[^"]+"/g,
+      () => `"version": "${cliVersion}"`
+    )
+    if (synced !== text) {
+      writeFileSync(p, synced)
+    }
   }
 }
 
@@ -98,13 +128,19 @@ if (!isSemver(manifest.version)) {
   console.error(`plugin.json: version "${manifest.version}" is not semver`)
   process.exit(1)
 }
-// the published CLI version is the release truth — manifest must match
-const cliVersion = readJson('packages/cli/package.json').version
 if (manifest.version !== cliVersion) {
   console.error(
     `plugin.json: version ${manifest.version} != packages/cli version ${cliVersion}`
   )
   process.exit(1)
+}
+for (const m of MARKETPLACES) {
+  for (const p of readJson(m).plugins ?? []) {
+    if (p.version !== cliVersion) {
+      console.error(`${m}: plugin "${p.name}" version ${p.version} != packages/cli version ${cliVersion}`)
+      process.exit(1)
+    }
+  }
 }
 
 /** Claude/Codex manifests reuse the agent-plugins fields minus $schema. */
