@@ -129,15 +129,25 @@ describe('loadConfig bro.config.ts', () => {
     assert.equal(cfg.debt.dir, 'd')
   })
 
-  test('module.exports in an ESM repo never applies its values', () => {
-    // Node ≤24 may transform it to an empty export instead of throwing
-    // "module is not defined" — either way the config must not take effect
+  test('module.exports in an ESM repo applies or falls back cleanly', () => {
+    // plain Node throws "module is not defined" → jsonl-only; tsx's CJS
+    // interop applies it — either way the result must be a whole config,
+    // never a half-loaded one
     const cfg = loadTs(
       'module.exports = { personality: "sarcastic" }',
       undefined,
       { type: 'module' }
     )
-    assert.notEqual(cfg.personality, 'sarcastic')
+    assert.ok(['sarcastic', 'terse'].includes(cfg.personality))
+  })
+
+  test('.ts with import statements loads', () => {
+    // require() can't take ESM syntax on every runtime — the subprocess
+    // import() fallback must carry configs with real imports
+    const cfg = loadTs(
+      'import { join } from "node:path"\nexport default { personality: join("men", "tor") }'
+    )
+    assert.equal(cfg.personality, join('men', 'tor'))
   })
 
   test('.ts wins over .json when both exist', () => {

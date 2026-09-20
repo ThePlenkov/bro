@@ -6,9 +6,11 @@
  * only works where the repo is CommonJS. No bro import is required, so
  * the config resolves under a global install too.
  */
+import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { createRequire, stripTypeScriptTypes } from 'node:module'
+import { createRequire } from 'node:module'
 import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const
 export type StoreBackend = (typeof STORE_BACKENDS)[number]
@@ -103,35 +105,39 @@ function readConfigFile(name: string, path: string): unknown {
       // createRequire needs an ABSOLUTE referrer — a relative cwd would
       // throw here while the .json path happily loads.
       const req = createRequire(abs)
-      // Unwrap only a real ESM namespace — `export default null` must hit
-      // the non-object fallback, not leak the namespace through `??`
-      const unwrap = (mod: unknown) =>
-        typeof mod === 'object' &&
-        mod !== null &&
-        (mod as Record<symbol, unknown>)[Symbol.toStringTag] === 'Module'
-          ? (mod as { default: unknown }).default
-          : mod
+      // Unwrap the default export — a real ESM namespace (Module tag) OR
+      // tsx's plain {default: …} shape — while `export default null` must
+      // still hit the non-object fallback, not leak a wrapper through `??`
+      const unwrap = (mod: unknown) => {
+        if (typeof mod !== 'object' || mod === null) {
+          return mod
+        }
+        const m = mod as Record<string | symbol, unknown>
+        const wrapper =
+          m[Symbol.toStringTag] === 'Module' ||
+          Object.keys(m).every((k) => k === 'default' || k === '__esModule')
+        return wrapper && 'default' in m ? m.default : mod
+      }
       try {
         return unwrap(req(abs))
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        const src = readFileSync(abs, 'utf8')
         // Node ≤24's require() treats every .ts as CJS-TS — `export default`
-        // can't transform. Rewrite it to module.exports and eval with
-        // stripped types; real `import` statements stay unsupported there
-        if (
-          !/Transform failed|Expected identifier|Cannot use export/.test(msg) ||
-          !/^export\s+default\s/m.test(src) ||
-          /^\s*import\s+/m.test(src)
-        ) {
+        // can't transform there. Fall back to a real ESM import() in a
+        // subprocess: same loader semantics, and `import` statements in the
+        // config keep working. Config values must be JSON-serializable.
+        if (!/Transform failed|Expected identifier|Cannot use export|ERR_REQUIRE/.test(msg)) {
           throw err
         }
-        const cjs = stripTypeScriptTypes(
-          src.replace(/^export\s+default\s+/m, 'module.exports = ')
+        const out = execFileSync(
+          process.execPath,
+          [
+            '--eval',
+            `import(${JSON.stringify(pathToFileURL(abs).href)}).then(m => process.stdout.write(JSON.stringify(m.default ?? null)))`,
+          ],
+          { encoding: 'utf8' }
         )
-        const m: { exports: unknown } = { exports: {} }
-        new Function('module', 'exports', 'require', cjs)(m, m.exports, req)
-        return m.exports
+        return JSON.parse(out)
       }
     }
     return JSON.parse(readFileSync(path, 'utf8'))
