@@ -147,6 +147,11 @@ describe('loadConfig bro.config.ts', () => {
     assert.equal(cfg.personality, 'sarcastic')
   })
 
+  test('non-Error throw falls back cleanly', () => {
+    const cfg = loadTs('throw null')
+    assert.deepEqual(cfg.stores, ['jsonl'])
+  })
+
   test('broken .ts falls back to jsonl-only, never to .json', () => {
     const cfg = loadTs('export default {{{', { stores: ['jsonl', 'beads'] })
     assert.deepEqual(cfg.stores, ['jsonl'])

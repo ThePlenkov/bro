@@ -114,7 +114,7 @@ function readConfigFile(name: string, path: string): unknown {
       try {
         return unwrap(req(abs))
       } catch (err) {
-        const msg = (err as Error).message
+        const msg = err instanceof Error ? err.message : String(err)
         const src = readFileSync(abs, 'utf8')
         // Node ≤24's require() treats every .ts as CJS-TS — `export default`
         // can't transform. Rewrite it to module.exports and eval with
@@ -136,7 +136,7 @@ function readConfigFile(name: string, path: string): unknown {
     }
     return JSON.parse(readFileSync(path, 'utf8'))
   } catch (err) {
-    const msg = (err as Error).message
+    const msg = err instanceof Error ? err.message : String(err)
     const hint = /module is not defined|exports is not defined/.test(msg)
       ? ' (this repo is ESM — use `export default`, not module.exports)'
       : /Transform failed|Expected identifier/.test(msg)
