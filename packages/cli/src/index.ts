@@ -22,6 +22,7 @@ import { runDrillCommand } from './commands/drill.ts'
 import { runHooksCommand } from './commands/hooks.ts'
 import { runRetrospectCommand } from './commands/retrospect.ts'
 import { runSetupCommand } from './commands/setup.ts'
+import { runSyncCommand } from './commands/sync.ts'
 
 // Single source of truth is package.json — dist/index.js sits one dir
 // below it in both the workspace and the published tarball.
@@ -48,6 +49,7 @@ Commands:
   hooks <ev>   Agent lifecycle hooks: session-start|post-compaction|
                prompt-submit|post-tool|stop|permission
   setup        Wire bro into the current repo
+  sync         Push/pull artifact dirs on refs/bro/data [--pull]
 
 Options:
   --version    Print version
@@ -106,6 +108,9 @@ async function main(): Promise<void> {
       return
     case 'setup':
       await runSetupCommand(rest)
+      return
+    case 'sync':
+      runSyncCommand(rest)
       return
     default:
       console.error(`unknown command: ${cmd}`)

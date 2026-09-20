@@ -6,20 +6,27 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-export const STORE_BACKENDS = ['jsonl', 'beads'] as const
+export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const
 export type StoreBackend = (typeof STORE_BACKENDS)[number]
 export const PERSONALITIES = ['terse', 'mentor', 'sarcastic'] as const
 export type Personality = (typeof PERSONALITIES)[number]
 
 export interface BroConfig {
   /** Active stores. The JSONL ledger is always on — extra backends are
-   *  projections written alongside it. beads is on by default; an
-   *  explicit "stores": ["jsonl"] opts out. */
+   *  projections written alongside it. beads is on by default; gitref is
+   *  opt-in — it pushes artifact dirs to a standalone data ref. */
   stores: StoreBackend[]
   personality: Personality
   debt: {
     /** Directory holding the review-debt ledger, relative to cwd. */
     dir: string
+  }
+  sync: {
+    /** Data ref holding synced artifacts — outside refs/heads so it
+     *  never shows up as a branch. */
+    ref: string
+    /** Remote the data ref pushes to / pulls from. */
+    remote: string
   }
 }
 
@@ -27,6 +34,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   stores: ['jsonl', 'beads'],
   personality: 'terse',
   debt: { dir: '.agents/review-debt' },
+  sync: { ref: 'refs/bro/data', remote: 'origin' },
 }
 
 interface RawConfig extends Partial<Omit<BroConfig, 'stores'>> {
@@ -81,6 +89,16 @@ export function loadConfig(cwd: string = process.cwd()): BroConfig {
       ...rest,
       stores: normalizeStores(raw),
       debt: { ...DEFAULT_CONFIG.debt, ...(rest.debt ?? {}) },
+      // only string fields may reach git arg construction — a null or
+      // non-string sync.ref/sync.remote must fall back to the default
+      sync: {
+        ...DEFAULT_CONFIG.sync,
+        ...(typeof rest.sync === 'object' && rest.sync !== null
+          ? Object.fromEntries(
+              Object.entries(rest.sync).filter(([, v]) => typeof v === 'string')
+            )
+          : {}),
+      },
     }
   } catch {
     // Unparseable config ≠ missing config — don't silently enable beads
