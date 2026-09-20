@@ -8,7 +8,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const
 export type StoreBackend = (typeof STORE_BACKENDS)[number]
@@ -77,9 +77,9 @@ function normalizeStores(raw: RawConfig): StoreBackend[] {
 /** Identity helper for bro.config.ts: `export default defineConfig({…})`
  *  gives typed sections when @bro/core is a local dep; a plain object
  *  works without it. Extra keys are plugin sections (see bro-akl). */
-export function defineConfig(
-  config: Partial<BroConfig> & Record<string, unknown>
-): Record<string, unknown> {
+export function defineConfig<
+  T extends Partial<BroConfig> & Record<string, unknown>,
+>(config: T): T {
   return config
 }
 
@@ -98,9 +98,17 @@ function readConfigFile(name: string, path: string): unknown {
         return undefined
       }
       // resolving from the config itself keeps any relative imports
-      // inside it rooted at the repo, not at the CLI install location
-      const mod = createRequire(path)(path) as { default?: unknown }
-      return mod.default ?? mod
+      // inside it rooted at the repo, not at the CLI install location.
+      // createRequire needs an ABSOLUTE referrer — a relative cwd would
+      // throw here while the .json path happily loads.
+      const mod = createRequire(resolve(path))(resolve(path))
+      // Unwrap only a real ESM namespace — `export default null` must hit
+      // the non-object fallback, not leak the namespace through `??`
+      return typeof mod === 'object' &&
+        mod !== null &&
+        (mod as Record<symbol, unknown>)[Symbol.toStringTag] === 'Module'
+        ? (mod as { default: unknown }).default
+        : mod
     }
     return JSON.parse(readFileSync(path, 'utf8'))
   } catch (err) {

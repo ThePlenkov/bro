@@ -2,7 +2,7 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { DEFAULT_CONFIG, defineConfig, loadConfig } from './config.ts'
 
 function load(raw?: unknown): ReturnType<typeof loadConfig> {
@@ -144,6 +144,18 @@ describe('loadConfig bro.config.ts', () => {
   test('non-object .ts export falls back to jsonl-only', () => {
     const cfg = loadTs('export default 42')
     assert.deepEqual(cfg.stores, ['jsonl'])
+  })
+
+  test('export default null does not leak the module namespace', () => {
+    const cfg = loadTs('export default null')
+    assert.deepEqual(cfg.stores, ['jsonl'])
+  })
+
+  test('relative cwd resolves bro.config.ts too', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-config-rel-'))
+    writeFileSync(join(dir, 'bro.config.ts'), 'export default { personality: "sarcastic" }')
+    const rel = relative(process.cwd(), dir)
+    assert.equal(loadConfig(rel).personality, 'sarcastic')
   })
 
   test('defineConfig is a pass-through', () => {
