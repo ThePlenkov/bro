@@ -7,7 +7,7 @@
  * the config resolves under a global install too.
  */
 import { existsSync, readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
+import { createRequire, stripTypeScriptTypes } from 'node:module'
 import { join, resolve } from 'node:path'
 
 export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const
@@ -97,25 +97,51 @@ function readConfigFile(name: string, path: string): unknown {
         )
         return undefined
       }
+      const abs = resolve(path)
       // resolving from the config itself keeps any relative imports
       // inside it rooted at the repo, not at the CLI install location.
       // createRequire needs an ABSOLUTE referrer — a relative cwd would
       // throw here while the .json path happily loads.
-      const mod = createRequire(resolve(path))(resolve(path))
+      const req = createRequire(abs)
       // Unwrap only a real ESM namespace — `export default null` must hit
       // the non-object fallback, not leak the namespace through `??`
-      return typeof mod === 'object' &&
+      const unwrap = (mod: unknown) =>
+        typeof mod === 'object' &&
         mod !== null &&
         (mod as Record<symbol, unknown>)[Symbol.toStringTag] === 'Module'
-        ? (mod as { default: unknown }).default
-        : mod
+          ? (mod as { default: unknown }).default
+          : mod
+      try {
+        return unwrap(req(abs))
+      } catch (err) {
+        const msg = (err as Error).message
+        const src = readFileSync(abs, 'utf8')
+        // Node ≤24's require() treats every .ts as CJS-TS — `export default`
+        // can't transform. Rewrite it to module.exports and eval with
+        // stripped types; real `import` statements stay unsupported there
+        if (
+          !/Transform failed|Expected identifier|Cannot use export/.test(msg) ||
+          !/^export\s+default\s/m.test(src) ||
+          /^\s*import\s+/m.test(src)
+        ) {
+          throw err
+        }
+        const cjs = stripTypeScriptTypes(
+          src.replace(/^export\s+default\s+/m, 'module.exports = ')
+        )
+        const m: { exports: unknown } = { exports: {} }
+        new Function('module', 'exports', 'require', cjs)(m, m.exports, req)
+        return m.exports
+      }
     }
     return JSON.parse(readFileSync(path, 'utf8'))
   } catch (err) {
     const msg = (err as Error).message
     const hint = /module is not defined|exports is not defined/.test(msg)
       ? ' (this repo is ESM — use `export default`, not module.exports)'
-      : ` (${msg})`
+      : /Transform failed|Expected identifier/.test(msg)
+        ? ' (this dir resolves as CommonJS — use `module.exports` or add `"type": "module"` to package.json)'
+        : ` (${msg})`
     console.error(`warning: ${name} failed to load — using jsonl-only stores${hint}`)
     return undefined
   }

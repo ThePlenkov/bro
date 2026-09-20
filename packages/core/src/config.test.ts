@@ -99,16 +99,17 @@ describe('loadConfig root shape', () => {
 function loadTs(
   source: string,
   json?: unknown,
-  pkg?: unknown
+  pkg: unknown = { type: 'module' }
 ): ReturnType<typeof loadConfig> {
   const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
   writeFileSync(join(dir, 'bro.config.ts'), source)
   if (json !== undefined) {
     writeFileSync(join(dir, 'bro.config.json'), JSON.stringify(json))
   }
-  if (pkg !== undefined) {
-    writeFileSync(join(dir, 'package.json'), JSON.stringify(pkg))
-  }
+  // a dir with no package.json resolves .ts as CommonJS on Node ≤24 —
+  // `export default` then fails to transform. Tests model real repos,
+  // so the module type is always explicit (default ESM, the canonical form)
+  writeFileSync(join(dir, 'package.json'), JSON.stringify(pkg))
   return loadConfig(dir)
 }
 
@@ -120,13 +121,23 @@ describe('loadConfig bro.config.ts', () => {
   })
 
   test('module.exports object loads in a CJS repo', () => {
-    const cfg = loadTs('module.exports = { debt: { dir: "d" } }')
+    const cfg = loadTs(
+      'module.exports = { debt: { dir: "d" } }',
+      undefined,
+      { type: 'commonjs' }
+    )
     assert.equal(cfg.debt.dir, 'd')
   })
 
-  test('module.exports in an ESM repo falls back to jsonl-only', () => {
-    const cfg = loadTs('module.exports = {}', undefined, { type: 'module' })
-    assert.deepEqual(cfg.stores, ['jsonl'])
+  test('module.exports in an ESM repo never applies its values', () => {
+    // Node ≤24 may transform it to an empty export instead of throwing
+    // "module is not defined" — either way the config must not take effect
+    const cfg = loadTs(
+      'module.exports = { personality: "sarcastic" }',
+      undefined,
+      { type: 'module' }
+    )
+    assert.notEqual(cfg.personality, 'sarcastic')
   })
 
   test('.ts wins over .json when both exist', () => {
@@ -153,6 +164,7 @@ describe('loadConfig bro.config.ts', () => {
 
   test('relative cwd resolves bro.config.ts too', () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-config-rel-'))
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ type: 'module' }))
     writeFileSync(join(dir, 'bro.config.ts'), 'export default { personality: "sarcastic" }')
     const rel = relative(process.cwd(), dir)
     assert.equal(loadConfig(rel).personality, 'sarcastic')
