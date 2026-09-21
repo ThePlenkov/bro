@@ -6,6 +6,7 @@
  * of BroPlugin entries instead of hardcoding commands.
  */
 import type { ConfigSection } from './config.ts'
+import type { PlanSchema } from './plan.ts'
 
 export interface BroPlugin {
   /** Subcommand name — argv[0]. */
@@ -23,6 +24,11 @@ export interface BroPlugin {
   /** Normalizer for the configKey section — raw file value in, typed
    *  section out. Required when configKey is set. */
   configSchema?: ConfigSection<unknown>
+  /** Plan validator — the plugin accepts TOML plans whose `kind` equals
+   *  this plugin's name, routed by `bro run`. Pairs with runPlan. */
+  planSchema?: PlanSchema<unknown>
+  /** Executes a planSchema-validated plan — `bro run <file>` calls this. */
+  runPlan?: (plan: unknown) => void | Promise<void>
   /** Not listed in usage — plumbing commands like `hooks`. */
   hidden?: boolean
   /** Set by the registry when the plugin came from config `plugins` —

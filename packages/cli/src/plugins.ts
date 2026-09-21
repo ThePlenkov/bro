@@ -8,20 +8,24 @@ import { isAbsolute, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
   actSection,
+  checkBeads,
   debtSection,
   definePlugin,
   loadConfig,
+  planKind,
+  readPlanDoc,
   syncSection,
   type BroPlugin,
   type ConfigSection,
 } from '@bro/core'
+import { parsePlanDoc, type RetroPlan } from '@bro/retro'
 import { runActCommand } from './commands/act.ts'
 import { runCleanupCommand } from './commands/cleanup.ts'
 import { runConvoyCommand } from './commands/convoy.ts'
 import { runDebtCommand } from './commands/debt.ts'
 import { runDrillCommand } from './commands/drill.ts'
 import { runHooksCommand } from './commands/hooks.ts'
-import { runRetrospectCommand } from './commands/retrospect.ts'
+import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runSetupCommand } from './commands/setup.ts'
 import { runSyncCommand } from './commands/sync.ts'
 
@@ -70,6 +74,11 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Self-correction: capture|record|status|list|schema',
     run: runRetrospectCommand,
     skill: 'wtf',
+    planSchema: (doc, source) => parsePlanDoc(doc, source),
+    runPlan: (plan) => {
+      checkBeads()
+      cmdRecord(plan as RetroPlan)
+    },
   }),
   definePlugin({
     name: 'wtf',
@@ -97,18 +106,49 @@ export const PLUGINS: BroPlugin[] = [
     configSchema: syncSection,
   }),
   definePlugin({
+    name: 'run',
+    summary: 'Execute a plan file — `kind` routes to the owning plugin',
+    run: (argv) => runPlanFile(argv),
+  }),
+  definePlugin({
     name: 'plugins',
     summary: 'List registered plugins — name, skill, config section',
     run() {
       for (const p of PLUGINS) {
         const src = p.external ? 'ext' : 'core'
+        const plan = p.planSchema ? 'plan' : '-'
         console.log(
-          `${p.name.padEnd(12)} ${(p.skill ?? '-').padEnd(10)} ${(p.configKey ?? '-').padEnd(8)} ${src.padEnd(4)} ${p.summary}`
+          `${p.name.padEnd(12)} ${(p.skill ?? '-').padEnd(10)} ${(p.configKey ?? '-').padEnd(8)} ${src.padEnd(4)} ${plan.padEnd(4)} ${p.summary}`
         )
       }
     },
   }),
 ]
+
+/** `bro run <plan.toml>` — parse the file, route on `kind`, validate with
+ *  the owning plugin's planSchema, execute via runPlan. */
+export async function runPlanFile(argv: string[]): Promise<void> {
+  const files = argv.filter((a) => !a.startsWith('-'))
+  const kinds = PLUGINS.filter((p) => p.planSchema).map((p) => p.name)
+  if (files.length !== 1) {
+    console.error(`usage: bro run <plan.toml> — plan kinds: ${kinds.join(', ') || '(none)'}`)
+    process.exit(2)
+  }
+  const file = files[0] as string
+  const doc = readPlanDoc(file)
+  const kind = planKind(doc)
+  if (!kind) {
+    throw new Error(`${file}: no kind field — known plan kinds: ${kinds.join(', ')}`)
+  }
+  const plugin = PLUGINS.find((p) => p.name === kind)
+  if (!plugin) {
+    throw new Error(`${file}: kind "${kind}" is unknown — known plan kinds: ${kinds.join(', ')}`)
+  }
+  if (!plugin.planSchema || !plugin.runPlan) {
+    throw new Error(`${file}: plugin "${kind}" does not accept plans`)
+  }
+  await plugin.runPlan(plugin.planSchema(doc, file))
+}
 
 /** configKey → configSchema across the registry — what `loadConfig`
  *  applies on top of core sections. External plugins register here too. */

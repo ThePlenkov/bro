@@ -85,7 +85,9 @@ function readPlan(rest: string[]): RetroPlan {
   return wtfFlag ? { ...plan, wtf: wtfFlag } : plan
 }
 
-function cmdRecord(plan: RetroPlan): void {
+/** `retrospect record`'s executor — also the plugin's runPlan for
+ * `bro run` (kind = "retrospect"). */
+export function cmdRecord(plan: RetroPlan): void {
   const res = recordRetro(plan)
   console.log(`retro ${res.retroId} recorded`)
   for (const id of res.actionIds) {
