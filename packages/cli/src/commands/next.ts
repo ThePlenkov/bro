@@ -25,30 +25,67 @@ interface ReadyBead {
 }
 
 interface NextResult {
-  state: 'task' | 'idle'
+  state: 'task' | 'gated' | 'idle'
   bead?: ReadyBead
   queue: number
   gates: Array<{ id: string; title: string }>
   epics: Array<{ id: string; title: string }>
+  moleculeSteps: number
 }
 
 const HUMAN_GATE = /human.?gate/i
 
-function pick(ready: ReadyBead[]): NextResult {
-  const gates = ready.filter((b) => HUMAN_GATE.test(b.title))
-  const epics = ready.filter((b) => b.issue_type === 'epic')
-  const queue = ready.filter(
-    (b) => !HUMAN_GATE.test(b.title) && b.issue_type !== 'epic' && !b.parent
-  )
-  queue.sort(
-    (a, b) => a.priority - b.priority || a.created_at.localeCompare(b.created_at)
-  )
+const claimable = (b: ReadyBead): boolean =>
+  !HUMAN_GATE.test(b.title) && b.issue_type !== 'epic' && !b.parent
+
+/** Split the ready queue into claimable work and things we never claim. */
+function classify(ready: ReadyBead[]) {
+  const queue = ready.filter(claimable)
+  queue.sort((a, b) => a.priority - b.priority || a.created_at.localeCompare(b.created_at))
   return {
-    state: queue.length > 0 ? 'task' : 'idle',
-    bead: queue[0],
-    queue: queue.length,
-    gates: gates.map((b) => ({ id: b.id, title: b.title })),
-    epics: epics.map((b) => ({ id: b.id, title: b.title })),
+    queue,
+    gates: ready.filter((b) => HUMAN_GATE.test(b.title)),
+    epics: ready.filter((b) => b.issue_type === 'epic'),
+    moleculeSteps: ready.filter((b) => b.parent).length,
+  }
+}
+
+/** Claim the first still-free bead — concurrent `bro next` runs race on
+ *  the same top item; the loser takes the next candidate, not an exit. */
+function claimFirst(queue: ReadyBead[]): ReadyBead | undefined {
+  for (const b of queue) {
+    try {
+      bd(['update', b.id, '--claim'])
+      return b
+    } catch {
+      // raced away — try the next candidate
+    }
+  }
+  return undefined
+}
+
+function printResult(result: NextResult, list: boolean): void {
+  if (result.bead) {
+    const b = result.bead
+    console.log(`→ ${b.id}${list ? '' : ' (claimed)'} P${b.priority} ${b.issue_type}`)
+    console.log(`  ${b.title}`)
+    if (b.description?.trim()) {
+      console.log(`  ${b.description.trim().split('\n')[0]}`)
+    }
+    console.log('  loop: implement → PR → bro act merge → bd close → bro next')
+  } else if (result.state === 'gated') {
+    console.log('next: nothing claimable — gates, epics, or molecule steps remain')
+  } else {
+    console.log('next: backlog empty — nothing ready')
+  }
+  for (const g of result.gates) {
+    console.log(`  gate: ${g.id} — ${g.title} (human decision needed)`)
+  }
+  for (const e of result.epics) {
+    console.log(`  epic: ${e.id} — ${e.title} (decompose, don't claim)`)
+  }
+  if (result.moleculeSteps > 0) {
+    console.log(`  convoy: ${result.moleculeSteps} molecule step(s) — owned by bro convoy`)
   }
 }
 
@@ -57,7 +94,11 @@ export async function runNextCommand(argv: string[]): Promise<void> {
     console.error(`Usage: bro next [--list] [--json]
 
   Claims the top ready bead and prints the work order. Human gates,
-  epics, and molecule steps are surfaced, never claimed.`)
+  epics, and molecule steps are surfaced, never claimed.
+
+  state: task  — a bead was emitted (claimed unless --list)
+         gated — nothing claimable; gates/epics/mol steps remain
+         idle  — backlog empty`)
     process.exit(0)
   }
   checkBeads()
@@ -68,40 +109,21 @@ export async function runNextCommand(argv: string[]): Promise<void> {
     console.error(`error: bd ready failed — ${err instanceof Error ? err.message : String(err)}`)
     process.exit(1)
   }
-  const result = pick(ready)
-  const json = argv.includes('--json')
-
-  if (!argv.includes('--list') && result.bead) {
-    // atomic claim — do this before the agent starts work
-    try {
-      bd(['update', result.bead.id, '--claim'])
-    } catch (err) {
-      console.error(`error: failed to claim ${result.bead.id} — ${err instanceof Error ? err.message : String(err)}`)
-      process.exit(1)
-    }
+  const list = argv.includes('--list')
+  const c = classify(ready)
+  const bead = list ? c.queue[0] : claimFirst(c.queue)
+  const result: NextResult = {
+    state: bead ? 'task' : c.gates.length + c.epics.length + c.moleculeSteps > 0 ? 'gated' : 'idle',
+    bead,
+    queue: c.queue.length,
+    gates: c.gates.map((b) => ({ id: b.id, title: b.title })),
+    epics: c.epics.map((b) => ({ id: b.id, title: b.title })),
+    moleculeSteps: c.moleculeSteps,
   }
 
-  if (json) {
+  if (argv.includes('--json')) {
     console.log(JSON.stringify(result, null, 2))
     return
   }
-
-  if (result.state === 'idle') {
-    console.log('next: backlog empty — nothing ready')
-  } else {
-    const b = result.bead!
-    const claimed = argv.includes('--list') ? '' : ' (claimed)'
-    console.log(`→ ${b.id}${claimed} P${b.priority} ${b.issue_type}`)
-    console.log(`  ${b.title}`)
-    if (b.description?.trim()) {
-      console.log(`  ${b.description.trim().split('\n')[0]}`)
-    }
-    console.log('  loop: implement → PR → bro act merge → bd close → bro next')
-  }
-  for (const g of result.gates) {
-    console.log(`  gate: ${g.id} — ${g.title} (human decision needed)`)
-  }
-  for (const e of result.epics) {
-    console.log(`  epic: ${e.id} — ${e.title} (decompose, don't claim)`)
-  }
+  printResult(result, list)
 }

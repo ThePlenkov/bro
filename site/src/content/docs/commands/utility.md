@@ -33,7 +33,10 @@ The agent's loop is *run `bro next`, do what it says, repeat until
 - **Molecule steps** — beads with a parent belong to `bro convoy`.
 
 `--list` previews without claiming; `--json` emits
-`{ state, bead, queue, gates, epics }` for programmatic loops.
+`{ state, queue, gates, epics, moleculeSteps }` plus `bead` when
+`state` is `task`. States: `task` — a bead was emitted; `gated` — open
+items remain but none are claimable (stop for the human, not done);
+`idle` — backlog empty.
 
 ## `bro sync` — the data ref
 

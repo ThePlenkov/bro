@@ -43,5 +43,7 @@ continue?" between items.** The queue is the approval.
 - **Stuck ≠ skipped** — if an item can't proceed, say why (blocker,
   missing access, ambiguity), leave it open, and move to the next bead.
   Never silently drop it: `bd update <id> --notes "<why>"` records it.
-- **Empty is a valid answer** — `state: idle` means done; report and
-  stop. Don't manufacture work.
+- **`idle` vs `gated`** — `state: idle` means the backlog is truly
+  empty: report and stop. `state: gated` means open items remain but
+  none are claimable (gates/epics/mol steps) — report what's blocking
+  and stop for the human, don't call it done. Don't manufacture work.
