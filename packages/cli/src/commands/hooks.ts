@@ -6,11 +6,13 @@
  *                                       rehydrate: beads ready + drill frame + PR gate + debt
  *   prompt-submit                     drill-frame reminder; PR URL → act snapshot
  *   post-tool                         exec nudges: gh pr create → act gate; merge → debt sweep;
- *                                       arms the stop gate for this session (bro act/drill,
- *                                       gh pr, git push) via a per-session marker in .git
- *   stop                              block while a drill frame or review threads are open —
- *                                       but only for sessions that armed the gate; ambient
- *                                       repo state is emitted as passive context, never a block
+ *                                       arms the stop gate for this session (bro act/drill/
+ *                                       work, gh pr, git push, worktree add) via a
+ *                                       per-session marker in .git
+ *   stop                              block while a drill frame, review threads, or a dirty
+ *                                       linked worktree remain — but only for sessions that
+ *                                       armed the gate; ambient repo state is emitted as
+ *                                       passive context, never a block
  *   permission                        auto-approve bro/bd invocations
  *
  * Contract: read the event payload on stdin, print hook control JSON on
@@ -29,9 +31,10 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { ghJson, resolveRepo } from '@bro/core'
+import { ghJson, gitTry, resolveRepo } from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
 import { evaluateExitGate, fetchPrActState, mergeSlotHolder } from '@bro/act'
+import { gitDirOf, isLinkedGitDir } from './work.ts'
 import { bdJson, currentFrame } from '@bro/drill'
 import { readDebtRecords } from '@bro/debt'
 
@@ -98,11 +101,13 @@ function unquoted(cmd: string): string {
 
 /** Which gate aspect a shell command arms for this session. The stop gate
  * only hard-blocks sessions that recorded interaction — `bro act`/`gh pr`/
- * `git push` arm the PR gate, `bro drill`/`bro wtf` arm the drill gate.
+ * `git push` arm the PR gate, `bro drill`/`bro wtf` arm the drill gate,
+ * worktree creation arms the work gate (`bro work`, `git worktree add`,
+ * `bd worktree create`).
  * Global flags between binary and subcommand are allowed (`gh -R o/r pr`,
  * `git -C path push`); the binary must sit at a command position — string
  * start or after `;`, `&`, `|`, or a newline (leading whitespace is fine). */
-export function classifyArmCommand(cmd: string): 'act' | 'drill' | null {
+export function classifyArmCommand(cmd: string): 'act' | 'drill' | 'work' | null {
   const c = unquoted(cmd)
   const at = '(^|[;&|\\n])\\s*'
   const bro = '(?:bro|npx\\s+(?:-y\\s+)?@theplenkov/bro(?:@[\\w.:-]+)?)'
@@ -112,6 +117,9 @@ export function classifyArmCommand(cmd: string): 'act' | 'drill' | null {
   if (new RegExp(`${at}${bro}\\s+(?:drill|wtf)\\b`).test(c)) {
     return 'drill'
   }
+  if (new RegExp(`${at}${bro}\\s+work\\b`).test(c)) {
+    return 'work'
+  }
   // Flag tokens may carry a separate value (`-C path`, `--repo o/r`), so
   // allow `-\S+` optionally followed by one non-flag token.
   const flags = '(?:\\s+-\\S+(?:\\s+[^-\\s]\\S*)?)*'
@@ -120,6 +128,12 @@ export function classifyArmCommand(cmd: string): 'act' | 'drill' | null {
   }
   if (new RegExp(`${at}git${flags}\\s+push\\b`).test(c)) {
     return 'act'
+  }
+  if (new RegExp(`${at}git${flags}\\s+worktree\\s+(?:add|remove)\\b`).test(c)) {
+    return 'work'
+  }
+  if (new RegExp(`${at}bd${flags}\\s+worktree\\s+(?:create|remove)\\b`).test(c)) {
+    return 'work'
   }
   return null
 }
@@ -195,6 +209,30 @@ function debtLine(): string | null {
   }
 }
 
+/** Parallel-friendly nudge: sessions sitting in the PRIMARY checkout get
+ *  told to isolate work in a linked worktree. Sessions already inside a
+ *  linked worktree (or outside git) get nothing — state, not noise. */
+function workNudgeLine(): string | null {
+  try {
+    const gd = gitDirOf(process.cwd())
+    if (!gd || isLinkedGitDir(gd)) {
+      return null
+    }
+    return 'parallel-friendly: run work in a linked worktree — `bro work enter <slug>`; finish with `bro work leave`; `bro work list` shows siblings'
+  } catch {
+    return null
+  }
+}
+
+/** Dirty count for the current dir, or 0 when not a git checkout. */
+function dirtyHere(): number {
+  const res = gitTry(['status', '--porcelain'])
+  if (res.code !== 0) {
+    return 0
+  }
+  return res.out.split('\n').filter(Boolean).length
+}
+
 /** `owner/repo` for the current clone — null when the split isn't clean. */
 function repoParts(): [string, string] | null {
   const parts = resolveRepo([]).split('/')
@@ -265,7 +303,7 @@ function hooksStateDir(): string | null {
 /** One marker file per aspect (<session>.<aspect>) — arming is a pure file
  * create with no read-modify-write, so concurrent post-tool hooks from
  * parallel tool calls cannot lose an aspect to a torn JSON rewrite. */
-function markerPath(sessionId: string, aspect: 'act' | 'drill'): string | null {
+function markerPath(sessionId: string, aspect: 'act' | 'drill' | 'work'): string | null {
   const dir = hooksStateDir()
   const safe = sessionId.replace(/[^\w.-]/g, '_')
   return dir && safe ? join(dir, `${safe}.${aspect}`) : null
@@ -273,10 +311,10 @@ function markerPath(sessionId: string, aspect: 'act' | 'drill'): string | null {
 
 /** Aspects this session armed, or empty when no marker exists. Markers
  * older than MARKER_TTL_MS count as unarmed even if still on disk. */
-export function readArmed(sessionId: string): Set<'act' | 'drill'> {
-  const armed = new Set<'act' | 'drill'>()
+export function readArmed(sessionId: string): Set<'act' | 'drill' | 'work'> {
+  const armed = new Set<'act' | 'drill' | 'work'>()
   const cutoff = Date.now() - MARKER_TTL_MS
-  for (const aspect of ['act', 'drill'] as const) {
+  for (const aspect of ['act', 'drill', 'work'] as const) {
     try {
       const path = markerPath(sessionId, aspect)
       if (path && existsSync(path) && statSync(path).mtimeMs >= cutoff) {
@@ -291,7 +329,7 @@ export function readArmed(sessionId: string): Set<'act' | 'drill'> {
 
 /** Record that this session touched `aspect`. Best-effort; also prunes
  * markers older than a week so stale sessions don't accumulate. */
-function armSession(sessionId: string, aspect: 'act' | 'drill'): void {
+function armSession(sessionId: string, aspect: 'act' | 'drill' | 'work'): void {
   try {
     const path = markerPath(sessionId, aspect)
     if (!path) {
@@ -302,7 +340,7 @@ function armSession(sessionId: string, aspect: 'act' | 'drill'): void {
     const cutoff = Date.now() - MARKER_TTL_MS
     for (const f of readdirSync(dirname(path))) {
       try {
-        if (/\.(act|drill)$/.test(f) && statSync(join(dirname(path), f)).mtimeMs < cutoff) {
+        if (/\.(act|drill|work)$/.test(f) && statSync(join(dirname(path), f)).mtimeMs < cutoff) {
           rmSync(join(dirname(path), f))
         }
       } catch {
@@ -339,6 +377,10 @@ async function emitSessionContext(
   const slot = mergeSlotLine()
   if (slot) {
     parts.push(slot)
+  }
+  const work = workNudgeLine()
+  if (work) {
+    parts.push(work)
   }
   if (parts.length > 0) {
     context(event, `bro state — resume from here:\n${parts.join('\n')}`)
@@ -411,6 +453,24 @@ async function emitStopGate(input: HookInput): Promise<void> {
   const hints: string[] = []
   if (drill) {
     hints.push(`bro: ${drill} (opened outside this session — informational)`)
+  }
+  // work gate: a session that created/used a worktree must not abandon a
+  // dirty one — clean worktrees get a leave-hint instead of a block
+  if (armed.has('work')) {
+    const gd = gitDirOf(process.cwd())
+    if (gd && isLinkedGitDir(gd)) {
+      const dirty = dirtyHere()
+      if (dirty > 0) {
+        emit({
+          decision: 'block',
+          reason:
+            `bro: linked worktree has ${dirty} uncommitted file(s) — ` +
+            'commit/push the work or discard deliberately, then `bro work leave`',
+        })
+        return
+      }
+      hints.push('bro: still inside a linked worktree — `bro work leave` when done')
+    }
   }
   const pr = await prBlockersLine()
   if (pr && armed.has('act')) {
