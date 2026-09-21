@@ -107,7 +107,9 @@ function unquoted(cmd: string): string {
  * Global flags between binary and subcommand are allowed (`gh -R o/r pr`,
  * `git -C path push`); the binary must sit at a command position — string
  * start or after `;`, `&`, `|`, or a newline (leading whitespace is fine). */
-export function classifyArmCommand(cmd: string): 'act' | 'drill' | 'work' | null {
+export type GateAspect = 'act' | 'drill' | 'work'
+
+export function classifyArmCommand(cmd: string): GateAspect | null {
   const c = unquoted(cmd)
   const at = '(^|[;&|\\n])\\s*'
   const bro = '(?:bro|npx\\s+(?:-y\\s+)?@theplenkov/bro(?:@[\\w.:-]+)?)'
@@ -117,7 +119,7 @@ export function classifyArmCommand(cmd: string): 'act' | 'drill' | 'work' | null
   if (new RegExp(`${at}${bro}\\s+(?:drill|wtf)\\b`).test(c)) {
     return 'drill'
   }
-  if (new RegExp(`${at}${bro}\\s+work\\b`).test(c)) {
+  if (new RegExp(String.raw`${at}${bro}\s+work\b`).test(c)) {
     return 'work'
   }
   // Flag tokens may carry a separate value (`-C path`, `--repo o/r`), so
@@ -129,10 +131,10 @@ export function classifyArmCommand(cmd: string): 'act' | 'drill' | 'work' | null
   if (new RegExp(`${at}git${flags}\\s+push\\b`).test(c)) {
     return 'act'
   }
-  if (new RegExp(`${at}git${flags}\\s+worktree\\s+(?:add|remove)\\b`).test(c)) {
+  if (new RegExp(String.raw`${at}git${flags}\s+worktree\s+(?:add|remove)\b`).test(c)) {
     return 'work'
   }
-  if (new RegExp(`${at}bd${flags}\\s+worktree\\s+(?:create|remove)\\b`).test(c)) {
+  if (new RegExp(String.raw`${at}bd${flags}\s+worktree\s+(?:create|remove)\b`).test(c)) {
     return 'work'
   }
   return null
@@ -303,7 +305,7 @@ function hooksStateDir(): string | null {
 /** One marker file per aspect (<session>.<aspect>) — arming is a pure file
  * create with no read-modify-write, so concurrent post-tool hooks from
  * parallel tool calls cannot lose an aspect to a torn JSON rewrite. */
-function markerPath(sessionId: string, aspect: 'act' | 'drill' | 'work'): string | null {
+function markerPath(sessionId: string, aspect: GateAspect): string | null {
   const dir = hooksStateDir()
   const safe = sessionId.replace(/[^\w.-]/g, '_')
   return dir && safe ? join(dir, `${safe}.${aspect}`) : null
@@ -311,8 +313,8 @@ function markerPath(sessionId: string, aspect: 'act' | 'drill' | 'work'): string
 
 /** Aspects this session armed, or empty when no marker exists. Markers
  * older than MARKER_TTL_MS count as unarmed even if still on disk. */
-export function readArmed(sessionId: string): Set<'act' | 'drill' | 'work'> {
-  const armed = new Set<'act' | 'drill' | 'work'>()
+export function readArmed(sessionId: string): Set<GateAspect> {
+  const armed = new Set<GateAspect>()
   const cutoff = Date.now() - MARKER_TTL_MS
   for (const aspect of ['act', 'drill', 'work'] as const) {
     try {
@@ -329,7 +331,7 @@ export function readArmed(sessionId: string): Set<'act' | 'drill' | 'work'> {
 
 /** Record that this session touched `aspect`. Best-effort; also prunes
  * markers older than a week so stale sessions don't accumulate. */
-function armSession(sessionId: string, aspect: 'act' | 'drill' | 'work'): void {
+function armSession(sessionId: string, aspect: GateAspect): void {
   try {
     const path = markerPath(sessionId, aspect)
     if (!path) {
@@ -457,18 +459,13 @@ async function emitStopGate(input: HookInput): Promise<void> {
   // work gate: a session that created/used a worktree must not abandon a
   // dirty one — clean worktrees get a leave-hint instead of a block
   if (armed.has('work')) {
+    const block = workGateBlock()
+    if (block) {
+      emit({ decision: 'block', reason: block })
+      return
+    }
     const gd = gitDirOf(process.cwd())
     if (gd && isLinkedGitDir(gd)) {
-      const dirty = dirtyHere()
-      if (dirty > 0) {
-        emit({
-          decision: 'block',
-          reason:
-            `bro: linked worktree has ${dirty} uncommitted file(s) — ` +
-            'commit/push the work or discard deliberately, then `bro work leave`',
-        })
-        return
-      }
       hints.push('bro: still inside a linked worktree — `bro work leave` when done')
     }
   }
@@ -490,6 +487,19 @@ async function emitStopGate(input: HookInput): Promise<void> {
   if (hints.length > 0) {
     context('Stop', hints.join('\n'))
   }
+}
+
+/** Block reason when the session sits in a dirty linked worktree, else null. */
+function workGateBlock(): string | null {
+  const gd = gitDirOf(process.cwd())
+  if (!gd || !isLinkedGitDir(gd)) {
+    return null
+  }
+  const dirty = dirtyHere()
+  return dirty > 0
+    ? `bro: linked worktree has ${dirty} uncommitted file(s) — ` +
+        'commit/push the work or discard deliberately, then `bro work leave`'
+    : null
 }
 
 /** Current-branch open PR → one-line blocker summary, or null when the PR

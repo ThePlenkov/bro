@@ -73,7 +73,7 @@ export function worktreePathFor(mainRoot: string, slug: string): string {
   return join(dirname(mainRoot), `${basename(mainRoot)}--${slug}`)
 }
 
-const SLUG_RE = /^[\w][\w.-]*$/
+const SLUG_RE = /^\w[\w.-]*$/
 
 function usage(): never {
   console.error(`usage:
@@ -166,7 +166,8 @@ function cmdLeave(argv: string[]): void {
     ? all.find((w) => w.path === resolve(pos[0]) || basename(w.path) === pos[0] || w.path === worktreePathFor(main.path, pos[0]))
     : all.find((w) => w.path === cur)
   if (!target) {
-    console.error(`error: no worktree ${pos[0] ? `matching "${pos[0]}"` : 'at the current directory'}`)
+    const what = pos[0] ? `matching "${pos[0]}"` : 'at the current directory'
+    console.error(`error: no worktree ${what}`)
     process.exit(1)
   }
   if (target.path === main.path) {
@@ -182,7 +183,8 @@ function cmdLeave(argv: string[]): void {
     console.error(`error: git worktree remove failed — ${res.err} (use --force to override)`)
     process.exit(1)
   }
-  console.log(`removed worktree ${target.path}${target.path === cur ? ` — this directory is gone; cd ${main.path}` : ''}`)
+  const gone = target.path === cur ? ` — this directory is gone; cd ${main.path}` : ''
+  console.log(`removed worktree ${target.path}${gone}`)
   if (deleteBranch && target.branch) {
     const del = gitTry(['-C', main.path, 'branch', '-d', target.branch])
     console.log(
@@ -193,22 +195,31 @@ function cmdLeave(argv: string[]): void {
   }
 }
 
+function stateLabel(w: WorktreeInfo): string {
+  if (w.prunable) {
+    return 'PRUNABLE'
+  }
+  const dirty = existsSync(w.path) ? dirtyCount(w.path) : -1
+  if (dirty < 0) {
+    return 'gone'
+  }
+  return dirty === 0 ? 'clean' : `dirty(${dirty})`
+}
+
+function refLabel(w: WorktreeInfo): string {
+  if (w.branch) {
+    return w.branch
+  }
+  const head = w.head.slice(0, 8)
+  return w.detached ? `detached@${head}` : head
+}
+
 function cmdList(argv: string[]): void {
   const withSizes = argv.includes('--sizes')
   const all = parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']))
   const main = all[0]
   for (const [i, w] of all.entries()) {
-    const dirty = existsSync(w.path) ? dirtyCount(w.path) : -1
-    const parts = [
-      i === 0 ? 'main' : 'linked',
-      w.path,
-      w.branch ?? (w.detached ? `detached@${w.head.slice(0, 8)}` : w.head.slice(0, 8)),
-    ]
-    if (w.prunable) {
-      parts.push('PRUNABLE')
-    } else {
-      parts.push(dirty < 0 ? 'gone' : dirty === 0 ? 'clean' : `dirty(${dirty})`)
-    }
+    const parts = [i === 0 ? 'main' : 'linked', w.path, refLabel(w), stateLabel(w)]
     if (withSizes && existsSync(w.path)) {
       parts.push(diskUsage(w.path))
     }
@@ -230,11 +241,12 @@ function cmdPrune(): void {
     console.error(`error: git worktree prune failed — ${res.err}`)
     process.exit(1)
   }
-  console.log(
-    prunable.length > 0
-      ? `pruned ${prunable.length} stale entr${prunable.length === 1 ? 'y' : 'ies'}`
-      : 'nothing stale — all worktrees present on disk'
-  )
+  if (prunable.length > 0) {
+    const plural = prunable.length === 1 ? 'y' : 'ies'
+    console.log(`pruned ${prunable.length} stale entr${plural}`)
+  } else {
+    console.log('nothing stale — all worktrees present on disk')
+  }
 }
 
 export function runWorkCommand(argv: string[]): void {
@@ -256,10 +268,11 @@ export function runWorkCommand(argv: string[]): void {
 /** Absolute git dir for cwd — used by hooks to tell linked worktrees from
  *  the primary checkout without re-parsing `worktree list`. */
 export function gitDirOf(cwd: string): string | null {
+  // NOSONAR javascript:S4036 — git is a required runtime dep; fixed argv
   const res = spawnSync('git', ['-C', cwd, 'rev-parse', '--absolute-git-dir'], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
-  }) // NOSONAR — fixed argv
+  })
   if (res.status !== 0) {
     return null
   }
