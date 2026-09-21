@@ -8,7 +8,7 @@
  *   reply   --thread ID --comment TEXT | --file TSV
  */
 import { readFileSync } from 'node:fs'
-import { ensureGhAuth, gh, gitTry, resolveRepo } from '@bro/core'
+import { ensureGhAuth, gh, gitTry, loadConfig, resolveRepo } from '@bro/core'
 import { isAncestor } from './cleanup.ts'
 import {
   evaluateExitGate,
@@ -82,7 +82,10 @@ async function cmdStatus(argv: string[]): Promise<void> {
   ensureGhAuth()
   const json = argv.includes('--json')
   const t = resolvePr(argv)
-  const state = await fetchPrActState({ owner: t.owner, repo: t.repoName, pr: t.pr })
+  const state = await fetchPrActState(
+    { owner: t.owner, repo: t.repoName, pr: t.pr },
+    { ignoreChecks: loadConfig().act.ignoreChecks }
+  )
   const gate = evaluateExitGate(state)
 
   if (!gate.ok) {
@@ -114,7 +117,10 @@ async function cmdStatus(argv: string[]): Promise<void> {
 async function cmdMerge(argv: string[]): Promise<void> {
   ensureGhAuth()
   const t = resolvePr(argv)
-  const state = await fetchPrActState({ owner: t.owner, repo: t.repoName, pr: t.pr })
+  const state = await fetchPrActState(
+    { owner: t.owner, repo: t.repoName, pr: t.pr },
+    { ignoreChecks: loadConfig().act.ignoreChecks }
+  )
 
   // a closed/merged PR can pass the gate (threads resolved, checks
   // settled) — merging it isn't a gate question, it's a lifecycle error
@@ -191,7 +197,10 @@ function deleteMergedLocalBranch(headRef: string, headSha: string): void {
 async function cmdThreads(argv: string[]): Promise<void> {
   ensureGhAuth()
   const t = resolvePr(argv)
-  const state = await fetchPrActState({ owner: t.owner, repo: t.repoName, pr: t.pr })
+  const state = await fetchPrActState(
+    { owner: t.owner, repo: t.repoName, pr: t.pr },
+    { ignoreChecks: loadConfig().act.ignoreChecks }
+  )
   for (const thread of state.threads) {
     if (thread.isResolved) {
       continue

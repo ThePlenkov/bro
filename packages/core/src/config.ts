@@ -34,6 +34,12 @@ export interface BroConfig {
     /** Remote the data ref pushes to / pulls from. */
     remote: string
   }
+  act: {
+    /** Check-name substrings (case-insensitive) excluded from the exit
+     *  gate — advisory-only checks like a flaky external reviewer whose
+     *  infra is not this repo's problem. */
+    ignoreChecks: string[]
+  }
 }
 
 export const DEFAULT_CONFIG: BroConfig = {
@@ -41,6 +47,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   personality: 'terse',
   debt: { dir: '.agents/review-debt' },
   sync: { ref: 'refs/bro/data', remote: 'origin' },
+  act: { ignoreChecks: [] },
 }
 
 interface RawConfig extends Partial<Omit<BroConfig, 'stores'>> {
@@ -193,6 +200,18 @@ export function loadConfig(cwd: string = process.cwd()): BroConfig {
               Object.entries(rest.sync).filter(([, v]) => typeof v === 'string')
             )
           : {}),
+      },
+      // only a list of substrings may reach the check filter — anything
+      // else falls back to the default
+      act: {
+        ignoreChecks:
+          typeof rest.act === 'object' &&
+          rest.act !== null &&
+          Array.isArray((rest.act as { ignoreChecks?: unknown }).ignoreChecks)
+            ? (rest.act as { ignoreChecks: unknown[] }).ignoreChecks.filter(
+                (v): v is string => typeof v === 'string'
+              )
+            : [],
       },
     }
   }

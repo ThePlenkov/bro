@@ -31,3 +31,7 @@ Developing bro itself: see CONTRIBUTING.md.
 - **Unified plans** — commands that take structured input (act, plan,
   backlog, retro, drill, …) accept a plan payload validated against a
   per-command plan schema; CLI flags alone are not the contract.
+- **Advisory checks** — Kilo Code Review is flaky external infra
+  (rate limits), not this repo's signal. It's excluded from the act
+  gate via `act.ignoreChecks` in bro.config.json; its reviews may still
+  be read when they land, but they never block a merge.

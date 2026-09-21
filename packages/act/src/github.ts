@@ -127,14 +127,22 @@ function failureAnnotations(owner: string, repo: string, runId: number): number 
 }
 
 /** Full open-PR state for the act loop — threads + checks + mergeability. */
-export async function fetchPrActState(target: {
-  owner: string
-  repo: string
-  pr: number
-}): Promise<PrActState> {
+export async function fetchPrActState(
+  target: {
+    owner: string
+    repo: string
+    pr: number
+  },
+  opts?: { ignoreChecks?: string[] }
+): Promise<PrActState> {
   const meta = fetchPrMeta(target)
   const threads = await fetchReviewThreads(target)
-  const checks = fetchChecks(target, false)
+  // Advisory checks (act.ignoreChecks) drop out of the gate entirely —
+  // a flaky external reviewer must not hold merges hostage
+  const ignored = (opts?.ignoreChecks ?? []).map((s) => s.toLowerCase())
+  const checks = fetchChecks(target, false).filter(
+    (c) => !ignored.some((i) => c.name.toLowerCase().includes(i))
+  )
 
   // "CI green" means every check — an optional check that fails is still
   // a red job on the PR. Required names are only kept to decide whether a
