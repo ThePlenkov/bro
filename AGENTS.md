@@ -31,6 +31,11 @@ Developing bro itself: see CONTRIBUTING.md.
 - **Unified plans** — commands that take structured input (act, plan,
   backlog, retro, drill, …) accept a plan payload validated against a
   per-command plan schema; CLI flags alone are not the contract.
+- **Verify like CI** — before claiming "tests pass", run the exact
+  command CI runs (`npm test` → `tsx --test`), not a hand-picked
+  runner; harness differences are real bugs' favorite hiding place.
+  Local green ≠ PR green — after every push, `bro act status` +
+  `bro act threads` are the only verdict.
 - **Infra failures don't block** — the gate rule: project-caused
   failures (code, config, real findings) block; infrastructure failures
   (quota, outage, runner flakes) never do. A *failed* AI-reviewer check
