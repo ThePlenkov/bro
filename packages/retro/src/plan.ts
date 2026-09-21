@@ -114,23 +114,26 @@ function parseActions(rawActions: unknown, errors: string[]): RetroAction[] {
   return actions
 }
 
-/** Parse + validate a plan file. Throws one error listing every problem —
- * the agent fixes the file once instead of iterating on single failures. */
-export function parsePlan(text: string, source = 'plan'): RetroPlan {
-  let doc: unknown
-  try {
-    doc = parse(text)
-  } catch (err) {
-    throw new Error(`${source}: invalid TOML — ${err instanceof Error ? err.message : String(err)}`)
-  }
+/** The `kind` value a retro plan must carry when it has one — lets
+ * `bro run <file>` route the plan to this plugin. */
+export const PLAN_KIND = 'retrospect'
 
+/** Validate an already-parsed plan document — the plugin planSchema.
+ *  Throws one error listing every problem — the agent fixes the file
+ *  once instead of iterating on single failures. */
+export function parsePlanDoc(doc: unknown, source = 'plan'): RetroPlan {
   const errors: string[] = []
   if (isRecord(doc)) {
     // a misspelled `actions`/`retro` key must not silently drop work
     for (const key of Object.keys(doc)) {
-      if (key !== 'retro' && key !== 'actions') {
+      if (key !== 'retro' && key !== 'actions' && key !== 'kind') {
         errors.push(`unknown top-level key "${key}"`)
       }
+    }
+    // `bro run` writes/reads the envelope; a hand-run plan that claims a
+    // different kind was routed wrong — say so instead of misparsing
+    if (doc.kind !== undefined && doc.kind !== PLAN_KIND) {
+      errors.push(`kind: expected "${PLAN_KIND}", got ${JSON.stringify(doc.kind)}`)
     }
   }
   const retro = isRecord(doc) ? doc.retro : undefined
@@ -147,12 +150,25 @@ export function parsePlan(text: string, source = 'plan'): RetroPlan {
   return { ...section, actions }
 }
 
+/** Parse + validate a plan file's TOML text. */
+export function parsePlan(text: string, source = 'plan'): RetroPlan {
+  let doc: unknown
+  try {
+    doc = parse(text)
+  } catch (err) {
+    throw new Error(`${source}: invalid TOML — ${err instanceof Error ? err.message : String(err)}`)
+  }
+  return parsePlanDoc(doc, source)
+}
+
 /** The commented template `bro retrospect schema` prints — keeps the schema
  * out of skill files so the CLI stays the single source of truth. */
 export const PLAN_SCHEMA = `# retrospection plan — written by the agent, executed by \`bro retrospect record\`
+# or routed by kind via \`bro run retro.toml\`
 #
 #   bro retrospect record retro.toml
 
+kind = "retrospect"  # plan envelope — \`bro run\` routes on it
 
 [retro]
 what = ""            # required — what went wrong, one line

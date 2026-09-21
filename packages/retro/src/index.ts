@@ -1,5 +1,5 @@
 export { bd, bdJson, checkBeads, refKind } from '@bro/core'
-export { parsePlan, PLAN_SCHEMA } from './plan.ts'
+export { parsePlan, parsePlanDoc, PLAN_KIND, PLAN_SCHEMA } from './plan.ts'
 export {
   captureWtf,
   listRetros,

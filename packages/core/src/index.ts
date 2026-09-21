@@ -21,5 +21,7 @@ export {
 export type { BroConfig, ConfigSection, Personality, StoreBackend } from './config.ts'
 export { definePlugin } from './plugin.ts'
 export type { BroPlugin } from './plugin.ts'
+export { planKind, readPlanDoc } from './plan.ts'
+export type { PlanSchema } from './plan.ts'
 export { makePrinter } from './output.ts'
 export type { Printer } from './output.ts'

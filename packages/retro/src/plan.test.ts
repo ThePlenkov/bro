@@ -107,4 +107,11 @@ sink = "backlog"
     const bad = '[retro]\nwhat="x"\nwhy="y"\n\n[actions]\ntitle="t"\n'
     assert.throws(() => parsePlan(bad), /must be an array of tables/)
   })
+
+  test('kind envelope: "retrospect" accepted, others rejected', () => {
+    const ok = 'kind="retrospect"\n[retro]\nwhat="x"\nwhy="y"\n'
+    assert.equal(parsePlan(ok).what, 'x')
+    const bad = 'kind="drill"\n[retro]\nwhat="x"\nwhy="y"\n'
+    assert.throws(() => parsePlan(bad), /kind: expected "retrospect", got "drill"/)
+  })
 })
