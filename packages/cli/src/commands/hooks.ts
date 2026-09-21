@@ -31,7 +31,7 @@ import {
 import { dirname, join } from 'node:path'
 import { ghJson, resolveRepo } from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
-import { evaluateExitGate, fetchPrActState } from '@bro/act'
+import { evaluateExitGate, fetchPrActState, mergeSlotHolder } from '@bro/act'
 import { bdJson, currentFrame } from '@bro/drill'
 import { readDebtRecords } from '@bro/debt'
 
@@ -172,6 +172,17 @@ function readyLines(limit: number): string[] {
     return rows.map((r) => `  ${r.id} ${r.title ?? ''}`.trimEnd())
   } catch {
     return []
+  }
+}
+
+/** Merge-slot holder for context — a session that sees the slot held knows
+ *  not to start a merge right now. Fail-open: no beads → no line. */
+function mergeSlotLine(): string | null {
+  try {
+    const holder = mergeSlotHolder()
+    return holder ? `merge slot: held by ${holder} — serialize merges via \`bro act merge\`` : null
+  } catch {
+    return null
   }
 }
 
@@ -324,6 +335,10 @@ async function emitSessionContext(
   const debt = debtLine()
   if (debt) {
     parts.push(debt)
+  }
+  const slot = mergeSlotLine()
+  if (slot) {
+    parts.push(slot)
   }
   if (parts.length > 0) {
     context(event, `bro state — resume from here:\n${parts.join('\n')}`)

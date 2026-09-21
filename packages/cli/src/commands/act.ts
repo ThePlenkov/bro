@@ -14,8 +14,10 @@ import { fetchReviewThreads } from '@bro/debt'
 import { isAncestor } from './cleanup.ts'
 import { flag } from './args.ts'
 import {
+  acquireMergeSlot,
   evaluateExitGate,
   fetchPrActState,
+  releaseMergeSlot,
   replyToThread,
   resolveReviewThread,
   unresolveReviewThread,
@@ -226,6 +228,19 @@ async function cmdMerge(argv: string[]): Promise<void> {
   // --match-head-commit pins the merge to the sha the gate evaluated —
   // a head that moved since fetch fails closed instead of landing
   // a commit the gate never saw
+  // The merge itself is the critical section two sessions must not enter
+  // together — serialize on the beads merge slot. `unavailable` (no bd, no
+  // .beads) proceeds: coordination is a bonus, never a gate of its own.
+  const slot = acquireMergeSlot()
+  if (slot.kind === 'held') {
+    console.error(
+      `merge slot held by ${slot.holder} — another session is merging; ` +
+        'wait for `bd merge-slot check` to report available, or `bd merge-slot release` a crashed holder'
+    )
+    process.exitCode = 1
+    return
+  }
+
   const args = ['pr', 'merge', String(t.pr), method, '--delete-branch', '--match-head-commit', state.headSha]
   if (argv.includes('--admin')) {
     args.push('--admin')
@@ -237,6 +252,10 @@ async function cmdMerge(argv: string[]): Promise<void> {
   } catch (err) {
     console.error(`error: merge failed — ${err instanceof Error ? err.message : String(err)}`)
     process.exitCode = 1
+  } finally {
+    if (slot.kind === 'acquired') {
+      releaseMergeSlot()
+    }
   }
 }
 
