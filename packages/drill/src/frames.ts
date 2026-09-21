@@ -42,26 +42,37 @@ export function childrenOf(id: string): DrillRow[] {
   return bdJson<DrillRow[]>(['children', id])
 }
 
-/** One `bd children` sweep: parent→kids and kid→parent in a single pass.
- * Kids are NOT label-filtered — drillUp's close check needs every child,
- * and drillTree renders them. Callers pick which predicate applies. */
+interface DepEdge {
+  issue_id: string
+  depends_on_id: string
+  type: string
+}
+
+/** One `bd dep list` sweep: parent→kids and kid→parent in a single call
+ * (was N+1 `bd children`). kids holds DRILL children only — every
+ * consumer filters on isDrill anyway; drillUp's any-child close check
+ * still uses childrenOf directly. */
 function drillRelations(rows: DrillRow[]): {
   kids: Map<string, DrillRow[]>
   parents: Map<string, string>
 } {
   const kids = new Map<string, DrillRow[]>()
   const parents = new Map<string, string>()
-  for (const row of rows) {
-    const children = childrenOf(row.id)
-    if (children.length === 0) {
-      continue
+  if (rows.length === 0) {
+    return { kids, parents }
+  }
+  const byId = new Map(rows.map((r) => [r.id, r]))
+  const edges = bdJson<DepEdge[]>([
+    'dep', 'list', ...rows.map((r) => r.id), '-t', 'parent-child',
+  ])
+  for (const e of edges) {
+    const kid = byId.get(e.issue_id)
+    const parent = byId.get(e.depends_on_id)
+    if (e.type !== 'parent-child' || !kid || !parent) {
+      continue // only drill↔drill edges — same as the old per-row sweep
     }
-    kids.set(row.id, children)
-    for (const kid of children) {
-      if (isDrill(kid)) {
-        parents.set(kid.id, row.id)
-      }
-    }
+    kids.set(parent.id, [...(kids.get(parent.id) ?? []), kid])
+    parents.set(kid.id, parent.id)
   }
   return { kids, parents }
 }

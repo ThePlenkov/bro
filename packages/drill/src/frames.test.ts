@@ -3,7 +3,14 @@ import assert from 'node:assert/strict'
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { assertHydratedRows, drillUp, planPreventions, refKind } from './frames.ts'
+import {
+  assertHydratedRows,
+  currentFrame,
+  drillTree,
+  drillUp,
+  planPreventions,
+  refKind,
+} from './frames.ts'
 import type { DrillRow } from './types.ts'
 
 const prevention = (id: string, title: string, status = 'open'): DrillRow => ({
@@ -182,6 +189,41 @@ describe('drillUp compensation', () => {
             (err.stderr ?? '').includes('close blew up'),
         )
       })
+    },
+  )
+})
+
+/** Nested drills served by a scripted bd — `dep list` answers every id in
+ *  one call (the N+1 fix): f2 is f1's child, so f1 is root and f2 is the
+ *  active leaf at depth 1. */
+const FAKE_BD_NESTED = `#!/bin/sh
+case "$1" in
+  list) echo '[{"id":"f1","title":"root","status":"open","labels":["drill"],"updated_at":"2026-01-01"},{"id":"f2","title":"leaf","status":"open","labels":["drill"],"updated_at":"2026-01-02"}]' ;;
+  dep) echo '[{"issue_id":"f2","depends_on_id":"f1","type":"parent-child"}]' ;;
+  mol) echo '{"wisps":[]}' ;;
+esac
+`
+
+describe('drillRelations via bd dep list', () => {
+  test(
+    'one batch call yields the parent→child tree',
+    { skip: WIN32 },
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
+      writeFileSync(join(dir, 'bd'), FAKE_BD_NESTED)
+      chmodSync(join(dir, 'bd'), 0o755)
+      const prevPath = process.env.PATH
+      process.env.PATH = `${dir}:${prevPath}`
+      try {
+        assert.equal(drillTree(), '● f1 root [open]\n  ● f2 leaf [open]')
+        const frame = currentFrame()
+        assert.equal(frame?.id, 'f2')
+        assert.equal(frame?.parentId, 'f1')
+        assert.equal(frame?.depth, 1)
+      } finally {
+        process.env.PATH = prevPath
+        rmSync(dir, { recursive: true, force: true })
+      }
     },
   )
 })
