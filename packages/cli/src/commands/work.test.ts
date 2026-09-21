@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   isLinkedGitDir,
   parseWorktreePorcelain,
+  unquoteGitPath,
   worktreePathFor,
 } from './work.ts'
 
@@ -40,13 +41,30 @@ describe('parseWorktreePorcelain', () => {
     assert.deepEqual(parseWorktreePorcelain(''), [])
     assert.deepEqual(parseWorktreePorcelain('\n'), [])
   })
+
+  test('C-quoted paths are unquoted', () => {
+    const text = 'worktree "/repo/main--we\\"ird"\nHEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ndetached\n'
+    assert.equal(parseWorktreePorcelain(text)[0]!.path, '/repo/main--we"ird')
+  })
+})
+
+describe('unquoteGitPath', () => {
+  test('plain paths pass through; quotes unwrap escapes', () => {
+    assert.equal(unquoteGitPath('/repo/x'), '/repo/x')
+    assert.equal(unquoteGitPath('"/repo/a b"'), '/repo/a b')
+    assert.equal(unquoteGitPath('"/repo/a\\\\b"'), '/repo/a\\b')
+  })
 })
 
 describe('isLinkedGitDir', () => {
-  test('linked worktrees carry a /worktrees/ segment', () => {
+  test('linked worktrees carry a .git/worktrees/<name> shape', () => {
     assert.ok(isLinkedGitDir('/repo/main/.git/worktrees/main--fix'))
     assert.ok(!isLinkedGitDir('/repo/main/.git'))
     assert.ok(!isLinkedGitDir('/repo/main'))
+  })
+
+  test('a primary checkout living under a worktrees/ dir is not linked', () => {
+    assert.ok(!isLinkedGitDir('/home/u/worktrees/repo/.git'))
   })
 })
 

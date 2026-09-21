@@ -34,6 +34,18 @@ export interface WorktreeInfo {
   prunable?: string
 }
 
+/** Git C-quotes unusual paths in porcelain output — unwrap and unescape. */
+export function unquoteGitPath(path: string): string {
+  if (!path.startsWith('"') || !path.endsWith('"')) {
+    return path
+  }
+  return path.slice(1, -1).replace(/\\(.)/g, (_, c: string) => {
+    if (c === 'n') return '\n'
+    if (c === 't') return '\t'
+    return c // covers \\, \", and any other escape — take literally
+  })
+}
+
 /** `git worktree list --porcelain` → entries. The first entry is always
  *  the main worktree — linked ones follow. */
 export function parseWorktreePorcelain(text: string): WorktreeInfo[] {
@@ -41,7 +53,7 @@ export function parseWorktreePorcelain(text: string): WorktreeInfo[] {
   let cur: WorktreeInfo | undefined
   for (const line of text.split('\n')) {
     if (line.startsWith('worktree ')) {
-      cur = { path: line.slice('worktree '.length), head: '', bare: false, detached: false }
+      cur = { path: unquoteGitPath(line.slice('worktree '.length)), head: '', bare: false, detached: false }
       out.push(cur)
     } else if (!cur) {
       continue
@@ -60,11 +72,13 @@ export function parseWorktreePorcelain(text: string): WorktreeInfo[] {
   return out
 }
 
-/** git dir of a linked worktree contains a `/worktrees/` segment under the
- *  main .git — the primary checkout's git dir never does. */
+/** A linked worktree's git dir is exactly `<main>/.git/worktrees/<name>` —
+ *  the primary checkout's git dir never is. Anchoring on `.git/worktrees/`
+ *  keeps a primary checkout living under a `…/worktrees/…` directory from
+ *  being misclassified as linked. */
 export function isLinkedGitDir(gitDir: string): boolean {
   const norm = gitDir.split(sep).join('/')
-  return norm.includes('/worktrees/')
+  return /(?:^|\/)\.git\/worktrees\/[^/]+$/.test(norm)
 }
 
 /** Slug → sibling path next to the main checkout: `bro` + `fix-x` →
@@ -130,6 +144,10 @@ function cmdEnter(argv: string[]): void {
   // an existing branch under the target name means the slug names an
   // in-flight task — check it out rather than failing on -b
   const branchExists = gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).code === 0
+  if (branchExists && base) {
+    console.error(`error: --base only applies when creating the branch; ${branch} already exists`)
+    process.exit(1)
+  }
   const args = ['worktree', 'add', path]
   if (branchExists) {
     args.push(branch)
