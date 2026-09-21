@@ -19,6 +19,8 @@ const open = (over: Partial<PrActState> = {}): PrActState => ({
   reviewersFailing: 0,
   sastPending: 0,
   sastUnknown: 0,
+  fixRounds: 0,
+  maxRounds: 3,
   ...over,
 })
 
@@ -63,5 +65,25 @@ describe('evaluateExitGate', () => {
 
   it('is not blocked on a closed-unmerged PR either', () => {
     assert.equal(evaluateExitGate(open({ state: 'CLOSED', openThreads: 3 })).ok, true)
+  })
+
+  it('mandates debt-defer once fix rounds exceed the cap', () => {
+    const g = evaluateExitGate(
+      open({ openThreads: 2, fixRounds: 4, maxRounds: 3 })
+    )
+    assert.equal(g.ok, false)
+    assert.match(g.blockers[0], /fix-round cap hit \(4>3\)/)
+    assert.match(g.blockers[0], /defer the 2 remaining thread\(s\)/)
+    // at/below the cap or cap disabled — plain thread blocker
+    assert.match(
+      evaluateExitGate(open({ openThreads: 1, fixRounds: 3, maxRounds: 3 })).blockers[0],
+      /1 unresolved review thread/
+    )
+    assert.match(
+      evaluateExitGate(open({ openThreads: 1, fixRounds: 9, maxRounds: 0 })).blockers[0],
+      /1 unresolved review thread/
+    )
+    // no open threads → cap is moot
+    assert.equal(evaluateExitGate(open({ fixRounds: 9, maxRounds: 3 })).ok, true)
   })
 })

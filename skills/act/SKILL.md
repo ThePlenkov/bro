@@ -52,6 +52,10 @@ default store, so standard installs already have it).
   `"stores": ["jsonl"]` opt-out — the defer didn't happen: fall back to
   fix or reject, do NOT resolve. Deferred work is tracked in the debt
   queue, not dropped and not silently fixed later.
+  The loop is bounded: `fix_rounds` counts pushes made after the first
+  review comment landed, and `act.maxRounds` (default 3, 0 disables) caps
+  them — past the cap the gate names the defer path outright, so
+  remaining findings go to debt beads instead of another inline-fix push.
 - **Merge through `bro act merge`, never `gh pr merge` directly.** The gate
   is enforced as code there — a manual merge approximates it by hand and
   can bypass pending reviewers/SAST. Only a user-directed override justifies

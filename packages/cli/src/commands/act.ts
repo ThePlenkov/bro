@@ -84,9 +84,10 @@ async function cmdStatus(argv: string[]): Promise<void> {
   ensureGhAuth()
   const json = argv.includes('--json')
   const t = resolvePr(argv)
+  const act = loadBroConfig().act
   const state = await fetchPrActState(
     { owner: t.owner, repo: t.repoName, pr: t.pr },
-    { ignoreChecks: loadBroConfig().act.ignoreChecks }
+    { ignoreChecks: act.ignoreChecks, maxRounds: act.maxRounds }
   )
   const gate = evaluateExitGate(state)
 
@@ -103,7 +104,8 @@ async function cmdStatus(argv: string[]): Promise<void> {
     `open_threads=${gate.open_threads} ci_pending=${gate.ci_pending} ` +
       `reviewers_pending=${gate.reviewers_pending} ` +
       `reviewers_failing=${gate.reviewers_failing} ` +
-      `sast_pending=${gate.sast_pending} sast_unknown=${gate.sast_unknown}`
+      `sast_pending=${gate.sast_pending} sast_unknown=${gate.sast_unknown} ` +
+      `fix_rounds=${gate.fix_rounds}`
   )
   console.log(`exit_gate=${gate.ok ? 'OK' : 'BLOCKED'}`)
   for (const b of gate.blockers) {
@@ -119,9 +121,10 @@ async function cmdStatus(argv: string[]): Promise<void> {
 async function cmdMerge(argv: string[]): Promise<void> {
   ensureGhAuth()
   const t = resolvePr(argv)
+  const act = loadBroConfig().act
   const state = await fetchPrActState(
     { owner: t.owner, repo: t.repoName, pr: t.pr },
-    { ignoreChecks: loadBroConfig().act.ignoreChecks }
+    { ignoreChecks: act.ignoreChecks, maxRounds: act.maxRounds }
   )
 
   // a closed/merged PR can pass the gate (threads resolved, checks

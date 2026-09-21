@@ -126,6 +126,31 @@ function failureAnnotations(owner: string, repo: string, runId: number): number 
   return pages.flat().filter((a) => a.annotation_level === 'failure').length
 }
 
+/** Commits on the PR head, oldest first — the raw material for fixRounds. */
+function fetchPrCommits(target: {
+  owner: string
+  repo: string
+  pr: number
+}): Date[] {
+  const dates: Date[] = []
+  for (let page = 1; ; page += 1) {
+    const commits = ghJson<Array<{ commit?: { committer?: { date?: string } } }>>([
+      'api',
+      `repos/${target.owner}/${target.repo}/pulls/${target.pr}/commits?per_page=100&page=${page}`,
+    ])
+    for (const c of commits ?? []) {
+      const date = c.commit?.committer?.date
+      if (date) {
+        dates.push(new Date(date))
+      }
+    }
+    if ((commits?.length ?? 0) < 100) {
+      break
+    }
+  }
+  return dates
+}
+
 /** Full open-PR state for the act loop — threads + checks + mergeability. */
 export async function fetchPrActState(
   target: {
@@ -133,7 +158,7 @@ export async function fetchPrActState(
     repo: string
     pr: number
   },
-  opts?: { ignoreChecks?: string[] }
+  opts?: { ignoreChecks?: string[]; maxRounds?: number }
 ): Promise<PrActState> {
   const meta = fetchPrMeta(target)
   const threads = await fetchReviewThreads(target)
@@ -200,6 +225,17 @@ export async function fetchPrActState(
     }
   }
 
+  // A "fix round" is a push made after review began — counting commits
+  // (not threads) because a round can also be a rebase or a no-thread fix.
+  const firstReview = Math.min(
+    ...threads.flatMap((t) =>
+      t.comments.nodes.map((c) => (c.createdAt ? Date.parse(c.createdAt) : Number.POSITIVE_INFINITY))
+    )
+  )
+  const fixRounds = Number.isFinite(firstReview)
+    ? fetchPrCommits(target).filter((d) => d.getTime() > firstReview).length
+    : 0
+
   return {
     pr: target.pr,
     url: meta.url,
@@ -219,6 +255,8 @@ export async function fetchPrActState(
     reviewersFailing,
     sastPending,
     sastUnknown,
+    fixRounds,
+    maxRounds: opts?.maxRounds ?? 0,
   }
 }
 
