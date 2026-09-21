@@ -37,25 +37,19 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 
 const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim() !== ''
 
-function parseThread(raw: unknown, i: number, errors: string[]): ActThreadVerdict | undefined {
-  const where = `threads[${i}]`
-  if (!isRecord(raw)) {
-    errors.push(`${where}: must be a table`)
-    return undefined
-  }
+function checkThread(raw: Record<string, unknown>, where: string, errors: string[]): void {
   for (const key of Object.keys(raw)) {
     if (!THREAD_KEYS.has(key)) {
       errors.push(`${where}: unknown key "${key}"`)
     }
   }
-  const valid = nonEmpty(raw.thread_id) && nonEmpty(raw.action)
   if (!nonEmpty(raw.thread_id)) {
     errors.push(`${where}: thread_id is required`)
   }
-  if (nonEmpty(raw.action) && !(ACT_ACTIONS as readonly string[]).includes(raw.action)) {
-    errors.push(`${where}: action must be one of ${ACT_ACTIONS.join('|')}`)
-  } else if (!nonEmpty(raw.action)) {
+  if (!nonEmpty(raw.action)) {
     errors.push(`${where}: action is required`)
+  } else if (!(ACT_ACTIONS as readonly string[]).includes(raw.action)) {
+    errors.push(`${where}: action must be one of ${ACT_ACTIONS.join('|')}`)
   }
   for (const f of ['comment', 'title'] as const) {
     if (raw[f] !== undefined && typeof raw[f] !== 'string') {
@@ -68,11 +62,20 @@ function parseThread(raw: unknown, i: number, errors: string[]): ActThreadVerdic
   if (raw.action === 'defer' && !nonEmpty(raw.title)) {
     errors.push(`${where}: defer requires a title — the debt bead's`)
   }
-  if (!valid) {
+}
+
+function parseThread(raw: unknown, i: number, errors: string[]): ActThreadVerdict | undefined {
+  const where = `threads[${i}]`
+  if (!isRecord(raw)) {
+    errors.push(`${where}: must be a table`)
+    return undefined
+  }
+  checkThread(raw, where, errors)
+  if (!nonEmpty(raw.thread_id) || !nonEmpty(raw.action)) {
     return undefined
   }
   return {
-    thread_id: (raw.thread_id as string).trim(),
+    thread_id: raw.thread_id.trim(),
     action: raw.action as ActAction,
     comment: typeof raw.comment === 'string' ? raw.comment : undefined,
     title: typeof raw.title === 'string' ? raw.title : undefined,
