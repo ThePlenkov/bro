@@ -18,9 +18,10 @@ import {
   type BroPlugin,
   type ConfigSection,
 } from '@bro/core'
+import { parseActPlan, type ActPlan } from '@bro/act'
 import { parseDebtPlan, type DebtPlan } from '@bro/debt'
 import { parsePlanDoc, type RetroPlan } from '@bro/retro'
-import { runActCommand } from './commands/act.ts'
+import { applyActPlan, runActCommand } from './commands/act.ts'
 import { runCleanupCommand } from './commands/cleanup.ts'
 import { runConvoyCommand } from './commands/convoy.ts'
 import { runNextCommand } from './commands/next.ts'
@@ -49,6 +50,8 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'act',
     configKey: 'act',
     configSchema: actSection,
+    planSchema: (doc, source) => parseActPlan(doc, source),
+    runPlan: (plan) => applyActPlan(plan as ActPlan),
   }),
   definePlugin({
     name: 'convoy',

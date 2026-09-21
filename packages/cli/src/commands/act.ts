@@ -8,7 +8,7 @@
  *   reply   --thread ID --comment TEXT | --file TSV
  */
 import { readFileSync } from 'node:fs'
-import { ensureGhAuth, gh, gitTry, resolveRepo } from '@bro/core'
+import { ensureGhAuth, bd, gh, gitTry, resolveRepo } from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
 import { fetchReviewThreads } from '@bro/debt'
 import { isAncestor } from './cleanup.ts'
@@ -18,6 +18,8 @@ import {
   replyToThread,
   resolveReviewThread,
   unresolveReviewThread,
+  type ActPlan,
+  type ActThreadVerdict,
 } from '@bro/act'
 
 function usage(): never {
@@ -308,6 +310,70 @@ const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
   threads: cmdThreads,
   resolve: cmdResolve,
   reply: cmdReply,
+}
+
+/** Defer a thread into a debt bead — the skill's mechanics as code:
+ *  `bd create -l debt --external-ref <thread>`, reply with the bead id,
+ *  then resolve. Fails loudly when bd can't create — never resolves a
+ *  defer that didn't land. */
+function deferThread(v: ActThreadVerdict, pr?: number): string {
+  const desc = pr
+    ? `deferred from PR #${pr} thread ${v.thread_id}`
+    : `deferred thread ${v.thread_id}`
+  if (!v.title) {
+    throw new Error(`defer verdict for ${v.thread_id} has no title`)
+  }
+  const bead = bd([
+    'create',
+    '--silent',
+    '--title',
+    v.title,
+    '-l',
+    'debt',
+    '-d',
+    desc,
+    '--external-ref',
+    v.thread_id,
+  ]).trim()
+  const reply = `deferred to ${bead}` + (v.comment ? ` — ${v.comment}` : '')
+  replyToThread(v.thread_id, reply)
+  resolveReviewThread(v.thread_id)
+  return bead
+}
+
+/** Apply an `act` plan (`bro run act.toml`) — batch thread verdicts.
+ *  One bad verdict doesn't abort the rest; failures list at the end. */
+export function applyActPlan(plan: ActPlan): void {
+  ensureGhAuth()
+  // no upfront beads check — a defer without bd/.beads fails that one
+  // verdict (thread stays unresolved, per the skill's fallback rule)
+  // instead of blocking every other verdict in the plan
+  const failed: string[] = []
+  for (const v of plan.threads) {
+    try {
+      if (v.action === 'reply') {
+        replyToThread(v.thread_id, v.comment!)
+        console.error(`act: replied on ${v.thread_id}`)
+      } else if (v.action === 'defer') {
+        console.error(`act: deferred ${v.thread_id} → ${deferThread(v, plan.pr)}`)
+      } else {
+        if (v.comment) {
+          replyToThread(v.thread_id, v.comment)
+        }
+        resolveReviewThread(v.thread_id)
+        console.error(`act: resolved ${v.thread_id}`)
+      }
+    } catch (err) {
+      failed.push(v.thread_id)
+      console.error(
+        `act: ${v.thread_id} failed — ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  }
+  if (failed.length > 0) {
+    console.error(`act plan: ${failed.length} verdict(s) failed: ${failed.join(', ')}`)
+    process.exitCode = 1
+  }
 }
 
 export async function runActCommand(argv: string[]): Promise<void> {
