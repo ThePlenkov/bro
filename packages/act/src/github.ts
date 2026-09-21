@@ -126,29 +126,29 @@ function failureAnnotations(owner: string, repo: string, runId: number): number 
   return pages.flat().filter((a) => a.annotation_level === 'failure').length
 }
 
-/** Commits on the PR head, oldest first — the raw material for fixRounds. */
-function fetchPrCommits(target: {
+/** Submitted reviews on the PR — each carries the head SHA it reviewed.
+ *  Distinct reviewed SHAs ≈ pushes that entered the review loop. */
+function fetchPrReviews(target: {
   owner: string
   repo: string
   pr: number
-}): Date[] {
-  const dates: Date[] = []
+}): string[] {
+  const shas = new Set<string>()
   for (let page = 1; ; page += 1) {
-    const commits = ghJson<Array<{ commit?: { committer?: { date?: string } } }>>([
+    const reviews = ghJson<Array<{ commit_id?: string }>>([
       'api',
-      `repos/${target.owner}/${target.repo}/pulls/${target.pr}/commits?per_page=100&page=${page}`,
+      `repos/${target.owner}/${target.repo}/pulls/${target.pr}/reviews?per_page=100&page=${page}`,
     ])
-    for (const c of commits ?? []) {
-      const date = c.commit?.committer?.date
-      if (date) {
-        dates.push(new Date(date))
+    for (const r of reviews ?? []) {
+      if (r.commit_id) {
+        shas.add(r.commit_id)
       }
     }
-    if ((commits?.length ?? 0) < 100) {
+    if ((reviews?.length ?? 0) < 100) {
       break
     }
   }
-  return dates
+  return [...shas]
 }
 
 /** Full open-PR state for the act loop — threads + checks + mergeability. */
@@ -225,16 +225,13 @@ export async function fetchPrActState(
     }
   }
 
-  // A "fix round" is a push made after review began — counting commits
-  // (not threads) because a round can also be a rebase or a no-thread fix.
-  const firstReview = Math.min(
-    ...threads.flatMap((t) =>
-      t.comments.nodes.map((c) => (c.createdAt ? Date.parse(c.createdAt) : Number.POSITIVE_INFINITY))
-    )
-  )
-  const fixRounds = Number.isFinite(firstReview)
-    ? fetchPrCommits(target).filter((d) => d.getTime() > firstReview).length
-    : 0
+  // A "fix round" is a reviewed push after the first — counting distinct
+  // reviewed head SHAs, not commits: one push can carry many commits, and
+  // committer dates are commit-time, not push-time. The first reviewed
+  // head is the baseline (the PR as submitted); every head reviewed after
+  // it is one round of the fix loop.
+  const reviewedShas = threads.length > 0 ? fetchPrReviews(target) : []
+  const fixRounds = Math.max(0, reviewedShas.length - 1)
 
   return {
     pr: target.pr,

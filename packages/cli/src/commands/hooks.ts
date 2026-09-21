@@ -403,7 +403,9 @@ async function emitStopGate(input: HookInput): Promise<void> {
       decision: 'block',
       reason:
         `${pr} — ` +
-        'list with `bro act threads`, fix or reply, then resolve; recheck `bro act status`',
+        'list with `bro act threads` — fix inline or defer to a debt bead ' +
+          '(reply + resolve); when fix_rounds exceeds act.maxRounds only ' +
+          'defer counts; recheck `bro act status`',
     })
     return
   }

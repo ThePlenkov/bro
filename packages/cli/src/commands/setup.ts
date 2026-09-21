@@ -58,6 +58,11 @@ function readExistingConfig(path: string): Partial<BroConfig> | null {
 }
 
 function writeConfig(opts: { beads: boolean; personality?: string }): string {
+  // bro.config.ts shadows bro.config.json — writing the .json under it
+  // would report success while the .ts stays effective
+  if (existsSync(join(process.cwd(), 'bro.config.ts'))) {
+    return 'bro.config.ts present and takes precedence — edit it directly, not writing bro.config.json'
+  }
   const path = join(process.cwd(), 'bro.config.json')
   const existed = existsSync(path)
   const existing = readExistingConfig(path)!
@@ -164,7 +169,11 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
   // file installs) — readExistingConfig exits on a parse error; loadConfig
   // alone would silently fall back to defaults and setup would init beads
   // on top of a broken config.
-  readExistingConfig(join(process.cwd(), 'bro.config.json'))
+  // …but a bro.config.ts shadows the .json entirely — validating the
+  // inert file would fail setup on a config that isn't even effective.
+  if (!existsSync(join(process.cwd(), 'bro.config.ts'))) {
+    readExistingConfig(join(process.cwd(), 'bro.config.json'))
+  }
   // beads is a default store — setup needs bd whenever the effective config
   // keeps it on, not only when --beads was passed explicitly.
   const wantsBeads = beads || loadBroConfig().stores.includes('beads')
