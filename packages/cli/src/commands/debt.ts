@@ -20,11 +20,13 @@ import { loadBroConfig } from '../plugins.ts'
 import {
   applyCollectLabel,
   applyDebtLabel,
+  applyDebtVerdicts,
   applyLastN,
   buildSummary,
   claimDebtRecord,
   clearDebtLabels,
   collectPr,
+  DEBT_ROW_STATUSES,
   DEBT_STATES,
   ensureDebtLabels,
   fetchMergedPrCandidates,
@@ -46,6 +48,8 @@ import {
   writeSummary,
   type DebtPrState,
   type DebtRecord,
+  type DebtStatus,
+  type DebtVerdict,
   type HarvestPrFilters,
 } from '@bro/debt'
 
@@ -533,8 +537,7 @@ function cmdMark(argv: string[]): void {
 
 // --- set -------------------------------------------------------------------
 
-const DEBT_ROW_STATUSES = ['open', 'claimed', 'done', 'wontfix', 'duplicate'] as const
-type DebtRowStatus = (typeof DEBT_ROW_STATUSES)[number]
+type DebtRowStatus = DebtStatus
 
 interface SetArgs {
   threadIds: string[]
@@ -587,26 +590,22 @@ function cmdSet(argv: string[]): void {
     process.exit(2)
   }
 
-  const records = readDebtRecords()
-  const byId = new Map(records.map((r) => [r.thread_id, r]))
-  const ids = [...new Set(threadIds)]
-  const missing = ids.filter((id) => !byId.has(id))
-  const terminal = status === 'done' || status === 'wontfix'
-  const now = new Date().toISOString()
-
-  upsertLedgerOverlays(
-    ids
-      .filter((id) => byId.has(id))
-      .map((thread_id) => ({
-        thread_id,
-        status,
-        fix_pr: terminal ? (fixPr ?? byId.get(thread_id)!.fix_pr) : null,
-        fixed_at: terminal ? now : null,
-        notes: notes ?? byId.get(thread_id)!.notes,
-      }))
+  applyVerdicts(
+    [...new Set(threadIds)].map((thread_id) => ({
+      thread_id,
+      status,
+      fix_pr: fixPr ?? undefined,
+      notes: notes ?? undefined,
+    }))
   )
+}
+
+/** Apply verdicts to the ledger — shared by `debt set` (argv → uniform
+ *  verdicts) and the debt plan runner (`bro run debt.toml`). */
+export function applyVerdicts(verdicts: DebtVerdict[]): void {
+  const { applied, missing } = applyDebtVerdicts(verdicts)
   writeSummary(buildSummary(readDebtRecords()))
-  console.error(`debt set: ${ids.length - missing.length} row(s) → ${status}`)
+  console.error(`debt set: ${applied} row(s) updated`)
   if (missing.length > 0) {
     console.error(`warning: thread id(s) not in ledger: ${missing.join(', ')}`)
     process.exitCode = 1

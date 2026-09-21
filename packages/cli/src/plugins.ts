@@ -18,12 +18,13 @@ import {
   type BroPlugin,
   type ConfigSection,
 } from '@bro/core'
+import { parseDebtPlan, type DebtPlan } from '@bro/debt'
 import { parsePlanDoc, type RetroPlan } from '@bro/retro'
 import { runActCommand } from './commands/act.ts'
 import { runCleanupCommand } from './commands/cleanup.ts'
 import { runConvoyCommand } from './commands/convoy.ts'
 import { runNextCommand } from './commands/next.ts'
-import { runDebtCommand } from './commands/debt.ts'
+import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
 import { runDrillCommand } from './commands/drill.ts'
 import { runHooksCommand } from './commands/hooks.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
@@ -38,6 +39,8 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'debt',
     configKey: 'debt',
     configSchema: debtSection,
+    planSchema: (doc, source) => parseDebtPlan(doc, source),
+    runPlan: (plan) => applyVerdicts((plan as DebtPlan).verdicts),
   }),
   definePlugin({
     name: 'act',

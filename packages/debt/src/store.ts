@@ -20,6 +20,7 @@ import { loadConfig } from '@bro/core'
 import type {
   AuthorPolicy,
   DebtRecord,
+  DebtStatus,
   DebtSummary,
   LedgerOverlay,
 } from './types.ts'
@@ -615,5 +616,44 @@ export function claimDebtRecord(threadId: string, cwd?: string): DebtRecord | nu
       cwd
     )
     return { ...row, status: 'claimed' }
+  })
+}
+
+export interface DebtVerdictInput {
+  thread_id: string
+  status: DebtStatus
+  notes?: string
+  fix_pr?: number
+}
+
+/** Apply verdict rows to the ledger under one lock — defaults (notes,
+ *  fix_pr) resolve against the in-lock read, so a concurrent writer
+ *  between read and write can't be clobbered by a stale snapshot. */
+export function applyDebtVerdicts(
+  verdicts: DebtVerdictInput[],
+  cwd?: string
+): { applied: number; missing: string[] } {
+  return withFileLock(ledgerFile(cwd), () => {
+    const byId = new Map(readDebtRecords(cwd).map((r) => [r.thread_id, r]))
+    const ids = [...new Set(verdicts.map((v) => v.thread_id))]
+    const missing = ids.filter((id) => !byId.has(id))
+    const now = new Date().toISOString()
+    upsertLedgerOverlaysUnlocked(
+      verdicts
+        .filter((v) => byId.has(v.thread_id))
+        .map((v) => {
+          const terminal = v.status === 'done' || v.status === 'wontfix'
+          const row = byId.get(v.thread_id)!
+          return {
+            thread_id: v.thread_id,
+            status: v.status,
+            fix_pr: terminal ? (v.fix_pr ?? row.fix_pr) : null,
+            fixed_at: terminal ? now : null,
+            notes: v.notes ?? row.notes,
+          }
+        }),
+      cwd
+    )
+    return { applied: ids.length - missing.length, missing }
   })
 }
