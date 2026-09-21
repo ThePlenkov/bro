@@ -8,6 +8,7 @@ import { isAbsolute, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
   actSection,
+  checkBeads,
   debtSection,
   definePlugin,
   loadConfig,
@@ -74,7 +75,10 @@ export const PLUGINS: BroPlugin[] = [
     run: runRetrospectCommand,
     skill: 'wtf',
     planSchema: (doc, source) => parsePlanDoc(doc, source),
-    runPlan: (plan) => cmdRecord(plan as RetroPlan),
+    runPlan: (plan) => {
+      checkBeads()
+      cmdRecord(plan as RetroPlan)
+    },
   }),
   definePlugin({
     name: 'wtf',
@@ -124,15 +128,15 @@ export const PLUGINS: BroPlugin[] = [
 /** `bro run <plan.toml>` — parse the file, route on `kind`, validate with
  *  the owning plugin's planSchema, execute via runPlan. */
 export async function runPlanFile(argv: string[]): Promise<void> {
-  const file = argv.filter((a) => !a.startsWith('-'))[0]
-  if (!file) {
-    const kinds = PLUGINS.filter((p) => p.planSchema).map((p) => p.name)
+  const files = argv.filter((a) => !a.startsWith('-'))
+  const kinds = PLUGINS.filter((p) => p.planSchema).map((p) => p.name)
+  if (files.length !== 1) {
     console.error(`usage: bro run <plan.toml> — plan kinds: ${kinds.join(', ') || '(none)'}`)
     process.exit(2)
   }
+  const file = files[0] as string
   const doc = readPlanDoc(file)
   const kind = planKind(doc)
-  const kinds = PLUGINS.filter((p) => p.planSchema).map((p) => p.name)
   if (!kind) {
     throw new Error(`${file}: no kind field — known plan kinds: ${kinds.join(', ')}`)
   }
