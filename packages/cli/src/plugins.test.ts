@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
-import { loadExternalPlugins, PLUGINS, pluginConfigSections } from './plugins.ts'
+import { loadExternalPlugins, PLUGINS, pluginConfigSections, runPlanFile } from './plugins.ts'
 
 describe('plugin registry', () => {
   test('names are unique', () => {
@@ -170,5 +170,48 @@ describe('loadExternalPlugins', () => {
     } finally {
       unload(loaded)
     }
+  })
+})
+
+describe('bro run — plan routing', () => {
+  function planFile(body: string): string {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-plan-'))
+    const file = join(dir, 'plan.toml')
+    writeFileSync(file, body)
+    return file
+  }
+
+  test('kind routes to the plugin, schema validates, runPlan executes', async () => {
+    const seen: string[] = []
+    const plugin = {
+      name: 'testplan',
+      summary: 't',
+      run: () => {},
+      planSchema: (doc: unknown) => ({ v: (doc as { plan: { v: string } }).plan.v }),
+      runPlan: (p: unknown) => { seen.push((p as { v: string }).v) },
+    }
+    PLUGINS.push(plugin)
+    try {
+      await runPlanFile([planFile('kind = "testplan"\n[plan]\nv = "ok"')])
+      assert.deepEqual(seen, ['ok'])
+    } finally {
+      PLUGINS.splice(PLUGINS.indexOf(plugin), 1)
+    }
+  })
+
+  test('unknown kind errors with the known list', async () => {
+    await assert.rejects(
+      runPlanFile([planFile('kind = "nope"\n[plan]\nv = 1')]),
+      /no plan executor.*retrospect/
+    )
+  })
+
+  test('missing kind errors', async () => {
+    await assert.rejects(runPlanFile([planFile('[plan]\nv = 1')]), /no plan executor/)
+  })
+
+  test('bad TOML surfaces the file path', async () => {
+    const file = planFile('kind = [')
+    await assert.rejects(runPlanFile([file]), new RegExp(`${file}.*invalid TOML`))
   })
 })
