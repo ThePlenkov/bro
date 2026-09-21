@@ -149,6 +149,56 @@ function isPlugin(p: unknown): p is BroPlugin {
   return true
 }
 
+/** Imports one specifier → exported candidate entries, or undefined on
+ *  failure (warned). Relative specs must resolve inside the repo root —
+ *  `../../etc/evil.ts` must not become a plugin just because config says so. */
+async function importPluginModule(
+  spec: string,
+  req: ReturnType<typeof createRequire>,
+  root: string
+): Promise<unknown[] | undefined> {
+  try {
+    const resolved = req.resolve(spec)
+    const rel = relative(root, resolved)
+    if (spec.startsWith('.') && (rel.startsWith('..') || isAbsolute(rel))) {
+      throw new Error('plugin path escapes the repo root')
+    }
+    const mod = (await import(pathToFileURL(resolved).href)) as {
+      default?: unknown
+    }
+    const exported = mod.default ?? mod
+    return Array.isArray(exported) ? exported : [exported]
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`warning: plugin "${spec}" failed to load (${msg}) — skipped`)
+    return undefined
+  }
+}
+
+/** Validates + registers one export; undefined = rejected (warned). */
+function registerExternal(entry: unknown, spec: string): BroPlugin | undefined {
+  if (!isPlugin(entry)) {
+    console.error(`warning: plugin "${spec}" export is not a BroPlugin — skipped`)
+    return undefined
+  }
+  if (PLUGINS.some((p) => p.name === entry.name)) {
+    console.error(`warning: plugin "${spec}" name "${entry.name}" is taken — skipped`)
+    return undefined
+  }
+  const plugin: BroPlugin = { ...entry, external: true }
+  // a registered configKey is owned — an external plugin must not
+  // shadow a builtin (or earlier external) section schema
+  if (plugin.configKey && PLUGINS.some((p) => p.configKey === plugin.configKey)) {
+    console.error(
+      `warning: plugin "${spec}" configKey "${plugin.configKey}" is already owned — its configSchema is ignored`
+    )
+    delete plugin.configKey
+    delete plugin.configSchema
+  }
+  PLUGINS.push(plugin)
+  return plugin
+}
+
 /** Imports config `plugins` specifiers relative to the repo and registers
  *  valid BroPlugin exports. A bad module or export warns and is skipped —
  *  one broken plugin must never take the whole CLI down. Returns what was
@@ -164,49 +214,12 @@ export async function loadExternalPlugins(
   const req = createRequire(resolve(cwd, 'bro.config.json'))
   const root = resolve(cwd)
   for (const spec of specs) {
-    let entries: unknown[]
-    try {
-      const resolved = req.resolve(spec)
-      // relative specs must stay inside the repo — `../../etc/evil.ts`
-      // must not become a plugin just because the config says so
-      const rel = relative(root, resolved)
-      if (spec.startsWith('.') && (rel.startsWith('..') || isAbsolute(rel))) {
-        throw new Error('plugin path escapes the repo root')
+    const entries = await importPluginModule(spec, req, root)
+    for (const entry of entries ?? []) {
+      const plugin = registerExternal(entry, spec)
+      if (plugin) {
+        loaded.push(plugin)
       }
-      const mod = (await import(pathToFileURL(resolved).href)) as {
-        default?: unknown
-      }
-      const exported = mod.default ?? mod
-      entries = Array.isArray(exported) ? exported : [exported]
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      console.error(`warning: plugin "${spec}" failed to load (${msg}) — skipped`)
-      continue
-    }
-    for (const entry of entries) {
-      if (!isPlugin(entry)) {
-        console.error(`warning: plugin "${spec}" export is not a BroPlugin — skipped`)
-        continue
-      }
-      if (PLUGINS.some((p) => p.name === entry.name)) {
-        console.error(`warning: plugin "${spec}" name "${entry.name}" is taken — skipped`)
-        continue
-      }
-      const plugin: BroPlugin = { ...entry, external: true }
-      // a registered configKey is owned — an external plugin must not
-      // shadow a builtin (or earlier external) section schema
-      if (
-        plugin.configKey &&
-        PLUGINS.some((p) => p.configKey === plugin.configKey)
-      ) {
-        console.error(
-          `warning: plugin "${spec}" configKey "${plugin.configKey}" is already owned — its configSchema is ignored`
-        )
-        delete plugin.configKey
-        delete plugin.configSchema
-      }
-      PLUGINS.push(plugin)
-      loaded.push(plugin)
     }
   }
   return loaded
