@@ -1,6 +1,8 @@
 # bro 🤝
 
 > Your agent's sidekick. Skills are instructions — **bro is the hands.**
+>
+> **Docs + landing:** https://theplenkov.github.io/bro/
 
 Your AI agent can read a PR. Can it tell which merged PRs still have
 unresolved review threads rotting in them? Can it say "bro, what's left?"

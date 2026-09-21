@@ -1,0 +1,61 @@
+/* bro — dark-first, terse. Brand accent: handshake amber. */
+:root {
+  --sl-color-accent-low: #3d2f10;
+  --sl-color-accent: #d9a441;
+  --sl-color-accent-high: #f5d98a;
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #eceef2;
+  --sl-color-gray-2: #c0c4ce;
+  --sl-color-gray-3: #8b919e;
+  --sl-color-gray-4: #585d69;
+  --sl-color-gray-5: #383c46;
+  --sl-color-gray-6: #272a33;
+  --sl-color-black: #191b21;
+}
+:root[data-theme='light'] {
+  --sl-color-accent-low: #f3e3bd;
+  --sl-color-accent: #a8720f;
+  --sl-color-accent-high: #6b4a07;
+  --sl-color-white: #1a1b20;
+  --sl-color-gray-1: #272a33;
+  --sl-color-gray-2: #383c46;
+  --sl-color-gray-3: #585d69;
+  --sl-color-gray-4: #8b919e;
+  --sl-color-gray-5: #c0c4ce;
+  --sl-color-gray-6: #eceef2;
+  --sl-color-gray-7: #f6f7f9;
+  --sl-color-black: #ffffff;
+}
+
+/* with/without comparison on the landing page */
+.versus {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: 1fr;
+}
+@media (min-width: 50rem) {
+  .versus {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+.versus > div {
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.75rem;
+  padding: 1.25rem;
+}
+.versus .without {
+  border-color: var(--sl-color-gray-5);
+}
+.versus .with {
+  border-color: var(--sl-color-accent);
+}
+.versus h3 {
+  margin-top: 0;
+}
+.versus ul {
+  padding-left: 1.25rem;
+  margin-bottom: 0;
+}
+.versus li {
+  margin: 0.5rem 0;
+}
