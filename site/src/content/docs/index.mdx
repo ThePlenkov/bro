@@ -139,10 +139,17 @@ install gives the same mechanics to Devin, Claude Code, and Codex.
 
 ## How
 
+Commands infer context — you mostly don't pass arguments at all:
+
+```bash
+bro act         # on a branch → the gate for its PR
+bro debt        # the damage report
+bro drill       # where the current descent stands
+bro wtf "..."   # vent → bead; bare → what's unanswered
+```
+
 ```bash
 npx -y @theplenkov/bro setup        # wire bro into the repo
-npx -y @theplenkov/bro debt collect # sweep merged-PR findings
-npx -y @theplenkov/bro act status   # the gate, as code
 ```
 
 bro collects and carries — the verdict is yours. bro got you.

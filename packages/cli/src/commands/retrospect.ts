@@ -178,8 +178,11 @@ function rejectPositionals(sub: string, rest: string[]): void {
 
 export async function runRetrospectCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
+  // zero-arg magic: bare `bro retrospect` reports open wtfs
   if (!sub) {
-    usage()
+    checkBeads()
+    cmdStatus([])
+    return
   }
   if (sub === '--help' || sub === '-h') {
     usage(0)

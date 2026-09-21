@@ -786,7 +786,12 @@ function maybeDataRefSync(): void {
 
 export async function runDebtCommand(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv
-  if (!cmd || cmd === '--help' || cmd === '-h') {
+  // zero-arg magic: bare `bro debt` is the damage report
+  if (!cmd) {
+    cmdStatus([])
+    return
+  }
+  if (cmd === '--help' || cmd === '-h') {
     usage()
   }
   const handler = COMMANDS[cmd!]
