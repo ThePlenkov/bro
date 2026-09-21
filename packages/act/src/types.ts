@@ -31,6 +31,12 @@ export interface PrActState {
   sastPending: number
   /** SAST checks whose annotations could not be fetched. */
   sastUnknown: number
+  /** Pushes made after the first review comment landed — the act loop's
+   *  round counter. */
+  fixRounds: number
+  /** act.maxRounds — when fixRounds exceeds this, open threads must defer
+   *  to debt beads instead of another inline-fix round. 0 = unbounded. */
+  maxRounds: number
 }
 
 export interface ExitGate {
@@ -43,4 +49,6 @@ export interface ExitGate {
   sast_pending: number
   sast_unknown: number
   is_draft: boolean
+  fix_rounds: number
+  max_rounds: number
 }

@@ -103,6 +103,17 @@ describe('loadConfig root shape', () => {
   test('non-object act section falls back to defaults', () => {
     assert.deepEqual(load({ act: 'x' }).act, DEFAULT_CONFIG.act)
   })
+
+  test('act.maxRounds keeps only non-negative integers', () => {
+    assert.equal(load({ act: { maxRounds: 5 } }).act.maxRounds, 5)
+    assert.equal(load({ act: { maxRounds: 0 } }).act.maxRounds, 0)
+    for (const bad of [-1, 1.5, '3', true, null]) {
+      assert.equal(
+        load({ act: { maxRounds: bad } }).act.maxRounds,
+        DEFAULT_CONFIG.act.maxRounds
+      )
+    }
+  })
 })
 
 function loadTs(

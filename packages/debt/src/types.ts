@@ -51,6 +51,7 @@ export interface ReviewThreadComment {
   path?: string
   line?: number | null
   body?: string
+  createdAt?: string
 }
 
 export interface ReviewThreadNode {

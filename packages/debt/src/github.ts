@@ -33,7 +33,7 @@ function reviewThreadsQuery(afterClause: string): string {
               isResolved
               isOutdated
               comments(first: 1) {
-                nodes { author { login __typename } path line body }
+                nodes { author { login __typename } path line body createdAt }
               }
             }
           }

@@ -47,19 +47,31 @@ export const syncSection: ConfigSection<{ ref: string; remote: string }> = (
     : {}),
 })
 
-export const actSection: ConfigSection<{ ignoreChecks: string[] }> = (raw) => ({
-  // only a list of substrings may reach the check filter — anything
-  // else falls back to the default
-  ignoreChecks:
-    typeof raw === 'object' &&
-    raw !== null &&
-    Array.isArray((raw as { ignoreChecks?: unknown }).ignoreChecks)
-      ? (raw as { ignoreChecks: unknown[] }).ignoreChecks.filter(
+export const actSection: ConfigSection<{
+  ignoreChecks: string[]
+  maxRounds: number
+}> = (raw) => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
+    ignoreChecks?: unknown
+    maxRounds?: unknown
+  }
+  return {
+    // only a list of substrings may reach the check filter — anything
+    // else falls back to the default
+    ignoreChecks: Array.isArray(obj.ignoreChecks)
+      ? obj.ignoreChecks.filter(
           // an empty substring would match EVERY check name
           (v): v is string => typeof v === 'string' && v.trim() !== ''
         )
       : [],
-})
+    maxRounds:
+      typeof obj.maxRounds === 'number' &&
+      Number.isInteger(obj.maxRounds) &&
+      obj.maxRounds >= 0
+        ? obj.maxRounds
+        : DEFAULT_CONFIG.act.maxRounds,
+  }
+}
 
 /** Sections core normalizes itself — identical to what the built-in
  *  plugins declare as their configSchema. */
@@ -91,6 +103,9 @@ export interface BroConfig {
      *  gate — advisory-only checks like a flaky external reviewer whose
      *  infra is not this repo's problem. */
     ignoreChecks: string[]
+    /** Inline fix-round cap — past it, remaining threads must defer to
+     *  debt beads instead of another push. 0 disables the cap. */
+    maxRounds: number
   }
   /** External plugin specifiers — relative paths or package names the CLI
    *  resolves from the repo and imports at startup. Each module's default
@@ -103,7 +118,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   personality: 'terse',
   debt: { dir: '.agents/review-debt' },
   sync: { ref: 'refs/bro/data', remote: 'origin' },
-  act: { ignoreChecks: [] },
+  act: { ignoreChecks: [], maxRounds: 3 },
   plugins: [],
 }
 
