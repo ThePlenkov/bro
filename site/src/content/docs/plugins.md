@@ -9,11 +9,14 @@ the same contract — command, skill, config section, plan schema.
 
 ## The contract
 
-A plugin is a plain object — no imports needed, the loader duck-types it:
+A plugin is a plain object — or typed via the side-effect-free
+`@theplenkov/bro/plugin` entry point:
 
 ```ts
 // bro-memory.ts
-export default {
+import { definePlugin } from '@theplenkov/bro/plugin'
+
+export default definePlugin({
   name: 'memory',                    // → `bro memory <args>`
   summary: 'remember what matters',  // shows in `bro plugins` + help
   skill: 'memory',                   // skills/memory/SKILL.md
@@ -25,17 +28,14 @@ export default {
   planSchema: validateMemoryPlan,    // validates `kind = "memory"` plans
   runPlan: runMemoryPlan,            // executes them via `bro run`
   run: (argv) => { /* ... */ },
-}
+})
 ```
 
 Required: `name`, `summary`, `run`. Everything else is optional and
 type-checked at load — wrong field types warn and skip the plugin.
-
-:::note[Typed helpers]
-`definePlugin` / `defineConfig` / `BroPlugin` live in the private core
-package today; a side-effect-free `@theplenkov/bro/plugin` export is
-tracked as upcoming work. Plain objects work either way.
-:::
+`@theplenkov/bro/plugin` also exports `defineConfig`, `makePrinter`, and
+the `BroPlugin` / `BroConfig` / `ConfigSection` / `PlanSchema` types —
+it never runs the CLI on import.
 
 ## Loading external plugins
 
