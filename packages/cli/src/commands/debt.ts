@@ -788,7 +788,7 @@ export async function runDebtCommand(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv
   // zero-arg magic: bare `bro debt` is the damage report
   if (!cmd) {
-    await cmdStatus([])
+    cmdStatus([])
     return
   }
   if (cmd === '--help' || cmd === '-h') {
