@@ -40,6 +40,30 @@ per run.
 Retro plans — `[retro]` what/why/scope/wtf/evidence plus `[[actions]]`
 fanned out to prevention beads by `sink`.
 
+### `act`
+
+Batch thread verdicts on the open PR — the fix/reject/defer triage as
+one plan instead of N `act resolve`/`reply` calls:
+
+```toml
+kind = "act"
+pr = 66                      # optional — names the PR in defer beads
+
+[[threads]]
+thread_id = "PRRT_..."
+action = "resolve"           # resolve | reply | defer
+comment = "fixed in abc123"  # required for reply; optional elsewhere
+
+[[threads]]
+thread_id = "PRRT_..."
+action = "defer"             # → debt bead + reply + resolve
+title = "the bead's title"   # required for defer
+```
+
+`defer` creates a `debt`-labeled bead linked by `--external-ref` to the
+thread — if the bead can't be created, the thread is **not** resolved.
+A failed verdict doesn't abort the rest; failures are listed at the end.
+
 ### `debt`
 
 Batch triage verdicts for the review-debt ledger — replaces N
