@@ -40,6 +40,10 @@ continue?" between items.** The queue is the approval.
   change. Debt batches are the exception, not the rule.
 - **The gate decides done** — `bro act status` green before merge,
   `bro act merge` to land it, branches deleted after.
+- **Pending checks are not a stop** — while a PR waits on CI/reviewers,
+  spawn a background gate-watcher (poll `bro act status`, `bro act merge`
+  on green, report threads verbatim) and take the next bead in a
+  worktree. An idle "waiting" turn is the failure mode this kills.
 - **Stuck ≠ skipped** — if an item can't proceed, say why (blocker,
   missing access, ambiguity), leave it open, and move to the next bead.
   Never silently drop it: `bd update <id> --notes "<why>"` records it.
