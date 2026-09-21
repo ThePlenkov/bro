@@ -26,8 +26,9 @@ default store, so standard installs already have it).
 
 - **Loop until the exit gate is green.** `bro act status` returns non-zero
   with named blockers — keep fixing until it passes; do not self-declare done.
-  **Green means every check green** — `ci_pending` counts all non-AI checks,
-  not just required ones; a failing optional job is still a red box on the PR.
+  **Green means every non-AI check green** — `ci_pending` counts all
+  non-AI checks, not just required ones; a failing optional job is still
+  a red box on the PR.
   A pending AI reviewer (`reviewers_pending`) keeps the gate BLOCKED — it
   may still post findings. A *failed* reviewer check (`reviewers_failing`)
   does **not** block: its exit code is infrastructure (crash, quota,
