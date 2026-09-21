@@ -214,6 +214,24 @@ function readConfigFile(name: string, path: string): unknown {
   }
 }
 
+/** Runs every section schema over the raw file — a throwing schema warns
+ *  and falls back to schema(undefined), never crashes the load. */
+function applySections(
+  config: BroConfig & Record<string, unknown>,
+  raw: Record<string, unknown>,
+  sections: Record<string, ConfigSection<unknown>>
+): void {
+  for (const [key, schema] of Object.entries({ ...CORE_SECTIONS, ...sections })) {
+    try {
+      config[key] = schema(raw[key])
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`warning: bro.config "${key}" invalid (${msg}) — using defaults`)
+      config[key] = schema(undefined)
+    }
+  }
+}
+
 export function loadConfig(
   cwd: string = process.cwd(),
   /** Plugin-registered section schemas — key = configKey, applied over the
@@ -241,15 +259,7 @@ export function loadConfig(
       ...rest,
       stores: normalizeStores(raw as RawConfig),
     }
-    for (const [key, schema] of Object.entries({ ...CORE_SECTIONS, ...sections })) {
-      try {
-        config[key] = schema((raw as Record<string, unknown>)[key])
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        console.error(`warning: bro.config "${key}" invalid (${msg}) — using defaults`)
-        config[key] = schema(undefined)
-      }
-    }
+    applySections(config, raw as Record<string, unknown>, sections)
     return config
   }
   return DEFAULT_CONFIG
