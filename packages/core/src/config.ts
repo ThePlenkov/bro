@@ -280,9 +280,10 @@ export function loadConfig(
       ...rest,
       stores: normalizeStores(raw as RawConfig),
       plugins: Array.isArray((raw as RawConfig).plugins)
-        ? ((raw as RawConfig).plugins as unknown[]).filter(
-            (v): v is string => typeof v === 'string' && v.trim() !== ''
-          )
+        ? ((raw as RawConfig).plugins as unknown[])
+            .filter((v): v is string => typeof v === 'string')
+            .map((v) => v.trim())
+            .filter((v) => v !== '')
         : [],
     }
     applySections(config, raw as Record<string, unknown>, sections)

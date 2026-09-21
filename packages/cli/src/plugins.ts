@@ -4,7 +4,7 @@
  * dispatches argv[0] through this list; nothing is hardcoded in main.
  */
 import { createRequire } from 'node:module'
-import { resolve } from 'node:path'
+import { isAbsolute, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
   actSection,
@@ -128,14 +128,25 @@ export function loadBroConfig(cwd: string = process.cwd()) {
 
 function isPlugin(p: unknown): p is BroPlugin {
   const o = p as BroPlugin
-  return (
-    !!o &&
-    typeof o === 'object' &&
-    typeof o.name === 'string' &&
-    o.name !== '' &&
-    typeof o.summary === 'string' &&
-    typeof o.run === 'function'
-  )
+  if (
+    !o ||
+    typeof o !== 'object' ||
+    typeof o.name !== 'string' ||
+    o.name === '' ||
+    typeof o.summary !== 'string' ||
+    typeof o.run !== 'function'
+  ) {
+    return false
+  }
+  // optional fields must be the right type when present — a truthy
+  // non-function configSchema would crash config loading later
+  if (o.configSchema !== undefined && typeof o.configSchema !== 'function') return false
+  if (o.planSchema !== undefined && typeof o.planSchema !== 'function') return false
+  if (o.runPlan !== undefined && typeof o.runPlan !== 'function') return false
+  if (o.skill !== undefined && typeof o.skill !== 'string') return false
+  if (o.configKey !== undefined && typeof o.configKey !== 'string') return false
+  if (o.argvPrefix !== undefined && !Array.isArray(o.argvPrefix)) return false
+  return true
 }
 
 /** Imports config `plugins` specifiers relative to the repo and registers
@@ -143,16 +154,26 @@ function isPlugin(p: unknown): p is BroPlugin {
  *  one broken plugin must never take the whole CLI down. Returns what was
  *  registered (mainly so tests can unload). */
 export async function loadExternalPlugins(
-  cwd: string = process.cwd()
+  cwd: string = process.cwd(),
+  /** injectable for tests/callers that already loaded config */
+  specs: string[] = loadConfig(cwd).plugins
 ): Promise<BroPlugin[]> {
   const loaded: BroPlugin[] = []
   // createRequire anchored at the repo keeps both `./x.ts` and bare
   // package specifiers resolving from the user's install, not the CLI's
   const req = createRequire(resolve(cwd, 'bro.config.json'))
-  for (const spec of loadConfig(cwd).plugins) {
+  const root = resolve(cwd)
+  for (const spec of specs) {
     let entries: unknown[]
     try {
-      const mod = (await import(pathToFileURL(req.resolve(spec)).href)) as {
+      const resolved = req.resolve(spec)
+      // relative specs must stay inside the repo — `../../etc/evil.ts`
+      // must not become a plugin just because the config says so
+      const rel = relative(root, resolved)
+      if (spec.startsWith('.') && (rel.startsWith('..') || isAbsolute(rel))) {
+        throw new Error('plugin path escapes the repo root')
+      }
+      const mod = (await import(pathToFileURL(resolved).href)) as {
         default?: unknown
       }
       const exported = mod.default ?? mod
@@ -171,7 +192,19 @@ export async function loadExternalPlugins(
         console.error(`warning: plugin "${spec}" name "${entry.name}" is taken — skipped`)
         continue
       }
-      const plugin = { ...entry, external: true }
+      const plugin: BroPlugin = { ...entry, external: true }
+      // a registered configKey is owned — an external plugin must not
+      // shadow a builtin (or earlier external) section schema
+      if (
+        plugin.configKey &&
+        PLUGINS.some((p) => p.configKey === plugin.configKey)
+      ) {
+        console.error(
+          `warning: plugin "${spec}" configKey "${plugin.configKey}" is already owned — its configSchema is ignored`
+        )
+        delete plugin.configKey
+        delete plugin.configSchema
+      }
       PLUGINS.push(plugin)
       loaded.push(plugin)
     }

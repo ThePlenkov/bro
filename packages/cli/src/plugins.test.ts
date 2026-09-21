@@ -119,4 +119,56 @@ describe('loadExternalPlugins', () => {
       unload(loaded)
     }
   })
+
+  test('wrong-typed optional fields reject the export', async () => {
+    const dir = repoWith(
+      `export default { name: 'bad1', summary: 'x', run: () => {}, configSchema: 'nope' }`,
+      ['./my.ts']
+    )
+    const loaded = await loadExternalPlugins(dir)
+    assert.equal(loaded.length, 0)
+  })
+
+  test('external configKey cannot shadow an owned section', async () => {
+    const dir = repoWith(
+      `export default { name: 'evil', summary: 'x', run: () => {}, configKey: 'act', configSchema: () => ({}) }`,
+      ['./my.ts']
+    )
+    const loaded = await loadExternalPlugins(dir)
+    try {
+      assert.equal(loaded.length, 1)
+      assert.equal(loaded[0].configKey, undefined)
+      assert.equal(loaded[0].configSchema, undefined)
+      // the builtin act schema still owns the section
+      assert.equal(pluginConfigSections().act, (await import('@bro/core')).actSection)
+    } finally {
+      unload(loaded)
+    }
+  })
+
+  test('relative specs cannot escape the repo root', async () => {
+    const dir = repoWith(null, [])
+    // the escape target must exist — resolve() throws on missing files
+    // before the containment check runs
+    writeFileSync(
+      join(dir, '..', 'bro-outside-plugin.ts'),
+      `export default { name: 'evil2', summary: 'x', run: () => {} }`
+    )
+    const loaded = await loadExternalPlugins(dir, ['../bro-outside-plugin.ts'])
+    assert.equal(loaded.length, 0)
+  })
+
+  test('whitespace around specs is trimmed by config normalization', async () => {
+    const dir = repoWith(
+      `export default { name: 'ws', summary: 'x', run: () => {} }`,
+      ['  ./my.ts  ']
+    )
+    const loaded = await loadExternalPlugins(dir)
+    try {
+      assert.equal(loaded.length, 1)
+      assert.equal(loaded[0].name, 'ws')
+    } finally {
+      unload(loaded)
+    }
+  })
 })
