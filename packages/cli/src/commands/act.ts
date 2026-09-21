@@ -335,7 +335,8 @@ function deferThread(v: ActThreadVerdict, pr?: number): string {
     '--external-ref',
     v.thread_id,
   ]).trim()
-  replyToThread(v.thread_id, `deferred to ${bead}${v.comment ? ` — ${v.comment}` : ''}`)
+  const reply = `deferred to ${bead}` + (v.comment ? ` — ${v.comment}` : '')
+  replyToThread(v.thread_id, reply)
   resolveReviewThread(v.thread_id)
   return bead
 }

@@ -48,17 +48,19 @@ function parseThread(raw: unknown, i: number, errors: string[]): ActThreadVerdic
       errors.push(`${where}: unknown key "${key}"`)
     }
   }
+  const valid = nonEmpty(raw.thread_id) && nonEmpty(raw.action)
   if (!nonEmpty(raw.thread_id)) {
     errors.push(`${where}: thread_id is required`)
   }
-  if (!nonEmpty(raw.action) || !(ACT_ACTIONS as readonly string[]).includes(raw.action)) {
+  if (nonEmpty(raw.action) && !(ACT_ACTIONS as readonly string[]).includes(raw.action)) {
     errors.push(`${where}: action must be one of ${ACT_ACTIONS.join('|')}`)
+  } else if (!nonEmpty(raw.action)) {
+    errors.push(`${where}: action is required`)
   }
-  if (raw.comment !== undefined && typeof raw.comment !== 'string') {
-    errors.push(`${where}: comment must be a string`)
-  }
-  if (raw.title !== undefined && typeof raw.title !== 'string') {
-    errors.push(`${where}: title must be a string`)
+  for (const f of ['comment', 'title'] as const) {
+    if (raw[f] !== undefined && typeof raw[f] !== 'string') {
+      errors.push(`${where}: ${f} must be a string`)
+    }
   }
   if (raw.action === 'reply' && !nonEmpty(raw.comment)) {
     errors.push(`${where}: reply requires a comment`)
@@ -66,11 +68,11 @@ function parseThread(raw: unknown, i: number, errors: string[]): ActThreadVerdic
   if (raw.action === 'defer' && !nonEmpty(raw.title)) {
     errors.push(`${where}: defer requires a title — the debt bead's`)
   }
-  if (!nonEmpty(raw.thread_id) || !nonEmpty(raw.action)) {
+  if (!valid) {
     return undefined
   }
   return {
-    thread_id: raw.thread_id.trim(),
+    thread_id: (raw.thread_id as string).trim(),
     action: raw.action as ActAction,
     comment: typeof raw.comment === 'string' ? raw.comment : undefined,
     title: typeof raw.title === 'string' ? raw.title : undefined,
