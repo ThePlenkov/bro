@@ -43,4 +43,6 @@ items remain but none are claimable (stop for the human, not done);
 Runtime artifacts (ledger, skills state, memory) shouldn't poison the PR
 diff reviewers read. `bro sync` pushes artifact directories to
 `refs/bro/data` — a git ref outside `refs/heads`, so it never shows up as
-a branch or in a PR.
+a branch or in a PR. It carries `.agents` and the debt ledger — **not**
+`.beads`: the work-item store has its own sync story (`bd sync` /
+committed JSONL), and layering a second transport under it would race it.
