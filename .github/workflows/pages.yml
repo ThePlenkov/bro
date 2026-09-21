@@ -12,7 +12,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: pages
+  # per-ref: a PR build must never cancel an in-flight main deploy
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -31,7 +32,9 @@ jobs:
           cache: npm
           cache-dependency-path: site/package-lock.json
 
-      - run: npm ci
+      # --ignore-scripts: this workflow runs on PRs — dependencies'
+      # install scripts must not execute on untrusted code
+      - run: npm ci --ignore-scripts
       - run: npm run build
 
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3

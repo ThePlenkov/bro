@@ -7,11 +7,16 @@ Commands that take structured input share one envelope: a TOML file with
 a `kind` that routes to the owning plugin.
 
 ```toml
-kind = "retrospect"
-title = "why the deploy broke"
+kind = "retrospect"          # routes to the retrospect plugin
+
+[retro]
+what = "the deploy broke"    # required — one line
+why = "CI ran a different Node than prod"
+scope = "project"
 
 [[actions]]
 title = "pin the Node version in CI"
+sink = "workaround"          # backlog | memory | agentic-documents | …
 ```
 
 ## `bro run <plan.toml>`

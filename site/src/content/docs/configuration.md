@@ -4,8 +4,9 @@ description: bro.config.ts — typed config, validated sections, safe fallbacks.
 ---
 
 `bro.config.ts` (preferred) or `bro.config.json` in the repo root.
-Everything is optional — missing or malformed values fall back to
-defaults instead of crashing.
+Everything is optional — missing keys and wrong-type values fall back
+to per-section defaults instead of crashing. (A syntactically broken
+file is different — `bro setup` will tell you to fix it.)
 
 ```ts
 // bro.config.ts — plain default export; every key optional

@@ -44,6 +44,7 @@ fail-open so a broken bro never wedges a session.
 
 ## The data ref
 
-`bro sync` pushes `.agents/` and the ledger to `refs/bro/data` — git
-memory that travels with the repo but never appears in a PR diff or
-branch list.
+`bro sync` pushes *untracked* artifact dirs (`.agents/`, the ledger) to
+`refs/bro/data` — git memory that travels with the repo but never
+appears in a PR diff or branch list. Files already tracked in the repo
+stay out — the data ref is for runtime state, not a second source tree.
