@@ -33,9 +33,13 @@ describe('evaluateExitGate', () => {
     assert.deepEqual(g.blockers, ['2 unresolved review thread(s)', '1 pending/failing check(s)'])
   })
 
-  it('blocks on pending and failed AI reviewers', () => {
+  it('blocks on pending but not failed AI reviewers', () => {
     assert.equal(evaluateExitGate(open({ reviewersPending: 1 })).ok, false)
-    assert.equal(evaluateExitGate(open({ reviewersFailing: 1 })).ok, false)
+    // a failed reviewer check is infra noise — its findings (if any)
+    // arrive as threads, which block on their own
+    const g = evaluateExitGate(open({ reviewersFailing: 2 }))
+    assert.equal(g.ok, true)
+    assert.equal(g.reviewers_failing, 2)
   })
 
   it('blocks on SAST findings, conflicts, drafts, unknown mergeability', () => {

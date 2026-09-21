@@ -30,9 +30,11 @@ export function evaluateExitGate(state: PrActState): ExitGate {
   if (state.reviewersPending > 0) {
     blockers.push(`${state.reviewersPending} AI reviewer(s) still running — recheck`)
   }
-  if (state.reviewersFailing > 0) {
-    blockers.push(`${state.reviewersFailing} AI reviewer check(s) failed — re-run or push`)
-  }
+  // a *failed* reviewer check is infrastructure (crash/quota/service
+  // outage) — the reviewer's actual findings arrive as threads, which DO
+  // block above. reviewersFailing stays in the report for visibility but
+  // never holds the gate; pending reviewers still wait since they may
+  // post findings.
   if (state.sastPending > 0) {
     blockers.push(`${state.sastPending} SAST finding(s)`)
   }

@@ -159,8 +159,9 @@ export async function fetchPrActState(
 
   // A pending AI reviewer can still open threads — declaring the gate OK
   // while one is running invites exactly the "threads after OK" surprise.
-  // A failed reviewer check is a red job like any other: the review may
-  // never have run, so it blocks until a re-run turns it green.
+  // A *failed* reviewer check is infra noise (crash/quota/outage) — real
+  // findings arrive as threads regardless, so the count is reported for
+  // visibility but the gate does not block on it.
   const reviewersPending = checks.filter(
     (c) => AI_REVIEWER_RE.test(c.name) && c.bucket === 'pending'
   ).length

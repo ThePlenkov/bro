@@ -31,7 +31,10 @@ Developing bro itself: see CONTRIBUTING.md.
 - **Unified plans** — commands that take structured input (act, plan,
   backlog, retro, drill, …) accept a plan payload validated against a
   per-command plan schema; CLI flags alone are not the contract.
-- **Advisory checks** — Kilo Code Review is flaky external infra
-  (rate limits), not this repo's signal. It's excluded from the act
-  gate via `act.ignoreChecks` in bro.config.json; its reviews may still
-  be read when they land, but they never block a merge.
+- **Infra failures don't block** — the gate rule: project-caused
+  failures (code, config, real findings) block; infrastructure failures
+  (quota, outage, runner flakes) never do. A *failed* AI-reviewer check
+  is pure infra — its findings arrive as threads, which block on their
+  own. Reviewers that are *reliably* flaky go on `act.ignoreChecks` in
+  bro.config.json so a stuck pending state doesn't block either —
+  currently `"kilo"` (rate limits; advisory, may still be read).
