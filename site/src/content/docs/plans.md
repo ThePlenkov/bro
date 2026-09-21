@@ -64,6 +64,27 @@ title = "the bead's title"   # required for defer
 thread — if the bead can't be created, the thread is **not** resolved.
 A failed verdict doesn't abort the rest; failures are listed at the end.
 
+### `drill`
+
+A declared descent tree — the investigation shape materializes as open
+drill frames, each filled later via `drill up --result`:
+
+```toml
+kind = "drill"
+title = "why does the cache miss"   # root frame — required
+
+[[steps]]
+title = "check the parser"          # child of root
+
+[[steps]]
+title = "narrow the repro"
+under = 0                           # child of steps[0] — nested trees
+ephemeral = true
+```
+
+`under` indexes an earlier step (no forward refs, no self-parenting).
+Steps also take `description`, `priority`, `type`, `ephemeral`.
+
 ### `debt`
 
 Batch triage verdicts for the review-debt ledger — replaces N
