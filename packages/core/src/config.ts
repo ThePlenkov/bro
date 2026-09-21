@@ -1,10 +1,16 @@
 /**
- * bro configuration. Resolution order: bro.config.json in cwd → defaults.
- * Keep it a JSON file — bro runs as a compiled CLI, importing user TS at
- * runtime is not worth the loader dance for v0.
+ * bro configuration. Resolution order: bro.config.ts → bro.config.json
+ * in cwd → defaults. The .ts file loads synchronously via createRequire —
+ * native type stripping handles it on Node ≥22.18. `export default {…}`
+ * is the canonical form (works in ESM and CJS repos); `module.exports`
+ * only works where the repo is CommonJS. No bro import is required, so
+ * the config resolves under a global install too.
  */
+import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { createRequire } from 'node:module'
+import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const
 export type StoreBackend = (typeof STORE_BACKENDS)[number]
@@ -70,24 +76,113 @@ function normalizeStores(raw: RawConfig): StoreBackend[] {
   return [...DEFAULT_CONFIG.stores]
 }
 
-export function loadConfig(cwd: string = process.cwd()): BroConfig {
-  const path = join(cwd, 'bro.config.json')
-  if (!existsSync(path)) {
-    return DEFAULT_CONFIG
+/** Identity helper for bro.config.ts: `export default defineConfig({…})`
+ *  gives typed sections when @bro/core is a local dep; a plain object
+ *  works without it. Extra keys are plugin sections (see bro-akl). */
+export function defineConfig<
+  T extends Partial<BroConfig> & Record<string, unknown>,
+>(config: T): T {
+  return config
+}
+
+// Unwrap the default export — a real ESM namespace (Module tag) OR tsx's
+// plain {default: …} shape — while `export default null` must still hit
+// the non-object fallback, not leak a wrapper through `??`
+function unwrapDefault(mod: unknown): unknown {
+  if (typeof mod !== 'object' || mod === null) {
+    return mod
   }
+  const m = mod as Record<string | symbol, unknown>
+  const wrapper =
+    m[Symbol.toStringTag] === 'Module' ||
+    Object.keys(m).every((k) => k === 'default' || k === '__esModule')
+  return wrapper && 'default' in m ? m.default : mod
+}
+
+function loadTsConfig(name: string, path: string): unknown {
+  // the published CLI still installs on Node 22.0–22.17 where type
+  // stripping is absent — detect it up front, not by catching the
+  // require failure
+  if (!(process.features as { typescript?: unknown }).typescript) {
+    console.error(
+      `warning: ${name} needs Node >=22.18 (native type stripping) — using jsonl-only stores`
+    )
+    return undefined
+  }
+  // resolving from the config itself keeps any relative imports inside it
+  // rooted at the repo, not at the CLI install location. createRequire
+  // needs an ABSOLUTE referrer — a relative cwd would throw here while
+  // the .json path happily loads.
+  const abs = resolve(path)
+  const req = createRequire(abs)
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8')) as RawConfig
-    // a valid-JSON non-object root ("str", […], 42) is not a config —
-    // spreading it would silently produce garbage keys
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-      console.error('bro.config.json: root must be a JSON object — using jsonl-only stores')
+    return unwrapDefault(req(abs))
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    // Node ≤24's require() treats every .ts as CJS-TS — `export default`
+    // can't transform there. Fall back to a real ESM import() in a
+    // subprocess: same loader semantics, and `import` statements in the
+    // config keep working. Config values must be JSON-serializable.
+    if (
+      !/Transform failed|Expected identifier|Cannot use export|ERR_REQUIRE/.test(msg)
+    ) {
+      throw err
+    }
+    const out = execFileSync(
+      process.execPath,
+      [
+        '--eval',
+        `import(${JSON.stringify(pathToFileURL(abs).href)}).then(m => process.stdout.write(JSON.stringify(m.default ?? null)))`,
+      ],
+      { encoding: 'utf8' }
+    )
+    return JSON.parse(out)
+  }
+}
+
+/** Reads one config file; undefined = failed (caller falls back to
+ *  jsonl-only — a broken file must not silently enable beads). */
+function readConfigFile(name: string, path: string): unknown {
+  try {
+    if (name.endsWith('.ts')) {
+      return loadTsConfig(name, path)
+    }
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    let hint = ` (${msg})`
+    if (/module is not defined|exports is not defined/.test(msg)) {
+      hint = ' (this repo is ESM — use `export default`, not module.exports)'
+    } else if (/Transform failed|Expected identifier/.test(msg)) {
+      hint =
+        ' (this dir resolves as CommonJS — use `module.exports` or add `"type": "module"` to package.json)'
+    }
+    console.error(`warning: ${name} failed to load — using jsonl-only stores${hint}`)
+    return undefined
+  }
+}
+
+export function loadConfig(cwd: string = process.cwd()): BroConfig {
+  for (const name of ['bro.config.ts', 'bro.config.json']) {
+    const path = join(cwd, name)
+    if (!existsSync(path)) {
+      continue
+    }
+    const raw = readConfigFile(name, path)
+    if (raw === undefined) {
       return { ...DEFAULT_CONFIG, stores: ['jsonl'] }
     }
-    const { stores: _s, store: _legacy, ...rest } = raw
+    // a valid non-object root ("str", […], 42) is not a config —
+    // spreading it would silently produce garbage keys
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      console.error(`${name}: root must be an object — using jsonl-only stores`)
+      return { ...DEFAULT_CONFIG, stores: ['jsonl'] }
+    }
+    const { stores: _s, store: _legacy, ...rest } = raw as RawConfig
     return {
       ...DEFAULT_CONFIG,
       ...rest,
-      stores: normalizeStores(raw),
+      stores: normalizeStores(raw as RawConfig),
       debt: { ...DEFAULT_CONFIG.debt, ...(rest.debt ?? {}) },
       // only string fields may reach git arg construction — a null or
       // non-string sync.ref/sync.remote must fall back to the default
@@ -100,10 +195,6 @@ export function loadConfig(cwd: string = process.cwd()): BroConfig {
           : {}),
       },
     }
-  } catch {
-    // Unparseable config ≠ missing config — don't silently enable beads
-    // (and its `bd init` side effects) on a file the user broke.
-    console.error('warning: bro.config.json is not valid JSON — using jsonl-only stores')
-    return { ...DEFAULT_CONFIG, stores: ['jsonl'] }
   }
+  return DEFAULT_CONFIG
 }

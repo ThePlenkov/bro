@@ -2,8 +2,8 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { DEFAULT_CONFIG, loadConfig } from './config.ts'
+import { join, relative } from 'node:path'
+import { DEFAULT_CONFIG, defineConfig, loadConfig } from './config.ts'
 
 function load(raw?: unknown): ReturnType<typeof loadConfig> {
   const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
@@ -93,5 +93,102 @@ describe('loadConfig root shape', () => {
 
   test('non-object sync section falls back to defaults', () => {
     assert.deepEqual(load({ sync: 'x' }).sync, DEFAULT_CONFIG.sync)
+  })
+})
+
+function loadTs(
+  source: string,
+  json?: unknown,
+  pkg: unknown = { type: 'module' }
+): ReturnType<typeof loadConfig> {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
+  writeFileSync(join(dir, 'bro.config.ts'), source)
+  if (json !== undefined) {
+    writeFileSync(join(dir, 'bro.config.json'), JSON.stringify(json))
+  }
+  // a dir with no package.json resolves .ts as CommonJS on Node ≤24 —
+  // `export default` then fails to transform. Tests model real repos,
+  // so the module type is always explicit (default ESM, the canonical form)
+  writeFileSync(join(dir, 'package.json'), JSON.stringify(pkg))
+  return loadConfig(dir)
+}
+
+describe('loadConfig bro.config.ts', () => {
+  test('export default object loads', () => {
+    const cfg = loadTs('export default { personality: "mentor" }')
+    assert.equal(cfg.personality, 'mentor')
+    assert.deepEqual(cfg.stores, ['jsonl', 'beads'])
+  })
+
+  test('module.exports object loads in a CJS repo', () => {
+    const cfg = loadTs(
+      'module.exports = { debt: { dir: "d" } }',
+      undefined,
+      { type: 'commonjs' }
+    )
+    assert.equal(cfg.debt.dir, 'd')
+  })
+
+  test('module.exports in an ESM repo applies or falls back cleanly', () => {
+    // plain Node throws "module is not defined" → jsonl-only; tsx's CJS
+    // interop applies it — either way the result must be a whole config,
+    // never a half-loaded one
+    const cfg = loadTs(
+      'module.exports = { personality: "sarcastic" }',
+      undefined,
+      { type: 'module' }
+    )
+    assert.ok(['sarcastic', 'terse'].includes(cfg.personality))
+  })
+
+  test('.ts with import statements loads', () => {
+    // require() can't take ESM syntax on every runtime — the subprocess
+    // import() fallback must carry configs with real imports
+    const cfg = loadTs(
+      'import { join } from "node:path"\nexport default { personality: join("men", "tor") }'
+    )
+    assert.equal(cfg.personality, join('men', 'tor'))
+  })
+
+  test('.ts wins over .json when both exist', () => {
+    const cfg = loadTs('export default { personality: "sarcastic" }', {
+      personality: 'mentor',
+    })
+    assert.equal(cfg.personality, 'sarcastic')
+  })
+
+  test('non-Error throw falls back cleanly', () => {
+    const cfg = loadTs('throw null')
+    assert.deepEqual(cfg.stores, ['jsonl'])
+  })
+
+  test('broken .ts falls back to jsonl-only, never to .json', () => {
+    const cfg = loadTs('export default {{{', { stores: ['jsonl', 'beads'] })
+    assert.deepEqual(cfg.stores, ['jsonl'])
+  })
+
+  test('non-object .ts export falls back to jsonl-only', () => {
+    const cfg = loadTs('export default 42')
+    assert.deepEqual(cfg.stores, ['jsonl'])
+  })
+
+  test('export default null does not leak the module namespace', () => {
+    const cfg = loadTs('export default null')
+    assert.deepEqual(cfg.stores, ['jsonl'])
+  })
+
+  test('relative cwd resolves bro.config.ts too', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-config-rel-'))
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ type: 'module' }))
+    writeFileSync(join(dir, 'bro.config.ts'), 'export default { personality: "sarcastic" }')
+    const rel = relative(process.cwd(), dir)
+    assert.equal(loadConfig(rel).personality, 'sarcastic')
+  })
+
+  test('defineConfig is a pass-through', () => {
+    assert.deepEqual(defineConfig({ personality: 'mentor', extra: 1 }), {
+      personality: 'mentor',
+      extra: 1,
+    })
   })
 })
