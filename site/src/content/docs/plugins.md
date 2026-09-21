@@ -28,7 +28,7 @@ export default definePlugin({
   planSchema: validateMemoryPlan,    // validates `kind = "memory"` plans
   runPlan: runMemoryPlan,            // executes them via `bro run`
   run: (argv) => { /* ... */ },
-}
+})
 ```
 
 Required: `name`, `summary`, `run`. Everything else is optional and
