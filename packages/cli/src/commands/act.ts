@@ -9,6 +9,7 @@
  */
 import { readFileSync } from 'node:fs'
 import { ensureGhAuth, gh, gitTry, loadConfig, resolveRepo } from '@bro/core'
+import { fetchReviewThreads } from '@bro/debt'
 import { isAncestor } from './cleanup.ts'
 import {
   evaluateExitGate,
@@ -197,14 +198,15 @@ function deleteMergedLocalBranch(headRef: string, headSha: string): void {
 async function cmdThreads(argv: string[]): Promise<void> {
   ensureGhAuth()
   const t = resolvePr(argv)
-  const state = await fetchPrActState(
-    { owner: t.owner, repo: t.repoName, pr: t.pr },
-    { ignoreChecks: loadConfig().act.ignoreChecks }
-  )
-  for (const thread of state.threads) {
+  // threads only needs the threads API — fetching checks/SAST here would
+  // make a read-only listing fail on unrelated check-service flakes
+  const threads = await fetchReviewThreads({ owner: t.owner, repo: t.repoName, pr: t.pr })
+  let open = 0
+  for (const thread of threads) {
     if (thread.isResolved) {
       continue
     }
+    open += 1
     const c = thread.comments.nodes[0]
     const author = c?.author?.login ?? '-'
     const path = c?.path ?? '-'
@@ -212,7 +214,7 @@ async function cmdThreads(argv: string[]): Promise<void> {
     const body = (c?.body ?? '').replace(/[\n\t]/g, ' ').slice(0, 120)
     console.log(`${thread.id}\t${author}\t${path}:${line}\t${body}`)
   }
-  console.error(`act threads: ${state.openThreads} unresolved`)
+  console.error(`act threads: ${open} unresolved`)
 }
 
 function threadArg(argv: string[]): string {

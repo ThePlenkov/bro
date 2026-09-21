@@ -96,7 +96,7 @@ describe('loadConfig root shape', () => {
   })
 
   test('act.ignoreChecks keeps only strings', () => {
-    const cfg = load({ act: { ignoreChecks: ['kilo', 42, 'flaky-bot'] } })
+    const cfg = load({ act: { ignoreChecks: ['kilo', 42, 'flaky-bot', '', '  '] } })
     assert.deepEqual(cfg.act.ignoreChecks, ['kilo', 'flaky-bot'])
   })
 

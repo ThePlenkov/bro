@@ -209,7 +209,8 @@ export function loadConfig(cwd: string = process.cwd()): BroConfig {
           rest.act !== null &&
           Array.isArray((rest.act as { ignoreChecks?: unknown }).ignoreChecks)
             ? (rest.act as { ignoreChecks: unknown[] }).ignoreChecks.filter(
-                (v): v is string => typeof v === 'string'
+                // an empty substring would match EVERY check name
+                (v): v is string => typeof v === 'string' && v.trim() !== ''
               )
             : [],
       },

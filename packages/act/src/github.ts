@@ -139,7 +139,9 @@ export async function fetchPrActState(
   const threads = await fetchReviewThreads(target)
   // Advisory checks (act.ignoreChecks) drop out of the gate entirely —
   // a flaky external reviewer must not hold merges hostage
-  const ignored = (opts?.ignoreChecks ?? []).map((s) => s.toLowerCase())
+  const ignored = (opts?.ignoreChecks ?? [])
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s !== '')
   const checks = fetchChecks(target, false).filter(
     (c) => !ignored.some((i) => c.name.toLowerCase().includes(i))
   )
