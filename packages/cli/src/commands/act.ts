@@ -320,11 +320,14 @@ function deferThread(v: ActThreadVerdict, pr?: number): string {
   const desc = pr
     ? `deferred from PR #${pr} thread ${v.thread_id}`
     : `deferred thread ${v.thread_id}`
+  if (!v.title) {
+    throw new Error(`defer verdict for ${v.thread_id} has no title`)
+  }
   const bead = bd([
     'create',
     '--silent',
     '--title',
-    v.title!,
+    v.title,
     '-l',
     'debt',
     '-d',
