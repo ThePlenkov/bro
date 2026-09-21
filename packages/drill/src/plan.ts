@@ -43,12 +43,10 @@ const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim() 
 const isPosInt = (v: unknown): v is number =>
   typeof v === 'number' && Number.isInteger(v) && v > 0
 
-function parseStep(raw: unknown, i: number, errors: string[]): DrillStep | undefined {
-  const where = `steps[${i}]`
-  if (!isRecord(raw)) {
-    errors.push(`${where}: must be a table`)
-    return undefined
-  }
+const isInt = (v: unknown): v is number =>
+  typeof v === 'number' && Number.isInteger(v) && v >= 0
+
+function checkStep(raw: Record<string, unknown>, where: string, errors: string[]): void {
   for (const key of Object.keys(raw)) {
     if (!STEP_KEYS.has(key)) {
       errors.push(`${where}: unknown key "${key}"`)
@@ -56,22 +54,32 @@ function parseStep(raw: unknown, i: number, errors: string[]): DrillStep | undef
   }
   if (!nonEmpty(raw.title)) {
     errors.push(`${where}: title is required`)
-    return undefined
   }
-  if (raw.under !== undefined && (typeof raw.under !== 'number' || !Number.isInteger(raw.under) || raw.under < 0)) {
+  if (raw.under !== undefined && !isInt(raw.under)) {
     errors.push(`${where}: under must be a non-negative step index`)
+  }
+  for (const f of ['description', 'type'] as const) {
+    if (raw[f] !== undefined && typeof raw[f] !== 'string') {
+      errors.push(`${where}: ${f} must be a string`)
+    }
   }
   if (raw.ephemeral !== undefined && typeof raw.ephemeral !== 'boolean') {
     errors.push(`${where}: ephemeral must be a boolean`)
   }
-  if (raw.description !== undefined && typeof raw.description !== 'string') {
-    errors.push(`${where}: description must be a string`)
-  }
   if (raw.priority !== undefined && !isPosInt(raw.priority)) {
     errors.push(`${where}: priority must be a positive integer`)
   }
-  if (raw.type !== undefined && typeof raw.type !== 'string') {
-    errors.push(`${where}: type must be a string`)
+}
+
+function parseStep(raw: unknown, i: number, errors: string[]): DrillStep | undefined {
+  const where = `steps[${i}]`
+  if (!isRecord(raw)) {
+    errors.push(`${where}: must be a table`)
+    return undefined
+  }
+  checkStep(raw, where, errors)
+  if (!nonEmpty(raw.title)) {
+    return undefined
   }
   return {
     title: raw.title.trim(),
