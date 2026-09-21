@@ -3,6 +3,9 @@
  * skill + owned config section (+ plan schema later, bro-cap). The CLI
  * dispatches argv[0] through this list; nothing is hardcoded in main.
  */
+import { createRequire } from 'node:module'
+import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import {
   actSection,
   debtSection,
@@ -98,8 +101,9 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'List registered plugins — name, skill, config section',
     run() {
       for (const p of PLUGINS) {
+        const src = p.external ? 'ext' : 'core'
         console.log(
-          `${p.name.padEnd(12)} ${(p.skill ?? '-').padEnd(10)} ${(p.configKey ?? '-').padEnd(8)} ${p.summary}`
+          `${p.name.padEnd(12)} ${(p.skill ?? '-').padEnd(10)} ${(p.configKey ?? '-').padEnd(8)} ${src.padEnd(4)} ${p.summary}`
         )
       }
     },
@@ -120,4 +124,57 @@ export function pluginConfigSections(): Record<string, ConfigSection<unknown>> {
 /** loadConfig + registered plugin sections — the CLI's config entrypoint. */
 export function loadBroConfig(cwd: string = process.cwd()) {
   return loadConfig(cwd, pluginConfigSections())
+}
+
+function isPlugin(p: unknown): p is BroPlugin {
+  const o = p as BroPlugin
+  return (
+    !!o &&
+    typeof o === 'object' &&
+    typeof o.name === 'string' &&
+    o.name !== '' &&
+    typeof o.summary === 'string' &&
+    typeof o.run === 'function'
+  )
+}
+
+/** Imports config `plugins` specifiers relative to the repo and registers
+ *  valid BroPlugin exports. A bad module or export warns and is skipped —
+ *  one broken plugin must never take the whole CLI down. Returns what was
+ *  registered (mainly so tests can unload). */
+export async function loadExternalPlugins(
+  cwd: string = process.cwd()
+): Promise<BroPlugin[]> {
+  const loaded: BroPlugin[] = []
+  // createRequire anchored at the repo keeps both `./x.ts` and bare
+  // package specifiers resolving from the user's install, not the CLI's
+  const req = createRequire(resolve(cwd, 'bro.config.json'))
+  for (const spec of loadConfig(cwd).plugins) {
+    let entries: unknown[]
+    try {
+      const mod = (await import(pathToFileURL(req.resolve(spec)).href)) as {
+        default?: unknown
+      }
+      const exported = mod.default ?? mod
+      entries = Array.isArray(exported) ? exported : [exported]
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`warning: plugin "${spec}" failed to load (${msg}) — skipped`)
+      continue
+    }
+    for (const entry of entries) {
+      if (!isPlugin(entry)) {
+        console.error(`warning: plugin "${spec}" export is not a BroPlugin — skipped`)
+        continue
+      }
+      if (PLUGINS.some((p) => p.name === entry.name)) {
+        console.error(`warning: plugin "${spec}" name "${entry.name}" is taken — skipped`)
+        continue
+      }
+      const plugin = { ...entry, external: true }
+      PLUGINS.push(plugin)
+      loaded.push(plugin)
+    }
+  }
+  return loaded
 }

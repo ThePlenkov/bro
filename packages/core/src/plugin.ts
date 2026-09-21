@@ -25,6 +25,9 @@ export interface BroPlugin {
   configSchema?: ConfigSection<unknown>
   /** Not listed in usage — plumbing commands like `hooks`. */
   hidden?: boolean
+  /** Set by the registry when the plugin came from config `plugins` —
+   *  not part of the author-facing contract. */
+  external?: boolean
 }
 
 /** Identity helper — typed declaration sites, same role as defineConfig. */
