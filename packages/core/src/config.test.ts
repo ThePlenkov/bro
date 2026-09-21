@@ -94,6 +94,15 @@ describe('loadConfig root shape', () => {
   test('non-object sync section falls back to defaults', () => {
     assert.deepEqual(load({ sync: 'x' }).sync, DEFAULT_CONFIG.sync)
   })
+
+  test('act.ignoreChecks keeps only strings', () => {
+    const cfg = load({ act: { ignoreChecks: ['kilo', 42, 'flaky-bot', '', '  '] } })
+    assert.deepEqual(cfg.act.ignoreChecks, ['kilo', 'flaky-bot'])
+  })
+
+  test('non-object act section falls back to defaults', () => {
+    assert.deepEqual(load({ act: 'x' }).act, DEFAULT_CONFIG.act)
+  })
 })
 
 function loadTs(
