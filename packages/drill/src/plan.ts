@@ -118,9 +118,9 @@ export function parseDrillPlan(doc: unknown, source = 'plan'): DrillPlan {
       if (!s) {
         return
       }
-      // under must reference an already-declared step — no forward refs,
-      // no self-parenting
-      if (s.under !== undefined && s.under >= i) {
+      // under indexes the parsed steps array — steps.length, not the raw
+      // index i, so a step that failed validation can't be referenced
+      if (s.under !== undefined && s.under >= steps.length) {
         errors.push(`steps[${i}]: under must index a previous step`)
       }
       steps.push(s)
