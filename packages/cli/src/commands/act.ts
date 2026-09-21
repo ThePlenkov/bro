@@ -8,7 +8,7 @@
  *   reply   --thread ID --comment TEXT | --file TSV
  */
 import { readFileSync } from 'node:fs'
-import { ensureGhAuth, bd, checkBeads, gh, gitTry, resolveRepo } from '@bro/core'
+import { ensureGhAuth, bd, gh, gitTry, resolveRepo } from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
 import { fetchReviewThreads } from '@bro/debt'
 import { isAncestor } from './cleanup.ts'
@@ -344,9 +344,9 @@ function deferThread(v: ActThreadVerdict, pr?: number): string {
  *  One bad verdict doesn't abort the rest; failures list at the end. */
 export function applyActPlan(plan: ActPlan): void {
   ensureGhAuth()
-  if (plan.threads.some((t) => t.action === 'defer')) {
-    checkBeads()
-  }
+  // no upfront beads check — a defer without bd/.beads fails that one
+  // verdict (thread stays unresolved, per the skill's fallback rule)
+  // instead of blocking every other verdict in the plan
   const failed: string[] = []
   for (const v of plan.threads) {
     try {
