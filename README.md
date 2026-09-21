@@ -1,6 +1,6 @@
 # bro 🤝
 
-> Your agent's sidekick. Skills are instructions — **bro is the hands.**
+> Your agent's sidekick. Skills are instructions — **bro is the brain.**
 >
 > **Docs + landing:** https://theplenkov.github.io/bro/
 
