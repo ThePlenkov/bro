@@ -19,7 +19,7 @@ default store, so standard installs already have it).
 | `bro act status [PR] [--json]` | PR state + **exit gate** — open threads, CI failures, SAST findings. Exits non-zero while blocked |
 | `bro act threads [PR]` | Unresolved review threads, TSV |
 | `bro act wait [PR] [--interval S] [--timeout M] [--merge]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green |
-| `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin]` | Merge **only if the exit gate is green** — BLOCKED refuses and names blockers |
+| `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin]` | Merge **only if the exit gate is green** — serialized on the beads merge slot; BLOCKED refuses and names blockers |
 | `bro act resolve --thread ID [--comment T]` | Resolve a thread (reply first if comment given) |
 | `bro act reply --thread ID --comment T` | Reply without resolving (`--file TSV` for batch) |
 
@@ -59,8 +59,11 @@ default store, so standard installs already have it).
   remaining findings go to debt beads instead of another inline-fix push.
 - **Merge through `bro act merge`, never `gh pr merge` directly.** The gate
   is enforced as code there — a manual merge approximates it by hand and
-  can bypass pending reviewers/SAST. Only a user-directed override justifies
-  merging around a BLOCKED gate.
+  can bypass pending reviewers/SAST. `bro act merge` also serializes the
+  merge on the beads merge slot (`bd merge-slot`): a held slot means another
+  session is mid-merge — wait for `bd merge-slot check` to report available;
+  a crashed holder is freed with `bd merge-slot release`. Only a
+  user-directed override justifies merging around a BLOCKED gate.
 - **Wait via `bro act wait <PR>` in the background, never a bespoke poll
   loop.** The command polls the exit gate until nothing is pending —
   green, settled blockers (threads, failures), or `--timeout` — then
