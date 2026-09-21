@@ -15,7 +15,8 @@
     "lint": "nx run-many -t lint",
     "affected": "nx affected -t build test lint --exclude=skills-*,plugins-*-skills-*",
     "build:nx-plugins": "tsx scripts/build-nx-plugins.ts",
-    "patch:nx": "tsx scripts/patch-nx-submodule.ts"
+    "patch:nx": "tsx scripts/patch-nx-submodule.ts",
+    "typecheck": "nx run-many -t typecheck --exclude=skills-*,plugins-*-skills-*"
   },
   "devDependencies": {
     "@nx-devkit/skill": "file:./vendor/nx.ts/packages/skill",

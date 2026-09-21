@@ -1,6 +1,11 @@
 {
   "$schema": "./node_modules/nx/schemas/nx-schema.json",
   "defaultBase": "main",
+  "targetDefaults": {
+    "typecheck": {
+      "dependsOn": ["^build"]
+    }
+  },
   "release": {
     "projects": ["@theplenkov/bro"],
     "version": {
