@@ -3,6 +3,9 @@
  * skill + owned config section (+ plan schema later, bro-cap). The CLI
  * dispatches argv[0] through this list; nothing is hardcoded in main.
  */
+import { createRequire } from 'node:module'
+import { isAbsolute, relative, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import {
   actSection,
   debtSection,
@@ -98,8 +101,9 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'List registered plugins — name, skill, config section',
     run() {
       for (const p of PLUGINS) {
+        const src = p.external ? 'ext' : 'core'
         console.log(
-          `${p.name.padEnd(12)} ${(p.skill ?? '-').padEnd(10)} ${(p.configKey ?? '-').padEnd(8)} ${p.summary}`
+          `${p.name.padEnd(12)} ${(p.skill ?? '-').padEnd(10)} ${(p.configKey ?? '-').padEnd(8)} ${src.padEnd(4)} ${p.summary}`
         )
       }
     },
@@ -120,4 +124,103 @@ export function pluginConfigSections(): Record<string, ConfigSection<unknown>> {
 /** loadConfig + registered plugin sections — the CLI's config entrypoint. */
 export function loadBroConfig(cwd: string = process.cwd()) {
   return loadConfig(cwd, pluginConfigSections())
+}
+
+function isPlugin(p: unknown): p is BroPlugin {
+  const o = p as BroPlugin
+  if (
+    !o ||
+    typeof o !== 'object' ||
+    typeof o.name !== 'string' ||
+    o.name === '' ||
+    typeof o.summary !== 'string' ||
+    typeof o.run !== 'function'
+  ) {
+    return false
+  }
+  // optional fields must be the right type when present — a truthy
+  // non-function configSchema would crash config loading later
+  if (o.configSchema !== undefined && typeof o.configSchema !== 'function') return false
+  if (o.planSchema !== undefined && typeof o.planSchema !== 'function') return false
+  if (o.runPlan !== undefined && typeof o.runPlan !== 'function') return false
+  if (o.skill !== undefined && typeof o.skill !== 'string') return false
+  if (o.configKey !== undefined && typeof o.configKey !== 'string') return false
+  if (o.argvPrefix !== undefined && !Array.isArray(o.argvPrefix)) return false
+  return true
+}
+
+/** Imports one specifier → exported candidate entries, or undefined on
+ *  failure (warned). Relative specs must resolve inside the repo root —
+ *  `../../etc/evil.ts` must not become a plugin just because config says so. */
+async function importPluginModule(
+  spec: string,
+  req: ReturnType<typeof createRequire>,
+  root: string
+): Promise<unknown[] | undefined> {
+  try {
+    const resolved = req.resolve(spec)
+    const rel = relative(root, resolved)
+    if (spec.startsWith('.') && (rel.startsWith('..') || isAbsolute(rel))) {
+      throw new Error('plugin path escapes the repo root')
+    }
+    const mod = (await import(pathToFileURL(resolved).href)) as {
+      default?: unknown
+    }
+    const exported = mod.default ?? mod
+    return Array.isArray(exported) ? exported : [exported]
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`warning: plugin "${spec}" failed to load (${msg}) — skipped`)
+    return undefined
+  }
+}
+
+/** Validates + registers one export; undefined = rejected (warned). */
+function registerExternal(entry: unknown, spec: string): BroPlugin | undefined {
+  if (!isPlugin(entry)) {
+    console.error(`warning: plugin "${spec}" export is not a BroPlugin — skipped`)
+    return undefined
+  }
+  if (PLUGINS.some((p) => p.name === entry.name)) {
+    console.error(`warning: plugin "${spec}" name "${entry.name}" is taken — skipped`)
+    return undefined
+  }
+  const plugin: BroPlugin = { ...entry, external: true }
+  // a registered configKey is owned — an external plugin must not
+  // shadow a builtin (or earlier external) section schema
+  if (plugin.configKey && PLUGINS.some((p) => p.configKey === plugin.configKey)) {
+    console.error(
+      `warning: plugin "${spec}" configKey "${plugin.configKey}" is already owned — its configSchema is ignored`
+    )
+    delete plugin.configKey
+    delete plugin.configSchema
+  }
+  PLUGINS.push(plugin)
+  return plugin
+}
+
+/** Imports config `plugins` specifiers relative to the repo and registers
+ *  valid BroPlugin exports. A bad module or export warns and is skipped —
+ *  one broken plugin must never take the whole CLI down. Returns what was
+ *  registered (mainly so tests can unload). */
+export async function loadExternalPlugins(
+  cwd: string = process.cwd(),
+  /** injectable for tests/callers that already loaded config */
+  specs: string[] = loadConfig(cwd).plugins
+): Promise<BroPlugin[]> {
+  const loaded: BroPlugin[] = []
+  // createRequire anchored at the repo keeps both `./x.ts` and bare
+  // package specifiers resolving from the user's install, not the CLI's
+  const req = createRequire(resolve(cwd, 'bro.config.json'))
+  const root = resolve(cwd)
+  for (const spec of specs) {
+    const entries = await importPluginModule(spec, req, root)
+    for (const entry of entries ?? []) {
+      const plugin = registerExternal(entry, spec)
+      if (plugin) {
+        loaded.push(plugin)
+      }
+    }
+  }
+  return loaded
 }

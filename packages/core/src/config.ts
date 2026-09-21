@@ -92,6 +92,10 @@ export interface BroConfig {
      *  infra is not this repo's problem. */
     ignoreChecks: string[]
   }
+  /** External plugin specifiers — relative paths or package names the CLI
+   *  resolves from the repo and imports at startup. Each module's default
+   *  export must be a BroPlugin (or an array of them). */
+  plugins: string[]
 }
 
 export const DEFAULT_CONFIG: BroConfig = {
@@ -100,11 +104,14 @@ export const DEFAULT_CONFIG: BroConfig = {
   debt: { dir: '.agents/review-debt' },
   sync: { ref: 'refs/bro/data', remote: 'origin' },
   act: { ignoreChecks: [] },
+  plugins: [],
 }
 
-interface RawConfig extends Partial<Omit<BroConfig, 'stores'>> {
+interface RawConfig extends Partial<Omit<BroConfig, 'stores' | 'plugins'>> {
   /** New: explicit backend list. */
   stores?: unknown
+  /** External plugin specifiers — normalized to a string list. */
+  plugins?: unknown
   /** Legacy v0.1.0 field — 'beads'/'both' meant jsonl + beads projection. */
   store?: string
 }
@@ -267,11 +274,17 @@ export function loadConfig(
       console.error(`${name}: root must be an object — using jsonl-only stores`)
       return fallback(['jsonl'])
     }
-    const { stores: _s, store: _legacy, ...rest } = raw as RawConfig
+    const { stores: _s, store: _legacy, plugins: _p, ...rest } = raw as RawConfig
     const config: BroConfig & Record<string, unknown> = {
       ...DEFAULT_CONFIG,
       ...rest,
       stores: normalizeStores(raw as RawConfig),
+      plugins: Array.isArray((raw as RawConfig).plugins)
+        ? ((raw as RawConfig).plugins as unknown[])
+            .filter((v): v is string => typeof v === 'string')
+            .map((v) => v.trim())
+            .filter((v) => v !== '')
+        : [],
     }
     applySections(config, raw as Record<string, unknown>, sections)
     return config

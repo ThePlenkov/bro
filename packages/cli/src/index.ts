@@ -9,7 +9,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { PLUGINS } from './plugins.ts'
+import { loadExternalPlugins, PLUGINS } from './plugins.ts'
 
 // Single source of truth is package.json — dist/index.js sits one dir
 // below it in both the workspace and the published tarball.
@@ -51,6 +51,10 @@ async function main(): Promise<void> {
     console.log(VERSION)
     return
   }
+  // config `plugins` join the registry before help/dispatch — a listed
+  // external command must be dispatchable, and it should show in --help
+  await loadExternalPlugins()
+
   if (cmd === '--help' || cmd === '-h') {
     usage(0)
   }
