@@ -1,0 +1,93 @@
+---
+title: bro
+description: Your agent's sidekick — skills are instructions, bro is the hands.
+template: splash
+hero:
+  tagline: Skills are instructions. <strong>bro is the hands.</strong>
+  image:
+    html: "🤝"
+  actions:
+    - text: Get started
+      link: /bro/getting-started/
+      icon: right-arrow
+      variant: primary
+    - text: GitHub
+      link: https://github.com/ThePlenkov/bro
+      icon: external
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components'
+
+## Why
+
+Review bots dump comments on your PRs. You merge, the threads stay
+unresolved, the findings evaporate. Your agent can read a PR — but can it
+tell which merged PRs still have review threads rotting in them? Can it
+say "what's left"?
+
+Now it can.
+
+## What
+
+bro is a CLI that carries agent-workflow mechanics so prompts don't have
+to. Every capability ships the same way: **a command, a skill, a config
+section, and a plan schema**.
+
+<CardGrid>
+  <Card title="Review debt" icon="warning">
+    `bro debt` harvests unresolved threads on merged PRs into a ledger,
+    labels what it swept, and feeds the fix queue. Nothing gets scanned
+    twice, nothing hides.
+  </Card>
+  <Card title="Exit gate as code" icon="approve-check">
+    `bro act status` is the merge gate — open threads, pending CI, SAST
+    findings, round caps. Non-zero while blocked; `bro act merge` refuses
+    to bypass it.
+  </Card>
+  <Card title="Scoped descent" icon="magnifier">
+    `bro drill` frames a problem, descends into sub-frames, and ascends
+    only with `--result` — plus a prevention plan so it doesn't recur.
+  </Card>
+  <Card title="Retros that land" icon="document">
+    `bro wtf` captures the complaint verbatim; `bro retrospect` turns it
+    into a retro bead with prevention actions — not a chat apology.
+  </Card>
+</CardGrid>
+
+## With bro / without bro
+
+<div class="versus">
+  <div class="without">
+    <h3>Without bro</h3>
+    <ul>
+      <li>"Did the bot leave anything?" — scroll the PR and guess</li>
+      <li>Fix loop ends when the agent feels done</li>
+      <li>Deferred findings live in a promise nobody tracks</li>
+      <li>Every push re-triggers reviewers; the loop never converges</li>
+      <li>Post-mortem is a paragraph in chat, forgotten tomorrow</li>
+      <li>Each agent's memory is a bespoke snowflake</li>
+    </ul>
+  </div>
+  <div class="with">
+    <h3>With bro</h3>
+    <ul>
+      <li><code>bro debt prs</code> — the queue, labeled and counted</li>
+      <li><code>bro act status</code> — a gate that exits non-zero</li>
+      <li>Deferrals become debt beads linked to their thread</li>
+      <li><code>act.maxRounds</code> caps fix rounds, then mandates deferral</li>
+      <li><code>bro retrospect</code> writes prevention beads you can schedule</li>
+      <li>Stores and plugins are swappable — bring your own memory</li>
+    </ul>
+  </div>
+</div>
+
+## How
+
+```bash
+npx -y @theplenkov/bro setup        # wire bro into the repo
+npx -y @theplenkov/bro debt collect # sweep merged-PR findings
+npx -y @theplenkov/bro act status   # the gate, as code
+```
+
+One plugin install gives the same skills to Devin, Claude Code, and Codex.
+bro collects and carries — the verdict is yours.
