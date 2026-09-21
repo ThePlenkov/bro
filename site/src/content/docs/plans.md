@@ -33,6 +33,32 @@ per run.
 
 `bro retrospect schema` prints the commented template for its kind.
 
+## Kinds
+
+### `retrospect`
+
+Retro plans — `[retro]` what/why/scope/wtf/evidence plus `[[actions]]`
+fanned out to prevention beads by `sink`.
+
+### `debt`
+
+Batch triage verdicts for the review-debt ledger — replaces N
+interactive `bro debt set` calls:
+
+```toml
+kind = "debt"
+
+[[verdicts]]
+thread_id = "PRRT_..."
+status = "wontfix"           # open|claimed|done|wontfix|duplicate
+notes = "infra flake, not ours"
+
+[[verdicts]]
+thread_id = "PRRT_..."
+status = "done"
+fix_pr = 58                  # the PR that landed the fix
+```
+
 ## Why TOML
 
 Diff-friendly, comment-friendly, and forgiving for agents writing it by
