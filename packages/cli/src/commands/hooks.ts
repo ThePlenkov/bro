@@ -30,6 +30,7 @@ import {
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { ghJson, resolveRepo } from '@bro/core'
+import { loadBroConfig } from '../plugins.ts'
 import { evaluateExitGate, fetchPrActState } from '@bro/act'
 import { bdJson, currentFrame } from '@bro/drill'
 import { readDebtRecords } from '@bro/debt'
@@ -213,7 +214,10 @@ async function actGateLine(owner?: string, repo?: string, pr?: number): Promise<
       }
       ;[o, r] = parts
     }
-    const state = await fetchPrActState({ owner: o!, repo: r!, pr: n! })
+    const state = await fetchPrActState(
+      { owner: o!, repo: r!, pr: n! },
+      { ignoreChecks: loadBroConfig().act.ignoreChecks }
+    )
     const gate = evaluateExitGate(state)
     return gate.ok
       ? `pr #${state.pr}: gate OK`
@@ -420,7 +424,10 @@ async function prBlockersLine(): Promise<string | null> {
       return null
     }
     const [owner, repoName] = parts
-    const state = await fetchPrActState({ owner, repo: repoName!, pr: view.number })
+    const state = await fetchPrActState(
+      { owner, repo: repoName!, pr: view.number },
+      { ignoreChecks: loadBroConfig().act.ignoreChecks }
+    )
     // The same gate `bro act status` enforces: open threads, pending/failed
     // CI and AI reviewers, SAST findings, unknown mergeability, BEHIND.
     const gate = evaluateExitGate(state)

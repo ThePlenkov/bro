@@ -23,8 +23,15 @@ export type Personality = (typeof PERSONALITIES)[number]
 export type ConfigSection<T> = (raw: unknown) => T
 
 export const debtSection: ConfigSection<{ dir: string }> = (raw) => ({
-  ...DEFAULT_CONFIG.debt,
-  ...(typeof raw === 'object' && raw !== null ? raw : {}),
+  // dir feeds path.join — a non-string or empty value must fall back to
+  // the default, not throw mid-command
+  dir:
+    typeof raw === 'object' &&
+    raw !== null &&
+    typeof (raw as { dir?: unknown }).dir === 'string' &&
+    (raw as { dir: string }).dir.trim() !== ''
+      ? (raw as { dir: string }).dir
+      : DEFAULT_CONFIG.debt.dir,
 })
 
 export const syncSection: ConfigSection<{ ref: string; remote: string }> = (
@@ -238,6 +245,13 @@ export function loadConfig(
    *  raw file. A throwing schema falls back to schema(undefined). */
   sections: Record<string, ConfigSection<unknown>> = {}
 ): BroConfig & Record<string, unknown> {
+  // every exit path applies section schemas — a registered plugin
+  // section must resolve to its defaults even with no usable config file
+  const fallback = (stores: StoreBackend[]): BroConfig & Record<string, unknown> => {
+    const config = { ...DEFAULT_CONFIG, stores } as BroConfig & Record<string, unknown>
+    applySections(config, {}, sections)
+    return config
+  }
   for (const name of ['bro.config.ts', 'bro.config.json']) {
     const path = join(cwd, name)
     if (!existsSync(path)) {
@@ -245,13 +259,13 @@ export function loadConfig(
     }
     const raw = readConfigFile(name, path)
     if (raw === undefined) {
-      return { ...DEFAULT_CONFIG, stores: ['jsonl'] }
+      return fallback(['jsonl'])
     }
     // a valid non-object root ("str", […], 42) is not a config —
     // spreading it would silently produce garbage keys
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
       console.error(`${name}: root must be an object — using jsonl-only stores`)
-      return { ...DEFAULT_CONFIG, stores: ['jsonl'] }
+      return fallback(['jsonl'])
     }
     const { stores: _s, store: _legacy, ...rest } = raw as RawConfig
     const config: BroConfig & Record<string, unknown> = {
@@ -262,5 +276,5 @@ export function loadConfig(
     applySections(config, raw as Record<string, unknown>, sections)
     return config
   }
-  return DEFAULT_CONFIG
+  return fallback([...DEFAULT_CONFIG.stores])
 }
