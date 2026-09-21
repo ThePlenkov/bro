@@ -286,8 +286,7 @@ export function runWorkCommand(argv: string[]): void {
 /** Absolute git dir for cwd — used by hooks to tell linked worktrees from
  *  the primary checkout without re-parsing `worktree list`. */
 export function gitDirOf(cwd: string): string | null {
-  // NOSONAR javascript:S4036 — git is a required runtime dep; fixed argv
-  const res = spawnSync('git', ['-C', cwd, 'rev-parse', '--absolute-git-dir'], {
+  const res = spawnSync('git', ['-C', cwd, 'rev-parse', '--absolute-git-dir'], { // NOSONAR — git is a required runtime dep; fixed argv
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
   })

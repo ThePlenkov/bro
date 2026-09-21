@@ -459,14 +459,13 @@ async function emitStopGate(input: HookInput): Promise<void> {
   // work gate: a session that created/used a worktree must not abandon a
   // dirty one — clean worktrees get a leave-hint instead of a block
   if (armed.has('work')) {
-    const block = workGateBlock()
-    if (block) {
-      emit({ decision: 'block', reason: block })
+    const gate = workGate()
+    if (gate.block) {
+      emit({ decision: 'block', reason: gate.block })
       return
     }
-    const gd = gitDirOf(process.cwd())
-    if (gd && isLinkedGitDir(gd)) {
-      hints.push('bro: still inside a linked worktree — `bro work leave` when done')
+    if (gate.hint) {
+      hints.push(gate.hint)
     }
   }
   const pr = await prBlockersLine()
@@ -489,17 +488,22 @@ async function emitStopGate(input: HookInput): Promise<void> {
   }
 }
 
-/** Block reason when the session sits in a dirty linked worktree, else null. */
-function workGateBlock(): string | null {
+/** Work-gate outcome for an armed session: a block reason when the current
+ *  worktree is linked and dirty, a leave-hint when linked and clean. */
+function workGate(): { block?: string; hint?: string } {
   const gd = gitDirOf(process.cwd())
   if (!gd || !isLinkedGitDir(gd)) {
-    return null
+    return {}
   }
   const dirty = dirtyHere()
-  return dirty > 0
-    ? `bro: linked worktree has ${dirty} uncommitted file(s) — ` +
-        'commit/push the work or discard deliberately, then `bro work leave`'
-    : null
+  if (dirty > 0) {
+    return {
+      block:
+        `bro: linked worktree has ${dirty} uncommitted file(s) — ` +
+        'commit/push the work or discard deliberately, then `bro work leave`',
+    }
+  }
+  return { hint: 'bro: still inside a linked worktree — `bro work leave` when done' }
 }
 
 /** Current-branch open PR → one-line blocker summary, or null when the PR
