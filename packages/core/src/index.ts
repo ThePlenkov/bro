@@ -10,5 +10,7 @@ export {
   dataRefRoot,
 } from './dataref.ts'
 export type { BroConfig, Personality, StoreBackend } from './config.ts'
+export { definePlugin } from './plugin.ts'
+export type { BroPlugin } from './plugin.ts'
 export { makePrinter } from './output.ts'
 export type { Printer } from './output.ts'
