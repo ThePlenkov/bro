@@ -18,6 +18,7 @@ import {
   drillUp,
   listDrills,
   bd,
+  type DrillPlan,
 } from '@bro/drill'
 import { flag, flagAll, positionals } from './args.ts'
 
@@ -106,6 +107,27 @@ function cmdDown(rest: string[]): void {
   const { title, opts } = parseDown(rest)
   const row = drillDown(title, opts)
   console.log(`drill ↓ ${row.id} ${row.title}`)
+}
+
+/** Materialize a drill plan (`bro run drill.toml`): the root frame plus
+ *  declared child steps as open beads — investigation then fills each
+ *  with `drill up --result` as usual. */
+export function applyDrillPlan(plan: DrillPlan): void {
+  checkBeads()
+  const root = drillDown(plan.title)
+  console.log(`drill ↓ ${root.id} ${root.title} (plan root)`)
+  const ids = new Map<number, string>()
+  plan.steps.forEach((s, i) => {
+    const row = drillDown(s.title, {
+      under: s.under !== undefined ? ids.get(s.under) : root.id,
+      ephemeral: s.ephemeral,
+      description: s.description,
+      priority: s.priority,
+      type: s.type,
+    })
+    ids.set(i, row.id)
+    console.log(`  step → ${row.id} ${row.title}`)
+  })
 }
 
 function cmdUp(rest: string[]): void {
