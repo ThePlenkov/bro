@@ -10,7 +10,8 @@
     }
   },
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts"
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "tsdown": "^0.15.0",
