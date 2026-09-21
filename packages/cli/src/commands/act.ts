@@ -312,10 +312,15 @@ const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
 
 export async function runActCommand(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv
-  if (!cmd || cmd === '--help' || cmd === '-h') {
+  // zero-arg magic: bare `bro act` is the gate on the current branch's PR
+  if (!cmd) {
+    await cmdStatus([])
+    return
+  }
+  if (cmd === '--help' || cmd === '-h') {
     usage()
   }
-  const handler = COMMANDS[cmd!]
+  const handler = COMMANDS[cmd]
   if (!handler) {
     console.error(`unknown command: ${cmd}`)
     usage()

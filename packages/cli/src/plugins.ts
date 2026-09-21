@@ -83,8 +83,9 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'wtf',
     summary: 'Alias for `retrospect capture` — vent, verbatim',
-    run: runRetrospectCommand,
-    argvPrefix: ['capture'],
+    // bare `bro wtf` has nothing to capture — report open wtfs instead
+    run: (argv) =>
+      runRetrospectCommand(argv.length === 0 ? ['status'] : ['capture', ...argv]),
   }),
   definePlugin({
     name: 'hooks',

@@ -166,8 +166,11 @@ function rejectUnknownFlags(sub: string, argv: string[]): void {
 
 export async function runDrillCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
+  // zero-arg magic: bare `bro drill` shows where the descent stands
   if (!sub) {
-    usage()
+    checkBeads()
+    cmdCurrent()
+    return
   }
   if (sub === '--help' || sub === '-h') {
     usage(0)
