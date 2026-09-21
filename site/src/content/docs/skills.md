@@ -17,6 +17,7 @@ prompts; it survives in a file with a frontmatter trigger.
 | `sync` | `/sync` | Data-ref push/pull, bare-remote smoke rules |
 | `wtf` | `/wtf` | Capture verbatim, never paraphrase |
 | `convoy` | `/convoy` | Multi-bead batch coordination |
+| `next` | `/next`, "work the backlog", `/goal` | The autonomous loop: claim → implement → PR → close → repeat. The queue is the approval |
 
 ## Generation
 

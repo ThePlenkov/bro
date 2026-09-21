@@ -22,6 +22,7 @@ import { parsePlanDoc, type RetroPlan } from '@bro/retro'
 import { runActCommand } from './commands/act.ts'
 import { runCleanupCommand } from './commands/cleanup.ts'
 import { runConvoyCommand } from './commands/convoy.ts'
+import { runNextCommand } from './commands/next.ts'
 import { runDebtCommand } from './commands/debt.ts'
 import { runDrillCommand } from './commands/drill.ts'
 import { runHooksCommand } from './commands/hooks.ts'
@@ -51,6 +52,12 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Convoy execution over beads molecules: status|next|done|pour|list',
     run: runConvoyCommand,
     skill: 'convoy',
+  }),
+  definePlugin({
+    name: 'next',
+    summary: 'Claim + emit the top ready bead — the autonomous backlog loop',
+    run: runNextCommand,
+    skill: 'next',
   }),
   definePlugin({
     name: 'cleanup',
