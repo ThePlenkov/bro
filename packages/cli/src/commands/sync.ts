@@ -16,8 +16,8 @@ import {
   dataRefPush,
   dataRefRoot,
   gitTry,
-  loadConfig,
 } from '@bro/core'
+import { loadBroConfig } from '../plugins.ts'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -27,7 +27,7 @@ function artifactDirs(root: string): string[] {
     dirs.add('.agents')
   }
   // mirror the store's own resolution — BRO_DEBT_DIR wins over config
-  const debt = process.env.BRO_DEBT_DIR ?? loadConfig(root).debt.dir
+  const debt = process.env.BRO_DEBT_DIR ?? loadBroConfig(root).debt.dir
   if (existsSync(join(root, debt))) {
     dirs.add(debt)
   }
@@ -41,7 +41,7 @@ export function runSyncCommand(argv: string[]): void {
     console.error('bro sync: not inside a git worktree')
     process.exit(1)
   }
-  const { ref, remote } = loadConfig(root).sync
+  const { ref, remote } = loadBroConfig(root).sync
 
   if (pull) {
     const written = dataRefPull(root, remote, ref)

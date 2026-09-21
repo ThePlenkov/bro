@@ -17,6 +17,58 @@ export type StoreBackend = (typeof STORE_BACKENDS)[number]
 export const PERSONALITIES = ['terse', 'mentor', 'sarcastic'] as const
 export type Personality = (typeof PERSONALITIES)[number]
 
+/** A plugin-owned config section: raw JSON value in, normalized section
+ *  out. `schema(undefined)` MUST return the section default — that's the
+ *  fallback when the raw value is missing or the schema throws. */
+export type ConfigSection<T> = (raw: unknown) => T
+
+export const debtSection: ConfigSection<{ dir: string }> = (raw) => ({
+  // dir feeds path.join — a non-string or empty value must fall back to
+  // the default, not throw mid-command
+  dir:
+    typeof raw === 'object' &&
+    raw !== null &&
+    typeof (raw as { dir?: unknown }).dir === 'string' &&
+    (raw as { dir: string }).dir.trim() !== ''
+      ? (raw as { dir: string }).dir
+      : DEFAULT_CONFIG.debt.dir,
+})
+
+export const syncSection: ConfigSection<{ ref: string; remote: string }> = (
+  raw
+) => ({
+  // only string fields may reach git arg construction — a null or
+  // non-string sync.ref/sync.remote must fall back to the default
+  ...DEFAULT_CONFIG.sync,
+  ...(typeof raw === 'object' && raw !== null
+    ? Object.fromEntries(
+        Object.entries(raw).filter(([, v]) => typeof v === 'string')
+      )
+    : {}),
+})
+
+export const actSection: ConfigSection<{ ignoreChecks: string[] }> = (raw) => ({
+  // only a list of substrings may reach the check filter — anything
+  // else falls back to the default
+  ignoreChecks:
+    typeof raw === 'object' &&
+    raw !== null &&
+    Array.isArray((raw as { ignoreChecks?: unknown }).ignoreChecks)
+      ? (raw as { ignoreChecks: unknown[] }).ignoreChecks.filter(
+          // an empty substring would match EVERY check name
+          (v): v is string => typeof v === 'string' && v.trim() !== ''
+        )
+      : [],
+})
+
+/** Sections core normalizes itself — identical to what the built-in
+ *  plugins declare as their configSchema. */
+const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
+  debt: debtSection as ConfigSection<unknown>,
+  sync: syncSection as ConfigSection<unknown>,
+  act: actSection as ConfigSection<unknown>,
+}
+
 export interface BroConfig {
   /** Active stores. The JSONL ledger is always on — extra backends are
    *  projections written alongside it. beads is on by default; gitref is
@@ -169,7 +221,37 @@ function readConfigFile(name: string, path: string): unknown {
   }
 }
 
-export function loadConfig(cwd: string = process.cwd()): BroConfig {
+/** Runs every section schema over the raw file — a throwing schema warns
+ *  and falls back to schema(undefined), never crashes the load. */
+function applySections(
+  config: BroConfig & Record<string, unknown>,
+  raw: Record<string, unknown>,
+  sections: Record<string, ConfigSection<unknown>>
+): void {
+  for (const [key, schema] of Object.entries({ ...CORE_SECTIONS, ...sections })) {
+    try {
+      config[key] = schema(raw[key])
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`warning: bro.config "${key}" invalid (${msg}) — using defaults`)
+      config[key] = schema(undefined)
+    }
+  }
+}
+
+export function loadConfig(
+  cwd: string = process.cwd(),
+  /** Plugin-registered section schemas — key = configKey, applied over the
+   *  raw file. A throwing schema falls back to schema(undefined). */
+  sections: Record<string, ConfigSection<unknown>> = {}
+): BroConfig & Record<string, unknown> {
+  // every exit path applies section schemas — a registered plugin
+  // section must resolve to its defaults even with no usable config file
+  const fallback = (stores: StoreBackend[]): BroConfig & Record<string, unknown> => {
+    const config = { ...DEFAULT_CONFIG, stores } as BroConfig & Record<string, unknown>
+    applySections(config, {}, sections)
+    return config
+  }
   for (const name of ['bro.config.ts', 'bro.config.json']) {
     const path = join(cwd, name)
     if (!existsSync(path)) {
@@ -177,44 +259,22 @@ export function loadConfig(cwd: string = process.cwd()): BroConfig {
     }
     const raw = readConfigFile(name, path)
     if (raw === undefined) {
-      return { ...DEFAULT_CONFIG, stores: ['jsonl'] }
+      return fallback(['jsonl'])
     }
     // a valid non-object root ("str", […], 42) is not a config —
     // spreading it would silently produce garbage keys
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
       console.error(`${name}: root must be an object — using jsonl-only stores`)
-      return { ...DEFAULT_CONFIG, stores: ['jsonl'] }
+      return fallback(['jsonl'])
     }
     const { stores: _s, store: _legacy, ...rest } = raw as RawConfig
-    return {
+    const config: BroConfig & Record<string, unknown> = {
       ...DEFAULT_CONFIG,
       ...rest,
       stores: normalizeStores(raw as RawConfig),
-      debt: { ...DEFAULT_CONFIG.debt, ...(rest.debt ?? {}) },
-      // only string fields may reach git arg construction — a null or
-      // non-string sync.ref/sync.remote must fall back to the default
-      sync: {
-        ...DEFAULT_CONFIG.sync,
-        ...(typeof rest.sync === 'object' && rest.sync !== null
-          ? Object.fromEntries(
-              Object.entries(rest.sync).filter(([, v]) => typeof v === 'string')
-            )
-          : {}),
-      },
-      // only a list of substrings may reach the check filter — anything
-      // else falls back to the default
-      act: {
-        ignoreChecks:
-          typeof rest.act === 'object' &&
-          rest.act !== null &&
-          Array.isArray((rest.act as { ignoreChecks?: unknown }).ignoreChecks)
-            ? (rest.act as { ignoreChecks: unknown[] }).ignoreChecks.filter(
-                // an empty substring would match EVERY check name
-                (v): v is string => typeof v === 'string' && v.trim() !== ''
-              )
-            : [],
-      },
     }
+    applySections(config, raw as Record<string, unknown>, sections)
+    return config
   }
-  return DEFAULT_CONFIG
+  return fallback([...DEFAULT_CONFIG.stores])
 }

@@ -201,3 +201,60 @@ describe('loadConfig bro.config.ts', () => {
     })
   })
 })
+
+describe('loadConfig plugin sections', () => {
+  function loadWith(
+    raw: unknown,
+    sections: Parameters<typeof loadConfig>[1]
+  ): ReturnType<typeof loadConfig> {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
+    writeFileSync(join(dir, 'bro.config.json'), JSON.stringify(raw))
+    return loadConfig(dir, sections)
+  }
+
+  test('registered schema normalizes its section', () => {
+    const cfg = loadWith(
+      { myplug: { opt: 'x', junk: true } },
+      { myplug: (r) => ({ opt: (r as { opt?: string }).opt ?? 'default' }) }
+    )
+    assert.equal((cfg.myplug as { opt: string }).opt, 'x')
+  })
+
+  test('missing section still gets schema defaults', () => {
+    const cfg = loadWith({}, { myplug: () => ({ opt: 'default' }) })
+    assert.equal((cfg.myplug as { opt: string }).opt, 'default')
+  })
+
+  test('throwing schema warns and falls back to schema(undefined)', () => {
+    const cfg = loadWith(
+      { myplug: { bad: true } },
+      {
+        myplug: (r) => {
+          if (r !== undefined) throw new Error('bad section')
+          return { opt: 'default' }
+        },
+      }
+    )
+    assert.equal((cfg.myplug as { opt: string }).opt, 'default')
+  })
+
+  test('no config file still resolves registered sections to defaults', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
+    const cfg = loadConfig(dir, { myplug: () => ({ opt: 'default' }) })
+    assert.equal((cfg.myplug as { opt: string }).opt, 'default')
+  })
+
+  test('broken config file still resolves registered sections', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
+    writeFileSync(join(dir, 'bro.config.json'), '{not json')
+    const cfg = loadConfig(dir, { myplug: () => ({ opt: 'default' }) })
+    assert.deepEqual(cfg.stores, ['jsonl'])
+    assert.equal((cfg.myplug as { opt: string }).opt, 'default')
+  })
+
+  test('non-string debt.dir falls back to the default', () => {
+    assert.equal(load({ debt: { dir: 42 } }).debt.dir, DEFAULT_CONFIG.debt.dir)
+    assert.equal(load({ debt: { dir: '' } }).debt.dir, DEFAULT_CONFIG.debt.dir)
+    assert.equal(load({ debt: { dir: 'custom/dir' } }).debt.dir, 'custom/dir')
+  })
+})

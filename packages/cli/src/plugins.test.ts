@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
-import { PLUGINS } from './plugins.ts'
+import { PLUGINS, pluginConfigSections } from './plugins.ts'
 
 describe('plugin registry', () => {
   test('names are unique', () => {
@@ -29,5 +29,31 @@ describe('plugin registry', () => {
 
   test('plugins lists itself', () => {
     assert.ok(PLUGINS.some((p) => p.name === 'plugins'))
+  })
+
+  test('configKey ⟺ configSchema pairing', () => {
+    for (const p of PLUGINS) {
+      if (p.configKey) {
+        assert.equal(
+          typeof p.configSchema,
+          'function',
+          `${p.name} declares configKey without configSchema`
+        )
+      } else {
+        assert.equal(
+          p.configSchema,
+          undefined,
+          `${p.name} has configSchema but no configKey`
+        )
+      }
+    }
+  })
+
+  test('pluginConfigSections maps configKey to its schema', () => {
+    const sections = pluginConfigSections()
+    assert.equal(typeof sections.act, 'function')
+    assert.equal(typeof sections.sync, 'function')
+    assert.equal(typeof sections.debt, 'function')
+    assert.equal(sections.hooks, undefined)
   })
 })
