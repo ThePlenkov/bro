@@ -229,9 +229,14 @@ export async function fetchPrActState(
   // reviewed head SHAs, not commits: one push can carry many commits, and
   // committer dates are commit-time, not push-time. The first reviewed
   // head is the baseline (the PR as submitted); every head reviewed after
-  // it is one round of the fix loop.
-  const reviewedShas = threads.length > 0 ? fetchPrReviews(target) : []
-  const fixRounds = Math.max(0, reviewedShas.length - 1)
+  // it is one round of the fix loop. Reviews exist without threads
+  // (approvals), so this isn't gated on threads.
+  let fixRounds = 0
+  try {
+    fixRounds = Math.max(0, fetchPrReviews(target).length - 1)
+  } catch {
+    // best-effort — a flaky reviews endpoint must not break the gate
+  }
 
   return {
     pr: target.pr,

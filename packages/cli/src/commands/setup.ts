@@ -61,7 +61,13 @@ function writeConfig(opts: { beads: boolean; personality?: string }): string {
   // bro.config.ts shadows bro.config.json — writing the .json under it
   // would report success while the .ts stays effective
   if (existsSync(join(process.cwd(), 'bro.config.ts'))) {
-    return 'bro.config.ts present and takes precedence — edit it directly, not writing bro.config.json'
+    // --beads still initialized .beads above — flag it if the effective
+    // (.ts) config doesn't actually enable the store
+    const orphan =
+      opts.beads && !loadBroConfig().stores.includes('beads')
+        ? '\n    note: .beads initialized but "beads" is not in bro.config.ts stores'
+        : ''
+    return `bro.config.ts present and takes precedence — edit it directly, not writing bro.config.json${orphan}`
   }
   const path = join(process.cwd(), 'bro.config.json')
   const existed = existsSync(path)
