@@ -61,13 +61,24 @@ export async function runNextCommand(argv: string[]): Promise<void> {
     process.exit(0)
   }
   checkBeads()
-  const ready = bdJson<ReadyBead[]>(['ready', '--json'])
+  let ready: ReadyBead[]
+  try {
+    ready = bdJson<ReadyBead[]>(['ready', '--json'])
+  } catch (err) {
+    console.error(`error: bd ready failed — ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
   const result = pick(ready)
   const json = argv.includes('--json')
 
   if (!argv.includes('--list') && result.bead) {
     // atomic claim — do this before the agent starts work
-    bd(['update', result.bead.id, '--claim'])
+    try {
+      bd(['update', result.bead.id, '--claim'])
+    } catch (err) {
+      console.error(`error: failed to claim ${result.bead.id} — ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(1)
+    }
   }
 
   if (json) {
