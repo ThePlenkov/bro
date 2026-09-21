@@ -193,44 +193,12 @@ async function cmdWait(argv: string[]): Promise<void> {
 async function cmdMerge(argv: string[]): Promise<void> {
   ensureGhAuth()
   const t = resolvePr(argv)
-  const act = loadBroConfig().act
-  const state = await fetchPrActState(
-    { owner: t.owner, repo: t.repoName, pr: t.pr },
-    { ignoreChecks: act.ignoreChecks, maxRounds: act.maxRounds }
-  )
 
-  // a closed/merged PR can pass the gate (threads resolved, checks
-  // settled) — merging it isn't a gate question, it's a lifecycle error
-  if (state.state !== 'OPEN') {
-    console.error(`error: #${t.pr} is ${state.state} — only OPEN PRs can be merged`)
-    process.exitCode = 1
-    return
-  }
-
-  const gate = evaluateExitGate(state)
-  if (!gate.ok) {
-    console.error(`exit_gate=BLOCKED — refusing to merge #${t.pr}`)
-    for (const b of gate.blockers) {
-      console.error(`  blocker: ${b}`)
-    }
-    process.exitCode = 1
-    return
-  }
-
-  const strategies = ['--squash', '--merge', '--rebase'].filter((f) => argv.includes(f))
-  if (strategies.length > 1) {
-    console.error(`error: conflicting merge strategies: ${strategies.join(' ')}`)
-    process.exitCode = 2
-    return
-  }
-  const method = strategies[0] ?? '--squash'
-
-  // --match-head-commit pins the merge to the sha the gate evaluated —
-  // a head that moved since fetch fails closed instead of landing
-  // a commit the gate never saw
-  // The merge itself is the critical section two sessions must not enter
-  // together — serialize on the beads merge slot. `unavailable` (no bd, no
-  // .beads) proceeds: coordination is a bonus, never a gate of its own.
+  // Gate evaluation + merge is ONE critical section: acquiring the slot
+  // first closes the drift window between a green gate and the merge
+  // (new threads/state can't sneak in while a wedged bd would otherwise
+  // burn its timeout). `unavailable` (no bd, no .beads) proceeds —
+  // coordination is a bonus, never a gate of its own.
   const slot = acquireMergeSlot()
   if (slot.kind === 'held') {
     console.error(
@@ -240,18 +208,54 @@ async function cmdMerge(argv: string[]): Promise<void> {
     process.exitCode = 1
     return
   }
-
-  const args = ['pr', 'merge', String(t.pr), method, '--delete-branch', '--match-head-commit', state.headSha]
-  if (argv.includes('--admin')) {
-    args.push('--admin')
-  }
   try {
-    console.log(gh(args))
-    console.log(`act: merged #${t.pr}`)
-    deleteMergedLocalBranch(state.headRef, state.headSha)
-  } catch (err) {
-    console.error(`error: merge failed — ${err instanceof Error ? err.message : String(err)}`)
-    process.exitCode = 1
+    const act = loadBroConfig().act
+    const state = await fetchPrActState(
+      { owner: t.owner, repo: t.repoName, pr: t.pr },
+      { ignoreChecks: act.ignoreChecks, maxRounds: act.maxRounds }
+    )
+
+    // a closed/merged PR can pass the gate (threads resolved, checks
+    // settled) — merging it isn't a gate question, it's a lifecycle error
+    if (state.state !== 'OPEN') {
+      console.error(`error: #${t.pr} is ${state.state} — only OPEN PRs can be merged`)
+      process.exitCode = 1
+      return
+    }
+
+    const gate = evaluateExitGate(state)
+    if (!gate.ok) {
+      console.error(`exit_gate=BLOCKED — refusing to merge #${t.pr}`)
+      for (const b of gate.blockers) {
+        console.error(`  blocker: ${b}`)
+      }
+      process.exitCode = 1
+      return
+    }
+
+    const strategies = ['--squash', '--merge', '--rebase'].filter((f) => argv.includes(f))
+    if (strategies.length > 1) {
+      console.error(`error: conflicting merge strategies: ${strategies.join(' ')}`)
+      process.exitCode = 2
+      return
+    }
+    const method = strategies[0] ?? '--squash'
+
+    // --match-head-commit pins the merge to the sha the gate evaluated —
+    // a head that moved since fetch fails closed instead of landing
+    // a commit the gate never saw
+    const args = ['pr', 'merge', String(t.pr), method, '--delete-branch', '--match-head-commit', state.headSha]
+    if (argv.includes('--admin')) {
+      args.push('--admin')
+    }
+    try {
+      console.log(gh(args))
+      console.log(`act: merged #${t.pr}`)
+      deleteMergedLocalBranch(state.headRef, state.headSha)
+    } catch (err) {
+      console.error(`error: merge failed — ${err instanceof Error ? err.message : String(err)}`)
+      process.exitCode = 1
+    }
   } finally {
     if (slot.kind === 'acquired') {
       releaseMergeSlot()

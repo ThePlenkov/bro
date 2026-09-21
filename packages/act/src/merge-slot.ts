@@ -70,6 +70,8 @@ export function releaseMergeSlot(): void {
 /** Current holder for context surfaces (session-start line), or null when
  *  the slot is free / beads is absent. */
 export function mergeSlotHolder(): string | null {
-  const res = bdTry(['merge-slot', 'check', '--json'])
+  // hooks call this inline on every lifecycle event — a wedged dolt must
+  // cost ~seconds, not the default 15s budget
+  const res = bdTry(['merge-slot', 'check', '--json'], 3_000)
   return res.code === 0 ? parseCheck(res.out) : null
 }

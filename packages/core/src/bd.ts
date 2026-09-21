@@ -20,11 +20,14 @@ export function bd(args: string[]): string {
 /** Non-throwing bd — same contract as gitTry for paths where beads is
  *  optional (merge slot, hooks): a missing binary or absent database must
  *  degrade, not stall. */
-export function bdTry(args: string[]): { code: number; out: string; err: string } {
+export function bdTry(
+  args: string[],
+  timeoutMs = 15_000
+): { code: number; out: string; err: string } {
   const proc = spawnSync('bd', args, { // NOSONAR — PATH lookup is the contract (same as gh/git)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
-    timeout: 15_000,
+    timeout: timeoutMs,
   })
   return {
     code: proc.status ?? 1,
