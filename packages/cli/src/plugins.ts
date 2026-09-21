@@ -1,0 +1,96 @@
+/**
+ * Plugin registry — every bro capability as a BroPlugin: subcommand +
+ * skill + owned config section (+ plan schema later, bro-cap). The CLI
+ * dispatches argv[0] through this list; nothing is hardcoded in main.
+ */
+import { definePlugin, type BroPlugin } from '@bro/core'
+import { runActCommand } from './commands/act.ts'
+import { runCleanupCommand } from './commands/cleanup.ts'
+import { runConvoyCommand } from './commands/convoy.ts'
+import { runDebtCommand } from './commands/debt.ts'
+import { runDrillCommand } from './commands/drill.ts'
+import { runHooksCommand } from './commands/hooks.ts'
+import { runRetrospectCommand } from './commands/retrospect.ts'
+import { runSetupCommand } from './commands/setup.ts'
+import { runSyncCommand } from './commands/sync.ts'
+
+export const PLUGINS: BroPlugin[] = [
+  definePlugin({
+    name: 'debt',
+    summary: 'Review-debt pipeline: collect|status|prs|list|mark|sync|set',
+    run: runDebtCommand,
+    skill: 'debt',
+    configKey: 'debt',
+  }),
+  definePlugin({
+    name: 'act',
+    summary: 'Open-PR loop: status|threads|resolve|reply|merge',
+    run: runActCommand,
+    skill: 'act',
+    configKey: 'act',
+  }),
+  definePlugin({
+    name: 'convoy',
+    summary: 'Convoy execution over beads molecules: status|next|done|pour|list',
+    run: runConvoyCommand,
+    skill: 'convoy',
+  }),
+  definePlugin({
+    name: 'cleanup',
+    summary: 'Delete local branches whose PR merged [--remote] [--dry-run]',
+    run: runCleanupCommand,
+  }),
+  definePlugin({
+    name: 'drill',
+    summary: 'Scoped descent over beads: down|up|current|tree|list|distill',
+    run: runDrillCommand,
+    skill: 'drill',
+  }),
+  definePlugin({
+    name: 'unwind',
+    summary: 'Alias for `drill up`',
+    run: runDrillCommand,
+    argvPrefix: ['up'],
+  }),
+  definePlugin({
+    name: 'retrospect',
+    summary: 'Self-correction: capture|record|status|list|schema',
+    run: runRetrospectCommand,
+    skill: 'wtf',
+  }),
+  definePlugin({
+    name: 'wtf',
+    summary: 'Alias for `retrospect capture` — vent, verbatim',
+    run: runRetrospectCommand,
+    argvPrefix: ['capture'],
+  }),
+  definePlugin({
+    name: 'hooks',
+    summary: 'Agent lifecycle hooks',
+    run: runHooksCommand,
+    hidden: true,
+  }),
+  definePlugin({
+    name: 'setup',
+    summary: 'Wire bro into the current repo',
+    run: runSetupCommand,
+  }),
+  definePlugin({
+    name: 'sync',
+    summary: 'Push/pull artifact dirs on refs/bro/data [--pull]',
+    run: runSyncCommand,
+    skill: 'sync',
+    configKey: 'sync',
+  }),
+  definePlugin({
+    name: 'plugins',
+    summary: 'List registered plugins — name, skill, config section',
+    run() {
+      for (const p of PLUGINS) {
+        console.log(
+          `${p.name.padEnd(12)} ${(p.skill ?? '-').padEnd(10)} ${(p.configKey ?? '-').padEnd(8)} ${p.summary}`
+        )
+      }
+    },
+  }),
+]

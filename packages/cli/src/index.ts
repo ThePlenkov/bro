@@ -2,27 +2,14 @@
 /**
  * bro — agent's sidekick CLI.
  *
- *   bro debt <sub>   review-debt pipeline (collect, status, prs, list, mark, sync, set)
- *   bro act <sub>    open-PR review loop (status, threads, resolve, reply)
- *   bro convoy <sub> agent-internal convoy execution over beads molecules
- *   bro cleanup      delete local branches whose PR merged
- *   bro retrospect <sub> self-correction: wtf capture, retro plans → prevention beads
- *   bro wtf <complaint>  alias for `retrospect capture`
- *   bro setup        configure a repo for bro
- *   bro --version
+ * Thin host over the plugin registry — every capability is a BroPlugin
+ * (subcommand + skill + config section); see plugins.ts for the list
+ * and `bro plugins` for the live registry.
  */
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { runActCommand } from './commands/act.ts'
-import { runCleanupCommand } from './commands/cleanup.ts'
-import { runConvoyCommand } from './commands/convoy.ts'
-import { runDebtCommand } from './commands/debt.ts'
-import { runDrillCommand } from './commands/drill.ts'
-import { runHooksCommand } from './commands/hooks.ts'
-import { runRetrospectCommand } from './commands/retrospect.ts'
-import { runSetupCommand } from './commands/setup.ts'
-import { runSyncCommand } from './commands/sync.ts'
+import { PLUGINS } from './plugins.ts'
 
 // Single source of truth is package.json — dist/index.js sits one dir
 // below it in both the workspace and the published tarball.
@@ -33,23 +20,15 @@ const VERSION = (
 ).version
 
 function usage(exitCode = 1): never {
+  const commands = PLUGINS.filter((p) => !p.hidden)
+    .map((p) => `  ${p.name.padEnd(12)} ${p.summary}`)
+    .join('\n')
   console.error(`bro — agent's sidekick CLI
 
 Usage: bro <command> [args…]
 
 Commands:
-  debt <sub>   Review-debt pipeline: collect|status|prs|list|mark|sync|set
-  act <sub>    Open-PR loop: status|threads|resolve|reply
-  convoy <sub> Convoy execution over beads molecules: status|next|done|pour|list
-  cleanup      Delete local branches whose PR merged [--remote] [--dry-run]
-  drill <sub>  Scoped descent over beads: down|up|current|tree|list|distill
-  unwind       Alias for \`drill up\`
-  retrospect <sub>  Self-correction: capture|record|status|list|schema
-  wtf <complaint>  Alias for \`retrospect capture\`
-  hooks <ev>   Agent lifecycle hooks: session-start|post-compaction|
-               prompt-submit|post-tool|stop|permission
-  setup        Wire bro into the current repo
-  sync         Push/pull artifact dirs on refs/bro/data [--pull]
+${commands}
 
 Options:
   --version    Print version
@@ -60,6 +39,7 @@ Examples:
   bro debt prs                        # merged PRs still unprocessed
   bro debt sync                       # project the ledger into beads
   bro act status --json               # exit gate for the current PR
+  bro plugins                         # the registry — subcommand+skill+config
   bro setup`)
   process.exit(exitCode)
 }
@@ -78,44 +58,12 @@ async function main(): Promise<void> {
     usage()
   }
 
-  switch (cmd) {
-    case 'debt':
-      await runDebtCommand(rest)
-      return
-    case 'act':
-      await runActCommand(rest)
-      return
-    case 'convoy':
-      await runConvoyCommand(rest)
-      return
-    case 'cleanup':
-      runCleanupCommand(rest)
-      return
-    case 'drill':
-      await runDrillCommand(rest)
-      return
-    case 'unwind':
-      await runDrillCommand(['up', ...rest])
-      return
-    case 'retrospect':
-      await runRetrospectCommand(rest)
-      return
-    case 'wtf':
-      await runRetrospectCommand(['capture', ...rest])
-      return
-    case 'hooks':
-      await runHooksCommand(rest)
-      return
-    case 'setup':
-      await runSetupCommand(rest)
-      return
-    case 'sync':
-      runSyncCommand(rest)
-      return
-    default:
-      console.error(`unknown command: ${cmd}`)
-      usage()
+  const plugin = PLUGINS.find((p) => p.name === cmd)
+  if (!plugin) {
+    console.error(`unknown command: ${cmd}`)
+    usage()
   }
+  await plugin.run([...(plugin.argvPrefix ?? []), ...rest])
 }
 
 main().catch((err: unknown) => {
