@@ -5,6 +5,8 @@
  * The CLI is a thin host: it dispatches argv[0] through a static registry
  * of BroPlugin entries instead of hardcoding commands.
  */
+import type { ConfigSection } from './config.ts'
+
 export interface BroPlugin {
   /** Subcommand name — argv[0]. */
   name: string
@@ -18,6 +20,9 @@ export interface BroPlugin {
   skill?: string
   /** bro.config.* top-level key this plugin owns. */
   configKey?: string
+  /** Normalizer for the configKey section — raw file value in, typed
+   *  section out. Required when configKey is set. */
+  configSchema?: ConfigSection<unknown>
   /** Not listed in usage — plumbing commands like `hooks`. */
   hidden?: boolean
 }

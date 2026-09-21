@@ -10,7 +10,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { initBeadsStealth, loadConfig, PERSONALITIES, type BroConfig } from '@bro/core'
+import { initBeadsStealth, PERSONALITIES, type BroConfig } from '@bro/core'
+import { loadBroConfig } from '../plugins.ts'
 import { FORMULA_FILES, SKILL_FILES } from '../skills-data.ts'
 
 function hasBin(name: string): boolean {
@@ -62,7 +63,7 @@ function writeConfig(opts: { beads: boolean; personality?: string }): string {
   const existing = readExistingConfig(path)!
   // loadConfig normalizes legacy `store` into `stores`, so writing the
   // merged shape back migrates v0.1.0 configs in place.
-  const merged: BroConfig = { ...loadConfig() }
+  const merged: BroConfig = { ...loadBroConfig() }
   if (opts.beads && !merged.stores.includes('beads')) {
     merged.stores = [...merged.stores, 'beads']
   }
@@ -166,7 +167,7 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
   readExistingConfig(join(process.cwd(), 'bro.config.json'))
   // beads is a default store — setup needs bd whenever the effective config
   // keeps it on, not only when --beads was passed explicitly.
-  const wantsBeads = beads || loadConfig().stores.includes('beads')
+  const wantsBeads = beads || loadBroConfig().stores.includes('beads')
   checkPrereqs(wantsBeads)
 
   // bd init + formulas land BEFORE the config write — if beads setup fails,

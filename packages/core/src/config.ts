@@ -17,6 +17,51 @@ export type StoreBackend = (typeof STORE_BACKENDS)[number]
 export const PERSONALITIES = ['terse', 'mentor', 'sarcastic'] as const
 export type Personality = (typeof PERSONALITIES)[number]
 
+/** A plugin-owned config section: raw JSON value in, normalized section
+ *  out. `schema(undefined)` MUST return the section default — that's the
+ *  fallback when the raw value is missing or the schema throws. */
+export type ConfigSection<T> = (raw: unknown) => T
+
+export const debtSection: ConfigSection<{ dir: string }> = (raw) => ({
+  ...DEFAULT_CONFIG.debt,
+  ...(typeof raw === 'object' && raw !== null ? raw : {}),
+})
+
+export const syncSection: ConfigSection<{ ref: string; remote: string }> = (
+  raw
+) => ({
+  // only string fields may reach git arg construction — a null or
+  // non-string sync.ref/sync.remote must fall back to the default
+  ...DEFAULT_CONFIG.sync,
+  ...(typeof raw === 'object' && raw !== null
+    ? Object.fromEntries(
+        Object.entries(raw).filter(([, v]) => typeof v === 'string')
+      )
+    : {}),
+})
+
+export const actSection: ConfigSection<{ ignoreChecks: string[] }> = (raw) => ({
+  // only a list of substrings may reach the check filter — anything
+  // else falls back to the default
+  ignoreChecks:
+    typeof raw === 'object' &&
+    raw !== null &&
+    Array.isArray((raw as { ignoreChecks?: unknown }).ignoreChecks)
+      ? (raw as { ignoreChecks: unknown[] }).ignoreChecks.filter(
+          // an empty substring would match EVERY check name
+          (v): v is string => typeof v === 'string' && v.trim() !== ''
+        )
+      : [],
+})
+
+/** Sections core normalizes itself — identical to what the built-in
+ *  plugins declare as their configSchema. */
+const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
+  debt: debtSection as ConfigSection<unknown>,
+  sync: syncSection as ConfigSection<unknown>,
+  act: actSection as ConfigSection<unknown>,
+}
+
 export interface BroConfig {
   /** Active stores. The JSONL ledger is always on — extra backends are
    *  projections written alongside it. beads is on by default; gitref is
@@ -169,7 +214,12 @@ function readConfigFile(name: string, path: string): unknown {
   }
 }
 
-export function loadConfig(cwd: string = process.cwd()): BroConfig {
+export function loadConfig(
+  cwd: string = process.cwd(),
+  /** Plugin-registered section schemas — key = configKey, applied over the
+   *  raw file. A throwing schema falls back to schema(undefined). */
+  sections: Record<string, ConfigSection<unknown>> = {}
+): BroConfig & Record<string, unknown> {
   for (const name of ['bro.config.ts', 'bro.config.json']) {
     const path = join(cwd, name)
     if (!existsSync(path)) {
@@ -186,35 +236,21 @@ export function loadConfig(cwd: string = process.cwd()): BroConfig {
       return { ...DEFAULT_CONFIG, stores: ['jsonl'] }
     }
     const { stores: _s, store: _legacy, ...rest } = raw as RawConfig
-    return {
+    const config: BroConfig & Record<string, unknown> = {
       ...DEFAULT_CONFIG,
       ...rest,
       stores: normalizeStores(raw as RawConfig),
-      debt: { ...DEFAULT_CONFIG.debt, ...(rest.debt ?? {}) },
-      // only string fields may reach git arg construction — a null or
-      // non-string sync.ref/sync.remote must fall back to the default
-      sync: {
-        ...DEFAULT_CONFIG.sync,
-        ...(typeof rest.sync === 'object' && rest.sync !== null
-          ? Object.fromEntries(
-              Object.entries(rest.sync).filter(([, v]) => typeof v === 'string')
-            )
-          : {}),
-      },
-      // only a list of substrings may reach the check filter — anything
-      // else falls back to the default
-      act: {
-        ignoreChecks:
-          typeof rest.act === 'object' &&
-          rest.act !== null &&
-          Array.isArray((rest.act as { ignoreChecks?: unknown }).ignoreChecks)
-            ? (rest.act as { ignoreChecks: unknown[] }).ignoreChecks.filter(
-                // an empty substring would match EVERY check name
-                (v): v is string => typeof v === 'string' && v.trim() !== ''
-              )
-            : [],
-      },
     }
+    for (const [key, schema] of Object.entries({ ...CORE_SECTIONS, ...sections })) {
+      try {
+        config[key] = schema((raw as Record<string, unknown>)[key])
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`warning: bro.config "${key}" invalid (${msg}) — using defaults`)
+        config[key] = schema(undefined)
+      }
+    }
+    return config
   }
   return DEFAULT_CONFIG
 }

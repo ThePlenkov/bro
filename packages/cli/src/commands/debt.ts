@@ -14,9 +14,9 @@ import {
   dataRefPush,
   dataRefRoot,
   ensureGhAuth,
-  loadConfig,
   resolveRepo,
 } from '@bro/core'
+import { loadBroConfig } from '../plugins.ts'
 import {
   applyCollectLabel,
   applyDebtLabel,
@@ -346,7 +346,7 @@ async function cmdCollect(argv: string[]): Promise<void> {
     // allowed to mask them — but it still fails the run (no silent degrade).
     // Explicit values only — a typo like "beed" must fall back to jsonl,
     // not fail in bd after the ledger was already written.
-    if (loadConfig().stores.includes('beads')) {
+    if (loadBroConfig().stores.includes('beads')) {
       try {
         const res = syncDebtToBeads(readDebtRecords())
         console.error(
@@ -725,7 +725,7 @@ function cmdSync(argv: string[]): void {
   const dryRun = argv.includes('--dry-run')
   // The explicit jsonl opt-out must hold even for a manual sync — without
   // this gate `sync` would auto-init .beads and project anyway.
-  if (!loadConfig().stores.includes('beads')) {
+  if (!loadBroConfig().stores.includes('beads')) {
     console.error(
       'debt sync: beads is not in stores — drop the opt-out or set ' +
         '"stores": ["jsonl", "beads"] in bro.config.json'
@@ -761,7 +761,7 @@ const MUTATING = new Set(['collect', 'mark', 'set', 'sync', 'next'])
 /** Best-effort data-ref sync after ledger mutations — gitref is opt-in;
  *  sync failures warn but never mask the command's own result. */
 function maybeDataRefSync(): void {
-  const cfg = loadConfig()
+  const cfg = loadBroConfig()
   if (!cfg.stores.includes('gitref')) {
     return
   }

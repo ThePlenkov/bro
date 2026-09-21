@@ -3,7 +3,15 @@
  * skill + owned config section (+ plan schema later, bro-cap). The CLI
  * dispatches argv[0] through this list; nothing is hardcoded in main.
  */
-import { definePlugin, type BroPlugin } from '@bro/core'
+import {
+  actSection,
+  debtSection,
+  definePlugin,
+  loadConfig,
+  syncSection,
+  type BroPlugin,
+  type ConfigSection,
+} from '@bro/core'
 import { runActCommand } from './commands/act.ts'
 import { runCleanupCommand } from './commands/cleanup.ts'
 import { runConvoyCommand } from './commands/convoy.ts'
@@ -21,6 +29,7 @@ export const PLUGINS: BroPlugin[] = [
     run: runDebtCommand,
     skill: 'debt',
     configKey: 'debt',
+    configSchema: debtSection,
   }),
   definePlugin({
     name: 'act',
@@ -28,6 +37,7 @@ export const PLUGINS: BroPlugin[] = [
     run: runActCommand,
     skill: 'act',
     configKey: 'act',
+    configSchema: actSection,
   }),
   definePlugin({
     name: 'convoy',
@@ -81,6 +91,7 @@ export const PLUGINS: BroPlugin[] = [
     run: runSyncCommand,
     skill: 'sync',
     configKey: 'sync',
+    configSchema: syncSection,
   }),
   definePlugin({
     name: 'plugins',
@@ -94,3 +105,19 @@ export const PLUGINS: BroPlugin[] = [
     },
   }),
 ]
+
+/** configKey → configSchema across the registry — what `loadConfig`
+ *  applies on top of core sections. External plugins register here too. */
+export function pluginConfigSections(): Record<string, ConfigSection<unknown>> {
+  return Object.fromEntries(
+    PLUGINS.filter((p) => p.configKey && p.configSchema).map((p) => [
+      p.configKey as string,
+      p.configSchema as ConfigSection<unknown>,
+    ])
+  )
+}
+
+/** loadConfig + registered plugin sections — the CLI's config entrypoint. */
+export function loadBroConfig(cwd: string = process.cwd()) {
+  return loadConfig(cwd, pluginConfigSections())
+}

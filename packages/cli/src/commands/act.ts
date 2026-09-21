@@ -8,7 +8,8 @@
  *   reply   --thread ID --comment TEXT | --file TSV
  */
 import { readFileSync } from 'node:fs'
-import { ensureGhAuth, gh, gitTry, loadConfig, resolveRepo } from '@bro/core'
+import { ensureGhAuth, gh, gitTry, resolveRepo } from '@bro/core'
+import { loadBroConfig } from '../plugins.ts'
 import { fetchReviewThreads } from '@bro/debt'
 import { isAncestor } from './cleanup.ts'
 import {
@@ -85,7 +86,7 @@ async function cmdStatus(argv: string[]): Promise<void> {
   const t = resolvePr(argv)
   const state = await fetchPrActState(
     { owner: t.owner, repo: t.repoName, pr: t.pr },
-    { ignoreChecks: loadConfig().act.ignoreChecks }
+    { ignoreChecks: loadBroConfig().act.ignoreChecks }
   )
   const gate = evaluateExitGate(state)
 
@@ -120,7 +121,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
   const t = resolvePr(argv)
   const state = await fetchPrActState(
     { owner: t.owner, repo: t.repoName, pr: t.pr },
-    { ignoreChecks: loadConfig().act.ignoreChecks }
+    { ignoreChecks: loadBroConfig().act.ignoreChecks }
   )
 
   // a closed/merged PR can pass the gate (threads resolved, checks

@@ -1,7 +1,16 @@
 export { ensureGhAuth, gh, ghJson, ghTry, resolveRepo } from './gh.ts'
 export { git, gitTry } from './git.ts'
 export { bd, bdJson, checkBeads, evidenceKind, initBeadsStealth, refKind } from './bd.ts'
-export { DEFAULT_CONFIG, defineConfig, loadConfig, PERSONALITIES, STORE_BACKENDS } from './config.ts'
+export {
+  actSection,
+  debtSection,
+  DEFAULT_CONFIG,
+  defineConfig,
+  loadConfig,
+  PERSONALITIES,
+  STORE_BACKENDS,
+  syncSection,
+} from './config.ts'
 export {
   DATA_REF,
   dataRefCommit,
@@ -9,7 +18,7 @@ export {
   dataRefPush,
   dataRefRoot,
 } from './dataref.ts'
-export type { BroConfig, Personality, StoreBackend } from './config.ts'
+export type { BroConfig, ConfigSection, Personality, StoreBackend } from './config.ts'
 export { definePlugin } from './plugin.ts'
 export type { BroPlugin } from './plugin.ts'
 export { makePrinter } from './output.ts'
