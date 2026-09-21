@@ -42,7 +42,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
         with:
           node-version: "lts/*"
-          cache: npm
+          check-latest: true
+          # no npm cache — release jobs must not reuse a poisoned cache
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
@@ -75,8 +76,13 @@ jobs:
           # nx release version already updated the npm lock file and
           # staged its changes; commit only the manifests it touched.
           v=$(node -p "require('./packages/cli/package.json').version")
+          # stamp the new version into plugin.json + marketplaces and
+          # regen adapters — check:plugins fails the release PR otherwise
+          node scripts/gen-plugins.ts --sync-version
           git checkout -B "release/v$v"
-          git add packages/*/package.json package.json package-lock.json
+          git add packages/*/package.json package.json package-lock.json \
+            plugin.json .claude-plugin/marketplace.json \
+            .agents/plugins/marketplace.json plugins/ hooks.json hooks/run.sh
           if git diff --cached --quiet; then
             echo "no version change — nothing to release"
             exit 0
