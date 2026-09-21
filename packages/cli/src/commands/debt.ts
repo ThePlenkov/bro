@@ -20,6 +20,7 @@ import { loadBroConfig } from '../plugins.ts'
 import {
   applyCollectLabel,
   applyDebtLabel,
+  applyDebtVerdicts,
   applyLastN,
   buildSummary,
   claimDebtRecord,
@@ -602,28 +603,9 @@ function cmdSet(argv: string[]): void {
 /** Apply verdicts to the ledger — shared by `debt set` (argv → uniform
  *  verdicts) and the debt plan runner (`bro run debt.toml`). */
 export function applyVerdicts(verdicts: DebtVerdict[]): void {
-  const records = readDebtRecords()
-  const byId = new Map(records.map((r) => [r.thread_id, r]))
-  const ids = [...new Set(verdicts.map((v) => v.thread_id))]
-  const missing = ids.filter((id) => !byId.has(id))
-  const now = new Date().toISOString()
-
-  upsertLedgerOverlays(
-    verdicts
-      .filter((v) => byId.has(v.thread_id))
-      .map((v) => ({
-        thread_id: v.thread_id,
-        status: v.status,
-        fix_pr:
-          v.status === 'done' || v.status === 'wontfix'
-            ? (v.fix_pr ?? byId.get(v.thread_id)!.fix_pr)
-            : null,
-        fixed_at: v.status === 'done' || v.status === 'wontfix' ? now : null,
-        notes: v.notes ?? byId.get(v.thread_id)!.notes,
-      }))
-  )
+  const { applied, missing } = applyDebtVerdicts(verdicts)
   writeSummary(buildSummary(readDebtRecords()))
-  console.error(`debt set: ${ids.length - missing.length} row(s) updated`)
+  console.error(`debt set: ${applied} row(s) updated`)
   if (missing.length > 0) {
     console.error(`warning: thread id(s) not in ledger: ${missing.join(', ')}`)
     process.exitCode = 1

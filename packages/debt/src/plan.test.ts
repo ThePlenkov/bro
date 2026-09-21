@@ -74,6 +74,22 @@ fix_pr = -3
     }
   })
 
+  test('rejects duplicate thread_id verdicts', () => {
+    assert.throws(
+      () =>
+        parsePlan(`
+[[verdicts]]
+thread_id = "T1"
+status = "done"
+
+[[verdicts]]
+thread_id = "T1"
+status = "wontfix"
+`),
+      /verdicts\[1\]: duplicate thread_id "T1"/
+    )
+  })
+
   test('flags unknown keys instead of dropping them', () => {
     assert.throws(
       () => parsePlan('[[verdicts]]\nthread_id="T1"\nstatus="done"\nverdict="x"'),

@@ -103,11 +103,18 @@ export function parseDebtPlan(doc: unknown, source = 'plan'): DebtPlan {
   } else if (doc.verdicts.length === 0) {
     errors.push('verdicts: at least one verdict is required')
   } else {
+    const seen = new Set<string>()
     doc.verdicts.forEach((raw, i) => {
       const v = parseVerdict(raw, i, errors)
-      if (v) {
-        verdicts.push(v)
+      if (!v) {
+        return
       }
+      if (seen.has(v.thread_id)) {
+        errors.push(`verdicts[${i}]: duplicate thread_id ${JSON.stringify(v.thread_id)}`)
+        return
+      }
+      seen.add(v.thread_id)
+      verdicts.push(v)
     })
   }
   if (errors.length > 0) {
