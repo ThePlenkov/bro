@@ -202,12 +202,19 @@ describe('bro run — plan routing', () => {
   test('unknown kind errors with the known list', async () => {
     await assert.rejects(
       runPlanFile([planFile('kind = "nope"\n[plan]\nv = 1')]),
-      /no plan executor.*retrospect/
+      /kind "nope" is unknown.*retrospect/
+    )
+  })
+
+  test('kind naming a plan-less plugin errors distinctly', async () => {
+    await assert.rejects(
+      runPlanFile([planFile('kind = "cleanup"\n[plan]\nv = 1')]),
+      /plugin "cleanup" does not accept plans/
     )
   })
 
   test('missing kind errors', async () => {
-    await assert.rejects(runPlanFile([planFile('[plan]\nv = 1')]), /no plan executor/)
+    await assert.rejects(runPlanFile([planFile('[plan]\nv = 1')]), /no kind field/)
   })
 
   test('bad TOML surfaces the file path', async () => {

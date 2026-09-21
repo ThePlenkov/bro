@@ -132,12 +132,16 @@ export async function runPlanFile(argv: string[]): Promise<void> {
   }
   const doc = readPlanDoc(file)
   const kind = planKind(doc)
+  const kinds = PLUGINS.filter((p) => p.planSchema).map((p) => p.name)
+  if (!kind) {
+    throw new Error(`${file}: no kind field — known plan kinds: ${kinds.join(', ')}`)
+  }
   const plugin = PLUGINS.find((p) => p.name === kind)
-  if (!kind || !plugin?.planSchema || !plugin.runPlan) {
-    const kinds = PLUGINS.filter((p) => p.planSchema).map((p) => p.name)
-    throw new Error(
-      `${file}: kind ${JSON.stringify(kind ?? null)} has no plan executor — known kinds: ${kinds.join(', ')}`
-    )
+  if (!plugin) {
+    throw new Error(`${file}: kind "${kind}" is unknown — known plan kinds: ${kinds.join(', ')}`)
+  }
+  if (!plugin.planSchema || !plugin.runPlan) {
+    throw new Error(`${file}: plugin "${kind}" does not accept plans`)
   }
   await plugin.runPlan(plugin.planSchema(doc, file))
 }
