@@ -176,13 +176,18 @@ export async function fetchPrActState(
   // SAST annotation fetch failure counts as unknown below.
   const required = fetchChecks(target, true)
   const requiredNames = new Set(required.map((c) => c.name))
-  const ciPending = checks.filter(
+  // "CI green" means every check — an optional check that fails is still
+  // a red job on the PR. Pending and failing split here: pending is worth
+  // waiting out (act wait), failing is a settled verdict to act on.
+  const ciChecks = checks.filter(
     (c) =>
       c.bucket !== 'pass' &&
       c.state !== 'SKIPPED' &&
       c.state !== 'NEUTRAL' &&
       !AI_REVIEWER_RE.test(c.name)
-  ).length
+  )
+  const ciPending = ciChecks.filter((c) => c.bucket === 'pending').length
+  const ciFailing = ciChecks.filter((c) => c.bucket === 'fail').length
 
   // A pending AI reviewer can still open threads — declaring the gate OK
   // while one is running invites exactly the "threads after OK" surprise.
@@ -253,6 +258,7 @@ export async function fetchPrActState(
     openThreads: threads.filter((t) => !t.isResolved).length,
     threads,
     ciPending,
+    ciFailing,
     reviewersPending,
     reviewersFailing,
     sastPending,

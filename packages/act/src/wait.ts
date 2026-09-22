@@ -15,12 +15,17 @@ export interface GateWaitResult {
 export interface WaitOptions {
   intervalMs?: number
   timeoutMs?: number
+  /** Consecutive fetch failures tolerated before giving up — one transient
+   *  gh/network blip must not kill a long-running watcher. Default 3. */
+  maxFetchErrors?: number
   onPoll?: (state: PrActState, gate: ExitGate) => void
+  onError?: (err: unknown, consecutive: number) => void
 }
 
 /** Still settling: pending CI/reviewers or GitHub computing mergeability.
- *  Everything else — threads, failures, BEHIND — is a settled verdict the
- *  caller should act on now, not wait out. A merged/closed PR is settled. */
+ *  ciPending counts only *running* checks — a settled red check is a
+ *  verdict to act on, not to wait out. Everything else — threads,
+ *  failures, BEHIND — is settled too. A merged/closed PR is settled. */
 export function gatePending(state: PrActState): boolean {
   return (
     state.state === 'OPEN' &&
@@ -28,20 +33,39 @@ export function gatePending(state: PrActState): boolean {
   )
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
 export async function waitForGate(
   fetch: () => Promise<{ state: PrActState; gate: ExitGate }>,
   opts: WaitOptions = {},
 ): Promise<GateWaitResult> {
   const intervalMs = opts.intervalMs ?? 60_000
+  const maxErrors = opts.maxFetchErrors ?? 3
   const deadline = Date.now() + (opts.timeoutMs ?? 45 * 60_000)
   let polls = 0
+  let fetchErrors = 0
   for (;;) {
-    const { state, gate } = await fetch()
+    let result: { state: PrActState; gate: ExitGate }
+    try {
+      result = await fetch()
+      fetchErrors = 0
+    } catch (err) {
+      fetchErrors += 1
+      opts.onError?.(err, fetchErrors)
+      if (fetchErrors >= maxErrors || Date.now() >= deadline) {
+        throw err
+      }
+      await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())))
+      continue
+    }
     polls += 1
+    const { state, gate } = result
     opts.onPoll?.(state, gate)
     if (!gatePending(state) || Date.now() >= deadline) {
       return { state, gate, timedOut: gatePending(state), polls }
     }
-    await new Promise((r) => setTimeout(r, intervalMs))
+    // cap the sleep at the deadline — a full-interval nap can overshoot
+    // the configured timeout by up to intervalMs
+    await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())))
   }
 }

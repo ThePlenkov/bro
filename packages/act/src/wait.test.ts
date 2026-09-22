@@ -16,6 +16,7 @@ const open = (over: Partial<PrActState> = {}): PrActState => ({
   openThreads: 0,
   threads: [],
   ciPending: 0,
+  ciFailing: 0,
   reviewersPending: 0,
   reviewersFailing: 0,
   sastPending: 0,
@@ -60,6 +61,39 @@ test('waitForGate settles on blockers without waiting them out', async () => {
   assert.equal(res.gate.ok, false)
   assert.equal(res.state.openThreads, 2)
   assert.equal(res.polls, 2)
+})
+
+test('a failing check settles immediately — not waited out', async () => {
+  const res = await waitForGate(fetcher([open({ ciFailing: 1 })]), {
+    intervalMs: 0,
+  })
+  assert.equal(res.gate.ok, false)
+  assert.equal(res.timedOut, false)
+  assert.equal(res.polls, 1)
+})
+
+test('transient fetch errors retry; persistent ones throw', async () => {
+  let calls = 0
+  const flaky = async () => {
+    calls += 1
+    if (calls < 3) {
+      throw new Error('gh blip')
+    }
+    const state = open()
+    return { state, gate: evaluateExitGate(state) }
+  }
+  const res = await waitForGate(flaky, { intervalMs: 0 })
+  assert.equal(res.gate.ok, true)
+  assert.equal(calls, 3)
+
+  await assert.rejects(
+    waitForGate(
+      async () => {
+        throw new Error('gh down')
+      },
+      { intervalMs: 0, maxFetchErrors: 2 },
+    ),
+  )
 })
 
 test('waitForGate times out on never-settling pending', async () => {

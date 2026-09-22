@@ -114,6 +114,7 @@ function printStatus(state: PrActState, gate: ExitGate): void {
   console.log(`mergeable=${state.mergeable} merge_state=${state.mergeState} draft=${state.isDraft}`)
   console.log(
     `open_threads=${gate.open_threads} ci_pending=${gate.ci_pending} ` +
+      `ci_failing=${gate.ci_failing} ` +
       `reviewers_pending=${gate.reviewers_pending} ` +
       `reviewers_failing=${gate.reviewers_failing} ` +
       `sast_pending=${gate.sast_pending} sast_unknown=${gate.sast_unknown} ` +
@@ -154,7 +155,11 @@ async function cmdWait(argv: string[]): Promise<void> {
       timeoutMs: timeout * 60_000,
       onPoll: (s, g) =>
         console.error(
-          `act wait #${s.pr}: threads=${g.open_threads} ci=${g.ci_pending} reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
+          `act wait #${s.pr}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
+        ),
+      onError: (err, n) =>
+        console.error(
+          `act wait #${t.pr}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
         ),
     }
   )

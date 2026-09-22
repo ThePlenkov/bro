@@ -15,6 +15,7 @@ const open = (over: Partial<PrActState> = {}): PrActState => ({
   openThreads: 0,
   threads: [],
   ciPending: 0,
+  ciFailing: 0,
   reviewersPending: 0,
   reviewersFailing: 0,
   sastPending: 0,
@@ -29,10 +30,14 @@ describe('evaluateExitGate', () => {
     assert.equal(evaluateExitGate(open()).ok, true)
   })
 
-  it('blocks on open threads and pending checks', () => {
-    const g = evaluateExitGate(open({ openThreads: 2, ciPending: 1 }))
+  it('blocks on open threads and pending/failing checks', () => {
+    const g = evaluateExitGate(open({ openThreads: 2, ciPending: 1, ciFailing: 1 }))
     assert.equal(g.ok, false)
-    assert.deepEqual(g.blockers, ['2 unresolved review thread(s)', '1 pending/failing check(s)'])
+    assert.deepEqual(g.blockers, [
+      '2 unresolved review thread(s)',
+      '1 pending check(s)',
+      '1 failing check(s)',
+    ])
   })
 
   it('blocks on pending but not failed AI reviewers', () => {
