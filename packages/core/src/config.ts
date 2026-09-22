@@ -1,6 +1,7 @@
 /**
  * bro configuration. Resolution order: bro.config.ts → bro.config.json
- * in cwd → defaults. The .ts file loads synchronously via createRequire —
+ * in cwd → same pair in the main worktree root (linked worktrees inherit
+ * the machine-local config) → defaults. The .ts file loads synchronously via createRequire —
  * native type stripping handles it on Node ≥22.18. `export default {…}`
  * is the canonical form (works in ESM and CJS repos); `module.exports`
  * only works where the repo is CommonJS. No bro import is required, so
@@ -252,7 +253,7 @@ function readConfigFile(name: string, path: string): unknown {
       hint =
         ' (this dir resolves as CommonJS — use `module.exports` or add `"type": "module"` to package.json)'
     }
-    console.error(`warning: ${name} failed to load — using jsonl-only stores${hint}`)
+    console.error(`warning: ${name} failed to load — skipping${hint}`)
     return undefined
   }
 }
@@ -279,11 +280,14 @@ function applySections(
  *  `--git-common-dir` resolves to `<main>/.git` there (and to
  *  `<cwd>/.git` in the main checkout itself, which dedupes). */
 function mainWorktreeRoot(cwd: string): string | null {
-  const r = gitTry(['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  const r = gitTry(['-C', cwd, 'rev-parse', '--git-common-dir'])
   if (r.code !== 0 || r.out.trim() === '') {
     return null
   }
-  return dirname(r.out.trim())
+  // linked worktrees print the main checkout's absolute .git path; the
+  // main worktree prints a relative `.git` — resolve covers both, and
+  // unlike --path-format this works on older git too
+  return dirname(resolve(cwd, r.out.trim()))
 }
 
 export function loadConfig(
@@ -304,8 +308,11 @@ export function loadConfig(
   // loses act.ignoreChecks and store choices (a bare `act wait` stalls on
   // a flaky reviewer the main checkout knows to ignore).
   const dirs = [cwd, mainWorktreeRoot(cwd)].filter(
-    (d): d is string => d !== null && d !== ''
+    (d): d is string => d !== null && d.trim() !== ''
   )
+  // a config that exists but fails never silently enables beads — the
+  // flag keeps the final fallback at jsonl-only in that case
+  let sawBroken = false
   for (const dir of new Set(dirs)) {
     for (const name of ['bro.config.ts', 'bro.config.json']) {
       const path = join(dir, name)
@@ -313,14 +320,19 @@ export function loadConfig(
         continue
       }
       const raw = readConfigFile(name, path)
+      // broken file (warned inside readConfigFile) or invalid root: skip
+      // the rest of THIS dir — .ts precedence means a broken winner never
+      // promotes the sibling .json — but the next dir still gets tried
       if (raw === undefined) {
-        return fallback(['jsonl'])
+        sawBroken = true
+        break
       }
       // a valid non-object root ("str", […], 42) is not a config —
       // spreading it would silently produce garbage keys
       if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-        console.error(`${name}: root must be an object — using jsonl-only stores`)
-        return fallback(['jsonl'])
+        console.error(`${name}: root must be an object — skipping`)
+        sawBroken = true
+        break
       }
       const { stores: _s, store: _legacy, plugins: _p, ...rest } = raw as RawConfig
       const config: BroConfig & Record<string, unknown> = {
@@ -332,11 +344,15 @@ export function loadConfig(
               .filter((v): v is string => typeof v === 'string')
               .map((v) => v.trim())
               .filter((v) => v !== '')
+              // relative specs anchor at the config's own dir — an
+              // inherited config's `./x.ts` plugin must resolve in the
+              // main worktree, not the linked one
+              .map((v) => (v.startsWith('.') ? resolve(dir, v) : v))
           : [],
       }
       applySections(config, raw as Record<string, unknown>, sections)
       return config
     }
   }
-  return fallback([...DEFAULT_CONFIG.stores])
+  return fallback(sawBroken ? ['jsonl'] : [...DEFAULT_CONFIG.stores])
 }
