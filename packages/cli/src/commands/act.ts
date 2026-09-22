@@ -352,7 +352,10 @@ export function applyActPlan(plan: ActPlan): void {
   for (const v of plan.threads) {
     try {
       if (v.action === 'reply') {
-        replyToThread(v.thread_id, v.comment!)
+        if (!v.comment) {
+          throw new Error(`reply verdict for ${v.thread_id} has no comment`)
+        }
+        replyToThread(v.thread_id, v.comment)
         console.error(`act: replied on ${v.thread_id}`)
       } else if (v.action === 'defer') {
         console.error(`act: deferred ${v.thread_id} → ${deferThread(v, plan.pr)}`)
