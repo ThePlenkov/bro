@@ -17,8 +17,8 @@ the user's index are never touched.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro sync` | Commit untracked+ignored files under `.agents/` + the debt dir to the data ref, push to `sync.remote` |
-| `bro sync --pull` | Fetch the data ref and materialize its files into the worktree — the fresh-clone restore path |
+| `bro sync` | Commit untracked+ignored files under `.agents/` + the debt dir to the data ref, push to `sync.remote` — then run `bd sync` for beads state |
+| `bro sync --pull` | Fetch the data ref and materialize its files into the worktree — the fresh-clone restore path; also runs `bd sync` |
 
 ## Policy
 
@@ -35,3 +35,9 @@ the user's index are never touched.
   doesn't exist: there is nothing to restore from.
 - The ref is NOT a branch: `git branch` stays clean, and nobody can
   accidentally check it out or merge it into code.
+- **Beads state rides its own transport.** Drill frames, wtfs, retros and
+  the ready queue live in the local Dolt DB — `bro sync` orchestrates
+  `bd sync` (beads' pull+merge+push cycle) so one command moves
+  everything. `sync.beads: false` opts out; a missing `bd` or `.beads` is
+  skipped silently, a `bd sync` failure warns without breaking artifact
+  sync.

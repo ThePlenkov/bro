@@ -44,11 +44,13 @@ export const syncSection: ConfigSection<{
     unknown
   >
   return {
-    // only string fields may reach git arg construction — a null or
-    // non-string sync.ref/sync.remote must fall back to the default
+    // only non-blank strings may reach git arg construction — a null,
+    // non-string, or empty sync.ref/sync.remote falls back to the default
     ...DEFAULT_CONFIG.sync,
     ...Object.fromEntries(
-      Object.entries(obj).filter(([, v]) => typeof v === 'string')
+      Object.entries(obj).filter(
+        ([, v]) => typeof v === 'string' && v.trim() !== ''
+      )
     ),
     beads: typeof obj.beads === 'boolean' ? obj.beads : DEFAULT_CONFIG.sync.beads,
   }
