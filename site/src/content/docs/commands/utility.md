@@ -43,4 +43,6 @@ items remain but none are claimable (stop for the human, not done);
 Runtime artifacts (ledger, skills state, memory) shouldn't poison the PR
 diff reviewers read. `bro sync` pushes artifact directories to
 `refs/bro/data` — a git ref outside `refs/heads`, so it never shows up as
-a branch or in a PR.
+a branch or in a PR. It also runs `bd sync` — beads state (drill frames,
+wtfs, the ready queue) has its own Dolt transport, not the data ref
+(`sync.beads: false` opts out).

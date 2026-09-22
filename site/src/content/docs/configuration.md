@@ -14,7 +14,7 @@ export default {
   personality: 'terse',
   stores: ['jsonl', 'beads'],
   debt: { dir: '.agents/review-debt' },
-  sync: { ref: 'refs/bro/data', remote: 'origin' },
+  sync: { ref: 'refs/bro/data', remote: 'origin', beads: true },
   act: { ignoreChecks: ['kilo'], maxRounds: 3 },
   plugins: ['./my-plugin.ts'],
 }
@@ -44,6 +44,7 @@ Explicit `"stores": ["jsonl"]` is the beads opt-out.
 | --- | ------- | ---- |
 | `ref` | `refs/bro/data` | Data ref — outside `refs/heads`, never a branch |
 | `remote` | `origin` | Remote the data ref pushes/pulls |
+| `beads` | `true` | Also run `bd sync` — beads state (drill frames, wtfs, retros) has its own transport; `false` syncs only bro artifacts |
 
 ### `act`
 

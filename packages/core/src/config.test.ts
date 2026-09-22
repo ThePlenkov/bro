@@ -95,6 +95,12 @@ describe('loadConfig root shape', () => {
     assert.deepEqual(load({ sync: 'x' }).sync, DEFAULT_CONFIG.sync)
   })
 
+  test('sync.beads: only a boolean counts, default on', () => {
+    assert.equal(load({}).sync.beads, true)
+    assert.equal(load({ sync: { beads: false } }).sync.beads, false)
+    assert.equal(load({ sync: { beads: 'no' } }).sync.beads, true)
+  })
+
   test('act.ignoreChecks keeps only strings', () => {
     const cfg = load({ act: { ignoreChecks: ['kilo', 42, 'flaky-bot', '', '  '] } })
     assert.deepEqual(cfg.act.ignoreChecks, ['kilo', 'flaky-bot'])
