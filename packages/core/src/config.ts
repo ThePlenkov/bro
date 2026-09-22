@@ -9,8 +9,9 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { gitTry } from './git.ts'
 
 export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const
 export type StoreBackend = (typeof STORE_BACKENDS)[number]
@@ -274,6 +275,17 @@ function applySections(
   }
 }
 
+/** The main checkout's root when cwd sits in a linked worktree —
+ *  `--git-common-dir` resolves to `<main>/.git` there (and to
+ *  `<cwd>/.git` in the main checkout itself, which dedupes). */
+function mainWorktreeRoot(cwd: string): string | null {
+  const r = gitTry(['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  if (r.code !== 0 || r.out.trim() === '') {
+    return null
+  }
+  return dirname(r.out.trim())
+}
+
 export function loadConfig(
   cwd: string = process.cwd(),
   /** Plugin-registered section schemas — key = configKey, applied over the
@@ -287,35 +299,44 @@ export function loadConfig(
     applySections(config, {}, sections)
     return config
   }
-  for (const name of ['bro.config.ts', 'bro.config.json']) {
-    const path = join(cwd, name)
-    if (!existsSync(path)) {
-      continue
+  // Linked worktrees share the main checkout's machine-local config —
+  // bro.config.* is gitignored, so a fresh `git worktree add` otherwise
+  // loses act.ignoreChecks and store choices (a bare `act wait` stalls on
+  // a flaky reviewer the main checkout knows to ignore).
+  const dirs = [cwd, mainWorktreeRoot(cwd)].filter(
+    (d): d is string => d !== null && d !== ''
+  )
+  for (const dir of new Set(dirs)) {
+    for (const name of ['bro.config.ts', 'bro.config.json']) {
+      const path = join(dir, name)
+      if (!existsSync(path)) {
+        continue
+      }
+      const raw = readConfigFile(name, path)
+      if (raw === undefined) {
+        return fallback(['jsonl'])
+      }
+      // a valid non-object root ("str", […], 42) is not a config —
+      // spreading it would silently produce garbage keys
+      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+        console.error(`${name}: root must be an object — using jsonl-only stores`)
+        return fallback(['jsonl'])
+      }
+      const { stores: _s, store: _legacy, plugins: _p, ...rest } = raw as RawConfig
+      const config: BroConfig & Record<string, unknown> = {
+        ...DEFAULT_CONFIG,
+        ...rest,
+        stores: normalizeStores(raw as RawConfig),
+        plugins: Array.isArray((raw as RawConfig).plugins)
+          ? ((raw as RawConfig).plugins as unknown[])
+              .filter((v): v is string => typeof v === 'string')
+              .map((v) => v.trim())
+              .filter((v) => v !== '')
+          : [],
+      }
+      applySections(config, raw as Record<string, unknown>, sections)
+      return config
     }
-    const raw = readConfigFile(name, path)
-    if (raw === undefined) {
-      return fallback(['jsonl'])
-    }
-    // a valid non-object root ("str", […], 42) is not a config —
-    // spreading it would silently produce garbage keys
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-      console.error(`${name}: root must be an object — using jsonl-only stores`)
-      return fallback(['jsonl'])
-    }
-    const { stores: _s, store: _legacy, plugins: _p, ...rest } = raw as RawConfig
-    const config: BroConfig & Record<string, unknown> = {
-      ...DEFAULT_CONFIG,
-      ...rest,
-      stores: normalizeStores(raw as RawConfig),
-      plugins: Array.isArray((raw as RawConfig).plugins)
-        ? ((raw as RawConfig).plugins as unknown[])
-            .filter((v): v is string => typeof v === 'string')
-            .map((v) => v.trim())
-            .filter((v) => v !== '')
-        : [],
-    }
-    applySections(config, raw as Record<string, unknown>, sections)
-    return config
   }
   return fallback([...DEFAULT_CONFIG.stores])
 }
