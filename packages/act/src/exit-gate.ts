@@ -11,6 +11,7 @@ export function evaluateExitGate(state: PrActState): ExitGate {
   const base = {
     open_threads: state.openThreads,
     ci_pending: state.ciPending,
+    ci_failing: state.ciFailing,
     reviewers_pending: state.reviewersPending,
     reviewers_failing: state.reviewersFailing,
     sast_pending: state.sastPending,
@@ -36,7 +37,10 @@ export function evaluateExitGate(state: PrActState): ExitGate {
     }
   }
   if (state.ciPending > 0) {
-    blockers.push(`${state.ciPending} pending/failing check(s)`)
+    blockers.push(`${state.ciPending} pending check(s)`)
+  }
+  if (state.ciFailing > 0) {
+    blockers.push(`${state.ciFailing} failing check(s)`)
   }
   if (state.reviewersPending > 0) {
     blockers.push(`${state.reviewersPending} AI reviewer(s) still running — recheck`)

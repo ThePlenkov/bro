@@ -21,8 +21,10 @@ export interface PrActState {
   mergeState: string
   openThreads: number
   threads: ReviewThreadNode[]
-  /** Non-reviewer checks that are not passing/skipped/neutral — all checks, not just required. */
+  /** Non-reviewer checks still running/queued — all checks, not just required. */
   ciPending: number
+  /** Non-reviewer checks settled red (failure/cancelled/timed out). */
+  ciFailing: number
   /** AI reviewer checks still running — they may yet open threads. */
   reviewersPending: number
   /** AI reviewer checks that failed — the review may never have run. */
@@ -44,6 +46,7 @@ export interface ExitGate {
   blockers: string[]
   open_threads: number
   ci_pending: number
+  ci_failing: number
   reviewers_pending: number
   reviewers_failing: number
   sast_pending: number

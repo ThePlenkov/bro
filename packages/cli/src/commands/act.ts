@@ -12,14 +12,18 @@ import { ensureGhAuth, bd, gh, gitTry, resolveRepo } from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
 import { fetchReviewThreads } from '@bro/debt'
 import { isAncestor } from './cleanup.ts'
+import { flag } from './args.ts'
 import {
   evaluateExitGate,
   fetchPrActState,
   replyToThread,
   resolveReviewThread,
   unresolveReviewThread,
+  waitForGate,
   type ActPlan,
   type ActThreadVerdict,
+  type ExitGate,
+  type PrActState,
 } from '@bro/act'
 
 function usage(): never {
@@ -27,6 +31,8 @@ function usage(): never {
 
 Commands:
   status [PR] [--json]              PR state + exit gate JSON
+  wait [PR] [--interval S] [--timeout M] [--merge] [--json]
+                                    Poll the gate until it settles; --merge lands on green
   threads [PR]                      Unresolved review threads (TSV)
   merge [PR] [--squash|--merge|--rebase] [--admin]  Merge only if the exit gate is green
   resolve --thread ID [--comment T] Resolve thread, optionally reply first
@@ -36,7 +42,7 @@ Commands:
   process.exit(1)
 }
 
-const VALUE_FLAGS = new Set(['--pr', '--thread', '--comment', '--file'])
+const VALUE_FLAGS = new Set(['--pr', '--thread', '--comment', '--file', '--interval', '--timeout'])
 
 /** PR number: --pr flag, first positional, or the current branch's PR. */
 function resolvePr(argv: string[]): { repo: string; owner: string; repoName: string; pr: number } {
@@ -100,10 +106,15 @@ async function cmdStatus(argv: string[]): Promise<void> {
     console.log(JSON.stringify({ pr: state, exit_gate: gate }, null, 2))
     return
   }
+  printStatus(state, gate)
+}
+
+function printStatus(state: PrActState, gate: ExitGate): void {
   console.log(`pr=#${state.pr} ${state.headRef} ${state.url}`)
   console.log(`mergeable=${state.mergeable} merge_state=${state.mergeState} draft=${state.isDraft}`)
   console.log(
     `open_threads=${gate.open_threads} ci_pending=${gate.ci_pending} ` +
+      `ci_failing=${gate.ci_failing} ` +
       `reviewers_pending=${gate.reviewers_pending} ` +
       `reviewers_failing=${gate.reviewers_failing} ` +
       `sast_pending=${gate.sast_pending} sast_unknown=${gate.sast_unknown} ` +
@@ -112,6 +123,63 @@ async function cmdStatus(argv: string[]): Promise<void> {
   console.log(`exit_gate=${gate.ok ? 'OK' : 'BLOCKED'}`)
   for (const b of gate.blockers) {
     console.log(`  blocker: ${b}`)
+  }
+}
+
+/**
+ * `bro act wait` — the gate-watcher as a primitive: poll until nothing is
+ * pending (gate green, threads/failures to act on, or timeout), print the
+ * verdict. `--merge` lands the PR when the gate settles OK — the whole
+ * "watcher + merge on green" loop in one backgroundable command.
+ */
+async function cmdWait(argv: string[]): Promise<void> {
+  ensureGhAuth()
+  const t = resolvePr(argv)
+  const act = loadBroConfig().act
+  const interval = Number(flag(argv, '--interval') ?? '60')
+  const timeout = Number(flag(argv, '--timeout') ?? '45')
+  if (!Number.isFinite(interval) || interval <= 0 || !Number.isFinite(timeout) || timeout <= 0) {
+    console.error('error: --interval/--timeout must be positive numbers (seconds/minutes)')
+    process.exit(2)
+  }
+  const res = await waitForGate(
+    async () => {
+      const state = await fetchPrActState(
+        { owner: t.owner, repo: t.repoName, pr: t.pr },
+        { ignoreChecks: act.ignoreChecks, maxRounds: act.maxRounds }
+      )
+      return { state, gate: evaluateExitGate(state) }
+    },
+    {
+      intervalMs: interval * 1000,
+      timeoutMs: timeout * 60_000,
+      onPoll: (s, g) =>
+        console.error(
+          `act wait #${s.pr}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
+        ),
+      onError: (err, n) =>
+        console.error(
+          `act wait #${t.pr}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
+        ),
+    }
+  )
+  if (argv.includes('--json')) {
+    console.log(
+      JSON.stringify({ pr: res.state, exit_gate: res.gate, timed_out: res.timedOut }, null, 2)
+    )
+  } else {
+    printStatus(res.state, res.gate)
+    if (res.timedOut) {
+      console.log(`wait: timed out after ${timeout}m — still pending`)
+    }
+  }
+  if (res.timedOut || !res.gate.ok || res.state.state !== 'OPEN') {
+    process.exitCode = res.timedOut || !res.gate.ok ? 1 : 0
+    return
+  }
+  if (argv.includes('--merge')) {
+    const mergeArgs = argv.filter((a) => ['--squash', '--rebase', '--admin'].includes(a))
+    await cmdMerge([String(t.pr), ...mergeArgs])
   }
 }
 
@@ -306,6 +374,7 @@ function cmdReply(argv: string[]): void {
 
 const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
   status: cmdStatus,
+  wait: cmdWait,
   merge: cmdMerge,
   threads: cmdThreads,
   resolve: cmdResolve,
