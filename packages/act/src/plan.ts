@@ -60,7 +60,7 @@ function checkThread(raw: Record<string, unknown>, where: string, errors: string
     errors.push(`${where}: reply requires a comment`)
   }
   if (raw.action === 'defer' && !nonEmpty(raw.title)) {
-    errors.push(`${where}: defer requires a title — the debt bead's`)
+    errors.push(`${where}: defer requires a title — it becomes the debt bead title`)
   }
 }
 

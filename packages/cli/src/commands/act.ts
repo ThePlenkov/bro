@@ -341,6 +341,22 @@ function deferThread(v: ActThreadVerdict, pr?: number): string {
   return bead
 }
 
+function replyVerdict(v: ActThreadVerdict): void {
+  if (!v.comment) {
+    throw new Error(`reply verdict for ${v.thread_id} has no comment`)
+  }
+  replyToThread(v.thread_id, v.comment)
+  console.error(`act: replied on ${v.thread_id}`)
+}
+
+function resolveVerdict(v: ActThreadVerdict): void {
+  if (v.comment) {
+    replyToThread(v.thread_id, v.comment)
+  }
+  resolveReviewThread(v.thread_id)
+  console.error(`act: resolved ${v.thread_id}`)
+}
+
 /** Apply an `act` plan (`bro run act.toml`) — batch thread verdicts.
  *  One bad verdict doesn't abort the rest; failures list at the end. */
 export function applyActPlan(plan: ActPlan): void {
@@ -352,16 +368,11 @@ export function applyActPlan(plan: ActPlan): void {
   for (const v of plan.threads) {
     try {
       if (v.action === 'reply') {
-        replyToThread(v.thread_id, v.comment!)
-        console.error(`act: replied on ${v.thread_id}`)
+        replyVerdict(v)
       } else if (v.action === 'defer') {
         console.error(`act: deferred ${v.thread_id} → ${deferThread(v, plan.pr)}`)
       } else {
-        if (v.comment) {
-          replyToThread(v.thread_id, v.comment)
-        }
-        resolveReviewThread(v.thread_id)
-        console.error(`act: resolved ${v.thread_id}`)
+        resolveVerdict(v)
       }
     } catch (err) {
       failed.push(v.thread_id)
