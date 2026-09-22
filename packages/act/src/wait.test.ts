@@ -1,0 +1,72 @@
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { evaluateExitGate } from './exit-gate.ts'
+import type { PrActState } from './types.ts'
+import { gatePending, waitForGate } from './wait.ts'
+
+const open = (over: Partial<PrActState> = {}): PrActState => ({
+  pr: 1,
+  headRef: 'x',
+  headSha: 'abc',
+  url: '',
+  state: 'OPEN',
+  mergeable: 'MERGEABLE',
+  mergeState: 'CLEAN',
+  isDraft: false,
+  openThreads: 0,
+  threads: [],
+  ciPending: 0,
+  reviewersPending: 0,
+  reviewersFailing: 0,
+  sastPending: 0,
+  sastUnknown: 0,
+  fixRounds: 0,
+  maxRounds: 3,
+  ...over,
+})
+
+const fetcher = (states: PrActState[]) => {
+  let i = 0
+  return async () => {
+    const state = states[Math.min(i, states.length - 1)]!
+    i += 1
+    return { state, gate: evaluateExitGate(state) }
+  }
+}
+
+test('gatePending: only pending signals keep waiting', () => {
+  assert.equal(gatePending(open({ ciPending: 1 })), true)
+  assert.equal(gatePending(open({ reviewersPending: 1 })), true)
+  assert.equal(gatePending(open({ mergeable: 'UNKNOWN' })), true)
+  assert.equal(gatePending(open()), false)
+  assert.equal(gatePending(open({ openThreads: 3 })), false)
+  assert.equal(gatePending(open({ state: 'MERGED', ciPending: 1 })), false)
+})
+
+test('waitForGate settles when the gate is green', async () => {
+  const res = await waitForGate(fetcher([open({ ciPending: 1 }), open()]), {
+    intervalMs: 0,
+  })
+  assert.equal(res.gate.ok, true)
+  assert.equal(res.timedOut, false)
+  assert.equal(res.polls, 2)
+})
+
+test('waitForGate settles on blockers without waiting them out', async () => {
+  const res = await waitForGate(
+    fetcher([open({ openThreads: 2, ciPending: 1 }), open({ openThreads: 2 })]),
+    { intervalMs: 0 },
+  )
+  assert.equal(res.gate.ok, false)
+  assert.equal(res.state.openThreads, 2)
+  assert.equal(res.polls, 2)
+})
+
+test('waitForGate times out on never-settling pending', async () => {
+  const res = await waitForGate(fetcher([open({ reviewersPending: 1 })]), {
+    intervalMs: 0,
+    timeoutMs: 0,
+  })
+  assert.equal(res.timedOut, true)
+  assert.equal(res.polls, 1)
+})

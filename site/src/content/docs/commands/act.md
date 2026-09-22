@@ -13,6 +13,7 @@ checks, SAST annotations, mergeability, and fix rounds.
 | ------- | ------------ |
 | `bro act status [PR] [--json]` | PR state + exit gate. Non-zero while blocked |
 | `bro act threads [PR]` | Unresolved review threads, TSV |
+| `bro act wait [PR] [--interval S] [--timeout M] [--merge]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green |
 | `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin]` | Merge **only if the gate is green** — refuses and names blockers |
 | `bro act resolve --thread ID [--comment T]` | Resolve (reply first if comment given); `--unresolve` reopens |
 | `bro act reply --thread ID --comment T` | Reply without resolving; `--file TSV` for batch |

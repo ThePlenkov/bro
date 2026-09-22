@@ -18,6 +18,7 @@ default store, so standard installs already have it).
 | ------- | ------------ |
 | `bro act status [PR] [--json]` | PR state + **exit gate** — open threads, CI failures, SAST findings. Exits non-zero while blocked |
 | `bro act threads [PR]` | Unresolved review threads, TSV |
+| `bro act wait [PR] [--interval S] [--timeout M] [--merge]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green |
 | `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin]` | Merge **only if the exit gate is green** — BLOCKED refuses and names blockers |
 | `bro act resolve --thread ID [--comment T]` | Resolve a thread (reply first if comment given) |
 | `bro act reply --thread ID --comment T` | Reply without resolving (`--file TSV` for batch) |
@@ -60,14 +61,15 @@ default store, so standard installs already have it).
   is enforced as code there — a manual merge approximates it by hand and
   can bypass pending reviewers/SAST. Only a user-directed override justifies
   merging around a BLOCKED gate.
-- **Wait via a background subagent, never in-session.** The wait primitive
-  is `gh pr checks <PR> --watch` — native settle logic, no hand-rolled
-  polling. Spawn it as a **background subagent** that then runs
-  `bro act status <PR>` and `bro act threads <PR>` as separate commands
-  (never `status && threads` — a failing gate must not hide the threads):
-  the subagent notifies
-  on completion and returns the gate report; a plain background shell
-  stays silent until polled, so it is only a fallback.
+- **Wait via `bro act wait <PR>` in the background, never a bespoke poll
+  loop.** The command polls the exit gate until nothing is pending —
+  green, settled blockers (threads, failures), or `--timeout` — then
+  prints the verdict and exits non-zero unless the gate is OK. Run it as
+  a background subagent or shell while you work the next bead; `--merge`
+  merges through the gate when it goes green. On a settled BLOCKED, run
+  `bro act threads <PR>` as a separate command (never `status && threads`
+  — a failing exit must not hide the threads). `gh pr checks --watch` is
+  the fallback only where bro isn't installed.
 - **Resolve silently when you fixed it.** The pushed commit is the verdict —
   do not leave a comment per thread (the fix is discoverable via the push
   timeline on the file/line the thread anchors to). Reply only when
