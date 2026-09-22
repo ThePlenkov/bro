@@ -34,18 +34,27 @@ export const debtSection: ConfigSection<{ dir: string }> = (raw) => ({
       : DEFAULT_CONFIG.debt.dir,
 })
 
-export const syncSection: ConfigSection<{ ref: string; remote: string }> = (
-  raw
-) => ({
-  // only string fields may reach git arg construction — a null or
-  // non-string sync.ref/sync.remote must fall back to the default
-  ...DEFAULT_CONFIG.sync,
-  ...(typeof raw === 'object' && raw !== null
-    ? Object.fromEntries(
-        Object.entries(raw).filter(([, v]) => typeof v === 'string')
+export const syncSection: ConfigSection<{
+  ref: string
+  remote: string
+  beads: boolean
+}> = (raw) => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<
+    string,
+    unknown
+  >
+  return {
+    // only non-blank strings may reach git arg construction — a null,
+    // non-string, or empty sync.ref/sync.remote falls back to the default
+    ...DEFAULT_CONFIG.sync,
+    ...Object.fromEntries(
+      Object.entries(obj).filter(
+        ([, v]) => typeof v === 'string' && v.trim() !== ''
       )
-    : {}),
-})
+    ),
+    beads: typeof obj.beads === 'boolean' ? obj.beads : DEFAULT_CONFIG.sync.beads,
+  }
+}
 
 export const actSection: ConfigSection<{
   ignoreChecks: string[]
@@ -97,6 +106,10 @@ export interface BroConfig {
     ref: string
     /** Remote the data ref pushes to / pulls from. */
     remote: string
+    /** Also run `bd sync` — beads state (drill frames, wtfs, retros) has
+     *  its own transport, not the data ref. Default true; set false to
+     *  sync only bro artifacts. */
+    beads: boolean
   }
   act: {
     /** Check-name substrings (case-insensitive) excluded from the exit
@@ -117,7 +130,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   stores: ['jsonl', 'beads'],
   personality: 'terse',
   debt: { dir: '.agents/review-debt' },
-  sync: { ref: 'refs/bro/data', remote: 'origin' },
+  sync: { ref: 'refs/bro/data', remote: 'origin', beads: true },
   act: { ignoreChecks: [], maxRounds: 3 },
   plugins: [],
 }
