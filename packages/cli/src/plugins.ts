@@ -20,13 +20,14 @@ import {
 } from '@bro/core'
 import { parseActPlan, type ActPlan } from '@bro/act'
 import { parseDebtPlan, type DebtPlan } from '@bro/debt'
+import { parseDrillPlan, type DrillPlan } from '@bro/drill'
 import { parsePlanDoc, type RetroPlan } from '@bro/retro'
 import { applyActPlan, runActCommand } from './commands/act.ts'
 import { runCleanupCommand } from './commands/cleanup.ts'
 import { runConvoyCommand } from './commands/convoy.ts'
 import { runNextCommand } from './commands/next.ts'
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
-import { runDrillCommand } from './commands/drill.ts'
+import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runHooksCommand } from './commands/hooks.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runSetupCommand } from './commands/setup.ts'
@@ -75,6 +76,8 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Scoped descent over beads: down|up|current|tree|list|distill',
     run: runDrillCommand,
     skill: 'drill',
+    planSchema: (doc, source) => parseDrillPlan(doc, source),
+    runPlan: (plan) => applyDrillPlan(plan as DrillPlan),
   }),
   definePlugin({
     name: 'unwind',

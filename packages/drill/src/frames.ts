@@ -153,11 +153,15 @@ function claimFrame(id: string): void {
   }
 }
 
-/** Descend: create a child frame under `opts.under` or the current leaf. */
+/** Descend: create a child frame under `opts.under` or the current leaf;
+ *  `opts.root` forces a parentless frame even when a leaf is open. */
 export function drillDown(title: string, opts: DownOptions = {}): DrillRow {
-  const parent = opts.under
-    ? requireOpenDrill(opts.under, '--under').id
-    : currentFrame()?.id
+  let parent: string | undefined
+  if (opts.under) {
+    parent = requireOpenDrill(opts.under, '--under').id
+  } else if (!opts.root) {
+    parent = currentFrame()?.id
+  }
   const args = ['create', title, '-l', DRILL_LABEL]
   if (parent) {
     args.push('--parent', parent)

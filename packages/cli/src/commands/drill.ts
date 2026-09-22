@@ -18,6 +18,7 @@ import {
   drillUp,
   listDrills,
   bd,
+  type DrillPlan,
 } from '@bro/drill'
 import { flag, flagAll, positionals } from './args.ts'
 
@@ -106,6 +107,58 @@ function cmdDown(rest: string[]): void {
   const { title, opts } = parseDown(rest)
   const row = drillDown(title, opts)
   console.log(`drill ↓ ${row.id} ${row.title}`)
+}
+
+/** Materialize a drill plan (`bro run drill.toml`): the root frame plus
+ *  declared child steps as open beads — investigation then fills each
+ *  with `drill up --result` as usual. The root is a root — a plan never
+ *  grafts onto whatever leaf happens to be open. bd has no transactions,
+ *  so a mid-flight failure deletes the frames this run created (the
+ *  claimFrame/drillUp convention): a retry converges instead of
+ *  duplicating the tree. */
+export function applyDrillPlan(plan: DrillPlan): void {
+  checkBeads()
+  const created: string[] = []
+  try {
+    const root = drillDown(plan.title, { root: true })
+    created.push(root.id)
+    console.log(`drill ↓ ${root.id} ${root.title} (plan root)`)
+    const ids = new Map<number, string>()
+    plan.steps.forEach((s, i) => {
+      const under = s.under === undefined ? root.id : ids.get(s.under)
+      if (under === undefined) {
+        throw new Error(`steps[${i}]: under=${s.under} has no materialized step`)
+      }
+      const row = drillDown(s.title, {
+        under,
+        ephemeral: s.ephemeral,
+        description: s.description,
+        priority: s.priority,
+        type: s.type,
+      })
+      created.push(row.id)
+      ids.set(i, row.id)
+      console.log(`  step → ${row.id} ${row.title}`)
+    })
+  } catch (err) {
+    const orphans: string[] = []
+    // children first — bd refuses to delete a frame with open children
+    for (const id of [...created].reverse()) {
+      try {
+        bd(['delete', id, '--force'])
+      } catch {
+        orphans.push(id)
+      }
+    }
+    if (orphans.length === 0) {
+      throw err
+    }
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(
+      `${msg} — cleanup incomplete: frame(s) left behind: ${orphans.join(', ')}`,
+      { cause: err },
+    )
+  }
 }
 
 function cmdUp(rest: string[]): void {

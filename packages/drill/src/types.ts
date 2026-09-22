@@ -18,6 +18,8 @@ export interface DrillFrame extends DrillRow {
 
 export interface DownOptions {
   under?: string
+  /** Force a root frame — by default `down` nests under the current leaf. */
+  root?: boolean
   ephemeral?: boolean
   type?: string
   priority?: number
