@@ -22,6 +22,13 @@ describe('parseAcquire', () => {
     assert.deepEqual(parseAcquire(''), { kind: 'unavailable' })
     assert.deepEqual(parseAcquire('{"acquired":false}'), { kind: 'unavailable' })
   })
+
+  test('empty holder is degenerate output — unavailable, not held', () => {
+    assert.deepEqual(
+      parseAcquire('{"acquired":false,"holder":"","id":"x-merge-slot"}'),
+      { kind: 'unavailable' }
+    )
+  })
 })
 
 describe('parseCheck', () => {

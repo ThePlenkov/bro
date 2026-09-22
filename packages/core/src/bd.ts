@@ -28,6 +28,9 @@ export function bdTry(
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
+    // same maxBuffer contract as bd() — a future caller passing a large
+    // payload must not silently get truncated stdout
+    maxBuffer: 64 * 1024 * 1024,
   })
   return {
     code: proc.status ?? 1,

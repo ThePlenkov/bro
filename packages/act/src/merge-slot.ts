@@ -35,8 +35,10 @@ export function parseAcquire(out: string): MergeSlot {
     return { kind: 'acquired' }
   }
   // a held slot reports acquired:false + the current holder — distinguish
-  // real contention from "no beads here" by whether we got JSON at all
-  if (body && typeof body.holder === 'string') {
+  // real contention from "no beads here" by whether we got JSON at all;
+  // an empty holder string is degenerate bd output, fail open instead of
+  // refusing a merge with a nameless holder
+  if (body && typeof body.holder === 'string' && body.holder.length > 0) {
     return { kind: 'held', holder: body.holder }
   }
   return { kind: 'unavailable' }
@@ -62,9 +64,17 @@ export function acquireMergeSlot(): MergeSlot {
 }
 
 /** Release the merge slot after a merge attempt. Best-effort — a wedged
- *  bd must not turn a successful merge into a failure. */
+ *  bd must not turn a successful merge into a failure — but a failed
+ *  release leaves the slot held under this actor's name, so it is
+ *  surfaced on stderr rather than swallowed silently. */
 export function releaseMergeSlot(): void {
-  bdTry(['merge-slot', 'release', '--json'])
+  const res = bdTry(['merge-slot', 'release', '--json'])
+  if (res.code !== 0) {
+    console.error(
+      `bro: merge-slot release failed (${res.err || `exit ${res.code}`}) — ` +
+        'slot may stay held; recover with `bd merge-slot release`'
+    )
+  }
 }
 
 /** Current holder for context surfaces (session-start line), or null when

@@ -194,6 +194,16 @@ async function cmdMerge(argv: string[]): Promise<void> {
   ensureGhAuth()
   const t = resolvePr(argv)
 
+  // cheap client-side validation before acquiring the slot — a doomed
+  // request must not occupy the critical section
+  const strategies = ['--squash', '--merge', '--rebase'].filter((f) => argv.includes(f))
+  if (strategies.length > 1) {
+    console.error(`error: conflicting merge strategies: ${strategies.join(' ')}`)
+    process.exitCode = 2
+    return
+  }
+  const method = strategies[0] ?? '--squash'
+
   // Gate evaluation + merge is ONE critical section: acquiring the slot
   // first closes the drift window between a green gate and the merge
   // (new threads/state can't sneak in while a wedged bd would otherwise
@@ -232,14 +242,6 @@ async function cmdMerge(argv: string[]): Promise<void> {
       process.exitCode = 1
       return
     }
-
-    const strategies = ['--squash', '--merge', '--rebase'].filter((f) => argv.includes(f))
-    if (strategies.length > 1) {
-      console.error(`error: conflicting merge strategies: ${strategies.join(' ')}`)
-      process.exitCode = 2
-      return
-    }
-    const method = strategies[0] ?? '--squash'
 
     // --match-head-commit pins the merge to the sha the gate evaluated —
     // a head that moved since fetch fails closed instead of landing

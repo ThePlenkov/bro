@@ -19,7 +19,7 @@ default store, so standard installs already have it).
 | `bro act status [PR] [--json]` | PR state + **exit gate** — open threads, CI failures, SAST findings. Exits non-zero while blocked |
 | `bro act threads [PR]` | Unresolved review threads, TSV |
 | `bro act wait [PR] [--interval S] [--timeout M] [--merge]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green |
-| `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin]` | Merge **only if the exit gate is green** — serialized on the beads merge slot; BLOCKED refuses and names blockers |
+| `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin]` | Merge **only if the exit gate is green** — serialized on the beads merge slot (best-effort: without beads the merge proceeds unserialized); BLOCKED refuses and names blockers |
 | `bro act resolve --thread ID [--comment T]` | Resolve a thread (reply first if comment given) |
 | `bro act reply --thread ID --comment T` | Reply without resolving (`--file TSV` for batch) |
 
