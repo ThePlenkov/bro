@@ -10,7 +10,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { gitTry } from './git.ts'
 
@@ -287,7 +287,13 @@ function mainWorktreeRoot(cwd: string): string | null {
   // linked worktrees print the main checkout's absolute .git path; the
   // main worktree prints a relative `.git` — resolve covers both, and
   // unlike --path-format this works on older git too
-  return dirname(resolve(cwd, r.out.trim()))
+  const common = resolve(cwd, r.out.trim())
+  // a worktree attached to a BARE repo returns the repo dir itself
+  // (/srv/repo.git) — dirname would point at an unrelated ancestor
+  if (basename(common) !== '.git') {
+    return null
+  }
+  return dirname(common)
 }
 
 export function loadConfig(
@@ -346,8 +352,23 @@ export function loadConfig(
               .filter((v) => v !== '')
               // relative specs anchor at the config's own dir — an
               // inherited config's `./x.ts` plugin must resolve in the
-              // main worktree, not the linked one
-              .map((v) => (v.startsWith('.') ? resolve(dir, v) : v))
+              // main worktree, not the linked one. Containment is kept
+              // here: a spec escaping its anchor is dropped, so the
+              // absolute path reaching importPluginModule can't bypass
+              // its repo-root guard
+              .flatMap((v) => {
+                if (!v.startsWith('.')) {
+                  return [v]
+                }
+                const abs = resolve(dir, v)
+                if (abs !== dir && !abs.startsWith(dir + sep)) {
+                  console.error(
+                    `warning: plugin spec "${v}" escapes ${dir} — skipped`
+                  )
+                  return []
+                }
+                return [abs]
+              })
           : [],
       }
       applySections(config, raw as Record<string, unknown>, sections)

@@ -326,4 +326,28 @@ describe('loadConfig linked worktree', () => {
     writeFileSync(join(main, 'bro.config.json'), JSON.stringify({ plugins: ['./my-plugin.ts'] }))
     assert.deepEqual(loadConfig(wt).plugins, [join(main, 'my-plugin.ts')])
   })
+
+  test('a relative plugin spec escaping its config dir is dropped', () => {
+    const { main, wt } = repoWithWorktree()
+    writeFileSync(
+      join(main, 'bro.config.json'),
+      JSON.stringify({ plugins: ['../escape.ts', './ok.ts'] })
+    )
+    assert.deepEqual(loadConfig(wt).plugins, [join(main, 'ok.ts')])
+  })
+
+  test('worktree of a bare repo inherits nothing', () => {
+    const main = mkdtempSync(join(tmpdir(), 'bro-main-'))
+    execFileSync('git', ['init', '-q', main])
+    execFileSync('git', ['-C', main, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'])
+    const holder = mkdtempSync(join(tmpdir(), 'bro-bare-'))
+    const bare = join(holder, 'repo.git')
+    execFileSync('git', ['clone', '-q', '--bare', main, bare])
+    // a config sitting next to the bare repo (the wrong fallback target)
+    // must NOT leak into a worktree of it
+    writeFileSync(join(holder, 'bro.config.json'), JSON.stringify({ personality: 'sarcastic' }))
+    const wt = mkdtempSync(join(tmpdir(), 'bro-wt-'))
+    execFileSync('git', ['-C', bare, 'worktree', 'add', '-qf', '--detach', wt])
+    assert.equal(loadConfig(wt).personality, DEFAULT_CONFIG.personality)
+  })
 })
