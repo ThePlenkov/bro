@@ -281,6 +281,25 @@ function graphql(query: string, vars: Record<string, string>): void {
   }
 }
 
+/** The GitHub "Update branch" button — merge the base into the PR head.
+ *  expected_head_sha pins the head we saw, so a push between fetch and
+ *  update doesn't get steamrolled. False when GitHub refuses (conflict,
+ *  head moved, permissions) — the caller treats that as settled. */
+export function updatePullBranch(
+  target: { owner: string; repo: string; pr: number },
+  expectedHeadSha: string
+): boolean {
+  const r = ghTry([
+    'api',
+    '-X',
+    'PUT',
+    `repos/${target.owner}/${target.repo}/pulls/${target.pr}/update-branch`,
+    '-f',
+    `expected_head_sha=${expectedHeadSha}`,
+  ])
+  return r.code === 0
+}
+
 export function resolveReviewThread(threadId: string): void {
   graphql(
     'mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}',
