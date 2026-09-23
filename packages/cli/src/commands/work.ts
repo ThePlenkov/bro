@@ -198,6 +198,30 @@ note: gitignored dirs (node_modules, dist) are not shared — install deps there
   }
 }
 
+/** A positional can be a path, a basename, or a bare slug. Resolving the
+ *  current root must happen before removal — afterwards `rev-parse` can't
+ *  run in the deleted cwd. */
+function resolveLeaveTarget(
+  all: WorktreeInfo[],
+  main: WorktreeInfo,
+  selector: string | undefined
+): { target: WorktreeInfo; wasCurrent: boolean } {
+  const cur = selector ? undefined : currentRoot()
+  const target = selector
+    ? all.find((w) => w.path === resolve(selector) || basename(w.path) === selector || w.path === worktreePathFor(main.path, selector))
+    : all.find((w) => w.path === cur)
+  if (!target) {
+    const what = selector ? `matching "${selector}"` : 'at the current directory'
+    console.error(`error: no worktree ${what}`)
+    process.exit(1)
+  }
+  if (target.path === main.path) {
+    console.error('error: refusing to remove the main worktree')
+    process.exit(1)
+  }
+  return { target, wasCurrent: target.path === cur }
+}
+
 function cmdLeave(argv: string[]): void {
   const pos = positionals(argv, new Set())
   const force = argv.includes('--force')
@@ -208,21 +232,7 @@ function cmdLeave(argv: string[]): void {
     console.error('bro work: not inside a git worktree')
     process.exit(1)
   }
-  // resolve the current root up front — after a successful remove it no
-  // longer exists on disk and `rev-parse` can't run there
-  const cur = pos[0] ? undefined : currentRoot()
-  const target = pos[0]
-    ? all.find((w) => w.path === resolve(pos[0]) || basename(w.path) === pos[0] || w.path === worktreePathFor(main.path, pos[0]))
-    : all.find((w) => w.path === cur)
-  if (!target) {
-    const what = pos[0] ? `matching "${pos[0]}"` : 'at the current directory'
-    console.error(`error: no worktree ${what}`)
-    process.exit(1)
-  }
-  if (target.path === main.path) {
-    console.error('error: refusing to remove the main worktree')
-    process.exit(1)
-  }
+  const { target, wasCurrent } = resolveLeaveTarget(all, main, pos[0])
   // git's own dirty-tree refusal is our safety net — but submodule trees
   // need --force, which would silence it. Check dirt ourselves first.
   if (!force && dirtyCount(target.path) > 0) {
@@ -244,7 +254,7 @@ function cmdLeave(argv: string[]): void {
     console.error(`error: git worktree remove failed — ${res.err} (use --force to override)`)
     process.exit(1)
   }
-  const gone = target.path === cur ? ` — this directory is gone; cd ${main.path}` : ''
+  const gone = wasCurrent ? ` — this directory is gone; cd ${main.path}` : ''
   console.log(`removed worktree ${target.path}${gone}`)
   if (deleteBranch && target.branch) {
     const del = gitTry(['-C', main.path, 'branch', '-d', target.branch])
