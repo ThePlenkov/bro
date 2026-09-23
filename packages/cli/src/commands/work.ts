@@ -20,7 +20,7 @@
 import { existsSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve, sep } from 'node:path'
-import { git, gitTry } from '@bro/core'
+import { bdTry, git, gitTry } from '@bro/core'
 import { flag, positionals } from './args.ts'
 
 export interface WorktreeInfo {
@@ -126,6 +126,23 @@ function diskUsage(path: string): string {
   return du.status === 0 ? (du.stdout ?? '').split('\t')[0]!.trim() : '?'
 }
 
+/** The repo declares submodules — git worktree add does NOT populate them,
+ *  and `worktree remove` refuses a tree that still contains one. */
+export function hasSubmodules(worktreePath: string): boolean {
+  return existsSync(join(worktreePath, '.gitmodules'))
+}
+
+/** Best-effort claim: when the slug names a real bead, mark it in_progress
+ *  for this actor so parallel sessions see it taken. Beads-less repos and
+ *  non-bead slugs pass silently. */
+function claimBead(slug: string): string | null {
+  if (bdTry(['show', slug]).code !== 0) {
+    return null
+  }
+  const upd = bdTry(['update', slug, '--claim'])
+  return upd.code === 0 ? slug : null
+}
+
 function cmdEnter(argv: string[]): void {
   const pos = positionals(argv, new Set(['--branch', '--base']))
   const slug = pos[0]
@@ -162,9 +179,23 @@ function cmdEnter(argv: string[]): void {
     console.error(`error: git worktree add failed — ${res.err}`)
     process.exit(1)
   }
+  // submodules are not populated by worktree add — a fresh tree without
+  // them builds stale or fails; init is best-effort (network may be down)
+  if (hasSubmodules(path)) {
+    const sub = gitTry(['-C', path, 'submodule', 'update', '--init'])
+    console.log(
+      sub.code === 0
+        ? 'submodules initialized'
+        : `warning: submodule init failed — ${sub.err || 'check .gitmodules'}`
+    )
+  }
+  const claimed = claimBead(slug)
   console.log(`worktree ready: ${path}  (branch ${branch})
   cd ${path}
 note: gitignored dirs (node_modules, dist) are not shared — install deps there`)
+  if (claimed) {
+    console.log(`claimed bead ${claimed} for this session`)
+  }
 }
 
 function cmdLeave(argv: string[]): void {
@@ -191,6 +222,14 @@ function cmdLeave(argv: string[]): void {
   if (target.path === main.path) {
     console.error('error: refusing to remove the main worktree')
     process.exit(1)
+  }
+  // `git worktree remove` refuses trees containing populated submodules —
+  // deinit first so a repo with vendor/ submodules can actually leave
+  if (hasSubmodules(target.path)) {
+    const deinit = gitTry(['-C', target.path, 'submodule', 'deinit', '-f', '--all'])
+    if (deinit.code !== 0) {
+      console.error(`warning: submodule deinit failed — ${deinit.err}`)
+    }
   }
   const args = ['-C', main.path, 'worktree', 'remove', target.path]
   if (force) {

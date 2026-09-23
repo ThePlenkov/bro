@@ -11,6 +11,10 @@ export function bd(args: string[]): string {
   return execFileSync('bd', args, { // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    // pipe stderr — *Sync variants inherit it by default, and bd chatters
+    // ("no beads database found") into hook logs on every probe. Real
+    // errors still surface on err.stderr for callers that catch.
+    stdio: ['ignore', 'pipe', 'pipe'],
     // a wedged bd must degrade, not stall — hooks call this inline in the
     // agent lifecycle
     timeout: 15_000,

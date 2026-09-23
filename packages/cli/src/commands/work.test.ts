@@ -1,6 +1,10 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
+  hasSubmodules,
   isLinkedGitDir,
   parseWorktreePorcelain,
   unquoteGitPath,
@@ -72,5 +76,15 @@ describe('worktreePathFor', () => {
   test('derives a sibling path named <repo>--<slug>', () => {
     assert.equal(worktreePathFor('/ws/bro', 'fix-x'), '/ws/bro--fix-x')
     assert.equal(worktreePathFor('/ws/bro', 'a.b-1'), '/ws/bro--a.b-1')
+  })
+})
+
+describe('hasSubmodules', () => {
+  test('true only when the worktree declares .gitmodules', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-work-'))
+    assert.ok(!hasSubmodules(dir))
+    writeFileSync(join(dir, '.gitmodules'), '[submodule "v"]\n\tpath = v\n')
+    assert.ok(hasSubmodules(dir))
+    rmSync(dir, { recursive: true, force: true })
   })
 })
