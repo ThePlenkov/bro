@@ -88,6 +88,7 @@ fail-open.
 | `bro retrospect schema` / `list` | Print the commented TOML template · retros and open wtfs |
 | `bro setup [--beads] [--skills]` | Wires bro into the current repo: checks `gh` auth + `bd`, writes `bro.config.json`, optionally `bd init --stealth` + installs the debt-pipeline formula and thin skill wrappers |
 | `bro next [--list] [--json]` | **The autonomous loop's scheduler** — claims the top ready bead (priority, then age) and prints the work order. Skips human gates, epics, and molecule steps. `bro next → implement → PR → merge → bd close → bro next` until `state: idle` — no per-item "go?" prompts |
+| `bro loop [--max N] [--dry-run]` | **The autonomous loop as a command** — claim → worktree → spawn `loop.agent` → act gate → `bd close` → repeat. Review threads respawn the agent (≤ `loop.fixRounds`); failures land as bead notes, never silent |
 
 ## The pipeline (beads)
 

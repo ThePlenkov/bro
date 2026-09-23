@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Loop"
+  short_description: "Autonomous backlog runner — claim, agent, gate, close, repeat"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $loop to start the backlog runner."
+policy:
+  allow_implicit_invocation: false
