@@ -272,7 +272,18 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<string> {
     return failNoPr(bead, item, code)
   }
   say(ctx, `loop: ${bead.id} → PR #${pr}`)
+  return driveGate(ctx, bead, item, pr)
+}
 
+/** The PR gate loop — poll until the gate settles; merge on green,
+ *  respawn the agent on open threads (up to loop.fixRounds), park on
+ *  timeout/fetch-exhaustion/hard blocks. */
+async function driveGate(
+  ctx: Ctx,
+  bead: ReadyBead,
+  item: ReturnType<typeof planItem>,
+  pr: number
+): Promise<string> {
   const act = loadBroConfig(ctx.root).act
   const fetch = async () => {
     const state = await fetchPrActState(
