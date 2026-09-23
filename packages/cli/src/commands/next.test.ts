@@ -141,6 +141,20 @@ describe('bro next', () => {
   )
 
   it(
+    'a claim failure that is not a race surfaces instead of skipping',
+    withFakeBd(
+      MIXED,
+      async () => {
+        // claim fails but the bead is still open — an outage, not a
+        // race; it must surface, not silently drain the queue
+        await assert.rejects(runNextCommand([]))
+      },
+      '',
+      'b-older'
+    )
+  )
+
+  it(
     'reports gated when only gates/epics/mol steps remain',
     withFakeBd(GATED, async c => {
       await runNextCommand(['--json'])
