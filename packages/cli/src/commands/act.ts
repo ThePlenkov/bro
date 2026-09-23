@@ -21,6 +21,7 @@ import {
   replyToThread,
   resolveReviewThread,
   unresolveReviewThread,
+  updatePullBranch,
   waitForGate,
   type ActPlan,
   type ActThreadVerdict,
@@ -163,6 +164,13 @@ async function cmdWait(argv: string[]): Promise<void> {
         console.error(
           `act wait #${t.pr}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
         ),
+      // the "Update branch" button as a wait step: BEHIND + mergeable is
+      // a state to fix, not to sit on — conflicts still settle for a human
+      updateBranch: (s) => {
+        const ok = updatePullBranch({ owner: t.owner, repo: t.repoName, pr: t.pr }, s.headSha)
+        console.error(`act wait #${t.pr}: update-branch ${ok ? 'pushed a new head' : 'refused'}`)
+        return ok
+      },
     }
   )
   if (argv.includes('--json')) {

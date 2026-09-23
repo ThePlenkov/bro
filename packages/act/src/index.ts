@@ -5,6 +5,7 @@ export {
   replyToThread,
   resolveReviewThread,
   unresolveReviewThread,
+  updatePullBranch,
 } from './github.ts'
 export { evaluateExitGate } from './exit-gate.ts'
 export { gatePending, waitForGate } from './wait.ts'
