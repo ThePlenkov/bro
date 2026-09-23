@@ -22,7 +22,7 @@
  * note; a bead whose PR stalls keeps its worktree for inspection.
  */
 import { spawnSync, execFileSync } from 'node:child_process'
-import { writeFileSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 import { bd, bdJson, checkBeads, gitTry } from '@bro/core'
 import { evaluateExitGate, fetchPrActState, waitForGate } from '@bro/act'
 import { fetchReviewThreads } from '@bro/debt'
@@ -45,6 +45,7 @@ interface Ctx {
   cfg: LoopConfig
   agent: string
   intervalS: number
+  json: boolean
 }
 
 function usage(): never {
@@ -56,9 +57,19 @@ function usage(): never {
   process.exit(2)
 }
 
-const num = (v: string | undefined, dflt: number): number => {
+const num = (v: string | undefined, dflt: number, min = 1): number => {
   const n = Number(v)
-  return Number.isFinite(n) && n > 0 ? n : dflt
+  return Number.isFinite(n) && n >= min ? n : dflt
+}
+
+/** Progress lines — stderr under --json so stdout stays a clean
+ *  event stream. */
+const say = (ctx: Ctx, msg: string): void => {
+  if (ctx.json) {
+    console.error(msg)
+  } else {
+    console.log(msg)
+  }
 }
 
 function repoTarget(root: string): { owner: string; repo: string } {
@@ -77,8 +88,8 @@ function repoTarget(root: string): { owner: string; repo: string } {
 /** Fresh sibling worktree on loop/<id> off origin/main (falls back to
  *  main/HEAD when no origin). An existing dir is reused as-is. */
 function ensureWorktree(root: string, branch: string, dir: string): void {
-  if (gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', dir]).code === 0) {
-    return // path exists on disk — not a worktree check, cheap reuse
+  if (existsSync(dir)) {
+    return // a previous run's worktree survived — reuse it
   }
   gitTry(['-C', root, 'fetch', 'origin', 'main', '--quiet'])
   const base = ['origin/main', 'main', 'HEAD'].find(
@@ -141,10 +152,74 @@ function noteBead(id: string, note: string): void {
   }
 }
 
+/** Best-effort return of a bead to the open queue. */
+function reopenBead(id: string): void {
+  try {
+    bd(['update', id, '--status', 'open'])
+  } catch { /* best-effort unclaim */ }
+}
+
+/** Merge the PR, close the bead, drop the worktree. 'landed' only when
+ *  the PR reports MERGED — a closed or still-open PR parks the bead. */
+async function finalizeMerge(
+  ctx: Ctx,
+  bead: ReadyBead,
+  item: ReturnType<typeof planItem>,
+  pr: number
+): Promise<string> {
+  await runActCommand(['merge', String(pr)])
+  const state = execFileSync(
+    'gh',
+    ['pr', 'view', String(pr), '--json', 'state', '--jq', '.state'],
+    { cwd: ctx.root, encoding: 'utf8' }
+  ).trim()
+  if (state !== 'MERGED') {
+    noteBead(
+      bead.id,
+      `loop: merge of #${pr} did not land (state=${state}) — worktree ${item.worktreeDir}`
+    )
+    return 'parked'
+  }
+  try {
+    bd(['close', bead.id, '--reason', `landed via PR #${pr}`])
+  } catch (err) {
+    console.error(`loop: bd close ${bead.id} failed — ${String(err)}`)
+  }
+  gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', item.worktreeDir])
+  gitTry(['-C', ctx.root, 'branch', '-D', item.branch])
+  say(ctx, `loop: ${bead.id} landed via #${pr}`)
+  return 'landed'
+}
+
+/** Collect unresolved thread text, write the fix prompt, respawn the
+ *  agent. A dead fix agent is logged, not fatal — the next gate poll
+ *  decides whether anything landed on the branch. */
+async function runFixRound(
+  ctx: Ctx,
+  bead: ReadyBead,
+  item: ReturnType<typeof planItem>,
+  pr: number,
+  round: number
+): Promise<void> {
+  const threads = (await fetchReviewThreads({ owner: ctx.owner, repo: ctx.repo, pr }))
+    .filter((t) => !t.isResolved)
+    .map((t) => {
+      const c = t.comments.nodes[0]
+      return `- ${c?.path ?? ''}:${c?.line ?? ''} [${c?.author?.login ?? '?'}] ${c?.body ?? ''}`
+    })
+    .join('\n')
+  writeFileSync(item.promptFile, buildFixPrompt(bead, pr, threads))
+  say(ctx, `loop: #${pr} has open threads — fix round ${round}`)
+  const code = spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
+  if (code !== 0) {
+    console.error(`loop: fix agent exited ${code ?? 'timeout'} — the next gate poll decides`)
+  }
+}
+
 /** One bead end-to-end. Returns 'landed' | 'parked' | 'failed'. */
 async function runItem(ctx: Ctx, bead: ReadyBead): Promise<string> {
   const item = planItem(bead, ctx.root)
-  console.log(`\nloop: ${bead.id} → ${item.branch} @ ${item.worktreeDir}`)
+  say(ctx, `\nloop: ${bead.id} → ${item.branch} @ ${item.worktreeDir}`)
   try {
     ensureWorktree(ctx.root, item.branch, item.worktreeDir)
   } catch (err) {
@@ -152,7 +227,18 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<string> {
     return 'failed'
   }
   if (ctx.cfg.bootstrap) {
-    spawnSync('sh', ['-c', ctx.cfg.bootstrap], { cwd: item.worktreeDir, stdio: 'inherit' })
+    const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], {
+      cwd: item.worktreeDir,
+      stdio: 'inherit',
+    })
+    if (b.status !== 0) {
+      noteBead(
+        bead.id,
+        `loop: bootstrap failed (${b.status ?? b.signal ?? 'spawn error'}) — worktree kept at ${item.worktreeDir}`
+      )
+      reopenBead(bead.id)
+      return 'failed'
+    }
   }
   writeFileSync(item.promptFile, buildWorkPrompt(bead, item.branch))
   const code = spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
@@ -162,12 +248,10 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<string> {
       bead.id,
       `loop: agent exited ${code ?? 'timeout'} without a PR — worktree kept at ${item.worktreeDir}`
     )
-    try {
-      bd(['update', bead.id, '--status', 'open'])
-    } catch { /* best-effort unclaim */ }
+    reopenBead(bead.id)
     return 'failed'
   }
-  console.log(`loop: ${bead.id} → PR #${pr}`)
+  say(ctx, `loop: ${bead.id} → PR #${pr}`)
 
   const act = loadBroConfig(ctx.root).act
   const fetch = async () => {
@@ -178,42 +262,30 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<string> {
     return { state, gate: evaluateExitGate(state) }
   }
   for (let round = 0; ; round++) {
-    const res = await waitForGate(fetch, {
-      intervalMs: ctx.intervalS * 1000,
-      timeoutMs: ctx.cfg.mergeTimeoutMin * 60_000,
-      onPoll: (s, g) =>
-        console.error(
-          `loop #${pr}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f rev=${g.reviewers_pending} sast=${g.sast_pending}`
-        ),
-      onError: (err, n) =>
-        console.error(`loop #${pr}: fetch failed (${n}) — ${String(err)}`),
-    })
+    let res
+    try {
+      res = await waitForGate(fetch, {
+        intervalMs: ctx.intervalS * 1000,
+        timeoutMs: ctx.cfg.mergeTimeoutMin * 60_000,
+        onPoll: (s, g) =>
+          console.error(
+            `loop #${pr}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f rev=${g.reviewers_pending} sast=${g.sast_pending}`
+          ),
+        onError: (err, n) =>
+          console.error(`loop #${pr}: fetch failed (${n}) — ${String(err)}`),
+      })
+    } catch (err) {
+      noteBead(
+        bead.id,
+        `loop: gate fetch kept failing for PR #${pr} — ${String(err)} — worktree ${item.worktreeDir}`
+      )
+      return 'parked'
+    }
     if (res.gate.ok && res.state.state === 'OPEN') {
-      await runActCommand(['merge', String(pr)])
-      const merged = execFileSync(
-        'gh',
-        ['pr', 'view', String(pr), '--json', 'state', '--jq', '.state'],
-        { cwd: ctx.root, encoding: 'utf8' }
-      ).trim()
-      if (merged === 'MERGED') {
-        bd(['close', bead.id, '--reason', `landed via PR #${pr}`])
-        gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', item.worktreeDir])
-        gitTry(['-C', ctx.root, 'branch', '-D', item.branch])
-        console.log(`loop: ${bead.id} landed via #${pr}`)
-        return 'landed'
-      }
+      return finalizeMerge(ctx, bead, item, pr)
     }
     if (res.state.openThreads > 0 && round < ctx.cfg.fixRounds) {
-      const threads = (await fetchReviewThreads({ owner: ctx.owner, repo: ctx.repo, pr }))
-        .filter((t) => !t.isResolved)
-        .map((t) => {
-          const c = t.comments.nodes[0]
-          return `- ${c?.path ?? ''}:${c?.line ?? ''} [${c?.author?.login ?? '?'}] ${c?.body ?? ''}`
-        })
-        .join('\n')
-      writeFileSync(item.promptFile, buildFixPrompt(bead, pr, threads))
-      console.log(`loop: #${pr} has ${res.state.openThreads} thread(s) — fix round ${round + 1}`)
-      spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
+      await runFixRound(ctx, bead, item, pr, round + 1)
       continue
     }
     const why = res.timedOut
@@ -250,10 +322,11 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
       ...cfg,
       agentTimeoutMin: num(flag(argv, '--agent-timeout'), cfg.agentTimeoutMin),
       mergeTimeoutMin: num(flag(argv, '--merge-timeout'), cfg.mergeTimeoutMin),
-      maxItems: num(flag(argv, '--max'), cfg.maxItems),
+      maxItems: num(flag(argv, '--max'), cfg.maxItems, 0),
     },
     agent,
     intervalS: num(flag(argv, '--interval'), 60),
+    json: argv.includes('--json'),
   }
 
   if (argv.includes('--dry-run')) {
@@ -282,9 +355,17 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
       break
     }
     seen.add(bead.id)
-    tally[(await runItem(ctx, bead)) as 'landed' | 'parked' | 'failed'] += 1
+    const result = (await runItem(ctx, bead)) as 'landed' | 'parked' | 'failed'
+    tally[result] += 1
+    if (ctx.json) {
+      console.log(JSON.stringify({ bead: bead.id, result }))
+    }
   }
-  console.log(
-    `loop: done — ${tally.landed} landed, ${tally.parked} parked, ${tally.failed} failed`
-  )
+  if (ctx.json) {
+    console.log(JSON.stringify({ done: true, ...tally }))
+  } else {
+    console.log(
+      `loop: done — ${tally.landed} landed, ${tally.parked} parked, ${tally.failed} failed`
+    )
+  }
 }

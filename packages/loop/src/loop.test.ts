@@ -27,6 +27,13 @@ describe('loopSection', () => {
     assert.equal(cfg.maxItems, 0)
   })
 
+  test('zero timeouts fall back — 0 would park every gate instantly', () => {
+    const cfg = loopSection({ agentTimeoutMin: 0, mergeTimeoutMin: 0, maxItems: 0 })
+    assert.equal(cfg.agentTimeoutMin, DEFAULT_LOOP_CONFIG.agentTimeoutMin)
+    assert.equal(cfg.mergeTimeoutMin, DEFAULT_LOOP_CONFIG.mergeTimeoutMin)
+    assert.equal(cfg.maxItems, 0) // 0 is valid for maxItems — means unlimited
+  })
+
   test('valid values pass through', () => {
     const cfg = loopSection({
       agent: 'devin -p',
@@ -53,6 +60,13 @@ describe('planItem', () => {
     assert.equal(item.branch, 'loop/bro-x1')
     assert.equal(item.worktreeDir, '/home/u/projects/bro--bro-x1')
     assert.equal(item.promptFile, '/home/u/projects/bro--bro-x1/.bro-loop-prompt.md')
+  })
+
+  test('ids that sanitize to the same slug get distinct names', () => {
+    const a = planItem({ ...bead, id: 'mol/a-b' }, '/repo')
+    const b = planItem({ ...bead, id: 'mol-a-b' }, '/repo')
+    assert.notEqual(a.branch, b.branch)
+    assert.notEqual(a.worktreeDir, b.worktreeDir)
   })
 })
 

@@ -12,15 +12,18 @@ export const loopSection: ConfigSection<LoopConfig> = (raw) => {
     typeof obj[k] === 'string' && (obj[k] as string).trim() !== ''
       ? (obj[k] as string)
       : DEFAULT_LOOP_CONFIG[k]
-  const num = (k: 'agentTimeoutMin' | 'mergeTimeoutMin' | 'fixRounds' | 'maxItems') =>
-    typeof obj[k] === 'number' && Number.isFinite(obj[k]) && (obj[k] as number) >= 0
+  const num = (
+    k: 'agentTimeoutMin' | 'mergeTimeoutMin' | 'fixRounds' | 'maxItems',
+    min = 0
+  ) =>
+    typeof obj[k] === 'number' && Number.isFinite(obj[k]) && (obj[k] as number) >= min
       ? (obj[k] as number)
       : DEFAULT_LOOP_CONFIG[k]
   return {
     agent: str('agent') as string,
     bootstrap: str('bootstrap') as string,
-    agentTimeoutMin: num('agentTimeoutMin'),
-    mergeTimeoutMin: num('mergeTimeoutMin'),
+    agentTimeoutMin: num('agentTimeoutMin', 1),
+    mergeTimeoutMin: num('mergeTimeoutMin', 1),
     fixRounds: num('fixRounds'),
     maxItems: num('maxItems'),
   }

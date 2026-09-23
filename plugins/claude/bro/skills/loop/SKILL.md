@@ -12,11 +12,12 @@ claim → worktree → agent → gate → close → repeat — with no per-item
 
 ## Configure the agent once
 
+In `bro.config.json`:
+
 ```json
-// bro.config.json
 {
   "loop": {
-    "agent": "devin --prompt-file {promptFile} -p --permission-mode dangerous --respect-workspace-trust false",
+    "agent": "devin --prompt-file {promptFile} -p",
     "bootstrap": "npm install",
     "agentTimeoutMin": 45,
     "mergeTimeoutMin": 45,
@@ -30,7 +31,11 @@ claim → worktree → agent → gate → close → repeat — with no per-item
 fresh worktree (no placeholder → the path is appended as the last arg).
 Examples: `claude -p "$(cat {promptFile})"`, `codex exec "$(cat
 {promptFile})"`. The spawn env carries `BRO_BEAD_ID`, `BRO_BEAD_TITLE`,
-`BRO_PROMPT_FILE`.
+`BRO_PROMPT_FILE`. Whatever permission flags your agent needs for
+unattended work are yours to choose — e.g. devin's
+`--permission-mode dangerous --respect-workspace-trust false` skips all
+human confirmation, which is the point of the loop but obviously grants
+the agent full autonomy; scope it to machines/repos you trust.
 
 ## Commands
 
@@ -47,7 +52,7 @@ Examples: `claude -p "$(cat {promptFile})"`, `codex exec "$(cat
 1. **Claim** — top `bd ready` item, `bro next`'s rules: HUMAN GATE beads,
    epics, and molecule steps (convoy-owned) are never auto-claimed.
 2. **Worktree** — sibling `<repo>--<bead-id>` on branch `loop/<id>` off
-   `origin/main`; `loop.bootstrap` runs once if configured.
+   `origin/main`; `loop.bootstrap` runs once per bead, before the agent.
 3. **Agent** — the work-order prompt is written to the worktree and the
    agent runs synchronously with `loop.agentTimeoutMin` budget.
 4. **Gate** — the PR is discovered via `gh pr list --head`; `bro act`'s
@@ -59,8 +64,8 @@ Examples: `claude -p "$(cat {promptFile})"`, `codex exec "$(cat
 
 ## Policy
 
-- **The loop ends at `idle` or `gated`, not at a count** — `idle` means
-  the backlog is empty; `gated` means only human gates / epics / molecule
+- **The loop ends at `idle`, `gated`, or `--max N`** — `idle` means the
+  backlog is empty; `gated` means only human gates / epics / molecule
   steps remain. Report which and stop.
 - **Failures are visible, never silent** — an agent that exits without a
   PR gets the bead reopened with a `loop:` note; a stalled PR parks the
