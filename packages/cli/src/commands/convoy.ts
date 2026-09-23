@@ -23,6 +23,7 @@ import {
   formulaSteps,
   inlineFormulaDoc,
   listMolecules,
+  loadMolecule,
   nextStep,
   pourFormula,
   resolveMolecule,
@@ -125,9 +126,35 @@ export function applyConvoyPlan(plan: ConvoyPlan): void {
       assertGateFree(m)
     }
   }
-  for (const m of plan.molecules) {
-    const rootId = 'formula' in m ? pourFormula(m.formula, m.vars ?? {}) : pourInline(m)
-    console.log(`convoy ↓ ${rootId} ${'formula' in m ? m.formula : m.title}`)
+  // bd has no transactions — a mid-flight failure deletes the molecules
+  // this run poured (the applyDrillPlan convention): a retry converges
+  // instead of leaving half the plan materialized
+  const poured: string[] = []
+  try {
+    for (const m of plan.molecules) {
+      const rootId = 'formula' in m ? pourFormula(m.formula, m.vars ?? {}) : pourInline(m)
+      poured.push(rootId)
+      console.log(`convoy ↓ ${rootId} ${'formula' in m ? m.formula : m.title}`)
+    }
+  } catch (err) {
+    const orphans: string[] = []
+    for (const rootId of [...poured].reverse()) {
+      try {
+        // steps first — bd refuses to delete a root with open children
+        for (const s of stepsOf(loadMolecule(rootId))) bd(['delete', s.id, '--force'])
+        bd(['delete', rootId, '--force'])
+      } catch {
+        orphans.push(rootId)
+      }
+    }
+    if (orphans.length === 0) {
+      throw err
+    }
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(
+      `${msg} — cleanup incomplete: molecule(s) left behind: ${orphans.join(', ')}`,
+      { cause: err }
+    )
   }
 }
 
