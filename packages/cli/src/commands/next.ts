@@ -35,6 +35,9 @@ interface NextResult {
   /** every pick, in order — plans can claim more than one */
   beads: ReadyBead[]
   queue: number
+  /** claimable beads the plan's filters excluded — idle must not
+   *  pretend the backlog is empty while these remain */
+  filtered: number
   gates: Array<{ id: string; title: string }>
   epics: Array<{ id: string; title: string }>
   moleculeSteps: number
@@ -81,13 +84,27 @@ export function classify(
   ready: ReadyBead[],
   plan: Pick<NextPlan, 'filters' | 'gates' | 'order'> = DEFAULT_SELECTION
 ) {
-  const queue = applyFilters(ready.filter((b) => claimable(b, plan.gates)), plan.filters)
+  const claimableAll = ready.filter((b) => claimable(b, plan.gates))
+  const queue = applyFilters(claimableAll, plan.filters)
   queue.sort(ORDERERS[plan.order])
   return {
     queue,
+    filtered: claimableAll.length - queue.length,
     gates: ready.filter((b) => HUMAN_GATE.test(b.title)),
     epics: ready.filter((b) => b.issue_type === 'epic'),
     moleculeSteps: ready.filter((b) => b.parent).length,
+  }
+}
+
+/** A failed claim is a race only when the bead actually moved on
+ *  (claimed/closed elsewhere); a bd outage must surface, not silently
+ *  drain the queue into a fake idle. */
+function racedAway(b: ReadyBead): boolean {
+  try {
+    const cur = bdJson<Array<{ status?: string }>>(['show', b.id, '--json'])
+    return cur[0]?.status !== 'open'
+  } catch {
+    return false // show failed too — bd is down; the claim error is the diagnostic
   }
 }
 
@@ -102,8 +119,11 @@ function claimUpTo(queue: ReadyBead[], limit: number): ReadyBead[] {
     try {
       bd(['update', b.id, '--claim'])
       picked.push(b)
-    } catch {
-      // raced away — try the next candidate
+    } catch (err) {
+      if (racedAway(b)) {
+        continue // genuinely raced away — try the next candidate
+      }
+      throw err
     }
   }
   return picked
@@ -120,10 +140,13 @@ function printResult(result: NextResult, list: boolean): void {
   }
   if (result.beads.length === 0) {
     if (result.state === 'gated') {
-      console.log('next: nothing claimable — gates, epics, or molecule steps remain')
+      console.log('next: nothing claimable — filters, gates, epics, or molecule steps remain')
     } else {
       console.log('next: backlog empty — nothing ready')
     }
+  }
+  if (result.filtered > 0) {
+    console.log(`  filtered: ${result.filtered} claimable bead(s) excluded by plan filters`)
   }
   for (const g of result.gates) {
     console.log(`  gate: ${g.id} — ${g.title} (human decision needed)`)
@@ -153,7 +176,9 @@ export function applyNextPlan(plan: NextPlan): void {
   let state: NextResult['state'] = 'idle'
   if (beads.length > 0) {
     state = 'task'
-  } else if (c.gates.length + c.epics.length + c.moleculeSteps > 0) {
+  } else if (c.filtered + c.gates.length + c.epics.length + c.moleculeSteps > 0) {
+    // ready beads remain but none are claimable under this plan —
+    // 'idle' would falsely tell the loop the backlog is empty
     state = 'gated'
   }
   const result: NextResult = {
@@ -161,6 +186,7 @@ export function applyNextPlan(plan: NextPlan): void {
     bead: beads.length > 0 ? beads[0] : undefined,
     beads,
     queue: c.queue.length,
+    filtered: c.filtered,
     // a claimed gate is already reported as a pick — don't double-count it
     gates: c.gates.filter((b) => !picked.has(b.id)).map((b) => ({ id: b.id, title: b.title })),
     epics: c.epics.map((b) => ({ id: b.id, title: b.title })),

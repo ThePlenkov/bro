@@ -13,9 +13,17 @@ const FAKE_BD = `#!/bin/sh
 case "$1" in
   --version) echo 'bd 0.0' ;;
   ready) cat "$FAKE_BD_READY" ;;
+  show)
+    if [ -n "$FAKE_BD_CLAIM_FAIL" ]; then
+      case "$2" in *$FAKE_BD_CLAIM_FAIL*) echo '[{"status":"in_progress"}]'; exit 0 ;; esac
+    fi
+    echo '[{"status":"open"}]' ;;
   update)
     if [ -n "$FAKE_BD_CLAIM_FAIL" ]; then
       case "$2" in *$FAKE_BD_CLAIM_FAIL*) exit 1 ;; esac
+    fi
+    if [ -n "$FAKE_BD_UPDATE_FAIL" ]; then
+      case "$2" in *$FAKE_BD_UPDATE_FAIL*) echo 'db locked' >&2; exit 1 ;; esac
     fi
     echo "$@" >> "$FAKE_BD_LOG" ;;
 esac
@@ -39,7 +47,8 @@ interface Captured {
 function withFakeBd(
   ready: unknown[],
   fn: (c: Captured) => Promise<void>,
-  claimFail = ''
+  claimFail = '',
+  updateFail = ''
 ): () => Promise<void> {
   return async () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
@@ -52,11 +61,13 @@ function withFakeBd(
       FAKE_BD_READY: process.env.FAKE_BD_READY,
       FAKE_BD_LOG: process.env.FAKE_BD_LOG,
       FAKE_BD_CLAIM_FAIL: process.env.FAKE_BD_CLAIM_FAIL,
+      FAKE_BD_UPDATE_FAIL: process.env.FAKE_BD_UPDATE_FAIL,
     }
     process.env.PATH = `${dir}:${prev.PATH}`
     process.env.FAKE_BD_READY = join(dir, 'ready.json')
     process.env.FAKE_BD_LOG = log
     process.env.FAKE_BD_CLAIM_FAIL = claimFail
+    process.env.FAKE_BD_UPDATE_FAIL = updateFail
     const lines: string[] = []
     const orig = console.log
     console.log = (...args: unknown[]) => lines.push(args.join(' '))
@@ -227,6 +238,31 @@ describe('bro next plans', () => {
       assert.equal(r.gates.length, 0) // the claimed gate isn't double-reported
       assert.match(c.claims, /b-gate --claim/)
     })
+  )
+
+  it(
+    'filters that exclude everything report gated, not idle',
+    withFakeBd(RICH, async c => {
+      applyNextPlan(plan({ filters: { types: ['feature'] } }))
+      const r = JSON.parse(c.lines.join('\n'))
+      assert.equal(r.state, 'gated') // not idle — claimable beads remain
+      assert.equal(r.filtered, 4)
+      assert.equal(r.queue, 0)
+    })
+  )
+
+  it(
+    'a failed claim that is not a race surfaces the error',
+    withFakeBd(
+      MIXED,
+      async () => {
+        // update fails on b-older but show still reports it open —
+        // a bd outage, not a claim race: the error must propagate
+        assert.throws(() => applyNextPlan(plan()))
+      },
+      '',
+      'b-older'
+    )
   )
 
   it(

@@ -138,6 +138,12 @@ const checkEnum = (
   }
 }
 
+const checkBool = (v: unknown, key: string, errors: string[]): void => {
+  if (v !== undefined && typeof v !== 'boolean') {
+    errors.push(`${key}: must be a boolean`)
+  }
+}
+
 /** Validate an already-parsed plan document — the plugin planSchema.
  *  Throws one error listing every problem. */
 export function parseNextPlan(doc: unknown, source = 'plan'): NextPlan {
@@ -158,11 +164,8 @@ export function parseNextPlan(doc: unknown, source = 'plan'): NextPlan {
   }
   checkEnum(doc.order, 'order', NEXT_ORDERS, errors)
   checkEnum(doc.gates, 'gates', NEXT_GATE_POLICIES, errors)
-  for (const f of ['claim', 'json'] as const) {
-    if (doc[f] !== undefined && typeof doc[f] !== 'boolean') {
-      errors.push(`${f}: must be a boolean`)
-    }
-  }
+  checkBool(doc.claim, 'claim', errors)
+  checkBool(doc.json, 'json', errors)
   checkFilters(doc.filters, errors)
   if (errors.length > 0) {
     throw new Error(`${source}:\n  ${errors.join('\n  ')}`)
