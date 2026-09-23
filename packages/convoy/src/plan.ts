@@ -151,7 +151,7 @@ function parseStep(raw: unknown, i: number, where: string, errors: string[]): Co
   return {
     id: raw.id.trim(),
     title: raw.title.trim(),
-    type: typeof raw.type === 'string' ? raw.type : undefined,
+    type: typeof raw.type === 'string' ? raw.type.trim() : undefined,
     needs,
     description: typeof raw.description === 'string' ? raw.description : undefined,
     priority: typeof raw.priority === 'number' ? raw.priority : undefined,
@@ -311,12 +311,16 @@ export function parseConvoyPlan(doc: unknown, source = 'plan'): ConvoyPlan {
   }
   const gates = gatePolicy(doc.gates, 'plan', errors)
   const molecules: ConvoyMolecule[] = []
+  const molDocIdx: number[] = [] // original doc index per parsed molecule
   if (!Array.isArray(doc.molecules) || doc.molecules.length === 0) {
     errors.push('molecules: at least one [[molecules]] entry is required')
   } else {
     doc.molecules.forEach((raw, i) => {
       const m = parseMolecule(raw, i, errors)
-      if (m) molecules.push(m)
+      if (m) {
+        molecules.push(m)
+        molDocIdx.push(i)
+      }
     })
   }
   // gates = "forbid" is a parse-time guarantee for inline molecules —
@@ -326,7 +330,7 @@ export function parseConvoyPlan(doc: unknown, source = 'plan'): ConvoyPlan {
     if (policy !== 'forbid' || 'formula' in m) return
     for (const s of m.steps) {
       if (stepKind(declAsIssue(s)) === 'human') {
-        errors.push(`molecules[${i}]: step "${s.id}" is a human gate but gates = "forbid"`)
+        errors.push(`molecules[${molDocIdx[i]}]: step "${s.id}" is a human gate but gates = "forbid"`)
       }
     }
   })

@@ -104,8 +104,17 @@ function pourInline(m: ConvoyInline): string {
   writeFileSync(file, stringify(inlineFormulaDoc(m, name)))
   try {
     const rootId = pourFormula(name, {})
-    // bd titles the root after the formula name — restore the plan's title
-    bd(['update', rootId, '--title', m.title])
+    // bd titles the root after the formula name — restore the plan's
+    // title; if that fails the caller never sees rootId, so the molecule
+    // escapes rollbackPoured — compensate here instead
+    try {
+      bd(['update', rootId, '--title', m.title])
+    } catch (err) {
+      const orphans = rollbackPoured([rootId])
+      if (orphans.length === 0) throw err
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new Error(`${msg} — cleanup incomplete: molecule(s) left behind: ${orphans.join(', ')}`, { cause: err })
+    }
     return rootId
   } finally {
     rmSync(file, { force: true })
