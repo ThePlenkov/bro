@@ -72,12 +72,15 @@ const say = (ctx: Ctx, msg: string): void => {
   }
 }
 
+/** Subprocesses resolve through PATH by design — bro orchestrates gh,
+ *  bd, and the operator-configured agent; a sanitized PATH would break
+ *  the very binaries the config names. NOSONAR lives on these helpers. */
+function ghOut(args: string[], cwd: string): string {
+  return execFileSync('gh', args, { cwd, encoding: 'utf8' }).trim() // NOSONAR
+}
+
 function repoTarget(root: string): { owner: string; repo: string } {
-  const out = execFileSync(
-    'gh',
-    ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'],
-    { cwd: root, encoding: 'utf8' }
-  ).trim() // NOSONAR — PATH lookup is the contract
+  const out = ghOut(['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'], root)
   const [owner, repo] = out.split('/')
   if (!owner || !repo) {
     throw new Error(`gh repo view returned "${out}"`)
@@ -108,7 +111,7 @@ function ensureWorktree(root: string, branch: string, dir: string): void {
 /** Spawn the agent synchronously in the worktree — inherit stdio so the
  *  run is observable; timeout kills the process group. */
 function spawnAgent(ctx: Ctx, beadId: string, title: string, promptFile: string, dir: string): number | null {
-  const res = spawnSync('sh', ['-c', expandAgentCmd(ctx.agent, promptFile)], {
+  const res = spawnSync('sh', ['-c', expandAgentCmd(ctx.agent, promptFile)], { // NOSONAR — operator-configured agent command
     cwd: dir,
     env: {
       ...process.env,
@@ -133,11 +136,7 @@ function spawnAgent(ctx: Ctx, beadId: string, title: string, promptFile: string,
 /** PR number opened from this worktree's branch, or null. */
 function findPr(dir: string, branch: string): number | null {
   try {
-    const out = execFileSync(
-      'gh',
-      ['pr', 'list', '--head', branch, '--json', 'number', '--jq', '.[0].number // empty'],
-      { cwd: dir, encoding: 'utf8' }
-    ).trim()
+    const out = ghOut(['pr', 'list', '--head', branch, '--json', 'number', '--jq', '.[0].number // empty'], dir)
     return out === '' ? null : Number(out)
   } catch {
     return null
@@ -168,11 +167,7 @@ async function finalizeMerge(
   pr: number
 ): Promise<string> {
   await runActCommand(['merge', String(pr)])
-  const state = execFileSync(
-    'gh',
-    ['pr', 'view', String(pr), '--json', 'state', '--jq', '.state'],
-    { cwd: ctx.root, encoding: 'utf8' }
-  ).trim()
+  const state = ghOut(['pr', 'view', String(pr), '--json', 'state', '--jq', '.state'], ctx.root)
   if (state !== 'MERGED') {
     noteBead(
       bead.id,
@@ -246,7 +241,7 @@ function runBootstrap(ctx: Ctx, bead: ReadyBead, item: ReturnType<typeof planIte
   if (!ctx.cfg.bootstrap) {
     return true
   }
-  const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], {
+  const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], { // NOSONAR — operator-configured bootstrap
     cwd: item.worktreeDir,
     stdio: 'inherit',
   })

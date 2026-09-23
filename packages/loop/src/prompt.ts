@@ -56,7 +56,8 @@ ${threads.trim()}
 /** Expand the agent template — `{promptFile}` becomes the quoted path.
  *  No placeholder → the path is appended, quoted, as the last arg. */
 export function expandAgentCmd(template: string, promptFile: string): string {
-  const q = `'${promptFile.replaceAll("'", String.raw`'\''`)}'`
+  const esc = promptFile.replaceAll("'", String.raw`'\''`)
+  const q = `'${esc}'`
   return template.includes('{promptFile}')
     ? template.replaceAll('{promptFile}', q)
     : `${template} ${q}`

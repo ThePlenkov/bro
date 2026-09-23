@@ -15,7 +15,7 @@ export interface LoopItem {
 function hash4(s: string): string {
   let h = 5381
   for (const c of s) {
-    h = ((h << 5) + h + c.charCodeAt(0)) >>> 0
+    h = ((h << 5) + h + (c.codePointAt(0) ?? 0)) >>> 0
   }
   return h.toString(36).slice(0, 4)
 }
