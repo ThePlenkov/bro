@@ -61,6 +61,41 @@ const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim() 
 const isPosInt = (v: unknown): v is number =>
   typeof v === 'number' && Number.isInteger(v) && v > 0
 
+function checkTypes(raw: unknown, errors: string[]): void {
+  if (raw === undefined) {
+    return
+  }
+  if (!Array.isArray(raw) || raw.length === 0 || raw.some((t) => !nonEmpty(t))) {
+    errors.push('filters.types: must be a non-empty array of issue types')
+  }
+}
+
+function checkMaxPriority(raw: unknown, errors: string[]): void {
+  if (raw === undefined) {
+    return
+  }
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0 || raw > 4) {
+    errors.push('filters.max_priority: must be an integer 0–4')
+  }
+}
+
+function checkMatch(raw: unknown, errors: string[]): void {
+  if (raw === undefined) {
+    return
+  }
+  if (!nonEmpty(raw)) {
+    errors.push('filters.match: must be a non-empty string')
+    return
+  }
+  try {
+    new RegExp(raw, 'i')
+  } catch (err) {
+    errors.push(
+      `filters.match: invalid regex — ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+}
+
 function checkFilters(raw: unknown, errors: string[]): void {
   if (raw === undefined) {
     return
@@ -74,37 +109,9 @@ function checkFilters(raw: unknown, errors: string[]): void {
       errors.push(`filters: unknown key "${key}"`)
     }
   }
-  if (raw.types !== undefined) {
-    if (
-      !Array.isArray(raw.types) ||
-      raw.types.length === 0 ||
-      raw.types.some((t) => !nonEmpty(t))
-    ) {
-      errors.push('filters.types: must be a non-empty array of issue types')
-    }
-  }
-  if (
-    raw.max_priority !== undefined &&
-    (typeof raw.max_priority !== 'number' ||
-      !Number.isInteger(raw.max_priority) ||
-      raw.max_priority < 0 ||
-      raw.max_priority > 4)
-  ) {
-    errors.push('filters.max_priority: must be an integer 0–4')
-  }
-  if (raw.match !== undefined) {
-    if (!nonEmpty(raw.match)) {
-      errors.push('filters.match: must be a non-empty string')
-    } else {
-      try {
-        new RegExp(raw.match, 'i')
-      } catch (err) {
-        errors.push(
-          `filters.match: invalid regex — ${err instanceof Error ? err.message : String(err)}`
-        )
-      }
-    }
-  }
+  checkTypes(raw.types, errors)
+  checkMaxPriority(raw.max_priority, errors)
+  checkMatch(raw.match, errors)
 }
 
 function parseFilters(raw: unknown): NextFilters {
@@ -117,6 +124,17 @@ function parseFilters(raw: unknown): NextFilters {
       : undefined,
     maxPriority: typeof raw.max_priority === 'number' ? raw.max_priority : undefined,
     match: nonEmpty(raw.match) ? new RegExp(raw.match, 'i') : undefined,
+  }
+}
+
+const checkEnum = (
+  v: unknown,
+  key: string,
+  allowed: readonly string[],
+  errors: string[]
+): void => {
+  if (v !== undefined && (typeof v !== 'string' || !allowed.includes(v))) {
+    errors.push(`${key}: must be one of ${allowed.join('|')}`)
   }
 }
 
@@ -138,19 +156,8 @@ export function parseNextPlan(doc: unknown, source = 'plan'): NextPlan {
   if (doc.limit !== undefined && !isPosInt(doc.limit)) {
     errors.push('limit: must be a positive integer')
   }
-  if (
-    doc.order !== undefined &&
-    (typeof doc.order !== 'string' || !(NEXT_ORDERS as readonly string[]).includes(doc.order))
-  ) {
-    errors.push(`order: must be one of ${NEXT_ORDERS.join('|')}`)
-  }
-  if (
-    doc.gates !== undefined &&
-    (typeof doc.gates !== 'string' ||
-      !(NEXT_GATE_POLICIES as readonly string[]).includes(doc.gates))
-  ) {
-    errors.push(`gates: must be one of ${NEXT_GATE_POLICIES.join('|')}`)
-  }
+  checkEnum(doc.order, 'order', NEXT_ORDERS, errors)
+  checkEnum(doc.gates, 'gates', NEXT_GATE_POLICIES, errors)
   for (const f of ['claim', 'json'] as const) {
     if (doc[f] !== undefined && typeof doc[f] !== 'boolean') {
       errors.push(`${f}: must be a boolean`)

@@ -69,14 +69,17 @@ const ORDERERS: Record<NextOrder, (a: ReadyBead, b: ReadyBead) => number> = {
   newest: (a, b) => b.created_at.localeCompare(a.created_at),
 }
 
+/** The argv `bro next` selection — plan defaults. */
+const DEFAULT_SELECTION = {
+  filters: {},
+  gates: 'forbid',
+  order: 'priority',
+} as const satisfies Pick<NextPlan, 'filters' | 'gates' | 'order'>
+
 /** Split the ready queue into claimable work and things we never claim. */
 export function classify(
   ready: ReadyBead[],
-  plan: Pick<NextPlan, 'filters' | 'gates' | 'order'> = {
-    filters: {},
-    gates: 'forbid',
-    order: 'priority',
-  }
+  plan: Pick<NextPlan, 'filters' | 'gates' | 'order'> = DEFAULT_SELECTION
 ) {
   const queue = applyFilters(ready.filter((b) => claimable(b, plan.gates)), plan.filters)
   queue.sort(ORDERERS[plan.order])
@@ -147,13 +150,15 @@ export function applyNextPlan(plan: NextPlan): void {
   const c = classify(ready, plan)
   const beads = plan.claim ? claimUpTo(c.queue, plan.limit) : c.queue.slice(0, plan.limit)
   const picked = new Set(beads.map((b) => b.id))
+  let state: NextResult['state'] = 'idle'
+  if (beads.length > 0) {
+    state = 'task'
+  } else if (c.gates.length + c.epics.length + c.moleculeSteps > 0) {
+    state = 'gated'
+  }
   const result: NextResult = {
-    state: beads.length
-      ? 'task'
-      : c.gates.length + c.epics.length + c.moleculeSteps > 0
-        ? 'gated'
-        : 'idle',
-    bead: beads[0],
+    state,
+    bead: beads.length > 0 ? beads[0] : undefined,
     beads,
     queue: c.queue.length,
     // a claimed gate is already reported as a pick — don't double-count it
