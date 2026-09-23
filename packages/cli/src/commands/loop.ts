@@ -216,6 +216,42 @@ async function runFixRound(
   }
 }
 
+/** Agent exited without a PR — note + reopen, 'failed'. */
+function failNoPr(
+  bead: ReadyBead,
+  item: ReturnType<typeof planItem>,
+  code: number | null
+): string {
+  noteBead(
+    bead.id,
+    `loop: agent exited ${code ?? 'timeout'} without a PR — worktree kept at ${item.worktreeDir}`
+  )
+  reopenBead(bead.id)
+  return 'failed'
+}
+
+/** Optional bootstrap command — false (with the bead noted + reopened)
+ *  when it fails; spawning the agent on a half-set-up worktree is worse
+ *  than failing fast. */
+function runBootstrap(ctx: Ctx, bead: ReadyBead, item: ReturnType<typeof planItem>): boolean {
+  if (!ctx.cfg.bootstrap) {
+    return true
+  }
+  const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], {
+    cwd: item.worktreeDir,
+    stdio: 'inherit',
+  })
+  if (b.status === 0) {
+    return true
+  }
+  noteBead(
+    bead.id,
+    `loop: bootstrap failed (${b.status ?? b.signal ?? 'spawn error'}) — worktree kept at ${item.worktreeDir}`
+  )
+  reopenBead(bead.id)
+  return false
+}
+
 /** One bead end-to-end. Returns 'landed' | 'parked' | 'failed'. */
 async function runItem(ctx: Ctx, bead: ReadyBead): Promise<string> {
   const item = planItem(bead, ctx.root)
@@ -226,30 +262,14 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<string> {
     noteBead(bead.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
     return 'failed'
   }
-  if (ctx.cfg.bootstrap) {
-    const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], {
-      cwd: item.worktreeDir,
-      stdio: 'inherit',
-    })
-    if (b.status !== 0) {
-      noteBead(
-        bead.id,
-        `loop: bootstrap failed (${b.status ?? b.signal ?? 'spawn error'}) — worktree kept at ${item.worktreeDir}`
-      )
-      reopenBead(bead.id)
-      return 'failed'
-    }
+  if (!runBootstrap(ctx, bead, item)) {
+    return 'failed'
   }
   writeFileSync(item.promptFile, buildWorkPrompt(bead, item.branch))
   const code = spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
   const pr = findPr(item.worktreeDir, item.branch)
   if (pr === null) {
-    noteBead(
-      bead.id,
-      `loop: agent exited ${code ?? 'timeout'} without a PR — worktree kept at ${item.worktreeDir}`
-    )
-    reopenBead(bead.id)
-    return 'failed'
+    return failNoPr(bead, item, code)
   }
   say(ctx, `loop: ${bead.id} → PR #${pr}`)
 
@@ -342,7 +362,11 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     console.log(`  agent: ${expandAgentCmd(ctx.agent, item.promptFile)}`)
     return
   }
+  await runQueue(ctx)
+}
 
+/** The claim→run→repeat cycle until the queue drains or --max hits. */
+async function runQueue(ctx: Ctx): Promise<void> {
   const seen = new Set<string>()
   const tally = { landed: 0, parked: 0, failed: 0 }
   for (;;) {
