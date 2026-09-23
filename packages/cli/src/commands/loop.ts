@@ -185,8 +185,17 @@ async function finalizeMerge(
   } catch (err) {
     console.error(`loop: bd close ${bead.id} failed — ${String(err)}`)
   }
-  gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', item.worktreeDir])
-  gitTry(['-C', ctx.root, 'branch', '-D', item.branch])
+  // an agent-initialized submodule inside the worktree blocks removal —
+  // deinit first; either way a failed cleanup is loud, never silent
+  gitTry(['-C', item.worktreeDir, 'submodule', 'deinit', '-f', '--all'])
+  const rm = gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', item.worktreeDir])
+  if (rm.code !== 0) {
+    console.error(`loop: worktree ${item.worktreeDir} not removed — ${rm.err.trim()}`)
+  }
+  const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch])
+  if (br.code !== 0) {
+    console.error(`loop: branch ${item.branch} not deleted — ${br.err.trim()}`)
+  }
   say(ctx, `loop: ${bead.id} landed via #${pr}`)
   return 'landed'
 }
