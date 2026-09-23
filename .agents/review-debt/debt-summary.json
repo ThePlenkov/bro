@@ -1,14 +1,8 @@
 {
-  "generated_at": "2026-09-21T12:01:32.127Z",
-  "open_count": 3,
-  "by_area": {
-    "packages/cli": 1,
-    "packages/act": 1,
-    "site/src": 1
-  },
-  "by_author": {
-    "codeant-ai": 3
-  },
+  "generated_at": "2026-09-22T14:16:42.989Z",
+  "open_count": 0,
+  "by_area": {},
+  "by_author": {},
   "duplicate_fingerprints": [],
-  "oldest_open": "2026-09-21T10:09:48.818Z"
+  "oldest_open": null
 }
