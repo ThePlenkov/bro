@@ -25,7 +25,8 @@ import { parsePlanDoc, type RetroPlan } from '@bro/retro'
 import { applyActPlan, runActCommand } from './commands/act.ts'
 import { runCleanupCommand } from './commands/cleanup.ts'
 import { runConvoyCommand } from './commands/convoy.ts'
-import { runNextCommand } from './commands/next.ts'
+import { applyNextPlan, runNextCommand } from './commands/next.ts'
+import { parseNextPlan, type NextPlan } from './commands/next-plan.ts'
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runHooksCommand } from './commands/hooks.ts'
@@ -66,6 +67,8 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Claim + emit the top ready bead — the autonomous backlog loop',
     run: runNextCommand,
     skill: 'next',
+    planSchema: (doc, source) => parseNextPlan(doc, source),
+    runPlan: (plan) => applyNextPlan(plan as NextPlan),
   }),
   definePlugin({
     name: 'cleanup',

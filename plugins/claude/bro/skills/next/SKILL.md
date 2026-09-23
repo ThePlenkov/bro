@@ -34,6 +34,16 @@ continue?" between items.** The queue is the approval.
 - **Molecule steps** — beads with a `parent` belong to `bro convoy`;
   the flat queue doesn't steal them.
 
+## Plans
+
+`bro run next.toml` drives the same selection from a validated plan —
+`limit` (batch size), `order` (priority|oldest|newest), `[filters]`
+(types, max_priority, title match), `claim = false` for a dry run, and
+`gates = "allow"` to pre-authorize claiming HUMAN GATE beads. Batching
+is for parallel execution (one claimed bead per worktree/agent); a
+claimed gate still means a human decides — the plan was the go-ahead,
+not the verdict.
+
 ## Policy
 
 - **One bead, one PR** — unless several items are trivially the same
