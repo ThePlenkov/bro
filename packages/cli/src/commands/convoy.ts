@@ -73,7 +73,8 @@ const slugify = (s: string): string =>
   s
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
+    .replace(/^-+/, '')
+    .replace(/-+$/, '')
     .slice(0, 40) || 'convoy'
 
 /** A molecule that forbids gates must not contain any — formulas are
@@ -126,9 +127,6 @@ export function applyConvoyPlan(plan: ConvoyPlan): void {
       assertGateFree(m)
     }
   }
-  // bd has no transactions — a mid-flight failure deletes the molecules
-  // this run poured (the applyDrillPlan convention): a retry converges
-  // instead of leaving half the plan materialized
   const poured: string[] = []
   try {
     for (const m of plan.molecules) {
@@ -137,16 +135,10 @@ export function applyConvoyPlan(plan: ConvoyPlan): void {
       console.log(`convoy ↓ ${rootId} ${'formula' in m ? m.formula : m.title}`)
     }
   } catch (err) {
-    const orphans: string[] = []
-    for (const rootId of [...poured].reverse()) {
-      try {
-        // steps first — bd refuses to delete a root with open children
-        for (const s of stepsOf(loadMolecule(rootId))) bd(['delete', s.id, '--force'])
-        bd(['delete', rootId, '--force'])
-      } catch {
-        orphans.push(rootId)
-      }
-    }
+    // bd has no transactions — a mid-flight failure deletes the molecules
+    // this run poured (the applyDrillPlan convention): a retry converges
+    // instead of leaving half the plan materialized
+    const orphans = rollbackPoured(poured)
     if (orphans.length === 0) {
       throw err
     }
@@ -156,6 +148,22 @@ export function applyConvoyPlan(plan: ConvoyPlan): void {
       { cause: err }
     )
   }
+}
+
+/** Delete the molecules this run poured, newest first — steps before
+ *  their root since bd refuses a root with open children. Returns the
+ *  root ids whose cleanup failed. */
+function rollbackPoured(poured: string[]): string[] {
+  const orphans: string[] = []
+  for (const rootId of [...poured].reverse()) {
+    try {
+      for (const s of stepsOf(loadMolecule(rootId))) bd(['delete', s.id, '--force'])
+      bd(['delete', rootId, '--force'])
+    } catch {
+      orphans.push(rootId)
+    }
+  }
+  return orphans
 }
 
 export async function runConvoyCommand(argv: string[]): Promise<void> {

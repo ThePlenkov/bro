@@ -103,6 +103,24 @@ export const declAsIssue = (s: Pick<ConvoyStepDecl, 'id' | 'title' | 'type'>): M
   issue_type: s.type ?? 'task',
 })
 
+function stepNeeds(raw: Record<string, unknown>, at: string, errors: string[]): string[] | undefined {
+  if (raw.needs === undefined) {
+    return undefined
+  }
+  if (!Array.isArray(raw.needs) || !raw.needs.every(nonEmpty)) {
+    errors.push(`${at}: needs must be a list of step ids`)
+    return undefined
+  }
+  return raw.needs.map((n) => n.trim())
+}
+
+function checkPriority(raw: Record<string, unknown>, at: string, errors: string[]): void {
+  const p = raw.priority
+  if (p !== undefined && (typeof p !== 'number' || !Number.isInteger(p) || p < 0 || p > 4)) {
+    errors.push(`${at}: priority must be an integer 0-4`)
+  }
+}
+
 function parseStep(raw: unknown, i: number, where: string, errors: string[]): ConvoyStepDecl | undefined {
   const at = `${where}.steps[${i}]`
   if (!isRecord(raw)) {
@@ -125,23 +143,8 @@ function parseStep(raw: unknown, i: number, where: string, errors: string[]): Co
       errors.push(`${at}: ${f} must be a string`)
     }
   }
-  let needs: string[] | undefined
-  if (raw.needs !== undefined) {
-    if (!Array.isArray(raw.needs) || !raw.needs.every(nonEmpty)) {
-      errors.push(`${at}: needs must be a list of step ids`)
-    } else {
-      needs = raw.needs.map((n) => n.trim())
-    }
-  }
-  if (
-    raw.priority !== undefined &&
-    (typeof raw.priority !== 'number' ||
-      !Number.isInteger(raw.priority) ||
-      raw.priority < 0 ||
-      raw.priority > 4)
-  ) {
-    errors.push(`${at}: priority must be an integer 0-4`)
-  }
+  const needs = stepNeeds(raw, at, errors)
+  checkPriority(raw, at, errors)
   if (!nonEmpty(raw.id) || !nonEmpty(raw.title)) {
     return undefined
   }
@@ -200,46 +203,49 @@ function checkStepGraph(steps: ConvoyStepDecl[], where: string, errors: string[]
   for (const s of steps) visit(s.id, [])
 }
 
-function parseMolecule(raw: unknown, i: number, errors: string[]): ConvoyMolecule | undefined {
-  const where = `molecules[${i}]`
-  if (!isRecord(raw)) {
-    errors.push(`${where}: must be a table`)
+function pourVars(raw: Record<string, unknown>, where: string, errors: string[]): Record<string, string> {
+  if (raw.vars !== undefined && !isRecord(raw.vars)) {
+    errors.push(`${where}: vars must be a table ([molecules.vars])`)
+  }
+  const vars: Record<string, string> = {}
+  if (isRecord(raw.vars)) {
+    for (const [k, v] of Object.entries(raw.vars)) {
+      if (typeof v !== 'string') {
+        errors.push(`${where}: vars.${k} must be a string`)
+      } else {
+        vars[k] = v
+      }
+    }
+  }
+  return vars
+}
+
+function parsePour(
+  raw: Record<string, unknown>,
+  where: string,
+  gates: GatePolicy | undefined,
+  errors: string[]
+): ConvoyPour | undefined {
+  // a molecule either pours a registered formula or declares steps
+  // inline — mixing them is always a mistake
+  for (const k of ['title', 'steps', 'description'] as const) {
+    if (raw[k] !== undefined) {
+      errors.push(`${where}: ${k} only applies to inline molecules`)
+    }
+  }
+  if (!nonEmpty(raw.formula)) {
+    errors.push(`${where}: formula is required`)
     return undefined
   }
-  for (const key of Object.keys(raw)) {
-    if (!MOL_KEYS.has(key)) {
-      errors.push(`${where}: unknown key "${key}"`)
-    }
-  }
-  const gates = gatePolicy(raw.gates, where, errors)
-  const isPour = raw.formula !== undefined
-  if (isPour) {
-    // a molecule either pours a registered formula or declares steps
-    // inline — mixing them is always a mistake
-    for (const k of ['title', 'steps', 'description'] as const) {
-      if (raw[k] !== undefined) {
-        errors.push(`${where}: ${k} only applies to inline molecules`)
-      }
-    }
-    if (!nonEmpty(raw.formula)) {
-      errors.push(`${where}: formula is required`)
-      return undefined
-    }
-    if (raw.vars !== undefined && !isRecord(raw.vars)) {
-      errors.push(`${where}: vars must be a table ([molecules.vars])`)
-    }
-    const vars: Record<string, string> = {}
-    if (isRecord(raw.vars)) {
-      for (const [k, v] of Object.entries(raw.vars)) {
-        if (typeof v !== 'string') {
-          errors.push(`${where}: vars.${k} must be a string`)
-        } else {
-          vars[k] = v
-        }
-      }
-    }
-    return { formula: raw.formula.trim(), vars, gates }
-  }
+  return { formula: raw.formula.trim(), vars: pourVars(raw, where, errors), gates }
+}
+
+function parseInlineMolecule(
+  raw: Record<string, unknown>,
+  where: string,
+  gates: GatePolicy | undefined,
+  errors: string[]
+): ConvoyInline | undefined {
   if (raw.title === undefined && raw.steps === undefined && raw.description === undefined) {
     errors.push(`${where}: needs either formula = "…" or title + [[molecules.steps]]`)
     return undefined
@@ -269,6 +275,23 @@ function parseMolecule(raw: unknown, i: number, errors: string[]): ConvoyMolecul
     steps,
     gates,
   }
+}
+
+function parseMolecule(raw: unknown, i: number, errors: string[]): ConvoyMolecule | undefined {
+  const where = `molecules[${i}]`
+  if (!isRecord(raw)) {
+    errors.push(`${where}: must be a table`)
+    return undefined
+  }
+  for (const key of Object.keys(raw)) {
+    if (!MOL_KEYS.has(key)) {
+      errors.push(`${where}: unknown key "${key}"`)
+    }
+  }
+  const gates = gatePolicy(raw.gates, where, errors)
+  return raw.formula !== undefined
+    ? parsePour(raw, where, gates, errors)
+    : parseInlineMolecule(raw, where, gates, errors)
 }
 
 /** Validate an already-parsed plan document — the plugin planSchema.
