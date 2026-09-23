@@ -1,0 +1,74 @@
+{
+  "SessionStart": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PROJECT_DIR/hooks/run.sh\" session-start || true; exit 0",
+          "timeout": 20
+        }
+      ]
+    }
+  ],
+  "PostCompaction": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PROJECT_DIR/hooks/run.sh\" post-compaction || true; exit 0",
+          "timeout": 20
+        }
+      ]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PROJECT_DIR/hooks/run.sh\" prompt-submit || true; exit 0",
+          "timeout": 15
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "^exec$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PROJECT_DIR/hooks/run.sh\" post-tool || true; exit 0",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PROJECT_DIR/hooks/run.sh\" stop || true; exit 0",
+          "timeout": 25
+        }
+      ]
+    }
+  ],
+  "PermissionRequest": [
+    {
+      "matcher": "^exec$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"$DEVIN_PROJECT_DIR/hooks/run.sh\" permission || true; exit 0",
+          "timeout": 10
+        }
+      ]
+    }
+  ]
+}

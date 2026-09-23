@@ -77,6 +77,22 @@ describe('classifyArmCommand', () => {
     assert.equal(classifyArmCommand('bro drill up --result "done"'), 'drill')
   })
 
+  test('arms work on worktree-mutating commands', () => {
+    assert.equal(classifyArmCommand('bro work enter fix-x'), 'work')
+    assert.equal(classifyArmCommand('bro work leave'), 'work')
+    assert.equal(classifyArmCommand('npx -y @theplenkov/bro work list'), 'work')
+    assert.equal(classifyArmCommand('git worktree add ../repo--fix -b work/fix'), 'work')
+    assert.equal(classifyArmCommand('git -C /path worktree remove old'), 'work')
+    assert.equal(classifyArmCommand('bd worktree create feat'), 'work')
+    assert.equal(classifyArmCommand('bd worktree remove feat'), 'work')
+  })
+
+  test('read-only worktree commands do not arm', () => {
+    assert.equal(classifyArmCommand('git worktree list'), null)
+    assert.equal(classifyArmCommand('git worktree prune'), null)
+    assert.equal(classifyArmCommand('bd worktree list'), null)
+  })
+
   test('ignores unrelated or non-command-position text', () => {
     assert.equal(classifyArmCommand('git status'), null)
     assert.equal(classifyArmCommand('bd ready'), null)

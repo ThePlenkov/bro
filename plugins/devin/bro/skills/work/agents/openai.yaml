@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Work"
+  short_description: "Parallel-friendly git worktrees via the bro CLI — enter, work, leave clean"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $work to get started."
+policy:
+  allow_implicit_invocation: false

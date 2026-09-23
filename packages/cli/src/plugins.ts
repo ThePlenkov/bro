@@ -32,6 +32,7 @@ import { runHooksCommand } from './commands/hooks.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runSetupCommand } from './commands/setup.ts'
 import { runSyncCommand } from './commands/sync.ts'
+import { runWorkCommand } from './commands/work.ts'
 
 export const PLUGINS: BroPlugin[] = [
   definePlugin({
@@ -102,6 +103,12 @@ export const PLUGINS: BroPlugin[] = [
     // bare `bro wtf` has nothing to capture — report open wtfs instead
     run: (argv) =>
       runRetrospectCommand(argv.length === 0 ? ['status'] : ['capture', ...argv]),
+  }),
+  definePlugin({
+    name: 'work',
+    summary: 'Parallel-friendly worktrees: enter|leave|list|prune',
+    run: runWorkCommand,
+    skill: 'work',
   }),
   definePlugin({
     name: 'hooks',
