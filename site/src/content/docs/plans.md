@@ -64,6 +64,31 @@ title = "the bead's title"   # required for defer
 thread — if the bead can't be created, the thread is **not** resolved.
 A failed verdict doesn't abort the rest; failures are listed at the end.
 
+### `next`
+
+The backlog-loop selection as a plan — `bro run next.toml` computes the
+queue under the plan's filters and ordering, claims up to `limit` beads,
+and emits one work order per pick:
+
+```toml
+kind = "next"
+limit = 3                  # beads to claim — default 1
+order = "priority"         # priority | oldest | newest
+claim = false              # selection only — nothing is claimed
+gates = "allow"            # forbid (default): gates surfaced, never
+                           #   claimed; allow: HUMAN GATE beads join the queue
+json = true                # machine-readable result
+
+[filters]
+types = ["task", "bug"]    # issue_type allowlist — epics and molecule
+                           #   steps stay excluded regardless
+max_priority = 2           # claim only P0..P2
+match = "schema|plan"      # case-insensitive regex over the title
+```
+
+`gates = "allow"` is the pre-authorized verdict — the plan itself is the
+human's go-ahead, so gate beads become claimable work.
+
 ### `drill`
 
 A declared descent tree — the investigation shape materializes as open

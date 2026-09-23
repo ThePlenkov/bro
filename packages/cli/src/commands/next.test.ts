@@ -3,7 +3,8 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { runNextCommand } from './next.ts'
+import { applyNextPlan, runNextCommand } from './next.ts'
+import { parseNextPlan } from './next-plan.ts'
 
 /** A scripted `bd` on PATH — PATH lookup is the exec contract. `ready`
  *  emits FAKE_BD_READY; `update` records claims into FAKE_BD_LOG, and
@@ -145,6 +146,110 @@ describe('bro next', () => {
       await runNextCommand(['--json'])
       const r = JSON.parse(c.lines.join('\n'))
       assert.equal(r.state, 'idle')
+    })
+  )
+})
+
+describe('bro next plans', () => {
+  const plan = (over: Partial<Parameters<typeof applyNextPlan>[0]> = {}) => ({
+    limit: 1,
+    order: 'priority' as const,
+    claim: true,
+    gates: 'forbid' as const,
+    json: true,
+    filters: {},
+    ...over,
+  })
+
+  const RICH = [
+    ...MIXED,
+    { id: 'b-low', title: 'low task', status: 'open', priority: 4, issue_type: 'task', created_at: '2026-01-04T00:00:00Z' },
+    { id: 'b-bug', title: 'a bug', status: 'open', priority: 1, issue_type: 'bug', created_at: '2026-01-05T00:00:00Z' },
+  ]
+
+  it(
+    'limit > 1 claims that many beads, in order',
+    withFakeBd(RICH, async c => {
+      applyNextPlan(plan({ limit: 3 }))
+      const r = JSON.parse(c.lines.join('\n'))
+      assert.deepEqual(r.beads.map((b: { id: string }) => b.id), ['b-bug', 'b-older', 'b-newer'])
+      assert.match(c.claims, /b-bug --claim/)
+      assert.match(c.claims, /b-newer --claim/)
+    })
+  )
+
+  it(
+    'claim = false selects without claiming',
+    withFakeBd(RICH, async c => {
+      applyNextPlan(plan({ claim: false, limit: 2 }))
+      const r = JSON.parse(c.lines.join('\n'))
+      assert.deepEqual(r.beads.map((b: { id: string }) => b.id), ['b-bug', 'b-older'])
+      assert.equal(c.claims, '')
+    })
+  )
+
+  it(
+    'filters narrow the queue: types, max_priority, match',
+    withFakeBd(RICH, async c => {
+      applyNextPlan(plan({ filters: { types: ['bug'] } }))
+      let r = JSON.parse(c.lines.join('\n'))
+      assert.equal(r.bead.id, 'b-bug')
+
+      c.lines.length = 0
+      applyNextPlan(plan({ filters: { maxPriority: 2 } }))
+      r = JSON.parse(c.lines.join('\n'))
+      assert.equal(r.bead.id, 'b-bug')
+      assert.equal(r.queue, 3) // b-low (P4) is filtered out
+
+      c.lines.length = 0
+      applyNextPlan(plan({ filters: { match: /task/ } }))
+      r = JSON.parse(c.lines.join('\n'))
+      assert.equal(r.bead.id, 'b-older') // b-bug's title doesn't match
+    })
+  )
+
+  it(
+    'order changes the pick',
+    withFakeBd(RICH, async c => {
+      applyNextPlan(plan({ order: 'newest', claim: false }))
+      const r = JSON.parse(c.lines.join('\n'))
+      assert.equal(r.bead.id, 'b-bug') // newest claimable by created_at
+    })
+  )
+
+  it(
+    'gates = "allow" puts HUMAN GATE beads in the queue',
+    withFakeBd(GATED, async c => {
+      applyNextPlan(plan({ gates: 'allow' }))
+      const r = JSON.parse(c.lines.join('\n'))
+      assert.equal(r.state, 'task')
+      assert.equal(r.bead.id, 'b-gate')
+      assert.equal(r.gates.length, 0) // the claimed gate isn't double-reported
+      assert.match(c.claims, /b-gate --claim/)
+    })
+  )
+
+  it(
+    'a raced-away claim still fills the batch from the rest of the queue',
+    withFakeBd(
+      MIXED,
+      async c => {
+        applyNextPlan(plan({ limit: 2 }))
+        const r = JSON.parse(c.lines.join('\n'))
+        assert.deepEqual(r.beads.map((b: { id: string }) => b.id), ['b-newer'])
+        assert.equal(r.queue, 2)
+      },
+      'b-older'
+    )
+  )
+
+  it(
+    'the schema routes through parseNextPlan — a parsed doc executes',
+    withFakeBd(RICH, async c => {
+      const p = parseNextPlan({ kind: 'next', limit: 1, json: true, filters: { types: ['bug'] } })
+      applyNextPlan(p)
+      const r = JSON.parse(c.lines.join('\n'))
+      assert.equal(r.bead.id, 'b-bug')
     })
   )
 })
