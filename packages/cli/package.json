@@ -40,7 +40,8 @@
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "@bro/retro": "*",
-    "@bro/convoy": "*"
+    "@bro/convoy": "*",
+    "@bro/loop": "*"
   },
   "license": "MIT",
   "repository": {

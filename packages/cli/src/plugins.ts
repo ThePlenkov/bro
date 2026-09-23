@@ -23,9 +23,11 @@ import { parseConvoyPlan, type ConvoyPlan } from '@bro/convoy'
 import { parseDebtPlan, type DebtPlan } from '@bro/debt'
 import { parseDrillPlan, type DrillPlan } from '@bro/drill'
 import { parsePlanDoc, type RetroPlan } from '@bro/retro'
+import { loopSection } from '@bro/loop'
 import { applyActPlan, runActCommand } from './commands/act.ts'
 import { runCleanupCommand } from './commands/cleanup.ts'
 import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts'
+import { runLoopCommand } from './commands/loop.ts'
 import { applyNextPlan, runNextCommand } from './commands/next.ts'
 import { parseNextPlan, type NextPlan } from './commands/next-plan.ts'
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
@@ -72,6 +74,14 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'next',
     planSchema: (doc, source) => parseNextPlan(doc, source),
     runPlan: (plan) => applyNextPlan(plan as NextPlan),
+  }),
+  definePlugin({
+    name: 'loop',
+    summary: 'Autonomous backlog runner — claim → agent → gate → close → repeat',
+    run: runLoopCommand,
+    skill: 'loop',
+    configKey: 'loop',
+    configSchema: loopSection,
   }),
   definePlugin({
     name: 'cleanup',

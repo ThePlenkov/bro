@@ -7,6 +7,7 @@ description: setup, run, sync, cleanup, plugins.
 | ------- | ------------ |
 | `bro setup [--beads] [--skills]` | Wire bro into the repo: check `gh`/`bd`, write `bro.config.json`, optionally `bd init --stealth` + formulas + skill wrappers |
 | `bro next [--list] [--json]` | The autonomous loop's scheduler — claims the top ready bead and prints the work order |
+| `bro loop [--max N] [--dry-run]` | The autonomous loop itself — claim → worktree → agent → gate → close → repeat |
 | `bro run <plan.toml>` | Execute a [plan](/bro/plans/) — `kind` routes to the owning plugin, its `planSchema` validates, `runPlan` executes |
 | `bro sync [--pull]` | Push/pull artifact dirs (`.agents`, ledger) on `refs/bro/data` — git memory outside the review surface, never a branch |
 | `bro cleanup [--remote] [--dry-run]` | Delete local branches whose PR merged — merged state comes from `gh`, not `git branch --merged` |
@@ -37,6 +38,26 @@ The agent's loop is *run `bro next`, do what it says, repeat until
 `state` is `task`. States: `task` — a bead was emitted; `gated` — open
 items remain but none are claimable (stop for the human, not done);
 `idle` — backlog empty.
+
+## `bro loop` — the runner, not just the scheduler
+
+`bro next` emits one work order; an agent still has to execute the loop.
+`bro loop` is the loop as a command: for each claimable bead it creates a
+sibling worktree (`<repo>--<id>`, branch `loop/<id>`), spawns the
+configured agent with the work-order prompt, then drives the merge gate
+itself — green → `bro act merge`; review threads → the agent is respawned
+with the findings (`loop.fixRounds` caps it); `bd close` and cleanup on
+success, a `--notes` trail on failure.
+
+```json
+{ "loop": { "agent": "devin --prompt-file {promptFile} -p --permission-mode dangerous --respect-workspace-trust false" } }
+```
+
+`{promptFile}` is the work-order file bro writes into the worktree (also
+works: `claude -p "$(cat {promptFile})"`, `codex exec "$(cat
+{promptFile})"`). `--dry-run` shows the plan before anything is claimed.
+One runner per repo — claims are atomic, so a second runner wastes agent
+runs but can't corrupt the queue.
 
 ## `bro sync` — the data ref
 

@@ -111,7 +111,7 @@ function racedAway(b: ReadyBead): boolean {
 
 /** Claim up to `limit` beads — concurrent `bro next` runs race on the
  *  same items; a raced-away claim falls through to the next candidate. */
-function claimUpTo(queue: ReadyBead[], limit: number): ReadyBead[] {
+export function claimUpTo(queue: ReadyBead[], limit: number): ReadyBead[] {
   const picked: ReadyBead[] = []
   for (const b of queue) {
     if (picked.length >= limit) {
