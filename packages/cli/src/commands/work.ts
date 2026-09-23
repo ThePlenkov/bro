@@ -228,6 +228,23 @@ function resolveLeaveTarget(
   return { target, wasCurrent: target.path === cur }
 }
 
+/** Pre-remove guards git can no longer provide once we stack --force for
+ *  submodule trees: locked is explicit human intent (unlock first), and
+ *  an on-disk tree that can't be verified clean is NOT clean. */
+function assertRemovable(target: WorktreeInfo, force: boolean): void {
+  if (target.locked !== undefined) {
+    const why = target.locked ? ` (${target.locked})` : ''
+    console.error(`error: ${target.path} is locked${why} — run \`git worktree unlock\` first`)
+    process.exit(1)
+  }
+  const dirty = dirtyCount(target.path)
+  if (!force && (dirty > 0 || (dirty < 0 && existsSync(target.path)))) {
+    const why = dirty > 0 ? 'has uncommitted changes' : 'could not be verified clean'
+    console.error(`error: ${target.path} ${why} (use --force to override)`)
+    process.exit(1)
+  }
+}
+
 function cmdLeave(argv: string[]): void {
   const pos = positionals(argv, new Set())
   const force = argv.includes('--force')
@@ -239,21 +256,7 @@ function cmdLeave(argv: string[]): void {
     process.exit(1)
   }
   const { target, wasCurrent } = resolveLeaveTarget(all, main, pos[0])
-  // locked is explicit human intent — no flag of ours should override it
-  if (target.locked !== undefined) {
-    const why = target.locked ? ` (${target.locked})` : ''
-    console.error(`error: ${target.path} is locked${why} — run \`git worktree unlock\` first`)
-    process.exit(1)
-  }
-  // git's own dirty-tree refusal is our safety net — but submodule trees
-  // need --force, which would silence it. Check dirt ourselves first;
-  // an unverifiable tree (-1 while still on disk) is NOT clean.
-  const dirty = dirtyCount(target.path)
-  if (!force && (dirty > 0 || (dirty < 0 && existsSync(target.path)))) {
-    const why = dirty > 0 ? 'has uncommitted changes' : 'could not be verified clean'
-    console.error(`error: ${target.path} ${why} (use --force to override)`)
-    process.exit(1)
-  }
+  assertRemovable(target, force)
   const args = ['-C', main.path, 'worktree', 'remove', target.path]
   if (force) {
     args.push('--force')
