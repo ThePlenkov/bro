@@ -320,60 +320,74 @@ export function loadConfig(
   // flag keeps the final fallback at jsonl-only in that case
   let sawBroken = false
   for (const dir of new Set(dirs)) {
-    for (const name of ['bro.config.ts', 'bro.config.json']) {
-      const path = join(dir, name)
-      if (!existsSync(path)) {
-        continue
-      }
-      const raw = readConfigFile(name, path)
-      // broken file (warned inside readConfigFile) or invalid root: skip
-      // the rest of THIS dir — .ts precedence means a broken winner never
-      // promotes the sibling .json — but the next dir still gets tried
-      if (raw === undefined) {
-        sawBroken = true
-        break
-      }
-      // a valid non-object root ("str", […], 42) is not a config —
-      // spreading it would silently produce garbage keys
-      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-        console.error(`${name}: root must be an object — skipping`)
-        sawBroken = true
-        break
-      }
-      const { stores: _s, store: _legacy, plugins: _p, ...rest } = raw as RawConfig
-      const config: BroConfig & Record<string, unknown> = {
-        ...DEFAULT_CONFIG,
-        ...rest,
-        stores: normalizeStores(raw as RawConfig),
-        plugins: Array.isArray((raw as RawConfig).plugins)
-          ? ((raw as RawConfig).plugins as unknown[])
-              .filter((v): v is string => typeof v === 'string')
-              .map((v) => v.trim())
-              .filter((v) => v !== '')
-              // relative specs anchor at the config's own dir — an
-              // inherited config's `./x.ts` plugin must resolve in the
-              // main worktree, not the linked one. Containment is kept
-              // here: a spec escaping its anchor is dropped, so the
-              // absolute path reaching importPluginModule can't bypass
-              // its repo-root guard
-              .flatMap((v) => {
-                if (!v.startsWith('.')) {
-                  return [v]
-                }
-                const abs = resolve(dir, v)
-                if (abs !== dir && !abs.startsWith(dir + sep)) {
-                  console.error(
-                    `warning: plugin spec "${v}" escapes ${dir} — skipped`
-                  )
-                  return []
-                }
-                return [abs]
-              })
-          : [],
-      }
-      applySections(config, raw as Record<string, unknown>, sections)
-      return config
+    const r = loadDirConfig(dir, sections)
+    if (r === 'broken') {
+      sawBroken = true
+    } else if (r !== null) {
+      return r
     }
   }
   return fallback(sawBroken ? ['jsonl'] : [...DEFAULT_CONFIG.stores])
+}
+
+/** Tries bro.config.ts → bro.config.json inside one dir. 'broken' = a
+ *  config exists but failed (the dir's remaining names are skipped —
+ *  .ts precedence never promotes the sibling .json); null = nothing
+ *  here. */
+function loadDirConfig(
+  dir: string,
+  sections: Record<string, ConfigSection<unknown>>
+): (BroConfig & Record<string, unknown>) | 'broken' | null {
+  for (const name of ['bro.config.ts', 'bro.config.json']) {
+    const path = join(dir, name)
+    if (!existsSync(path)) {
+      continue
+    }
+    const raw = readConfigFile(name, path)
+    if (raw === undefined) {
+      return 'broken' // warned inside readConfigFile
+    }
+    // a valid non-object root ("str", […], 42) is not a config —
+    // spreading it would silently produce garbage keys
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      console.error(`${name}: root must be an object — skipping`)
+      return 'broken'
+    }
+    const { stores: _s, store: _legacy, plugins: _p, ...rest } = raw as RawConfig
+    const config: BroConfig & Record<string, unknown> = {
+      ...DEFAULT_CONFIG,
+      ...rest,
+      stores: normalizeStores(raw as RawConfig),
+      plugins: normalizePluginSpecs(dir, (raw as RawConfig).plugins),
+    }
+    applySections(config, raw as Record<string, unknown>, sections)
+    return config
+  }
+  return null
+}
+
+/** Relative specs anchor at the config's own dir — an inherited config's
+ *  `./x.ts` plugin must resolve in the main worktree, not the linked
+ *  one. Containment is kept here: a spec escaping its anchor is dropped,
+ *  so the absolute path reaching importPluginModule can't bypass its
+ *  repo-root guard. */
+function normalizePluginSpecs(dir: string, plugins: unknown): string[] {
+  if (!Array.isArray(plugins)) {
+    return []
+  }
+  return plugins
+    .filter((v): v is string => typeof v === 'string')
+    .map((v) => v.trim())
+    .filter((v) => v !== '')
+    .flatMap((v) => {
+      if (!v.startsWith('.')) {
+        return [v]
+      }
+      const abs = resolve(dir, v)
+      if (abs !== dir && !abs.startsWith(dir + sep)) {
+        console.error(`warning: plugin spec "${v}" escapes ${dir} — skipped`)
+        return []
+      }
+      return [abs]
+    })
 }
