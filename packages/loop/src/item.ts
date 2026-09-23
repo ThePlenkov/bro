@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { LoopBead } from './types.ts'
 
@@ -29,6 +30,8 @@ export function planItem(bead: LoopBead, repoRoot: string): LoopItem {
   return {
     branch: `loop/${slug}`,
     worktreeDir: dir,
-    promptFile: join(dir, '.bro-loop-prompt.md'),
+    // outside the worktree — an agent's `git add -A` must never
+    // sweep the work order into the PR
+    promptFile: join(tmpdir(), 'bro-loop', slug, 'prompt.md'),
   }
 }

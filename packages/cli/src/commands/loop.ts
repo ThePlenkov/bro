@@ -21,8 +21,9 @@
  * rules). A bead whose agent fails without a PR is reopened with a
  * note; a bead whose PR stalls keeps its worktree for inspection.
  */
-import { spawnSync, execFileSync } from 'node:child_process'
-import { existsSync, writeFileSync } from 'node:fs'
+import { spawnSync, spawn, execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { bd, bdJson, checkBeads, gitTry } from '@bro/core'
 import { evaluateExitGate, fetchPrActState, waitForGate } from '@bro/act'
 import { fetchReviewThreads } from '@bro/debt'
@@ -58,8 +59,13 @@ function usage(): never {
 }
 
 const num = (v: string | undefined, dflt: number, min = 1): number => {
+  if (v === undefined) return dflt
   const n = Number(v)
-  return Number.isFinite(n) && n >= min ? n : dflt
+  if (!Number.isFinite(n) || n < min) {
+    console.error(`bro loop: invalid numeric value "${v}" (must be >= ${min})`)
+    process.exit(2)
+  }
+  return n
 }
 
 /** Progress lines — stderr under --json so stdout stays a clean
@@ -108,38 +114,59 @@ function ensureWorktree(root: string, branch: string, dir: string): void {
   }
 }
 
-/** Spawn the agent synchronously in the worktree — inherit stdio so the
- *  run is observable; timeout kills the process group. */
-function spawnAgent(ctx: Ctx, beadId: string, title: string, promptFile: string, dir: string): number | null {
-  const res = spawnSync('sh', ['-c', expandAgentCmd(ctx.agent, promptFile)], { // NOSONAR — operator-configured agent command
-    cwd: dir,
-    env: {
-      ...process.env,
-      BRO_BEAD_ID: beadId,
-      BRO_BEAD_TITLE: title,
-      BRO_PROMPT_FILE: promptFile,
-    },
-    stdio: 'inherit',
-    timeout: ctx.cfg.agentTimeoutMin * 60_000,
+/** Spawn the agent detached in the worktree so the timeout can kill the
+ *  whole process group — `spawnSync`'s timeout signals only the direct
+ *  `sh` child, leaving a timed-out agent writing in the tree. Under
+ *  --json the child's stdout is routed to stderr so the JSONL stream
+ *  stays parseable. */
+function spawnAgent(ctx: Ctx, beadId: string, title: string, promptFile: string, dir: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    const child = spawn('sh', ['-c', expandAgentCmd(ctx.agent, promptFile)], { // NOSONAR — operator-configured agent command
+      cwd: dir,
+      env: {
+        ...process.env,
+        BRO_BEAD_ID: beadId,
+        BRO_BEAD_TITLE: title,
+        BRO_PROMPT_FILE: promptFile,
+      },
+      stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
+      detached: true,
+    })
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      try {
+        process.kill(-child.pid!, 'SIGKILL') // detached → own group
+      } catch {
+        child.kill('SIGKILL')
+      }
+    }, ctx.cfg.agentTimeoutMin * 60_000)
+    child.on('error', (err) => {
+      clearTimeout(timer)
+      console.error(`loop: agent spawn failed — ${err.message}`)
+      resolve(null)
+    })
+    child.on('exit', (code, signal) => {
+      clearTimeout(timer)
+      if (timedOut || signal) {
+        console.error(`loop: agent killed (${signal ?? 'timeout'}) — budget ${ctx.cfg.agentTimeoutMin}m`)
+        resolve(null)
+        return
+      }
+      resolve(code)
+    })
   })
-  if (res.error) {
-    console.error(`loop: agent spawn failed — ${res.error.message}`)
-    return null
-  }
-  if (res.signal) {
-    console.error(`loop: agent killed (${res.signal}) — timeout ${ctx.cfg.agentTimeoutMin}m`)
-    return null
-  }
-  return res.status
 }
 
-/** PR number opened from this worktree's branch, or null. */
-function findPr(dir: string, branch: string): number | null {
+/** PR number opened from this worktree's branch — null when none,
+ *  'lookup-error' when gh itself failed (not the same thing: a failed
+ *  lookup must not reopen a bead whose PR may still exist). */
+function findPr(dir: string, branch: string): number | null | 'lookup-error' {
   try {
     const out = ghOut(['pr', 'list', '--head', branch, '--json', 'number', '--jq', '.[0].number // empty'], dir)
     return out === '' ? null : Number(out)
   } catch {
-    return null
+    return 'lookup-error'
   }
 }
 
@@ -159,19 +186,34 @@ function reopenBead(id: string): void {
 }
 
 /** Merge the PR, close the bead, drop the worktree. 'landed' only when
- *  the PR reports MERGED — a closed or still-open PR parks the bead. */
+ *  the PR reports MERGED — a closed or still-open PR parks the bead.
+ *  `alreadyMerged` skips the merge call for PRs that landed externally
+ *  while the gate was polling. */
 async function finalizeMerge(
   ctx: Ctx,
   bead: ReadyBead,
   item: ReturnType<typeof planItem>,
-  pr: number
+  pr: number,
+  alreadyMerged = false
 ): Promise<string> {
-  await runActCommand(['merge', String(pr)])
-  const state = ghOut(['pr', 'view', String(pr), '--json', 'state', '--jq', '.state'], ctx.root)
-  if (state !== 'MERGED') {
+  try {
+    if (!alreadyMerged) {
+      await runActCommand(['merge', String(pr)])
+    }
+    const state = ghOut(['pr', 'view', String(pr), '--json', 'state', '--jq', '.state'], ctx.root)
+    if (state !== 'MERGED') {
+      noteBead(
+        bead.id,
+        `loop: merge of #${pr} did not land (state=${state}) — worktree ${item.worktreeDir}`
+      )
+      return 'parked'
+    }
+  } catch (err) {
+    // a merge/fetch failure must not abort the loop leaving the bead
+    // claimed forever — note it and park
     noteBead(
       bead.id,
-      `loop: merge of #${pr} did not land (state=${state}) — worktree ${item.worktreeDir}`
+      `loop: finalizing #${pr} failed — ${err instanceof Error ? err.message : String(err)} — worktree ${item.worktreeDir}`
     )
     return 'parked'
   }
@@ -212,9 +254,9 @@ async function runFixRound(
       return `- ${c?.path ?? ''}:${c?.line ?? ''} [${c?.author?.login ?? '?'}] ${c?.body ?? ''}`
     })
     .join('\n')
-  writeFileSync(item.promptFile, buildFixPrompt(bead, pr, threads))
+  writePrompt(item, buildFixPrompt(bead, pr, threads))
   say(ctx, `loop: #${pr} has open threads — fix round ${round}`)
-  const code = spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
+  const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
   if (code !== 0) {
     console.error(`loop: fix agent exited ${code ?? 'timeout'} — the next gate poll decides`)
   }
@@ -243,7 +285,7 @@ function runBootstrap(ctx: Ctx, bead: ReadyBead, item: ReturnType<typeof planIte
   }
   const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], { // NOSONAR — operator-configured bootstrap
     cwd: item.worktreeDir,
-    stdio: 'inherit',
+    stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
   })
   if (b.status === 0) {
     return true
@@ -256,6 +298,13 @@ function runBootstrap(ctx: Ctx, bead: ReadyBead, item: ReturnType<typeof planIte
   return false
 }
 
+/** The work-order file lives outside the worktree (see planItem) —
+ *  its parent dir may not exist yet. */
+function writePrompt(item: ReturnType<typeof planItem>, text: string): void {
+  mkdirSync(dirname(item.promptFile), { recursive: true })
+  writeFileSync(item.promptFile, text)
+}
+
 /** One bead end-to-end. Returns 'landed' | 'parked' | 'failed'. */
 async function runItem(ctx: Ctx, bead: ReadyBead): Promise<string> {
   const item = planItem(bead, ctx.root)
@@ -264,14 +313,19 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<string> {
     ensureWorktree(ctx.root, item.branch, item.worktreeDir)
   } catch (err) {
     noteBead(bead.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
+    reopenBead(bead.id)
     return 'failed'
   }
   if (!runBootstrap(ctx, bead, item)) {
     return 'failed'
   }
-  writeFileSync(item.promptFile, buildWorkPrompt(bead, item.branch))
-  const code = spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
+  writePrompt(item, buildWorkPrompt(bead, item.branch))
+  const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
   const pr = findPr(item.worktreeDir, item.branch)
+  if (pr === 'lookup-error') {
+    noteBead(bead.id, `loop: PR lookup failed for ${item.branch} — worktree ${item.worktreeDir}`)
+    return 'parked'
+  }
   if (pr === null) {
     return failNoPr(bead, item, code)
   }
@@ -316,7 +370,15 @@ async function driveGate(
       )
       return 'parked'
     }
-    if (res.gate.ok && res.state.state === 'OPEN') {
+    if (res.state.state === 'MERGED') {
+      // landed externally (reviewer/bot merge) while we polled — close out
+      return finalizeMerge(ctx, bead, item, pr, true)
+    }
+    if (res.state.state === 'CLOSED') {
+      noteBead(bead.id, `loop: PR #${pr} was closed unmerged — worktree ${item.worktreeDir}`)
+      return 'parked'
+    }
+    if (res.gate.ok) {
       return finalizeMerge(ctx, bead, item, pr)
     }
     if (res.state.openThreads > 0 && round < ctx.cfg.fixRounds) {

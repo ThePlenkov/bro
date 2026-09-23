@@ -1,3 +1,5 @@
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { loopSection } from './config.ts'
@@ -59,7 +61,8 @@ describe('planItem', () => {
     const item = planItem(bead, '/home/u/projects/bro')
     assert.equal(item.branch, 'loop/bro-x1')
     assert.equal(item.worktreeDir, '/home/u/projects/bro--bro-x1')
-    assert.equal(item.promptFile, '/home/u/projects/bro--bro-x1/.bro-loop-prompt.md')
+    // outside the worktree — `git add -A` must never sweep it into the PR
+    assert.equal(item.promptFile, join(tmpdir(), 'bro-loop', 'bro-x1', 'prompt.md'))
   })
 
   test('ids that sanitize to the same slug get distinct names', () => {
