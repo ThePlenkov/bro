@@ -77,3 +77,26 @@ the agent full autonomy; scope it to machines/repos you trust.
 - One `bro loop` per repo — two runners would race the same top beads
   (claim is atomic, so the loser just takes the next one — wasteful,
   not corrupting).
+
+## Done means verified-clean, not exited
+
+A loop iteration is done only when the bead reached a terminal,
+authoritatively verified state — PR `MERGED` per `gh pr view` and the
+bead closed per `bd show`, or parked with a `loop:` note naming the
+blocker. A process exiting is not a verdict.
+
+Before reporting the run over:
+
+1. `gh pr list` — no loop PR left open that the run itself stalled.
+2. `git worktree list` — no orphan `<repo>--<id>` dirs whose branches
+   are already merged; every kept worktree has a parked bead explaining
+   it.
+3. `bd show <id>` on every claimed bead — closed or noted, never
+   silently `in_progress` with nothing running.
+4. `bro sync` — beads and artifacts pushed, not local-only.
+5. Cleanup failures are part of the report, not swallowed — a worktree
+   that failed removal is listed, not dropped.
+
+Cleanup after a merge wait is `&&`-sequenced or command-owned — never
+`;`: a failed `act wait` must not touch the PR, branch, worktree, or
+bead.
