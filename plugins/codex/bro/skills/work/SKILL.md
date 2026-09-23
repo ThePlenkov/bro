@@ -15,8 +15,8 @@ same branch in two worktrees — that refusal is the collision fence.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro work enter <slug>` | Sibling checkout `<repo>--<slug>` on branch `work/<slug>` (`--branch`, `--base` override); an existing branch is checked out, not recreated. Initializes submodules; if `<slug>` names a bead, claims it for the session |
-| `bro work leave [slug]` | Deinitializes submodules, then removes the worktree — the current one by default; `--force` discards dirty state, `--delete-branch` drops a merged branch |
+| `bro work enter <slug>` | Sibling checkout `<repo>--<slug>` on branch `work/<slug>` (`--branch`, `--base` override); an existing branch is checked out, not recreated. Tries to init submodules and, if `<slug>` names a bead, to claim it — both best-effort |
+| `bro work leave [slug]` | Remove the worktree — the current one by default; `--force` discards dirty state, `--delete-branch` drops a merged branch. Submodule trees are force-removed without touching the shared submodule config |
 | `bro work list` | Every worktree: branch, clean/dirty count, `--sizes` adds `du` |
 | `bro work prune` | Drop admin entries for worktrees already deleted on disk |
 
@@ -32,5 +32,5 @@ same branch in two worktrees — that refusal is the collision fence.
   install step inside the new worktree.
 - Beads needs no setup: `bd` discovers the shared database through the
   git common dir in any worktree.
-- **Slug after the bead.** `bro work enter bro-123` claims bead `bro-123`
-  on the way in — a non-bead slug just skips claiming.
+- **Slug after the bead.** `bro work enter bro-123` tries to claim bead
+  `bro-123` on the way in — a non-bead slug just skips claiming.

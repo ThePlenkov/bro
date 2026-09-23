@@ -223,26 +223,20 @@ function cmdLeave(argv: string[]): void {
     console.error('error: refusing to remove the main worktree')
     process.exit(1)
   }
-  // git's own dirty-tree refusal is our safety net — but the submodule
-  // path below adds --force, which would silence it. Check dirt ourselves
-  // before anything gets deinitialized or forced.
+  // git's own dirty-tree refusal is our safety net — but submodule trees
+  // need --force, which would silence it. Check dirt ourselves first.
   if (!force && dirtyCount(target.path) > 0) {
     console.error(`error: ${target.path} has uncommitted changes (use --force to override)`)
     process.exit(1)
   }
-  // `git worktree remove` refuses trees whose index holds gitlinks — even
-  // deinitialized ones. Deinit the submodules, then force the remove.
-  let forceForSubmodules = false
-  if (hasSubmodules(target.path)) {
-    const deinit = gitTry(['-C', target.path, 'submodule', 'deinit', '-f', '--all'])
-    if (deinit.code !== 0) {
-      console.error(`warning: submodule deinit failed — ${deinit.err}`)
-    } else {
-      forceForSubmodules = true
-    }
-  }
   const args = ['-C', main.path, 'worktree', 'remove', target.path]
-  if (force || forceForSubmodules) {
+  if (force) {
+    args.push('--force')
+  }
+  // submodule config is shared across worktrees — deinit here would
+  // unregister them for everyone. git's documented escape is a second
+  // --force, which leaves sibling checkouts untouched.
+  if (hasSubmodules(target.path)) {
     args.push('--force')
   }
   const res = gitTry(args)
