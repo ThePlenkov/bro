@@ -11,17 +11,34 @@
  *   pour <formula> [--var K=V]…  register agent/human types, bd mol pour
  *   list                      open molecules in this workspace
  */
+import { randomBytes } from 'node:crypto'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { stringify } from 'smol-toml'
 import { bd, checkBeads } from '@bro/core'
 import {
+  beadsDir,
   claimStep,
+  declAsIssue,
+  formulaSteps,
+  inlineFormulaDoc,
   listMolecules,
+  loadMolecule,
   nextStep,
   pourFormula,
   resolveMolecule,
   stepInputs,
+  stepKind,
   stepsOf,
 } from '@bro/convoy'
-import type { ConvoyNext, StepState } from '@bro/convoy'
+import type {
+  ConvoyInline,
+  ConvoyMolecule,
+  ConvoyNext,
+  ConvoyPlan,
+  MolIssue,
+  StepState,
+} from '@bro/convoy'
 import { flag, flagAll, positionals } from './args.ts'
 
 function usage(exitCode = 1): never {
@@ -50,6 +67,112 @@ function withInputs(next: ConvoyNext, mol: Parameters<typeof stepInputs>[0]): Co
   if (!next.step) return next
   const inputs = stepInputs(mol, next.step.id)
   return inputs.length > 0 ? { ...next, inputs } : next
+}
+
+const slugify = (s: string): string =>
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+/, '')
+    .replace(/-+$/, '')
+    .slice(0, 40) || 'convoy'
+
+/** A molecule that forbids gates must not contain any — formulas are
+ *  inspected pre-pour, inline steps were already checked at parse time
+ *  but a direct caller can bypass the schema. */
+function assertGateFree(m: ConvoyMolecule): void {
+  const declared: MolIssue[] =
+    'formula' in m ? formulaSteps(m.formula) : m.steps.map(declAsIssue)
+  const gated = declared.filter((s) => stepKind(s) === 'human')
+  if (gated.length > 0) {
+    const name = 'formula' in m ? m.formula : m.title
+    throw new Error(
+      `molecule "${name}" declares human gates (${gated.map((s) => s.id).join(', ')}) but gates = "forbid"`
+    )
+  }
+}
+
+/** An inline molecule pours through a generated formula file in the
+ *  resolved beads dir — the only path where declared agent/human types
+ *  survive (`bd create` flattens them to task). The file is a pour-time
+ *  artifact: removed as soon as the molecule exists. */
+function pourInline(m: ConvoyInline): string {
+  const name = `bro-plan-${slugify(m.title)}-${randomBytes(3).toString('hex')}`
+  const dir = join(beadsDir(), 'formulas')
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, `${name}.formula.toml`)
+  writeFileSync(file, stringify(inlineFormulaDoc(m, name)))
+  try {
+    const rootId = pourFormula(name, {})
+    // bd titles the root after the formula name — restore the plan's
+    // title; if that fails the caller never sees rootId, so the molecule
+    // escapes rollbackPoured — compensate here instead
+    try {
+      bd(['update', rootId, '--title', m.title])
+    } catch (err) {
+      const orphans = rollbackPoured([rootId])
+      if (orphans.length === 0) throw err
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new Error(`${msg} — cleanup incomplete: molecule(s) left behind: ${orphans.join(', ')}`, { cause: err })
+    }
+    return rootId
+  } finally {
+    rmSync(file, { force: true })
+  }
+}
+
+/**
+ * Materialize a convoy plan (`bro run convoy.toml`): pour each declared
+ * molecule — registered formulas via `bd mol pour`, inline step lists via
+ * a generated formula. Execution then proceeds through
+ * `convoy next`/`done` as usual.
+ */
+export function applyConvoyPlan(plan: ConvoyPlan): void {
+  checkBeads()
+  // preflight every gate policy before pouring anything — a late
+  // "forbid" failure must not leave earlier molecules poured
+  for (const m of plan.molecules) {
+    if ((m.gates ?? plan.gates ?? 'allow') === 'forbid') {
+      assertGateFree(m)
+    }
+  }
+  const poured: string[] = []
+  try {
+    for (const m of plan.molecules) {
+      const rootId = 'formula' in m ? pourFormula(m.formula, m.vars ?? {}) : pourInline(m)
+      poured.push(rootId)
+      console.log(`convoy ↓ ${rootId} ${'formula' in m ? m.formula : m.title}`)
+    }
+  } catch (err) {
+    // bd has no transactions — a mid-flight failure deletes the molecules
+    // this run poured (the applyDrillPlan convention): a retry converges
+    // instead of leaving half the plan materialized
+    const orphans = rollbackPoured(poured)
+    if (orphans.length === 0) {
+      throw err
+    }
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(
+      `${msg} — cleanup incomplete: molecule(s) left behind: ${orphans.join(', ')}`,
+      { cause: err }
+    )
+  }
+}
+
+/** Delete the molecules this run poured, newest first — steps before
+ *  their root since bd refuses a root with open children. Returns the
+ *  root ids whose cleanup failed. */
+function rollbackPoured(poured: string[]): string[] {
+  const orphans: string[] = []
+  for (const rootId of [...poured].reverse()) {
+    try {
+      for (const s of stepsOf(loadMolecule(rootId))) bd(['delete', s.id, '--force'])
+      bd(['delete', rootId, '--force'])
+    } catch {
+      orphans.push(rootId)
+    }
+  }
+  return orphans
 }
 
 export async function runConvoyCommand(argv: string[]): Promise<void> {

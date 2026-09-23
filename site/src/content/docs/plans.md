@@ -129,6 +129,43 @@ status = "done"
 fix_pr = 58                  # the PR that landed the fix
 ```
 
+### `convoy`
+
+A pour plan — which molecules to bring into existence and under what
+gate policy. `bro run` materializes each entry; execution then proceeds
+through `convoy next`/`done` as usual.
+
+```toml
+kind = "convoy"
+gates = "allow"                # plan-wide default: allow | forbid
+
+[[molecules]]                  # pour a registered formula/proto
+formula = "debt-pipeline"
+[molecules.vars]
+scope = "--last 20"
+
+[[molecules]]                  # ad-hoc molecule — steps inline
+title = "ship v0.1"
+gates = "forbid"               # reject if any step is a human gate
+
+[[molecules.steps]]
+id = "tag"
+title = "cut the tag"
+type = "agent"                 # "human" declares a gate
+
+[[molecules.steps]]
+id = "publish"
+title = "npm publish"
+type = "agent"
+needs = ["tag"]
+```
+
+`gates = "forbid"` is the unattended-run contract: inline steps are
+checked at parse time, formulas via `bd formula show` before anything is
+poured. Inline steps transpile to a generated formula so declared
+`agent`/`human` types survive the pour. `needs` must reference declared
+sibling ids — unknowns, self-refs, and cycles are rejected.
+
 ## Why TOML
 
 Diff-friendly, comment-friendly, and forgiving for agents writing it by
