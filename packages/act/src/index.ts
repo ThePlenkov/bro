@@ -11,3 +11,11 @@ export { gatePending, waitForGate } from './wait.ts'
 export type { GateWaitResult, WaitOptions } from './wait.ts'
 export { ACT_ACTIONS, parseActPlan, PLAN_KIND as ACT_PLAN_KIND } from './plan.ts'
 export type { ActAction, ActPlan, ActThreadVerdict } from './plan.ts'
+export {
+  acquireMergeSlot,
+  mergeSlotHolder,
+  parseAcquire,
+  parseCheck,
+  releaseMergeSlot,
+} from './merge-slot.ts'
+export type { MergeSlot } from './merge-slot.ts'

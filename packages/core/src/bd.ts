@@ -3,7 +3,7 @@
  * package. PATH lookup is the contract (same as gh); a generous maxBuffer
  * keeps large `bd list --json` payloads from hitting Node's 1 MiB default.
  */
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { statSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -15,6 +15,28 @@ export function bd(args: string[]): string {
     // agent lifecycle
     timeout: 15_000,
   })
+}
+
+/** Non-throwing bd — same contract as gitTry for paths where beads is
+ *  optional (merge slot, hooks): a missing binary or absent database must
+ *  degrade, not stall. */
+export function bdTry(
+  args: string[],
+  timeoutMs = 15_000
+): { code: number; out: string; err: string } {
+  const proc = spawnSync('bd', args, { // NOSONAR — PATH lookup is the contract (same as gh/git)
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    // same maxBuffer contract as bd() — a future caller passing a large
+    // payload must not silently get truncated stdout
+    maxBuffer: 64 * 1024 * 1024,
+  })
+  return {
+    code: proc.status ?? 1,
+    out: proc.stdout ?? '',
+    err: (proc.stderr ?? proc.error?.message ?? '').trim(),
+  }
 }
 
 export function bdJson<T>(args: string[]): T {
