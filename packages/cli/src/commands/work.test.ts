@@ -46,6 +46,14 @@ describe('parseWorktreePorcelain', () => {
     assert.deepEqual(parseWorktreePorcelain('\n'), [])
   })
 
+  test('locked entries carry the flag and optional reason', () => {
+    const text = `worktree /repo/main\nHEAD aaa\nbranch refs/heads/main\n\nworktree /repo/main--held\nHEAD bbb\nbranch refs/heads/work/held\nlocked user is debugging\n\nworktree /repo/main--held2\nHEAD ccc\nbranch refs/heads/work/held2\nlocked\n`
+    const [main, held, held2] = parseWorktreePorcelain(text)
+    assert.equal(main!.locked, undefined)
+    assert.equal(held!.locked, 'user is debugging')
+    assert.equal(held2!.locked, '')
+  })
+
   test('C-quoted paths are unquoted', () => {
     const text = 'worktree "/repo/main--we\\"ird"\nHEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ndetached\n'
     assert.equal(parseWorktreePorcelain(text)[0]!.path, '/repo/main--we"ird')

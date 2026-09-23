@@ -32,6 +32,8 @@ export interface WorktreeInfo {
   detached: boolean
   /** admin entry exists but the directory is gone — `git worktree prune` bait */
   prunable?: string
+  /** locked against removal — porcelain carries `locked` or `locked <reason>` */
+  locked?: string
 }
 
 /** Git C-quotes unusual paths in porcelain output — unwrap and unescape. */
@@ -67,6 +69,10 @@ export function parseWorktreePorcelain(text: string): WorktreeInfo[] {
       cur.detached = true
     } else if (line.startsWith('prunable ')) {
       cur.prunable = line.slice('prunable '.length)
+    } else if (line === 'locked') {
+      cur.locked = ''
+    } else if (line.startsWith('locked ')) {
+      cur.locked = line.slice('locked '.length)
     }
   }
   return out
@@ -182,7 +188,7 @@ function cmdEnter(argv: string[]): void {
   // submodules are not populated by worktree add — a fresh tree without
   // them builds stale or fails; init is best-effort (network may be down)
   if (hasSubmodules(path)) {
-    const sub = gitTry(['-C', path, 'submodule', 'update', '--init'])
+    const sub = gitTry(['-C', path, 'submodule', 'update', '--init', '--recursive'])
     console.log(
       sub.code === 0
         ? 'submodules initialized'
@@ -233,10 +239,19 @@ function cmdLeave(argv: string[]): void {
     process.exit(1)
   }
   const { target, wasCurrent } = resolveLeaveTarget(all, main, pos[0])
+  // locked is explicit human intent — no flag of ours should override it
+  if (target.locked !== undefined) {
+    const why = target.locked ? ` (${target.locked})` : ''
+    console.error(`error: ${target.path} is locked${why} — run \`git worktree unlock\` first`)
+    process.exit(1)
+  }
   // git's own dirty-tree refusal is our safety net — but submodule trees
-  // need --force, which would silence it. Check dirt ourselves first.
-  if (!force && dirtyCount(target.path) > 0) {
-    console.error(`error: ${target.path} has uncommitted changes (use --force to override)`)
+  // need --force, which would silence it. Check dirt ourselves first;
+  // an unverifiable tree (-1 while still on disk) is NOT clean.
+  const dirty = dirtyCount(target.path)
+  if (!force && (dirty > 0 || (dirty < 0 && existsSync(target.path)))) {
+    const why = dirty > 0 ? 'has uncommitted changes' : 'could not be verified clean'
+    console.error(`error: ${target.path} ${why} (use --force to override)`)
     process.exit(1)
   }
   const args = ['-C', main.path, 'worktree', 'remove', target.path]
@@ -245,7 +260,7 @@ function cmdLeave(argv: string[]): void {
   }
   // submodule config is shared across worktrees — deinit here would
   // unregister them for everyone. git's documented escape is a second
-  // --force, which leaves sibling checkouts untouched.
+  // --force; safe to stack now that locked trees are refused above.
   if (hasSubmodules(target.path)) {
     args.push('--force')
   }
@@ -267,6 +282,9 @@ function cmdLeave(argv: string[]): void {
 }
 
 function stateLabel(w: WorktreeInfo): string {
+  if (w.locked !== undefined) {
+    return 'LOCKED'
+  }
   if (w.prunable) {
     return 'PRUNABLE'
   }
