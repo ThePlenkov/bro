@@ -383,8 +383,11 @@ function normalizePluginSpecs(dir: string, plugins: unknown): string[] {
       if (!v.startsWith('.')) {
         return [v]
       }
+      // anchor must be absolute too — a relative cwd would compare an
+      // absolute path against 'foo/' and drop every legit spec
+      const anchor = resolve(dir)
       const abs = resolve(dir, v)
-      if (abs !== dir && !abs.startsWith(dir + sep)) {
+      if (abs !== anchor && !abs.startsWith(anchor + sep)) {
         console.error(`warning: plugin spec "${v}" escapes ${dir} — skipped`)
         return []
       }

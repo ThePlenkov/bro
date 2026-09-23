@@ -1,7 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { DEFAULT_CONFIG, defineConfig, loadConfig } from './config.ts'
@@ -281,7 +281,9 @@ describe('loadConfig linked worktree', () => {
   /** Real git repo + linked worktree — git can't be faked for
    *  --git-common-dir, so the fixture uses the real thing. */
   function repoWithWorktree(): { main: string; wt: string } {
-    const main = mkdtempSync(join(tmpdir(), 'bro-main-'))
+    // realpath — git reports the real path for --git-common-dir; on
+    // symlinked tmpdirs (macOS /var→/private/var) assertions must match
+    const main = realpathSync(mkdtempSync(join(tmpdir(), 'bro-main-')))
     execFileSync('git', ['init', '-q', main])
     execFileSync('git', ['-C', main, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'])
     const wt = mkdtempSync(join(tmpdir(), 'bro-wt-'))
