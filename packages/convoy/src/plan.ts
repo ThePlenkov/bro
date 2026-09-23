@@ -184,7 +184,10 @@ function checkStepGraph(steps: ConvoyStepDecl[], where: string, errors: string[]
     const c = color.get(id)
     if (c === 2) return
     if (c === 1) {
-      const cycle = [...path.slice(path.indexOf(id)), id].join(' -> ')
+      // a gray node is always an ancestor on the current path — the
+      // indexOf guard is for the day that invariant breaks, not today
+      const idx = path.indexOf(id)
+      const cycle = idx >= 0 ? [...path.slice(idx), id].join(' -> ') : `${id} (unexpected cycle)`
       errors.push(`${where}: needs cycle ${cycle}`)
       return
     }
