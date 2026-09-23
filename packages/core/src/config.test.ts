@@ -338,6 +338,20 @@ describe('loadConfig linked worktree', () => {
     assert.deepEqual(loadConfig(wt).plugins, [join(main, 'ok.ts')])
   })
 
+  test('worktree of a --separate-git-dir repo inherits the main config', () => {
+    // the git dir lives outside the checkout — --git-common-dir can't
+    // find the main worktree, worktree list can
+    const holder = realpathSync(mkdtempSync(join(tmpdir(), 'bro-sep-')))
+    const gitdir = join(holder, 'gitdir')
+    const main = join(holder, 'checkout')
+    execFileSync('git', ['init', '-q', '--separate-git-dir', gitdir, main])
+    execFileSync('git', ['-C', main, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'])
+    writeFileSync(join(main, 'bro.config.json'), JSON.stringify({ personality: 'mentor' }))
+    const wt = realpathSync(mkdtempSync(join(tmpdir(), 'bro-wt-')))
+    execFileSync('git', ['-C', main, 'worktree', 'add', '-qf', '--detach', wt])
+    assert.equal(loadConfig(wt).personality, 'mentor')
+  })
+
   test('worktree of a bare repo inherits nothing', () => {
     const main = mkdtempSync(join(tmpdir(), 'bro-main-'))
     execFileSync('git', ['init', '-q', main])

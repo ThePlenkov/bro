@@ -8,7 +8,7 @@
  * the config resolves under a global install too.
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -288,12 +288,38 @@ function mainWorktreeRoot(cwd: string): string | null {
   // main worktree prints a relative `.git` — resolve covers both, and
   // unlike --path-format this works on older git too
   const common = resolve(cwd, r.out.trim())
-  // a worktree attached to a BARE repo returns the repo dir itself
-  // (/srv/repo.git) — dirname would point at an unrelated ancestor
-  if (basename(common) !== '.git') {
+  if (basename(common) === '.git') {
+    return dirname(common)
+  }
+  // `--separate-git-dir` detaches the git dir from the checkout and git
+  // keeps no back-pointer (`worktree list` reports the git dir itself).
+  // The only link is the checkout's own `.git` file (`gitdir: <common>`)
+  // — scan the common dir's siblings for it. A worktree of a BARE repo
+  // finds no such checkout (linked worktrees point at
+  // `<bare>/worktrees/<name>`, not the common dir) → nothing to inherit.
+  const parent = dirname(common)
+  let names: string[] = []
+  try {
+    names = readdirSync(parent)
+  } catch {
     return null
   }
-  return dirname(common)
+  for (const name of names) {
+    const dir = join(parent, name)
+    const gitfile = join(dir, '.git')
+    try {
+      if (!statSync(gitfile).isFile()) {
+        continue
+      }
+      const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(gitfile, 'utf8'))
+      if (m && resolve(dir, m[1].trim()) === common) {
+        return dir
+      }
+    } catch {
+      // unreadable sibling — skip
+    }
+  }
+  return null
 }
 
 export function loadConfig(
