@@ -19,12 +19,13 @@ import {
   type ConfigSection,
 } from '@bro/core'
 import { parseActPlan, type ActPlan } from '@bro/act'
+import { parseConvoyPlan, type ConvoyPlan } from '@bro/convoy'
 import { parseDebtPlan, type DebtPlan } from '@bro/debt'
 import { parseDrillPlan, type DrillPlan } from '@bro/drill'
 import { parsePlanDoc, type RetroPlan } from '@bro/retro'
 import { applyActPlan, runActCommand } from './commands/act.ts'
 import { runCleanupCommand } from './commands/cleanup.ts'
-import { runConvoyCommand } from './commands/convoy.ts'
+import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts'
 import { applyNextPlan, runNextCommand } from './commands/next.ts'
 import { parseNextPlan, type NextPlan } from './commands/next-plan.ts'
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
@@ -61,6 +62,8 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Convoy execution over beads molecules: status|next|done|pour|list',
     run: runConvoyCommand,
     skill: 'convoy',
+    planSchema: (doc, source) => parseConvoyPlan(doc, source),
+    runPlan: (plan) => applyConvoyPlan(plan as ConvoyPlan),
   }),
   definePlugin({
     name: 'next',

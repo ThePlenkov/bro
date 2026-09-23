@@ -1,3 +1,4 @@
+import { dirname } from 'node:path'
 import { bd, bdJson } from '@bro/core'
 import type { ConvoyNext, ConvoyStep, Molecule, MolIssue, StepInput, StepKind, StepState } from './types.ts'
 
@@ -119,6 +120,29 @@ export function claimStep(stepId: string): void {
   bd(['update', stepId, '--claim'])
 }
 
+/** The resolved beads directory — `bd info` reports the database inside
+ *  it; `<dir>/formulas/` is bd's first formula search path. */
+export function beadsDir(): string {
+  const info = bdJson<{ database_path: string }>(['info'])
+  return dirname(info.database_path)
+}
+
+/** A formula's declared steps as MolIssue shells — enough for `stepKind`
+ *  gate classification without pouring. */
+export function formulaSteps(formula: string): MolIssue[] {
+  const doc = bdJson<{ steps?: { id?: string; title?: string; type?: string }[] }>([
+    'formula',
+    'show',
+    formula,
+  ])
+  return (doc.steps ?? []).map((s) => ({
+    id: s.id ?? '',
+    title: s.title ?? '',
+    status: 'open',
+    issue_type: s.type ?? 'task',
+  }))
+}
+
 /**
  * `bro convoy pour` — register custom step types once so formulas keep
  * agent/human instead of flattening to task, then pour the formula.
@@ -129,7 +153,9 @@ export function pourFormula(formula: string, vars: Record<string, string> = {}):
     const current = bd(['config', 'get', 'types.custom']).trim()
     const types = new Set(current ? current.split(/[\s,]+/) : [])
     types.add('agent').add('human')
-    bd(['config', 'set', 'types.custom', [...types].join(' ')])
+    // bd parses types.custom as a comma-separated list — a space-joined
+    // value reads back as one bogus type and the pour still flattens
+    bd(['config', 'set', 'types.custom', [...types].join(',')])
   } catch {
     // old bd without types.custom — gates would flatten to task
   }
