@@ -26,6 +26,12 @@ case "$1" in
       case "$2" in *$FAKE_BD_UPDATE_FAIL*) echo 'db locked' >&2; exit 1 ;; esac
     fi
     echo "$@" >> "$FAKE_BD_LOG" ;;
+  show)
+    st=open
+    if [ -n "$FAKE_BD_CLAIM_FAIL" ]; then
+      case "$2" in *$FAKE_BD_CLAIM_FAIL*) st=in_progress ;; esac
+    fi
+    echo "[{\\"status\\":\\"$st\\"}]" ;;
 esac
 `
 
@@ -136,6 +142,20 @@ describe('bro next', () => {
         assert.match(c.lines[0], /→ b-newer.*\(claimed\)/)
         assert.match(c.claims, /b-newer --claim/)
       },
+      'b-older'
+    )
+  )
+
+  it(
+    'a claim failure that is not a race surfaces instead of skipping',
+    withFakeBd(
+      MIXED,
+      async () => {
+        // claim fails but the bead is still open — an outage, not a
+        // race; it must surface, not silently drain the queue
+        await assert.rejects(runNextCommand([]))
+      },
+      '',
       'b-older'
     )
   )

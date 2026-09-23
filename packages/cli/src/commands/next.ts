@@ -101,8 +101,9 @@ export function classify(
  *  drain the queue into a fake idle. */
 function racedAway(b: ReadyBead): boolean {
   try {
-    const cur = bdJson<Array<{ status?: string }>>(['show', b.id, '--json'])
-    return cur[0]?.status !== 'open'
+    const cur = bdJson<Array<{ status?: string }>>(['show', b.id])
+    const status = cur[0]?.status
+    return typeof status === 'string' && status !== 'open'
   } catch {
     return false // show failed too — bd is down; the claim error is the diagnostic
   }
