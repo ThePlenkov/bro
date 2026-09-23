@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { DEFAULT_CONFIG, defineConfig, loadConfig } from './config.ts'
@@ -273,5 +274,82 @@ describe('loadConfig plugin sections', () => {
     assert.equal(load({ debt: { dir: 42 } }).debt.dir, DEFAULT_CONFIG.debt.dir)
     assert.equal(load({ debt: { dir: '' } }).debt.dir, DEFAULT_CONFIG.debt.dir)
     assert.equal(load({ debt: { dir: 'custom/dir' } }).debt.dir, 'custom/dir')
+  })
+})
+
+describe('loadConfig linked worktree', () => {
+  /** Real git repo + linked worktree — git can't be faked for
+   *  --git-common-dir, so the fixture uses the real thing. */
+  function repoWithWorktree(): { main: string; wt: string } {
+    // realpath — git reports the real path for --git-common-dir; on
+    // symlinked tmpdirs (macOS /var→/private/var) assertions must match
+    const main = realpathSync(mkdtempSync(join(tmpdir(), 'bro-main-')))
+    execFileSync('git', ['init', '-q', main])
+    execFileSync('git', ['-C', main, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'])
+    const wt = mkdtempSync(join(tmpdir(), 'bro-wt-'))
+    execFileSync('git', ['-C', main, 'worktree', 'add', '-qf', '--detach', wt])
+    return { main, wt }
+  }
+
+  test('linked worktree inherits the main checkout config', () => {
+    const { main, wt } = repoWithWorktree()
+    writeFileSync(
+      join(main, 'bro.config.json'),
+      JSON.stringify({ act: { ignoreChecks: ['kilo'] }, personality: 'mentor' })
+    )
+    const cfg = loadConfig(wt)
+    assert.equal(cfg.personality, 'mentor')
+    assert.deepEqual(cfg.act.ignoreChecks, ['kilo'])
+  })
+
+  test('worktree-local config wins over the main checkout', () => {
+    const { main, wt } = repoWithWorktree()
+    writeFileSync(join(main, 'bro.config.json'), JSON.stringify({ personality: 'mentor' }))
+    writeFileSync(join(wt, 'bro.config.json'), JSON.stringify({ personality: 'terse' }))
+    assert.equal(loadConfig(wt).personality, 'terse')
+  })
+
+  test('broken worktree config falls back to the main checkout', () => {
+    const { main, wt } = repoWithWorktree()
+    writeFileSync(join(main, 'bro.config.json'), JSON.stringify({ personality: 'mentor' }))
+    writeFileSync(join(wt, 'bro.config.json'), '{oops')
+    assert.equal(loadConfig(wt).personality, 'mentor')
+  })
+
+  test('broken config everywhere still lands on jsonl-only', () => {
+    const { main, wt } = repoWithWorktree()
+    writeFileSync(join(wt, 'bro.config.json'), '{oops')
+    writeFileSync(join(main, 'bro.config.json'), '{oops too')
+    assert.deepEqual(loadConfig(wt).stores, ['jsonl'])
+  })
+
+  test('relative plugin spec anchors at the config dir', () => {
+    const { main, wt } = repoWithWorktree()
+    writeFileSync(join(main, 'bro.config.json'), JSON.stringify({ plugins: ['./my-plugin.ts'] }))
+    assert.deepEqual(loadConfig(wt).plugins, [join(main, 'my-plugin.ts')])
+  })
+
+  test('a relative plugin spec escaping its config dir is dropped', () => {
+    const { main, wt } = repoWithWorktree()
+    writeFileSync(
+      join(main, 'bro.config.json'),
+      JSON.stringify({ plugins: ['../escape.ts', './ok.ts'] })
+    )
+    assert.deepEqual(loadConfig(wt).plugins, [join(main, 'ok.ts')])
+  })
+
+  test('worktree of a bare repo inherits nothing', () => {
+    const main = mkdtempSync(join(tmpdir(), 'bro-main-'))
+    execFileSync('git', ['init', '-q', main])
+    execFileSync('git', ['-C', main, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'])
+    const holder = mkdtempSync(join(tmpdir(), 'bro-bare-'))
+    const bare = join(holder, 'repo.git')
+    execFileSync('git', ['clone', '-q', '--bare', main, bare])
+    // a config sitting next to the bare repo (the wrong fallback target)
+    // must NOT leak into a worktree of it
+    writeFileSync(join(holder, 'bro.config.json'), JSON.stringify({ personality: 'sarcastic' }))
+    const wt = mkdtempSync(join(tmpdir(), 'bro-wt-'))
+    execFileSync('git', ['-C', bare, 'worktree', 'add', '-qf', '--detach', wt])
+    assert.equal(loadConfig(wt).personality, DEFAULT_CONFIG.personality)
   })
 })

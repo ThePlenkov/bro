@@ -1,6 +1,7 @@
 /**
  * bro configuration. Resolution order: bro.config.ts → bro.config.json
- * in cwd → defaults. The .ts file loads synchronously via createRequire —
+ * in cwd → same pair in the main worktree root (linked worktrees inherit
+ * the machine-local config) → defaults. The .ts file loads synchronously via createRequire —
  * native type stripping handles it on Node ≥22.18. `export default {…}`
  * is the canonical form (works in ESM and CJS repos); `module.exports`
  * only works where the repo is CommonJS. No bro import is required, so
@@ -9,8 +10,9 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { gitTry } from './git.ts'
 
 export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const
 export type StoreBackend = (typeof STORE_BACKENDS)[number]
@@ -251,7 +253,7 @@ function readConfigFile(name: string, path: string): unknown {
       hint =
         ' (this dir resolves as CommonJS — use `module.exports` or add `"type": "module"` to package.json)'
     }
-    console.error(`warning: ${name} failed to load — using jsonl-only stores${hint}`)
+    console.error(`warning: ${name} failed to load — skipping${hint}`)
     return undefined
   }
 }
@@ -274,6 +276,26 @@ function applySections(
   }
 }
 
+/** The main checkout's root when cwd sits in a linked worktree —
+ *  `--git-common-dir` resolves to `<main>/.git` there (and to
+ *  `<cwd>/.git` in the main checkout itself, which dedupes). */
+function mainWorktreeRoot(cwd: string): string | null {
+  const r = gitTry(['-C', cwd, 'rev-parse', '--git-common-dir'])
+  if (r.code !== 0 || r.out.trim() === '') {
+    return null
+  }
+  // linked worktrees print the main checkout's absolute .git path; the
+  // main worktree prints a relative `.git` — resolve covers both, and
+  // unlike --path-format this works on older git too
+  const common = resolve(cwd, r.out.trim())
+  // a worktree attached to a BARE repo returns the repo dir itself
+  // (/srv/repo.git) — dirname would point at an unrelated ancestor
+  if (basename(common) !== '.git') {
+    return null
+  }
+  return dirname(common)
+}
+
 export function loadConfig(
   cwd: string = process.cwd(),
   /** Plugin-registered section schemas — key = configKey, applied over the
@@ -287,35 +309,88 @@ export function loadConfig(
     applySections(config, {}, sections)
     return config
   }
+  // Linked worktrees share the main checkout's machine-local config —
+  // bro.config.* is gitignored, so a fresh `git worktree add` otherwise
+  // loses act.ignoreChecks and store choices (a bare `act wait` stalls on
+  // a flaky reviewer the main checkout knows to ignore).
+  const dirs = [cwd, mainWorktreeRoot(cwd)].filter(
+    (d): d is string => d !== null && d.trim() !== ''
+  )
+  // a config that exists but fails never silently enables beads — the
+  // flag keeps the final fallback at jsonl-only in that case
+  let sawBroken = false
+  for (const dir of new Set(dirs)) {
+    const r = loadDirConfig(dir, sections)
+    if (r === 'broken') {
+      sawBroken = true
+    } else if (r !== null) {
+      return r
+    }
+  }
+  return fallback(sawBroken ? ['jsonl'] : [...DEFAULT_CONFIG.stores])
+}
+
+/** Tries bro.config.ts → bro.config.json inside one dir. 'broken' = a
+ *  config exists but failed (the dir's remaining names are skipped —
+ *  .ts precedence never promotes the sibling .json); null = nothing
+ *  here. */
+function loadDirConfig(
+  dir: string,
+  sections: Record<string, ConfigSection<unknown>>
+): (BroConfig & Record<string, unknown>) | 'broken' | null {
   for (const name of ['bro.config.ts', 'bro.config.json']) {
-    const path = join(cwd, name)
+    const path = join(dir, name)
     if (!existsSync(path)) {
       continue
     }
     const raw = readConfigFile(name, path)
     if (raw === undefined) {
-      return fallback(['jsonl'])
+      return 'broken' // warned inside readConfigFile
     }
     // a valid non-object root ("str", […], 42) is not a config —
     // spreading it would silently produce garbage keys
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-      console.error(`${name}: root must be an object — using jsonl-only stores`)
-      return fallback(['jsonl'])
+      console.error(`${name}: root must be an object — skipping`)
+      return 'broken'
     }
     const { stores: _s, store: _legacy, plugins: _p, ...rest } = raw as RawConfig
     const config: BroConfig & Record<string, unknown> = {
       ...DEFAULT_CONFIG,
       ...rest,
       stores: normalizeStores(raw as RawConfig),
-      plugins: Array.isArray((raw as RawConfig).plugins)
-        ? ((raw as RawConfig).plugins as unknown[])
-            .filter((v): v is string => typeof v === 'string')
-            .map((v) => v.trim())
-            .filter((v) => v !== '')
-        : [],
+      plugins: normalizePluginSpecs(dir, (raw as RawConfig).plugins),
     }
     applySections(config, raw as Record<string, unknown>, sections)
     return config
   }
-  return fallback([...DEFAULT_CONFIG.stores])
+  return null
+}
+
+/** Relative specs anchor at the config's own dir — an inherited config's
+ *  `./x.ts` plugin must resolve in the main worktree, not the linked
+ *  one. Containment is kept here: a spec escaping its anchor is dropped,
+ *  so the absolute path reaching importPluginModule can't bypass its
+ *  repo-root guard. */
+function normalizePluginSpecs(dir: string, plugins: unknown): string[] {
+  if (!Array.isArray(plugins)) {
+    return []
+  }
+  return plugins
+    .filter((v): v is string => typeof v === 'string')
+    .map((v) => v.trim())
+    .filter((v) => v !== '')
+    .flatMap((v) => {
+      if (!v.startsWith('.')) {
+        return [v]
+      }
+      // anchor must be absolute too — a relative cwd would compare an
+      // absolute path against 'foo/' and drop every legit spec
+      const anchor = resolve(dir)
+      const abs = resolve(dir, v)
+      if (abs !== anchor && !abs.startsWith(anchor + sep)) {
+        console.error(`warning: plugin spec "${v}" escapes ${dir} — skipped`)
+        return []
+      }
+      return [abs]
+    })
 }
