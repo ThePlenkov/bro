@@ -26,12 +26,6 @@ case "$1" in
       case "$2" in *$FAKE_BD_UPDATE_FAIL*) echo 'db locked' >&2; exit 1 ;; esac
     fi
     echo "$@" >> "$FAKE_BD_LOG" ;;
-  show)
-    st=open
-    if [ -n "$FAKE_BD_CLAIM_FAIL" ]; then
-      case "$2" in *$FAKE_BD_CLAIM_FAIL*) st=in_progress ;; esac
-    fi
-    echo "[{\\"status\\":\\"$st\\"}]" ;;
 esac
 `
 
