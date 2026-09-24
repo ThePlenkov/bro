@@ -145,15 +145,14 @@ collects what's owed, keeps the books clean, and waits. bro got you.
 ## Dev
 
 ```bash
-git clone --recursive https://github.com/theplenkov/bro
+git clone https://github.com/theplenkov/bro
 cd bro && npm install
 npm run build && npm test
 ```
 
 Workspace packages live in `packages/*` (`@bro/core`, `@bro/debt`, `@bro/act`,
 the CLI itself). Skills in `skills/` are thin wrappers — all mechanics are in
-the CLI. Nx inference comes from `vendor/nx.ts` (submodule, we ride the
-source).
+the CLI. Nx inference comes from the published `@nx-devkit/*` plugins.
 
 ## Releasing
 
