@@ -20,6 +20,11 @@ export interface WaitOptions {
   maxFetchErrors?: number
   onPoll?: (state: PrActState, gate: ExitGate) => void
   onError?: (err: unknown, consecutive: number) => void
+  /** Called when the PR is settled but only because it's BEHIND the base
+   *  (still mergeable — no conflicts). Return true to keep waiting: the
+   *  update pushes a new head and checks re-run. This is the "Update
+   *  branch" button wired into the wait loop. */
+  updateBranch?: (state: PrActState) => boolean | Promise<boolean>
 }
 
 /** Still settling: pending CI/reviewers or GitHub computing mergeability.
@@ -44,6 +49,7 @@ export async function waitForGate(
   const deadline = Date.now() + (opts.timeoutMs ?? 45 * 60_000)
   let polls = 0
   let fetchErrors = 0
+  let updatedSha = ''
   for (;;) {
     let result: { state: PrActState; gate: ExitGate }
     try {
@@ -61,6 +67,24 @@ export async function waitForGate(
     polls += 1
     const { state, gate } = result
     opts.onPoll?.(state, gate)
+    // BEHIND settles the wait, but it isn't a verdict — when the branch
+    // still merges cleanly, an update just pushes a new head and the
+    // gate recomputes. Guard on the sha so a stuck update can't spin.
+    if (
+      !gatePending(state) &&
+      state.state === 'OPEN' &&
+      state.mergeState === 'BEHIND' &&
+      state.mergeable === 'MERGEABLE' &&
+      opts.updateBranch &&
+      state.headSha !== updatedSha &&
+      Date.now() < deadline
+    ) {
+      if (await opts.updateBranch(state)) {
+        updatedSha = state.headSha
+        await sleep(Math.min(5_000, Math.max(0, deadline - Date.now())))
+        continue
+      }
+    }
     if (!gatePending(state) || Date.now() >= deadline) {
       return { state, gate, timedOut: gatePending(state), polls }
     }

@@ -104,3 +104,43 @@ test('waitForGate times out on never-settling pending', async () => {
   assert.equal(res.timedOut, true)
   assert.equal(res.polls, 1)
 })
+
+test('BEHIND triggers updateBranch and keeps waiting on success', async () => {
+  let updates = 0
+  const res = await waitForGate(
+    fetcher([
+      open({ mergeState: 'BEHIND', headSha: 'a1' }),
+      open({ mergeable: 'UNKNOWN' }), // update landed — mergeability recomputing
+      open({ headSha: 'b2' }),
+    ]),
+    {
+      intervalMs: 0,
+      updateBranch: (s) => {
+        updates += 1
+        assert.equal(s.headSha, 'a1')
+        return true
+      },
+    }
+  )
+  assert.equal(updates, 1)
+  assert.equal(res.gate.ok, true)
+  assert.equal(res.polls, 3)
+})
+
+test('BEHIND settles when updateBranch refuses or conflicts exist', async () => {
+  const refused = await waitForGate(fetcher([open({ mergeState: 'BEHIND' })]), {
+    intervalMs: 0,
+    updateBranch: () => false,
+  })
+  assert.equal(refused.gate.ok, false)
+  assert.equal(refused.polls, 1)
+
+  // CONFLICTING is a human job — no update attempt even when offered
+  let called = false
+  const conflicted = await waitForGate(
+    fetcher([open({ mergeState: 'BEHIND', mergeable: 'CONFLICTING' })]),
+    { intervalMs: 0, updateBranch: () => ((called = true), true) }
+  )
+  assert.equal(called, false)
+  assert.equal(conflicted.gate.ok, false)
+})
