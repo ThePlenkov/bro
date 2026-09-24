@@ -1,6 +1,10 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
+  hasSubmodules,
   isLinkedGitDir,
   parseWorktreePorcelain,
   unquoteGitPath,
@@ -42,6 +46,14 @@ describe('parseWorktreePorcelain', () => {
     assert.deepEqual(parseWorktreePorcelain('\n'), [])
   })
 
+  test('locked entries carry the flag and optional reason', () => {
+    const text = `worktree /repo/main\nHEAD aaa\nbranch refs/heads/main\n\nworktree /repo/main--held\nHEAD bbb\nbranch refs/heads/work/held\nlocked user is debugging\n\nworktree /repo/main--held2\nHEAD ccc\nbranch refs/heads/work/held2\nlocked\n`
+    const [main, held, held2] = parseWorktreePorcelain(text)
+    assert.equal(main!.locked, undefined)
+    assert.equal(held!.locked, 'user is debugging')
+    assert.equal(held2!.locked, '')
+  })
+
   test('C-quoted paths are unquoted', () => {
     const text = 'worktree "/repo/main--we\\"ird"\nHEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ndetached\n'
     assert.equal(parseWorktreePorcelain(text)[0]!.path, '/repo/main--we"ird')
@@ -72,5 +84,15 @@ describe('worktreePathFor', () => {
   test('derives a sibling path named <repo>--<slug>', () => {
     assert.equal(worktreePathFor('/ws/bro', 'fix-x'), '/ws/bro--fix-x')
     assert.equal(worktreePathFor('/ws/bro', 'a.b-1'), '/ws/bro--a.b-1')
+  })
+})
+
+describe('hasSubmodules', () => {
+  test('true only when the worktree declares .gitmodules', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-work-'))
+    assert.ok(!hasSubmodules(dir))
+    writeFileSync(join(dir, '.gitmodules'), '[submodule "v"]\n\tpath = v\n')
+    assert.ok(hasSubmodules(dir))
+    rmSync(dir, { recursive: true, force: true })
   })
 })
