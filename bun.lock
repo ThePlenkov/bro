@@ -24,6 +24,7 @@
         "@bro/debt": "*",
       },
       "devDependencies": {
+        "smol-toml": "1.7.1",
         "tsdown": "^0.15.0",
         "tsx": "^4.20.0",
         "typescript": "^5.9.0",
@@ -31,7 +32,7 @@
     },
     "packages/cli": {
       "name": "@theplenkov/bro",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "bin": {
         "bro": "dist/index.js",
       },
@@ -44,6 +45,7 @@
         "@bro/core": "*",
         "@bro/debt": "*",
         "@bro/drill": "*",
+        "@bro/loop": "*",
         "@bro/retro": "*",
         "tsdown": "^0.15.0",
         "tsx": "^4.20.0",
@@ -57,6 +59,7 @@
         "@bro/core": "*",
       },
       "devDependencies": {
+        "smol-toml": "1.7.1",
         "tsdown": "^0.15.0",
         "tsx": "^4.20.0",
         "typescript": "^5.9.0",
@@ -65,6 +68,9 @@
     "packages/core": {
       "name": "@bro/core",
       "version": "0.2.0",
+      "dependencies": {
+        "smol-toml": "1.7.1",
+      },
       "devDependencies": {
         "tsdown": "^0.15.0",
         "tsx": "^4.20.0",
@@ -78,6 +84,7 @@
         "@bro/core": "*",
       },
       "devDependencies": {
+        "smol-toml": "1.7.1",
         "tsdown": "^0.15.0",
         "tsx": "^4.20.0",
         "typescript": "^5.9.0",
@@ -90,6 +97,17 @@
         "@bro/core": "*",
       },
       "devDependencies": {
+        "smol-toml": "1.7.1",
+        "tsdown": "^0.15.0",
+        "tsx": "^4.20.0",
+        "typescript": "^5.9.0",
+      },
+    },
+    "packages/loop": {
+      "name": "@bro/loop",
+      "version": "0.2.0",
+      "devDependencies": {
+        "@bro/core": "*",
         "tsdown": "^0.15.0",
         "tsx": "^4.20.0",
         "typescript": "^5.9.0",
@@ -318,6 +336,8 @@
     "@bro/debt": ["@bro/debt@workspace:packages/debt"],
 
     "@bro/drill": ["@bro/drill@workspace:packages/drill"],
+
+    "@bro/loop": ["@bro/loop@workspace:packages/loop"],
 
     "@bro/retro": ["@bro/retro@workspace:packages/retro"],
 

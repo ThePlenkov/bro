@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" session-start || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks session-start || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@theplenkov/bro@0.2.0\" hooks session-start || true; fi; exit 0",
+            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" session-start || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks session-start || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@theplenkov/bro@0.2.1\" hooks session-start || true; fi; exit 0",
             "timeout": 20
           }
         ]
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" pre-compact || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks pre-compact || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@theplenkov/bro@0.2.0\" hooks pre-compact || true; fi; exit 0",
+            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" pre-compact || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks pre-compact || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@theplenkov/bro@0.2.1\" hooks pre-compact || true; fi; exit 0",
             "timeout": 20
           }
         ]
@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" prompt-submit || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks prompt-submit || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@theplenkov/bro@0.2.0\" hooks prompt-submit || true; fi; exit 0",
+            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" prompt-submit || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks prompt-submit || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@theplenkov/bro@0.2.1\" hooks prompt-submit || true; fi; exit 0",
             "timeout": 15
           }
         ]
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" post-tool || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks post-tool || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@theplenkov/bro@0.2.0\" hooks post-tool || true; fi; exit 0",
+            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" post-tool || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks post-tool || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@theplenkov/bro@0.2.1\" hooks post-tool || true; fi; exit 0",
             "timeout": 10
           }
         ]
@@ -55,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" stop || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks stop || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@theplenkov/bro@0.2.0\" hooks stop || true; fi; exit 0",
+            "command": "P=\"${CLAUDE_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" stop || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks stop || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@theplenkov/bro@0.2.1\" hooks stop || true; fi; exit 0",
             "timeout": 25
           }
         ]

@@ -45,6 +45,6 @@ fi
 if command -v npx >/dev/null 2>&1; then
   # --prefer-offline: warm npm cache wins over the network, so a slow
   # fetch can't eat the whole hook timeout
-  npx -y --prefer-offline "@theplenkov/bro@0.2.0" hooks "$@" || true
+  npx -y --prefer-offline "@theplenkov/bro@0.2.1" hooks "$@" || true
 fi
 exit 0
