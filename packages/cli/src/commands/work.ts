@@ -20,7 +20,7 @@
 import { existsSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve, sep } from 'node:path'
-import { git, gitTry } from '@bro/core'
+import { bdTry, git, gitTry } from '@bro/core'
 import { flag, positionals } from './args.ts'
 
 export interface WorktreeInfo {
@@ -32,6 +32,8 @@ export interface WorktreeInfo {
   detached: boolean
   /** admin entry exists but the directory is gone — `git worktree prune` bait */
   prunable?: string
+  /** locked against removal — porcelain carries `locked` or `locked <reason>` */
+  locked?: string
 }
 
 /** Git C-quotes unusual paths in porcelain output — unwrap and unescape. */
@@ -67,6 +69,10 @@ export function parseWorktreePorcelain(text: string): WorktreeInfo[] {
       cur.detached = true
     } else if (line.startsWith('prunable ')) {
       cur.prunable = line.slice('prunable '.length)
+    } else if (line === 'locked') {
+      cur.locked = ''
+    } else if (line.startsWith('locked ')) {
+      cur.locked = line.slice('locked '.length)
     }
   }
   return out
@@ -126,6 +132,23 @@ function diskUsage(path: string): string {
   return du.status === 0 ? (du.stdout ?? '').split('\t')[0]!.trim() : '?'
 }
 
+/** The repo declares submodules — git worktree add does NOT populate them,
+ *  and `worktree remove` refuses a tree that still contains one. */
+export function hasSubmodules(worktreePath: string): boolean {
+  return existsSync(join(worktreePath, '.gitmodules'))
+}
+
+/** Best-effort claim: when the slug names a real bead, mark it in_progress
+ *  for this actor so parallel sessions see it taken. Beads-less repos and
+ *  non-bead slugs pass silently. */
+function claimBead(slug: string): string | null {
+  if (bdTry(['show', slug]).code !== 0) {
+    return null
+  }
+  const upd = bdTry(['update', slug, '--claim'])
+  return upd.code === 0 ? slug : null
+}
+
 function cmdEnter(argv: string[]): void {
   const pos = positionals(argv, new Set(['--branch', '--base']))
   const slug = pos[0]
@@ -162,9 +185,64 @@ function cmdEnter(argv: string[]): void {
     console.error(`error: git worktree add failed — ${res.err}`)
     process.exit(1)
   }
+  // submodules are not populated by worktree add — a fresh tree without
+  // them builds stale or fails; init is best-effort (network may be down)
+  if (hasSubmodules(path)) {
+    const sub = gitTry(['-C', path, 'submodule', 'update', '--init', '--recursive'])
+    console.log(
+      sub.code === 0
+        ? 'submodules initialized'
+        : `warning: submodule init failed — ${sub.err || 'check .gitmodules'}`
+    )
+  }
+  const claimed = claimBead(slug)
   console.log(`worktree ready: ${path}  (branch ${branch})
   cd ${path}
 note: gitignored dirs (node_modules, dist) are not shared — install deps there`)
+  if (claimed) {
+    console.log(`claimed bead ${claimed} for this session`)
+  }
+}
+
+/** A positional can be a path, a basename, or a bare slug. Resolving the
+ *  current root must happen before removal — afterwards `rev-parse` can't
+ *  run in the deleted cwd. */
+function resolveLeaveTarget(
+  all: WorktreeInfo[],
+  main: WorktreeInfo,
+  selector: string | undefined
+): { target: WorktreeInfo; wasCurrent: boolean } {
+  const cur = selector ? undefined : currentRoot()
+  const target = selector
+    ? all.find((w) => w.path === resolve(selector) || basename(w.path) === selector || w.path === worktreePathFor(main.path, selector))
+    : all.find((w) => w.path === cur)
+  if (!target) {
+    const what = selector ? `matching "${selector}"` : 'at the current directory'
+    console.error(`error: no worktree ${what}`)
+    process.exit(1)
+  }
+  if (target.path === main.path) {
+    console.error('error: refusing to remove the main worktree')
+    process.exit(1)
+  }
+  return { target, wasCurrent: target.path === cur }
+}
+
+/** Pre-remove guards git can no longer provide once we stack --force for
+ *  submodule trees: locked is explicit human intent (unlock first), and
+ *  an on-disk tree that can't be verified clean is NOT clean. */
+function assertRemovable(target: WorktreeInfo, force: boolean): void {
+  if (target.locked !== undefined) {
+    const why = target.locked ? ` (${target.locked})` : ''
+    console.error(`error: ${target.path} is locked${why} — run \`git worktree unlock\` first`)
+    process.exit(1)
+  }
+  const dirty = dirtyCount(target.path)
+  if (!force && (dirty > 0 || (dirty < 0 && existsSync(target.path)))) {
+    const why = dirty > 0 ? 'has uncommitted changes' : 'could not be verified clean'
+    console.error(`error: ${target.path} ${why} (use --force to override)`)
+    process.exit(1)
+  }
 }
 
 function cmdLeave(argv: string[]): void {
@@ -177,23 +255,16 @@ function cmdLeave(argv: string[]): void {
     console.error('bro work: not inside a git worktree')
     process.exit(1)
   }
-  // resolve the current root up front — after a successful remove it no
-  // longer exists on disk and `rev-parse` can't run there
-  const cur = pos[0] ? undefined : currentRoot()
-  const target = pos[0]
-    ? all.find((w) => w.path === resolve(pos[0]) || basename(w.path) === pos[0] || w.path === worktreePathFor(main.path, pos[0]))
-    : all.find((w) => w.path === cur)
-  if (!target) {
-    const what = pos[0] ? `matching "${pos[0]}"` : 'at the current directory'
-    console.error(`error: no worktree ${what}`)
-    process.exit(1)
-  }
-  if (target.path === main.path) {
-    console.error('error: refusing to remove the main worktree')
-    process.exit(1)
-  }
+  const { target, wasCurrent } = resolveLeaveTarget(all, main, pos[0])
+  assertRemovable(target, force)
   const args = ['-C', main.path, 'worktree', 'remove', target.path]
   if (force) {
+    args.push('--force')
+  }
+  // submodule config is shared across worktrees — deinit here would
+  // unregister them for everyone. git's documented escape is a second
+  // --force; safe to stack now that locked trees are refused above.
+  if (hasSubmodules(target.path)) {
     args.push('--force')
   }
   const res = gitTry(args)
@@ -201,7 +272,7 @@ function cmdLeave(argv: string[]): void {
     console.error(`error: git worktree remove failed — ${res.err} (use --force to override)`)
     process.exit(1)
   }
-  const gone = target.path === cur ? ` — this directory is gone; cd ${main.path}` : ''
+  const gone = wasCurrent ? ` — this directory is gone; cd ${main.path}` : ''
   console.log(`removed worktree ${target.path}${gone}`)
   if (deleteBranch && target.branch) {
     const del = gitTry(['-C', main.path, 'branch', '-d', target.branch])
@@ -214,6 +285,9 @@ function cmdLeave(argv: string[]): void {
 }
 
 function stateLabel(w: WorktreeInfo): string {
+  if (w.locked !== undefined) {
+    return 'LOCKED'
+  }
   if (w.prunable) {
     return 'PRUNABLE'
   }
