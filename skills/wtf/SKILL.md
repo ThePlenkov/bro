@@ -51,3 +51,9 @@ Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0`, `bd init` done.
   then `bd show <id>` on each listed retro to read its `why` memo —
   a repeat root cause moves the fix one scope wider along
   session → agent → user → project → universal.
+- **Recurrence also escalates the sink.** A root cause that already has
+  a prose rule (memory, AGENTS.md, skill text) and still recurred will
+  not be fixed by wider prose — route at least one action to
+  `sink:workaround` or `sink:backlog` as a mechanical guardrail (CLI
+  validation, a hook, a schema check). Prose reached the agent and
+  didn't bind; the mechanism must.
