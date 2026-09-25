@@ -1,18 +1,25 @@
 name: Release
 
-# Human-triggered release: pick a semver bump (or let conventional
-# commits decide), nx release versions @theplenkov/bro on a release
-# branch, a PR opens for the merge gate. Once merged, release-tag.yml
-# cuts the v* tag on main and publish.yml ships it via OIDC.
+# nx.ts-style: every push to main is a release candidate. `nx release
+# version` derives the bump from conventional commits — a push with no
+# release-worthy commits is a no-op. Publish happens BEFORE the version
+# commit and tag are pushed: a failed publish leaves no phantom release
+# state, and the next run recomputes the same version from the last tag.
+# Manual dispatch is the force-bump / retry path.
+
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       specifier:
-        description: Semver bump — auto derives from conventional commits
+        description: >-
+          Force a version bump, bypassing conventional-commit derivation.
+          Leave at "none" for the usual retry-a-failed-publish dispatch.
         type: choice
-        options: [auto, patch, minor, major, prerelease]
-        default: auto
-        required: true
+        default: none
+        required: false
+        options: [none, patch, minor, major, prerelease]
       preid:
         description: Set to force a prerelease (e.g. beta → vX.Y.Z-beta.N)
         required: false
@@ -23,8 +30,8 @@ on:
         default: false
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: write # release commits, tags, GitHub releases
+  id-token: write # npm OIDC trusted publishing
 
 concurrency:
   group: release
@@ -32,21 +39,33 @@ concurrency:
 
 jobs:
   release:
+    # The release commit pushed by `nx release version` (chore(release)*)
+    # must not re-trigger this job. workflow_dispatch is the manual path.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'chore(release)'))
+    name: Publish @theplenkov/bro via nx release (OIDC)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
         with:
           node-version: "lts/*"
           check-latest: true
+          registry-url: https://registry.npmjs.org
           # no npm cache — release jobs must not reuse a poisoned cache
 
       - run: npm ci --no-audit --no-fund --ignore-scripts
 
-      - name: Version + release PR
+      # OIDC trusted publishing needs npm >= 11.5.1 — belt and braces.
+      - run: npm install -g npm@latest
+
+      - run: npm run build
+      - run: npm test
+
+      - name: Version (conventional commits)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SPEC: ${{ inputs.specifier }}
@@ -54,47 +73,86 @@ jobs:
           DRY: ${{ inputs.dryRun }}
         run: |
           set -e
-          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
-            echo "releases are cut from main only (got $GITHUB_REF)"
-            exit 1
-          fi
+          # gh auth setup-git scopes GITHUB_TOKEN to git ops in this step
+          # only — checkout keeps persist-credentials: false.
+          gh auth setup-git
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          args=()
-          [ "$SPEC" != "auto" ] && args+=("$SPEC")
+          args=(--git-push=false)
+          [ -n "$SPEC" ] && [ "$SPEC" != "none" ] && args+=("$SPEC")
           [ -n "$PREID" ] && args+=(--preid "$PREID")
           [ "$DRY" = "true" ] && args+=(--dry-run)
           npx nx release version "${args[@]}"
           if [ "$DRY" = "true" ]; then
-            echo "dry run — no branch, no PR"
+            echo "dry run — nothing committed"
             exit 0
           fi
-          # nx release version already updated the npm lock file and
-          # staged its changes; commit only the manifests it touched.
-          v=$(node -p "require('./packages/cli/package.json').version")
-          # stamp the new version into plugin.json + marketplaces and
-          # regen adapters — check:plugins fails the release PR otherwise
+          if ! git log -1 --pretty=%s | grep -q '^chore(release)'; then
+            echo "no release-worthy commits — nothing to publish"
+            exit 0
+          fi
+          # stamp the new version into plugin manifests + regen adapters,
+          # folded into the release commit so the tag points at a complete
+          # tree (check:plugins would fail an unstamped version anyway)
           node scripts/gen-plugins.ts --sync-version
-          git checkout -B "release/v$v"
-          git add packages/*/package.json package.json package-lock.json \
-            plugin.json .claude-plugin/marketplace.json \
-            .agents/plugins/marketplace.json plugins/ hooks.json hooks/run.sh
-          if git diff --cached --quiet; then
-            echo "no version change — nothing to release"
+          git add plugin.json .claude-plugin/marketplace.json \
+            .agents/plugins/marketplace.json plugins/ hooks.json hooks/run.sh \
+            package.json package-lock.json
+          git diff --cached --quiet || git commit --amend --no-edit
+
+      - name: Stop early when nothing was released
+        id: gate
+        run: |
+          if git log -1 --pretty=%s | grep -q '^chore(release)'; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish @theplenkov/bro (OIDC trusted publishing)
+        if: steps.gate.outputs.released == 'true'
+        working-directory: packages/cli
+        env:
+          NPM_CONFIG_PROVENANCE: 'true'
+        run: |
+          set -e
+          v=$(node -p "require('./package.json').version")
+          if npm view "@theplenkov/bro@$v" version >/dev/null 2>&1; then
+            echo "version $v already on npm — skipping publish"
             exit 0
           fi
-          git commit -m "release: v$v"
-          git push -u --force-with-lease origin "release/v$v"
-          if gh pr view "release/v$v" --json number >/dev/null 2>&1; then
-            echo "release PR already exists — branch updated"
-          elif ! gh pr create --title "release: v$v" --base main \
-            --body "Version bump cut by \`nx release version\` (specifier: $SPEC). Merge → release-tag.yml tags \`v$v\` on main → publish.yml ships it via OIDC trusted publishing."; then
-            echo "PR creation failed"
-            # Delete the orphaned branch only if a successful query
-            # proves no PR exists — a transient API failure must not
-            # delete the head branch of a live release PR.
-            if gh pr list --head "release/v$v" --json number --jq 'length' | grep -qx '0'; then
-              git push origin --delete "release/v$v"
-            fi
+          # Only a confirmed E404 means "not published" — a transient
+          # registry error must not fall through to npm publish.
+          npm view "@theplenkov/bro@$v" version 2>&1 | grep -q E404 || {
+            echo "npm view failed without E404 — aborting to avoid double publish"
             exit 1
+          }
+          # setup-node's registry-url writes an _authToken placeholder that
+          # expands empty and makes npm skip the OIDC exchange
+          # (actions/setup-node#1551). Strip it so trusted publishing works.
+          sed -i '/_authToken/d' "$NPM_CONFIG_USERCONFIG"
+          npm publish --access public
+
+      - name: Push release commit and tags
+        # Detached HEAD under checkout — push HEAD to main explicitly. If a
+        # merge raced in during publish this push fails; the next run
+        # recomputes the same version (nothing was pushed) and publish
+        # skips the already-published version — self-healing.
+        if: steps.gate.outputs.released == 'true'
+        run: |
+          git push origin HEAD:main
+          git push origin --tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: GitHub release
+        if: steps.gate.outputs.released == 'true'
+        run: |
+          v=$(node -p "require('./packages/cli/package.json').version")
+          if gh release view "v$v" >/dev/null 2>&1; then
+            echo "release v$v already exists"
+          else
+            gh release create "v$v" --title "v$v" --generate-notes
           fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
