@@ -35,7 +35,7 @@ Never edit generated files — `npm run gen:plugins` rewrites them,
 
 ## Setup
 
-Prereqs: `node >= 22` and `gh` authenticated.
+Prereqs: `node >= 22.18` (native TS type-stripping) and `gh` authenticated.
 
 Nx plugins are regular npm deps (`@nx-devkit/*`); `npm install` is all it
 takes — no submodule, no patch step:
