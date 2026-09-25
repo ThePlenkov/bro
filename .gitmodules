@@ -1,3 +1,0 @@
-[submodule "vendor/nx.ts"]
-	path = vendor/nx.ts
-	url = https://github.com/nx-devkit/nx.ts.git

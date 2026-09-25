@@ -14,14 +14,12 @@
     "test": "nx run-many -t test --exclude=skills-*,plugins-*-skills-*",
     "lint": "nx run-many -t lint",
     "affected": "nx affected -t build test lint --exclude=skills-*,plugins-*-skills-*",
-    "build:nx-plugins": "tsx scripts/build-nx-plugins.ts",
-    "patch:nx": "tsx scripts/patch-nx-submodule.ts",
     "typecheck": "nx run-many -t typecheck --exclude=skills-*,plugins-*-skills-*"
   },
   "devDependencies": {
-    "@nx-devkit/skill": "file:./vendor/nx.ts/packages/skill",
-    "@nx-devkit/skillspector": "file:./vendor/nx.ts/packages/skillspector",
-    "@nx-devkit/tsdown": "file:./vendor/nx.ts/packages/tsdown",
+    "@nx-devkit/skill": "^0.1.9",
+    "@nx-devkit/skillspector": "^0.1.9",
+    "@nx-devkit/tsdown": "^0.1.7",
     "@nx/js": "^23.2.1",
     "@types/node": "^22.0.0",
     "nx": "^23.1.0",
