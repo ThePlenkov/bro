@@ -37,7 +37,9 @@ Commands:
                                     Poll the gate until it settles; --merge lands on green
   threads [PR]                      Unresolved review threads (TSV)
   merge [PR] [--squash|--merge|--rebase] [--admin]  Merge only if the exit gate is green
-  resolve --thread ID [--comment T] Resolve thread, optionally reply first
+  resolve --thread ID [--comment T] Resolve a thread — a fix resolves silently
+                                    (the push is the verdict); --comment is for
+                                    reject/defer reasons
   reply --thread ID --comment T     Reply without resolving
         --file TSV                  Batch reply: <thread_id>\t<body> per line
         --unresolve                 resolve → unresolve instead`)
@@ -337,6 +339,11 @@ function cmdResolve(argv: string[]): void {
   const comment = commentArg(argv)
   const unresolve = argv.includes('--unresolve')
   if (comment) {
+    if (!unresolve) {
+      // the verdict on a fix is the push — comments on resolved-as-fixed
+      // threads are boilerplate noise on the PR (skills/act/SKILL.md)
+      console.error('act: note — fixes resolve silently; --comment is for reject/defer reasons')
+    }
     replyToThread(id, comment)
     console.error(`act: replied on ${id}`)
   }
