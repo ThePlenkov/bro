@@ -1,10 +1,10 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { stackSection } from '@bro/core'
+import { git, initRepo, inside } from './testrepo.ts'
 import {
   hasSubmodules,
   isLinkedGitDir,
@@ -142,31 +142,15 @@ describe('resolveEnterBase', () => {
  *  work/b on work/a and record the edge in <common>/bro/stack. */
 describe('work enter --stack', () => {
   function fixture(): { root: string; main: string; linked: string } {
-    const root = mkdtempSync(join(tmpdir(), 'bro-stack-'))
-    const main = join(root, 'repo')
-    execFileSync('git', ['init', '-q', '-b', 'main', main])
-    execFileSync('git', ['config', 'user.email', 't@t'], { cwd: main })
-    execFileSync('git', ['config', 'user.name', 't'], { cwd: main })
-    execFileSync('git', ['commit', '-qm', 'init', '--allow-empty'], { cwd: main })
-    const linked = join(root, 'repo--a')
-    execFileSync('git', ['worktree', 'add', '-q', linked, '-b', 'work/a'], { cwd: main })
-    execFileSync('git', ['commit', '-qm', 'a-work', '--allow-empty'], { cwd: linked })
+    const { root, main } = initRepo('bro-stack-')
+    const linked = join(root, 'main--a')
+    git(['worktree', 'add', '-q', linked, '-b', 'work/a'], main)
+    git(['commit', '-qm', 'a-work', '--allow-empty'], linked)
     return { root, main, linked }
   }
 
-  function inside<T>(dir: string, root: string, fn: () => T): T {
-    const prev = process.cwd()
-    process.chdir(dir)
-    try {
-      return fn()
-    } finally {
-      process.chdir(prev)
-      rmSync(root, { recursive: true, force: true })
-    }
-  }
-
   function headOf(root: string, ref: string): string {
-    return execFileSync('git', ['rev-parse', ref], { cwd: root, encoding: 'utf8' }).trim()
+    return git(['rev-parse', ref], root).trim()
   }
 
   test('--stack bases the new branch on the current worktree branch', () => {
@@ -199,10 +183,10 @@ describe('work enter --stack', () => {
 
   test('an existing branch is checked out — the resolved default base must not block it', () => {
     const { root, main, linked } = fixture()
-    execFileSync('git', ['branch', 'work/b'], { cwd: main })
+    git(['branch', 'work/b'], main)
     inside(linked, root, () => {
       runWorkCommand(['enter', 'b'])
-      const tree = join(root, 'repo--b')
+      const tree = join(root, 'main--b')
       assert.ok(readFileSync(join(tree, '.git'), 'utf8').startsWith('gitdir:'))
       assert.equal(headOf(tree, 'HEAD'), headOf(main, 'work/b'))
     })
