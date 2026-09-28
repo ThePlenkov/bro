@@ -67,22 +67,29 @@ export async function waitForGate(
     polls += 1
     const { state, gate } = result
     opts.onPoll?.(state, gate)
-    // BEHIND settles the wait, but it isn't a verdict — when the branch
-    // still merges cleanly, an update just pushes a new head and the
-    // gate recomputes. Guard on the sha so a stuck update can't spin.
+    // BEHIND settles the wait, but it isn't a verdict — when it's the
+    // ONLY blocker (gate.blockers is just the behind entry) and the
+    // branch still merges cleanly, an update pushes a new head and the
+    // gate recomputes. The endpoint answers 202 before the head moves:
+    // a poll still showing the sha we just updated means "landing",
+    // keep waiting rather than settling or re-updating.
     if (
       !gatePending(state) &&
       state.state === 'OPEN' &&
       state.mergeState === 'BEHIND' &&
-      state.mergeable === 'MERGEABLE' &&
       opts.updateBranch &&
-      state.headSha !== updatedSha &&
       Date.now() < deadline
     ) {
-      if (await opts.updateBranch(state)) {
-        updatedSha = state.headSha
-        await sleep(Math.min(5_000, Math.max(0, deadline - Date.now())))
+      if (state.headSha === updatedSha) {
+        await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())))
         continue
+      }
+      if (state.mergeable === 'MERGEABLE' && gate.blockers.length === 1) {
+        if (await opts.updateBranch(state)) {
+          updatedSha = state.headSha
+          await sleep(Math.min(5_000, Math.max(0, deadline - Date.now())))
+          continue
+        }
       }
     }
     if (!gatePending(state) || Date.now() >= deadline) {

@@ -127,6 +127,29 @@ test('BEHIND triggers updateBranch and keeps waiting on success', async () => {
   assert.equal(res.polls, 3)
 })
 
+test('an accepted-but-unlanded update keeps polling, not settling', async () => {
+  const res = await waitForGate(
+    fetcher([
+      open({ mergeState: 'BEHIND', headSha: 'a1' }),
+      open({ mergeState: 'BEHIND', headSha: 'a1' }), // update accepted (202) but head unchanged
+      open({ headSha: 'b2' }),                      // landed — clean state settles green
+    ]),
+    { intervalMs: 0, updateBranch: () => true }
+  )
+  assert.equal(res.gate.ok, true)
+  assert.equal(res.polls, 3)
+})
+
+test('BEHIND alongside other blockers does not update', async () => {
+  let called = false
+  const res = await waitForGate(
+    fetcher([open({ mergeState: 'BEHIND', openThreads: 2 })]),
+    { intervalMs: 0, updateBranch: () => ((called = true), true) }
+  )
+  assert.equal(called, false)
+  assert.equal(res.gate.ok, false)
+})
+
 test('BEHIND settles when updateBranch refuses or conflicts exist', async () => {
   const refused = await waitForGate(fetcher([open({ mergeState: 'BEHIND' })]), {
     intervalMs: 0,
