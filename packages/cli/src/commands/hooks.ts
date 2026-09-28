@@ -401,9 +401,12 @@ function parallelLines(sessionId: string): string[] {
         )
       }
     }
+    // exclude the entry for THIS checkout too — a session seeing its own
+    // worktree named as parallel work would be a false nudge
+    const cur = gitTry(['rev-parse', '--show-toplevel']).out.trim()
     const trees = parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out)
-      .slice(1)
-      .filter((w) => !w.prunable)
+      .slice(1) // porcelain lists the main worktree first
+      .filter((w) => !w.prunable && w.path !== cur)
     for (const w of trees.slice(0, 5)) {
       parts.push(`worktree ${basename(w.path)} [${w.branch ?? 'detached'}]`)
     }

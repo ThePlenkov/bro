@@ -17,8 +17,9 @@ over beads. In a repo with `bro.config.json` or `.beads/`:
   `gh pr`, `git push`, `bro drill`/`wtf` arm it via a per-session marker);
   ambient repo state is passive context for everyone else. Session-start
   context also nudges when another live session armed work in the same
-  checkout (fresh `.work` markers, linked worktrees, claimed beads) —
-  detection only, never a block.
+  repository — markers live in the common git dir, so detection spans
+  linked worktrees (fresh `.work` markers, other worktrees, claimed
+  beads) — detection only, never a block.
 
 Developing bro itself: see CONTRIBUTING.md.
 
