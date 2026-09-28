@@ -7,28 +7,33 @@ description: "Use when reading or mutating bro documents directly — tasks (bea
 
 **All mechanics live in the `bro` CLI.** This skill is policy only.
 
-bro's document surface is verb-first: `bro <verb> [noun|ref] [--flags]`.
-Doc types are plugin-registered (`task`, `store`); a type's adapter
-methods are the verb registry — there is no verb list to consult.
-`bro <verb> <ref>` without a noun infers the type from the ref's prefix
-and defaults to `task`.
+bro's document surface is noun-first, gh-style: `bro <noun> <verb>
+[ref…] [--flags]`. Doc types are plugin-registered (`task`, `store`);
+a type's adapter methods are the verb registry — there is no verb
+list to consult. Verbs live inside their noun's namespace, so plugin
+doc types may define any custom verbs freely.
+
+Shorthand: task verbs also work verb-first — `bro list`, `bro show
+<id>`, `bro close <id>` mean `bro task …`. A bare ref infers the type
+from its prefix; a bare noun (`bro task`, `bro store`) means `list`.
 
 The doc namespace is guarded, not declared: reserved words = plugin
-command names ∪ doc nouns/aliases ∪ discovered verbs. A plugin taking
+command names ∪ doc nouns/aliases ∪ shorthand verbs. A plugin taking
 a reserved name, or a doc type colliding on noun/alias/idPrefix, is
 skipped with a warning — everything else is usable.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro list [tasks] [--status=open]` | List docs — flags pass through to the store |
-| `bro show <id>` / `bro show task <id>` | One doc; the ref infers the type |
-| `bro new task "title" [--type=bug]` | Create — returns the doc |
-| `bro set <id> --status=blocked` | Update fields |
-| `bro close <id> [--reason=…]` / `bro rm <id>` | Close / delete a task |
-| `bro exec [--global] -- <bd args>` | Raw `bd` against the store — escape hatch, not contract |
-| `bro list stores` / `bro show store --global` | Store inventory / details |
-| `bro init store --global [--prefix=P]` | Create + validate the global store |
-| `bro path store --global` | Print the resolved global store dir |
+| `bro task list [--status=open]` / `bro list` | List tasks — flags pass through to the store |
+| `bro task show <id>` / `bro show <id>` | One doc; the ref infers the type |
+| `bro task new "title" [--type=bug]` / `bro new task "title"` | Create — returns the doc |
+| `bro task set <id> --status=blocked` / `bro set <id> …` | Update fields |
+| `bro task close <id> [--reason=…]` / `bro rm <id>` | Close / delete a task |
+| `bro task exec [--global] -- <bd args>` | Raw `bd` against the store — escape hatch, not contract |
+| `bro store list` | Store inventory — path + prefix + health |
+| `bro store show --global` | Details of the resolved global dir |
+| `bro store init --global [--prefix=P]` | Create + validate the global store |
+| `bro store path --global` | Print the resolved global store dir |
 | `bro next --global` | Schedule from the global queue — same pipeline, cwd = the store |
 
 ## Scopes
@@ -50,6 +55,6 @@ cross-machine queue set the store's own Dolt remote inside it
 - **Global is for user-level work** — cross-repo tasks, personal backlog,
   anything that must not ride the project's issue tracker or land in its
   PRs. If in doubt, file in the project.
-- **Prefer verbs over `exec`.** `bro exec -- …` exists for bd features
+- **Prefer verbs over `exec`.** `bro task exec -- …` exists for bd features
   the doc layer doesn't model yet; workflow output should come through
   typed verbs so ref inference and rendering keep working.

@@ -37,7 +37,7 @@ continue?" between items.** The queue is the approval.
   are never claimed; they surface as `foreign: N` when the shared db
   carries other projects' work. `scope = "all"` in a plan opts out.
 - **Global beads** — user-level beads live in a separate store
-  (`bro init store --global`, `bro list tasks --global`).
+  (`bro store init --global`, `bro task list --global`).
   `bro next --global` runs the same pipeline against that store
   explicitly; project output never mixes them in.
 - **Coordination primitives** — `gt:slot`-labeled beads (merge-queue

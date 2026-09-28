@@ -2,14 +2,14 @@
  * `task` doc type — beads issues under verb-first dispatch. The bd
  * store is the implementation; the contract is the doc layer.
  *
- *   bro list [tasks] [--status=open] [--label=x]
- *   bro show bro-n5t               ref infers the type — no noun needed
- *   bro new task "title" [--type=bug] [--priority=2]
- *   bro set bro-n5t --status=blocked
- *   bro close bro-n5t --reason="merged in #95"
- *   bro rm bro-n5t
- *   bro exec --global -- ready --json     raw bd against the store —
- *                                         escape hatch, not contract
+ *   bro task list [--status=open] [--label=x]
+ *   bro task show bro-n5t               ref infers the type — shorthand `bro show …`
+ *   bro task new "title" [--type=bug] [--priority=2]
+ *   bro task set bro-n5t --status=blocked
+ *   bro task close bro-n5t --reason="merged in #95"
+ *   bro task rm bro-n5t
+ *   bro task exec --global -- ready --json   raw bd against the store —
+ *                                            escape hatch, not contract
  *
  * `--global` retargets every verb at the user-level store — scope is a
  * flag resolved at adapter construction, never a verb concern.
