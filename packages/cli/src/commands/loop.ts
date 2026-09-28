@@ -24,7 +24,7 @@
 import { spawnSync, spawn, execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { bd, checkBeads, gitTry } from '@bro/core'
+import { bd, bdJson, checkBeads, gitTry } from '@bro/core'
 import { evaluateExitGate, fetchPrActState, updatePullBranch, waitForGate } from '@bro/act'
 import { fetchReviewThreads } from '@bro/debt'
 import {
@@ -37,6 +37,8 @@ import {
 import { loadBroConfig } from '../plugins.ts'
 import { flag } from './args.ts'
 import { runActCommand } from './act.ts'
+import { runSyncCommand } from './sync.ts'
+import { parseWorktreePorcelain } from './work.ts'
 import {
   claimUpTo,
   classify,
@@ -54,6 +56,9 @@ interface Ctx {
   agent: string
   intervalS: number
   json: boolean
+  /** Cleanup failures collected during the run — the end-of-run audit
+   *  prints them again so a tail never dies in a scrollback line. */
+  tails: string[]
 }
 
 function usage(): never {
@@ -234,11 +239,13 @@ async function finalizeMerge(
   gitTry(['-C', item.worktreeDir, 'submodule', 'deinit', '-f', '--all'])
   const rm = gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', item.worktreeDir])
   if (rm.code !== 0) {
-    console.error(`loop: worktree ${item.worktreeDir} not removed — ${rm.err.trim()}`)
+    ctx.tails.push(`worktree ${item.worktreeDir} not removed — ${rm.err.trim()}`)
+    console.error(`loop: ${ctx.tails.at(-1)}`)
   }
   const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch])
   if (br.code !== 0) {
-    console.error(`loop: branch ${item.branch} not deleted — ${br.err.trim()}`)
+    ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`)
+    console.error(`loop: ${ctx.tails.at(-1)}`)
   }
   say(ctx, `loop: ${bead.id} landed via #${pr}`)
   return 'landed'
@@ -438,6 +445,7 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     agent,
     intervalS: num(flag(argv, '--interval'), 60),
     json: argv.includes('--json'),
+    tails: [],
   }
 
   if (argv.includes('--dry-run')) {
@@ -471,6 +479,85 @@ function loopScope(): ReturnType<typeof nextScope> | null {
   }
 }
 
+/** Open PRs whose head is a loop/* branch — tails a previous run or a
+ *  parked item left open. */
+function openLoopPrs(ctx: Ctx): string[] {
+  try {
+    const prs = JSON.parse(
+      ghOut(
+        ['pr', 'list', '--state', 'open', '--json', 'number,headRefName', '--limit', '100'],
+        ctx.root
+      )
+    ) as { number: number; headRefName: string }[]
+    return prs
+      .filter((p) => p.headRefName.startsWith('loop/'))
+      .map((p) => `#${p.number} (${p.headRefName})`)
+  } catch {
+    return ['warning: open-PR audit failed — gh unavailable']
+  }
+}
+
+/** loop/* worktrees still checked out + loop/* branches with no
+ *  worktree — both are run tails. */
+export function loopRefTails(root: string): { worktrees: string[]; branches: string[] } {
+  const trees = parseWorktreePorcelain(
+    gitTry(['-C', root, 'worktree', 'list', '--porcelain']).out
+  ).filter((w) => w.branch?.startsWith('loop/'))
+  const onTree = new Set(trees.map((w) => w.branch!))
+  const bare = gitTry(['-C', root, 'branch', '--list', 'loop/*', '--format=%(refname:short)'])
+    .out.split('\n')
+    .filter((b) => b && !onTree.has(b))
+  return {
+    worktrees: trees.map((w) => `${w.path} [${w.branch}]`),
+    branches: bare,
+  }
+}
+
+/** Beads left in_progress — claimed but never closed. */
+function claimedTails(): string[] {
+  try {
+    return bdJson<{ id: string; title?: string }[]>([
+      'list',
+      '--status',
+      'in_progress',
+    ]).map((r) => `${r.id} ${(r.title ?? '').replace(/\s+/g, ' ').slice(0, 60)}`.trim())
+  } catch {
+    return ['warning: claimed-bead audit failed — bd unavailable']
+  }
+}
+
+/** End-of-run sweep: every tail the loop left must be named in the run
+ *  summary — open loop PRs, surviving loop worktrees/branches, claimed
+ *  beads, and cleanup failures collected during the run. Finished with
+ *  `bro sync` so artifacts and bead state travel. Never throws — an
+ *  audit failure is reported, not raised. */
+function endAudit(ctx: Ctx): void {
+  const { worktrees, branches } = loopRefTails(ctx.root)
+  const sections: [string, string[]][] = [
+    ['open PRs', openLoopPrs(ctx)],
+    ['worktrees', worktrees],
+    ['branches', branches],
+    ['claimed beads', claimedTails()],
+    ['cleanup errors', ctx.tails],
+  ]
+  const empty = sections.every(([, items]) => items.length === 0)
+  say(ctx, 'loop audit:')
+  if (empty) {
+    say(ctx, '  clean — no loop tails')
+  } else {
+    for (const [label, items] of sections) {
+      for (const item of items) {
+        say(ctx, `  ${label}: ${item}`)
+      }
+    }
+  }
+  try {
+    runSyncCommand([])
+  } catch (err) {
+    say(ctx, `  warning: bro sync failed — ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
 /** The claim→run→repeat cycle until the queue drains or --max hits. */
 async function runQueue(ctx: Ctx): Promise<void> {
   const seen = new Set<string>()
@@ -479,33 +566,39 @@ async function runQueue(ctx: Ctx): Promise<void> {
     return
   }
   const tally = { landed: 0, parked: 0, failed: 0 }
-  for (;;) {
-    if (ctx.cfg.maxItems > 0 && tally.landed + tally.parked + tally.failed >= ctx.cfg.maxItems) {
-      break
-    }
-    const ready = readyBeads()
-    const c = classify(ready, undefined, scope, epicParentIds(ready))
-    const bead = claimUpTo(c.queue.filter((b) => !seen.has(b.id)), 1)[0]
-    if (!bead) {
-      // a foreign-only remainder must not look like a drained queue —
-      // 'done' would hide work a shared db still advertises
-      if (c.foreign > 0) {
-        console.log(`loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
+  try {
+    for (;;) {
+      if (ctx.cfg.maxItems > 0 && tally.landed + tally.parked + tally.failed >= ctx.cfg.maxItems) {
+        break
       }
-      break
+      const ready = readyBeads()
+      const c = classify(ready, undefined, scope, epicParentIds(ready))
+      const bead = claimUpTo(c.queue.filter((b) => !seen.has(b.id)), 1)[0]
+      if (!bead) {
+        // a foreign-only remainder must not look like a drained queue —
+        // 'done' would hide work a shared db still advertises
+        if (c.foreign > 0) {
+          console.log(`loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
+        }
+        break
+      }
+      seen.add(bead.id)
+      const result = (await runItem(ctx, bead)) as 'landed' | 'parked' | 'failed'
+      tally[result] += 1
+      if (ctx.json) {
+        console.log(JSON.stringify({ bead: bead.id, result }))
+      }
     }
-    seen.add(bead.id)
-    const result = (await runItem(ctx, bead)) as 'landed' | 'parked' | 'failed'
-    tally[result] += 1
     if (ctx.json) {
-      console.log(JSON.stringify({ bead: bead.id, result }))
+      console.log(JSON.stringify({ done: true, ...tally }))
+    } else {
+      console.log(
+        `loop: done — ${tally.landed} landed, ${tally.parked} parked, ${tally.failed} failed`
+      )
     }
-  }
-  if (ctx.json) {
-    console.log(JSON.stringify({ done: true, ...tally }))
-  } else {
-    console.log(
-      `loop: done — ${tally.landed} landed, ${tally.parked} parked, ${tally.failed} failed`
-    )
+  } finally {
+    // idle, gated, or error — the audit always runs; a tail the loop
+    // left must surface in the summary, not be discovered later
+    endAudit(ctx)
   }
 }

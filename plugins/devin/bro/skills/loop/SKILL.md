@@ -85,17 +85,13 @@ authoritatively verified state — PR `MERGED` per `gh pr view` and the
 bead closed per `bd show`, or parked with a `loop:` note naming the
 blocker. A process exiting is not a verdict.
 
-Before reporting the run over:
-
-1. `gh pr list` — no loop PR left open that the run itself stalled.
-2. `git worktree list` — no orphan `<repo>--<id>` dirs whose branches
-   are already merged; every kept worktree has a parked bead explaining
-   it.
-3. `bd show <id>` on every claimed bead — closed or noted, never
-   silently `in_progress` with nothing running.
-4. `bro sync` — beads and artifacts pushed, not local-only.
-5. Cleanup failures are part of the report, not swallowed — a worktree
-   that failed removal is listed, not dropped.
+The loop runs this audit itself at every exit — idle, gated, or error
+(`try/finally` around the claim cycle): open `loop/*` PRs, surviving
+`loop/*` worktrees and branches, beads still `in_progress`, and cleanup
+failures collected during the run all print under `loop audit:` in the
+run summary, then `bro sync` pushes artifacts and bead state. A clean
+run prints `clean — no loop tails`. The audit is a report, not a fix —
+listed tails still need a human or a follow-up session to clear.
 
 Cleanup after a merge wait is `&&`-sequenced or command-owned — never
 `;`: a failed `act wait` must not touch the PR, branch, worktree, or
