@@ -6,6 +6,7 @@
  * of BroPlugin entries instead of hardcoding commands.
  */
 import type { ConfigSection } from './config.ts'
+import type { Connector } from './connectors.ts'
 import type { DocType } from './docs.ts'
 import type { PlanSchema } from './plan.ts'
 
@@ -28,6 +29,9 @@ export interface BroPlugin {
   /** Document types this plugin exposes to `bro <verb> <noun>` dispatch —
    *  adapter methods are the verb registry (see docs.ts). */
   docs?: DocType[]
+  /** External systems this plugin integrates — facades are capability
+   *  members (tasks, hooks, …); registered via registerConnector. */
+  connectors?: Connector[]
   /** Plan validator — the plugin accepts TOML plans whose `kind` equals
    *  this plugin's name, routed by `bro run`. Pairs with runPlan. */
   planSchema?: PlanSchema<unknown>

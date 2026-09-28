@@ -15,6 +15,7 @@ import {
   loadConfig,
   planKind,
   readPlanDoc,
+  registerConnector,
   stackSection,
   syncSection,
   type BroPlugin,
@@ -243,7 +244,26 @@ function isPlugin(p: unknown): p is BroPlugin {
   if (o.configKey !== undefined && typeof o.configKey !== 'string') return false
   if (o.argvPrefix !== undefined && !Array.isArray(o.argvPrefix)) return false
   if (o.docs !== undefined && (!Array.isArray(o.docs) || !o.docs.every(isDocType))) return false
+  if (
+    o.connectors !== undefined &&
+    (!Array.isArray(o.connectors) || !o.connectors.every(isConnector))
+  ) {
+    return false
+  }
   return true
+}
+
+/** A connectors entry must be a Connector — name + at least the shape
+ *  registerConnector relies on — else facade resolution would crash. */
+function isConnector(c: unknown): boolean {
+  const o = c as { name?: unknown; matchRemote?: unknown }
+  return (
+    !!o &&
+    typeof o === 'object' &&
+    typeof o.name === 'string' &&
+    o.name !== '' &&
+    (o.matchRemote === undefined || typeof o.matchRemote === 'function')
+  )
 }
 
 /** A docs entry must be a DocType — name + adapter factory — else it
@@ -316,6 +336,9 @@ function registerExternal(
     )
     delete plugin.configKey
     delete plugin.configSchema
+  }
+  for (const c of plugin.connectors ?? []) {
+    registerConnector(c)
   }
   PLUGINS.push(plugin)
   return plugin

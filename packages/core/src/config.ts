@@ -93,7 +93,7 @@ export const connectorsSection: ConfigSection<Record<string, string>> = (raw) =>
   if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
     for (const [k, v] of Object.entries(raw)) {
       if (k.trim() !== '' && typeof v === 'string' && v.trim() !== '') {
-        out[k] = v.trim()
+        out[k.trim()] = v.trim()
       }
     }
   }
