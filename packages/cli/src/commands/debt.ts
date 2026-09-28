@@ -14,6 +14,7 @@ import {
   dataRefPush,
   dataRefRoot,
   ensureGhAuth,
+  prLink,
   resolveRepo,
 } from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
@@ -268,10 +269,14 @@ async function cmdCollect(argv: string[]): Promise<void> {
         threadAuthor: args.threadAuthor,
       })
     } catch (err) {
-      console.error(`warning: PR #${pr.number} skipped — ${err instanceof Error ? err.message : err}`)
+      console.error(
+        `warning: PR ${prLink(`${args.owner}/${args.repoName}`, pr.number)} skipped — ${err instanceof Error ? err.message : err}`
+      )
       continue
     }
-    console.error(`debt: PR #${pr.number} — ${result.incoming.length} thread(s)`)
+    console.error(
+      `debt: PR ${prLink(`${args.owner}/${args.repoName}`, pr.number)} — ${result.incoming.length} thread(s)`
+    )
 
     if (args.dryRun) {
       for (const row of result.incoming) {
@@ -523,7 +528,7 @@ function cmdMark(argv: string[]): void {
   ensureGhAuth()
   if (stateRaw === 'none') {
     clearDebtLabels({ repo, pr })
-    console.error(`debt mark: cleared debt:* labels on #${pr}`)
+    console.error(`debt mark: cleared debt:* labels on ${prLink(repo, pr)}`)
     return
   }
   if (!(DEBT_STATES as readonly string[]).includes(stateRaw)) {
@@ -532,7 +537,7 @@ function cmdMark(argv: string[]): void {
   }
   ensureDebtLabels(repo)
   applyDebtLabel({ repo, pr, state: stateRaw as DebtPrState })
-  console.error(`debt mark: #${pr} → debt:${stateRaw}`)
+  console.error(`debt mark: ${prLink(repo, pr)} → debt:${stateRaw}`)
 }
 
 // --- set -------------------------------------------------------------------

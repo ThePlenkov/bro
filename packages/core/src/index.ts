@@ -1,4 +1,4 @@
-export { ensureGhAuth, gh, ghJson, ghTry, resolveRepo } from './gh.ts'
+export { ensureGhAuth, gh, ghJson, ghTry, prLink, resolveRepo } from './gh.ts'
 export { git, gitTry } from './git.ts'
 export { bd, bdJson, bdTry, checkBeads, evidenceKind, initBeadsStealth, refKind } from './bd.ts'
 export {

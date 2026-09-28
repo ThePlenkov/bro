@@ -53,3 +53,10 @@ export function resolveRepo(positional: string[]): string {
   ])
   return `${viewed.owner.login}/${viewed.name}`
 }
+
+/** `[#N](https://github.com/owner/repo/pull/N)` — the clickable form every
+ *  user-facing PR reference must use; bare `#N` is just text. TSV/data rows
+ *  keep the bare number — they are parsed, not read. */
+export function prLink(ownerRepo: string, pr: number): string {
+  return `[#${pr}](https://github.com/${ownerRepo}/pull/${pr})`
+}

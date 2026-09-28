@@ -24,7 +24,7 @@
 import { spawnSync, spawn, execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { bd, bdJson, checkBeads, gitTry } from '@bro/core'
+import { bd, bdJson, checkBeads, gitTry, prLink } from '@bro/core'
 import { evaluateExitGate, fetchPrActState, waitForGate } from '@bro/act'
 import { fetchReviewThreads } from '@bro/debt'
 import {
@@ -48,6 +48,9 @@ interface Ctx {
   intervalS: number
   json: boolean
 }
+
+/** Clickable PR ref for this repo — user-facing lines never print bare #N. */
+const prRef = (ctx: Ctx, pr: number): string => prLink(`${ctx.owner}/${ctx.repo}`, pr)
 
 function usage(): never {
   console.error(`Usage: bro loop [--max N] [--dry-run] [--json]
@@ -204,7 +207,7 @@ async function finalizeMerge(
     if (state !== 'MERGED') {
       noteBead(
         bead.id,
-        `loop: merge of #${pr} did not land (state=${state}) — worktree ${item.worktreeDir}`
+        `loop: merge of ${prRef(ctx, pr)} did not land (state=${state}) — worktree ${item.worktreeDir}`
       )
       return 'parked'
     }
@@ -213,12 +216,12 @@ async function finalizeMerge(
     // claimed forever — note it and park
     noteBead(
       bead.id,
-      `loop: finalizing #${pr} failed — ${err instanceof Error ? err.message : String(err)} — worktree ${item.worktreeDir}`
+      `loop: finalizing ${prRef(ctx, pr)} failed — ${err instanceof Error ? err.message : String(err)} — worktree ${item.worktreeDir}`
     )
     return 'parked'
   }
   try {
-    bd(['close', bead.id, '--reason', `landed via PR #${pr}`])
+    bd(['close', bead.id, '--reason', `landed via PR ${prRef(ctx, pr)}`])
   } catch (err) {
     console.error(`loop: bd close ${bead.id} failed — ${String(err)}`)
   }
@@ -233,7 +236,7 @@ async function finalizeMerge(
   if (br.code !== 0) {
     console.error(`loop: branch ${item.branch} not deleted — ${br.err.trim()}`)
   }
-  say(ctx, `loop: ${bead.id} landed via #${pr}`)
+  say(ctx, `loop: ${bead.id} landed via ${prRef(ctx, pr)}`)
   return 'landed'
 }
 
@@ -255,7 +258,7 @@ async function runFixRound(
     })
     .join('\n')
   writePrompt(item, buildFixPrompt(bead, pr, threads))
-  say(ctx, `loop: #${pr} has open threads — fix round ${round}`)
+  say(ctx, `loop: ${prRef(ctx, pr)} has open threads — fix round ${round}`)
   const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
   if (code !== 0) {
     console.error(`loop: fix agent exited ${code ?? 'timeout'} — the next gate poll decides`)
@@ -329,7 +332,7 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<string> {
   if (pr === null) {
     return failNoPr(bead, item, code)
   }
-  say(ctx, `loop: ${bead.id} → PR #${pr}`)
+  say(ctx, `loop: ${bead.id} → PR ${prRef(ctx, pr)}`)
   return driveGate(ctx, bead, item, pr)
 }
 
@@ -358,15 +361,15 @@ async function driveGate(
         timeoutMs: ctx.cfg.mergeTimeoutMin * 60_000,
         onPoll: (s, g) =>
           console.error(
-            `loop #${pr}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f rev=${g.reviewers_pending} sast=${g.sast_pending}`
+            `loop ${prRef(ctx, pr)}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f rev=${g.reviewers_pending} sast=${g.sast_pending}`
           ),
         onError: (err, n) =>
-          console.error(`loop #${pr}: fetch failed (${n}) — ${String(err)}`),
+          console.error(`loop ${prRef(ctx, pr)}: fetch failed (${n}) — ${String(err)}`),
       })
     } catch (err) {
       noteBead(
         bead.id,
-        `loop: gate fetch kept failing for PR #${pr} — ${String(err)} — worktree ${item.worktreeDir}`
+        `loop: gate fetch kept failing for PR ${prRef(ctx, pr)} — ${String(err)} — worktree ${item.worktreeDir}`
       )
       return 'parked'
     }
@@ -375,7 +378,7 @@ async function driveGate(
       return finalizeMerge(ctx, bead, item, pr, true)
     }
     if (res.state.state === 'CLOSED') {
-      noteBead(bead.id, `loop: PR #${pr} was closed unmerged — worktree ${item.worktreeDir}`)
+      noteBead(bead.id, `loop: PR ${prRef(ctx, pr)} was closed unmerged — worktree ${item.worktreeDir}`)
       return 'parked'
     }
     if (res.gate.ok) {
@@ -388,7 +391,7 @@ async function driveGate(
     const why = res.timedOut
       ? `gate still pending after ${ctx.cfg.mergeTimeoutMin}m`
       : `blocked: ${res.gate.blockers.join('; ')}`
-    noteBead(bead.id, `loop: PR #${pr} ${why} — worktree ${item.worktreeDir}`)
+    noteBead(bead.id, `loop: PR ${prRef(ctx, pr)} ${why} — worktree ${item.worktreeDir}`)
     return 'parked'
   }
 }

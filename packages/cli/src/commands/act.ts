@@ -8,7 +8,7 @@
  *   reply   --thread ID --comment TEXT | --file TSV
  */
 import { readFileSync } from 'node:fs'
-import { ensureGhAuth, bd, gh, gitTry, resolveRepo } from '@bro/core'
+import { ensureGhAuth, bd, gh, gitTry, prLink, resolveRepo } from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
 import { fetchReviewThreads } from '@bro/debt'
 import { isAncestor } from './cleanup.ts'
@@ -160,17 +160,19 @@ async function cmdWait(argv: string[]): Promise<void> {
       timeoutMs: timeout * 60_000,
       onPoll: (s, g) =>
         console.error(
-          `act wait #${s.pr}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
+          `act wait ${prLink(t.repo, s.pr)}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
         ),
       onError: (err, n) =>
         console.error(
-          `act wait #${t.pr}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
+          `act wait ${prLink(t.repo, t.pr)}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
         ),
       // the "Update branch" button as a wait step: BEHIND + mergeable is
       // a state to fix, not to sit on — conflicts still settle for a human
       updateBranch: (s) => {
         const ok = updatePullBranch({ owner: t.owner, repo: t.repoName, pr: t.pr }, s.headSha)
-        console.error(`act wait #${t.pr}: update-branch ${ok ? 'pushed a new head' : 'refused'}`)
+        console.error(
+          `act wait ${prLink(t.repo, t.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
+        )
         return ok
       },
     }
@@ -238,14 +240,16 @@ async function cmdMerge(argv: string[]): Promise<void> {
     // a closed/merged PR can pass the gate (threads resolved, checks
     // settled) — merging it isn't a gate question, it's a lifecycle error
     if (state.state !== 'OPEN') {
-      console.error(`error: #${t.pr} is ${state.state} — only OPEN PRs can be merged`)
+      console.error(
+        `error: ${prLink(t.repo, t.pr)} is ${state.state} — only OPEN PRs can be merged`
+      )
       process.exitCode = 1
       return
     }
 
     const gate = evaluateExitGate(state)
     if (!gate.ok) {
-      console.error(`exit_gate=BLOCKED — refusing to merge #${t.pr}`)
+      console.error(`exit_gate=BLOCKED — refusing to merge ${prLink(t.repo, t.pr)}`)
       for (const b of gate.blockers) {
         console.error(`  blocker: ${b}`)
       }
@@ -262,7 +266,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
     }
     try {
       console.log(gh(args))
-      console.log(`act: merged #${t.pr}`)
+      console.log(`act: merged ${prLink(t.repo, t.pr)}`)
       deleteMergedLocalBranch(state.headRef, state.headSha)
     } catch (err) {
       console.error(`error: merge failed — ${err instanceof Error ? err.message : String(err)}`)
