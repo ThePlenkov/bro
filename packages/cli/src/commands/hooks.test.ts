@@ -138,26 +138,21 @@ describe('classifyArmCommand positions', () => {
 })
 
 describe('armDetail', () => {
-  test('names the slug from bro work enter', () => {
-    assert.equal(armDetail('bro work enter bro-n5t-2', 'work'), 'bro-n5t-2')
-    assert.equal(armDetail('cd x && bro work enter bro-abc', 'work'), 'bro-abc')
-  })
-
-  test('names the path from git worktree add', () => {
-    assert.equal(armDetail('git worktree add ../bro--x -b work/x', 'work'), '../bro--x')
-    assert.equal(armDetail('git worktree add -b work/x ../bro--x', 'work'), '../bro--x')
-  })
-
-  test('names the PR for act commands', () => {
-    assert.equal(armDetail('bro act merge 89 --cleanup', 'act'), '#89')
-    assert.equal(armDetail('gh pr merge 42 --squash', 'act'), '#42')
-    assert.equal(armDetail('git push', 'act'), '')
-  })
-
-  test('returns empty for drill and unrecognized commands', () => {
-    assert.equal(armDetail('bro drill down bro-x', 'drill'), '')
-    assert.equal(armDetail('npm test', 'work'), '')
-  })
+  for (const [cmd, aspect, want] of [
+    ['bro work enter bro-n5t-2', 'work', 'bro-n5t-2'],
+    ['cd x && bro work enter bro-abc', 'work', 'bro-abc'],
+    ['git worktree add ../bro--x -b work/x', 'work', '../bro--x'],
+    ['git worktree add -b work/x ../bro--x', 'work', '../bro--x'],
+    ['bro act merge 89 --cleanup', 'act', '#89'],
+    ['gh pr merge 42 --squash', 'act', '#42'],
+    ['git push', 'act', ''],
+    ['bro drill down bro-x', 'drill', ''],
+    ['npm test', 'work', ''],
+  ] as const) {
+    test(`${cmd} → "${want}"`, () => {
+      assert.equal(armDetail(cmd, aspect), want)
+    })
+  }
 })
 
 describe('otherLiveWork', () => {
