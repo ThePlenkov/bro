@@ -2,7 +2,16 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { docVerbs, verbMethod } from '@bro/core'
 import type { DocAdapter, DocType } from '@bro/core'
-import { docArgs, docTypes, registerDocType, runDocVerb } from './docs.ts'
+import {
+  docArgs,
+  docTypes,
+  filterDocTypes,
+  registerDocType,
+  reservedWords,
+  runDocVerb,
+} from './docs.ts'
+import { storeDoc } from './doctypes/store.ts'
+import { taskDoc } from './doctypes/task.ts'
 
 describe('docArgs', () => {
   test('--key=value and boolean --key; --global sets scope', () => {
@@ -99,5 +108,46 @@ describe('runDocVerb', () => {
     assert.ok(names.includes('task'))
     assert.ok(names.includes('store'))
     assert.ok(names.includes('fake'))
+  })
+})
+
+describe('doc type collisions', () => {
+  function warnings(fn: () => unknown): string[] {
+    const orig = console.error
+    const out: string[] = []
+    console.error = (...a: unknown[]) => out.push(a.join(' '))
+    try {
+      fn()
+      return out
+    } finally {
+      console.error = orig
+    }
+  }
+
+  const prefixed: DocType = { name: 'fx', idPrefix: 'bro-x-', adapter: () => ({}) }
+  const cases: [string, DocType, DocType[]][] = [
+    ['duplicate noun', { name: 'task', adapter: () => ({}) }, []],
+    ['alias collision', { name: 'other', aliases: ['stores'], adapter: () => ({}) }, []],
+    ['noun spelled like a verb', { name: 'list', adapter: () => ({}) }, []],
+    ['overlapping idPrefix', { name: 'bx', idPrefix: 'bro-x-a-', adapter: () => ({}) }, [prefixed]],
+  ]
+
+  for (const [label, type, extra] of cases) {
+    test(`${label} — dropped with a warning, not dispatched`, () => {
+      const w = warnings(() => {
+        const kept = filterDocTypes([taskDoc, storeDoc, ...extra, type])
+        assert.ok(!kept.includes(type))
+      })
+      assert.ok(w.some((l) => l.includes('skipped')))
+    })
+  }
+
+  test('reservedWords covers verbs, nouns, and plugin names', () => {
+    const w = reservedWords()
+    for (const word of ['list', 'show', 'close', 'exec', 'init', 'task', 'store', 'tasks']) {
+      assert.ok(w.has(word), `reservedWords missing "${word}"`)
+    }
+    // a free word stays free
+    assert.ok(!w.has('totally-free-name'))
   })
 })
