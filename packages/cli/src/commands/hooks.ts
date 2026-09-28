@@ -443,6 +443,24 @@ function parallelLines(sessionId: string): string[] {
   }
 }
 
+const WORKTREE_VALUE_FLAGS = new Set(['-b', '--orphan', '--lock-reason'])
+
+/** First positional token after `worktree add|create`, skipping flags
+ *  and the values of flags that take one (`-b <branch>`). */
+function worktreeTarget(args: string): string {
+  const toks = args.split(/\s+/)
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i]!
+    if (!t.startsWith('-')) {
+      return t
+    }
+    if (WORKTREE_VALUE_FLAGS.has(t)) {
+      i++
+    }
+  }
+  return ''
+}
+
 /** What a session armed — recorded in the marker so a parallel session
  *  can name the bead/worktree it would collide with. */
 export function armDetail(cmd: string, aspect: GateAspect): string {
@@ -452,24 +470,8 @@ export function armDetail(cmd: string, aspect: GateAspect): string {
     if (enter) {
       return enter[1]!
     }
-    // `git worktree add <path>` / `bd worktree create <path>` — first
-    // positional token, skipping flags and value-flags like `-b <branch>`.
-    // No trailing wildcard in the regex — Sonar flags `.+` as super-linear.
     const add = /\bworktree\s+(?:add|create)\s+/.exec(c)
-    if (add) {
-      const VALUE_FLAGS = new Set(['-b', '--orphan', '--lock-reason'])
-      const toks = c.slice(add.index + add[0].length).split(/\s+/)
-      for (let i = 0; i < toks.length; i++) {
-        if (toks[i]!.startsWith('-')) {
-          if (VALUE_FLAGS.has(toks[i]!)) {
-            i++
-          }
-          continue
-        }
-        return toks[i]!.replace(/\/+$/, '')
-      }
-    }
-    return ''
+    return add ? worktreeTarget(c.slice(add.index + add[0].length)) : ''
   }
   if (aspect === 'act') {
     const m = /\b(\d{1,7})\b/.exec(c)
