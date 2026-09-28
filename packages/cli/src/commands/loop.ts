@@ -37,7 +37,14 @@ import {
 import { loadBroConfig } from '../plugins.ts'
 import { flag } from './args.ts'
 import { runActCommand } from './act.ts'
-import { claimUpTo, classify, nextScope, readyBeads, type ReadyBead } from './next.ts'
+import {
+  claimUpTo,
+  classify,
+  epicParentIds,
+  nextScope,
+  readyBeads,
+  type ReadyBead,
+} from './next.ts'
 
 interface Ctx {
   owner: string
@@ -429,7 +436,8 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   if (argv.includes('--dry-run')) {
     let top: ReadyBead | undefined
     try {
-      top = classify(readyBeads(), undefined, nextScope('project')).queue[0]
+      const ready = readyBeads()
+      top = classify(ready, undefined, nextScope('project'), epicParentIds(ready)).queue[0]
     } catch (err) {
       console.error(`loop: ${err instanceof Error ? err.message : String(err)}`)
       return
@@ -463,7 +471,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
       break
     }
     const ready = readyBeads()
-    const c = classify(ready, undefined, scope)
+    const c = classify(ready, undefined, scope, epicParentIds(ready))
     const bead = claimUpTo(c.queue.filter((b) => !seen.has(b.id)), 1)[0]
     if (!bead) {
       // a foreign-only remainder must not look like a drained queue —

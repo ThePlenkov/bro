@@ -10,9 +10,10 @@
  *                       (filters, limit, ordering, gates — next-plan.ts)
  *
  * Human gates (title "HUMAN GATE"), epics, and molecule steps (parent
- * set — convoy owns those) are never auto-claimed; they surface as
- * gates/skipped so the agent knows what it's NOT doing. A plan may
- * opt gates into the queue via gates = "allow".
+ * set AND parent not an epic — bd reuses `parent` for epic children,
+ * which are regular claimable work) are never auto-claimed; they
+ * surface as gates/skipped so the agent knows what it's NOT doing. A
+ * plan may opt gates into the queue via gates = "allow".
  *
  * Project scoping: a shared/federated bd can serve several repos, so
  * `ready` is filtered bd-side (--exclude-label) against coordination
@@ -96,10 +97,33 @@ export function nextScope(scope: NextPlan['scope']): { prefix?: string } {
   return { prefix: scope === 'all' ? undefined : projectPrefix() }
 }
 
-const claimable = (b: ReadyBead, gates: NextPlan['gates']): boolean =>
+/** bd reuses `parent` for both molecule steps and epic children — only
+ *  a parent that IS an epic makes the child regular work. Looked up
+ *  once per unique parent id; an unreadable parent stays a mol step. */
+export function epicParentIds(ready: ReadyBead[]): Set<string> {
+  const ids = [
+    ...new Set(ready.map((b) => b.parent).filter((p): p is string => !!p)),
+  ]
+  const epic = new Set<string>()
+  for (const id of ids) {
+    try {
+      const [row] = bdJson<Array<{ issue_type?: string }>>(['show', id])
+      if (row?.issue_type === 'epic') {
+        epic.add(id)
+      }
+    } catch { /* a parent we can't inspect stays a molecule step */ }
+  }
+  return epic
+}
+
+const claimable = (
+  b: ReadyBead,
+  gates: NextPlan['gates'],
+  epicParents: ReadonlySet<string>
+): boolean =>
   (gates === 'allow' || !HUMAN_GATE.test(b.title)) &&
   b.issue_type !== 'epic' &&
-  !b.parent
+  (!b.parent || epicParents.has(b.parent))
 
 /** Plan filters narrow the claimable queue — they can never re-include
  *  what classify excludes (epics, molecule steps, forbidden gates). */
@@ -136,13 +160,14 @@ const DEFAULT_SELECTION = {
 export function classify(
   ready: ReadyBead[],
   plan: Pick<NextPlan, 'filters' | 'gates' | 'order'> = DEFAULT_SELECTION,
-  scope: { prefix?: string } = {}
+  scope: { prefix?: string } = {},
+  epicParents: ReadonlySet<string> = new Set()
 ) {
   const local =
     scope.prefix === undefined
       ? ready
       : ready.filter((b) => b.id.startsWith(`${scope.prefix}-`))
-  const claimableAll = local.filter((b) => claimable(b, plan.gates))
+  const claimableAll = local.filter((b) => claimable(b, plan.gates, epicParents))
   const queue = applyFilters(claimableAll, plan.filters)
   queue.sort(ORDERERS[plan.order])
   return {
@@ -151,7 +176,7 @@ export function classify(
     foreign: ready.length - local.length,
     gates: local.filter((b) => HUMAN_GATE.test(b.title)),
     epics: local.filter((b) => b.issue_type === 'epic'),
-    moleculeSteps: local.filter((b) => b.parent).length,
+    moleculeSteps: local.filter((b) => b.parent && !epicParents.has(b.parent)).length,
   }
 }
 
@@ -237,7 +262,7 @@ export function applyNextPlan(plan: NextPlan): void {
   }
   let c: ReturnType<typeof classify>
   try {
-    c = classify(ready, plan, nextScope(plan.scope))
+    c = classify(ready, plan, nextScope(plan.scope), epicParentIds(ready))
   } catch (err) {
     console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
     process.exit(1)
