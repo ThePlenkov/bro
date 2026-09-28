@@ -88,6 +88,14 @@ function readPlan(rest: string[]): RetroPlan {
 /** `retrospect record`'s executor — also the plugin's runPlan for
  * `bro run` (kind = "retrospect"). */
 export function cmdRecord(plan: RetroPlan): void {
+  // recurrence escalation is a mechanical bar, not a prose one: a retro
+  // whose actions are all memory/agentic-documents sinks adds only more
+  // prose — warn when no workaround/backlog (i.e. buildable) action exists
+  if (!plan.actions.some((a) => a.sink === 'workaround' || a.sink === 'backlog')) {
+    console.error(
+      'retro: note — no mechanical action (workaround/backlog); a recurring cause survives on prose alone'
+    )
+  }
   const res = recordRetro(plan)
   console.log(`retro ${res.retroId} recorded`)
   for (const id of res.actionIds) {
