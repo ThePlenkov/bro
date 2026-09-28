@@ -1,32 +1,18 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { cleanupAfterMerge } from './act.ts'
+import { git, initRepo, inside } from './testrepo.ts'
 
-function git(args: string[], cwd: string): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' })
-}
-
-/** Bare-bones repo: main checkout on `main` with one commit. */
-function initRepo(): { root: string; main: string } {
-  const root = mkdtempSync(join(tmpdir(), 'bro-act-cleanup-'))
-  const main = join(root, 'main')
-  git(['init', '-q', '-b', 'main', main], root)
-  git(['config', 'user.email', 't@t'], main)
-  git(['config', 'user.name', 't'], main)
-  writeFileSync(join(main, '.gitignore'), 'node_modules/\n')
-  git(['add', '.gitignore'], main)
-  git(['commit', '-qm', 'init'], main)
-  return { root, main }
-}
+const repo = () => initRepo('bro-act-cleanup-', (m) =>
+  writeFileSync(join(m, '.gitignore'), 'node_modules/\n')
+)
 
 /** main checkout + linked worktree on `work/x` with one commit — the
  *  "merged head" a PR would have landed. */
 function fixture(): { root: string; main: string; linked: string; sha: string } {
-  const { root, main } = initRepo()
+  const { root, main } = repo()
   const linked = join(root, 'main--x')
   git(['worktree', 'add', '-q', linked, '-b', 'work/x'], main)
   writeFileSync(join(linked, 'g.txt'), 'y')
@@ -34,17 +20,6 @@ function fixture(): { root: string; main: string; linked: string; sha: string } 
   git(['commit', '-qm', 'work'], linked)
   const sha = git(['rev-parse', 'HEAD'], linked).trim()
   return { root, main, linked, sha }
-}
-
-function inside<T>(dir: string, root: string, fn: () => T): T {
-  const prev = process.cwd()
-  process.chdir(dir)
-  try {
-    return fn()
-  } finally {
-    process.chdir(prev)
-    rmSync(root, { recursive: true, force: true })
-  }
 }
 
 describe('cleanupAfterMerge', () => {
@@ -92,7 +67,7 @@ describe('cleanupAfterMerge', () => {
   })
 
   test('a main checkout on the merged branch switches back to the default branch', () => {
-    const { root, main } = initRepo()
+    const { root, main } = repo()
     git(['switch', '-qc', 'work/x'], main)
     const sha = git(['rev-parse', 'HEAD'], main).trim()
     inside(main, root, () => {
@@ -103,7 +78,7 @@ describe('cleanupAfterMerge', () => {
   })
 
   test('a branch with commits beyond the merged head is not deleted', () => {
-    const { root, main } = initRepo()
+    const { root, main } = repo()
     const baseSha = git(['rev-parse', 'HEAD'], main).trim()
     git(['switch', '-qc', 'work/x'], main)
     writeFileSync(join(main, 'later.txt'), 'z')
