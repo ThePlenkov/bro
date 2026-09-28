@@ -8,7 +8,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 export function git(args: string[], cwd: string): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' })
+  // a test run inside another repo still carries GIT_DIR/GIT_WORKTREE —
+  // strip repo-location env so the child only sees the fixture's cwd
+  const { GIT_DIR: _d, GIT_WORKTREE: _w, GIT_INDEX_FILE: _i, ...env } = process.env
+  return execFileSync('git', args, { cwd, env, encoding: 'utf8' }) // NOSONAR — PATH lookup is the contract (same as core/git.ts)
 }
 
 /** mkdtemp repo → `main` checkout with git identity and one commit.

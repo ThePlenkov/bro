@@ -479,50 +479,71 @@ function loopScope(): ReturnType<typeof nextScope> | null {
   }
 }
 
-/** Open PRs whose head is a loop/* branch — tails a previous run or a
- *  parked item left open. */
-function openLoopPrs(ctx: Ctx): string[] {
-  try {
-    const prs = JSON.parse(
-      ghOut(
-        ['pr', 'list', '--state', 'open', '--json', 'number,headRefName', '--limit', '100'],
-        ctx.root
-      )
-    ) as { number: number; headRefName: string }[]
-    return prs
-      .filter((p) => p.headRefName.startsWith('loop/'))
-      .map((p) => `#${p.number} (${p.headRefName})`)
-  } catch {
-    return ['warning: open-PR audit failed — gh unavailable']
+/** Open PRs on local loop/* branches — exact per-branch lookup, so the
+ *  audit is bounded by the repo's own tail set, not a global PR cap. */
+function openLoopPrs(ctx: Ctx, branches: string[]): string[] {
+  const out: string[] = []
+  for (const b of branches) {
+    try {
+      const prs = JSON.parse(
+        ghOut(['pr', 'list', '--state', 'open', '--head', b, '--json', 'number'], ctx.root)
+      ) as { number: number }[]
+      for (const p of prs) {
+        out.push(`#${p.number} (${b})`)
+      }
+    } catch {
+      out.push(`warning: PR lookup failed for ${b} — gh unavailable`)
+    }
   }
+  return out
+}
+
+interface RefTails {
+  worktrees: string[]
+  branches: string[]
+  errors: string[]
 }
 
 /** loop/* worktrees still checked out + loop/* branches with no
- *  worktree — both are run tails. */
-export function loopRefTails(root: string): { worktrees: string[]; branches: string[] } {
-  const trees = parseWorktreePorcelain(
-    gitTry(['-C', root, 'worktree', 'list', '--porcelain']).out
-  ).filter((w) => w.branch?.startsWith('loop/'))
+ *  worktree — both are run tails. A failed git probe reports as an
+ *  error line, never as a false "clean". */
+export function loopRefTails(root: string): RefTails {
+  const errors: string[] = []
+  const wt = gitTry(['-C', root, 'worktree', 'list', '--porcelain'])
+  if (wt.code !== 0) {
+    errors.push(`worktree list failed — ${wt.err || 'git error'}`)
+  }
+  const trees = parseWorktreePorcelain(wt.out).filter((w) => w.branch?.startsWith('loop/'))
   const onTree = new Set(trees.map((w) => w.branch!))
-  const bare = gitTry(['-C', root, 'branch', '--list', 'loop/*', '--format=%(refname:short)'])
-    .out.split('\n')
-    .filter((b) => b && !onTree.has(b))
+  const bl = gitTry(['-C', root, 'branch', '--list', 'loop/*', '--format=%(refname:short)'])
+  if (bl.code !== 0) {
+    errors.push(`branch list failed — ${bl.err || 'git error'}`)
+  }
+  const bare = bl.out.split('\n').filter((b) => b && !onTree.has(b))
   return {
     worktrees: trees.map((w) => `${w.path} [${w.branch}]`),
     branches: bare,
+    errors,
   }
 }
 
-/** Beads left in_progress — claimed but never closed. */
-function claimedTails(): string[] {
+/** Beads left in_progress, split by this run's claims vs pre-existing —
+ *  a shared store holds other sessions' claims too. */
+function claimedTails(seen: Set<string>): { own: string[]; other: string[] } {
   try {
-    return bdJson<{ id: string; title?: string }[]>([
+    const rows = bdJson<{ id: string; title?: string }[]>([
       'list',
       '--status',
       'in_progress',
-    ]).map((r) => `${r.id} ${(r.title ?? '').replace(/\s+/g, ' ').slice(0, 60)}`.trim())
+    ])
+    const fmt = (r: { id: string; title?: string }) =>
+      `${r.id} ${(r.title ?? '').replace(/\s+/g, ' ').slice(0, 60)}`.trim()
+    return {
+      own: rows.filter((r) => seen.has(r.id)).map(fmt),
+      other: rows.filter((r) => !seen.has(r.id)).map(fmt),
+    }
   } catch {
-    return ['warning: claimed-bead audit failed — bd unavailable']
+    return { own: [], other: ['warning: claimed-bead audit failed — bd unavailable'] }
   }
 }
 
@@ -531,13 +552,16 @@ function claimedTails(): string[] {
  *  beads, and cleanup failures collected during the run. Finished with
  *  `bro sync` so artifacts and bead state travel. Never throws — an
  *  audit failure is reported, not raised. */
-function endAudit(ctx: Ctx): void {
-  const { worktrees, branches } = loopRefTails(ctx.root)
+function endAudit(ctx: Ctx, seen: Set<string>): void {
+  const { worktrees, branches, errors } = loopRefTails(ctx.root)
+  const claimed = claimedTails(seen)
   const sections: [string, string[]][] = [
-    ['open PRs', openLoopPrs(ctx)],
+    ['open PRs', openLoopPrs(ctx, branches)],
     ['worktrees', worktrees],
     ['branches', branches],
-    ['claimed beads', claimedTails()],
+    ['claimed beads', claimed.own],
+    ['in_progress elsewhere', claimed.other],
+    ['audit errors', errors],
     ['cleanup errors', ctx.tails],
   ]
   const empty = sections.every(([, items]) => items.length === 0)
@@ -551,22 +575,31 @@ function endAudit(ctx: Ctx): void {
       }
     }
   }
+  // runSyncCommand narrates to stdout — in --json mode that would
+  // corrupt the event stream, so route its output to stderr instead
+  const log = console.log
+  if (ctx.json) {
+    console.log = console.error
+  }
   try {
     runSyncCommand([])
   } catch (err) {
     say(ctx, `  warning: bro sync failed — ${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    console.log = log
   }
 }
 
 /** The claim→run→repeat cycle until the queue drains or --max hits. */
 async function runQueue(ctx: Ctx): Promise<void> {
   const seen = new Set<string>()
-  const scope = loopScope()
-  if (!scope) {
-    return
-  }
   const tally = { landed: 0, parked: 0, failed: 0 }
   try {
+    // inside the try: a failed scope lookup still owes the run an audit
+    const scope = loopScope()
+    if (!scope) {
+      return
+    }
     for (;;) {
       if (ctx.cfg.maxItems > 0 && tally.landed + tally.parked + tally.failed >= ctx.cfg.maxItems) {
         break
@@ -578,7 +611,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
         // a foreign-only remainder must not look like a drained queue —
         // 'done' would hide work a shared db still advertises
         if (c.foreign > 0) {
-          console.log(`loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
+          say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
         }
         break
       }
@@ -599,6 +632,6 @@ async function runQueue(ctx: Ctx): Promise<void> {
   } finally {
     // idle, gated, or error — the audit always runs; a tail the loop
     // left must surface in the summary, not be discovered later
-    endAudit(ctx)
+    endAudit(ctx, seen)
   }
 }
