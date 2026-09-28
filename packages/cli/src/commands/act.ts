@@ -13,7 +13,7 @@ import { loadBroConfig } from '../plugins.ts'
 import { fetchReviewThreads } from '@bro/debt'
 import { isAncestor } from './cleanup.ts'
 import { flag } from './args.ts'
-import { gitDirOf, isLinkedGitDir, parseWorktreePorcelain } from './work.ts'
+import { gitDirOf, hasSubmodules, isLinkedGitDir, parseWorktreePorcelain } from './work.ts'
 import {
   acquireMergeSlot,
   evaluateExitGate,
@@ -316,10 +316,17 @@ function deleteMergedLocalBranch(headRef: string, headSha: string): void {
     console.error(`cleanup: ${headRef} has commits beyond the merged head — kept`)
     return
   }
-  const res = gitTry(['branch', '-D', headRef])
+  // `update-ref -d <ref> <tip>` deletes only if the ref still points at the
+  // tip we verified — a compare-and-delete, so commits landing between the
+  // check and the delete can't be silently dropped
+  const res = gitTry(['update-ref', '-d', `refs/heads/${headRef}`, tip])
   if (res.code === 0) {
     console.log(`cleanup: deleted local branch ${headRef}`)
-  } else if (!/not found|branch.*not.*exist/i.test(res.err)) {
+  } else if (/checked out/i.test(res.err)) {
+    console.error(`cleanup: ${headRef} is checked out — delete it after switching`)
+  } else if (/cannot lock ref/i.test(res.err)) {
+    console.error(`cleanup: ${headRef} moved past the verified tip — kept`)
+  } else {
     console.error(`cleanup: local branch ${headRef} not deleted (${res.err})`)
   }
 }
@@ -359,12 +366,20 @@ export function cleanupAfterMerge(headRef: string, headSha: string): void {
     // main checkout. `worktree remove` refuses trees with ANY extra files
     // (even ignored ones like node_modules), so a clean porcelain status —
     // no tracked modifications, no untracked files — is the guard for
-    // --force being safe: only ignored debris remains.
-    if (gitTry(['-C', cwd, 'status', '--porcelain']).out.trim() !== '') {
-      console.error(`cleanup: ${cwd} has uncommitted changes — worktree kept`)
+    // --force being safe: only ignored debris remains. A status failure is
+    // fail-closed: an unverifiable tree is kept, never forced away.
+    const status = gitTry(['-C', cwd, 'status', '--porcelain'])
+    if (status.code !== 0 || status.out.trim() !== '') {
+      console.error(
+        status.code !== 0
+          ? `cleanup: cannot verify ${cwd} is clean (${status.err}) — worktree kept`
+          : `cleanup: ${cwd} has uncommitted changes — worktree kept`
+      )
       return
     }
-    const res = gitTry(['-C', main.path, 'worktree', 'remove', '--force', cwd])
+    // initialized submodules need a second --force to override
+    const force = hasSubmodules(cwd) ? ['--force', '--force'] : ['--force']
+    const res = gitTry(['-C', main.path, 'worktree', 'remove', ...force, cwd])
     if (res.code !== 0) {
       console.error(`cleanup: worktree ${cwd} not removed (${res.err})`)
       return
