@@ -140,6 +140,21 @@ test('an accepted-but-unlanded update keeps polling, not settling', async () => 
   assert.equal(res.polls, 3)
 })
 
+test('a new blocker while the update is pending settles immediately', async () => {
+  const res = await waitForGate(
+    fetcher([
+      open({ mergeState: 'BEHIND', headSha: 'a1' }), // triggers update
+      // same sha (still landing) but a fresh review thread arrived —
+      // must settle with it, not poll out the deadline
+      open({ mergeState: 'BEHIND', headSha: 'a1', openThreads: 1 }),
+    ]),
+    { intervalMs: 0, timeoutMs: 60_000, updateBranch: () => true }
+  )
+  assert.equal(res.gate.ok, false)
+  assert.equal(res.state.openThreads, 1)
+  assert.equal(res.polls, 2)
+})
+
 test('BEHIND alongside other blockers does not update', async () => {
   let called = false
   const res = await waitForGate(

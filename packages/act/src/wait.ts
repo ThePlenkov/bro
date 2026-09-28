@@ -80,7 +80,15 @@ export async function waitForGate(
       opts.updateBranch &&
       Date.now() < deadline
     ) {
-      if (state.headSha === updatedSha) {
+      // The update we requested is still landing — keep polling only
+      // while BEHIND remains the sole blocker on a mergeable PR; a new
+      // settled blocker (fresh thread, failed check) must fall through
+      // and settle immediately, not wait out the deadline.
+      if (
+        state.headSha === updatedSha &&
+        state.mergeable === 'MERGEABLE' &&
+        gate.blockers.length === 1
+      ) {
         await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())))
         continue
       }
