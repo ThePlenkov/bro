@@ -371,6 +371,34 @@ export function otherLiveWork(
   return out
 }
 
+function formatAge(ageMs: number): string {
+  if (ageMs < 60_000) {
+    return 'just now'
+  }
+  if (ageMs < 3_600_000) {
+    return `${Math.round(ageMs / 60_000)}m ago`
+  }
+  return `${Math.round(ageMs / 3_600_000)}h ago`
+}
+
+function liveSessionLines(dir: string, selfId: string): string[] {
+  return otherLiveWork(dir, selfId).map((w) => {
+    const on = w.detail ? ` on ${w.detail}` : ''
+    return `session ${w.session.slice(0, 8)} armed work${on} (${formatAge(w.ageMs)})`
+  })
+}
+
+/** Linked worktrees on this repo, minus the current checkout — naming a
+ *  session its own worktree would be a false nudge. */
+function worktreeLines(): string[] {
+  const cur = gitTry(['rev-parse', '--show-toplevel']).out.trim()
+  return parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out)
+    .slice(1) // porcelain lists the main worktree first
+    .filter((w) => !w.prunable && w.path !== cur)
+    .slice(0, 5)
+    .map((w) => `worktree ${basename(w.path)} [${w.branch ?? 'detached'}]`)
+}
+
 /** Beads claimed but not yet closed — another signal of live work the
  *  flat queue already knows about. */
 function claimedLines(): string[] {
@@ -378,7 +406,8 @@ function claimedLines(): string[] {
     const rows = bdJson<BeadRow[]>(['list', '--status', 'in_progress'])
     return rows.slice(0, 5).map((r) => {
       const title = (r.title ?? '').replace(/\s+/g, ' ')
-      return `${r.id} ${title.length > 60 ? `${title.slice(0, 60)}…` : title}`.trim()
+      const short = title.length > 60 ? `${title.slice(0, 60)}…` : title
+      return `${r.id} ${short}`.trim()
     })
   } catch {
     return []
@@ -389,42 +418,29 @@ function claimedLines(): string[] {
  *  work here, or the repo carries linked worktrees / claimed beads —
  *  passive context naming what's occupied, never a block. */
 function parallelLines(sessionId: string): string[] {
-  const parts: string[] = []
   try {
+    const parts: string[] = []
     const dir = hooksStateDir()
     if (dir) {
-      for (const w of otherLiveWork(dir, sessionId)) {
-        const age =
-          w.ageMs < 60_000 ? 'just now' : w.ageMs < 3_600_000 ? `${Math.round(w.ageMs / 60_000)}m ago` : `${Math.round(w.ageMs / 3_600_000)}h ago`
-        parts.push(
-          `session ${w.session.slice(0, 8)} armed work${w.detail ? ` on ${w.detail}` : ''} (${age})`
-        )
-      }
+      parts.push(...liveSessionLines(dir, sessionId))
     }
-    // exclude the entry for THIS checkout too — a session seeing its own
-    // worktree named as parallel work would be a false nudge
-    const cur = gitTry(['rev-parse', '--show-toplevel']).out.trim()
-    const trees = parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out)
-      .slice(1) // porcelain lists the main worktree first
-      .filter((w) => !w.prunable && w.path !== cur)
-    for (const w of trees.slice(0, 5)) {
-      parts.push(`worktree ${basename(w.path)} [${w.branch ?? 'detached'}]`)
-    }
+    parts.push(...worktreeLines())
     const claimed = claimedLines()
     if (claimed.length > 0) {
       parts.push(`claimed beads: ${claimed.join(', ')}`)
     }
-    if (parts.length > 0) {
-      return [
-        'parallel work detected in this repo:',
-        ...parts.map((p) => `  ${p}`),
-        '  → for new work prefer `bro work enter <slug>` — a separate worktree, not this checkout',
-      ]
+    if (parts.length === 0) {
+      return []
     }
+    return [
+      'parallel work detected in this repo:',
+      ...parts.map((p) => `  ${p}`),
+      '  → for new work prefer `bro work enter <slug>` — a separate worktree, not this checkout',
+    ]
   } catch {
     // detection is passive — a probe failure must not break rehydrate
+    return []
   }
-  return parts.length > 0 ? parts : []
 }
 
 /** What a session armed — recorded in the marker so a parallel session
@@ -437,11 +453,12 @@ export function armDetail(cmd: string, aspect: GateAspect): string {
       return enter[1]!
     }
     // `git worktree add <path>` / `bd worktree create <path>` — first
-    // positional token, skipping flags and value-flags like `-b <branch>`
-    const add = /\bworktree\s+(?:add|create)\s+(.+)/.exec(c)
+    // positional token, skipping flags and value-flags like `-b <branch>`.
+    // No trailing wildcard in the regex — Sonar flags `.+` as super-linear.
+    const add = /\bworktree\s+(?:add|create)\s+/.exec(c)
     if (add) {
       const VALUE_FLAGS = new Set(['-b', '--orphan', '--lock-reason'])
-      const toks = add[1]!.split(/\s+/)
+      const toks = c.slice(add.index + add[0].length).split(/\s+/)
       for (let i = 0; i < toks.length; i++) {
         if (toks[i]!.startsWith('-')) {
           if (VALUE_FLAGS.has(toks[i]!)) {
