@@ -18,6 +18,7 @@ import {
   drillUp,
   listDrills,
   bd,
+  taskStore,
   type DrillPlan,
 } from '@bro/drill'
 import { flag, flagAll, positionals } from './args.ts'
@@ -145,7 +146,7 @@ export function applyDrillPlan(plan: DrillPlan): void {
     // children first — bd refuses to delete a frame with open children
     for (const id of [...created].reverse()) {
       try {
-        bd(['delete', id, '--force'])
+        taskStore().remove(id)
       } catch {
         orphans.push(id)
       }

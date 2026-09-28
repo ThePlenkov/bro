@@ -15,7 +15,7 @@ import { randomBytes } from 'node:crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stringify } from 'smol-toml'
-import { bd, checkBeads } from '@bro/core'
+import { checkBeads, taskStore } from '@bro/core'
 import {
   beadsDir,
   claimStep,
@@ -108,7 +108,7 @@ function pourInline(m: ConvoyInline): string {
     // title; if that fails the caller never sees rootId, so the molecule
     // escapes rollbackPoured — compensate here instead
     try {
-      bd(['update', rootId, '--title', m.title])
+      taskStore().update(rootId, { title: m.title })
     } catch (err) {
       const orphans = rollbackPoured([rootId])
       if (orphans.length === 0) throw err
@@ -166,8 +166,8 @@ function rollbackPoured(poured: string[]): string[] {
   const orphans: string[] = []
   for (const rootId of [...poured].reverse()) {
     try {
-      for (const s of stepsOf(loadMolecule(rootId))) bd(['delete', s.id, '--force'])
-      bd(['delete', rootId, '--force'])
+      for (const s of stepsOf(loadMolecule(rootId))) taskStore().remove(s.id)
+      taskStore().remove(rootId)
     } catch {
       orphans.push(rootId)
     }
@@ -253,7 +253,7 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
         console.error('error: done requires --result — the next steps read it as their input')
         process.exit(2)
       }
-      bd(['close', stepId, '--reason', result])
+      taskStore().close(stepId, result)
       const fresh = resolveMolecule(mol.root.id)
       console.log(JSON.stringify(withInputs(nextStep(fresh), fresh), null, 2))
       return

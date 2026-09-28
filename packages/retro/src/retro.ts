@@ -7,7 +7,7 @@
  * done. beads IS the memory system — no sidecar files.
  */
 import { execFileSync } from 'node:child_process'
-import { bd, bdJson, evidenceKind, refKind } from '@bro/core'
+import { bd, bdJson, evidenceKind, refKind, taskStore } from '@bro/core'
 import type { BeadRow, RecordResult, RetroPlan } from './types.ts'
 
 const WTF_LABEL = 'wtf'
@@ -17,7 +17,7 @@ const PREVENTION_LABEL = 'prevention'
 const isOpen = (row: BeadRow): boolean => row.status !== 'closed' && row.status !== 'done'
 
 function listByLabel(label: string): BeadRow[] {
-  return bdJson<BeadRow[]>(['list', '-l', label, '--all', '-n', '0'])
+  return taskStore().list<BeadRow>({ labels: [label], all: true, limit: 0 })
 }
 
 export function listWtf(): BeadRow[] {
@@ -70,12 +70,15 @@ export function captureWtf(complaint: string): BeadRow {
   ].join('\n')
   const first = complaint.trim().split('\n')[0] ?? ''
   const title = `wtf: ${shorten(first)}`
-  return bdJson<BeadRow>(['create', title, '-l', WTF_LABEL, '-d', description])
+  return taskStore().create<BeadRow>({
+    title,
+    labels: [WTF_LABEL],
+    description,
+  })
 }
 
 function requireOpenWtf(id: string): BeadRow {
-  const rows = bdJson<BeadRow[]>(['show', id])
-  const row = rows[0]
+  const row = taskStore().get<BeadRow>(id)
   if (!row || !(row.labels?.includes(WTF_LABEL) ?? false) || !isOpen(row)) {
     throw new Error(`wtf ${id} is not an open wtf bead`)
   }
@@ -115,13 +118,14 @@ export function recordRetro(plan: RetroPlan): RecordResult {
   ].join('\n')
   const first = plan.what.split('\n')[0] ?? ''
   const title = `retro: ${shorten(first)}`
-  const createArgs = ['create', title, '-l', RETRO_LABEL, '-d', memo]
-  if (wtf) {
+  const retro = taskStore().create<BeadRow>({
+    title,
+    labels: [RETRO_LABEL],
+    description: memo,
     // discovered-from, not --parent: the wtf is the trigger evidence,
     // and a child would block its close.
-    createArgs.push('--deps', `discovered-from:${wtf.id}`, '--no-inherit-labels')
-  }
-  const retro = bdJson<BeadRow>(createArgs)
+    ...(wtf ? { deps: [`discovered-from:${wtf.id}`], noInheritLabels: true } : {}),
+  })
 
   // bd has no transactions — if anything after the create fails, delete
   // what we created so a retry can't duplicate beads.
@@ -138,18 +142,13 @@ export function recordRetro(plan: RetroPlan): RecordResult {
       ]
         .join('\n')
         .trim()
-      const row = bdJson<BeadRow>([
-        'create',
-        '--title',
-        action.title,
-        '-l',
-        `${PREVENTION_LABEL},sink:${action.sink}`,
-        '--no-inherit-labels',
-        '--deps',
-        `discovered-from:${retro.id}`,
-        '-d',
-        detail,
-      ])
+      const row = taskStore().create<BeadRow>({
+        title: action.title,
+        labels: [PREVENTION_LABEL, `sink:${action.sink}`],
+        noInheritLabels: true,
+        deps: [`discovered-from:${retro.id}`],
+        description: detail,
+      })
       actionIds.push(row.id)
       created.push(row.id)
     }
@@ -173,14 +172,14 @@ export function recordRetro(plan: RetroPlan): RecordResult {
 
     // retro closes before the wtf — if the wtf close fails, compensation
     // deletes the created beads and the still-open wtf lets a retry land
-    bd(['close', retro.id, '--reason', 'retrospect recorded'])
+    taskStore().close(retro.id, 'retrospect recorded')
     if (wtf) {
-      bd(['close', wtf.id, '--reason', `answered by retro ${retro.id}`])
+      taskStore().close(wtf.id, `answered by retro ${retro.id}`)
     }
   } catch (err) {
     for (const id of created) {
       try {
-        bd(['delete', id, '--force'])
+        taskStore().remove(id)
       } catch {
         // best effort — report the original failure either way
       }

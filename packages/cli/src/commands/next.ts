@@ -23,7 +23,7 @@
  * queue is scoped to this checkout's issue_prefix — foreign-prefix
  * beads are reported, never claimed. scope = "all" opts out in plans.
  */
-import { bd, bdJson, bdTry, checkBeads } from '@bro/core'
+import { checkBeads, taskStore } from '@bro/core'
 import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts'
 import { requireGlobalStore } from '../doctypes/store.ts'
 
@@ -67,10 +67,7 @@ export const NEVER_CLAIM_LABELS = ['gt:slot']
  *  primitives are filtered out by bd itself, before classification.
  *  `dir` retargets the query at another store — `bro next --global`. */
 export function readyBeads(dir?: string): ReadyBead[] {
-  return bdJson<ReadyBead[]>(
-    ['ready', ...NEVER_CLAIM_LABELS.flatMap((l) => ['--exclude-label', l])],
-    dir
-  )
+  return taskStore(dir).ready<ReadyBead>({ excludeLabels: NEVER_CLAIM_LABELS })
 }
 
 /** This checkout's bead id scope — what `bd init` recorded as
@@ -79,20 +76,14 @@ export function readyBeads(dir?: string): ReadyBead[] {
  *  lookup is the opposite: on a shared db it would silently reopen
  *  cross-repo claiming, so it throws (fail closed). */
 export function projectPrefix(dir?: string): string | undefined {
-  const res = bdTry(['config', 'get', 'issue_prefix'], 15_000, dir)
-  if (res.code !== 0) {
+  try {
+    return taskStore(dir).prefix()
+  } catch (err) {
     throw new Error(
-      `bd config get issue_prefix failed — ${res.err || 'bd error'} ` +
+      `${err instanceof Error ? err.message : String(err)} ` +
         '(refusing to schedule without a verified project scope)'
     )
   }
-  const line = res.out.trim().split('\n').pop()?.trim() ?? ''
-  if (line === '' || /not set/i.test(line)) {
-    return undefined
-  }
-  const eq = line.indexOf('=')
-  const v = (eq >= 0 ? line.slice(eq + 1) : line).trim().replace(/^['"]|['"]$/g, '')
-  return v === '' ? undefined : v
 }
 
 /** Resolve a plan's scope policy to the scope classify applies:
@@ -112,8 +103,7 @@ export function epicParentIds(ready: ReadyBead[], dir?: string): Set<string> {
   const epic = new Set<string>()
   for (const id of ids) {
     try {
-      const [row] = bdJson<Array<{ issue_type?: string }>>(['show', id], dir)
-      if (row?.issue_type === 'epic') {
+      if (taskStore(dir).get(id)?.issue_type === 'epic') {
         epic.add(id)
       }
     } catch { /* a parent we can't inspect stays a molecule step */ }
@@ -190,8 +180,7 @@ export function classify(
  *  drain the queue into a fake idle. */
 function racedAway(b: ReadyBead, dir?: string): boolean {
   try {
-    const cur = bdJson<Array<{ status?: string }>>(['show', b.id], dir)
-    const status = cur[0]?.status
+    const status = taskStore(dir).get(b.id)?.status
     return typeof status === 'string' && status !== 'open'
   } catch {
     return false // show failed too — bd is down; the claim error is the diagnostic
@@ -207,7 +196,7 @@ export function claimUpTo(queue: ReadyBead[], limit: number, dir?: string): Read
       break
     }
     try {
-      bd(['update', b.id, '--claim'], dir)
+      taskStore(dir).claim(b.id)
       picked.push(b)
     } catch (err) {
       if (racedAway(b, dir)) {

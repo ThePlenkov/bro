@@ -1,5 +1,5 @@
 import { dirname } from 'node:path'
-import { bd, bdJson } from '@bro/core'
+import { bd, bdJson, taskStore } from '@bro/core'
 import type { ConvoyNext, ConvoyStep, Molecule, MolIssue, StepInput, StepKind, StepState } from './types.ts'
 
 /** `bd mol show <id> --json` — the whole DAG in one call. */
@@ -117,7 +117,7 @@ export function stepInputs(mol: Molecule, stepId: string): StepInput[] {
  * this — whoever claims first owns the step.
  */
 export function claimStep(stepId: string): void {
-  bd(['update', stepId, '--claim'])
+  taskStore().claim(stepId)
 }
 
 /** The resolved beads directory — `bd info` reports the database inside
