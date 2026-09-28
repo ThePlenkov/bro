@@ -16,7 +16,7 @@
  *                              #   checkout's issue_prefix are claimable;
  *                              #   all opens the queue to every scope in a
  *                              #   shared/federated db; global reads the
- *                              #   user-level store (`bro init store --global`)
+ *                              #   user-level store (`bro store init --global`)
  *   json = true                # machine-readable result
  *
  *   [filters]
@@ -37,7 +37,7 @@ export type NextGatePolicy = (typeof NEXT_GATE_POLICIES)[number]
 /** Queue scope — `project` (default) restricts claims to beads under
  *  this checkout's issue_prefix; `all` lifts the restriction for
  *  plans that deliberately work a shared/federated db; `global` reads
- *  the user-level store (`bro init store --global`) — still prefix-filtered by
+ *  the user-level store (`bro store init --global`) — still prefix-filtered by
  *  that store's own issue_prefix. */
 export const NEXT_SCOPES = ['project', 'all', 'global'] as const
 export type NextScope = (typeof NEXT_SCOPES)[number]

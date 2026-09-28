@@ -2,10 +2,10 @@
  * `store` doc type — the beads stores bro knows: the project store at
  * the repo root and the user-level global store.
  *
- *   bro list stores                  both stores, path + prefix + health
- *   bro show store --global          details of the resolved global dir
- *   bro init store --global          create + validate the global store
- *   bro path store --global          print the resolved store dir
+ *   bro store list                   both stores, path + prefix + health
+ *   bro store show --global          details of the resolved global dir
+ *   bro store init --global          create + validate the global store
+ *   bro store path --global          print the resolved store dir
  *
  * The global store defaults to ~/.local/share/bro/beads — `beads.global`
  * in bro.config.json or $BRO_GLOBAL_BEADS (env wins) relocate it.
@@ -45,7 +45,7 @@ export function resolveGlobalDir(cwd: string = process.cwd()): string {
 export function requireGlobalStore(cwd: string = process.cwd()): string {
   const dir = resolveGlobalDir(cwd)
   if (!existsSync(join(dir, '.beads'))) {
-    console.error(`error: no global beads store at ${dir} — run \`bro init store --global\` first`)
+    console.error(`error: no global beads store at ${dir} — run \`bro store init --global\` first`)
     process.exit(2)
   }
   return dir

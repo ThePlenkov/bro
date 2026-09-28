@@ -1,17 +1,23 @@
 /**
- * `bro <verb> [noun|ref] [--flags]` — verb-first dispatch over the
- * registered doc types. Plugin lookup wins argv[0]; when no plugin
- * matches, the word is tried as a doc verb against every type's adapter
- * (adapter methods are the registry — see core/docs.ts).
+ * `bro <noun> <verb> [ref…] [--flags]` — gh-style noun-first dispatch
+ * over the registered doc types. Verbs live inside their noun's
+ * namespace: `bro store init` and `bro task exec` never collide, and a
+ * plugin doc type's custom verbs are free by construction. Adapter
+ * methods are the verb registry (see core/docs.ts).
  *
- *   bro list [tasks] [--status=open]     standard: list|show|new|set|rm
- *   bro show bro-n5t                     ref → type inference (idPrefix)
- *   bro close bro-n5t --reason=done      custom verb, same arg shape
- *   bro … --global                       scope flag → global store
- *   bro exec -- --raw bd args            escape hatch per doc type
+ *   bro task list [--status=open]       standard: list|show|new|set|rm
+ *   bro task show bro-n5t               the noun namespaces the verb
+ *   bro store init --global             scope flag → global store
+ *   bro task exec -- <raw bd args>      escape hatch per doc type
+ *   bro <noun>                          bare noun = `list` if supported
  *
- * Flag convention for doc verbs: `--key=value` or boolean `--key`.
- * `--k v` pairs are NOT consumed (a value would eat the ref).
+ * Verb-first shorthand stays bound to the default type (task) plus
+ * ref-prefix inference: `bro list`, `bro show bro-n5t`,
+ * `bro close <id>`. A noun or a non-task verb in that position gets a
+ * `bro <noun> <verb>` redirect, never a silent reinterpretation.
+ *
+ * Flag convention: `--key=value` or boolean `--key`; `--k v` pairs are
+ * NOT consumed (a value would eat the ref).
  */
 import {
   docTypeNamed,
@@ -114,56 +120,14 @@ export function docArgs(argv: string[]): {
   return { positional, flags, scope }
 }
 
-interface Bound {
-  type: DocType
-  adapter: ReturnType<DocType['adapter']>
-  method: (...args: never[]) => unknown
-}
-
-/** The doc-type a verb + first positional resolves to. Positionals may
- *  be `[noun, ref…]` or `[ref…]`; a missing noun falls back to `task`
- *  (the dominant type), then to a unique supporter of the verb. */
-function resolveType(
-  supporting: Bound[],
-  positional: string[],
-  cmd: string
-): { bound: Bound; rest: string[] } | undefined {
-  const named =
-    positional[0] !== undefined
-      ? supporting.find((b) => docTypeNamed(b.type, positional[0]!))
-      : undefined
-  if (named) {
-    return { bound: named, rest: positional.slice(1) }
-  }
-  // 'store' is a noun even when store lacks this verb — `bro close
-  // store` must say "not supported on store", not silently read
-  // 'store' as a task ref and go hunting for it in beads
-  const knownNoun =
-    positional[0] !== undefined
-      ? docTypes().find((t) => docTypeNamed(t, positional[0]!))
-      : undefined
-  if (knownNoun) {
-    die(`bro ${cmd} is not supported on ${knownNoun.name}`)
-  }
-  const rest = positional
-  // ref-shaped first arg — infer the type by prefix, else task, else
-  // the only type that can serve the verb at all
-  const inferred =
-    (positional[0] !== undefined &&
-      supporting.find((b) => b.type.idPrefix && positional[0]!.startsWith(b.type.idPrefix))) ||
-    supporting.find((b) => b.type.name === 'task') ||
-    (supporting.length === 1 ? supporting[0] : undefined)
-  return inferred ? { bound: inferred, rest } : undefined
-}
-
 function die(msg: string): never {
   console.error(`error: ${msg}`)
   process.exit(2)
 }
 
-function needRef(ref: string | undefined, verb: string): string {
+function needRef(type: DocType, ref: string | undefined, verb: string): string {
   if (!ref) {
-    die(`bro ${verb} needs a ref — \`bro ${verb} <id>\``)
+    die(`bro ${type.name} ${verb} needs a ref — \`bro ${type.name} ${verb} <id>\``)
   }
   return ref
 }
@@ -187,67 +151,99 @@ function printResult(type: DocType, verb: string, result: unknown): void {
   console.log(render(result))
 }
 
-/**
- * Try `cmd` as a doc verb. Returns false when no registered type
- * exposes it — the caller falls through to "unknown command".
- */
-export async function runDocVerb(cmd: string, argv: string[]): Promise<boolean> {
-  const { positional, flags, scope } = docArgs(argv)
-  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd()
-  const ctx: DocCtx = { root, scope }
-  const supporting = docTypes()
-    .map((t) => {
-      const adapter = t.adapter(ctx)
-      const method = verbMethod(adapter, cmd)
-      return method ? ({ type: t, adapter, method } as Bound) : undefined
-    })
-    .filter((b): b is Bound => b !== undefined)
-  if (supporting.length === 0) {
-    return false
+/** Invoke `verb` on `type`'s adapter — unknown verbs die with the
+ *  type's discovered verb list (the noun is already explicit). */
+async function runBound(
+  type: DocType,
+  verb: string,
+  rest: string[],
+  flags: DocFlags,
+  ctx: DocCtx
+): Promise<true> {
+  const adapter = type.adapter(ctx)
+  const method = verbMethod(adapter, verb)
+  if (!method) {
+    die(`bro ${type.name} ${verb} — ${type.name} verbs: ${docVerbs(adapter).join(' ')}`)
   }
-  const hit = resolveType(supporting, positional, cmd)
-  if (!hit) {
-    die(
-      `bro ${cmd} needs a noun — ` +
-        supporting.map((b) => b.type.name).join('|') +
-        ` (e.g. \`bro ${cmd} ${supporting[0]!.type.name} …\`)`
-    )
-  }
-  const { bound, rest } = hit
-  const { type, adapter } = bound
-  if (scope === 'global' && !(type.scopes ?? ['project']).includes('global')) {
+  if (ctx.scope === 'global' && !(type.scopes ?? ['project']).includes('global')) {
     die(`--global is not supported on ${type.name}`)
   }
 
-  const role = STANDARD_VERBS[cmd]
   let result: unknown
-  switch (role) {
+  switch (STANDARD_VERBS[verb]) {
     case 'list':
       result = [...(adapter.list?.(flags) ?? [])]
       break
     case 'get':
-      result = adapter.get?.(needRef(rest[0], cmd)) ?? die(`${type.name} "${rest[0]}" not found`)
+      result = adapter.get?.(needRef(type, rest[0], verb)) ?? die(`${type.name} "${rest[0]}" not found`)
       break
     case 'create':
       result = adapter.create?.({ ...flags, title: rest.join(' ') }, flags)
       break
     case 'update':
-      result = adapter.update?.(needRef(rest[0], cmd), flags)
+      result = adapter.update?.(needRef(type, rest[0], verb), flags)
       break
     case 'remove':
-      adapter.remove?.(needRef(rest[0], cmd))
+      adapter.remove?.(needRef(type, rest[0], verb))
       break
     default:
       // custom verb — ref is a convenience head; `positional` carries
       // the full tail so passthrough verbs (exec) lose nothing
-      result = await (bound.method as (
+      result = await (method as (
         ref: string | undefined,
         flags: DocFlags,
         positional: string[]
       ) => unknown)(rest[0], flags, rest)
   }
-  printResult(type, cmd, result)
+  printResult(type, verb, result)
   return true
+}
+
+/**
+ * Dispatch `cmd` into the doc layer. Noun-first is the grammar:
+ * `bro <noun> [verb] [ref…]` (bare noun → `list` when supported).
+ * Verb-first is shorthand bound to the default type plus ref-prefix
+ * inference. Returns false when `cmd` is neither a noun nor a doc
+ * verb — the caller falls through to "unknown command".
+ */
+export async function runDocVerb(cmd: string, argv: string[]): Promise<boolean> {
+  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd()
+  const { positional, flags, scope } = docArgs(argv)
+  const ctx: DocCtx = { root, scope }
+  const types = docTypes()
+
+  // noun-first — canonical: `bro store init --global`
+  const noun = types.find((t) => docTypeNamed(t, cmd))
+  if (noun) {
+    const [verb = 'list', ...rest] = positional
+    return runBound(noun, verb, rest, flags, ctx)
+  }
+
+  // verb-first shorthand: ref-prefix inference wins, else the default
+  // type (task). `bro show bro-n5t` / `bro list` — anything noun- or
+  // foreign-verb-shaped gets a noun-first redirect, not silent magic.
+  const pref = positional[0]
+  const inferred =
+    (pref !== undefined &&
+      types.find((t) => t.idPrefix && pref.startsWith(t.idPrefix))) ||
+    types.find((t) => t.name === 'task') ||
+    types[0]
+  if (!inferred) {
+    return false
+  }
+  if (!verbMethod(inferred.adapter(ctx), cmd)) {
+    const owner = types.find((t) => verbMethod(t.adapter(ctx), cmd) !== undefined)
+    if (owner) {
+      die(`'${cmd}' is a ${owner.name} verb — use \`bro ${owner.name} ${cmd} …\``)
+    }
+    return false
+  }
+  if (pref !== undefined && types.some((t) => t !== inferred && docTypeNamed(t, pref))) {
+    die(`'${pref}' is a doc noun — use \`bro ${pref} ${cmd} …\``)
+  }
+  // the bound type's own noun stays consumable: `bro show task <id>`
+  const rest = pref !== undefined && docTypeNamed(inferred, pref) ? positional.slice(1) : positional
+  return runBound(inferred, cmd, rest, flags, ctx)
 }
 
 /** Words external plugins must not take as command names — plugin
@@ -273,20 +269,18 @@ export function reservedWords(root = process.cwd()): Set<string> {
   return words
 }
 
-/** Verb/noun lines for `bro --help` — discovered, not hardcoded. */
+/** Noun/verb lines for `bro --help` — discovered, not hardcoded.
+ *  `verbs` here means the shorthand surface: the default type's verbs
+ *  usable verb-first; every type's full verb set lives behind
+ *  `bro <noun> <verb>`. */
 export function docUsageLines(): string[] {
   const root = process.cwd()
   const ctx: DocCtx = { root, scope: 'project' }
-  const verbs = new Set<string>()
-  const nouns: string[] = []
-  for (const t of docTypes()) {
-    for (const v of docVerbs(t.adapter(ctx))) {
-      verbs.add(v)
-    }
-    nouns.push(t.name)
-  }
+  const types = docTypes()
+  const def = types.find((t) => t.name === 'task') ?? types[0]
+  const verbs = def ? docVerbs(def.adapter(ctx)) : []
   return [
-    `  doc verbs: ${[...verbs].join(' ')}`,
-    `  doc nouns: ${nouns.join(' ')}   (e.g. \`bro list tasks\`, \`bro show <id>\`, \`bro init store --global\`)`,
+    `  doc types: ${types.map((t) => t.name).join(' ')}   — \`bro <noun> <verb>\` (e.g. \`bro task list\`, \`bro store init --global\`)`,
+    `  shorthand: ${verbs.join(' ')}   — ${def?.name ?? 'task'} verbs usable verb-first (\`bro show <id>\`)`,
   ]
 }

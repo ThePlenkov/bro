@@ -59,6 +59,7 @@ describe('runDocVerb', () => {
   registerDocType({
     name: 'fake',
     aliases: ['fakes'],
+    idPrefix: 'fx-',
     render: (d: { id: string }) => `rendered:${d.id}`,
     adapter: () => ({
       list: (flags: Record<string, string>) => {
@@ -88,19 +89,34 @@ describe('runDocVerb', () => {
     assert.equal(await runDocVerb('definitely-not-a-verb', []), false)
   })
 
-  test('`bro list fakes --x=1` reaches the adapter with flags', async () => {
+  test('`bro fake list --x=1` reaches the adapter with flags', async () => {
     const printed = await captureLog(async () => {
-      assert.equal(await runDocVerb('list', ['fakes', '--x=1']), true)
+      assert.equal(await runDocVerb('fake', ['list', '--x=1']), true)
     })
     assert.ok(calls.includes('list:{"x":"1"}'))
     assert.deepEqual(printed, ['rendered:f1'])
   })
 
-  test('`bro show fake id-7` resolves the noun then the ref', async () => {
+  test('`bro fake` bare noun defaults to list', async () => {
     await captureLog(async () => {
-      assert.equal(await runDocVerb('show', ['fake', 'id-7']), true)
+      assert.equal(await runDocVerb('fake', []), true)
+    })
+    assert.ok(calls.includes('list:{}'))
+  })
+
+  test('`bro fake show id-7` — noun namespaces the verb', async () => {
+    await captureLog(async () => {
+      assert.equal(await runDocVerb('fake', ['show', 'id-7']), true)
     })
     assert.ok(calls.includes('get:id-7'))
+  })
+
+  test('verb-first ref inference still binds a non-default type', async () => {
+    // fake idPrefix 'fx-' — `bro show fx-9` resolves the type by prefix
+    await captureLog(async () => {
+      assert.equal(await runDocVerb('show', ['fx-9']), true)
+    })
+    assert.ok(calls.includes('get:fx-9'))
   })
 
   test('builtin doc types registered: task + store', () => {
