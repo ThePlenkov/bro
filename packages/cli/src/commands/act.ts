@@ -193,9 +193,15 @@ async function cmdWait(argv: string[]): Promise<void> {
     process.exitCode = res.timedOut || !res.gate.ok ? 1 : 0
     return
   }
+  await mergeIfAsked(argv, t.pr)
+}
+
+/** Post-wait merge dispatch: `--merge` lands the PR (with `--cleanup`
+ *  forwarded); `--cleanup` alone is an error — nothing was merged. */
+async function mergeIfAsked(argv: string[], pr: number): Promise<void> {
   if (argv.includes('--merge')) {
     const mergeArgs = argv.filter((a) => ['--squash', '--rebase', '--admin', '--cleanup'].includes(a))
-    await cmdMerge([String(t.pr), ...mergeArgs])
+    await cmdMerge([String(pr), ...mergeArgs])
   } else if (argv.includes('--cleanup')) {
     console.error('error: --cleanup requires --merge — nothing was merged, nothing to clean')
     process.exitCode = 2
