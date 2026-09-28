@@ -24,7 +24,7 @@
 import { spawnSync, spawn, execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { bd, bdJson, checkBeads, gitTry, prLink } from '@bro/core'
+import { checkBeads, gitTry, prLink, taskStore } from '@bro/core'
 import { evaluateExitGate, fetchPrActState, updatePullBranch, waitForGate } from '@bro/act'
 import { fetchReviewThreads } from '@bro/debt'
 import {
@@ -187,7 +187,7 @@ function findPr(dir: string, branch: string): number | null | 'lookup-error' {
 
 function noteBead(id: string, note: string): void {
   try {
-    bd(['update', id, '--notes', note])
+    taskStore().update(id, { notes: note })
   } catch {
     console.error(`loop: could not note ${id} — ${note}`)
   }
@@ -196,7 +196,7 @@ function noteBead(id: string, note: string): void {
 /** Best-effort return of a bead to the open queue. */
 function reopenBead(id: string): void {
   try {
-    bd(['update', id, '--status', 'open'])
+    taskStore().update(id, { status: 'open' })
   } catch { /* best-effort unclaim */ }
 }
 
@@ -233,7 +233,7 @@ async function finalizeMerge(
     return 'parked'
   }
   try {
-    bd(['close', bead.id, '--reason', `landed via PR ${prRef(ctx, pr)}`])
+    taskStore().close(bead.id, `landed via PR ${prRef(ctx, pr)}`)
   } catch (err) {
     console.error(`loop: bd close ${bead.id} failed — ${String(err)}`)
   }
@@ -536,11 +536,7 @@ export function loopRefTails(root: string): RefTails {
  *  a shared store holds other sessions' claims too. */
 function claimedTails(seen: Set<string>): { own: string[]; other: string[] } {
   try {
-    const rows = bdJson<{ id: string; title?: string }[]>([
-      'list',
-      '--status',
-      'in_progress',
-    ])
+    const rows = taskStore().list({ status: 'in_progress' })
     const fmt = (r: { id: string; title?: string }) =>
       `${r.id} ${(r.title ?? '').replace(/\s+/g, ' ').slice(0, 60)}`.trim()
     return {

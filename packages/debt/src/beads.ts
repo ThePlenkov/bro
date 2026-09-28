@@ -5,7 +5,7 @@
  * queue (`bd ready -l debt`). Upsert key: `external_ref` = `thread_id`, so
  * `bro debt sync` is idempotent. Status reconciles ledger → bead on re-runs.
  */
-import { bd, initBeadsStealth } from '@bro/core'
+import { bd, initBeadsStealth, taskStore } from '@bro/core'
 import type { DebtPriority, DebtRecord, DebtStatus } from './types.ts'
 
 export interface BeadRef {
@@ -37,7 +37,7 @@ export function checkBeads(opts: { autoInit?: boolean } = {}): void {
     initBeadsStealth()
   }
   try {
-    bd(['list', '--json', '-n', '1'])
+    taskStore().list({ limit: 1 })
   } catch (err) {
     // preserve the real failure — "not initialized" is only one cause
     const stderr = (err as { stderr?: string }).stderr?.trim()
@@ -59,10 +59,10 @@ export function listDebtBeads(): Map<string, BeadRef> {
     metadata?: { times_seen?: number } | null
   }>
   try {
-    rows = JSON.parse(bd(['list', '--json', '-n', '0', '--all', '-l', 'debt']))
+    rows = taskStore().list({ limit: 0, all: true, labels: ['debt'] })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    throw new Error(`bd list failed or returned malformed JSON — ${msg}`)
+    throw new Error(`task list failed or returned malformed JSON — ${msg}`)
   }
   const map = new Map<string, BeadRef>()
   for (const row of rows) {
@@ -113,51 +113,49 @@ function reconcileStatus(
   const target = STATUS_MAP[want]
   const isClosed = beadStatus === 'closed' || beadStatus === 'done'
   if (target === 'closed' && !isClosed) {
-    bd(['close', beadId, '--reason', `debt status: ${want}`])
+    taskStore().close(beadId, `debt status: ${want}`)
     res.closed += 1
   } else if (target !== 'closed' && isClosed) {
-    bd(['reopen', beadId])
+    taskStore().reopen(beadId)
     res.reopened += 1
     if (target === 'in_progress') {
-      bd(['update', beadId, '--status', 'in_progress'])
+      taskStore().update(beadId, { status: 'in_progress' })
     }
   } else if (target === 'in_progress' && beadStatus === 'open') {
-    bd(['update', beadId, '--status', 'in_progress'])
+    taskStore().update(beadId, { status: 'in_progress' })
     res.updated += 1
   } else if (target === 'open' && beadStatus !== 'open') {
     // Ledger is truth: a bead left claimed after the record went back to
     // open must return to the queue, not sit as in_progress forever.
-    bd(['update', beadId, '--status', 'open'])
+    taskStore().update(beadId, { status: 'open' })
     res.updated += 1
   } else {
     res.unchanged += 1
   }
 }
 
-function beadArgs(rec: DebtRecord): string[] {
-  return [
-    'create',
-    '--silent',
-    '--title',
-    `${rec.area}: ${rec.body_preview}`,
-    '--description',
-    `${rec.body}\n\n---\nthread: ${rec.thread_url}\npr: ${rec.source_pr_url}`,
-    '-l',
-    `debt,pr:${rec.source_pr},area:${rec.area},author:${rec.author},priority:${rec.priority}`,
-    '--priority',
-    String(PRIORITY_MAP[rec.priority]),
-    '--external-ref',
-    rec.thread_id,
-    '--metadata',
-    JSON.stringify({
+function beadInput(rec: DebtRecord) {
+  return {
+    title: `${rec.area}: ${rec.body_preview}`,
+    description: `${rec.body}\n\n---\nthread: ${rec.thread_url}\npr: ${rec.source_pr_url}`,
+    labels: [
+      'debt',
+      `pr:${rec.source_pr}`,
+      `area:${rec.area}`,
+      `author:${rec.author}`,
+      `priority:${rec.priority}`,
+    ],
+    priority: PRIORITY_MAP[rec.priority],
+    externalRef: rec.thread_id,
+    metadata: {
       thread_id: rec.thread_id,
       fingerprint: rec.fingerprint,
       path: rec.path,
       line: rec.line,
       source_pr: rec.source_pr,
       times_seen: rec.times_seen,
-    }),
-  ]
+    },
+  }
 }
 
 function syncRecord(
@@ -172,7 +170,7 @@ function syncRecord(
     if (dryRun) {
       return
     }
-    const id = bd(beadArgs(rec)).trim()
+    const id = taskStore().create(beadInput(rec)).id
     existing.set(rec.thread_id, { id, status: 'open' })
     if (rec.status !== 'open') {
       reconcileStatus(id, 'open', rec.status, res)
@@ -191,18 +189,18 @@ function syncRecord(
 function reconcileDrift(bead: BeadRef, rec: DebtRecord, res: SyncResult): void {
   const wantTitle = `${rec.area}: ${rec.body_preview}`
   const wantPriority = PRIORITY_MAP[rec.priority]
-  const updateArgs = ['update', bead.id]
+  const patch: Record<string, string | number> = {}
   if (bead.title !== undefined && bead.title !== wantTitle) {
-    updateArgs.push('--title', wantTitle)
+    patch.title = wantTitle
   }
   if (bead.priority !== undefined && bead.priority !== wantPriority) {
-    updateArgs.push('--priority', String(wantPriority))
+    patch.priority = wantPriority
   }
   if (bead.timesSeen !== rec.times_seen) {
-    updateArgs.push('--set-metadata', `times_seen=${rec.times_seen}`)
+    patch['set-metadata'] = `times_seen=${rec.times_seen}`
   }
-  if (updateArgs.length > 2) {
-    bd(updateArgs)
+  if (Object.keys(patch).length > 0) {
+    taskStore().update(bead.id, patch)
     res.updated += 1
   }
 }
@@ -213,7 +211,7 @@ function tryLink(dup: BeadRef, canonical: BeadRef, res: SyncResult, dryRun: bool
     return
   }
   // bd link is idempotent on existing edges — failures are real, let them throw.
-  bd(['link', dup.id, canonical.id, '--type', 'related'])
+  taskStore().link(dup.id, canonical.id, 'related')
   res.linked += 1
 }
 

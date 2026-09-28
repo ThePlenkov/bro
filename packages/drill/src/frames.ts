@@ -6,7 +6,7 @@
  * (`claim` on down, `handoff` on up). No claim.json, no .drills/ tree —
  * beads IS the memory system.
  */
-import { bd, bdJson, evidenceKind, refKind } from '@bro/core'
+import { bd, bdJson, evidenceKind, refKind, taskStore } from '@bro/core'
 import type { DownOptions, DrillFrame, DrillRow, UpOptions, UpResult } from './types.ts'
 
 const DRILL_LABEL = 'drill'
@@ -21,7 +21,11 @@ function isOpen(row: DrillRow): boolean {
 }
 
 export function listDrills(): DrillRow[] {
-  const persistent = bdJson<DrillRow[]>(['list', '-l', DRILL_LABEL, '--all', '-n', '0'])
+  const persistent = taskStore().list<DrillRow>({
+    labels: [DRILL_LABEL],
+    all: true,
+    limit: 0,
+  })
   // ephemeral frames live in the wisp namespace, outside `bd list`
   let wisps: DrillRow[] = []
   try {
@@ -39,7 +43,7 @@ export function listDrills(): DrillRow[] {
 }
 
 export function childrenOf(id: string): DrillRow[] {
-  return bdJson<DrillRow[]>(['children', id])
+  return taskStore().children<DrillRow>(id)
 }
 
 interface DepEdge {
@@ -62,9 +66,10 @@ function drillRelations(rows: DrillRow[]): {
     return { kids, parents }
   }
   const byId = new Map(rows.map((r) => [r.id, r]))
-  const edges = bdJson<DepEdge[]>([
-    'dep', 'list', ...rows.map((r) => r.id), '-t', 'parent-child',
-  ])
+  const edges = taskStore().deps<DepEdge>(
+    rows.map((r) => r.id),
+    { type: 'parent-child' }
+  )
   for (const e of edges) {
     const kid = byId.get(e.issue_id)
     const parent = byId.get(e.depends_on_id)
@@ -115,7 +120,7 @@ export function currentFrame(): DrillFrame | undefined {
 
 /** The bead must be an open drill frame, or an explicit selector is wrong. */
 function requireOpenDrill(id: string, flag: string): DrillRow {
-  const row = bdJson<DrillRow[]>(['show', id])[0]
+  const row = taskStore().get<DrillRow>(id)
   if (!row || !isDrill(row) || !isOpen(row)) {
     throw new Error(`${flag} ${id} is not an open drill frame`)
   }
@@ -141,7 +146,7 @@ function claimFrame(id: string): void {
     ])
   } catch (err) {
     try {
-      bd(['delete', id, '--force'])
+      taskStore().remove(id)
     } catch (cleanupErr) {
       throw new Error(
         `claim failed: ${err instanceof Error ? err.message : err}; ` +
@@ -162,23 +167,15 @@ export function drillDown(title: string, opts: DownOptions = {}): DrillRow {
   } else if (!opts.root) {
     parent = currentFrame()?.id
   }
-  const args = ['create', title, '-l', DRILL_LABEL]
-  if (parent) {
-    args.push('--parent', parent)
-  }
-  if (opts.ephemeral) {
-    args.push('--ephemeral')
-  }
-  if (opts.type) {
-    args.push('-t', opts.type)
-  }
-  if (opts.priority !== undefined) {
-    args.push('-p', String(opts.priority))
-  }
-  if (opts.description) {
-    args.push('-d', opts.description)
-  }
-  const row = bdJson<DrillRow>(args)
+  const row = taskStore().create<DrillRow>({
+    title,
+    labels: [DRILL_LABEL],
+    parent,
+    ephemeral: opts.ephemeral,
+    type: opts.type,
+    priority: opts.priority,
+    description: opts.description,
+  })
   if (!opts.ephemeral) {
     // wisp semantics: ephemeral frames get no audit trail
     claimFrame(row.id)
@@ -194,15 +191,10 @@ export { refKind }
  * of hydrated issues): a wrong shape would mask as "no priors" and
  * silently resurrect the duplicate-on-retry bug this query prevents. */
 function priorPreventionRows(frameId: string): DrillRow[] {
-  const rows = bdJson<DrillRow[]>([
-    'dep',
-    'list',
-    frameId,
-    '--direction=up',
-    '--type',
-    'discovered-from',
-    '--json',
-  ])
+  const rows = taskStore().deps<DrillRow>([frameId], {
+    direction: 'up',
+    type: 'discovered-from',
+  })
   assertHydratedRows(rows, `bd dep list for ${frameId}`)
   return rows
 }
@@ -277,16 +269,12 @@ function createPreventions(
   const created: string[] = []
   const newIds = new Map<string, string>()
   for (const item of create) {
-    const row = bdJson<DrillRow>([
-      'create',
-      '--title',
-      item,
-      '-l',
-      PREVENTION_LABEL,
-      '--no-inherit-labels',
-      '--deps',
-      `discovered-from:${frameId}`,
-    ])
+    const row = taskStore().create<DrillRow>({
+      title: item,
+      labels: [PREVENTION_LABEL],
+      noInheritLabels: true,
+      deps: [`discovered-from:${frameId}`],
+    })
     created.push(row.id)
     newIds.set(titleKey(item), row.id)
   }
@@ -308,11 +296,11 @@ function createPreventions(
 /** `bd note` appends — check the stored notes first so a retry after a
  * later failure can't duplicate the memo. */
 function noteOnce(frameId: string, memo: string): void {
-  const current = bdJson<DrillRow[]>(['show', frameId])[0]
+  const current = taskStore().get<DrillRow>(frameId)
   if (current?.notes?.includes(memo)) {
     return
   }
-  bd(['note', frameId, memo])
+  taskStore().note(frameId, memo)
 }
 
 /** Evidence refs + handoff event — skipped for wisps (no audit trail).
@@ -414,12 +402,12 @@ export function drillUp(opts: UpOptions): UpResult {
     if (!frame.ephemeral) {
       recordHandoff(frame, opts.evidence ?? [])
     }
-    bd(['close', frame.id, '--reason', 'drill up — result handed to parent'])
+    taskStore().close(frame.id, 'drill up — result handed to parent')
   } catch (err) {
     const orphans: string[] = []
     for (const id of created) {
       try {
-        bd(['delete', id, '--force'])
+        taskStore().remove(id)
       } catch {
         orphans.push(id)
       }

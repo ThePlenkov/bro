@@ -1,9 +1,10 @@
 /**
- * `task` doc type — beads issues under verb-first dispatch. The bd
- * store is the implementation; the contract is the doc layer.
+ * `task` doc type — the issue-level store under noun-first dispatch.
+ * All backend access goes through the TaskStore contract
+ * (@bro/core/tasks.ts); this file only maps CLI flags onto it.
  *
  *   bro task list [--status=open] [--label=x]
- *   bro task show bro-n5t               ref infers the type — shorthand `bro show …`
+ *   bro task show bro-n5t               shorthand: `bro show …`
  *   bro task new "title" [--type=bug] [--priority=2]
  *   bro task set bro-n5t --status=blocked
  *   bro task close bro-n5t --reason="merged in #95"
@@ -15,96 +16,93 @@
  * flag resolved at adapter construction, never a verb concern.
  */
 import { spawnSync } from 'node:child_process'
-import { bd, bdJson } from '@bro/core'
-import type { DocAdapter, DocCtx, DocFlags, DocType } from '@bro/core'
+import { taskStore } from '@bro/core'
+import type { DocAdapter, DocCtx, DocFlags, DocType, TaskFilter, TaskInput, TaskRow, TaskStore } from '@bro/core'
 import { requireGlobalStore } from './store.ts'
 
-export interface TaskRow {
-  id: string
-  title?: string
-  status?: string
-  issue_type?: string
-  priority?: number
-  labels?: string[]
-  [k: string]: unknown
-}
+export type { TaskRow }
 
-/** The store dir this invocation targets — lazily, per verb call, so a
+/** The store this invocation targets — lazily, per verb call, so a
  *  missing global store fails only the verb that needed it. */
-function storeDir(ctx: DocCtx): string {
-  return ctx.scope === 'global' ? requireGlobalStore(ctx.root) : ctx.root
+function storeFor(ctx: DocCtx): () => TaskStore {
+  const dir = () => (ctx.scope === 'global' ? requireGlobalStore(ctx.root) : ctx.root)
+  return () => taskStore(dir())
 }
 
-/** DocFlags → bd-style argv (`status=open` → --status open; a 'true'
- *  boolean stays a bare flag). */
-function flagArgs(flags: DocFlags, skip: readonly string[] = []): string[] {
-  return Object.entries(flags).flatMap(([k, v]) => {
-    if (skip.includes(k)) {
-      return []
-    }
-    return v === 'true' ? [`--${k}`] : [`--${k}`, v]
-  })
+/** CLI flags → TaskFilter — known keys map, the rest are ignored
+ *  (the store contract is typed; arbitrary backend flags go through
+ *  `exec`). */
+function toFilter(flags: DocFlags): TaskFilter {
+  const f: TaskFilter = {}
+  if (flags['status']) f.status = flags['status']
+  if (flags['type']) f.type = flags['type']
+  if (flags['all'] === 'true') f.all = true
+  const limit = flags['limit'] ?? flags['n']
+  if (limit) f.limit = Number(limit)
+  const label = flags['label'] ?? flags['l']
+  if (label) f.labels = label.split(',')
+  return f
+}
+
+/** CLI flags → TaskInput — everything the dispatcher didn't consume
+ *  as the title. */
+function toInput(input: Record<string, unknown>, flags: DocFlags): TaskInput {
+  const i: TaskInput = { title: '' }
+  if (typeof input['title'] === 'string') i.title = input['title']
+  if (flags['type']) i.type = flags['type']
+  if (flags['priority']) i.priority = Number(flags['priority'])
+  if (flags['description']) i.description = flags['description']
+  if (flags['label']) i.labels = flags['label'].split(',')
+  if (flags['external-ref']) i.externalRef = flags['external-ref']
+  return i
 }
 
 function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
-  const dir = () => storeDir(ctx)
+  const store = storeFor(ctx)
+  const die = (msg: string): never => {
+    console.error(`error: ${msg}`)
+    process.exit(2)
+  }
   return {
-    list: (flags) => bdJson<TaskRow[]>(['list', ...flagArgs(flags)], dir()),
-    get: (ref) => {
-      if (!ref) {
-        return undefined
-      }
-      // bd show --json wraps the issue in an array
-      const r = bdJson<TaskRow | TaskRow[]>(['show', ref], dir())
-      return Array.isArray(r) ? r[0] : r
-    },
+    list: (flags) => store().list(toFilter(flags)),
+    get: (ref) => (ref ? store().get(ref) : undefined),
     create: (input, flags) => {
-      const title = input['title']
-      if (typeof title !== 'string' || title === '') {
-        console.error('error: bro new task needs a title — `bro new task "title"`')
-        process.exit(2)
+      const i = toInput(input, flags)
+      if (i.title === '') {
+        die('bro task new needs a title — `bro task new "title"`')
       }
-      return bdJson<TaskRow>(['create', title, ...flagArgs(flags)], dir())
+      return store().create(i)
     },
     update: (ref, patch) => {
       if (!ref) {
-        console.error('error: bro set needs a ref — `bro set <id> --status=open`')
-        process.exit(2)
+        die('bro task set needs a ref — `bro task set <id> --status=open`')
       }
-      bd(['update', ref, ...flagArgs(patch)], dir())
+      const s = store()
+      s.update(ref, patch)
       // the mutation already landed — a failed readback must not turn
       // a successful update into a reported failure
       try {
-        const r = bdJson<TaskRow | TaskRow[]>(['show', ref], dir())
-        return Array.isArray(r) ? r[0] : r
+        return s.get(ref)
       } catch {
         return { id: ref }
       }
     },
     remove: (ref) => {
       if (!ref) {
-        console.error('error: bro rm needs a ref — `bro rm <id>`')
-        process.exit(2)
+        die('bro task rm needs a ref — `bro task rm <id>`')
       }
-      bd(['delete', ref], dir())
+      store().remove(ref)
     },
     close: (ref: string | undefined, flags: DocFlags) => {
-      if (!ref) {
-        console.error('error: bro close needs a ref — `bro close <id> [--reason=…]`')
-        process.exit(2)
-      }
-      const args = ['close', ref]
-      if (flags['reason']) {
-        args.push('--reason', flags['reason'])
-      }
-      args.push(...flagArgs(flags, ['reason']))
-      bd(args, dir())
+      const id = ref ?? die('bro task close needs a ref — `bro task close <id> [--reason=…]`')
+      store().close(id, flags['reason'])
     },
-    // raw passthrough — `bro exec [--global] -- <bd args>`; anything
-    // after `--` reaches bd untouched. The escape hatch for bd features
-    // the doc layer does not model yet.
+    // raw passthrough — `bro task exec [--global] -- <bd args>`;
+    // anything after `--` reaches bd untouched. The escape hatch for
+    // bd features the store contract does not model yet.
     exec: (_ref: string | undefined, _flags: DocFlags, positional: string[]) => {
-      const res = spawnSync('bd', positional, { cwd: dir(), stdio: 'inherit' }) // NOSONAR — PATH contract
+      const dir = ctx.scope === 'global' ? requireGlobalStore(ctx.root) : ctx.root
+      const res = spawnSync('bd', positional, { cwd: dir, stdio: 'inherit' }) // NOSONAR — PATH contract
       process.exit(res.status ?? 1)
     },
   }

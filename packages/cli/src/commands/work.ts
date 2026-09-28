@@ -22,7 +22,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve, sep } from 'node:path'
-import { bdTry, git, gitTry, loadConfig, stackSection } from '@bro/core'
+import { git, gitTry, loadConfig, stackSection, taskStore } from '@bro/core'
 import { flag, positionals } from './args.ts'
 
 export interface WorktreeInfo {
@@ -144,11 +144,15 @@ export function hasSubmodules(worktreePath: string): boolean {
  *  for this actor so parallel sessions see it taken. Beads-less repos and
  *  non-bead slugs pass silently. */
 function claimBead(slug: string): string | null {
-  if (bdTry(['show', slug]).code !== 0) {
+  try {
+    if (!taskStore().get(slug)) {
+      return null
+    }
+    taskStore().claim(slug)
+    return slug
+  } catch {
     return null
   }
-  const upd = bdTry(['update', slug, '--claim'])
-  return upd.code === 0 ? slug : null
 }
 
 /** Base ref for a new worktree's branch. `git worktree add` alone would

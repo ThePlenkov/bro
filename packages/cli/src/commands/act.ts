@@ -8,7 +8,7 @@
  *   reply   --thread ID --comment TEXT | --file TSV
  */
 import { readFileSync } from 'node:fs'
-import { ensureGhAuth, bd, gh, gitTry, prLink, resolveRepo } from '@bro/core'
+import { ensureGhAuth, gh, gitTry, prLink, resolveRepo, taskStore } from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
 import { fetchReviewThreads } from '@bro/debt'
 import { isAncestor } from './cleanup.ts'
@@ -577,18 +577,12 @@ function deferThread(v: ActThreadVerdict, ownerRepo: string | null, pr?: number)
   if (!v.title) {
     throw new Error(`defer verdict for ${v.thread_id} has no title`)
   }
-  const bead = bd([
-    'create',
-    '--silent',
-    '--title',
-    v.title,
-    '-l',
-    'debt',
-    '-d',
-    desc,
-    '--external-ref',
-    v.thread_id,
-  ]).trim()
+  const bead = taskStore().create({
+    title: v.title,
+    labels: ['debt'],
+    description: desc,
+    externalRef: v.thread_id,
+  }).id
   const reply = `deferred to ${bead}` + (v.comment ? ` — ${v.comment}` : '')
   replyToThread(v.thread_id, reply)
   resolveReviewThread(v.thread_id)

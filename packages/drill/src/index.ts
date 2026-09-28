@@ -1,4 +1,4 @@
-export { bd, bdJson, checkBeads, refKind } from '@bro/core'
+export { bd, bdJson, checkBeads, refKind, taskStore } from '@bro/core'
 export {
   childrenOf,
   currentFrame,

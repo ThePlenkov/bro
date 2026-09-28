@@ -31,11 +31,11 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
-import { ghJson, gitTry, prLink, resolveRepo } from '@bro/core'
+import { ghJson, gitTry, prLink, resolveRepo, taskStore } from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
 import { evaluateExitGate, fetchPrActState, mergeSlotHolder } from '@bro/act'
 import { gitDirOf, isLinkedGitDir, parseWorktreePorcelain } from './work.ts'
-import { bdJson, currentFrame } from '@bro/drill'
+import { currentFrame } from '@bro/drill'
 import { readDebtRecords } from '@bro/debt'
 
 interface HookInput {
@@ -184,7 +184,7 @@ function drillLine(): string | null {
 
 function readyLines(limit: number): string[] {
   try {
-    const rows = bdJson<BeadRow[]>(['ready']).slice(0, limit)
+    const rows = taskStore().ready<BeadRow>().slice(0, limit)
     return rows.map((r) => `  ${r.id} ${r.title ?? ''}`.trimEnd())
   } catch {
     return []
@@ -403,7 +403,7 @@ function worktreeLines(): string[] {
  *  flat queue already knows about. */
 function claimedLines(): string[] {
   try {
-    const rows = bdJson<BeadRow[]>(['list', '--status', 'in_progress'])
+    const rows = taskStore().list<BeadRow>({ status: 'in_progress' })
     return rows.slice(0, 5).map((r) => {
       const title = (r.title ?? '').replace(/\s+/g, ' ')
       const short = title.length > 60 ? `${title.slice(0, 60)}…` : title
