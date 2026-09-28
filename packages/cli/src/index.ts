@@ -9,6 +9,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { docUsageLines, reservedDocVerbs, runDocVerb } from './docs.ts'
 import { loadExternalPlugins, PLUGINS } from './plugins.ts'
 
 // Single source of truth is package.json — dist/index.js sits one dir
@@ -29,6 +30,7 @@ Usage: bro <command> [args…]
 
 Commands:
 ${commands}
+${docUsageLines().join('\n')}
 
 Options:
   --version    Print version
@@ -53,7 +55,7 @@ async function main(): Promise<void> {
   }
   // config `plugins` join the registry before help/dispatch — a listed
   // external command must be dispatchable, and it should show in --help
-  await loadExternalPlugins()
+  await loadExternalPlugins(undefined, undefined, reservedDocVerbs())
 
   if (cmd === '--help' || cmd === '-h') {
     usage(0)
@@ -63,11 +65,16 @@ async function main(): Promise<void> {
   }
 
   const plugin = PLUGINS.find((p) => p.name === cmd)
-  if (!plugin) {
-    console.error(`unknown command: ${cmd}`)
-    usage()
+  if (plugin) {
+    await plugin.run([...(plugin.argvPrefix ?? []), ...rest])
+    return
   }
-  await plugin.run([...(plugin.argvPrefix ?? []), ...rest])
+  // verb-first doc dispatch — `bro list`, `bro show <id>`, …
+  if (await runDocVerb(cmd, rest)) {
+    return
+  }
+  console.error(`unknown command: ${cmd}`)
+  usage()
 }
 
 main().catch((err: unknown) => {
