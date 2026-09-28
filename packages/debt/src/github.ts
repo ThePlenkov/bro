@@ -2,7 +2,7 @@
  * GitHub data access for the debt pipeline: review threads (GraphQL) and
  * merged-PR candidate resolution (gh pr list/view + filters).
  */
-import { gh, ghJson } from '@bro/core'
+import { gh, ghJson, prLink } from '@bro/core'
 import type { MergedPrCandidate, ReviewThreadNode } from './types.ts'
 
 export interface HarvestPrFilters {
@@ -42,7 +42,7 @@ function reviewThreadsQuery(afterClause: string): string {
     }`
 }
 
-function parseThreadPage(raw: string, pr: number): ThreadPage {
+function parseThreadPage(raw: string, ownerRepo: string, pr: number): ThreadPage {
   const parsed = JSON.parse(raw) as {
     data?: { repository?: { pullRequest?: { reviewThreads?: ThreadPage } } }
     errors?: unknown
@@ -52,7 +52,7 @@ function parseThreadPage(raw: string, pr: number): ThreadPage {
   }
   const threads = parsed.data?.repository?.pullRequest?.reviewThreads
   if (!threads) {
-    throw new Error(`pull request #${pr} not found`)
+    throw new Error(`pull request ${prLink(ownerRepo, pr)} not found`)
   }
   return threads
 }
@@ -80,7 +80,7 @@ export async function fetchReviewThreads(target: {
       '-F',
       'n=100',
     ])
-    const page = parseThreadPage(raw, target.pr)
+    const page = parseThreadPage(raw, `${target.owner}/${target.repo}`, target.pr)
     nodes.push(...page.nodes)
     if (!page.pageInfo.hasNextPage || !page.pageInfo.endCursor) {
       break
@@ -113,7 +113,9 @@ export function fetchPrMeta(opts: {
   ])
 
   if (viewed.state !== 'MERGED') {
-    throw new Error(`PR #${opts.pr} is not merged (state=${viewed.state})`)
+    throw new Error(
+      `PR ${prLink(`${opts.owner}/${opts.repo}`, opts.pr)} is not merged (state=${viewed.state})`
+    )
   }
   return {
     title: viewed.title,
@@ -309,7 +311,9 @@ function fetchExplicitMergedPrs(opts: {
         'number,mergedAt,updatedAt,author,labels,state',
       ])
       if (viewed.state !== 'MERGED' || !viewed.mergedAt) {
-        console.error(`warning: PR #${number} is not merged — skipped`)
+        console.error(
+          `warning: PR ${prLink(`${opts.owner}/${opts.repo}`, number)} is not merged — skipped`
+        )
         continue
       }
       out.push({
@@ -320,7 +324,9 @@ function fetchExplicitMergedPrs(opts: {
         labels: (viewed.labels ?? []).map((l) => l.name),
       })
     } catch {
-      console.error(`warning: PR #${number} fetch failed — skipped`)
+      console.error(
+        `warning: PR ${prLink(`${opts.owner}/${opts.repo}`, number)} fetch failed — skipped`
+      )
     }
   }
   return out

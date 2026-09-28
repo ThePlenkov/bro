@@ -8,7 +8,7 @@
  *   reply   --thread ID --comment TEXT | --file TSV
  */
 import { readFileSync } from 'node:fs'
-import { ensureGhAuth, bd, gh, gitTry, resolveRepo } from '@bro/core'
+import { ensureGhAuth, bd, gh, gitTry, prLink, resolveRepo } from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
 import { fetchReviewThreads } from '@bro/debt'
 import { isAncestor } from './cleanup.ts'
@@ -164,17 +164,19 @@ async function cmdWait(argv: string[]): Promise<void> {
       timeoutMs: timeout * 60_000,
       onPoll: (s, g) =>
         console.error(
-          `act wait #${s.pr}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
+          `act wait ${prLink(t.repo, s.pr)}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
         ),
       onError: (err, n) =>
         console.error(
-          `act wait #${t.pr}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
+          `act wait ${prLink(t.repo, t.pr)}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
         ),
       // the "Update branch" button as a wait step: BEHIND + mergeable is
       // a state to fix, not to sit on — conflicts still settle for a human
       updateBranch: (s) => {
         const ok = updatePullBranch({ owner: t.owner, repo: t.repoName, pr: t.pr }, s.headSha)
-        console.error(`act wait #${t.pr}: update-branch ${ok ? 'pushed a new head' : 'refused'}`)
+        console.error(
+          `act wait ${prLink(t.repo, t.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
+        )
         return ok
       },
     }
@@ -227,18 +229,18 @@ function mergeMethod(argv: string[]): string | null {
 
 /** `gh pr merge` + the authoritative verify — a merge queue accepts a PR
  *  without landing it, so only a MERGED state returns the landed head. */
-function landPr(pr: number, args: string[], head: { ref: string; sha: string }): { ref: string; sha: string } | undefined {
+function landPr(ownerRepo: string, pr: number, args: string[], head: { ref: string; sha: string }): { ref: string; sha: string } | undefined {
   try {
     console.log(gh(args))
     const after = JSON.parse(gh(['pr', 'view', String(pr), '--json', 'state'])) as {
       state: string
     }
     if (after.state === 'MERGED') {
-      console.log(`act: merged #${pr}`)
+      console.log(`act: merged ${prLink(ownerRepo, pr)}`)
       return head
     }
     console.log(
-      `act: #${pr} accepted but state=${after.state} — a merge queue still owns it; ` +
+      `act: ${prLink(ownerRepo, pr)} accepted but state=${after.state} — a merge queue still owns it; ` +
         'local cleanup deferred'
     )
     return undefined
@@ -284,14 +286,16 @@ async function cmdMerge(argv: string[]): Promise<void> {
     // a closed/merged PR can pass the gate (threads resolved, checks
     // settled) — merging it isn't a gate question, it's a lifecycle error
     if (state.state !== 'OPEN') {
-      console.error(`error: #${t.pr} is ${state.state} — only OPEN PRs can be merged`)
+      console.error(
+        `error: ${prLink(t.repo, t.pr)} is ${state.state} — only OPEN PRs can be merged`
+      )
       process.exitCode = 1
       return
     }
 
     const gate = evaluateExitGate(state)
     if (!gate.ok) {
-      console.error(`exit_gate=BLOCKED — refusing to merge #${t.pr}`)
+      console.error(`exit_gate=BLOCKED — refusing to merge ${prLink(t.repo, t.pr)}`)
       for (const b of gate.blockers) {
         console.error(`  blocker: ${b}`)
       }
@@ -306,7 +310,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
     if (argv.includes('--admin')) {
       args.push('--admin')
     }
-    mergedHead = landPr(t.pr, args, { ref: state.headRef, sha: state.headSha })
+    mergedHead = landPr(t.repo, t.pr, args, { ref: state.headRef, sha: state.headSha })
   } finally {
     if (slot.kind === 'acquired') {
       releaseMergeSlot()
@@ -563,10 +567,13 @@ const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
  *  `bd create -l debt --external-ref <thread>`, reply with the bead id,
  *  then resolve. Fails loudly when bd can't create — never resolves a
  *  defer that didn't land. */
-function deferThread(v: ActThreadVerdict, pr?: number): string {
-  const desc = pr
-    ? `deferred from PR #${pr} thread ${v.thread_id}`
-    : `deferred thread ${v.thread_id}`
+function deferThread(v: ActThreadVerdict, ownerRepo: string | null, pr?: number): string {
+  const desc =
+    pr && ownerRepo
+      ? `deferred from PR ${prLink(ownerRepo, pr)} thread ${v.thread_id}`
+      : pr
+        ? `deferred from PR #${pr} thread ${v.thread_id}`
+        : `deferred thread ${v.thread_id}`
   if (!v.title) {
     throw new Error(`defer verdict for ${v.thread_id} has no title`)
   }
@@ -612,12 +619,15 @@ export function applyActPlan(plan: ActPlan): void {
   // verdict (thread stays unresolved, per the skill's fallback rule)
   // instead of blocking every other verdict in the plan
   const failed: string[] = []
+  let ownerRepo: string | null = null
   for (const v of plan.threads) {
     try {
       if (v.action === 'reply') {
         replyVerdict(v)
       } else if (v.action === 'defer') {
-        console.error(`act: deferred ${v.thread_id} → ${deferThread(v, plan.pr)}`)
+        // lazy: only a defer verdict pays the `gh repo view` call
+        ownerRepo ??= resolveRepo([])
+        console.error(`act: deferred ${v.thread_id} → ${deferThread(v, ownerRepo, plan.pr)}`)
       } else {
         resolveVerdict(v)
       }

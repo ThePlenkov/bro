@@ -31,7 +31,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
-import { ghJson, gitTry, resolveRepo } from '@bro/core'
+import { ghJson, gitTry, prLink, resolveRepo } from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
 import { evaluateExitGate, fetchPrActState, mergeSlotHolder } from '@bro/act'
 import { gitDirOf, isLinkedGitDir, parseWorktreePorcelain } from './work.ts'
@@ -272,8 +272,8 @@ async function actGateLine(owner?: string, repo?: string, pr?: number): Promise<
     )
     const gate = evaluateExitGate(state)
     return gate.ok
-      ? `pr #${state.pr}: gate OK`
-      : `pr #${state.pr}: gate BLOCKED (${gate.blockers.join('; ')}) — \`bro act status\``
+      ? `pr ${prLink(`${o}/${r}`, state.pr)}: gate OK`
+      : `pr ${prLink(`${o}/${r}`, state.pr)}: gate BLOCKED (${gate.blockers.join('; ')}) — \`bro act status\``
   } catch {
     return null
   }
@@ -666,7 +666,12 @@ function workGate(): { block?: string; hint?: string } {
  * is clean / not OPEN / unreachable. */
 async function prBlockersLine(): Promise<string | null> {
   try {
-    const view = ghJson<{ number: number; state: string }>(['pr', 'view', '--json', 'number,state'])
+    const view = ghJson<{ number: number; state: string; url: string }>([
+      'pr',
+      'view',
+      '--json',
+      'number,state,url',
+    ])
     const parts = view.state === 'OPEN' ? repoParts() : null
     if (!parts) {
       return null
@@ -680,7 +685,9 @@ async function prBlockersLine(): Promise<string | null> {
     // The same gate `bro act status` enforces: open threads, pending/failed
     // CI and AI reviewers, SAST findings, unknown mergeability, BEHIND.
     const gate = evaluateExitGate(state)
-    return gate.ok ? null : `bro: PR #${view.number}: ${gate.blockers.join('; ')}`
+    return gate.ok
+      ? null
+      : `bro: PR [#${view.number}](${view.url}): ${gate.blockers.join('; ')}`
   } catch {
     // no repo/PR/auth — nothing to gate on
     return null

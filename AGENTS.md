@@ -47,3 +47,10 @@ Developing bro itself: see CONTRIBUTING.md.
   own. Reviewers that are *reliably* flaky go on `act.ignoreChecks` in
   bro.config.json so a stuck pending state doesn't block either —
   currently `"kilo"` (rate limits; advisory, may still be read).
+- **PR refs are links** — any user-facing reply or bro output line that
+  names a PR renders it as `[#N](https://github.com/<owner>/<repo>/pull/N)`,
+  never bare `#N`. `prLink()` in `@bro/core` formats it; TSV/data rows
+  keep the bare number (parsed, not read).
+- **Never leave uncommitted changes** — every unit of work lands on a
+  branch, is committed, pushed, and opened as a draft PR. A dirty tree
+  at session end is lost work.

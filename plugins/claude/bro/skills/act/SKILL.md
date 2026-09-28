@@ -83,6 +83,10 @@ default store, so standard installs already have it).
   rejecting a finding (state the reason) or answering a question the
   reviewer asked. If a thread needs an explicit audit marker, pass
   `--comment <sha>` — a bare SHA, not prose.
+- **Report with links, not text.** Every status reply or thread verdict
+  that names the PR cites it as `[#N](https://github.com/<owner>/<repo>/pull/N)`
+  — `bro act status` prints the URL on its `pr=` line, carry it through.
+  A bare `#N` is just text in every UI that renders these reports.
 - **Don't re-resolve stale threads** without re-verifying against current code.
 - Debt rows from `bro debt list` become work via
   `bro debt set claimed --thread-id <id>` → fix →
