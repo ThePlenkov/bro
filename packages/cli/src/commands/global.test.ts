@@ -90,6 +90,17 @@ describe('resolveGlobalDir', () => {
     }
   })
 
+  test('a relative beads.global anchors at cwd, not the process dir', () => {
+    const dir = configDir({ global: 'rel-store' })
+    try {
+      withEnv('BRO_GLOBAL_BEADS', undefined, () => {
+        assert.equal(resolveGlobalDir(dir), join(dir, 'rel-store'))
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('no config file and no env → the default store', () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-global-empty-'))
     try {

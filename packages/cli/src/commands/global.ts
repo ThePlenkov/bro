@@ -15,16 +15,23 @@
  * remote at a private repo for a cross-machine queue.
  */
 import { existsSync, mkdirSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { bdTry, DEFAULT_GLOBAL_BEADS_DIR } from '@bro/core'
 import { flag } from './args.ts'
 import { loadBroConfig } from '../plugins.ts'
 
-/** Where the global store lives — config/env/default resolution. */
+/** Where the global store lives — config/env/default resolution. A
+ *  relative `beads.global` anchors at `cwd` (the dir the config was
+ *  loaded for), not at whatever process.cwd happens to be — absolute
+ *  or `~/…` paths are preferred and skip the warning. */
 export function resolveGlobalDir(cwd: string = process.cwd()): string {
   const cfg = loadBroConfig(cwd) as { beads?: { global?: string } }
-  return resolve(cfg.beads?.global ?? DEFAULT_GLOBAL_BEADS_DIR)
+  const p = cfg.beads?.global ?? DEFAULT_GLOBAL_BEADS_DIR
+  if (!isAbsolute(p)) {
+    console.error(`bro: relative beads.global '${p}' resolves against ${cwd} — prefer an absolute or ~/… path`)
+  }
+  return resolve(cwd, p)
 }
 
 /** The store dir when it must exist — scheduling from a store that was
@@ -56,9 +63,9 @@ function cmdInit(argv: string[]): void {
   const prefix = flag(argv, '--prefix') ?? 'global'
   mkdirSync(dir, { recursive: true })
   const res = spawnSync(
-    'bd',
+    'bd', // NOSONAR — PATH lookup is the contract (same as the bd wrapper)
     ['init', '--prefix', prefix, '--non-interactive', '--init-if-missing'],
-    { cwd: dir, stdio: 'inherit' } // NOSONAR — PATH lookup is the contract
+    { cwd: dir, stdio: 'inherit' }
   )
   if (res.status !== 0) {
     console.error(`error: bd init failed in ${dir}`)

@@ -102,9 +102,13 @@ export const beadsSection: ConfigSection<{ global: string }> = (raw) => {
     return { global: DEFAULT_GLOBAL_BEADS_DIR }
   }
   const p = v.trim()
-  return {
-    global: p === '~' ? homedir() : p.startsWith('~/') ? join(homedir(), p.slice(2)) : p,
+  let dir = p
+  if (p === '~') {
+    dir = homedir()
+  } else if (p.startsWith('~/')) {
+    dir = join(homedir(), p.slice(2))
   }
+  return { global: dir }
 }
 
 /** Sections core normalizes itself — identical to what the built-in
