@@ -87,7 +87,8 @@ interface Bound {
  *  (the dominant type), then to a unique supporter of the verb. */
 function resolveType(
   supporting: Bound[],
-  positional: string[]
+  positional: string[],
+  cmd: string
 ): { bound: Bound; rest: string[] } | undefined {
   const named =
     positional[0] !== undefined
@@ -95,6 +96,16 @@ function resolveType(
       : undefined
   if (named) {
     return { bound: named, rest: positional.slice(1) }
+  }
+  // 'store' is a noun even when store lacks this verb — `bro close
+  // store` must say "not supported on store", not silently read
+  // 'store' as a task ref and go hunting for it in beads
+  const knownNoun =
+    positional[0] !== undefined
+      ? docTypes().find((t) => docTypeNamed(t, positional[0]!))
+      : undefined
+  if (knownNoun) {
+    die(`bro ${cmd} is not supported on ${knownNoun.name}`)
   }
   const rest = positional
   // ref-shaped first arg — infer the type by prefix, else task, else
@@ -156,7 +167,7 @@ export async function runDocVerb(cmd: string, argv: string[]): Promise<boolean> 
   if (supporting.length === 0) {
     return false
   }
-  const hit = resolveType(supporting, positional)
+  const hit = resolveType(supporting, positional, cmd)
   if (!hit) {
     die(
       `bro ${cmd} needs a noun — ` +
@@ -199,6 +210,20 @@ export async function runDocVerb(cmd: string, argv: string[]): Promise<boolean> 
   }
   printResult(type, cmd, result)
   return true
+}
+
+/** Verb names external plugins must not take — plugin lookup wins
+ *  argv[0], so a plugin named `list` would shadow every doc type's
+ *  list. Computed from builtin docs before external plugins load. */
+export function reservedDocVerbs(root = process.cwd()): Set<string> {
+  const ctx: DocCtx = { root, scope: 'project' }
+  const verbs = new Set(Object.keys(STANDARD_VERBS))
+  for (const t of docTypes()) {
+    for (const v of docVerbs(t.adapter(ctx))) {
+      verbs.add(v)
+    }
+  }
+  return verbs
 }
 
 /** Verb/noun lines for `bro --help` — discovered, not hardcoded. */

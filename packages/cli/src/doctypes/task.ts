@@ -72,7 +72,14 @@ function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
         process.exit(2)
       }
       bd(['update', ref, ...flagArgs(patch)], dir())
-      return bdJson<TaskRow>(['show', ref], dir())
+      // the mutation already landed — a failed readback must not turn
+      // a successful update into a reported failure
+      try {
+        const r = bdJson<TaskRow | TaskRow[]>(['show', ref], dir())
+        return Array.isArray(r) ? r[0] : r
+      } catch {
+        return { id: ref }
+      }
     },
     remove: (ref) => {
       if (!ref) {
@@ -81,7 +88,7 @@ function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
       }
       bd(['delete', ref], dir())
     },
-    close: (ref, flags) => {
+    close: (ref: string | undefined, flags: DocFlags) => {
       if (!ref) {
         console.error('error: bro close needs a ref — `bro close <id> [--reason=…]`')
         process.exit(2)
@@ -96,7 +103,7 @@ function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
     // raw passthrough — `bro exec [--global] -- <bd args>`; anything
     // after `--` reaches bd untouched. The escape hatch for bd features
     // the doc layer does not model yet.
-    exec: (_ref, _flags, positional) => {
+    exec: (_ref: string | undefined, _flags: DocFlags, positional: string[]) => {
       const res = spawnSync('bd', positional, { cwd: dir(), stdio: 'inherit' }) // NOSONAR — PATH contract
       process.exit(res.status ?? 1)
     },
@@ -107,7 +114,10 @@ export const taskDoc: DocType<TaskRow> = {
   name: 'task',
   aliases: ['tasks', 'bead', 'beads', 'issue'],
   scopes: ['project', 'global'],
-  render: (t) =>
-    `${t.id}  [${t.status ?? '?'}${t.issue_type ? ` ${t.issue_type}` : ''}]  ${(t.title ?? '').replace(/\s+/g, ' ').slice(0, 80)}`,
+  render(t) {
+    const kind = t.issue_type ? ` ${t.issue_type}` : ''
+    const title = (t.title ?? '').replace(/\s+/g, ' ').slice(0, 80)
+    return `${t.id}  [${t.status ?? '?'}${kind}]  ${title}`
+  },
   adapter: taskAdapter,
 }

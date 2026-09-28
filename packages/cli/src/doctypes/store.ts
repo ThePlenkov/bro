@@ -105,7 +105,8 @@ function initStore(name: Scope, flags: DocFlags, root: string): void {
     console.error(`error: store created but unusable — ${check.err || 'bd config failed'}`)
     process.exit(1)
   }
-  console.log(`${name} store ready: ${dir}${prefix ? ` (prefix ${prefix})` : ''}`)
+  const suffix = prefix ? ` (prefix ${prefix})` : ''
+  console.log(`${name} store ready: ${dir}${suffix}`)
 }
 
 function storeAdapter(ctx: DocCtx): DocAdapter<StoreInfo> {
@@ -116,7 +117,7 @@ function storeAdapter(ctx: DocCtx): DocAdapter<StoreInfo> {
       const name = named(ref)
       return name ? storeInfo(name, storePath(name, ctx.root)) : null
     },
-    init: (ref, flags) => {
+    init: (ref: string | undefined, flags: DocFlags) => {
       const name = named(ref)
       if (!name) {
         console.error(`error: unknown store "${ref}" — project|global`)
@@ -124,7 +125,7 @@ function storeAdapter(ctx: DocCtx): DocAdapter<StoreInfo> {
       }
       initStore(name, flags, ctx.root)
     },
-    path: (ref) => {
+    path: (ref: string | undefined) => {
       const name = named(ref)
       if (!name) {
         console.error(`error: unknown store "${ref}" — project|global`)
@@ -139,7 +140,9 @@ export const storeDoc: DocType<StoreInfo> = {
   name: 'store',
   aliases: ['stores'],
   scopes: ['project', 'global'],
-  render: (s) =>
-    `${s.name.padEnd(8)} ${(s.initialized ? s.prefix ?? '?' : 'uninitialized').padEnd(13)} ${s.path}`,
+  render(s) {
+    const state = s.initialized ? (s.prefix ?? '?') : 'uninitialized'
+    return `${s.name.padEnd(8)} ${state.padEnd(13)} ${s.path}`
+  },
   adapter: storeAdapter,
 }

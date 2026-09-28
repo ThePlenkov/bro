@@ -74,10 +74,12 @@ export interface DocType<TDoc = unknown> {
   /** Ref prefix for `bro show <id>` inference — a ref starting with it
    *  resolves to this type without naming the noun. */
   idPrefix?: string
-  /** One-line row for `list` and verb results — default JSON. */
-  render?: (doc: TDoc) => string
+  /** One-line row for `list` and verb results — default JSON. Method
+   *  shorthand keeps TDoc bivariant so DocType<X> stays assignable to
+   *  the untyped registry slot. */
+  render?(doc: TDoc): string
   /** `show` body — default is pretty JSON of the doc. */
-  describe?: (doc: TDoc) => string
+  describe?(doc: TDoc): string
   /** Factory must be cheap — it builds closures, never opens stores.
    *  IO belongs inside the verb methods so a missing store only fails
    *  the verb that needs it. */
@@ -98,7 +100,7 @@ export function docVerbs(adapter: DocAdapter): string[] {
       verbs.add(k)
     }
   }
-  return [...verbs].sort()
+  return [...verbs].sort((a, b) => a.localeCompare(b))
 }
 
 /** Resolve CLI verb → the adapter method to invoke (standard verbs map

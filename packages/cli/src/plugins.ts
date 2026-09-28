@@ -19,6 +19,7 @@ import {
   syncSection,
   type BroPlugin,
   type ConfigSection,
+  type DocType,
 } from '@bro/core'
 import { parseActPlan, type ActPlan } from '@bro/act'
 import { parseConvoyPlan, type ConvoyPlan } from '@bro/convoy'
@@ -241,8 +242,21 @@ function isPlugin(p: unknown): p is BroPlugin {
   if (o.skill !== undefined && typeof o.skill !== 'string') return false
   if (o.configKey !== undefined && typeof o.configKey !== 'string') return false
   if (o.argvPrefix !== undefined && !Array.isArray(o.argvPrefix)) return false
-  if (o.docs !== undefined && !Array.isArray(o.docs)) return false
+  if (o.docs !== undefined && (!Array.isArray(o.docs) || !o.docs.every(isDocType))) return false
   return true
+}
+
+/** A docs entry must be a DocType — name + adapter factory — else it
+ *  would crash docVerbs/docTypes deep in dispatch or --help. */
+function isDocType(d: unknown): d is DocType {
+  const o = d as DocType
+  return (
+    !!o &&
+    typeof o === 'object' &&
+    typeof o.name === 'string' &&
+    o.name !== '' &&
+    typeof o.adapter === 'function'
+  )
 }
 
 /** Imports one specifier → exported candidate entries, or undefined on
@@ -272,9 +286,21 @@ async function importPluginModule(
 }
 
 /** Validates + registers one export; undefined = rejected (warned). */
-function registerExternal(entry: unknown, spec: string): BroPlugin | undefined {
+function registerExternal(
+  entry: unknown,
+  spec: string,
+  reserved?: ReadonlySet<string>
+): BroPlugin | undefined {
   if (!isPlugin(entry)) {
     console.error(`warning: plugin "${spec}" export is not a BroPlugin — skipped`)
+    return undefined
+  }
+  // plugin lookup wins argv[0] — a plugin named like a doc verb would
+  // shadow `bro list`/`bro show`/`bro init` for every doc type
+  if (reserved?.has(entry.name)) {
+    console.error(
+      `warning: plugin "${spec}" name "${entry.name}" is a doc verb — skipped`
+    )
     return undefined
   }
   if (PLUGINS.some((p) => p.name === entry.name)) {
@@ -302,7 +328,9 @@ function registerExternal(entry: unknown, spec: string): BroPlugin | undefined {
 export async function loadExternalPlugins(
   cwd: string = process.cwd(),
   /** injectable for tests/callers that already loaded config */
-  specs: string[] = loadConfig(cwd).plugins
+  specs: string[] = loadConfig(cwd).plugins,
+  /** plugin names that must stay dispatchable to other layers (doc verbs) */
+  reserved: ReadonlySet<string> = new Set()
 ): Promise<BroPlugin[]> {
   const loaded: BroPlugin[] = []
   // createRequire anchored at the repo keeps both `./x.ts` and bare
@@ -312,7 +340,7 @@ export async function loadExternalPlugins(
   for (const spec of specs) {
     const entries = await importPluginModule(spec, req, root)
     for (const entry of entries ?? []) {
-      const plugin = registerExternal(entry, spec)
+      const plugin = registerExternal(entry, spec, reserved)
       if (plugin) {
         loaded.push(plugin)
       }
