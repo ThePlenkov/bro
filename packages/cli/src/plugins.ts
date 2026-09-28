@@ -34,7 +34,6 @@ import { applyNextPlan, runNextCommand } from './commands/next.ts'
 import { parseNextPlan, type NextPlan } from './commands/next-plan.ts'
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
-import { runGlobalCommand } from './commands/global.ts'
 import { runHooksCommand } from './commands/hooks.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runSetupCommand } from './commands/setup.ts'
@@ -124,9 +123,13 @@ export const PLUGINS: BroPlugin[] = [
       runRetrospectCommand(argv.length === 0 ? ['status'] : ['capture', ...argv]),
   }),
   definePlugin({
-    name: 'global',
-    summary: 'User-level beads store: init|path|<bd args…> — separate db, explicit only',
-    run: runGlobalCommand,
+    name: 'docs',
+    summary: 'Doc-type dispatch — `bro <verb> <noun|ref>` (bro <verb> store|task)',
+    // dispatch lives in index.ts's argv[0] fallback — this entry owns
+    // the beads config section and keeps the registry honest
+    hidden: true,
+    run: () => process.exit(2),
+    skill: 'docs',
     configKey: 'beads',
     configSchema: beadsSection,
   }),
@@ -238,6 +241,7 @@ function isPlugin(p: unknown): p is BroPlugin {
   if (o.skill !== undefined && typeof o.skill !== 'string') return false
   if (o.configKey !== undefined && typeof o.configKey !== 'string') return false
   if (o.argvPrefix !== undefined && !Array.isArray(o.argvPrefix)) return false
+  if (o.docs !== undefined && !Array.isArray(o.docs)) return false
   return true
 }
 

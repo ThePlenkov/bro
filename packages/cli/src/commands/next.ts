@@ -6,7 +6,7 @@
  *   bro next            claim + emit the top ready bead
  *   bro next --list     the queue without claiming
  *   bro next --json     machine output
- *   bro next --global   the user-level store (`bro global init`) — same
+ *   bro next --global   the user-level store (`bro init store --global`) — same
  *                       pipeline run with cwd = the global beads dir
  *   bro run next.toml   the same selection driven by a validated plan
  *                       (filters, limit, ordering, gates — next-plan.ts)
@@ -25,7 +25,7 @@
  */
 import { bd, bdJson, bdTry, checkBeads } from '@bro/core'
 import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts'
-import { requireGlobalStore } from './global.ts'
+import { requireGlobalStore } from '../doctypes/store.ts'
 
 export interface ReadyBead {
   id: string
@@ -324,7 +324,7 @@ export async function runNextCommand(argv: string[]): Promise<void> {
   Scope: only beads under this checkout's issue_prefix are claimable;
   gt:slot coordination primitives are never surfaced. Plans may set
   scope = "all" to opt out. --global reads the user-level store
-  instead (\`bro global init\`) — same pipeline, different home.`)
+  instead (\`bro init store --global\`) — same pipeline, different home.`)
     process.exit(0)
   }
   applyNextPlan({

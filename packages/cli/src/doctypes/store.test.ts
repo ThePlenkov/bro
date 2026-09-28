@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beadsSection, DEFAULT_GLOBAL_BEADS_DIR } from '@bro/core'
-import { resolveGlobalDir } from './global.ts'
+import { resolveGlobalDir } from './store.ts'
 
 const DEFAULT_GLOBAL_DIR = DEFAULT_GLOBAL_BEADS_DIR
 
@@ -27,7 +27,7 @@ function withEnv<T>(key: string, value: string | undefined, fn: () => T): T {
 }
 
 function configDir(beads: unknown): string {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-global-cfg-'))
+  const dir = mkdtempSync(join(tmpdir(), 'bro-store-cfg-'))
   writeFileSync(join(dir, 'bro.config.json'), JSON.stringify({ beads }))
   return dir
 }
@@ -102,7 +102,7 @@ describe('resolveGlobalDir', () => {
   })
 
   test('no config file and no env → the default store', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-global-empty-'))
+    const dir = mkdtempSync(join(tmpdir(), 'bro-store-empty-'))
     try {
       withEnv('BRO_GLOBAL_BEADS', undefined, () => {
         assert.equal(resolveGlobalDir(dir), DEFAULT_GLOBAL_DIR)

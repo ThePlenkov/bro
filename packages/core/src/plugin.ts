@@ -6,6 +6,7 @@
  * of BroPlugin entries instead of hardcoding commands.
  */
 import type { ConfigSection } from './config.ts'
+import type { DocType } from './docs.ts'
 import type { PlanSchema } from './plan.ts'
 
 export interface BroPlugin {
@@ -24,6 +25,9 @@ export interface BroPlugin {
   /** Normalizer for the configKey section — raw file value in, typed
    *  section out. Required when configKey is set. */
   configSchema?: ConfigSection<unknown>
+  /** Document types this plugin exposes to `bro <verb> <noun>` dispatch —
+   *  adapter methods are the verb registry (see docs.ts). */
+  docs?: DocType[]
   /** Plan validator — the plugin accepts TOML plans whose `kind` equals
    *  this plugin's name, routed by `bro run`. Pairs with runPlan. */
   planSchema?: PlanSchema<unknown>
