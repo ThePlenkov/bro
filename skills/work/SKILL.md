@@ -15,7 +15,7 @@ same branch in two worktrees — that refusal is the collision fence.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro work enter <slug>` | Sibling checkout `<repo>--<slug>` on branch `work/<slug>` (`--branch`, `--base` override); an existing branch is checked out, not recreated. Tries to init submodules and, if `<slug>` names a bead, to claim it — both best-effort |
+| `bro work enter <slug>` | Sibling checkout `<repo>--<slug>` on branch `work/<slug>` (`--branch`, `--base` override). Base is explicit: the main checkout's branch by default — `--stack` (or `stack.mode: "auto"` in bro.config.json) bases on the current worktree's branch instead, and the edge is recorded under `.git/bro/stack/` for bottom-up merge order. An existing branch is checked out, not recreated. Tries to init submodules and, if `<slug>` names a bead, to claim it — both best-effort |
 | `bro work leave [slug]` | Remove the worktree — the current one by default; `--force` discards dirty state, `--delete-branch` drops a merged branch. Submodule trees are force-removed without touching the shared submodule config |
 | `bro work list` | Every worktree: branch, clean/dirty count, `--sizes` adds `du` |
 | `bro work prune` | Drop admin entries for worktrees already deleted on disk |
@@ -34,3 +34,7 @@ same branch in two worktrees — that refusal is the collision fence.
   git common dir in any worktree.
 - **Slug after the bead.** `bro work enter bro-123` tries to claim bead
   `bro-123` on the way in — a non-bead slug just skips claiming.
+- **Stacked PRs**: with `stack.mode: "auto"`, a second `bro work enter`
+  run from inside a worktree bases the new branch on that worktree's
+  branch — the session's stack head. `manual` (default) needs `--stack`
+  or `--base`. Merge a stack bottom-up; gh-stack drives submit/sync.

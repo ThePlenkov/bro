@@ -15,6 +15,7 @@ import {
   loadConfig,
   planKind,
   readPlanDoc,
+  stackSection,
   syncSection,
   type BroPlugin,
   type ConfigSection,
@@ -134,6 +135,8 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Parallel-friendly worktrees: enter|leave|list|prune',
     run: runWorkCommand,
     skill: 'work',
+    configKey: 'stack',
+    configSchema: stackSection,
   }),
   definePlugin({
     name: 'hooks',

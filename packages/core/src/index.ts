@@ -10,6 +10,7 @@ export {
   defineConfig,
   loadConfig,
   PERSONALITIES,
+  stackSection,
   STORE_BACKENDS,
   syncSection,
 } from './config.ts'
