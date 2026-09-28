@@ -208,6 +208,20 @@ function stackMode(): 'auto' | 'manual' {
   }
 }
 
+// submodules are not populated by worktree add — a fresh tree without
+// them builds stale or fails; init is best-effort (network may be down)
+function initSubmodules(path: string): void {
+  if (!hasSubmodules(path)) {
+    return
+  }
+  const sub = gitTry(['-C', path, 'submodule', 'update', '--init', '--recursive'])
+  console.log(
+    sub.code === 0
+      ? 'submodules initialized'
+      : `warning: submodule init failed — ${sub.err || 'check .gitmodules'}`
+  )
+}
+
 /** Everything that decides where the new branch forks from. */
 function enterBase(argv: string[], main: WorktreeInfo): { base?: string } {
   const { base, err } = resolveEnterBase(
@@ -263,16 +277,7 @@ function cmdEnter(argv: string[]): void {
     console.error(`error: git worktree add failed — ${res.err}`)
     process.exit(1)
   }
-  // submodules are not populated by worktree add — a fresh tree without
-  // them builds stale or fails; init is best-effort (network may be down)
-  if (hasSubmodules(path)) {
-    const sub = gitTry(['-C', path, 'submodule', 'update', '--init', '--recursive'])
-    console.log(
-      sub.code === 0
-        ? 'submodules initialized'
-        : `warning: submodule init failed — ${sub.err || 'check .gitmodules'}`
-    )
-  }
+  initSubmodules(path)
   const claimed = claimBead(slug)
   // a stack edge is only a real edge when the base is a local branch —
   // a raw commit-ish (--base abc123 / origin/main) yields no merge order
