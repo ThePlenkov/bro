@@ -85,6 +85,21 @@ export const actSection: ConfigSection<{
   }
 }
 
+/** bro.config.json `connectors` section — facade → connector precedence,
+ *  e.g. { "reviews": "gitlab", "tasks": "jira" }. Only string→string
+ *  entries survive; anything else is dropped. */
+export const connectorsSection: ConfigSection<Record<string, string>> = (raw) => {
+  const out: Record<string, string> = {}
+  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+    for (const [k, v] of Object.entries(raw)) {
+      if (k.trim() !== '' && typeof v === 'string' && v.trim() !== '') {
+        out[k.trim()] = v.trim()
+      }
+    }
+  }
+  return out
+}
+
 /** Default global-beads store — XDG data dir, not a repo path. */
 export const DEFAULT_GLOBAL_BEADS_DIR = join(homedir(), '.local', 'share', 'bro', 'beads')
 
@@ -132,6 +147,7 @@ const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   debt: debtSection as ConfigSection<unknown>,
   sync: syncSection as ConfigSection<unknown>,
   act: actSection as ConfigSection<unknown>,
+  connectors: connectorsSection as ConfigSection<unknown>,
 }
 
 export interface BroConfig {
@@ -164,6 +180,8 @@ export interface BroConfig {
      *  debt beads instead of another push. 0 disables the cap. */
     maxRounds: number
   }
+  /** Facade → connector precedence, e.g. { reviews: 'gitlab' }. */
+  connectors: Record<string, string>
   /** External plugin specifiers — relative paths or package names the CLI
    *  resolves from the repo and imports at startup. Each module's default
    *  export must be a BroPlugin (or an array of them). */
@@ -176,6 +194,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   debt: { dir: '.agents/review-debt' },
   sync: { ref: 'refs/bro/data', remote: 'origin', beads: true },
   act: { ignoreChecks: [], maxRounds: 3 },
+  connectors: {},
   plugins: [],
 }
 

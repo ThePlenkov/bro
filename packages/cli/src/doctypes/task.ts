@@ -16,17 +16,21 @@
  * flag resolved at adapter construction, never a verb concern.
  */
 import { spawnSync } from 'node:child_process'
-import { taskStore } from '@bro/core'
+import { facade } from '@bro/core'
 import type { DocAdapter, DocCtx, DocFlags, DocType, TaskFilter, TaskInput, TaskRow, TaskStore } from '@bro/core'
 import { requireGlobalStore } from './store.ts'
+import { loadBroConfig } from '../plugins.ts'
 
 export type { TaskRow }
 
 /** The store this invocation targets — lazily, per verb call, so a
- *  missing global store fails only the verb that needed it. */
+ *  missing global store fails only the verb that needed it. Resolved
+ *  through the connector registry: `connectors.tasks` in bro.config
+ *  can point the whole surface at another work-item system. */
 function storeFor(ctx: DocCtx): () => TaskStore {
   const dir = () => (ctx.scope === 'global' ? requireGlobalStore(ctx.root) : ctx.root)
-  return () => taskStore(dir())
+  return () =>
+    facade('tasks', { dir: dir() }, { prefer: loadBroConfig(ctx.root).connectors })
 }
 
 /** CLI flags → TaskFilter — known keys map, the rest are ignored

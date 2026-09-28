@@ -31,7 +31,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
-import { ghJson, gitTry, prLink, resolveRepo, taskStore } from '@bro/core'
+import { ghJson, gitTry, parallelWorkLines, prLink, resolveRepo, sessionStartLines } from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
 import { evaluateExitGate, fetchPrActState, mergeSlotHolder } from '@bro/act'
 import { gitDirOf, isLinkedGitDir, parseWorktreePorcelain } from './work.ts'
@@ -164,12 +164,6 @@ export function parsePrUrl(text: string): { owner: string; repo: string; pr: num
 
 // --- shared probes ------------------------------------------------------------
 
-interface BeadRow {
-  id: string
-  title?: string
-  status?: string
-}
-
 function drillLine(): string | null {
   try {
     const frame = currentFrame()
@@ -179,15 +173,6 @@ function drillLine(): string | null {
     return `drill frame open: ${frame.id} "${frame.title}" [depth=${frame.depth}] — close with \`bro drill up --result "…"\``
   } catch {
     return null
-  }
-}
-
-function readyLines(limit: number): string[] {
-  try {
-    const rows = taskStore().ready<BeadRow>().slice(0, limit)
-    return rows.map((r) => `  ${r.id} ${r.title ?? ''}`.trimEnd())
-  } catch {
-    return []
   }
 }
 
@@ -400,15 +385,11 @@ function worktreeLines(): string[] {
 }
 
 /** Beads claimed but not yet closed — another signal of live work the
- *  flat queue already knows about. */
+ *  flat queue already knows about. Collected from every connector's
+ *  parallelWork probe (beads reports claimed tasks today). */
 function claimedLines(): string[] {
   try {
-    const rows = taskStore().list<BeadRow>({ status: 'in_progress' })
-    return rows.slice(0, 5).map((r) => {
-      const title = (r.title ?? '').replace(/\s+/g, ' ')
-      const short = title.length > 60 ? `${title.slice(0, 60)}…` : title
-      return `${r.id} ${short}`.trim()
-    })
+    return parallelWorkLines({ dir: process.cwd() })
   } catch {
     return []
   }
@@ -425,10 +406,7 @@ function parallelLines(sessionId: string): string[] {
       parts.push(...liveSessionLines(dir, sessionId))
     }
     parts.push(...worktreeLines())
-    const claimed = claimedLines()
-    if (claimed.length > 0) {
-      parts.push(`claimed beads: ${claimed.join(', ')}`)
-    }
+    parts.push(...claimedLines())
     if (parts.length === 0) {
       return []
     }
@@ -518,10 +496,9 @@ async function emitSessionContext(
   if (drill) {
     parts.push(drill)
   }
-  const ready = readyLines(8)
-  if (ready.length > 0) {
-    parts.push(`bd ready:\n${ready.join('\n')}`)
-  }
+  // sessionStart probes collect from every connector — beads reports
+  // the ready queue today; a jira connector would add assigned issues
+  parts.push(...sessionStartLines({ dir: process.cwd() }))
   const gate = await actGateLine()
   if (gate) {
     parts.push(gate)
