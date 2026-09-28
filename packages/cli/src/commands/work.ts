@@ -163,17 +163,19 @@ export function resolveEnterBase(
   stack: boolean,
   auto: boolean,
   current: string | undefined,
-  mainBranch: string | undefined
+  /** What the main checkout points at — branch name, or its commit sha
+   *  when detached. Either way the default base, never ambient HEAD. */
+  mainRef: string | undefined
 ): { base?: string; err?: string } {
   if (explicit !== undefined) {
     return { base: explicit }
   }
-  if (!current || current === mainBranch) {
+  if (!current || current === mainRef) {
     return stack
       ? { err: '--stack needs a checked-out work branch — the default branch is not a stack head' }
-      : { base: mainBranch }
+      : { base: mainRef }
   }
-  return stack || auto ? { base: current } : { base: mainBranch }
+  return stack || auto ? { base: current } : { base: mainRef }
 }
 
 /** Stacked branches record their base so act wait / cleanup can derive
@@ -215,14 +217,16 @@ function cmdEnter(argv: string[]): void {
   }
   const branch = flag(argv, '--branch') ?? `work/${slug}`
   const stack = argv.includes('--stack')
+  const baseFlag = flag(argv, '--base')
   const main = mainWorktree()
+  const mainRef = main.branch ?? main.head
   const current = gitTry(['branch', '--show-current']).out.trim() || undefined
   const { base, err } = resolveEnterBase(
-    flag(argv, '--base'),
+    baseFlag,
     stack,
     stackMode() === 'auto',
     current,
-    main.branch
+    mainRef
   )
   if (err) {
     console.error(`error: ${err}`)
@@ -234,10 +238,12 @@ function cmdEnter(argv: string[]): void {
     process.exit(1)
   }
   // an existing branch under the target name means the slug names an
-  // in-flight task — check it out rather than failing on -b
+  // in-flight task — check it out rather than failing on -b. The
+  // resolved default base is irrelevant here; only a user-passed
+  // --base/--stack conflicts with checking out an existing branch.
   const branchExists = gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).code === 0
-  if (branchExists && base) {
-    console.error(`error: --base only applies when creating the branch; ${branch} already exists`)
+  if (branchExists && (baseFlag !== undefined || stack)) {
+    console.error(`error: --base/--stack only apply when creating the branch; ${branch} already exists`)
     process.exit(1)
   }
   const args = ['worktree', 'add', path]
@@ -245,9 +251,9 @@ function cmdEnter(argv: string[]): void {
     args.push(branch)
   } else {
     args.push('-b', branch)
-  }
-  if (base) {
-    args.push(base)
+    if (base) {
+      args.push(base)
+    }
   }
   const res = gitTry(args)
   if (res.code !== 0) {
@@ -269,7 +275,7 @@ function cmdEnter(argv: string[]): void {
   // a raw commit-ish (--base abc123 / origin/main) yields no merge order
   const stacked =
     base !== undefined &&
-    base !== main.branch &&
+    base !== mainRef &&
     gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${base}`]).code === 0
   if (stacked) {
     recordStackEdge(branch, base)

@@ -131,6 +131,11 @@ describe('resolveEnterBase', () => {
     assert.ok(resolveEnterBase(undefined, true, false, undefined, 'main').err)
     assert.deepEqual(resolveEnterBase(undefined, true, false, 'work/a', 'main'), { base: 'work/a' })
   })
+
+  test('a detached main still pins a base — its commit, not ambient HEAD', () => {
+    assert.deepEqual(resolveEnterBase(undefined, false, false, 'work/a', 'c0ffee'), { base: 'c0ffee' })
+    assert.deepEqual(resolveEnterBase(undefined, false, true, 'work/a', 'c0ffee'), { base: 'work/a' })
+  })
 })
 
 /** Real-repo enter: linked worktree on work/a + --stack/auto must base
@@ -175,7 +180,7 @@ describe('work enter --stack', () => {
     })
   })
 
-  test('manual mode (default) ignores the worktree branch', () => {
+  test('manual mode (default) pins main — no accidental stack on HEAD', () => {
     const { root, main, linked } = fixture()
     inside(linked, root, () => {
       runWorkCommand(['enter', 'b'])
@@ -189,6 +194,17 @@ describe('work enter --stack', () => {
     inside(linked, root, () => {
       runWorkCommand(['enter', 'b'])
       assert.equal(headOf(main, 'work/b'), headOf(main, 'work/a'))
+    })
+  })
+
+  test('an existing branch is checked out — the resolved default base must not block it', () => {
+    const { root, main, linked } = fixture()
+    execFileSync('git', ['branch', 'work/b'], { cwd: main })
+    inside(linked, root, () => {
+      runWorkCommand(['enter', 'b'])
+      const tree = join(root, 'repo--b')
+      assert.ok(readFileSync(join(tree, '.git'), 'utf8').startsWith('gitdir:'))
+      assert.equal(headOf(tree, 'HEAD'), headOf(main, 'work/b'))
     })
   })
 })
