@@ -24,7 +24,7 @@
 import { spawnSync, spawn, execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { bd, bdJson, checkBeads, gitTry } from '@bro/core'
+import { bd, checkBeads, gitTry } from '@bro/core'
 import { evaluateExitGate, fetchPrActState, waitForGate } from '@bro/act'
 import { fetchReviewThreads } from '@bro/debt'
 import {
@@ -37,7 +37,7 @@ import {
 import { loadBroConfig } from '../plugins.ts'
 import { flag } from './args.ts'
 import { runActCommand } from './act.ts'
-import { claimUpTo, classify, type ReadyBead } from './next.ts'
+import { claimUpTo, classify, nextScope, readyBeads, type ReadyBead } from './next.ts'
 
 interface Ctx {
   owner: string
@@ -427,8 +427,7 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   }
 
   if (argv.includes('--dry-run')) {
-    const ready = bdJson<ReadyBead[]>(['ready', '--json'])
-    const top = classify(ready).queue[0]
+    const top = classify(readyBeads(), undefined, nextScope('project')).queue[0]
     if (!top) {
       console.log('loop --dry-run: nothing claimable')
       return
@@ -445,13 +444,14 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
 /** The claim→run→repeat cycle until the queue drains or --max hits. */
 async function runQueue(ctx: Ctx): Promise<void> {
   const seen = new Set<string>()
+  const scope = nextScope('project') // prefix is stable for the run
   const tally = { landed: 0, parked: 0, failed: 0 }
   for (;;) {
     if (ctx.cfg.maxItems > 0 && tally.landed + tally.parked + tally.failed >= ctx.cfg.maxItems) {
       break
     }
-    const ready = bdJson<ReadyBead[]>(['ready', '--json'])
-    const bead = claimUpTo(classify(ready).queue.filter((b) => !seen.has(b.id)), 1)[0]
+    const ready = readyBeads()
+    const bead = claimUpTo(classify(ready, undefined, scope).queue.filter((b) => !seen.has(b.id)), 1)[0]
     if (!bead) {
       break
     }

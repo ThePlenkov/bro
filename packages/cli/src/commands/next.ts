@@ -13,8 +13,14 @@
  * set — convoy owns those) are never auto-claimed; they surface as
  * gates/skipped so the agent knows what it's NOT doing. A plan may
  * opt gates into the queue via gates = "allow".
+ *
+ * Project scoping: a shared/federated bd can serve several repos, so
+ * `ready` is filtered bd-side (--exclude-label) against coordination
+ * primitives (gt:slot merge-queue semaphores and friends), then the
+ * queue is scoped to this checkout's issue_prefix — foreign-prefix
+ * beads are reported, never claimed. scope = "all" opts out in plans.
  */
-import { bd, bdJson, checkBeads } from '@bro/core'
+import { bd, bdJson, bdTry, checkBeads } from '@bro/core'
 import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts'
 
 export interface ReadyBead {
@@ -38,12 +44,52 @@ interface NextResult {
   /** claimable beads the plan's filters excluded — idle must not
    *  pretend the backlog is empty while these remain */
   filtered: number
+  /** ready beads under another issue_prefix — a shared db serves
+   *  several repos; they are reported, never claimed here */
+  foreign: number
   gates: Array<{ id: string; title: string }>
   epics: Array<{ id: string; title: string }>
   moleculeSteps: number
 }
 
 const HUMAN_GATE = /human.?gate/i
+
+/** Labels that mark coordination primitives, not work — excluded bd-side
+ *  so a shared queue's semaphores can never look claimable. Gas Town's
+ *  merge-slot bead (<prefix>-merge-slot) is the known instance. */
+export const NEVER_CLAIM_LABELS = ['gt:slot']
+
+/** The single `bd ready` contract for next and loop: coordination
+ *  primitives are filtered out by bd itself, before classification. */
+export function readyBeads(): ReadyBead[] {
+  return bdJson<ReadyBead[]>([
+    'ready',
+    ...NEVER_CLAIM_LABELS.flatMap((l) => ['--exclude-label', l]),
+  ])
+}
+
+/** This checkout's bead id scope — what `bd init` recorded as
+ *  issue_prefix. Unset prefix means the db cannot tell scopes apart:
+ *  fail open rather than hide real work. */
+export function projectPrefix(): string | undefined {
+  const res = bdTry(['config', 'get', 'issue_prefix'])
+  if (res.code !== 0) {
+    return undefined
+  }
+  const line = res.out.trim().split('\n').pop()?.trim() ?? ''
+  if (line === '' || /not set/i.test(line)) {
+    return undefined
+  }
+  const eq = line.indexOf('=')
+  const v = (eq >= 0 ? line.slice(eq + 1) : line).trim().replace(/^['"]|['"]$/g, '')
+  return v === '' ? undefined : v
+}
+
+/** Resolve a plan's scope policy to the scope classify applies:
+ *  `all` opts out entirely; `project` filters to issue_prefix. */
+export function nextScope(scope: NextPlan['scope']): { prefix?: string } {
+  return { prefix: scope === 'all' ? undefined : projectPrefix() }
+}
 
 const claimable = (b: ReadyBead, gates: NextPlan['gates']): boolean =>
   (gates === 'allow' || !HUMAN_GATE.test(b.title)) &&
@@ -79,20 +125,28 @@ const DEFAULT_SELECTION = {
   order: 'priority',
 } as const satisfies Pick<NextPlan, 'filters' | 'gates' | 'order'>
 
-/** Split the ready queue into claimable work and things we never claim. */
+/** Split the ready queue into claimable work and things we never claim.
+ *  scope.prefix restricts claimable AND reporting to this project's
+ *  beads — foreign-prefix beads only appear in the `foreign` count. */
 export function classify(
   ready: ReadyBead[],
-  plan: Pick<NextPlan, 'filters' | 'gates' | 'order'> = DEFAULT_SELECTION
+  plan: Pick<NextPlan, 'filters' | 'gates' | 'order'> = DEFAULT_SELECTION,
+  scope: { prefix?: string } = {}
 ) {
-  const claimableAll = ready.filter((b) => claimable(b, plan.gates))
+  const local =
+    scope.prefix === undefined
+      ? ready
+      : ready.filter((b) => b.id.startsWith(`${scope.prefix}-`))
+  const claimableAll = local.filter((b) => claimable(b, plan.gates))
   const queue = applyFilters(claimableAll, plan.filters)
   queue.sort(ORDERERS[plan.order])
   return {
     queue,
     filtered: claimableAll.length - queue.length,
-    gates: ready.filter((b) => HUMAN_GATE.test(b.title)),
-    epics: ready.filter((b) => b.issue_type === 'epic'),
-    moleculeSteps: ready.filter((b) => b.parent).length,
+    foreign: ready.length - local.length,
+    gates: local.filter((b) => HUMAN_GATE.test(b.title)),
+    epics: local.filter((b) => b.issue_type === 'epic'),
+    moleculeSteps: local.filter((b) => b.parent).length,
   }
 }
 
@@ -149,6 +203,11 @@ function printResult(result: NextResult, list: boolean): void {
   if (result.filtered > 0) {
     console.log(`  filtered: ${result.filtered} claimable bead(s) excluded by plan filters`)
   }
+  if (result.foreign > 0) {
+    console.log(
+      `  foreign: ${result.foreign} bead(s) outside this project's issue_prefix — not claimable here`
+    )
+  }
   for (const g of result.gates) {
     console.log(`  gate: ${g.id} — ${g.title} (human decision needed)`)
   }
@@ -166,18 +225,18 @@ export function applyNextPlan(plan: NextPlan): void {
   checkBeads()
   let ready: ReadyBead[]
   try {
-    ready = bdJson<ReadyBead[]>(['ready', '--json'])
+    ready = readyBeads()
   } catch (err) {
     console.error(`error: bd ready failed — ${err instanceof Error ? err.message : String(err)}`)
     process.exit(1)
   }
-  const c = classify(ready, plan)
+  const c = classify(ready, plan, nextScope(plan.scope))
   const beads = plan.claim ? claimUpTo(c.queue, plan.limit) : c.queue.slice(0, plan.limit)
   const picked = new Set(beads.map((b) => b.id))
   let state: NextResult['state'] = 'idle'
   if (beads.length > 0) {
     state = 'task'
-  } else if (c.filtered + c.gates.length + c.epics.length + c.moleculeSteps > 0) {
+  } else if (c.filtered + c.foreign + c.gates.length + c.epics.length + c.moleculeSteps > 0) {
     // ready beads remain but none are claimable under this plan —
     // 'idle' would falsely tell the loop the backlog is empty
     state = 'gated'
@@ -188,6 +247,7 @@ export function applyNextPlan(plan: NextPlan): void {
     beads,
     queue: c.queue.length,
     filtered: c.filtered,
+    foreign: c.foreign,
     // a claimed gate is already reported as a pick — don't double-count it
     gates: c.gates.filter((b) => !picked.has(b.id)).map((b) => ({ id: b.id, title: b.title })),
     epics: c.epics.map((b) => ({ id: b.id, title: b.title })),
@@ -211,8 +271,12 @@ export async function runNextCommand(argv: string[]): Promise<void> {
   \`bro run next.toml\` (kind = "next").
 
   state: task  — a bead was emitted (claimed unless --list)
-         gated — nothing claimable; gates/epics/mol steps remain
-         idle  — backlog empty`)
+         gated — nothing claimable; gates/epics/mol steps/foreign remain
+         idle  — backlog empty
+
+  Scope: only beads under this checkout's issue_prefix are claimable;
+  gt:slot coordination primitives are never surfaced. Plans may set
+  scope = "all" to opt out.`)
     process.exit(0)
   }
   applyNextPlan({
@@ -221,6 +285,7 @@ export async function runNextCommand(argv: string[]): Promise<void> {
     claim: !argv.includes('--list'),
     gates: 'forbid',
     json: argv.includes('--json'),
+    scope: 'project',
     filters: {},
   })
 }

@@ -12,6 +12,10 @@
  *   gates = "allow"            # forbid (default) — HUMAN GATE beads are
  *                              #   surfaced but never claimed; allow puts
  *                              #   them in the queue like any other bead
+ *   scope = "all"              # project (default) — only beads under this
+ *                              #   checkout's issue_prefix are claimable;
+ *                              #   all opens the queue to every scope in a
+ *                              #   shared/federated db
  *   json = true                # machine-readable result
  *
  *   [filters]
@@ -29,6 +33,12 @@ export type NextOrder = (typeof NEXT_ORDERS)[number]
 export const NEXT_GATE_POLICIES = ['forbid', 'allow'] as const
 export type NextGatePolicy = (typeof NEXT_GATE_POLICIES)[number]
 
+/** Queue scope — `project` (default) restricts claims to beads under
+ *  this checkout's issue_prefix; `all` lifts the restriction for
+ *  plans that deliberately work a shared/federated db. */
+export const NEXT_SCOPES = ['project', 'all'] as const
+export type NextScope = (typeof NEXT_SCOPES)[number]
+
 export interface NextFilters {
   /** issue_type allowlist — applied on top of the built-in exclusions */
   types?: string[]
@@ -43,6 +53,7 @@ export interface NextPlan {
   order: NextOrder
   claim: boolean
   gates: NextGatePolicy
+  scope: NextScope
   json: boolean
   filters: NextFilters
 }
@@ -50,7 +61,7 @@ export interface NextPlan {
 /** The `kind` value a next plan must carry — `bro run` routes on it. */
 export const PLAN_KIND = 'next'
 
-const TOP_KEYS = new Set(['kind', 'limit', 'order', 'claim', 'gates', 'json', 'filters'])
+const TOP_KEYS = new Set(['kind', 'limit', 'order', 'claim', 'gates', 'scope', 'json', 'filters'])
 const FILTER_KEYS = new Set(['types', 'max_priority', 'match'])
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
@@ -164,6 +175,7 @@ export function parseNextPlan(doc: unknown, source = 'plan'): NextPlan {
   }
   checkEnum(doc.order, 'order', NEXT_ORDERS, errors)
   checkEnum(doc.gates, 'gates', NEXT_GATE_POLICIES, errors)
+  checkEnum(doc.scope, 'scope', NEXT_SCOPES, errors)
   checkBool(doc.claim, 'claim', errors)
   checkBool(doc.json, 'json', errors)
   checkFilters(doc.filters, errors)
@@ -175,6 +187,7 @@ export function parseNextPlan(doc: unknown, source = 'plan'): NextPlan {
     order: typeof doc.order === 'string' ? (doc.order as NextOrder) : 'priority',
     claim: doc.claim !== false,
     gates: typeof doc.gates === 'string' ? (doc.gates as NextGatePolicy) : 'forbid',
+    scope: typeof doc.scope === 'string' ? (doc.scope as NextScope) : 'project',
     json: doc.json === true,
     filters: parseFilters(doc.filters),
   }
