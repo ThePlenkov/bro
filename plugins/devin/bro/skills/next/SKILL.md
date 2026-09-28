@@ -36,9 +36,9 @@ continue?" between items.** The queue is the approval.
 - **Foreign-scope beads** — ids outside this checkout's `issue_prefix`
   are never claimed; they surface as `foreign: N` when the shared db
   carries other projects' work. `scope = "all"` in a plan opts out.
-- **Coordination primitives** — `gt:*`-labeled beads (merge slots and
-  friends) are excluded inside `bd ready` itself; a semaphore is never
-  work.
+- **Coordination primitives** — `gt:slot`-labeled beads (merge-queue
+  semaphores) are excluded inside `bd ready` itself; a semaphore is
+  never work.
 
 ## Plans
 

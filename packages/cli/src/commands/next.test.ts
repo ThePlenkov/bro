@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { applyNextPlan, runNextCommand } from './next.ts'
+import { applyNextPlan, projectPrefix, runNextCommand } from './next.ts'
 import { parseNextPlan } from './next-plan.ts'
 
 /** A scripted `bd` on PATH — PATH lookup is the exec contract. `ready`
@@ -16,6 +16,7 @@ case "$1" in
   --version) echo 'bd 0.0' ;;
   ready) echo "$@" >> "$FAKE_BD_READY_LOG"; cat "$FAKE_BD_READY" ;;
   config)
+    if [ -n "$FAKE_BD_CONFIG_FAIL" ]; then exit 1; fi
     case "$3" in
       issue_prefix) echo "\${FAKE_BD_PREFIX:-issue_prefix (not set)}" ;;
       *) echo "$3 (not set)" ;;
@@ -74,6 +75,7 @@ function withFakeBd(
       FAKE_BD_UPDATE_FAIL: process.env.FAKE_BD_UPDATE_FAIL,
       FAKE_BD_PREFIX: process.env.FAKE_BD_PREFIX,
       FAKE_BD_READY_LOG: process.env.FAKE_BD_READY_LOG,
+      FAKE_BD_CONFIG_FAIL: process.env.FAKE_BD_CONFIG_FAIL,
     }
     process.env.PATH = `${dir}:${prev.PATH}`
     process.env.FAKE_BD_READY = join(dir, 'ready.json')
@@ -253,6 +255,14 @@ describe('bro next', () => {
         assert.equal(r.bead.id, 'other-x') // no prefix → fail open
       }
     )
+  )
+
+  it(
+    'a failed prefix lookup fails closed — unscoped claiming must stop',
+    withFakeBd(MIXED, async () => {
+      process.env.FAKE_BD_CONFIG_FAIL = '1'
+      assert.throws(() => projectPrefix(), /refusing to schedule/)
+    })
   )
 })
 

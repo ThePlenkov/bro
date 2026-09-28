@@ -69,12 +69,17 @@ export function readyBeads(): ReadyBead[] {
 }
 
 /** This checkout's bead id scope — what `bd init` recorded as
- *  issue_prefix. Unset prefix means the db cannot tell scopes apart:
- *  fail open rather than hide real work. */
+ *  issue_prefix. An explicitly unset prefix means the db cannot tell
+ *  scopes apart — fail open rather than hide real work. A FAILED
+ *  lookup is the opposite: on a shared db it would silently reopen
+ *  cross-repo claiming, so it throws (fail closed). */
 export function projectPrefix(): string | undefined {
   const res = bdTry(['config', 'get', 'issue_prefix'])
   if (res.code !== 0) {
-    return undefined
+    throw new Error(
+      `bd config get issue_prefix failed — ${res.err || 'bd error'} ` +
+        '(refusing to schedule without a verified project scope)'
+    )
   }
   const line = res.out.trim().split('\n').pop()?.trim() ?? ''
   if (line === '' || /not set/i.test(line)) {
@@ -230,7 +235,13 @@ export function applyNextPlan(plan: NextPlan): void {
     console.error(`error: bd ready failed — ${err instanceof Error ? err.message : String(err)}`)
     process.exit(1)
   }
-  const c = classify(ready, plan, nextScope(plan.scope))
+  let c: ReturnType<typeof classify>
+  try {
+    c = classify(ready, plan, nextScope(plan.scope))
+  } catch (err) {
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
   const beads = plan.claim ? claimUpTo(c.queue, plan.limit) : c.queue.slice(0, plan.limit)
   const picked = new Set(beads.map((b) => b.id))
   let state: NextResult['state'] = 'idle'

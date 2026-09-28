@@ -427,7 +427,13 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   }
 
   if (argv.includes('--dry-run')) {
-    const top = classify(readyBeads(), undefined, nextScope('project')).queue[0]
+    let top: ReadyBead | undefined
+    try {
+      top = classify(readyBeads(), undefined, nextScope('project')).queue[0]
+    } catch (err) {
+      console.error(`loop: ${err instanceof Error ? err.message : String(err)}`)
+      return
+    }
     if (!top) {
       console.log('loop --dry-run: nothing claimable')
       return
@@ -444,15 +450,27 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
 /** The claim→run→repeat cycle until the queue drains or --max hits. */
 async function runQueue(ctx: Ctx): Promise<void> {
   const seen = new Set<string>()
-  const scope = nextScope('project') // prefix is stable for the run
+  let scope: ReturnType<typeof nextScope>
+  try {
+    scope = nextScope('project') // prefix is stable for the run
+  } catch (err) {
+    console.error(`loop: ${err instanceof Error ? err.message : String(err)}`)
+    return
+  }
   const tally = { landed: 0, parked: 0, failed: 0 }
   for (;;) {
     if (ctx.cfg.maxItems > 0 && tally.landed + tally.parked + tally.failed >= ctx.cfg.maxItems) {
       break
     }
     const ready = readyBeads()
-    const bead = claimUpTo(classify(ready, undefined, scope).queue.filter((b) => !seen.has(b.id)), 1)[0]
+    const c = classify(ready, undefined, scope)
+    const bead = claimUpTo(c.queue.filter((b) => !seen.has(b.id)), 1)[0]
     if (!bead) {
+      // a foreign-only remainder must not look like a drained queue —
+      // 'done' would hide work a shared db still advertises
+      if (c.foreign > 0) {
+        console.log(`loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
+      }
       break
     }
     seen.add(bead.id)
