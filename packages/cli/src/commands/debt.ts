@@ -26,7 +26,6 @@ import {
   applyCollectLabel,
   applyDebtLabel,
   applyDebtVerdicts,
-  applyLastN,
   buildSummary,
   buildTrend,
   claimDebtRecord,
@@ -665,11 +664,12 @@ async function harvestTargets(
   args: CollectArgs,
   targets: Awaited<ReturnType<typeof resolveHarvestPrs>>,
   labelingEnabled: boolean
-): Promise<{ rows: number; labeled: number }> {
+): Promise<{ rows: number; labeled: number; failed: number }> {
   const scans = await probeTargets(rev, args.repo, targets)
 
   const scanned: ScannedPr[] = []
   let rows = 0
+  let failed = 0
   for (const [i, pr] of targets.entries()) {
     // Serial commit phase by design: ledger writes and the per-PR
     // progress line keep a deterministic order.
@@ -683,6 +683,7 @@ async function harvestTargets(
       targets.length
     )
     if (s === null) {
+      failed += 1
       continue
     }
     scanned.push(s)
@@ -693,7 +694,7 @@ async function harvestTargets(
     labelingEnabled && !args.dryRun && scanned.length > 0
       ? await labelScannedPrs(rev, args, scanned)
       : 0
-  return { rows, labeled }
+  return { rows, labeled, failed }
 }
 
 async function collectReviewThreads(rev: ReviewFacade, args: CollectArgs): Promise<void> {
@@ -733,10 +734,16 @@ async function collectReviewThreads(rev: ReviewFacade, args: CollectArgs): Promi
     ensureDebtLabels(rev, args.repo)
   }
 
-  const { rows, labeled } = await harvestTargets(rev, args, targets, labelingEnabled)
+  const { rows, labeled, failed } = await harvestTargets(rev, args, targets, labelingEnabled)
 
   const labeledMsg = labelingEnabled ? `labeled ${labeled} PR(s)` : 'labels disabled'
   console.error(`debt collect: wrote ${rows} row(s), ${labeledMsg}`)
+  // a skipped PR is missing evidence, not noise — automation reading
+  // the ledger must know the sweep was incomplete
+  if (failed > 0) {
+    console.error(`debt collect: ${failed} PR(s) failed — collection is incomplete`)
+    process.exitCode = 1
+  }
 }
 
 // --- status ----------------------------------------------------------------

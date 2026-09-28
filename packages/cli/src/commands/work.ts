@@ -182,7 +182,7 @@ export function resolveEnterBase(
   }
   if (!current || current === mainRef) {
     return stack
-      ? { err: '--stack needs a checked-out work branch — the default branch is not a stack head' }
+      ? { err: '--stack needs a checked-out work branch — detached HEAD and the default branch are not stack heads' }
       : { base: mainRef }
   }
   return stack || auto ? { base: current } : { base: mainRef }
@@ -248,6 +248,14 @@ function enterBase(argv: string[], main: WorktreeInfo): { base?: string } {
   return { base }
 }
 
+/** The default branch name regardless of the main checkout's attachment
+ *  — a detached main reports `mainRef` as a sha, which must not make an
+ *  explicit `--base main` record a stack edge an attached main wouldn't. */
+function defaultBranchName(): string | undefined {
+  const head = gitTry(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
+  return head.code === 0 ? head.out.trim().replace(/^[^/]+\//, '') : undefined
+}
+
 function cmdEnter(argv: string[]): void {
   const pos = positionals(argv, new Set(['--branch', '--base']))
   const slug = pos[0]
@@ -258,6 +266,7 @@ function cmdEnter(argv: string[]): void {
   const branch = flag(argv, '--branch') ?? `work/${slug}`
   const main = mainWorktree()
   const mainRef = main.branch ?? main.head
+  const defaultRef = defaultBranchName()
   const { base } = enterBase(argv, main)
   const path = worktreePathFor(main.path, slug)
   if (existsSync(path)) {
@@ -294,6 +303,7 @@ function cmdEnter(argv: string[]): void {
   const stacked =
     base !== undefined &&
     base !== mainRef &&
+    base !== defaultRef &&
     gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${base}`]).code === 0
   if (stacked) {
     recordStackEdge(branch, base)

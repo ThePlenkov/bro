@@ -566,6 +566,9 @@ function openLoopPrs(ctx: Ctx, branches: string[]): string[] {
 
 interface RefTails {
   worktrees: string[]
+  /** branch names riding a loop/* worktree — disjoint from `branches`,
+   *  needed so the open-PR audit sees PRs on worktree'd branches too */
+  worktreeBranches: string[]
   branches: string[]
   errors: string[]
 }
@@ -588,6 +591,7 @@ export function loopRefTails(root: string): RefTails {
   const bare = bl.out.split('\n').filter((b) => b && !onTree.has(b))
   return {
     worktrees: trees.map((w) => `${w.path} [${w.branch}]`),
+    worktreeBranches: trees.map((w) => w.branch!),
     branches: bare,
     errors,
   }
@@ -615,10 +619,12 @@ function claimedTails(seen: Set<string>): { own: string[]; other: string[] } {
  *  `bro sync` so artifacts and bead state travel. Never throws — an
  *  audit failure is reported, not raised. */
 function endAudit(ctx: Ctx, seen: Set<string>): void {
-  const { worktrees, branches, errors } = loopRefTails(ctx.root)
+  const { worktrees, worktreeBranches, branches, errors } = loopRefTails(ctx.root)
   const claimed = claimedTails(seen)
   const sections: [string, string[]][] = [
-    ['open PRs', openLoopPrs(ctx, branches)],
+    // PRs live on branches — worktree'd ones (a parked bead keeps both)
+    // are just as much a tail as the bare branches
+    ['open PRs', openLoopPrs(ctx, [...branches, ...worktreeBranches])],
     ['worktrees', worktrees],
     ['branches', branches],
     ['claimed beads', claimed.own],

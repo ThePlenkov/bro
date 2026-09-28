@@ -7,7 +7,7 @@
  *   resolve --thread ID [--comment TEXT] [--unresolve]
  *   reply   --thread ID --comment TEXT | --file TSV
  */
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import {
   ensureAuth,
   gitTry,
@@ -20,6 +20,7 @@ import { loadBroConfig } from '../plugins.ts'
 import { isAncestor } from './cleanup.ts'
 import { flag } from './args.ts'
 import { gitDirOf, hasSubmodules, isLinkedGitDir, parseWorktreePorcelain } from './work.ts'
+import type { WorktreeInfo } from './work.ts'
 import {
   acquireMergeSlot,
   evaluateExitGate,
@@ -116,7 +117,9 @@ async function cmdStatus(argv: string[]): Promise<void> {
 }
 
 function printStatus(state: PrActState, gate: ExitGate): void {
-  console.log(`pr=#${state.pr} ${state.headRef} ${state.url}`)
+  // clickable by convention (AGENTS.md): user-facing PR refs are links —
+  // state.url is the PR's own html_url, so this is also GHE-safe
+  console.log(`pr=[#${state.pr}](${state.url}) ${state.headRef}`)
   console.log(`mergeable=${state.mergeable} merge_state=${state.mergeState} draft=${state.isDraft}`)
   console.log(
     `open_threads=${gate.open_threads} ci_pending=${gate.ci_pending} ` +
@@ -340,8 +343,10 @@ async function cmdMerge(argv: string[]): Promise<void> {
  * extra commits is kept, which also covers the fork-PR case where
  * headRef names a branch we never had. */
 function deleteMergedLocalBranch(headRef: string, headSha: string): void {
+  // a prunable entry (directory already gone) still lists its branch —
+  // it must not count as checked out or the branch is never deleted
   const checkedOut = parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out).some(
-    (w) => w.branch === headRef
+    (w) => w.branch === headRef && w.prunable === undefined && existsSync(w.path)
   )
   if (checkedOut) {
     console.error(`cleanup: ${headRef} is checked out — delete it after switching`)
@@ -389,6 +394,44 @@ function defaultBranch(): string {
   return 'main'
 }
 
+/** Remove the linked worktree the merged branch was checked out in,
+ *  via the main checkout. Returns false when the tree must be kept —
+ *  locked (explicit human intent; `work leave` holds the same line even
+ *  under --force), dirty/unverifiable, or the removal itself failed.
+ *  `worktree remove` refuses trees with ANY extra files (even ignored
+ *  ones like node_modules), so a clean porcelain status — no tracked
+ *  modifications, no untracked files — is the guard for --force being
+ *  safe: only ignored debris remains. The check is config-independent
+ *  (`-c status.showUntrackedFiles=all` overrides a user config that
+ *  would hide untracked files) and fail-closed. */
+function removeMergedWorktree(root: string, here: WorktreeInfo, main: WorktreeInfo): boolean {
+  if (here.locked !== undefined) {
+    const why = here.locked ? ` (${here.locked})` : ''
+    console.error(`cleanup: ${root} is locked${why} — worktree kept; unlock with \`git worktree unlock\``)
+    return false
+  }
+  const status = gitTry(['-c', 'status.showUntrackedFiles=all', '-C', root, 'status', '--porcelain'])
+  if (status.code !== 0 || status.out.trim() !== '') {
+    console.error(
+      status.code !== 0
+        ? `cleanup: cannot verify ${root} is clean (${status.err}) — worktree kept`
+        : `cleanup: ${root} has uncommitted changes — worktree kept`
+    )
+    return false
+  }
+  // initialized submodules need a second --force to override
+  const force = hasSubmodules(root) ? ['--force', '--force'] : ['--force']
+  const res = gitTry(['-C', main.path, 'worktree', 'remove', ...force, root])
+  if (res.code !== 0) {
+    console.error(`cleanup: worktree ${root} not removed (${res.err})`)
+    return false
+  }
+  process.chdir(main.path) // cwd is gone — git ops below need a live dir
+  console.log(`cleanup: removed worktree ${root}`)
+  console.log(`cleanup: cd ${main.path}`)
+  return true
+}
+
 /**
  * `--cleanup`: after an authoritative merge, retire the whole local surface
  * the PR lived on — worktree or checkout first (a checkout cannot delete
@@ -408,33 +451,10 @@ export function cleanupAfterMerge(headRef: string, headSha: string): void {
   const gitDir = gitDirOf(cwd)
 
   if (here?.branch === headRef && gitDir && isLinkedGitDir(gitDir) && main) {
-    // inside a linked worktree on the merged branch — remove it via the
-    // main checkout. `worktree remove` refuses trees with ANY extra files
-    // (even ignored ones like node_modules), so a clean porcelain status —
-    // no tracked modifications, no untracked files — is the guard for
-    // --force being safe: only ignored debris remains. The check is
-    // config-independent — `-c status.showUntrackedFiles=all` overrides a
-    // user config that would hide untracked files from --porcelain — and
-    // fail-closed: a status failure means the tree is kept, never forced.
-    const status = gitTry(['-c', 'status.showUntrackedFiles=all', '-C', root, 'status', '--porcelain'])
-    if (status.code !== 0 || status.out.trim() !== '') {
-      console.error(
-        status.code !== 0
-          ? `cleanup: cannot verify ${root} is clean (${status.err}) — worktree kept`
-          : `cleanup: ${root} has uncommitted changes — worktree kept`
-      )
+    if (!removeMergedWorktree(root, here, main)) {
       return
     }
-    // initialized submodules need a second --force to override
-    const force = hasSubmodules(root) ? ['--force', '--force'] : ['--force']
-    const res = gitTry(['-C', main.path, 'worktree', 'remove', ...force, root])
-    if (res.code !== 0) {
-      console.error(`cleanup: worktree ${root} not removed (${res.err})`)
-      return
-    }
-    process.chdir(main.path) // cwd is gone — git ops below need a live dir
-    console.log(`cleanup: removed worktree ${root}`)
-    console.log(`cleanup: cd ${main.path}`)
+    // worktree removed — fall through to retire the branch it sat on
   } else if (here?.branch === headRef && here.path === main?.path) {
     // the main checkout itself sits on the merged branch — switch back to
     // the default branch before the delete below can run
@@ -627,15 +647,27 @@ export function applyActPlan(plan: ActPlan): void {
   // verdict (thread stays unresolved, per the skill's fallback rule)
   // instead of blocking every other verdict in the plan
   const failed: string[] = []
-  let ownerRepo: string | null = null
+  // lazy: only a defer verdict pays the repo-resolution call — and
+  // outside a clone it can't pay at all; null falls back to the bare-#
+  // bead description rather than failing a valid defer plan.
+  // undefined = not yet attempted.
+  let ownerRepo: string | null | undefined
+  const repoForDefers = (): string | null => {
+    if (ownerRepo === undefined) {
+      try {
+        ownerRepo = rev.resolveRepo([])
+      } catch {
+        ownerRepo = null
+      }
+    }
+    return ownerRepo
+  }
   for (const v of plan.threads) {
     try {
       if (v.action === 'reply') {
         replyVerdict(rev, v)
       } else if (v.action === 'defer') {
-        // lazy: only a defer verdict pays the repo-resolution call
-        ownerRepo ??= rev.resolveRepo([])
-        console.error(`act: deferred ${v.thread_id} → ${deferThread(rev, v, ownerRepo, plan.pr)}`)
+        console.error(`act: deferred ${v.thread_id} → ${deferThread(rev, v, repoForDefers(), plan.pr)}`)
       } else {
         resolveVerdict(rev, v)
       }

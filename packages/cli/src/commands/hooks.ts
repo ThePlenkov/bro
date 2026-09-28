@@ -376,6 +376,11 @@ export function otherLiveWork(
         continue
       }
       const detail = readFileSync(path, 'utf8').split('\n')[1]?.trim() ?? ''
+      // leave/list/remove leave detail-less markers — every work-CREATING
+      // command carries a detail, so '' reliably means residue, not work
+      if (!detail) {
+        continue
+      }
       out.push({ session: m[1]!, detail, ageMs: now - st.mtimeMs })
     } catch {
       // unreadable marker — skip
@@ -455,7 +460,7 @@ export function armDetail(cmd: string, aspect: GateAspect): string {
     return m ? m[1]! : ''
   }
   if (aspect === 'work') {
-    const enter = /\bwork\s+enter\s+([a-z0-9][\w.-]*)/.exec(c)
+    const enter = /\bwork\s+enter\s+(\w[\w.-]*)/.exec(c)
     if (enter) {
       return enter[1]!
     }

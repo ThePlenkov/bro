@@ -120,6 +120,16 @@ function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
     exec: (_ref: string | undefined, _flags: DocFlags, positional: string[]) => {
       const dir = ctx.scope === 'global' ? requireGlobalStore(ctx.root) : ctx.root
       const res = spawnSync('bd', positional, { cwd: dir, stdio: 'inherit' }) // NOSONAR — PATH contract
+      // a missing bd spawns nothing — stdio: 'inherit' means silence, so
+      // the real diagnostic (ENOENT + install hint) must come from here
+      if (res.error) {
+        const enoent = (res.error as NodeJS.ErrnoException).code === 'ENOENT'
+        console.error(
+          enoent
+            ? 'error: bd not found — install beads first (https://github.com/gastownhall/beads)'
+            : `error: bd failed — ${res.error.message}`
+        )
+      }
       process.exit(res.status ?? 1)
     },
   }

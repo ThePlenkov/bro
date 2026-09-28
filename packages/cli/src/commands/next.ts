@@ -93,6 +93,11 @@ export function nextScope(scope: NextPlan['scope'], dir?: string): { prefix?: st
   return { prefix: scope === 'all' ? undefined : projectPrefix(dir) }
 }
 
+/** A parent's issue_type rarely changes mid-process — `bro loop`
+ *  re-classifies every iteration, so each unique parent resolves once
+ *  per process instead of spawning `bd show` per iteration. */
+const parentEpicCache = new Map<string, boolean>()
+
 /** bd reuses `parent` for both molecule steps and epic children — only
  *  a parent that IS an epic makes the child regular work. Looked up
  *  once per unique parent id; an unreadable parent stays a mol step. */
@@ -102,11 +107,21 @@ export function epicParentIds(ready: ReadyBead[], dir?: string): Set<string> {
   ]
   const epic = new Set<string>()
   for (const id of ids) {
-    try {
-      if (taskStore(dir).get(id)?.issue_type === 'epic') {
+    const key = `${dir ?? ''}:${id}`
+    const cached = parentEpicCache.get(key)
+    if (cached !== undefined) {
+      if (cached) {
         epic.add(id)
       }
-    } catch { /* a parent we can't inspect stays a molecule step */ }
+      continue
+    }
+    try {
+      const isEpic = taskStore(dir).get(id)?.issue_type === 'epic'
+      parentEpicCache.set(key, isEpic)
+      if (isEpic) {
+        epic.add(id)
+      }
+    } catch { /* a parent we can't inspect stays a molecule step — never cached */ }
   }
   return epic
 }
@@ -243,6 +258,23 @@ function printResult(result: NextResult, list: boolean): void {
   }
 }
 
+/** readyBeads with a diagnostic — a missing bd is an install problem,
+ *  not a queue failure, and the global path must report it the same
+ *  way checkBeads() does for the project path. */
+function readyOrDie(dir?: string): ReadyBead[] {
+  try {
+    return readyBeads(dir)
+  } catch (err) {
+    const enoent = (err as NodeJS.ErrnoException).code === 'ENOENT'
+    console.error(
+      enoent
+        ? 'error: bd not found — install beads first (https://github.com/gastownhall/beads)'
+        : `error: bd ready failed — ${err instanceof Error ? err.message : String(err)}`
+    )
+    process.exit(1)
+  }
+}
+
 /** The shared execution path — argv `bro next` and `bro run next.toml`
  *  differ only in how the plan is populated. */
 export function applyNextPlan(plan: NextPlan): void {
@@ -253,13 +285,7 @@ export function applyNextPlan(plan: NextPlan): void {
   if (dir === undefined) {
     checkBeads()
   }
-  let ready: ReadyBead[]
-  try {
-    ready = readyBeads(dir)
-  } catch (err) {
-    console.error(`error: bd ready failed — ${err instanceof Error ? err.message : String(err)}`)
-    process.exit(1)
-  }
+  const ready = readyOrDie(dir)
   let c: ReturnType<typeof classify>
   try {
     c = classify(ready, plan, nextScope(plan.scope, dir), epicParentIds(ready, dir))

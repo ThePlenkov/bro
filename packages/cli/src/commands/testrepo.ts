@@ -18,9 +18,16 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export function git(args: string[], cwd: string): string {
-  // a test run inside another repo still carries GIT_DIR/GIT_WORKTREE —
-  // strip repo-location env so the child only sees the fixture's cwd
-  const { GIT_DIR: _d, GIT_WORKTREE: _w, GIT_INDEX_FILE: _i, ...env } = process.env
+  // a test run inside another repo still carries its repo-location env —
+  // strip it so the child only sees the fixture's cwd (GIT_WORK_TREE is
+  // the canonical spelling; GIT_WORKTREE is dead text git ignores)
+  const {
+    GIT_DIR: _d,
+    GIT_WORK_TREE: _w,
+    GIT_INDEX_FILE: _i,
+    GIT_COMMON_DIR: _c,
+    ...env
+  } = process.env
   return execFileSync('git', args, { cwd, env, encoding: 'utf8' }) // NOSONAR — PATH lookup is the contract (same as core/git.ts)
 }
 
