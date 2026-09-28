@@ -123,11 +123,16 @@ export function taskStore(dir?: string): TaskStore {
     ready: (f = {}) => bdJson(['ready', ...filterArgs(f)], dir),
     get: (id) => {
       const r = bdJson<TaskRow | TaskRow[]>(['show', id], dir)
-      return (Array.isArray(r) ? r[0] : r) as never
+      // bd show answers an array; empty/undefined = no such task
+      return ((Array.isArray(r) ? r[0] : r) ?? undefined) as never
     },
     create: (i) => {
       const r = bdJson<TaskRow | TaskRow[]>(createArgs(i), dir)
-      return (Array.isArray(r) ? r[0]! : r) as never
+      const row = Array.isArray(r) ? r[0] : r
+      if (!row) {
+        throw new Error('task create returned no row — backend contract broken')
+      }
+      return row as never
     },
     update: (id, patch) => {
       const args = ['update', id]

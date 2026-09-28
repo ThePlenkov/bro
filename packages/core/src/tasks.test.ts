@@ -14,7 +14,7 @@ case "$1" in
   list) echo '[{"id":"t1","status":"open"}]' ;;
   ready) echo '[{"id":"t1"}]' ;;
   show) echo '[{"id":"t1","status":"in_progress"}]' ;;
-  create) echo '{"id":"t9","status":"open"}' ;;
+  create) if [ "$FAKE_BD_CREATE_EMPTY" = "1" ]; then echo '[]'; else echo '{"id":"t9","status":"open"}'; fi ;;
   dep) echo '[{"issue_id":"t2","depends_on_id":"t1","type":"parent-child"}]' ;;
   config) if [ "$FAKE_BD_CONFIG_FAIL" = "1" ]; then echo 'db gone' >&2; exit 1; fi
           echo "issue_prefix = $FAKE_BD_PREFIX" ;;
@@ -138,6 +138,15 @@ describe('taskStore', { skip: WIN32 }, () => {
       assert.ok(call.includes('dep list t1 t2'), call)
       assert.ok(call.includes('-t parent-child'), call)
       assert.ok(call.includes('--direction=up'), call)
+    })
+  })
+
+  test('create on an empty-array reply throws, not crashes on .id', () => {
+    withFakeBd({ FAKE_BD_CREATE_EMPTY: '1' }, () => {
+      assert.throws(
+        () => taskStore().create({ title: 'x' }),
+        /task create returned no row/
+      )
     })
   })
 
