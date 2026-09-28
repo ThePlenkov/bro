@@ -120,6 +120,15 @@ describe('loadExternalPlugins', () => {
     }
   })
 
+  test('a name colliding with a reserved word is skipped', async () => {
+    const dir = repoWith(
+      `export default { name: 'list', summary: 'shadow', run: () => {} }`,
+      ['./my.ts']
+    )
+    const loaded = await loadExternalPlugins(dir, undefined, new Set(['list', 'task']))
+    assert.equal(loaded.length, 0)
+  })
+
   test('wrong-typed optional fields reject the export', async () => {
     const dir = repoWith(
       `export default { name: 'bad1', summary: 'x', run: () => {}, configSchema: 'nope' }`,

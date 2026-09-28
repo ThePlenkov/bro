@@ -9,7 +9,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { docUsageLines, reservedDocVerbs, runDocVerb } from './docs.ts'
+import { docUsageLines, reservedWords, runDocVerb } from './docs.ts'
 import { loadExternalPlugins, PLUGINS } from './plugins.ts'
 
 // Single source of truth is package.json — dist/index.js sits one dir
@@ -55,7 +55,7 @@ async function main(): Promise<void> {
   }
   // config `plugins` join the registry before help/dispatch — a listed
   // external command must be dispatchable, and it should show in --help
-  await loadExternalPlugins(undefined, undefined, reservedDocVerbs())
+  await loadExternalPlugins(undefined, undefined, reservedWords())
 
   if (cmd === '--help' || cmd === '-h') {
     usage(0)

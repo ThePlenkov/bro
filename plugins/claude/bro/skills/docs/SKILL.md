@@ -13,6 +13,11 @@ methods are the verb registry — there is no verb list to consult.
 `bro <verb> <ref>` without a noun infers the type from the ref's prefix
 and defaults to `task`.
 
+The doc namespace is guarded, not declared: reserved words = plugin
+command names ∪ doc nouns/aliases ∪ discovered verbs. A plugin taking
+a reserved name, or a doc type colliding on noun/alias/idPrefix, is
+skipped with a warning — everything else is usable.
+
 | Command | What it does |
 | ------- | ------------ |
 | `bro list [tasks] [--status=open]` | List docs — flags pass through to the store |

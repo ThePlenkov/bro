@@ -36,10 +36,48 @@ export function registerDocType(type: DocType): void {
   EXTRA_DOCS.push(type)
 }
 
+/** Registration filter: a doc type whose noun duplicates another
+ *  type's name/alias, spells a standard verb (`bro list` where 'list'
+ *  is also a noun is unparseable), or overlaps another type's
+ *  idPrefix (bare-ref inference becomes ambiguous) is dropped with a
+ *  warning — one bad plugin doc must not corrupt the namespace. */
+export function filterDocTypes(types: DocType[]): DocType[] {
+  const nouns = new Set<string>()
+  const prefixes: [string, string][] = []
+  const out: DocType[] = []
+  for (const t of types) {
+    const names = [t.name, ...(t.aliases ?? [])]
+    const clash = names.find((n) => nouns.has(n) || n in STANDARD_VERBS)
+    if (clash) {
+      console.error(`warning: doc type "${t.name}" noun "${clash}" is reserved — skipped`)
+      continue
+    }
+    const px = t.idPrefix && prefixes.find(([p]) => p.startsWith(t.idPrefix!) || t.idPrefix!.startsWith(p))
+    if (px) {
+      console.error(
+        `warning: doc type "${t.name}" idPrefix "${t.idPrefix}" overlaps "${px[1]}" — skipped`
+      )
+      continue
+    }
+    for (const n of names) {
+      nouns.add(n)
+    }
+    if (t.idPrefix) {
+      prefixes.push([t.idPrefix, t.name])
+    }
+    out.push(t)
+  }
+  return out
+}
+
 /** All registered doc types — builtins, plugin `docs` fields, and
- *  runtime registrations. */
+ *  runtime registrations — minus namespace collisions. */
 export function docTypes(): DocType[] {
-  return [...BUILTIN_DOCS, ...PLUGINS.flatMap((p) => p.docs ?? []), ...EXTRA_DOCS]
+  return filterDocTypes([
+    ...BUILTIN_DOCS,
+    ...PLUGINS.flatMap((p) => p.docs ?? []),
+    ...EXTRA_DOCS,
+  ])
 }
 
 /** Parse argv for doc verbs: `--key=value`, boolean `--key`, scope
@@ -212,18 +250,27 @@ export async function runDocVerb(cmd: string, argv: string[]): Promise<boolean> 
   return true
 }
 
-/** Verb names external plugins must not take — plugin lookup wins
- *  argv[0], so a plugin named `list` would shadow every doc type's
- *  list. Computed from builtin docs before external plugins load. */
-export function reservedDocVerbs(root = process.cwd()): Set<string> {
+/** Words external plugins must not take as command names — plugin
+ *  lookup wins argv[0], so a plugin named `list` would shadow the doc
+ *  layer, and one named `task` would look like a doc noun it isn't.
+ *  The set is computed, not declared: plugin commands ∪ doc nouns ∪
+ *  discovered doc verbs. Everything else is usable. */
+export function reservedWords(root = process.cwd()): Set<string> {
   const ctx: DocCtx = { root, scope: 'project' }
-  const verbs = new Set(Object.keys(STANDARD_VERBS))
+  const words = new Set(Object.keys(STANDARD_VERBS))
+  for (const p of PLUGINS) {
+    words.add(p.name)
+  }
   for (const t of docTypes()) {
+    words.add(t.name)
+    for (const a of t.aliases ?? []) {
+      words.add(a)
+    }
     for (const v of docVerbs(t.adapter(ctx))) {
-      verbs.add(v)
+      words.add(v)
     }
   }
-  return verbs
+  return words
 }
 
 /** Verb/noun lines for `bro --help` — discovered, not hardcoded. */
