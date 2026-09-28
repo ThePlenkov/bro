@@ -13,6 +13,7 @@ import { loadBroConfig } from '../plugins.ts'
 import { fetchReviewThreads } from '@bro/debt'
 import { isAncestor } from './cleanup.ts'
 import { flag } from './args.ts'
+import { gitDirOf, hasSubmodules, isLinkedGitDir, parseWorktreePorcelain } from './work.ts'
 import {
   acquireMergeSlot,
   evaluateExitGate,
@@ -34,10 +35,13 @@ function usage(): never {
 
 Commands:
   status [PR] [--json]              PR state + exit gate JSON
-  wait [PR] [--interval S] [--timeout M] [--merge] [--json]
-                                    Poll the gate until it settles; --merge lands on green
+  wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--json]
+                                    Poll the gate until it settles; --merge lands on green,
+                                    --cleanup retires the worktree + local branch after it
   threads [PR]                      Unresolved review threads (TSV)
-  merge [PR] [--squash|--merge|--rebase] [--admin]  Merge only if the exit gate is green
+  merge [PR] [--squash|--merge|--rebase] [--admin] [--cleanup]
+                                    Merge only if the exit gate is green;
+                                    --cleanup also retires the worktree + local branch
   resolve --thread ID [--comment T] Resolve a thread — a fix resolves silently
                                     (the push is the verdict); --comment is for
                                     reject/defer reasons
@@ -191,9 +195,18 @@ async function cmdWait(argv: string[]): Promise<void> {
     process.exitCode = res.timedOut || !res.gate.ok ? 1 : 0
     return
   }
+  await mergeIfAsked(argv, t.pr)
+}
+
+/** Post-wait merge dispatch: `--merge` lands the PR (with `--cleanup`
+ *  forwarded); `--cleanup` alone is an error — nothing was merged. */
+async function mergeIfAsked(argv: string[], pr: number): Promise<void> {
   if (argv.includes('--merge')) {
-    const mergeArgs = argv.filter((a) => ['--squash', '--rebase', '--admin'].includes(a))
-    await cmdMerge([String(t.pr), ...mergeArgs])
+    const mergeArgs = argv.filter((a) => ['--squash', '--rebase', '--admin', '--cleanup'].includes(a))
+    await cmdMerge([String(pr), ...mergeArgs])
+  } else if (argv.includes('--cleanup')) {
+    console.error('error: --cleanup requires --merge — nothing was merged, nothing to clean')
+    process.exitCode = 2
   }
 }
 
@@ -202,19 +215,51 @@ async function cmdWait(argv: string[]): Promise<void> {
  * Merging through bro cannot bypass a BLOCKED gate; `gh pr merge` by hand
  * can. This is the guardrail for "merged without running the gate".
  */
+/** Merge strategy validation — returns null (caller errors out) on
+ *  conflicting flags. Runs before the slot so a doomed request never
+ *  occupies the critical section. */
+function mergeMethod(argv: string[]): string | null {
+  const strategies = ['--squash', '--merge', '--rebase'].filter((f) => argv.includes(f))
+  if (strategies.length > 1) {
+    console.error(`error: conflicting merge strategies: ${strategies.join(' ')}`)
+    return null
+  }
+  return strategies[0] ?? '--squash'
+}
+
+/** `gh pr merge` + the authoritative verify — a merge queue accepts a PR
+ *  without landing it, so only a MERGED state returns the landed head. */
+function landPr(ownerRepo: string, pr: number, args: string[], head: { ref: string; sha: string }): { ref: string; sha: string } | undefined {
+  try {
+    console.log(gh(args))
+    const after = JSON.parse(gh(['pr', 'view', String(pr), '--json', 'state'])) as {
+      state: string
+    }
+    if (after.state === 'MERGED') {
+      console.log(`act: merged ${prLink(ownerRepo, pr)}`)
+      return head
+    }
+    console.log(
+      `act: ${prLink(ownerRepo, pr)} accepted but state=${after.state} — a merge queue still owns it; ` +
+        'local cleanup deferred'
+    )
+    return undefined
+  } catch (err) {
+    console.error(`error: merge failed — ${err instanceof Error ? err.message : String(err)}`)
+    process.exitCode = 1
+    return undefined
+  }
+}
+
 async function cmdMerge(argv: string[]): Promise<void> {
   ensureGhAuth()
   const t = resolvePr(argv)
 
-  // cheap client-side validation before acquiring the slot — a doomed
-  // request must not occupy the critical section
-  const strategies = ['--squash', '--merge', '--rebase'].filter((f) => argv.includes(f))
-  if (strategies.length > 1) {
-    console.error(`error: conflicting merge strategies: ${strategies.join(' ')}`)
+  const method = mergeMethod(argv)
+  if (!method) {
     process.exitCode = 2
     return
   }
-  const method = strategies[0] ?? '--squash'
 
   // Gate evaluation + merge is ONE critical section: acquiring the slot
   // first closes the drift window between a green gate and the merge
@@ -230,6 +275,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
     process.exitCode = 1
     return
   }
+  let mergedHead: { ref: string; sha: string } | undefined
   try {
     const act = loadBroConfig().act
     const state = await fetchPrActState(
@@ -264,30 +310,35 @@ async function cmdMerge(argv: string[]): Promise<void> {
     if (argv.includes('--admin')) {
       args.push('--admin')
     }
-    try {
-      console.log(gh(args))
-      console.log(`act: merged ${prLink(t.repo, t.pr)}`)
-      deleteMergedLocalBranch(state.headRef, state.headSha)
-    } catch (err) {
-      console.error(`error: merge failed — ${err instanceof Error ? err.message : String(err)}`)
-      process.exitCode = 1
-    }
+    mergedHead = landPr(t.repo, t.pr, args, { ref: state.headRef, sha: state.headSha })
   } finally {
     if (slot.kind === 'acquired') {
       releaseMergeSlot()
+    }
+  }
+  // local cleanup runs AFTER the merge slot is released — it is pure git
+  // plumbing and must not extend the critical section
+  if (mergedHead) {
+    if (argv.includes('--cleanup')) {
+      cleanupAfterMerge(mergedHead.ref, mergedHead.sha)
+    } else {
+      deleteMergedLocalBranch(mergedHead.ref, mergedHead.sha)
     }
   }
 }
 
 /** Best-effort local-side cleanup after a merge — the remote branch is
  * already gone via --delete-branch, but the local ref lingers. Never
- * fails the merge: a branch checked out in a worktree simply reports.
- * Deletes only when the local tip IS the merged head (or its ancestor) —
- * a same-named branch with extra commits is kept, which also covers the
- * fork-PR case where headRef names a branch we never had. */
+ * fails the merge: a branch checked out in ANY worktree simply reports
+ * (a checkout cannot delete its own branch). Deletes only when the local
+ * tip IS the merged head (or its ancestor) — a same-named branch with
+ * extra commits is kept, which also covers the fork-PR case where
+ * headRef names a branch we never had. */
 function deleteMergedLocalBranch(headRef: string, headSha: string): void {
-  const current = gitTry(['branch', '--show-current']).out.trim()
-  if (headRef === current) {
+  const checkedOut = parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out).some(
+    (w) => w.branch === headRef
+  )
+  if (checkedOut) {
     console.error(`cleanup: ${headRef} is checked out — delete it after switching`)
     return
   }
@@ -300,12 +351,99 @@ function deleteMergedLocalBranch(headRef: string, headSha: string): void {
     console.error(`cleanup: ${headRef} has commits beyond the merged head — kept`)
     return
   }
-  const res = gitTry(['branch', '-D', headRef])
+  // `update-ref -d <ref> <tip>` deletes only if the ref still points at the
+  // tip we verified — a compare-and-delete, so commits landing between the
+  // check and the delete can't be silently dropped
+  const res = gitTry(['update-ref', '-d', `refs/heads/${headRef}`, tip])
   if (res.code === 0) {
     console.log(`cleanup: deleted local branch ${headRef}`)
-  } else if (!/not found|branch.*not.*exist/i.test(res.err)) {
+  } else if (/checked out/i.test(res.err)) {
+    console.error(`cleanup: ${headRef} is checked out — delete it after switching`)
+  } else if (/cannot lock ref/i.test(res.err)) {
+    console.error(`cleanup: ${headRef} moved past the verified tip — kept`)
+  } else {
     console.error(`cleanup: local branch ${headRef} not deleted (${res.err})`)
   }
+}
+
+/** The branch a merged PR's checkout should fall back to: origin/HEAD's
+ *  target, else the first existing of main/master. */
+function defaultBranch(): string {
+  // refresh first — a stale origin/HEAD would switch back to a renamed or
+  // deleted default branch (failure only: kept, never data loss)
+  gitTry(['remote', 'set-head', 'origin', '--auto'])
+  const head = gitTry(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
+  if (head.code === 0) {
+    return head.out.trim().replace(/^[^/]+\//, '')
+  }
+  for (const b of ['main', 'master']) {
+    if (gitTry(['rev-parse', '--verify', `refs/heads/${b}`]).code === 0) {
+      return b
+    }
+  }
+  return 'main'
+}
+
+/**
+ * `--cleanup`: after an authoritative merge, retire the whole local surface
+ * the PR lived on — worktree or checkout first (a checkout cannot delete
+ * its own branch), then the branch itself under deleteMergedLocalBranch's
+ * tip guard. Owned by the command, not a `;`-sequenced watcher shell: it
+ * only ever runs after a merge that actually landed. Best-effort — every
+ * step reports and a dirty tree is kept, never force-removed.
+ */
+export function cleanupAfterMerge(headRef: string, headSha: string): void {
+  const cwd = process.cwd()
+  // cwd may be a subdirectory — resolve the containing worktree root
+  // before matching against `worktree list` paths
+  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || cwd
+  const all = parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out)
+  const main = all[0]
+  const here = all.find((w) => w.path === root)
+  const gitDir = gitDirOf(cwd)
+
+  if (here?.branch === headRef && gitDir && isLinkedGitDir(gitDir) && main) {
+    // inside a linked worktree on the merged branch — remove it via the
+    // main checkout. `worktree remove` refuses trees with ANY extra files
+    // (even ignored ones like node_modules), so a clean porcelain status —
+    // no tracked modifications, no untracked files — is the guard for
+    // --force being safe: only ignored debris remains. The check is
+    // config-independent — `-c status.showUntrackedFiles=all` overrides a
+    // user config that would hide untracked files from --porcelain — and
+    // fail-closed: a status failure means the tree is kept, never forced.
+    const status = gitTry(['-c', 'status.showUntrackedFiles=all', '-C', root, 'status', '--porcelain'])
+    if (status.code !== 0 || status.out.trim() !== '') {
+      console.error(
+        status.code !== 0
+          ? `cleanup: cannot verify ${root} is clean (${status.err}) — worktree kept`
+          : `cleanup: ${root} has uncommitted changes — worktree kept`
+      )
+      return
+    }
+    // initialized submodules need a second --force to override
+    const force = hasSubmodules(root) ? ['--force', '--force'] : ['--force']
+    const res = gitTry(['-C', main.path, 'worktree', 'remove', ...force, root])
+    if (res.code !== 0) {
+      console.error(`cleanup: worktree ${root} not removed (${res.err})`)
+      return
+    }
+    process.chdir(main.path) // cwd is gone — git ops below need a live dir
+    console.log(`cleanup: removed worktree ${root}`)
+    console.log(`cleanup: cd ${main.path}`)
+  } else if (here?.branch === headRef && here.path === main?.path) {
+    // the main checkout itself sits on the merged branch — switch back to
+    // the default branch before the delete below can run
+    const def = defaultBranch()
+    const res = gitTry(['-C', main.path, 'switch', def])
+    if (res.code !== 0) {
+      console.error(`cleanup: could not switch to ${def} (${res.err}) — branch ${headRef} kept`)
+      return
+    }
+    console.log(`cleanup: switched to ${def}`)
+  }
+  // merged branch checked out elsewhere, or not checked out at all —
+  // deleteMergedLocalBranch reports the first and handles the second
+  deleteMergedLocalBranch(headRef, headSha)
 }
 
 async function cmdThreads(argv: string[]): Promise<void> {
@@ -429,10 +567,13 @@ const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
  *  `bd create -l debt --external-ref <thread>`, reply with the bead id,
  *  then resolve. Fails loudly when bd can't create — never resolves a
  *  defer that didn't land. */
-function deferThread(v: ActThreadVerdict, pr?: number): string {
-  const desc = pr
-    ? `deferred from PR #${pr} thread ${v.thread_id}`
-    : `deferred thread ${v.thread_id}`
+function deferThread(v: ActThreadVerdict, ownerRepo: string | null, pr?: number): string {
+  const desc =
+    pr && ownerRepo
+      ? `deferred from PR ${prLink(ownerRepo, pr)} thread ${v.thread_id}`
+      : pr
+        ? `deferred from PR #${pr} thread ${v.thread_id}`
+        : `deferred thread ${v.thread_id}`
   if (!v.title) {
     throw new Error(`defer verdict for ${v.thread_id} has no title`)
   }
@@ -478,12 +619,15 @@ export function applyActPlan(plan: ActPlan): void {
   // verdict (thread stays unresolved, per the skill's fallback rule)
   // instead of blocking every other verdict in the plan
   const failed: string[] = []
+  let ownerRepo: string | null = null
   for (const v of plan.threads) {
     try {
       if (v.action === 'reply') {
         replyVerdict(v)
       } else if (v.action === 'defer') {
-        console.error(`act: deferred ${v.thread_id} → ${deferThread(v, plan.pr)}`)
+        // lazy: only a defer verdict pays the `gh repo view` call
+        ownerRepo ??= resolveRepo([])
+        console.error(`act: deferred ${v.thread_id} → ${deferThread(v, ownerRepo, plan.pr)}`)
       } else {
         resolveVerdict(v)
       }

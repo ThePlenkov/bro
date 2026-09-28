@@ -22,6 +22,7 @@
     "@nx-devkit/tsdown": "^0.1.7",
     "@nx/js": "^23.2.1",
     "@types/node": "^22.0.0",
+    "markdownlint-cli2": "^0.23.3",
     "nx": "^23.1.0",
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",

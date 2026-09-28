@@ -30,11 +30,11 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { ghJson, gitTry, prLink, resolveRepo } from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
 import { evaluateExitGate, fetchPrActState, mergeSlotHolder } from '@bro/act'
-import { gitDirOf, isLinkedGitDir } from './work.ts'
+import { gitDirOf, isLinkedGitDir, parseWorktreePorcelain } from './work.ts'
 import { bdJson, currentFrame } from '@bro/drill'
 import { readDebtRecords } from '@bro/debt'
 
@@ -289,10 +289,16 @@ async function actGateLine(owner?: string, repo?: string, pr?: number): Promise<
 // aspects. No session_id or no git dir → unarmed → passive (fail-open).
 
 const MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000
+/** "Live" for parallel-session detection is tighter than the stop-gate
+ *  TTL — a marker older than a day is residue, not a working session. */
+const LIVE_SESSION_MS = 24 * 60 * 60 * 1000
 
+/** Markers live under the common git dir — shared across all linked
+ *  worktrees of the repo, so a session in one worktree can detect work
+ *  armed by a session in another. `--git-dir` would be per-worktree. */
 function hooksStateDir(): string | null {
   try {
-    const gd = execFileSync('git', ['rev-parse', '--git-dir'], { // NOSONAR
+    const gd = execFileSync('git', ['rev-parse', '--git-common-dir'], { // NOSONAR
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim()
@@ -329,16 +335,163 @@ export function readArmed(sessionId: string): Set<GateAspect> {
   return armed
 }
 
+/** Other sessions' live work-arm markers — the parallel-work signal.
+ *  Markers carry `Date.now()\n<detail>`; freshness is mtime within
+ *  LIVE_SESSION_MS (a 7-day-old marker is residue, not a session). */
+export function otherLiveWork(
+  dir: string,
+  selfId: string,
+  now: number = Date.now()
+): Array<{ session: string; detail: string; ageMs: number }> {
+  const out: Array<{ session: string; detail: string; ageMs: number }> = []
+  const cutoff = now - LIVE_SESSION_MS
+  let files: string[]
+  try {
+    files = readdirSync(dir)
+  } catch {
+    return out // no marker dir yet — nothing armed
+  }
+  for (const f of files) {
+    const m = /^([\w.-]+)\.work$/.exec(f)
+    if (!m || m[1] === selfId) {
+      continue
+    }
+    try {
+      const path = join(dir, f)
+      const st = statSync(path)
+      if (st.mtimeMs < cutoff) {
+        continue
+      }
+      const detail = readFileSync(path, 'utf8').split('\n')[1]?.trim() ?? ''
+      out.push({ session: m[1]!, detail, ageMs: now - st.mtimeMs })
+    } catch {
+      // unreadable marker — skip
+    }
+  }
+  return out
+}
+
+function formatAge(ageMs: number): string {
+  if (ageMs < 60_000) {
+    return 'just now'
+  }
+  if (ageMs < 3_600_000) {
+    return `${Math.round(ageMs / 60_000)}m ago`
+  }
+  return `${Math.round(ageMs / 3_600_000)}h ago`
+}
+
+function liveSessionLines(dir: string, selfId: string): string[] {
+  return otherLiveWork(dir, selfId).map((w) => {
+    const on = w.detail ? ` on ${w.detail}` : ''
+    return `session ${w.session.slice(0, 8)} armed work${on} (${formatAge(w.ageMs)})`
+  })
+}
+
+/** Linked worktrees on this repo, minus the current checkout — naming a
+ *  session its own worktree would be a false nudge. */
+function worktreeLines(): string[] {
+  const cur = gitTry(['rev-parse', '--show-toplevel']).out.trim()
+  return parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out)
+    .slice(1) // porcelain lists the main worktree first
+    .filter((w) => !w.prunable && w.path !== cur)
+    .slice(0, 5)
+    .map((w) => `worktree ${basename(w.path)} [${w.branch ?? 'detached'}]`)
+}
+
+/** Beads claimed but not yet closed — another signal of live work the
+ *  flat queue already knows about. */
+function claimedLines(): string[] {
+  try {
+    const rows = bdJson<BeadRow[]>(['list', '--status', 'in_progress'])
+    return rows.slice(0, 5).map((r) => {
+      const title = (r.title ?? '').replace(/\s+/g, ' ')
+      const short = title.length > 60 ? `${title.slice(0, 60)}…` : title
+      return `${r.id} ${short}`.trim()
+    })
+  } catch {
+    return []
+  }
+}
+
+/** Parallel-session nudge at session start: another live session armed
+ *  work here, or the repo carries linked worktrees / claimed beads —
+ *  passive context naming what's occupied, never a block. */
+function parallelLines(sessionId: string): string[] {
+  try {
+    const parts: string[] = []
+    const dir = hooksStateDir()
+    if (dir) {
+      parts.push(...liveSessionLines(dir, sessionId))
+    }
+    parts.push(...worktreeLines())
+    const claimed = claimedLines()
+    if (claimed.length > 0) {
+      parts.push(`claimed beads: ${claimed.join(', ')}`)
+    }
+    if (parts.length === 0) {
+      return []
+    }
+    return [
+      'parallel work detected in this repo:',
+      ...parts.map((p) => `  ${p}`),
+      '  → for new work prefer `bro work enter <slug>` — a separate worktree, not this checkout',
+    ]
+  } catch {
+    // detection is passive — a probe failure must not break rehydrate
+    return []
+  }
+}
+
+const WORKTREE_VALUE_FLAGS = new Set(['-b', '--orphan', '--lock-reason'])
+
+/** First positional token after `worktree add|create`, skipping flags
+ *  and the values of flags that take one (`-b <branch>`). */
+function worktreeTarget(args: string): string {
+  const toks = args.split(/\s+/)
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i]!
+    if (!t.startsWith('-')) {
+      return t
+    }
+    if (WORKTREE_VALUE_FLAGS.has(t)) {
+      i++
+    }
+  }
+  return ''
+}
+
+/** What a session armed — recorded in the marker so a parallel session
+ *  can name the bead/worktree it would collide with. */
+export function armDetail(cmd: string, aspect: GateAspect): string {
+  const c = unquoted(cmd)
+  if (aspect === 'work') {
+    const enter = /\bwork\s+enter\s+([a-z0-9][\w.-]*)/.exec(c)
+    if (enter) {
+      return enter[1]!
+    }
+    const add = /\bworktree\s+(?:add|create)\s+/.exec(c)
+    return add ? worktreeTarget(c.slice(add.index + add[0].length)) : ''
+  }
+  if (aspect === 'act') {
+    const m = /\b(\d{1,7})\b/.exec(c)
+    return m ? `#${m[1]}` : ''
+  }
+  return ''
+}
+
 /** Record that this session touched `aspect`. Best-effort; also prunes
  * markers older than a week so stale sessions don't accumulate. */
-function armSession(sessionId: string, aspect: GateAspect): void {
+function armSession(sessionId: string, aspect: GateAspect, detail: string = ''): void {
   try {
     const path = markerPath(sessionId, aspect)
     if (!path) {
       return
     }
     mkdirSync(dirname(path), { recursive: true })
-    writeFileSync(path, String(Date.now()))
+    // line 2 carries the arming detail (slug/branch/PR) for
+    // parallel-session detection — readArmed only ever reads mtime
+    writeFileSync(path, `${Date.now()}\n${detail}`)
     const cutoff = Date.now() - MARKER_TTL_MS
     for (const f of readdirSync(dirname(path))) {
       try {
@@ -357,7 +510,8 @@ function armSession(sessionId: string, aspect: GateAspect): void {
 // --- event handlers -----------------------------------------------------------
 
 async function emitSessionContext(
-  event: 'SessionStart' | 'PostCompaction' | 'PreCompact'
+  event: 'SessionStart' | 'PostCompaction' | 'PreCompact',
+  sessionId = ''
 ): Promise<void> {
   const parts: string[] = []
   const drill = drillLine()
@@ -380,6 +534,8 @@ async function emitSessionContext(
   if (slot) {
     parts.push(slot)
   }
+  const parallel = parallelLines(sessionId)
+  parts.push(...parallel)
   const work = workNudgeLine()
   if (work) {
     parts.push(work)
@@ -415,7 +571,7 @@ function emitPostTool(input: HookInput): void {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
   const aspect = classifyArmCommand(cmd)
   if (sessionId && aspect) {
-    armSession(sessionId, aspect)
+    armSession(sessionId, aspect, armDetail(cmd, aspect))
   }
   switch (classifyExecCommand(cmd)) {
     case 'pr-merge':
@@ -564,16 +720,17 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   }
   const input = readInput()
   try {
+    const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
     switch (event) {
       case 'session-start':
-        await emitSessionContext('SessionStart')
+        await emitSessionContext('SessionStart', sessionId)
         return
       case 'post-compaction':
-        await emitSessionContext('PostCompaction')
+        await emitSessionContext('PostCompaction', sessionId)
         return
       case 'pre-compact':
         // Claude Code requires hookEventName to match the firing event
-        await emitSessionContext('PreCompact')
+        await emitSessionContext('PreCompact', sessionId)
         return
       case 'prompt-submit':
         await emitPromptContext(input)

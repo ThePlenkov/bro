@@ -4,8 +4,10 @@
  * tree; git itself refuses to check out the same branch twice, which is
  * the anti-collision guarantee.
  *
- *   bro work enter <slug> [--branch <name>] [--base <ref>]
- *                       sibling checkout <repo>--<slug> on branch work/<slug>
+ *   bro work enter <slug> [--branch <name>] [--base <ref>] [--stack]
+ *                       sibling checkout <repo>--<slug> on branch work/<slug>;
+ *                       --stack (or stack.mode=auto) bases the branch on the
+ *                       current worktree's branch — the session's stack head
  *   bro work leave [slug] [--force] [--delete-branch]
  *                       remove a worktree — current one by default
  *   bro work list       worktrees with branch, dirty state, disk usage
@@ -17,10 +19,10 @@
  * discovers `.beads` through the git common dir regardless of how the
  * worktree was created.
  */
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve, sep } from 'node:path'
-import { bdTry, git, gitTry } from '@bro/core'
+import { bdTry, git, gitTry, loadConfig, stackSection } from '@bro/core'
 import { flag, positionals } from './args.ts'
 
 export interface WorktreeInfo {
@@ -97,7 +99,7 @@ const SLUG_RE = /^\w[\w.-]*$/
 
 function usage(): never {
   console.error(`usage:
-  bro work enter <slug> [--branch <name>] [--base <ref>]
+  bro work enter <slug> [--branch <name>] [--base <ref>] [--stack]
   bro work leave [slug] [--force] [--delete-branch]
   bro work list
   bro work prune`)
@@ -149,6 +151,93 @@ function claimBead(slug: string): string | null {
   return upd.code === 0 ? slug : null
 }
 
+/** Base ref for a new worktree's branch. `git worktree add` alone would
+ *  fork at HEAD — that is accidental stacking whenever enter runs from
+ *  a linked worktree. So the base is always explicit: --base wins
+ *  outright; --stack (or stack.mode=auto) uses the current worktree's
+ *  branch — the session's stack head; otherwise the main checkout's
+ *  branch. Nothing to stack on (default branch / detached): auto falls
+ *  back to main, an explicit --stack errors. */
+export function resolveEnterBase(
+  explicit: string | undefined,
+  stack: boolean,
+  auto: boolean,
+  current: string | undefined,
+  /** What the main checkout points at — branch name, or its commit sha
+   *  when detached. Either way the default base, never ambient HEAD. */
+  mainRef: string | undefined
+): { base?: string; err?: string } {
+  if (explicit !== undefined) {
+    return { base: explicit }
+  }
+  if (!current || current === mainRef) {
+    return stack
+      ? { err: '--stack needs a checked-out work branch — the default branch is not a stack head' }
+      : { base: mainRef }
+  }
+  return stack || auto ? { base: current } : { base: mainRef }
+}
+
+/** Stacked branches record their base so act wait / cleanup can derive
+ *  merge order bottom-up. The edge lives in the common git dir —
+ *  visible from every linked worktree. One file per branch,
+ *  create-only, advisory. */
+function recordStackEdge(branch: string, base: string): void {
+  const res = gitTry(['rev-parse', '--path-format=absolute', '--git-common-dir'])
+  const common = res.code === 0 ? res.out.trim() : ''
+  if (!common) {
+    return
+  }
+  try {
+    const dir = join(common, 'bro', 'stack')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, encodeURIComponent(branch)), `${base}\n`)
+  } catch {
+    // advisory record — a failed write must not break enter
+  }
+}
+
+function stackMode(): 'auto' | 'manual' {
+  try {
+    const cfg = loadConfig(process.cwd(), { stack: stackSection }) as {
+      stack?: { mode?: string }
+    }
+    return cfg.stack?.mode === 'auto' ? 'auto' : 'manual'
+  } catch {
+    return 'manual'
+  }
+}
+
+// submodules are not populated by worktree add — a fresh tree without
+// them builds stale or fails; init is best-effort (network may be down)
+function initSubmodules(path: string): void {
+  if (!hasSubmodules(path)) {
+    return
+  }
+  const sub = gitTry(['-C', path, 'submodule', 'update', '--init', '--recursive'])
+  console.log(
+    sub.code === 0
+      ? 'submodules initialized'
+      : `warning: submodule init failed — ${sub.err || 'check .gitmodules'}`
+  )
+}
+
+/** Everything that decides where the new branch forks from. */
+function enterBase(argv: string[], main: WorktreeInfo): { base?: string } {
+  const { base, err } = resolveEnterBase(
+    flag(argv, '--base'),
+    argv.includes('--stack'),
+    stackMode() === 'auto',
+    gitTry(['branch', '--show-current']).out.trim() || undefined,
+    main.branch ?? main.head
+  )
+  if (err) {
+    console.error(`error: ${err}`)
+    process.exit(1)
+  }
+  return { base }
+}
+
 function cmdEnter(argv: string[]): void {
   const pos = positionals(argv, new Set(['--branch', '--base']))
   const slug = pos[0]
@@ -157,18 +246,21 @@ function cmdEnter(argv: string[]): void {
     usage()
   }
   const branch = flag(argv, '--branch') ?? `work/${slug}`
-  const base = flag(argv, '--base')
   const main = mainWorktree()
+  const mainRef = main.branch ?? main.head
+  const { base } = enterBase(argv, main)
   const path = worktreePathFor(main.path, slug)
   if (existsSync(path)) {
     console.error(`error: ${path} already exists`)
     process.exit(1)
   }
   // an existing branch under the target name means the slug names an
-  // in-flight task — check it out rather than failing on -b
+  // in-flight task — check it out rather than failing on -b. The
+  // resolved default base is irrelevant here; only a user-passed
+  // --base/--stack conflicts with checking out an existing branch.
   const branchExists = gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).code === 0
-  if (branchExists && base) {
-    console.error(`error: --base only applies when creating the branch; ${branch} already exists`)
+  if (branchExists && (flag(argv, '--base') !== undefined || argv.includes('--stack'))) {
+    console.error(`error: --base/--stack only apply when creating the branch; ${branch} already exists`)
     process.exit(1)
   }
   const args = ['worktree', 'add', path]
@@ -176,29 +268,32 @@ function cmdEnter(argv: string[]): void {
     args.push(branch)
   } else {
     args.push('-b', branch)
-  }
-  if (base) {
-    args.push(base)
+    if (base) {
+      args.push(base)
+    }
   }
   const res = gitTry(args)
   if (res.code !== 0) {
     console.error(`error: git worktree add failed — ${res.err}`)
     process.exit(1)
   }
-  // submodules are not populated by worktree add — a fresh tree without
-  // them builds stale or fails; init is best-effort (network may be down)
-  if (hasSubmodules(path)) {
-    const sub = gitTry(['-C', path, 'submodule', 'update', '--init', '--recursive'])
-    console.log(
-      sub.code === 0
-        ? 'submodules initialized'
-        : `warning: submodule init failed — ${sub.err || 'check .gitmodules'}`
-    )
-  }
+  initSubmodules(path)
   const claimed = claimBead(slug)
+  // a stack edge is only a real edge when the base is a local branch —
+  // a raw commit-ish (--base abc123 / origin/main) yields no merge order
+  const stacked =
+    base !== undefined &&
+    base !== mainRef &&
+    gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${base}`]).code === 0
+  if (stacked) {
+    recordStackEdge(branch, base)
+  }
   console.log(`worktree ready: ${path}  (branch ${branch})
   cd ${path}
 note: gitignored dirs (node_modules, dist) are not shared — install deps there`)
+  if (stacked) {
+    console.log(`stacked on ${base} — merge order runs bottom-up`)
+  }
   if (claimed) {
     console.log(`claimed bead ${claimed} for this session`)
   }

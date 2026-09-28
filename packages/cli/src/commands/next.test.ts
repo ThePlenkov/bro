@@ -3,21 +3,35 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { applyNextPlan, runNextCommand } from './next.ts'
+import { applyNextPlan, projectPrefix, runNextCommand } from './next.ts'
 import { parseNextPlan } from './next-plan.ts'
 
 /** A scripted `bd` on PATH — PATH lookup is the exec contract. `ready`
- *  emits FAKE_BD_READY; `update` records claims into FAKE_BD_LOG, and
- *  fails for ids in FAKE_BD_CLAIM_FAIL (simulates a raced-away bead). */
+ *  emits FAKE_BD_READY and logs its argv into FAKE_BD_LOG; `update`
+ *  records claims into FAKE_BD_LOG, and fails for ids in
+ *  FAKE_BD_CLAIM_FAIL (simulates a raced-away bead). `config get
+ *  issue_prefix` echoes FAKE_BD_PREFIX, "(not set)" when unset. `show`
+ *  reports issue_type=epic for ids matching FAKE_BD_EPIC_PARENTS. */
 const FAKE_BD = `#!/bin/sh
 case "$1" in
   --version) echo 'bd 0.0' ;;
-  ready) cat "$FAKE_BD_READY" ;;
+  ready) echo "$@" >> "$FAKE_BD_READY_LOG"; cat "$FAKE_BD_READY" ;;
+  config)
+    if [ -n "$FAKE_BD_CONFIG_FAIL" ]; then exit 1; fi
+    case "$3" in
+      issue_prefix) echo "\${FAKE_BD_PREFIX:-issue_prefix (not set)}" ;;
+      *) echo "$3 (not set)" ;;
+    esac ;;
   show)
+    status=open
     if [ -n "$FAKE_BD_CLAIM_FAIL" ]; then
-      case "$2" in *$FAKE_BD_CLAIM_FAIL*) echo '[{"status":"in_progress"}]'; exit 0 ;; esac
+      case "$2" in *$FAKE_BD_CLAIM_FAIL*) status=in_progress ;; esac
     fi
-    echo '[{"status":"open"}]' ;;
+    type=task
+    if [ -n "$FAKE_BD_EPIC_PARENTS" ]; then
+      case "$2" in *$FAKE_BD_EPIC_PARENTS*) type=epic ;; esac
+    fi
+    echo '[{"status":"'$status'","issue_type":"'$type'"}]' ;;
   update)
     if [ -n "$FAKE_BD_CLAIM_FAIL" ]; then
       case "$2" in *$FAKE_BD_CLAIM_FAIL*) exit 1 ;; esac
@@ -42,13 +56,17 @@ const GATED = [MIXED[0], MIXED[1], MIXED[2]]
 interface Captured {
   lines: string[]
   claims: string
+  /** argv of every `bd ready` invocation — one line per call */
+  readyArgs: string
 }
 
 function withFakeBd(
   ready: unknown[],
   fn: (c: Captured) => Promise<void>,
   claimFail = '',
-  updateFail = ''
+  updateFail = '',
+  prefix = '',
+  epicParents = ''
 ): () => Promise<void> {
   return async () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
@@ -62,12 +80,21 @@ function withFakeBd(
       FAKE_BD_LOG: process.env.FAKE_BD_LOG,
       FAKE_BD_CLAIM_FAIL: process.env.FAKE_BD_CLAIM_FAIL,
       FAKE_BD_UPDATE_FAIL: process.env.FAKE_BD_UPDATE_FAIL,
+      FAKE_BD_PREFIX: process.env.FAKE_BD_PREFIX,
+      FAKE_BD_READY_LOG: process.env.FAKE_BD_READY_LOG,
+      FAKE_BD_CONFIG_FAIL: process.env.FAKE_BD_CONFIG_FAIL,
+      FAKE_BD_EPIC_PARENTS: process.env.FAKE_BD_EPIC_PARENTS,
     }
     process.env.PATH = `${dir}:${prev.PATH}`
     process.env.FAKE_BD_READY = join(dir, 'ready.json')
     process.env.FAKE_BD_LOG = log
+    process.env.FAKE_BD_READY_LOG = join(dir, 'ready.log')
     process.env.FAKE_BD_CLAIM_FAIL = claimFail
     process.env.FAKE_BD_UPDATE_FAIL = updateFail
+    if (prefix === '') delete process.env.FAKE_BD_PREFIX
+    else process.env.FAKE_BD_PREFIX = prefix
+    if (epicParents === '') delete process.env.FAKE_BD_EPIC_PARENTS
+    else process.env.FAKE_BD_EPIC_PARENTS = epicParents
     const lines: string[] = []
     const orig = console.log
     console.log = (...args: unknown[]) => lines.push(args.join(' '))
@@ -76,6 +103,10 @@ function withFakeBd(
         lines,
         get claims() {
           return existsSync(log) ? readFileSync(log, 'utf8') : ''
+        },
+        get readyArgs() {
+          const rl = join(dir, 'ready.log')
+          return existsSync(rl) ? readFileSync(rl, 'utf8') : ''
         },
       })
     } finally {
@@ -173,6 +204,100 @@ describe('bro next', () => {
       assert.equal(r.state, 'idle')
     })
   )
+
+  it(
+    'excludes coordination primitives bd-side via --exclude-label',
+    withFakeBd(MIXED, async c => {
+      await runNextCommand(['--list'])
+      // the label filter must reach bd itself — a shared queue's
+      // semaphores are filtered before classification ever sees them
+      assert.match(c.readyArgs, /^ready --exclude-label gt:slot --json$/m)
+    })
+  )
+
+  it(
+    'scopes the queue to issue_prefix — foreign beads are reported, never claimed',
+    withFakeBd(
+      [
+        { id: 'other-x', title: 'foreign task', status: 'open', priority: 1, issue_type: 'task', created_at: '2026-01-01T00:00:00Z' },
+        { id: 'other-merge-slot', title: 'foreign merge slot', status: 'open', priority: 1, issue_type: 'task', created_at: '2026-01-01T00:00:00Z' },
+        ...MIXED,
+      ],
+      async c => {
+        await runNextCommand(['--json'])
+        const r = JSON.parse(c.lines.join('\n'))
+        // the foreign beads outrank b-older by priority — yet only the
+        // project bead may be picked
+        assert.equal(r.bead.id, 'b-older')
+        assert.equal(r.foreign, 2)
+        assert.match(c.claims, /b-older --claim/)
+        assert.doesNotMatch(c.claims, /other-/)
+      },
+      '',
+      '',
+      'b'
+    )
+  )
+
+  it(
+    'a foreign-only queue is gated, not idle',
+    withFakeBd(
+      [{ id: 'other-x', title: 'foreign task', status: 'open', priority: 1, issue_type: 'task', created_at: '2026-01-01T00:00:00Z' }],
+      async c => {
+        await runNextCommand(['--json'])
+        const r = JSON.parse(c.lines.join('\n'))
+        assert.equal(r.state, 'gated')
+        assert.equal(r.foreign, 1)
+      },
+      '',
+      '',
+      'b'
+    )
+  )
+
+  it(
+    'epic children are claimable; only non-epic parents stay molecule steps',
+    withFakeBd(
+      [
+        { id: 'b-echild', title: 'epic child', parent: 'b-epic-x', status: 'open', priority: 2, issue_type: 'task', created_at: '2026-01-02T00:00:00Z' },
+        { id: 'b-mol2', title: 'real mol step', parent: 'm-9', status: 'open', priority: 1, issue_type: 'task', created_at: '2026-01-01T00:00:00Z' },
+      ],
+      async c => {
+        await runNextCommand(['--json'])
+        const r = JSON.parse(c.lines.join('\n'))
+        // b-mol2 outranks b-echild by priority but its parent is not an
+        // epic — the epic child wins, the mol step stays convoy-owned
+        assert.equal(r.bead.id, 'b-echild')
+        assert.equal(r.moleculeSteps, 1)
+        assert.match(c.claims, /b-echild --claim/)
+        assert.doesNotMatch(c.claims, /b-mol2/)
+      },
+      '',
+      '',
+      '',
+      'b-epic-x'
+    )
+  )
+
+  it(
+    'falls back to unscoped when issue_prefix is not set',
+    withFakeBd(
+      [{ id: 'other-x', title: 'foreign task', status: 'open', priority: 1, issue_type: 'task', created_at: '2026-01-01T00:00:00Z' }],
+      async c => {
+        await runNextCommand(['--json'])
+        const r = JSON.parse(c.lines.join('\n'))
+        assert.equal(r.bead.id, 'other-x') // no prefix → fail open
+      }
+    )
+  )
+
+  it(
+    'a failed prefix lookup fails closed — unscoped claiming must stop',
+    withFakeBd(MIXED, async () => {
+      process.env.FAKE_BD_CONFIG_FAIL = '1'
+      assert.throws(() => projectPrefix(), /refusing to schedule/)
+    })
+  )
 })
 
 describe('bro next plans', () => {
@@ -181,6 +306,7 @@ describe('bro next plans', () => {
     order: 'priority' as const,
     claim: true,
     gates: 'forbid' as const,
+    scope: 'project' as const,
     json: true,
     filters: {},
     ...over,
@@ -301,5 +427,29 @@ describe('bro next plans', () => {
       const r = JSON.parse(c.lines.join('\n'))
       assert.equal(r.bead.id, 'b-bug')
     })
+  )
+
+  it(
+    'scope = "all" opts out of the issue_prefix restriction',
+    withFakeBd(
+      [{ id: 'other-x', title: 'foreign task', status: 'open', priority: 1, issue_type: 'task', created_at: '2026-01-01T00:00:00Z' }],
+      async c => {
+        const p = parseNextPlan({ kind: 'next', scope: 'all', json: true })
+        applyNextPlan(p)
+        const r = JSON.parse(c.lines.join('\n'))
+        assert.equal(r.bead.id, 'other-x')
+        assert.equal(r.foreign, 0)
+      },
+      '',
+      '',
+      'b'
+    )
+  )
+
+  it(
+    'scope rejects unknown values',
+    () => {
+      assert.throws(() => parseNextPlan({ kind: 'next', scope: 'universe' }), /scope.*project\|all/)
+    }
   )
 })

@@ -10,6 +10,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { homedir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { gitTry } from './git.ts'
@@ -82,6 +83,47 @@ export const actSection: ConfigSection<{
         ? obj.maxRounds
         : DEFAULT_CONFIG.act.maxRounds,
   }
+}
+
+/** Default global-beads store — XDG data dir, not a repo path. */
+export const DEFAULT_GLOBAL_BEADS_DIR = join(homedir(), '.local', 'share', 'bro', 'beads')
+
+/** bro.config.json `beads` section — `beads.global` is the global store
+ *  dir. BRO_GLOBAL_BEADS wins over the file: a per-machine path should
+ *  not need a committed edit. `~` expands against the home dir. */
+export const beadsSection: ConfigSection<{ global: string }> = (raw) => {
+  const fromConfig =
+    typeof raw === 'object' && raw !== null ? (raw as { global?: unknown }).global : undefined
+  const env = process.env.BRO_GLOBAL_BEADS
+  const v =
+    (typeof env === 'string' && env.trim() !== '' ? env : undefined) ??
+    (typeof fromConfig === 'string' && fromConfig.trim() !== '' ? fromConfig : undefined)
+  if (v === undefined) {
+    return { global: DEFAULT_GLOBAL_BEADS_DIR }
+  }
+  const p = v.trim()
+  let dir = p
+  if (p === '~') {
+    dir = homedir()
+  } else if (p.startsWith('~/')) {
+    dir = join(homedir(), p.slice(2))
+  }
+  return { global: dir }
+}
+
+/** bro.config.json `stack` section — how `bro work enter` picks the base
+ *  for a new worktree when a session already produced a PR branch.
+ *  'manual' (default): stack only on explicit --stack/--base.
+ *  'auto': base on the current worktree's branch whenever it isn't the
+ *  main checkout's branch — second+ PR in a session lands on the stack
+ *  head; gh-stack then drives submit/sync/merge bottom-up. */
+export const stackSection: ConfigSection<{ mode: 'auto' | 'manual' }> = (raw) => {
+  const m = typeof raw === 'object' && raw !== null ? (raw as { mode?: unknown }).mode : undefined
+  if (m !== undefined && m !== 'auto' && m !== 'manual') {
+    console.error(`bro.config: stack.mode must be "auto" or "manual" — got ${JSON.stringify(m)}`)
+    return { mode: 'manual' }
+  }
+  return { mode: m ?? 'manual' }
 }
 
 /** Sections core normalizes itself — identical to what the built-in

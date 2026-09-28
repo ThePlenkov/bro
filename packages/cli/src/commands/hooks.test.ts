@@ -1,6 +1,9 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { classifyArmCommand, classifyExecCommand, isSelfToolCommand, parsePrUrl, readArmed } from './hooks.ts'
+import { mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { classifyArmCommand, classifyExecCommand, isSelfToolCommand, parsePrUrl, readArmed, armDetail, otherLiveWork } from './hooks.ts'
 
 describe('classifyExecCommand', () => {
   test('detects gh pr merge', () => {
@@ -131,5 +134,65 @@ describe('classifyArmCommand positions', () => {
   test('escaped quotes inside arguments do not open a command position', () => {
     assert.equal(classifyArmCommand('echo "x\\"; git push"'), null)
     assert.equal(classifyArmCommand("echo 'a\\'; bro act'"), null)
+  })
+})
+
+describe('armDetail', () => {
+  for (const [cmd, aspect, want] of [
+    ['bro work enter bro-n5t-2', 'work', 'bro-n5t-2'],
+    ['cd x && bro work enter bro-abc', 'work', 'bro-abc'],
+    ['git worktree add ../bro--x -b work/x', 'work', '../bro--x'],
+    ['git worktree add -b work/x ../bro--x', 'work', '../bro--x'],
+    ['bro act merge 89 --cleanup', 'act', '#89'],
+    ['gh pr merge 42 --squash', 'act', '#42'],
+    ['git push', 'act', ''],
+    ['bro drill down bro-x', 'drill', ''],
+    ['npm test', 'work', ''],
+  ] as const) {
+    test(`${cmd} → "${want}"`, () => {
+      assert.equal(armDetail(cmd, aspect), want)
+    })
+  }
+})
+
+describe('otherLiveWork', () => {
+  /** Seed marker files; ageHours backdates mtime past the live window. */
+  function markerDir(entries: Array<[name: string, content: string, ageHours?: number]>): string {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-hooks-'))
+    for (const [name, content, ageHours] of entries) {
+      const p = join(dir, name)
+      writeFileSync(p, content)
+      if (ageHours !== undefined) {
+        const past = new Date(Date.now() - ageHours * 3_600_000)
+        utimesSync(p, past, past)
+      }
+    }
+    return dir
+  }
+
+  test("a second session's live work marker is detected with its detail", () => {
+    const dir = markerDir([['other-session-1.work', '123\nbro-xyz']])
+    const found = otherLiveWork(dir, 'self-session')
+    assert.equal(found.length, 1)
+    assert.equal(found[0]!.session, 'other-session-1')
+    assert.equal(found[0]!.detail, 'bro-xyz')
+  })
+
+  test('a lone session sees nothing', () => {
+    const dir = markerDir([
+      ['self-session.work', '123\nbro-mine'],
+      ['self-session.act', '123\n#1'],
+    ])
+    assert.equal(otherLiveWork(dir, 'self-session').length, 0)
+  })
+
+  test('stale markers and non-work aspects are ignored', () => {
+    const dir = markerDir([
+      ['old-session.work', '123\nbro-old', 25],
+      ['other.act', '123\n#1'],
+      ['other.drill', '123\n'],
+      ['unrelated-file', 'x'],
+    ])
+    assert.equal(otherLiveWork(dir, 'self-session').length, 0)
   })
 })

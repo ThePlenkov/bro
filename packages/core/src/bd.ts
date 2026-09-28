@@ -7,9 +7,10 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { statSync } from 'node:fs'
 import { join } from 'node:path'
 
-export function bd(args: string[]): string {
+export function bd(args: string[], cwd?: string): string {
   return execFileSync('bd', args, { // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
     encoding: 'utf8',
+    cwd,
     maxBuffer: 64 * 1024 * 1024,
     // pipe stderr — *Sync variants inherit it by default, and bd chatters
     // ("no beads database found") into hook logs on every probe. Real
@@ -26,9 +27,13 @@ export function bd(args: string[]): string {
  *  degrade, not stall. */
 export function bdTry(
   args: string[],
-  timeoutMs = 15_000
+  timeoutMs = 15_000,
+  /** Run bd against another store dir — the global queue lives outside
+   *  the project checkout, so callers pass it explicitly. */
+  cwd?: string
 ): { code: number; out: string; err: string } {
   const proc = spawnSync('bd', args, { // NOSONAR — PATH lookup is the contract (same as gh/git)
+    cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -43,8 +48,8 @@ export function bdTry(
   }
 }
 
-export function bdJson<T>(args: string[]): T {
-  const out = bd([...args, '--json'])
+export function bdJson<T>(args: string[], cwd?: string): T {
+  const out = bd([...args, '--json'], cwd)
   try {
     return JSON.parse(out) as T
   } catch (err) {
