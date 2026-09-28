@@ -3,8 +3,10 @@ export { git, gitTry } from './git.ts'
 export { bd, bdJson, bdTry, checkBeads, evidenceKind, initBeadsStealth, refKind } from './bd.ts'
 export {
   actSection,
+  beadsSection,
   debtSection,
   DEFAULT_CONFIG,
+  DEFAULT_GLOBAL_BEADS_DIR,
   defineConfig,
   loadConfig,
   PERSONALITIES,

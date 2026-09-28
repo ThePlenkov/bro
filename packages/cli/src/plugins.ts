@@ -8,6 +8,7 @@ import { isAbsolute, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
   actSection,
+  beadsSection,
   checkBeads,
   debtSection,
   definePlugin,
@@ -32,6 +33,7 @@ import { applyNextPlan, runNextCommand } from './commands/next.ts'
 import { parseNextPlan, type NextPlan } from './commands/next-plan.ts'
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
+import { runGlobalCommand } from './commands/global.ts'
 import { runHooksCommand } from './commands/hooks.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runSetupCommand } from './commands/setup.ts'
@@ -119,6 +121,13 @@ export const PLUGINS: BroPlugin[] = [
     // bare `bro wtf` has nothing to capture — report open wtfs instead
     run: (argv) =>
       runRetrospectCommand(argv.length === 0 ? ['status'] : ['capture', ...argv]),
+  }),
+  definePlugin({
+    name: 'global',
+    summary: 'User-level beads store: init|path|<bd args…> — separate db, explicit only',
+    run: runGlobalCommand,
+    configKey: 'beads',
+    configSchema: beadsSection,
   }),
   definePlugin({
     name: 'work',

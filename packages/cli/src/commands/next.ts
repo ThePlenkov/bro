@@ -6,6 +6,8 @@
  *   bro next            claim + emit the top ready bead
  *   bro next --list     the queue without claiming
  *   bro next --json     machine output
+ *   bro next --global   the user-level store (`bro global init`) — same
+ *                       pipeline run with cwd = the global beads dir
  *   bro run next.toml   the same selection driven by a validated plan
  *                       (filters, limit, ordering, gates — next-plan.ts)
  *
@@ -23,6 +25,7 @@
  */
 import { bd, bdJson, bdTry, checkBeads } from '@bro/core'
 import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts'
+import { requireGlobalStore } from './global.ts'
 
 export interface ReadyBead {
   id: string
@@ -61,12 +64,13 @@ const HUMAN_GATE = /human.?gate/i
 export const NEVER_CLAIM_LABELS = ['gt:slot']
 
 /** The single `bd ready` contract for next and loop: coordination
- *  primitives are filtered out by bd itself, before classification. */
-export function readyBeads(): ReadyBead[] {
-  return bdJson<ReadyBead[]>([
-    'ready',
-    ...NEVER_CLAIM_LABELS.flatMap((l) => ['--exclude-label', l]),
-  ])
+ *  primitives are filtered out by bd itself, before classification.
+ *  `dir` retargets the query at another store — `bro next --global`. */
+export function readyBeads(dir?: string): ReadyBead[] {
+  return bdJson<ReadyBead[]>(
+    ['ready', ...NEVER_CLAIM_LABELS.flatMap((l) => ['--exclude-label', l])],
+    dir
+  )
 }
 
 /** This checkout's bead id scope — what `bd init` recorded as
@@ -74,8 +78,8 @@ export function readyBeads(): ReadyBead[] {
  *  scopes apart — fail open rather than hide real work. A FAILED
  *  lookup is the opposite: on a shared db it would silently reopen
  *  cross-repo claiming, so it throws (fail closed). */
-export function projectPrefix(): string | undefined {
-  const res = bdTry(['config', 'get', 'issue_prefix'])
+export function projectPrefix(dir?: string): string | undefined {
+  const res = bdTry(['config', 'get', 'issue_prefix'], 15_000, dir)
   if (res.code !== 0) {
     throw new Error(
       `bd config get issue_prefix failed — ${res.err || 'bd error'} ` +
@@ -92,22 +96,23 @@ export function projectPrefix(): string | undefined {
 }
 
 /** Resolve a plan's scope policy to the scope classify applies:
- *  `all` opts out entirely; `project` filters to issue_prefix. */
-export function nextScope(scope: NextPlan['scope']): { prefix?: string } {
-  return { prefix: scope === 'all' ? undefined : projectPrefix() }
+ *  `all` opts out entirely; `project`/`global` filter to the queried
+ *  store's issue_prefix (the global store has its own). */
+export function nextScope(scope: NextPlan['scope'], dir?: string): { prefix?: string } {
+  return { prefix: scope === 'all' ? undefined : projectPrefix(dir) }
 }
 
 /** bd reuses `parent` for both molecule steps and epic children — only
  *  a parent that IS an epic makes the child regular work. Looked up
  *  once per unique parent id; an unreadable parent stays a mol step. */
-export function epicParentIds(ready: ReadyBead[]): Set<string> {
+export function epicParentIds(ready: ReadyBead[], dir?: string): Set<string> {
   const ids = [
     ...new Set(ready.map((b) => b.parent).filter((p): p is string => !!p)),
   ]
   const epic = new Set<string>()
   for (const id of ids) {
     try {
-      const [row] = bdJson<Array<{ issue_type?: string }>>(['show', id])
+      const [row] = bdJson<Array<{ issue_type?: string }>>(['show', id], dir)
       if (row?.issue_type === 'epic') {
         epic.add(id)
       }
@@ -183,9 +188,9 @@ export function classify(
 /** A failed claim is a race only when the bead actually moved on
  *  (claimed/closed elsewhere); a bd outage must surface, not silently
  *  drain the queue into a fake idle. */
-function racedAway(b: ReadyBead): boolean {
+function racedAway(b: ReadyBead, dir?: string): boolean {
   try {
-    const cur = bdJson<Array<{ status?: string }>>(['show', b.id])
+    const cur = bdJson<Array<{ status?: string }>>(['show', b.id], dir)
     const status = cur[0]?.status
     return typeof status === 'string' && status !== 'open'
   } catch {
@@ -195,17 +200,17 @@ function racedAway(b: ReadyBead): boolean {
 
 /** Claim up to `limit` beads — concurrent `bro next` runs race on the
  *  same items; a raced-away claim falls through to the next candidate. */
-export function claimUpTo(queue: ReadyBead[], limit: number): ReadyBead[] {
+export function claimUpTo(queue: ReadyBead[], limit: number, dir?: string): ReadyBead[] {
   const picked: ReadyBead[] = []
   for (const b of queue) {
     if (picked.length >= limit) {
       break
     }
     try {
-      bd(['update', b.id, '--claim'])
+      bd(['update', b.id, '--claim'], dir)
       picked.push(b)
     } catch (err) {
-      if (racedAway(b)) {
+      if (racedAway(b, dir)) {
         continue // genuinely raced away — try the next candidate
       }
       throw err
@@ -252,22 +257,28 @@ function printResult(result: NextResult, list: boolean): void {
 /** The shared execution path — argv `bro next` and `bro run next.toml`
  *  differ only in how the plan is populated. */
 export function applyNextPlan(plan: NextPlan): void {
-  checkBeads()
+  // scope = "global" retargets every bd call at the user-level store —
+  // the pipeline is identical, only the queue's home dir differs, and
+  // the project store is not required at all (global works repo-less)
+  const dir = plan.scope === 'global' ? requireGlobalStore() : undefined
+  if (dir === undefined) {
+    checkBeads()
+  }
   let ready: ReadyBead[]
   try {
-    ready = readyBeads()
+    ready = readyBeads(dir)
   } catch (err) {
     console.error(`error: bd ready failed — ${err instanceof Error ? err.message : String(err)}`)
     process.exit(1)
   }
   let c: ReturnType<typeof classify>
   try {
-    c = classify(ready, plan, nextScope(plan.scope), epicParentIds(ready))
+    c = classify(ready, plan, nextScope(plan.scope, dir), epicParentIds(ready, dir))
   } catch (err) {
     console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
     process.exit(1)
   }
-  const beads = plan.claim ? claimUpTo(c.queue, plan.limit) : c.queue.slice(0, plan.limit)
+  const beads = plan.claim ? claimUpTo(c.queue, plan.limit, dir) : c.queue.slice(0, plan.limit)
   const picked = new Set(beads.map((b) => b.id))
   let state: NextResult['state'] = 'idle'
   if (beads.length > 0) {
@@ -299,7 +310,7 @@ export function applyNextPlan(plan: NextPlan): void {
 
 export async function runNextCommand(argv: string[]): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
-    console.error(`Usage: bro next [--list] [--json]
+    console.error(`Usage: bro next [--list] [--json] [--global]
 
   Claims the top ready bead and prints the work order. Human gates,
   epics, and molecule steps are surfaced, never claimed. Filters,
@@ -312,7 +323,8 @@ export async function runNextCommand(argv: string[]): Promise<void> {
 
   Scope: only beads under this checkout's issue_prefix are claimable;
   gt:slot coordination primitives are never surfaced. Plans may set
-  scope = "all" to opt out.`)
+  scope = "all" to opt out. --global reads the user-level store
+  instead (\`bro global init\`) — same pipeline, different home.`)
     process.exit(0)
   }
   applyNextPlan({
@@ -321,7 +333,7 @@ export async function runNextCommand(argv: string[]): Promise<void> {
     claim: !argv.includes('--list'),
     gates: 'forbid',
     json: argv.includes('--json'),
-    scope: 'project',
+    scope: argv.includes('--global') ? 'global' : 'project',
     filters: {},
   })
 }

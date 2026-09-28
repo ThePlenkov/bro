@@ -36,6 +36,10 @@ continue?" between items.** The queue is the approval.
 - **Foreign-scope beads** — ids outside this checkout's `issue_prefix`
   are never claimed; they surface as `foreign: N` when the shared db
   carries other projects' work. `scope = "all"` in a plan opts out.
+- **Global beads** — user-level beads live in a separate store
+  (`bro global init`, `bro global ready`). `bro next --global` runs the
+  same pipeline against that store explicitly; project output never
+  mixes them in.
 - **Coordination primitives** — `gt:slot`-labeled beads (merge-queue
   semaphores) are excluded inside `bd ready` itself; a semaphore is
   never work.
@@ -45,8 +49,9 @@ continue?" between items.** The queue is the approval.
 `bro run next.toml` drives the same selection from a validated plan —
 `limit` (batch size), `order` (priority|oldest|newest), `[filters]`
 (types, max_priority, title match), `claim = false` for a dry run,
-`gates = "allow"` to pre-authorize claiming HUMAN GATE beads, and
-`scope = "all"` to lift project scoping. Batching
+`gates = "allow"` to pre-authorize claiming HUMAN GATE beads,
+`scope = "all"` to lift project scoping, and `scope = "global"` (or
+`bro next --global`) to schedule from the user-level store. Batching
 is for parallel execution (one claimed bead per worktree/agent); a
 claimed gate still means a human decides — the plan was the go-ahead,
 not the verdict.
