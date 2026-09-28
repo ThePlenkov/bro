@@ -161,11 +161,22 @@ describe('armDetail', () => {
 })
 
 describe('otherLiveWork', () => {
-  const HOUR = 3_600_000
+  /** Seed marker files; ageHours backdates mtime past the live window. */
+  function markerDir(entries: Array<[name: string, content: string, ageHours?: number]>): string {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-hooks-'))
+    for (const [name, content, ageHours] of entries) {
+      const p = join(dir, name)
+      writeFileSync(p, content)
+      if (ageHours !== undefined) {
+        const past = new Date(Date.now() - ageHours * 3_600_000)
+        utimesSync(p, past, past)
+      }
+    }
+    return dir
+  }
 
   test("a second session's live work marker is detected with its detail", () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-hooks-'))
-    writeFileSync(join(dir, 'other-session-1.work'), '123\nbro-xyz')
+    const dir = markerDir([['other-session-1.work', '123\nbro-xyz']])
     const found = otherLiveWork(dir, 'self-session')
     assert.equal(found.length, 1)
     assert.equal(found[0]!.session, 'other-session-1')
@@ -173,21 +184,20 @@ describe('otherLiveWork', () => {
   })
 
   test('a lone session sees nothing', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-hooks-'))
-    writeFileSync(join(dir, 'self-session.work'), '123\nbro-mine')
-    writeFileSync(join(dir, 'self-session.act'), '123\n#1')
+    const dir = markerDir([
+      ['self-session.work', '123\nbro-mine'],
+      ['self-session.act', '123\n#1'],
+    ])
     assert.equal(otherLiveWork(dir, 'self-session').length, 0)
   })
 
   test('stale markers and non-work aspects are ignored', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-hooks-'))
-    const stale = join(dir, 'old-session.work')
-    writeFileSync(stale, '123\nbro-old')
-    const past = new Date(Date.now() - 25 * HOUR)
-    utimesSync(stale, past, past)
-    writeFileSync(join(dir, 'other.act'), '123\n#1')
-    writeFileSync(join(dir, 'other.drill'), '123\n')
-    writeFileSync(join(dir, 'unrelated-file'), 'x')
+    const dir = markerDir([
+      ['old-session.work', '123\nbro-old', 25],
+      ['other.act', '123\n#1'],
+      ['other.drill', '123\n'],
+      ['unrelated-file', 'x'],
+    ])
     assert.equal(otherLiveWork(dir, 'self-session').length, 0)
   })
 })
