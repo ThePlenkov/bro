@@ -41,6 +41,8 @@ function toFilter(flags: DocFlags): TaskFilter {
   if (limit) f.limit = Number(limit)
   const label = flags['label'] ?? flags['l']
   if (label) f.labels = label.split(',')
+  const exclude = flags['exclude-label']
+  if (exclude) f.excludeLabels = exclude.split(',')
   return f
 }
 
@@ -53,7 +55,18 @@ function toInput(input: Record<string, unknown>, flags: DocFlags): TaskInput {
   if (flags['priority']) i.priority = Number(flags['priority'])
   if (flags['description']) i.description = flags['description']
   if (flags['label']) i.labels = flags['label'].split(',')
+  if (flags['deps']) i.deps = flags['deps'].split(',')
+  if (flags['parent']) i.parent = flags['parent']
   if (flags['external-ref']) i.externalRef = flags['external-ref']
+  if (flags['ephemeral'] === 'true') i.ephemeral = true
+  if (flags['no-inherit-labels'] === 'true') i.noInheritLabels = true
+  if (flags['metadata']) {
+    try {
+      i.metadata = JSON.parse(flags['metadata']) as Record<string, unknown>
+    } catch {
+      i.metadata = { value: flags['metadata'] }
+    }
+  }
   return i
 }
 
