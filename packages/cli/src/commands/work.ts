@@ -208,6 +208,22 @@ function stackMode(): 'auto' | 'manual' {
   }
 }
 
+/** Everything that decides where the new branch forks from. */
+function enterBase(argv: string[], main: WorktreeInfo): { base?: string } {
+  const { base, err } = resolveEnterBase(
+    flag(argv, '--base'),
+    argv.includes('--stack'),
+    stackMode() === 'auto',
+    gitTry(['branch', '--show-current']).out.trim() || undefined,
+    main.branch ?? main.head
+  )
+  if (err) {
+    console.error(`error: ${err}`)
+    process.exit(1)
+  }
+  return { base }
+}
+
 function cmdEnter(argv: string[]): void {
   const pos = positionals(argv, new Set(['--branch', '--base']))
   const slug = pos[0]
@@ -216,22 +232,9 @@ function cmdEnter(argv: string[]): void {
     usage()
   }
   const branch = flag(argv, '--branch') ?? `work/${slug}`
-  const stack = argv.includes('--stack')
-  const baseFlag = flag(argv, '--base')
   const main = mainWorktree()
   const mainRef = main.branch ?? main.head
-  const current = gitTry(['branch', '--show-current']).out.trim() || undefined
-  const { base, err } = resolveEnterBase(
-    baseFlag,
-    stack,
-    stackMode() === 'auto',
-    current,
-    mainRef
-  )
-  if (err) {
-    console.error(`error: ${err}`)
-    process.exit(1)
-  }
+  const { base } = enterBase(argv, main)
   const path = worktreePathFor(main.path, slug)
   if (existsSync(path)) {
     console.error(`error: ${path} already exists`)
