@@ -434,14 +434,12 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   }
 
   if (argv.includes('--dry-run')) {
-    let top: ReadyBead | undefined
-    try {
-      const ready = readyBeads()
-      top = classify(ready, undefined, nextScope('project'), epicParentIds(ready)).queue[0]
-    } catch (err) {
-      console.error(`loop: ${err instanceof Error ? err.message : String(err)}`)
+    const scope = loopScope()
+    if (!scope) {
       return
     }
+    const ready = readyBeads()
+    const top = classify(ready, undefined, scope, epicParentIds(ready)).queue[0]
     if (!top) {
       console.log('loop --dry-run: nothing claimable')
       return
@@ -455,14 +453,22 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   await runQueue(ctx)
 }
 
+/** Project scope for the queue — a failed prefix lookup is reported
+ *  once, not thrown into the claim loop. */
+function loopScope(): ReturnType<typeof nextScope> | null {
+  try {
+    return nextScope('project') // prefix is stable for the run
+  } catch (err) {
+    console.error(`loop: ${err instanceof Error ? err.message : String(err)}`)
+    return null
+  }
+}
+
 /** The claim→run→repeat cycle until the queue drains or --max hits. */
 async function runQueue(ctx: Ctx): Promise<void> {
   const seen = new Set<string>()
-  let scope: ReturnType<typeof nextScope>
-  try {
-    scope = nextScope('project') // prefix is stable for the run
-  } catch (err) {
-    console.error(`loop: ${err instanceof Error ? err.message : String(err)}`)
+  const scope = loopScope()
+  if (!scope) {
     return
   }
   const tally = { landed: 0, parked: 0, failed: 0 }
