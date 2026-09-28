@@ -25,7 +25,7 @@ import { spawnSync, spawn, execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { bd, checkBeads, gitTry } from '@bro/core'
-import { evaluateExitGate, fetchPrActState, waitForGate } from '@bro/act'
+import { evaluateExitGate, fetchPrActState, updatePullBranch, waitForGate } from '@bro/act'
 import { fetchReviewThreads } from '@bro/debt'
 import {
   buildFixPrompt,
@@ -369,6 +369,13 @@ async function driveGate(
           ),
         onError: (err, n) =>
           console.error(`loop #${pr}: fetch failed (${n}) — ${String(err)}`),
+        // same as `act wait`: BEHIND + mergeable is a state to fix, not
+        // to park on — conflicts still settle for a human
+        updateBranch: (s) => {
+          const ok = updatePullBranch({ owner: ctx.owner, repo: ctx.repo, pr }, s.headSha)
+          console.error(`loop #${pr}: update-branch ${ok ? 'pushed a new head' : 'refused'}`)
+          return ok
+        },
       })
     } catch (err) {
       noteBead(
