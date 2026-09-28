@@ -237,21 +237,23 @@ function isPlugin(p: unknown): p is BroPlugin {
   }
   // optional fields must be the right type when present — a truthy
   // non-function configSchema would crash config loading later
-  if (o.configSchema !== undefined && typeof o.configSchema !== 'function') return false
-  if (o.planSchema !== undefined && typeof o.planSchema !== 'function') return false
-  if (o.runPlan !== undefined && typeof o.runPlan !== 'function') return false
-  if (o.skill !== undefined && typeof o.skill !== 'string') return false
-  if (o.configKey !== undefined && typeof o.configKey !== 'string') return false
-  if (o.argvPrefix !== undefined && !Array.isArray(o.argvPrefix)) return false
-  if (o.docs !== undefined && (!Array.isArray(o.docs) || !o.docs.every(isDocType))) return false
-  if (
-    o.connectors !== undefined &&
-    (!Array.isArray(o.connectors) || !o.connectors.every(isConnector))
-  ) {
-    return false
-  }
-  return true
+  return PLUGIN_FIELD_CHECKS.every(([key, ok]) => o[key] === undefined || ok(o[key]))
 }
+
+/** Present-but-wrong optional fields — each predicate runs only when
+ *  the field is defined. Table form keeps isPlugin flat as fields grow. */
+const PLUGIN_FIELD_CHECKS: ReadonlyArray<
+  [keyof BroPlugin, (v: unknown) => boolean]
+> = [
+  ['configSchema', (v) => typeof v === 'function'],
+  ['planSchema', (v) => typeof v === 'function'],
+  ['runPlan', (v) => typeof v === 'function'],
+  ['skill', (v) => typeof v === 'string'],
+  ['configKey', (v) => typeof v === 'string'],
+  ['argvPrefix', (v) => Array.isArray(v)],
+  ['docs', (v) => Array.isArray(v) && v.every(isDocType)],
+  ['connectors', (v) => Array.isArray(v) && v.every(isConnector)],
+]
 
 /** A connectors entry must be a Connector — name + at least the shape
  *  registerConnector relies on — else facade resolution would crash. */
