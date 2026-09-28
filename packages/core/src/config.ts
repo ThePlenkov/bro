@@ -10,6 +10,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { homedir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { gitTry } from './git.ts'
@@ -81,6 +82,28 @@ export const actSection: ConfigSection<{
       obj.maxRounds >= 0
         ? obj.maxRounds
         : DEFAULT_CONFIG.act.maxRounds,
+  }
+}
+
+/** Default global-beads store — XDG data dir, not a repo path. */
+export const DEFAULT_GLOBAL_BEADS_DIR = join(homedir(), '.local', 'share', 'bro', 'beads')
+
+/** bro.config.json `beads` section — `beads.global` is the global store
+ *  dir. BRO_GLOBAL_BEADS wins over the file: a per-machine path should
+ *  not need a committed edit. `~` expands against the home dir. */
+export const beadsSection: ConfigSection<{ global: string }> = (raw) => {
+  const fromConfig =
+    typeof raw === 'object' && raw !== null ? (raw as { global?: unknown }).global : undefined
+  const env = process.env.BRO_GLOBAL_BEADS
+  const v =
+    (typeof env === 'string' && env.trim() !== '' ? env : undefined) ??
+    (typeof fromConfig === 'string' && fromConfig.trim() !== '' ? fromConfig : undefined)
+  if (v === undefined) {
+    return { global: DEFAULT_GLOBAL_BEADS_DIR }
+  }
+  const p = v.trim()
+  return {
+    global: p === '~' ? homedir() : p.startsWith('~/') ? join(homedir(), p.slice(2)) : p,
   }
 }
 
