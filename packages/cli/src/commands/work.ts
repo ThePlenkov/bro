@@ -245,7 +245,7 @@ function cmdEnter(argv: string[]): void {
   // resolved default base is irrelevant here; only a user-passed
   // --base/--stack conflicts with checking out an existing branch.
   const branchExists = gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).code === 0
-  if (branchExists && (baseFlag !== undefined || stack)) {
+  if (branchExists && (flag(argv, '--base') !== undefined || argv.includes('--stack'))) {
     console.error(`error: --base/--stack only apply when creating the branch; ${branch} already exists`)
     process.exit(1)
   }
