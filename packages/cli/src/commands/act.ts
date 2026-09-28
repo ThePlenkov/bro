@@ -13,6 +13,7 @@ import { loadBroConfig } from '../plugins.ts'
 import { fetchReviewThreads } from '@bro/debt'
 import { isAncestor } from './cleanup.ts'
 import { flag } from './args.ts'
+import { gitDirOf, isLinkedGitDir, parseWorktreePorcelain } from './work.ts'
 import {
   acquireMergeSlot,
   evaluateExitGate,
@@ -34,10 +35,13 @@ function usage(): never {
 
 Commands:
   status [PR] [--json]              PR state + exit gate JSON
-  wait [PR] [--interval S] [--timeout M] [--merge] [--json]
-                                    Poll the gate until it settles; --merge lands on green
+  wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--json]
+                                    Poll the gate until it settles; --merge lands on green,
+                                    --cleanup retires the worktree + local branch after it
   threads [PR]                      Unresolved review threads (TSV)
-  merge [PR] [--squash|--merge|--rebase] [--admin]  Merge only if the exit gate is green
+  merge [PR] [--squash|--merge|--rebase] [--admin] [--cleanup]
+                                    Merge only if the exit gate is green;
+                                    --cleanup also retires the worktree + local branch
   resolve --thread ID [--comment T] Resolve a thread — a fix resolves silently
                                     (the push is the verdict); --comment is for
                                     reject/defer reasons
@@ -190,8 +194,11 @@ async function cmdWait(argv: string[]): Promise<void> {
     return
   }
   if (argv.includes('--merge')) {
-    const mergeArgs = argv.filter((a) => ['--squash', '--rebase', '--admin'].includes(a))
+    const mergeArgs = argv.filter((a) => ['--squash', '--rebase', '--admin', '--cleanup'].includes(a))
     await cmdMerge([String(t.pr), ...mergeArgs])
+  } else if (argv.includes('--cleanup')) {
+    console.error('error: --cleanup requires --merge — nothing was merged, nothing to clean')
+    process.exitCode = 2
   }
 }
 
@@ -228,6 +235,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
     process.exitCode = 1
     return
   }
+  let mergedHead: { ref: string; sha: string } | undefined
   try {
     const act = loadBroConfig().act
     const state = await fetchPrActState(
@@ -263,7 +271,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
     try {
       console.log(gh(args))
       console.log(`act: merged #${t.pr}`)
-      deleteMergedLocalBranch(state.headRef, state.headSha)
+      mergedHead = { ref: state.headRef, sha: state.headSha }
     } catch (err) {
       console.error(`error: merge failed — ${err instanceof Error ? err.message : String(err)}`)
       process.exitCode = 1
@@ -273,17 +281,29 @@ async function cmdMerge(argv: string[]): Promise<void> {
       releaseMergeSlot()
     }
   }
+  // local cleanup runs AFTER the merge slot is released — it is pure git
+  // plumbing and must not extend the critical section
+  if (mergedHead) {
+    if (argv.includes('--cleanup')) {
+      cleanupAfterMerge(mergedHead.ref, mergedHead.sha)
+    } else {
+      deleteMergedLocalBranch(mergedHead.ref, mergedHead.sha)
+    }
+  }
 }
 
 /** Best-effort local-side cleanup after a merge — the remote branch is
  * already gone via --delete-branch, but the local ref lingers. Never
- * fails the merge: a branch checked out in a worktree simply reports.
- * Deletes only when the local tip IS the merged head (or its ancestor) —
- * a same-named branch with extra commits is kept, which also covers the
- * fork-PR case where headRef names a branch we never had. */
+ * fails the merge: a branch checked out in ANY worktree simply reports
+ * (a checkout cannot delete its own branch). Deletes only when the local
+ * tip IS the merged head (or its ancestor) — a same-named branch with
+ * extra commits is kept, which also covers the fork-PR case where
+ * headRef names a branch we never had. */
 function deleteMergedLocalBranch(headRef: string, headSha: string): void {
-  const current = gitTry(['branch', '--show-current']).out.trim()
-  if (headRef === current) {
+  const checkedOut = parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out).some(
+    (w) => w.branch === headRef
+  )
+  if (checkedOut) {
     console.error(`cleanup: ${headRef} is checked out — delete it after switching`)
     return
   }
@@ -302,6 +322,70 @@ function deleteMergedLocalBranch(headRef: string, headSha: string): void {
   } else if (!/not found|branch.*not.*exist/i.test(res.err)) {
     console.error(`cleanup: local branch ${headRef} not deleted (${res.err})`)
   }
+}
+
+/** The branch a merged PR's checkout should fall back to: origin/HEAD's
+ *  target, else the first existing of main/master. */
+function defaultBranch(): string {
+  const head = gitTry(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
+  if (head.code === 0) {
+    return head.out.trim().replace(/^[^/]+\//, '')
+  }
+  for (const b of ['main', 'master']) {
+    if (gitTry(['rev-parse', '--verify', `refs/heads/${b}`]).code === 0) {
+      return b
+    }
+  }
+  return 'main'
+}
+
+/**
+ * `--cleanup`: after an authoritative merge, retire the whole local surface
+ * the PR lived on — worktree or checkout first (a checkout cannot delete
+ * its own branch), then the branch itself under deleteMergedLocalBranch's
+ * tip guard. Owned by the command, not a `;`-sequenced watcher shell: it
+ * only ever runs after a merge that actually landed. Best-effort — every
+ * step reports and a dirty tree is kept, never force-removed.
+ */
+export function cleanupAfterMerge(headRef: string, headSha: string): void {
+  const cwd = process.cwd()
+  const all = parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out)
+  const main = all[0]
+  const here = all.find((w) => w.path === cwd)
+  const gitDir = gitDirOf(cwd)
+
+  if (here?.branch === headRef && gitDir && isLinkedGitDir(gitDir) && main) {
+    // inside a linked worktree on the merged branch — remove it via the
+    // main checkout. `worktree remove` refuses trees with ANY extra files
+    // (even ignored ones like node_modules), so a clean porcelain status —
+    // no tracked modifications, no untracked files — is the guard for
+    // --force being safe: only ignored debris remains.
+    if (gitTry(['-C', cwd, 'status', '--porcelain']).out.trim() !== '') {
+      console.error(`cleanup: ${cwd} has uncommitted changes — worktree kept`)
+      return
+    }
+    const res = gitTry(['-C', main.path, 'worktree', 'remove', '--force', cwd])
+    if (res.code !== 0) {
+      console.error(`cleanup: worktree ${cwd} not removed (${res.err})`)
+      return
+    }
+    process.chdir(main.path) // cwd is gone — git ops below need a live dir
+    console.log(`cleanup: removed worktree ${cwd}`)
+    console.log(`cleanup: cd ${main.path}`)
+  } else if (here?.branch === headRef && here.path === main?.path) {
+    // the main checkout itself sits on the merged branch — switch back to
+    // the default branch before the delete below can run
+    const def = defaultBranch()
+    const res = gitTry(['-C', main.path, 'switch', def])
+    if (res.code !== 0) {
+      console.error(`cleanup: could not switch to ${def} (${res.err}) — branch ${headRef} kept`)
+      return
+    }
+    console.log(`cleanup: switched to ${def}`)
+  }
+  // merged branch checked out elsewhere, or not checked out at all —
+  // deleteMergedLocalBranch reports the first and handles the second
+  deleteMergedLocalBranch(headRef, headSha)
 }
 
 async function cmdThreads(argv: string[]): Promise<void> {

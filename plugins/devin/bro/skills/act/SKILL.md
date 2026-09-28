@@ -18,8 +18,8 @@ default store, so standard installs already have it).
 | ------- | ------------ |
 | `bro act status [PR] [--json]` | PR state + **exit gate** — open threads, CI failures, SAST findings. Exits non-zero while blocked |
 | `bro act threads [PR]` | Unresolved review threads, TSV |
-| `bro act wait [PR] [--interval S] [--timeout M] [--merge]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green |
-| `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin]` | Merge **only if the exit gate is green** — serialized on the beads merge slot (best-effort: without beads the merge proceeds unserialized); BLOCKED refuses and names blockers |
+| `bro act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; add `--cleanup` to retire the linked worktree + local branch after the merge lands |
+| `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup]` | Merge **only if the exit gate is green** — serialized on the beads merge slot (best-effort: without beads the merge proceeds unserialized); BLOCKED refuses and names blockers. `--cleanup` retires the merged branch's worktree/checkout + local ref |
 | `bro act resolve --thread ID [--comment T]` | Resolve a thread (reply first if comment given) |
 | `bro act reply --thread ID --comment T` | Reply without resolving (`--file TSV` for batch) |
 
@@ -69,7 +69,11 @@ default store, so standard installs already have it).
   green, settled blockers (threads, failures), or `--timeout` — then
   prints the verdict and exits non-zero unless the gate is OK. Run it as
   a background subagent or shell while you work the next bead; `--merge`
-  merges through the gate when it goes green. On a settled BLOCKED, run
+  merges through the gate when it goes green. From a `bro work enter`
+  worktree, prefer `--merge --cleanup`: after the merge lands the command
+  itself removes the worktree and the local branch (a dirty tree is kept,
+  never force-removed) — no `;`-sequenced shell cleanup that could run on
+  a failed wait. On a settled BLOCKED, run
   `bro act threads <PR>` as a separate command (never `status && threads`
   — a failing exit must not hide the threads). `gh pr checks --watch` is
   the fallback only where bro isn't installed.
