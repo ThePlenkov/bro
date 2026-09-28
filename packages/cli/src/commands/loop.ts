@@ -24,7 +24,7 @@
 import { spawnSync, spawn, execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { bd, bdJson, checkBeads, gitTry } from '@bro/core'
+import { bd, checkBeads, gitTry } from '@bro/core'
 import { evaluateExitGate, fetchPrActState, waitForGate } from '@bro/act'
 import { fetchReviewThreads } from '@bro/debt'
 import {
@@ -37,7 +37,14 @@ import {
 import { loadBroConfig } from '../plugins.ts'
 import { flag } from './args.ts'
 import { runActCommand } from './act.ts'
-import { claimUpTo, classify, type ReadyBead } from './next.ts'
+import {
+  claimUpTo,
+  classify,
+  epicParentIds,
+  nextScope,
+  readyBeads,
+  type ReadyBead,
+} from './next.ts'
 
 interface Ctx {
   owner: string
@@ -427,8 +434,12 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   }
 
   if (argv.includes('--dry-run')) {
-    const ready = bdJson<ReadyBead[]>(['ready', '--json'])
-    const top = classify(ready).queue[0]
+    const scope = loopScope()
+    if (!scope) {
+      return
+    }
+    const ready = readyBeads()
+    const top = classify(ready, undefined, scope, epicParentIds(ready)).queue[0]
     if (!top) {
       console.log('loop --dry-run: nothing claimable')
       return
@@ -442,17 +453,38 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   await runQueue(ctx)
 }
 
+/** Project scope for the queue — a failed prefix lookup is reported
+ *  once, not thrown into the claim loop. */
+function loopScope(): ReturnType<typeof nextScope> | null {
+  try {
+    return nextScope('project') // prefix is stable for the run
+  } catch (err) {
+    console.error(`loop: ${err instanceof Error ? err.message : String(err)}`)
+    return null
+  }
+}
+
 /** The claim→run→repeat cycle until the queue drains or --max hits. */
 async function runQueue(ctx: Ctx): Promise<void> {
   const seen = new Set<string>()
+  const scope = loopScope()
+  if (!scope) {
+    return
+  }
   const tally = { landed: 0, parked: 0, failed: 0 }
   for (;;) {
     if (ctx.cfg.maxItems > 0 && tally.landed + tally.parked + tally.failed >= ctx.cfg.maxItems) {
       break
     }
-    const ready = bdJson<ReadyBead[]>(['ready', '--json'])
-    const bead = claimUpTo(classify(ready).queue.filter((b) => !seen.has(b.id)), 1)[0]
+    const ready = readyBeads()
+    const c = classify(ready, undefined, scope, epicParentIds(ready))
+    const bead = claimUpTo(c.queue.filter((b) => !seen.has(b.id)), 1)[0]
     if (!bead) {
+      // a foreign-only remainder must not look like a drained queue —
+      // 'done' would hide work a shared db still advertises
+      if (c.foreign > 0) {
+        console.log(`loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
+      }
       break
     }
     seen.add(bead.id)

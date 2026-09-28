@@ -14,6 +14,7 @@ describe('next plan schema', () => {
       order: 'priority',
       claim: true,
       gates: 'forbid',
+      scope: 'project',
       json: false,
       filters: {},
     })
@@ -25,6 +26,7 @@ limit = 3
 order = "oldest"
 claim = false
 gates = "allow"
+scope = "all"
 json = true
 
 [filters]
@@ -35,6 +37,7 @@ match = "schema|plan"`)
     assert.equal(plan.order, 'oldest')
     assert.equal(plan.claim, false)
     assert.equal(plan.gates, 'allow')
+    assert.equal(plan.scope, 'all')
     assert.equal(plan.json, true)
     assert.deepEqual(plan.filters.types, ['task', 'bug'])
     assert.equal(plan.filters.maxPriority, 2)
