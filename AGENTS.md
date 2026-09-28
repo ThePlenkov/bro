@@ -15,7 +15,11 @@ over beads. In a repo with `bro.config.json` or `.beads/`:
   repeated stop is let through (gates, not loops). The stop gate only
   hard-blocks sessions that touched the PR or drill frame (`bro act`,
   `gh pr`, `git push`, `bro drill`/`wtf` arm it via a per-session marker);
-  ambient repo state is passive context for everyone else.
+  ambient repo state is passive context for everyone else. Session-start
+  context also nudges when another live session armed work in the same
+  repository — markers live in the common git dir, so detection spans
+  linked worktrees (fresh `.work` markers, other worktrees, claimed
+  beads) — detection only, never a block.
 
 Developing bro itself: see CONTRIBUTING.md.
 
