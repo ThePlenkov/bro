@@ -213,19 +213,51 @@ async function mergeIfAsked(argv: string[], pr: number): Promise<void> {
  * Merging through bro cannot bypass a BLOCKED gate; `gh pr merge` by hand
  * can. This is the guardrail for "merged without running the gate".
  */
+/** Merge strategy validation — returns null (caller errors out) on
+ *  conflicting flags. Runs before the slot so a doomed request never
+ *  occupies the critical section. */
+function mergeMethod(argv: string[]): string | null {
+  const strategies = ['--squash', '--merge', '--rebase'].filter((f) => argv.includes(f))
+  if (strategies.length > 1) {
+    console.error(`error: conflicting merge strategies: ${strategies.join(' ')}`)
+    return null
+  }
+  return strategies[0] ?? '--squash'
+}
+
+/** `gh pr merge` + the authoritative verify — a merge queue accepts a PR
+ *  without landing it, so only a MERGED state returns the landed head. */
+function landPr(pr: number, args: string[], head: { ref: string; sha: string }): { ref: string; sha: string } | undefined {
+  try {
+    console.log(gh(args))
+    const after = JSON.parse(gh(['pr', 'view', String(pr), '--json', 'state'])) as {
+      state: string
+    }
+    if (after.state === 'MERGED') {
+      console.log(`act: merged #${pr}`)
+      return head
+    }
+    console.log(
+      `act: #${pr} accepted but state=${after.state} — a merge queue still owns it; ` +
+        'local cleanup deferred'
+    )
+    return undefined
+  } catch (err) {
+    console.error(`error: merge failed — ${err instanceof Error ? err.message : String(err)}`)
+    process.exitCode = 1
+    return undefined
+  }
+}
+
 async function cmdMerge(argv: string[]): Promise<void> {
   ensureGhAuth()
   const t = resolvePr(argv)
 
-  // cheap client-side validation before acquiring the slot — a doomed
-  // request must not occupy the critical section
-  const strategies = ['--squash', '--merge', '--rebase'].filter((f) => argv.includes(f))
-  if (strategies.length > 1) {
-    console.error(`error: conflicting merge strategies: ${strategies.join(' ')}`)
+  const method = mergeMethod(argv)
+  if (!method) {
     process.exitCode = 2
     return
   }
-  const method = strategies[0] ?? '--squash'
 
   // Gate evaluation + merge is ONE critical section: acquiring the slot
   // first closes the drift window between a green gate and the merge
@@ -274,27 +306,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
     if (argv.includes('--admin')) {
       args.push('--admin')
     }
-    try {
-      console.log(gh(args))
-      // authoritative check: `gh pr merge` can succeed by enqueueing into
-      // a merge queue without the PR actually being merged — only MERGED
-      // means the head landed and local cleanup is safe
-      const after = JSON.parse(gh(['pr', 'view', String(t.pr), '--json', 'state'])) as {
-        state: string
-      }
-      if (after.state === 'MERGED') {
-        console.log(`act: merged #${t.pr}`)
-        mergedHead = { ref: state.headRef, sha: state.headSha }
-      } else {
-        console.log(
-          `act: #${t.pr} accepted but state=${after.state} — a merge queue still owns it; ` +
-            'local cleanup deferred'
-        )
-      }
-    } catch (err) {
-      console.error(`error: merge failed — ${err instanceof Error ? err.message : String(err)}`)
-      process.exitCode = 1
-    }
+    mergedHead = landPr(t.pr, args, { ref: state.headRef, sha: state.headSha })
   } finally {
     if (slot.kind === 'acquired') {
       releaseMergeSlot()
