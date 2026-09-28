@@ -10,7 +10,8 @@ import { parseNextPlan } from './next-plan.ts'
  *  emits FAKE_BD_READY and logs its argv into FAKE_BD_LOG; `update`
  *  records claims into FAKE_BD_LOG, and fails for ids in
  *  FAKE_BD_CLAIM_FAIL (simulates a raced-away bead). `config get
- *  issue_prefix` echoes FAKE_BD_PREFIX, "(not set)" when unset. */
+ *  issue_prefix` echoes FAKE_BD_PREFIX, "(not set)" when unset. `show`
+ *  reports issue_type=epic for ids matching FAKE_BD_EPIC_PARENTS. */
 const FAKE_BD = `#!/bin/sh
 case "$1" in
   --version) echo 'bd 0.0' ;;
@@ -22,10 +23,15 @@ case "$1" in
       *) echo "$3 (not set)" ;;
     esac ;;
   show)
+    status=open
     if [ -n "$FAKE_BD_CLAIM_FAIL" ]; then
-      case "$2" in *$FAKE_BD_CLAIM_FAIL*) echo '[{"status":"in_progress"}]'; exit 0 ;; esac
+      case "$2" in *$FAKE_BD_CLAIM_FAIL*) status=in_progress ;; esac
     fi
-    echo '[{"status":"open"}]' ;;
+    type=task
+    if [ -n "$FAKE_BD_EPIC_PARENTS" ]; then
+      case "$2" in *$FAKE_BD_EPIC_PARENTS*) type=epic ;; esac
+    fi
+    echo '[{"status":"'$status'","issue_type":"'$type'"}]' ;;
   update)
     if [ -n "$FAKE_BD_CLAIM_FAIL" ]; then
       case "$2" in *$FAKE_BD_CLAIM_FAIL*) exit 1 ;; esac
@@ -59,7 +65,8 @@ function withFakeBd(
   fn: (c: Captured) => Promise<void>,
   claimFail = '',
   updateFail = '',
-  prefix = ''
+  prefix = '',
+  epicParents = ''
 ): () => Promise<void> {
   return async () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
@@ -76,6 +83,7 @@ function withFakeBd(
       FAKE_BD_PREFIX: process.env.FAKE_BD_PREFIX,
       FAKE_BD_READY_LOG: process.env.FAKE_BD_READY_LOG,
       FAKE_BD_CONFIG_FAIL: process.env.FAKE_BD_CONFIG_FAIL,
+      FAKE_BD_EPIC_PARENTS: process.env.FAKE_BD_EPIC_PARENTS,
     }
     process.env.PATH = `${dir}:${prev.PATH}`
     process.env.FAKE_BD_READY = join(dir, 'ready.json')
@@ -85,6 +93,8 @@ function withFakeBd(
     process.env.FAKE_BD_UPDATE_FAIL = updateFail
     if (prefix === '') delete process.env.FAKE_BD_PREFIX
     else process.env.FAKE_BD_PREFIX = prefix
+    if (epicParents === '') delete process.env.FAKE_BD_EPIC_PARENTS
+    else process.env.FAKE_BD_EPIC_PARENTS = epicParents
     const lines: string[] = []
     const orig = console.log
     console.log = (...args: unknown[]) => lines.push(args.join(' '))
@@ -242,6 +252,30 @@ describe('bro next', () => {
       '',
       '',
       'b'
+    )
+  )
+
+  it(
+    'epic children are claimable; only non-epic parents stay molecule steps',
+    withFakeBd(
+      [
+        { id: 'b-echild', title: 'epic child', parent: 'b-epic-x', status: 'open', priority: 2, issue_type: 'task', created_at: '2026-01-02T00:00:00Z' },
+        { id: 'b-mol2', title: 'real mol step', parent: 'm-9', status: 'open', priority: 1, issue_type: 'task', created_at: '2026-01-01T00:00:00Z' },
+      ],
+      async c => {
+        await runNextCommand(['--json'])
+        const r = JSON.parse(c.lines.join('\n'))
+        // b-mol2 outranks b-echild by priority but its parent is not an
+        // epic — the epic child wins, the mol step stays convoy-owned
+        assert.equal(r.bead.id, 'b-echild')
+        assert.equal(r.moleculeSteps, 1)
+        assert.match(c.claims, /b-echild --claim/)
+        assert.doesNotMatch(c.claims, /b-mol2/)
+      },
+      '',
+      '',
+      '',
+      'b-epic-x'
     )
   )
 
