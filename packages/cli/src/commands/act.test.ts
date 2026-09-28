@@ -80,6 +80,17 @@ describe('cleanupAfterMerge', () => {
     })
   })
 
+  test('run from a subdirectory still removes the containing worktree', () => {
+    const { root, main, linked, sha } = fixture()
+    const sub = join(linked, 'src', 'deep')
+    mkdirSync(sub, { recursive: true })
+    inside(sub, root, () => {
+      cleanupAfterMerge('work/x', sha)
+      assert.equal(existsSync(linked), false)
+      assert.equal(git(['branch', '--list', 'work/x'], main).trim(), '')
+    })
+  })
+
   test('a main checkout on the merged branch switches back to the default branch', () => {
     const { root, main } = initRepo()
     git(['switch', '-qc', 'work/x'], main)

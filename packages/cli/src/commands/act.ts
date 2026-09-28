@@ -270,8 +270,21 @@ async function cmdMerge(argv: string[]): Promise<void> {
     }
     try {
       console.log(gh(args))
-      console.log(`act: merged #${t.pr}`)
-      mergedHead = { ref: state.headRef, sha: state.headSha }
+      // authoritative check: `gh pr merge` can succeed by enqueueing into
+      // a merge queue without the PR actually being merged — only MERGED
+      // means the head landed and local cleanup is safe
+      const after = JSON.parse(gh(['pr', 'view', String(t.pr), '--json', 'state'])) as {
+        state: string
+      }
+      if (after.state === 'MERGED') {
+        console.log(`act: merged #${t.pr}`)
+        mergedHead = { ref: state.headRef, sha: state.headSha }
+      } else {
+        console.log(
+          `act: #${t.pr} accepted but state=${after.state} — a merge queue still owns it; ` +
+            'local cleanup deferred'
+        )
+      }
     } catch (err) {
       console.error(`error: merge failed — ${err instanceof Error ? err.message : String(err)}`)
       process.exitCode = 1
@@ -334,6 +347,9 @@ function deleteMergedLocalBranch(headRef: string, headSha: string): void {
 /** The branch a merged PR's checkout should fall back to: origin/HEAD's
  *  target, else the first existing of main/master. */
 function defaultBranch(): string {
+  // refresh first — a stale origin/HEAD would switch back to a renamed or
+  // deleted default branch (failure only: kept, never data loss)
+  gitTry(['remote', 'set-head', 'origin', '--auto'])
   const head = gitTry(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
   if (head.code === 0) {
     return head.out.trim().replace(/^[^/]+\//, '')
@@ -356,9 +372,12 @@ function defaultBranch(): string {
  */
 export function cleanupAfterMerge(headRef: string, headSha: string): void {
   const cwd = process.cwd()
+  // cwd may be a subdirectory — resolve the containing worktree root
+  // before matching against `worktree list` paths
+  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || cwd
   const all = parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out)
   const main = all[0]
-  const here = all.find((w) => w.path === cwd)
+  const here = all.find((w) => w.path === root)
   const gitDir = gitDirOf(cwd)
 
   if (here?.branch === headRef && gitDir && isLinkedGitDir(gitDir) && main) {
@@ -366,26 +385,28 @@ export function cleanupAfterMerge(headRef: string, headSha: string): void {
     // main checkout. `worktree remove` refuses trees with ANY extra files
     // (even ignored ones like node_modules), so a clean porcelain status —
     // no tracked modifications, no untracked files — is the guard for
-    // --force being safe: only ignored debris remains. A status failure is
-    // fail-closed: an unverifiable tree is kept, never forced away.
-    const status = gitTry(['-C', cwd, 'status', '--porcelain'])
+    // --force being safe: only ignored debris remains. The check is
+    // config-independent — `-c status.showUntrackedFiles=all` overrides a
+    // user config that would hide untracked files from --porcelain — and
+    // fail-closed: a status failure means the tree is kept, never forced.
+    const status = gitTry(['-c', 'status.showUntrackedFiles=all', '-C', root, 'status', '--porcelain'])
     if (status.code !== 0 || status.out.trim() !== '') {
       console.error(
         status.code !== 0
-          ? `cleanup: cannot verify ${cwd} is clean (${status.err}) — worktree kept`
-          : `cleanup: ${cwd} has uncommitted changes — worktree kept`
+          ? `cleanup: cannot verify ${root} is clean (${status.err}) — worktree kept`
+          : `cleanup: ${root} has uncommitted changes — worktree kept`
       )
       return
     }
     // initialized submodules need a second --force to override
-    const force = hasSubmodules(cwd) ? ['--force', '--force'] : ['--force']
-    const res = gitTry(['-C', main.path, 'worktree', 'remove', ...force, cwd])
+    const force = hasSubmodules(root) ? ['--force', '--force'] : ['--force']
+    const res = gitTry(['-C', main.path, 'worktree', 'remove', ...force, root])
     if (res.code !== 0) {
-      console.error(`cleanup: worktree ${cwd} not removed (${res.err})`)
+      console.error(`cleanup: worktree ${root} not removed (${res.err})`)
       return
     }
     process.chdir(main.path) // cwd is gone — git ops below need a live dir
-    console.log(`cleanup: removed worktree ${cwd}`)
+    console.log(`cleanup: removed worktree ${root}`)
     console.log(`cleanup: cd ${main.path}`)
   } else if (here?.branch === headRef && here.path === main?.path) {
     // the main checkout itself sits on the merged branch — switch back to
