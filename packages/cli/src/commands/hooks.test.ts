@@ -1,6 +1,9 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { classifyArmCommand, classifyExecCommand, isSelfToolCommand, parsePrUrl, readArmed } from './hooks.ts'
+import { mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { classifyArmCommand, classifyExecCommand, isSelfToolCommand, parsePrUrl, readArmed, armDetail, otherLiveWork } from './hooks.ts'
 
 describe('classifyExecCommand', () => {
   test('detects gh pr merge', () => {
@@ -131,5 +134,60 @@ describe('classifyArmCommand positions', () => {
   test('escaped quotes inside arguments do not open a command position', () => {
     assert.equal(classifyArmCommand('echo "x\\"; git push"'), null)
     assert.equal(classifyArmCommand("echo 'a\\'; bro act'"), null)
+  })
+})
+
+describe('armDetail', () => {
+  test('names the slug from bro work enter', () => {
+    assert.equal(armDetail('bro work enter bro-n5t-2', 'work'), 'bro-n5t-2')
+    assert.equal(armDetail('cd x && bro work enter bro-abc', 'work'), 'bro-abc')
+  })
+
+  test('names the path from git worktree add', () => {
+    assert.equal(armDetail('git worktree add ../bro--x -b work/x', 'work'), '../bro--x')
+    assert.equal(armDetail('git worktree add -b work/x ../bro--x', 'work'), '../bro--x')
+  })
+
+  test('names the PR for act commands', () => {
+    assert.equal(armDetail('bro act merge 89 --cleanup', 'act'), '#89')
+    assert.equal(armDetail('gh pr merge 42 --squash', 'act'), '#42')
+    assert.equal(armDetail('git push', 'act'), '')
+  })
+
+  test('returns empty for drill and unrecognized commands', () => {
+    assert.equal(armDetail('bro drill down bro-x', 'drill'), '')
+    assert.equal(armDetail('npm test', 'work'), '')
+  })
+})
+
+describe('otherLiveWork', () => {
+  const HOUR = 3_600_000
+
+  test("a second session's live work marker is detected with its detail", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-hooks-'))
+    writeFileSync(join(dir, 'other-session-1.work'), '123\nbro-xyz')
+    const found = otherLiveWork(dir, 'self-session')
+    assert.equal(found.length, 1)
+    assert.equal(found[0]!.session, 'other-session-1')
+    assert.equal(found[0]!.detail, 'bro-xyz')
+  })
+
+  test('a lone session sees nothing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-hooks-'))
+    writeFileSync(join(dir, 'self-session.work'), '123\nbro-mine')
+    writeFileSync(join(dir, 'self-session.act'), '123\n#1')
+    assert.equal(otherLiveWork(dir, 'self-session').length, 0)
+  })
+
+  test('stale markers and non-work aspects are ignored', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-hooks-'))
+    const stale = join(dir, 'old-session.work')
+    writeFileSync(stale, '123\nbro-old')
+    const past = new Date(Date.now() - 25 * HOUR)
+    utimesSync(stale, past, past)
+    writeFileSync(join(dir, 'other.act'), '123\n#1')
+    writeFileSync(join(dir, 'other.drill'), '123\n')
+    writeFileSync(join(dir, 'unrelated-file'), 'x')
+    assert.equal(otherLiveWork(dir, 'self-session').length, 0)
   })
 })
