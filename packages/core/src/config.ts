@@ -111,6 +111,21 @@ export const beadsSection: ConfigSection<{ global: string }> = (raw) => {
   return { global: dir }
 }
 
+/** bro.config.json `stack` section — how `bro work enter` picks the base
+ *  for a new worktree when a session already produced a PR branch.
+ *  'manual' (default): stack only on explicit --stack/--base.
+ *  'auto': base on the current worktree's branch whenever it isn't the
+ *  main checkout's branch — second+ PR in a session lands on the stack
+ *  head; gh-stack then drives submit/sync/merge bottom-up. */
+export const stackSection: ConfigSection<{ mode: 'auto' | 'manual' }> = (raw) => {
+  const m = typeof raw === 'object' && raw !== null ? (raw as { mode?: unknown }).mode : undefined
+  if (m !== undefined && m !== 'auto' && m !== 'manual') {
+    console.error(`bro.config: stack.mode must be "auto" or "manual" — got ${JSON.stringify(m)}`)
+    return { mode: 'manual' }
+  }
+  return { mode: m ?? 'manual' }
+}
+
 /** Sections core normalizes itself — identical to what the built-in
  *  plugins declare as their configSchema. */
 const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
