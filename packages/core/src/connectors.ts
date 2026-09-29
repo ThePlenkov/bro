@@ -88,6 +88,11 @@ export interface Connector {
    *  (github.com, gitlab.*, a self-hosted domain). Drives facade
    *  auto-detect ahead of registry order. */
   matchRemote?(url: string): boolean
+  /** Auth/readiness probe — the SYSTEM owns its credential check, so a
+   *  facade-backed command on a foreign host never demands `gh auth`.
+   *  null = ready; a string is the remediation line a command prints.
+   *  Sync: probes shell out like the rest of the facade surface. */
+  auth?(ctx: ConnectorCtx): string | null
   tasks?(ctx: ConnectorCtx): TaskStore
   reviews?(ctx: ConnectorCtx): ReviewFacade
   hooks?(ctx: ConnectorCtx): ConnectorHooks
@@ -221,17 +226,14 @@ export interface FacadeOpts {
   prefer?: Record<string, string>
 }
 
-/** Resolve the facade a command needs. Throws when nothing provides it —
- *  callers that probe rather than require should catch or pre-check
- *  `connectors()`. */
-export function facade<K extends keyof FacadeMap>(
+/** The connector chosen to serve `kind` — shared by facade() and auth
+ *  probing so both resolve through the same precedence. */
+function pickConnector<K extends keyof FacadeMap>(
   kind: K,
   ctx: ConnectorCtx,
-  opts: FacadeOpts = {}
-): FacadeMap[K] {
-  const provides = (c: Connector): ((ctx: ConnectorCtx) => unknown) | undefined =>
-    c[kind as keyof Connector] as ((ctx: ConnectorCtx) => unknown) | undefined
-  const providers = registry.filter((c) => typeof provides(c) === 'function')
+  opts: FacadeOpts
+): Connector {
+  const providers = registry.filter((c) => typeof c[kind as keyof Connector] === 'function')
   const named = opts.connector ?? opts.prefer?.[kind]
   let pick: Connector | undefined
   if (named !== undefined) {
@@ -253,7 +255,49 @@ export function facade<K extends keyof FacadeMap>(
       )
     }
   }
-  return provides(pick)!(ctx) as FacadeMap[K]
+  return pick
+}
+
+/** Resolve the facade a command needs. Throws when nothing provides it —
+ *  callers that probe rather than require should catch or pre-check
+ *  `connectors()`. */
+export function facade<K extends keyof FacadeMap>(
+  kind: K,
+  ctx: ConnectorCtx,
+  opts: FacadeOpts = {}
+): FacadeMap[K] {
+  const pick = pickConnector(kind, ctx, opts)
+  const provides = pick[kind as keyof Connector] as (ctx: ConnectorCtx) => unknown
+  return provides(ctx) as FacadeMap[K]
+}
+
+/** The serving connector's auth probe — null when ready, else the
+ *  remediation line. Resolution failures surface as the message: a
+ *  missing provider is as unusable as a missing credential. */
+export function facadeAuth<K extends keyof FacadeMap>(
+  kind: K,
+  ctx: ConnectorCtx,
+  opts: FacadeOpts = {}
+): string | null {
+  try {
+    return pickConnector(kind, ctx, opts).auth?.(ctx) ?? null
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err)
+  }
+}
+
+/** Hard auth gate for commands — exits(1) with the remediation line when
+ *  the resolved connector isn't usable. */
+export function ensureAuth<K extends keyof FacadeMap>(
+  kind: K,
+  ctx: ConnectorCtx,
+  opts: FacadeOpts = {}
+): void {
+  const msg = facadeAuth(kind, ctx, opts)
+  if (msg) {
+    console.error(`error: ${msg}`)
+    process.exit(1)
+  }
 }
 
 /** facade('reviews') bound to a dir — the common resolution path for

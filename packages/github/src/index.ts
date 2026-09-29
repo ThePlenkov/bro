@@ -3,7 +3,7 @@
  * (PR state, threads, checks, merge) over the `gh` CLI. Registers like
  * any connector — built-in today, nothing GitHub-specific in core.
  */
-import type { Connector } from '@bro/core'
+import { ghTry, type Connector } from '@bro/core'
 import { githubReview } from './reviews.ts'
 
 export { githubReview }
@@ -16,6 +16,13 @@ export const githubConnector: Connector = {
   matchRemote(url: string): boolean {
     const host = url.match(/^(?:https?:\/\/|git@)([^/:]+)/i)?.[1]?.toLowerCase() ?? ''
     return host.split('.').includes('github')
+  },
+  /** `gh auth status` — covers both "gh missing" (spawn failure →
+   *  nonzero code) and "gh present but logged out". */
+  auth() {
+    return ghTry(['auth', 'status']).code === 0
+      ? null
+      : 'gh not authenticated — run `gh auth login`'
   },
   reviews: (ctx) => githubReview(ctx.dir),
 }

@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import {
   connectors,
   facade,
+  facadeAuth,
   parallelWorkLines,
   promptContextLines,
   registerConnector,
@@ -104,6 +105,23 @@ describe('connectors', () => {
     const dir = process.cwd()
     assert.ok((await sessionStartLines({ dir })).includes('acme: 2 assigned'))
     assert.ok((await parallelWorkLines({ dir })).includes('acme: plane-mq claimed'))
+  })
+
+  test('facadeAuth returns the serving connector\'s remediation line', () => {
+    registerConnector({
+      name: 'acme-auth',
+      tasks: fakeTasks('acme'),
+      auth: () => 'acme: run `acme login`',
+    })
+    const dir = process.cwd()
+    assert.equal(
+      facadeAuth('tasks', { dir }, { connector: 'acme-auth' }),
+      'acme: run `acme login`'
+    )
+    // beads has no auth probe — nothing to demand
+    assert.equal(facadeAuth('tasks', { dir }, { connector: 'beads' }), null)
+    // no provider surfaces as the message, not a throw
+    assert.equal(typeof facadeAuth('reviews', { dir }, { connector: 'acme-bare' }), 'string')
   })
 
   test('probes may be async; a rejected probe starves only itself', async () => {
