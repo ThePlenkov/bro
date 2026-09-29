@@ -124,7 +124,16 @@ function parseCollectArgs(rev: ReviewFacade, argv: string[]): CollectArgs {
     '--no-label': 'noLabel',
   }
   const valueFlags: Record<string, (v: string) => void> = {
-    '--pr-ids': (v) => (filters.prIds = parseCsvInts(v)),
+    // An all-invalid --pr-ids parses to [] — which reads as "no explicit
+    // selection" and silently falls back to the default 50-PR queue.
+    '--pr-ids': (v) => {
+      const ids = parseCsvInts(v)
+      if (ids.length === 0) {
+        console.error(`error: --pr-ids has no valid PR numbers in "${v}"`)
+        process.exit(2)
+      }
+      filters.prIds = ids
+    },
     '--merged-since': (v) => (filters.mergedSince = v),
     '--merged-until': (v) => (filters.mergedUntil = v),
     '--last': (v) => (filters.lastN = parsePositiveInt('--last', v)),
@@ -144,10 +153,14 @@ function parseCollectArgs(rev: ReviewFacade, argv: string[]): CollectArgs {
     const set = valueFlags[arg]
     if (set) {
       const value = readOption(argv, i)
-      if (value !== null) {
-        set(value)
-        i += 1
+      // A value flag without a value must not silently parse as absent —
+      // a dropped selection flag downgrades to the default 50-PR queue.
+      if (value === null) {
+        console.error(`error: ${arg} requires a value`)
+        process.exit(2)
       }
+      set(value)
+      i += 1
       continue
     }
     positional.push(arg)

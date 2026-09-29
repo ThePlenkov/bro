@@ -415,18 +415,19 @@ function graphql(query: string, vars: Record<string, string>): void {
 /** The ReviewFacade bound to a dir — `gh repo view`/`gh pr view` run
  *  there so repo/PR detection follows the facade's repo, not cwd. */
 export function githubReview(dir: string = process.cwd()): ReviewFacade {
+  const resolvedRepo = (positional: string[] = []): string => {
+    const [owner, repo] = positional
+    if (owner && repo) {
+      return `${owner}/${repo}`
+    }
+    const viewed = ghJson<{ owner: { login: string }; name: string }>(
+      ['repo', 'view', '--json', 'owner,name'],
+      dir
+    )
+    return `${viewed.owner.login}/${viewed.name}`
+  }
   return {
-    resolveRepo(positional = []) {
-      const [owner, repo] = positional
-      if (owner && repo) {
-        return `${owner}/${repo}`
-      }
-      const viewed = ghJson<{ owner: { login: string }; name: string }>(
-        ['repo', 'view', '--json', 'owner,name'],
-        dir
-      )
-      return `${viewed.owner.login}/${viewed.name}`
-    },
+    resolveRepo: resolvedRepo,
     prLink: prLinkStr,
     currentPr() {
       // `gh pr view` resolves the PR for the checked-out branch — `gh pr
@@ -440,9 +441,14 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
       return { pr: view.number, state: view.state, url: view.url }
     },
     prsForBranch(branch) {
-      // Open PRs on this head — resolved against the bound dir's repo.
+      // Explicit --repo: `gh pr list --head` would otherwise guess the
+      // repo from the dir's remotes — a fork's `upstream` can answer
+      // instead of the configured review host.
       return ghJson<Array<{ number: number }>>(
-        ['pr', 'list', '--head', branch, '--state', 'open', '--json', 'number'],
+        [
+          'pr', 'list', '--head', branch, '--state', 'open',
+          '--repo', resolvedRepo(), '--json', 'number',
+        ],
         dir
       ).map((p) => p.number)
     },
