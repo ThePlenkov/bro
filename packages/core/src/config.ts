@@ -154,9 +154,19 @@ export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = (raw) =
     mode?: unknown
     dir?: unknown
   }
-  const mode = obj.mode !== undefined && !(SDD_MODES as readonly unknown[]).includes(obj.mode)
-    ? 'off'
-    : ((obj.mode ?? DEFAULT_CONFIG.sdd.mode) as SddMode)
+  if (
+    obj.mode !== undefined &&
+    !(SDD_MODES as readonly unknown[]).includes(obj.mode)
+  ) {
+    console.error(
+      `bro.config: sdd.mode must be one of ${SDD_MODES.map((m) => `"${m}"`).join('|')} — got ${JSON.stringify(obj.mode)}`
+    )
+  }
+  const mode = (
+    obj.mode !== undefined && (SDD_MODES as readonly unknown[]).includes(obj.mode)
+      ? obj.mode
+      : DEFAULT_CONFIG.sdd.mode
+  ) as SddMode
   return {
     mode,
     dir:

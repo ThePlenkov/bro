@@ -15,8 +15,9 @@ while a session's own claim lacks a spec.
 
 ## What counts as a spec
 
-- `specs/<bead-id>.md` in the repo — non-empty. The file rides the
-  feature branch, so the spec is reviewed in the same PR as the code.
+- `<sdd.dir>/<bead-id>.md` in the repo — non-empty (`specs/` by
+  default; the configured dir applies). The file rides the feature
+  branch, so the spec is reviewed in the same PR as the code.
 - or a `spec:` link in the bead description (external doc).
 
 Exempt: `issue_type: chore` and beads labeled `trivial` or `debt` —
@@ -28,7 +29,7 @@ finding already carries its own evidence.
 | Command | What it does |
 | ------- | ------------ |
 | `bro spec check [id…]` | Coverage over `in_progress` beads (`--all` adds open): `spec` / `link` / `exempt` / `MISSING`. Exit 1 on any MISSING — CI-able |
-| `bro spec new <id>` | Scaffold `specs/<id>.md` from the bead title; never overwrites |
+| `bro spec new <id>` | Scaffold `<sdd.dir>/<id>.md` from the bead title; never overwrites |
 
 ## Config
 

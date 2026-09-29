@@ -90,6 +90,9 @@ describe('specState', () => {
       assert.equal(specState(row(), dir, 'specs'), 'missing')
       writeFileSync(join(dir, 'specs', 'b1.md'), '# spec\n')
       assert.equal(specState(row(), dir, 'specs'), 'spec')
+      // path-traversal ids never count as having a spec file
+      assert.equal(specState(row({ id: '../outside' }), dir, 'specs'), 'missing')
+      assert.equal(specState(row({ id: 'a/../b' }), dir, 'specs'), 'missing')
     })
   })
 })

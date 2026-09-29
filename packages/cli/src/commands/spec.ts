@@ -39,12 +39,21 @@ function repoRoot(dir: string): string {
 
 const SPEC_LINK = /\bspec:\s*\S+/i
 
+/** Bead ids are word-ish (`bro-svk.5`); separators and dot-segments
+ *  would let `spec new ../../x` write outside the spec dir. */
+function validBeadId(id: string): boolean {
+  return /^[\w.-]+$/.test(id) && !id.includes('..')
+}
+
 function specFilePath(dir: string, specDir: string, id: string): string {
   return join(repoRoot(dir), specDir, `${id}.md`)
 }
 
 /** A non-empty spec file counts; a zero-byte scaffold does not. */
 function hasSpecFile(dir: string, specDir: string, id: string): boolean {
+  if (!validBeadId(id)) {
+    return false
+  }
   try {
     const p = specFilePath(dir, specDir, id)
     return statSync(p).isFile() && readFileSync(p, 'utf8').trim() !== ''
@@ -170,6 +179,10 @@ function cmdNew(dir: string, specDir: string, id: string | undefined): void {
     console.error('error: bro spec new needs a bead id — `bro spec new bro-123`')
     process.exit(2)
   }
+  if (!validBeadId(id)) {
+    console.error(`error: invalid bead id "${id}" — ids match [\\w.-]+ without '..'`)
+    process.exit(2)
+  }
   const path = specFilePath(dir, specDir, id)
   if (existsSync(path)) {
     console.error(`error: ${path} already exists — refusing to overwrite`)
@@ -191,22 +204,29 @@ function cmdNew(dir: string, specDir: string, id: string | undefined): void {
 
 function cmdCheck(dir: string, specDir: string, ids: string[], all: boolean): void {
   const store = tasks(dir)
+  const unknown: string[] = []
   const rows =
     ids.length > 0
       ? ids.flatMap((id) => {
           try {
             const r = store.get(id)
+            if (!r) {
+              unknown.push(id)
+            }
             return r ? [r] : []
           } catch {
+            unknown.push(id)
             return []
           }
         })
       : store.list({ status: 'in_progress' }).concat(all ? store.list({ status: 'open' }) : [])
-  if (ids.length > 0 && rows.length === 0) {
-    console.error('error: no matching beads found')
-    process.exit(2)
-  }
+  // an id that doesn't resolve is a failure, not a pass — report it
+  // as UNKNOWN and count it toward the missing tally
   let missing = 0
+  for (const id of unknown) {
+    missing += 1
+    console.log(`${id}\tUNKNOWN\t(bead not found or store unreadable)`)
+  }
   for (const r of rows) {
     const state = specState(r, dir, specDir)
     if (state === 'missing') {
