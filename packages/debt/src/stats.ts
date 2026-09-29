@@ -20,18 +20,32 @@ export interface StatBucket {
   fixRate: number | null
 }
 
+const KNOWN_STATUSES: ReadonlySet<string> = new Set([
+  'open',
+  'claimed',
+  'done',
+  'wontfix',
+  'duplicate',
+])
+
 export function groupStats(records: DebtRecord[], by: StatsGroupBy): StatBucket[] {
   const buckets = new Map<string, StatBucket>()
   for (const r of records) {
-    // legacy rows predate `source` — they belong to review-threads
-    const key = by === 'source' ? (r.source ?? 'review-threads') : r[by]
+    // legacy rows predate `source` — they belong to review-threads;
+    // ledger is unvalidated JSONL, so author/area can be missing too
+    const raw = by === 'source' ? (r.source ?? 'review-threads') : r[by]
+    const key = raw || 'unknown'
     let b = buckets.get(key)
     if (!b) {
       b = { key, total: 0, open: 0, claimed: 0, done: 0, wontfix: 0, duplicate: 0, fixRate: null }
       buckets.set(key, b)
     }
     b.total += 1
-    b[r.status] += 1
+    // an unrecognized status counts toward total but no bucket — b[status]
+    // unchecked would write NaN into a field that isn't part of the shape
+    if (KNOWN_STATUSES.has(r.status)) {
+      b[r.status as keyof Pick<StatBucket, 'open' | 'claimed' | 'done' | 'wontfix' | 'duplicate'>] += 1
+    }
   }
   const out = [...buckets.values()]
   for (const b of out) {

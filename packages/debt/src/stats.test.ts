@@ -109,6 +109,23 @@ describe('groupStats', () => {
     )
   })
 
+  test('malformed rows: missing group key falls back to "unknown"', () => {
+    const row = rec('open')
+    delete (row as Partial<DebtRecord>).author
+    const rows = groupStats([row], 'author')
+    assert.equal(rows[0]!.key, 'unknown')
+  })
+
+  test('malformed rows: unrecognized status counts in total, no NaN in buckets', () => {
+    const row = rec('open')
+    row.status = 'deferred' as DebtStatus
+    const rows = groupStats([row], 'author')
+    const b = rows[0]!
+    assert.equal(b.total, 1)
+    assert.equal(b.open + b.claimed + b.done + b.wontfix + b.duplicate, 0)
+    assert.ok(!Object.values(b).some((v) => typeof v === 'number' && Number.isNaN(v)))
+  })
+
   test('empty ledger → empty result', () => {
     assert.deepEqual(groupStats([], 'author'), [])
   })
