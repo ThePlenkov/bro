@@ -34,5 +34,14 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "description": "GitHub connector for bro — reviews facade over the gh CLI",
+  "keywords": [
+    "github",
+    "connector",
+    "code-review",
+    "agent",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs"
 }

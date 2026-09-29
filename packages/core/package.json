@@ -34,5 +34,14 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "description": "Shared primitives for bro packages — gh/git/bd wrappers, config, plugin surface, task store",
+  "keywords": [
+    "beads",
+    "github-cli",
+    "plugin",
+    "agent",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs"
 }

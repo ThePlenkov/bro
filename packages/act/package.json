@@ -36,5 +36,14 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "description": "PR review gate for bro — threads, checks, reviewers, exit gate, merge slot",
+  "keywords": [
+    "pr-review",
+    "github-actions",
+    "code-review",
+    "agent",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs"
 }
