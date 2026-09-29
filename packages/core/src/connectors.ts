@@ -149,8 +149,12 @@ const beadsConnector: Connector = {
     },
     parallelWork(ctx) {
       try {
+        // other sessions' live work — own claims are already this
+        // session's business, naming them again would be a false nudge
+        const mine = sessionTaskClaims(ctx)
         const claimed = taskStore(ctx.dir)
           .list({ status: 'in_progress' })
+          .filter((r) => !mine.has(r.id))
           .slice(0, 5)
           .map((r) => `${r.id} ${shortTitle(r.title)}`.trim())
         return claimed.length > 0 ? [`claimed beads: ${claimed.join(', ')}`] : []
