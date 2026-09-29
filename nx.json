@@ -27,6 +27,10 @@
     {
       "plugin": "@nx-devkit/skillspector",
       "options": {}
+    },
+    {
+      "plugin": "@nx-devkit/prepare-for-release",
+      "options": {}
     }
   ]
 }

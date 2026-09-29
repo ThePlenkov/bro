@@ -17,6 +17,7 @@
     "typecheck": "nx run-many -t typecheck --exclude=skills-*,plugins-*-skills-*"
   },
   "devDependencies": {
+    "@nx-devkit/prepare-for-release": "^0.1.14",
     "@nx-devkit/skill": "^0.1.9",
     "@nx-devkit/skillspector": "^0.1.9",
     "@nx-devkit/tsdown": "^0.1.7",
