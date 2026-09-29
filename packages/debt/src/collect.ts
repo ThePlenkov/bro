@@ -44,7 +44,7 @@ export interface CollectPrResult {
   skippedThreadAuthor: number
 }
 
-type SkipReason = 'outdated' | 'thread_author' | 'config'
+type SkipReason = 'outdated' | 'thread_author' | 'config' | 'no_comment'
 type ThreadAction =
   | { kind: 'skip'; reason: SkipReason }
   | { kind: 'harvest'; author: string; classification: ReturnType<typeof classifyThread> }
@@ -63,7 +63,12 @@ function classifyThreadAction(opts: {
     return opts.thread.outdated ? { kind: 'skip', reason: 'outdated' } : null
   }
   const comment = opts.thread.comment
-  const author = comment?.author ?? 'unknown'
+  // A comment-less thread (deleted/minimized) harvests into an empty
+  // unusable record — skip it instead.
+  if (!comment) {
+    return { kind: 'skip', reason: 'no_comment' }
+  }
+  const author = comment.author
   if (!authorMatchesFilter(author, opts.threadAuthor)) {
     return { kind: 'skip', reason: 'thread_author' }
   }

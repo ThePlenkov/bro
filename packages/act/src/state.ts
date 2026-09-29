@@ -90,10 +90,12 @@ export async function fetchPrActState(
     // null = the run exists but its annotations could not be fetched.
     // Absent key = a commit-status check with no annotations endpoint —
     // nothing is unknown about it. A fetch failure only counts as
-    // unknown for required checks: an optional SAST must not hold the gate.
+    // unknown for required checks: an optional SAST must not hold the
+    // gate — and with no required checks configured at all, nothing is
+    // marked required, so a flaky annotations endpoint stays infra noise.
     const annotations = rev.checkAnnotations(target.repo, meta.headSha)
     for (const check of sastChecks) {
-      const gates = requiredNames.size === 0 || requiredNames.has(check.name)
+      const gates = requiredNames.has(check.name)
       if (!annotations.has(check.name)) {
         continue
       }

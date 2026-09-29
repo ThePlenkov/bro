@@ -134,13 +134,24 @@ export function runCleanupCommand(argv: string[]): void {
     console.error(`cleanup: fetch --prune failed (${fetch.err || 'offline?'}) — planning from local state`)
   }
 
-  const rev = reviewHost(undefined, loadBroConfig().connectors)
-  const mergedPrs = rev.mergedPrs(rev.resolveRepo([]), { limit: MERGED_LIMIT })
-  const merged = new Map(
-    mergedPrs.filter((pr) => pr.headRef !== '').map((pr) => [pr.headRef, pr.headSha])
-  )
-  if (mergedPrs.length === MERGED_LIMIT) {
-    console.error(`cleanup: scanned the last ${MERGED_LIMIT} merged PRs — older branches may be missed`)
+  // Host unreachable (offline, auth, no connector match) → an empty map:
+  // every branch reads "no merged PR" and is kept — cleanup never deletes
+  // on absent evidence.
+  let merged = new Map<string, string>()
+  try {
+    const rev = reviewHost(undefined, loadBroConfig().connectors)
+    const mergedPrs = rev.mergedPrs(rev.resolveRepo([]), { limit: MERGED_LIMIT })
+    merged = new Map(
+      mergedPrs.filter((pr) => pr.headRef !== '').map((pr) => [pr.headRef, pr.headSha])
+    )
+    if (mergedPrs.length === MERGED_LIMIT) {
+      console.error(`cleanup: scanned the last ${MERGED_LIMIT} merged PRs — older branches may be missed`)
+    }
+  } catch (err) {
+    console.error(
+      `cleanup: review host unreachable (${err instanceof Error ? err.message : err}) — ` +
+        'no merged-PR evidence, keeping all branches'
+    )
   }
 
   const plan = planCleanup(localBranches(), merged, {

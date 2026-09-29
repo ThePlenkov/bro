@@ -265,6 +265,12 @@ async function runFixRound(
       return `- ${c?.path ?? ''}:${c?.line ?? ''} [${c?.author ?? '?'}] ${c?.body ?? ''}`
     })
     .join('\n')
+  // Threads may have been resolved between the gate snapshot and this
+  // fetch — respawning the agent on an empty fix list wastes a round.
+  if (threads === '') {
+    say(ctx, `loop: ${prRef(ctx, pr)} threads resolved since the gate snapshot — skipping fix round`)
+    return
+  }
   writePrompt(item, buildFixPrompt(bead, pr, threads))
   say(ctx, `loop: ${prRef(ctx, pr)} has open threads — fix round ${round}`)
   const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
