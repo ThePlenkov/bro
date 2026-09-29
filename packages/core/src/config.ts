@@ -48,7 +48,9 @@ export const debtSection: ConfigSection<{
         ? obj.sources
         : DEFAULT_CONFIG.debt.sources,
     stale_days:
-      typeof obj.stale_days === 'number' && obj.stale_days > 0
+      typeof obj.stale_days === 'number' &&
+      Number.isFinite(obj.stale_days) &&
+      obj.stale_days > 0
         ? obj.stale_days
         : DEFAULT_CONFIG.debt.stale_days,
   }

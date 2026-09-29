@@ -92,8 +92,9 @@ interface DependabotAlert {
 }
 
 /** Open dependabot PRs — an alert with a fix PR in flight isn't debt, the
- *  PR is the work item. Matched by head ref containing the package name
- *  (`dependabot/npm_and_yarn/<pkg>-<ver>`). */
+ *  PR is the work item. Matched by head ref `dependabot/.../<pkg>-<ver>` —
+ *  the trailing dash is the version boundary so `ember` can't match
+ *  `ember-cli-1.0`. Dependabot refs drop the `@` from scoped packages. */
 function dependabotOpenPrs(repo: string): Array<{ number: number; headRefName: string; url: string }> {
   try {
     return ghJson([
@@ -123,10 +124,8 @@ export function collectDependabot(ctx: CollectCtx): DebtRecord[] {
   const prs = dependabotOpenPrs(ctx.repo)
   const out: DebtRecord[] = []
   for (const a of alerts) {
-    const pkg = a.security_vulnerability?.package?.name ?? ''
-    const fixPr = pkg
-      ? prs.find((p) => p.headRefName.includes(pkg))
-      : undefined
+    const pkg = a.security_vulnerability?.package?.name?.replace(/^@/, '') ?? ''
+    const fixPr = pkg ? prs.find((p) => p.headRefName.includes(`${pkg}-`)) : undefined
     if (fixPr) continue // linked PR is the work item — see bead bro-8gk
     const severity = a.security_vulnerability?.severity ?? 'medium'
     const body =
@@ -237,8 +236,10 @@ export function collectStalePrs(ctx: CollectCtx, staleDays: number): DebtRecord[
   const out: DebtRecord[] = []
   for (const pr of prs) {
     const failing = (pr.statusCheckRollup ?? []).some((c) => c.conclusion === 'FAILURE')
-    const idleDays = Math.floor((Date.now() - Date.parse(pr.updatedAt)) / 86_400_000)
-    const stale = Date.parse(pr.updatedAt) < cutoff
+    const updated = Date.parse(pr.updatedAt)
+    if (Number.isNaN(updated)) continue // malformed timestamp — can't judge staleness
+    const idleDays = Math.floor((Date.now() - updated) / 86_400_000)
+    const stale = updated < cutoff
     if (pr.isDraft && !failing) continue
     if (!stale && !failing) continue
     const reasons = [
@@ -279,7 +280,7 @@ export function collectFailedCi(ctx: CollectCtx): DebtRecord[] {
   const branch = repoInfo.default_branch ?? 'main'
   const res = ghJson<{ workflow_runs?: WorkflowRun[] }>([
     'api',
-    `repos/${ctx.repo}/actions/runs?branch=${branch}&status=completed&per_page=1`,
+    `repos/${ctx.repo}/actions/runs?branch=${encodeURIComponent(branch)}&status=completed&per_page=1`,
   ])
   const latest = res.workflow_runs?.[0]
   if (!latest || latest.conclusion !== 'failure') return []
