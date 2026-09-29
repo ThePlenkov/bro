@@ -36,6 +36,13 @@ interface CollectCtx {
   harvestedAt: string
 }
 
+/** `gh api --paginate --slurp` — all pages of a list endpoint as one flat
+ *  array. Truncating at page 1 would drop real findings and falsely
+ *  resolve ledger rows that still exist upstream. */
+function ghJsonAll<T>(endpoint: string): T[] {
+  return ghJson<T[][]>(['api', '--paginate', '--slurp', endpoint]).flat()
+}
+
 function baseRecord(
   ctx: CollectCtx,
   opts: {
@@ -94,33 +101,30 @@ interface DependabotAlert {
 /** Open dependabot PRs — an alert with a fix PR in flight isn't debt, the
  *  PR is the work item. Matched by head ref `dependabot/.../<pkg>-<ver>` —
  *  the trailing dash is the version boundary so `ember` can't match
- *  `ember-cli-1.0`. Dependabot refs drop the `@` from scoped packages. */
+ *  `ember-cli-1.0`. Dependabot refs drop the `@` from scoped packages.
+ *  Failure propagates: an empty list here would mark every covered alert
+ *  as debt, so the caller skips the whole source on error. */
 function dependabotOpenPrs(repo: string): Array<{ number: number; headRefName: string; url: string }> {
-  try {
-    return ghJson([
-      'pr',
-      'list',
-      '--repo',
-      repo,
-      '--author',
-      'app/dependabot',
-      '--state',
-      'open',
-      '--json',
-      'number,headRefName,url',
-      '--limit',
-      '200',
-    ])
-  } catch {
-    return []
-  }
+  return ghJson([
+    'pr',
+    'list',
+    '--repo',
+    repo,
+    '--author',
+    'app/dependabot',
+    '--state',
+    'open',
+    '--json',
+    'number,headRefName,url',
+    '--limit',
+    '200',
+  ])
 }
 
 export function collectDependabot(ctx: CollectCtx): DebtRecord[] {
-  const alerts = ghJson<DependabotAlert[]>([
-    'api',
-    `repos/${ctx.repo}/dependabot/alerts?state=open&per_page=100`,
-  ])
+  const alerts = ghJsonAll<DependabotAlert>(
+    `repos/${ctx.repo}/dependabot/alerts?state=open&per_page=100`
+  )
   const prs = dependabotOpenPrs(ctx.repo)
   const out: DebtRecord[] = []
   for (const a of alerts) {
@@ -158,10 +162,9 @@ interface ScanAlert {
 }
 
 export function collectCodeScanning(ctx: CollectCtx): DebtRecord[] {
-  const alerts = ghJson<ScanAlert[]>([
-    'api',
-    `repos/${ctx.repo}/code-scanning/alerts?state=open&per_page=100`,
-  ])
+  const alerts = ghJsonAll<ScanAlert>(
+    `repos/${ctx.repo}/code-scanning/alerts?state=open&per_page=100`
+  )
   return alerts.map((a) =>
     baseRecord(ctx, {
       threadId: `code-scanning:${a.number}`,
@@ -187,10 +190,9 @@ interface SecretAlert {
 }
 
 export function collectSecretScanning(ctx: CollectCtx): DebtRecord[] {
-  const alerts = ghJson<SecretAlert[]>([
-    'api',
-    `repos/${ctx.repo}/secret-scanning/alerts?state=open&per_page=100`,
-  ])
+  const alerts = ghJsonAll<SecretAlert>(
+    `repos/${ctx.repo}/secret-scanning/alerts?state=open&per_page=100`
+  )
   return alerts.map((a) =>
     baseRecord(ctx, {
       threadId: `secret-scanning:${a.number}`,
