@@ -16,6 +16,7 @@ import {
   planKind,
   readPlanDoc,
   registerConnector,
+  sddSection,
   stackSection,
   syncSection,
   type BroPlugin,
@@ -40,6 +41,7 @@ import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runHooksCommand } from './commands/hooks.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runSetupCommand } from './commands/setup.ts'
+import { runSpecCommand, sddConnector } from './commands/spec.ts'
 import { runSyncCommand } from './commands/sync.ts'
 import { runWorkCommand, workConnector } from './commands/work.ts'
 
@@ -52,6 +54,7 @@ registerConnector(drillConnector)
 registerConnector(workConnector)
 registerConnector(actConnector)
 registerConnector(debtConnector)
+registerConnector(sddConnector)
 
 export const PLUGINS: BroPlugin[] = [
   definePlugin({
@@ -153,6 +156,14 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'work',
     configKey: 'stack',
     configSchema: stackSection,
+  }),
+  definePlugin({
+    name: 'spec',
+    summary: 'Spec-driven development policy: check|new (sdd.mode gates hooks)',
+    run: runSpecCommand,
+    skill: 'sdd',
+    configKey: 'sdd',
+    configSchema: sddSection,
   }),
   definePlugin({
     name: 'hooks',

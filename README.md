@@ -113,7 +113,8 @@ run on defaults until they set up. Everything's optional:
   "stores": ["jsonl", "beads"],
   "personality": "terse",
   "debt": { "dir": ".agents/review-debt" },
-  "connectors": { "reviews": "github", "tasks": "beads" }
+  "connectors": { "reviews": "github", "tasks": "beads" },
+  "sdd": { "mode": "remind", "dir": "specs" }
 }
 ```
 
@@ -121,6 +122,11 @@ run on defaults until they set up. Everything's optional:
 could — e.g. a self-hosted GitHub Enterprise or a future GitLab/Jira
 connector. With one provider per facade it can be omitted; remote-URL
 matching auto-detects github.com anyway.
+
+`sdd` opts the repo into spec-driven development: `remind` nudges via
+session/prompt hook context when a claimed bead lacks `specs/<id>.md`
+(or a `spec:` link), `gate` also lets the stop gate block once. Commit
+the section — it then applies to every agent in the repo.
 
 `stores` lists the backends debt writes to. `jsonl` is the evidence ledger
 (always written — drop it and bro adds it back). `beads` is on **by

@@ -10,6 +10,8 @@ export {
   defineConfig,
   loadConfig,
   PERSONALITIES,
+  sddSection,
+  SDD_MODES,
   stackSection,
   STORE_BACKENDS,
   syncSection,
@@ -21,7 +23,7 @@ export {
   dataRefPush,
   dataRefRoot,
 } from './dataref.ts'
-export type { BroConfig, ConfigSection, Personality, StoreBackend } from './config.ts'
+export type { BroConfig, ConfigSection, Personality, SddMode, StoreBackend } from './config.ts'
 export { definePlugin } from './plugin.ts'
 export type { BroPlugin } from './plugin.ts'
 export { docTypeNamed, docVerbs, STANDARD_VERBS, verbMethod } from './docs.ts'
@@ -51,6 +53,7 @@ export {
   registerConnector,
   reviewHost,
   sessionStartLines,
+  sessionTaskClaims,
   stopGateContributions,
 } from './connectors.ts'
 export type {

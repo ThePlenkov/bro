@@ -1,5 +1,8 @@
 {
   "act": {
     "ignoreChecks": ["kilo"]
+  },
+  "sdd": {
+    "mode": "gate"
   }
 }

@@ -141,6 +141,31 @@ export const stackSection: ConfigSection<{ mode: 'auto' | 'manual' }> = (raw) =>
   return { mode: m ?? 'manual' }
 }
 
+export const SDD_MODES = ['off', 'remind', 'gate'] as const
+export type SddMode = (typeof SDD_MODES)[number]
+
+/** bro.config.json `sdd` section — spec-driven development policy.
+ *  off (default): nothing emitted. remind: session-start/prompt context
+ *  names claimed beads without a spec. gate: the stop gate also blocks
+ *  once while an own claim lacks a spec. `dir` is where `specs/<id>.md`
+ *  lives; a `spec:` link in the bead description counts too. */
+export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = (raw) => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
+    mode?: unknown
+    dir?: unknown
+  }
+  const mode = obj.mode !== undefined && !(SDD_MODES as readonly unknown[]).includes(obj.mode)
+    ? 'off'
+    : ((obj.mode ?? DEFAULT_CONFIG.sdd.mode) as SddMode)
+  return {
+    mode,
+    dir:
+      typeof obj.dir === 'string' && obj.dir.trim() !== ''
+        ? obj.dir.trim()
+        : DEFAULT_CONFIG.sdd.dir,
+  }
+}
+
 /** Sections core normalizes itself — identical to what the built-in
  *  plugins declare as their configSchema. */
 const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
@@ -148,6 +173,7 @@ const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   sync: syncSection as ConfigSection<unknown>,
   act: actSection as ConfigSection<unknown>,
   connectors: connectorsSection as ConfigSection<unknown>,
+  sdd: sddSection as ConfigSection<unknown>,
 }
 
 export interface BroConfig {
@@ -182,6 +208,11 @@ export interface BroConfig {
   }
   /** Facade → connector precedence, e.g. { reviews: 'gitlab' }. */
   connectors: Record<string, string>
+  /** Spec-driven development policy — spec before code for claimed
+   *  beads. `off` (default) emits nothing; `remind` adds session/prompt
+   *  context; `gate` also lets the stop gate block once. `dir` holds
+   *  `specs/<id>.md` files; a `spec:` link in the description counts. */
+  sdd: { mode: SddMode; dir: string }
   /** External plugin specifiers — relative paths or package names the CLI
    *  resolves from the repo and imports at startup. Each module's default
    *  export must be a BroPlugin (or an array of them). */
@@ -195,6 +226,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   sync: { ref: 'refs/bro/data', remote: 'origin', beads: true },
   act: { ignoreChecks: [], maxRounds: 3 },
   connectors: {},
+  sdd: { mode: 'off', dir: 'specs' },
   plugins: [],
 }
 
