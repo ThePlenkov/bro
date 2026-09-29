@@ -52,3 +52,11 @@ export type { DebtPlan, DebtVerdict } from './plan.ts'
 export { applyDebtVerdicts } from './store.ts'
 export type { DebtVerdictInput } from './store.ts'
 export { debtConnector } from './connector.ts'
+export {
+  ALL_SOURCES,
+  COLLECTORS,
+  DEBT_SOURCES,
+  parseSources,
+  resolvedThreadIds,
+} from './collectors.ts'
+export type { DebtSource, DebtSourceName } from './collectors.ts'

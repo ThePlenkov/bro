@@ -25,17 +25,34 @@ export type Personality = (typeof PERSONALITIES)[number]
  *  fallback when the raw value is missing or the schema throws. */
 export type ConfigSection<T> = (raw: unknown) => T
 
-export const debtSection: ConfigSection<{ dir: string }> = (raw) => ({
-  // dir feeds path.join — a non-string or empty value must fall back to
-  // the default, not throw mid-command
-  dir:
-    typeof raw === 'object' &&
-    raw !== null &&
-    typeof (raw as { dir?: unknown }).dir === 'string' &&
-    (raw as { dir: string }).dir.trim() !== ''
-      ? (raw as { dir: string }).dir
-      : DEFAULT_CONFIG.debt.dir,
-})
+export const debtSection: ConfigSection<{
+  dir: string
+  sources: string[]
+  stale_days: number
+}> = (raw) => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
+  return {
+    // dir feeds path.join — a non-string or empty value must fall back to
+    // the default, not throw mid-command
+    dir:
+      typeof obj.dir === 'string' && obj.dir.trim() !== ''
+        ? obj.dir
+        : DEFAULT_CONFIG.debt.dir,
+    // Which collectors `debt collect` runs. Source names are validated by
+    // the debt plugin (core stays vendor-neutral) — unknown entries are
+    // dropped there with a warning, not silently accepted.
+    sources:
+      Array.isArray(obj.sources) &&
+      obj.sources.every((s) => typeof s === 'string' && s.trim() !== '') &&
+      obj.sources.length > 0
+        ? obj.sources
+        : DEFAULT_CONFIG.debt.sources,
+    stale_days:
+      typeof obj.stale_days === 'number' && obj.stale_days > 0
+        ? obj.stale_days
+        : DEFAULT_CONFIG.debt.stale_days,
+  }
+}
 
 export const syncSection: ConfigSection<{
   ref: string
@@ -195,6 +212,12 @@ export interface BroConfig {
   debt: {
     /** Directory holding the review-debt ledger, relative to cwd. */
     dir: string
+    /** Collectors `bro debt collect` runs. Default: review-threads only —
+     *  the pre-multi-source contract. Others opt in: dependabot,
+     *  code-scanning, secret-scanning, stale-prs, failed-ci. */
+    sources: string[]
+    /** Idle days before an open PR counts as stale (stale-prs collector). */
+    stale_days: number
   }
   sync: {
     /** Data ref holding synced artifacts — outside refs/heads so it
@@ -232,7 +255,7 @@ export interface BroConfig {
 export const DEFAULT_CONFIG: BroConfig = {
   stores: ['jsonl', 'beads'],
   personality: 'terse',
-  debt: { dir: '.agents/review-debt' },
+  debt: { dir: '.agents/review-debt', sources: ['review-threads'], stale_days: 14 },
   sync: { ref: 'refs/bro/data', remote: 'origin', beads: true },
   act: { ignoreChecks: [], maxRounds: 3 },
   connectors: {},
