@@ -2,7 +2,8 @@ name: Publish
 
 # Tag-triggered npm publish via OIDC trusted publishing — no tokens.
 # Setup (one-time, after first placeholder exists on npm):
-#   npm trust github @broject/bro --file publish.yml --repo ThePlenkov/bro
+#   npm trust github @broject/<pkg> --file publish.yml --repo ThePlenkov/bro
+#   (repeat per published package — prepare-for-release emits them)
 on:
   push:
     tags: ['v*']
@@ -49,23 +50,29 @@ jobs:
         run: test "v$(node -p "require('./package.json').version")" = "$EXPECTED_TAG" || { echo "tag $EXPECTED_TAG != package version"; exit 1; }
 
       # LTS node ships npm >= 11.5.1 — OIDC trusted publishing built in.
-      - name: Publish @broject/bro
-        working-directory: packages/cli
+      # Publish order follows the internal dep graph (core first, cli last)
+      # so a consumer never resolves a dep that isn't on the registry yet.
+      - name: Publish @broject/* packages
         run: |
-          v=$(node -p "require('./package.json').version")
-          if npm view "@broject/bro@$v" version >/dev/null 2>&1; then
-            echo "version $v already on npm — skipping publish"
-            exit 0
-          fi
-          # Only a confirmed E404 means "not published" — a transient
-          # registry/network error must not fall through to npm publish.
-          if ! npm view "@broject/bro@$v" version 2>&1 | grep -q E404; then
-            echo "npm view failed without E404 — aborting to avoid double publish"
-            exit 1
-          fi
+          set -e
           # setup-node's registry-url writes an _authToken placeholder
           # that expands empty and makes npm skip the OIDC exchange
           # (actions/setup-node#1551). Strip it so trusted publishing
           # can kick in.
           sed -i '/_authToken/d' "$NPM_CONFIG_USERCONFIG"
-          npm publish --access public
+          for dir in core retro convoy debt drill github loop act cli; do
+            cd "$GITHUB_WORKSPACE/packages/$dir"
+            name=$(node -p "require('./package.json').name")
+            v=$(node -p "require('./package.json').version")
+            if npm view "$name@$v" version >/dev/null 2>&1; then
+              echo "$name@$v already on npm — skipping"
+              continue
+            fi
+            # Only a confirmed E404 means "not published" — a transient
+            # registry/network error must not fall through to npm publish.
+            if ! npm view "$name@$v" version 2>&1 | grep -q E404; then
+              echo "npm view $name failed without E404 — aborting to avoid double publish"
+              exit 1
+            fi
+            npm publish --access public
+          done

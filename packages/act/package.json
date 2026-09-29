@@ -1,7 +1,6 @@
 {
   "name": "@broject/act",
   "version": "0.2.0",
-  "private": true,
   "type": "module",
   "exports": {
     ".": {
@@ -14,13 +13,28 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@broject/core": "*",
-    "@broject/debt": "*"
+    "@broject/core": "^0.2.0",
+    "@broject/debt": "^0.2.0"
   },
   "devDependencies": {
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "smol-toml": "1.7.1"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/act"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

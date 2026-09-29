@@ -1,7 +1,7 @@
 name: Release
 
 # Human-triggered release: pick a semver bump (or let conventional
-# commits decide), nx release versions @broject/bro on a release
+# commits decide), nx release versions @broject/* (lockstep) on a release
 # branch, a PR opens for the merge gate. Once merged, release-tag.yml
 # cuts the v* tag on main and publish.yml ships it via OIDC.
 on:

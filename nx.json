@@ -7,7 +7,7 @@
     }
   },
   "release": {
-    "projects": ["@broject/bro"],
+    "projects": ["@broject/*", "!@broject/site"],
     "version": {
       "conventionalCommits": true
     },
