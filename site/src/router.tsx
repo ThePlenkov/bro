@@ -3,6 +3,7 @@ import { routeTree } from './routeTree.gen'
 
 const BASE_URL = import.meta.env.BASE_URL
 
+// staticFunctionMiddleware fetches a root-relative /__tsr/ cache URL, ignoring the base path
 if (import.meta.env.PROD && typeof window !== 'undefined') {
   const nativeFetch = window.fetch.bind(window)
   window.fetch = (input, init) =>
