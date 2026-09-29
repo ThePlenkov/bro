@@ -5,7 +5,7 @@
  * queue (`bd ready -l debt`). Upsert key: `external_ref` = `thread_id`, so
  * `bro debt sync` is idempotent. Status reconciles ledger → bead on re-runs.
  */
-import { bd, initBeadsStealth, taskStore } from '@bro/core'
+import { bd, initBeadsStealth, taskStore } from '@broject/core'
 import type { DebtPriority, DebtRecord, DebtStatus } from './types.ts'
 
 export interface BeadRef {

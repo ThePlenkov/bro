@@ -22,14 +22,14 @@ import {
   type BroPlugin,
   type ConfigSection,
   type DocType,
-} from '@bro/core'
-import { actConnector, parseActPlan, type ActPlan } from '@bro/act'
-import { parseConvoyPlan, type ConvoyPlan } from '@bro/convoy'
-import { debtConnector, parseDebtPlan, type DebtPlan } from '@bro/debt'
-import { drillConnector, parseDrillPlan, type DrillPlan } from '@bro/drill'
-import { parsePlanDoc, type RetroPlan } from '@bro/retro'
-import { loopSection } from '@bro/loop'
-import { githubConnector } from '@bro/github'
+} from '@broject/core'
+import { actConnector, parseActPlan, type ActPlan } from '@broject/act'
+import { parseConvoyPlan, type ConvoyPlan } from '@broject/convoy'
+import { debtConnector, parseDebtPlan, type DebtPlan } from '@broject/debt'
+import { drillConnector, parseDrillPlan, type DrillPlan } from '@broject/drill'
+import { parsePlanDoc, type RetroPlan } from '@broject/retro'
+import { loopSection } from '@broject/loop'
+import { githubConnector } from '@broject/github'
 import { applyActPlan, runActCommand } from './commands/act.ts'
 import { runCleanupCommand } from './commands/cleanup.ts'
 import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts'

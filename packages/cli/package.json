@@ -1,5 +1,5 @@
 {
-  "name": "@theplenkov/bro",
+  "name": "@broject/bro",
   "version": "0.2.0",
   "description": "bro \u2014 agent's sidekick CLI: review-debt pipeline, PR triage, fix loops",
   "type": "module",
@@ -24,25 +24,25 @@
   },
   "scripts": {
     "test": "tsx --test src/**/*.test.ts",
-    "prepack": "node -e \"const{copyFileSync}=require('node:fs');for(const f of['README.md','LICENSE'])copyFileSync('../../'+f,f)\"",
-    "postpack": "node -e \"const{rmSync}=require('node:fs');for(const f of['README.md','LICENSE'])rmSync(f,{force:true})\"",
+    "prepack": "node ../../scripts/pack-cli.ts pre",
+    "postpack": "node ../../scripts/pack-cli.ts post",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "smol-toml": "1.7.1"
   },
   "devDependencies": {
-    "@bro/act": "*",
-    "@bro/core": "*",
-    "@bro/debt": "*",
-    "@bro/drill": "*",
-    "@bro/github": "*",
+    "@broject/act": "*",
+    "@broject/core": "*",
+    "@broject/debt": "*",
+    "@broject/drill": "*",
+    "@broject/github": "*",
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
-    "@bro/retro": "*",
-    "@bro/convoy": "*",
-    "@bro/loop": "*"
+    "@broject/retro": "*",
+    "@broject/convoy": "*",
+    "@broject/loop": "*"
   },
   "license": "MIT",
   "repository": {

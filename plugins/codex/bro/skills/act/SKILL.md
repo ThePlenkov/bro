@@ -1,6 +1,6 @@
 ---
 name: act
-description: "Use when the user invokes /act on an open PR or a 'bro: PR #N ...' status ping arrives — the review-fix loop. Thin wrapper over the bro CLI: `bro act status` is the exit gate as code; resolve/reply are mutations. Requires `bro` (npx -y @theplenkov/bro@0) and gh."
+description: "Use when the user invokes /act on an open PR or a 'bro: PR #N ...' status ping arrives — the review-fix loop. Thin wrapper over the bro CLI: `bro act status` is the exit gate as code; resolve/reply are mutations. Requires `bro` (npx -y @broject/bro@0) and gh."
 ---
 
 # /act (bro)
@@ -8,7 +8,7 @@ description: "Use when the user invokes /act on an open PR or a 'bro: PR #N ...'
 **All mechanics live in the `bro` CLI.** This skill is policy only — do not
 reimplement what `bro act` already does.
 
-Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
+Prereq: `bro` on PATH or `npx -y @broject/bro@0` (major-pinned). Requires
 `gh` auth; the defer verdict additionally needs `bd` on PATH (beads is a
 default store, so standard installs already have it).
 

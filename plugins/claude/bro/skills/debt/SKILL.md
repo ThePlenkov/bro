@@ -1,6 +1,6 @@
 ---
 name: debt
-description: "Use when the user invokes /debt or asks about review debt on merged PRs. Thin wrapper over the bro CLI — all mechanics live in `bro debt *` commands; this skill carries policy only. Requires `bro` (npx -y @theplenkov/bro@0) and gh."
+description: "Use when the user invokes /debt or asks about review debt on merged PRs. Thin wrapper over the bro CLI — all mechanics live in `bro debt *` commands; this skill carries policy only. Requires `bro` (npx -y @broject/bro@0) and gh."
 ---
 
 # /debt (bro)
@@ -8,7 +8,7 @@ description: "Use when the user invokes /debt or asks about review debt on merge
 **All mechanics live in the `bro` CLI.** This skill is policy only — do not
 reimplement what `bro debt` already does.
 
-Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
+Prereq: `bro` on PATH or `npx -y @broject/bro@0` (major-pinned). Requires
 `gh` auth; `bd` is required only with beads enabled (the default) —
 `"stores": ["jsonl"]` in bro.config.json opts out and drops the `bd`
 requirement.

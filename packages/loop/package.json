@@ -1,5 +1,5 @@
 {
-  "name": "@bro/loop",
+  "name": "@broject/loop",
   "version": "0.2.0",
   "private": true,
   "type": "module",
@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@bro/core": "*",
+    "@broject/core": "*",
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"

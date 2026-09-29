@@ -149,7 +149,7 @@ describe('loadExternalPlugins', () => {
       assert.equal(loaded[0].configKey, undefined)
       assert.equal(loaded[0].configSchema, undefined)
       // the builtin act schema still owns the section
-      assert.equal(pluginConfigSections().act, (await import('@bro/core')).actSection)
+      assert.equal(pluginConfigSections().act, (await import('@broject/core')).actSection)
     } finally {
       unload(loaded)
     }

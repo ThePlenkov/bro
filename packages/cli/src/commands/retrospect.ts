@@ -20,8 +20,8 @@ import {
   parsePlan,
   PLAN_SCHEMA,
   recordRetro,
-} from '@bro/retro'
-import type { RetroPlan } from '@bro/retro'
+} from '@broject/retro'
+import type { RetroPlan } from '@broject/retro'
 import { flag, positionals } from './args.ts'
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set(['--wtf'])

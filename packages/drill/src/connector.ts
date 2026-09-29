@@ -3,7 +3,7 @@
  * frame line at session start and prompt submit, and the stop-gate
  * contribution under the 'drill' arming aspect.
  */
-import type { Connector } from '@bro/core'
+import type { Connector } from '@broject/core'
 import { currentFrame } from './frames.ts'
 
 /** The open-frame line, or null — the same text every surface shares. */

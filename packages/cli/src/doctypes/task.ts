@@ -1,7 +1,7 @@
 /**
  * `task` doc type — the issue-level store under noun-first dispatch.
  * All backend access goes through the TaskStore contract
- * (@bro/core/tasks.ts); this file only maps CLI flags onto it.
+ * (@broject/core/tasks.ts); this file only maps CLI flags onto it.
  *
  *   bro task list [--status=open] [--label=x]
  *   bro task show bro-n5t               shorthand: `bro show …`
@@ -16,8 +16,8 @@
  * flag resolved at adapter construction, never a verb concern.
  */
 import { spawnSync } from 'node:child_process'
-import { facade } from '@bro/core'
-import type { DocAdapter, DocCtx, DocFlags, DocType, TaskFilter, TaskInput, TaskRow, TaskStore } from '@bro/core'
+import { facade } from '@broject/core'
+import type { DocAdapter, DocCtx, DocFlags, DocType, TaskFilter, TaskInput, TaskRow, TaskStore } from '@broject/core'
 import { requireGlobalStore } from './store.ts'
 import { loadBroConfig } from '../plugins.ts'
 

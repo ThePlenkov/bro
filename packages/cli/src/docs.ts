@@ -29,7 +29,7 @@ import {
   type DocFlags,
   type DocType,
   type Scope,
-} from '@bro/core'
+} from '@broject/core'
 import { PLUGINS } from './plugins.ts'
 import { storeDoc } from './doctypes/store.ts'
 import { taskDoc } from './doctypes/task.ts'

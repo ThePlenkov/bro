@@ -5,7 +5,7 @@
  * the session armed 'act'. All host access goes through the resolved
  * ReviewFacade; this connector owns no vendor calls.
  */
-import { loadConfig, reviewHost, type Connector, type PrTarget } from '@bro/core'
+import { loadConfig, reviewHost, type Connector, type PrTarget } from '@broject/core'
 import { evaluateExitGate } from './exit-gate.ts'
 import { mergeSlotHolder } from './merge-slot.ts'
 import { fetchPrActState } from './state.ts'

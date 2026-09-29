@@ -1,6 +1,6 @@
 ---
 name: next
-description: "Use when the user says 'work the backlog', 'clean the queue', invokes /next, or sets a /goal over open beads — the autonomous backlog loop. Thin wrapper over the bro CLI: `bro next` is the scheduler as code — it claims the top ready bead and emits the work order. Requires `bro` (npx -y @theplenkov/bro@0) and bd."
+description: "Use when the user says 'work the backlog', 'clean the queue', invokes /next, or sets a /goal over open beads — the autonomous backlog loop. Thin wrapper over the bro CLI: `bro next` is the scheduler as code — it claims the top ready bead and emits the work order. Requires `bro` (npx -y @broject/bro@0) and bd."
 ---
 
 # /next (bro)
@@ -9,7 +9,7 @@ description: "Use when the user says 'work the backlog', 'clean the queue', invo
 `bro next` computes the queue from `bd ready`, claims the top item
 atomically, and surfaces what it deliberately skipped.
 
-Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0`, `bd init` done.
+Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd init` done.
 
 ## The loop
 

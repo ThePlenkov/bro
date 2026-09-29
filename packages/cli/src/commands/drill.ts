@@ -20,7 +20,7 @@ import {
   bd,
   taskStore,
   type DrillPlan,
-} from '@bro/drill'
+} from '@broject/drill'
 import { flag, flagAll, positionals } from './args.ts'
 
 function usage(exitCode = 1): never {

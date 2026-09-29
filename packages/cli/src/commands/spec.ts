@@ -26,7 +26,7 @@ import {
   type ConnectorCtx,
   type TaskRow,
   type TaskStore,
-} from '@bro/core'
+} from '@broject/core'
 
 export type SpecState = 'spec' | 'link' | 'exempt' | 'missing'
 

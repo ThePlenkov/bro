@@ -1,6 +1,6 @@
 ---
 name: drill
-description: "Use when the user invokes /drill or /unwind, or when a task needs scoped descent — narrower investigation frames with mandatory result+prevention memos. Thin wrapper over the bro CLI: drill frames are beads; bd owns storage, `bro drill` owns the invariants. Requires `bro` (npx -y @theplenkov/bro@0) and bd."
+description: "Use when the user invokes /drill or /unwind, or when a task needs scoped descent — narrower investigation frames with mandatory result+prevention memos. Thin wrapper over the bro CLI: drill frames are beads; bd owns storage, `bro drill` owns the invariants. Requires `bro` (npx -y @broject/bro@0) and bd."
 ---
 
 # /drill (bro)
@@ -10,7 +10,7 @@ only. A drill frame is a bead labeled `drill`; nesting uses bd's native
 `--parent` hierarchy. There is no `.drills/` directory tree and no
 claim.json — **beads IS the memory system**.
 
-Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0`, `bd init` done.
+Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd init` done.
 
 ## Commands
 

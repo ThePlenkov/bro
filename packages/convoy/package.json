@@ -1,10 +1,10 @@
 {
-  "name": "@bro/convoy",
+  "name": "@broject/convoy",
   "version": "0.2.0",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@bro/core": "*"
+    "@broject/core": "*"
   },
   "exports": {
     ".": {

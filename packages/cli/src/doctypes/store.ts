@@ -15,8 +15,8 @@
 import { existsSync, mkdirSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { bdTry, DEFAULT_GLOBAL_BEADS_DIR, gitTry } from '@bro/core'
-import type { DocAdapter, DocCtx, DocFlags, DocType, Scope } from '@bro/core'
+import { bdTry, DEFAULT_GLOBAL_BEADS_DIR, gitTry } from '@broject/core'
+import type { DocAdapter, DocCtx, DocFlags, DocType, Scope } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 
 export interface StoreInfo {

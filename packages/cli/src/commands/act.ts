@@ -15,7 +15,7 @@ import {
   taskStore,
   type PrTarget,
   type ReviewFacade,
-} from '@bro/core'
+} from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import { isAncestor } from './cleanup.ts'
 import { flag } from './args.ts'
@@ -30,7 +30,7 @@ import {
   type ActThreadVerdict,
   type ExitGate,
   type PrActState,
-} from '@bro/act'
+} from '@broject/act'
 
 function usage(): never {
   console.error(`Usage: bro act <command> [args…]

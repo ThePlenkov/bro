@@ -1,5 +1,5 @@
 {
-  "name": "@bro/debt",
+  "name": "@broject/debt",
   "version": "0.2.0",
   "private": true,
   "type": "module",
@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@bro/core": "*"
+    "@broject/core": "*"
   },
   "devDependencies": {
     "tsdown": "^0.15.0",

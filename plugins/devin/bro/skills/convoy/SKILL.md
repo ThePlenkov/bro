@@ -1,6 +1,6 @@
 ---
 name: convoy
-description: "Use when the user invokes /convoy or asks to run a beads workflow — a molecule's DAG of steps executed inside the agent. Thin wrapper over the bro CLI: `bro convoy next` is the scheduler as code; `bro convoy done` advances it. Requires `bro` (npx -y @theplenkov/bro@0) and bd."
+description: "Use when the user invokes /convoy or asks to run a beads workflow — a molecule's DAG of steps executed inside the agent. Thin wrapper over the bro CLI: `bro convoy next` is the scheduler as code; `bro convoy done` advances it. Requires `bro` (npx -y @broject/bro@0) and bd."
 ---
 
 # /convoy (bro)
@@ -8,7 +8,7 @@ description: "Use when the user invokes /convoy or asks to run a beads workflow 
 **All mechanics live in the `bro` CLI.** This skill is policy only — do not
 reimplement scheduling; `bro convoy next` computes it from beads state.
 
-Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0` (major-pinned). Requires
+Prereq: `bro` on PATH or `npx -y @broject/bro@0` (major-pinned). Requires
 `bd` and an initialized `.beads/`.
 
 ## What a convoy is

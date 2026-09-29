@@ -1,7 +1,7 @@
 /**
  * Collect unresolved review threads from a merged PR into DebtRecords.
  */
-import type { ReviewFacade, ReviewThread } from '@bro/core'
+import type { ReviewFacade, ReviewThread } from '@broject/core'
 import type {
   AuthorPolicy,
   DebtNeeds,

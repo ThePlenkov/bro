@@ -2,7 +2,7 @@ name: Publish
 
 # Tag-triggered npm publish via OIDC trusted publishing — no tokens.
 # Setup (one-time, after first placeholder exists on npm):
-#   npm trust github @theplenkov/bro --file publish.yml --repo ThePlenkov/bro
+#   npm trust github @broject/bro --file publish.yml --repo ThePlenkov/bro
 on:
   push:
     tags: ['v*']
@@ -49,17 +49,17 @@ jobs:
         run: test "v$(node -p "require('./package.json').version")" = "$EXPECTED_TAG" || { echo "tag $EXPECTED_TAG != package version"; exit 1; }
 
       # LTS node ships npm >= 11.5.1 — OIDC trusted publishing built in.
-      - name: Publish @theplenkov/bro
+      - name: Publish @broject/bro
         working-directory: packages/cli
         run: |
           v=$(node -p "require('./package.json').version")
-          if npm view "@theplenkov/bro@$v" version >/dev/null 2>&1; then
+          if npm view "@broject/bro@$v" version >/dev/null 2>&1; then
             echo "version $v already on npm — skipping publish"
             exit 0
           fi
           # Only a confirmed E404 means "not published" — a transient
           # registry/network error must not fall through to npm publish.
-          if ! npm view "@theplenkov/bro@$v" version 2>&1 | grep -q E404; then
+          if ! npm view "@broject/bro@$v" version 2>&1 | grep -q E404; then
             echo "npm view failed without E404 — aborting to avoid double publish"
             exit 1
           fi

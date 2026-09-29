@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { applyConvoyPlan } from './convoy.ts'
-import type { ConvoyPlan } from '@bro/convoy'
+import type { ConvoyPlan } from '@broject/convoy'
 
 /** A scripted `bd` on PATH — PATH lookup is the exec contract
  *  (packages/core bd.ts). `mol pour ok` emits a root id; `mol pour boom`

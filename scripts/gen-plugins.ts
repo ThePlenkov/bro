@@ -174,7 +174,7 @@ const VERSIONED_SOURCES = [
   'hooks/run.sh',
   'plugins/claude/bro/hooks/hooks.json',
 ]
-const PIN_RE = /@theplenkov\/bro@[\w.:-]+/g
+const PIN_RE = /@broject\/bro@[\w.:-]+/g
 
 const drift = []
 
@@ -203,7 +203,7 @@ function emit(path, content) {
   writeFileSync(p, content)
 }
 
-// keep every `@theplenkov/bro@…` npx pin equal to plugin.json's version
+// keep every `@broject/bro@…` npx pin equal to plugin.json's version
 for (const src of VERSIONED_SOURCES) {
   const p = join(ROOT, src)
   if (!existsSync(p)) {
@@ -211,7 +211,7 @@ for (const src of VERSIONED_SOURCES) {
     continue
   }
   const text = readFileSync(p, 'utf8')
-  const synced = text.replace(PIN_RE, `@theplenkov/bro@${manifest.version}`)
+  const synced = text.replace(PIN_RE, `@broject/bro@${manifest.version}`)
   if (CHECK ? synced !== text : false) {
     drift.push(src)
   } else if (!CHECK && synced !== text) {

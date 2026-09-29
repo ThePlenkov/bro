@@ -1,9 +1,9 @@
 /**
- * @bro/github — the GitHub connector. Provides the `reviews` facade
+ * @broject/github — the GitHub connector. Provides the `reviews` facade
  * (PR state, threads, checks, merge) over the `gh` CLI. Registers like
  * any connector — built-in today, nothing GitHub-specific in core.
  */
-import { ghTry, type Connector } from '@bro/core'
+import { ghTry, type Connector } from '@broject/core'
 import { githubReview } from './reviews.ts'
 
 export { githubReview }

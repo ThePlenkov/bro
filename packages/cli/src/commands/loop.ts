@@ -30,15 +30,15 @@ import {
   reviewHost,
   taskStore,
   type ReviewFacade,
-} from '@bro/core'
-import { evaluateExitGate, fetchPrActState, waitForGate } from '@bro/act'
+} from '@broject/core'
+import { evaluateExitGate, fetchPrActState, waitForGate } from '@broject/act'
 import {
   buildFixPrompt,
   buildWorkPrompt,
   expandAgentCmd,
   planItem,
   type LoopConfig,
-} from '@bro/loop'
+} from '@broject/loop'
 import { loadBroConfig } from '../plugins.ts'
 import { flag } from './args.ts'
 import { runActCommand } from './act.ts'

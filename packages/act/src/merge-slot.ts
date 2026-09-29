@@ -11,7 +11,7 @@
  *   check   → { available: boolean, holder: string|null, waiters }
  *   acquire → { acquired: boolean, holder: string }
  */
-import { bdTry } from '@bro/core'
+import { bdTry } from '@broject/core'
 
 export type MergeSlot =
   | { kind: 'acquired' }

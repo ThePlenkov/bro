@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { beadsSection, DEFAULT_GLOBAL_BEADS_DIR } from '@bro/core'
+import { beadsSection, DEFAULT_GLOBAL_BEADS_DIR } from '@broject/core'
 import { resolveGlobalDir } from './store.ts'
 
 const DEFAULT_GLOBAL_DIR = DEFAULT_GLOBAL_BEADS_DIR

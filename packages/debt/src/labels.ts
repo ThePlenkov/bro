@@ -4,7 +4,7 @@
  * coarser question without rescanning. Host calls go through the injected
  * ReviewFacade.
  */
-import type { ReviewFacade } from '@bro/core'
+import type { ReviewFacade } from '@broject/core'
 
 export const DEBT_STATES = ['collected', 'clean', 'skipped'] as const
 export type DebtPrState = (typeof DEBT_STATES)[number]

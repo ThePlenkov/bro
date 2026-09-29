@@ -10,11 +10,11 @@ the same contract — command, skill, config section, plan schema.
 ## The contract
 
 A plugin is a plain object — or typed via the side-effect-free
-`@theplenkov/bro/plugin` entry point:
+`@broject/bro/plugin` entry point:
 
 ```ts
 // bro-memory.ts
-import { definePlugin } from '@theplenkov/bro/plugin'
+import { definePlugin } from '@broject/bro/plugin'
 
 export default definePlugin({
   name: 'memory',                    // → `bro memory <args>`
@@ -33,7 +33,7 @@ export default definePlugin({
 
 Required: `name`, `summary`, `run`. Everything else is optional and
 type-checked at load — wrong field types warn and skip the plugin.
-`@theplenkov/bro/plugin` also exports `defineConfig`, `makePrinter`, and
+`@broject/bro/plugin` also exports `defineConfig`, `makePrinter`, and
 the `BroPlugin` / `BroConfig` / `ConfigSection` / `PlanSchema` types —
 it never runs the CLI on import.
 
