@@ -1,7 +1,12 @@
 {
   "name": "@broject/bro",
+<<<<<<< Updated upstream
   "version": "0.2.1",
   "description": "bro \u2014 agent's sidekick CLI: review-debt pipeline, PR triage, fix loops",
+=======
+  "version": "0.2.0",
+  "description": "bro — agent's sidekick CLI: review-debt pipeline, PR triage, fix loops",
+>>>>>>> Stashed changes
   "type": "module",
   "bin": {
     "bro": "dist/index.js"
@@ -32,17 +37,9 @@
     "smol-toml": "1.7.1"
   },
   "devDependencies": {
-    "@broject/act": "*",
-    "@broject/core": "*",
-    "@broject/debt": "*",
-    "@broject/drill": "*",
-    "@broject/github": "*",
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.0",
-    "@broject/retro": "*",
-    "@broject/convoy": "*",
-    "@broject/loop": "*"
+    "typescript": "^5.9.0"
   },
   "license": "MIT",
   "repository": {
