@@ -93,6 +93,9 @@ describe('specState', () => {
       // path-traversal ids never count as having a spec file
       assert.equal(specState(row({ id: '../outside' }), dir, 'specs'), 'missing')
       assert.equal(specState(row({ id: 'a/../b' }), dir, 'specs'), 'missing')
+      // an escaping sdd.dir fails open to 'missing' too
+      assert.equal(specState(row(), dir, '../outside'), 'missing')
+      assert.equal(specState(row(), dir, '/tmp'), 'missing')
     })
   })
 })

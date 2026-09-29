@@ -16,7 +16,7 @@
  * policy is opt-in per repo and committed, not per machine).
  */
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import {
   facade,
   gitTry,
@@ -45,8 +45,18 @@ function validBeadId(id: string): boolean {
   return /^[\w.-]+$/.test(id) && !id.includes('..')
 }
 
-function specFilePath(dir: string, specDir: string, id: string): string {
-  return join(repoRoot(dir), specDir, `${id}.md`)
+/** The configured spec dir must stay inside the checkout — an absolute
+ *  or escaping `sdd.dir` returns null (probes fail open; commands
+ *  report it as a config error). */
+function specDirAbs(dir: string, specDir: string): string | null {
+  const root = resolve(repoRoot(dir))
+  const abs = resolve(root, specDir)
+  return abs === root || abs.startsWith(root + sep) ? abs : null
+}
+
+function specFilePath(dir: string, specDir: string, id: string): string | null {
+  const base = specDirAbs(dir, specDir)
+  return base === null ? null : join(base, `${id}.md`)
 }
 
 /** A non-empty spec file counts; a zero-byte scaffold does not. */
@@ -56,7 +66,7 @@ function hasSpecFile(dir: string, specDir: string, id: string): boolean {
   }
   try {
     const p = specFilePath(dir, specDir, id)
-    return statSync(p).isFile() && readFileSync(p, 'utf8').trim() !== ''
+    return p !== null && statSync(p).isFile() && readFileSync(p, 'utf8').trim() !== ''
   } catch {
     return false
   }
@@ -184,6 +194,10 @@ function cmdNew(dir: string, specDir: string, id: string | undefined): void {
     process.exit(2)
   }
   const path = specFilePath(dir, specDir, id)
+  if (path === null) {
+    console.error(`error: sdd.dir "${specDir}" escapes the repo root — fix bro.config.json`)
+    process.exit(2)
+  }
   if (existsSync(path)) {
     console.error(`error: ${path} already exists — refusing to overwrite`)
     process.exit(1)
@@ -194,7 +208,7 @@ function cmdNew(dir: string, specDir: string, id: string | undefined): void {
   } catch {
     // no task backend readable — scaffold with the bare id
   }
-  mkdirSync(join(repoRoot(dir), specDir), { recursive: true })
+  mkdirSync(specDirAbs(dir, specDir)!, { recursive: true })
   writeFileSync(
     path,
     `# ${id} — ${title || 'spec'}\n\n## Problem\n\n## Design\n\n## Plan\n\n- [ ] …\n`
@@ -220,13 +234,13 @@ function cmdCheck(dir: string, specDir: string, ids: string[], all: boolean): vo
           }
         })
       : store.list({ status: 'in_progress' }).concat(all ? store.list({ status: 'open' }) : [])
-  // an id that doesn't resolve is a failure, not a pass — report it
-  // as UNKNOWN and count it toward the missing tally
-  let missing = 0
-  for (const id of unknown) {
-    missing += 1
-    console.log(`${id}\tUNKNOWN\t(bead not found or store unreadable)`)
+  // an explicit id that doesn't resolve is a usage failure — partial
+  // results would report silent success for a bead that doesn't exist
+  if (unknown.length > 0) {
+    console.error(`error: bead(s) not found: ${unknown.join(', ')}`)
+    process.exit(2)
   }
+  let missing = 0
   for (const r of rows) {
     const state = specState(r, dir, specDir)
     if (state === 'missing') {
