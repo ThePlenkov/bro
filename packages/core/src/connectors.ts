@@ -22,7 +22,7 @@
  * when a real consumer exists.
  */
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { gitTry } from './git.ts'
 import type { ReviewFacade } from './review.ts'
 import type { TaskStore } from './tasks.ts'
@@ -107,8 +107,9 @@ const shortTitle = (t: string | undefined): string => {
 
 /** Bead ids this session claimed — the `task` aspect marker records one
  *  claim per detail line (line 1 is the timestamp). No session or no
- *  marker → nothing is "mine". */
-function sessionTaskClaims(ctx: ConnectorCtx): Set<string> {
+ *  marker → nothing is "mine". Exported for policy connectors (sdd)
+ *  that scope their nudges to the session's own claims. */
+export function sessionTaskClaims(ctx: ConnectorCtx): Set<string> {
   const mine = new Set<string>()
   if (!ctx.sessionId) {
     return mine
@@ -118,8 +119,10 @@ function sessionTaskClaims(ctx: ConnectorCtx): Set<string> {
     if (gd.code !== 0) {
       return mine
     }
+    // --git-common-dir is relative in the main worktree ('.git') and
+    // absolute in linked ones — resolve against ctx.dir, never cwd
     const safe = ctx.sessionId.replace(/[^\w.-]/g, '_')
-    const marker = join(gd.out.trim(), 'bro', 'hooks', `${safe}.task`)
+    const marker = join(resolve(ctx.dir, gd.out.trim()), 'bro', 'hooks', `${safe}.task`)
     for (const d of readFileSync(marker, 'utf8').split('\n').slice(1)) {
       const id = d.trim()
       if (id) {

@@ -15,7 +15,7 @@ packages/convoy   @bro/convoy    — molecule scheduling: DAG readiness, next-st
 packages/loop     @bro/loop      — autonomous backlog runner (claim → agent → gate)
 packages/retro    @bro/retro     — wtf capture + retro plans
 packages/cli      @theplenkov/bro — published CLI (bin: bro), bundles @bro/*
-skills/act, skills/convoy, skills/debt, skills/drill, skills/wtf — thin skills: policy only, call `bro *`
+skills/act, skills/convoy, skills/debt, skills/drill, skills/sdd, skills/wtf — thin skills: policy only, call `bro *`
 plugin.json                      — agent-plugins.org manifest (repo root IS the Devin plugin)
 hooks.json + hooks/run.sh        — Devin lifecycle hooks → `bro hooks <event>`
 .claude-plugin/marketplace.json  — marketplace manifest (Claude + Codex + Cursor read it)
