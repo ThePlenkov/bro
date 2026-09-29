@@ -35,5 +35,15 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "description": "Review-debt pipeline for bro — harvest unresolved threads on merged PRs into a ledger and beads",
+  "keywords": [
+    "code-review",
+    "debt",
+    "github",
+    "beads",
+    "agent",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs"
 }

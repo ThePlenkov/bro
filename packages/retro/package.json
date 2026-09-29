@@ -35,5 +35,14 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "description": "Retrospect engine for bro — TOML retro plans fan prevention actions out to beads, skills, rules",
+  "keywords": [
+    "retrospective",
+    "self-correction",
+    "beads",
+    "agent",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs"
 }

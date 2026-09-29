@@ -11,6 +11,7 @@
     "integrations",
     "skills",
     "---Extend---",
-    "plugins"
+    "plugins",
+    "packages"
   ]
 }

@@ -35,5 +35,13 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "description": "Scoped descent frames for bro — drill down/up over beads with result + prevention memos",
+  "keywords": [
+    "beads",
+    "investigation",
+    "agent",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs"
 }

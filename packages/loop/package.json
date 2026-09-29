@@ -34,5 +34,14 @@
   },
   "dependencies": {
     "@broject/core": "^0.2.0"
-  }
+  },
+  "description": "Autonomous backlog loop for bro — claim beads, spawn agents in worktrees, drive the act gate",
+  "keywords": [
+    "automation",
+    "backlog",
+    "beads",
+    "agent",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs"
 }

@@ -35,5 +35,15 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "description": "Beads molecule runner for bro — DAG workflows scheduled inside the agent",
+  "keywords": [
+    "beads",
+    "workflow",
+    "dag",
+    "orchestration",
+    "agent",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs"
 }
