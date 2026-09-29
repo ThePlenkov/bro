@@ -19,7 +19,10 @@ Requires Node ≥ 22 and `bd`. ESM only.
 
 - `parsePlan` / `parsePlanDoc` / `PLAN_SCHEMA` — retro plan parsing +
   validation
-- `ACTION_SINKS` / `RETRO_SCOPES` — where prevention actions land
+- `ACTION_SINKS` — where prevention actions land: `backlog`, `memory`,
+  `agentic-documents`, `upstream-issue`, `workaround`
+- `RETRO_SCOPES` — action visibility: `universal`, `project`, `user`,
+  `agent`, `session`
 - Re-exports `bd` primitives from `@broject/core`
 
 ## Links
