@@ -2,7 +2,10 @@ import { useState } from 'react'
 
 const clients = [
   { name: 'Claude Code', cmd: '/plugin marketplace add ThePlenkov/bro\n/plugin install bro@bro' },
-  { name: 'Codex', cmd: 'codex plugin marketplace add ThePlenkov/bro' },
+  {
+    name: 'Codex',
+    cmd: 'codex plugin marketplace add ThePlenkov/bro\n# then install bro from the marketplace',
+  },
   { name: 'Devin', cmd: 'devin plugins install ThePlenkov/bro' },
   { name: 'just the CLI', cmd: 'npx -y @broject/bro --help' },
 ]
@@ -13,7 +16,11 @@ export function Install() {
   const { cmd } = clients[active]
 
   const copy = async () => {
-    await navigator.clipboard.writeText(cmd)
+    try {
+      await navigator.clipboard.writeText(cmd)
+    } catch {
+      return
+    }
     setCopied(true)
     setTimeout(() => setCopied(false), 1500)
   }
