@@ -22,6 +22,10 @@ command names ∪ doc nouns/aliases ∪ shorthand verbs. A plugin taking
 a reserved name, or a doc type colliding on noun/alias/idPrefix, is
 skipped with a warning — everything else is usable.
 
+Task verbs resolve through the `tasks` connector facade — beads is the
+built-in provider; `connectors.tasks` in `bro.config.json` (or a plugin
+shipping its own connector via `BroPlugin.connectors`) retargets them.
+
 | Command | What it does |
 | ------- | ------------ |
 | `bro task list [--status=open]` / `bro list` | List tasks — flags pass through to the store |
