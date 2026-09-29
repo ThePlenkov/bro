@@ -3,4 +3,5 @@ dist/
 .tanstack/
 .source/
 .output/
+.wrangler/
 src/routeTree.gen.ts
