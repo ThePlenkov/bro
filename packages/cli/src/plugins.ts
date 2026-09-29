@@ -28,6 +28,7 @@ import { parseDebtPlan, type DebtPlan } from '@bro/debt'
 import { parseDrillPlan, type DrillPlan } from '@bro/drill'
 import { parsePlanDoc, type RetroPlan } from '@bro/retro'
 import { loopSection } from '@bro/loop'
+import { githubConnector } from '@bro/github'
 import { applyActPlan, runActCommand } from './commands/act.ts'
 import { runCleanupCommand } from './commands/cleanup.ts'
 import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts'
@@ -41,6 +42,11 @@ import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runSetupCommand } from './commands/setup.ts'
 import { runSyncCommand } from './commands/sync.ts'
 import { runWorkCommand } from './commands/work.ts'
+
+// Built-in connectors register at module load, ahead of external
+// plugins — registry order is the fallback precedence, and an external
+// connector must not shadow a built-in system.
+registerConnector(githubConnector)
 
 export const PLUGINS: BroPlugin[] = [
   definePlugin({

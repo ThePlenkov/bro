@@ -4,8 +4,9 @@
  */
 import { spawnSync } from 'node:child_process'
 
-export function gh(args: string[]): string {
+export function gh(args: string[], cwd?: string): string {
   const proc = spawnSync('gh', args, {
+    cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
   })
@@ -15,16 +16,17 @@ export function gh(args: string[]): string {
   return proc.stdout ?? ''
 }
 
-export function ghJson<T>(args: string[]): T {
-  return JSON.parse(gh(args)) as T
+export function ghJson<T>(args: string[], cwd?: string): T {
+  return JSON.parse(gh(args, cwd)) as T
 }
 
 /**
  * `gh` without the throw — for commands whose exit code carries meaning
  * (`gh pr checks` exits 1 when checks fail while still printing JSON).
  */
-export function ghTry(args: string[]): { code: number; out: string; err: string } {
+export function ghTry(args: string[], cwd?: string): { code: number; out: string; err: string } {
   const proc = spawnSync('gh', args, { // NOSONAR — user-installed CLI; PATH lookup is the contract
+    cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
   })

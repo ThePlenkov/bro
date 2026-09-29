@@ -22,6 +22,7 @@
  * when a real consumer exists.
  */
 import { gitTry } from './git.ts'
+import type { ReviewFacade } from './review.ts'
 import type { TaskStore } from './tasks.ts'
 import { taskStore } from './tasks.ts'
 
@@ -32,10 +33,11 @@ export interface ConnectorCtx {
 }
 
 /** Capability → facade type. Optional on Connector; required here once
- *  the facade exists. `reviews`, `findings`, `sast` join when their
- *  first real consumer lands. */
+ *  the facade exists. `findings`, `sast` join when their first real
+ *  consumer lands. */
 export interface FacadeMap {
   tasks: TaskStore
+  reviews: ReviewFacade
 }
 
 /** Context a connector contributes to the agent lifecycle — the
@@ -61,6 +63,7 @@ export interface Connector {
    *  auto-detect ahead of registry order. */
   matchRemote?(url: string): boolean
   tasks?(ctx: ConnectorCtx): TaskStore
+  reviews?(ctx: ConnectorCtx): ReviewFacade
   hooks?(ctx: ConnectorCtx): ConnectorHooks
 }
 
