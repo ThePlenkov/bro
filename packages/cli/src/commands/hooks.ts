@@ -313,7 +313,7 @@ async function parallelLines(sessionId: string): Promise<string[]> {
     if (dir) {
       parts.push(...liveSessionLines(dir, sessionId))
     }
-    parts.push(...(await parallelWorkLines({ dir: process.cwd() })))
+    parts.push(...(await parallelWorkLines({ dir: process.cwd(), sessionId })))
     if (parts.length === 0) {
       return []
     }
@@ -379,9 +379,19 @@ function armSession(sessionId: string, aspect: GateAspect, detail: string = ''):
       return
     }
     mkdirSync(dirname(path), { recursive: true })
-    // line 2 carries the arming detail (slug/branch/PR) for
-    // parallel-session detection — readArmed only ever reads mtime
-    writeFileSync(path, `${Date.now()}\n${detail}`)
+    // line 1 is the timestamp; each further line is an arming detail
+    // (slug/branch/PR/bead) — accumulated so a session claiming two
+    // beads keeps both; readArmed only ever reads mtime
+    let body = ''
+    try {
+      body = readFileSync(path, 'utf8')
+    } catch {
+      body = `${Date.now()}\n`
+    }
+    if (detail && !body.split('\n').includes(detail)) {
+      body = `${body.replace(/\n?$/, '\n')}${detail}\n`
+    }
+    writeFileSync(path, body)
     const cutoff = Date.now() - MARKER_TTL_MS
     for (const f of readdirSync(dirname(path))) {
       try {
@@ -407,7 +417,7 @@ async function emitSessionContext(
   // sessionStart probes collect from every connector — beads reports
   // the ready queue, drill the open frame, act the PR gate + merge slot,
   // debt the open findings; a jira connector would add assigned issues
-  parts.push(...(await sessionStartLines({ dir: process.cwd() })))
+  parts.push(...(await sessionStartLines({ dir: process.cwd(), sessionId })))
   parts.push(...(await parallelLines(sessionId)))
   if (parts.length > 0) {
     context(event, `bro state — resume from here:\n${parts.join('\n')}`)
@@ -416,7 +426,8 @@ async function emitSessionContext(
 
 async function emitPromptContext(input: HookInput): Promise<void> {
   const prompt = typeof input.prompt === 'string' ? input.prompt : ''
-  const parts = await promptContextLines({ dir: process.cwd() }, prompt)
+  const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
+  const parts = await promptContextLines({ dir: process.cwd(), sessionId }, prompt)
   if (parts.length > 0) {
     context('UserPromptSubmit', parts.join('\n'))
   }
@@ -473,9 +484,9 @@ async function emitStopGate(input: HookInput): Promise<void> {
     const i = GATE_PRIORITY.indexOf(a)
     return i === -1 ? GATE_PRIORITY.length : i
   }
-  const contributions = (await stopGateContributions({ dir: process.cwd() })).sort(
-    (a, b) => rank(a.aspect) - rank(b.aspect)
-  )
+  const contributions = (
+    await stopGateContributions({ dir: process.cwd(), sessionId })
+  ).sort((a, b) => rank(a.aspect) - rank(b.aspect))
   const hints: string[] = []
   for (const c of contributions) {
     if (!armed.has(c.aspect)) {
@@ -488,8 +499,9 @@ async function emitStopGate(input: HookInput): Promise<void> {
       emit({ decision: 'block', reason: c.block })
       return
     }
-    if (c.armedHint) {
-      hints.push(c.armedHint)
+    const hint = c.armedHint ?? c.passive
+    if (hint) {
+      hints.push(hint)
     }
   }
   if (hints.length > 0) {

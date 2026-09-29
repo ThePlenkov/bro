@@ -21,6 +21,8 @@
  * contract). New facades join FacadeMap + Connector together, and only
  * when a real consumer exists.
  */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { gitTry } from './git.ts'
 import type { ReviewFacade } from './review.ts'
 import type { TaskStore } from './tasks.ts'
@@ -30,6 +32,10 @@ export interface ConnectorCtx {
   /** Working dir — repo root for project-scoped facades, the resolved
    *  global dir for user-level ones (same contract as taskStore(dir)). */
   dir: string
+  /** Firing session's id — lets probes distinguish this session's claims
+   *  (recorded in `<git-common-dir>/bro/hooks/<session>.<aspect>` markers)
+   *  from foreign live work. Absent outside hook events. */
+  sessionId?: string
 }
 
 /** Capability → facade type. Optional on Connector; required here once
@@ -94,6 +100,33 @@ const shortTitle = (t: string | undefined): string => {
   return flat.length > 60 ? `${flat.slice(0, 60)}…` : flat
 }
 
+/** Bead ids this session claimed — the `task` aspect marker records one
+ *  claim per detail line (line 1 is the timestamp). No session or no
+ *  marker → nothing is "mine". */
+function sessionTaskClaims(ctx: ConnectorCtx): Set<string> {
+  const mine = new Set<string>()
+  if (!ctx.sessionId) {
+    return mine
+  }
+  try {
+    const gd = gitTry(['-C', ctx.dir, 'rev-parse', '--git-common-dir'])
+    if (gd.code !== 0) {
+      return mine
+    }
+    const safe = ctx.sessionId.replace(/[^\w.-]/g, '_')
+    const marker = join(gd.out.trim(), 'bro', 'hooks', `${safe}.task`)
+    for (const d of readFileSync(marker, 'utf8').split('\n').slice(1)) {
+      const id = d.trim()
+      if (id) {
+        mine.add(id)
+      }
+    }
+  } catch {
+    // no marker file — the session claimed nothing
+  }
+  return mine
+}
+
 const beadsConnector: Connector = {
   name: 'beads',
   tasks: (ctx) => taskStore(ctx.dir),
@@ -122,25 +155,33 @@ const beadsConnector: Connector = {
     },
     stopGate(ctx) {
       try {
-        const claimed = taskStore(ctx.dir)
-          .list({ status: 'in_progress' })
-          .slice(0, 5)
-          .map((r) => `${r.id} ${shortTitle(r.title)}`.trim())
+        const claimed = taskStore(ctx.dir).list({ status: 'in_progress' })
         if (claimed.length === 0) {
           return []
         }
-        const list = claimed.join(', ')
-        return [
-          {
-            // own aspect — claiming arms 'task', so the gate binds the
-            // session that claimed, not every worktree user
+        // foreign claims are ambient — the session can't close beads it
+        // didn't claim, so they stay passive context
+        const mine = sessionTaskClaims(ctx)
+        const own = claimed.filter((r) => mine.has(r.id))
+        const foreign = claimed.filter((r) => !mine.has(r.id))
+        const fmt = (r: { id: string; title?: string }): string =>
+          `${r.id} ${shortTitle(r.title)}`.trim()
+        const out: GateContribution[] = []
+        if (own.length > 0) {
+          out.push({
             aspect: 'task',
             block:
-              `bro: claimed beads open: ${list} — ` +
+              `bro: claimed beads open: ${own.slice(0, 5).map(fmt).join(', ')} — ` +
               'close (`bd close <id>`) or release the claim before stopping',
-            passive: `bro: claimed beads open: ${list}`,
-          },
-        ]
+          })
+        }
+        if (foreign.length > 0) {
+          out.push({
+            aspect: 'task',
+            passive: `bro: claimed beads open: ${foreign.slice(0, 5).map(fmt).join(', ')}`,
+          })
+        }
+        return out
       } catch {
         return []
       }
