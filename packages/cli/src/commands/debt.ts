@@ -13,7 +13,7 @@ import {
   dataRefCommit,
   dataRefPush,
   dataRefRoot,
-  ensureGhAuth,
+  ensureAuth,
   reviewHost,
   type ReviewFacade,
 } from '@bro/core'
@@ -185,7 +185,7 @@ function parseCollectArgs(rev: ReviewFacade, argv: string[]): CollectArgs {
 async function cmdCollect(argv: string[]): Promise<void> {
   const rev = reviewHost(undefined, loadBroConfig().connectors)
   const args = parseCollectArgs(rev, argv)
-  ensureGhAuth()
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
 
   // Fetch at least as many candidates as --last requests, or it silently caps.
   const listLimit = Math.max(args.filters.lastN ?? 0, 100)
@@ -431,7 +431,7 @@ function cmdPrs(argv: string[]): void {
   }
   const rev = reviewHost(undefined, loadBroConfig().connectors)
   const repo = rev.resolveRepo(positional)
-  ensureGhAuth()
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
 
   const prs = rev.mergedPrs(repo, { limit })
   const rows = prs
@@ -507,7 +507,7 @@ function cmdMark(argv: string[]): void {
   }
   const rev = reviewHost(undefined, loadBroConfig().connectors)
   const repo = rev.resolveRepo(rest)
-  ensureGhAuth()
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   if (stateRaw === 'none') {
     clearDebtLabels(rev, { repo, pr })
     console.error(`debt mark: cleared debt:* labels on ${rev.prLink(repo, pr)}`)

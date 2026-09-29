@@ -9,7 +9,7 @@
  */
 import { readFileSync } from 'node:fs'
 import {
-  ensureGhAuth,
+  ensureAuth,
   gitTry,
   reviewHost,
   taskStore,
@@ -94,7 +94,7 @@ function resolvePr(rev: ReviewFacade, argv: string[]): PrTarget {
 }
 
 async function cmdStatus(argv: string[]): Promise<void> {
-  ensureGhAuth()
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   const rev = reviewHost(undefined, loadBroConfig().connectors)
   const json = argv.includes('--json')
   const t = resolvePr(rev, argv)
@@ -139,7 +139,7 @@ function printStatus(state: PrActState, gate: ExitGate): void {
  * "watcher + merge on green" loop in one backgroundable command.
  */
 async function cmdWait(argv: string[]): Promise<void> {
-  ensureGhAuth()
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   const rev = reviewHost(undefined, loadBroConfig().connectors)
   const t = resolvePr(rev, argv)
   const act = loadBroConfig().act
@@ -260,7 +260,7 @@ function landPr(
 }
 
 async function cmdMerge(argv: string[]): Promise<void> {
-  ensureGhAuth()
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   const rev = reviewHost(undefined, loadBroConfig().connectors)
   const t = resolvePr(rev, argv)
 
@@ -452,7 +452,7 @@ export function cleanupAfterMerge(headRef: string, headSha: string): void {
 }
 
 async function cmdThreads(argv: string[]): Promise<void> {
-  ensureGhAuth()
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   const rev = reviewHost(undefined, loadBroConfig().connectors)
   const t = resolvePr(rev, argv)
   // threads only needs the threads API — fetching checks/SAST here would
@@ -490,7 +490,7 @@ function commentArg(argv: string[]): string | null {
 }
 
 function cmdResolve(argv: string[]): void {
-  ensureGhAuth()
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   const rev = reviewHost(undefined, loadBroConfig().connectors)
   const id = threadArg(argv)
   const comment = commentArg(argv)
@@ -514,7 +514,7 @@ function cmdResolve(argv: string[]): void {
 }
 
 function cmdReply(argv: string[]): void {
-  ensureGhAuth()
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   const rev = reviewHost(undefined, loadBroConfig().connectors)
   const fileIdx = argv.indexOf('--file')
   if (fileIdx >= 0) {
@@ -621,7 +621,7 @@ function resolveVerdict(rev: ReviewFacade, v: ActThreadVerdict): void {
 /** Apply an `act` plan (`bro run act.toml`) — batch thread verdicts.
  *  One bad verdict doesn't abort the rest; failures list at the end. */
 export function applyActPlan(plan: ActPlan): void {
-  ensureGhAuth()
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   const rev = reviewHost(undefined, loadBroConfig().connectors)
   // no upfront beads check — a defer without bd/.beads fails that one
   // verdict (thread stays unresolved, per the skill's fallback rule)

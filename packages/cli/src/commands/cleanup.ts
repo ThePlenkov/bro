@@ -5,7 +5,7 @@
  * SHAs intersected with local branches. The remote side is opt-in —
  * merge --delete-branch already covers PRs merged through the UI/CLI.
  */
-import { ensureGhAuth, git, gitTry, reviewHost } from '@bro/core'
+import { ensureAuth, git, gitTry, reviewHost } from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
 import { positionals } from './args.ts'
 
@@ -126,7 +126,7 @@ export function runCleanupCommand(argv: string[]): void {
   const dryRun = argv.includes('--dry-run')
   const withRemote = argv.includes('--remote')
 
-  ensureGhAuth()
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   // freshen remote state — tolerable to proceed if the fetch fails
   // (offline): deletion decisions still come from the local view.
   const fetch = gitTry(['fetch', '--prune', '--quiet'])

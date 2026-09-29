@@ -33,14 +33,6 @@ export function ghTry(args: string[], cwd?: string): { code: number; out: string
   return { code: proc.status ?? 1, out: proc.stdout ?? '', err: (proc.stderr ?? '').trim() }
 }
 
-export function ensureGhAuth(): void {
-  const proc = spawnSync('gh', ['auth', 'status'], { stdio: 'ignore' }) // NOSONAR — PATH lookup is the contract
-  if (proc.status !== 0) {
-    console.error('error: gh not authenticated — run `gh auth login`')
-    process.exit(1)
-  }
-}
-
 /** `OWNER/REPO` from args, or `gh repo view` in the current clone. */
 export function resolveRepo(positional: string[]): string {
   const [owner, repo] = positional
