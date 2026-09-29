@@ -11,11 +11,15 @@ over beads. In a repo with `bro.config.json` or `.beads/`:
 - `bro drill down`/`up` creates scoped descent frames; an open frame must be
   closed with `--result` before stopping.
 - Plugin hooks rehydrate state at session start/post-compaction and block
-  Stop once while a drill frame or unresolved review threads remain — a
-  repeated stop is let through (gates, not loops). The stop gate only
-  hard-blocks sessions that touched the PR or drill frame (`bro act`,
-  `gh pr`, `git push`, `bro drill`/`wtf` arm it via a per-session marker);
-  ambient repo state is passive context for everyone else. Session-start
+  Stop once while a drill frame, unresolved review threads, a dirty
+  worktree, or this session's open bead claims remain — a repeated stop
+  is let through (gates, not loops). The stop gate only hard-blocks
+  sessions that touched the thing (`bro act`/`gh pr`/`git push` arm `act`,
+  `bro drill`/`wtf` arm `drill`, worktree mutations arm `work`,
+  `bd --claim`/`bro work enter` arm `task` — per-session markers in the
+  common git dir); ambient repo state is passive context for everyone
+  else. Each contribution is a connector's `stopGate` probe — the hook
+  owns the arming policy, connectors only report state. Session-start
   context also nudges when another live session armed work in the same
   repository — markers live in the common git dir, so detection spans
   linked worktrees (fresh `.work` markers, other worktrees, claimed

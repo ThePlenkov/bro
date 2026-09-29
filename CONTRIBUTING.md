@@ -6,11 +6,14 @@ Heavy mechanics live in `packages/*`; `skills/` holds thin prompt wrappers only.
 ## Layout
 
 ```text
-packages/core     @bro/core      — gh wrapper, config loader, output printer
+packages/core     @bro/core      — connector model, facades (tasks/reviews), config, output
+packages/github   @bro/github    — GitHub connector: ReviewFacade over `gh`
 packages/debt     @bro/debt      — review-debt domain: collect, labels, ledger, beads sync
 packages/act      @bro/act       — open-PR loop: state, threads, resolve, exit gate
 packages/drill    @bro/drill     — scoped descent: drill frames as beads
 packages/convoy   @bro/convoy    — molecule scheduling: DAG readiness, next-step, pour
+packages/loop     @bro/loop      — autonomous backlog runner (claim → agent → gate)
+packages/retro    @bro/retro     — wtf capture + retro plans
 packages/cli      @theplenkov/bro — published CLI (bin: bro), bundles @bro/*
 skills/act, skills/convoy, skills/debt, skills/drill, skills/wtf — thin skills: policy only, call `bro *`
 plugin.json                      — agent-plugins.org manifest (repo root IS the Devin plugin)
@@ -53,6 +56,43 @@ npm test           # node:test via tsx
 npm run lint       # includes skill lint/validate targets
 npx nx show projects
 ```
+
+## Connectors
+
+External systems integrate as **connectors** (`packages/core/src/connectors.ts`):
+a connector is the system (beads, github, a future jira/gitlab), and each
+capability it provides is an optional **facade** member — presence advertises
+the capability, absence is honest.
+
+```ts
+interface Connector {
+  name: string                      // 'beads' | 'github' | …
+  matchRemote?(url): boolean        // claims hosts it can serve (auto-detect)
+  tasks?(ctx): TaskStore            // work items — `bro task`, `next`, `loop`
+  reviews?(ctx): ReviewFacade       // PR review loop — `bro act`, `debt`
+  hooks?(ctx): ConnectorHooks       // lifecycle probes — see below
+}
+```
+
+Commands ask for a facade, never a vendor API: `facade('reviews', {dir})`.
+Resolution order: explicit `connector` → `connectors.<facade>` in
+`bro.config.json` → `matchRemote(origin)` → registry order (built-ins first).
+
+`ConnectorHooks` is how a system joins the agent lifecycle — all probes are
+async-capable and fail-open with a per-probe timeout:
+
+- `sessionStart` / `parallelWork` / `promptSubmit` → context lines; the
+  prompt probe gets the raw text so each system spots its own references
+  (`ReviewFacade.parsePrRef` parses the vendor's PR URLs).
+- `stopGate` → `GateContribution { aspect, block, armedHint, passive }`.
+  The hook owns arming policy: `block` fires only when the session armed
+  that aspect (`bro act`/`gh pr`/`git push` → `act`, `bro drill`/`wtf` →
+  `drill`, worktree mutations → `work`, `bd --claim`/`bro work enter` →
+  `task`); `passive` is ambient context for everyone else.
+
+External plugins register connectors via `BroPlugin.connectors` — a plugin
+can ship a whole new system without a PR to bro. Duplicate names are
+skipped: a plugin cannot shadow a built-in.
 
 ## Conventions
 

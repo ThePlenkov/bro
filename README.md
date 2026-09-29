@@ -112,9 +112,15 @@ run on defaults until they set up. Everything's optional:
 {
   "stores": ["jsonl", "beads"],
   "personality": "terse",
-  "debt": { "dir": ".agents/review-debt" }
+  "debt": { "dir": ".agents/review-debt" },
+  "connectors": { "reviews": "github", "tasks": "beads" }
 }
 ```
+
+`connectors` pins which registered connector serves a facade when several
+could — e.g. a self-hosted GitHub Enterprise or a future GitLab/Jira
+connector. With one provider per facade it can be omitted; remote-URL
+matching auto-detects github.com anyway.
 
 `stores` lists the backends debt writes to. `jsonl` is the evidence ledger
 (always written — drop it and bro adds it back). `beads` is on **by
