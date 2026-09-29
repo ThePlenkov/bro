@@ -57,4 +57,4 @@ Explicit `"stores": ["jsonl"]` is the beads opt-out.
 
 External plugin specifiers — relative paths (contained to the repo) or
 package names, imported at startup. Each module's default export must be
-a `BroPlugin`. See [Plugins](/bro/plugins/).
+a `BroPlugin`. See [Plugins](/docs/plugins).

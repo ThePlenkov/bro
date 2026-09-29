@@ -16,7 +16,7 @@ answered.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro retrospect record <plan.toml>` | Validate a TOML [plan](/bro/plans/) and fan it out: retro bead + prevention beads, wtf answered |
+| `bro retrospect record <plan.toml>` | Validate a TOML [plan](/docs/plans) and fan it out: retro bead + prevention beads, wtf answered |
 | `bro retrospect status` | Exit gate — non-zero while a `wtf` is unanswered |
 | `bro retrospect schema` | Print the commented TOML template |
 | `bro retrospect list` | Retros and open wtfs |

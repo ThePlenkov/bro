@@ -3,12 +3,32 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "astro dev",
-    "build": "astro build",
-    "preview": "astro preview"
+    "dev": "vite dev --port 3000",
+    "build": "vite build",
+    "preview": "vite preview --port 3000",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@astrojs/starlight": "^0.42.2",
-    "astro": "^7.3.3"
+    "@tanstack/react-router": "1.170.38",
+    "@tanstack/react-start": "1.168.56",
+    "@tanstack/start-static-server-functions": "1.167.37",
+    "fumadocs-core": "16.15.12",
+    "fumadocs-mdx": "15.4.3",
+    "fumadocs-ui": "16.15.12",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@types/mdx": "2.0.14",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "@vitejs/plugin-react": "6.1.1",
+    "tailwindcss": "4.3.3",
+    "typescript": "6.0.3",
+    "vite": "8.3.0"
+  },
+  "overrides": {
+    "mdast-util-to-markdown": "2.1.2"
   }
 }

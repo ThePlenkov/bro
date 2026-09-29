@@ -1,0 +1,16 @@
+{
+  "pages": [
+    "---Start here---",
+    "index",
+    "why-bro",
+    "---Commands---",
+    "...commands",
+    "---Guides---",
+    "configuration",
+    "plans",
+    "integrations",
+    "skills",
+    "---Extend---",
+    "plugins"
+  ]
+}
