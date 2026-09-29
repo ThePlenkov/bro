@@ -284,19 +284,14 @@ async function cmdCollect(argv: string[]): Promise<void> {
   }
 }
 
-async function collectReviewThreads(rev: ReviewFacade, args: CollectArgs): Promise<void> {
-  // Fetch at least as many candidates as --last requests, or it silently caps.
-  const listLimit = Math.max(args.filters.lastN ?? 0, 100)
-  const matched = resolveHarvestPrs(rev, {
-    repo: args.repo,
-    filters: args.filters,
-    listLimit,
-  })
+// Review bots can comment AFTER merge+label. A labeled PR whose updatedAt
+// is newer than our scan timestamp goes back into the queue — except
+// `debt:skipped`, which is a human opt-out and is never rescanned.
+function selectTargets(
+  matched: Awaited<ReturnType<typeof resolveHarvestPrs>>,
+  args: CollectArgs
+): { targets: typeof matched; staleCount: number; processedCount: number } {
   const { pending, processed } = partitionByProcessed(matched)
-
-  // Review bots can comment AFTER merge+label. A labeled PR whose updatedAt
-  // is newer than our scan timestamp goes back into the queue — except
-  // `debt:skipped`, which is a human opt-out and is never rescanned.
   const processedAt = readProcessedAt()
   const futureBound = new Date(Date.now() + 5 * 60 * 1000).toISOString()
   const stale = processed.filter((pr) => {
@@ -315,14 +310,124 @@ async function collectReviewThreads(rev: ReviewFacade, args: CollectArgs): Promi
       (pr.updatedAt !== null && pr.updatedAt > at)
     )
   })
-  const targets = args.reharvest
-    ? matched.filter((pr) => prDebtState(pr.labels) !== 'skipped')
-    : [...pending, ...stale]
+  return {
+    targets: args.reharvest
+      ? matched.filter((pr) => prDebtState(pr.labels) !== 'skipped')
+      : [...pending, ...stale],
+    staleCount: stale.length,
+    processedCount: processed.length,
+  }
+}
+
+/** A reharvested thread that was marked done/wontfix is unresolved again
+ *  — the terminal overlay must not shadow the fresh open evidence. */
+function reopenTerminalRows(rows: DebtRecord[]): void {
+  const overlays = readLedgerOverlays()
+  const reopen = rows.filter((r) => {
+    const s = overlays.get(r.thread_id)?.status
+    return s === 'done' || s === 'wontfix'
+  })
+  if (reopen.length === 0) {
+    return
+  }
+  upsertLedgerOverlays(
+    reopen.map((r) => {
+      const prev = overlays.get(r.thread_id)
+      return {
+        thread_id: r.thread_id,
+        status: 'open' as const,
+        fix_pr: null,
+        fixed_at: null,
+        notes: prev?.notes ? `${prev.notes} | reopened by reharvest` : 'reopened by reharvest',
+      }
+    })
+  )
+  console.error(`debt: reopened ${reopen.length} terminal row(s) — still unresolved`)
+}
+
+async function harvestPr(
+  rev: ReviewFacade,
+  args: CollectArgs,
+  pr: { number: number; updatedAt: string | null },
+  labelingEnabled: boolean
+): Promise<{ rows: number; labeled: number }> {
+  // Captured before fetching threads: activity arriving mid-scan is then
+  // newer than the recorded timestamp and gets picked up next run.
+  const scannedAt = new Date().toISOString()
+  let result
+  try {
+    result = await collectPr(rev, {
+      repo: args.repo,
+      pr: pr.number,
+      runId: args.runId,
+      threadAuthor: args.threadAuthor,
+    })
+  } catch (err) {
+    console.error(
+      `warning: PR ${rev.prLink(args.repo, pr.number)} skipped — ${err instanceof Error ? err.message : err}`
+    )
+    return { rows: 0, labeled: 0 }
+  }
+  console.error(
+    `debt: PR ${rev.prLink(args.repo, pr.number)} — ${result.incoming.length} thread(s)`
+  )
+
+  if (args.dryRun) {
+    for (const row of result.incoming) {
+      console.log(JSON.stringify(row))
+    }
+    return { rows: 0, labeled: 0 }
+  }
+
+  if (result.incoming.length > 0) {
+    writeHarvestFile({
+      pr: result.pr,
+      runId: args.runId,
+      harvestedAt: result.incoming[0]!.harvested_at,
+      records: result.incoming,
+    })
+    reopenTerminalRows(result.incoming)
+  }
+
+  let labeled = 0
+  // Never overwrite a human `debt:skipped` opt-out, even under --reharvest.
+  // Re-fetch labels: the candidate snapshot predates this PR's collection,
+  // and a human may have opted out while we were scanning.
+  if (labelingEnabled) {
+    const current = rev.labels({ repo: args.repo, pr: pr.number })
+    if (prDebtState(current) !== 'skipped') {
+      const state: DebtPrState = result.incoming.length > 0 ? 'collected' : 'clean'
+      applyCollectLabel(rev, { repo: args.repo, pr: pr.number, state })
+      labeled = 1
+    }
+    // Store the observed updatedAt as the cursor, not the wall clock:
+    // no cross-clock skew, and mid-scan activity bumps the server's
+    // updatedAt past our cursor so the next run catches it. Re-fetched
+    // post-label: our own label write bumps updatedAt, so the pre-scan
+    // snapshot would flag the PR stale again on the next run. Only full
+    // scans earn a cursor — a --thread-author partial scan must not
+    // mask post-scan activity on a labeled PR.
+    const cursor =
+      rev.prUpdatedAt({ repo: args.repo, pr: pr.number }) ?? pr.updatedAt ?? scannedAt
+    markProcessedAt([pr.number], cursor)
+  }
+  return { rows: result.incoming.length, labeled }
+}
+
+async function collectReviewThreads(rev: ReviewFacade, args: CollectArgs): Promise<void> {
+  // Fetch at least as many candidates as --last requests, or it silently caps.
+  const listLimit = Math.max(args.filters.lastN ?? 0, 100)
+  const matched = resolveHarvestPrs(rev, {
+    repo: args.repo,
+    filters: args.filters,
+    listLimit,
+  })
+  const { targets, staleCount, processedCount } = selectTargets(matched, args)
 
   console.error(
     `debt collect: ${matched.length} merged PR(s) matched, ` +
-      `${processed.length - stale.length} already processed (debt:* label)` +
-      (stale.length > 0 ? `, ${stale.length} stale (post-scan activity)` : '') +
+      `${processedCount - staleCount} already processed (debt:* label)` +
+      (staleCount > 0 ? `, ${staleCount} stale (post-scan activity)` : '') +
       `, scanning ${targets.length}`
   )
 
@@ -349,96 +454,13 @@ async function collectReviewThreads(rev: ReviewFacade, args: CollectArgs): Promi
   let totalRows = 0
   let labeled = 0
   for (const pr of targets) {
-    // Captured before fetching threads: activity arriving mid-scan is then
-    // newer than the recorded timestamp and gets picked up next run.
-    const scannedAt = new Date().toISOString()
-    let result
-    try {
-      result = await collectPr(rev, {
-        repo: args.repo,
-        pr: pr.number,
-        runId: args.runId,
-        threadAuthor: args.threadAuthor,
-      })
-    } catch (err) {
-      console.error(
-        `warning: PR ${rev.prLink(args.repo, pr.number)} skipped — ${err instanceof Error ? err.message : err}`
-      )
-      continue
-    }
-    console.error(
-      `debt: PR ${rev.prLink(args.repo, pr.number)} — ${result.incoming.length} thread(s)`
-    )
-
-    if (args.dryRun) {
-      for (const row of result.incoming) {
-        console.log(JSON.stringify(row))
-      }
-      continue
-    }
-
-    const state: DebtPrState = result.incoming.length > 0 ? 'collected' : 'clean'
-    if (result.incoming.length > 0) {
-      writeHarvestFile({
-        pr: result.pr,
-        runId: args.runId,
-        harvestedAt: result.incoming[0]!.harvested_at,
-        records: result.incoming,
-      })
-      totalRows += result.incoming.length
-      // A reharvested thread that was marked done/wontfix is unresolved again
-      // — the terminal overlay must not shadow the fresh open evidence.
-      const overlays = readLedgerOverlays()
-      const reopen = result.incoming.filter((r) => {
-        const s = overlays.get(r.thread_id)?.status
-        return s === 'done' || s === 'wontfix'
-      })
-      if (reopen.length > 0) {
-        upsertLedgerOverlays(
-          reopen.map((r) => {
-            const prev = overlays.get(r.thread_id)
-            return {
-              thread_id: r.thread_id,
-              status: 'open' as const,
-              fix_pr: null,
-              fixed_at: null,
-              notes: prev?.notes ? `${prev.notes} | reopened by reharvest` : 'reopened by reharvest',
-            }
-          })
-        )
-        console.error(`debt: reopened ${reopen.length} terminal row(s) — still unresolved`)
-      }
-    }
-    // Never overwrite a human `debt:skipped` opt-out, even under --reharvest.
-    // Re-fetch labels: the candidate snapshot predates this PR's collection,
-    // and a human may have opted out while we were scanning.
-    if (labelingEnabled) {
-      const current = rev.labels({ repo: args.repo, pr: pr.number })
-      if (prDebtState(current) !== 'skipped') {
-        applyCollectLabel(rev, { repo: args.repo, pr: pr.number, state })
-        labeled += 1
-      }
-      // Store the observed updatedAt as the cursor, not the wall clock:
-      // no cross-clock skew, and mid-scan activity bumps the server's
-      // updatedAt past our cursor so the next run catches it. Re-fetched
-      // post-label: our own label write bumps updatedAt, so the pre-scan
-      // snapshot would flag the PR stale again on the next run. Only full
-      // scans earn a cursor — a --thread-author partial scan must not
-      // mask post-scan activity on a labeled PR.
-      const cursor =
-        rev.prUpdatedAt({ repo: args.repo, pr: pr.number }) ??
-        pr.updatedAt ??
-        scannedAt
-      markProcessedAt([pr.number], cursor)
-    }
+    const res = await harvestPr(rev, args, pr, labelingEnabled)
+    totalRows += res.rows
+    labeled += res.labeled
   }
 
-  if (!args.dryRun) {
-    const labeledMsg = labelingEnabled
-      ? `labeled ${labeled} PR(s)`
-      : 'labels disabled'
-    console.error(`debt collect: wrote ${totalRows} row(s), ${labeledMsg}`)
-  }
+  const labeledMsg = labelingEnabled ? `labeled ${labeled} PR(s)` : 'labels disabled'
+  console.error(`debt collect: wrote ${totalRows} row(s), ${labeledMsg}`)
 }
 
 // --- status ----------------------------------------------------------------

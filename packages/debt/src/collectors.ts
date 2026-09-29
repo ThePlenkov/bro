@@ -285,7 +285,7 @@ export function collectFailedCi(ctx: CollectCtx): DebtRecord[] {
     `repos/${ctx.repo}/actions/runs?branch=${encodeURIComponent(branch)}&status=completed&per_page=1`,
   ])
   const latest = res.workflow_runs?.[0]
-  if (!latest || latest.conclusion !== 'failure') return []
+  if (latest?.conclusion !== 'failure') return []
   return [
     baseRecord(ctx, {
       threadId: `failed-ci:${branch}`,
