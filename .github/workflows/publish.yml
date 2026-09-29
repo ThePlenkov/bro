@@ -43,11 +43,16 @@ jobs:
       - run: npm run build
       - run: npm test
 
-      - name: Tag must match package version
-        working-directory: packages/cli
+      - name: Tag must match every package version
         env:
           EXPECTED_TAG: ${{ inputs.tag || github.ref_name }}
-        run: test "v$(node -p "require('./package.json').version")" = "$EXPECTED_TAG" || { echo "tag $EXPECTED_TAG != package version"; exit 1; }
+        run: |
+          for dir in core retro convoy debt drill github loop act cli; do
+            p="packages/$dir/package.json"
+            name=$(node -p "require('./$p').name")
+            v=$(node -p "require('./$p').version")
+            test "v$v" = "$EXPECTED_TAG" || { echo "$name@$v != tag $EXPECTED_TAG (lockstep broken)"; exit 1; }
+          done
 
       # LTS node ships npm >= 11.5.1 — OIDC trusted publishing built in.
       # Publish order follows the internal dep graph (core first, cli last)
