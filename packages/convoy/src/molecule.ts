@@ -1,5 +1,5 @@
 import { dirname } from 'node:path'
-import { bd, bdJson, taskStore } from '@bro/core'
+import { bd, bdJson, taskStore } from '@broject/core'
 import type { ConvoyNext, ConvoyStep, Molecule, MolIssue, StepInput, StepKind, StepState } from './types.ts'
 
 /** `bd mol show <id> --json` — the whole DAG in one call. */

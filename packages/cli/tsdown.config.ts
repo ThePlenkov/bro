@@ -5,5 +5,5 @@ export default defineConfig({
   format: ['esm'],
   dts: true,
   // Bundle workspace libs into the published CLI — consumers get one file.
-  noExternal: [/^@bro\//],
+  noExternal: [/^@broject\//],
 })

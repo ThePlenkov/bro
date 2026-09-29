@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { facade, registerConnector } from '@bro/core'
+import { facade, registerConnector } from '@broject/core'
 import { githubConnector, githubReview } from './index.ts'
 
 const WIN32 = process.platform === 'win32'

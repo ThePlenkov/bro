@@ -7,7 +7,7 @@
  * done. beads IS the memory system — no sidecar files.
  */
 import { execFileSync } from 'node:child_process'
-import { bd, bdJson, evidenceKind, refKind, taskStore } from '@bro/core'
+import { bd, bdJson, evidenceKind, refKind, taskStore } from '@broject/core'
 import type { BeadRow, RecordResult, RetroPlan } from './types.ts'
 
 const WTF_LABEL = 'wtf'

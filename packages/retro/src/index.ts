@@ -1,4 +1,4 @@
-export { bd, bdJson, checkBeads, refKind } from '@bro/core'
+export { bd, bdJson, checkBeads, refKind } from '@broject/core'
 export { parsePlan, parsePlanDoc, PLAN_KIND, PLAN_SCHEMA } from './plan.ts'
 export {
   captureWtf,

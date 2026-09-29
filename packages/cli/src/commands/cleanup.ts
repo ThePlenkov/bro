@@ -5,7 +5,7 @@
  * SHAs intersected with local branches. The remote side is opt-in —
  * merge --delete-branch already covers PRs merged through the UI/CLI.
  */
-import { ensureAuth, git, gitTry, reviewHost } from '@bro/core'
+import { ensureAuth, git, gitTry, reviewHost } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import { positionals } from './args.ts'
 

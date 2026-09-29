@@ -16,7 +16,7 @@ import {
   dataRefPush,
   dataRefRoot,
   gitTry,
-} from '@bro/core'
+} from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import { execFileSync } from 'node:child_process'
 import { existsSync, statSync } from 'node:fs'

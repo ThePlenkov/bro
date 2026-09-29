@@ -10,7 +10,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { initBeadsStealth, PERSONALITIES, type BroConfig } from '@bro/core'
+import { initBeadsStealth, PERSONALITIES, type BroConfig } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import { FORMULA_FILES, SKILL_FILES } from '../skills-data.ts'
 

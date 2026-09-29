@@ -2,7 +2,7 @@
  * act domain types — the open-PR review loop. Ported from the act skill's
  * pr-state.ts, same semantics minus the shell plumbing.
  */
-import type { CheckInfo, ReviewThread } from '@bro/core'
+import type { CheckInfo, ReviewThread } from '@broject/core'
 
 export type { CheckInfo as PrCheck }
 

@@ -6,15 +6,15 @@ Heavy mechanics live in `packages/*`; `skills/` holds thin prompt wrappers only.
 ## Layout
 
 ```text
-packages/core     @bro/core      — connector model, facades (tasks/reviews), config, output
-packages/github   @bro/github    — GitHub connector: ReviewFacade over `gh`
-packages/debt     @bro/debt      — review-debt domain: collect, labels, ledger, beads sync
-packages/act      @bro/act       — open-PR loop: state, threads, resolve, exit gate
-packages/drill    @bro/drill     — scoped descent: drill frames as beads
-packages/convoy   @bro/convoy    — molecule scheduling: DAG readiness, next-step, pour
-packages/loop     @bro/loop      — autonomous backlog runner (claim → agent → gate)
-packages/retro    @bro/retro     — wtf capture + retro plans
-packages/cli      @theplenkov/bro — published CLI (bin: bro), bundles @bro/*
+packages/core     @broject/core      — connector model, facades (tasks/reviews), config, output
+packages/github   @broject/github    — GitHub connector: ReviewFacade over `gh`
+packages/debt     @broject/debt      — review-debt domain: collect, labels, ledger, beads sync
+packages/act      @broject/act       — open-PR loop: state, threads, resolve, exit gate
+packages/drill    @broject/drill     — scoped descent: drill frames as beads
+packages/convoy   @broject/convoy    — molecule scheduling: DAG readiness, next-step, pour
+packages/loop     @broject/loop      — autonomous backlog runner (claim → agent → gate)
+packages/retro    @broject/retro     — wtf capture + retro plans
+packages/cli      @broject/bro — published CLI (bin: bro), bundles @broject/*
 skills/act, skills/convoy, skills/debt, skills/drill, skills/sdd, skills/wtf — thin skills: policy only, call `bro *`
 plugin.json                      — agent-plugins.org manifest (repo root IS the Devin plugin)
 hooks.json + hooks/run.sh        — Devin lifecycle hooks → `bro hooks <event>`

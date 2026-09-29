@@ -1,12 +1,12 @@
 /**
- * Plugin API surface — `import ... from '@theplenkov/bro/plugin'`.
+ * Plugin API surface — `import ... from '@broject/bro/plugin'`.
  *
  * Side-effect-free by contract: the CLI entry (index.ts) runs main() on
  * import; this module must never do that. Everything a plugin author or
  * bro.config.ts needs — the contract, config helpers, output printer —
  * re-exported from the bundled core.
  */
-export { defineConfig, definePlugin } from '@bro/core'
+export { defineConfig, definePlugin } from '@broject/core'
 export type {
   BroConfig,
   BroPlugin,
@@ -14,5 +14,5 @@ export type {
   PlanSchema,
   Printer,
   StoreBackend,
-} from '@bro/core'
-export { makePrinter } from '@bro/core'
+} from '@broject/core'
+export { makePrinter } from '@broject/core'

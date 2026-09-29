@@ -1,4 +1,4 @@
-import type { ConfigSection } from '@bro/core'
+import type { ConfigSection } from '@broject/core'
 import { DEFAULT_LOOP_CONFIG, type LoopConfig } from './types.ts'
 
 /** `loop` config section — strings normalized, numbers must be finite

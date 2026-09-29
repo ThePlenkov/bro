@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
-import { loadConfig } from '@bro/core'
+import { loadConfig } from '@broject/core'
 import type {
   AuthorPolicy,
   DebtRecord,

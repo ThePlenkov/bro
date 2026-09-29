@@ -2,7 +2,7 @@
  * Harvest selection — merged-PR filters and candidate resolution. Pure
  * domain logic over ReviewFacade.mergedPrs; no host calls live here.
  */
-import type { MergedPr, ReviewFacade } from '@bro/core'
+import type { MergedPr, ReviewFacade } from '@broject/core'
 
 export interface HarvestPrFilters {
   prIds: number[]

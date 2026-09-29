@@ -2,7 +2,7 @@
  * The debt connector — open review-debt findings as session-start
  * context. The ledger is local state, so the only probe is the count.
  */
-import type { Connector } from '@bro/core'
+import type { Connector } from '@broject/core'
 import { readDebtRecords } from './store.ts'
 
 export const debtConnector: Connector = {

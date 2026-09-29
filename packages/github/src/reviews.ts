@@ -1,9 +1,9 @@
 /**
  * GitHub ReviewFacade — the review-host capability implemented over the
  * `gh` CLI. Ported from act/github.ts and debt/github.ts — same calls,
- * same semantics, normalized onto the domain types in @bro/core/review.
+ * same semantics, normalized onto the domain types in @broject/core/review.
  */
-import { gh, ghJson, ghTry } from '@bro/core'
+import { gh, ghJson, ghTry } from '@broject/core'
 import type {
   CheckInfo,
   MergeOpts,
@@ -14,7 +14,7 @@ import type {
   PrTarget,
   ReviewFacade,
   ReviewThread,
-} from '@bro/core'
+} from '@broject/core'
 
 // graphql/REST paths need owner+repo separately — split the facade's
 // 'owner/name' string once at the boundary.

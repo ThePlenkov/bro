@@ -7,7 +7,7 @@
     }
   },
   "release": {
-    "projects": ["@theplenkov/bro"],
+    "projects": ["@broject/bro"],
     "version": {
       "conventionalCommits": true
     },

@@ -1,7 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { docVerbs, verbMethod } from '@bro/core'
-import type { DocAdapter, DocType } from '@bro/core'
+import { docVerbs, verbMethod } from '@broject/core'
+import type { DocAdapter, DocType } from '@broject/core'
 import {
   docArgs,
   docTypes,

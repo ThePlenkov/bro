@@ -10,7 +10,7 @@ export default defineConfig({
       description: "Your agent's sidekick — skills are instructions, bro is the hands.",
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/ThePlenkov/bro' },
-        { icon: 'external', label: 'npm', href: 'https://www.npmjs.com/package/@theplenkov/bro' },
+        { icon: 'external', label: 'npm', href: 'https://www.npmjs.com/package/@broject/bro' },
       ],
       customCss: ['./src/styles/custom.css'],
       sidebar: [

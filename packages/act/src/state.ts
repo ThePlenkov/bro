@@ -3,7 +3,7 @@
  * aggregated into the PrActState the exit gate reads. Domain rules only;
  * every host call goes through the injected ReviewFacade.
  */
-import type { PrTarget, ReviewFacade } from '@bro/core'
+import type { PrTarget, ReviewFacade } from '@broject/core'
 import type { PrActState } from './types.ts'
 
 // Word boundaries: a check merely *containing* "kilo"/"gemini" (e.g.

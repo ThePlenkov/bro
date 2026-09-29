@@ -16,7 +16,7 @@ import {
   ensureAuth,
   reviewHost,
   type ReviewFacade,
-} from '@bro/core'
+} from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import {
   applyCollectLabel,
@@ -49,7 +49,7 @@ import {
   type DebtStatus,
   type DebtVerdict,
   type HarvestPrFilters,
-} from '@bro/debt'
+} from '@broject/debt'
 
 function readOption(argv: string[], index: number): string | null {
   const value = argv[index + 1]

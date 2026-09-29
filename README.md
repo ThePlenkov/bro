@@ -10,9 +10,9 @@ unresolved review threads rotting in them? Can it say "bro, what's left?"
 Now it can.
 
 ```bash
-npx @theplenkov/bro debt prs        # merged PRs nobody processed yet
-npx @theplenkov/bro debt collect    # sweep them, label them debt:collected
-npx @theplenkov/bro debt status     # the damage report
+npx @broject/bro debt prs        # merged PRs nobody processed yet
+npx @broject/bro debt collect    # sweep them, label them debt:collected
+npx @broject/bro debt status     # the damage report
 ```
 
 ## What's the deal
@@ -31,8 +31,8 @@ PR merged → bro debt collect → findings land in .agents/review-debt/
 ## Install
 
 ```bash
-npx -y @theplenkov/bro --help     # zero install
-npm i -g @theplenkov/bro          # or keep bro around: bro debt status
+npx -y @broject/bro --help     # zero install
+npm i -g @broject/bro          # or keep bro around: bro debt status
 ```
 
 Requires: `node >= 22`, `gh` authenticated, `bd`
@@ -162,7 +162,7 @@ cd bro && npm install
 npm run build && npm test
 ```
 
-Workspace packages live in `packages/*` (`@bro/core`, `@bro/debt`, `@bro/act`,
+Workspace packages live in `packages/*` (`@broject/core`, `@broject/debt`, `@broject/act`,
 the CLI itself). Skills in `skills/` are thin wrappers — all mechanics are in
 the CLI. Nx inference comes from the published `@nx-devkit/*` plugins.
 

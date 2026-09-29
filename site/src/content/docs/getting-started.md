@@ -13,8 +13,8 @@ description: Install bro and wire it into a repo in under a minute.
 ## Install
 
 ```bash
-npx -y @theplenkov/bro --help     # zero install
-npm i -g @theplenkov/bro          # or keep bro around
+npx -y @broject/bro --help     # zero install
+npm i -g @broject/bro          # or keep bro around
 ```
 
 ## Wire a repo

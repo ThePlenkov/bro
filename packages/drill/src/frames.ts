@@ -6,7 +6,7 @@
  * (`claim` on down, `handoff` on up). No claim.json, no .drills/ tree —
  * beads IS the memory system.
  */
-import { bd, bdJson, evidenceKind, refKind, taskStore } from '@bro/core'
+import { bd, bdJson, evidenceKind, refKind, taskStore } from '@broject/core'
 import type { DownOptions, DrillFrame, DrillRow, UpOptions, UpResult } from './types.ts'
 
 const DRILL_LABEL = 'drill'

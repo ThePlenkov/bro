@@ -276,7 +276,7 @@ function normalizeStores(raw: RawConfig): StoreBackend[] {
 }
 
 /** Identity helper for bro.config.ts: `export default defineConfig({…})`
- *  gives typed sections when @bro/core is a local dep; a plain object
+ *  gives typed sections when @broject/core is a local dep; a plain object
  *  works without it. Extra keys are plugin sections (see bro-akl). */
 export function defineConfig<
   T extends Partial<BroConfig> & Record<string, unknown>,

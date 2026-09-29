@@ -1,6 +1,6 @@
 ---
 name: wtf
-description: "Use when the user invokes /wtf or vents sharp frustration at the agent's own work. Thin wrapper over the bro CLI — `bro wtf` captures the complaint as a bead, `bro retrospect record` stores a TOML retro plan and fans prevention actions out to beads. Requires `bro` (npx -y @theplenkov/bro@0) and bd."
+description: "Use when the user invokes /wtf or vents sharp frustration at the agent's own work. Thin wrapper over the bro CLI — `bro wtf` captures the complaint as a bead, `bro retrospect record` stores a TOML retro plan and fans prevention actions out to beads. Requires `bro` (npx -y @broject/bro@0) and bd."
 ---
 
 # /wtf (bro)
@@ -9,7 +9,7 @@ description: "Use when the user invokes /wtf or vents sharp frustration at the a
 only. A `wtf` bead is the trigger artifact; a `retro` bead is the
 analysis record; `prevention` beads carry the follow-up work.
 
-Prereq: `bro` on PATH or `npx -y @theplenkov/bro@0`, `bd init` done.
+Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd init` done.
 
 ## Commands
 

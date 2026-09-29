@@ -11,7 +11,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { sddConnector, specState } from './spec.ts'
-import type { ConnectorCtx } from '@bro/core'
+import type { ConnectorCtx } from '@broject/core'
 
 /** Scripted bd — `list` cats $FAKE_BD_LIST_FILE (written by withRepo),
  *  `show`/`config` keep taskStore happy. */

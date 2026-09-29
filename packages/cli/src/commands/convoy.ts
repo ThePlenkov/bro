@@ -15,7 +15,7 @@ import { randomBytes } from 'node:crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stringify } from 'smol-toml'
-import { checkBeads, taskStore } from '@bro/core'
+import { checkBeads, taskStore } from '@broject/core'
 import {
   beadsDir,
   claimStep,
@@ -30,7 +30,7 @@ import {
   stepInputs,
   stepKind,
   stepsOf,
-} from '@bro/convoy'
+} from '@broject/convoy'
 import type {
   ConvoyInline,
   ConvoyMolecule,
@@ -38,7 +38,7 @@ import type {
   ConvoyPlan,
   MolIssue,
   StepState,
-} from '@bro/convoy'
+} from '@broject/convoy'
 import { flag, flagAll, positionals } from './args.ts'
 
 function usage(exitCode = 1): never {

@@ -37,7 +37,7 @@ import {
   promptContextLines,
   sessionStartLines,
   stopGateContributions,
-} from '@bro/core'
+} from '@broject/core'
 
 interface HookInput {
   tool_input?: { command?: unknown }
@@ -116,7 +116,7 @@ export type GateAspect = 'act' | 'drill' | 'work' | 'task'
 export function classifyArmCommand(cmd: string): GateAspect | null {
   const c = unquoted(cmd)
   const at = '(^|[;&|\\n])\\s*'
-  const bro = '(?:bro|npx\\s+(?:-y\\s+)?@theplenkov/bro(?:@[\\w.:-]+)?)'
+  const bro = '(?:bro|npx\\s+(?:-y\\s+)?@broject/bro(?:@[\\w.:-]+)?)'
   if (new RegExp(`${at}${bro}\\s+act\\b`).test(c)) {
     return 'act'
   }
@@ -159,7 +159,7 @@ export function classifyArmCommands(cmd: string): GateAspect[] {
     out.add(primary)
   }
   const c = unquoted(cmd)
-  const bro = '(?:bro|npx\\s+(?:-y\\s+)?@theplenkov/bro(?:@[\\w.:-]+)?)'
+  const bro = '(?:bro|npx\\s+(?:-y\\s+)?@broject/bro(?:@[\\w.:-]+)?)'
   if (new RegExp(`(^|[;&|\\n])\\s*${bro}\\s+work\\s+enter\\b`).test(c)) {
     out.add('task')
   }
@@ -175,7 +175,7 @@ export function isSelfToolCommand(cmd: string): boolean {
   }
   return (
     /^\s*(bro|bd)(\s|$)/.test(cmd) ||
-    /^\s*npx\s+(-y\s+)?@theplenkov\/bro(@[\w.:-]+)?(\s|$)/.test(cmd)
+    /^\s*npx\s+(-y\s+)?@broject\/bro(@[\w.:-]+)?(\s|$)/.test(cmd)
   )
 }
 

@@ -22,7 +22,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve, sep } from 'node:path'
-import { git, gitTry, loadConfig, stackSection, taskStore, type Connector } from '@bro/core'
+import { git, gitTry, loadConfig, stackSection, taskStore, type Connector } from '@broject/core'
 import { flag, positionals } from './args.ts'
 
 export interface WorktreeInfo {
