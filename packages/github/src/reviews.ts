@@ -12,16 +12,24 @@ import type {
   MergedPrQuery,
   PrMeta,
   PrTarget,
-  RepoRef,
   ReviewFacade,
   ReviewThread,
 } from '@bro/core'
 
-const ownerRepo = (r: RepoRef): string => `${r.owner}/${r.repo}`
+// graphql/REST paths need owner+repo separately — split the facade's
+// 'owner/name' string once at the boundary.
+const parts = (repo: string): { owner: string; name: string } => {
+  const [owner, name] = repo.split('/')
+  return { owner: owner!, name: name! }
+}
+
+const prLinkStr = (repo: string, pr: number): string =>
+  `[#${pr}](https://github.com/${repo}/pull/${pr})`
 
 // --- PR state -----------------------------------------------------------------
 
 function prMeta(t: PrTarget): PrMeta {
+  const { owner, name } = parts(t.repo)
   const pr = ghJson<{
     data?: {
       repository?: {
@@ -43,9 +51,9 @@ function prMeta(t: PrTarget): PrMeta {
     '-f',
     `query=query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid headRefName mergeable mergeStateStatus state url isDraft}}}`,
     '-f',
-    `o=${t.owner}`,
+    `o=${owner}`,
     '-f',
-    `r=${t.repo}`,
+    `r=${name}`,
     '-F',
     `pr=${t.pr}`,
   ]).data?.repository?.pullRequest
@@ -69,7 +77,7 @@ function checks(t: PrTarget, requiredOnly = false): CheckInfo[] {
     'checks',
     String(t.pr),
     '--repo',
-    ownerRepo(t),
+    t.repo,
     '--json',
     'name,state,bucket',
   ]
@@ -91,26 +99,34 @@ function checks(t: PrTarget, requiredOnly = false): CheckInfo[] {
   return []
 }
 
-function checkAnnotations(ref: RepoRef, headSha: string): Map<string, number> {
-  const out = new Map<string, number>()
+function checkAnnotations(repo: string, headSha: string): Map<string, number | null> {
+  const out = new Map<string, number | null>()
   for (let page = 1; ; page += 1) {
     const res = ghJson<{ check_runs: Array<{ id: number; name: string }> }>([
       'api',
-      `repos/${ownerRepo(ref)}/commits/${headSha}/check-runs?per_page=100&page=${page}`,
+      `repos/${repo}/commits/${headSha}/check-runs?per_page=100&page=${page}`,
     ])
     for (const run of res.check_runs ?? []) {
       // A re-run check reports one run per attempt — every attempt's
-      // annotations count, not just the latest id's.
-      // --paginate emits one JSON array per page — --slurp folds them
-      // into a single array-of-arrays that JSON.parse can handle.
-      const pages = ghJson<Array<Array<{ annotation_level?: string }>>>([
-        'api',
-        '--paginate',
-        '--slurp',
-        `repos/${ownerRepo(ref)}/check-runs/${run.id}/annotations?per_page=100`,
-      ])
-      const failures = pages.flat().filter((a) => a.annotation_level === 'failure').length
-      out.set(run.name, (out.get(run.name) ?? 0) + failures)
+      // annotations count, not just the latest id's. A failed fetch
+      // marks the name null (unknown), never a partial count.
+      if (out.get(run.name) === null) {
+        continue
+      }
+      try {
+        // --paginate emits one JSON array per page — --slurp folds them
+        // into a single array-of-arrays that JSON.parse can handle.
+        const pages = ghJson<Array<Array<{ annotation_level?: string }>>>([
+          'api',
+          '--paginate',
+          '--slurp',
+          `repos/${repo}/check-runs/${run.id}/annotations?per_page=100`,
+        ])
+        const failures = pages.flat().filter((a) => a.annotation_level === 'failure').length
+        out.set(run.name, (out.get(run.name) ?? 0) + failures)
+      } catch {
+        out.set(run.name, null)
+      }
     }
     if ((res.check_runs?.length ?? 0) < 100) {
       break
@@ -126,7 +142,7 @@ function reviewedShas(t: PrTarget): string[] {
   for (let page = 1; ; page += 1) {
     const reviews = ghJson<Array<{ commit_id?: string }>>([
       'api',
-      `repos/${ownerRepo(t)}/pulls/${t.pr}/reviews?per_page=100&page=${page}`,
+      `repos/${t.repo}/pulls/${t.pr}/reviews?per_page=100&page=${page}`,
     ])
     for (const r of reviews ?? []) {
       if (r.commit_id) {
@@ -181,7 +197,7 @@ function reviewThreadsQuery(afterClause: string): string {
     }`
 }
 
-function parseThreadPage(raw: string, ownerRepoStr: string, pr: number): ThreadPage {
+function parseThreadPage(raw: string, repo: string, pr: number): ThreadPage {
   const parsed = JSON.parse(raw) as {
     data?: { repository?: { pullRequest?: { reviewThreads?: ThreadPage } } }
     errors?: unknown
@@ -191,12 +207,13 @@ function parseThreadPage(raw: string, ownerRepoStr: string, pr: number): ThreadP
   }
   const threads = parsed.data?.repository?.pullRequest?.reviewThreads
   if (!threads) {
-    throw new Error(`pull request [#${pr}](https://github.com/${ownerRepoStr}/pull/${pr}) not found`)
+    throw new Error(`pull request ${prLinkStr(repo, pr)} not found`)
   }
   return threads
 }
 
 async function reviewThreads(t: PrTarget): Promise<ReviewThread[]> {
+  const { owner, name } = parts(t.repo)
   const nodes: ReviewThread[] = []
   let cursor = ''
   for (;;) {
@@ -209,15 +226,15 @@ async function reviewThreads(t: PrTarget): Promise<ReviewThread[]> {
       '-f',
       `query=${reviewThreadsQuery(afterClause)}`,
       '-f',
-      `o=${t.owner}`,
+      `o=${owner}`,
       '-f',
-      `r=${t.repo}`,
+      `r=${name}`,
       '-F',
       `pr=${t.pr}`,
       '-F',
       'n=100',
     ])
-    const page = parseThreadPage(raw, ownerRepo(t), t.pr)
+    const page = parseThreadPage(raw, t.repo, t.pr)
     for (const n of page.nodes) {
       const c = n.comments.nodes[0]
       nodes.push({
@@ -258,15 +275,13 @@ function mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo {
     'view',
     String(t.pr),
     '--repo',
-    ownerRepo(t),
+    t.repo,
     '--json',
     'title,url,mergedAt,mergeCommit,state',
   ])
 
   if (viewed.state !== 'MERGED') {
-    throw new Error(
-      `PR [#${t.pr}](https://github.com/${ownerRepo(t)}/pull/${t.pr}) is not merged (state=${viewed.state})`
-    )
+    throw new Error(`PR ${prLinkStr(t.repo, t.pr)} is not merged (state=${viewed.state})`)
   }
   return {
     title: viewed.title,
@@ -283,6 +298,8 @@ interface MergedPrRow {
   state?: string
   author?: { login?: string }
   labels?: Array<{ name: string }>
+  headRefName?: string
+  headRefOid?: string
 }
 
 const toMergedPr = (row: MergedPrRow & { mergedAt: string }): MergedPr => ({
@@ -291,20 +308,22 @@ const toMergedPr = (row: MergedPrRow & { mergedAt: string }): MergedPr => ({
   updatedAt: row.updatedAt,
   author: row.author?.login ?? 'unknown',
   labels: (row.labels ?? []).map((l) => l.name),
+  headRef: row.headRefName ?? '',
+  headSha: row.headRefOid ?? '',
 })
 
-function listMergedPrs(ref: RepoRef, q: MergedPrQuery): MergedPr[] {
+function listMergedPrs(repo: string, q: MergedPrQuery): MergedPr[] {
   const args = [
     'pr',
     'list',
     '--repo',
-    ownerRepo(ref),
+    repo,
     '--state',
     'merged',
     '--limit',
     String(q.limit ?? 100),
     '--json',
-    'number,mergedAt,updatedAt,author,labels',
+    'number,mergedAt,updatedAt,author,labels,headRefName,headRefOid',
   ]
   if (q.author) {
     args.push('--author', q.author)
@@ -317,19 +336,19 @@ function listMergedPrs(ref: RepoRef, q: MergedPrQuery): MergedPr[] {
     .map(toMergedPr)
 }
 
-function explicitMergedPrs(ref: RepoRef, ids: number[]): MergedPr[] {
+function explicitMergedPrs(repo: string, ids: number[]): MergedPr[] {
   const out: MergedPr[] = []
   for (const number of ids) {
-    const link = `[#${number}](https://github.com/${ownerRepo(ref)}/pull/${number})`
+    const link = prLinkStr(repo, number)
     try {
       const viewed = ghJson<MergedPrRow>([
         'pr',
         'view',
         String(number),
         '--repo',
-        ownerRepo(ref),
+        repo,
         '--json',
-        'number,mergedAt,updatedAt,author,labels,state',
+        'number,mergedAt,updatedAt,author,labels,state,headRefName,headRefOid',
       ])
       if (viewed.state !== 'MERGED' || !viewed.mergedAt) {
         console.error(`warning: PR ${link} is not merged — skipped`)
@@ -343,13 +362,13 @@ function explicitMergedPrs(ref: RepoRef, ids: number[]): MergedPr[] {
   return out
 }
 
-function mergedPrs(ref: RepoRef, q: MergedPrQuery = {}): MergedPr[] {
+function mergedPrs(repo: string, q: MergedPrQuery = {}): MergedPr[] {
   // `ids` present — even empty — is an explicit selection; only its
   // absence means "list merged PRs with the filters".
   if (q.ids !== undefined) {
-    return explicitMergedPrs(ref, q.ids)
+    return explicitMergedPrs(repo, q.ids)
   }
-  return listMergedPrs(ref, q)
+  return listMergedPrs(repo, q)
 }
 
 // --- labels -------------------------------------------------------------------
@@ -360,7 +379,7 @@ function labels(t: PrTarget): string[] {
     'view',
     String(t.pr),
     '--repo',
-    ownerRepo(t),
+    t.repo,
     '--json',
     'labels',
   ])
@@ -373,7 +392,7 @@ function prUpdatedAt(t: PrTarget): string | null {
     'view',
     String(t.pr),
     '--repo',
-    ownerRepo(t),
+    t.repo,
     '--json',
     'updatedAt',
   ])
@@ -396,19 +415,43 @@ function graphql(query: string, vars: Record<string, string>): void {
 /** The ReviewFacade bound to a dir — `gh repo view`/`gh pr view` run
  *  there so repo/PR detection follows the facade's repo, not cwd. */
 export function githubReview(dir: string = process.cwd()): ReviewFacade {
+  const resolvedRepo = (positional: string[] = []): string => {
+    const [owner, repo] = positional
+    if (owner && repo) {
+      return `${owner}/${repo}`
+    }
+    const viewed = ghJson<{ owner: { login: string }; name: string }>(
+      ['repo', 'view', '--json', 'owner,name'],
+      dir
+    )
+    return `${viewed.owner.login}/${viewed.name}`
+  }
   return {
-    resolveRepo(positional = []) {
-      const [owner, repo] = positional
-      if (owner && repo) {
-        return `${owner}/${repo}`
+    resolveRepo: resolvedRepo,
+    prLink: prLinkStr,
+    currentPr() {
+      // `gh pr view` resolves the PR for the checked-out branch — `gh pr
+      // list --limit 1` would grab an arbitrary open PR instead. It also
+      // resolves CLOSED/MERGED PRs, so the caller must check state.
+      const res = ghTry(['pr', 'view', '--json', 'number,state,url'], dir)
+      if (res.code !== 0 || res.out.trim() === '') {
+        return null
       }
-      const viewed = ghJson<{ owner: { login: string }; name: string }>(
-        ['repo', 'view', '--json', 'owner,name'],
-        dir
-      )
-      return `${viewed.owner.login}/${viewed.name}`
+      const view = JSON.parse(res.out) as { number: number; state: string; url: string }
+      return { pr: view.number, state: view.state, url: view.url }
     },
-    prLink: (ownerRepoStr, pr) => `[#${pr}](https://github.com/${ownerRepoStr}/pull/${pr})`,
+    prsForBranch(branch) {
+      // Explicit --repo: `gh pr list --head` would otherwise guess the
+      // repo from the dir's remotes — a fork's `upstream` can answer
+      // instead of the configured review host.
+      return ghJson<Array<{ number: number }>>(
+        [
+          'pr', 'list', '--head', branch, '--state', 'open',
+          '--repo', resolvedRepo(), '--json', 'number',
+        ],
+        dir
+      ).map((p) => p.number)
+    },
     prMeta,
     mergedPrInfo,
     mergedPrs,
@@ -418,14 +461,24 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
     reviewThreads,
     labels,
     prUpdatedAt,
-    createLabel(ref, name, color) {
-      gh(['label', 'create', name, '--repo', ownerRepo(ref), '--color', color, '--force'])
+    createLabel(repo, name, color) {
+      gh(['label', 'create', name, '--repo', repo, '--color', color, '--force'])
     },
     addLabel(t, label) {
-      gh(['pr', 'edit', String(t.pr), '--repo', ownerRepo(t), '--add-label', label])
+      gh(['pr', 'edit', String(t.pr), '--repo', t.repo, '--add-label', label])
     },
     removeLabel(t, label) {
-      gh(['pr', 'edit', String(t.pr), '--repo', ownerRepo(t), '--remove-label', label])
+      // Ensure-absent: suppress only confirmed absent-label errors —
+      // "repository not found" and other real failures propagate.
+      try {
+        gh(['pr', 'edit', String(t.pr), '--repo', t.repo, '--remove-label', label])
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes(label) && /not found|does not exist|no such label/i.test(msg)) {
+          return
+        }
+        throw err
+      }
     },
     resolveThread(id, unresolve = false) {
       const m = unresolve ? 'unresolveReviewThread' : 'resolveReviewThread'
@@ -442,7 +495,7 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
         'api',
         '-X',
         'PUT',
-        `repos/${ownerRepo(t)}/pulls/${t.pr}/update-branch`,
+        `repos/${t.repo}/pulls/${t.pr}/update-branch`,
         '-f',
         `expected_head_sha=${expectedHeadSha}`,
       ])
@@ -455,7 +508,7 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
         String(t.pr),
         `--${opts.method}`,
         '--repo',
-        ownerRepo(t),
+        t.repo,
         '--match-head-commit',
         opts.expectedHeadSha,
       ]
@@ -473,7 +526,7 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
         'view',
         String(t.pr),
         '--repo',
-        ownerRepo(t),
+        t.repo,
         '--json',
         'state',
       ])

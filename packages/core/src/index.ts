@@ -36,7 +36,6 @@ export type {
   MergedPrQuery,
   PrMeta,
   PrTarget,
-  RepoRef,
   ReviewComment,
   ReviewFacade,
   ReviewThread,
@@ -47,6 +46,7 @@ export {
   facade,
   parallelWorkLines,
   registerConnector,
+  reviewHost,
   sessionStartLines,
 } from './connectors.ts'
 export type { Connector, ConnectorCtx, ConnectorHooks, FacadeMap, FacadeOpts } from './connectors.ts'

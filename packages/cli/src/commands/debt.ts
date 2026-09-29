@@ -14,8 +14,8 @@ import {
   dataRefPush,
   dataRefRoot,
   ensureGhAuth,
-  prLink,
-  resolveRepo,
+  reviewHost,
+  type ReviewFacade,
 } from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
 import {
@@ -30,9 +30,6 @@ import {
   DEBT_ROW_STATUSES,
   DEBT_STATES,
   ensureDebtLabels,
-  fetchMergedPrCandidates,
-  fetchPrLabels,
-  fetchPrUpdatedAt,
   hasHarvestSelection,
   parseCsvInts,
   parseCsvStrings,
@@ -89,8 +86,6 @@ Commands:
 
 interface CollectArgs {
   repo: string
-  owner: string
-  repoName: string
   filters: HarvestPrFilters
   threadAuthor: string | null
   runId: string
@@ -100,7 +95,16 @@ interface CollectArgs {
   noLabel: boolean
 }
 
-function parseCollectArgs(argv: string[]): CollectArgs {
+function parsePositiveInt(flag: string, value: string): number {
+  const n = Number(value)
+  if (!Number.isInteger(n) || n <= 0) {
+    console.error(`error: ${flag} must be a positive integer, got "${value}"`)
+    process.exit(2)
+  }
+  return n
+}
+
+function parseCollectArgs(rev: ReviewFacade, argv: string[]): CollectArgs {
   const positional: string[] = []
   const filters: HarvestPrFilters = {
     prIds: [],
@@ -112,61 +116,57 @@ function parseCollectArgs(argv: string[]): CollectArgs {
   }
   let threadAuthor: string | null = null
   let runId = 'local'
-  let dryRun = false
-  let listOnly = false
-  let reharvest = false
-  let noLabel = false
+  const bools = { dryRun: false, listOnly: false, reharvest: false, noLabel: false }
+  const boolFlags: Record<string, keyof typeof bools> = {
+    '--dry-run': 'dryRun',
+    '--list-only': 'listOnly',
+    '--reharvest': 'reharvest',
+    '--no-label': 'noLabel',
+  }
+  const valueFlags: Record<string, (v: string) => void> = {
+    // An all-invalid --pr-ids parses to [] — which reads as "no explicit
+    // selection" and silently falls back to the default 50-PR queue.
+    '--pr-ids': (v) => {
+      const ids = parseCsvInts(v)
+      if (ids.length === 0) {
+        console.error(`error: --pr-ids has no valid PR numbers in "${v}"`)
+        process.exit(2)
+      }
+      filters.prIds = ids
+    },
+    '--merged-since': (v) => (filters.mergedSince = v),
+    '--merged-until': (v) => (filters.mergedUntil = v),
+    '--last': (v) => (filters.lastN = parsePositiveInt('--last', v)),
+    '--pr-author': (v) => (filters.prAuthor = v),
+    '--labels': (v) => (filters.labels = parseCsvStrings(v)),
+    '--thread-author': (v) => (threadAuthor = v),
+    '--run-id': (v) => (runId = v),
+  }
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!
-    const value = readOption(argv, i)
-    switch (arg) {
-      case '--dry-run':
-        dryRun = true
-        break
-      case '--list-only':
-        listOnly = true
-        break
-      case '--reharvest':
-        reharvest = true
-        break
-      case '--no-label':
-        noLabel = true
-        break
-      case '--pr-ids':
-      case '--merged-since':
-      case '--merged-until':
-      case '--last':
-      case '--pr-author':
-      case '--labels':
-      case '--thread-author':
-      case '--run-id':
-        if (value === null) {
-          break
-        }
-        i += 1
-        if (arg === '--pr-ids') filters.prIds = parseCsvInts(value)
-        else if (arg === '--merged-since') filters.mergedSince = value
-        else if (arg === '--merged-until') filters.mergedUntil = value
-        else if (arg === '--last') {
-          const n = Number(value)
-          if (!Number.isInteger(n) || n <= 0) {
-            console.error(`error: --last must be a positive integer, got "${value}"`)
-            process.exit(2)
-          }
-          filters.lastN = n
-        } else if (arg === '--pr-author') filters.prAuthor = value
-        else if (arg === '--labels') filters.labels = parseCsvStrings(value)
-        else if (arg === '--thread-author') threadAuthor = value
-        else if (arg === '--run-id') runId = value
-        break
-      default:
-        positional.push(arg)
+    const bool = boolFlags[arg]
+    if (bool) {
+      bools[bool] = true
+      continue
     }
+    const set = valueFlags[arg]
+    if (set) {
+      const value = readOption(argv, i)
+      // A value flag without a value must not silently parse as absent —
+      // a dropped selection flag downgrades to the default 50-PR queue.
+      if (value === null) {
+        console.error(`error: ${arg} requires a value`)
+        process.exit(2)
+      }
+      set(value)
+      i += 1
+      continue
+    }
+    positional.push(arg)
   }
 
-  const repo = resolveRepo(positional)
-  const [owner, repoName] = repo.split('/')
+  const repo = rev.resolveRepo(positional)
 
   // No explicit selection → default queue: last 50 merged PRs.
   if (!hasHarvestSelection(filters)) {
@@ -175,27 +175,22 @@ function parseCollectArgs(argv: string[]): CollectArgs {
 
   return {
     repo,
-    owner: owner!,
-    repoName: repoName!,
     filters,
     threadAuthor,
     runId,
-    dryRun,
-    listOnly,
-    reharvest,
-    noLabel,
+    ...bools,
   }
 }
 
 async function cmdCollect(argv: string[]): Promise<void> {
-  const args = parseCollectArgs(argv)
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  const args = parseCollectArgs(rev, argv)
   ensureGhAuth()
 
   // Fetch at least as many candidates as --last requests, or it silently caps.
   const listLimit = Math.max(args.filters.lastN ?? 0, 100)
-  const matched = resolveHarvestPrs({
-    owner: args.owner,
-    repo: args.repoName,
+  const matched = resolveHarvestPrs(rev, {
+    repo: args.repo,
     filters: args.filters,
     listLimit,
   })
@@ -250,7 +245,7 @@ async function cmdCollect(argv: string[]): Promise<void> {
     console.error('debt collect: --thread-author is a partial scan — labels disabled')
   }
   if (!args.dryRun && labelingEnabled) {
-    ensureDebtLabels(args.repo)
+    ensureDebtLabels(rev, args.repo)
   }
 
   let totalRows = 0
@@ -261,21 +256,20 @@ async function cmdCollect(argv: string[]): Promise<void> {
     const scannedAt = new Date().toISOString()
     let result
     try {
-      result = await collectPr({
-        owner: args.owner,
-        repo: args.repoName,
+      result = await collectPr(rev, {
+        repo: args.repo,
         pr: pr.number,
         runId: args.runId,
         threadAuthor: args.threadAuthor,
       })
     } catch (err) {
       console.error(
-        `warning: PR ${prLink(`${args.owner}/${args.repoName}`, pr.number)} skipped — ${err instanceof Error ? err.message : err}`
+        `warning: PR ${rev.prLink(args.repo, pr.number)} skipped — ${err instanceof Error ? err.message : err}`
       )
       continue
     }
     console.error(
-      `debt: PR ${prLink(`${args.owner}/${args.repoName}`, pr.number)} — ${result.incoming.length} thread(s)`
+      `debt: PR ${rev.prLink(args.repo, pr.number)} — ${result.incoming.length} thread(s)`
     )
 
     if (args.dryRun) {
@@ -321,9 +315,9 @@ async function cmdCollect(argv: string[]): Promise<void> {
     // Re-fetch labels: the candidate snapshot predates this PR's collection,
     // and a human may have opted out while we were scanning.
     if (labelingEnabled) {
-      const current = fetchPrLabels({ owner: args.owner, repo: args.repoName, pr: pr.number })
+      const current = rev.labels({ repo: args.repo, pr: pr.number })
       if (prDebtState(current) !== 'skipped') {
-        applyCollectLabel({ repo: args.repo, pr: pr.number, state })
+        applyCollectLabel(rev, { repo: args.repo, pr: pr.number, state })
         labeled += 1
       }
       // Store the observed updatedAt as the cursor, not the wall clock:
@@ -334,7 +328,7 @@ async function cmdCollect(argv: string[]): Promise<void> {
       // scans earn a cursor — a --thread-author partial scan must not
       // mask post-scan activity on a labeled PR.
       const cursor =
-        fetchPrUpdatedAt({ owner: args.owner, repo: args.repoName, pr: pr.number }) ??
+        rev.prUpdatedAt({ repo: args.repo, pr: pr.number }) ??
         pr.updatedAt ??
         scannedAt
       markProcessedAt([pr.number], cursor)
@@ -402,17 +396,10 @@ function cmdStatus(): void {
   }
 
   // Best-effort: count merged PRs still lacking a debt:* label. Skipped
-  // silently when no repo resolves (not in a clone, gh unreachable).
+  // silently when no repo resolves (not in a clone, host unreachable).
   try {
-    const repo = resolveRepo([])
-    const [owner, repoName] = repo.split('/')
-    const merged = fetchMergedPrCandidates({
-      owner: owner!,
-      repo: repoName!,
-      prAuthor: null,
-      label: null,
-      limit: 100,
-    })
+    const rev = reviewHost(undefined, loadBroConfig().connectors)
+    const merged = rev.mergedPrs(rev.resolveRepo([]), { limit: 100 })
     const { pending } = partitionByProcessed(merged)
     console.log(`\nunprocessed merged PRs: ${pending.length} (of last ${merged.length})`)
   } catch {
@@ -442,17 +429,11 @@ function cmdPrs(argv: string[]): void {
     }
     positional.push(arg)
   }
-  const repo = resolveRepo(positional)
-  const [owner, repoName] = repo.split('/')
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  const repo = rev.resolveRepo(positional)
   ensureGhAuth()
 
-  const prs = fetchMergedPrCandidates({
-    owner: owner!,
-    repo: repoName!,
-    prAuthor: null,
-    label: null,
-    limit,
-  })
+  const prs = rev.mergedPrs(repo, { limit })
   const rows = prs
     .map((pr) => ({ pr, state: prDebtState(pr.labels) ?? 'none' }))
     .filter((row) => showAll || row.state === 'none')
@@ -524,20 +505,21 @@ function cmdMark(argv: string[]): void {
     console.error(`Usage: bro debt mark PR <${[...DEBT_STATES, 'none'].join('|')}> [OWNER REPO]`)
     process.exit(2)
   }
-  const repo = resolveRepo(rest)
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  const repo = rev.resolveRepo(rest)
   ensureGhAuth()
   if (stateRaw === 'none') {
-    clearDebtLabels({ repo, pr })
-    console.error(`debt mark: cleared debt:* labels on ${prLink(repo, pr)}`)
+    clearDebtLabels(rev, { repo, pr })
+    console.error(`debt mark: cleared debt:* labels on ${rev.prLink(repo, pr)}`)
     return
   }
   if (!(DEBT_STATES as readonly string[]).includes(stateRaw)) {
     console.error(`error: unknown state ${stateRaw}`)
     process.exit(2)
   }
-  ensureDebtLabels(repo)
-  applyDebtLabel({ repo, pr, state: stateRaw as DebtPrState })
-  console.error(`debt mark: ${prLink(repo, pr)} → debt:${stateRaw}`)
+  ensureDebtLabels(rev, repo)
+  applyDebtLabel(rev, { repo, pr, state: stateRaw as DebtPrState })
+  console.error(`debt mark: ${rev.prLink(repo, pr)} → debt:${stateRaw}`)
 }
 
 // --- set -------------------------------------------------------------------

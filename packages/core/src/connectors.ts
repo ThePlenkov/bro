@@ -170,6 +170,15 @@ export function facade<K extends keyof FacadeMap>(
   return provides(pick)!(ctx) as FacadeMap[K]
 }
 
+/** facade('reviews') bound to a dir — the common resolution path for
+ *  review-host commands (act/debt/hooks). */
+export function reviewHost(
+  dir: string = process.cwd(),
+  prefer?: Record<string, string>
+): ReviewFacade {
+  return facade('reviews', { dir }, { prefer })
+}
+
 /** Every registered connector's hook probes — hooks collect, never pick:
  *  each system reports its own ambient state. */
 export function connectorHooks(ctx: ConnectorCtx): ConnectorHooks[] {

@@ -2,13 +2,9 @@
  * act domain types — the open-PR review loop. Ported from the act skill's
  * pr-state.ts, same semantics minus the shell plumbing.
  */
-import type { ReviewThreadNode } from '@bro/debt'
+import type { CheckInfo, ReviewThread } from '@bro/core'
 
-export interface PrCheck {
-  name: string
-  state: string
-  bucket: string
-}
+export type { CheckInfo as PrCheck }
 
 export interface PrActState {
   pr: number
@@ -20,7 +16,7 @@ export interface PrActState {
   mergeable: string
   mergeState: string
   openThreads: number
-  threads: ReviewThreadNode[]
+  threads: ReviewThread[]
   /** Non-reviewer checks still running/queued — all checks, not just required. */
   ciPending: number
   /** Non-reviewer checks settled red (failure/cancelled/timed out). */

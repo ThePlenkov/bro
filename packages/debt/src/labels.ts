@@ -1,9 +1,10 @@
 /**
  * `debt:*` PR labels — the PR-level "was this merged PR processed?" marker.
  * Row-level dedup lives in store.ts (`thread_id` upsert); labels answer the
- * coarser question without rescanning.
+ * coarser question without rescanning. Host calls go through the injected
+ * ReviewFacade.
  */
-import { gh } from '@bro/core'
+import type { ReviewFacade } from '@bro/core'
 
 export const DEBT_STATES = ['collected', 'clean', 'skipped'] as const
 export type DebtPrState = (typeof DEBT_STATES)[number]
@@ -47,39 +48,29 @@ const LABEL_COLORS: Record<DebtPrState, string> = {
   skipped: '8250DF',
 }
 
-/** Idempotent — `gh label create --force` updates in place when the label exists. */
-export function ensureDebtLabels(repo: string): void {
+/** Idempotent — createLabel upserts in place when the label exists. */
+export function ensureDebtLabels(rev: ReviewFacade, repo: string): void {
   for (const state of DEBT_STATES) {
-    gh(['label', 'create', debtLabel(state), '--repo', repo, '--color', LABEL_COLORS[state], '--force'])
-  }
-}
-
-/** Suppress only confirmed absent-label errors; real gh failures propagate. */
-function tryRemoveLabel(repo: string, pr: number, label: string): void {
-  try {
-    gh(['pr', 'edit', String(pr), '--repo', repo, '--remove-label', label])
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    // Must name THIS label — "repository not found" must not be swallowed.
-    if (msg.includes(label) && /not found|does not exist|no such label/i.test(msg)) {
-      return
-    }
-    throw err
+    rev.createLabel(repo, debtLabel(state), LABEL_COLORS[state])
   }
 }
 
 /**
  * Sets `debt:<state>` on the PR. Adds the target first, then removes the
- * others — gh has no atomic multi-label write, and on a mid-removal failure
- * the precedence rule (`skipped` > machine states) keeps the safer state.
+ * others — hosts have no atomic multi-label write, and on a mid-removal
+ * failure the precedence rule (`skipped` > machine states) keeps the
+ * safer state.
  */
-export function applyDebtLabel(opts: { repo: string; pr: number; state: DebtPrState }): void {
+export function applyDebtLabel(
+  rev: ReviewFacade,
+  opts: { repo: string; pr: number; state: DebtPrState }
+): void {
   const target = debtLabel(opts.state)
-  gh(['pr', 'edit', String(opts.pr), '--repo', opts.repo, '--add-label', target])
+  rev.addLabel({ repo: opts.repo, pr: opts.pr }, target)
   for (const state of DEBT_STATES) {
     const label = debtLabel(state)
     if (label !== target) {
-      tryRemoveLabel(opts.repo, opts.pr, label)
+      rev.removeLabel({ repo: opts.repo, pr: opts.pr }, label)
     }
   }
 }
@@ -90,22 +81,28 @@ export function applyDebtLabel(opts: { repo: string; pr: number; state: DebtPrSt
  * a human can opt out after the re-fetch, and this keeps that late opt-out
  * intact (precedence resolves it as `skipped` either way).
  */
-export function applyCollectLabel(opts: { repo: string; pr: number; state: DebtPrState }): void {
+export function applyCollectLabel(
+  rev: ReviewFacade,
+  opts: { repo: string; pr: number; state: DebtPrState }
+): void {
   const target = debtLabel(opts.state)
-  gh(['pr', 'edit', String(opts.pr), '--repo', opts.repo, '--add-label', target])
+  rev.addLabel({ repo: opts.repo, pr: opts.pr }, target)
   for (const state of DEBT_STATES) {
     if (state === 'skipped') {
       continue
     }
     const label = debtLabel(state)
     if (label !== target) {
-      tryRemoveLabel(opts.repo, opts.pr, label)
+      rev.removeLabel({ repo: opts.repo, pr: opts.pr }, label)
     }
   }
 }
 
-export function clearDebtLabels(opts: { repo: string; pr: number }): void {
+export function clearDebtLabels(
+  rev: ReviewFacade,
+  opts: { repo: string; pr: number }
+): void {
   for (const state of DEBT_STATES) {
-    tryRemoveLabel(opts.repo, opts.pr, debtLabel(state))
+    rev.removeLabel({ repo: opts.repo, pr: opts.pr }, debtLabel(state))
   }
 }

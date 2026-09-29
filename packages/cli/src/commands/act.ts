@@ -8,9 +8,15 @@
  *   reply   --thread ID --comment TEXT | --file TSV
  */
 import { readFileSync } from 'node:fs'
-import { ensureGhAuth, gh, gitTry, prLink, resolveRepo, taskStore } from '@bro/core'
+import {
+  ensureGhAuth,
+  gitTry,
+  reviewHost,
+  taskStore,
+  type PrTarget,
+  type ReviewFacade,
+} from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
-import { fetchReviewThreads } from '@bro/debt'
 import { isAncestor } from './cleanup.ts'
 import { flag } from './args.ts'
 import { gitDirOf, hasSubmodules, isLinkedGitDir, parseWorktreePorcelain } from './work.ts'
@@ -19,10 +25,6 @@ import {
   evaluateExitGate,
   fetchPrActState,
   releaseMergeSlot,
-  replyToThread,
-  resolveReviewThread,
-  unresolveReviewThread,
-  updatePullBranch,
   waitForGate,
   type ActPlan,
   type ActThreadVerdict,
@@ -54,7 +56,7 @@ Commands:
 const VALUE_FLAGS = new Set(['--pr', '--thread', '--comment', '--file', '--interval', '--timeout'])
 
 /** PR number: --pr flag, first positional, or the current branch's PR. */
-function resolvePr(argv: string[]): { repo: string; owner: string; repoName: string; pr: number } {
+function resolvePr(rev: ReviewFacade, argv: string[]): PrTarget {
   const positional: string[] = []
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!
@@ -70,42 +72,37 @@ function resolvePr(argv: string[]): { repo: string; owner: string; repoName: str
   const prRaw =
     (prFlag >= 0 ? argv[prFlag + 1] : undefined) ?? positional[0] ?? null
 
-  const repo = resolveRepo([])
-  const [owner, repoName] = repo.split('/')
+  const repo = rev.resolveRepo([])
 
   if (prRaw === null) {
-    // `gh pr view` resolves the PR for the CURRENT branch — `gh pr list
-    // --limit 1` would grab an arbitrary open PR instead. It also resolves
-    // CLOSED/MERGED PRs, so state must be checked explicitly.
-    let pr: { number: number; state: string } | null = null
-    try {
-      pr = JSON.parse(gh(['pr', 'view', '--json', 'number,state']))
-    } catch {
-      /* no PR for this branch */
-    }
+    // the connector resolves the PR for the CURRENT branch — a bare list
+    // query would grab an arbitrary open PR instead. CLOSED/MERGED PRs
+    // resolve too, so state must be checked explicitly.
+    const pr = rev.currentPr()
     if (!pr || pr.state !== 'OPEN') {
       console.error('error: no open PR for current branch — pass a PR number')
       process.exit(2)
     }
-    return { repo, owner: owner!, repoName: repoName!, pr: pr.number }
+    return { repo, pr: pr.pr }
   }
   const pr = Number(prRaw)
   if (!Number.isInteger(pr) || pr <= 0) {
     console.error(`error: invalid PR number "${prRaw}"`)
     process.exit(2)
   }
-  return { repo, owner: owner!, repoName: repoName!, pr }
+  return { repo, pr }
 }
 
 async function cmdStatus(argv: string[]): Promise<void> {
   ensureGhAuth()
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
   const json = argv.includes('--json')
-  const t = resolvePr(argv)
+  const t = resolvePr(rev, argv)
   const act = loadBroConfig().act
-  const state = await fetchPrActState(
-    { owner: t.owner, repo: t.repoName, pr: t.pr },
-    { ignoreChecks: act.ignoreChecks, maxRounds: act.maxRounds }
-  )
+  const state = await fetchPrActState(rev, t, {
+    ignoreChecks: act.ignoreChecks,
+    maxRounds: act.maxRounds,
+  })
   const gate = evaluateExitGate(state)
 
   if (!gate.ok) {
@@ -143,7 +140,8 @@ function printStatus(state: PrActState, gate: ExitGate): void {
  */
 async function cmdWait(argv: string[]): Promise<void> {
   ensureGhAuth()
-  const t = resolvePr(argv)
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  const t = resolvePr(rev, argv)
   const act = loadBroConfig().act
   const interval = Number(flag(argv, '--interval') ?? '60')
   const timeout = Number(flag(argv, '--timeout') ?? '45')
@@ -153,10 +151,10 @@ async function cmdWait(argv: string[]): Promise<void> {
   }
   const res = await waitForGate(
     async () => {
-      const state = await fetchPrActState(
-        { owner: t.owner, repo: t.repoName, pr: t.pr },
-        { ignoreChecks: act.ignoreChecks, maxRounds: act.maxRounds }
-      )
+      const state = await fetchPrActState(rev, t, {
+        ignoreChecks: act.ignoreChecks,
+        maxRounds: act.maxRounds,
+      })
       return { state, gate: evaluateExitGate(state) }
     },
     {
@@ -164,18 +162,18 @@ async function cmdWait(argv: string[]): Promise<void> {
       timeoutMs: timeout * 60_000,
       onPoll: (s, g) =>
         console.error(
-          `act wait ${prLink(t.repo, s.pr)}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
+          `act wait ${rev.prLink(t.repo, s.pr)}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
         ),
       onError: (err, n) =>
         console.error(
-          `act wait ${prLink(t.repo, t.pr)}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
+          `act wait ${rev.prLink(t.repo, t.pr)}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
         ),
       // the "Update branch" button as a wait step: BEHIND + mergeable is
       // a state to fix, not to sit on — conflicts still settle for a human
       updateBranch: (s) => {
-        const ok = updatePullBranch({ owner: t.owner, repo: t.repoName, pr: t.pr }, s.headSha)
+        const ok = rev.updateBranch(t, s.headSha)
         console.error(
-          `act wait ${prLink(t.repo, t.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
+          `act wait ${rev.prLink(t.repo, t.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
         )
         return ok
       },
@@ -218,29 +216,39 @@ async function mergeIfAsked(argv: string[], pr: number): Promise<void> {
 /** Merge strategy validation — returns null (caller errors out) on
  *  conflicting flags. Runs before the slot so a doomed request never
  *  occupies the critical section. */
-function mergeMethod(argv: string[]): string | null {
+function mergeMethod(argv: string[]): 'squash' | 'merge' | 'rebase' | null {
   const strategies = ['--squash', '--merge', '--rebase'].filter((f) => argv.includes(f))
   if (strategies.length > 1) {
     console.error(`error: conflicting merge strategies: ${strategies.join(' ')}`)
     return null
   }
-  return strategies[0] ?? '--squash'
+  return (strategies[0]?.slice(2) ?? 'squash') as 'squash' | 'merge' | 'rebase'
 }
 
-/** `gh pr merge` + the authoritative verify — a merge queue accepts a PR
- *  without landing it, so only a MERGED state returns the landed head. */
-function landPr(ownerRepo: string, pr: number, args: string[], head: { ref: string; sha: string }): { ref: string; sha: string } | undefined {
+/** mergePr + the landed-head handoff — a merge queue accepts a PR
+ *  without landing it, so only a MERGED state returns the head. */
+function landPr(
+  rev: ReviewFacade,
+  t: PrTarget,
+  opts: { method: 'squash' | 'merge' | 'rebase'; admin: boolean },
+  head: { ref: string; sha: string }
+): { ref: string; sha: string } | undefined {
   try {
-    console.log(gh(args))
-    const after = JSON.parse(gh(['pr', 'view', String(pr), '--json', 'state'])) as {
-      state: string
-    }
-    if (after.state === 'MERGED') {
-      console.log(`act: merged ${prLink(ownerRepo, pr)}`)
+    // expectedHeadSha pins the merge to the sha the gate evaluated —
+    // a head that moved since fetch fails closed instead of landing
+    // a commit the gate never saw
+    const after = rev.mergePr(t, {
+      method: opts.method,
+      expectedHeadSha: head.sha,
+      deleteBranch: true,
+      admin: opts.admin,
+    })
+    if (after === 'MERGED') {
+      console.log(`act: merged ${rev.prLink(t.repo, t.pr)}`)
       return head
     }
     console.log(
-      `act: ${prLink(ownerRepo, pr)} accepted but state=${after.state} — a merge queue still owns it; ` +
+      `act: ${rev.prLink(t.repo, t.pr)} accepted but state=${after} — a merge queue still owns it; ` +
         'local cleanup deferred'
     )
     return undefined
@@ -253,7 +261,8 @@ function landPr(ownerRepo: string, pr: number, args: string[], head: { ref: stri
 
 async function cmdMerge(argv: string[]): Promise<void> {
   ensureGhAuth()
-  const t = resolvePr(argv)
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  const t = resolvePr(rev, argv)
 
   const method = mergeMethod(argv)
   if (!method) {
@@ -278,16 +287,16 @@ async function cmdMerge(argv: string[]): Promise<void> {
   let mergedHead: { ref: string; sha: string } | undefined
   try {
     const act = loadBroConfig().act
-    const state = await fetchPrActState(
-      { owner: t.owner, repo: t.repoName, pr: t.pr },
-      { ignoreChecks: act.ignoreChecks, maxRounds: act.maxRounds }
-    )
+    const state = await fetchPrActState(rev, t, {
+      ignoreChecks: act.ignoreChecks,
+      maxRounds: act.maxRounds,
+    })
 
     // a closed/merged PR can pass the gate (threads resolved, checks
     // settled) — merging it isn't a gate question, it's a lifecycle error
     if (state.state !== 'OPEN') {
       console.error(
-        `error: ${prLink(t.repo, t.pr)} is ${state.state} — only OPEN PRs can be merged`
+        `error: ${rev.prLink(t.repo, t.pr)} is ${state.state} — only OPEN PRs can be merged`
       )
       process.exitCode = 1
       return
@@ -295,7 +304,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
 
     const gate = evaluateExitGate(state)
     if (!gate.ok) {
-      console.error(`exit_gate=BLOCKED — refusing to merge ${prLink(t.repo, t.pr)}`)
+      console.error(`exit_gate=BLOCKED — refusing to merge ${rev.prLink(t.repo, t.pr)}`)
       for (const b of gate.blockers) {
         console.error(`  blocker: ${b}`)
       }
@@ -303,14 +312,10 @@ async function cmdMerge(argv: string[]): Promise<void> {
       return
     }
 
-    // --match-head-commit pins the merge to the sha the gate evaluated —
-    // a head that moved since fetch fails closed instead of landing
-    // a commit the gate never saw
-    const args = ['pr', 'merge', String(t.pr), method, '--delete-branch', '--match-head-commit', state.headSha]
-    if (argv.includes('--admin')) {
-      args.push('--admin')
-    }
-    mergedHead = landPr(t.repo, t.pr, args, { ref: state.headRef, sha: state.headSha })
+    mergedHead = landPr(rev, t, { method, admin: argv.includes('--admin') }, {
+      ref: state.headRef,
+      sha: state.headSha,
+    })
   } finally {
     if (slot.kind === 'acquired') {
       releaseMergeSlot()
@@ -448,18 +453,19 @@ export function cleanupAfterMerge(headRef: string, headSha: string): void {
 
 async function cmdThreads(argv: string[]): Promise<void> {
   ensureGhAuth()
-  const t = resolvePr(argv)
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  const t = resolvePr(rev, argv)
   // threads only needs the threads API — fetching checks/SAST here would
   // make a read-only listing fail on unrelated check-service flakes
-  const threads = await fetchReviewThreads({ owner: t.owner, repo: t.repoName, pr: t.pr })
+  const threads = await rev.reviewThreads(t)
   let open = 0
   for (const thread of threads) {
-    if (thread.isResolved) {
+    if (thread.resolved) {
       continue
     }
     open += 1
-    const c = thread.comments.nodes[0]
-    const author = c?.author?.login ?? '-'
+    const c = thread.comment
+    const author = c?.author ?? '-'
     const path = c?.path ?? '-'
     const line = c?.line ?? '-'
     const body = (c?.body ?? '').replace(/[\n\t]/g, ' ').slice(0, 120)
@@ -485,6 +491,7 @@ function commentArg(argv: string[]): string | null {
 
 function cmdResolve(argv: string[]): void {
   ensureGhAuth()
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
   const id = threadArg(argv)
   const comment = commentArg(argv)
   const unresolve = argv.includes('--unresolve')
@@ -494,20 +501,21 @@ function cmdResolve(argv: string[]): void {
       // threads are boilerplate noise on the PR (skills/act/SKILL.md)
       console.error('act: note — fixes resolve silently; --comment is for reject/defer reasons')
     }
-    replyToThread(id, comment)
+    rev.replyThread(id, comment)
     console.error(`act: replied on ${id}`)
   }
   if (unresolve) {
-    unresolveReviewThread(id)
+    rev.resolveThread(id, true)
     console.error(`act: unresolved ${id}`)
   } else {
-    resolveReviewThread(id)
+    rev.resolveThread(id)
     console.error(`act: resolved ${id}`)
   }
 }
 
 function cmdReply(argv: string[]): void {
   ensureGhAuth()
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
   const fileIdx = argv.indexOf('--file')
   if (fileIdx >= 0) {
     const file = argv[fileIdx + 1]
@@ -534,7 +542,7 @@ function cmdReply(argv: string[]): void {
       })
       .filter((r): r is { id: string; body: string } => r !== null)
     for (const row of rows) {
-      replyToThread(row.id, row.body)
+      rev.replyThread(row.id, row.body)
       console.error(`act: replied on ${row.id}`)
     }
     console.error(`act reply: ${rows.length} repl(ies)`)
@@ -550,7 +558,7 @@ function cmdReply(argv: string[]): void {
     console.error('error: --comment required (or --file TSV)')
     usage()
   }
-  replyToThread(id, comment!)
+  rev.replyThread(id, comment!)
   console.error(`act: replied on ${id}`)
 }
 
@@ -567,10 +575,15 @@ const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
  *  `bd create -l debt --external-ref <thread>`, reply with the bead id,
  *  then resolve. Fails loudly when bd can't create — never resolves a
  *  defer that didn't land. */
-function deferThread(v: ActThreadVerdict, ownerRepo: string | null, pr?: number): string {
+function deferThread(
+  rev: ReviewFacade,
+  v: ActThreadVerdict,
+  ownerRepo: string | null,
+  pr?: number
+): string {
   const desc =
     pr && ownerRepo
-      ? `deferred from PR ${prLink(ownerRepo, pr)} thread ${v.thread_id}`
+      ? `deferred from PR ${rev.prLink(ownerRepo, pr)} thread ${v.thread_id}`
       : pr
         ? `deferred from PR #${pr} thread ${v.thread_id}`
         : `deferred thread ${v.thread_id}`
@@ -584,24 +597,24 @@ function deferThread(v: ActThreadVerdict, ownerRepo: string | null, pr?: number)
     externalRef: v.thread_id,
   }).id
   const reply = `deferred to ${bead}` + (v.comment ? ` — ${v.comment}` : '')
-  replyToThread(v.thread_id, reply)
-  resolveReviewThread(v.thread_id)
+  rev.replyThread(v.thread_id, reply)
+  rev.resolveThread(v.thread_id)
   return bead
 }
 
-function replyVerdict(v: ActThreadVerdict): void {
+function replyVerdict(rev: ReviewFacade, v: ActThreadVerdict): void {
   if (!v.comment) {
     throw new Error(`reply verdict for ${v.thread_id} has no comment`)
   }
-  replyToThread(v.thread_id, v.comment)
+  rev.replyThread(v.thread_id, v.comment)
   console.error(`act: replied on ${v.thread_id}`)
 }
 
-function resolveVerdict(v: ActThreadVerdict): void {
+function resolveVerdict(rev: ReviewFacade, v: ActThreadVerdict): void {
   if (v.comment) {
-    replyToThread(v.thread_id, v.comment)
+    rev.replyThread(v.thread_id, v.comment)
   }
-  resolveReviewThread(v.thread_id)
+  rev.resolveThread(v.thread_id)
   console.error(`act: resolved ${v.thread_id}`)
 }
 
@@ -609,6 +622,7 @@ function resolveVerdict(v: ActThreadVerdict): void {
  *  One bad verdict doesn't abort the rest; failures list at the end. */
 export function applyActPlan(plan: ActPlan): void {
   ensureGhAuth()
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
   // no upfront beads check — a defer without bd/.beads fails that one
   // verdict (thread stays unresolved, per the skill's fallback rule)
   // instead of blocking every other verdict in the plan
@@ -617,13 +631,13 @@ export function applyActPlan(plan: ActPlan): void {
   for (const v of plan.threads) {
     try {
       if (v.action === 'reply') {
-        replyVerdict(v)
+        replyVerdict(rev, v)
       } else if (v.action === 'defer') {
-        // lazy: only a defer verdict pays the `gh repo view` call
-        ownerRepo ??= resolveRepo([])
-        console.error(`act: deferred ${v.thread_id} → ${deferThread(v, ownerRepo, plan.pr)}`)
+        // lazy: only a defer verdict pays the repo-resolution call
+        ownerRepo ??= rev.resolveRepo([])
+        console.error(`act: deferred ${v.thread_id} → ${deferThread(rev, v, ownerRepo, plan.pr)}`)
       } else {
-        resolveVerdict(v)
+        resolveVerdict(rev, v)
       }
     } catch (err) {
       failed.push(v.thread_id)
