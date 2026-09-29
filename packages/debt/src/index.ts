@@ -52,6 +52,8 @@ export type { DebtPlan, DebtVerdict } from './plan.ts'
 export { applyDebtVerdicts } from './store.ts'
 export type { DebtVerdictInput } from './store.ts'
 export { debtConnector } from './connector.ts'
+export { groupStats } from './stats.ts'
+export type { StatBucket, StatsGroupBy } from './stats.ts'
 export {
   ALL_SOURCES,
   COLLECTORS,

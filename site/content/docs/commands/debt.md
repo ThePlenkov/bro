@@ -20,6 +20,7 @@ PR merged → bro debt collect → findings land in .agents/review-debt/
 | `bro debt collect` | Scan merged PRs missing a `debt:*` label, harvest unresolved threads, label the PR `debt:collected` or `debt:clean` |
 | `bro debt prs` | The queue — merged PRs still unprocessed (`--all` for everything) |
 | `bro debt status` | Ledger stats: open/done/wontfix, by area, by author, duplicates |
+| `bro debt stats [--by author\|source\|area]` | Reviewer/source signal: findings grouped with fix% — the done share of decided rows. Which bot is worth reading, which is noise |
 | `bro debt list` | Raw rows, filterable |
 | `bro debt mark <pr> <state>` | Manual override — `skipped` is the human opt-out |
 | `bro debt set <status> --thread-id ID` | Row lifecycle: `claimed` / `done --fix-pr N` / `wontfix` / `duplicate` |

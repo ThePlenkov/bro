@@ -30,6 +30,7 @@ import {
   DEBT_ROW_STATUSES,
   DEBT_STATES,
   ensureDebtLabels,
+  groupStats,
   hasHarvestSelection,
   parseCsvInts,
   parseCsvStrings,
@@ -53,6 +54,7 @@ import {
   type DebtRecord,
   type DebtStatus,
   type DebtVerdict,
+  type StatsGroupBy,
   type HarvestPrFilters,
 } from '@broject/debt'
 
@@ -76,6 +78,8 @@ Commands:
                                   opt in: ${DEBT_SOURCES.join(', ')}
                                   debt.stale_days tunes stale-prs (default 14)
   status                          Ledger summary + unprocessed merged PR count
+  stats [--by author|source|area] Signal per reviewer/source/area — fix% is
+        [--json]                  done share of decided rows (default: author)
   prs [--limit N] [--all]         Unprocessed merged PRs (--all: full matrix)
   list [filters]                  Ledger rows (--status, --area, --author,
                                   --priority, --pr, --limit)
@@ -505,6 +509,39 @@ function cmdStatus(): void {
   }
 }
 
+// --- stats -----------------------------------------------------------------
+
+const STATS_BY: readonly StatsGroupBy[] = ['author', 'source', 'area']
+
+function cmdStats(argv: string[]): void {
+  const json = argv.includes('--json')
+  let by: StatsGroupBy = 'author'
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--by') {
+      const value = readOption(argv, i)
+      if (!value || !(STATS_BY as readonly string[]).includes(value)) {
+        console.error(`error: --by must be one of ${STATS_BY.join('|')}, got "${value}"`)
+        process.exit(2)
+      }
+      by = value as StatsGroupBy
+      i += 1
+    }
+  }
+
+  const rows = groupStats(readDebtRecords(), by)
+  if (json) {
+    console.log(JSON.stringify(rows, null, 2))
+    return
+  }
+  const label = by === 'author' ? 'reviewer' : by
+  console.log(`${label}\ttotal\topen\tclaimed\tdone\twontfix\tdup\tfix%`)
+  for (const r of rows) {
+    const rate = r.fixRate === null ? '—' : `${Math.round(r.fixRate * 100)}%`
+    console.log(`${r.key}\t${r.total}\t${r.open}\t${r.claimed}\t${r.done}\t${r.wontfix}\t${r.duplicate}\t${rate}`)
+  }
+  console.error(`debt stats: ${rows.length} ${label}(s)`)
+}
+
 // --- prs -------------------------------------------------------------------
 
 function cmdPrs(argv: string[]): void {
@@ -835,6 +872,7 @@ function cmdSync(argv: string[]): void {
 const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
   collect: cmdCollect,
   status: cmdStatus,
+  stats: cmdStats,
   prs: cmdPrs,
   list: cmdList,
   mark: cmdMark,

@@ -64,6 +64,7 @@ fail-open.
 | `bro debt collect` | Scans merged PRs missing a `debt:*` label, harvests unresolved threads, labels the PR `debt:collected` or `debt:clean` |
 | `bro debt prs` | The queue — merged PRs still unprocessed (`--all` for the full picture) |
 | `bro debt status` | Ledger stats: open/done/wontfix, by area, by author, dupes |
+| `bro debt stats [--by author\|source\|area]` | **Which reviewer is worth reading** — findings per reviewer with fix% (done share of decided rows); `--by source` scores the collectors too |
 | `bro debt list` | Raw rows, filterable |
 | `bro debt mark <pr> <state>` | Manual override — `skipped` is the human opt-out, bro respects it |
 | `bro debt set <status> --thread-id ID` | Row status: `claimed` / `done --fix-pr N` / `wontfix` / `duplicate` — feeds `sync` |
