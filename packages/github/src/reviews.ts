@@ -335,7 +335,7 @@ function explicitMergedPrs(ref: RepoRef, ids: number[]): MergedPr[] {
         console.error(`warning: PR ${link} is not merged — skipped`)
         continue
       }
-      out.push(toMergedPr(viewed))
+      out.push(toMergedPr({ ...viewed, mergedAt: viewed.mergedAt }))
     } catch {
       console.error(`warning: PR ${link} fetch failed — skipped`)
     }
