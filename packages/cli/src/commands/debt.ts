@@ -95,6 +95,15 @@ interface CollectArgs {
   noLabel: boolean
 }
 
+function parsePositiveInt(flag: string, value: string): number {
+  const n = Number(value)
+  if (!Number.isInteger(n) || n <= 0) {
+    console.error(`error: ${flag} must be a positive integer, got "${value}"`)
+    process.exit(2)
+  }
+  return n
+}
+
 function parseCollectArgs(rev: ReviewFacade, argv: string[]): CollectArgs {
   const positional: string[] = []
   const filters: HarvestPrFilters = {
@@ -107,57 +116,41 @@ function parseCollectArgs(rev: ReviewFacade, argv: string[]): CollectArgs {
   }
   let threadAuthor: string | null = null
   let runId = 'local'
-  let dryRun = false
-  let listOnly = false
-  let reharvest = false
-  let noLabel = false
+  const bools = { dryRun: false, listOnly: false, reharvest: false, noLabel: false }
+  const boolFlags: Record<string, keyof typeof bools> = {
+    '--dry-run': 'dryRun',
+    '--list-only': 'listOnly',
+    '--reharvest': 'reharvest',
+    '--no-label': 'noLabel',
+  }
+  const valueFlags: Record<string, (v: string) => void> = {
+    '--pr-ids': (v) => (filters.prIds = parseCsvInts(v)),
+    '--merged-since': (v) => (filters.mergedSince = v),
+    '--merged-until': (v) => (filters.mergedUntil = v),
+    '--last': (v) => (filters.lastN = parsePositiveInt('--last', v)),
+    '--pr-author': (v) => (filters.prAuthor = v),
+    '--labels': (v) => (filters.labels = parseCsvStrings(v)),
+    '--thread-author': (v) => (threadAuthor = v),
+    '--run-id': (v) => (runId = v),
+  }
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!
-    const value = readOption(argv, i)
-    switch (arg) {
-      case '--dry-run':
-        dryRun = true
-        break
-      case '--list-only':
-        listOnly = true
-        break
-      case '--reharvest':
-        reharvest = true
-        break
-      case '--no-label':
-        noLabel = true
-        break
-      case '--pr-ids':
-      case '--merged-since':
-      case '--merged-until':
-      case '--last':
-      case '--pr-author':
-      case '--labels':
-      case '--thread-author':
-      case '--run-id':
-        if (value === null) {
-          break
-        }
-        i += 1
-        if (arg === '--pr-ids') filters.prIds = parseCsvInts(value)
-        else if (arg === '--merged-since') filters.mergedSince = value
-        else if (arg === '--merged-until') filters.mergedUntil = value
-        else if (arg === '--last') {
-          const n = Number(value)
-          if (!Number.isInteger(n) || n <= 0) {
-            console.error(`error: --last must be a positive integer, got "${value}"`)
-            process.exit(2)
-          }
-          filters.lastN = n
-        } else if (arg === '--pr-author') filters.prAuthor = value
-        else if (arg === '--labels') filters.labels = parseCsvStrings(value)
-        else if (arg === '--thread-author') threadAuthor = value
-        else if (arg === '--run-id') runId = value
-        break
-      default:
-        positional.push(arg)
+    const bool = boolFlags[arg]
+    if (bool) {
+      bools[bool] = true
+      continue
     }
+    const set = valueFlags[arg]
+    if (set) {
+      const value = readOption(argv, i)
+      if (value !== null) {
+        set(value)
+        i += 1
+      }
+      continue
+    }
+    positional.push(arg)
   }
 
   const repo = rev.resolveRepo(positional)
@@ -172,10 +165,7 @@ function parseCollectArgs(rev: ReviewFacade, argv: string[]): CollectArgs {
     filters,
     threadAuthor,
     runId,
-    dryRun,
-    listOnly,
-    reharvest,
-    noLabel,
+    ...bools,
   }
 }
 
