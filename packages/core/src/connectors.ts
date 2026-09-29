@@ -132,7 +132,9 @@ const beadsConnector: Connector = {
         const list = claimed.join(', ')
         return [
           {
-            aspect: 'work',
+            // own aspect — claiming arms 'task', so the gate binds the
+            // session that claimed, not every worktree user
+            aspect: 'task',
             block:
               `bro: claimed beads open: ${list} — ` +
               'close (`bd close <id>`) or release the claim before stopping',
@@ -239,6 +241,24 @@ export function connectorHooks(ctx: ConnectorCtx): ConnectorHooks[] {
   return out
 }
 
+/** Per-probe budget — a hung connector (dead network, wedged CLI) must
+ *  not stall the whole hook. Racing the probe means the output goes out
+ *  on time even if a spawned child lingers. */
+const PROBE_TIMEOUT_MS = 4_000
+
+async function probeWithTimeout<T>(p: MaybePromise<T>, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), PROBE_TIMEOUT_MS)
+    timer.unref?.()
+  })
+  try {
+    return await Promise.race([Promise.resolve(p), timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /** Collect a line-producing probe across all connectors — fail-open
  *  per connector, one wedged system must not starve the rest. */
 async function collectLines(
@@ -248,7 +268,7 @@ async function collectLines(
   const out: string[] = []
   for (const h of connectorHooks(ctx)) {
     try {
-      out.push(...((await probe(h)) ?? []))
+      out.push(...((await probeWithTimeout(probe(h), undefined)) ?? []))
     } catch {
       // fail-open
     }
@@ -279,7 +299,7 @@ export async function stopGateContributions(
   const out: GateContribution[] = []
   for (const h of connectorHooks(ctx)) {
     try {
-      out.push(...((await h.stopGate?.(ctx)) ?? []))
+      out.push(...((await probeWithTimeout(h.stopGate?.(ctx), undefined)) ?? []))
     } catch {
       // fail-open
     }

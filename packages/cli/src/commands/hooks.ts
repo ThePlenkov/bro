@@ -103,14 +103,15 @@ function unquoted(cmd: string): string {
 /** Which gate aspect a shell command arms for this session. The stop gate
  * only hard-blocks sessions that recorded interaction — `bro act`/`gh pr`/
  * `git push` arm the PR gate, `bro drill`/`bro wtf` arm the drill gate,
- * worktree creation and bead claims arm the work gate (`bro work`,
- * `git worktree add`, `bd worktree create`, `bd … --claim`).
+ * worktree creation arms the work gate (`bro work`, `git worktree add`,
+ * `bd worktree create`), bead claims arm the task gate (`bd … --claim`,
+ * `bro work enter` — it claims the bead it enters).
  * Global flags between binary and subcommand are allowed (`gh -R o/r pr`,
  * `git -C path push`); the binary must sit at a command position — string
  * start or after `;`, `&`, `|`, or a newline (leading whitespace is fine).
  * The set is open — connectors may contribute gates under their own
  * aspect names; arming patterns for those live where they're owned. */
-export type GateAspect = 'act' | 'drill' | 'work'
+export type GateAspect = 'act' | 'drill' | 'work' | 'task'
 
 export function classifyArmCommand(cmd: string): GateAspect | null {
   const c = unquoted(cmd)
@@ -140,11 +141,29 @@ export function classifyArmCommand(cmd: string): GateAspect | null {
   if (new RegExp(String.raw`${at}bd${flags}\s+worktree\s+(?:create|remove)\b`).test(c)) {
     return 'work'
   }
-  // claiming a bead is work — the session owes the claim a close/release
+  // claiming a bead arms 'task' — the session owes the claim a
+  // close/release, and the gate binds the claimer, not every work user
   if (new RegExp(`${at}bd\\b[^;&|\\n]*--claim\\b`).test(c)) {
-    return 'work'
+    return 'task'
   }
   return null
+}
+
+/** All aspects a command arms — classifyArmCommand's primary plus
+ *  side-effects: `bro work enter <bead>` claims that bead, so it arms
+ *  'task' on top of 'work'. */
+export function classifyArmCommands(cmd: string): GateAspect[] {
+  const out = new Set<GateAspect>()
+  const primary = classifyArmCommand(cmd)
+  if (primary) {
+    out.add(primary)
+  }
+  const c = unquoted(cmd)
+  const bro = '(?:bro|npx\\s+(?:-y\\s+)?@theplenkov/bro(?:@[\\w.:-]+)?)'
+  if (new RegExp(`(^|[;&|\\n])\\s*${bro}\\s+work\\s+enter\\b`).test(c)) {
+    out.add('task')
+  }
+  return [...out]
 }
 
 /** bro/bd are the plugin's own tools — permission hooks approve them
@@ -331,6 +350,11 @@ function worktreeTarget(args: string): string {
  *  can name the bead/worktree it would collide with. */
 export function armDetail(cmd: string, aspect: GateAspect): string {
   const c = unquoted(cmd)
+  if (aspect === 'task') {
+    // the claimed bead id — `bd update bro-x --claim`, `bro work enter bro-x`
+    const m = /\b([a-z]+-[\w.]+)\b/i.exec(c)
+    return m ? m[1]! : ''
+  }
   if (aspect === 'work') {
     const enter = /\bwork\s+enter\s+([a-z0-9][\w.-]*)/.exec(c)
     if (enter) {
@@ -404,9 +428,11 @@ function emitPostTool(input: HookInput): void {
   }
   const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
-  const aspect = classifyArmCommand(cmd)
-  if (sessionId && aspect) {
-    armSession(sessionId, aspect, armDetail(cmd, aspect))
+  const aspects = classifyArmCommands(cmd)
+  if (sessionId) {
+    for (const aspect of aspects) {
+      armSession(sessionId, aspect, armDetail(cmd, aspect))
+    }
   }
   switch (classifyExecCommand(cmd)) {
     case 'pr-merge':
@@ -432,14 +458,26 @@ function emitPostTool(input: HookInput): void {
  * Contributions evaluate independently — a foreign drill frame must not
  * shadow an armed PR gate. Respects stop_hook_active so a blocked stop
  * can't loop. */
+const GATE_PRIORITY = ['drill', 'work', 'act', 'task']
+
 async function emitStopGate(input: HookInput): Promise<void> {
   if (input.stop_hook_active === true) {
     return
   }
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
   const armed = sessionId ? readArmed(sessionId) : new Set<string>()
+  // Block priority is aspect order, not registry order — a beads gate
+  // (registry-first) must not shadow a dirty-worktree block: abandoning
+  // uncommitted work loses code, an open claim loses bookkeeping.
+  const rank = (a: string): number => {
+    const i = GATE_PRIORITY.indexOf(a)
+    return i === -1 ? GATE_PRIORITY.length : i
+  }
+  const contributions = (await stopGateContributions({ dir: process.cwd() })).sort(
+    (a, b) => rank(a.aspect) - rank(b.aspect)
+  )
   const hints: string[] = []
-  for (const c of await stopGateContributions({ dir: process.cwd() })) {
+  for (const c of contributions) {
     if (!armed.has(c.aspect)) {
       if (c.passive) {
         hints.push(c.passive)
