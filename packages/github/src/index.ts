@@ -10,11 +10,12 @@ export { githubReview }
 
 export const githubConnector: Connector = {
   name: 'github',
-  /** github.com and GHES-style hosts; arbitrary enterprise domains fall
-   *  back to `connectors.reviews` config when the URL doesn't match. */
+  /** Label-boundary host match — github.com and GHES-style
+   *  `github.corp.com`, but not lookalikes (evilgithub.com). Arbitrary
+   *  enterprise hosts resolve via `connectors.reviews` config. */
   matchRemote(url: string): boolean {
     const host = url.match(/^(?:https?:\/\/|git@)([^/:]+)/i)?.[1]?.toLowerCase() ?? ''
-    return host === 'github.com' || host.includes('github')
+    return host.split('.').includes('github')
   },
   reviews: (ctx) => githubReview(ctx.dir),
 }

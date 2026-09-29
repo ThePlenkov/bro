@@ -53,6 +53,8 @@ describe('github connector', () => {
     assert.equal(githubConnector.matchRemote?.('git@github.com:acme/widgets.git'), true)
     assert.equal(githubConnector.matchRemote?.('https://github.com/acme/widgets.git'), true)
     assert.equal(githubConnector.matchRemote?.('git@gitlab.com:acme/widgets.git'), false)
+    assert.equal(githubConnector.matchRemote?.('git@evilgithub.com:acme/widgets.git'), false)
+    assert.equal(githubConnector.matchRemote?.('git@github.corp.internal:acme/w.git'), true)
   })
 })
 
@@ -110,7 +112,7 @@ describe('githubReview', { skip: WIN32 }, () => {
       assert.equal(state, 'MERGED')
       assert.match(
         readFileSync(log, 'utf8'),
-        /pr merge 42 --squash --match-head-commit abc123 --delete-branch/
+        /pr merge 42 --squash --repo acme\/widgets --match-head-commit abc123 --delete-branch/
       )
     })
   })

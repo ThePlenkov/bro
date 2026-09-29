@@ -92,30 +92,29 @@ function checks(t: PrTarget, requiredOnly = false): CheckInfo[] {
 }
 
 function checkAnnotations(ref: RepoRef, headSha: string): Map<string, number> {
-  const counts = new Map<string, number>()
+  const out = new Map<string, number>()
   for (let page = 1; ; page += 1) {
     const res = ghJson<{ check_runs: Array<{ id: number; name: string }> }>([
       'api',
       `repos/${ownerRepo(ref)}/commits/${headSha}/check-runs?per_page=100&page=${page}`,
     ])
     for (const run of res.check_runs ?? []) {
-      counts.set(run.name, run.id)
+      // A re-run check reports one run per attempt — every attempt's
+      // annotations count, not just the latest id's.
+      // --paginate emits one JSON array per page — --slurp folds them
+      // into a single array-of-arrays that JSON.parse can handle.
+      const pages = ghJson<Array<Array<{ annotation_level?: string }>>>([
+        'api',
+        '--paginate',
+        '--slurp',
+        `repos/${ownerRepo(ref)}/check-runs/${run.id}/annotations?per_page=100`,
+      ])
+      const failures = pages.flat().filter((a) => a.annotation_level === 'failure').length
+      out.set(run.name, (out.get(run.name) ?? 0) + failures)
     }
     if ((res.check_runs?.length ?? 0) < 100) {
       break
     }
-  }
-  const out = new Map<string, number>()
-  for (const [name, runId] of counts) {
-    // --paginate emits one JSON array per page — --slurp folds them into a
-    // single array-of-arrays that JSON.parse can handle.
-    const pages = ghJson<Array<Array<{ annotation_level?: string }>>>([
-      'api',
-      '--paginate',
-      '--slurp',
-      `repos/${ownerRepo(ref)}/check-runs/${runId}/annotations?per_page=100`,
-    ])
-    out.set(name, pages.flat().filter((a) => a.annotation_level === 'failure').length)
   }
   return out
 }
@@ -286,9 +285,9 @@ interface MergedPrRow {
   labels?: Array<{ name: string }>
 }
 
-const toMergedPr = (row: MergedPrRow): MergedPr => ({
+const toMergedPr = (row: MergedPrRow & { mergedAt: string }): MergedPr => ({
   number: row.number,
-  mergedAt: row.mergedAt!,
+  mergedAt: row.mergedAt,
   updatedAt: row.updatedAt,
   author: row.author?.login ?? 'unknown',
   labels: (row.labels ?? []).map((l) => l.name),
@@ -314,7 +313,7 @@ function listMergedPrs(ref: RepoRef, q: MergedPrQuery): MergedPr[] {
     args.push('--label', q.label)
   }
   return ghJson<MergedPrRow[]>(args)
-    .filter((row) => row.mergedAt)
+    .filter((row): row is MergedPrRow & { mergedAt: string } => row.mergedAt !== null)
     .map(toMergedPr)
 }
 
@@ -345,7 +344,9 @@ function explicitMergedPrs(ref: RepoRef, ids: number[]): MergedPr[] {
 }
 
 function mergedPrs(ref: RepoRef, q: MergedPrQuery = {}): MergedPr[] {
-  if (q.ids && q.ids.length > 0) {
+  // `ids` present — even empty — is an explicit selection; only its
+  // absence means "list merged PRs with the filters".
+  if (q.ids !== undefined) {
     return explicitMergedPrs(ref, q.ids)
   }
   return listMergedPrs(ref, q)
@@ -453,6 +454,8 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
         'merge',
         String(t.pr),
         `--${opts.method}`,
+        '--repo',
+        ownerRepo(t),
         '--match-head-commit',
         opts.expectedHeadSha,
       ]
