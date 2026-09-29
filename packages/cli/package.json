@@ -1,7 +1,7 @@
 {
   "name": "@broject/bro",
   "version": "0.2.1",
-  "description": "bro \u2014 agent's sidekick CLI: review-debt pipeline, PR triage, fix loops",
+  "description": "bro — agent's sidekick CLI: review-debt pipeline, PR triage, fix loops",
   "type": "module",
   "bin": {
     "bro": "dist/index.js"
