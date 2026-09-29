@@ -31,6 +31,9 @@ export interface DebtRecord {
   fix_pr: number | null
   fixed_at: string | null
   notes: string | null
+  /** Collector feed the row came from — absent on review-thread rows
+   *  (back-compat with pre-multi-source ledgers). */
+  source?: string
 }
 
 export interface LedgerOverlay {

@@ -17,7 +17,7 @@ requirement.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro debt collect [filters]` | Scan merged PRs **without** a `debt:*` label → collect unresolved threads → write `harvests/*.jsonl` → label `debt:collected` / `debt:clean` |
+| `bro debt collect [filters]` | Scan merged PRs **without** a `debt:*` label → collect unresolved threads → write `harvests/*.jsonl` → label `debt:collected` / `debt:clean`. With `debt.sources` in bro.config.json it also runs opt-in collectors (`dependabot`, `code-scanning`, `secret-scanning`, `stale-prs`, `failed-ci`) — same ledger, `debt:<source>` labels on beads, `debt.stale_days` tunes stale-prs |
 | `bro debt status` | Ledger summary + unprocessed merged-PR count |
 | `bro debt prs` | Merged PRs still unprocessed — the work queue (`--all`: full matrix) |
 | `bro debt list` | Ledger rows (`--status`, `--area`, `--author`, `--priority`, `--pr`) |

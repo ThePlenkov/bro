@@ -112,7 +112,11 @@ run on defaults until they set up. Everything's optional:
 {
   "stores": ["jsonl", "beads"],
   "personality": "terse",
-  "debt": { "dir": ".agents/review-debt" },
+  "debt": {
+    "dir": ".agents/review-debt",
+    "sources": ["review-threads", "dependabot", "secret-scanning"],
+    "stale_days": 14
+  },
   "connectors": { "reviews": "github", "tasks": "beads" },
   "sdd": { "mode": "remind", "dir": "specs" }
 }
@@ -140,6 +144,23 @@ installed; a missing bd fails the run after evidence is written.
 The ledger dir is machine-local state too — bro adds it to
 `.git/info/exclude` on first write so harvest evidence can't be committed
 by accident.
+
+`debt.sources` picks which collectors `bro debt collect` runs. The
+default is `["review-threads"]` — the original merged-PR sweep. Opt-in
+sources feed the same ledger and beads projection (`debt:<source>`
+labels, `thread_id` is the source's stable key):
+
+| Source | Feeds on |
+| ------ | -------- |
+| `review-threads` | Unresolved review threads on merged PRs (default) |
+| `dependabot` | Open Dependabot alerts — skipped when an open `dependabot/*` PR already covers the dependency |
+| `code-scanning` | Open code-scanning alerts (rule + file ref) |
+| `secret-scanning` | Open secret-scanning alerts — always blocking priority |
+| `stale-prs` | Open PRs idle > `debt.stale_days` days or failing checks (WIP drafts don't count) |
+| `failed-ci` | Latest default-branch workflow run, if it failed |
+
+Alert sources reconcile both ways: a finding that disappears upstream is
+marked `done` in the ledger on the next collect.
 
 ## Labels bro manages
 

@@ -140,7 +140,9 @@ function beadInput(rec: DebtRecord) {
     description: `${rec.body}\n\n---\nthread: ${rec.thread_url}\npr: ${rec.source_pr_url}`,
     labels: [
       'debt',
-      `pr:${rec.source_pr}`,
+      ...(rec.source ? [`debt:${rec.source}`] : []),
+      // source records carry no PR — pr:0 would be a junk label
+      ...(rec.source_pr > 0 ? [`pr:${rec.source_pr}`] : []),
       `area:${rec.area}`,
       `author:${rec.author}`,
       `priority:${rec.priority}`,

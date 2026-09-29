@@ -220,13 +220,17 @@ export function harvestFilename(opts: {
   harvestedAt: string
   pr: number
   runId: string
+  source?: string
 }): string {
   const d = new Date(opts.harvestedAt)
   const pad = (n: number): string => String(n).padStart(2, '0')
   const ts =
     `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}` +
     `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`
-  return `${ts}-pr-${opts.pr}-run-${sanitizeRunId(opts.runId)}.jsonl`
+  // Non-PR collector feeds key off the source name — several sources can
+  // land within the same second, so pr-0 alone would collide.
+  const key = opts.source ? `src-${sanitizeRunId(opts.source)}` : `pr-${opts.pr}`
+  return `${ts}-${key}-run-${sanitizeRunId(opts.runId)}.jsonl`
 }
 
 /** Append-only harvest snapshot (one new file per PR per run — no merge conflicts). */
@@ -235,6 +239,7 @@ export function writeHarvestFile(opts: {
   runId: string
   harvestedAt: string
   records: DebtRecord[]
+  source?: string
   cwd?: string
 }): string {
   if (opts.records.length === 0) {
@@ -243,7 +248,12 @@ export function writeHarvestFile(opts: {
   const dir = harvestDir(opts.cwd)
   const path = join(
     dir,
-    harvestFilename({ harvestedAt: opts.harvestedAt, pr: opts.pr, runId: opts.runId })
+    harvestFilename({
+      harvestedAt: opts.harvestedAt,
+      pr: opts.pr,
+      runId: opts.runId,
+      source: opts.source,
+    })
   )
   mkdirSync(dir, { recursive: true })
   ensureDebtDirExcluded(debtDir(opts.cwd))

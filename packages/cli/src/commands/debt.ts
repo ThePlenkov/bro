@@ -44,6 +44,11 @@ import {
   upsertLedgerOverlays,
   writeHarvestFile,
   writeSummary,
+  ALL_SOURCES,
+  COLLECTORS,
+  DEBT_SOURCES,
+  parseSources,
+  resolvedThreadIds,
   type DebtPrState,
   type DebtRecord,
   type DebtStatus,
@@ -67,6 +72,9 @@ Commands:
                                   Filters: --pr-ids, --merged-since, --merged-until,
                                   --last, --pr-author, --labels, --thread-author
                                   Flags: --dry-run, --list-only, --reharvest, --no-label
+                                  Sources: debt.sources config — default review-threads;
+                                  opt in: ${DEBT_SOURCES.join(', ')}
+                                  debt.stale_days tunes stale-prs (default 14)
   status                          Ledger summary + unprocessed merged PR count
   prs [--limit N] [--all]         Unprocessed merged PRs (--all: full matrix)
   list [filters]                  Ledger rows (--status, --area, --author,
@@ -187,18 +195,103 @@ async function cmdCollect(argv: string[]): Promise<void> {
   const args = parseCollectArgs(rev, argv)
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
 
-  // Fetch at least as many candidates as --last requests, or it silently caps.
-  const listLimit = Math.max(args.filters.lastN ?? 0, 100)
-  const matched = resolveHarvestPrs(rev, {
-    repo: args.repo,
-    filters: args.filters,
-    listLimit,
-  })
-  const { pending, processed } = partitionByProcessed(matched)
+  const debtCfg = loadBroConfig().debt
+  const knownSources = new Set<string>(ALL_SOURCES)
+  const sources = new Set(parseSources(debtCfg.sources))
+  for (const s of debtCfg.sources.filter((x) => !knownSources.has(x))) {
+    console.error(`debt collect: unknown source "${s}" — ignored`)
+  }
 
-  // Review bots can comment AFTER merge+label. A labeled PR whose updatedAt
-  // is newer than our scan timestamp goes back into the queue — except
-  // `debt:skipped`, which is a human opt-out and is never rescanned.
+  if (sources.has('review-threads')) {
+    await collectReviewThreads(rev, args)
+  }
+
+  // Multi-source collectors — opt-in feeds landing in the same ledger.
+  for (const source of DEBT_SOURCES) {
+    if (!sources.has(source)) {
+      continue
+    }
+    const harvestedAt = new Date().toISOString()
+    let records: DebtRecord[] = []
+    try {
+      records = COLLECTORS[source](
+        { repo: args.repo, runId: args.runId, harvestedAt },
+        debtCfg.stale_days
+      )
+    } catch (err) {
+      console.error(
+        `debt: source ${source} failed — ${err instanceof Error ? err.message : err}`
+      )
+      continue
+    }
+    console.error(`debt: ${source} — ${records.length} finding(s)`)
+    if (args.dryRun) {
+      for (const row of records) {
+        console.log(JSON.stringify(row))
+      }
+      continue
+    }
+    if (records.length > 0) {
+      writeHarvestFile({
+        pr: 0,
+        source,
+        runId: args.runId,
+        harvestedAt,
+        records,
+      })
+    }
+    // Alerts/CI are server-side truth: a finding absent from the fresh
+    // fetch resolved upstream — close its ledger row so the queue shrinks.
+    const gone = resolvedThreadIds(readDebtRecords(), source, records)
+    if (gone.length > 0) {
+      upsertLedgerOverlays(
+        gone.map((thread_id) => ({
+          thread_id,
+          status: 'done' as const,
+          fix_pr: null,
+          fixed_at: new Date().toISOString(),
+          notes: 'resolved upstream — no longer reported',
+        }))
+      )
+      console.error(`debt: ${source} — resolved ${gone.length} row(s) no longer reported`)
+    }
+  }
+
+  if (!args.dryRun) {
+    const totalRows = readDebtRecords().length
+    if (totalRows > 0) {
+      writeSummary(buildSummary(readDebtRecords()))
+    }
+
+    // store: beads|both → also project into bd. Collection results are
+    // already durable; a sync failure is reported as its own error, not
+    // allowed to mask them — but it still fails the run (no silent degrade).
+    // Explicit values only — a typo like "beed" must fall back to jsonl,
+    // not fail in bd after the ledger was already written.
+    if (loadBroConfig().stores.includes('beads')) {
+      try {
+        const res = syncDebtToBeads(readDebtRecords())
+        console.error(
+          `debt sync: ${res.created} created, ${res.closed} closed, ` +
+            `${res.reopened} reopened, ${res.linked} linked`
+        )
+      } catch (err) {
+        console.error(`debt sync FAILED: ${err instanceof Error ? err.message : err}`)
+        console.error('evidence is written; run `bro debt sync` to retry the projection')
+        process.exitCode = 1
+      }
+    }
+  }
+}
+
+// Review bots can comment AFTER merge+label. A labeled PR whose updatedAt
+// is newer than our scan timestamp goes back into the queue — except
+// `debt:skipped`, which is a human opt-out and is never rescanned.
+function selectTargets(
+  matched: Awaited<ReturnType<typeof resolveHarvestPrs>>,
+  args: CollectArgs
+): { targets: typeof matched; staleCount: number; processedCount: number } {
+  const { pending, processed } = partitionByProcessed(matched)
   const processedAt = readProcessedAt()
   const futureBound = new Date(Date.now() + 5 * 60 * 1000).toISOString()
   const stale = processed.filter((pr) => {
@@ -217,14 +310,124 @@ async function cmdCollect(argv: string[]): Promise<void> {
       (pr.updatedAt !== null && pr.updatedAt > at)
     )
   })
-  const targets = args.reharvest
-    ? matched.filter((pr) => prDebtState(pr.labels) !== 'skipped')
-    : [...pending, ...stale]
+  return {
+    targets: args.reharvest
+      ? matched.filter((pr) => prDebtState(pr.labels) !== 'skipped')
+      : [...pending, ...stale],
+    staleCount: stale.length,
+    processedCount: processed.length,
+  }
+}
+
+/** A reharvested thread that was marked done/wontfix is unresolved again
+ *  — the terminal overlay must not shadow the fresh open evidence. */
+function reopenTerminalRows(rows: DebtRecord[]): void {
+  const overlays = readLedgerOverlays()
+  const reopen = rows.filter((r) => {
+    const s = overlays.get(r.thread_id)?.status
+    return s === 'done' || s === 'wontfix'
+  })
+  if (reopen.length === 0) {
+    return
+  }
+  upsertLedgerOverlays(
+    reopen.map((r) => {
+      const prev = overlays.get(r.thread_id)
+      return {
+        thread_id: r.thread_id,
+        status: 'open' as const,
+        fix_pr: null,
+        fixed_at: null,
+        notes: prev?.notes ? `${prev.notes} | reopened by reharvest` : 'reopened by reharvest',
+      }
+    })
+  )
+  console.error(`debt: reopened ${reopen.length} terminal row(s) — still unresolved`)
+}
+
+async function harvestPr(
+  rev: ReviewFacade,
+  args: CollectArgs,
+  pr: { number: number; updatedAt: string | null },
+  labelingEnabled: boolean
+): Promise<{ rows: number; labeled: number }> {
+  // Captured before fetching threads: activity arriving mid-scan is then
+  // newer than the recorded timestamp and gets picked up next run.
+  const scannedAt = new Date().toISOString()
+  let result
+  try {
+    result = await collectPr(rev, {
+      repo: args.repo,
+      pr: pr.number,
+      runId: args.runId,
+      threadAuthor: args.threadAuthor,
+    })
+  } catch (err) {
+    console.error(
+      `warning: PR ${rev.prLink(args.repo, pr.number)} skipped — ${err instanceof Error ? err.message : err}`
+    )
+    return { rows: 0, labeled: 0 }
+  }
+  console.error(
+    `debt: PR ${rev.prLink(args.repo, pr.number)} — ${result.incoming.length} thread(s)`
+  )
+
+  if (args.dryRun) {
+    for (const row of result.incoming) {
+      console.log(JSON.stringify(row))
+    }
+    return { rows: 0, labeled: 0 }
+  }
+
+  if (result.incoming.length > 0) {
+    writeHarvestFile({
+      pr: result.pr,
+      runId: args.runId,
+      harvestedAt: result.incoming[0]!.harvested_at,
+      records: result.incoming,
+    })
+    reopenTerminalRows(result.incoming)
+  }
+
+  let labeled = 0
+  // Never overwrite a human `debt:skipped` opt-out, even under --reharvest.
+  // Re-fetch labels: the candidate snapshot predates this PR's collection,
+  // and a human may have opted out while we were scanning.
+  if (labelingEnabled) {
+    const current = rev.labels({ repo: args.repo, pr: pr.number })
+    if (prDebtState(current) !== 'skipped') {
+      const state: DebtPrState = result.incoming.length > 0 ? 'collected' : 'clean'
+      applyCollectLabel(rev, { repo: args.repo, pr: pr.number, state })
+      labeled = 1
+    }
+    // Store the observed updatedAt as the cursor, not the wall clock:
+    // no cross-clock skew, and mid-scan activity bumps the server's
+    // updatedAt past our cursor so the next run catches it. Re-fetched
+    // post-label: our own label write bumps updatedAt, so the pre-scan
+    // snapshot would flag the PR stale again on the next run. Only full
+    // scans earn a cursor — a --thread-author partial scan must not
+    // mask post-scan activity on a labeled PR.
+    const cursor =
+      rev.prUpdatedAt({ repo: args.repo, pr: pr.number }) ?? pr.updatedAt ?? scannedAt
+    markProcessedAt([pr.number], cursor)
+  }
+  return { rows: result.incoming.length, labeled }
+}
+
+async function collectReviewThreads(rev: ReviewFacade, args: CollectArgs): Promise<void> {
+  // Fetch at least as many candidates as --last requests, or it silently caps.
+  const listLimit = Math.max(args.filters.lastN ?? 0, 100)
+  const matched = resolveHarvestPrs(rev, {
+    repo: args.repo,
+    filters: args.filters,
+    listLimit,
+  })
+  const { targets, staleCount, processedCount } = selectTargets(matched, args)
 
   console.error(
     `debt collect: ${matched.length} merged PR(s) matched, ` +
-      `${processed.length - stale.length} already processed (debt:* label)` +
-      (stale.length > 0 ? `, ${stale.length} stale (post-scan activity)` : '') +
+      `${processedCount - staleCount} already processed (debt:* label)` +
+      (staleCount > 0 ? `, ${staleCount} stale (post-scan activity)` : '') +
       `, scanning ${targets.length}`
   )
 
@@ -251,118 +454,13 @@ async function cmdCollect(argv: string[]): Promise<void> {
   let totalRows = 0
   let labeled = 0
   for (const pr of targets) {
-    // Captured before fetching threads: activity arriving mid-scan is then
-    // newer than the recorded timestamp and gets picked up next run.
-    const scannedAt = new Date().toISOString()
-    let result
-    try {
-      result = await collectPr(rev, {
-        repo: args.repo,
-        pr: pr.number,
-        runId: args.runId,
-        threadAuthor: args.threadAuthor,
-      })
-    } catch (err) {
-      console.error(
-        `warning: PR ${rev.prLink(args.repo, pr.number)} skipped — ${err instanceof Error ? err.message : err}`
-      )
-      continue
-    }
-    console.error(
-      `debt: PR ${rev.prLink(args.repo, pr.number)} — ${result.incoming.length} thread(s)`
-    )
-
-    if (args.dryRun) {
-      for (const row of result.incoming) {
-        console.log(JSON.stringify(row))
-      }
-      continue
-    }
-
-    const state: DebtPrState = result.incoming.length > 0 ? 'collected' : 'clean'
-    if (result.incoming.length > 0) {
-      writeHarvestFile({
-        pr: result.pr,
-        runId: args.runId,
-        harvestedAt: result.incoming[0]!.harvested_at,
-        records: result.incoming,
-      })
-      totalRows += result.incoming.length
-      // A reharvested thread that was marked done/wontfix is unresolved again
-      // — the terminal overlay must not shadow the fresh open evidence.
-      const overlays = readLedgerOverlays()
-      const reopen = result.incoming.filter((r) => {
-        const s = overlays.get(r.thread_id)?.status
-        return s === 'done' || s === 'wontfix'
-      })
-      if (reopen.length > 0) {
-        upsertLedgerOverlays(
-          reopen.map((r) => {
-            const prev = overlays.get(r.thread_id)
-            return {
-              thread_id: r.thread_id,
-              status: 'open' as const,
-              fix_pr: null,
-              fixed_at: null,
-              notes: prev?.notes ? `${prev.notes} | reopened by reharvest` : 'reopened by reharvest',
-            }
-          })
-        )
-        console.error(`debt: reopened ${reopen.length} terminal row(s) — still unresolved`)
-      }
-    }
-    // Never overwrite a human `debt:skipped` opt-out, even under --reharvest.
-    // Re-fetch labels: the candidate snapshot predates this PR's collection,
-    // and a human may have opted out while we were scanning.
-    if (labelingEnabled) {
-      const current = rev.labels({ repo: args.repo, pr: pr.number })
-      if (prDebtState(current) !== 'skipped') {
-        applyCollectLabel(rev, { repo: args.repo, pr: pr.number, state })
-        labeled += 1
-      }
-      // Store the observed updatedAt as the cursor, not the wall clock:
-      // no cross-clock skew, and mid-scan activity bumps the server's
-      // updatedAt past our cursor so the next run catches it. Re-fetched
-      // post-label: our own label write bumps updatedAt, so the pre-scan
-      // snapshot would flag the PR stale again on the next run. Only full
-      // scans earn a cursor — a --thread-author partial scan must not
-      // mask post-scan activity on a labeled PR.
-      const cursor =
-        rev.prUpdatedAt({ repo: args.repo, pr: pr.number }) ??
-        pr.updatedAt ??
-        scannedAt
-      markProcessedAt([pr.number], cursor)
-    }
+    const res = await harvestPr(rev, args, pr, labelingEnabled)
+    totalRows += res.rows
+    labeled += res.labeled
   }
 
-  if (!args.dryRun) {
-    if (totalRows > 0) {
-      writeSummary(buildSummary(readDebtRecords()))
-    }
-    const labeledMsg = labelingEnabled
-      ? `labeled ${labeled} PR(s)`
-      : 'labels disabled'
-    console.error(`debt collect: wrote ${totalRows} row(s), ${labeledMsg}`)
-
-    // store: beads|both → also project into bd. Collection results are
-    // already durable; a sync failure is reported as its own error, not
-    // allowed to mask them — but it still fails the run (no silent degrade).
-    // Explicit values only — a typo like "beed" must fall back to jsonl,
-    // not fail in bd after the ledger was already written.
-    if (loadBroConfig().stores.includes('beads')) {
-      try {
-        const res = syncDebtToBeads(readDebtRecords())
-        console.error(
-          `debt sync: ${res.created} created, ${res.closed} closed, ` +
-            `${res.reopened} reopened, ${res.linked} linked`
-        )
-      } catch (err) {
-        console.error(`debt sync FAILED: ${err instanceof Error ? err.message : err}`)
-        console.error('evidence is written; run `bro debt sync` to retry the projection')
-        process.exitCode = 1
-      }
-    }
-  }
+  const labeledMsg = labelingEnabled ? `labeled ${labeled} PR(s)` : 'labels disabled'
+  console.error(`debt collect: wrote ${totalRows} row(s), ${labeledMsg}`)
 }
 
 // --- status ----------------------------------------------------------------
@@ -455,6 +553,9 @@ function rowMatchesFilters(
   if (filters.author !== null && row.author !== filters.author) return false
   if (filters.priority !== null && row.priority !== filters.priority) return false
   if (filters.pr !== null && row.source_pr !== filters.pr) return false
+  // legacy rows predate sources — they belong to review-threads
+  if (filters.source !== null && (row.source ?? 'review-threads') !== filters.source)
+    return false
   return true
 }
 
@@ -465,6 +566,7 @@ function cmdList(argv: string[]): void {
     author: null,
     priority: null,
     pr: null,
+    source: null,
   }
   let limit = 50
   for (let i = 0; i < argv.length; i += 1) {
