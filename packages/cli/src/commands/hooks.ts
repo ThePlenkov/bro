@@ -31,7 +31,13 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
-import { ghJson, gitTry, parallelWorkLines, prLink, resolveRepo, sessionStartLines } from '@bro/core'
+import {
+  gitTry,
+  parallelWorkLines,
+  reviewHost,
+  sessionStartLines,
+  type PrTarget,
+} from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
 import { evaluateExitGate, fetchPrActState, mergeSlotHolder } from '@bro/act'
 import { gitDirOf, isLinkedGitDir, parseWorktreePorcelain } from './work.ts'
@@ -220,45 +226,30 @@ function dirtyHere(): number {
   return res.out.split('\n').filter(Boolean).length
 }
 
-/** `owner/repo` for the current clone — null when the split isn't clean. */
-function repoParts(): [string, string] | null {
-  const parts = resolveRepo([]).split('/')
-  const [owner, name] = parts
-  return parts.length === 2 && owner && name ? [owner, name] : null
-}
-
-/** Current branch's open PR → one-line gate summary. Null when no PR/no gh. */
-async function actGateLine(owner?: string, repo?: string, pr?: number): Promise<string | null> {
+/** Current branch's open PR → one-line gate summary. Null when no PR/
+ *  no review host resolves. `target` overrides the current-branch
+ *  lookup (e.g. a PR URL parsed out of the prompt). */
+async function actGateLine(target?: PrTarget): Promise<string | null> {
   try {
-    let o = owner
-    let r = repo
-    let n = pr
-    if (n === undefined) {
-      const view = ghJson<{ number: number; state: string }>([
-        'pr',
-        'view',
-        '--json',
-        'number,state',
-      ])
-      if (view.state !== 'OPEN') {
+    const rev = reviewHost(process.cwd(), loadBroConfig().connectors)
+    let t = target
+    if (!t) {
+      const cur = rev.currentPr()
+      if (!cur || cur.state !== 'OPEN') {
         return null
       }
-      n = view.number
-      const parts = repoParts()
-      if (!parts) {
-        return null
-      }
-      ;[o, r] = parts
+      t = { repo: rev.resolveRepo([]), pr: cur.pr }
     }
     const act = loadBroConfig().act
-    const state = await fetchPrActState(
-      { owner: o!, repo: r!, pr: n! },
-      { ignoreChecks: act.ignoreChecks, maxRounds: act.maxRounds }
-    )
+    const state = await fetchPrActState(rev, t, {
+      ignoreChecks: act.ignoreChecks,
+      maxRounds: act.maxRounds,
+    })
     const gate = evaluateExitGate(state)
+    const link = rev.prLink(t.repo, state.pr)
     return gate.ok
-      ? `pr ${prLink(`${o}/${r}`, state.pr)}: gate OK`
-      : `pr ${prLink(`${o}/${r}`, state.pr)}: gate BLOCKED (${gate.blockers.join('; ')}) — \`bro act status\``
+      ? `pr ${link}: gate OK`
+      : `pr ${link}: gate BLOCKED (${gate.blockers.join('; ')}) — \`bro act status\``
   } catch {
     return null
   }
@@ -530,7 +521,7 @@ async function emitPromptContext(input: HookInput): Promise<void> {
   }
   const ref = typeof input.prompt === 'string' ? parsePrUrl(input.prompt) : null
   if (ref) {
-    const gate = await actGateLine(ref.owner, ref.repo, ref.pr)
+    const gate = await actGateLine({ repo: `${ref.owner}/${ref.repo}`, pr: ref.pr })
     if (gate) {
       parts.push(gate)
     }
@@ -643,20 +634,15 @@ function workGate(): { block?: string; hint?: string } {
  * is clean / not OPEN / unreachable. */
 async function prBlockersLine(): Promise<string | null> {
   try {
-    const view = ghJson<{ number: number; state: string; url: string }>([
-      'pr',
-      'view',
-      '--json',
-      'number,state,url',
-    ])
-    const parts = view.state === 'OPEN' ? repoParts() : null
-    if (!parts) {
+    const rev = reviewHost(process.cwd(), loadBroConfig().connectors)
+    const cur = rev.currentPr()
+    if (!cur || cur.state !== 'OPEN') {
       return null
     }
-    const [owner, repoName] = parts
     const act = loadBroConfig().act
     const state = await fetchPrActState(
-      { owner, repo: repoName!, pr: view.number },
+      rev,
+      { repo: rev.resolveRepo([]), pr: cur.pr },
       { ignoreChecks: act.ignoreChecks, maxRounds: act.maxRounds }
     )
     // The same gate `bro act status` enforces: open threads, pending/failed
@@ -664,7 +650,7 @@ async function prBlockersLine(): Promise<string | null> {
     const gate = evaluateExitGate(state)
     return gate.ok
       ? null
-      : `bro: PR [#${view.number}](${view.url}): ${gate.blockers.join('; ')}`
+      : `bro: PR [#${cur.pr}](${cur.url}): ${gate.blockers.join('; ')}`
   } catch {
     // no repo/PR/auth — nothing to gate on
     return null

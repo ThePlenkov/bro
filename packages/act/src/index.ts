@@ -1,12 +1,5 @@
 export type { ExitGate, PrActState, PrCheck } from './types.ts'
-export {
-  fetchPrActState,
-  fetchPrMeta,
-  replyToThread,
-  resolveReviewThread,
-  unresolveReviewThread,
-  updatePullBranch,
-} from './github.ts'
+export { fetchPrActState } from './state.ts'
 export { evaluateExitGate } from './exit-gate.ts'
 export { gatePending, waitForGate } from './wait.ts'
 export type { GateWaitResult, WaitOptions } from './wait.ts'

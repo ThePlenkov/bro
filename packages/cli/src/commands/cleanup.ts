@@ -1,12 +1,12 @@
 /**
  * `bro cleanup [--remote] [--dry-run]` — delete local branches whose PR
  * already merged. Squash merges break `git branch --merged` ancestry, so
- * merged state comes from GitHub: `gh pr list --state merged` headRefNames
- * + head SHAs intersected with local branches. The remote side is opt-in
- * — `gh pr merge --delete-branch` already covers PRs merged through the
- * UI/CLI.
+ * merged state comes from the review host: merged-PR headRefs + head
+ * SHAs intersected with local branches. The remote side is opt-in —
+ * merge --delete-branch already covers PRs merged through the UI/CLI.
  */
-import { ensureGhAuth, ghJson, git, gitTry } from '@bro/core'
+import { ensureGhAuth, git, gitTry, reviewHost } from '@bro/core'
+import { loadBroConfig } from '../plugins.ts'
 import { positionals } from './args.ts'
 
 const PROTECTED = new Set(['main', 'master'])
@@ -134,17 +134,11 @@ export function runCleanupCommand(argv: string[]): void {
     console.error(`cleanup: fetch --prune failed (${fetch.err || 'offline?'}) — planning from local state`)
   }
 
-  const mergedPrs = ghJson<Array<{ headRefName: string; headRefOid: string }>>([
-    'pr',
-    'list',
-    '--state',
-    'merged',
-    '--limit',
-    String(MERGED_LIMIT),
-    '--json',
-    'headRefName,headRefOid',
-  ])
-  const merged = new Map(mergedPrs.map((pr) => [pr.headRefName, pr.headRefOid]))
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  const mergedPrs = rev.mergedPrs(rev.resolveRepo([]), { limit: MERGED_LIMIT })
+  const merged = new Map(
+    mergedPrs.filter((pr) => pr.headRef !== '').map((pr) => [pr.headRef, pr.headSha])
+  )
   if (mergedPrs.length === MERGED_LIMIT) {
     console.error(`cleanup: scanned the last ${MERGED_LIMIT} merged PRs — older branches may be missed`)
   }

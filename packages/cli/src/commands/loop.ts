@@ -21,12 +21,17 @@
  * rules). A bead whose agent fails without a PR is reopened with a
  * note; a bead whose PR stalls keeps its worktree for inspection.
  */
-import { spawnSync, spawn, execFileSync } from 'node:child_process'
+import { spawnSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { checkBeads, gitTry, prLink, taskStore } from '@bro/core'
-import { evaluateExitGate, fetchPrActState, updatePullBranch, waitForGate } from '@bro/act'
-import { fetchReviewThreads } from '@bro/debt'
+import {
+  checkBeads,
+  gitTry,
+  reviewHost,
+  taskStore,
+  type ReviewFacade,
+} from '@bro/core'
+import { evaluateExitGate, fetchPrActState, waitForGate } from '@bro/act'
 import {
   buildFixPrompt,
   buildWorkPrompt,
@@ -49,7 +54,9 @@ import {
 } from './next.ts'
 
 interface Ctx {
-  owner: string
+  /** Review facade bound to the main checkout — host calls follow the
+   *  repo, not the caller's cwd. `repo` is its 'owner/name'. */
+  rev: ReviewFacade
   repo: string
   root: string
   cfg: LoopConfig
@@ -62,7 +69,7 @@ interface Ctx {
 }
 
 /** Clickable PR ref for this repo — user-facing lines never print bare #N. */
-const prRef = (ctx: Ctx, pr: number): string => prLink(`${ctx.owner}/${ctx.repo}`, pr)
+const prRef = (ctx: Ctx, pr: number): string => ctx.rev.prLink(ctx.repo, pr)
 
 function usage(): never {
   console.error(`Usage: bro loop [--max N] [--dry-run] [--json]
@@ -93,21 +100,9 @@ const say = (ctx: Ctx, msg: string): void => {
   }
 }
 
-/** Subprocesses resolve through PATH by design — bro orchestrates gh,
- *  bd, and the operator-configured agent; a sanitized PATH would break
- *  the very binaries the config names. NOSONAR lives on these helpers. */
-function ghOut(args: string[], cwd: string): string {
-  return execFileSync('gh', args, { cwd, encoding: 'utf8' }).trim() // NOSONAR
-}
-
-function repoTarget(root: string): { owner: string; repo: string } {
-  const out = ghOut(['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'], root)
-  const [owner, repo] = out.split('/')
-  if (!owner || !repo) {
-    throw new Error(`gh repo view returned "${out}"`)
-  }
-  return { owner, repo }
-}
+/** Agent commands resolve through PATH by design — bro orchestrates the
+ *  operator-configured agent; a sanitized PATH would break the very
+ *  binary the config names. NOSONAR lives on the spawn helpers. */
 
 /** Fresh sibling worktree on loop/<id> off origin/main (falls back to
  *  main/HEAD when no origin). An existing dir is reused as-is. */
@@ -176,10 +171,9 @@ function spawnAgent(ctx: Ctx, beadId: string, title: string, promptFile: string,
 /** PR number opened from this worktree's branch — null when none,
  *  'lookup-error' when gh itself failed (not the same thing: a failed
  *  lookup must not reopen a bead whose PR may still exist). */
-function findPr(dir: string, branch: string): number | null | 'lookup-error' {
+function findPr(ctx: Ctx, branch: string): number | null | 'lookup-error' {
   try {
-    const out = ghOut(['pr', 'list', '--head', branch, '--json', 'number', '--jq', '.[0].number // empty'], dir)
-    return out === '' ? null : Number(out)
+    return ctx.rev.prsForBranch(branch)[0] ?? null
   } catch {
     return 'lookup-error'
   }
@@ -215,7 +209,7 @@ async function finalizeMerge(
     if (!alreadyMerged) {
       await runActCommand(['merge', String(pr)])
     }
-    const state = ghOut(['pr', 'view', String(pr), '--json', 'state', '--jq', '.state'], ctx.root)
+    const state = ctx.rev.prMeta({ repo: ctx.repo, pr }).state
     if (state !== 'MERGED') {
       noteBead(
         bead.id,
@@ -264,11 +258,11 @@ async function runFixRound(
   pr: number,
   round: number
 ): Promise<void> {
-  const threads = (await fetchReviewThreads({ owner: ctx.owner, repo: ctx.repo, pr }))
-    .filter((t) => !t.isResolved)
+  const threads = (await ctx.rev.reviewThreads({ repo: ctx.repo, pr }))
+    .filter((t) => !t.resolved)
     .map((t) => {
-      const c = t.comments.nodes[0]
-      return `- ${c?.path ?? ''}:${c?.line ?? ''} [${c?.author?.login ?? '?'}] ${c?.body ?? ''}`
+      const c = t.comment
+      return `- ${c?.path ?? ''}:${c?.line ?? ''} [${c?.author ?? '?'}] ${c?.body ?? ''}`
     })
     .join('\n')
   writePrompt(item, buildFixPrompt(bead, pr, threads))
@@ -338,7 +332,7 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<string> {
   }
   writePrompt(item, buildWorkPrompt(bead, item.branch))
   const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
-  const pr = findPr(item.worktreeDir, item.branch)
+  const pr = findPr(ctx, item.branch)
   if (pr === 'lookup-error') {
     noteBead(bead.id, `loop: PR lookup failed for ${item.branch} — worktree ${item.worktreeDir}`)
     return 'parked'
@@ -362,7 +356,8 @@ async function driveGate(
   const act = loadBroConfig(ctx.root).act
   const fetch = async () => {
     const state = await fetchPrActState(
-      { owner: ctx.owner, repo: ctx.repo, pr },
+      ctx.rev,
+      { repo: ctx.repo, pr },
       { ignoreChecks: act.ignoreChecks, maxRounds: act.maxRounds }
     )
     return { state, gate: evaluateExitGate(state) }
@@ -382,7 +377,7 @@ async function driveGate(
         // same as `act wait`: BEHIND + mergeable is a state to fix, not
         // to park on — conflicts still settle for a human
         updateBranch: (s) => {
-          const ok = updatePullBranch({ owner: ctx.owner, repo: ctx.repo, pr }, s.headSha)
+          const ok = ctx.rev.updateBranch({ repo: ctx.repo, pr }, s.headSha)
           console.error(
             `loop ${prRef(ctx, pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
           )
@@ -429,7 +424,8 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     console.error('bro loop: not inside a git worktree')
     process.exit(1)
   }
-  const cfg = loadBroConfig(root).loop as LoopConfig
+  const broCfg = loadBroConfig(root)
+  const cfg = broCfg.loop as LoopConfig
   const agent = flag(argv, '--agent') ?? cfg.agent
   if (!agent) {
     console.error(
@@ -438,8 +434,10 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     )
     process.exit(2)
   }
+  const rev = reviewHost(root, broCfg.connectors)
   const ctx: Ctx = {
-    ...repoTarget(root),
+    rev,
+    repo: rev.resolveRepo([]),
     root,
     cfg: {
       ...cfg,
@@ -490,14 +488,11 @@ function openLoopPrs(ctx: Ctx, branches: string[]): string[] {
   const out: string[] = []
   for (const b of branches) {
     try {
-      const prs = JSON.parse(
-        ghOut(['pr', 'list', '--state', 'open', '--head', b, '--json', 'number'], ctx.root)
-      ) as { number: number }[]
-      for (const p of prs) {
-        out.push(`${prRef(ctx, p.number)} (${b})`)
+      for (const pr of ctx.rev.prsForBranch(b)) {
+        out.push(`${prRef(ctx, pr)} (${b})`)
       }
     } catch {
-      out.push(`warning: PR lookup failed for ${b} — gh unavailable`)
+      out.push(`warning: PR lookup failed for ${b} — host unreachable`)
     }
   }
   return out

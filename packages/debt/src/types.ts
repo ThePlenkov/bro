@@ -46,21 +46,6 @@ export interface AuthorPolicy {
   non_actionable_authors: string[]
 }
 
-export interface ReviewThreadComment {
-  author: { login?: string; __typename?: string }
-  path?: string
-  line?: number | null
-  body?: string
-  createdAt?: string
-}
-
-export interface ReviewThreadNode {
-  id: string
-  isResolved: boolean
-  isOutdated: boolean
-  comments: { nodes: ReviewThreadComment[] }
-}
-
 export interface DebtSummary {
   generated_at: string
   open_count: number
@@ -74,10 +59,4 @@ export interface DebtSummary {
   oldest_open: string | null
 }
 
-export interface MergedPrCandidate {
-  number: number
-  mergedAt: string
-  updatedAt: string | null
-  author: string
-  labels: string[]
-}
+

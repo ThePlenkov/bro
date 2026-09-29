@@ -6,16 +6,10 @@
  * today; a gitlab connector maps MR discussions/pipelines later.
  */
 
-/** A pull/merge request on a review host. */
+/** A pull/merge request on a review host — `repo` is 'owner/name'. */
 export interface PrTarget {
-  owner: string
   repo: string
   pr: number
-}
-
-export interface RepoRef {
-  owner: string
-  repo: string
 }
 
 /** Normalized PR head state — vendor enums collapsed to uppercase. */
@@ -61,6 +55,10 @@ export interface MergedPr {
   updatedAt: string | null
   author: string
   labels: string[]
+  /** Source branch + its tip sha at merge — cleanup maps branches it
+   *  can retire onto these. */
+  headRef: string
+  headSha: string
 }
 
 export interface MergedPrInfo {
@@ -70,8 +68,9 @@ export interface MergedPrInfo {
   mergeSha: string
 }
 
-/** Selection for mergedPrs — `ids` wins over the list filters; unmerged
- *  ids are warned and skipped by the connector, not thrown. */
+/** Selection for mergedPrs — `ids` present (even empty) is an explicit
+ *  selection; unmerged ids are warned and skipped by the connector,
+ *  not thrown. */
 export interface MergedPrQuery {
   ids?: number[]
   author?: string
@@ -93,17 +92,24 @@ export interface ReviewFacade {
   resolveRepo(positional?: string[]): string
   /** Clickable PR reference for user-facing output — vendor URL shape. */
   prLink(ownerRepo: string, pr: number): string
+  /** The PR for the bound dir's checked-out branch — null when the
+   *  branch has none or the host is unreachable. */
+  currentPr(): { pr: number; state: string; url: string } | null
+  /** Open PR numbers whose head is this branch — the loop's "did the
+   *  agent open one" probe. */
+  prsForBranch(branch: string): number[]
 
   prMeta(t: PrTarget): PrMeta
   /** Merged-PR detail for harvest — throws when the PR isn't merged. */
   mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo
-  mergedPrs(ref: RepoRef, q?: MergedPrQuery): MergedPr[]
+  mergedPrs(repo: string, q?: MergedPrQuery): MergedPr[]
 
   checks(t: PrTarget, requiredOnly?: boolean): CheckInfo[]
-  /** Check name → failure-annotation count at a head sha. An absent key
-   *  means the check has no annotations endpoint — nothing is unknown
-   *  about it. */
-  checkAnnotations(ref: RepoRef, headSha: string): Map<string, number>
+  /** Check name → failure-annotation count at a head sha. `null` means
+   *  the run exists but its annotations could not be fetched — a caller
+   *  that gates on findings must count it as unknown, not zero. An
+   *  absent key means the check has no annotations endpoint at all. */
+  checkAnnotations(repo: string, headSha: string): Map<string, number | null>
   /** Distinct reviewed head SHAs — pushes that entered the review loop. */
   reviewedShas(t: PrTarget): string[]
 
@@ -114,8 +120,9 @@ export interface ReviewFacade {
   labels(t: PrTarget): string[]
   prUpdatedAt(t: PrTarget): string | null
   /** Idempotent — creates or updates the label in place. */
-  createLabel(ref: RepoRef, name: string, color: string): void
+  createLabel(repo: string, name: string, color: string): void
   addLabel(t: PrTarget, label: string): void
+  /** Ensure-absent — removing a label the PR doesn't carry is a no-op. */
   removeLabel(t: PrTarget, label: string): void
 
   /** The host's "update branch" — merge base into head, pinned to the

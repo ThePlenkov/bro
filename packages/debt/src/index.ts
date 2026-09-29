@@ -6,9 +6,6 @@ export type {
   DebtStatus,
   DebtSummary,
   LedgerOverlay,
-  MergedPrCandidate,
-  ReviewThreadComment,
-  ReviewThreadNode,
 } from './types.ts'
 export { bodyPreview, deriveArea, fingerprint } from './text.ts'
 export {
@@ -27,19 +24,14 @@ export {
 } from './store.ts'
 export {
   applyLastN,
-  fetchMergedPrCandidates,
-  fetchPrLabels,
-  fetchPrUpdatedAt,
-  fetchPrMeta,
-  fetchReviewThreads,
   filterByLabels,
   filterByMergedDate,
   hasHarvestSelection,
   parseCsvInts,
   parseCsvStrings,
   resolveHarvestPrs,
-} from './github.ts'
-export type { HarvestPrFilters } from './github.ts'
+} from './harvest.ts'
+export type { HarvestPrFilters } from './harvest.ts'
 export {
   applyCollectLabel,
   applyDebtLabel,

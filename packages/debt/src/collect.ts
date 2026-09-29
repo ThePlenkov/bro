@@ -1,20 +1,19 @@
 /**
  * Collect unresolved review threads from a merged PR into DebtRecords.
  */
+import type { ReviewFacade, ReviewThread } from '@bro/core'
 import type {
   AuthorPolicy,
   DebtNeeds,
   DebtPriority,
   DebtRecord,
-  ReviewThreadNode,
 } from './types.ts'
-import { fetchPrMeta, fetchReviewThreads } from './github.ts'
 import { loadAuthorPolicy } from './store.ts'
 import { bodyPreview, deriveArea, fingerprint } from './text.ts'
 
 export function classifyThread(opts: {
   author: string
-  authorType?: string
+  bot?: boolean
   config: AuthorPolicy
 }): {
   priority: DebtPriority
@@ -25,9 +24,9 @@ export function classifyThread(opts: {
   if (opts.config.excluded_authors.some((a) => a.toLowerCase() === login)) {
     return { priority: 'noise', needs: 'skip', harvest: false }
   }
-  // GraphQL reports app actors (coderabbitai, cubic-dev-ai, ...) without
-  // the [bot] suffix — __typename is the reliable discriminator.
-  const isBot = opts.authorType === 'Bot' || login.endsWith('[bot]')
+  // App actors (coderabbitai, cubic-dev-ai, ...) report no [bot] suffix —
+  // the facade's bot flag is the reliable discriminator.
+  const isBot = opts.bot === true || login.endsWith('[bot]')
   if (!isBot) {
     return { priority: 'human', needs: 'code_change', harvest: true }
   }
@@ -56,21 +55,21 @@ function authorMatchesFilter(author: string, threadAuthor: string | null): boole
 }
 
 function classifyThreadAction(opts: {
-  thread: ReviewThreadNode
+  thread: ReviewThread
   threadAuthor: string | null
   config: AuthorPolicy
 }): ThreadAction | null {
-  if (opts.thread.isResolved || opts.thread.isOutdated) {
-    return opts.thread.isOutdated ? { kind: 'skip', reason: 'outdated' } : null
+  if (opts.thread.resolved || opts.thread.outdated) {
+    return opts.thread.outdated ? { kind: 'skip', reason: 'outdated' } : null
   }
-  const comment = opts.thread.comments.nodes[0]
-  const author = comment?.author?.login ?? 'unknown'
+  const comment = opts.thread.comment
+  const author = comment?.author ?? 'unknown'
   if (!authorMatchesFilter(author, opts.threadAuthor)) {
     return { kind: 'skip', reason: 'thread_author' }
   }
   const classification = classifyThread({
     author,
-    authorType: comment?.author?.__typename,
+    bot: comment?.bot,
     config: opts.config,
   })
   if (!classification.harvest) {
@@ -80,17 +79,17 @@ function classifyThreadAction(opts: {
 }
 
 function toDebtRecord(opts: {
-  thread: ReviewThreadNode
-  meta: ReturnType<typeof fetchPrMeta>
+  thread: ReviewThread
+  meta: { title: string; url: string; mergedAt: string; mergeSha: string }
   pr: number
   runId: string
   harvestedAt: string
   classification: ReturnType<typeof classifyThread>
 }): DebtRecord {
-  const comment = opts.thread.comments.nodes[0] ?? {}
-  const author = comment.author?.login ?? 'unknown'
-  const path = comment.path ?? ''
-  const body = comment.body ?? ''
+  const comment = opts.thread.comment
+  const author = comment?.author ?? 'unknown'
+  const path = comment?.path ?? ''
+  const body = comment?.body ?? ''
 
   return {
     thread_id: opts.thread.id,
@@ -104,7 +103,7 @@ function toDebtRecord(opts: {
     merged_at: opts.meta.mergedAt,
     merged_sha: opts.meta.mergeSha,
     path,
-    line: comment.line ?? null,
+    line: comment?.line ?? null,
     author,
     body,
     body_preview: bodyPreview(body),
@@ -119,28 +118,21 @@ function toDebtRecord(opts: {
   }
 }
 
-export async function collectPr(opts: {
-  owner: string
-  repo: string
-  pr: number
-  mergedSha?: string
-  runId: string
-  threadAuthor?: string | null
-  cwd?: string
-}): Promise<CollectPrResult> {
+export async function collectPr(
+  rev: ReviewFacade,
+  opts: {
+    repo: string
+    pr: number
+    mergedSha?: string
+    runId: string
+    threadAuthor?: string | null
+    cwd?: string
+  }
+): Promise<CollectPrResult> {
   const config = loadAuthorPolicy(opts.cwd)
-  const meta = fetchPrMeta({
-    owner: opts.owner,
-    repo: opts.repo,
-    pr: opts.pr,
-    mergedSha: opts.mergedSha,
-  })
+  const meta = rev.mergedPrInfo({ repo: opts.repo, pr: opts.pr }, opts.mergedSha)
   const harvestedAt = new Date().toISOString()
-  const threads = await fetchReviewThreads({
-    owner: opts.owner,
-    repo: opts.repo,
-    pr: opts.pr,
-  })
+  const threads = await rev.reviewThreads({ repo: opts.repo, pr: opts.pr })
 
   const incoming: DebtRecord[] = []
   let skipped = 0

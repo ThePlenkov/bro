@@ -46,7 +46,7 @@ function withFakeGh(env: Record<string, string>, fn: (log: string) => void): voi
   }
 }
 
-const target = { owner: 'acme', repo: 'widgets', pr: 42 }
+const target = { repo: 'acme/widgets', pr: 42 }
 
 describe('github connector', () => {
   test('matchRemote claims github hosts only', () => {

@@ -14,8 +14,8 @@ import {
   dataRefPush,
   dataRefRoot,
   ensureGhAuth,
-  prLink,
-  resolveRepo,
+  reviewHost,
+  type ReviewFacade,
 } from '@bro/core'
 import { loadBroConfig } from '../plugins.ts'
 import {
@@ -30,9 +30,6 @@ import {
   DEBT_ROW_STATUSES,
   DEBT_STATES,
   ensureDebtLabels,
-  fetchMergedPrCandidates,
-  fetchPrLabels,
-  fetchPrUpdatedAt,
   hasHarvestSelection,
   parseCsvInts,
   parseCsvStrings,
@@ -89,8 +86,6 @@ Commands:
 
 interface CollectArgs {
   repo: string
-  owner: string
-  repoName: string
   filters: HarvestPrFilters
   threadAuthor: string | null
   runId: string
@@ -100,7 +95,7 @@ interface CollectArgs {
   noLabel: boolean
 }
 
-function parseCollectArgs(argv: string[]): CollectArgs {
+function parseCollectArgs(rev: ReviewFacade, argv: string[]): CollectArgs {
   const positional: string[] = []
   const filters: HarvestPrFilters = {
     prIds: [],
@@ -165,8 +160,7 @@ function parseCollectArgs(argv: string[]): CollectArgs {
     }
   }
 
-  const repo = resolveRepo(positional)
-  const [owner, repoName] = repo.split('/')
+  const repo = rev.resolveRepo(positional)
 
   // No explicit selection → default queue: last 50 merged PRs.
   if (!hasHarvestSelection(filters)) {
@@ -175,8 +169,6 @@ function parseCollectArgs(argv: string[]): CollectArgs {
 
   return {
     repo,
-    owner: owner!,
-    repoName: repoName!,
     filters,
     threadAuthor,
     runId,
@@ -188,14 +180,14 @@ function parseCollectArgs(argv: string[]): CollectArgs {
 }
 
 async function cmdCollect(argv: string[]): Promise<void> {
-  const args = parseCollectArgs(argv)
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  const args = parseCollectArgs(rev, argv)
   ensureGhAuth()
 
   // Fetch at least as many candidates as --last requests, or it silently caps.
   const listLimit = Math.max(args.filters.lastN ?? 0, 100)
-  const matched = resolveHarvestPrs({
-    owner: args.owner,
-    repo: args.repoName,
+  const matched = resolveHarvestPrs(rev, {
+    repo: args.repo,
     filters: args.filters,
     listLimit,
   })
@@ -250,7 +242,7 @@ async function cmdCollect(argv: string[]): Promise<void> {
     console.error('debt collect: --thread-author is a partial scan — labels disabled')
   }
   if (!args.dryRun && labelingEnabled) {
-    ensureDebtLabels(args.repo)
+    ensureDebtLabels(rev, args.repo)
   }
 
   let totalRows = 0
@@ -261,21 +253,20 @@ async function cmdCollect(argv: string[]): Promise<void> {
     const scannedAt = new Date().toISOString()
     let result
     try {
-      result = await collectPr({
-        owner: args.owner,
-        repo: args.repoName,
+      result = await collectPr(rev, {
+        repo: args.repo,
         pr: pr.number,
         runId: args.runId,
         threadAuthor: args.threadAuthor,
       })
     } catch (err) {
       console.error(
-        `warning: PR ${prLink(`${args.owner}/${args.repoName}`, pr.number)} skipped — ${err instanceof Error ? err.message : err}`
+        `warning: PR ${rev.prLink(args.repo, pr.number)} skipped — ${err instanceof Error ? err.message : err}`
       )
       continue
     }
     console.error(
-      `debt: PR ${prLink(`${args.owner}/${args.repoName}`, pr.number)} — ${result.incoming.length} thread(s)`
+      `debt: PR ${rev.prLink(args.repo, pr.number)} — ${result.incoming.length} thread(s)`
     )
 
     if (args.dryRun) {
@@ -321,9 +312,9 @@ async function cmdCollect(argv: string[]): Promise<void> {
     // Re-fetch labels: the candidate snapshot predates this PR's collection,
     // and a human may have opted out while we were scanning.
     if (labelingEnabled) {
-      const current = fetchPrLabels({ owner: args.owner, repo: args.repoName, pr: pr.number })
+      const current = rev.labels({ repo: args.repo, pr: pr.number })
       if (prDebtState(current) !== 'skipped') {
-        applyCollectLabel({ repo: args.repo, pr: pr.number, state })
+        applyCollectLabel(rev, { repo: args.repo, pr: pr.number, state })
         labeled += 1
       }
       // Store the observed updatedAt as the cursor, not the wall clock:
@@ -334,7 +325,7 @@ async function cmdCollect(argv: string[]): Promise<void> {
       // scans earn a cursor — a --thread-author partial scan must not
       // mask post-scan activity on a labeled PR.
       const cursor =
-        fetchPrUpdatedAt({ owner: args.owner, repo: args.repoName, pr: pr.number }) ??
+        rev.prUpdatedAt({ repo: args.repo, pr: pr.number }) ??
         pr.updatedAt ??
         scannedAt
       markProcessedAt([pr.number], cursor)
@@ -402,17 +393,10 @@ function cmdStatus(): void {
   }
 
   // Best-effort: count merged PRs still lacking a debt:* label. Skipped
-  // silently when no repo resolves (not in a clone, gh unreachable).
+  // silently when no repo resolves (not in a clone, host unreachable).
   try {
-    const repo = resolveRepo([])
-    const [owner, repoName] = repo.split('/')
-    const merged = fetchMergedPrCandidates({
-      owner: owner!,
-      repo: repoName!,
-      prAuthor: null,
-      label: null,
-      limit: 100,
-    })
+    const rev = reviewHost(undefined, loadBroConfig().connectors)
+    const merged = rev.mergedPrs(rev.resolveRepo([]), { limit: 100 })
     const { pending } = partitionByProcessed(merged)
     console.log(`\nunprocessed merged PRs: ${pending.length} (of last ${merged.length})`)
   } catch {
@@ -442,17 +426,11 @@ function cmdPrs(argv: string[]): void {
     }
     positional.push(arg)
   }
-  const repo = resolveRepo(positional)
-  const [owner, repoName] = repo.split('/')
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  const repo = rev.resolveRepo(positional)
   ensureGhAuth()
 
-  const prs = fetchMergedPrCandidates({
-    owner: owner!,
-    repo: repoName!,
-    prAuthor: null,
-    label: null,
-    limit,
-  })
+  const prs = rev.mergedPrs(repo, { limit })
   const rows = prs
     .map((pr) => ({ pr, state: prDebtState(pr.labels) ?? 'none' }))
     .filter((row) => showAll || row.state === 'none')
@@ -524,20 +502,21 @@ function cmdMark(argv: string[]): void {
     console.error(`Usage: bro debt mark PR <${[...DEBT_STATES, 'none'].join('|')}> [OWNER REPO]`)
     process.exit(2)
   }
-  const repo = resolveRepo(rest)
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  const repo = rev.resolveRepo(rest)
   ensureGhAuth()
   if (stateRaw === 'none') {
-    clearDebtLabels({ repo, pr })
-    console.error(`debt mark: cleared debt:* labels on ${prLink(repo, pr)}`)
+    clearDebtLabels(rev, { repo, pr })
+    console.error(`debt mark: cleared debt:* labels on ${rev.prLink(repo, pr)}`)
     return
   }
   if (!(DEBT_STATES as readonly string[]).includes(stateRaw)) {
     console.error(`error: unknown state ${stateRaw}`)
     process.exit(2)
   }
-  ensureDebtLabels(repo)
-  applyDebtLabel({ repo, pr, state: stateRaw as DebtPrState })
-  console.error(`debt mark: ${prLink(repo, pr)} → debt:${stateRaw}`)
+  ensureDebtLabels(rev, repo)
+  applyDebtLabel(rev, { repo, pr, state: stateRaw as DebtPrState })
+  console.error(`debt mark: ${rev.prLink(repo, pr)} → debt:${stateRaw}`)
 }
 
 // --- set -------------------------------------------------------------------
