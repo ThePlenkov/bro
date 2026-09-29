@@ -1,0 +1,6 @@
+{
+  "name": "broject",
+  "compatibility_date": "2026-09-21",
+  "assets": { "directory": "./dist/client" },
+  "routes": [{ "pattern": "broject.dev", "custom_domain": true }]
+}
