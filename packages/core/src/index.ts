@@ -45,11 +45,21 @@ export {
   connectors,
   facade,
   parallelWorkLines,
+  promptContextLines,
   registerConnector,
   reviewHost,
   sessionStartLines,
+  stopGateContributions,
 } from './connectors.ts'
-export type { Connector, ConnectorCtx, ConnectorHooks, FacadeMap, FacadeOpts } from './connectors.ts'
+export type {
+  Connector,
+  ConnectorCtx,
+  ConnectorHooks,
+  FacadeMap,
+  FacadeOpts,
+  GateContribution,
+  MaybePromise,
+} from './connectors.ts'
 export { planKind, readPlanDoc } from './plan.ts'
 export type { PlanSchema } from './plan.ts'
 export { makePrinter } from './output.ts'

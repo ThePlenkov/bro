@@ -21,6 +21,8 @@
  * contract). New facades join FacadeMap + Connector together, and only
  * when a real consumer exists.
  */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { gitTry } from './git.ts'
 import type { ReviewFacade } from './review.ts'
 import type { TaskStore } from './tasks.ts'
@@ -30,6 +32,10 @@ export interface ConnectorCtx {
   /** Working dir — repo root for project-scoped facades, the resolved
    *  global dir for user-level ones (same contract as taskStore(dir)). */
   dir: string
+  /** Firing session's id — lets probes distinguish this session's claims
+   *  (recorded in `<git-common-dir>/bro/hooks/<session>.<aspect>` markers)
+   *  from foreign live work. Absent outside hook events. */
+  sessionId?: string
 }
 
 /** Capability → facade type. Optional on Connector; required here once
@@ -40,20 +46,40 @@ export interface FacadeMap {
   reviews: ReviewFacade
 }
 
+export type MaybePromise<T> = T | Promise<T>
+
+/** One system's answer to "may this session stop?" — the hook applies
+ *  the arming policy; the connector only reports state:
+ *  - `block`    — reason line, fires only when the session armed `aspect`
+ *  - `armedHint`— context for an armed session that isn't blocked
+ *  - `passive`  — ambient context for sessions that never armed it */
+export interface GateContribution {
+  /** Arming aspect — matches the post-tool marker name ('act', 'drill',
+   *  'work', or a connector-owned name). */
+  aspect: string
+  block?: string
+  armedHint?: string
+  passive?: string
+}
+
 /** Context a connector contributes to the agent lifecycle — the
  *  per-connector answer to "what does this system know that the session
  *  must see". All probes are fail-open: a wedged system yields no lines,
- *  never a stalled hook. */
+ *  never a stalled hook. Probes may be async — a review host's gate
+ *  check is a network call. */
 export interface ConnectorHooks {
   /** Ambient context lines for session-start rehydration — e.g. beads
    *  reports the ready queue. */
-  sessionStart?(ctx: ConnectorCtx): string[]
+  sessionStart?(ctx: ConnectorCtx): MaybePromise<string[]>
   /** Signals that OTHER live work exists here — claimed items, held
    *  slots; grouped under the parallel-work nudge, never a block. */
-  parallelWork?(ctx: ConnectorCtx): string[]
-  /** Stop-gate blockers — non-empty means the session has unfinished
-   *  business in this system. */
-  stopGate?(ctx: ConnectorCtx): string[]
+  parallelWork?(ctx: ConnectorCtx): MaybePromise<string[]>
+  /** Prompt-submit context — the raw prompt lets each system spot its
+   *  own references (github sees PR URLs, jira would see issue keys). */
+  promptSubmit?(ctx: ConnectorCtx, prompt: string): MaybePromise<string[]>
+  /** Stop-gate contributions — non-empty `block` means the session has
+   *  unfinished business in this system. */
+  stopGate?(ctx: ConnectorCtx): MaybePromise<GateContribution[]>
 }
 
 export interface Connector {
@@ -72,6 +98,33 @@ export interface Connector {
 const shortTitle = (t: string | undefined): string => {
   const flat = (t ?? '').replace(/\s+/g, ' ').trim()
   return flat.length > 60 ? `${flat.slice(0, 60)}…` : flat
+}
+
+/** Bead ids this session claimed — the `task` aspect marker records one
+ *  claim per detail line (line 1 is the timestamp). No session or no
+ *  marker → nothing is "mine". */
+function sessionTaskClaims(ctx: ConnectorCtx): Set<string> {
+  const mine = new Set<string>()
+  if (!ctx.sessionId) {
+    return mine
+  }
+  try {
+    const gd = gitTry(['-C', ctx.dir, 'rev-parse', '--git-common-dir'])
+    if (gd.code !== 0) {
+      return mine
+    }
+    const safe = ctx.sessionId.replace(/[^\w.-]/g, '_')
+    const marker = join(gd.out.trim(), 'bro', 'hooks', `${safe}.task`)
+    for (const d of readFileSync(marker, 'utf8').split('\n').slice(1)) {
+      const id = d.trim()
+      if (id) {
+        mine.add(id)
+      }
+    }
+  } catch {
+    // no marker file — the session claimed nothing
+  }
+  return mine
 }
 
 const beadsConnector: Connector = {
@@ -96,6 +149,39 @@ const beadsConnector: Connector = {
           .slice(0, 5)
           .map((r) => `${r.id} ${shortTitle(r.title)}`.trim())
         return claimed.length > 0 ? [`claimed beads: ${claimed.join(', ')}`] : []
+      } catch {
+        return []
+      }
+    },
+    stopGate(ctx) {
+      try {
+        const claimed = taskStore(ctx.dir).list({ status: 'in_progress' })
+        if (claimed.length === 0) {
+          return []
+        }
+        // foreign claims are ambient — the session can't close beads it
+        // didn't claim, so they stay passive context
+        const mine = sessionTaskClaims(ctx)
+        const own = claimed.filter((r) => mine.has(r.id))
+        const foreign = claimed.filter((r) => !mine.has(r.id))
+        const fmt = (r: { id: string; title?: string }): string =>
+          `${r.id} ${shortTitle(r.title)}`.trim()
+        const out: GateContribution[] = []
+        if (own.length > 0) {
+          out.push({
+            aspect: 'task',
+            block:
+              `bro: claimed beads open: ${own.slice(0, 5).map(fmt).join(', ')} — ` +
+              'close (`bd close <id>`) or release the claim before stopping',
+          })
+        }
+        if (foreign.length > 0) {
+          out.push({
+            aspect: 'task',
+            passive: `bro: claimed beads open: ${foreign.slice(0, 5).map(fmt).join(', ')}`,
+          })
+        }
+        return out
       } catch {
         return []
       }
@@ -196,24 +282,68 @@ export function connectorHooks(ctx: ConnectorCtx): ConnectorHooks[] {
   return out
 }
 
-/** Collect session-start context lines from all connectors. */
-export function sessionStartLines(ctx: ConnectorCtx): string[] {
-  return connectorHooks(ctx).flatMap((h) => {
-    try {
-      return h.sessionStart?.(ctx) ?? []
-    } catch {
-      return []
-    }
+/** Per-probe budget — a hung connector (dead network, wedged CLI) must
+ *  not stall the whole hook. Racing the probe means the output goes out
+ *  on time even if a spawned child lingers. */
+const PROBE_TIMEOUT_MS = 4_000
+
+async function probeWithTimeout<T>(p: MaybePromise<T>, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), PROBE_TIMEOUT_MS)
+    timer.unref?.()
   })
+  try {
+    return await Promise.race([Promise.resolve(p), timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** Collect a line-producing probe across all connectors — fail-open
+ *  per connector, one wedged system must not starve the rest. */
+async function collectLines(
+  ctx: ConnectorCtx,
+  probe: (h: ConnectorHooks) => MaybePromise<string[] | undefined>
+): Promise<string[]> {
+  const out: string[] = []
+  for (const h of connectorHooks(ctx)) {
+    try {
+      out.push(...((await probeWithTimeout(probe(h), undefined)) ?? []))
+    } catch {
+      // fail-open
+    }
+  }
+  return out
+}
+
+/** Collect session-start context lines from all connectors. */
+export function sessionStartLines(ctx: ConnectorCtx): Promise<string[]> {
+  return collectLines(ctx, (h) => h.sessionStart?.(ctx))
 }
 
 /** Collect parallel-work signals from all connectors. */
-export function parallelWorkLines(ctx: ConnectorCtx): string[] {
-  return connectorHooks(ctx).flatMap((h) => {
+export function parallelWorkLines(ctx: ConnectorCtx): Promise<string[]> {
+  return collectLines(ctx, (h) => h.parallelWork?.(ctx))
+}
+
+/** Collect prompt-submit context from all connectors. */
+export function promptContextLines(ctx: ConnectorCtx, prompt: string): Promise<string[]> {
+  return collectLines(ctx, (h) => h.promptSubmit?.(ctx, prompt))
+}
+
+/** Collect stop-gate contributions from all connectors — the caller
+ *  applies the session-arming policy to each. */
+export async function stopGateContributions(
+  ctx: ConnectorCtx
+): Promise<GateContribution[]> {
+  const out: GateContribution[] = []
+  for (const h of connectorHooks(ctx)) {
     try {
-      return h.parallelWork?.(ctx) ?? []
+      out.push(...((await probeWithTimeout(h.stopGate?.(ctx), undefined)) ?? []))
     } catch {
-      return []
+      // fail-open
     }
-  })
+  }
+  return out
 }

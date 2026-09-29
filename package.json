@@ -33,5 +33,9 @@
   },
   "overrides": {
     "smol-toml": "1.7.1"
+  },
+  "allowScripts": {
+    "nx@23.2.1": true,
+    "esbuild@0.28.2": true
   }
 }

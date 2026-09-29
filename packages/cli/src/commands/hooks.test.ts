@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyArmCommand, classifyExecCommand, isSelfToolCommand, parsePrUrl, readArmed, armDetail, otherLiveWork } from './hooks.ts'
+import { classifyArmCommand, classifyArmCommands, classifyExecCommand, isSelfToolCommand, readArmed, armDetail, otherLiveWork } from './hooks.ts'
 
 describe('classifyExecCommand', () => {
   test('detects gh pr merge', () => {
@@ -48,21 +48,6 @@ describe('isSelfToolCommand', () => {
   })
 })
 
-describe('parsePrUrl', () => {
-  test('extracts owner/repo/pr from a GitHub URL', () => {
-    assert.deepEqual(parsePrUrl('see https://github.com/acme/widgets/pull/42 please'), {
-      owner: 'acme',
-      repo: 'widgets',
-      pr: 42,
-    })
-  })
-
-  test('returns null without a PR URL', () => {
-    assert.equal(parsePrUrl('fix the thing'), null)
-    assert.equal(parsePrUrl('github.com/acme/widgets/issues/9'), null)
-  })
-})
-
 describe('classifyArmCommand', () => {
   test('arms act on PR-touching commands', () => {
     assert.equal(classifyArmCommand('bro act status'), 'act')
@@ -94,6 +79,19 @@ describe('classifyArmCommand', () => {
     assert.equal(classifyArmCommand('git worktree list'), null)
     assert.equal(classifyArmCommand('git worktree prune'), null)
     assert.equal(classifyArmCommand('bd worktree list'), null)
+  })
+
+  test('bead claims arm task — the session owes the claim a close/release', () => {
+    assert.equal(classifyArmCommand('bd update bro-x1 --claim'), 'task')
+    assert.equal(classifyArmCommand('bd update --claim bro-x1'), 'task')
+    assert.equal(classifyArmCommand('bd ready'), null)
+    assert.equal(classifyArmCommand('bd show bro-x1'), null)
+  })
+
+  test('work enter arms both work and task — it also claims the bead', () => {
+    assert.deepEqual(classifyArmCommands('bro work enter bro-x1').sort(), ['task', 'work'])
+    assert.deepEqual(classifyArmCommands('git worktree add ../x'), ['work'])
+    assert.deepEqual(classifyArmCommands('git status'), [])
   })
 
   test('ignores unrelated or non-command-position text', () => {
@@ -147,6 +145,7 @@ describe('armDetail', () => {
     ['gh pr merge 42 --squash', 'act', '#42'],
     ['git push', 'act', ''],
     ['bro drill down bro-x', 'drill', ''],
+    ['bd update bro-x1 --claim', 'task', 'bro-x1'],
     ['npm test', 'work', ''],
   ] as const) {
     test(`${cmd} → "${want}"`, () => {

@@ -22,7 +22,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve, sep } from 'node:path'
-import { git, gitTry, loadConfig, stackSection, taskStore } from '@bro/core'
+import { git, gitTry, loadConfig, stackSection, taskStore, type Connector } from '@bro/core'
 import { flag, positionals } from './args.ts'
 
 export interface WorktreeInfo {
@@ -468,4 +468,64 @@ export function gitDirOf(cwd: string): string | null {
   }
   const dir = (res.stdout ?? '').trim()
   return dir ? resolve(dir) : null
+}
+
+/** The work connector — git worktrees as lifecycle state: a session in
+ *  the primary checkout gets the parallel-friendly nudge, sibling
+ *  worktrees surface under parallel work, and an armed session stopping
+ *  inside a dirty linked worktree blocks until it's clean or left. */
+export const workConnector: Connector = {
+  name: 'work',
+  hooks: () => ({
+    sessionStart(ctx) {
+      try {
+        const gd = gitDirOf(ctx.dir)
+        if (!gd || isLinkedGitDir(gd)) {
+          return []
+        }
+        return [
+          'parallel-friendly: run work in a linked worktree — `bro work enter <slug>`; finish with `bro work leave`; `bro work list` shows siblings',
+        ]
+      } catch {
+        return []
+      }
+    },
+    parallelWork(ctx) {
+      try {
+        const cur = gitTry(['-C', ctx.dir, 'rev-parse', '--show-toplevel']).out.trim()
+        return parseWorktreePorcelain(
+          gitTry(['-C', ctx.dir, 'worktree', 'list', '--porcelain']).out
+        )
+          .slice(1) // porcelain lists the main worktree first
+          .filter((w) => !w.prunable && w.path !== cur)
+          .slice(0, 5)
+          .map((w) => `worktree ${basename(w.path)} [${w.branch ?? 'detached'}]`)
+      } catch {
+        return []
+      }
+    },
+    stopGate(ctx) {
+      try {
+        const gd = gitDirOf(ctx.dir)
+        if (!gd || !isLinkedGitDir(gd)) {
+          return []
+        }
+        const res = gitTry(['-C', ctx.dir, 'status', '--porcelain'])
+        const dirty = res.code === 0 ? res.out.split('\n').filter(Boolean).length : 0
+        return [
+          {
+            aspect: 'work',
+            block:
+              dirty > 0
+                ? `bro: linked worktree has ${dirty} uncommitted file(s) — ` +
+                  'commit/push the work or discard deliberately, then `bro work leave`'
+                : undefined,
+            armedHint: 'bro: still inside a linked worktree — `bro work leave` when done',
+          },
+        ]
+      } catch {
+        return []
+      }
+    },
+  }),
 }
