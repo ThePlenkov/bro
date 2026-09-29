@@ -13,3 +13,4 @@ export {
   releaseMergeSlot,
 } from './merge-slot.ts'
 export type { MergeSlot } from './merge-slot.ts'
+export { actConnector } from './connector.ts'

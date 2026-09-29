@@ -3,22 +3,23 @@
  * `hooks.json` at the plugin root calls this; all policy lives here.
  *
  *   session-start | post-compaction | pre-compact
- *                                       rehydrate: beads ready + drill frame + PR gate + debt
- *   prompt-submit                     drill-frame reminder; PR URL → act snapshot
+ *                                       rehydrate: connector probes — beads ready,
+ *                                       drill frame, PR gate, debt, merge slot, work nudge
+ *   prompt-submit                     connector prompt probes — drill-frame reminder;
+ *                                       the review host parses its own PR URLs → act snapshot
  *   post-tool                         exec nudges: gh pr create → act gate; merge → debt sweep;
  *                                       arms the stop gate for this session (bro act/drill/
- *                                       work, gh pr, git push, worktree add) via a
+ *                                       work, gh pr, git push, worktree add, bd --claim) via a
  *                                       per-session marker in .git
- *   stop                              block while a drill frame, review threads, or a dirty
- *                                       linked worktree remain — but only for sessions that
- *                                       armed the gate; ambient repo state is emitted as
- *                                       passive context, never a block
+ *   stop                              connector GateContributions — each system reports
+ *                                       unfinished work; the hook blocks only aspects this
+ *                                       session armed, ambient state is passive context
  *   permission                        auto-approve bro/bd invocations
  *
  * Contract: read the event payload on stdin, print hook control JSON on
  * stdout, exit 0. Everything is best-effort — hooks only fire in bro-enabled
- * repos (bro.config.json or .beads/ walking up) and every probe is wrapped so
- * a missing bd/gh or a dead network can never stall the session.
+ * repos (bro.config.json or .beads/ walking up) and every connector probe is
+ * fail-open so a missing bd/gh or a dead network can never stall the session.
  */
 import { execFileSync } from 'node:child_process'
 import {
@@ -30,19 +31,13 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
-  gitTry,
   parallelWorkLines,
-  reviewHost,
+  promptContextLines,
   sessionStartLines,
-  type PrTarget,
+  stopGateContributions,
 } from '@bro/core'
-import { loadBroConfig } from '../plugins.ts'
-import { evaluateExitGate, fetchPrActState, mergeSlotHolder } from '@bro/act'
-import { gitDirOf, isLinkedGitDir, parseWorktreePorcelain } from './work.ts'
-import { currentFrame } from '@bro/drill'
-import { readDebtRecords } from '@bro/debt'
 
 interface HookInput {
   tool_input?: { command?: unknown }
@@ -108,11 +103,13 @@ function unquoted(cmd: string): string {
 /** Which gate aspect a shell command arms for this session. The stop gate
  * only hard-blocks sessions that recorded interaction — `bro act`/`gh pr`/
  * `git push` arm the PR gate, `bro drill`/`bro wtf` arm the drill gate,
- * worktree creation arms the work gate (`bro work`, `git worktree add`,
- * `bd worktree create`).
+ * worktree creation and bead claims arm the work gate (`bro work`,
+ * `git worktree add`, `bd worktree create`, `bd … --claim`).
  * Global flags between binary and subcommand are allowed (`gh -R o/r pr`,
  * `git -C path push`); the binary must sit at a command position — string
- * start or after `;`, `&`, `|`, or a newline (leading whitespace is fine). */
+ * start or after `;`, `&`, `|`, or a newline (leading whitespace is fine).
+ * The set is open — connectors may contribute gates under their own
+ * aspect names; arming patterns for those live where they're owned. */
 export type GateAspect = 'act' | 'drill' | 'work'
 
 export function classifyArmCommand(cmd: string): GateAspect | null {
@@ -143,6 +140,10 @@ export function classifyArmCommand(cmd: string): GateAspect | null {
   if (new RegExp(String.raw`${at}bd${flags}\s+worktree\s+(?:create|remove)\b`).test(c)) {
     return 'work'
   }
+  // claiming a bead is work — the session owes the claim a close/release
+  if (new RegExp(`${at}bd\\b[^;&|\\n]*--claim\\b`).test(c)) {
+    return 'work'
+  }
   return null
 }
 
@@ -157,102 +158,6 @@ export function isSelfToolCommand(cmd: string): boolean {
     /^\s*(bro|bd)(\s|$)/.test(cmd) ||
     /^\s*npx\s+(-y\s+)?@theplenkov\/bro(@[\w.:-]+)?(\s|$)/.test(cmd)
   )
-}
-
-/** First GitHub PR URL in free text → { owner, repo, pr }. */
-export function parsePrUrl(text: string): { owner: string; repo: string; pr: number } | null {
-  const m = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/.exec(text)
-  if (!m) {
-    return null
-  }
-  return { owner: m[1]!, repo: m[2]!, pr: Number(m[3]) }
-}
-
-// --- shared probes ------------------------------------------------------------
-
-function drillLine(): string | null {
-  try {
-    const frame = currentFrame()
-    if (!frame) {
-      return null
-    }
-    return `drill frame open: ${frame.id} "${frame.title}" [depth=${frame.depth}] — close with \`bro drill up --result "…"\``
-  } catch {
-    return null
-  }
-}
-
-/** Merge-slot holder for context — a session that sees the slot held knows
- *  not to start a merge right now. Fail-open: no beads → no line. */
-function mergeSlotLine(): string | null {
-  try {
-    const holder = mergeSlotHolder()
-    return holder ? `merge slot: held by ${holder} — serialize merges via \`bro act merge\`` : null
-  } catch {
-    return null
-  }
-}
-
-function debtLine(): string | null {
-  try {
-    const open = readDebtRecords().filter((r) => r.status === 'open').length
-    return open > 0 ? `debt: ${open} open finding(s) — \`bro debt next\` picks one` : null
-  } catch {
-    return null
-  }
-}
-
-/** Parallel-friendly nudge: sessions sitting in the PRIMARY checkout get
- *  told to isolate work in a linked worktree. Sessions already inside a
- *  linked worktree (or outside git) get nothing — state, not noise. */
-function workNudgeLine(): string | null {
-  try {
-    const gd = gitDirOf(process.cwd())
-    if (!gd || isLinkedGitDir(gd)) {
-      return null
-    }
-    return 'parallel-friendly: run work in a linked worktree — `bro work enter <slug>`; finish with `bro work leave`; `bro work list` shows siblings'
-  } catch {
-    return null
-  }
-}
-
-/** Dirty count for the current dir, or 0 when not a git checkout. */
-function dirtyHere(): number {
-  const res = gitTry(['status', '--porcelain'])
-  if (res.code !== 0) {
-    return 0
-  }
-  return res.out.split('\n').filter(Boolean).length
-}
-
-/** Current branch's open PR → one-line gate summary. Null when no PR/
- *  no review host resolves. `target` overrides the current-branch
- *  lookup (e.g. a PR URL parsed out of the prompt). */
-async function actGateLine(target?: PrTarget): Promise<string | null> {
-  try {
-    const rev = reviewHost(process.cwd(), loadBroConfig().connectors)
-    let t = target
-    if (!t) {
-      const cur = rev.currentPr()
-      if (!cur || cur.state !== 'OPEN') {
-        return null
-      }
-      t = { repo: rev.resolveRepo([]), pr: cur.pr }
-    }
-    const act = loadBroConfig().act
-    const state = await fetchPrActState(rev, t, {
-      ignoreChecks: act.ignoreChecks,
-      maxRounds: act.maxRounds,
-    })
-    const gate = evaluateExitGate(state)
-    const link = rev.prLink(t.repo, state.pr)
-    return gate.ok
-      ? `pr ${link}: gate OK`
-      : `pr ${link}: gate BLOCKED (${gate.blockers.join('; ')}) — \`bro act status\``
-  } catch {
-    return null
-  }
 }
 
 // --- session arming -----------------------------------------------------------
@@ -293,20 +198,34 @@ function markerPath(sessionId: string, aspect: GateAspect): string | null {
   return dir && safe ? join(dir, `${safe}.${aspect}`) : null
 }
 
-/** Aspects this session armed, or empty when no marker exists. Markers
- * older than MARKER_TTL_MS count as unarmed even if still on disk. */
-export function readArmed(sessionId: string): Set<GateAspect> {
-  const armed = new Set<GateAspect>()
+/** Aspects this session armed, or empty when no marker exists. The
+ * marker dir is scanned by the `<session>.` prefix — an aspect is any
+ * suffix, so connector-owned aspects (armed by external tooling that
+ * writes the same marker shape) are armed without a CLI-side list.
+ * Markers older than MARKER_TTL_MS count as unarmed even if on disk. */
+export function readArmed(sessionId: string): Set<string> {
+  const armed = new Set<string>()
+  const dir = hooksStateDir()
+  const safe = sessionId.replace(/[^\w.-]/g, '_')
+  if (!dir || !safe) {
+    return armed
+  }
   const cutoff = Date.now() - MARKER_TTL_MS
-  for (const aspect of ['act', 'drill', 'work'] as const) {
-    try {
-      const path = markerPath(sessionId, aspect)
-      if (path && existsSync(path) && statSync(path).mtimeMs >= cutoff) {
-        armed.add(aspect)
+  try {
+    for (const f of readdirSync(dir)) {
+      if (!f.startsWith(`${safe}.`)) {
+        continue
       }
-    } catch {
-      // unreadable marker = unarmed aspect
+      try {
+        if (statSync(join(dir, f)).mtimeMs >= cutoff) {
+          armed.add(f.slice(safe.length + 1))
+        }
+      } catch {
+        // unreadable marker = unarmed aspect
+      }
     }
+  } catch {
+    // unreadable dir = unarmed session
   }
   return armed
 }
@@ -364,40 +283,18 @@ function liveSessionLines(dir: string, selfId: string): string[] {
   })
 }
 
-/** Linked worktrees on this repo, minus the current checkout — naming a
- *  session its own worktree would be a false nudge. */
-function worktreeLines(): string[] {
-  const cur = gitTry(['rev-parse', '--show-toplevel']).out.trim()
-  return parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out)
-    .slice(1) // porcelain lists the main worktree first
-    .filter((w) => !w.prunable && w.path !== cur)
-    .slice(0, 5)
-    .map((w) => `worktree ${basename(w.path)} [${w.branch ?? 'detached'}]`)
-}
-
-/** Beads claimed but not yet closed — another signal of live work the
- *  flat queue already knows about. Collected from every connector's
- *  parallelWork probe (beads reports claimed tasks today). */
-function claimedLines(): string[] {
-  try {
-    return parallelWorkLines({ dir: process.cwd() })
-  } catch {
-    return []
-  }
-}
-
 /** Parallel-session nudge at session start: another live session armed
- *  work here, or the repo carries linked worktrees / claimed beads —
- *  passive context naming what's occupied, never a block. */
-function parallelLines(sessionId: string): string[] {
+ *  work here, or a connector reports live work (claimed beads, sibling
+ *  worktrees, held slots) — passive context naming what's occupied,
+ *  never a block. */
+async function parallelLines(sessionId: string): Promise<string[]> {
   try {
     const parts: string[] = []
     const dir = hooksStateDir()
     if (dir) {
       parts.push(...liveSessionLines(dir, sessionId))
     }
-    parts.push(...worktreeLines())
-    parts.push(...claimedLines())
+    parts.push(...(await parallelWorkLines({ dir: process.cwd() })))
     if (parts.length === 0) {
       return []
     }
@@ -464,7 +361,7 @@ function armSession(sessionId: string, aspect: GateAspect, detail: string = ''):
     const cutoff = Date.now() - MARKER_TTL_MS
     for (const f of readdirSync(dirname(path))) {
       try {
-        if (/\.(act|drill|work)$/.test(f) && statSync(join(dirname(path), f)).mtimeMs < cutoff) {
+        if (statSync(join(dirname(path), f)).mtimeMs < cutoff) {
           rmSync(join(dirname(path), f))
         }
       } catch {
@@ -483,49 +380,19 @@ async function emitSessionContext(
   sessionId = ''
 ): Promise<void> {
   const parts: string[] = []
-  const drill = drillLine()
-  if (drill) {
-    parts.push(drill)
-  }
   // sessionStart probes collect from every connector — beads reports
-  // the ready queue today; a jira connector would add assigned issues
-  parts.push(...sessionStartLines({ dir: process.cwd() }))
-  const gate = await actGateLine()
-  if (gate) {
-    parts.push(gate)
-  }
-  const debt = debtLine()
-  if (debt) {
-    parts.push(debt)
-  }
-  const slot = mergeSlotLine()
-  if (slot) {
-    parts.push(slot)
-  }
-  const parallel = parallelLines(sessionId)
-  parts.push(...parallel)
-  const work = workNudgeLine()
-  if (work) {
-    parts.push(work)
-  }
+  // the ready queue, drill the open frame, act the PR gate + merge slot,
+  // debt the open findings; a jira connector would add assigned issues
+  parts.push(...(await sessionStartLines({ dir: process.cwd() })))
+  parts.push(...(await parallelLines(sessionId)))
   if (parts.length > 0) {
     context(event, `bro state — resume from here:\n${parts.join('\n')}`)
   }
 }
 
 async function emitPromptContext(input: HookInput): Promise<void> {
-  const parts: string[] = []
-  const drill = drillLine()
-  if (drill) {
-    parts.push(drill)
-  }
-  const ref = typeof input.prompt === 'string' ? parsePrUrl(input.prompt) : null
-  if (ref) {
-    const gate = await actGateLine({ repo: `${ref.owner}/${ref.repo}`, pr: ref.pr })
-    if (gate) {
-      parts.push(gate)
-    }
-  }
+  const prompt = typeof input.prompt === 'string' ? input.prompt : ''
+  const parts = await promptContextLines({ dir: process.cwd() }, prompt)
   if (parts.length > 0) {
     context('UserPromptSubmit', parts.join('\n'))
   }
@@ -558,102 +425,37 @@ function emitPostTool(input: HookInput): void {
   }
 }
 
-/** The exit gate as a hook: don't stop while review threads or a drill frame
- * stay open — but only for sessions that armed the matching aspect this
- * session (see session arming above). Unarmed sessions get the same findings
- * as passive context: ambient repo state is not their obligation.
- * Respects stop_hook_active so a blocked stop can't loop. */
+/** The exit gate as a hook: every connector contributes GateContributions;
+ * the hook applies the arming policy — `block` fires only when this session
+ * armed the contribution's aspect, `armedHint` is shown to armed-but-clean
+ * sessions, `passive` to everyone else (ambient state, not an obligation).
+ * Contributions evaluate independently — a foreign drill frame must not
+ * shadow an armed PR gate. Respects stop_hook_active so a blocked stop
+ * can't loop. */
 async function emitStopGate(input: HookInput): Promise<void> {
   if (input.stop_hook_active === true) {
     return
   }
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
   const armed = sessionId ? readArmed(sessionId) : new Set<string>()
-  const drill = drillLine()
-  // Armed blocks are evaluated independently — a foreign drill frame must not
-  // shadow an armed PR gate, and vice versa.
-  if (drill && armed.has('drill')) {
-    emit({ decision: 'block', reason: `bro: ${drill}` })
-    return
-  }
   const hints: string[] = []
-  if (drill) {
-    hints.push(`bro: ${drill} (opened outside this session — informational)`)
-  }
-  // work gate: a session that created/used a worktree must not abandon a
-  // dirty one — clean worktrees get a leave-hint instead of a block
-  if (armed.has('work')) {
-    const gate = workGate()
-    if (gate.block) {
-      emit({ decision: 'block', reason: gate.block })
+  for (const c of await stopGateContributions({ dir: process.cwd() })) {
+    if (!armed.has(c.aspect)) {
+      if (c.passive) {
+        hints.push(c.passive)
+      }
+      continue
+    }
+    if (c.block) {
+      emit({ decision: 'block', reason: c.block })
       return
     }
-    if (gate.hint) {
-      hints.push(gate.hint)
+    if (c.armedHint) {
+      hints.push(c.armedHint)
     }
-  }
-  const pr = await prBlockersLine()
-  if (pr && armed.has('act')) {
-    emit({
-      decision: 'block',
-      reason:
-        `${pr} — ` +
-        'list with `bro act threads` — fix inline or defer to a debt bead ' +
-          '(reply + resolve); when fix_rounds exceeds act.maxRounds only ' +
-          'defer counts; recheck `bro act status`',
-    })
-    return
-  }
-  if (pr) {
-    hints.push(`${pr} (current branch — this session did not touch it)`)
   }
   if (hints.length > 0) {
     context('Stop', hints.join('\n'))
-  }
-}
-
-/** Work-gate outcome for an armed session: a block reason when the current
- *  worktree is linked and dirty, a leave-hint when linked and clean. */
-function workGate(): { block?: string; hint?: string } {
-  const gd = gitDirOf(process.cwd())
-  if (!gd || !isLinkedGitDir(gd)) {
-    return {}
-  }
-  const dirty = dirtyHere()
-  if (dirty > 0) {
-    return {
-      block:
-        `bro: linked worktree has ${dirty} uncommitted file(s) — ` +
-        'commit/push the work or discard deliberately, then `bro work leave`',
-    }
-  }
-  return { hint: 'bro: still inside a linked worktree — `bro work leave` when done' }
-}
-
-/** Current-branch open PR → one-line blocker summary, or null when the PR
- * is clean / not OPEN / unreachable. */
-async function prBlockersLine(): Promise<string | null> {
-  try {
-    const rev = reviewHost(process.cwd(), loadBroConfig().connectors)
-    const cur = rev.currentPr()
-    if (!cur || cur.state !== 'OPEN') {
-      return null
-    }
-    const act = loadBroConfig().act
-    const state = await fetchPrActState(
-      rev,
-      { repo: rev.resolveRepo([]), pr: cur.pr },
-      { ignoreChecks: act.ignoreChecks, maxRounds: act.maxRounds }
-    )
-    // The same gate `bro act status` enforces: open threads, pending/failed
-    // CI and AI reviewers, SAST findings, unknown mergeability, BEHIND.
-    const gate = evaluateExitGate(state)
-    return gate.ok
-      ? null
-      : `bro: PR [#${cur.pr}](${cur.url}): ${gate.blockers.join('; ')}`
-  } catch {
-    // no repo/PR/auth — nothing to gate on
-    return null
   }
 }
 

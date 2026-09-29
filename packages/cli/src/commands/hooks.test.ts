@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyArmCommand, classifyExecCommand, isSelfToolCommand, parsePrUrl, readArmed, armDetail, otherLiveWork } from './hooks.ts'
+import { classifyArmCommand, classifyExecCommand, isSelfToolCommand, readArmed, armDetail, otherLiveWork } from './hooks.ts'
 
 describe('classifyExecCommand', () => {
   test('detects gh pr merge', () => {
@@ -48,21 +48,6 @@ describe('isSelfToolCommand', () => {
   })
 })
 
-describe('parsePrUrl', () => {
-  test('extracts owner/repo/pr from a GitHub URL', () => {
-    assert.deepEqual(parsePrUrl('see https://github.com/acme/widgets/pull/42 please'), {
-      owner: 'acme',
-      repo: 'widgets',
-      pr: 42,
-    })
-  })
-
-  test('returns null without a PR URL', () => {
-    assert.equal(parsePrUrl('fix the thing'), null)
-    assert.equal(parsePrUrl('github.com/acme/widgets/issues/9'), null)
-  })
-})
-
 describe('classifyArmCommand', () => {
   test('arms act on PR-touching commands', () => {
     assert.equal(classifyArmCommand('bro act status'), 'act')
@@ -94,6 +79,13 @@ describe('classifyArmCommand', () => {
     assert.equal(classifyArmCommand('git worktree list'), null)
     assert.equal(classifyArmCommand('git worktree prune'), null)
     assert.equal(classifyArmCommand('bd worktree list'), null)
+  })
+
+  test('bead claims arm work — the claim owes a close/release', () => {
+    assert.equal(classifyArmCommand('bd update bro-x1 --claim'), 'work')
+    assert.equal(classifyArmCommand('bd update --claim bro-x1'), 'work')
+    assert.equal(classifyArmCommand('bd ready'), null)
+    assert.equal(classifyArmCommand('bd show bro-x1'), null)
   })
 
   test('ignores unrelated or non-command-position text', () => {

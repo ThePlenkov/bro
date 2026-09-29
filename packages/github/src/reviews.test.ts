@@ -56,6 +56,17 @@ describe('github connector', () => {
     assert.equal(githubConnector.matchRemote?.('git@evilgithub.com:acme/widgets.git'), false)
     assert.equal(githubConnector.matchRemote?.('git@github.corp.internal:acme/w.git'), true)
   })
+
+  test('parsePrRef extracts repo/pr from a GitHub pull URL only', () => {
+    const rev = githubReview()
+    assert.deepEqual(rev.parsePrRef('see https://github.com/acme/widgets/pull/42 please'), {
+      repo: 'acme/widgets',
+      pr: 42,
+    })
+    assert.equal(rev.parsePrRef('fix the thing'), null)
+    assert.equal(rev.parsePrRef('github.com/acme/widgets/issues/9'), null)
+    assert.equal(rev.parsePrRef('https://gitlab.com/acme/widgets/-/merge_requests/42'), null)
+  })
 })
 
 describe('githubReview', { skip: WIN32 }, () => {

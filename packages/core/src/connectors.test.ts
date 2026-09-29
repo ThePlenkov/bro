@@ -8,8 +8,10 @@ import {
   connectors,
   facade,
   parallelWorkLines,
+  promptContextLines,
   registerConnector,
   sessionStartLines,
+  stopGateContributions,
 } from './connectors.ts'
 import type { Connector } from './connectors.ts'
 import type { TaskStore } from './tasks.ts'
@@ -85,7 +87,7 @@ describe('connectors', () => {
     })
   })
 
-  test('hook collectors are fail-open and return arrays', () => {
+  test('hook collectors are fail-open and return arrays', async () => {
     registerConnector({
       name: 'acme-wedged',
       hooks: () => {
@@ -100,7 +102,39 @@ describe('connectors', () => {
       }),
     })
     const dir = process.cwd()
-    assert.ok(sessionStartLines({ dir }).includes('acme: 2 assigned'))
-    assert.ok(parallelWorkLines({ dir }).includes('acme: plane-mq claimed'))
+    assert.ok((await sessionStartLines({ dir })).includes('acme: 2 assigned'))
+    assert.ok((await parallelWorkLines({ dir })).includes('acme: plane-mq claimed'))
+  })
+
+  test('probes may be async; a rejected probe starves only itself', async () => {
+    registerConnector({
+      name: 'acme-async',
+      hooks: () => ({
+        sessionStart: async () => ['acme: async line'],
+        promptSubmit: async (_ctx, prompt) =>
+          prompt.includes('JIRA-1') ? ['acme: JIRA-1 in progress'] : [],
+        stopGate: async () => [
+          { aspect: 'jira', block: 'acme: JIRA-1 open', passive: 'acme: jira busy' },
+        ],
+      }),
+    })
+    registerConnector({
+      name: 'acme-rejecting',
+      hooks: () => ({
+        sessionStart: () => Promise.reject(new Error('offline')),
+        promptSubmit: () => Promise.reject(new Error('offline')),
+        stopGate: () => Promise.reject(new Error('offline')),
+      }),
+    })
+    const dir = process.cwd()
+    assert.ok((await sessionStartLines({ dir })).includes('acme: async line'))
+    assert.ok(
+      (await promptContextLines({ dir }, 'look at JIRA-1')).includes('acme: JIRA-1 in progress')
+    )
+    assert.deepEqual(await promptContextLines({ dir }, 'no refs here'), [])
+    const gates = await stopGateContributions({ dir })
+    assert.ok(
+      gates.some((g) => g.aspect === 'jira' && g.block === 'acme: JIRA-1 open')
+    )
   })
 })

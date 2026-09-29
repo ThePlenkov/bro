@@ -22,10 +22,10 @@ import {
   type ConfigSection,
   type DocType,
 } from '@bro/core'
-import { parseActPlan, type ActPlan } from '@bro/act'
+import { actConnector, parseActPlan, type ActPlan } from '@bro/act'
 import { parseConvoyPlan, type ConvoyPlan } from '@bro/convoy'
-import { parseDebtPlan, type DebtPlan } from '@bro/debt'
-import { parseDrillPlan, type DrillPlan } from '@bro/drill'
+import { debtConnector, parseDebtPlan, type DebtPlan } from '@bro/debt'
+import { drillConnector, parseDrillPlan, type DrillPlan } from '@bro/drill'
 import { parsePlanDoc, type RetroPlan } from '@bro/retro'
 import { loopSection } from '@bro/loop'
 import { githubConnector } from '@bro/github'
@@ -41,12 +41,17 @@ import { runHooksCommand } from './commands/hooks.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runSetupCommand } from './commands/setup.ts'
 import { runSyncCommand } from './commands/sync.ts'
-import { runWorkCommand } from './commands/work.ts'
+import { runWorkCommand, workConnector } from './commands/work.ts'
 
 // Built-in connectors register at module load, ahead of external
 // plugins — registry order is the fallback precedence, and an external
-// connector must not shadow a built-in system.
+// connector must not shadow a built-in system. Registration order also
+// decides stop-gate block priority: drill > work > act.
 registerConnector(githubConnector)
+registerConnector(drillConnector)
+registerConnector(workConnector)
+registerConnector(actConnector)
+registerConnector(debtConnector)
 
 export const PLUGINS: BroPlugin[] = [
   definePlugin({

@@ -452,6 +452,10 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
         dir
       ).map((p) => p.number)
     },
+    parsePrRef(text) {
+      const m = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/.exec(text)
+      return m ? { repo: `${m[1]}/${m[2]}`, pr: Number(m[3]) } : null
+    },
     prMeta,
     mergedPrInfo,
     mergedPrs,

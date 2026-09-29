@@ -98,6 +98,10 @@ export interface ReviewFacade {
   /** Open PR numbers whose head is this branch — the loop's "did the
    *  agent open one" probe. */
   prsForBranch(branch: string): number[]
+  /** A PR reference in free text (the host's own URL shape) → target —
+   *  the prompt-submit probe's way to spot its PRs. Null when the text
+   *  names none. */
+  parsePrRef(text: string): PrTarget | null
 
   prMeta(t: PrTarget): PrMeta
   /** Merged-PR detail for harvest — throws when the PR isn't merged. */

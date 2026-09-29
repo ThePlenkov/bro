@@ -51,3 +51,4 @@ export { DEBT_ROW_STATUSES, parseDebtPlan, PLAN_KIND as DEBT_PLAN_KIND } from '.
 export type { DebtPlan, DebtVerdict } from './plan.ts'
 export { applyDebtVerdicts } from './store.ts'
 export type { DebtVerdictInput } from './store.ts'
+export { debtConnector } from './connector.ts'

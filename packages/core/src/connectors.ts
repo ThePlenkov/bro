@@ -40,20 +40,40 @@ export interface FacadeMap {
   reviews: ReviewFacade
 }
 
+export type MaybePromise<T> = T | Promise<T>
+
+/** One system's answer to "may this session stop?" — the hook applies
+ *  the arming policy; the connector only reports state:
+ *  - `block`    — reason line, fires only when the session armed `aspect`
+ *  - `armedHint`— context for an armed session that isn't blocked
+ *  - `passive`  — ambient context for sessions that never armed it */
+export interface GateContribution {
+  /** Arming aspect — matches the post-tool marker name ('act', 'drill',
+   *  'work', or a connector-owned name). */
+  aspect: string
+  block?: string
+  armedHint?: string
+  passive?: string
+}
+
 /** Context a connector contributes to the agent lifecycle — the
  *  per-connector answer to "what does this system know that the session
  *  must see". All probes are fail-open: a wedged system yields no lines,
- *  never a stalled hook. */
+ *  never a stalled hook. Probes may be async — a review host's gate
+ *  check is a network call. */
 export interface ConnectorHooks {
   /** Ambient context lines for session-start rehydration — e.g. beads
    *  reports the ready queue. */
-  sessionStart?(ctx: ConnectorCtx): string[]
+  sessionStart?(ctx: ConnectorCtx): MaybePromise<string[]>
   /** Signals that OTHER live work exists here — claimed items, held
    *  slots; grouped under the parallel-work nudge, never a block. */
-  parallelWork?(ctx: ConnectorCtx): string[]
-  /** Stop-gate blockers — non-empty means the session has unfinished
-   *  business in this system. */
-  stopGate?(ctx: ConnectorCtx): string[]
+  parallelWork?(ctx: ConnectorCtx): MaybePromise<string[]>
+  /** Prompt-submit context — the raw prompt lets each system spot its
+   *  own references (github sees PR URLs, jira would see issue keys). */
+  promptSubmit?(ctx: ConnectorCtx, prompt: string): MaybePromise<string[]>
+  /** Stop-gate contributions — non-empty `block` means the session has
+   *  unfinished business in this system. */
+  stopGate?(ctx: ConnectorCtx): MaybePromise<GateContribution[]>
 }
 
 export interface Connector {
@@ -96,6 +116,29 @@ const beadsConnector: Connector = {
           .slice(0, 5)
           .map((r) => `${r.id} ${shortTitle(r.title)}`.trim())
         return claimed.length > 0 ? [`claimed beads: ${claimed.join(', ')}`] : []
+      } catch {
+        return []
+      }
+    },
+    stopGate(ctx) {
+      try {
+        const claimed = taskStore(ctx.dir)
+          .list({ status: 'in_progress' })
+          .slice(0, 5)
+          .map((r) => `${r.id} ${shortTitle(r.title)}`.trim())
+        if (claimed.length === 0) {
+          return []
+        }
+        const list = claimed.join(', ')
+        return [
+          {
+            aspect: 'work',
+            block:
+              `bro: claimed beads open: ${list} — ` +
+              'close (`bd close <id>`) or release the claim before stopping',
+            passive: `bro: claimed beads open: ${list}`,
+          },
+        ]
       } catch {
         return []
       }
@@ -196,24 +239,50 @@ export function connectorHooks(ctx: ConnectorCtx): ConnectorHooks[] {
   return out
 }
 
-/** Collect session-start context lines from all connectors. */
-export function sessionStartLines(ctx: ConnectorCtx): string[] {
-  return connectorHooks(ctx).flatMap((h) => {
+/** Collect a line-producing probe across all connectors — fail-open
+ *  per connector, one wedged system must not starve the rest. */
+async function collectLines(
+  ctx: ConnectorCtx,
+  probe: (h: ConnectorHooks) => MaybePromise<string[] | undefined>
+): Promise<string[]> {
+  const out: string[] = []
+  for (const h of connectorHooks(ctx)) {
     try {
-      return h.sessionStart?.(ctx) ?? []
+      out.push(...((await probe(h)) ?? []))
     } catch {
-      return []
+      // fail-open
     }
-  })
+  }
+  return out
+}
+
+/** Collect session-start context lines from all connectors. */
+export function sessionStartLines(ctx: ConnectorCtx): Promise<string[]> {
+  return collectLines(ctx, (h) => h.sessionStart?.(ctx))
 }
 
 /** Collect parallel-work signals from all connectors. */
-export function parallelWorkLines(ctx: ConnectorCtx): string[] {
-  return connectorHooks(ctx).flatMap((h) => {
+export function parallelWorkLines(ctx: ConnectorCtx): Promise<string[]> {
+  return collectLines(ctx, (h) => h.parallelWork?.(ctx))
+}
+
+/** Collect prompt-submit context from all connectors. */
+export function promptContextLines(ctx: ConnectorCtx, prompt: string): Promise<string[]> {
+  return collectLines(ctx, (h) => h.promptSubmit?.(ctx, prompt))
+}
+
+/** Collect stop-gate contributions from all connectors — the caller
+ *  applies the session-arming policy to each. */
+export async function stopGateContributions(
+  ctx: ConnectorCtx
+): Promise<GateContribution[]> {
+  const out: GateContribution[] = []
+  for (const h of connectorHooks(ctx)) {
     try {
-      return h.parallelWork?.(ctx) ?? []
+      out.push(...((await h.stopGate?.(ctx)) ?? []))
     } catch {
-      return []
+      // fail-open
     }
-  })
+  }
+  return out
 }
