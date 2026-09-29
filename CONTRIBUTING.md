@@ -14,7 +14,15 @@ packages/drill    @broject/drill     — scoped descent: drill frames as beads
 packages/convoy   @broject/convoy    — molecule scheduling: DAG readiness, next-step, pour
 packages/loop     @broject/loop      — autonomous backlog runner (claim → agent → gate)
 packages/retro    @broject/retro     — wtf capture + retro plans
-packages/cli      @broject/bro — published CLI (bin: bro), bundles @broject/*
+packages/cli      @broject/bro — published CLI (bin: bro), bundles @broject/* into dist
+
+All `@broject/*` packages publish to npm (lockstep via `nx release`,
+`release.projects` covers everything but `site`). The CLI still bundles
+its internals — `npm i @broject/bro` stays one self-contained file —
+while libs ship standalone for SDK consumers (`@broject/core` connector
+types, `@broject/github` review host, …). `publish.yml` walks the dep
+order (core first, cli last); `prepare-for-release` placeholders +
+`npm trust` bootstrap any new package before OIDC can attach.
 skills/act, skills/convoy, skills/debt, skills/drill, skills/sdd, skills/wtf — thin skills: policy only, call `bro *`
 plugin.json                      — agent-plugins.org manifest (repo root IS the Devin plugin)
 hooks.json + hooks/run.sh        — Devin lifecycle hooks → `bro hooks <event>`

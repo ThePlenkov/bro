@@ -1,7 +1,6 @@
 {
   "name": "@broject/retro",
   "version": "0.2.0",
-  "private": true,
   "type": "module",
   "exports": {
     ".": {
@@ -14,12 +13,27 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "smol-toml": "1.7.1"
+    "smol-toml": "1.7.1",
+    "@broject/core": "^0.2.0"
   },
   "devDependencies": {
-    "@broject/core": "*",
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/retro"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

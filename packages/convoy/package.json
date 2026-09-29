@@ -1,10 +1,9 @@
 {
   "name": "@broject/convoy",
   "version": "0.2.0",
-  "private": true,
   "type": "module",
   "dependencies": {
-    "@broject/core": "*"
+    "@broject/core": "^0.2.0"
   },
   "exports": {
     ".": {
@@ -21,5 +20,20 @@
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "smol-toml": "1.7.1"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/convoy"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
