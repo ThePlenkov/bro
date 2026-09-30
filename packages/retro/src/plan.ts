@@ -185,6 +185,9 @@ evidence = []        # optional — shas, PR urls, bead ids → bd provenance
 #   upstream-issue     file an issue in the external repo
 #   workaround         code-level fix or guardrail to implement now
 #
+# recurrence: a root cause that recurred despite a prose rule needs >=1
+# workaround|backlog action — wider prose is more of what already failed
+#
 # [[actions]]
 # title = ""
 # sink = "backlog"
