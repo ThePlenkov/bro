@@ -37,12 +37,24 @@ jobs:
             echo "release tagging must run from main (got $GITHUB_REF)"
             exit 1
           fi
+          v=$(node -p "require('./packages/cli/package.json').version")
+          # The subject must announce THIS version — a 'release: v*'
+          # subject on an unrelated merge must not tag/publish. A
+          # squash merge appends ' (#N)', a merge branch tip is exact.
+          release_subject() {
+            case "$1" in "release: v$v"|"release: v$v "*) return 0;; esac
+            return 1
+          }
           subject=$(git log -1 --pretty=%s)
-          if [ "$GITHUB_EVENT_NAME" = "push" ] && ! grep -qE '^release: v[0-9]' <<<"$subject"; then
+          # A conventional merge commit ('Merge pull request...') puts
+          # 'release: v*' on the second parent — the release branch tip.
+          if ! release_subject "$subject"; then
+            subject=$(git log -1 --pretty=%s 'HEAD^2' 2>/dev/null || true)
+          fi
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && ! release_subject "$subject"; then
             echo "not a release merge ($subject) — nothing to do"
             exit 0
           fi
-          v=$(node -p "require('./packages/cli/package.json').version")
           if ! git ls-remote --exit-code --tags origin "refs/tags/v$v" >/dev/null 2>&1; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
