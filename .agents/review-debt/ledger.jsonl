@@ -1,20 +1,20 @@
-{"thread_id":"PRRT_kwDOUamqtM6inJfG","status":"claimed","fix_pr":null,"fixed_at":null,"notes":"fixed in PR #46"}
-{"thread_id":"PRRT_kwDOUamqtM6inJfM","status":"claimed","fix_pr":null,"fixed_at":null,"notes":"fixed in PR #46"}
+{"thread_id":"PRRT_kwDOUamqtM6inJfG","status":"done","fix_pr":46,"fixed_at":"2026-09-30T16:24:05.506Z","notes":"fixed in PR #46"}
+{"thread_id":"PRRT_kwDOUamqtM6inJfM","status":"done","fix_pr":46,"fixed_at":"2026-09-30T16:24:05.759Z","notes":"fixed in PR #46"}
 {"thread_id":"PRRT_kwDOUamqtM6iOvje","status":"done","fix_pr":9,"fixed_at":"2026-09-15T09:54:31.020Z","notes":null}
 {"thread_id":"PRRT_kwDOUamqtM6iOvjm","status":"done","fix_pr":9,"fixed_at":"2026-09-15T09:54:31.068Z","notes":null}
 {"thread_id":"PRRT_kwDOUamqtM6iOvjN","status":"done","fix_pr":9,"fixed_at":"2026-09-15T09:54:30.887Z","notes":null}
 {"thread_id":"PRRT_kwDOUamqtM6iOvjX","status":"done","fix_pr":9,"fixed_at":"2026-09-15T09:54:30.950Z","notes":null}
-{"thread_id":"PRRT_kwDOUamqtM6jbB3h","status":"claimed","fix_pr":null,"fixed_at":null,"notes":"covered by PR #42 (in stack, pending merge)"}
-{"thread_id":"PRRT_kwDOUamqtM6jbB3p","status":"claimed","fix_pr":null,"fixed_at":null,"notes":"covered by PR #42 (in stack, pending merge)"}
-{"thread_id":"PRRT_kwDOUamqtM6jh0S0","status":"claimed","fix_pr":null,"fixed_at":null,"notes":null}
-{"thread_id":"PRRT_kwDOUamqtM6jh0S3","status":"claimed","fix_pr":null,"fixed_at":null,"notes":"covered by PR #42 (in stack, pending merge)"}
+{"thread_id":"PRRT_kwDOUamqtM6jbB3h","status":"done","fix_pr":42,"fixed_at":"2026-09-30T16:24:05.986Z","notes":"covered by PR #42 (in stack, pending merge)"}
+{"thread_id":"PRRT_kwDOUamqtM6jbB3p","status":"done","fix_pr":42,"fixed_at":"2026-09-30T16:24:06.251Z","notes":"covered by PR #42 (in stack, pending merge)"}
+{"thread_id":"PRRT_kwDOUamqtM6jh0S0","status":"done","fix_pr":42,"fixed_at":"2026-09-30T16:24:07.961Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6jh0S3","status":"done","fix_pr":42,"fixed_at":"2026-09-30T16:24:06.512Z","notes":"covered by PR #42 (in stack, pending merge)"}
 {"thread_id":"PRRT_kwDOUamqtM6jh0Sn","status":"done","fix_pr":40,"fixed_at":"2026-09-19T21:37:53.365Z","notes":null}
-{"thread_id":"PRRT_kwDOUamqtM6jh0St","status":"claimed","fix_pr":null,"fixed_at":null,"notes":null}
-{"thread_id":"PRRT_kwDOUamqtM6jh1Eq","status":"claimed","fix_pr":null,"fixed_at":null,"notes":"covered by PR #42 (in stack, pending merge)"}
-{"thread_id":"PRRT_kwDOUamqtM6jh5H5","status":"claimed","fix_pr":null,"fixed_at":null,"notes":"covered by PR #42 (in stack, pending merge)"}
-{"thread_id":"PRRT_kwDOUamqtM6jh5Ha","status":"claimed","fix_pr":null,"fixed_at":null,"notes":"covered by PR #42 (in stack, pending merge)"}
+{"thread_id":"PRRT_kwDOUamqtM6jh0St","status":"done","fix_pr":42,"fixed_at":"2026-09-30T16:24:07.774Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6jh1Eq","status":"done","fix_pr":42,"fixed_at":"2026-09-30T16:24:06.806Z","notes":"covered by PR #42 (in stack, pending merge)"}
+{"thread_id":"PRRT_kwDOUamqtM6jh5H5","status":"done","fix_pr":42,"fixed_at":"2026-09-30T16:24:06.992Z","notes":"covered by PR #42 (in stack, pending merge)"}
+{"thread_id":"PRRT_kwDOUamqtM6jh5Ha","status":"done","fix_pr":42,"fixed_at":"2026-09-30T16:24:07.327Z","notes":"covered by PR #42 (in stack, pending merge)"}
 {"thread_id":"PRRT_kwDOUamqtM6jh5Hm","status":"duplicate","fix_pr":null,"fixed_at":null,"notes":null}
-{"thread_id":"PRRT_kwDOUamqtM6jh5HV","status":"claimed","fix_pr":null,"fixed_at":null,"notes":"covered by PR #42 (in stack, pending merge)"}
+{"thread_id":"PRRT_kwDOUamqtM6jh5HV","status":"done","fix_pr":42,"fixed_at":"2026-09-30T16:24:07.545Z","notes":"covered by PR #42 (in stack, pending merge)"}
 {"thread_id":"PRRT_kwDOUamqtM6jpldV","status":"done","fix_pr":39,"fixed_at":"2026-09-18T22:12:20.365Z","notes":null}
 {"thread_id":"PRRT_kwDOUamqtM6jpwGa","status":"done","fix_pr":37,"fixed_at":"2026-09-18T13:46:57.180Z","notes":null}
 {"thread_id":"PRRT_kwDOUamqtM6jpwGf","status":"done","fix_pr":38,"fixed_at":"2026-09-18T17:17:06.952Z","notes":null}
@@ -23,4 +23,28 @@
 {"thread_id":"PRRT_kwDOUamqtM6kTv-o","status":"done","fix_pr":58,"fixed_at":"2026-09-22T14:16:37.910Z","notes":null}
 {"thread_id":"PRRT_kwDOUamqtM6kTwLX","status":"done","fix_pr":58,"fixed_at":"2026-09-22T14:16:38.113Z","notes":null}
 {"thread_id":"PRRT_kwDOUamqtM6kUlW8","status":"claimed","fix_pr":null,"fixed_at":null,"notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6ndQRE","status":"done","fix_pr":160,"fixed_at":"2026-09-30T16:35:57.804Z","notes":"fixed in #160: ancestry grep + degrade-path tests"}
+{"thread_id":"PRRT_kwDOUamqtM6nEI6_","status":"done","fix_pr":141,"fixed_at":"2026-09-30T15:31:42.803Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nEI60","status":"done","fix_pr":138,"fixed_at":"2026-09-30T15:31:42.105Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nEI62","status":"done","fix_pr":139,"fixed_at":"2026-09-30T15:31:42.331Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nEI68","status":"done","fix_pr":140,"fixed_at":"2026-09-30T15:31:42.573Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nEI6o","status":"done","fix_pr":135,"fixed_at":"2026-09-30T15:31:41.299Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nEI6s","status":"done","fix_pr":136,"fixed_at":"2026-09-30T15:31:41.668Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nEI6w","status":"done","fix_pr":137,"fixed_at":"2026-09-30T15:31:41.887Z","notes":null}
 {"thread_id":"PRRT_kwDOUamqtM6nHBM6","status":"done","fix_pr":130,"fixed_at":"2026-09-30T08:35:19.939Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nHBND","status":"done","fix_pr":131,"fixed_at":"2026-09-30T15:31:40.485Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nHBNP","status":"done","fix_pr":131,"fixed_at":"2026-09-30T15:31:40.290Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nHG-I","status":"done","fix_pr":134,"fixed_at":"2026-09-30T15:31:40.934Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nHgTP","status":"done","fix_pr":132,"fixed_at":"2026-09-30T15:31:40.701Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nHgTT","status":"done","fix_pr":133,"fixed_at":"2026-09-30T15:31:40.068Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nHXUu","status":"done","fix_pr":144,"fixed_at":"2026-09-30T15:31:39.810Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nP2F6","status":"done","fix_pr":142,"fixed_at":"2026-09-30T15:57:58.460Z","notes":"reopened by reharvest"}
+{"thread_id":"PRRT_kwDOUamqtM6nP2GA","status":"done","fix_pr":143,"fixed_at":"2026-09-30T15:31:43.206Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nW9Bj","status":"done","fix_pr":159,"fixed_at":"2026-09-30T15:56:39.027Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nW9Bl","status":"done","fix_pr":159,"fixed_at":"2026-09-30T15:56:38.630Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nXszu","status":"done","fix_pr":160,"fixed_at":"2026-09-30T16:35:57.804Z","notes":"fixed in #160: ancestry grep + degrade-path tests"}
+{"thread_id":"PRRT_kwDOUamqtM6nY3I1","status":"done","fix_pr":159,"fixed_at":"2026-09-30T15:56:37.977Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nYu3j","status":"done","fix_pr":159,"fixed_at":"2026-09-30T15:56:38.200Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nYVoa","status":"wontfix","fix_pr":null,"fixed_at":"2026-09-30T16:24:23.422Z","notes":"fail-fast with remediation is intended — silent retry loop would hide the auth fix; watch restart is cheap"}
+{"thread_id":"PRRT_kwDOUamqtM6nYVoN","status":"done","fix_pr":159,"fixed_at":"2026-09-30T15:56:37.741Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nYY8-","status":"done","fix_pr":159,"fixed_at":"2026-09-30T15:56:39.317Z","notes":null}
