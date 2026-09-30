@@ -184,6 +184,30 @@ describe('connectors', () => {
     assert.equal(typeof facadeAuth('reviews', { dir }, { connector: 'acme-bare' }), 'string')
   })
 
+  test('facadeAuth names the plugin when auth breaks the sync contract', () => {
+    registerConnector({
+      name: 'acme-async-auth',
+      tasks: fakeTasks('acme'),
+      // plugin bug on purpose — a Promise is truthy and would print as
+      // "[object Promise]" if facadeAuth trusted the declared type
+      auth: (async () => null) as unknown as Connector['auth'],
+    })
+    registerConnector({
+      name: 'acme-weird-auth',
+      tasks: fakeTasks('acme'),
+      auth: (() => 42) as unknown as Connector['auth'],
+    })
+    const dir = process.cwd()
+    assert.match(
+      facadeAuth('tasks', { dir }, { connector: 'acme-async-auth' }) ?? '',
+      /connector "acme-async-auth": auth probe must be sync — got a Promise/
+    )
+    assert.match(
+      facadeAuth('tasks', { dir }, { connector: 'acme-weird-auth' }) ?? '',
+      /connector "acme-weird-auth": auth probe must be sync — got number/
+    )
+  })
+
   test('probes may be async; a rejected probe starves only itself', async () => {
     registerConnector({
       name: 'acme-async',

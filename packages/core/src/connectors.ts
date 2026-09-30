@@ -92,7 +92,9 @@ export interface Connector {
   /** Auth/readiness probe — the SYSTEM owns its credential check, so a
    *  facade-backed command on a foreign host never demands `gh auth`.
    *  null = ready; a string is the remediation line a command prints.
-   *  Sync: probes shell out like the rest of the facade surface. */
+   *  Sync: probes shell out like the rest of the facade surface — a
+   *  non-string return (an async probe) is reported back as the
+   *  plugin's defect, never awaited. */
   auth?(ctx: ConnectorCtx): string | null
   tasks?(ctx: ConnectorCtx): TaskStore
   reviews?(ctx: ConnectorCtx): ReviewFacade
@@ -342,7 +344,23 @@ export function facadeAuth<K extends keyof FacadeMap>(
   opts: FacadeOpts = {}
 ): string | null {
   try {
-    return pickConnector(kind, ctx, opts).auth?.(ctx) ?? null
+    const c = pickConnector(kind, ctx, opts)
+    // the sync signature is a convention plugins can violate — a Promise
+    // is truthy, sails past ?? null, and prints as "[object Promise]",
+    // so check the shape and name the plugin instead
+    const r: unknown = c.auth?.(ctx)
+    if (r === null || r === undefined) {
+      return null
+    }
+    if (typeof r !== 'string') {
+      if (r instanceof Promise) {
+        // swallow rejections — the diagnostic already carries the bug
+        r.catch(() => {})
+      }
+      const got = r instanceof Promise ? 'a Promise' : typeof r
+      return `connector "${c.name}": auth probe must be sync — got ${got}`
+    }
+    return r
   } catch (err) {
     return err instanceof Error ? err.message : String(err)
   }
