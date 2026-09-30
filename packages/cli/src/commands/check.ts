@@ -453,27 +453,35 @@ const BOOL_FLAGS = new Set([
   '-h',
 ])
 
+function argError(a: string, kind: 'option' | 'argument'): never {
+  console.error(
+    `error: ${kind === 'option' ? 'unknown option' : 'unexpected argument'} ${JSON.stringify(a)} — see \`bro check --help\``
+  )
+  process.exit(2)
+}
+
+/** A value flag's value is a separate token — but only when the next
+ *  token isn't itself a flag (`--root --json` is a missing value, and
+ *  flag() reports it; skipping the flag here would eat that error). */
+function nextIsValue(argv: string[], i: number): boolean {
+  const a = argv[i]!
+  return !a.includes('=') && argv[i + 1] !== undefined && !argv[i + 1]!.startsWith('-')
+}
+
 function rejectUnknownArgs(argv: string[]): void {
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]!
-    if (a.startsWith('-')) {
-      const name = a.includes('=') ? a.slice(0, a.indexOf('=')) : a
-      if (VALUE_FLAGS.has(name)) {
-        // skip the value token — unless it looks like another flag,
-        // which flag() itself reports as a missing value
-        if (!a.includes('=') && argv[i + 1] !== undefined && !argv[i + 1]!.startsWith('-')) {
-          i += 1
-        }
-        continue
-      }
-      if (!BOOL_FLAGS.has(a)) {
-        console.error(`error: unknown option ${JSON.stringify(a)} — see \`bro check --help\``)
-        process.exit(2)
-      }
-      continue
+    if (!a.startsWith('-')) {
+      argError(a, 'argument')
     }
-    console.error(`error: unexpected argument ${JSON.stringify(a)} — see \`bro check --help\``)
-    process.exit(2)
+    const name = a.includes('=') ? a.slice(0, a.indexOf('=')) : a
+    if (VALUE_FLAGS.has(name)) {
+      if (nextIsValue(argv, i)) {
+        i += 1
+      }
+    } else if (!BOOL_FLAGS.has(a)) {
+      argError(a, 'option')
+    }
   }
 }
 
