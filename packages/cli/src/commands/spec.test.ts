@@ -11,7 +11,8 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { sddConnector, specState } from './spec.ts'
-import type { ConnectorCtx } from '@broject/core'
+import { registerConnector } from '@broject/core'
+import type { ConnectorCtx, TaskRow, TaskStore } from '@broject/core'
 
 /** Scripted bd — `list` cats $FAKE_BD_LIST_FILE (written by withRepo),
  *  `show`/`config` keep taskStore happy. */
@@ -205,5 +206,67 @@ describe('sddConnector', () => {
       assert.match((await h.sessionStart!(ctx(dir)))[0] ?? '', /SDD \(gate\)/)
       assert.deepEqual(await h.stopGate!(ctx(dir)), [])
     })
+  })
+})
+
+describe('sddConnector under a non-beads tasks connector', () => {
+  const probe = (dir: string) => sddConnector.hooks!(ctx(dir))!
+  const fakeStore = (rows: TaskRow[], actor?: () => string): TaskStore =>
+    ({ list: () => rows, actor }) as unknown as TaskStore
+
+  // a foreign backend's assignee lives in its own identity space —
+  // comparing it to bdActor marked every own claim foreign and ate the
+  // nudge (bro-cwgv)
+  test('no actor() → a foreign assignee cannot disprove the marker', async () => {
+    registerConnector({
+      name: 'spec-fake-tasks',
+      tasks: () =>
+        fakeStore([
+          {
+            id: 'b1',
+            status: 'in_progress',
+            title: 'thing',
+            issue_type: 'task',
+            assignee: 'linear-user-9',
+          },
+        ]),
+    })
+    await withRepo(
+      {
+        claims: ['b1'],
+        config: { connectors: { tasks: 'spec-fake-tasks' }, sdd: { mode: 'gate' } },
+      },
+      async (dir) => {
+        const gate = await probe(dir).stopGate!(ctx(dir))
+        assert.equal(gate.length, 1)
+        assert.match(gate[0]!.block ?? '', /b1 thing/)
+      }
+    )
+  })
+
+  test('actor() follows the backend\u2019s own claim identity', async () => {
+    registerConnector({
+      name: 'spec-fake-actor',
+      tasks: () =>
+        fakeStore(
+          [
+            { id: 'b1', status: 'in_progress', title: 'mine', issue_type: 'task', assignee: 'jira-me' },
+            { id: 'b2', status: 'in_progress', title: 'held', issue_type: 'task', assignee: 'jira-other' },
+          ],
+          () => 'jira-me'
+        ),
+    })
+    await withRepo(
+      {
+        claims: ['b1', 'b2'],
+        config: { connectors: { tasks: 'spec-fake-actor' }, sdd: { mode: 'gate' } },
+      },
+      async (dir) => {
+        const gate = await probe(dir).stopGate!(ctx(dir))
+        assert.equal(gate.length, 1)
+        assert.match(gate[0]!.block ?? '', /b1 mine/)
+        assert.doesNotMatch(gate[0]!.block ?? '', /b2/)
+      }
+    )
   })
 })
