@@ -101,6 +101,9 @@ export interface BdCompat {
   ok: boolean
   /** bd binary absent (ENOENT) — a setup gap, not drift */
   missing: boolean
+  /** bd present but `bd --version` itself failed — operational
+   *  (timeout, permissions), not drift; do not degrade on it */
+  broken: boolean
   version?: string
   /** drift findings — non-empty ⇒ ok:false */
   problems: string[]
@@ -141,6 +144,7 @@ function probeVersion(res: BdCompat, dir?: string): boolean {
   const ver = bdTry(['--version'], 10_000, dir)
   if (ver.code !== 0) {
     res.missing = /ENOENT/.test(ver.err)
+    res.broken = !res.missing
     res.problems.push(
       res.missing ? 'bd not found on PATH' : `\`bd --version\` failed — ${ver.err || 'spawn error'}`
     )
@@ -174,15 +178,10 @@ function probeRead(res: BdCompat, name: string, dir?: string): boolean {
     res.storeErr = p.err
     return false // every remaining probe hits the same wall
   }
-  // unclassifiable failure: once a probe proved the store reachable a
-  // second one dying is suspicious enough to report — but when nothing
-  // reached the store it's store state (corrupt db, perms), not drift
-  if (res.store === 'reachable') {
-    res.problems.push(`\`bd ${name}\` failed on a readable store — ${firstErrLine(p.err, p.code)}`)
-    return true
-  }
+  // unclassifiable failure is store state (corrupt db, lock, perms),
+  // not proof of drift — degrade is for contract breakage only
   res.store = 'error'
-  res.storeErr = p.err
+  res.storeErr = `\`bd ${name}\` failed — ${firstErrLine(p.err, p.code)}`
   return false
 }
 
@@ -217,7 +216,7 @@ function probeSchema(res: BdCompat, dir?: string): void {
  * unproven.
  */
 export function probeBdCompat(dir?: string): BdCompat {
-  const res: BdCompat = { ok: true, missing: false, problems: [], store: 'unprobed' }
+  const res: BdCompat = { ok: true, missing: false, broken: false, problems: [], store: 'unprobed' }
   if (!probeVersion(res, dir)) {
     return res
   }
@@ -300,6 +299,9 @@ export function checkBeads(dir?: string): void {
   if (compat.missing) {
     throw new Error('bd not found — install beads first (https://github.com/gastownhall/beads)')
   }
+  if (compat.broken) {
+    throw new Error(`bd unusable — ${compat.problems.join('; ')}`)
+  }
   if (!compat.ok) {
     const v = compat.version ? ` ${compat.version}` : ''
     throw new BdCompatError(
@@ -309,8 +311,10 @@ export function checkBeads(dir?: string): void {
   if (compat.store !== 'reachable') {
     // preserve the real failure — "not initialized" is only one cause
     throw new Error(
-      `bd list failed — ${compat.storeErr || 'no beads database found'} ` +
-        '(run `bd init` if beads is not initialized here)'
+      compat.store === 'error'
+        ? `bd store probe failed — ${compat.storeErr}`
+        : `bd list failed — ${compat.storeErr || 'no beads database found'} ` +
+            '(run `bd init` if beads is not initialized here)'
     )
   }
 }

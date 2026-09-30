@@ -251,6 +251,13 @@ function bdCompatCheck(dir: string, beadsActive: boolean): DoctorCheck {
     )
   }
   const v = compat.version ?? '?'
+  if (compat.store === 'error') {
+    return check(
+      'bd-compat',
+      'warn',
+      `v${v} — read contract unproven: ${compat.storeErr ?? 'probe failed'}`
+    )
+  }
   return check(
     'bd-compat',
     'ok',

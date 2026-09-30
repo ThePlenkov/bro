@@ -16,10 +16,13 @@ const WIN32 = process.platform === 'win32'
  *  answers a healthy store: version, array-shaped reads, schema 1. */
 const FAKE_BD = `#!/bin/sh
 case "$1" in
-  --version) echo 'bd version 1.3.0 (fake)' ;;
+  --version)
+    [ "$FAKE_BD_VERSION_FAIL" = "1" ] && { echo 'Error: exec format error' >&2; exit 1; }
+    echo 'bd version 1.3.0 (fake)' ;;
   list|ready)
     [ "$FAKE_BD_NO_STORE" = "1" ] && { echo 'Error: no beads database found' >&2; exit 1; }
     [ "$FAKE_BD_FLAG_DRIFT" = "1" ] && { echo 'Error: unknown flag: --json' >&2; exit 1; }
+    [ "$1" = "ready" ] && [ "$FAKE_BD_READY_FAIL" = "1" ] && { echo 'Error: database is locked' >&2; exit 1; }
     [ "$FAKE_BD_SHAPE_DRIFT" = "1" ] && { echo '{"issues":[]}'; exit 0; }
     [ "$FAKE_BD_ROW_DRIFT" = "1" ] && { echo '[{"name":"x"}]'; exit 0; }
     echo '[]' ;;
@@ -130,6 +133,25 @@ describe('probeBdCompat', { skip: WIN32 }, () => {
       assert.equal(c.store, 'absent')
     })
   })
+
+  test('a bd that cannot answer --version is broken, not drift', () => {
+    withFakeBd({ FAKE_BD_VERSION_FAIL: '1' }, () => {
+      const c = probeBdCompat()
+      assert.equal(c.ok, false)
+      assert.equal(c.broken, true)
+      assert.equal(c.missing, false)
+    })
+  })
+
+  test('a transient read failure is a store error, not drift', () => {
+    withFakeBd({ FAKE_BD_READY_FAIL: '1' }, () => {
+      const c = probeBdCompat()
+      assert.equal(c.ok, true)
+      assert.equal(c.store, 'error')
+      assert.match(c.storeErr ?? '', /database is locked/)
+      assert.deepEqual(c.problems, [])
+    })
+  })
 })
 
 describe('isBdCompatError', { skip: WIN32 }, () => {
@@ -162,6 +184,32 @@ describe('checkBeads', { skip: WIN32 }, () => {
   test('absent store keeps the bd-init guidance', () => {
     withFakeBd({ FAKE_BD_NO_STORE: '1' }, () => {
       assert.throws(() => checkBeads(), /bd list failed.*bd init/s)
+    })
+  })
+
+  test('broken bd fails as operational, not compat', () => {
+    withFakeBd({ FAKE_BD_VERSION_FAIL: '1' }, () => {
+      assert.throws(
+        () => checkBeads(),
+        (err: unknown) => {
+          assert.ok(!(err instanceof BdCompatError))
+          assert.match((err as Error).message, /bd unusable/)
+          return true
+        }
+      )
+    })
+  })
+
+  test('transient read failure is operational, not compat', () => {
+    withFakeBd({ FAKE_BD_READY_FAIL: '1' }, () => {
+      assert.throws(
+        () => checkBeads(),
+        (err: unknown) => {
+          assert.ok(!(err instanceof BdCompatError))
+          assert.match((err as Error).message, /store probe failed.*database is locked/s)
+          return true
+        }
+      )
     })
   })
 })

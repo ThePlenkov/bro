@@ -23,6 +23,9 @@ function assertCompatible(): void {
       'bd not found — install beads, or opt out with "stores": ["jsonl"] in bro.config.json'
     )
   }
+  if (compat.broken) {
+    throw new Error(`bd unusable — ${compat.problems.join('; ')}`)
+  }
   if (!compat.ok) {
     const v = compat.version ? ` ${compat.version}` : ''
     throw new BdCompatError(
