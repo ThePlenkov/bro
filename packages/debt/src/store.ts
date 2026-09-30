@@ -258,7 +258,9 @@ export function writeHarvestFile(opts: {
   mkdirSync(dir, { recursive: true })
   ensureDebtDirExcluded(debtDir(opts.cwd))
   const lines = opts.records.map((r) => JSON.stringify(r)).join('\n')
-  writeFileSync(path, `${lines}\n`, 'utf8')
+  // Atomic like every other ledger write — a concurrent trend/list read
+  // must never see a half-written snapshot.
+  atomicWrite(path, `${lines}\n`)
   return path
 }
 

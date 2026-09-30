@@ -34,7 +34,9 @@ const KNOWN_STATUSES: ReadonlySet<string> = new Set([
  *  can be missing too. */
 export function groupKey(r: DebtRecord, by: StatsGroupBy): string {
   const raw = by === 'source' ? (r.source ?? 'review-threads') : r[by]
-  return raw || 'unknown'
+  // Unvalidated JSONL can carry a non-string — `raw || 'unknown'` would
+  // pass it through and localeCompare would crash sorting on it.
+  return typeof raw === 'string' && raw !== '' ? raw : 'unknown'
 }
 
 export function groupStats(records: DebtRecord[], by: StatsGroupBy): StatBucket[] {

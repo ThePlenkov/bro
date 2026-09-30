@@ -103,6 +103,36 @@ function spanFor(r: DebtRecord, bounds: ThreadBounds, by: StatsGroupBy | null): 
   return { start, end, key: by === null ? 'all' : groupKey(r, by) }
 }
 
+/** First index whose element is >= v. */
+function lowerBound(xs: number[], v: number): number {
+  let lo = 0
+  let hi = xs.length
+  while (lo < hi) {
+    const m = (lo + hi) >> 1
+    if (xs[m]! < v) {
+      lo = m + 1
+    } else {
+      hi = m
+    }
+  }
+  return lo
+}
+
+/** First index whose element is > v — i.e. the count of elements <= v. */
+function upperBound(xs: number[], v: number): number {
+  let lo = 0
+  let hi = xs.length
+  while (lo < hi) {
+    const m = (lo + hi) >> 1
+    if (xs[m]! <= v) {
+      lo = m + 1
+    } else {
+      hi = m
+    }
+  }
+  return lo
+}
+
 export function buildTrend(
   records: DebtRecord[],
   bounds: ThreadBounds,
@@ -129,6 +159,8 @@ export function buildTrend(
   }
 
   // Group ordering follows stats: record count desc, key asc on ties.
+  // Each key's open edges sort once — a (bucket, key) cell then answers
+  // opened/closed/open by range count instead of rescanning every span.
   const byKey = new Map<string, Span[]>()
   for (const s of spans) {
     const ks = byKey.get(s.key)
@@ -141,19 +173,27 @@ export function buildTrend(
   const keys = [...byKey.entries()]
     .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
     .map(([k]) => k)
+  const sorted = new Map<string, { starts: number[]; ends: number[] }>()
+  for (const [key, ks] of byKey) {
+    sorted.set(key, {
+      starts: ks.map((s) => s.start).sort((a, b) => a - b),
+      ends: ks.flatMap((s) => (s.end === null ? [] : [s.end])).sort((a, b) => a - b),
+    })
+  }
 
   const points: TrendPoint[] = []
   for (let b = t0; b <= tEnd; b = bucketEnd(b, g)) {
     const end = bucketEnd(b, g)
     const cutoff = Math.min(end, now)
     for (const key of keys) {
-      const ks = byKey.get(key)!
+      const { starts, ends } = sorted.get(key)!
       points.push({
         bucket: fmt(b),
         key,
-        opened: ks.filter((s) => s.start >= b && s.start < end).length,
-        closed: ks.filter((s) => s.end !== null && s.end >= b && s.end < end).length,
-        open: ks.filter((s) => s.start <= cutoff && (s.end === null || s.end > cutoff)).length,
+        opened: lowerBound(starts, end) - lowerBound(starts, b),
+        closed: lowerBound(ends, end) - lowerBound(ends, b),
+        // open at cutoff = started ≤ cutoff minus ended ≤ cutoff.
+        open: upperBound(starts, cutoff) - upperBound(ends, cutoff),
       })
     }
   }
