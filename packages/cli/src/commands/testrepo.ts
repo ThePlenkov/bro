@@ -343,10 +343,15 @@ const FAKE_AGENT = `const fs = require('node:fs')
 const path = require('node:path')
 const { execFileSync } = require('node:child_process')
 const STATE = process.env.FAKE_HOST_STATE
+const promptFile = process.env.BRO_PROMPT_FILE
+if (!STATE || !promptFile) {
+  console.error('fake agent: FAKE_HOST_STATE and BRO_PROMPT_FILE must be set')
+  process.exit(1)
+}
 const scenario = process.env.E2E_SCENARIO || 'land'
 const load = () => JSON.parse(fs.readFileSync(STATE, 'utf8'))
 const save = (s) => fs.writeFileSync(STATE, JSON.stringify(s))
-const prompt = fs.readFileSync(process.env.BRO_PROMPT_FILE, 'utf8')
+const prompt = fs.readFileSync(promptFile, 'utf8')
 const log = (msg) => {
   const f = path.join(path.dirname(STATE), 'spawns.log')
   fs.appendFileSync(f, (prompt.includes('review-threads') ? 'fix' : 'work') + ' ' + msg + '\\n')
@@ -376,7 +381,8 @@ switch (scenario) {
     break
   case 'fail':
     log('dying')
-    process.exit(3)
+    process.exitCode = 3
+    break
   default:
     process.exit(1)
 }
