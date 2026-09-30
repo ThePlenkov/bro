@@ -671,7 +671,7 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
       return ghJson<Array<{ number: number }>>(
         [
           'pr', 'list', '--head', branch, '--state', 'open',
-          '--repo', resolvedRepo(), '--json', 'number',
+          '--repo', resolveRepo([], dir), '--json', 'number',
         ],
         dir
       ).map((p) => p.number)
