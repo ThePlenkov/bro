@@ -355,9 +355,9 @@ export async function runNextCommand(argv: string[]): Promise<void> {
   instead (\`bro store init --global\`) — same pipeline, different home.`)
     process.exit(0)
   }
-  // flag() rejects a repeated --label — scalar flags are not repeatable;
-  // a silent second declaration would pretend to widen the scope
-  const labelArg = argv.includes('--label') ? flag(argv, '--label') : undefined
+  // flag() owns both spellings (--label v / --label=v) and rejects repeats —
+  // gating on argv.includes('--label') would miss the = form entirely
+  const labelArg = flag(argv, '--label')
   const labels = labelArg?.split(',').map((s) => s.trim()).filter((s) => s !== '')
   if (labelArg !== undefined && (labels === undefined || labels.length === 0)) {
     console.error('error: --label requires a comma-separated value, e.g. --label debt,ui')
