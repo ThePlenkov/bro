@@ -13,6 +13,7 @@
 {"thread_id":"dependabot:4","status":"done","fix_pr":null,"fixed_at":"2026-09-30T19:29:51.737Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"dependabot:6","status":"done","fix_pr":null,"fixed_at":"2026-09-30T19:29:51.737Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"dependabot:7","status":"done","fix_pr":null,"fixed_at":"2026-09-30T19:29:51.737Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"failed-ci:main","status":"done","fix_pr":null,"fixed_at":"2026-09-30T22:44:47.229Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"PRRT_kwDOUamqtM6inJfG","status":"done","fix_pr":46,"fixed_at":"2026-09-30T16:24:05.506Z","notes":"fixed in PR #46"}
 {"thread_id":"PRRT_kwDOUamqtM6inJfM","status":"done","fix_pr":46,"fixed_at":"2026-09-30T16:24:05.759Z","notes":"fixed in PR #46"}
 {"thread_id":"PRRT_kwDOUamqtM6iOvje","status":"done","fix_pr":9,"fixed_at":"2026-09-15T09:54:31.020Z","notes":null}
