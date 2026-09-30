@@ -31,7 +31,8 @@ requirement.
   `skipped` is a human opt-out and always wins over machine labels.
 - **beads is a default store.** A normal collect auto-runs
   `bd init --stealth --skip-agents --skip-hooks` when `.beads` is missing
-  (skipped by `--dry-run`, `--list-only`, and an empty target list) and
+  (skipped by `--dry-run`, `--list-only`, and an empty target list) —
+  announced on stderr, never silent — and
   keeps the ledger dir out of git via `.git/info/exclude`.
   `"stores": ["jsonl"]` in bro.config.json is the opt-out.
 - **Label after the file lands.** In CI pipelines run

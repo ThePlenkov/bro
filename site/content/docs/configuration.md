@@ -28,8 +28,9 @@ purpose — store choices are machine-local.
 ### `stores`
 
 Artifact backends. `jsonl` is the evidence ledger — always written.
-`beads` is on by default (auto-inits `.beads` stealth when missing) and
-projects debt into `bd`. `gitref` pushes artifact dirs to the data ref.
+`beads` is on by default (auto-inits `.beads` stealth when missing —
+announced on stderr, nothing lands in git) and projects debt into `bd`.
+`gitref` pushes artifact dirs to the data ref.
 Explicit `"stores": ["jsonl"]` is the beads opt-out.
 
 ### `debt`

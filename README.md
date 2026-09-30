@@ -136,12 +136,15 @@ the section — it then applies to every agent in the repo.
 
 `stores` lists the backends debt writes to. `jsonl` is the evidence ledger
 (always written — drop it and bro adds it back). `beads` is on **by
-default**: a normal collect auto-runs `bd init --stealth --skip-agents
---skip-hooks` when a repo is missing `.beads` (skipped by `--dry-run`,
-`--list-only`, and an empty target list), and
-projects every record into `bd` — JSONL keeps the receipts, beads runs the
-queue. Opt out with an explicit `"stores": ["jsonl"]`. Requires `bd`
-installed; a missing bd fails the run after evidence is written.
+default**: the ledger alone is a log — the beads projection is the queue
+(`bd ready -l debt`, drill frames, `bro next`). A normal collect auto-runs
+`bd init --stealth --skip-agents --skip-hooks` when a repo is missing
+`.beads` (skipped by `--dry-run`, `--list-only`, and an empty target
+list) — announced on stderr, never silent — and projects every record
+into `bd`. Stealth means local-only: `.beads` lands in `.git/info/exclude`,
+nothing is committed, `rm -rf .beads` undoes it. Opt out with an explicit
+`"stores": ["jsonl"]`. Requires `bd` installed; a missing bd fails the run
+after evidence is written.
 
 The ledger dir is machine-local state too — bro adds it to
 `.git/info/exclude` on first write so harvest evidence can't be committed

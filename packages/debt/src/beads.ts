@@ -40,10 +40,14 @@ export function checkBeads(opts: { autoInit?: boolean } = {}): void {
   assertCompatible()
   // beads is a default store — a repo without .beads gets a stealth init
   // (local exclude, nothing lands in git) instead of a setup error.
+  // Silent auto-mutation is the surprise, so the init announces itself.
   // Dry runs must not mutate: they skip init and let `bd list` report
   // the missing workspace instead.
-  if (opts.autoInit !== false) {
-    initBeadsStealth()
+  if (opts.autoInit !== false && initBeadsStealth()) {
+    console.error(
+      'debt: initialized .beads (stealth — nothing lands in git; ' +
+        '"stores": ["jsonl"] in bro.config.json opts out)'
+    )
   }
   try {
     taskStore().list({ limit: 1 })
