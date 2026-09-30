@@ -227,7 +227,7 @@ export const PLUGINS: BroPlugin[] = [
  *  execute via runPlan. Resolution is shared with `bro plan validate`. */
 export async function runPlanFile(argv: string[]): Promise<void> {
   const files = argv.filter((a) => !a.startsWith('-'))
-  const kinds = PLUGINS.filter((p) => p.planSchema).map((p) => p.name)
+  const kinds = PLUGINS.filter((p) => p.planSchema && p.runPlan).map((p) => p.name)
   if (files.length !== 1) {
     console.error(`usage: bro run <plan.toml> — plan kinds: ${kinds.join(', ') || '(none)'}`)
     process.exit(2)

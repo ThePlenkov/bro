@@ -116,6 +116,12 @@ describe('resolvePlanDoc', () => {
       () => resolvePlanDoc(planFile('kind = "docless"'), [docless]),
       /plugin "docless" does not accept plans/
     )
+    const norun = planPlugin({ name: 'norun' })
+    delete norun.runPlan
+    assert.throws(
+      () => resolvePlanDoc(planFile('kind = "norun"\nneed = "x"'), [norun]),
+      /plugin "norun" does not accept plans/
+    )
   })
 
   test('plugins without planVersion gate at v1', () => {

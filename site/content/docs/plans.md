@@ -54,10 +54,10 @@ retrospect   v1
 
 Absent means "whatever the installed schema is" — every unversioned plan
 keeps working. A pin *newer* than this bro understands is rejected with
-the supported version named, never silently misparsed — that is the
-contract external producers target: pin `version = 1` and the plan fails
-loudly on a bro whose schema moved, instead of executing under a drifted
-reading.
+the supported version named, never silently misparsed. The gate only
+looks upward: a pin at or below the installed version passes and the
+kind's `planSchema` decides what it accepts — whether an older pin
+survives a schema advance is the schema's contract, not the gate's.
 
 ## `bro plan validate <plan.toml>`
 
