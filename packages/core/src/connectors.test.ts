@@ -1,13 +1,15 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  bdActor,
   connectors,
   facade,
   facadeAuth,
+  isOwnClaim,
   parallelWorkLines,
   promptContextLines,
   registerConnector,
@@ -32,6 +34,58 @@ const withRepo = (remote: string | null, fn: (dir: string) => void): void => {
 
 const fakeTasks = (tag: string): ((ctx: { dir: string }) => TaskStore) =>
   () => ({ tag }) as unknown as TaskStore
+
+/** Scripted bd — `list` cats $FAKE_BD_LIST_FILE (written by withClaimRepo). */
+const FAKE_BD = `#!/bin/sh
+case "$1" in
+  list) cat "$FAKE_BD_LIST_FILE" ;;
+  *) : ;;
+esac
+`
+
+/** Tmp git repo + scripted bd + a `.task` claim marker — the beads
+ *  connector's claim-scoped probes (parallelWork, stopGate) run against
+ *  it. BEADS_ACTOR pins the actor so ownership checks are hermetic. */
+function withClaimRepo(
+  opts: { claims?: string[]; list?: string },
+  fn: (dir: string) => void | Promise<void>
+): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-conn-claim-'))
+  const bin = join(dir, 'bin')
+  mkdirSync(bin)
+  writeFileSync(join(bin, 'bd'), FAKE_BD)
+  chmodSync(join(bin, 'bd'), 0o755)
+  writeFileSync(join(dir, 'list.json'), opts.list ?? '[]')
+  const prevPath = process.env.PATH
+  const prevList = process.env.FAKE_BD_LIST_FILE
+  const prevActor = process.env.BEADS_ACTOR
+  const run = async (): Promise<void> => {
+    execFileSync('git', ['init', '-q', dir])
+    if (opts.claims !== undefined) {
+      const hooks = join(dir, '.git', 'bro', 'hooks')
+      mkdirSync(hooks, { recursive: true })
+      writeFileSync(join(hooks, 's1.task'), ['2026-01-01', ...opts.claims].join('\n'))
+    }
+    process.env.PATH = `${bin}:${prevPath}`
+    process.env.FAKE_BD_LIST_FILE = join(dir, 'list.json')
+    process.env.BEADS_ACTOR = 'test-agent'
+    await fn(dir)
+  }
+  return run().finally(() => {
+    process.env.PATH = prevPath
+    if (prevList === undefined) delete process.env.FAKE_BD_LIST_FILE
+    else process.env.FAKE_BD_LIST_FILE = prevList
+    if (prevActor === undefined) delete process.env.BEADS_ACTOR
+    else process.env.BEADS_ACTOR = prevActor
+    rmSync(dir, { recursive: true, force: true })
+  })
+}
+
+const CLAIMED_LIST =
+  '[' +
+  '{"id":"b1","status":"in_progress","title":"held elsewhere","assignee":"other-agent"},' +
+  '{"id":"b2","status":"in_progress","title":"mine","assignee":"test-agent"}' +
+  ']'
 
 describe('connectors', () => {
   test('beads is registered built-in and provides tasks', () => {
@@ -154,5 +208,60 @@ describe('connectors', () => {
     assert.ok(
       gates.some((g) => g.aspect === 'jira' && g.block === 'acme: JIRA-1 open')
     )
+  })
+
+  test('bdActor prefers BEADS_ACTOR over git config', () => {
+    const prev = process.env.BEADS_ACTOR
+    process.env.BEADS_ACTOR = 'env-agent'
+    try {
+      assert.equal(bdActor(process.cwd()), 'env-agent')
+    } finally {
+      if (prev === undefined) delete process.env.BEADS_ACTOR
+      else process.env.BEADS_ACTOR = prev
+    }
+  })
+})
+
+describe('isOwnClaim', () => {
+  const mine = new Set(['b1'])
+
+  test('a marker id counts as own only when the store assignee matches', () => {
+    assert.equal(isOwnClaim({ id: 'b1', assignee: 'me' }, mine, 'me'), true)
+    assert.equal(isOwnClaim({ id: 'b1', assignee: 'other' }, mine, 'me'), false)
+    assert.equal(isOwnClaim({ id: 'b2', assignee: 'me' }, mine, 'me'), false)
+  })
+
+  test('unverifiable rows keep the marker — fail-open', () => {
+    assert.equal(isOwnClaim({ id: 'b1' }, mine, 'me'), true)
+    assert.equal(isOwnClaim({ id: 'b1', assignee: 'x' }, mine, ''), true)
+  })
+})
+
+describe('beads claim ownership', () => {
+  // b1 is in the marker (bro work enter attempted) but held by another
+  // actor; b2 is genuinely claimed by this session's actor.
+  const opts = { claims: ['b1', 'b2'], list: CLAIMED_LIST }
+
+  test('parallelWork still surfaces a refused marker claim', async () => {
+    await withClaimRepo(opts, async (dir) => {
+      const beads = (await parallelWorkLines({ dir, sessionId: 's1' })).find((l) =>
+        l.startsWith('claimed beads:')
+      )
+      assert.match(beads ?? '', /\bb1\b/)
+      assert.doesNotMatch(beads ?? '', /\bb2\b/)
+    })
+  })
+
+  test('stopGate blocks only on verified own claims; refused stays passive', async () => {
+    await withClaimRepo(opts, async (dir) => {
+      const task = (await stopGateContributions({ dir, sessionId: 's1' })).filter(
+        (g) => g.aspect === 'task'
+      )
+      const block = task.find((g) => g.block)
+      const passive = task.find((g) => g.passive)
+      assert.match(block?.block ?? '', /\bb2\b/)
+      assert.doesNotMatch(block?.block ?? '', /\bb1\b/)
+      assert.match(passive?.passive ?? '', /\bb1\b/)
+    })
   })
 })

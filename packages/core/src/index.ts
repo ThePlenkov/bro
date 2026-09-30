@@ -46,11 +46,13 @@ export type {
   ScanOpts,
 } from './review.ts'
 export {
+  bdActor,
   connectorHooks,
   connectors,
   ensureAuth,
   facade,
   facadeAuth,
+  isOwnClaim,
   parallelWorkLines,
   promptContextLines,
   registerConnector,
