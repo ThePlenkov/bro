@@ -262,6 +262,47 @@ function spawnRun(bin: SverkaBin, root: string, args: string[]) {
   })
 }
 
+interface RunOutcome {
+  proc: ReturnType<typeof spawnRun>
+  parsed: ParsedRun | null
+}
+
+/** One spawn + envelope parse — the COLLECTION_FAILED retry lives here:
+ *  `--evaluate` against a config whose steps emit no SARIF artifacts
+ *  makes sverka drop the whole run report, so bro retries once without
+ *  it and the stats still land. */
+function executeSverka(
+  bin: SverkaBin,
+  root: string,
+  opts: Parameters<typeof sverkaArgs>[0],
+  err: (msg: string) => void
+): RunOutcome {
+  const first = spawnRun(bin, root, sverkaArgs(opts))
+  const parsed = first.stdout ? parseRunJson(first.stdout) : null
+  if (parsed?.error !== 'COLLECTION_FAILED') {
+    return { proc: first, parsed }
+  }
+  err(
+    `warning: sverka evaluate failed (${parsed.message ?? 'collection failed'}) — retrying without --evaluate; drop it from flags/config or declare SARIF artifact outputs`
+  )
+  const retry = spawnRun(bin, root, sverkaArgs({ ...opts, evaluate: false }))
+  return { proc: retry, parsed: retry.stdout ? parseRunJson(retry.stdout) : null }
+}
+
+/** parsed data → the normalized text-render view; absent fields stay
+ *  absent rather than defaulting into misleading zeros. */
+function toReport(data: SverkaRunData, durationMs: number, code: number): CheckReport {
+  return {
+    status: data.status ?? 'unknown',
+    durationMs,
+    steps: data.steps ?? [],
+    ...(data.findings !== undefined ? { findings: data.findings } : {}),
+    ...(data.verdict !== undefined ? { verdict: data.verdict } : {}),
+    ...(data.summary !== undefined ? { summary: data.summary } : {}),
+    exitCode: code,
+  }
+}
+
 /** Execute sverka and normalize to a CheckReport. `data` is sverka's raw
  *  payload — the `--json` output passes it through verbatim (planId and
  *  future fields included); `report` is the normalized text-render view.
@@ -272,22 +313,7 @@ export function runCheck(
   opts: Parameters<typeof sverkaArgs>[0],
   err: (msg: string) => void = (m) => console.error(m)
 ): { report?: CheckReport; data?: SverkaRunData; exitCode: number } {
-  let args = sverkaArgs(opts)
-  let proc = spawnRun(bin, root, args)
-  let parsed = proc.stdout ? parseRunJson(proc.stdout) : null
-
-  // --evaluate against a config whose steps emit no SARIF artifacts
-  // makes sverka drop the whole run report — retry once without it so
-  // the stats still land
-  if (parsed?.error === 'COLLECTION_FAILED') {
-    err(
-      `warning: sverka evaluate failed (${parsed.message ?? 'collection failed'}) — retrying without --evaluate; drop it from flags/config or declare SARIF artifact outputs`
-    )
-    args = sverkaArgs({ ...opts, evaluate: false })
-    proc = spawnRun(bin, root, args)
-    parsed = proc.stdout ? parseRunJson(proc.stdout) : null
-  }
-
+  const { proc, parsed } = executeSverka(bin, root, opts, err)
   if (proc.error) {
     err(`error: failed to run sverka (${proc.error.message})`)
     return { exitCode: 1 }
@@ -307,15 +333,7 @@ export function runCheck(
   }
   const data = parsed.data ?? {}
   return {
-    report: {
-      status: data.status ?? 'unknown',
-      durationMs: parsed.durationMs ?? 0,
-      steps: data.steps ?? [],
-      ...(data.findings !== undefined ? { findings: data.findings } : {}),
-      ...(data.verdict !== undefined ? { verdict: data.verdict } : {}),
-      ...(data.summary !== undefined ? { summary: data.summary } : {}),
-      exitCode: code,
-    },
+    report: toReport(data, parsed.durationMs ?? 0, code),
     data,
     exitCode: code,
   }
@@ -350,40 +368,48 @@ function stderrTail(stderr: string | undefined, n = 4): string[] {
     .slice(-n)
 }
 
-export function renderText(report: CheckReport): string[] {
-  const lines: string[] = []
-  for (const s of report.steps) {
-    const icon = STEP_ICON[s.status] ?? '?'
-    const dur = fmtMs(s.durationMs)
-    let extra = ''
-    if (s.status === 'failed') {
-      const why = s.error ?? (s.exitCode !== undefined ? `exit ${s.exitCode}` : '')
-      extra = why !== '' ? ` — ${why}` : ''
-    } else if (s.status === 'cache-hit' && s.cacheKey) {
-      extra = ` — cache ${s.cacheKey.slice(0, 12)}`
-    }
-    lines.push(`${icon} ${s.stepId}${dur !== '' ? ` ${dur}` : ''}${extra}`)
-    if (s.status === 'failed') {
-      for (const l of stderrTail(s.stderr)) {
-        lines.push(`    ${l}`)
-      }
-    }
+/** One step → its rendered line(s): the status line, plus the indented
+ *  stderr tail when it failed. */
+function stepLines(s: SverkaStep): string[] {
+  const icon = STEP_ICON[s.status] ?? '?'
+  const dur = s.durationMs !== undefined ? ` ${fmtMs(s.durationMs)}` : ''
+  let detail = ''
+  if (s.status === 'failed') {
+    detail = s.error ?? (s.exitCode !== undefined ? `exit ${s.exitCode}` : '')
+  } else if (s.status === 'cache-hit' && s.cacheKey) {
+    detail = `cache ${s.cacheKey.slice(0, 12)}`
   }
-  const ok = report.steps.filter((s) => s.status === 'succeeded' || s.status === 'cache-hit')
-    .length
+  const suffix = detail !== '' ? ` — ${detail}` : ''
+  const line = `${icon} ${s.stepId}${dur}${suffix}`
+  if (s.status !== 'failed') {
+    return [line]
+  }
+  return [line, ...stderrTail(s.stderr).map((l) => `    ${l}`)]
+}
+
+function totalsLine(report: CheckReport): string {
+  const ok = report.steps.filter(
+    (s) => s.status === 'succeeded' || s.status === 'cache-hit'
+  ).length
   const failed = report.steps.filter((s) => s.status === 'failed').length
   const other = report.steps.length - ok - failed
-  lines.push(
-    `${report.steps.length} steps · ${ok} ok` +
-      (failed > 0 ? ` · ${failed} failed` : '') +
-      (other > 0 ? ` · ${other} other` : '') +
-      ` — ${fmtMs(report.durationMs) || '?'}`
-  )
+  const parts = [`${report.steps.length} steps · ${ok} ok`]
+  if (failed > 0) {
+    parts.push(`${failed} failed`)
+  }
+  if (other > 0) {
+    parts.push(`${other} other`)
+  }
+  const dur = fmtMs(report.durationMs)
+  return `${parts.join(' · ')} — ${dur !== '' ? dur : '?'}`
+}
+
+export function renderText(report: CheckReport): string[] {
+  const lines = report.steps.flatMap(stepLines)
+  lines.push(totalsLine(report))
   if (report.findings !== undefined || report.verdict !== undefined) {
-    lines.push(
-      `findings: ${report.findings ?? 0}` +
-        (report.verdict !== undefined ? ` · verdict: ${report.verdict}` : '')
-    )
+    const verdict = report.verdict !== undefined ? ` · verdict: ${report.verdict}` : ''
+    lines.push(`findings: ${report.findings ?? 0}${verdict}`)
   }
   return lines
 }
@@ -451,13 +477,19 @@ function rejectUnknownArgs(argv: string[]): void {
   }
 }
 
-export function runCheckCommand(argv: string[]): void {
-  if (argv.includes('--help') || argv.includes('-h')) {
-    usage()
-  }
+interface CheckArgs {
+  root: string
+  format: 'text' | 'json'
+  opts: Parameters<typeof sverkaArgs>[0]
+  /** check.bin from config — resolveSverka's first resolution step */
+  cfgBin?: string
+}
+
+/** argv + the repo's `check` section → run parameters. Usage failures
+ *  exit 2 here. Config loads from the run root — `--root <other-repo>`
+ *  picks up that repo's section (and node_modules for resolution). */
+function parseCheckArgs(argv: string[]): CheckArgs {
   rejectUnknownArgs(argv)
-  // config loads from the run root — `--root <other-repo>` picks up that
-  // repo's "check" section (and its node_modules for binary resolution)
   const root = resolve(flag(argv, '--root') ?? process.cwd())
   const cfg = (loadBroConfig(root).check ?? checkSection(undefined)) as CheckConfig
   const format = flag(argv, '--format') ?? (argv.includes('--json') ? 'json' : 'text')
@@ -465,23 +497,35 @@ export function runCheckCommand(argv: string[]): void {
     console.error(`error: --format must be text|json — got ${JSON.stringify(format)}`)
     process.exit(2)
   }
-  const opts = {
-    config: flag(argv, '--config') ?? cfg.config,
-    entry: flag(argv, '--entry') ?? cfg.entry,
-    executor: flag(argv, '--executor') ?? cfg.executor,
-    evaluate: argv.includes('--evaluate') || cfg.evaluate,
-    quiet: argv.includes('-q') || argv.includes('--quiet'),
-    verbose: argv.includes('-v') || argv.includes('--verbose'),
-  }
+  const executor = flag(argv, '--executor') ?? cfg.executor
   if (
-    opts.executor !== undefined &&
-    !(CHECK_EXECUTORS as readonly string[]).includes(opts.executor)
+    executor !== undefined &&
+    !(CHECK_EXECUTORS as readonly string[]).includes(executor)
   ) {
-    console.error(`error: --executor must be host|docker — got ${JSON.stringify(opts.executor)}`)
+    console.error(`error: --executor must be host|docker — got ${JSON.stringify(executor)}`)
     process.exit(2)
   }
+  return {
+    root,
+    format,
+    opts: {
+      config: flag(argv, '--config') ?? cfg.config,
+      entry: flag(argv, '--entry') ?? cfg.entry,
+      executor,
+      evaluate: argv.includes('--evaluate') || cfg.evaluate,
+      quiet: argv.includes('-q') || argv.includes('--quiet'),
+      verbose: argv.includes('-v') || argv.includes('--verbose'),
+    },
+    ...(cfg.bin !== undefined ? { cfgBin: cfg.bin } : {}),
+  }
+}
 
-  const bin = resolveSverka(root, cfg.bin)
+export function runCheckCommand(argv: string[]): void {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    usage()
+  }
+  const { root, format, opts, cfgBin } = parseCheckArgs(argv)
+  const bin = resolveSverka(root, cfgBin)
   if (bin === null) {
     console.error(
       'error: sverka not found — install @sverka/cli in the repo (npm i -D @sverka/cli), put sverka on PATH, or set "check": {"bin": …} in bro.config.json'
