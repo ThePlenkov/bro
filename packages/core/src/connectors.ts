@@ -25,6 +25,7 @@ import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { gitTry } from './git.ts'
 import type { ReviewFacade } from './review.ts'
+import type { SpecStore } from './specs.ts'
 import type { TaskRow, TaskStore } from './tasks.ts'
 import { bdActor, taskStore } from './tasks.ts'
 
@@ -44,6 +45,7 @@ export interface ConnectorCtx {
 export interface FacadeMap {
   tasks: TaskStore
   reviews: ReviewFacade
+  specs: SpecStore
 }
 
 export type MaybePromise<T> = T | Promise<T>
@@ -88,6 +90,11 @@ export interface Connector {
    *  (github.com, gitlab.*, a self-hosted domain). Drives facade
    *  auto-detect ahead of registry order. */
   matchRemote?(url: string): boolean
+  /** Project-layout matcher — the connector claims repos whose
+   *  directories it recognizes (`.specify/`, `openspec/`). Tried after
+   *  matchRemote for facades where the project picks the tool, not the
+   *  host (specs). */
+  matchDir?(dir: string): boolean
   /** Auth/readiness probe — the SYSTEM owns its credential check, so a
    *  facade-backed command on a foreign host never demands `gh auth`.
    *  null = ready; a string is the remediation line a command prints.
@@ -97,6 +104,7 @@ export interface Connector {
   auth?(ctx: ConnectorCtx): string | null
   tasks?(ctx: ConnectorCtx): TaskStore
   reviews?(ctx: ConnectorCtx): ReviewFacade
+  specs?(ctx: ConnectorCtx): SpecStore
   hooks?(ctx: ConnectorCtx): ConnectorHooks
 }
 
@@ -273,6 +281,31 @@ export interface FacadeOpts {
  *  the same for a later registerConnector. */
 const pickMemo = new Map<string, Connector>()
 
+/** Ambiguity warning policy — a non-default provider silently winning
+ *  (dir/remote claim) deserves a pin hint, as does a bare fallback when
+ *  NO provider declares a matcher. When a matchDir exists but none
+ *  claimed, registry-first is the designed default (specs: bare repo →
+ *  native), not ambiguity the user should be nagged about. */
+function warnIfAmbiguous(
+  kind: string,
+  providers: Connector[],
+  pick: Connector,
+  remoteMatched: boolean
+): void {
+  if (remoteMatched || providers.length <= 1) {
+    return
+  }
+  const designedDefault =
+    pick === providers[0] && providers.some((c) => c.matchDir !== undefined)
+  if (designedDefault) {
+    return
+  }
+  console.error(
+    `warning: ${providers.map((c) => c.name).join(', ')} all provide "${kind}" ` +
+      `— using ${pick.name}; set connectors.${kind} in bro.config.json`
+  )
+}
+
 /** The connector chosen to serve `kind` — shared by facade() and auth
  *  probing so both resolve through the same precedence. */
 function pickConnector<K extends keyof FacadeMap>(
@@ -282,32 +315,28 @@ function pickConnector<K extends keyof FacadeMap>(
 ): Connector {
   const providers = registry.filter((c) => typeof c[kind as keyof Connector] === 'function')
   const named = opts.connector ?? opts.prefer?.[kind]
-  let pick: Connector | undefined
   if (named !== undefined) {
-    pick = providers.find((c) => c.name === named)
+    const pick = providers.find((c) => c.name === named)
     if (!pick) {
       throw new Error(`connector "${named}" does not provide "${kind}"`)
     }
-  } else {
-    const url = remoteUrl(ctx.dir)
-    const key = `${kind}\0${ctx.dir}\0${url ?? ''}\0${registry.length}`
-    const memo = pickMemo.get(key)
-    if (memo !== undefined) {
-      return memo
-    }
-    const remote = url === undefined ? undefined : providers.find((c) => c.matchRemote?.(url))
-    pick = remote ?? providers[0]
-    if (!pick) {
-      throw new Error(`no connector provides "${kind}"`)
-    }
-    if (remote === undefined && providers.length > 1) {
-      console.error(
-        `warning: ${providers.map((c) => c.name).join(', ')} all provide "${kind}" ` +
-          `— using ${pick.name}; set connectors.${kind} in bro.config.json`
-      )
-    }
-    pickMemo.set(key, pick)
+    return pick
   }
+  const url = remoteUrl(ctx.dir)
+  const key = `${kind}\0${ctx.dir}\0${url ?? ''}\0${registry.length}`
+  const memo = pickMemo.get(key)
+  if (memo !== undefined) {
+    return memo
+  }
+  const remote = url === undefined ? undefined : providers.find((c) => c.matchRemote?.(url))
+  // no remote claim → project-layout match (specs: .specify/, openspec/)
+  const dir = remote === undefined ? providers.find((c) => c.matchDir?.(ctx.dir)) : undefined
+  const pick = remote ?? dir ?? providers[0]
+  if (!pick) {
+    throw new Error(`no connector provides "${kind}"`)
+  }
+  warnIfAmbiguous(kind, providers, pick, remote !== undefined)
+  pickMemo.set(key, pick)
   return pick
 }
 
@@ -376,6 +405,14 @@ export function reviewHost(
   prefer?: Record<string, string>
 ): ReviewFacade {
   return facade('reviews', { dir }, { prefer })
+}
+
+/** facade('specs') bound to a dir — the SDD tool this project runs. */
+export function specStore(
+  dir: string = process.cwd(),
+  prefer?: Record<string, string>
+): SpecStore {
+  return facade('specs', { dir }, { prefer })
 }
 
 /** Every registered connector's hook probes — hooks collect, never pick:

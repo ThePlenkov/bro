@@ -24,12 +24,36 @@ Exempt: `issue_type: chore` and beads labeled `trivial` or `debt` —
 SDD measures design mass, not bookkeeping, and a harvested review
 finding already carries its own evidence.
 
+## What a spec is — and is not
+
+A bead is intent-to-change: it opens, gets claimed, closes. A spec is a
+stable project artifact — it rides the feature branch, is reviewed with
+the code, and stays on main as what the project now *is*. Specs form a
+tree: an epic's spec-of-specs decomposes into feature specs via
+`parent:` frontmatter (`bro spec new <id> --parent <epic>`).
+
 ## Commands
 
 | Command | What it does |
 | ------- | ------------ |
 | `bro spec check [id…]` | Coverage over `in_progress` beads (`--all` adds open): `spec` / `link` / `exempt` / `MISSING`. Exit 1 on any MISSING — CI-able |
-| `bro spec new <id>` | Scaffold `<sdd.dir>/<id>.md` from the bead title; never overwrites |
+| `bro spec new <id>` | Scaffold `<sdd.dir>/<id>.md` from the bead title; never overwrites. `--parent <id>` links the tree |
+| `bro spec tree` | The spec hierarchy — roots, children, MISSING for claimed beads with none |
+| `bro spec init` | Bootstrap SDD: detects `.specify/`/`openspec/` and writes `connectors.specs` + `sdd.mode: remind`; on a bare repo scaffolds a native `specs/` root. `--tool` overrides detection |
+
+## Which SDD tool
+
+The `specs` facade resolves the project's own tool — enforcement speaks
+its language, never imposes bro's shape:
+
+| Connector | Detected by | A spec is |
+| --------- | ----------- | --------- |
+| `native` (default) | `<sdd.dir>/` exists, or nothing else | `<sdd.dir>/<id>.md` |
+| `speckit` | `.specify/` | `specs/<NNN>-<slug>/spec.md`, linked via `spec:` |
+| `openspec` | `openspec/` | `openspec/changes/<id>/proposal.md` |
+| `agent` | explicit only | no files — `spec:` links are the evidence |
+
+Override detection: `"connectors": { "specs": "openspec" }`.
 
 ## Config
 

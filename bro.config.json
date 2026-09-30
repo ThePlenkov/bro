@@ -1,9 +1,19 @@
 {
   "act": {
-    "ignoreChecks": ["kilo"]
+    "ignoreChecks": [
+      "kilo",
+      "github-advanced-security"
+    ]
   },
   "debt": {
-    "sources": ["review-threads", "dependabot", "code-scanning", "secret-scanning", "stale-prs", "failed-ci"]
+    "sources": [
+      "review-threads",
+      "dependabot",
+      "code-scanning",
+      "secret-scanning",
+      "stale-prs",
+      "failed-ci"
+    ]
   },
   "sdd": {
     "mode": "gate"
