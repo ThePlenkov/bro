@@ -93,7 +93,7 @@ async function fetchHarvests(sha: string): Promise<Finding[]> {
   const paths = (tree.tree ?? [])
     .filter(isHarvestBlob)
     .map((e) => e.path)
-    .sort()
+    .sort((a, b) => a.localeCompare(b))
     .slice(-HARVEST_FETCH)
   const texts = await Promise.all(
     paths.map((p) => fetch(`${RAW}/${sha}/${p}`).then((r) => (r.ok ? r.text() : '')))
