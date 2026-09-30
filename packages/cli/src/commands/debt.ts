@@ -283,7 +283,9 @@ async function cmdCollect(argv: string[]): Promise<void> {
     // and leave the ledger jsonl-only instead of red-failing collect.
     // Explicit values only — a typo like "beed" must fall back to jsonl,
     // not fail in bd after the ledger was already written.
-    if (loadBroConfig().stores.includes('beads')) {
+    // --list-only is a read-only inspection and an empty ledger has nothing
+    // to project — neither justifies auto-initializing .beads.
+    if (totalRows > 0 && !args.listOnly && loadBroConfig().stores.includes('beads')) {
       try {
         const res = syncDebtToBeads(readDebtRecords())
         console.error(
