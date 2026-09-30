@@ -1,6 +1,9 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { planCleanup } from './cleanup.ts'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { planCleanup, runCleanupCommand } from './cleanup.ts'
+import { git, initRepo, inside } from './testrepo.ts'
 
 const A = 'a'.repeat(40)
 const B = 'b'.repeat(40)
@@ -74,5 +77,51 @@ describe('planCleanup', () => {
     const plan = planCleanup([branch('feat/open-pr'), branch('feat/local-only')], merged([]), {}, none)
     assert.deepEqual(plan.delete, [])
     assert.equal(plan.skip.length, 2)
+  })
+})
+
+describe('runCleanupCommand degrade paths', () => {
+  /** capture console.error for a sync fn */
+  const captureErr = (fn: () => void): string[] => {
+    const errs: string[] = []
+    const orig = console.error
+    console.error = (...args: unknown[]) => errs.push(args.join(' '))
+    try {
+      fn()
+    } finally {
+      console.error = orig
+    }
+    return errs
+  }
+
+  test('a broken bro.config.json warns, degrades, and keeps every branch', () => {
+    const { root, main } = initRepo('bro-cleanup-cfg-')
+    inside(main, root, () => {
+      git(['branch', 'feat/stray'], main)
+      writeFileSync(join(main, 'bro.config.json'), '{ not json')
+      const errs = captureErr(() => runCleanupCommand([]))
+      // config load fails open (warn + jsonl fallback) and the run still
+      // reaches the keep-all plan — a config problem never aborts cleanup
+      assert.ok(errs.some((l) => l.includes('bro.config.json failed to load')))
+      assert.ok(git(['branch', '--list', 'feat/stray'], main).includes('feat/stray'))
+    })
+  })
+
+  test('an unreachable review host keeps every branch — no evidence, no deletion', () => {
+    const { root, main } = initRepo('bro-cleanup-host-')
+    inside(main, root, () => {
+      git(['branch', 'feat/no-remote'], main)
+      const lines: string[] = []
+      const orig = console.log
+      console.log = (...args: unknown[]) => lines.push(args.join(' '))
+      try {
+        runCleanupCommand([])
+      } finally {
+        console.log = orig
+      }
+      // empty merged-PR map → keep-all plan, nothing deleted
+      assert.ok(lines.some((l) => l.includes('nothing to delete')))
+      assert.ok(git(['branch', '--list', 'feat/no-remote'], main).includes('feat/no-remote'))
+    })
   })
 })
