@@ -8,6 +8,7 @@ Heavy mechanics live in `packages/*`; `skills/` holds thin prompt wrappers only.
 ```text
 packages/core     @broject/core      — connector model, facades (tasks/reviews), config, output
 packages/github   @broject/github    — GitHub connector: ReviewFacade over `gh`
+packages/gitlab   @broject/gitlab    — GitLab connector: ReviewFacade over `glab`
 packages/debt     @broject/debt      — review-debt domain: collect, labels, ledger, beads sync
 packages/act      @broject/act       — open-PR loop: state, threads, resolve, exit gate
 packages/drill    @broject/drill     — scoped descent: drill frames as beads

@@ -434,11 +434,13 @@ function prUpdatedAt(t: PrTarget): string | null {
 // call; a small pool overlaps the chunks.
 
 /** Run `fn` over `items` with at most `cap` in flight — a Promise pool,
- *  not a thread pool: the win is overlapping `gh` processes. */
+ *  not a thread pool: the win is overlapping `gh` processes. A cap <= 0
+ *  clamps to one serial worker — zero workers would silently process
+ *  nothing. */
 async function pooled<T>(items: T[], cap: number, fn: (item: T) => Promise<void>): Promise<void> {
   let next = 0
   await Promise.all(
-    Array.from({ length: Math.min(cap, items.length) }, async () => {
+    Array.from({ length: Math.max(1, Math.min(cap, items.length)) }, async () => {
       while (next < items.length) {
         await fn(items[next++]!) // NOSONAR — serial within a worker; the workers overlap
       }

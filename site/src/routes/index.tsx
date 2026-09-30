@@ -15,7 +15,7 @@ const DOCS = `${BASE_URL}docs`
 const pieces = [
   { name: 'plugin', what: 'skills + hooks', gloss: 'lives inside your agent. rehydrates context on start, blocks the stop while work is unfinished.' },
   { name: 'bro', what: 'one CLI', gloss: 'the mechanics your prompts kept forgetting. one command, one verdict.' },
-  { name: 'connectors', what: 'your systems', gloss: 'beads, GitHub, and whatever you plug in next — behind the same facades.' },
+  { name: 'connectors', what: 'your systems', gloss: 'beads, GitHub, GitLab — and whatever you plug in next — behind the same facades.' },
 ]
 
 const vocab = [

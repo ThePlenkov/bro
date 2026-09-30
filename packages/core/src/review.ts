@@ -2,11 +2,12 @@
  * ReviewFacade — the capability a review-host connector provides: PR/MR
  * state, review threads, checks, merge. Named by domain semantics —
  * threads, checks, mergeable — never vendor API names (no checkRuns,
- * graphql, or notes in the contract). GitHub implements it via `gh`
- * today; a gitlab connector maps MR discussions/pipelines later.
+ * graphql, or notes in the contract). GitHub implements it via `gh`,
+ * GitLab via `glab` (MR discussions, pipelines, diff versions).
  */
 
-/** A pull/merge request on a review host — `repo` is 'owner/name'. */
+/** A pull/merge request on a review host — `repo` is the host's project
+ *  path: 'owner/name' on GitHub; GitLab nests ('group/sub/proj'). */
 export interface PrTarget {
   repo: string
   pr: number

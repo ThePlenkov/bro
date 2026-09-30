@@ -30,6 +30,7 @@ import { drillConnector, parseDrillPlan, type DrillPlan } from '@broject/drill'
 import { parsePlanDoc, type RetroPlan } from '@broject/retro'
 import { loopSection } from '@broject/loop'
 import { githubConnector } from '@broject/github'
+import { gitlabConnector } from '@broject/gitlab'
 import { applyActPlan, runActCommand } from './commands/act.ts'
 import { runCleanupCommand } from './commands/cleanup.ts'
 import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts'
@@ -51,6 +52,7 @@ import { runWorkCommand, workConnector } from './commands/work.ts'
 // connector must not shadow a built-in system. Registration order also
 // decides stop-gate block priority: drill > work > act.
 registerConnector(githubConnector)
+registerConnector(gitlabConnector)
 registerConnector(drillConnector)
 registerConnector(workConnector)
 registerConnector(actConnector)

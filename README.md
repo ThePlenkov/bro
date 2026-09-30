@@ -125,9 +125,9 @@ run on defaults until they set up. Everything's optional:
 ```
 
 `connectors` pins which registered connector serves a facade when several
-could — e.g. a self-hosted GitHub Enterprise or a future GitLab/Jira
-connector. With one provider per facade it can be omitted; remote-URL
-matching auto-detects github.com anyway.
+could — e.g. a self-hosted GitHub Enterprise or GitLab instance. Remote-URL
+matching auto-detects github.com and gitlab.com; anything else (GHES,
+self-hosted GitLab, a future Jira connector) resolves through this map.
 
 `sdd` opts the repo into spec-driven development: `remind` nudges via
 session/prompt hook context when a claimed bead lacks `specs/<id>.md`

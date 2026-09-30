@@ -47,7 +47,7 @@ jobs:
         env:
           EXPECTED_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          for dir in core retro convoy debt drill github loop act cli; do
+          for dir in core retro convoy debt drill github gitlab loop act cli; do
             p="packages/$dir/package.json"
             name=$(node -p "require('./$p').name")
             v=$(node -p "require('./$p').version")
@@ -65,7 +65,7 @@ jobs:
           # (actions/setup-node#1551). Strip it so trusted publishing
           # can kick in.
           sed -i '/_authToken/d' "$NPM_CONFIG_USERCONFIG"
-          for dir in core retro convoy debt drill github loop act cli; do
+          for dir in core retro convoy debt drill github gitlab loop act cli; do
             cd "$GITHUB_WORKSPACE/packages/$dir"
             name=$(node -p "require('./package.json').name")
             v=$(node -p "require('./package.json').version")
