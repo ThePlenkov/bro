@@ -66,8 +66,8 @@ interface Data {
   findings: Finding[]
 }
 
-const parseJsonl = <T>(text: string): T[] =>
-  text
+function parseJsonl<T>(text: string): T[] {
+  return text
     .split('\n')
     .filter((l) => l.trim() !== '')
     .flatMap((l) => {
@@ -77,6 +77,7 @@ const parseJsonl = <T>(text: string): T[] =>
         return [] // a malformed line drops that row, not the page
       }
     })
+}
 
 /** Newest harvest files under <sha> — the trees API lists paths, raw
  *  serves the content by sha (one repo, one dashboard: a handful of GETs). */
