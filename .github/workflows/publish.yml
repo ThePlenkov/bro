@@ -54,6 +54,26 @@ jobs:
             test "v$v" = "$EXPECTED_TAG" || { echo "$name@$v != tag $EXPECTED_TAG (lockstep broken)"; exit 1; }
           done
 
+      # A package that has never been published has no OIDC trust config —
+      # npm can't create one for a name that doesn't exist, so its first
+      # publish is always the manual `prepare-for-release` bootstrap.
+      # Fail fast BEFORE any package publishes: a mid-loop abort leaves a
+      # half-published lockstep (core@x.y out, cli missing).
+      - name: Preflight — every package must exist on npm
+        run: |
+          missing=""
+          for dir in core retro convoy debt drill github gitlab loop act pack cli; do
+            name=$(node -p "require('./packages/$dir/package.json').name")
+            if ! npm view "$name" name >/dev/null 2>&1; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Never published, needs manual bootstrap (placeholder + npm trust):$missing"
+            echo "Run: npx nx run-many -t prepare-for-release -p <names> && npm trust github <name> --file publish.yml --repo ThePlenkov/bro"
+            exit 1
+          fi
+
       # LTS node ships npm >= 11.5.1 — OIDC trusted publishing built in.
       # Publish order follows the internal dep graph (core first, cli last)
       # so a consumer never resolves a dep that isn't on the registry yet.

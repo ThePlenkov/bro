@@ -1,5 +1,7 @@
 # @broject/debt
 
+[![npm](https://img.shields.io/npm/v/@broject/debt)](https://www.npmjs.com/package/@broject/debt)
+
 The review-debt pipeline behind `bro debt` — harvest unresolved review
 threads on merged PRs into a local ledger, label PRs `debt:*` so nothing
 is scanned twice, and sync open findings into beads.

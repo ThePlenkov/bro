@@ -1,5 +1,10 @@
 # bro 🤝
 
+[![npm](https://img.shields.io/npm/v/@broject/bro)](https://www.npmjs.com/package/@broject/bro)
+[![CI](https://github.com/ThePlenkov/bro/actions/workflows/ci.yml/badge.svg)](https://github.com/ThePlenkov/bro/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![node](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen)](https://nodejs.org)
+
 > Your agent's sidekick. Skills are instructions — **bro is the brain.**
 >
 > **Landing:** https://broject.dev · **Docs:** https://broject.dev/docs/
