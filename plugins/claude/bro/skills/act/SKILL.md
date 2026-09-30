@@ -83,6 +83,15 @@ default store, so standard installs already have it).
   rejecting a finding (state the reason) or answering a question the
   reviewer asked. If a thread needs an explicit audit marker, pass
   `--comment <sha>` — a bare SHA, not prose.
+- **Resolving is not the gate — a fix push re-opens review.** After the
+  last `bro act resolve` of a round, `bro act status` on the *new head*
+  decides: fresh findings land on every push, so the loop exits only on
+  `exit_gate=OK` or hands off to `bro act wait --merge`. Never report a
+  PR as done from the resolve output alone.
+- **A pushed PR is merged, watched, or handed off — never unwatched.**
+  `bro act wait <PR> --merge` in the background is the default end-state;
+  a watcher exit is a state to inspect, not silence — a `timed_out` exit
+  means the PR is still open, so re-arm the watcher or hand off.
 - **Report with links, not text.** Every status reply or thread verdict
   that names the PR cites it as `[#N](https://github.com/<owner>/<repo>/pull/N)`
   — `bro act status` prints the URL on its `pr=` line, carry it through.
