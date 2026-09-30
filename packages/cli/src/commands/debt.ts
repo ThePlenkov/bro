@@ -14,6 +14,7 @@ import {
   dataRefPush,
   dataRefRoot,
   ensureAuth,
+  facadeAuth,
   isBdCompatError,
   reviewHost,
   type MergedPrScan,
@@ -206,11 +207,23 @@ function parseCollectArgs(rev: ReviewFacade, argv: string[]): CollectArgs {
   }
 }
 
-async function cmdCollect(argv: string[]): Promise<void> {
+async function cmdCollect(
+  argv: string[],
+  opts: { throwOnAuthFailure?: boolean } = {}
+): Promise<void> {
   const rev = reviewHost(undefined, loadBroConfig().connectors)
   // Auth gate before resolveRepo — an unauthenticated `gh repo view`
-  // must not beat the remediation message.
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
+  // must not beat the remediation message. `debt watch` runs this per
+  // tick: there the gate throws so a transient failure retries on the
+  // next tick instead of process.exit killing the loop.
+  if (opts.throwOnAuthFailure) {
+    const msg = facadeAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
+    if (msg !== null) {
+      throw new Error(msg)
+    }
+  } else {
+    ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
+  }
   const args = parseCollectArgs(rev, argv)
 
   const debtCfg = loadBroConfig().debt
@@ -1125,10 +1138,15 @@ async function cmdWatch(argv: string[]): Promise<void> {
     }
     collectArgv.push(argv[i]!)
   }
+  // Startup auth is fail-fast — an unauthenticated watch exits with the
+  // remediation line now rather than spinning on a failure it can never
+  // fix. Inside the loop the same check throws (see cmdCollect), so a
+  // later blip retries instead of killing the watcher.
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   console.error(`debt watch: collecting every ${intervalSec}s — Ctrl-C to stop`)
   for (;;) {
     try {
-      await cmdCollect(collectArgv)
+      await cmdCollect(collectArgv, { throwOnAuthFailure: true })
       // cmdCollect wrote ledger + overlays — publish now, per tick.
       // The post-handler MUTATING sync never runs: watch never returns.
       maybeDataRefSync()
