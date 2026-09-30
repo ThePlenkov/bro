@@ -281,6 +281,31 @@ export interface FacadeOpts {
  *  the same for a later registerConnector. */
 const pickMemo = new Map<string, Connector>()
 
+/** Ambiguity warning policy — a non-default provider silently winning
+ *  (dir/remote claim) deserves a pin hint, as does a bare fallback when
+ *  NO provider declares a matcher. When a matchDir exists but none
+ *  claimed, registry-first is the designed default (specs: bare repo →
+ *  native), not ambiguity the user should be nagged about. */
+function warnIfAmbiguous(
+  kind: string,
+  providers: Connector[],
+  pick: Connector,
+  remoteMatched: boolean
+): void {
+  if (remoteMatched || providers.length <= 1) {
+    return
+  }
+  const designedDefault =
+    pick === providers[0] && providers.some((c) => c.matchDir !== undefined)
+  if (designedDefault) {
+    return
+  }
+  console.error(
+    `warning: ${providers.map((c) => c.name).join(', ')} all provide "${kind}" ` +
+      `— using ${pick.name}; set connectors.${kind} in bro.config.json`
+  )
+}
+
 /** The connector chosen to serve `kind` — shared by facade() and auth
  *  probing so both resolve through the same precedence. */
 function pickConnector<K extends keyof FacadeMap>(
@@ -290,40 +315,28 @@ function pickConnector<K extends keyof FacadeMap>(
 ): Connector {
   const providers = registry.filter((c) => typeof c[kind as keyof Connector] === 'function')
   const named = opts.connector ?? opts.prefer?.[kind]
-  let pick: Connector | undefined
   if (named !== undefined) {
-    pick = providers.find((c) => c.name === named)
+    const pick = providers.find((c) => c.name === named)
     if (!pick) {
       throw new Error(`connector "${named}" does not provide "${kind}"`)
     }
-  } else {
-    const url = remoteUrl(ctx.dir)
-    const key = `${kind}\0${ctx.dir}\0${url ?? ''}\0${registry.length}`
-    const memo = pickMemo.get(key)
-    if (memo !== undefined) {
-      return memo
-    }
-    const remote = url === undefined ? undefined : providers.find((c) => c.matchRemote?.(url))
-    // no remote claim → project-layout match (specs: .specify/, openspec/)
-    const dir = remote === undefined ? providers.find((c) => c.matchDir?.(ctx.dir)) : undefined
-    pick = remote ?? dir ?? providers[0]
-    if (!pick) {
-      throw new Error(`no connector provides "${kind}"`)
-    }
-    // Ambiguity worth warning on: a non-default provider silently won,
-    // or fallback order resolved a facade whose providers self-describe
-    // no matcher — when a matchDir exists and none claimed, the registry
-    // default IS the design (specs: bare repo → native), not ambiguity.
-    const designedDefault =
-      pick === providers[0] && providers.some((c) => c.matchDir !== undefined)
-    if (remote === undefined && providers.length > 1 && !designedDefault) {
-      console.error(
-        `warning: ${providers.map((c) => c.name).join(', ')} all provide "${kind}" ` +
-          `— using ${pick.name}; set connectors.${kind} in bro.config.json`
-      )
-    }
-    pickMemo.set(key, pick)
+    return pick
   }
+  const url = remoteUrl(ctx.dir)
+  const key = `${kind}\0${ctx.dir}\0${url ?? ''}\0${registry.length}`
+  const memo = pickMemo.get(key)
+  if (memo !== undefined) {
+    return memo
+  }
+  const remote = url === undefined ? undefined : providers.find((c) => c.matchRemote?.(url))
+  // no remote claim → project-layout match (specs: .specify/, openspec/)
+  const dir = remote === undefined ? providers.find((c) => c.matchDir?.(ctx.dir)) : undefined
+  const pick = remote ?? dir ?? providers[0]
+  if (!pick) {
+    throw new Error(`no connector provides "${kind}"`)
+  }
+  warnIfAmbiguous(kind, providers, pick, remote !== undefined)
+  pickMemo.set(key, pick)
   return pick
 }
 

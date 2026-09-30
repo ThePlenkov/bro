@@ -193,11 +193,11 @@ function cmdNew(dir: string, id: string | undefined, parent: string | undefined)
     process.exit(2)
   }
   if (!validBeadId(id)) {
-    console.error(`error: invalid bead id "${id}" — ids match [\\w.-]+ without '..'`)
+    console.error(String.raw`error: invalid bead id "${id}" — ids match [\w.-]+ without '..'`)
     process.exit(2)
   }
   if (parent !== undefined && !validBeadId(parent)) {
-    console.error(`error: invalid parent id "${parent}" — ids match [\\w.-]+ without '..'`)
+    console.error(String.raw`error: invalid parent id "${parent}" — ids match [\w.-]+ without '..'`)
     process.exit(2)
   }
   const spec = specs(dir)
@@ -271,7 +271,8 @@ function cmdTree(dir: string): void {
   }
   const walk = (parent: string | undefined, depth: number): void => {
     for (const n of byParent.get(parent) ?? []) {
-      console.log(`${'  '.repeat(depth)}${n.id}${n.path ? `  ${n.path}` : ''}`)
+      const path = n.path !== undefined ? `  ${n.path}` : ''
+      console.log(`${'  '.repeat(depth)}${n.id}${path}`)
       walk(n.id, depth + 1)
     }
   }
@@ -293,6 +294,14 @@ function cmdTree(dir: string): void {
   }
 }
 
+/** Object-or-empty for config merges — malformed sections (string where
+ *  an object was expected) must not spread chars into the patch. */
+function sectionObj(v: unknown): Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+    ? { ...(v as Record<string, unknown>) }
+    : {}
+}
+
 /** Config merge — write the detected tool + sdd.mode without clobbering
  *  unrelated sections the repo already set. `native` clears a stale
  *  connectors.specs override — init to native must actually resolve
@@ -305,9 +314,8 @@ function writeConfig(dir: string, patch: { sddMode: string; connector?: string }
   } catch {
     // absent or unreadable config — start fresh
   }
-  const sdd = { ...((cfg.sdd as Record<string, unknown>) ?? {}), mode: patch.sddMode }
-  cfg.sdd = sdd
-  const connectors = { ...((cfg.connectors as Record<string, unknown>) ?? {}) }
+  cfg.sdd = { ...sectionObj(cfg.sdd), mode: patch.sddMode }
+  const connectors = sectionObj(cfg.connectors)
   if (patch.connector === undefined || patch.connector === 'native') {
     delete connectors.specs
   } else {
@@ -322,43 +330,43 @@ function writeConfig(dir: string, patch: { sddMode: string; connector?: string }
   return path
 }
 
+/** Project-layout detection for `spec init` — the order is the claim
+ *  precedence the connectors use. */
+function detectSpecTool(dir: string): string {
+  if (existsSync(join(dir, '.specify'))) {
+    return 'speckit'
+  }
+  if (existsSync(join(dir, 'openspec'))) {
+    return 'openspec'
+  }
+  return 'native'
+}
+
+const SPEC_TOOLS = ['native', 'speckit', 'openspec', 'agent']
+
 function cmdInit(dir: string, tool: string | undefined): void {
-  const root = join(dir)
-  const detected =
-    tool ??
-    (existsSync(join(root, '.specify'))
-      ? 'speckit'
-      : existsSync(join(root, 'openspec'))
-        ? 'openspec'
-        : 'native')
-  const known = ['native', 'speckit', 'openspec', 'agent']
-  if (!known.includes(detected)) {
-    console.error(
-      `error: unknown spec tool "${detected}" — one of ${known.join(', ')}`
-    )
+  const detected = tool ?? detectSpecTool(dir)
+  if (!SPEC_TOOLS.includes(detected)) {
+    console.error(`error: unknown spec tool "${detected}" — one of ${SPEC_TOOLS.join(', ')}`)
     process.exit(2)
   }
   const cfgPath = writeConfig(dir, {
     sddMode: 'remind',
     connector: detected === 'native' ? undefined : detected,
   })
-  if (detected === 'native') {
-    const base = specDirAbs(dir, loadConfig(dir).sdd.dir)
-    if (base !== null && !existsSync(base)) {
-      try {
-        const path = specs(dir).scaffold?.('project', { title: 'spec of specs' })
-        if (path) {
-          console.log(`spec: wrote ${path}`)
-        }
-      } catch {
-        // scaffold failure is non-fatal — config still landed
+  const specDir = loadConfig(dir).sdd.dir
+  if (detected === 'native' && specDirAbs(dir, specDir) !== null && !existsSync(join(dir, specDir))) {
+    try {
+      const path = specs(dir).scaffold?.('project', { title: 'spec of specs' })
+      if (path) {
+        console.log(`spec: wrote ${path}`)
       }
+    } catch {
+      // scaffold failure is non-fatal — config still landed
     }
   }
-  console.log(
-    `spec init: ${detected} — sdd.mode=remind written to ${cfgPath}` +
-      (detected === 'agent' ? ' (policy-only: link specs via spec:)' : '')
-  )
+  const note = detected === 'agent' ? ' (policy-only: link specs via spec:)' : ''
+  console.log(`spec init: ${detected} — sdd.mode=remind written to ${cfgPath}${note}`)
 }
 
 const VALUE_FLAGS = new Set(['--parent', '--tool'])
