@@ -67,4 +67,14 @@ priority = 1
       assert.match(msg, /priority must be a positive integer/)
     }
   })
+
+  test('version pin: v1 accepted, newer/malformed rejected', () => {
+    const plan = parsePlan('version = 1\ntitle="r"')
+    assert.equal(plan.title, 'r')
+    assert.throws(
+      () => parsePlan('version = 2\ntitle="r"'),
+      /version: drill schema v2 is newer than this bro understands \(latest v1\)/
+    )
+    assert.throws(() => parsePlan('version = -1\ntitle="r"'), /version: must be a positive integer/)
+  })
 })

@@ -42,3 +42,28 @@ export function readPlanDoc(file: string): Record<string, unknown> {
 export function planKind(doc: Record<string, unknown>): string | undefined {
   return typeof doc.kind === 'string' ? doc.kind : undefined
 }
+
+/** The envelope's `version` gate — the schema the producer pinned must
+ *  be a positive integer this bro understands (`latest` = the kind's
+ *  PLAN_VERSION). Absent is fine: unversioned plans mean "whatever the
+ *  installed schema is". Routers and planSchema validators share this
+ *  so a pinned version fails the same way on both paths. */
+export function checkPlanVersion(
+  raw: unknown,
+  kind: string,
+  latest: number,
+  errors: string[]
+): void {
+  if (raw === undefined) {
+    return
+  }
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1) {
+    errors.push('version: must be a positive integer')
+    return
+  }
+  if (raw > latest) {
+    errors.push(
+      `version: ${kind} schema v${raw} is newer than this bro understands (latest v${latest})`
+    )
+  }
+}

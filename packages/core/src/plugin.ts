@@ -35,6 +35,9 @@ export interface BroPlugin {
   /** Plan validator — the plugin accepts TOML plans whose `kind` equals
    *  this plugin's name, routed by `bro run`. Pairs with runPlan. */
   planSchema?: PlanSchema<unknown>
+  /** The schema version planSchema speaks — the contract `version = N`
+   *  pins and `bro plan` advertises. Defaults to 1 when unset. */
+  planVersion?: number
   /** Executes a planSchema-validated plan — `bro run <file>` calls this. */
   runPlan?: (plan: unknown) => void | Promise<void>
   /** Not listed in usage — plumbing commands like `hooks`. */

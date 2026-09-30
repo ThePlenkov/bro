@@ -94,4 +94,16 @@ match = "([bad"`),
   it('a non-table doc is rejected', () => {
     assert.throws(() => parseNextPlan(['x'], 'test.toml'), /expected a TOML table/)
   })
+
+  it('version pin: v1 accepted, newer/malformed rejected', async () => {
+    assert.equal((await parse('kind = "next"\nversion = 1')).limit, 1)
+    await assert.rejects(
+      parse('kind = "next"\nversion = 2'),
+      /version: next schema v2 is newer than this bro understands \(latest v1\)/
+    )
+    await assert.rejects(
+      parse('kind = "next"\nversion = "1"'),
+      /version: must be a positive integer/
+    )
+  })
 })

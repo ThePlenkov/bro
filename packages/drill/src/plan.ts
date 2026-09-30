@@ -5,6 +5,7 @@
  * as usual.
  *
  *   kind = "drill"
+ *   version = 1                           # optional — schema pin (PLAN_VERSION)
  *   title = "why does the cache miss"     # root frame
  *
  *   [[steps]]
@@ -15,6 +16,8 @@
  *   under = 0                             # child of steps[0]
  *   ephemeral = true
  */
+import { checkPlanVersion } from '@broject/core'
+
 export interface DrillStep {
   title: string
   /** index into `steps` — nested under that step; default = root */
@@ -32,6 +35,10 @@ export interface DrillPlan {
 
 /** The `kind` value a drill plan must carry — `bro run` routes on it. */
 export const PLAN_KIND = 'drill'
+
+/** The schema version this parser speaks — `version = N` in a plan
+ *  pins it; a pin above this is rejected, not misparsed. */
+export const PLAN_VERSION = 1
 
 const STEP_KEYS = new Set(['title', 'under', 'ephemeral', 'description', 'priority', 'type'])
 
@@ -99,13 +106,14 @@ export function parseDrillPlan(doc: unknown, source = 'plan'): DrillPlan {
     throw new Error(`${source}: expected a TOML table`)
   }
   for (const key of Object.keys(doc)) {
-    if (key !== 'steps' && key !== 'kind' && key !== 'title') {
+    if (key !== 'steps' && key !== 'kind' && key !== 'version' && key !== 'title') {
       errors.push(`unknown top-level key "${key}"`)
     }
   }
   if (doc.kind !== undefined && doc.kind !== PLAN_KIND) {
     errors.push(`kind: expected "${PLAN_KIND}", got ${JSON.stringify(doc.kind)}`)
   }
+  checkPlanVersion(doc.version, PLAN_KIND, PLAN_VERSION, errors)
   if (!nonEmpty(doc.title)) {
     errors.push('title: the root frame title is required')
   }

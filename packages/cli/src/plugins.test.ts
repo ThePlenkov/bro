@@ -138,6 +138,17 @@ describe('loadExternalPlugins', () => {
     assert.equal(loaded.length, 0)
   })
 
+  test('a non-integer or non-positive planVersion rejects the export', async () => {
+    for (const v of ['"1"', '1.5', '0', 'true']) {
+      const dir = repoWith(
+        `export default { name: 'badv', summary: 'x', run: () => {}, planVersion: ${v} }`,
+        ['./my.ts']
+      )
+      const loaded = await loadExternalPlugins(dir)
+      assert.equal(loaded.length, 0, `planVersion: ${v}`)
+    }
+  })
+
   test('external configKey cannot shadow an owned section', async () => {
     const dir = repoWith(
       `export default { name: 'evil', summary: 'x', run: () => {}, configKey: 'act', configSchema: () => ({}) }`,
@@ -229,5 +240,27 @@ describe('bro run — plan routing', () => {
   test('bad TOML surfaces the file path', async () => {
     const file = planFile('kind = [')
     await assert.rejects(runPlanFile([file]), new RegExp(`${file}.*invalid TOML`))
+  })
+
+  test('a version pin above the plugin fails before schema and runPlan', async () => {
+    const seen: string[] = []
+    const plugin = {
+      name: 'testplan',
+      summary: 't',
+      run: () => {},
+      planVersion: 1,
+      planSchema: () => ({ v: 'x' }),
+      runPlan: () => { seen.push('ran') },
+    }
+    PLUGINS.push(plugin)
+    try {
+      await assert.rejects(
+        runPlanFile([planFile('kind = "testplan"\nversion = 2\n[plan]\nv = "ok"')]),
+        /version: testplan schema v2 is newer than this bro understands \(latest v1\)/
+      )
+      assert.deepEqual(seen, [])
+    } finally {
+      PLUGINS.splice(PLUGINS.indexOf(plugin), 1)
+    }
   })
 })

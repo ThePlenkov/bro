@@ -221,4 +221,17 @@ describe('inlineFormulaDoc', () => {
     })
     assert.ok('steps' in back.molecules[0]!)
   })
+
+  test('version pin: v1 accepted, newer/malformed rejected', () => {
+    const plan = parsePlan('version = 1\n[[molecules]]\ntitle = "x"\n[[molecules.steps]]\nid="a"\ntitle="a"')
+    assert.equal(plan.molecules.length, 1)
+    assert.throws(
+      () => parsePlan('version = 2\n[[molecules]]\nformula = "f"'),
+      /version: convoy schema v2 is newer than this bro understands \(latest v1\)/
+    )
+    assert.throws(
+      () => parsePlan('version = 1.5\n[[molecules]]\nformula = "f"'),
+      /version: must be a positive integer/
+    )
+  })
 })

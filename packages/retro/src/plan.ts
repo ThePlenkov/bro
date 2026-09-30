@@ -4,6 +4,7 @@
  * validates it and fans it out into beads deterministically.
  */
 import { parse } from 'smol-toml'
+import { checkPlanVersion } from '@broject/core'
 import { ACTION_SINKS, RETRO_SCOPES } from './types.ts'
 import type { ActionSink, RetroAction, RetroPlan, RetroScope } from './types.ts'
 
@@ -118,6 +119,10 @@ function parseActions(rawActions: unknown, errors: string[]): RetroAction[] {
  * `bro run <file>` route the plan to this plugin. */
 export const PLAN_KIND = 'retrospect'
 
+/** The schema version this parser speaks — `version = N` in a plan
+ *  pins it; a pin above this is rejected, not misparsed. */
+export const PLAN_VERSION = 1
+
 /** Validate an already-parsed plan document — the plugin planSchema.
  *  Throws one error listing every problem — the agent fixes the file
  *  once instead of iterating on single failures. */
@@ -126,7 +131,7 @@ export function parsePlanDoc(doc: unknown, source = 'plan'): RetroPlan {
   if (isRecord(doc)) {
     // a misspelled `actions`/`retro` key must not silently drop work
     for (const key of Object.keys(doc)) {
-      if (key !== 'retro' && key !== 'actions' && key !== 'kind') {
+      if (key !== 'retro' && key !== 'actions' && key !== 'kind' && key !== 'version') {
         errors.push(`unknown top-level key "${key}"`)
       }
     }
@@ -135,6 +140,7 @@ export function parsePlanDoc(doc: unknown, source = 'plan'): RetroPlan {
     if (doc.kind !== undefined && doc.kind !== PLAN_KIND) {
       errors.push(`kind: expected "${PLAN_KIND}", got ${JSON.stringify(doc.kind)}`)
     }
+    checkPlanVersion(doc.version, PLAN_KIND, PLAN_VERSION, errors)
   }
   const retro = isRecord(doc) ? doc.retro : undefined
   if (!isRecord(retro)) {
@@ -169,6 +175,7 @@ export const PLAN_SCHEMA = `# retrospection plan — written by the agent, execu
 #   bro retrospect record retro.toml
 
 kind = "retrospect"  # plan envelope — \`bro run\` routes on it
+version = 1          # optional schema pin — \`bro plan\` lists what this bro understands
 
 [retro]
 what = ""            # required — what went wrong, one line

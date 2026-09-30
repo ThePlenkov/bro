@@ -47,7 +47,12 @@ export { classifyThread, collectPr, collectThreads } from './collect.ts'
 export type { CollectPrResult } from './collect.ts'
 export { checkBeads, listDebtBeads, syncDebtToBeads } from './beads.ts'
 export type { BeadRef, SyncResult } from './beads.ts'
-export { DEBT_ROW_STATUSES, parseDebtPlan, PLAN_KIND as DEBT_PLAN_KIND } from './plan.ts'
+export {
+  DEBT_ROW_STATUSES,
+  parseDebtPlan,
+  PLAN_KIND as DEBT_PLAN_KIND,
+  PLAN_VERSION as DEBT_PLAN_VERSION,
+} from './plan.ts'
 export type { DebtPlan, DebtVerdict } from './plan.ts'
 export { applyDebtVerdicts } from './store.ts'
 export type { DebtVerdictInput } from './store.ts'

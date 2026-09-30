@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parsePlan } from './plan.ts'
+import { parsePlan, parsePlanDoc } from './plan.ts'
+import { parse } from 'smol-toml'
 
 const VALID = `
 [retro]
@@ -113,5 +114,18 @@ sink = "backlog"
     assert.equal(parsePlan(ok).what, 'x')
     const bad = 'kind="drill"\n[retro]\nwhat="x"\nwhy="y"\n'
     assert.throws(() => parsePlan(bad), /kind: expected "retrospect", got "drill"/)
+  })
+
+  test('version pin: v1 accepted, newer/malformed rejected', () => {
+    const ok = 'version=1\n[retro]\nwhat="x"\nwhy="y"\n'
+    assert.equal(parsePlan(ok).what, 'x')
+    assert.throws(
+      () => parsePlanDoc(parse('version=2\n[retro]\nwhat="x"\nwhy="y"\n')),
+      /version: retrospect schema v2 is newer than this bro understands \(latest v1\)/
+    )
+    assert.throws(
+      () => parsePlan('version="1"\n[retro]\nwhat="x"\nwhy="y"\n'),
+      /version: must be a positive integer/
+    )
   })
 })

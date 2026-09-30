@@ -4,6 +4,7 @@
  * applies them to the PR in one pass.
  *
  *   kind = "act"
+ *   version = 1                # optional — schema pin (PLAN_VERSION)
  *   pr = 66                    # optional — context for defer beads
  *   [[threads]]
  *   thread_id = "PRRT_..."
@@ -11,6 +12,8 @@
  *   comment = "why"            # required for reply; optional elsewhere
  *   title = "bead title"       # required for defer — the debt bead title
  */
+import { checkPlanVersion } from '@broject/core'
+
 export const ACT_ACTIONS = ['resolve', 'reply', 'defer'] as const
 export type ActAction = (typeof ACT_ACTIONS)[number]
 
@@ -29,6 +32,10 @@ export interface ActPlan {
 /** The `kind` value an act plan must carry when it has one — lets
  * `bro run <file>` route the plan to this plugin. */
 export const PLAN_KIND = 'act'
+
+/** The schema version this parser speaks — `version = N` in a plan
+ *  pins it; a pin above this is rejected, not misparsed. */
+export const PLAN_VERSION = 1
 
 const THREAD_KEYS = new Set(['thread_id', 'action', 'comment', 'title'])
 
@@ -90,13 +97,14 @@ export function parseActPlan(doc: unknown, source = 'plan'): ActPlan {
     throw new Error(`${source}: expected a TOML table`)
   }
   for (const key of Object.keys(doc)) {
-    if (key !== 'threads' && key !== 'kind' && key !== 'pr') {
+    if (key !== 'threads' && key !== 'kind' && key !== 'version' && key !== 'pr') {
       errors.push(`unknown top-level key "${key}"`)
     }
   }
   if (doc.kind !== undefined && doc.kind !== PLAN_KIND) {
     errors.push(`kind: expected "${PLAN_KIND}", got ${JSON.stringify(doc.kind)}`)
   }
+  checkPlanVersion(doc.version, PLAN_KIND, PLAN_VERSION, errors)
   if (
     doc.pr !== undefined &&
     (typeof doc.pr !== 'number' || !Number.isInteger(doc.pr) || doc.pr <= 0)

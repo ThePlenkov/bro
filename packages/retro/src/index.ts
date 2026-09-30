@@ -1,5 +1,11 @@
 export { bd, bdJson, checkBeads, refKind } from '@broject/core'
-export { parsePlan, parsePlanDoc, PLAN_KIND, PLAN_SCHEMA } from './plan.ts'
+export {
+  parsePlan,
+  parsePlanDoc,
+  PLAN_KIND,
+  PLAN_SCHEMA,
+  PLAN_VERSION as RETRO_PLAN_VERSION,
+} from './plan.ts'
 export {
   captureWtf,
   listRetros,
