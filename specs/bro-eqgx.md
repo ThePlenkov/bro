@@ -31,8 +31,11 @@ collects `*.sarif` from `.sverka/artifacts` and runs the policy gate).
 **Binary resolution** (first hit wins):
 
 1. `check.bin` in bro.config (path or command name — escape hatch)
-2. `<root>/node_modules/.bin/sverka` walking up from the run root —
-   the repo's own pinned install wins (stack-health case)
+2. `<root>/node_modules` walking up from the run root — the repo's own
+   pinned install wins (stack-health case); the package entry
+   (`@sverka/cli/dist/bin.mjs`, spawned via `process.execPath`) is
+   preferred over `.bin` shims so Windows `.cmd` launchers never reach
+   `spawn`
 3. `sverka` on `PATH`
 4. the `@sverka/cli` bundled with `@broject/bro` (new runtime dep —
    `bro check` works in any repo, not just ones that installed sverka)

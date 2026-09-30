@@ -18,8 +18,8 @@
  * executor; usage errors exit 2.
  */
 import { spawnSync } from 'node:child_process'
-import { accessSync, existsSync } from 'node:fs'
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { accessSync, existsSync, statSync } from 'node:fs'
+import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { X_OK } from 'node:constants'
 import { flag } from './args.ts'
@@ -70,8 +70,13 @@ export interface SverkaBin {
   via?: string
 }
 
-function executableFile(p: string): boolean {
+/** A runnable regular file — existsSync alone lets a stale or
+ *  directory-valued `.bin` entry win resolution. */
+function runnableFile(p: string): boolean {
   try {
+    if (!statSync(p).isFile()) {
+      return false
+    }
     accessSync(p, X_OK)
     return true
   } catch {
@@ -79,14 +84,28 @@ function executableFile(p: string): boolean {
   }
 }
 
-/** `<dir>/node_modules/.bin/sverka` walking up — the repo's own pinned
- *  install wins over PATH and the bundled copy. */
-function repoLocalBin(root: string): string | undefined {
+const IS_WIN = process.platform === 'win32'
+/** npm bin shims are extensionless shell scripts on POSIX and `.cmd`
+ *  launchers on Windows; `.exe` covers non-npm installs. */
+const PATH_NAMES = IS_WIN ? ['sverka.exe', 'sverka.cmd', 'sverka.bat', 'sverka'] : ['sverka']
+
+/** `<dir>/node_modules` sverka walking up — the repo's own pinned
+ *  install wins over PATH and the bundled copy. The package entry
+ *  (`@sverka/cli/dist/bin.mjs`) is preferred: it spawns through
+ *  `process.execPath`, sidestepping shim/shebang/.cmd exec rules. */
+function repoLocalBin(root: string): SverkaBin | undefined {
   let dir = resolve(root)
   for (;;) {
-    const p = join(dir, 'node_modules', '.bin', 'sverka')
-    if (existsSync(p)) {
-      return p
+    const nm = join(dir, 'node_modules')
+    const entry = join(nm, '@sverka', 'cli', 'dist', 'bin.mjs')
+    if (existsSync(entry)) {
+      return { file: process.execPath, args: [entry], via: 'repo' }
+    }
+    for (const name of PATH_NAMES) {
+      const shim = join(nm, '.bin', name)
+      if (runnableFile(shim)) {
+        return { file: shim, args: [], via: 'repo' }
+      }
     }
     const parent = dirname(dir)
     if (parent === dir) {
@@ -96,14 +115,16 @@ function repoLocalBin(root: string): string | undefined {
   }
 }
 
-function pathBin(): string | undefined {
-  for (const dir of (process.env.PATH ?? '').split(':')) {
+function pathBin(): SverkaBin | undefined {
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
     if (dir === '') {
       continue
     }
-    const p = join(dir, 'sverka')
-    if (executableFile(p)) {
-      return p
+    for (const name of PATH_NAMES) {
+      const p = join(dir, name)
+      if (runnableFile(p)) {
+        return { file: p, args: [], via: 'PATH' }
+      }
     }
   }
   return undefined
@@ -144,11 +165,11 @@ export function resolveSverka(root: string, cfgBin?: string): SverkaBin | null {
   }
   const local = repoLocalBin(root)
   if (local !== undefined) {
-    return { file: local, args: [], via: 'repo' }
+    return local
   }
   const onPath = pathBin()
   if (onPath !== undefined) {
-    return { file: onPath, args: [], via: 'PATH' }
+    return onPath
   }
   const bundled = bundledBin()
   if (bundled !== undefined) {
@@ -217,8 +238,21 @@ function sverkaArgs(opts: {
   return args
 }
 
+/** `.cmd`/`.bat` shims (Windows npm bins, a `check.bin` pointing at one)
+ *  can't be spawned directly — route through the command interpreter. */
+function spawnTarget(bin: SverkaBin): { file: string; args: string[] } {
+  if (/\.(cmd|bat)$/i.test(bin.file)) {
+    return {
+      file: process.env.ComSpec ?? 'cmd.exe',
+      args: ['/d', '/s', '/c', bin.file, ...bin.args],
+    }
+  }
+  return bin
+}
+
 function spawnRun(bin: SverkaBin, root: string, args: string[]) {
-  return spawnSync(bin.file, [...bin.args, ...args], {
+  const target = spawnTarget(bin)
+  return spawnSync(target.file, [...target.args, ...args], {
     cwd: root,
     encoding: 'utf8',
     // step stdout/stderr ride inside the JSON payload — headroom for
@@ -228,14 +262,16 @@ function spawnRun(bin: SverkaBin, root: string, args: string[]) {
   })
 }
 
-/** Execute sverka and normalize to a CheckReport. Returns null when the
- *  output can't be parsed (spawn failure details on err). */
+/** Execute sverka and normalize to a CheckReport. `data` is sverka's raw
+ *  payload — the `--json` output passes it through verbatim (planId and
+ *  future fields included); `report` is the normalized text-render view.
+ *  Neither is set when the output can't be parsed (details on err). */
 export function runCheck(
   bin: SverkaBin,
   root: string,
   opts: Parameters<typeof sverkaArgs>[0],
   err: (msg: string) => void = (m) => console.error(m)
-): { report?: CheckReport; exitCode: number } {
+): { report?: CheckReport; data?: SverkaRunData; exitCode: number } {
   let args = sverkaArgs(opts)
   let proc = spawnRun(bin, root, args)
   let parsed = proc.stdout ? parseRunJson(proc.stdout) : null
@@ -280,6 +316,7 @@ export function runCheck(
       ...(data.summary !== undefined ? { summary: data.summary } : {}),
       exitCode: code,
     },
+    data,
     exitCode: code,
   }
 }
@@ -375,10 +412,50 @@ Flags win over config. Exit code mirrors sverka's.`)
   process.exit(2)
 }
 
+/** Known argv surface — a typo'd flag (`--evalute`) silently doing
+ *  nothing is a usage error, not a pass. Value flags consume the next
+ *  token. */
+const VALUE_FLAGS = new Set(['--root', '--config', '--entry', '--executor', '--format'])
+const BOOL_FLAGS = new Set([
+  '--evaluate',
+  '--json',
+  '-q',
+  '--quiet',
+  '-v',
+  '--verbose',
+  '--help',
+  '-h',
+])
+
+function rejectUnknownArgs(argv: string[]): void {
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i]!
+    if (a.startsWith('-')) {
+      const name = a.includes('=') ? a.slice(0, a.indexOf('=')) : a
+      if (VALUE_FLAGS.has(name)) {
+        // skip the value token — unless it looks like another flag,
+        // which flag() itself reports as a missing value
+        if (!a.includes('=') && argv[i + 1] !== undefined && !argv[i + 1]!.startsWith('-')) {
+          i += 1
+        }
+        continue
+      }
+      if (!BOOL_FLAGS.has(a)) {
+        console.error(`error: unknown option ${JSON.stringify(a)} — see \`bro check --help\``)
+        process.exit(2)
+      }
+      continue
+    }
+    console.error(`error: unexpected argument ${JSON.stringify(a)} — see \`bro check --help\``)
+    process.exit(2)
+  }
+}
+
 export function runCheckCommand(argv: string[]): void {
   if (argv.includes('--help') || argv.includes('-h')) {
     usage()
   }
+  rejectUnknownArgs(argv)
   // config loads from the run root — `--root <other-repo>` picks up that
   // repo's "check" section (and its node_modules for binary resolution)
   const root = resolve(flag(argv, '--root') ?? process.cwd())
@@ -412,17 +489,22 @@ export function runCheckCommand(argv: string[]): void {
     process.exit(1)
   }
 
-  const { report, exitCode } = runCheck(bin, root, opts)
-  if (report === undefined) {
+  const { report, data, exitCode } = runCheck(bin, root, opts)
+  if (report === undefined || data === undefined) {
     process.exit(exitCode)
   }
   if (format === 'json') {
-    const { exitCode: _code, durationMs: _ms, ...data } = report
-    console.log(JSON.stringify({ command: 'check', data, durationMs: report.durationMs }))
+    // passthrough — sverka's `data` verbatim under bro's envelope name;
+    // a projection here would silently drop fields (planId, …)
+    console.log(
+      JSON.stringify({ command: 'check', data, durationMs: report.durationMs })
+    )
   } else {
     for (const line of renderText(report)) {
       console.log(line)
     }
   }
-  process.exit(exitCode)
+  // process.exitCode, not exit(): a piped --json report can still have
+  // buffered stdout writes pending — exiting would truncate it
+  process.exitCode = exitCode
 }

@@ -29,18 +29,25 @@ to `sverka run`.
 ## Config
 
 ```json
-"check": {
-  "bin": "sverka",             // optional — skip resolution
-  "config": "sverka.config.ts",
-  "entry": "default",
-  "executor": "host",
-  "evaluate": false
+{
+  "check": {
+    "bin": "sverka",
+    "config": "sverka.config.ts",
+    "entry": "default",
+    "executor": "host",
+    "evaluate": false
+  }
 }
 ```
 
-Flags win over config. Binary resolution: `check.bin` →
-`<root>/node_modules/.bin/sverka` (walks up — the repo's pinned install)
-→ `sverka` on PATH → the `@sverka/cli` bundled with `@broject/bro`.
+All fields optional: `bin` skips binary resolution entirely; `config`,
+`entry`, `executor` map to the same-named `sverka run` flags;
+`evaluate: true` turns on SARIF collection + the policy gate.
+
+Flags win over config. Binary resolution: `check.bin` → the repo's
+pinned install (`node_modules/@sverka/cli` then `.bin` shims, walking
+up from root) → `sverka` on PATH → the `@sverka/cli` bundled with
+`@broject/bro`.
 
 ## Policy
 
