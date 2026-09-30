@@ -24,6 +24,7 @@
  * beads are reported, never claimed. scope = "all" opts out in plans.
  */
 import { checkBeads, taskStore } from '@broject/core'
+import { flag } from './args.ts'
 import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts'
 import { requireGlobalStore } from '../doctypes/store.ts'
 
@@ -354,12 +355,11 @@ export async function runNextCommand(argv: string[]): Promise<void> {
   instead (\`bro store init --global\`) — same pipeline, different home.`)
     process.exit(0)
   }
-  const lIdx = argv.indexOf('--label')
-  const labels =
-    lIdx >= 0 && argv[lIdx + 1] !== undefined && !argv[lIdx + 1].startsWith('--')
-      ? argv[lIdx + 1].split(',').map((s) => s.trim()).filter((s) => s !== '')
-      : undefined
-  if (lIdx >= 0 && (labels === undefined || labels.length === 0)) {
+  // flag() rejects a repeated --label — scalar flags are not repeatable;
+  // a silent second declaration would pretend to widen the scope
+  const labelArg = argv.includes('--label') ? flag(argv, '--label') : undefined
+  const labels = labelArg?.split(',').map((s) => s.trim()).filter((s) => s !== '')
+  if (labelArg !== undefined && (labels === undefined || labels.length === 0)) {
     console.error('error: --label requires a comma-separated value, e.g. --label debt,ui')
     process.exit(2)
   }
