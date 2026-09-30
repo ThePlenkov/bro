@@ -148,6 +148,24 @@ describe('connectors', () => {
     })
   })
 
+  test('ambiguous providers warn once across auth + facade resolution', () => {
+    // beads + acme-tasks both serve 'tasks'; no remote match → the pick
+    // is memoized, so ensureAuth's probe and the command's facade() call
+    // print the ambiguity notice a single time
+    const errs: string[] = []
+    const orig = console.error
+    console.error = (m: unknown) => errs.push(String(m))
+    try {
+      withRepo(null, (dir) => {
+        facadeAuth('tasks', { dir })
+        facade('tasks', { dir })
+      })
+    } finally {
+      console.error = orig
+    }
+    assert.equal(errs.filter((l) => l.includes('all provide "tasks"')).length, 1)
+  })
+
   test('hook collectors are fail-open and return arrays', async () => {
     registerConnector({
       name: 'acme-wedged',
