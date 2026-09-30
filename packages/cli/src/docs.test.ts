@@ -145,6 +145,8 @@ describe('doc type collisions', () => {
     ['duplicate noun', { name: 'task', adapter: () => ({}) }, []],
     ['alias collision', { name: 'other', aliases: ['stores'], adapter: () => ({}) }, []],
     ['noun spelled like a verb', { name: 'list', adapter: () => ({}) }, []],
+    ['noun taken by a plugin command', { name: 'debt', adapter: () => ({}) }, []],
+    ['alias taken by a plugin command', { name: 'ledger', aliases: ['act'], adapter: () => ({}) }, []],
     ['overlapping idPrefix', { name: 'bx', idPrefix: 'bro-x-a-', adapter: () => ({}) }, [prefixed]],
   ]
 
