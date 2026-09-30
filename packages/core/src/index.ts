@@ -69,6 +69,7 @@ export {
   promptContextLines,
   registerConnector,
   reviewHost,
+  specStore,
   sessionStartLines,
   sessionTaskClaims,
   stopGateContributions,
@@ -82,6 +83,7 @@ export type {
   GateContribution,
   MaybePromise,
 } from './connectors.ts'
+export type { SpecNode, SpecStore } from './specs.ts'
 export { warnDeprecated } from './deprecation.ts'
 export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts'
 export type { PlanSchema } from './plan.ts'

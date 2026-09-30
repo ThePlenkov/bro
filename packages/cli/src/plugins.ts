@@ -43,6 +43,7 @@ import { runHooksCommand } from './commands/hooks.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runSetupCommand } from './commands/setup.ts'
 import { runSpecCommand, sddConnector } from './commands/spec.ts'
+import { SPEC_CONNECTORS } from './spec-connectors.ts'
 import { runSyncCommand } from './commands/sync.ts'
 import { runWorkCommand, workConnector } from './commands/work.ts'
 
@@ -57,6 +58,12 @@ registerConnector(workConnector)
 registerConnector(actConnector)
 registerConnector(debtConnector)
 registerConnector(sddConnector)
+// specs facade providers — registry order is detection precedence:
+// native first (its matchDir claims the configured sdd.dir), then
+// tool-layout matchers, agent last (explicit pick only, never detects)
+for (const c of SPEC_CONNECTORS) {
+  registerConnector(c)
+}
 
 export const PLUGINS: BroPlugin[] = [
   definePlugin({

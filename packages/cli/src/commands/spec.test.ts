@@ -3,16 +3,32 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { sddConnector, specState } from './spec.ts'
-import { registerConnector } from '@broject/core'
-import type { ConnectorCtx, TaskRow, TaskStore } from '@broject/core'
+import { hasSpecFile, SPEC_CONNECTORS } from '../spec-connectors.ts'
+import { loadConfig, registerConnector, specStore } from '@broject/core'
+import type { ConnectorCtx, SpecStore, TaskRow, TaskStore } from '@broject/core'
+
+for (const c of SPEC_CONNECTORS) {
+  registerConnector(c)
+}
+
+/** Native-shaped facade pinned to an explicit spec dir — the specState
+ *  unit tests need to aim hasSpec at dirs config never produces. */
+const nativeAt = (dir: string, specDir: string): SpecStore => ({
+  hasSpec: (id) => hasSpecFile(dir, specDir, id),
+  remedy: () => '',
+  policy: () => '',
+  tree: () => [],
+})
 
 /** Scripted bd — `list` cats $FAKE_BD_LIST_FILE (written by withRepo),
  *  `show`/`config` keep taskStore happy. */
@@ -81,27 +97,27 @@ describe('specState', () => {
 
   test('missing by default; file/link/exempt win', async () => {
     await withRepo({ config: {} }, (dir) => {
-      assert.equal(specState(row(), dir, 'specs'), 'missing')
+      assert.equal(specState(row(), nativeAt(dir, 'specs')), 'missing')
       // spec: link in the description counts
       assert.equal(
-        specState(row({ description: 'design: spec: docs/x.md' }), dir, 'specs'),
+        specState(row({ description: 'design: spec: docs/x.md' }), nativeAt(dir, 'specs')),
         'link'
       )
       // chores and trivial-labeled beads are exempt
-      assert.equal(specState(row({ issue_type: 'chore' }), dir, 'specs'), 'exempt')
-      assert.equal(specState(row({ labels: ['trivial'] }), dir, 'specs'), 'exempt')
+      assert.equal(specState(row({ issue_type: 'chore' }), nativeAt(dir, 'specs')), 'exempt')
+      assert.equal(specState(row({ labels: ['trivial'] }), nativeAt(dir, 'specs')), 'exempt')
       // an empty scaffold does not satisfy the rule
       mkdirSync(join(dir, 'specs'))
       writeFileSync(join(dir, 'specs', 'b1.md'), '  \n')
-      assert.equal(specState(row(), dir, 'specs'), 'missing')
+      assert.equal(specState(row(), nativeAt(dir, 'specs')), 'missing')
       writeFileSync(join(dir, 'specs', 'b1.md'), '# spec\n')
-      assert.equal(specState(row(), dir, 'specs'), 'spec')
+      assert.equal(specState(row(), nativeAt(dir, 'specs')), 'spec')
       // path-traversal ids never count as having a spec file
-      assert.equal(specState(row({ id: '../outside' }), dir, 'specs'), 'missing')
-      assert.equal(specState(row({ id: 'a/../b' }), dir, 'specs'), 'missing')
+      assert.equal(specState(row({ id: '../outside' }), nativeAt(dir, 'specs')), 'missing')
+      assert.equal(specState(row({ id: 'a/../b' }), nativeAt(dir, 'specs')), 'missing')
       // an escaping sdd.dir fails open to 'missing' too
-      assert.equal(specState(row(), dir, '../outside'), 'missing')
-      assert.equal(specState(row(), dir, '/tmp'), 'missing')
+      assert.equal(specState(row(), nativeAt(dir, '../outside')), 'missing')
+      assert.equal(specState(row(), nativeAt(dir, '/tmp')), 'missing')
     })
   })
 })
@@ -268,5 +284,108 @@ describe('sddConnector under a non-beads tasks connector', () => {
         assert.doesNotMatch(gate[0]!.block ?? '', /b2/)
       }
     )
+  })
+})
+
+describe('specs facade resolution', () => {
+  test('bare repo resolves to native', async () => {
+    await withRepo({ config: {} }, (dir) => {
+      assert.match(specStore(dir).policy(), /specs\/<id>\.md/)
+    })
+  })
+
+  test('.specify/ detects speckit', async () => {
+    await withRepo({ config: {} }, (dir) => {
+      mkdirSync(join(dir, '.specify'))
+      assert.match(specStore(dir).remedy('b1'), /speckit/)
+    })
+  })
+
+  test('openspec/ detects openspec and counts changes/<id>', async () => {
+    await withRepo({ config: {} }, (dir) => {
+      mkdirSync(join(dir, 'openspec', 'changes', 'b1'), { recursive: true })
+      writeFileSync(join(dir, 'openspec', 'changes', 'b1', 'proposal.md'), '# change\n')
+      const spec = specStore(dir)
+      assert.match(spec.policy(), /openspec\/changes/)
+      assert.equal(spec.hasSpec('b1'), true)
+      assert.equal(spec.hasSpec('b2'), false)
+    })
+  })
+
+  test('connectors.specs override wins over detection', async () => {
+    await withRepo({ config: { connectors: { specs: 'agent' } } }, (dir) => {
+      mkdirSync(join(dir, '.specify'))
+      const spec = specStore(dir, loadConfig(dir).connectors)
+      assert.match(spec.policy(), /write the design down first/)
+      assert.equal(spec.hasSpec('b1'), false)
+    })
+  })
+})
+
+describe('native spec tree', () => {
+  test('tree() links children via parent frontmatter', async () => {
+    await withRepo({ config: {} }, (dir) => {
+      mkdirSync(join(dir, 'specs'))
+      writeFileSync(join(dir, 'specs', 'epic.md'), '# epic\n')
+      writeFileSync(join(dir, 'specs', 'child.md'), '---\nparent: epic\n---\n# child\n')
+      writeFileSync(join(dir, 'specs', 'sib.md'), '# sib\n')
+      const nodes = specStore(dir).tree()
+      assert.deepEqual(
+        nodes.map((n) => [n.id, n.parent]),
+        [
+          ['child', 'epic'],
+          ['epic', undefined],
+          ['sib', undefined],
+        ]
+      )
+    })
+  })
+
+  test('scaffold() writes parent frontmatter and refuses overwrites', async () => {
+    await withRepo({ config: {} }, (dir) => {
+      const spec = specStore(dir)
+      const p = spec.scaffold!('b1', { title: 'thing', parent: 'epic' })
+      assert.match(readFileSync(p, 'utf8'), /^parent: epic$/m)
+      assert.throws(() => spec.scaffold!('b1', {}), /already exists/)
+    })
+  })
+})
+
+describe('bro spec init', () => {
+  test('bare repo: native mode + root spec-of-specs + config', async () => {
+    await withRepo({ config: {} }, async (dir) => {
+      rmSync(join(dir, 'bro.config.json'))
+      const cwd = process.cwd()
+      process.chdir(dir)
+      try {
+        const { runSpecCommand } = await import('./spec.ts')
+        runSpecCommand(['init'])
+      } finally {
+        process.chdir(cwd)
+      }
+      const cfg = JSON.parse(readFileSync(join(dir, 'bro.config.json'), 'utf8'))
+      assert.equal(cfg.sdd.mode, 'remind')
+      assert.equal(cfg.connectors?.specs, undefined)
+      assert.ok(readFileSync(join(dir, 'specs', 'project.md'), 'utf8').includes('spec of specs'))
+    })
+  })
+
+  test('.specify/ repo: speckit connector written to config', async () => {
+    await withRepo({ config: {} }, async (dir) => {
+      mkdirSync(join(dir, '.specify'))
+      rmSync(join(dir, 'bro.config.json'))
+      const cwd = process.cwd()
+      process.chdir(dir)
+      try {
+        const { runSpecCommand } = await import('./spec.ts')
+        runSpecCommand(['init'])
+      } finally {
+        process.chdir(cwd)
+      }
+      const cfg = JSON.parse(readFileSync(join(dir, 'bro.config.json'), 'utf8'))
+      assert.equal(cfg.connectors.specs, 'speckit')
+      assert.equal(cfg.sdd.mode, 'remind')
+      assert.ok(!existsSync(join(dir, 'specs', 'project.md')))
+    })
   })
 })
