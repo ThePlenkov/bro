@@ -141,11 +141,51 @@ describe('connectors', () => {
     })
   })
 
+  test('an origin change mid-process re-resolves the pick', () => {
+    registerConnector({
+      name: 'acme-remote2',
+      matchRemote: (url) => url.includes('acme2.example'),
+      tasks: fakeTasks('remote2'),
+    })
+    withRepo('git@github.com:o/r.git', (dir) => {
+      const first = facade('tasks', { dir }) as unknown as { tag?: string }
+      assert.notEqual(first.tag, 'remote2')
+      execFileSync('git', [
+        '-C',
+        dir,
+        'remote',
+        'set-url',
+        'origin',
+        'git@acme2.example:o/r.git',
+      ])
+      const second = facade('tasks', { dir }) as unknown as { tag: string }
+      assert.equal(second.tag, 'remote2')
+    })
+  })
+
   test('no remote → registry order still resolves', () => {
     withRepo(null, (dir) => {
       const store = facade('tasks', { dir })
       assert.equal(typeof store.list, 'function')
     })
+  })
+
+  test('ambiguous providers warn once across auth + facade resolution', () => {
+    // beads + acme-tasks both serve 'tasks'; no remote match → the pick
+    // is memoized, so ensureAuth's probe and the command's facade() call
+    // print the ambiguity notice a single time
+    const errs: string[] = []
+    const orig = console.error
+    console.error = (m: unknown) => errs.push(String(m))
+    try {
+      withRepo(null, (dir) => {
+        facadeAuth('tasks', { dir })
+        facade('tasks', { dir })
+      })
+    } finally {
+      console.error = orig
+    }
+    assert.equal(errs.filter((l) => l.includes('all provide "tasks"')).length, 1)
   })
 
   test('hook collectors are fail-open and return arrays', async () => {

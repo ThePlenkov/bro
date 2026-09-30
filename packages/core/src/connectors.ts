@@ -290,6 +290,14 @@ export interface FacadeOpts {
   prefer?: Record<string, string>
 }
 
+/** Auto-detect picks memoized per (kind, dir, remote URL, registry
+ *  shape) — a command resolves the same facade twice (auth gate, then
+ *  the facade itself); the memo keeps the ambiguity warning single.
+ *  The URL sits in the key so a mid-process `git remote set-url`
+ *  re-resolves instead of serving a stale pick; registry length does
+ *  the same for a later registerConnector. */
+const pickMemo = new Map<string, Connector>()
+
 /** The connector chosen to serve `kind` — shared by facade() and auth
  *  probing so both resolve through the same precedence. */
 function pickConnector<K extends keyof FacadeMap>(
@@ -307,6 +315,11 @@ function pickConnector<K extends keyof FacadeMap>(
     }
   } else {
     const url = remoteUrl(ctx.dir)
+    const key = `${kind}\0${ctx.dir}\0${url ?? ''}\0${registry.length}`
+    const memo = pickMemo.get(key)
+    if (memo !== undefined) {
+      return memo
+    }
     const remote = url === undefined ? undefined : providers.find((c) => c.matchRemote?.(url))
     pick = remote ?? providers[0]
     if (!pick) {
@@ -318,6 +331,7 @@ function pickConnector<K extends keyof FacadeMap>(
           `— using ${pick.name}; set connectors.${kind} in bro.config.json`
       )
     }
+    pickMemo.set(key, pick)
   }
   return pick
 }
