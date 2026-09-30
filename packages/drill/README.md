@@ -1,5 +1,7 @@
 # @broject/drill
 
+[![npm](https://img.shields.io/npm/v/@broject/drill)](https://www.npmjs.com/package/@broject/drill)
+
 Scoped descent frames behind `bro drill` — `drill down` opens a narrower
 investigation frame (materialized as a bead), `drill up` closes it with a
 mandatory result + prevention memo so a problem can't silently recur.

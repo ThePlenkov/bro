@@ -82,7 +82,18 @@ jobs:
             echo "tag v$v already exists"
           fi
           if ! gh release view "v$v" >/dev/null 2>&1; then
-            gh release create "v$v" --title "v$v" --generate-notes
+            # Release notes = the curated CHANGELOG.md section for this
+            # version (nx release wrote it); auto notes are the fallback.
+            awk -v ver="${v#v}" '
+              $0 ~ "^## " ver " " { inSec=1; print; next }
+              inSec && /^## / { exit }
+              inSec { print }
+            ' CHANGELOG.md > /tmp/relnotes.md || true
+            if [ -s /tmp/relnotes.md ]; then
+              gh release create "v$v" --title "v$v" --notes-file /tmp/relnotes.md
+            else
+              gh release create "v$v" --title "v$v" --generate-notes
+            fi
           fi
           # Dispatch on main so the *latest* publish.yml runs — the tag
           # only selects which ref gets checked out and published.

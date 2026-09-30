@@ -1,5 +1,7 @@
 # @broject/act
 
+[![npm](https://img.shields.io/npm/v/@broject/act)](https://www.npmjs.com/package/@broject/act)
+
 The open-PR review gate behind `bro act` — PR state (threads, checks,
 reviewers, merge slot), the exit-gate evaluation, wait-for-gate polling,
 and the act plan schema.

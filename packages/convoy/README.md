@@ -1,5 +1,7 @@
 # @broject/convoy
 
+[![npm](https://img.shields.io/npm/v/@broject/convoy)](https://www.npmjs.com/package/@broject/convoy)
+
 The molecule runner behind `bro convoy` — pours a beads formula into a
 runnable molecule (a DAG of steps) and schedules it inside the agent:
 `convoy next` emits the next step, `convoy done` advances the graph.

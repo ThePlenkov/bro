@@ -1,5 +1,7 @@
 # @broject/gitlab
 
+[![npm](https://img.shields.io/npm/v/@broject/gitlab)](https://www.npmjs.com/package/@broject/gitlab)
+
 The GitLab connector for `bro` — the `reviews` facade (MR state, threads,
 checks, merge) implemented over the `glab` CLI. Registers like any
 connector: built-in today, but nothing GitLab-specific lives in core.

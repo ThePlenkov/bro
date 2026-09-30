@@ -1,5 +1,7 @@
 # @broject/core
 
+[![npm](https://img.shields.io/npm/v/@broject/core)](https://www.npmjs.com/package/@broject/core)
+
 Shared primitives every `bro` package builds on — `gh`/`git`/`bd`
 subprocess wrappers, config + TOML parsing, the plugin, doc and task-store
 surfaces, plan schemas.

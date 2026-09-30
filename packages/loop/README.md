@@ -1,5 +1,7 @@
 # @broject/loop
 
+[![npm](https://img.shields.io/npm/v/@broject/loop)](https://www.npmjs.com/package/@broject/loop)
+
 The autonomous backlog loop behind `bro loop` — claims each ready bead,
 spawns the configured agent in a fresh worktree, drives the `bro act`
 review gate, closes the bead, repeats.

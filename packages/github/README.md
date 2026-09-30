@@ -1,5 +1,7 @@
 # @broject/github
 
+[![npm](https://img.shields.io/npm/v/@broject/github)](https://www.npmjs.com/package/@broject/github)
+
 The GitHub connector for `bro` — the `reviews` facade (PR state, threads,
 checks, merge) implemented over the `gh` CLI. Registers like any
 connector: built-in today, but nothing GitHub-specific lives in core.

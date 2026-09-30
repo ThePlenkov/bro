@@ -1,5 +1,7 @@
 # @broject/retro
 
+[![npm](https://img.shields.io/npm/v/@broject/retro)](https://www.npmjs.com/package/@broject/retro)
+
 The retrospect engine behind `bro retrospect` — parses TOML retro plans
 (a root cause + prevention actions) and fans each action out to its sink:
 beads, skills, rules, or docs. Powers `bro wtf`.
