@@ -56,9 +56,13 @@ function withClaimRepo(
   writeFileSync(join(bin, 'bd'), FAKE_BD)
   chmodSync(join(bin, 'bd'), 0o755)
   writeFileSync(join(dir, 'list.json'), opts.list ?? '[]')
-  const prevPath = process.env.PATH
-  const prevList = process.env.FAKE_BD_LIST_FILE
-  const prevActor = process.env.BEADS_ACTOR
+  // snapshot → set → restore keeps probe env hermetic (PATH finds the
+  // scripted bd; BEADS_ACTOR pins the actor so git config doesn't leak in)
+  const saved: Record<string, string | undefined> = {
+    PATH: process.env.PATH,
+    FAKE_BD_LIST_FILE: process.env.FAKE_BD_LIST_FILE,
+    BEADS_ACTOR: process.env.BEADS_ACTOR,
+  }
   const run = async (): Promise<void> => {
     execFileSync('git', ['init', '-q', dir])
     if (opts.claims !== undefined) {
@@ -66,17 +70,19 @@ function withClaimRepo(
       mkdirSync(hooks, { recursive: true })
       writeFileSync(join(hooks, 's1.task'), ['2026-01-01', ...opts.claims].join('\n'))
     }
-    process.env.PATH = `${bin}:${prevPath}`
+    process.env.PATH = `${bin}:${saved.PATH}`
     process.env.FAKE_BD_LIST_FILE = join(dir, 'list.json')
     process.env.BEADS_ACTOR = 'test-agent'
     await fn(dir)
   }
   return run().finally(() => {
-    process.env.PATH = prevPath
-    if (prevList === undefined) delete process.env.FAKE_BD_LIST_FILE
-    else process.env.FAKE_BD_LIST_FILE = prevList
-    if (prevActor === undefined) delete process.env.BEADS_ACTOR
-    else process.env.BEADS_ACTOR = prevActor
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) {
+        delete process.env[k]
+      } else {
+        process.env[k] = v
+      }
+    }
     rmSync(dir, { recursive: true, force: true })
   })
 }
