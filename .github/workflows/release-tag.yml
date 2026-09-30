@@ -48,8 +48,11 @@ jobs:
           subject=$(git log -1 --pretty=%s)
           # A conventional merge commit ('Merge pull request...') puts
           # 'release: v*' on the second parent — the release branch tip.
+          # Manual follow-up commits can move the tip off the release
+          # subject, so search the second parent's ancestry for THIS
+          # version's release commit instead of inspecting the tip only.
           if ! release_subject "$subject"; then
-            subject=$(git log -1 --pretty=%s 'HEAD^2' 2>/dev/null || true)
+            subject=$(git log -1 --format=%s --grep="^release: v$v" 'HEAD^2' 2>/dev/null || true)
           fi
           if [ "$GITHUB_EVENT_NAME" = "push" ] && ! release_subject "$subject"; then
             echo "not a release merge ($subject) — nothing to do"
