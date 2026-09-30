@@ -167,7 +167,7 @@ interface ThreadPage {
       nodes: Array<{
         author?: { login?: string; __typename?: string }
         path?: string
-        line?: number
+        line?: number | null
         body?: string
         createdAt?: string
       }>
