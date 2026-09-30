@@ -1,3 +1,39 @@
+## 0.2.4 (2026-09-30)
+
+### 🚀 Features
+
+- **cli:** bro doctor — environment diagnostics command (bro-2vt) ([#148](https://github.com/ThePlenkov/bro/pull/148))
+- **core:** bd compat check + graceful jsonl degrade (bro-y1b) ([#151](https://github.com/ThePlenkov/bro/pull/151))
+- **core:** 0.x contract stability — changelog + deprecation seams (bro-7ix) ([#153](https://github.com/ThePlenkov/bro/pull/153))
+- **debt:** announce stealth .beads init — beads stays a default store (bro-0fc) ([#152](https://github.com/ThePlenkov/bro/pull/152))
+- **debt:** bro debt trend — burn-down over time (bro-55t) ([#157](https://github.com/ThePlenkov/bro/pull/157))
+- **gitlab:** second connector — ReviewFacade over glab (bro-00t) ([#149](https://github.com/ThePlenkov/bro/pull/149))
+- **next,loop:** declared label scope — loops can't bleed across the queue (bro-idk7) ([#167](https://github.com/ThePlenkov/bro/pull/167))
+- **plans:** versioned plan schemas + bro plan validate (bro-2u5) ([#150](https://github.com/ThePlenkov/bro/pull/150))
+- **setup:** @broject/bro-pack — capabilities ship as an npm pack ([#165](https://github.com/ThePlenkov/bro/pull/165))
+- **site:** /debt — bro's own debt dashboard, live from refs/bro/data ([#166](https://github.com/ThePlenkov/bro/pull/166))
+- **site:** /debt shows harvested findings, not only the status overlay ([#168](https://github.com/ThePlenkov/bro/pull/168))
+
+### 🩹 Fixes
+
+- debt batch — bd diagnostics, merge semantics, doc-dispatch namespace ([#102](https://github.com/ThePlenkov/bro/pull/102))
+- **ci,cli:** release-tag fallback searches ancestry; cleanup degrade-path tests (bro-p1sm, bro-ara7) ([#160](https://github.com/ThePlenkov/bro/pull/160))
+- **cli:** cleanup treats review-host auth as a warning, not a gate (bro-owg) ([#130](https://github.com/ThePlenkov/bro/pull/130))
+- **cli:** own-keys check for reserved doc nouns (bro-ff6) ([#154](https://github.com/ThePlenkov/bro/pull/154))
+- **cli:** memoize filtered doc types — one collision warning per process (bro-zpf) ([#155](https://github.com/ThePlenkov/bro/pull/155))
+- **cli:** reserve plugin command names in the doc-type guard (bro-e8o) ([#156](https://github.com/ThePlenkov/bro/pull/156))
+- **cli:** debt watch syncs the ledger to gitref per tick (bro-mtwa) ([#162](https://github.com/ThePlenkov/bro/pull/162))
+- **cli:** debt watch — fail-fast auth at startup, throw per tick ([#161](https://github.com/ThePlenkov/bro/pull/161))
+- **cli:** read-only debt commands no longer publish the ledger ([#163](https://github.com/ThePlenkov/bro/pull/163))
+- **cli:** flag() recognizes --name=value — a missed label scope was fail-open ([#171](https://github.com/ThePlenkov/bro/pull/171))
+- **cli:** drop argv.includes gates — --label=v never reached flag() ([#172](https://github.com/ThePlenkov/bro/pull/172))
+- **debt:** sweep security + review findings — axios override, ci permissions, --label repeat ([#170](https://github.com/ThePlenkov/bro/pull/170))
+
+### ❤️ Thank You
+
+- Devin @devin-ai-integration[bot]
+- Petr Plenkov @ThePlenkov
+
 ## 0.2.3 (2026-09-30)
 
 ### 🚀 Features
