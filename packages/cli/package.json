@@ -1,6 +1,6 @@
 {
   "name": "@broject/bro",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "bro — agent's sidekick CLI: review-debt pipeline, PR triage, fix loops",
   "type": "module",
   "bin": {
