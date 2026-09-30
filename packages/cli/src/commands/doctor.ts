@@ -33,17 +33,19 @@ const check = (
   hint?: string
 ): DoctorCheck => ({ name, status, detail, ...(hint ? { hint } : {}) })
 
-/** `--version` probe — the same PATH-is-the-contract lookup every bro
- *  shell-out uses. `missing` is true only on ENOENT: a binary that
- *  exists but can't spawn (EACCES) or times out is present-but-broken,
- *  and reporting it "not found" would send the user reinstalling a tool
- *  that's actually installed. */
-function probeBin(name: string): {
+interface BinProbe {
   found: boolean
+  /** true only on ENOENT — a binary that exists but can't spawn (EACCES)
+   *  or times out is present-but-broken; reporting it "not found" would
+   *  send the user reinstalling a tool that's actually installed */
   missing?: boolean
   version?: string
   err?: string
-} {
+}
+
+/** `--version` probe — the same PATH-is-the-contract lookup every bro
+ *  shell-out uses. */
+function probeBin(name: string): BinProbe {
   const p = spawnSync(name, ['--version'], { // NOSONAR — PATH lookup is the contract (same as gh/bd/git)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
@@ -56,13 +58,17 @@ function probeBin(name: string): {
   if (p.status !== 0) {
     return { found: false, err: (p.stderr ?? '').trim() || `exit ${p.status}` }
   }
-  const m = /(\d+\.\d+[\w.-]*)/.exec(`${p.stdout ?? ''} ${p.stderr ?? ''}`)
-  return { found: true, version: m?.[1] }
+  const m = /\d+(\.\d+)+/.exec(`${p.stdout ?? ''} ${p.stderr ?? ''}`)
+  return { found: true, version: m?.[0] }
 }
 
 /** Present-but-broken vs absent — a spawn failure is never "not found". */
-function binProblem(p: { missing?: boolean; err?: string }): string {
-  return p.missing === true ? 'not found' : `not usable${p.err ? ` (${p.err})` : ''}`
+function binProblem(p: BinProbe): string {
+  if (p.missing === true) {
+    return 'not found'
+  }
+  const err = p.err ? ` (${p.err})` : ''
+  return `not usable${err}`
 }
 
 /** Repo root for dir, or null outside a worktree. */
@@ -92,14 +98,15 @@ function checkNode(): DoctorCheck {
   // the real capability gate is type stripping (bro.config.ts loads via
   // createRequire), not the version number — same probe config.ts uses
   const ts = (process.features as { typescript?: unknown }).typescript
-  return ts
-    ? check('node', 'ok', `v${process.versions.node}`)
-    : check(
-        'node',
-        'warn',
-        `v${process.versions.node} — no native type stripping`,
-        'bro.config.ts needs Node ≥22.18 — bro.config.json still works'
-      )
+  if (ts) {
+    return check('node', 'ok', `v${process.versions.node}`)
+  }
+  return check(
+    'node',
+    'warn',
+    `v${process.versions.node} — no native type stripping`,
+    'bro.config.ts needs Node ≥22.18 — bro.config.json still works'
+  )
 }
 
 function checkGh(): DoctorCheck {
@@ -112,9 +119,10 @@ function checkGh(): DoctorCheck {
     encoding: 'utf8',
     timeout: 15_000,
   })
-  return auth.status === 0
-    ? check('gh', 'ok', `${gh.version ?? 'present'} authed`)
-    : check('gh', 'fail', `${gh.version ?? 'present'} not authenticated`, 'run `gh auth login`')
+  if (auth.status !== 0) {
+    return check('gh', 'fail', `${gh.version ?? 'present'} not authenticated`, 'run `gh auth login`')
+  }
+  return check('gh', 'ok', `${gh.version ?? 'present'} authed`)
 }
 
 /** Hooks replay run.sh's resolution order: local dist walking up from the
@@ -137,11 +145,11 @@ function checkHooks(dir: string): DoctorCheck {
     d = parent
   }
   if (probeBin('bro').found) {
+    // `bro hooks` with no event is a silent no-op — same probe run.sh runs
     const probe = spawnSync('bro', ['hooks'], { // NOSONAR — PATH lookup is the contract
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 10_000,
     })
-    // `bro hooks` with no event is a silent no-op — same probe run.sh runs
     if (probe.status === 0) {
       return check('hooks', 'ok', 'resolves via `bro` on PATH')
     }
@@ -174,48 +182,148 @@ function knownConfigKeys(): Set<string> {
   ])
 }
 
+/** One config file → verdict, or null when absent. Existence alone proves
+ *  nothing — a throwing .ts silently falls back to jsonl-only stores, so
+ *  the probe loads through the same readConfigFile path loadConfig uses. */
+function configFileVerdict(path: string, name: string): DoctorCheck | null {
+  const state = probeConfigFile(path)
+  if (state === null) {
+    return null
+  }
+  if (state === 'broken') {
+    return check(
+      'config',
+      'fail',
+      `${name} failed to load`,
+      'fix or remove it — a broken config silently falls back to jsonl-only stores'
+    )
+  }
+  if (name.endsWith('.ts')) {
+    return check('config', 'ok', `${name} loads (takes precedence over .json)`)
+  }
+  return jsonKeysVerdict(path, name)
+}
+
+function jsonKeysVerdict(path: string, name: string): DoctorCheck {
+  let raw: Record<string, unknown>
+  try {
+    raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+  } catch {
+    return check('config', 'ok', name) // probe already ok'd it — can't happen, stay honest anyway
+  }
+  const unknown = Object.keys(raw).filter((k) => !knownConfigKeys().has(k))
+  if (unknown.length === 0) {
+    return check('config', 'ok', name)
+  }
+  return check(
+    'config',
+    'warn',
+    `${name} — unknown keys: ${unknown.join(', ')}`,
+    'unknown sections silently no-op — check for typos'
+  )
+}
+
 /** Config-file probe: which file wins (loadConfig order — cwd .ts, cwd
- *  .json, main-root .ts, main-root .json), whether it LOADS (existence
- *  alone proves nothing — a throwing .ts silently falls back to
- *  jsonl-only), and whether the keys are known. */
+ *  .json, main-root .ts, main-root .json). */
 function checkConfig(dirs: string[]): DoctorCheck {
   for (const dir of dirs) {
     for (const name of ['bro.config.ts', 'bro.config.json']) {
-      const path = join(dir, name)
-      const state = probeConfigFile(path)
-      if (state === null) {
-        continue
+      const verdict = configFileVerdict(join(dir, name), name)
+      if (verdict !== null) {
+        return verdict
       }
-      if (state === 'broken') {
-        return check(
-          'config',
-          'fail',
-          `${name} failed to load`,
-          'fix or remove it — a broken config silently falls back to jsonl-only stores'
-        )
-      }
-      if (name.endsWith('.ts')) {
-        return check('config', 'ok', `${name} loads (takes precedence over .json)`)
-      }
-      // probe already ok'd the file — re-parse only to inspect keys
-      let raw: Record<string, unknown> = {}
-      try {
-        raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
-      } catch {
-        return check('config', 'ok', name)
-      }
-      const unknown = Object.keys(raw).filter((k) => !knownConfigKeys().has(k))
-      return unknown.length > 0
-        ? check(
-            'config',
-            'warn',
-            `${name} — unknown keys: ${unknown.join(', ')}`,
-            'unknown sections silently no-op — check for typos'
-          )
-        : check('config', 'ok', name)
     }
   }
   return check('config', 'ok', 'no bro.config — running on defaults')
+}
+
+/** bd group: presence (fail only when beads is an active store), Dolt-era
+ *  compat (`bd dolt` exists at all → the backend bro assumes), and store
+ *  readability when a store is live. */
+function bdChecks(
+  dir: string,
+  bd: BinProbe,
+  beadsDir: boolean,
+  beadsActive: boolean
+): DoctorCheck[] {
+  if (!bd.found) {
+    const fix = 'install beads (https://github.com/gastownhall/beads) or set "stores": ["jsonl"]'
+    return [
+      beadsActive
+        ? check('bd', 'fail', binProblem(bd), fix)
+        : check('bd', 'warn', binProblem(bd), 'beads store is off — nothing needs it'),
+    ]
+  }
+  const out: DoctorCheck[] = [check('bd', 'ok', bd.version ?? 'present')]
+  const dolt = bdTry(['dolt', 'remote', 'list'], 15_000, dir)
+  if (dolt.code !== 0) {
+    const err = dolt.err ? ` (${dolt.err})` : ''
+    out.push(
+      check('bd-backend', 'warn', '`bd dolt` failed', `bd predates the Dolt backend — upgrade beads${err}`)
+    )
+  } else {
+    out.push(check('bd-backend', 'ok', 'dolt remotes reachable'))
+  }
+  if (beadsDir) {
+    const list = bdTry(['list', '--json', '-n', '1'], 15_000, dir)
+    out.push(
+      list.code === 0
+        ? check('bd-store', 'ok', 'beads store readable')
+        : check('bd-store', 'fail', 'beads store present but `bd list` failed', list.err || 'inspect the store or re-run `bd init`')
+    )
+  } else if (beadsActive) {
+    out.push(check('bd-store', 'ok', 'no .beads — auto-inits stealth on first use'))
+  }
+  return out
+}
+
+/** Remote group: the git remote `bro sync` pushes to, and the beads Dolt
+ *  remote when a store is live (beads state is local-only without it). */
+function remoteChecks(
+  dir: string,
+  root: string | null,
+  syncRemote: string,
+  beadsDir: boolean,
+  bdFound: boolean
+): DoctorCheck[] {
+  if (root === null) {
+    return []
+  }
+  const remote = gitTry(['-C', dir, 'remote', 'get-url', syncRemote])
+  const out: DoctorCheck[] = [
+    remote.code === 0
+      ? check('git-remote', 'ok', `${syncRemote} → ${remote.out.trim()}`)
+      : check('git-remote', 'warn', `no "${syncRemote}" remote`, 'bro sync and beads replication stay local-only'),
+  ]
+  if (!beadsDir) {
+    return out
+  }
+  if (!bdFound) {
+    out.push(check('dolt-remote', 'skip', 'needs bd'))
+    return out
+  }
+  const remotes = bdTry(['dolt', 'remote', 'list'], 15_000, dir)
+  if (remotes.code !== 0) {
+    out.push(check('dolt-remote', 'skip', '`bd dolt remote list` failed'))
+    return out
+  }
+  const names = remotes.out
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l !== '')
+  if (names.length === 0) {
+    out.push(
+      check(
+        'dolt-remote',
+        'warn',
+        'none configured',
+        'beads state is local-only — `bd dolt remote add` inside .beads syncs it across machines'
+      )
+    )
+    return out
+  }
+  out.push(check('dolt-remote', 'ok', names.join(', ')))
+  return out
 }
 
 export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
@@ -227,87 +335,28 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
       ? check('git', 'ok', git.version ?? 'present')
       : check('git', 'fail', binProblem(git), 'every bro command shells out to git')
   )
+
   const root = repoRoot(dir)
   const cfg = loadBroConfig(dir)
   checks.push(
-    root
-      ? check('repo', 'ok', `worktree root ${root} · stores: ${cfg.stores.join(', ')}`)
-      : check('repo', 'warn', 'not inside a git worktree', 'worktree/branch/sync commands need a repo')
+    root === null
+      ? check('repo', 'warn', 'not inside a git worktree', 'worktree/branch/sync commands need a repo')
+      : check('repo', 'ok', `worktree root ${root} · stores: ${cfg.stores.join(', ')}`)
   )
-
   checks.push(checkGh())
 
-  // --- bd: presence, Dolt-era compat, store readability --------------------
   // a store is live when .beads exists at the root OR BEADS_DIR pins one
   // (the loop harness runs worktrees against a shared store that way)
+  const envDir = process.env.BEADS_DIR
   const beadsDir =
     (root !== null && isDir(join(root, '.beads'))) ||
-    (typeof process.env.BEADS_DIR === 'string' &&
-      process.env.BEADS_DIR !== '' &&
-      isDir(process.env.BEADS_DIR))
-  const beadsActive = cfg.stores.includes('beads')
+    (typeof envDir === 'string' && envDir !== '' && isDir(envDir))
   const bd = probeBin('bd')
-  if (!bd.found) {
-    checks.push(
-      beadsActive
-        ? check('bd', 'fail', binProblem(bd), 'install beads (https://github.com/gastownhall/beads) or set "stores": ["jsonl"]')
-        : check('bd', 'warn', binProblem(bd), 'beads store is off — nothing needs it')
-    )
-  } else {
-    checks.push(check('bd', 'ok', bd.version ?? 'present'))
-    // `bd dolt` existing at all proves the Dolt-era backend bro's beads
-    // integration assumes — an older bd fails the probe, which is the
-    // version-compat signal (pre-Dolt bd can't serve the store)
-    const dolt = bdTry(['dolt', 'remote', 'list'], 15_000, dir)
-    checks.push(
-      dolt.code === 0
-        ? check('bd-backend', 'ok', 'dolt remotes reachable')
-        : check('bd-backend', 'warn', '`bd dolt` failed', `bd predates the Dolt backend — upgrade beads${dolt.err ? ` (${dolt.err})` : ''}`)
-    )
-    if (beadsDir) {
-      const list = bdTry(['list', '--json', '-n', '1'], 15_000, dir)
-      checks.push(
-        list.code === 0
-          ? check('bd-store', 'ok', 'beads store readable')
-          : check('bd-store', 'fail', 'beads store present but `bd list` failed', list.err || 'inspect the store or re-run `bd init`')
-      )
-    } else if (beadsActive) {
-      checks.push(check('bd-store', 'ok', 'no .beads — auto-inits stealth on first use'))
-    }
-  }
+  checks.push(...bdChecks(dir, bd, beadsDir, cfg.stores.includes('beads')))
 
   checks.push(checkHooks(dir))
-  checks.push(
-    checkConfig([dir, root, mainRoot(dir)].filter((d): d is string => d !== null))
-  )
-
-  // --- remotes: git sync.remote + the beads dolt remote --------------------
-  if (root !== null) {
-    const remote = gitTry(['-C', dir, 'remote', 'get-url', cfg.sync.remote])
-    checks.push(
-      remote.code === 0
-        ? check('git-remote', 'ok', `${cfg.sync.remote} → ${remote.out.trim()}`)
-        : check('git-remote', 'warn', `no "${cfg.sync.remote}" remote`, 'bro sync and beads replication stay local-only')
-    )
-    if (beadsDir) {
-      if (!bd.found) {
-        checks.push(check('dolt-remote', 'skip', 'needs bd'))
-      } else {
-        const remotes = bdTry(['dolt', 'remote', 'list'], 15_000, dir)
-        const names = remotes.out
-          .split('\n')
-          .map((l) => l.trim())
-          .filter((l) => l !== '')
-        checks.push(
-          remotes.code !== 0
-            ? check('dolt-remote', 'skip', '`bd dolt remote list` failed')
-            : names.length > 0
-              ? check('dolt-remote', 'ok', names.join(', '))
-              : check('dolt-remote', 'warn', 'none configured', 'beads state is local-only — `bd dolt remote add` inside .beads syncs it across machines')
-        )
-      }
-    }
-  }
+  checks.push(checkConfig([dir, root, mainRoot(dir)].filter((d): d is string => d !== null)))
+  checks.push(...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found))
 
   return checks
 }
