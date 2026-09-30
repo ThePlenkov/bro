@@ -73,7 +73,12 @@ describe('github connector', () => {
     assert.equal(githubConnector.matchRemote?.('https://github.com/acme/widgets.git'), true)
     assert.equal(githubConnector.matchRemote?.('git@gitlab.com:acme/widgets.git'), false)
     assert.equal(githubConnector.matchRemote?.('git@evilgithub.com:acme/widgets.git'), false)
-    assert.equal(githubConnector.matchRemote?.('git@github.corp.internal:acme/w.git'), true)
+    assert.equal(githubConnector.matchRemote?.('git@api.github.com:acme/w.git'), true)
+    // right-edge lookalikes — a `github` label off the github.com edge is
+    // indistinguishable from phishing, so GHES goes through config instead
+    assert.equal(githubConnector.matchRemote?.('git@github.com.evil.com:acme/w.git'), false)
+    assert.equal(githubConnector.matchRemote?.('git@foo.github.attacker.tld:a/w.git'), false)
+    assert.equal(githubConnector.matchRemote?.('git@github.corp.internal:acme/w.git'), false)
   })
 
   test('parsePrRef extracts repo/pr from a GitHub pull URL only', () => {

@@ -10,12 +10,13 @@ export { githubReview }
 
 export const githubConnector: Connector = {
   name: 'github',
-  /** Label-boundary host match — github.com and GHES-style
-   *  `github.corp.com`, but not lookalikes (evilgithub.com). Arbitrary
-   *  enterprise hosts resolve via `connectors.reviews` config. */
+  /** github.com hosts only — the bare domain or a subdomain. A `github`
+   *  label anywhere else can't be told from a lookalike syntactically
+   *  (`github.corp.com` vs `github.com.evil.com`), so GHES-style hosts
+   *  resolve via `connectors.reviews` config. */
   matchRemote(url: string): boolean {
     const host = url.match(/^(?:https?:\/\/|git@)([^/:]+)/i)?.[1]?.toLowerCase() ?? ''
-    return host.split('.').includes('github')
+    return host === 'github.com' || host.endsWith('.github.com')
   },
   /** `gh auth status` — covers both "gh missing" (spawn failure →
    *  nonzero code) and "gh present but logged out". */
