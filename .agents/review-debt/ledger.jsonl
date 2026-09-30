@@ -59,6 +59,7 @@
 {"thread_id":"PRRT_kwDOUamqtM6nP2GA","status":"done","fix_pr":143,"fixed_at":"2026-09-30T15:31:43.206Z","notes":null}
 {"thread_id":"PRRT_kwDOUamqtM6npqiA","status":"done","fix_pr":170,"fixed_at":"2026-09-30T19:34:05.204Z","notes":"repeated --label now exits 2 via flag()"}
 {"thread_id":"PRRT_kwDOUamqtM6nrdj-","status":"done","fix_pr":171,"fixed_at":"2026-09-30T19:34:50.976Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6nrkWZ","status":"done","fix_pr":172,"fixed_at":"2026-09-30T19:41:14.203Z","notes":"includes() gates removed; flag() is sole presence+parse authority"}
 {"thread_id":"PRRT_kwDOUamqtM6nW9Bj","status":"done","fix_pr":159,"fixed_at":"2026-09-30T15:56:39.027Z","notes":null}
 {"thread_id":"PRRT_kwDOUamqtM6nW9Bl","status":"done","fix_pr":159,"fixed_at":"2026-09-30T15:56:38.630Z","notes":null}
 {"thread_id":"PRRT_kwDOUamqtM6nXszu","status":"done","fix_pr":160,"fixed_at":"2026-09-30T16:35:57.804Z","notes":"fixed in #160: ancestry grep + degrade-path tests"}
