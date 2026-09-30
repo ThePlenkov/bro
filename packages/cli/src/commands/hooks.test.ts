@@ -162,6 +162,12 @@ describe('classifySkillMutation', () => {
     assert.equal(skill('bro act wait --merge --cleanup'), 'act')
   })
 
+  test('debt next cites only when it claims', () => {
+    assert.equal(skill('bro debt next'), null)
+    assert.equal(skill('bro debt next --json'), null)
+    assert.equal(skill('bro debt next --claim'), 'debt')
+  })
+
   test('finds mutations later in a chained command', () => {
     assert.equal(skill('bro act status && bro act resolve --thread t'), 'act')
     assert.equal(skill('cd x && bro drill down "y"'), 'drill')

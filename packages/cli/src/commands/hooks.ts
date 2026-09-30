@@ -206,10 +206,17 @@ const BARE_READ_FLAGS: Record<string, RegExp> = {
   loop: /--dry-run\b/,
 }
 
+/** Verbs that mutate only under a flag — `act wait` reads until
+ *  --merge/--cleanup, `debt next` lists until --claim CAS-claims. */
+const FLAG_MUTATIONS: Record<string, Record<string, RegExp>> = {
+  act: { wait: /--(?:merge|cleanup)\b/ },
+  debt: { next: /--claim\b/ },
+}
+
 /** One `bro <plugin> <verb>` invocation → the cite it earns, or null for
  *  a read. Per-plugin quirks live here so the matchAll scan stays flat:
- *  `wtf` is bare-status vs arg-capture, `act wait` reads until
- *  --merge/--cleanup, bare mutations read only under a listed flag. */
+ *  `wtf` is bare-status vs arg-capture, flag-verbs read unless their
+ *  mutation flag is present, bare mutations read only under a listed flag. */
 function mutationCite(
   plugin: string,
   verb: string | undefined,
@@ -225,14 +232,8 @@ function mutationCite(
   }
   const verbs = MUTATION_VERBS[plugin]
   if (verbs) {
-    // `act wait` is a read that becomes a mutation with --merge/--cleanup;
-    // `debt next` reads the queue but --claim CAS-claims the top finding
-    const hit =
-      plugin === 'act' && verb === 'wait'
-        ? /--(?:merge|cleanup)\b/.test(rest)
-        : plugin === 'debt' && verb === 'next'
-          ? /--claim\b/.test(rest)
-          : verb !== undefined && verbs.has(verb)
+    const flagRe = FLAG_MUTATIONS[plugin]?.[verb ?? '']
+    const hit = flagRe ? flagRe.test(rest) : verb !== undefined && verbs.has(verb)
     return hit ? cite : null
   }
   return BARE_MUTATIONS.has(plugin) && !BARE_READ_FLAGS[plugin]?.test(rest)
