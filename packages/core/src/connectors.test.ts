@@ -141,6 +141,28 @@ describe('connectors', () => {
     })
   })
 
+  test('an origin change mid-process re-resolves the pick', () => {
+    registerConnector({
+      name: 'acme-remote2',
+      matchRemote: (url) => url.includes('acme2.example'),
+      tasks: fakeTasks('remote2'),
+    })
+    withRepo('git@github.com:o/r.git', (dir) => {
+      const first = facade('tasks', { dir }) as unknown as { tag?: string }
+      assert.notEqual(first.tag, 'remote2')
+      execFileSync('git', [
+        '-C',
+        dir,
+        'remote',
+        'set-url',
+        'origin',
+        'git@acme2.example:o/r.git',
+      ])
+      const second = facade('tasks', { dir }) as unknown as { tag: string }
+      assert.equal(second.tag, 'remote2')
+    })
+  })
+
   test('no remote → registry order still resolves', () => {
     withRepo(null, (dir) => {
       const store = facade('tasks', { dir })
