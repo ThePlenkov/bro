@@ -40,6 +40,7 @@ import {
   type TaskStore,
 } from '@broject/core'
 import { specDirAbs, validBeadId } from '../spec-connectors.ts'
+import { flag, positionals } from './args.ts'
 
 export type SpecState = 'spec' | 'link' | 'exempt' | 'missing'
 
@@ -70,10 +71,21 @@ function tasks(dir: string): TaskStore {
   return facade('tasks', { dir }, { prefer: loadConfig(dir).connectors })
 }
 
-/** The project's spec facade — resolution failures degrade to agent
- *  mode: policy text only, never a crashed hook. */
+/** The project's spec facade — a bad `connectors.specs` name (typo'd or
+ *  uninstalled plugin) must never break a hook or a coverage run:
+ *  degrade to agent-style policy text instead of throwing. */
 function specs(dir: string): SpecStore {
-  return specStore(dir, loadConfig(dir).connectors)
+  try {
+    return specStore(dir, loadConfig(dir).connectors)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return {
+      hasSpec: () => false,
+      remedy: () => `fix connectors.specs (${msg}) or add a spec: link`,
+      policy: () => `spec before code — specs facade unavailable: ${msg}`,
+      tree: () => [],
+    }
+  }
 }
 
 /** This session's claimed beads that lack a spec — the nudge scope is
@@ -282,7 +294,9 @@ function cmdTree(dir: string): void {
 }
 
 /** Config merge — write the detected tool + sdd.mode without clobbering
- *  unrelated sections the repo already set. */
+ *  unrelated sections the repo already set. `native` clears a stale
+ *  connectors.specs override — init to native must actually resolve
+ *  native, not leave a prior pick in force. */
 function writeConfig(dir: string, patch: { sddMode: string; connector?: string }): string {
   const path = join(dir, 'bro.config.json')
   let cfg: Record<string, unknown> = {}
@@ -293,9 +307,15 @@ function writeConfig(dir: string, patch: { sddMode: string; connector?: string }
   }
   const sdd = { ...((cfg.sdd as Record<string, unknown>) ?? {}), mode: patch.sddMode }
   cfg.sdd = sdd
-  if (patch.connector !== undefined && patch.connector !== 'native') {
-    const connectors = { ...((cfg.connectors as Record<string, unknown>) ?? {}) }
+  const connectors = { ...((cfg.connectors as Record<string, unknown>) ?? {}) }
+  if (patch.connector === undefined || patch.connector === 'native') {
+    delete connectors.specs
+  } else {
     connectors.specs = patch.connector
+  }
+  if (Object.keys(connectors).length === 0) {
+    delete cfg.connectors
+  } else {
     cfg.connectors = connectors
   }
   writeFileSync(path, `${JSON.stringify(cfg, null, 2)}\n`)
@@ -341,19 +361,15 @@ function cmdInit(dir: string, tool: string | undefined): void {
   )
 }
 
+const VALUE_FLAGS = new Set(['--parent', '--tool'])
+
 export function runSpecCommand(argv: string[]): void {
   const dir = process.cwd()
   const { mode } = loadConfig(dir).sdd
   const [sub, ...rest] = argv
-  const positional = rest.filter((a) => !a.startsWith('-'))
+  const positional = positionals(rest, VALUE_FLAGS)
   if (sub === 'new') {
-    const p = rest.indexOf('--parent')
-    const parent = p === -1 ? undefined : rest[p + 1]
-    if (p !== -1 && (parent === undefined || parent.startsWith('-'))) {
-      console.error('error: --parent needs a bead id — `bro spec new <id> --parent <epic>`')
-      process.exit(2)
-    }
-    cmdNew(dir, positional[0], parent)
+    cmdNew(dir, positional[0], flag(rest, '--parent'))
     return
   }
   if (sub === 'check' || sub === undefined) {
@@ -368,8 +384,7 @@ export function runSpecCommand(argv: string[]): void {
     return
   }
   if (sub === 'init') {
-    const t = rest.indexOf('--tool')
-    cmdInit(dir, t === -1 ? undefined : rest[t + 1])
+    cmdInit(dir, flag(rest, '--tool'))
     return
   }
   usage()

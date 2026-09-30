@@ -11,7 +11,7 @@
  * so every tool's hasSpec only answers "does this tool see a file for
  * this id".
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { basename, join, resolve, sep } from 'node:path'
 import {
   gitTry,
@@ -36,11 +36,21 @@ export function validBeadId(id: string): boolean {
 
 /** The configured spec dir must stay inside the checkout — an absolute
  *  or escaping `sdd.dir` returns null (probes fail open; commands
- *  report it as a config error). */
+ *  report it as a config error). An existing dir is realpath'd too: a
+ *  repo-local symlink pointing outside would otherwise let `spec new`
+ *  write past the checkout. */
 export function specDirAbs(dir: string, specDir: string): string | null {
   const root = resolve(repoRoot(dir))
   const abs = resolve(root, specDir)
-  return abs === root || abs.startsWith(root + sep) ? abs : null
+  if (abs !== root && !abs.startsWith(root + sep)) {
+    return null
+  }
+  try {
+    const real = realpathSync(abs)
+    return real === root || real.startsWith(root + sep) ? abs : null
+  } catch {
+    return abs // not yet created — the lexical check already held
+  }
 }
 
 function specFilePath(dir: string, specDir: string, id: string): string | null {
@@ -84,7 +94,14 @@ function scaffoldBody(id: string, title: string, parent?: string): string {
 
 export const nativeSpecConnector: Connector = {
   name: 'native',
+  // native defers to a recognized tool layout — a speckit repo carries
+  // both `.specify/` and a `specs/` dir; sdd.dir existing must not outbid
+  // the tool that owns it. Bare repos still fall to native via order.
   matchDir: (dir) => {
+    const root = repoRoot(dir)
+    if (existsSync(join(root, '.specify')) || existsSync(join(root, 'openspec'))) {
+      return false
+    }
     const base = specDirAbs(dir, loadConfig(dir).sdd.dir)
     return base !== null && existsSync(base)
   },
@@ -149,7 +166,11 @@ export const speckitConnector: Connector = {
       }
       try {
         for (const d of readdirSync(featuresDir)) {
-          if (d.includes(id) && existsSync(join(featuresDir, d, 'spec.md'))) {
+          // exact or -<id> suffix: `b10` must not satisfy `b1`
+          if (
+            (d === id || d.endsWith(`-${id}`)) &&
+            existsSync(join(featuresDir, d, 'spec.md'))
+          ) {
             return { id, path: join('specs', d, 'spec.md') }
           }
         }

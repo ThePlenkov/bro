@@ -310,10 +310,13 @@ function pickConnector<K extends keyof FacadeMap>(
     if (!pick) {
       throw new Error(`no connector provides "${kind}"`)
     }
-    // ambiguity worth warning on = a non-default provider silently won
-    // (dir/remote match). Falling back to registry order is the design,
-    // not a choice the user should be nagged to pin.
-    if (pick !== providers[0] && providers.length > 1) {
+    // Ambiguity worth warning on: a non-default provider silently won,
+    // or fallback order resolved a facade whose providers self-describe
+    // no matcher — when a matchDir exists and none claimed, the registry
+    // default IS the design (specs: bare repo → native), not ambiguity.
+    const designedDefault =
+      pick === providers[0] && providers.some((c) => c.matchDir !== undefined)
+    if (remote === undefined && providers.length > 1 && !designedDefault) {
       console.error(
         `warning: ${providers.map((c) => c.name).join(', ')} all provide "${kind}" ` +
           `— using ${pick.name}; set connectors.${kind} in bro.config.json`
