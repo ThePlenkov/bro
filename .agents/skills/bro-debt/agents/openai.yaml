@@ -1,7 +1,0 @@
-interface:
-  display_name: "Bro Debt"
-  short_description: "Review-debt pipeline via the bro CLI — collect + status"
-  brand_color: "#B60205"
-  default_prompt: "Use $bro-debt to get started."
-policy:
-  allow_implicit_invocation: false
