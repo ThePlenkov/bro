@@ -126,7 +126,15 @@ export function runCleanupCommand(argv: string[]): void {
   const dryRun = argv.includes('--dry-run')
   const withRemote = argv.includes('--remote')
 
-  const prefer = loadBroConfig().connectors
+  // a broken config (external plugin schema whose fallback also throws)
+  // must not abort cleanup before the keep-all fallback — degrade to the
+  // default connector preference instead
+  let prefer: Record<string, string> | undefined
+  try {
+    prefer = loadBroConfig().connectors
+  } catch (err) {
+    console.error(`cleanup: bro config unreadable (${err instanceof Error ? err.message : String(err)}) — using default connectors`)
+  }
   // auth is a warning, not a gate — unauthenticated runs still get the
   // local plan, and the empty-map fallback below keeps every branch
   const auth = facadeAuth('reviews', { dir: process.cwd() }, { prefer })
