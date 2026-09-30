@@ -54,7 +54,11 @@ the agent full autonomy; scope it to machines/repos you trust.
 2. **Worktree** — sibling `<repo>--<bead-id>` on branch `loop/<id>` off
    `origin/main`; `loop.bootstrap` runs once per bead, before the agent.
 3. **Agent** — the work-order prompt is written to the worktree and the
-   agent runs synchronously with `loop.agentTimeoutMin` budget.
+   agent runs synchronously with `loop.agentTimeoutMin` budget. Its env
+   pins `BEADS_DIR` to the runner's store (`bd where`), so `bd` writes
+   inside the worktree reach the shared db regardless of version or a
+   tracked `.beads` copy — and an agent `bd close` is honored as a
+   verdict (`closed`), not reopened as a failure.
 4. **Gate** — the PR is discovered via `gh pr list --head`; `bro act`'s
    gate is polled (`mergeTimeoutMin`). Green → `bro act merge` (merge
    slot + `--match-head-commit` apply). Threads → the agent is respawned

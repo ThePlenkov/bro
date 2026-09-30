@@ -82,6 +82,9 @@ describe('prompts', () => {
     assert.match(p, /`loop\/bro-x1`/)
     assert.match(p, /gh pr create/)
     assert.match(p, /Do NOT merge/)
+    // the verdict channel: an agent close reaches the shared store
+    assert.match(p, /bd close "\$BRO_BEAD_ID"/)
+    assert.match(p, /BEADS_DIR/)
   })
 
   test('fix prompt carries the threads verbatim', () => {
