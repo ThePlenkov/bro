@@ -1,14 +1,18 @@
 /**
  * `bro setup` — wire bro into the current repo.
  *
- *   bro setup [--beads] [--skills] [--personality NAME]
+ *   bro setup [--beads] [--skills] [--pack [NAME]] [--personality NAME]
  *
  * Detects gh + bd, writes bro.config.json (never clobbers existing keys),
  * optionally runs `bd init --stealth`, and drops thin skill wrappers into
- * .agents/skills/.
+ * .agents/skills/. `--pack` installs the capability pack (skills/ +
+ * formulas/ trees) from an npm package — the repo's own node_modules
+ * first, then the CLI's — instead of the embedded snapshot.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { initBeadsStealth, PERSONALITIES, type BroConfig } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
@@ -107,6 +111,71 @@ function installFiles(root: string, files: Record<string, string>, what: string)
   return n
 }
 
+const DEFAULT_PACK = '@broject/bro-pack'
+
+/** Resolves `<spec>/package.json` — the repo's node_modules first (a
+ *  project-installed pack wins), then the CLI's own install tree so the
+ *  published binary finds its bundled dependency. */
+export function resolvePackDir(spec: string, cwd = process.cwd()): string | null {
+  for (const referrer of [join(cwd, 'noop.js'), fileURLToPath(import.meta.url)]) {
+    try {
+      return dirname(createRequire(referrer).resolve(`${spec}/package.json`))
+    } catch {
+      // specifier not visible from this referrer — try the next
+    }
+  }
+  return null
+}
+
+/** Reads every file under dir into {relpath: utf8} — the pack's skills/
+ *  and formulas/ trees are flat capability bundles, not modules.
+ *  Symlinks are not followed: a pack must be self-contained, and
+ *  lstat over stat keeps the walk inside the package tree. */
+export function readPackTree(dir: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  const walk = (d: string, prefix: string): void => {
+    for (const name of readdirSync(d)) {
+      const path = join(d, name)
+      const rel = prefix ? `${prefix}/${name}` : name
+      const st = lstatSync(path)
+      if (st.isSymbolicLink()) {
+        continue
+      }
+      if (st.isDirectory()) {
+        walk(path, rel)
+      } else {
+        out[rel] = readFileSync(path, 'utf8')
+      }
+    }
+  }
+  walk(dir, '')
+  return out
+}
+
+/** Validates a pack spec early — setup must fail on a missing/broken
+ *  pack BEFORE any mutation (beads init, config write, skill installs). */
+export function checkedPackDir(spec: string): string {
+  const dir = resolvePackDir(spec)
+  if (dir === null) {
+    console.error(`error: pack ${spec} not resolvable — install it or check the "pack" config key`)
+    process.exit(1)
+  }
+  if (!existsSync(join(dir, 'skills'))) {
+    console.error(`error: ${spec} resolved to ${dir} but has no skills/ tree — not a bro pack`)
+    process.exit(1)
+  }
+  return dir
+}
+
+function setupPack(dir: string, spec: string, wantsBeads: boolean): void {
+  console.error(`  pack: ${spec} → ${dir}`)
+  installFiles(join('.agents', 'skills'), readPackTree(join(dir, 'skills')), 'skill')
+  const formulasDir = join(dir, 'formulas')
+  if (wantsBeads && existsSync(formulasDir)) {
+    installFiles(join('.beads', 'formulas'), readPackTree(formulasDir), 'formula')
+  }
+}
+
 function setupBeads(): void {
   if (initBeadsStealth()) {
     console.error('  initialized .beads (stealth — nothing lands in git)')
@@ -119,6 +188,8 @@ function setupBeads(): void {
 interface SetupArgs {
   beads: boolean
   skills: boolean
+  /** --pack without a value means "the configured/default pack". */
+  pack: false | string
   personality?: string
 }
 
@@ -133,9 +204,16 @@ function parseSetupArgs(argv: string[]): SetupArgs {
     console.error(`error: --personality must be one of: ${PERSONALITIES.join(', ')}`)
     process.exit(2)
   }
+  const kIdx = argv.indexOf('--pack')
+  let pack: SetupArgs['pack'] = false
+  if (kIdx >= 0) {
+    const kVal = argv[kIdx + 1]
+    pack = kVal !== undefined && !kVal.startsWith('--') ? kVal : ''
+  }
   return {
     beads: argv.includes('--beads'),
     skills: argv.includes('--skills'),
+    pack,
     personality: pVal,
   }
 }
@@ -170,7 +248,7 @@ function checkPrereqs(needBeads: boolean): void {
 }
 
 export async function runSetupCommand(argv: string[]): Promise<void> {
-  const { beads, skills, personality } = parseSetupArgs(argv)
+  const { beads, skills, pack, personality } = parseSetupArgs(argv)
   // A malformed bro.config.json must fail BEFORE any mutation (bd init,
   // file installs) — readExistingConfig exits on a parse error; loadConfig
   // alone would silently fall back to defaults and setup would init beads
@@ -183,6 +261,9 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
   // beads is a default store — setup needs bd whenever the effective config
   // keeps it on, not only when --beads was passed explicitly.
   const wantsBeads = beads || loadBroConfig().stores.includes('beads')
+  // Validate the pack BEFORE beads init/config/skills mutate anything —
+  // a bad spec must fail setup on a clean tree, not a half-written one.
+  const packDir = pack === false ? null : checkedPackDir(pack || loadBroConfig().pack || DEFAULT_PACK)
   checkPrereqs(wantsBeads)
 
   // bd init + formulas land BEFORE the config write — if beads setup fails,
@@ -197,6 +278,10 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
     if (installFiles(join('.agents', 'skills'), SKILL_FILES, 'skill') === 0) {
       console.error('  skills already installed and current')
     }
+  }
+
+  if (packDir !== null) {
+    setupPack(packDir, pack || loadBroConfig().pack || DEFAULT_PACK, wantsBeads)
   }
 
   console.error('bro setup: done. Next: `bro debt prs` to see the queue, `bro debt collect` to sweep.')

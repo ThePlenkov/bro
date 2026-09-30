@@ -9,3 +9,5 @@ packages/cli/LICENSE
 packages/cli/.pack-stash.json
 .agents/review-debt/
 .agents/skills/
+packages/pack/skills/
+packages/pack/formulas/

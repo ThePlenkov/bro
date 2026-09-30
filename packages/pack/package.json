@@ -1,0 +1,48 @@
+{
+  "name": "@broject/bro-pack",
+  "version": "0.2.3",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "prepare": "node ../../scripts/gen-pack.ts",
+    "prepack": "node ../../scripts/gen-pack.ts",
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsdown": "^0.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "files": [
+    "dist",
+    "skills",
+    "formulas"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/pack"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "Default capability pack for bro — skills/ + formulas/ trees installed by `bro setup --pack`",
+  "keywords": [
+    "bro",
+    "pack",
+    "skills",
+    "agent"
+  ],
+  "homepage": "https://broject.dev/docs"
+}
