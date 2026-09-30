@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-09-30T08:35:19.978Z",
+  "open_count": 23,
+  "by_area": {
+    "packages/core": 5,
+    "packages/cli": 6,
+    "CONTRIBUTING.md": 1,
+    "packages/github": 9,
+    "scripts/pack-cli.ts": 1,
+    ".github/workflows": 1
+  },
+  "by_author": {
+    "kilo-code-bot": 21,
+    "codeant-ai": 2
+  },
+  "duplicate_fingerprints": [],
+  "oldest_open": "2026-09-29T16:37:18.126Z"
+}
