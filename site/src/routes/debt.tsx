@@ -81,6 +81,9 @@ function parseJsonl<T>(text: string): T[] {
 
 /** Newest harvest files under <sha> — the trees API lists paths, raw
  *  serves the content by sha (one repo, one dashboard: a handful of GETs). */
+const isHarvestBlob = (e: { path: string; type: string }) =>
+  e.type === 'blob' && e.path.startsWith(HARVEST_PREFIX) && e.path.endsWith('.jsonl')
+
 async function fetchHarvests(sha: string): Promise<Finding[]> {
   const treeRes = await fetch(`${TREE_API}/${sha}?recursive=1`)
   if (!treeRes.ok) {
@@ -88,7 +91,7 @@ async function fetchHarvests(sha: string): Promise<Finding[]> {
   }
   const tree = (await treeRes.json()) as { tree?: Array<{ path: string; type: string }> }
   const paths = (tree.tree ?? [])
-    .filter((e) => e.type === 'blob' && e.path.startsWith(HARVEST_PREFIX) && e.path.endsWith('.jsonl'))
+    .filter(isHarvestBlob)
     .map((e) => e.path)
     .sort()
     .slice(-HARVEST_FETCH)
@@ -145,14 +148,26 @@ function DebtDashboard() {
     return { counts: c, total: data?.rows.length ?? 0, recent: closed }
   }, [data])
 
-  const openFindings = useMemo(
-    () =>
-      (data?.findings ?? [])
-        .filter((f) => f.status === 'open')
-        .sort((a, b) => (b.harvested_at ?? '').localeCompare(a.harvested_at ?? ''))
-        .slice(0, 12),
-    [data]
-  )
+  const openFindings = useMemo(() => {
+    // findings with a closed ledger overlay are not open anymore —
+    // and the same finding repeats across harvest runs, so dedupe
+    const closedIds = new Set(
+      (data?.rows ?? [])
+        .filter((r) => r.status !== 'open' && r.status !== 'claimed')
+        .map((r) => r.thread_id)
+    )
+    const seen = new Set<string>()
+    const out: Finding[] = []
+    for (const f of data?.findings ?? []) {
+      if (f.status !== 'open' || closedIds.has(f.thread_id)) continue
+      const key = f.fingerprint ?? f.thread_id
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(f)
+    }
+    out.sort((a, b) => (b.harvested_at ?? '').localeCompare(a.harvested_at ?? ''))
+    return out.slice(0, 12)
+  }, [data])
 
   return (
     <>
@@ -274,7 +289,11 @@ function DebtDashboard() {
                     {openFindings.map((f) => (
                       <tr key={f.fingerprint ?? f.thread_id}>
                         <td>
-                          <a href={`${GITHUB}/pull/${f.source_pr}`}>#{f.source_pr}</a>
+                          {f.source_pr > 0 ? (
+                            <a href={`${GITHUB}/pull/${f.source_pr}`}>#{f.source_pr}</a>
+                          ) : (
+                            '—'
+                          )}
                         </td>
                         <td>{f.priority ?? '—'}</td>
                         <td className="debt-note">
