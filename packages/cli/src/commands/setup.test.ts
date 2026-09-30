@@ -33,8 +33,10 @@ describe('resolvePackDir', () => {
   })
 
   test('falls back to the CLI tree — the workspace default pack resolves', () => {
+    // the workspace pack is always present where these tests run — a
+    // null here is a real regression in fallback resolution, not a skip
     const dir = resolvePackDir('@broject/bro-pack', tmp('bro-pack-self-'))
-    assert.ok(dir === null || dir.endsWith(join('packages', 'pack')))
+    assert.ok(dir?.endsWith(join('packages', 'pack')), `resolved ${dir}`)
   })
 })
 
