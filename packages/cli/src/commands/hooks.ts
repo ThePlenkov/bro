@@ -8,7 +8,9 @@
  *   prompt-submit                     connector prompt probes — drill-frame reminder;
  *                                       the review host parses its own PR URLs → act snapshot
  *   post-tool                         exec nudges: gh pr create → act gate; merge → debt sweep;
- *                                       arms the stop gate for this session (bro act/drill/
+ *                                       first mutating bro subcommand per session cites its
+ *                                       governing skill (skills/<name>/SKILL.md); arms the
+ *                                       stop gate for this session (bro act/drill/
  *                                       work, gh pr, git push, worktree add, bd --claim) via a
  *                                       per-session marker in .git
  *   stop                              connector GateContributions — each system reports
@@ -164,6 +166,99 @@ export function classifyArmCommands(cmd: string): GateAspect[] {
     out.add('task')
   }
   return [...out]
+}
+
+// --- governing-skill citation ---------------------------------------------------
+//
+// Skills load on user triggers (/act, bro: pings) — a mid-flow
+// `bro act resolve` shell call never reads the document that governs it
+// (retro bro-cj0). The first mutating subcommand per session names its
+// governing skill so policy reaches the point of use. Reads never cite:
+// the hint exists because prose misses mutations, not because bro ran.
+
+/** plugin name → mutating verbs (the verb is the first token after the
+ *  subcommand; reads like status/list/threads are absent by design). */
+const MUTATION_VERBS: Record<string, ReadonlySet<string>> = {
+  act: new Set(['resolve', 'reply', 'merge']),
+  drill: new Set(['down', 'up', 'distill']),
+  retrospect: new Set(['capture', 'record']),
+  debt: new Set(['collect', 'mark', 'set', 'sync']),
+  work: new Set(['enter', 'leave', 'prune']),
+  convoy: new Set(['pour', 'claim', 'done']),
+  spec: new Set(['new']),
+}
+
+/** plugin → skill where the cited name differs from argv[0] —
+ *  aliases (unwind → drill) and shared skills (retrospect → wtf). */
+const PLUGIN_SKILL: Record<string, string> = {
+  retrospect: 'wtf',
+  wtf: 'wtf',
+  unwind: 'drill',
+  spec: 'sdd',
+}
+
+/** Plugins whose bare invocation mutates — `next` claims the top bead,
+ *  `loop` runs claim→agent→gate→close, `sync` writes the data ref,
+ *  `unwind` is `drill up`. A listed read flag suppresses the hint. */
+const BARE_MUTATIONS = new Set(['next', 'loop', 'sync', 'unwind'])
+const BARE_READ_FLAGS: Record<string, RegExp> = {
+  next: /--list\b/,
+  loop: /--dry-run\b/,
+}
+
+/** One `bro <plugin> <verb>` invocation → the cite it earns, or null for
+ *  a read. Per-plugin quirks live here so the matchAll scan stays flat:
+ *  `wtf` is bare-status vs arg-capture, `act wait` reads until
+ *  --merge/--cleanup, bare mutations read only under a listed flag. */
+function mutationCite(
+  plugin: string,
+  verb: string | undefined,
+  rest: string,
+  cmd: string
+): { plugin: string; skill: string } | null {
+  const cite = { plugin, skill: PLUGIN_SKILL[plugin] ?? plugin }
+  // `bro wtf <arg>` captures; bare `bro wtf` reports status. Quoted args
+  // are stripped from `c`, so an empty rest falls back to spotting the
+  // quote in the raw command — the real command position is proven.
+  if (plugin === 'wtf') {
+    return verb !== undefined || /wtf\s+["']/.test(cmd) ? cite : null
+  }
+  const verbs = MUTATION_VERBS[plugin]
+  if (verbs) {
+    // `act wait` is a read that becomes a mutation with --merge/--cleanup
+    const hit =
+      plugin === 'act' && verb === 'wait'
+        ? /--(?:merge|cleanup)\b/.test(rest)
+        : verb !== undefined && verbs.has(verb)
+    return hit ? cite : null
+  }
+  return BARE_MUTATIONS.has(plugin) && !BARE_READ_FLAGS[plugin]?.test(rest)
+    ? cite
+    : null
+}
+
+/** The mutating `bro <cmd>` in a shell command → { plugin, skill } to
+ *  cite, or null for reads/other tools. Command position is proven on
+ *  the quote-stripped text; the verb comes from the same text (verbs are
+ *  bare words — quoting only ever hides argument values). */
+export function classifySkillMutation(
+  cmd: string
+): { plugin: string; skill: string } | null {
+  const c = unquoted(cmd)
+  // non-capturing position group — m[1] must stay the plugin name
+  const at = String.raw`(?:^|[;&|\n])\s*`
+  const bro = String.raw`(?:bro|npx\s+(?:-y\s+)?@broject/bro(?:@[\w.:-]+)?)`
+  // chained commands may carry several bro calls — the first mutation wins
+  for (const m of c.matchAll(new RegExp(String.raw`${at}${bro}\s+([a-z]+)\b`, 'g'))) {
+    // the command segment ends at the next separator — a later segment's
+    // flags must not turn this read into a mutation
+    const rest = /[^;&|\n]*/.exec(c.slice(m.index + m[0].length))?.[0] ?? ''
+    const cite = mutationCite(m[1]!, /\S+/.exec(rest)?.[0], rest, cmd)
+    if (cite) {
+      return cite
+    }
+  }
+  return null
 }
 
 /** bro/bd are the plugin's own tools — permission hooks approve them
@@ -407,6 +502,55 @@ function armSession(sessionId: string, aspect: GateAspect, detail: string = ''):
   }
 }
 
+/** Hinted-skill markers live in a `hinted/` subdir of the hooks state
+ *  dir — `readArmed` scans `<session>.*` files as gate aspects, so dedup
+ *  state must not sit flat beside the arming markers. */
+function hintedPath(sessionId: string, skill: string): string | null {
+  const dir = hooksStateDir()
+  const safe = sessionId.replace(/[^\w.-]/g, '_')
+  return dir && safe ? join(dir, 'hinted', `${safe}.${skill}`) : null
+}
+
+/** True when this session was already pointed at the skill — a marker
+ *  younger than MARKER_TTL_MS counts; older re-hints (a week-old session
+ *  is a new session). */
+function skillHinted(sessionId: string, skill: string): boolean {
+  const path = hintedPath(sessionId, skill)
+  if (!path) {
+    return false
+  }
+  try {
+    return statSync(path).mtimeMs >= Date.now() - MARKER_TTL_MS
+  } catch {
+    return false
+  }
+}
+
+function markSkillHinted(sessionId: string, skill: string): void {
+  try {
+    const path = hintedPath(sessionId, skill)
+    if (!path) {
+      return
+    }
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, `${Date.now()}\n`)
+    // hinted/ sits below the dir armSession prunes, so stale markers
+    // need their own sweep — same TTL, same best-effort
+    const cutoff = Date.now() - MARKER_TTL_MS
+    for (const f of readdirSync(dirname(path))) {
+      try {
+        if (statSync(join(dirname(path), f)).mtimeMs < cutoff) {
+          rmSync(join(dirname(path), f))
+        }
+      } catch {
+        // prune is best-effort
+      }
+    }
+  } catch {
+    // hinting is best-effort — a failed marker must never stall the hook
+  }
+}
+
 // --- event handlers -----------------------------------------------------------
 
 async function emitSessionContext(
@@ -445,20 +589,30 @@ function emitPostTool(input: HookInput): void {
       armSession(sessionId, aspect, armDetail(cmd, aspect))
     }
   }
+  const lines: string[] = []
+  // a mutating bro subcommand cites its governing skill once per session —
+  // the SKILL.md never loads on a bare CLI call (bro-d8s)
+  const mutation = classifySkillMutation(cmd)
+  if (mutation && sessionId && !skillHinted(sessionId, mutation.skill)) {
+    markSkillHinted(sessionId, mutation.skill)
+    lines.push(
+      `bro ${mutation.plugin} mutations are governed by the ${mutation.skill} skill ` +
+        `— read skills/${mutation.skill}/SKILL.md before continuing`
+    )
+  }
   switch (classifyExecCommand(cmd)) {
     case 'pr-merge':
-      context(
-        'PostToolUse',
-        'PR merged — sweep review debt with `bro debt collect`; queue: `bro debt prs`'
-      )
-      return
+      lines.push('PR merged — sweep review debt with `bro debt collect`; queue: `bro debt prs`')
+      break
     case 'pr-create':
-      context(
-        'PostToolUse',
+      lines.push(
         'PR created — `bro act status` is the review gate; `bro act threads` lists open threads'
       )
-      return
+      break
     default:
+  }
+  if (lines.length > 0) {
+    context('PostToolUse', lines.join('\n'))
   }
 }
 

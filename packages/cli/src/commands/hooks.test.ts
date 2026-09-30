@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyArmCommand, classifyArmCommands, classifyExecCommand, isSelfToolCommand, readArmed, armDetail, otherLiveWork } from './hooks.ts'
+import { classifyArmCommand, classifyArmCommands, classifyExecCommand, classifySkillMutation, isSelfToolCommand, readArmed, armDetail, otherLiveWork } from './hooks.ts'
 
 describe('classifyExecCommand', () => {
   test('detects gh pr merge', () => {
@@ -100,6 +100,83 @@ describe('classifyArmCommand', () => {
     assert.equal(classifyArmCommand('bro debt collect'), null)
     assert.equal(classifyArmCommand('echo "gh pr merge"'), null)
     assert.equal(classifyArmCommand('gh auth status'), null)
+  })
+})
+
+describe('classifySkillMutation', () => {
+  const skill = (cmd: string) => classifySkillMutation(cmd)?.skill ?? null
+
+  test('cites the governing skill on mutating verbs', () => {
+    assert.equal(skill('bro act resolve --thread t1'), 'act')
+    assert.equal(skill('bro act merge 33 --squash'), 'act')
+    assert.equal(skill('bro drill up --result "done"'), 'drill')
+    assert.equal(skill('bro drill down "why"'), 'drill')
+    assert.equal(skill('bro debt collect'), 'debt')
+    assert.equal(skill('bro debt set done --thread-id t1'), 'debt')
+    assert.equal(skill('bro work enter fix-x'), 'work')
+    assert.equal(skill('bro convoy done bro-x --result "y"'), 'convoy')
+    assert.equal(skill('bro spec new bro-x'), 'sdd')
+    assert.equal(skill('npx -y @broject/bro act reply --thread t --comment x'), 'act')
+  })
+
+  test('aliases cite the shared skill, not argv[0]', () => {
+    assert.equal(skill('bro retrospect capture "oops"'), 'wtf')
+    assert.equal(skill('bro retrospect record --file p.toml'), 'wtf')
+    assert.equal(skill('bro unwind --result "done"'), 'drill')
+    assert.equal(skill('bro wtf "how did this happen"'), 'wtf')
+  })
+
+  test('wtf mutates only with an argument — bare is status', () => {
+    assert.equal(skill('bro wtf'), null)
+    assert.equal(skill('bro wtf verbatim complaint'), 'wtf')
+    assert.equal(skill("bro wtf 'quoted vent'"), 'wtf')
+  })
+
+  test('bare-mutation plugins cite unless a read flag suppresses', () => {
+    assert.equal(skill('bro next'), 'next')
+    assert.equal(skill('bro next --list'), null)
+    assert.equal(skill('bro loop'), 'loop')
+    assert.equal(skill('bro loop --dry-run'), null)
+    assert.equal(skill('bro sync'), 'sync')
+    assert.equal(skill('bro sync --pull'), 'sync')
+  })
+
+  test('reads never cite', () => {
+    assert.equal(skill('bro act status'), null)
+    assert.equal(skill('bro act threads 12'), null)
+    assert.equal(skill('bro act wait --interval 30'), null)
+    assert.equal(skill('bro debt status'), null)
+    assert.equal(skill('bro debt prs'), null)
+    assert.equal(skill('bro debt list --status open'), null)
+    assert.equal(skill('bro drill current'), null)
+    assert.equal(skill('bro drill tree'), null)
+    assert.equal(skill('bro work list'), null)
+    assert.equal(skill('bro convoy next'), null)
+    assert.equal(skill('bro retrospect status'), null)
+    assert.equal(skill('bro spec check'), null)
+  })
+
+  test('act wait cites only when it can merge', () => {
+    assert.equal(skill('bro act wait'), null)
+    assert.equal(skill('bro act wait --merge'), 'act')
+    assert.equal(skill('bro act wait --merge --cleanup'), 'act')
+  })
+
+  test('finds mutations later in a chained command', () => {
+    assert.equal(skill('bro act status && bro act resolve --thread t'), 'act')
+    assert.equal(skill('cd x && bro drill down "y"'), 'drill')
+  })
+
+  test("a later segment's flags cannot mutate an earlier read", () => {
+    assert.equal(skill('bro act wait; git push'), null)
+    assert.equal(skill('bro next --list && echo done'), null)
+  })
+
+  test('ignores non-command-position text and other tools', () => {
+    assert.equal(skill('echo "bro act resolve --thread t"'), null)
+    assert.equal(skill('git status'), null)
+    assert.equal(skill('bd close bro-x'), null)
+    assert.equal(skill('broact resolve'), null)
   })
 })
 
