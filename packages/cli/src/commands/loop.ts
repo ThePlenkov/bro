@@ -25,6 +25,7 @@ import { spawnSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import {
+  bdTry,
   checkBeads,
   gitTry,
   reviewHost,
@@ -63,6 +64,9 @@ interface Ctx {
   agent: string
   intervalS: number
   json: boolean
+  /** Store the loop's own taskStore resolves to — pinned into agent and
+   *  bootstrap env as BEADS_DIR so worktree `bd` writes reach it. */
+  beadsDir?: string
   /** Cleanup failures collected during the run — the end-of-run audit
    *  prints them again so a tail never dies in a scrollback line. */
   tails: string[]
@@ -104,6 +108,41 @@ const say = (ctx: Ctx, msg: string): void => {
  *  operator-configured agent; a sanitized PATH would break the very
  *  binary the config names. NOSONAR lives on the spawn helpers. */
 
+type ItemResult = 'landed' | 'closed' | 'parked' | 'failed'
+
+/** The beads dir the loop's own taskStore calls resolve to (`bd where`
+ *  from the run root). Pinned into spawned envs as BEADS_DIR — a
+ *  worktree-local .beads (tracked copy, stale checkout) or a bd too old
+ *  for common-dir discovery would otherwise fork bead state: the agent's
+ *  close/update lands in a db that dies with the worktree and the bead
+ *  re-surfaces phantom-open in main. */
+export function resolveBeadsDir(root: string, warn?: (msg: string) => void): string | undefined {
+  const fail = (why: string): undefined => {
+    warn?.(`loop: 'bd where' ${why} — agents run unpinned, BEADS_DIR not set`)
+    return undefined
+  }
+  const res = bdTry(['where', '--json'], 15_000, root)
+  if (res.code !== 0) {
+    return fail(`exited ${res.code}${res.err ? `: ${res.err}` : ''}`)
+  }
+  try {
+    const path = (JSON.parse(res.out) as { path?: string }).path
+    return path ?? fail('returned no path')
+  } catch {
+    return fail('returned malformed JSON')
+  }
+}
+
+/** Spawn env shared by agent and bootstrap — BEADS_DIR pins every bd
+ *  the child runs to the loop's store. */
+function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    ...(ctx.beadsDir ? { BEADS_DIR: ctx.beadsDir } : {}),
+    ...extra,
+  }
+}
+
 /** Fresh sibling worktree on loop/<id> off origin/main (falls back to
  *  main/HEAD when no origin). An existing dir is reused as-is. */
 function ensureWorktree(root: string, branch: string, dir: string): void {
@@ -133,12 +172,11 @@ function spawnAgent(ctx: Ctx, beadId: string, title: string, promptFile: string,
   return new Promise((resolve) => {
     const child = spawn('sh', ['-c', expandAgentCmd(ctx.agent, promptFile)], { // NOSONAR — operator-configured agent command
       cwd: dir,
-      env: {
-        ...process.env,
+      env: agentEnv(ctx, {
         BRO_BEAD_ID: beadId,
         BRO_BEAD_TITLE: title,
         BRO_PROMPT_FILE: promptFile,
-      },
+      }),
       stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
       detached: true,
     })
@@ -204,7 +242,7 @@ async function finalizeMerge(
   item: ReturnType<typeof planItem>,
   pr: number,
   alreadyMerged = false
-): Promise<string> {
+): Promise<ItemResult> {
   try {
     if (!alreadyMerged) {
       await runActCommand(['merge', String(pr)])
@@ -227,7 +265,11 @@ async function finalizeMerge(
     return 'parked'
   }
   try {
-    taskStore().close(bead.id, `landed via PR ${prRef(ctx, pr)}`)
+    // the agent may have closed it already — a verdict plus a PR both
+    // reaching the store is fine; a second close is a noisy error
+    if (taskStore().get(bead.id)?.status !== 'closed') {
+      taskStore().close(bead.id, `landed via PR ${prRef(ctx, pr)}`)
+    }
   } catch (err) {
     console.error(`loop: bd close ${bead.id} failed — ${String(err)}`)
   }
@@ -279,12 +321,28 @@ async function runFixRound(
   }
 }
 
+/** An agent that exits without a PR may still have left a verdict — its
+ *  `bd close` lands in the shared store (BEADS_DIR pin). Closed means
+ *  "nothing to ship"; reopening it would resurrect the phantom. A failed
+ *  status probe falls through to the failure path rather than masking
+ *  it. */
+function agentVerdict(ctx: Ctx, bead: ReadyBead, worktreeDir: string): ItemResult | undefined {
+  try {
+    if (taskStore().get(bead.id)?.status === 'closed') {
+      say(ctx, `loop: ${bead.id} closed by the agent — verdict, not a failure`)
+      noteBead(bead.id, `loop: closed by agent verdict — worktree ${worktreeDir} kept for audit`)
+      return 'closed'
+    }
+  } catch { /* bd unreachable → normal failure accounting decides */ }
+  return undefined
+}
+
 /** Agent exited without a PR — note + reopen, 'failed'. */
 function failNoPr(
   bead: ReadyBead,
   item: ReturnType<typeof planItem>,
   code: number | null
-): string {
+): ItemResult {
   noteBead(
     bead.id,
     `loop: agent exited ${code ?? 'timeout'} without a PR — worktree kept at ${item.worktreeDir}`
@@ -302,6 +360,7 @@ function runBootstrap(ctx: Ctx, bead: ReadyBead, item: ReturnType<typeof planIte
   }
   const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], { // NOSONAR — operator-configured bootstrap
     cwd: item.worktreeDir,
+    env: agentEnv(ctx, {}),
     stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
   })
   if (b.status === 0) {
@@ -322,8 +381,8 @@ function writePrompt(item: ReturnType<typeof planItem>, text: string): void {
   writeFileSync(item.promptFile, text)
 }
 
-/** One bead end-to-end. Returns 'landed' | 'parked' | 'failed'. */
-async function runItem(ctx: Ctx, bead: ReadyBead): Promise<string> {
+/** One bead end-to-end. */
+async function runItem(ctx: Ctx, bead: ReadyBead): Promise<ItemResult> {
   const item = planItem(bead, ctx.root)
   say(ctx, `\nloop: ${bead.id} → ${item.branch} @ ${item.worktreeDir}`)
   try {
@@ -344,7 +403,7 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<string> {
     return 'parked'
   }
   if (pr === null) {
-    return failNoPr(bead, item, code)
+    return agentVerdict(ctx, bead, item.worktreeDir) ?? failNoPr(bead, item, code)
   }
   say(ctx, `loop: ${bead.id} → PR ${prRef(ctx, pr)}`)
   return driveGate(ctx, bead, item, pr)
@@ -358,7 +417,7 @@ async function driveGate(
   bead: ReadyBead,
   item: ReturnType<typeof planItem>,
   pr: number
-): Promise<string> {
+): Promise<ItemResult> {
   const act = loadBroConfig(ctx.root).act
   const fetch = async () => {
     const state = await fetchPrActState(
@@ -454,6 +513,7 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     agent,
     intervalS: num(flag(argv, '--interval'), 60),
     json: argv.includes('--json'),
+    beadsDir: resolveBeadsDir(root, (m) => console.error(m)),
     tails: [],
   }
 
@@ -595,7 +655,7 @@ function endAudit(ctx: Ctx, seen: Set<string>): void {
 /** The claim→run→repeat cycle until the queue drains or --max hits. */
 async function runQueue(ctx: Ctx): Promise<void> {
   const seen = new Set<string>()
-  const tally = { landed: 0, parked: 0, failed: 0 }
+  const tally = { landed: 0, closed: 0, parked: 0, failed: 0 }
   try {
     // inside the try: a failed scope lookup still owes the run an audit
     const scope = loopScope()
@@ -603,7 +663,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
       return
     }
     for (;;) {
-      if (ctx.cfg.maxItems > 0 && tally.landed + tally.parked + tally.failed >= ctx.cfg.maxItems) {
+      if (ctx.cfg.maxItems > 0 && tally.landed + tally.closed + tally.parked + tally.failed >= ctx.cfg.maxItems) {
         break
       }
       const ready = readyBeads()
@@ -618,7 +678,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
         break
       }
       seen.add(bead.id)
-      const result = (await runItem(ctx, bead)) as 'landed' | 'parked' | 'failed'
+      const result = await runItem(ctx, bead)
       tally[result] += 1
       if (ctx.json) {
         console.log(JSON.stringify({ bead: bead.id, result }))
@@ -628,7 +688,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
       console.log(JSON.stringify({ done: true, ...tally }))
     } else {
       console.log(
-        `loop: done — ${tally.landed} landed, ${tally.parked} parked, ${tally.failed} failed`
+        `loop: done — ${tally.landed} landed, ${tally.closed} closed, ${tally.parked} parked, ${tally.failed} failed`
       )
     }
   } finally {

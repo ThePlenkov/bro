@@ -59,6 +59,12 @@ works: `claude -p "$(cat {promptFile})"`, `codex exec "$(cat
 One runner per repo — claims are atomic, so a second runner wastes agent
 runs but can't corrupt the queue.
 
+The spawn env pins `BEADS_DIR` to the runner's store (`bd where`), so
+every `bd` call inside the worktree hits the shared db even when the
+repo tracks `.beads` or bd predates common-dir discovery. An agent's
+`bd close` is honored as a verdict — a closed bead without a PR tallies
+`closed` rather than being reopened as a phantom failure.
+
 ## `bro sync` — the data ref
 
 Runtime artifacts (ledger, skills state, memory) shouldn't poison the PR

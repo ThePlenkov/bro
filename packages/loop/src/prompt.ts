@@ -21,6 +21,11 @@ ${body}# Rules
   summary and a test-plan checklist.
 - Do NOT merge, do NOT wait on reviewers — the orchestrator drives the
   review gate. Your job ends once the PR exists.
+- Report verdicts through beads: if the task needs no code change
+  (already done, invalid, obsolete), run
+  \`bd close "$BRO_BEAD_ID" --reason '<why>'\` and stop — BEADS_DIR is
+  pinned to the shared store, so the verdict reaches the loop. Never
+  \`bd init\` in this worktree.
 - If you genuinely cannot finish, push what you have and explain the
   blocker as your final message — never leave silent half-state.
 `
