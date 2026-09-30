@@ -2,7 +2,7 @@
  * GitHub CLI helpers. `gh` is a hard dependency — bro shells out rather than
  * carrying an Octokit client, so auth, proxies and GHES setups just work.
  */
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 
 export function gh(args: string[], cwd?: string): string {
   const proc = spawnSync('gh', args, {
@@ -16,8 +16,36 @@ export function gh(args: string[], cwd?: string): string {
   return proc.stdout ?? ''
 }
 
+/** Async `gh` — the spawnSync variant blocks the event loop, so bulk
+ *  probes that run host calls under a concurrency cap need this to
+ *  actually overlap. Same contract: resolve stdout, throw on non-zero. */
+export function ghAsync(args: string[], cwd?: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('gh', args, { // NOSONAR — PATH lookup is the contract (same as gh/git)
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let out = ''
+    let err = ''
+    proc.stdout.setEncoding('utf8').on('data', (d: string) => (out += d))
+    proc.stderr.setEncoding('utf8').on('data', (d: string) => (err += d))
+    proc.on('error', reject)
+    proc.on('close', (code) => {
+      if (code === 0) {
+        resolve(out)
+      } else {
+        reject(new Error(`gh ${args[0]} failed: ${err.trim()}`))
+      }
+    })
+  })
+}
+
 export function ghJson<T>(args: string[], cwd?: string): T {
   return JSON.parse(gh(args, cwd)) as T
+}
+
+export async function ghJsonAsync<T>(args: string[], cwd?: string): Promise<T> {
+  return JSON.parse(await ghAsync(args, cwd)) as T
 }
 
 /**

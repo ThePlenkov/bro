@@ -3,17 +3,20 @@
  * `gh` CLI. Ported from act/github.ts and debt/github.ts — same calls,
  * same semantics, normalized onto the domain types in @broject/core/review.
  */
-import { gh, ghJson, ghTry } from '@broject/core'
+import { gh, ghAsync, ghJson, ghJsonAsync, ghTry } from '@broject/core'
 import type {
   CheckInfo,
   MergeOpts,
   MergedPr,
   MergedPrInfo,
   MergedPrQuery,
+  MergedPrScan,
+  PrLabelOp,
   PrMeta,
   PrTarget,
   ReviewFacade,
   ReviewThread,
+  ScanOpts,
 } from '@broject/core'
 
 // graphql/REST paths need owner+repo separately — split the facade's
@@ -212,6 +215,29 @@ function parseThreadPage(raw: string, repo: string, pr: number): ThreadPage {
   return threads
 }
 
+/** GraphQL thread nodes → domain threads — shared by the paginated
+ *  per-PR fetch and the bulk scan's inlined first page. */
+function toReviewThreads(nodes: ThreadPage['nodes']): ReviewThread[] {
+  return nodes.map((n) => {
+    const c = n.comments.nodes[0]
+    return {
+      id: n.id,
+      resolved: n.isResolved,
+      outdated: n.isOutdated,
+      comment: c
+        ? {
+            author: c.author?.login ?? 'unknown',
+            bot: c.author?.__typename === 'Bot',
+            path: c.path ?? null,
+            line: c.line ?? null,
+            body: c.body ?? '',
+            createdAt: c.createdAt ?? '',
+          }
+        : null,
+    }
+  })
+}
+
 async function reviewThreads(t: PrTarget): Promise<ReviewThread[]> {
   const { owner, name } = parts(t.repo)
   const nodes: ReviewThread[] = []
@@ -220,7 +246,7 @@ async function reviewThreads(t: PrTarget): Promise<ReviewThread[]> {
     const afterClause = cursor
       ? `, after: "${cursor.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
       : ''
-    const raw = gh([
+    const raw = await ghAsync([
       'api',
       'graphql',
       '-f',
@@ -235,24 +261,7 @@ async function reviewThreads(t: PrTarget): Promise<ReviewThread[]> {
       'n=100',
     ])
     const page = parseThreadPage(raw, t.repo, t.pr)
-    for (const n of page.nodes) {
-      const c = n.comments.nodes[0]
-      nodes.push({
-        id: n.id,
-        resolved: n.isResolved,
-        outdated: n.isOutdated,
-        comment: c
-          ? {
-              author: c.author?.login ?? 'unknown',
-              bot: c.author?.__typename === 'Bot',
-              path: c.path ?? null,
-              line: c.line ?? null,
-              body: c.body ?? '',
-              createdAt: c.createdAt ?? '',
-            }
-          : null,
-      })
-    }
+    nodes.push(...toReviewThreads(page.nodes))
     if (!page.pageInfo.hasNextPage || !page.pageInfo.endCursor) {
       break
     }
@@ -399,6 +408,232 @@ function prUpdatedAt(t: PrTarget): string | null {
   return viewed.updatedAt ?? null
 }
 
+// --- bulk probes ---------------------------------------------------------------
+//
+// `debt collect` pays several gh round-trips per merged PR when driven
+// through the per-PR methods (~5-7 spawnSync each — a 100-PR scan reads
+// as hung). Aliased GraphQL fields fold a whole chunk of PRs into one
+// call; a small pool overlaps the chunks.
+
+/** Run `fn` over `items` with at most `cap` in flight — a Promise pool,
+ *  not a thread pool: the win is overlapping `gh` processes. */
+async function pooled<T>(items: T[], cap: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0
+  await Promise.all(
+    Array.from({ length: Math.min(cap, items.length) }, async () => {
+      while (next < items.length) {
+        await fn(items[next++]!)
+      }
+    })
+  )
+}
+
+function chunks<T>(items: T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size))
+  }
+  return out
+}
+
+/** pullRequest(number:N) under an alias — the building block for bulk
+ *  probes and post-write updatedAt re-queries. */
+function aliasedPrQuery(
+  targets: PrTarget[],
+  alias: string,
+  fields: string
+): string {
+  const body = targets
+    .map((t, i) => `${alias}${i}: pullRequest(number: ${t.pr}) { ${fields} }`)
+    .join('\n')
+  return `query($o:String!,$r:String!){ repository(owner:$o,name:$r){ ${body} } }`
+}
+
+interface ScanNode {
+  title?: string
+  url?: string
+  mergedAt?: string | null
+  updatedAt?: string | null
+  mergeCommit?: { oid?: string }
+  labels?: { nodes?: Array<{ name?: string }> }
+  reviewThreads?: {
+    pageInfo?: { hasNextPage?: boolean }
+    nodes?: ThreadPage['nodes']
+  }
+}
+
+function parseAliasedPrs<T extends object>(
+  raw: string,
+  targets: PrTarget[],
+  alias: string
+): Array<T | null> {
+  const parsed = JSON.parse(raw) as {
+    data?: { repository?: Record<string, T | null> }
+    errors?: unknown
+  }
+  if (parsed.errors) {
+    throw new Error(`GraphQL errors: ${JSON.stringify(parsed.errors)}`)
+  }
+  const repo = parsed.data?.repository
+  if (!repo) {
+    throw new Error('bulk scan: no repository in response')
+  }
+  return targets.map((_, i) => repo[`${alias}${i}`] ?? null)
+}
+
+const SCAN_PR_FIELDS = `
+  title url mergedAt updatedAt
+  mergeCommit { oid }
+  labels(first: 50) { nodes { name } }
+  reviewThreads(first: 100) {
+    pageInfo { hasNextPage }
+    nodes { id isResolved isOutdated comments(first: 1) { nodes { author { login __typename } path line body createdAt } } }
+  }`
+
+/** Aliased-GraphQL probe: one `gh api graphql` call per ~15 PRs covers
+ *  meta + threads + labels + updatedAt; chunks overlap under a small
+ *  concurrency cap. Misses stay out of the map — the caller's serial
+ *  per-PR path reports them properly. */
+async function scanMergedPrs(
+  targets: PrTarget[],
+  opts?: ScanOpts
+): Promise<Map<number, MergedPrScan>> {
+  const out = new Map<number, MergedPrScan>()
+  if (targets.length === 0) {
+    return out
+  }
+  const { owner, name } = parts(targets[0]!.repo)
+  let done = 0
+  await pooled(chunks(targets, 15), opts?.concurrency ?? 4, async (chunk) => {
+    let rows: Array<ScanNode | null>
+    try {
+      rows = parseAliasedPrs<ScanNode>(
+        await ghAsync([
+          'api',
+          'graphql',
+          '-f',
+          `query=${aliasedPrQuery(chunk, 's', SCAN_PR_FIELDS)}`,
+          '-f',
+          `o=${owner}`,
+          '-f',
+          `r=${name}`,
+        ]),
+        chunk,
+        's'
+      )
+    } catch (err) {
+      console.error(
+        `warning: bulk scan chunk (${chunk.length} PR(s)) failed — ` +
+          `${err instanceof Error ? err.message : err}`
+      )
+      return
+    }
+    for (const [i, t] of chunk.entries()) {
+      const node = rows[i]
+      // Non-merged / missing PRs stay out — the serial fallback decides.
+      if (!node?.mergedAt) {
+        continue
+      }
+      let threads = toReviewThreads(node.reviewThreads?.nodes ?? [])
+      // >100 threads on one PR is rare — full paginated fetch per-PR.
+      if (node.reviewThreads?.pageInfo?.hasNextPage) {
+        try {
+          threads = await reviewThreads(t)
+        } catch {
+          continue
+        }
+      }
+      out.set(t.pr, {
+        info: {
+          title: node.title ?? '',
+          url: node.url ?? `https://github.com/${t.repo}/pull/${t.pr}`,
+          mergedAt: node.mergedAt,
+          mergeSha: node.mergeCommit?.oid ?? '',
+        },
+        threads,
+        labels: (node.labels?.nodes ?? []).map((l) => l.name ?? ''),
+        updatedAt: node.updatedAt ?? null,
+      })
+    }
+    done += chunk.length
+    opts?.onProgress?.(done, targets.length)
+  })
+  return out
+}
+
+/** Post-write `updatedAt` for a set of PRs — one chunked aliased query,
+ *  not a serial `pr view` per PR. Missing keys stay absent. */
+async function updatedAtFor(targets: PrTarget[]): Promise<Map<number, string>> {
+  const out = new Map<number, string>()
+  if (targets.length === 0) {
+    return out
+  }
+  const { owner, name } = parts(targets[0]!.repo)
+  for (const chunk of chunks(targets, 50)) {
+    let rows: Array<{ updatedAt?: string | null } | null>
+    try {
+      rows = parseAliasedPrs(
+        await ghAsync([
+          'api',
+          'graphql',
+          '-f',
+          `query=${aliasedPrQuery(chunk, 'u', 'updatedAt')}`,
+          '-f',
+          `o=${owner}`,
+          '-f',
+          `r=${name}`,
+        ]),
+        chunk,
+        'u'
+      )
+    } catch {
+      continue
+    }
+    for (const [i, t] of chunk.entries()) {
+      const at = rows[i]?.updatedAt
+      if (at) {
+        out.set(t.pr, at)
+      }
+    }
+  }
+  return out
+}
+
+/** `gh pr edit` per PR overlapped under the pool — one call does the
+ *  add + the removals; then a single chunked re-query hands the caller
+ *  post-write updatedAt cursors without a serial `pr view` per PR. */
+async function labelPrs(
+  ops: PrLabelOp[],
+  opts?: { concurrency?: number }
+): Promise<Map<number, string | null>> {
+  const applied: PrTarget[] = []
+  await pooled(ops, opts?.concurrency ?? 4, async (op) => {
+    if (op.add.length === 0 && op.remove.length === 0) {
+      applied.push(op.t)
+      return
+    }
+    const args = ['pr', 'edit', String(op.t.pr), '--repo', op.t.repo]
+    if (op.add.length > 0) {
+      args.push('--add-label', op.add.join(','))
+    }
+    if (op.remove.length > 0) {
+      args.push('--remove-label', op.remove.join(','))
+    }
+    try {
+      await ghAsync(args)
+      applied.push(op.t)
+    } catch (err) {
+      // A failed write leaves the PR unlabeled — next collect rescans it.
+      console.error(
+        `warning: label write on ${prLinkStr(op.t.repo, op.t.pr)} failed — ` +
+          `${err instanceof Error ? err.message : err}`
+      )
+    }
+  })
+  const stamps = await updatedAtFor(applied)
+  return new Map(applied.map((t) => [t.pr, stamps.get(t.pr) ?? null]))
+}
+
 // --- mutations ----------------------------------------------------------------
 
 function graphql(query: string, vars: Record<string, string>): void {
@@ -459,6 +694,8 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
     prMeta,
     mergedPrInfo,
     mergedPrs,
+    scanMergedPrs,
+    labelPrs,
     checks,
     checkAnnotations,
     reviewedShas,

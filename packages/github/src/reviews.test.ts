@@ -8,6 +8,8 @@ import { githubConnector, githubReview } from './index.ts'
 
 const WIN32 = process.platform === 'win32'
 
+const SCAN_NODE = `{"title":"did the thing","url":"https://github.com/acme/widgets/pull/7","mergedAt":"2026-01-02T00:00:00Z","updatedAt":"2026-01-03T00:00:00Z","mergeCommit":{"oid":"abc123"},"labels":{"nodes":[{"name":"bug"}]},"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":"THR_1","isResolved":false,"isOutdated":false,"comments":{"nodes":[{"author":{"login":"reviewer-bot","__typename":"Bot"},"path":"a.ts","line":3,"body":"fix this","createdAt":"2026-01-01"}]}}]}}`
+
 /** Scripted gh on PATH — records argv to $FAKE_GH_LOG, answers by $1 $2. */
 const FAKE_GH = `#!/bin/sh
 echo "$@" >> "$FAKE_GH_LOG"
@@ -17,7 +19,11 @@ case "$1 $2" in
   "repo view") echo '{"owner":{"login":"acme"},"name":"widgets"}' ;;
   "pr view") echo '{"state":"MERGED"}' ;;
   "pr merge") echo 'Merging pull request' ;;
-  "api graphql") echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"THR_1","isResolved":false,"isOutdated":false,"comments":{"nodes":[{"author":{"login":"reviewer-bot","__typename":"Bot"},"path":"a.ts","line":3,"body":"fix this","createdAt":"2026-01-01"}]}}]}}}}}' ;;
+  "api graphql") case "$@" in
+      *"s0: pullRequest"*) echo '{"data":{"repository":{"s0":${SCAN_NODE},"s1":${SCAN_NODE}}}}' ;;
+      *"u0: pullRequest"*) echo '{"data":{"repository":{"u0":{"updatedAt":"2026-02-02T00:00:00Z"},"u1":{"updatedAt":"2026-02-02T00:00:00Z"}}}}' ;;
+      *) echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"THR_1","isResolved":false,"isOutdated":false,"comments":{"nodes":[{"author":{"login":"reviewer-bot","__typename":"Bot"},"path":"a.ts","line":3,"body":"fix this","createdAt":"2026-01-01"}]}}]}}}}}' ;;
+    esac ;;
   "api repos/"* ) echo '{}' ;;
   "pr edit"|"label create") : ;;
 esac
@@ -103,6 +109,76 @@ describe('githubReview', { skip: WIN32 }, () => {
     })
   })
 
+  test('scanMergedPrs folds a chunk of PRs into one aliased query', async () => {
+    await withFakeGhAsync(async (log) => {
+      const scans = await githubReview().scanMergedPrs!([
+        { repo: 'acme/widgets', pr: 7 },
+        { repo: 'acme/widgets', pr: 8 },
+      ])
+      assert.equal(scans.size, 2)
+      const s = scans.get(7)!
+      assert.equal(s.info.mergeSha, 'abc123')
+      assert.equal(s.info.mergedAt, '2026-01-02T00:00:00Z')
+      assert.equal(s.updatedAt, '2026-01-03T00:00:00Z')
+      assert.deepEqual(s.labels, ['bug'])
+      assert.equal(s.threads.length, 1)
+      assert.equal(s.threads[0]!.id, 'THR_1')
+      assert.equal(s.threads[0]!.comment!.author, 'reviewer-bot')
+      // both PRs ride ONE graphql call — the per-PR serial probes are
+      // what made a wide collect crawl (the logged query is multi-line,
+      // so assertions match the whole log)
+      const calls = readFileSync(log, 'utf8').trim().split('\n')
+      assert.equal(calls.filter((l) => l.startsWith('api graphql')).length, 1)
+      assert.match(readFileSync(log, 'utf8'), /s0: pullRequest\(number: 7\)/)
+      assert.match(readFileSync(log, 'utf8'), /s1: pullRequest\(number: 8\)/)
+    })
+  })
+
+  test('scanMergedPrs reports progress per chunk', async () => {
+    await withFakeGhAsync(async () => {
+      const marks: Array<[number, number]> = []
+      await githubReview().scanMergedPrs!(
+        [{ repo: 'acme/widgets', pr: 7 }],
+        { onProgress: (d, t) => marks.push([d, t]) }
+      )
+      assert.deepEqual(marks, [[1, 1]])
+    })
+  })
+
+  test('labelPrs writes add+remove in one pr edit and re-queries updatedAt', async () => {
+    await withFakeGhAsync(async (log) => {
+      const out = await githubReview().labelPrs!([
+        {
+          t: { repo: 'acme/widgets', pr: 7 },
+          add: ['debt:collected'],
+          remove: ['debt:clean'],
+        },
+        {
+          t: { repo: 'acme/widgets', pr: 8 },
+          add: ['debt:clean'],
+          remove: [],
+        },
+      ])
+      assert.deepEqual(
+        [...out.entries()].sort(),
+        [
+          [7, '2026-02-02T00:00:00Z'],
+          [8, '2026-02-02T00:00:00Z'],
+        ]
+      )
+      const lines = readFileSync(log, 'utf8')
+      assert.match(
+        lines,
+        /pr edit 7 --repo acme\/widgets --add-label debt:collected --remove-label debt:clean/
+      )
+      assert.match(lines, /pr edit 8 --repo acme\/widgets --add-label debt:clean/)
+      assert.doesNotMatch(lines, /--remove-label $|--remove-label\n/m)
+      // one batched updatedAt re-query — no per-PR `pr view`
+      assert.match(lines, /u0: pullRequest\(number: \d+\) \{ updatedAt \}/)
+      assert.equal(lines.split('\n').filter((l) => l.startsWith('pr view')).length, 0)
+    })
+  })
+
   test('resolveThread picks the mutation by the unresolve flag', () => {
     withFakeGh({}, (log) => {
       githubReview().resolveThread('THR_1')
@@ -141,7 +217,7 @@ describe('githubReview', { skip: WIN32 }, () => {
   })
 })
 
-async function withFakeGhAsync(fn: () => Promise<void>): Promise<void> {
+async function withFakeGhAsync(fn: (log: string) => Promise<void>): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'bro-fake-gh-'))
   const log = join(dir, 'gh.log')
   writeFileSync(log, '')
@@ -152,7 +228,7 @@ async function withFakeGhAsync(fn: () => Promise<void>): Promise<void> {
   const prevLog = process.env.FAKE_GH_LOG
   process.env.FAKE_GH_LOG = log
   try {
-    await fn()
+    await fn(log)
   } finally {
     process.env.PATH = prevPath
     if (prevLog === undefined) delete process.env.FAKE_GH_LOG

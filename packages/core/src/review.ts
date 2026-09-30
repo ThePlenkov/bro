@@ -68,6 +68,34 @@ export interface MergedPrInfo {
   mergeSha: string
 }
 
+/** Everything a post-merge debt scan needs about one PR — meta + threads
+ *  + labels + updatedAt observed at probe time. `scanMergedPrs` carries
+ *  it in one bulk fetch so a repo-wide collect doesn't pay one serial
+ *  round-trip per field per PR. */
+export interface MergedPrScan {
+  info: MergedPrInfo
+  threads: ReviewThread[]
+  /** Labels + updatedAt at probe time — fresh enough for the labeling
+   *  decision and to seed the processed cursor for PRs that get no
+   *  label write. */
+  labels: string[]
+  updatedAt: string | null
+}
+
+export interface ScanOpts {
+  /** In-flight host-call ceiling — the connector picks a default. */
+  concurrency?: number
+  /** Called as batches finish — (PRs probed so far, total). */
+  onProgress?: (done: number, total: number) => void
+}
+
+/** One label write in `labelPrs` — add + remove on a single PR. */
+export interface PrLabelOp {
+  t: PrTarget
+  add: string[]
+  remove: string[]
+}
+
 /** Selection for mergedPrs — `ids` present (even empty) is an explicit
  *  selection; unmerged ids are warned and skipped by the connector,
  *  not thrown. */
@@ -107,6 +135,22 @@ export interface ReviewFacade {
   /** Merged-PR detail for harvest — throws when the PR isn't merged. */
   mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo
   mergedPrs(repo: string, q?: MergedPrQuery): MergedPr[]
+
+  /** Bulk post-merge probe — meta + threads + labels + updatedAt for many
+   *  PRs with bounded host calls. Optional fast-path: when absent (or a PR
+   *  is missing from the map — a per-PR probe failure) callers fall back
+   *  to the per-PR methods, so correctness never depends on the bulk path. */
+  scanMergedPrs?(targets: PrTarget[], opts?: ScanOpts): Promise<Map<number, MergedPrScan>>
+
+  /** Bulk label write — each op adds + removes on one PR under bounded
+   *  concurrency. Resolves to post-write `updatedAt` per applied PR for
+   *  cursor bookkeeping (null when the host can't observe it); PRs absent
+   *  from the map are failed writes. Optional — absent → per-PR
+   *  addLabel/removeLabel + prUpdatedAt. */
+  labelPrs?(
+    ops: PrLabelOp[],
+    opts?: { concurrency?: number }
+  ): Promise<Map<number, string | null>>
 
   checks(t: PrTarget, requiredOnly?: boolean): CheckInfo[]
   /** Check name → failure-annotation count at a head sha. `null` means
