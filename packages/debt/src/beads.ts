@@ -24,9 +24,9 @@ function assertCompatible(): void {
     )
   }
   if (!compat.ok) {
+    const v = compat.version ? ` ${compat.version}` : ''
     throw new BdCompatError(
-      `bd${compat.version ? ` ${compat.version}` : ''} drifted off the contract bro speaks — ` +
-        compat.problems.join('; ')
+      `bd${v} drifted off the contract bro speaks — ` + compat.problems.join('; ')
     )
   }
 }

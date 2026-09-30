@@ -237,6 +237,29 @@ function checkConfig(dirs: string[]): DoctorCheck {
   return check('config', 'ok', 'no bro.config — running on defaults')
 }
 
+/** Compat probe — verifies the contract bro calls (read-path --json
+ *  shapes, subcommand/flag surface, store schema) rather than trusting a
+ *  pre-1.0 version number. Drift fails when beads is an active store. */
+function bdCompatCheck(dir: string, beadsActive: boolean): DoctorCheck {
+  const compat = probeBdCompat(dir)
+  if (!compat.ok) {
+    return check(
+      'bd-compat',
+      beadsActive ? 'fail' : 'warn',
+      compat.problems.join('; '),
+      'bd moved past the contract bro speaks — upgrade/downgrade beads or set "stores": ["jsonl"]'
+    )
+  }
+  const v = compat.version ?? '?'
+  return check(
+    'bd-compat',
+    'ok',
+    compat.store === 'reachable'
+      ? `v${v} contract verified`
+      : `v${v} — read contract unproven (no store)`
+  )
+}
+
 /** bd group: presence (fail only when beads is an active store), Dolt-era
  *  compat (`bd dolt` exists at all → the backend bro assumes), and store
  *  readability when a store is live. */
@@ -254,27 +277,7 @@ function bdChecks(
         : check('bd', 'warn', binProblem(bd), 'beads store is off — nothing needs it'),
     ]
   }
-  const out: DoctorCheck[] = [check('bd', 'ok', bd.version ?? 'present')]
-  // compat probe — verifies the contract bro calls (read-path --json
-  // shapes, subcommand/flag surface, store schema) rather than trusting a
-  // pre-1.0 version number. Drift fails when beads is an active store.
-  const compat = probeBdCompat(dir)
-  if (!compat.ok) {
-    out.push(
-      check(
-        'bd-compat',
-        beadsActive ? 'fail' : 'warn',
-        compat.problems.join('; '),
-        'bd moved past the contract bro speaks — upgrade/downgrade beads or set "stores": ["jsonl"]'
-      )
-    )
-  } else if (compat.store === 'reachable') {
-    out.push(check('bd-compat', 'ok', `v${compat.version ?? '?'} contract verified`))
-  } else {
-    out.push(
-      check('bd-compat', 'ok', `v${compat.version ?? '?'} — read contract unproven (no store)`)
-    )
-  }
+  const out: DoctorCheck[] = [check('bd', 'ok', bd.version ?? 'present'), bdCompatCheck(dir, beadsActive)]
   const dolt = bdTry(['dolt', 'remote', 'list'], 15_000, dir)
   if (dolt.code !== 0) {
     const err = dolt.err ? ` (${dolt.err})` : ''

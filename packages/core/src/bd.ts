@@ -131,6 +131,84 @@ function rowShape(v: unknown, cmd: string, problems: string[]): void {
   }
 }
 
+function firstErrLine(err: string, code: number): string {
+  return err.split('\n')[0] || `exit ${code}`
+}
+
+/** Presence probe — false aborts the compat run (nothing else answers
+ *  without the binary). */
+function probeVersion(res: BdCompat, dir?: string): boolean {
+  const ver = bdTry(['--version'], 10_000, dir)
+  if (ver.code !== 0) {
+    res.missing = /ENOENT/.test(ver.err)
+    res.problems.push(
+      res.missing ? 'bd not found on PATH' : `\`bd --version\` failed — ${ver.err || 'spawn error'}`
+    )
+    res.ok = false
+    return false
+  }
+  res.version = /\d+\.\d+[\d.]*/.exec(`${ver.out} ${ver.err}`)?.[0]?.replace(/\.*$/, '')
+  return true
+}
+
+/** One read-path probe: `bd <name> --json -n 1` must answer a JSON array
+ *  of id-keyed rows while a store is reachable. Records the store state
+ *  the first probe observes; usage errors are drift anywhere. */
+function probeRead(res: BdCompat, name: string, dir?: string): boolean {
+  const p = bdTry([name, '--json', '-n', '1'], 15_000, dir)
+  if (p.code === 0) {
+    res.store = 'reachable'
+    try {
+      rowShape(JSON.parse(p.out), name, res.problems)
+    } catch {
+      res.problems.push(`\`bd ${name} --json\` returned non-JSON output`)
+    }
+    return true
+  }
+  if (BD_USAGE_DRIFT.test(p.err)) {
+    res.problems.push(`\`bd ${name}\` rejected the call — ${firstErrLine(p.err, p.code)}`)
+    return true
+  }
+  if (BD_NO_STORE.test(p.err)) {
+    res.store = 'absent'
+    res.storeErr = p.err
+    return false // every remaining probe hits the same wall
+  }
+  // unclassifiable failure: once a probe proved the store reachable a
+  // second one dying is suspicious enough to report — but when nothing
+  // reached the store it's store state (corrupt db, perms), not drift
+  if (res.store === 'reachable') {
+    res.problems.push(`\`bd ${name}\` failed on a readable store — ${firstErrLine(p.err, p.code)}`)
+    return true
+  }
+  res.store = 'error'
+  res.storeErr = p.err
+  return false
+}
+
+/** Schema probe — meaningful only with a live store. */
+function probeSchema(res: BdCompat, dir?: string): void {
+  const info = bdTry(['info', '--json'], 15_000, dir)
+  if (info.code !== 0) {
+    // usage errors = drift; anything else is operational, not compat
+    if (BD_USAGE_DRIFT.test(info.err)) {
+      res.problems.push(`\`bd info\` rejected the call — ${firstErrLine(info.err, info.code)}`)
+    }
+    return
+  }
+  try {
+    const parsed = JSON.parse(info.out) as { schema_version?: unknown }
+    const v = parsed.schema_version
+    if (typeof v === 'number' && v > BD_KNOWN_SCHEMA_VERSION) {
+      res.problems.push(
+        `bd store schema_version ${v} is newer than bro knows (${BD_KNOWN_SCHEMA_VERSION})`
+      )
+    }
+  } catch {
+    res.problems.push('`bd info --json` returned non-JSON output')
+  }
+}
+
 /**
  * Compat probe — verifies the bd contract bro relies on, since version
  * numbers can't pin a pre-1.0 CLI. Read-path probes run only while a
@@ -140,76 +218,18 @@ function rowShape(v: unknown, cmd: string, problems: string[]): void {
  */
 export function probeBdCompat(dir?: string): BdCompat {
   const res: BdCompat = { ok: true, missing: false, problems: [], store: 'unprobed' }
-  const ver = bdTry(['--version'], 10_000, dir)
-  if (ver.code !== 0) {
-    res.missing = /ENOENT/.test(ver.err)
-    res.problems.push(
-      res.missing ? 'bd not found on PATH' : `\`bd --version\` failed — ${ver.err || 'spawn error'}`
-    )
-    res.ok = false
+  if (!probeVersion(res, dir)) {
     return res
   }
-  res.version = /\d+(\.\d+)+/.exec(`${ver.out} ${ver.err}`)?.[0]
-
-  // The read path every TaskStore consumer builds on: list + ready must
-  // answer a JSON array of rows with a string id.
-  for (const name of ['list', 'ready'] as const) {
-    const p = bdTry([name, '--json', '-n', '1'], 15_000, dir)
-    if (p.code === 0) {
-      res.store = 'reachable'
-      try {
-        rowShape(JSON.parse(p.out), name, res.problems)
-      } catch {
-        res.problems.push(`\`bd ${name} --json\` returned non-JSON output`)
-      }
-      continue
+  // The read path every TaskStore consumer builds on: list + ready.
+  for (const name of ['list', 'ready']) {
+    if (!probeRead(res, name, dir)) {
+      break
     }
-    if (BD_USAGE_DRIFT.test(p.err)) {
-      res.problems.push(`\`bd ${name}\` rejected the call — ${p.err.split('\n')[0]}`)
-      continue
-    }
-    if (BD_NO_STORE.test(p.err)) {
-      res.store = 'absent'
-      res.storeErr = p.err
-      break // every remaining probe hits the same wall
-    }
-    // unclassifiable failure: once a probe proved the store reachable a
-    // second one dying is suspicious enough to report — but when nothing
-    // reached the store it's store state (corrupt db, perms), not drift
-    if (res.store === 'reachable') {
-      res.problems.push(
-        `\`bd ${name}\` failed on a readable store — ${p.err.split('\n')[0] || `exit ${p.code}`}`
-      )
-      continue
-    }
-    res.store = 'error'
-    res.storeErr = p.err
-    break
   }
-
-  // Schema probe — meaningful only with a live store.
   if (res.store === 'reachable') {
-    const info = bdTry(['info', '--json'], 15_000, dir)
-    if (info.code === 0) {
-      try {
-        const parsed = JSON.parse(info.out) as { schema_version?: unknown }
-        if (
-          typeof parsed.schema_version === 'number' &&
-          parsed.schema_version > BD_KNOWN_SCHEMA_VERSION
-        ) {
-          res.problems.push(
-            `bd store schema_version ${parsed.schema_version} is newer than bro knows (${BD_KNOWN_SCHEMA_VERSION})`
-          )
-        }
-      } catch {
-        res.problems.push('`bd info --json` returned non-JSON output')
-      }
-    } else if (BD_USAGE_DRIFT.test(info.err)) {
-      res.problems.push(`\`bd info\` rejected the call — ${info.err.split('\n')[0]}`)
-    }
-    // other info failures are operational, not compat
+    probeSchema(res, dir)
   }
-
   res.ok = res.problems.length === 0
   return res
 }
@@ -281,9 +301,9 @@ export function checkBeads(dir?: string): void {
     throw new Error('bd not found — install beads first (https://github.com/gastownhall/beads)')
   }
   if (!compat.ok) {
+    const v = compat.version ? ` ${compat.version}` : ''
     throw new BdCompatError(
-      `bd${compat.version ? ` ${compat.version}` : ''} drifted off the contract bro speaks — ` +
-        compat.problems.join('; ')
+      `bd${v} drifted off the contract bro speaks — ` + compat.problems.join('; ')
     )
   }
   if (compat.store !== 'reachable') {
