@@ -522,10 +522,12 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     json: argv.includes('--json'),
     selection: {
       filters: (() => {
-        if (!argv.includes('--label')) {
+        // flag() covers --label v and --label=v; argv.includes would miss =
+        const raw = flag(argv, '--label')
+        if (raw === undefined) {
           return {}
         }
-        const labels = (flag(argv, '--label') ?? '')
+        const labels = raw
           .split(',')
           .map((s) => s.trim())
           .filter((s) => s !== '')
