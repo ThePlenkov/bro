@@ -38,6 +38,11 @@ jobs:
             exit 1
           fi
           subject=$(git log -1 --pretty=%s)
+          # A conventional merge commit ('Merge pull request...') puts
+          # 'release: v*' on the second parent — the release branch tip.
+          if ! grep -qE '^release: v[0-9]' <<<"$subject"; then
+            subject=$(git log -1 --pretty=%s 'HEAD^2' 2>/dev/null || true)
+          fi
           if [ "$GITHUB_EVENT_NAME" = "push" ] && ! grep -qE '^release: v[0-9]' <<<"$subject"; then
             echo "not a release merge ($subject) — nothing to do"
             exit 0
