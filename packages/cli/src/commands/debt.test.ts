@@ -4,7 +4,7 @@ import { commandMutatedLedger } from './debt.ts'
 
 describe('commandMutatedLedger', () => {
   test('mutating commands write the ledger', () => {
-    for (const cmd of ['collect', 'mark', 'set', 'sync', 'next']) {
+    for (const cmd of ['collect', 'mark', 'set', 'sync']) {
       assert.equal(commandMutatedLedger(cmd, []), true, cmd)
     }
   })
@@ -13,6 +13,7 @@ describe('commandMutatedLedger', () => {
     assert.equal(commandMutatedLedger('collect', ['--dry-run']), false)
     assert.equal(commandMutatedLedger('collect', ['--list-only']), false)
     assert.equal(commandMutatedLedger('sync', ['--dry-run']), false)
+    assert.equal(commandMutatedLedger('next', []), false)
   })
 
   test('non-mutating commands never publish', () => {

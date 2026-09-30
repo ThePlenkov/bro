@@ -234,15 +234,19 @@ async function cmdCollect(
   if (sources.has('review-threads')) {
     await collectReviewThreads(rev, args)
   }
-  collectDebtSources(args, sources, debtCfg.stale_days)
+  // --list-only is a read-only inspection — it must not write harvest
+  // files, overlays, or the summary either.
+  if (!args.listOnly) {
+    collectDebtSources(args, sources, debtCfg.stale_days)
+  }
 
-  if (args.dryRun) {
+  if (args.dryRun || args.listOnly) {
     return
   }
   const totalRows = readDebtRecords().length
   if (totalRows > 0) {
     writeSummary(buildSummary(readDebtRecords()))
-    maybeProjectDebtToBeads(args.listOnly)
+    maybeProjectDebtToBeads()
   }
 }
 
@@ -326,10 +330,9 @@ function collectOneSource(
  *  moved past the contract will keep failing every run, so warn once
  *  and leave the ledger jsonl-only instead of red-failing collect.
  *  Explicit values only — a typo like "beed" must fall back to jsonl,
- *  not fail in bd after the ledger was already written.
- *  --list-only is a read-only inspection — it never auto-inits .beads. */
-function maybeProjectDebtToBeads(listOnly: boolean): void {
-  if (listOnly || !loadBroConfig().stores.includes('beads')) {
+ *  not fail in bd after the ledger was already written. */
+function maybeProjectDebtToBeads(): void {
+  if (!loadBroConfig().stores.includes('beads')) {
     return
   }
   try {
@@ -1172,9 +1175,12 @@ async function cmdWatch(argv: string[]): Promise<void> {
   for (;;) {
     try {
       await cmdCollect(collectArgv, { throwOnAuthFailure: true })
-      // cmdCollect wrote ledger + overlays — publish now, per tick.
-      // The post-handler MUTATING sync never runs: watch never returns.
-      maybeDataRefSync()
+      // cmdCollect wrote ledger + overlays — publish now, per tick, but
+      // only when this pass actually mutated (read-only flags write
+      // nothing). The post-handler sync never runs: watch never returns.
+      if (commandMutatedLedger('collect', collectArgv)) {
+        maybeDataRefSync()
+      }
     } catch (err) {
       // A failed pass (network blip, gh outage) must not kill the loop.
       console.error(`debt watch: collect failed — ${err instanceof Error ? err.message : err}`)
@@ -1222,20 +1228,25 @@ const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
   watch: cmdWatch,
 }
 
-const MUTATING = new Set(['collect', 'mark', 'set', 'sync', 'next'])
-
-// Read-only flag variants of mutating commands write nothing — a post-run
-// publish would push ledger rows the run did not change (and still ship
-// ignored debt). skip: collect --dry-run/--list-only, sync --dry-run.
-const READONLY_VARIANTS: Record<string, readonly string[]> = {
-  collect: ['--dry-run', '--list-only'],
-  sync: ['--dry-run'],
-}
-
+// Whether the invocation wrote ledger state — the post-run data-ref
+// publish fires only then. Read-only variants write nothing: collect
+// --dry-run/--list-only, sync --dry-run, and bare `next` (only --claim
+// writes). Publishing after them would push rows the run did not change,
+// including ignored debt.
 export function commandMutatedLedger(cmd: string, args: string[]): boolean {
-  return (
-    MUTATING.has(cmd) && !READONLY_VARIANTS[cmd]?.some((f) => args.includes(f))
-  )
+  switch (cmd) {
+    case 'collect':
+      return !args.includes('--dry-run') && !args.includes('--list-only')
+    case 'sync':
+      return !args.includes('--dry-run')
+    case 'next':
+      return args.includes('--claim')
+    case 'mark':
+    case 'set':
+      return true
+    default:
+      return false
+  }
 }
 
 /** Best-effort data-ref sync after ledger mutations — gitref is opt-in;
