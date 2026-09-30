@@ -176,4 +176,14 @@ describe('doc type collisions', () => {
     // a free word stays free
     assert.ok(!w.has('totally-free-name'))
   })
+
+  test('docTypes memoizes the filtered list — one warning per process', () => {
+    registerDocType({ name: 'dup', aliases: ['task'], adapter: () => ({}) })
+    const w = warnings(() => {
+      docTypes()
+      docTypes()
+      docTypes()
+    })
+    assert.equal(w.filter((l) => l.includes('skipped')).length, 1)
+  })
 })
