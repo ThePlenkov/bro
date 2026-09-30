@@ -83,6 +83,7 @@ fail-open.
 | `bro act wait [PR] [--merge]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green — the whole watcher loop in one command |
 | `bro act merge [PR] [--squash\|--merge\|--rebase]` | Merge **only when the exit gate is green** — refuses and names blockers when BLOCKED. Deletes the merged local branch too |
 | `bro cleanup [--remote] [--dry-run]` | Delete local branches whose PR merged — squash makes `git branch --merged` useless, so merged state comes from `gh pr list --state merged` |
+| `bro check [--evaluate] [--json]` | Run the repo's sverka workflow (`sverka run --format json`) — per-step status/duration + findings/verdict when evaluated. Exit code mirrors the executor. Resolves repo-local `sverka` → PATH → the `@sverka/cli` bundled with bro |
 | `bro drill down <title> [--under ID] [--ephemeral]` | Scoped descent — a child frame under the current leaf, as a `drill`-labeled bead |
 | `bro drill up --result T [--prevent T]… [--evidence R]…` | Ascend. `--result` is mandatory; each `--prevent` becomes a `discovered-from` task; evidence refs land in `bd provenance` (skipped for `--ephemeral` wisps) |
 | `bro unwind …` | Alias for `drill up` |
