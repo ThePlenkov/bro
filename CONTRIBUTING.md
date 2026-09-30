@@ -24,7 +24,9 @@ while libs ship standalone for SDK consumers (`@broject/core` connector
 types, `@broject/github` review host, …). `publish.yml` walks the dep
 order (core first, cli last); `prepare-for-release` placeholders +
 `npm trust` bootstrap any new package before OIDC can attach.
-skills/act, skills/convoy, skills/debt, skills/drill, skills/sdd, skills/wtf — thin skills: policy only, call `bro *`
+skills/<name>/                   — thin skills: policy only, call `bro *`
+                                   (act, convoy, debt, docs, drill, loop,
+                                   next, sdd, sync, work, wtf)
 plugin.json                      — agent-plugins.org manifest (repo root IS the Devin plugin)
 hooks.json + hooks/run.sh        — Devin lifecycle hooks → `bro hooks <event>`
 .claude-plugin/marketplace.json  — marketplace manifest (Claude + Codex + Cursor read it)
