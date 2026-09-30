@@ -42,6 +42,7 @@ function withRepo(
   chmodSync(join(bin, 'bd'), 0o755)
   const prevPath = process.env.PATH
   const prevList = process.env.FAKE_BD_LIST_FILE
+  const prevActor = process.env.BEADS_ACTOR
   const run = async (): Promise<void> => {
     execFileSync('git', ['init', '-q', dir])
     writeFileSync(
@@ -58,12 +59,16 @@ function withRepo(
     }
     process.env.PATH = `${bin}:${prevPath}`
     process.env.FAKE_BD_LIST_FILE = join(dir, 'list.json')
+    // pin the claim-ownership identity — git user.name is not hermetic
+    process.env.BEADS_ACTOR = 'test-agent'
     await fn(dir)
   }
   return run().finally(() => {
     process.env.PATH = prevPath
     if (prevList === undefined) delete process.env.FAKE_BD_LIST_FILE
     else process.env.FAKE_BD_LIST_FILE = prevList
+    if (prevActor === undefined) delete process.env.BEADS_ACTOR
+    else process.env.BEADS_ACTOR = prevActor
     rmSync(dir, { recursive: true, force: true })
   })
 }
@@ -151,6 +156,38 @@ describe('sddConnector', () => {
       assert.deepEqual(await h.stopGate!(ctx(dir)), [])
       assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), [])
     })
+  })
+
+  test('a marker claim held by another actor is foreign — never nudged', async () => {
+    // `bro work enter b1` armed the marker but the claim was refused —
+    // the store says other-agent holds it, so it is not ours to spec
+    await withRepo(
+      {
+        claims: ['b1'],
+        list: '[{"id":"b1","status":"in_progress","title":"held","issue_type":"task","assignee":"other-agent"}]',
+      },
+      async (dir) => {
+        const h = probe(dir)
+        assert.deepEqual(await h.stopGate!(ctx(dir)), [])
+        assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), [])
+        const start = await h.sessionStart!(ctx(dir))
+        assert.equal(start.filter((l) => l.includes('spec missing')).length, 0)
+      }
+    )
+  })
+
+  test('a marker claim whose assignee matches still counts as own', async () => {
+    await withRepo(
+      {
+        claims: ['b1'],
+        list: '[{"id":"b1","status":"in_progress","title":"thing","issue_type":"task","assignee":"test-agent"}]',
+      },
+      async (dir) => {
+        const gate = await probe(dir).stopGate!(ctx(dir))
+        assert.equal(gate.length, 1)
+        assert.match(gate[0]!.block ?? '', /b1 thing/)
+      }
+    )
   })
 
   test('remind mode reports missing specs as passive, not block', async () => {

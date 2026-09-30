@@ -23,6 +23,8 @@ export interface TaskRow {
   id: string
   title?: string
   status?: string
+  /** claim holder — the actor `claim()` wrote; ownership checks read it */
+  assignee?: string
   issue_type?: string
   priority?: number
   labels?: string[]

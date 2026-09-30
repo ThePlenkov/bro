@@ -142,16 +142,22 @@ export function hasSubmodules(worktreePath: string): boolean {
 
 /** Best-effort claim: when the slug names a real bead, mark it in_progress
  *  for this actor so parallel sessions see it taken. Beads-less repos and
- *  non-bead slugs pass silently. */
-function claimBead(slug: string): string | null {
+ *  non-bead slugs pass silently; a refused claim (another actor holds the
+ *  bead) is reported — the worktree still stands, but the bead isn't ours
+ *  and the session's `.task` marker must not read as ownership. */
+function claimBead(slug: string): { claimed?: string; refused?: boolean } {
   try {
     if (!taskStore().get(slug)) {
-      return null
+      return {}
     }
-    taskStore().claim(slug)
-    return slug
   } catch {
-    return null
+    return {} // beads-less repo or a dead store — nothing to say
+  }
+  try {
+    taskStore().claim(slug)
+    return { claimed: slug }
+  } catch {
+    return { refused: true }
   }
 }
 
@@ -282,7 +288,7 @@ function cmdEnter(argv: string[]): void {
     process.exit(1)
   }
   initSubmodules(path)
-  const claimed = claimBead(slug)
+  const claim = claimBead(slug)
   // a stack edge is only a real edge when the base is a local branch —
   // a raw commit-ish (--base abc123 / origin/main) yields no merge order
   const stacked =
@@ -298,8 +304,10 @@ note: gitignored dirs (node_modules, dist) are not shared — install deps there
   if (stacked) {
     console.log(`stacked on ${base} — merge order runs bottom-up`)
   }
-  if (claimed) {
-    console.log(`claimed bead ${claimed} for this session`)
+  if (claim.claimed) {
+    console.log(`claimed bead ${claim.claimed} for this session`)
+  } else if (claim.refused) {
+    console.error(`note: could not claim bead ${slug} — another actor may hold it`)
   }
 }
 

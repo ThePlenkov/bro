@@ -18,8 +18,10 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import {
+  bdActor,
   facade,
   gitTry,
+  isOwnClaim,
   loadConfig,
   sessionTaskClaims,
   type Connector,
@@ -106,9 +108,12 @@ function ownClaimsMissingSpec(ctx: ConnectorCtx, specDir: string): TaskRow[] {
     if (mine.size === 0) {
       return []
     }
+    // marker ids are attempted claims — a bead held by another actor is
+    // foreign work, never this session's to spec
+    const me = bdActor(ctx.dir)
     return tasks(ctx.dir)
       .list({ status: 'in_progress' })
-      .filter((r) => mine.has(r.id) && specState(r, ctx.dir, specDir) === 'missing')
+      .filter((r) => isOwnClaim(r, mine, me) && specState(r, ctx.dir, specDir) === 'missing')
   } catch {
     return []
   }
