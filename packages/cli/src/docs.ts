@@ -53,7 +53,7 @@ export function filterDocTypes(types: DocType[]): DocType[] {
   const out: DocType[] = []
   for (const t of types) {
     const names = [t.name, ...(t.aliases ?? [])]
-    const clash = names.find((n) => nouns.has(n) || n in STANDARD_VERBS)
+    const clash = names.find((n) => nouns.has(n) || Object.hasOwn(STANDARD_VERBS, n))
     if (clash) {
       console.error(`warning: doc type "${t.name}" noun "${clash}" is reserved — skipped`)
       continue

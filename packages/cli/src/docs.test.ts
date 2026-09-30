@@ -158,6 +158,16 @@ describe('doc type collisions', () => {
     })
   }
 
+  test('prototype-chain names are not reserved — `constructor` noun is kept', () => {
+    const proto: DocType = { name: 'constructor', adapter: () => ({}) }
+    let kept: DocType[] = []
+    const w = warnings(() => {
+      kept = filterDocTypes([taskDoc, storeDoc, proto])
+    })
+    assert.ok(kept.includes(proto))
+    assert.ok(w.every((l) => !l.includes('constructor')))
+  })
+
   test('reservedWords covers verbs, nouns, and plugin names', () => {
     const w = reservedWords()
     for (const word of ['list', 'show', 'close', 'exec', 'init', 'task', 'store', 'tasks']) {
