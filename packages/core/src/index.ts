@@ -28,7 +28,7 @@ export { definePlugin } from './plugin.ts'
 export type { BroPlugin } from './plugin.ts'
 export { docTypeNamed, docVerbs, STANDARD_VERBS, verbMethod } from './docs.ts'
 export type { DocAdapter, DocCtx, DocFlags, DocType, DocVerb, Scope } from './docs.ts'
-export { taskStore } from './tasks.ts'
+export { bdActor, taskStore } from './tasks.ts'
 export type { TaskFilter, TaskInput, TaskRow, TaskStore } from './tasks.ts'
 export type {
   CheckInfo,
@@ -46,7 +46,6 @@ export type {
   ScanOpts,
 } from './review.ts'
 export {
-  bdActor,
   connectorHooks,
   connectors,
   ensureAuth,

@@ -18,7 +18,6 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import {
-  bdActor,
   facade,
   gitTry,
   isOwnClaim,
@@ -108,10 +107,15 @@ function ownClaimsMissingSpec(ctx: ConnectorCtx, specDir: string): TaskRow[] {
     if (mine.size === 0) {
       return []
     }
-    // marker ids are attempted claims — a bead held by another actor is
-    // foreign work, never this session's to spec
-    const me = bdActor(ctx.dir)
-    return tasks(ctx.dir)
+    // marker ids are attempted claims — a task held by another actor is
+    // foreign work, never this session's to spec. The actor identity is
+    // the serving store's: a non-beads backend's assignee lives in that
+    // backend's identity space — comparing it to beads/git identity
+    // would wrongly disprove every claim; a store that exposes no actor
+    // keeps the marker's word (fail-open)
+    const store = tasks(ctx.dir)
+    const me = store.actor?.() ?? ''
+    return store
       .list({ status: 'in_progress' })
       .filter((r) => isOwnClaim(r, mine, me) && specState(r, ctx.dir, specDir) === 'missing')
   } catch {

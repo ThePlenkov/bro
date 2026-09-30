@@ -150,6 +150,12 @@ describe('taskStore', { skip: WIN32 }, () => {
     })
   })
 
+  test('actor resolves the bd claim identity', () => {
+    withFakeBd({ BEADS_ACTOR: 'agent-x' }, () => {
+      assert.equal(taskStore().actor?.(), 'agent-x')
+    })
+  })
+
   test('prefix parses the config value', () => {
     withFakeBd({ FAKE_BD_PREFIX: 'bro' }, () => {
       assert.equal(taskStore().prefix(), 'bro')

@@ -5,7 +5,6 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  bdActor,
   connectors,
   facade,
   facadeAuth,
@@ -17,6 +16,7 @@ import {
   stopGateContributions,
 } from './connectors.ts'
 import type { Connector } from './connectors.ts'
+import { bdActor } from './tasks.ts'
 import type { TaskStore } from './tasks.ts'
 
 const withRepo = (remote: string | null, fn: (dir: string) => void): void => {

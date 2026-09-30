@@ -23,11 +23,10 @@
  */
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { bdTry } from './bd.ts'
 import { gitTry } from './git.ts'
 import type { ReviewFacade } from './review.ts'
 import type { TaskRow, TaskStore } from './tasks.ts'
-import { taskStore } from './tasks.ts'
+import { bdActor, taskStore } from './tasks.ts'
 
 export interface ConnectorCtx {
   /** Working dir — repo root for project-scoped facades, the resolved
@@ -108,32 +107,6 @@ const shortTitle = (t: string | undefined): string => {
   return flat.length > 60 ? `${flat.slice(0, 60)}…` : flat
 }
 
-/** The identity `bd … --claim` writes to assignee — bd's actor chain
- *  (BEADS_ACTOR → BD_ACTOR → config `actor` → git user.name → $USER),
- *  minus the --actor flag no bro call passes. '' when nothing resolves;
- *  ownership checks treat that as unverifiable, never as a match. */
-export function bdActor(dir: string): string {
-  const env = process.env.BEADS_ACTOR?.trim() || process.env.BD_ACTOR?.trim() || ''
-  if (env !== '') {
-    return env
-  }
-  // 'actor = name' — take the value side; 'actor (not set…)' falls through
-  const cfg = bdTry(['config', 'get', 'actor'], 3_000, dir)
-  const line = cfg.code === 0 ? (cfg.out.trim().split('\n').pop()?.trim() ?? '') : ''
-  if (line !== '' && !/not set/i.test(line)) {
-    const eq = line.indexOf('=')
-    const v = (eq >= 0 ? line.slice(eq + 1) : line).trim().replace(/^['"]|['"]$/g, '')
-    if (v !== '') {
-      return v
-    }
-  }
-  const git = gitTry(['-C', dir, 'config', 'user.name'])
-  if (git.code === 0 && git.out.trim() !== '') {
-    return git.out.trim()
-  }
-  return process.env.USER?.trim() ?? ''
-}
-
 /** Bead ids this session claimed — the `task` aspect marker records one
  *  claim per detail line (line 1 is the timestamp). No session or no
  *  marker → nothing is "mine". Exported for policy connectors (sdd)
@@ -172,10 +145,12 @@ export function sessionTaskClaims(ctx: ConnectorCtx): Set<string> {
 /** Does `row` belong to this session's claims? The marker alone cannot
  *  say — it records attempts, and a refused `bro work enter` claim leaves
  *  the id armed while another actor holds the bead. Ownership is real only
- *  when the store's assignee matches this actor; an unverifiable row
- *  (missing assignee, unresolvable actor) keeps the marker's word —
- *  probes stay fail-open rather than re-nudging on claims we can't
- *  disprove. */
+ *  when the store's assignee matches this actor — pass the *serving*
+ *  store's claim identity (`store.actor?.()`); a foreign backend's
+ *  assignee is in its own identity space, never comparable to bdActor.
+ *  An unverifiable row (missing assignee, unresolvable/absent actor)
+ *  keeps the marker's word — probes stay fail-open rather than
+ *  re-nudging on claims we can't disprove. */
 export function isOwnClaim(row: TaskRow, mine: Set<string>, actor: string): boolean {
   if (!mine.has(row.id)) {
     return false

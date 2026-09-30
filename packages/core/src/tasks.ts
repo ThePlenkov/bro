@@ -14,6 +14,33 @@
  * init/info. Those keep calling bd() until they get doc types.
  */
 import { bd, bdJson, bdTry } from './bd.ts'
+import { gitTry } from './git.ts'
+
+/** The identity `bd … --claim` writes to assignee — bd's actor chain
+ *  (BEADS_ACTOR → BD_ACTOR → config `actor` → git user.name → $USER),
+ *  minus the --actor flag no bro call passes. '' when nothing resolves;
+ *  ownership checks treat that as unverifiable, never as a match. */
+export function bdActor(dir: string): string {
+  const env = process.env.BEADS_ACTOR?.trim() || process.env.BD_ACTOR?.trim() || ''
+  if (env !== '') {
+    return env
+  }
+  // 'actor = name' — take the value side; 'actor (not set…)' falls through
+  const cfg = bdTry(['config', 'get', 'actor'], 3_000, dir)
+  const line = cfg.code === 0 ? (cfg.out.trim().split('\n').pop()?.trim() ?? '') : ''
+  if (line !== '' && !/not set/i.test(line)) {
+    const eq = line.indexOf('=')
+    const v = (eq >= 0 ? line.slice(eq + 1) : line).trim().replace(/^['"]|['"]$/g, '')
+    if (v !== '') {
+      return v
+    }
+  }
+  const git = gitTry(['-C', dir, 'config', 'user.name'])
+  if (git.code === 0 && git.out.trim() !== '') {
+    return git.out.trim()
+  }
+  return process.env.USER?.trim() ?? ''
+}
 
 /** The row shape the task backend returns — fields optional, extras
  *  pass through so callers can read backend-specific data without the
@@ -74,6 +101,11 @@ export interface TaskStore {
   update(id: string, patch: Record<string, string | number>): void
   /** atomic assignee + in_progress — throws when already claimed */
   claim(id: string): void
+  /** the identity `claim()` writes to assignee — '' when unresolvable.
+   *  Stores without a claim-actor concept omit it; ownership checks then
+   *  keep the claim marker's word (fail-open) rather than disprove a
+   *  foreign assignee against an identity space that isn't theirs. */
+  actor?(): string
   reopen(id: string): void
   close(id: string, reason?: string): void
   /** hard delete — use close() for lifecycle transitions */
@@ -148,6 +180,7 @@ export function taskStore(dir?: string): TaskStore {
     claim: (id) => {
       bd(['update', id, '--claim'], dir)
     },
+    actor: () => bdActor(dir ?? process.cwd()),
     reopen: (id) => {
       bd(['reopen', id], dir)
     },
