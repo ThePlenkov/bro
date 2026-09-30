@@ -134,7 +134,8 @@ export interface ReviewFacade {
   parsePrRef(text: string): PrTarget | null
 
   prMeta(t: PrTarget): PrMeta
-  /** Merged-PR detail for harvest — throws when the PR isn't merged. */
+  /** Merged-PR detail for harvest — throws when the PR isn't merged or a
+   *  MERGED PR reports no mergedAt. */
   mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo
   mergedPrs(repo: string, q?: MergedPrQuery): MergedPr[]
 

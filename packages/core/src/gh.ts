@@ -66,7 +66,7 @@ export function ghTry(args: string[], cwd?: string): { code: number; out: string
  *  repo could target the wrong repository. */
 export function resolveRepo(positional: string[], cwd?: string): string {
   const [owner, repo] = positional
-  if (owner && repo) {
+  if (positional.length === 2 && owner && repo) {
     return `${owner}/${repo}`
   }
   if (positional.length !== 0) {

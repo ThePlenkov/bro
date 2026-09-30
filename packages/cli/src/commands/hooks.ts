@@ -225,11 +225,14 @@ function mutationCite(
   }
   const verbs = MUTATION_VERBS[plugin]
   if (verbs) {
-    // `act wait` is a read that becomes a mutation with --merge/--cleanup
+    // `act wait` is a read that becomes a mutation with --merge/--cleanup;
+    // `debt next` reads the queue but --claim CAS-claims the top finding
     const hit =
       plugin === 'act' && verb === 'wait'
         ? /--(?:merge|cleanup)\b/.test(rest)
-        : verb !== undefined && verbs.has(verb)
+        : plugin === 'debt' && verb === 'next'
+          ? /--claim\b/.test(rest)
+          : verb !== undefined && verbs.has(verb)
     return hit ? cite : null
   }
   return BARE_MUTATIONS.has(plugin) && !BARE_READ_FLAGS[plugin]?.test(rest)
@@ -533,7 +536,14 @@ function markSkillHinted(sessionId: string, skill: string): void {
       return
     }
     mkdirSync(dirname(path), { recursive: true })
-    writeFileSync(path, `${Date.now()}\n`)
+    // exclusive create — concurrent post-tool hooks in the same session
+    // both see no marker; only the first write wins, the loser's EEXIST
+    // skips the prune too
+    try {
+      writeFileSync(path, `${Date.now()}\n`, { flag: 'wx' })
+    } catch {
+      return
+    }
     // hinted/ sits below the dir armSession prunes, so stale markers
     // need their own sweep — same TTL, same best-effort
     const cutoff = Date.now() - MARKER_TTL_MS
