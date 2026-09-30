@@ -82,9 +82,11 @@ function parseJsonl<T>(text: string): T[] {
 /** Newest harvest files under <sha> — the trees API lists paths, raw
  *  serves the content by sha (one repo, one dashboard: a handful of GETs). */
 async function fetchHarvests(sha: string): Promise<Finding[]> {
-  const tree = (await (
-    await fetch(`${TREE_API}/${sha}?recursive=1`)
-  ).json()) as { tree?: Array<{ path: string; type: string }> }
+  const treeRes = await fetch(`${TREE_API}/${sha}?recursive=1`)
+  if (!treeRes.ok) {
+    return []
+  }
+  const tree = (await treeRes.json()) as { tree?: Array<{ path: string; type: string }> }
   const paths = (tree.tree ?? [])
     .filter((e) => e.type === 'blob' && e.path.startsWith(HARVEST_PREFIX) && e.path.endsWith('.jsonl'))
     .map((e) => e.path)
