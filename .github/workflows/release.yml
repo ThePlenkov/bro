@@ -85,7 +85,11 @@ jobs:
           fi
           git commit -m "release: v$v"
           git push -u --force-with-lease origin "release/v$v"
-          if gh pr view "release/v$v" --json number >/dev/null 2>&1; then
+          if ! prs=$(gh pr list --head "release/v$v" --state open --base main --json number --jq 'length'); then
+            echo "gh pr list failed — cannot tell whether a release PR exists"
+            exit 1
+          fi
+          if [ "$prs" != "0" ]; then
             echo "release PR already exists — branch updated"
           elif ! gh pr create --title "release: v$v" --base main \
             --body "Version bump cut by \`nx release version\` (specifier: $SPEC). Merge → release-tag.yml tags \`v$v\` on main → publish.yml ships it via OIDC trusted publishing."; then
