@@ -11,14 +11,17 @@ import { gitlabConnector, gitlabReview } from './index.ts'
 const WIN32 = process.platform === 'win32'
 
 const MR_DEFAULT =
-  '{"iid":%IID%,"state":"merged","title":"did the thing","web_url":"https://gitlab.com/acme/widgets/-/merge_requests/%IID%","merged_at":"2026-01-02T00:00:00Z","updated_at":"2026-01-03T00:00:00Z","merge_commit_sha":"abc123","labels":["bug"],"sha":"abc123","source_branch":"feat","author":{"username":"dev"}}'
+  '{"iid":%IID%,"state":"merged","title":"did the thing","web_url":"https://gitlab.com/acme/widgets/-/merge_requests/%IID%","merged_at":"2026-01-02T00:00:00Z","updated_at":"2026-01-03T00:00:00Z","merge_commit_sha":"abc123","labels":["bug"],"sha":"abc123","source_branch":"feat","diff_refs":{"head_sha":"abc123"},"author":{"username":"dev"}}'
 
-const DISCUSSIONS = `[{"id":"d1","individual_note":false,"notes":[{"id":1,"resolvable":true,"resolved":false,"active":true,"body":"fix this","created_at":"2026-01-01","author":{"username":"project_7_bot_x"},"position":{"new_path":"a.ts","new_line":3}}]},{"id":"d2","individual_note":true,"notes":[{"id":2,"resolvable":false,"body":"nope","author":{"username":"dev"}}]},{"id":"d3","individual_note":false,"notes":[{"id":3,"resolvable":false,"body":"chat","author":{"username":"dev"}}]},{"id":"d4","individual_note":false,"notes":[{"id":4,"resolvable":true,"resolved":true,"active":false,"body":"done","author":{"username":"dev"}}]}]`
+// d1 sits on the current diff head — d4's note is pinned to oldsha99,
+// so outdated comes from position.head_sha, not the flaky `active` flag
+const DISCUSSIONS = `[{"id":"d1","individual_note":false,"notes":[{"id":1,"resolvable":true,"resolved":false,"body":"fix this","created_at":"2026-01-01","author":{"username":"project_7_bot_x"},"position":{"new_path":"a.ts","new_line":3,"head_sha":"abc123"}}]},{"id":"d2","individual_note":true,"notes":[{"id":2,"resolvable":false,"body":"nope","author":{"username":"dev"}}]},{"id":"d3","individual_note":false,"notes":[{"id":3,"resolvable":false,"body":"chat","author":{"username":"dev"}}]},{"id":"d4","individual_note":false,"notes":[{"id":4,"resolvable":true,"resolved":true,"body":"done","author":{"username":"dev"},"position":{"new_path":"b.ts","new_line":9,"head_sha":"oldsha99"}}]}]`
 
-/** Scripted glab on PATH — records argv to $FAKE_GLAB_LOG, answers REST
- *  reads by endpoint shape and writes by method+endpoint. */
+/** Scripted glab on PATH — records argv + GITLAB_HOST to $FAKE_GLAB_LOG,
+ *  answers REST reads by endpoint shape and writes by method+endpoint. */
 const FAKE_GLAB = `#!/bin/sh
 echo "$@" >> "$FAKE_GLAB_LOG"
+echo "env:GITLAB_HOST=$GITLAB_HOST" >> "$FAKE_GLAB_LOG"
 case "$1 $2" in
   "auth status") if [ "$FAKE_GLAB_AUTH_FAIL" = "1" ]; then exit 1; fi; exit 0 ;;
   "api -X") case "$3 $4" in
@@ -27,7 +30,7 @@ case "$1 $2" in
       "PUT "*"/rebase") if [ "$FAKE_GLAB_REBASE_FAIL" = "1" ]; then echo 'rebase refused' >&2; exit 1; fi; echo '{}' ;;
       "PUT "*"/merge") echo '{"state":"merged"}' ;;
       "POST "*"/labels") if [ "$FAKE_GLAB_LABEL_EXISTS" = "1" ]; then echo 'Label already exists' >&2; exit 1; fi; echo '{}' ;;
-      "PUT "*"/labels") echo '{}' ;;
+      "PUT "*"/labels/"*) echo '{}' ;;
       "PUT "*"/merge_requests/"*) echo '{"iid":7,"updated_at":"2026-02-02T00:00:00Z"}' ;;
     esac ;;
   "api "*) case "$2" in
@@ -160,12 +163,15 @@ describe('gitlab connector', () => {
       const msg = gitlabConnector.auth!({ dir: mkdtempSync(join(tmpdir(), 'x-')) })
       assert.match(msg ?? '', /glab not authenticated for gitlab\.com/)
     })
-    // a self-hosted remote scopes the probe to its own host
+    // a self-hosted remote scopes the probe to its own host — both the
+    // --hostname flag and the GITLAB_HOST env pin
     const selfHosted = makeRepo('git@gitlab.corp.com:a/b.git')
     try {
       withFakeGlab({}, (log) => {
         gitlabConnector.auth!({ dir: selfHosted })
-        assert.match(readFileSync(log, 'utf8'), /auth status --hostname gitlab\.corp\.com/)
+        const lines = readFileSync(log, 'utf8')
+        assert.match(lines, /auth status --hostname gitlab\.corp\.com/)
+        assert.match(lines, /env:GITLAB_HOST=gitlab\.corp\.com/)
       })
     } finally {
       rmSync(selfHosted, { recursive: true, force: true })
@@ -241,6 +247,14 @@ describe('gitlabReview', { skip: WIN32 }, () => {
       assert.match(lines, /merge_requests\/42\/pipelines/)
       assert.match(lines, /pipelines\/11\/jobs/)
       assert.match(lines, /pipelines\/11\/bridges/)
+    })
+  })
+
+  test('checks ignores pipelines pinned to an older commit', () => {
+    // the fake's only pipeline is sha abc123 — an MR at a moved head has
+    // no current pipeline, so no checks rather than stale ones
+    withFakeGlab({ FAKE_GLAB_MR: '{"iid":42,"state":"opened","sha":"zzz999"}' }, () => {
+      assert.deepEqual(gitlabReview().checks(target), [])
     })
   })
 
@@ -388,6 +402,29 @@ describe('gitlabReview', { skip: WIN32 }, () => {
     })
   })
 
+  test('createLabel retries an existing label through its resource route', () => {
+    withFakeGlab({ FAKE_GLAB_LABEL_EXISTS: '1' }, (log) => {
+      gitlabReview().createLabel('acme/widgets', 'debt:collected', '#112233')
+      const lines = readFileSync(log, 'utf8')
+      assert.match(lines, /POST projects\/acme%2Fwidgets\/labels -f name=debt:collected/)
+      // GitLab updates a label via PUT /labels/:name — the deprecated
+      // collection PUT with name as a param must not be used
+      assert.match(lines, /PUT projects\/acme%2Fwidgets\/labels\/debt%3Acollected -f color=#112233/)
+    })
+  })
+
+  test('facade calls pin GITLAB_HOST to the detected remote host', () => {
+    const dir = makeRepo('git@gitlab.corp.com:a/b.git')
+    try {
+      withFakeGlab({}, (log) => {
+        gitlabReview(dir).prsForBranch('main')
+        assert.match(readFileSync(log, 'utf8'), /env:GITLAB_HOST=gitlab\.corp\.com/)
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('currentPr/prsForBranch answer from the checked-out branch', () => {
     const dir = makeRepo('git@gitlab.com:acme/widgets.git')
     try {
@@ -427,10 +464,13 @@ describe('gitlabReview', { skip: WIN32 }, () => {
         deleteBranch: true,
       })
       assert.equal(state, 'MERGED')
+      const lines = readFileSync(log, 'utf8')
       assert.match(
-        readFileSync(log, 'utf8'),
-        /PUT projects\/acme%2Fwidgets\/merge_requests\/42\/merge -f sha=abc123 -f squash=true -f merge_method=merge -f should_remove_source_branch=true/
+        lines,
+        /PUT projects\/acme%2Fwidgets\/merge_requests\/42\/merge -f sha=abc123 -f squash=true -f should_remove_source_branch=true/
       )
+      // merge_method is project config, not a merge-endpoint param
+      assert.doesNotMatch(lines, /merge_method/)
     })
   })
 })

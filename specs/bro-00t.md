@@ -24,12 +24,17 @@ GraphQL schema is needed. The mapping:
   (`projects/<enc>`).
 - **threads** ⇐ MR discussions: only resolvable, non-system discussion
   notes count (individual notes are issue-style comments, not threads).
-  `resolved` = all resolvable notes resolved; `outdated` = first note's
-  `active === false`. resolve/unresolve = `PUT …/discussions/:id` with
-  `resolved=`; reply = `POST …/discussions/:id/notes`.
-- **checks** ⇐ head-pipeline jobs + bridges, `status` → bucket map.
-  GitLab has no per-job required flag — pipeline success is a
-  project-level merge gate, so `requiredOnly` returns all.
+  `resolved` = all resolvable notes resolved; `outdated` = the first
+  note's `position.head_sha` differing from the MR's
+  `diff_refs.head_sha` (the REST `active` flag isn't reliably
+  serialized — it's only the fallback when a sha is absent).
+  resolve/unresolve = `PUT …/discussions/:id` with `resolved=`; reply =
+  `POST …/discussions/:id/notes`.
+- **checks** ⇐ jobs + bridges of the pipeline whose `sha` matches the
+  MR head, `status` → bucket map — a stale-commit pipeline is not the
+  current check state, so no match means `[]`. GitLab has no per-job
+  required flag — pipeline success is a project-level merge gate, so
+  `requiredOnly` returns all.
 - **checkAnnotations** ⇐ `new Map()` — GitLab has no annotations
   endpoint; an absent key already means exactly that in the contract.
 - **reviewedShas** ⇐ MR diff versions' `head_commit_sha` — the pushes
@@ -40,10 +45,12 @@ GraphQL schema is needed. The mapping:
   discussions and missing approvals are gated by their own signals.
   `mergeState`: `need_rebase`→BEHIND, else the status uppercased.
 - **merge** ⇐ `PUT …/merge` with `sha` (the expectedHeadSha pin — a
-  moved head answers 406) + `merge_method` map (merge→merge,
-  rebase→rebase_merge, squash→merge+squash); a re-GET returns the
-  authoritative post-merge state (auto-merge holds surface as non-MERGED).
-  GitLab has no `admin` bypass param — the flag is ignored.
+  moved head answers 409) + `squash=true` for the squash method; a
+  re-GET returns the authoritative post-merge state (auto-merge holds
+  surface as non-MERGED). The endpoint has no merge-method param —
+  merge-vs-rebase is project config (`merge_method` there), so
+  non-squash `method`s land the project's way. No `admin` bypass
+  param either — the flag is ignored.
 - **updateBranch** ⇐ head-sha check, then `PUT …/rebase`. GitLab's only
   update mechanism rebases rather than merging base into head; the
   response is async-accepted, which is fine — the caller re-polls.
@@ -56,9 +63,11 @@ GraphQL schema is needed. The mapping:
 - **auth** ⇐ `glab auth status` (`--hostname` for non-gitlab.com hosts).
 - **matchRemote** ⇐ `gitlab.com` + `*.gitlab.com` only — the same
   lookalike rule as github; self-hosted instances resolve via
-  `connectors.reviews` config. All `glab` calls run `cwd=dir`, so glab's
-  own remote detection picks the instance; `prLink`/`parsePrRef` bind
-  the detected host.
+  `connectors.reviews` config. All `glab` calls run `cwd=dir` with
+  `GITLAB_HOST` pinned to the detected remote host (or the user's own
+  `GITLAB_HOST` when the dir has no remote) — glab's in-repo detection
+  would usually agree, but the pin makes configured self-hosted setups
+  deterministic; `prLink`/`parsePrRef` bind the same host.
 
 Seam verdicts (no core changes needed):
 

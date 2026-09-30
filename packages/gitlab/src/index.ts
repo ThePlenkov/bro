@@ -28,7 +28,7 @@ export const gitlabConnector: Connector = {
     if (host !== 'gitlab.com') {
       args.push('--hostname', host)
     }
-    return glabTry(args, ctx.dir).code === 0
+    return glabTry(args, { cwd: ctx.dir, env: { GITLAB_HOST: host } }).code === 0
       ? null
       : `glab not authenticated for ${host} — run \`glab auth login\``
   },
