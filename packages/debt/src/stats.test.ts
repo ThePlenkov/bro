@@ -116,6 +116,13 @@ describe('groupStats', () => {
     assert.equal(rows[0]!.key, 'unknown')
   })
 
+  test('malformed rows: non-string group key falls back to "unknown"', () => {
+    const row = rec('open')
+    ;(row as { author: unknown }).author = 42
+    const rows = groupStats([row], 'author')
+    assert.equal(rows[0]!.key, 'unknown')
+  })
+
   test('malformed rows: unrecognized status counts in total, no NaN in buckets', () => {
     const row = rec('open')
     row.status = 'deferred' as DebtStatus

@@ -17,6 +17,7 @@ export {
   markProcessedAt,
   readLedgerOverlays,
   readProcessedAt,
+  readThreadBounds,
   upsertLedgerOverlays,
   upsertRecords,
   writeHarvestFile,
@@ -57,8 +58,10 @@ export type { DebtPlan, DebtVerdict } from './plan.ts'
 export { applyDebtVerdicts } from './store.ts'
 export type { DebtVerdictInput } from './store.ts'
 export { debtConnector } from './connector.ts'
-export { groupStats } from './stats.ts'
+export { groupKey, groupStats } from './stats.ts'
 export type { StatBucket, StatsGroupBy } from './stats.ts'
+export { buildTrend } from './trend.ts'
+export type { ThreadBounds, TrendGranularity, TrendOptions, TrendPoint } from './trend.ts'
 export {
   ALL_SOURCES,
   COLLECTORS,

@@ -28,13 +28,21 @@ const KNOWN_STATUSES: ReadonlySet<string> = new Set([
   'duplicate',
 ])
 
+/** The grouping key for one record — shared by stats and trend so both
+ *  views bucket a row the same way. Legacy rows predate `source` — they
+ *  belong to review-threads; ledger is unvalidated JSONL, so author/area
+ *  can be missing too. */
+export function groupKey(r: DebtRecord, by: StatsGroupBy): string {
+  const raw = by === 'source' ? (r.source ?? 'review-threads') : r[by]
+  // Unvalidated JSONL can carry a non-string — `raw || 'unknown'` would
+  // pass it through and localeCompare would crash sorting on it.
+  return typeof raw === 'string' && raw !== '' ? raw : 'unknown'
+}
+
 export function groupStats(records: DebtRecord[], by: StatsGroupBy): StatBucket[] {
   const buckets = new Map<string, StatBucket>()
   for (const r of records) {
-    // legacy rows predate `source` — they belong to review-threads;
-    // ledger is unvalidated JSONL, so author/area can be missing too
-    const raw = by === 'source' ? (r.source ?? 'review-threads') : r[by]
-    const key = raw || 'unknown'
+    const key = groupKey(r, by)
     let b = buckets.get(key)
     if (!b) {
       b = { key, total: 0, open: 0, claimed: 0, done: 0, wontfix: 0, duplicate: 0, fixRate: null }

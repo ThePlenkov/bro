@@ -27,6 +27,7 @@ import {
   applyDebtVerdicts,
   applyLastN,
   buildSummary,
+  buildTrend,
   claimDebtRecord,
   clearDebtLabels,
   collectPr,
@@ -45,6 +46,7 @@ import {
   readDebtRecords,
   readLedgerOverlays,
   readProcessedAt,
+  readThreadBounds,
   markProcessedAt,
   resolveHarvestPrs,
   syncDebtToBeads,
@@ -61,6 +63,7 @@ import {
   type DebtStatus,
   type DebtVerdict,
   type StatsGroupBy,
+  type TrendGranularity,
   type HarvestPrFilters,
 } from '@broject/debt'
 
@@ -86,6 +89,9 @@ Commands:
   status                          Ledger summary + unprocessed merged PR count
   stats [--by author|source|area] Signal per reviewer/source/area — fix% is
         [--json]                  done share of decided rows (default: author)
+  trend [--by author|source|area] Burn-down — open debt per time bucket
+        [--bucket week|day]       (ungrouped renders a single "all" series;
+        [--since DATE] [--json]   --json is chart-ready data)
   prs [--limit N] [--all]         Unprocessed merged PRs (--all: full matrix)
   list [filters]                  Ledger rows (--status, --area, --author,
                                   --priority, --pr, --limit)
@@ -770,6 +776,65 @@ function cmdStats(argv: string[]): void {
   console.error(`debt stats: ${rows.length} ${label}(s)`)
 }
 
+// --- trend -----------------------------------------------------------------
+
+const TREND_GRANULARITIES: readonly TrendGranularity[] = ['week', 'day']
+
+function enumFlag<T extends string>(
+  arg: string,
+  value: string | null,
+  allowed: readonly T[]
+): T {
+  if (value !== null && (allowed as readonly string[]).includes(value)) {
+    return value as T
+  }
+  console.error(`error: ${arg} must be one of ${allowed.join('|')}, got "${value}"`)
+  process.exit(2)
+}
+
+function dateFlag(arg: string, value: string | null): string {
+  if (value !== null && !Number.isNaN(Date.parse(value))) {
+    return value
+  }
+  console.error(`error: ${arg} must be a date, got "${value}"`)
+  process.exit(2)
+}
+
+function cmdTrend(argv: string[]): void {
+  const json = argv.includes('--json')
+  let by: StatsGroupBy | null = null
+  let granularity: TrendGranularity = 'week'
+  let since: string | null = null
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]!
+    if (arg === '--by') {
+      by = enumFlag(arg, readOption(argv, i), STATS_BY)
+      i += 1
+    } else if (arg === '--bucket') {
+      granularity = enumFlag(arg, readOption(argv, i), TREND_GRANULARITIES)
+      i += 1
+    } else if (arg === '--since') {
+      since = dateFlag(arg, readOption(argv, i))
+      i += 1
+    }
+  }
+
+  const points = buildTrend(readDebtRecords(), readThreadBounds(), {
+    by,
+    granularity,
+    since,
+  })
+  if (json) {
+    console.log(JSON.stringify(points, null, 2))
+    return
+  }
+  console.log('bucket\tkey\topened\tclosed\topen')
+  for (const p of points) {
+    console.log(`${p.bucket}\t${p.key}\t${p.opened}\t${p.closed}\t${p.open}`)
+  }
+  console.error(`debt trend: ${points.length} point(s)`)
+}
+
 // --- prs -------------------------------------------------------------------
 
 function cmdPrs(argv: string[]): void {
@@ -1101,6 +1166,7 @@ const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
   collect: cmdCollect,
   status: cmdStatus,
   stats: cmdStats,
+  trend: cmdTrend,
   prs: cmdPrs,
   list: cmdList,
   mark: cmdMark,
