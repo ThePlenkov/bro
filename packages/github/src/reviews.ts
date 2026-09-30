@@ -3,7 +3,7 @@
  * `gh` CLI. Ported from act/github.ts and debt/github.ts — same calls,
  * same semantics, normalized onto the domain types in @broject/core/review.
  */
-import { gh, ghAsync, ghJson, ghJsonAsync, ghTry } from '@broject/core'
+import { gh, ghAsync, ghJson, ghTry } from '@broject/core'
 import type {
   CheckInfo,
   MergeOpts,
@@ -422,7 +422,7 @@ async function pooled<T>(items: T[], cap: number, fn: (item: T) => Promise<void>
   await Promise.all(
     Array.from({ length: Math.min(cap, items.length) }, async () => {
       while (next < items.length) {
-        await fn(items[next++]!)
+        await fn(items[next++]!) // NOSONAR — serial within a worker; the workers overlap
       }
     })
   )
@@ -538,7 +538,7 @@ async function scanMergedPrs(
       // >100 threads on one PR is rare — full paginated fetch per-PR.
       if (node.reviewThreads?.pageInfo?.hasNextPage) {
         try {
-          threads = await reviewThreads(t)
+          threads = await reviewThreads(t) // NOSONAR — rare per-PR fallback inside the chunk loop
         } catch {
           continue
         }
@@ -569,7 +569,7 @@ async function updatedAtFor(targets: PrTarget[]): Promise<Map<number, string>> {
     return out
   }
   const { owner, name } = parts(targets[0]!.repo)
-  for (const chunk of chunks(targets, 50)) {
+  await pooled(chunks(targets, 50), 4, async (chunk) => {
     let rows: Array<{ updatedAt?: string | null } | null>
     try {
       rows = parseAliasedPrs(
@@ -587,7 +587,7 @@ async function updatedAtFor(targets: PrTarget[]): Promise<Map<number, string>> {
         'u'
       )
     } catch {
-      continue
+      return
     }
     for (const [i, t] of chunk.entries()) {
       const at = rows[i]?.updatedAt
@@ -595,7 +595,7 @@ async function updatedAtFor(targets: PrTarget[]): Promise<Map<number, string>> {
         out.set(t.pr, at)
       }
     }
-  }
+  })
   return out
 }
 

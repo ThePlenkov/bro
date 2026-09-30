@@ -442,16 +442,16 @@ async function scanPr(
   return { pr: pr.number, result, labels, updatedAt, listedAt: pr.updatedAt, scannedAt }
 }
 
-/** Label writes + processed cursors for the scanned PRs — batched through
- *  `labelPrs` when the connector offers it, serial per-PR otherwise.
- *  `debt:skipped` is never written over and still earns a cursor: nothing
- *  changed for it, so probe-time updatedAt is the honest marker. */
-async function labelScannedPrs(
-  rev: ReviewFacade,
-  args: CollectArgs,
-  scanned: ScannedPr[]
-): Promise<number> {
-  const writes: Array<{ s: ScannedPr; op: PrLabelOp }> = []
+interface LabelWrite {
+  s: ScannedPr
+  op: PrLabelOp
+}
+
+/** One label op per non-skipped PR — the machine state from the scan
+ *  outcome. `skipped` is never in the remove set: a late human opt-out
+ *  survives the write either way. */
+function buildLabelWrites(args: CollectArgs, scanned: ScannedPr[]): LabelWrite[] {
+  const writes: LabelWrite[] = []
   for (const s of scanned) {
     if (prDebtState(s.labels) === 'skipped') {
       continue
@@ -464,57 +464,87 @@ async function labelScannedPrs(
         add: [debtLabel(state)],
         // A remove names only labels the probe observed — removing an
         // absent label fails the whole pr-edit call, losing the add.
-        // `skipped` is never removed: a late human opt-out survives.
         remove: DEBT_STATES.filter((x) => x !== 'skipped' && x !== state)
           .map(debtLabel)
           .filter((l) => s.labels.some((have) => have.toLowerCase() === l)),
       },
     })
   }
+  return writes
+}
 
-  // post-write updatedAt per PR, or absent when the write failed / the
-  // connector has no bulk path
-  const wrote = new Map<number, string | null>()
-  if (typeof rev.labelPrs === 'function' && writes.length > 0) {
-    try {
-      for (const [pr, at] of await rev.labelPrs(writes.map((w) => w.op))) {
-        wrote.set(pr, at)
-      }
-    } catch (err) {
-      console.error(
-        `warning: bulk label write failed — falling back per-PR ` +
-          `(${err instanceof Error ? err.message : err})`
-      )
-    }
+/** The bulk write — post-write updatedAt per applied PR; null when the
+ *  connector lacks the fast path or the batch failed outright. */
+async function bulkLabelWrites(
+  rev: ReviewFacade,
+  writes: LabelWrite[]
+): Promise<Map<number, string | null> | null> {
+  if (typeof rev.labelPrs !== 'function' || writes.length === 0) {
+    return null
   }
+  try {
+    return await rev.labelPrs(writes.map((w) => w.op))
+  } catch (err) {
+    console.error(
+      `warning: bulk label write failed — falling back per-PR ` +
+        `(${err instanceof Error ? err.message : err})`
+    )
+    return null
+  }
+}
+
+/** One write — applied in bulk already, else the serial pre-bulk path.
+ *  `stamp` is the post-write updatedAt when observed; `ok: false` means
+ *  the write failed (unlabeled → rescan next run, self-healing). */
+function ensureLabelWritten(
+  rev: ReviewFacade,
+  args: CollectArgs,
+  w: LabelWrite,
+  wrote: Map<number, string | null> | null
+): { ok: boolean; stamp: string | null } {
+  if (wrote?.has(w.s.pr)) {
+    return { ok: true, stamp: wrote.get(w.s.pr) ?? null }
+  }
+  try {
+    applyCollectLabel(rev, {
+      repo: args.repo,
+      pr: w.s.pr,
+      state: w.s.result.incoming.length > 0 ? 'collected' : 'clean',
+    })
+  } catch (err) {
+    console.error(
+      `warning: label write on ${rev.prLink(args.repo, w.s.pr)} failed — ` +
+        `${err instanceof Error ? err.message : err}`
+    )
+    return { ok: false, stamp: null }
+  }
+  return { ok: true, stamp: null }
+}
+
+/** Label writes + processed cursors for the scanned PRs — batched through
+ *  `labelPrs` when the connector offers it, serial per-PR otherwise.
+ *  `debt:skipped` is never written over and still earns a cursor: nothing
+ *  changed for it, so probe-time updatedAt is the honest marker. */
+async function labelScannedPrs(
+  rev: ReviewFacade,
+  args: CollectArgs,
+  scanned: ScannedPr[]
+): Promise<number> {
+  const writes = buildLabelWrites(args, scanned)
+  const wrote = await bulkLabelWrites(rev, writes)
 
   let labeled = 0
-  for (const { s, op } of writes) {
-    let cursor: string | null | undefined = wrote.get(s.pr)
-    if (!wrote.has(s.pr)) {
-      // serial fallback — the pre-bulk path, same calls as before
-      try {
-        applyCollectLabel(rev, {
-          repo: args.repo,
-          pr: s.pr,
-          state: s.result.incoming.length > 0 ? 'collected' : 'clean',
-        })
-      } catch (err) {
-        console.error(
-          `warning: label write on ${rev.prLink(args.repo, s.pr)} failed — ` +
-            `${err instanceof Error ? err.message : err}`
-        )
-        continue
-      }
-      labeled += 1
-    } else {
-      labeled += 1
+  for (const w of writes) {
+    const res = ensureLabelWritten(rev, args, w, wrote)
+    if (!res.ok) {
+      continue // write failed — unlabeled, next run rescans
     }
+    labeled += 1
     // Cursor: post-write updatedAt (bulk result or a fresh fetch) — a
     // pre-write stamp would flag the PR stale on every later run.
-    cursor ??=
-      rev.prUpdatedAt(op.t) ?? s.updatedAt ?? s.listedAt ?? s.scannedAt
-    markProcessedAt([s.pr], cursor)
+    const cursor =
+      res.stamp ?? rev.prUpdatedAt(w.op.t) ?? w.s.updatedAt ?? w.s.listedAt ?? w.s.scannedAt
+    markProcessedAt([w.s.pr], cursor)
   }
   // Skipped PRs: no write touched them — probe-time updatedAt IS current;
   // serial-path PRs fetch fresh, exactly like the old loop.
@@ -566,6 +596,45 @@ async function probeTargets(
   }
 }
 
+/** Probe → commit → label. The bulk probe carries meta+threads+labels+
+ *  updatedAt per PR when the connector offers it; serial per-PR fetches
+ *  inside scanPr cover whatever the bulk pass missed. */
+async function harvestTargets(
+  rev: ReviewFacade,
+  args: CollectArgs,
+  targets: Awaited<ReturnType<typeof resolveHarvestPrs>>,
+  labelingEnabled: boolean
+): Promise<{ rows: number; labeled: number }> {
+  const scans = await probeTargets(rev, args.repo, targets)
+
+  const scanned: ScannedPr[] = []
+  let rows = 0
+  for (const [i, pr] of targets.entries()) {
+    // Serial commit phase by design: ledger writes and the per-PR
+    // progress line keep a deterministic order.
+    const s = await scanPr( // NOSONAR — deliberate serial awaits
+      rev,
+      args,
+      pr,
+      scans?.get(pr.number),
+      labelingEnabled,
+      i + 1,
+      targets.length
+    )
+    if (s === null) {
+      continue
+    }
+    scanned.push(s)
+    rows += s.result.incoming.length
+  }
+
+  const labeled =
+    labelingEnabled && !args.dryRun && scanned.length > 0
+      ? await labelScannedPrs(rev, args, scanned)
+      : 0
+  return { rows, labeled }
+}
+
 async function collectReviewThreads(rev: ReviewFacade, args: CollectArgs): Promise<void> {
   // Fetch at least as many candidates as --last requests, or it silently caps.
   const listLimit = Math.max(args.filters.lastN ?? 0, 100)
@@ -603,38 +672,10 @@ async function collectReviewThreads(rev: ReviewFacade, args: CollectArgs): Promi
     ensureDebtLabels(rev, args.repo)
   }
 
-  // Probe phase — one bounded-concurrency fetch for meta + threads +
-  // labels + updatedAt per PR when the connector offers it; serial
-  // per-PR fetches inside scanPr cover whatever the bulk pass missed.
-  const scans = await probeTargets(rev, args.repo, targets)
-
-  // Commit phase — records, harvest files, then labels + cursors.
-  const scanned: ScannedPr[] = []
-  let totalRows = 0
-  for (const [i, pr] of targets.entries()) {
-    const s = await scanPr(
-      rev,
-      args,
-      pr,
-      scans?.get(pr.number),
-      labelingEnabled,
-      i + 1,
-      targets.length
-    )
-    if (s === null) {
-      continue
-    }
-    scanned.push(s)
-    totalRows += s.result.incoming.length
-  }
-
-  let labeled = 0
-  if (labelingEnabled && !args.dryRun && scanned.length > 0) {
-    labeled = await labelScannedPrs(rev, args, scanned)
-  }
+  const { rows, labeled } = await harvestTargets(rev, args, targets, labelingEnabled)
 
   const labeledMsg = labelingEnabled ? `labeled ${labeled} PR(s)` : 'labels disabled'
-  console.error(`debt collect: wrote ${totalRows} row(s), ${labeledMsg}`)
+  console.error(`debt collect: wrote ${rows} row(s), ${labeledMsg}`)
 }
 
 // --- status ----------------------------------------------------------------
