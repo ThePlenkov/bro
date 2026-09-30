@@ -44,11 +44,13 @@ export function registerDocType(type: DocType): void {
 
 /** Registration filter: a doc type whose noun duplicates another
  *  type's name/alias, spells a standard verb (`bro list` where 'list'
- *  is also a noun is unparseable), or overlaps another type's
- *  idPrefix (bare-ref inference becomes ambiguous) is dropped with a
- *  warning — one bad plugin doc must not corrupt the namespace. */
+ *  is also a noun is unparseable), names a plugin command (plugin
+ *  lookup wins argv[0], so `bro <plugin>` would never reach the doc
+ *  layer), or overlaps another type's idPrefix (bare-ref inference
+ *  becomes ambiguous) is dropped with a warning — one bad plugin doc
+ *  must not corrupt the namespace. */
 export function filterDocTypes(types: DocType[]): DocType[] {
-  const nouns = new Set<string>()
+  const nouns = new Set(PLUGINS.map((p) => p.name))
   const prefixes: [string, string][] = []
   const out: DocType[] = []
   for (const t of types) {
@@ -88,7 +90,12 @@ let docTypesCache: { sig: string; filtered: DocType[] } | undefined
  *  list and re-filters once. */
 export function docTypes(): DocType[] {
   const raw = [...BUILTIN_DOCS, ...PLUGINS.flatMap((p) => p.docs ?? []), ...EXTRA_DOCS]
-  const sig = raw.map((t) => `${t.name}${t.aliases?.join(',') ?? ''}${t.idPrefix ?? ''}`).join('\n')
+  // plugin names are reserved nouns too — a late external registration
+  // must invalidate the filter even when it ships no doc types
+  const sig =
+    PLUGINS.map((p) => p.name).join('\n') +
+    '\n' +
+    raw.map((t) => `${t.name}${t.aliases?.join(',') ?? ''}${t.idPrefix ?? ''}`).join('\n')
   if (docTypesCache?.sig !== sig) {
     docTypesCache = { sig, filtered: filterDocTypes(raw) }
   }
