@@ -93,6 +93,9 @@ export function runCli(
   args: string[],
   opts: { cwd: string; input?: string; env?: Record<string, string> }
 ): CliResult {
+  if (!existsSync(CLI_DIST)) {
+    throw new Error('packages/cli/dist is missing — run `npm run build` before e2e tests')
+  }
   const proc = spawnSync(process.execPath, [CLI_DIST, ...args], {
     cwd: opts.cwd,
     input: opts.input ?? '',
