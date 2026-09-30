@@ -123,28 +123,27 @@ function toDebtRecord(opts: {
   }
 }
 
-export async function collectPr(
-  rev: ReviewFacade,
-  opts: {
-    repo: string
-    pr: number
-    mergedSha?: string
-    runId: string
-    threadAuthor?: string | null
-    cwd?: string
-  }
-): Promise<CollectPrResult> {
+/** Pure half of collectPr — threads + meta → DebtRecords. The bulk-scan
+ *  path (ReviewFacade.scanMergedPrs) calls this directly so a repo-wide
+ *  collect shares one classification pipeline with the serial probe. */
+export function collectThreads(opts: {
+  meta: { title: string; url: string; mergedAt: string; mergeSha: string }
+  threads: ReviewThread[]
+  pr: number
+  runId: string
+  threadAuthor?: string | null
+  cwd?: string
+  harvestedAt?: string
+}): CollectPrResult {
   const config = loadAuthorPolicy(opts.cwd)
-  const meta = rev.mergedPrInfo({ repo: opts.repo, pr: opts.pr }, opts.mergedSha)
-  const harvestedAt = new Date().toISOString()
-  const threads = await rev.reviewThreads({ repo: opts.repo, pr: opts.pr })
+  const harvestedAt = opts.harvestedAt ?? new Date().toISOString()
 
   const incoming: DebtRecord[] = []
   let skipped = 0
   let skippedOutdated = 0
   let skippedThreadAuthor = 0
 
-  for (const thread of threads) {
+  for (const thread of opts.threads) {
     const action = classifyThreadAction({
       thread,
       threadAuthor: opts.threadAuthor ?? null,
@@ -166,7 +165,7 @@ export async function collectPr(
     incoming.push(
       toDebtRecord({
         thread,
-        meta,
+        meta: opts.meta,
         pr: opts.pr,
         runId: opts.runId,
         harvestedAt,
@@ -176,4 +175,21 @@ export async function collectPr(
   }
 
   return { pr: opts.pr, incoming, skipped, skippedOutdated, skippedThreadAuthor }
+}
+
+export async function collectPr(
+  rev: ReviewFacade,
+  opts: {
+    repo: string
+    pr: number
+    mergedSha?: string
+    runId: string
+    threadAuthor?: string | null
+    cwd?: string
+  }
+): Promise<CollectPrResult> {
+  const meta = rev.mergedPrInfo({ repo: opts.repo, pr: opts.pr }, opts.mergedSha)
+  const harvestedAt = new Date().toISOString()
+  const threads = await rev.reviewThreads({ repo: opts.repo, pr: opts.pr })
+  return collectThreads({ ...opts, meta, threads, harvestedAt })
 }

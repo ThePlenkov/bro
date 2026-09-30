@@ -1,4 +1,4 @@
-export { gh, ghJson, ghTry, prLink, resolveRepo } from './gh.ts'
+export { gh, ghAsync, ghJson, ghJsonAsync, ghTry, prLink, resolveRepo } from './gh.ts'
 export { git, gitTry } from './git.ts'
 export { bd, bdJson, bdTry, checkBeads, evidenceKind, initBeadsStealth, refKind } from './bd.ts'
 export {
@@ -36,11 +36,14 @@ export type {
   MergedPr,
   MergedPrInfo,
   MergedPrQuery,
+  MergedPrScan,
+  PrLabelOp,
   PrMeta,
   PrTarget,
   ReviewComment,
   ReviewFacade,
   ReviewThread,
+  ScanOpts,
 } from './review.ts'
 export {
   connectorHooks,

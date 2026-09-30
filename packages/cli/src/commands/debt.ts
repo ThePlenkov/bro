@@ -15,6 +15,8 @@ import {
   dataRefRoot,
   ensureAuth,
   reviewHost,
+  type MergedPrScan,
+  type PrLabelOp,
   type ReviewFacade,
 } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
@@ -27,8 +29,11 @@ import {
   claimDebtRecord,
   clearDebtLabels,
   collectPr,
+  collectThreads,
+  type CollectPrResult,
   DEBT_ROW_STATUSES,
   DEBT_STATES,
+  debtLabel,
   ensureDebtLabels,
   groupStats,
   hasHarvestSelection,
@@ -349,38 +354,80 @@ function reopenTerminalRows(rows: DebtRecord[]): void {
   console.error(`debt: reopened ${reopen.length} terminal row(s) — still unresolved`)
 }
 
-async function harvestPr(
+interface ScannedPr {
+  pr: number
+  result: CollectPrResult
+  /** Labels for the debt-state decision — probe-fresh in the bulk path,
+   *  re-fetched post-collect in the serial path (same window as before). */
+  labels: string[]
+  /** updatedAt at probe time — the cursor for PRs that get no label
+   *  write (nothing bumped it since the probe). Null in the serial path:
+   *  the cursor phase re-fetches like the old loop did. */
+  updatedAt: string | null
+  /** The candidate's list-time updatedAt — last-resort cursor fallback. */
+  listedAt: string | null
+  scannedAt: string
+}
+
+/** Records for one PR — classified from the bulk probe when present,
+ *  else the serial per-PR fetch (meta + threads + labels). Writes the
+ *  harvest file; returns null on probe failure (warned, not thrown). */
+async function scanPr(
   rev: ReviewFacade,
   args: CollectArgs,
   pr: { number: number; updatedAt: string | null },
-  labelingEnabled: boolean
-): Promise<{ rows: number; labeled: number }> {
+  scan: MergedPrScan | undefined,
+  labelingEnabled: boolean,
+  pos: number,
+  total: number
+): Promise<ScannedPr | null> {
   // Captured before fetching threads: activity arriving mid-scan is then
   // newer than the recorded timestamp and gets picked up next run.
   const scannedAt = new Date().toISOString()
-  let result
+  let result: CollectPrResult
+  let labels: string[] = []
+  let updatedAt: string | null = null
   try {
-    result = await collectPr(rev, {
-      repo: args.repo,
-      pr: pr.number,
-      runId: args.runId,
-      threadAuthor: args.threadAuthor,
-    })
+    if (scan !== undefined) {
+      result = collectThreads({
+        meta: scan.info,
+        threads: scan.threads,
+        pr: pr.number,
+        runId: args.runId,
+        threadAuthor: args.threadAuthor,
+        harvestedAt: scannedAt,
+      })
+      labels = scan.labels
+      updatedAt = scan.updatedAt
+    } else {
+      result = await collectPr(rev, {
+        repo: args.repo,
+        pr: pr.number,
+        runId: args.runId,
+        threadAuthor: args.threadAuthor,
+      })
+      // Re-fetch labels: the candidate snapshot predates this PR's
+      // collection, and a human may have opted out while we scanned.
+      // Skipped under --dry-run — no write will consult them.
+      if (labelingEnabled && !args.dryRun) {
+        labels = rev.labels({ repo: args.repo, pr: pr.number })
+      }
+    }
   } catch (err) {
     console.error(
       `warning: PR ${rev.prLink(args.repo, pr.number)} skipped — ${err instanceof Error ? err.message : err}`
     )
-    return { rows: 0, labeled: 0 }
+    return null
   }
   console.error(
-    `debt: PR ${rev.prLink(args.repo, pr.number)} — ${result.incoming.length} thread(s)`
+    `debt: [${pos}/${total}] PR ${rev.prLink(args.repo, pr.number)} — ${result.incoming.length} thread(s)`
   )
 
   if (args.dryRun) {
     for (const row of result.incoming) {
       console.log(JSON.stringify(row))
     }
-    return { rows: 0, labeled: 0 }
+    return { pr: pr.number, result, labels, updatedAt, listedAt: pr.updatedAt, scannedAt }
   }
 
   if (result.incoming.length > 0) {
@@ -392,30 +439,200 @@ async function harvestPr(
     })
     reopenTerminalRows(result.incoming)
   }
+  return { pr: pr.number, result, labels, updatedAt, listedAt: pr.updatedAt, scannedAt }
+}
+
+interface LabelWrite {
+  s: ScannedPr
+  op: PrLabelOp
+}
+
+/** One label op per non-skipped PR — the machine state from the scan
+ *  outcome. `skipped` is never in the remove set: a late human opt-out
+ *  survives the write either way. */
+function buildLabelWrites(args: CollectArgs, scanned: ScannedPr[]): LabelWrite[] {
+  const writes: LabelWrite[] = []
+  for (const s of scanned) {
+    if (prDebtState(s.labels) === 'skipped') {
+      continue
+    }
+    const state: DebtPrState = s.result.incoming.length > 0 ? 'collected' : 'clean'
+    writes.push({
+      s,
+      op: {
+        t: { repo: args.repo, pr: s.pr },
+        add: [debtLabel(state)],
+        // A remove names only labels the probe observed — removing an
+        // absent label fails the whole pr-edit call, losing the add.
+        remove: DEBT_STATES.filter((x) => x !== 'skipped' && x !== state)
+          .map(debtLabel)
+          .filter((l) => s.labels.some((have) => have.toLowerCase() === l)),
+      },
+    })
+  }
+  return writes
+}
+
+/** The bulk write — post-write updatedAt per applied PR; null when the
+ *  connector lacks the fast path or the batch failed outright. */
+async function bulkLabelWrites(
+  rev: ReviewFacade,
+  writes: LabelWrite[]
+): Promise<Map<number, string | null> | null> {
+  if (typeof rev.labelPrs !== 'function' || writes.length === 0) {
+    return null
+  }
+  try {
+    return await rev.labelPrs(writes.map((w) => w.op))
+  } catch (err) {
+    console.error(
+      `warning: bulk label write failed — falling back per-PR ` +
+        `(${err instanceof Error ? err.message : err})`
+    )
+    return null
+  }
+}
+
+/** One write — applied in bulk already, else the serial pre-bulk path.
+ *  `stamp` is the post-write updatedAt when observed; `ok: false` means
+ *  the write failed (unlabeled → rescan next run, self-healing). */
+function ensureLabelWritten(
+  rev: ReviewFacade,
+  args: CollectArgs,
+  w: LabelWrite,
+  wrote: Map<number, string | null> | null
+): { ok: boolean; stamp: string | null } {
+  if (wrote?.has(w.s.pr)) {
+    return { ok: true, stamp: wrote.get(w.s.pr) ?? null }
+  }
+  try {
+    applyCollectLabel(rev, {
+      repo: args.repo,
+      pr: w.s.pr,
+      state: w.s.result.incoming.length > 0 ? 'collected' : 'clean',
+    })
+  } catch (err) {
+    console.error(
+      `warning: label write on ${rev.prLink(args.repo, w.s.pr)} failed — ` +
+        `${err instanceof Error ? err.message : err}`
+    )
+    return { ok: false, stamp: null }
+  }
+  return { ok: true, stamp: null }
+}
+
+/** Label writes + processed cursors for the scanned PRs — batched through
+ *  `labelPrs` when the connector offers it, serial per-PR otherwise.
+ *  `debt:skipped` is never written over and still earns a cursor: nothing
+ *  changed for it, so probe-time updatedAt is the honest marker. */
+async function labelScannedPrs(
+  rev: ReviewFacade,
+  args: CollectArgs,
+  scanned: ScannedPr[]
+): Promise<number> {
+  const writes = buildLabelWrites(args, scanned)
+  const wrote = await bulkLabelWrites(rev, writes)
 
   let labeled = 0
-  // Never overwrite a human `debt:skipped` opt-out, even under --reharvest.
-  // Re-fetch labels: the candidate snapshot predates this PR's collection,
-  // and a human may have opted out while we were scanning.
-  if (labelingEnabled) {
-    const current = rev.labels({ repo: args.repo, pr: pr.number })
-    if (prDebtState(current) !== 'skipped') {
-      const state: DebtPrState = result.incoming.length > 0 ? 'collected' : 'clean'
-      applyCollectLabel(rev, { repo: args.repo, pr: pr.number, state })
-      labeled = 1
+  for (const w of writes) {
+    const res = ensureLabelWritten(rev, args, w, wrote)
+    if (!res.ok) {
+      continue // write failed — unlabeled, next run rescans
     }
-    // Store the observed updatedAt as the cursor, not the wall clock:
-    // no cross-clock skew, and mid-scan activity bumps the server's
-    // updatedAt past our cursor so the next run catches it. Re-fetched
-    // post-label: our own label write bumps updatedAt, so the pre-scan
-    // snapshot would flag the PR stale again on the next run. Only full
-    // scans earn a cursor — a --thread-author partial scan must not
-    // mask post-scan activity on a labeled PR.
+    labeled += 1
+    // Cursor: post-write updatedAt (bulk result or a fresh fetch) — a
+    // pre-write stamp would flag the PR stale on every later run.
     const cursor =
-      rev.prUpdatedAt({ repo: args.repo, pr: pr.number }) ?? pr.updatedAt ?? scannedAt
-    markProcessedAt([pr.number], cursor)
+      res.stamp ?? rev.prUpdatedAt(w.op.t) ?? w.s.updatedAt ?? w.s.listedAt ?? w.s.scannedAt
+    markProcessedAt([w.s.pr], cursor)
   }
-  return { rows: result.incoming.length, labeled }
+  // Skipped PRs: no write touched them — probe-time updatedAt IS current;
+  // serial-path PRs fetch fresh, exactly like the old loop.
+  for (const s of scanned) {
+    if (prDebtState(s.labels) !== 'skipped') {
+      continue
+    }
+    const cursor =
+      s.updatedAt ??
+      rev.prUpdatedAt({ repo: args.repo, pr: s.pr }) ??
+      s.listedAt ??
+      s.scannedAt
+    markProcessedAt([s.pr], cursor)
+  }
+  return labeled
+}
+
+/** The bulk probe — one call carries meta + threads + labels + updatedAt
+ *  for every target when the connector offers it. Returns null when
+ *  unavailable/failed: the per-PR loop then probes serially. */
+async function probeTargets(
+  rev: ReviewFacade,
+  repo: string,
+  targets: Array<{ number: number }>
+): Promise<Map<number, MergedPrScan> | null> {
+  if (typeof rev.scanMergedPrs !== 'function' || targets.length === 0) {
+    return null
+  }
+  const started = Date.now()
+  try {
+    return await rev.scanMergedPrs(
+      targets.map((pr) => ({ repo, pr: pr.number })),
+      {
+        onProgress: (done, total) => {
+          const left =
+            done > 0 && done < total
+              ? `, ~${Math.round((((Date.now() - started) / done) * (total - done)) / 1000)}s left`
+              : ''
+          console.error(`debt collect: probed ${done}/${total} merged PR(s)${left}`)
+        },
+      }
+    )
+  } catch (err) {
+    console.error(
+      `warning: bulk scan failed — falling back to serial probes ` +
+        `(${err instanceof Error ? err.message : err})`
+    )
+    return null
+  }
+}
+
+/** Probe → commit → label. The bulk probe carries meta+threads+labels+
+ *  updatedAt per PR when the connector offers it; serial per-PR fetches
+ *  inside scanPr cover whatever the bulk pass missed. */
+async function harvestTargets(
+  rev: ReviewFacade,
+  args: CollectArgs,
+  targets: Awaited<ReturnType<typeof resolveHarvestPrs>>,
+  labelingEnabled: boolean
+): Promise<{ rows: number; labeled: number }> {
+  const scans = await probeTargets(rev, args.repo, targets)
+
+  const scanned: ScannedPr[] = []
+  let rows = 0
+  for (const [i, pr] of targets.entries()) {
+    // Serial commit phase by design: ledger writes and the per-PR
+    // progress line keep a deterministic order.
+    const s = await scanPr( // NOSONAR — deliberate serial awaits
+      rev,
+      args,
+      pr,
+      scans?.get(pr.number),
+      labelingEnabled,
+      i + 1,
+      targets.length
+    )
+    if (s === null) {
+      continue
+    }
+    scanned.push(s)
+    rows += s.result.incoming.length
+  }
+
+  const labeled =
+    labelingEnabled && !args.dryRun && scanned.length > 0
+      ? await labelScannedPrs(rev, args, scanned)
+      : 0
+  return { rows, labeled }
 }
 
 async function collectReviewThreads(rev: ReviewFacade, args: CollectArgs): Promise<void> {
@@ -455,16 +672,10 @@ async function collectReviewThreads(rev: ReviewFacade, args: CollectArgs): Promi
     ensureDebtLabels(rev, args.repo)
   }
 
-  let totalRows = 0
-  let labeled = 0
-  for (const pr of targets) {
-    const res = await harvestPr(rev, args, pr, labelingEnabled)
-    totalRows += res.rows
-    labeled += res.labeled
-  }
+  const { rows, labeled } = await harvestTargets(rev, args, targets, labelingEnabled)
 
   const labeledMsg = labelingEnabled ? `labeled ${labeled} PR(s)` : 'labels disabled'
-  console.error(`debt collect: wrote ${totalRows} row(s), ${labeledMsg}`)
+  console.error(`debt collect: wrote ${rows} row(s), ${labeledMsg}`)
 }
 
 // --- status ----------------------------------------------------------------
