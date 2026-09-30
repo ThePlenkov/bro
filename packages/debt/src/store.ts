@@ -340,6 +340,30 @@ function applyLedgerOverlays(records: DebtRecord[], cwd?: string): DebtRecord[] 
   })
 }
 
+/** Fold one raw row into first/last sighting bounds — a row missing a
+ *  parseable harvested_at can't be placed on a timeline. */
+function observeSighting(
+  bounds: Map<string, { first: string; last: string }>,
+  row: Partial<DebtRecord>
+): void {
+  const at = row.harvested_at
+  if (
+    typeof row.thread_id !== 'string' ||
+    typeof at !== 'string' ||
+    Number.isNaN(Date.parse(at))
+  ) {
+    return
+  }
+  const b = bounds.get(row.thread_id) ?? { first: at, last: at }
+  if (at < b.first) {
+    b.first = at
+  }
+  if (at > b.last) {
+    b.last = at
+  }
+  bounds.set(row.thread_id, b)
+}
+
 /**
  * First/last harvest observation per thread across the append-only
  * snapshots (+ the legacy flat file). The merged record's `harvested_at`
@@ -356,25 +380,7 @@ export function readThreadBounds(
   }
   for (const file of sources) {
     for (const row of readJsonlLines<Partial<DebtRecord>>(file)) {
-      const at = row.harvested_at
-      if (
-        typeof row.thread_id !== 'string' ||
-        typeof at !== 'string' ||
-        Number.isNaN(Date.parse(at))
-      ) {
-        continue
-      }
-      const b = bounds.get(row.thread_id)
-      if (!b) {
-        bounds.set(row.thread_id, { first: at, last: at })
-        continue
-      }
-      if (at < b.first) {
-        b.first = at
-      }
-      if (at > b.last) {
-        b.last = at
-      }
+      observeSighting(bounds, row)
     }
   }
   return bounds

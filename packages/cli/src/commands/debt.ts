@@ -780,6 +780,26 @@ function cmdStats(argv: string[]): void {
 
 const TREND_GRANULARITIES: readonly TrendGranularity[] = ['week', 'day']
 
+function enumFlag<T extends string>(
+  arg: string,
+  value: string | null,
+  allowed: readonly T[]
+): T {
+  if (value !== null && (allowed as readonly string[]).includes(value)) {
+    return value as T
+  }
+  console.error(`error: ${arg} must be one of ${allowed.join('|')}, got "${value}"`)
+  process.exit(2)
+}
+
+function dateFlag(arg: string, value: string | null): string {
+  if (value !== null && !Number.isNaN(Date.parse(value))) {
+    return value
+  }
+  console.error(`error: ${arg} must be a date, got "${value}"`)
+  process.exit(2)
+}
+
 function cmdTrend(argv: string[]): void {
   const json = argv.includes('--json')
   let by: StatsGroupBy | null = null
@@ -788,30 +808,13 @@ function cmdTrend(argv: string[]): void {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!
     if (arg === '--by') {
-      const value = readOption(argv, i)
-      if (!value || !(STATS_BY as readonly string[]).includes(value)) {
-        console.error(`error: --by must be one of ${STATS_BY.join('|')}, got "${value}"`)
-        process.exit(2)
-      }
-      by = value as StatsGroupBy
+      by = enumFlag(arg, readOption(argv, i), STATS_BY)
       i += 1
     } else if (arg === '--bucket') {
-      const value = readOption(argv, i)
-      if (!value || !(TREND_GRANULARITIES as readonly string[]).includes(value)) {
-        console.error(
-          `error: --bucket must be one of ${TREND_GRANULARITIES.join('|')}, got "${value}"`
-        )
-        process.exit(2)
-      }
-      granularity = value as TrendGranularity
+      granularity = enumFlag(arg, readOption(argv, i), TREND_GRANULARITIES)
       i += 1
     } else if (arg === '--since') {
-      const value = readOption(argv, i)
-      if (value === null || Number.isNaN(Date.parse(value))) {
-        console.error(`error: --since must be a date, got "${value}"`)
-        process.exit(2)
-      }
-      since = value
+      since = dateFlag(arg, readOption(argv, i))
       i += 1
     }
   }
