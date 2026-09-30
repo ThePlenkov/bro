@@ -85,7 +85,7 @@ jobs:
           fi
           git commit -m "release: v$v"
           git push -u --force-with-lease origin "release/v$v"
-          if ! prs=$(gh pr list --head "release/v$v" --state open --json number --jq 'length'); then
+          if ! prs=$(gh pr list --head "release/v$v" --state open --base main --json number --jq 'length'); then
             echo "gh pr list failed — cannot tell whether a release PR exists"
             exit 1
           fi
