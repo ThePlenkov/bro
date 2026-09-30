@@ -2,6 +2,9 @@
   "act": {
     "ignoreChecks": ["kilo"]
   },
+  "debt": {
+    "sources": ["review-threads", "dependabot", "code-scanning", "secret-scanning", "stale-prs", "failed-ci"]
+  },
   "sdd": {
     "mode": "gate"
   }
