@@ -211,7 +211,7 @@ section.how, section.not, section.vocab { padding: 64px 0 0; }
   gap: 40px;
 }
 .debt-table { width: 100%; border-collapse: collapse; font-size: 14px; }
-.debt-table td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line); color: var(--dim); }
+.debt-table td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line); color: var(--dim); overflow-wrap: anywhere; }
 .debt-table td:first-child { color: var(--text); font-family: var(--mono); font-size: 13px; }
 .debt-table .num { text-align: right; font-family: var(--mono); }
 .debt-note { color: var(--faint); font-size: 13px; }

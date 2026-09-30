@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
 import css from '../styles.css?url'
 
@@ -46,22 +46,27 @@ async function load(): Promise<Data> {
   const ref = (await (await fetch(REF_API)).json()) as { object?: { sha?: string } }
   const sha = ref.object?.sha
   if (!sha) {
-    throw new Error('refs/bro/data not found — is the debt sync running?')
+    throw new Error('data ref not found')
   }
-  const [summary, ledgerText] = await Promise.all([
+  const [summary, ledgerRes] = await Promise.all([
     fetch(`${RAW}/${sha}/${SUMMARY_PATH}`).then((r) => {
-      if (!r.ok) throw new Error(`summary fetch: ${r.status}`)
+      if (!r.ok) throw new Error('summary fetch failed')
       return r.json() as Promise<Summary>
     }),
-    fetch(`${RAW}/${sha}/${LEDGER_PATH}`).then((r) => {
-      if (!r.ok) throw new Error(`ledger fetch: ${r.status}`)
-      return r.text()
-    }),
+    // the status overlay is optional — a fresh ledger may not exist yet;
+    // a 404 means "no rows", not a broken dashboard
+    fetch(`${RAW}/${sha}/${LEDGER_PATH}`).then((r) => (r.ok ? r.text() : '')),
   ])
-  const rows = ledgerText
+  const rows = ledgerRes
     .split('\n')
     .filter((l) => l.trim() !== '')
-    .map((l) => JSON.parse(l) as Row)
+    .flatMap((l) => {
+      try {
+        return [JSON.parse(l) as Row]
+      } catch {
+        return [] // a malformed line drops that row, not the page
+      }
+    })
   return { summary, rows }
 }
 
@@ -72,18 +77,26 @@ function DebtDashboard() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    load().then(setData, (err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+    load().then(
+      setData,
+      (err: unknown) => {
+        console.error('debt dashboard:', err)
+        setError('could not load the ledger — check the console for details')
+      }
+    )
   }, [])
 
-  const counts: Record<string, number> = {}
-  for (const r of data?.rows ?? []) {
-    counts[r.status] = (counts[r.status] ?? 0) + 1
-  }
-  const total = data?.rows.length ?? 0
-  const recent = (data?.rows ?? [])
-    .filter((r) => r.status === 'done' && r.fix_pr !== null)
-    .sort((a, b) => (b.fixed_at ?? '').localeCompare(a.fixed_at ?? ''))
-    .slice(0, 10)
+  const { counts, total, recent } = useMemo(() => {
+    const c: Record<string, number> = {}
+    for (const r of data?.rows ?? []) {
+      c[r.status] = (c[r.status] ?? 0) + 1
+    }
+    const closed = (data?.rows ?? [])
+      .filter((r) => r.status !== 'open' && r.status !== 'claimed' && r.fix_pr !== null)
+      .sort((a, b) => (b.fixed_at ?? '').localeCompare(a.fixed_at ?? ''))
+      .slice(0, 10)
+    return { counts: c, total: data?.rows.length ?? 0, recent: closed }
+  }, [data])
 
   return (
     <>
@@ -204,6 +217,7 @@ function DebtDashboard() {
                       <td>
                         <a href={`${GITHUB}/pull/${r.fix_pr}`}>#{r.fix_pr}</a>
                       </td>
+                      <td>{r.status}</td>
                       <td>{r.fixed_at?.slice(0, 10)}</td>
                       <td className="debt-note">{r.notes ?? '—'}</td>
                     </tr>
