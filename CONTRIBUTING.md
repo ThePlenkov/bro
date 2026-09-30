@@ -76,7 +76,7 @@ the capability, absence is honest.
 interface Connector {
   name: string                      // 'beads' | 'github' | …
   matchRemote?(url): boolean        // claims hosts it can serve (auto-detect)
-  tasks?(ctx): TaskStore            // work items — `bro task`, `next`, `loop`
+  tasks?(ctx): TaskStore            // work items — the `bro task` doc surface
   reviews?(ctx): ReviewFacade       // PR review loop — `bro act`, `debt`
   hooks?(ctx): ConnectorHooks       // lifecycle probes — see below
 }
