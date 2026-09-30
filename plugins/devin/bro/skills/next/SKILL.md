@@ -48,7 +48,9 @@ continue?" between items.** The queue is the approval.
 
 `bro run next.toml` drives the same selection from a validated plan —
 `limit` (batch size), `order` (priority|oldest|newest), `[filters]`
-(types, max_priority, title match), `claim = false` for a dry run,
+(types, max_priority, title match, `labels` — the declared scope: only
+beads carrying one of those labels are claimable, unlabeled and
+other-labeled work stays untouched), `claim = false` for a dry run,
 `gates = "allow"` to pre-authorize claiming HUMAN GATE beads,
 `scope = "all"` to lift project scoping, and `scope = "global"` (or
 `bro next --global`) to schedule from the user-level store. Batching

@@ -53,6 +53,7 @@ import {
   readyBeads,
   type ReadyBead,
 } from './next.ts'
+import type { NextPlan } from './next-plan.ts'
 
 interface Ctx {
   /** Review facade bound to the main checkout — host calls follow the
@@ -64,6 +65,10 @@ interface Ctx {
   agent: string
   intervalS: number
   json: boolean
+  /** Declared label scope — `bro loop --label debt,ui` only claims
+   *  beads carrying one of these labels; the rest of the shared queue
+   *  stays untouched. */
+  selection: Pick<NextPlan, 'filters' | 'gates' | 'order'>
   /** Store the loop's own taskStore resolves to — pinned into agent and
    *  bootstrap env as BEADS_DIR so worktree `bd` writes reach it. */
   beadsDir?: string
@@ -76,10 +81,12 @@ interface Ctx {
 const prRef = (ctx: Ctx, pr: number): string => ctx.rev.prLink(ctx.repo, pr)
 
 function usage(): never {
-  console.error(`Usage: bro loop [--max N] [--dry-run] [--json]
+  console.error(`Usage: bro loop [--max N] [--dry-run] [--json] [--label a,b]
   --agent '<cmd {promptFile}>'   agent template (config: loop.agent)
   --agent-timeout MIN            per-spawn budget (loop.agentTimeoutMin, 45)
   --merge-timeout MIN            gate budget per round (loop.mergeTimeoutMin, 45)
+  --label a,b                    declared scope — only beads carrying one
+                                of these labels are claimable
   --interval SEC                 gate poll interval (60)`)
   process.exit(2)
 }
@@ -513,6 +520,26 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     agent,
     intervalS: num(flag(argv, '--interval'), 60),
     json: argv.includes('--json'),
+    selection: {
+      filters: (() => {
+        if (!argv.includes('--label')) {
+          return {}
+        }
+        const labels = (flag(argv, '--label') ?? '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s !== '')
+        // a declared-but-empty scope must fail closed — silently
+        // widening to the whole queue is exactly what --label prevents
+        if (labels.length === 0) {
+          console.error('error: --label requires a comma-separated value, e.g. --label debt,ui')
+          process.exit(2)
+        }
+        return { labels }
+      })(),
+      gates: 'forbid' as const,
+      order: 'priority' as const,
+    },
     beadsDir: resolveBeadsDir(root, (m) => console.error(m)),
     tails: [],
   }
@@ -523,7 +550,7 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
       return
     }
     const ready = readyBeads()
-    const top = classify(ready, undefined, scope, epicParentIds(ready)).queue[0]
+    const top = classify(ready, ctx.selection, scope, epicParentIds(ready)).queue[0]
     if (!top) {
       console.log('loop --dry-run: nothing claimable')
       return
@@ -673,7 +700,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
         break
       }
       const ready = readyBeads()
-      const c = classify(ready, undefined, scope, epicParentIds(ready))
+      const c = classify(ready, ctx.selection, scope, epicParentIds(ready))
       const bead = claimUpTo(c.queue.filter((b) => !seen.has(b.id)), 1)[0]
       if (!bead) {
         // a foreign-only remainder must not look like a drained queue —

@@ -36,6 +36,9 @@ export interface ReadyBead {
   issue_type: string
   created_at: string
   parent?: string
+  /** bd labels — present on `bd ready --json` rows; the labels scope
+   *  filter in plans/argv only claims beads carrying a declared label. */
+  labels?: string[]
 }
 
 interface NextResult {
@@ -149,6 +152,11 @@ function applyFilters(queue: ReadyBead[], f: NextFilters): ReadyBead[] {
   }
   if (f.match) {
     q = q.filter((b) => f.match!.test(b.title))
+  }
+  if (f.labels?.length) {
+    // declared scope: any-of — the bead must carry at least one of the
+    // labels the run was pointed at; unlabeled beads are out of scope
+    q = q.filter((b) => b.labels?.some((l) => f.labels!.includes(l)))
   }
   return q
 }
@@ -327,10 +335,12 @@ export function applyNextPlan(plan: NextPlan): void {
 
 export async function runNextCommand(argv: string[]): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
-    console.error(`Usage: bro next [--list] [--json] [--global]
+    console.error(`Usage: bro next [--list] [--json] [--global] [--label a,b]
 
   Claims the top ready bead and prints the work order. Human gates,
-  epics, and molecule steps are surfaced, never claimed. Filters,
+  epics, and molecule steps are surfaced, never claimed. --label
+  declares the run's scope — only beads carrying one of those labels
+  are claimable (unlabeled work is out of scope). Other filters,
   limit, ordering, and gate policy are plan-only — see
   \`bro run next.toml\` (kind = "next").
 
@@ -344,6 +354,15 @@ export async function runNextCommand(argv: string[]): Promise<void> {
   instead (\`bro store init --global\`) — same pipeline, different home.`)
     process.exit(0)
   }
+  const lIdx = argv.indexOf('--label')
+  const labels =
+    lIdx >= 0 && argv[lIdx + 1] !== undefined && !argv[lIdx + 1].startsWith('--')
+      ? argv[lIdx + 1].split(',').map((s) => s.trim()).filter((s) => s !== '')
+      : undefined
+  if (lIdx >= 0 && (labels === undefined || labels.length === 0)) {
+    console.error('error: --label requires a comma-separated value, e.g. --label debt,ui')
+    process.exit(2)
+  }
   applyNextPlan({
     limit: 1,
     order: 'priority',
@@ -351,6 +370,6 @@ export async function runNextCommand(argv: string[]): Promise<void> {
     gates: 'forbid',
     json: argv.includes('--json'),
     scope: argv.includes('--global') ? 'global' : 'project',
-    filters: {},
+    filters: labels !== undefined ? { labels } : {},
   })
 }

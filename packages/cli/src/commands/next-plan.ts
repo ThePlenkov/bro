@@ -52,6 +52,10 @@ export interface NextFilters {
   maxPriority?: number
   /** title regex, already compiled case-insensitive */
   match?: RegExp
+  /** declared label scope — any-of. A bead must carry at least one of
+   *  these labels to be claimable; unlabeled/other-labeled work stays
+   *  out of the run's sanctioned context. */
+  labels?: string[]
 }
 
 export interface NextPlan {
@@ -72,7 +76,7 @@ export const PLAN_KIND = 'next'
 export const PLAN_VERSION = 1
 
 const TOP_KEYS = new Set(['kind', 'version', 'limit', 'order', 'claim', 'gates', 'scope', 'json', 'filters'])
-const FILTER_KEYS = new Set(['types', 'max_priority', 'match'])
+const FILTER_KEYS = new Set(['types', 'max_priority', 'match', 'labels'])
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -133,6 +137,11 @@ function checkFilters(raw: unknown, errors: string[]): void {
   checkTypes(raw.types, errors)
   checkMaxPriority(raw.max_priority, errors)
   checkMatch(raw.match, errors)
+  if (raw.labels !== undefined) {
+    if (!Array.isArray(raw.labels) || raw.labels.length === 0 || raw.labels.some((l) => !nonEmpty(l))) {
+      errors.push('filters.labels: must be a non-empty array of label names')
+    }
+  }
 }
 
 function parseFilters(raw: unknown): NextFilters {
@@ -145,6 +154,9 @@ function parseFilters(raw: unknown): NextFilters {
       : undefined,
     maxPriority: typeof raw.max_priority === 'number' ? raw.max_priority : undefined,
     match: nonEmpty(raw.match) ? new RegExp(raw.match, 'i') : undefined,
+    labels: Array.isArray(raw.labels)
+      ? raw.labels.filter((l): l is string => typeof l === 'string').map((l) => l.trim())
+      : undefined,
   }
 }
 

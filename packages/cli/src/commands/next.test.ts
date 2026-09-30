@@ -362,6 +362,29 @@ describe('bro next plans', () => {
   )
 
   it(
+    'labels declare the claimable scope — any-of, unlabeled excluded',
+    withFakeBd(
+      [
+        { id: 'b-debt', title: 'debt row', status: 'open', priority: 2, issue_type: 'task', created_at: '2026-01-02T00:00:00Z', labels: ['debt'] },
+        { id: 'b-ui', title: 'ui thing', status: 'open', priority: 1, issue_type: 'task', created_at: '2026-01-03T00:00:00Z', labels: ['ui'] },
+        { id: 'b-bare', title: 'no labels', status: 'open', priority: 1, issue_type: 'task', created_at: '2026-01-01T00:00:00Z' },
+      ],
+      async c => {
+        applyNextPlan(plan({ filters: { labels: ['debt'] } }))
+        let r = JSON.parse(c.lines.join('\n'))
+        assert.equal(r.bead.id, 'b-debt')
+        assert.equal(r.queue, 1)
+        assert.equal(r.filtered, 2) // ui + unlabeled are out of scope
+
+        c.lines.length = 0
+        applyNextPlan(plan({ filters: { labels: ['debt', 'ui'] } }))
+        r = JSON.parse(c.lines.join('\n'))
+        assert.equal(r.queue, 2) // any-of — both labeled beads qualify
+      }
+    )
+  )
+
+  it(
     'order changes the pick',
     withFakeBd(RICH, async c => {
       applyNextPlan(plan({ order: 'newest', claim: false }))
