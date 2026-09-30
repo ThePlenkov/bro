@@ -7,7 +7,6 @@
 import { gitTry } from '@broject/core'
 import type {
   CheckInfo,
-  MergeOpts,
   MergedPr,
   MergedPrInfo,
   MergedPrQuery,
@@ -163,7 +162,7 @@ interface GlDiscussion {
  *  `group_<id>_bot_<suffix>`; GitHub-style `[bot]` names show up on
  *  mirrored apps too. */
 const isBotName = (username: string): boolean =>
-  /^(?:project|group)_\d+_bot(?:_|$)/.test(username) || /\[bot\]$/.test(username)
+  /^(?:project|group)_\d+_bot(?:_|$)/.test(username) || username.endsWith('[bot]')
 
 /** Thread ids are COMPOSITE — `repo/iid/discussion-id`. GitHub's node ids
  *  are globally addressable; a GitLab discussion needs its project and MR
@@ -529,8 +528,8 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
       ).map((m) => m.iid)
     },
     parsePrRef(text) {
-      const host = hostOnce().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const m = new RegExp(`${host}/([\\w./-]+?)/-/merge_requests/(\\d+)`, 'i').exec(text)
+      const host = hostOnce().replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
+      const m = new RegExp(String.raw`${host}/([\w./-]+?)/-/merge_requests/(\d+)`, 'i').exec(text)
       return m ? { repo: m[1]!, pr: Number(m[2]) } : null
     },
     prMeta,

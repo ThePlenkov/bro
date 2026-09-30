@@ -6,7 +6,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 
 export function glab(args: string[], cwd?: string): string {
-  const proc = spawnSync('glab', args, {
+  const proc = spawnSync('glab', args, { // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',

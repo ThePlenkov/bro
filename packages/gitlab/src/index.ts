@@ -17,7 +17,7 @@ export const gitlabConnector: Connector = {
    *  instances resolve via `connectors.reviews` config. */
   matchRemote(url: string): boolean {
     const host =
-      url.match(/^(?:https?:\/\/|ssh:\/\/[^@]+@|[^@\s]+@)([^/:]+)/i)?.[1]?.toLowerCase() ?? ''
+      /^(?:https?:\/\/|ssh:\/\/[^@]+@|[^@\s]+@)([^/:]+)/i.exec(url)?.[1]?.toLowerCase() ?? ''
     return host === 'gitlab.com' || host.endsWith('.gitlab.com')
   },
   /** `glab auth status` — covers both "glab missing" (spawn failure →
