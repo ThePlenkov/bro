@@ -172,9 +172,12 @@ describe('doc type collisions', () => {
 
   test('reservedWords covers verbs, nouns, and plugin names', () => {
     const w = reservedWords()
-    for (const word of ['list', 'show', 'close', 'exec', 'init', 'task', 'store', 'tasks']) {
+    for (const word of ['list', 'show', 'close', 'exec', 'task', 'store', 'tasks']) {
       assert.ok(w.has(word), `reservedWords missing "${word}"`)
     }
+    // store.init lives behind `bro store init` — a plugin named "init"
+    // shadows nothing verb-first, so it is NOT reserved
+    assert.ok(!w.has('init'))
     // a free word stays free
     assert.ok(!w.has('totally-free-name'))
   })

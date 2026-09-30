@@ -356,7 +356,7 @@ function registerExternal(
   // shadow `bro list`/`bro show`/`bro init` for every doc type
   if (reserved?.has(entry.name)) {
     console.error(
-      `warning: plugin "${spec}" name "${entry.name}" is a doc verb — skipped`
+      `warning: plugin "${spec}" name "${entry.name}" is a reserved doc noun/verb — skipped`
     )
     return undefined
   }
@@ -397,12 +397,24 @@ export async function loadExternalPlugins(
   // package specifiers resolving from the user's install, not the CLI's
   const req = createRequire(resolve(cwd, 'bro.config.json'))
   const root = resolve(cwd)
+  // reserved is computed before any external plugin registers — a doc
+  // noun a freshly accepted plugin just contributed must still block a
+  // later plugin's command name (`bro <noun>` would route to it)
+  const live = new Set(reserved)
   for (const spec of specs) {
     const entries = await importPluginModule(spec, req, root)
     for (const entry of entries ?? []) {
-      const plugin = registerExternal(entry, spec, reserved)
+      const plugin = registerExternal(entry, spec, live)
       if (plugin) {
         loaded.push(plugin)
+        // the accepted plugin's own name is reserved too — a later
+        // plugin can't shadow `bro <name>` either
+        live.add(plugin.name)
+        for (const d of plugin.docs ?? []) {
+          for (const n of [d.name, ...(d.aliases ?? [])]) {
+            live.add(n)
+          }
+        }
       }
     }
   }

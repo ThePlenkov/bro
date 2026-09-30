@@ -190,9 +190,16 @@ async function runBound(
     case 'list':
       result = [...(adapter.list?.(flags) ?? [])]
       break
-    case 'get':
-      result = adapter.get?.(needRef(type, rest[0], verb)) ?? die(`${type.name} "${rest[0]}" not found`)
+    case 'get': {
+      // scope alone can answer a bare show (`bro store show --global`) —
+      // the ref requirement only kicks in when the adapter declines
+      result =
+        adapter.get?.(rest[0]) ??
+        (rest[0] === undefined
+          ? die(`bro ${type.name} ${verb} needs a ref — \`bro ${type.name} ${verb} <id>\``)
+          : die(`${type.name} "${rest[0]}" not found`))
       break
+    }
     case 'create':
       result = adapter.create?.({ ...flags, title: rest.join(' ') }, flags)
       break
@@ -247,8 +254,22 @@ export async function runDocVerb(cmd: string, argv: string[]): Promise<boolean> 
   if (!inferred) {
     return false
   }
-  if (!verbMethod(inferred.adapter(ctx), cmd)) {
-    const owner = types.find((t) => verbMethod(t.adapter(ctx), cmd) !== undefined)
+  let inferredHas = false
+  try {
+    inferredHas = verbMethod(inferred.adapter(ctx), cmd) !== undefined
+  } catch {
+    // a throwing adapter factory can't answer — treat as no-match and
+    // let the guarded redirect search below find the verb's real owner
+  }
+  if (!inferredHas) {
+    // one bad plugin adapter must not abort the redirect search
+    const owner = types.find((t) => {
+      try {
+        return verbMethod(t.adapter(ctx), cmd) !== undefined
+      } catch {
+        return false
+      }
+    })
     if (owner) {
       die(`'${cmd}' is a ${owner.name} verb — use \`bro ${owner.name} ${cmd} …\``)
     }
@@ -266,20 +287,32 @@ export async function runDocVerb(cmd: string, argv: string[]): Promise<boolean> 
  *  lookup wins argv[0], so a plugin named `list` would shadow the doc
  *  layer, and one named `task` would look like a doc noun it isn't.
  *  The set is computed, not declared: plugin commands ∪ doc nouns ∪
- *  discovered doc verbs. Everything else is usable. */
+ *  the default type's shorthand verbs. Everything else is usable. */
 export function reservedWords(root = process.cwd()): Set<string> {
   const ctx: DocCtx = { root, scope: 'project' }
   const words = new Set(Object.keys(STANDARD_VERBS))
   for (const p of PLUGINS) {
     words.add(p.name)
   }
-  for (const t of docTypes()) {
+  const types = docTypes()
+  for (const t of types) {
     words.add(t.name)
     for (const a of t.aliases ?? []) {
       words.add(a)
     }
-    for (const v of docVerbs(t.adapter(ctx))) {
-      words.add(v)
+  }
+  // only the default type's verbs are verb-first reachable — a custom
+  // verb on another noun is always `bro <noun> <verb>` and can never be
+  // shadowed by a plugin command, so it isn't a reservation. A throwing
+  // adapter factory must not take startup or --help down with it.
+  const def = types.find((t) => t.name === 'task') ?? types[0]
+  if (def) {
+    try {
+      for (const v of docVerbs(def.adapter(ctx))) {
+        words.add(v)
+      }
+    } catch {
+      // broken adapter — its nouns above are still reserved
     }
   }
   return words
@@ -294,7 +327,12 @@ export function docUsageLines(): string[] {
   const ctx: DocCtx = { root, scope: 'project' }
   const types = docTypes()
   const def = types.find((t) => t.name === 'task') ?? types[0]
-  const verbs = def ? docVerbs(def.adapter(ctx)) : []
+  let verbs: string[] = []
+  try {
+    verbs = def ? docVerbs(def.adapter(ctx)) : []
+  } catch {
+    // a throwing adapter factory degrades help to the noun list
+  }
   return [
     `  doc types: ${types.map((t) => t.name).join(' ')}   — \`bro <noun> <verb>\` (e.g. \`bro task list\`, \`bro store init --global\`)`,
     `  shorthand: ${verbs.join(' ')}   — ${def?.name ?? 'task'} verbs usable verb-first (\`bro show <id>\`)`,

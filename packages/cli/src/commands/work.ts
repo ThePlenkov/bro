@@ -175,14 +175,18 @@ export function resolveEnterBase(
   current: string | undefined,
   /** What the main checkout points at — branch name, or its commit sha
    *  when detached. Either way the default base, never ambient HEAD. */
-  mainRef: string | undefined
+  mainRef: string | undefined,
+  /** The repo's default branch name — on a detached main `mainRef` is a
+   *  sha, so `current === 'main'` would slip through the check above
+   *  and let --stack treat the default branch as a stack head. */
+  defaultRef?: string | undefined
 ): { base?: string; err?: string } {
   if (explicit !== undefined) {
     return { base: explicit }
   }
-  if (!current || current === mainRef) {
+  if (!current || current === mainRef || current === defaultRef) {
     return stack
-      ? { err: '--stack needs a checked-out work branch — the default branch is not a stack head' }
+      ? { err: '--stack needs a checked-out work branch — detached HEAD and the default branch are not stack heads' }
       : { base: mainRef }
   }
   return stack || auto ? { base: current } : { base: mainRef }
@@ -239,13 +243,31 @@ function enterBase(argv: string[], main: WorktreeInfo): { base?: string } {
     argv.includes('--stack'),
     stackMode() === 'auto',
     gitTry(['branch', '--show-current']).out.trim() || undefined,
-    main.branch ?? main.head
+    main.branch ?? main.head,
+    defaultBranchName()
   )
   if (err) {
     console.error(`error: ${err}`)
     process.exit(1)
   }
   return { base }
+}
+
+/** The default branch name regardless of the main checkout's attachment
+ *  — a detached main reports `mainRef` as a sha, which must not make an
+ *  explicit `--base main` record a stack edge an attached main wouldn't.
+ *  Remote-agnostic: origin/HEAD is asked first, then any other remote's
+ *  HEAD — a repo whose primary remote isn't 'origin' gets the same
+ *  protection. */
+function defaultBranchName(): string | undefined {
+  const remotes = ['origin', ...gitTry(['remote']).out.split('\n').filter(Boolean)]
+  for (const r of new Set(remotes)) {
+    const head = gitTry(['symbolic-ref', '--short', `refs/remotes/${r}/HEAD`])
+    if (head.code === 0) {
+      return head.out.trim().replace(/^[^/]+\//, '')
+    }
+  }
+  return undefined
 }
 
 function cmdEnter(argv: string[]): void {
@@ -258,6 +280,7 @@ function cmdEnter(argv: string[]): void {
   const branch = flag(argv, '--branch') ?? `work/${slug}`
   const main = mainWorktree()
   const mainRef = main.branch ?? main.head
+  const defaultRef = defaultBranchName()
   const { base } = enterBase(argv, main)
   const path = worktreePathFor(main.path, slug)
   if (existsSync(path)) {
@@ -294,6 +317,7 @@ function cmdEnter(argv: string[]): void {
   const stacked =
     base !== undefined &&
     base !== mainRef &&
+    base !== defaultRef &&
     gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${base}`]).code === 0
   if (stacked) {
     recordStackEdge(branch, base)

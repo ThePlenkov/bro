@@ -56,7 +56,10 @@ export type DocVerb<TDoc = unknown> = (
  */
 export interface DocAdapter<TDoc = unknown> {
   list?(flags: DocFlags): Iterable<TDoc>
-  get?(ref: string): TDoc | null | undefined
+  /** `ref` is undefined on a bare `show` — a scoped adapter (store
+   *  --global) may still answer; ref-requiring adapters return nothing
+   *  and dispatch reports the missing ref. */
+  get?(ref: string | undefined): TDoc | null | undefined
   create?(input: Record<string, unknown>, flags: DocFlags): TDoc
   update?(ref: string, patch: DocFlags): TDoc | void
   remove?(ref: string): void
@@ -109,7 +112,15 @@ export function verbMethod(
   adapter: DocAdapter,
   verb: string
 ): ((...args: never[]) => unknown) | undefined {
-  const method = adapter[STANDARD_VERBS[verb] ?? verb]
+  // own-key check — `adapter['constructor']` must not resolve through
+  // Object.prototype via a Record index hit on STANDARD_VERBS; and a
+  // custom verb spelling an inherited member ('toString', 'hasOwnProperty')
+  // must not become invocable through the adapter either
+  const name = Object.hasOwn(STANDARD_VERBS, verb) ? STANDARD_VERBS[verb]! : verb
+  if (Object.hasOwn(Object.prototype, name)) {
+    return undefined
+  }
+  const method = adapter[name]
   return typeof method === 'function'
     ? (method as (...args: never[]) => unknown)
     : undefined

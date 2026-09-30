@@ -482,7 +482,11 @@ export function loadConfig(
   // bro.config.* is gitignored, so a fresh `git worktree add` otherwise
   // loses act.ignoreChecks and store choices (a bare `act wait` stalls on
   // a flaky reviewer the main checkout knows to ignore).
-  const dirs = [cwd, mainWorktreeRoot(cwd)].filter(
+  // Resolve once up front: mainWorktreeRoot returns an absolute path, so
+  // a relative cwd must be absolute too or the Set dedupe compares
+  // 'foo' against '/abs/foo' and loads the same dir twice.
+  const base = resolve(cwd)
+  const dirs = [base, mainWorktreeRoot(base)].filter(
     (d): d is string => d !== null && d.trim() !== ''
   )
   // a config that exists but fails never silently enables beads — the

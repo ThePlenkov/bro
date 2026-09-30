@@ -79,9 +79,21 @@ export function resolveRepo(positional: string[], cwd?: string): string {
   return `${viewed.owner.login}/${viewed.name}`
 }
 
+/** The GitHub host links should point at — GH_HOST is `gh`'s own
+ *  override, so GitHub Enterprise installs link to their server instead
+ *  of github.com. */
+export function ghHost(): string {
+  const h = process.env.GH_HOST
+  // GH_HOST is a bare host per gh(1) — but a pasted URL with a scheme
+  // would produce https://https://… links, so normalize it away
+  return h !== undefined && h.trim() !== ''
+    ? h.trim().replace(/^https?:\/\//, '').replace(/\/+$/, '')
+    : 'github.com'
+}
+
 /** `[#N](https://github.com/owner/repo/pull/N)` — the clickable form every
  *  user-facing PR reference must use; bare `#N` is just text. TSV/data rows
  *  keep the bare number — they are parsed, not read. */
 export function prLink(ownerRepo: string, pr: number): string {
-  return `[#${pr}](https://github.com/${ownerRepo}/pull/${pr})`
+  return `[#${pr}](https://${ghHost()}/${ownerRepo}/pull/${pr})`
 }
