@@ -1224,6 +1224,20 @@ const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
 
 const MUTATING = new Set(['collect', 'mark', 'set', 'sync', 'next'])
 
+// Read-only flag variants of mutating commands write nothing — a post-run
+// publish would push ledger rows the run did not change (and still ship
+// ignored debt). skip: collect --dry-run/--list-only, sync --dry-run.
+const READONLY_VARIANTS: Record<string, readonly string[]> = {
+  collect: ['--dry-run', '--list-only'],
+  sync: ['--dry-run'],
+}
+
+export function commandMutatedLedger(cmd: string, args: string[]): boolean {
+  return (
+    MUTATING.has(cmd) && !READONLY_VARIANTS[cmd]?.some((f) => args.includes(f))
+  )
+}
+
 /** Best-effort data-ref sync after ledger mutations — gitref is opt-in;
  *  sync failures warn but never mask the command's own result. */
 function maybeDataRefSync(): void {
@@ -1266,7 +1280,7 @@ export async function runDebtCommand(argv: string[]): Promise<void> {
     usage()
   }
   await handler(rest)
-  if (MUTATING.has(cmd)) {
+  if (commandMutatedLedger(cmd!, rest)) {
     maybeDataRefSync()
   }
 }
