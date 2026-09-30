@@ -38,7 +38,7 @@
 {"thread_id":"PRRT_kwDOUamqtM6jpwGX","status":"done","fix_pr":36,"fixed_at":"2026-09-18T13:07:10.919Z","notes":null}
 {"thread_id":"PRRT_kwDOUamqtM6kTv-o","status":"done","fix_pr":58,"fixed_at":"2026-09-22T14:16:37.910Z","notes":null}
 {"thread_id":"PRRT_kwDOUamqtM6kTwLX","status":"done","fix_pr":58,"fixed_at":"2026-09-22T14:16:38.113Z","notes":null}
-{"thread_id":"PRRT_kwDOUamqtM6kUlW8","status":"claimed","fix_pr":null,"fixed_at":null,"notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6kUlW8","status":"done","fix_pr":null,"fixed_at":"2026-09-30T22:47:15.985Z","notes":"bro sync orchestrates bd sync when .beads exists (sync.beads default true) — thread resolved on PR #56"}
 {"thread_id":"PRRT_kwDOUamqtM6ndQRE","status":"done","fix_pr":160,"fixed_at":"2026-09-30T16:35:57.804Z","notes":"fixed in #160: ancestry grep + degrade-path tests"}
 {"thread_id":"PRRT_kwDOUamqtM6nEI6_","status":"done","fix_pr":141,"fixed_at":"2026-09-30T15:31:42.803Z","notes":null}
 {"thread_id":"PRRT_kwDOUamqtM6nEI60","status":"done","fix_pr":138,"fixed_at":"2026-09-30T15:31:42.105Z","notes":null}
