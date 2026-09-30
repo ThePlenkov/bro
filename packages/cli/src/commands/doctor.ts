@@ -13,7 +13,7 @@
 import { spawnSync } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
-import { bdTry, gitTry, probeConfigFile } from '@broject/core'
+import { bdTry, gitTry, probeBdCompat, probeConfigFile } from '@broject/core'
 import { loadBroConfig, pluginConfigSections } from '../plugins.ts'
 
 export type DoctorStatus = 'ok' | 'warn' | 'fail' | 'skip'
@@ -255,6 +255,26 @@ function bdChecks(
     ]
   }
   const out: DoctorCheck[] = [check('bd', 'ok', bd.version ?? 'present')]
+  // compat probe — verifies the contract bro calls (read-path --json
+  // shapes, subcommand/flag surface, store schema) rather than trusting a
+  // pre-1.0 version number. Drift fails when beads is an active store.
+  const compat = probeBdCompat(dir)
+  if (!compat.ok) {
+    out.push(
+      check(
+        'bd-compat',
+        beadsActive ? 'fail' : 'warn',
+        compat.problems.join('; '),
+        'bd moved past the contract bro speaks — upgrade/downgrade beads or set "stores": ["jsonl"]'
+      )
+    )
+  } else if (compat.store === 'reachable') {
+    out.push(check('bd-compat', 'ok', `v${compat.version ?? '?'} contract verified`))
+  } else {
+    out.push(
+      check('bd-compat', 'ok', `v${compat.version ?? '?'} — read contract unproven (no store)`)
+    )
+  }
   const dolt = bdTry(['dolt', 'remote', 'list'], 15_000, dir)
   if (dolt.code !== 0) {
     const err = dolt.err ? ` (${dolt.err})` : ''

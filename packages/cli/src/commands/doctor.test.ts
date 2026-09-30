@@ -26,9 +26,12 @@ case "$1" in
       exit 0
     fi
     exit 1 ;;
-  list)
+  list|ready)
     [ "\${FAKE_BD_LIST_FAIL:-0}" = "1" ] && { echo 'no beads database' >&2; exit 1; }
+    [ "\${FAKE_BD_DRIFT:-0}" = "1" ] && { echo '{"issues":[]}'; exit 0; }
+    [ "\${FAKE_BD_FLAG_DRIFT:-0}" = "1" ] && { echo 'Error: unknown flag: --json' >&2; exit 1; }
     echo '[]' ;;
+  info) echo "{\\"schema_version\\":\${FAKE_BD_SCHEMA:-1}}" ;;
   *) exit 1 ;;
 esac
 `
@@ -122,7 +125,7 @@ describe('bro doctor', () => {
       (dir) => {
         const checks = runDoctorChecks(dir)
         for (const name of [
-          'node', 'git', 'repo', 'gh', 'bd', 'bd-backend', 'bd-store',
+          'node', 'git', 'repo', 'gh', 'bd', 'bd-compat', 'bd-backend', 'bd-store',
           'hooks', 'config', 'git-remote', 'dolt-remote',
         ]) {
           assert.equal(byName(checks, name)?.status, 'ok', `${name}: ${JSON.stringify(byName(checks, name))}`)
@@ -188,6 +191,39 @@ describe('bro doctor', () => {
       const c = byName(runDoctorChecks(dir), 'config')
       assert.equal(c.status, 'warn')
       assert.match(c.detail, /sdd2/)
+    }))
+
+  test('drifted bd output shape fails when beads is an active store', () =>
+    withEnv(
+      { config: { stores: ['jsonl', 'beads'] }, beadsDir: true, bins: ['bd', 'gh'], env: { FAKE_BD_DRIFT: '1' } },
+      (dir) => {
+        const c = byName(runDoctorChecks(dir), 'bd-compat')
+        assert.equal(c.status, 'fail')
+        assert.match(c.detail, /expected an array/)
+        assert.equal(doctorExitCode(runDoctorChecks(dir)), 1)
+      }
+    ))
+
+  test('drifted bd only warns under jsonl-only stores', () =>
+    withEnv({ config: { stores: ['jsonl'] }, bins: ['bd', 'gh'], env: { FAKE_BD_FLAG_DRIFT: '1' } }, (dir) => {
+      const c = byName(runDoctorChecks(dir), 'bd-compat')
+      assert.equal(c.status, 'warn')
+      assert.match(c.detail, /unknown flag/)
+      assert.equal(doctorExitCode(runDoctorChecks(dir)), 0)
+    }))
+
+  test('bd store schema newer than bro knows warns/fails via compat', () =>
+    withEnv({ config: { stores: ['jsonl'] }, bins: ['bd', 'gh'], env: { FAKE_BD_SCHEMA: '2' } }, (dir) => {
+      const c = byName(runDoctorChecks(dir), 'bd-compat')
+      assert.equal(c.status, 'warn')
+      assert.match(c.detail, /schema_version 2/)
+    }))
+
+  test('no store — compat is unproven but ok', () =>
+    withEnv({ config: { stores: ['jsonl', 'beads'] }, bins: ['bd', 'gh'], env: { FAKE_BD_LIST_FAIL: '1' } }, (dir) => {
+      const c = byName(runDoctorChecks(dir), 'bd-compat')
+      assert.equal(c.status, 'ok')
+      assert.match(c.detail, /unproven/)
     }))
 
   test('pre-Dolt bd — backend warns, store probe skips', () =>

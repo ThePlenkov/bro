@@ -15,6 +15,8 @@ import { parseNextPlan } from './next-plan.ts'
 const FAKE_BD = `#!/bin/sh
 case "$1" in
   --version) echo 'bd 0.0' ;;
+  list) echo '[]' ;;
+  info) echo '{"schema_version":1}' ;;
   ready) echo "$@" >> "$FAKE_BD_READY_LOG"; cat "$FAKE_BD_READY" ;;
   config)
     if [ -n "$FAKE_BD_CONFIG_FAIL" ]; then exit 1; fi
@@ -31,7 +33,7 @@ case "$1" in
     if [ -n "$FAKE_BD_EPIC_PARENTS" ]; then
       case "$2" in *$FAKE_BD_EPIC_PARENTS*) type=epic ;; esac
     fi
-    echo '[{"status":"'$status'","issue_type":"'$type'"}]' ;;
+    echo '[{"id":"'$2'","status":"'$status'","issue_type":"'$type'"}]' ;;
   update)
     if [ -n "$FAKE_BD_CLAIM_FAIL" ]; then
       case "$2" in *$FAKE_BD_CLAIM_FAIL*) exit 1 ;; esac

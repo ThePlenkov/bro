@@ -13,7 +13,7 @@
  * mol/wisp (molecules), provenance (evidence), merge-slot, config,
  * init/info. Those keep calling bd() until they get doc types.
  */
-import { bd, bdJson, bdTry } from './bd.ts'
+import { bd, BdCompatError, bdJson, bdTry } from './bd.ts'
 import { gitTry } from './git.ts'
 
 /** Resolved probe results per dir — hook surfaces ask for the actor
@@ -138,6 +138,33 @@ export interface TaskStore {
   prefix(): string | undefined
 }
 
+/** A parsed `--json` payload must be the shape the contract declares —
+ *  valid JSON in a drifted shape (object envelope, bare strings) is a
+ *  compat failure to name now, not a TypeError five calls later. */
+function taskRows<T extends TaskRow>(v: unknown, cmd: string): T[] {
+  if (!Array.isArray(v)) {
+    throw new BdCompatError(
+      `bd ${cmd} --json returned ${v === null ? 'null' : typeof v} — expected an array`
+    )
+  }
+  for (const r of v) {
+    if (typeof r !== 'object' || r === null || typeof (r as TaskRow).id !== 'string') {
+      throw new BdCompatError(`bd ${cmd} --json rows lack a string \`id\` — output shape drifted`)
+    }
+  }
+  return v as T[]
+}
+
+function taskRow(v: unknown, cmd: string): TaskRow | undefined {
+  if (v === undefined || v === null) {
+    return undefined
+  }
+  if (typeof v !== 'object' || typeof (v as TaskRow).id !== 'string') {
+    throw new BdCompatError(`bd ${cmd} --json returned a non-row shape — output drifted`)
+  }
+  return v as TaskRow
+}
+
 function filterArgs(f: TaskFilter): string[] {
   const args: string[] = []
   if (f.status) args.push('--status', f.status)
@@ -169,18 +196,18 @@ function createArgs(i: TaskInput): string[] {
  *  (`resolveGlobalDir` lives in the cli layer). */
 export function taskStore(dir?: string): TaskStore {
   return {
-    list: (f = {}) => bdJson(['list', '--json', ...filterArgs(f)], dir),
-    ready: (f = {}) => bdJson(['ready', ...filterArgs(f)], dir),
+    list: (f = {}) => taskRows(bdJson(['list', '--json', ...filterArgs(f)], dir), 'list'),
+    ready: (f = {}) => taskRows(bdJson(['ready', ...filterArgs(f)], dir), 'ready'),
     get: (id) => {
       const r = bdJson<TaskRow | TaskRow[]>(['show', id], dir)
       // bd show answers an array; empty/undefined = no such task
-      return ((Array.isArray(r) ? r[0] : r) ?? undefined) as never
+      return taskRow(Array.isArray(r) ? r[0] : r, 'show') as never
     },
     create: (i) => {
       const r = bdJson<TaskRow | TaskRow[]>(createArgs(i), dir)
-      const row = Array.isArray(r) ? r[0] : r
+      const row = taskRow(Array.isArray(r) ? r[0] : r, 'create')
       if (!row) {
-        throw new Error('task create returned no row — backend contract broken')
+        throw new BdCompatError('bd create returned no row — backend contract broken')
       }
       return row as never
     },
@@ -209,9 +236,9 @@ export function taskStore(dir?: string): TaskStore {
     note: (id, text) => {
       bd(['note', id, text], dir)
     },
-    children: (id) => bdJson(['children', id], dir),
-    deps: (ids, opts = {}) =>
-      bdJson(
+    children: (id) => taskRows(bdJson(['children', id], dir), 'children'),
+    deps: (ids, opts = {}) => {
+      const v = bdJson(
         [
           'dep',
           'list',
@@ -220,7 +247,12 @@ export function taskStore(dir?: string): TaskStore {
           ...(opts.direction ? [`--direction=${opts.direction}`] : []),
         ],
         dir
-      ),
+      )
+      if (!Array.isArray(v)) {
+        throw new BdCompatError('bd dep list --json returned a non-array — output drifted')
+      }
+      return v as never
+    },
     link: (from, to, type = 'related') => {
       bd(['link', from, to, '--type', type], dir)
     },

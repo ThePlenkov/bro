@@ -59,6 +59,161 @@ export function bdJson<T>(args: string[], cwd?: string): T {
   }
 }
 
+/**
+ * Thrown when the bd binary can't speak the contract bro assumes — a
+ * renamed/removed command or flag, or a `--json` payload in a different
+ * shape. Distinct from operational failures (no binary, no store, a
+ * corrupt db): compat is permanent until bd is upgraded or downgraded,
+ * so callers may degrade — warn and fall back — instead of retrying.
+ */
+export class BdCompatError extends Error {
+  override name = 'BdCompatError'
+}
+
+/** stderr/message patterns that mean the bd binary rejected the call —
+ *  renamed/removed commands or flags. Store-state errors (`no beads
+ *  database`) are deliberately absent: that's an environment problem,
+ *  not API drift. */
+const BD_USAGE_DRIFT =
+  /unknown (command|flag|shorthand)|flag provided but not defined|unrecognized command/i
+const BD_NO_STORE = /no beads database|not initialized|no database found/i
+
+function errText(err: unknown): string {
+  const e = err as { message?: unknown; stderr?: unknown }
+  return `${typeof e?.message === 'string' ? e.message : String(err)}\n${
+    typeof e?.stderr === 'string' ? e.stderr : ''
+  }`
+}
+
+/** Classifier for errors thrown out of any bd call: contract drift vs
+ *  operational failure. Drives the degrade decision — drift is permanent
+ *  until bd changes, so callers may warn + fall back rather than fail. */
+export function isBdCompatError(err: unknown): boolean {
+  if (err instanceof BdCompatError) {
+    return true
+  }
+  const t = errText(err)
+  return BD_USAGE_DRIFT.test(t) || t.includes('malformed JSON')
+}
+
+export interface BdCompat {
+  /** no drift found — bd speaks the contract bro assumes */
+  ok: boolean
+  /** bd binary absent (ENOENT) — a setup gap, not drift */
+  missing: boolean
+  version?: string
+  /** drift findings — non-empty ⇒ ok:false */
+  problems: string[]
+  /** what the read probes saw. 'absent' = no store to probe, so shape
+   *  checks were inconclusive; 'error' = a store failure that isn't
+   *  classifiable as drift (corrupt db, permissions) */
+  store: 'reachable' | 'absent' | 'error' | 'unprobed'
+  storeErr?: string
+}
+
+/** The newest `.beads` schema_version this bro was built against —
+ *  `bd info --json` reports it; a newer value means the store moved
+ *  past what this code reads. */
+export const BD_KNOWN_SCHEMA_VERSION = 1
+
+function rowShape(v: unknown, cmd: string, problems: string[]): void {
+  if (!Array.isArray(v)) {
+    problems.push(
+      `\`bd ${cmd} --json\` returned ${v === null ? 'null' : typeof v}, expected an array`
+    )
+    return
+  }
+  for (const r of v) {
+    if (typeof r !== 'object' || r === null || typeof (r as { id?: unknown }).id !== 'string') {
+      problems.push(`\`bd ${cmd} --json\` rows lack a string \`id\` — output shape drifted`)
+      return
+    }
+  }
+}
+
+/**
+ * Compat probe — verifies the bd contract bro relies on, since version
+ * numbers can't pin a pre-1.0 CLI. Read-path probes run only while a
+ * store is reachable; without one, flag/command drift still surfaces
+ * (usage errors precede the database check) but output shape stays
+ * unproven.
+ */
+export function probeBdCompat(dir?: string): BdCompat {
+  const res: BdCompat = { ok: true, missing: false, problems: [], store: 'unprobed' }
+  const ver = bdTry(['--version'], 10_000, dir)
+  if (ver.code !== 0) {
+    res.missing = /ENOENT/.test(ver.err)
+    res.problems.push(
+      res.missing ? 'bd not found on PATH' : `\`bd --version\` failed — ${ver.err || 'spawn error'}`
+    )
+    res.ok = false
+    return res
+  }
+  res.version = /\d+(\.\d+)+/.exec(`${ver.out} ${ver.err}`)?.[0]
+
+  // The read path every TaskStore consumer builds on: list + ready must
+  // answer a JSON array of rows with a string id.
+  for (const name of ['list', 'ready'] as const) {
+    const p = bdTry([name, '--json', '-n', '1'], 15_000, dir)
+    if (p.code === 0) {
+      res.store = 'reachable'
+      try {
+        rowShape(JSON.parse(p.out), name, res.problems)
+      } catch {
+        res.problems.push(`\`bd ${name} --json\` returned non-JSON output`)
+      }
+      continue
+    }
+    if (BD_USAGE_DRIFT.test(p.err)) {
+      res.problems.push(`\`bd ${name}\` rejected the call — ${p.err.split('\n')[0]}`)
+      continue
+    }
+    if (BD_NO_STORE.test(p.err)) {
+      res.store = 'absent'
+      res.storeErr = p.err
+      break // every remaining probe hits the same wall
+    }
+    // unclassifiable failure: once a probe proved the store reachable a
+    // second one dying is suspicious enough to report — but when nothing
+    // reached the store it's store state (corrupt db, perms), not drift
+    if (res.store === 'reachable') {
+      res.problems.push(
+        `\`bd ${name}\` failed on a readable store — ${p.err.split('\n')[0] || `exit ${p.code}`}`
+      )
+      continue
+    }
+    res.store = 'error'
+    res.storeErr = p.err
+    break
+  }
+
+  // Schema probe — meaningful only with a live store.
+  if (res.store === 'reachable') {
+    const info = bdTry(['info', '--json'], 15_000, dir)
+    if (info.code === 0) {
+      try {
+        const parsed = JSON.parse(info.out) as { schema_version?: unknown }
+        if (
+          typeof parsed.schema_version === 'number' &&
+          parsed.schema_version > BD_KNOWN_SCHEMA_VERSION
+        ) {
+          res.problems.push(
+            `bd store schema_version ${parsed.schema_version} is newer than bro knows (${BD_KNOWN_SCHEMA_VERSION})`
+          )
+        }
+      } catch {
+        res.problems.push('`bd info --json` returned non-JSON output')
+      }
+    } else if (BD_USAGE_DRIFT.test(info.err)) {
+      res.problems.push(`\`bd info\` rejected the call — ${info.err.split('\n')[0]}`)
+    }
+    // other info failures are operational, not compat
+  }
+
+  res.ok = res.problems.length === 0
+  return res
+}
+
 /** Classify a provenance ref — shared by drill and retro evidence. */
 export function refKind(ref: string): string {
   if (/\/pull\/|\/merge_requests\//.test(ref)) {
@@ -120,23 +275,21 @@ export function initBeadsStealth(): boolean {
   }
 }
 
-export function checkBeads(): void {
-  try {
-    bd(['--version'])
-  } catch (err) {
-    // ENOENT = the binary is absent; anything else is a real failure to surface
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new Error('bd not found — install beads first (https://github.com/gastownhall/beads)')
-    }
-    throw err
+export function checkBeads(dir?: string): void {
+  const compat = probeBdCompat(dir)
+  if (compat.missing) {
+    throw new Error('bd not found — install beads first (https://github.com/gastownhall/beads)')
   }
-  try {
-    bd(['list', '--json', '-n', '1'])
-  } catch (err) {
+  if (!compat.ok) {
+    throw new BdCompatError(
+      `bd${compat.version ? ` ${compat.version}` : ''} drifted off the contract bro speaks — ` +
+        compat.problems.join('; ')
+    )
+  }
+  if (compat.store !== 'reachable') {
     // preserve the real failure — "not initialized" is only one cause
-    const stderr = (err as { stderr?: string }).stderr?.trim()
     throw new Error(
-      `bd list failed — ${stderr || (err instanceof Error ? err.message : String(err))} ` +
+      `bd list failed — ${compat.storeErr || 'no beads database found'} ` +
         '(run `bd init` if beads is not initialized here)'
     )
   }

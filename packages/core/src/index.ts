@@ -1,6 +1,18 @@
 export { gh, ghAsync, ghJson, ghJsonAsync, ghTry, prLink, resolveRepo } from './gh.ts'
 export { git, gitTry } from './git.ts'
-export { bd, bdJson, bdTry, checkBeads, evidenceKind, initBeadsStealth, refKind } from './bd.ts'
+export {
+  bd,
+  BdCompatError,
+  bdJson,
+  bdTry,
+  checkBeads,
+  evidenceKind,
+  initBeadsStealth,
+  isBdCompatError,
+  probeBdCompat,
+  refKind,
+} from './bd.ts'
+export type { BdCompat } from './bd.ts'
 export {
   actSection,
   beadsSection,
