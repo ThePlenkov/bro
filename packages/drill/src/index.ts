@@ -16,6 +16,10 @@ export type {
   UpOptions,
   UpResult,
 } from './types.ts'
-export { parseDrillPlan, PLAN_KIND as DRILL_PLAN_KIND } from './plan.ts'
+export {
+  parseDrillPlan,
+  PLAN_KIND as DRILL_PLAN_KIND,
+  PLAN_VERSION as DRILL_PLAN_VERSION,
+} from './plan.ts'
 export type { DrillPlan, DrillStep } from './plan.ts'
 export { drillConnector } from './connector.ts'

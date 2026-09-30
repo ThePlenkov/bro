@@ -4,12 +4,14 @@
  * ledger deterministically.
  *
  *   kind = "debt"
+ *   version = 1          # optional — schema pin (PLAN_VERSION)
  *   [[verdicts]]
  *   thread_id = "PRRT_..."
  *   status = "wontfix"     # open|claimed|done|wontfix|duplicate
  *   notes = "why"        # optional
  *   fix_pr = 123         # optional — the PR that landed the fix
  */
+import { checkPlanVersion } from '@broject/core'
 import type { DebtStatus } from './types.ts'
 
 export const DEBT_ROW_STATUSES: readonly DebtStatus[] = [
@@ -34,6 +36,10 @@ export interface DebtPlan {
 /** The `kind` value a debt plan must carry when it has one — lets
  * `bro run <file>` route the plan to this plugin. */
 export const PLAN_KIND = 'debt'
+
+/** The schema version this parser speaks — `version = N` in a plan
+ *  pins it; a pin above this is rejected, not misparsed. */
+export const PLAN_VERSION = 1
 
 const VERDICT_KEYS = new Set(['thread_id', 'status', 'notes', 'fix_pr'])
 
@@ -88,7 +94,7 @@ export function parseDebtPlan(doc: unknown, source = 'plan'): DebtPlan {
     throw new Error(`${source}: expected a TOML table`)
   }
   for (const key of Object.keys(doc)) {
-    if (key !== 'verdicts' && key !== 'kind') {
+    if (key !== 'verdicts' && key !== 'kind' && key !== 'version') {
       errors.push(`unknown top-level key "${key}"`)
     }
   }
@@ -97,6 +103,7 @@ export function parseDebtPlan(doc: unknown, source = 'plan'): DebtPlan {
   if (doc.kind !== undefined && doc.kind !== PLAN_KIND) {
     errors.push(`kind: expected "${PLAN_KIND}", got ${JSON.stringify(doc.kind)}`)
   }
+  checkPlanVersion(doc.version, PLAN_KIND, PLAN_VERSION, errors)
   const verdicts: DebtVerdict[] = []
   if (!Array.isArray(doc.verdicts)) {
     errors.push('verdicts: must be an array of tables ([[verdicts]])')

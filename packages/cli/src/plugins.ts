@@ -13,8 +13,6 @@ import {
   debtSection,
   definePlugin,
   loadConfig,
-  planKind,
-  readPlanDoc,
   registerConnector,
   sddSection,
   stackSection,
@@ -23,11 +21,11 @@ import {
   type ConfigSection,
   type DocType,
 } from '@broject/core'
-import { actConnector, parseActPlan, type ActPlan } from '@broject/act'
-import { parseConvoyPlan, type ConvoyPlan } from '@broject/convoy'
-import { debtConnector, parseDebtPlan, type DebtPlan } from '@broject/debt'
-import { drillConnector, parseDrillPlan, type DrillPlan } from '@broject/drill'
-import { parsePlanDoc, type RetroPlan } from '@broject/retro'
+import { actConnector, ACT_PLAN_VERSION, parseActPlan, type ActPlan } from '@broject/act'
+import { CONVOY_PLAN_VERSION, parseConvoyPlan, type ConvoyPlan } from '@broject/convoy'
+import { DEBT_PLAN_VERSION, debtConnector, parseDebtPlan, type DebtPlan } from '@broject/debt'
+import { DRILL_PLAN_VERSION, drillConnector, parseDrillPlan, type DrillPlan } from '@broject/drill'
+import { parsePlanDoc, RETRO_PLAN_VERSION, type RetroPlan } from '@broject/retro'
 import { loopSection } from '@broject/loop'
 import { githubConnector } from '@broject/github'
 import { gitlabConnector } from '@broject/gitlab'
@@ -36,7 +34,8 @@ import { runCleanupCommand } from './commands/cleanup.ts'
 import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts'
 import { runLoopCommand } from './commands/loop.ts'
 import { applyNextPlan, runNextCommand } from './commands/next.ts'
-import { parseNextPlan, type NextPlan } from './commands/next-plan.ts'
+import { parseNextPlan, PLAN_VERSION as NEXT_PLAN_VERSION, type NextPlan } from './commands/next-plan.ts'
+import { resolvePlanDoc, runPlanCommand } from './commands/plan.ts'
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
 import { runDoctorCommand } from './commands/doctor.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
@@ -68,6 +67,7 @@ export const PLUGINS: BroPlugin[] = [
     configKey: 'debt',
     configSchema: debtSection,
     planSchema: (doc, source) => parseDebtPlan(doc, source),
+    planVersion: DEBT_PLAN_VERSION,
     runPlan: (plan) => applyVerdicts((plan as DebtPlan).verdicts),
   }),
   definePlugin({
@@ -78,6 +78,7 @@ export const PLUGINS: BroPlugin[] = [
     configKey: 'act',
     configSchema: actSection,
     planSchema: (doc, source) => parseActPlan(doc, source),
+    planVersion: ACT_PLAN_VERSION,
     runPlan: (plan) => applyActPlan(plan as ActPlan),
   }),
   definePlugin({
@@ -86,6 +87,7 @@ export const PLUGINS: BroPlugin[] = [
     run: runConvoyCommand,
     skill: 'convoy',
     planSchema: (doc, source) => parseConvoyPlan(doc, source),
+    planVersion: CONVOY_PLAN_VERSION,
     runPlan: (plan) => applyConvoyPlan(plan as ConvoyPlan),
   }),
   definePlugin({
@@ -94,6 +96,7 @@ export const PLUGINS: BroPlugin[] = [
     run: runNextCommand,
     skill: 'next',
     planSchema: (doc, source) => parseNextPlan(doc, source),
+    planVersion: NEXT_PLAN_VERSION,
     runPlan: (plan) => applyNextPlan(plan as NextPlan),
   }),
   definePlugin({
@@ -115,6 +118,7 @@ export const PLUGINS: BroPlugin[] = [
     run: runDrillCommand,
     skill: 'drill',
     planSchema: (doc, source) => parseDrillPlan(doc, source),
+    planVersion: DRILL_PLAN_VERSION,
     runPlan: (plan) => applyDrillPlan(plan as DrillPlan),
   }),
   definePlugin({
@@ -129,6 +133,7 @@ export const PLUGINS: BroPlugin[] = [
     run: runRetrospectCommand,
     skill: 'wtf',
     planSchema: (doc, source) => parsePlanDoc(doc, source),
+    planVersion: RETRO_PLAN_VERSION,
     runPlan: (plan) => {
       checkBeads()
       cmdRecord(plan as RetroPlan)
@@ -198,6 +203,11 @@ export const PLUGINS: BroPlugin[] = [
     run: (argv) => runPlanFile(argv),
   }),
   definePlugin({
+    name: 'plan',
+    summary: 'Plan contract: list kinds + schema versions, validate a file',
+    run: (argv) => runPlanCommand(argv, PLUGINS),
+  }),
+  definePlugin({
     name: 'plugins',
     summary: 'List registered plugins — name, skill, config section',
     run() {
@@ -212,8 +222,9 @@ export const PLUGINS: BroPlugin[] = [
   }),
 ]
 
-/** `bro run <plan.toml>` — parse the file, route on `kind`, validate with
- *  the owning plugin's planSchema, execute via runPlan. */
+/** `bro run <plan.toml>` — parse the file, route on `kind`, gate on the
+ *  envelope `version`, validate with the owning plugin's planSchema,
+ *  execute via runPlan. Resolution is shared with `bro plan validate`. */
 export async function runPlanFile(argv: string[]): Promise<void> {
   const files = argv.filter((a) => !a.startsWith('-'))
   const kinds = PLUGINS.filter((p) => p.planSchema).map((p) => p.name)
@@ -222,19 +233,11 @@ export async function runPlanFile(argv: string[]): Promise<void> {
     process.exit(2)
   }
   const file = files[0] as string
-  const doc = readPlanDoc(file)
-  const kind = planKind(doc)
-  if (!kind) {
-    throw new Error(`${file}: no kind field — known plan kinds: ${kinds.join(', ')}`)
+  const { plugin, plan } = resolvePlanDoc(file, PLUGINS)
+  if (!plugin.runPlan) {
+    throw new Error(`${file}: plugin "${plugin.name}" does not accept plans`)
   }
-  const plugin = PLUGINS.find((p) => p.name === kind)
-  if (!plugin) {
-    throw new Error(`${file}: kind "${kind}" is unknown — known plan kinds: ${kinds.join(', ')}`)
-  }
-  if (!plugin.planSchema || !plugin.runPlan) {
-    throw new Error(`${file}: plugin "${kind}" does not accept plans`)
-  }
-  await plugin.runPlan(plugin.planSchema(doc, file))
+  await plugin.runPlan(plan)
 }
 
 /** configKey → configSchema across the registry — what `loadConfig`
@@ -277,6 +280,7 @@ const PLUGIN_FIELD_CHECKS: ReadonlyArray<
 > = [
   ['configSchema', (v) => typeof v === 'function'],
   ['planSchema', (v) => typeof v === 'function'],
+  ['planVersion', (v) => typeof v === 'number' && Number.isInteger(v as number) && (v as number) >= 1],
   ['runPlan', (v) => typeof v === 'function'],
   ['skill', (v) => typeof v === 'string'],
   ['configKey', (v) => typeof v === 'string'],

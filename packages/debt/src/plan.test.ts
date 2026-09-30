@@ -100,4 +100,17 @@ status = "wontfix"
       /unknown top-level key "foo"/
     )
   })
+
+  test('version pin: v1 accepted, newer/malformed rejected', () => {
+    const plan = parsePlan('version = 1\n[[verdicts]]\nthread_id="T1"\nstatus="done"')
+    assert.equal(plan.verdicts.length, 1)
+    assert.throws(
+      () => parsePlan('version = 2\n[[verdicts]]\nthread_id="T1"\nstatus="done"'),
+      /version: debt schema v2 is newer than this bro understands \(latest v1\)/
+    )
+    assert.throws(
+      () => parsePlan('version = 0\n[[verdicts]]\nthread_id="T1"\nstatus="done"'),
+      /version: must be a positive integer/
+    )
+  })
 })

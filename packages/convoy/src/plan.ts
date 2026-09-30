@@ -5,6 +5,7 @@
  * proceeds through `convoy next`/`done` as usual.
  *
  *   kind = "convoy"
+ *   version = 1                    # optional — schema pin (PLAN_VERSION)
  *   gates = "allow"                # plan-wide default gate policy
  *
  *   [[molecules]]                  # pour a registered formula/proto
@@ -21,6 +22,7 @@
  *   type = "agent"                 # "human" declares a gate
  *   needs = ["build"]
  */
+import { checkPlanVersion } from '@broject/core'
 import { stepKind } from './molecule.ts'
 import type { MolIssue } from './types.ts'
 
@@ -74,7 +76,11 @@ export interface ConvoyPlan {
 /** The `kind` value a convoy plan must carry — `bro run` routes on it. */
 export const PLAN_KIND = 'convoy'
 
-const TOP_KEYS = new Set(['kind', 'gates', 'molecules'])
+/** The schema version this parser speaks — `version = N` in a plan
+ *  pins it; a pin above this is rejected, not misparsed. */
+export const PLAN_VERSION = 1
+
+const TOP_KEYS = new Set(['kind', 'version', 'gates', 'molecules'])
 const MOL_KEYS = new Set(['formula', 'vars', 'title', 'description', 'steps', 'gates'])
 const STEP_KEYS = new Set(['id', 'title', 'type', 'needs', 'description', 'priority'])
 
@@ -309,6 +315,7 @@ export function parseConvoyPlan(doc: unknown, source = 'plan'): ConvoyPlan {
   if (doc.kind !== undefined && doc.kind !== PLAN_KIND) {
     errors.push(`kind: expected "${PLAN_KIND}", got ${JSON.stringify(doc.kind)}`)
   }
+  checkPlanVersion(doc.version, PLAN_KIND, PLAN_VERSION, errors)
   const gates = gatePolicy(doc.gates, 'plan', errors)
   const molecules: ConvoyMolecule[] = []
   const molDocIdx: number[] = [] // original doc index per parsed molecule

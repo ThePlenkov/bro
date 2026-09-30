@@ -4,10 +4,13 @@ description: Structured TOML input — one envelope, per-command schemas.
 ---
 
 Commands that take structured input share one envelope: a TOML file with
-a `kind` that routes to the owning plugin.
+a `kind` that routes to the owning plugin. Each kind's schema carries a
+version — `version` pins the contract the file was written against, and
+`bro plan` lists what the installed bro understands.
 
 ```toml
 kind = "retrospect"          # routes to the retrospect plugin
+version = 1                  # optional — the schema pin
 
 [retro]
 what = "the deploy broke"    # required — one line
@@ -23,8 +26,9 @@ sink = "workaround"          # backlog | memory | agentic-documents | …
 
 1. Parses the TOML document
 2. Reads `kind` → finds the plugin by name
-3. Validates the payload against the plugin's `planSchema`
-4. Executes via the plugin's `runPlan`
+3. Gates `version` against the plugin's declared schema version
+4. Validates the payload against the plugin's `planSchema`
+5. Executes via the plugin's `runPlan`
 
 Unknown kinds are rejected with the list of known ones; a plugin without
 `planSchema`/`runPlan` says so instead of guessing. Validation is
@@ -32,6 +36,37 @@ aggregate — every problem in the file is reported at once, not one error
 per run.
 
 `bro retrospect schema` prints the commented template for its kind.
+
+## `version` — the schema pin
+
+`version` is optional and must be a positive integer at or below the
+kind's current schema version — `bro plan` lists them:
+
+```text
+$ bro plan
+debt         v1
+act          v1
+convoy       v1
+next         v1
+drill        v1
+retrospect   v1
+```
+
+Absent means "whatever the installed schema is" — every unversioned plan
+keeps working. A pin *newer* than this bro understands is rejected with
+the supported version named, never silently misparsed — that is the
+contract external producers target: pin `version = 1` and the plan fails
+loudly on a bro whose schema moved, instead of executing under a drifted
+reading.
+
+## `bro plan validate <plan.toml>`
+
+Runs the full `bro run` pipeline — TOML parse, `kind` routing, the
+`version` gate, `planSchema` — and stops before `runPlan`. Valid files
+print `ok — <kind> plan, schema v<N>`; invalid ones exit 1 with the same
+aggregate error `bro run` would report. Validate before pushing a plan
+into a queue: the executor and the checker share one resolve step, so
+they can't disagree.
 
 ## Kinds
 

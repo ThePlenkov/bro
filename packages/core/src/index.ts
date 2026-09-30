@@ -70,7 +70,7 @@ export type {
   GateContribution,
   MaybePromise,
 } from './connectors.ts'
-export { planKind, readPlanDoc } from './plan.ts'
+export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts'
 export type { PlanSchema } from './plan.ts'
 export { makePrinter } from './output.ts'
 export type { Printer } from './output.ts'

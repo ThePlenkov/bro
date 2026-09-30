@@ -78,4 +78,17 @@ action = "defer"
   test('requires threads', () => {
     assert.throws(() => parsePlan('kind = "act"'), /threads: must be an array/)
   })
+
+  test('version pin: v1 accepted, newer/malformed rejected', () => {
+    const plan = parsePlan('version = 1\n[[threads]]\nthread_id="T"\naction="resolve"')
+    assert.equal(plan.threads.length, 1)
+    assert.throws(
+      () => parsePlan('version = 2\n[[threads]]\nthread_id="T"\naction="resolve"'),
+      /version: act schema v2 is newer than this bro understands \(latest v1\)/
+    )
+    assert.throws(
+      () => parsePlan('version = "1"\n[[threads]]\nthread_id="T"\naction="resolve"'),
+      /version: must be a positive integer/
+    )
+  })
 })

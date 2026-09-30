@@ -6,6 +6,7 @@
  * execution with plan defaults.
  *
  *   kind = "next"
+ *   version = 1                # optional — schema pin (PLAN_VERSION)
  *   limit = 3                  # beads to claim — default 1
  *   order = "priority"         # priority | oldest | newest
  *   claim = false              # selection only — nothing is claimed
@@ -25,6 +26,8 @@
  *   max_priority = 2           # claim only P0..P2
  *   match = "schema|plan"      # case-insensitive regex over the title
  */
+import { checkPlanVersion } from '@broject/core'
+
 export const NEXT_ORDERS = ['priority', 'oldest', 'newest'] as const
 export type NextOrder = (typeof NEXT_ORDERS)[number]
 
@@ -64,7 +67,11 @@ export interface NextPlan {
 /** The `kind` value a next plan must carry — `bro run` routes on it. */
 export const PLAN_KIND = 'next'
 
-const TOP_KEYS = new Set(['kind', 'limit', 'order', 'claim', 'gates', 'scope', 'json', 'filters'])
+/** The schema version this parser speaks — `version = N` in a plan
+ *  pins it; a pin above this is rejected, not misparsed. */
+export const PLAN_VERSION = 1
+
+const TOP_KEYS = new Set(['kind', 'version', 'limit', 'order', 'claim', 'gates', 'scope', 'json', 'filters'])
 const FILTER_KEYS = new Set(['types', 'max_priority', 'match'])
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
@@ -173,6 +180,7 @@ export function parseNextPlan(doc: unknown, source = 'plan'): NextPlan {
   if (doc.kind !== undefined && doc.kind !== PLAN_KIND) {
     errors.push(`kind: expected "${PLAN_KIND}", got ${JSON.stringify(doc.kind)}`)
   }
+  checkPlanVersion(doc.version, PLAN_KIND, PLAN_VERSION, errors)
   if (doc.limit !== undefined && !isPosInt(doc.limit)) {
     errors.push('limit: must be a positive integer')
   }

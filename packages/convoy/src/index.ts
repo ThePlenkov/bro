@@ -17,6 +17,7 @@ export {
   inlineFormulaDoc,
   parseConvoyPlan,
   PLAN_KIND,
+  PLAN_VERSION as CONVOY_PLAN_VERSION,
 } from './plan.ts'
 export type {
   ConvoyInline,
