@@ -113,10 +113,14 @@ export function verbMethod(
   verb: string
 ): ((...args: never[]) => unknown) | undefined {
   // own-key check — `adapter['constructor']` must not resolve through
-  // Object.prototype via a Record index hit on STANDARD_VERBS
-  const method = adapter[
-    Object.hasOwn(STANDARD_VERBS, verb) ? STANDARD_VERBS[verb]! : verb
-  ]
+  // Object.prototype via a Record index hit on STANDARD_VERBS; and a
+  // custom verb spelling an inherited member ('toString', 'hasOwnProperty')
+  // must not become invocable through the adapter either
+  const name = Object.hasOwn(STANDARD_VERBS, verb) ? STANDARD_VERBS[verb]! : verb
+  if (Object.hasOwn(Object.prototype, name)) {
+    return undefined
+  }
+  const method = adapter[name]
   return typeof method === 'function'
     ? (method as (...args: never[]) => unknown)
     : undefined

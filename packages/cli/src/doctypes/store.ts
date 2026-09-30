@@ -93,7 +93,9 @@ function initFailed(res: ReturnType<typeof spawnSync>, dir: string, created: boo
       ? 'error: bd not found — install beads first (https://github.com/gastownhall/beads)'
       : `error: bd init failed in ${dir}${res.error ? ` (${res.error.message})` : ''}`
   )
-  if (created && enoent) {
+  if (created) {
+    // we made the dir this run — any failure strands an empty store
+    // otherwise, not just a missing-bd ENOENT
     rmSync(dir, { recursive: true, force: true })
   }
   process.exit(1)

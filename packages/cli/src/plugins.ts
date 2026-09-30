@@ -407,6 +407,9 @@ export async function loadExternalPlugins(
       const plugin = registerExternal(entry, spec, live)
       if (plugin) {
         loaded.push(plugin)
+        // the accepted plugin's own name is reserved too — a later
+        // plugin can't shadow `bro <name>` either
+        live.add(plugin.name)
         for (const d of plugin.docs ?? []) {
           for (const n of [d.name, ...(d.aliases ?? [])]) {
             live.add(n)

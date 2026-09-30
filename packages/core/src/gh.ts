@@ -84,7 +84,11 @@ export function resolveRepo(positional: string[], cwd?: string): string {
  *  of github.com. */
 export function ghHost(): string {
   const h = process.env.GH_HOST
-  return h !== undefined && h.trim() !== '' ? h.trim() : 'github.com'
+  // GH_HOST is a bare host per gh(1) — but a pasted URL with a scheme
+  // would produce https://https://… links, so normalize it away
+  return h !== undefined && h.trim() !== ''
+    ? h.trim().replace(/^https?:\/\//, '').replace(/\/+$/, '')
+    : 'github.com'
 }
 
 /** `[#N](https://github.com/owner/repo/pull/N)` — the clickable form every

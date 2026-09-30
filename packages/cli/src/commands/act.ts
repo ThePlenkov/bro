@@ -653,14 +653,16 @@ export function applyActPlan(plan: ActPlan): void {
   // undefined = not yet attempted.
   let ownerRepo: string | null | undefined
   const repoForDefers = (): string | null => {
-    if (ownerRepo === undefined) {
-      try {
-        ownerRepo = rev.resolveRepo([])
-      } catch {
-        ownerRepo = null
-      }
+    if (ownerRepo !== undefined) {
+      return ownerRepo
     }
-    return ownerRepo
+    // a failed resolve isn't cached — one transient outage must not
+    // degrade every later defer in the same plan
+    try {
+      return (ownerRepo = rev.resolveRepo([]))
+    } catch {
+      return null
+    }
   }
   for (const v of plan.threads) {
     try {

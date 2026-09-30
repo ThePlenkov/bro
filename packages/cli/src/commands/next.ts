@@ -95,7 +95,10 @@ export function nextScope(scope: NextPlan['scope'], dir?: string): { prefix?: st
 
 /** A parent's issue_type rarely changes mid-process — `bro loop`
  *  re-classifies every iteration, so each unique parent resolves once
- *  per process instead of spawning `bd show` per iteration. */
+ *  per process instead of spawning `bd show` per iteration. Only
+ *  positives are cached: a parent promoted to epic mid-loop must start
+ *  un-gating its children on the next iteration, not stay mol-stepped
+ *  for the process lifetime. */
 const parentEpicCache = new Map<string, boolean>()
 
 /** bd reuses `parent` for both molecule steps and epic children — only
@@ -107,18 +110,17 @@ export function epicParentIds(ready: ReadyBead[], dir?: string): Set<string> {
   ]
   const epic = new Set<string>()
   for (const id of ids) {
-    const key = `${dir ?? ''}:${id}`
+    // cwd namespaces callers that share the same dir arg — without it a
+    // project caller inherits another project's classification
+    const key = `${process.cwd()}:${dir ?? ''}:${id}`
     const cached = parentEpicCache.get(key)
-    if (cached !== undefined) {
-      if (cached) {
-        epic.add(id)
-      }
+    if (cached === true) {
+      epic.add(id)
       continue
     }
     try {
-      const isEpic = taskStore(dir).get(id)?.issue_type === 'epic'
-      parentEpicCache.set(key, isEpic)
-      if (isEpic) {
+      if (taskStore(dir).get(id)?.issue_type === 'epic') {
+        parentEpicCache.set(key, true)
         epic.add(id)
       }
     } catch { /* a parent we can't inspect stays a molecule step — never cached */ }
@@ -265,7 +267,7 @@ function readyOrDie(dir?: string): ReadyBead[] {
   try {
     return readyBeads(dir)
   } catch (err) {
-    const enoent = (err as NodeJS.ErrnoException).code === 'ENOENT'
+    const enoent = err != null && (err as NodeJS.ErrnoException).code === 'ENOENT'
     console.error(
       enoent
         ? 'error: bd not found — install beads first (https://github.com/gastownhall/beads)'

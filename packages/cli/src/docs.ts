@@ -254,7 +254,14 @@ export async function runDocVerb(cmd: string, argv: string[]): Promise<boolean> 
   if (!inferred) {
     return false
   }
-  if (!verbMethod(inferred.adapter(ctx), cmd)) {
+  let inferredHas = false
+  try {
+    inferredHas = verbMethod(inferred.adapter(ctx), cmd) !== undefined
+  } catch {
+    // a throwing adapter factory can't answer — treat as no-match and
+    // let the guarded redirect search below find the verb's real owner
+  }
+  if (!inferredHas) {
     // one bad plugin adapter must not abort the redirect search
     const owner = types.find((t) => {
       try {
