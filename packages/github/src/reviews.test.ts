@@ -24,7 +24,17 @@ case "$1 $2" in
       *"u0: pullRequest"*) echo '{"data":{"repository":{"u0":{"updatedAt":"2026-02-02T00:00:00Z"},"u1":{"updatedAt":"2026-02-02T00:00:00Z"}}}}' ;;
       *) echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"THR_1","isResolved":false,"isOutdated":false,"comments":{"nodes":[{"author":{"login":"reviewer-bot","__typename":"Bot"},"path":"a.ts","line":3,"body":"fix this","createdAt":"2026-01-01"}]}}]}}}}}' ;;
     esac ;;
-  "api repos/"* ) echo '{}' ;;
+  "api repos/"* ) case "$2" in
+      *check-runs?*) echo '{"check_runs":[{"id":1,"name":"build"},{"id":2,"name":"kilo"},{"id":3,"name":"build"},{"id":4,"name":"lint"}]}' ;;
+      *) echo '{}' ;;
+    esac ;;
+  "api --paginate") case "$4" in
+      *check-runs/1/annotations*) echo '[[{"annotation_level":"failure"},{"annotation_level":"warning"}]]' ;;
+      *check-runs/2/annotations*) if [ "$FAKE_GH_ANN_FAIL" = "1" ]; then echo 'rate limit' >&2; exit 1; fi
+          echo '[[{"annotation_level":"failure"}]]' ;;
+      *check-runs/3/annotations*) echo '[[{"annotation_level":"failure"}]]' ;;
+      *check-runs/4/annotations*) echo '{"message":"Not Found"}' ;;
+    esac ;;
   "pr edit"|"label create") : ;;
 esac
 `
@@ -90,6 +100,26 @@ describe('githubReview', { skip: WIN32 }, () => {
   test('checks returns [] when the host reports no checks', () => {
     withFakeGh({ FAKE_GH_NO_CHECKS: '1' }, () => {
       assert.deepEqual(githubReview().checks(target), [])
+    })
+  })
+
+  test('checkAnnotations accumulates failure counts across re-run attempts', () => {
+    withFakeGh({}, () => {
+      const got = githubReview().checkAnnotations('acme/widgets', 'abc123')
+      // build ran twice (ids 1+3) — 1 failure each; kilo once — 1 failure;
+      // lint's endpoint answered a non-array error body, which counts as
+      // unknown rather than throwing.
+      assert.deepEqual(Object.fromEntries(got), { build: 2, kilo: 1, lint: null })
+    })
+  })
+
+  test('checkAnnotations marks only the failed run unknown — other counts survive', () => {
+    withFakeGh({ FAKE_GH_ANN_FAIL: '1' }, () => {
+      const got = githubReview().checkAnnotations('acme/widgets', 'abc123')
+      assert.equal(got.get('build'), 2)
+      assert.equal(got.get('kilo'), null)
+      assert.equal(got.get('lint'), null)
+      assert.equal(got.size, 3)
     })
   })
 
