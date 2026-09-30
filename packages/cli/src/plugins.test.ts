@@ -138,6 +138,29 @@ describe('loadExternalPlugins', () => {
     assert.equal(loaded.length, 0)
   })
 
+  test('a non-string deprecated field rejects the export', async () => {
+    const dir = repoWith(
+      `export default { name: 'badd', summary: 'x', run: () => {}, deprecated: true }`,
+      ['./my.ts']
+    )
+    const loaded = await loadExternalPlugins(dir)
+    assert.equal(loaded.length, 0)
+  })
+
+  test('a string deprecated field registers and survives on the plugin', async () => {
+    const dir = repoWith(
+      `export default { name: 'shim', summary: 'x', run: () => {}, deprecated: 'use bro newcmd' }`,
+      ['./my.ts']
+    )
+    const loaded = await loadExternalPlugins(dir)
+    try {
+      assert.equal(loaded.length, 1)
+      assert.equal(loaded[0].deprecated, 'use bro newcmd')
+    } finally {
+      unload(loaded)
+    }
+  })
+
   test('a non-integer or non-positive planVersion rejects the export', async () => {
     for (const v of ['"1"', '1.5', '0', 'true']) {
       const dir = repoWith(

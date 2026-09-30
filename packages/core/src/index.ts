@@ -82,6 +82,7 @@ export type {
   GateContribution,
   MaybePromise,
 } from './connectors.ts'
+export { warnDeprecated } from './deprecation.ts'
 export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts'
 export type { PlanSchema } from './plan.ts'
 export { makePrinter } from './output.ts'

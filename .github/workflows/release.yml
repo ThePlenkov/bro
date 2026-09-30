@@ -72,11 +72,19 @@ jobs:
           # nx release version already updated the npm lock file and
           # staged its changes; commit only the manifests it touched.
           v=$(node -p "require('./packages/cli/package.json').version")
+          # render this release's CHANGELOG.md entry — the tag doesn't
+          # exist yet, so pass the version; git mutations stay with the
+          # single workflow commit (release-tag.yml owns the GH release)
+          if git ls-remote --exit-code --tags origin "refs/tags/v$v" >/dev/null 2>&1; then
+            echo "v$v is already tagged — no changelog entry to write"
+          else
+            npx nx release changelog "$v" --git-commit=false --git-tag=false
+          fi
           # stamp the new version into plugin.json + marketplaces and
           # regen adapters — check:plugins fails the release PR otherwise
           node scripts/gen-plugins.ts --sync-version
           git checkout -B "release/v$v"
-          git add packages/*/package.json package.json package-lock.json \
+          git add CHANGELOG.md packages/*/package.json package.json package-lock.json \
             plugin.json .claude-plugin/marketplace.json \
             .agents/plugins/marketplace.json plugins/ hooks.json hooks/run.sh
           if git diff --cached --quiet; then

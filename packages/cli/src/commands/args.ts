@@ -1,6 +1,16 @@
 /**
  * Shared hand-rolled arg parsing for bro commands — no parser library.
  */
+import { warnDeprecated } from '@broject/core'
+
+/** Warn (once per invocation) that a flag is deprecated — it still
+ *  applies; removal lands in a later release. Matches both `--flag`
+ *  and `--flag=value` spellings. */
+export function deprecatedFlag(argv: string[], name: string, advice?: string): void {
+  if (argv.includes(name) || argv.some((a) => a.startsWith(`${name}=`))) {
+    warnDeprecated(`flag ${name}`, advice)
+  }
+}
 
 /** A value flag's argument must exist and not look like another option. */
 export function flagValue(argv: string[], i: number, name: string): string {

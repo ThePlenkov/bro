@@ -283,6 +283,7 @@ const PLUGIN_FIELD_CHECKS: ReadonlyArray<
   ['planVersion', (v) => typeof v === 'number' && Number.isInteger(v as number) && (v as number) >= 1],
   ['runPlan', (v) => typeof v === 'function'],
   ['skill', (v) => typeof v === 'string'],
+  ['deprecated', (v) => typeof v === 'string'],
   ['configKey', (v) => typeof v === 'string'],
   ['argvPrefix', (v) => Array.isArray(v)],
   ['docs', (v) => Array.isArray(v) && v.every(isDocType)],

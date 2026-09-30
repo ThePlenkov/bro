@@ -114,3 +114,28 @@ skipped: a plugin cannot shadow a built-in.
   if it needs logic, that logic belongs in `packages/`.
 - **Hooks fail open.** `bro hooks <event>` must never stall a session: gate on
   bro-enabled repos, wrap every probe, exit 0 on any failure.
+
+## Stability & deprecations
+
+Pre-1.0 the surface can still move — but it moves with signal, never
+silently. Two rules:
+
+- **Every release writes CHANGELOG.md.** `release.yml` runs
+  `nx release changelog <v>` (conventional commits → sections) and the
+  release PR carries the entry; release-tag.yml owns the GitHub
+  release. Subjects are the changelog — write `feat(scope):` /
+  `fix(scope):` / `deprecate:` deliberately. `!` marks breaking.
+- **Removal is two releases.** Deleting/renaming a command, flag, or
+  doc verb first ships a deprecation release where it still works and
+  prints one stderr line — removal lands in a later release.
+
+The seams:
+
+| surface | mechanism |
+| --- | --- |
+| whole command | `deprecated: 'use …'` on the `BroPlugin` (+ `hidden: true` to drop it from `--help`) |
+| flag / subcommand | `deprecatedFlag(argv, '--old', 'use …')` (commands/args.ts) |
+| doc verb, anything else | `warnDeprecated('what', 'advice')` from `@broject/core` at the call site |
+
+All emit `warning: <what> is deprecated — <advice>`. One line, on
+stderr, and the old path keeps working — that's the whole contract.
