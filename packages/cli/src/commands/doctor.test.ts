@@ -45,6 +45,8 @@ const BRO_SHIM = '#!/bin/sh\n[ "$1" = "--version" ] && { echo "0.2.3"; exit 0; }
 interface EnvOpts {
   /** object → JSON.stringify'd; string → written verbatim (invalid JSON tests) */
   config?: object | string
+  /** written verbatim as bro.config.ts */
+  configTs?: string
   beadsDir?: boolean
   remote?: boolean
   /** shims to drop into bin/ — absent name = binary missing from PATH */
@@ -76,6 +78,9 @@ function withEnv(opts: EnvOpts, fn: (dir: string) => void): Promise<void> {
       join(dir, 'bro.config.json'),
       typeof opts.config === 'string' ? opts.config : JSON.stringify(opts.config)
     )
+  }
+  if (opts.configTs !== undefined) {
+    writeFileSync(join(dir, 'bro.config.ts'), opts.configTs)
   }
   const prevPath = process.env.PATH
   const saved: Record<string, string | undefined> = {}
@@ -154,8 +159,25 @@ describe('bro doctor', () => {
       assert.equal(byName(runDoctorChecks(dir), 'gh').status, 'fail')
     }))
 
+  test('present-but-broken binary says "not usable", never "not found"', () =>
+    withEnv({ bins: [] }, (dir) => {
+      // gh exists on PATH but isn't executable — EACCES, not ENOENT
+      writeFileSync(join(dir, 'bin', 'gh'), FAIL_SHIM)
+      const c = byName(runDoctorChecks(dir), 'gh')
+      assert.equal(c.status, 'fail')
+      assert.match(c.detail, /not usable/)
+      assert.doesNotMatch(c.detail, /not found/)
+    }))
+
   test('invalid bro.config.json fails the config check', () =>
     withEnv({ config: '{ not json', bins: [] }, (dir) => {
+      const checks = runDoctorChecks(dir)
+      assert.equal(byName(checks, 'config').status, 'fail')
+      assert.equal(doctorExitCode(checks), 1)
+    }))
+
+  test('a throwing bro.config.ts fails — loadable, not just present', () =>
+    withEnv({ configTs: 'throw new Error("boom")\n', bins: ['gh'] }, (dir) => {
       const checks = runDoctorChecks(dir)
       assert.equal(byName(checks, 'config').status, 'fail')
       assert.equal(doctorExitCode(checks), 1)

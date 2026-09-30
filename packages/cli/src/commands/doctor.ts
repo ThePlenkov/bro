@@ -13,7 +13,7 @@
 import { spawnSync } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
-import { bdTry, gitTry } from '@broject/core'
+import { bdTry, gitTry, probeConfigFile } from '@broject/core'
 import { loadBroConfig, pluginConfigSections } from '../plugins.ts'
 
 export type DoctorStatus = 'ok' | 'warn' | 'fail' | 'skip'
@@ -34,22 +34,35 @@ const check = (
 ): DoctorCheck => ({ name, status, detail, ...(hint ? { hint } : {}) })
 
 /** `--version` probe — the same PATH-is-the-contract lookup every bro
- *  shell-out uses. found=false covers ENOENT and a binary whose
- *  --version itself fails (unusable either way). */
-function probeBin(name: string): { found: boolean; version?: string; err?: string } {
+ *  shell-out uses. `missing` is true only on ENOENT: a binary that
+ *  exists but can't spawn (EACCES) or times out is present-but-broken,
+ *  and reporting it "not found" would send the user reinstalling a tool
+ *  that's actually installed. */
+function probeBin(name: string): {
+  found: boolean
+  missing?: boolean
+  version?: string
+  err?: string
+} {
   const p = spawnSync(name, ['--version'], { // NOSONAR — PATH lookup is the contract (same as gh/bd/git)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 10_000,
   })
   if (p.error) {
-    return { found: false, err: p.error.message }
+    const code = (p.error as NodeJS.ErrnoException).code
+    return { found: false, missing: code === 'ENOENT', err: p.error.message }
   }
   if (p.status !== 0) {
     return { found: false, err: (p.stderr ?? '').trim() || `exit ${p.status}` }
   }
   const m = /(\d+\.\d+[\w.-]*)/.exec(`${p.stdout ?? ''} ${p.stderr ?? ''}`)
   return { found: true, version: m?.[1] }
+}
+
+/** Present-but-broken vs absent — a spawn failure is never "not found". */
+function binProblem(p: { missing?: boolean; err?: string }): string {
+  return p.missing === true ? 'not found' : `not usable${p.err ? ` (${p.err})` : ''}`
 }
 
 /** Repo root for dir, or null outside a worktree. */
@@ -92,7 +105,7 @@ function checkNode(): DoctorCheck {
 function checkGh(): DoctorCheck {
   const gh = probeBin('gh')
   if (!gh.found) {
-    return check('gh', 'fail', `not usable${gh.err ? ` (${gh.err})` : ''}`, 'install the GitHub CLI — https://cli.github.com')
+    return check('gh', 'fail', binProblem(gh), 'install the GitHub CLI — https://cli.github.com')
   }
   const auth = spawnSync('gh', ['auth', 'status'], { // NOSONAR — PATH lookup is the contract
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -162,26 +175,34 @@ function knownConfigKeys(): Set<string> {
 }
 
 /** Config-file probe: which file wins (loadConfig order — cwd .ts, cwd
- *  .json, main-root .ts, main-root .json), whether it parses, whether the
- *  keys are known. */
+ *  .json, main-root .ts, main-root .json), whether it LOADS (existence
+ *  alone proves nothing — a throwing .ts silently falls back to
+ *  jsonl-only), and whether the keys are known. */
 function checkConfig(dirs: string[]): DoctorCheck {
   for (const dir of dirs) {
     for (const name of ['bro.config.ts', 'bro.config.json']) {
       const path = join(dir, name)
-      if (!statSync(path, { throwIfNoEntry: false })?.isFile()) {
+      const state = probeConfigFile(path)
+      if (state === null) {
         continue
       }
+      if (state === 'broken') {
+        return check(
+          'config',
+          'fail',
+          `${name} failed to load`,
+          'fix or remove it — a broken config silently falls back to jsonl-only stores'
+        )
+      }
       if (name.endsWith('.ts')) {
-        return check('config', 'ok', `${name} (takes precedence over .json)`)
+        return check('config', 'ok', `${name} loads (takes precedence over .json)`)
       }
-      let raw: unknown
+      // probe already ok'd the file — re-parse only to inspect keys
+      let raw: Record<string, unknown> = {}
       try {
-        raw = JSON.parse(readFileSync(path, 'utf8'))
-      } catch (err) {
-        return check('config', 'fail', `${name} is not valid JSON`, (err as Error).message)
-      }
-      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-        return check('config', 'fail', `${name} root must be a JSON object`)
+        raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+      } catch {
+        return check('config', 'ok', name)
       }
       const unknown = Object.keys(raw).filter((k) => !knownConfigKeys().has(k))
       return unknown.length > 0
@@ -204,7 +225,7 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
   checks.push(
     git.found
       ? check('git', 'ok', git.version ?? 'present')
-      : check('git', 'fail', 'not found', 'every bro command shells out to git')
+      : check('git', 'fail', binProblem(git), 'every bro command shells out to git')
   )
   const root = repoRoot(dir)
   const cfg = loadBroConfig(dir)
@@ -229,8 +250,8 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
   if (!bd.found) {
     checks.push(
       beadsActive
-        ? check('bd', 'fail', `not usable${bd.err ? ` (${bd.err})` : ''}`, 'install beads (https://github.com/gastownhall/beads) or set "stores": ["jsonl"]')
-        : check('bd', 'warn', 'not found', 'beads store is off — nothing needs it')
+        ? check('bd', 'fail', binProblem(bd), 'install beads (https://github.com/gastownhall/beads) or set "stores": ["jsonl"]')
+        : check('bd', 'warn', binProblem(bd), 'beads store is off — nothing needs it')
     )
   } else {
     checks.push(check('bd', 'ok', bd.version ?? 'present'))
