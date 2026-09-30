@@ -20,7 +20,7 @@
     "dist"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.18"
   },
   "scripts": {
     "test": "tsx --test src/**/*.test.ts",
