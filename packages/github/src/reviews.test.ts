@@ -250,6 +250,16 @@ describe('githubReview', { skip: WIN32 }, () => {
     })
   })
 
+  test('mergedPrs explicit ids deduplicates — one fetch, one row per id', () => {
+    withFakeGh({}, (log) => {
+      const prs = githubReview().mergedPrs('acme/widgets', { ids: [7, 7, 8, 7] })
+      assert.equal(prs.length, 2)
+      const lines = readFileSync(log, 'utf8')
+      assert.equal(lines.split('\n').filter((l) => l.startsWith('pr view 7 ')).length, 1)
+      assert.equal(lines.split('\n').filter((l) => l.startsWith('pr view 8 ')).length, 1)
+    })
+  })
+
   test('mergedPrs explicit ids keeps partial results and warns with the gh error', () => {
     withFakeGh({ FAKE_GH_PR_VIEW_FAIL: '8' }, () => {
       const errs: string[] = []

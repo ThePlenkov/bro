@@ -348,7 +348,11 @@ function listMergedPrs(repo: string, q: MergedPrQuery): MergedPr[] {
 function explicitMergedPrs(repo: string, ids: number[]): MergedPr[] {
   const out: MergedPr[] = []
   const failures: unknown[] = []
-  for (const number of ids) {
+  // Dedup at the facade — the old pipeline's `parseCsvInts` deduplicated
+  // upstream, and duplicate ids would produce duplicate rows that
+  // double-count in consumer aggregations.
+  const unique = [...new Set(ids)]
+  for (const number of unique) {
     const link = prLink(repo, number)
     try {
       const viewed = ghJson<MergedPrRow>([
@@ -375,10 +379,10 @@ function explicitMergedPrs(repo: string, ids: number[]): MergedPr[] {
   // Every fetch failing is one outage (auth, network, repo gone, no gh on
   // PATH), not N unmerged PRs — an empty return would read as "all ids
   // unmerged" and silently empty the caller's selection.
-  if (failures.length > 0 && failures.length === ids.length) {
+  if (failures.length > 0 && failures.length === unique.length) {
     const first = failures[0]
     throw new Error(
-      `all ${ids.length} PR fetch(es) failed: ` +
+      `all ${unique.length} PR fetch(es) failed: ` +
         (first instanceof Error ? first.message : String(first))
     )
   }
