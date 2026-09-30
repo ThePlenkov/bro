@@ -529,6 +529,18 @@ function markSkillHinted(sessionId: string, skill: string): void {
     }
     mkdirSync(dirname(path), { recursive: true })
     writeFileSync(path, `${Date.now()}\n`)
+    // hinted/ sits below the dir armSession prunes, so stale markers
+    // need their own sweep — same TTL, same best-effort
+    const cutoff = Date.now() - MARKER_TTL_MS
+    for (const f of readdirSync(dirname(path))) {
+      try {
+        if (statSync(join(dirname(path), f)).mtimeMs < cutoff) {
+          rmSync(join(dirname(path), f))
+        }
+      } catch {
+        // prune is best-effort
+      }
+    }
   } catch {
     // hinting is best-effort — a failed marker must never stall the hook
   }
