@@ -14,6 +14,7 @@ import {
   dataRefPush,
   dataRefRoot,
   ensureAuth,
+  isBdCompatError,
   reviewHost,
   type MergedPrScan,
   type PrLabelOp,
@@ -277,6 +278,9 @@ async function cmdCollect(argv: string[]): Promise<void> {
     // store: beads|both → also project into bd. Collection results are
     // already durable; a sync failure is reported as its own error, not
     // allowed to mask them — but it still fails the run (no silent degrade).
+    // Exception: bd API drift degrades — beads is pre-1.0 and a bd that
+    // moved past the contract will keep failing every run, so warn once
+    // and leave the ledger jsonl-only instead of red-failing collect.
     // Explicit values only — a typo like "beed" must fall back to jsonl,
     // not fail in bd after the ledger was already written.
     if (loadBroConfig().stores.includes('beads')) {
@@ -287,9 +291,18 @@ async function cmdCollect(argv: string[]): Promise<void> {
             `${res.reopened} reopened, ${res.linked} linked`
         )
       } catch (err) {
-        console.error(`debt sync FAILED: ${err instanceof Error ? err.message : err}`)
-        console.error('evidence is written; run `bro debt sync` to retry the projection')
-        process.exitCode = 1
+        const msg = err instanceof Error ? err.message : String(err)
+        if (isBdCompatError(err)) {
+          console.error(`debt sync skipped: ${msg}`)
+          console.error(
+            'beads projection off — ledger stays jsonl-only; upgrade/downgrade bd ' +
+              'or set "stores": ["jsonl"] in bro.config.json'
+          )
+        } else {
+          console.error(`debt sync FAILED: ${msg}`)
+          console.error('evidence is written; run `bro debt sync` to retry the projection')
+          process.exitCode = 1
+        }
       }
     }
   }

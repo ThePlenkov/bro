@@ -11,9 +11,9 @@ const WIN32 = process.platform === 'win32'
 const FAKE_BD = `#!/bin/sh
 echo "$@" >> "$FAKE_BD_LOG"
 case "$1" in
-  list) echo '[{"id":"t1","status":"open"}]' ;;
+  list) if [ "$FAKE_BD_DRIFT" = "envelope" ]; then echo '{"issues":[{"id":"t1"}]}'; else echo '[{"id":"t1","status":"open"}]'; fi ;;
   ready) echo '[{"id":"t1"}]' ;;
-  show) echo '[{"id":"t1","status":"in_progress"}]' ;;
+  show) if [ "$FAKE_BD_DRIFT" = "norow" ]; then echo '[{"name":"t1"}]'; else echo '[{"id":"t1","status":"in_progress"}]'; fi ;;
   create) if [ "$FAKE_BD_CREATE_EMPTY" = "1" ]; then echo '[]'; else echo '{"id":"t9","status":"open"}'; fi ;;
   dep) echo '[{"issue_id":"t2","depends_on_id":"t1","type":"parent-child"}]' ;;
   config) if [ "$FAKE_BD_CONFIG_FAIL" = "1" ]; then echo 'db gone' >&2; exit 1; fi
@@ -145,8 +145,24 @@ describe('taskStore', { skip: WIN32 }, () => {
     withFakeBd({ FAKE_BD_CREATE_EMPTY: '1' }, () => {
       assert.throws(
         () => taskStore().create({ title: 'x' }),
-        /task create returned no row/
+        /bd create returned no row/
       )
+    })
+  })
+
+  test('drifted list payload throws a compat error, not a TypeError', () => {
+    withFakeBd({ FAKE_BD_DRIFT: 'envelope' }, () => {
+      assert.throws(() => taskStore().list(), (err: unknown) => {
+        assert.equal((err as Error).name, 'BdCompatError')
+        assert.match((err as Error).message, /expected an array/)
+        return true
+      })
+    })
+  })
+
+  test('drifted show row (missing id) throws a compat error', () => {
+    withFakeBd({ FAKE_BD_DRIFT: 'norow' }, () => {
+      assert.throws(() => taskStore().get('t1'), /non-row shape/)
     })
   })
 

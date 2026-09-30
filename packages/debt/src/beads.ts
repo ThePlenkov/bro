@@ -5,7 +5,7 @@
  * queue (`bd ready -l debt`). Upsert key: `external_ref` = `thread_id`, so
  * `bro debt sync` is idempotent. Status reconciles ledger → bead on re-runs.
  */
-import { bd, initBeadsStealth, taskStore } from '@broject/core'
+import { BdCompatError, initBeadsStealth, probeBdCompat, taskStore } from '@broject/core'
 import type { DebtPriority, DebtRecord, DebtStatus } from './types.ts'
 
 export interface BeadRef {
@@ -16,19 +16,28 @@ export interface BeadRef {
   timesSeen?: number
 }
 
-export function checkBeads(opts: { autoInit?: boolean } = {}): void {
-  try {
-    bd(['--version'])
-  } catch (err) {
-    // ENOENT = the binary is absent; permission/timeout/broken-exec
-    // failures are real and must surface, not masquerade as "not found".
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new Error(
-        'bd not found — install beads, or opt out with "stores": ["jsonl"] in bro.config.json'
-      )
-    }
-    throw err
+function assertCompatible(): void {
+  const compat = probeBdCompat()
+  if (compat.missing) {
+    throw new Error(
+      'bd not found — install beads, or opt out with "stores": ["jsonl"] in bro.config.json'
+    )
   }
+  if (compat.broken) {
+    throw new Error(`bd unusable — ${compat.problems.join('; ')}`)
+  }
+  if (!compat.ok) {
+    const v = compat.version ? ` ${compat.version}` : ''
+    throw new BdCompatError(
+      `bd${v} drifted off the contract bro speaks — ` + compat.problems.join('; ')
+    )
+  }
+}
+
+export function checkBeads(opts: { autoInit?: boolean } = {}): void {
+  // Compat before init: a drifted bd must not write a store we can't
+  // read back (init flag drift would also surface here as a usage error).
+  assertCompatible()
   // beads is a default store — a repo without .beads gets a stealth init
   // (local exclude, nothing lands in git) instead of a setup error.
   // Dry runs must not mutate: they skip init and let `bd list` report
@@ -39,7 +48,12 @@ export function checkBeads(opts: { autoInit?: boolean } = {}): void {
   try {
     taskStore().list({ limit: 1 })
   } catch (err) {
-    // preserve the real failure — "not initialized" is only one cause
+    // preserve the real failure — "not initialized" is only one cause;
+    // a compat error stays a compat error (shape validation may have
+    // run on a store the first probe couldn't see)
+    if (err instanceof BdCompatError) {
+      throw err
+    }
     const stderr = (err as { stderr?: string }).stderr?.trim()
     throw new Error(
       `bd list failed — ${stderr || (err instanceof Error ? err.message : String(err))} ` +
@@ -61,6 +75,10 @@ export function listDebtBeads(): Map<string, BeadRef> {
   try {
     rows = taskStore().list({ limit: 0, all: true, labels: ['debt'] })
   } catch (err) {
+    // a compat failure stays classified — `debt collect` degrades on it
+    if (err instanceof BdCompatError) {
+      throw err
+    }
     const msg = err instanceof Error ? err.message : String(err)
     throw new Error(`task list failed or returned malformed JSON — ${msg}`)
   }

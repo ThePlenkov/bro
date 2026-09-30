@@ -13,7 +13,8 @@ import type { ConvoyPlan } from '@broject/convoy'
 const FAKE_BD = `#!/bin/sh
 case "$1" in
   --version) echo 'bd 0.0' ;;
-  list) echo '[]' ;;
+  list|ready) echo '[]' ;;
+  info) echo '{"schema_version":1}' ;;
   config)
     case "$2" in
       get) echo 'agent,human' ;;
