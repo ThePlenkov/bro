@@ -16,6 +16,13 @@
 import { bd, bdJson, bdTry } from './bd.ts'
 import { gitTry } from './git.ts'
 
+/** Resolved probe results per dir — hook surfaces ask for the actor
+ *  several times per event in one process, and each probe is a sync
+ *  bd+git shell-out. Processes that call this are short-lived hooks,
+ *  so a stale entry is not a real concern. Env stays outside the
+ *  cache: it wins unconditionally and is read fresh every call. */
+const actorCache = new Map<string, string>()
+
 /** The identity `bd … --claim` writes to assignee — bd's actor chain
  *  (BEADS_ACTOR → BD_ACTOR → config `actor` → git user.name → $USER),
  *  minus the --actor flag no bro call passes. '' when nothing resolves;
@@ -25,6 +32,15 @@ export function bdActor(dir: string): string {
   if (env !== '') {
     return env
   }
+  let actor = actorCache.get(dir)
+  if (actor === undefined) {
+    actor = probeActor(dir)
+    actorCache.set(dir, actor)
+  }
+  return actor
+}
+
+function probeActor(dir: string): string {
   // 'actor = name' — take the value side; 'actor (not set…)' falls through
   const cfg = bdTry(['config', 'get', 'actor'], 3_000, dir)
   const line = cfg.code === 0 ? (cfg.out.trim().split('\n').pop()?.trim() ?? '') : ''
