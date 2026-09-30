@@ -51,17 +51,22 @@ jobs:
           # fast-forward/rebase pushes have no HEAD^2, and follow-up
           # commits move the tip off the release subject either way.
           if ! release_subject "$subject"; then
-            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
-              # Search only commits this push introduced — covers the
-              # second parent of a merge AND linear pushes, and can't
-              # match a stale release commit deeper in history.
-              subject=$(git log -1 --format=%s --grep="^release: v$v" HEAD --not "$BEFORE_SHA" 2>/dev/null || true)
+            if [ "$GITHUB_EVENT_NAME" = "push" ] \
+               && git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
+              # Only subjects of commits this push introduced — covers
+              # the second parent of a merge AND linear pushes, and
+              # can't match a stale release commit deeper in history.
+              subject=$(git log --format=%s HEAD --not "$BEFORE_SHA" \
+                | grep -m1 "^release: v$v" || true)
             else
-              # workflow_dispatch catch-up — the release commit may sit
-              # deep in ancestry: second parent on a merge, else HEAD.
+              # workflow_dispatch catch-up (and a push whose before-SHA
+              # isn't in this clone — a forced update): the release
+              # commit may sit deep in ancestry — second parent on a
+              # merge, else all of HEAD.
               range="HEAD"
               git rev-parse -q --verify 'HEAD^2' >/dev/null 2>&1 && range="HEAD^2"
-              subject=$(git log -1 --format=%s --grep="^release: v$v" "$range" 2>/dev/null || true)
+              subject=$(git log --format=%s "$range" 2>/dev/null \
+                | grep -m1 "^release: v$v" || true)
             fi
           fi
           if [ "$GITHUB_EVENT_NAME" = "push" ] && ! release_subject "$subject"; then
