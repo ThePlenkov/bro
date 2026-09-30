@@ -32,7 +32,8 @@ json = true
 [filters]
 types = ["task", "bug"]
 max_priority = 2
-match = "schema|plan"`)
+match = "schema|plan"
+labels = ["debt", "ui"]`)
     assert.equal(plan.limit, 3)
     assert.equal(plan.order, 'oldest')
     assert.equal(plan.claim, false)
@@ -41,6 +42,7 @@ match = "schema|plan"`)
     assert.equal(plan.json, true)
     assert.deepEqual(plan.filters.types, ['task', 'bug'])
     assert.equal(plan.filters.maxPriority, 2)
+    assert.deepEqual(plan.filters.labels, ['debt', 'ui'])
     assert.ok(plan.filters.match instanceof RegExp)
     assert.ok(plan.filters.match!.test('PLAN schema'))
   })
@@ -88,6 +90,17 @@ match = "([bad"`),
     await assert.rejects(
       parse('kind = "next"\n[filters]\nlabel = "x"'),
       /filters: unknown key "label"/
+    )
+  })
+
+  it('filters.labels must be a non-empty string array', async () => {
+    await assert.rejects(
+      parse('kind = "next"\n[filters]\nlabels = []'),
+      /filters\.labels: must be a non-empty array/
+    )
+    await assert.rejects(
+      parse('kind = "next"\n[filters]\nlabels = ["ok", 3]'),
+      /filters\.labels: must be a non-empty array/
     )
   })
 

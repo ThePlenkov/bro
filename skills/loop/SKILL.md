@@ -45,6 +45,7 @@ the agent full autonomy; scope it to machines/repos you trust.
 | `bro loop --max N` | At most N beads this run |
 | `bro loop --dry-run` | Print the top item's plan (claim, worktree, agent cmd) — changes nothing |
 | `bro loop --agent '<tpl>'` | One-off agent override |
+| `bro loop --label a,b` | Declared scope — only beads carrying one of these labels are claimable; the rest of the shared queue stays untouched. "Loop the debt beads" never bleeds into unrelated work |
 | `--agent-timeout MIN`, `--merge-timeout MIN`, `--interval SEC` | Budget overrides |
 
 ## What happens per bead
