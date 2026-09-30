@@ -1,0 +1,218 @@
+import { describe, test } from 'node:test'
+import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { doctorExitCode, runDoctorChecks, type DoctorCheck } from './doctor.ts'
+
+/** Scripted tools — PATH is set to the shim dir ONLY, so nothing real
+ *  leaks in: git is a symlink to the real binary (repo probes need it);
+ *  bd/gh/bro/npx are env-scripted shims, or absent entirely. */
+const BD_SHIM = `#!/bin/sh
+case "$1" in
+  --version) echo 'bd version 1.3.0 (fake)' ;;
+  dolt)
+    if [ "$2" = "remote" ] && [ "$3" = "list" ]; then
+      if [ "\${FAKE_BD_DOLT_FAIL:-0}" = "1" ]; then echo 'unknown command' >&2; exit 1; fi
+      printf '%s' "\${FAKE_BD_DOLT:-}"
+      exit 0
+    fi
+    exit 1 ;;
+  list)
+    [ "\${FAKE_BD_LIST_FAIL:-0}" = "1" ] && { echo 'no beads database' >&2; exit 1; }
+    echo '[]' ;;
+  *) exit 1 ;;
+esac
+`
+const GH_SHIM = `#!/bin/sh
+case "$1" in
+  --version) echo 'gh version 2.80.0 (fake)' ;;
+  auth) exit \${FAKE_GH_AUTH:-0} ;;
+  *) exit 1 ;;
+esac
+`
+const FAIL_SHIM = '#!/bin/sh\nexit 1\n'
+const BRO_SHIM = '#!/bin/sh\n[ "$1" = "--version" ] && { echo "0.2.3"; exit 0; }\nexit 0\n'
+
+interface EnvOpts {
+  /** object → JSON.stringify'd; string → written verbatim (invalid JSON tests) */
+  config?: object | string
+  beadsDir?: boolean
+  remote?: boolean
+  /** shims to drop into bin/ — absent name = binary missing from PATH */
+  bins?: Array<'bd' | 'gh' | 'bro' | 'npx'>
+  env?: Record<string, string>
+}
+
+function withEnv(opts: EnvOpts, fn: (dir: string) => void): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-doctor-'))
+  const bin = join(dir, 'bin')
+  mkdirSync(bin)
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
+  symlinkSync(realGit, join(bin, 'git'))
+  const shims: Record<string, string> = { bd: BD_SHIM, gh: GH_SHIM, bro: BRO_SHIM, npx: FAIL_SHIM }
+  for (const name of opts.bins ?? []) {
+    const path = join(bin, name)
+    writeFileSync(path, shims[name]!)
+    chmodSync(path, 0o755)
+  }
+  execFileSync('git', ['init', '-q', dir])
+  if (opts.remote) {
+    execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', 'https://example.com/x.git'])
+  }
+  if (opts.beadsDir) {
+    mkdirSync(join(dir, '.beads'))
+  }
+  if (opts.config !== undefined) {
+    writeFileSync(
+      join(dir, 'bro.config.json'),
+      typeof opts.config === 'string' ? opts.config : JSON.stringify(opts.config)
+    )
+  }
+  const prevPath = process.env.PATH
+  const saved: Record<string, string | undefined> = {}
+  for (const [k, v] of Object.entries(opts.env ?? {})) {
+    saved[k] = process.env[k]
+    process.env[k] = v
+  }
+  for (const k of ['DEVIN_PLUGIN_ROOT', 'CLAUDE_PLUGIN_ROOT', 'PLUGIN_ROOT', 'BEADS_DIR']) {
+    saved[k] = process.env[k]
+    delete process.env[k]
+  }
+  const run = async (): Promise<void> => {
+    process.env.PATH = bin
+    await fn(dir)
+  }
+  return run().finally(() => {
+    process.env.PATH = prevPath
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+    rmSync(dir, { recursive: true, force: true })
+  })
+}
+
+const byName = (checks: DoctorCheck[], name: string): DoctorCheck =>
+  checks.find((c) => c.name === name)!
+
+describe('bro doctor', () => {
+  test('healthy env — every probe ok, exit 0', () =>
+    withEnv(
+      {
+        config: { stores: ['jsonl', 'beads'] },
+        beadsDir: true,
+        remote: true,
+        bins: ['bd', 'gh', 'bro'],
+        env: { FAKE_BD_DOLT: 'origin\tgit+https://example.com/x.git\n' },
+      },
+      (dir) => {
+        const checks = runDoctorChecks(dir)
+        for (const name of [
+          'node', 'git', 'repo', 'gh', 'bd', 'bd-backend', 'bd-store',
+          'hooks', 'config', 'git-remote', 'dolt-remote',
+        ]) {
+          assert.equal(byName(checks, name)?.status, 'ok', `${name}: ${JSON.stringify(byName(checks, name))}`)
+        }
+        assert.equal(doctorExitCode(checks), 0)
+      }
+    ))
+
+  test('missing bd fails when beads is an active store', () =>
+    withEnv({ config: {}, beadsDir: true, bins: ['gh'] }, (dir) => {
+      const checks = runDoctorChecks(dir)
+      assert.equal(byName(checks, 'bd').status, 'fail')
+      assert.equal(byName(checks, 'dolt-remote').status, 'skip')
+      assert.equal(doctorExitCode(checks), 1)
+    }))
+
+  test('missing bd only warns under jsonl-only stores', () =>
+    withEnv({ config: { stores: ['jsonl'] }, bins: ['gh', 'bro'] }, (dir) => {
+      const checks = runDoctorChecks(dir)
+      assert.equal(byName(checks, 'bd').status, 'warn')
+      assert.equal(doctorExitCode(checks), 0)
+    }))
+
+  test('gh present but unauthenticated fails', () =>
+    withEnv({ bins: ['gh'], env: { FAKE_GH_AUTH: '1' } }, (dir) => {
+      const checks = runDoctorChecks(dir)
+      assert.equal(byName(checks, 'gh').status, 'fail')
+      assert.match(byName(checks, 'gh').hint ?? '', /gh auth login/)
+      assert.equal(doctorExitCode(checks), 1)
+    }))
+
+  test('gh missing entirely fails', () =>
+    withEnv({ bins: [] }, (dir) => {
+      assert.equal(byName(runDoctorChecks(dir), 'gh').status, 'fail')
+    }))
+
+  test('invalid bro.config.json fails the config check', () =>
+    withEnv({ config: '{ not json', bins: [] }, (dir) => {
+      const checks = runDoctorChecks(dir)
+      assert.equal(byName(checks, 'config').status, 'fail')
+      assert.equal(doctorExitCode(checks), 1)
+    }))
+
+  test('unknown config keys warn — typoed sections silently no-op', () =>
+    withEnv({ config: { stores: ['jsonl'], sdd2: { mode: 'gate' } }, bins: ['gh'] }, (dir) => {
+      const c = byName(runDoctorChecks(dir), 'config')
+      assert.equal(c.status, 'warn')
+      assert.match(c.detail, /sdd2/)
+    }))
+
+  test('pre-Dolt bd — backend warns, store probe skips', () =>
+    withEnv(
+      { beadsDir: true, remote: true, bins: ['bd', 'gh'], env: { FAKE_BD_DOLT_FAIL: '1' } },
+      (dir) => {
+        const checks = runDoctorChecks(dir)
+        assert.equal(byName(checks, 'bd-backend').status, 'warn')
+        assert.equal(byName(checks, 'dolt-remote').status, 'skip')
+      }
+    ))
+
+  test('.beads without a dolt remote warns — state stays local-only', () =>
+    withEnv({ beadsDir: true, remote: true, bins: ['bd', 'gh'], env: { FAKE_BD_DOLT: '' } }, (dir) => {
+      const checks = runDoctorChecks(dir)
+      assert.equal(byName(checks, 'dolt-remote').status, 'warn')
+    }))
+
+  test('.beads present but unreadable fails the store probe', () =>
+    withEnv({ beadsDir: true, bins: ['bd', 'gh'], env: { FAKE_BD_LIST_FAIL: '1' } }, (dir) => {
+      const checks = runDoctorChecks(dir)
+      assert.equal(byName(checks, 'bd-store').status, 'fail')
+      assert.equal(doctorExitCode(checks), 1)
+    }))
+
+  test('hooks: no bro, no npx → warn "no resolution"; bro on PATH → ok', () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      const c = byName(runDoctorChecks(dir), 'hooks')
+      assert.equal(c.status, 'warn')
+      assert.match(c.detail, /no resolution/)
+    }).then(() =>
+      withEnv({ bins: ['gh', 'bro'] }, (dir) => {
+        const c = byName(runDoctorChecks(dir), 'hooks')
+        assert.equal(c.status, 'ok')
+        assert.match(c.detail, /PATH/)
+      })
+    ))
+
+  test('not a git repo — repo warns, remote probes are skipped', () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      const bare = mkdtempSync(join(tmpdir(), 'bro-doctor-bare-'))
+      try {
+        const checks = runDoctorChecks(bare)
+        assert.equal(byName(checks, 'repo').status, 'warn')
+        assert.equal(byName(checks, 'git-remote'), undefined)
+      } finally {
+        rmSync(bare, { recursive: true, force: true })
+      }
+    }))
+})
