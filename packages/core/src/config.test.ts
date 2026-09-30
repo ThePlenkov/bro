@@ -70,6 +70,22 @@ describe('loadConfig stores', () => {
   })
 })
 
+describe('loadConfig pack', () => {
+  test('absent pack → undefined, not a default leak', () => {
+    assert.equal(load().pack, undefined)
+  })
+
+  test('a string pack name passes through', () => {
+    assert.equal(load({ pack: '@scope/my-pack' }).pack, '@scope/my-pack')
+  })
+
+  test('non-string pack values are dropped with a warning', () => {
+    for (const bad of [{ n: 1 }, ['a'], 42, '']) {
+      assert.equal(load({ pack: bad }).pack, undefined, `pack ${JSON.stringify(bad)}`)
+    }
+  })
+})
+
 describe('loadConfig root shape', () => {
   test('non-object JSON roots fall back to jsonl-only', () => {
     for (const root of ['str', [1, 2], 42, null, true]) {

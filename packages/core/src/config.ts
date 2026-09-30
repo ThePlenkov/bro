@@ -269,13 +269,27 @@ export const DEFAULT_CONFIG: BroConfig = {
   plugins: [],
 }
 
-interface RawConfig extends Partial<Omit<BroConfig, 'stores' | 'plugins'>> {
+interface RawConfig extends Partial<Omit<BroConfig, 'stores' | 'plugins' | 'pack'>> {
   /** New: explicit backend list. */
   stores?: unknown
   /** External plugin specifiers — normalized to a string list. */
   plugins?: unknown
+  /** Capability pack name — must normalize to a string, anything else
+   *  (object, array, number) is rejected rather than reaching `pack`. */
+  pack?: unknown
   /** Legacy v0.1.0 field — 'beads'/'both' meant jsonl + beads projection. */
   store?: string
+}
+
+function normalizePack(raw: unknown): string | undefined {
+  if (raw === undefined) {
+    return undefined
+  }
+  if (typeof raw === 'string' && raw.trim() !== '') {
+    return raw
+  }
+  console.error('warning: bro.config "pack" must be a non-empty string — ignoring')
+  return undefined
 }
 
 function normalizeStores(raw: RawConfig): StoreBackend[] {
@@ -530,10 +544,12 @@ function loadDirConfig(
       console.error(`${name}: root must be an object — skipping`)
       return 'broken'
     }
-    const { stores: _s, store: _legacy, plugins: _p, ...rest } = raw as RawConfig
+    const { stores: _s, store: _legacy, plugins: _p, pack: _pk, ...rest } = raw as RawConfig
+    const pack = normalizePack(_pk)
     const config: BroConfig & Record<string, unknown> = {
       ...DEFAULT_CONFIG,
       ...rest,
+      ...(pack !== undefined ? { pack } : {}),
       stores: normalizeStores(raw as RawConfig),
       plugins: normalizePluginSpecs(dir, (raw as RawConfig).plugins),
     }

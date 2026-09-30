@@ -6,9 +6,11 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "scripts": {
+    "prepare": "node ../../scripts/gen-pack.ts",
     "prepack": "node ../../scripts/gen-pack.ts",
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit"
