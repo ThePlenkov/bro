@@ -248,6 +248,21 @@ describe('connectors', () => {
     )
   })
 
+  test('a rejecting auth probe stays the sync-contract diagnostic, never an unhandled rejection', async () => {
+    registerConnector({
+      name: 'acme-rejecting-auth',
+      tasks: fakeTasks('acme'),
+      auth: (() => Promise.reject(new Error('offline'))) as unknown as Connector['auth'],
+    })
+    assert.match(
+      facadeAuth('tasks', { dir: process.cwd() }, { connector: 'acme-rejecting-auth' }) ?? '',
+      /connector "acme-rejecting-auth": auth probe must be sync — got a Promise/
+    )
+    // the swallowed rejection settles here — an unguarded Promise would
+    // fail the whole run as an unhandled rejection
+    await new Promise((r) => setImmediate(r))
+  })
+
   test('probes may be async; a rejected probe starves only itself', async () => {
     registerConnector({
       name: 'acme-async',
