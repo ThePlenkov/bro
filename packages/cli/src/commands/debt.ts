@@ -61,6 +61,7 @@ import {
   resolvedThreadIds,
   type DebtPrState,
   type DebtRecord,
+  type DebtSource,
   type DebtStatus,
   type DebtVerdict,
   type StatsGroupBy,
@@ -227,104 +228,128 @@ async function cmdCollect(
   const args = parseCollectArgs(rev, argv)
 
   const debtCfg = loadBroConfig().debt
-  const knownSources = new Set<string>(ALL_SOURCES)
   const sources = new Set(parseSources(debtCfg.sources))
-  for (const s of debtCfg.sources.filter((x) => !knownSources.has(x))) {
-    console.error(`debt collect: unknown source "${s}" — ignored`)
-  }
+  warnUnknownSources(debtCfg.sources)
 
   if (sources.has('review-threads')) {
     await collectReviewThreads(rev, args)
   }
+  collectDebtSources(args, sources, debtCfg.stale_days)
 
-  // Multi-source collectors — opt-in feeds landing in the same ledger.
+  if (args.dryRun) {
+    return
+  }
+  const totalRows = readDebtRecords().length
+  if (totalRows > 0) {
+    writeSummary(buildSummary(readDebtRecords()))
+    maybeProjectDebtToBeads(args.listOnly)
+  }
+}
+
+/** A configured source nothing implements would silently collect zero
+ *  findings — warn so a typo'd name isn't mistaken for a clean sweep. */
+function warnUnknownSources(configured: string[]): void {
+  const knownSources = new Set<string>(ALL_SOURCES)
+  for (const s of configured.filter((x) => !knownSources.has(x))) {
+    console.error(`debt collect: unknown source "${s}" — ignored`)
+  }
+}
+
+/** Multi-source collectors — opt-in feeds landing in the same ledger. */
+function collectDebtSources(
+  args: CollectArgs,
+  sources: Set<string>,
+  staleDays: number
+): void {
   for (const source of DEBT_SOURCES) {
-    if (!sources.has(source)) {
-      continue
-    }
-    const harvestedAt = new Date().toISOString()
-    let records: DebtRecord[] = []
-    try {
-      records = COLLECTORS[source](
-        { repo: args.repo, runId: args.runId, harvestedAt },
-        debtCfg.stale_days
-      )
-    } catch (err) {
-      console.error(
-        `debt: source ${source} failed — ${err instanceof Error ? err.message : err}`
-      )
-      continue
-    }
-    console.error(`debt: ${source} — ${records.length} finding(s)`)
-    if (args.dryRun) {
-      for (const row of records) {
-        console.log(JSON.stringify(row))
-      }
-      continue
-    }
-    if (records.length > 0) {
-      writeHarvestFile({
-        pr: 0,
-        source,
-        runId: args.runId,
-        harvestedAt,
-        records,
-      })
-    }
-    // Alerts/CI are server-side truth: a finding absent from the fresh
-    // fetch resolved upstream — close its ledger row so the queue shrinks.
-    const gone = resolvedThreadIds(readDebtRecords(), source, records)
-    if (gone.length > 0) {
-      upsertLedgerOverlays(
-        gone.map((thread_id) => ({
-          thread_id,
-          status: 'done' as const,
-          fix_pr: null,
-          fixed_at: new Date().toISOString(),
-          notes: 'resolved upstream — no longer reported',
-        }))
-      )
-      console.error(`debt: ${source} — resolved ${gone.length} row(s) no longer reported`)
+    if (sources.has(source)) {
+      collectOneSource(source, args, staleDays)
     }
   }
+}
 
-  if (!args.dryRun) {
-    const totalRows = readDebtRecords().length
-    if (totalRows > 0) {
-      writeSummary(buildSummary(readDebtRecords()))
+function collectOneSource(
+  source: DebtSource,
+  args: CollectArgs,
+  staleDays: number
+): void {
+  const harvestedAt = new Date().toISOString()
+  let records: DebtRecord[] = []
+  try {
+    records = COLLECTORS[source](
+      { repo: args.repo, runId: args.runId, harvestedAt },
+      staleDays
+    )
+  } catch (err) {
+    console.error(
+      `debt: source ${source} failed — ${err instanceof Error ? err.message : err}`
+    )
+    return
+  }
+  console.error(`debt: ${source} — ${records.length} finding(s)`)
+  if (args.dryRun) {
+    for (const row of records) {
+      console.log(JSON.stringify(row))
     }
+    return
+  }
+  if (records.length > 0) {
+    writeHarvestFile({
+      pr: 0,
+      source,
+      runId: args.runId,
+      harvestedAt,
+      records,
+    })
+  }
+  // Alerts/CI are server-side truth: a finding absent from the fresh
+  // fetch resolved upstream — close its ledger row so the queue shrinks.
+  const gone = resolvedThreadIds(readDebtRecords(), source, records)
+  if (gone.length > 0) {
+    upsertLedgerOverlays(
+      gone.map((thread_id) => ({
+        thread_id,
+        status: 'done' as const,
+        fix_pr: null,
+        fixed_at: new Date().toISOString(),
+        notes: 'resolved upstream — no longer reported',
+      }))
+    )
+    console.error(`debt: ${source} — resolved ${gone.length} row(s) no longer reported`)
+  }
+}
 
-    // store: beads|both → also project into bd. Collection results are
-    // already durable; a sync failure is reported as its own error, not
-    // allowed to mask them — but it still fails the run (no silent degrade).
-    // Exception: bd API drift degrades — beads is pre-1.0 and a bd that
-    // moved past the contract will keep failing every run, so warn once
-    // and leave the ledger jsonl-only instead of red-failing collect.
-    // Explicit values only — a typo like "beed" must fall back to jsonl,
-    // not fail in bd after the ledger was already written.
-    // --list-only is a read-only inspection and an empty ledger has nothing
-    // to project — neither justifies auto-initializing .beads.
-    if (totalRows > 0 && !args.listOnly && loadBroConfig().stores.includes('beads')) {
-      try {
-        const res = syncDebtToBeads(readDebtRecords())
-        console.error(
-          `debt sync: ${res.created} created, ${res.closed} closed, ` +
-            `${res.reopened} reopened, ${res.linked} linked`
-        )
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        if (isBdCompatError(err)) {
-          console.error(`debt sync skipped: ${msg}`)
-          console.error(
-            'beads projection off — ledger stays jsonl-only; upgrade/downgrade bd ' +
-              'or set "stores": ["jsonl"] in bro.config.json'
-          )
-        } else {
-          console.error(`debt sync FAILED: ${msg}`)
-          console.error('evidence is written; run `bro debt sync` to retry the projection')
-          process.exitCode = 1
-        }
-      }
+/** store: beads|both → also project into bd. Collection results are
+ *  already durable; a sync failure is reported as its own error, not
+ *  allowed to mask them — but it still fails the run (no silent degrade).
+ *  Exception: bd API drift degrades — beads is pre-1.0 and a bd that
+ *  moved past the contract will keep failing every run, so warn once
+ *  and leave the ledger jsonl-only instead of red-failing collect.
+ *  Explicit values only — a typo like "beed" must fall back to jsonl,
+ *  not fail in bd after the ledger was already written.
+ *  --list-only is a read-only inspection — it never auto-inits .beads. */
+function maybeProjectDebtToBeads(listOnly: boolean): void {
+  if (listOnly || !loadBroConfig().stores.includes('beads')) {
+    return
+  }
+  try {
+    const res = syncDebtToBeads(readDebtRecords())
+    console.error(
+      `debt sync: ${res.created} created, ${res.closed} closed, ` +
+        `${res.reopened} reopened, ${res.linked} linked`
+    )
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (isBdCompatError(err)) {
+      console.error(`debt sync skipped: ${msg}`)
+      console.error(
+        'beads projection off — ledger stays jsonl-only; upgrade/downgrade bd ' +
+          'or set "stores": ["jsonl"] in bro.config.json'
+      )
+    } else {
+      console.error(`debt sync FAILED: ${msg}`)
+      console.error('evidence is written; run `bro debt sync` to retry the projection')
+      process.exitCode = 1
     }
   }
 }
