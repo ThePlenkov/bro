@@ -340,6 +340,46 @@ function applyLedgerOverlays(records: DebtRecord[], cwd?: string): DebtRecord[] 
   })
 }
 
+/**
+ * First/last harvest observation per thread across the append-only
+ * snapshots (+ the legacy flat file). The merged record's `harvested_at`
+ * is the *latest* sighting — trend reconstruction needs the earliest.
+ */
+export function readThreadBounds(
+  cwd?: string
+): Map<string, { first: string; last: string }> {
+  const bounds = new Map<string, { first: string; last: string }>()
+  const sources = [...listHarvestFiles(cwd)]
+  const legacy = debtFile(cwd)
+  if (existsSync(legacy)) {
+    sources.push(legacy)
+  }
+  for (const file of sources) {
+    for (const row of readJsonlLines<Partial<DebtRecord>>(file)) {
+      const at = row.harvested_at
+      if (
+        typeof row.thread_id !== 'string' ||
+        typeof at !== 'string' ||
+        Number.isNaN(Date.parse(at))
+      ) {
+        continue
+      }
+      const b = bounds.get(row.thread_id)
+      if (!b) {
+        bounds.set(row.thread_id, { first: at, last: at })
+        continue
+      }
+      if (at < b.first) {
+        b.first = at
+      }
+      if (at > b.last) {
+        b.last = at
+      }
+    }
+  }
+  return bounds
+}
+
 export function readDebtRecords(cwd?: string): DebtRecord[] {
   const sources = [...listHarvestFiles(cwd)]
   const legacy = debtFile(cwd)
@@ -374,12 +414,16 @@ export function upsertRecords(existing: DebtRecord[], incoming: DebtRecord[]): D
       })
       continue
     }
+    const status = prev.status === 'claimed' ? 'claimed' : row.status
+    const closed = status === 'done' || status === 'wontfix' || status === 'duplicate'
     byId.set(row.thread_id, {
       ...row,
       times_seen: prev.times_seen + 1,
-      status: prev.status === 'claimed' ? 'claimed' : row.status,
-      fix_pr: prev.fix_pr,
-      fixed_at: prev.fixed_at,
+      status,
+      // A non-terminal merge carries no close stamp — a reharvested
+      // duplicate reopens and must not keep the old verdict's fixed_at.
+      fix_pr: closed ? (row.fix_pr ?? prev.fix_pr) : null,
+      fixed_at: closed ? (row.fixed_at ?? prev.fixed_at) : null,
       notes: prev.notes,
     })
   }
@@ -652,7 +696,10 @@ export function applyDebtVerdicts(
       verdicts
         .filter((v) => byId.has(v.thread_id))
         .map((v) => {
-          const terminal = v.status === 'done' || v.status === 'wontfix'
+          // duplicate is terminal for the open pool too — unstamped it
+          // would ride the trend's open line forever.
+          const terminal =
+            v.status === 'done' || v.status === 'wontfix' || v.status === 'duplicate'
           const row = byId.get(v.thread_id)!
           return {
             thread_id: v.thread_id,

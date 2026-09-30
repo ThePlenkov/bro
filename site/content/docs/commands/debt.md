@@ -21,6 +21,7 @@ PR merged → bro debt collect → findings land in .agents/review-debt/
 | `bro debt prs` | The queue — merged PRs still unprocessed (`--all` for everything) |
 | `bro debt status` | Ledger stats: open/done/wontfix, by area, by author, duplicates |
 | `bro debt stats [--by author\|source\|area]` | Reviewer/source signal: findings grouped with fix% — the done share of decided rows. Which bot is worth reading, which is noise |
+| `bro debt trend [--by author\|source\|area] [--bucket week\|day] [--since DATE]` | Burn-down — open findings per time bucket, with opened/closed deltas. `--json` is chart-ready; ungrouped renders one `all` series |
 | `bro debt list` | Raw rows, filterable |
 | `bro debt mark <pr> <state>` | Manual override — `skipped` is the human opt-out |
 | `bro debt set <status> --thread-id ID` | Row lifecycle: `claimed` / `done --fix-pr N` / `wontfix` / `duplicate` |
