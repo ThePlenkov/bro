@@ -40,6 +40,10 @@ export interface BroPlugin {
   planVersion?: number
   /** Executes a planSchema-validated plan — `bro run <file>` calls this. */
   runPlan?: (plan: unknown) => void | Promise<void>
+  /** Deprecation advice ("use `bro drill up`") — dispatch prints one
+   *  stderr warning and still runs the command. Pair with `hidden:
+   *  true` to drop it from `--help`; removal lands in a later release. */
+  deprecated?: string
   /** Not listed in usage — plumbing commands like `hooks`. */
   hidden?: boolean
   /** Set by the registry when the plugin came from config `plugins` —

@@ -11,6 +11,11 @@
   },
   "release": {
     "projects": ["@broject/*", "!@broject/site"],
+    "changelog": {
+      "workspaceChangelog": {
+        "createRelease": false
+      }
+    },
     "version": {
       "conventionalCommits": true
     },

@@ -9,6 +9,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { warnDeprecated } from '@broject/core'
 import { docUsageLines, reservedWords, runDocVerb } from './docs.ts'
 import { loadExternalPlugins, PLUGINS } from './plugins.ts'
 
@@ -66,6 +67,9 @@ async function main(): Promise<void> {
 
   const plugin = PLUGINS.find((p) => p.name === cmd)
   if (plugin) {
+    if (plugin.deprecated) {
+      warnDeprecated(`'bro ${plugin.name}'`, plugin.deprecated)
+    }
     await plugin.run([...(plugin.argvPrefix ?? []), ...rest])
     return
   }
