@@ -1129,6 +1129,9 @@ async function cmdWatch(argv: string[]): Promise<void> {
   for (;;) {
     try {
       await cmdCollect(collectArgv)
+      // cmdCollect wrote ledger + overlays — publish now, per tick.
+      // The post-handler MUTATING sync never runs: watch never returns.
+      maybeDataRefSync()
     } catch (err) {
       // A failed pass (network blip, gh outage) must not kill the loop.
       console.error(`debt watch: collect failed — ${err instanceof Error ? err.message : err}`)
