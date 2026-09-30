@@ -139,8 +139,8 @@ the section — it then applies to every agent in the repo.
 default**: the ledger alone is a log — the beads projection is the queue
 (`bd ready -l debt`, drill frames, `bro next`). A normal collect auto-runs
 `bd init --stealth --skip-agents --skip-hooks` when a repo is missing
-`.beads` (skipped by `--dry-run`, `--list-only`, and an empty target
-list) — announced on stderr, never silent — and projects every record
+`.beads` (skipped by `--dry-run`, `--list-only`, and an empty ledger) —
+announced on stderr, never silent — and projects every record
 into `bd`. Stealth means local-only: `.beads` lands in `.git/info/exclude`,
 nothing is committed, `rm -rf .beads` undoes it. Opt out with an explicit
 `"stores": ["jsonl"]`. Requires `bd` installed; a missing bd fails the run

@@ -43,12 +43,19 @@ The init announces itself instead of running silently. `debt checkBeads`
 stderr line when `initBeadsStealth()` actually initializes — matching the
 message `bro setup --beads` already prints, plus the opt-out pointer.
 `initBeadsStealth` stays silent itself: it returns a bool precisely so
-each caller can announce in its own voice. Dry runs still skip init and
-announce nothing.
+each caller can announce in its own voice.
+
+The init also only fires when there is something to queue. `debt collect`
+skips the beads projection entirely on `--dry-run`, on `--list-only`
+(read-only inspection), and when the ledger is empty — a clean sweep on a
+fresh repo creates no `.beads`. Explicit `bro debt sync` still inits:
+asking to sync is asking for the queue.
 
 ## Plan
 
 - [ ] debt `beads.ts`: announce on `initBeadsStealth() === true`
+- [ ] cli `debt.ts`: collect skips the projection on `--list-only` and
+      empty ledgers — no init without something to queue
 - [ ] debt `beads.test.ts`: announce on init, once; silent when `.beads`
       exists; no init + no announce under `autoInit: false`
 - [ ] README + docs: record the decision — beads default, init announced,
