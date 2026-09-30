@@ -98,7 +98,8 @@ export interface PrLabelOp {
 
 /** Selection for mergedPrs — `ids` present (even empty) is an explicit
  *  selection; unmerged ids are warned and skipped by the connector,
- *  not thrown. */
+ *  not thrown. When every fetch fails the connector throws — a
+ *  batch-wide outage is not a selection result. */
 export interface MergedPrQuery {
   ids?: number[]
   author?: string

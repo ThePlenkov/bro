@@ -17,7 +17,9 @@ case "$1 $2" in
   "pr checks") if [ "$FAKE_GH_NO_CHECKS" = "1" ]; then echo 'no checks reported' >&2; exit 8; fi
       echo '[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"kilo","state":"PENDING","bucket":"pending"}]' ;;
   "repo view") echo '{"owner":{"login":"acme"},"name":"widgets"}' ;;
-  "pr view") if [ "$FAKE_GH_NO_MERGED_AT" = "1" ]; then echo '{"state":"MERGED"}';
+  "pr view") if [ -n "$FAKE_GH_PR_VIEW_FAIL" ]; then case ",$FAKE_GH_PR_VIEW_FAIL," in
+      *",$3,"*) echo 'gh: authentication required' >&2; exit 1 ;; esac; fi
+      if [ "$FAKE_GH_NO_MERGED_AT" = "1" ]; then echo '{"state":"MERGED"}';
       else echo '{"state":"MERGED","title":"did the thing","url":"https://github.com/acme/widgets/pull/7","mergedAt":"2026-01-02T00:00:00Z","mergeCommit":{"oid":"abc123"}}'; fi ;;
   "pr merge") echo 'Merging pull request' ;;
   "api graphql") case "$@" in
@@ -231,6 +233,31 @@ describe('githubReview', { skip: WIN32 }, () => {
   test('mergedPrInfo throws when a MERGED PR reports no mergedAt', () => {
     withFakeGh({ FAKE_GH_NO_MERGED_AT: '1' }, () => {
       assert.throws(() => githubReview().mergedPrInfo(target), /no mergedAt/)
+    })
+  })
+
+  test('mergedPrs explicit ids throws when every fetch fails — an outage, not N unmerged PRs', () => {
+    withFakeGh({ FAKE_GH_PR_VIEW_FAIL: '7,8' }, () => {
+      assert.throws(
+        () => githubReview().mergedPrs('acme/widgets', { ids: [7, 8] }),
+        /authentication required/
+      )
+    })
+  })
+
+  test('mergedPrs explicit ids keeps partial results and warns with the gh error', () => {
+    withFakeGh({ FAKE_GH_PR_VIEW_FAIL: '8' }, () => {
+      const errs: string[] = []
+      const origError = console.error
+      console.error = (msg: unknown) => errs.push(String(msg))
+      try {
+        const prs = githubReview().mergedPrs('acme/widgets', { ids: [7, 8] })
+        assert.equal(prs.length, 1)
+        assert.equal(prs[0]!.mergedAt, '2026-01-02T00:00:00Z')
+      } finally {
+        console.error = origError
+      }
+      assert.match(errs.join('\n'), /fetch failed — .*authentication required/)
     })
   })
 
