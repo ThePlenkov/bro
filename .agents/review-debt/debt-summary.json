@@ -1,8 +1,33 @@
 {
-  "generated_at": "2026-09-30T16:35:57.882Z",
-  "open_count": 0,
-  "by_area": {},
-  "by_author": {},
-  "duplicate_fingerprints": [],
-  "oldest_open": null
+  "generated_at": "2026-09-30T19:06:54.462Z",
+  "open_count": 16,
+  "by_area": {
+    "packages/cli": 1,
+    "package-lock.json": 10,
+    "packages/core": 2,
+    "packages/loop": 2,
+    ".github/workflows": 1
+  },
+  "by_author": {
+    "codeant-ai": 1,
+    "dependabot[bot]": 10,
+    "github-code-scanning": 5
+  },
+  "duplicate_fingerprints": [
+    {
+      "fingerprint": "e48697a7897579d1",
+      "count": 2,
+      "prs": [
+        0
+      ]
+    },
+    {
+      "fingerprint": "6e700236ce876a36",
+      "count": 2,
+      "prs": [
+        0
+      ]
+    }
+  ],
+  "oldest_open": "2026-09-30T19:06:37.210Z"
 }
