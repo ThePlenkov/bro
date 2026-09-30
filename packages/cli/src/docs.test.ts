@@ -176,4 +176,27 @@ describe('doc type collisions', () => {
     // a free word stays free
     assert.ok(!w.has('totally-free-name'))
   })
+
+  test('docTypes memoizes the filtered list — one warning per process', () => {
+    registerDocType({ name: 'dup', aliases: ['task'], adapter: () => ({}) })
+    const w = warnings(() => {
+      docTypes()
+      docTypes()
+      docTypes()
+    })
+    assert.equal(w.filter((l) => l.includes('skipped')).length, 1)
+  })
+
+  test('mutating a registered type re-filters — stale nouns never dispatch', () => {
+    const t: DocType = { name: 'mut', adapter: () => ({}) }
+    registerDocType(t)
+    assert.ok(docTypes().includes(t))
+    t.aliases = ['task']
+    const w = warnings(() => {
+      assert.ok(!docTypes().includes(t))
+    })
+    assert.ok(w.some((l) => l.includes('skipped')))
+    delete t.aliases
+    assert.ok(docTypes().includes(t))
+  })
 })

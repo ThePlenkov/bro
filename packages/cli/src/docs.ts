@@ -76,14 +76,23 @@ export function filterDocTypes(types: DocType[]): DocType[] {
   return out
 }
 
+let docTypesCache: { sig: string; filtered: DocType[] } | undefined
+
 /** All registered doc types — builtins, plugin `docs` fields, and
- *  runtime registrations — minus namespace collisions. */
+ *  runtime registrations — minus namespace collisions. Memoized on the
+ *  registration list plus the filter-relevant fields (name/aliases/
+ *  idPrefix) so a collision warning prints once per process instead of
+ *  once per call site (reservedWords/dispatch/--help all call this).
+ *  Any registration — registerDocType, a plugin pushed after external
+ *  load, or an in-place mutation of a registered type — rebuilds the
+ *  list and re-filters once. */
 export function docTypes(): DocType[] {
-  return filterDocTypes([
-    ...BUILTIN_DOCS,
-    ...PLUGINS.flatMap((p) => p.docs ?? []),
-    ...EXTRA_DOCS,
-  ])
+  const raw = [...BUILTIN_DOCS, ...PLUGINS.flatMap((p) => p.docs ?? []), ...EXTRA_DOCS]
+  const sig = raw.map((t) => `${t.name}${t.aliases?.join(',') ?? ''}${t.idPrefix ?? ''}`).join('\n')
+  if (docTypesCache?.sig !== sig) {
+    docTypesCache = { sig, filtered: filterDocTypes(raw) }
+  }
+  return docTypesCache.filtered
 }
 
 /** Parse argv for doc verbs: `--key=value`, boolean `--key`, scope
