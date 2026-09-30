@@ -30,6 +30,8 @@ import { loopSection } from '@broject/loop'
 import { githubConnector } from '@broject/github'
 import { gitlabConnector } from '@broject/gitlab'
 import { applyActPlan, runActCommand } from './commands/act.ts'
+import { checkSection } from './commands/check-config.ts'
+import { runCheckCommand } from './commands/check.ts'
 import { runCleanupCommand } from './commands/cleanup.ts'
 import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts'
 import { runLoopCommand } from './commands/loop.ts'
@@ -106,6 +108,14 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'loop',
     configKey: 'loop',
     configSchema: loopSection,
+  }),
+  definePlugin({
+    name: 'check',
+    summary: 'Run the repo sverka workflow — per-step stats + findings [--json]',
+    run: runCheckCommand,
+    skill: 'check',
+    configKey: 'check',
+    configSchema: checkSection,
   }),
   definePlugin({
     name: 'cleanup',
