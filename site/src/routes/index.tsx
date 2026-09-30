@@ -35,6 +35,7 @@ function Home() {
           bro <span aria-hidden="true">🤝</span>
         </a>
         <nav>
+          <a href={`${BASE_URL}debt`}>debt</a>
           <a href={DOCS}>docs</a>
           <a href={GITHUB}>github</a>
         </nav>
