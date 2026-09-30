@@ -10,6 +10,7 @@ export {
   defineConfig,
   loadConfig,
   PERSONALITIES,
+  probeConfigFile,
   sddSection,
   SDD_MODES,
   stackSection,

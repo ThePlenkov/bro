@@ -37,6 +37,7 @@ import { runLoopCommand } from './commands/loop.ts'
 import { applyNextPlan, runNextCommand } from './commands/next.ts'
 import { parseNextPlan, type NextPlan } from './commands/next-plan.ts'
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
+import { runDoctorCommand } from './commands/doctor.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runHooksCommand } from './commands/hooks.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
@@ -175,6 +176,11 @@ export const PLUGINS: BroPlugin[] = [
     name: 'setup',
     summary: 'Wire bro into the current repo',
     run: runSetupCommand,
+  }),
+  definePlugin({
+    name: 'doctor',
+    summary: 'Environment diagnostics: node, git, gh auth, bd, hooks, config, remotes [--json]',
+    run: runDoctorCommand,
   }),
   definePlugin({
     name: 'sync',

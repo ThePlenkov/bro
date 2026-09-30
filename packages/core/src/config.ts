@@ -386,6 +386,21 @@ function readConfigFile(name: string, path: string): unknown {
   }
 }
 
+/** Diagnostic probe for `bro doctor` — loads ONE config file through the
+ *  same readConfigFile path loadConfig uses (so a throwing bro.config.ts
+ *  reports broken here exactly when loadConfig would skip it). Returns
+ *  'ok' | 'broken' | null (file absent). */
+export function probeConfigFile(path: string): 'ok' | 'broken' | null {
+  if (!existsSync(path)) {
+    return null
+  }
+  const raw = readConfigFile(basename(path), path)
+  if (raw === undefined) {
+    return 'broken' // warned inside readConfigFile
+  }
+  return typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? 'ok' : 'broken'
+}
+
 /** Runs every section schema over the raw file — a throwing schema warns
  *  and falls back to schema(undefined), never crashes the load. */
 function applySections(
