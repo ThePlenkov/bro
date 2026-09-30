@@ -5,7 +5,7 @@
  * SHAs intersected with local branches. The remote side is opt-in —
  * merge --delete-branch already covers PRs merged through the UI/CLI.
  */
-import { ensureAuth, git, gitTry, reviewHost } from '@broject/core'
+import { facadeAuth, git, gitTry, reviewHost } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import { positionals } from './args.ts'
 
@@ -126,7 +126,21 @@ export function runCleanupCommand(argv: string[]): void {
   const dryRun = argv.includes('--dry-run')
   const withRemote = argv.includes('--remote')
 
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
+  // a broken config (external plugin schema whose fallback also throws)
+  // must not abort cleanup before the keep-all fallback — degrade to the
+  // default connector preference instead
+  let prefer: Record<string, string> | undefined
+  try {
+    prefer = loadBroConfig().connectors
+  } catch (err) {
+    console.error(`cleanup: bro config unreadable (${err instanceof Error ? err.message : String(err)}) — using default connectors`)
+  }
+  // auth is a warning, not a gate — unauthenticated runs still get the
+  // local plan, and the empty-map fallback below keeps every branch
+  const auth = facadeAuth('reviews', { dir: process.cwd() }, { prefer })
+  if (auth !== null) {
+    console.error(`cleanup: ${auth} — planning from local state`)
+  }
   // freshen remote state — tolerable to proceed if the fetch fails
   // (offline): deletion decisions still come from the local view.
   const fetch = gitTry(['fetch', '--prune', '--quiet'])
@@ -139,7 +153,7 @@ export function runCleanupCommand(argv: string[]): void {
   // on absent evidence.
   let merged = new Map<string, string>()
   try {
-    const rev = reviewHost(undefined, loadBroConfig().connectors)
+    const rev = reviewHost(undefined, prefer)
     const mergedPrs = rev.mergedPrs(rev.resolveRepo([]), { limit: MERGED_LIMIT })
     merged = new Map(
       mergedPrs.filter((pr) => pr.headRef !== '').map((pr) => [pr.headRef, pr.headSha])
