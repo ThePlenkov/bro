@@ -61,18 +61,21 @@ export function ghTry(args: string[], cwd?: string): { code: number; out: string
   return { code: proc.status ?? 1, out: proc.stdout ?? '', err: (proc.stderr ?? '').trim() }
 }
 
-/** `OWNER/REPO` from args, or `gh repo view` in the current clone. */
-export function resolveRepo(positional: string[]): string {
+/** `OWNER/REPO` from args, or `gh repo view` in the current clone. Any
+ *  other arity is a usage error — silently falling back to the checkout's
+ *  repo could target the wrong repository. */
+export function resolveRepo(positional: string[], cwd?: string): string {
   const [owner, repo] = positional
   if (owner && repo) {
     return `${owner}/${repo}`
   }
-  const viewed = ghJson<{ owner: { login: string }; name: string }>([
-    'repo',
-    'view',
-    '--json',
-    'owner,name',
-  ])
+  if (positional.length !== 0) {
+    throw new Error(`expected OWNER REPO, got: ${positional.join(' ')}`)
+  }
+  const viewed = ghJson<{ owner: { login: string }; name: string }>(
+    ['repo', 'view', '--json', 'owner,name'],
+    cwd
+  )
   return `${viewed.owner.login}/${viewed.name}`
 }
 

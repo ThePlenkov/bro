@@ -3,7 +3,7 @@
  * `gh` CLI. Ported from act/github.ts and debt/github.ts — same calls,
  * same semantics, normalized onto the domain types in @broject/core/review.
  */
-import { gh, ghAsync, ghJson, ghTry } from '@broject/core'
+import { gh, ghAsync, ghJson, ghTry, resolveRepo } from '@broject/core'
 import type {
   CheckInfo,
   MergeOpts,
@@ -650,19 +650,8 @@ function graphql(query: string, vars: Record<string, string>): void {
 /** The ReviewFacade bound to a dir — `gh repo view`/`gh pr view` run
  *  there so repo/PR detection follows the facade's repo, not cwd. */
 export function githubReview(dir: string = process.cwd()): ReviewFacade {
-  const resolvedRepo = (positional: string[] = []): string => {
-    const [owner, repo] = positional
-    if (owner && repo) {
-      return `${owner}/${repo}`
-    }
-    const viewed = ghJson<{ owner: { login: string }; name: string }>(
-      ['repo', 'view', '--json', 'owner,name'],
-      dir
-    )
-    return `${viewed.owner.login}/${viewed.name}`
-  }
   return {
-    resolveRepo: resolvedRepo,
+    resolveRepo: (positional: string[] = []) => resolveRepo(positional, dir),
     prLink: prLinkStr,
     currentPr() {
       // `gh pr view` resolves the PR for the checked-out branch — `gh pr
