@@ -252,6 +252,10 @@ export interface BroConfig {
    *  resolves from the repo and imports at startup. Each module's default
    *  export must be a BroPlugin (or an array of them). */
   plugins: string[]
+  /** Capability pack `bro setup --pack` installs — an npm package name
+   *  carrying skills/ + formulas/ trees. Default @broject/bro-pack;
+   *  project-local node_modules are resolved before the CLI's own. */
+  pack?: string
 }
 
 export const DEFAULT_CONFIG: BroConfig = {
