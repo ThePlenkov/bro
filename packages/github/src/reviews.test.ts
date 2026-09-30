@@ -17,7 +17,8 @@ case "$1 $2" in
   "pr checks") if [ "$FAKE_GH_NO_CHECKS" = "1" ]; then echo 'no checks reported' >&2; exit 8; fi
       echo '[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"kilo","state":"PENDING","bucket":"pending"}]' ;;
   "repo view") echo '{"owner":{"login":"acme"},"name":"widgets"}' ;;
-  "pr view") echo '{"state":"MERGED"}' ;;
+  "pr view") if [ "$FAKE_GH_NO_MERGED_AT" = "1" ]; then echo '{"state":"MERGED"}';
+      else echo '{"state":"MERGED","title":"did the thing","url":"https://github.com/acme/widgets/pull/7","mergedAt":"2026-01-02T00:00:00Z","mergeCommit":{"oid":"abc123"}}'; fi ;;
   "pr merge") echo 'Merging pull request' ;;
   "api graphql") case "$@" in
       *"s0: pullRequest"*) echo '{"data":{"repository":{"s0":${SCAN_NODE},"s1":${SCAN_NODE}}}}' ;;
@@ -216,6 +217,20 @@ describe('githubReview', { skip: WIN32 }, () => {
       const lines = readFileSync(log, 'utf8')
       assert.match(lines, /resolveReviewThread/)
       assert.match(lines, /unresolveReviewThread/)
+    })
+  })
+
+  test('mergedPrInfo returns the mergedAt the API reports', () => {
+    withFakeGh({}, () => {
+      const info = githubReview().mergedPrInfo(target)
+      assert.equal(info.mergedAt, '2026-01-02T00:00:00Z')
+      assert.equal(info.mergeSha, 'abc123')
+    })
+  })
+
+  test('mergedPrInfo throws when a MERGED PR reports no mergedAt', () => {
+    withFakeGh({ FAKE_GH_NO_MERGED_AT: '1' }, () => {
+      assert.throws(() => githubReview().mergedPrInfo(target), /no mergedAt/)
     })
   })
 

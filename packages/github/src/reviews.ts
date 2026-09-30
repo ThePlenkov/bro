@@ -292,10 +292,13 @@ function mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo {
   if (viewed.state !== 'MERGED') {
     throw new Error(`PR ${prLinkStr(t.repo, t.pr)} is not merged (state=${viewed.state})`)
   }
+  if (!viewed.mergedAt) {
+    throw new Error(`PR ${prLinkStr(t.repo, t.pr)} is MERGED but reports no mergedAt`)
+  }
   return {
     title: viewed.title,
     url: viewed.url,
-    mergedAt: viewed.mergedAt ?? new Date().toISOString(),
+    mergedAt: viewed.mergedAt,
     mergeSha: mergeSha || viewed.mergeCommit?.oid || '',
   }
 }
