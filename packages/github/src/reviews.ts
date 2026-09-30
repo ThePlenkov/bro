@@ -3,7 +3,7 @@
  * `gh` CLI. Ported from act/github.ts and debt/github.ts — same calls,
  * same semantics, normalized onto the domain types in @broject/core/review.
  */
-import { gh, ghAsync, ghJson, ghTry, resolveRepo } from '@broject/core'
+import { gh, ghAsync, ghJson, ghTry, prLink, resolveRepo } from '@broject/core'
 import type {
   CheckInfo,
   MergeOpts,
@@ -25,9 +25,6 @@ const parts = (repo: string): { owner: string; name: string } => {
   const [owner, name] = repo.split('/')
   return { owner: owner!, name: name! }
 }
-
-const prLinkStr = (repo: string, pr: number): string =>
-  `[#${pr}](https://github.com/${repo}/pull/${pr})`
 
 // --- PR state -----------------------------------------------------------------
 
@@ -210,7 +207,7 @@ function parseThreadPage(raw: string, repo: string, pr: number): ThreadPage {
   }
   const threads = parsed.data?.repository?.pullRequest?.reviewThreads
   if (!threads) {
-    throw new Error(`pull request ${prLinkStr(repo, pr)} not found`)
+    throw new Error(`pull request ${prLink(repo, pr)} not found`)
   }
   return threads
 }
@@ -290,10 +287,10 @@ function mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo {
   ])
 
   if (viewed.state !== 'MERGED') {
-    throw new Error(`PR ${prLinkStr(t.repo, t.pr)} is not merged (state=${viewed.state})`)
+    throw new Error(`PR ${prLink(t.repo, t.pr)} is not merged (state=${viewed.state})`)
   }
   if (!viewed.mergedAt) {
-    throw new Error(`PR ${prLinkStr(t.repo, t.pr)} is MERGED but reports no mergedAt`)
+    throw new Error(`PR ${prLink(t.repo, t.pr)} is MERGED but reports no mergedAt`)
   }
   return {
     title: viewed.title,
@@ -352,7 +349,7 @@ function explicitMergedPrs(repo: string, ids: number[]): MergedPr[] {
   const out: MergedPr[] = []
   const failures: unknown[] = []
   for (const number of ids) {
-    const link = prLinkStr(repo, number)
+    const link = prLink(repo, number)
     try {
       const viewed = ghJson<MergedPrRow>([
         'pr',
@@ -642,7 +639,7 @@ async function labelPrs(
     } catch (err) {
       // A failed write leaves the PR unlabeled — next collect rescans it.
       console.error(
-        `warning: label write on ${prLinkStr(op.t.repo, op.t.pr)} failed — ` +
+        `warning: label write on ${prLink(op.t.repo, op.t.pr)} failed — ` +
           `${err instanceof Error ? err.message : err}`
       )
     }
@@ -669,7 +666,7 @@ function graphql(query: string, vars: Record<string, string>): void {
 export function githubReview(dir: string = process.cwd()): ReviewFacade {
   return {
     resolveRepo: (positional: string[] = []) => resolveRepo(positional, dir),
-    prLink: prLinkStr,
+    prLink,
     currentPr() {
       // `gh pr view` resolves the PR for the checked-out branch — `gh pr
       // list --limit 1` would grab an arbitrary open PR instead. It also
