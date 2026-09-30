@@ -31,6 +31,7 @@ jobs:
       - name: Tag v{version}, release, dispatch publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -e
           if [ "$GITHUB_REF" != "refs/heads/main" ]; then
@@ -46,13 +47,22 @@ jobs:
             return 1
           }
           subject=$(git log -1 --pretty=%s)
-          # A conventional merge commit ('Merge pull request...') puts
-          # 'release: v*' on the second parent — the release branch tip.
-          # Manual follow-up commits can move the tip off the release
-          # subject, so search the second parent's ancestry for THIS
-          # version's release commit instead of inspecting the tip only.
+          # A merge commit puts 'release: v*' on the second parent — but
+          # fast-forward/rebase pushes have no HEAD^2, and follow-up
+          # commits move the tip off the release subject either way.
           if ! release_subject "$subject"; then
-            subject=$(git log -1 --format=%s --grep="^release: v$v" 'HEAD^2' 2>/dev/null || true)
+            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+              # Search only commits this push introduced — covers the
+              # second parent of a merge AND linear pushes, and can't
+              # match a stale release commit deeper in history.
+              subject=$(git log -1 --format=%s --grep="^release: v$v" HEAD --not "$BEFORE_SHA" 2>/dev/null || true)
+            else
+              # workflow_dispatch catch-up — the release commit may sit
+              # deep in ancestry: second parent on a merge, else HEAD.
+              range="HEAD"
+              git rev-parse -q --verify 'HEAD^2' >/dev/null 2>&1 && range="HEAD^2"
+              subject=$(git log -1 --format=%s --grep="^release: v$v" "$range" 2>/dev/null || true)
+            fi
           fi
           if [ "$GITHUB_EVENT_NAME" = "push" ] && ! release_subject "$subject"; then
             echo "not a release merge ($subject) — nothing to do"
