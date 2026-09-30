@@ -116,15 +116,20 @@ type ItemResult = 'landed' | 'closed' | 'parked' | 'failed'
  *  for common-dir discovery would otherwise fork bead state: the agent's
  *  close/update lands in a db that dies with the worktree and the bead
  *  re-surfaces phantom-open in main. */
-export function resolveBeadsDir(root: string): string | undefined {
-  const res = bdTry(['where', '--json'], 15_000, root)
-  if (res.code !== 0) {
+export function resolveBeadsDir(root: string, warn?: (msg: string) => void): string | undefined {
+  const fail = (why: string): undefined => {
+    warn?.(`loop: 'bd where' ${why} — agents run unpinned, BEADS_DIR not set`)
     return undefined
   }
+  const res = bdTry(['where', '--json'], 15_000, root)
+  if (res.code !== 0) {
+    return fail(`exited ${res.code}${res.err ? `: ${res.err}` : ''}`)
+  }
   try {
-    return (JSON.parse(res.out) as { path?: string }).path || undefined
+    const path = (JSON.parse(res.out) as { path?: string }).path
+    return path ?? fail('returned no path')
   } catch {
-    return undefined
+    return fail('returned malformed JSON')
   }
 }
 
@@ -321,10 +326,11 @@ async function runFixRound(
  *  "nothing to ship"; reopening it would resurrect the phantom. A failed
  *  status probe falls through to the failure path rather than masking
  *  it. */
-function agentVerdict(ctx: Ctx, bead: ReadyBead): ItemResult | undefined {
+function agentVerdict(ctx: Ctx, bead: ReadyBead, worktreeDir: string): ItemResult | undefined {
   try {
     if (taskStore().get(bead.id)?.status === 'closed') {
       say(ctx, `loop: ${bead.id} closed by the agent — verdict, not a failure`)
+      noteBead(bead.id, `loop: closed by agent verdict — worktree ${worktreeDir} kept for audit`)
       return 'closed'
     }
   } catch { /* bd unreachable → normal failure accounting decides */ }
@@ -397,7 +403,7 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<ItemResult> {
     return 'parked'
   }
   if (pr === null) {
-    return agentVerdict(ctx, bead) ?? failNoPr(bead, item, code)
+    return agentVerdict(ctx, bead, item.worktreeDir) ?? failNoPr(bead, item, code)
   }
   say(ctx, `loop: ${bead.id} → PR ${prRef(ctx, pr)}`)
   return driveGate(ctx, bead, item, pr)
@@ -507,7 +513,7 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     agent,
     intervalS: num(flag(argv, '--interval'), 60),
     json: argv.includes('--json'),
-    beadsDir: resolveBeadsDir(root),
+    beadsDir: resolveBeadsDir(root, (m) => console.error(m)),
     tails: [],
   }
 

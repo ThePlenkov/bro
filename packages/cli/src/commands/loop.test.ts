@@ -1,4 +1,4 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { bdTry } from '@broject/core'
@@ -40,6 +40,14 @@ describe('loopRefTails', () => {
 })
 
 describe('resolveBeadsDir', () => {
+  // bdTry inherits process.env — an ambient BEADS_DIR would redirect the
+  // bd init/where calls below to an external store instead of the temp repo
+  const ambientBeadsDir = process.env.BEADS_DIR
+  delete process.env.BEADS_DIR
+  after(() => {
+    if (ambientBeadsDir !== undefined) process.env.BEADS_DIR = ambientBeadsDir
+  })
+
   test('a repo without beads resolves nothing', () => {
     const { root, main } = initRepo('bro-loop-beads-')
     inside(main, root, () => {
