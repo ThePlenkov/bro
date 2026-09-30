@@ -187,3 +187,39 @@ section.how, section.not, section.vocab { padding: 64px 0 0; }
 @media (prefers-reduced-motion: reduce) {
   .tl, .cursor { animation: none; }
 }
+
+/* /debt — the self-dogfood ledger dashboard */
+.debt-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin: 8px 0 56px;
+}
+.stat {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.stat-n { font: 700 30px/1 var(--mono); color: var(--accent); }
+.stat-l { font: 12px var(--mono); color: var(--faint); }
+.debt-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 40px;
+}
+.debt-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.debt-table td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line); color: var(--dim); }
+.debt-table td:first-child { color: var(--text); font-family: var(--mono); font-size: 13px; }
+.debt-table .num { text-align: right; font-family: var(--mono); }
+.debt-note { color: var(--faint); font-size: 13px; }
+.debt-empty { text-align: center; color: var(--dim); font: 14px var(--mono); padding: 48px 0; }
+
+@media (max-width: 680px) {
+  .debt-grid, .debt-cols { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 480px) {
+  .debt-grid, .debt-cols { grid-template-columns: 1fr; }
+}
