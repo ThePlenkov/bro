@@ -16,7 +16,7 @@ describe('commandMutatedLedger', () => {
   })
 
   test('non-mutating commands never publish', () => {
-    for (const cmd of ['status', 'list', 'prs', 'ignore', 'watch', 'help']) {
+    for (const cmd of ['status', 'stats', 'trend', 'prs', 'list', 'watch']) {
       assert.equal(commandMutatedLedger(cmd, []), false, cmd)
     }
   })
