@@ -206,6 +206,37 @@ const BARE_READ_FLAGS: Record<string, RegExp> = {
   loop: /--dry-run\b/,
 }
 
+/** One `bro <plugin> <verb>` invocation → the cite it earns, or null for
+ *  a read. Per-plugin quirks live here so the matchAll scan stays flat:
+ *  `wtf` is bare-status vs arg-capture, `act wait` reads until
+ *  --merge/--cleanup, bare mutations read only under a listed flag. */
+function mutationCite(
+  plugin: string,
+  verb: string | undefined,
+  rest: string,
+  cmd: string
+): { plugin: string; skill: string } | null {
+  const cite = { plugin, skill: PLUGIN_SKILL[plugin] ?? plugin }
+  // `bro wtf <arg>` captures; bare `bro wtf` reports status. Quoted args
+  // are stripped from `c`, so an empty rest falls back to spotting the
+  // quote in the raw command — the real command position is proven.
+  if (plugin === 'wtf') {
+    return verb !== undefined || /wtf\s+["']/.test(cmd) ? cite : null
+  }
+  const verbs = MUTATION_VERBS[plugin]
+  if (verbs) {
+    // `act wait` is a read that becomes a mutation with --merge/--cleanup
+    const hit =
+      plugin === 'act' && verb === 'wait'
+        ? /--(?:merge|cleanup)\b/.test(rest)
+        : verb !== undefined && verbs.has(verb)
+    return hit ? cite : null
+  }
+  return BARE_MUTATIONS.has(plugin) && !BARE_READ_FLAGS[plugin]?.test(rest)
+    ? cite
+    : null
+}
+
 /** The mutating `bro <cmd>` in a shell command → { plugin, skill } to
  *  cite, or null for reads/other tools. Command position is proven on
  *  the quote-stripped text; the verb comes from the same text (verbs are
@@ -215,42 +246,16 @@ export function classifySkillMutation(
 ): { plugin: string; skill: string } | null {
   const c = unquoted(cmd)
   // non-capturing position group — m[1] must stay the plugin name
-  const at = '(?:^|[;&|\\n])\\s*'
-  const bro = '(?:bro|npx\\s+(?:-y\\s+)?@broject/bro(?:@[\\w.:-]+)?)'
+  const at = String.raw`(?:^|[;&|\n])\s*`
+  const bro = String.raw`(?:bro|npx\s+(?:-y\s+)?@broject/bro(?:@[\w.:-]+)?)`
   // chained commands may carry several bro calls — the first mutation wins
-  for (const m of c.matchAll(new RegExp(`${at}${bro}\\s+([a-z]+)\\b`, 'g'))) {
-    const plugin = m[1]!
+  for (const m of c.matchAll(new RegExp(String.raw`${at}${bro}\s+([a-z]+)\b`, 'g'))) {
     // the command segment ends at the next separator — a later segment's
     // flags must not turn this read into a mutation
     const rest = /[^;&|\n]*/.exec(c.slice(m.index + m[0].length))?.[0] ?? ''
-    const verb = /\S+/.exec(rest)?.[0]
-    const cite = (): { plugin: string; skill: string } => ({
-      plugin,
-      skill: PLUGIN_SKILL[plugin] ?? plugin,
-    })
-    // `bro wtf <arg>` captures; bare `bro wtf` reports status. Quoted args
-    // are stripped from `c`, so an empty rest falls back to spotting the
-    // quote in the raw command — the real command position is proven.
-    if (plugin === 'wtf') {
-      if (verb !== undefined || /wtf\s+["']/.test(cmd)) {
-        return cite()
-      }
-      continue
-    }
-    const verbs = MUTATION_VERBS[plugin]
-    if (verbs) {
-      // `act wait` is a read that becomes a mutation with --merge/--cleanup
-      const hit =
-        plugin === 'act' && verb === 'wait'
-          ? /--(?:merge|cleanup)\b/.test(rest)
-          : verb !== undefined && verbs.has(verb)
-      if (hit) {
-        return cite()
-      }
-      continue
-    }
-    if (BARE_MUTATIONS.has(plugin) && !BARE_READ_FLAGS[plugin]?.test(rest)) {
-      return cite()
+    const cite = mutationCite(m[1]!, /\S+/.exec(rest)?.[0], rest, cmd)
+    if (cite) {
+      return cite
     }
   }
   return null
