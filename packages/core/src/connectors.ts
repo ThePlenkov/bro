@@ -313,7 +313,7 @@ function pickConnector<K extends keyof FacadeMap>(
       throw new Error(`connector "${named}" does not provide "${kind}"`)
     }
   } else {
-    const key = `${kind}${ctx.dir}${registry.length}`
+    const key = `${kind}\0${ctx.dir}\0${registry.length}`
     const memo = pickMemo.get(key)
     if (memo !== undefined) {
       return memo
