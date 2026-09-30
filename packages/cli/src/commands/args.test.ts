@@ -78,4 +78,20 @@ describe('flag', () => {
     assert.equal(r.code, 2)
     assert.match(r.err.join('\n'), /requires a value/)
   })
+
+  test('--name=value spelling returns the value', () => {
+    assert.equal(flag(['--label=debt,ui'], '--label'), 'debt,ui')
+  })
+
+  test('--name= empty value fails closed', () => {
+    const r = exits(() => flag(['--label='], '--label'))
+    assert.equal(r.code, 2)
+    assert.match(r.err.join('\n'), /requires a value/)
+  })
+
+  test('bare + = spellings count as a repeat', () => {
+    const r = exits(() => flag(['--label', 'a', '--label=b'], '--label'))
+    assert.equal(r.code, 2)
+    assert.match(r.err.join('\n'), /may be given only once/)
+  })
 })

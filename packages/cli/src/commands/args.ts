@@ -23,17 +23,28 @@ export function flagValue(argv: string[], i: number, name: string): string {
 }
 
 /** Scalar flags are not repeatable — a second occurrence can hide a
- * missing value that would pass validation. */
+ * missing value that would pass validation. Matches both spellings:
+ * `--name value` and `--name=value`; a missed `--name=value` would
+ * silently drop the option instead of failing closed. */
 export function flag(argv: string[], name: string): string | undefined {
-  const i = argv.indexOf(name)
-  if (i < 0) {
+  const occurrences = argv.filter((a) => a === name || a.startsWith(`${name}=`))
+  if (occurrences.length === 0) {
     return undefined
   }
-  if (argv.includes(name, i + 1)) {
+  if (occurrences.length > 1) {
     console.error(`error: ${name} may be given only once`)
     process.exit(2)
   }
-  return flagValue(argv, i, name)
+  const eq = occurrences[0]!
+  if (eq.startsWith(`${name}=`)) {
+    const v = eq.slice(name.length + 1)
+    if (v === '') {
+      console.error(`error: ${name} requires a value`)
+      process.exit(2)
+    }
+    return v
+  }
+  return flagValue(argv, argv.indexOf(name), name)
 }
 
 export function flagAll(argv: string[], name: string): string[] {
