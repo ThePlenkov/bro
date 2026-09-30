@@ -40,7 +40,7 @@ npx -y @broject/bro --help     # zero install
 npm i -g @broject/bro          # or keep bro around: bro debt status
 ```
 
-Requires: `node >= 22`, `gh` authenticated, `bd`
+Requires: `node >= 22.18`, `gh` authenticated, `bd`
 ([beads](https://github.com/gastownhall/beads)) — it's a default store, so
 it's required unless you opt out. That's it. No tokens to babysit, no
 config files to confess to. (Zero-beads fallback: `"stores": ["jsonl"]`

@@ -5,7 +5,7 @@
 
 The capability pack for `bro` — skills, agent adapters and bead formulas
 shipped as a versioned npm package. `bro setup --pack` installs them into
-`.agents/skills/` and `.beads/formulas/`.
+`.agents/skills/` — plus `.beads/formulas/` when beads is enabled.
 
 ## Usage
 

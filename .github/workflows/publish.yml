@@ -64,9 +64,14 @@ jobs:
           missing=""
           for dir in core retro convoy debt drill github gitlab loop act pack cli; do
             name=$(node -p "require('./packages/$dir/package.json').name")
-            if ! npm view "$name" name >/dev/null 2>&1; then
-              missing="$missing $name"
+            out=$(npm view "$name" name 2>&1) && continue
+            # only a real E404 means "never published" — outages, rate
+            # limits and auth failures must abort, not misreport
+            if ! grep -q E404 <<<"$out"; then
+              echo "::error::npm view $name failed without E404: $out"
+              exit 1
             fi
+            missing="$missing $name"
           done
           if [ -n "$missing" ]; then
             echo "::error::Never published, needs manual bootstrap (placeholder + npm trust):$missing"
