@@ -6,5 +6,6 @@ dist/
 *.tgz
 packages/cli/README.md
 packages/cli/LICENSE
+packages/cli/.pack-stash.json
 .agents/review-debt/
 .agents/skills/
