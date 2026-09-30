@@ -201,8 +201,10 @@ function parseCollectArgs(rev: ReviewFacade, argv: string[]): CollectArgs {
 
 async function cmdCollect(argv: string[]): Promise<void> {
   const rev = reviewHost(undefined, loadBroConfig().connectors)
-  const args = parseCollectArgs(rev, argv)
+  // Auth gate before resolveRepo — an unauthenticated `gh repo view`
+  // must not beat the remediation message.
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
+  const args = parseCollectArgs(rev, argv)
 
   const debtCfg = loadBroConfig().debt
   const knownSources = new Set<string>(ALL_SOURCES)
@@ -776,8 +778,8 @@ function cmdPrs(argv: string[]): void {
     positional.push(arg)
   }
   const rev = reviewHost(undefined, loadBroConfig().connectors)
-  const repo = rev.resolveRepo(positional)
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
+  const repo = rev.resolveRepo(positional)
 
   const prs = rev.mergedPrs(repo, { limit })
   const rows = prs
@@ -856,8 +858,8 @@ function cmdMark(argv: string[]): void {
     process.exit(2)
   }
   const rev = reviewHost(undefined, loadBroConfig().connectors)
-  const repo = rev.resolveRepo(rest)
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
+  const repo = rev.resolveRepo(rest)
   if (stateRaw === 'none') {
     clearDebtLabels(rev, { repo, pr })
     console.error(`debt mark: cleared debt:* labels on ${rev.prLink(repo, pr)}`)
