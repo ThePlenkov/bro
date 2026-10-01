@@ -15,7 +15,9 @@ targets its predecessor.
 worktree based on the previous member's branch and a PR targeting it.
 
 ```text
-bro stack push <bead>     → worktree stack/<name>/<n>-<slug>, base = tip
+bro stack push <bead>     → branch stack/<name>/<n>-<slug> (work enter
+                            --base <tip> --branch <name>); worktree keeps
+                            the sibling <repo>--<slug> path
 bro stack list [<name>]   → the chain: bead, branch, PR, state
 bro stack sync [<name>]   → retarget/rebase after a member merges
 ```
