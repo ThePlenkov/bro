@@ -194,29 +194,11 @@ export const nativeSpecConnector: Connector = {
   specs(ctx) {
     const { dir: specDir } = loadConfig(ctx.dir).sdd
     const root = ctx.dir
-    // one index per store instance — hasSpec is called per bead, and a
-    // rescan-per-bead would read every spec file's head each time.
-    // scaffold() drops the cache after writing.
-    let index: ResolvedSpec[] | undefined
-    const specIndex = (): ResolvedSpec[] => {
-      if (index === undefined) {
-        const base = specDirAbs(root, specDir)
-        index = base !== null && existsSync(base) ? indexSpecDir(base, specDir) : []
-      }
-      return index
-    }
     return {
-      hasSpec: (id) => {
-        if (!validBeadId(id)) {
-          return false
-        }
-        try {
-          const node = preferSpec(specIndex().filter((n) => n.id === id))
-          return node !== undefined && readFileSync(node.abs, 'utf8').trim() !== ''
-        } catch {
-          return false
-        }
-      },
+      // no index cache: a spec file can appear between calls in one
+      // store's lifetime (agent writes it, next hasSpec must see it).
+      // Specs dirs are tens of small files — a rescan is sub-ms.
+      hasSpec: (id) => hasSpecFile(root, specDir, id),
       scaffold(id, opts) {
         const base = specDirAbs(root, specDir)
         if (base === null) {
@@ -241,7 +223,6 @@ export const nativeSpecConnector: Connector = {
         }
         mkdirSync(dirname(path), { recursive: true })
         writeFileSync(path, scaffoldBody(id, opts.title ?? '', parent?.dirSpec === true ? undefined : opts.parent))
-        index = undefined
         return path
       },
       remedy: (id) =>
@@ -249,7 +230,11 @@ export const nativeSpecConnector: Connector = {
       policy: () =>
         `spec before code — ${specDir}/<id>.md or <id>/ dir, or a spec: link in the bead (exempt: chore / 'trivial' / 'debt')`,
       tree() {
-        const nodes: SpecNode[] = specIndex().map(({ abs: _a, dirSpec: _d, ...n }) => n)
+        const base = specDirAbs(root, specDir)
+        if (base === null || !existsSync(base)) {
+          return []
+        }
+        const nodes: SpecNode[] = indexSpecDir(base, specDir).map(({ abs: _a, dirSpec: _d, ...n }) => n)
         return nodes.sort((a, b) => a.id.localeCompare(b.id))
       },
     } satisfies SpecStore
