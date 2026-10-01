@@ -6,9 +6,10 @@ parent: project
 
 ## Scope
 
-`bro wtf` — capture a failure moment (screenshot, command, logs) into
-a retro record; recurring roots must escalate to a mechanism, not to
-another instance of prose.
+`bro wtf` captures the verbatim complaint plus cwd/git context as a
+`wtf` bead; `bro retrospect record` stores the analysis in a retro bead
+and routes prevention actions. Recurring roots must escalate to a
+mechanism, not another instance of prose.
 
 ## Owns
 

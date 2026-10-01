@@ -46,7 +46,7 @@ skills/                                                    → distro (packs)
 
 ## Invariants
 
-- Every in_progress bead has a spec (file or `spec:` link) — `sdd.mode:
-  gate` enforces it in this repo itself.
+- Every in_progress bead claimed by this session has a spec (file or
+  `spec:` link) — `sdd.mode: gate` blocks missing specs for own claims.
 - Spec filenames name their bead (`<id>.md`); capability specs name
   the capability. `bro spec tree` renders this file as the root.

@@ -8,8 +8,8 @@ parent: project
 
 `bro act` is the exit gate as code: threads, checks, SAST annotations,
 AI-reviewer verdicts; resolve/reply/merge/wait mutations. `bro debt`
-harvests resolved-but-unfixed findings and security alerts into the
-ledger and beads.
+harvests unresolved review threads on merged PRs plus configured alert,
+PR, and CI sources into the ledger and beads.
 
 ## Owns
 

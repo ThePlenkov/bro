@@ -7,7 +7,7 @@ parent: sdd
 ## Problem
 
 The `parent:` tree mechanics shipped in bro-gkbe but bro itself had no
-spec-of-specs: 17 flat bead specs, no root, no capability layer.
+spec-of-specs: 18 flat bead specs, no root, no capability layer.
 
 ## Design
 

@@ -6,8 +6,9 @@ parent: project
 
 ## Scope
 
-The Connector contract every external system implements: tasks,
-reviews, specs facades + hook probes; beads task store, GitHub/GitLab
+The Connector contract: optional capabilities (`tasks`, `reviews`,
+`specs` facades + hook probes) a system may implement — GitHub provides
+only `reviews`, beads only `tasks`. Beads task store, GitHub/GitLab
 review hosts; `bro sync` — the `refs/bro/data` gitref store, CAS push,
 tree-union JSONL merge.
 
