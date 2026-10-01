@@ -102,7 +102,13 @@ function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
         const idxAbs = join(abs, index)
         nodes.push({ id: e.name, path: join(rel, index), abs: idxAbs, dirSpec: true, parent: specParent(idxAbs) ?? parent })
         walk(abs, rel, e.name, true)
-      } else if (collectFiles && e.name.endsWith('.md') && !INDEX_NAMES.includes(e.name)) {
+      } else if (
+        collectFiles &&
+        e.name.endsWith('.md') &&
+        // index names are the dir's own index inside a spec dir; at the
+        // spec root they are ordinary (if unusually named) specs
+        (parent === undefined || !INDEX_NAMES.includes(e.name))
+      ) {
         const id = basename(e.name, '.md')
         if (!validBeadId(id)) {
           continue
