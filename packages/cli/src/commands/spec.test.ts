@@ -528,62 +528,62 @@ describe('bro spec tree rendering', () => {
     return { out, err }
   }
 
-  const treeOf = (dir: string): Promise<{ out: string[]; err: string[] }> =>
-    capture(dir, ['tree'])
+  /** Run `bro spec tree` over a spec fixture — returns stdout lines and
+   *  the stderr lines about cyclic edges (unrelated facade warnings are
+   *  filtered out). */
+  const runTree = async (
+    files: Record<string, string>
+  ): Promise<{ out: string[]; cyclic: string[] }> => {
+    let res = { out: [] as string[], cyclic: [] as string[] }
+    await withRepo({ config: {}, list: '[]' }, async (dir) => {
+      writeSpecs(dir, files)
+      const { out, err } = await capture(dir, ['tree'])
+      res = { out, cyclic: err.filter((l) => l.includes('cyclic')) }
+    })
+    return res
+  }
 
   test('duplicate ids at different depths keep their own subtrees', async () => {
-    await withRepo({ config: {}, list: '[]' }, async (dir) => {
-      // flat specs/dup.md collides with dir spec specs/cap/dup/ — the
-      // leaf inside the dir spec is ITS child, not the flat one's
-      writeSpecs(dir, {
-        'dup.md': '# flat dup\n',
-        'cap/spec.md': '# cap\n',
-        'cap/dup/spec.md': '# dir dup\n',
-        'cap/dup/leaf.md': '# leaf\n',
-      })
-      const { out, err } = await treeOf(dir)
-      assert.deepEqual(out, [
-        `cap  ${join('specs', 'cap', 'spec.md')}`,
-        `  dup  ${join('specs', 'cap', 'dup', 'spec.md')}`,
-        `    leaf  ${join('specs', 'cap', 'dup', 'leaf.md')}`,
-        `dup  ${join('specs', 'dup.md')}`,
-      ])
-      // unrelated facade warnings share stderr — only a cycle warning
-      // would be wrong here
-      assert.equal(err.filter((l) => l.includes('cyclic')).length, 0)
+    // flat specs/dup.md collides with dir spec specs/cap/dup/ — the
+    // leaf inside the dir spec is ITS child, not the flat one's
+    const { out, cyclic } = await runTree({
+      'dup.md': '# flat dup\n',
+      'cap/spec.md': '# cap\n',
+      'cap/dup/spec.md': '# dir dup\n',
+      'cap/dup/leaf.md': '# leaf\n',
     })
+    assert.deepEqual(out, [
+      `cap  ${join('specs', 'cap', 'spec.md')}`,
+      `  dup  ${join('specs', 'cap', 'dup', 'spec.md')}`,
+      `    leaf  ${join('specs', 'cap', 'dup', 'leaf.md')}`,
+      `dup  ${join('specs', 'dup.md')}`,
+    ])
+    assert.deepEqual(cyclic, [])
   })
 
   test('a self-parent edge renders at root level', async () => {
-    await withRepo({ config: {}, list: '[]' }, async (dir) => {
-      writeSpecs(dir, {
-        'a.md': '---\nparent: a\n---\n# a\n',
-        'b.md': '# b\n',
-      })
-      const { out, err } = await treeOf(dir)
-      assert.deepEqual(out, [
-        `a  ${join('specs', 'a.md')}`,
-        `b  ${join('specs', 'b.md')}`,
-      ])
-      assert.equal(err.filter((l) => l.includes('cyclic')).length, 0)
+    const { out, cyclic } = await runTree({
+      'a.md': '---\nparent: a\n---\n# a\n',
+      'b.md': '# b\n',
     })
+    assert.deepEqual(out, [
+      `a  ${join('specs', 'a.md')}`,
+      `b  ${join('specs', 'b.md')}`,
+    ])
+    assert.deepEqual(cyclic, [])
   })
 
   test('an unresolvable cycle warns instead of dropping the subtree', async () => {
-    await withRepo({ config: {}, list: '[]' }, async (dir) => {
-      writeSpecs(dir, {
-        'a.md': '---\nparent: b\n---\n# a\n',
-        'b.md': '---\nparent: a\n---\n# b\n',
-        // a subtree hung off a cyclic node is unreachable too
-        'c.md': '---\nparent: a\n---\n# c\n',
-        'root.md': '# root\n',
-      })
-      const { out, err } = await treeOf(dir)
-      assert.deepEqual(out, [`root  ${join('specs', 'root.md')}`])
-      const cyclic = err.filter((l) => l.includes('cyclic parent edge'))
-      assert.equal(cyclic.length, 1)
-      assert.match(cyclic[0]!, /a, b, c/)
+    // a subtree hung off a cyclic node is unreachable too
+    const { out, cyclic } = await runTree({
+      'a.md': '---\nparent: b\n---\n# a\n',
+      'b.md': '---\nparent: a\n---\n# b\n',
+      'c.md': '---\nparent: a\n---\n# c\n',
+      'root.md': '# root\n',
     })
+    assert.deepEqual(out, [`root  ${join('specs', 'root.md')}`])
+    assert.equal(cyclic.length, 1)
+    assert.match(cyclic[0]!, /a, b, c/)
   })
 })
 
