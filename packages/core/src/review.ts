@@ -20,6 +20,9 @@ export interface PrMeta {
   url: string
   headSha: string
   headRef: string
+  /** Target branch — stack sync reads it to decide whether a retarget
+   *  is needed at all. */
+  baseRef: string
   mergeable: string // MERGEABLE | CONFLICTING | UNKNOWN
   mergeState: string
 }
@@ -126,9 +129,11 @@ export interface ReviewFacade {
   /** The PR for the bound dir's checked-out branch — null when the
    *  branch has none or the host is unreachable. */
   currentPr(): { pr: number; state: string; url: string } | null
-  /** Open PR numbers whose head is this branch — the loop's "did the
-   *  agent open one" probe. */
-  prsForBranch(branch: string): number[]
+  /** PR numbers whose head is this branch — the loop's "did the agent
+   *  open one" probe. Default `open`; `all` adds merged/closed PRs in
+   *  the host's listing order — stack sync needs them to see a member's
+   *  merge land. */
+  prsForBranch(branch: string, state?: 'open' | 'all'): number[]
   /** A PR reference in free text (the host's own URL shape) → target —
    *  the prompt-submit probe's way to spot its PRs. Null when the text
    *  names none. */
@@ -177,6 +182,11 @@ export interface ReviewFacade {
   /** Ensure-absent — removing a label the PR doesn't carry is a no-op. */
   removeLabel(t: PrTarget, label: string): void
 
+  /** Retarget the PR's base branch (stack sync's half of a rebase — the
+   *  branch moves locally, the PR's declared base moves here). False
+   *  when the host refuses. Optional — a host without the capability
+   *  leaves sync reporting the PR as un-retargetable. */
+  retargetPr?(t: PrTarget, base: string): boolean
   /** The host's "update branch" — merge base into head, pinned to the
    *  seen sha. False when the host refuses (conflict, moved head,
    *  permissions) — the caller treats that as settled. */

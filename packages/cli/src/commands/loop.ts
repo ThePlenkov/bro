@@ -44,7 +44,15 @@ import { loadBroConfig } from '../plugins.ts'
 import { flag } from './args.ts'
 import { runActCommand } from './act.ts'
 import { runSyncCommand } from './sync.ts'
-import { parseWorktreePorcelain } from './work.ts'
+import { mergedBranches, stackMemberFor, stackTip, syncStack } from './stack.ts'
+import { isStackName } from '@broject/stack'
+import { loopSlug } from '@broject/loop'
+import {
+  defaultBranchName,
+  parseWorktreePorcelain,
+  readStackEdges,
+  recordStackEdge,
+} from './work.ts'
 import {
   claimUpTo,
   classify,
@@ -72,6 +80,10 @@ interface Ctx {
   /** Store the loop's own taskStore resolves to — pinned into agent and
    *  bootstrap env as BEADS_DIR so worktree `bd` writes reach it. */
   beadsDir?: string
+  /** `bro loop --stack <name>` — each claimed bead becomes a member of
+   *  the named stack: branch stack/<name>/<n>-<slug> based on the tip,
+   *  PR targeting the member below. */
+  stack?: string
   /** Cleanup failures collected during the run — the end-of-run audit
    *  prints them again so a tail never dies in a scrollback line. */
   tails: string[]
@@ -81,12 +93,14 @@ interface Ctx {
 const prRef = (ctx: Ctx, pr: number): string => ctx.rev.prLink(ctx.repo, pr)
 
 function usage(): never {
-  console.error(`Usage: bro loop [--max N] [--dry-run] [--json] [--label a,b]
+  console.error(`Usage: bro loop [--max N] [--dry-run] [--json] [--label a,b] [--stack NAME]
   --agent '<cmd {promptFile}>'   agent template (config: loop.agent)
   --agent-timeout MIN            per-spawn budget (loop.agentTimeoutMin, 45)
   --merge-timeout MIN            gate budget per round (loop.mergeTimeoutMin, 45)
   --label a,b                    declared scope — only beads carrying one
                                 of these labels are claimable
+  --stack NAME                   chain claimed beads onto stack NAME —
+                                each PR targets the member below
   --interval SEC                 gate poll interval (60)`)
   process.exit(2)
 }
@@ -151,15 +165,18 @@ function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
 }
 
 /** Fresh sibling worktree on loop/<id> off origin/main (falls back to
- *  main/HEAD when no origin). An existing dir is reused as-is. */
-function ensureWorktree(root: string, branch: string, dir: string): void {
+ *  main/HEAD when no origin) — or off `base` when a stack already picked
+ *  the fork point. An existing dir is reused as-is. */
+function ensureWorktree(root: string, branch: string, dir: string, base?: string): void {
   if (existsSync(dir)) {
     return // a previous run's worktree survived — reuse it
   }
-  gitTry(['-C', root, 'fetch', 'origin', 'main', '--quiet'])
-  const base = ['origin/main', 'main', 'HEAD'].find(
-    (r) => gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', r]).code === 0
-  )
+  if (base === undefined) {
+    gitTry(['-C', root, 'fetch', 'origin', 'main', '--quiet'])
+    base = ['origin/main', 'main', 'HEAD'].find(
+      (r) => gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', r]).code === 0
+    )
+  }
   const add = gitTry(['-C', root, 'worktree', 'add', '-b', branch, dir, base ?? 'HEAD'])
   if (add.code !== 0) {
     // branch may already exist from a previous run — attach to it
@@ -388,12 +405,60 @@ function writePrompt(item: ReturnType<typeof planItem>, text: string): void {
   writeFileSync(item.promptFile, text)
 }
 
+interface StackSlot {
+  /** Position the bead occupies (or joins at). */
+  n: number
+  /** Creation/prompt base — the live tip's branch, the recorded edge,
+   *  or the default branch for a bottom member. */
+  base?: string
+  /** The stack edge to record — set only for a fresh member whose base
+   *  is another stack branch. */
+  edge?: string
+  /** True when the member sits directly on the default branch. */
+  bottom: boolean
+}
+
+/** The stack slot a claimed bead takes. A bead already in the stack
+ *  (failed/parked retry, parked member) re-enters ITS member branch —
+ *  re-deriving `n` from the tip would plan a phantom `stack/<name>/<n'>-`
+ *  branch while the surviving worktree sits on the old one. A new bead
+ *  joins at the live tip — merged members are skipped so the chain
+ *  never forks from a dead (already-merged) branch. */
+function resolveStackSlot(ctx: Ctx, bead: ReadyBead): StackSlot | undefined {
+  if (ctx.stack === undefined) {
+    return undefined
+  }
+  const dflt = defaultBranchName() ?? 'main'
+  const existing = stackMemberFor(ctx.root, ctx.stack, loopSlug(bead.id))
+  if (existing !== undefined) {
+    const edge = readStackEdges().get(existing.branch)
+    return { n: existing.n, base: edge ?? dflt, bottom: edge === undefined }
+  }
+  const dead = mergedBranches(ctx.root, ctx.stack, { repo: ctx.repo, facade: ctx.rev })
+  const tip = stackTip(ctx.root, ctx.stack, dead)
+  return { n: tip.n, base: tip.base ?? dflt, edge: tip.base, bottom: tip.base === undefined }
+}
+
 /** One bead end-to-end. */
 async function runItem(ctx: Ctx, bead: ReadyBead): Promise<ItemResult> {
-  const item = planItem(bead, ctx.root)
+  // resolved here, not earlier — a member that landed since the last
+  // item correctly yields the default branch as the next base
+  const slot = resolveStackSlot(ctx, bead)
+  const item = planItem(
+    bead,
+    ctx.root,
+    slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
+  )
   say(ctx, `\nloop: ${bead.id} → ${item.branch} @ ${item.worktreeDir}`)
   try {
-    ensureWorktree(ctx.root, item.branch, item.worktreeDir)
+    // a surviving worktree dir is reused as-is — its branch kept its
+    // original base, so the stack edge only records on fresh creation
+    const fresh = !existsSync(item.worktreeDir)
+    ensureWorktree(ctx.root, item.branch, item.worktreeDir, slot?.base)
+    if (fresh && slot?.edge !== undefined) {
+      // same edge `work enter --stack` records — merge order travels
+      recordStackEdge(item.branch, slot.edge)
+    }
   } catch (err) {
     noteBead(bead.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
     reopenBead(bead.id)
@@ -402,7 +467,7 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<ItemResult> {
   if (!runBootstrap(ctx, bead, item)) {
     return 'failed'
   }
-  writePrompt(item, buildWorkPrompt(bead, item.branch))
+  writePrompt(item, buildWorkPrompt(bead, item.branch, slot?.base, slot?.bottom))
   const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
   const pr = findPr(ctx, item.branch)
   if (pr === 'lookup-error') {
@@ -486,6 +551,36 @@ async function driveGate(
   }
 }
 
+/** `--label a,b` → selection filters — flag() covers both spellings; a
+ *  declared-but-empty value fails closed (silently widening to the
+ *  whole queue is exactly what --label prevents). */
+function labelSelection(argv: string[]): { labels?: string[] } {
+  const raw = flag(argv, '--label')
+  if (raw === undefined) {
+    return {}
+  }
+  const labels = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s !== '')
+  if (labels.length === 0) {
+    console.error('error: --label requires a comma-separated value, e.g. --label debt,ui')
+    process.exit(2)
+  }
+  return { labels }
+}
+
+/** `--stack NAME` — must form a git-ref-safe component or the member
+ *  branches it plans would fail on creation mid-run. */
+function stackNameFlag(argv: string[]): string | undefined {
+  const name = flag(argv, '--stack')
+  if (name !== undefined && !isStackName(name)) {
+    console.error(`bro loop: invalid stack name "${name}" ([a-z0-9_.-])`)
+    process.exit(2)
+  }
+  return name
+}
+
 export async function runLoopCommand(argv: string[]): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
     usage()
@@ -521,28 +616,12 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     intervalS: num(flag(argv, '--interval'), 60),
     json: argv.includes('--json'),
     selection: {
-      filters: (() => {
-        // flag() covers --label v and --label=v; argv.includes would miss =
-        const raw = flag(argv, '--label')
-        if (raw === undefined) {
-          return {}
-        }
-        const labels = raw
-          .split(',')
-          .map((s) => s.trim())
-          .filter((s) => s !== '')
-        // a declared-but-empty scope must fail closed — silently
-        // widening to the whole queue is exactly what --label prevents
-        if (labels.length === 0) {
-          console.error('error: --label requires a comma-separated value, e.g. --label debt,ui')
-          process.exit(2)
-        }
-        return { labels }
-      })(),
+      filters: labelSelection(argv),
       gates: 'forbid' as const,
       order: 'priority' as const,
     },
     beadsDir: resolveBeadsDir(root, (m) => console.error(m)),
+    stack: stackNameFlag(argv),
     tails: [],
   }
 
@@ -557,9 +636,17 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
       console.log('loop --dry-run: nothing claimable')
       return
     }
-    const item = planItem(top, root)
+    const slot = resolveStackSlot(ctx, top)
+    const item = planItem(
+      top,
+      root,
+      slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
+    )
     console.log(`would claim ${top.id} — ${top.title}`)
     console.log(`  worktree ${item.worktreeDir} on ${item.branch}`)
+    if (slot !== undefined) {
+      console.log(`  stack ${ctx.stack} member ${slot.n} — PR base ${slot.base}`)
+    }
     console.log(`  agent: ${expandAgentCmd(ctx.agent, item.promptFile)}`)
     return
   }
@@ -603,21 +690,28 @@ interface RefTails {
 }
 
 /** loop/* worktrees still checked out + loop/* branches with no
- *  worktree — both are run tails. A failed git probe reports as an
- *  error line, never as a false "clean". */
-export function loopRefTails(root: string): RefTails {
+ *  worktree — both are run tails; a `--stack` run owns its `stack/<name>/*`
+ *  branches the same way. A failed git probe reports as an error line,
+ *  never as a false "clean". */
+export function loopRefTails(root: string, prefixes: string[] = ['loop/']): RefTails {
   const errors: string[] = []
   const wt = gitTry(['-C', root, 'worktree', 'list', '--porcelain'])
   if (wt.code !== 0) {
     errors.push(`worktree list failed — ${wt.err || 'git error'}`)
   }
-  const trees = parseWorktreePorcelain(wt.out).filter((w) => w.branch?.startsWith('loop/'))
+  const trees = parseWorktreePorcelain(wt.out).filter((w) =>
+    prefixes.some((p) => w.branch?.startsWith(p))
+  )
   const onTree = new Set(trees.map((w) => w.branch!))
-  const bl = gitTry(['-C', root, 'branch', '--list', 'loop/*', '--format=%(refname:short)'])
-  if (bl.code !== 0) {
-    errors.push(`branch list failed — ${bl.err || 'git error'}`)
+  const bare: string[] = []
+  for (const prefix of prefixes) {
+    const bl = gitTry(['-C', root, 'branch', '--list', `${prefix}*`, '--format=%(refname:short)'])
+    if (bl.code !== 0) {
+      errors.push(`branch list failed — ${bl.err || 'git error'}`)
+      continue
+    }
+    bare.push(...bl.out.split('\n').filter((b) => b && !onTree.has(b)))
   }
-  const bare = bl.out.split('\n').filter((b) => b && !onTree.has(b))
   return {
     worktrees: trees.map((w) => `${w.path} [${w.branch}]`),
     worktreeBranches: trees.map((w) => w.branch!),
@@ -648,7 +742,10 @@ function claimedTails(seen: Set<string>): { own: string[]; other: string[] } {
  *  `bro sync` so artifacts and bead state travel. Never throws — an
  *  audit failure is reported, not raised. */
 function endAudit(ctx: Ctx, seen: Set<string>): void {
-  const { worktrees, worktreeBranches, branches, errors } = loopRefTails(ctx.root)
+  const { worktrees, worktreeBranches, branches, errors } = loopRefTails(
+    ctx.root,
+    ctx.stack === undefined ? ['loop/'] : ['loop/', `stack/${ctx.stack}/`]
+  )
   const claimed = claimedTails(seen)
   const sections: [string, string[]][] = [
     // PRs live on branches — worktree'd ones (a parked bead keeps both)
@@ -687,6 +784,38 @@ function endAudit(ctx: Ctx, seen: Set<string>): void {
   }
 }
 
+/** Claim the next ready bead — undefined when the queue drains. A
+ *  foreign-only remainder must not look like a drained queue: 'done'
+ *  would hide work a shared db still advertises. */
+function claimNext(
+  ctx: Ctx,
+  scope: NonNullable<ReturnType<typeof nextScope>>,
+  seen: Set<string>
+): ReadyBead | undefined {
+  const ready = readyBeads()
+  const c = classify(ready, ctx.selection, scope, epicParentIds(ready))
+  const bead = claimUpTo(c.queue.filter((b) => !seen.has(b.id)), 1)[0]
+  if (!bead && c.foreign > 0) {
+    say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
+  }
+  return bead
+}
+
+/** Post-merge cascade after a landed stack member — retarget + rebase
+ *  whatever stacked on top of it before the next item runs. */
+function syncAfterLand(ctx: Ctx): void {
+  if (ctx.stack === undefined) {
+    return
+  }
+  try {
+    for (const line of syncStack(ctx.root, ctx.stack)) {
+      say(ctx, `loop stack sync:${line}`)
+    }
+  } catch (err) {
+    say(ctx, `loop: stack sync failed — ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
 /** The claim→run→repeat cycle until the queue drains or --max hits. */
 async function runQueue(ctx: Ctx): Promise<void> {
   const seen = new Set<string>()
@@ -698,23 +827,20 @@ async function runQueue(ctx: Ctx): Promise<void> {
       return
     }
     for (;;) {
-      if (ctx.cfg.maxItems > 0 && tally.landed + tally.closed + tally.parked + tally.failed >= ctx.cfg.maxItems) {
+      const done = tally.landed + tally.closed + tally.parked + tally.failed
+      if (ctx.cfg.maxItems > 0 && done >= ctx.cfg.maxItems) {
         break
       }
-      const ready = readyBeads()
-      const c = classify(ready, ctx.selection, scope, epicParentIds(ready))
-      const bead = claimUpTo(c.queue.filter((b) => !seen.has(b.id)), 1)[0]
+      const bead = claimNext(ctx, scope, seen)
       if (!bead) {
-        // a foreign-only remainder must not look like a drained queue —
-        // 'done' would hide work a shared db still advertises
-        if (c.foreign > 0) {
-          say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
-        }
         break
       }
       seen.add(bead.id)
       const result = await runItem(ctx, bead)
       tally[result] += 1
+      if (result === 'landed') {
+        syncAfterLand(ctx)
+      }
       if (ctx.json) {
         console.log(JSON.stringify({ bead: bead.id, result }))
       }

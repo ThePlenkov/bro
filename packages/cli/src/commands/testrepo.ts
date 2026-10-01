@@ -297,20 +297,34 @@ const facade = {
   resolveRepo: () => 'o/r',
   prLink: (_repo, pr) => '[#' + pr + '](https://example.test/o/r/pull/' + pr + ')',
   currentPr: () => null,
-  prsForBranch: () => {
+  prsForBranch: (branch, state) => {
     const s = load()
     if (s.prLookupFails) throw new Error('host unreachable')
+    // per-branch PRs (stack e2e) — {prs: {'stack/s/1-x': {number, state, baseRef}}}
+    // the map is authoritative: an unmapped branch has NO PR — falling
+    // through to the global prOpened would lend an unrelated PR to a
+    // stack branch
+    if (s.prs) {
+      const p = s.prs[branch]
+      if (!p) return []
+      if (state === 'all') return [p.number]
+      return p.state === 'OPEN' ? [p.number] : []
+    }
     return s.prOpened ? [s.pr ?? 7] : []
   },
   parsePrRef: () => null,
-  prMeta: () => {
+  prMeta: (t) => {
     const s = load()
+    const per = s.prs
+      ? Object.values(s.prs).find((p) => p.number === t.pr) ?? {}
+      : {}
     return {
-      state: s.prState ?? 'OPEN',
-      isDraft: !!s.isDraft,
-      url: 'https://example.test/o/r/pull/' + (s.pr ?? 7),
-      headSha: s.headSha ?? 'abc123',
-      headRef: s.headRef ?? 'loop/fx-a',
+      state: per.state ?? s.prState ?? 'OPEN',
+      isDraft: !!(per.isDraft ?? s.isDraft),
+      url: 'https://example.test/o/r/pull/' + t.pr,
+      headSha: per.headSha ?? s.headSha ?? 'abc123',
+      headRef: per.headRef ?? s.headRef ?? 'loop/fx-a',
+      baseRef: per.baseRef ?? s.baseRef ?? 'main',
       mergeable: s.mergeable ?? 'MERGEABLE',
       mergeState: s.mergeState ?? 'CLEAN',
     }
@@ -328,11 +342,29 @@ const facade = {
   createLabel: () => {},
   addLabel: () => {},
   removeLabel: () => {},
+  retargetPr: (t, base) => {
+    const s = load()
+    s.retargets = (s.retargets ?? []).concat([{ pr: t.pr, base }])
+    if (s.prs) {
+      for (const p of Object.values(s.prs)) {
+        if (p.number === t.pr) p.baseRef = base
+      }
+    }
+    save(s)
+    return true
+  },
   updateBranch: () => false,
-  mergePr: () => {
+  mergePr: (t) => {
     const s = load()
     s.merges = (s.merges ?? 0) + 1
     s.prState = s.mergeResult ?? 'MERGED'
+    // a merge lands on the per-branch entry too — otherwise a mapped
+    // stack member keeps reporting OPEN after its merge
+    if (s.prs) {
+      for (const p of Object.values(s.prs)) {
+        if (p.number === t.pr) p.state = s.prState
+      }
+    }
     save(s)
     return s.prState
   },

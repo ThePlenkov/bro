@@ -3,9 +3,24 @@ import type { LoopBead } from './types.ts'
 /** The work-order prompt written to the fresh worktree — the agent's
  *  whole world is this one bead. bro owns the gate; the agent's job ends
  *  at an open PR, not a merge. */
-export function buildWorkPrompt(bead: LoopBead, branch: string): string {
+export function buildWorkPrompt(
+  bead: LoopBead,
+  branch: string,
+  prBase?: string,
+  stackBottom?: boolean
+): string {
   const desc = bead.description?.trim()
   const body = desc ? `\n${desc}\n` : ''
+  // a stack member's PR targets the member below it — merges cascade
+  // bottom-up; the bottom member legitimately targets the default branch
+  const stackWho = stackBottom
+    ? "the stack's bottom member; the PR targets the default branch"
+    : 'a stack member; the PR targets the member below you, not the default branch'
+  const prLine =
+    prBase === undefined
+      ? `push, then \`gh pr create\` with a
+  summary and a test-plan checklist.`
+      : `push, then \`gh pr create --base ${prBase}\` — you are ${stackWho}. Add a summary and a test-plan checklist.`
   return `You are an autonomous implementation agent. This worktree is already
 checked out on branch \`${branch}\` — work here, nowhere else.
 
@@ -17,8 +32,7 @@ ${body}# Rules
 - Implement the task on the current branch. Follow the repo's AGENTS.md
   conventions — they are the contract.
 - Verify like CI before opening the PR — run the repo's real test command.
-- Commit with a conventional message, push, then \`gh pr create\` with a
-  summary and a test-plan checklist.
+- Commit with a conventional message, ${prLine}
 - Do NOT merge, do NOT wait on reviewers — the orchestrator drives the
   review gate. Your job ends once the PR exists.
 - Report verdicts through beads: if the task needs no code change

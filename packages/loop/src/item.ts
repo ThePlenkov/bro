@@ -21,14 +21,26 @@ function hash4(s: string): string {
   return h.toString(36).slice(0, 4)
 }
 
-export function planItem(bead: LoopBead, repoRoot: string): LoopItem {
-  let slug = bead.id.replaceAll(/[^A-Za-z0-9._-]+/g, '-')
-  if (slug !== bead.id) {
-    slug += `-${hash4(bead.id)}`
-  }
+/** Bead id → worktree/branch slug — sanitized, hash-disambiguated when
+ *  the id carries characters the ref namespace can't hold. Exported so
+ *  stack member lookups (`stack push` re-enter, loop retries) match the
+ *  exact slug a planned item would use. */
+export function loopSlug(id: string): string {
+  const slug = id.replaceAll(/[^A-Za-z0-9._-]+/g, '-')
+  return slug === id ? slug : `${slug}-${hash4(id)}`
+}
+
+export function planItem(
+  bead: LoopBead,
+  repoRoot: string,
+  opts?: { stack?: { name: string; n: number } }
+): LoopItem {
+  const slug = loopSlug(bead.id)
   const dir = join(dirname(repoRoot), `${basename(repoRoot)}--${slug}`)
   return {
-    branch: `loop/${slug}`,
+    // stack mode joins the named chain — stack/<name>/<n>-<slug> based
+    // on the tip; the worktree naming stays identical either way
+    branch: opts?.stack ? `stack/${opts.stack.name}/${opts.stack.n}-${slug}` : `loop/${slug}`,
     worktreeDir: dir,
     // outside the worktree — an agent's `git add -A` must never
     // sweep the work order into the PR
