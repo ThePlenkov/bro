@@ -34,7 +34,7 @@ Dogfood: bro's own specs/ reorganized — capability specs became
 
 - [x] reorganize specs/ → `specs/<cap>/spec.md` + `specs/<cap>/<id>.md`
 - [x] this spec lives positionally at `specs/sdd/bro-64gr.md`
-- [ ] native connector: recursive index, positional parents, dir hasSpec
-- [ ] `spec new --parent` writes inside dir specs
-- [ ] tests: dir spec detection, nested parents, frontmatter override
-- [ ] sdd SKILL.md documents the dir convention
+- [x] native connector: recursive index, positional parents, dir hasSpec
+- [x] `spec new --parent` writes inside dir specs (+ same-id collision refuse)
+- [x] tests: dir spec detection, nested parents, frontmatter override
+- [x] sdd SKILL.md documents the dir convention

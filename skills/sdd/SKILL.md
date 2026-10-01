@@ -37,7 +37,7 @@ the code, and stays on main as what the project now *is*. Specs form a
 tree: an epic's spec-of-specs decomposes into feature specs — children
 sit inside the parent's dir spec, or a flat spec points at its parent
 via `parent:` frontmatter (`bro spec new <id> --parent <epic>` writes
-inside `specs/<epic>/` when the parent is a dir spec).
+inside `<sdd.dir>/<epic>/` when the parent is a dir spec).
 
 ## Commands
 

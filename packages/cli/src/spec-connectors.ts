@@ -188,6 +188,12 @@ export const nativeSpecConnector: Connector = {
         // the edge, so no parent: frontmatter is needed. A flat-file or
         // absent parent gets the frontmatter edge instead.
         const parent = opts.parent === undefined ? undefined : findSpec(root, specDir, opts.parent)
+        // specs resolve at any depth — a same-id file elsewhere in the
+        // tree is a collision, not a free slot at the root
+        const existing = findSpec(root, specDir, id)
+        if (existing !== undefined) {
+          throw new Error(`a spec for "${id}" already exists at ${existing.path} — refusing to duplicate`)
+        }
         const path =
           parent?.dirSpec === true
             ? join(dirname(parent.abs), `${id}.md`)
