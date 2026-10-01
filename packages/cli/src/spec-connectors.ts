@@ -74,7 +74,13 @@ interface ResolvedSpec extends SpecNode {
  *  are content, not specs — indexed subdirs still nest through. */
 function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
   const nodes: ResolvedSpec[] = []
-  const walk = (dirAbs: string, dirRel: string, parent: string | undefined, collectFiles: boolean): void => {
+  const walk = (
+    dirAbs: string,
+    dirRel: string,
+    parent: string | undefined,
+    collectFiles: boolean,
+    indexName?: string
+  ): void => {
     let entries
     try {
       entries = readdirSync(dirAbs, { withFileTypes: true })
@@ -100,16 +106,16 @@ function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
         }
         const idxAbs = join(abs, index)
         nodes.push({ id: e.name, path: join(rel, index), abs: idxAbs, dirSpec: true, parent: specParent(idxAbs) ?? parent })
-        walk(abs, rel, e.name, true)
+        walk(abs, rel, e.name, true, index)
       } else if (
         collectFiles &&
         e.name.endsWith('.md') &&
-        // index names are the dir's own index inside a spec dir; at the
-        // spec root they are ordinary (if unusually named) specs
-        (parent === undefined || !INDEX_NAMES.includes(e.name))
+        e.name !== indexName
       ) {
         const id = basename(e.name, '.md')
-        if (!validBeadId(id)) {
+        // a child cannot re-declare its dir spec's id — `foo/foo.md`
+        // would self-parent and loop the tree walk
+        if (!validBeadId(id) || id === parent) {
           continue
         }
         nodes.push({ id, path: rel, abs, dirSpec: false, parent: specParent(abs) ?? parent })

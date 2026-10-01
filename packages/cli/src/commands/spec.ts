@@ -270,11 +270,17 @@ function cmdTree(dir: string): void {
     const key = nodes.some((p) => p.id === n.parent) ? n.parent : undefined
     byParent.set(key, [...(byParent.get(key) ?? []), n])
   }
+  const seen = new Set<string>()
   const walk = (parent: string | undefined, depth: number): void => {
     for (const n of byParent.get(parent) ?? []) {
+      // frontmatter can hand-author a cycle (a↔b) or a self-parent —
+      // a visited node renders once and never recurses again
       const path = n.path !== undefined ? `  ${n.path}` : ''
       console.log(`${'  '.repeat(depth)}${n.id}${path}`)
-      walk(n.id, depth + 1)
+      if (!seen.has(n.id)) {
+        seen.add(n.id)
+        walk(n.id, depth + 1)
+      }
     }
   }
   walk(undefined, 0)

@@ -455,6 +455,30 @@ describe('dir specs — the tree IS the filetree', () => {
     })
   })
 
+  test('a child file reusing the dir id is skipped — no self-parent', async () => {
+    await withRepo({ config: {} }, (dir) => {
+      mkdirSync(join(dir, 'specs', 'foo'), { recursive: true })
+      writeFileSync(join(dir, 'specs', 'foo', 'spec.md'), '# foo\n')
+      writeFileSync(join(dir, 'specs', 'foo', 'foo.md'), '# dup\n')
+      writeFileSync(join(dir, 'specs', 'foo', 'leaf.md'), '# leaf\n')
+      const nodes = specStore(dir).tree()
+      assert.deepEqual(
+        nodes.map((n) => n.id).sort(),
+        ['foo', 'leaf']
+      )
+    })
+  })
+
+  test('a non-selected index name inside a dir spec is a child spec', async () => {
+    await withRepo({ config: {} }, (dir) => {
+      mkdirSync(join(dir, 'specs', 'cap'), { recursive: true })
+      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# cap\n')
+      writeFileSync(join(dir, 'specs', 'cap', 'README.md'), '# readme child\n')
+      const nodes = specStore(dir).tree()
+      assert.equal(nodes.find((n) => n.id === 'README')?.parent, 'cap')
+    })
+  })
+
   test('scaffold --parent into a dir spec writes positionally, no frontmatter', async () => {
     await withRepo({ config: {} }, (dir) => {
       mkdirSync(join(dir, 'specs', 'cap'), { recursive: true })
