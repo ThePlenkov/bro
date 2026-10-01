@@ -20,6 +20,9 @@ export interface PrMeta {
   url: string
   headSha: string
   headRef: string
+  /** Target branch — stack sync reads it to decide whether a retarget
+   *  is needed at all. */
+  baseRef: string
   mergeable: string // MERGEABLE | CONFLICTING | UNKNOWN
   mergeState: string
 }
@@ -177,6 +180,11 @@ export interface ReviewFacade {
   /** Ensure-absent — removing a label the PR doesn't carry is a no-op. */
   removeLabel(t: PrTarget, label: string): void
 
+  /** Retarget the PR's base branch (stack sync's half of a rebase — the
+   *  branch moves locally, the PR's declared base moves here). False
+   *  when the host refuses. Optional — a host without the capability
+   *  leaves sync reporting the PR as un-retargetable. */
+  retargetPr?(t: PrTarget, base: string): boolean
   /** The host's "update branch" — merge base into head, pinned to the
    *  seen sha. False when the host refuses (conflict, moved head,
    *  permissions) — the caller treats that as settled. */

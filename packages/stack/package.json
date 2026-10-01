@@ -1,0 +1,47 @@
+{
+  "name": "@broject/stack",
+  "version": "0.2.4",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsdown": "^0.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/stack"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "Stacked bead→worktree→PR chains for bro — stack/<name>/<n>-<slug> branch namespace over worktree stack edges",
+  "keywords": [
+    "beads",
+    "stacked-prs",
+    "worktree",
+    "agent",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs"
+}

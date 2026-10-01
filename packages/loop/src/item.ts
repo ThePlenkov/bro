@@ -21,14 +21,20 @@ function hash4(s: string): string {
   return h.toString(36).slice(0, 4)
 }
 
-export function planItem(bead: LoopBead, repoRoot: string): LoopItem {
+export function planItem(
+  bead: LoopBead,
+  repoRoot: string,
+  opts?: { stack?: { name: string; n: number } }
+): LoopItem {
   let slug = bead.id.replaceAll(/[^A-Za-z0-9._-]+/g, '-')
   if (slug !== bead.id) {
     slug += `-${hash4(bead.id)}`
   }
   const dir = join(dirname(repoRoot), `${basename(repoRoot)}--${slug}`)
   return {
-    branch: `loop/${slug}`,
+    // stack mode joins the named chain — stack/<name>/<n>-<slug> based
+    // on the tip; the worktree naming stays identical either way
+    branch: opts?.stack ? `stack/${opts.stack.name}/${opts.stack.n}-${slug}` : `loop/${slug}`,
     worktreeDir: dir,
     // outside the worktree — an agent's `git add -A` must never
     // sweep the work order into the PR

@@ -13,6 +13,7 @@ packages/debt     @broject/debt      — review-debt domain: collect, labels, le
 packages/act      @broject/act       — open-PR loop: state, threads, resolve, exit gate
 packages/drill    @broject/drill     — scoped descent: drill frames as beads
 packages/convoy   @broject/convoy    — molecule scheduling: DAG readiness, next-step, pour
+packages/stack    @broject/stack     — stacked bead→worktree→PR chains (stack/<name>/<n>-<slug>)
 packages/loop     @broject/loop      — autonomous backlog runner (claim → agent → gate)
 packages/retro    @broject/retro     — wtf capture + retro plans
 packages/cli      @broject/bro — published CLI (bin: bro), bundles @broject/* into dist
@@ -26,7 +27,7 @@ order (core first, cli last); `prepare-for-release` placeholders +
 `npm trust` bootstrap any new package before OIDC can attach.
 skills/<name>/                   — thin skills: policy only, call `bro *`
                                    (act, convoy, debt, docs, drill, loop,
-                                   next, sdd, sync, work, wtf)
+                                   next, sdd, stack, sync, work, wtf)
 plugin.json                      — agent-plugins.org manifest (repo root IS the Devin plugin)
 hooks.json + hooks/run.sh        — Devin lifecycle hooks → `bro hooks <event>`
 .claude-plugin/marketplace.json  — marketplace manifest (Claude + Codex + Cursor read it)

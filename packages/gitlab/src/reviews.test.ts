@@ -200,13 +200,14 @@ describe('gitlabReview', { skip: WIN32 }, () => {
     withFakeGlab(
       {
         FAKE_GLAB_MR:
-          '{"iid":42,"state":"opened","draft":true,"web_url":"u","sha":"abc123","source_branch":"feat","detailed_merge_status":"ci_still_running"}',
+          '{"iid":42,"state":"opened","draft":true,"web_url":"u","sha":"abc123","source_branch":"feat","target_branch":"main","detailed_merge_status":"ci_still_running"}',
       },
       () => {
         const meta = gitlabReview().prMeta(target)
         assert.equal(meta.state, 'OPEN')
         assert.equal(meta.isDraft, true)
         assert.equal(meta.headSha, 'abc123')
+        assert.equal(meta.baseRef, 'main')
         // pending CI is its own gate signal — mergeable only answers
         // "does it conflict"
         assert.equal(meta.mergeable, 'MERGEABLE')

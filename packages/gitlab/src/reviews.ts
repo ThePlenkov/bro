@@ -67,6 +67,7 @@ interface MrRow {
   web_url?: string
   sha?: string // head sha
   source_branch?: string
+  target_branch?: string
   merge_status?: string // pre-15.6 compute flag
   detailed_merge_status?: string // 15.6+ verdict
   labels?: string[]
@@ -298,6 +299,7 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
       url: mr.web_url ?? '',
       headSha: mr.sha ?? '',
       headRef: mr.source_branch ?? '',
+      baseRef: mr.target_branch ?? '',
       mergeable: toMergeable(mr),
       mergeState: toMergeState(mr),
     }
@@ -644,6 +646,14 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
           `body=${body}`,
         ],
         gopts()
+      )
+    },
+    retargetPr(t, base) {
+      return (
+        glabTry(
+          ['api', '-X', 'PUT', api(t.repo, `merge_requests/${t.pr}`), '-f', `target_branch=${base}`],
+          gopts()
+        ).code === 0
       )
     },
     updateBranch(t, expectedHeadSha) {

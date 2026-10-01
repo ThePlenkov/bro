@@ -36,6 +36,7 @@ function prMeta(t: PrTarget): PrMeta {
         pullRequest?: {
           headRefOid: string
           headRefName: string
+          baseRefName: string
           mergeable: string
           mergeStateStatus: string
           state: string
@@ -49,7 +50,7 @@ function prMeta(t: PrTarget): PrMeta {
     'api',
     'graphql',
     '-f',
-    `query=query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid headRefName mergeable mergeStateStatus state url isDraft}}}`,
+    `query=query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid headRefName baseRefName mergeable mergeStateStatus state url isDraft}}}`,
     '-f',
     `o=${owner}`,
     '-f',
@@ -66,6 +67,7 @@ function prMeta(t: PrTarget): PrMeta {
     url: pr.url,
     headSha: pr.headRefOid,
     headRef: pr.headRefName,
+    baseRef: pr.baseRefName,
     mergeable: (pr.mergeable || 'UNKNOWN').toUpperCase(),
     mergeState: (pr.mergeStateStatus || 'UNKNOWN').toUpperCase(),
   }
@@ -739,6 +741,9 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
         'mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t,body:$b}){comment{id}}}',
         { t: id, b: body }
       )
+    },
+    retargetPr(t, base) {
+      return ghTry(['pr', 'edit', String(t.pr), '--repo', t.repo, '--base', base]).code === 0
     },
     updateBranch(t, expectedHeadSha) {
       const r = ghTry([

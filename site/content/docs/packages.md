@@ -26,6 +26,7 @@ can build on the same primitives instead of forking them.
 | `@broject/convoy` | Molecule runner — beads DAG workflows scheduled inside the agent |
 | `@broject/github` | GitHub connector — the `reviews` facade over the `gh` CLI |
 | `@broject/loop` | Autonomous backlog loop — claim beads, spawn agents, drive the gate |
+| `@broject/stack` | Stacked bead→worktree→PR chains — branch-namespace parsing + sync planning |
 | `@broject/retro` | Retrospect engine — TOML retro plans → prevention actions |
 
 All packages are ESM-only and require Node ≥ 22. Versions release in

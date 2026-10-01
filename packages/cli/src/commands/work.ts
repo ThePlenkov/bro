@@ -19,7 +19,7 @@
  * discovers `.beads` through the git common dir regardless of how the
  * worktree was created.
  */
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { git, gitTry, loadConfig, stackSection, taskStore, type Connector } from '@broject/core'
@@ -106,7 +106,7 @@ function usage(): never {
   process.exit(2)
 }
 
-function mainWorktree(): WorktreeInfo {
+export function mainWorktree(): WorktreeInfo {
   const all = parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']))
   const main = all[0]
   if (!main) {
@@ -121,7 +121,7 @@ function currentRoot(): string {
 }
 
 /** Dirty-file count in a worktree, or -1 when the path is gone. */
-function dirtyCount(path: string): number {
+export function dirtyCount(path: string): number {
   const res = gitTry(['-C', path, 'status', '--porcelain'])
   if (res.code !== 0) {
     return -1
@@ -145,7 +145,7 @@ export function hasSubmodules(worktreePath: string): boolean {
  *  non-bead slugs pass silently; a refused claim (another actor holds the
  *  bead) is reported — the worktree still stands, but the bead isn't ours
  *  and the session's `.task` marker must not read as ownership. */
-function claimBead(slug: string): { claimed?: string; refused?: boolean } {
+export function claimBead(slug: string): { claimed?: string; refused?: boolean } {
   try {
     if (!taskStore().get(slug)) {
       return {}
@@ -192,22 +192,64 @@ export function resolveEnterBase(
   return stack || auto ? { base: current } : { base: mainRef }
 }
 
-/** Stacked branches record their base so act wait / cleanup can derive
+/** `<common-git-dir>/bro/stack` — the stack edge dir, shared across every
+ *  linked worktree. Null when git can't name the common dir. */
+export function stackEdgeDir(): string | null {
+  const res = gitTry(['rev-parse', '--path-format=absolute', '--git-common-dir'])
+  const common = res.code === 0 ? res.out.trim() : ''
+  return common ? join(common, 'bro', 'stack') : null
+}
+
+/** Stacked branches record their base so stack sync / cleanup can derive
  *  merge order bottom-up. The edge lives in the common git dir —
  *  visible from every linked worktree. One file per branch,
  *  create-only, advisory. */
-function recordStackEdge(branch: string, base: string): void {
-  const res = gitTry(['rev-parse', '--path-format=absolute', '--git-common-dir'])
-  const common = res.code === 0 ? res.out.trim() : ''
-  if (!common) {
+export function recordStackEdge(branch: string, base: string): void {
+  const dir = stackEdgeDir()
+  if (!dir) {
     return
   }
   try {
-    const dir = join(common, 'bro', 'stack')
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, encodeURIComponent(branch)), `${base}\n`)
   } catch {
     // advisory record — a failed write must not break enter
+  }
+}
+
+/** Every recorded edge, branch → base. Stale entries (dead branches) are
+ *  the reader's call — the file is advisory, reconciliation lives in
+ *  `bro stack list`/`sync`. */
+export function readStackEdges(): Map<string, string> {
+  const out = new Map<string, string>()
+  const dir = stackEdgeDir()
+  if (!dir) {
+    return out
+  }
+  try {
+    for (const f of readdirSync(dir)) {
+      const base = readFileSync(join(dir, f), 'utf8').trim()
+      if (base !== '') {
+        out.set(decodeURIComponent(f), base)
+      }
+    }
+  } catch {
+    // no edge dir yet, or unreadable — same answer: no edges
+  }
+  return out
+}
+
+/** Stack sync retargets a member onto the default branch — the edge is
+ *  absence, so a stale file must go or the member reads as still-stacked. */
+export function removeStackEdge(branch: string): void {
+  const dir = stackEdgeDir()
+  if (!dir) {
+    return
+  }
+  try {
+    rmSync(join(dir, encodeURIComponent(branch)), { force: true })
+  } catch {
+    // advisory — a failed remove must not break sync
   }
 }
 
@@ -224,7 +266,7 @@ function stackMode(): 'auto' | 'manual' {
 
 // submodules are not populated by worktree add — a fresh tree without
 // them builds stale or fails; init is best-effort (network may be down)
-function initSubmodules(path: string): void {
+export function initSubmodules(path: string): void {
   if (!hasSubmodules(path)) {
     return
   }
@@ -259,7 +301,7 @@ function enterBase(argv: string[], main: WorktreeInfo): { base?: string } {
  *  Remote-agnostic: origin/HEAD is asked first, then any other remote's
  *  HEAD — a repo whose primary remote isn't 'origin' gets the same
  *  protection. */
-function defaultBranchName(): string | undefined {
+export function defaultBranchName(): string | undefined {
   const remotes = ['origin', ...gitTry(['remote']).out.split('\n').filter(Boolean)]
   for (const r of new Set(remotes)) {
     const head = gitTry(['symbolic-ref', '--short', `refs/remotes/${r}/HEAD`])
@@ -270,18 +312,32 @@ function defaultBranchName(): string | undefined {
   return undefined
 }
 
-function cmdEnter(argv: string[]): void {
-  const pos = positionals(argv, new Set(['--branch', '--base']))
-  const slug = pos[0]
-  if (!slug || !SLUG_RE.test(slug)) {
-    console.error('error: enter needs a slug ([a-z0-9_.-], not starting with -)')
-    usage()
-  }
-  const branch = flag(argv, '--branch') ?? `work/${slug}`
-  const main = mainWorktree()
+export interface EnterWorktreeResult {
+  path: string
+  branch: string
+  base?: string
+  /** base is a real local branch other than main — a stack edge was
+   *  recorded for bottom-up merge order */
+  stacked: boolean
+  claim: { claimed?: string; refused?: boolean }
+}
+
+/** The worktree-add core shared by `work enter` and `stack push` — the
+ *  caller resolves branch/base; this adds the sibling worktree (or
+ *  checks out an existing branch), inits submodules, claims a bead-named
+ *  slug, and records the stack edge last so a failure mid-way never
+ *  leaves a half-registered member. `allowExisting` gates whether an
+ *  already-existing target branch is checked out or refused. */
+export function enterWorktree(opts: {
+  slug: string
+  branch: string
+  base?: string
+  main: WorktreeInfo
+  defaultRef?: string
+  allowExisting?: boolean
+}): EnterWorktreeResult {
+  const { slug, branch, base, main, defaultRef, allowExisting = true } = opts
   const mainRef = main.branch ?? main.head
-  const defaultRef = defaultBranchName()
-  const { base } = enterBase(argv, main)
   const path = worktreePathFor(main.path, slug)
   if (existsSync(path)) {
     console.error(`error: ${path} already exists`)
@@ -289,11 +345,10 @@ function cmdEnter(argv: string[]): void {
   }
   // an existing branch under the target name means the slug names an
   // in-flight task — check it out rather than failing on -b. The
-  // resolved default base is irrelevant here; only a user-passed
-  // --base/--stack conflicts with checking out an existing branch.
+  // resolved default base is irrelevant here.
   const branchExists = gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).code === 0
-  if (branchExists && (flag(argv, '--base') !== undefined || argv.includes('--stack'))) {
-    console.error(`error: --base/--stack only apply when creating the branch; ${branch} already exists`)
+  if (branchExists && !allowExisting) {
+    console.error(`error: ${branch} already exists`)
     process.exit(1)
   }
   const args = ['worktree', 'add', path]
@@ -319,18 +374,38 @@ function cmdEnter(argv: string[]): void {
     base !== mainRef &&
     base !== defaultRef &&
     gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${base}`]).code === 0
-  if (stacked) {
+  if (stacked && !branchExists) {
     recordStackEdge(branch, base)
   }
-  console.log(`worktree ready: ${path}  (branch ${branch})
-  cd ${path}
+  return { path, branch, base, stacked, claim }
+}
+
+function cmdEnter(argv: string[]): void {
+  const pos = positionals(argv, new Set(['--branch', '--base']))
+  const slug = pos[0]
+  if (!slug || !SLUG_RE.test(slug)) {
+    console.error('error: enter needs a slug ([a-z0-9_.-], not starting with -)')
+    usage()
+  }
+  const branch = flag(argv, '--branch') ?? `work/${slug}`
+  const main = mainWorktree()
+  const defaultRef = defaultBranchName()
+  const { base } = enterBase(argv, main)
+  const branchExists = gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).code === 0
+  if (branchExists && (flag(argv, '--base') !== undefined || argv.includes('--stack'))) {
+    console.error(`error: --base/--stack only apply when creating the branch; ${branch} already exists`)
+    process.exit(1)
+  }
+  const r = enterWorktree({ slug, branch, base, main, defaultRef })
+  console.log(`worktree ready: ${r.path}  (branch ${r.branch})
+  cd ${r.path}
 note: gitignored dirs (node_modules, dist) are not shared — install deps there`)
-  if (stacked) {
+  if (r.stacked) {
     console.log(`stacked on ${base} — merge order runs bottom-up`)
   }
-  if (claim.claimed) {
-    console.log(`claimed bead ${claim.claimed} for this session`)
-  } else if (claim.refused) {
+  if (r.claim.claimed) {
+    console.log(`claimed bead ${r.claim.claimed} for this session`)
+  } else if (r.claim.refused) {
     console.error(`note: could not claim bead ${slug} — another actor may hold it`)
   }
 }
@@ -415,7 +490,7 @@ function cmdLeave(argv: string[]): void {
   }
 }
 
-function stateLabel(w: WorktreeInfo): string {
+export function stateOfWorktree(w: WorktreeInfo): string {
   if (w.locked !== undefined) {
     return 'LOCKED'
   }
@@ -442,7 +517,7 @@ function cmdList(argv: string[]): void {
   const all = parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']))
   const main = all[0]
   for (const [i, w] of all.entries()) {
-    const parts = [i === 0 ? 'main' : 'linked', w.path, refLabel(w), stateLabel(w)]
+    const parts = [i === 0 ? 'main' : 'linked', w.path, refLabel(w), stateOfWorktree(w)]
     if (withSizes && existsSync(w.path)) {
       parts.push(diskUsage(w.path))
     }

@@ -45,6 +45,7 @@ import { runHooksCommand } from './commands/hooks.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runSetupCommand } from './commands/setup.ts'
 import { runSpecCommand, sddConnector } from './commands/spec.ts'
+import { runStackCommand } from './commands/stack.ts'
 import { SPEC_CONNECTORS } from './spec-connectors.ts'
 import { runSyncCommand } from './commands/sync.ts'
 import { runWorkCommand, workConnector } from './commands/work.ts'
@@ -181,6 +182,13 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'work',
     configKey: 'stack',
     configSchema: stackSection,
+  }),
+  definePlugin({
+    name: 'stack',
+    summary: 'Stacked bead→worktree→PR chains: push|list|sync',
+    run: runStackCommand,
+    skill: 'stack',
+    // the 'stack' config section (stack.mode) stays owned by `work`
   }),
   definePlugin({
     name: 'spec',
