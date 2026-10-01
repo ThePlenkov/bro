@@ -26,7 +26,7 @@
  * project's own tool language.
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import {
   facade,
   isOwnClaim,
@@ -265,25 +265,62 @@ function cmdCheck(dir: string, ids: string[], all: boolean): void {
 function cmdTree(dir: string): void {
   const spec = specs(dir)
   const nodes = spec.tree()
-  const byParent = new Map<string | undefined, SpecNode[]>()
+  const byId = new Map<string, SpecNode[]>()
   for (const n of nodes) {
-    const key = nodes.some((p) => p.id === n.parent) ? n.parent : undefined
+    byId.set(n.id, [...(byId.get(n.id) ?? []), n])
+  }
+  /** A child's parent resolves to a node, not an id — duplicate ids at
+   *  different depths (flat `specs/foo.md` beside dir spec
+   *  `specs/x/foo/`) share one id; a positional child belongs to the
+   *  dir spec whose tree contains its path, an ambiguous frontmatter
+   *  edge to the path-first candidate. Self-parent (a hand-authored
+   *  `parent: <self>`) is root-level — keying under itself orphans it. */
+  const parentOf = (n: SpecNode): SpecNode | undefined => {
+    const p = n.parent
+    if (p === undefined || p === n.id) {
+      return undefined
+    }
+    const cands = byId.get(p) ?? []
+    if (cands.length <= 1) {
+      return cands[0]
+    }
+    const enclosing = cands
+      .filter(
+        (c) =>
+          c.path !== undefined &&
+          n.path !== undefined &&
+          n.path.startsWith(`${dirname(c.path)}${sep}`)
+      )
+      .sort((a, b) => b.path!.length - a.path!.length)
+    return (
+      enclosing[0] ??
+      cands.slice().sort((a, b) => (a.path ?? '').localeCompare(b.path ?? ''))[0]
+    )
+  }
+  const byParent = new Map<SpecNode | undefined, SpecNode[]>()
+  for (const n of nodes) {
+    const key = parentOf(n)
     byParent.set(key, [...(byParent.get(key) ?? []), n])
   }
-  const seen = new Set<string>()
-  const walk = (parent: string | undefined, depth: number): void => {
+  const rendered = new Set<SpecNode>()
+  const walk = (parent: SpecNode | undefined, depth: number): void => {
     for (const n of byParent.get(parent) ?? []) {
-      // frontmatter can hand-author a cycle (a↔b) or a self-parent —
-      // a visited node renders once and never recurses again
       const path = n.path !== undefined ? `  ${n.path}` : ''
       console.log(`${'  '.repeat(depth)}${n.id}${path}`)
-      if (!seen.has(n.id)) {
-        seen.add(n.id)
-        walk(n.id, depth + 1)
-      }
+      rendered.add(n)
+      walk(n, depth + 1)
     }
   }
   walk(undefined, 0)
+  // a hand-authored cycle (a↔b) keys every member under a partner the
+  // root walk never reaches — name the dropped subtree, don't drop it
+  // silently
+  const orphaned = nodes.filter((n) => !rendered.has(n))
+  if (orphaned.length > 0) {
+    console.error(
+      `spec tree: cyclic parent edge(s) — not rendered: ${orphaned.map((n) => n.id).join(', ')}`
+    )
+  }
   let missing: TaskRow[] = []
   try {
     const store = tasks(dir)

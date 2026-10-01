@@ -12,7 +12,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { sddConnector, specState } from './spec.ts'
+import { runSpecCommand, sddConnector, specState } from './spec.ts'
 import { hasSpecFile, SPEC_CONNECTORS } from '../spec-connectors.ts'
 import { loadConfig, registerConnector, specStore } from '@broject/core'
 import type { ConnectorCtx, SpecStore, TaskRow, TaskStore } from '@broject/core'
@@ -491,6 +491,83 @@ describe('dir specs — the tree IS the filetree', () => {
       writeFileSync(join(dir, 'specs', 'flat.md'), '# flat\n')
       const q = spec.scaffold!('child2', { parent: 'flat' })
       assert.match(readFileSync(q, 'utf8'), /^parent: flat$/m)
+    })
+  })
+})
+
+describe('bro spec tree rendering', () => {
+  /** Run `bro spec <argv>` with cwd in the tmp repo, capturing console. */
+  const capture = async (
+    dir: string,
+    argv: string[]
+  ): Promise<{ out: string[]; err: string[] }> => {
+    const out: string[] = []
+    const err: string[] = []
+    const origLog = console.log
+    const origErr = console.error
+    console.log = (m?: unknown) => out.push(String(m))
+    console.error = (m?: unknown) => err.push(String(m))
+    const cwd = process.cwd()
+    process.chdir(dir)
+    try {
+      runSpecCommand(argv)
+    } finally {
+      process.chdir(cwd)
+      console.log = origLog
+      console.error = origErr
+    }
+    return { out, err }
+  }
+
+  test('duplicate ids at different depths keep their own subtrees', async () => {
+    await withRepo({ config: {}, list: '[]' }, async (dir) => {
+      // flat specs/dup.md collides with dir spec specs/cap/dup/ — the
+      // leaf inside the dir spec is ITS child, not the flat one's
+      mkdirSync(join(dir, 'specs', 'cap', 'dup'), { recursive: true })
+      writeFileSync(join(dir, 'specs', 'dup.md'), '# flat dup\n')
+      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# cap\n')
+      writeFileSync(join(dir, 'specs', 'cap', 'dup', 'spec.md'), '# dir dup\n')
+      writeFileSync(join(dir, 'specs', 'cap', 'dup', 'leaf.md'), '# leaf\n')
+      const { out, err } = await capture(dir, ['tree'])
+      assert.deepEqual(out, [
+        `cap  ${join('specs', 'cap', 'spec.md')}`,
+        `  dup  ${join('specs', 'cap', 'dup', 'spec.md')}`,
+        `    leaf  ${join('specs', 'cap', 'dup', 'leaf.md')}`,
+        `dup  ${join('specs', 'dup.md')}`,
+      ])
+      // unrelated facade warnings share stderr — only a cycle warning
+      // would be wrong here
+      assert.equal(err.filter((l) => l.includes('cyclic')).length, 0)
+    })
+  })
+
+  test('a self-parent edge renders at root level', async () => {
+    await withRepo({ config: {}, list: '[]' }, async (dir) => {
+      mkdirSync(join(dir, 'specs'))
+      writeFileSync(join(dir, 'specs', 'a.md'), '---\nparent: a\n---\n# a\n')
+      writeFileSync(join(dir, 'specs', 'b.md'), '# b\n')
+      const { out, err } = await capture(dir, ['tree'])
+      assert.deepEqual(out, [
+        `a  ${join('specs', 'a.md')}`,
+        `b  ${join('specs', 'b.md')}`,
+      ])
+      assert.equal(err.filter((l) => l.includes('cyclic')).length, 0)
+    })
+  })
+
+  test('an unresolvable cycle warns instead of dropping the subtree', async () => {
+    await withRepo({ config: {}, list: '[]' }, async (dir) => {
+      mkdirSync(join(dir, 'specs'))
+      writeFileSync(join(dir, 'specs', 'a.md'), '---\nparent: b\n---\n# a\n')
+      writeFileSync(join(dir, 'specs', 'b.md'), '---\nparent: a\n---\n# b\n')
+      // a subtree hung off a cyclic node is unreachable too
+      writeFileSync(join(dir, 'specs', 'c.md'), '---\nparent: a\n---\n# c\n')
+      writeFileSync(join(dir, 'specs', 'root.md'), '# root\n')
+      const { out, err } = await capture(dir, ['tree'])
+      assert.deepEqual(out, [`root  ${join('specs', 'root.md')}`])
+      const cyclic = err.filter((l) => l.includes('cyclic parent edge'))
+      assert.equal(cyclic.length, 1)
+      assert.match(cyclic[0]!, /a, b, c/)
     })
   })
 })
