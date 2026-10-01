@@ -7,10 +7,15 @@
  */
 
 /** One node of the spec tree — `parent` links a feature spec to its
- *  spec-of-specs; `path` is repo-relative for tools with files. */
+ *  spec-of-specs; `path` is repo-relative for tools with files.
+ *  `parentVia` records how the edge was declared when the tool can tell:
+ *  `position` edges resolve to the enclosing dir spec while `frontmatter`
+ *  edges resolve deterministically — they diverge when the parent id is
+ *  duplicated. */
 export interface SpecNode {
   id: string
   parent?: string
+  parentVia?: 'position' | 'frontmatter'
   path?: string
 }
 

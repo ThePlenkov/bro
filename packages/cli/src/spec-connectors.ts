@@ -105,7 +105,15 @@ function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
           continue
         }
         const idxAbs = join(abs, index)
-        nodes.push({ id: e.name, path: join(rel, index), abs: idxAbs, dirSpec: true, parent: specParent(idxAbs) ?? parent })
+        const fm = specParent(idxAbs)
+        nodes.push({
+          id: e.name,
+          path: join(rel, index),
+          abs: idxAbs,
+          dirSpec: true,
+          parent: fm ?? parent,
+          parentVia: fm !== undefined ? 'frontmatter' : parent !== undefined ? 'position' : undefined,
+        })
         walk(abs, rel, e.name, true, index)
       } else if (
         collectFiles &&
@@ -118,7 +126,15 @@ function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
         if (!validBeadId(id) || id === parent) {
           continue
         }
-        nodes.push({ id, path: rel, abs, dirSpec: false, parent: specParent(abs) ?? parent })
+        const fm = specParent(abs)
+        nodes.push({
+          id,
+          path: rel,
+          abs,
+          dirSpec: false,
+          parent: fm ?? parent,
+          parentVia: fm !== undefined ? 'frontmatter' : parent !== undefined ? 'position' : undefined,
+        })
       }
     }
   }

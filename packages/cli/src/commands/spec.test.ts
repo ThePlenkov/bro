@@ -585,6 +585,28 @@ describe('bro spec tree rendering', () => {
     assert.equal(cyclic.length, 1)
     assert.match(cyclic[0]!, /a, b, c/)
   })
+
+  test('an explicit parent edge resolves path-first over an enclosing duplicate', async () => {
+    // inner sits inside dir spec z/dup yet its frontmatter names the
+    // duplicated id — explicit edges resolve by path order, so flat
+    // specs/dup.md (sorting before specs/z/…) wins over the enclosing
+    // dir spec; the positional leaf still belongs to the dir spec
+    const { out, cyclic } = await runTree({
+      'dup.md': '# flat dup\n',
+      'z/spec.md': '# z\n',
+      'z/dup/spec.md': '# dup\n',
+      'z/dup/leaf.md': '# leaf\n',
+      'z/dup/inner.md': '---\nparent: dup\n---\n# inner\n',
+    })
+    assert.deepEqual(out, [
+      `dup  ${join('specs', 'dup.md')}`,
+      `  inner  ${join('specs', 'z', 'dup', 'inner.md')}`,
+      `z  ${join('specs', 'z', 'spec.md')}`,
+      `  dup  ${join('specs', 'z', 'dup', 'spec.md')}`,
+      `    leaf  ${join('specs', 'z', 'dup', 'leaf.md')}`,
+    ])
+    assert.deepEqual(cyclic, [])
+  })
 })
 
 describe('bro spec init', () => {

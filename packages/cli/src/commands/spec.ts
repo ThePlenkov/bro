@@ -26,7 +26,7 @@
  * project's own tool language.
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join, sep } from 'node:path'
+import { basename, dirname, join, sep } from 'node:path'
 import {
   facade,
   isOwnClaim,
@@ -271,10 +271,12 @@ function cmdTree(dir: string): void {
   }
   /** A child's parent resolves to a node, not an id — duplicate ids at
    *  different depths (flat `specs/foo.md` beside dir spec
-   *  `specs/x/foo/`) share one id; a positional child belongs to the
-   *  dir spec whose tree contains its path, an ambiguous frontmatter
-   *  edge to the path-first candidate. Self-parent (a hand-authored
-   *  `parent: <self>`) is root-level — keying under itself orphans it. */
+   *  `specs/x/foo/`) share one id. A positional edge belongs to the dir
+   *  spec whose tree contains the child's path (only an index-bearing
+   *  dir can contain a child — flat files never enclose); an explicit
+   *  frontmatter edge resolves deterministically to the path-first
+   *  candidate. Self-parent (a hand-authored `parent: <self>`) is
+   *  root-level — keying under itself orphans the node. */
   const parentOf = (n: SpecNode): SpecNode | undefined => {
     const p = n.parent
     if (p === undefined || p === n.id) {
@@ -284,18 +286,22 @@ function cmdTree(dir: string): void {
     if (cands.length <= 1) {
       return cands[0]
     }
+    const byPath = cands
+      .slice()
+      .sort((a, b) => (a.path ?? '').localeCompare(b.path ?? ''))
+    if (n.parentVia === 'frontmatter') {
+      return byPath[0]
+    }
     const enclosing = cands
       .filter(
         (c) =>
           c.path !== undefined &&
+          basename(dirname(c.path)) === c.id &&
           n.path !== undefined &&
           n.path.startsWith(`${dirname(c.path)}${sep}`)
       )
       .sort((a, b) => b.path!.length - a.path!.length)
-    return (
-      enclosing[0] ??
-      cands.slice().sort((a, b) => (a.path ?? '').localeCompare(b.path ?? ''))[0]
-    )
+    return enclosing[0] ?? byPath[0]
   }
   const byParent = new Map<SpecNode | undefined, SpecNode[]>()
   for (const n of nodes) {
