@@ -1,5 +1,5 @@
 ---
-parent: sessions
+parent: project
 ---
 
 # bro-2vt — bro doctor: environment diagnostics command

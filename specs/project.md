@@ -17,7 +17,7 @@ answer — the index every capability spec links back to.
 | --------------- | ------------ |
 | `specs/review-gate.md` | PR review loop + debt pipeline (`bro act`, `bro debt`) |
 | `specs/sdd.md` | spec policy + `specs` facade (`bro spec`, sdd hooks) |
-| `specs/sessions.md` | lifecycle hooks, worktrees, drill, loop (`bro work|drill|loop|hooks`) |
+| `specs/sessions.md` | lifecycle hooks, worktrees, drill, loop (`bro work`, `bro drill`, `bro loop`, `bro hooks`) |
 | `specs/plans.md` | versioned plan schemas (`bro run`, `bro plan`) |
 | `specs/distro.md` | npm publish, packs, adapters, releases (`bro setup`, nx release) |
 | `specs/backends.md` | connector/facade seam: task stores, review hosts, sync data-refs |
@@ -29,12 +29,14 @@ answer — the index every capability spec links back to.
 packages/
   act/        exit gate, PR state, thread mutations        → review-gate
   debt/       collectors, ledger, formula molecules        → review-gate
-  core/       connectors/facades, specs, plans, git, docs  → backends
+  core/       connectors/facades, tasks, git, docs         → backends
+    src/specs.ts              SpecStore facade contract    → sdd
+    src/plan.ts               plan version check + routing → plans
   github/     gh review connector                          → backends
   gitlab/     glab review connector                        → backends
   cli/        bro: plugin registry + command dispatch      → all
     src/commands/spec.ts, spec-connectors.ts               → sdd
-    src/commands/{hooks,work,drill,loop}.ts                → sessions
+    src/commands/{hooks,work,drill,loop,next}.ts           → sessions
   pack/       @broject/bro-pack — client skill packs       → distro
   loop/, convoy/, retro/, drill/                           → sessions/retro
 site/         broject.dev                                  → distro
