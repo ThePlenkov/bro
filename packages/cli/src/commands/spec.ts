@@ -2,15 +2,16 @@
  * `bro spec` — spec-driven development policy over claimed tasks.
  *
  * A bead has a spec when the resolved `specs` connector sees one
- * (native: <dir>/<id>.md riding the feature branch; speckit: a
- * linked specs/<NNN>-<slug>/spec.md; openspec: changes/<id>/proposal.md)
+ * (native: <dir>/<id>.md or a <dir>/<id>/ dir whose spec.md/README.md
+ * is the index — nesting IS the spec tree; speckit: a linked
+ * specs/<NNN>-<slug>/spec.md; openspec: changes/<id>/proposal.md)
  * or its description carries a `spec:` link. Chores and `trivial`-
  * labeled beads are exempt — SDD measures design mass, not bookkeeping.
  *
  *   bro spec check [id…]   coverage over in_progress beads (exit 1 on
  *                          missing — CI-able); --all includes open
- *   bro spec new <id>      scaffold a spec (--parent <id> links the
- *                          spec-of-specs tree — native connector only)
+ *   bro spec new <id>      scaffold a spec (--parent <id> nests inside
+ *                          a dir spec, else frontmatter-links — native)
  *   bro spec tree          the spec hierarchy: roots, children, and
  *                          claimed beads still MISSING a spec
  *   bro spec init          bootstrap SDD — detect the project's tool,
@@ -176,8 +177,8 @@ Commands:
   check [id…]   spec coverage for in_progress beads (or the given ids);
                 --all also scans open beads. Exit 1 when any MISSING.
   new <id>      scaffold a spec from the bead title (refuses to
-                overwrite). --parent <id> links the spec-of-specs tree
-                (native connector).
+                overwrite). --parent <id> nests inside a dir spec, or
+                links a flat parent via frontmatter (native connector).
   tree          spec hierarchy from the serving connector's tree() —
                 roots, children, MISSING for claimed beads without one.
   init          bootstrap SDD: detect the project's tool (.specify/,
@@ -269,11 +270,17 @@ function cmdTree(dir: string): void {
     const key = nodes.some((p) => p.id === n.parent) ? n.parent : undefined
     byParent.set(key, [...(byParent.get(key) ?? []), n])
   }
+  const seen = new Set<string>()
   const walk = (parent: string | undefined, depth: number): void => {
     for (const n of byParent.get(parent) ?? []) {
+      // frontmatter can hand-author a cycle (a↔b) or a self-parent —
+      // a visited node renders once and never recurses again
       const path = n.path !== undefined ? `  ${n.path}` : ''
       console.log(`${'  '.repeat(depth)}${n.id}${path}`)
-      walk(n.id, depth + 1)
+      if (!seen.has(n.id)) {
+        seen.add(n.id)
+        walk(n.id, depth + 1)
+      }
     }
   }
   walk(undefined, 0)

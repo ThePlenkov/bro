@@ -1,7 +1,3 @@
----
-parent: sdd
----
-
 # bro-19g — SDD enforcement: spec-first policy via connector hooks
 
 ## Problem

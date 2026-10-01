@@ -1,7 +1,3 @@
----
-parent: distro
----
-
 # bro-155e — npm docs: per-package READMEs + metadata + site package map
 
 ## Context

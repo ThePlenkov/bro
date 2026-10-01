@@ -1,8 +1,9 @@
 # project — bro spec-of-specs
 
 The root spec: what bro is, and where each capability lives in the
-filetree. Children are capability specs; bead-level leaf specs hang
-under the capability they serve (`parent:` frontmatter). A spec is a
+filetree. Children are capability specs; bead-level leaf specs nest inside
+their capability dir — position is the edge, `parent:` frontmatter
+overrides it. A spec is a
 stable project artifact — it survives the bead that produced it.
 
 ## Problem
@@ -15,15 +16,18 @@ answer — the index every capability spec links back to.
 
 | Capability spec | What it owns |
 | --------------- | ------------ |
-| `specs/review-gate.md` | PR review loop + debt pipeline (`bro act`, `bro debt`) |
-| `specs/sdd.md` | spec policy + `specs` facade (`bro spec`, sdd hooks) |
-| `specs/sessions.md` | lifecycle hooks, worktrees, drill, loop (`bro work`, `bro drill`, `bro loop`, `bro hooks`) |
-| `specs/plans.md` | versioned plan schemas (`bro run`, `bro plan`) |
-| `specs/distro.md` | npm publish, packs, adapters, releases (`bro setup`, nx release) |
-| `specs/backends.md` | connector/facade seam: task stores, review hosts, sync data-refs |
-| `specs/retro.md` | `bro wtf` — failure capture → retro notes → debt |
+| `specs/review-gate/` | PR review loop + debt pipeline (`bro act`, `bro debt`) |
+| `specs/sdd/` | spec policy + `specs` facade (`bro spec`, sdd hooks) |
+| `specs/sessions/` | lifecycle hooks, worktrees, drill, loop (`bro work`, `bro drill`, `bro loop`, `bro hooks`) |
+| `specs/plans/` | versioned plan schemas (`bro run`, `bro plan`) |
+| `specs/distro/` | npm publish, packs, adapters, releases (`bro setup`, nx release) |
+| `specs/backends/` | connector/facade seam: task stores, review hosts, sync data-refs |
+| `specs/retro/` | `bro wtf` — failure capture → retro notes → debt |
 
 ## Filetree (capability → code)
+
+Spec layout mirrors the tree: this file is the root; each capability is
+a dir spec (`<cap>/spec.md` index) holding its bead specs as children.
 
 ```text
 packages/

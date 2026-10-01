@@ -1,7 +1,3 @@
----
-parent: distro
----
-
 # bro-y89 — publish all @broject/* packages + bro-pack for `bro setup`
 
 ## Problem

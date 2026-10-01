@@ -12,7 +12,7 @@
  * this id".
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
-import { basename, join, resolve, sep } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import {
   gitTry,
   loadConfig,
@@ -58,14 +58,106 @@ function specFilePath(dir: string, specDir: string, id: string): string | null {
   return base === null ? null : join(base, `${id}.md`)
 }
 
+/** A spec directory's index file, in preference order — `spec.md`
+ *  matches speckit's convention, README.md suits prose-first trees. */
+const INDEX_NAMES = ['spec.md', 'README.md']
+
+interface ResolvedSpec extends SpecNode {
+  abs: string
+  dirSpec: boolean
+}
+
+/** The spec tree as the filetree: `.md` files and index-bearing dirs
+ *  are nodes; a node's parent is its enclosing spec dir, overridden by
+ *  `parent:` frontmatter when present. `.md` files inside a spec dir
+ *  are its children; inside a dir with no index (assets/, notes/) they
+ *  are content, not specs — indexed subdirs still nest through. */
+function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
+  const nodes: ResolvedSpec[] = []
+  const walk = (
+    dirAbs: string,
+    dirRel: string,
+    parent: string | undefined,
+    collectFiles: boolean,
+    indexName?: string
+  ): void => {
+    let entries
+    try {
+      entries = readdirSync(dirAbs, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      const abs = join(dirAbs, e.name)
+      const rel = join(dirRel, e.name)
+      if (e.isDirectory()) {
+        const index = INDEX_NAMES.find((n) => {
+          try {
+            return statSync(join(abs, n)).isFile()
+          } catch {
+            return false
+          }
+        })
+        if (index === undefined || !validBeadId(e.name)) {
+          // no index, or a name that cannot be a spec id — transparent:
+          // nested index dirs still hang off the nearest spec ancestor
+          walk(abs, rel, parent, false)
+          continue
+        }
+        const idxAbs = join(abs, index)
+        nodes.push({ id: e.name, path: join(rel, index), abs: idxAbs, dirSpec: true, parent: specParent(idxAbs) ?? parent })
+        walk(abs, rel, e.name, true, index)
+      } else if (
+        collectFiles &&
+        e.name.endsWith('.md') &&
+        e.name !== indexName
+      ) {
+        const id = basename(e.name, '.md')
+        // a child cannot re-declare its dir spec's id — `foo/foo.md`
+        // would self-parent and loop the tree walk
+        if (!validBeadId(id) || id === parent) {
+          continue
+        }
+        nodes.push({ id, path: rel, abs, dirSpec: false, parent: specParent(abs) ?? parent })
+      }
+    }
+  }
+  walk(absBase, relBase, undefined, true)
+  return nodes
+}
+
+/** Pick between same-id nodes deterministically — a hand-created
+ *  `specs/<id>.md` beside `specs/<id>/spec.md` is a user collision the
+ *  scaffold refuses to create, but resolution must not depend on
+ *  readdir order: a written spec beats a zero-byte scaffold, a dir
+ *  spec (child-bearing) beats a flat file. */
+function preferSpec(nodes: ResolvedSpec[]): ResolvedSpec | undefined {
+  const nonEmpty = (n: ResolvedSpec): boolean => {
+    try {
+      return readFileSync(n.abs, 'utf8').trim() !== ''
+    } catch {
+      return false
+    }
+  }
+  return nodes
+    .slice()
+    .sort((a, b) => Number(nonEmpty(b)) - Number(nonEmpty(a)) || Number(b.dirSpec) - Number(a.dirSpec))[0]
+}
+
+/** Resolve an id to its spec node — file or dir spec, at any depth. */
+function findSpec(dir: string, specDir: string, id: string): ResolvedSpec | undefined {
+  const base = specDirAbs(dir, specDir)
+  if (base === null || !existsSync(base) || !validBeadId(id)) {
+    return undefined
+  }
+  return preferSpec(indexSpecDir(base, specDir).filter((n) => n.id === id))
+}
+
 /** A non-empty spec file counts; a zero-byte scaffold does not. */
 export function hasSpecFile(dir: string, specDir: string, id: string): boolean {
-  if (!validBeadId(id)) {
-    return false
-  }
   try {
-    const p = specFilePath(dir, specDir, id)
-    return p !== null && statSync(p).isFile() && readFileSync(p, 'utf8').trim() !== ''
+    const node = findSpec(dir, specDir, id)
+    return node !== undefined && readFileSync(node.abs, 'utf8').trim() !== ''
   } catch {
     return false
   }
@@ -109,40 +201,46 @@ export const nativeSpecConnector: Connector = {
     const { dir: specDir } = loadConfig(ctx.dir).sdd
     const root = ctx.dir
     return {
+      // no index cache: a spec file can appear between calls in one
+      // store's lifetime (agent writes it, next hasSpec must see it).
+      // Specs dirs are tens of small files — a rescan is sub-ms.
       hasSpec: (id) => hasSpecFile(root, specDir, id),
       scaffold(id, opts) {
-        const path = specFilePath(root, specDir, id)
-        if (path === null) {
+        const base = specDirAbs(root, specDir)
+        if (base === null) {
           throw new Error(`sdd.dir "${specDir}" escapes the repo root — fix bro.config.json`)
         }
+        // a dir-spec parent takes the child positionally — location is
+        // the edge, so no parent: frontmatter is needed. A flat-file or
+        // absent parent gets the frontmatter edge instead.
+        const parent = opts.parent === undefined ? undefined : findSpec(root, specDir, opts.parent)
+        // specs resolve at any depth — a same-id file elsewhere in the
+        // tree is a collision, not a free slot at the root
+        const existing = findSpec(root, specDir, id)
+        if (existing !== undefined) {
+          throw new Error(`a spec for "${id}" already exists at ${existing.path} — refusing to duplicate`)
+        }
+        const path =
+          parent?.dirSpec === true
+            ? join(dirname(parent.abs), `${id}.md`)
+            : specFilePath(root, specDir, id)!
         if (existsSync(path)) {
           throw new Error(`${path} already exists — refusing to overwrite`)
         }
-        mkdirSync(specDirAbs(root, specDir)!, { recursive: true })
-        writeFileSync(path, scaffoldBody(id, opts.title ?? '', opts.parent))
+        mkdirSync(dirname(path), { recursive: true })
+        writeFileSync(path, scaffoldBody(id, opts.title ?? '', parent?.dirSpec === true ? undefined : opts.parent))
         return path
       },
       remedy: (id) =>
         `write ${specDir}/${id}.md (\`bro spec new ${id}\`), add a spec: link, or label 'trivial'`,
       policy: () =>
-        `spec before code — ${specDir}/<id>.md or a spec: link in the bead (exempt: chore / 'trivial' / 'debt')`,
+        `spec before code — ${specDir}/<id>.md or <id>/ dir, or a spec: link in the bead (exempt: chore / 'trivial' / 'debt')`,
       tree() {
         const base = specDirAbs(root, specDir)
         if (base === null || !existsSync(base)) {
           return []
         }
-        const nodes: SpecNode[] = []
-        for (const f of readdirSync(base)) {
-          if (!f.endsWith('.md')) {
-            continue
-          }
-          const id = basename(f, '.md')
-          if (!validBeadId(id)) {
-            continue
-          }
-          const path = join(base, f)
-          nodes.push({ id, parent: specParent(path), path: join(specDir, f) })
-        }
+        const nodes: SpecNode[] = indexSpecDir(base, specDir).map(({ abs: _a, dirSpec: _d, ...n }) => n)
         return nodes.sort((a, b) => a.id.localeCompare(b.id))
       },
     } satisfies SpecStore
