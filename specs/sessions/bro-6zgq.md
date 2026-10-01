@@ -13,8 +13,9 @@ Beads stay the coordination substrate (claims, frames, deps) — files
 are the *output*, not the store. On `bro drill up`:
 
 ```text
-bro drill up --result "…" --prevention "…" --report
-→ drills/<frame-id>.md   (committed with the branch)
+bro drill up --result "…" --prevent "…" --report
+→ drills/<frame-id>.md   (written into the worktree; it rides the
+                                  branch like any file — drill up never commits)
 ```
 
 Report shape — md with frontmatter, template-driven:
@@ -25,15 +26,21 @@ drill: <frame-id>
 scope: <what was drilled>
 parent-chain: [root, …, frame]
 date: <iso>
-result: <one line>
-prevention: <one line>
+result: "<one line — quoted scalars: result/prevention text may
+          carry colons, newlines, YAML markers>"
+prevention: ["<one line>", …]   # list — --prevent is repeatable
 ---
 # drill report — <title>
 ## Result …  ## Prevention …  ## Trail (children, evidence links)
 ```
 
-- `drill.report` config section: `dir` (default `drills/`), `mode`
-  (`off` default | `prompt` | `always`) — `always` writes on every `up`.
+- `drill.report` config section (loaded like other sections via
+  loadConfig in the drill command): `dir` (default `drills/`), `mode`
+  (`off` default | `prompt` | `always`). `prompt` degrades to `off`
+  non-interactively (no TTY → no question, no file). `always` covers
+  persistent frames only — ephemeral coordination frames need an
+  explicit `--report`, matching the "durable output is intentional"
+  rule.
 - Fit the existing doctypes store if it absorbs it cheaply; else a
   plain `drills/` dir + `bro drill report` to list them.
 
