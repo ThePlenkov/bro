@@ -112,7 +112,7 @@ function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
           abs: idxAbs,
           dirSpec: true,
           parent: fm ?? parent,
-          parentVia: fm !== undefined ? 'frontmatter' : parent !== undefined ? 'position' : undefined,
+          parentVia: edgeVia(fm, parent),
         })
         walk(abs, rel, e.name, true, index)
       } else if (
@@ -133,7 +133,7 @@ function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
           abs,
           dirSpec: false,
           parent: fm ?? parent,
-          parentVia: fm !== undefined ? 'frontmatter' : parent !== undefined ? 'position' : undefined,
+          parentVia: edgeVia(fm, parent),
         })
       }
     }
@@ -177,6 +177,20 @@ export function hasSpecFile(dir: string, specDir: string, id: string): boolean {
   } catch {
     return false
   }
+}
+
+/** Edge origin for a resolved parent: an explicit `parent:` frontmatter
+ *  line beats the positional enclosing dir spec; no edge at all leaves
+ *  it unset. Renderers resolve the two differently on duplicate ids. */
+function edgeVia(
+  fm: string | undefined,
+  positional: string | undefined
+): SpecNode['parentVia'] {
+  return fm !== undefined
+    ? 'frontmatter'
+    : positional !== undefined
+      ? 'position'
+      : undefined
 }
 
 /** `parent: <bead-id>` from a spec file's frontmatter — the spec tree's
