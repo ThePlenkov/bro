@@ -784,6 +784,38 @@ function endAudit(ctx: Ctx, seen: Set<string>): void {
   }
 }
 
+/** Claim the next ready bead — undefined when the queue drains. A
+ *  foreign-only remainder must not look like a drained queue: 'done'
+ *  would hide work a shared db still advertises. */
+function claimNext(
+  ctx: Ctx,
+  scope: NonNullable<ReturnType<typeof nextScope>>,
+  seen: Set<string>
+): ReadyBead | undefined {
+  const ready = readyBeads()
+  const c = classify(ready, ctx.selection, scope, epicParentIds(ready))
+  const bead = claimUpTo(c.queue.filter((b) => !seen.has(b.id)), 1)[0]
+  if (!bead && c.foreign > 0) {
+    say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
+  }
+  return bead
+}
+
+/** Post-merge cascade after a landed stack member — retarget + rebase
+ *  whatever stacked on top of it before the next item runs. */
+function syncAfterLand(ctx: Ctx): void {
+  if (ctx.stack === undefined) {
+    return
+  }
+  try {
+    for (const line of syncStack(ctx.root, ctx.stack)) {
+      say(ctx, `loop stack sync:${line}`)
+    }
+  } catch (err) {
+    say(ctx, `loop: stack sync failed — ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
 /** The claim→run→repeat cycle until the queue drains or --max hits. */
 async function runQueue(ctx: Ctx): Promise<void> {
   const seen = new Set<string>()
@@ -795,33 +827,19 @@ async function runQueue(ctx: Ctx): Promise<void> {
       return
     }
     for (;;) {
-      if (ctx.cfg.maxItems > 0 && tally.landed + tally.closed + tally.parked + tally.failed >= ctx.cfg.maxItems) {
+      const done = tally.landed + tally.closed + tally.parked + tally.failed
+      if (ctx.cfg.maxItems > 0 && done >= ctx.cfg.maxItems) {
         break
       }
-      const ready = readyBeads()
-      const c = classify(ready, ctx.selection, scope, epicParentIds(ready))
-      const bead = claimUpTo(c.queue.filter((b) => !seen.has(b.id)), 1)[0]
+      const bead = claimNext(ctx, scope, seen)
       if (!bead) {
-        // a foreign-only remainder must not look like a drained queue —
-        // 'done' would hide work a shared db still advertises
-        if (c.foreign > 0) {
-          say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
-        }
         break
       }
       seen.add(bead.id)
       const result = await runItem(ctx, bead)
       tally[result] += 1
-      if (result === 'landed' && ctx.stack !== undefined) {
-        // a landed member drops out of the chain — retarget + rebase
-        // whatever stacked on top of it before the next item runs
-        try {
-          for (const line of syncStack(ctx.root, ctx.stack)) {
-            say(ctx, `loop stack sync:${line}`)
-          }
-        } catch (err) {
-          say(ctx, `loop: stack sync failed — ${err instanceof Error ? err.message : String(err)}`)
-        }
+      if (result === 'landed') {
+        syncAfterLand(ctx)
       }
       if (ctx.json) {
         console.log(JSON.stringify({ bead: bead.id, result }))

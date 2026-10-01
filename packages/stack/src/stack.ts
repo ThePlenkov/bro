@@ -29,7 +29,7 @@ export interface StackBranch {
  *  enters member ordering. */
 function isRefComponent(s: string): boolean {
   return (
-    /^[A-Za-z0-9_][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_][A-Za-z0-9_-]*)*$/.test(s) &&
+    /^\w[\w-]*(?:\.\w[\w-]*)*$/.test(s) &&
     !s.endsWith('.lock')
   )
 }
@@ -40,7 +40,7 @@ export function isStackName(name: string): boolean {
 
 export function parseStackBranch(branch: string): StackBranch | undefined {
   const m = STACK_BRANCH_RE.exec(branch)
-  const n = m === null ? NaN : Number(m[2])
+  const n = m === null ? Number.NaN : Number(m[2])
   if (
     m === null ||
     !isStackName(m[1]!) ||
@@ -165,7 +165,14 @@ export function stackTop(
   members: StackBranch[],
   dead?: ReadonlySet<string>
 ): StackBranch | undefined {
-  return members.findLast((m) => dead?.has(m.branch) !== true)
+  // lib is pre-ES2023 — walk back by hand instead of findLast
+  for (let i = members.length - 1; i >= 0; i--) {
+    const m = members[i]!
+    if (dead?.has(m.branch) !== true) {
+      return m
+    }
+  }
+  return undefined
 }
 
 /** Effective base for display: the PR's declared base is ground truth

@@ -206,7 +206,7 @@ function blockedReason(w: WorktreeInfo | undefined, dirty: number): string | und
     return 'no worktree'
   }
   if (w.locked !== undefined) {
-    return `locked${w.locked ? ` (${w.locked})` : ''}`
+    return w.locked === '' ? 'locked' : `locked (${w.locked})`
   }
   if (dirty < 0) {
     return 'worktree gone'
@@ -250,7 +250,7 @@ function collectMembers(
   )
   return stackMembers(allBranches(root), name).map((b) => {
     const w = trees.get(b.branch)
-    const dirty = w === undefined || !w.path ? -1 : dirtyCount(w.path)
+    const dirty = !w?.path ? -1 : dirtyCount(w.path)
     const blocked = blockedReason(w, dirty)
     const m: MemberView = {
       ...b,
