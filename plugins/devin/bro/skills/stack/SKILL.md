@@ -17,7 +17,7 @@ reviews while the parent is still in flight. The stack is a *view* over
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro stack push <bead> [--name <stack>]` | Sibling worktree `<repo>--<bead>` on branch `stack/<name>/<n>-<bead>`, based on the stack tip (first member bases on the main checkout's branch). Name comes from `--name` or the current `stack/<name>/…` worktree. Claims the bead, like `work enter` |
+| `bro stack push <bead> [--name <stack>]` | Sibling worktree `<repo>--<bead>` on branch `stack/<name>/<n>-<bead>`, based on the stack tip (first member bases on the default branch). `--name` is required from the main checkout; inside a `stack/<name>/…` member worktree the name is inferred. Re-pushing a bead that is already a member re-enters its worktree — no duplicate position. Claims the bead, like `work enter` |
 | `bro stack list [<name>]` | The chain: position, bead, branch, recorded base, worktree state, PR state + declared base |
 | `bro stack sync [<name>]` | Post-merge cascade: retarget open child PRs to the new base and rebase child branches; a dirty or locked worktree is skipped and reported — its owner rebases on enter |
 | `bro loop --stack <name>` | The autonomous runner chains every claimed bead onto the named stack and syncs after each landed merge |
@@ -28,11 +28,13 @@ reviews while the parent is still in flight. The stack is a *view* over
   branch/worktree/PR machinery follows; a beadless slug still works but
   claims nothing.
 - **Open member PRs against the member below** — `gh pr create --base
-  stack/<name>/<n-1>-…`, never the default branch. `stack push` prints
-  the exact command.
+  stack/<name>/<n-1>-…` for every member above the bottom; the bottom
+  member has no parent, so its PR targets the default branch. `stack
+  push` prints the exact command when the member is stacked.
 - **Merge bottom-up, then `stack sync`.** A squash-merged member leaves
-  the chain; sync retargets the next open PR and rebases its branch.
-  Sync is safe to rerun — in-sync members are no-ops.
+  the chain — its edge is retired and its branch is deleted once no
+  worktree holds it; sync retargets the next open PR and rebases its
+  branch. Sync is safe to rerun — in-sync members are no-ops.
 - **Never sync over someone's dirty worktree.** Skipped members keep
   their recorded base; the owner rebases when they re-enter.
 - Stacks compose with `bro work enter --stack` — the same edge registry

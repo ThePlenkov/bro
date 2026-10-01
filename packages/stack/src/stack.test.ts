@@ -9,6 +9,7 @@ import {
   planSync,
   stackMembers,
   stackNames,
+  stackTop,
   type SyncMemberInput,
 } from './stack.ts'
 
@@ -34,8 +35,13 @@ describe('parseStackBranch', () => {
       'work/fix-x',
       'stack/x', // no member segment
       'stack/x/abc-bead', // n must be digits
+      'stack/x/0-bead', // positions are 1-based
       'stack/x/1', // no slug
       'stack/a/b/1-x', // name can't contain /
+      'stack/x/1-a/b', // slug can't contain /
+      'stack/x/99999999999999999999-y', // beyond safe integers
+      'stack/x/1-foo..bar', // no git-ref dot runs
+      'stack/x/1-foo.lock', // reserved ref suffix
     ]) {
       assert.equal(parseStackBranch(b), undefined, b)
     }
@@ -48,6 +54,14 @@ describe('isStackName', () => {
     assert.equal(isStackName('a/b'), false)
     assert.equal(isStackName('..'), false)
     assert.equal(isStackName('x..y'), false)
+    // git ref rules: no leading dot, no trailing dot, no .lock tail,
+    // no leading dash
+    assert.equal(isStackName('.'), false)
+    assert.equal(isStackName('.foo'), false)
+    assert.equal(isStackName('foo.'), false)
+    assert.equal(isStackName('foo.lock'), false)
+    assert.equal(isStackName('-foo'), false)
+    assert.equal(isStackName('a.b.c'), true)
   })
 })
 
@@ -83,16 +97,34 @@ describe('stackMembers / stackNames / nextIndex', () => {
   })
 })
 
-describe('displayBase', () => {
-  const members = [
-    { n: 1, branch: 'stack/s/1-a' },
-    { n: 2, branch: 'stack/s/2-b' },
-  ]
+describe('stackTop', () => {
+  const members = stackMembers(
+    ['stack/s/1-a', 'stack/s/2-b', 'stack/s/3-c'],
+    's'
+  )
 
-  it('prefers the recorded edge, else previous member, else default', () => {
-    assert.equal(displayBase({ n: 1 }, members, 'main'), 'main')
-    assert.equal(displayBase({ n: 2 }, members, 'main'), 'stack/s/1-a')
-    assert.equal(displayBase({ n: 2, edgeBase: 'other' }, members, 'main'), 'other')
+  it('is the highest-n live member — dead (merged) members are skipped', () => {
+    assert.equal(stackTop(members)?.branch, 'stack/s/3-c')
+    assert.equal(stackTop(members, new Set(['stack/s/3-c']))?.branch, 'stack/s/2-b')
+    assert.equal(
+      stackTop(members, new Set(['stack/s/2-b', 'stack/s/3-c']))?.branch,
+      'stack/s/1-a'
+    )
+    assert.equal(stackTop([], undefined), undefined)
+  })
+})
+
+describe('displayBase', () => {
+  it('PR base is ground truth, then the recorded edge, then the default', () => {
+    // a synced-to-default member: edge gone, PR retargeted to main
+    assert.equal(displayBase({ prBase: 'main' }, 'main'), 'main')
+    assert.equal(displayBase({ edgeBase: 'stack/s/1-a' }, 'main'), 'stack/s/1-a')
+    assert.equal(
+      displayBase({ edgeBase: 'stack/s/1-a', prBase: 'stack/s/1-a' }, 'main'),
+      'stack/s/1-a'
+    )
+    // no edge, no PR — based on the default branch
+    assert.equal(displayBase({}, 'main'), 'main')
   })
 })
 

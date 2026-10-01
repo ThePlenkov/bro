@@ -3,18 +3,25 @@ import type { LoopBead } from './types.ts'
 /** The work-order prompt written to the fresh worktree — the agent's
  *  whole world is this one bead. bro owns the gate; the agent's job ends
  *  at an open PR, not a merge. */
-export function buildWorkPrompt(bead: LoopBead, branch: string, prBase?: string): string {
+export function buildWorkPrompt(
+  bead: LoopBead,
+  branch: string,
+  prBase?: string,
+  stackBottom?: boolean
+): string {
   const desc = bead.description?.trim()
   const body = desc ? `\n${desc}\n` : ''
-  // a stack member's PR targets the member below it, never the default
-  // branch — the merge cascade retargets on sync
+  // a stack member's PR targets the member below it — merges cascade
+  // bottom-up; the bottom member legitimately targets the default branch
   const prLine =
     prBase === undefined
       ? `push, then \`gh pr create\` with a
   summary and a test-plan checklist.`
-      : `push, then \`gh pr create --base ${prBase}\` — you are a
-  stack member; the PR targets the member below you, not the default
-  branch. Add a summary and a test-plan checklist.`
+      : `push, then \`gh pr create --base ${prBase}\` — you are ${
+          stackBottom
+            ? "the stack's bottom member; the PR targets the default branch"
+            : 'a stack member; the PR targets the member below you, not the default branch'
+        }. Add a summary and a test-plan checklist.`
   return `You are an autonomous implementation agent. This worktree is already
 checked out on branch \`${branch}\` — work here, nowhere else.
 

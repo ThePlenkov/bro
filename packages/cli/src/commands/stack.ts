@@ -8,7 +8,7 @@
  *   bro stack push <bead> [--name <stack>]
  *                       sibling worktree <repo>--<bead> on branch
  *                       stack/<name>/<n>-<slug> based on the stack tip
- *                       (first member bases on the main checkout's branch)
+ *                       (first member bases on the default branch)
  *   bro stack list [<name>]   the chain: position, bead, branch, base,
  *                             worktree state, PR
  *   bro stack sync [<name>]   after a member merges: retarget open child
@@ -27,7 +27,9 @@ import {
   planSync,
   stackMembers,
   stackNames,
+  stackTop,
   type SyncMemberInput,
+  type SyncPlanItem,
 } from '@broject/stack'
 import { flag, positionals } from './args.ts'
 import { loadBroConfig } from '../plugins.ts'
@@ -86,12 +88,68 @@ function resolveStackName(argv: string[]): string {
   usage()
 }
 
-/** The stack tip for a push: the highest-n live member branch. A branch
- *  that merged but still exists is still the right base — its PR-target
- *  diff is computed against it, and `stack sync` retargets after merge. */
-export function stackTip(dir: string, name: string): { n: number; base?: string } {
+/** The live member carrying this bead's slug — a re-push re-enters that
+ *  member instead of minting a second position for the same bead. */
+export function stackMemberFor(dir: string, name: string, slug: string) {
+  return stackMembers(allBranches(dir), name).find((m) => m.slug === slug)
+}
+
+/** One PR per stack member, newest first: OPEN wins, else the most
+ *  recent MERGED/CLOSED. `prsForBranch(branch, 'all')` lists every
+ *  state — without it a merged member is invisible to sync. */
+function memberPr(
+  rev: { repo: string; facade: ReviewFacade },
+  branch: string
+): { pr: number; meta: PrMeta } | undefined {
+  const prs = rev.facade.prsForBranch(branch, 'all')
+  let merged: { pr: number; meta: PrMeta } | undefined
+  for (const pr of prs.slice(0, 5)) {
+    const meta = rev.facade.prMeta({ repo: rev.repo, pr })
+    if (meta.state === 'OPEN') {
+      return { pr, meta }
+    }
+    merged ??= { pr, meta }
+  }
+  return merged
+}
+
+/** Branches of members whose PR reports MERGED — dead ends for tip
+ *  selection even while the branch still exists. `undefined` when the
+ *  host can't answer (offline → conservative: nothing reads as merged). */
+export function mergedBranches(
+  dir: string,
+  name: string,
+  rev: { repo: string; facade: ReviewFacade } | undefined
+): ReadonlySet<string> | undefined {
+  if (rev === undefined) {
+    return undefined
+  }
+  const dead = new Set<string>()
+  for (const m of stackMembers(allBranches(dir), name)) {
+    try {
+      if (memberPr(rev, m.branch)?.meta.state === 'MERGED') {
+        dead.add(m.branch)
+      }
+    } catch {
+      // host unreachable mid-lookup — the member stays live, the
+      // conservative answer
+    }
+  }
+  return dead
+}
+
+/** The stack tip for a push: the highest-n LIVE member branch. A merged
+ *  member's branch is a dead end — its commits already reached the
+ *  default branch — so `dead` members are skipped; the next member then
+ *  bases on the nearest live member (or the default branch) and gets
+ *  the next position number (merged slots are never reused). */
+export function stackTip(
+  dir: string,
+  name: string,
+  dead?: ReadonlySet<string>
+): { n: number; base?: string } {
   const members = stackMembers(allBranches(dir), name)
-  return { n: nextIndex(members), base: members.at(-1)?.branch }
+  return { n: nextIndex(members), base: stackTop(members, dead)?.branch }
 }
 
 function cmdPush(argv: string[]): void {
@@ -104,24 +162,29 @@ function cmdPush(argv: string[]): void {
   const name = resolveStackName(argv)
   const main = mainWorktree()
   const defaultRef = defaultBranchName()
-  const branches = allBranches(main.path)
   // re-pushing a bead that already sits in the stack re-enters its member
   // branch — push is idempotent, never a duplicate position
-  const existing = stackMembers(branches, name).find((m) => m.slug === slug)
-  const { n, base } = existing
-    ? { n: existing.n, base: readStackEdges().get(existing.branch) }
-    : stackTip(main.path, name)
+  const existing = stackMemberFor(main.path, name, slug)
+  const rev = resolveReview(main.path)
+  const dead = existing === undefined ? mergedBranches(main.path, name, rev) : undefined
+  const tip = existing === undefined ? stackTip(main.path, name, dead) : undefined
+  const n = existing?.n ?? tip!.n
   const branch = existing?.branch ?? formatStackBranch(name, n, slug)
+  const base =
+    existing !== undefined
+      ? readStackEdges().get(existing.branch)
+      : (tip!.base ?? defaultRef ?? main.branch ?? main.head)
   const r = enterWorktree({
     slug,
     branch,
-    base: existing === undefined ? (base ?? main.branch ?? main.head) : undefined,
+    base: existing === undefined ? base : undefined,
     main,
     defaultRef,
     allowExisting: existing !== undefined,
+    reusePath: existing !== undefined,
   })
   console.log(`worktree ready: ${r.path}  (branch ${r.branch})`)
-  console.log(`stack ${name} member ${n} — based on ${r.base ?? base ?? main.branch ?? 'HEAD'}`)
+  console.log(`stack ${name} member ${n} — based on ${r.base ?? base ?? 'HEAD'}`)
   if (r.stacked) {
     console.log(`open the PR against the parent member: gh pr create --base ${r.base}`)
   }
@@ -137,9 +200,43 @@ interface MemberView extends SyncMemberInput {
   worktree?: WorktreeInfo
 }
 
-/** Live member state: branch namespace + edges + worktrees + PRs. A
- *  failing host is not fatal — PR fields come back undefined and the
- *  member reads as unmerged, which is the conservative answer for sync. */
+/** Why a member can't be rewritten locally — the skip report's reason. */
+function blockedReason(w: WorktreeInfo | undefined, dirty: number): string | undefined {
+  if (w === undefined) {
+    return 'no worktree'
+  }
+  if (w.locked !== undefined) {
+    return `locked${w.locked ? ` (${w.locked})` : ''}`
+  }
+  if (dirty < 0) {
+    return 'worktree gone'
+  }
+  return dirty === 0 ? undefined : `dirty worktree (${dirty} file(s))`
+}
+
+/** PR state onto a member — OPEN/MERGED base + state; a failing host is
+ *  not fatal: the fields stay undefined and the member reads as
+ *  unmerged, which is the conservative answer for sync. */
+function attachPr(
+  m: MemberView,
+  rev: { repo: string; facade: ReviewFacade } | undefined
+): void {
+  if (rev === undefined) {
+    return
+  }
+  try {
+    const hit = memberPr(rev, m.branch)
+    if (hit !== undefined) {
+      m.pr = hit.pr
+      m.prState = hit.meta.state
+      m.prBase = hit.meta.baseRef
+    }
+  } catch {
+    // host unreachable — member reads as unmerged/untargeted
+  }
+}
+
+/** Live member state: branch namespace + edges + worktrees + PRs. */
 function collectMembers(
   name: string,
   root: string,
@@ -154,36 +251,15 @@ function collectMembers(
   return stackMembers(allBranches(root), name).map((b) => {
     const w = trees.get(b.branch)
     const dirty = w === undefined || !w.path ? -1 : dirtyCount(w.path)
+    const blocked = blockedReason(w, dirty)
     const m: MemberView = {
       ...b,
       edgeBase: edges.get(b.branch),
       worktree: w,
-      rebaseable: w !== undefined && w.locked === undefined && dirty === 0,
-      blocked:
-        w === undefined
-          ? 'no worktree'
-          : w.locked !== undefined
-            ? `locked${w.locked ? ` (${w.locked})` : ''}`
-            : dirty !== 0
-              ? dirty < 0
-                ? 'worktree gone'
-                : `dirty worktree (${dirty} file(s))`
-              : undefined,
+      rebaseable: blocked === undefined,
+      blocked,
     }
-    if (rev === undefined) {
-      return m
-    }
-    try {
-      const pr = rev.facade.prsForBranch(b.branch)[0]
-      if (pr !== undefined) {
-        const meta: PrMeta = rev.facade.prMeta({ repo: rev.repo, pr })
-        m.pr = pr
-        m.prState = meta.state
-        m.prBase = meta.baseRef
-      }
-    } catch {
-      // host unreachable mid-sync — member reads as unmerged/untargeted
-    }
+    attachPr(m, rev)
     return m
   })
 }
@@ -195,6 +271,28 @@ function resolveReview(root: string): { repo: string; facade: ReviewFacade } | u
   } catch {
     return undefined
   }
+}
+
+/** One member row in `stack list` — position, slug, branch, effective
+ *  base, worktree state, PR state + target. */
+function memberLine(
+  m: MemberView,
+  defaultBase: string,
+  rev: { repo: string; facade: ReviewFacade } | undefined,
+  root: string
+): string {
+  const stale =
+    m.edgeBase !== undefined && m.edgeBase !== defaultBase && !localBranch(root, m.edgeBase)
+  const wt =
+    m.worktree === undefined
+      ? 'no-worktree'
+      : `${basename(m.worktree.path)} ${stateOfWorktree(m.worktree)}`
+  let pr = 'PR?' // no review host resolved — can't tell
+  if (rev !== undefined) {
+    pr = m.pr === undefined ? 'no-PR' : `${rev.facade.prLink(rev.repo, m.pr)} ${m.prState}→${m.prBase}`
+  }
+  const base = displayBase(m, defaultBase)
+  return `  ${m.n}  ${m.slug}  ${m.branch}  base ${base}${stale ? ' (stale edge)' : ''}  ${wt}  ${pr}`
 }
 
 function cmdList(argv: string[]): void {
@@ -211,26 +309,100 @@ function cmdList(argv: string[]): void {
   for (const name of names) {
     const members = collectMembers(name, main.path, rev)
     console.log(`stack ${name}  (${members.length} member${members.length === 1 ? '' : 's'})`)
-    if (members.length === 0) {
-      continue
-    }
     for (const m of members) {
-      const base = displayBase(m, members, defaultBase)
-      const stale =
-        m.edgeBase !== undefined && m.edgeBase !== defaultBase && !localBranch(main.path, m.edgeBase)
-      const wt =
-        m.worktree === undefined
-          ? 'no-worktree'
-          : `${basename(m.worktree.path)} ${stateOfWorktree(m.worktree)}`
-      const pr =
-        m.pr === undefined
-          ? rev === undefined
-            ? 'PR?' // no review host resolved — can't tell
-            : 'no-PR'
-          : `${rev!.facade.prLink(rev!.repo, m.pr)} ${m.prState}→${m.prBase}`
-      console.log(`  ${m.n}  ${m.slug}  ${m.branch}  base ${base}${stale ? ' (stale edge)' : ''}  ${wt}  ${pr}`)
+      console.log(memberLine(m, defaultBase, rev, main.path))
     }
   }
+}
+
+/** A merged member leaves the chain — its edge goes, and its branch
+ *  goes too when no worktree still holds it (a checked-out branch can't
+ *  be deleted; the owner's worktree keeps it until `work leave`). */
+function retireMerged(
+  m: MemberView,
+  root: string,
+  lines: string[]
+): void {
+  removeStackEdge(m.branch)
+  if (m.worktree !== undefined) {
+    lines.push(`  ${m.branch} merged — leaves the chain (worktree keeps the branch)`)
+    return
+  }
+  const del = gitTry(['-C', root, 'branch', '-D', m.branch])
+  lines.push(
+    del.code === 0
+      ? `  ${m.branch} merged — edge + branch removed`
+      : `  ${m.branch} merged — edge removed, branch kept (${del.err.trim() || 'delete failed'})`
+  )
+}
+
+/** Rebase a member's branch onto its new base and force-push the result
+ *  when a PR rides it. The fork point is the recorded old base — under
+ *  squash merges a merge-base can predate the parent's commits and
+ *  replay already-squashed changes; the edge is the truthful fork. */
+function rebaseMember(item: SyncPlanItem<MemberView>, lines: string[]): boolean {
+  const m = item.member
+  const wt = m.worktree!
+  const oldRef =
+    item.oldBase !== item.desiredBase &&
+    gitTry(['-C', wt.path, 'rev-parse', '--verify', '--quiet', `refs/heads/${item.oldBase}`]).code === 0
+      ? item.oldBase
+      : undefined
+  const fork = oldRef ?? gitTry(['-C', wt.path, 'merge-base', item.desiredBase, 'HEAD']).out.trim()
+  const rb =
+    fork === ''
+      ? { code: 1, err: `no merge-base with ${item.desiredBase}` }
+      : gitTry(['-C', wt.path, 'rebase', '--onto', item.desiredBase, fork])
+  if (rb.code !== 0) {
+    gitTry(['-C', wt.path, 'rebase', '--abort'])
+    lines.push(`  ${m.branch} rebase onto ${item.desiredBase} failed — aborted; owner resolves on enter`)
+    return false
+  }
+  lines.push(`  ${m.branch} rebased onto ${item.desiredBase}`)
+  if (m.pr === undefined) {
+    return true
+  }
+  // a rebased branch with an open PR must move the remote head too —
+  // retargeting while the remote still carries pre-rebase commits
+  // would inflate the PR diff
+  const push = gitTry(['-C', wt.path, 'push', '--force-with-lease', 'origin', `HEAD:refs/heads/${m.branch}`])
+  if (push.code !== 0) {
+    lines.push(`  ${m.branch} push failed — ${push.err || 'remote refused'}; retarget skipped`)
+    return false
+  }
+  return true
+}
+
+/** Move the member's recorded edge to its new base — the edge is the
+ *  fork truth, so it updates even when the PR retarget is refused (a
+ *  stale edge would re-schedule the rewrite on every later sync). */
+function updateEdge(m: MemberView, desiredBase: string, defaultBase: string): void {
+  if (desiredBase === defaultBase) {
+    removeStackEdge(m.branch)
+  } else {
+    recordStackEdge(m.branch, desiredBase)
+  }
+}
+
+function retargetMember(
+  item: SyncPlanItem<MemberView>,
+  rev: { repo: string; facade: ReviewFacade } | undefined,
+  lines: string[]
+): void {
+  const m = item.member
+  if (!item.retarget || m.pr === undefined) {
+    return
+  }
+  if (rev?.facade.retargetPr === undefined) {
+    lines.push(`  ${m.branch} — review host cannot retarget PRs; set --base by hand`)
+    return
+  }
+  const ok = rev.facade.retargetPr({ repo: rev.repo, pr: m.pr }, item.desiredBase)
+  lines.push(
+    ok
+      ? `  ${rev.facade.prLink(rev.repo, m.pr)} retargeted → ${item.desiredBase}`
+      : `  ${rev.facade.prLink(rev.repo, m.pr)} retarget refused`
+  )
 }
 
 /** The sync cascade — shared by `stack sync` and `loop --stack`'s
@@ -245,8 +417,7 @@ export function syncStack(root: string, name: string): string[] {
   for (const item of planSync(members, defaultBase)) {
     const m = item.member
     if (m.prState === 'MERGED') {
-      removeStackEdge(m.branch)
-      lines.push(`  ${m.branch} merged — leaves the chain`)
+      retireMerged(m, root, lines)
       continue
     }
     if (item.skip) {
@@ -254,49 +425,15 @@ export function syncStack(root: string, name: string): string[] {
       continue
     }
     if (!item.rebase && !item.retarget) {
+      continue // in sync — don't even touch the edge file
+    }
+    if (item.rebase && !rebaseMember(item, lines)) {
       continue
     }
-    if (item.rebase) {
-      const wt = m.worktree!
-      // fork point via merge-base — the old base branch may already be
-      // deleted, and only member-unique commits must be replayed
-      const fork = gitTry(['-C', wt.path, 'merge-base', item.desiredBase, 'HEAD']).out.trim()
-      const rb =
-        fork === ''
-          ? { code: 1, err: `no merge-base with ${item.desiredBase}` }
-          : gitTry(['-C', wt.path, 'rebase', '--onto', item.desiredBase, fork])
-      if (rb.code !== 0) {
-        gitTry(['-C', wt.path, 'rebase', '--abort'])
-        lines.push(`  ${m.branch} rebase onto ${item.desiredBase} failed — aborted; owner resolves on enter`)
-        continue
-      }
-      lines.push(`  ${m.branch} rebased onto ${item.desiredBase}`)
-      // a rebased branch with an open PR must move the remote head too —
-      // retargeting while the remote still carries pre-rebase commits
-      // would inflate the PR diff
-      if (m.pr !== undefined) {
-        const push = gitTry(['-C', wt.path, 'push', '--force-with-lease', 'origin', `HEAD:refs/heads/${m.branch}`])
-        if (push.code !== 0) {
-          lines.push(`  ${m.branch} push failed — ${push.err || 'remote refused'}; retarget skipped`)
-          continue
-        }
-      }
-    }
-    if (item.retarget && m.pr !== undefined) {
-      if (rev?.facade.retargetPr === undefined) {
-        lines.push(`  ${m.branch} — review host cannot retarget PRs; set --base by hand`)
-      } else if (rev.facade.retargetPr({ repo: rev.repo, pr: m.pr }, item.desiredBase)) {
-        lines.push(`  ${rev.facade.prLink(rev.repo, m.pr)} retargeted → ${item.desiredBase}`)
-      } else {
-        lines.push(`  ${rev.facade.prLink(rev.repo, m.pr)} retarget refused`)
-        continue
-      }
-    }
-    if (item.desiredBase === defaultBase) {
-      removeStackEdge(m.branch)
-    } else {
-      recordStackEdge(m.branch, item.desiredBase)
-    }
+    // edge moves with the branch regardless of the retarget's verdict —
+    // a refused retarget must not leave the fork truth stale
+    updateEdge(m, item.desiredBase, defaultBase)
+    retargetMember(item, rev, lines)
   }
   return lines
 }

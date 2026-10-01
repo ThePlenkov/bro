@@ -686,13 +686,13 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
       const view = JSON.parse(res.out) as { number: number; state: string; url: string }
       return { pr: view.number, state: view.state, url: view.url }
     },
-    prsForBranch(branch) {
+    prsForBranch(branch, state) {
       // Explicit --repo: `gh pr list --head` would otherwise guess the
       // repo from the dir's remotes — a fork's `upstream` can answer
       // instead of the configured review host.
       return ghJson<Array<{ number: number }>>(
         [
-          'pr', 'list', '--head', branch, '--state', 'open',
+          'pr', 'list', '--head', branch, '--state', state === 'all' ? 'all' : 'open',
           '--repo', resolveRepo([], dir), '--json', 'number',
         ],
         dir

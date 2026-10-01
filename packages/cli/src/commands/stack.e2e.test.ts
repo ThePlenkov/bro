@@ -104,6 +104,39 @@ describe('bro stack e2e', () => {
     })
   })
 
+  test('re-push of an existing member re-enters — no duplicate position', () => {
+    const f = stackFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'first' }])
+    inside(f.main, f.root, () => {
+      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
+      const r = f.run(['push', 'fx-a', '--name', 's'])
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /stack\/s\/1-fx-a/)
+      // still one member — the second push reused the worktree+branch
+      assert.deepEqual(
+        git(['worktree', 'list', '--porcelain'], f.main)
+          .split('\n')
+          .filter((l) => l.includes('fx-a')).length,
+        2 // worktree + branch lines
+      )
+    })
+  })
+
+  test('a merged tip is skipped — next push bases on the default branch', () => {
+    const f = stackFixture([{ ...FAKE_BEAD, id: 'fx-b', title: 'second' }])
+    inside(f.main, f.root, () => {
+      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
+      writeHostState(f.hostState, {
+        prs: { 'stack/s/1-fx-a': { number: 11, state: 'MERGED', baseRef: 'main' } },
+      })
+      const r = f.run(['push', 'fx-b', '--name', 's'])
+      assert.equal(r.code, 0, r.stderr)
+      // position 2 is still taken (merged slots are never reused), but
+      // the base is the default branch, not the merged member
+      assert.match(r.stdout, /stack\/s\/2-fx-b/)
+      assert.match(r.stdout, /based on main/)
+    })
+  })
+
   test('push inside a stack worktree infers the stack name', () => {
     const f = stackFixture([{ ...FAKE_BEAD, id: 'fx-b', title: 'second' }])
     inside(f.main, f.root, () => {
@@ -176,6 +209,30 @@ describe('bro stack e2e', () => {
       )
       // the host recorded the retarget
       assert.deepEqual(readHostState(f.hostState).retargets, [{ pr: 12, base: 'main' }])
+    })
+  })
+
+  test('a merged member with no worktree loses its branch on sync', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
+      commitIn(join(f.root, 'main--fx-a'), 'a.txt')
+      assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
+      // member 1's worktree is gone — nothing anchors the branch
+      git(['worktree', 'remove', '--force', join(f.root, 'main--fx-a')], f.main)
+      writeHostState(f.hostState, {
+        prs: {
+          'stack/s/1-fx-a': { number: 11, state: 'MERGED', baseRef: 'main' },
+          'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
+        },
+      })
+      const r = f.run(['sync', 's'])
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /stack\/s\/1-fx-a merged — edge \+ branch removed/)
+      assert.equal(
+        git(['branch', '--list', 'stack/s/1-fx-a'], f.main).trim(),
+        ''
+      )
     })
   })
 

@@ -129,9 +129,11 @@ export interface ReviewFacade {
   /** The PR for the bound dir's checked-out branch — null when the
    *  branch has none or the host is unreachable. */
   currentPr(): { pr: number; state: string; url: string } | null
-  /** Open PR numbers whose head is this branch — the loop's "did the
-   *  agent open one" probe. */
-  prsForBranch(branch: string): number[]
+  /** PR numbers whose head is this branch — the loop's "did the agent
+   *  open one" probe. Default `open`; `all` adds merged/closed PRs in
+   *  the host's listing order — stack sync needs them to see a member's
+   *  merge land. */
+  prsForBranch(branch: string, state?: 'open' | 'all'): number[]
   /** A PR reference in free text (the host's own URL shape) → target —
    *  the prompt-submit probe's way to spot its PRs. Null when the text
    *  names none. */

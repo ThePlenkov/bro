@@ -8,8 +8,9 @@
 
 /** stack/<name>/<n>-<slug> — name and slug are bead-ish (`[\w.-]+`), n is
  *  the 1-based position. The slug cannot start with another `<digits>-`
- *  without ambiguity, so bead slugs (which never do) are the contract. */
-const STACK_BRANCH_RE = /^stack\/([\w.-]+)\/(\d+)-(.+)$/
+ *  without ambiguity, so bead slugs (which never do) are the contract.
+ *  Slug stays inside one ref component — no `/`, no `..`, no `.lock`. */
+const STACK_BRANCH_RE = /^stack\/([\w.-]+)\/(\d+)-([\w.-]+)$/
 
 export interface StackBranch {
   /** stack name */
@@ -22,16 +23,34 @@ export interface StackBranch {
   branch: string
 }
 
+/** A git-ref-safe slug component — no `.`-leading component, no `..`,
+ *  no `.lock` tail, no leading `-`. Shared by name validation and
+ *  parseStackBranch's slug guard so a malformed `stack/…` ref never
+ *  enters member ordering. */
+function isRefComponent(s: string): boolean {
+  return (
+    /^[A-Za-z0-9_][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_][A-Za-z0-9_-]*)*$/.test(s) &&
+    !s.endsWith('.lock')
+  )
+}
+
 export function isStackName(name: string): boolean {
-  return /^[\w.-]+$/.test(name) && !name.includes('..')
+  return isRefComponent(name)
 }
 
 export function parseStackBranch(branch: string): StackBranch | undefined {
   const m = STACK_BRANCH_RE.exec(branch)
-  if (!m || !isStackName(m[1]!)) {
+  const n = m === null ? NaN : Number(m[2])
+  if (
+    m === null ||
+    !isStackName(m[1]!) ||
+    !isRefComponent(m[3]!) ||
+    !Number.isSafeInteger(n) ||
+    n < 1
+  ) {
     return undefined
   }
-  return { name: m[1]!, n: Number(m[2]), slug: m[3]!, branch }
+  return { name: m[1]!, n, slug: m[3]!, branch }
 }
 
 export function formatStackBranch(name: string, n: number, slug: string): string {
@@ -44,7 +63,7 @@ export function formatStackBranch(name: string, n: number, slug: string): string
 export function stackMembers(branches: string[], name: string): StackBranch[] {
   return branches
     .map(parseStackBranch)
-    .filter((b): b is StackBranch => b !== undefined && b.name === name)
+    .filter((b): b is StackBranch => b?.name === name)
     .sort((a, b) => a.n - b.n || a.branch.localeCompare(b.branch))
 }
 
@@ -57,7 +76,7 @@ export function stackNames(branches: string[]): string[] {
       names.add(p.name)
     }
   }
-  return [...names].sort()
+  return [...names].sort((a, b) => a.localeCompare(b))
 }
 
 /** Next position — always tip+1, never a gap fill: a missing middle
@@ -138,16 +157,23 @@ export function planSync<T extends SyncMemberInput>(
   return plan
 }
 
-/** Effective base for display: the recorded edge, else the nearest lower
- *  member, else the default branch. */
+/** The live member's tip — the highest-n member not in `dead` (merged
+ *  members keep their branch until the worktree goes away, but a merged
+ *  branch is a dead end as a base). Position numbering still counts
+ *  every member — a merged member's slot is never reused. */
+export function stackTop(
+  members: StackBranch[],
+  dead?: ReadonlySet<string>
+): StackBranch | undefined {
+  return members.findLast((m) => dead?.has(m.branch) !== true)
+}
+
+/** Effective base for display: the PR's declared base is ground truth
+ *  when a PR exists, else the recorded edge, else the default branch —
+ *  a missing edge after sync means the member sits on the default. */
 export function displayBase(
-  member: { n: number; edgeBase?: string },
-  members: { n: number; branch: string }[],
+  member: { prBase?: string; edgeBase?: string },
   defaultBase: string
 ): string {
-  if (member.edgeBase !== undefined) {
-    return member.edgeBase
-  }
-  const below = members.filter((m) => m.n < member.n).at(-1)
-  return below?.branch ?? defaultBase
+  return member.prBase ?? member.edgeBase ?? defaultBase
 }

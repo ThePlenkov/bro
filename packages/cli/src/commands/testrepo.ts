@@ -297,11 +297,19 @@ const facade = {
   resolveRepo: () => 'o/r',
   prLink: (_repo, pr) => '[#' + pr + '](https://example.test/o/r/pull/' + pr + ')',
   currentPr: () => null,
-  prsForBranch: (branch) => {
+  prsForBranch: (branch, state) => {
     const s = load()
     if (s.prLookupFails) throw new Error('host unreachable')
     // per-branch PRs (stack e2e) — {prs: {'stack/s/1-x': {number, state, baseRef}}}
-    if (s.prs?.[branch]) return [s.prs[branch].number]
+    // the map is authoritative: an unmapped branch has NO PR — falling
+    // through to the global prOpened would lend an unrelated PR to a
+    // stack branch
+    if (s.prs) {
+      const p = s.prs[branch]
+      if (!p) return []
+      if (state === 'all') return [p.number]
+      return p.state === 'OPEN' ? [p.number] : []
+    }
     return s.prOpened ? [s.pr ?? 7] : []
   },
   parsePrRef: () => null,
@@ -346,10 +354,17 @@ const facade = {
     return true
   },
   updateBranch: () => false,
-  mergePr: () => {
+  mergePr: (t) => {
     const s = load()
     s.merges = (s.merges ?? 0) + 1
     s.prState = s.mergeResult ?? 'MERGED'
+    // a merge lands on the per-branch entry too — otherwise a mapped
+    // stack member keeps reporting OPEN after its merge
+    if (s.prs) {
+      for (const p of Object.values(s.prs)) {
+        if (p.number === t.pr) p.state = s.prState
+      }
+    }
     save(s)
     return s.prState
   },

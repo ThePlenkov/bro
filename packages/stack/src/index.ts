@@ -7,6 +7,7 @@ export {
   planSync,
   stackMembers,
   stackNames,
+  stackTop,
   type StackBranch,
   type SyncMemberInput,
   type SyncPlanItem,

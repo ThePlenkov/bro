@@ -327,7 +327,10 @@ export interface EnterWorktreeResult {
  *  checks out an existing branch), inits submodules, claims a bead-named
  *  slug, and records the stack edge last so a failure mid-way never
  *  leaves a half-registered member. `allowExisting` gates whether an
- *  already-existing target branch is checked out or refused. */
+ *  already-existing target branch is checked out or refused;
+ *  `reusePath` additionally lets an existing worktree dir be reused —
+ *  only when it is checked out on the target branch (stack push's
+ *  idempotent re-enter). */
 export function enterWorktree(opts: {
   slug: string
   branch: string
@@ -335,11 +338,22 @@ export function enterWorktree(opts: {
   main: WorktreeInfo
   defaultRef?: string
   allowExisting?: boolean
+  reusePath?: boolean
 }): EnterWorktreeResult {
-  const { slug, branch, base, main, defaultRef, allowExisting = true } = opts
+  const { slug, branch, base, main, defaultRef, allowExisting = true, reusePath = false } = opts
   const mainRef = main.branch ?? main.head
   const path = worktreePathFor(main.path, slug)
   if (existsSync(path)) {
+    const onBranch = gitTry(['-C', path, 'branch', '--show-current']).out.trim()
+    if (reusePath && onBranch === branch) {
+      return {
+        path,
+        branch,
+        base: readStackEdges().get(branch),
+        stacked: readStackEdges().get(branch) !== undefined,
+        claim: claimBead(slug),
+      }
+    }
     console.error(`error: ${path} already exists`)
     process.exit(1)
   }

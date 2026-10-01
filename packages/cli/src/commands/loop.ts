@@ -44,11 +44,13 @@ import { loadBroConfig } from '../plugins.ts'
 import { flag } from './args.ts'
 import { runActCommand } from './act.ts'
 import { runSyncCommand } from './sync.ts'
-import { stackTip, syncStack } from './stack.ts'
+import { mergedBranches, stackMemberFor, stackTip, syncStack } from './stack.ts'
 import { isStackName } from '@broject/stack'
+import { loopSlug } from '@broject/loop'
 import {
   defaultBranchName,
   parseWorktreePorcelain,
+  readStackEdges,
   recordStackEdge,
 } from './work.ts'
 import {
@@ -403,28 +405,59 @@ function writePrompt(item: ReturnType<typeof planItem>, text: string): void {
   writeFileSync(item.promptFile, text)
 }
 
+interface StackSlot {
+  /** Position the bead occupies (or joins at). */
+  n: number
+  /** Creation/prompt base — the live tip's branch, the recorded edge,
+   *  or the default branch for a bottom member. */
+  base?: string
+  /** The stack edge to record — set only for a fresh member whose base
+   *  is another stack branch. */
+  edge?: string
+  /** True when the member sits directly on the default branch. */
+  bottom: boolean
+}
+
+/** The stack slot a claimed bead takes. A bead already in the stack
+ *  (failed/parked retry, parked member) re-enters ITS member branch —
+ *  re-deriving `n` from the tip would plan a phantom `stack/<name>/<n'>-`
+ *  branch while the surviving worktree sits on the old one. A new bead
+ *  joins at the live tip — merged members are skipped so the chain
+ *  never forks from a dead (already-merged) branch. */
+function resolveStackSlot(ctx: Ctx, bead: ReadyBead): StackSlot | undefined {
+  if (ctx.stack === undefined) {
+    return undefined
+  }
+  const dflt = defaultBranchName() ?? 'main'
+  const existing = stackMemberFor(ctx.root, ctx.stack, loopSlug(bead.id))
+  if (existing !== undefined) {
+    const edge = readStackEdges().get(existing.branch)
+    return { n: existing.n, base: edge ?? dflt, bottom: edge === undefined }
+  }
+  const dead = mergedBranches(ctx.root, ctx.stack, { repo: ctx.repo, facade: ctx.rev })
+  const tip = stackTip(ctx.root, ctx.stack, dead)
+  return { n: tip.n, base: tip.base ?? dflt, edge: tip.base, bottom: tip.base === undefined }
+}
+
 /** One bead end-to-end. */
 async function runItem(ctx: Ctx, bead: ReadyBead): Promise<ItemResult> {
-  // stack mode: the member joins the named chain at the current tip —
-  // resolved here, not earlier, so a member that landed since the last
+  // resolved here, not earlier — a member that landed since the last
   // item correctly yields the default branch as the next base
-  const tip = ctx.stack === undefined ? undefined : stackTip(ctx.root, ctx.stack)
+  const slot = resolveStackSlot(ctx, bead)
   const item = planItem(
     bead,
     ctx.root,
-    tip === undefined ? undefined : { stack: { name: ctx.stack!, n: tip.n } }
+    slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
   )
-  const prBase =
-    tip === undefined ? undefined : (tip.base ?? defaultBranchName() ?? 'main')
   say(ctx, `\nloop: ${bead.id} → ${item.branch} @ ${item.worktreeDir}`)
   try {
     // a surviving worktree dir is reused as-is — its branch kept its
     // original base, so the stack edge only records on fresh creation
     const fresh = !existsSync(item.worktreeDir)
-    ensureWorktree(ctx.root, item.branch, item.worktreeDir, tip?.base)
-    if (fresh && ctx.stack !== undefined && tip?.base !== undefined) {
+    ensureWorktree(ctx.root, item.branch, item.worktreeDir, slot?.base)
+    if (fresh && slot?.edge !== undefined) {
       // same edge `work enter --stack` records — merge order travels
-      recordStackEdge(item.branch, tip.base)
+      recordStackEdge(item.branch, slot.edge)
     }
   } catch (err) {
     noteBead(bead.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
@@ -434,7 +467,7 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<ItemResult> {
   if (!runBootstrap(ctx, bead, item)) {
     return 'failed'
   }
-  writePrompt(item, buildWorkPrompt(bead, item.branch, prBase))
+  writePrompt(item, buildWorkPrompt(bead, item.branch, slot?.base, slot?.bottom))
   const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
   const pr = findPr(ctx, item.branch)
   if (pr === 'lookup-error') {
@@ -518,6 +551,36 @@ async function driveGate(
   }
 }
 
+/** `--label a,b` → selection filters — flag() covers both spellings; a
+ *  declared-but-empty value fails closed (silently widening to the
+ *  whole queue is exactly what --label prevents). */
+function labelSelection(argv: string[]): { labels?: string[] } {
+  const raw = flag(argv, '--label')
+  if (raw === undefined) {
+    return {}
+  }
+  const labels = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s !== '')
+  if (labels.length === 0) {
+    console.error('error: --label requires a comma-separated value, e.g. --label debt,ui')
+    process.exit(2)
+  }
+  return { labels }
+}
+
+/** `--stack NAME` — must form a git-ref-safe component or the member
+ *  branches it plans would fail on creation mid-run. */
+function stackNameFlag(argv: string[]): string | undefined {
+  const name = flag(argv, '--stack')
+  if (name !== undefined && !isStackName(name)) {
+    console.error(`bro loop: invalid stack name "${name}" ([a-z0-9_.-])`)
+    process.exit(2)
+  }
+  return name
+}
+
 export async function runLoopCommand(argv: string[]): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
     usage()
@@ -553,36 +616,12 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     intervalS: num(flag(argv, '--interval'), 60),
     json: argv.includes('--json'),
     selection: {
-      filters: (() => {
-        // flag() covers --label v and --label=v; argv.includes would miss =
-        const raw = flag(argv, '--label')
-        if (raw === undefined) {
-          return {}
-        }
-        const labels = raw
-          .split(',')
-          .map((s) => s.trim())
-          .filter((s) => s !== '')
-        // a declared-but-empty scope must fail closed — silently
-        // widening to the whole queue is exactly what --label prevents
-        if (labels.length === 0) {
-          console.error('error: --label requires a comma-separated value, e.g. --label debt,ui')
-          process.exit(2)
-        }
-        return { labels }
-      })(),
+      filters: labelSelection(argv),
       gates: 'forbid' as const,
       order: 'priority' as const,
     },
     beadsDir: resolveBeadsDir(root, (m) => console.error(m)),
-    stack: (() => {
-      const name = flag(argv, '--stack')
-      if (name !== undefined && !isStackName(name)) {
-        console.error(`bro loop: invalid stack name "${name}" ([a-z0-9_.-])`)
-        process.exit(2)
-      }
-      return name
-    })(),
+    stack: stackNameFlag(argv),
     tails: [],
   }
 
@@ -597,9 +636,17 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
       console.log('loop --dry-run: nothing claimable')
       return
     }
-    const item = planItem(top, root)
+    const slot = resolveStackSlot(ctx, top)
+    const item = planItem(
+      top,
+      root,
+      slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
+    )
     console.log(`would claim ${top.id} — ${top.title}`)
     console.log(`  worktree ${item.worktreeDir} on ${item.branch}`)
+    if (slot !== undefined) {
+      console.log(`  stack ${ctx.stack} member ${slot.n} — PR base ${slot.base}`)
+    }
     console.log(`  agent: ${expandAgentCmd(ctx.agent, item.promptFile)}`)
     return
   }

@@ -547,11 +547,11 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
         return null
       }
     },
-    prsForBranch(branch) {
+    prsForBranch(branch, state) {
       return glabPaged<MrRow>(
         api(
           resolveRepo([]),
-          `merge_requests?source_branch=${encodeURIComponent(branch)}&state=opened`
+          `merge_requests?source_branch=${encodeURIComponent(branch)}&state=${state === 'all' ? 'all' : 'opened'}`
         ),
         gopts()
       ).map((m) => m.iid)
