@@ -422,6 +422,39 @@ describe('dir specs — the tree IS the filetree', () => {
     })
   })
 
+  test('frontmatter on a dir-spec index beats its positional parent', async () => {
+    await withRepo({ config: {} }, (dir) => {
+      mkdirSync(join(dir, 'specs', 'cap', 'sub'), { recursive: true })
+      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# cap\n')
+      writeFileSync(join(dir, 'specs', 'cap', 'sub', 'spec.md'), '---\nparent: other\n---\n# sub\n')
+      writeFileSync(join(dir, 'specs', 'other.md'), '# other\n')
+      const nodes = specStore(dir).tree()
+      assert.equal(nodes.find((n) => n.id === 'sub')?.parent, 'other')
+    })
+  })
+
+  test('spec.md wins over README.md when a dir carries both', async () => {
+    await withRepo({ config: {} }, (dir) => {
+      mkdirSync(join(dir, 'specs', 'cap'), { recursive: true })
+      writeFileSync(join(dir, 'specs', 'cap', 'README.md'), '# readme\n')
+      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# spec\n')
+      const nodes = specStore(dir).tree()
+      assert.equal(nodes.find((n) => n.id === 'cap')?.path, join('specs', 'cap', 'spec.md'))
+    })
+  })
+
+  test('an invalid-id dir walks through — nested specs stay attached', async () => {
+    await withRepo({ config: {} }, (dir) => {
+      mkdirSync(join(dir, 'specs', 'cap', 'bad name', 'inner'), { recursive: true })
+      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# cap\n')
+      writeFileSync(join(dir, 'specs', 'cap', 'bad name', 'spec.md'), '# invalid id\n')
+      writeFileSync(join(dir, 'specs', 'cap', 'bad name', 'inner', 'spec.md'), '# inner\n')
+      const nodes = specStore(dir).tree()
+      assert.equal(nodes.find((n) => n.id === 'inner')?.parent, 'cap')
+      assert.equal(nodes.find((n) => n.id === 'bad name'), undefined)
+    })
+  })
+
   test('scaffold --parent into a dir spec writes positionally, no frontmatter', async () => {
     await withRepo({ config: {} }, (dir) => {
       mkdirSync(join(dir, 'specs', 'cap'), { recursive: true })

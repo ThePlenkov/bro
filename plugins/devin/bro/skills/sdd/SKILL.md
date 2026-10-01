@@ -18,8 +18,8 @@ while a session's own claim lacks a spec.
 - `<sdd.dir>/<bead-id>.md` in the repo — non-empty (`specs/` by
   default; the configured dir applies). The file rides the feature
   branch, so the spec is reviewed in the same PR as the code.
-- or a **dir spec**: `<sdd.dir>/<bead-id>/` whose `spec.md` (or
-  `README.md`) is the index — a spec that is a folder of files. Nested
+- or a **dir spec**: `<sdd.dir>/<bead-id>/` whose non-empty `spec.md`
+  (or `README.md`) is the index — a spec that is a folder of files. Nested
   `.md` files and index-bearing subdirs are its children; nesting IS
   the spec tree (a `.md` inside a dir with no index is content, not a
   spec).

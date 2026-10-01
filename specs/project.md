@@ -1,8 +1,9 @@
 # project — bro spec-of-specs
 
 The root spec: what bro is, and where each capability lives in the
-filetree. Children are capability specs; bead-level leaf specs hang
-under the capability they serve (`parent:` frontmatter). A spec is a
+filetree. Children are capability specs; bead-level leaf specs nest inside
+their capability dir — position is the edge, `parent:` frontmatter
+overrides it. A spec is a
 stable project artifact — it survives the bead that produced it.
 
 ## Problem
@@ -27,7 +28,6 @@ answer — the index every capability spec links back to.
 
 Spec layout mirrors the tree: this file is the root; each capability is
 a dir spec (`<cap>/spec.md` index) holding its bead specs as children.
-
 
 ```text
 packages/

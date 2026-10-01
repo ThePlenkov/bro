@@ -92,11 +92,10 @@ function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
             return false
           }
         })
-        if (index === undefined) {
+        if (index === undefined || !validBeadId(e.name)) {
+          // no index, or a name that cannot be a spec id — transparent:
+          // nested index dirs still hang off the nearest spec ancestor
           walk(abs, rel, parent, false)
-          continue
-        }
-        if (!validBeadId(e.name)) {
           continue
         }
         const idxAbs = join(abs, index)
@@ -121,13 +120,31 @@ function indexSpecDir(absBase: string, relBase: string): ResolvedSpec[] {
   return nodes
 }
 
+/** Pick between same-id nodes deterministically — a hand-created
+ *  `specs/<id>.md` beside `specs/<id>/spec.md` is a user collision the
+ *  scaffold refuses to create, but resolution must not depend on
+ *  readdir order: a written spec beats a zero-byte scaffold, a dir
+ *  spec (child-bearing) beats a flat file. */
+function preferSpec(nodes: ResolvedSpec[]): ResolvedSpec | undefined {
+  const nonEmpty = (n: ResolvedSpec): boolean => {
+    try {
+      return readFileSync(n.abs, 'utf8').trim() !== ''
+    } catch {
+      return false
+    }
+  }
+  return nodes
+    .slice()
+    .sort((a, b) => Number(nonEmpty(b)) - Number(nonEmpty(a)) || Number(b.dirSpec) - Number(a.dirSpec))[0]
+}
+
 /** Resolve an id to its spec node — file or dir spec, at any depth. */
 function findSpec(dir: string, specDir: string, id: string): ResolvedSpec | undefined {
   const base = specDirAbs(dir, specDir)
   if (base === null || !existsSync(base) || !validBeadId(id)) {
     return undefined
   }
-  return indexSpecDir(base, specDir).find((n) => n.id === id)
+  return preferSpec(indexSpecDir(base, specDir).filter((n) => n.id === id))
 }
 
 /** A non-empty spec file counts; a zero-byte scaffold does not. */
@@ -177,8 +194,29 @@ export const nativeSpecConnector: Connector = {
   specs(ctx) {
     const { dir: specDir } = loadConfig(ctx.dir).sdd
     const root = ctx.dir
+    // one index per store instance — hasSpec is called per bead, and a
+    // rescan-per-bead would read every spec file's head each time.
+    // scaffold() drops the cache after writing.
+    let index: ResolvedSpec[] | undefined
+    const specIndex = (): ResolvedSpec[] => {
+      if (index === undefined) {
+        const base = specDirAbs(root, specDir)
+        index = base !== null && existsSync(base) ? indexSpecDir(base, specDir) : []
+      }
+      return index
+    }
     return {
-      hasSpec: (id) => hasSpecFile(root, specDir, id),
+      hasSpec: (id) => {
+        if (!validBeadId(id)) {
+          return false
+        }
+        try {
+          const node = preferSpec(specIndex().filter((n) => n.id === id))
+          return node !== undefined && readFileSync(node.abs, 'utf8').trim() !== ''
+        } catch {
+          return false
+        }
+      },
       scaffold(id, opts) {
         const base = specDirAbs(root, specDir)
         if (base === null) {
@@ -203,6 +241,7 @@ export const nativeSpecConnector: Connector = {
         }
         mkdirSync(dirname(path), { recursive: true })
         writeFileSync(path, scaffoldBody(id, opts.title ?? '', parent?.dirSpec === true ? undefined : opts.parent))
+        index = undefined
         return path
       },
       remedy: (id) =>
@@ -210,11 +249,7 @@ export const nativeSpecConnector: Connector = {
       policy: () =>
         `spec before code — ${specDir}/<id>.md or <id>/ dir, or a spec: link in the bead (exempt: chore / 'trivial' / 'debt')`,
       tree() {
-        const base = specDirAbs(root, specDir)
-        if (base === null || !existsSync(base)) {
-          return []
-        }
-        const nodes: SpecNode[] = indexSpecDir(base, specDir).map(({ abs: _a, dirSpec: _d, ...n }) => n)
+        const nodes: SpecNode[] = specIndex().map(({ abs: _a, dirSpec: _d, ...n }) => n)
         return nodes.sort((a, b) => a.id.localeCompare(b.id))
       },
     } satisfies SpecStore

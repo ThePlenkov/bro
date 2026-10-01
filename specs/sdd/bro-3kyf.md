@@ -15,5 +15,5 @@ the spec dir is not bead-id-only.
 ## Plan
 
 - [x] root + 7 capability specs with real ownership filetrees
-- [x] parent: frontmatter on all leaf specs
+- [x] leaf specs nested in capability dirs — position is the parent edge
 - [x] `bro spec tree` renders the hierarchy (verified live)
