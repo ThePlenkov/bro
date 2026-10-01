@@ -2,6 +2,7 @@ export { bd, bdJson, checkBeads, refKind, taskStore } from '@broject/core'
 export {
   childrenOf,
   currentFrame,
+  drillChain,
   drillDown,
   drillTree,
   drillUp,
@@ -9,6 +10,18 @@ export {
   planPreventions,
 } from './frames.ts'
 export type { PreventionPlan } from './frames.ts'
+export {
+  listReports,
+  renderReport,
+  writeReport,
+} from './report.ts'
+export type { DrillReportEntry, DrillReportInput } from './report.ts'
+export {
+  DEFAULT_DRILL_CONFIG,
+  DRILL_REPORT_MODES,
+  drillSection,
+} from './config.ts'
+export type { DrillConfig, DrillReportMode } from './config.ts'
 export type {
   DownOptions,
   DrillFrame,

@@ -1,11 +1,12 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   assertHydratedRows,
   currentFrame,
+  drillChain,
   drillTree,
   drillUp,
   planPreventions,
@@ -220,6 +221,93 @@ describe('drillRelations via bd dep list', () => {
         assert.equal(frame?.id, 'f2')
         assert.equal(frame?.parentId, 'f1')
         assert.equal(frame?.depth, 1)
+      } finally {
+        process.env.PATH = prevPath
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+  )
+})
+
+/** A scripted bd where `close` succeeds — for the report-write path. */
+const FAKE_BD_OK = `#!/bin/sh
+case "$1" in
+  show) echo '[{"id":"f1","title":"t","status":"open","labels":["drill"]}]' ;;
+  list) echo '[{"id":"f1","title":"t","status":"open","labels":["drill"]}]' ;;
+  children) echo '[]' ;;
+  dep) echo '[]' ;;
+  mol) echo '{"wisps":[]}' ;;
+  note) : ;;
+  create) echo '{"id":"bd-new-1","title":"p1","status":"open","labels":["prevention"]}' ;;
+  provenance) echo '[]' ;;
+  close) : ;;
+esac
+`
+
+describe('drillUp --report', () => {
+  test(
+    'writes <reportDir>/<frame>.md with the memo data',
+    { skip: WIN32 },
+    () => {
+      const bin = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
+      writeFileSync(join(bin, 'bd'), FAKE_BD_OK)
+      chmodSync(join(bin, 'bd'), 0o755)
+      const dir = mkdtempSync(join(tmpdir(), 'bro-report-'))
+      const prevPath = process.env.PATH
+      process.env.PATH = `${bin}:${prevPath}`
+      try {
+        const res = drillUp({
+          id: 'f1',
+          result: 'found it: a\nb',
+          prevent: ['p1'],
+          reportDir: dir,
+        })
+        assert.equal(res.closed, 'f1')
+        assert.deepEqual(res.preventionIds, ['bd-new-1'])
+        assert.equal(res.reportPath, join(dir, 'f1.md'))
+        const text = readFileSync(res.reportPath!, 'utf8')
+        assert.match(text, /^drill: "f1"$/m)
+        assert.match(text, /^result: "found it: a\\nb"$/m)
+        assert.match(text, /^- p1 \(bd-new-1\)$/m)
+      } finally {
+        process.env.PATH = prevPath
+        rmSync(bin, { recursive: true, force: true })
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test('no reportDir → no reportPath', { skip: WIN32 }, () => {
+    const bin = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
+    writeFileSync(join(bin, 'bd'), FAKE_BD_OK)
+    chmodSync(join(bin, 'bd'), 0o755)
+    const prevPath = process.env.PATH
+    process.env.PATH = `${bin}:${prevPath}`
+    try {
+      const res = drillUp({ id: 'f1', result: 'r' })
+      assert.equal(res.reportPath, undefined)
+    } finally {
+      process.env.PATH = prevPath
+      rmSync(bin, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('drillChain', () => {
+  test(
+    'walks parent edges root → frame',
+    { skip: WIN32 },
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
+      writeFileSync(join(dir, 'bd'), FAKE_BD_NESTED)
+      chmodSync(join(dir, 'bd'), 0o755)
+      const prevPath = process.env.PATH
+      process.env.PATH = `${dir}:${prevPath}`
+      try {
+        assert.deepEqual(drillChain('f2'), ['f1', 'f2'])
+        assert.deepEqual(drillChain('f1'), ['f1'])
+        // unknown id → chain of itself, no hang
+        assert.deepEqual(drillChain('nope'), ['nope'])
       } finally {
         process.env.PATH = prevPath
         rmSync(dir, { recursive: true, force: true })

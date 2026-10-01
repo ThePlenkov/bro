@@ -4,22 +4,31 @@
  * prevention memo on the way up).
  *
  *   down <title> [--under ID] [--ephemeral]   descend into a narrower frame
- *   up --result T [--prevent T]… [--evidence R]…   ascend, hand result to parent
+ *   up --result T [--prevent T]… [--evidence R]… [--report]   ascend, hand result to parent
  *   current                                   active leaf frame
  *   tree                                      all drill trees
  *   list                                      open frames
+ *   report                                    published reports under drill.report.dir
  *   distill ID                                bd mol distill: tree → proto
  */
+import { createInterface } from 'node:readline/promises'
+import { relative, resolve } from 'node:path'
+import { gitTry, loadConfig } from '@broject/core'
 import {
   checkBeads,
   currentFrame,
+  DEFAULT_DRILL_CONFIG,
   drillDown,
+  drillSection,
   drillTree,
   drillUp,
   listDrills,
+  listReports,
   bd,
   taskStore,
+  type DrillConfig,
   type DrillPlan,
+  type DrillRow,
 } from '@broject/drill'
 import { flag, flagAll, positionals } from './args.ts'
 
@@ -29,9 +38,11 @@ function usage(exitCode = 1): never {
 Commands:
   down <title> [--under ID] [--ephemeral]        New child frame under current leaf (or root)
   up --result T [--prevent T]… [--evidence R]…   Close current frame, memo goes to beads
+     [--report]                                  also write drills/<id>.md (drill.report)
   current                                        Show the active leaf frame
   tree                                           Render all drill hierarchies
   list                                           Open drill frames
+  report                                         List published drill reports
   distill ID                                     Extract a reusable proto from a drill epic
 
   bro unwind …                                   alias for \`bro drill up\``)
@@ -92,6 +103,7 @@ function parseUp(rest: string[]) {
     result,
     prevent: flagAll(rest, '--prevent'),
     evidence: flagAll(rest, '--evidence'),
+    report: rest.includes('--report'),
   }
 }
 
@@ -162,11 +174,84 @@ export function applyDrillPlan(plan: DrillPlan): void {
   }
 }
 
-function cmdUp(rest: string[]): void {
-  const res = drillUp(parseUp(rest))
+/** `drill.report` section + repo root — the dir resolves against the
+ *  worktree root so the report rides the branch like any file. */
+function reportConfig(): { dir: string; mode: DrillConfig['report']['mode'] } {
+  const cfg = loadConfig(process.cwd(), { drill: drillSection }) as {
+    drill?: DrillConfig
+  }
+  const rep = cfg.drill?.report ?? DEFAULT_DRILL_CONFIG.report
+  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd()
+  return { dir: resolve(root, rep.dir), mode: rep.mode }
+}
+
+/** Best-effort frame lookup for the report decision — a miss just means
+ *  no prompt; drillUp produces the authoritative error. */
+function safeRow(id: string): DrillRow | undefined {
+  try {
+    return taskStore().get<DrillRow>(id)
+  } catch {
+    return undefined
+  }
+}
+
+/** Whether this `drill up` writes a report: explicit --report always does;
+ *  mode 'always' covers persistent frames (ephemeral wisps still need the
+ *  flag); 'prompt' asks on a TTY and degrades to off without one. */
+async function resolveReportDir(args: ReturnType<typeof parseUp>): Promise<string | undefined> {
+  const rc = reportConfig()
+  if (args.report) {
+    return rc.dir
+  }
+  if (rc.mode === 'off') {
+    return undefined
+  }
+  const target = args.id ? safeRow(args.id) : currentFrame()
+  if (!target) {
+    return undefined
+  }
+  if (rc.mode === 'always') {
+    return target.ephemeral ? undefined : rc.dir
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return undefined
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    const answer = await rl.question(
+      `publish drill report → ${relative(process.cwd(), rc.dir) || '.'}/${target.id}.md? [Y/n] `
+    )
+    const a = answer.trim()
+    return a === '' || /^y(es)?$/i.test(a) ? rc.dir : undefined
+  } finally {
+    rl.close()
+  }
+}
+
+async function cmdUp(rest: string[]): Promise<void> {
+  const args = parseUp(rest)
+  const reportDir = await resolveReportDir(args)
+  const res = drillUp({ ...args, reportDir })
   console.log(`drill ↑ ${res.closed} closed`)
   for (const id of res.preventionIds) {
     console.log(`  prevention → ${id}`)
+  }
+  if (res.reportPath) {
+    const rel = relative(process.cwd(), res.reportPath)
+    console.log(`  report → ${rel.startsWith('..') ? res.reportPath : rel}`)
+  }
+}
+
+function cmdReport(): void {
+  const { dir } = reportConfig()
+  const rows = listReports(dir)
+  if (rows.length === 0) {
+    console.log('no drill reports')
+    return
+  }
+  for (const row of rows) {
+    const rel = relative(process.cwd(), row.path)
+    console.log(`${row.id}\t${row.title}\t${rel.startsWith('..') ? row.path : rel}`)
   }
 }
 
@@ -195,10 +280,11 @@ function cmdList(): void {
 /** A misspelled option must fail loudly, not dissolve into a title. */
 const KNOWN_FLAGS: Record<string, Set<string>> = {
   down: new Set(['--under', '--ephemeral', '--type', '--priority', '--description']),
-  up: new Set(['--id', '--result', '--prevent', '--evidence']),
+  up: new Set(['--id', '--result', '--prevent', '--evidence', '--report']),
   current: new Set(),
   tree: new Set(),
   list: new Set(),
+  report: new Set(),
   distill: new Set(),
 }
 
@@ -236,7 +322,7 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
   }
   rejectUnknownFlags(sub, rest)
   // these subs take no positional args — a stray one is a typo, not input
-  const noPositionals = new Set(['up', 'current', 'tree', 'list'])
+  const noPositionals = new Set(['up', 'current', 'tree', 'list', 'report'])
   const extras = drillPositionals(rest)
   if (noPositionals.has(sub) && extras.length > 0) {
     console.error(`error: unexpected argument "${extras[0]}"`)
@@ -258,7 +344,7 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
       cmdDown(rest)
       return
     case 'up':
-      cmdUp(rest)
+      await cmdUp(rest)
       return
     case 'current':
       cmdCurrent()
@@ -268,6 +354,9 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
       return
     case 'list':
       cmdList()
+      return
+    case 'report':
+      cmdReport()
       return
     case 'distill': {
       process.stdout.write(bd(['mol', 'distill', parseDistill(rest)]))

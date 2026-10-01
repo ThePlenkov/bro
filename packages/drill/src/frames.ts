@@ -7,6 +7,7 @@
  * beads IS the memory system.
  */
 import { bd, bdJson, evidenceKind, refKind, taskStore } from '@broject/core'
+import { writeReport } from './report.ts'
 import type { DownOptions, DrillFrame, DrillRow, UpOptions, UpResult } from './types.ts'
 
 const DRILL_LABEL = 'drill'
@@ -44,6 +45,25 @@ export function listDrills(): DrillRow[] {
 
 export function childrenOf(id: string): DrillRow[] {
   return taskStore().children<DrillRow>(id)
+}
+
+/** Descent path [root, …, id] for reports — cycle-safe (a broken dep
+ *  graph must not hang the walk). */
+export function drillChain(id: string): string[] {
+  const { parents } = drillRelations(listDrills())
+  const chain = [id]
+  const seen = new Set(chain)
+  let cur = id
+  for (;;) {
+    const parent = parents.get(cur)
+    if (parent === undefined || seen.has(parent)) {
+      break
+    }
+    chain.unshift(parent)
+    seen.add(parent)
+    cur = parent
+  }
+  return chain
 }
 
 interface DepEdge {
@@ -385,6 +405,19 @@ export function drillUp(opts: UpOptions): UpResult {
     ...(prevents.length ? ['', '## Prevention', '', ...prevents.map((p) => `- ${p}`)] : []),
   ].join('\n')
 
+  // gather report data while the frame is still open — a closed wisp can
+  // drop out of wisp listings, taking its edges with it
+  const reportInput = opts.reportDir
+    ? {
+        frame,
+        chain: drillChain(frame.id),
+        children: childrenOf(frame.id).filter(isDrill),
+        result: opts.result,
+        prevention: prevents,
+        evidence: opts.evidence ?? [],
+      }
+    : undefined
+
   // bd has no transactions — the ordering + idempotency contract is the
   // mitigation: children-check first (fail fast), noteOnce dedupes the
   // memo, prevention creation reuses open same-title beads, handoff
@@ -423,7 +456,18 @@ export function drillUp(opts: UpOptions): UpResult {
       { cause: err },
     )
   }
-  return { closed: frame.id, preventionIds }
+  // post-close: the file rides the branch like any artifact — a write
+  // failure must not look like the up failed (the frame IS closed)
+  let reportPath: string | undefined
+  if (reportInput) {
+    try {
+      reportPath = writeReport(opts.reportDir!, { ...reportInput, preventionIds })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new Error(`frame ${frame.id} closed — report write failed: ${msg}`)
+    }
+  }
+  return { closed: frame.id, preventionIds, reportPath }
 }
 
 /** Root frames + rendered tree (indented, roots first). */

@@ -17,11 +17,12 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd init` done.
 | Command | What it does |
 | ------- | ------------ |
 | `bro drill down <title> [--under ID] [--ephemeral]` | New child frame under the current leaf (or a root). `--ephemeral` = wisp, no audit trail |
-| `bro drill up --result T [--prevent T]… [--evidence R]…` | Close the current frame. `--result` is **mandatory** (CLI-enforced). `--prevent` is policy-mandatory when the drill found an error, gap, or reusable lesson — each item spawns a `prevention`-labeled task linked `discovered-from` the frame. `--evidence` records a provenance ref (sha/PR) |
+| `bro drill up --result T [--prevent T]… [--evidence R]… [--report]` | Close the current frame. `--result` is **mandatory** (CLI-enforced). `--prevent` is policy-mandatory when the drill found an error, gap, or reusable lesson — each item spawns a `prevention`-labeled task linked `discovered-from` the frame. `--evidence` records a provenance ref (sha/PR). `--report` also writes `drills/<id>.md` — the durable md artifact (frontmatter + result/prevention/trail) for drills done on purpose |
 | `bro unwind …` | Alias for `drill up` — collapse a solved frame into its parent |
 | `bro drill current` | The active leaf frame (deepest open path) |
 | `bro drill tree` | All drill hierarchies (● open / ○ closed) |
 | `bro drill list` | Open frames |
+| `bro drill report` | Published reports under `drill.report.dir` (`drills/`) |
 | `bro drill distill ID` | `bd mol distill` — turn a successful drill tree into a reusable proto/formula |
 
 ## Policy
@@ -41,6 +42,11 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd init` done.
 - **Drill → distill → formula** is the learning loop: a drill tree that
   solved a problem well can be distilled into a proto and re-poured next
   time (`bd mol pour`/`bd mol wisp`).
+- **Reports are intentional.** Beads stay the coordination substrate; a
+  committed `drills/<id>.md` is the durable output for postmortems and
+  audits. `--report` forces it; `drill.report.mode` `always` covers
+  persistent frames only, `prompt` asks on a TTY (off non-interactively).
+  `drill up` writes the file but never commits — it rides the branch.
 - Lifecycle is auditable for persistent frames: `claim` on down,
   `handoff` on up, evidence refs as provenance events
   (`bd provenance log <id>`). `--ephemeral` wisps skip all provenance —
