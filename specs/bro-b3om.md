@@ -1,3 +1,7 @@
+---
+parent: sessions
+---
+
 # bro-b3om — loop worktrees: pin agent bd at the shared store; honor a close verdict
 
 ## Problem

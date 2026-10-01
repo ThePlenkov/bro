@@ -1,3 +1,7 @@
+---
+parent: sessions
+---
+
 # bro-dgp — E2E matrix for dangerous paths: loop auto-merge, hook gates, worktree lifecycle
 
 ## Problem

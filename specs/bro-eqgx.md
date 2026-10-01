@@ -1,3 +1,7 @@
+---
+parent: review-gate
+---
+
 # bro-eqgx — bro check: sverka as check executor, findings + stats back
 
 ## Problem
