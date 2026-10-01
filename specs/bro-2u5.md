@@ -1,3 +1,7 @@
+---
+parent: plans
+---
+
 # bro-2u5 — Versioned plan schemas + bro plan validate
 
 ## Problem

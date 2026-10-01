@@ -1,3 +1,7 @@
+---
+parent: review-gate
+---
+
 # bro-55t — debt trends: burn-down over time
 
 ## Problem

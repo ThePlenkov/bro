@@ -1,3 +1,7 @@
+---
+parent: retro
+---
+
 # bro-0w9 — wtf skill: when the same root recurs, the sink must leave prose — escalate to mechanism, not scope
 
 ## Problem

@@ -1,3 +1,7 @@
+---
+parent: review-gate
+---
+
 # bro-cye — debt collect: unbounded serial scan stalls on repos with many merged PRs
 
 ## Problem

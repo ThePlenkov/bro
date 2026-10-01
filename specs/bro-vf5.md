@@ -1,3 +1,7 @@
+---
+parent: distro
+---
+
 # bro-vf5 — rebrand: @bro/* + @theplenkov/bro → @broject/* npm scope
 
 ## Problem

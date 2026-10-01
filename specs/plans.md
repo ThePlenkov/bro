@@ -1,0 +1,18 @@
+---
+parent: project
+---
+
+# plans — versioned plan schemas
+
+## Scope
+
+Unified plans: `bro run <file>` routes TOML plans by `kind` to the
+owning plugin's runPlan; `version = N` pins the schema contract;
+`bro plan` advertises. Plans make agent orchestration data, not prose.
+
+## Owns
+
+```text
+packages/core/src/plan.ts            version check, kind routing
+packages/*/src/*plan*                per-plugin schemas + runners
+```

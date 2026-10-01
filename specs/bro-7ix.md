@@ -1,3 +1,7 @@
+---
+parent: distro
+---
+
 # bro-7ix — 0.x contract stability: changelog + deprecation policy
 
 ## Problem
