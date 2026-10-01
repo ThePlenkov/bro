@@ -444,6 +444,23 @@ describe('gitlabReview', { skip: WIN32 }, () => {
     }
   })
 
+  test("prsForBranch 'all' asks for every MR state — merged members stay visible to stack sync", () => {
+    const dir = makeRepo('git@gitlab.com:acme/widgets.git')
+    try {
+      withFakeGlab(
+        { FAKE_GLAB_OPEN_MRS: '[{"iid":9,"state":"merged","web_url":"u9"}]' },
+        (log) => {
+          gitlabReview(dir).prsForBranch('stack/s/1-x', 'all')
+          const lines = readFileSync(log, 'utf8')
+          assert.match(lines, /merge_requests\?source_branch=stack%2Fs%2F1-x&state=all/)
+          assert.doesNotMatch(lines, /state=opened/)
+        }
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('updateBranch checks the head sha, then PUTs the rebase', () => {
     withFakeGlab({}, (log) => {
       assert.equal(gitlabReview().updateBranch(target, 'abc123'), true)

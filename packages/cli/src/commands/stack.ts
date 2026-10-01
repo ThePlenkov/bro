@@ -155,8 +155,10 @@ export function stackTip(
 function cmdPush(argv: string[]): void {
   const pos = positionals(argv, NAME_FLAGS)
   const slug = pos[0]
-  if (!slug || !/^[\w.-]+$/.test(slug) || slug.startsWith('-')) {
-    console.error('error: push needs a bead/slug ([a-z0-9_.-], not starting with -)')
+  // same contract parseStackBranch applies — a slug it rejects would
+  // mint a member branch the stack view can never see
+  if (!slug || !isStackName(slug)) {
+    console.error('error: push needs a bead/slug (git-ref-safe: [a-z0-9_.-], no leading ./-)')
     usage()
   }
   const name = resolveStackName(argv)
@@ -171,9 +173,11 @@ function cmdPush(argv: string[]): void {
   const n = existing?.n ?? tip!.n
   const branch = existing?.branch ?? formatStackBranch(name, n, slug)
   const base =
-    existing !== undefined
-      ? readStackEdges().get(existing.branch)
-      : (tip!.base ?? defaultRef ?? main.branch ?? main.head)
+    (existing === undefined ? undefined : readStackEdges().get(existing.branch)) ??
+    tip?.base ??
+    defaultRef ??
+    main.branch ??
+    main.head
   const r = enterWorktree({
     slug,
     branch,

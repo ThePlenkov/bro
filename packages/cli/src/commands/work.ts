@@ -344,8 +344,14 @@ export function enterWorktree(opts: {
   const mainRef = main.branch ?? main.head
   const path = worktreePathFor(main.path, slug)
   if (existsSync(path)) {
+    // reuse only a worktree that IS this repo's — an unrelated checkout
+    // that happens to sit on the same branch name is not this stack's
+    // member (same common git dir = same repository)
     const onBranch = gitTry(['-C', path, 'branch', '--show-current']).out.trim()
-    if (reusePath && onBranch === branch) {
+    const commonOf = (dir: string) =>
+      gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']).out.trim()
+    const sameRepo = commonOf(path) !== '' && commonOf(path) === commonOf(main.path)
+    if (reusePath && onBranch === branch && sameRepo) {
       return {
         path,
         branch,
