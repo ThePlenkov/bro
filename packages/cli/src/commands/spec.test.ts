@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { runSpecCommand, sddConnector, specState } from './spec.ts'
 import { hasSpecFile, SPEC_CONNECTORS } from '../spec-connectors.ts'
 import { loadConfig, registerConnector, specStore } from '@broject/core'
@@ -496,6 +496,15 @@ describe('dir specs — the tree IS the filetree', () => {
 })
 
 describe('bro spec tree rendering', () => {
+  /** Write spec files under specs/, creating intermediate dirs. */
+  const writeSpecs = (dir: string, files: Record<string, string>): void => {
+    for (const [rel, body] of Object.entries(files)) {
+      const abs = join(dir, 'specs', rel)
+      mkdirSync(dirname(abs), { recursive: true })
+      writeFileSync(abs, body)
+    }
+  }
+
   /** Run `bro spec <argv>` with cwd in the tmp repo, capturing console. */
   const capture = async (
     dir: string,
@@ -519,16 +528,20 @@ describe('bro spec tree rendering', () => {
     return { out, err }
   }
 
+  const treeOf = (dir: string): Promise<{ out: string[]; err: string[] }> =>
+    capture(dir, ['tree'])
+
   test('duplicate ids at different depths keep their own subtrees', async () => {
     await withRepo({ config: {}, list: '[]' }, async (dir) => {
       // flat specs/dup.md collides with dir spec specs/cap/dup/ — the
       // leaf inside the dir spec is ITS child, not the flat one's
-      mkdirSync(join(dir, 'specs', 'cap', 'dup'), { recursive: true })
-      writeFileSync(join(dir, 'specs', 'dup.md'), '# flat dup\n')
-      writeFileSync(join(dir, 'specs', 'cap', 'spec.md'), '# cap\n')
-      writeFileSync(join(dir, 'specs', 'cap', 'dup', 'spec.md'), '# dir dup\n')
-      writeFileSync(join(dir, 'specs', 'cap', 'dup', 'leaf.md'), '# leaf\n')
-      const { out, err } = await capture(dir, ['tree'])
+      writeSpecs(dir, {
+        'dup.md': '# flat dup\n',
+        'cap/spec.md': '# cap\n',
+        'cap/dup/spec.md': '# dir dup\n',
+        'cap/dup/leaf.md': '# leaf\n',
+      })
+      const { out, err } = await treeOf(dir)
       assert.deepEqual(out, [
         `cap  ${join('specs', 'cap', 'spec.md')}`,
         `  dup  ${join('specs', 'cap', 'dup', 'spec.md')}`,
@@ -543,10 +556,11 @@ describe('bro spec tree rendering', () => {
 
   test('a self-parent edge renders at root level', async () => {
     await withRepo({ config: {}, list: '[]' }, async (dir) => {
-      mkdirSync(join(dir, 'specs'))
-      writeFileSync(join(dir, 'specs', 'a.md'), '---\nparent: a\n---\n# a\n')
-      writeFileSync(join(dir, 'specs', 'b.md'), '# b\n')
-      const { out, err } = await capture(dir, ['tree'])
+      writeSpecs(dir, {
+        'a.md': '---\nparent: a\n---\n# a\n',
+        'b.md': '# b\n',
+      })
+      const { out, err } = await treeOf(dir)
       assert.deepEqual(out, [
         `a  ${join('specs', 'a.md')}`,
         `b  ${join('specs', 'b.md')}`,
@@ -557,13 +571,14 @@ describe('bro spec tree rendering', () => {
 
   test('an unresolvable cycle warns instead of dropping the subtree', async () => {
     await withRepo({ config: {}, list: '[]' }, async (dir) => {
-      mkdirSync(join(dir, 'specs'))
-      writeFileSync(join(dir, 'specs', 'a.md'), '---\nparent: b\n---\n# a\n')
-      writeFileSync(join(dir, 'specs', 'b.md'), '---\nparent: a\n---\n# b\n')
-      // a subtree hung off a cyclic node is unreachable too
-      writeFileSync(join(dir, 'specs', 'c.md'), '---\nparent: a\n---\n# c\n')
-      writeFileSync(join(dir, 'specs', 'root.md'), '# root\n')
-      const { out, err } = await capture(dir, ['tree'])
+      writeSpecs(dir, {
+        'a.md': '---\nparent: b\n---\n# a\n',
+        'b.md': '---\nparent: a\n---\n# b\n',
+        // a subtree hung off a cyclic node is unreachable too
+        'c.md': '---\nparent: a\n---\n# c\n',
+        'root.md': '# root\n',
+      })
+      const { out, err } = await treeOf(dir)
       assert.deepEqual(out, [`root  ${join('specs', 'root.md')}`])
       const cyclic = err.filter((l) => l.includes('cyclic parent edge'))
       assert.equal(cyclic.length, 1)
