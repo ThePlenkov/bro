@@ -1,7 +1,3 @@
----
-parent: sessions
----
-
 # bro-d8s — hook/policy: mutations through bro subcommands cite their governing skill
 
 ## Problem

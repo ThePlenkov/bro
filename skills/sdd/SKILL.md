@@ -18,6 +18,11 @@ while a session's own claim lacks a spec.
 - `<sdd.dir>/<bead-id>.md` in the repo — non-empty (`specs/` by
   default; the configured dir applies). The file rides the feature
   branch, so the spec is reviewed in the same PR as the code.
+- or a **dir spec**: `<sdd.dir>/<bead-id>/` whose `spec.md` (or
+  `README.md`) is the index — a spec that is a folder of files. Nested
+  `.md` files and index-bearing subdirs are its children; nesting IS
+  the spec tree (a `.md` inside a dir with no index is content, not a
+  spec).
 - or a `spec:` link in the bead description (external doc).
 
 Exempt: `issue_type: chore` and beads labeled `trivial` or `debt` —
@@ -29,8 +34,10 @@ finding already carries its own evidence.
 A bead is intent-to-change: it opens, gets claimed, closes. A spec is a
 stable project artifact — it rides the feature branch, is reviewed with
 the code, and stays on main as what the project now *is*. Specs form a
-tree: an epic's spec-of-specs decomposes into feature specs via
-`parent:` frontmatter (`bro spec new <id> --parent <epic>`).
+tree: an epic's spec-of-specs decomposes into feature specs — children
+sit inside the parent's dir spec, or a flat spec points at its parent
+via `parent:` frontmatter (`bro spec new <id> --parent <epic>` writes
+inside `specs/<epic>/` when the parent is a dir spec).
 
 ## Commands
 
@@ -48,7 +55,7 @@ its language, never imposes bro's shape:
 
 | Connector | Detected by | A spec is |
 | --------- | ----------- | --------- |
-| `native` (default) | `<sdd.dir>/` exists, or nothing else | `<sdd.dir>/<id>.md` |
+| `native` (default) | `<sdd.dir>/` exists, or nothing else | `<sdd.dir>/<id>.md` or `<id>/` dir spec |
 | `speckit` | `.specify/` | `specs/<NNN>-<slug>/spec.md`, linked via `spec:` |
 | `openspec` | `openspec/` | `openspec/changes/<id>/proposal.md` |
 | `agent` | explicit only | no files — `spec:` links are the evidence |

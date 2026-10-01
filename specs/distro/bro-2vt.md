@@ -1,7 +1,3 @@
----
-parent: distro
----
-
 # bro-2vt — bro doctor: environment diagnostics command
 
 ## Problem

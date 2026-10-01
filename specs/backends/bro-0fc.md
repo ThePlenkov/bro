@@ -1,7 +1,3 @@
----
-parent: backends
----
-
 # bro-0fc — bd default vs opt-in for fresh repos
 
 ## Problem

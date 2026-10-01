@@ -1,7 +1,3 @@
----
-parent: sdd
----
-
 # bro-gkbe — bro spec facade: spec tree + SDD tool connectors + init
 
 ## Problem

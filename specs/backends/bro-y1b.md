@@ -1,7 +1,3 @@
----
-parent: backends
----
-
 # bro-y1b — bd compatibility check + graceful degradation
 
 ## Problem

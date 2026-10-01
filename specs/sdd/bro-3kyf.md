@@ -1,7 +1,3 @@
----
-parent: sdd
----
-
 # bro-3kyf — spec tree dogfood
 
 ## Problem
@@ -12,9 +8,8 @@ spec-of-specs: 18 flat bead specs, no root, no capability layer.
 ## Design
 
 `specs/project.md` is the root (capability map + filetree); seven
-capability specs (`review-gate`, `sdd`, `sessions`, `plans`, `distro`,
-`backends`, `retro`) own package paths; each leaf bead spec carries
-`parent: <capability>` frontmatter. Capability ids are plain names —
+capability dir specs (`<cap>/spec.md`) own package paths; leaf bead
+specs nest inside their capability dir — position is the edge. Capability ids are plain names —
 the spec dir is not bead-id-only.
 
 ## Plan
