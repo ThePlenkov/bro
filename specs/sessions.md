@@ -6,8 +6,10 @@ parent: project
 
 ## Scope
 
-`bro hooks <event>` — session/prompt probes, post-tool nudges,
-stop-gate contributions, and permission auto-approval; session arming
+`bro hooks <event>` — seven lifecycle events (session-start,
+post-compaction, pre-compact, prompt-submit, post-tool, stop,
+permission): session/prompt probes, post-tool nudges, stop-gate
+contributions, and permission auto-approval; session arming
 markers; parallel-work detection. `bro work` — linked worktree
 lifecycle. `bro drill` — scoped descent frames.
 `bro loop` — claim→agent→gate→close automation; `bro next` — claim and

@@ -15,5 +15,6 @@ owning plugin's runPlan; `version = N` pins the schema contract;
 ```text
 packages/core/src/plan.ts            version check + kind extraction
 packages/cli (resolvePlanDoc)        kind → owning plugin routing
-packages/*/src/*plan*                per-plugin schemas + runners
+packages/*/src/plan.ts,              per-plugin schemas + runners;
+packages/cli/src/commands/*plan*.ts  incl. next-plan.ts/parseNextPlan
 ```
