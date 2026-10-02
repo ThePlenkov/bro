@@ -49,6 +49,7 @@ import { runHooksCommand } from './commands/hooks.ts'
 import { runWatchCommand } from './commands/watch.ts'
 import { runAgentsCommand } from './commands/agents.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
+import { runServeCommand } from './commands/serve.ts'
 import { runSetupCommand } from './commands/setup.ts'
 import { runSpecCommand, sddConnector } from './commands/spec.ts'
 import { runStackCommand } from './commands/stack.ts'
@@ -149,6 +150,12 @@ export const PLUGINS: BroPlugin[] = [
       'Orchestrator heartbeat — mols × act gates × fleet snapshot [--once|--every N|--notify|--json]',
     run: runWatchCommand,
     skill: 'watch',
+  }),
+  definePlugin({
+    name: 'serve',
+    summary: 'Facade host for thin clients — HTTP/JSON on 127.0.0.1 [--port N]',
+    run: runServeCommand,
+    skill: 'serve',
   }),
   definePlugin({
     name: 'check',

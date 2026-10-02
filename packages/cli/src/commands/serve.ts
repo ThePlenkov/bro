@@ -1,0 +1,518 @@
+/**
+ * `bro serve` — the facade host for thin clients (TUI/webui/IDE).
+ * Spec: specs/sessions/bro-f4ot/spec.md.
+ *
+ *   bro serve [--port <n>]
+ *
+ * HTTP/JSON bound to 127.0.0.1 — the loopback bind IS the v1 trust
+ * boundary: no remote exposure, no auth model. Write ops (spawn/stop)
+ * are safe because the server runs inside the local session context;
+ * remote orchestration, if ever, is a separate spec.
+ *
+ *   GET    /                    service index
+ *   GET    /api/v1/health       {ok, pid, dir, startedAt}
+ *   GET    /api/v1/snapshot     the watch snapshot — mols × gates × fleet
+ *   GET    /api/v1/agents       per-backend agent plane
+ *   GET    /api/v1/agents/<ref> one agent — ref is agentId or molStep
+ *   POST   /api/v1/agents       spawn {molStep, worktree?, prompt?|promptFile?,
+ *                               connector?, beadsDir?} → 201 {agent}
+ *   DELETE /api/v1/agents/<ref> stop — terminal agents report
+ *                               stopped:false; a miss beside a degraded
+ *                               backend is 503 (unverifiable), a clean
+ *                               miss 404
+ *
+ * Discovery: `<git-common-dir>/bro/serve.json` {pid, url, dir,
+ * startedAt} written on listen (tmp+rename), removed on shutdown. A
+ * second serve on the same repo refuses while the recorded pid is
+ * alive — two live servers would make the file a coin flip.
+ */
+import { randomBytes } from 'node:crypto'
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { dirname, join } from 'node:path'
+import type { Readable } from 'node:stream'
+import { gitTry, SpawnError, type AgentConnector, type AgentInfo } from '@broject/core'
+import {
+  agentConnectorNames,
+  loadAgentEnv,
+  pidAlive,
+  type AgentConnectorEnv,
+} from '../agent-connectors.ts'
+import {
+  collectAgentBackends,
+  findAgent,
+  SpawnInputError,
+  spawnStepAgent,
+  stopAgent,
+  type AgentBackendPlane,
+  type StepSpawnRequest,
+  type StopOutcome,
+} from './agents.ts'
+import { flag, positionals } from './args.ts'
+import { collectSnapshot } from './watch.ts'
+
+// --- serve state (discovery) ---------------------------------------------------
+
+/** What a client needs to find and trust the server for a repo. */
+export interface ServeState {
+  pid: number
+  url: string
+  dir: string
+  startedAt: string
+}
+
+/** `<git-common-dir>/bro/serve.json` — shared across linked worktrees,
+ *  same anchor as agents.json and the hooks markers. Null outside a
+ *  repo. */
+export function serveStatePath(dir: string): string | null {
+  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  const common = r.code === 0 ? r.out.trim() : ''
+  return common === '' ? null : join(common, 'bro', 'serve.json')
+}
+
+export function readServeState(dir: string): ServeState | undefined {
+  const path = serveStatePath(dir)
+  if (path === null) {
+    return undefined
+  }
+  try {
+    const v = JSON.parse(readFileSync(path, 'utf8')) as Partial<ServeState>
+    // a torn/garbage entry is not a state — only a full record counts
+    if (
+      typeof v.pid === 'number' &&
+      typeof v.url === 'string' &&
+      typeof v.dir === 'string'
+    ) {
+      return v as ServeState
+    }
+    return undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** tmp+rename — readers never see a half-written state file. */
+export function writeServeState(dir: string, state: ServeState): void {
+  const path = serveStatePath(dir)
+  if (path === null) {
+    throw new Error('no git common dir — cannot write serve.json')
+  }
+  mkdirSync(dirname(path), { recursive: true })
+  const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
+  writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`)
+  renameSync(tmp, path)
+}
+
+/** Remove the state file only while it still names THIS process — a
+ *  successor that already rewrote it must not be unregistered by the
+ *  dying predecessor's cleanup. */
+export function clearServeState(dir: string): void {
+  try {
+    const state = readServeState(dir)
+    if (state !== undefined && state.pid === process.pid) {
+      const path = serveStatePath(dir)
+      if (path !== null) {
+        rmSync(path, { force: true })
+      }
+    }
+  } catch {
+    // best-effort — the stale-pid check on next start covers leftovers
+  }
+}
+
+/** A recorded serve whose pid is still alive — a second `bro serve`
+ *  refuses to start against this (two servers, one discovery file). */
+export function liveServeState(dir: string): ServeState | undefined {
+  const state = readServeState(dir)
+  return state !== undefined && pidAlive(state.pid) ? state : undefined
+}
+
+// --- HTTP plumbing ---------------------------------------------------------------
+
+/** Fail-closed request error carrying its status — the handler maps it
+ *  without a second decode of the failure. */
+export class HttpError extends Error {
+  override name = 'HttpError'
+  constructor(
+    public status: number,
+    message: string
+  ) {
+    super(message)
+  }
+}
+
+const MAX_BODY_BYTES = 256 * 1024
+
+/** Read a request body with a hard cap — a thin client never legitimately
+ *  sends more than a prompt's worth of JSON, and an unbounded read is a
+ *  memory DoS even on loopback. */
+export async function readBody(stream: Readable, limit = MAX_BODY_BYTES): Promise<string> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of stream) {
+    // IncomingMessage yields Buffers, but tests feed string chunks —
+    // normalize so the cap counts bytes either way
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string)
+    size += buf.length
+    if (size > limit) {
+      throw new HttpError(413, `request body over ${limit} bytes`)
+    }
+    chunks.push(buf)
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+// --- routing -----------------------------------------------------------------------
+
+/** The seam between transport and facade — tests inject fakes; the real
+ *  command wires it to the same machinery `bro agents`/`bro watch` use. */
+export interface ServeDeps {
+  snapshot(): Promise<unknown>
+  backends(): Promise<AgentBackendPlane[]>
+  find(
+    ref: string
+  ): Promise<{ hit?: { conn: AgentConnector; agent: AgentInfo }; degraded: string[] }>
+  spawn(req: StepSpawnRequest): Promise<AgentInfo>
+  stop(ref: string): Promise<StopOutcome>
+  connectors(): string[]
+}
+
+export interface ServeResponse {
+  status: number
+  body: unknown
+}
+
+const ROUTES = [
+  'GET /api/v1/health',
+  'GET /api/v1/snapshot',
+  'GET /api/v1/agents',
+  'POST /api/v1/agents',
+  'GET /api/v1/agents/<ref>',
+  'DELETE /api/v1/agents/<ref>',
+]
+
+const startedAt = new Date().toISOString()
+
+/** refs are agentIds (`native-ab12`) or molStep ids (`bro-mol-z0l`) —
+ *  conservative charset so a weird segment can't smuggle path or query
+ *  syntax into downstream lookups. */
+const SAFE_REF = /^[A-Za-z0-9._~-]+$/
+
+function parseRef(seg: string): string {
+  const ref = decodeURIComponent(seg)
+  if (!SAFE_REF.test(ref)) {
+    throw new HttpError(400, `invalid agent ref "${ref}"`)
+  }
+  return ref
+}
+
+const SPAWN_FIELDS = new Set([
+  'molStep',
+  'worktree',
+  'prompt',
+  'promptFile',
+  'connector',
+  'beadsDir',
+])
+
+/** POST body → StepSpawnRequest — strict: a misspelled field must be a
+ *  400, not a silently dropped option. */
+export function parseSpawnBody(raw: string | undefined): StepSpawnRequest {
+  if (raw === undefined || raw.trim() === '') {
+    throw new HttpError(400, 'POST /api/v1/agents needs a JSON body')
+  }
+  let doc: unknown
+  try {
+    doc = JSON.parse(raw)
+  } catch {
+    throw new HttpError(400, 'request body is not valid JSON')
+  }
+  if (typeof doc !== 'object' || doc === null || Array.isArray(doc)) {
+    throw new HttpError(400, 'request body must be a JSON object')
+  }
+  const unknown = Object.keys(doc).filter((k) => !SPAWN_FIELDS.has(k))
+  if (unknown.length > 0) {
+    throw new HttpError(400, `unknown field(s): ${unknown.join(', ')}`)
+  }
+  const req = doc as Record<string, unknown>
+  for (const [k, v] of Object.entries(req)) {
+    if (v !== undefined && typeof v !== 'string') {
+      throw new HttpError(400, `field "${k}" must be a string`)
+    }
+  }
+  if (typeof req.molStep !== 'string' || req.molStep.trim() === '') {
+    throw new HttpError(400, 'field "molStep" is required')
+  }
+  return {
+    molStep: req.molStep as string,
+    worktree: req.worktree as string | undefined,
+    prompt: req.prompt as string | undefined,
+    promptFile: req.promptFile as string | undefined,
+    connector: req.connector as string | undefined,
+    beadsDir: req.beadsDir as string | undefined,
+  }
+}
+
+/** Serialize the backend plane exactly like `bro agents status --json`
+ *  — conn objects don't cross the wire. */
+function backendJson(backends: AgentBackendPlane[]): unknown {
+  return {
+    backends: backends.map(({ conn, agents, degraded }) => ({
+      name: conn.name,
+      capabilities: conn.capabilities(),
+      agents,
+      ...(degraded !== undefined ? { degraded } : {}),
+    })),
+  }
+}
+
+function missBody(ref: string, degraded: string[]): Record<string, unknown> {
+  return {
+    error: `no agent "${ref}"`,
+    ...(degraded.length > 0 ? { degraded } : {}),
+  }
+}
+
+export async function routeRequest(
+  method: string,
+  pathname: string,
+  rawBody: string | undefined,
+  deps: ServeDeps,
+  dir: string
+): Promise<ServeResponse> {
+  try {
+    return await route(method, pathname, rawBody, deps, dir)
+  } catch (err) {
+    // HttpError is fail-closed input validation — a response, not a crash
+    if (err instanceof HttpError) {
+      return { status: err.status, body: { error: err.message } }
+    }
+    throw err
+  }
+}
+
+async function route(
+  method: string,
+  pathname: string,
+  rawBody: string | undefined,
+  deps: ServeDeps,
+  dir: string
+): Promise<ServeResponse> {
+  const seg = pathname.split('/').filter((s) => s !== '')
+
+  if (method === 'GET' && seg.length === 0) {
+    return { status: 200, body: { service: 'bro', routes: ROUTES } }
+  }
+
+  const api = seg[0] === 'api' && seg[1] === 'v1' ? seg.slice(2) : undefined
+  if (api === undefined || api.length === 0) {
+    return { status: 404, body: { error: 'not found', routes: ROUTES } }
+  }
+
+  // /api/v1/health
+  if (api[0] === 'health' && api.length === 1) {
+    if (method !== 'GET') {
+      return { status: 405, body: { error: 'method not allowed' } }
+    }
+    return { status: 200, body: { ok: true, pid: process.pid, dir, startedAt } }
+  }
+
+  // /api/v1/snapshot
+  if (api[0] === 'snapshot' && api.length === 1) {
+    if (method !== 'GET') {
+      return { status: 405, body: { error: 'method not allowed' } }
+    }
+    return { status: 200, body: await deps.snapshot() }
+  }
+
+  // /api/v1/agents[/<ref>]
+  if (api[0] === 'agents') {
+    if (api.length === 1) {
+      if (method === 'GET') {
+        return { status: 200, body: backendJson(await deps.backends()) }
+      }
+      if (method === 'POST') {
+        const req = parseSpawnBody(rawBody)
+        if (
+          req.connector !== undefined &&
+          !deps.connectors().includes(req.connector)
+        ) {
+          return {
+            status: 400,
+            body: {
+              error: `agent connector "${req.connector}" is not registered`,
+              connectors: deps.connectors(),
+            },
+          }
+        }
+        try {
+          const agent = await deps.spawn(req)
+          return { status: 201, body: { agent } }
+        } catch (err) {
+          if (err instanceof SpawnInputError || err instanceof HttpError) {
+            return { status: 400, body: { error: err.message } }
+          }
+          if (err instanceof SpawnError) {
+            return { status: 409, body: { error: err.message } }
+          }
+          throw err
+        }
+      }
+      return { status: 405, body: { error: 'method not allowed' } }
+    }
+    if (api.length === 2) {
+      const ref = parseRef(api[1]!)
+      if (method === 'GET') {
+        const { hit, degraded } = await deps.find(ref)
+        if (!hit) {
+          return { status: 404, body: missBody(ref, degraded) }
+        }
+        return { status: 200, body: hit.agent }
+      }
+      if (method === 'DELETE') {
+        const outcome = await deps.stop(ref)
+        if (!outcome.found) {
+          // a degraded read can't confirm "gone" — unverifiable is not 404
+          if (outcome.degraded.length > 0) {
+            return {
+              status: 503,
+              body: {
+                error: `cannot verify "${ref}" — backend(s) degraded`,
+                degraded: outcome.degraded,
+              },
+            }
+          }
+          return { status: 404, body: { error: `no agent "${ref}"` } }
+        }
+        return {
+          status: 200,
+          body: {
+            agent: outcome.agent,
+            stopped: outcome.stopped,
+            ...(outcome.stopped === false && outcome.agent !== undefined
+              ? { note: `already ${outcome.agent.state}` }
+              : {}),
+            ...(outcome.respawned !== undefined
+              ? { respawned: outcome.respawned }
+              : {}),
+          },
+        }
+      }
+      return { status: 405, body: { error: 'method not allowed' } }
+    }
+  }
+
+  return { status: 404, body: { error: 'not found', routes: ROUTES } }
+}
+
+// --- server ----------------------------------------------------------------------------
+
+function send(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { 'content-type': 'application/json' })
+  res.end(`${JSON.stringify(body)}\n`)
+}
+
+export function createServeHandler(
+  deps: ServeDeps,
+  dir: string
+): (req: IncomingMessage, res: ServerResponse) => void {
+  return (req, res) => {
+    void (async () => {
+      try {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+        const rawBody =
+          req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
+            ? await readBody(req)
+            : undefined
+        const r = await routeRequest(req.method ?? 'GET', url.pathname, rawBody, deps, dir)
+        send(res, r.status, r.body)
+      } catch (err) {
+        const status = err instanceof HttpError ? err.status : 500
+        send(res, status, {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    })()
+  }
+}
+
+function realDeps(dir: string, env: AgentConnectorEnv): ServeDeps {
+  return {
+    snapshot: () => collectSnapshot(dir),
+    backends: async () => (await collectAgentBackends(dir, env)).backends,
+    find: (ref) => findAgent(dir, env, ref),
+    spawn: (req) => spawnStepAgent(dir, env, req),
+    stop: (ref) => stopAgent(dir, env, ref),
+    connectors: () => agentConnectorNames(),
+  }
+}
+
+function usage(): never {
+  console.error(`usage:
+  bro serve [--port <n>]
+
+HTTP/JSON facade host on 127.0.0.1 (default port: ephemeral — the bound
+address is printed and written to <git-common-dir>/bro/serve.json).
+
+Routes: ${ROUTES.join(', ')}`)
+  process.exit(2)
+}
+
+export async function runServeCommand(argv: string[]): Promise<void> {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    usage()
+  }
+  const pos = positionals(argv, new Set(['--port']))
+  if (pos.length > 0) {
+    usage()
+  }
+  const portRaw = flag(argv, '--port')
+  let port = 0
+  if (portRaw !== undefined) {
+    port = Number(portRaw)
+    if (!Number.isInteger(port) || port < 0 || port > 65535) {
+      console.error(`error: --port needs an integer 0–65535, got "${portRaw}"`)
+      process.exit(2)
+    }
+  }
+
+  const dir = process.cwd()
+  if (serveStatePath(dir) === null) {
+    console.error('error: not inside a git repository — bro serve needs the git common dir')
+    process.exit(1)
+  }
+  const live = liveServeState(dir)
+  if (live !== undefined) {
+    console.error(`error: already serving ${live.url} (pid ${live.pid}) — one host per repo`)
+    process.exit(1)
+  }
+
+  const env = loadAgentEnv(dir)
+  const server = createServer(createServeHandler(realDeps(dir, env), dir))
+
+  const url = await new Promise<string>((resolve, reject) => {
+    server.once('error', reject)
+    // 127.0.0.1 only — the loopback bind IS the trust boundary; there is
+    // no --host flag to widen it with.
+    server.listen(port, '127.0.0.1', () => {
+      const addr = server.address()
+      resolve(`http://127.0.0.1:${typeof addr === 'object' && addr !== null ? addr.port : port}`)
+    })
+  }).catch((err: unknown) => {
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  })
+
+  writeServeState(dir, { pid: process.pid, url, dir, startedAt })
+  console.log(`bro serve — ${url}`)
+  console.log('discovery: <git-common-dir>/bro/serve.json · ctrl-c to stop')
+
+  await new Promise<void>((resolve) => {
+    const shutdown = (): void => {
+      server.close(() => resolve())
+    }
+    process.once('SIGINT', shutdown)
+    process.once('SIGTERM', shutdown)
+  })
+  clearServeState(dir)
+}

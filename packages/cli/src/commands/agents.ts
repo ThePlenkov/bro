@@ -32,7 +32,6 @@ import { basename } from 'node:path'
 import {
   bdAt,
   readAgentRegistry,
-  SpawnError,
   type AgentConnector,
   type AgentInfo,
 } from '@broject/core'
@@ -63,14 +62,23 @@ function die(msg: string): never {
   process.exit(1)
 }
 
+/** One backend's plane — the connector plus what its list() saw. */
+export interface AgentBackendPlane {
+  conn: AgentConnector
+  agents: AgentInfo[]
+  degraded?: string
+}
+
 /** All backends' agent planes — a throwing factory or list() is
- *  degrade-equivalent (one `degraded` note), never a hard failure. */
-async function collectAgents(
+ *  degrade-equivalent (one `degraded` note), never a hard failure.
+ *  Throws (not exits) on an unregistered --connector so `bro serve`
+ *  can map it to a 400; command callers render it via die. */
+export async function collectAgentBackends(
   dir: string,
   env: AgentConnectorEnv,
   connectorName?: string
-): Promise<{ backends: { conn: AgentConnector; agents: AgentInfo[]; degraded?: string }[] }> {
-  const backends = []
+): Promise<{ backends: AgentBackendPlane[] }> {
+  const backends: AgentBackendPlane[] = []
   for (const conn of eachAgentConnector({ dir }, env, (name, err) => {
     // --connector scopes failures too — an unrelated backend's throwing
     // factory must not leak a degraded stub into the selected view
@@ -97,7 +105,7 @@ async function collectAgents(
     }
   }
   if (connectorName !== undefined && !backends.some((b) => b.conn.name === connectorName)) {
-    die(`agent connector "${connectorName}" is not registered`)
+    throw new Error(`agent connector "${connectorName}" is not registered`)
   }
   return { backends }
 }
@@ -105,8 +113,8 @@ async function collectAgents(
 /** Target → agent + its backend, matched on agentId OR molStep.
  *  `degraded` names backends whose list() failed — a miss next to a
  *  degraded backend is "couldn't verify", not "gone". */
-function findInBackends(
-  backends: { conn: AgentConnector; agents: AgentInfo[]; degraded?: string }[],
+export function findInBackends(
+  backends: AgentBackendPlane[],
   target: string
 ): { hit?: { conn: AgentConnector; agent: AgentInfo }; degraded: string[] } {
   const degraded = backends
@@ -121,21 +129,19 @@ function findInBackends(
   return { degraded }
 }
 
-async function findAgent(
+export async function findAgent(
   dir: string,
   env: AgentConnectorEnv,
   target: string,
   connectorName?: string
 ): Promise<{ hit?: { conn: AgentConnector; agent: AgentInfo }; degraded: string[] }> {
-  const { backends } = await collectAgents(dir, env, connectorName)
+  const { backends } = await collectAgentBackends(dir, env, connectorName)
   return findInBackends(backends, target)
 }
 
 // --- status -------------------------------------------------------------------
 
-function printStatusTable(
-  backends: { conn: AgentConnector; agents: AgentInfo[]; degraded?: string }[]
-): void {
+function printStatusTable(backends: AgentBackendPlane[]): void {
   const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'pid', 'worktree']
   const rows = backends.flatMap(({ conn, agents }) => {
     const sup = conn.capabilities().supervisor
@@ -170,7 +176,7 @@ function printStatusTable(
  *  found agent doesn't mean the fleet view is complete (stderr, so
  *  --json stays parseable). */
 function statusDetail(
-  backends: { conn: AgentConnector; agents: AgentInfo[]; degraded?: string }[],
+  backends: AgentBackendPlane[],
   target: string,
   json: boolean
 ): void {
@@ -206,7 +212,9 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
   const target = pos[0]
   const json = argv.includes('--json')
   const connectorName = flag(argv, '--connector')
-  const { backends } = await collectAgents(dir, env, connectorName)
+  const { backends } = await collectAgentBackends(dir, env, connectorName).catch((err: unknown) =>
+    die(err instanceof Error ? err.message : String(err))
+  )
 
   if (target !== undefined) {
     // the fleet read already collected — search it, don't list() twice
@@ -256,7 +264,8 @@ async function supervisorVerb(conn: AgentConnector, verb: 'up' | 'down'): Promis
 /** The step's worktree: explicit --worktree → the registry's recorded
  *  path (a respawn reuses the dead agent's checkout) → the
  *  `<repo>--<step>` sibling convention. Missing = the caller never
- *  entered one — the error names the command, not a guess. */
+ *  entered one — the error names the command, not a guess. Throws so
+ *  `bro serve` can map it to a 4xx; the command layer renders via die. */
 function resolveWorktree(
   dir: string,
   molStep: string,
@@ -277,7 +286,7 @@ function resolveWorktree(
   if (existsSync(conventional)) {
     return conventional
   }
-  die(
+  throw new SpawnInputError(
     `no worktree for ${molStep} — run \`bro work enter ${molStep}\` first ` +
       `(or pass --worktree <path>)`
   )
@@ -286,7 +295,8 @@ function resolveWorktree(
 /** The spawn prompt: --prompt-file → the previous run's stored prompt
  *  (respawn keeps a custom-prompt agent's real instructions — the
  *  agentId outlives the process, so its prompt file does too) → the
- *  bead's own text, the convoy formula's rendered instructions. */
+ *  bead's own text, the convoy formula's rendered instructions. Throws —
+ *  the command layer renders via die, the serve host maps to 4xx. */
 function resolvePrompt(
   dir: string,
   beads: string,
@@ -296,7 +306,7 @@ function resolvePrompt(
 ): string {
   if (promptFile !== undefined) {
     if (!existsSync(promptFile)) {
-      die(`prompt file ${promptFile} does not exist`)
+      throw new SpawnInputError(`prompt file ${promptFile} does not exist`)
     }
     return readFileSync(promptFile, 'utf8')
   }
@@ -308,21 +318,109 @@ function resolvePrompt(
   }
   const r = bdAt(beads, ['show', molStep, '--json'])
   if (r.code !== 0) {
-    die(`cannot render a prompt — bead ${molStep} unreadable (${r.err}); pass --prompt-file`)
+    throw new SpawnInputError(
+      `cannot render a prompt — bead ${molStep} unreadable (${r.err}); pass --prompt-file`
+    )
   }
   let row: { title?: string; description?: string } | undefined
   try {
     row = (JSON.parse(r.out) as { title?: string; description?: string }[])[0]
   } catch {
     // exit-0 garbage (non-JSON diagnostics, truncated output) falls
-    // through to the same die as an empty row
+    // through to the same throw as an empty row
     row = undefined
   }
   const prompt = `# ${row?.title ?? molStep}\n\n${row?.description ?? ''}`.trim()
   if (row === undefined || prompt === `# ${molStep}`) {
-    die(`bead ${molStep} has no title/description to prompt with — pass --prompt-file`)
+    throw new SpawnInputError(
+      `bead ${molStep} has no title/description to prompt with — pass --prompt-file`
+    )
   }
   return prompt
+}
+
+/** Bad spawn input (missing worktree/prompt file, exclusive fields) —
+ *  400 territory, distinct from SpawnError's conflict/refusal (409). */
+export class SpawnInputError extends Error {
+  override name = 'SpawnInputError'
+}
+
+/** A spawn request — `bro agents up <step>` flags and `bro serve`'s
+ *  POST body share this shape. `prompt` is literal text (serve);
+ *  `promptFile` is a path (both). */
+export interface StepSpawnRequest {
+  molStep: string
+  connector?: string
+  worktree?: string
+  promptFile?: string
+  prompt?: string
+  beadsDir?: string
+}
+
+/** The spawn behind `up <step>` and POST /api/v1/agents — resolve the
+ *  connector, worktree, prompt, and shared store, then conn.spawn.
+ *  Throws on every failure (SpawnError on conflict/refusal) — callers
+ *  render; nothing exits here. */
+export async function spawnStepAgent(
+  dir: string,
+  env: AgentConnectorEnv,
+  req: StepSpawnRequest
+): Promise<AgentInfo> {
+  if (req.prompt !== undefined && req.promptFile !== undefined) {
+    throw new SpawnInputError('prompt and promptFile are mutually exclusive')
+  }
+  const conn = resolveAgentConnector({ dir }, { connector: req.connector }, env)
+  const beads = req.beadsDir ?? beadsDir()
+  const repoRoot = resolveWorktree(dir, req.molStep, req.worktree, conn.name)
+  if (!existsSync(repoRoot)) {
+    throw new SpawnInputError(`worktree ${repoRoot} does not exist`)
+  }
+  const prompt = req.prompt ?? resolvePrompt(dir, beads, req.molStep, req.promptFile, conn.name)
+  return conn.spawn({ molStep: req.molStep, repoRoot, beadsDir: beads, prompt })
+}
+
+/** The stop behind `down <target>` and DELETE /api/v1/agents/<ref>. */
+export interface StopOutcome {
+  found: boolean
+  degraded: string[]
+  /** live state at stop time — can differ from the list() snapshot */
+  agent?: AgentInfo
+  backend?: string
+  /** true when stop() ran — false when the agent was already terminal */
+  stopped: boolean
+  /** pid changed between list() and status() — a respawn raced us */
+  respawned?: { from?: number; to?: number }
+}
+
+/** Stop one agent by agentId or molStep. Idempotent by contract — a
+ *  gone agent is the desired end state (`found:false`), not an error;
+ *  `degraded` tells the caller the miss is unverified, not confirmed. */
+export async function stopAgent(
+  dir: string,
+  env: AgentConnectorEnv,
+  target: string,
+  connectorName?: string
+): Promise<StopOutcome> {
+  const { hit, degraded } = await findAgent(dir, env, target, connectorName)
+  if (!hit) {
+    return { found: false, degraded, stopped: false }
+  }
+  // bind the stop to what the backend reports NOW, not the list()
+  // snapshot — a respawn between the two reuses the agentId with a new
+  // pid, and a dead agent is already the desired end state
+  let current = hit.agent
+  try {
+    current = await hit.conn.status(hit.agent.id)
+  } catch {
+    // the read failed — stop() still binds to the observed id
+  }
+  if (current.state === 'exited' || current.state === 'stopped' || current.state === 'lost') {
+    return { found: true, degraded, agent: current, backend: hit.conn.name, stopped: false }
+  }
+  const respawned =
+    current.pid !== hit.agent.pid ? { from: hit.agent.pid, to: current.pid } : undefined
+  await hit.conn.stop(hit.agent.id)
+  return { found: true, degraded, agent: current, backend: hit.conn.name, stopped: true, respawned }
 }
 
 async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
@@ -331,26 +429,22 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
   if (pos.length > 1) {
     usage()
   }
-  const conn = resolveAgentConnector({ dir }, { connector: connectorName }, env)
   const molStep = pos[0]
   if (molStep === undefined) {
-    await supervisorVerb(conn, 'up')
+    await supervisorVerb(resolveAgentConnector({ dir }, { connector: connectorName }, env), 'up')
     return
   }
-  const beads = flag(argv, '--beads-dir') ?? beadsDir()
-  const repoRoot = resolveWorktree(dir, molStep, flag(argv, '--worktree'), conn.name)
-  if (!existsSync(repoRoot)) {
-    die(`worktree ${repoRoot} does not exist`)
-  }
-  const prompt = resolvePrompt(dir, beads, molStep, flag(argv, '--prompt-file'), conn.name)
   let info: AgentInfo
   try {
-    info = await conn.spawn({ molStep, repoRoot, beadsDir: beads, prompt })
+    info = await spawnStepAgent(dir, env, {
+      molStep,
+      connector: connectorName,
+      worktree: flag(argv, '--worktree'),
+      promptFile: flag(argv, '--prompt-file'),
+      beadsDir: flag(argv, '--beads-dir'),
+    })
   } catch (err) {
-    if (err instanceof SpawnError) {
-      die(err.message)
-    }
-    throw err
+    die(err instanceof Error ? err.message : String(err))
   }
   const pid = info.pid === undefined ? '' : ` pid ${info.pid}`
   console.log(`agent ${info.id} ${info.state} for ${molStep} (${info.backend}${pid})`)
@@ -373,38 +467,33 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
     await supervisorVerb(resolveAgentConnector({ dir }, { connector: connectorName }, env), 'down')
     return
   }
-  const { hit, degraded } = await findAgent(dir, env, target, connectorName)
-  if (!hit) {
+  const outcome = await stopAgent(dir, env, target, connectorName).catch((err: unknown) =>
+    die(err instanceof Error ? err.message : String(err))
+  )
+  if (!outcome.found) {
     // a degraded read can't confirm "gone" — report unverified, don't
     // claim the desired end state was reached
-    if (degraded.length > 0) {
-      die(`down: no agent "${target}" found — backend(s) degraded: ${degraded.join('; ')}`)
+    if (outcome.degraded.length > 0) {
+      die(
+        `down: no agent "${target}" found — backend(s) degraded: ${outcome.degraded.join('; ')}`
+      )
     }
     // stop() is idempotent — a gone agent is the desired end state
     console.log(`down: no agent "${target}" — nothing to stop`)
     return
   }
-  // bind the stop to what the backend reports NOW, not the list()
-  // snapshot — a respawn between the two reuses the agentId with a new
-  // pid, and a dead agent is already the desired end state
-  let current = hit.agent
-  try {
-    current = await hit.conn.status(hit.agent.id)
-  } catch {
-    // the read failed — stop() still binds to the observed id
-  }
-  if (current.state === 'exited' || current.state === 'stopped' || current.state === 'lost') {
-    console.log(`down: ${hit.agent.id} is ${current.state} — nothing to stop`)
+  const agent = outcome.agent!
+  if (!outcome.stopped) {
+    console.log(`down: ${agent.id} is ${agent.state} — nothing to stop`)
     return
   }
-  if (current.pid !== hit.agent.pid) {
+  if (outcome.respawned) {
     const fmt = (p: number | undefined) => (p === undefined ? 'unknown' : String(p))
     console.error(
-      `note: ${hit.agent.id} respawned since lookup (pid ${fmt(hit.agent.pid)} → ${fmt(current.pid)}) — stopping current instance`
+      `note: ${agent.id} respawned since lookup (pid ${fmt(outcome.respawned.from)} → ${fmt(outcome.respawned.to)}) — stopping current instance`
     )
   }
-  await hit.conn.stop(hit.agent.id)
-  console.log(`stopped ${hit.agent.id} (${hit.agent.molStep}, ${hit.conn.name})`)
+  console.log(`stopped ${agent.id} (${agent.molStep}, ${outcome.backend})`)
 }
 
 export async function runAgentsCommand(argv: string[]): Promise<void> {
