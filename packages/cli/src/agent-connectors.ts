@@ -702,14 +702,14 @@ function toTmuxInfo(
 ): AgentInfo {
   const name = tmuxSessionName(entry)
   // a batch `live` set decides outright; without one, probe the server
-  const probe: TmuxLiveness =
-    name === undefined
-      ? 'dead'
-      : live !== undefined
-        ? live.has(name)
-          ? 'running'
-          : 'dead'
-        : tmuxProbe(socket, name).live
+  let probe: TmuxLiveness
+  if (name === undefined) {
+    probe = 'dead' // no legal session name → nothing to find
+  } else if (live !== undefined) {
+    probe = live.has(name) ? 'running' : 'dead'
+  } else {
+    probe = tmuxProbe(socket, name).live
+  }
   return {
     id: entry.agentId,
     pid: typeof entry.pid === 'number' ? entry.pid : undefined,
