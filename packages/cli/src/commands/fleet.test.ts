@@ -2,7 +2,14 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { ConvoyStep } from '@broject/convoy'
 import type { AgentInfo } from '@broject/core'
-import { agentCell, worktreeOf } from './fleet.ts'
+import {
+  agentCell,
+  fleetArgs,
+  liveFrame,
+  worktreeOf,
+  type FleetPayload,
+  type FleetRow,
+} from './fleet.ts'
 import type { WorktreeInfo } from './work.ts'
 
 const step = (state: ConvoyStep['state']): ConvoyStep => ({
@@ -88,5 +95,84 @@ describe('worktreeOf', () => {
 
   test('no agent, no worktrees → undefined', () => {
     assert.equal(worktreeOf('bro-x', undefined, []), undefined)
+  })
+})
+
+describe('fleetArgs', () => {
+  test('bare fleet is the one-shot table', () => {
+    assert.deepEqual(fleetArgs([]), { json: false, live: false, everySec: 2 })
+    assert.deepEqual(fleetArgs(['--json']), { json: true, live: false, everySec: 2 })
+  })
+
+  test('--live paints the dashboard at the default cadence', () => {
+    assert.deepEqual(fleetArgs(['--live']), { json: false, live: true, everySec: 2 })
+  })
+
+  test('--every sets the cadence and implies --live', () => {
+    assert.deepEqual(fleetArgs(['--every', '5']), { json: false, live: true, everySec: 5 })
+    assert.deepEqual(fleetArgs(['--live', '--every=0.5']), {
+      json: false,
+      live: true,
+      everySec: 0.5,
+    })
+  })
+
+  test('a non-positive or overflowing --every fails closed', () => {
+    for (const bad of ['0', '-1', 'abc', '9999999999']) {
+      assert.throws(() => fleetArgs(['--live', '--every', bad]), /--every needs a positive/)
+    }
+  })
+
+  test('--live --json is a usage error — a repaint loop is not JSON', () => {
+    assert.throws(() => fleetArgs(['--live', '--json']), /does not combine with --json/)
+    assert.throws(() => fleetArgs(['--json', '--every', '2']), /does not combine with --json/)
+  })
+})
+
+const payloadRow = (agent: string): FleetRow => ({
+  mol: 'bro-mol-x',
+  step: 'bro-x',
+  title: 't',
+  kind: 'agent',
+  state: 'in_progress',
+  agent,
+})
+
+const payload = (over: Partial<FleetPayload> = {}): FleetPayload => ({
+  rows: [payloadRow('running (pid 42)')],
+  degraded: [],
+  conflicts: [],
+  prErrors: [],
+  ...over,
+})
+
+describe('liveFrame', () => {
+  test('header, table, and footer compose one frame', () => {
+    const f = liveFrame(payload(), new Date('2026-01-01T00:00:00Z'), 2)
+    assert.match(f, /^bro fleet — live · 2026-01-01T00:00:00\.000Z · every 2s\n/)
+    assert.match(f, /mol\s+step\s+state/)
+    assert.match(f, /bro-mol-x\s+bro-x\s+in_progress\s+running \(pid 42\)/)
+    assert.match(f, /\nq quit$/)
+  })
+
+  test('an empty fleet still frames', () => {
+    const f = liveFrame(payload({ rows: [] }), new Date(0), 5)
+    assert.match(f, /no open molecules — nothing in the fleet/)
+    assert.match(f, /every 5s/)
+  })
+
+  test('warnings render in-frame — degraded, conflict, PR lookup', () => {
+    const f = liveFrame(
+      payload({
+        degraded: ['tmux: socket gone'],
+        conflicts: ['bro-x: tmux agent t1 ignored — native holds the step'],
+        prErrors: ['work/x: gh failed'],
+      }),
+      new Date(0),
+      2
+    )
+    assert.match(f, /warning: backend degraded — tmux: socket gone/)
+    assert.match(f, /warning: agent conflict — bro-x: tmux agent t1 ignored/)
+    assert.match(f, /warning: PR lookup failed — work\/x: gh failed/)
   })
 })

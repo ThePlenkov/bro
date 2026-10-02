@@ -127,7 +127,8 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'fleet',
-    summary: 'Fleet view — mols × steps × agents × worktrees × PRs [--json]',
+    summary:
+      'Fleet view — mols × steps × agents × worktrees × PRs [--json|--live|--every N]',
     run: runFleetCommand,
   }),
   definePlugin({
