@@ -16,10 +16,11 @@
  *   GET    /api/v1/agents/<ref> one agent — ref is agentId or molStep
  *   POST   /api/v1/agents       spawn {molStep, worktree?, prompt?|promptFile?,
  *                               connector?, beadsDir?} → 201 {agent}
- *   DELETE /api/v1/agents/<ref> stop — terminal agents report
- *                               stopped:false; a miss beside a degraded
- *                               backend is 503 (unverifiable), a clean
- *                               miss 404
+ *   DELETE /api/v1/agents/<ref> stop — always invokes the connector's
+ *                               idempotent stop; terminal agents report
+ *                               `terminal:true` + a note. A miss beside a
+ *                               degraded backend is 503 (unverifiable),
+ *                               a clean miss 404
  *
  * Discovery: `<git-common-dir>/bro/serve.json` {pid, url, dir,
  * startedAt} written on listen (tmp+rename), removed on shutdown. A
@@ -457,7 +458,7 @@ async function route(
           body: {
             agent: outcome.agent,
             stopped: outcome.stopped,
-            ...(outcome.stopped === false && outcome.agent !== undefined
+            ...(outcome.terminal === true && outcome.agent !== undefined
               ? { note: `already ${outcome.agent.state}` }
               : {}),
             ...(outcome.respawned !== undefined

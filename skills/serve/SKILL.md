@@ -7,7 +7,9 @@ description: "Use when a thin client (TUI, webui, IDE) needs the bro facade over
 
 **All mechanics live in the `bro` CLI.** This skill is policy only.
 
-Prereq: `bro` on PATH or `npx -y @broject/bro@0` (major-pinned).
+Prereq: `bro` on PATH or `npx -y @broject/bro@0` (major-pinned), plus
+`bd` — the snapshot route and a `{molStep}`-only spawn resolve through
+the shared beads store.
 
 `bro serve` hosts the agents facade plus the watch snapshot as HTTP/JSON
 so TUI/webui/IDE clients are thin — they never shell out to `bd`/`gh`
@@ -24,6 +26,7 @@ themselves. The loopback bind IS the trust boundary: 127.0.0.1 only, no
 
 | Route | What it returns |
 | ----- | --------------- |
+| `GET /` | service index — `{service, routes}` |
 | `GET /api/v1/health` | `{ok, pid, dir, startedAt}` — liveness |
 | `GET /api/v1/snapshot` | the `bro watch` snapshot — mols × gates × fleet |
 | `GET /api/v1/agents` | per-backend agent plane (`bro agents status --json` shape) |

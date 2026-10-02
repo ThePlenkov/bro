@@ -27,8 +27,15 @@ function startServe(
     })
     let out = ''
     let err = ''
+    // every reject path kills the child — an orphaned `bro serve`
+    // outlives the fixture its caller is about to rmSync
+    function fail(e: Error): void {
+      clearTimeout(timer)
+      child.kill('SIGKILL')
+      reject(e)
+    }
     const timer = setTimeout(
-      () => reject(new Error(`serve never reported a URL — stdout: ${out} stderr: ${err}`)),
+      () => fail(new Error(`serve never reported a URL — stdout: ${out} stderr: ${err}`)),
       15_000
     )
     child.stdout!.on('data', (d: Buffer) => {
@@ -43,8 +50,7 @@ function startServe(
       err += d.toString('utf8')
     })
     child.once('exit', (code) => {
-      clearTimeout(timer)
-      reject(new Error(`serve exited ${code} before binding — ${err}`))
+      fail(new Error(`serve exited ${code} before binding — ${err}`))
     })
   })
 }
@@ -136,10 +142,20 @@ describe('bro serve e2e', () => {
         })
         const result = await new Promise<{ code: number | null; err: string }>((resolve) => {
           let err = ''
+          // bounded wait — if the refuse logic regresses and the second
+          // serve binds instead of exiting, kill it and fail the test
+          // rather than hanging the suite
+          const timer = setTimeout(() => {
+            second.kill('SIGKILL')
+            resolve({ code: null, err: `${err} — timed out waiting for exit` })
+          }, 15_000)
           second.stderr!.on('data', (d: Buffer) => {
             err += d.toString('utf8')
           })
-          second.once('exit', (code) => resolve({ code, err }))
+          second.once('exit', (code) => {
+            clearTimeout(timer)
+            resolve({ code, err })
+          })
         })
         assert.equal(result.code, 1)
         assert.match(result.err, /already serving/)

@@ -386,15 +386,23 @@ export interface StopOutcome {
   /** live state at stop time — can differ from the list() snapshot */
   agent?: AgentInfo
   backend?: string
-  /** true when stop() ran — false when the agent was already terminal */
+  /** true when stop() ran — always true on a found agent; the connector
+   *  binds to the CURRENT registry entry, so the call also stops a
+   *  respawn that landed between our status read and here */
   stopped: boolean
+  /** the agent already read terminal when we looked — stop() still ran
+   *  (idempotent), the flag just says there was nothing live to kill */
+  terminal?: boolean
   /** pid changed between list() and status() — a respawn raced us */
   respawned?: { from?: number; to?: number }
 }
 
 /** Stop one agent by agentId or molStep. Idempotent by contract — a
  *  gone agent is the desired end state (`found:false`), not an error;
- *  `degraded` tells the caller the miss is unverified, not confirmed. */
+ *  `degraded` tells the caller the miss is unverified, not confirmed.
+ *  stop() is called unconditionally on a hit: skipping it on a terminal
+ *  read would leave a racing respawn running while the caller believes
+ *  the step is dead. */
 export async function stopAgent(
   dir: string,
   env: AgentConnectorEnv,
@@ -414,13 +422,20 @@ export async function stopAgent(
   } catch {
     // the read failed — stop() still binds to the observed id
   }
-  if (current.state === 'exited' || current.state === 'stopped' || current.state === 'lost') {
-    return { found: true, degraded, agent: current, backend: hit.conn.name, stopped: false }
-  }
+  const terminal =
+    current.state === 'exited' || current.state === 'stopped' || current.state === 'lost'
   const respawned =
     current.pid !== hit.agent.pid ? { from: hit.agent.pid, to: current.pid } : undefined
   await hit.conn.stop(hit.agent.id)
-  return { found: true, degraded, agent: current, backend: hit.conn.name, stopped: true, respawned }
+  return {
+    found: true,
+    degraded,
+    agent: current,
+    backend: hit.conn.name,
+    stopped: true,
+    terminal,
+    respawned,
+  }
 }
 
 async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
@@ -483,7 +498,7 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
     return
   }
   const agent = outcome.agent!
-  if (!outcome.stopped) {
+  if (outcome.terminal) {
     console.log(`down: ${agent.id} is ${agent.state} — nothing to stop`)
     return
   }

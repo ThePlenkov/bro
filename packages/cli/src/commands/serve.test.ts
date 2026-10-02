@@ -142,6 +142,8 @@ describe('serve — routes', () => {
     assert.equal(stopped.status, 200)
     assert.equal((stopped.body as { stopped: boolean }).stopped, true)
 
+    // stop() always runs on a hit — `terminal` flags there was nothing
+    // live to kill, the note still reports the observed state
     const terminal = await route(
       'DELETE',
       '/api/v1/agents/native-aa11',
@@ -151,12 +153,13 @@ describe('serve — routes', () => {
           found: true,
           degraded: [],
           agent: { ...fakeAgent, state: 'exited' },
-          stopped: false,
+          stopped: true,
+          terminal: true,
         }),
       })
     )
     assert.equal(terminal.status, 200)
-    assert.equal((terminal.body as { stopped: boolean }).stopped, false)
+    assert.equal((terminal.body as { stopped: boolean }).stopped, true)
     assert.match((terminal.body as { note: string }).note, /already exited/)
 
     const miss = await route('DELETE', '/api/v1/agents/native-gone')
