@@ -351,7 +351,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // the wrapper captures $? into the .exit file — the only exit
           // record a detached process can leave once the parent is gone
           const child = spawn(
-            'sh',
+            'sh', // NOSONAR — PATH lookup is the contract (same as git/bd everywhere)
             ['-c', `${expandAgentCmd(command, promptFile)}; s=$?; printf %s "$s" > "$1"`, 'bro-agent', exitFile],
             { // NOSONAR — operator-configured agent command (same contract as loop)
               cwd: spec.repoRoot,
