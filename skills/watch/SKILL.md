@@ -38,3 +38,9 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd` initialized.
   surface; `bro agents` owns the respawn.
 - **Degraded is not dead.** A backend whose `list()` failed renders its
   rows `unknown`, never `lost` — don't respawn on a failed read.
+- **Report progress in words, not IDs.** When relaying snapshot state
+  to the user, translate every code: `bro-mol-3n2` → "the notify
+  connector molecule", `bro-mol-0io` → "the `bro watch` molecule".
+  A status line must say what the agent is *doing* and what just
+  *landed* ("PR for X merged, session moved to Y") — bare mol/bead/PR
+  IDs alone are not a report. IDs may appear in parentheses.
