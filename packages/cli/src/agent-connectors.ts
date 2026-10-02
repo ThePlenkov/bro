@@ -20,6 +20,7 @@ import {
   openSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -171,17 +172,22 @@ function agentsHome(dir: string): string | null {
   return common === '' ? null : join(common, 'bro', 'agents')
 }
 
-/** Hooks markers are `<common>/bro/hooks/<session>.<aspect>` — the agent
- *  gets a synthetic session name so `otherLiveWork` (session-start
- *  parallel detection) reports it as live work on the molStep. */
+/** `<common>/bro/hooks/agent-<id>.work` — hooks markers are
+ *  `<common>/bro/hooks/<session>.<aspect>`; the agent gets a synthetic
+ *  session name so `otherLiveWork` (session-start parallel detection)
+ *  reports it as live work on the molStep. Null outside a common dir. */
+function workMarkerPath(dir: string, agentId: string): string | null {
+  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  const common = r.code === 0 ? r.out.trim() : ''
+  return common === '' ? null : join(common, 'bro', 'hooks', `agent-${agentId}.work`)
+}
+
 function writeWorkMarker(dir: string, agentId: string, molStep: string): void {
   try {
-    const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
-    const common = r.code === 0 ? r.out.trim() : ''
-    if (!common) {
+    const marker = workMarkerPath(dir, agentId)
+    if (marker === null) {
       return
     }
-    const marker = join(common, 'bro', 'hooks', `agent-${agentId}.work`)
     mkdirSync(dirname(marker), { recursive: true })
     writeFileSync(marker, `${Date.now()}\n${molStep}\n`)
   } catch {
@@ -191,10 +197,24 @@ function writeWorkMarker(dir: string, agentId: string, molStep: string): void {
 
 function dropWorkMarker(dir: string, agentId: string): void {
   try {
-    const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
-    const common = r.code === 0 ? r.out.trim() : ''
-    if (common) {
-      rmSync(join(common, 'bro', 'hooks', `agent-${agentId}.work`), { force: true })
+    const marker = workMarkerPath(dir, agentId)
+    if (marker !== null) {
+      rmSync(marker, { force: true })
+    }
+  } catch {
+    // best-effort
+  }
+}
+
+/** Marker mtime IS the liveness signal detection reads — refresh it
+ *  while the agent is verifiably alive or a long-running worker goes
+ *  stale (and a dead one's leftover marker stops looking live). */
+function touchWorkMarker(dir: string, agentId: string): void {
+  try {
+    const marker = workMarkerPath(dir, agentId)
+    if (marker !== null && existsSync(marker)) {
+      const now = new Date()
+      utimesSync(marker, now, now)
     }
   } catch {
     // best-effort
@@ -232,14 +252,22 @@ function readExitFile(home: string, agentId: string): number | undefined {
  *  harvests the .exit file into the entry so `agents.json` keeps
  *  pid+exit-status alongside the handle (and the harvest is once). */
 function nativeState(dir: string, home: string | null, molStep: string, entry: AgentRegistryEntry): AgentState {
-  if (entry.stopped === true) {
-    return 'stopped'
-  }
+  // liveness first: a 'stopped' marker on a pid that is still alive means
+  // SIGTERM hasn't landed yet — the agent IS still running, and dedup
+  // must keep refusing a respawn that would run alongside it
   const pid = typeof entry.pid === 'number' ? entry.pid : undefined
   if (pid !== undefined && pidAlive(pid)) {
+    touchWorkMarker(dir, entry.agentId)
     return 'running'
   }
+  // every terminal state also retires the .work marker — a dead agent
+  // must not keep reporting as live work to parallel-session detection
+  if (entry.stopped === true) {
+    dropWorkMarker(dir, entry.agentId)
+    return 'stopped'
+  }
   if (entry.exitStatus !== undefined) {
+    dropWorkMarker(dir, entry.agentId)
     return 'exited'
   }
   if (home) {
@@ -250,9 +278,11 @@ function nativeState(dir: string, home: string | null, molStep: string, entry: A
       } catch {
         // harvest is advisory — the .exit file still proves the exit
       }
+      dropWorkMarker(dir, entry.agentId)
       return 'exited'
     }
   }
+  dropWorkMarker(dir, entry.agentId)
   return 'lost'
 }
 
@@ -335,8 +365,11 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         }
         // a dead entry doesn't entitle us to whatever claim sits on the
         // step now — if another actor picked it up meanwhile, rebinding
-        // would steal a live worker's (or a human's) step
-        if (claimed && step?.assignee !== bdActor(spec.repoRoot)) {
+        // would steal a live worker's (or a human's) step. The actor is
+        // resolved in the pinned store's context — the same context the
+        // claim itself was written under.
+        const actor = claimed ? bdActor(spec.beadsDir) : undefined
+        if (claimed && step?.assignee !== actor) {
           throw new SpawnError(
             `${spec.molStep} is claimed by ${step?.assignee ?? '?'} — rebind only takes our own claim`
           )
@@ -369,7 +402,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           spawnError: undefined,
         })
         if (claimed) {
-          rebindStep(spec.beadsDir, spec.molStep, bdActor(spec.repoRoot))
+          rebindStep(spec.beadsDir, spec.molStep, actor!)
         } else {
           claimStep(spec.beadsDir, spec.molStep)
         }
@@ -450,11 +483,17 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         try {
           process.kill(-pid, 'SIGTERM') // detached → own process group
         } catch {
-          try {
-            process.kill(pid, 'SIGTERM')
-          } catch {
-            // died between probe and signal — same outcome
-          }
+          // No fallback to kill(pid): a native child is always its own
+          // group leader, so a failed group signal means the pid was
+          // recycled by a non-leader — signaling it would hit an
+          // unrelated process.
+        }
+        // let the signal land before recording the stop — `stopped` on a
+        // still-living pid would let a respawn run alongside the dying
+        // agent (nativeState reports live pids as running regardless)
+        const deadline = Date.now() + 2_000
+        while (pidAlive(pid) && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 25))
         }
       }
       try {

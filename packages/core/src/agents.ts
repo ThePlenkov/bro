@@ -137,13 +137,24 @@ export function readAgentRegistry(dir: string): Record<string, AgentRegistryEntr
     const out: Record<string, AgentRegistryEntry> = {}
     for (const [k, e] of Object.entries(v)) {
       const ent = e as AgentRegistryEntry
-      if (typeof ent?.agentId === 'string' && typeof ent?.backend === 'string') {
+      if (
+        typeof ent?.agentId === 'string' &&
+        ent.agentId !== '' &&
+        typeof ent?.backend === 'string' &&
+        ent.backend !== ''
+      ) {
         out[k] = ent
       }
     }
     return out
-  } catch {
-    return {}
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (err instanceof SyntaxError || code === 'ENOENT') {
+      return {}
+    }
+    // EACCES/EIO/etc. is degradation, not emptiness — a silent {} would
+    // let the next patch discard every known agent
+    throw err
   }
 }
 
@@ -172,9 +183,10 @@ const heldRegistryLocks = new Set<string>()
 
 /** A crashed holder leaves the lock file behind — break it once it's
  *  older than any legit critical section (bd subprocess is the slowest
- *  at ≤15s). */
+ *  at ≤15s). The wait bound must exceed that ceiling: a holder stuck on
+ *  a slow-but-alive bd call (10–15s) must not fail its waiters. */
 const REGISTRY_LOCK_STALE_MS = 60_000
-const REGISTRY_LOCK_WAIT_MS = 10_000
+const REGISTRY_LOCK_WAIT_MS = 20_000
 
 const syncSleep = (ms: number): void => {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
@@ -199,7 +211,15 @@ const tryAcquireLockFile = (lock: string, token: string): boolean => {
     }
   }
   try {
-    if (Date.now() - statSync(lock).mtimeMs > REGISTRY_LOCK_STALE_MS) {
+    // ownership-checked stale break — read the holder token FIRST, then
+    // prove stale AND unchanged. A contender that already replaced the
+    // file shows a fresh mtime or a different token — either way the
+    // delete is skipped instead of robbing its fresh lock.
+    const holder = readFileSync(lock, 'utf8')
+    if (
+      Date.now() - statSync(lock).mtimeMs > REGISTRY_LOCK_STALE_MS &&
+      readFileSync(lock, 'utf8') === holder
+    ) {
       rmSync(lock, { force: true })
     }
   } catch {

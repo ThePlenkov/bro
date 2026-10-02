@@ -51,7 +51,7 @@ if (args[0] === 'show') {
   for (let i = 2; i < args.length; i++) {
     const k = args[i].slice(2)
     if (k === 'claim') {
-      if (r.status === 'in_progress') { console.error('already claimed'); process.exit(1) }
+      if (r.status !== 'open') { console.error('already claimed'); process.exit(1) }
       r.status = 'in_progress'
       r.assignee = 'tester'
     } else {

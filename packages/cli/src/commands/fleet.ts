@@ -76,22 +76,23 @@ async function collectAgents(dir: string): Promise<{
 /** The worktree column: the agent's recorded worktree wins; otherwise
  *  the step's own `bro work` checkout — `worktreePathFor(main, step)`,
  *  an exact sibling path, not a basename suffix that could borrow
- *  another repo's `…--<step>` directory. */
+ *  another repo's `…--<step>` directory. Returns the absolute path —
+ *  the row renders its basename, but the PR lookup needs the path
+ *  itself (two worktrees can share a basename). */
 export function worktreeOf(
   stepId: string,
   agent: AgentInfo | undefined,
   worktrees: WorktreeInfo[]
 ): string | undefined {
   if (agent?.worktree) {
-    return basename(agent.worktree)
+    return agent.worktree
   }
   const main = worktrees[0]?.path // porcelain lists the main checkout first
   if (main === undefined) {
     return undefined
   }
   const expected = worktreePathFor(main, stepId)
-  const hit = worktrees.find((w) => w.path === expected)
-  return hit === undefined ? undefined : basename(hit.path)
+  return worktrees.find((w) => w.path === expected)?.path
 }
 
 /** `work/x` branch name for a worktree path — '' when unreadable. */
@@ -130,8 +131,6 @@ function fleetRows(
   repo: string,
   worktrees: WorktreeInfo[]
 ): FleetRow[] {
-  const fullPath = (name: string | undefined) =>
-    name === undefined ? undefined : (worktrees.find((w) => basename(w.path) === name)?.path ?? name)
   const rows: FleetRow[] = []
   for (const m of listMolecules()) {
     const mol = loadMolecule(m.id)
@@ -148,8 +147,8 @@ function fleetRows(
         kind: s.kind,
         state: s.state,
         agent: agentCell(s, agent, issue?.assignee, degradedAny),
-        worktree: wt,
-        pr: rev === undefined ? undefined : prForWorktree(rev, repo, fullPath(wt)),
+        worktree: wt === undefined ? undefined : basename(wt),
+        pr: rev === undefined ? undefined : prForWorktree(rev, repo, wt),
       })
     }
   }
@@ -197,7 +196,9 @@ export function agentCell(
     return '—'
   }
   const pid = agent.pid !== undefined ? ` (pid ${agent.pid})` : ''
-  if (agent.state === 'lost' && step.state === 'in_progress') {
+  // a clean exit while the step stays claimed is the same respawn
+  // decision as a lost worker — the claim outlived its agent either way
+  if ((agent.state === 'lost' || agent.state === 'exited') && step.state === 'in_progress') {
     return 'lost — respawn?'
   }
   return `${agent.state}${pid}`

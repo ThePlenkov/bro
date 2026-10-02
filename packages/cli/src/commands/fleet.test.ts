@@ -57,6 +57,13 @@ describe('agentCell', () => {
     assert.equal(agentCell(step('done'), agent('exited'), undefined, false), 'exited')
     assert.equal(agentCell(step('in_progress'), agent('stopped'), undefined, false), 'stopped')
   })
+
+  test('an exited agent on a claimed step is the respawn surface too', () => {
+    assert.equal(
+      agentCell(step('in_progress'), agent('exited'), 'me', false),
+      'lost — respawn?'
+    )
+  })
 })
 
 const wt = (path: string): WorktreeInfo => ({ path, head: 'x', bare: false, detached: false })
@@ -64,12 +71,12 @@ const wt = (path: string): WorktreeInfo => ({ path, head: 'x', bare: false, deta
 describe('worktreeOf', () => {
   test("the agent's recorded worktree wins over name matching", () => {
     const a = { ...agent('running'), worktree: '/elsewhere/custom-dir' }
-    assert.equal(worktreeOf('bro-x', a, [wt('/r/main')]), 'custom-dir')
+    assert.equal(worktreeOf('bro-x', a, [wt('/r/main')]), '/elsewhere/custom-dir')
   })
 
   test('an exact <repo>--<step> sibling counts as the checkout', () => {
     const trees = [wt('/r/main'), wt('/r/main--bro-x')]
-    assert.equal(worktreeOf('bro-x', undefined, trees), 'main--bro-x')
+    assert.equal(worktreeOf('bro-x', undefined, trees), '/r/main--bro-x')
   })
 
   test("another repo's same-suffixed sibling does not match", () => {
