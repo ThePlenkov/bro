@@ -128,12 +128,10 @@ export function emitMailbox(dir: string, text: string): boolean {
   return true
 }
 
-/** The snapshot — pure reads across all three planes. Every plane is
- *  best-effort on its own: a throwing plane degrades its section, never
- *  kills the heartbeat. */
-export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
-  // --- mols: pure beads reads ---
-  const mols: WatchMol[] = listMolecules().map((m) => {
+/** mols section — every open molecule through nextStep; pure beads
+ *  reads, no backend, no network. */
+function collectMols(): WatchMol[] {
+  return listMolecules().map((m) => {
     const n = nextStep(loadMolecule(m.id))
     return {
       mol: m.id,
@@ -144,16 +142,56 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
       blocked: n.blocked,
     }
   })
+}
+
+function worktreeList(): WorktreeInfo[] {
+  try {
+    return parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']))
+  } catch {
+    return []
+  }
+}
+
+/** The act exit gate per distinct fleet PR — a failed probe is recorded
+ *  per-PR (`error`), not folded into "blocked" and never kills the rest. */
+async function gateFleetPrs(
+  rev: ReviewFacade,
+  repo: string,
+  rows: FleetRow[],
+  dir: string
+): Promise<WatchPrGate[]> {
+  const act = loadBroConfig(dir).act
+  const out: WatchPrGate[] = []
+  const seen = new Set<number>()
+  for (const row of rows) {
+    const pr = row.prNum
+    if (pr === undefined || seen.has(pr)) {
+      continue
+    }
+    seen.add(pr)
+    const link = row.pr ?? rev.prLink(repo, pr)
+    try {
+      const state = await fetchPrActState(rev, { repo, pr }, {
+        ignoreChecks: act.ignoreChecks,
+        maxRounds: act.maxRounds,
+      })
+      const gate = evaluateExitGate(state)
+      out.push({ pr, link, ok: gate.ok, blockers: gate.blockers })
+    } catch (err) {
+      out.push({ pr, link, error: err instanceof Error ? err.message : String(err) })
+    }
+  }
+  return out
+}
+
+/** The snapshot — pure reads across all three planes. Every plane is
+ *  best-effort on its own: a throwing plane degrades its section, never
+ *  kills the heartbeat. */
+export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
+  const mols = collectMols()
 
   // --- fleet: same machinery as `bro fleet` ---
   const { byStep, degraded, conflicts } = await collectAgents(dir)
-  const worktrees = (() => {
-    try {
-      return parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']))
-    } catch {
-      return [] as WorktreeInfo[]
-    }
-  })()
   let rev: ReviewFacade | undefined
   let repo = ''
   let gateReason: string | undefined
@@ -164,34 +202,13 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
     rev = undefined
     gateReason = err instanceof Error ? err.message : String(err)
   }
-  const rows = fleetRows(byStep, degraded.length > 0, rev, repo, worktrees)
+  const rows = fleetRows(byStep, degraded.length > 0, rev, repo, worktreeList())
 
-  // --- gates: the act exit gate per fleet PR ---
-  const gates: WatchGates = { available: rev !== undefined, reason: gateReason, prs: [] }
-  if (rev !== undefined) {
-    const act = loadBroConfig(dir).act
-    const seen = new Set<number>()
-    for (const row of rows) {
-      const pr = row.prNum
-      if (pr === undefined || seen.has(pr)) {
-        continue
-      }
-      seen.add(pr)
-      const link = row.pr ?? rev.prLink(repo, pr)
-      try {
-        const state = await fetchPrActState(rev, { repo, pr }, {
-          ignoreChecks: act.ignoreChecks,
-          maxRounds: act.maxRounds,
-        })
-        const gate = evaluateExitGate(state)
-        gates.prs.push({ pr, link, ok: gate.ok, blockers: gate.blockers })
-      } catch (err) {
-        // a per-PR probe failure is reported, not folded into "blocked" —
-        // an unreachable host is not a red gate
-        gates.prs.push({ pr, link, error: err instanceof Error ? err.message : String(err) })
-      }
-    }
-  }
+  // --- gates: no review host renders the section unavailable ---
+  const gates: WatchGates =
+    rev === undefined
+      ? { available: false, reason: gateReason, prs: [] }
+      : { available: true, prs: await gateFleetPrs(rev, repo, rows, dir) }
 
   return {
     ts: new Date().toISOString(),
@@ -202,68 +219,78 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
   }
 }
 
+function attentionLines(attention: string[]): string[] {
+  return attention.length === 0 ? ['  (quiet)'] : attention.map((a) => `  ${a}`)
+}
+
+function molLines(mols: WatchMol[]): string[] {
+  if (mols.length === 0) {
+    return ['  no open molecules']
+  }
+  const head = ['mol', 'state', 'ready', 'gates', 'in-progress', 'blocked']
+  const rows = mols.map((m) => [
+    m.mol,
+    m.state,
+    m.ready.map((r) => r.id).join(',') || '—',
+    m.gates.join(',') || '—',
+    m.inProgress.join(',') || '—',
+    m.blocked.join(',') || '—',
+  ])
+  const w = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)))
+  const line = (vals: string[]) =>
+    '  ' + vals.map((v, i) => v.padEnd(w[i]!)).join('  ').trimEnd()
+  return [line(head), ...rows.map(line)]
+}
+
+function gateVerdict(g: WatchPrGate): string {
+  if (g.error !== undefined) {
+    return `probe failed — ${g.error}`
+  }
+  return g.ok ? 'ok' : `blocked — ${(g.blockers ?? []).join('; ')}`
+}
+
+function gateLines(gates: WatchGates): string[] {
+  if (!gates.available) {
+    return [`  unavailable${gates.reason === undefined ? '' : ` — ${gates.reason}`}`]
+  }
+  if (gates.prs.length === 0) {
+    return ['  no PRs in the fleet']
+  }
+  return gates.prs.map((g) => `  ${g.link}  ${gateVerdict(g)}`)
+}
+
+function fleetLines(fleet: WatchSnapshot['fleet']): string[] {
+  const out =
+    fleet.rows.length === 0
+      ? ['  no open molecules — nothing in the fleet']
+      : fleetTableLines(fleet.rows).map((l) => `  ${l}`)
+  for (const d of fleet.degraded) {
+    out.push(`  warning: backend degraded — ${d}`)
+  }
+  for (const c of fleet.conflicts) {
+    out.push(`  warning: agent conflict — ${c}`)
+  }
+  return out
+}
+
 /** Text render — attention first; an empty list is the "fleet is quiet"
  *  answer, printed as such rather than omitted. */
 export function renderSnapshot(s: WatchSnapshot): string {
-  const out: string[] = [`bro watch — ${s.ts}`, '']
-  out.push('attention')
-  if (s.attention.length === 0) {
-    out.push('  (quiet)')
-  } else {
-    for (const a of s.attention) {
-      out.push(`  ${a}`)
-    }
-  }
-  out.push('', 'mols')
-  if (s.mols.length === 0) {
-    out.push('  no open molecules')
-  } else {
-    const rows = s.mols.map((m) => [
-      m.mol,
-      m.state,
-      m.ready.map((r) => r.id).join(',') || '—',
-      m.gates.join(',') || '—',
-      m.inProgress.join(',') || '—',
-      m.blocked.join(',') || '—',
-    ])
-    const head = ['mol', 'state', 'ready', 'gates', 'in-progress', 'blocked']
-    const w = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)))
-    out.push('  ' + head.map((h, i) => h.padEnd(w[i]!)).join('  ').trimEnd())
-    for (const r of rows) {
-      out.push('  ' + r.map((c, i) => c.padEnd(w[i]!)).join('  ').trimEnd())
-    }
-  }
-  out.push('', 'gates')
-  if (!s.gates.available) {
-    out.push(`  unavailable${s.gates.reason === undefined ? '' : ` — ${s.gates.reason}`}`)
-  } else if (s.gates.prs.length === 0) {
-    out.push('  no PRs in the fleet')
-  } else {
-    for (const g of s.gates.prs) {
-      const verdict =
-        g.error !== undefined
-          ? `probe failed — ${g.error}`
-          : g.ok
-            ? 'ok'
-            : `blocked — ${(g.blockers ?? []).join('; ')}`
-      out.push(`  ${g.link}  ${verdict}`)
-    }
-  }
-  out.push('', 'fleet')
-  if (s.fleet.rows.length === 0) {
-    out.push('  no open molecules — nothing in the fleet')
-  } else {
-    for (const l of fleetTableLines(s.fleet.rows)) {
-      out.push(`  ${l}`)
-    }
-  }
-  for (const d of s.fleet.degraded) {
-    out.push(`  warning: backend degraded — ${d}`)
-  }
-  for (const c of s.fleet.conflicts) {
-    out.push(`  warning: agent conflict — ${c}`)
-  }
-  return out.join('\n')
+  return [
+    `bro watch — ${s.ts}`,
+    '',
+    'attention',
+    ...attentionLines(s.attention),
+    '',
+    'mols',
+    ...molLines(s.mols),
+    '',
+    'gates',
+    ...gateLines(s.gates),
+    '',
+    'fleet',
+    ...fleetLines(s.fleet),
+  ].join('\n')
 }
 
 /** Parsed watch flags — `--once` is the default so it needs no field. */
