@@ -29,8 +29,8 @@ knobs live under `agents.<backend>` (e.g. `agents.gascity.configDir`).
 
   ```ts
   interface AgentConnector {
-    spawn(spec: SpawnSpec): Promise<AgentInfo>  // throws SpawnError
-    list(): Promise<AgentInfo[]>                // never throws; [] on backend outage
+    spawn(spec: SpawnSpec): Promise<AgentInfo>  // throws SpawnError (duplicate/conflict)
+    list(): Promise<ListResult>                 // {agents: AgentInfo[], degraded?: string}
     status(id: string): Promise<AgentInfo>      // throws AgentNotFound
     stop(id: string): Promise<void>             // idempotent; no-op if gone
     capabilities(): AgentCapabilities           // {attach?, respawn?, supervisor:'none'|'ondemand'|'required'}
@@ -53,11 +53,24 @@ knobs live under `agents.<backend>` (e.g. `agents.gascity.configDir`).
   }
   ```
 
-  `spawn` fails fast on a duplicate through **both** planes: the shared
-  dolt claim (`bd` assignee/in_progress on the molStep — the synced,
-  cross-clone truth) AND the local registry. The registry alone is
-  per-clone and cannot see a remote backend's worker; the beads claim is
-  what makes "no duplicate respawn" hold across clones.
+  `spawn` dedup must correlate both planes, not fail on claim alone —
+  otherwise a crashed worker's stale `in_progress` claim makes respawn
+  impossible:
+
+  - **fail fast** only when the molStep is claimed AND the claim resolves
+    to a *live* agent (registry entry with running/spawned state, or a
+    remote backend reporting it alive);
+  - **respawn path** — molStep claimed but its agent is `lost`/`exited`:
+    spawn re-claims/rebinds the step (the claim transfers to the new
+    worker) and reuses the registry entry's `agentId`;
+  - **unclaimed** molStep: spawn claims it fresh.
+
+  `list()` returning `degraded` (backend unreachable) means `bro fleet`
+  renders `unknown`, never `lost — respawn?` — a failed read must not
+  look like a dead fleet. **Scope note:** cross-clone exclusivity is
+  best-effort — `refs/dolt/data` sync is not atomic across clones; true
+  multi-machine dedup needs a shared lock plane and is out of v1 scope
+  (single-repo, single-machine fleet first).
 
 - **agentId registry** — `<git-common-dir>/bro/agents.json`, atomic-write
   (tmp+rename) map `molStep → {agentId, backend, spawnedAt}`. Native keeps
@@ -77,7 +90,13 @@ knobs live under `agents.<backend>` (e.g. `agents.gascity.configDir`).
 Read-only view, works regardless of backend: mols × steps × agents ×
 worktrees × PR gates. Phase 1 one-shot table; `--live` TUI later; site
 route over `bro serve`. An agent dead while its step stays claimed renders
-as `lost — respawn?` — the respawn decision surface.
+as `lost — respawn?` — the respawn decision surface — only on a
+successful `list()`; a `degraded` list renders `unknown` instead.
+
+`bro serve` is the facade host for thin clients (TUI/webui). Trust
+boundary, v1: binds `127.0.0.1` only, no remote exposure; write
+operations (spawn/stop) require the local session context — remote
+orchestration, if ever, is a separate spec.
 
 ## Filetree
 

@@ -36,13 +36,13 @@ packages/
   core/       connectors/facades, tasks, git, docs         → backends
     src/specs.ts              SpecStore facade contract    → sdd
     src/plan.ts               plan version check + routing → plans
+    src/agents.ts             AgentConnector contract      → sessions
   github/     gh review connector                          → backends
   gitlab/     glab review connector                        → backends
   cli/        bro: plugin registry + command dispatch      → all
     src/commands/spec.ts, spec-connectors.ts               → sdd
     src/commands/{hooks,work,drill,loop,next}.ts           → sessions
     src/commands/{agents,fleet,serve}.ts, agent-connectors.ts → sessions
-    core/src/agents.ts                                     → sessions
   pack/       @broject/bro-pack — client skill packs       → distro
   loop/, convoy/, retro/, drill/                           → sessions/retro
 site/         broject.dev                                  → distro
