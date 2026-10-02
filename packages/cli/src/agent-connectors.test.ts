@@ -274,7 +274,7 @@ describe('resolveAgentConnector', () => {
       )
       // registry order — native is the designed default
       assert.equal(resolveAgentConnector({ dir: main }, {}, env).name, 'native')
-      assert.deepEqual(agentConnectorNames(), ['native', 'tmux'])
+      assert.deepEqual(agentConnectorNames(), ['native', 'tmux', 'gascity'])
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -587,7 +587,7 @@ describe('eachAgentConnector', () => {
       { agents: {}, connectors: {} },
       (name, err) => notes.push(`${name}: ${err instanceof Error ? err.message : String(err)}`)
     )
-    assert.deepEqual(conns.map((c) => c.name), ['native', 'tmux'])
+    assert.deepEqual(conns.map((c) => c.name), ['native', 'tmux', 'gascity'])
     assert.deepEqual(notes, ['explody: backend exploded'])
     assert.throws(
       () => eachAgentConnector({ dir: '/x' }, { agents: {}, connectors: {} }),
