@@ -1192,16 +1192,28 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
    *  agent named after the molStep, pinned to spec.repoRoot. Written on
    *  every spawn; gc reads config per command. */
   const writeStepAgent = (spec: SpawnSpec, city: string): void => {
-    if (!/^[\w.-]+$/.test(spec.molStep)) {
+    // leading-alnum guard: '.'/'..' would escape the per-step dir and a
+    // template-named step would overwrite the shared template
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(spec.molStep)) {
       throw new SpawnError(`molStep ${spec.molStep} is not a safe gascity agent name`)
     }
+    // inherit a customized agents.gascity.template — its prompt and
+    // agent.toml carry over; only the work_dir pin is asserted
+    const tplDir = join(city, 'agents', template)
+    const read = (f: string, fallback: string): string => {
+      try {
+        return readFileSync(join(tplDir, f), 'utf8')
+      } catch {
+        return fallback
+      }
+    }
+    const wd = `work_dir = "${tomlStr(spec.repoRoot)}"`
+    // work_dir is top-level — it must precede any [table] in the file
+    const agentToml = `${wd}\n` + read('agent.toml', GC_AGENT_TOML).replace(/^work_dir\s*=.*$/gm, '')
     const agentDir = join(city, 'agents', spec.molStep)
     mkdirSync(agentDir, { recursive: true })
-    writeFileSync(join(agentDir, 'prompt.template.md'), GC_PROMPT_TEMPLATE)
-    writeFileSync(
-      join(agentDir, 'agent.toml'),
-      `${GC_AGENT_TOML}work_dir = "${tomlStr(spec.repoRoot)}"\n`
-    )
+    writeFileSync(join(agentDir, 'prompt.template.md'), read('prompt.template.md', GC_PROMPT_TEMPLATE))
+    writeFileSync(join(agentDir, 'agent.toml'), agentToml)
   }
 
   /** Adopt the repo as a rig — the rig's beads DB IS the shared store,
@@ -1313,6 +1325,24 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     if (submit.code !== 0) {
       throw new Error(
         `gc session submit ${spec.molStep} — ${submit.err !== '' ? submit.err : `exited ${submit.code}`}`
+      )
+    }
+  }
+
+  /** `close` is the terminal op — `kill` races the reconciler's restart.
+   *  A failed close is tolerated only when the session is verifiably
+   *  gone — marking stopped while it still runs would leave a live
+   *  worker that respawns refuse as a duplicate. */
+  const closeGcSession = (city: string, target: string, molStep: string): void => {
+    const close = gcRun(['session', 'close', target, '--city', city])
+    if (close.code === 0) {
+      return
+    }
+    const { sessions } = listGcSessions(city)
+    const s = sessions?.find((x) => x.id === target || x.alias === molStep)
+    if (s === undefined ? sessions === undefined : gcState(s) !== 'exited') {
+      throw new Error(
+        `gc session close ${target} — ${close.err !== '' ? close.err : `exited ${close.code}`}`
       )
     }
   }
@@ -1444,21 +1474,11 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       const [molStep, entry] = hit
       const city = configDir()
       if (city !== null && entry.stopped !== true) {
-        // `close` is the terminal op — `kill` races the reconciler's
-        // restart. A failed close is tolerated only when the session is
-        // verifiably gone — marking stopped while it still runs would
-        // leave a live worker that respawns refuse as a duplicate.
-        const target = typeof entry.sessionId === 'string' ? entry.sessionId : molStep
-        const close = gcRun(['session', 'close', target, '--city', city])
-        if (close.code !== 0) {
-          const { sessions } = listGcSessions(city)
-          const s = sessions?.find((x) => x.id === target || x.alias === molStep)
-          if (s === undefined ? sessions === undefined : gcState(s) !== 'exited') {
-            throw new Error(
-              `gc session close ${target} — ${close.err !== '' ? close.err : `exited ${close.code}`}`
-            )
-          }
-        }
+        closeGcSession(
+          city,
+          typeof entry.sessionId === 'string' ? entry.sessionId : molStep,
+          molStep
+        )
       }
       try {
         patchAgentRegistry(dir, molStep, { stopped: true })
