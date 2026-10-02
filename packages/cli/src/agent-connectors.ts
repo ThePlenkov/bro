@@ -172,6 +172,15 @@ function agentsHome(dir: string): string | null {
   return common === '' ? null : join(common, 'bro', 'agents')
 }
 
+/** `<common>/bro/agents/<agentId>.prompt.md` — the spawn-time rendered
+ *  instructions. Respawn of a custom-prompt agent (a fixer round's
+ *  thread context, say) reuses it — the agentId survives process death,
+ *  so the file does too. */
+export function agentPromptPath(dir: string, agentId: string): string | null {
+  const home = agentsHome(dir)
+  return home === null ? null : join(home, `${agentId}.prompt.md`)
+}
+
 /** `<common>/bro/hooks/agent-<id>.work` — hooks markers are
  *  `<common>/bro/hooks/<session>.<aspect>`; the agent gets a synthetic
  *  session name so `otherLiveWork` (session-start parallel detection)
