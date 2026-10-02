@@ -241,97 +241,110 @@ async function gateFleetPrs(
   )
 }
 
+const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
+
+/** Each plane degrades to its own error state — the snapshot composes
+ *  results, it never dies on one plane. */
+function molsPlane(): { mols: WatchMol[]; error?: string } {
+  try {
+    return { mols: collectMols() }
+  } catch (err) {
+    return { mols: [], error: errText(err) }
+  }
+}
+
+interface ResolvedHost {
+  rev?: ReviewFacade
+  repo: string
+  reason?: string
+}
+
+function hostPlane(dir: string): ResolvedHost {
+  try {
+    const rev = reviewHost(dir)
+    return { rev, repo: rev.resolveRepo([]) }
+  } catch (err) {
+    return { repo: '', reason: errText(err) }
+  }
+}
+
+/** fleet — same machinery as `bro fleet`; a throwing read (backends,
+ *  worktree list, the molecule re-read in fleetRows) degrades the
+ *  section, never the heartbeat. */
+async function fleetPlane(
+  dir: string,
+  host: ResolvedHost
+): Promise<WatchSnapshot['fleet']> {
+  try {
+    const { byStep, degraded, conflicts } = await collectAgents(dir)
+    const prErrors: string[] = []
+    const rows = fleetRows(
+      byStep,
+      degraded.length > 0,
+      host.rev,
+      host.repo,
+      worktreeList(prErrors),
+      prErrors
+    )
+    return { rows, degraded, conflicts, prErrors }
+  } catch (err) {
+    return { rows: [], degraded: [], conflicts: [], prErrors: [], error: errText(err) }
+  }
+}
+
+/** gates — no review host renders the section unavailable; a throwing
+ *  probe renders `error`, distinct from a host failure. */
+async function gatesPlane(
+  dir: string,
+  host: ResolvedHost,
+  rows: FleetRow[],
+  prErrors: string[]
+): Promise<WatchGates> {
+  if (host.rev === undefined) {
+    return { available: false, reason: host.reason, prs: [] }
+  }
+  const lookupErrors = prErrors.length > 0 ? prErrors : undefined
+  try {
+    return {
+      available: true,
+      prs: await gateFleetPrs(host.rev, host.repo, rows, dir),
+      lookupErrors,
+    }
+  } catch (err) {
+    return { available: true, error: errText(err), prs: [], lookupErrors }
+  }
+}
+
 /** The snapshot — pure reads across all three planes. Every plane is
  *  best-effort on its own: a throwing plane degrades its section, never
  *  kills the heartbeat. */
 export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
-  let mols: WatchMol[] = []
-  let molsError: string | undefined
-  try {
-    mols = collectMols()
-  } catch (err) {
-    molsError = err instanceof Error ? err.message : String(err)
-  }
+  const molsPlane_ = molsPlane()
+  const host = hostPlane(dir)
+  const fleet = await fleetPlane(dir, host)
+  const gates = await gatesPlane(dir, host, fleet.rows, fleet.prErrors ?? [])
 
-  let rev: ReviewFacade | undefined
-  let repo = ''
-  let gateReason: string | undefined
-  try {
-    rev = reviewHost(dir)
-    repo = rev.resolveRepo([])
-  } catch (err) {
-    rev = undefined
-    gateReason = err instanceof Error ? err.message : String(err)
-  }
-
-  // --- fleet: same machinery as `bro fleet`; a throwing read
-  // (backends, worktree list, the molecule re-read in fleetRows)
-  // degrades the section, never the heartbeat ---
-  let rows: FleetRow[] = []
-  let degraded: string[] = []
-  let conflicts: string[] = []
-  let prErrors: string[] = []
-  let fleetError: string | undefined
-  try {
-    const agents = await collectAgents(dir)
-    degraded = agents.degraded
-    conflicts = agents.conflicts
-    rows = fleetRows(
-      agents.byStep,
-      degraded.length > 0,
-      rev,
-      repo,
-      worktreeList(prErrors),
-      prErrors
-    )
-  } catch (err) {
-    fleetError = err instanceof Error ? err.message : String(err)
-  }
-
-  // --- gates: no review host renders the section unavailable; a
-  // throwing probe renders `error`, distinct from a host failure ---
-  let gates: WatchGates
-  if (rev === undefined) {
-    gates = { available: false, reason: gateReason, prs: [] }
-  } else {
-    const lookupErrors = prErrors.length > 0 ? prErrors : undefined
-    try {
-      gates = {
-        available: true,
-        prs: await gateFleetPrs(rev, repo, rows, dir),
-        lookupErrors,
-      }
-    } catch (err) {
-      gates = {
-        available: true,
-        error: err instanceof Error ? err.message : String(err),
-        prs: [],
-        lookupErrors,
-      }
-    }
-  }
-
-  const attention = attentionOf(mols, rows, gates.prs)
-  for (const e of prErrors) {
+  const attention = attentionOf(molsPlane_.mols, fleet.rows, gates.prs)
+  for (const e of fleet.prErrors ?? []) {
     attention.push(`PR lookup failed — ${e}`)
   }
   if (gates.error !== undefined) {
     attention.push(`gates probe failed — ${gates.error}`)
   }
-  if (fleetError !== undefined) {
-    attention.push(`fleet plane failed — ${fleetError}`)
+  if (fleet.error !== undefined) {
+    attention.push(`fleet plane failed — ${fleet.error}`)
   }
-  if (molsError !== undefined) {
-    attention.push(`mols plane failed — ${molsError}`)
+  if (molsPlane_.error !== undefined) {
+    attention.push(`mols plane failed — ${molsPlane_.error}`)
   }
 
   return {
     ts: new Date().toISOString(),
     attention,
-    mols,
-    molsError,
+    mols: molsPlane_.mols,
+    molsError: molsPlane_.error,
     gates,
-    fleet: { rows, degraded, conflicts, prErrors, error: fleetError },
+    fleet,
   }
 }
 
