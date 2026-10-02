@@ -6,8 +6,8 @@
  * parent burning tokens in a wait loop.
  *
  * Mailbox: `<git-common-dir>/bro/notify/` inside a repo (shared across
- * linked worktrees), `$XDG_STATE_HOME/bro/notify/` outside one — the
- * spec's "(or XDG state)" fallback.
+ * linked worktrees), the XDG state dir (`$XDG_STATE_HOME`, default
+ * `~/.local/state`) outside one — the spec's "(or XDG state)" fallback.
  */
 import { dropMailbox, notifyDir } from '@broject/core'
 

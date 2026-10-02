@@ -1,12 +1,22 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   drainDirs,
   drainMailbox,
+  DROP_TTL_MS,
   dropMailbox,
   mailboxDir,
   notifyDir,
@@ -25,19 +35,22 @@ const withRepo = (fn: (dir: string) => void): void => {
   }
 }
 
-/** Pin XDG state into a tmp dir — drainDirs() reads the real
- *  $HOME/.local/state mailbox otherwise and tests would eat it. */
-const withXdg = <T>(dir: string, fn: () => T): T => {
+/** Pin XDG state into a tmp dir the helper owns and removes — without it
+ *  drainDirs() would read the real $HOME/.local/state mailbox and tests
+ *  would eat a live session's drops. */
+const withXdg = <T>(fn: (xdg: string) => T): T => {
+  const dir = tmp('bro-xdg-')
   const prev = process.env.XDG_STATE_HOME
   process.env.XDG_STATE_HOME = dir
   try {
-    return fn()
+    return fn(dir)
   } finally {
     if (prev === undefined) {
       delete process.env.XDG_STATE_HOME
     } else {
       process.env.XDG_STATE_HOME = prev
     }
+    rmSync(dir, { recursive: true, force: true })
   }
 }
 
@@ -72,8 +85,8 @@ describe('mailboxDir', () => {
 
 describe('userMailboxDir / notifyDir', () => {
   test('XDG_STATE_HOME wins, else ~/.local/state', () => {
-    withXdg(join(tmp('bro-xdg-'), 'state'), () => {
-      assert.match(userMailboxDir(), /state\/bro\/notify$/)
+    withXdg((xdg) => {
+      assert.equal(userMailboxDir(), join(xdg, 'bro', 'notify'))
     })
     const prev = process.env.XDG_STATE_HOME
     delete process.env.XDG_STATE_HOME
@@ -86,16 +99,30 @@ describe('userMailboxDir / notifyDir', () => {
     }
   })
 
+  test('an empty XDG_STATE_HOME falls back like an unset one', () => {
+    const prev = process.env.XDG_STATE_HOME
+    process.env.XDG_STATE_HOME = ''
+    try {
+      assert.match(userMailboxDir(), /\.local\/state\/bro\/notify$/)
+    } finally {
+      if (prev === undefined) {
+        delete process.env.XDG_STATE_HOME
+      } else {
+        process.env.XDG_STATE_HOME = prev
+      }
+    }
+  })
+
   test('notifyDir picks the repo mailbox, else the user mailbox', () => {
     withRepo((dir) => {
-      withXdg(tmp('bro-xdg-'), () => {
+      withXdg(() => {
         assert.equal(notifyDir(dir), mailboxDir(dir))
       })
     })
     const bare = tmp('bro-notify-bare-')
     try {
-      withXdg(join(bare, 'xdg'), () => {
-        assert.equal(notifyDir(bare), join(bare, 'xdg', 'bro', 'notify'))
+      withXdg((xdg) => {
+        assert.equal(notifyDir(bare), join(xdg, 'bro', 'notify'))
       })
     } finally {
       rmSync(bare, { recursive: true, force: true })
@@ -118,61 +145,57 @@ describe('dropMailbox', () => {
 })
 
 describe('drainMailbox', () => {
-  test('returns drops oldest-first and deletes them', () => {
+  test('delivers drops oldest-first, verbatim — once per session', () => {
     withRepo((dir) => {
-      withXdg(tmp('bro-xdg-'), () => {
+      withXdg(() => {
         const mb = mailboxDir(dir)!
         mkdirSync(mb, { recursive: true })
         writeFileSync(join(mb, 'note-100-a.txt'), 'first')
-        writeFileSync(join(mb, 'note-200-b.txt'), 'second')
+        writeFileSync(join(mb, 'note-200-b.txt'), 'two\n  indented')
         writeFileSync(join(mb, '.note-300.tmp'), 'half-written')
-        assert.deepEqual(drainMailbox(dir), ['first', 'second'])
-        assert.equal(existsSync(join(mb, 'note-100-a.txt')), false)
-        assert.deepEqual(drainMailbox(dir), [])
+        assert.deepEqual(drainMailbox(dir, 's1'), ['first', 'two\n  indented'])
+        // same session: no redelivery
+        assert.deepEqual(drainMailbox(dir, 's1'), [])
+        // the cursor lives in the mailbox dir
+        assert.ok(existsSync(join(mb, '.seen-s1')))
       })
     })
   })
 
-  test('orders by drop time across prefixes — watch-* does not wait on note-*', () => {
+  test('broadcast: a different session still gets the drops', () => {
     withRepo((dir) => {
-      withXdg(tmp('bro-xdg-'), () => {
+      withXdg(() => {
         const mb = mailboxDir(dir)!
-        mkdirSync(mb, { recursive: true })
-        writeFileSync(join(mb, 'watch-100-a.txt'), 'older watch')
-        writeFileSync(join(mb, 'note-200-b.txt'), 'newer note')
-        writeFileSync(join(mb, 'watch-50-c.txt'), 'oldest watch')
-        assert.deepEqual(drainMailbox(dir), [
-          'oldest watch',
-          'older watch',
-          'newer note',
-        ])
+        dropMailbox(mb, 'for everyone', 'note')
+        assert.deepEqual(drainMailbox(dir, 's1'), ['for everyone'])
+        // s1's drain must not eat it — s2 is the intended recipient case
+        assert.deepEqual(drainMailbox(dir, 's2'), ['for everyone'])
+        // and the writer session echoing it back is delivery, not loss
+        assert.deepEqual(drainMailbox(dir, 's3'), ['for everyone'])
       })
     })
   })
 
-  test('a live .claim is invisible to drain; a stale one is handed back', () => {
+  test('a drop older than the TTL is reaped undelivered', () => {
     withRepo((dir) => {
-      withXdg(tmp('bro-xdg-'), () => {
+      withXdg(() => {
         const mb = mailboxDir(dir)!
         mkdirSync(mb, { recursive: true })
-        const claim = join(mb, '.note-100-a.txt.4242-zz.claim')
-        writeFileSync(claim, 'claimed but undelivered')
-        assert.deepEqual(drainMailbox(dir), [])
-        assert.equal(existsSync(claim), true)
-        const stale = new Date(Date.now() - 120_000)
-        utimesSync(claim, stale, stale)
-        assert.deepEqual(drainMailbox(dir), ['claimed but undelivered'])
-        assert.equal(existsSync(claim), false)
+        const stale = join(mb, 'note-100-a.txt')
+        writeFileSync(stale, 'ancient')
+        const old = new Date(Date.now() - DROP_TTL_MS - 1000)
+        utimesSync(stale, old, old)
+        assert.deepEqual(drainMailbox(dir, 's1'), [])
+        assert.equal(existsSync(stale), false)
       })
     })
   })
 
   test('drains the user mailbox too — drops written outside a repo', () => {
     withRepo((dir) => {
-      const xdg = tmp('bro-xdg-')
-      withXdg(xdg, () => {
+      withXdg(() => {
         dropMailbox(userMailboxDir(), 'from a repo-less writer', 'note')
-        assert.deepEqual(drainMailbox(dir), ['from a repo-less writer'])
+        assert.deepEqual(drainMailbox(dir, 's1'), ['from a repo-less writer'])
       })
     })
   })
@@ -180,9 +203,9 @@ describe('drainMailbox', () => {
   test('no mailboxes anywhere is an empty drain, not an error', () => {
     const dir = tmp('bro-notify-empty-')
     try {
-      withXdg(join(dir, 'xdg'), () => {
-        assert.deepEqual(drainDirs(dir), [join(dir, 'xdg', 'bro', 'notify')])
-        assert.deepEqual(drainMailbox(dir), [])
+      withXdg((xdg) => {
+        assert.deepEqual(drainDirs(dir), [join(xdg, 'bro', 'notify')])
+        assert.deepEqual(drainMailbox(dir, 's1'), [])
       })
     } finally {
       rmSync(dir, { recursive: true, force: true })
