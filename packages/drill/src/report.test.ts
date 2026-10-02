@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { listReports, renderReport, writeReport } from './report.ts'
@@ -105,6 +105,29 @@ describe('writeReport + listReports', () => {
       assert.equal(rows.length, 1)
       assert.equal(rows[0]!.id, 'f9')
       assert.equal(rows[0]!.title, 't9')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a `drill:` line in the body is not a report — only frontmatter counts', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-report-'))
+    try {
+      writeFileSync(
+        join(dir, 'note.md'),
+        '---\ntitle: "unrelated"\n---\n\nbody text\ndrill: fake-id\n',
+      )
+      assert.deepEqual(listReports(dir), [])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('write is atomic — no .tmp sibling left behind', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-report-'))
+    try {
+      writeReport(dir, base)
+      assert.deepEqual(readdirSync(dir), ['f1.md'])
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

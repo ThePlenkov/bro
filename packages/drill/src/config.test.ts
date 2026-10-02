@@ -22,4 +22,12 @@ describe('drillSection', () => {
     assert.equal(cfg.report.dir, 'drills')
     assert.equal(cfg.report.mode, 'off')
   })
+
+  test('absolute or escaping dir falls back to drills — reports stay in the repo', () => {
+    for (const dir of ['/tmp/out', '../outside', 'a/../../b', '..\\up']) {
+      assert.equal(drillSection({ report: { dir } }).report.dir, 'drills')
+    }
+    // a `..`-looking name that isn't a traversal segment is fine
+    assert.equal(drillSection({ report: { dir: 'drills..x' } }).report.dir, 'drills..x')
+  })
 })

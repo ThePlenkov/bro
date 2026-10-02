@@ -5,7 +5,7 @@
  * substrate; the file is the *output* — it rides the branch like any
  * source file and `drill up` never commits it.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { DrillRow } from './types.ts'
 
@@ -55,7 +55,7 @@ export function renderReport(input: DrillReportInput): string {
     input.prevention.length === 0
       ? ['(none)']
       : input.prevention.map((p, i) => {
-          const id = input.preventionIds[i]
+          const id = input.preventionIds[i] ?? ''
           return `- ${p}${id ? ` (${id})` : ''}`
         })
   const children =
@@ -88,19 +88,26 @@ export function renderReport(input: DrillReportInput): string {
 }
 
 /** Writes `<dir>/<frame-id>.md`, creating the dir — returns the path. A
- *  re-report overwrites: the file mirrors the memo, not history. */
+ *  re-report overwrites: the file mirrors the memo, not history. The
+ *  write lands via a sibling tmp + rename — an interrupted write must
+ *  not leave a truncated "durable" report. */
 export function writeReport(dir: string, input: DrillReportInput): string {
   mkdirSync(dir, { recursive: true })
   const path = join(dir, `${input.frame.id}.md`)
-  writeFileSync(path, renderReport(input))
+  const tmp = `${path}.tmp`
+  writeFileSync(tmp, renderReport(input))
+  renameSync(tmp, path)
   return path
 }
 
+const FM_BLOCK = /^---\r?\n([\s\S]*?)\r?\n---/
 const FM_DRILL = /^drill:\s*"?([^"\n]+)"?\s*$/m
 const TITLE = /^# drill report — (.+)$/m
 
 /** Reports under `dir` — files without a `drill:` frontmatter key aren't
- *  reports and are skipped; an unreadable file fails loudly. */
+ *  reports and are skipped; an unreadable file fails loudly. The key
+ *  must sit inside the delimited frontmatter — a `drill:` line in the
+ *  body doesn't make a file a report. */
 export function listReports(dir: string): DrillReportEntry[] {
   if (!existsSync(dir)) {
     return []
@@ -109,7 +116,8 @@ export function listReports(dir: string): DrillReportEntry[] {
   for (const name of readdirSync(dir).filter((f) => f.endsWith('.md')).sort()) {
     const path = join(dir, name)
     const text = readFileSync(path, 'utf8')
-    const fm = text.startsWith('---') ? FM_DRILL.exec(text) : null
+    const block = FM_BLOCK.exec(text)
+    const fm = block ? FM_DRILL.exec(block[1]!) : null
     if (!fm) {
       continue
     }

@@ -41,6 +41,11 @@ export interface UpOptions {
 export interface UpResult {
   closed: string
   preventionIds: string[]
-  /** Path of the written report — present only when reportDir was set. */
+  /** Path of the written report — present only when reportDir was set
+   *  and the write succeeded. */
   reportPath?: string
+  /** Report write failure message — the frame IS closed at that point,
+   *  so a failed write must surface as data, not a thrown error (the
+   *  CLI warns; `up` still succeeded). */
+  reportError?: string
 }

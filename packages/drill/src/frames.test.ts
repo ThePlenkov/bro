@@ -277,6 +277,32 @@ describe('drillUp --report', () => {
     },
   )
 
+  test(
+    'report write failure surfaces as reportError — the close still succeeded',
+    { skip: WIN32 },
+    () => {
+      const bin = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
+      writeFileSync(join(bin, 'bd'), FAKE_BD_OK)
+      chmodSync(join(bin, 'bd'), 0o755)
+      const dir = mkdtempSync(join(tmpdir(), 'bro-report-'))
+      // a reportDir rooted inside a regular file → mkdir fails
+      const file = join(dir, 'afile')
+      writeFileSync(file, 'x')
+      const prevPath = process.env.PATH
+      process.env.PATH = `${bin}:${prevPath}`
+      try {
+        const res = drillUp({ id: 'f1', result: 'r', reportDir: join(file, 'sub') })
+        assert.equal(res.closed, 'f1')
+        assert.equal(res.reportPath, undefined)
+        assert.match(res.reportError ?? '', /ENOTDIR|not a directory/i)
+      } finally {
+        process.env.PATH = prevPath
+        rmSync(bin, { recursive: true, force: true })
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+  )
+
   test('no reportDir → no reportPath', { skip: WIN32 }, () => {
     const bin = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
     writeFileSync(join(bin, 'bd'), FAKE_BD_OK)

@@ -16,6 +16,7 @@ import { relative, resolve } from 'node:path'
 import { gitTry, loadConfig } from '@broject/core'
 import {
   checkBeads,
+  childrenOf,
   currentFrame,
   DEFAULT_DRILL_CONFIG,
   drillDown,
@@ -38,7 +39,7 @@ function usage(exitCode = 1): never {
 Commands:
   down <title> [--under ID] [--ephemeral]        New child frame under current leaf (or root)
   up --result T [--prevent T]… [--evidence R]…   Close current frame, memo goes to beads
-     [--report]                                  also write drills/<id>.md (drill.report)
+     [--report]                                  also write <drill.report.dir>/<id>.md (default drills/)
   current                                        Show the active leaf frame
   tree                                           Render all drill hierarchies
   list                                           Open drill frames
@@ -195,6 +196,8 @@ function safeRow(id: string): DrillRow | undefined {
   }
 }
 
+const openish = (r: DrillRow): boolean => r.status !== 'closed' && r.status !== 'done'
+
 /** Whether this `drill up` writes a report: explicit --report always does;
  *  mode 'always' covers persistent frames (ephemeral wisps still need the
  *  flag); 'prompt' asks on a TTY and degrades to off without one. */
@@ -210,10 +213,24 @@ async function resolveReportDir(args: ReturnType<typeof parseUp>): Promise<strin
   if (!target) {
     return undefined
   }
+  // ephemeral wisps need the explicit flag, whatever the mode
+  if (target.ephemeral) {
+    return undefined
+  }
   if (rc.mode === 'always') {
-    return target.ephemeral ? undefined : rc.dir
+    return rc.dir
   }
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return undefined
+  }
+  // don't ask when the up can't succeed anyway — a Y followed by "not an
+  // open drill frame"/"open child issues" is a misleading prompt; drillUp
+  // still validates authoritatively
+  if (
+    !openish(target) ||
+    !(target.labels?.includes('drill') ?? false) ||
+    childrenOf(target.id).some(openish)
+  ) {
     return undefined
   }
   const rl = createInterface({ input: process.stdin, output: process.stdout })
@@ -239,6 +256,9 @@ async function cmdUp(rest: string[]): Promise<void> {
   if (res.reportPath) {
     const rel = relative(process.cwd(), res.reportPath)
     console.log(`  report → ${rel.startsWith('..') ? res.reportPath : rel}`)
+  }
+  if (res.reportError) {
+    console.error(`  report write failed (frame is closed): ${res.reportError}`)
   }
 }
 
@@ -337,7 +357,11 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
   } else if (sub === 'distill') {
     parseDistill(rest)
   }
-  checkBeads()
+  // `report` lists files only — a missing/uninitialized bd must not
+  // block reading published reports
+  if (sub !== 'report') {
+    checkBeads()
+  }
 
   switch (sub) {
     case 'down':

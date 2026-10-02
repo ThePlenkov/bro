@@ -457,17 +457,18 @@ export function drillUp(opts: UpOptions): UpResult {
     )
   }
   // post-close: the file rides the branch like any artifact — a write
-  // failure must not look like the up failed (the frame IS closed)
+  // failure must not look like the up failed (the frame IS closed), so
+  // it surfaces as reportError for the caller to warn about
   let reportPath: string | undefined
+  let reportError: string | undefined
   if (reportInput) {
     try {
       reportPath = writeReport(opts.reportDir!, { ...reportInput, preventionIds })
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      throw new Error(`frame ${frame.id} closed — report write failed: ${msg}`)
+      reportError = err instanceof Error ? err.message : String(err)
     }
   }
-  return { closed: frame.id, preventionIds, reportPath }
+  return { closed: frame.id, preventionIds, reportPath, reportError }
 }
 
 /** Root frames + rendered tree (indented, roots first). */
