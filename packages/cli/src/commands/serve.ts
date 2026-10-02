@@ -133,6 +133,48 @@ export function liveServeState(dir: string): ServeState | undefined {
   return state !== undefined && pidAlive(state.pid) ? state : undefined
 }
 
+/** Drop our lock file — only while it still carries OUR pid, so a
+ *  broken-stale-then-retaken lock stays with its new holder. */
+function releaseServeLock(lock: string): void {
+  try {
+    if (readFileSync(lock, 'utf8') === `${process.pid}`) {
+      rmSync(lock, { force: true })
+    }
+  } catch {
+    // raced removal is already the desired end state
+  }
+}
+
+/** One acquisition attempt — link the staged pid file over `lock`.
+ *  EEXIST means held: a live holder refuses; a dead holder's leftover
+ *  is broken so the next attempt wins. */
+function tryLockOnce(staged: string, lock: string): 'acquired' | 'held' | 'retry' {
+  try {
+    linkSync(staged, lock)
+    return 'acquired'
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw err
+    }
+  }
+  let holder = Number.NaN
+  try {
+    holder = Number(readFileSync(lock, 'utf8').trim())
+  } catch {
+    // raced removal — the retry decides
+    return 'retry'
+  }
+  if (Number.isInteger(holder) && pidAlive(holder)) {
+    return 'held'
+  }
+  try {
+    rmSync(lock, { force: true })
+  } catch {
+    // another starter broke it first — the retry decides
+  }
+  return 'retry'
+}
+
 /** `<serve.json>.lock` — atomic create is the singleton gate, so two
  *  starters can't both pass the live-state check and both write
  *  serve.json (the lock is held for the server's whole lifetime, not a
@@ -153,37 +195,12 @@ export function acquireServeLock(dir: string): (() => void) | undefined {
   writeFileSync(staged, `${process.pid}`)
   try {
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        linkSync(staged, lock)
-        return () => {
-          try {
-            // remove only while the lock still carries OUR pid — a
-            // broken-stale-then-retaken lock belongs to its new holder
-            if (readFileSync(lock, 'utf8') === `${process.pid}`) {
-              rmSync(lock, { force: true })
-            }
-          } catch {
-            // raced removal is already the desired end state
-          }
-        }
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
-          throw err
-        }
-        let holder = Number.NaN
-        try {
-          holder = Number(readFileSync(lock, 'utf8').trim())
-        } catch {
-          // raced removal — the retry decides
-        }
-        if (Number.isInteger(holder) && pidAlive(holder)) {
-          return undefined
-        }
-        try {
-          rmSync(lock, { force: true })
-        } catch {
-          // another starter broke it first — the retry decides
-        }
+      const verdict = tryLockOnce(staged, lock)
+      if (verdict === 'acquired') {
+        return () => releaseServeLock(lock)
+      }
+      if (verdict === 'held') {
+        return undefined
       }
     }
     return undefined
@@ -368,6 +385,120 @@ export async function routeRequest(
   }
 }
 
+const NOT_FOUND: ServeResponse = { status: 404, body: { error: 'not found', routes: ROUTES } }
+const NOT_ALLOWED: ServeResponse = { status: 405, body: { error: 'method not allowed' } }
+
+function routeHealth(method: string, meta: ServeMeta): ServeResponse {
+  if (method !== 'GET') {
+    return NOT_ALLOWED
+  }
+  return {
+    status: 200,
+    body: { ok: true, pid: process.pid, dir: meta.dir, startedAt: meta.startedAt },
+  }
+}
+
+async function routeSnapshot(method: string, deps: ServeDeps): Promise<ServeResponse> {
+  if (method !== 'GET') {
+    return NOT_ALLOWED
+  }
+  return { status: 200, body: await deps.snapshot() }
+}
+
+async function routeAgents(
+  method: string,
+  rawBody: string | undefined,
+  deps: ServeDeps
+): Promise<ServeResponse> {
+  if (method === 'GET') {
+    return { status: 200, body: backendJson(await deps.backends()) }
+  }
+  if (method !== 'POST') {
+    return NOT_ALLOWED
+  }
+  const req = parseSpawnBody(rawBody)
+  if (req.connector !== undefined && !deps.connectors().includes(req.connector)) {
+    return {
+      status: 400,
+      body: {
+        error: `agent connector "${req.connector}" is not registered`,
+        connectors: deps.connectors(),
+      },
+    }
+  }
+  try {
+    const agent = await deps.spawn(req)
+    return { status: 201, body: { agent } }
+  } catch (err) {
+    if (err instanceof SpawnInputError || err instanceof HttpError) {
+      return { status: 400, body: { error: err.message } }
+    }
+    if (err instanceof SpawnError) {
+      return { status: 409, body: { error: err.message } }
+    }
+    throw err
+  }
+}
+
+async function routeAgentGet(ref: string, deps: ServeDeps): Promise<ServeResponse> {
+  const { hit, degraded } = await deps.find(ref)
+  if (!hit) {
+    return { status: 404, body: missBody(ref, degraded) }
+  }
+  // a hit beside a degraded backend is a partial read — surface the
+  // note on the resource rather than claiming a complete view
+  return {
+    status: 200,
+    body: { ...hit.agent, ...(degraded.length > 0 ? { degraded } : {}) },
+  }
+}
+
+async function routeAgentDelete(ref: string, deps: ServeDeps): Promise<ServeResponse> {
+  const outcome = await deps.stop(ref)
+  if (!outcome.found) {
+    // a degraded read can't confirm "gone" — unverifiable is not 404
+    if (outcome.degraded.length > 0) {
+      return {
+        status: 503,
+        body: {
+          error: `cannot verify "${ref}" — backend(s) degraded`,
+          degraded: outcome.degraded,
+        },
+      }
+    }
+    return { status: 404, body: { error: `no agent "${ref}"` } }
+  }
+  return {
+    status: 200,
+    body: {
+      agent: outcome.agent,
+      stopped: outcome.stopped,
+      // machine-readable "was already terminal" — clients shouldn't
+      // string-match the note to tell it from a live stop
+      ...(outcome.terminal === true ? { terminal: true } : {}),
+      ...(outcome.terminal === true && outcome.agent !== undefined
+        ? { note: `already ${outcome.agent.state}` }
+        : {}),
+      ...(outcome.respawned !== undefined ? { respawned: outcome.respawned } : {}),
+    },
+  }
+}
+
+async function routeAgentRef(
+  method: string,
+  seg: string,
+  deps: ServeDeps
+): Promise<ServeResponse> {
+  const ref = parseRef(seg)
+  if (method === 'GET') {
+    return routeAgentGet(ref, deps)
+  }
+  if (method === 'DELETE') {
+    return routeAgentDelete(ref, deps)
+  }
+  return NOT_ALLOWED
+}
+
 async function route(
   method: string,
   pathname: string,
@@ -383,114 +514,24 @@ async function route(
 
   const api = seg[0] === 'api' && seg[1] === 'v1' ? seg.slice(2) : undefined
   if (api === undefined || api.length === 0) {
-    return { status: 404, body: { error: 'not found', routes: ROUTES } }
+    return NOT_FOUND
   }
 
-  // /api/v1/health
   if (api[0] === 'health' && api.length === 1) {
-    if (method !== 'GET') {
-      return { status: 405, body: { error: 'method not allowed' } }
-    }
-    return {
-      status: 200,
-      body: { ok: true, pid: process.pid, dir: meta.dir, startedAt: meta.startedAt },
-    }
+    return routeHealth(method, meta)
   }
-
-  // /api/v1/snapshot
   if (api[0] === 'snapshot' && api.length === 1) {
-    if (method !== 'GET') {
-      return { status: 405, body: { error: 'method not allowed' } }
-    }
-    return { status: 200, body: await deps.snapshot() }
+    return routeSnapshot(method, deps)
   }
-
-  // /api/v1/agents[/<ref>]
   if (api[0] === 'agents') {
     if (api.length === 1) {
-      if (method === 'GET') {
-        return { status: 200, body: backendJson(await deps.backends()) }
-      }
-      if (method === 'POST') {
-        const req = parseSpawnBody(rawBody)
-        if (
-          req.connector !== undefined &&
-          !deps.connectors().includes(req.connector)
-        ) {
-          return {
-            status: 400,
-            body: {
-              error: `agent connector "${req.connector}" is not registered`,
-              connectors: deps.connectors(),
-            },
-          }
-        }
-        try {
-          const agent = await deps.spawn(req)
-          return { status: 201, body: { agent } }
-        } catch (err) {
-          if (err instanceof SpawnInputError || err instanceof HttpError) {
-            return { status: 400, body: { error: err.message } }
-          }
-          if (err instanceof SpawnError) {
-            return { status: 409, body: { error: err.message } }
-          }
-          throw err
-        }
-      }
-      return { status: 405, body: { error: 'method not allowed' } }
+      return routeAgents(method, rawBody, deps)
     }
     if (api.length === 2) {
-      const ref = parseRef(api[1]!)
-      if (method === 'GET') {
-        const { hit, degraded } = await deps.find(ref)
-        if (!hit) {
-          return { status: 404, body: missBody(ref, degraded) }
-        }
-        // a hit beside a degraded backend is a partial read — surface the
-        // note on the resource rather than claiming a complete view
-        return {
-          status: 200,
-          body: { ...hit.agent, ...(degraded.length > 0 ? { degraded } : {}) },
-        }
-      }
-      if (method === 'DELETE') {
-        const outcome = await deps.stop(ref)
-        if (!outcome.found) {
-          // a degraded read can't confirm "gone" — unverifiable is not 404
-          if (outcome.degraded.length > 0) {
-            return {
-              status: 503,
-              body: {
-                error: `cannot verify "${ref}" — backend(s) degraded`,
-                degraded: outcome.degraded,
-              },
-            }
-          }
-          return { status: 404, body: { error: `no agent "${ref}"` } }
-        }
-        return {
-          status: 200,
-          body: {
-            agent: outcome.agent,
-            stopped: outcome.stopped,
-            // machine-readable "was already terminal" — clients shouldn't
-            // string-match the note to tell it from a live stop
-            ...(outcome.terminal === true ? { terminal: true } : {}),
-            ...(outcome.terminal === true && outcome.agent !== undefined
-              ? { note: `already ${outcome.agent.state}` }
-              : {}),
-            ...(outcome.respawned !== undefined
-              ? { respawned: outcome.respawned }
-              : {}),
-          },
-        }
-      }
-      return { status: 405, body: { error: 'method not allowed' } }
+      return routeAgentRef(method, api[1]!, deps)
     }
   }
-
-  return { status: 404, body: { error: 'not found', routes: ROUTES } }
+  return NOT_FOUND
 }
 
 // --- server ----------------------------------------------------------------------------

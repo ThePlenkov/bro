@@ -361,7 +361,7 @@ export interface StepSpawnRequest {
  *  connector, worktree, prompt, and shared store, then conn.spawn.
  *  Throws on every failure (SpawnError on conflict/refusal) — callers
  *  render; nothing exits here. */
-export async function spawnStepAgent(
+export function spawnStepAgent(
   dir: string,
   env: AgentConnectorEnv,
   req: StepSpawnRequest
@@ -370,7 +370,7 @@ export async function spawnStepAgent(
     throw new SpawnInputError('prompt and promptFile are mutually exclusive')
   }
   // '' would slip past `??` below and spawn an agent with no instructions
-  if (req.prompt !== undefined && req.prompt.trim() === '') {
+  if (req.prompt?.trim() === '') {
     throw new SpawnInputError('prompt must not be empty')
   }
   const conn = resolveAgentConnector({ dir }, { connector: req.connector }, env)

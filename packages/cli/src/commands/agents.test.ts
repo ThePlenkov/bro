@@ -255,8 +255,8 @@ describe('bro agents up <step>', () => {
     // the guard lives in spawnStepAgent, not in either front door
     const env = { agents: {}, connectors: {} } as AgentConnectorEnv
     for (const prompt of ['', '   ']) {
-      await assert.rejects(
-        spawnStepAgent('/nonexistent', env, { molStep: 'fx-1', prompt }),
+      assert.throws(
+        () => spawnStepAgent('/nonexistent', env, { molStep: 'fx-1', prompt }),
         SpawnInputError
       )
     }
