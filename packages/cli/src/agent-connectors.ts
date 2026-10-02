@@ -278,6 +278,11 @@ function prepareSpawn(
     isLive: (existing: AgentRegistryEntry) => boolean
     liveDetail?: (existing: AgentRegistryEntry) => string
     entry?: (agentId: string) => Record<string, unknown>
+    /** Rehome the claim onto the backend's worker identity after
+     *  claim/rebind (gascity: the session alias, so gc's default
+     *  work_query picks up in_progress work assigned to the session).
+     *  Also counts as "our own claim" in the rebind guard. */
+    claimAs?: string
   }
 ): { agentId: string; promptFile: string; log: string; exitFile: string } {
   const registry = readAgentRegistry(dir)
@@ -310,7 +315,7 @@ function prepareSpawn(
   // a live worker's (or a human's) step. The actor resolves in the
   // pinned store's context — the same context the claim was written under.
   const actor = claimed ? bdActor(spec.beadsDir) : undefined
-  if (claimed && step?.assignee !== actor) {
+  if (claimed && step?.assignee !== actor && step?.assignee !== opts.claimAs) {
     throw new SpawnError(
       `${spec.molStep} is claimed by ${step?.assignee ?? '?'} — rebind only takes our own claim`
     )
@@ -348,6 +353,9 @@ function prepareSpawn(
     rebindStep(spec.beadsDir, spec.molStep, actor!)
   } else {
     claimStep(spec.beadsDir, spec.molStep)
+  }
+  if (opts.claimAs !== undefined) {
+    rebindStep(spec.beadsDir, spec.molStep, opts.claimAs)
   }
   return { agentId, promptFile, log, exitFile }
 }
@@ -968,15 +976,23 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
  *  model mismatch is absorbed here, not in the facade).
  *
  *  Contract mapping (spike-probed on gc 1.4.2):
- *   - spawn   = lazy city bootstrap → `gc session new <template>
- *               --alias <molStep> --no-attach --json` → `gc sling` the
- *               bead → `gc session submit` the rendered prompt; respawn
- *               reuses the registry id and `gc session reset` the
- *               surviving session instead of colliding on --alias;
+ *   - spawn   = lazy city bootstrap → author a per-step agent
+ *               `agents/<molStep>/` (work_dir = spec.repoRoot — gc
+ *               derives the session's working dir from agent config,
+ *               and `gc sling`'s first operand must resolve to a
+ *               configured agent, so the agent IS named <molStep>) →
+ *               `gc session new <molStep> --alias <molStep> --no-attach
+ *               --json` → `gc sling <molStep> <molStep>` → `gc session
+ *               submit` the rendered prompt; the claim is rehomed to
+ *               the session alias so gc's default work_query (tier 1:
+ *               in_progress assigned to the session/alias) picks the
+ *               bead up; respawn reuses the registry id and `gc session
+ *               reset` the surviving session instead of colliding on
+ *               --alias;
  *   - list    = `gc session list --json --state all`; a supervisor
- *               unreachable probe degrades the read — an unverifiable
- *               session is omitted (fleet renders `unknown`), never
- *               reported `lost`;
+ *               not-verifiably-running probe degrades the read — an
+ *               unverifiable session is omitted (fleet renders
+ *               `unknown`), never reported `lost`;
  *   - stop    = `gc session close` — the terminal op; `kill` would race
  *               the reconciler's restart;
  *   - up/down = `gc start`/`gc stop <city>` — city-scoped lifecycle; the
@@ -1025,7 +1041,10 @@ function listGcSessions(city: string): { sessions?: GcSession[]; err?: string } 
     return { err: r.err !== '' ? r.err : `gc session list exited ${r.code}` }
   }
   try {
-    const v = JSON.parse(r.out) as { sessions?: GcSession[] }
+    const v = JSON.parse(r.out) as { ok?: boolean; sessions?: GcSession[]; error?: string }
+    if (v.ok === false) {
+      return { err: v.error ?? 'gc session list returned ok: false' }
+    }
     return { sessions: Array.isArray(v.sessions) ? v.sessions : [] }
   } catch {
     return { err: 'gc session list returned unparseable JSON' }
@@ -1059,16 +1078,18 @@ function gcState(s: GcSession): AgentState {
   }
 }
 
-/** Supervisor reachability — the liveness oracle. undefined = the probe
- *  itself failed (backend unreachable → degrade, never report `lost`);
- *  false = verified not running (everything it manages is stopped). */
+/** Supervisor reachability — the liveness oracle. Only `true` is proof
+ *  of life: the probe failing, an `ok:false` payload, a missing field,
+ *  or a verified-stopped supervisor all mean a missing session cannot be
+ *  called `lost` — callers degrade on anything but `true`. */
 function gcSupervisorRunning(): boolean | undefined {
   const r = gcRun(['supervisor', 'status', '--json'])
   if (r.code !== 0) {
     return undefined
   }
   try {
-    return (JSON.parse(r.out) as { running?: boolean }).running === true
+    const v = JSON.parse(r.out) as { ok?: boolean; running?: boolean }
+    return v.ok !== false && v.running === true ? true : undefined
   } catch {
     return undefined
   }
@@ -1080,13 +1101,17 @@ function gcRigDirOf(spec: SpawnSpec): string {
   return dirname(spec.beadsDir)
 }
 
+/** TOML basic-string escape — quotes, backslashes, control chars. */
+const tomlStr = (s: string): string =>
+  s.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('\n', '\\n').replaceAll('\t', '\\t')
+
 const GC_CITY_TOML = (provider: string, command: string): string =>
   `# authored by bro's gascity connector (bro-cduq) — regenerate by deleting
 [workspace]
 provider = "${provider}"
 
 [providers.${provider}]
-command = "${command.replaceAll('"', '\\"')}"
+command = "${tomlStr(command)}"
 prompt_mode = "none"
 `
 
@@ -1154,8 +1179,29 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       120_000
     )
     if (init.code !== 0) {
+      // a failed init must not leave the marker standing — otherwise the
+      // next spawn sees city.toml and skips init on a half-built city
+      rmSync(toml, { force: true })
       throw new SpawnError(`gc init failed — ${init.err !== '' ? init.err : `exited ${init.code}`}`)
     }
+  }
+
+  /** Per-step agent — `gc sling <target> <bead>` resolves <target> as a
+   *  configured agent (never a session alias), and a session's working
+   *  dir comes from its agent's work_dir — so each step gets its own
+   *  agent named after the molStep, pinned to spec.repoRoot. Written on
+   *  every spawn; gc reads config per command. */
+  const writeStepAgent = (spec: SpawnSpec, city: string): void => {
+    if (!/^[\w.-]+$/.test(spec.molStep)) {
+      throw new SpawnError(`molStep ${spec.molStep} is not a safe gascity agent name`)
+    }
+    const agentDir = join(city, 'agents', spec.molStep)
+    mkdirSync(agentDir, { recursive: true })
+    writeFileSync(join(agentDir, 'prompt.template.md'), GC_PROMPT_TEMPLATE)
+    writeFileSync(
+      join(agentDir, 'agent.toml'),
+      `${GC_AGENT_TOML}work_dir = "${tomlStr(spec.repoRoot)}"\n`
+    )
   }
 
   /** Adopt the repo as a rig — the rig's beads DB IS the shared store,
@@ -1208,6 +1254,69 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     }
   }
 
+  /** Bring the city up and return the session id — `session reset` a
+   *  surviving session in place (preserves alias+bead), else `session
+   *  new` the per-step agent. A `session new` whose id can't be learned
+   *  is closed by alias first so no orphan runs beside the retry. */
+  const ensureGcSession = (spec: SpawnSpec, city: string, prior: unknown): string => {
+    initCity(city)
+    writeStepAgent(spec, city)
+    ensureRig(spec, city)
+    ensureStarted(city)
+    const priorId = typeof prior === 'string' ? prior : undefined
+    const { sessions } = listGcSessions(city)
+    const alive = sessions?.find((s) => s.id === priorId || s.alias === spec.molStep)
+    if (alive !== undefined) {
+      const reset = gcRun(['session', 'reset', alive.id, '--city', city])
+      if (reset.code !== 0) {
+        throw new Error(`gc session reset ${alive.id} — ${reset.err !== '' ? reset.err : `exited ${reset.code}`}`)
+      }
+      return alive.id
+    }
+    const created = gcRun(
+      ['session', 'new', spec.molStep, '--alias', spec.molStep, '--no-attach', '--json', '--city', city],
+      120_000
+    )
+    if (created.code !== 0) {
+      throw new Error(
+        `gc session new ${spec.molStep} — ${created.err !== '' ? created.err : `exited ${created.code}`}`
+      )
+    }
+    let v: { session_id?: string; ok?: boolean }
+    try {
+      v = JSON.parse(created.out) as { session_id?: string; ok?: boolean }
+    } catch {
+      // exit-0 garbage still created a session under the alias —
+      // close it so the orphan can't run alongside a retry
+      gcRun(['session', 'close', spec.molStep, '--city', city])
+      throw new Error('gc session new returned unparseable JSON')
+    }
+    if (v.ok === false) {
+      throw new Error('gc session new returned ok: false')
+    }
+    if (v.session_id === undefined) {
+      gcRun(['session', 'close', spec.molStep, '--city', city])
+      throw new Error('gc session new returned no session_id')
+    }
+    return v.session_id
+  }
+
+  /** Route + deliver: sling the bead (the routed work order), then
+   *  submit the rendered prompt. Never --force — a bead that doesn't
+   *  resolve in the rig store is a claimless dispatch. */
+  const dispatchStep = (spec: SpawnSpec, city: string): void => {
+    const sling = gcRun(['sling', spec.molStep, spec.molStep, '--city', city])
+    if (sling.code !== 0) {
+      throw new Error(`gc sling ${spec.molStep} — ${sling.err !== '' ? sling.err : `exited ${sling.code}`}`)
+    }
+    const submit = gcRun(['session', 'submit', spec.molStep, spec.prompt, '--city', city])
+    if (submit.code !== 0) {
+      throw new Error(
+        `gc session submit ${spec.molStep} — ${submit.err !== '' ? submit.err : `exited ${submit.code}`}`
+      )
+    }
+  }
+
   return {
     name: 'gascity',
 
@@ -1243,54 +1352,12 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           liveDetail: (e) =>
             `session ${typeof e.sessionId === 'string' ? e.sessionId : spec.molStep}`,
           entry: () => ({ sessionId: undefined }),
+          claimAs: spec.molStep,
         })
         let sessionId: string | undefined
         try {
-          initCity(city)
-          ensureRig(spec, city)
-          ensureStarted(city)
-          // respawn: the old session survives in gc's durable list —
-          // `session reset` restarts it in place (preserves alias+bead)
-          // instead of colliding on a fresh --alias.
-          const prior = typeof existing?.sessionId === 'string' ? existing.sessionId : undefined
-          const { sessions } = listGcSessions(city)
-          const alive = sessions?.find(
-            (s) => s.id === prior || s.alias === spec.molStep
-          )
-          if (alive !== undefined) {
-            const reset = gcRun(['session', 'reset', alive.id, '--city', city])
-            if (reset.code !== 0) {
-              throw new Error(`gc session reset ${alive.id} — ${reset.err !== '' ? reset.err : `exited ${reset.code}`}`)
-            }
-            sessionId = alive.id
-          } else {
-            const created = gcRun(
-              ['session', 'new', template, '--alias', spec.molStep, '--no-attach', '--json', '--city', city],
-              120_000
-            )
-            if (created.code !== 0) {
-              throw new Error(
-                `gc session new ${template} — ${created.err !== '' ? created.err : `exited ${created.code}`}`
-              )
-            }
-            sessionId = (JSON.parse(created.out) as { session_id?: string }).session_id
-            if (sessionId === undefined) {
-              throw new Error('gc session new returned no session_id')
-            }
-          }
-          // dispatch order: sling the bead (the routed work order), then
-          // submit the rendered prompt. Never --force — a bead that
-          // doesn't resolve in the rig store is a claimless dispatch.
-          const sling = gcRun(['sling', spec.molStep, spec.molStep, '--city', city])
-          if (sling.code !== 0) {
-            throw new Error(`gc sling ${spec.molStep} — ${sling.err !== '' ? sling.err : `exited ${sling.code}`}`)
-          }
-          const submit = gcRun(['session', 'submit', spec.molStep, spec.prompt, '--city', city])
-          if (submit.code !== 0) {
-            throw new Error(
-              `gc session submit ${spec.molStep} — ${submit.err !== '' ? submit.err : `exited ${submit.code}`}`
-            )
-          }
+          sessionId = ensureGcSession(spec, city, existing?.sessionId)
+          dispatchStep(spec, city)
         } catch (err) {
           // leave the entry respawn-able: close the orphan session so a
           // retry can't run alongside a zombie, then record the failure.
@@ -1329,17 +1396,18 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           return { agents: [], degraded: err }
         }
         // absent sessions are 'lost' only when the supervisor can verify;
-        // unreachable → degrade and omit them: an unlisted agent renders
-        // 'unknown' in fleet, a 'lost' one would look like a dead fleet.
+        // not verifiably running → degrade and omit them: an unlisted
+        // agent renders 'unknown' in fleet, a 'lost' one would look like
+        // a dead fleet.
         const missing = entries.some(
           ([molStep, e]) => gcSessionFor(e, molStep, sessions) === undefined
         )
-        if (missing && gcSupervisorRunning() === undefined) {
+        if (missing && gcSupervisorRunning() !== true) {
           return {
             agents: entries
               .filter(([molStep, e]) => gcSessionFor(e, molStep, sessions) !== undefined)
               .map(([molStep, e]) => toInfo(molStep, e, sessions, 'lost')),
-            degraded: 'gc supervisor unreachable — agent liveness unknown',
+            degraded: 'gc supervisor not running — agent liveness unknown',
           }
         }
         return { agents: entries.map(([molStep, e]) => toInfo(molStep, e, sessions, 'lost')) }
@@ -1362,8 +1430,8 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       if (sessions === undefined) {
         throw new Error(`gascity unreachable — ${err}`)
       }
-      if (gcSessionFor(entry, molStep, sessions) === undefined && gcSupervisorRunning() === undefined) {
-        throw new Error('gc supervisor unreachable — agent liveness unknown')
+      if (gcSessionFor(entry, molStep, sessions) === undefined && gcSupervisorRunning() !== true) {
+        throw new Error('gc supervisor not running — agent liveness unknown')
       }
       return toInfo(molStep, entry, sessions, 'lost')
     },
@@ -1377,9 +1445,20 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       const city = configDir()
       if (city !== null && entry.stopped !== true) {
         // `close` is the terminal op — `kill` races the reconciler's
-        // restart. Best-effort: a gone session is the desired end state.
+        // restart. A failed close is tolerated only when the session is
+        // verifiably gone — marking stopped while it still runs would
+        // leave a live worker that respawns refuse as a duplicate.
         const target = typeof entry.sessionId === 'string' ? entry.sessionId : molStep
-        gcRun(['session', 'close', target, '--city', city])
+        const close = gcRun(['session', 'close', target, '--city', city])
+        if (close.code !== 0) {
+          const { sessions } = listGcSessions(city)
+          const s = sessions?.find((x) => x.id === target || x.alias === molStep)
+          if (s === undefined ? sessions === undefined : gcState(s) !== 'exited') {
+            throw new Error(
+              `gc session close ${target} — ${close.err !== '' ? close.err : `exited ${close.code}`}`
+            )
+          }
+        }
       }
       try {
         patchAgentRegistry(dir, molStep, { stopped: true })

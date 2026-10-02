@@ -84,10 +84,15 @@ if (args[0] === 'start') {
   const dir = args[1]
   const db = JSON.parse(fs.readFileSync(path.join(dir, '.fake-gc.json'), 'utf8'))
   db.supervisor = true; fs.writeFileSync(path.join(dir, '.fake-gc.json'), JSON.stringify(db))
+  // supervisor status is machine-wide (no --city) — the liveness signal
+  // lives in a per-test file outside any city store
+  if (process.env.FAKE_GC_SUPERVISOR) fs.writeFileSync(process.env.FAKE_GC_SUPERVISOR, 'true')
   process.exit(0)
 }
 if (args[0] === 'supervisor' && args[1] === 'status') {
-  console.log(JSON.stringify({ schema_version: '1', ok: true, running: load().supervisor, pid: 0, socket_path: '', checked_paths: [] }))
+  let running = false
+  try { running = fs.readFileSync(process.env.FAKE_GC_SUPERVISOR ?? '', 'utf8') === 'true' } catch { running = false }
+  console.log(JSON.stringify({ schema_version: '1', ok: true, running, pid: 0, socket_path: '', checked_paths: [] }))
   process.exit(0)
 }
 if (args[0] === 'rig' && args[1] === 'list') {
@@ -104,6 +109,9 @@ if (args[0] === 'session' && args[1] === 'new') {
   const db = load()
   const s = { id: 'gc-' + (db.sessions.length + 1), alias, template: args[2], state: 'active', closed: false, created_at: new Date().toISOString(), last_active: new Date().toISOString(), attached: false }
   db.sessions.push(s); save(db)
+  // FAKE_GC_GARBLE_NEW: exit 0 with non-JSON — the session exists but the
+  // caller can't learn its id (the orphan-close path under test)
+  if (process.env.FAKE_GC_GARBLE_NEW) { console.log('garbage not json'); process.exit(0) }
   console.log(JSON.stringify({ schema_version: '1', ok: true, session_id: s.id, session_name: s.id, alias: s.alias, template: s.template, transport: 'x', work_dir: city, deferred_start: true, attached: false }))
   process.exit(0)
 }
@@ -128,6 +136,9 @@ if (args[0] === 'session' && args[1] === 'submit') {
   process.exit(0)
 }
 if (args[0] === 'sling') {
+  // --force is a claimless dispatch the connector must never use —
+  // refuse it so a regression fails these tests instead of passing
+  if (argv.includes('--force')) { console.error('refusing --force'); process.exit(1) }
   const db = load(); db.slung.push({ target: args[1], bead: args[2] }); save(db); process.exit(0)
 }
 console.error('unhandled: ' + argv.join(' ')); process.exit(1)
@@ -159,6 +170,7 @@ function fixture(rows: Array<Record<string, unknown>>, knobs: Record<string, unk
   chmodSync(join(binDir, 'gc'), 0o755)
   const prevPath = process.env.PATH ?? ''
   process.env.PATH = `${binDir}:${prevPath}`
+  process.env.FAKE_GC_SUPERVISOR = join(root, 'gc-supervisor')
   return {
     root,
     main,
@@ -177,6 +189,8 @@ function fixture(rows: Array<Record<string, unknown>>, knobs: Record<string, unk
 function cleanup(fx: Fixture): void {
   process.env.PATH = fx.prevPath
   delete process.env.FAKE_GC_FAIL
+  delete process.env.FAKE_GC_GARBLE_NEW
+  delete process.env.FAKE_GC_SUPERVISOR
   rmSync(fx.root, { recursive: true, force: true })
 }
 
@@ -199,14 +213,22 @@ describe('gascity connector', () => {
       const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
       assert.equal(info.backend, 'gascity')
       assert.equal(info.state, 'running')
-      // the claim landed in the pinned shared store
+      // the claim landed in the pinned shared store, rehomed to the
+      // session alias — gc's default work_query picks up in_progress
+      // work assigned to the session
       assert.equal(fx.dbRows()[0]!.status, 'in_progress')
+      assert.equal(fx.dbRows()[0]!.assignee, 'fx-1')
       // registry keeps the session handle alongside the stable agentId
       const entry = readAgentRegistry(fx.main)['fx-1']!
       assert.equal(entry.agentId, info.id)
       assert.equal(entry.sessionId, 'gc-1')
       // the city was authored: init files + adopted rig + supervisor up
       assert.ok(existsSync(join(fx.city, 'city.toml')))
+      // the per-step agent pins the session's work_dir to the spec's
+      // repoRoot — gc sling's target operand resolves it as a configured
+      // agent, not a session alias
+      const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8')
+      assert.ok(agentToml.includes(`work_dir = "${fx.main}"`))
       const gdb = fx.gcDb()
       assert.deepEqual(gdb.rigs, [dirname(fx.beadsDir)])
       assert.equal(gdb.supervisor, true)
@@ -285,7 +307,7 @@ describe('gascity connector', () => {
       assert.equal(l.agents.length, 0)
       await conn.status(info.id).then(
         () => assert.fail('status should throw on degraded read'),
-        (e) => assert.match(String(e), /supervisor unreachable/)
+        (e) => assert.match(String(e), /supervisor not running/)
       )
     } finally {
       cleanup(fx)
@@ -340,6 +362,56 @@ describe('gascity connector', () => {
       assert.match(String(entry.spawnError), /sling/)
       // the orphan session was closed by the failure path
       assert.equal(fx.gcDb().sessions[0]!.closed, true)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('unparseable session-new output closes the alias orphan', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      process.env.FAKE_GC_GARBLE_NEW = '1'
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
+      await assert.rejects(conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1')), /unparseable/)
+      // the session gc created but never reported is closed by alias
+      assert.equal(fx.gcDb().sessions[0]!.closed, true)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('stop refuses to mark stopped when close fails and the session lives', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
+      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
+      process.env.FAKE_GC_FAIL = 'session close'
+      await assert.rejects(conn.stop(info.id), /session close/)
+      assert.notEqual(readAgentRegistry(fx.main)['fx-1']!.stopped, true)
+      // close failing on an already-gone session is still a clean stop
+      const db = fx.gcDb()
+      db.sessions = []
+      writeFileSync(join(fx.city, '.fake-gc.json'), JSON.stringify(db))
+      process.env.FAKE_GC_FAIL = ''
+      await conn.stop(info.id)
+      assert.equal(readAgentRegistry(fx.main)['fx-1']!.stopped, true)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('a stopped supervisor degrades a missing session, never reports lost', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
+      await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
+      const db = fx.gcDb()
+      db.sessions = []
+      writeFileSync(join(fx.city, '.fake-gc.json'), JSON.stringify(db))
+      writeFileSync(join(fx.root, 'gc-supervisor'), 'false')
+      const l = await conn.list()
+      assert.equal(l.degraded !== undefined, true)
+      assert.equal(l.agents.length, 0)
     } finally {
       cleanup(fx)
     }
