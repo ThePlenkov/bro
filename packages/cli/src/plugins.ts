@@ -14,6 +14,7 @@ import {
   debtSection,
   definePlugin,
   loadConfig,
+  notifyConnector,
   registerConnector,
   sddSection,
   stackSection,
@@ -37,6 +38,7 @@ import { runCleanupCommand } from './commands/cleanup.ts'
 import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts'
 import { runLoopCommand } from './commands/loop.ts'
 import { applyNextPlan, runNextCommand } from './commands/next.ts'
+import { runNotifyCommand } from './commands/notify.ts'
 import { parseNextPlan, PLAN_VERSION as NEXT_PLAN_VERSION, type NextPlan } from './commands/next-plan.ts'
 import { resolvePlanDoc, runPlanCommand } from './commands/plan.ts'
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
@@ -64,6 +66,7 @@ registerConnector(workConnector)
 registerConnector(actConnector)
 registerConnector(debtConnector)
 registerConnector(sddConnector)
+registerConnector(notifyConnector)
 // specs facade providers — registry order is detection precedence:
 // native first (its matchDir claims the configured sdd.dir), then
 // tool-layout matchers, agent last (explicit pick only, never detects)
@@ -128,6 +131,12 @@ export const PLUGINS: BroPlugin[] = [
     // (bro-q0f2) lands — one owner per configKey
     configKey: 'agents',
     configSchema: agentsSection,
+  }),
+  definePlugin({
+    name: 'notify',
+    summary: 'Drop an event into the session mailbox — drained into context by the next postTool probe',
+    run: runNotifyCommand,
+    skill: 'notify',
   }),
   definePlugin({
     name: 'watch',

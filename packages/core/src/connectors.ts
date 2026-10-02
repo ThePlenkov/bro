@@ -79,6 +79,10 @@ export interface ConnectorHooks {
   /** Prompt-submit context — the raw prompt lets each system spot its
    *  own references (github sees PR URLs, jira would see issue keys). */
   promptSubmit?(ctx: ConnectorCtx, prompt: string): MaybePromise<string[]>
+  /** Post-tool context — cheap per-event probes that run on every tool
+   *  landing, success or not; the notify connector drains the session
+   *  mailbox here so child events arrive mid-turn. */
+  postTool?(ctx: ConnectorCtx): MaybePromise<string[]>
   /** Stop-gate contributions — non-empty `block` means the session has
    *  unfinished business in this system. */
   stopGate?(ctx: ConnectorCtx): MaybePromise<GateContribution[]>
@@ -480,6 +484,12 @@ export function parallelWorkLines(ctx: ConnectorCtx): Promise<string[]> {
 /** Collect prompt-submit context from all connectors. */
 export function promptContextLines(ctx: ConnectorCtx, prompt: string): Promise<string[]> {
   return collectLines(ctx, (h) => h.promptSubmit?.(ctx, prompt))
+}
+
+/** Collect post-tool context lines from all connectors — mailbox
+ *  drains and other per-event probes. */
+export function postToolLines(ctx: ConnectorCtx): Promise<string[]> {
+  return collectLines(ctx, (h) => h.postTool?.(ctx))
 }
 
 /** Collect stop-gate contributions from all connectors — the caller

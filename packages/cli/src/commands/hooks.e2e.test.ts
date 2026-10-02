@@ -50,7 +50,14 @@ function hook(
   payload: Record<string, unknown>,
   cwd = f.main
 ): { code: number | null; stdout: string; stderr: string } {
-  return runCli(['hooks', event], { cwd, input: JSON.stringify(payload) })
+  // XDG pinned to the fixture — the notify drain reads the user-level
+  // mailbox ($HOME/.local/state/bro/notify) too, and a test run must
+  // never eat a real session's drops
+  return runCli(['hooks', event], {
+    cwd,
+    input: JSON.stringify(payload),
+    env: { XDG_STATE_HOME: join(f.root, 'xdg-state') },
+  })
 }
 
 /** A linked worktree, optionally dirty. */
@@ -145,6 +152,52 @@ describe('hooks e2e — post-tool arming', () => {
       const r = hook(f, 'post-tool', postTool('git push origin work/x', false))
       assert.equal(r.code, 0)
       assert.equal(markerExists(f, 's1', 'act'), false)
+    })
+  })
+})
+
+describe('hooks e2e — post-tool mailbox drain', () => {
+  /** <git-common>/bro/notify — sibling of the marker dir. */
+  const mailbox = (f: Fixture): string => join(f.markerDir, '..', 'notify')
+  const postTool = (success = true) => ({
+    tool_input: { command: 'true' },
+    tool_response: { success },
+    session_id: 's1',
+  })
+
+  test('a pending drop is injected as context and consumed', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      mkdirSync(mailbox(f), { recursive: true })
+      writeFileSync(join(mailbox(f), 'note-1-ab12.txt'), 'watcher: gate ready on s-9')
+      const r = hook(f, 'post-tool', postTool())
+      assert.equal(r.code, 0)
+      assert.match(r.stdout, /PostToolUse/)
+      assert.match(r.stdout, /mailbox message/)
+      assert.match(r.stdout, /watcher: gate ready on s-9/)
+      // drained — the file is gone, a second probe delivers nothing
+      assert.equal(existsSync(join(mailbox(f), 'note-1-ab12.txt')), false)
+      const again = hook(f, 'post-tool', postTool())
+      assert.doesNotMatch(again.stdout, /watcher: gate ready/)
+    })
+  })
+
+  test('a failed tool call is still a delivery tick', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      mkdirSync(mailbox(f), { recursive: true })
+      writeFileSync(join(mailbox(f), 'note-1-ab12.txt'), 'fixer died')
+      const r = hook(f, 'post-tool', postTool(false))
+      assert.match(r.stdout, /fixer died/)
+    })
+  })
+
+  test('an empty mailbox emits nothing', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const r = hook(f, 'post-tool', postTool())
+      assert.equal(r.code, 0)
+      assert.equal(r.stdout.trim(), '')
     })
   })
 })

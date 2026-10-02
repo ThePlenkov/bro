@@ -66,6 +66,7 @@ export {
   facadeAuth,
   isOwnClaim,
   parallelWorkLines,
+  postToolLines,
   promptContextLines,
   registerConnector,
   reviewHost,
@@ -74,6 +75,15 @@ export {
   sessionTaskClaims,
   stopGateContributions,
 } from './connectors.ts'
+export {
+  drainDirs,
+  drainMailbox,
+  dropMailbox,
+  mailboxDir,
+  notifyConnector,
+  notifyDir,
+  userMailboxDir,
+} from './notify.ts'
 export type {
   Connector,
   ConnectorCtx,
