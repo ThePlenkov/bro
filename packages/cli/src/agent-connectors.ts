@@ -363,20 +363,20 @@ function readExitFile(home: string, agentId: string): number | undefined {
   }
 }
 
-/** Live state for a registry entry under this backend — also lazily
- *  harvests the .exit file into the entry so `agents.json` keeps
- *  pid+exit-status alongside the handle (and the harvest is once). */
-function nativeState(dir: string, home: string | null, molStep: string, entry: AgentRegistryEntry): AgentState {
-  // liveness first: a 'stopped' marker on a pid that is still alive means
-  // SIGTERM hasn't landed yet — the agent IS still running, and dedup
-  // must keep refusing a respawn that would run alongside it
-  const pid = typeof entry.pid === 'number' ? entry.pid : undefined
-  if (pid !== undefined && pidAlive(pid)) {
-    touchWorkMarker(dir, entry.agentId)
-    return 'running'
-  }
-  // every terminal state also retires the .work marker — a dead agent
-  // must not keep reporting as live work to parallel-session detection
+/** The recorded-death ladder both backends walk once liveness fails —
+ *  stopped flag → harvested exitStatus → the .exit file (lazily
+ *  harvested into the registry so `agents.json` keeps pid+exit-status
+ *  alongside the handle, and the harvest is once). Terminal states
+ *  also retire the .work marker: a dead agent must not keep reporting
+ *  as live work to parallel-session detection. Returns undefined when
+ *  nothing recorded a death — the caller decides what unproven means
+ *  ('lost' for a confirmed-dead backend, 'spawned' for a failed probe). */
+function recordedDeath(
+  dir: string,
+  home: string | null,
+  molStep: string,
+  entry: AgentRegistryEntry
+): AgentState | undefined {
   if (entry.stopped === true) {
     dropWorkMarker(dir, entry.agentId)
     return 'stopped'
@@ -396,6 +396,58 @@ function nativeState(dir: string, home: string | null, molStep: string, entry: A
       dropWorkMarker(dir, entry.agentId)
       return 'exited'
     }
+  }
+  return undefined
+}
+
+/** Registry scan by agentId within one backend — status()/stop()
+ *  resolve through it. */
+function findAgentEntry(
+  dir: string,
+  backend: string,
+  id: string
+): [string, AgentRegistryEntry] | undefined {
+  for (const [molStep, e] of Object.entries(readAgentRegistry(dir))) {
+    if (e.backend === backend && e.agentId === id) {
+      return [molStep, e]
+    }
+  }
+  return undefined
+}
+
+/** Spawn guards shared by the built-in backends — they refuse before a
+ *  claim or registry write lands: an unconfigured agent command, a
+ *  nonexistent worktree, or an unanchorable agents home. Returns the
+ *  shared artifacts dir on success. */
+function spawnHome(dir: string, backend: string, command: string, spec: SpawnSpec): string {
+  if (command === '') {
+    throw new SpawnError(
+      `no agent command configured — set agents.${backend}.command or loop.agent in bro.config.json`
+    )
+  }
+  if (!existsSync(spec.repoRoot)) {
+    throw new SpawnError(`worktree ${spec.repoRoot} does not exist`)
+  }
+  const home = agentsHome(dir)
+  if (!home) {
+    throw new SpawnError(`no git common dir for ${spec.repoRoot}`)
+  }
+  return home
+}
+
+/** Live state for a registry entry under this backend. */
+function nativeState(dir: string, home: string | null, molStep: string, entry: AgentRegistryEntry): AgentState {
+  // liveness first: a 'stopped' marker on a pid that is still alive means
+  // SIGTERM hasn't landed yet — the agent IS still running, and dedup
+  // must keep refusing a respawn that would run alongside it
+  const pid = typeof entry.pid === 'number' ? entry.pid : undefined
+  if (pid !== undefined && pidAlive(pid)) {
+    touchWorkMarker(dir, entry.agentId)
+    return 'running'
+  }
+  const dead = recordedDeath(dir, home, molStep, entry)
+  if (dead !== undefined) {
+    return dead
   }
   dropWorkMarker(dir, entry.agentId)
   return 'lost'
@@ -425,31 +477,13 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       ? knobs.command
       : undefined) ?? env.loop?.agent ?? ''
 
-  const findEntry = (id: string): [string, AgentRegistryEntry] | undefined => {
-    for (const [molStep, e] of Object.entries(readAgentRegistry(dir))) {
-      if (e.backend === 'native' && e.agentId === id) {
-        return [molStep, e]
-      }
-    }
-    return undefined
-  }
+  const findEntry = (id: string) => findAgentEntry(dir, 'native', id)
 
   return {
     name: 'native',
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
-      if (command === '') {
-        throw new SpawnError(
-          'no agent command configured — set agents.native.command or loop.agent in bro.config.json'
-        )
-      }
-      if (!existsSync(spec.repoRoot)) {
-        throw new SpawnError(`worktree ${spec.repoRoot} does not exist`)
-      }
-      const home = agentsHome(dir)
-      if (!home) {
-        throw new SpawnError(`no git common dir for ${spec.repoRoot}`)
-      }
+      const home = spawnHome(dir, 'native', command, spec)
       // dedup → claim → spawn → pid-patch runs as ONE critical section:
       // without the lock a second bro process can pass the liveness
       // check between our read and our write and double-spawn (TOCTOU).
@@ -647,10 +681,10 @@ function tmuxProbe(socket: string, name: string): { live: TmuxLiveness; err: str
 
 /** Live state for a tmux entry: `probe` is the session liveness verdict
  *  (tmuxProbe for one entry, list()'s batched list-sessions for the
- *  fleet — the pane dying takes the session with it), then the same
- *  stopped/exit/lost ladder as native. An 'unknown' probe still honors
- *  recorded death (stopped flag, .exit file) but never reports 'lost'
- *  — a failed probe didn't find a corpse. */
+ *  fleet — the pane dying takes the session with it), then the shared
+ *  recorded-death ladder. An 'unknown' probe still honors recorded
+ *  death but never reports 'lost' — a failed probe didn't find a
+ *  corpse, so 'spawned' (registered, unverified) is the honest read. */
 function tmuxState(
   dir: string,
   home: string | null,
@@ -664,25 +698,9 @@ function tmuxState(
     touchWorkMarker(dir, entry.agentId)
     return 'running'
   }
-  if (entry.stopped === true) {
-    dropWorkMarker(dir, entry.agentId)
-    return 'stopped'
-  }
-  if (entry.exitStatus !== undefined) {
-    dropWorkMarker(dir, entry.agentId)
-    return 'exited'
-  }
-  if (home) {
-    const code = readExitFile(home, entry.agentId)
-    if (code !== undefined) {
-      try {
-        patchAgentRegistry(dir, molStep, { exitStatus: code })
-      } catch {
-        // harvest is advisory — the .exit file still proves the exit
-      }
-      dropWorkMarker(dir, entry.agentId)
-      return 'exited'
-    }
+  const dead = recordedDeath(dir, home, molStep, entry)
+  if (dead !== undefined) {
+    return dead
   }
   if (probe === 'unknown') {
     // the marker stays — an unverifiable agent may still be live work
@@ -741,31 +759,13 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       : undefined) ?? env.loop?.agent ?? ''
   const socket = typeof knobs.socket === 'string' ? knobs.socket : 'bro'
 
-  const findEntry = (id: string): [string, AgentRegistryEntry] | undefined => {
-    for (const [molStep, e] of Object.entries(readAgentRegistry(dir))) {
-      if (e.backend === 'tmux' && e.agentId === id) {
-        return [molStep, e]
-      }
-    }
-    return undefined
-  }
+  const findEntry = (id: string) => findAgentEntry(dir, 'tmux', id)
 
   return {
     name: 'tmux',
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the critical section is sync
-      if (command === '') {
-        throw new SpawnError(
-          'no agent command configured — set agents.tmux.command or loop.agent in bro.config.json'
-        )
-      }
-      if (!existsSync(spec.repoRoot)) {
-        throw new SpawnError(`worktree ${spec.repoRoot} does not exist`)
-      }
-      const home = agentsHome(dir)
-      if (!home) {
-        throw new SpawnError(`no git common dir for ${spec.repoRoot}`)
-      }
+      const home = spawnHome(dir, 'tmux', command, spec)
       const ver = tmuxRun(socket, ['-V'])
       if (ver.missing || ver.code !== 0) {
         throw new SpawnError(`tmux unavailable — ${ver.missing ? 'not on PATH' : ver.err}`)
