@@ -20,6 +20,7 @@
  * unchanged snapshot is not re-emitted — a heartbeat reports
  * transitions, not noise.
  */
+import { randomBytes } from 'node:crypto'
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { git, gitTry, reviewHost, type ReviewFacade } from '@broject/core'
@@ -66,8 +67,18 @@ export interface WatchSnapshot {
   ts: string
   attention: string[]
   mols: WatchMol[]
+  /** set when the mols plane itself threw — the section renders
+   *  `unavailable` rather than a false "no open molecules" */
+  molsError?: string
   gates: WatchGates
-  fleet: { rows: FleetRow[]; degraded: string[]; conflicts: string[] }
+  fleet: {
+    rows: FleetRow[]
+    degraded: string[]
+    conflicts: string[]
+    /** branch→PR lookups that failed — a quiet PR column must not
+     *  read as "no PRs exist" when the lookups errored */
+    prErrors?: string[]
+  }
 }
 
 /** `<git-common-dir>/bro/notify` — null outside a repo (notify warns
@@ -87,9 +98,14 @@ export function attentionOf(
 ): string[] {
   const attention: string[] = []
   for (const m of mols) {
+    if (m.state.startsWith('error')) {
+      attention.push(`mol ${m.mol} unreadable — ${m.state}`)
+      continue
+    }
     for (const g of m.gates) {
       const t = m.ready.find((s) => s.id === g)?.title
-      attention.push(`gate ready — ${m.mol}: ${g}${t === undefined ? '' : ` (${t})`}`)
+      const suffix = t === undefined ? '' : ` (${t})`
+      attention.push(`gate ready — ${m.mol}: ${g}${suffix}`)
     }
   }
   for (const r of rows) {
@@ -121,7 +137,7 @@ export function emitMailbox(dir: string, text: string): boolean {
     return false
   }
   mkdirSync(mb, { recursive: true })
-  const name = `watch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`
+  const name = `watch-${Date.now()}-${randomBytes(4).toString('hex')}.txt`
   const tmp = join(mb, `.${name}.tmp`)
   writeFileSync(tmp, text)
   renameSync(tmp, join(mb, name))
@@ -129,17 +145,30 @@ export function emitMailbox(dir: string, text: string): boolean {
 }
 
 /** mols section — every open molecule through nextStep; pure beads
- *  reads, no backend, no network. */
+ *  reads, no backend, no network. A molecule whose load/nextStep
+ *  throws degrades to an `error` row — one bad mol must not blank
+ *  the plane or kill the heartbeat. */
 function collectMols(): WatchMol[] {
   return listMolecules().map((m) => {
-    const n = nextStep(loadMolecule(m.id))
-    return {
-      mol: m.id,
-      state: n.state,
-      ready: n.ready.map((s) => ({ id: s.id, title: s.title, kind: s.kind })),
-      gates: n.gates,
-      inProgress: n.inProgress,
-      blocked: n.blocked,
+    try {
+      const n = nextStep(loadMolecule(m.id))
+      return {
+        mol: m.id,
+        state: n.state,
+        ready: n.ready.map((s) => ({ id: s.id, title: s.title, kind: s.kind })),
+        gates: n.gates,
+        inProgress: n.inProgress,
+        blocked: n.blocked,
+      }
+    } catch (err) {
+      return {
+        mol: m.id,
+        state: `error — ${err instanceof Error ? err.message : String(err)}`,
+        ready: [],
+        gates: [],
+        inProgress: [],
+        blocked: [],
+      }
     }
   })
 }
@@ -152,8 +181,10 @@ function worktreeList(): WorktreeInfo[] {
   }
 }
 
-/** The act exit gate per distinct fleet PR — a failed probe is recorded
- *  per-PR (`error`), not folded into "blocked" and never kills the rest. */
+/** The act exit gate per distinct fleet PR — probed in parallel so a
+ *  large fleet doesn't serialize one heartbeat into a long blocking
+ *  sequence. A failed probe is recorded per-PR (`error`), not folded
+ *  into "blocked" and never kills the rest. */
 async function gateFleetPrs(
   rev: ReviewFacade,
   repo: string,
@@ -161,34 +192,43 @@ async function gateFleetPrs(
   dir: string
 ): Promise<WatchPrGate[]> {
   const act = loadBroConfig(dir).act
-  const out: WatchPrGate[] = []
   const seen = new Set<number>()
+  const targets: { pr: number; link: string }[] = []
   for (const row of rows) {
     const pr = row.prNum
     if (pr === undefined || seen.has(pr)) {
       continue
     }
     seen.add(pr)
-    const link = row.pr ?? rev.prLink(repo, pr)
-    try {
-      const state = await fetchPrActState(rev, { repo, pr }, {
-        ignoreChecks: act.ignoreChecks,
-        maxRounds: act.maxRounds,
-      })
-      const gate = evaluateExitGate(state)
-      out.push({ pr, link, ok: gate.ok, blockers: gate.blockers })
-    } catch (err) {
-      out.push({ pr, link, error: err instanceof Error ? err.message : String(err) })
-    }
+    targets.push({ pr, link: row.pr ?? rev.prLink(repo, pr) })
   }
-  return out
+  return Promise.all(
+    targets.map(async ({ pr, link }) => {
+      try {
+        const state = await fetchPrActState(rev, { repo, pr }, {
+          ignoreChecks: act.ignoreChecks,
+          maxRounds: act.maxRounds,
+        })
+        const gate = evaluateExitGate(state)
+        return { pr, link, ok: gate.ok, blockers: gate.blockers }
+      } catch (err) {
+        return { pr, link, error: err instanceof Error ? err.message : String(err) }
+      }
+    })
+  )
 }
 
 /** The snapshot — pure reads across all three planes. Every plane is
  *  best-effort on its own: a throwing plane degrades its section, never
  *  kills the heartbeat. */
 export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
-  const mols = collectMols()
+  let mols: WatchMol[] = []
+  let molsError: string | undefined
+  try {
+    mols = collectMols()
+  } catch (err) {
+    molsError = err instanceof Error ? err.message : String(err)
+  }
 
   // --- fleet: same machinery as `bro fleet` ---
   const { byStep, degraded, conflicts } = await collectAgents(dir)
@@ -202,7 +242,8 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
     rev = undefined
     gateReason = err instanceof Error ? err.message : String(err)
   }
-  const rows = fleetRows(byStep, degraded.length > 0, rev, repo, worktreeList())
+  const prErrors: string[] = []
+  const rows = fleetRows(byStep, degraded.length > 0, rev, repo, worktreeList(), prErrors)
 
   // --- gates: no review host renders the section unavailable ---
   const gates: WatchGates =
@@ -210,12 +251,21 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
       ? { available: false, reason: gateReason, prs: [] }
       : { available: true, prs: await gateFleetPrs(rev, repo, rows, dir) }
 
+  const attention = attentionOf(mols, rows, gates.prs)
+  for (const e of prErrors) {
+    attention.push(`PR lookup failed — ${e}`)
+  }
+  if (molsError !== undefined) {
+    attention.push(`mols plane failed — ${molsError}`)
+  }
+
   return {
     ts: new Date().toISOString(),
-    attention: attentionOf(mols, rows, gates.prs),
+    attention,
     mols,
+    molsError,
     gates,
-    fleet: { rows, degraded, conflicts },
+    fleet: { rows, degraded, conflicts, prErrors },
   }
 }
 
@@ -251,7 +301,8 @@ function gateVerdict(g: WatchPrGate): string {
 
 function gateLines(gates: WatchGates): string[] {
   if (!gates.available) {
-    return [`  unavailable${gates.reason === undefined ? '' : ` — ${gates.reason}`}`]
+    const reason = gates.reason === undefined ? '' : ` — ${gates.reason}`
+    return [`  unavailable${reason}`]
   }
   if (gates.prs.length === 0) {
     return ['  no PRs in the fleet']
@@ -270,6 +321,9 @@ function fleetLines(fleet: WatchSnapshot['fleet']): string[] {
   for (const c of fleet.conflicts) {
     out.push(`  warning: agent conflict — ${c}`)
   }
+  for (const e of fleet.prErrors ?? []) {
+    out.push(`  warning: PR lookup failed — ${e}`)
+  }
   return out
 }
 
@@ -283,7 +337,7 @@ export function renderSnapshot(s: WatchSnapshot): string {
     ...attentionLines(s.attention),
     '',
     'mols',
-    ...molLines(s.mols),
+    ...(s.molsError === undefined ? molLines(s.mols) : [`  unavailable — ${s.molsError}`]),
     '',
     'gates',
     ...gateLines(s.gates),
@@ -305,8 +359,12 @@ export function watchArgs(argv: string[]): {
     return base
   }
   const everySec = Number(everyRaw)
-  if (!Number.isFinite(everySec) || everySec <= 0) {
-    throw new Error(`--every needs a positive seconds value, got "${everyRaw}"`)
+  // setTimeout clamps delays over 2^31-1 ms to ~1ms — a huge --every
+  // would busy-tick instead of waiting, so it fails closed here.
+  if (!Number.isFinite(everySec) || everySec <= 0 || everySec * 1000 > 0x7fffffff) {
+    throw new Error(
+      `--every needs a positive seconds value up to ${0x7fffffff / 1000}s, got "${everyRaw}"`
+    )
   }
   return { ...base, everySec }
 }
@@ -337,7 +395,15 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
       const key = snapshotKey(snap)
       if (key !== lastNotified) {
         lastNotified = key
-        emitMailbox(dir, text)
+        try {
+          emitMailbox(dir, text)
+        } catch (err) {
+          // mailbox write failures (permissions, disk, races) warn —
+          // the heartbeat is best-effort and must not die on a drop
+          console.error(
+            `warning: mailbox drop failed — ${err instanceof Error ? err.message : String(err)}`
+          )
+        }
       }
     }
   }

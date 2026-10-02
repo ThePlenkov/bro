@@ -104,8 +104,13 @@ function branchOf(path: string): string {
 }
 
 /** PR number for a worktree's branch — one failed lookup must not
- *  blank the row. */
-function prNumForWorktree(rev: ReviewFacade, abs: string | undefined): number | undefined {
+ *  blank the row, but it is reported into `errors` when given: a
+ *  silent miss would let the snapshot claim no PRs exist. */
+function prNumForWorktree(
+  rev: ReviewFacade,
+  abs: string | undefined,
+  errors?: string[]
+): number | undefined {
   if (abs === undefined) {
     return undefined
   }
@@ -115,7 +120,8 @@ function prNumForWorktree(rev: ReviewFacade, abs: string | undefined): number | 
   }
   try {
     return rev.prsForBranch(branch)[0]
-  } catch {
+  } catch (err) {
+    errors?.push(`${branch}: ${err instanceof Error ? err.message : String(err)}`)
     return undefined
   }
 }
@@ -128,7 +134,8 @@ export function fleetRows(
   degradedAny: boolean,
   rev: ReviewFacade | undefined,
   repo: string,
-  worktrees: WorktreeInfo[]
+  worktrees: WorktreeInfo[],
+  prErrors?: string[]
 ): FleetRow[] {
   const rows: FleetRow[] = []
   for (const m of listMolecules()) {
@@ -139,7 +146,7 @@ export function fleetRows(
         | { assignee?: string }
         | undefined
       const wt = worktreeOf(s.id, agent, worktrees)
-      const prNum = rev === undefined ? undefined : prNumForWorktree(rev, wt)
+      const prNum = rev === undefined ? undefined : prNumForWorktree(rev, wt, prErrors)
       rows.push({
         mol: m.id,
         step: s.id,
@@ -148,7 +155,7 @@ export function fleetRows(
         state: s.state,
         agent: agentCell(s, agent, issue?.assignee, degradedAny),
         worktree: wt === undefined ? undefined : basename(wt),
-        pr: prNum === undefined ? undefined : rev!.prLink(repo, prNum),
+        pr: rev === undefined || prNum === undefined ? undefined : rev.prLink(repo, prNum),
         prNum,
       })
     }
@@ -176,7 +183,12 @@ export function fleetTableLines(rows: FleetRow[]): string[] {
   return [line(cols.map(([, h]) => h)), ...cells.map((c) => line(c))]
 }
 
-export function printFleetTable(rows: FleetRow[], degraded: string[], conflicts: string[]): void {
+export function printFleetTable(
+  rows: FleetRow[],
+  degraded: string[],
+  conflicts: string[],
+  prErrors: string[] = []
+): void {
   for (const l of fleetTableLines(rows)) {
     console.log(l)
   }
@@ -185,6 +197,9 @@ export function printFleetTable(rows: FleetRow[], degraded: string[], conflicts:
   }
   for (const c of conflicts) {
     console.error(`warning: agent conflict — ${c}`)
+  }
+  for (const e of prErrors) {
+    console.error(`warning: PR lookup failed — ${e}`)
   }
 }
 
@@ -235,15 +250,16 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
     rev = undefined
   }
 
-  const rows = fleetRows(byStep, degraded.length > 0, rev, repo, worktrees)
+  const prErrors: string[] = []
+  const rows = fleetRows(byStep, degraded.length > 0, rev, repo, worktrees, prErrors)
 
   if (json) {
-    console.log(JSON.stringify({ rows, degraded, conflicts }, null, 2))
+    console.log(JSON.stringify({ rows, degraded, conflicts, prErrors }, null, 2))
     return
   }
   if (rows.length === 0) {
     console.log('no open molecules — nothing in the fleet')
     return
   }
-  printFleetTable(rows, degraded, conflicts)
+  printFleetTable(rows, degraded, conflicts, prErrors)
 }

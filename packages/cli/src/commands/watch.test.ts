@@ -64,6 +64,12 @@ describe('watchArgs', () => {
       assert.throws(() => watchArgs(['--every', v]), /--every/)
     }
   })
+
+  test('an --every beyond the timer range fails closed', () => {
+    // over 2^31-1 ms setTimeout clamps to ~1ms — a busy tick, not a cadence
+    assert.throws(() => watchArgs(['--every', '3000000000']), /--every/)
+    assert.equal(watchArgs(['--every', '2147483']).everySec, 2147483)
+  })
 })
 
 describe('attentionOf', () => {
@@ -93,6 +99,13 @@ describe('attentionOf', () => {
     const g = prGate({ ok: false, blockers: ['2 unresolved review thread(s)'] })
     assert.deepEqual(attentionOf([], [], [g]), [
       'PR [#12](https://github.com/o/r/pull/12) blocked — 2 unresolved review thread(s)',
+    ])
+  })
+
+  test('a mol whose load threw is attention, not a silent drop', () => {
+    const m = mol({ state: 'error — bd gone' })
+    assert.deepEqual(attentionOf([m], [], []), [
+      'mol m-1 unreadable — error — bd gone',
     ])
   })
 
@@ -146,6 +159,18 @@ describe('renderSnapshot', () => {
       snap({ gates: { available: false, reason: 'no review host', prs: [] } })
     )
     assert.match(text, /gates\n  unavailable — no review host/)
+  })
+
+  test('a failed mols plane renders unavailable, never a false quiet', () => {
+    const text = renderSnapshot(snap({ molsError: 'bd timed out' }))
+    assert.match(text, /mols\n  unavailable — bd timed out/)
+  })
+
+  test('failed PR lookups warn in the fleet section', () => {
+    const text = renderSnapshot(
+      snap({ fleet: { rows: [], degraded: [], conflicts: [], prErrors: ['work/x: boom'] } })
+    )
+    assert.match(text, /warning: PR lookup failed — work\/x: boom/)
   })
 
   test('attention and sections render their contents', () => {
