@@ -83,6 +83,30 @@ export type {
   GateContribution,
   MaybePromise,
 } from './connectors.ts'
+export {
+  AgentNotFound,
+  agentRegistryPath,
+  agentsSection,
+  bdAt,
+  claimStep,
+  mintAgentId,
+  patchAgentRegistry,
+  probeStep,
+  readAgentRegistry,
+  rebindStep,
+  SpawnError,
+  withAgentRegistryLock,
+  writeAgentRegistry,
+} from './agents.ts'
+export type {
+  AgentCapabilities,
+  AgentConnector,
+  AgentInfo,
+  AgentRegistryEntry,
+  AgentState,
+  ListResult,
+  SpawnSpec,
+} from './agents.ts'
 export type { SpecNode, SpecStore } from './specs.ts'
 export { warnDeprecated } from './deprecation.ts'
 export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts'

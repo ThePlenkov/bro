@@ -8,6 +8,7 @@ import { isAbsolute, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
   actSection,
+  agentsSection,
   beadsSection,
   checkBeads,
   debtSection,
@@ -41,6 +42,7 @@ import { resolvePlanDoc, runPlanCommand } from './commands/plan.ts'
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
 import { runDoctorCommand } from './commands/doctor.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
+import { runFleetCommand } from './commands/fleet.ts'
 import { runHooksCommand } from './commands/hooks.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runSetupCommand } from './commands/setup.ts'
@@ -116,6 +118,15 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'loop',
     configKey: 'loop',
     configSchema: loopSection,
+  }),
+  definePlugin({
+    name: 'fleet',
+    summary: 'Fleet view — mols × steps × agents × worktrees × PRs [--json]',
+    run: runFleetCommand,
+    // owns the agents.* backend-knob section until `bro agents`
+    // (bro-q0f2) lands — one owner per configKey
+    configKey: 'agents',
+    configSchema: agentsSection,
   }),
   definePlugin({
     name: 'check',
