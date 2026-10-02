@@ -28,7 +28,7 @@ themselves. The loopback bind IS the trust boundary: 127.0.0.1 only, no
 | `GET /api/v1/snapshot` | the `bro watch` snapshot — mols × gates × fleet |
 | `GET /api/v1/agents` | per-backend agent plane (`bro agents status --json` shape) |
 | `GET /api/v1/agents/<ref>` | one agent; ref is agentId or molStep |
-| `POST /api/v1/agents` | spawn — `{molStep, worktree?, prompt?\|promptFile?, connector?, beadsDir?}` → `201 {agent}`; `409` on a live-claim conflict, `400` on bad input |
+| `POST /api/v1/agents` | spawn — `{molStep, worktree?, prompt?\|promptFile?, connector?, beadsDir?}` → `201 {agent}`; `409` on any spawn refusal (`SpawnError` — live claim, foreign backend, connector can't spawn), `400` on bad input |
 | `DELETE /api/v1/agents/<ref>` | stop — `200 {agent, stopped}`; `404` on a clean miss, `503` when a degraded backend makes the miss unverifiable |
 
 ## Policy
