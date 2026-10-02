@@ -123,6 +123,10 @@ describe('fleetArgs', () => {
     }
   })
 
+  test('a sub-floor --every is a busy loop, not a cadence', () => {
+    assert.throws(() => fleetArgs(['--live', '--every', '0.01']), /at least 0\.1s/)
+  })
+
   test('--live --json is a usage error — a repaint loop is not JSON', () => {
     assert.throws(() => fleetArgs(['--live', '--json']), /does not combine with --json/)
     assert.throws(() => fleetArgs(['--json', '--every', '2']), /does not combine with --json/)

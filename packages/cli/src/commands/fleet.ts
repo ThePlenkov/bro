@@ -282,6 +282,9 @@ export interface FleetArgs {
 }
 
 export const LIVE_DEFAULT_SEC = 2
+/** setTimeout clamps sub-ms delays to ~1ms — anything below this floor
+ *  is a busy collect/repaint loop, not a cadence. */
+export const LIVE_MIN_SEC = 0.1
 
 /** Parsed fleet flags. `--every` implies `--live` — a repaint cadence
  *  only means something on the dashboard; `--live --json` is refused
@@ -298,6 +301,11 @@ export function fleetArgs(argv: string[]): FleetArgs {
     if (!Number.isFinite(everySec) || everySec <= 0 || everySec * 1000 > 0x7fffffff) {
       throw new Error(
         `--every needs a positive seconds value up to ${0x7fffffff / 1000}s, got "${everyRaw}"`
+      )
+    }
+    if (everySec < LIVE_MIN_SEC) {
+      throw new Error(
+        `--every needs at least ${LIVE_MIN_SEC}s between repaints, got "${everyRaw}"`
       )
     }
   }
@@ -377,6 +385,10 @@ async function runFleetLive(dir: string, everySec: number): Promise<void> {
       }
       input.removeListener('data', onKey)
       out.removeListener('resize', repaint)
+      // an unused `once` handler would still swallow a later real
+      // signal as a no-op quit — drop them on every exit path
+      process.removeListener('SIGINT', quit)
+      process.removeListener('SIGTERM', quit)
       // restore the screen first — a destroyed stdin throws on
       // setRawMode (kill/session teardown) and must not skip it
       out.write(CURSOR_SHOW + ALT_SCREEN_OFF)
@@ -408,14 +420,21 @@ async function runFleetLive(dir: string, everySec: number): Promise<void> {
     process.once('SIGTERM', quit)
 
     const tick = async (): Promise<void> => {
+      // a quit that landed mid-collect already restored the primary
+      // screen — painting now would corrupt it, so both paths check
       try {
-        paint(liveFrame(await collectFleet(dir), new Date(), everySec))
+        const frame = liveFrame(await collectFleet(dir), new Date(), everySec)
+        if (!settled) {
+          paint(frame)
+        }
       } catch (err) {
         // a throwing collect (e.g. a mid-write beads read) degrades the
         // frame, never kills the dashboard — the next tick retries
-        paint(
-          `bro fleet — live · ${new Date().toISOString()}\n\ncollection failed — ${err instanceof Error ? err.message : String(err)}\n\nq quit`
-        )
+        if (!settled) {
+          paint(
+            `bro fleet — live · ${new Date().toISOString()}\n\ncollection failed — ${err instanceof Error ? err.message : String(err)}\n\nq quit`
+          )
+        }
       }
       if (!settled) {
         timer = setTimeout(() => void tick(), everySec * 1000)
