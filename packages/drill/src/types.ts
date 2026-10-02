@@ -8,6 +8,7 @@ export interface DrillRow {
   updated_at?: string
   labels?: string[]
   notes?: string
+  description?: string
   ephemeral?: boolean
 }
 
@@ -31,9 +32,20 @@ export interface UpOptions {
   result: string
   prevent?: string[]
   evidence?: string[]
+  /** Resolved report dir — set by the caller when a durable md report
+   *  should be written (--report, or drill.report.mode deciding yes).
+   *  Undefined → no file; the mode/flag policy lives in the CLI. */
+  reportDir?: string
 }
 
 export interface UpResult {
   closed: string
   preventionIds: string[]
+  /** Path of the written report — present only when reportDir was set
+   *  and the write succeeded. */
+  reportPath?: string
+  /** Report write failure message — the frame IS closed at that point,
+   *  so a failed write must surface as data, not a thrown error (the
+   *  CLI warns; `up` still succeeded). */
+  reportError?: string
 }

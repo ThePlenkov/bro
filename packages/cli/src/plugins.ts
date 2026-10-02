@@ -24,7 +24,7 @@ import {
 import { actConnector, ACT_PLAN_VERSION, parseActPlan, type ActPlan } from '@broject/act'
 import { CONVOY_PLAN_VERSION, parseConvoyPlan, type ConvoyPlan } from '@broject/convoy'
 import { DEBT_PLAN_VERSION, debtConnector, parseDebtPlan, type DebtPlan } from '@broject/debt'
-import { DRILL_PLAN_VERSION, drillConnector, parseDrillPlan, type DrillPlan } from '@broject/drill'
+import { DRILL_PLAN_VERSION, drillConnector, drillSection, parseDrillPlan, type DrillPlan } from '@broject/drill'
 import { parsePlanDoc, RETRO_PLAN_VERSION, type RetroPlan } from '@broject/retro'
 import { loopSection } from '@broject/loop'
 import { githubConnector } from '@broject/github'
@@ -132,9 +132,11 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'drill',
-    summary: 'Scoped descent over beads: down|up|current|tree|list|distill',
+    summary: 'Scoped descent over beads: down|up|current|tree|list|report|distill',
     run: runDrillCommand,
     skill: 'drill',
+    configKey: 'drill',
+    configSchema: drillSection,
     planSchema: (doc, source) => parseDrillPlan(doc, source),
     planVersion: DRILL_PLAN_VERSION,
     runPlan: (plan) => applyDrillPlan(plan as DrillPlan),
