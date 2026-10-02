@@ -36,6 +36,7 @@ import {
   rebindStep,
   SpawnError,
   readAgentRegistry,
+  withAgentRegistryLock,
   type AgentConnector,
   type AgentInfo,
   type AgentRegistryEntry,
@@ -289,92 +290,100 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       if (!home) {
         throw new SpawnError(`no git common dir for ${spec.repoRoot}`)
       }
-      // dedup correlates both planes: a claim alone is not a conflict —
-      // a crashed worker's stale in_progress must not block respawn —
-      // and a live agent alone is not spawnable-over either.
-      const registry = readAgentRegistry(dir)
-      const existing = registry[spec.molStep]
-      const live =
-        existing !== undefined &&
-        nativeState(dir, home, spec.molStep, existing) === 'running'
-      if (live) {
-        throw new SpawnError(
-          `${spec.molStep} already has a live agent (${existing!.agentId}, pid ${String(existing!.pid)})`
-        )
-      }
-      const step = probeStep(spec.beadsDir, spec.molStep)
-      const claimed = step?.status === 'in_progress'
-      if (claimed && existing === undefined) {
-        // claimed with no registry entry — an interactive session or a
-        // foreign backend owns it; spawning would double-claim
-        throw new SpawnError(
-          `${spec.molStep} is claimed outside the agent registry (assignee ${step?.assignee ?? '?'})`
-        )
-      }
-      // Registry entry FIRST: every later failure (claim refused, spawn
-      // error) leaves a respawn-able 'lost' entry instead of a foreign
-      // claim that can never be rebound.
-      const agentId = existing?.agentId ?? mintAgentId('native')
-      mkdirSync(home, { recursive: true })
-      const promptFile = join(home, `${agentId}.prompt.md`)
-      const log = join(home, `${agentId}.log`)
-      const exitFile = join(home, `${agentId}.exit`)
-      rmSync(exitFile, { force: true })
-      writeFileSync(promptFile, spec.prompt)
-      // exitStatus: undefined clears a respawned entry's stale harvest —
-      // the new run must not read as already-exited (undefined keys
-      // drop out of the serialized registry)
-      patchAgentRegistry(dir, spec.molStep, {
-        agentId,
-        backend: 'native',
-        spawnedAt: new Date().toISOString(),
-        worktree: spec.repoRoot,
-        log,
-        stopped: false,
-        exitStatus: undefined,
-      })
-      if (claimed) {
-        rebindStep(spec.beadsDir, spec.molStep, bdActor(spec.repoRoot))
-      } else {
-        claimStep(spec.beadsDir, spec.molStep)
-      }
-      const fd = openSync(log, 'a')
-      try {
-        // the wrapper captures $? into the .exit file — the only exit
-        // record a detached process can leave once the parent is gone
-        const child = spawn(
-          'sh',
-          ['-c', `${expandAgentCmd(command, promptFile)}; s=$?; printf %s "$s" > "$1"`, 'bro-agent', exitFile],
-          { // NOSONAR — operator-configured agent command (same contract as loop)
-            cwd: spec.repoRoot,
-            env: {
-              ...process.env,
-              BEADS_DIR: spec.beadsDir,
-              BRO_BEAD_ID: spec.molStep,
-              BRO_AGENT_ID: agentId,
-              BRO_PROMPT_FILE: promptFile,
-              ...spec.env,
-            },
-            stdio: ['ignore', fd, fd],
-            detached: true,
-          }
-        )
-        // an unhandled 'error' event would take the whole CLI down —
-        // a failed exec records itself on the entry and reads 'lost'
-        child.on('error', (err) => {
-          try {
-            patchAgentRegistry(dir, spec.molStep, { spawnError: err.message })
-          } catch {
-            // the entry may not have landed yet — nothing else to do
-          }
+      // dedup → claim → spawn → pid-patch runs as ONE critical section:
+      // without the lock a second bro process can pass the liveness
+      // check between our read and our write and double-spawn (TOCTOU).
+      // Everything inside is synchronous — the bd subprocesses are
+      // spawnSync — so the hold is milliseconds in the common case.
+      return withAgentRegistryLock(dir, () => {
+        // dedup correlates both planes: a claim alone is not a conflict —
+        // a crashed worker's stale in_progress must not block respawn —
+        // and a live agent alone is not spawnable-over either.
+        const registry = readAgentRegistry(dir)
+        const existing = registry[spec.molStep]
+        const live =
+          existing !== undefined &&
+          nativeState(dir, home, spec.molStep, existing) === 'running'
+        if (live) {
+          throw new SpawnError(
+            `${spec.molStep} already has a live agent (${existing!.agentId}, pid ${String(existing!.pid)})`
+          )
+        }
+        const step = probeStep(spec.beadsDir, spec.molStep)
+        const claimed = step?.status === 'in_progress'
+        if (claimed && existing === undefined) {
+          // claimed with no registry entry — an interactive session or a
+          // foreign backend owns it; spawning would double-claim
+          throw new SpawnError(
+            `${spec.molStep} is claimed outside the agent registry (assignee ${step?.assignee ?? '?'})`
+          )
+        }
+        // Registry entry FIRST: every later failure (claim refused, spawn
+        // error) leaves a respawn-able 'lost' entry instead of a foreign
+        // claim that can never be rebound.
+        const agentId = existing?.agentId ?? mintAgentId('native')
+        mkdirSync(home, { recursive: true })
+        const promptFile = join(home, `${agentId}.prompt.md`)
+        const log = join(home, `${agentId}.log`)
+        const exitFile = join(home, `${agentId}.exit`)
+        rmSync(exitFile, { force: true })
+        writeFileSync(promptFile, spec.prompt)
+        // exitStatus: undefined clears a respawned entry's stale harvest —
+        // the new run must not read as already-exited (undefined keys
+        // drop out of the serialized registry)
+        patchAgentRegistry(dir, spec.molStep, {
+          agentId,
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          worktree: spec.repoRoot,
+          log,
+          stopped: false,
+          exitStatus: undefined,
         })
-        child.unref()
-        patchAgentRegistry(dir, spec.molStep, { pid: child.pid ?? -1 })
-        writeWorkMarker(dir, agentId, spec.molStep)
-      } finally {
-        closeSync(fd)
-      }
-      return toInfo(dir, home, spec.molStep, readAgentRegistry(dir)[spec.molStep]!)
+        if (claimed) {
+          rebindStep(spec.beadsDir, spec.molStep, bdActor(spec.repoRoot))
+        } else {
+          claimStep(spec.beadsDir, spec.molStep)
+        }
+        const fd = openSync(log, 'a')
+        let spawned: AgentRegistryEntry
+        try {
+          // the wrapper captures $? into the .exit file — the only exit
+          // record a detached process can leave once the parent is gone
+          const child = spawn(
+            'sh',
+            ['-c', `${expandAgentCmd(command, promptFile)}; s=$?; printf %s "$s" > "$1"`, 'bro-agent', exitFile],
+            { // NOSONAR — operator-configured agent command (same contract as loop)
+              cwd: spec.repoRoot,
+              env: {
+                ...process.env,
+                BEADS_DIR: spec.beadsDir,
+                BRO_BEAD_ID: spec.molStep,
+                BRO_AGENT_ID: agentId,
+                BRO_PROMPT_FILE: promptFile,
+                ...spec.env,
+              },
+              stdio: ['ignore', fd, fd],
+              detached: true,
+            }
+          )
+          // an unhandled 'error' event would take the whole CLI down —
+          // a failed exec records itself on the entry and reads 'lost'
+          child.on('error', (err) => {
+            try {
+              patchAgentRegistry(dir, spec.molStep, { spawnError: err.message })
+            } catch {
+              // the entry may not have landed yet — nothing else to do
+            }
+          })
+          child.unref()
+          spawned = patchAgentRegistry(dir, spec.molStep, { pid: child.pid ?? -1 })
+          writeWorkMarker(dir, agentId, spec.molStep)
+        } finally {
+          closeSync(fd)
+        }
+        return toInfo(dir, home, spec.molStep, spawned)
+      })
     },
 
     async list() {

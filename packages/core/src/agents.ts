@@ -17,7 +17,16 @@
  */
 import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { ConfigSection } from './config.ts'
 import { gitTry } from './git.ts'
@@ -147,9 +156,82 @@ export function writeAgentRegistry(
     throw new Error('no git common dir — cannot write agents.json')
   }
   mkdirSync(dirname(path), { recursive: true })
-  const tmp = `${path}.${process.pid}.tmp`
+  // pid+random — a tmp name a crashed writer's leftover can't collide with
+  const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
   writeFileSync(tmp, `${JSON.stringify(reg, null, 2)}\n`)
   renameSync(tmp, path)
+}
+
+// --- registry lock ---------------------------------------------------------------
+
+/** Lock paths this process holds — makes withAgentRegistryLock
+ *  re-entrant so a locked critical section (native spawn) can call
+ *  patchAgentRegistry without deadlocking on itself. */
+const heldRegistryLocks = new Set<string>()
+
+/** A crashed holder leaves the lock file behind — break it once it's
+ *  older than any legit critical section (bd subprocess is the slowest
+ *  at ≤15s). */
+const REGISTRY_LOCK_STALE_MS = 60_000
+const REGISTRY_LOCK_WAIT_MS = 10_000
+
+const syncSleep = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/** Advisory inter-process lock on `<agents.json>.lock` (O_EXCL create —
+ *  existence IS the lock). Serializes registry read-modify-write across
+ *  bro processes: without it two spawns both read the pre-write state
+ *  and the loser's patch is silently dropped. Returns the release. */
+export function acquireAgentRegistryLock(dir: string): () => void {
+  const path = agentRegistryPath(dir)
+  if (!path) {
+    throw new Error('no git common dir — cannot lock agents.json')
+  }
+  mkdirSync(dirname(path), { recursive: true })
+  const lock = `${path}.lock`
+  if (heldRegistryLocks.has(lock)) {
+    return () => {} // re-entrant — the outer section owns it
+  }
+  const deadline = Date.now() + REGISTRY_LOCK_WAIT_MS
+  for (;;) {
+    try {
+      closeSync(openSync(lock, 'wx')) // existence is the lock, not the fd
+      break
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw err
+      }
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > REGISTRY_LOCK_STALE_MS) {
+          rmSync(lock, { force: true })
+        }
+      } catch {
+        // raced removal or a stat flake — the retry decides
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`agents.json lock held over ${REGISTRY_LOCK_WAIT_MS / 1000}s`)
+      }
+      syncSleep(25)
+    }
+  }
+  heldRegistryLocks.add(lock)
+  return () => {
+    heldRegistryLocks.delete(lock)
+    rmSync(lock, { force: true })
+  }
+}
+
+/** Run `fn` under the registry lock. Sync-only on purpose — an async
+ *  fn would release-and-reattach semantics nobody needs here; the
+ *  native spawn section is synchronous top to bottom. */
+export function withAgentRegistryLock<T>(dir: string, fn: () => T): T {
+  const release = acquireAgentRegistryLock(dir)
+  try {
+    return fn()
+  } finally {
+    release()
+  }
 }
 
 /** Read-modify-write one molStep entry; `patch` merges over the existing
@@ -159,12 +241,14 @@ export function patchAgentRegistry(
   molStep: string,
   patch: Partial<AgentRegistryEntry>
 ): AgentRegistryEntry {
-  const reg = readAgentRegistry(dir)
-  const cur = reg[molStep] ?? { agentId: '', backend: '', spawnedAt: '' }
-  const next = { ...cur, ...patch }
-  reg[molStep] = next
-  writeAgentRegistry(dir, reg)
-  return next
+  return withAgentRegistryLock(dir, () => {
+    const reg = readAgentRegistry(dir)
+    const cur = reg[molStep] ?? { agentId: '', backend: '', spawnedAt: '' }
+    const next = { ...cur, ...patch }
+    reg[molStep] = next
+    writeAgentRegistry(dir, reg)
+    return next
+  })
 }
 
 /** Fresh id for a molStep's first spawn — respawns reuse the registry

@@ -1,10 +1,18 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import {
+  acquireAgentRegistryLock,
   agentRegistryPath,
   agentsSection,
   bdAt,
@@ -15,6 +23,7 @@ import {
   readAgentRegistry,
   rebindStep,
   SpawnError,
+  withAgentRegistryLock,
   writeAgentRegistry,
 } from './agents.ts'
 
@@ -150,6 +159,55 @@ describe('agent registry IO', () => {
       assert.equal(e.pid, 42)
       assert.equal(e.exitStatus, 3)
       assert.equal(e.agentId, 'native-ab12')
+    })
+  })
+})
+
+describe('registry lock', () => {
+  test('withAgentRegistryLock re-enters — a patch inside the section works', () => {
+    withRepo((dir) => {
+      const order: string[] = []
+      withAgentRegistryLock(dir, () => {
+        order.push('outer')
+        patchAgentRegistry(dir, 'bro-x', {
+          agentId: 'native-ab12',
+          backend: 'native',
+          spawnedAt: 't0',
+        })
+        order.push('inner')
+      })
+      assert.deepEqual(order, ['outer', 'inner'])
+      assert.equal(readAgentRegistry(dir)['bro-x']!.agentId, 'native-ab12')
+      // released — no lock file left behind
+      assert.equal(existsSync(`${agentRegistryPath(dir)!}.lock`), false)
+    })
+  })
+
+  test('a stale lock file (crashed holder) is broken, not waited on', () => {
+    withRepo((dir) => {
+      const lock = `${agentRegistryPath(dir)!}.lock`
+      mkdirSync(dirname(lock), { recursive: true })
+      writeFileSync(lock, 'dead holder')
+      const past = new Date(Date.now() - 120_000)
+      utimesSync(lock, past, past)
+      const release = acquireAgentRegistryLock(dir)
+      release()
+      assert.equal(existsSync(lock), false)
+    })
+  })
+
+  test('a lost patch is impossible under the lock — concurrent writers serialize', () => {
+    withRepo((dir) => {
+      // two writers, one lock each at a time — both patches land
+      withAgentRegistryLock(dir, () => {
+        const reg = readAgentRegistry(dir)
+        reg['a'] = { agentId: 'a1', backend: 'native', spawnedAt: 't' }
+        writeAgentRegistry(dir, reg)
+      })
+      patchAgentRegistry(dir, 'b', { agentId: 'b1', backend: 'native', spawnedAt: 't' })
+      const reg = readAgentRegistry(dir)
+      assert.equal(reg['a']!.agentId, 'a1')
+      assert.equal(reg['b']!.agentId, 'b1')
     })
   })
 })

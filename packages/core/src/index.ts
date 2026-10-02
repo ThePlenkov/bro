@@ -95,6 +95,7 @@ export {
   readAgentRegistry,
   rebindStep,
   SpawnError,
+  withAgentRegistryLock,
   writeAgentRegistry,
 } from './agents.ts'
 export type {
