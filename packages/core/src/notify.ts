@@ -105,76 +105,100 @@ function seenPath(mb: string, sessionId: string): string {
  *  chronological key a filename sort can't see: `note-*` sorts before
  *  `watch-*` regardless of drop time. */
 const dropTime = (name: string): number =>
-  Number(name.match(/-(\d+)-/)?.[1] ?? 0)
+  Number(/-(\d+)-/.exec(name)?.[1] ?? 0)
 
-/** Every pending drop this session hasn't seen, oldest-first by the
- *  embedded drop time. Seen drops stay
- *  for other sessions until they expire; a drop is deleted once it is
- *  older than DROP_TTL_MS, delivered or not. Drops are injected
- *  verbatim — a heartbeat's formatting is part of the event. */
-export function drainMailbox(dir: string, sessionId: string): string[] {
-  const out: string[] = []
-  const now = Date.now()
-  for (const mb of drainDirs(dir)) {
-    let files: string[]
+/** The session's `.seen` cursor — absent or unreadable means first
+ *  drain, everything is new. */
+function readSeen(cursor: string): Set<string> {
+  try {
+    return new Set(readFileSync(cursor, 'utf8').split('\n').filter(Boolean))
+  } catch {
+    return new Set()
+  }
+}
+
+/** Persist the cursor pruned to names still on disk — a failed write
+ *  just re-delivers next drain (fail-open). */
+function writeSeen(cursor: string, seen: Set<string>, files: string[]): void {
+  try {
+    writeFileSync(cursor, [...seen].filter((f) => files.includes(f)).join('\n'))
+  } catch {
+    // best-effort
+  }
+}
+
+/** Dead sessions leave cursors behind — prune them like hook markers. */
+function pruneStaleCursors(mb: string, files: string[], now: number): void {
+  for (const f of files.filter((f) => f.startsWith('.seen-'))) {
     try {
-      files = readdirSync(mb)
-    } catch {
-      continue // no mailbox yet — nothing to drain
-    }
-    const cursor = seenPath(mb, sessionId)
-    const seen = new Set<string>()
-    try {
-      for (const n of readFileSync(cursor, 'utf8').split('\n')) {
-        if (n !== '') {
-          seen.add(n)
-        }
+      if (now - statSync(join(mb, f)).mtimeMs > SEEN_TTL_MS) {
+        rmSync(join(mb, f), { force: true })
       }
     } catch {
-      // no cursor yet — first drain for this session
-    }
-    for (const f of files
-      .filter((f) => f.endsWith('.txt') && !f.startsWith('.'))
-      .sort((a, b) => dropTime(a) - dropTime(b) || (a < b ? -1 : a > b ? 1 : 0))) {
-      const path = join(mb, f)
-      try {
-        if (now - statSync(path).mtimeMs > DROP_TTL_MS) {
-          rmSync(path, { force: true }) // expired — reap, never deliver
-          continue
-        }
-        if (seen.has(f)) {
-          continue
-        }
-        const text = readFileSync(path, 'utf8')
-        seen.add(f)
-        if (text.trim() !== '') {
-          out.push(text)
-        }
-      } catch {
-        // unreadable drop — skip; the next drain retries
-      }
-    }
-    // rewrite the cursor to names still on disk — bounded by live drops
-    try {
-      writeFileSync(
-        cursor,
-        [...seen].filter((f) => files.includes(f)).join('\n')
-      )
-    } catch {
-      // a failed cursor write just re-delivers next time — fail-open
-    }
-    // dead sessions leave cursors — prune like hook markers
-    for (const f of files.filter((f) => f.startsWith('.seen-'))) {
-      try {
-        if (now - statSync(join(mb, f)).mtimeMs > SEEN_TTL_MS) {
-          rmSync(join(mb, f), { force: true })
-        }
-      } catch {
-        // best-effort
-      }
+      // best-effort
     }
   }
+}
+
+/** One drop: reap when expired, deliver into `out` when unseen. Drops
+ *  stay on disk for other sessions until the TTL takes them, so a
+ *  crash mid-drain loses nothing — the unwritten cursor redelivers. */
+function drainDrop(
+  mb: string,
+  f: string,
+  seen: Set<string>,
+  out: string[],
+  now: number
+): void {
+  const path = join(mb, f)
+  try {
+    if (now - statSync(path).mtimeMs > DROP_TTL_MS) {
+      rmSync(path, { force: true }) // expired — reap, never deliver
+      return
+    }
+    if (seen.has(f)) {
+      return
+    }
+    const text = readFileSync(path, 'utf8')
+    seen.add(f)
+    if (text.trim() !== '') {
+      out.push(text)
+    }
+  } catch {
+    // unreadable drop — skip; the next drain retries
+  }
+}
+
+/** Drain one mailbox dir for a session, oldest-first by embedded drop
+ *  time. Drops are injected verbatim — a heartbeat's formatting is
+ *  part of the event. */
+function drainDir(mb: string, sessionId: string, now: number): string[] {
+  let files: string[]
+  try {
+    files = readdirSync(mb)
+  } catch {
+    return [] // no mailbox yet — nothing to drain
+  }
+  const cursor = seenPath(mb, sessionId)
+  const seen = readSeen(cursor)
+  const out: string[] = []
+  for (const f of files
+    .filter((f) => f.endsWith('.txt') && !f.startsWith('.'))
+    .sort((a, b) => dropTime(a) - dropTime(b) || a.localeCompare(b))) {
+    drainDrop(mb, f, seen, out, now)
+  }
+  writeSeen(cursor, seen, files)
+  pruneStaleCursors(mb, files, now)
   return out
+}
+
+/** Every pending drop this session hasn't seen, oldest-first by the
+ *  embedded drop time. Seen drops stay for other sessions until they
+ *  expire; a drop is deleted once it is older than DROP_TTL_MS,
+ *  delivered or not. */
+export function drainMailbox(dir: string, sessionId: string): string[] {
+  const now = Date.now()
+  return drainDirs(dir).flatMap((mb) => drainDir(mb, sessionId, now))
 }
 
 /** The notify connector — the read side of the mailbox. Its postTool
