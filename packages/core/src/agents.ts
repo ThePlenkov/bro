@@ -26,6 +26,7 @@ import {
   rmSync,
   statSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { ConfigSection } from './config.ts'
@@ -180,10 +181,17 @@ const syncSleep = (ms: number): void => {
 }
 
 /** One acquisition attempt — true when the lock is ours. On EEXIST a
- *  stale lock (crashed holder) is broken so the next retry can take it. */
-const tryAcquireLockFile = (lock: string): boolean => {
+ *  stale lock (crashed holder) is broken so the next retry can take it.
+ *  The file carries the caller's token: existence is the lock, the token
+ *  is the ownership proof release() checks before removing it. */
+const tryAcquireLockFile = (lock: string, token: string): boolean => {
   try {
-    closeSync(openSync(lock, 'wx')) // existence is the lock, not the fd
+    const fd = openSync(lock, 'wx')
+    try {
+      writeSync(fd, token)
+    } finally {
+      closeSync(fd)
+    }
     return true
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
@@ -214,8 +222,9 @@ export function acquireAgentRegistryLock(dir: string): () => void {
   if (heldRegistryLocks.has(lock)) {
     return () => {} // re-entrant — the outer section owns it
   }
+  const token = `${process.pid}:${randomBytes(8).toString('hex')}`
   const deadline = Date.now() + REGISTRY_LOCK_WAIT_MS
-  while (!tryAcquireLockFile(lock)) {
+  while (!tryAcquireLockFile(lock, token)) {
     if (Date.now() >= deadline) {
       throw new Error(`agents.json lock held over ${REGISTRY_LOCK_WAIT_MS / 1000}s`)
     }
@@ -224,7 +233,16 @@ export function acquireAgentRegistryLock(dir: string): () => void {
   heldRegistryLocks.add(lock)
   return () => {
     heldRegistryLocks.delete(lock)
-    rmSync(lock, { force: true })
+    try {
+      // a section that overran the stale window may have been broken and
+      // re-acquired by a contender — remove the file only while it still
+      // carries OUR token, or release would drop the new holder's lock
+      if (readFileSync(lock, 'utf8') === token) {
+        rmSync(lock, { force: true })
+      }
+    } catch {
+      // lock already gone — the desired end state
+    }
   }
 }
 

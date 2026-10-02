@@ -19,7 +19,7 @@ import { basename } from 'node:path'
 import { git, gitTry, reviewHost, type AgentInfo, type ReviewFacade } from '@broject/core'
 import { listMolecules, loadMolecule, stepsOf, type ConvoyStep } from '@broject/convoy'
 import { eachAgentConnector, loadAgentEnv } from '../agent-connectors.ts'
-import { parseWorktreePorcelain, type WorktreeInfo } from './work.ts'
+import { parseWorktreePorcelain, worktreePathFor, type WorktreeInfo } from './work.ts'
 
 export interface FleetRow {
   mol: string
@@ -35,34 +35,49 @@ export interface FleetRow {
 }
 
 /** The fleet's agent plane — merged across every registered backend.
- *  A throwing connector is degrade-equivalent: it contributes no agents
- *  and one `degraded` note, never a hard failure of the whole view. */
+ *  A throwing connector — factory or list() — is degrade-equivalent:
+ *  it contributes no agents and one `degraded` note, never a hard
+ *  failure of the whole view. Two backends reporting the same step is a
+ *  `conflict`: registry order decides (same precedence as connector
+ *  resolution) and the loser is reported, not silently overwritten. */
 async function collectAgents(dir: string): Promise<{
   byStep: Map<string, AgentInfo>
   degraded: string[]
+  conflicts: string[]
 }> {
   const byStep = new Map<string, AgentInfo>()
   const degraded: string[] = []
+  const conflicts: string[] = []
   const env = loadAgentEnv(dir)
-  for (const conn of eachAgentConnector({ dir }, env)) {
+  for (const conn of eachAgentConnector({ dir }, env, (name, err) => {
+    degraded.push(`${name}: ${err instanceof Error ? err.message : String(err)}`)
+  })) {
     try {
       const res = await conn.list()
       if (res.degraded) {
         degraded.push(`${conn.name}: ${res.degraded}`)
       }
       for (const a of res.agents) {
+        if (byStep.has(a.molStep)) {
+          conflicts.push(
+            `${a.molStep}: ${conn.name} agent ${a.id} ignored — ${byStep.get(a.molStep)!.backend} holds the step`
+          )
+          continue
+        }
         byStep.set(a.molStep, a)
       }
     } catch (err) {
       degraded.push(`${conn.name}: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
-  return { byStep, degraded }
+  return { byStep, degraded, conflicts }
 }
 
-/** The worktree column: the agent's recorded worktree wins; otherwise a
- *  `<repo>--<step>` sibling counts as that step's checkout. */
-function worktreeOf(
+/** The worktree column: the agent's recorded worktree wins; otherwise
+ *  the step's own `bro work` checkout — `worktreePathFor(main, step)`,
+ *  an exact sibling path, not a basename suffix that could borrow
+ *  another repo's `…--<step>` directory. */
+export function worktreeOf(
   stepId: string,
   agent: AgentInfo | undefined,
   worktrees: WorktreeInfo[]
@@ -70,8 +85,13 @@ function worktreeOf(
   if (agent?.worktree) {
     return basename(agent.worktree)
   }
-  const hit = worktrees.find((w) => basename(w.path).endsWith(`--${stepId}`))
-  return hit ? basename(hit.path) : undefined
+  const main = worktrees[0]?.path // porcelain lists the main checkout first
+  if (main === undefined) {
+    return undefined
+  }
+  const expected = worktreePathFor(main, stepId)
+  const hit = worktrees.find((w) => w.path === expected)
+  return hit === undefined ? undefined : basename(hit.path)
 }
 
 /** `work/x` branch name for a worktree path — '' when unreadable. */
@@ -136,7 +156,7 @@ function fleetRows(
   return rows
 }
 
-function printFleetTable(rows: FleetRow[], degraded: string[]): void {
+function printFleetTable(rows: FleetRow[], degraded: string[], conflicts: string[]): void {
   const cols: [keyof FleetRow, string][] = [
     ['mol', 'mol'],
     ['step', 'step'],
@@ -157,6 +177,9 @@ function printFleetTable(rows: FleetRow[], degraded: string[]): void {
   }
   for (const d of degraded) {
     console.error(`warning: backend degraded — ${d}`)
+  }
+  for (const c of conflicts) {
+    console.error(`warning: agent conflict — ${c}`)
   }
 }
 
@@ -184,7 +207,7 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
   const json = argv.includes('--json')
   const dir = process.cwd()
 
-  const { byStep, degraded } = await collectAgents(dir)
+  const { byStep, degraded, conflicts } = await collectAgents(dir)
 
   const worktrees = (() => {
     try {
@@ -208,12 +231,12 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
   const rows = fleetRows(byStep, degraded.length > 0, rev, repo, worktrees)
 
   if (json) {
-    console.log(JSON.stringify({ rows, degraded }, null, 2))
+    console.log(JSON.stringify({ rows, degraded, conflicts }, null, 2))
     return
   }
   if (rows.length === 0) {
     console.log('no open molecules — nothing in the fleet')
     return
   }
-  printFleetTable(rows, degraded)
+  printFleetTable(rows, degraded, conflicts)
 }

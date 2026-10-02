@@ -18,9 +18,11 @@ import {
 } from '@broject/core'
 import {
   agentConnectorNames,
+  eachAgentConnector,
   loadAgentEnv,
   makeNativeConnector,
   pidAlive,
+  registerAgentConnector,
   resolveAgentConnector,
   type AgentConnectorEnv,
 } from './agent-connectors.ts'
@@ -51,7 +53,7 @@ if (args[0] === 'show') {
     if (k === 'claim') {
       if (r.status === 'in_progress') { console.error('already claimed'); process.exit(1) }
       r.status = 'in_progress'
-      r.assignee = 'claimer'
+      r.assignee = 'tester'
     } else {
       r[k] = args[++i]
     }
@@ -232,6 +234,55 @@ describe('native connector', () => {
     }
   })
 
+  test('a claim held by another actor is not stolen on respawn', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const conn = makeNativeConnector({ dir: fx.main }, fx.env)
+      const first = await conn.spawn(
+        SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+      )
+      process.kill(-first.pid!, 'SIGKILL')
+      await until(() => !pidAlive(first.pid!))
+      // someone else claimed the step while our worker was dead
+      const db = join(fx.beadsDir, 'store.json')
+      const rows = JSON.parse(readFileSync(db, 'utf8')).rows
+      rows[0].assignee = 'other-actor'
+      writeFileSync(db, JSON.stringify({ rows }))
+      await assert.rejects(
+        conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+        /claimed by other-actor/
+      )
+      await conn.stop(first.id)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('spec.env cannot override the identity pins', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const conn = makeNativeConnector({ dir: fx.main }, fx.env)
+      const spec = {
+        ...SPEC(
+          fx.main,
+          fx.beadsDir,
+          'fx-1',
+          "require('fs').writeFileSync('env.out', [process.env.BEADS_DIR, process.env.BRO_BEAD_ID, process.env.BRO_AGENT_ID].join('|'))"
+        ),
+        env: { BEADS_DIR: '/evil', BRO_BEAD_ID: 'spoofed', BRO_AGENT_ID: 'spoofed' },
+      }
+      const info = await conn.spawn(spec)
+      await until(() => existsSync(join(fx.main, 'env.out')))
+      const out = readFileSync(join(fx.main, 'env.out'), 'utf8')
+      assert.equal(out, `${fx.beadsDir}|fx-1|${info.id}`)
+      // the claim landed in the pinned store, not the overridden one
+      assert.equal(fx.dbRows()[0]!.status, 'in_progress')
+      await conn.stop(info.id)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
   test('exit status harvests into the registry — dead pid + .exit → exited', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
@@ -299,6 +350,28 @@ describe('native connector', () => {
       respawn: true,
       supervisor: 'none',
     })
+  })
+})
+
+describe('eachAgentConnector', () => {
+  // registers LAST — the registry is module-global, so a throwing factory
+  // would break connector-resolution probes in earlier tests
+  test('a throwing factory degrades to a note; without the callback it still throws', () => {
+    registerAgentConnector('explody', () => {
+      throw new Error('backend exploded')
+    })
+    const notes: string[] = []
+    const conns = eachAgentConnector(
+      { dir: '/x' },
+      { agents: {}, connectors: {} },
+      (name, err) => notes.push(`${name}: ${err instanceof Error ? err.message : String(err)}`)
+    )
+    assert.deepEqual(conns.map((c) => c.name), ['native'])
+    assert.deepEqual(notes, ['explody: backend exploded'])
+    assert.throws(
+      () => eachAgentConnector({ dir: '/x' }, { agents: {}, connectors: {} }),
+      /backend exploded/
+    )
   })
 })
 

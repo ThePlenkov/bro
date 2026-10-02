@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -193,6 +194,20 @@ describe('registry lock', () => {
       const release = acquireAgentRegistryLock(dir)
       release()
       assert.equal(existsSync(lock), false)
+    })
+  })
+
+  test('release never removes a lock a contender re-acquired', () => {
+    withRepo((dir) => {
+      const lock = `${agentRegistryPath(dir)!}.lock`
+      mkdirSync(dirname(lock), { recursive: true })
+      const release = acquireAgentRegistryLock(dir)
+      // our section overran the stale window: the file was broken and
+      // re-created by another holder — releasing must not delete THEIRS
+      rmSync(lock)
+      writeFileSync(lock, 'other-holder')
+      release()
+      assert.equal(readFileSync(lock, 'utf8'), 'other-holder')
     })
   })
 

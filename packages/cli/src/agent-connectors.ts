@@ -137,12 +137,27 @@ export function resolveAgentConnector(
 
 /** Every registered backend, constructed — fleet reads across ALL of
  *  them (the view works regardless of which backend a fleet runs on);
- *  each connector's list() carries its own degraded flag. */
+ *  each connector's list() carries its own degraded flag. A throwing
+ *  factory is degrade-equivalent: with `onFactoryError` it contributes a
+ *  note and the other backends still construct — without it, the throw
+ *  propagates as before. */
 export function eachAgentConnector(
   ctx: ConnectorCtx,
-  env: AgentConnectorEnv = loadAgentEnv(ctx.dir)
+  env: AgentConnectorEnv = loadAgentEnv(ctx.dir),
+  onFactoryError?: (name: string, error: unknown) => void
 ): AgentConnector[] {
-  return agentRegistry.map((x) => x.make(ctx, env))
+  const connectors: AgentConnector[] = []
+  for (const x of agentRegistry) {
+    try {
+      connectors.push(x.make(ctx, env))
+    } catch (error) {
+      if (onFactoryError === undefined) {
+        throw error
+      }
+      onFactoryError(x.name, error)
+    }
+  }
+  return connectors
 }
 
 // --- native --------------------------------------------------------------------
@@ -318,6 +333,14 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             `${spec.molStep} is claimed outside the agent registry (assignee ${step?.assignee ?? '?'})`
           )
         }
+        // a dead entry doesn't entitle us to whatever claim sits on the
+        // step now — if another actor picked it up meanwhile, rebinding
+        // would steal a live worker's (or a human's) step
+        if (claimed && step?.assignee !== bdActor(spec.repoRoot)) {
+          throw new SpawnError(
+            `${spec.molStep} is claimed by ${step?.assignee ?? '?'} — rebind only takes our own claim`
+          )
+        }
         // Registry entry FIRST: every later failure (claim refused, spawn
         // error) leaves a respawn-able 'lost' entry instead of a foreign
         // claim that can never be rebound.
@@ -339,6 +362,11 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           log,
           stopped: false,
           exitStatus: undefined,
+          // a respawn must not keep the dead worker's pid/spawnError —
+          // a claim failure before the pid patch would leave a stale
+          // pid that could alias an unrelated process later
+          pid: undefined,
+          spawnError: undefined,
         })
         if (claimed) {
           rebindStep(spec.beadsDir, spec.molStep, bdActor(spec.repoRoot))
@@ -357,11 +385,13 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
               cwd: spec.repoRoot,
               env: {
                 ...process.env,
+                ...spec.env,
+                // identity pins last — spec.env must never redirect the
+                // claim store or re-badge the worker as another bead/agent
                 BEADS_DIR: spec.beadsDir,
                 BRO_BEAD_ID: spec.molStep,
                 BRO_AGENT_ID: agentId,
                 BRO_PROMPT_FILE: promptFile,
-                ...spec.env,
               },
               stdio: ['ignore', fd, fd],
               detached: true,

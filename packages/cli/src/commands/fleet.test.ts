@@ -2,7 +2,8 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { ConvoyStep } from '@broject/convoy'
 import type { AgentInfo } from '@broject/core'
-import { agentCell } from './fleet.ts'
+import { agentCell, worktreeOf } from './fleet.ts'
+import type { WorktreeInfo } from './work.ts'
 
 const step = (state: ConvoyStep['state']): ConvoyStep => ({
   id: 'bro-x',
@@ -55,5 +56,30 @@ describe('agentCell', () => {
   test('exited and stopped render plainly', () => {
     assert.equal(agentCell(step('done'), agent('exited'), undefined, false), 'exited')
     assert.equal(agentCell(step('in_progress'), agent('stopped'), undefined, false), 'stopped')
+  })
+})
+
+const wt = (path: string): WorktreeInfo => ({ path, head: 'x', bare: false, detached: false })
+
+describe('worktreeOf', () => {
+  test("the agent's recorded worktree wins over name matching", () => {
+    const a = { ...agent('running'), worktree: '/elsewhere/custom-dir' }
+    assert.equal(worktreeOf('bro-x', a, [wt('/r/main')]), 'custom-dir')
+  })
+
+  test('an exact <repo>--<step> sibling counts as the checkout', () => {
+    const trees = [wt('/r/main'), wt('/r/main--bro-x')]
+    assert.equal(worktreeOf('bro-x', undefined, trees), 'main--bro-x')
+  })
+
+  test("another repo's same-suffixed sibling does not match", () => {
+    const trees = [wt('/r/main'), wt('/r/other--bro-x'), wt('/elsewhere/main--bro-x')]
+    // 'other--bro-x' is a different repo's worktree; '/elsewhere/…' is
+    // ours by name but not a sibling of main — neither counts
+    assert.equal(worktreeOf('bro-x', undefined, trees), undefined)
+  })
+
+  test('no agent, no worktrees → undefined', () => {
+    assert.equal(worktreeOf('bro-x', undefined, []), undefined)
   })
 })
