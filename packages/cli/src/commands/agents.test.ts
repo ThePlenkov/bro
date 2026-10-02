@@ -71,6 +71,16 @@ function fixture(rows: Array<Record<string, unknown>> = []): Fixture {
     PATH: process.env.PATH ?? '',
     FAKE_BD_DB: process.env.FAKE_BD_DB,
     BEADS_ACTOR: process.env.BEADS_ACTOR,
+    // ambient repo/store pins from an outer agent session (GIT_DIR,
+    // BEADS_DIR, BRO_*) would redirect the in-process connector's git
+    // lookups into the outer repo — scrub them like testrepo's git()
+    scrubbed: {} as Record<string, string | undefined>,
+  }
+  for (const k of Object.keys(process.env)) {
+    if (/^(GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_COMMON_DIR|BEADS_DIR|BRO_)/.test(k)) {
+      prev.scrubbed[k] = process.env[k]
+      delete process.env[k]
+    }
   }
   process.env.PATH = `${binDir}:${prev.PATH}`
   process.env.FAKE_BD_DB = db
@@ -87,12 +97,34 @@ function fixture(rows: Array<Record<string, unknown>> = []): Fixture {
       return f
     },
     restore() {
+      // detached agents outlive a failed assertion — kill whatever the
+      // registry still points at before the tmpdir (and it) goes away
+      try {
+        for (const e of Object.values(readAgentRegistry(main))) {
+          if (typeof e.pid === 'number' && e.pid > 0) {
+            try {
+              process.kill(-e.pid, 'SIGKILL') // detached → own process group
+            } catch {
+              // already gone
+            }
+          }
+        }
+      } catch {
+        // no readable registry — nothing spawned
+      }
       process.chdir(prev.cwd)
       process.env.PATH = prev.PATH
       for (const [k, v] of [
         ['FAKE_BD_DB', prev.FAKE_BD_DB],
         ['BEADS_ACTOR', prev.BEADS_ACTOR],
       ] as const) {
+        if (v === undefined) {
+          delete process.env[k]
+        } else {
+          process.env[k] = v
+        }
+      }
+      for (const [k, v] of Object.entries(prev.scrubbed)) {
         if (v === undefined) {
           delete process.env[k]
         } else {
@@ -252,10 +284,14 @@ describe('bro agents up <step>', () => {
   })
 
   test('a live agent on the step refuses a second spawn', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open', description: LONG_RUN }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
+      // --prompt-file, not the bead text: `node {promptFile}` runs the
+      // prompt as a program, and the rendered `# fx-1\n\n…` bead text is
+      // a SyntaxError — the child would die before the dedup check
       const first = await agents([
         'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN),
       ])
       assert.equal(first.code, 0, first.err.join('\n'))
       const again = await agents([

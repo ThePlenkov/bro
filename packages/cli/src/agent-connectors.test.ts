@@ -71,6 +71,8 @@ interface Fixture {
   beadsDir: string
   env: AgentConnectorEnv
   prevPath: string
+  /** Ambient GIT_/BEADS_/BRO_ pins scrubbed for the test's duration. */
+  scrubbed: Record<string, string | undefined>
   dbRows(): Array<Record<string, unknown>>
 }
 
@@ -90,6 +92,16 @@ function fixture(
   writeFileSync(join(binDir, 'bd'), FAKE_BD)
   chmodSync(join(binDir, 'bd'), 0o755)
   const prevPath = process.env.PATH ?? ''
+  // ambient repo/store pins (GIT_DIR, BEADS_DIR, BRO_*) would redirect
+  // the connector's git-common-dir resolution into the outer repo —
+  // same hazard testrepo's git() strips
+  const scrubbed: Record<string, string | undefined> = {}
+  for (const k of Object.keys(process.env)) {
+    if (/^(GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_COMMON_DIR|BEADS_DIR|BRO_)/.test(k)) {
+      scrubbed[k] = process.env[k]
+      delete process.env[k]
+    }
+  }
   process.env.PATH = `${binDir}:${prevPath}`
   return {
     root,
@@ -97,12 +109,35 @@ function fixture(
     beadsDir,
     env: { agents: { native: { command } }, connectors: {} },
     prevPath,
+    scrubbed,
     dbRows: () => JSON.parse(readFileSync(db, 'utf8')).rows,
   }
 }
 
 function cleanup(fx: Fixture): void {
+  // detached agents outlive a failed assertion — kill whatever the
+  // registry still points at before the tmpdir (and it) goes away
+  try {
+    for (const e of Object.values(readAgentRegistry(fx.main))) {
+      if (typeof e.pid === 'number' && e.pid > 0) {
+        try {
+          process.kill(-e.pid, 'SIGKILL') // detached → own process group
+        } catch {
+          // already gone
+        }
+      }
+    }
+  } catch {
+    // no readable registry — nothing spawned
+  }
   process.env.PATH = fx.prevPath
+  for (const [k, v] of Object.entries(fx.scrubbed)) {
+    if (v === undefined) {
+      delete process.env[k]
+    } else {
+      process.env[k] = v
+    }
+  }
   rmSync(fx.root, { recursive: true, force: true })
 }
 

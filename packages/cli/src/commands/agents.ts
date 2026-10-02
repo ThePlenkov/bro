@@ -71,13 +71,17 @@ async function collectAgents(
   connectorName?: string
 ): Promise<{ backends: { conn: AgentConnector; agents: AgentInfo[]; degraded?: string }[] }> {
   const backends = []
-  for (const conn of eachAgentConnector({ dir }, env, (name, err) =>
-    backends.push({
-      conn: { name, capabilities: () => ({ supervisor: 'none' as const }) } as AgentConnector,
-      agents: [],
-      degraded: `factory: ${err instanceof Error ? err.message : String(err)}`,
-    })
-  )) {
+  for (const conn of eachAgentConnector({ dir }, env, (name, err) => {
+    // --connector scopes failures too — an unrelated backend's throwing
+    // factory must not leak a degraded stub into the selected view
+    if (connectorName === undefined || name === connectorName) {
+      backends.push({
+        conn: { name, capabilities: () => ({ supervisor: 'none' as const }) } as AgentConnector,
+        agents: [],
+        degraded: `factory: ${err instanceof Error ? err.message : String(err)}`,
+      })
+    }
+  })) {
     if (connectorName !== undefined && conn.name !== connectorName) {
       continue
     }
@@ -101,13 +105,10 @@ async function collectAgents(
 /** Target → agent + its backend, matched on agentId OR molStep.
  *  `degraded` names backends whose list() failed — a miss next to a
  *  degraded backend is "couldn't verify", not "gone". */
-async function findAgent(
-  dir: string,
-  env: AgentConnectorEnv,
-  target: string,
-  connectorName?: string
-): Promise<{ hit?: { conn: AgentConnector; agent: AgentInfo }; degraded: string[] }> {
-  const { backends } = await collectAgents(dir, env, connectorName)
+function findInBackends(
+  backends: { conn: AgentConnector; agents: AgentInfo[]; degraded?: string }[],
+  target: string
+): { hit?: { conn: AgentConnector; agent: AgentInfo }; degraded: string[] } {
   const degraded = backends
     .filter((b) => b.degraded !== undefined)
     .map((b) => `${b.conn.name}: ${b.degraded}`)
@@ -118,6 +119,16 @@ async function findAgent(
     }
   }
   return { degraded }
+}
+
+async function findAgent(
+  dir: string,
+  env: AgentConnectorEnv,
+  target: string,
+  connectorName?: string
+): Promise<{ hit?: { conn: AgentConnector; agent: AgentInfo }; degraded: string[] }> {
+  const { backends } = await collectAgents(dir, env, connectorName)
+  return findInBackends(backends, target)
 }
 
 // --- status -------------------------------------------------------------------
@@ -155,18 +166,29 @@ function printStatusTable(
 }
 
 async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
-  const target = positionals(argv, new Set(['--connector']))[0]
+  const pos = positionals(argv, new Set(['--connector']))
+  if (pos.length > 1) {
+    usage()
+  }
+  const target = pos[0]
   const json = argv.includes('--json')
   const connectorName = flag(argv, '--connector')
   const { backends } = await collectAgents(dir, env, connectorName)
 
   if (target !== undefined) {
-    const { hit, degraded } = await findAgent(dir, env, target, connectorName)
+    // the table path already collected — search it, don't list() twice
+    const { hit, degraded } = findInBackends(backends, target)
     if (!hit) {
       const blind = degraded.length > 0 ? ` (degraded: ${degraded.join('; ')})` : ''
       die(
         `no agent "${target}"${blind} — checked ${backends.map((b) => b.conn.name).join(', ') || 'no backends'}`
       )
+    }
+    // a found agent doesn't mean the fleet view is complete — surface
+    // degraded backends on the targeted read too (stderr, so --json
+    // stays parseable)
+    for (const d of degraded) {
+      console.error(`warning: backend degraded — ${d}`)
     }
     const a = hit.agent
     if (json) {
@@ -279,7 +301,14 @@ function resolvePrompt(
   if (r.code !== 0) {
     die(`cannot render a prompt — bead ${molStep} unreadable (${r.err}); pass --prompt-file`)
   }
-  const row = (JSON.parse(r.out) as { title?: string; description?: string }[])[0]
+  let row: { title?: string; description?: string } | undefined
+  try {
+    row = (JSON.parse(r.out) as { title?: string; description?: string }[])[0]
+  } catch {
+    // exit-0 garbage (non-JSON diagnostics, truncated output) falls
+    // through to the same die as an empty row
+    row = undefined
+  }
   const prompt = `# ${row?.title ?? molStep}\n\n${row?.description ?? ''}`.trim()
   if (row === undefined || prompt === `# ${molStep}`) {
     die(`bead ${molStep} has no title/description to prompt with — pass --prompt-file`)
@@ -345,6 +374,24 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
     // stop() is idempotent — a gone agent is the desired end state
     console.log(`down: no agent "${target}" — nothing to stop`)
     return
+  }
+  // bind the stop to what the backend reports NOW, not the list()
+  // snapshot — a respawn between the two reuses the agentId with a new
+  // pid, and a dead agent is already the desired end state
+  let current = hit.agent
+  try {
+    current = await hit.conn.status(hit.agent.id)
+  } catch {
+    // the read failed — stop() still binds to the observed id
+  }
+  if (current.state === 'exited' || current.state === 'stopped' || current.state === 'lost') {
+    console.log(`down: ${hit.agent.id} is ${current.state} — nothing to stop`)
+    return
+  }
+  if (current.pid !== hit.agent.pid) {
+    console.error(
+      `note: ${hit.agent.id} respawned since lookup (pid ${String(hit.agent.pid)} → ${String(current.pid)}) — stopping current instance`
+    )
   }
   await hit.conn.stop(hit.agent.id)
   console.log(`stopped ${hit.agent.id} (${hit.agent.molStep}, ${hit.conn.name})`)
