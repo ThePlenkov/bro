@@ -47,6 +47,7 @@ import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runFleetCommand } from './commands/fleet.ts'
 import { runHooksCommand } from './commands/hooks.ts'
 import { runWatchCommand } from './commands/watch.ts'
+import { runAgentsCommand } from './commands/agents.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runSetupCommand } from './commands/setup.ts'
 import { runSpecCommand, sddConnector } from './commands/spec.ts'
@@ -127,8 +128,12 @@ export const PLUGINS: BroPlugin[] = [
     name: 'fleet',
     summary: 'Fleet view — mols × steps × agents × worktrees × PRs [--json]',
     run: runFleetCommand,
-    // owns the agents.* backend-knob section until `bro agents`
-    // (bro-q0f2) lands — one owner per configKey
+  }),
+  definePlugin({
+    name: 'agents',
+    summary: 'Agent supervisor — status|up|down over the orchestrator connectors',
+    run: runAgentsCommand,
+    skill: 'agents',
     configKey: 'agents',
     configSchema: agentsSection,
   }),

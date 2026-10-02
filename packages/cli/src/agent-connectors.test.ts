@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import {
   agentRegistryPath,
   bdActor,
+  patchAgentRegistry,
   readAgentRegistry,
   SpawnError,
   AgentNotFound,
@@ -70,6 +71,8 @@ interface Fixture {
   beadsDir: string
   env: AgentConnectorEnv
   prevPath: string
+  /** Ambient GIT_/BEADS_/BRO_ pins scrubbed for the test's duration. */
+  scrubbed: Record<string, string | undefined>
   dbRows(): Array<Record<string, unknown>>
 }
 
@@ -89,6 +92,16 @@ function fixture(
   writeFileSync(join(binDir, 'bd'), FAKE_BD)
   chmodSync(join(binDir, 'bd'), 0o755)
   const prevPath = process.env.PATH ?? ''
+  // ambient repo/store pins (GIT_DIR, BEADS_DIR, BRO_*) would redirect
+  // the connector's git-common-dir resolution into the outer repo —
+  // same hazard testrepo's git() strips
+  const scrubbed: Record<string, string | undefined> = {}
+  for (const k of Object.keys(process.env)) {
+    if (/^(GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_COMMON_DIR|BEADS_DIR|BRO_)/.test(k)) {
+      scrubbed[k] = process.env[k]
+      delete process.env[k]
+    }
+  }
   process.env.PATH = `${binDir}:${prevPath}`
   return {
     root,
@@ -96,12 +109,37 @@ function fixture(
     beadsDir,
     env: { agents: { native: { command } }, connectors: {} },
     prevPath,
+    scrubbed,
     dbRows: () => JSON.parse(readFileSync(db, 'utf8')).rows,
   }
 }
 
 function cleanup(fx: Fixture): void {
+  // detached agents outlive a failed assertion — kill whatever the
+  // registry still points at before the tmpdir (and it) goes away
+  try {
+    for (const e of Object.values(readAgentRegistry(fx.main))) {
+      // never signal our own pid/pgid — a group-leader test process
+      // would take the whole runner down
+      if (typeof e.pid === 'number' && e.pid > 0 && e.pid !== process.pid && e.pid !== process.ppid) {
+        try {
+          process.kill(-e.pid, 'SIGKILL') // detached → own process group
+        } catch {
+          // already gone
+        }
+      }
+    }
+  } catch {
+    // no readable registry — nothing spawned
+  }
   process.env.PATH = fx.prevPath
+  for (const [k, v] of Object.entries(fx.scrubbed)) {
+    if (v === undefined) {
+      delete process.env[k]
+    } else {
+      process.env[k] = v
+    }
+  }
   rmSync(fx.root, { recursive: true, force: true })
 }
 
@@ -339,6 +377,52 @@ describe('native connector', () => {
       const reg = agentRegistryPath(fx.main)
       assert.equal(reg !== null && existsSync(reg), false)
     } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('a foreign-backend registry entry refuses spawn — no cross-backend adopt', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const conn = makeNativeConnector({ dir: fx.main }, fx.env)
+      patchAgentRegistry(fx.main, 'fx-1', {
+        agentId: 'tmux-ab12',
+        backend: 'tmux',
+        spawnedAt: new Date().toISOString(),
+      })
+      await assert.rejects(
+        conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 1)')),
+        /registered to backend "tmux"/
+      )
+      // nothing claimed, nothing spawned
+      assert.equal(fx.dbRows()[0]!.status, 'open')
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('an unsafe registry agentId is reminted, never trusted as a path', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'in_progress', assignee: 'tester' }])
+    const prevActor = process.env.BEADS_ACTOR
+    process.env.BEADS_ACTOR = 'tester'
+    try {
+      const conn = makeNativeConnector({ dir: fx.main }, fx.env)
+      patchAgentRegistry(fx.main, 'fx-1', {
+        agentId: '../evil',
+        backend: 'native',
+        spawnedAt: new Date().toISOString(),
+      })
+      const info = await conn.spawn(
+        SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+      )
+      assert.match(info.id, /^native-[0-9a-f]{8}$/)
+      await conn.stop(info.id)
+    } finally {
+      if (prevActor === undefined) {
+        delete process.env.BEADS_ACTOR
+      } else {
+        process.env.BEADS_ACTOR = prevActor
+      }
       cleanup(fx)
     }
   })
