@@ -5,6 +5,7 @@
  * substrate; the file is the *output* — it rides the branch like any
  * source file and `drill up` never commits it.
  */
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { DrillRow } from './types.ts'
@@ -94,7 +95,7 @@ export function renderReport(input: DrillReportInput): string {
 export function writeReport(dir: string, input: DrillReportInput): string {
   mkdirSync(dir, { recursive: true })
   const path = join(dir, `${input.frame.id}.md`)
-  const tmp = `${path}.tmp`
+  const tmp = `${path}.${randomBytes(6).toString('hex')}.tmp`
   writeFileSync(tmp, renderReport(input))
   renameSync(tmp, path)
   return path

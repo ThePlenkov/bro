@@ -43,7 +43,8 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd init` done.
   solved a problem well can be distilled into a proto and re-poured next
   time (`bd mol pour`/`bd mol wisp`).
 - **Reports are intentional.** Beads stay the coordination substrate; a
-  committed `drills/<id>.md` is the durable output for postmortems and
+  committed `<id>.md` under `drill.report.dir` (`drills/` by default)
+  is the durable output for postmortems and
   audits. `--report` forces it; `drill.report.mode` `always` covers
   persistent frames only, `prompt` asks on a TTY (off non-interactively).
   When publishing is enabled, `drill up` writes the file but never
