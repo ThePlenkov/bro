@@ -802,27 +802,36 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // 'duplicate' — clear it; kill-session on a missing target is
         // a no-op error we ignore
         tmuxRun(socket, ['kill-session', '-t', session])
-        // pane env mirrors native's spawn env: ambient process.env first
-        // — an already-running server's env is whatever started IT, not
-        // us — then spec.env, then the identity pins LAST so neither can
-        // redirect the claim store or re-badge the worker
+        // ambient env (process.env + spec.env) rides a 0600 file the
+        // pane sources, not argv — -e KEY=VALUE would expose secrets on
+        // the tmux client's world-readable cmdline, a regression vs
+        // native's spawn env. Identity pins are non-secret and stay on
+        // -e; they're also filtered OUT of the file so sourcing can
+        // never redirect the claim store or re-badge the worker
+        const envFile = join(home, `${agentId}.env`)
+        const PIN_KEYS = ['BEADS_DIR', 'BRO_BEAD_ID', 'BRO_AGENT_ID', 'BRO_PROMPT_FILE']
+        const ambient = Object.entries({ ...process.env, ...spec.env })
+          .filter(
+            (e): e is [string, string] =>
+              e[1] !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) && !PIN_KEYS.includes(e[0])
+          )
+          .map(([k, v]) => `export ${k}=${shQuote(v)}`)
+          .join('\n')
+        writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
         const envArgs = Object.entries({
-          ...process.env,
-          ...spec.env,
           BEADS_DIR: spec.beadsDir,
           BRO_BEAD_ID: spec.molStep,
           BRO_AGENT_ID: agentId,
           BRO_PROMPT_FILE: promptFile,
-        })
-          .filter((e): e is [string, string] => e[1] !== undefined)
-          .flatMap(([k, v]) => ['-e', `${k}=${v}`])
-        // the pane runs the agent; $? lands in the .exit file before the
-        // pipeline drains, tee keeps a log the way native's fd redirect
-        // does. Session dies with the pane → has-session IS liveness.
-        // tmux runs the command through the user's default-shell — a
+        }).flatMap(([k, v]) => ['-e', `${k}=${v}`])
+        // the pane sources the ambient env and drops the file, then runs
+        // the agent; $? lands in the .exit file before the pipeline
+        // drains, tee keeps a log the way native's fd redirect does.
+        // Session dies with the pane → has-session IS liveness. tmux
+        // runs the command through the user's default-shell — a
         // non-POSIX one (fish) would eat the braces, so sh -c pins the
         // dialect the same way native's spawn does
-        const paneScript = `{ ${expandAgentCmd(command, promptFile)}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>&1 | tee -a ${shQuote(log)}`
+        const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${expandAgentCmd(command, promptFile)}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>&1 | tee -a ${shQuote(log)}`
         const paneCmd = `sh -c ${shQuote(paneScript)}` // NOSONAR — operator-configured agent command (same contract as native/loop)
         const res = tmuxRun(socket, [
           'new-session',
@@ -835,6 +844,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           paneCmd,
         ])
         if (res.code !== 0) {
+          rmSync(envFile, { force: true }) // a failed spawn must not leave ambient env on disk
           try {
             patchAgentRegistry(dir, spec.molStep, { spawnError: res.err })
           } catch {
@@ -922,10 +932,20 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         if (
           cur === undefined ||
           cur.agentId !== entry.agentId ||
-          cur.spawnedAt !== entry.spawnedAt ||
-          (name !== undefined && tmuxProbe(socket, name).live === 'running')
+          cur.spawnedAt !== entry.spawnedAt
         ) {
-          return // respawned or still alive — the live run owns the entry
+          return // respawned — the live run owns the entry
+        }
+        if (name !== undefined) {
+          const p = tmuxProbe(socket, name)
+          if (p.live === 'running') {
+            return // still alive — the live run owns the entry
+          }
+          if (p.live === 'unknown') {
+            // an unverifiable probe must not record 'stopped' on a
+            // session that may still be live — fail loudly instead
+            throw new Error(`cannot verify ${id}'s tmux session stopped — ${p.err}`)
+          }
         }
         try {
           patchAgentRegistry(dir, molStep, { stopped: true })

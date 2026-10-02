@@ -122,10 +122,11 @@ if (args[0] === 'kill-session') {
   process.exit(0)
 }
 if (args[0] === 'list-sessions') {
-  const db = load()
-  for (const n of Object.keys(db.sessions)) {
-    if (alive(db.sessions[n].pid)) { console.log(n) }
-  }
+  // a real server dies with its last session — zero live sessions means
+  // 'no server running', not a clean empty listing
+  const live = Object.keys(load().sessions).filter((n) => alive(load().sessions[n].pid))
+  if (live.length === 0) { console.error('no server running'); process.exit(1) }
+  for (const n of live) { console.log(n) }
   process.exit(0)
 }
 if (args[0] === 'list-panes') {
