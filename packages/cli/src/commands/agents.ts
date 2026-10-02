@@ -98,21 +98,26 @@ async function collectAgents(
   return { backends }
 }
 
-/** Target → agent + its backend, matched on agentId OR molStep. */
+/** Target → agent + its backend, matched on agentId OR molStep.
+ *  `degraded` names backends whose list() failed — a miss next to a
+ *  degraded backend is "couldn't verify", not "gone". */
 async function findAgent(
   dir: string,
   env: AgentConnectorEnv,
   target: string,
   connectorName?: string
-): Promise<{ conn: AgentConnector; agent: AgentInfo } | undefined> {
+): Promise<{ hit?: { conn: AgentConnector; agent: AgentInfo }; degraded: string[] }> {
   const { backends } = await collectAgents(dir, env, connectorName)
+  const degraded = backends
+    .filter((b) => b.degraded !== undefined)
+    .map((b) => `${b.conn.name}: ${b.degraded}`)
   for (const { conn, agents } of backends) {
     const hit = agents.find((a) => a.id === target || a.molStep === target)
     if (hit) {
-      return { conn, agent: hit }
+      return { hit: { conn, agent: hit }, degraded }
     }
   }
-  return undefined
+  return { degraded }
 }
 
 // --- status -------------------------------------------------------------------
@@ -156,9 +161,12 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
   const { backends } = await collectAgents(dir, env, connectorName)
 
   if (target !== undefined) {
-    const hit = await findAgent(dir, env, target, connectorName)
+    const { hit, degraded } = await findAgent(dir, env, target, connectorName)
     if (!hit) {
-      die(`no agent "${target}" — checked ${backends.map((b) => b.conn.name).join(', ') || 'no backends'}`)
+      const blind = degraded.length > 0 ? ` (degraded: ${degraded.join('; ')})` : ''
+      die(
+        `no agent "${target}"${blind} — checked ${backends.map((b) => b.conn.name).join(', ') || 'no backends'}`
+      )
     }
     const a = hit.agent
     if (json) {
@@ -218,11 +226,19 @@ async function supervisorVerb(conn: AgentConnector, verb: 'up' | 'down'): Promis
  *  path (a respawn reuses the dead agent's checkout) → the
  *  `<repo>--<step>` sibling convention. Missing = the caller never
  *  entered one — the error names the command, not a guess. */
-function resolveWorktree(dir: string, molStep: string, explicit: string | undefined): string {
+function resolveWorktree(
+  dir: string,
+  molStep: string,
+  explicit: string | undefined,
+  backend: string
+): string {
   if (explicit !== undefined) {
     return explicit
   }
-  const recorded = readAgentRegistry(dir)[molStep]?.worktree
+  // recorded state is the resolving backend's — `--connector x` must not
+  // inherit backend-y's worktree/prompt for the same step
+  const entry = readAgentRegistry(dir)[molStep]
+  const recorded = entry?.backend === backend ? entry.worktree : undefined
   if (typeof recorded === 'string' && existsSync(recorded)) {
     return recorded
   }
@@ -244,7 +260,8 @@ function resolvePrompt(
   dir: string,
   beads: string,
   molStep: string,
-  promptFile: string | undefined
+  promptFile: string | undefined,
+  backend: string
 ): string {
   if (promptFile !== undefined) {
     if (!existsSync(promptFile)) {
@@ -252,7 +269,8 @@ function resolvePrompt(
     }
     return readFileSync(promptFile, 'utf8')
   }
-  const agentId = readAgentRegistry(dir)[molStep]?.agentId
+  const entry = readAgentRegistry(dir)[molStep]
+  const agentId = entry?.backend === backend ? entry.agentId : undefined
   const stored = agentId === undefined ? null : agentPromptPath(dir, agentId)
   if (stored !== null && existsSync(stored)) {
     return readFileSync(stored, 'utf8')
@@ -282,11 +300,11 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
     return
   }
   const beads = flag(argv, '--beads-dir') ?? beadsDir()
-  const repoRoot = resolveWorktree(dir, molStep, flag(argv, '--worktree'))
+  const repoRoot = resolveWorktree(dir, molStep, flag(argv, '--worktree'), conn.name)
   if (!existsSync(repoRoot)) {
     die(`worktree ${repoRoot} does not exist`)
   }
-  const prompt = resolvePrompt(dir, beads, molStep, flag(argv, '--prompt-file'))
+  const prompt = resolvePrompt(dir, beads, molStep, flag(argv, '--prompt-file'), conn.name)
   let info: AgentInfo
   try {
     info = await conn.spawn({ molStep, repoRoot, beadsDir: beads, prompt })
@@ -317,8 +335,13 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
     await supervisorVerb(resolveAgentConnector({ dir }, { connector: connectorName }, env), 'down')
     return
   }
-  const hit = await findAgent(dir, env, target, connectorName)
+  const { hit, degraded } = await findAgent(dir, env, target, connectorName)
   if (!hit) {
+    // a degraded read can't confirm "gone" — report unverified, don't
+    // claim the desired end state was reached
+    if (degraded.length > 0) {
+      die(`down: no agent "${target}" found — backend(s) degraded: ${degraded.join('; ')}`)
+    }
     // stop() is idempotent — a gone agent is the desired end state
     console.log(`down: no agent "${target}" — nothing to stop`)
     return

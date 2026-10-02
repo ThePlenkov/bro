@@ -335,3 +335,27 @@ describe('bro agents down <target>', () => {
     }
   })
 })
+
+// registers LAST — the connector registry is module-global, so the
+// throwing factory must not exist while earlier tests resolve connectors
+describe('bro agents — degraded backends', () => {
+  test('a degraded backend cannot confirm gone — down fails loudly', async () => {
+    const { registerAgentConnector } = await import('../agent-connectors.ts')
+    registerAgentConnector('explody-agents-test', () => {
+      throw new Error('backend exploded')
+    })
+    const fx = fixture()
+    try {
+      const r = await agents(['down', 'fx-9'])
+      assert.equal(r.code, 1)
+      assert.match(r.err.join('\n'), /backend\(s\) degraded:.*explody-agents-test.*backend exploded/)
+      // and the read side still renders the healthy backend's table
+      const st = await agents(['status'])
+      assert.equal(st.code, 0)
+      assert.match(st.out.join('\n'), /native\s+none/)
+      assert.match(st.err.join('\n'), /backend degraded — explody-agents-test/)
+    } finally {
+      fx.restore()
+    }
+  })
+})

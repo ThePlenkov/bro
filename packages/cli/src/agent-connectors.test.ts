@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import {
   agentRegistryPath,
   bdActor,
+  patchAgentRegistry,
   readAgentRegistry,
   SpawnError,
   AgentNotFound,
@@ -339,6 +340,52 @@ describe('native connector', () => {
       const reg = agentRegistryPath(fx.main)
       assert.equal(reg !== null && existsSync(reg), false)
     } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('a foreign-backend registry entry refuses spawn — no cross-backend adopt', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const conn = makeNativeConnector({ dir: fx.main }, fx.env)
+      patchAgentRegistry(fx.main, 'fx-1', {
+        agentId: 'tmux-ab12',
+        backend: 'tmux',
+        spawnedAt: new Date().toISOString(),
+      })
+      await assert.rejects(
+        conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 1)')),
+        /registered to backend "tmux"/
+      )
+      // nothing claimed, nothing spawned
+      assert.equal(fx.dbRows()[0]!.status, 'open')
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('an unsafe registry agentId is reminted, never trusted as a path', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'in_progress', assignee: 'tester' }])
+    const prevActor = process.env.BEADS_ACTOR
+    process.env.BEADS_ACTOR = 'tester'
+    try {
+      const conn = makeNativeConnector({ dir: fx.main }, fx.env)
+      patchAgentRegistry(fx.main, 'fx-1', {
+        agentId: '../evil',
+        backend: 'native',
+        spawnedAt: new Date().toISOString(),
+      })
+      const info = await conn.spawn(
+        SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+      )
+      assert.match(info.id, /^native-[0-9a-f]{8}$/)
+      await conn.stop(info.id)
+    } finally {
+      if (prevActor === undefined) {
+        delete process.env.BEADS_ACTOR
+      } else {
+        process.env.BEADS_ACTOR = prevActor
+      }
       cleanup(fx)
     }
   })

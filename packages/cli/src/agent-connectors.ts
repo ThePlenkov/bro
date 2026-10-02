@@ -172,13 +172,20 @@ function agentsHome(dir: string): string | null {
   return common === '' ? null : join(common, 'bro', 'agents')
 }
 
+/** agentIds become filenames under shared dirs — a tampered registry
+ *  entry's `../x` must not escape them. Minted ids are `<backend>-<hex>`;
+ *  the pattern starts alnum so `.`/`..` segments can never form. */
+const SAFE_AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
 /** `<common>/bro/agents/<agentId>.prompt.md` — the spawn-time rendered
  *  instructions. Respawn of a custom-prompt agent (a fixer round's
  *  thread context, say) reuses it — the agentId survives process death,
- *  so the file does too. */
+ *  so the file does too. Null for an unsafe or unanchorable id. */
 export function agentPromptPath(dir: string, agentId: string): string | null {
   const home = agentsHome(dir)
-  return home === null ? null : join(home, `${agentId}.prompt.md`)
+  return home === null || !SAFE_AGENT_ID.test(agentId)
+    ? null
+    : join(home, `${agentId}.prompt.md`)
 }
 
 /** `<common>/bro/hooks/agent-<id>.work` — hooks markers are
@@ -186,6 +193,9 @@ export function agentPromptPath(dir: string, agentId: string): string | null {
  *  session name so `otherLiveWork` (session-start parallel detection)
  *  reports it as live work on the molStep. Null outside a common dir. */
 function workMarkerPath(dir: string, agentId: string): string | null {
+  if (!SAFE_AGENT_ID.test(agentId)) {
+    return null
+  }
   const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
   const common = r.code === 0 ? r.out.trim() : ''
   return common === '' ? null : join(common, 'bro', 'hooks', `agent-${agentId}.work`)
@@ -355,6 +365,14 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         // and a live agent alone is not spawnable-over either.
         const registry = readAgentRegistry(dir)
         const existing = registry[spec.molStep]
+        // a registry entry belongs to the backend that wrote it — the
+        // respawn contract (same agentId, same claim rebind) is
+        // per-runtime; one backend must not adopt another's entry
+        if (existing !== undefined && existing.backend !== 'native') {
+          throw new SpawnError(
+            `${spec.molStep} is registered to backend "${existing.backend}" — respawn belongs to it`
+          )
+        }
         const live =
           existing !== undefined &&
           nativeState(dir, home, spec.molStep, existing) === 'running'
@@ -386,7 +404,12 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         // Registry entry FIRST: every later failure (claim refused, spawn
         // error) leaves a respawn-able 'lost' entry instead of a foreign
         // claim that can never be rebound.
-        const agentId = existing?.agentId ?? mintAgentId('native')
+        // a reused id must stay filename-safe — a tampered entry gets a
+        // fresh mint, not a path escape into <home>/
+        const agentId =
+          existing !== undefined && SAFE_AGENT_ID.test(existing.agentId)
+            ? existing.agentId
+            : mintAgentId('native')
         mkdirSync(home, { recursive: true })
         const promptFile = join(home, `${agentId}.prompt.md`)
         const log = join(home, `${agentId}.log`)
