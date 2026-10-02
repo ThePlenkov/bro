@@ -377,9 +377,15 @@ async function runFleetLive(dir: string, everySec: number): Promise<void> {
       }
       input.removeListener('data', onKey)
       out.removeListener('resize', repaint)
-      input.setRawMode(false)
-      input.pause()
+      // restore the screen first — a destroyed stdin throws on
+      // setRawMode (kill/session teardown) and must not skip it
       out.write(CURSOR_SHOW + ALT_SCREEN_OFF)
+      try {
+        input.setRawMode(false)
+        input.pause()
+      } catch {
+        // stdin already closed/destroyed
+      }
       resolve()
     }
     const onKey = (buf: Buffer): void => {
