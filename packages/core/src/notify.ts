@@ -16,17 +16,24 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import type { Connector } from './connectors.ts'
 import { gitTry } from './git.ts'
 
 /** The repo mailbox — `<git-common>/bro/notify`; null outside a repo. */
 export function mailboxDir(dir: string): string | null {
   const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
-  const common = r.code === 0 ? r.out.trim() : ''
+  let common = r.code === 0 ? r.out.trim() : ''
+  if (common === '') {
+    // git <2.31 has no --path-format — resolve the possibly-relative
+    // common dir against `dir` instead of failing detection outright
+    const rel = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'])
+    common = rel.code === 0 && rel.out.trim() !== '' ? resolve(dir, rel.out.trim()) : ''
+  }
   return common === '' ? null : join(common, 'bro', 'notify')
 }
 
@@ -72,33 +79,84 @@ export function dropMailbox(dir: string, text: string, prefix: string): string {
   return join(dir, name)
 }
 
-/** Read+delete every pending drop — the filename sort is chronological
- *  (epoch-ms prefixes). Consumed on read: the first session whose
- *  postTool fires gets the event. An unreadable drop is left in place —
- *  a transient fs error shouldn't lose it. */
+/** Epoch-ms embedded in a drop name (`<prefix>-<ms>-<rand>.txt`) — the
+ *  chronological key a filename sort can't see: `note-*` sorts before
+ *  `watch-*` regardless of drop time. */
+const dropTime = (name: string): number =>
+  Number(name.match(/-(\d+)-/)?.[1] ?? 0)
+
+/** Claims older than this were abandoned by a crashed drainer — the drop
+ *  was never delivered, so it goes back to the mailbox. */
+const CLAIM_STALE_MS = 60_000
+
+/** Hand drops abandoned mid-claim back to the mailbox — a `.claim` file
+ *  older than CLAIM_STALE_MS means its drainer died between the atomic
+ *  rename and the delete, and at-least-once demands the redelivery.
+ *  Returns the restored drop names so the caller drains them now. */
+function releaseStaleClaims(mb: string, names: string[]): string[] {
+  const restored: string[] = []
+  for (const f of names) {
+    if (!f.startsWith('.') || !f.endsWith('.claim')) continue
+    const claim = join(mb, f)
+    try {
+      if (Date.now() - statSync(claim).mtimeMs < CLAIM_STALE_MS) continue
+      const orig = f.slice(1).replace(/\.[^.]+\.claim$/, '')
+      renameSync(claim, join(mb, orig))
+      restored.push(orig)
+    } catch {
+      // gone or unstat-able — a live drainer owns it
+    }
+  }
+  return restored
+}
+
+/** Read+delete every pending drop, oldest first by embedded drop time.
+ *  Each drop is claimed with an atomic rename before it's read — a
+ *  concurrent drainer that loses the rename sees ENOENT and skips, so a
+ *  drop can't be delivered twice. Consumed on read: the first session
+ *  whose postTool fires gets the event. An unreadable drop is handed
+ *  back under its original name — a transient fs error shouldn't lose
+ *  it. */
 export function drainMailbox(dir: string): string[] {
   const out: string[] = []
   for (const mb of drainDirs(dir)) {
     let files: string[]
     try {
-      files = readdirSync(mb)
+      const names = readdirSync(mb)
+      files = names
         .filter((f) => f.endsWith('.txt') && !f.startsWith('.'))
-        .sort()
+        .concat(releaseStaleClaims(mb, names))
+        .sort((a, b) => dropTime(a) - dropTime(b) || (a < b ? -1 : a > b ? 1 : 0))
     } catch {
       continue // no mailbox yet — nothing to drain
     }
     for (const f of files) {
-      const path = join(mb, f)
+      const orig = join(mb, f)
+      const claim = join(
+        mb,
+        `.${f}.${process.pid}-${randomBytes(4).toString('hex')}.claim`
+      )
       try {
-        const text = readFileSync(path, 'utf8').trim()
+        renameSync(orig, claim)
+      } catch {
+        continue // claimed by a concurrent drainer — it owns the drop
+      }
+      try {
+        const text = readFileSync(claim, 'utf8').trim()
         if (text !== '') {
           out.push(text)
         }
-        // delete LAST — a crash between read and rm re-delivers the
-        // drop (at-least-once); rm-before-collect could lose it
-        rmSync(path, { force: true })
+        // delete LAST — a crash between read and rm strands the claim;
+        // releaseStaleClaims hands it back for redelivery (at-least-once)
+        rmSync(claim, { force: true })
       } catch {
-        // unreadable drop — skip; the next drain retries
+        // unreadable drop — hand it back so the next drain retries; a
+        // failed restore strands the claim, released later as stale
+        try {
+          renameSync(claim, orig)
+        } catch {
+          // stranded claim — releaseStaleClaims recovers it
+        }
       }
     }
   }

@@ -1,7 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -129,6 +129,40 @@ describe('drainMailbox', () => {
         assert.deepEqual(drainMailbox(dir), ['first', 'second'])
         assert.equal(existsSync(join(mb, 'note-100-a.txt')), false)
         assert.deepEqual(drainMailbox(dir), [])
+      })
+    })
+  })
+
+  test('orders by drop time across prefixes — watch-* does not wait on note-*', () => {
+    withRepo((dir) => {
+      withXdg(tmp('bro-xdg-'), () => {
+        const mb = mailboxDir(dir)!
+        mkdirSync(mb, { recursive: true })
+        writeFileSync(join(mb, 'watch-100-a.txt'), 'older watch')
+        writeFileSync(join(mb, 'note-200-b.txt'), 'newer note')
+        writeFileSync(join(mb, 'watch-50-c.txt'), 'oldest watch')
+        assert.deepEqual(drainMailbox(dir), [
+          'oldest watch',
+          'older watch',
+          'newer note',
+        ])
+      })
+    })
+  })
+
+  test('a live .claim is invisible to drain; a stale one is handed back', () => {
+    withRepo((dir) => {
+      withXdg(tmp('bro-xdg-'), () => {
+        const mb = mailboxDir(dir)!
+        mkdirSync(mb, { recursive: true })
+        const claim = join(mb, '.note-100-a.txt.4242-zz.claim')
+        writeFileSync(claim, 'claimed but undelivered')
+        assert.deepEqual(drainMailbox(dir), [])
+        assert.equal(existsSync(claim), true)
+        const stale = new Date(Date.now() - 120_000)
+        utimesSync(claim, stale, stale)
+        assert.deepEqual(drainMailbox(dir), ['claimed but undelivered'])
+        assert.equal(existsSync(claim), false)
       })
     })
   })
