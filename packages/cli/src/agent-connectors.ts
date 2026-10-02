@@ -12,7 +12,7 @@
  * marker in the hooks state dir so parallel-session detection sees the
  * agent, and molStep claims pinned into the shared beads store.
  */
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   closeSync,
   existsSync,
@@ -541,3 +541,330 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
 }
 
 registerAgentConnector('native', makeNativeConnector)
+
+// --- tmux ----------------------------------------------------------------------
+
+/** tmux runs the pane command through sh — single-quote a path the same
+ *  way expandAgentCmd quotes {promptFile}. */
+const shQuote = (s: string): string => `'${s.replaceAll("'", String.raw`'\''`)}'`
+
+/** tmux session names can't hold `.`/`:` (target syntax) — minted ids
+ *  (`tmux-<hex>` → `bro-tmux-<hex>`) always pass; a tampered registry
+ *  entry's name must still be proven safe before it becomes a -t arg. */
+const TMUX_SESSION_NAME = /^[A-Za-z0-9_-]+$/
+
+interface TmuxResult {
+  code: number
+  out: string
+  err: string
+  /** ENOENT — the binary isn't there at all (degrade, don't probe). */
+  missing: boolean
+}
+
+/** One tmux call on a socket. `socket === ''` targets the user's default
+ *  server (no -L); the default 'bro' socket keeps the fleet off it. */
+function tmuxRun(socket: string, args: string[]): TmuxResult {
+  const proc = spawnSync('tmux', socket === '' ? args : ['-L', socket, ...args], { // NOSONAR — PATH lookup is the contract (same as git/bd)
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    timeout: 10_000,
+  })
+  return {
+    code: proc.status ?? 1,
+    out: proc.stdout ?? '',
+    err: (proc.stderr ?? proc.error?.message ?? '').trim(),
+    missing: (proc.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
+  }
+}
+
+/** The registry entry's tmux session name — the recorded one, or derived
+ *  from a safe agentId for entries written before `session` existed.
+ *  Undefined when neither is a legal tmux name. */
+function tmuxSessionName(entry: AgentRegistryEntry): string | undefined {
+  if (typeof entry.session === 'string' && TMUX_SESSION_NAME.test(entry.session)) {
+    return entry.session
+  }
+  const derived = `bro-${entry.agentId}`
+  return TMUX_SESSION_NAME.test(derived) ? derived : undefined
+}
+
+/** Live state for a tmux entry: has-session is the liveness probe (the
+ *  pane dying takes the session with it), then the same stopped/exit/
+ *  lost ladder as native — the pane command writes the same .exit file
+ *  the detached wrapper does. */
+function tmuxState(
+  socket: string,
+  dir: string,
+  home: string | null,
+  molStep: string,
+  entry: AgentRegistryEntry
+): AgentState {
+  // liveness first — 'stopped' on a session that still exists means
+  // kill-session hasn't landed; the agent IS still running
+  const name = tmuxSessionName(entry)
+  if (name !== undefined && tmuxRun(socket, ['has-session', '-t', name]).code === 0) {
+    touchWorkMarker(dir, entry.agentId)
+    return 'running'
+  }
+  if (entry.stopped === true) {
+    dropWorkMarker(dir, entry.agentId)
+    return 'stopped'
+  }
+  if (entry.exitStatus !== undefined) {
+    dropWorkMarker(dir, entry.agentId)
+    return 'exited'
+  }
+  if (home) {
+    const code = readExitFile(home, entry.agentId)
+    if (code !== undefined) {
+      try {
+        patchAgentRegistry(dir, molStep, { exitStatus: code })
+      } catch {
+        // harvest is advisory — the .exit file still proves the exit
+      }
+      dropWorkMarker(dir, entry.agentId)
+      return 'exited'
+    }
+  }
+  dropWorkMarker(dir, entry.agentId)
+  return 'lost'
+}
+
+function toTmuxInfo(
+  socket: string,
+  dir: string,
+  home: string | null,
+  molStep: string,
+  entry: AgentRegistryEntry
+): AgentInfo {
+  return {
+    id: entry.agentId,
+    pid: typeof entry.pid === 'number' ? entry.pid : undefined,
+    molStep,
+    backend: entry.backend,
+    state: tmuxState(socket, dir, home, molStep, entry),
+    worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
+    log: typeof entry.log === 'string' ? entry.log : undefined,
+  }
+}
+
+/** The tmux backend — each agent is a detached tmux session on a
+ *  dedicated socket (`agents.tmux.socket`, default 'bro'; '' = the
+ *  user's default server). Interactive: `tmux -L bro attach -t
+ *  bro-<agentId>` is the attach the capability flag promises. The tmux
+ *  server self-starts on new-session, so supervisor stays 'none'.
+ *
+ *  Dedup/claim/registry semantics are the native one's — the beads
+ *  claim in the shared store is the single source of truth, the
+ *  agentId survives respawn, and a foreign backend's entry is never
+ *  adopted. Knobs: `agents.tmux.command` → `loop.agent` (same agent
+ *  command template as native, `{promptFile}` expanded). */
+export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
+  const dir = ctx.dir
+  const knobs = env.agents['tmux'] ?? {}
+  const command =
+    (typeof knobs.command === 'string' && knobs.command.trim() !== ''
+      ? knobs.command
+      : undefined) ?? env.loop?.agent ?? ''
+  const socket = typeof knobs.socket === 'string' ? knobs.socket : 'bro'
+
+  const findEntry = (id: string): [string, AgentRegistryEntry] | undefined => {
+    for (const [molStep, e] of Object.entries(readAgentRegistry(dir))) {
+      if (e.backend === 'tmux' && e.agentId === id) {
+        return [molStep, e]
+      }
+    }
+    return undefined
+  }
+
+  return {
+    name: 'tmux',
+
+    async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+      if (command === '') {
+        throw new SpawnError(
+          'no agent command configured — set agents.tmux.command or loop.agent in bro.config.json'
+        )
+      }
+      if (!existsSync(spec.repoRoot)) {
+        throw new SpawnError(`worktree ${spec.repoRoot} does not exist`)
+      }
+      const home = agentsHome(dir)
+      if (!home) {
+        throw new SpawnError(`no git common dir for ${spec.repoRoot}`)
+      }
+      const ver = tmuxRun(socket, ['-V'])
+      if (ver.missing || ver.code !== 0) {
+        throw new SpawnError(`tmux unavailable — ${ver.missing ? 'not on PATH' : ver.err}`)
+      }
+      // same critical section as native: dedup → claim → session →
+      // pid-patch under the registry lock, all synchronous shell-outs
+      return withAgentRegistryLock(dir, () => {
+        const registry = readAgentRegistry(dir)
+        const existing = registry[spec.molStep]
+        if (existing !== undefined && existing.backend !== 'tmux') {
+          throw new SpawnError(
+            `${spec.molStep} is registered to backend "${existing.backend}" — respawn belongs to it`
+          )
+        }
+        const live =
+          existing !== undefined &&
+          tmuxState(socket, dir, home, spec.molStep, existing) === 'running'
+        if (live) {
+          throw new SpawnError(
+            `${spec.molStep} already has a live agent (${existing!.agentId}, session ${tmuxSessionName(existing!) ?? '?'})`
+          )
+        }
+        const step = probeStep(spec.beadsDir, spec.molStep)
+        const claimed = step?.status === 'in_progress'
+        if (claimed && existing === undefined) {
+          throw new SpawnError(
+            `${spec.molStep} is claimed outside the agent registry (assignee ${step?.assignee ?? '?'})`
+          )
+        }
+        const actor = claimed ? bdActor(spec.beadsDir) : undefined
+        if (claimed && step?.assignee !== actor) {
+          throw new SpawnError(
+            `${spec.molStep} is claimed by ${step?.assignee ?? '?'} — rebind only takes our own claim`
+          )
+        }
+        // entry first — same as native: a later failure leaves a
+        // respawn-able 'lost' entry instead of a foreign claim
+        const agentId =
+          existing !== undefined && SAFE_AGENT_ID.test(existing.agentId)
+            ? existing.agentId
+            : mintAgentId('tmux')
+        const session = `bro-${agentId}`
+        mkdirSync(home, { recursive: true })
+        const promptFile = join(home, `${agentId}.prompt.md`)
+        const log = join(home, `${agentId}.log`)
+        const exitFile = join(home, `${agentId}.exit`)
+        rmSync(exitFile, { force: true })
+        writeFileSync(promptFile, spec.prompt)
+        patchAgentRegistry(dir, spec.molStep, {
+          agentId,
+          backend: 'tmux',
+          spawnedAt: new Date().toISOString(),
+          worktree: spec.repoRoot,
+          log,
+          session,
+          stopped: false,
+          exitStatus: undefined,
+          pid: undefined,
+          spawnError: undefined,
+        })
+        if (claimed) {
+          rebindStep(spec.beadsDir, spec.molStep, actor!)
+        } else {
+          claimStep(spec.beadsDir, spec.molStep)
+        }
+        // a leftover session with our name (crash between entry and
+        // kill, a respawn over a zombie) would make new-session fail
+        // 'duplicate' — clear it; kill-session on a missing target is
+        // a no-op error we ignore
+        tmuxRun(socket, ['kill-session', '-t', session])
+        // identity pins ride the -e batch LAST via object spread — a
+        // spec.env BEADS_DIR/BRO_* must not redirect the claim store or
+        // re-badge the worker (same guarantee as native's env order)
+        const envArgs = Object.entries({
+          ...spec.env,
+          BEADS_DIR: spec.beadsDir,
+          BRO_BEAD_ID: spec.molStep,
+          BRO_AGENT_ID: agentId,
+          BRO_PROMPT_FILE: promptFile,
+        }).flatMap(([k, v]) => ['-e', `${k}=${v}`])
+        // the pane runs the agent; $? lands in the .exit file before the
+        // pipeline drains, tee keeps a log the way native's fd redirect
+        // does. Session dies with the pane → has-session IS liveness
+        const paneCmd = `{ ${expandAgentCmd(command, promptFile)}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>&1 | tee -a ${shQuote(log)}`
+        const res = tmuxRun(socket, [
+          'new-session',
+          '-d',
+          '-s',
+          session,
+          '-c',
+          spec.repoRoot,
+          ...envArgs,
+          paneCmd,
+        ])
+        if (res.code !== 0) {
+          try {
+            patchAgentRegistry(dir, spec.molStep, { spawnError: res.err })
+          } catch {
+            // the entry landed already — the SpawnError still reports
+          }
+          throw new SpawnError(`tmux new-session failed — ${res.err}`)
+        }
+        // pane pid — a display handle like native's child pid, not the
+        // liveness signal (has-session is)
+        const pp = tmuxRun(socket, ['list-panes', '-t', session, '-F', '#{pane_pid}'])
+        const panePid = pp.code === 0 ? Number(pp.out.trim().split('\n')[0]) : NaN
+        const spawned = patchAgentRegistry(
+          dir,
+          spec.molStep,
+          Number.isInteger(panePid) && panePid > 0 ? { pid: panePid } : {}
+        )
+        writeWorkMarker(dir, agentId, spec.molStep)
+        return toTmuxInfo(socket, dir, home, spec.molStep, spawned)
+      })
+    },
+
+    async list() {
+      try {
+        const ver = tmuxRun(socket, ['-V'])
+        if (ver.missing || ver.code !== 0) {
+          return { agents: [], degraded: ver.missing ? 'tmux not on PATH' : ver.err }
+        }
+        const home = agentsHome(dir)
+        const agents = Object.entries(readAgentRegistry(dir))
+          .filter(([, e]) => e.backend === 'tmux')
+          .map(([molStep, e]) => toTmuxInfo(socket, dir, home, molStep, e))
+        return { agents }
+      } catch (err) {
+        return {
+          agents: [],
+          degraded: err instanceof Error ? err.message : String(err),
+        }
+      }
+    },
+
+    async status(id: string): Promise<AgentInfo> {
+      const hit = findEntry(id)
+      if (!hit) {
+        throw new AgentNotFound(`no tmux agent ${id}`)
+      }
+      return toTmuxInfo(socket, dir, agentsHome(dir), hit[0], hit[1])
+    },
+
+    async stop(id: string): Promise<void> {
+      const hit = findEntry(id)
+      if (!hit) {
+        return // idempotent — gone is the desired end state
+      }
+      const [molStep, entry] = hit
+      const name = tmuxSessionName(entry)
+      if (name !== undefined) {
+        tmuxRun(socket, ['kill-session', '-t', name])
+        // let the kill land before recording the stop — 'stopped' on a
+        // still-live session would let a respawn run alongside it
+        const deadline = Date.now() + 2_000
+        while (
+          tmuxRun(socket, ['has-session', '-t', name]).code === 0 &&
+          Date.now() < deadline
+        ) {
+          await new Promise((r) => setTimeout(r, 25))
+        }
+      }
+      try {
+        patchAgentRegistry(dir, molStep, { stopped: true })
+      } catch {
+        // the marker removal below still records intent
+      }
+      dropWorkMarker(dir, id)
+    },
+
+    capabilities: () => ({ attach: true, respawn: true, supervisor: 'none' }),
+  }
+}
+
+registerAgentConnector('tmux', makeTmuxConnector)

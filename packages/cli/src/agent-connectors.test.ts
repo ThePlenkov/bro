@@ -22,6 +22,7 @@ import {
   eachAgentConnector,
   loadAgentEnv,
   makeNativeConnector,
+  makeTmuxConnector,
   pidAlive,
   registerAgentConnector,
   resolveAgentConnector,
@@ -65,6 +66,62 @@ if (args[0] === 'show') {
 }
 `
 
+/** tmux shim — a state file per socket at $TMUX_FAKE_HOME/<socket>.json
+ *  maps session → pid; new-session spawns the pane command detached like
+ *  a real server would (pane exit → has-session fails). Covers -V,
+ *  new-session (-d -s -c -e), has-session, kill-session, list-panes. */
+const FAKE_TMUX = `#!/usr/bin/env node
+const fs = require('node:fs')
+const cp = require('node:child_process')
+const args = process.argv.slice(2)
+let socket = 'default'
+if (args[0] === '-L') { socket = args[1]; args.splice(0, 2) }
+const DB = process.env.TMUX_FAKE_HOME + '/' + socket + '.json'
+const load = () => { try { return JSON.parse(fs.readFileSync(DB, 'utf8')) } catch { return { sessions: {} } } }
+const save = (db) => fs.writeFileSync(DB, JSON.stringify(db))
+const alive = (pid) => { try { process.kill(pid, 0); return true } catch (e) { return e.code === 'EPERM' } }
+const target = () => args[args.indexOf('-t') + 1]
+if (args[0] === '-V') { console.log('tmux 3.7c-fake'); process.exit(0) }
+if (args[0] === 'new-session') {
+  let name, cwd = process.cwd(), env = {}, cmd
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i]
+    if (a === '-d') continue
+    if (a === '-s') name = args[++i]
+    else if (a === '-c') cwd = args[++i]
+    else if (a === '-e') { const kv = args[++i]; const eq = kv.indexOf('='); env[kv.slice(0, eq)] = kv.slice(eq + 1) }
+    else cmd = a
+  }
+  const db = load()
+  if (db.sessions[name] && alive(db.sessions[name].pid)) {
+    console.error('duplicate session: ' + name); process.exit(1)
+  }
+  const child = cp.spawn('sh', ['-c', cmd], {
+    cwd, env: { ...process.env, ...env }, detached: true, stdio: 'ignore',
+  })
+  child.unref()
+  db.sessions[name] = { pid: child.pid }
+  save(db)
+  process.exit(0)
+}
+if (args[0] === 'has-session') {
+  const s = load().sessions[target()]
+  process.exit(s && alive(s.pid) ? 0 : 1)
+}
+if (args[0] === 'kill-session') {
+  const db = load(); const s = db.sessions[target()]
+  if (s && alive(s.pid)) { try { process.kill(-s.pid, 'SIGKILL') } catch {} }
+  delete db.sessions[target()]; save(db)
+  process.exit(0)
+}
+if (args[0] === 'list-panes') {
+  const s = load().sessions[target()]
+  if (!s || !alive(s.pid)) { console.error('no session'); process.exit(1) }
+  console.log(s.pid); process.exit(0)
+}
+console.error('unhandled tmux args: ' + args.join(' ')); process.exit(1)
+`
+
 interface Fixture {
   root: string
   main: string
@@ -77,10 +134,12 @@ interface Fixture {
 }
 
 /** Real git repo + fake bd on PATH + a beadsDir store. The agent
- *  command is `node {promptFile}` — the prompt IS the program. */
+ *  command is `node {promptFile}` — the prompt IS the program.
+ *  `tmux: true` adds the tmux shim and a tmux knob mirroring native's. */
 function fixture(
   rows: Array<Record<string, unknown>>,
-  command = 'node {promptFile}'
+  command = 'node {promptFile}',
+  opts: { tmux?: boolean } = {}
 ): Fixture {
   const { root, main } = initRepo('bro-agconn-')
   const beadsDir = join(root, 'beads')
@@ -91,6 +150,14 @@ function fixture(
   mkdirSync(binDir)
   writeFileSync(join(binDir, 'bd'), FAKE_BD)
   chmodSync(join(binDir, 'bd'), 0o755)
+  const agents: Record<string, Record<string, unknown>> = { native: { command } }
+  if (opts.tmux === true) {
+    writeFileSync(join(binDir, 'tmux'), FAKE_TMUX)
+    chmodSync(join(binDir, 'tmux'), 0o755)
+    mkdirSync(join(root, 'tmux-state'), { recursive: true })
+    process.env.TMUX_FAKE_HOME = join(root, 'tmux-state')
+    agents['tmux'] = { command, socket: 'test' }
+  }
   const prevPath = process.env.PATH ?? ''
   // ambient repo/store pins (GIT_DIR, BEADS_DIR, BRO_*) would redirect
   // the connector's git-common-dir resolution into the outer repo —
@@ -107,7 +174,7 @@ function fixture(
     root,
     main,
     beadsDir,
-    env: { agents: { native: { command } }, connectors: {} },
+    env: { agents, connectors: {} },
     prevPath,
     scrubbed,
     dbRows: () => JSON.parse(readFileSync(db, 'utf8')).rows,
@@ -133,6 +200,7 @@ function cleanup(fx: Fixture): void {
     // no readable registry — nothing spawned
   }
   process.env.PATH = fx.prevPath
+  delete process.env.TMUX_FAKE_HOME
   for (const [k, v] of Object.entries(fx.scrubbed)) {
     if (v === undefined) {
       delete process.env[k]
@@ -182,7 +250,7 @@ describe('resolveAgentConnector', () => {
       )
       // registry order — native is the designed default
       assert.equal(resolveAgentConnector({ dir: main }, {}, env).name, 'native')
-      assert.deepEqual(agentConnectorNames(), ['native'])
+      assert.deepEqual(agentConnectorNames(), ['native', 'tmux'])
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -437,6 +505,277 @@ describe('native connector', () => {
   })
 })
 
+describe('tmux connector', () => {
+  test('spawn claims the step, registers the agent, leaves a .work marker', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true })
+    try {
+      const conn = makeTmuxConnector({ dir: fx.main }, fx.env)
+      const info = await conn.spawn(
+        SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+      )
+      assert.equal(info.backend, 'tmux')
+      assert.equal(info.state, 'running')
+      assert.ok(typeof info.pid === 'number' && pidAlive(info.pid))
+      // the claim landed in the pinned store
+      assert.equal(fx.dbRows()[0]!.status, 'in_progress')
+      // the registry records the session handle alongside the id
+      const entry = readAgentRegistry(fx.main)['fx-1']!
+      assert.equal(entry.agentId, info.id)
+      assert.equal(entry.session, `bro-${info.id}`)
+      assert.equal(entry.worktree, fx.main)
+      // parallel-session detection sees the agent as live work
+      const marker = join(fx.main, '.git', 'bro', 'hooks', `agent-${info.id}.work`)
+      assert.ok(existsSync(marker))
+      await conn.stop(info.id)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('a live agent on the step refuses a second spawn', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true })
+    try {
+      const conn = makeTmuxConnector({ dir: fx.main }, fx.env)
+      const first = await conn.spawn(
+        SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+      )
+      await assert.rejects(
+        conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+        SpawnError
+      )
+      await conn.stop(first.id)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('a foreign claim (no registry entry) refuses spawn', async () => {
+    const fx = fixture(
+      [{ id: 'fx-1', status: 'in_progress', assignee: 'human' }],
+      undefined,
+      { tmux: true }
+    )
+    try {
+      const conn = makeTmuxConnector({ dir: fx.main }, fx.env)
+      await assert.rejects(
+        conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 1)')),
+        SpawnError
+      )
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('respawn: dead agent + live claim → rebinds, reuses agentId', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true })
+    try {
+      const conn = makeTmuxConnector({ dir: fx.main }, fx.env)
+      const first = await conn.spawn(
+        SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+      )
+      // kill the pane's process group — no exit file written → 'lost'
+      process.kill(-first.pid!, 'SIGKILL')
+      await until(() => !pidAlive(first.pid!))
+      const l = await conn.list()
+      assert.equal(l.agents[0]!.state, 'lost')
+      const second = await conn.spawn(
+        SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+      )
+      assert.equal(second.id, first.id)
+      assert.equal(second.state, 'running')
+      // the claim moved to the respawning actor
+      assert.equal(fx.dbRows()[0]!.assignee, bdActor(fx.main))
+      await conn.stop(second.id)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('a claim held by another actor is not stolen on respawn', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true })
+    try {
+      const conn = makeTmuxConnector({ dir: fx.main }, fx.env)
+      const first = await conn.spawn(
+        SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+      )
+      process.kill(-first.pid!, 'SIGKILL')
+      await until(() => !pidAlive(first.pid!))
+      // someone else claimed the step while our worker was dead
+      const db = join(fx.beadsDir, 'store.json')
+      const rows = JSON.parse(readFileSync(db, 'utf8')).rows
+      rows[0].assignee = 'other-actor'
+      writeFileSync(db, JSON.stringify({ rows }))
+      await assert.rejects(
+        conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+        /claimed by other-actor/
+      )
+      await conn.stop(first.id)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('spec.env cannot override the identity pins', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true })
+    try {
+      const conn = makeTmuxConnector({ dir: fx.main }, fx.env)
+      const spec = {
+        ...SPEC(
+          fx.main,
+          fx.beadsDir,
+          'fx-1',
+          "require('fs').writeFileSync('env.out', [process.env.BEADS_DIR, process.env.BRO_BEAD_ID, process.env.BRO_AGENT_ID].join('|'))"
+        ),
+        env: { BEADS_DIR: '/evil', BRO_BEAD_ID: 'spoofed', BRO_AGENT_ID: 'spoofed' },
+      }
+      const info = await conn.spawn(spec)
+      await until(() => existsSync(join(fx.main, 'env.out')))
+      const out = readFileSync(join(fx.main, 'env.out'), 'utf8')
+      assert.equal(out, `${fx.beadsDir}|fx-1|${info.id}`)
+      // the claim landed in the pinned store, not the overridden one
+      assert.equal(fx.dbRows()[0]!.status, 'in_progress')
+      await conn.stop(info.id)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('exit status harvests into the registry — dead session + .exit → exited', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true })
+    try {
+      const conn = makeTmuxConnector({ dir: fx.main }, fx.env)
+      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1', 'process.exit(3)'))
+      await until(() => !pidAlive(info.pid!))
+      const st = await conn.status(info.id)
+      assert.equal(st.state, 'exited')
+      assert.equal(readAgentRegistry(fx.main)['fx-1']!.exitStatus, 3)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('stop is idempotent and marks the entry stopped', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true })
+    try {
+      const conn = makeTmuxConnector({ dir: fx.main }, fx.env)
+      const info = await conn.spawn(
+        SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+      )
+      await conn.stop(info.id)
+      await conn.stop(info.id) // idempotent
+      await conn.stop('tmux-deadbeef') // unknown id → no-op
+      const st = await conn.status(info.id)
+      assert.equal(st.state, 'stopped')
+      assert.ok(!existsSync(join(fx.main, '.git', 'bro', 'hooks', `agent-${info.id}.work`)))
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('status on an unknown id throws AgentNotFound', async () => {
+    const fx = fixture([], undefined, { tmux: true })
+    try {
+      const conn = makeTmuxConnector({ dir: fx.main }, fx.env)
+      await assert.rejects(conn.status('tmux-nope'), AgentNotFound)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('no agent command configured → SpawnError before claiming', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true })
+    try {
+      const conn = makeTmuxConnector({ dir: fx.main }, { agents: {}, connectors: {} })
+      await assert.rejects(conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1', 'true')), SpawnError)
+      assert.equal(fx.dbRows()[0]!.status, 'open')
+      const reg = agentRegistryPath(fx.main)
+      assert.equal(reg !== null && existsSync(reg), false)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('a foreign-backend registry entry refuses spawn — no cross-backend adopt', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true })
+    try {
+      const conn = makeTmuxConnector({ dir: fx.main }, fx.env)
+      patchAgentRegistry(fx.main, 'fx-1', {
+        agentId: 'native-ab12',
+        backend: 'native',
+        spawnedAt: new Date().toISOString(),
+      })
+      await assert.rejects(
+        conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 1)')),
+        /registered to backend "native"/
+      )
+      assert.equal(fx.dbRows()[0]!.status, 'open')
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('an unsafe registry agentId is reminted, never trusted as a path', async () => {
+    const fx = fixture(
+      [{ id: 'fx-1', status: 'in_progress', assignee: 'tester' }],
+      undefined,
+      { tmux: true }
+    )
+    const prevActor = process.env.BEADS_ACTOR
+    process.env.BEADS_ACTOR = 'tester'
+    try {
+      const conn = makeTmuxConnector({ dir: fx.main }, fx.env)
+      patchAgentRegistry(fx.main, 'fx-1', {
+        agentId: '../evil',
+        backend: 'tmux',
+        spawnedAt: new Date().toISOString(),
+      })
+      const info = await conn.spawn(
+        SPEC(fx.main, fx.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+      )
+      assert.match(info.id, /^tmux-[0-9a-f]{8}$/)
+      await conn.stop(info.id)
+    } finally {
+      if (prevActor === undefined) {
+        delete process.env.BEADS_ACTOR
+      } else {
+        process.env.BEADS_ACTOR = prevActor
+      }
+      cleanup(fx)
+    }
+  })
+
+  test('a failing tmux binary degrades list() and refuses spawn', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true })
+    try {
+      // tmux that can't even report a version — the backend is down
+      writeFileSync(
+        join(fx.root, 'bin', 'tmux'),
+        '#!/bin/sh\necho "tmux exploded" >&2\nexit 1\n'
+      )
+      const conn = makeTmuxConnector({ dir: fx.main }, fx.env)
+      const l = await conn.list()
+      assert.deepEqual(l.agents, [])
+      assert.match(l.degraded ?? '', /tmux exploded/)
+      await assert.rejects(
+        conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1', 'true')),
+        /tmux unavailable/
+      )
+      assert.equal(fx.dbRows()[0]!.status, 'open')
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('capabilities: attachable, respawnable, self-supervised', () => {
+    const conn = makeTmuxConnector({ dir: '/x' }, { agents: {}, connectors: {} })
+    assert.deepEqual(conn.capabilities(), {
+      attach: true,
+      respawn: true,
+      supervisor: 'none',
+    })
+  })
+})
+
 describe('eachAgentConnector', () => {
   // registers LAST — the registry is module-global, so a throwing factory
   // would break connector-resolution probes in earlier tests
@@ -450,7 +789,7 @@ describe('eachAgentConnector', () => {
       { agents: {}, connectors: {} },
       (name, err) => notes.push(`${name}: ${err instanceof Error ? err.message : String(err)}`)
     )
-    assert.deepEqual(conns.map((c) => c.name), ['native'])
+    assert.deepEqual(conns.map((c) => c.name), ['native', 'tmux'])
     assert.deepEqual(notes, ['explody: backend exploded'])
     assert.throws(
       () => eachAgentConnector({ dir: '/x' }, { agents: {}, connectors: {} }),
