@@ -119,7 +119,9 @@ function cleanup(fx: Fixture): void {
   // registry still points at before the tmpdir (and it) goes away
   try {
     for (const e of Object.values(readAgentRegistry(fx.main))) {
-      if (typeof e.pid === 'number' && e.pid > 0) {
+      // never signal our own pid/pgid — a group-leader test process
+      // would take the whole runner down
+      if (typeof e.pid === 'number' && e.pid > 0 && e.pid !== process.pid && e.pid !== process.ppid) {
         try {
           process.kill(-e.pid, 'SIGKILL') // detached → own process group
         } catch {

@@ -398,8 +398,9 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
     return
   }
   if (current.pid !== hit.agent.pid) {
+    const fmt = (p: number | undefined) => (p === undefined ? 'unknown' : String(p))
     console.error(
-      `note: ${hit.agent.id} respawned since lookup (pid ${String(hit.agent.pid)} → ${String(current.pid)}) — stopping current instance`
+      `note: ${hit.agent.id} respawned since lookup (pid ${fmt(hit.agent.pid)} → ${fmt(current.pid)}) — stopping current instance`
     )
   }
   await hit.conn.stop(hit.agent.id)

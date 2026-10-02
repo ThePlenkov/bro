@@ -101,7 +101,9 @@ function fixture(rows: Array<Record<string, unknown>> = []): Fixture {
       // registry still points at before the tmpdir (and it) goes away
       try {
         for (const e of Object.values(readAgentRegistry(main))) {
-          if (typeof e.pid === 'number' && e.pid > 0) {
+          // tests register pid: process.pid to fake 'running' — if this
+          // process led its own group, kill(-pid) would kill the runner
+          if (typeof e.pid === 'number' && e.pid > 0 && e.pid !== process.pid && e.pid !== process.ppid) {
             try {
               process.kill(-e.pid, 'SIGKILL') // detached → own process group
             } catch {
