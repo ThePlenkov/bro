@@ -103,6 +103,7 @@ orchestration, if ever, is a separate spec.
 ```text
 packages/core/src/agents.ts           contract + facade
 packages/cli/src/agent-connectors.ts  native connector + connector registry
+packages/cli/src/agent-connectors-gascity.ts  gascity connector (gc CLI)
 packages/cli/src/commands/fleet.ts    bro fleet
 packages/cli/src/commands/agents.ts   bro agents up/down/status
 packages/cli/src/commands/serve.ts    bro serve (facade host for clients)

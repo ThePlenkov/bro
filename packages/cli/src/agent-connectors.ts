@@ -46,6 +46,7 @@ import {
   type SpawnSpec,
 } from '@broject/core'
 import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop'
+import { makeGascityConnector } from './agent-connectors-gascity.ts'
 
 /** Everything a factory needs: the repo ctx + the resolved config
  *  (agents.<backend> knobs, connectors.agents pick, loop.agent fallback). */
@@ -509,3 +510,4 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
 }
 
 registerAgentConnector('native', makeNativeConnector)
+registerAgentConnector('gascity', makeGascityConnector)
