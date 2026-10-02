@@ -165,6 +165,39 @@ function printStatusTable(
   }
 }
 
+/** Targeted `status <id|step>`: detail on a hit; a miss dies naming the
+ *  checked backends. Degraded backends warn on the targeted read too — a
+ *  found agent doesn't mean the fleet view is complete (stderr, so
+ *  --json stays parseable). */
+function statusDetail(
+  backends: { conn: AgentConnector; agents: AgentInfo[]; degraded?: string }[],
+  target: string,
+  json: boolean
+): void {
+  const { hit, degraded } = findInBackends(backends, target)
+  if (!hit) {
+    const blind = degraded.length > 0 ? ` (degraded: ${degraded.join('; ')})` : ''
+    die(
+      `no agent "${target}"${blind} — checked ${backends.map((b) => b.conn.name).join(', ') || 'no backends'}`
+    )
+  }
+  for (const d of degraded) {
+    console.error(`warning: backend degraded — ${d}`)
+  }
+  const a = hit.agent
+  if (json) {
+    console.log(JSON.stringify(a, null, 2))
+    return
+  }
+  console.log(`agent     ${a.id}`)
+  console.log(`backend   ${a.backend} (supervisor: ${hit.conn.capabilities().supervisor})`)
+  console.log(`step      ${a.molStep}`)
+  console.log(`state     ${a.state}`)
+  if (a.pid !== undefined) console.log(`pid       ${a.pid}`)
+  if (a.worktree !== undefined) console.log(`worktree  ${a.worktree}`)
+  if (a.log !== undefined) console.log(`log       ${a.log}`)
+}
+
 async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
   const pos = positionals(argv, new Set(['--connector']))
   if (pos.length > 1) {
@@ -176,32 +209,8 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
   const { backends } = await collectAgents(dir, env, connectorName)
 
   if (target !== undefined) {
-    // the table path already collected — search it, don't list() twice
-    const { hit, degraded } = findInBackends(backends, target)
-    if (!hit) {
-      const blind = degraded.length > 0 ? ` (degraded: ${degraded.join('; ')})` : ''
-      die(
-        `no agent "${target}"${blind} — checked ${backends.map((b) => b.conn.name).join(', ') || 'no backends'}`
-      )
-    }
-    // a found agent doesn't mean the fleet view is complete — surface
-    // degraded backends on the targeted read too (stderr, so --json
-    // stays parseable)
-    for (const d of degraded) {
-      console.error(`warning: backend degraded — ${d}`)
-    }
-    const a = hit.agent
-    if (json) {
-      console.log(JSON.stringify(a, null, 2))
-      return
-    }
-    console.log(`agent     ${a.id}`)
-    console.log(`backend   ${a.backend} (supervisor: ${hit.conn.capabilities().supervisor})`)
-    console.log(`step      ${a.molStep}`)
-    console.log(`state     ${a.state}`)
-    if (a.pid !== undefined) console.log(`pid       ${a.pid}`)
-    if (a.worktree !== undefined) console.log(`worktree  ${a.worktree}`)
-    if (a.log !== undefined) console.log(`log       ${a.log}`)
+    // the fleet read already collected — search it, don't list() twice
+    statusDetail(backends, target, json)
     return
   }
 
