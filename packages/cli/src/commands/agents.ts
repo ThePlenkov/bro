@@ -55,7 +55,10 @@ function usage(): never {
   process.exit(2)
 }
 
-const die = (msg: string): never => {
+// a function declaration, not a const arrow — tsc only treats calls to
+// never-returning function declarations as terminating the control flow,
+// so the die() call sites below narrow correctly
+function die(msg: string): never {
   console.error(`error: ${msg}`)
   process.exit(1)
 }
