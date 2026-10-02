@@ -15,9 +15,9 @@ wave 2 (needs bro-g4vn):
   agents-supervisor    bro-q0f2  bro agents up/down + agentId registry +
                                  respawn-on-lost (the watcher becomes code)
   bro-serve            bro-dr1s  facade host (HTTP/JSON or MCP) for clients
-wave 3 (needs bro-g4vn + verdict):
+wave 3 (needs bro-g4vn; gascity-connector also needs bro-4bkv green):
   gascity-connector    bro-cduq  only if bro-4bkv green
-  tmux-connector       bro-uqkr  interactive panes backend
+  tmux-connector       bro-uqkr  interactive panes backend (facade only)
 wave 4 (polish):
   fleet-live-tui       bro-n54z  --live refresh     [needs bro-vf1j]
   fleet-webui          bro-1rir  site route over bro serve [needs bro-dr1s]

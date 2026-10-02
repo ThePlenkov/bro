@@ -20,16 +20,16 @@ paseo, cao) need one contract — not per-backend shell folklore.
 
 ## Model
 
-`agents` facade over orchestrator backends, same shape as `specs` facade:
-
-- `agents.backend` in `bro.config.json`:
-  `native | gascity | tmux | paseo | cao | auto` (default `native`; `auto`
-  picks by detected config, e.g. a gascity config dir → gascity).
+`agents` facade over orchestrator backends — selected through the
+existing `connectors.agents` seam in `bro.config.json` (explicit
+`--connector` → `connectors.agents` → `matchRemote`/`matchDir` →
+registry order; `native` is the designed default). Backend-specific
+knobs live under `agents.<backend>` (e.g. `agents.gascity.configDir`).
 - **Connector contract** (typed, minimal):
 
   ```ts
   interface AgentConnector {
-    spawn(spec: SpawnSpec): Promise<AgentRef>   // throws SpawnError
+    spawn(spec: SpawnSpec): Promise<AgentInfo>  // throws SpawnError
     list(): Promise<AgentInfo[]>                // never throws; [] on backend outage
     status(id: string): Promise<AgentInfo>      // throws AgentNotFound
     stop(id: string): Promise<void>             // idempotent; no-op if gone
@@ -53,8 +53,11 @@ paseo, cao) need one contract — not per-backend shell folklore.
   }
   ```
 
-  `spawn` fails fast if the molStep already has a live AgentInfo (registry
-  check) — that is what makes "no duplicate respawn" decidable.
+  `spawn` fails fast on a duplicate through **both** planes: the shared
+  dolt claim (`bd` assignee/in_progress on the molStep — the synced,
+  cross-clone truth) AND the local registry. The registry alone is
+  per-clone and cannot see a remote backend's worker; the beads claim is
+  what makes "no duplicate respawn" hold across clones.
 
 - **agentId registry** — `<git-common-dir>/bro/agents.json`, atomic-write
   (tmp+rename) map `molStep → {agentId, backend, spawnedAt}`. Native keeps
@@ -83,6 +86,7 @@ packages/core/src/agents.ts           contract + facade
 packages/cli/src/agent-connectors.ts  native connector + connector registry
 packages/cli/src/commands/fleet.ts    bro fleet
 packages/cli/src/commands/agents.ts   bro agents up/down/status
+packages/cli/src/commands/serve.ts    bro serve (facade host for clients)
 ```
 
 ## Milestones
