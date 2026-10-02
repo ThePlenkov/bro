@@ -21,7 +21,7 @@
  * transitions, not noise.
  */
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { git, gitTry, reviewHost, type ReviewFacade } from '@broject/core'
 import { evaluateExitGate, fetchPrActState } from '@broject/act'
@@ -60,6 +60,12 @@ export interface WatchGates {
    *  `unavailable`, never a phantom dead fleet */
   available: boolean
   reason?: string
+  /** the probe machinery itself threw — distinct from per-PR `error`:
+   *  every gate is unprobed, which is not "no PRs" */
+  error?: string
+  /** branch→PR lookups that failed — an empty `prs` then means
+   *  "couldn't resolve", not "nothing to gate" */
+  lookupErrors?: string[]
   prs: WatchPrGate[]
 }
 
@@ -78,6 +84,10 @@ export interface WatchSnapshot {
     /** branch→PR lookups that failed — a quiet PR column must not
      *  read as "no PRs exist" when the lookups errored */
     prErrors?: string[]
+    /** set when the fleet plane itself threw (agent backends or the
+     *  molecule re-read in fleetRows) — the section renders
+     *  `unavailable`, never a false empty fleet */
+    error?: string
   }
 }
 
@@ -140,7 +150,14 @@ export function emitMailbox(dir: string, text: string): boolean {
   const name = `watch-${Date.now()}-${randomBytes(4).toString('hex')}.txt`
   const tmp = join(mb, `.${name}.tmp`)
   writeFileSync(tmp, text)
-  renameSync(tmp, join(mb, name))
+  try {
+    renameSync(tmp, join(mb, name))
+  } catch (err) {
+    // a failed rename strands the tmp file — remove it so retries
+    // don't accumulate debris in the mailbox
+    rmSync(tmp, { force: true })
+    throw err
+  }
   return true
 }
 
@@ -173,10 +190,13 @@ function collectMols(): WatchMol[] {
   })
 }
 
-function worktreeList(): WorktreeInfo[] {
+function worktreeList(errors?: string[]): WorktreeInfo[] {
   try {
     return parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']))
-  } catch {
+  } catch (err) {
+    // a failed worktree read hides every worktree branch's PR — report
+    // it instead of letting gates claim "no PRs in the fleet"
+    errors?.push(`worktree list: ${err instanceof Error ? err.message : String(err)}`)
     return []
   }
 }
@@ -195,12 +215,15 @@ async function gateFleetPrs(
   const seen = new Set<number>()
   const targets: { pr: number; link: string }[] = []
   for (const row of rows) {
-    const pr = row.prNum
-    if (pr === undefined || seen.has(pr)) {
-      continue
+    // every PR on the branch is gated — prNum is only the display pick
+    const prs = row.prNums ?? (row.prNum === undefined ? [] : [row.prNum])
+    for (const pr of prs) {
+      if (seen.has(pr)) {
+        continue
+      }
+      seen.add(pr)
+      targets.push({ pr, link: pr === row.prNum && row.pr !== undefined ? row.pr : rev.prLink(repo, pr) })
     }
-    seen.add(pr)
-    targets.push({ pr, link: row.pr ?? rev.prLink(repo, pr) })
   }
   return Promise.all(
     targets.map(async ({ pr, link }) => {
@@ -230,8 +253,6 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
     molsError = err instanceof Error ? err.message : String(err)
   }
 
-  // --- fleet: same machinery as `bro fleet` ---
-  const { byStep, degraded, conflicts } = await collectAgents(dir)
   let rev: ReviewFacade | undefined
   let repo = ''
   let gateReason: string | undefined
@@ -242,18 +263,63 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
     rev = undefined
     gateReason = err instanceof Error ? err.message : String(err)
   }
-  const prErrors: string[] = []
-  const rows = fleetRows(byStep, degraded.length > 0, rev, repo, worktreeList(), prErrors)
 
-  // --- gates: no review host renders the section unavailable ---
-  const gates: WatchGates =
-    rev === undefined
-      ? { available: false, reason: gateReason, prs: [] }
-      : { available: true, prs: await gateFleetPrs(rev, repo, rows, dir) }
+  // --- fleet: same machinery as `bro fleet`; a throwing read
+  // (backends, worktree list, the molecule re-read in fleetRows)
+  // degrades the section, never the heartbeat ---
+  let rows: FleetRow[] = []
+  let degraded: string[] = []
+  let conflicts: string[] = []
+  let prErrors: string[] = []
+  let fleetError: string | undefined
+  try {
+    const agents = await collectAgents(dir)
+    degraded = agents.degraded
+    conflicts = agents.conflicts
+    rows = fleetRows(
+      agents.byStep,
+      degraded.length > 0,
+      rev,
+      repo,
+      worktreeList(prErrors),
+      prErrors
+    )
+  } catch (err) {
+    fleetError = err instanceof Error ? err.message : String(err)
+  }
+
+  // --- gates: no review host renders the section unavailable; a
+  // throwing probe renders `error`, distinct from a host failure ---
+  let gates: WatchGates
+  if (rev === undefined) {
+    gates = { available: false, reason: gateReason, prs: [] }
+  } else {
+    const lookupErrors = prErrors.length > 0 ? prErrors : undefined
+    try {
+      gates = {
+        available: true,
+        prs: await gateFleetPrs(rev, repo, rows, dir),
+        lookupErrors,
+      }
+    } catch (err) {
+      gates = {
+        available: true,
+        error: err instanceof Error ? err.message : String(err),
+        prs: [],
+        lookupErrors,
+      }
+    }
+  }
 
   const attention = attentionOf(mols, rows, gates.prs)
   for (const e of prErrors) {
     attention.push(`PR lookup failed — ${e}`)
+  }
+  if (gates.error !== undefined) {
+    attention.push(`gates probe failed — ${gates.error}`)
+  }
+  if (fleetError !== undefined) {
+    attention.push(`fleet plane failed — ${fleetError}`)
   }
   if (molsError !== undefined) {
     attention.push(`mols plane failed — ${molsError}`)
@@ -265,7 +331,7 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
     mols,
     molsError,
     gates,
-    fleet: { rows, degraded, conflicts, prErrors },
+    fleet: { rows, degraded, conflicts, prErrors, error: fleetError },
   }
 }
 
@@ -304,17 +370,28 @@ function gateLines(gates: WatchGates): string[] {
     const reason = gates.reason === undefined ? '' : ` — ${gates.reason}`
     return [`  unavailable${reason}`]
   }
-  if (gates.prs.length === 0) {
-    return ['  no PRs in the fleet']
+  if (gates.error !== undefined) {
+    return [`  probe failed — ${gates.error}`]
   }
-  return gates.prs.map((g) => `  ${g.link}  ${gateVerdict(g)}`)
+  const lookupWarn =
+    gates.lookupErrors === undefined
+      ? []
+      : [`  warning: ${gates.lookupErrors.length} branch→PR lookup(s) failed — see fleet`]
+  if (gates.prs.length === 0) {
+    return gates.lookupErrors === undefined
+      ? ['  no PRs in the fleet']
+      : ['  no PRs resolved', ...lookupWarn]
+  }
+  return [...gates.prs.map((g) => `  ${g.link}  ${gateVerdict(g)}`), ...lookupWarn]
 }
 
 function fleetLines(fleet: WatchSnapshot['fleet']): string[] {
   const out =
-    fleet.rows.length === 0
-      ? ['  no open molecules — nothing in the fleet']
-      : fleetTableLines(fleet.rows).map((l) => `  ${l}`)
+    fleet.error !== undefined
+      ? [`  unavailable — ${fleet.error}`]
+      : fleet.rows.length === 0
+        ? ['  no open molecules — nothing in the fleet']
+        : fleetTableLines(fleet.rows).map((l) => `  ${l}`)
   for (const d of fleet.degraded) {
     out.push(`  warning: backend degraded — ${d}`)
   }

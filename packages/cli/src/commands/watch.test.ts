@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { FleetRow } from './fleet.ts'
@@ -213,6 +213,10 @@ describe('emitMailbox', () => {
 
   test('outside a repo it reports no mailbox instead of throwing', () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-watch-nowt-'))
-    assert.equal(emitMailbox(dir, 'x'), false)
+    try {
+      assert.equal(emitMailbox(dir, 'x'), false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

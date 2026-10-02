@@ -35,6 +35,9 @@ export interface FleetRow {
   /** The PR's number — `pr` is the rendered link; watch feeds the number
    *  to the act gate instead of re-parsing the link. */
   prNum?: number
+  /** Every open PR on the branch — `prNum` is `[0]` for display, but a
+   *  branch with several open PRs still needs each one gated. */
+  prNums?: number[]
 }
 
 /** The fleet's agent plane — merged across every registered backend.
@@ -106,23 +109,23 @@ function branchOf(path: string): string {
 /** PR number for a worktree's branch — one failed lookup must not
  *  blank the row, but it is reported into `errors` when given: a
  *  silent miss would let the snapshot claim no PRs exist. */
-function prNumForWorktree(
+function prNumsForWorktree(
   rev: ReviewFacade,
   abs: string | undefined,
   errors?: string[]
-): number | undefined {
+): number[] {
   if (abs === undefined) {
-    return undefined
+    return []
   }
   const branch = branchOf(abs)
   if (branch === '') {
-    return undefined
+    return []
   }
   try {
-    return rev.prsForBranch(branch)[0]
+    return rev.prsForBranch(branch)
   } catch (err) {
     errors?.push(`${branch}: ${err instanceof Error ? err.message : String(err)}`)
-    return undefined
+    return []
   }
 }
 
@@ -146,7 +149,8 @@ export function fleetRows(
         | { assignee?: string }
         | undefined
       const wt = worktreeOf(s.id, agent, worktrees)
-      const prNum = rev === undefined ? undefined : prNumForWorktree(rev, wt, prErrors)
+      const prNums = rev === undefined ? [] : prNumsForWorktree(rev, wt, prErrors)
+      const prNum = prNums[0]
       rows.push({
         mol: m.id,
         step: s.id,
@@ -157,6 +161,7 @@ export function fleetRows(
         worktree: wt === undefined ? undefined : basename(wt),
         pr: rev === undefined || prNum === undefined ? undefined : rev.prLink(repo, prNum),
         prNum,
+        prNums: prNums.length > 1 ? prNums : undefined,
       })
     }
   }
