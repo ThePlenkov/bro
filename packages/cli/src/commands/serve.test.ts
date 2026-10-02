@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
@@ -135,6 +135,9 @@ describe('serve — routes', () => {
   test('a ref with unsafe characters is a 400, not a lookup', async () => {
     const r = await route('GET', '/api/v1/agents/a%20b')
     assert.equal(r.status, 400)
+    // malformed % escapes throw in decodeURIComponent — still a 400
+    const bad = await route('GET', '/api/v1/agents/%E0%A4%A')
+    assert.equal(bad.status, 400)
   })
 
   test('DELETE /api/v1/agents/<ref> — stopped, terminal, miss, degraded-miss', async () => {
@@ -316,6 +319,13 @@ describe('serve state discovery', () => {
       assert.equal(acquireServeLock(main), undefined)
       release!()
       assert.equal(existsSync(`${serveStatePath(main)}.lock`), false)
+
+      // a leftover lock naming a dead pid is broken, not honored
+      writeFileSync(`${serveStatePath(main)}.lock`, `${1 << 30}`)
+      const retaken = acquireServeLock(main)
+      assert.notEqual(retaken, undefined)
+      assert.equal(readFileSync(`${serveStatePath(main)}.lock`, 'utf8'), `${process.pid}`)
+      retaken!()
     })
   })
 })
@@ -331,17 +341,29 @@ describe('serve handler over a real socket', () => {
       assert.equal(health.status, 200)
       assert.equal((await health.json() as { ok: boolean }).ok, true)
 
+      const json = { 'content-type': 'application/json' }
+
       const badJson = await fetch(`${base}/api/v1/agents`, {
         method: 'POST',
+        headers: json,
         body: 'not json',
       })
       assert.equal(badJson.status, 400)
 
       const tooBig = await fetch(`${base}/api/v1/agents`, {
         method: 'POST',
+        headers: json,
         body: 'x'.repeat(300 * 1024),
       })
       assert.equal(tooBig.status, 413)
+
+      // writes that aren't application/json are refused outright — the
+      // loopback CSRF guard; a browser simple-request can't set it
+      const csrf = await fetch(`${base}/api/v1/agents`, {
+        method: 'POST',
+        body: '{"molStep":"fx-1"}',
+      })
+      assert.equal(csrf.status, 415)
 
       // GET routes ignore a body-less path cleanly
       const detail = await fetch(`${base}/api/v1/agents/native-aa11`)

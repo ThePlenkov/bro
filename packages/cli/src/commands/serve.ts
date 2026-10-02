@@ -7,7 +7,11 @@
  * HTTP/JSON bound to 127.0.0.1 — the loopback bind IS the v1 trust
  * boundary: no remote exposure, no auth model. Write ops (spawn/stop)
  * are safe because the server runs inside the local session context;
- * remote orchestration, if ever, is a separate spec.
+ * remote orchestration, if ever, is a separate spec. Loopback alone is
+ * not a write barrier though — a hostile web page can fire simple
+ * cross-origin POSTs, so writes additionally require
+ * `content-type: application/json` (a request a browser can't make
+ * without a preflight this server never answers).
  *
  *   GET    /                    service index
  *   GET    /api/v1/health       {ok, pid, dir, startedAt}
@@ -28,7 +32,7 @@
  * alive — two live servers would make the file a coin flip.
  */
 import { randomBytes } from 'node:crypto'
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from 'node:fs'
+import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { dirname, join } from 'node:path'
 import type { Readable } from 'node:stream'
@@ -128,12 +132,12 @@ export function liveServeState(dir: string): ServeState | undefined {
   return state !== undefined && pidAlive(state.pid) ? state : undefined
 }
 
-/** `<serve.json>.lock` — O_EXCL create is atomic, so two starters can't
- *  both pass the live-state check and both write serve.json (the lock
- *  is held for the server's whole lifetime, not a critical section).
- *  The file carries the holder pid: a live holder refuses, a dead
- *  holder's leftover is broken. Returns the release, or undefined when
- *  another server holds it. */
+/** `<serve.json>.lock` — atomic create is the singleton gate, so two
+ *  starters can't both pass the live-state check and both write
+ *  serve.json (the lock is held for the server's whole lifetime, not a
+ *  critical section). The file carries the holder pid: a live holder
+ *  refuses, a dead holder's leftover is broken. Returns the release, or
+ *  undefined when another server holds it. */
 export function acquireServeLock(dir: string): (() => void) | undefined {
   const statePath = serveStatePath(dir)
   if (statePath === null) {
@@ -141,46 +145,50 @@ export function acquireServeLock(dir: string): (() => void) | undefined {
   }
   const lock = `${statePath}.lock`
   mkdirSync(dirname(lock), { recursive: true })
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const fd = openSync(lock, 'wx')
+  // link(2) publishes the populated file atomically — open('wx')+write
+  // would leave a window where the lock exists but reads empty, and a
+  // racing starter could break it as "stale"
+  const staged = `${lock}.${process.pid}.tmp`
+  writeFileSync(staged, `${process.pid}`)
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        writeSync(fd, `${process.pid}`)
-      } finally {
-        closeSync(fd)
-      }
-      return () => {
-        try {
-          // remove only while the lock still carries OUR pid — a broken-
-          // stale-then-retaken lock belongs to its new holder
-          if (readFileSync(lock, 'utf8') === `${process.pid}`) {
-            rmSync(lock, { force: true })
+        linkSync(staged, lock)
+        return () => {
+          try {
+            // remove only while the lock still carries OUR pid — a
+            // broken-stale-then-retaken lock belongs to its new holder
+            if (readFileSync(lock, 'utf8') === `${process.pid}`) {
+              rmSync(lock, { force: true })
+            }
+          } catch {
+            // raced removal is already the desired end state
           }
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw err
+        }
+        let holder = Number.NaN
+        try {
+          holder = Number(readFileSync(lock, 'utf8').trim())
         } catch {
-          // raced removal is already the desired end state
+          // raced removal — the retry decides
+        }
+        if (Number.isInteger(holder) && pidAlive(holder)) {
+          return undefined
+        }
+        try {
+          rmSync(lock, { force: true })
+        } catch {
+          // another starter broke it first — the retry decides
         }
       }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
-        throw err
-      }
-      let holder = Number.NaN
-      try {
-        holder = Number(readFileSync(lock, 'utf8').trim())
-      } catch {
-        // raced removal — the retry decides
-      }
-      if (Number.isInteger(holder) && pidAlive(holder)) {
-        return undefined
-      }
-      try {
-        rmSync(lock, { force: true })
-      } catch {
-        // another starter broke it first — the retry decides
-      }
     }
+    return undefined
+  } finally {
+    rmSync(staged, { force: true })
   }
-  return undefined
 }
 
 // --- HTTP plumbing ---------------------------------------------------------------
@@ -260,7 +268,14 @@ export interface ServeMeta {
 const SAFE_REF = /^[A-Za-z0-9._~-]+$/
 
 function parseRef(seg: string): string {
-  const ref = decodeURIComponent(seg)
+  let ref: string
+  try {
+    ref = decodeURIComponent(seg)
+  } catch {
+    // malformed % escapes throw URIError — that's bad input, a 400,
+    // not a 500
+    throw new HttpError(400, `invalid agent ref "${seg}"`)
+  }
   if (!SAFE_REF.test(ref)) {
     throw new HttpError(400, `invalid agent ref "${ref}"`)
   }
@@ -489,10 +504,20 @@ export function createServeHandler(
     void (async () => {
       try {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-        const rawBody =
+        const wantsBody =
           req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
-            ? await readBody(req)
-            : undefined
+        // loopback alone is not a write barrier — a hostile web page can
+        // POST simple requests (text/plain/form) cross-origin. Requiring
+        // a non-simple content-type forces a preflight this server never
+        // answers, so the browser blocks the write before it lands.
+        if (
+          wantsBody &&
+          !(req.headers['content-type'] ?? '').startsWith('application/json')
+        ) {
+          send(res, 415, { error: 'writes need content-type: application/json' })
+          return
+        }
+        const rawBody = wantsBody ? await readBody(req) : undefined
         const r = await routeRequest(req.method ?? 'GET', url.pathname, rawBody, deps, meta)
         send(res, r.status, r.body)
       } catch (err) {
@@ -534,6 +559,14 @@ export async function runServeCommand(argv: string[]): Promise<void> {
   const pos = positionals(argv, new Set(['--port']))
   if (pos.length > 0) {
     usage()
+  }
+  // reject unknown options — `--prot 3000` must fail, not silently serve
+  // on an ephemeral port nobody can see
+  for (const a of argv) {
+    if (a.startsWith('--') && a.split('=')[0] !== '--port') {
+      console.error(`error: unknown option ${a}`)
+      usage()
+    }
   }
   const portRaw = flag(argv, '--port')
   let port = 0

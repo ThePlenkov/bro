@@ -97,9 +97,17 @@ describe('bro serve e2e', () => {
 
         const bad = await fetch(`${url}/api/v1/agents`, {
           method: 'POST',
+          headers: { 'content-type': 'application/json' },
           body: '{}',
         })
         assert.equal(bad.status, 400)
+
+        // a non-JSON write is refused — the loopback CSRF guard
+        const forged = await fetch(`${url}/api/v1/agents`, {
+          method: 'POST',
+          body: '{"molStep":"fx-1"}',
+        })
+        assert.equal(forged.status, 415)
 
         // discovery file lives in the common dir while the server runs
         const stateFile = join(main, '.git', 'bro', 'serve.json')

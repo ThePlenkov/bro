@@ -369,6 +369,10 @@ export async function spawnStepAgent(
   if (req.prompt !== undefined && req.promptFile !== undefined) {
     throw new SpawnInputError('prompt and promptFile are mutually exclusive')
   }
+  // '' would slip past `??` below and spawn an agent with no instructions
+  if (req.prompt !== undefined && req.prompt.trim() === '') {
+    throw new SpawnInputError('prompt must not be empty')
+  }
   const conn = resolveAgentConnector({ dir }, { connector: req.connector }, env)
   const beads = req.beadsDir ?? beadsDir()
   const repoRoot = resolveWorktree(dir, req.molStep, req.worktree, conn.name)

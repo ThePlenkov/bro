@@ -2,10 +2,10 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { agentPromptPath, pidAlive } from '../agent-connectors.ts'
+import { agentPromptPath, pidAlive, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { readAgentRegistry, writeAgentRegistry } from '@broject/core'
 import { initRepo, installFakeBd, readBeads } from './testrepo.ts'
-import { runAgentsCommand } from './agents.ts'
+import { runAgentsCommand, SpawnInputError, spawnStepAgent } from './agents.ts'
 
 class Exit extends Error {
   constructor(public code: number) {
@@ -250,6 +250,18 @@ describe('bro agents up|down — supervisor verb', () => {
 })
 
 describe('bro agents up <step>', () => {
+  test('an empty prompt is bad input, not a silent spawn', async () => {
+    // the HTTP API can send prompt:"" — the CLI flag parser can't — so
+    // the guard lives in spawnStepAgent, not in either front door
+    const env = { agents: {}, connectors: {} } as AgentConnectorEnv
+    for (const prompt of ['', '   ']) {
+      await assert.rejects(
+        spawnStepAgent('/nonexistent', env, { molStep: 'fx-1', prompt }),
+        SpawnInputError
+      )
+    }
+  })
+
   test('spawns the step agent: claim lands, registry + prompt written', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
