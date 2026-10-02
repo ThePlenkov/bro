@@ -549,12 +549,26 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           await new Promise((r) => setTimeout(r, 25))
         }
       }
-      try {
-        patchAgentRegistry(dir, molStep, { stopped: true })
-      } catch {
-        // the marker removal below still records intent
-      }
-      dropWorkMarker(dir, id)
+      // a respawn during the kill wait re-probes and re-pins the entry
+      // under the registry lock — re-verify under the SAME lock or
+      // 'stopped' + the marker drop land on a live, respawned entry
+      withAgentRegistryLock(dir, () => {
+        const cur = readAgentRegistry(dir)[molStep]
+        if (
+          cur === undefined ||
+          cur.agentId !== entry.agentId ||
+          cur.spawnedAt !== entry.spawnedAt ||
+          (pid !== undefined && pidAlive(pid))
+        ) {
+          return // respawned or still alive — the live run owns the entry
+        }
+        try {
+          patchAgentRegistry(dir, molStep, { stopped: true })
+        } catch {
+          // the marker removal below still records intent
+        }
+        dropWorkMarker(dir, id)
+      })
     },
 
     capabilities: () => ({ attach: false, respawn: true, supervisor: 'none' }),
@@ -567,7 +581,8 @@ registerAgentConnector('native', makeNativeConnector)
 
 /** tmux runs the pane command through sh — single-quote a path the same
  *  way expandAgentCmd quotes {promptFile}. */
-const shQuote = (s: string): string => `'${s.replaceAll("'", String.raw`'\''`)}'`
+const SH_SQUOTE = String.raw`'\''` // ' → '\'' : close, escaped quote, reopen
+const shQuote = (s: string): string => `'${s.replaceAll("'", SH_SQUOTE)}'`
 
 /** tmux session names can't hold `.`/`:` (target syntax) — minted ids
  *  (`tmux-<hex>` → `bro-tmux-<hex>`) always pass; a tampered registry
@@ -609,21 +624,43 @@ function tmuxSessionName(entry: AgentRegistryEntry): string | undefined {
   return TMUX_SESSION_NAME.test(derived) ? derived : undefined
 }
 
-/** Live state for a tmux entry: has-session is the liveness probe (the
- *  pane dying takes the session with it), then the same stopped/exit/
- *  lost ladder as native — the pane command writes the same .exit file
- *  the detached wrapper does. */
+/** Tri-state liveness from has-session: exit 0 proves the session lives;
+ *  TMUX_DEAD_ERR shapes prove it dead — sessions live inside the
+ *  server, so a missing session, a downed server, or a socket file
+ *  that isn't there are all corpses, not mysteries. Anything else
+ *  (timeout, refused connection, permissions) is 'unknown': the probe
+ *  failed and must not read as 'lost'. */
+type TmuxLiveness = 'running' | 'dead' | 'unknown'
+
+const TMUX_DEAD_ERR = /can't find session|no server running|no such file or directory/i
+
+function tmuxProbe(socket: string, name: string): { live: TmuxLiveness; err: string } {
+  const r = tmuxRun(socket, ['has-session', '-t', name])
+  if (r.code === 0) {
+    return { live: 'running', err: '' }
+  }
+  return {
+    live: TMUX_DEAD_ERR.test(r.err) ? 'dead' : 'unknown',
+    err: r.err !== '' ? r.err : `tmux exited ${r.code}`,
+  }
+}
+
+/** Live state for a tmux entry: `probe` is the session liveness verdict
+ *  (tmuxProbe for one entry, list()'s batched list-sessions for the
+ *  fleet — the pane dying takes the session with it), then the same
+ *  stopped/exit/lost ladder as native. An 'unknown' probe still honors
+ *  recorded death (stopped flag, .exit file) but never reports 'lost'
+ *  — a failed probe didn't find a corpse. */
 function tmuxState(
-  socket: string,
   dir: string,
   home: string | null,
   molStep: string,
-  entry: AgentRegistryEntry
+  entry: AgentRegistryEntry,
+  probe: TmuxLiveness
 ): AgentState {
   // liveness first — 'stopped' on a session that still exists means
   // kill-session hasn't landed; the agent IS still running
-  const name = tmuxSessionName(entry)
-  if (name !== undefined && tmuxRun(socket, ['has-session', '-t', name]).code === 0) {
+  if (probe === 'running') {
     touchWorkMarker(dir, entry.agentId)
     return 'running'
   }
@@ -647,6 +684,10 @@ function tmuxState(
       return 'exited'
     }
   }
+  if (probe === 'unknown') {
+    // the marker stays — an unverifiable agent may still be live work
+    return 'spawned'
+  }
   dropWorkMarker(dir, entry.agentId)
   return 'lost'
 }
@@ -656,14 +697,25 @@ function toTmuxInfo(
   dir: string,
   home: string | null,
   molStep: string,
-  entry: AgentRegistryEntry
+  entry: AgentRegistryEntry,
+  live?: Set<string>
 ): AgentInfo {
+  const name = tmuxSessionName(entry)
+  // a batch `live` set decides outright; without one, probe the server
+  const probe: TmuxLiveness =
+    name === undefined
+      ? 'dead'
+      : live !== undefined
+        ? live.has(name)
+          ? 'running'
+          : 'dead'
+        : tmuxProbe(socket, name).live
   return {
     id: entry.agentId,
     pid: typeof entry.pid === 'number' ? entry.pid : undefined,
     molStep,
     backend: entry.backend,
-    state: tmuxState(socket, dir, home, molStep, entry),
+    state: tmuxState(dir, home, molStep, entry, probe),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     log: typeof entry.log === 'string' ? entry.log : undefined,
   }
@@ -701,7 +753,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
   return {
     name: 'tmux',
 
-    async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+    async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the critical section is sync
       if (command === '') {
         throw new SpawnError(
           'no agent command configured — set agents.tmux.command or loop.agent in bro.config.json'
@@ -725,7 +777,22 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // resolves — entry callback, not a precomputed name, because a
         // tampered entry's unsafe id is reminted inside
         const { agentId, promptFile, log, exitFile } = prepareSpawn(dir, home, 'tmux', spec, {
-          isLive: (e) => tmuxState(socket, dir, home, spec.molStep, e) === 'running',
+          isLive: (e) => {
+            const n = tmuxSessionName(e)
+            if (n === undefined) {
+              return false
+            }
+            const p = tmuxProbe(socket, n)
+            if (p.live === 'unknown') {
+              // an unverifiable liveness probe must not let a duplicate
+              // spawn kill-session a worker that may still be alive
+              throw new SpawnError(`cannot verify ${spec.molStep}'s tmux session — ${p.err}`)
+            }
+            if (p.live === 'running') {
+              touchWorkMarker(dir, e.agentId)
+            }
+            return p.live === 'running'
+          },
           liveDetail: (e) => `session ${tmuxSessionName(e) ?? '?'}`,
           entry: (id) => ({ session: `bro-${id}` }),
         })
@@ -735,21 +802,28 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // 'duplicate' — clear it; kill-session on a missing target is
         // a no-op error we ignore
         tmuxRun(socket, ['kill-session', '-t', session])
-        // identity pins ride the -e batch LAST via object spread — a
-        // spec.env BEADS_DIR/BRO_* must not redirect the claim store or
-        // re-badge the worker (same guarantee as native's env order)
+        // pane env mirrors native's spawn env: ambient process.env first
+        // — an already-running server's env is whatever started IT, not
+        // us — then spec.env, then the identity pins LAST so neither can
+        // redirect the claim store or re-badge the worker
         const envArgs = Object.entries({
+          ...process.env,
           ...spec.env,
           BEADS_DIR: spec.beadsDir,
           BRO_BEAD_ID: spec.molStep,
           BRO_AGENT_ID: agentId,
           BRO_PROMPT_FILE: promptFile,
-        }).flatMap(([k, v]) => ['-e', `${k}=${v}`])
+        })
+          .filter((e): e is [string, string] => e[1] !== undefined)
+          .flatMap(([k, v]) => ['-e', `${k}=${v}`])
         // the pane runs the agent; $? lands in the .exit file before the
         // pipeline drains, tee keeps a log the way native's fd redirect
-        // does. Session dies with the pane → has-session IS liveness
-        const paneCmd = // NOSONAR — operator-configured agent command (same contract as native/loop)
-          `{ ${expandAgentCmd(command, promptFile)}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>&1 | tee -a ${shQuote(log)}`
+        // does. Session dies with the pane → has-session IS liveness.
+        // tmux runs the command through the user's default-shell — a
+        // non-POSIX one (fish) would eat the braces, so sh -c pins the
+        // dialect the same way native's spawn does
+        const paneScript = `{ ${expandAgentCmd(command, promptFile)}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>&1 | tee -a ${shQuote(log)}`
+        const paneCmd = `sh -c ${shQuote(paneScript)}` // NOSONAR — operator-configured agent command (same contract as native/loop)
         const res = tmuxRun(socket, [
           'new-session',
           '-d',
@@ -771,7 +845,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // pane pid — a display handle like native's child pid, not the
         // liveness signal (has-session is)
         const pp = tmuxRun(socket, ['list-panes', '-t', session, '-F', '#{pane_pid}'])
-        const panePid = pp.code === 0 ? Number(pp.out.trim().split('\n')[0]) : NaN
+        const panePid = pp.code === 0 ? Number(pp.out.trim().split('\n')[0]) : Number.NaN
         const spawned = patchAgentRegistry(
           dir,
           spec.molStep,
@@ -782,17 +856,29 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       })
     },
 
-    async list() {
+    async list() { // NOSONAR — connector contract is async; the body is sync
       try {
         const ver = tmuxRun(socket, ['-V'])
         if (ver.missing || ver.code !== 0) {
           return { agents: [], degraded: ver.missing ? 'tmux not on PATH' : ver.err }
         }
         const home = agentsHome(dir)
-        const agents = Object.entries(readAgentRegistry(dir))
-          .filter(([, e]) => e.backend === 'tmux')
-          .map(([molStep, e]) => toTmuxInfo(socket, dir, home, molStep, e))
-        return { agents }
+        const entries = Object.entries(readAgentRegistry(dir)).filter(
+          ([, e]) => e.backend === 'tmux'
+        )
+        // one server round-trip for the whole fleet instead of a
+        // has-session per entry — a name absent from a SUCCESSFUL
+        // listing is proof of dead, and so is a dead-server error (the
+        // server holds its sessions). Any other failure degrades the
+        // list rather than reporting live agents as corpses
+        const ls = tmuxRun(socket, ['list-sessions', '-F', '#{session_name}'])
+        if (ls.code !== 0 && !TMUX_DEAD_ERR.test(ls.err)) {
+          return { agents: [], degraded: ls.err !== '' ? ls.err : `tmux exited ${ls.code}` }
+        }
+        const live = new Set(ls.out.split('\n').filter((s) => s !== ''))
+        return {
+          agents: entries.map(([molStep, e]) => toTmuxInfo(socket, dir, home, molStep, e, live)),
+        }
       } catch (err) {
         return {
           agents: [],
@@ -801,7 +887,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       }
     },
 
-    async status(id: string): Promise<AgentInfo> {
+    async status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the body is sync
       const hit = findEntry(id)
       if (!hit) {
         throw new AgentNotFound(`no tmux agent ${id}`)
@@ -822,18 +908,32 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // still-live session would let a respawn run alongside it
         const deadline = Date.now() + 2_000
         while (
-          tmuxRun(socket, ['has-session', '-t', name]).code === 0 &&
+          tmuxProbe(socket, name).live === 'running' &&
           Date.now() < deadline
         ) {
-          await new Promise((r) => setTimeout(r, 25))
+          await new Promise((r) => setTimeout(r, 25)) // NOSONAR — bounded kill-wait poll
         }
       }
-      try {
-        patchAgentRegistry(dir, molStep, { stopped: true })
-      } catch {
-        // the marker removal below still records intent
-      }
-      dropWorkMarker(dir, id)
+      // a respawn during the kill wait re-probes and re-pins the entry
+      // under the registry lock — re-verify under the SAME lock or
+      // 'stopped' + the marker drop land on a live, respawned entry
+      withAgentRegistryLock(dir, () => {
+        const cur = readAgentRegistry(dir)[molStep]
+        if (
+          cur === undefined ||
+          cur.agentId !== entry.agentId ||
+          cur.spawnedAt !== entry.spawnedAt ||
+          (name !== undefined && tmuxProbe(socket, name).live === 'running')
+        ) {
+          return // respawned or still alive — the live run owns the entry
+        }
+        try {
+          patchAgentRegistry(dir, molStep, { stopped: true })
+        } catch {
+          // the marker removal below still records intent
+        }
+        dropWorkMarker(dir, id)
+      })
     },
 
     capabilities: () => ({ attach: true, respawn: true, supervisor: 'none' }),

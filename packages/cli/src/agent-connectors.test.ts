@@ -74,7 +74,8 @@ if (args[0] === 'show') {
 /** tmux shim — a state file per socket at $TMUX_FAKE_HOME/<socket>.json
  *  maps session → pid; new-session spawns the pane command detached like
  *  a real server would (pane exit → has-session fails). Covers -V,
- *  new-session (-d -s -c -e), has-session, kill-session, list-panes. */
+ *  new-session (-d -s -c -e), has-session, kill-session, list-sessions
+ *  (-F #{session_name}), list-panes. */
 const FAKE_TMUX = `#!/usr/bin/env node
 const fs = require('node:fs')
 const cp = require('node:child_process')
@@ -111,12 +112,20 @@ if (args[0] === 'new-session') {
 }
 if (args[0] === 'has-session') {
   const s = load().sessions[target()]
-  process.exit(s && alive(s.pid) ? 0 : 1)
+  if (s && alive(s.pid)) { process.exit(0) }
+  console.error("can't find session: " + target()); process.exit(1)
 }
 if (args[0] === 'kill-session') {
   const db = load(); const s = db.sessions[target()]
   if (s && alive(s.pid)) { try { process.kill(-s.pid, 'SIGKILL') } catch {} }
   delete db.sessions[target()]; save(db)
+  process.exit(0)
+}
+if (args[0] === 'list-sessions') {
+  const db = load()
+  for (const n of Object.keys(db.sessions)) {
+    if (alive(db.sessions[n].pid)) { console.log(n) }
+  }
   process.exit(0)
 }
 if (args[0] === 'list-panes') {
@@ -133,6 +142,9 @@ interface Fixture {
   beadsDir: string
   env: AgentConnectorEnv
   prevPath: string
+  /** TMUX_FAKE_HOME before the fixture overwrote it — restored, never
+   *  deleted, so a pre-set runner env survives the test. */
+  prevTmuxFakeHome?: string
   /** Ambient GIT_/BEADS_/BRO_ pins scrubbed for the test's duration. */
   scrubbed: Record<string, string | undefined>
   dbRows(): Array<Record<string, unknown>>
@@ -156,6 +168,7 @@ function fixture(
   writeFileSync(join(binDir, 'bd'), FAKE_BD)
   chmodSync(join(binDir, 'bd'), 0o755)
   const agents: Record<string, Record<string, unknown>> = { native: { command } }
+  const prevTmuxFakeHome = process.env.TMUX_FAKE_HOME
   if (opts.tmux === true) {
     writeFileSync(join(binDir, 'tmux'), FAKE_TMUX)
     chmodSync(join(binDir, 'tmux'), 0o755)
@@ -181,6 +194,7 @@ function fixture(
     beadsDir,
     env: { agents, connectors: {} },
     prevPath,
+    prevTmuxFakeHome,
     scrubbed,
     dbRows: () => JSON.parse(readFileSync(db, 'utf8')).rows,
   }
@@ -205,7 +219,11 @@ function cleanup(fx: Fixture): void {
     // no readable registry — nothing spawned
   }
   process.env.PATH = fx.prevPath
-  delete process.env.TMUX_FAKE_HOME
+  if (fx.prevTmuxFakeHome === undefined) {
+    delete process.env.TMUX_FAKE_HOME
+  } else {
+    process.env.TMUX_FAKE_HOME = fx.prevTmuxFakeHome
+  }
   for (const [k, v] of Object.entries(fx.scrubbed)) {
     if (v === undefined) {
       delete process.env[k]
