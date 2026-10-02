@@ -6,7 +6,15 @@
  * source file and `drill up` never commits it.
  */
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import type { DrillRow } from './types.ts'
 
@@ -97,8 +105,13 @@ export function writeReport(dir: string, input: DrillReportInput): string {
   mkdirSync(dir, { recursive: true })
   const path = join(dir, `${input.frame.id}.md`)
   const tmp = `${path}.${randomBytes(6).toString('hex')}.tmp`
-  writeFileSync(tmp, renderReport(input))
-  renameSync(tmp, path)
+  try {
+    writeFileSync(tmp, renderReport(input))
+    renameSync(tmp, path)
+  } catch (err) {
+    rmSync(tmp, { force: true })
+    throw err
+  }
   return path
 }
 
