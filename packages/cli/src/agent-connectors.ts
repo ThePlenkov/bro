@@ -255,6 +255,102 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
+/** The shared spawn prologue every built-in backend runs under the
+ *  registry lock — dedup across the two state planes (registry liveness
+ *  + beads claim), the claim/rebind, and the shared-dir artifacts
+ *  (prompt/log/exit). Returns the paths the backend tail needs.
+ *
+ *  Dedup correlates both planes: a claim alone is not a conflict — a
+ *  crashed worker's stale in_progress must not block respawn — and a
+ *  live agent alone is not spawnable-over either. The registry entry
+ *  goes in FIRST: every later failure (claim refused, spawn error)
+ *  leaves a respawn-able 'lost' entry instead of a foreign claim that
+ *  can never be rebound. `opts.isLive` is the backend's liveness probe
+ *  on an existing entry; `opts.entry` merges backend-private fields
+ *  (tmux's session name) into the patch. */
+function prepareSpawn(
+  dir: string,
+  home: string,
+  backend: string,
+  spec: SpawnSpec,
+  opts: {
+    isLive: (existing: AgentRegistryEntry) => boolean
+    liveDetail?: (existing: AgentRegistryEntry) => string
+    entry?: (agentId: string) => Record<string, unknown>
+  }
+): { agentId: string; promptFile: string; log: string; exitFile: string } {
+  const registry = readAgentRegistry(dir)
+  const existing = registry[spec.molStep]
+  // a registry entry belongs to the backend that wrote it — the respawn
+  // contract (same agentId, same claim rebind) is per-runtime; one
+  // backend must not adopt another's entry
+  if (existing !== undefined && existing.backend !== backend) {
+    throw new SpawnError(
+      `${spec.molStep} is registered to backend "${existing.backend}" — respawn belongs to it`
+    )
+  }
+  if (existing !== undefined && opts.isLive(existing)) {
+    const detail = opts.liveDetail?.(existing) ?? `pid ${String(existing.pid)}`
+    throw new SpawnError(
+      `${spec.molStep} already has a live agent (${existing.agentId}, ${detail})`
+    )
+  }
+  const step = probeStep(spec.beadsDir, spec.molStep)
+  const claimed = step?.status === 'in_progress'
+  if (claimed && existing === undefined) {
+    // claimed with no registry entry — an interactive session or a
+    // foreign backend owns it; spawning would double-claim
+    throw new SpawnError(
+      `${spec.molStep} is claimed outside the agent registry (assignee ${step?.assignee ?? '?'})`
+    )
+  }
+  // a dead entry doesn't entitle us to whatever claim sits on the step
+  // now — if another actor picked it up meanwhile, rebinding would steal
+  // a live worker's (or a human's) step. The actor resolves in the
+  // pinned store's context — the same context the claim was written under.
+  const actor = claimed ? bdActor(spec.beadsDir) : undefined
+  if (claimed && step?.assignee !== actor) {
+    throw new SpawnError(
+      `${spec.molStep} is claimed by ${step?.assignee ?? '?'} — rebind only takes our own claim`
+    )
+  }
+  // a reused id must stay filename-safe — a tampered entry gets a fresh
+  // mint, not a path escape into <home>/
+  const agentId =
+    existing !== undefined && SAFE_AGENT_ID.test(existing.agentId)
+      ? existing.agentId
+      : mintAgentId(backend)
+  mkdirSync(home, { recursive: true })
+  const promptFile = join(home, `${agentId}.prompt.md`)
+  const log = join(home, `${agentId}.log`)
+  const exitFile = join(home, `${agentId}.exit`)
+  rmSync(exitFile, { force: true })
+  writeFileSync(promptFile, spec.prompt)
+  // exitStatus: undefined clears a respawned entry's stale harvest — the
+  // new run must not read as already-exited (undefined keys drop out of
+  // the serialized registry). pid/spawnError likewise — a claim failure
+  // before the backend patches its handle would leave a stale value that
+  // could alias an unrelated process/session later
+  patchAgentRegistry(dir, spec.molStep, {
+    agentId,
+    backend,
+    spawnedAt: new Date().toISOString(),
+    worktree: spec.repoRoot,
+    log,
+    stopped: false,
+    exitStatus: undefined,
+    pid: undefined,
+    spawnError: undefined,
+    ...opts.entry?.(agentId),
+  })
+  if (claimed) {
+    rebindStep(spec.beadsDir, spec.molStep, actor!)
+  } else {
+    claimStep(spec.beadsDir, spec.molStep)
+  }
+  return { agentId, promptFile, log, exitFile }
+}
+
 /** Exit status the wrapper dropped at `<agentId>.exit` — absent when the
  *  process is still running or died by SIGKILL (nothing to write with). */
 function readExitFile(home: string, agentId: string): number | undefined {
@@ -360,84 +456,9 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       // Everything inside is synchronous — the bd subprocesses are
       // spawnSync — so the hold is milliseconds in the common case.
       return withAgentRegistryLock(dir, () => {
-        // dedup correlates both planes: a claim alone is not a conflict —
-        // a crashed worker's stale in_progress must not block respawn —
-        // and a live agent alone is not spawnable-over either.
-        const registry = readAgentRegistry(dir)
-        const existing = registry[spec.molStep]
-        // a registry entry belongs to the backend that wrote it — the
-        // respawn contract (same agentId, same claim rebind) is
-        // per-runtime; one backend must not adopt another's entry
-        if (existing !== undefined && existing.backend !== 'native') {
-          throw new SpawnError(
-            `${spec.molStep} is registered to backend "${existing.backend}" — respawn belongs to it`
-          )
-        }
-        const live =
-          existing !== undefined &&
-          nativeState(dir, home, spec.molStep, existing) === 'running'
-        if (live) {
-          throw new SpawnError(
-            `${spec.molStep} already has a live agent (${existing!.agentId}, pid ${String(existing!.pid)})`
-          )
-        }
-        const step = probeStep(spec.beadsDir, spec.molStep)
-        const claimed = step?.status === 'in_progress'
-        if (claimed && existing === undefined) {
-          // claimed with no registry entry — an interactive session or a
-          // foreign backend owns it; spawning would double-claim
-          throw new SpawnError(
-            `${spec.molStep} is claimed outside the agent registry (assignee ${step?.assignee ?? '?'})`
-          )
-        }
-        // a dead entry doesn't entitle us to whatever claim sits on the
-        // step now — if another actor picked it up meanwhile, rebinding
-        // would steal a live worker's (or a human's) step. The actor is
-        // resolved in the pinned store's context — the same context the
-        // claim itself was written under.
-        const actor = claimed ? bdActor(spec.beadsDir) : undefined
-        if (claimed && step?.assignee !== actor) {
-          throw new SpawnError(
-            `${spec.molStep} is claimed by ${step?.assignee ?? '?'} — rebind only takes our own claim`
-          )
-        }
-        // Registry entry FIRST: every later failure (claim refused, spawn
-        // error) leaves a respawn-able 'lost' entry instead of a foreign
-        // claim that can never be rebound.
-        // a reused id must stay filename-safe — a tampered entry gets a
-        // fresh mint, not a path escape into <home>/
-        const agentId =
-          existing !== undefined && SAFE_AGENT_ID.test(existing.agentId)
-            ? existing.agentId
-            : mintAgentId('native')
-        mkdirSync(home, { recursive: true })
-        const promptFile = join(home, `${agentId}.prompt.md`)
-        const log = join(home, `${agentId}.log`)
-        const exitFile = join(home, `${agentId}.exit`)
-        rmSync(exitFile, { force: true })
-        writeFileSync(promptFile, spec.prompt)
-        // exitStatus: undefined clears a respawned entry's stale harvest —
-        // the new run must not read as already-exited (undefined keys
-        // drop out of the serialized registry)
-        patchAgentRegistry(dir, spec.molStep, {
-          agentId,
-          backend: 'native',
-          spawnedAt: new Date().toISOString(),
-          worktree: spec.repoRoot,
-          log,
-          stopped: false,
-          exitStatus: undefined,
-          // a respawn must not keep the dead worker's pid/spawnError —
-          // a claim failure before the pid patch would leave a stale
-          // pid that could alias an unrelated process later
-          pid: undefined,
-          spawnError: undefined,
+        const { agentId, promptFile, log, exitFile } = prepareSpawn(dir, home, 'native', spec, {
+          isLive: (e) => nativeState(dir, home, spec.molStep, e) === 'running',
         })
-        if (claimed) {
-          rebindStep(spec.beadsDir, spec.molStep, actor!)
-        } else {
-          claimStep(spec.beadsDir, spec.molStep)
-        }
         const fd = openSync(log, 'a')
         let spawned: AgentRegistryEntry
         try {
@@ -700,64 +721,15 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       // same critical section as native: dedup → claim → session →
       // pid-patch under the registry lock, all synchronous shell-outs
       return withAgentRegistryLock(dir, () => {
-        const registry = readAgentRegistry(dir)
-        const existing = registry[spec.molStep]
-        if (existing !== undefined && existing.backend !== 'tmux') {
-          throw new SpawnError(
-            `${spec.molStep} is registered to backend "${existing.backend}" — respawn belongs to it`
-          )
-        }
-        const live =
-          existing !== undefined &&
-          tmuxState(socket, dir, home, spec.molStep, existing) === 'running'
-        if (live) {
-          throw new SpawnError(
-            `${spec.molStep} already has a live agent (${existing!.agentId}, session ${tmuxSessionName(existing!) ?? '?'})`
-          )
-        }
-        const step = probeStep(spec.beadsDir, spec.molStep)
-        const claimed = step?.status === 'in_progress'
-        if (claimed && existing === undefined) {
-          throw new SpawnError(
-            `${spec.molStep} is claimed outside the agent registry (assignee ${step?.assignee ?? '?'})`
-          )
-        }
-        const actor = claimed ? bdActor(spec.beadsDir) : undefined
-        if (claimed && step?.assignee !== actor) {
-          throw new SpawnError(
-            `${spec.molStep} is claimed by ${step?.assignee ?? '?'} — rebind only takes our own claim`
-          )
-        }
-        // entry first — same as native: a later failure leaves a
-        // respawn-able 'lost' entry instead of a foreign claim
-        const agentId =
-          existing !== undefined && SAFE_AGENT_ID.test(existing.agentId)
-            ? existing.agentId
-            : mintAgentId('tmux')
-        const session = `bro-${agentId}`
-        mkdirSync(home, { recursive: true })
-        const promptFile = join(home, `${agentId}.prompt.md`)
-        const log = join(home, `${agentId}.log`)
-        const exitFile = join(home, `${agentId}.exit`)
-        rmSync(exitFile, { force: true })
-        writeFileSync(promptFile, spec.prompt)
-        patchAgentRegistry(dir, spec.molStep, {
-          agentId,
-          backend: 'tmux',
-          spawnedAt: new Date().toISOString(),
-          worktree: spec.repoRoot,
-          log,
-          session,
-          stopped: false,
-          exitStatus: undefined,
-          pid: undefined,
-          spawnError: undefined,
+        // the session name derives from the agentId prepareSpawn
+        // resolves — entry callback, not a precomputed name, because a
+        // tampered entry's unsafe id is reminted inside
+        const { agentId, promptFile, log, exitFile } = prepareSpawn(dir, home, 'tmux', spec, {
+          isLive: (e) => tmuxState(socket, dir, home, spec.molStep, e) === 'running',
+          liveDetail: (e) => `session ${tmuxSessionName(e) ?? '?'}`,
+          entry: (id) => ({ session: `bro-${id}` }),
         })
-        if (claimed) {
-          rebindStep(spec.beadsDir, spec.molStep, actor!)
-        } else {
-          claimStep(spec.beadsDir, spec.molStep)
-        }
+        const session = `bro-${agentId}`
         // a leftover session with our name (crash between entry and
         // kill, a respawn over a zombie) would make new-session fail
         // 'duplicate' — clear it; kill-session on a missing target is
@@ -776,7 +748,8 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // the pane runs the agent; $? lands in the .exit file before the
         // pipeline drains, tee keeps a log the way native's fd redirect
         // does. Session dies with the pane → has-session IS liveness
-        const paneCmd = `{ ${expandAgentCmd(command, promptFile)}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>&1 | tee -a ${shQuote(log)}`
+        const paneCmd = // NOSONAR — operator-configured agent command (same contract as native/loop)
+          `{ ${expandAgentCmd(command, promptFile)}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>&1 | tee -a ${shQuote(log)}`
         const res = tmuxRun(socket, [
           'new-session',
           '-d',
