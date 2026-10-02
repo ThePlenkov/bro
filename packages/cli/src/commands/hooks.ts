@@ -12,7 +12,8 @@
  *                                       governing skill (skills/<name>/SKILL.md); arms the
  *                                       stop gate for this session (bro act/drill/
  *                                       work, gh pr, git push, worktree add, bd --claim) via a
- *                                       per-session marker in .git
+ *                                       per-session marker in .git; connector postTool probes
+ *                                       run on every event — notify drains the session mailbox
  *   stop                              connector GateContributions — each system reports
  *                                       unfinished work; the hook blocks only aspects this
  *                                       session armed, ambient state is passive context
@@ -36,6 +37,7 @@ import {
 import { dirname, join } from 'node:path'
 import {
   parallelWorkLines,
+  postToolLines,
   promptContextLines,
   sessionStartLines,
   stopGateContributions,
@@ -593,40 +595,42 @@ async function emitPromptContext(input: HookInput): Promise<void> {
   }
 }
 
-function emitPostTool(input: HookInput): void {
-  if (input.tool_response?.success !== true) {
-    return
-  }
-  const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
+async function emitPostTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
-  const aspects = classifyArmCommands(cmd)
-  if (sessionId) {
-    for (const aspect of aspects) {
-      armSession(sessionId, aspect, armDetail(cmd, aspect))
+  const lines: string[] = []
+  if (input.tool_response?.success === true) {
+    const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
+    const aspects = classifyArmCommands(cmd)
+    if (sessionId) {
+      for (const aspect of aspects) {
+        armSession(sessionId, aspect, armDetail(cmd, aspect))
+      }
+    }
+    // a mutating bro subcommand cites its governing skill once per session —
+    // the SKILL.md never loads on a bare CLI call (bro-d8s)
+    const mutation = classifySkillMutation(cmd)
+    if (mutation && sessionId && !skillHinted(sessionId, mutation.skill)) {
+      markSkillHinted(sessionId, mutation.skill)
+      lines.push(
+        `bro ${mutation.plugin} mutations are governed by the ${mutation.skill} skill ` +
+          `— read skills/${mutation.skill}/SKILL.md before continuing`
+      )
+    }
+    switch (classifyExecCommand(cmd)) {
+      case 'pr-merge':
+        lines.push('PR merged — sweep review debt with `bro debt collect`; queue: `bro debt prs`')
+        break
+      case 'pr-create':
+        lines.push(
+          'PR created — `bro act status` is the review gate; `bro act threads` lists open threads'
+        )
+        break
+      default:
     }
   }
-  const lines: string[] = []
-  // a mutating bro subcommand cites its governing skill once per session —
-  // the SKILL.md never loads on a bare CLI call (bro-d8s)
-  const mutation = classifySkillMutation(cmd)
-  if (mutation && sessionId && !skillHinted(sessionId, mutation.skill)) {
-    markSkillHinted(sessionId, mutation.skill)
-    lines.push(
-      `bro ${mutation.plugin} mutations are governed by the ${mutation.skill} skill ` +
-        `— read skills/${mutation.skill}/SKILL.md before continuing`
-    )
-  }
-  switch (classifyExecCommand(cmd)) {
-    case 'pr-merge':
-      lines.push('PR merged — sweep review debt with `bro debt collect`; queue: `bro debt prs`')
-      break
-    case 'pr-create':
-      lines.push(
-        'PR created — `bro act status` is the review gate; `bro act threads` lists open threads'
-      )
-      break
-    default:
-  }
+  // connector postTool probes run on every event — a failed exec is
+  // still a delivery tick for a drained mailbox (notify)
+  lines.push(...(await postToolLines({ dir: process.cwd(), sessionId })))
   if (lines.length > 0) {
     context('PostToolUse', lines.join('\n'))
   }
@@ -721,7 +725,7 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
         await emitPromptContext(input)
         return
       case 'post-tool':
-        emitPostTool(input)
+        await emitPostTool(input)
         return
       case 'stop':
         await emitStopGate(input)

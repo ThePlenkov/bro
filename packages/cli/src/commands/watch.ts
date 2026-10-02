@@ -20,10 +20,7 @@
  * unchanged snapshot is not re-emitted — a heartbeat reports
  * transitions, not noise.
  */
-import { randomBytes } from 'node:crypto'
-import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { git, gitTry, reviewHost, type ReviewFacade } from '@broject/core'
+import { dropMailbox, git, mailboxDir, reviewHost, type ReviewFacade } from '@broject/core'
 import { evaluateExitGate, fetchPrActState } from '@broject/act'
 import { listMolecules, loadMolecule, nextStep } from '@broject/convoy'
 import { loadBroConfig } from '../plugins.ts'
@@ -91,14 +88,6 @@ export interface WatchSnapshot {
   }
 }
 
-/** `<git-common-dir>/bro/notify` — null outside a repo (notify warns
- *  and skips rather than failing the heartbeat). */
-function mailboxDir(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
-  const common = r.code === 0 ? r.out.trim() : ''
-  return common === '' ? null : join(common, 'bro', 'notify')
-}
-
 /** The heartbeat's answer: ready human gates, lost agents, blocked and
  *  unprobeable PR exit gates. Empty = the fleet is quiet. */
 export function attentionOf(
@@ -139,25 +128,15 @@ export function snapshotKey(s: WatchSnapshot): string {
   return JSON.stringify({ ...s, ts: '' })
 }
 
-/** One atomic mailbox file — tmp+rename so a draining reader never sees
- *  a half-written event. */
+/** One atomic mailbox file — tmp+rename (dropMailbox in core) so a
+ *  draining reader never sees a half-written event. Outside a repo
+ *  there is no mailbox — report false instead of throwing. */
 export function emitMailbox(dir: string, text: string): boolean {
   const mb = mailboxDir(dir)
   if (mb === null) {
     return false
   }
-  mkdirSync(mb, { recursive: true })
-  const name = `watch-${Date.now()}-${randomBytes(4).toString('hex')}.txt`
-  const tmp = join(mb, `.${name}.tmp`)
-  writeFileSync(tmp, text)
-  try {
-    renameSync(tmp, join(mb, name))
-  } catch (err) {
-    // a failed rename strands the tmp file — remove it so retries
-    // don't accumulate debris in the mailbox
-    rmSync(tmp, { force: true })
-    throw err
-  }
+  dropMailbox(mb, text, 'watch')
   return true
 }
 
