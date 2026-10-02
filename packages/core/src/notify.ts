@@ -91,10 +91,12 @@ export function drainMailbox(dir: string): string[] {
       const path = join(mb, f)
       try {
         const text = readFileSync(path, 'utf8').trim()
-        rmSync(path, { force: true })
         if (text !== '') {
           out.push(text)
         }
+        // delete LAST — a crash between read and rm re-delivers the
+        // drop (at-least-once); rm-before-collect could lose it
+        rmSync(path, { force: true })
       } catch {
         // unreadable drop — skip; the next drain retries
       }
