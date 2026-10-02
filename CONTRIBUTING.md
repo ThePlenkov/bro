@@ -96,6 +96,9 @@ async-capable and fail-open with a per-probe timeout:
 - `sessionStart` / `parallelWork` / `promptSubmit` → context lines; the
   prompt probe gets the raw text so each system spots its own references
   (`ReviewFacade.parsePrRef` parses the vendor's PR URLs).
+- `postTool` → per-event context lines, fired on every tool landing
+  (success or not) — the notify connector drains the session mailbox
+  here so child events arrive mid-turn.
 - `stopGate` → `GateContribution { aspect, block, armedHint, passive }`.
   The hook owns arming policy: `block` fires only when the session armed
   that aspect (`bro act`/`gh pr`/`git push` → `act`, `bro drill`/`wtf` →

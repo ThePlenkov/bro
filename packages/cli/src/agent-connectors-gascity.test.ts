@@ -13,10 +13,10 @@ import { readAgentRegistry, SpawnError, AgentNotFound } from '@broject/core'
 import {
   agentConnectorNames,
   loadAgentEnv,
+  makeGascityConnector,
   resolveAgentConnector,
   type AgentConnectorEnv,
 } from './agent-connectors.ts'
-import { makeGascityConnector } from './agent-connectors-gascity.ts'
 import { initRepo } from './commands/testrepo.ts'
 
 /** bd shim — JSON store at $BEADS_DIR/store.json; same coverage as the
@@ -188,8 +188,8 @@ const SPEC = (main: string, beadsDir: string, molStep: string) => ({
 })
 
 describe('gascity connector', () => {
-  test('registry order: native first, gascity second', () => {
-    assert.deepEqual(agentConnectorNames(), ['native', 'gascity'])
+  test('registry order: native first, gascity last', () => {
+    assert.deepEqual(agentConnectorNames(), ['native', 'tmux', 'gascity'])
   })
 
   test('spawn inits the city, adopts the rig, claims, sessions+slings', async () => {

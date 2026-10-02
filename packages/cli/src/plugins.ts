@@ -14,6 +14,7 @@ import {
   debtSection,
   definePlugin,
   loadConfig,
+  notifyConnector,
   registerConnector,
   sddSection,
   stackSection,
@@ -37,6 +38,7 @@ import { runCleanupCommand } from './commands/cleanup.ts'
 import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts'
 import { runLoopCommand } from './commands/loop.ts'
 import { applyNextPlan, runNextCommand } from './commands/next.ts'
+import { runNotifyCommand } from './commands/notify.ts'
 import { parseNextPlan, PLAN_VERSION as NEXT_PLAN_VERSION, type NextPlan } from './commands/next-plan.ts'
 import { resolvePlanDoc, runPlanCommand } from './commands/plan.ts'
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
@@ -44,7 +46,10 @@ import { runDoctorCommand } from './commands/doctor.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runFleetCommand } from './commands/fleet.ts'
 import { runHooksCommand } from './commands/hooks.ts'
+import { runWatchCommand } from './commands/watch.ts'
+import { runAgentsCommand } from './commands/agents.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
+import { runServeCommand } from './commands/serve.ts'
 import { runSetupCommand } from './commands/setup.ts'
 import { runSpecCommand, sddConnector } from './commands/spec.ts'
 import { runStackCommand } from './commands/stack.ts'
@@ -63,6 +68,7 @@ registerConnector(workConnector)
 registerConnector(actConnector)
 registerConnector(debtConnector)
 registerConnector(sddConnector)
+registerConnector(notifyConnector)
 // specs facade providers — registry order is detection precedence:
 // native first (its matchDir claims the configured sdd.dir), then
 // tool-layout matchers, agent last (explicit pick only, never detects)
@@ -123,10 +129,33 @@ export const PLUGINS: BroPlugin[] = [
     name: 'fleet',
     summary: 'Fleet view — mols × steps × agents × worktrees × PRs [--json]',
     run: runFleetCommand,
-    // owns the agents.* backend-knob section until `bro agents`
-    // (bro-q0f2) lands — one owner per configKey
+  }),
+  definePlugin({
+    name: 'agents',
+    summary: 'Agent supervisor — status|up|down over the orchestrator connectors',
+    run: runAgentsCommand,
+    skill: 'agents',
     configKey: 'agents',
     configSchema: agentsSection,
+  }),
+  definePlugin({
+    name: 'notify',
+    summary: 'Drop an event into the session mailbox — drained into context by the next postTool probe',
+    run: runNotifyCommand,
+    skill: 'notify',
+  }),
+  definePlugin({
+    name: 'watch',
+    summary:
+      'Orchestrator heartbeat — mols × act gates × fleet snapshot [--once|--every N|--notify|--json]',
+    run: runWatchCommand,
+    skill: 'watch',
+  }),
+  definePlugin({
+    name: 'serve',
+    summary: 'Facade host for thin clients — HTTP/JSON on 127.0.0.1 [--port N]',
+    run: runServeCommand,
+    skill: 'serve',
   }),
   definePlugin({
     name: 'check',

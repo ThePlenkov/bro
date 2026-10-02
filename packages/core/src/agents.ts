@@ -90,6 +90,12 @@ export interface AgentConnector {
   status(id: string): Promise<AgentInfo>
   /** Idempotent — a gone agent is the desired end state, not an error. */
   stop(id: string): Promise<void>
+  /** Supervisor lifecycle, capability-declared: `supervisor: 'none'`
+   *  backends (native) never implement these — `bro agents up|down` with
+   *  no target reports them as no-ops. A supervised backend WITHOUT the
+   *  methods is reported as a gap, not silently ignored. */
+  up?(): Promise<void>
+  down?(): Promise<void>
   capabilities(): AgentCapabilities
 }
 
