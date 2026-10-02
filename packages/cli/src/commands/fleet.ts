@@ -32,6 +32,12 @@ export interface FleetRow {
   agent: string
   worktree?: string
   pr?: string
+  /** The PR's number — `pr` is the rendered link; watch feeds the number
+   *  to the act gate instead of re-parsing the link. */
+  prNum?: number
+  /** Every open PR on the branch — `prNum` is `[0]` for display, but a
+   *  branch with several open PRs still needs each one gated. */
+  prNums?: number[]
 }
 
 /** The fleet's agent plane — merged across every registered backend.
@@ -40,7 +46,7 @@ export interface FleetRow {
  *  failure of the whole view. Two backends reporting the same step is a
  *  `conflict`: registry order decides (same precedence as connector
  *  resolution) and the loser is reported, not silently overwritten. */
-async function collectAgents(dir: string): Promise<{
+export async function collectAgents(dir: string): Promise<{
   byStep: Map<string, AgentInfo>
   degraded: string[]
   conflicts: string[]
@@ -100,36 +106,39 @@ function branchOf(path: string): string {
   return gitTry(['-C', path, 'branch', '--show-current']).out.trim()
 }
 
-/** PR link for a worktree's branch — one failed lookup must not blank
- *  the row. */
-function prForWorktree(
+/** PR number for a worktree's branch — one failed lookup must not
+ *  blank the row, but it is reported into `errors` when given: a
+ *  silent miss would let the snapshot claim no PRs exist. */
+function prNumsForWorktree(
   rev: ReviewFacade,
-  repo: string,
-  abs: string | undefined
-): string | undefined {
+  abs: string | undefined,
+  errors?: string[]
+): number[] {
   if (abs === undefined) {
-    return undefined
+    return []
   }
   const branch = branchOf(abs)
   if (branch === '') {
-    return undefined
+    return []
   }
   try {
-    const n = rev.prsForBranch(branch)[0]
-    return n === undefined ? undefined : rev.prLink(repo, n)
-  } catch {
-    return undefined
+    return rev.prsForBranch(branch)
+  } catch (err) {
+    errors?.push(`${branch}: ${err instanceof Error ? err.message : String(err)}`)
+    return []
   }
 }
 
 /** Rows across open molecules — the agent cell, a `<repo>--<step>`
- *  worktree match, and a best-effort PR per step. */
-function fleetRows(
+ *  worktree match, and a best-effort PR per step. Exported for `bro
+ *  watch`, which composes the same rows into its snapshot. */
+export function fleetRows(
   byStep: Map<string, AgentInfo>,
   degradedAny: boolean,
   rev: ReviewFacade | undefined,
   repo: string,
-  worktrees: WorktreeInfo[]
+  worktrees: WorktreeInfo[],
+  prErrors?: string[]
 ): FleetRow[] {
   const rows: FleetRow[] = []
   for (const m of listMolecules()) {
@@ -140,6 +149,8 @@ function fleetRows(
         | { assignee?: string }
         | undefined
       const wt = worktreeOf(s.id, agent, worktrees)
+      const prNums = rev === undefined ? [] : prNumsForWorktree(rev, wt, prErrors)
+      const prNum = prNums[0]
       rows.push({
         mol: m.id,
         step: s.id,
@@ -148,14 +159,18 @@ function fleetRows(
         state: s.state,
         agent: agentCell(s, agent, issue?.assignee, degradedAny),
         worktree: wt === undefined ? undefined : basename(wt),
-        pr: rev === undefined ? undefined : prForWorktree(rev, repo, wt),
+        pr: rev === undefined || prNum === undefined ? undefined : rev.prLink(repo, prNum),
+        prNum,
+        prNums: prNums.length > 1 ? prNums : undefined,
       })
     }
   }
   return rows
 }
 
-function printFleetTable(rows: FleetRow[], degraded: string[], conflicts: string[]): void {
+/** The fleet table as lines — `bro watch` embeds the same rendering in
+ *  its snapshot text (mailbox drops carry the whole frame). */
+export function fleetTableLines(rows: FleetRow[]): string[] {
   const cols: [keyof FleetRow, string][] = [
     ['mol', 'mol'],
     ['step', 'step'],
@@ -170,15 +185,26 @@ function printFleetTable(rows: FleetRow[], degraded: string[], conflicts: string
   )
   const line = (vals: string[]) =>
     vals.map((v, i) => v.padEnd(widths[i]!)).join('  ').trimEnd()
-  console.log(line(cols.map(([, h]) => h)))
-  for (const c of cells) {
-    console.log(line(c))
+  return [line(cols.map(([, h]) => h)), ...cells.map((c) => line(c))]
+}
+
+export function printFleetTable(
+  rows: FleetRow[],
+  degraded: string[],
+  conflicts: string[],
+  prErrors: string[] = []
+): void {
+  for (const l of fleetTableLines(rows)) {
+    console.log(l)
   }
   for (const d of degraded) {
     console.error(`warning: backend degraded — ${d}`)
   }
   for (const c of conflicts) {
     console.error(`warning: agent conflict — ${c}`)
+  }
+  for (const e of prErrors) {
+    console.error(`warning: PR lookup failed — ${e}`)
   }
 }
 
@@ -229,15 +255,16 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
     rev = undefined
   }
 
-  const rows = fleetRows(byStep, degraded.length > 0, rev, repo, worktrees)
+  const prErrors: string[] = []
+  const rows = fleetRows(byStep, degraded.length > 0, rev, repo, worktrees, prErrors)
 
   if (json) {
-    console.log(JSON.stringify({ rows, degraded, conflicts }, null, 2))
+    console.log(JSON.stringify({ rows, degraded, conflicts, prErrors }, null, 2))
     return
   }
   if (rows.length === 0) {
     console.log('no open molecules — nothing in the fleet')
     return
   }
-  printFleetTable(rows, degraded, conflicts)
+  printFleetTable(rows, degraded, conflicts, prErrors)
 }
