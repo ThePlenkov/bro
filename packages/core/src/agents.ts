@@ -179,6 +179,27 @@ const syncSleep = (ms: number): void => {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
 
+/** One acquisition attempt — true when the lock is ours. On EEXIST a
+ *  stale lock (crashed holder) is broken so the next retry can take it. */
+const tryAcquireLockFile = (lock: string): boolean => {
+  try {
+    closeSync(openSync(lock, 'wx')) // existence is the lock, not the fd
+    return true
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw err
+    }
+  }
+  try {
+    if (Date.now() - statSync(lock).mtimeMs > REGISTRY_LOCK_STALE_MS) {
+      rmSync(lock, { force: true })
+    }
+  } catch {
+    // raced removal or a stat flake — the retry decides
+  }
+  return false
+}
+
 /** Advisory inter-process lock on `<agents.json>.lock` (O_EXCL create —
  *  existence IS the lock). Serializes registry read-modify-write across
  *  bro processes: without it two spawns both read the pre-write state
@@ -194,26 +215,11 @@ export function acquireAgentRegistryLock(dir: string): () => void {
     return () => {} // re-entrant — the outer section owns it
   }
   const deadline = Date.now() + REGISTRY_LOCK_WAIT_MS
-  for (;;) {
-    try {
-      closeSync(openSync(lock, 'wx')) // existence is the lock, not the fd
-      break
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
-        throw err
-      }
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > REGISTRY_LOCK_STALE_MS) {
-          rmSync(lock, { force: true })
-        }
-      } catch {
-        // raced removal or a stat flake — the retry decides
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(`agents.json lock held over ${REGISTRY_LOCK_WAIT_MS / 1000}s`)
-      }
-      syncSleep(25)
+  while (!tryAcquireLockFile(lock)) {
+    if (Date.now() >= deadline) {
+      throw new Error(`agents.json lock held over ${REGISTRY_LOCK_WAIT_MS / 1000}s`)
     }
+    syncSleep(25)
   }
   heldRegistryLocks.add(lock)
   return () => {
@@ -303,7 +309,8 @@ export function probeStep(
 export function claimStep(beadsDir: string, molStep: string): void {
   const r = bdAt(beadsDir, ['update', molStep, '--claim'])
   if (r.code !== 0) {
-    throw new SpawnError(`claim of ${molStep} refused — ${r.err || `bd exited ${r.code}`}`)
+    const why = r.err !== '' ? r.err : `bd exited ${r.code}`
+    throw new SpawnError(`claim of ${molStep} refused — ${why}`)
   }
 }
 
@@ -312,7 +319,8 @@ export function claimStep(beadsDir: string, molStep: string): void {
 export function rebindStep(beadsDir: string, molStep: string, actor: string): void {
   const r = bdAt(beadsDir, ['update', molStep, '--assignee', actor])
   if (r.code !== 0) {
-    throw new SpawnError(`rebind of ${molStep} failed — ${r.err || `bd exited ${r.code}`}`)
+    const why = r.err !== '' ? r.err : `bd exited ${r.code}`
+    throw new SpawnError(`rebind of ${molStep} failed — ${why}`)
   }
 }
 

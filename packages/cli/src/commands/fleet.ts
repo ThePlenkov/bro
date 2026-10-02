@@ -79,6 +79,87 @@ function branchOf(path: string): string {
   return gitTry(['-C', path, 'branch', '--show-current']).out.trim()
 }
 
+/** PR link for a worktree's branch — one failed lookup must not blank
+ *  the row. */
+function prForWorktree(
+  rev: ReviewFacade,
+  repo: string,
+  abs: string | undefined
+): string | undefined {
+  if (abs === undefined) {
+    return undefined
+  }
+  const branch = branchOf(abs)
+  if (branch === '') {
+    return undefined
+  }
+  try {
+    const n = rev.prsForBranch(branch)[0]
+    return n === undefined ? undefined : rev.prLink(repo, n)
+  } catch {
+    return undefined
+  }
+}
+
+/** Rows across open molecules — the agent cell, a `<repo>--<step>`
+ *  worktree match, and a best-effort PR per step. */
+function fleetRows(
+  byStep: Map<string, AgentInfo>,
+  degradedAny: boolean,
+  rev: ReviewFacade | undefined,
+  repo: string,
+  worktrees: WorktreeInfo[]
+): FleetRow[] {
+  const fullPath = (name: string | undefined) =>
+    name === undefined ? undefined : (worktrees.find((w) => basename(w.path) === name)?.path ?? name)
+  const rows: FleetRow[] = []
+  for (const m of listMolecules()) {
+    const mol = loadMolecule(m.id)
+    for (const s of stepsOf(mol)) {
+      const agent = byStep.get(s.id)
+      const issue = mol.issues.find((i) => i.id === s.id) as
+        | { assignee?: string }
+        | undefined
+      const wt = worktreeOf(s.id, agent, worktrees)
+      rows.push({
+        mol: m.id,
+        step: s.id,
+        title: s.title,
+        kind: s.kind,
+        state: s.state,
+        agent: agentCell(s, agent, issue?.assignee, degradedAny),
+        worktree: wt,
+        pr: rev === undefined ? undefined : prForWorktree(rev, repo, fullPath(wt)),
+      })
+    }
+  }
+  return rows
+}
+
+function printFleetTable(rows: FleetRow[], degraded: string[]): void {
+  const cols: [keyof FleetRow, string][] = [
+    ['mol', 'mol'],
+    ['step', 'step'],
+    ['state', 'state'],
+    ['agent', 'agent'],
+    ['worktree', 'worktree'],
+    ['pr', 'pr'],
+  ]
+  const cells = rows.map((r) => cols.map(([k]) => String(r[k] ?? '—')))
+  const widths = cols.map(([, h], i) =>
+    Math.max(h.length, ...cells.map((c) => c[i]!.length))
+  )
+  const line = (vals: string[]) =>
+    vals.map((v, i) => v.padEnd(widths[i]!)).join('  ').trimEnd()
+  console.log(line(cols.map(([, h]) => h)))
+  for (const c of cells) {
+    console.log(line(c))
+  }
+  for (const d of degraded) {
+    console.error(`warning: backend degraded — ${d}`)
+  }
+}
+
 /** Agent cell — see the module doc for the state table. */
 export function agentCell(
   step: ConvoyStep,
@@ -104,7 +185,6 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
   const dir = process.cwd()
 
   const { byStep, degraded } = await collectAgents(dir)
-  const degradedAny = degraded.length > 0
 
   const worktrees = (() => {
     try {
@@ -113,8 +193,6 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
       return [] as WorktreeInfo[]
     }
   })()
-  const fullPath = (name: string | undefined) =>
-    name === undefined ? undefined : (worktrees.find((w) => basename(w.path) === name)?.path ?? name)
 
   // PR resolution is best-effort — no review host (or a dead one) must
   // not break the table; the column just goes quiet.
@@ -127,43 +205,7 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
     rev = undefined
   }
 
-  const rows: FleetRow[] = []
-  const mols = listMolecules()
-  for (const m of mols) {
-    const mol = loadMolecule(m.id)
-    for (const s of stepsOf(mol)) {
-      const agent = byStep.get(s.id)
-      const issue = mol.issues.find((i) => i.id === s.id) as
-        | { assignee?: string }
-        | undefined
-      const wt = worktreeOf(s.id, agent, worktrees)
-      const abs = fullPath(wt)
-      let pr: string | undefined
-      if (rev && abs) {
-        const branch = branchOf(abs)
-        if (branch !== '') {
-          try {
-            const n = rev.prsForBranch(branch)[0]
-            if (n !== undefined) {
-              pr = rev.prLink(repo, n)
-            }
-          } catch {
-            // one failed lookup must not blank the row
-          }
-        }
-      }
-      rows.push({
-        mol: m.id,
-        step: s.id,
-        title: s.title,
-        kind: s.kind,
-        state: s.state,
-        agent: agentCell(s, agent, issue?.assignee as string | undefined, degradedAny),
-        worktree: wt,
-        pr,
-      })
-    }
-  }
+  const rows = fleetRows(byStep, degraded.length > 0, rev, repo, worktrees)
 
   if (json) {
     console.log(JSON.stringify({ rows, degraded }, null, 2))
@@ -173,25 +215,5 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
     console.log('no open molecules — nothing in the fleet')
     return
   }
-  const cols: [keyof FleetRow, string][] = [
-    ['mol', 'mol'],
-    ['step', 'step'],
-    ['state', 'state'],
-    ['agent', 'agent'],
-    ['worktree', 'worktree'],
-    ['pr', 'pr'],
-  ]
-  const cells = rows.map((r) => cols.map(([k]) => String(r[k] ?? '—')))
-  const widths = cols.map(([, h], i) =>
-    Math.max(h.length, ...cells.map((c) => c[i]!.length))
-  )
-  const line = (vals: string[]) =>
-    vals.map((v, i) => v.padEnd(widths[i]!)).join('  ').trimEnd()
-  console.log(line(cols.map(([, h]) => h)))
-  for (const c of cells) {
-    console.log(line(c))
-  }
-  for (const d of degraded) {
-    console.error(`warning: backend degraded — ${d}`)
-  }
+  printFleetTable(rows, degraded)
 }
