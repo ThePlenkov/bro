@@ -220,28 +220,31 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     }
   }
 
-  /** City bootstrap — author city.toml + the worker template once, then
-   *  `gc init --file … --no-start`; adopt the repo as a rig (the rig's
-   *  beads DB IS the shared store); ensure the machine-wide supervisor
-   *  via city-scoped `gc start` (never `gc supervisor start/stop` —
-   *  other cities ride the same supervisor). */
-  const ensureCity = (spec: SpawnSpec, city: string): void => {
+  /** Author city.toml + the worker template once, then `gc init --file
+   *  … --no-start` — files-only bootstrap, no supervisor side effects. */
+  const initCity = (city: string): void => {
     mkdirSync(city, { recursive: true })
     const toml = join(city, 'city.toml')
-    if (!existsSync(toml)) {
-      writeFileSync(toml, CITY_TOML(providerName(command), command))
-      const agentDir = join(city, 'agents', template)
-      mkdirSync(agentDir, { recursive: true })
-      writeFileSync(join(agentDir, 'prompt.template.md'), PROMPT_TEMPLATE)
-      writeFileSync(join(agentDir, 'agent.toml'), AGENT_TOML)
-      const init = gc(
-        ['init', '--file', toml, '--preserve-existing', '--no-start', '--skip-provider-readiness', '--yes', city],
-        120_000
-      )
-      if (init.code !== 0) {
-        throw new SpawnError(`gc init failed — ${init.err !== '' ? init.err : `exited ${init.code}`}`)
-      }
+    if (existsSync(toml)) {
+      return
     }
+    writeFileSync(toml, CITY_TOML(providerName(command), command))
+    const agentDir = join(city, 'agents', template)
+    mkdirSync(agentDir, { recursive: true })
+    writeFileSync(join(agentDir, 'prompt.template.md'), PROMPT_TEMPLATE)
+    writeFileSync(join(agentDir, 'agent.toml'), AGENT_TOML)
+    const init = gc(
+      ['init', '--file', toml, '--preserve-existing', '--no-start', '--skip-provider-readiness', '--yes', city],
+      120_000
+    )
+    if (init.code !== 0) {
+      throw new SpawnError(`gc init failed — ${init.err !== '' ? init.err : `exited ${init.code}`}`)
+    }
+  }
+
+  /** Adopt the repo as a rig — the rig's beads DB IS the shared store,
+   *  so claims land where `bro fleet` reads. Idempotent. */
+  const ensureRig = (spec: SpawnSpec, city: string): void => {
     const rigDir = rigDirOf(spec)
     const rigs = gc(['rig', 'list', '--json', '--city', city])
     const registered =
@@ -260,6 +263,12 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         throw new SpawnError(`gc rig add ${rigDir} failed — ${add.err !== '' ? add.err : `exited ${add.code}`}`)
       }
     }
+  }
+
+  /** City-scoped supervisor ensure — `gc start` registers + brings up
+   *  the shared supervisor. NEVER `gc supervisor stop` anywhere: it is
+   *  machine-wide and would kill other cities' agents. */
+  const ensureStarted = (city: string): void => {
     if (supervisorRunning() !== true) {
       const start = gc(['start', city], 120_000)
       if (start.code !== 0) {
@@ -338,7 +347,9 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         }
         let sessionId: string | undefined
         try {
-          ensureCity(spec, city)
+          initCity(city)
+          ensureRig(spec, city)
+          ensureStarted(city)
           // respawn: the old session survives in gc's durable list —
           // `session reset` restarts it in place (preserves alias+bead)
           // instead of colliding on a fresh --alias.
@@ -472,6 +483,35 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         patchAgentRegistry(dir, molStep, { stopped: true })
       } catch {
         // stop intent is recorded best-effort, same as native
+      }
+    },
+
+    /** supervisor:'required' ⇒ up/down are `gc start`/`gc stop <city>`
+     *  — city-scoped lifecycle; the machine-wide supervisor itself is
+     *  never touched (other cities ride it). */
+    async up(): Promise<void> {
+      const city = configDir()
+      if (city === null) {
+        throw new SpawnError('no git common dir — cannot locate the gascity city')
+      }
+      if (command === '') {
+        throw new SpawnError(
+          'no agent command configured — set agents.gascity.command or loop.agent in bro.config.json'
+        )
+      }
+      initCity(city)
+      ensureStarted(city)
+    },
+
+    async down(): Promise<void> {
+      const city = configDir()
+      // an uninitialized city has nothing to stop — idempotent down
+      if (city === null || !existsSync(join(city, 'city.toml'))) {
+        return
+      }
+      const r = gc(['stop', city], 120_000)
+      if (r.code !== 0) {
+        throw new SpawnError(`gc stop failed — ${r.err !== '' ? r.err : `exited ${r.code}`}`)
       }
     },
 

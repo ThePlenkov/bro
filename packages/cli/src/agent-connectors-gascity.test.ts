@@ -86,6 +86,12 @@ if (args[0] === 'start') {
   db.supervisor = true; fs.writeFileSync(path.join(dir, '.fake-gc.json'), JSON.stringify(db))
   process.exit(0)
 }
+if (args[0] === 'stop') {
+  const dir = args[1]
+  const db = JSON.parse(fs.readFileSync(path.join(dir, '.fake-gc.json'), 'utf8'))
+  db.supervisor = false; fs.writeFileSync(path.join(dir, '.fake-gc.json'), JSON.stringify(db))
+  process.exit(0)
+}
 if (args[0] === 'supervisor' && args[1] === 'status') {
   console.log(JSON.stringify({ schema_version: '1', ok: true, running: load().supervisor, pid: 0, socket_path: '', checked_paths: [] }))
   process.exit(0)
@@ -358,6 +364,22 @@ describe('gascity connector', () => {
         resolveAgentConnector({ dir: fx.main }, { connector: 'gascity' }, fx.env).name,
         'gascity'
       )
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('up inits + starts the city; down stops it; down before init is a no-op', async () => {
+    const fx = fixture([])
+    try {
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
+      await conn.down() // nothing to stop — no throw, no city authored
+      assert.equal(existsSync(join(fx.city, 'city.toml')), false)
+      await conn.up()
+      assert.ok(existsSync(join(fx.city, 'city.toml')))
+      assert.equal(fx.gcDb().supervisor, true)
+      await conn.down()
+      assert.equal(fx.gcDb().supervisor, false)
     } finally {
       cleanup(fx)
     }
