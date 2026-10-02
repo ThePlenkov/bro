@@ -9,6 +9,7 @@ import { SpawnError, type AgentConnector, type AgentInfo } from '@broject/core'
 import { initRepo, inside } from './testrepo.ts'
 import { SpawnInputError } from './agents.ts'
 import {
+  acquireServeLock,
   clearServeState,
   createServeHandler,
   HttpError,
@@ -56,7 +57,7 @@ const route = (
   path: string,
   body?: string,
   d: ServeDeps = deps()
-) => routeRequest(method, path, body, d, '/repo')
+) => routeRequest(method, path, body, d, { dir: '/repo', startedAt: 't0' })
 
 describe('serve — routes', () => {
   test('GET / is the service index; unknown paths 404 with the route list', async () => {
@@ -103,6 +104,21 @@ describe('serve — routes', () => {
     const hit = await route('GET', '/api/v1/agents/native-aa11')
     assert.equal(hit.status, 200)
     assert.equal((hit.body as AgentInfo).molStep, 'fx-1')
+
+    // a hit beside a degraded backend surfaces the note on the resource
+    const partial = await route(
+      'GET',
+      '/api/v1/agents/native-aa11',
+      undefined,
+      deps({
+        find: async () => ({
+          hit: { conn: fakeConn, agent: fakeAgent },
+          degraded: ['tmux: socket gone'],
+        }),
+      })
+    )
+    assert.equal(partial.status, 200)
+    assert.deepEqual((partial.body as { degraded: string[] }).degraded, ['tmux: socket gone'])
 
     const miss = await route(
       'GET',
@@ -286,11 +302,24 @@ describe('serve state discovery', () => {
   test('no repo → no state path', () => {
     assert.equal(serveStatePath('/tmp'), null)
   })
+
+  test('the serve lock is exclusive and breaks on a dead holder', () => {
+    const { root, main } = initRepo('bro-serve-lock-')
+    inside(main, root, () => {
+      const release = acquireServeLock(main)
+      assert.notEqual(release, undefined)
+      // the same process re-entering is refused — the lock is held, and
+      // our own pid is alive
+      assert.equal(acquireServeLock(main), undefined)
+      release!()
+      assert.equal(existsSync(`${serveStatePath(main)}.lock`), false)
+    })
+  })
 })
 
 describe('serve handler over a real socket', () => {
   test('health, JSON envelope, 413 cap, and bad-JSON 400 all hold on the wire', async () => {
-    const server = createServer(createServeHandler(deps(), '/repo'))
+    const server = createServer(createServeHandler(deps(), { dir: '/repo', startedAt: 't0' }))
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
     const port = (server.address() as AddressInfo).port
     const base = `http://127.0.0.1:${port}`

@@ -27,7 +27,7 @@
  * alive — two live servers would make the file a coin flip.
  */
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { dirname, join } from 'node:path'
 import type { Readable } from 'node:stream'
@@ -127,6 +127,61 @@ export function liveServeState(dir: string): ServeState | undefined {
   return state !== undefined && pidAlive(state.pid) ? state : undefined
 }
 
+/** `<serve.json>.lock` — O_EXCL create is atomic, so two starters can't
+ *  both pass the live-state check and both write serve.json (the lock
+ *  is held for the server's whole lifetime, not a critical section).
+ *  The file carries the holder pid: a live holder refuses, a dead
+ *  holder's leftover is broken. Returns the release, or undefined when
+ *  another server holds it. */
+export function acquireServeLock(dir: string): (() => void) | undefined {
+  const statePath = serveStatePath(dir)
+  if (statePath === null) {
+    return undefined
+  }
+  const lock = `${statePath}.lock`
+  mkdirSync(dirname(lock), { recursive: true })
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = openSync(lock, 'wx')
+      try {
+        writeSync(fd, `${process.pid}`)
+      } finally {
+        closeSync(fd)
+      }
+      return () => {
+        try {
+          // remove only while the lock still carries OUR pid — a broken-
+          // stale-then-retaken lock belongs to its new holder
+          if (readFileSync(lock, 'utf8') === `${process.pid}`) {
+            rmSync(lock, { force: true })
+          }
+        } catch {
+          // raced removal is already the desired end state
+        }
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw err
+      }
+      let holder = Number.NaN
+      try {
+        holder = Number(readFileSync(lock, 'utf8').trim())
+      } catch {
+        // raced removal — the retry decides
+      }
+      if (Number.isInteger(holder) && pidAlive(holder)) {
+        return undefined
+      }
+      try {
+        rmSync(lock, { force: true })
+      } catch {
+        // another starter broke it first — the retry decides
+      }
+    }
+  }
+  return undefined
+}
+
 // --- HTTP plumbing ---------------------------------------------------------------
 
 /** Fail-closed request error carrying its status — the handler maps it
@@ -191,7 +246,12 @@ const ROUTES = [
   'DELETE /api/v1/agents/<ref>',
 ]
 
-const startedAt = new Date().toISOString()
+/** Per-server context — startedAt is captured at LISTEN time, not module
+ *  load: the health payload must say when this server came up. */
+export interface ServeMeta {
+  dir: string
+  startedAt: string
+}
 
 /** refs are agentIds (`native-ab12`) or molStep ids (`bro-mol-z0l`) —
  *  conservative charset so a weird segment can't smuggle path or query
@@ -278,10 +338,10 @@ export async function routeRequest(
   pathname: string,
   rawBody: string | undefined,
   deps: ServeDeps,
-  dir: string
+  meta: ServeMeta
 ): Promise<ServeResponse> {
   try {
-    return await route(method, pathname, rawBody, deps, dir)
+    return await route(method, pathname, rawBody, deps, meta)
   } catch (err) {
     // HttpError is fail-closed input validation — a response, not a crash
     if (err instanceof HttpError) {
@@ -296,7 +356,7 @@ async function route(
   pathname: string,
   rawBody: string | undefined,
   deps: ServeDeps,
-  dir: string
+  meta: ServeMeta
 ): Promise<ServeResponse> {
   const seg = pathname.split('/').filter((s) => s !== '')
 
@@ -314,7 +374,10 @@ async function route(
     if (method !== 'GET') {
       return { status: 405, body: { error: 'method not allowed' } }
     }
-    return { status: 200, body: { ok: true, pid: process.pid, dir, startedAt } }
+    return {
+      status: 200,
+      body: { ok: true, pid: process.pid, dir: meta.dir, startedAt: meta.startedAt },
+    }
   }
 
   // /api/v1/snapshot
@@ -367,7 +430,12 @@ async function route(
         if (!hit) {
           return { status: 404, body: missBody(ref, degraded) }
         }
-        return { status: 200, body: hit.agent }
+        // a hit beside a degraded backend is a partial read — surface the
+        // note on the resource rather than claiming a complete view
+        return {
+          status: 200,
+          body: { ...hit.agent, ...(degraded.length > 0 ? { degraded } : {}) },
+        }
       }
       if (method === 'DELETE') {
         const outcome = await deps.stop(ref)
@@ -414,7 +482,7 @@ function send(res: ServerResponse, status: number, body: unknown): void {
 
 export function createServeHandler(
   deps: ServeDeps,
-  dir: string
+  meta: ServeMeta
 ): (req: IncomingMessage, res: ServerResponse) => void {
   return (req, res) => {
     void (async () => {
@@ -424,7 +492,7 @@ export function createServeHandler(
           req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
             ? await readBody(req)
             : undefined
-        const r = await routeRequest(req.method ?? 'GET', url.pathname, rawBody, deps, dir)
+        const r = await routeRequest(req.method ?? 'GET', url.pathname, rawBody, deps, meta)
         send(res, r.status, r.body)
       } catch (err) {
         const status = err instanceof HttpError ? err.status : 500
@@ -486,33 +554,55 @@ export async function runServeCommand(argv: string[]): Promise<void> {
     console.error(`error: already serving ${live.url} (pid ${live.pid}) — one host per repo`)
     process.exit(1)
   }
+  // the lock makes the singleton atomic — live-state check → write has a
+  // gap two starters could both pass through; O_EXCL create cannot
+  const releaseLock = acquireServeLock(dir)
+  if (releaseLock === undefined) {
+    console.error('error: another bro serve is starting or running (serve.json.lock held)')
+    process.exit(1)
+  }
 
   const env = loadAgentEnv(dir)
-  const server = createServer(createServeHandler(realDeps(dir, env), dir))
+  const startedAt = new Date().toISOString()
+  const meta: ServeMeta = { dir, startedAt }
+  const server = createServer(createServeHandler(realDeps(dir, env), meta))
 
-  const url = await new Promise<string>((resolve, reject) => {
-    server.once('error', reject)
-    // 127.0.0.1 only — the loopback bind IS the trust boundary; there is
-    // no --host flag to widen it with.
-    server.listen(port, '127.0.0.1', () => {
-      const addr = server.address()
-      resolve(`http://127.0.0.1:${typeof addr === 'object' && addr !== null ? addr.port : port}`)
+  try {
+    const url = await new Promise<string>((resolve, reject) => {
+      server.once('error', reject)
+      // 127.0.0.1 only — the loopback bind IS the trust boundary; there is
+      // no --host flag to widen it with.
+      server.listen(port, '127.0.0.1', () => {
+        const addr = server.address()
+        resolve(`http://127.0.0.1:${typeof addr === 'object' && addr !== null ? addr.port : port}`)
+      })
+    }).catch((err: unknown) => {
+      console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(1)
     })
-  }).catch((err: unknown) => {
-    console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
-    process.exit(1)
-  })
 
-  writeServeState(dir, { pid: process.pid, url, dir, startedAt })
-  console.log(`bro serve — ${url}`)
-  console.log('discovery: <git-common-dir>/bro/serve.json · ctrl-c to stop')
+    writeServeState(dir, { pid: process.pid, url, dir, startedAt })
+    console.log(`bro serve — ${url}`)
+    console.log('discovery: <git-common-dir>/bro/serve.json · ctrl-c to stop')
 
-  await new Promise<void>((resolve) => {
-    const shutdown = (): void => {
-      server.close(() => resolve())
-    }
-    process.once('SIGINT', shutdown)
-    process.once('SIGTERM', shutdown)
-  })
-  clearServeState(dir)
+    await new Promise<void>((resolve) => {
+      const shutdown = (): void => {
+        // close() waits on keep-alive sockets — cap the grace so a
+        // parked connection can't hang SIGTERM forever; in-flight
+        // requests get a short window to land first
+        const force = setTimeout(() => {
+          server.closeAllConnections()
+        }, 2_000)
+        server.close(() => {
+          clearTimeout(force)
+          resolve()
+        })
+      }
+      process.once('SIGINT', shutdown)
+      process.once('SIGTERM', shutdown)
+    })
+    clearServeState(dir)
+  } finally {
+    releaseLock()
+  }
 }
