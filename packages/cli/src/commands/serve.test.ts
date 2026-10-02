@@ -1,7 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { createServer } from 'node:http'
+import { createServer, request, type IncomingMessage } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -118,6 +118,8 @@ describe('serve — routes', () => {
       })
     )
     assert.equal(partial.status, 200)
+    assert.equal((partial.body as AgentInfo).id, fakeAgent.id)
+    assert.equal((partial.body as AgentInfo).molStep, fakeAgent.molStep)
     assert.deepEqual((partial.body as { degraded: string[] }).degraded, ['tmux: socket gone'])
 
     const miss = await route(
@@ -163,6 +165,8 @@ describe('serve — routes', () => {
     )
     assert.equal(terminal.status, 200)
     assert.equal((terminal.body as { stopped: boolean }).stopped, true)
+    // terminal is the machine-readable bit — the note is for humans
+    assert.equal((terminal.body as { terminal?: boolean }).terminal, true)
     assert.match((terminal.body as { note: string }).note, /already exited/)
 
     const miss = await route('DELETE', '/api/v1/agents/native-gone')
@@ -364,6 +368,17 @@ describe('serve handler over a real socket', () => {
         body: '{"molStep":"fx-1"}',
       })
       assert.equal(csrf.status, 415)
+
+      // a foreign Host — the DNS-rebinding shape — is refused before routing
+      const rebound = await new Promise<IncomingMessage>((resolve) => {
+        const req = request(
+          `${base}/api/v1/health`,
+          { headers: { host: 'attacker.example.com' } },
+          resolve
+        )
+        req.end()
+      })
+      assert.equal(rebound.statusCode, 403)
 
       // GET routes ignore a body-less path cleanly
       const detail = await fetch(`${base}/api/v1/agents/native-aa11`)

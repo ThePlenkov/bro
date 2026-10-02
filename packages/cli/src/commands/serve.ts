@@ -11,7 +11,8 @@
  * not a write barrier though — a hostile web page can fire simple
  * cross-origin POSTs, so writes additionally require
  * `content-type: application/json` (a request a browser can't make
- * without a preflight this server never answers).
+ * without a preflight this server never answers), and every request
+ * needs a loopback `Host` — a rebound name is 403 (DNS rebinding).
  *
  *   GET    /                    service index
  *   GET    /api/v1/health       {ok, pid, dir, startedAt}
@@ -473,6 +474,9 @@ async function route(
           body: {
             agent: outcome.agent,
             stopped: outcome.stopped,
+            // machine-readable "was already terminal" — clients shouldn't
+            // string-match the note to tell it from a live stop
+            ...(outcome.terminal === true ? { terminal: true } : {}),
             ...(outcome.terminal === true && outcome.agent !== undefined
               ? { note: `already ${outcome.agent.state}` }
               : {}),
@@ -503,6 +507,18 @@ export function createServeHandler(
   return (req, res) => {
     void (async () => {
       try {
+        // DNS-rebinding guard: a rebound browser request still carries
+        // the attacker's Host — only loopback names are real clients.
+        // Covers reads too: CSRF only blinds the response, rebinding
+        // would expose the snapshot/agents planes to the page.
+        const rawHost = (req.headers.host ?? '').toLowerCase()
+        const host = rawHost.startsWith('[')
+          ? rawHost.slice(0, rawHost.indexOf(']') + 1)
+          : rawHost.split(':')[0]
+        if (host !== '127.0.0.1' && host !== 'localhost' && host !== '[::1]') {
+          send(res, 403, { error: 'loopback host only' })
+          return
+        }
         const url = new URL(req.url ?? '/', 'http://127.0.0.1')
         const wantsBody =
           req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
@@ -597,8 +613,7 @@ export async function runServeCommand(argv: string[]): Promise<void> {
   }
 
   const env = loadAgentEnv(dir)
-  const startedAt = new Date().toISOString()
-  const meta: ServeMeta = { dir, startedAt }
+  const meta: ServeMeta = { dir, startedAt: '' }
   const server = createServer(createServeHandler(realDeps(dir, env), meta))
 
   try {
@@ -607,6 +622,7 @@ export async function runServeCommand(argv: string[]): Promise<void> {
       // 127.0.0.1 only — the loopback bind IS the trust boundary; there is
       // no --host flag to widen it with.
       server.listen(port, '127.0.0.1', () => {
+        meta.startedAt = new Date().toISOString()
         const addr = server.address()
         resolve(`http://127.0.0.1:${typeof addr === 'object' && addr !== null ? addr.port : port}`)
       })
@@ -615,7 +631,7 @@ export async function runServeCommand(argv: string[]): Promise<void> {
       process.exit(1)
     })
 
-    writeServeState(dir, { pid: process.pid, url, dir, startedAt })
+    writeServeState(dir, { pid: process.pid, url, dir, startedAt: meta.startedAt })
     console.log(`bro serve — ${url}`)
     console.log('discovery: <git-common-dir>/bro/serve.json · ctrl-c to stop')
 
