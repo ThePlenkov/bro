@@ -26,9 +26,11 @@ processes) that the connector absorbs, not the facade.
 - `gc init --dolt-host/--dolt-port/--dolt-database/--dolt-project-id`
   pins a city to an external/hosted Dolt outright — a shared remote
   ledger is natively supported if we ever want it.
-- Fallback for unrouted dispatch: `gc sling --force` dispatches even if
-  the bead doesn't resolve in the local store — but the preferred path
-  is adopt-then-sling so the claim is real, not bypassed.
+- `gc sling --force` can dispatch a bead that doesn't resolve in the
+  rig store — a dispatch with no shared-store claim, so `bro fleet`
+  would see work with no ownership and duplicate workers become
+  possible. **Not a fallback**: the connector must never use it; the
+  only dispatch path is adopt-then-sling so the claim is real.
 
 ## Externally-generated config/packs — supported
 
@@ -73,5 +75,6 @@ processes) that the connector absorbs, not the facade.
 
 Proceed with `bro-cduq` (gascity connector) after `bro-g4vn` lands the
 facade. Connector plan: author `city.toml` + worker template → `gc init
---file --no-start` → `gc rig add <repo> --adopt` → spawn = `session new
---no-attach` + `sling` → fleet reads via `session list --json`.
+--file city.toml --no-start` → `gc rig add <repo> --adopt` → spawn =
+`session new --no-attach` + `sling` → fleet reads via `session list
+--json`.
