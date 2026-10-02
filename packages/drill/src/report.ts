@@ -57,7 +57,8 @@ export function renderReport(input: DrillReportInput): string {
       ? ['(none)']
       : input.prevention.map((p, i) => {
           const id = input.preventionIds[i] ?? ''
-          return `- ${p}${id ? ` (${id})` : ''}`
+          const suffix = id ? ` (${id})` : ''
+          return `- ${p}${suffix}`
         })
   const children =
     input.children.length === 0
@@ -101,9 +102,8 @@ export function writeReport(dir: string, input: DrillReportInput): string {
   return path
 }
 
-const FM_BLOCK = /^---\r?\n([\s\S]*?)\r?\n---/
 const FM_DRILL = /^drill:\s*"?([^"\n]+)"?\s*$/m
-const TITLE = /^# drill report — (.+)$/m
+const TITLE = /^# drill report — ([^\n]+)$/m
 
 /** Reports under `dir` — files without a `drill:` frontmatter key aren't
  *  reports and are skipped; an unreadable file fails loudly. The key
@@ -117,8 +117,14 @@ export function listReports(dir: string): DrillReportEntry[] {
   for (const name of readdirSync(dir).filter((f) => f.endsWith('.md')).sort()) {
     const path = join(dir, name)
     const text = readFileSync(path, 'utf8')
-    const block = FM_BLOCK.exec(text)
-    const fm = block ? FM_DRILL.exec(block[1]!) : null
+    // the key must sit inside the delimited frontmatter — a `drill:`
+    // line in the body doesn't make a file a report
+    const lines = text.split('\n')
+    const fmEnd =
+      lines[0]?.trimEnd() === '---'
+        ? lines.findIndex((l, i) => i > 0 && l.trimEnd() === '---')
+        : -1
+    const fm = fmEnd === -1 ? null : FM_DRILL.exec(lines.slice(1, fmEnd).join('\n'))
     if (!fm) {
       continue
     }

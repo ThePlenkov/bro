@@ -31,7 +31,7 @@ export const drillSection: ConfigSection<DrillConfig> = (raw) => {
     !(DRILL_REPORT_MODES as readonly unknown[]).includes(rep.mode)
   ) {
     console.error(
-      `bro.config: drill.report.mode must be one of ${DRILL_REPORT_MODES.map((m) => `"${m}"`).join('|')} — got ${JSON.stringify(rep.mode)}`
+      `bro.config: drill.report.mode must be one of ${DRILL_REPORT_MODES.map((m) => JSON.stringify(m)).join('|')} — got ${JSON.stringify(rep.mode)}`
     )
   }
   // dir is repo-relative by contract — an absolute path or a `..`

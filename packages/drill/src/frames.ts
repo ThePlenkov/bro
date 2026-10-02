@@ -8,6 +8,7 @@
  */
 import { bd, bdJson, evidenceKind, refKind, taskStore } from '@broject/core'
 import { writeReport } from './report.ts'
+import type { DrillReportInput } from './report.ts'
 import type { DownOptions, DrillFrame, DrillRow, UpOptions, UpResult } from './types.ts'
 
 const DRILL_LABEL = 'drill'
@@ -366,6 +367,81 @@ function recordHandoff(frame: DrillRow, evidence: string[]): void {
   ])
 }
 
+/** The frame `up` closes — explicit `--id` or the current leaf, always
+ *  validated as an open drill frame. `bd list` doesn't carry
+ *  `ephemeral`; `bd show` gives the full row. */
+function upTarget(id: string | undefined): DrillRow {
+  if (id) {
+    return requireOpenDrill(id, '--id')
+  }
+  const leaf = currentFrame()
+  if (!leaf) {
+    throw new Error('no open drill frame — nothing to ascend from')
+  }
+  return requireOpenDrill(leaf.id, '--id')
+}
+
+/** bd has no transactions — the ordering + idempotency contract is the
+ *  mitigation: children-check first (fail fast), noteOnce dedupes the
+ *  memo, prevention creation reuses open same-title beads, handoff
+ *  events are idempotent, close lands last. On any failure mid-flight,
+ *  delete only the prevention beads THIS call created — reused ones
+ *  predate the call and are never compensation — so a retry converges
+ *  instead of duplicating. Returns the per-item prevention ids. */
+function closeFrame(
+  frame: DrillRow,
+  memo: string,
+  prevents: string[],
+  evidence: string[],
+): string[] {
+  let created: string[] = []
+  try {
+    noteOnce(frame.id, memo)
+    const prev = createPreventions(frame.id, prevents)
+    created = prev.created
+    if (!frame.ephemeral) {
+      recordHandoff(frame, evidence)
+    }
+    taskStore().close(frame.id, 'drill up — result handed to parent')
+    return prev.ids
+  } catch (err) {
+    const orphans: string[] = []
+    for (const id of created) {
+      try {
+        taskStore().remove(id)
+      } catch {
+        orphans.push(id)
+      }
+    }
+    // clean cleanup → rethrow the original (same convention as claimFrame);
+    // orphans force a new message — keep the failure debuggable via cause
+    if (orphans.length === 0) {
+      throw err
+    }
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(
+      `${msg} — cleanup incomplete: prevention bead(s) left behind: ${orphans.join(', ')}`,
+      { cause: err },
+    )
+  }
+}
+
+/** Post-close report write — the file rides the branch like any
+ *  artifact; a write failure must not look like the up failed (the
+ *  frame IS closed), so it surfaces as reportError for the caller to
+ *  warn about. */
+function reportSafely(
+  dir: string,
+  input: Omit<DrillReportInput, 'preventionIds' | 'date'>,
+  preventionIds: string[],
+): { reportPath?: string; reportError?: string } {
+  try {
+    return { reportPath: writeReport(dir, { ...input, preventionIds }) }
+  } catch (err) {
+    return { reportError: err instanceof Error ? err.message : String(err) }
+  }
+}
+
 /**
  * Ascend: close the frame with a structured memo. `--result` is mandatory —
  * a drill that returns nothing teaches nothing. Each `--prevent` item lands
@@ -376,16 +452,7 @@ export function drillUp(opts: UpOptions): UpResult {
   if (!opts.result.trim()) {
     throw new Error('drill up requires --result — a frame must return a curated finding')
   }
-  // `bd list` doesn't carry `ephemeral`; `bd show` gives the full row
-  const frame = opts.id
-    ? requireOpenDrill(opts.id, '--id')
-    : ((): DrillRow => {
-        const leaf = currentFrame()
-        if (!leaf) {
-          throw new Error('no open drill frame — nothing to ascend from')
-        }
-        return requireOpenDrill(leaf.id, '--id')
-      })()
+  const frame = upTarget(opts.id)
   // bd refuses to close a parent with ANY open children — check before
   // writing the memo so a later failure can't leave partial state.
   const openKids = childrenOf(frame.id).filter(isOpen)
@@ -418,57 +485,9 @@ export function drillUp(opts: UpOptions): UpResult {
       }
     : undefined
 
-  // bd has no transactions — the ordering + idempotency contract is the
-  // mitigation: children-check first (fail fast), noteOnce dedupes the
-  // memo, prevention creation reuses open same-title beads, handoff
-  // events are idempotent, close lands last. On any failure mid-flight,
-  // delete only the prevention beads THIS call created — reused ones
-  // predate the call and are never compensation — so a retry converges
-  // instead of duplicating.
-  let created: string[] = []
-  let preventionIds: string[] = []
-  try {
-    noteOnce(frame.id, memo)
-    const prev = createPreventions(frame.id, prevents)
-    created = prev.created
-    preventionIds = prev.ids
-    if (!frame.ephemeral) {
-      recordHandoff(frame, opts.evidence ?? [])
-    }
-    taskStore().close(frame.id, 'drill up — result handed to parent')
-  } catch (err) {
-    const orphans: string[] = []
-    for (const id of created) {
-      try {
-        taskStore().remove(id)
-      } catch {
-        orphans.push(id)
-      }
-    }
-    // clean cleanup → rethrow the original (same convention as claimFrame);
-    // orphans force a new message — keep the failure debuggable via cause
-    if (orphans.length === 0) {
-      throw err
-    }
-    const msg = err instanceof Error ? err.message : String(err)
-    throw new Error(
-      `${msg} — cleanup incomplete: prevention bead(s) left behind: ${orphans.join(', ')}`,
-      { cause: err },
-    )
-  }
-  // post-close: the file rides the branch like any artifact — a write
-  // failure must not look like the up failed (the frame IS closed), so
-  // it surfaces as reportError for the caller to warn about
-  let reportPath: string | undefined
-  let reportError: string | undefined
-  if (reportInput) {
-    try {
-      reportPath = writeReport(opts.reportDir!, { ...reportInput, preventionIds })
-    } catch (err) {
-      reportError = err instanceof Error ? err.message : String(err)
-    }
-  }
-  return { closed: frame.id, preventionIds, reportPath, reportError }
+  const preventionIds = closeFrame(frame, memo, prevents, opts.evidence ?? [])
+  const rep = reportInput ? reportSafely(opts.reportDir!, reportInput, preventionIds) : {}
+  return { closed: frame.id, preventionIds, ...rep }
 }
 
 /** Root frames + rendered tree (indented, roots first). */
