@@ -162,6 +162,23 @@ describe('drainMailbox', () => {
     })
   })
 
+  test('orders by drop time across prefixes — watch-* does not wait on note-*', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        mkdirSync(mb, { recursive: true })
+        writeFileSync(join(mb, 'watch-100-a.txt'), 'older watch')
+        writeFileSync(join(mb, 'note-200-b.txt'), 'newer note')
+        writeFileSync(join(mb, 'watch-50-c.txt'), 'oldest watch')
+        assert.deepEqual(drainMailbox(dir, 's1'), [
+          'oldest watch',
+          'older watch',
+          'newer note',
+        ])
+      })
+    })
+  })
+
   test('broadcast: a different session still gets the drops', () => {
     withRepo((dir) => {
       withXdg(() => {

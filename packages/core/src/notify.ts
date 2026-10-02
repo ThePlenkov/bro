@@ -26,14 +26,20 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import type { Connector } from './connectors.ts'
 import { gitTry } from './git.ts'
 
 /** The repo mailbox — `<git-common>/bro/notify`; null outside a repo. */
 export function mailboxDir(dir: string): string | null {
   const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
-  const common = r.code === 0 ? r.out.trim() : ''
+  let common = r.code === 0 ? r.out.trim() : ''
+  if (common === '') {
+    // git <2.31 has no --path-format — resolve the possibly-relative
+    // common dir against `dir` instead of failing detection outright
+    const rel = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'])
+    common = rel.code === 0 && rel.out.trim() !== '' ? resolve(dir, rel.out.trim()) : ''
+  }
   return common === '' ? null : join(common, 'bro', 'notify')
 }
 
@@ -95,8 +101,14 @@ function seenPath(mb: string, sessionId: string): string {
   return join(mb, `.seen-${sid}`)
 }
 
-/** Every pending drop this session hasn't seen, oldest-first — the
- *  filename sort is chronological (epoch-ms prefixes). Seen drops stay
+/** Epoch-ms embedded in a drop name (`<prefix>-<ms>-<rand>.txt`) — the
+ *  chronological key a filename sort can't see: `note-*` sorts before
+ *  `watch-*` regardless of drop time. */
+const dropTime = (name: string): number =>
+  Number(name.match(/-(\d+)-/)?.[1] ?? 0)
+
+/** Every pending drop this session hasn't seen, oldest-first by the
+ *  embedded drop time. Seen drops stay
  *  for other sessions until they expire; a drop is deleted once it is
  *  older than DROP_TTL_MS, delivered or not. Drops are injected
  *  verbatim — a heartbeat's formatting is part of the event. */
@@ -121,7 +133,9 @@ export function drainMailbox(dir: string, sessionId: string): string[] {
     } catch {
       // no cursor yet — first drain for this session
     }
-    for (const f of files.filter((f) => f.endsWith('.txt') && !f.startsWith('.')).sort()) {
+    for (const f of files
+      .filter((f) => f.endsWith('.txt') && !f.startsWith('.'))
+      .sort((a, b) => dropTime(a) - dropTime(b) || (a < b ? -1 : a > b ? 1 : 0))) {
       const path = join(mb, f)
       try {
         if (now - statSync(path).mtimeMs > DROP_TTL_MS) {
