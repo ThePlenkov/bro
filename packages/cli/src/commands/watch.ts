@@ -394,9 +394,12 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
     if (notify) {
       const key = snapshotKey(snap)
       if (key !== lastNotified) {
-        lastNotified = key
         try {
-          emitMailbox(dir, text)
+          // mark notified only on a successful drop — a transient
+          // failure retries on the next tick, never silently lost
+          if (emitMailbox(dir, text)) {
+            lastNotified = key
+          }
         } catch (err) {
           // mailbox write failures (permissions, disk, races) warn —
           // the heartbeat is best-effort and must not die on a drop
