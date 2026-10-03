@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
@@ -38,6 +38,16 @@ const withRepo = (fn: (dir: string) => void): void => {
   }
 }
 
+const withRepoAsync = async (fn: (dir: string) => Promise<void>): Promise<void> => {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-agents-'))
+  try {
+    execFileSync('git', ['init', '-q', dir])
+    await fn(dir)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 /** Minimal bd shim — a JSON-file store. `show`/`update --claim`/
  *  `update --assignee` cover the claim probes the facade makes. */
 const FAKE_BD = `#!/usr/bin/env node
@@ -69,6 +79,31 @@ if (args[0] === 'show') {
 } else {
   console.error('unhandled: ' + args.join(' ')); process.exit(1)
 }
+`
+
+/** Child writer for the inter-process lock test — an independent
+ *  process contending on one registry. argv: dir, module-url, molStep,
+ *  iterations. No static imports: the file lands in a bare tmpdir so
+ *  node runs it as CJS; dynamic import() loads the ESM source. */
+const LOCK_WORKER = `const [dir, mod, me, iters] = process.argv.slice(2)
+const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+const main = async () => {
+  const { patchAgentRegistry, readAgentRegistry, writeAgentRegistry, withAgentRegistryLock } = await import(mod)
+  for (let i = 0; i < Number(iters); i++) {
+    withAgentRegistryLock(dir, () => {
+      const reg = readAgentRegistry(dir)
+      nap(5) // hold the section so contenders really queue on the lock
+      const n = (reg.counter?.n ?? 0) + 1
+      reg.counter = { agentId: 'counter', backend: 'native', spawnedAt: 't', n }
+      writeAgentRegistry(dir, reg)
+    })
+    patchAgentRegistry(dir, me, { agentId: me, backend: 'native', spawnedAt: 't', seq: i })
+  }
+}
+main().then(
+  () => process.exit(0),
+  (e) => { console.error(e); process.exit(1) }
+)
 `
 
 const withFakeBd = (fn: (binDir: string) => void): void => {
@@ -251,18 +286,41 @@ describe('registry lock', () => {
     })
   })
 
-  test('a lost patch is impossible under the lock — concurrent writers serialize', () => {
-    withRepo((dir) => {
-      // two writers, one lock each at a time — both patches land
-      withAgentRegistryLock(dir, () => {
+  test('a lost patch is impossible under the lock — independent processes serialize', async () => {
+    await withRepoAsync(async (dir) => {
+      const workerDir = mkdtempSync(join(tmpdir(), 'bro-lockworker-'))
+      try {
+        const worker = join(workerDir, 'worker.ts')
+        writeFileSync(worker, LOCK_WORKER)
+        const mod = new URL('./agents.ts', import.meta.url).href
+        const writers = 4
+        const iters = 8
+        const kids = Array.from({ length: writers }, (_, i) =>
+          spawn(process.execPath, [worker, dir, mod, `w${i}`, String(iters)], {
+            stdio: ['ignore', 'ignore', 'pipe'],
+          })
+        )
+        const exits = await Promise.all(
+          kids.map(
+            (k) =>
+              new Promise<{ code: number | null; err: string }>((resolve) => {
+                let err = ''
+                k.stderr!.on('data', (d: Buffer) => (err += d))
+                k.on('close', (code) => resolve({ code, err }))
+              })
+          )
+        )
+        exits.forEach((r, i) => assert.equal(r.code, 0, `writer w${i}: ${r.err}`))
         const reg = readAgentRegistry(dir)
-        reg['a'] = { agentId: 'a1', backend: 'native', spawnedAt: 't' }
-        writeAgentRegistry(dir, reg)
-      })
-      patchAgentRegistry(dir, 'b', { agentId: 'b1', backend: 'native', spawnedAt: 't' })
-      const reg = readAgentRegistry(dir)
-      assert.equal(reg['a']!.agentId, 'a1')
-      assert.equal(reg['b']!.agentId, 'b1')
+        // every locked read-modify-write landed — a lost update drops the count
+        assert.equal(reg['counter']!.n, writers * iters)
+        for (let i = 0; i < writers; i++) {
+          assert.equal(reg[`w${i}`]!.seq, iters - 1)
+        }
+        assert.equal(existsSync(`${agentRegistryPath(dir)!}.lock`), false)
+      } finally {
+        rmSync(workerDir, { recursive: true, force: true })
+      }
     })
   })
 })
