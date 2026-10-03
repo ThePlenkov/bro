@@ -79,8 +79,9 @@ spawn is **detached**, its handles are **pinned** somewhere durable.
 - **Pin the handles at spawn.** pid, log path, claimed step. `bro agents`
   writes them to `<git-common>/bro/agents.json` plus
   `<agentId>.{prompt.md,log,exit}` and pins the claim into the shared
-  beads store — a hand-rolled spawn must record pid + log itself (a file,
-  a bead comment); it stays outside the registry, so its pin file is the
+  beads store — a hand-rolled spawn must record pid + log + claimed step
+  itself (a file, a bead comment); it stays outside the registry, so its
+  pin file is the
   only handle `status`, `stop`, or respawn will never see. An unpinned
   worker is unfindable next session.
 - **Monitor by point checks, never by waiting.** `tail` the log,
