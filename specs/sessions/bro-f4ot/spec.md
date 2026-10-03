@@ -117,15 +117,24 @@ as `lost — respawn?` — the respawn decision surface — only on a
 successful `list()`; a `degraded` list renders `unknown` instead.
 
 `bro serve` is the facade host for thin clients (TUI/webui). Trust
-boundary, v1: binds `127.0.0.1` only, no remote exposure. Loopback alone
-is not a write barrier — a hostile web page can fire cross-site requests
-at it — so the server enforces a browser-origin control: every request
-needs a loopback `Host` (a rebound name is 403 — DNS rebinding), and
-writes (POST/PUT/PATCH/DELETE) refuse a non-loopback `Origin` (403 — the
-browser stamps every cross-site request); body-bearing writes
-(POST/PUT/PATCH) also require `content-type: application/json`, a header
-a browser can't send cross-site without a preflight the server never
-answers. Remote orchestration, if ever, is a separate spec.
+boundary, v1: binds `127.0.0.1` only, no remote exposure. The "local
+session context" is concrete — the server generates a random session
+token at listen time and publishes it inside `<git-common-dir>/bro/
+serve.json` (tmp+rename, mode `0600`), so **possession of the token is
+the authorization check**: every write (POST/PUT/PATCH/DELETE — spawn
+and stop mutate agents and beads claims) must present
+`Authorization: Bearer <token>` or get a 401. Read access to that file
+means a same-UID local process — the same privilege needed to run
+`bro agents up` directly — while a different local user can't read it
+and a hostile web page can't mint the header cross-site (a non-simple
+header forces a preflight the server never answers). The browser
+layers stay underneath: every request needs a loopback `Host` (a
+rebound name is 403 — DNS rebinding), writes refuse a non-loopback
+`Origin` (403 — the browser stamps every cross-site request), and
+body-bearing writes (POST/PUT/PATCH) also require
+`content-type: application/json`. Reads keep the Host guard alone —
+the planes expose repo state a same-UID process can read from disk
+anyway. Remote orchestration, if ever, is a separate spec.
 
 ## Filetree
 
