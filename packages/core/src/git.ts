@@ -54,9 +54,9 @@ export function gitLogPathRecords(dir: string, ref: string): GitLogPathRecord[] 
     if (tok === '') {
       continue
     }
-    const head = /^\x1e([0-9a-f]{40,64})\t([\s\S]*)$/.exec(tok)
-    if (head !== null) {
-      cur = { sha: head[1]!, subject: head[2]!, paths: [] }
+    if (tok.charCodeAt(0) === 0x1e) {
+      const tab = tok.indexOf('\t')
+      cur = { sha: tok.slice(1, tab), subject: tok.slice(tab + 1), paths: [] }
       records.push(cur)
     } else if (cur !== undefined) {
       cur.paths.push(tok.replace(/^\n/, ''))

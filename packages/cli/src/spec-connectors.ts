@@ -223,9 +223,11 @@ const unquote = (s: string): string => {
  *  values keep their #), then quotes strip. */
 const yamlScalar = (s: string): string => {
   const t = s.trim()
-  return unquote(
-    t.startsWith('"') || t.startsWith("'") ? t : t.replace(/\s+#.*$/, '')
-  )
+  if (t.startsWith('"') || t.startsWith("'")) {
+    return unquote(t)
+  }
+  const c = t.indexOf(' #')
+  return unquote(c === -1 ? t : t.slice(0, c))
 }
 
 /** Split a flow list on commas outside quotes — `["a,b", 'c']` is two
@@ -256,10 +258,12 @@ const flowItems = (s: string): string[] => {
 
 /** `scope:` frontmatter — repo-relative pathspecs the spec claims for
  *  itself (spec drift's audit surface). A YAML list or a single string;
- *  an empty/absent key declares nothing and returns []. */
+ *  an empty/absent key declares nothing and returns []. The whole file
+ *  is read — a capped read would silently narrow a long frontmatter's
+ *  declared scope into the commit fallback. */
 function specScope(path: string): string[] {
   try {
-    const head = readFileSync(path, 'utf8').slice(0, 2000)
+    const head = readFileSync(path, 'utf8')
     const fm = /^---\n([\s\S]*?)\n---/.exec(head)
     if (fm === null) {
       return []
@@ -269,16 +273,25 @@ function specScope(path: string): string[] {
     if (i === -1) {
       return []
     }
-    const inline = yamlScalar(lines[i]!.replace(/^scope:\s*/, ''))
+    const body = lines.slice(i + 1)
+    let inline = yamlScalar(lines[i]!.replace(/^scope:\s*/, ''))
+    // a flow list may wrap — `scope: [a,\n  b]` joins until the closing ]
+    for (let j = 0; inline.startsWith('[') && !inline.endsWith(']') && j < body.length; j++) {
+      inline += ` ${yamlScalar(body[j]!)}`
+    }
     if (inline !== '') {
       return inline.startsWith('[') && inline.endsWith(']')
         ? flowItems(inline.slice(1, -1)).map(yamlScalar).filter((s) => s !== '')
         : [inline]
     }
     const items: string[] = []
-    for (const l of lines.slice(i + 1)) {
+    for (const l of body) {
       const m = /^\s*-\s+/.exec(l)
       if (m === null) {
+        // blank and comment-only lines are YAML-legal inside a list
+        if (/^\s*(#.*)?$/.test(l)) {
+          continue
+        }
         break
       }
       items.push(yamlScalar(l.slice(m[0].length)))

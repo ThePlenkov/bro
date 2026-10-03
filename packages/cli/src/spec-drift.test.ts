@@ -78,6 +78,32 @@ describe('native scope() — the tool\u2019s explicit scope', () => {
       }
     )
   })
+
+  test('blank and comment lines inside a block list do not truncate it', () => {
+    withRepo(
+      (m) => {
+        seedSpec(m, 'b1', '---\nscope:\n  - a.ts\n\n  # middle comment\n  - b.ts\n---\n')
+        seedSpec(m, 'b2', '---\nscope: [a.ts,\n  b.ts]\n---\n')
+      },
+      (main) => {
+        const spec = specStore(main)
+        assert.deepEqual(spec.scope?.('b1'), ['a.ts', 'b.ts'])
+        assert.deepEqual(spec.scope?.('b2'), ['a.ts', 'b.ts'])
+      }
+    )
+  })
+
+  test('frontmatter past 2000 bytes still yields its scope', () => {
+    withRepo(
+      (m) => {
+        const pad = `# ${'x'.repeat(3000)}\n`
+        seedSpec(m, 'b1', `---\n${pad}scope:\n  - src/**\n---\n`)
+      },
+      (main) => {
+        assert.deepEqual(specStore(main).scope?.('b1'), ['src/**'])
+      }
+    )
+  })
 })
 
 describe('pickSpecPath', () => {
@@ -173,6 +199,32 @@ describe('resolveScope', () => {
           assert.equal(r.state, 'unverifiable', id)
           assert.match(r.state === 'unverifiable' ? r.reason : '', /exclusion-only/)
         }
+      }
+    )
+  })
+
+  test('a scope covering only its own spec file matches nothing', () => {
+    withRepo(
+      (m) => {
+        seedSpec(m, 'b1', '---\nscope:\n  - specs/b1.md\n---\n')
+      },
+      (main) => {
+        assert.deepEqual(resolveScope(main, 'HEAD', 'b1', specStore(main)), {
+          state: 'unverifiable',
+          reason: 'scope matches nothing',
+        })
+      }
+    )
+  })
+
+  test('bead commits touching only the spec file leave no-scope', () => {
+    withRepo(
+      (m) => {
+        seedSpec(m, 'b1', '')
+      },
+      (main) => {
+        commit(main, 'docs: update spec (b1)', { 'specs/b1.md': '# b1 v2\n' })
+        assert.deepEqual(resolveScope(main, 'HEAD', 'b1', specStore(main)), { state: 'no-scope' })
       }
     )
   })

@@ -92,26 +92,40 @@ export function resolveScope(dir: string, ref: string, id: string, spec: SpecSto
   // keeps a `specs/[id].md` name from globbing
   const exclude = specPath === undefined ? [] : [`:(exclude,literal)${specPath}`]
   const explicit = spec.scope?.(id) ?? null
-  if (explicit !== null && explicit.length > 0) {
-    const bad = explicit.find(badScopeEntry)
-    if (bad !== undefined) {
-      return { state: 'unverifiable', reason: `bad scope path: ${bad}` }
-    }
-    if (explicit.every(negativePathspec)) {
-      return { state: 'unverifiable', reason: 'bad scope path: exclusion-only scope' }
-    }
-    // an explicit scope matching zero committed paths is a typo the
-    // audit must not bless — history, not just the tree, so a scoped
-    // path deleted later still resolves
-    const r = gitTry(['-C', dir, 'log', '-1', '--format=%H', ref, '--', ...explicit])
-    if (r.code !== 0) {
-      return { state: 'unverifiable', reason: `git log failed: ${r.err}` }
-    }
-    if (r.out.trim() === '') {
-      return { state: 'unverifiable', reason: 'scope matches nothing' }
-    }
-    return { state: 'scoped', via: 'frontmatter', pathspecs: [...explicit, ...exclude] }
+  return explicit !== null && explicit.length > 0
+    ? explicitScope(dir, ref, explicit, exclude)
+    : commitScope(dir, ref, id, specPath, exclude)
+}
+
+/** Frontmatter scope — validated, never widened: bad entries and
+ *  exclusion-only sets are unverifiable, and the match probe counts
+ *  paths *after* the spec's own exclusion so `scope: <its own file>`
+ *  can't pass as "covers something". */
+function explicitScope(dir: string, ref: string, entries: string[], exclude: string[]): ScopeResult {
+  const bad = entries.find(badScopeEntry)
+  if (bad !== undefined) {
+    return { state: 'unverifiable', reason: `bad scope path: ${bad}` }
   }
+  if (entries.every(negativePathspec)) {
+    return { state: 'unverifiable', reason: 'bad scope path: exclusion-only scope' }
+  }
+  // an explicit scope matching zero committed paths is a typo the
+  // audit must not bless — history, not just the tree, so a scoped
+  // path deleted later still resolves
+  const r = gitTry(['-C', dir, 'log', '-1', '--format=%H', ref, '--', ...entries, ...exclude])
+  if (r.code !== 0) {
+    return { state: 'unverifiable', reason: `git log failed: ${r.err}` }
+  }
+  if (r.out.trim() === '') {
+    return { state: 'unverifiable', reason: 'scope matches nothing' }
+  }
+  return { state: 'scoped', via: 'frontmatter', pathspecs: [...entries, ...exclude] }
+}
+
+/** Commit-refs fallback — the union of paths touched by commits whose
+ *  subject carries `(<id>)`. A bead whose commits only ever touched its
+ *  own spec file leaves nothing to audit → no-scope. */
+function commitScope(dir: string, ref: string, id: string, specPath: string | undefined, exclude: string[]): ScopeResult {
   const records = gitLogPathRecords(dir, ref)
   if (records === null) {
     return { state: 'unverifiable', reason: 'git log failed' }
@@ -119,13 +133,18 @@ export function resolveScope(dir: string, ref: string, id: string, spec: SpecSto
   // `(<id>)` as a literal needle: the parens are part of the match, so
   // `(b10)` or a bare `b1` cannot satisfy bead `b1`
   const marker = `(${id})`
+  const own = specPath === undefined ? undefined : `:(literal)${specPath}`
   const paths = new Set<string>()
   for (const rec of records) {
-    if (rec.subject.includes(marker)) {
-      for (const p of rec.paths) {
-        // touched paths are exact file names, not user-written globs —
-        // a literal `src/[id].ts` must not widen into a pathspec
-        paths.add(`:(literal)${p}`)
+    if (!rec.subject.includes(marker)) {
+      continue
+    }
+    for (const p of rec.paths) {
+      // touched paths are exact file names, not user-written globs —
+      // a literal `src/[id].ts` must not widen into a pathspec
+      const lit = `:(literal)${p}`
+      if (lit !== own) {
+        paths.add(lit)
       }
     }
   }
