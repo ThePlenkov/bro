@@ -488,18 +488,19 @@ function armSession(sessionId: string, aspect: GateAspect, detail: string = ''):
       return
     }
     mkdirSync(dirname(path), { recursive: true })
-    // line 1 is the timestamp; each further line is an arming detail
-    // (slug/branch/PR/bead) — accumulated so a session claiming two
-    // beads keeps both; readArmed only ever reads mtime
-    let body = ''
+    // line 2+ are the arming details (slug/branch/PR/bead) — accumulated
+    // so a session claiming two beads keeps both
+    let rest = ''
     try {
-      body = readFileSync(path, 'utf8')
+      rest = readFileSync(path, 'utf8').split('\n').slice(1).join('\n')
     } catch {
-      // line 1: <millis> [<owner-pid> <start>] — the owner pair lets
-      // readers prove the session is alive instead of trusting mtime
-      // (a dead session's marker is residue even inside the window)
-      body = `${Date.now()}${ownerTag()}\n`
+      // fresh marker — no details yet
     }
+    // line 1 re-stamps `<millis> [<owner-pid> <start>]` on every arm —
+    // the owner pair lets readers prove the session is alive instead of
+    // trusting mtime, and a resumed session must not keep its previous
+    // dead owner (the marker would read as residue while it still works)
+    let body = `${Date.now()}${ownerTag()}\n${rest}`
     if (detail && !body.split('\n').includes(detail)) {
       body = `${body.replace(/\n?$/, '\n')}${detail}\n`
     }

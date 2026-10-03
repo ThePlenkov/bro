@@ -2,7 +2,9 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { pidAlive, procStat } from './proc.ts'
 
-describe('pidAlive', () => {
+const NOPROC = process.platform !== 'linux'
+
+describe('pidAlive', { skip: NOPROC }, () => {
   test('pid 0 is dead — kill(0) would signal our own process group', () => {
     assert.equal(pidAlive(0), false)
     assert.equal(pidAlive(0, '1'), false)
@@ -34,7 +36,7 @@ describe('pidAlive', () => {
   })
 })
 
-describe('procStat', () => {
+describe('procStat', { skip: NOPROC }, () => {
   test('reads state and start of a live process', () => {
     const st = procStat(process.pid)
     assert.notEqual(st, null)

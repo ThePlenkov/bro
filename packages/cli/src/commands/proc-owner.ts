@@ -77,11 +77,37 @@ function procAgentPid(dir: string, depth = 0): number | null {
   if (depth > 16) {
     return null
   }
-  if (procIsAgentCmd(dir) || AGENT_ENV_RE.test(readProcText(dir, 'environ'))) {
+  if (procIsAgentProc(dir)) {
     return Number(basename(dir))
   }
   const ppid = procPpid(dir)
   return ppid > 1 ? procAgentPid(join(dirname(dir), String(ppid)), depth + 1) : null
+}
+
+/** Agent shape by cmdline or env badge — the shared predicate behind
+ *  procAgentPid (occupancy: nearest match suffices) and procAgentRoot
+ *  (ownership: topmost match wins). */
+function procIsAgentProc(dir: string): boolean {
+  return procIsAgentCmd(dir) || AGENT_ENV_RE.test(readProcText(dir, 'environ'))
+}
+
+/** The topmost agent-shaped ancestor — the owner tag's pid. The env
+ *  badge is inherited by every descendant, so the NEAREST agent
+ *  ancestor is usually a transient tool shell that exits mid-session
+ *  while the session still works; a marker owned by it drops early and
+ *  frees the worktree under a live session. The chain root outlives
+ *  its tool shells, so the walk keeps climbing past matches. */
+function procAgentRoot(dir: string): number | null {
+  let top: number | null = null
+  let cur: string | null = dir
+  for (let depth = 0; depth <= 16 && cur !== null; depth++) {
+    if (procIsAgentProc(cur)) {
+      top = Number(basename(cur))
+    }
+    const ppid = procPpid(cur)
+    cur = ppid > 1 ? join(dirname(cur), String(ppid)) : null
+  }
+  return top
 }
 
 function procIsAgent(dir: string): boolean {
@@ -124,10 +150,12 @@ export function agentProcessesIn(worktree: string, procDir = '/proc'): ProcHit[]
 
 let cachedOwner: { pid: number; start: string } | null | undefined
 
-/** This process's owning agent — the nearest agent-shaped ancestor.
+/** This process's owning agent — the topmost agent-shaped ancestor.
  *  A `bro` invocation runs as a tool-call child (bro → shell → agent),
- *  so the recorded pid must be the ancestor's, not our own: ours dies
- *  when the CLI exits. Null when no ancestor is agent-shaped (human
+ *  so the recorded pid must be the session root's, not our own (ours
+ *  dies when the CLI exits) and not the nearest badged ancestor's
+ *  (a tool shell that exits mid-session). Null when no ancestor is
+ *  agent-shaped (human
  *  shell, CI, no /proc, or an ancestor whose start won't read) — the
  *  caller's marker then stays ownerless and readers keep the mtime
  *  fallback. A start-less owner is strictly worse than none: it keeps
@@ -136,7 +164,7 @@ let cachedOwner: { pid: number; start: string } | null | undefined
  *  markers on every tool call and the owner never changes. */
 export function agentOwner(): { pid: number; start: string } | null {
   if (cachedOwner === undefined) {
-    const pid = existsSyncProc() ? procAgentPid(`/proc/${process.ppid}`) : null
+    const pid = existsSyncProc() ? procAgentRoot(`/proc/${process.ppid}`) : null
     const start = pid === null ? '' : (procStat(pid)?.start ?? '')
     cachedOwner = pid === null || start === '' ? null : { pid, start }
   }
@@ -160,14 +188,18 @@ export function ownerTag(): string {
 }
 
 /** Line 1 of a session/work marker: `<millis> [pid start]` — the pid
- *  pair is the owning process's identity (start disambiguates reuse). */
+ *  pair is the owning process's identity (start disambiguates reuse).
+ *  A pid without a start can't disambiguate, so it reads as ownerless:
+ *  a reuse-blind owner would suppress the mtime fallback while still
+ *  trusting a recycled pid — the worst of both planes. */
 export function markerOwner(
   firstLine: string | undefined
 ): { pid: number; start: string } | null {
   const parts = (firstLine ?? '').trim().split(' ')
   const pid = Number(parts[1])
-  return Number.isInteger(pid) && pid > 0
-    ? { pid, start: parts[2] ?? '' }
+  const start = parts[2] ?? ''
+  return Number.isInteger(pid) && pid > 0 && start !== ''
+    ? { pid, start }
     : null
 }
 

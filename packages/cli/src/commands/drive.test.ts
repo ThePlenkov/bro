@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { AgentInfo, TaskRow, TaskStore } from '@broject/core'
+import { procStat, type AgentInfo, type TaskRow, type TaskStore } from '@broject/core'
 import {
   agentProcessesIn,
   branchSlug,
@@ -166,9 +166,11 @@ describe('liveWorkDetails', () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-drive-hooks-'))
     try {
       // mtime aged past the window but the owner pid is us — an idle
-      // session still owns its claim
+      // session still owns its claim; the tag carries our real start
+      // (a pid without it reads ownerless → mtime → residue)
       const marker = join(dir, 'idle.work')
-      writeFileSync(marker, `${Date.now()} ${process.pid}\nbro-idle\n`)
+      const start = procStat(process.pid)?.start ?? '1'
+      writeFileSync(marker, `${Date.now()} ${process.pid} ${start}\nbro-idle\n`)
       const old = Date.now() - 48 * 60 * 60 * 1000
       utimesSync(marker, old / 1000, old / 1000)
       assert.deepEqual(liveWorkDetails(dir), ['bro-idle'])
