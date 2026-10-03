@@ -17,7 +17,7 @@
  *                             and reported — the owner rebases on enter
  */
 import { basename } from 'node:path'
-import { gitTry, reviewHost, type PrMeta, type ReviewFacade } from '@broject/core'
+import { acquireFileLock, gitTry, reviewHost, type PrMeta, type ReviewFacade } from '@broject/core'
 import {
   displayBase,
   formatStackBranch,
@@ -42,6 +42,7 @@ import {
   readStackEdges,
   recordStackEdge,
   removeStackEdge,
+  stackPushLockPath,
   stateOfWorktree,
   type WorktreeInfo,
 } from './work.ts'
@@ -164,38 +165,56 @@ function cmdPush(argv: string[]): void {
   const name = resolveStackName(argv)
   const main = mainWorktree()
   const defaultRef = defaultBranchName()
-  // re-pushing a bead that already sits in the stack re-enters its member
-  // branch — push is idempotent, never a duplicate position
-  const existing = stackMemberFor(main.path, name, slug)
-  const rev = resolveReview(main.path)
-  const dead = existing === undefined ? mergedBranches(main.path, name, rev) : undefined
-  const tip = existing === undefined ? stackTip(main.path, name, dead) : undefined
-  const n = existing?.n ?? tip!.n
-  const branch = existing?.branch ?? formatStackBranch(name, n, slug)
-  const base =
-    (existing === undefined ? undefined : readStackEdges().get(existing.branch)) ??
-    tip?.base ??
-    defaultRef ??
-    main.branch ??
-    main.head
-  const r = enterWorktree({
-    slug,
-    branch,
-    base: existing === undefined ? base : undefined,
-    main,
-    defaultRef,
-    allowExisting: existing !== undefined,
-    reusePath: existing !== undefined,
-  })
-  console.log(`worktree ready: ${r.path}  (branch ${r.branch})`)
-  console.log(`stack ${name} member ${n} — based on ${r.base ?? base ?? 'HEAD'}`)
-  if (r.stacked) {
-    console.log(`open the PR against the parent member: gh pr create --base ${r.base}`)
+  // the push lock serializes member-listing → worktree-add across bro
+  // processes: without it two concurrent pushes (loop workers, push +
+  // loop racing) read the same tip and both mint position n under
+  // different slugs. Once `worktree add` lands the branch is visible to
+  // a waiter's recompute, so the slower post-add steps inside are safe.
+  const lockPath = stackPushLockPath(name)
+  let release: (() => void) | undefined
+  try {
+    release =
+      lockPath === null ? undefined : acquireFileLock(lockPath, { label: `stack ${name} push lock` })
+  } catch (err) {
+    console.error(`error: ${(err as Error).message} — another push is in flight; retry`)
+    process.exit(1)
   }
-  if (r.claim.claimed) {
-    console.log(`claimed bead ${r.claim.claimed} for this session`)
-  } else if (r.claim.refused) {
-    console.error(`note: could not claim bead ${slug} — another actor may hold it`)
+  try {
+    // re-pushing a bead that already sits in the stack re-enters its member
+    // branch — push is idempotent, never a duplicate position
+    const existing = stackMemberFor(main.path, name, slug)
+    const rev = resolveReview(main.path)
+    const dead = existing === undefined ? mergedBranches(main.path, name, rev) : undefined
+    const tip = existing === undefined ? stackTip(main.path, name, dead) : undefined
+    const n = existing?.n ?? tip!.n
+    const branch = existing?.branch ?? formatStackBranch(name, n, slug)
+    const base =
+      (existing === undefined ? undefined : readStackEdges().get(existing.branch)) ??
+      tip?.base ??
+      defaultRef ??
+      main.branch ??
+      main.head
+    const r = enterWorktree({
+      slug,
+      branch,
+      base: existing === undefined ? base : undefined,
+      main,
+      defaultRef,
+      allowExisting: existing !== undefined,
+      reusePath: existing !== undefined,
+    })
+    console.log(`worktree ready: ${r.path}  (branch ${r.branch})`)
+    console.log(`stack ${name} member ${n} — based on ${r.base ?? base ?? 'HEAD'}`)
+    if (r.stacked) {
+      console.log(`open the PR against the parent member: gh pr create --base ${r.base}`)
+    }
+    if (r.claim.claimed) {
+      console.log(`claimed bead ${r.claim.claimed} for this session`)
+    } else if (r.claim.refused) {
+      console.error(`note: could not claim bead ${slug} — another actor may hold it`)
+    }
+  } finally {
+    release?.()
   }
 }
 

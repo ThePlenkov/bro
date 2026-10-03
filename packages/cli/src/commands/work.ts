@@ -241,6 +241,17 @@ export function stackEdgeDir(): string | null {
   return common ? join(common, 'bro', 'stack') : null
 }
 
+/** `<common-git-dir>/bro/stack-<name>.lock` — the `stack push`
+ *  serialization point, held across the plan→create window so two
+ *  concurrent pushes can't read the same tip and both mint position n.
+ *  Sibling of the edge dir, NOT inside it: readStackEdges maps every
+ *  file in bro/stack/ to a branch edge, so a lockfile there would read
+ *  as a bogus edge. Null when git can't name the common dir. */
+export function stackPushLockPath(name: string): string | null {
+  const dir = stackEdgeDir()
+  return dir === null ? null : join(dirname(dir), `stack-${encodeURIComponent(name)}.lock`)
+}
+
 /** Stacked branches record their base so stack sync / cleanup can derive
  *  merge order bottom-up. The edge lives in the common git dir —
  *  visible from every linked worktree. One file per branch,
