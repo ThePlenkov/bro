@@ -396,13 +396,20 @@ describe('serve handler over a real socket', () => {
         headers: { origin: 'http://evil.example' },
       })
       assert.equal(foreignDelete.status, 403)
-      // an unparseable Origin fails closed
+      // an unparseable or non-origin-shaped Origin fails closed — a
+      // loopback hostname with a path is not a value browsers send
       const badOrigin = await fetch(`${base}/api/v1/agents`, {
         method: 'POST',
         headers: { ...json, origin: 'not a url' },
         body: '{"molStep":"fx-1"}',
       })
       assert.equal(badOrigin.status, 403)
+      const pathOrigin = await fetch(`${base}/api/v1/agents`, {
+        method: 'POST',
+        headers: { ...json, origin: 'http://localhost/path' },
+        body: '{"molStep":"fx-1"}',
+      })
+      assert.equal(pathOrigin.status, 403)
       // a loopback Origin — the fleet webui's own shape — passes the gate;
       // the 400 proves the request reached the body parser
       const sameOrigin = await fetch(`${base}/api/v1/agents`, {

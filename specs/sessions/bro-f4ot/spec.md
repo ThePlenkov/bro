@@ -99,10 +99,10 @@ is not a write barrier — a hostile web page can fire cross-site requests
 at it — so the server enforces a browser-origin control: every request
 needs a loopback `Host` (a rebound name is 403 — DNS rebinding), and
 writes (POST/PUT/PATCH/DELETE) refuse a non-loopback `Origin` (403 — the
-browser stamps every cross-site request) plus require
-`content-type: application/json`, a header a browser can't send
-cross-site without a preflight the server never answers. Remote
-orchestration, if ever, is a separate spec.
+browser stamps every cross-site request); body-bearing writes
+(POST/PUT/PATCH) also require `content-type: application/json`, a header
+a browser can't send cross-site without a preflight the server never
+answers. Remote orchestration, if ever, is a separate spec.
 
 ## Filetree
 

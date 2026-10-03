@@ -305,8 +305,15 @@ const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
  *  local tooling; anything else (or unparseable) is a foreign page. */
 function isLoopbackOrigin(origin: string): boolean {
   try {
-    const { hostname } = new URL(origin)
-    return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]'
+    const parsed = new URL(origin)
+    // origin-shaped only — `http://localhost/path` parses to a loopback
+    // hostname but is not a value a browser would send as Origin
+    return (
+      parsed.origin === origin &&
+      (parsed.hostname === '127.0.0.1' ||
+        parsed.hostname === 'localhost' ||
+        parsed.hostname === '[::1]')
+    )
   } catch {
     return false
   }
