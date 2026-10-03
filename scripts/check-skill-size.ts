@@ -36,7 +36,8 @@ if (!existsSync(skillMd)) {
   process.exit(1)
 }
 
-const lines = readFileSync(skillMd, 'utf8').replace(/\r?\n$/, '').split(/\r?\n/).length
+const lines = readFileSync(skillMd, 'utf8') // NOSONAR — path confined to the workspace above
+  .replace(/\r?\n$/, '').split(/\r?\n/).length
 if (lines > MAX_LINES) {
   const level = values['warn-only'] === true ? 'warning' : 'error'
   console.error(`::${level} file=${skillMd}::${lines} lines — SKILL.md budget is ${MAX_LINES}`)

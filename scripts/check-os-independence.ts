@@ -73,7 +73,7 @@ async function* walk(dir: string): AsyncGenerator<string> {
 // bash-by-design (the marker must carry a reason).
 function hasOsIndependenceExemption(text: string): boolean {
   const head = text.split('\n').slice(0, 20).join('\n')
-  return /^[ \t]*<!--[ \t]*os-independence-exempt:[ \t]*\S[^\r\n>]*-->[ \t]*$/im.test(head)
+  return /^[ \t]*<!--[ \t]*os-independence-exempt:[ \t]*\S[^\r\n>]*-->[ \t]*$/im.test(head) // NOSONAR S7780 — \S needs the escape here; String.raw buys nothing
 }
 
 function escapeRegExp(s: string): string {

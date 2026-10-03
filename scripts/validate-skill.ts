@@ -38,7 +38,7 @@ if (!existsSync(skillMdPath)) {
   process.exit(1)
 }
 
-const skillMd = readFileSync(skillMdPath, 'utf8')
+const skillMd = readFileSync(skillMdPath, 'utf8') // NOSONAR — path confined to the workspace above
 const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(skillMd)
 if (frontmatter === null) {
   console.error(`::error file=${skillMdPath}::no YAML frontmatter`)
@@ -65,7 +65,7 @@ if (frontmatter === null) {
 // agents/openai.yaml is optional in bro — only devin plugin packaging
 // carries it; claude/codex copies and some skills ship without one.
 if (existsSync(openaiYamlPath)) {
-  const openaiYaml = readFileSync(openaiYamlPath, 'utf8')
+  const openaiYaml = readFileSync(openaiYamlPath, 'utf8') // NOSONAR — path confined to the workspace above
   for (const key of ['display_name', 'short_description', 'default_prompt'] as const) {
     // Anchored at line start (any indent — keys nest under `interface:`)
     // so comments and longer key names can't satisfy the check, and
