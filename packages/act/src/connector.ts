@@ -82,12 +82,14 @@ function mergeSlotLine(): string | null {
 
 /** Pending-watch markers left by `bro act wait`: a dead pid means the
  *  session that promised to watch died mid-poll — flag the stale promise
- *  and retire the marker so it reports exactly once. A live pid is
- *  parallel work — passive context only. */
+ *  and retire the marker to claim the report. The claim says nothing
+ *  about delivery, so a retired marker keeps re-flagging on later
+ *  session starts until it ages out. A live pid is parallel work —
+ *  passive context only. */
 function watchLines(dir: string): string[] {
   try {
     const out: string[] = []
-    for (const { watch, file, alive } of listWatches(dir)) {
+    for (const { watch, file, alive, reported } of listWatches(dir)) {
       if (alive) {
         out.push(
           `act watch active on ${watch.link} (pid ${watch.pid}) — another process is polling`
@@ -95,8 +97,11 @@ function watchLines(dir: string): string[] {
         continue
       }
       // the retire is an atomic claim — a racing session start already
-      // reporting this stale promise loses the rename and skips it
-      if (!watchRetire(file)) {
+      // reporting this stale promise loses the rename and skips it. An
+      // already-retired marker still re-flags: the claim proves nothing
+      // about delivery, so a warning dropped with its session (hook
+      // budget, crash) resurfaces until the marker ages out.
+      if (reported !== true && !watchRetire(file)) {
         continue
       }
       const mode = watch.merge ? ' (was set to merge on green)' : ''

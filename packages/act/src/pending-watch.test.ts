@@ -83,7 +83,24 @@ describe('pending-watch markers', () => {
     assert.equal(watchRetire(listed[0]!.file), true)
     // a racing retire loses the claim — the stale promise reports once
     assert.equal(watchRetire(listed[0]!.file), false)
-    assert.equal(listWatches(dir).length, 0)
+    // the retired marker stays listed as reported — a warning that never
+    // delivered (hook killed after the claim) re-flags at the next
+    // session start until the marker ages out (bro-b6qt)
+    const after = listWatches(dir)
+    assert.equal(after.length, 1)
+    assert.equal(after[0]!.reported, true)
+    assert.equal(after[0]!.alive, false)
+  })
+
+  test('a marker with a non-finite startedAt is residue, not eternal', () => {
+    const dir = repo()
+    const path = watchBegin(dir, base)
+    assert.ok(path)
+    // 1e999 parses to Infinity — typeof passes, the TTL check never fires
+    writeFileSync(path!, '{"pr":42,"link":"x","pid":1,"merge":false,"startedAt":1e999,"timeoutMin":5}')
+    const listed = listWatches(dir)
+    assert.equal(listed.length, 0)
+    assert.equal(existsSync(path!), false) // malformed → pruned
   })
 
   test('a live pid with a different start identity reports alive:false', (t) => {

@@ -43,6 +43,10 @@ export interface ListedWatch {
   file: string
   /** Watching process still lives — parallel work, not a broken promise. */
   alive: boolean
+  /** Renamed to `.retired` — a session already claimed the report, but
+   *  the claim says nothing about delivery; a fresh retired marker is
+   *  still listed so a lost warning re-flags at the next session start. */
+  reported?: boolean
 }
 
 /** A marker older than a day is residue regardless of pid — unless the
@@ -167,20 +171,17 @@ export function watchEnd(path: string | null): void {
   }
 }
 
-/** Remove a reported stale marker — flagged once, then retired. The
- *  rename is the atomic claim: exactly one concurrent caller wins it,
- *  so a dead marker is reported once even when two session starts race.
- *  Returns true only for the caller that claimed the retire. */
+/** Claim a reported stale marker — the rename is the atomic claim:
+ *  exactly one concurrent caller wins it. The `.retired` file is kept,
+ *  not deleted — the claim proves nothing about delivery, so the marker
+ *  stays listed as `reported` and re-flags at the next session start if
+ *  the warning was lost; the normal TTL prune (or a covering watchEnd)
+ *  is what finally removes it. Returns true only for the winner. */
 export function watchRetire(file: string): boolean {
   try {
     renameSync(file, `${file}.retired`)
   } catch {
     return false // gone or claimed by a racing retire — it reports
-  }
-  try {
-    rmSync(`${file}.retired`)
-  } catch {
-    // claimed already — a racing prune beating this delete is equivalent
   }
   return true
 }
@@ -193,7 +194,10 @@ function readMarker(file: string): PendingWatch | null {
       typeof w.pid === 'number' &&
       (w.pidStart === undefined || typeof w.pidStart === 'string') &&
       typeof w.merge === 'boolean' &&
+      // an Infinity/NaN startedAt poisons the TTL check — Date.now() -
+      // Infinity is never > ttl, so the marker would never be pruned
       typeof w.startedAt === 'number' &&
+      Number.isFinite(w.startedAt) &&
       typeof w.timeoutMin === 'number'
       ? w
       : null
@@ -232,7 +236,8 @@ function listWatchesIn(wd: string): ListedWatch[] {
   const out: ListedWatch[] = []
   for (const f of files) {
     const file = join(wd, f)
-    if (!f.endsWith('.json')) {
+    const retired = f.endsWith('.json.retired')
+    if (!f.endsWith('.json') && !retired) {
       // a .tmp between write and rename is a marker mid-publication —
       // prune it only once it is old enough to be crash residue
       if (!f.endsWith('.tmp') || Date.now() - fileAge(file) > WATCH_TTL_MS) {
@@ -245,7 +250,9 @@ function listWatchesIn(wd: string): ListedWatch[] {
       pruneFile(file)
       continue
     }
-    out.push({ watch: w, file, alive: pidAlive(w.pid, w.pidStart) })
+    // a retired marker is stale by definition — pid reuse since the
+    // claim must not resurrect it into a live watch
+    out.push({ watch: w, file, alive: !retired && pidAlive(w.pid, w.pidStart), reported: retired })
   }
   return out
 }
