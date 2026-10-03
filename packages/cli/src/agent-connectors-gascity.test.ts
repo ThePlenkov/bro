@@ -252,7 +252,7 @@ describe('gascity connector', () => {
       assert.match(agentToml, /BRO_PR_URL = "https:\/\/x\/pr\/7"/)
       assert.ok(!agentToml.includes('BAD-KEY'))
       // the connector injects its own identity pins into the table
-      assert.match(agentToml, new RegExp(`BEADS_DIR = "${fx.beadsDir.replaceAll('/', '\\/')}"`))
+      assert.ok(agentToml.includes(`BEADS_DIR = "${fx.beadsDir}"`))
       assert.match(agentToml, /BRO_BEAD_ID = "fx-1"/)
     } finally {
       cleanup(fx)
@@ -265,7 +265,13 @@ describe('gascity connector', () => {
       const conn = makeGascityConnector({ dir: fx.main }, fx.env)
       const info = await conn.spawn({
         ...SPEC(fx.main, fx.beadsDir, 'fx-1'),
-        env: { BEADS_DIR: '/evil/store', BRO_BEAD_ID: 'other-bead', BRO_AGENT_ID: 'x', SAFE: '1' },
+        env: {
+          BEADS_DIR: '/evil/store',
+          BRO_BEAD_ID: 'other-bead',
+          BRO_AGENT_ID: 'x',
+          BRO_PROMPT_FILE: '/evil/prompt.md',
+          SAFE: '1',
+        },
       })
       const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8')
       assert.ok(!agentToml.includes('/evil/store'))
@@ -274,6 +280,11 @@ describe('gascity connector', () => {
       // the caller's; the proc-owner environ badge depends on it
       assert.match(agentToml, new RegExp(`BRO_AGENT_ID = "${info.id}"`))
       assert.ok(!agentToml.includes('BRO_AGENT_ID = "x"'))
+      // BRO_PROMPT_FILE points at the real prompt artifact, never the
+      // caller's path
+      assert.ok(!agentToml.includes('/evil/prompt.md'))
+      assert.ok(agentToml.includes('BRO_PROMPT_FILE = "'), agentToml)
+      assert.ok(agentToml.includes(`${info.id}.prompt.md`), agentToml)
       assert.match(agentToml, /BRO_BEAD_ID = "fx-1"/)
       assert.match(agentToml, /SAFE = "1"/)
     } finally {

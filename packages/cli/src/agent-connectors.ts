@@ -345,6 +345,25 @@ function touchWorkMarker(dir: string, agentId: string): void {
 // this module keep resolving
 export { pidAlive }
 
+/** Identity-pin env keys the connector owns — a caller-supplied value
+ *  would redirect the claim store or re-badge the worker, so every
+ *  backend filters these out of ambient/spec env and injects its own
+ *  values (agentEnvPins). One shared list: the pin set is a security
+ *  boundary that must not drift between backends. */
+const AGENT_PIN_KEYS = new Set(['BEADS_DIR', 'BRO_BEAD_ID', 'BRO_AGENT_ID', 'BRO_PROMPT_FILE'])
+
+/** The real pin values a backend injects over/around caller env —
+ *  BEADS_DIR/BRO_BEAD_ID bind the shared store + claim; BRO_AGENT_ID is
+ *  the environ badge proc-owner reads to tell a bro-spawned worker from
+ *  an ambient process; BRO_PROMPT_FILE points at the rendered prompt
+ *  artifact prepareSpawn writes. */
+const agentEnvPins = (spec: SpawnSpec, agentId: string, promptFile: string): [string, string][] => [
+  ['BEADS_DIR', spec.beadsDir],
+  ['BRO_BEAD_ID', spec.molStep],
+  ['BRO_AGENT_ID', agentId],
+  ['BRO_PROMPT_FILE', promptFile],
+]
+
 /** The shared spawn prologue every built-in backend runs under the
  *  registry lock — dedup across the two state planes (registry liveness
  *  + beads claim), the claim/rebind, and the shared-dir artifacts
@@ -615,10 +634,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 ...spec.env,
                 // identity pins last — spec.env must never redirect the
                 // claim store or re-badge the worker as another bead/agent
-                BEADS_DIR: spec.beadsDir,
-                BRO_BEAD_ID: spec.molStep,
-                BRO_AGENT_ID: agentId,
-                BRO_PROMPT_FILE: promptFile,
+                ...Object.fromEntries(agentEnvPins(spec, agentId, promptFile)),
               },
               stdio: ['ignore', fd, fd],
               detached: true,
@@ -925,21 +941,15 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // -e; they're also filtered OUT of the file so sourcing can
         // never redirect the claim store or re-badge the worker
         const envFile = join(home, `${agentId}.env`)
-        const PIN_KEYS = ['BEADS_DIR', 'BRO_BEAD_ID', 'BRO_AGENT_ID', 'BRO_PROMPT_FILE']
         const ambient = Object.entries({ ...process.env, ...spec.env })
           .filter(
             (e): e is [string, string] =>
-              e[1] !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) && !PIN_KEYS.includes(e[0])
+              e[1] !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) && !AGENT_PIN_KEYS.has(e[0])
           )
           .map(([k, v]) => `export ${k}=${shQuote(v)}`)
           .join('\n')
         writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
-        const envArgs = Object.entries({
-          BEADS_DIR: spec.beadsDir,
-          BRO_BEAD_ID: spec.molStep,
-          BRO_AGENT_ID: agentId,
-          BRO_PROMPT_FILE: promptFile,
-        }).flatMap(([k, v]) => ['-e', `${k}=${v}`])
+        const envArgs = agentEnvPins(spec, agentId, promptFile).flatMap(([k, v]) => ['-e', `${k}=${v}`])
         // the pane sources the ambient env and drops the file, then runs
         // the agent; $? lands in the .exit file before the pipeline
         // drains, tee keeps a log the way native's fd redirect does.
@@ -1233,21 +1243,6 @@ const tomlStr = (s: string): string =>
     (ch) => TOML_SHORT_ESCAPES[ch] ?? `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`
   )
 
-/** Caller-provided env keys that would hijack worker identity —
- *  filtered from the agent.toml env table; the connector injects its
- *  own values instead (gcEnvPins). */
-const GC_PINNED_ENV = new Set(['BEADS_DIR', 'BRO_BEAD_ID', 'BRO_AGENT_ID', 'BRO_PROMPT_FILE'])
-
-/** Identity pins the connector owns — the env table always carries the
- *  shared store + the real bead + agent ids regardless of what spec.env
- *  says. BRO_AGENT_ID is the environ badge proc-owner reads to tell a
- *  bro-spawned worker from an ambient process in the same worktree. */
-const gcEnvPins = (spec: SpawnSpec, agentId: string): [string, string][] => [
-  ['BEADS_DIR', spec.beadsDir],
-  ['BRO_BEAD_ID', spec.molStep],
-  ['BRO_AGENT_ID', agentId],
-]
-
 /** gc session submit carries the prompt as a single argv element —
  *  Linux caps it at 128KiB (MAX_ARG_STRLEN); leave headroom for the
  *  rest of argv. */
@@ -1339,7 +1334,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
    *  dir comes from its agent's work_dir — so each step gets its own
    *  agent named after the molStep, pinned to spec.repoRoot. Written on
    *  every spawn; gc reads config per command. */
-  const writeStepAgent = (spec: SpawnSpec, city: string, agentId: string): void => {
+  const writeStepAgent = (spec: SpawnSpec, city: string, agentId: string, promptFile: string): void => {
     // leading-alnum guard: '.'/'..' would escape the per-step dir and a
     // template-named step would overwrite the shared template
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(spec.molStep)) {
@@ -1364,11 +1359,11 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       // BEADS_DIR/BRO_BEAD_ID/... would redirect bead ops or re-badge
       // the worker, so the env table filters them out and re-injects
       // the connector's own below
-      ([k]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && !GC_PINNED_ENV.has(k)
+      ([k]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && !AGENT_PIN_KEYS.has(k)
     )
     // caller env plus the connector-owned identity pins — pins always
     // render so the table exists even when spec.env is empty
-    const allEnv = [...envEntries, ...gcEnvPins(spec, agentId)]
+    const allEnv = [...envEntries, ...agentEnvPins(spec, agentId, promptFile)]
     const envToml = `env = { ${allEnv.map(([k, v]) => `${k} = "${tomlStr(v)}"`).join(', ')} }\n`
     // work_dir (+ env) are top-level — they must precede any [table] in
     // the file; the template's own copies are dropped so ours win
@@ -1437,9 +1432,15 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
    *  surviving session in place (preserves alias+bead), else `session
    *  new` the per-step agent. A `session new` whose id can't be learned
    *  is closed by alias first so no orphan runs beside the retry. */
-  const ensureGcSession = (spec: SpawnSpec, city: string, prior: unknown, agentId: string): string => {
+  const ensureGcSession = (
+    spec: SpawnSpec,
+    city: string,
+    prior: unknown,
+    agentId: string,
+    promptFile: string
+  ): string => {
     initCity(city)
-    writeStepAgent(spec, city, agentId)
+    writeStepAgent(spec, city, agentId, promptFile)
     ensureRig(spec, city)
     ensureStarted(city)
     const priorId = typeof prior === 'string' ? prior : undefined
@@ -1545,7 +1546,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       // spawn → registry patch, all under the agents.json lock.
       return withAgentRegistryLock(dir, () => {
         const existing = readAgentRegistry(dir)[spec.molStep]
-        const { agentId } = prepareSpawn(dir, home, 'gascity', spec, {
+        const { agentId, promptFile } = prepareSpawn(dir, home, 'gascity', spec, {
           isLive: (e) => {
             const { sessions, err } = listGcSessions(city)
             if (sessions === undefined) {
@@ -1564,7 +1565,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         })
         let sessionId: string | undefined
         try {
-          sessionId = ensureGcSession(spec, city, existing?.sessionId, agentId)
+          sessionId = ensureGcSession(spec, city, existing?.sessionId, agentId, promptFile)
           dispatchStep(spec, city)
         } catch (err) {
           // leave the entry respawn-able: close the orphan session so a
