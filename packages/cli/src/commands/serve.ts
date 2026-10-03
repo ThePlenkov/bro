@@ -46,7 +46,6 @@
  */
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import {
-  chmodSync,
   closeSync,
   linkSync,
   mkdirSync,
@@ -142,10 +141,11 @@ export function writeServeState(dir: string, state: ServeState): void {
   mkdirSync(dirname(path), { recursive: true })
   const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
   // the file carries the session token — publish at 0600 so "can read
-  // it" equals "same-UID local process"; chmod after write covers the
-  // pathological pre-existing-tmp case where the create mode is a no-op
+  // it" equals "same-UID local process". rm first so the create-mode
+  // always applies: a pre-existing tmp would keep its old mode through
+  // the truncate, leaving the token readable until a later chmod
+  rmSync(tmp, { force: true })
   writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 })
-  chmodSync(tmp, 0o600)
   renameSync(tmp, path)
 }
 
@@ -710,13 +710,12 @@ function send(
  *  naive === would leak prefix length to a same-box attacker who
  *  somehow can't read the 0600 file. */
 function bearerMatch(header: string | undefined, token: string): boolean {
-  const m = /^Bearer (.+)$/.exec(header ?? '')
-  if (m === null) {
-    return false
-  }
-  const presented = Buffer.from(m[1]!, 'utf8')
-  const expected = Buffer.from(token, 'utf8')
-  return presented.length === expected.length && timingSafeEqual(presented, expected)
+  // string ops, not a regex — the credential check stays linear even on
+  // a megabyte-long header a hostile client could send
+  const presented = header?.startsWith('Bearer ') === true ? header.slice(7) : ''
+  const a = Buffer.from(presented, 'utf8')
+  const b = Buffer.from(token, 'utf8')
+  return a.length === b.length && a.length > 0 && timingSafeEqual(a, b)
 }
 
 export function createServeHandler(
