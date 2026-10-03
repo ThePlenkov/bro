@@ -175,6 +175,23 @@ describe('bro stack e2e', () => {
     }
   })
 
+  test('a push that exits mid-section still releases the lock — exit-hook cleanup', () => {
+    const f = stackFixture([{ ...FAKE_BEAD, id: 'fx-c', title: 'third' }])
+    inside(f.main, f.root, () => {
+      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
+      // enterWorktree exits(1) on an existing target dir — inside the held lock
+      mkdirSync(join(f.root, 'main--fx-b'))
+      const r = f.run(['push', 'fx-b', '--name', 's'])
+      assert.equal(r.code, 1)
+      assert.match(r.stderr, /already exists/)
+      const common = git(['rev-parse', '--path-format=absolute', '--git-common-dir'], f.main).trim()
+      assert.equal(existsSync(join(common, 'bro', `stack-${encodeURIComponent('s')}.lock`)), false)
+      // the next push isn't blocked by the stranded hold
+      rmSync(join(f.root, 'main--fx-b'), { recursive: true })
+      assert.equal(f.run(['push', 'fx-c', '--name', 's']).code, 0)
+    })
+  })
+
   test('push inside a stack worktree infers the stack name', () => {
     const f = stackFixture([{ ...FAKE_BEAD, id: 'fx-b', title: 'second' }])
     inside(f.main, f.root, () => {
