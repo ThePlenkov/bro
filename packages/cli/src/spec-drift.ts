@@ -66,6 +66,21 @@ function badScopeEntry(entry: string): boolean {
   )
 }
 
+/** A subtract-only pathspec — `:(exclude…)`, `:(!…)`, `:!…`. An
+ *  all-exclusion scope matches the whole repo minus a hole: silent
+ *  widening, which the spec forbids. */
+function negativePathspec(entry: string): boolean {
+  if (entry.startsWith(':!')) {
+    return true
+  }
+  const m = /^:\(([^)]*)\)/.exec(entry)
+  if (m === null) {
+    return false
+  }
+  const sigil = m[1]!.split(',').map((s) => s.trim())
+  return sigil.includes('exclude') || sigil.some((s) => s.startsWith('!'))
+}
+
 /** Resolve bead `id` to its repo path set on `ref` — the drift
  *  engine's half of "spec vs code". `ref` resolution is the caller's
  *  (the recency probe owns the origin/HEAD → main → HEAD chain).
@@ -73,12 +88,17 @@ function badScopeEntry(entry: string): boolean {
  *  come from it, commits from git. */
 export function resolveScope(dir: string, ref: string, id: string, spec: SpecStore): ScopeResult {
   const specPath = pickSpecPath(dir, spec.tree(), id)
-  const exclude = specPath === undefined ? [] : [`:(exclude)${specPath}`]
+  // the spec path is a filesystem path, not a user pathspec — literal
+  // keeps a `specs/[id].md` name from globbing
+  const exclude = specPath === undefined ? [] : [`:(exclude,literal)${specPath}`]
   const explicit = spec.scope?.(id) ?? null
   if (explicit !== null && explicit.length > 0) {
     const bad = explicit.find(badScopeEntry)
     if (bad !== undefined) {
       return { state: 'unverifiable', reason: `bad scope path: ${bad}` }
+    }
+    if (explicit.every(negativePathspec)) {
+      return { state: 'unverifiable', reason: 'bad scope path: exclusion-only scope' }
     }
     // an explicit scope matching zero committed paths is a typo the
     // audit must not bless — history, not just the tree, so a scoped
@@ -96,12 +116,16 @@ export function resolveScope(dir: string, ref: string, id: string, spec: SpecSto
   if (records === null) {
     return { state: 'unverifiable', reason: 'git log failed' }
   }
+  // `(<id>)` as a literal needle: the parens are part of the match, so
+  // `(b10)` or a bare `b1` cannot satisfy bead `b1`
   const marker = `(${id})`
   const paths = new Set<string>()
   for (const rec of records) {
     if (rec.subject.includes(marker)) {
       for (const p of rec.paths) {
-        paths.add(p)
+        // touched paths are exact file names, not user-written globs —
+        // a literal `src/[id].ts` must not widen into a pathspec
+        paths.add(`:(literal)${p}`)
       }
     }
   }

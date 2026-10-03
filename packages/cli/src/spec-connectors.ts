@@ -157,7 +157,12 @@ function preferSpec(nodes: ResolvedSpec[]): ResolvedSpec | undefined {
   }
   return nodes
     .slice()
-    .sort((a, b) => Number(nonEmpty(b)) - Number(nonEmpty(a)) || Number(b.dirSpec) - Number(a.dirSpec))[0]
+    .sort(
+      (a, b) =>
+        Number(nonEmpty(b)) - Number(nonEmpty(a)) ||
+        Number(b.dirSpec) - Number(a.dirSpec) ||
+        a.path.localeCompare(b.path)
+    )[0]
 }
 
 /** Resolve an id to its spec node — file or dir spec, at any depth. */
@@ -213,6 +218,39 @@ const unquote = (s: string): string => {
     : t
 }
 
+/** One YAML scalar: a ` #…` comment drops off a bare value (quoted
+ *  values keep their #), then quotes strip. */
+const yamlScalar = (s: string): string => {
+  const t = s.trim()
+  return unquote(t[0] === '"' || t[0] === "'" ? t : t.replace(/\s+#.*$/, ''))
+}
+
+/** Split a flow list on commas outside quotes — `["a,b", 'c']` is two
+ *  entries, not three. */
+const flowItems = (s: string): string[] => {
+  const items: string[] = []
+  let cur = ''
+  let q = ''
+  for (const ch of s) {
+    if (q !== '') {
+      cur += ch
+      if (ch === q) {
+        q = ''
+      }
+    } else if (ch === '"' || ch === "'") {
+      q = ch
+      cur += ch
+    } else if (ch === ',') {
+      items.push(cur)
+      cur = ''
+    } else {
+      cur += ch
+    }
+  }
+  items.push(cur)
+  return items
+}
+
 /** `scope:` frontmatter — repo-relative pathspecs the spec claims for
  *  itself (spec drift's audit surface). A YAML list or a single string;
  *  an empty/absent key declares nothing and returns []. */
@@ -228,11 +266,11 @@ function specScope(path: string): string[] {
     if (i === -1) {
       return []
     }
-    const inline = lines[i]!.replace(/^scope:\s*/, '').trim()
+    const inline = yamlScalar(lines[i]!.replace(/^scope:\s*/, ''))
     if (inline !== '') {
       return inline.startsWith('[') && inline.endsWith(']')
-        ? inline.slice(1, -1).split(',').map(unquote).filter((s) => s !== '')
-        : [unquote(inline)]
+        ? flowItems(inline.slice(1, -1)).map(yamlScalar).filter((s) => s !== '')
+        : [inline]
     }
     const items: string[] = []
     for (const l of lines.slice(i + 1)) {
@@ -240,7 +278,7 @@ function specScope(path: string): string[] {
       if (m === null) {
         break
       }
-      items.push(unquote(m[1]!))
+      items.push(yamlScalar(m[1]!))
     }
     return items.filter((s) => s !== '')
   } catch {
