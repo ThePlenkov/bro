@@ -35,43 +35,7 @@ import {
   unregisterAgentConnector,
   type AgentConnectorEnv,
 } from './agent-connectors.ts'
-import { initRepo } from './commands/testrepo.ts'
-
-/** bd shim — JSON store at $BEADS_DIR/store.json; covers show,
- *  update --claim, update --assignee, `config get actor`. */
-const FAKE_BD = `#!/usr/bin/env node
-const fs = require('node:fs')
-const DB = process.env.BEADS_DIR + '/store.json'
-const load = () => { try { return JSON.parse(fs.readFileSync(DB, 'utf8')) } catch { return { rows: [] } } }
-const save = (db) => fs.writeFileSync(DB, JSON.stringify(db))
-const args = process.argv.slice(2).filter((a) => a !== '--json')
-if (args[0] === 'config' && args[1] === 'get' && args[2] === 'actor') {
-  console.log('actor = tester'); process.exit(0)
-}
-const row = (id) => load().rows.find((r) => r.id === id)
-if (args[0] === 'show') {
-  const r = row(args[1])
-  if (!r) { console.error('not found: ' + args[1]); process.exit(1) }
-  process.stdout.write(JSON.stringify([r]) + '\\n')
-} else if (args[0] === 'update') {
-  const db = load()
-  const r = db.rows.find((x) => x.id === args[1])
-  if (!r) { console.error('not found: ' + args[1]); process.exit(1) }
-  for (let i = 2; i < args.length; i++) {
-    const k = args[i].slice(2)
-    if (k === 'claim') {
-      if (r.status !== 'open') { console.error('already claimed'); process.exit(1) }
-      r.status = 'in_progress'
-      r.assignee = 'tester'
-    } else {
-      r[k] = args[++i]
-    }
-  }
-  save(db)
-} else {
-  console.error('unhandled: ' + args.join(' ')); process.exit(1)
-}
-`
+import { initRepo, installFakeBd, readBeads, writeBeads } from './commands/testrepo.ts'
 
 /** tmux shim — a state file per socket at $TMUX_FAKE_HOME/<socket>.json
  *  maps session → pid; new-session spawns the pane command detached like
@@ -143,33 +107,35 @@ interface Fixture {
   root: string
   main: string
   beadsDir: string
+  /** the fake bd's JSON store (FAKE_BD_DB) */
+  db: string
   env: AgentConnectorEnv
   prevPath: string
   /** TMUX_FAKE_HOME before the fixture overwrote it — restored, never
    *  deleted, so a pre-set runner env survives the test. */
   prevTmuxFakeHome?: string
+  prevFakeBdDb?: string
+  prevBeadsActor?: string
   /** Ambient GIT_/BEADS_/BRO_ pins scrubbed for the test's duration. */
   scrubbed: Record<string, string | undefined>
   dbRows(): Array<Record<string, unknown>>
 }
 
-/** Real git repo + fake bd on PATH + a beadsDir store. The agent
- *  command is `node {promptFile}` — the prompt IS the program.
- *  `tmux: true` adds the tmux shim and a tmux knob mirroring native's. */
+/** Real git repo + the shared fake bd on PATH + a beadsDir the pinned
+ *  store's cwd contract needs (bdActor shells out with it as cwd; the
+ *  store itself keys off FAKE_BD_DB — same wiring as agents.test.ts).
+ *  The agent command is `node {promptFile}` — the prompt IS the
+ *  program. `tmux: true` adds the tmux shim and a tmux knob mirroring
+ *  native's. */
 function fixture(
   rows: Array<Record<string, unknown>>,
   command = 'node {promptFile}',
   opts: { tmux?: boolean } = {}
 ): Fixture {
   const { root, main } = initRepo('bro-agconn-')
+  const { binDir, db } = installFakeBd(root, rows)
   const beadsDir = join(root, 'beads')
   mkdirSync(beadsDir, { recursive: true })
-  const db = join(beadsDir, 'store.json')
-  writeFileSync(db, JSON.stringify({ rows }))
-  const binDir = join(root, 'bin')
-  mkdirSync(binDir)
-  writeFileSync(join(binDir, 'bd'), FAKE_BD)
-  chmodSync(join(binDir, 'bd'), 0o755)
   const agents: Record<string, Record<string, unknown>> = { native: { command } }
   const prevTmuxFakeHome = process.env.TMUX_FAKE_HOME
   if (opts.tmux === true) {
@@ -180,6 +146,8 @@ function fixture(
     agents['tmux'] = { command, socket: 'test' }
   }
   const prevPath = process.env.PATH ?? ''
+  const prevFakeBdDb = process.env.FAKE_BD_DB
+  const prevBeadsActor = process.env.BEADS_ACTOR
   // ambient repo/store pins (GIT_DIR, BEADS_DIR, BRO_*) would redirect
   // the connector's git-common-dir resolution into the outer repo —
   // same hazard testrepo's git() strips
@@ -191,15 +159,22 @@ function fixture(
     }
   }
   process.env.PATH = `${binDir}:${prevPath}`
+  process.env.FAKE_BD_DB = db
+  // BEADS_ACTOR is pinned so the rebind-actor check matches the fake's
+  // `tester` regardless of session env (same as agents.test.ts)
+  process.env.BEADS_ACTOR = 'tester'
   return {
     root,
     main,
     beadsDir,
+    db,
     env: { agents, connectors: {} },
     prevPath,
     prevTmuxFakeHome,
+    prevFakeBdDb,
+    prevBeadsActor,
     scrubbed,
-    dbRows: () => JSON.parse(readFileSync(db, 'utf8')).rows,
+    dbRows: () => readBeads(db),
   }
 }
 
@@ -237,6 +212,16 @@ function cleanup(fx: Fixture): void {
     delete process.env.TMUX_FAKE_HOME
   } else {
     process.env.TMUX_FAKE_HOME = fx.prevTmuxFakeHome
+  }
+  for (const [k, v] of [
+    ['FAKE_BD_DB', fx.prevFakeBdDb],
+    ['BEADS_ACTOR', fx.prevBeadsActor],
+  ] as const) {
+    if (v === undefined) {
+      delete process.env[k]
+    } else {
+      process.env[k] = v
+    }
   }
   for (const [k, v] of Object.entries(fx.scrubbed)) {
     if (v === undefined) {
@@ -418,10 +403,9 @@ function connectorContract(b: BackendCase): void {
       kill(first)
       await until(() => !pidAlive(first.pid!))
       // someone else claimed the step while our worker was dead
-      const db = join(f.beadsDir, 'store.json')
-      const rows = JSON.parse(readFileSync(db, 'utf8')).rows
-      rows[0].assignee = 'other-actor'
-      writeFileSync(db, JSON.stringify({ rows }))
+      const rows = f.dbRows()
+      rows[0]!.assignee = 'other-actor'
+      writeBeads(f.db, rows)
       await assert.rejects(
         c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
         /claimed by other-actor/
