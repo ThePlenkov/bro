@@ -23,7 +23,8 @@ import { collectEmbedded, type EmbeddedData } from './embedded.ts'
 function repoRoot(): string | null {
   const root = fileURLToPath(new URL('../../..', import.meta.url))
   try {
-    return JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).name === 'bro' ? root : null
+    const isRepo = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).name === 'bro'
+    return isRepo && existsSync(join(root, 'skills')) && existsSync(join(root, 'formulas')) ? root : null
   } catch {
     return null
   }

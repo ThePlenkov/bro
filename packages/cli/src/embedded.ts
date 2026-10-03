@@ -10,8 +10,8 @@
  * the snapshot can never drift between them. The repo's skills/ and
  * formulas/ trees are the single source of truth.
  */
-import { readdirSync, readFileSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { lstatSync, readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 export interface EmbeddedData {
   SKILL_FILES: Record<string, string>
@@ -19,20 +19,29 @@ export interface EmbeddedData {
 }
 
 /** Reads every file under dir into {relpath: utf8}; keys are POSIX so the
- *  snapshot is byte-identical on every OS. */
+ *  snapshot is byte-identical on every OS. Symlinks are never followed:
+ *  recursive readdir descends into linked dirs, so a manual lstat walk
+ *  keeps the snapshot inside the tree. */
 function collectDir(root: string, dir: string, prefix = ''): Record<string, string> {
   const files: Record<string, string> = {}
-  // readdir order isn't guaranteed across filesystems — sort for a
-  // deterministic snapshot (check-embedded compares serialized output).
-  const entries = readdirSync(join(root, dir), { recursive: true, withFileTypes: true })
-    .sort((a, b) => join(a.parentPath, a.name).localeCompare(join(b.parentPath, b.name)))
-  for (const entry of entries) {
-    if (!entry.isFile()) {
-      continue
+  const walk = (d: string, rel: string): void => {
+    // readdir order isn't guaranteed across filesystems — sort for a
+    // deterministic snapshot (check-embedded compares serialized output).
+    for (const name of readdirSync(d).sort((a, b) => a.localeCompare(b))) {
+      const path = join(d, name)
+      const r = rel ? `${rel}/${name}` : name
+      const st = lstatSync(path)
+      if (st.isSymbolicLink()) {
+        continue
+      }
+      if (st.isDirectory()) {
+        walk(path, r)
+      } else if (st.isFile()) {
+        files[prefix + r] = readFileSync(path, 'utf8')
+      }
     }
-    const abs = join(entry.parentPath, entry.name)
-    files[`${prefix}${relative(join(root, dir), abs).replaceAll('\\', '/')}`] = readFileSync(abs, 'utf8')
   }
+  walk(join(root, dir), '')
   return files
 }
 

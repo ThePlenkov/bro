@@ -20,6 +20,17 @@ if (!existsSync(artifact)) {
 
 const current = collectEmbedded(root)
 const embedded: unknown = JSON.parse(readFileSync(artifact, 'utf8'))
+if (
+  typeof embedded !== 'object' ||
+  embedded === null ||
+  !('SKILL_FILES' in embedded) ||
+  !('FORMULA_FILES' in embedded) ||
+  typeof embedded.SKILL_FILES !== 'object' ||
+  typeof embedded.FORMULA_FILES !== 'object'
+) {
+  console.error('dist/generated/skills-data.json has invalid structure — rebuild (npm run build)')
+  process.exit(1)
+}
 if (JSON.stringify(embedded) !== JSON.stringify(current)) {
   console.error('dist/generated/skills-data.json is stale — rebuild (npm run build)')
   process.exit(1)
