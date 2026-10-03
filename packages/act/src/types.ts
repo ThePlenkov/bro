@@ -32,9 +32,10 @@ export interface PrActState {
   /** Pushes made after the first review comment landed — the act loop's
    *  round counter. */
   fixRounds: number
-  /** act.maxRounds — when fixRounds exceeds this, open threads must defer
-   *  to debt beads instead of another inline-fix round. 0 = unbounded.
-   *  On a docs-only PR this already carries the tighter docsMaxRounds. */
+  /** The effective round cap — when fixRounds exceeds this, open threads
+   *  must defer to debt beads instead of another inline-fix round.
+   *  0 = unbounded. Usually act.maxRounds; on a docs-only PR the tighter
+   *  of it and act.docsMaxRounds. */
   maxRounds: number
   /** Every file the PR touches matches act.docsPaths — the signal that
    *  swapped in the tighter round cap. Probed only while threads are

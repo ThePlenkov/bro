@@ -8,26 +8,26 @@
 import { DEFAULT_CONFIG } from '@broject/core'
 import type { PrTarget, ReviewFacade } from '@broject/core'
 
+// '**/' before '**' — '**/' is zero-or-more directories, so '**/*.md'
+// hits a root-level README.md, not only slashed paths
+const GLOB_TOKEN = /\*\*\/|\*\*|\*|\?|[^*?]+/g
+
 function globToRe(glob: string): RegExp {
-  let re = ''
-  for (let i = 0; i < glob.length; i += 1) {
-    const c = glob[i]!
-    if (c === '*') {
-      if (glob[i + 1] === '*') {
-        // '**/' is zero-or-more directories — '**/*.md' must hit a
-        // root-level README.md, not only slashed paths
-        re += glob[i + 2] === '/' ? '(?:.*/)?' : '.*'
-        i += glob[i + 2] === '/' ? 2 : 1
-      } else {
-        re += '[^/]*'
-      }
-    } else if (c === '?') {
-      re += '[^/]'
-    } else {
-      // any non-alphanumeric char is safe to escape literally
-      re += /[a-zA-Z0-9]/.test(c) ? c : `\\${c}`
+  const re = glob.replace(GLOB_TOKEN, (tok) => {
+    switch (tok) {
+      case '**/':
+        return '(?:.*/)?'
+      case '**':
+        return '.*'
+      case '*':
+        return '[^/]*'
+      case '?':
+        return '[^/]'
+      default:
+        // literal run — escape every non-alphanumeric char
+        return tok.replace(/[^a-zA-Z0-9]/g, (c) => `\\${c}`)
     }
-  }
+  })
   return new RegExp(`^${re}$`)
 }
 

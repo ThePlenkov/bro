@@ -51,7 +51,7 @@ Past it, the gate's blocker changes its verdict: *defer remaining threads
 to debt beads, do not fix inline.* Docs-only PRs — every changed file
 matching `act.docsPaths` — cap tighter at `act.docsMaxRounds` (default
 **2**): doc threads churn per push, so the tail belongs in debt sooner.
-`docs_only=true` in `act status` shows when the tighter cap is in effect.
+`docs_only=true` in `act status` marks a docs-only PR.
 
 Contradictory findings across rounds resolve by **judgment, not push** —
 a fix for round N can draw a contradictory finding in round N+1; a

@@ -149,8 +149,9 @@ export const actConnector: Connector = {
           block:
             `${line} — ` +
             'list with `bro act threads` — fix inline or defer to a debt bead ' +
-            '(reply + resolve); when fix_rounds exceeds act.maxRounds only ' +
-            'defer counts; recheck `bro act status`',
+            '(reply + resolve); when fix_rounds exceeds the round cap ' +
+            '(act.maxRounds — tighter on docs-only PRs) only defer ' +
+            'counts; recheck `bro act status`',
           passive: `${line} (current branch — this session did not touch it)`,
         },
       ]

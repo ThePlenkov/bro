@@ -110,7 +110,7 @@ export const actSection: ConfigSection<{
           // an empty pattern would match EVERY path
           (v): v is string => typeof v === 'string' && v.trim() !== ''
         )
-      : DEFAULT_CONFIG.act.docsPaths,
+      : [...DEFAULT_CONFIG.act.docsPaths],
     docsMaxRounds:
       typeof obj.docsMaxRounds === 'number' &&
       Number.isInteger(obj.docsMaxRounds) &&
