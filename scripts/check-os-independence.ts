@@ -78,8 +78,9 @@ function tokenMatches(line: string, token: string): boolean {
 }
 
 // `git grep` ships with Git on Windows too — not a POSIX-only pattern.
-const isGitSubcommand = (line: string, token: string): boolean =>
-  token === 'grep ' && line.includes('git grep')
+// Strip the subcommand itself so a later `| grep` on the same line still
+// gets flagged.
+const stripGitSubcommands = (line: string): string => line.replace(/\bgit\s+grep\b/g, '')
 
 interface Issue {
   file: string
@@ -98,7 +99,7 @@ for await (const path of walk(skillDir)) {
   const lines = text.split('\n')
   let inShell = false
   for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i]!
+    const line = lines[i] ?? ''
     if (/^```(bash|sh|shell)\b/.test(line)) {
       inShell = true
       continue
@@ -110,8 +111,9 @@ for await (const path of walk(skillDir)) {
     if (!inShell) {
       continue
     }
+    const scanLine = stripGitSubcommands(line)
     for (const { token, advice } of POSIX_PATTERNS) {
-      if (tokenMatches(line, token) && !isGitSubcommand(line, token)) {
+      if (tokenMatches(scanLine, token)) {
         issues.push({ file: rel, line: i + 1, token, advice })
       }
     }

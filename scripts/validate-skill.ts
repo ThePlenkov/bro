@@ -38,10 +38,17 @@ if (frontmatter === null) {
   console.error(`::error file=${skillMdPath}::no YAML frontmatter`)
   failed = true
 } else {
-  const fm = frontmatter[1]!
+  const fmLines = frontmatter[1]!.split('\n')
   for (const field of ['name', 'description'] as const) {
-    const m = new RegExp(`^${field}:\\s*(.+)$`, 'm').exec(fm)
-    const value = m?.[1]?.trim().replace(/^["']|["']$/g, '') ?? ''
+    const keyRe = new RegExp(`^${field}:\\s*(.*)$`)
+    const idx = fmLines.findIndex((l) => keyRe.test(l))
+    let value = idx === -1 ? '' : (keyRe.exec(fmLines[idx]!)?.[1] ?? '').trim().replace(/^["']|["']$/g, '')
+    // Block scalar (`description: >`) or next-line value needs a following
+    // indented non-empty line — an empty block is still an empty field.
+    if (idx !== -1 && (value === '' || /^[|>]/.test(value))) {
+      const next = fmLines.slice(idx + 1).find((l) => l.trim() !== '' && !l.trimStart().startsWith('#'))
+      value = next !== undefined && /^\s/.test(next) ? 'block' : ''
+    }
     if (value === '') {
       console.error(`::error file=${skillMdPath}::missing or empty '${field}' in frontmatter`)
       failed = true
@@ -54,7 +61,9 @@ if (frontmatter === null) {
 if (existsSync(openaiYamlPath)) {
   const openaiYaml = readFileSync(openaiYamlPath, 'utf8')
   for (const key of ['display_name', 'short_description', 'default_prompt'] as const) {
-    if (!new RegExp(`${key}:\\s*\\S`).test(openaiYaml)) {
+    // Anchored at line start (any indent — keys nest under `interface:`)
+    // so comments and longer key names can't satisfy the check.
+    if (!new RegExp(`^\\s*${key}:\\s*\\S`, 'm').test(openaiYaml)) {
       console.error(`::error file=${openaiYamlPath}::missing or empty '${key}'`)
       failed = true
     }

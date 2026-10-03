@@ -7,7 +7,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
-const MAX_LINES = 400
+const MAX_LINES = 250
 
 const { values, positionals } = parseArgs({
   options: {
