@@ -213,7 +213,8 @@ function specParent(path: string): string | undefined {
 
 const unquote = (s: string): string => {
   const t = s.trim()
-  return t.length >= 2 && t[0] === t[t.length - 1] && (t[0] === '"' || t[0] === "'")
+  return t.length >= 2 &&
+    ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))
     ? t.slice(1, -1)
     : t
 }
@@ -222,7 +223,9 @@ const unquote = (s: string): string => {
  *  values keep their #), then quotes strip. */
 const yamlScalar = (s: string): string => {
   const t = s.trim()
-  return unquote(t[0] === '"' || t[0] === "'" ? t : t.replace(/\s+#.*$/, ''))
+  return unquote(
+    t.startsWith('"') || t.startsWith("'") ? t : t.replace(/\s+#.*$/, '')
+  )
 }
 
 /** Split a flow list on commas outside quotes — `["a,b", 'c']` is two
@@ -274,11 +277,11 @@ function specScope(path: string): string[] {
     }
     const items: string[] = []
     for (const l of lines.slice(i + 1)) {
-      const m = /^\s*-\s+(.+?)\s*$/.exec(l)
+      const m = /^\s*-\s+/.exec(l)
       if (m === null) {
         break
       }
-      items.push(yamlScalar(m[1]!))
+      items.push(yamlScalar(l.slice(m[0].length)))
     }
     return items.filter((s) => s !== '')
   } catch {
