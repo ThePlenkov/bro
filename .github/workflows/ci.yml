@@ -23,10 +23,13 @@ jobs:
       - run: npm ci --no-audit --no-fund
 
       - name: Check generated files are fresh
-        run: npm run check:embedded && npm run check:plugins
+        run: npm run check:plugins
 
       - name: Build
         run: npm run build
+
+      - name: Check embedded snapshot is fresh
+        run: npm run check:embedded
 
       - name: Typecheck
         run: npm run typecheck

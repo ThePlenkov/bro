@@ -22,10 +22,12 @@ prompts; it survives in a file with a frontmatter trigger.
 ## Generation
 
 `scripts/gen-plugins.ts` renders `skills/*/SKILL.md` into per-client
-adapters (`plugins/{devin,claude,codex}/bro/`) plus the embedded copy in
-`packages/cli/src/skills-data.ts`. The source of truth is `skills/`;
-adapters are build artifacts — edit the source, regen, commit both.
-`npm run check:embedded` and `check:plugins` enforce freshness in CI.
+adapters (`plugins/{devin,claude,codex}/bro/`). The published CLI also
+embeds a snapshot of `skills/` + `formulas/` — emitted at bundle time as
+`dist/generated/skills-data.json`; source runs collect the trees live.
+The source of truth is `skills/`; adapters are build artifacts — edit the
+source, regen, commit. `npm run check:embedded` and `check:plugins`
+enforce freshness in CI.
 
 ## Skill discipline for agents
 
