@@ -92,7 +92,7 @@ function list(ul, items, cls) {
 
 // r.pr / g.link are markdown [#N](url) — the webui renders real anchors
 function prCell(td, md, num) {
-  var m = /^\\[#(\\d+)\\]\\(([^)]+)\\)$/.exec(md || '');
+  var m = /^\\[#(\\d+)\\]\\((https?:\\/\\/[^)]+)\\)$/.exec(md || '');
   if (m) {
     var a = el('a', '#' + m[1]);
     a.href = m[2];
