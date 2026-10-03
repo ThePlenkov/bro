@@ -42,8 +42,9 @@ as a warnings block.
 - **Poll discipline** — chained `setTimeout` at 2s (a slow collect
   stretches the cadence, never stacks), `tick()` returns early while
   `document.hidden` or a fetch is in flight, `visibilitychange` re-arms
-  and repaints immediately on return. A failed fetch dims the frame and
-  reports the error — it never blanks the last good snapshot.
+  and polls immediately on return when idle; an active fetch renders on
+  completion. A failed fetch dims the frame and reports the error — it
+  never blanks the last good snapshot.
 - **Read-only** — the page issues GETs only. The respawn decision stays
   a surface, not a button; spawn/stop stay API ops for real clients.
 - **Injection-safe** — bead titles are user input: every value lands via

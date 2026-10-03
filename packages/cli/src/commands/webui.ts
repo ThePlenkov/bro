@@ -60,9 +60,10 @@ function list(ul, items, cls) {
 }
 
 // pr/g.link are markdown [#N](url) — the webui renders real anchors;
-// anything after the link stays plain text
+// https? only: a poisoned link can't navigate to a custom scheme.
+// Anything after the link stays plain text
 function appendPrLink(parent, md) {
-  var m = /^\\[#(\\d+)\\]\\(([^)]+)\\)(.*)$/.exec(md || '');
+  var m = /^\\[#(\\d+)\\]\\((https?:\\/\\/[^)]+)\\)(.*)$/.exec(md || '');
   if (m) {
     var a = el('a', '#' + m[1]);
     a.href = m[2];
