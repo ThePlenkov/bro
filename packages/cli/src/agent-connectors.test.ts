@@ -32,6 +32,7 @@ import {
   pidAlive,
   registerAgentConnector,
   resolveAgentConnector,
+  unregisterAgentConnector,
   type AgentConnectorEnv,
 } from './agent-connectors.ts'
 import { initRepo } from './commands/testrepo.ts'
@@ -625,6 +626,26 @@ describe('eachAgentConnector', () => {
       () => eachAgentConnector({ dir: '/x' }, { agents: {}, connectors: {} }),
       /backend exploded/
     )
+  })
+})
+
+describe('unregisterAgentConnector', () => {
+  test('built-ins refuse removal; unknown names are a no-op', () => {
+    const before = agentConnectorNames()
+    // warns + skips — a misnamed fixture cleanup must not take 'native' down
+    unregisterAgentConnector('native')
+    unregisterAgentConnector('never-registered')
+    assert.deepEqual(agentConnectorNames(), before)
+  })
+
+  test('a disposer drops only the entry its registration added', () => {
+    const dispose = registerAgentConnector('pin-dup', makeNativeConnector)
+    // a duplicate registration is skipped and hands back no disposer —
+    // the loser's cleanup cannot remove the entry that won the name
+    assert.equal(registerAgentConnector('pin-dup', makeTmuxConnector), undefined)
+    dispose!()
+    assert.ok(!agentConnectorNames().includes('pin-dup'))
+    assert.ok(agentConnectorNames().includes('native'))
   })
 })
 

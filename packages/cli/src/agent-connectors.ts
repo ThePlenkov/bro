@@ -67,13 +67,47 @@ export type AgentConnectorFactory = (
 const agentRegistry: { name: string; make: AgentConnectorFactory }[] = []
 
 /** External backends (gascity, tmux, …) register here. Duplicate names
- *  are skipped — a plugin cannot shadow a built-in backend. */
-export function registerAgentConnector(name: string, make: AgentConnectorFactory): void {
+ *  are skipped — a plugin cannot shadow a built-in backend. Returns a
+ *  disposer bound to THIS registration (undefined when skipped): fixture
+ *  cleanup removes the entry it added, never whatever holds the name. */
+export function registerAgentConnector(
+  name: string,
+  make: AgentConnectorFactory
+): (() => void) | undefined {
   if (agentRegistry.some((x) => x.name === name)) {
     console.error(`warning: agent connector "${name}" already registered — skipped`)
+    return undefined
+  }
+  const entry = { name, make }
+  agentRegistry.push(entry)
+  return () => {
+    const i = agentRegistry.indexOf(entry)
+    if (i >= 0) {
+      agentRegistry.splice(i, 1)
+    }
+  }
+}
+
+/** Backends registered at module load — a fixture unregistering one of
+ *  these (a misnamed cleanup, or a name whose register was skipped as a
+ *  duplicate) would silently change which factory the name resolves to
+ *  for the rest of the process. */
+const BUILTIN_AGENT_BACKENDS = new Set(['native', 'tmux', 'gascity'])
+
+/** Deliberate name-based removal — fixtures prefer the disposer
+ *  registerAgentConnector returns, which can only drop the entry it
+ *  added. Built-ins refuse with a warning (same visibility as
+ *  registerAgentConnector's duplicate warning); unknown names are a
+ *  no-op. */
+export function unregisterAgentConnector(name: string): void {
+  if (BUILTIN_AGENT_BACKENDS.has(name)) {
+    console.error(`warning: agent connector "${name}" is built-in — unregister skipped`)
     return
   }
-  agentRegistry.push({ name, make })
+  const i = agentRegistry.findIndex((x) => x.name === name)
+  if (i >= 0) {
+    agentRegistry.splice(i, 1)
+  }
 }
 
 export function agentConnectorNames(): string[] {
