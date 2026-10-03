@@ -66,11 +66,11 @@ function badScopeEntry(entry: string): boolean {
   )
 }
 
-/** A subtract-only pathspec — `:(exclude…)`, `:(!…)`, `:!…`. An
- *  all-exclusion scope matches the whole repo minus a hole: silent
+/** A subtract-only pathspec — `:(exclude…)`, `:(!…)`, `:!…`, `:^…`.
+ *  An all-exclusion scope matches the whole repo minus a hole: silent
  *  widening, which the spec forbids. */
 function negativePathspec(entry: string): boolean {
-  if (entry.startsWith(':!')) {
+  if (entry.startsWith(':!') || entry.startsWith(':^')) {
     return true
   }
   const m = /^:\(([^)]*)\)/.exec(entry)

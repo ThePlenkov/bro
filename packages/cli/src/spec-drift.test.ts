@@ -163,13 +163,16 @@ describe('resolveScope', () => {
     withRepo(
       (m) => {
         seedSpec(m, 'b1', '---\nscope:\n  - ":(exclude)docs"\n---\n')
+        seedSpec(m, 'b2', '---\nscope:\n  - ":^docs"\n---\n')
         mkdirSync(join(m, 'docs'))
         writeFileSync(join(m, 'docs', 'a.md'), 'x\n')
       },
       (main) => {
-        const r = resolveScope(main, 'HEAD', 'b1', specStore(main))
-        assert.equal(r.state, 'unverifiable')
-        assert.match(r.state === 'unverifiable' ? r.reason : '', /exclusion-only/)
+        for (const id of ['b1', 'b2']) {
+          const r = resolveScope(main, 'HEAD', id, specStore(main))
+          assert.equal(r.state, 'unverifiable', id)
+          assert.match(r.state === 'unverifiable' ? r.reason : '', /exclusion-only/)
+        }
       }
     )
   })
