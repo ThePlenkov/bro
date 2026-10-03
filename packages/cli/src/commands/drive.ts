@@ -248,6 +248,8 @@ export interface OccupancyCtx {
  *  the argument: skipped pass, never double-work on one branch. */
 export function occupied(opts: OccupancyCtx): string | undefined {
   const live = opts.agents.filter((a) => a.state === 'running' || a.state === 'spawned')
+  // fixer agents spawn with molStep = the fixer bead's id, so this match
+  // names our own worker — reported as the fixer, not a foreign occupant
   if (opts.fixerBead !== undefined && live.some((a) => a.molStep === opts.fixerBead)) {
     return `fixer agent live on ${opts.fixerBead}`
   }
