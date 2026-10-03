@@ -11,8 +11,10 @@
  * not a write barrier though — a hostile web page can fire simple
  * cross-origin POSTs, so writes additionally require
  * `content-type: application/json` (a request a browser can't make
- * without a preflight this server never answers), and every request
- * needs a loopback `Host` — a rebound name is 403 (DNS rebinding).
+ * without a preflight this server never answers) and refuse a
+ * non-loopback `Origin` (the browser stamps every cross-site request —
+ * a foreign one is 403). Every request needs a loopback `Host` — a
+ * rebound name is 403 (DNS rebinding).
  *
  *   GET    /                    service index
  *   GET    /fleet               the fleet webui — an HTML dashboard over
@@ -293,6 +295,22 @@ export interface ServeMeta {
  *  conservative charset so a weird segment can't smuggle path or query
  *  syntax into downstream lookups. */
 const SAFE_REF = /^[A-Za-z0-9._~-]+$/
+
+/** State-changing methods — the Origin allowlist applies to all of
+ *  them, not just the body-carrying ones: DELETE writes too. */
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
+/** A browser stamps every cross-site request — and every same-site
+ *  POST — with `Origin`. Loopback origins are the fleet webui and
+ *  local tooling; anything else (or unparseable) is a foreign page. */
+function isLoopbackOrigin(origin: string): boolean {
+  try {
+    const { hostname } = new URL(origin)
+    return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]'
+  } catch {
+    return false
+  }
+}
 
 function parseRef(seg: string): string {
   let ref: string
@@ -594,6 +612,18 @@ export function createServeHandler(
         if (host !== '127.0.0.1' && host !== 'localhost' && host !== '[::1]') {
           send(res, 403, { error: 'loopback host only' })
           return
+        }
+        // Origin allowlist on writes — a hostile page can't hide its
+        // Origin (the browser sets it), so a present-but-foreign one is
+        // refused outright. Clients that send none (curl, TUI, node
+        // fetch) pass here; the content-type gate below is the second
+        // barrier for the Origin-less simple-request shape.
+        if (WRITE_METHODS.has(req.method ?? 'GET')) {
+          const origin = req.headers.origin
+          if (origin !== undefined && !isLoopbackOrigin(origin)) {
+            send(res, 403, { error: 'loopback origin only' })
+            return
+          }
         }
         const url = new URL(req.url ?? '/', 'http://127.0.0.1')
         const wantsBody =

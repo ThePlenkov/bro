@@ -383,6 +383,35 @@ describe('serve handler over a real socket', () => {
       })
       assert.equal(csrf.status, 415)
 
+      // a foreign Origin on a write — the browser's own CSRF stamp — is
+      // refused before routing, on body-carrying and DELETE alike
+      const foreignPost = await fetch(`${base}/api/v1/agents`, {
+        method: 'POST',
+        headers: { ...json, origin: 'http://evil.example' },
+        body: '{"molStep":"fx-1"}',
+      })
+      assert.equal(foreignPost.status, 403)
+      const foreignDelete = await fetch(`${base}/api/v1/agents/native-aa11`, {
+        method: 'DELETE',
+        headers: { origin: 'http://evil.example' },
+      })
+      assert.equal(foreignDelete.status, 403)
+      // an unparseable Origin fails closed
+      const badOrigin = await fetch(`${base}/api/v1/agents`, {
+        method: 'POST',
+        headers: { ...json, origin: 'not a url' },
+        body: '{"molStep":"fx-1"}',
+      })
+      assert.equal(badOrigin.status, 403)
+      // a loopback Origin — the fleet webui's own shape — passes the gate;
+      // the 400 proves the request reached the body parser
+      const sameOrigin = await fetch(`${base}/api/v1/agents`, {
+        method: 'POST',
+        headers: { ...json, origin: base },
+        body: 'not json',
+      })
+      assert.equal(sameOrigin.status, 400)
+
       // a foreign Host — the DNS-rebinding shape — is refused before routing
       const rebound = await new Promise<IncomingMessage>((resolve) => {
         const req = request(
