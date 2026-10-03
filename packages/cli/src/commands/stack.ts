@@ -17,7 +17,14 @@
  *                             and reported — the owner rebases on enter
  */
 import { basename } from 'node:path'
-import { gitTry, reviewHost, type PrMeta, type ReviewFacade } from '@broject/core'
+import {
+  acquireFileLock,
+  gitTry,
+  LockTimeout,
+  reviewHost,
+  type PrMeta,
+  type ReviewFacade,
+} from '@broject/core'
 import {
   displayBase,
   formatStackBranch,
@@ -34,15 +41,18 @@ import {
 import { flag, positionals } from './args.ts'
 import { loadBroConfig } from '../plugins.ts'
 import {
+  createWorktree,
   dirtyCount,
-  enterWorktree,
+  finishWorktreeEnter,
   mainWorktree,
   defaultBranchName,
   parseWorktreePorcelain,
   readStackEdges,
   recordStackEdge,
   removeStackEdge,
+  stackPushLockPath,
   stateOfWorktree,
+  type WorktreeCreateResult,
   type WorktreeInfo,
 } from './work.ts'
 
@@ -164,29 +174,70 @@ function cmdPush(argv: string[]): void {
   const name = resolveStackName(argv)
   const main = mainWorktree()
   const defaultRef = defaultBranchName()
-  // re-pushing a bead that already sits in the stack re-enters its member
-  // branch — push is idempotent, never a duplicate position
-  const existing = stackMemberFor(main.path, name, slug)
-  const rev = resolveReview(main.path)
-  const dead = existing === undefined ? mergedBranches(main.path, name, rev) : undefined
-  const tip = existing === undefined ? stackTip(main.path, name, dead) : undefined
-  const n = existing?.n ?? tip!.n
-  const branch = existing?.branch ?? formatStackBranch(name, n, slug)
-  const base =
-    (existing === undefined ? undefined : readStackEdges().get(existing.branch)) ??
-    tip?.base ??
-    defaultRef ??
-    main.branch ??
-    main.head
-  const r = enterWorktree({
-    slug,
-    branch,
-    base: existing === undefined ? base : undefined,
-    main,
-    defaultRef,
-    allowExisting: existing !== undefined,
-    reusePath: existing !== undefined,
-  })
+  // the push lock serializes member-listing → worktree-add across bro
+  // processes: without it two concurrent pushes (loop workers, push +
+  // loop racing) read the same tip and both mint position n under
+  // different slugs. The section ends at `worktree add` — once the
+  // branch exists a waiter's recompute sees it; the slower post-add
+  // steps (submodule init, bead claim) stay outside the hold.
+  const lockPath = stackPushLockPath(name)
+  if (lockPath === null) {
+    console.error('note: could not resolve the git common dir — pushing without the stack lock')
+  }
+  let release: (() => void) | undefined
+  try {
+    release =
+      lockPath === null ? undefined : acquireFileLock(lockPath, { label: `stack ${name} push lock` })
+  } catch (err) {
+    if (err instanceof LockTimeout) {
+      console.error(`error: ${err.message} — another push is in flight; retry`)
+    } else {
+      console.error(`error: ${(err as Error).message}`)
+    }
+    process.exit(1)
+  }
+  let n: number
+  let created: WorktreeCreateResult
+  let base: string | undefined
+  let reenter = false
+  try {
+    // re-pushing a bead that already sits in the stack re-enters its member
+    // branch — push is idempotent, never a duplicate position
+    const existing = stackMemberFor(main.path, name, slug)
+    reenter = existing !== undefined
+    const rev = resolveReview(main.path)
+    const dead = existing === undefined ? mergedBranches(main.path, name, rev) : undefined
+    const tip = existing === undefined ? stackTip(main.path, name, dead) : undefined
+    n = existing?.n ?? tip!.n
+    const branch = existing?.branch ?? formatStackBranch(name, n, slug)
+    base =
+      (existing === undefined ? undefined : readStackEdges().get(existing.branch)) ??
+      tip?.base ??
+      defaultRef ??
+      main.branch ??
+      main.head
+    created = createWorktree({
+      slug,
+      branch,
+      base: existing === undefined ? base : undefined,
+      main,
+      defaultRef,
+      allowExisting: existing !== undefined,
+      reusePath: existing !== undefined,
+    })
+  } finally {
+    release?.()
+  }
+  const r = finishWorktreeEnter(
+    {
+      slug,
+      branch: created.branch,
+      base: reenter ? undefined : base,
+      main,
+      defaultRef,
+    },
+    created
+  )
   console.log(`worktree ready: ${r.path}  (branch ${r.branch})`)
   console.log(`stack ${name} member ${n} — based on ${r.base ?? base ?? 'HEAD'}`)
   if (r.stacked) {

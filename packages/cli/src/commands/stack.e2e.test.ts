@@ -4,11 +4,14 @@
  *  branch. A bare origin exists so the post-rebase force-push is real. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import {
+  CLI_DIST,
   FAKE_BEAD,
   bead,
+  e2eEnv,
   git,
   initRepo,
   inside,
@@ -25,6 +28,7 @@ interface Fixture {
   main: string
   db: string
   hostState: string
+  env: Record<string, string>
   run: (args: string[], cwd?: string) => CliResult
 }
 
@@ -50,6 +54,7 @@ function stackFixture(rows: Array<Record<string, unknown>> = []): Fixture {
     main,
     db,
     hostState: host.state,
+    env,
     run: (args, cwd = main) => runCli(['stack', ...args], { cwd, env }),
   }
 }
@@ -134,6 +139,68 @@ describe('bro stack e2e', () => {
       // the base is the default branch, not the merged member
       assert.match(r.stdout, /stack\/s\/2-fx-b/)
       assert.match(r.stdout, /based on main/)
+    })
+  })
+
+  test('a push blocked on the push lock recomputes the position — no duplicate n', async () => {
+    const f = stackFixture([{ ...FAKE_BEAD, id: 'fx-b', title: 'second' }])
+    try {
+      // hold the lock the way a racing push would — the file IS the lock
+      const common = git(['rev-parse', '--path-format=absolute', '--git-common-dir'], f.main).trim()
+      const lock = join(common, 'bro', `stack-${encodeURIComponent('s')}.lock`)
+      mkdirSync(dirname(lock), { recursive: true })
+      writeFileSync(lock, `${process.pid}:racer`)
+      assert.equal(existsSync(CLI_DIST), true, 'packages/cli/dist is missing — run `npm run build`')
+      const proc = spawn(process.execPath, [CLI_DIST, 'stack', 'push', 'fx-b', '--name', 's'], {
+        cwd: f.main,
+        env: e2eEnv(f.env),
+      })
+      const done = new Promise<CliResult>((resolvePromise, rejectPromise) => {
+        let stdout = ''
+        let stderr = ''
+        const kill = setTimeout(() => {
+          proc.kill()
+          rejectPromise(new Error(`push never finished — lock still held?\n${stderr}`))
+        }, 30_000)
+        proc.stdout.on('data', (d: Buffer) => (stdout += d))
+        proc.stderr.on('data', (d: Buffer) => (stderr += d))
+        proc.on('error', (err) => {
+          clearTimeout(kill)
+          rejectPromise(err)
+        })
+        proc.on('close', (code) => {
+          clearTimeout(kill)
+          resolvePromise({ code, stdout, stderr })
+        })
+      })
+      // the "racer" lands member 1 while our push still waits on the lock —
+      // the push must re-read members inside the lock and mint position 2
+      git(['branch', 'stack/s/1-fx-a', 'main'], f.main)
+      rmSync(lock)
+      const r = await done
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /stack\/s\/2-fx-b/)
+      assert.match(r.stdout, /based on stack\/s\/1-fx-a/)
+      assert.equal(existsSync(lock), false)
+    } finally {
+      rmSync(f.root, { recursive: true, force: true })
+    }
+  })
+
+  test('a push that exits mid-section still releases the lock — exit-hook cleanup', () => {
+    const f = stackFixture([{ ...FAKE_BEAD, id: 'fx-c', title: 'third' }])
+    inside(f.main, f.root, () => {
+      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
+      // enterWorktree exits(1) on an existing target dir — inside the held lock
+      mkdirSync(join(f.root, 'main--fx-b'))
+      const r = f.run(['push', 'fx-b', '--name', 's'])
+      assert.equal(r.code, 1)
+      assert.match(r.stderr, /already exists/)
+      const common = git(['rev-parse', '--path-format=absolute', '--git-common-dir'], f.main).trim()
+      assert.equal(existsSync(join(common, 'bro', `stack-${encodeURIComponent('s')}.lock`)), false)
+      // the next push isn't blocked by the stranded hold
+      rmSync(join(f.root, 'main--fx-b'), { recursive: true })
+      assert.equal(f.run(['push', 'fx-c', '--name', 's']).code, 0)
     })
   })
 
