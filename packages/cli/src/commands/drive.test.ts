@@ -290,21 +290,35 @@ describe('buildFixerPrompt', () => {
 })
 
 describe('ensureFixerWorktree', () => {
-  test('reuses the conventional dir on the right branch; refuses a foreign one', () => {
+  test('reuses the conventional dir on the right branch; a foreign one falls back', () => {
     const { root, main } = initRepo('bro-drive-wtx-')
     inside(main, root, () => {
       git(['branch', 'work/bro-a'], main)
       git(['branch', 'work/bro-b'], main)
+      git(['branch', 'work/bro-c'], main)
       const dir = join(root, 'main--bro-a')
       git(['worktree', 'add', '-q', dir, 'work/bro-a'], main)
       assert.equal(ensureFixerWorktree(main, 'work/bro-a').path, dir)
-      // main--bro-c stands on a different branch — never clobbered
+      // main--bro-c stands on a different branch — never clobbered; the
+      // branch-namespaced path takes the checkout instead
       const foreign = join(root, 'main--bro-c')
       git(['worktree', 'add', '-q', foreign, 'work/bro-b'], main)
-      assert.match(
-        ensureFixerWorktree(main, 'work/bro-c').err ?? '',
-        /exists on work\/bro-b/
-      )
+      const r = ensureFixerWorktree(main, 'work/bro-c')
+      assert.equal(r.path, join(root, 'main--work-bro-c'))
+      assert.equal(r.created, true)
+      assert.equal(git(['-C', r.path!, 'branch', '--show-current'], main).trim(), 'work/bro-c')
+      assert.equal(git(['-C', foreign, 'branch', '--show-current'], main).trim(), 'work/bro-b')
+    })
+  })
+
+  test('every name held by a foreign branch is a named refusal', () => {
+    const { root, main } = initRepo('bro-drive-wtf-')
+    inside(main, root, () => {
+      git(['branch', 'work/bro-b'], main)
+      git(['branch', 'work/bro-e'], main)
+      git(['worktree', 'add', '-q', join(root, 'main--bro-d'), 'work/bro-b'], main)
+      git(['worktree', 'add', '-q', join(root, 'main--work-bro-d'), 'work/bro-e'], main)
+      assert.match(ensureFixerWorktree(main, 'work/bro-d').err ?? '', /foreign branch/)
     })
   })
 
@@ -314,6 +328,7 @@ describe('ensureFixerWorktree', () => {
       git(['branch', 'work/bro-a'], main)
       const r = ensureFixerWorktree(main, 'work/bro-a')
       assert.equal(r.err, undefined)
+      assert.equal(r.created, true)
       assert.equal(git(['-C', r.path!, 'branch', '--show-current'], main).trim(), 'work/bro-a')
     })
   })

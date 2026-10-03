@@ -321,28 +321,42 @@ function closeFixer(store: TaskStore, id: string, reason: string): void {
 // --- fixer worktree + prompt ---------------------------------------------------------
 
 /** The PR's fixer checkout: the branch's existing worktree, else a fresh
- *  `<repo>--<slug>` on it. A dir standing on another branch is named and
- *  skipped — never clobbered. */
+ *  `<repo>--<slug>` on it — `created` marks a dir this call added so the
+ *  caller can retire it when the work evaporates. A dir standing on
+ *  another branch is never clobbered: distinct branches sharing the
+ *  final slug (work/x vs loop/x) fall back to the branch-namespaced
+ *  `<repo>--work-x` path instead of refusing as foreign. */
 export function ensureFixerWorktree(
   mainRoot: string,
   branch: string
-): { path?: string; err?: string } {
-  const slug = branchSlug(branch)
-  const dir = worktreePathFor(mainRoot, slug)
-  if (existsSync(dir)) {
-    const on = gitTry(['-C', dir, 'branch', '--show-current']).out.trim()
-    return on === branch
-      ? { path: dir }
-      : { err: `${dir} exists on ${on || 'detached HEAD'} — not ${branch}` }
+): { path?: string; created?: boolean; err?: string } {
+  for (const name of new Set([branchSlug(branch), branch.replaceAll('/', '-')])) {
+    const dir = worktreePathFor(mainRoot, name)
+    if (existsSync(dir)) {
+      const on = gitTry(['-C', dir, 'branch', '--show-current']).out.trim()
+      if (on === branch) {
+        return { path: dir }
+      }
+      continue
+    }
+    // fetch first — an orphaned PR's remote head may be newer than ours
+    gitTry(['-C', mainRoot, 'fetch', 'origin', branch, '--quiet'])
+    const add = gitTry(['-C', mainRoot, 'worktree', 'add', dir, branch])
+    if (add.code === 0) {
+      // the fetch refreshed origin/<branch>, not the local ref the
+      // worktree just checked out — ff or the fixer works a stale tip
+      gitTry(['-C', dir, 'merge', '--ff-only', `origin/${branch}`, '--quiet'])
+      return { path: dir, created: true }
+    }
+    const retry = gitTry(['-C', mainRoot, 'worktree', 'add', '-b', branch, dir, `origin/${branch}`])
+    if (retry.code === 0) {
+      return { path: dir, created: true }
+    }
+    return { err: retry.err || add.err }
   }
-  // fetch first — an orphaned PR's remote head may be newer than ours
-  gitTry(['-C', mainRoot, 'fetch', 'origin', branch, '--quiet'])
-  const add = gitTry(['-C', mainRoot, 'worktree', 'add', dir, branch])
-  if (add.code === 0) {
-    return { path: dir }
+  return {
+    err: `every worktree path for ${branch} is held by a foreign branch`,
   }
-  const retry = gitTry(['-C', mainRoot, 'worktree', 'add', '-b', branch, dir, `origin/${branch}`])
-  return retry.code === 0 ? { path: dir } : { err: retry.err || add.err }
 }
 
 /** The fixer's work order — unresolved threads at spawn time (the prompt
@@ -458,16 +472,19 @@ async function spawnFixer(
   pr: number,
   state: PrActState,
   worktree: string | undefined,
-  fixer: TaskRow | undefined
+  fixer: TaskRow | undefined,
+  work: PassWork
 ): Promise<PrVerdict> {
   const link = ctx.rev.prLink(ctx.repo, pr)
   let wt = worktree
+  let created = false
   if (wt === undefined) {
     const ensured = ensureFixerWorktree(ctx.mainRoot, state.headRef)
     if (ensured.path === undefined) {
       return { pr, link, verdict: 'no-worktree', detail: ensured.err }
     }
     wt = ensured.path
+    created = ensured.created === true
   }
   // threads may have settled between the gate fetch and now — spawning a
   // fixer on an empty list burns an agent for nothing
@@ -475,7 +492,26 @@ async function spawnFixer(
     (t) => !t.resolved
   )
   if (open.length === 0) {
+    if (created) {
+      // the work evaporated after we checked out — retire the dir we
+      // just added or it lingers as an orphaned fixer worktree
+      gitTry(['-C', ctx.mainRoot, 'worktree', 'remove', wt])
+    }
     return { pr, link, verdict: 'threads-resolved' }
+  }
+  // a last occupancy read right before the spawn — the gap since the
+  // pass-level check covered the worktree create + thread refetch,
+  // long enough for another owner to arm this branch
+  const occ = occupied({
+    agents: work.agents,
+    fixerBead: fixer?.id,
+    branch: state.headRef,
+    worktree: wt,
+    workDetails: work.workDetails,
+    scanProc: agentProcessesIn,
+  })
+  if (occ !== undefined) {
+    return { pr, link, verdict: 'occupied', detail: occ }
   }
   const bead = fixer ?? ensureFixerBead(ctx.store, pr, link, state.headRef)
   const prompt = buildFixerPrompt({
@@ -559,7 +595,7 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     if (occ !== undefined) {
       return { pr, link, verdict: 'occupied', detail: occ }
     }
-    return spawnFixer(ctx, pr, state, worktree, fixer)
+    return spawnFixer(ctx, pr, state, worktree, fixer, work)
   }
   return { pr, link, verdict: 'blocked', detail: gate.blockers.join('; ') }
 }

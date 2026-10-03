@@ -239,6 +239,22 @@ describe('gascity connector', () => {
     }
   })
 
+  test('spec.env lands in the per-step agent env table', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
+      await conn.spawn({
+        ...SPEC(fx.main, fx.beadsDir, 'fx-1'),
+        env: { BRO_PR: '7', BRO_PR_URL: 'https://x/pr/7', 'BAD-KEY': 'x' },
+      })
+      const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8')
+      assert.match(agentToml, /env = \{ BRO_PR = "7", BRO_PR_URL = "https:\/\/x\/pr\/7" \}/)
+      assert.ok(!agentToml.includes('BAD-KEY'))
+    } finally {
+      cleanup(fx)
+    }
+  })
+
   test('a live session on the step refuses a second spawn', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
