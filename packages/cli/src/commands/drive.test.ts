@@ -71,6 +71,10 @@ describe('driveSection', () => {
       merge: 'never',
     })
     assert.equal(driveSection({ intervalSec: -5 }).intervalSec, 300)
+    // a saved cadence below the --every floor would be rejected as its
+    // own default — the section normalizes out-of-range values
+    assert.equal(driveSection({ intervalSec: 0.05 }).intervalSec, 300)
+    assert.equal(driveSection({ intervalSec: Infinity }).intervalSec, 300)
     assert.equal(driveSection({ merge: 'always' }).merge, 'auto')
   })
 })

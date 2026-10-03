@@ -11,6 +11,12 @@ export interface DriveConfig {
   merge: 'auto' | 'never'
 }
 
+/** The cadence bounds `drive --every` enforces — the config section
+ *  applies the same floor so a saved cadence can never be rejected as
+ *  its own default (a sub-floor cadence is a busy loop, not a poll). */
+export const MIN_INTERVAL_SEC = 0.1
+export const MAX_INTERVAL_SEC = 0x7fffffff / 1000
+
 /** bro.config.json `drive` section. */
 export const driveSection: ConfigSection<DriveConfig> = (raw) => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
@@ -23,7 +29,8 @@ export const driveSection: ConfigSection<DriveConfig> = (raw) => {
     intervalSec:
       typeof obj.intervalSec === 'number' &&
       Number.isFinite(obj.intervalSec) &&
-      obj.intervalSec > 0
+      obj.intervalSec >= MIN_INTERVAL_SEC &&
+      obj.intervalSec <= MAX_INTERVAL_SEC
         ? obj.intervalSec
         : 300,
     merge: obj.merge === 'never' ? 'never' : 'auto',

@@ -95,6 +95,7 @@ export type {
 } from './connectors.ts'
 export {
   AgentNotFound,
+  acquireAgentRegistryLock,
   agentRegistryPath,
   agentsSection,
   bdAt,

@@ -22,7 +22,15 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
-import { git, gitTry, loadConfig, stackSection, taskStore, type Connector } from '@broject/core'
+import {
+  acquireFileLock,
+  git,
+  gitTry,
+  loadConfig,
+  stackSection,
+  taskStore,
+  type Connector,
+} from '@broject/core'
 import { flag, positionals } from './args.ts'
 import { ownerTag } from './proc-owner.ts'
 
@@ -117,24 +125,50 @@ export function worktreeGitDir(path: string): string | null {
   }
 }
 
+/** The claim/retire mutex for one worktree — `<gitdir>/bro/claim.lock`.
+ *  `claimWorktree` stamps under it and `bro drive` runs its
+ *  occupancy-probe→`worktree remove` / probe→spawn sections under it,
+ *  so a dir can't gain an owner while a driver is removing it. Null
+ *  when the tree's gitdir can't be resolved. */
+export function claimLockPath(path: string): string | null {
+  const gd = worktreeGitDir(path)
+  return gd === null ? null : join(gd, 'bro', 'claim.lock')
+}
+
 /** The worktree's own claim marker — `<gitdir>/bro/work`, the in-tree
  *  counterpart of the hooks `.work` markers (bro-pywx). `bro drive`
  *  reads it as occupancy: presence inside THIS worktree is the claim,
  *  no detail-name matching needed — so an owner session is seen even
  *  when its armed detail never named this branch. Advisory: a failed
- *  write must not break enter; the other occupancy planes still apply. */
+ *  write must not break enter; the other occupancy planes still apply.
+ *  The stamp runs under claimLockPath so `bro drive` can't remove the
+ *  tree mid-claim. */
 export function claimWorktree(path: string, detail: string): void {
   try {
-    const gd = worktreeGitDir(path)
-    if (gd === null) {
+    const lock = claimLockPath(path)
+    if (lock === null) {
       return
     }
-    const dir = join(gd, 'bro')
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(
-      join(dir, 'work'),
-      `${Date.now()}${ownerTag()}\n${detail}\n`
-    )
+    const release = acquireFileLock(lock, { label: `${basename(path)} claim lock` })
+    try {
+      // a driver holding the lock just retired the tree — stamping a
+      // claim now would resurrect a dead checkout's marker
+      if (!existsSync(join(path, '.git'))) {
+        return
+      }
+      const gd = worktreeGitDir(path)
+      if (gd === null) {
+        return
+      }
+      const dir = join(gd, 'bro')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(
+        join(dir, 'work'),
+        `${Date.now()}${ownerTag()}\n${detail}\n`
+      )
+    } finally {
+      release()
+    }
   } catch {
     // advisory — occupancy falls back to the other planes
   }

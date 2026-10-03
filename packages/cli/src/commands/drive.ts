@@ -31,6 +31,8 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import {
+  acquireAgentRegistryLock,
+  acquireFileLock,
   checkBeads,
   ensureAuth,
   gitTry,
@@ -53,9 +55,20 @@ import {
 } from './act.ts'
 import { spawnStepAgent } from './agents.ts'
 import { collectAgents } from './fleet.ts'
-import { driveSection, type DriveConfig } from './drive-config.ts'
+import {
+  driveSection,
+  MAX_INTERVAL_SEC,
+  MIN_INTERVAL_SEC,
+  type DriveConfig,
+} from './drive-config.ts'
 import { loadBroConfig } from '../plugins.ts'
-import { mainWorktree, parseWorktreePorcelain, worktreeGitDir, worktreePathFor } from './work.ts'
+import {
+  claimLockPath,
+  mainWorktree,
+  parseWorktreePorcelain,
+  worktreeGitDir,
+  worktreePathFor,
+} from './work.ts'
 
 function usage(): never {
   console.error(`Usage: bro drive [--once] [--every [SEC]] [--no-merge] [--connector <name>] [--json]`)
@@ -103,9 +116,13 @@ export function driveArgs(argv: string[], defaultEverySec = 300): DriveArgs {
   const everySec = everyRaw === undefined ? defaultEverySec : Number(everyRaw)
   // the same 0.1s floor fleet applies — a sub-floor cadence is a busy
   // loop hammering the review host, not a poll
-  if (!Number.isFinite(everySec) || everySec < 0.1 || everySec * 1000 > 0x7fffffff) {
+  if (
+    !Number.isFinite(everySec) ||
+    everySec < MIN_INTERVAL_SEC ||
+    everySec > MAX_INTERVAL_SEC
+  ) {
     throw new Error(
-      `--every needs a seconds value ≥0.1 up to ${0x7fffffff / 1000}s, got "${everyRaw ?? defaultEverySec}"`
+      `--every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw ?? defaultEverySec}"`
     )
   }
   return { ...base, everySec }
@@ -491,13 +508,83 @@ function retireLanding(ctx: Ctx, state: PrActState, worktree: string | undefined
   }
 }
 
+/** Fresh occupancy inputs — the pass-level snapshot predates the
+ *  thread refetch by seconds, long enough for a claim to land unseen. */
+async function freshOccupancy(ctx: Ctx): Promise<Pick<PassWork, 'agents' | 'workDetails'>> {
+  const { byStep } = await collectAgents(ctx.mainRoot)
+  const hooks = hooksDirOf(ctx.mainRoot)
+  return {
+    agents: [...byStep.values()],
+    workDetails: hooks === null ? [] : liveWorkDetails(hooks),
+  }
+}
+
+/** Lock order is registry → claim, everywhere. A spawning claimant
+ *  writes its registry entry + .work marker under the registry lock;
+ *  `bro work enter` stamps its claim under the worktree's claim lock.
+ *  Occupancy-check→remove / check→spawn sections hold BOTH so a claim
+ *  lands before the probe or after the action — never between. The
+ *  spawn path re-acquires the registry lock re-entrantly, which is why
+ *  registry must come first. */
+function acquireOccupancyLocks(dir: string, wt: string | undefined): () => void {
+  const releaseReg = acquireAgentRegistryLock(dir)
+  const claimLock = wt === undefined ? null : claimLockPath(wt)
+  const releaseClaim =
+    claimLock === null
+      ? () => {}
+      : acquireFileLock(claimLock, { label: `${basename(wt!)} claim lock` })
+  return () => {
+    releaseClaim()
+    releaseReg()
+  }
+}
+
+/** Remove a just-created fixer worktree iff still orphaned — the
+ *  occupancy probe and `git worktree remove` run under both occupancy
+ *  locks (see acquireOccupancyLocks). Returns the occupancy detail when
+ *  the tree is owned or a lock can't be taken, undefined when retired. */
+function retireIfOrphaned(
+  ctx: Ctx,
+  wt: string,
+  branch: string,
+  fixer: TaskRow | undefined,
+  fresh: Pick<PassWork, 'agents' | 'workDetails'>
+): string | undefined {
+  let release: () => void
+  try {
+    release = acquireOccupancyLocks(ctx.mainRoot, wt)
+  } catch (err) {
+    // a lock we can't take is indistinguishable from an active claimer —
+    // occupied is always the safe verdict
+    return `occupancy re-check failed — ${errText(err)}`
+  }
+  try {
+    const occ = occupied({
+      agents: fresh.agents,
+      fixerBead: fixer?.id,
+      branch,
+      worktree: wt,
+      workDetails: fresh.workDetails,
+      scanProc: agentProcessesIn,
+    })
+    if (occ !== undefined) {
+      return occ
+    }
+    // the work evaporated after we checked out — retire the dir we
+    // just added or it lingers as an orphaned fixer worktree
+    gitTry(['-C', ctx.mainRoot, 'worktree', 'remove', wt])
+    return undefined
+  } finally {
+    release()
+  }
+}
+
 async function spawnFixer(
   ctx: Ctx,
   pr: number,
   state: PrActState,
   worktree: string | undefined,
-  fixer: TaskRow | undefined,
-  work: PassWork
+  fixer: TaskRow | undefined
 ): Promise<PrVerdict> {
   const link = ctx.rev.prLink(ctx.repo, pr)
   let wt = worktree
@@ -519,68 +606,81 @@ async function spawnFixer(
     if (created) {
       // re-check occupancy before retiring a dir we just added — another
       // owner could claim it during the thread refetch, and `git
-      // worktree remove` on a clean tree deletes even a live cwd
-      const occ = occupied({
-        agents: work.agents,
-        fixerBead: fixer?.id,
-        branch: state.headRef,
-        worktree: wt,
-        workDetails: work.workDetails,
-        scanProc: agentProcessesIn,
-      })
-      if (occ !== undefined) {
-        return { pr, link, verdict: 'occupied', detail: occ }
+      // worktree remove` on a clean tree deletes even a live cwd. Fresh
+      // inputs (the pass snapshot predates the refetch), and the
+      // registry lock held across check+remove: a claimant writes its
+      // registry entry + .work marker under the same lock, so a claim
+      // lands before the check or after the remove — never between
+      const fresh = await freshOccupancy(ctx)
+      const retire = retireIfOrphaned(ctx, wt, state.headRef, fixer, fresh)
+      if (retire !== undefined) {
+        return { pr, link, verdict: 'occupied', detail: retire }
       }
-      // the work evaporated after we checked out — retire the dir we
-      // just added or it lingers as an orphaned fixer worktree
-      gitTry(['-C', ctx.mainRoot, 'worktree', 'remove', wt])
     }
     return { pr, link, verdict: 'threads-resolved' }
   }
   // a last occupancy read right before the spawn — the gap since the
   // pass-level check covered the worktree create + thread refetch,
-  // long enough for another owner to arm this branch
-  const occ = occupied({
-    agents: work.agents,
-    fixerBead: fixer?.id,
-    branch: state.headRef,
-    worktree: wt,
-    workDetails: work.workDetails,
-    scanProc: agentProcessesIn,
-  })
-  if (occ !== undefined) {
-    return { pr, link, verdict: 'occupied', detail: occ }
-  }
-  const bead = fixer ?? ensureFixerBead(ctx.store, pr, link, state.headRef)
-  const prompt = buildFixerPrompt({
-    pr,
-    link,
-    branch: state.headRef,
-    worktree: wt,
-    threads: open.map((t) => ({
-      path: t.comment?.path,
-      line: t.comment?.line,
-      author: t.comment?.author,
-      body: t.comment?.body,
-    })),
-  })
+  // long enough for another owner to arm this branch. Both occupancy
+  // locks are held across probe→spawn (see acquireOccupancyLocks) so a
+  // `bro work enter` or a competing spawn can't land a claim between
+  const fresh = await freshOccupancy(ctx)
+  let release: () => void
   try {
-    const info = await spawnStepAgent(ctx.mainRoot, ctx.env, {
-      molStep: bead.id,
-      worktree: wt,
-      prompt,
-      connector: ctx.connector,
-      env: { BRO_PR: String(pr), BRO_PR_URL: link },
-    })
-    const pid = info.pid === undefined ? '' : ` pid ${info.pid}`
-    return { pr, link, verdict: 'spawned', detail: `${bead.id} → ${info.id}${pid}` }
+    release = acquireOccupancyLocks(ctx.mainRoot, wt)
   } catch (err) {
     return {
       pr,
       link,
-      verdict: err instanceof SpawnError ? 'spawn-refused' : 'spawn-failed',
-      detail: errText(err),
+      verdict: 'occupied',
+      detail: `occupancy re-check failed — ${errText(err)}`,
     }
+  }
+  try {
+    const occ = occupied({
+      agents: fresh.agents,
+      fixerBead: fixer?.id,
+      branch: state.headRef,
+      worktree: wt,
+      workDetails: fresh.workDetails,
+      scanProc: agentProcessesIn,
+    })
+    if (occ !== undefined) {
+      return { pr, link, verdict: 'occupied', detail: occ }
+    }
+    const bead = fixer ?? ensureFixerBead(ctx.store, pr, link, state.headRef)
+    const prompt = buildFixerPrompt({
+      pr,
+      link,
+      branch: state.headRef,
+      worktree: wt,
+      threads: open.map((t) => ({
+        path: t.comment?.path,
+        line: t.comment?.line,
+        author: t.comment?.author,
+        body: t.comment?.body,
+      })),
+    })
+    try {
+      const info = await spawnStepAgent(ctx.mainRoot, ctx.env, {
+        molStep: bead.id,
+        worktree: wt,
+        prompt,
+        connector: ctx.connector,
+        env: { BRO_PR: String(pr), BRO_PR_URL: link },
+      })
+      const pid = info.pid === undefined ? '' : ` pid ${info.pid}`
+      return { pr, link, verdict: 'spawned', detail: `${bead.id} → ${info.id}${pid}` }
+    } catch (err) {
+      return {
+        pr,
+        link,
+        verdict: err instanceof SpawnError ? 'spawn-refused' : 'spawn-failed',
+        detail: errText(err),
+      }
+    }
+  } finally {
+    release()
   }
 }
 
@@ -670,7 +770,7 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     if (occ !== undefined) {
       return { pr, link, verdict: 'occupied', detail: occ }
     }
-    return spawnFixer(ctx, pr, state, worktree, fixer, work)
+    return spawnFixer(ctx, pr, state, worktree, fixer)
   }
   return { pr, link, verdict: 'blocked', detail: gate.blockers.join('; ') }
 }
