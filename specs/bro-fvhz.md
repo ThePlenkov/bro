@@ -88,7 +88,11 @@ Honest-failure states — always a row, never a throw:
 
 - `unverifiable` — spec file has no commit on the ref (uncommitted or
   branch-only), unborn/empty history, `spec:` external link (no local
-  file to date), git failure.
+  file to date), shallow history (`git rev-parse --is-shallow-repository`
+  — boundary commits masquerade as roots, so path-limited logs can
+  attribute spec and scope to the same boundary commit and fake
+  `fresh`), git failure. Shallow is checked before any timestamp
+  comparison.
 - `no-scope` — no frontmatter scope, no bead-id commits.
 - `fresh` — `spec-ts` wins the comparison above.
 - `STALE` — the scope commit is newer than the spec commit per the
