@@ -6,6 +6,7 @@
 import { randomBytes } from 'node:crypto'
 import { linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
+import { pidAlive } from './proc.ts'
 
 /** Lock paths → ownership tokens this process holds — makes
  *  acquireFileLock re-entrant (a locked section can call a helper that
@@ -29,20 +30,10 @@ const syncSleep = (ms: number): void => {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
 
-/** kill(pid, 0) as liveness probe — EPERM means alive under another
- *  user. Unparseable/absent pids count as dead: a token without a pid
- *  can't prove its holder lives. */
-function pidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) {
-    return false
-  }
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM'
-  }
-}
+/** Holder liveness via the shared probe (proc.ts) — kill(0)/EPERM plus
+ *  the zombie state byte, so an unreaped dead holder can't hold a lock
+ *  forever. Unparseable/absent pids count as dead: a token without a
+ *  pid can't prove its holder lives. */
 
 /** Is the lock instance AT `path` a stealable hold? A dead owner is
  *  stolen at once; a live one only past the abandoned bound. */

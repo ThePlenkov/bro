@@ -24,6 +24,7 @@ import { spawnSync } from 'node:child_process'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { git, gitTry, loadConfig, stackSection, taskStore, type Connector } from '@broject/core'
 import { flag, positionals } from './args.ts'
+import { ownerTag } from './proc-owner.ts'
 
 export interface WorktreeInfo {
   path: string
@@ -130,7 +131,10 @@ export function claimWorktree(path: string, detail: string): void {
     }
     const dir = join(gd, 'bro')
     mkdirSync(dir, { recursive: true })
-    writeFileSync(join(dir, 'work'), `${Date.now()}\n${detail}\n`)
+    writeFileSync(
+      join(dir, 'work'),
+      `${Date.now()}${ownerTag()}\n${detail}\n`
+    )
   } catch {
     // advisory — occupancy falls back to the other planes
   }

@@ -145,6 +145,37 @@ describe('liveWorkDetails', () => {
   test('missing dir is empty, not an error', () => {
     assert.deepEqual(liveWorkDetails('/no/such/dir'), [])
   })
+
+  test('a dead owner pid makes a fresh marker residue (bro-b87b)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-drive-hooks-'))
+    try {
+      // fresh mtime, but the recorded owner pid cannot exist — the
+      // session died and nobody owns the claim anymore
+      writeFileSync(
+        join(dir, 'dead.work'),
+        `${Date.now()} 2000000000 1\nbro-x\n`
+      )
+      writeFileSync(join(dir, 'old.work'), `${Date.now()}\nbro-y\n`)
+      assert.deepEqual(liveWorkDetails(dir), ['bro-y'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a live owner pid keeps a marker past the freshness window (bro-xlhm)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-drive-hooks-'))
+    try {
+      // mtime aged past the window but the owner pid is us — an idle
+      // session still owns its claim
+      const marker = join(dir, 'idle.work')
+      writeFileSync(marker, `${Date.now()} ${process.pid}\nbro-idle\n`)
+      const old = Date.now() - 48 * 60 * 60 * 1000
+      utimesSync(marker, old / 1000, old / 1000)
+      assert.deepEqual(liveWorkDetails(dir), ['bro-idle'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('agentProcessesIn', () => {

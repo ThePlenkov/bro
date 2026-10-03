@@ -42,6 +42,7 @@ import {
   sessionStartLines,
   stopGateContributions,
 } from '@broject/core'
+import { markerLive, ownerTag } from './proc-owner.ts'
 
 interface HookInput {
   tool_input?: { command?: unknown }
@@ -359,7 +360,6 @@ export function otherLiveWork(
   now: number = Date.now()
 ): Array<{ session: string; detail: string; ageMs: number }> {
   const out: Array<{ session: string; detail: string; ageMs: number }> = []
-  const cutoff = now - LIVE_SESSION_MS
   let files: string[]
   try {
     files = readdirSync(dir)
@@ -374,10 +374,11 @@ export function otherLiveWork(
     try {
       const path = join(dir, f)
       const st = statSync(path)
-      if (st.mtimeMs < cutoff) {
+      const lines = readFileSync(path, 'utf8').split('\n')
+      if (!markerLive(lines[0], st.mtimeMs, LIVE_SESSION_MS, now)) {
         continue
       }
-      const detail = readFileSync(path, 'utf8').split('\n')[1]?.trim() ?? ''
+      const detail = lines[1]?.trim() ?? ''
       // leave/list/remove leave detail-less markers — every work-CREATING
       // command carries a detail, so '' reliably means residue, not work
       if (!detail) {
@@ -492,7 +493,10 @@ function armSession(sessionId: string, aspect: GateAspect, detail: string = ''):
     try {
       body = readFileSync(path, 'utf8')
     } catch {
-      body = `${Date.now()}\n`
+      // line 1: <millis> [<owner-pid> <start>] — the owner pair lets
+      // readers prove the session is alive instead of trusting mtime
+      // (a dead session's marker is residue even inside the window)
+      body = `${Date.now()}${ownerTag()}\n`
     }
     if (detail && !body.split('\n').includes(detail)) {
       body = `${body.replace(/\n?$/, '\n')}${detail}\n`

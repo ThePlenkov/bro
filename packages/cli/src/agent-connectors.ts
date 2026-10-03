@@ -34,6 +34,7 @@ import {
   mintAgentId,
   patchAgentRegistry,
   probeStep,
+  procStat,
   rebindStep,
   SpawnError,
   readAgentRegistry,
@@ -236,14 +237,22 @@ function workMarkerPath(dir: string, agentId: string): string | null {
   return common === '' ? null : join(common, 'bro', 'hooks', `agent-${agentId}.work`)
 }
 
-function writeWorkMarker(dir: string, agentId: string, molStep: string): void {
+function writeWorkMarker(dir: string, agentId: string, molStep: string, pid?: number): void {
   try {
     const marker = workMarkerPath(dir, agentId)
     if (marker === null) {
       return
     }
     mkdirSync(dirname(marker), { recursive: true })
-    writeFileSync(marker, `${Date.now()}\n${molStep}\n`)
+    // stamp the agent's real pid (+start identity) so a dead agent's
+    // marker reads as residue immediately, not after the freshness
+    // window — mtime-only markers from a killed session used to occupy
+    // a worktree for a day (bro-b87b)
+    const tag =
+      typeof pid === 'number' && pid > 0
+        ? ` ${pid} ${procStat(pid)?.start ?? ''}`
+        : ''
+    writeFileSync(marker, `${Date.now()}${tag}\n${molStep}\n`)
   } catch {
     // marker is advisory — never break a spawn over detection cosmetics
   }
@@ -571,7 +580,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           })
           child.unref()
           spawned = patchAgentRegistry(dir, spec.molStep, { pid: child.pid ?? -1 })
-          writeWorkMarker(dir, agentId, spec.molStep)
+          writeWorkMarker(dir, agentId, spec.molStep, child.pid)
         } finally {
           closeSync(fd)
         }
@@ -904,7 +913,12 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           spec.molStep,
           Number.isInteger(panePid) && panePid > 0 ? { pid: panePid } : {}
         )
-        writeWorkMarker(dir, agentId, spec.molStep)
+        writeWorkMarker(
+          dir,
+          agentId,
+          spec.molStep,
+          Number.isInteger(panePid) && panePid > 0 ? panePid : undefined
+        )
         return toTmuxInfo(socket, dir, home, spec.molStep, spawned)
       })
     },
