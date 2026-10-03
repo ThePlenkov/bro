@@ -162,14 +162,17 @@ describe('liveWorkDetails', () => {
     }
   })
 
-  test('a live owner pid keeps a marker past the freshness window (bro-xlhm)', () => {
+  test('a live owner pid keeps a marker past the freshness window (bro-xlhm)', { skip: process.platform !== 'linux' }, () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-drive-hooks-'))
     try {
       // mtime aged past the window but the owner pid is us — an idle
-      // session still owns its claim; the tag carries our real start
-      // (a pid without it reads ownerless → mtime → residue)
+      // session still owns its claim; the tag carries our real start —
+      // no '1' fallback: a pid with a fabricated start is a shape
+      // production never emits (ownerTag omits the tag without a
+      // readable start), so assert the real one or skip on non-/proc
       const marker = join(dir, 'idle.work')
-      const start = procStat(process.pid)?.start ?? '1'
+      const start = procStat(process.pid)?.start
+      assert.ok(start, 'expected a readable /proc start for our own pid')
       writeFileSync(marker, `${Date.now()} ${process.pid} ${start}\nbro-idle\n`)
       const old = Date.now() - 48 * 60 * 60 * 1000
       utimesSync(marker, old / 1000, old / 1000)
