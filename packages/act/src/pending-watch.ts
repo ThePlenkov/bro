@@ -115,12 +115,21 @@ function pidAlive(pid: number, pidStart?: string): boolean {
   )
 }
 
+/** Does a live watcher's promise cover a dead marker's? A merge wait
+ *  also watches, so merge:true covers both modes; a watch-only wait
+ *  covers only another watch-only promise — a dead merge:true marker
+ *  left behind by a merge:false replacement still has to flag, or the
+ *  merge intent dies silently with the old process. */
+function coveredBy(live: ListedWatch[], w: PendingWatch): boolean {
+  return live.some((l) => l.watch.pr === w.pr && (l.watch.merge || !w.merge))
+}
+
 /** Drop a marker for the running wait — best-effort. The new marker is
  *  published first (tmp write + atomic rename), and only then are
- *  dead-pid markers for the same PR retired — a failed write or
- *  cleanup must never strand a stale promise unreported while also
- *  losing the replacement. Dead-pid markers for other PRs stay: a
- *  session-start report may still flag them. */
+ *  covered dead-pid markers retired — a failed write or cleanup must
+ *  never strand a stale promise unreported while also losing the
+ *  replacement. Uncovered dead markers stay: a session-start report
+ *  may still flag them. */
 export function watchBegin(
   dir: string,
   w: Omit<PendingWatch, 'pid' | 'startedAt'>
@@ -152,10 +161,14 @@ export function watchBegin(
       )
     )
     renameSync(tmp, path)
-    // the new promise is durable — now retire dead-pid markers for this
-    // PR; the pass also prunes TTL-expired residue on the way through
-    for (const { watch, file, alive } of listWatchesIn(wd)) {
-      if (!alive && watch.pr === w.pr) {
+    // the new promise is durable — now retire dead-pid markers the
+    // covering live set makes redundant; an uncovered dead marker (a
+    // merge:true promise only a merge:false wait survived) stays so a
+    // session-start report can still flag it
+    const listed = listWatchesIn(wd)
+    const live = listed.filter((l) => l.alive)
+    for (const { watch, file, alive } of listed) {
+      if (!alive && coveredBy(live, watch)) {
         try {
           rmSync(file)
         } catch {
@@ -268,18 +281,16 @@ function listWatchesIn(wd: string): ListedWatch[] {
  *  that promised to watch is gone and nobody is polling. Anything that
  *  isn't a fresh, well-formed marker (abandoned tmp write, malformed
  *  JSON, TTL-expired, retire residue) is pruned on the way through. A
- *  dead marker for a PR that has a live watcher is superseded — the
- *  replacement already keeps the promise, so reporting the old one
- *  would be a false stale flag. */
+ *  dead marker superseded by a live watcher that covers its merge mode
+ *  is not reported — the replacement already keeps the promise, so
+ *  flagging the old one would be a false stale flag. */
 export function listWatches(dir: string): ListedWatch[] {
   const wd = watchesDir(dir)
   if (!wd) {
     return []
   }
   const out = listWatchesIn(wd)
-  const livePrs = new Set(
-    out.filter((l) => l.alive).map((l) => l.watch.pr)
-  )
-  return out.filter((l) => l.alive || !livePrs.has(l.watch.pr))
+  const live = out.filter((l) => l.alive)
+  return out.filter((l) => l.alive || !coveredBy(live, l.watch))
 }
 

@@ -171,6 +171,43 @@ describe('pending-watch markers', () => {
     assert.equal(existsSync(stale), true)
   })
 
+  test('a dead merge marker is not superseded by a watch-only wait', () => {
+    const dir = repo()
+    const live = watchBegin(dir, { ...base, merge: false })
+    assert.ok(live)
+    // a dead merge:true marker — the replacement only watches, so the
+    // merge promise died with the old process and must still flag
+    const stale = join(dir, '.git', 'bro', 'watches', '42-2000000000.json')
+    writeFileSync(
+      stale,
+      JSON.stringify({ ...base, pid: 2_000_000_000, startedAt: Date.now() })
+    )
+    const listed = listWatches(dir)
+    assert.equal(listed.length, 2)
+    const dead = listed.find((l) => !l.alive)
+    assert.ok(dead)
+    assert.equal(dead.watch.merge, true)
+  })
+
+  test('a live merge wait also covers a dead watch-only marker', () => {
+    const dir = repo()
+    const live = watchBegin(dir, base)
+    assert.ok(live)
+    const stale = join(dir, '.git', 'bro', 'watches', '42-2000000000.json')
+    writeFileSync(
+      stale,
+      JSON.stringify({
+        ...base,
+        merge: false,
+        pid: 2_000_000_000,
+        startedAt: Date.now(),
+      })
+    )
+    const listed = listWatches(dir)
+    assert.equal(listed.length, 1)
+    assert.equal(listed[0]!.file, live)
+  })
+
   test('TTL-expired markers are pruned, not listed', () => {
     const dir = repo()
     const path = watchBegin(dir, base)
@@ -255,5 +292,24 @@ describe('pending-watch markers', () => {
     const listed = listWatches(dir)
     assert.equal(listed.length, 2)
     assert.ok(listed.every((l) => l.watch.pid === process.pid))
+  })
+
+  test('begin keeps a dead merge marker a watch-only wait does not cover', () => {
+    const dir = repo()
+    const seed = watchBegin(dir, base)
+    watchEnd(seed) // only to materialize the watches dir
+    const stale = join(dir, '.git', 'bro', 'watches', '42-2000000000.json')
+    writeFileSync(
+      stale,
+      JSON.stringify({ ...base, pid: 2_000_000_000, startedAt: Date.now() })
+    )
+    const next = watchBegin(dir, { ...base, merge: false })
+    assert.ok(next)
+    // merge:false does not keep the dead merge:true promise — the
+    // marker survives the retire pass and still flags at session start
+    assert.equal(existsSync(stale), true)
+    const listed = listWatches(dir)
+    assert.equal(listed.length, 2)
+    assert.ok(listed.some((l) => !l.alive && l.watch.merge))
   })
 })
