@@ -22,6 +22,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { pidAlive, procStat } from '@broject/core'
 
 export interface PendingWatch {
   pr: number
@@ -73,46 +74,6 @@ function watchesDir(dir: string): string | null {
   } catch {
     return null
   }
-}
-
-/** The process's /proc identity — state byte (field 3: 'Z' marks an
- *  unreaped zombie) and starttime (field 22). Post-comm fields split
- *  from index 0 = field 3. Null where /proc is absent. */
-function procStat(pid: number): { state: string; start: string } | null {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
-    return { state: rest[0] ?? '', start: rest[19] ?? '' }
-  } catch {
-    return null
-  }
-}
-
-function pidAlive(pid: number, pidStart?: string): boolean {
-  let signaled = false
-  try {
-    process.kill(pid, 0)
-    signaled = true
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'EPERM') {
-      return false
-    }
-  }
-  const st = procStat(pid)
-  // a zombie answers kill(pid, 0) — and survives an EPERM probe — but
-  // nobody is polling; the watching session is gone either way
-  if (st?.state === 'Z') {
-    return false
-  }
-  if (!signaled) {
-    // EPERM — a live process owned by another uid, not ours to verify
-    return true
-  }
-  // verify it is the same process the marker recorded; an unverifiable
-  // identity stays fail-open (alive, not a stale promise)
-  return (
-    pidStart === undefined || st === null || st.start === '' || st.start === pidStart
-  )
 }
 
 /** Does watch `a` keep marker `b`'s promise? Same PR, and `a`'s merge

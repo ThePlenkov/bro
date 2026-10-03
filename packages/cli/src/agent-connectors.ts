@@ -33,7 +33,9 @@ import {
   loadConfig,
   mintAgentId,
   patchAgentRegistry,
+  pidAlive,
   probeStep,
+  procStat,
   rebindStep,
   SpawnError,
   readAgentRegistry,
@@ -236,14 +238,23 @@ function workMarkerPath(dir: string, agentId: string): string | null {
   return common === '' ? null : join(common, 'bro', 'hooks', `agent-${agentId}.work`)
 }
 
-function writeWorkMarker(dir: string, agentId: string, molStep: string): void {
+function writeWorkMarker(dir: string, agentId: string, molStep: string, pid?: number): void {
   try {
     const marker = workMarkerPath(dir, agentId)
     if (marker === null) {
       return
     }
     mkdirSync(dirname(marker), { recursive: true })
-    writeFileSync(marker, `${Date.now()}\n${molStep}\n`)
+    // stamp the agent's real pid (+start identity) so a dead agent's
+    // marker reads as residue immediately, not after the freshness
+    // window — mtime-only markers from a killed session used to occupy
+    // a worktree for a day (bro-b87b)
+    const start =
+      typeof pid === 'number' && pid > 0 ? procStat(pid)?.start : undefined
+    // no starttime = no reuse identity — better an ownerless marker on
+    // the mtime window than a tag a recycled pid can impersonate
+    const tag = start ? ` ${pid} ${start}` : ''
+    writeFileSync(marker, `${Date.now()}${tag}\n${molStep}\n`)
   } catch {
     // marker is advisory — never break a spawn over detection cosmetics
   }
@@ -275,20 +286,10 @@ function touchWorkMarker(dir: string, agentId: string): void {
   }
 }
 
-/** pid alive = kill(pid, 0) doesn't throw. EPERM means the process
- *  exists but isn't ours — still alive. pid <= 0 is never a live agent
- *  (kill(0) would signal OUR OWN process group — not a probe). */
-export function pidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) {
-    return false
-  }
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM'
-  }
-}
+// liveness comes from @broject/core's shared probe — kill(0) plus the
+// zombie and pid-reuse checks; re-exported so existing imports from
+// this module keep resolving
+export { pidAlive }
 
 /** The shared spawn prologue every built-in backend runs under the
  *  registry lock — dedup across the two state planes (registry liveness
@@ -478,13 +479,21 @@ function spawnHome(dir: string, backend: string, command: string, spec: SpawnSpe
   return home
 }
 
+/** The registry's recorded starttime for entry.pid — undefined when
+ *  the entry predates identity recording or the read failed; pidAlive
+ *  then skips the reuse check rather than guess. */
+const entryPidStart = (entry: AgentRegistryEntry): string | undefined =>
+  typeof entry.pidStart === 'string' && entry.pidStart !== ''
+    ? entry.pidStart
+    : undefined
+
 /** Live state for a registry entry under this backend. */
 function nativeState(dir: string, home: string | null, molStep: string, entry: AgentRegistryEntry): AgentState {
   // liveness first: a 'stopped' marker on a pid that is still alive means
   // SIGTERM hasn't landed yet — the agent IS still running, and dedup
   // must keep refusing a respawn that would run alongside it
   const pid = typeof entry.pid === 'number' ? entry.pid : undefined
-  if (pid !== undefined && pidAlive(pid)) {
+  if (pid !== undefined && pidAlive(pid, entryPidStart(entry))) {
     touchWorkMarker(dir, entry.agentId)
     return 'running'
   }
@@ -570,8 +579,17 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             }
           })
           child.unref()
-          spawned = patchAgentRegistry(dir, spec.molStep, { pid: child.pid ?? -1 })
-          writeWorkMarker(dir, agentId, spec.molStep)
+          spawned = patchAgentRegistry(dir, spec.molStep, {
+            pid: child.pid ?? -1,
+            // the starttime pins identity against pid reuse — without it
+            // a recycled pid keeps a dead agent 'running' in every
+            // dedup/stop decision the registry drives
+            pidStart:
+              typeof child.pid === 'number'
+                ? (procStat(child.pid)?.start ?? null)
+                : null,
+          })
+          writeWorkMarker(dir, agentId, spec.molStep, child.pid)
         } finally {
           closeSync(fd)
         }
@@ -609,7 +627,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       }
       const [molStep, entry] = hit
       const pid = typeof entry.pid === 'number' ? entry.pid : undefined
-      if (pid !== undefined && pidAlive(pid)) {
+      if (pid !== undefined && pidAlive(pid, entryPidStart(entry))) {
         try {
           process.kill(-pid, 'SIGTERM') // detached → own process group
         } catch {
@@ -622,7 +640,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         // still-living pid would let a respawn run alongside the dying
         // agent (nativeState reports live pids as running regardless)
         const deadline = Date.now() + 2_000
-        while (pidAlive(pid) && Date.now() < deadline) {
+        while (pidAlive(pid, entryPidStart(entry)) && Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 25))
         }
       }
@@ -635,7 +653,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           cur === undefined ||
           cur.agentId !== entry.agentId ||
           cur.spawnedAt !== entry.spawnedAt ||
-          (pid !== undefined && pidAlive(pid))
+          (pid !== undefined && pidAlive(pid, entryPidStart(entry)))
         ) {
           return // respawned or still alive — the live run owns the entry
         }
@@ -904,7 +922,12 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           spec.molStep,
           Number.isInteger(panePid) && panePid > 0 ? { pid: panePid } : {}
         )
-        writeWorkMarker(dir, agentId, spec.molStep)
+        writeWorkMarker(
+          dir,
+          agentId,
+          spec.molStep,
+          Number.isInteger(panePid) && panePid > 0 ? panePid : undefined
+        )
         return toTmuxInfo(socket, dir, home, spec.molStep, spawned)
       })
     },

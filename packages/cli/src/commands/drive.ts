@@ -28,8 +28,8 @@
  * process's ancestry to an agent-shaped root — occupied is always the
  * safe verdict (a skipped pass, never double-work).
  */
-import { existsSync, readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs'
-import { basename, dirname, join, resolve, sep } from 'node:path'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { basename, join, resolve } from 'node:path'
 import {
   checkBeads,
   ensureAuth,
@@ -168,11 +168,12 @@ export function detailMatches(
   )
 }
 
-/** Every detail line of every fresh `.work` marker — a session claiming
+/** Every detail line of every live `.work` marker — a session claiming
  *  two beads keeps both, so occupancy reads them all (otherLiveWork's
- *  first-line peek would miss the second). */
+ *  first-line peek would miss the second). Liveness is owner-pid first
+ *  (bro-b87b: a dead session's marker is residue even when fresh),
+ *  mtime-window fallback for ownerless markers. */
 export function liveWorkDetails(dir: string, now: number = Date.now()): string[] {
-  const cutoff = now - LIVE_MARKER_MS
   const details: string[] = []
   let files: string[]
   try {
@@ -186,10 +187,11 @@ export function liveWorkDetails(dir: string, now: number = Date.now()): string[]
     }
     try {
       const path = join(dir, f)
-      if (statSync(path).mtimeMs < cutoff) {
+      const lines = readFileSync(path, 'utf8').split('\n')
+      if (!markerLive(lines[0], statSync(path).mtimeMs, LIVE_MARKER_MS, now)) {
         continue
       }
-      for (const line of readFileSync(path, 'utf8').split('\n').slice(1)) {
+      for (const line of lines.slice(1)) {
         const d = line.trim()
         if (d !== '') {
           details.push(d)
@@ -202,87 +204,9 @@ export function liveWorkDetails(dir: string, now: number = Date.now()): string[]
   return details
 }
 
-interface ProcHit {
-  pid: number
-  cmd: string
-}
-
-/** Agent-shaped cmdline — the fallback for sessions that never armed a
- *  marker. Deliberately a small allowlist: counting ANY process would
- *  let a leftover `tsc --watch` or dev server occupy a worktree forever. */
-const AGENT_CMD_RE = /(?:^|[\s/])(devin|claude|codex|gemini|aider|opencode|amp)(?:\s|$)/
-
-/** Env badges agent runtimes pin on themselves — every descendant
- *  inherits them, so a detached tool shell counts even after a setsid
- *  broke the ancestry chain. NUL-anchored: /proc environ entries are
- *  NUL-separated and an unanchored match would take `XAI_AGENT=`. */
-const AGENT_ENV_RE = /(?:^|\0)(?:BRO_AGENT_ID|AI_AGENT)=/
-
-function readProcText(dir: string, file: string): string {
-  try {
-    return readFileSync(join(dir, file), 'utf8')
-  } catch {
-    return ''
-  }
-}
-
-/** ppid of a /proc entry — the `PPid:` line of status; 0 when unreadable. */
-function procPpid(dir: string): number {
-  const m = /^PPid:[ \t]*(\d+)/m.exec(readProcText(dir, 'status'))
-  return m === null ? 0 : Number(m[1])
-}
-
-/** Agent-shaped when the process OR a live ancestor matches — agent
- *  CLIs keep their own cwd at the launch dir while their tool shells
- *  (bash, node, git) are what cd into the worktree; bro-pywx's raced
- *  spawn was exactly that shape — the devin process sat in the main
- *  checkout, invisible to an own-cmdline-only scan. Bounded so a wedged
- *  or cyclic chain can never loop the pass. */
-function procIsAgent(dir: string, depth = 0): boolean {
-  if (depth > 16) {
-    return false
-  }
-  const cmd = readProcText(dir, 'cmdline').replaceAll('\0', ' ').trim()
-  if (AGENT_CMD_RE.test(cmd) || AGENT_ENV_RE.test(readProcText(dir, 'environ'))) {
-    return true
-  }
-  const ppid = procPpid(dir)
-  return ppid > 1 && procIsAgent(join(dirname(dir), String(ppid)), depth + 1)
-}
-
-/** Live agent-shaped processes with cwd inside `worktree` — Linux-only
- *  layer; a missing /proc is "no data", not "occupied" (the facade and
- *  marker planes still apply). `procDir` is injectable for tests. */
-export function agentProcessesIn(worktree: string, procDir = '/proc'): ProcHit[] {
-  const hits: ProcHit[] = []
-  let names: string[]
-  try {
-    names = readdirSync(procDir)
-  } catch {
-    return hits
-  }
-  const root = resolve(worktree)
-  for (const name of names) {
-    if (!/^\d+$/.test(name) || Number(name) === process.pid) {
-      continue
-    }
-    const dir = join(procDir, name)
-    let cwd: string
-    try {
-      cwd = readlinkSync(join(dir, 'cwd'))
-    } catch {
-      continue
-    }
-    if (cwd !== root && !cwd.startsWith(root + sep)) {
-      continue
-    }
-    if (procIsAgent(dir)) {
-      const cmd = readProcText(dir, 'cmdline').replaceAll('\0', ' ').trim()
-      hits.push({ pid: Number(name), cmd })
-    }
-  }
-  return hits
-}
+import { agentProcessesIn, markerLive, type ProcHit } from './proc-owner.ts'
+export { agentProcessesIn }
+export type { ProcHit }
 
 export interface OccupancyCtx {
   /** All backends' agents for the pass. */
@@ -312,10 +236,11 @@ export function worktreeClaim(worktree: string, now: number = Date.now()): strin
       return undefined
     }
     const marker = join(gd, 'bro', 'work')
-    if (statSync(marker).mtimeMs < now - LIVE_MARKER_MS) {
+    const lines = readFileSync(marker, 'utf8').split('\n')
+    if (!markerLive(lines[0], statSync(marker).mtimeMs, LIVE_MARKER_MS, now)) {
       return undefined
     }
-    return readFileSync(marker, 'utf8').split('\n')[1]?.trim() ?? ''
+    return lines[1]?.trim() ?? ''
   } catch {
     return undefined
   }
