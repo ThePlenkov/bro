@@ -96,6 +96,28 @@ describe('gitDriftRef', () => {
     })
   })
 
+  test('remote-tracking main covers a checkout with no local default branch', () => {
+    withRepo((dir) => {
+      const remote = mkdtempSync(join(tmpdir(), 'bro-git-remote-'))
+      try {
+        git(remote, ['init', '-q', '--bare', '-b', 'main'])
+        git(dir, ['remote', 'add', 'origin', remote])
+        git(dir, ['push', '-q', 'origin', 'main'])
+        git(dir, ['fetch', '-q', 'origin'])
+        // a CI checkout shape: remote-tracking main exists but no
+        // origin/HEAD symref (recent git auto-creates it on fetch —
+        // symbolic-ref -d drops the symref; update-ref -d would
+        // dereference and delete origin/main itself)
+        git(dir, ['symbolic-ref', '-d', 'refs/remotes/origin/HEAD'])
+        git(dir, ['checkout', '-qb', 'develop'])
+        git(dir, ['branch', '-qD', 'main'])
+        assert.equal(gitDriftRef(dir), 'refs/remotes/origin/main')
+      } finally {
+        rmSync(remote, { recursive: true, force: true })
+      }
+    })
+  })
+
   test('unborn history resolves nothing — null, not a throw', () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-git-'))
     try {

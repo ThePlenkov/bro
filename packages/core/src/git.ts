@@ -31,13 +31,22 @@ export function gitTry(args: string[]): { code: number; out: string; err: string
 
 /** The drift comparison ref — landed spec vs landed code, so a feature
  *  branch's own commits can't flag the spec it's about to update.
- *  Chain: `origin/HEAD` → local `main`/`master` → `HEAD` (solo and
- *  no-remote repos). null when nothing resolves to a commit — unborn
- *  history is the caller's `unverifiable`, not a throw. Qualified
- *  refs so a tag named `main` can't shadow (or fake) the branch —
- *  `rev-parse` resolves refs/tags/ before refs/heads/. */
+ *  Chain: `origin/HEAD` → local `main`/`master` → remote-tracking
+ *  `origin/main`/`master` (a remote checkout with no local default
+ *  branch) → `HEAD` (solo and no-remote repos). null when nothing
+ *  resolves to a commit — unborn history is the caller's
+ *  `unverifiable`, not a throw. Qualified refs so a tag named `main`
+ *  can't shadow (or fake) the branch — `rev-parse` resolves
+ *  refs/tags/ before refs/heads/. */
 export function gitDriftRef(dir: string): string | null {
-  for (const cand of ['refs/remotes/origin/HEAD', 'refs/heads/main', 'refs/heads/master', 'HEAD']) {
+  for (const cand of [
+    'refs/remotes/origin/HEAD',
+    'refs/heads/main',
+    'refs/heads/master',
+    'refs/remotes/origin/main',
+    'refs/remotes/origin/master',
+    'HEAD',
+  ]) {
     const r = gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', `${cand}^{commit}`])
     if (r.code === 0) {
       return cand
