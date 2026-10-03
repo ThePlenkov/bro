@@ -39,12 +39,17 @@ Precedence chain, first hit wins:
    list or a single string; entries are git pathspecs passed verbatim
    (argv, never a shell string) after `--`. Repo-relative only — an
    absolute or `../` entry makes the row `unverifiable` ("bad scope
-   path"), never silently widens.
+   path"), never silently widens. An explicit scope that matches zero
+   committed paths is a typo the audit must not bless — `unverifiable`
+   ("scope matches nothing"), never `fresh`.
 2. **Bead-id commits** — commits on the drift ref whose *subject*
    contains `(<id>)` (the squash-merge convention `… (bro-x) (#N)`);
    the union of their touched paths is the scope. Subject-only:
    `--format` records filtered in-process — `--grep` searches bodies
    too. One `git log --format=%H%x09%s -z --name-only <ref>` pass.
+   Output is unbounded (full history × touched paths) — the probe must
+   not rely on `spawnSync`'s default `maxBuffer`: stream via `spawn`
+   or set an explicit cap.
 3. Nothing resolves → `no-scope` — its own row state, never silently
    fresh.
 
@@ -66,8 +71,12 @@ Two committer-date timestamps on the drift ref:
 - `scope-ts` — newest commit over the scope pathspecs (no `--follow` —
   "anything touched this surface" is the question).
 
-`STALE` ⇔ `scope-ts > spec-ts`. Equal is fresh — a commit updating
-spec and code together is the ideal landing.
+`STALE` ⇔ `scope-ts > spec-ts`. Committer dates have one-second
+resolution, so a tie is not automatically fresh — same SHA is fresh
+(the commit updated spec and code together, the ideal landing); equal
+timestamps on different SHAs resolve by ancestry — `git merge-base
+--is-ancestor <scope-sha> <spec-sha>`: the scope commit predating the
+spec commit is fresh, otherwise STALE.
 
 **The ref**: `origin/HEAD` (the remote default branch) — drift
 compares *landed* spec vs *landed* code; a feature branch's own
@@ -81,9 +90,10 @@ Honest-failure states — always a row, never a throw:
   branch-only), unborn/empty history, `spec:` external link (no local
   file to date), git failure.
 - `no-scope` — no frontmatter scope, no bead-id commits.
-- `fresh` — `spec-ts ≥ scope-ts`, including "scope resolved, zero
-  commits over it" (nothing drifted).
-- `STALE` — `scope-ts > spec-ts`.
+- `fresh` — `spec-ts` wins the comparison above.
+- `STALE` — the scope commit is newer than the spec commit per the
+  comparison above (strictly later, or a tie the ancestry check
+  loses).
 
 ### Output + exit
 
@@ -106,8 +116,11 @@ drift). Usage errors exit 2.
 tool's *explicit* scope only (native: `scope:` frontmatter;
 speckit/openspec: absent → the commit-refs fallback still applies;
 agent: never). The commit-refs fallback lives in the drift engine —
-it's beads+git, not tool-specific. Spec paths come from the existing
-`tree()` id-match — no new accessor needed. Recency helpers go next to
+it's beads+git, not tool-specific. Spec paths come from `tree()` —
+same-id collisions resolve by the connector's own disambiguation
+(native: `preferSpec` — non-empty beats scaffold, dir spec beats flat;
+openspec change vs shipped spec: the same pick `hasSpec` makes) — no
+new accessor needed. Recency helpers go next to
 `gitTry` in `packages/core/src/git.ts` — argv only, no shell strings.
 
 ## Plan
