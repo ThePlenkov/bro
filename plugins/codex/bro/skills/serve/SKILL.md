@@ -44,11 +44,13 @@ token — see below.
   `bro serve` on one repo refuses while the recorded pid is alive.
 - **Writes require the session token.** Every POST/PUT/PATCH/DELETE must
   send `Authorization: Bearer <token>` where the token is the `token`
-  field in serve.json. The file is written mode 0600, so possessing the
-  token means "same-UID local process" — the "local session context"
-  check made concrete (a different local user gets 401; a browser can't
-  send the header cross-site). Reads don't take it: the planes expose
-  repo state a same-UID process can read from disk anyway.
+  field in serve.json — possession, not UID, is what the server checks.
+  The file is written mode 0600, so the token is normally readable only
+  by its owner: a different local user gets 401 and a browser can't send
+  the header cross-site. Reads don't take it — any local user can reach
+  the GET planes over loopback (v1 accepts this; the gated surface is
+  mutation, and the planes expose repo state the owner's own processes
+  can read from disk anyway).
 - **Writes exist because the host is local.** spawn/stop ride the same
   claim/registry machinery as `bro agents up|down` — dedup, respawn, and
   beads-claim semantics are identical. Remote orchestration is a

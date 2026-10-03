@@ -334,6 +334,9 @@ describe('serve state discovery', () => {
       // a state without a token is a foreign/torn record — fail closed
       writeFileSync(serveStatePath(main)!, JSON.stringify({ pid: 1, url: 'u', dir: main, startedAt: 't' }))
       assert.equal(readServeState(main), undefined)
+      // an EMPTY token validates yet can never authenticate — torn too
+      writeFileSync(serveStatePath(main)!, JSON.stringify({ pid: 1, url: 'u', dir: main, startedAt: 't', token: '' }))
+      assert.equal(readServeState(main), undefined)
     })
   })
 

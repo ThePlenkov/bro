@@ -122,7 +122,10 @@ export function readServeState(dir: string): ServeState | undefined {
       typeof v.pid === 'number' &&
       typeof v.url === 'string' &&
       typeof v.dir === 'string' &&
-      typeof v.token === 'string'
+      typeof v.token === 'string' &&
+      // an empty token would validate yet never authenticate — a
+      // malformed record is torn state, not a live server
+      v.token.length > 0
     ) {
       return v as ServeState
     }
@@ -740,8 +743,9 @@ export function createServeHandler(
         }
         // The local-session-context check on writes — spawn/stop mutate
         // agents and beads claims, so the caller must present the
-        // session token from serve.json (mode 0600: possession means a
-        // same-UID process, the privilege `bro agents up` itself needs).
+        // session token from serve.json (mode 0600 — normally readable
+        // only by the owner, so possession means a same-UID process,
+        // the privilege `bro agents up` itself needs).
         // A browser can't send Authorization cross-site without a
         // preflight we never answer, and a non-owner local process
         // can't read the file. Checked before Origin so the refusal is

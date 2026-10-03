@@ -119,22 +119,26 @@ successful `list()`; a `degraded` list renders `unknown` instead.
 `bro serve` is the facade host for thin clients (TUI/webui). Trust
 boundary, v1: binds `127.0.0.1` only, no remote exposure. The "local
 session context" is concrete — the server generates a random session
-token at listen time and publishes it inside `<git-common-dir>/bro/
-serve.json` (tmp+rename, mode `0600`), so **possession of the token is
-the authorization check**: every write (POST/PUT/PATCH/DELETE — spawn
+token at listen time and publishes it inside
+`<git-common-dir>/bro/serve.json` (tmp+rename, mode `0600`), so
+**possession of the token is the authorization check**: every write
+(POST/PUT/PATCH/DELETE — spawn
 and stop mutate agents and beads claims) must present
-`Authorization: Bearer <token>` or get a 401. Read access to that file
-means a same-UID local process — the same privilege needed to run
-`bro agents up` directly — while a different local user can't read it
-and a hostile web page can't mint the header cross-site (a non-simple
-header forces a preflight the server never answers). The browser
-layers stay underneath: every request needs a loopback `Host` (a
-rebound name is 403 — DNS rebinding), writes refuse a non-loopback
+`Authorization: Bearer <token>` or get a 401. The file's `0600` mode
+makes the token normally readable only by its owner, so possession in
+practice means a same-UID local process — the same privilege needed to
+run `bro agents up` directly — while a different local user can't read
+it and a hostile web page can't mint the header cross-site (a
+non-simple header forces a preflight the server never answers). The
+browser layers stay underneath: every request needs a loopback `Host`
+(a rebound name is 403 — DNS rebinding), writes refuse a non-loopback
 `Origin` (403 — the browser stamps every cross-site request), and
 body-bearing writes (POST/PUT/PATCH) also require
-`content-type: application/json`. Reads keep the Host guard alone —
-the planes expose repo state a same-UID process can read from disk
-anyway. Remote orchestration, if ever, is a separate spec.
+`content-type: application/json`. Reads keep the Host guard alone and
+take no token — any local user can reach the GET planes over loopback,
+which v1 accepts: the gated surface is mutation, and the planes expose
+repo state the owner's own processes could read from disk anyway.
+Remote orchestration, if ever, is a separate spec.
 
 ## Filetree
 
