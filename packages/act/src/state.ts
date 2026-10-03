@@ -5,7 +5,7 @@
  */
 import { DEFAULT_CONFIG } from '@broject/core'
 import type { PrTarget, ReviewFacade } from '@broject/core'
-import { docsOnly, effectiveMaxRounds } from './docs.ts'
+import { docsOnlyPr, effectiveMaxRounds } from './docs.ts'
 import type { PrActState } from './types.ts'
 
 // Word boundaries: a check merely *containing* "kilo"/"gemini" (e.g.
@@ -131,17 +131,8 @@ export async function fetchPrActState(
   }
 
   // A docs-only PR churns reviewer threads on every push — the tighter
-  // docsMaxRounds cap moves the tail to debt sooner. Unknown file scope
-  // (facade without prFiles, a failed fetch, an empty diff) is never
-  // "docs-only" — the cap can only tighten on positive evidence.
-  let files: string[] | null = null
-  try {
-    files = rev.prFiles?.(target) ?? null
-  } catch {
-    // best-effort — same rule as reviewedShas
-  }
-  const isDocsOnly =
-    files !== null && docsOnly(files, opts?.docsPaths ?? DEFAULT_CONFIG.act.docsPaths)
+  // docsMaxRounds cap moves the tail to debt sooner.
+  const isDocsOnly = docsOnlyPr(rev, target, opts)
   const maxRounds = effectiveMaxRounds(
     opts?.maxRounds ?? 0,
     isDocsOnly,

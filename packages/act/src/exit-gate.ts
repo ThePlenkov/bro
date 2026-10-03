@@ -4,6 +4,21 @@
  */
 import type { ExitGate, PrActState } from './types.ts'
 
+/** Thread blocker text — the cap-hit variant mandates debt-defer, the
+ *  plain one just counts. */
+function threadsBlocker(state: PrActState): string {
+  if (state.maxRounds > 0 && state.fixRounds > state.maxRounds) {
+    // bound the act loop: past the round cap, remaining threads defer to
+    // debt beads (reply + resolve) instead of another inline-fix push
+    return (
+      `fix-round cap hit (${state.fixRounds}>${state.maxRounds}` +
+      `${state.docsOnly ? ', docs-only PR' : ''}) — ` +
+      `defer the ${state.openThreads} remaining thread(s) to debt beads and resolve, do not fix inline`
+    )
+  }
+  return `${state.openThreads} unresolved review thread(s)`
+}
+
 export function evaluateExitGate(state: PrActState): ExitGate {
   // the gate guards an open PR's merge readiness — on a merged/closed PR
   // stale pending statuses (e.g. a reviewer that never finished) are
@@ -26,17 +41,7 @@ export function evaluateExitGate(state: PrActState): ExitGate {
   }
   const blockers: string[] = []
   if (state.openThreads > 0) {
-    if (state.maxRounds > 0 && state.fixRounds > state.maxRounds) {
-      // bound the act loop: past the round cap, remaining threads defer to
-      // debt beads (reply + resolve) instead of another inline-fix push
-      blockers.push(
-        `fix-round cap hit (${state.fixRounds}>${state.maxRounds}` +
-          `${state.docsOnly ? ', docs-only PR' : ''}) — ` +
-          `defer the ${state.openThreads} remaining thread(s) to debt beads and resolve, do not fix inline`
-      )
-    } else {
-      blockers.push(`${state.openThreads} unresolved review thread(s)`)
-    }
+    blockers.push(threadsBlocker(state))
   }
   if (state.ciPending > 0) {
     blockers.push(`${state.ciPending} pending check(s)`)

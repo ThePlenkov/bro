@@ -5,6 +5,8 @@
  * `a/docs/x`); anything else is a full-path glob where `*` stays inside
  * a segment and `**` crosses `/`.
  */
+import { DEFAULT_CONFIG } from '@broject/core'
+import type { PrTarget, ReviewFacade } from '@broject/core'
 
 function globToRe(glob: string): RegExp {
   let re = ''
@@ -20,7 +22,8 @@ function globToRe(glob: string): RegExp {
     } else if (c === '?') {
       re += '[^/]'
     } else {
-      re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      // any non-alphanumeric char is safe to escape literally
+      re += /[a-zA-Z0-9]/.test(c) ? c : `\\${c}`
     }
   }
   return new RegExp(`^${re}$`)
@@ -44,6 +47,26 @@ export function docsOnly(files: string[], patterns: string[]): boolean {
     patterns.length > 0 &&
     files.every((f) => patterns.some((p) => isDocsPath(f, p)))
   )
+}
+
+/** Docs-only verdict for a PR — positive evidence only. A facade
+ *  without `prFiles`, a failed fetch, or an empty diff is unknown scope
+ *  and reports false: the cap may only tighten on real data. */
+export function docsOnlyPr(
+  rev: ReviewFacade,
+  t: PrTarget,
+  opts?: { docsPaths?: string[] }
+): boolean {
+  try {
+    const files = rev.prFiles?.(t)
+    return (
+      files !== undefined &&
+      docsOnly(files, opts?.docsPaths ?? DEFAULT_CONFIG.act.docsPaths)
+    )
+  } catch {
+    // best-effort — same rule as reviewedShas
+    return false
+  }
 }
 
 /** The cap a docs-only PR runs under: docsMaxRounds when set, never
