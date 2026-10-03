@@ -15,7 +15,7 @@ import {
   type FleetPayload,
   type FleetRow,
 } from './fleet.ts'
-import { registerAgentConnector, unregisterAgentConnector } from '../agent-connectors.ts'
+import { registerAgentConnector } from '../agent-connectors.ts'
 import { initRepo } from './testrepo.ts'
 import type { WorktreeInfo } from './work.ts'
 
@@ -354,16 +354,28 @@ describe('collectAgents', () => {
         's-1': { agentId: 'native-dead1', backend: 'native', spawnedAt: '2026-01-01T00:00:00Z' },
       })
     )
-    registerAgentConnector('dupa', () =>
+    // disposers bind to the entry THIS registration added — a skipped
+    // duplicate can't remove a foreign connector under the same name
+    const fixtureDisposers: (() => void)[] = []
+    const registerFixture = (
+      name: string,
+      make: Parameters<typeof registerAgentConnector>[1]
+    ) => {
+      const dispose = registerAgentConnector(name, make)
+      if (dispose !== undefined) {
+        fixtureDisposers.push(dispose)
+      }
+    }
+    registerFixture('dupa', () =>
       stubConn('dupa', {
         agents: [regAgent('dupa-1', 's-1', 'dupa'), regAgent('dupa-9', 's-9', 'dupa')],
       })
     )
-    registerAgentConnector('dupb', () =>
+    registerFixture('dupb', () =>
       stubConn('dupb', { agents: [regAgent('dupb-9', 's-9', 'dupb')] })
     )
-    registerAgentConnector('gone', () => stubConn('gone', { agents: [], degraded: 'socket gone' }))
-    registerAgentConnector('explody', () => {
+    registerFixture('gone', () => stubConn('gone', { agents: [], degraded: 'socket gone' }))
+    registerFixture('explody', () => {
       throw new Error('factory boom')
     })
     try {
@@ -404,8 +416,8 @@ describe('collectAgents', () => {
     } finally {
       // the registry is module-global — fixture connectors must not leak
       // into whatever runs after this file's process
-      for (const n of ['dupa', 'dupb', 'gone', 'explody']) {
-        unregisterAgentConnector(n)
+      for (const dispose of fixtureDisposers) {
+        dispose()
       }
       rmSync(root, { recursive: true, force: true })
     }

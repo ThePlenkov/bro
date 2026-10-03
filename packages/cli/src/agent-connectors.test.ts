@@ -637,6 +637,16 @@ describe('unregisterAgentConnector', () => {
     unregisterAgentConnector('never-registered')
     assert.deepEqual(agentConnectorNames(), before)
   })
+
+  test('a disposer drops only the entry its registration added', () => {
+    const dispose = registerAgentConnector('pin-dup', makeNativeConnector)
+    // a duplicate registration is skipped and hands back no disposer —
+    // the loser's cleanup cannot remove the entry that won the name
+    assert.equal(registerAgentConnector('pin-dup', makeTmuxConnector), undefined)
+    dispose!()
+    assert.ok(!agentConnectorNames().includes('pin-dup'))
+    assert.ok(agentConnectorNames().includes('native'))
+  })
 })
 
 describe('loadAgentEnv', () => {
