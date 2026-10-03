@@ -1208,8 +1208,23 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       }
     }
     const wd = `work_dir = "${tomlStr(spec.repoRoot)}"`
-    // work_dir is top-level — it must precede any [table] in the file
-    const agentToml = `${wd}\n` + read('agent.toml', GC_AGENT_TOML).replace(/^work_dir\s*=.*$/gm, '')
+    // spec.env rides the agent's env table — the only channel a gc
+    // session has for caller env (gc re-injects it after its `env -u`
+    // strip, so the spawned provider process actually sees the vars)
+    const envEntries = Object.entries(spec.env ?? {}).filter(([k]) =>
+      /^[A-Za-z_][A-Za-z0-9_]*$/.test(k)
+    )
+    const envToml =
+      envEntries.length === 0
+        ? ''
+        : `env = { ${envEntries.map(([k, v]) => `${k} = "${tomlStr(v)}"`).join(', ')} }\n`
+    // work_dir (+ env) are top-level — they must precede any [table] in
+    // the file; the template's own copies are dropped so ours win
+    const agentToml =
+      `${wd}\n${envToml}` +
+      read('agent.toml', GC_AGENT_TOML)
+        .replace(/^work_dir\s*=.*$/gm, '')
+        .replace(/^env\s*=.*$/gm, '')
     const agentDir = join(city, 'agents', spec.molStep)
     mkdirSync(agentDir, { recursive: true })
     writeFileSync(join(agentDir, 'prompt.template.md'), read('prompt.template.md', GC_PROMPT_TEMPLATE))
