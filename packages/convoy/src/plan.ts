@@ -40,7 +40,7 @@ export interface ConvoyStepDecl {
   id: string
   title: string
   /** agent | human | any bd type — unregistered types flatten to task
-   *  at pour (title heuristics then decide gate-ness) */
+   *  at pour, where they schedule as agent-executable */
   type?: string
   /** ids of sibling steps that must finish first */
   needs?: string[]

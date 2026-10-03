@@ -46,15 +46,16 @@ describe('stepsOf', () => {
 })
 
 describe('stepKind', () => {
-  it('honors registered custom types', () => {
+  it('honors declared types', () => {
     assert.equal(stepKind(issue('x', { issue_type: 'human' })), 'human')
+    assert.equal(stepKind(issue('x', { issue_type: 'gate' })), 'human')
     assert.equal(stepKind(issue('x', { issue_type: 'agent' })), 'agent')
   })
 
-  it('detects gate titles on flattened task types', () => {
-    assert.equal(stepKind(issue('x', { title: 'HUMAN GATE — approve plan' })), 'human')
-    assert.equal(stepKind(issue('x', { title: 'GATE — bro act status' })), 'human')
-    assert.equal(stepKind(issue('x', { title: 'fix the thing' })), 'agent')
+  it('treats the title as display-only — gate-titled tasks are agent work', () => {
+    assert.equal(stepKind(issue('x', { title: 'HUMAN GATE — approve plan' })), 'agent')
+    assert.equal(stepKind(issue('x', { title: 'GATE — bro act status' })), 'agent')
+    assert.equal(stepKind(issue('x', { title: 'Merge — bro act merge' })), 'agent')
   })
 })
 
@@ -65,7 +66,7 @@ describe('nextStep', () => {
         issue('root', { issue_type: 'molecule' }),
         issue('a', { status: statuses[0] }),
         issue('b', { status: statuses[1] }),
-        issue('g', { status: statuses[2], title: 'GATE — approve' }),
+        issue('g', { status: statuses[2], issue_type: 'human', title: 'Approve the release' }),
       ],
       [
         { from: 'a', to: 'b' },
