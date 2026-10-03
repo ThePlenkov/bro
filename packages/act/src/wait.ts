@@ -17,7 +17,7 @@ export interface WaitOptions {
   intervalMs?: number
   timeoutMs?: number
   /** Repo dir + PR identity for the pending-watch marker: while the loop
-   *  polls, `<git-common-dir>/bro/watches/<pr>-<pid>.json` proves a watch
+   *  polls, `<git-common-dir>/bro/watches/<pr>-<pid>-<nonce>.json` proves a watch
    *  was promised; a dead pid at session start is the stale promise the
    *  act connector flags. Omit to wait markerless. */
   watch?: { dir: string } & Omit<PendingWatch, 'pid' | 'startedAt'>

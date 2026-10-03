@@ -60,7 +60,13 @@ function watchesDir(dir: string): string | null {
     const gd = execFileSync(
       'git', // NOSONAR — git is the runner's own tool; PATH is trusted config
       ['-C', dir, 'rev-parse', '--git-common-dir'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+      // a hung git must not stall a wait start or the session-start hook —
+      // bound the lookup so a stalled process fails open
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 5000,
+      }
     ).trim()
     return gd ? join(resolve(dir, gd), 'bro', 'watches') : null
   } catch {
@@ -68,13 +74,14 @@ function watchesDir(dir: string): string | null {
   }
 }
 
-/** The process's /proc start identity — distinguishes a reused pid from
- *  the watcher that recorded it. Null where /proc is absent. */
-function procStart(pid: number): string | null {
+/** The process's /proc identity — state byte (field 3: 'Z' marks an
+ *  unreaped zombie) and starttime (field 22). Post-comm fields split
+ *  from index 0 = field 3. Null where /proc is absent. */
+function procStat(pid: number): { state: string; start: string } | null {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-    // field 22 (starttime); post-comm fields split from index 0 = field 3
-    return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] ?? null
+    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    return { state: rest[0] ?? '', start: rest[19] ?? '' }
   } catch {
     return null
   }
@@ -86,19 +93,25 @@ function pidAlive(pid: number, pidStart?: string): boolean {
   } catch (e) {
     return (e as NodeJS.ErrnoException).code === 'EPERM'
   }
-  // pid lives — verify it is the same process the marker recorded; an
-  // unverifiable identity stays fail-open (alive, not a stale promise)
-  const current = pidStart === undefined ? null : procStart(pid)
-  return pidStart === undefined || current === null || current === pidStart
+  const st = procStat(pid)
+  // a zombie answers kill(pid, 0) but nobody is polling — the watching
+  // session is gone for reporting purposes
+  if (st?.state === 'Z') {
+    return false
+  }
+  // verify it is the same process the marker recorded; an unverifiable
+  // identity stays fail-open (alive, not a stale promise)
+  return (
+    pidStart === undefined || st === null || st.start === '' || st.start === pidStart
+  )
 }
 
-/** Drop a marker for the running wait — best-effort. Cleanup runs
- *  before the new marker is published: a listWatches pass prunes
- *  TTL-expired residue, and dead-pid markers for the same PR are
- *  retired — the new watch supersedes their stale promise. Dead-pid
- *  markers for other PRs stay: a session-start report may still flag
- *  them. The marker is written to a tmp file then renamed so a crash
- *  mid-write never leaves a partial JSON marker behind. */
+/** Drop a marker for the running wait — best-effort. The new marker is
+ *  published first (tmp write + atomic rename), and only then are
+ *  dead-pid markers for the same PR retired — a failed write or
+ *  cleanup must never strand a stale promise unreported while also
+ *  losing the replacement. Dead-pid markers for other PRs stay: a
+ *  session-start report may still flag them. */
 export function watchBegin(
   dir: string,
   w: Omit<PendingWatch, 'pid' | 'startedAt'>
@@ -109,15 +122,6 @@ export function watchBegin(
   }
   try {
     mkdirSync(wd, { recursive: true })
-    for (const { watch, file, alive } of listWatches(dir)) {
-      if (!alive && watch.pr === w.pr) {
-        try {
-          rmSync(file)
-        } catch {
-          // retire is best-effort
-        }
-      }
-    }
     // unique per wait — two waits on the same PR in one process each own
     // their marker, so neither publish nor watchEnd clobbers the other's
     const path = join(
@@ -131,7 +135,7 @@ export function watchBegin(
         {
           ...w,
           pid: process.pid,
-          pidStart: procStart(process.pid) ?? undefined,
+          pidStart: procStat(process.pid)?.start ?? undefined,
           startedAt: Date.now(),
         },
         null,
@@ -139,6 +143,17 @@ export function watchBegin(
       )
     )
     renameSync(tmp, path)
+    // the new promise is durable — now retire dead-pid markers for this
+    // PR; listWatches also prunes TTL-expired residue on the way through
+    for (const { watch, file, alive } of listWatches(dir)) {
+      if (!alive && watch.pr === w.pr) {
+        try {
+          rmSync(file)
+        } catch {
+          // retire is best-effort
+        }
+      }
+    }
     return path
   } catch {
     return null

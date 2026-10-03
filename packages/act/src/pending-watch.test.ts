@@ -110,6 +110,8 @@ describe('pending-watch markers', () => {
     w.startedAt = Date.now() - 25 * 60 * 60 * 1000
     writeFileSync(path!, JSON.stringify(w))
     assert.equal(listWatches(dir).length, 0)
+    // pruned means gone from disk, not merely omitted from the listing
+    assert.equal(existsSync(path!), false)
   })
 
   test('malformed marker files are pruned, not listed', () => {
