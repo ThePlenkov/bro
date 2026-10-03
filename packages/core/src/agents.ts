@@ -69,10 +69,6 @@ export interface ListResult {
 
 export interface AgentConnector {
   readonly name: string
-  /** Remote-URL matcher — same precedence role as Connector.matchRemote. */
-  matchRemote?(url: string): boolean
-  /** Project-layout matcher — e.g. gascity claims a configDir layout. */
-  matchDir?(dir: string): boolean
   /** Start a worker for spec.molStep. Throws SpawnError on
    *  duplicate/conflict (claimed by a LIVE agent). */
   spawn(spec: SpawnSpec): Promise<AgentInfo>

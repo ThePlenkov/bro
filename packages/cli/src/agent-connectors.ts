@@ -59,10 +59,19 @@ export interface AgentConnectorEnv {
   loop?: LoopConfig
 }
 
-export type AgentConnectorFactory = (
-  ctx: ConnectorCtx,
-  env: AgentConnectorEnv
-) => AgentConnector
+/** The factory contract — matchRemote/matchDir are STATICS on the
+ *  factory, never instance members: resolveAgentConnector probes them
+ *  without constructing a backend, so a matcher must be cheap and
+ *  side-effect free. Construction happens once — for the claimed winner
+ *  or the registry-order fallback — never per probe. */
+export interface AgentConnectorFactory {
+  (ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector
+  /** Remote-URL matcher — claims a repo host this backend serves (same
+   *  precedence role as Connector.matchRemote). */
+  matchRemote?(url: string, ctx: ConnectorCtx, env: AgentConnectorEnv): boolean
+  /** Project-layout matcher — e.g. gascity claims a configDir layout. */
+  matchDir?(ctx: ConnectorCtx, env: AgentConnectorEnv): boolean
+}
 
 // --- registry ------------------------------------------------------------------
 
@@ -131,9 +140,9 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
 }
 
 /** Pick the serving backend: explicit --connector → connectors.agents →
- *  matchRemote/matchDir → registry order. Provisional factories are
- *  cheap — a connector that must not be picked stays unconstructed
- *  until chosen. */
+ *  matchRemote/matchDir → registry order. Matchers are factory statics,
+ *  so probing never constructs — a connector materializes only once it
+ *  has been chosen. */
 export function resolveAgentConnector(
   ctx: ConnectorCtx,
   opts: { connector?: string } = {},
@@ -151,9 +160,9 @@ export function resolveAgentConnector(
   }
   const url = gitTry(['-C', ctx.dir, 'remote', 'get-url', 'origin'])
   const remote = url.code === 0 ? url.out.trim() : ''
-  // matchers run on a probe instance — construction must be side-effect
-  // free; a backend that can't even construct is skipped as no-match,
-  // but the failure is collected and surfaced, not swallowed silently
+  // a backend whose static matcher claims the repo but whose factory
+  // then throws is skipped as no-match — the failure is collected and
+  // surfaced, not swallowed silently
   const probeFailures = new Map<string, string>()
   const chosen =
     probeAgentConnectors(ctx, env, remote, probeFailures) ?? firstAgentConnector(ctx, env)
@@ -167,33 +176,33 @@ export function resolveAgentConnector(
   return chosen
 }
 
-/** Probe-construct each registered backend in registry order and return
- *  the first satisfying a matcher — remote first, then dir. A backend
- *  that can't construct is a recorded no-match, not a resolution
- *  failure; its error lands in probeFailures for the caller's warning. */
+/** Run each registered backend's static matchers — remote first, then
+ *  dir, registry order inside each — and return the first claimed
+ *  backend, constructed. Probing itself builds nothing: the factory runs
+ *  only after its matcher claimed the ctx. A claimed backend that can't
+ *  construct is a recorded no-match, not a resolution failure; its error
+ *  lands in probeFailures for the caller's warning. */
 function probeAgentConnectors(
   ctx: ConnectorCtx,
   env: AgentConnectorEnv,
   remote: string,
   probeFailures: Map<string, string>
 ): AgentConnector | undefined {
-  const matchers: ((conn: AgentConnector) => boolean | undefined)[] = [
-    (conn) => conn.matchDir?.(ctx.dir),
+  const matchers: ((c: (typeof agentRegistry)[number]) => boolean | undefined)[] = [
+    (c) => c.make.matchDir?.(ctx, env),
   ]
   if (remote !== '') {
-    matchers.unshift((conn) => conn.matchRemote?.(remote))
+    matchers.unshift((c) => c.make.matchRemote?.(remote, ctx, env))
   }
   for (const match of matchers) {
     for (const c of agentRegistry) {
-      let conn: AgentConnector | undefined
-      try {
-        conn = c.make(ctx, env)
-      } catch (err) {
-        probeFailures.set(c.name, err instanceof Error ? err.message : String(err))
+      if (match(c) !== true) {
         continue
       }
-      if (match(conn) === true) {
-        return conn
+      try {
+        return c.make(ctx, env)
+      } catch (err) {
+        probeFailures.set(c.name, err instanceof Error ? err.message : String(err))
       }
     }
   }
@@ -1248,7 +1257,20 @@ function gcProviderName(command: string): string {
   return /^[a-zA-Z][\w-]*$/.test(base) ? base : 'agent'
 }
 
-export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
+/** City root — explicit `agents.gascity.configDir`, else the shared
+ *  `<git-common-dir>/bro/gascity` (out of every worktree). Module-level
+ *  so the factory's static matchDir probes it without constructing the
+ *  connector. */
+function gcConfigDir(dir: string, env: AgentConnectorEnv): string | null {
+  const k = env.agents['gascity']?.configDir
+  if (typeof k === 'string' && k.trim() !== '') {
+    return isAbsolute(k) ? k : resolve(dir, k)
+  }
+  const home = agentsHome(dir)
+  return home === null ? null : dirname(home) + '/gascity'
+}
+
+function gascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
   const dir = ctx.dir
   const knobs = env.agents['gascity'] ?? {}
   const command =
@@ -1260,16 +1282,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       ? knobs.template.trim()
       : 'bro-worker'
 
-  /** City root — explicit `agents.gascity.configDir`, else the shared
-   *  `<git-common-dir>/bro/gascity` (out of every worktree). */
-  const configDir = (): string | null => {
-    const k = knobs.configDir
-    if (typeof k === 'string' && k.trim() !== '') {
-      return isAbsolute(k) ? k : resolve(dir, k)
-    }
-    const home = agentsHome(dir)
-    return home === null ? null : dirname(home) + '/gascity'
-  }
+  const configDir = (): string | null => gcConfigDir(dir, env)
 
   const findEntry = (id: string) => findAgentEntry(dir, 'gascity', id)
 
@@ -1477,13 +1490,6 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
   return {
     name: 'gascity',
 
-    // gascity claims a configDir layout — an authored city.toml at the
-    // resolved configDir is the marker (spec: agents.gascity.configDir).
-    matchDir: () => {
-      const city = configDir()
-      return city !== null && existsSync(join(city, 'city.toml'))
-    },
-
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
       const home = spawnHome(dir, 'gascity', command, spec)
       const city = configDir()
@@ -1647,6 +1653,17 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     capabilities: () => ({ attach: true, respawn: true, supervisor: 'required' }),
   }
 }
+
+/** The gascity factory — matchers ride as statics so resolve probes a
+ *  claim without constructing the backend. matchDir claims a configDir
+ *  layout: an authored city.toml at the resolved configDir is the
+ *  marker (spec: agents.gascity.configDir). */
+export const makeGascityConnector: AgentConnectorFactory = Object.assign(gascityConnector, {
+  matchDir(ctx: ConnectorCtx, env: AgentConnectorEnv): boolean {
+    const city = gcConfigDir(ctx.dir, env)
+    return city !== null && existsSync(join(city, 'city.toml'))
+  },
+})
 
 registerAgentConnector('tmux', makeTmuxConnector)
 registerAgentConnector('gascity', makeGascityConnector)

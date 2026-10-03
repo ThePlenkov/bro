@@ -436,11 +436,13 @@ describe('gascity connector', () => {
   test('matchDir claims the configDir layout only after init', async () => {
     const fx = fixture([])
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
-      assert.equal(conn.matchDir!(fx.main), false)
+      // the matcher is a factory static — probing builds no connector
+      assert.equal(makeGascityConnector.matchDir!({ dir: fx.main }, fx.env), false)
       mkdirSync(fx.city, { recursive: true })
       writeFileSync(join(fx.city, 'city.toml'), '# city\n')
-      assert.equal(conn.matchDir!(fx.main), true)
+      assert.equal(makeGascityConnector.matchDir!({ dir: fx.main }, fx.env), true)
+      // the claim also resolves through auto-detect (no explicit pick)
+      assert.equal(resolveAgentConnector({ dir: fx.main }, {}, fx.env).name, 'gascity')
       // explicit connector pick resolves by name regardless
       assert.equal(
         resolveAgentConnector({ dir: fx.main }, { connector: 'gascity' }, fx.env).name,

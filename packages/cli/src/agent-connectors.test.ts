@@ -34,6 +34,7 @@ import {
   resolveAgentConnector,
   unregisterAgentConnector,
   type AgentConnectorEnv,
+  type AgentConnectorFactory,
 } from './agent-connectors.ts'
 import { initRepo, installFakeBd, readBeads, writeBeads } from './commands/testrepo.ts'
 
@@ -274,6 +275,77 @@ describe('resolveAgentConnector', () => {
       assert.equal(resolveAgentConnector({ dir: main }, {}, env).name, 'native')
       assert.deepEqual(agentConnectorNames(), ['native', 'tmux', 'gascity'])
     } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('matchers are factory statics — a non-claiming backend is never constructed', () => {
+    const { root, main } = initRepo('bro-agconn-')
+    const env: AgentConnectorEnv = { agents: {}, connectors: {} }
+    let built = 0
+    const make: AgentConnectorFactory = Object.assign(
+      (ctx: ConnectorCtx, e: AgentConnectorEnv): AgentConnector => {
+        built++
+        return { ...makeNativeConnector(ctx, e), name: 'probe-shy' }
+      },
+      { matchDir: () => false }
+    )
+    const dispose = registerAgentConnector('probe-shy', make)
+    try {
+      // the static declines → the factory never runs; registry order wins
+      assert.equal(resolveAgentConnector({ dir: main }, {}, env).name, 'native')
+      assert.equal(built, 0)
+    } finally {
+      dispose!()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a static matchDir claim wins ahead of registry order', () => {
+    const { root, main } = initRepo('bro-agconn-')
+    const env: AgentConnectorEnv = { agents: {}, connectors: {} }
+    const make: AgentConnectorFactory = Object.assign(
+      (ctx: ConnectorCtx, e: AgentConnectorEnv): AgentConnector => ({
+        ...makeNativeConnector(ctx, e),
+        name: 'dir-claimer',
+      }),
+      { matchDir: () => true }
+    )
+    const dispose = registerAgentConnector('dir-claimer', make)
+    try {
+      // registered last, but its static claim beats registry order
+      assert.equal(resolveAgentConnector({ dir: main }, {}, env).name, 'dir-claimer')
+    } finally {
+      dispose!()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a claimed backend whose factory throws is skipped, warned, and falls back', () => {
+    const { root, main } = initRepo('bro-agconn-')
+    const env: AgentConnectorEnv = { agents: {}, connectors: {} }
+    const make: AgentConnectorFactory = Object.assign(
+      (): AgentConnector => {
+        throw new Error('backend exploded')
+      },
+      { matchDir: () => true }
+    )
+    const dispose = registerAgentConnector('broken-claimer', make)
+    const orig = console.error
+    const warnings: string[] = []
+    console.error = (...a: unknown[]) => warnings.push(a.join(' '))
+    try {
+      assert.equal(resolveAgentConnector({ dir: main }, {}, env).name, 'native')
+      assert.ok(
+        warnings.some((w) =>
+          /agent connector "broken-claimer" skipped — failed to initialize: backend exploded/.test(
+            w
+          )
+        )
+      )
+    } finally {
+      console.error = orig
+      dispose!()
       rmSync(root, { recursive: true, force: true })
     }
   })
