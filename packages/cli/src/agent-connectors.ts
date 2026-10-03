@@ -153,40 +153,8 @@ export function resolveAgentConnector(
   // free; a backend that can't even construct is skipped as no-match,
   // but the failure is collected and surfaced, not swallowed silently
   const probeFailures = new Map<string, string>()
-  const probe = (c: (typeof agentRegistry)[number]): AgentConnector | undefined => {
-    try {
-      return c.make(ctx, env)
-    } catch (err) {
-      probeFailures.set(c.name, err instanceof Error ? err.message : String(err))
-      return undefined
-    }
-  }
-  let chosen: AgentConnector | undefined
-  if (remote !== '') {
-    for (const c of agentRegistry) {
-      const p = probe(c)
-      if (p?.matchRemote?.(remote) === true) {
-        chosen = p
-        break
-      }
-    }
-  }
-  if (chosen === undefined) {
-    for (const c of agentRegistry) {
-      const p = probe(c)
-      if (p?.matchDir?.(ctx.dir) === true) {
-        chosen = p
-        break
-      }
-    }
-  }
-  if (chosen === undefined) {
-    const first = agentRegistry[0]
-    if (!first) {
-      throw new Error('no agent connector registered')
-    }
-    chosen = makeAgentConnector(first, ctx, env)
-  }
+  const chosen =
+    probeAgentConnectors(ctx, env, remote, probeFailures) ?? firstAgentConnector(ctx, env)
   // a backend that failed to even construct is diagnosable config rot —
   // name it so silent failover doesn't hide a broken registration
   for (const [n, why] of probeFailures) {
@@ -195,6 +163,49 @@ export function resolveAgentConnector(
     }
   }
   return chosen
+}
+
+/** Probe-construct each registered backend in registry order and return
+ *  the first satisfying a matcher — remote first, then dir. A backend
+ *  that can't construct is a recorded no-match, not a resolution
+ *  failure; its error lands in probeFailures for the caller's warning. */
+function probeAgentConnectors(
+  ctx: ConnectorCtx,
+  env: AgentConnectorEnv,
+  remote: string,
+  probeFailures: Map<string, string>
+): AgentConnector | undefined {
+  const matchers: ((conn: AgentConnector) => boolean | undefined)[] = [
+    (conn) => conn.matchDir?.(ctx.dir),
+  ]
+  if (remote !== '') {
+    matchers.unshift((conn) => conn.matchRemote?.(remote))
+  }
+  for (const match of matchers) {
+    for (const c of agentRegistry) {
+      let conn: AgentConnector | undefined
+      try {
+        conn = c.make(ctx, env)
+      } catch (err) {
+        probeFailures.set(c.name, err instanceof Error ? err.message : String(err))
+        continue
+      }
+      if (match(conn) === true) {
+        return conn
+      }
+    }
+  }
+  return undefined
+}
+
+/** Registry-order fallback — no matcher claimed the repo, so the first
+ *  registered backend (the designed default `native`) wins. */
+function firstAgentConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
+  const first = agentRegistry[0]
+  if (!first) {
+    throw new Error('no agent connector registered')
+  }
+  return makeAgentConnector(first, ctx, env)
 }
 
 /** The chosen connector's constructor threw — a broken backend is a
