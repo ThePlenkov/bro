@@ -77,7 +77,7 @@ function hasOsIndependenceExemption(text: string): boolean {
 }
 
 function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return s.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
 }
 
 // Word boundary for command tokens so 'head' does not match 'ahead'.
