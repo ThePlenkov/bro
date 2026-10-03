@@ -11,9 +11,24 @@ import {
   gitLogStamp,
 } from './git.ts'
 
+/** A test run inside another repo still carries its repo-location env —
+ *  strip it so child git only sees the fixture's cwd (same scrub as the
+ *  cli testrepo fixture). */
+const cleanEnv = (): NodeJS.ProcessEnv => {
+  const {
+    GIT_DIR: _d,
+    GIT_WORK_TREE: _w,
+    GIT_INDEX_FILE: _i,
+    GIT_COMMON_DIR: _c,
+    ...env
+  } = process.env
+  return env
+}
+
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', ['-C', cwd, ...args], { // NOSONAR — test fixture
     encoding: 'utf8',
+    env: cleanEnv(),
   }).trim()
 }
 
@@ -154,17 +169,27 @@ describe('gitLogStamp', () => {
     }
   })
 
-  test('--follow reaches across a rename for the spec path', () => {
+  test('a renamed spec still yields its newest touch, not none', () => {
     withRepo((dir) => {
       commit(dir, 'spec', { 'specs/x.md': '# x\n' })
       mkdirSync(join(dir, 'specs', 'x'), { recursive: true })
       renameSync(join(dir, 'specs', 'x.md'), join(dir, 'specs', 'x', 'spec.md'))
       const renamed = commit(dir, 'move spec', {})
+      // `log -1` always surfaces the newest touch, so --follow can't be
+      // differentially observed here — the spec still mandates it. The
+      // checkable contract: the renamed path's stamp is the rename
+      // commit, and the pre-rename name reads that same commit as its
+      // last touch (the delete half of the rename) — never a throw
       const r = gitLogStamp(dir, 'HEAD', ['specs/x/spec.md'], { follow: true })
       if (r.state !== 'commit') {
         assert.fail(`expected commit, got ${JSON.stringify(r)}`)
       }
       assert.equal(r.stamp.sha, renamed)
+      const old = gitLogStamp(dir, 'HEAD', ['specs/x.md'])
+      if (old.state !== 'commit') {
+        assert.fail(`expected commit, got ${JSON.stringify(old)}`)
+      }
+      assert.equal(old.stamp.sha, renamed)
     })
   })
 })
@@ -187,7 +212,9 @@ describe('gitIsShallow', () => {
       assert.equal(gitIsShallow(dir), false)
       const clone = mkdtempSync(join(tmpdir(), 'bro-git-shallow-'))
       try {
-        execFileSync('git', ['clone', '-q', '--depth', '1', `file://${dir}`, join(clone, 'c')])
+        execFileSync('git', ['clone', '-q', '--depth', '1', `file://${dir}`, join(clone, 'c')], {
+          env: cleanEnv(),
+        })
         assert.equal(gitIsShallow(join(clone, 'c')), true)
       } finally {
         rmSync(clone, { recursive: true, force: true })
