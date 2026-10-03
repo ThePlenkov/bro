@@ -574,13 +574,15 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     },
     reviewedShas,
     prFiles(t) {
-      // the MR's current diff list — new_path is the post-change path,
-      // old_path covers deletions
+      // the MR's current diff list — a rename reports BOTH paths so a
+      // code→docs rename still counts as touching code
       const files = glabPaged<{ new_path?: string; old_path?: string }>(
         api(t.repo, `merge_requests/${t.pr}/diffs`),
         gopts()
       )
-      return files.map((f) => f.new_path ?? f.old_path ?? '').filter((p) => p !== '')
+      return files.flatMap((f) =>
+        [...new Set([f.new_path, f.old_path].filter((p): p is string => typeof p === 'string' && p !== ''))]
+      )
     },
     reviewThreads,
     labels(t) {

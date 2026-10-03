@@ -37,7 +37,9 @@ export interface PrActState {
    *  On a docs-only PR this already carries the tighter docsMaxRounds. */
   maxRounds: number
   /** Every file the PR touches matches act.docsPaths — the signal that
-   *  swapped in the tighter round cap. */
+   *  swapped in the tighter round cap. Probed only while threads are
+   *  open (the cap's sole consumer): false means "not docs-only OR not
+   *  probed". */
   docsOnly: boolean
 }
 

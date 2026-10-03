@@ -131,8 +131,11 @@ export async function fetchPrActState(
   }
 
   // A docs-only PR churns reviewer threads on every push — the tighter
-  // docsMaxRounds cap moves the tail to debt sooner.
-  const isDocsOnly = docsOnlyPr(rev, target, opts)
+  // docsMaxRounds cap moves the tail to debt sooner. The file list is
+  // only probed while threads are open: that's the cap's sole consumer,
+  // and it keeps a per-poll host call off a quiet PR.
+  const isDocsOnly =
+    threads.some((t) => !t.resolved) && docsOnlyPr(rev, target, opts)
   const maxRounds = effectiveMaxRounds(
     opts?.maxRounds ?? 0,
     isDocsOnly,

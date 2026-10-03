@@ -23,6 +23,12 @@ describe('isDocsPath', () => {
     assert.equal(isDocsPath('other/specs/bro-1.md', 'specs/**'), false)
   })
 
+  test('**/ is zero-or-more directories — root files match too', () => {
+    assert.equal(isDocsPath('README.md', '**/*.md'), true)
+    assert.equal(isDocsPath('a/b/README.md', '**/*.md'), true)
+    assert.equal(isDocsPath('a/b/x.ts', '**/*.md'), false)
+  })
+
   test('regex metacharacters in patterns are literal', () => {
     assert.equal(isDocsPath('a+b.md', 'a+b.md'), true)
     assert.equal(isDocsPath('axb.md', 'a+b.md'), false)

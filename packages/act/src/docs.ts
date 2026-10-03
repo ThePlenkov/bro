@@ -14,8 +14,10 @@ function globToRe(glob: string): RegExp {
     const c = glob[i]!
     if (c === '*') {
       if (glob[i + 1] === '*') {
-        re += '.*'
-        i += 1
+        // '**/' is zero-or-more directories — '**/*.md' must hit a
+        // root-level README.md, not only slashed paths
+        re += glob[i + 2] === '/' ? '(?:.*/)?' : '.*'
+        i += glob[i + 2] === '/' ? 2 : 1
       } else {
         re += '[^/]*'
       }

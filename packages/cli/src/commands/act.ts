@@ -103,6 +103,8 @@ async function cmdStatus(argv: string[]): Promise<void> {
   const state = await fetchPrActState(rev, t, {
     ignoreChecks: act.ignoreChecks,
     maxRounds: act.maxRounds,
+    docsPaths: act.docsPaths,
+    docsMaxRounds: act.docsMaxRounds,
   })
   const gate = evaluateExitGate(state)
 
