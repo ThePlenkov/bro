@@ -94,6 +94,15 @@ const seedStore = (dir: string, rows: Record<string, unknown>[]): string => {
   return dir
 }
 
+const withStore = (rows: Record<string, unknown>[], fn: (store: string) => void): void => {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-beads-'))
+  try {
+    fn(seedStore(dir, rows))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 describe('agentRegistryPath', () => {
   test('resolves to <git-common-dir>/bro/agents.json', () => {
     withRepo((dir) => {
@@ -270,45 +279,43 @@ describe('mintAgentId', () => {
 describe('shared-store claims', () => {
   test('probeStep reads status/assignee; missing bead → undefined', () => {
     withFakeBd(() => {
-      const store = seedStore(mkdtempSync(join(tmpdir(), 'bro-beads-')), [
-        { id: 'fx-1', status: 'in_progress', assignee: 'me' },
-      ])
-      const p = probeStep(store, 'fx-1')
-      assert.equal(p!.status, 'in_progress')
-      assert.equal(p!.assignee, 'me')
-      assert.equal(probeStep(store, 'fx-nope'), undefined)
+      withStore([{ id: 'fx-1', status: 'in_progress', assignee: 'me' }], (store) => {
+        const p = probeStep(store, 'fx-1')
+        assert.equal(p!.status, 'in_progress')
+        assert.equal(p!.assignee, 'me')
+        assert.equal(probeStep(store, 'fx-nope'), undefined)
+      })
     })
   })
 
   test('claimStep flips to in_progress; a second claim throws SpawnError', () => {
     withFakeBd(() => {
-      const store = seedStore(mkdtempSync(join(tmpdir(), 'bro-beads-')), [
-        { id: 'fx-1', status: 'open' },
-      ])
-      claimStep(store, 'fx-1')
-      assert.equal(probeStep(store, 'fx-1')!.status, 'in_progress')
-      assert.throws(() => claimStep(store, 'fx-1'), SpawnError)
+      withStore([{ id: 'fx-1', status: 'open' }], (store) => {
+        claimStep(store, 'fx-1')
+        assert.equal(probeStep(store, 'fx-1')!.status, 'in_progress')
+        assert.throws(() => claimStep(store, 'fx-1'), SpawnError)
+      })
     })
   })
 
   test('rebindStep moves the assignee without touching status', () => {
     withFakeBd(() => {
-      const store = seedStore(mkdtempSync(join(tmpdir(), 'bro-beads-')), [
-        { id: 'fx-1', status: 'in_progress', assignee: 'dead-worker' },
-      ])
-      rebindStep(store, 'fx-1', 'new-worker')
-      const p = probeStep(store, 'fx-1')
-      assert.equal(p!.status, 'in_progress')
-      assert.equal(p!.assignee, 'new-worker')
+      withStore([{ id: 'fx-1', status: 'in_progress', assignee: 'dead-worker' }], (store) => {
+        rebindStep(store, 'fx-1', 'new-worker')
+        const p = probeStep(store, 'fx-1')
+        assert.equal(p!.status, 'in_progress')
+        assert.equal(p!.assignee, 'new-worker')
+      })
     })
   })
 
   test('bdAt reports bd failure without throwing', () => {
     withFakeBd(() => {
-      const store = seedStore(mkdtempSync(join(tmpdir(), 'bro-beads-')), [])
-      const r = bdAt(store, ['bogus'])
-      assert.equal(r.code, 1)
-      assert.match(r.err, /unhandled/)
+      withStore([], (store) => {
+        const r = bdAt(store, ['bogus'])
+        assert.equal(r.code, 1)
+        assert.match(r.err, /unhandled/)
+      })
     })
   })
 })
