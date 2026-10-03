@@ -142,23 +142,27 @@ export function claimLockPath(path: string): string | null {
  *  when its armed detail never named this branch. Advisory: a failed
  *  write must not break enter; the other occupancy planes still apply.
  *  The stamp runs under claimLockPath so `bro drive` can't remove the
- *  tree mid-claim. */
-export function claimWorktree(path: string, detail: string): void {
+ *  tree mid-claim. Returns 'gone' when the tree was retired before the
+ *  stamp (callers must not report the dead path as ready), 'skipped'
+ *  on an advisory write failure. */
+export function claimWorktree(path: string, detail: string): 'stamped' | 'gone' | 'skipped' {
   try {
     const lock = claimLockPath(path)
     if (lock === null) {
-      return
+      // a missing .git means the tree is gone; a present but
+      // unresolvable one is just an unclaimable checkout
+      return existsSync(join(path, '.git')) ? 'skipped' : 'gone'
     }
     const release = acquireFileLock(lock, { label: `${basename(path)} claim lock` })
     try {
       // a driver holding the lock just retired the tree — stamping a
       // claim now would resurrect a dead checkout's marker
       if (!existsSync(join(path, '.git'))) {
-        return
+        return 'gone'
       }
       const gd = worktreeGitDir(path)
       if (gd === null) {
-        return
+        return 'skipped'
       }
       const dir = join(gd, 'bro')
       mkdirSync(dir, { recursive: true })
@@ -166,11 +170,13 @@ export function claimWorktree(path: string, detail: string): void {
         join(dir, 'work'),
         `${Date.now()}${ownerTag()}\n${detail}\n`
       )
+      return 'stamped'
     } finally {
       release()
     }
   } catch {
     // advisory — occupancy falls back to the other planes
+    return 'skipped'
   }
 }
 
@@ -410,6 +416,10 @@ export interface EnterWorktreeResult {
    *  recorded for bottom-up merge order */
   stacked: boolean
   claim: { claimed?: string; refused?: boolean }
+  /** the worktree vanished between `worktree add` and the claim stamp —
+   *  a `bro drive` retire won the claim lock. Callers must abort rather
+   *  than report the dead path as ready */
+  gone?: boolean
 }
 
 export interface EnterWorktreeOpts {
@@ -507,7 +517,11 @@ export function finishWorktreeEnter(
 ): EnterWorktreeResult {
   const { slug, branch, base } = opts
   const { path } = created
-  claimWorktree(path, slug)
+  if (claimWorktree(path, slug) === 'gone') {
+    // a driver retired the tree between the add and the stamp — claiming
+    // the bead and reporting success would strand both on a dead path
+    return { path, branch, stacked: false, claim: {}, gone: true }
+  }
   if (created.reused) {
     const edgeBase = readStackEdges().get(branch)
     return { path, branch, base: edgeBase, stacked: edgeBase !== undefined, claim: claimBead(slug) }
@@ -542,6 +556,10 @@ function cmdEnter(argv: string[]): void {
     process.exit(1)
   }
   const r = enterWorktree({ slug, branch, base, main, defaultRef })
+  if (r.gone) {
+    console.error(`error: ${r.path} was retired before the claim could land — nothing to enter`)
+    process.exit(1)
+  }
   console.log(`worktree ready: ${r.path}  (branch ${r.branch})
   cd ${r.path}
 note: gitignored dirs (node_modules, dist) are not shared — install deps there`)

@@ -238,6 +238,10 @@ function cmdPush(argv: string[]): void {
     },
     created
   )
+  if (r.gone) {
+    console.error(`error: ${r.path} was retired before the claim could land — aborting`)
+    process.exit(1)
+  }
   console.log(`worktree ready: ${r.path}  (branch ${r.branch})`)
   console.log(`stack ${name} member ${n} — based on ${r.base ?? base ?? 'HEAD'}`)
   if (r.stacked) {

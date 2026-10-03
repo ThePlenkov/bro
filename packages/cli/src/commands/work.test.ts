@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import { stackSection } from '@broject/core'
 import { git, initRepo, inside } from './testrepo.ts'
 import {
+  claimWorktree,
+  finishWorktreeEnter,
   hasSubmodules,
   isLinkedGitDir,
   parseWorktreePorcelain,
@@ -135,6 +137,40 @@ describe('resolveEnterBase', () => {
   test('a detached main still pins a base — its commit, not ambient HEAD', () => {
     assert.deepEqual(resolveEnterBase(undefined, false, false, 'work/a', 'c0ffee'), { base: 'c0ffee' })
     assert.deepEqual(resolveEnterBase(undefined, false, true, 'work/a', 'c0ffee'), { base: 'work/a' })
+  })
+})
+
+describe('claimWorktree', () => {
+  test('a vanished worktree reports gone — no claim lands on a dead path', () => {
+    assert.equal(claimWorktree(join(tmpdir(), 'bro-claim-gone-nope'), 'x'), 'gone')
+  })
+
+  test('a real worktree stamps its marker and reports stamped', () => {
+    const { root, main } = initRepo('bro-claim-')
+    const tree = join(root, 'main--w')
+    git(['worktree', 'add', '-q', tree, '-b', 'work/w'], main)
+    inside(main, root, () => {
+      assert.equal(claimWorktree(tree, 'w'), 'stamped')
+      const marker = join(main, '.git', 'worktrees', 'main--w', 'bro', 'work')
+      assert.equal(readFileSync(marker, 'utf8').split('\n')[1], 'w')
+    })
+  })
+
+  test('finishWorktreeEnter returns gone instead of reporting a dead path ready', () => {
+    const { root, main } = initRepo('bro-gone-')
+    inside(main, root, () => {
+      const r = finishWorktreeEnter(
+        { slug: 'w', branch: 'work/w', main: { path: main, head: '', bare: false, detached: false } },
+        {
+          path: join(root, 'vanished'),
+          branch: 'work/w',
+          branchExists: false,
+          reused: false,
+          stacked: false,
+        }
+      )
+      assert.equal(r.gone, true)
+    })
   })
 })
 

@@ -528,11 +528,18 @@ async function freshOccupancy(ctx: Ctx): Promise<Pick<PassWork, 'agents' | 'work
  *  registry must come first. */
 function acquireOccupancyLocks(dir: string, wt: string | undefined): () => void {
   const releaseReg = acquireAgentRegistryLock(dir)
-  const claimLock = wt === undefined ? null : claimLockPath(wt)
-  const releaseClaim =
-    claimLock === null
-      ? () => {}
-      : acquireFileLock(claimLock, { label: `${basename(wt!)} claim lock` })
+  let releaseClaim: () => void = () => {}
+  try {
+    const claimLock = wt === undefined ? null : claimLockPath(wt)
+    if (claimLock !== null) {
+      releaseClaim = acquireFileLock(claimLock, { label: `${basename(wt!)} claim lock` })
+    }
+  } catch (err) {
+    // a thrown claim acquire must not strand the registry lock — a busy
+    // worktree would otherwise wedge every agent operation this process
+    releaseReg()
+    throw err
+  }
   return () => {
     releaseClaim()
     releaseReg()
