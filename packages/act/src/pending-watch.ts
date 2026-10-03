@@ -21,7 +21,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 export interface PendingWatch {
   pr: number
@@ -115,21 +115,27 @@ function pidAlive(pid: number, pidStart?: string): boolean {
   )
 }
 
-/** Does a live watcher's promise cover a dead marker's? A merge wait
- *  also watches, so merge:true covers both modes; a watch-only wait
- *  covers only another watch-only promise — a dead merge:true marker
- *  left behind by a merge:false replacement still has to flag, or the
- *  merge intent dies silently with the old process. */
-function coveredBy(live: ListedWatch[], w: PendingWatch): boolean {
-  return live.some((l) => l.watch.pr === w.pr && (l.watch.merge || !w.merge))
+/** Does watch `a` keep marker `b`'s promise? Same PR, and `a`'s merge
+ *  mode at least as strong: a merge wait also watches, so merge:true
+ *  covers both modes; a watch-only wait covers only another watch-only
+ *  promise — a dead merge:true marker left behind by a merge:false
+ *  replacement still has to flag, or the merge intent dies silently
+ *  with the old process. */
+function covers(a: PendingWatch, b: PendingWatch): boolean {
+  return a.pr === b.pr && (a.merge || !b.merge)
 }
 
-/** Drop a marker for the running wait — best-effort. The new marker is
- *  published first (tmp write + atomic rename), and only then are
- *  covered dead-pid markers retired — a failed write or cleanup must
- *  never strand a stale promise unreported while also losing the
- *  replacement. Uncovered dead markers stay: a session-start report
- *  may still flag them. */
+function coveredBy(live: ListedWatch[], w: PendingWatch): boolean {
+  return live.some((l) => covers(l.watch, w))
+}
+
+/** Drop a marker for the running wait — best-effort. The marker is
+ *  published via tmp write + atomic rename so a crash mid-write never
+ *  leaves a partial marker. Dead markers the new wait covers are NOT
+ *  retired here — the replacement hasn't kept the promise yet, so they
+ *  stay on disk (hidden from reports by listWatches) until the covering
+ *  watch ends. A replacement that crashes leaves both records
+ *  flaggable; one that completes retires them in watchEnd. */
 export function watchBegin(
   dir: string,
   w: Omit<PendingWatch, 'pid' | 'startedAt'>
@@ -161,36 +167,42 @@ export function watchBegin(
       )
     )
     renameSync(tmp, path)
-    // the new promise is durable — now retire dead-pid markers the
-    // covering live set makes redundant; an uncovered dead marker (a
-    // merge:true promise only a merge:false wait survived) stays so a
-    // session-start report can still flag it
-    const listed = listWatchesIn(wd)
-    const live = listed.filter((l) => l.alive)
-    for (const { watch, file, alive } of listed) {
-      if (!alive && coveredBy(live, watch)) {
-        try {
-          rmSync(file)
-        } catch {
-          // retire is best-effort
-        }
-      }
-    }
     return path
   } catch {
     return null
   }
 }
 
-/** Remove this wait's own marker — called on settle, timeout, or throw. */
+/** Remove this wait's own marker — called on settle, timeout, or throw.
+ *  Ending is also the retire point for dead markers this watch covered:
+ *  while it lived they were a promise still being kept (listWatches hid
+ *  them), and the ending session reported the outcome itself, so the
+ *  superseded record must not resurface as a false stale flag. Dead
+ *  markers it never covered — or another live watch still covers —
+ *  stay. */
 export function watchEnd(path: string | null): void {
   if (!path) {
     return
   }
+  const w = readMarker(path)
   try {
     rmSync(path)
   } catch {
     // the marker is best-effort — a failed remove leaves residue the TTL prunes
+  }
+  if (w === null) {
+    return
+  }
+  const listed = listWatchesIn(dirname(path))
+  const live = listed.filter((l) => l.alive)
+  for (const d of listed) {
+    if (!d.alive && covers(w, d.watch) && !coveredBy(live, d.watch)) {
+      try {
+        rmSync(d.file)
+      } catch {
+        // retire is best-effort
+      }
+    }
   }
 }
 

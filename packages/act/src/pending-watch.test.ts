@@ -138,8 +138,22 @@ describe('pending-watch markers', () => {
       t.skip('zombie fixture did not produce a child pid')
       return
     }
-    // give the forked child a beat to exit and zombify
-    await new Promise((r) => setTimeout(r, 300))
+    // wait for the forked child to exit and zombify — a fixed delay is
+    // flaky under scheduling load; poll /proc for the 'Z' state instead
+    let state = ''
+    const deadline = Date.now() + 5_000
+    while (state !== 'Z' && Date.now() < deadline) {
+      try {
+        const stat = readFileSync(`/proc/${zombiePid}/stat`, 'utf8')
+        state = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0] ?? ''
+      } catch {
+        break // child gone — the assertion below names it either way
+      }
+      if (state !== 'Z') {
+        await new Promise((r) => setTimeout(r, 10))
+      }
+    }
+    assert.equal(state, 'Z', 'fixture child never zombified')
     const dir = repo()
     const path = watchBegin(dir, base)
     assert.ok(path)
@@ -275,7 +289,7 @@ describe('pending-watch markers', () => {
     assert.equal(listWatches(dir).length, 0)
   })
 
-  test('begin retires a dead-pid marker for the same PR', () => {
+  test('a covering watch end retires the dead marker it superseded', () => {
     const dir = repo()
     const path = watchBegin(dir, base)
     assert.ok(path)
@@ -287,11 +301,44 @@ describe('pending-watch markers', () => {
     )
     const next = watchBegin(dir, { ...base, merge: false })
     assert.ok(next)
-    assert.equal(existsSync(stale), false)
-    // the dead marker is retired; both live waits keep their own
+    // begin does NOT retire: the replacement hasn't kept the promise yet —
+    // the dead record stays on disk, hidden from reports while covered
+    assert.equal(existsSync(stale), true)
     const listed = listWatches(dir)
     assert.equal(listed.length, 2)
     assert.ok(listed.every((l) => l.watch.pid === process.pid))
+    // the merge watch's end retires it — its own outcome was reported in
+    // session, so the superseded record must not resurface. The remaining
+    // live watch-only wait does not cover a dead merge marker either way
+    watchEnd(path)
+    assert.equal(existsSync(stale), false)
+    watchEnd(next)
+  })
+
+  test('an end of a non-covering watch leaves a still-covered dead marker', () => {
+    const dir = repo()
+    const first = watchBegin(dir, base)
+    const second = watchBegin(dir, base)
+    assert.ok(first)
+    assert.ok(second)
+    // a dead watch-only marker covered by BOTH live merge waits
+    const stale = join(dir, '.git', 'bro', 'watches', '42-2000000000.json')
+    writeFileSync(
+      stale,
+      JSON.stringify({
+        ...base,
+        merge: false,
+        pid: 2_000_000_000,
+        startedAt: Date.now(),
+      })
+    )
+    // first ends but second still covers — the record stays while any
+    // promise is open, so a crashed survivor can still flag it
+    watchEnd(first)
+    assert.equal(existsSync(stale), true)
+    // the last covering watch's end retires it
+    watchEnd(second)
+    assert.equal(existsSync(stale), false)
   })
 
   test('begin keeps a dead merge marker a watch-only wait does not cover', () => {
@@ -305,8 +352,9 @@ describe('pending-watch markers', () => {
     )
     const next = watchBegin(dir, { ...base, merge: false })
     assert.ok(next)
-    // merge:false does not keep the dead merge:true promise — the
-    // marker survives the retire pass and still flags at session start
+    // merge:false does not keep the dead merge:true promise — no live
+    // watch covers it, so it stays on disk and still flags at session
+    // start
     assert.equal(existsSync(stale), true)
     const listed = listWatches(dir)
     assert.equal(listed.length, 2)
