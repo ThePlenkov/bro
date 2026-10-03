@@ -37,7 +37,19 @@
  * alive — two live servers would make the file a coin flip.
  */
 import { randomBytes } from 'node:crypto'
-import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  closeSync,
+  fstatSync,
+  linkSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { dirname, join } from 'node:path'
 import type { Readable } from 'node:stream'
@@ -210,14 +222,24 @@ function tryLockOnce(staged: string, lock: string): 'acquired' | 'held' | 'retry
       throw err
     }
   }
+  // wx write = create, fill, close — a writer paused past
+  // EMPTY_LOCK_GRACE_MS mid-call can have its still-empty lock broken
+  // and the path stolen; the inode check proves our fd is still the
+  // file at `lock` before the acquisition counts
+  let fd: number
   try {
-    writeFileSync(lock, `${process.pid}`, { flag: 'wx' })
-    return 'acquired'
+    fd = openSync(lock, 'wx')
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
       return heldOrRetry(lock)
     }
     throw err
+  }
+  try {
+    writeSync(fd, `${process.pid}`)
+    return fstatSync(fd).ino === statSync(lock).ino ? 'acquired' : 'retry'
+  } finally {
+    closeSync(fd)
   }
 }
 
