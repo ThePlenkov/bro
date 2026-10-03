@@ -53,11 +53,12 @@ type = "agent"
 needs = ["pr-gate"]
 condition = "{{merge}} == auto"
 description = """
-Run `bro act wait --merge --squash --cleanup` from the worktree: the watcher
-polls the exit gate and lands the PR the moment it settles green — in
-orchestration mode the merge is covered by the act formula, not a human
-gate. `bro act merge` (dispatched by wait) refuses while the gate is
-blocked, so this step can only complete green.
+Run `bro act wait --merge --squash` from the worktree: the watcher polls the
+exit gate and lands the PR the moment it settles green — in orchestration
+mode the merge is covered by the act formula, not a human gate. `bro act
+merge` (dispatched by wait) refuses while the gate is blocked, so this step
+can only complete green. No `--cleanup` here — the following step retires
+the worktree deliberately, after the bead is closed.
 If it refuses because reviewers are still pending or threads arrived after
 pr-gate, keep working: fix/defer threads, then merge again. Never use
 `gh pr merge` and never wait for a human — the merge is yours.
