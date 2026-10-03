@@ -18,15 +18,17 @@ import { collectEmbedded, type EmbeddedData } from './embedded.ts'
 // dist/*.js bundle chunk — ../../.. lands on the repo root in development
 // and on node_modules in an install (no package.json → the artifact path
 // below). The live path is admitted only for this repo: the root package
-// name matches AND repo markers exist — skills/ + formulas/ + packages/cli —
-// so a consumer project literally named "bro" with its own skills trees
-// still falls through to the shipped snapshot.
+// name matches AND packages/cli/package.json is @broject/bro (existsSync
+// alone would let a same-named consumer monorepo's own cli package pass)
+// AND repo markers exist — skills/ + formulas/ — so a consumer project
+// literally named "bro" with its own skills trees still falls through to
+// the shipped snapshot.
 function repoRoot(): string | null {
   const root = fileURLToPath(new URL('../../..', import.meta.url))
   try {
     const isRepo =
       JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).name === 'bro' &&
-      existsSync(join(root, 'packages', 'cli')) &&
+      JSON.parse(readFileSync(join(root, 'packages', 'cli', 'package.json'), 'utf8')).name === '@broject/bro' &&
       existsSync(join(root, 'skills')) &&
       existsSync(join(root, 'formulas'))
     return isRepo ? root : null

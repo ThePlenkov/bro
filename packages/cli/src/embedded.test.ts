@@ -17,8 +17,10 @@ describe('collectEmbedded', () => {
       writeFileSync(join(root, 'skills', 'act', 'SKILL.md'), '# act\n')
       writeFileSync(join(root, 'skills', 'act', 'deep', 'ref.md'), 'ref\n')
       writeFileSync(join(root, 'formulas', 'mol.toml'), '[mol]\n')
-      // a symlinked dir would escape the tree — must be skipped, not followed
-      symlinkSync(join(root, 'formulas'), join(root, 'skills', 'escape'), 'dir')
+      // a symlinked dir inside a walked tree would escape it — must be
+      // skipped, not followed (top level alone wouldn't reach lstat:
+      // Dirent.isDirectory() is already false for a symlink there)
+      symlinkSync(join(root, 'formulas'), join(root, 'skills', 'act', 'escape'), 'dir')
 
       const data = collectEmbedded(root)
       assert.equal(data.SKILL_FILES['act/SKILL.md'], '# act\n')
@@ -39,8 +41,13 @@ describe('collectEmbedded', () => {
       // creation order differs from sort order — the walk must sort
       writeFileSync(join(root, 'skills', 's', 'z.md'), 'z')
       writeFileSync(join(root, 'skills', 's', 'a.md'), 'a')
-      const keys = Object.keys(collectEmbedded(root).SKILL_FILES)
-      assert.deepEqual(keys, ['s/a.md', 's/z.md'])
+      writeFileSync(join(root, 'formulas', 'z.toml'), 'z')
+      writeFileSync(join(root, 'formulas', 'a.toml'), 'a')
+      const data = collectEmbedded(root)
+      assert.deepEqual(Object.keys(data.SKILL_FILES), ['s/a.md', 's/z.md'])
+      assert.deepEqual(Object.keys(data.FORMULA_FILES), ['a.toml', 'z.toml'])
+      // byte-identical across repeated collections, not just ordered once
+      assert.equal(JSON.stringify(collectEmbedded(root)), JSON.stringify(data))
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
