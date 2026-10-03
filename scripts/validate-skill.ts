@@ -7,7 +7,7 @@
 // buys nothing the field checks below don't already pin.
 
 import { existsSync, readFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
 const { values, positionals } = parseArgs({
@@ -22,6 +22,12 @@ if (skillArg === undefined) {
 }
 
 const skillDir = resolve(skillArg)
+// Confine to the workspace — the arg is agent/CI-supplied.
+const relDir = relative(process.cwd(), skillDir)
+if (relDir.startsWith('..') || isAbsolute(relDir)) {
+  console.error(`::error::--skill must resolve inside the workspace`)
+  process.exit(1)
+}
 const skillMdPath = join(skillDir, 'SKILL.md')
 const openaiYamlPath = join(skillDir, 'agents', 'openai.yaml')
 
@@ -40,7 +46,7 @@ if (frontmatter === null) {
 } else {
   const fmLines = frontmatter[1]!.split('\n')
   for (const field of ['name', 'description'] as const) {
-    const keyRe = new RegExp(`^${field}:\\s*(.*)$`)
+    const keyRe = new RegExp(String.raw`^${field}:[ \t]*(.*)$`)
     const idx = fmLines.findIndex((l) => keyRe.test(l))
     let value = idx === -1 ? '' : (keyRe.exec(fmLines[idx]!)?.[1] ?? '').trim().replace(/^["']|["']$/g, '')
     // Block scalar (`description: >`) or next-line value needs a following
@@ -62,8 +68,9 @@ if (existsSync(openaiYamlPath)) {
   const openaiYaml = readFileSync(openaiYamlPath, 'utf8')
   for (const key of ['display_name', 'short_description', 'default_prompt'] as const) {
     // Anchored at line start (any indent — keys nest under `interface:`)
-    // so comments and longer key names can't satisfy the check.
-    if (!new RegExp(`^\\s*${key}:\\s*\\S`, 'm').test(openaiYaml)) {
+    // so comments and longer key names can't satisfy the check, and
+    // `[ \t]*` keeps an empty field from borrowing the next line's value.
+    if (!new RegExp(String.raw`^[ \t]*${key}:[ \t]*\S`, 'm').test(openaiYaml)) {
       console.error(`::error file=${openaiYamlPath}::missing or empty '${key}'`)
       failed = true
     }

@@ -6,8 +6,9 @@
 //
 // A file can opt out near the top:  <!-- os-independence-exempt: reason -->
 
+import { existsSync } from 'node:fs'
 import { readdir, readFile } from 'node:fs/promises'
-import { join, relative, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
 const { values, positionals } = parseArgs({
@@ -24,6 +25,13 @@ if (skillArg === undefined) {
   process.exit(1)
 }
 const skillDir = resolve(skillArg)
+// Confine to the workspace and fail as an annotation, not a stack trace —
+// the arg is agent/CI-supplied and a missing dir would die inside `walk`.
+const relDir = relative(process.cwd(), skillDir)
+if (relDir.startsWith('..') || isAbsolute(relDir) || !existsSync(skillDir)) {
+  console.error(`::error file=${skillDir}::skill directory missing or outside the workspace`)
+  process.exit(1)
+}
 
 // Patterns that are not portable to Windows without Git Bash / WSL / translation.
 const POSIX_PATTERNS = [
@@ -65,7 +73,7 @@ async function* walk(dir: string): AsyncGenerator<string> {
 // bash-by-design (the marker must carry a reason).
 function hasOsIndependenceExemption(text: string): boolean {
   const head = text.split('\n').slice(0, 20).join('\n')
-  return /^[ \t]*<!--[ \t]*os-independence-exempt:[ \t]*[^>\r\n]+-->[ \t]*$/im.test(head)
+  return /^[ \t]*<!--[ \t]*os-independence-exempt:[ \t]*\S[^\r\n>]*-->[ \t]*$/im.test(head)
 }
 
 function escapeRegExp(s: string): string {
@@ -74,7 +82,7 @@ function escapeRegExp(s: string): string {
 
 // Word boundary for command tokens so 'head' does not match 'ahead'.
 function tokenMatches(line: string, token: string): boolean {
-  return /^\w/.test(token) ? new RegExp(`\\b${escapeRegExp(token)}`).test(line) : line.includes(token)
+  return /^\w/.test(token) ? new RegExp(String.raw`\b${escapeRegExp(token)}`).test(line) : line.includes(token)
 }
 
 // `git grep` ships with Git on Windows too — not a POSIX-only pattern.
@@ -90,34 +98,50 @@ interface Issue {
 }
 
 const issues: Issue[] = []
-for await (const path of walk(skillDir)) {
-  const text = await readFile(path, 'utf8')
-  if (hasOsIndependenceExemption(text)) {
-    continue
+
+const emitIssues = (): void => {
+  const level = values['warn-only'] === true ? 'warning' : 'error'
+  for (const i of issues) {
+    console.error(`::${level} file=${i.file},line=${i.line}::'${i.token.trim()}' — ${i.advice}`)
   }
-  const rel = relative(process.cwd(), path).replace(/\\/g, '/')
-  const lines = text.split('\n')
-  let inShell = false
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i] ?? ''
-    if (/^```(bash|sh|shell)\b/.test(line)) {
-      inShell = true
+}
+
+try {
+  for await (const path of walk(skillDir)) {
+    const text = await readFile(path, 'utf8')
+    if (hasOsIndependenceExemption(text)) {
       continue
     }
-    if (inShell && line.startsWith('```')) {
-      inShell = false
-      continue
-    }
-    if (!inShell) {
-      continue
-    }
-    const scanLine = stripGitSubcommands(line)
-    for (const { token, advice } of POSIX_PATTERNS) {
-      if (tokenMatches(scanLine, token)) {
-        issues.push({ file: rel, line: i + 1, token, advice })
+    const rel = relative(process.cwd(), path).replaceAll('\\', '/')
+    const lines = text.split('\n')
+    let inShell = false
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i] ?? ''
+      // Markdown allows up to 3 leading spaces on fences — nested blocks
+      // (lists, quotes) must still be scanned.
+      if (/^ {0,3}```(bash|sh|shell)\b/.test(line)) {
+        inShell = true
+        continue
+      }
+      if (inShell && /^ {0,3}```/.test(line)) {
+        inShell = false
+        continue
+      }
+      if (!inShell) {
+        continue
+      }
+      const scanLine = stripGitSubcommands(line)
+      for (const { token, advice } of POSIX_PATTERNS) {
+        if (tokenMatches(scanLine, token)) {
+          issues.push({ file: rel, line: i + 1, token, advice })
+        }
       }
     }
   }
+} catch (error) {
+  emitIssues()
+  console.error(`::error file=${skillDir}::${error instanceof Error ? error.message : String(error)}`)
+  process.exit(1)
 }
 
 if (issues.length === 0) {
@@ -125,8 +149,5 @@ if (issues.length === 0) {
   process.exit(0)
 }
 
-for (const i of issues) {
-  const level = values['warn-only'] === true ? 'warning' : 'error'
-  console.error(`::${level} file=${i.file},line=${i.line}::'${i.token.trim()}' — ${i.advice}`)
-}
+emitIssues()
 process.exit(values['warn-only'] === true ? 0 : 1)
