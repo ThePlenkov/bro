@@ -16,6 +16,12 @@ describe('isDocsPath', () => {
     assert.equal(isDocsPath('docsify/x.md', 'docs/'), false)
   })
 
+  test('the dir part of a trailing-slash pattern globs too', () => {
+    assert.equal(isDocsPath('docs-v2/guide.md', 'docs*/'), true)
+    assert.equal(isDocsPath('src/docs-v2/guide.md', 'docs*/'), true)
+    assert.equal(isDocsPath('docs-v2', 'docs*/'), false)
+  })
+
   test('slashed patterns are full-path globs — * stays in a segment', () => {
     assert.equal(isDocsPath('specs/bro-1.md', 'specs/*.md'), true)
     assert.equal(isDocsPath('specs/sub/bro-1.md', 'specs/*.md'), false)

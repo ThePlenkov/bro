@@ -64,7 +64,8 @@ default store, so standard installs already have it).
   Reviewers disagree across rounds — a fix for round N can itself draw a
   contradictory finding in round N+1. Don't push a flip-flop: pick the
   reading you judge right, reply with the reasoning, resolve; the losing
-  side is a debt bead when it's still a real concern.
+  side is a debt bead only when it's still a real but non-blocking
+  concern — a blocking finding is fixed or rejected, never deferred.
 - **Merge through `bro act merge`, never `gh pr merge` directly.** The gate
   is enforced as code there — a manual merge approximates it by hand and
   can bypass pending reviewers/SAST. `bro act merge` also serializes the

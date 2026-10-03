@@ -291,7 +291,8 @@ export const DEFAULT_CONFIG: BroConfig = {
   act: {
     ignoreChecks: [],
     maxRounds: 3,
-    docsPaths: ['*.md', '*.mdx', '*.rst', '*.txt', 'docs/'],
+    // no '*.txt' — requirements.txt and test fixtures are not docs
+    docsPaths: ['*.md', '*.mdx', '*.rst', 'docs/'],
     docsMaxRounds: 2,
   },
   connectors: {},

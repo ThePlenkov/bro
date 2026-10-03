@@ -32,13 +32,13 @@ function globToRe(glob: string): RegExp {
 }
 
 export function isDocsPath(path: string, pattern: string): boolean {
-  if (pattern.endsWith('/')) {
-    return path.startsWith(pattern) || path.includes(`/${pattern}`)
-  }
-  const target = pattern.includes('/')
+  // 'docs/' is a dir at any depth — '**/docs/**' — and the dir name
+  // itself may glob ('docs*/' hits docs-v2/)
+  const glob = pattern.endsWith('/') ? `**/${pattern}**` : pattern
+  const target = glob.includes('/')
     ? path
     : path.slice(path.lastIndexOf('/') + 1)
-  return globToRe(pattern).test(target)
+  return globToRe(glob).test(target)
 }
 
 /** True only when every changed path is docs — an empty file list or

@@ -8,11 +8,9 @@
       "*.md",
       "*.mdx",
       "*.rst",
-      "*.txt",
       "docs/",
       "specs/",
-      "site/content/",
-      "skills/"
+      "site/content/"
     ]
   },
   "debt": {
