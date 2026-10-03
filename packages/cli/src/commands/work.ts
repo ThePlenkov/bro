@@ -391,6 +391,11 @@ export interface WorktreeCreateResult {
   /** The target dir already stood on the target branch — stack push's
    *  idempotent re-enter; no `worktree add` ran. */
   reused: boolean
+  /** base is a real local branch other than main — a stack edge was
+   *  recorded for bottom-up merge order. Recorded HERE, not in
+   *  finishWorktreeEnter, so a same-slug re-push entering under the push
+   *  lock always observes the edge the first push minted. */
+  stacked: boolean
 }
 
 /** The create half of `enterWorktree` — split out so `stack push` holds
@@ -403,7 +408,7 @@ export interface WorktreeCreateResult {
  *  (same common git dir — an unrelated checkout that happens to sit on
  *  the same branch name is not this stack's member). */
 export function createWorktree(opts: EnterWorktreeOpts): WorktreeCreateResult {
-  const { slug, branch, base, main, allowExisting = true, reusePath = false } = opts
+  const { slug, branch, base, main, defaultRef, allowExisting = true, reusePath = false } = opts
   const path = worktreePathFor(main.path, slug)
   if (existsSync(path)) {
     const onBranch = gitTry(['-C', path, 'branch', '--show-current']).out.trim()
@@ -411,7 +416,7 @@ export function createWorktree(opts: EnterWorktreeOpts): WorktreeCreateResult {
       gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']).out.trim()
     const sameRepo = commonOf(path) !== '' && commonOf(path) === commonOf(main.path)
     if (reusePath && onBranch === branch && sameRepo) {
-      return { path, branch, branchExists: true, reused: true }
+      return { path, branch, branchExists: true, reused: true, stacked: false }
     }
     console.error(`error: ${path} already exists`)
     process.exit(1)
@@ -438,19 +443,31 @@ export function createWorktree(opts: EnterWorktreeOpts): WorktreeCreateResult {
     console.error(`error: git worktree add failed — ${res.err}`)
     process.exit(1)
   }
-  return { path, branch, branchExists, reused: false }
+  // a stack edge is only a real edge when the base is a local branch —
+  // a raw commit-ish (--base abc123 / origin/main) yields no merge order.
+  // The edge records HERE, right after the add: it is part of the
+  // plan→create window — a re-push of the same slug holds the push lock
+  // until it lands, and must observe the member as stacked.
+  const stacked =
+    base !== undefined &&
+    base !== (main.branch ?? main.head) &&
+    base !== defaultRef &&
+    gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${base}`]).code === 0
+  if (stacked && !branchExists) {
+    recordStackEdge(branch, base)
+  }
+  return { path, branch, branchExists, reused: false, stacked }
 }
 
 /** The post-add half of `enterWorktree` — claim marker, submodule init,
- *  bead claim, and the stack edge LAST so a failure mid-way never
- *  leaves a half-registered member. Safe outside the push lock: the
- *  branch exists once createWorktree returns, so a racing push already
- *  sees the minted position. */
+ *  bead claim. Safe outside the push lock: the branch AND its stack
+ *  edge exist once createWorktree returns, so a racing push already
+ *  sees the fully-minted position. */
 export function finishWorktreeEnter(
   opts: EnterWorktreeOpts,
   created: WorktreeCreateResult
 ): EnterWorktreeResult {
-  const { slug, branch, base, main, defaultRef } = opts
+  const { slug, branch, base } = opts
   const { path } = created
   claimWorktree(path, slug)
   if (created.reused) {
@@ -458,18 +475,7 @@ export function finishWorktreeEnter(
     return { path, branch, base: edgeBase, stacked: edgeBase !== undefined, claim: claimBead(slug) }
   }
   initSubmodules(path)
-  const claim = claimBead(slug)
-  // a stack edge is only a real edge when the base is a local branch —
-  // a raw commit-ish (--base abc123 / origin/main) yields no merge order
-  const stacked =
-    base !== undefined &&
-    base !== (main.branch ?? main.head) &&
-    base !== defaultRef &&
-    gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${base}`]).code === 0
-  if (stacked && !created.branchExists) {
-    recordStackEdge(branch, base)
-  }
-  return { path, branch, base, stacked, claim }
+  return { path, branch, base, stacked: created.stacked, claim: claimBead(slug) }
 }
 
 /** The worktree-add core shared by `work enter` and `stack push` — the

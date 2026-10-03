@@ -4,8 +4,8 @@
  *  clobbers or double-allocates. Re-entrant per path inside a process so
  *  a locked section can reach for the same lock again. */
 import { randomBytes } from 'node:crypto'
-import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 
 /** Lock paths → ownership tokens this process holds — makes
  *  acquireFileLock re-entrant (a locked section can call a helper that
@@ -20,6 +20,9 @@ const heldLocks = new Map<string, string>()
  *  immediately — liveness is the staleness signal, not age. */
 const LOCK_ABANDONED_MS = 10 * 60_000
 const LOCK_WAIT_MS = 20_000
+/** Sweep floor for crashed staged-token leftovers — a fresh sibling
+ *  could belong to an in-flight acquirer; an old one can't. */
+const LOCK_STALE_MS = 60_000
 
 const syncSleep = (ms: number): void => {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
@@ -61,19 +64,33 @@ const lockStealable = (path: string): boolean => {
  *  recreated between the check and the remove.) */
 const removeCaptured = (lock: string, verify: (captured: string) => boolean): void => {
   const dest = `${lock}.cap-${process.pid}-${randomBytes(4).toString('hex')}`
+  const drop = (): void => {
+    try {
+      rmSync(dest, { force: true })
+    } catch {
+      // best-effort — a cleanup I/O error must not mask the caller's
+      // exception or abort the exit hook mid-release
+    }
+  }
   try {
     renameSync(lock, dest)
   } catch {
     return // already gone or renamed by a contender — the retry decides
   }
-  if (verify(dest)) {
-    rmSync(dest, { force: true })
+  let ok = false
+  try {
+    ok = verify(dest)
+  } catch {
+    // a verify that can't answer puts the instance back — fail-safe
+  }
+  if (ok) {
+    drop()
     return
   }
   try {
     renameSync(dest, lock)
   } catch {
-    rmSync(dest, { force: true }) // a new lock already sits there — drop the captured
+    drop() // a new lock already sits there — drop the captured
   }
 }
 
@@ -85,6 +102,32 @@ const stealLock = (lock: string): void => {
     return
   }
   removeCaptured(lock, lockStealable)
+}
+
+/** Sweep crashed staged-token leftovers (`<lock>.<pid>.<rand>.tmp`). A
+ *  hard kill between stage and link leaves one behind; stage→link is
+ *  synchronous so a sibling older than the sweep floor is by definition
+ *  a leftover — a fresh one could belong to an in-flight acquirer. */
+const sweepStaged = (lock: string): void => {
+  try {
+    const dir = dirname(lock)
+    const prefix = `${basename(lock)}.`
+    for (const f of readdirSync(dir)) {
+      if (!f.startsWith(prefix) || !f.endsWith('.tmp')) {
+        continue
+      }
+      const p = join(dir, f)
+      try {
+        if (Date.now() - statSync(p).mtimeMs > LOCK_STALE_MS) {
+          rmSync(p, { force: true })
+        }
+      } catch {
+        // raced removal — fine
+      }
+    }
+  } catch {
+    // unreadable dir — the acquire attempts decide
+  }
 }
 
 /** One acquisition attempt — true when the lock is ours. The token file
@@ -172,6 +215,7 @@ export function acquireFileLock(lock: string, opts: FileLockOptions = {}): () =>
   }
   const token = `${process.pid}:${randomBytes(8).toString('hex')}`
   const deadline = Date.now() + waitMs
+  sweepStaged(lock)
   while (!tryAcquireLockFile(lock, token)) {
     if (Date.now() >= deadline) {
       throw new LockTimeout(`${label} held over ${waitMs / 1000}s`)

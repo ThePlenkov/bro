@@ -3,7 +3,7 @@
  *  ownership proof steal/release check. */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -56,6 +56,25 @@ describe('filelock', () => {
       const child = spawnSync('npx', ['tsx', script], { encoding: 'utf8' })
       assert.equal(child.status, 0, child.stderr)
       assert.equal(existsSync(lock), false)
+    } finally {
+      done()
+    }
+  })
+
+  test('a crashed staged token is swept on acquire; a fresh one is not', () => {
+    const { dir, done } = tmp()
+    try {
+      const lock = join(dir, 'x.lock')
+      const old = join(dir, 'x.lock.1.aaaa.tmp')
+      const fresh = join(dir, 'x.lock.2.bbbb.tmp')
+      writeFileSync(old, 'gone')
+      writeFileSync(fresh, 'inflight')
+      const past = new Date(Date.now() - 120_000)
+      utimesSync(old, past, past)
+      const release = acquireFileLock(lock)
+      release()
+      assert.equal(existsSync(old), false)
+      assert.equal(existsSync(fresh), true)
     } finally {
       done()
     }

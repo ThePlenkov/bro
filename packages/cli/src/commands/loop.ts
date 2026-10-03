@@ -470,6 +470,9 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<ItemResult> {
       }
     }
     const lockPath = ctx.stack === undefined ? null : stackPushLockPath(ctx.stack)
+    if (ctx.stack !== undefined && lockPath === null) {
+      say(ctx, 'loop: could not resolve the git common dir — running without the stack lock')
+    }
     // a live competing push can outlast one 20s wait — the hold is
     // short, so retry the window a few times before flunking the item;
     // flunking parks the bead unreclaimed for the whole run
