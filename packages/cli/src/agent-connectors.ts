@@ -66,21 +66,34 @@ export type AgentConnectorFactory = (
 
 // --- registry ------------------------------------------------------------------
 
-const agentRegistry: { name: string; make: AgentConnectorFactory }[] = []
+/** Probe matchers live on the registry entry, not the instance — a
+ *  probe must not construct a connector it will never pick (bro-srhs). */
+interface AgentConnectorMatchers {
+  matchDir?: (dir: string, env: AgentConnectorEnv) => boolean
+  matchRemote?: (url: string, env: AgentConnectorEnv) => boolean
+}
+
+const agentRegistry: ({
+  name: string
+  make: AgentConnectorFactory
+} & AgentConnectorMatchers)[] = []
 
 /** External backends (gascity, tmux, …) register here. Duplicate names
  *  are skipped — a plugin cannot shadow a built-in backend. Returns a
  *  disposer bound to THIS registration (undefined when skipped): fixture
- *  cleanup removes the entry it added, never whatever holds the name. */
+ *  cleanup removes the entry it added, never whatever holds the name.
+ *  `matchers` are factory-level probes — resolution runs them without
+ *  constructing the connector. */
 export function registerAgentConnector(
   name: string,
-  make: AgentConnectorFactory
+  make: AgentConnectorFactory,
+  matchers: AgentConnectorMatchers = {}
 ): (() => void) | undefined {
   if (agentRegistry.some((x) => x.name === name)) {
     console.error(`warning: agent connector "${name}" already registered — skipped`)
     return undefined
   }
-  const entry = { name, make }
+  const entry = { name, make, ...matchers }
   agentRegistry.push(entry)
   return () => {
     const i = agentRegistry.indexOf(entry)
@@ -177,23 +190,24 @@ function probeAgentConnectors(
   remote: string,
   probeFailures: Map<string, string>
 ): AgentConnector | undefined {
-  const matchers: ((conn: AgentConnector) => boolean | undefined)[] = [
-    (conn) => conn.matchDir?.(ctx.dir),
+  const matchers: ((c: (typeof agentRegistry)[number]) => boolean | undefined)[] = [
+    (c) => c.matchDir?.(ctx.dir, env),
   ]
   if (remote !== '') {
-    matchers.unshift((conn) => conn.matchRemote?.(remote))
+    matchers.unshift((c) => c.matchRemote?.(remote, env))
   }
   for (const match of matchers) {
     for (const c of agentRegistry) {
-      let conn: AgentConnector | undefined
-      try {
-        conn = c.make(ctx, env)
-      } catch (err) {
-        probeFailures.set(c.name, err instanceof Error ? err.message : String(err))
+      // probe first — only a matcher that claims the repo gets
+      // constructed; a claim that can't construct is a recorded failure,
+      // not a silent fallthrough
+      if (match(c) !== true) {
         continue
       }
-      if (match(conn) === true) {
-        return conn
+      try {
+        return c.make(ctx, env)
+      } catch (err) {
+        probeFailures.set(c.name, err instanceof Error ? err.message : String(err))
       }
     }
   }
@@ -314,9 +328,19 @@ function writeWorkMarker(dir: string, agentId: string, molStep: string, pid?: nu
   }
 }
 
-function dropWorkMarker(dir: string, agentId: string): void {
+/** Unlink the .work marker — but revalidate the registry first: a
+ *  respawn reuses the agentId, so a caller working from a stale snapshot
+ *  (nativeState/recordedDeath list entries outside the registry lock)
+ *  would unlink the fresh marker the new run just wrote (bro-78qb).
+ *  Drop only when the registry no longer points a NEWER same-agentId
+ *  spawn at this marker. */
+function dropWorkMarker(dir: string, molStep: string, entry: AgentRegistryEntry): void {
   try {
-    const marker = workMarkerPath(dir, agentId)
+    const cur = readAgentRegistry(dir)[molStep]
+    if (cur !== undefined && cur.agentId === entry.agentId && cur.spawnedAt !== entry.spawnedAt) {
+      return // respawned — the live run owns the marker now
+    }
+    const marker = workMarkerPath(dir, entry.agentId)
     if (marker !== null) {
       rmSync(marker, { force: true })
     }
@@ -449,7 +473,9 @@ function prepareSpawn(
     agentId,
     backend,
     spawnedAt: new Date().toISOString(),
-    worktree: spec.repoRoot,
+    // absolute — a relative repoRoot breaks branch/PR lookup when the
+    // reader's cwd differs from the spawner's (bro-qoqt)
+    worktree: resolve(spec.repoRoot),
     log,
     stopped: false,
     exitStatus: undefined,
@@ -495,11 +521,11 @@ function recordedDeath(
   entry: AgentRegistryEntry
 ): AgentState | undefined {
   if (entry.stopped === true) {
-    dropWorkMarker(dir, entry.agentId)
+    dropWorkMarker(dir, molStep, entry)
     return 'stopped'
   }
   if (entry.exitStatus !== undefined) {
-    dropWorkMarker(dir, entry.agentId)
+    dropWorkMarker(dir, molStep, entry)
     return 'exited'
   }
   if (home) {
@@ -510,7 +536,7 @@ function recordedDeath(
       } catch {
         // harvest is advisory — the .exit file still proves the exit
       }
-      dropWorkMarker(dir, entry.agentId)
+      dropWorkMarker(dir, molStep, entry)
       return 'exited'
     }
   }
@@ -575,7 +601,7 @@ function nativeState(dir: string, home: string | null, molStep: string, entry: A
   if (dead !== undefined) {
     return dead
   }
-  dropWorkMarker(dir, entry.agentId)
+  dropWorkMarker(dir, molStep, entry)
   return 'lost'
 }
 
@@ -642,8 +668,16 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           )
           // an unhandled 'error' event would take the whole CLI down —
           // a failed exec records itself on the entry and reads 'lost'
+          const spawnStamp = readAgentRegistry(dir)[spec.molStep]?.spawnedAt
           child.on('error', (err) => {
             try {
+              // stamp only our own run — a respawn that reused this
+              // molStep/agentId owns the entry now; an old child's error
+              // must not mislabel a live respawn (bro-ooud)
+              const cur = readAgentRegistry(dir)[spec.molStep]
+              if (cur?.agentId !== agentId || cur?.spawnedAt !== spawnStamp) {
+                return
+              }
               patchAgentRegistry(dir, spec.molStep, { spawnError: err.message })
             } catch {
               // the entry may not have landed yet — nothing else to do
@@ -733,7 +767,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         } catch {
           // the marker removal below still records intent
         }
-        dropWorkMarker(dir, id)
+        dropWorkMarker(dir, molStep, entry)
       })
     },
 
@@ -838,7 +872,7 @@ function tmuxState(
     // the marker stays — an unverifiable agent may still be live work
     return 'spawned'
   }
-  dropWorkMarker(dir, entry.agentId)
+  dropWorkMarker(dir, molStep, entry)
   return 'lost'
 }
 
@@ -1083,7 +1117,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         } catch {
           // the marker removal below still records intent
         }
-        dropWorkMarker(dir, id)
+        dropWorkMarker(dir, molStep, entry)
       })
     },
 
@@ -1279,6 +1313,25 @@ function gcProviderName(command: string): string {
   return /^[a-zA-Z][\w-]*$/.test(base) ? base : 'agent'
 }
 
+/** City root — explicit `agents.gascity.configDir`, else the shared
+ *  `<git-common-dir>/bro/gascity` (out of every worktree). */
+function gcConfigDir(dir: string, env: AgentConnectorEnv): string | null {
+  const k = env.agents['gascity']?.configDir
+  if (typeof k === 'string' && k.trim() !== '') {
+    return isAbsolute(k) ? k : resolve(dir, k)
+  }
+  const home = agentsHome(dir)
+  return home === null ? null : dirname(home) + '/gascity'
+}
+
+/** gascity claims a configDir layout — an authored city.toml at the
+ *  resolved configDir is the marker (spec: agents.gascity.configDir).
+ *  Factory-level: resolution probes this without constructing. */
+function gcMatchDir(dir: string, env: AgentConnectorEnv): boolean {
+  const city = gcConfigDir(dir, env)
+  return city !== null && existsSync(join(city, 'city.toml'))
+}
+
 export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
   const dir = ctx.dir
   const knobs = env.agents['gascity'] ?? {}
@@ -1291,16 +1344,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       ? knobs.template.trim()
       : 'bro-worker'
 
-  /** City root — explicit `agents.gascity.configDir`, else the shared
-   *  `<git-common-dir>/bro/gascity` (out of every worktree). */
-  const configDir = (): string | null => {
-    const k = knobs.configDir
-    if (typeof k === 'string' && k.trim() !== '') {
-      return isAbsolute(k) ? k : resolve(dir, k)
-    }
-    const home = agentsHome(dir)
-    return home === null ? null : dirname(home) + '/gascity'
-  }
+  const configDir = (): string | null => gcConfigDir(dir, env)
 
   const findEntry = (id: string) => findAgentEntry(dir, 'gascity', id)
 
@@ -1518,12 +1562,8 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
   return {
     name: 'gascity',
 
-    // gascity claims a configDir layout — an authored city.toml at the
-    // resolved configDir is the marker (spec: agents.gascity.configDir).
-    matchDir: () => {
-      const city = configDir()
-      return city !== null && existsSync(join(city, 'city.toml'))
-    },
+    // instance-level view of the registered factory matcher
+    matchDir: () => gcMatchDir(dir, env),
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
       // gc session submit has no --file/stdin mode (v1.4.2), so the
@@ -1701,4 +1741,4 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
 }
 
 registerAgentConnector('tmux', makeTmuxConnector)
-registerAgentConnector('gascity', makeGascityConnector)
+registerAgentConnector('gascity', makeGascityConnector, { matchDir: gcMatchDir })

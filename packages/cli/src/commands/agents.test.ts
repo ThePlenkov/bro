@@ -375,6 +375,47 @@ describe('bro agents down <target>', () => {
     }
   })
 
+  test("a status() that drops the pid renders 'unknown' in the respawn note", async () => {
+    // a respawn between list() and status() reuses the agentId with a new
+    // handle — but a connector can also just stop reporting a pid; the
+    // note must not print "pid 4242 → undefined" (bro-8ltl)
+    const { registerAgentConnector } = await import('../agent-connectors.ts')
+    let stopped = ''
+    const agent = {
+      id: 'ag-1',
+      molStep: 'fx-1',
+      backend: 'flaky-pid-agents-test',
+      state: 'running' as const,
+      pid: 4242,
+    }
+    const dispose = registerAgentConnector('flaky-pid-agents-test', () => ({
+      name: 'flaky-pid-agents-test',
+      spawn: () => Promise.reject(new Error('unused')),
+      list: () => Promise.resolve({ agents: [agent] }),
+      // the handle drops out entirely — optional-field exactness means
+      // an explicit `pid: undefined` isn't the shape we're testing
+      status: () => {
+        const { pid: _dropped, ...rest } = agent
+        return Promise.resolve(rest)
+      },
+      stop: (id: string) => {
+        stopped = id
+        return Promise.resolve()
+      },
+      capabilities: () => ({ attach: false, respawn: true, supervisor: 'none' as const }),
+    }))
+    const fx = fixture()
+    try {
+      const r = await agents(['down', 'ag-1', '--connector', 'flaky-pid-agents-test'])
+      assert.equal(r.code, 0)
+      assert.match(r.err.join('\n'), /respawned since lookup \(pid 4242 → unknown\)/)
+      assert.equal(stopped, 'ag-1')
+    } finally {
+      dispose?.()
+      fx.restore()
+    }
+  })
+
   test('extra positionals are usage errors', async () => {
     const fx = fixture()
     try {
