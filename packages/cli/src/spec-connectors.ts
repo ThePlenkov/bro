@@ -161,7 +161,7 @@ function preferSpec(nodes: ResolvedSpec[]): ResolvedSpec | undefined {
       (a, b) =>
         Number(nonEmpty(b)) - Number(nonEmpty(a)) ||
         Number(b.dirSpec) - Number(a.dirSpec) ||
-        a.path.localeCompare(b.path)
+        (a.path ?? '').localeCompare(b.path ?? '')
     )[0]
 }
 

@@ -31,14 +31,16 @@ export interface GitLogPathRecord {
   paths: string[]
 }
 
-/** `git log --format=%H%x09%s -z --name-only <ref>` parsed into
+/** `git log --format=%x1e%H%x09%s -z --name-only <ref>` parsed into
  *  per-commit records — callers filter subjects in-process (`--grep`
- *  would search bodies too). Output is unbounded (full history ×
- *  touched paths), so spawnSync gets an explicit cap rather than the
- *  1 MB default. null on git failure — the caller decides the honest
- *  state (unborn ref, bad ref). */
+ *  would search bodies too). Each header is framed by the \x1e record
+ *  separator, so a filename that happens to look like `<sha>\t<subject>`
+ *  can't pose as a commit. Output is unbounded (full history × touched
+ *  paths), so spawnSync gets an explicit cap rather than the 1 MB
+ *  default. null on git failure — the caller decides the honest state
+ *  (unborn ref, bad ref). */
 export function gitLogPathRecords(dir: string, ref: string): GitLogPathRecord[] | null {
-  const proc = spawnSync('git', ['-C', dir, 'log', '--format=%H%x09%s', '-z', '--name-only', ref], { // NOSONAR — PATH lookup is the contract
+  const proc = spawnSync('git', ['-C', dir, 'log', '--format=%x1e%H%x09%s', '-z', '--name-only', ref], { // NOSONAR — PATH lookup is the contract
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
@@ -52,7 +54,7 @@ export function gitLogPathRecords(dir: string, ref: string): GitLogPathRecord[] 
     if (tok === '') {
       continue
     }
-    const head = /^([0-9a-f]{40,64})\t([\s\S]*)$/.exec(tok)
+    const head = /^\x1e([0-9a-f]{40,64})\t([\s\S]*)$/.exec(tok)
     if (head !== null) {
       cur = { sha: head[1]!, subject: head[2]!, paths: [] }
       records.push(cur)
