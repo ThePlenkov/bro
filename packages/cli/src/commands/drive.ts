@@ -23,12 +23,13 @@
  *   PR settled             → close a dangling fixer bead
  *
  * Occupancy is the guard bro-pywx hardens: never spawn into a worktree
- * a live session works in. Planes: the agents facade, fresh .work
- * markers, and a /proc cwd scan for agent-shaped processes — occupied
- * is always the safe verdict (a skipped pass, never double-work).
+ * a live session works in. Planes: the agents facade, the worktree's own
+ * claim marker, fresh .work markers, and a /proc cwd scan that follows a
+ * process's ancestry to an agent-shaped root — occupied is always the
+ * safe verdict (a skipped pass, never double-work).
  */
 import { existsSync, readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs'
-import { basename, join, resolve, sep } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import {
   checkBeads,
   ensureAuth,
@@ -54,7 +55,7 @@ import { spawnStepAgent } from './agents.ts'
 import { collectAgents } from './fleet.ts'
 import { driveSection, type DriveConfig } from './drive-config.ts'
 import { loadBroConfig } from '../plugins.ts'
-import { mainWorktree, parseWorktreePorcelain, worktreePathFor } from './work.ts'
+import { mainWorktree, parseWorktreePorcelain, worktreeGitDir, worktreePathFor } from './work.ts'
 
 function usage(): never {
   console.error(`Usage: bro drive [--once] [--every [SEC]] [--no-merge] [--connector <name>] [--json]`)
@@ -211,12 +212,42 @@ interface ProcHit {
  *  let a leftover `tsc --watch` or dev server occupy a worktree forever. */
 const AGENT_CMD_RE = /(?:^|[\s/])(devin|claude|codex|gemini|aider|opencode|amp)(?:\s|$)/
 
+/** Env badges agent runtimes pin on themselves — every descendant
+ *  inherits them, so a detached tool shell counts even after a setsid
+ *  broke the ancestry chain. NUL-anchored: /proc environ entries are
+ *  NUL-separated and an unanchored match would take `XAI_AGENT=`. */
+const AGENT_ENV_RE = /(?:^|\0)(?:BRO_AGENT_ID|AI_AGENT)=/
+
 function readProcText(dir: string, file: string): string {
   try {
     return readFileSync(join(dir, file), 'utf8')
   } catch {
     return ''
   }
+}
+
+/** ppid of a /proc entry — the `PPid:` line of status; 0 when unreadable. */
+function procPpid(dir: string): number {
+  const m = /^PPid:[ \t]*(\d+)/m.exec(readProcText(dir, 'status'))
+  return m === null ? 0 : Number(m[1])
+}
+
+/** Agent-shaped when the process OR a live ancestor matches — agent
+ *  CLIs keep their own cwd at the launch dir while their tool shells
+ *  (bash, node, git) are what cd into the worktree; bro-pywx's raced
+ *  spawn was exactly that shape — the devin process sat in the main
+ *  checkout, invisible to an own-cmdline-only scan. Bounded so a wedged
+ *  or cyclic chain can never loop the pass. */
+function procIsAgent(dir: string, depth = 0): boolean {
+  if (depth > 16) {
+    return false
+  }
+  const cmd = readProcText(dir, 'cmdline').replaceAll('\0', ' ').trim()
+  if (AGENT_CMD_RE.test(cmd) || AGENT_ENV_RE.test(readProcText(dir, 'environ'))) {
+    return true
+  }
+  const ppid = procPpid(dir)
+  return ppid > 1 && procIsAgent(join(dirname(dir), String(ppid)), depth + 1)
 }
 
 /** Live agent-shaped processes with cwd inside `worktree` — Linux-only
@@ -245,9 +276,8 @@ export function agentProcessesIn(worktree: string, procDir = '/proc'): ProcHit[]
     if (cwd !== root && !cwd.startsWith(root + sep)) {
       continue
     }
-    const cmd = readProcText(dir, 'cmdline').replaceAll('\0', ' ').trim()
-    const env = readProcText(dir, 'environ')
-    if (AGENT_CMD_RE.test(cmd) || env.includes('BRO_AGENT_ID=')) {
+    if (procIsAgent(dir)) {
+      const cmd = readProcText(dir, 'cmdline').replaceAll('\0', ' ').trim()
       hits.push({ pid: Number(name), cmd })
     }
   }
@@ -266,6 +296,29 @@ export interface OccupancyCtx {
   workDetails: string[]
   /** Injectable /proc scan — tests pass a stub. */
   scanProc?: (worktree: string) => ProcHit[]
+  /** Injectable worktree-claim probe — tests pass a stub. */
+  scanClaim?: (worktree: string) => string | undefined
+}
+
+/** The worktree's own claim marker — `<gitdir>/bro/work`, stamped by
+ *  `bro work enter` (bro-pywx). Unlike .work marker details it needs no
+ *  name matching: presence inside THIS tree is the claim. Returns the
+ *  marker detail ('' when fresh but anonymous), undefined when absent
+ *  or stale. */
+export function worktreeClaim(worktree: string, now: number = Date.now()): string | undefined {
+  try {
+    const gd = worktreeGitDir(worktree)
+    if (gd === null) {
+      return undefined
+    }
+    const marker = join(gd, 'bro', 'work')
+    if (statSync(marker).mtimeMs < now - LIVE_MARKER_MS) {
+      return undefined
+    }
+    return readFileSync(marker, 'utf8').split('\n')[1]?.trim() ?? ''
+  } catch {
+    return undefined
+  }
 }
 
 /** Why a PR's worktree is owned right now — undefined = orphaned, the
@@ -285,6 +338,10 @@ export function occupied(opts: OccupancyCtx): string | undefined {
     )
     if (agent) {
       return `agent ${agent.id} live in ${basename(opts.worktree)}`
+    }
+    const claim = (opts.scanClaim ?? worktreeClaim)(opts.worktree)
+    if (claim !== undefined) {
+      return `worktree ${basename(opts.worktree)} claimed${claim === '' ? '' : ` by ${claim}`}`
     }
   }
   const slug = branchSlug(opts.branch)

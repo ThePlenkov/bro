@@ -27,8 +27,11 @@ For every open PR on a fleet branch (worktree branches + local
 | `gate.ok` | no | `bro act merge`, retire the worktree when clean, close the fixer bead |
 | PR merged/closed | — | close a dangling fixer bead |
 
-Occupancy = the agents facade + fresh `.work` markers + a `/proc` cwd
-scan for agent-shaped processes. Occupied is always the safe verdict.
+Occupancy = the agents facade + the worktree's own claim marker
+(`<gitdir>/bro/work`, stamped by `bro work enter`) + fresh `.work`
+markers + a `/proc` cwd scan that follows a process's ancestry to an
+agent-shaped root — agent CLIs sit at their launch dir while their tool
+shells hold the worktree cwd. Occupied is always the safe verdict.
 
 ## Commands
 
