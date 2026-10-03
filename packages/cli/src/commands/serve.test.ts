@@ -1,9 +1,9 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request, type IncomingMessage } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { SpawnError, type AgentConnector, type AgentInfo } from '@broject/core'
 import { initRepo, inside } from './testrepo.ts'
@@ -215,6 +215,26 @@ describe('serve — routes', () => {
     )
     assert.equal(conflict.status, 409)
 
+    // kind → status: input refusals are 400, server misconfiguration
+    // 500, a missing backend 503 — not every SpawnError is a conflict
+    for (const [kind, status] of [
+      ['input', 400],
+      ['config', 500],
+      ['unavailable', 503],
+    ] as const) {
+      const r = await route(
+        'POST',
+        '/api/v1/agents',
+        JSON.stringify({ molStep: 'fx-1' }),
+        deps({
+          spawn: async () => {
+            throw new SpawnError(`spawn failed (${kind})`, kind)
+          },
+        })
+      )
+      assert.equal(r.status, status, `kind=${kind}`)
+    }
+
     const badInput = await route(
       'POST',
       '/api/v1/agents',
@@ -344,6 +364,27 @@ describe('serve state discovery', () => {
       assert.notEqual(retaken, undefined)
       assert.equal(readFileSync(`${serveStatePath(main)}.lock`, 'utf8'), `${process.pid}`)
       retaken!()
+    })
+  })
+
+  test('an empty lock is in-flight while fresh, stealable when aged (wx fallback)', () => {
+    const { root, main } = initRepo('bro-serve-lock-wx-')
+    inside(main, root, () => {
+      const lock = `${serveStatePath(main)}.lock`
+      // the wx fallback's create-then-write window: a FRESH empty lock
+      // is a live writer mid-write — a starter must refuse, not break
+      mkdirSync(dirname(lock), { recursive: true })
+      writeFileSync(lock, '')
+      assert.equal(acquireServeLock(main), undefined)
+      assert.equal(existsSync(lock), true, 'fresh empty lock must survive a refused acquire')
+      // an empty lock older than the grace is a crashed writer's
+      // leftover — the next starter breaks it and takes over
+      const old = (Date.now() - 60_000) / 1000
+      utimesSync(lock, old, old)
+      const acquired = acquireServeLock(main)
+      assert.notEqual(acquired, undefined)
+      assert.equal(readFileSync(lock, 'utf8'), `${process.pid}`)
+      acquired!()
     })
   })
 })

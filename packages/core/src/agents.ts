@@ -90,10 +90,29 @@ export interface AgentConnector {
   capabilities(): AgentCapabilities
 }
 
+/** Why a spawn refused — the reply surface maps the kind to a status
+ *  (409/400/500/503) instead of string-matching the message. */
+export type SpawnErrorKind =
+  /** claim refused, live agent, foreign backend — a real conflict */
+  | 'conflict'
+  /** caller input — a worktree path that doesn't exist, an unsafe name */
+  | 'input'
+  /** server-side misconfiguration — no agent command, no common dir */
+  | 'config'
+  /** backend tooling missing or down — tmux absent, gc unreachable */
+  | 'unavailable'
+
 /** Duplicate/conflict on spawn — distinct from operational failures so
  *  callers can tell "already running" apart from "backend broken". */
 export class SpawnError extends Error {
   override name = 'SpawnError'
+  /** assigned in the body — parameter properties don't survive node's
+   *  strip-only TS mode, and this file is spawned as a subprocess */
+  readonly kind: SpawnErrorKind
+  constructor(message: string, kind: SpawnErrorKind = 'conflict') {
+    super(message)
+    this.kind = kind
+  }
 }
 
 export class AgentNotFound extends Error {
@@ -236,7 +255,7 @@ export function mintAgentId(backend: string): string {
 export function bdAt(
   beadsDir: string,
   args: string[]
-): { code: number; out: string; err: string } {
+): { code: number; out: string; err: string; ran: boolean } {
   const proc = spawnSync('bd', args, { // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
     env: { ...process.env, BEADS_DIR: beadsDir },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -247,7 +266,15 @@ export function bdAt(
   return {
     code: proc.status ?? 1,
     out: proc.stdout ?? '',
-    err: (proc.stderr ?? proc.error?.message ?? '').trim(),
+    err: (
+      proc.stderr ||
+      proc.error?.message ||
+      (proc.signal !== null ? `killed by ${proc.signal}` : '')
+    ).trim(),
+    // ran = bd executed to a real exit — ENOENT, a timeout kill, or a
+    // signal means the store never answered, so a non-zero code is
+    // degradation ('unavailable'), not a refusal ('conflict')
+    ran: proc.error === undefined && proc.status !== null,
   }
 }
 
@@ -275,7 +302,9 @@ export function claimStep(beadsDir: string, molStep: string): void {
   const r = bdAt(beadsDir, ['update', molStep, '--claim'])
   if (r.code !== 0) {
     const why = r.err !== '' ? r.err : `bd exited ${r.code}`
-    throw new SpawnError(`claim of ${molStep} refused — ${why}`)
+    // bd itself missing/hung is the store being down — 503 territory,
+    // not a claim conflict
+    throw new SpawnError(`claim of ${molStep} refused — ${why}`, r.ran ? 'conflict' : 'unavailable')
   }
 }
 
@@ -285,7 +314,7 @@ export function rebindStep(beadsDir: string, molStep: string, actor: string): vo
   const r = bdAt(beadsDir, ['update', molStep, '--assignee', actor])
   if (r.code !== 0) {
     const why = r.err !== '' ? r.err : `bd exited ${r.code}`
-    throw new SpawnError(`rebind of ${molStep} failed — ${why}`)
+    throw new SpawnError(`rebind of ${molStep} failed — ${why}`, r.ran ? 'conflict' : 'unavailable')
   }
 }
 

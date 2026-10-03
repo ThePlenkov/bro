@@ -123,6 +123,23 @@ const withFakeBd = (fn: (binDir: string) => void): void => {
   }
 }
 
+/** PATH with no bd on it at all — spawnSync reports ENOENT, which is
+ *  the store being down, not a refused operation. */
+const withNoBd = (fn: () => void): void => {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-nobd-'))
+  try {
+    const prev = process.env.PATH
+    process.env.PATH = dir
+    try {
+      fn()
+    } finally {
+      process.env.PATH = prev
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 const seedStore = (dir: string, rows: Record<string, unknown>[]): string => {
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'store.json'), JSON.stringify({ rows }))
@@ -351,8 +368,26 @@ describe('shared-store claims', () => {
       withStore([{ id: 'fx-1', status: 'open' }], (store) => {
         claimStep(store, 'fx-1')
         assert.equal(probeStep(store, 'fx-1')!.status, 'in_progress')
-        assert.throws(() => claimStep(store, 'fx-1'), SpawnError)
+        assert.throws(
+          () => claimStep(store, 'fx-1'),
+          (e) => e instanceof SpawnError && e.kind === 'conflict'
+        )
       })
+    })
+  })
+
+  test('an unspawnable bd maps claim/rebind failures to unavailable, not conflict', () => {
+    withNoBd(() => {
+      const r = bdAt('/anywhere', ['show', 'fx-1', '--json'])
+      assert.equal(r.ran, false)
+      assert.throws(
+        () => claimStep('/anywhere', 'fx-1'),
+        (e) => e instanceof SpawnError && e.kind === 'unavailable'
+      )
+      assert.throws(
+        () => rebindStep('/anywhere', 'fx-1', 'worker'),
+        (e) => e instanceof SpawnError && e.kind === 'unavailable'
+      )
     })
   })
 
@@ -372,6 +407,8 @@ describe('shared-store claims', () => {
       withStore([], (store) => {
         const r = bdAt(store, ['bogus'])
         assert.equal(r.code, 1)
+        // bd ran and refused — a real non-zero exit, not degradation
+        assert.equal(r.ran, true)
         assert.match(r.err, /unhandled/)
       })
     })
