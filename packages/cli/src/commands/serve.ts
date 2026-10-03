@@ -39,7 +39,6 @@
 import { randomBytes } from 'node:crypto'
 import {
   closeSync,
-  fstatSync,
   linkSync,
   mkdirSync,
   openSync,
@@ -222,10 +221,10 @@ function tryLockOnce(staged: string, lock: string): 'acquired' | 'held' | 'retry
       throw err
     }
   }
-  // wx write = create, fill, close — a writer paused past
-  // EMPTY_LOCK_GRACE_MS mid-call can have its still-empty lock broken
-  // and the path stolen; the inode check proves our fd is still the
-  // file at `lock` before the acquisition counts
+  // wx = create-then-write — a writer paused past EMPTY_LOCK_GRACE_MS
+  // mid-call can have its still-empty lock broken and the path stolen;
+  // the re-read proves the lock still names us before the acquisition
+  // counts (a stolen path holds the thief's pid, or nothing at all)
   let fd: number
   try {
     fd = openSync(lock, 'wx')
@@ -236,10 +235,18 @@ function tryLockOnce(staged: string, lock: string): 'acquired' | 'held' | 'retry
     throw err
   }
   try {
-    writeSync(fd, `${process.pid}`)
-    return fstatSync(fd).ino === statSync(lock).ino ? 'acquired' : 'retry'
+    const pid = `${process.pid}`
+    for (let off = 0; off < pid.length; ) {
+      off += writeSync(fd, pid.slice(off))
+    }
   } finally {
     closeSync(fd)
+  }
+  try {
+    return readFileSync(lock, 'utf8') === `${process.pid}` ? 'acquired' : 'retry'
+  } catch {
+    // the path no longer names our file — broken mid-write, retry
+    return 'retry'
   }
 }
 
