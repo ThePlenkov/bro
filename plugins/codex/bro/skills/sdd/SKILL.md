@@ -44,6 +44,7 @@ inside `<sdd.dir>/<epic>/` when the parent is a dir spec).
 | Command | What it does |
 | ------- | ------------ |
 | `bro spec check [id…]` | Coverage over `in_progress` beads (`--all` adds open): `spec` / `link` / `exempt` / `MISSING`. Exit 1 on any MISSING — CI-able |
+| `bro spec drift [id…]` | Freshness over spec'd **closed** beads (`--all` scans every spec'd bead): `STALE` / `fresh` / `no-scope` / `unverifiable`, from spec-vs-scope commit recency on `origin/HEAD` (`--ref` overrides). Exit 1 on any STALE |
 | `bro spec new <id>` | Scaffold `<sdd.dir>/<id>.md` from the bead title; never overwrites. `--parent <id>` links the tree |
 | `bro spec tree` | The spec hierarchy — roots, children, MISSING for claimed beads with none |
 | `bro spec init` | Bootstrap SDD: detects `.specify/`/`openspec/` and writes `connectors.specs` + `sdd.mode: remind`; on a bare repo scaffolds a native `specs/` root. `--tool` overrides detection |
@@ -86,3 +87,6 @@ beads are never your blocker.
   instead of writing an empty spec file — a stub defeats the audit.
 - `bro spec check` is the self-audit; wire it into CI the same way
   `bro act status` gates PRs.
+- `bro spec drift` audits **shipped** specs — a spec the code moved
+  past is debt to reschedule, not a gate. `unverifiable`/`no-scope`
+  rows report coverage gaps and never fail the run.
