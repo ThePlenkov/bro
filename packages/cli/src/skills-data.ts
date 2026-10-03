@@ -17,14 +17,21 @@ import { collectEmbedded, type EmbeddedData } from './embedded.ts'
 // src/skills-data.ts sits three levels under the repo root; so does every
 // dist/*.js bundle chunk — ../../.. lands on the repo root in development
 // and on node_modules in an install (no package.json → the artifact path
-// below). Matching on the root package name keeps an unlucky install
-// layout (a "bro"-named package.json beside us) from ever taking the
-// live path outside the repo.
+// below). The live path is admitted only for this repo: the root package
+// name matches AND packages/cli/package.json is @broject/bro (existsSync
+// alone would let a same-named consumer monorepo's own cli package pass)
+// AND repo markers exist — skills/ + formulas/ — so a consumer project
+// literally named "bro" with its own skills trees still falls through to
+// the shipped snapshot.
 function repoRoot(): string | null {
   const root = fileURLToPath(new URL('../../..', import.meta.url))
   try {
-    const isRepo = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).name === 'bro'
-    return isRepo && existsSync(join(root, 'skills')) && existsSync(join(root, 'formulas')) ? root : null
+    const isRepo =
+      JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).name === 'bro' &&
+      JSON.parse(readFileSync(join(root, 'packages', 'cli', 'package.json'), 'utf8')).name === '@broject/bro' &&
+      existsSync(join(root, 'skills')) &&
+      existsSync(join(root, 'formulas'))
+    return isRepo ? root : null
   } catch {
     return null
   }
