@@ -37,11 +37,17 @@
  * alive — two live servers would make the file a coin flip.
  */
 import { randomBytes } from 'node:crypto'
-import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { dirname, join } from 'node:path'
 import type { Readable } from 'node:stream'
-import { gitTry, SpawnError, type AgentConnector, type AgentInfo } from '@broject/core'
+import {
+  gitTry,
+  SpawnError,
+  type AgentConnector,
+  type AgentInfo,
+  type SpawnErrorKind,
+} from '@broject/core'
 import {
   agentConnectorNames,
   loadAgentEnv,
@@ -150,26 +156,34 @@ function releaseServeLock(lock: string): void {
   }
 }
 
-/** One acquisition attempt — link the staged pid file over `lock`.
- *  EEXIST means held: a live holder refuses; a dead holder's leftover
- *  is broken so the next attempt wins. */
-function tryLockOnce(staged: string, lock: string): 'acquired' | 'held' | 'retry' {
+/** A lock file read that came back empty — the wx fallback below has a
+ *  create-then-write window where a racer sees zero bytes. A fresh
+ *  empty lock is in-flight (retry, never break it); one older than the
+ *  grace is a crashed writer's leftover. */
+const EMPTY_LOCK_GRACE_MS = 5_000
+
+/** Filesystems where link(2) is not implemented (some fuse/9p/drvfs
+ *  mounts) — the serve lock falls back to a single O_CREAT|O_EXCL
+ *  write, which is the same atomic-create contract. */
+const NO_HARDLINK_CODES = new Set(['EPERM', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP'])
+
+/** The lock exists — decide held vs stealable. A live pid refuses; a
+ *  dead/unparseable one is broken so the next attempt wins; a fresh
+ *  empty file is an in-flight wx writer (retry, don't break). */
+function heldOrRetry(lock: string): 'held' | 'retry' {
+  let raw: string
+  let age = 0
   try {
-    linkSync(staged, lock)
-    return 'acquired'
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
-      throw err
-    }
-  }
-  let holder = Number.NaN
-  try {
-    holder = Number(readFileSync(lock, 'utf8').trim())
+    raw = readFileSync(lock, 'utf8')
+    age = Date.now() - statSync(lock).mtimeMs
   } catch {
     // raced removal — the retry decides
     return 'retry'
   }
-  if (Number.isInteger(holder) && pidAlive(holder)) {
+  if (raw.trim() === '' && age < EMPTY_LOCK_GRACE_MS) {
+    return 'retry'
+  }
+  if (Number.isInteger(Number(raw.trim())) && raw.trim() !== '' && pidAlive(Number(raw.trim()))) {
     return 'held'
   }
   try {
@@ -178,6 +192,33 @@ function tryLockOnce(staged: string, lock: string): 'acquired' | 'held' | 'retry
     // another starter broke it first — the retry decides
   }
   return 'retry'
+}
+
+/** One acquisition attempt — link the staged pid file over `lock`, or
+ *  wx-write it on filesystems without hard links. A held lock reports
+ *  'held' (live holder) or 'retry' (dead holder broken, try again). */
+function tryLockOnce(staged: string, lock: string): 'acquired' | 'held' | 'retry' {
+  try {
+    linkSync(staged, lock)
+    return 'acquired'
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === 'EEXIST') {
+      return heldOrRetry(lock)
+    }
+    if (!NO_HARDLINK_CODES.has(code ?? '')) {
+      throw err
+    }
+  }
+  try {
+    writeFileSync(lock, `${process.pid}`, { flag: 'wx' })
+    return 'acquired'
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      return heldOrRetry(lock)
+    }
+    throw err
+  }
 }
 
 /** `<serve.json>.lock` — atomic create is the singleton gate, so two
@@ -468,10 +509,21 @@ async function routeAgents(
       return { status: 400, body: { error: err.message } }
     }
     if (err instanceof SpawnError) {
-      return { status: 409, body: { error: err.message } }
+      // honest statuses: a claim refusal is a conflict, a missing
+      // command config is the server's problem, a dead backend is
+      // unavailable — one flat 409 lied about all three
+      const status = SPAWN_ERROR_STATUS[err.kind]
+      return { status, body: { error: err.message } }
     }
     throw err
   }
+}
+
+const SPAWN_ERROR_STATUS: Record<SpawnErrorKind, number> = {
+  conflict: 409,
+  input: 400,
+  config: 500,
+  unavailable: 503,
 }
 
 async function routeAgentGet(ref: string, deps: ServeDeps): Promise<ServeResponse> {

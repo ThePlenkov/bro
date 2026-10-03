@@ -215,6 +215,26 @@ describe('serve — routes', () => {
     )
     assert.equal(conflict.status, 409)
 
+    // kind → status: input refusals are 400, server misconfiguration
+    // 500, a missing backend 503 — not every SpawnError is a conflict
+    for (const [kind, status] of [
+      ['input', 400],
+      ['config', 500],
+      ['unavailable', 503],
+    ] as const) {
+      const r = await route(
+        'POST',
+        '/api/v1/agents',
+        JSON.stringify({ molStep: 'fx-1' }),
+        deps({
+          spawn: async () => {
+            throw new SpawnError(`spawn failed (${kind})`, kind)
+          },
+        })
+      )
+      assert.equal(r.status, status, `kind=${kind}`)
+    }
+
     const badInput = await route(
       'POST',
       '/api/v1/agents',

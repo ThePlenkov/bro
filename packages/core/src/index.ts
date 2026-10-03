@@ -115,6 +115,7 @@ export type {
   AgentRegistryEntry,
   AgentState,
   ListResult,
+  SpawnErrorKind,
   SpawnSpec,
 } from './agents.ts'
 export { acquireFileLock, LockTimeout, withFileLock } from './filelock.ts'

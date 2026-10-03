@@ -90,10 +90,29 @@ export interface AgentConnector {
   capabilities(): AgentCapabilities
 }
 
+/** Why a spawn refused — the reply surface maps the kind to a status
+ *  (409/400/500/503) instead of string-matching the message. */
+export type SpawnErrorKind =
+  /** claim refused, live agent, foreign backend — a real conflict */
+  | 'conflict'
+  /** caller input — a worktree path that doesn't exist, an unsafe name */
+  | 'input'
+  /** server-side misconfiguration — no agent command, no common dir */
+  | 'config'
+  /** backend tooling missing or down — tmux absent, gc unreachable */
+  | 'unavailable'
+
 /** Duplicate/conflict on spawn — distinct from operational failures so
  *  callers can tell "already running" apart from "backend broken". */
 export class SpawnError extends Error {
   override name = 'SpawnError'
+  /** assigned in the body — parameter properties don't survive node's
+   *  strip-only TS mode, and this file is spawned as a subprocess */
+  readonly kind: SpawnErrorKind
+  constructor(message: string, kind: SpawnErrorKind = 'conflict') {
+    super(message)
+    this.kind = kind
+  }
 }
 
 export class AgentNotFound extends Error {

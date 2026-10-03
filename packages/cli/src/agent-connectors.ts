@@ -145,22 +145,23 @@ export function resolveAgentConnector(
         `agent connector "${prefer}" is not registered (known: ${agentConnectorNames().join(', ') || 'none'})`
       )
     }
-    return hit.make(ctx, env)
+    return makeAgentConnector(hit, ctx, env)
   }
   const url = gitTry(['-C', ctx.dir, 'remote', 'get-url', 'origin'])
   const remote = url.code === 0 ? url.out.trim() : ''
-  // matchers run on a probe instance — construction must be side-effect free
+  // matchers run on a probe instance — construction must be side-effect
+  // free; a backend that can't even construct is skipped as no-match
   if (remote !== '') {
     for (const c of agentRegistry) {
-      const probe = c.make(ctx, env)
-      if (probe.matchRemote?.(remote)) {
+      const probe = probeAgentConnector(c, ctx, env)
+      if (probe?.matchRemote?.(remote) === true) {
         return probe
       }
     }
   }
   for (const c of agentRegistry) {
-    const probe = c.make(ctx, env)
-    if (probe.matchDir?.(ctx.dir)) {
+    const probe = probeAgentConnector(c, ctx, env)
+    if (probe?.matchDir?.(ctx.dir) === true) {
       return probe
     }
   }
@@ -168,7 +169,39 @@ export function resolveAgentConnector(
   if (!first) {
     throw new Error('no agent connector registered')
   }
-  return first.make(ctx, env)
+  return makeAgentConnector(first, ctx, env)
+}
+
+/** Constructor failure while probing a backend — a connector that
+ *  cannot instantiate has no matcher to run, so probe loops treat it
+ *  as no-match rather than failing the whole resolution. */
+function probeAgentConnector(
+  c: (typeof agentRegistry)[number],
+  ctx: ConnectorCtx,
+  env: AgentConnectorEnv
+): AgentConnector | undefined {
+  try {
+    return c.make(ctx, env)
+  } catch {
+    return undefined
+  }
+}
+
+/** The chosen connector's constructor threw — a broken backend is a
+ *  classified config failure, not an opaque crash for the client. */
+function makeAgentConnector(
+  c: (typeof agentRegistry)[number],
+  ctx: ConnectorCtx,
+  env: AgentConnectorEnv
+): AgentConnector {
+  try {
+    return c.make(ctx, env)
+  } catch (err) {
+    throw new SpawnError(
+      `agent connector "${c.name}" failed to initialize — ${err instanceof Error ? err.message : String(err)}`,
+      'config'
+    )
+  }
 }
 
 /** Every registered backend, constructed — fleet reads across ALL of
@@ -465,15 +498,16 @@ function findAgentEntry(
 function spawnHome(dir: string, backend: string, command: string, spec: SpawnSpec): string {
   if (command === '') {
     throw new SpawnError(
-      `no agent command configured — set agents.${backend}.command or loop.agent in bro.config.json`
+      `no agent command configured — set agents.${backend}.command or loop.agent in bro.config.json`,
+      'config'
     )
   }
   if (!existsSync(spec.repoRoot)) {
-    throw new SpawnError(`worktree ${spec.repoRoot} does not exist`)
+    throw new SpawnError(`worktree ${spec.repoRoot} does not exist`, 'input')
   }
   const home = agentsHome(dir)
   if (!home) {
-    throw new SpawnError(`no git common dir for ${spec.repoRoot}`)
+    throw new SpawnError(`no git common dir for ${spec.repoRoot}`, 'config')
   }
   return home
 }
@@ -811,7 +845,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       const home = spawnHome(dir, 'tmux', command, spec)
       const ver = tmuxRun(socket, ['-V'])
       if (ver.missing || ver.code !== 0) {
-        throw new SpawnError(`tmux unavailable — ${ver.missing ? 'not on PATH' : ver.err}`)
+        throw new SpawnError(`tmux unavailable — ${ver.missing ? 'not on PATH' : ver.err}`, 'unavailable')
       }
       // same critical section as native: dedup → claim → session →
       // pid-patch under the registry lock, all synchronous shell-outs
@@ -829,7 +863,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
             if (p.live === 'unknown') {
               // an unverifiable liveness probe must not let a duplicate
               // spawn kill-session a worker that may still be alive
-              throw new SpawnError(`cannot verify ${spec.molStep}'s tmux session — ${p.err}`)
+              throw new SpawnError(`cannot verify ${spec.molStep}'s tmux session — ${p.err}`, 'unavailable')
             }
             if (p.live === 'running') {
               touchWorkMarker(dir, e.agentId)
@@ -893,7 +927,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           } catch {
             // the entry landed already — the SpawnError still reports
           }
-          throw new SpawnError(`tmux new-session failed — ${res.err}`)
+          throw new SpawnError(`tmux new-session failed — ${res.err}`, 'unavailable')
         }
         // pane pid — a display handle like native's child pid, not the
         // liveness signal (has-session is)
@@ -1216,7 +1250,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       // a failed init must not leave the marker standing — otherwise the
       // next spawn sees city.toml and skips init on a half-built city
       rmSync(toml, { force: true })
-      throw new SpawnError(`gc init failed — ${init.err !== '' ? init.err : `exited ${init.code}`}`)
+      throw new SpawnError(`gc init failed — ${init.err !== '' ? init.err : `exited ${init.code}`}`, 'unavailable')
     }
   }
 
@@ -1229,7 +1263,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     // leading-alnum guard: '.'/'..' would escape the per-step dir and a
     // template-named step would overwrite the shared template
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(spec.molStep)) {
-      throw new SpawnError(`molStep ${spec.molStep} is not a safe gascity agent name`)
+      throw new SpawnError(`molStep ${spec.molStep} is not a safe gascity agent name`, 'input')
     }
     // inherit a customized agents.gascity.template — its prompt and
     // agent.toml carry over; only the work_dir pin is asserted
@@ -1282,7 +1316,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     if (!registered) {
       const add = gcRun(['rig', 'add', rigDir, '--adopt', '--city', city], 60_000)
       if (add.code !== 0) {
-        throw new SpawnError(`gc rig add ${rigDir} failed — ${add.err !== '' ? add.err : `exited ${add.code}`}`)
+        throw new SpawnError(`gc rig add ${rigDir} failed — ${add.err !== '' ? add.err : `exited ${add.code}`}`, 'unavailable')
       }
     }
   }
@@ -1293,7 +1327,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     if (gcSupervisorRunning() !== true) {
       const start = gcRun(['start', city], 120_000)
       if (start.code !== 0) {
-        throw new SpawnError(`gc start failed — ${start.err !== '' ? start.err : `exited ${start.code}`}`)
+        throw new SpawnError(`gc start failed — ${start.err !== '' ? start.err : `exited ${start.code}`}`, 'unavailable')
       }
     }
   }
@@ -1410,7 +1444,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       const home = spawnHome(dir, 'gascity', command, spec)
       const city = configDir()
       if (city === null) {
-        throw new SpawnError(`no git common dir for ${spec.repoRoot}`)
+        throw new SpawnError(`no git common dir for ${spec.repoRoot}`, 'config')
       }
       // same TOCTOU critical section as native: dedup → claim → backend
       // spawn → registry patch, all under the agents.json lock.
@@ -1422,7 +1456,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
             if (sessions === undefined) {
               // an unverifiable liveness probe must not let a duplicate
               // spawn run alongside a worker that may still be alive
-              throw new SpawnError(`gascity unreachable — cannot verify existing agent: ${err}`)
+              throw new SpawnError(`gascity unreachable — cannot verify existing agent: ${err}`, 'unavailable')
             }
             const s = gcSessionFor(e, spec.molStep, sessions)
             const st = s === undefined ? 'lost' : gcState(s)
@@ -1449,7 +1483,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           })
           throw err instanceof SpawnError
             ? err
-            : new SpawnError(err instanceof Error ? err.message : String(err))
+            : new SpawnError(err instanceof Error ? err.message : String(err), 'unavailable')
         }
         const spawned = patchAgentRegistry(dir, spec.molStep, { sessionId })
         const { sessions } = listGcSessions(city)
@@ -1542,11 +1576,12 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     async up(): Promise<void> {
       const city = configDir()
       if (city === null) {
-        throw new SpawnError('no git common dir — cannot locate the gascity city')
+        throw new SpawnError('no git common dir — cannot locate the gascity city', 'config')
       }
       if (command === '') {
         throw new SpawnError(
-          'no agent command configured — set agents.gascity.command or loop.agent in bro.config.json'
+          'no agent command configured — set agents.gascity.command or loop.agent in bro.config.json',
+          'config'
         )
       }
       initCity(city)
@@ -1561,7 +1596,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       }
       const r = gcRun(['stop', city], 120_000)
       if (r.code !== 0) {
-        throw new SpawnError(`gc stop failed — ${r.err !== '' ? r.err : `exited ${r.code}`}`)
+        throw new SpawnError(`gc stop failed — ${r.err !== '' ? r.err : `exited ${r.code}`}`, 'unavailable')
       }
     },
 
