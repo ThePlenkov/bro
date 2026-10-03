@@ -1,6 +1,14 @@
 export { gh, ghAsync, ghJson, ghJsonAsync, ghTry, prLink, resolveRepo } from './gh.ts'
-export { git, gitTry, gitLogPathRecords } from './git.ts'
-export type { GitLogPathRecord } from './git.ts'
+export {
+  git,
+  gitTry,
+  gitLogPathRecords,
+  gitDriftRef,
+  gitLogStamp,
+  gitIsAncestor,
+  gitIsShallow,
+} from './git.ts'
+export type { GitLogPathRecord, GitStamp, GitLogStamp } from './git.ts'
 export {
   bd,
   BdCompatError,

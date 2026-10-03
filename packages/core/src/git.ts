@@ -23,6 +23,80 @@ export function gitTry(args: string[]): { code: number; out: string; err: string
   return { code: proc.status ?? 1, out: proc.stdout ?? '', err: (proc.stderr ?? '').trim() }
 }
 
+/** The drift comparison ref — landed spec vs landed code, so a feature
+ *  branch's own commits can't flag the spec it's about to update.
+ *  Chain: `origin/HEAD` → local `main`/`master` → `HEAD` (solo and
+ *  no-remote repos). null when nothing resolves to a commit — unborn
+ *  history is the caller's `unverifiable`, not a throw. */
+export function gitDriftRef(dir: string): string | null {
+  for (const cand of ['origin/HEAD', 'main', 'master', 'HEAD']) {
+    const r = gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', `${cand}^{commit}`])
+    if (r.code === 0) {
+      return cand
+    }
+  }
+  return null
+}
+
+/** One commit's identity plus its committer date — `iso` (%cI) is for
+ *  display, `ts` (%ct epoch seconds) is for ordering: strict-ISO
+ *  strings don't sort across differing timezone offsets. */
+export interface GitStamp {
+  sha: string
+  iso: string
+  ts: number
+}
+
+export type GitLogStamp =
+  | { state: 'commit'; stamp: GitStamp }
+  | { state: 'none' } // log ran clean — nothing on <ref> touched the paths
+  | { state: 'error'; err: string } // bad ref, unborn history, git failure
+
+/** `git log -1` over pathspecs — the newest commit on `ref` touching
+ *  any of them. `follow` opts into rename-following (spec side: a
+ *  renamed spec isn't freshly written); git only honours it for a
+ *  single path, so the scope side never passes it. Pathspecs are argv
+ *  entries verbatim — magic like `:(exclude…)` is the caller's. */
+export function gitLogStamp(
+  dir: string,
+  ref: string,
+  pathspecs: string[],
+  opts?: { follow?: boolean }
+): GitLogStamp {
+  const args = ['-C', dir, 'log', '-1', '--format=%H%x09%cI%x09%ct']
+  if (opts?.follow === true) {
+    args.push('--follow')
+  }
+  args.push(ref, '--', ...pathspecs)
+  const r = gitTry(args)
+  if (r.code !== 0) {
+    return { state: 'error', err: r.err }
+  }
+  const line = r.out.trim()
+  if (line === '') {
+    return { state: 'none' }
+  }
+  const [sha = '', iso = '', ts = ''] = line.split('\t')
+  return { state: 'commit', stamp: { sha, iso, ts: Number(ts) } }
+}
+
+/** `git merge-base --is-ancestor` — the drift tie-break: equal
+ *  committer timestamps on different SHAs resolve by ancestry (scope
+ *  commit predating the spec commit is fresh). null when git can't
+ *  answer (unknown object) — the caller treats that as unverifiable. */
+export function gitIsAncestor(dir: string, ancestor: string, descendant: string): boolean | null {
+  const r = gitTry(['-C', dir, 'merge-base', '--is-ancestor', ancestor, descendant])
+  return r.code === 0 ? true : r.code === 1 ? false : null
+}
+
+/** Shallow check — boundary commits masquerade as roots, so a
+ *  path-limited log can attribute spec and scope to the same boundary
+ *  commit and fake `fresh`. null on git failure. */
+export function gitIsShallow(dir: string): boolean | null {
+  const r = gitTry(['-C', dir, 'rev-parse', '--is-shallow-repository'])
+  return r.code === 0 ? r.out.trim() === 'true' : null
+}
+
 /** One commit of a `git log --name-only` pass — `paths` is every file
  *  the commit touched. */
 export interface GitLogPathRecord {
