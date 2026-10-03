@@ -260,8 +260,10 @@ const flowItems = (s: string): string[] => {
  *  itself (spec drift's audit surface). A YAML list or a single string;
  *  an empty/absent key declares nothing and returns []. The whole file
  *  is read — a capped read would silently narrow a long frontmatter's
- *  declared scope into the commit fallback. */
-function specScope(path: string): string[] {
+ *  declared scope into the commit fallback. Exported for the drift
+ *  audit, which must read the *audited* file's scope — a connector's
+ *  id-keyed lookup can resolve a different same-id file. */
+export function specScope(path: string): string[] {
   try {
     const head = readFileSync(path, 'utf8')
     const fm = /^---\n([\s\S]*?)\n---/.exec(head)
