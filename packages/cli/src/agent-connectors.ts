@@ -1213,9 +1213,42 @@ function gcRigDirOf(spec: SpawnSpec): string {
   return dirname(spec.beadsDir)
 }
 
-/** TOML basic-string escape — quotes, backslashes, control chars. */
+/** TOML basic-string escapes that have a short form. */
+const TOML_SHORT_ESCAPES: Record<string, string> = {
+  '\\': '\\\\',
+  '"': '\\"',
+  '\n': '\\n',
+  '\t': '\\t',
+  '\r': '\\r',
+  '\b': '\\b',
+  '\f': '\\f',
+}
+
+/** TOML basic-string escape — quotes, backslashes, and EVERY control
+ *  char (U+0000–U+001F, U+007F) — a raw CR or other control byte makes
+ *  the generated config unparsable. */
 const tomlStr = (s: string): string =>
-  s.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('\n', '\\n').replaceAll('\t', '\\t')
+  s.replace(
+    /[\x00-\x1f\x7f"\\]/g,
+    (ch) => TOML_SHORT_ESCAPES[ch] ?? `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`
+  )
+
+/** Caller-provided env keys that would hijack worker identity —
+ *  filtered from the agent.toml env table; the connector injects its
+ *  own values instead (gcEnvPins). */
+const GC_PINNED_ENV = new Set(['BEADS_DIR', 'BRO_BEAD_ID', 'BRO_AGENT_ID', 'BRO_PROMPT_FILE'])
+
+/** Identity pins the connector owns — the env table always carries the
+ *  shared store + the real bead id regardless of what spec.env says. */
+const gcEnvPins = (spec: SpawnSpec): [string, string][] => [
+  ['BEADS_DIR', spec.beadsDir],
+  ['BRO_BEAD_ID', spec.molStep],
+]
+
+/** gc session submit carries the prompt as a single argv element —
+ *  Linux caps it at 128KiB (MAX_ARG_STRLEN); leave headroom for the
+ *  rest of argv. */
+const GC_SUBMIT_PROMPT_MAX = 120_000
 
 const GC_CITY_TOML = (provider: string, command: string): string =>
   `# authored by bro's gascity connector (bro-cduq) — regenerate by deleting
@@ -1323,13 +1356,17 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     // spec.env rides the agent's env table — the only channel a gc
     // session has for caller env (gc re-injects it after its `env -u`
     // strip, so the spawned provider process actually sees the vars)
-    const envEntries = Object.entries(spec.env ?? {}).filter(([k]) =>
-      /^[A-Za-z_][A-Za-z0-9_]*$/.test(k)
+    const envEntries = Object.entries(spec.env ?? {}).filter(
+      // identity pins are connector-owned — a caller value for
+      // BEADS_DIR/BRO_BEAD_ID/... would redirect bead ops or re-badge
+      // the worker, so the env table filters them out and re-injects
+      // the connector's own below
+      ([k]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && !GC_PINNED_ENV.has(k)
     )
-    const envToml =
-      envEntries.length === 0
-        ? ''
-        : `env = { ${envEntries.map(([k, v]) => `${k} = "${tomlStr(v)}"`).join(', ')} }\n`
+    // caller env plus the connector-owned identity pins — pins always
+    // render so the table exists even when spec.env is empty
+    const allEnv = [...envEntries, ...gcEnvPins(spec)]
+    const envToml = `env = { ${allEnv.map(([k, v]) => `${k} = "${tomlStr(v)}"`).join(', ')} }\n`
     // work_dir (+ env) are top-level — they must precede any [table] in
     // the file; the template's own copies are dropped so ours win
     const agentToml =
@@ -1485,6 +1522,17 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     },
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+      // gc session submit has no --file/stdin mode (v1.4.2), so the
+      // prompt rides argv — Linux caps a single element at 128KiB
+      // (MAX_ARG_STRLEN) and E2BIG there reads as an opaque spawn
+      // failure. Bound it as bad input before claiming or touching gc.
+      const promptBytes = Buffer.byteLength(spec.prompt)
+      if (promptBytes > GC_SUBMIT_PROMPT_MAX) {
+        throw new SpawnError(
+          `prompt is ${promptBytes} bytes — gc session submit passes it as one argv element (cap ${GC_SUBMIT_PROMPT_MAX}); shorten the prompt or file it`,
+          'input'
+        )
+      }
       const home = spawnHome(dir, 'gascity', command, spec)
       const city = configDir()
       if (city === null) {

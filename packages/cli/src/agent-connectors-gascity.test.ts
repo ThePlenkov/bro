@@ -248,8 +248,69 @@ describe('gascity connector', () => {
         env: { BRO_PR: '7', BRO_PR_URL: 'https://x/pr/7', 'BAD-KEY': 'x' },
       })
       const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8')
-      assert.match(agentToml, /env = \{ BRO_PR = "7", BRO_PR_URL = "https:\/\/x\/pr\/7" \}/)
+      assert.match(agentToml, /BRO_PR = "7"/)
+      assert.match(agentToml, /BRO_PR_URL = "https:\/\/x\/pr\/7"/)
       assert.ok(!agentToml.includes('BAD-KEY'))
+      // the connector injects its own identity pins into the table
+      assert.match(agentToml, new RegExp(`BEADS_DIR = "${fx.beadsDir.replaceAll('/', '\\/')}"`))
+      assert.match(agentToml, /BRO_BEAD_ID = "fx-1"/)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('identity pins in spec.env cannot override the connector-owned values', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
+      await conn.spawn({
+        ...SPEC(fx.main, fx.beadsDir, 'fx-1'),
+        env: { BEADS_DIR: '/evil/store', BRO_BEAD_ID: 'other-bead', BRO_AGENT_ID: 'x', SAFE: '1' },
+      })
+      const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8')
+      assert.ok(!agentToml.includes('/evil/store'))
+      assert.ok(!agentToml.includes('other-bead'))
+      assert.ok(!agentToml.includes('BRO_AGENT_ID'))
+      assert.match(agentToml, /BRO_BEAD_ID = "fx-1"/)
+      assert.match(agentToml, /SAFE = "1"/)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('TOML escapes every control char in env values', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
+      await conn.spawn({
+        ...SPEC(fx.main, fx.beadsDir, 'fx-1'),
+        env: { MSG: 'line1\r\nline2\x07bell', PATHY: 'a\\b"c\td' },
+      })
+      const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8')
+      assert.ok(agentToml.includes('MSG = "line1\\r\\nline2\\u0007bell"'), agentToml)
+      assert.ok(agentToml.includes('PATHY = "a\\\\b\\"c\\td"'), agentToml)
+      // no raw control bytes survive into the generated config
+      assert.ok(!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(agentToml))
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('a prompt past the argv cap refuses spawn as bad input', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
+      const err = await conn
+        .spawn({ ...SPEC(fx.main, fx.beadsDir, 'fx-1'), prompt: 'x'.repeat(200_000) })
+        .then(() => null)
+        .catch((e) => e)
+      assert.ok(err instanceof SpawnError, `expected SpawnError, got ${err}`)
+      assert.equal(err.kind, 'input')
+      assert.match(String(err), /argv/)
+      // refused before claiming or touching gc — bead still open, city
+      // never even initialized
+      assert.equal(fx.dbRows()[0]!.status, 'open')
+      assert.ok(!existsSync(join(fx.city, '.fake-gc.json')))
     } finally {
       cleanup(fx)
     }
