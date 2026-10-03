@@ -10,6 +10,10 @@
  *
  *   bro spec check [id…]   coverage over in_progress beads (exit 1 on
  *                          missing — CI-able); --all includes open
+ *   bro spec drift [id…]   freshness over spec'd beads — STALE when
+ *                          landed code moved past the spec; default
+ *                          scans closed beads, --all scans all, --json
+ *                          for agents, exit 1 on STALE
  *   bro spec new <id>      scaffold a spec (--parent <id> nests inside
  *                          a dir spec, else frontmatter-links — native)
  *   bro spec tree          the spec hierarchy: roots, children, and
@@ -41,6 +45,7 @@ import {
   type TaskStore,
 } from '@broject/core'
 import { specDirAbs, validBeadId } from '../spec-connectors.ts'
+import { driftEnv, driftRow, specLinkPath } from '../spec-drift.ts'
 import { flag, positionals } from './args.ts'
 
 export type SpecState = 'spec' | 'link' | 'exempt' | 'missing'
@@ -176,6 +181,11 @@ function usage(): never {
 Commands:
   check [id…]   spec coverage for in_progress beads (or the given ids);
                 --all also scans open beads. Exit 1 when any MISSING.
+  drift [id…]   spec freshness over spec'd beads — STALE when landed
+                code moved past the spec. Default scans closed beads;
+                --all scans every spec'd bead, --json emits rows as
+                objects, --ref overrides the comparison ref. Exit 1 on
+                any STALE.
   new <id>      scaffold a spec from the bead title (refuses to
                 overwrite). --parent <id> nests inside a dir spec, or
                 links a flat parent via frontmatter (native connector).
@@ -255,6 +265,59 @@ function cmdCheck(dir: string, ids: string[], all: boolean): void {
   }
   if (missing > 0) {
     console.error(`spec check: ${missing} bead(s) without a spec — ${spec.policy()}`)
+    process.exit(1)
+  }
+}
+
+/** `bro spec drift` — the freshness audit (spec: specs/bro-fvhz.md).
+ *  Same TSV + exit-code contract as check: a row per spec'd bead,
+ *  sorted by id, exit 1 when any STALE. `unverifiable`/`no-scope`
+ *  report coverage gaps without failing. */
+function cmdDrift(dir: string, ids: string[], opts: { all: boolean; json: boolean; ref?: string }): void {
+  const store = tasks(dir)
+  const spec = specs(dir)
+  const unknown: string[] = []
+  const rows =
+    ids.length > 0
+      ? ids.flatMap((id) => {
+          try {
+            const r = store.get(id)
+            if (!r) {
+              unknown.push(id)
+            }
+            return r ? [r] : []
+          } catch {
+            unknown.push(id)
+            return []
+          }
+        })
+      : store.list(opts.all ? { all: true } : { status: 'closed' })
+  // an explicit id that doesn't resolve is a usage failure — partial
+  // results would report silent success for a bead that doesn't exist
+  if (unknown.length > 0) {
+    console.error(`error: bead(s) not found: ${unknown.join(', ')}`)
+    process.exit(2)
+  }
+  // the audit set is spec'd beads — spec|link states; exempt (chore /
+  // trivial / debt) and unspec'd beads never enter it, explicit ids too
+  const audited = rows.filter((r) => {
+    const s = specState(r, spec)
+    return s === 'spec' || s === 'link'
+  })
+  const env = driftEnv(dir, opts.ref)
+  const drifted = audited
+    .map((r) => driftRow(dir, r.id, spec, env, specLinkPath(dir, r.description)))
+    .sort((a, b) => a.id.localeCompare(b.id))
+  if (opts.json) {
+    console.log(JSON.stringify(drifted))
+  } else {
+    for (const r of drifted) {
+      console.log(`${r.id}\t${r.state}\t${r.detail}`)
+    }
+  }
+  const stale = drifted.filter((r) => r.state === 'STALE').length
+  if (stale > 0) {
+    console.error(`spec drift: ${stale} stale spec(s)`)
     process.exit(1)
   }
 }
@@ -421,6 +484,11 @@ function cmdInit(dir: string, tool: string | undefined): void {
 
 const VALUE_FLAGS = new Set(['--parent', '--tool'])
 
+/** drift's own value flag — kept out of the shared set so a stray
+ *  `--ref` on another subcommand stays an unknown flag, not a swallowed
+ *  positional. */
+const DRIFT_VALUE_FLAGS = new Set([...VALUE_FLAGS, '--ref'])
+
 export function runSpecCommand(argv: string[]): void {
   const dir = process.cwd()
   const { mode } = loadConfig(dir).sdd
@@ -435,6 +503,14 @@ export function runSpecCommand(argv: string[]): void {
       console.error('note: sdd.mode is off — enable it in bro.config.json to make this a policy')
     }
     cmdCheck(dir, positional, rest.includes('--all'))
+    return
+  }
+  if (sub === 'drift') {
+    cmdDrift(dir, positionals(rest, DRIFT_VALUE_FLAGS), {
+      all: rest.includes('--all'),
+      json: rest.includes('--json'),
+      ref: flag(rest, '--ref'),
+    })
     return
   }
   if (sub === 'tree') {

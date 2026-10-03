@@ -13,11 +13,16 @@
  *    3. neither resolves → `no-scope`.
  *  The spec's own path is always excluded (`:(exclude)<spec-path>`) —
  *  a `scope: specs/**` cannot mask its own drift. */
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import {
+  gitDriftRef,
+  gitIsAncestor,
+  gitIsShallow,
   gitLogPathRecords,
+  gitLogStamp,
   gitTry,
+  type GitStamp,
   type SpecNode,
   type SpecStore,
 } from '@broject/core'
@@ -152,4 +157,112 @@ function commitScope(dir: string, ref: string, id: string, specPath: string | un
     return { state: 'no-scope' }
   }
   return { state: 'scoped', via: 'commits', pathspecs: [...paths, ...exclude] }
+}
+
+// --- staleness — the drift audit row ------------------------------------------
+
+export type DriftState = 'STALE' | 'fresh' | 'no-scope' | 'unverifiable'
+
+export interface DriftRow {
+  id: string
+  state: DriftState
+  detail: string
+}
+
+/** Repo-level facts every drift row shares — resolved once per run, not
+ *  per bead. `ref` is the comparison ref (origin/HEAD → main → HEAD;
+ *  null = unborn/empty history), `shallow` the honesty gate the spec
+ *  checks before any timestamp comparison (null = git failure). */
+export interface DriftEnv {
+  ref: string | null
+  shallow: boolean | null
+}
+
+export function driftEnv(dir: string, ref?: string): DriftEnv {
+  return { ref: ref ?? gitDriftRef(dir), shallow: gitIsShallow(dir) }
+}
+
+const unverifiable = (id: string, detail: string): DriftRow => ({ id, state: 'unverifiable', detail })
+
+/** The bead's `spec:` link target when it names a repo-relative file
+ *  that exists in the checkout — a local spec the drift audit can date.
+ *  URLs, escapes, absolute paths, and prose mentions (`spec: linked
+ *  external docs`) yield undefined: there is no local file to date
+ *  (unverifiable), and the tree pick still gets its say. Trailing
+ *  delimiters are stripped — the target often sits inside parentheses. */
+export function specLinkPath(dir: string, desc: string | undefined): string | undefined {
+  const t = /\bspec:\s*(\S+)/i.exec(desc ?? '')?.[1]?.replace(/[)\].,;:'"]+$/, '')
+  if (
+    t === undefined ||
+    /^[a-z][a-z0-9+.-]*:/i.test(t) ||
+    badScopeEntry(t) ||
+    !existsSync(join(dir, t))
+  ) {
+    return undefined
+  }
+  return t
+}
+
+/** One drift row for bead `id` — every failure mode is a row, never a
+ *  throw. Order is the spec's: shallow before any timestamp comparison,
+ *  then the spec side (a spec with no local file or no landed commit
+ *  can't be dated), then the scope side. `linkPath` is the bead's own
+ *  `spec:` declaration resolved to a repo path — explicit wins over the
+ *  tree pick. */
+export function driftRow(dir: string, id: string, spec: SpecStore, env: DriftEnv, linkPath?: string): DriftRow {
+  if (env.ref === null) {
+    return unverifiable(id, 'unborn or empty history — no drift ref')
+  }
+  if (env.shallow !== false) {
+    return unverifiable(id, env.shallow === true ? 'shallow history' : 'git failure')
+  }
+  const specPath = linkPath ?? pickSpecPath(dir, spec.tree(), id)
+  if (specPath === undefined) {
+    // covers the `spec:` external link — there is no local file to date
+    return unverifiable(id, 'no local spec file to date')
+  }
+  const specStamp = gitLogStamp(dir, env.ref, [`:(literal)${specPath}`], { follow: true })
+  if (specStamp.state === 'error') {
+    return unverifiable(id, specStamp.err)
+  }
+  if (specStamp.state === 'none') {
+    // uncommitted, or committed on a branch that hasn't landed on the ref
+    return unverifiable(id, `no spec commit on ${env.ref}`)
+  }
+  const scope = resolveScope(dir, env.ref, id, spec)
+  if (scope.state === 'no-scope') {
+    return { id, state: 'no-scope', detail: 'no frontmatter scope, no bead-id commits' }
+  }
+  if (scope.state === 'unverifiable') {
+    return unverifiable(id, scope.reason)
+  }
+  const scopeStamp = gitLogStamp(dir, env.ref, scope.pathspecs)
+  if (scopeStamp.state === 'error') {
+    return unverifiable(id, scopeStamp.err)
+  }
+  if (scopeStamp.state === 'none') {
+    // resolveScope already proved the scope matches landed commits —
+    // none here is a race or a git quirk, never fresh data
+    return unverifiable(id, 'scope matched nothing')
+  }
+  return compare(id, specStamp.stamp, scopeStamp.stamp, dir)
+}
+
+/** The staleness predicate: same commit is fresh (spec and code landed
+ *  together — the ideal), a strictly newer scope commit is STALE, and
+ *  equal one-second committer timestamps on different SHAs resolve by
+ *  ancestry — the scope commit predating the spec commit is fresh. */
+function compare(id: string, spec: GitStamp, scope: GitStamp, dir: string): DriftRow {
+  const detail = `spec@${spec.sha.slice(0, 8)} ${spec.iso} · scope@${scope.sha.slice(0, 8)} ${scope.iso}`
+  if (spec.sha === scope.sha || scope.ts < spec.ts) {
+    return { id, state: 'fresh', detail }
+  }
+  if (scope.ts > spec.ts) {
+    return { id, state: 'STALE', detail }
+  }
+  const anc = gitIsAncestor(dir, scope.sha, spec.sha)
+  if (anc === null) {
+    return unverifiable(id, 'ancestry check failed')
+  }
+  return { id, state: anc ? 'fresh' : 'STALE', detail }
 }
