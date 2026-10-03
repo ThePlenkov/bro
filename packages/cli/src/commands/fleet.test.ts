@@ -386,6 +386,21 @@ describe('collectAgents', () => {
       // membership is asserted, never exact equality
       assert.ok(degraded.includes('gone: socket gone'), `degraded: ${JSON.stringify(degraded)}`)
       assert.ok(degraded.includes('explody: factory boom'), `degraded: ${JSON.stringify(degraded)}`)
+
+      // the composition the collector feeds: a collected byStep +
+      // degraded flag must reach the rows unchanged
+      const restore = installFleetBd(
+        root,
+        molWith([molIssue('s-1', 'in_progress'), molIssue('s-2', 'in_progress'), molIssue('s-9', 'open')])
+      )
+      try {
+        const rows = fleetRows(byStep, degraded.length > 0, undefined, '', [])
+        assert.equal(rows.find((r) => r.step === 's-1')!.agent, 'lost — respawn?')
+        assert.equal(rows.find((r) => r.step === 's-2')!.agent, 'unknown')
+        assert.equal(rows.find((r) => r.step === 's-9')!.agent, 'running')
+      } finally {
+        restore()
+      }
     } finally {
       // the registry is module-global — fixture connectors must not leak
       // into whatever runs after this file's process

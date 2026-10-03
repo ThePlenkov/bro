@@ -76,10 +76,22 @@ export function registerAgentConnector(name: string, make: AgentConnectorFactory
   agentRegistry.push({ name, make })
 }
 
+/** Backends registered at module load — a fixture unregistering one of
+ *  these (a misnamed cleanup, or a name whose register was skipped as a
+ *  duplicate) would silently change which factory the name resolves to
+ *  for the rest of the process. */
+const BUILTIN_AGENT_BACKENDS = new Set(['native', 'tmux', 'gascity'])
+
 /** Remove a registered backend — test fixtures unregister what they add;
  *  a skipped duplicate registration should never silently change which
- *  factory a name resolves to. No-op for unknown names. */
+ *  factory a name resolves to. Built-ins refuse with a warning (same
+ *  visibility as registerAgentConnector's duplicate warning); unknown
+ *  names are a no-op. */
 export function unregisterAgentConnector(name: string): void {
+  if (BUILTIN_AGENT_BACKENDS.has(name)) {
+    console.error(`warning: agent connector "${name}" is built-in — unregister skipped`)
+    return
+  }
   const i = agentRegistry.findIndex((x) => x.name === name)
   if (i >= 0) {
     agentRegistry.splice(i, 1)
