@@ -1,7 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -78,11 +78,39 @@ describe('pending-watch markers', () => {
     assert.equal(listWatches(dir).length, 0)
   })
 
-  test('malformed marker files are skipped', () => {
+  test('malformed marker files are pruned, not listed', () => {
     const dir = repo()
     const path = watchBegin(dir, base)
     assert.ok(path)
     writeFileSync(path!, 'not json')
     assert.equal(listWatches(dir).length, 0)
+    assert.equal(existsSync(path!), false)
+  })
+
+  test('interrupted-write tmp residue is pruned', () => {
+    const dir = repo()
+    const path = watchBegin(dir, base)
+    assert.ok(path)
+    writeFileSync(`${path!}.tmp`, 'partial')
+    assert.equal(listWatches(dir).length, 1)
+    assert.equal(existsSync(`${path!}.tmp`), false)
+  })
+
+  test('begin retires a dead-pid marker for the same PR', () => {
+    const dir = repo()
+    const path = watchBegin(dir, base)
+    assert.ok(path)
+    // a second marker from another (now dead) process watching the same PR
+    const stale = join(dir, '.git', 'bro', 'watches', '42-2000000000.json')
+    writeFileSync(
+      stale,
+      JSON.stringify({ ...base, pid: 2_000_000_000, startedAt: Date.now() })
+    )
+    const next = watchBegin(dir, { ...base, merge: false })
+    assert.ok(next)
+    assert.equal(existsSync(stale), false)
+    const listed = listWatches(dir)
+    assert.equal(listed.length, 1)
+    assert.equal(listed[0]!.watch.pid, process.pid)
   })
 })
