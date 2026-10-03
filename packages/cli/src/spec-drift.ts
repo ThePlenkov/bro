@@ -112,7 +112,7 @@ function explicitScope(dir: string, ref: string, entries: string[], exclude: str
   // an explicit scope matching zero committed paths is a typo the
   // audit must not bless — history, not just the tree, so a scoped
   // path deleted later still resolves
-  const r = gitTry(['-C', dir, 'log', '-1', '--format=%H', ref, '--', ...entries, ...exclude])
+  const r = gitTry(['-C', dir, 'log', '-1', '--format=%H', '--end-of-options', ref, '--', ...entries, ...exclude])
   if (r.code !== 0) {
     return { state: 'unverifiable', reason: `git log failed: ${r.err}` }
   }
