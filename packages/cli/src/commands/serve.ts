@@ -9,12 +9,12 @@
  * are safe because the server runs inside the local session context;
  * remote orchestration, if ever, is a separate spec. Loopback alone is
  * not a write barrier though — a hostile web page can fire simple
- * cross-origin POSTs, so writes additionally require
- * `content-type: application/json` (a request a browser can't make
- * without a preflight this server never answers) and refuse a
+ * cross-origin POSTs, so every write (POST/PUT/PATCH/DELETE) refuses a
  * non-loopback `Origin` (the browser stamps every cross-site request —
- * a foreign one is 403). Every request needs a loopback `Host` — a
- * rebound name is 403 (DNS rebinding).
+ * a foreign one is 403), and body-bearing writes additionally require
+ * `content-type: application/json` (a request a browser can't make
+ * without a preflight this server never answers). Every request needs
+ * a loopback `Host` — a rebound name is 403 (DNS rebinding).
  *
  *   GET    /                    service index
  *   GET    /fleet               the fleet webui — an HTML dashboard over
