@@ -11,7 +11,14 @@
  * the wait still runs, the hook just has nothing to report.
  */
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { join, resolve } from 'node:path'
 
 export interface PendingWatch {
@@ -39,9 +46,9 @@ const WATCH_TTL_MS = 24 * 60 * 60 * 1000
  *  one linked worktree is visible to sessions in every other. */
 function watchesDir(dir: string): string | null {
   try {
-    const gd = execFileSync(
+    const gd = execFileSync( // NOSONAR — git is the runner's own tool; PATH is trusted config
       'git',
-      ['-C', dir, 'rev-parse', '--git-common-dir'], // NOSONAR — git is the runner's own tool
+      ['-C', dir, 'rev-parse', '--git-common-dir'],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
     ).trim()
     return gd ? join(resolve(dir, gd), 'bro', 'watches') : null
@@ -59,9 +66,13 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-/** Drop a marker for the running wait — best-effort. A listWatches pass
- *  prunes TTL-expired residue first (dead-pid markers stay — a
- *  session-start report may still flag them). */
+/** Drop a marker for the running wait — best-effort. Cleanup runs
+ *  before the new marker is published: a listWatches pass prunes
+ *  TTL-expired residue, and dead-pid markers for the same PR are
+ *  retired — the new watch supersedes their stale promise. Dead-pid
+ *  markers for other PRs stay: a session-start report may still flag
+ *  them. The marker is written to a tmp file then renamed so a crash
+ *  mid-write never leaves a partial JSON marker behind. */
 export function watchBegin(
   dir: string,
   w: Omit<PendingWatch, 'pid' | 'startedAt'>
@@ -72,12 +83,22 @@ export function watchBegin(
   }
   try {
     mkdirSync(wd, { recursive: true })
-    listWatches(dir)
+    for (const { watch, file, alive } of listWatches(dir)) {
+      if (!alive && watch.pr === w.pr) {
+        try {
+          rmSync(file)
+        } catch {
+          // retire is best-effort
+        }
+      }
+    }
     const path = join(wd, `${w.pr}-${process.pid}.json`)
+    const tmp = `${path}.tmp`
     writeFileSync(
-      path,
+      tmp,
       JSON.stringify({ ...w, pid: process.pid, startedAt: Date.now() }, null, 2)
     )
+    renameSync(tmp, path)
     return path
   } catch {
     return null
@@ -120,10 +141,16 @@ export function listWatches(dir: string): ListedWatch[] {
     return out
   }
   for (const f of files) {
+    const file = join(wd, f)
     if (!f.endsWith('.json')) {
+      // residue of an interrupted atomic write — prune
+      try {
+        rmSync(file)
+      } catch {
+        // prune is best-effort
+      }
       continue
     }
-    const file = join(wd, f)
     try {
       const w = JSON.parse(readFileSync(file, 'utf8')) as PendingWatch
       if (
@@ -131,19 +158,20 @@ export function listWatches(dir: string): ListedWatch[] {
         typeof w.pid !== 'number' ||
         typeof w.startedAt !== 'number'
       ) {
-        continue
+        throw new Error('malformed marker')
       }
       if (Date.now() - w.startedAt > WATCH_TTL_MS) {
-        try {
-          rmSync(file)
-        } catch {
-          // prune is best-effort
-        }
+        rmSync(file)
         continue
       }
       out.push({ watch: w, file, alive: pidAlive(w.pid) })
     } catch {
-      // unreadable marker — skip
+      // malformed or unreadable marker — prune so it never lingers
+      try {
+        rmSync(file)
+      } catch {
+        // prune is best-effort
+      }
     }
   }
   return out
