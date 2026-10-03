@@ -111,6 +111,13 @@ const armExitHook = (): void => {
   process.on('exit', releaseAll)
 }
 
+/** A live holder outlasted the wait bound — distinct from acquisition
+ *  failures (EACCES, EIO) so callers can name contention without
+ *  mislabeling filesystem errors as a competing hold. */
+export class LockTimeout extends Error {
+  override name = 'LockTimeout'
+}
+
 export interface FileLockOptions {
   /** Give up waiting after this — the holder is alive but slow.
    *  Default 20s. */
@@ -134,7 +141,7 @@ export function acquireFileLock(lock: string, opts: FileLockOptions = {}): () =>
   const deadline = Date.now() + waitMs
   while (!tryAcquireLockFile(lock, token)) {
     if (Date.now() >= deadline) {
-      throw new Error(`${label} held over ${waitMs / 1000}s`)
+      throw new LockTimeout(`${label} held over ${waitMs / 1000}s`)
     }
     syncSleep(25)
   }

@@ -117,7 +117,7 @@ export type {
   ListResult,
   SpawnSpec,
 } from './agents.ts'
-export { acquireFileLock, withFileLock } from './filelock.ts'
+export { acquireFileLock, LockTimeout, withFileLock } from './filelock.ts'
 export type { FileLockOptions } from './filelock.ts'
 export type { SpecNode, SpecStore } from './specs.ts'
 export { warnDeprecated } from './deprecation.ts'

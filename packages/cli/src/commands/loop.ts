@@ -30,6 +30,7 @@ import {
   gitTry,
   reviewHost,
   taskStore,
+  withFileLock,
   type ReviewFacade,
 } from '@broject/core'
 import { evaluateExitGate, fetchPrActState, waitForGate } from '@broject/act'
@@ -52,6 +53,7 @@ import {
   parseWorktreePorcelain,
   readStackEdges,
   recordStackEdge,
+  stackPushLockPath,
 } from './work.ts'
 import {
   claimUpTo,
@@ -442,22 +444,35 @@ function resolveStackSlot(ctx: Ctx, bead: ReadyBead): StackSlot | undefined {
 /** One bead end-to-end. */
 async function runItem(ctx: Ctx, bead: ReadyBead): Promise<ItemResult> {
   // resolved here, not earlier — a member that landed since the last
-  // item correctly yields the default branch as the next base
-  const slot = resolveStackSlot(ctx, bead)
-  const item = planItem(
-    bead,
-    ctx.root,
-    slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
-  )
-  say(ctx, `\nloop: ${bead.id} → ${item.branch} @ ${item.worktreeDir}`)
+  // item correctly yields the default branch as the next base. For a
+  // --stack run the resolve→create window goes under the same push lock
+  // `stack push` holds: without it a loop and a push racing one stack
+  // read the same tip and both mint position n.
+  let slot: StackSlot | undefined
+  let item!: ReturnType<typeof planItem>
   try {
-    // a surviving worktree dir is reused as-is — its branch kept its
-    // original base, so the stack edge only records on fresh creation
-    const fresh = !existsSync(item.worktreeDir)
-    ensureWorktree(ctx.root, item.branch, item.worktreeDir, slot?.base)
-    if (fresh && slot?.edge !== undefined) {
-      // same edge `work enter --stack` records — merge order travels
-      recordStackEdge(item.branch, slot.edge)
+    const planAndCreate = (): void => {
+      slot = resolveStackSlot(ctx, bead)
+      item = planItem(
+        bead,
+        ctx.root,
+        slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
+      )
+      say(ctx, `\nloop: ${bead.id} → ${item.branch} @ ${item.worktreeDir}`)
+      // a surviving worktree dir is reused as-is — its branch kept its
+      // original base, so the stack edge only records on fresh creation
+      const fresh = !existsSync(item.worktreeDir)
+      ensureWorktree(ctx.root, item.branch, item.worktreeDir, slot?.base)
+      if (fresh && slot?.edge !== undefined) {
+        // same edge `work enter --stack` records — merge order travels
+        recordStackEdge(item.branch, slot.edge)
+      }
+    }
+    const lockPath = ctx.stack === undefined ? null : stackPushLockPath(ctx.stack)
+    if (lockPath === null) {
+      planAndCreate()
+    } else {
+      withFileLock(lockPath, planAndCreate, { label: `stack ${ctx.stack} push lock` })
     }
   } catch (err) {
     noteBead(bead.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)

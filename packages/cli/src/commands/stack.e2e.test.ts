@@ -150,16 +150,28 @@ describe('bro stack e2e', () => {
       const lock = join(common, 'bro', `stack-${encodeURIComponent('s')}.lock`)
       mkdirSync(dirname(lock), { recursive: true })
       writeFileSync(lock, `${process.pid}:racer`)
+      assert.equal(existsSync(CLI_DIST), true, 'packages/cli/dist is missing — run `npm run build`')
       const proc = spawn(process.execPath, [CLI_DIST, 'stack', 'push', 'fx-b', '--name', 's'], {
         cwd: f.main,
         env: e2eEnv(f.env),
       })
-      const done = new Promise<CliResult>((resolvePromise) => {
+      const done = new Promise<CliResult>((resolvePromise, rejectPromise) => {
         let stdout = ''
         let stderr = ''
+        const kill = setTimeout(() => {
+          proc.kill()
+          rejectPromise(new Error(`push never finished — lock still held?\n${stderr}`))
+        }, 30_000)
         proc.stdout.on('data', (d: Buffer) => (stdout += d))
         proc.stderr.on('data', (d: Buffer) => (stderr += d))
-        proc.on('close', (code) => resolvePromise({ code, stdout, stderr }))
+        proc.on('error', (err) => {
+          clearTimeout(kill)
+          rejectPromise(err)
+        })
+        proc.on('close', (code) => {
+          clearTimeout(kill)
+          resolvePromise({ code, stdout, stderr })
+        })
       })
       // the "racer" lands member 1 while our push still waits on the lock —
       // the push must re-read members inside the lock and mint position 2
