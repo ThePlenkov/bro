@@ -131,7 +131,10 @@ export function beadsDir(): string {
 }
 
 /** A formula's declared steps as MolIssue shells — enough for `stepKind`
- *  gate classification without pouring. */
+ *  gate classification without pouring. Any `gate` block counts as a
+ *  hold: bd cook materializes it as a `gate`-typed issue blocking the
+ *  step, whatever the condition type (human, gh:run, timer, …) — the
+ *  same classification `stepKind` applies post-pour. */
 export function formulaSteps(formula: string): MolIssue[] {
   const doc = bdJson<{
     steps?: { id?: string; title?: string; type?: string; gate?: { type?: string } }[]
@@ -144,7 +147,7 @@ export function formulaSteps(formula: string): MolIssue[] {
     id: s.id ?? '',
     title: s.title ?? '',
     status: 'open',
-    issue_type: s.gate?.type?.trim() === 'human' ? 'human' : (s.type?.trim() ?? 'task'),
+    issue_type: s.gate ? 'gate' : (s.type?.trim() ?? 'task'),
   }))
 }
 

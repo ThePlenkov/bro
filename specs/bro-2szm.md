@@ -3,7 +3,7 @@
 ## Problem
 
 `stepKind` in `packages/convoy/src/molecule.ts` falls back to a title
-regex (`/(human gate|gate)/i`) when `issue_type` isn't `agent`/`human`.
+regex (`/\b(human\s+gate|gate)\b/i`) when `issue_type` isn't `agent`/`human`.
 That made every agent step whose title merely *mentions* a gate — ship-bead's
 "GATE — …" steps, "Merge … gate" steps — classify as `human`, parking the
 convoy on a human that never comes. Titles were renamed in protos and poured
@@ -30,6 +30,9 @@ front is the protection, not a title guess.
 ## Plan
 
 - [x] `stepKind`: drop the title regex; `human`|`gate` → `human`, else `agent`
+- [x] `formulaSteps`: any `[steps.gate]` block → `gate` — pre-pour
+      classification matches post-pour `stepKind` (bd materializes a
+      `gate`-typed issue whatever the gate's condition type)
 - [x] update doc comments (`molecule.ts`, `plan.ts` type field note)
 - [x] tests: declared-type classification incl. `gate` type; `GATE —`-titled
       task stays `agent`; nextStep gate-state fixture uses `issue_type: human`
