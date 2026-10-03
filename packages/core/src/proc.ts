@@ -37,11 +37,12 @@ export function pidAlive(pid: number, pidStart?: string): boolean {
   if (!Number.isInteger(pid) || pid <= 0) {
     return false
   }
-  let signaled = false
   try {
     process.kill(pid, 0)
-    signaled = true
   } catch (e) {
+    // EPERM = exists but owned by another uid — still subject to the
+    // zombie and reuse checks below; /proc stat is world-readable, so
+    // foreign ownership doesn't make identity unverifiable
     if ((e as NodeJS.ErrnoException).code !== 'EPERM') {
       return false
     }
@@ -49,9 +50,6 @@ export function pidAlive(pid: number, pidStart?: string): boolean {
   const st = procStat(pid)
   if (st?.state === 'Z') {
     return false
-  }
-  if (!signaled) {
-    return true
   }
   return (
     pidStart === undefined || st === null || st.start === '' || st.start === pidStart

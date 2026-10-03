@@ -352,8 +352,10 @@ export function readArmed(sessionId: string): Set<string> {
 }
 
 /** Other sessions' live work-arm markers — the parallel-work signal.
- *  Markers carry `Date.now()\n<detail>`; freshness is mtime within
- *  LIVE_SESSION_MS (a 7-day-old marker is residue, not a session). */
+ *  Markers carry `<millis> [<owner-pid> <start>]\n<detail>`; an owned
+ *  marker is live while its owner pid is (idle sessions past the
+ *  window stay claimed), an ownerless marker falls back to mtime
+ *  within LIVE_SESSION_MS, and a 7-day-old marker is always residue. */
 export function otherLiveWork(
   dir: string,
   selfId: string,

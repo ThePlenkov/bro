@@ -25,10 +25,26 @@ export interface ProcHit {
   cmd: string
 }
 
-/** Agent-shaped cmdline — the fallback for sessions that never armed a
- *  marker. Deliberately a small allowlist: counting ANY process would
- *  let a leftover `tsc --watch` or dev server occupy a worktree forever. */
-const AGENT_CMD_RE = /(?:^|[\s/])(devin|claude|codex|gemini|aider|opencode|amp)(?:\s|$)/
+/** Agent-shaped executable name — the fallback for sessions that never
+ *  armed a marker. Checked against argv[0] (and argv[1] when argv[0] is
+ *  a launcher like npx/node): matching inside arbitrary arguments would
+ *  let `grep claude` occupy a worktree. An optional script extension
+ *  covers `node devin.js`-style invocations. */
+const AGENT_NAME_RE = /^(devin|claude|codex|gemini|aider|opencode|amp)(\.\w+)?$/
+const AGENT_LAUNCHERS = new Set(['node', 'npx', 'bun', 'bunx', 'tsx', 'uvx', 'deno'])
+
+/** True when the process's own argv names an agent — the executable or
+ *  the launcher's script argument, never a free-floating argument. */
+function procIsAgentCmd(dir: string): boolean {
+  const argv = readProcText(dir, 'cmdline').split('\0')
+  if (AGENT_NAME_RE.test(basename(argv[0] ?? ''))) {
+    return true
+  }
+  return (
+    AGENT_LAUNCHERS.has(basename(argv[0] ?? '')) &&
+    AGENT_NAME_RE.test(basename(argv[1] ?? ''))
+  )
+}
 
 /** Env badges agent runtimes pin on themselves — every descendant
  *  inherits them, so a detached tool shell counts even after a setsid
@@ -61,8 +77,7 @@ function procAgentPid(dir: string, depth = 0): number | null {
   if (depth > 16) {
     return null
   }
-  const cmd = readProcText(dir, 'cmdline').replaceAll('\0', ' ').trim()
-  if (AGENT_CMD_RE.test(cmd) || AGENT_ENV_RE.test(readProcText(dir, 'environ'))) {
+  if (procIsAgentCmd(dir) || AGENT_ENV_RE.test(readProcText(dir, 'environ'))) {
     return Number(basename(dir))
   }
   const ppid = procPpid(dir)
