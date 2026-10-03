@@ -8,8 +8,10 @@ refreshed in place until quit.
 ## Problem
 
 Watching a fleet today means re-running `bro fleet` in a loop —
-`watch -n2 bro fleet` scrolls, loses the header, and can't answer a
-keypress. A supervisor human wants a stable dashboard: table redraws
+`watch -n2 bro fleet` repaints in place, but its keys aren't ours to
+bind, stderr warnings land outside the frame, and a collect slower
+than the interval can't stretch the cadence. A supervisor human wants
+a stable dashboard: table redraws
 in place, `lost — respawn?` rows stay visible, one key quits. The data
 plane already exists (`collectAgents` + `fleetRows`); only the render
 loop is missing.
@@ -23,6 +25,9 @@ repaints a full-screen frame:
 bro fleet --live            full-screen table, refresh every 2s
 bro fleet --live --every N  refresh every N seconds
 ```
+
+`--every` implies `--live` — both forms are the TTY dashboard and
+exit 2 without a TTY.
 
 - **Same rows, same honesty rules** — the frame is `fleetTableLines`
   over `collectAgents`/`fleetRows`; a degraded backend still renders

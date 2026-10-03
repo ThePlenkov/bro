@@ -373,15 +373,21 @@ async function runFleetLive(dir: string, everySec: number): Promise<void> {
     }
   }
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let settled = false
-    const quit = (): void => {
+    let escTimer: NodeJS.Timeout | undefined
+    // settle + teardown: drops every listener and restores the primary
+    // screen. Returns false when already settled.
+    const teardown = (): boolean => {
       if (settled) {
-        return
+        return false
       }
       settled = true
       if (timer !== undefined) {
         clearTimeout(timer)
+      }
+      if (escTimer !== undefined) {
+        clearTimeout(escTimer)
       }
       input.removeListener('data', onKey)
       out.removeListener('resize', repaint)
@@ -398,26 +404,49 @@ async function runFleetLive(dir: string, everySec: number): Promise<void> {
       } catch {
         // stdin already closed/destroyed
       }
-      resolve()
+      return true
+    }
+    const quit = (): void => {
+      if (teardown()) {
+        resolve()
+      }
     }
     const onKey = (buf: Buffer): void => {
       const k = buf.toString()
-      // raw mode delivers Ctrl-C as \x03 (no SIGINT); Esc alone is \x1b
-      // — an arrow key arrives as a multi-byte \x1b[… sequence and is
-      // ignored, not a quit
-      if (k === 'q' || k === '\x03' || k === '\x1b') {
+      if (k === '\x1b') {
+        // a lone ESC may be the head of a split escape sequence (arrow,
+        // Alt+key) — quit only when no continuation arrives shortly
+        escTimer = setTimeout(quit, 50)
+        return
+      }
+      if (escTimer !== undefined) {
+        clearTimeout(escTimer)
+        escTimer = undefined
+      }
+      // raw mode delivers Ctrl-C as \x03 (no SIGINT); an arrow key
+      // arrives as a multi-byte \x1b[… sequence and is ignored, not
+      // a quit
+      if (k === 'q' || k === '\x03') {
         quit()
       }
     }
-    out.write(ALT_SCREEN_ON + CURSOR_HIDE)
-    input.setRawMode(true)
-    input.resume()
-    input.on('data', onKey)
-    out.on('resize', repaint)
-    // Ctrl-C is data under raw mode, but a stray SIGINT/SIGTERM (kill,
-    // session teardown) must still restore the screen
-    process.once('SIGINT', quit)
-    process.once('SIGTERM', quit)
+    try {
+      out.write(ALT_SCREEN_ON + CURSOR_HIDE)
+      input.setRawMode(true)
+      input.resume()
+      input.on('data', onKey)
+      out.on('resize', repaint)
+      // Ctrl-C is data under raw mode, but a stray SIGINT/SIGTERM (kill,
+      // session teardown) must still restore the screen
+      process.once('SIGINT', quit)
+      process.once('SIGTERM', quit)
+    } catch (err) {
+      // a half-set-up terminal still gets restored before the
+      // failure propagates
+      teardown()
+      reject(err)
+      return
+    }
 
     const tick = async (): Promise<void> => {
       // a quit that landed mid-collect already restored the primary
