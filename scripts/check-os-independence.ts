@@ -6,7 +6,7 @@
 //
 // A file can opt out near the top:  <!-- os-independence-exempt: reason -->
 
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { readdir, readFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -30,6 +30,13 @@ const skillDir = resolve(skillArg)
 const relDir = relative(process.cwd(), skillDir)
 if (relDir.startsWith('..') || isAbsolute(relDir) || !existsSync(skillDir)) {
   console.error(`::error file=${skillDir}::skill directory missing or outside the workspace`)
+  process.exit(1)
+}
+// A lexical check alone lets a workspace symlink walk outside — confine
+// the canonical path too.
+const relReal = relative(realpathSync(process.cwd()), realpathSync(skillDir))
+if (relReal.startsWith('..') || isAbsolute(relReal)) {
+  console.error(`::error file=${skillDir}::skill directory resolves outside the workspace`)
   process.exit(1)
 }
 

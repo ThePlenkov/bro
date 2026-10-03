@@ -3,7 +3,7 @@
 // per-skill `size-check` target by @nx-devkit/skill:
 // tsx scripts/check-skill-size.ts --skill <projectRoot> [--warn-only]
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
@@ -33,6 +33,13 @@ if (relDir.startsWith('..') || isAbsolute(relDir)) {
 const skillMd = join(skillDir, 'SKILL.md')
 if (!existsSync(skillMd)) {
   console.error(`::error file=${skillMd}::SKILL.md not found`)
+  process.exit(1)
+}
+// A lexical check alone lets a SKILL.md symlink read outside the
+// workspace — confine the canonical path too.
+const relReal = relative(realpathSync(process.cwd()), realpathSync(skillMd))
+if (relReal.startsWith('..') || isAbsolute(relReal)) {
+  console.error(`::error file=${skillMd}::SKILL.md resolves outside the workspace`)
   process.exit(1)
 }
 

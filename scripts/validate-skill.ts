@@ -6,7 +6,7 @@
 // (name + description), so a schema pull (yaml + ajv + a schema file)
 // buys nothing the field checks below don't already pin.
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
@@ -31,10 +31,22 @@ if (relDir.startsWith('..') || isAbsolute(relDir)) {
 const skillMdPath = join(skillDir, 'SKILL.md')
 const openaiYamlPath = join(skillDir, 'agents', 'openai.yaml')
 
+// Lexical confinement isn't enough — a workspace symlink can still point
+// outside. Confine the canonical path of every file actually read.
+const workspace = realpathSync(process.cwd())
+const confined = (path: string): boolean => {
+  const rel = relative(workspace, realpathSync(path))
+  return !rel.startsWith('..') && !isAbsolute(rel)
+}
+
 let failed = false
 
 if (!existsSync(skillMdPath)) {
   console.error(`::error file=${skillMdPath}::SKILL.md not found`)
+  process.exit(1)
+}
+if (!confined(skillMdPath)) {
+  console.error(`::error file=${skillMdPath}::SKILL.md resolves outside the workspace`)
   process.exit(1)
 }
 
@@ -65,6 +77,10 @@ if (frontmatter === null) {
 // agents/openai.yaml is optional in bro — only devin plugin packaging
 // carries it; claude/codex copies and some skills ship without one.
 if (existsSync(openaiYamlPath)) {
+  if (!confined(openaiYamlPath)) {
+    console.error(`::error file=${openaiYamlPath}::agents/openai.yaml resolves outside the workspace`)
+    process.exit(1)
+  }
   const openaiYaml = readFileSync(openaiYamlPath, 'utf8') // NOSONAR — path confined to the workspace above
   for (const key of ['display_name', 'short_description', 'default_prompt'] as const) {
     // Anchored at line start (any indent — keys nest under `interface:`)
