@@ -442,54 +442,66 @@ function resolveStackSlot(ctx: Ctx, bead: ReadyBead): StackSlot | undefined {
   return { n: tip.n, base: tip.base ?? dflt, edge: tip.base, bottom: tip.base === undefined }
 }
 
+/** Resolve the bead's stack slot and create its worktree under the same
+ *  push lock `stack push` holds — without it a loop and a push racing
+ *  one stack read the same tip and both mint position n. A live
+ *  competing push can outlast one 20s wait, so transient contention is
+ *  retried a few times before flunking the item (flunking parks the
+ *  bead unreclaimed for the whole run). */
+function planItemAndWorktree(
+  ctx: Ctx,
+  bead: ReadyBead
+): { slot: StackSlot | undefined; item: ReturnType<typeof planItem> } {
+  let slot: StackSlot | undefined
+  let item!: ReturnType<typeof planItem>
+  const planAndCreate = (): void => {
+    slot = resolveStackSlot(ctx, bead)
+    item = planItem(
+      bead,
+      ctx.root,
+      slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
+    )
+    say(ctx, `\nloop: ${bead.id} → ${item.branch} @ ${item.worktreeDir}`)
+    // a surviving worktree dir is reused as-is — its branch kept its
+    // original base, so the stack edge only records on fresh creation
+    const fresh = !existsSync(item.worktreeDir)
+    ensureWorktree(ctx.root, item.branch, item.worktreeDir, slot?.base)
+    if (fresh && slot?.edge !== undefined) {
+      // same edge `work enter --stack` records — merge order travels
+      recordStackEdge(item.branch, slot.edge)
+    }
+  }
+  const lockPath = ctx.stack === undefined ? null : stackPushLockPath(ctx.stack)
+  if (ctx.stack !== undefined && lockPath === null) {
+    say(ctx, 'loop: could not resolve the git common dir — running without the stack lock')
+  }
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      if (lockPath === null) {
+        planAndCreate()
+      } else {
+        withFileLock(lockPath, planAndCreate, { label: `stack ${ctx.stack} push lock` })
+      }
+      break
+    } catch (err) {
+      if (!(err instanceof LockTimeout) || attempt >= 2) {
+        throw err
+      }
+    }
+  }
+  return { slot, item }
+}
+
 /** One bead end-to-end. */
 async function runItem(ctx: Ctx, bead: ReadyBead): Promise<ItemResult> {
   // resolved here, not earlier — a member that landed since the last
-  // item correctly yields the default branch as the next base. For a
-  // --stack run the resolve→create window goes under the same push lock
-  // `stack push` holds: without it a loop and a push racing one stack
-  // read the same tip and both mint position n.
+  // item correctly yields the default branch as the next base.
   let slot: StackSlot | undefined
   let item!: ReturnType<typeof planItem>
   try {
-    const planAndCreate = (): void => {
-      slot = resolveStackSlot(ctx, bead)
-      item = planItem(
-        bead,
-        ctx.root,
-        slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
-      )
-      say(ctx, `\nloop: ${bead.id} → ${item.branch} @ ${item.worktreeDir}`)
-      // a surviving worktree dir is reused as-is — its branch kept its
-      // original base, so the stack edge only records on fresh creation
-      const fresh = !existsSync(item.worktreeDir)
-      ensureWorktree(ctx.root, item.branch, item.worktreeDir, slot?.base)
-      if (fresh && slot?.edge !== undefined) {
-        // same edge `work enter --stack` records — merge order travels
-        recordStackEdge(item.branch, slot.edge)
-      }
-    }
-    const lockPath = ctx.stack === undefined ? null : stackPushLockPath(ctx.stack)
-    if (ctx.stack !== undefined && lockPath === null) {
-      say(ctx, 'loop: could not resolve the git common dir — running without the stack lock')
-    }
-    // a live competing push can outlast one 20s wait — the hold is
-    // short, so retry the window a few times before flunking the item;
-    // flunking parks the bead unreclaimed for the whole run
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        if (lockPath === null) {
-          planAndCreate()
-        } else {
-          withFileLock(lockPath, planAndCreate, { label: `stack ${ctx.stack} push lock` })
-        }
-        break
-      } catch (err) {
-        if (!(err instanceof LockTimeout) || attempt >= 2) {
-          throw err
-        }
-      }
-    }
+    const planned = planItemAndWorktree(ctx, bead)
+    slot = planned.slot
+    item = planned.item
   } catch (err) {
     noteBead(bead.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
     reopenBead(bead.id)
