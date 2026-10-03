@@ -30,12 +30,36 @@ const nativeAt = (dir: string, specDir: string): SpecStore => ({
   tree: () => [],
 })
 
-/** Scripted bd — `list` cats $FAKE_BD_LIST_FILE (written by withRepo),
- *  `show`/`config` keep taskStore happy. */
+/** Scripted bd — `list`/`show` read $FAKE_BD_LIST_FILE (written by
+ *  withRepo) with the real CLI's filtering contract: --status selects,
+ *  closed rows hide unless --all or --status closed asks, `show <id>`
+ *  answers [row] or exits 1 with the "Issue <id> not found" miss
+ *  isBdNotFound classifies. `config` keeps taskStore happy. */
 const FAKE_BD = `#!/bin/sh
 case "$1" in
-  list) cat "$FAKE_BD_LIST_FILE" ;;
-  show) echo '[{"id":"b1","status":"in_progress","title":"thing"}]' ;;
+  list)
+    shift
+    node -e '
+      const rows = JSON.parse(require("fs").readFileSync(process.env.FAKE_BD_LIST_FILE, "utf8"))
+      const a = process.argv.slice(1)
+      const val = (f) => { const i = a.indexOf(f); return i < 0 ? undefined : a[i + 1] }
+      const status = val("--status")
+      let r = rows
+      if (status !== undefined) r = r.filter((x) => x.status === status)
+      else if (!a.includes("--all")) r = r.filter((x) => x.status !== "closed")
+      const n = Number(val("-n"))
+      if (n > 0) r = r.slice(0, n)
+      console.log(JSON.stringify(r))
+    ' -- "$@"
+    ;;
+  show)
+    node -e '
+      const rows = JSON.parse(require("fs").readFileSync(process.env.FAKE_BD_LIST_FILE, "utf8"))
+      const r = rows.find((x) => x.id === process.argv[1])
+      if (r === undefined) { console.error("Issue " + process.argv[1] + " not found"); process.exit(1) }
+      console.log(JSON.stringify([r]))
+    ' -- "$2"
+    ;;
   config) echo 'issue_prefix = bro' ;;
   *) : ;;
 esac
@@ -62,6 +86,8 @@ function withRepo(
   const prevActor = process.env.BEADS_ACTOR
   const run = async (): Promise<void> => {
     execFileSync('git', ['init', '-q', dir])
+    execFileSync('git', ['-C', dir, 'config', 'user.email', 't@t'])
+    execFileSync('git', ['-C', dir, 'config', 'user.name', 't'])
     writeFileSync(
       join(dir, 'bro.config.json'),
       JSON.stringify(opts.config ?? { sdd: { mode: 'gate' } })
@@ -91,6 +117,63 @@ function withRepo(
 }
 
 const ctx = (dir: string): ConnectorCtx => ({ dir, sessionId: 's1' })
+
+/** Write spec files under specs/, creating intermediate dirs. */
+const writeSpecs = (dir: string, files: Record<string, string>): void => {
+  for (const [rel, body] of Object.entries(files)) {
+    const abs = join(dir, 'specs', rel)
+    mkdirSync(dirname(abs), { recursive: true })
+    writeFileSync(abs, body)
+  }
+}
+
+/** process.exit stubbed into a throw — usage-error paths exit 2 and an
+ *  in-process command run must not take the test runner with it. */
+class ExitSignal extends Error {
+  constructor(readonly code: number) {
+    super(`exit ${code}`)
+  }
+}
+
+/** Run `bro spec <argv>` with cwd in the tmp repo, capturing console and
+ *  the exit verdict (process.exit code, else process.exitCode). */
+const capture = async (
+  dir: string,
+  argv: string[]
+): Promise<{ out: string[]; err: string[]; exit: number }> => {
+  const out: string[] = []
+  const err: string[] = []
+  const origLog = console.log
+  const origErr = console.error
+  const origExit = process.exit
+  const origCode = process.exitCode
+  let exit: number | undefined
+  console.log = (m?: unknown) => out.push(String(m))
+  console.error = (m?: unknown) => err.push(String(m))
+  process.exit = ((code?: number) => {
+    throw new ExitSignal(code ?? 0)
+  }) as typeof process.exit
+  process.exitCode = 0
+  const cwd = process.cwd()
+  process.chdir(dir)
+  try {
+    runSpecCommand(argv)
+  } catch (e) {
+    if (!(e instanceof ExitSignal)) {
+      throw e
+    }
+    exit = e.code
+  } finally {
+    process.chdir(cwd)
+    console.log = origLog
+    console.error = origErr
+    process.exit = origExit
+    const code = exit ?? process.exitCode ?? 0
+    process.exitCode = origCode
+    exit = code
+  }
+  return { out, err, exit }
+}
 
 describe('specState', () => {
   const row = (over: object = {}) => ({ id: 'b1', title: 't', ...over })
@@ -496,38 +579,6 @@ describe('dir specs — the tree IS the filetree', () => {
 })
 
 describe('bro spec tree rendering', () => {
-  /** Write spec files under specs/, creating intermediate dirs. */
-  const writeSpecs = (dir: string, files: Record<string, string>): void => {
-    for (const [rel, body] of Object.entries(files)) {
-      const abs = join(dir, 'specs', rel)
-      mkdirSync(dirname(abs), { recursive: true })
-      writeFileSync(abs, body)
-    }
-  }
-
-  /** Run `bro spec <argv>` with cwd in the tmp repo, capturing console. */
-  const capture = async (
-    dir: string,
-    argv: string[]
-  ): Promise<{ out: string[]; err: string[] }> => {
-    const out: string[] = []
-    const err: string[] = []
-    const origLog = console.log
-    const origErr = console.error
-    console.log = (m?: unknown) => out.push(String(m))
-    console.error = (m?: unknown) => err.push(String(m))
-    const cwd = process.cwd()
-    process.chdir(dir)
-    try {
-      runSpecCommand(argv)
-    } finally {
-      process.chdir(cwd)
-      console.log = origLog
-      console.error = origErr
-    }
-    return { out, err }
-  }
-
   /** Run `bro spec tree` over a spec fixture — returns stdout lines and
    *  the stderr lines about cyclic edges (unrelated facade warnings are
    *  filtered out). */
@@ -645,5 +696,301 @@ describe('bro spec init', () => {
       assert.equal(cfg.sdd.mode, 'remind')
       assert.ok(!existsSync(join(dir, 'specs', 'project.md')))
     })
+  })
+})
+
+describe('bro spec drift', () => {
+  const T0 = '2026-01-01T00:00:00Z'
+  const T1 = '2026-01-02T00:00:00Z'
+  const T2 = '2026-01-03T00:00:00Z'
+
+  /** Stage `files` and commit with `subject`, pinning author+committer
+   *  dates — the staleness predicate compares committer timestamps, so
+   *  the fixture controls them instead of racing the clock. */
+  const commit = (
+    dir: string,
+    subject: string,
+    files: Record<string, string>,
+    date: string
+  ): void => {
+    for (const [p, content] of Object.entries(files)) {
+      const abs = join(dir, p)
+      mkdirSync(dirname(abs), { recursive: true })
+      writeFileSync(abs, content)
+    }
+    const {
+      GIT_DIR: _d,
+      GIT_WORK_TREE: _w,
+      GIT_INDEX_FILE: _i,
+      GIT_COMMON_DIR: _c,
+      ...env
+    } = process.env
+    // stage the declared files only — `add -A` would sweep the fixture's
+    // bro.config.json / bin / list.json into a (b1) commit and fabricate
+    // a commit-resolved scope
+    execFileSync('git', ['add', '--', ...Object.keys(files)], { cwd: dir, env })
+    execFileSync('git', ['commit', '-qm', subject], {
+      cwd: dir,
+      env: { ...env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
+    })
+  }
+
+  /** capture() minus connector-collision warnings — earlier describes
+   *  register fake tasks connectors process-wide, so facade resolution
+   *  warns on every run; it is fixture noise, not drift output. */
+  const drift = async (
+    dir: string,
+    argv: string[]
+  ): Promise<{ out: string[]; err: string[]; exit: number }> => {
+    const r = await capture(dir, argv)
+    return { ...r, err: r.err.filter((l) => !l.startsWith('warning:')) }
+  }
+
+  const beadRow = (id: string, over: object = {}): Record<string, unknown> => ({
+    id,
+    status: 'closed',
+    title: `${id} title`,
+    issue_type: 'task',
+    ...over,
+  })
+  const list = (...rows: Record<string, unknown>[]): string => JSON.stringify(rows)
+
+  const scopedSpec = (scope = 'src/**'): string =>
+    `---\nscope:\n  - "${scope}"\n---\n# spec\n`
+
+  test('STALE row: landed code newer than the spec — TSV detail + exit 1', async () => {
+    await withRepo({ config: {}, list: list(beadRow('b1')) }, async (dir) => {
+      commit(dir, 'spec (b1)', { 'specs/b1.md': scopedSpec() }, T0)
+      commit(dir, 'code moved on', { 'src/a.ts': 'x\n' }, T1)
+      const r = await drift(dir, ['drift'])
+      assert.equal(r.exit, 1)
+      assert.deepEqual(r.err, ['spec drift: 1 stale spec(s)'])
+      assert.equal(r.out.length, 1)
+      assert.match(r.out[0]!, /^b1\tSTALE\tspec@[0-9a-f]{8} \S+ · scope@[0-9a-f]{8} \S+$/)
+    })
+  })
+
+  test('fresh rows: spec landed after code, or in the same commit — exit 0', async () => {
+    await withRepo(
+      { config: {}, list: list(beadRow('b2'), beadRow('b1')) },
+      async (dir) => {
+        commit(dir, 'code (b1)', { 'src/a.ts': 'x\n' }, T0)
+        commit(dir, 'spec (b1)', { 'specs/b1.md': scopedSpec() }, T1)
+        // b2: spec and code in one commit — the ideal landing is fresh.
+        // disjoint scope: a shared path would stale b1's row too
+        commit(
+          dir,
+          'spec+code (b2)',
+          { 'specs/b2.md': scopedSpec('docs/**'), 'docs/b2.md': 'y\n' },
+          T2
+        )
+        const r = await drift(dir, ['drift'])
+        assert.equal(r.exit, 0)
+        assert.deepEqual(r.err, [])
+        // rows sort by id regardless of list order
+        assert.deepEqual(
+          r.out.map((l) => l.split('\t').slice(0, 2).join('\t')),
+          ['b1\tfresh', 'b2\tfresh']
+        )
+      }
+    )
+  })
+
+  test('no-scope reports the coverage gap without failing', async () => {
+    await withRepo({ config: {}, list: list(beadRow('b1')) }, async (dir) => {
+      // a plain spec — no scope: frontmatter — and no commit subjects
+      // carry (b1): nothing resolves the audit scope
+      commit(dir, 'spec (b1)', { 'specs/b1.md': '# plain spec\n' }, T0)
+      const r = await drift(dir, ['drift'])
+      assert.equal(r.exit, 0)
+      assert.deepEqual(r.out, [
+        'b1\tno-scope\tno frontmatter scope, no bead-id commits',
+      ])
+    })
+  })
+
+  test('bead-id commits resolve the scope; the next code commit staleness it', async () => {
+    await withRepo({ config: {}, list: list(beadRow('b1')) }, async (dir) => {
+      commit(dir, 'feat: the thing (b1) (#7)', { 'src/a.ts': 'x\n' }, T0)
+      commit(dir, 'spec (b1)', { 'specs/b1.md': '# plain spec\n' }, T1)
+      let r = await drift(dir, ['drift'])
+      assert.match(r.out[0]!, /^b1\tfresh\t/)
+      assert.equal(r.exit, 0)
+      // code moves past the spec — a commit without the bead marker
+      // still lands inside the resolved scope pathset
+      commit(dir, 'refactor (b9)', { 'src/a.ts': 'x2\n' }, T2)
+      r = await drift(dir, ['drift'])
+      assert.match(r.out[0]!, /^b1\tSTALE\t/)
+      assert.equal(r.exit, 1)
+    })
+  })
+
+  test('explicit ids audit exactly those; an unknown id exits 2', async () => {
+    await withRepo(
+      { config: {}, list: list(beadRow('b1'), beadRow('b2')) },
+      async (dir) => {
+        commit(dir, 'code', { 'src/a.ts': 'x\n' }, T0)
+        commit(
+          dir,
+          'specs',
+          { 'specs/b1.md': scopedSpec(), 'specs/b2.md': scopedSpec() },
+          T1
+        )
+        const r = await drift(dir, ['drift', 'b1'])
+        assert.equal(r.exit, 0)
+        assert.equal(r.out.length, 1)
+        assert.match(r.out[0]!, /^b1\tfresh\t/)
+        const miss = await drift(dir, ['drift', 'b9'])
+        assert.equal(miss.exit, 2)
+        assert.match(miss.err[0] ?? '', /bead\(s\) not found: b9/)
+      }
+    )
+  })
+
+  test('an explicit id with no local spec file is unverifiable, not dropped', async () => {
+    await withRepo({ config: {}, list: list(beadRow('b1')) }, async (dir) => {
+      commit(dir, 'code', { 'src/a.ts': 'x\n' }, T0)
+      const r = await drift(dir, ['drift', 'b1'])
+      assert.equal(r.exit, 0)
+      assert.deepEqual(r.out, ['b1\tunverifiable\tno local spec file to date'])
+    })
+  })
+
+  test('uncommitted spec file: no commit on the drift ref — unverifiable', async () => {
+    await withRepo({ config: {}, list: list(beadRow('b1')) }, async (dir) => {
+      commit(dir, 'code', { 'src/a.ts': 'x\n' }, T0)
+      writeSpecs(dir, { 'b1.md': scopedSpec() })
+      const r = await drift(dir, ['drift'])
+      assert.equal(r.exit, 0)
+      assert.match(r.out[0]!, /^b1\tunverifiable\tno spec commit on /)
+    })
+  })
+
+  test('a spec: external link is unverifiable — nothing local to date', async () => {
+    await withRepo(
+      {
+        config: {},
+        list: list(beadRow('b1', { description: 'see spec: https://docs.example/x' })),
+      },
+      async (dir) => {
+        commit(dir, 'code', { 'src/a.ts': 'x\n' }, T0)
+        const r = await drift(dir, ['drift'])
+        assert.equal(r.exit, 0)
+        assert.deepEqual(r.out, ['b1\tunverifiable\tno local spec file to date'])
+      }
+    )
+  })
+
+  test('a spec: link to a repo file audits that file', async () => {
+    await withRepo(
+      { config: {}, list: list(beadRow('b1', { description: 'spec: docs/spec.md' })) },
+      async (dir) => {
+        commit(dir, 'linked spec', { 'docs/spec.md': scopedSpec() }, T0)
+        commit(dir, 'code', { 'src/a.ts': 'x\n' }, T1)
+        const r = await drift(dir, ['drift'])
+        assert.equal(r.exit, 1)
+        assert.match(r.out[0]!, /^b1\tSTALE\t/)
+      }
+    )
+  })
+
+  test('bad scope entries are unverifiable — never silently widened', async () => {
+    await withRepo(
+      { config: {}, list: list(beadRow('b1'), beadRow('b2')) },
+      async (dir) => {
+        commit(dir, 'specs', {
+          'specs/b1.md': scopedSpec('../outside'),
+          'specs/b2.md': scopedSpec('nope/**'),
+        }, T0)
+        const r = await drift(dir, ['drift'])
+        assert.equal(r.exit, 0)
+        assert.deepEqual(r.out, [
+          'b1\tunverifiable\tbad scope path: ../outside',
+          'b2\tunverifiable\tscope matches nothing',
+        ])
+      }
+    )
+  })
+
+  test('shallow history is unverifiable before any timestamp comparison', async () => {
+    await withRepo({ config: {}, list: list(beadRow('b1')) }, async (dir) => {
+      commit(dir, 'spec+code', { 'specs/b1.md': scopedSpec(), 'src/a.ts': 'x\n' }, T0)
+      // .git/shallow is what --is-shallow-repository reads — one line
+      // fakes a boundary clone without a second repo
+      const sha = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], {
+        encoding: 'utf8',
+      }).trim()
+      writeFileSync(join(dir, '.git', 'shallow'), `${sha}\n`)
+      const r = await drift(dir, ['drift'])
+      assert.equal(r.exit, 0)
+      assert.deepEqual(r.out, ['b1\tunverifiable\tshallow history'])
+    })
+  })
+
+  test('unborn history is unverifiable — no drift ref resolves', async () => {
+    await withRepo({ config: {}, list: list(beadRow('b1')) }, async (dir) => {
+      writeSpecs(dir, { 'b1.md': scopedSpec() })
+      const r = await drift(dir, ['drift'])
+      assert.equal(r.exit, 0)
+      assert.deepEqual(r.out, [
+        'b1\tunverifiable\tunborn or empty history — no drift ref',
+      ])
+    })
+  })
+
+  test('default scans closed beads; --all adds open ones; exempt never audit', async () => {
+    const staleSpec = { 'specs/b1.md': scopedSpec(), 'specs/b2.md': scopedSpec(), 'specs/b3.md': scopedSpec() }
+    await withRepo(
+      {
+        config: {},
+        list: list(
+          beadRow('b2', { status: 'in_progress' }),
+          beadRow('b1'),
+          beadRow('b3', { labels: ['trivial'] })
+        ),
+      },
+      async (dir) => {
+        commit(dir, 'specs', staleSpec, T0)
+        commit(dir, 'code', { 'src/a.ts': 'x\n' }, T1)
+        let r = await drift(dir, ['drift'])
+        assert.deepEqual(r.out.map((l) => l.split('\t')[0]), ['b1'])
+        assert.equal(r.exit, 1)
+        r = await drift(dir, ['drift', '--all'])
+        // b3 is exempt (trivial) — never enters the audit set
+        assert.deepEqual(r.out.map((l) => l.split('\t')[0]), ['b1', 'b2'])
+        assert.equal(r.exit, 1)
+      }
+    )
+  })
+
+  test('--json emits the same rows as objects; STALE still exits 1', async () => {
+    await withRepo(
+      { config: {}, list: list(beadRow('b1'), beadRow('b2')) },
+      async (dir) => {
+        commit(
+          dir,
+          'specs',
+          { 'specs/b1.md': scopedSpec(), 'specs/b2.md': '# plain\n' },
+          T0
+        )
+        commit(dir, 'code', { 'src/a.ts': 'x\n' }, T1)
+        const r = await drift(dir, ['drift', '--json'])
+        assert.equal(r.exit, 1)
+        assert.deepEqual(r.err, ['spec drift: 1 stale spec(s)'])
+        const rows = JSON.parse(r.out.join('\n')) as Array<{
+          id: string
+          state: string
+          detail: string
+        }>
+        assert.equal(rows.length, 2)
+        assert.deepEqual(
+          rows.map((x) => x.id),
+          ['b1', 'b2']
+        )
+        assert.equal(rows[0]!.state, 'STALE')
+        assert.match(rows[0]!.detail, /^spec@[0-9a-f]{8} /)
+        assert.equal(rows[1]!.state, 'no-scope')
+      }
+    )
   })
 })
