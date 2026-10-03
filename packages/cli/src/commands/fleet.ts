@@ -1,9 +1,12 @@
 /**
- * `bro fleet` — the read-only one-shot fleet view: open molecules ×
- * steps × agents × worktrees × PRs. Spec: specs/sessions/bro-f4ot/spec.md.
+ * `bro fleet` — the read-only fleet view: open molecules × steps ×
+ * agents × worktrees × PRs. Spec: specs/sessions/bro-f4ot/spec.md,
+ * specs/sessions/bro-f4ot/bro-n54z.md (--live).
  *
- *   bro fleet            table
- *   bro fleet --json     machine-readable rows + degraded backends
+ *   bro fleet                 one-shot table
+ *   bro fleet --json          machine-readable rows + degraded backends
+ *   bro fleet --live          full-screen dashboard, repaint every 2s
+ *   bro fleet --live --every N  repaint every N seconds
  *
  * State the table must surface honestly:
  *  - an agent dead while its step stays claimed → `lost — respawn?`
@@ -13,12 +16,17 @@
  *  - a claimed step with no agent → `claimed — <assignee>` (interactive
  *    sessions and foreign backends hold claims too).
  *
- *   --live TUI / site route are later milestones (bro-n54z, bro-1rir).
+ * --live is the human at the terminal: same rows, alternate screen,
+ * chained setTimeout ticks (a slow backend stretches the interval, it
+ * never stacks collects), q/Esc/Ctrl-C quits. Non-TTY is a usage
+ * error — `bro watch --every N` is the non-interactive heartbeat.
+ * The site route over `bro serve` is bro-1rir.
  */
 import { basename } from 'node:path'
 import { git, gitTry, reviewHost, type AgentInfo, type ReviewFacade } from '@broject/core'
 import { listMolecules, loadMolecule, stepsOf, type ConvoyStep } from '@broject/convoy'
 import { eachAgentConnector, loadAgentEnv } from '../agent-connectors.ts'
+import { flag } from './args.ts'
 import { parseWorktreePorcelain, worktreePathFor, type WorktreeInfo } from './work.ts'
 
 export interface FleetRow {
@@ -230,10 +238,17 @@ export function agentCell(
   return `${agent.state}${pid}`
 }
 
-export async function runFleetCommand(argv: string[]): Promise<void> {
-  const json = argv.includes('--json')
-  const dir = process.cwd()
+/** One collect pass — the rows plus every warning plane. Shared by the
+ *  one-shot table and the --live repaint loop. Exported: `liveFrame`'s
+ *  signature names it. */
+export interface FleetPayload {
+  rows: FleetRow[]
+  degraded: string[]
+  conflicts: string[]
+  prErrors: string[]
+}
 
+async function collectFleet(dir: string): Promise<FleetPayload> {
   const { byStep, degraded, conflicts } = await collectAgents(dir)
 
   const worktrees = (() => {
@@ -257,8 +272,225 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
 
   const prErrors: string[] = []
   const rows = fleetRows(byStep, degraded.length > 0, rev, repo, worktrees, prErrors)
+  return { rows, degraded, conflicts, prErrors }
+}
 
-  if (json) {
+export interface FleetArgs {
+  json: boolean
+  live: boolean
+  everySec: number
+}
+
+export const LIVE_DEFAULT_SEC = 2
+/** setTimeout clamps sub-ms delays to ~1ms — anything below this floor
+ *  is a busy collect/repaint loop, not a cadence. */
+export const LIVE_MIN_SEC = 0.1
+
+/** Parsed fleet flags. `--every` implies `--live` — a repaint cadence
+ *  only means something on the dashboard; `--live --json` is refused
+ *  (a repaint loop can't emit one JSON document). Throws on bad input;
+ *  `flag()` itself exits on a missing/duplicated `--every` value. */
+export function fleetArgs(argv: string[]): FleetArgs {
+  const everyRaw = flag(argv, '--every')
+  const live = argv.includes('--live') || everyRaw !== undefined
+  let everySec = LIVE_DEFAULT_SEC
+  if (everyRaw !== undefined) {
+    everySec = Number(everyRaw)
+    // setTimeout clamps delays over 2^31-1 ms to ~1ms — a huge --every
+    // would busy-repaint instead of waiting, so it fails closed here.
+    if (!Number.isFinite(everySec) || everySec <= 0 || everySec * 1000 > 0x7fffffff) {
+      throw new Error(
+        `--every needs a positive seconds value up to ${0x7fffffff / 1000}s, got "${everyRaw}"`
+      )
+    }
+    if (everySec < LIVE_MIN_SEC) {
+      throw new Error(
+        `--every needs at least ${LIVE_MIN_SEC}s between repaints, got "${everyRaw}"`
+      )
+    }
+  }
+  const json = argv.includes('--json')
+  if (live && json) {
+    throw new Error('--live is a TTY dashboard — it does not combine with --json')
+  }
+  return { json, live, everySec }
+}
+
+const ALT_SCREEN_ON = '\u001b[?1049h'
+const ALT_SCREEN_OFF = '\u001b[?1049l'
+const CURSOR_HIDE = '\u001b[?25l'
+const CURSOR_SHOW = '\u001b[?25h'
+/** Cursor home + repaint + clear-to-end: the frame is rewritten in
+ *  place; a shorter frame never leaves stale rows behind. */
+const REPAINT = '\u001b[H'
+const CLEAR_REST = '\u001b[J'
+
+/** The live frame as one string — header, the one-shot table, warnings
+ *  in-frame (stderr would scroll under the repaint), footer. Pure so
+ *  the test sees exactly what the TTY gets. */
+export function liveFrame(payload: FleetPayload, ts: Date, everySec: number): string {
+  const lines = [
+    `bro fleet — live · ${ts.toISOString()} · every ${everySec}s`,
+    '',
+    ...(payload.rows.length === 0
+      ? ['no open molecules — nothing in the fleet']
+      : fleetTableLines(payload.rows)),
+  ]
+  const warnings = [
+    ...payload.degraded.map((d) => `warning: backend degraded — ${d}`),
+    ...payload.conflicts.map((c) => `warning: agent conflict — ${c}`),
+    ...payload.prErrors.map((e) => `warning: PR lookup failed — ${e}`),
+  ]
+  if (warnings.length > 0) {
+    lines.push('', ...warnings)
+  }
+  lines.push('', 'q quit')
+  return lines.join('\n')
+}
+
+/** The repaint loop — alt screen + raw keys, chained setTimeout (never
+ *  setInterval: a slow collect stretches the cadence instead of
+ *  stacking), repaint on resize, restore on every exit path. */
+async function runFleetLive(dir: string, everySec: number): Promise<void> {
+  const out = process.stdout
+  const input = process.stdin
+  if (!out.isTTY || !input.isTTY) {
+    console.error(
+      'error: --live needs a TTY — for a non-interactive ticker use `bro watch --every N`'
+    )
+    process.exit(2)
+  }
+
+  let timer: NodeJS.Timeout | undefined
+  let lastFrame = ''
+  const paint = (frame: string): void => {
+    lastFrame = frame
+    out.write(REPAINT + frame + CLEAR_REST)
+  }
+  const repaint = (): void => {
+    if (lastFrame !== '') {
+      paint(lastFrame)
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let escTimer: NodeJS.Timeout | undefined
+    // settle + teardown: drops every listener and restores the primary
+    // screen. Returns false when already settled.
+    const teardown = (): boolean => {
+      if (settled) {
+        return false
+      }
+      settled = true
+      if (timer !== undefined) {
+        clearTimeout(timer)
+      }
+      if (escTimer !== undefined) {
+        clearTimeout(escTimer)
+      }
+      input.removeListener('data', onKey)
+      out.removeListener('resize', repaint)
+      // an unused `once` handler would still swallow a later real
+      // signal as a no-op quit — drop them on every exit path
+      process.removeListener('SIGINT', quit)
+      process.removeListener('SIGTERM', quit)
+      // restore the screen first — a destroyed stdin throws on
+      // setRawMode (kill/session teardown) and must not skip it
+      out.write(CURSOR_SHOW + ALT_SCREEN_OFF)
+      try {
+        input.setRawMode(false)
+        input.pause()
+      } catch {
+        // stdin already closed/destroyed
+      }
+      return true
+    }
+    const quit = (): void => {
+      if (teardown()) {
+        resolve()
+      }
+    }
+    const onKey = (buf: Buffer): void => {
+      const k = buf.toString()
+      if (k === '\x1b') {
+        // a lone ESC may be the head of a split escape sequence (arrow,
+        // Alt+key) — quit only when no continuation arrives shortly
+        escTimer = setTimeout(quit, 50)
+        return
+      }
+      if (escTimer !== undefined) {
+        clearTimeout(escTimer)
+        escTimer = undefined
+      }
+      // raw mode delivers Ctrl-C as \x03 (no SIGINT); an arrow key
+      // arrives as a multi-byte \x1b[… sequence and is ignored, not
+      // a quit
+      if (k === 'q' || k === '\x03') {
+        quit()
+      }
+    }
+    try {
+      out.write(ALT_SCREEN_ON + CURSOR_HIDE)
+      input.setRawMode(true)
+      input.resume()
+      input.on('data', onKey)
+      out.on('resize', repaint)
+      // Ctrl-C is data under raw mode, but a stray SIGINT/SIGTERM (kill,
+      // session teardown) must still restore the screen
+      process.once('SIGINT', quit)
+      process.once('SIGTERM', quit)
+    } catch (err) {
+      // a half-set-up terminal still gets restored before the
+      // failure propagates
+      teardown()
+      reject(err)
+      return
+    }
+
+    const tick = async (): Promise<void> => {
+      // a quit that landed mid-collect already restored the primary
+      // screen — painting now would corrupt it, so both paths check
+      try {
+        const frame = liveFrame(await collectFleet(dir), new Date(), everySec)
+        if (!settled) {
+          paint(frame)
+        }
+      } catch (err) {
+        // a throwing collect (e.g. a mid-write beads read) degrades the
+        // frame, never kills the dashboard — the next tick retries
+        if (!settled) {
+          paint(
+            `bro fleet — live · ${new Date().toISOString()}\n\ncollection failed — ${err instanceof Error ? err.message : String(err)}\n\nq quit`
+          )
+        }
+      }
+      if (!settled) {
+        timer = setTimeout(() => void tick(), everySec * 1000)
+      }
+    }
+    void tick()
+  })
+}
+
+export async function runFleetCommand(argv: string[]): Promise<void> {
+  let args: FleetArgs
+  try {
+    args = fleetArgs(argv)
+  } catch (err) {
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(2)
+  }
+  const dir = process.cwd()
+
+  if (args.live) {
+    await runFleetLive(dir, args.everySec)
+    return
+  }
+
+  const { rows, degraded, conflicts, prErrors } = await collectFleet(dir)
+
+  if (args.json) {
     console.log(JSON.stringify({ rows, degraded, conflicts, prErrors }, null, 2))
     return
   }
