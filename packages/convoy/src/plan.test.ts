@@ -103,19 +103,16 @@ type = "human"
 `),
       /step "g" is a human gate but gates = "forbid"/
     )
-    // a gate-titled step counts even without a declared type
-    assert.throws(
-      () =>
-        parsePlan(`
+    // a gate-titled step with no declared type is agent work — the title
+    // is display-only; only type = "human" declares a gate
+    parsePlan(`
 gates = "forbid"
 [[molecules]]
 title = "unattended"
 [[molecules.steps]]
 id = "g"
 title = "HUMAN GATE — approve"
-`),
-      /gates = "forbid"/
-    )
+`)
   })
 
   test('needs must reference declared siblings — no self-refs, no unknowns, no cycles', () => {

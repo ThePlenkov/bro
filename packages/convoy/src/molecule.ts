@@ -28,15 +28,18 @@ export function resolveMolecule(id?: string): Molecule {
 }
 
 /**
- * Step classification. bd flattens unregistered custom types to `task`
- * (unless `bd config set types.custom "agent human"` was run before pour),
- * so kind is: declared type if agent|human, else `gate`/`human`-titled
- * a gate title → human, otherwise agent-executable.
+ * Step classification — the declared `issue_type` is the contract, the
+ * title is display-only. `human` is bro's declared human-step convention;
+ * `gate` is bd's native gate issue (a poured `[steps.gate]` block
+ * materializes as a `gate`-typed issue blocking its step) — both hold the
+ * convoy for a human. Everything else, including `task` steps flattened
+ * from unregistered custom types at pour, is agent-executable — the
+ * declaration is unrecoverable post-flatten, so `bro convoy pour`
+ * registers agent/human in types.custom up front.
  */
 export function stepKind(issue: MolIssue): StepKind {
   const t = issue.issue_type
-  if (t === 'agent' || t === 'human') return t
-  if (/\b(human\s+gate|gate)\b/i.test(issue.title)) return 'human'
+  if (t === 'human' || t === 'gate') return 'human'
   return 'agent'
 }
 
@@ -128,7 +131,10 @@ export function beadsDir(): string {
 }
 
 /** A formula's declared steps as MolIssue shells — enough for `stepKind`
- *  gate classification without pouring. */
+ *  gate classification without pouring. Any `gate` block counts as a
+ *  hold: bd cook materializes it as a `gate`-typed issue blocking the
+ *  step, whatever the condition type (human, gh:run, timer, …) — the
+ *  same classification `stepKind` applies post-pour. */
 export function formulaSteps(formula: string): MolIssue[] {
   const doc = bdJson<{
     steps?: { id?: string; title?: string; type?: string; gate?: { type?: string } }[]
@@ -141,7 +147,7 @@ export function formulaSteps(formula: string): MolIssue[] {
     id: s.id ?? '',
     title: s.title ?? '',
     status: 'open',
-    issue_type: s.gate?.type?.trim() === 'human' ? 'human' : (s.type?.trim() ?? 'task'),
+    issue_type: s.gate ? 'gate' : (s.type?.trim() ?? 'task'),
   }))
 }
 
