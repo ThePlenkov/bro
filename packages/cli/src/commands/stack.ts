@@ -181,6 +181,9 @@ function cmdPush(argv: string[]): void {
   // branch exists a waiter's recompute sees it; the slower post-add
   // steps (submodule init, bead claim) stay outside the hold.
   const lockPath = stackPushLockPath(name)
+  if (lockPath === null) {
+    console.error('note: could not resolve the git common dir — pushing without the stack lock')
+  }
   let release: (() => void) | undefined
   try {
     release =

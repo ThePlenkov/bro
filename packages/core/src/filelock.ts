@@ -4,7 +4,7 @@
  *  clobbers or double-allocates. Re-entrant per path inside a process so
  *  a locked section can reach for the same lock again. */
 import { randomBytes } from 'node:crypto'
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeSync } from 'node:fs'
+import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 /** Lock paths → ownership tokens this process holds — makes
@@ -40,51 +40,90 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-/** Is `token` (the lock file's current content) a stealable hold? A
- *  dead owner is stolen at once; a live one only past the abandoned
- *  bound. Re-reading the file before rm keeps a fresh replacement safe. */
-const lockStealable = (lock: string, token: string): boolean => {
+/** Is the lock instance AT `path` a stealable hold? A dead owner is
+ *  stolen at once; a live one only past the abandoned bound. */
+const lockStealable = (path: string): boolean => {
+  let token: string
   let age: number
   try {
-    age = Date.now() - statSync(lock).mtimeMs
+    token = readFileSync(path, 'utf8')
+    age = Date.now() - statSync(path).mtimeMs
   } catch {
-    return false // vanished — the next create attempt wins
+    return false // vanished or unreadable — can't prove dead, don't steal
   }
   return !pidAlive(Number(token.split(':')[0])) || age > LOCK_ABANDONED_MS
 }
 
-/** One acquisition attempt — true when the lock is ours. On EEXIST a
- *  stealable lock is removed so the next retry takes it; a live
- *  holder's is left alone. The file carries the caller's token:
- *  existence is the lock, the token is the ownership proof release()
- *  and steal both check before removing it. */
-const tryAcquireLockFile = (lock: string, token: string): boolean => {
+/** Capture-then-check removal: rename(2) grabs whatever instance sits
+ *  at `lock` atomically, `verify` re-checks THAT instance — a fresh
+ *  replacement swapped in mid-race is put back instead of unlinked.
+ *  (A plain read-then-rm can delete a lock that was stolen-and-
+ *  recreated between the check and the remove.) */
+const removeCaptured = (lock: string, verify: (captured: string) => boolean): void => {
+  const dest = `${lock}.cap-${process.pid}-${randomBytes(4).toString('hex')}`
   try {
-    const fd = openSync(lock, 'wx')
-    try {
-      writeSync(fd, token)
-    } finally {
-      closeSync(fd)
-    }
+    renameSync(lock, dest)
+  } catch {
+    return // already gone or renamed by a contender — the retry decides
+  }
+  if (verify(dest)) {
+    rmSync(dest, { force: true })
+    return
+  }
+  try {
+    renameSync(dest, lock)
+  } catch {
+    rmSync(dest, { force: true }) // a new lock already sits there — drop the captured
+  }
+}
+
+/** Steal a held lock once its instance proves stale. The pre-check on
+ *  `lock` keeps a live hold from ever being moved; the re-check inside
+ *  removeCaptured re-proves the captured instance itself. */
+const stealLock = (lock: string): void => {
+  if (!lockStealable(lock)) {
+    return
+  }
+  removeCaptured(lock, lockStealable)
+}
+
+/** One acquisition attempt — true when the lock is ours. The token file
+ *  is staged and link(2)'d into place atomically: an O_EXCL create would
+ *  publish an EMPTY lock whose pid-less token reads as a dead owner — a
+ *  concurrent acquirer could steal it before the first write landed.
+ *  On EEXIST a provably stale hold is stolen so the next retry wins. */
+const tryAcquireLockFile = (lock: string, token: string): boolean => {
+  const staged = `${lock}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
+  writeFileSync(staged, token)
+  try {
+    linkSync(staged, lock)
     return true
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
       throw err
     }
+  } finally {
+    rmSync(staged, { force: true })
   }
   try {
-    // ownership-checked steal — read the holder token FIRST, then prove
-    // stealable AND unchanged. A contender that already replaced the
-    // file shows a different token — the delete is skipped instead of
-    // robbing its fresh lock.
-    const holder = readFileSync(lock, 'utf8')
-    if (lockStealable(lock, holder) && readFileSync(lock, 'utf8') === holder) {
-      rmSync(lock, { force: true })
-    }
+    stealLock(lock)
   } catch {
     // raced removal or a stat flake — the retry decides
   }
   return false
+}
+
+/** Drop `lock` only while it still carries `token` — the same
+ *  capture-then-check as steal: a section whose hold was stolen and
+ *  re-acquired by a contender must not unlink the new holder's lock. */
+const releaseLock = (lock: string, token: string): void => {
+  removeCaptured(lock, (captured) => {
+    try {
+      return readFileSync(captured, 'utf8') === token
+    } catch {
+      return false // unreadable instance — not provably ours, put it back
+    }
+  })
 }
 
 /** Release every lock this process still holds — called by the exit
@@ -92,13 +131,7 @@ const tryAcquireLockFile = (lock: string, token: string): boolean => {
  *  stranded lock blocks every contender until a dead-owner steal. */
 const releaseAll = (): void => {
   for (const [lock, token] of heldLocks) {
-    try {
-      if (readFileSync(lock, 'utf8') === token) {
-        rmSync(lock, { force: true })
-      }
-    } catch {
-      // lock already gone — the desired end state
-    }
+    releaseLock(lock, token)
   }
 }
 
@@ -149,15 +182,7 @@ export function acquireFileLock(lock: string, opts: FileLockOptions = {}): () =>
   armExitHook()
   return () => {
     heldLocks.delete(lock)
-    try {
-      // a section whose pid somehow survived an abandoned-window steal
-      // must not drop the new holder's lock — token check first
-      if (readFileSync(lock, 'utf8') === token) {
-        rmSync(lock, { force: true })
-      }
-    } catch {
-      // lock already gone — the desired end state
-    }
+    releaseLock(lock, token)
   }
 }
 
