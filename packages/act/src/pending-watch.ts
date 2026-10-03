@@ -21,7 +21,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 export interface PendingWatch {
   pr: number
@@ -60,7 +60,14 @@ function watchesDir(dir: string): string | null {
     const gd = execFileSync(
       'git', // NOSONAR — git is the runner's own tool; PATH is trusted config
       ['-C', dir, 'rev-parse', '--git-common-dir'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+      // a hung git must not stall a wait start or the session-start hook —
+      // bound the lookup so a stalled process fails open
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 5000,
+        killSignal: 'SIGKILL',
+      }
     ).trim()
     return gd ? join(resolve(dir, gd), 'bro', 'watches') : null
   } catch {
@@ -68,37 +75,67 @@ function watchesDir(dir: string): string | null {
   }
 }
 
-/** The process's /proc start identity — distinguishes a reused pid from
- *  the watcher that recorded it. Null where /proc is absent. */
-function procStart(pid: number): string | null {
+/** The process's /proc identity — state byte (field 3: 'Z' marks an
+ *  unreaped zombie) and starttime (field 22). Post-comm fields split
+ *  from index 0 = field 3. Null where /proc is absent. */
+function procStat(pid: number): { state: string; start: string } | null {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-    // field 22 (starttime); post-comm fields split from index 0 = field 3
-    return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] ?? null
+    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    return { state: rest[0] ?? '', start: rest[19] ?? '' }
   } catch {
     return null
   }
 }
 
 function pidAlive(pid: number, pidStart?: string): boolean {
+  let signaled = false
   try {
     process.kill(pid, 0)
+    signaled = true
   } catch (e) {
-    return (e as NodeJS.ErrnoException).code === 'EPERM'
+    if ((e as NodeJS.ErrnoException).code !== 'EPERM') {
+      return false
+    }
   }
-  // pid lives — verify it is the same process the marker recorded; an
-  // unverifiable identity stays fail-open (alive, not a stale promise)
-  const current = pidStart === undefined ? null : procStart(pid)
-  return pidStart === undefined || current === null || current === pidStart
+  const st = procStat(pid)
+  // a zombie answers kill(pid, 0) — and survives an EPERM probe — but
+  // nobody is polling; the watching session is gone either way
+  if (st?.state === 'Z') {
+    return false
+  }
+  if (!signaled) {
+    // EPERM — a live process owned by another uid, not ours to verify
+    return true
+  }
+  // verify it is the same process the marker recorded; an unverifiable
+  // identity stays fail-open (alive, not a stale promise)
+  return (
+    pidStart === undefined || st === null || st.start === '' || st.start === pidStart
+  )
 }
 
-/** Drop a marker for the running wait — best-effort. Cleanup runs
- *  before the new marker is published: a listWatches pass prunes
- *  TTL-expired residue, and dead-pid markers for the same PR are
- *  retired — the new watch supersedes their stale promise. Dead-pid
- *  markers for other PRs stay: a session-start report may still flag
- *  them. The marker is written to a tmp file then renamed so a crash
- *  mid-write never leaves a partial JSON marker behind. */
+/** Does watch `a` keep marker `b`'s promise? Same PR, and `a`'s merge
+ *  mode at least as strong: a merge wait also watches, so merge:true
+ *  covers both modes; a watch-only wait covers only another watch-only
+ *  promise — a dead merge:true marker left behind by a merge:false
+ *  replacement still has to flag, or the merge intent dies silently
+ *  with the old process. */
+function covers(a: PendingWatch, b: PendingWatch): boolean {
+  return a.pr === b.pr && (a.merge || !b.merge)
+}
+
+function coveredBy(live: ListedWatch[], w: PendingWatch): boolean {
+  return live.some((l) => covers(l.watch, w))
+}
+
+/** Drop a marker for the running wait — best-effort. The marker is
+ *  published via tmp write + atomic rename so a crash mid-write never
+ *  leaves a partial marker. Dead markers the new wait covers are NOT
+ *  retired here — the replacement hasn't kept the promise yet, so they
+ *  stay on disk (hidden from reports by listWatches) until the covering
+ *  watch ends. A replacement that crashes leaves both records
+ *  flaggable; one that completes retires them in watchEnd. */
 export function watchBegin(
   dir: string,
   w: Omit<PendingWatch, 'pid' | 'startedAt'>
@@ -109,15 +146,6 @@ export function watchBegin(
   }
   try {
     mkdirSync(wd, { recursive: true })
-    for (const { watch, file, alive } of listWatches(dir)) {
-      if (!alive && watch.pr === w.pr) {
-        try {
-          rmSync(file)
-        } catch {
-          // retire is best-effort
-        }
-      }
-    }
     // unique per wait — two waits on the same PR in one process each own
     // their marker, so neither publish nor watchEnd clobbers the other's
     const path = join(
@@ -131,7 +159,7 @@ export function watchBegin(
         {
           ...w,
           pid: process.pid,
-          pidStart: procStart(process.pid) ?? undefined,
+          pidStart: procStat(process.pid)?.start ?? undefined,
           startedAt: Date.now(),
         },
         null,
@@ -145,15 +173,36 @@ export function watchBegin(
   }
 }
 
-/** Remove this wait's own marker — called on settle, timeout, or throw. */
+/** Remove this wait's own marker — called on settle, timeout, or throw.
+ *  Ending is also the retire point for dead markers this watch covered:
+ *  while it lived they were a promise still being kept (listWatches hid
+ *  them), and the ending session reported the outcome itself, so the
+ *  superseded record must not resurface as a false stale flag. Dead
+ *  markers it never covered — or another live watch still covers —
+ *  stay. */
 export function watchEnd(path: string | null): void {
   if (!path) {
     return
   }
+  const w = readMarker(path)
   try {
     rmSync(path)
   } catch {
     // the marker is best-effort — a failed remove leaves residue the TTL prunes
+  }
+  if (w === null) {
+    return
+  }
+  const listed = listWatchesIn(dirname(path))
+  const live = listed.filter((l) => l.alive)
+  for (const d of listed) {
+    if (!d.alive && covers(w, d.watch) && !coveredBy(live, d.watch)) {
+      try {
+        rmSync(d.file)
+      } catch {
+        // retire is best-effort
+      }
+    }
   }
 }
 
@@ -212,11 +261,7 @@ function fileAge(file: string): number {
  *  that promised to watch is gone and nobody is polling. Anything that
  *  isn't a fresh, well-formed marker (abandoned tmp write, malformed
  *  JSON, TTL-expired, retire residue) is pruned on the way through. */
-export function listWatches(dir: string): ListedWatch[] {
-  const wd = watchesDir(dir)
-  if (!wd) {
-    return []
-  }
+function listWatchesIn(wd: string): ListedWatch[] {
   let files: string[]
   try {
     files = readdirSync(wd)
@@ -242,5 +287,22 @@ export function listWatches(dir: string): ListedWatch[] {
     out.push({ watch: w, file, alive: pidAlive(w.pid, w.pidStart) })
   }
   return out
+}
+
+/** All recorded watches with pid liveness — a dead pid means the session
+ *  that promised to watch is gone and nobody is polling. Anything that
+ *  isn't a fresh, well-formed marker (abandoned tmp write, malformed
+ *  JSON, TTL-expired, retire residue) is pruned on the way through. A
+ *  dead marker superseded by a live watcher that covers its merge mode
+ *  is not reported — the replacement already keeps the promise, so
+ *  flagging the old one would be a false stale flag. */
+export function listWatches(dir: string): ListedWatch[] {
+  const wd = watchesDir(dir)
+  if (!wd) {
+    return []
+  }
+  const out = listWatchesIn(wd)
+  const live = out.filter((l) => l.alive)
+  return out.filter((l) => l.alive || !coveredBy(live, l.watch))
 }
 
