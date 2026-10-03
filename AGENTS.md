@@ -58,3 +58,30 @@ Developing bro itself: see CONTRIBUTING.md.
 - **Never leave uncommitted changes** — every unit of work lands on a
   branch, is committed, pushed, and opened as a draft PR. A dirty tree
   at session end is lost work.
+
+## Convoy fan-out — detach + pins
+
+Running several molecules at once means spawning detached workers, never
+serializing them inside one session. The pattern has two halves: the
+spawn is **detached**, its handles are **pinned** somewhere durable.
+
+- **Spawn detached.** `bro agents up <mol-step>` is the codified path —
+  the native backend is a `sh -c` spawn in its own process group,
+  parent-unref'd (nohup-equivalent). The hand-rolled form, per molecule:
+  `nohup devin -p --export /tmp/<mol>.json -- "<prompt>" >> /tmp/<mol>.log 2>&1 &`
+  (systemd-run/tmux also count). An exec-background shell dies with the
+  turn — a worker spawned that way is already unwatched.
+- **Pin the handles at spawn.** pid, log path, claimed step. `bro agents`
+  writes them to `<git-common>/bro/agents.json` plus
+  `<agentId>.{prompt.md,log,exit}` and pins the claim into the shared
+  beads store — a hand-rolled spawn must record pid + log itself (a file,
+  a bead comment). An unpinned worker is unfindable next session.
+- **Monitor by point checks, never by waiting.** `tail` the log,
+  `kill -0 <pid>` / `pgrep -f`, `bro agents status`, `bro fleet`, a fresh
+  `bro convoy next` — between turns, not in a blocking loop. A synchronous
+  `get_output` or `sleep` wait on detached work blocks the conversation
+  and buys nothing (retro bro-lmdj).
+- **Completion is detected, not awaited.** `.exit` file,
+  `bro agents status` → `exited`, a `pgrep` that comes back empty — or a
+  detached watcher shell that polls and `bro notify`s. Never promise
+  "I'll report when it lands" from a foreground wait.
