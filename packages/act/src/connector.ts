@@ -82,8 +82,10 @@ function mergeSlotLine(): string | null {
 
 /** Pending-watch markers left by `bro act wait`: a dead pid means the
  *  session that promised to watch died mid-poll — flag the stale promise
- *  and retire the marker so it reports exactly once. A live pid is
- *  parallel work — passive context only. */
+ *  and retire the marker to claim the report. The claim says nothing
+ *  about delivery, so a retired marker keeps re-flagging on later
+ *  session starts until it ages out. A live pid is parallel work —
+ *  passive context only. */
 function watchLines(dir: string): string[] {
   try {
     const out: string[] = []

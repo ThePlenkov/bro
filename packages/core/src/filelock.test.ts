@@ -48,9 +48,23 @@ describe('filelock', () => {
     const { dir, done } = tmp()
     try {
       const lock = join(dir, 'x.lock')
-      writeFileSync(lock, `${process.pid}:held`) // held — the wait would engage
-      assert.throws(() => acquireFileLock(lock, { waitMs: NaN }), RangeError)
-      assert.throws(() => acquireFileLock(lock, { waitMs: -1 }), RangeError)
+      // run in a child — a validation regression sends the NaN deadline
+      // into an unbounded synchronous Atomics.wait the runner cannot
+      // interrupt, so the spawn timeout is the guardrail
+      const script = join(dir, 'wait.ts')
+      writeFileSync(
+        script,
+        `import assert from 'node:assert/strict'\n` +
+          `import { writeFileSync } from 'node:fs'\n` +
+          `import { acquireFileLock } from ${JSON.stringify(join(here, 'filelock.ts'))}\n` +
+          `const lock = ${JSON.stringify(lock)}\n` +
+          `writeFileSync(lock, process.pid + ':held') // held — the wait would engage\n` +
+          `assert.throws(() => acquireFileLock(lock, { waitMs: NaN }), RangeError)\n` +
+          `assert.throws(() => acquireFileLock(lock, { waitMs: Infinity }), RangeError)\n` +
+          `assert.throws(() => acquireFileLock(lock, { waitMs: -1 }), RangeError)\n`
+      )
+      const child = spawnSync('npx', ['tsx', script], { encoding: 'utf8', timeout: 30_000 })
+      assert.equal(child.status, 0, child.error ? String(child.error) : child.stderr)
     } finally {
       done()
     }

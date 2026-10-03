@@ -250,7 +250,9 @@ function listWatchesIn(wd: string): ListedWatch[] {
       pruneFile(file)
       continue
     }
-    out.push({ watch: w, file, alive: pidAlive(w.pid, w.pidStart), reported: retired })
+    // a retired marker is stale by definition — pid reuse since the
+    // claim must not resurrect it into a live watch
+    out.push({ watch: w, file, alive: !retired && pidAlive(w.pid, w.pidStart), reported: retired })
   }
   return out
 }

@@ -201,8 +201,9 @@ export interface FileLockOptions {
  *  process.exit() inside the section can't strand the file. */
 export function acquireFileLock(lock: string, opts: FileLockOptions = {}): () => void {
   const { waitMs = LOCK_WAIT_MS, label = 'file lock' } = opts
-  // a NaN/negative deadline compares false forever — the wait would
-  // never time out. Reject it instead of hanging.
+  // a NaN/Infinity deadline compares false forever — the wait would
+  // never time out; a negative one is nonsense degrading to an immediate
+  // timeout. Reject both instead of misbehaving.
   if (!Number.isFinite(waitMs) || waitMs < 0) {
     throw new RangeError(`${label}: waitMs must be a finite non-negative number — got ${waitMs}`)
   }
