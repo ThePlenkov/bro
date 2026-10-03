@@ -77,14 +77,16 @@ knobs live under `agents.<backend>` (e.g. `agents.gascity.configDir`).
   spawns end with exactly one worker. A `tmp+rename` registry write
   makes each *write* atomic but not the read→decide→claim sequence, so
   it alone does not satisfy this contract. v1 anchors the section on an
-  O_EXCL lockfile at `<agents.json>.lock` (stale-broken past the bd-call
-  ceiling) that every backend's `spawn` wraps around dedup → claim →
-  backend start → registry patch — a per-repo hold, strictly stronger
-  than a per-step key. Where `beadsDir` offers a native atomic
-  claim-and-rebind keyed by molStep, that is equivalent only if it
-  prevents competing spawns from both patching the registry or starting
-  workers, and leaves the registry entry matching the sole started
-  worker.
+  O_EXCL lockfile at `<agents.json>.lock` (broken only after the holder
+  proves dead — an age-based break can steal the section mid-start — or
+  fenced by a lease renewed for the full section) that every backend's
+  `spawn` wraps around dedup → claim → backend start → registry patch —
+  a per-repo hold, strictly stronger than a per-step key. Where
+  `beadsDir` offers a native atomic claim-and-rebind keyed by molStep,
+  that is equivalent only if the claim is an exclusive reservation held
+  across dedup through worker start and registry patch — preventing
+  competing spawns from both patching the registry or starting workers,
+  and leaving the registry entry matching the sole started worker.
 
   `list()` returning `degraded` (backend unreachable) means `bro fleet`
   renders `unknown`, never `lost — respawn?` — a failed read must not
