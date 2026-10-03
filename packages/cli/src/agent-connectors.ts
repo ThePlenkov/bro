@@ -198,27 +198,35 @@ function probeAgentConnectors(
   }
   for (const match of matchers) {
     for (const c of agentRegistry) {
-      // probe first — only a matcher that claims the repo gets
-      // constructed; a throwing matcher or a claim that can't construct
-      // is a recorded failure, not a silent fallthrough
-      let claimed: boolean | undefined
-      try {
-        claimed = match(c)
-      } catch (err) {
-        probeFailures.set(c.name, err instanceof Error ? err.message : String(err))
-        continue
-      }
-      if (claimed !== true) {
-        continue
-      }
-      try {
-        return c.make(ctx, env)
-      } catch (err) {
-        probeFailures.set(c.name, err instanceof Error ? err.message : String(err))
+      const hit = probeOne(c, match, ctx, env, probeFailures)
+      if (hit !== undefined) {
+        return hit
       }
     }
   }
   return undefined
+}
+
+/** One connector's probe — the matcher's claim plus the construction it
+ *  entitles. A throwing matcher or a claim that can't construct is a
+ *  recorded failure, not a silent fallthrough; only a true claim that
+ *  constructs returns the connector. */
+function probeOne(
+  c: (typeof agentRegistry)[number],
+  match: (c: (typeof agentRegistry)[number]) => boolean | undefined,
+  ctx: ConnectorCtx,
+  env: AgentConnectorEnv,
+  probeFailures: Map<string, string>
+): AgentConnector | undefined {
+  try {
+    if (match(c) !== true) {
+      return undefined
+    }
+    return c.make(ctx, env)
+  } catch (err) {
+    probeFailures.set(c.name, err instanceof Error ? err.message : String(err))
+    return undefined
+  }
 }
 
 /** Registry-order fallback — no matcher claimed the repo, so the first
