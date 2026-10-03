@@ -85,15 +85,19 @@ function errText(err: unknown): string {
   }`
 }
 
-/** stderr patterns meaning "the id doesn't exist" — a lookup miss is
- *  `undefined` on the TaskStore contract, distinct from an operational
- *  failure (dead store, lock, timeout) which must stay a thrown error. */
-const BD_NOT_FOUND = /not found|no issues found/i
+/** bd's exact lookup-miss signals — `bd show <id>` on an absent row
+ *  prints `Issue <id> not found` on stderr and a
+ *  `no issues found matching the provided IDs` error payload on
+ *  stdout. Only these mark a miss — anything else containing "not
+ *  found" (a malformed payload, a dead store) must stay thrown. */
+const BD_NOT_FOUND = /Issue .+ not found|no issues found matching the provided IDs/i
 
 /** Classifier for a thrown bd error: true when the backend reported the
- *  requested id absent. */
+ *  requested id absent. Scans stderr *and* stdout — bd writes the
+ *  miss's JSON error object to stdout. */
 export function isBdNotFound(err: unknown): boolean {
-  return BD_NOT_FOUND.test(errText(err))
+  const out = (err as { stdout?: unknown }).stdout
+  return BD_NOT_FOUND.test(`${errText(err)}\n${typeof out === 'string' ? out : ''}`)
 }
 
 /** Classifier for errors thrown out of any bd call: contract drift vs
