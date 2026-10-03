@@ -1,6 +1,7 @@
 export type { ExitGate, PrActState, PrCheck } from './types.ts'
 export { fetchPrActState } from './state.ts'
 export { evaluateExitGate } from './exit-gate.ts'
+export { docsOnly, effectiveMaxRounds, isDocsPath } from './docs.ts'
 export { gatePending, waitForGate } from './wait.ts'
 export type { GateWaitResult, WaitOptions } from './wait.ts'
 export {
@@ -19,3 +20,5 @@ export {
 } from './merge-slot.ts'
 export type { MergeSlot } from './merge-slot.ts'
 export { actConnector } from './connector.ts'
+export { listWatches, watchBegin, watchEnd, watchRetire } from './pending-watch.ts'
+export type { ListedWatch, PendingWatch } from './pending-watch.ts'

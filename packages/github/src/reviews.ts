@@ -415,6 +415,38 @@ function labels(t: PrTarget): string[] {
   return (viewed.labels ?? []).map((l) => l.name)
 }
 
+/** Paths the PR's diff touches — one entry per file, paginated like the
+ *  reviews fetch. */
+function prFiles(t: PrTarget): string[] {
+  const files: string[] = []
+  for (let page = 1; ; page += 1) {
+    // the endpoint truncates at 3,000 files — a 30th full page means the
+    // list is silently incomplete, so throw: callers must treat an
+    // unknown file scope as "not docs-only", not guess from a prefix
+    if (page > 30) {
+      throw new Error(`prFiles: ${prLink(t.repo, t.pr)} exceeds the 3,000-file API limit`)
+    }
+    const rows = ghJson<Array<{ filename?: string; previous_filename?: string }>>([
+      'api',
+      `repos/${t.repo}/pulls/${t.pr}/files?per_page=100&page=${page}`,
+    ])
+    for (const f of rows ?? []) {
+      // a rename reports BOTH paths — a code→docs rename still counts as
+      // touching code
+      if (f.filename) {
+        files.push(f.filename)
+      }
+      if (f.previous_filename) {
+        files.push(f.previous_filename)
+      }
+    }
+    if ((rows?.length ?? 0) < 100) {
+      break
+    }
+  }
+  return files
+}
+
 function prUpdatedAt(t: PrTarget): string | null {
   const viewed = ghJson<{ updatedAt?: string }>([
     'pr',
@@ -710,6 +742,7 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
     checks,
     checkAnnotations,
     reviewedShas,
+    prFiles,
     reviewThreads,
     labels,
     prUpdatedAt,

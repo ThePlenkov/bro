@@ -103,6 +103,8 @@ async function cmdStatus(argv: string[]): Promise<void> {
   const state = await fetchPrActState(rev, t, {
     ignoreChecks: act.ignoreChecks,
     maxRounds: act.maxRounds,
+    docsPaths: act.docsPaths,
+    docsMaxRounds: act.docsMaxRounds,
   })
   const gate = evaluateExitGate(state)
 
@@ -127,7 +129,7 @@ function printStatus(state: PrActState, gate: ExitGate): void {
       `reviewers_pending=${gate.reviewers_pending} ` +
       `reviewers_failing=${gate.reviewers_failing} ` +
       `sast_pending=${gate.sast_pending} sast_unknown=${gate.sast_unknown} ` +
-      `fix_rounds=${gate.fix_rounds}`
+      `fix_rounds=${gate.fix_rounds} docs_only=${gate.docs_only}`
   )
   console.log(`exit_gate=${gate.ok ? 'OK' : 'BLOCKED'}`)
   for (const b of gate.blockers) {
@@ -157,12 +159,23 @@ async function cmdWait(argv: string[]): Promise<void> {
       const state = await fetchPrActState(rev, t, {
         ignoreChecks: act.ignoreChecks,
         maxRounds: act.maxRounds,
+        docsPaths: act.docsPaths,
+        docsMaxRounds: act.docsMaxRounds,
       })
       return { state, gate: evaluateExitGate(state) }
     },
     {
       intervalMs: interval * 1000,
       timeoutMs: timeout * 60_000,
+      // a session-bound watcher that dies with the turn leaves a marker —
+      // the session-start hook flags the stale promise (bro-97lk)
+      watch: {
+        dir: process.cwd(),
+        pr: t.pr,
+        link: rev.prLink(t.repo, t.pr),
+        merge: argv.includes('--merge'),
+        timeoutMin: timeout,
+      },
       onPoll: (s, g) =>
         console.error(
           `act wait ${rev.prLink(t.repo, s.pr)}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
@@ -293,6 +306,8 @@ async function cmdMerge(argv: string[]): Promise<void> {
     const state = await fetchPrActState(rev, t, {
       ignoreChecks: act.ignoreChecks,
       maxRounds: act.maxRounds,
+      docsPaths: act.docsPaths,
+      docsMaxRounds: act.docsMaxRounds,
     })
 
     // a closed/merged PR can pass the gate (threads resolved, checks

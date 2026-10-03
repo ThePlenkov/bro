@@ -23,6 +23,7 @@ const open = (over: Partial<PrActState> = {}): PrActState => ({
   sastUnknown: 0,
   fixRounds: 0,
   maxRounds: 3,
+  docsOnly: false,
   ...over,
 })
 

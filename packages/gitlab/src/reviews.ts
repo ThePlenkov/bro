@@ -573,6 +573,17 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
       return new Map<string, number | null>()
     },
     reviewedShas,
+    prFiles(t) {
+      // the MR's current diff list — a rename reports BOTH paths so a
+      // code→docs rename still counts as touching code
+      const files = glabPaged<{ new_path?: string; old_path?: string }>(
+        api(t.repo, `merge_requests/${t.pr}/diffs`),
+        gopts()
+      )
+      return files.flatMap((f) =>
+        [...new Set([f.new_path, f.old_path].filter((p): p is string => typeof p === 'string' && p !== ''))]
+      )
+    },
     reviewThreads,
     labels(t) {
       return getMr(t).labels ?? []

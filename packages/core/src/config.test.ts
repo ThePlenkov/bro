@@ -137,6 +137,23 @@ describe('loadConfig root shape', () => {
       )
     }
   })
+
+  test('act.docsPaths keeps only non-blank strings', () => {
+    const cfg = load({ act: { docsPaths: ['*.md', 42, '', '  ', 'specs/'] } })
+    assert.deepEqual(cfg.act.docsPaths, ['*.md', 'specs/'])
+    assert.deepEqual(load({ act: { docsPaths: 'x' } }).act.docsPaths, DEFAULT_CONFIG.act.docsPaths)
+  })
+
+  test('act.docsMaxRounds keeps only non-negative integers', () => {
+    assert.equal(load({ act: { docsMaxRounds: 1 } }).act.docsMaxRounds, 1)
+    assert.equal(load({ act: { docsMaxRounds: 0 } }).act.docsMaxRounds, 0)
+    for (const bad of [-1, 1.5, '2', true, null]) {
+      assert.equal(
+        load({ act: { docsMaxRounds: bad } }).act.docsMaxRounds,
+        DEFAULT_CONFIG.act.docsMaxRounds
+      )
+    }
+  })
 })
 
 function loadTs(

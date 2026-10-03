@@ -81,10 +81,14 @@ export const syncSection: ConfigSection<{
 export const actSection: ConfigSection<{
   ignoreChecks: string[]
   maxRounds: number
+  docsPaths: string[]
+  docsMaxRounds: number
 }> = (raw) => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     ignoreChecks?: unknown
     maxRounds?: unknown
+    docsPaths?: unknown
+    docsMaxRounds?: unknown
   }
   return {
     // only a list of substrings may reach the check filter — anything
@@ -101,6 +105,18 @@ export const actSection: ConfigSection<{
       obj.maxRounds >= 0
         ? obj.maxRounds
         : DEFAULT_CONFIG.act.maxRounds,
+    docsPaths: Array.isArray(obj.docsPaths)
+      ? obj.docsPaths.filter(
+          // an empty pattern would match EVERY path
+          (v): v is string => typeof v === 'string' && v.trim() !== ''
+        )
+      : [...DEFAULT_CONFIG.act.docsPaths],
+    docsMaxRounds:
+      typeof obj.docsMaxRounds === 'number' &&
+      Number.isInteger(obj.docsMaxRounds) &&
+      obj.docsMaxRounds >= 0
+        ? obj.docsMaxRounds
+        : DEFAULT_CONFIG.act.docsMaxRounds,
   }
 }
 
@@ -240,6 +256,15 @@ export interface BroConfig {
     /** Inline fix-round cap — past it, remaining threads must defer to
      *  debt beads instead of another push. 0 disables the cap. */
     maxRounds: number
+    /** Path patterns classifying a file as docs — a pattern without a
+     *  slash matches the basename glob (`*.md`), one ending in `/`
+     *  matches the dir anywhere (`docs/`), anything else is a full-path
+     *  glob. A PR whose changed files all match is "docs-only". */
+    docsPaths: string[]
+    /** Round cap applied instead of maxRounds (whichever is tighter)
+     *  on a docs-only PR — doc threads churn per push, so inline fixing
+     *  converges slower for less value. 0 disables the docs-specific cap. */
+    docsMaxRounds: number
   }
   /** Facade → connector precedence, e.g. { reviews: 'gitlab' }. */
   connectors: Record<string, string>
@@ -263,7 +288,13 @@ export const DEFAULT_CONFIG: BroConfig = {
   personality: 'terse',
   debt: { dir: '.agents/review-debt', sources: ['review-threads'], stale_days: 14 },
   sync: { ref: 'refs/bro/data', remote: 'origin', beads: true },
-  act: { ignoreChecks: [], maxRounds: 3 },
+  act: {
+    ignoreChecks: [],
+    maxRounds: 3,
+    // no '*.txt' — requirements.txt and test fixtures are not docs
+    docsPaths: ['*.md', '*.mdx', '*.rst', 'docs/'],
+    docsMaxRounds: 2,
+  },
   connectors: {},
   sdd: { mode: 'off', dir: 'specs' },
   plugins: [],

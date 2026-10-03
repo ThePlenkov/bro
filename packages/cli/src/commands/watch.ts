@@ -210,6 +210,8 @@ async function gateFleetPrs(
         const state = await fetchPrActState(rev, { repo, pr }, {
           ignoreChecks: act.ignoreChecks,
           maxRounds: act.maxRounds,
+          docsPaths: act.docsPaths,
+          docsMaxRounds: act.docsMaxRounds,
         })
         const gate = evaluateExitGate(state)
         return { pr, link, ok: gate.ok, blockers: gate.blockers }

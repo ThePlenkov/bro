@@ -161,6 +161,11 @@ export interface ReviewFacade {
     opts?: { concurrency?: number }
   ): Promise<Map<number, string | null>>
 
+  /** Paths this PR touches — the diff's file list. Optional — a host
+   *  without the capability leaves callers treating the PR as unknown
+   *  scope (never "docs-only"). */
+  prFiles?(t: PrTarget): string[]
+
   checks(t: PrTarget, requiredOnly?: boolean): CheckInfo[]
   /** Check name → failure-annotation count at a head sha. `null` means
    *  the run exists but its annotations could not be fetched — a caller

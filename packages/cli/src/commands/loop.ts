@@ -495,7 +495,12 @@ async function driveGate(
     const state = await fetchPrActState(
       ctx.rev,
       { repo: ctx.repo, pr },
-      { ignoreChecks: act.ignoreChecks, maxRounds: act.maxRounds }
+      {
+        ignoreChecks: act.ignoreChecks,
+        maxRounds: act.maxRounds,
+        docsPaths: act.docsPaths,
+        docsMaxRounds: act.docsMaxRounds,
+      }
     )
     return { state, gate: evaluateExitGate(state) }
   }
@@ -539,7 +544,12 @@ async function driveGate(
     if (res.gate.ok) {
       return finalizeMerge(ctx, bead, item, pr)
     }
-    if (res.state.openThreads > 0 && round < ctx.cfg.fixRounds) {
+    // the gate's effective cap (docs-tightened on docs-only PRs) is the
+    // respawn limit's peer — once it mandates debt-defer, another inline
+    // fix round is exactly what the cap exists to prevent
+    const capHit =
+      res.state.maxRounds > 0 && res.state.fixRounds > res.state.maxRounds
+    if (res.state.openThreads > 0 && !capHit && round < ctx.cfg.fixRounds) {
       await runFixRound(ctx, bead, item, pr, round + 1)
       continue
     }

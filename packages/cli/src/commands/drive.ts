@@ -483,7 +483,12 @@ interface Ctx {
   mainRoot: string
   rev: ReviewFacade
   repo: string
-  act: { ignoreChecks: string[]; maxRounds: number }
+  act: {
+    ignoreChecks: string[]
+    maxRounds: number
+    docsPaths: string[]
+    docsMaxRounds: number
+  }
   merge: boolean
   json: boolean
   connector?: string
@@ -655,7 +660,12 @@ async function mergeAndRetire(
   const after = await fetchPrActState(
     ctx.rev,
     { repo: ctx.repo, pr },
-    { ignoreChecks: ctx.act.ignoreChecks, maxRounds: ctx.act.maxRounds }
+    {
+        ignoreChecks: ctx.act.ignoreChecks,
+        maxRounds: ctx.act.maxRounds,
+        docsPaths: ctx.act.docsPaths,
+        docsMaxRounds: ctx.act.docsMaxRounds,
+      }
   ).catch(() => undefined)
   if (after?.state !== 'MERGED') {
     return {
@@ -679,7 +689,12 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     state = await fetchPrActState(
       ctx.rev,
       { repo: ctx.repo, pr },
-      { ignoreChecks: ctx.act.ignoreChecks, maxRounds: ctx.act.maxRounds }
+      {
+        ignoreChecks: ctx.act.ignoreChecks,
+        maxRounds: ctx.act.maxRounds,
+        docsPaths: ctx.act.docsPaths,
+        docsMaxRounds: ctx.act.docsMaxRounds,
+      }
     )
   } catch (err) {
     return { pr, link, verdict: 'probe-failed', detail: errText(err) }
@@ -770,7 +785,12 @@ async function sweepSettledFixers(ctx: Ctx, prs: Set<number>): Promise<void> {
       const st = await fetchPrActState(
         ctx.rev,
         { repo: ctx.repo, pr },
-        { ignoreChecks: ctx.act.ignoreChecks, maxRounds: ctx.act.maxRounds }
+        {
+        ignoreChecks: ctx.act.ignoreChecks,
+        maxRounds: ctx.act.maxRounds,
+        docsPaths: ctx.act.docsPaths,
+        docsMaxRounds: ctx.act.docsMaxRounds,
+      }
       )
       if (st.state !== 'OPEN') {
         closeFixer(ctx.store, row.id, `${link} ${st.state.toLowerCase()} — fixer done`)

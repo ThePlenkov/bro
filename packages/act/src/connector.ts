@@ -8,6 +8,7 @@
 import { loadConfig, reviewHost, type Connector, type PrTarget } from '@broject/core'
 import { evaluateExitGate } from './exit-gate.ts'
 import { mergeSlotHolder } from './merge-slot.ts'
+import { listWatches, watchRetire } from './pending-watch.ts'
 import { fetchPrActState } from './state.ts'
 
 /** One-line gate summary for a PR — null when no PR/host resolves. */
@@ -26,6 +27,8 @@ async function gateLine(dir: string, target?: PrTarget): Promise<string | null> 
     const state = await fetchPrActState(rev, t, {
       ignoreChecks: cfg.act.ignoreChecks,
       maxRounds: cfg.act.maxRounds,
+      docsPaths: cfg.act.docsPaths,
+      docsMaxRounds: cfg.act.docsMaxRounds,
     })
     const gate = evaluateExitGate(state)
     const link = rev.prLink(t.repo, state.pr)
@@ -49,7 +52,12 @@ async function blockerLine(dir: string): Promise<string | null> {
     const state = await fetchPrActState(
       rev,
       { repo: rev.resolveRepo([]), pr: cur.pr },
-      { ignoreChecks: cfg.act.ignoreChecks, maxRounds: cfg.act.maxRounds }
+      {
+        ignoreChecks: cfg.act.ignoreChecks,
+        maxRounds: cfg.act.maxRounds,
+        docsPaths: cfg.act.docsPaths,
+        docsMaxRounds: cfg.act.docsMaxRounds,
+      }
     )
     // The same gate `bro act status` enforces: open threads, pending/failed
     // CI and AI reviewers, SAST findings, unknown mergeability, BEHIND.
@@ -72,11 +80,45 @@ function mergeSlotLine(): string | null {
   }
 }
 
+/** Pending-watch markers left by `bro act wait`: a dead pid means the
+ *  session that promised to watch died mid-poll — flag the stale promise
+ *  and retire the marker so it reports exactly once. A live pid is
+ *  parallel work — passive context only. */
+function watchLines(dir: string): string[] {
+  try {
+    const out: string[] = []
+    for (const { watch, file, alive } of listWatches(dir)) {
+      if (alive) {
+        out.push(
+          `act watch active on ${watch.link} (pid ${watch.pid}) — another process is polling`
+        )
+        continue
+      }
+      // the retire is an atomic claim — a racing session start already
+      // reporting this stale promise loses the rename and skips it
+      if (!watchRetire(file)) {
+        continue
+      }
+      const mode = watch.merge ? ' (was set to merge on green)' : ''
+      out.push(
+        `stale act watch on ${watch.link}${mode} — the watching session died; ` +
+          `check \`bro act status --pr ${watch.pr}\``
+      )
+    }
+    return out
+  } catch {
+    // detection is passive — a probe failure must not break rehydrate
+    return []
+  }
+}
+
 export const actConnector: Connector = {
   name: 'act',
   hooks: () => ({
     async sessionStart(ctx) {
-      const out: string[] = []
+      // watch markers first — local fs only, so a slow gate probe that
+      // blows the hook budget can't strand a stale-promise report
+      const out: string[] = watchLines(ctx.dir)
       const gate = await gateLine(ctx.dir)
       if (gate) {
         out.push(gate)
@@ -107,8 +149,9 @@ export const actConnector: Connector = {
           block:
             `${line} — ` +
             'list with `bro act threads` — fix inline or defer to a debt bead ' +
-            '(reply + resolve); when fix_rounds exceeds act.maxRounds only ' +
-            'defer counts; recheck `bro act status`',
+            '(reply + resolve); when fix_rounds exceeds the round cap ' +
+            '(act.maxRounds — tighter on docs-only PRs) only defer ' +
+            'counts; recheck `bro act status`',
           passive: `${line} (current branch — this session did not touch it)`,
         },
       ]

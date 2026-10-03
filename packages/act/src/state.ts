@@ -3,7 +3,9 @@
  * aggregated into the PrActState the exit gate reads. Domain rules only;
  * every host call goes through the injected ReviewFacade.
  */
-import type { PrTarget, ReviewFacade } from '@broject/core'
+import { DEFAULT_CONFIG } from '@broject/core'
+import type { CheckInfo, PrTarget, ReviewFacade } from '@broject/core'
+import { docsOnlyPr, effectiveMaxRounds } from './docs.ts'
 import type { PrActState } from './types.ts'
 
 // Word boundaries: a check merely *containing* "kilo"/"gemini" (e.g.
@@ -33,11 +35,52 @@ function isSast(name: string): boolean {
   return SAST_NAMES.some((s) => lower.includes(s))
 }
 
+/** Failure-level SAST annotations → gate counts. A `null` annotation
+ *  value means the run's annotations could not be fetched — unknown,
+ *  and only counted for required checks (an optional SAST must not hold
+ *  the gate; with no required checks configured at all, a flaky
+ *  annotations endpoint stays infra noise). */
+function sastCounts(
+  rev: ReviewFacade,
+  target: PrTarget,
+  checks: CheckInfo[],
+  requiredNames: Set<string>,
+  headSha: string
+): { pending: number; unknown: number } {
+  const out = { pending: 0, unknown: 0 }
+  const sastChecks = checks.filter(
+    (c) => isSast(c.name) && c.state !== 'SKIPPED' && c.state !== 'NEUTRAL'
+  )
+  if (sastChecks.length === 0) {
+    return out
+  }
+  const annotations = rev.checkAnnotations(target.repo, headSha)
+  for (const check of sastChecks) {
+    if (!annotations.has(check.name)) {
+      continue
+    }
+    const count = annotations.get(check.name)!
+    if (count === null) {
+      if (requiredNames.has(check.name)) {
+        out.unknown += 1
+      }
+    } else {
+      out.pending += count
+    }
+  }
+  return out
+}
+
 /** Full open-PR state for the act loop — threads + checks + mergeability. */
 export async function fetchPrActState(
   rev: ReviewFacade,
   target: PrTarget,
-  opts?: { ignoreChecks?: string[]; maxRounds?: number }
+  opts?: {
+    ignoreChecks?: string[]
+    maxRounds?: number
+    docsPaths?: string[]
+    docsMaxRounds?: number
+  }
 ): Promise<PrActState> {
   const meta = rev.prMeta(target)
   const threads = await rev.reviewThreads(target)
@@ -81,34 +124,9 @@ export async function fetchPrActState(
 
   // A SAST scan can report "success" while still carrying failure-level
   // annotations — inspect every non-skipped SAST check, not just pending.
-  const sastChecks = checks.filter(
-    (c) => isSast(c.name) && c.state !== 'SKIPPED' && c.state !== 'NEUTRAL'
-  )
-  let sastPending = 0
-  let sastUnknown = 0
-  if (sastChecks.length > 0) {
-    // null = the run exists but its annotations could not be fetched.
-    // Absent key = a commit-status check with no annotations endpoint —
-    // nothing is unknown about it. A fetch failure only counts as
-    // unknown for required checks: an optional SAST must not hold the
-    // gate — and with no required checks configured at all, nothing is
-    // marked required, so a flaky annotations endpoint stays infra noise.
-    const annotations = rev.checkAnnotations(target.repo, meta.headSha)
-    for (const check of sastChecks) {
-      const gates = requiredNames.has(check.name)
-      if (!annotations.has(check.name)) {
-        continue
-      }
-      const count = annotations.get(check.name)!
-      if (count === null) {
-        if (gates) {
-          sastUnknown += 1
-        }
-      } else {
-        sastPending += count
-      }
-    }
-  }
+  const sast = sastCounts(rev, target, checks, requiredNames, meta.headSha)
+  const sastPending = sast.pending
+  const sastUnknown = sast.unknown
 
   // A "fix round" is a reviewed push after the first — counting distinct
   // reviewed head SHAs, not commits: one push can carry many commits, and
@@ -122,6 +140,18 @@ export async function fetchPrActState(
   } catch {
     // best-effort — a flaky reviews endpoint must not break the gate
   }
+
+  // A docs-only PR churns reviewer threads on every push — the tighter
+  // docsMaxRounds cap moves the tail to debt sooner. The file list is
+  // only probed while threads are open: that's the cap's sole consumer,
+  // and it keeps a per-poll host call off a quiet PR.
+  const isDocsOnly =
+    threads.some((t) => !t.resolved) && docsOnlyPr(rev, target, opts)
+  const maxRounds = effectiveMaxRounds(
+    opts?.maxRounds ?? 0,
+    isDocsOnly,
+    opts?.docsMaxRounds ?? DEFAULT_CONFIG.act.docsMaxRounds
+  )
 
   return {
     pr: target.pr,
@@ -141,6 +171,7 @@ export async function fetchPrActState(
     sastPending,
     sastUnknown,
     fixRounds,
-    maxRounds: opts?.maxRounds ?? 0,
+    maxRounds,
+    docsOnly: isDocsOnly,
   }
 }
