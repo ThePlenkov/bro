@@ -1,5 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import {
   chmodSync,
   existsSync,
@@ -206,6 +207,17 @@ function cleanup(fx: Fixture): void {
   // registry still points at before the tmpdir (and it) goes away
   try {
     for (const e of Object.values(readAgentRegistry(fx.main))) {
+      // a tmux pane is the server's child, not a detached group leader —
+      // the recorded session id is its reliable termination handle, and
+      // it covers an entry whose pane pid never reached the registry
+      if (typeof e.session === 'string') {
+        const socket = fx.env.agents['tmux']?.socket
+        spawnSync(
+          'tmux',
+          [...(typeof socket === 'string' ? ['-L', socket] : []), 'kill-session', '-t', e.session],
+          { stdio: 'ignore' }
+        )
+      }
       // never signal our own pid/pgid — a group-leader test process
       // would take the whole runner down
       if (typeof e.pid === 'number' && e.pid > 0 && e.pid !== process.pid && e.pid !== process.ppid) {
@@ -327,6 +339,20 @@ function connectorContract(b: BackendCase): void {
     } finally {
       cleanup(f)
     }
+  })
+
+  test('a test failing before stop still reaps the spawned agent', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    let pid: number | undefined
+    try {
+      const info = await conn(f).spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+      pid = info.pid
+      assert.ok(pid !== undefined && pidAlive(pid))
+    } finally {
+      // the assertion-failure path — cleanup runs with no stop() first
+      cleanup(f)
+    }
+    await until(() => !pidAlive(pid!))
   })
 
   test('a live agent on the step refuses a second spawn', async () => {
