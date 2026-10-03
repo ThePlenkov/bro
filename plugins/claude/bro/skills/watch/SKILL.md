@@ -39,7 +39,7 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd` initialized.
   per-process: a scheduled `--once --notify` run always emits.
 - **Watch is read-only.** It never claims steps, never mutates beads,
   never respawns agents — a `lost — respawn?` row is the decision
-  surface; respawning is a manual act (`bro spawn`).
+  surface; respawning is a manual act (`bro agents up <step>`).
 - **Degraded is not dead.** A backend whose `list()` failed renders its
   rows `unknown`, never `lost` — don't respawn on a failed read.
 - **Report progress in words, not IDs.** When relaying snapshot state
