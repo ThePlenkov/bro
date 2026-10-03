@@ -30,8 +30,13 @@ export function procStat(
  *    different starttime is a different process.
  *
  *  Unverifiable identity (no /proc, unreadable stat) stays fail-open:
- *  alive, never a false stale report. */
+ *  alive, never a false stale report. A non-positive or non-integer
+ *  pid is dead input, not unverifiable: kill(0) and kill(-pid) answer
+ *  for process groups, so the signal cannot attest that pid. */
 export function pidAlive(pid: number, pidStart?: string): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false
+  }
   let signaled = false
   try {
     process.kill(pid, 0)

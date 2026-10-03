@@ -248,10 +248,11 @@ function writeWorkMarker(dir: string, agentId: string, molStep: string, pid?: nu
     // marker reads as residue immediately, not after the freshness
     // window — mtime-only markers from a killed session used to occupy
     // a worktree for a day (bro-b87b)
-    const tag =
-      typeof pid === 'number' && pid > 0
-        ? ` ${pid} ${procStat(pid)?.start ?? ''}`
-        : ''
+    const start =
+      typeof pid === 'number' && pid > 0 ? procStat(pid)?.start : undefined
+    // no starttime = no reuse identity — better an ownerless marker on
+    // the mtime window than a tag a recycled pid can impersonate
+    const tag = start ? ` ${pid} ${start}` : ''
     writeFileSync(marker, `${Date.now()}${tag}\n${molStep}\n`)
   } catch {
     // marker is advisory — never break a spawn over detection cosmetics

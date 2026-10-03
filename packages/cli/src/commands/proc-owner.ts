@@ -113,13 +113,17 @@ let cachedOwner: { pid: number; start: string } | null | undefined
  *  A `bro` invocation runs as a tool-call child (bro → shell → agent),
  *  so the recorded pid must be the ancestor's, not our own: ours dies
  *  when the CLI exits. Null when no ancestor is agent-shaped (human
- *  shell, CI, no /proc) — the caller's marker then stays ownerless and
- *  readers keep the mtime fallback. Cached per process: hooks arm
+ *  shell, CI, no /proc, or an ancestor whose start won't read) — the
+ *  caller's marker then stays ownerless and readers keep the mtime
+ *  fallback. A start-less owner is strictly worse than none: it keeps
+ *  a marker live past the window under a reused pid while still
+ *  suppressing the freshness check. Cached per process: hooks arm
  *  markers on every tool call and the owner never changes. */
 export function agentOwner(): { pid: number; start: string } | null {
   if (cachedOwner === undefined) {
     const pid = existsSyncProc() ? procAgentPid(`/proc/${process.ppid}`) : null
-    cachedOwner = pid === null ? null : { pid, start: procStat(pid)?.start ?? '' }
+    const start = pid === null ? '' : (procStat(pid)?.start ?? '')
+    cachedOwner = pid === null || start === '' ? null : { pid, start }
   }
   return cachedOwner
 }
