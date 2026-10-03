@@ -1,6 +1,6 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import {
   existsSync,
   mkdtempSync,
@@ -100,6 +100,75 @@ describe('pending-watch markers', () => {
     const listed = listWatches(dir)
     assert.equal(listed.length, 1)
     assert.equal(listed[0]!.alive, false)
+  })
+
+  test('an unreaped zombie reports alive:false — kill(0) lies', async (t) => {
+    if (!existsSync('/proc')) {
+      t.skip('zombie detection needs /proc')
+      return
+    }
+    try {
+      execFileSync('python3', ['--version'], { stdio: 'pipe' })
+    } catch {
+      t.skip('python3 unavailable for the zombie fixture')
+      return
+    }
+    // a real zombie: python forks a child that exits immediately while
+    // the parent sleeps without wait() — the child stays 'Z' until the
+    // parent dies
+    const py = spawn('python3', [
+      '-c',
+      'import os,time\n' +
+        'pid = os.fork()\n' +
+        'if pid:\n' +
+        '    print(pid, flush=True)\n' +
+        '    time.sleep(60)\n' +
+        'else:\n' +
+        '    os._exit(0)\n',
+    ])
+    t.after(() => py.kill('SIGKILL'))
+    const zombiePid = await new Promise<number>((resolvePromise, reject) => {
+      py.stdout.once('data', (d: Buffer) => {
+        resolvePromise(Number(d.toString().trim()))
+      })
+      py.once('error', reject)
+      py.once('exit', () => reject(new Error('python3 exited early')))
+    })
+    if (!zombiePid) {
+      t.skip('zombie fixture did not produce a child pid')
+      return
+    }
+    // give the forked child a beat to exit and zombify
+    await new Promise((r) => setTimeout(r, 300))
+    const dir = repo()
+    const path = watchBegin(dir, base)
+    assert.ok(path)
+    const w = JSON.parse(readFileSync(path!, 'utf8')) as PendingWatch
+    w.pid = zombiePid
+    delete w.pidStart // identity can't match a different process anyway
+    writeFileSync(path!, JSON.stringify(w))
+    const listed = listWatches(dir)
+    assert.equal(listed.length, 1)
+    assert.equal(listed[0]!.alive, false)
+  })
+
+  test('a dead marker superseded by a live same-PR watch is not reported', () => {
+    const dir = repo()
+    const live = watchBegin(dir, base)
+    assert.ok(live)
+    // a dead marker for the same PR — e.g. left by a crashed watcher the
+    // new wait replaced; reporting it would be a false stale flag
+    const stale = join(dir, '.git', 'bro', 'watches', '42-2000000000.json')
+    writeFileSync(
+      stale,
+      JSON.stringify({ ...base, pid: 2_000_000_000, startedAt: Date.now() })
+    )
+    const listed = listWatches(dir)
+    assert.equal(listed.length, 1)
+    assert.equal(listed[0]!.file, live)
+    // the superseded marker stays on disk for the watching process's own
+    // retire pass — it is hidden from reports, not deleted
+    assert.equal(existsSync(stale), true)
   })
 
   test('TTL-expired markers are pruned, not listed', () => {

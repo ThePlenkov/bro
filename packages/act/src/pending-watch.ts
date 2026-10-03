@@ -88,16 +88,24 @@ function procStat(pid: number): { state: string; start: string } | null {
 }
 
 function pidAlive(pid: number, pidStart?: string): boolean {
+  let signaled = false
   try {
     process.kill(pid, 0)
+    signaled = true
   } catch (e) {
-    return (e as NodeJS.ErrnoException).code === 'EPERM'
+    if ((e as NodeJS.ErrnoException).code !== 'EPERM') {
+      return false
+    }
   }
   const st = procStat(pid)
-  // a zombie answers kill(pid, 0) but nobody is polling — the watching
-  // session is gone for reporting purposes
+  // a zombie answers kill(pid, 0) — and survives an EPERM probe — but
+  // nobody is polling; the watching session is gone either way
   if (st?.state === 'Z') {
     return false
+  }
+  if (!signaled) {
+    // EPERM — a live process owned by another uid, not ours to verify
+    return true
   }
   // verify it is the same process the marker recorded; an unverifiable
   // identity stays fail-open (alive, not a stale promise)
@@ -144,8 +152,8 @@ export function watchBegin(
     )
     renameSync(tmp, path)
     // the new promise is durable — now retire dead-pid markers for this
-    // PR; listWatches also prunes TTL-expired residue on the way through
-    for (const { watch, file, alive } of listWatches(dir)) {
+    // PR; the pass also prunes TTL-expired residue on the way through
+    for (const { watch, file, alive } of listWatchesIn(wd)) {
       if (!alive && watch.pr === w.pr) {
         try {
           rmSync(file)
@@ -227,11 +235,7 @@ function fileAge(file: string): number {
  *  that promised to watch is gone and nobody is polling. Anything that
  *  isn't a fresh, well-formed marker (abandoned tmp write, malformed
  *  JSON, TTL-expired, retire residue) is pruned on the way through. */
-export function listWatches(dir: string): ListedWatch[] {
-  const wd = watchesDir(dir)
-  if (!wd) {
-    return []
-  }
+function listWatchesIn(wd: string): ListedWatch[] {
   let files: string[]
   try {
     files = readdirSync(wd)
@@ -257,5 +261,24 @@ export function listWatches(dir: string): ListedWatch[] {
     out.push({ watch: w, file, alive: pidAlive(w.pid, w.pidStart) })
   }
   return out
+}
+
+/** All recorded watches with pid liveness — a dead pid means the session
+ *  that promised to watch is gone and nobody is polling. Anything that
+ *  isn't a fresh, well-formed marker (abandoned tmp write, malformed
+ *  JSON, TTL-expired, retire residue) is pruned on the way through. A
+ *  dead marker for a PR that has a live watcher is superseded — the
+ *  replacement already keeps the promise, so reporting the old one
+ *  would be a false stale flag. */
+export function listWatches(dir: string): ListedWatch[] {
+  const wd = watchesDir(dir)
+  if (!wd) {
+    return []
+  }
+  const out = listWatchesIn(wd)
+  const livePrs = new Set(
+    out.filter((l) => l.alive).map((l) => l.watch.pr)
+  )
+  return out.filter((l) => l.alive || !livePrs.has(l.watch.pr))
 }
 
