@@ -243,7 +243,9 @@ function cmdCheck(dir: string, ids: string[], all: boolean): void {
           }
           return r ? [r] : []
         })
-      : store.list({ status: 'in_progress' }).concat(all ? store.list({ status: 'open' }) : [])
+      // limit 0 — a backend default cap must not silently drop rows
+      // from a coverage audit
+      : store.list({ status: 'in_progress', limit: 0 }).concat(all ? store.list({ status: 'open', limit: 0 }) : [])
   // an explicit id that doesn't resolve is a usage failure — partial
   // results would report silent success for a bead that doesn't exist
   if (unknown.length > 0) {
@@ -283,8 +285,9 @@ function cmdDrift(dir: string, ids: string[], opts: { all: boolean; json: boolea
           return r ? [r] : []
         })
       // closed beads need `all` — the filter's documented switch for
-      // including them; a backend may drop closed rows without it
-      : store.list(opts.all ? { all: true } : { status: 'closed', all: true })
+      // including them; a backend may drop closed rows without it.
+      // limit 0 — a backend default cap must not silently drop rows
+      : store.list(opts.all ? { all: true, limit: 0 } : { status: 'closed', all: true, limit: 0 })
   // an explicit id that doesn't resolve is a usage failure — partial
   // results would report silent success for a bead that doesn't exist
   if (unknown.length > 0) {
@@ -292,14 +295,24 @@ function cmdDrift(dir: string, ids: string[], opts: { all: boolean; json: boolea
     process.exit(2)
   }
   // the audit set is spec'd beads — spec|link states; exempt (chore /
-  // trivial / debt) and unspec'd beads never enter it, explicit ids too
+  // trivial / debt) and unspec'd beads never enter it. An explicit id
+  // always yields a row — dropping it would report a clean pass for an
+  // audit that never ran (driftRow answers 'no local spec file')
   const audited = rows.filter((r) => {
     const s = specState(r, spec)
-    return s === 'spec' || s === 'link'
+    return s === 'spec' || s === 'link' || ids.length > 0
   })
   const env = driftEnv(dir, opts.ref)
   const drifted = audited
-    .map((r) => driftRow(dir, r.id, spec, env, specLinkPath(dir, r.description)))
+    .map((r) => {
+      // a declared `spec:` that resolves to no local file is
+      // unverifiable on its own — the tree pick must not silently
+      // substitute a spec the bead never declared
+      const link = specLinkPath(dir, r.description)
+      return SPEC_LINK.test(r.description ?? '') && link === undefined
+        ? { id: r.id, state: 'unverifiable' as const, detail: 'no local spec file to date' }
+        : driftRow(dir, r.id, spec, env, link)
+    })
     .sort((a, b) => a.id.localeCompare(b.id))
   if (opts.json) {
     console.log(JSON.stringify(drifted))

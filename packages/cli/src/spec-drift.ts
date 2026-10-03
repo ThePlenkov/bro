@@ -13,7 +13,7 @@
  *    3. neither resolves → `no-scope`.
  *  The spec's own path is always excluded (`:(exclude)<spec-path>`) —
  *  a `scope: specs/**` cannot mask its own drift. */
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import {
   gitDriftRef,
@@ -26,6 +26,7 @@ import {
   type SpecNode,
   type SpecStore,
 } from '@broject/core'
+import { specScope } from './spec-connectors.ts'
 
 export type ScopeResult =
   | { state: 'scoped'; via: 'frontmatter' | 'commits'; pathspecs: string[] }
@@ -98,8 +99,13 @@ export function resolveScope(dir: string, ref: string, id: string, spec: SpecSto
   // the spec path is a filesystem path, not a user pathspec — literal
   // keeps a `specs/[id].md` name from globbing
   const exclude = specPath === undefined ? [] : [`:(exclude,literal)${specPath}`]
-  const explicit = spec.scope?.(id) ?? null
-  return explicit !== null && explicit.length > 0
+  // the audited file's own declared scope — the connector's id-keyed
+  // scope() can resolve a different same-id file than the one being
+  // audited (a spec: link wins the audit), which would compare the
+  // link's stamp against another spec's scope
+  const explicit =
+    specPath !== undefined ? specScope(join(dir, specPath)) : (spec.scope?.(id) ?? [])
+  return explicit.length > 0
     ? explicitScope(dir, ref, explicit, exclude)
     : commitScope(dir, ref, id, specPath, exclude)
 }
@@ -129,11 +135,26 @@ function explicitScope(dir: string, ref: string, entries: string[], exclude: str
   return { state: 'scoped', via: 'frontmatter', pathspecs: [...entries, ...exclude] }
 }
 
+/** `git log` path records are a per-(dir,ref) fact — the commit-scope
+ *  fallback's history scan is the run's most expensive call, so it is
+ *  shared across audited beads instead of repeating per row. */
+const logRecordsCache = new Map<string, ReturnType<typeof gitLogPathRecords>>()
+
+function logPathRecords(dir: string, ref: string): ReturnType<typeof gitLogPathRecords> {
+  const key = `${dir}\0${ref}`
+  let r = logRecordsCache.get(key)
+  if (r === undefined) {
+    r = gitLogPathRecords(dir, ref)
+    logRecordsCache.set(key, r)
+  }
+  return r
+}
+
 /** Commit-refs fallback — the union of paths touched by commits whose
  *  subject carries `(<id>)`. A bead whose commits only ever touched its
  *  own spec file leaves nothing to audit → no-scope. */
 function commitScope(dir: string, ref: string, id: string, specPath: string | undefined, exclude: string[]): ScopeResult {
-  const records = gitLogPathRecords(dir, ref)
+  const records = logPathRecords(dir, ref)
   if (records === null) {
     return { state: 'unverifiable', reason: 'git log failed' }
   }
@@ -199,13 +220,16 @@ export function specLinkPath(dir: string, desc: string | undefined): string | un
     /^[a-z][a-z0-9+.-]*:/i.test(t) ||
     badScopeEntry(t) ||
     // a regular file only — a dir target would date every commit under
-    // it, conflating the spec with everything it documents
+    // it, conflating the spec with everything it documents; lstat keeps
+    // a symlink out — git dates the link entry, not its target's edits
     !existsSync(join(dir, t)) ||
-    !statSync(join(dir, t)).isFile()
+    !lstatSync(join(dir, t)).isFile()
   ) {
     return undefined
   }
-  return t
+  // `spec: ./…` must normalize to the tracked path — git pathspecs
+  // never match a leading `./`
+  return t.replace(/^(?:\.[/\\])+/, '')
 }
 
 /** One drift row for bead `id` — every failure mode is a row, never a
