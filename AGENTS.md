@@ -70,28 +70,30 @@ spawn is **detached**, its handles are **pinned** somewhere durable.
   parent-unref'd (nohup-equivalent), wired through connector resolution,
   the configured agent template, and the shared beads environment. The
   hand-rolled form —
-  `nohup devin -p --export ~/.bro/agents/<mol>.json -- "<prompt>" >> ~/.bro/agents/<mol>.log 2>&1 &`
+  `(umask 077; mkdir -p -m 700 ~/.bro/agents; nohup devin -p --prompt-file <prompt.md> --export ~/.bro/agents/<mol>.json >> ~/.bro/agents/<mol>.log 2>&1 &)`
   (systemd-run/tmux also count) — skips all of that: no registry entry,
-  no managed claim, no `bro agents status`/`down` reach. Keep logs in a
-  user-owned dir — prompts land in them, so world-readable `/tmp` is
-  out. An exec-background shell dies with the turn — a worker spawned
-  that way is already unwatched.
+  no managed claim, no `bro agents status`/`down` reach. Prompts go in a
+  file, logs in a user-owned dir: a prompt on argv is visible to every
+  local user via `ps`, and world-readable `/tmp` is out. An
+  exec-background shell dies with the turn — a worker spawned that way
+  is already unwatched.
 - **Pin the handles at spawn.** pid, log path, claimed step. `bro agents`
   writes them to `<git-common>/bro/agents.json` plus
-  `<agentId>.{prompt.md,log,exit}` and pins the claim into the shared
-  beads store — a hand-rolled spawn must record pid + log + claimed step
-  itself (a file, a bead comment); it stays outside the registry, so its
-  pin file is the
-  only handle `status`, `stop`, or respawn will never see. An unpinned
-  worker is unfindable next session.
+  `<git-common>/bro/agents/<agentId>.{prompt.md,log,exit}` and pins the
+  claim into the shared beads store — a hand-rolled spawn must record
+  pid + log + claimed step itself (a file, a bead comment); it stays
+  outside the registry, so its pin file is the only handle `status`,
+  `stop`, or respawn will never see. An unpinned worker is unfindable
+  next session.
 - **Monitor by point checks, never by waiting.** `tail` the log,
-  `kill -0 <pid>` / `pgrep -f`, `bro agents status`, `bro fleet`, a fresh
-  `bro convoy next` — between turns, not in a blocking loop. A synchronous
-  `get_output` or `sleep` wait on detached work blocks the conversation
-  and buys nothing (retro bro-lmdj).
+  `kill -0 <pid>`, `pgrep -f <pattern>`, `bro agents status`,
+  `bro fleet`, a fresh `bro convoy next` — between turns, not in a
+  blocking loop. A synchronous `get_output` or `sleep` wait on detached
+  work blocks the conversation and buys nothing (retro bro-lmdj).
 - **Completion is detected, not awaited.** `bro agents status` →
-  `exited` with its `.exit` code, the step closing in beads — or a
-  detached watcher shell that polls and `bro notify`s. An empty `pgrep`
-  only proves the process died, not that it finished: read the exit code
-  or the step state, not the silence. Never promise "I'll report when it
-  lands" from a foreground wait.
+  `exited`, then read the exit record — `<agentId>.exit` holds the code;
+  `status` reports state only. For hand-rolled workers the step closing
+  in beads is the proof — or a detached watcher shell that polls and
+  `bro notify`s. An empty `pgrep` only proves the process died, not that
+  it finished. Never promise "I'll report when it lands" from a
+  foreground wait.
