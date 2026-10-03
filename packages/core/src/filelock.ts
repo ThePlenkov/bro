@@ -15,10 +15,11 @@ const heldLocks = new Map<string, string>()
 
 /** A holder that outlives this is robbed even while alive — caps the
  *  pid-recycled-onto-an-unrelated-process case. Inside the bound a LIVE
- *  holder is never robbed: a slow-but-alive section fails its waiters
- *  (timeout), it is never raced. A dead holder's lock is stolen
+ *  holder is never robbed: a slow-but-alive section (gascity's
+ *  multi-minute spawn is the longest legit hold) fails its waiters
+ *  instead of being raced. A dead holder's lock is stolen
  *  immediately — liveness is the staleness signal, not age. */
-const LOCK_ABANDONED_MS = 10 * 60_000
+const LOCK_ABANDONED_MS = 15 * 60_000
 const LOCK_WAIT_MS = 20_000
 /** Sweep floor for crashed staged-token leftovers — a fresh sibling
  *  could belong to an in-flight acquirer; an old one can't. */
