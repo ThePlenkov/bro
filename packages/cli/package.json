@@ -23,7 +23,7 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "tsx --test src/*.test.ts src/**/*.test.ts",
     "prepack": "node ../../scripts/pack-cli.ts pre",
     "postpack": "node ../../scripts/pack-cli.ts post",
     "typecheck": "tsc --noEmit"

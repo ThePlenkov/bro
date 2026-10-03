@@ -33,4 +33,9 @@ export interface SpecStore {
   policy(): string
   /** The spec tree — spec-of-specs roots down to leaves. */
   tree(): SpecNode[]
+  /** The tool's *explicit* scope for `id` — repo-relative pathspecs the
+   *  spec declares (native: `scope:` frontmatter). Absent on tools
+   *  without the concept and null when the spec declares none — both
+   *  fall through to the drift engine's commit-refs fallback. */
+  scope?(id: string): string[] | null
 }

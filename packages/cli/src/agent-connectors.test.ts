@@ -53,7 +53,8 @@ const load = () => { try { return JSON.parse(fs.readFileSync(DB, 'utf8')) } catc
 const save = (db) => fs.writeFileSync(DB, JSON.stringify(db))
 const alive = (pid) => { try { process.kill(pid, 0); return true } catch (e) { return e.code === 'EPERM' } }
 const target = () => args[args.indexOf('-t') + 1]
-if (args[0] === '-V') { console.log('tmux 3.7c-fake'); process.exit(0) }
+// writeSync — console.log is pipe-buffered and process.exit truncates it
+if (args[0] === '-V') { fs.writeSync(1, 'tmux 3.7c-fake\\n'); process.exit(0) }
 if (args[0] === 'new-session') {
   let name, cwd = process.cwd(), env = {}, cmd
   for (let i = 1; i < args.length; i++) {
@@ -92,13 +93,12 @@ if (args[0] === 'list-sessions') {
   // 'no server running', not a clean empty listing
   const live = Object.keys(load().sessions).filter((n) => alive(load().sessions[n].pid))
   if (live.length === 0) { console.error('no server running'); process.exit(1) }
-  for (const n of live) { console.log(n) }
-  process.exit(0)
+  fs.writeSync(1, live.join('\\n') + '\\n'); process.exit(0)
 }
 if (args[0] === 'list-panes') {
   const s = load().sessions[target()]
   if (!s || !alive(s.pid)) { console.error('no session'); process.exit(1) }
-  console.log(s.pid); process.exit(0)
+  fs.writeSync(1, s.pid + '\\n'); process.exit(0)
 }
 console.error('unhandled tmux args: ' + args.join(' ')); process.exit(1)
 `

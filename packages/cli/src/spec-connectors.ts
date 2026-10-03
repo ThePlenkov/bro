@@ -157,7 +157,12 @@ function preferSpec(nodes: ResolvedSpec[]): ResolvedSpec | undefined {
   }
   return nodes
     .slice()
-    .sort((a, b) => Number(nonEmpty(b)) - Number(nonEmpty(a)) || Number(b.dirSpec) - Number(a.dirSpec))[0]
+    .sort(
+      (a, b) =>
+        Number(nonEmpty(b)) - Number(nonEmpty(a)) ||
+        Number(b.dirSpec) - Number(a.dirSpec) ||
+        (a.path ?? '').localeCompare(b.path ?? '')
+    )[0]
 }
 
 /** Resolve an id to its spec node — file or dir spec, at any depth. */
@@ -203,6 +208,97 @@ function specParent(path: string): string | undefined {
     return m?.[1]
   } catch {
     return undefined
+  }
+}
+
+const unquote = (s: string): string => {
+  const t = s.trim()
+  return t.length >= 2 &&
+    ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))
+    ? t.slice(1, -1)
+    : t
+}
+
+/** One YAML scalar: a ` #…` comment drops off a bare value (quoted
+ *  values keep their #), then quotes strip. */
+const yamlScalar = (s: string): string => {
+  const t = s.trim()
+  if (t.startsWith('"') || t.startsWith("'")) {
+    return unquote(t)
+  }
+  const c = t.indexOf(' #')
+  return unquote(c === -1 ? t : t.slice(0, c))
+}
+
+/** Split a flow list on commas outside quotes — `["a,b", 'c']` is two
+ *  entries, not three. */
+const flowItems = (s: string): string[] => {
+  const items: string[] = []
+  let cur = ''
+  let q = ''
+  for (const ch of s) {
+    if (q !== '') {
+      cur += ch
+      if (ch === q) {
+        q = ''
+      }
+    } else if (ch === '"' || ch === "'") {
+      q = ch
+      cur += ch
+    } else if (ch === ',') {
+      items.push(cur)
+      cur = ''
+    } else {
+      cur += ch
+    }
+  }
+  items.push(cur)
+  return items
+}
+
+/** `scope:` frontmatter — repo-relative pathspecs the spec claims for
+ *  itself (spec drift's audit surface). A YAML list or a single string;
+ *  an empty/absent key declares nothing and returns []. The whole file
+ *  is read — a capped read would silently narrow a long frontmatter's
+ *  declared scope into the commit fallback. */
+function specScope(path: string): string[] {
+  try {
+    const head = readFileSync(path, 'utf8')
+    const fm = /^---\n([\s\S]*?)\n---/.exec(head)
+    if (fm === null) {
+      return []
+    }
+    const lines = fm[1]!.split('\n')
+    const i = lines.findIndex((l) => /^scope:\s*/.test(l))
+    if (i === -1) {
+      return []
+    }
+    const body = lines.slice(i + 1)
+    let inline = yamlScalar(lines[i]!.replace(/^scope:\s*/, ''))
+    // a flow list may wrap — `scope: [a,\n  b]` joins until the closing ]
+    for (let j = 0; inline.startsWith('[') && !inline.endsWith(']') && j < body.length; j++) {
+      inline += ` ${yamlScalar(body[j]!)}`
+    }
+    if (inline !== '') {
+      return inline.startsWith('[') && inline.endsWith(']')
+        ? flowItems(inline.slice(1, -1)).map(yamlScalar).filter((s) => s !== '')
+        : [inline]
+    }
+    const items: string[] = []
+    for (const l of body) {
+      const m = /^\s*-\s+/.exec(l)
+      if (m === null) {
+        // blank and comment-only lines are YAML-legal inside a list
+        if (/^\s*(#.*)?$/.test(l)) {
+          continue
+        }
+        break
+      }
+      items.push(yamlScalar(l.slice(m[0].length)))
+    }
+    return items.filter((s) => s !== '')
+  } catch {
+    return []
   }
 }
 
@@ -265,6 +361,17 @@ export const nativeSpecConnector: Connector = {
         `write ${specDir}/${id}.md (\`bro spec new ${id}\`), add a spec: link, or label 'trivial'`,
       policy: () =>
         `spec before code — ${specDir}/<id>.md or <id>/ dir, or a spec: link in the bead (exempt: chore / 'trivial' / 'debt')`,
+      // the tool's explicit scope only — `scope:` frontmatter on the
+      // resolved spec file; the commit-refs fallback is the drift
+      // engine's, not the connector's
+      scope: (id) => {
+        const node = findSpec(root, specDir, id)
+        if (node === undefined) {
+          return null
+        }
+        const entries = specScope(node.abs)
+        return entries.length === 0 ? null : entries
+      },
       tree() {
         const base = specDirAbs(root, specDir)
         if (base === null || !existsSync(base)) {
