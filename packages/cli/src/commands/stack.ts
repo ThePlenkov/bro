@@ -52,6 +52,7 @@ import {
   removeStackEdge,
   stackPushLockPath,
   stateOfWorktree,
+  type EnterWorktreeResult,
   type WorktreeCreateResult,
   type WorktreeInfo,
 } from './work.ts'
@@ -238,6 +239,19 @@ function cmdPush(argv: string[]): void {
     },
     created
   )
+  reportPush(r, name, n, base, slug)
+}
+
+/** Push result reporting — a `gone` worktree was retired by a driver
+ *  before the claim landed, so the push aborts instead of printing a
+ *  dead path as ready. */
+function reportPush(
+  r: EnterWorktreeResult,
+  name: string,
+  n: number,
+  base: string | undefined,
+  slug: string
+): void {
   if (r.gone) {
     console.error(`error: ${r.path} was retired before the claim could land — aborting`)
     process.exit(1)
