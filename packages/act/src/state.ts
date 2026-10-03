@@ -3,7 +3,9 @@
  * aggregated into the PrActState the exit gate reads. Domain rules only;
  * every host call goes through the injected ReviewFacade.
  */
+import { DEFAULT_CONFIG } from '@broject/core'
 import type { PrTarget, ReviewFacade } from '@broject/core'
+import { docsOnly, effectiveMaxRounds } from './docs.ts'
 import type { PrActState } from './types.ts'
 
 // Word boundaries: a check merely *containing* "kilo"/"gemini" (e.g.
@@ -37,7 +39,12 @@ function isSast(name: string): boolean {
 export async function fetchPrActState(
   rev: ReviewFacade,
   target: PrTarget,
-  opts?: { ignoreChecks?: string[]; maxRounds?: number }
+  opts?: {
+    ignoreChecks?: string[]
+    maxRounds?: number
+    docsPaths?: string[]
+    docsMaxRounds?: number
+  }
 ): Promise<PrActState> {
   const meta = rev.prMeta(target)
   const threads = await rev.reviewThreads(target)
@@ -123,6 +130,24 @@ export async function fetchPrActState(
     // best-effort — a flaky reviews endpoint must not break the gate
   }
 
+  // A docs-only PR churns reviewer threads on every push — the tighter
+  // docsMaxRounds cap moves the tail to debt sooner. Unknown file scope
+  // (facade without prFiles, a failed fetch, an empty diff) is never
+  // "docs-only" — the cap can only tighten on positive evidence.
+  let files: string[] | null = null
+  try {
+    files = rev.prFiles?.(target) ?? null
+  } catch {
+    // best-effort — same rule as reviewedShas
+  }
+  const isDocsOnly =
+    files !== null && docsOnly(files, opts?.docsPaths ?? DEFAULT_CONFIG.act.docsPaths)
+  const maxRounds = effectiveMaxRounds(
+    opts?.maxRounds ?? 0,
+    isDocsOnly,
+    opts?.docsMaxRounds ?? DEFAULT_CONFIG.act.docsMaxRounds
+  )
+
   return {
     pr: target.pr,
     url: meta.url,
@@ -141,6 +166,7 @@ export async function fetchPrActState(
     sastPending,
     sastUnknown,
     fixRounds,
-    maxRounds: opts?.maxRounds ?? 0,
+    maxRounds,
+    docsOnly: isDocsOnly,
   }
 }

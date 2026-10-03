@@ -27,6 +27,8 @@ async function gateLine(dir: string, target?: PrTarget): Promise<string | null> 
     const state = await fetchPrActState(rev, t, {
       ignoreChecks: cfg.act.ignoreChecks,
       maxRounds: cfg.act.maxRounds,
+      docsPaths: cfg.act.docsPaths,
+      docsMaxRounds: cfg.act.docsMaxRounds,
     })
     const gate = evaluateExitGate(state)
     const link = rev.prLink(t.repo, state.pr)
@@ -50,7 +52,12 @@ async function blockerLine(dir: string): Promise<string | null> {
     const state = await fetchPrActState(
       rev,
       { repo: rev.resolveRepo([]), pr: cur.pr },
-      { ignoreChecks: cfg.act.ignoreChecks, maxRounds: cfg.act.maxRounds }
+      {
+        ignoreChecks: cfg.act.ignoreChecks,
+        maxRounds: cfg.act.maxRounds,
+        docsPaths: cfg.act.docsPaths,
+        docsMaxRounds: cfg.act.docsMaxRounds,
+      }
     )
     // The same gate `bro act status` enforces: open threads, pending/failed
     // CI and AI reviewers, SAST findings, unknown mergeability, BEHIND.

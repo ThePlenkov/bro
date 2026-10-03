@@ -19,6 +19,7 @@ export function evaluateExitGate(state: PrActState): ExitGate {
     is_draft: state.isDraft,
     fix_rounds: state.fixRounds,
     max_rounds: state.maxRounds,
+    docs_only: state.docsOnly,
   }
   if (state.state !== 'OPEN') {
     return { ok: true, blockers: [], ...base }
@@ -29,7 +30,8 @@ export function evaluateExitGate(state: PrActState): ExitGate {
       // bound the act loop: past the round cap, remaining threads defer to
       // debt beads (reply + resolve) instead of another inline-fix push
       blockers.push(
-        `fix-round cap hit (${state.fixRounds}>${state.maxRounds}) — ` +
+        `fix-round cap hit (${state.fixRounds}>${state.maxRounds}` +
+          `${state.docsOnly ? ', docs-only PR' : ''}) — ` +
           `defer the ${state.openThreads} remaining thread(s) to debt beads and resolve, do not fix inline`
       )
     } else {

@@ -573,6 +573,15 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
       return new Map<string, number | null>()
     },
     reviewedShas,
+    prFiles(t) {
+      // the MR's current diff list — new_path is the post-change path,
+      // old_path covers deletions
+      const files = glabPaged<{ new_path?: string; old_path?: string }>(
+        api(t.repo, `merge_requests/${t.pr}/diffs`),
+        gopts()
+      )
+      return files.map((f) => f.new_path ?? f.old_path ?? '').filter((p) => p !== '')
+    },
     reviewThreads,
     labels(t) {
       return getMr(t).labels ?? []

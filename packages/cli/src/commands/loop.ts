@@ -495,7 +495,12 @@ async function driveGate(
     const state = await fetchPrActState(
       ctx.rev,
       { repo: ctx.repo, pr },
-      { ignoreChecks: act.ignoreChecks, maxRounds: act.maxRounds }
+      {
+        ignoreChecks: act.ignoreChecks,
+        maxRounds: act.maxRounds,
+        docsPaths: act.docsPaths,
+        docsMaxRounds: act.docsMaxRounds,
+      }
     )
     return { state, gate: evaluateExitGate(state) }
   }

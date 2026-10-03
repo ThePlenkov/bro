@@ -415,6 +415,27 @@ function labels(t: PrTarget): string[] {
   return (viewed.labels ?? []).map((l) => l.name)
 }
 
+/** Paths the PR's diff touches — one entry per file, paginated like the
+ *  reviews fetch. */
+function prFiles(t: PrTarget): string[] {
+  const files: string[] = []
+  for (let page = 1; ; page += 1) {
+    const rows = ghJson<Array<{ filename?: string }>>([
+      'api',
+      `repos/${t.repo}/pulls/${t.pr}/files?per_page=100&page=${page}`,
+    ])
+    for (const f of rows ?? []) {
+      if (f.filename) {
+        files.push(f.filename)
+      }
+    }
+    if ((rows?.length ?? 0) < 100) {
+      break
+    }
+  }
+  return files
+}
+
 function prUpdatedAt(t: PrTarget): string | null {
   const viewed = ghJson<{ updatedAt?: string }>([
     'pr',
@@ -710,6 +731,7 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
     checks,
     checkAnnotations,
     reviewedShas,
+    prFiles,
     reviewThreads,
     labels,
     prUpdatedAt,

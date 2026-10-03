@@ -57,6 +57,14 @@ default store, so standard installs already have it).
   review comment landed, and `act.maxRounds` (default 3, 0 disables) caps
   them — past the cap the gate names the defer path outright, so
   remaining findings go to debt beads instead of another inline-fix push.
+  Docs-only PRs (every changed file matches `act.docsPaths`) cap tighter —
+  `act.docsMaxRounds` (default 2): doc threads churn per push, so the
+  tail belongs in debt, not another round.
+- **Contradictory cross-round findings resolve by judgment, not push.**
+  Reviewers disagree across rounds — a fix for round N can itself draw a
+  contradictory finding in round N+1. Don't push a flip-flop: pick the
+  reading you judge right, reply with the reasoning, resolve; the losing
+  side is a debt bead when it's still a real concern.
 - **Merge through `bro act merge`, never `gh pr merge` directly.** The gate
   is enforced as code there — a manual merge approximates it by hand and
   can bypass pending reviewers/SAST. `bro act merge` also serializes the

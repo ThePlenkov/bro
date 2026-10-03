@@ -3,6 +3,16 @@
     "ignoreChecks": [
       "kilo",
       "github-advanced-security"
+    ],
+    "docsPaths": [
+      "*.md",
+      "*.mdx",
+      "*.rst",
+      "*.txt",
+      "docs/",
+      "specs/",
+      "site/content/",
+      "skills/"
     ]
   },
   "debt": {

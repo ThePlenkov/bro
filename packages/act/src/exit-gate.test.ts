@@ -22,6 +22,7 @@ const open = (over: Partial<PrActState> = {}): PrActState => ({
   sastUnknown: 0,
   fixRounds: 0,
   maxRounds: 3,
+  docsOnly: false,
   ...over,
 })
 
@@ -90,5 +91,14 @@ describe('evaluateExitGate', () => {
     )
     // no open threads → cap is moot
     assert.equal(evaluateExitGate(open({ fixRounds: 9, maxRounds: 3 })).ok, true)
+  })
+
+  it('names the docs-only PR in the cap blocker and reports docs_only', () => {
+    const g = evaluateExitGate(
+      open({ openThreads: 1, fixRounds: 3, maxRounds: 2, docsOnly: true })
+    )
+    assert.match(g.blockers[0], /fix-round cap hit \(3>2, docs-only PR\)/)
+    assert.equal(g.docs_only, true)
+    assert.equal(evaluateExitGate(open()).docs_only, false)
   })
 })

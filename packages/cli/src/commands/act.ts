@@ -127,7 +127,7 @@ function printStatus(state: PrActState, gate: ExitGate): void {
       `reviewers_pending=${gate.reviewers_pending} ` +
       `reviewers_failing=${gate.reviewers_failing} ` +
       `sast_pending=${gate.sast_pending} sast_unknown=${gate.sast_unknown} ` +
-      `fix_rounds=${gate.fix_rounds}`
+      `fix_rounds=${gate.fix_rounds} docs_only=${gate.docs_only}`
   )
   console.log(`exit_gate=${gate.ok ? 'OK' : 'BLOCKED'}`)
   for (const b of gate.blockers) {
@@ -157,6 +157,8 @@ async function cmdWait(argv: string[]): Promise<void> {
       const state = await fetchPrActState(rev, t, {
         ignoreChecks: act.ignoreChecks,
         maxRounds: act.maxRounds,
+        docsPaths: act.docsPaths,
+        docsMaxRounds: act.docsMaxRounds,
       })
       return { state, gate: evaluateExitGate(state) }
     },
@@ -302,6 +304,8 @@ async function cmdMerge(argv: string[]): Promise<void> {
     const state = await fetchPrActState(rev, t, {
       ignoreChecks: act.ignoreChecks,
       maxRounds: act.maxRounds,
+      docsPaths: act.docsPaths,
+      docsMaxRounds: act.docsMaxRounds,
     })
 
     // a closed/merged PR can pass the gate (threads resolved, checks

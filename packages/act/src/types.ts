@@ -33,8 +33,12 @@ export interface PrActState {
    *  round counter. */
   fixRounds: number
   /** act.maxRounds — when fixRounds exceeds this, open threads must defer
-   *  to debt beads instead of another inline-fix round. 0 = unbounded. */
+   *  to debt beads instead of another inline-fix round. 0 = unbounded.
+   *  On a docs-only PR this already carries the tighter docsMaxRounds. */
   maxRounds: number
+  /** Every file the PR touches matches act.docsPaths — the signal that
+   *  swapped in the tighter round cap. */
+  docsOnly: boolean
 }
 
 export interface ExitGate {
@@ -50,4 +54,5 @@ export interface ExitGate {
   is_draft: boolean
   fix_rounds: number
   max_rounds: number
+  docs_only: boolean
 }

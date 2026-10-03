@@ -48,7 +48,16 @@ So the loop is bounded and severity-aware:
 
 `act.maxRounds` (default **3**, `0` disables) caps inline fix rounds.
 Past it, the gate's blocker changes its verdict: *defer remaining threads
-to debt beads, do not fix inline.*
+to debt beads, do not fix inline.* Docs-only PRs — every changed file
+matching `act.docsPaths` — cap tighter at `act.docsMaxRounds` (default
+**2**): doc threads churn per push, so the tail belongs in debt sooner.
+`docs_only=true` in `act status` shows when the tighter cap is in effect.
+
+Contradictory findings across rounds resolve by **judgment, not push** —
+a fix for round N can draw a contradictory finding in round N+1; a
+flip-flop commit just buys a fresh round. Pick the right reading, reply
+with the reasoning, resolve; a real concern on the losing side becomes a
+debt bead.
 
 **Merge through `bro act merge`, never `gh pr merge`** — the gate is
 enforced there.

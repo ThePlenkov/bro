@@ -54,6 +54,8 @@ Explicit `"stores": ["jsonl"]` is the beads opt-out.
 | --- | ------- | ---- |
 | `ignoreChecks` | `[]` | Check-name substrings excluded from the exit gate — for chronically flaky external reviewers |
 | `maxRounds` | `3` | Inline fix-round cap. Past it, remaining threads must defer to debt beads. `0` disables |
+| `docsPaths` | `['*.md', '*.mdx', '*.rst', '*.txt', 'docs/']` | Path patterns classifying a file as docs. No slash → basename glob (`*.md`); trailing `/` → dir at any depth (`docs/`); otherwise full-path glob (`**` crosses `/`) |
+| `docsMaxRounds` | `2` | Tighter round cap for docs-only PRs (every changed file matches `docsPaths`). `0` disables the docs-specific cap |
 
 ### `plugins`
 
