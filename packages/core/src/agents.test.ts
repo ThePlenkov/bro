@@ -322,7 +322,10 @@ describe('registry lock', () => {
             (k) =>
               new Promise<{ code: number | null; err: string }>((resolve) => {
                 let err = ''
-                k.stderr!.on('data', (d: Buffer) => (err += d))
+                // utf8 decode per-chunk would split multi-byte sequences
+                // into U+FFFD — setEncoding joins them stream-aware
+                k.stderr!.setEncoding('utf8')
+                k.stderr!.on('data', (d: string) => (err += d))
                 k.on('close', (code) => resolve({ code, err }))
               })
           )
