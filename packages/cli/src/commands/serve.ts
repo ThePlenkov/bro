@@ -508,6 +508,20 @@ async function routeAgentRef(
   return NOT_ALLOWED
 }
 
+/** The site route — read-only HTML over the snapshot plane; the
+ *  loopback Host check guards it like every other route. */
+function routeFleet(method: string): ServeResponse {
+  if (method !== 'GET') {
+    return NOT_ALLOWED
+  }
+  return {
+    status: 200,
+    body: FLEET_PAGE,
+    contentType: 'text/html; charset=utf-8',
+    headers: { 'content-security-policy': WEBUI_CSP },
+  }
+}
+
 async function route(
   method: string,
   pathname: string,
@@ -521,18 +535,8 @@ async function route(
     return { status: 200, body: { service: 'bro', routes: ROUTES } }
   }
 
-  // the site route — read-only HTML over the snapshot plane; the
-  // loopback Host check guards it like every other route
   if (seg.length === 1 && seg[0] === 'fleet') {
-    if (method !== 'GET') {
-      return NOT_ALLOWED
-    }
-    return {
-      status: 200,
-      body: FLEET_PAGE,
-      contentType: 'text/html; charset=utf-8',
-      headers: { 'content-security-policy': WEBUI_CSP },
-    }
+    return routeFleet(method)
   }
 
   const api = seg[0] === 'api' && seg[1] === 'v1' ? seg.slice(2) : undefined

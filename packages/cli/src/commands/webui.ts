@@ -37,7 +37,9 @@ const PAGE_STYLE = `
   .stale { opacity: .55; }
 `
 
-const PAGE_SCRIPT = `
+// String.raw — the script ships regex literals; raw keeps `\[` written
+// once instead of doubly escaped for the template
+const PAGE_SCRIPT = String.raw`
 var POLL_MS = 2000;
 var root = document.body;
 var timer;
@@ -63,7 +65,7 @@ function list(ul, items, cls) {
 // https? only: a poisoned link can't navigate to a custom scheme.
 // Anything after the link stays plain text
 function appendPrLink(parent, md) {
-  var m = /^\\[#(\\d+)\\]\\((https?:\\/\\/[^)]+)\\)(.*)$/.exec(md || '');
+  var m = /^\[#(\d+)\]\((https?:\/\/[^)]+)\)(.*)$/.exec(md || '');
   if (m) {
     var a = el('a', '#' + m[1]);
     a.href = m[2];
