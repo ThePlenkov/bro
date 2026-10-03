@@ -1,0 +1,87 @@
+# ship-bead — take one bead from spec to merged PR.
+#
+#   work → pr-gate → merge (auto: bro act wait --merge | human: gate) → cleanup
+#
+# Run: `bd mol pour ship-bead --var bead=bro-xxxx`
+#      add `--var merge=human` to restore the human merge gate.
+
+formula = "ship-bead"
+description = "Claim a bead, work it in a linked worktree per its spec, gate the PR with bro act, merge per the merge= var (auto: bro act wait --merge — the convoy default; human: human gate), cleanup."
+version = 1
+type = "workflow"
+
+[vars.bead]
+description = "The bead id to ship"
+required = true
+
+[vars.merge]
+description = "Merge mode: 'auto' lands the PR through bro act wait --merge (armed in-session or by a driver — the convoy/orchestration default; fixer/driver covers post-exit review rounds). 'human' pours a human merge gate instead."
+required = false
+default = "auto"
+enum = ["auto", "human"]
+
+[[steps]]
+id = "work"
+title = "Implement {{bead}} per its spec"
+type = "agent"
+description = """
+Claim {{bead}}, `bro work enter {{bead}}` for a linked worktree, and implement
+it per its spec file (find it via `bro spec tree` / `specs/`). For epic beads
+the first task is decomposition: child beads wired by blocks deps, each with a
+spec reference — then implement the ready children in order.
+Rules: spec first (sdd gate), tests via `npm test` (exact CI command), commit +
+push + `gh pr create`. Never push to main. Done when: the PR is open and pushed.
+"""
+
+[[steps]]
+id = "pr-gate"
+title = "Verify — bro act status until exit 0"
+type = "agent"
+needs = ["work"]
+description = """
+In the worktree, run `bro act status` until exit 0: zero open review threads,
+no pending/failing CI, no pending SAST, reviewers reported. Fix inline when
+correctness is at stake; defer minor findings to debt beads (bd create -l debt)
+and resolve with a pointer. `bro act threads` lists what's open. Exit non-zero
+= the gate holds.
+"""
+
+[[steps]]
+id = "merge"
+title = "Merge — bro act wait --merge"
+type = "agent"
+needs = ["pr-gate"]
+condition = "{{merge}} == auto"
+description = """
+Run `bro act wait --merge --squash --cleanup` from the worktree: the watcher
+polls the exit gate and lands the PR the moment it settles green — in
+orchestration mode the merge is covered by the act formula, not a human
+gate. `bro act merge` (dispatched by wait) refuses while the gate is
+blocked, so this step can only complete green.
+If it refuses because reviewers are still pending or threads arrived after
+pr-gate, keep working: fix/defer threads, then merge again. Never use
+`gh pr merge` and never wait for a human — the merge is yours.
+"""
+
+[[steps]]
+id = "merge-human"
+title = "HUMAN GATE — merge the PR"
+type = "human"
+needs = ["pr-gate"]
+condition = "{{merge}} == human"
+description = """
+Gate is green — a human reviews and merges the PR. Merge is a human
+decision; agents carry, humans ship.
+"""
+
+[[steps]]
+id = "cleanup"
+title = "Close out — worktree, bead, sync"
+type = "agent"
+needs = ["merge", "merge-human"]
+description = """
+After merge: `git pull` main, `bro work leave` / `git worktree remove` the
+linked worktree, delete the merged branch, `bd close {{bead}}` (and parent
+epic if its children are all closed), `bd dolt push`, `bro debt collect`.
+Verify with `git worktree list` and `bd ready` — nothing left dangling.
+"""
