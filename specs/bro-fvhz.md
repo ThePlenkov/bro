@@ -117,10 +117,12 @@ tool's *explicit* scope only (native: `scope:` frontmatter;
 speckit/openspec: absent → the commit-refs fallback still applies;
 agent: never). The commit-refs fallback lives in the drift engine —
 it's beads+git, not tool-specific. Spec paths come from `tree()` —
-same-id collisions resolve by the connector's own disambiguation
-(native: `preferSpec` — non-empty beats scaffold, dir spec beats flat;
-openspec change vs shipped spec: the same pick `hasSpec` makes) — no
-new accessor needed. Recency helpers go next to
+which can return several same-id nodes (openspec change + shipped
+spec, a flat file beside a dir spec). `tree()` reports them all; the
+drift engine picks deterministically with the same rule the
+connector's `hasSpec` applies (native: `preferSpec` — non-empty beats
+scaffold, dir spec beats flat; openspec: the pick `hasSpec` makes) —
+no new accessor needed. Recency helpers go next to
 `gitTry` in `packages/core/src/git.ts` — argv only, no shell strings.
 
 ## Plan
