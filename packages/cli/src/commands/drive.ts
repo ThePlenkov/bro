@@ -101,9 +101,11 @@ export function driveArgs(argv: string[], defaultEverySec = 300): DriveArgs {
     }
   }
   const everySec = everyRaw === undefined ? defaultEverySec : Number(everyRaw)
-  if (!Number.isFinite(everySec) || everySec <= 0 || everySec * 1000 > 0x7fffffff) {
+  // the same 0.1s floor fleet applies — a sub-floor cadence is a busy
+  // loop hammering the review host, not a poll
+  if (!Number.isFinite(everySec) || everySec < 0.1 || everySec * 1000 > 0x7fffffff) {
     throw new Error(
-      `--every needs a positive seconds value up to ${0x7fffffff / 1000}s, got "${everyRaw ?? defaultEverySec}"`
+      `--every needs a seconds value ≥0.1 up to ${0x7fffffff / 1000}s, got "${everyRaw ?? defaultEverySec}"`
     )
   }
   return { ...base, everySec }
@@ -515,6 +517,20 @@ async function spawnFixer(
   )
   if (open.length === 0) {
     if (created) {
+      // re-check occupancy before retiring a dir we just added — another
+      // owner could claim it during the thread refetch, and `git
+      // worktree remove` on a clean tree deletes even a live cwd
+      const occ = occupied({
+        agents: work.agents,
+        fixerBead: fixer?.id,
+        branch: state.headRef,
+        worktree: wt,
+        workDetails: work.workDetails,
+        scanProc: agentProcessesIn,
+      })
+      if (occ !== undefined) {
+        return { pr, link, verdict: 'occupied', detail: occ }
+      }
       // the work evaporated after we checked out — retire the dir we
       // just added or it lingers as an orphaned fixer worktree
       gitTry(['-C', ctx.mainRoot, 'worktree', 'remove', wt])

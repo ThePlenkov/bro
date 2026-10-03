@@ -50,9 +50,11 @@ describe('driveArgs', () => {
   })
 
   test('a bad --every fails closed', () => {
-    for (const v of ['abc', '0', '-5', 'NaN', '3000000000']) {
+    for (const v of ['abc', '0', '-5', 'NaN', '3000000000', '0.01']) {
       assert.throws(() => driveArgs(['--every', v]), /--every/)
     }
+    // the floor fleet already enforces — below it is a busy loop
+    assert.equal(driveArgs(['--every', '0.1']).everySec, 0.1)
   })
 })
 
