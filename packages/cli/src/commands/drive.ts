@@ -31,6 +31,7 @@ import { existsSync, readdirSync, readFileSync, readlinkSync, statSync } from 'n
 import { basename, join, resolve, sep } from 'node:path'
 import {
   checkBeads,
+  ensureAuth,
   gitTry,
   reviewHost,
   SpawnError,
@@ -43,7 +44,12 @@ import {
 import { evaluateExitGate, fetchPrActState, type PrActState } from '@broject/act'
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { flag } from './args.ts'
-import { deleteMergedLocalBranch, removeMergedWorktree, runActCommand } from './act.ts'
+import {
+  defaultBranch,
+  deleteMergedLocalBranch,
+  removeMergedWorktree,
+  runActCommand,
+} from './act.ts'
 import { spawnStepAgent } from './agents.ts'
 import { collectAgents } from './fleet.ts'
 import { driveSection, type DriveConfig } from './drive-config.ts'
@@ -51,7 +57,7 @@ import { loadBroConfig } from '../plugins.ts'
 import { mainWorktree, parseWorktreePorcelain, worktreePathFor } from './work.ts'
 
 function usage(): never {
-  console.error(`Usage: bro drive [--once] [--every SEC] [--no-merge] [--connector <name>] [--json]`)
+  console.error(`Usage: bro drive [--once] [--every [SEC]] [--no-merge] [--connector <name>] [--json]`)
   process.exit(2)
 }
 
@@ -64,20 +70,39 @@ export interface DriveArgs {
   connector?: string
 }
 
-export function driveArgs(argv: string[]): DriveArgs {
+export function driveArgs(argv: string[], defaultEverySec = 300): DriveArgs {
   const base: DriveArgs = {
     json: argv.includes('--json'),
     merge: !argv.includes('--no-merge'),
     connector: flag(argv, '--connector'),
   }
-  const everyRaw = flag(argv, '--every')
-  if (everyRaw === undefined) {
+  const every = argv.filter((a) => a === '--every' || a.startsWith('--every='))
+  if (every.length > 1) {
+    console.error('error: --every may be given only once')
+    process.exit(2)
+  }
+  if (every.length === 0) {
     return base
   }
-  const everySec = Number(everyRaw)
+  const tok = every[0]!
+  let everyRaw: string | undefined
+  if (tok === '--every') {
+    // a bare --every takes the configured cadence — flagValue's contract
+    // (next token must not look like an option) still applies when a
+    // value follows
+    const next = argv[argv.indexOf(tok) + 1]
+    everyRaw = next !== undefined && next.trim() !== '' && !next.startsWith('--') ? next : undefined
+  } else {
+    everyRaw = tok.slice('--every='.length)
+    if (everyRaw === '') {
+      console.error('error: --every requires a value')
+      process.exit(2)
+    }
+  }
+  const everySec = everyRaw === undefined ? defaultEverySec : Number(everyRaw)
   if (!Number.isFinite(everySec) || everySec <= 0 || everySec * 1000 > 0x7fffffff) {
     throw new Error(
-      `--every needs a positive seconds value up to ${0x7fffffff / 1000}s, got "${everyRaw}"`
+      `--every needs a positive seconds value up to ${0x7fffffff / 1000}s, got "${everyRaw ?? defaultEverySec}"`
     )
   }
   return { ...base, everySec }
@@ -459,6 +484,16 @@ function retireLanding(ctx: Ctx, state: PrActState, worktree: string | undefined
       const here = all.find((w) => w.path === worktree)
       if (here && here.path !== main.path) {
         removeMergedWorktree(worktree, here, main)
+      } else if (here && here.branch === state.headRef) {
+        // the merged branch is checked out in the MAIN worktree — the
+        // delete below can never land while it is, so switch the main
+        // checkout to the default branch first (same move as
+        // cleanupAfterMerge; a dirty main keeps the branch, never data)
+        const def = defaultBranch()
+        const res = gitTry(['-C', main.path, 'switch', def])
+        if (res.code !== 0) {
+          say(ctx, `drive: could not switch ${main.path} to ${def} (${res.err})`)
+        }
       }
     }
     deleteMergedLocalBranch(state.headRef, state.headSha)
@@ -585,7 +620,23 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     if (!(await mergeGreen(ctx, pr))) {
       return { pr, link, verdict: 'merge-refused' }
     }
-    retireLanding(ctx, state, worktree)
+    // a merge-queue acceptance exits 0 without a landed merge — only a
+    // MERGED re-probe proves the head; anything else keeps the PR for
+    // the next pass instead of retiring its worktree early
+    const after = await fetchPrActState(
+      ctx.rev,
+      { repo: ctx.repo, pr },
+      { ignoreChecks: ctx.act.ignoreChecks, maxRounds: ctx.act.maxRounds }
+    ).catch(() => undefined)
+    if (after?.state !== 'MERGED') {
+      return {
+        pr,
+        link,
+        verdict: 'merge-unverified',
+        detail: after === undefined ? 'state re-probe failed' : `state ${after.state.toLowerCase()}`,
+      }
+    }
+    retireLanding(ctx, after, worktree)
     if (fixer) {
       closeFixer(ctx.store, fixer.id, `merged via ${link}`)
     }
@@ -658,24 +709,50 @@ async function driveOnce(ctx: Ctx): Promise<void> {
   if (prs.size === 0) {
     say(ctx, 'drive: no open PRs on fleet branches')
   }
+  // a settled PR drops out of prsForBranch entirely — without this sweep
+  // its fixer bead hangs open forever after the merge/close
+  for (const row of ctx.store.list({ labels: [FIXER_LABEL], all: true })) {
+    const m = /^drive:pr:(\d+)$/.exec(row.external_ref ?? '')
+    if (m === null || row.status === 'closed' || prs.has(Number(m[1]))) {
+      continue
+    }
+    const pr = Number(m[1])
+    const link = ctx.rev.prLink(ctx.repo, pr)
+    try {
+      const st = await fetchPrActState(
+        ctx.rev,
+        { repo: ctx.repo, pr },
+        { ignoreChecks: ctx.act.ignoreChecks, maxRounds: ctx.act.maxRounds }
+      )
+      if (st.state !== 'OPEN') {
+        closeFixer(ctx.store, row.id, `${link} ${st.state.toLowerCase()} — fixer done`)
+        say(ctx, `drive ${link} settled (${st.state.toLowerCase()}) — fixer ${row.id} closed`)
+      }
+    } catch (err) {
+      say(ctx, `warning: fixer sweep probe failed for ${link} — ${errText(err)}`)
+    }
+  }
 }
 
 export async function runDriveCommand(argv: string[]): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
     usage()
   }
-  let args: DriveArgs
-  try {
-    args = driveArgs(argv)
-  } catch (err) {
-    console.error(`error: ${errText(err)}`)
-    process.exit(2)
-  }
   checkBeads()
   const main = mainWorktree()
   const broCfg = loadBroConfig(main.path)
   const drive = ((broCfg as Record<string, unknown>).drive as DriveConfig | undefined) ??
     driveSection(undefined)
+  let args: DriveArgs
+  try {
+    args = driveArgs(argv, drive.intervalSec)
+  } catch (err) {
+    console.error(`error: ${errText(err)}`)
+    process.exit(2)
+  }
+  // same gate as `bro act` — without it an unauthenticated pass catches
+  // every lookup's auth error per-branch and reports "no open PRs"
+  ensureAuth('reviews', { dir: main.path }, { prefer: broCfg.connectors })
   const rev = reviewHost(main.path, broCfg.connectors)
   const ctx: Ctx = {
     mainRoot: main.path,

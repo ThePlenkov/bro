@@ -1,6 +1,6 @@
 ---
 name: drive
-description: "Use when orphaned PRs need an owner — 'drive the review loop', 'watch the PRs and fix them', a post-PR supervisor. Thin wrapper over the bro CLI: `bro drive` polls act exit gates, spawns fixer agents through the facade, and merges on green. Requires `bro` (npx -y @broject/bro@0), bd, and gh."
+description: "Use when orphaned PRs need an owner — 'drive the review loop', 'watch the PRs and fix them', a post-PR supervisor. Thin wrapper over the bro CLI: `bro drive` polls act exit gates, spawns fixer agents through the facade, and merges on green. Requires `bro` (npx -y @broject/bro@0), bd, and the configured review-host CLI (for example, `gh` or `glab`)."
 ---
 
 # /drive (bro)
@@ -35,7 +35,7 @@ scan for agent-shaped processes. Occupied is always the safe verdict.
 | Command | What it does |
 | ------- | ------------ |
 | `bro drive [--once]` | one supervision pass (default) |
-| `bro drive --every N` | a pass every N seconds — the detached supervisor |
+| `bro drive --every [N]` | a pass every N seconds — the detached supervisor; a bare `--every` uses `drive.intervalSec` |
 | `bro drive --no-merge` | supervise only — never merge (config: `drive.merge: "never"`) |
 | `bro drive --connector <name>` | spawn fixers on one backend |
 | `bro drive --json` | one JSON line per PR verdict |
@@ -52,7 +52,8 @@ The fixer agent's command resolves exactly like `bro agents up` —
 - **Occupied is not an error.** A skipped PR means a live session owns
   it — report and move on; never force-spawn into someone's worktree.
 - **The fixer bead is the handle.** `bro agents status <bead>` shows
-  the fixer, `bro fleet` lists it, `bro agents down <bead>` stops it.
+  the fixer, `bro agents down <bead>` stops it (the fixer is a
+  standalone task, not a molecule step — `bro fleet` doesn't list it).
   A dead fixer respawns on the same agentId — that is the contract.
 - **Merge is the exit gate's call, not the driver's.** `bro drive`
   never bypasses `bro act merge` — a non-green PR is supervised, not

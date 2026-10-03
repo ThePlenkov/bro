@@ -42,6 +42,10 @@ describe('driveArgs', () => {
       connector: 'tmux',
     })
     assert.equal(driveArgs(['--every=15']).everySec, 15)
+    // a bare --every takes the configured cadence
+    assert.equal(driveArgs(['--every']).everySec, 300)
+    assert.equal(driveArgs(['--every'], 60).everySec, 60)
+    assert.equal(driveArgs(['--every', '--json']).everySec, 300)
   })
 
   test('a bad --every fails closed', () => {

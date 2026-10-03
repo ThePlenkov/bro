@@ -378,8 +378,9 @@ export function deleteMergedLocalBranch(headRef: string, headSha: string): void 
 }
 
 /** The branch a merged PR's checkout should fall back to: origin/HEAD's
- *  target, else the first existing of main/master. */
-function defaultBranch(): string {
+ *  target, else the first existing of main/master. Exported for `bro
+ *  drive`'s post-merge retirement — same fallback, different caller. */
+export function defaultBranch(): string {
   // refresh first — a stale origin/HEAD would switch back to a renamed or
   // deleted default branch (failure only: kept, never data loss)
   gitTry(['remote', 'set-head', 'origin', '--auto'])
