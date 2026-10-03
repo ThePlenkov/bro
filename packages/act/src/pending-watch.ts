@@ -66,6 +66,7 @@ function watchesDir(dir: string): string | null {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
         timeout: 5000,
+        killSignal: 'SIGKILL',
       }
     ).trim()
     return gd ? join(resolve(dir, gd), 'bro', 'watches') : null
