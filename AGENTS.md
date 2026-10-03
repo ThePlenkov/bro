@@ -68,9 +68,11 @@ spawn is **detached**, its handles are **pinned** somewhere durable.
 - **Spawn detached.** `bro agents up <mol-step>` is the codified path —
   the native backend is a `sh -c` spawn in its own process group,
   parent-unref'd (nohup-equivalent). The hand-rolled form, per molecule:
-  `nohup devin -p --export /tmp/<mol>.json -- "<prompt>" >> /tmp/<mol>.log 2>&1 &`
-  (systemd-run/tmux also count). An exec-background shell dies with the
-  turn — a worker spawned that way is already unwatched.
+  `nohup devin -p --export ~/.bro/agents/<mol>.json -- "<prompt>" >> ~/.bro/agents/<mol>.log 2>&1 &`
+  (systemd-run/tmux also count; keep logs in a user-owned dir — prompts
+  land in them, so world-readable `/tmp` is out). An exec-background
+  shell dies with the turn — a worker spawned that way is already
+  unwatched.
 - **Pin the handles at spawn.** pid, log path, claimed step. `bro agents`
   writes them to `<git-common>/bro/agents.json` plus
   `<agentId>.{prompt.md,log,exit}` and pins the claim into the shared
