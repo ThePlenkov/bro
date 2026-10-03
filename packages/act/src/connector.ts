@@ -8,6 +8,7 @@
 import { loadConfig, reviewHost, type Connector, type PrTarget } from '@broject/core'
 import { evaluateExitGate } from './exit-gate.ts'
 import { mergeSlotHolder } from './merge-slot.ts'
+import { listWatches, watchRetire } from './pending-watch.ts'
 import { fetchPrActState } from './state.ts'
 
 /** One-line gate summary for a PR — null when no PR/host resolves. */
@@ -72,6 +73,34 @@ function mergeSlotLine(): string | null {
   }
 }
 
+/** Pending-watch markers left by `bro act wait`: a dead pid means the
+ *  session that promised to watch died mid-poll — flag the stale promise
+ *  and retire the marker so it reports exactly once. A live pid is
+ *  parallel work — passive context only. */
+function watchLines(dir: string): string[] {
+  try {
+    const out: string[] = []
+    for (const { watch, file, alive } of listWatches(dir)) {
+      if (alive) {
+        out.push(
+          `act watch active on ${watch.link} (pid ${watch.pid}) — another process is polling`
+        )
+        continue
+      }
+      watchRetire(file)
+      const mode = watch.merge ? ' (was set to merge on green)' : ''
+      out.push(
+        `stale act watch on ${watch.link}${mode} — the watching session died; ` +
+          `check \`bro act status --pr ${watch.pr}\``
+      )
+    }
+    return out
+  } catch {
+    // detection is passive — a probe failure must not break rehydrate
+    return []
+  }
+}
+
 export const actConnector: Connector = {
   name: 'act',
   hooks: () => ({
@@ -85,6 +114,7 @@ export const actConnector: Connector = {
       if (slot) {
         out.push(slot)
       }
+      out.push(...watchLines(ctx.dir))
       return out
     },
     async promptSubmit(ctx, prompt) {

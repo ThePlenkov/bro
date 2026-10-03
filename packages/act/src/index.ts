@@ -19,3 +19,5 @@ export {
 } from './merge-slot.ts'
 export type { MergeSlot } from './merge-slot.ts'
 export { actConnector } from './connector.ts'
+export { listWatches, watchBegin, watchEnd, watchRetire } from './pending-watch.ts'
+export type { ListedWatch, PendingWatch } from './pending-watch.ts'
