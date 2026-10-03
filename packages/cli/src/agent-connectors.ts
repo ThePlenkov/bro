@@ -1239,10 +1239,13 @@ const tomlStr = (s: string): string =>
 const GC_PINNED_ENV = new Set(['BEADS_DIR', 'BRO_BEAD_ID', 'BRO_AGENT_ID', 'BRO_PROMPT_FILE'])
 
 /** Identity pins the connector owns — the env table always carries the
- *  shared store + the real bead id regardless of what spec.env says. */
-const gcEnvPins = (spec: SpawnSpec): [string, string][] => [
+ *  shared store + the real bead + agent ids regardless of what spec.env
+ *  says. BRO_AGENT_ID is the environ badge proc-owner reads to tell a
+ *  bro-spawned worker from an ambient process in the same worktree. */
+const gcEnvPins = (spec: SpawnSpec, agentId: string): [string, string][] => [
   ['BEADS_DIR', spec.beadsDir],
   ['BRO_BEAD_ID', spec.molStep],
+  ['BRO_AGENT_ID', agentId],
 ]
 
 /** gc session submit carries the prompt as a single argv element —
@@ -1336,7 +1339,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
    *  dir comes from its agent's work_dir — so each step gets its own
    *  agent named after the molStep, pinned to spec.repoRoot. Written on
    *  every spawn; gc reads config per command. */
-  const writeStepAgent = (spec: SpawnSpec, city: string): void => {
+  const writeStepAgent = (spec: SpawnSpec, city: string, agentId: string): void => {
     // leading-alnum guard: '.'/'..' would escape the per-step dir and a
     // template-named step would overwrite the shared template
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(spec.molStep)) {
@@ -1365,7 +1368,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     )
     // caller env plus the connector-owned identity pins — pins always
     // render so the table exists even when spec.env is empty
-    const allEnv = [...envEntries, ...gcEnvPins(spec)]
+    const allEnv = [...envEntries, ...gcEnvPins(spec, agentId)]
     const envToml = `env = { ${allEnv.map(([k, v]) => `${k} = "${tomlStr(v)}"`).join(', ')} }\n`
     // work_dir (+ env) are top-level — they must precede any [table] in
     // the file; the template's own copies are dropped so ours win
@@ -1434,9 +1437,9 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
    *  surviving session in place (preserves alias+bead), else `session
    *  new` the per-step agent. A `session new` whose id can't be learned
    *  is closed by alias first so no orphan runs beside the retry. */
-  const ensureGcSession = (spec: SpawnSpec, city: string, prior: unknown): string => {
+  const ensureGcSession = (spec: SpawnSpec, city: string, prior: unknown, agentId: string): string => {
     initCity(city)
-    writeStepAgent(spec, city)
+    writeStepAgent(spec, city, agentId)
     ensureRig(spec, city)
     ensureStarted(city)
     const priorId = typeof prior === 'string' ? prior : undefined
@@ -1561,7 +1564,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         })
         let sessionId: string | undefined
         try {
-          sessionId = ensureGcSession(spec, city, existing?.sessionId)
+          sessionId = ensureGcSession(spec, city, existing?.sessionId, agentId)
           dispatchStep(spec, city)
         } catch (err) {
           // leave the entry respawn-able: close the orphan session so a

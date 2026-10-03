@@ -263,14 +263,17 @@ describe('gascity connector', () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
       const conn = makeGascityConnector({ dir: fx.main }, fx.env)
-      await conn.spawn({
+      const info = await conn.spawn({
         ...SPEC(fx.main, fx.beadsDir, 'fx-1'),
         env: { BEADS_DIR: '/evil/store', BRO_BEAD_ID: 'other-bead', BRO_AGENT_ID: 'x', SAFE: '1' },
       })
       const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8')
       assert.ok(!agentToml.includes('/evil/store'))
       assert.ok(!agentToml.includes('other-bead'))
-      assert.ok(!agentToml.includes('BRO_AGENT_ID'))
+      // BRO_AGENT_ID still renders — with the connector's real id, never
+      // the caller's; the proc-owner environ badge depends on it
+      assert.match(agentToml, new RegExp(`BRO_AGENT_ID = "${info.id}"`))
+      assert.ok(!agentToml.includes('BRO_AGENT_ID = "x"'))
       assert.match(agentToml, /BRO_BEAD_ID = "fx-1"/)
       assert.match(agentToml, /SAFE = "1"/)
     } finally {
