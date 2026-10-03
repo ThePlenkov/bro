@@ -46,6 +46,7 @@
  */
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import {
+  chmodSync,
   closeSync,
   linkSync,
   mkdirSync,
@@ -145,10 +146,14 @@ export function writeServeState(dir: string, state: ServeState): void {
   const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
   // the file carries the session token — publish at 0600 so "can read
   // it" equals "same-UID local process". rm first so the create-mode
-  // always applies: a pre-existing tmp would keep its old mode through
-  // the truncate, leaving the token readable until a later chmod
+  // always applies (a pre-existing tmp would keep its old mode through
+  // the truncate, leaving a permissive file until a later chmod); the
+  // chmod then pins 0600 exactly — create-mode is `mode & ~umask`, and
+  // a pathological umask could strip even owner bits, leaving the token
+  // unreadable to its own clients
   rmSync(tmp, { force: true })
   writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 })
+  chmodSync(tmp, 0o600)
   renameSync(tmp, path)
 }
 
