@@ -55,7 +55,7 @@ describe('gitDriftRef', () => {
         git(dir, ['remote', 'add', 'origin', remote])
         git(dir, ['push', '-q', 'origin', 'main'])
         git(dir, ['remote', 'set-head', 'origin', 'main'])
-        assert.equal(gitDriftRef(dir), 'origin/HEAD')
+        assert.equal(gitDriftRef(dir), 'refs/remotes/origin/HEAD')
       } finally {
         rmSync(remote, { recursive: true, force: true })
       }
@@ -63,11 +63,20 @@ describe('gitDriftRef', () => {
   })
 
   test('no remote falls back to local main, then master, then HEAD', () => {
-    withRepo((dir) => assert.equal(gitDriftRef(dir), 'main'))
-    withRepo((dir) => assert.equal(gitDriftRef(dir), 'master'), 'master')
+    withRepo((dir) => assert.equal(gitDriftRef(dir), 'refs/heads/main'))
+    withRepo((dir) => assert.equal(gitDriftRef(dir), 'refs/heads/master'), 'master')
     withRepo((dir) => {
       git(dir, ['checkout', '-qb', 'develop'])
       git(dir, ['branch', '-qD', 'main'])
+      assert.equal(gitDriftRef(dir), 'HEAD')
+    })
+  })
+
+  test('a tag named main cannot stand in for the branch', () => {
+    withRepo((dir) => {
+      git(dir, ['checkout', '-qb', 'develop'])
+      git(dir, ['branch', '-qD', 'main'])
+      git(dir, ['tag', 'main'])
       assert.equal(gitDriftRef(dir), 'HEAD')
     })
   })
@@ -121,6 +130,13 @@ describe('gitLogStamp', () => {
       const r = gitLogStamp(dir, 'HEAD', [])
       assert.equal(r.state, 'error')
       assert.match(r.state === 'error' ? r.err : '', /empty pathspecs/)
+    })
+  })
+
+  test('a dash-prefixed ref is an error, not a git log option', () => {
+    withRepo((dir) => {
+      commit(dir, 'one', { 'src/a.ts': 'a\n' })
+      assert.equal(gitLogStamp(dir, '--all', ['src/']).state, 'error')
     })
   })
 

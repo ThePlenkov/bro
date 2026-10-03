@@ -20,16 +20,24 @@ export function gitTry(args: string[]): { code: number; out: string; err: string
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
   })
-  return { code: proc.status ?? 1, out: proc.stdout ?? '', err: (proc.stderr ?? '').trim() }
+  // status null = spawn failure or signal, not a real verdict —
+  // callers read exit 1 as one, so surface git's own fatal code
+  return {
+    code: proc.status ?? 128,
+    out: proc.stdout ?? '',
+    err: (proc.stderr ?? proc.error?.message ?? '').trim(),
+  }
 }
 
 /** The drift comparison ref — landed spec vs landed code, so a feature
  *  branch's own commits can't flag the spec it's about to update.
  *  Chain: `origin/HEAD` → local `main`/`master` → `HEAD` (solo and
  *  no-remote repos). null when nothing resolves to a commit — unborn
- *  history is the caller's `unverifiable`, not a throw. */
+ *  history is the caller's `unverifiable`, not a throw. Qualified
+ *  refs so a tag named `main` can't shadow (or fake) the branch —
+ *  `rev-parse` resolves refs/tags/ before refs/heads/. */
 export function gitDriftRef(dir: string): string | null {
-  for (const cand of ['origin/HEAD', 'main', 'master', 'HEAD']) {
+  for (const cand of ['refs/remotes/origin/HEAD', 'refs/heads/main', 'refs/heads/master', 'HEAD']) {
     const r = gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', `${cand}^{commit}`])
     if (r.code === 0) {
       return cand
@@ -72,7 +80,7 @@ export function gitLogStamp(
   if (opts?.follow === true) {
     args.push('--follow')
   }
-  args.push(ref, '--', ...pathspecs)
+  args.push('--end-of-options', ref, '--', ...pathspecs)
   const r = gitTry(args)
   if (r.code !== 0) {
     return { state: 'error', err: r.err }
@@ -123,7 +131,7 @@ export interface GitLogPathRecord {
  *  default. null on git failure — the caller decides the honest state
  *  (unborn ref, bad ref). */
 export function gitLogPathRecords(dir: string, ref: string): GitLogPathRecord[] | null {
-  const proc = spawnSync('git', ['-C', dir, 'log', '--format=%x1e%H%x09%s', '-z', '--name-only', ref], { // NOSONAR — PATH lookup is the contract
+  const proc = spawnSync('git', ['-C', dir, 'log', '--format=%x1e%H%x09%s', '-z', '--name-only', '--end-of-options', ref], { // NOSONAR — PATH lookup is the contract
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
