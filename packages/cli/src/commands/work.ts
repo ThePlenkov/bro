@@ -19,9 +19,9 @@
  * discovers `.beads` through the git common dir regardless of how the
  * worktree was created.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { basename, dirname, join, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { git, gitTry, loadConfig, stackSection, taskStore, type Connector } from '@broject/core'
 import { flag, positionals } from './args.ts'
 
@@ -93,6 +93,47 @@ export function isLinkedGitDir(gitDir: string): boolean {
  *  `../bro--fix-x`. */
 export function worktreePathFor(mainRoot: string, slug: string): string {
   return join(dirname(mainRoot), `${basename(mainRoot)}--${slug}`)
+}
+
+/** A worktree's real git dir — a linked worktree's `.git` is a FILE
+ *  naming `<common>/worktrees/<name>`; the main checkout's `.git` is the
+ *  dir itself. Null when neither is readable. Reading the pointer file
+ *  beats a `git rev-parse` subprocess on the driver's per-PR hot path. */
+export function worktreeGitDir(path: string): string | null {
+  const dotgit = join(path, '.git')
+  try {
+    if (statSync(dotgit).isDirectory()) {
+      return dotgit
+    }
+    const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotgit, 'utf8'))
+    if (m === null) {
+      return null
+    }
+    const d = m[1]!.trim()
+    return isAbsolute(d) ? d : resolve(path, d)
+  } catch {
+    return null
+  }
+}
+
+/** The worktree's own claim marker — `<gitdir>/bro/work`, the in-tree
+ *  counterpart of the hooks `.work` markers (bro-pywx). `bro drive`
+ *  reads it as occupancy: presence inside THIS worktree is the claim,
+ *  no detail-name matching needed — so an owner session is seen even
+ *  when its armed detail never named this branch. Advisory: a failed
+ *  write must not break enter; the other occupancy planes still apply. */
+export function claimWorktree(path: string, detail: string): void {
+  try {
+    const gd = worktreeGitDir(path)
+    if (gd === null) {
+      return
+    }
+    const dir = join(gd, 'bro')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'work'), `${Date.now()}\n${detail}\n`)
+  } catch {
+    // advisory — occupancy falls back to the other planes
+  }
 }
 
 const SLUG_RE = /^\w[\w.-]*$/
@@ -352,6 +393,7 @@ export function enterWorktree(opts: {
       gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']).out.trim()
     const sameRepo = commonOf(path) !== '' && commonOf(path) === commonOf(main.path)
     if (reusePath && onBranch === branch && sameRepo) {
+      claimWorktree(path, slug)
       return {
         path,
         branch,
@@ -385,6 +427,7 @@ export function enterWorktree(opts: {
     console.error(`error: git worktree add failed — ${res.err}`)
     process.exit(1)
   }
+  claimWorktree(path, slug)
   initSubmodules(path)
   const claim = claimBead(slug)
   // a stack edge is only a real edge when the base is a local branch —

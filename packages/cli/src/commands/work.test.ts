@@ -181,6 +181,15 @@ describe('work enter --stack', () => {
     })
   })
 
+  test('enter stamps the in-worktree claim marker the driver reads (bro-pywx)', () => {
+    const { root, main, linked } = fixture()
+    inside(linked, root, () => {
+      runWorkCommand(['enter', 'b'])
+      const marker = join(main, '.git', 'worktrees', 'main--b', 'bro', 'work')
+      assert.equal(readFileSync(marker, 'utf8').split('\n')[1], 'b')
+    })
+  })
+
   test('an existing branch is checked out — the resolved default base must not block it', () => {
     const { root, main, linked } = fixture()
     git(['branch', 'work/b'], main)
