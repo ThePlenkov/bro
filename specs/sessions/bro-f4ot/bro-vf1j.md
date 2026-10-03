@@ -36,9 +36,10 @@ today they only surface when someone thinks to look.
 
 The snapshot leads with an **attention** list — the heartbeat's
 answer: ready human gates, `lost — respawn?` agents, BLOCKED exit
-gates. Empty list = no attention condition fired — read it alongside
-the degraded/unavailable/probe-failed lines (those land as warnings,
-not attention) before calling the fleet quiet.
+gates, probe and lookup failures. Empty list = no attention condition
+fired — read it alongside the degraded/unavailable lines (backend
+degradation and an unavailable review host are warnings, not
+attention) before calling the fleet quiet.
 
 ```text
 bro watch [--once]      one snapshot (default — the heartbeat call)

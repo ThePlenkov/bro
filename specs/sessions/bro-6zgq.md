@@ -32,11 +32,20 @@ prevention: ["<one line>", …]   # list — --prevent is repeatable
 ---
 # drill report — <title>
 
-## Result …
+## Result
 
-## Prevention …
+<result text>
 
-## Trail (children, evidence links)
+## Prevention
+
+- <item> (<bead-id>)   # or `(none)`
+
+## Trail
+
+- children:
+  - `<id>` — <title>
+- evidence:
+  - <link>
 ```
 
 - `drill.report` config section (loaded like other sections via
