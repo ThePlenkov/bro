@@ -255,7 +255,7 @@ export function mintAgentId(backend: string): string {
 export function bdAt(
   beadsDir: string,
   args: string[]
-): { code: number; out: string; err: string; spawned: boolean } {
+): { code: number; out: string; err: string; ran: boolean } {
   const proc = spawnSync('bd', args, { // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
     env: { ...process.env, BEADS_DIR: beadsDir },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -266,11 +266,15 @@ export function bdAt(
   return {
     code: proc.status ?? 1,
     out: proc.stdout ?? '',
-    err: (proc.stderr ?? proc.error?.message ?? '').trim(),
-    // proc.error set = bd never ran (ENOENT, timeout kill) — the store
-    // itself is down, not the claim refused; callers map that to
-    // 'unavailable', not 'conflict'
-    spawned: proc.error === undefined,
+    err: (
+      proc.stderr ||
+      proc.error?.message ||
+      (proc.signal !== null ? `killed by ${proc.signal}` : '')
+    ).trim(),
+    // ran = bd executed to a real exit — ENOENT, a timeout kill, or a
+    // signal means the store never answered, so a non-zero code is
+    // degradation ('unavailable'), not a refusal ('conflict')
+    ran: proc.error === undefined && proc.status !== null,
   }
 }
 
@@ -300,7 +304,7 @@ export function claimStep(beadsDir: string, molStep: string): void {
     const why = r.err !== '' ? r.err : `bd exited ${r.code}`
     // bd itself missing/hung is the store being down — 503 territory,
     // not a claim conflict
-    throw new SpawnError(`claim of ${molStep} refused — ${why}`, r.spawned ? 'conflict' : 'unavailable')
+    throw new SpawnError(`claim of ${molStep} refused — ${why}`, r.ran ? 'conflict' : 'unavailable')
   }
 }
 
@@ -310,7 +314,7 @@ export function rebindStep(beadsDir: string, molStep: string, actor: string): vo
   const r = bdAt(beadsDir, ['update', molStep, '--assignee', actor])
   if (r.code !== 0) {
     const why = r.err !== '' ? r.err : `bd exited ${r.code}`
-    throw new SpawnError(`rebind of ${molStep} failed — ${why}`, r.spawned ? 'conflict' : 'unavailable')
+    throw new SpawnError(`rebind of ${molStep} failed — ${why}`, r.ran ? 'conflict' : 'unavailable')
   }
 }
 
