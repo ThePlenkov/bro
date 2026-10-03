@@ -25,8 +25,9 @@ prompts; it survives in a file with a frontmatter trigger.
 adapters (`plugins/{devin,claude,codex}/bro/`). The published CLI also
 embeds a snapshot of `skills/` + `formulas/` — emitted at bundle time as
 `dist/generated/skills-data.json`; source runs collect the trees live.
-The source of truth is `skills/`; adapters are build artifacts — edit the
-source, regen, commit. `npm run check:embedded` and `check:plugins`
+The source of truth is `skills/` (adapters + snapshot) and `formulas/`
+(snapshot); adapters are generated but committed — edit the source,
+regen, commit. `npm run check:embedded` and `check:plugins`
 enforce freshness in CI.
 
 ## Skill discipline for agents

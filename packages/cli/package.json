@@ -28,6 +28,17 @@
     "postpack": "node ../../scripts/pack-cli.ts post",
     "typecheck": "tsc --noEmit"
   },
+  "nx": {
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "{workspaceRoot}/skills/**/*",
+          "{workspaceRoot}/formulas/**/*"
+        ]
+      }
+    }
+  },
   "dependencies": {
     "@broject/bro-pack": "^0.2.0",
     "@sverka/cli": "^0.1.27",

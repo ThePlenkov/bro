@@ -27,7 +27,9 @@ function collectDir(root: string, dir: string, prefix = ''): Record<string, stri
   const walk = (d: string, rel: string): void => {
     // readdir order isn't guaranteed across filesystems — sort for a
     // deterministic snapshot (check-embedded compares serialized output).
-    for (const name of readdirSync(d).sort((a, b) => a.localeCompare(b))) {
+    // Code-unit compare, not localeCompare: ICU locales differ across
+    // environments and must not reorder the artifact.
+    for (const name of readdirSync(d).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
       const path = join(d, name)
       const r = rel ? `${rel}/${name}` : name
       const st = lstatSync(path)
@@ -48,7 +50,7 @@ function collectDir(root: string, dir: string, prefix = ''): Record<string, stri
 export function collectEmbedded(root: string): EmbeddedData {
   const skills: Record<string, string> = {}
   for (const entry of readdirSync(join(root, 'skills'), { withFileTypes: true })
-    .sort((a, b) => a.name.localeCompare(b.name))) {
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
     if (!entry.isDirectory()) {
       continue
     }

@@ -41,7 +41,7 @@ formulas/                        — beads formulas (debt-pipeline)
 
 The published CLI embeds a snapshot of `skills/` + `formulas/` — emitted at
 bundle time by the tsdown plugin (`packages/cli/tsdown.config.ts`) as
-`dist/generated/skills-data.json`. Nothing generated is committed: source
+`dist/generated/skills-data.json`. The snapshot is never committed: source
 runs collect the trees live via `packages/cli/src/skills-data.ts` and
 installed builds read the bundled asset. `npm run check:embedded` verifies
 the built snapshot is current (run after `npm run build`).
@@ -65,7 +65,7 @@ npm install
 ## Commands
 
 ```bash
-npm run build      # gen-embedded + nx run-many -t build (packages only;
+npm run build      # gen-plugins + nx run-many -t build (packages only;
                    # skills-* excluded — skill build needs skills-compiler)
 npm test           # node:test via tsx
 npm run lint       # includes skill lint/validate targets
