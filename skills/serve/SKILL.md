@@ -27,6 +27,7 @@ themselves. The loopback bind IS the trust boundary: 127.0.0.1 only, no
 | Route | What it returns |
 | ----- | --------------- |
 | `GET /` | service index — `{service, routes}` |
+| `GET /fleet` | the fleet webui — an HTML dashboard that polls `/api/v1/snapshot` (read-only; opens in a browser) |
 | `GET /api/v1/health` | `{ok, pid, dir, startedAt}` — liveness |
 | `GET /api/v1/snapshot` | the `bro watch` snapshot — mols × gates × fleet |
 | `GET /api/v1/agents` | per-backend agent plane (`bro agents status --json` shape) |

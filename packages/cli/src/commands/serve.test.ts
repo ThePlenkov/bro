@@ -22,6 +22,7 @@ import {
   writeServeState,
   type ServeDeps,
 } from './serve.ts'
+import { WEBUI_CSP } from './webui.ts'
 
 const fakeConn = {
   name: 'native',
@@ -71,6 +72,19 @@ describe('serve — routes', () => {
       const r = await route('GET', p)
       assert.equal(r.status, 404, p)
     }
+  })
+
+  test('GET /fleet serves the webui as HTML with its CSP; non-GET is 405', async () => {
+    const r = await route('GET', '/fleet')
+    assert.equal(r.status, 200)
+    assert.equal(r.contentType, 'text/html; charset=utf-8')
+    assert.equal(r.headers?.['content-security-policy'], WEBUI_CSP)
+    const html = String(r.body)
+    assert.match(html, /<!doctype html>/)
+    assert.match(html, /\/api\/v1\/snapshot/)
+
+    const post = await route('POST', '/fleet', '{}')
+    assert.equal(post.status, 405)
   })
 
   test('GET /api/v1/health answers liveness', async () => {
@@ -384,6 +398,13 @@ describe('serve handler over a real socket', () => {
       const detail = await fetch(`${base}/api/v1/agents/native-aa11`)
       assert.equal(detail.status, 200)
       assert.equal((await detail.json() as AgentInfo).id, 'native-aa11')
+
+      // the site route is verbatim HTML with its CSP — not a JSON envelope
+      const page = await fetch(`${base}/fleet`)
+      assert.equal(page.status, 200)
+      assert.match(page.headers.get('content-type') ?? '', /text\/html/)
+      assert.equal(page.headers.get('content-security-policy'), WEBUI_CSP)
+      assert.match(await page.text(), /<!doctype html>/)
     } finally {
       await new Promise((r) => server.close(r))
     }
