@@ -166,11 +166,11 @@ export function resolveAgentConnector(
   const probeFailures = new Map<string, string>()
   const chosen =
     probeAgentConnectors(ctx, env, remote, probeFailures) ?? firstAgentConnector(ctx, env)
-  // a backend that failed to even construct is diagnosable config rot —
-  // name it so silent failover doesn't hide a broken registration
+  // a backend whose probe failed is diagnosable config rot — name it so
+  // silent failover doesn't hide a broken registration
   for (const [n, why] of probeFailures) {
     if (n !== chosen.name) {
-      console.error(`warning: agent connector "${n}" skipped — failed to initialize: ${why}`)
+      console.error(`warning: agent connector "${n}" skipped — ${why}`)
     }
   }
   return chosen
@@ -196,13 +196,22 @@ function probeAgentConnectors(
   }
   for (const match of matchers) {
     for (const c of agentRegistry) {
-      if (match(c) !== true) {
+      // a throwing matcher is a recorded no-match — one faulty backend
+      // must not abort resolution for the whole registry
+      let claimed: boolean | undefined
+      try {
+        claimed = match(c)
+      } catch (err) {
+        probeFailures.set(c.name, `matcher threw: ${err instanceof Error ? err.message : String(err)}`)
+        continue
+      }
+      if (claimed !== true) {
         continue
       }
       try {
         return c.make(ctx, env)
       } catch (err) {
-        probeFailures.set(c.name, err instanceof Error ? err.message : String(err))
+        probeFailures.set(c.name, `failed to initialize: ${err instanceof Error ? err.message : String(err)}`)
       }
     }
   }

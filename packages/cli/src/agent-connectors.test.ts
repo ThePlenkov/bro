@@ -321,6 +321,38 @@ describe('resolveAgentConnector', () => {
     }
   })
 
+  test('a throwing static matcher is a recorded no-match, not a resolution failure', () => {
+    const { root, main } = initRepo('bro-agconn-')
+    const env: AgentConnectorEnv = { agents: {}, connectors: {} }
+    const make: AgentConnectorFactory = Object.assign(
+      (): AgentConnector => {
+        throw new Error('never reached — the throw is in the matcher')
+      },
+      {
+        matchDir: () => {
+          throw new Error('matcher exploded')
+        },
+      }
+    )
+    const dispose = registerAgentConnector('match-thrower', make)
+    const orig = console.error
+    const warnings: string[] = []
+    console.error = (...a: unknown[]) => warnings.push(a.join(' '))
+    try {
+      // the faulty static skips that backend; resolution still completes
+      assert.equal(resolveAgentConnector({ dir: main }, {}, env).name, 'native')
+      assert.ok(
+        warnings.some((w) =>
+          /agent connector "match-thrower" skipped — matcher threw: matcher exploded/.test(w)
+        )
+      )
+    } finally {
+      console.error = orig
+      dispose!()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   test('a claimed backend whose factory throws is skipped, warned, and falls back', () => {
     const { root, main } = initRepo('bro-agconn-')
     const env: AgentConnectorEnv = { agents: {}, connectors: {} }
