@@ -15,6 +15,8 @@
  * needs a loopback `Host` — a rebound name is 403 (DNS rebinding).
  *
  *   GET    /                    service index
+ *   GET    /fleet               the fleet webui — an HTML dashboard over
+ *                               /api/v1/snapshot (spec bro-1rir)
  *   GET    /api/v1/health       {ok, pid, dir, startedAt}
  *   GET    /api/v1/snapshot     the watch snapshot — mols × gates × fleet
  *   GET    /api/v1/agents       per-backend agent plane
@@ -56,6 +58,7 @@ import {
 } from './agents.ts'
 import { flag, positionals } from './args.ts'
 import { collectSnapshot } from './watch.ts'
+import { FLEET_PAGE, WEBUI_CSP } from './webui.ts'
 
 // --- serve state (discovery) ---------------------------------------------------
 
@@ -262,9 +265,15 @@ export interface ServeDeps {
 export interface ServeResponse {
   status: number
   body: unknown
+  /** non-JSON routes declare their type — `send` then emits the body
+   *  verbatim instead of a JSON envelope */
+  contentType?: string
+  /** extra response headers — the webui's CSP rides this */
+  headers?: Record<string, string>
 }
 
 const ROUTES = [
+  'GET /fleet',
   'GET /api/v1/health',
   'GET /api/v1/snapshot',
   'GET /api/v1/agents',
@@ -499,6 +508,20 @@ async function routeAgentRef(
   return NOT_ALLOWED
 }
 
+/** The site route — read-only HTML over the snapshot plane; the
+ *  loopback Host check guards it like every other route. */
+function routeFleet(method: string): ServeResponse {
+  if (method !== 'GET') {
+    return NOT_ALLOWED
+  }
+  return {
+    status: 200,
+    body: FLEET_PAGE,
+    contentType: 'text/html; charset=utf-8',
+    headers: { 'content-security-policy': WEBUI_CSP },
+  }
+}
+
 async function route(
   method: string,
   pathname: string,
@@ -510,6 +533,12 @@ async function route(
 
   if (method === 'GET' && seg.length === 0) {
     return { status: 200, body: { service: 'bro', routes: ROUTES } }
+  }
+
+  // one comparison — a compound condition would push route() over the
+  // SonarCloud cognitive-complexity ceiling; join() tolerates stray slashes
+  if (seg.join('/') === 'fleet') {
+    return routeFleet(method)
   }
 
   const api = seg[0] === 'api' && seg[1] === 'v1' ? seg.slice(2) : undefined
@@ -536,9 +565,15 @@ async function route(
 
 // --- server ----------------------------------------------------------------------------
 
-function send(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { 'content-type': 'application/json' })
-  res.end(`${JSON.stringify(body)}\n`)
+function send(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  opts: { contentType?: string; headers?: Record<string, string> } = {}
+): void {
+  const contentType = opts.contentType ?? 'application/json'
+  res.writeHead(status, { 'content-type': contentType, ...opts.headers })
+  res.end(contentType === 'application/json' ? `${JSON.stringify(body)}\n` : String(body))
 }
 
 export function createServeHandler(
@@ -576,7 +611,7 @@ export function createServeHandler(
         }
         const rawBody = wantsBody ? await readBody(req) : undefined
         const r = await routeRequest(req.method ?? 'GET', url.pathname, rawBody, deps, meta)
-        send(res, r.status, r.body)
+        send(res, r.status, r.body, r)
       } catch (err) {
         const status = err instanceof HttpError ? err.status : 500
         send(res, status, {
