@@ -13,7 +13,7 @@
  * mol/wisp (molecules), provenance (evidence), merge-slot, config,
  * init/info. Those keep calling bd() until they get doc types.
  */
-import { bd, BdCompatError, bdJson, bdTry } from './bd.ts'
+import { bd, BdCompatError, bdJson, bdTry, isBdNotFound } from './bd.ts'
 import { gitTry } from './git.ts'
 
 /** Resolved probe results per dir — hook surfaces ask for the actor
@@ -199,7 +199,18 @@ export function taskStore(dir?: string): TaskStore {
     list: (f = {}) => taskRows(bdJson(['list', '--json', ...filterArgs(f)], dir), 'list'),
     ready: (f = {}) => taskRows(bdJson(['ready', ...filterArgs(f)], dir), 'ready'),
     get: (id) => {
-      const r = bdJson<TaskRow | TaskRow[]>(['show', id], dir)
+      let r: TaskRow | TaskRow[]
+      try {
+        r = bdJson<TaskRow | TaskRow[]>(['show', id], dir)
+      } catch (err) {
+        // a missing id exits nonzero on bd — that miss is the contract's
+        // `undefined`. Every other failure stays thrown: reporting a
+        // dead backend as "absent" would mask a live row as gone
+        if (isBdNotFound(err)) {
+          return undefined as never
+        }
+        throw err
+      }
       // bd show answers an array; empty/undefined = no such task
       return taskRow(Array.isArray(r) ? r[0] : r, 'show') as never
     },

@@ -13,7 +13,9 @@ echo "$@" >> "$FAKE_BD_LOG"
 case "$1" in
   list) if [ "$FAKE_BD_DRIFT" = "envelope" ]; then echo '{"issues":[{"id":"t1"}]}'; else echo '[{"id":"t1","status":"open"}]'; fi ;;
   ready) echo '[{"id":"t1"}]' ;;
-  show) if [ "$FAKE_BD_DRIFT" = "norow" ]; then echo '[{"name":"t1"}]'; else echo '[{"id":"t1","status":"in_progress"}]'; fi ;;
+  show) if [ "$FAKE_BD_SHOW" = "missing" ]; then echo 'Issue t1 not found' >&2; exit 1;
+        elif [ "$FAKE_BD_SHOW" = "broken" ]; then echo 'database is locked' >&2; exit 1;
+        elif [ "$FAKE_BD_DRIFT" = "norow" ]; then echo '[{"name":"t1"}]'; else echo '[{"id":"t1","status":"in_progress"}]'; fi ;;
   create) if [ "$FAKE_BD_CREATE_EMPTY" = "1" ]; then echo '[]'; else echo '{"id":"t9","status":"open"}'; fi ;;
   dep) echo '[{"issue_id":"t2","depends_on_id":"t1","type":"parent-child"}]' ;;
   config) if [ "$FAKE_BD_CONFIG_FAIL" = "1" ]; then echo 'db gone' >&2; exit 1; fi
@@ -83,6 +85,18 @@ describe('taskStore', { skip: WIN32 }, () => {
   test('get unwraps the array bd show returns', () => {
     withFakeBd({}, () => {
       assert.equal(taskStore().get('t1')?.status, 'in_progress')
+    })
+  })
+
+  test('get returns undefined for a missing id', () => {
+    withFakeBd({ FAKE_BD_SHOW: 'missing' }, () => {
+      assert.equal(taskStore().get('t1'), undefined)
+    })
+  })
+
+  test('get propagates a backend failure — never reports it as absent', () => {
+    withFakeBd({ FAKE_BD_SHOW: 'broken' }, () => {
+      assert.throws(() => taskStore().get('t1'), /locked|Command failed/)
     })
   })
 

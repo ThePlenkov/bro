@@ -237,16 +237,11 @@ function cmdCheck(dir: string, ids: string[], all: boolean): void {
   const rows =
     ids.length > 0
       ? ids.flatMap((id) => {
-          try {
-            const r = store.get(id)
-            if (!r) {
-              unknown.push(id)
-            }
-            return r ? [r] : []
-          } catch {
+          const r = store.get(id)
+          if (!r) {
             unknown.push(id)
-            return []
           }
+          return r ? [r] : []
         })
       : store.list({ status: 'in_progress' }).concat(all ? store.list({ status: 'open' }) : [])
   // an explicit id that doesn't resolve is a usage failure — partial
@@ -265,7 +260,8 @@ function cmdCheck(dir: string, ids: string[], all: boolean): void {
   }
   if (missing > 0) {
     console.error(`spec check: ${missing} bead(s) without a spec — ${spec.policy()}`)
-    process.exit(1)
+    // exitCode, not exit() — process.exit can cut pending piped stdout
+    process.exitCode = 1
   }
 }
 
@@ -280,18 +276,15 @@ function cmdDrift(dir: string, ids: string[], opts: { all: boolean; json: boolea
   const rows =
     ids.length > 0
       ? ids.flatMap((id) => {
-          try {
-            const r = store.get(id)
-            if (!r) {
-              unknown.push(id)
-            }
-            return r ? [r] : []
-          } catch {
+          const r = store.get(id)
+          if (!r) {
             unknown.push(id)
-            return []
           }
+          return r ? [r] : []
         })
-      : store.list(opts.all ? { all: true } : { status: 'closed' })
+      // closed beads need `all` — the filter's documented switch for
+      // including them; a backend may drop closed rows without it
+      : store.list(opts.all ? { all: true } : { status: 'closed', all: true })
   // an explicit id that doesn't resolve is a usage failure — partial
   // results would report silent success for a bead that doesn't exist
   if (unknown.length > 0) {
@@ -318,7 +311,9 @@ function cmdDrift(dir: string, ids: string[], opts: { all: boolean; json: boolea
   const stale = drifted.filter((r) => r.state === 'STALE').length
   if (stale > 0) {
     console.error(`spec drift: ${stale} stale spec(s)`)
-    process.exit(1)
+    // exitCode, not exit() — process.exit can cut pending piped stdout
+    // (`bro spec drift --json | jq` would read a truncated array)
+    process.exitCode = 1
   }
 }
 
@@ -489,10 +484,35 @@ const VALUE_FLAGS = new Set(['--parent', '--tool'])
  *  positional. */
 const DRIFT_VALUE_FLAGS = new Set([...VALUE_FLAGS, '--ref'])
 
+/** Per-subcommand option allowlist — a misspelled or misplaced option
+ *  must fail loudly. Without it `--jso` runs a TSV audit the caller
+ *  expected as JSON, and `--ref HEAD` on `new` leaks HEAD into
+ *  positionals as the bead id. `=`-spellings of a known flag pass. */
+const KNOWN_FLAGS: Record<string, Set<string>> = {
+  new: new Set(['--parent']),
+  check: new Set(['--all']),
+  drift: new Set([...DRIFT_VALUE_FLAGS, '--all', '--json']),
+  tree: new Set(),
+  init: new Set(['--tool']),
+}
+
 export function runSpecCommand(argv: string[]): void {
   const dir = process.cwd()
   const { mode } = loadConfig(dir).sdd
   const [sub, ...rest] = argv
+  // own-key lookup — an inherited key like `toString` is not a
+  // subcommand; bare `bro spec` dispatches to check
+  const key = sub ?? 'check'
+  const known = Object.hasOwn(KNOWN_FLAGS, key) ? KNOWN_FLAGS[key] : undefined
+  if (known === undefined) {
+    usage()
+  }
+  for (const a of rest) {
+    if (a.startsWith('--') && !known.has(a.split('=', 1)[0]!)) {
+      console.error(`error: unknown option "${a}" for spec ${key}`)
+      process.exit(2)
+    }
+  }
   const positional = positionals(rest, VALUE_FLAGS)
   if (sub === 'new') {
     cmdNew(dir, positional[0], flag(rest, '--parent'))
