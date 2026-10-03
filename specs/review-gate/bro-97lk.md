@@ -1,4 +1,4 @@
-# bro-97lk — act wait: detached watch mode that survives session end
+# bro-97lk — act wait: pending-watch marker for session-bound waits
 
 ## Problem
 
