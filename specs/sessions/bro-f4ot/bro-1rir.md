@@ -40,17 +40,18 @@ false empty fleet. Fleet `degraded`/`conflicts`/`prErrors` notes render
 as a warnings block.
 
 - **Poll discipline** — chained `setTimeout` at 2s (a slow collect
-  stretches the cadence, never stacks), skipped while
-  `document.hidden`, immediate repaint on `visibilitychange`. A failed
-  fetch dims the frame and reports the error — it never blanks the last
-  good snapshot.
+  stretches the cadence, never stacks), `tick()` returns early while
+  `document.hidden` or a fetch is in flight, `visibilitychange` re-arms
+  and repaints immediately on return. A failed fetch dims the frame and
+  reports the error — it never blanks the last good snapshot.
 - **Read-only** — the page issues GETs only. The respawn decision stays
   a surface, not a button; spawn/stop stay API ops for real clients.
 - **Injection-safe** — bead titles are user input: every value lands via
   `textContent`, never `innerHTML`. The response carries a CSP —
-  `default-src 'none'; script-src 'unsafe-inline'; style-src
-  'unsafe-inline'; connect-src 'self'` — so a smuggled title can't load
-  anything even if markup injection ever slips through.
+  `default-src 'none'; script-src 'sha256-…'; style-src 'sha256-…';
+  connect-src 'self'` — hashes computed at module load from the exact
+  `<script>`/`<style>` bytes served, so a smuggled title can't execute
+  or load anything even if markup injection ever slips through.
 - **Trust boundary unchanged** — the page rides the same loopback Host
   check as every route; DNS rebinding is refused before routing.
 
@@ -59,12 +60,12 @@ sends its body verbatim — the JSON envelope stays the default.
 
 ## Plan
 
-- [ ] `packages/cli/src/commands/webui.ts` — `fleetPage()` returns the
-      document; client JS polls `/api/v1/snapshot`, renders the four
-      sections via DOM `textContent`
-- [ ] `serve.ts` — `GET /fleet` in ROUTES + router; `ServeResponse`
+- [x] `packages/cli/src/commands/webui.ts` — `FLEET_PAGE` document;
+      client JS polls `/api/v1/snapshot`, renders the four sections via
+      DOM `textContent`
+- [x] `serve.ts` — `GET /fleet` in ROUTES + router; `ServeResponse`
       `contentType`/`headers`; `send` honors them; module doc route list
-- [ ] `serve.test.ts` — `/fleet` status+content-type+CSP on the wire,
+- [x] `serve.test.ts` — `/fleet` status+content-type+CSP on the wire,
       405 on non-GET, JSON routes unaffected
-- [ ] `skills/serve/SKILL.md` route table row; regen `skills-data.ts`
-- [ ] `npm test` (exact CI command)
+- [x] `skills/serve/SKILL.md` route table row; regen `skills-data.ts`
+- [x] `npm test` (exact CI command)
