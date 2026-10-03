@@ -349,6 +349,12 @@ function connectorContract(b: BackendCase): void {
       pid = info.pid
       assert.ok(pid !== undefined && pidAlive(pid))
     } finally {
+      // tmux: hide the recorded pid so the session-id path is the only
+      // reaper — the fake pane is itself a detached group leader, so the
+      // generic -pid kill would mask a broken kill-session
+      if (b.tmux === true && pid !== undefined) {
+        patchAgentRegistry(f.main, 'fx-1', { pid: undefined })
+      }
       // the assertion-failure path — cleanup runs with no stop() first
       cleanup(f)
     }
