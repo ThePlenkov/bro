@@ -199,9 +199,16 @@ function probeAgentConnectors(
   for (const match of matchers) {
     for (const c of agentRegistry) {
       // probe first — only a matcher that claims the repo gets
-      // constructed; a claim that can't construct is a recorded failure,
-      // not a silent fallthrough
-      if (match(c) !== true) {
+      // constructed; a throwing matcher or a claim that can't construct
+      // is a recorded failure, not a silent fallthrough
+      let claimed: boolean | undefined
+      try {
+        claimed = match(c)
+      } catch (err) {
+        probeFailures.set(c.name, err instanceof Error ? err.message : String(err))
+        continue
+      }
+      if (claimed !== true) {
         continue
       }
       try {
@@ -336,14 +343,18 @@ function writeWorkMarker(dir: string, agentId: string, molStep: string, pid?: nu
  *  spawn at this marker. */
 function dropWorkMarker(dir: string, molStep: string, entry: AgentRegistryEntry): void {
   try {
-    const cur = readAgentRegistry(dir)[molStep]
-    if (cur !== undefined && cur.agentId === entry.agentId && cur.spawnedAt !== entry.spawnedAt) {
-      return // respawned — the live run owns the marker now
-    }
-    const marker = workMarkerPath(dir, entry.agentId)
-    if (marker !== null) {
-      rmSync(marker, { force: true })
-    }
+    // revalidate + unlink must not interleave with a respawn's registry
+    // write + marker write — same lock the spawner holds (re-entrant)
+    withAgentRegistryLock(dir, () => {
+      const cur = readAgentRegistry(dir)[molStep]
+      if (cur !== undefined && cur.agentId === entry.agentId && cur.spawnedAt !== entry.spawnedAt) {
+        return // respawned — the live run owns the marker now
+      }
+      const marker = workMarkerPath(dir, entry.agentId)
+      if (marker !== null) {
+        rmSync(marker, { force: true })
+      }
+    })
   } catch {
     // best-effort
   }
