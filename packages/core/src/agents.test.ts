@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
@@ -192,6 +192,37 @@ describe('registry lock', () => {
       const past = new Date(Date.now() - 120_000)
       utimesSync(lock, past, past)
       const release = acquireAgentRegistryLock(dir)
+      release()
+      assert.equal(existsSync(lock), false)
+    })
+  })
+
+  test('a live holder’s lock is never stolen — the contender fails, the lock survives', () => {
+    withRepo((dir) => {
+      const lock = `${agentRegistryPath(dir)!}.lock`
+      mkdirSync(dirname(lock), { recursive: true })
+      // a real holder token is <pid>:<hex>; our own pid is alive and the
+      // file is way past the old age-only break — a slow-but-alive
+      // backend start (gascity's multi-minute section) must not be
+      // double-entered
+      writeFileSync(lock, `${process.pid}:cafe`)
+      const past = new Date(Date.now() - 10 * 60_000)
+      utimesSync(lock, past, past)
+      assert.throws(() => acquireAgentRegistryLock(dir, { waitMs: 200 }), /lock held/)
+      assert.equal(readFileSync(lock, 'utf8'), `${process.pid}:cafe`)
+    })
+  })
+
+  test('a dead-pid lock is broken — the contender recovers the section', () => {
+    withRepo((dir) => {
+      const lock = `${agentRegistryPath(dir)!}.lock`
+      mkdirSync(dirname(lock), { recursive: true })
+      // a pid that has already exited — spawnSync returns after death
+      const dead = spawnSync(process.execPath, ['-e', '']).pid!
+      writeFileSync(lock, `${dead}:cafe`)
+      const past = new Date(Date.now() - 120_000)
+      utimesSync(lock, past, past)
+      const release = acquireAgentRegistryLock(dir, { waitMs: 5_000 })
       release()
       assert.equal(existsSync(lock), false)
     })

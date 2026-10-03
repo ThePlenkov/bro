@@ -187,21 +187,43 @@ export function writeAgentRegistry(
  *  patchAgentRegistry without deadlocking on itself. */
 const heldRegistryLocks = new Set<string>()
 
-/** A crashed holder leaves the lock file behind — break it once it's
- *  older than any legit critical section (bd subprocess is the slowest
- *  at ≤15s). The wait bound must exceed that ceiling: a holder stuck on
- *  a slow-but-alive bd call (10–15s) must not fail its waiters. */
+/** A dead holder leaves the lock file behind. The token carries the
+ *  holder pid, so recovery proves death (kill(pid,0)) instead of
+ *  guessing from age: a live holder's lock is NEVER broken on age
+ *  alone — a gascity spawn legitimately holds the section through
+ *  backend starts with multi-minute timeouts, and an age-only break
+ *  would let a contender double-spawn alongside it. STALE covers
+ *  unparseable/dead-pid residue; ORPHAN is the live-pid backstop for
+ *  pid reuse (a recorded pid now owned by an unrelated process), set
+ *  beyond any legit critical section. The wait bound stays far below
+ *  STALE: a contender that can't take the lock fails fast with a
+ *  retryable error rather than stealing it. */
 const REGISTRY_LOCK_STALE_MS = 60_000
+const REGISTRY_LOCK_ORPHAN_MS = 15 * 60_000
 const REGISTRY_LOCK_WAIT_MS = 20_000
 
 const syncSleep = (ms: number): void => {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
 
+/** pid alive = kill(pid, 0) doesn't throw. EPERM means the process
+ *  exists but isn't ours — still alive. Local copy: core can't import
+ *  the cli's pidAlive. */
+const lockPidAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
 /** One acquisition attempt — true when the lock is ours. On EEXIST a
- *  stale lock (crashed holder) is broken so the next retry can take it.
- *  The file carries the caller's token: existence is the lock, the token
- *  is the ownership proof release() checks before removing it. */
+ *  stale lock is broken so the next retry can take it — but only once
+ *  the holder is proven dead (unparseable token or dead pid past
+ *  STALE, or anything past ORPHAN). The file carries the caller's
+ *  token: existence is the lock, the token is the ownership proof
+ *  release() checks before removing it. */
 const tryAcquireLockFile = (lock: string, token: string): boolean => {
   try {
     const fd = openSync(lock, 'wx')
@@ -222,8 +244,11 @@ const tryAcquireLockFile = (lock: string, token: string): boolean => {
     // file shows a fresh mtime or a different token — either way the
     // delete is skipped instead of robbing its fresh lock.
     const holder = readFileSync(lock, 'utf8')
+    const pid = Number(holder.split(':')[0])
+    const holderAlive = Number.isInteger(pid) && pid > 0 && lockPidAlive(pid)
+    const age = Date.now() - statSync(lock).mtimeMs
     if (
-      Date.now() - statSync(lock).mtimeMs > REGISTRY_LOCK_STALE_MS &&
+      age > (holderAlive ? REGISTRY_LOCK_ORPHAN_MS : REGISTRY_LOCK_STALE_MS) &&
       readFileSync(lock, 'utf8') === holder
     ) {
       rmSync(lock, { force: true })
@@ -238,7 +263,10 @@ const tryAcquireLockFile = (lock: string, token: string): boolean => {
  *  existence IS the lock). Serializes registry read-modify-write across
  *  bro processes: without it two spawns both read the pre-write state
  *  and the loser's patch is silently dropped. Returns the release. */
-export function acquireAgentRegistryLock(dir: string): () => void {
+export function acquireAgentRegistryLock(
+  dir: string,
+  opts: { waitMs?: number } = {}
+): () => void {
   const path = agentRegistryPath(dir)
   if (!path) {
     throw new Error('no git common dir — cannot lock agents.json')
@@ -248,11 +276,12 @@ export function acquireAgentRegistryLock(dir: string): () => void {
   if (heldRegistryLocks.has(lock)) {
     return () => {} // re-entrant — the outer section owns it
   }
+  const waitMs = opts.waitMs ?? REGISTRY_LOCK_WAIT_MS
   const token = `${process.pid}:${randomBytes(8).toString('hex')}`
-  const deadline = Date.now() + REGISTRY_LOCK_WAIT_MS
+  const deadline = Date.now() + waitMs
   while (!tryAcquireLockFile(lock, token)) {
     if (Date.now() >= deadline) {
-      throw new Error(`agents.json lock held over ${REGISTRY_LOCK_WAIT_MS / 1000}s`)
+      throw new Error(`agents.json lock held over ${waitMs / 1000}s`)
     }
     syncSleep(25)
   }
