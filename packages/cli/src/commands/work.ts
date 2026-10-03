@@ -27,6 +27,7 @@ import {
   git,
   gitTry,
   loadConfig,
+  LockTimeout,
   stackSection,
   taskStore,
   type Connector,
@@ -143,9 +144,14 @@ export function claimLockPath(path: string): string | null {
  *  write must not break enter; the other occupancy planes still apply.
  *  The stamp runs under claimLockPath so `bro drive` can't remove the
  *  tree mid-claim. Returns 'gone' when the tree was retired before the
- *  stamp (callers must not report the dead path as ready), 'skipped'
- *  on an advisory write failure. */
-export function claimWorktree(path: string, detail: string): 'stamped' | 'gone' | 'skipped' {
+ *  stamp (callers must not report the dead path as ready),
+ *  'lock-timeout' when a live holder outlasted the lock wait (a driver
+ *  may still be mid-retire — not ready either), 'skipped' on an
+ *  advisory write failure. */
+export function claimWorktree(
+  path: string,
+  detail: string
+): 'stamped' | 'gone' | 'lock-timeout' | 'skipped' {
   try {
     const lock = claimLockPath(path)
     if (lock === null) {
@@ -174,7 +180,12 @@ export function claimWorktree(path: string, detail: string): 'stamped' | 'gone' 
     } finally {
       release()
     }
-  } catch {
+  } catch (err) {
+    // contention is not advisory — a driver holding the claim lock may
+    // still retire the tree after we report ready
+    if (err instanceof LockTimeout) {
+      return 'lock-timeout'
+    }
     // advisory — occupancy falls back to the other planes
     return 'skipped'
   }
@@ -420,6 +431,9 @@ export interface EnterWorktreeResult {
    *  a `bro drive` retire won the claim lock. Callers must abort rather
    *  than report the dead path as ready */
   gone?: boolean
+  /** the claim-lock wait expired on a live holder — a driver may still
+   *  be mid-retire, so callers must abort rather than report ready */
+  claimLockTimedOut?: boolean
 }
 
 export interface EnterWorktreeOpts {
@@ -517,10 +531,14 @@ export function finishWorktreeEnter(
 ): EnterWorktreeResult {
   const { slug, branch, base } = opts
   const { path } = created
-  if (claimWorktree(path, slug) === 'gone') {
+  const stamp = claimWorktree(path, slug)
+  if (stamp === 'gone') {
     // a driver retired the tree between the add and the stamp — claiming
     // the bead and reporting success would strand both on a dead path
     return { path, branch, stacked: false, claim: {}, gone: true }
+  }
+  if (stamp === 'lock-timeout') {
+    return { path, branch, stacked: false, claim: {}, claimLockTimedOut: true }
   }
   if (created.reused) {
     const edgeBase = readStackEdges().get(branch)
@@ -556,6 +574,10 @@ function cmdEnter(argv: string[]): void {
     process.exit(1)
   }
   const r = enterWorktree({ slug, branch, base, main, defaultRef })
+  if (r.claimLockTimedOut) {
+    console.error(`error: claim lock for ${r.path} timed out — retry enter`)
+    process.exit(1)
+  }
   if (r.gone) {
     console.error(`error: ${r.path} was retired before the claim could land — nothing to enter`)
     process.exit(1)

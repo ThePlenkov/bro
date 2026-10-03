@@ -252,6 +252,10 @@ function reportPush(
   base: string | undefined,
   slug: string
 ): void {
+  if (r.claimLockTimedOut) {
+    console.error(`error: claim lock for ${r.path} timed out — retry push`)
+    process.exit(1)
+  }
   if (r.gone) {
     console.error(`error: ${r.path} was retired before the claim could land — aborting`)
     process.exit(1)

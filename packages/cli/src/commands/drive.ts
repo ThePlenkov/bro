@@ -509,7 +509,9 @@ function retireLanding(ctx: Ctx, state: PrActState, worktree: string | undefined
 }
 
 /** Fresh occupancy inputs — the pass-level snapshot predates the
- *  thread refetch by seconds, long enough for a claim to land unseen. */
+ *  thread refetch by seconds, long enough for a claim to land unseen.
+ *  Call under the occupancy locks: a pre-lock snapshot can still miss a
+ *  claim that lands while the registry lock is being waited on. */
 async function freshOccupancy(ctx: Ctx): Promise<Pick<PassWork, 'agents' | 'workDetails'>> {
   const { byStep } = await collectAgents(ctx.mainRoot)
   const hooks = hooksDirOf(ctx.mainRoot)
@@ -547,16 +549,18 @@ function acquireOccupancyLocks(dir: string, wt: string | undefined): () => void 
 }
 
 /** Remove a just-created fixer worktree iff still orphaned — the
- *  occupancy probe and `git worktree remove` run under both occupancy
- *  locks (see acquireOccupancyLocks). Returns the occupancy detail when
- *  the tree is owned or a lock can't be taken, undefined when retired. */
-function retireIfOrphaned(
+ *  occupancy refresh, probe, and `git worktree remove` all run under
+ *  both occupancy locks (see acquireOccupancyLocks). Refreshing inside
+ *  the hold matters: the lock wait itself is a window where a claimant
+ *  can land a registry entry a pre-lock snapshot would miss. Returns
+ *  the occupancy detail when the tree is owned or a lock can't be
+ *  taken, undefined when retired. */
+async function retireIfOrphaned(
   ctx: Ctx,
   wt: string,
   branch: string,
-  fixer: TaskRow | undefined,
-  fresh: Pick<PassWork, 'agents' | 'workDetails'>
-): string | undefined {
+  fixer: TaskRow | undefined
+): Promise<string | undefined> {
   let release: () => void
   try {
     release = acquireOccupancyLocks(ctx.mainRoot, wt)
@@ -566,6 +570,7 @@ function retireIfOrphaned(
     return `occupancy re-check failed — ${errText(err)}`
   }
   try {
+    const fresh = await freshOccupancy(ctx)
     const occ = occupied({
       agents: fresh.agents,
       fixerBead: fixer?.id,
@@ -613,13 +618,12 @@ async function spawnFixer(
     if (created) {
       // re-check occupancy before retiring a dir we just added — another
       // owner could claim it during the thread refetch, and `git
-      // worktree remove` on a clean tree deletes even a live cwd. Fresh
-      // inputs (the pass snapshot predates the refetch), and the
-      // registry lock held across check+remove: a claimant writes its
-      // registry entry + .work marker under the same lock, so a claim
-      // lands before the check or after the remove — never between
-      const fresh = await freshOccupancy(ctx)
-      const retire = retireIfOrphaned(ctx, wt, state.headRef, fixer, fresh)
+      // worktree remove` on a clean tree deletes even a live cwd. The
+      // refresh + check + remove all run inside retireIfOrphaned under
+      // both occupancy locks: a claimant writes its registry entry +
+      // .work marker under the same locks, so a claim lands before the
+      // check or after the remove — never between
+      const retire = await retireIfOrphaned(ctx, wt, state.headRef, fixer)
       if (retire !== undefined) {
         return { pr, link, verdict: 'occupied', detail: retire }
       }
@@ -629,9 +633,10 @@ async function spawnFixer(
   // a last occupancy read right before the spawn — the gap since the
   // pass-level check covered the worktree create + thread refetch,
   // long enough for another owner to arm this branch. Both occupancy
-  // locks are held across probe→spawn (see acquireOccupancyLocks) so a
-  // `bro work enter` or a competing spawn can't land a claim between
-  const fresh = await freshOccupancy(ctx)
+  // locks are held across refresh→probe→spawn (see acquireOccupancyLocks)
+  // so a `bro work enter` or a competing spawn can't land a claim
+  // between — the refresh itself must come after the acquire, or the
+  // lock wait is one more stale-input window
   let release: () => void
   try {
     release = acquireOccupancyLocks(ctx.mainRoot, wt)
@@ -644,6 +649,7 @@ async function spawnFixer(
     }
   }
   try {
+    const fresh = await freshOccupancy(ctx)
     const occ = occupied({
       agents: fresh.agents,
       fixerBead: fixer?.id,
