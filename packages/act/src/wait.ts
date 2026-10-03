@@ -53,7 +53,12 @@ export async function waitForGate(
   const intervalMs = opts.intervalMs ?? 60_000
   const maxErrors = opts.maxFetchErrors ?? 3
   const deadline = Date.now() + (opts.timeoutMs ?? 45 * 60_000)
-  const marker = opts.watch ? watchBegin(opts.watch.dir, opts.watch) : null
+  let marker: string | null = null
+  if (opts.watch) {
+    // strip dir — it selects the marker root, not part of the stored schema
+    const { dir, ...w } = opts.watch
+    marker = watchBegin(dir, w)
+  }
   let polls = 0
   let fetchErrors = 0
   let updatedSha = ''

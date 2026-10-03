@@ -87,7 +87,11 @@ function watchLines(dir: string): string[] {
         )
         continue
       }
-      watchRetire(file)
+      // the retire is an atomic claim — a racing session start already
+      // reporting this stale promise loses the rename and skips it
+      if (!watchRetire(file)) {
+        continue
+      }
       const mode = watch.merge ? ' (was set to merge on green)' : ''
       out.push(
         `stale act watch on ${watch.link}${mode} — the watching session died; ` +
@@ -105,7 +109,9 @@ export const actConnector: Connector = {
   name: 'act',
   hooks: () => ({
     async sessionStart(ctx) {
-      const out: string[] = []
+      // watch markers first — local fs only, so a slow gate probe that
+      // blows the hook budget can't strand a stale-promise report
+      const out: string[] = watchLines(ctx.dir)
       const gate = await gateLine(ctx.dir)
       if (gate) {
         out.push(gate)
@@ -114,7 +120,6 @@ export const actConnector: Connector = {
       if (slot) {
         out.push(slot)
       }
-      out.push(...watchLines(ctx.dir))
       return out
     },
     async promptSubmit(ctx, prompt) {
