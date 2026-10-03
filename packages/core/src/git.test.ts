@@ -105,9 +105,11 @@ describe('gitDriftRef', () => {
         git(dir, ['push', '-q', 'origin', 'main'])
         git(dir, ['fetch', '-q', 'origin'])
         // a CI checkout shape: remote-tracking main exists but no
-        // origin/HEAD symref (recent git auto-creates it on fetch —
-        // symbolic-ref -d drops the symref; update-ref -d would
-        // dereference and delete origin/main itself)
+        // origin/HEAD symref. set-head creates it deterministically
+        // (newer git may have already; older never does) so the delete
+        // can't fail on a missing ref — and symbolic-ref -d, not
+        // update-ref -d, which would dereference and drop origin/main
+        git(dir, ['remote', 'set-head', 'origin', 'main'])
         git(dir, ['symbolic-ref', '-d', 'refs/remotes/origin/HEAD'])
         git(dir, ['checkout', '-qb', 'develop'])
         git(dir, ['branch', '-qD', 'main'])
