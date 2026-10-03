@@ -13,7 +13,7 @@
  *    3. neither resolves → `no-scope`.
  *  The spec's own path is always excluded (`:(exclude)<spec-path>`) —
  *  a `scope: specs/**` cannot mask its own drift. */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import {
   gitDriftRef,
@@ -90,9 +90,11 @@ function negativePathspec(entry: string): boolean {
  *  engine's half of "spec vs code". `ref` resolution is the caller's
  *  (the recency probe owns the origin/HEAD → main → HEAD chain).
  *  `spec` is the serving facade; explicit scope and the spec path
- *  come from it, commits from git. */
-export function resolveScope(dir: string, ref: string, id: string, spec: SpecStore): ScopeResult {
-  const specPath = pickSpecPath(dir, spec.tree(), id)
+ *  come from it, commits from git. `auditedSpecPath` is the path the
+ *  caller actually audits (a `spec:` link can win over the tree pick)
+ *  — it is the file the exclusion masks. */
+export function resolveScope(dir: string, ref: string, id: string, spec: SpecStore, auditedSpecPath?: string): ScopeResult {
+  const specPath = auditedSpecPath ?? pickSpecPath(dir, spec.tree(), id)
   // the spec path is a filesystem path, not a user pathspec — literal
   // keeps a `specs/[id].md` name from globbing
   const exclude = specPath === undefined ? [] : [`:(exclude,literal)${specPath}`]
@@ -196,7 +198,10 @@ export function specLinkPath(dir: string, desc: string | undefined): string | un
     t === undefined ||
     /^[a-z][a-z0-9+.-]*:/i.test(t) ||
     badScopeEntry(t) ||
-    !existsSync(join(dir, t))
+    // a regular file only — a dir target would date every commit under
+    // it, conflating the spec with everything it documents
+    !existsSync(join(dir, t)) ||
+    !statSync(join(dir, t)).isFile()
   ) {
     return undefined
   }
@@ -229,7 +234,7 @@ export function driftRow(dir: string, id: string, spec: SpecStore, env: DriftEnv
     // uncommitted, or committed on a branch that hasn't landed on the ref
     return unverifiable(id, `no spec commit on ${env.ref}`)
   }
-  const scope = resolveScope(dir, env.ref, id, spec)
+  const scope = resolveScope(dir, env.ref, id, spec, specPath)
   if (scope.state === 'no-scope') {
     return { id, state: 'no-scope', detail: 'no frontmatter scope, no bead-id commits' }
   }
