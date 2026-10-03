@@ -729,6 +729,44 @@ function bearerMatch(header: string | undefined, token: string): boolean {
   return a.length === b.length && a.length > 0 && timingSafeEqual(a, b)
 }
 
+/** The guards on state-changing requests — returns the refusal to
+ *  send, or undefined when the write may proceed. Order: bearer token
+ *  first (the "local session context" check — spawn/stop mutate agents
+ *  and beads claims, so the caller must present the session token from
+ *  serve.json, mode 0600 — normally readable only by the owner, so
+ *  possession means a same-UID process, the privilege `bro agents up`
+ *  itself needs; a browser can't send Authorization cross-site without
+ *  a preflight we never answer), then the Origin allowlist (a hostile
+ *  page can't hide its Origin — a present-but-foreign one is refused;
+ *  Origin-less clients like curl/TUI/node fetch pass, the content-type
+ *  gate is the second barrier for the simple-request shape), then the
+ *  non-simple content-type on body-bearing writes (a browser can't
+ *  send it cross-site without a preflight this server never answers). */
+function writeGuard(
+  req: IncomingMessage,
+  meta: ServeMeta,
+  token: string,
+  wantsBody: boolean
+): ServeResponse | undefined {
+  if (!bearerMatch(req.headers.authorization, token)) {
+    return {
+      status: 401,
+      body: {
+        error: `session token required — read it from ${serveStatePath(meta.dir) ?? '<git-common-dir>/bro/serve.json'}`,
+      },
+      headers: { 'www-authenticate': 'Bearer' },
+    }
+  }
+  const origin = req.headers.origin
+  if (origin !== undefined && !isLoopbackOrigin(origin)) {
+    return { status: 403, body: { error: 'loopback origin only' } }
+  }
+  if (wantsBody && !(req.headers['content-type'] ?? '').startsWith('application/json')) {
+    return { status: 415, body: { error: 'writes need content-type: application/json' } }
+  }
+  return undefined
+}
+
 export function createServeHandler(
   deps: ServeDeps,
   meta: ServeMeta,
@@ -749,47 +787,16 @@ export function createServeHandler(
           send(res, 403, { error: 'loopback host only' })
           return
         }
-        // The local-session-context check on writes — spawn/stop mutate
-        // agents and beads claims, so the caller must present the
-        // session token from serve.json (mode 0600 — normally readable
-        // only by the owner, so possession means a same-UID process,
-        // the privilege `bro agents up` itself needs).
-        // A browser can't send Authorization cross-site without a
-        // preflight we never answer, and a non-owner local process
-        // can't read the file. Checked before Origin so the refusal is
-        // the same 401 for every credential-less write.
-        if (WRITE_METHODS.has(req.method ?? 'GET') && !bearerMatch(req.headers.authorization, token)) {
-          send(res, 401, {
-            error: `session token required — read it from ${serveStatePath(meta.dir) ?? '<git-common-dir>/bro/serve.json'}`,
-          }, { headers: { 'www-authenticate': 'Bearer' } })
-          return
-        }
-        // Origin allowlist on writes — a hostile page can't hide its
-        // Origin (the browser sets it), so a present-but-foreign one is
-        // refused outright. Clients that send none (curl, TUI, node
-        // fetch) pass here; the content-type gate below is the second
-        // barrier for the Origin-less simple-request shape.
+        const wantsBody =
+          req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
         if (WRITE_METHODS.has(req.method ?? 'GET')) {
-          const origin = req.headers.origin
-          if (origin !== undefined && !isLoopbackOrigin(origin)) {
-            send(res, 403, { error: 'loopback origin only' })
+          const refusal = writeGuard(req, meta, token, wantsBody)
+          if (refusal !== undefined) {
+            send(res, refusal.status, refusal.body, refusal)
             return
           }
         }
         const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-        const wantsBody =
-          req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
-        // loopback alone is not a write barrier — a hostile web page can
-        // POST simple requests (text/plain/form) cross-origin. Requiring
-        // a non-simple content-type forces a preflight this server never
-        // answers, so the browser blocks the write before it lands.
-        if (
-          wantsBody &&
-          !(req.headers['content-type'] ?? '').startsWith('application/json')
-        ) {
-          send(res, 415, { error: 'writes need content-type: application/json' })
-          return
-        }
         const rawBody = wantsBody ? await readBody(req) : undefined
         const r = await routeRequest(req.method ?? 'GET', url.pathname, rawBody, deps, meta)
         send(res, r.status, r.body, r)
