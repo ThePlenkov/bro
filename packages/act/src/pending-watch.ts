@@ -46,8 +46,8 @@ const WATCH_TTL_MS = 24 * 60 * 60 * 1000
  *  one linked worktree is visible to sessions in every other. */
 function watchesDir(dir: string): string | null {
   try {
-    const gd = execFileSync( // NOSONAR — git is the runner's own tool; PATH is trusted config
-      'git',
+    const gd = execFileSync(
+      'git', // NOSONAR — git is the runner's own tool; PATH is trusted config
       ['-C', dir, 'rev-parse', '--git-common-dir'],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
     ).trim()
@@ -126,53 +126,52 @@ export function watchRetire(file: string): void {
   }
 }
 
+function readMarker(file: string): PendingWatch | null {
+  try {
+    const w = JSON.parse(readFileSync(file, 'utf8')) as PendingWatch
+    return typeof w.pr === 'number' &&
+      typeof w.pid === 'number' &&
+      typeof w.startedAt === 'number'
+      ? w
+      : null
+  } catch {
+    return null
+  }
+}
+
+function pruneFile(file: string): void {
+  try {
+    rmSync(file)
+  } catch {
+    // prune is best-effort
+  }
+}
+
 /** All recorded watches with pid liveness — a dead pid means the session
- *  that promised to watch is gone and nobody is polling. */
+ *  that promised to watch is gone and nobody is polling. Anything that
+ *  isn't a fresh, well-formed marker (interrupted tmp write, malformed
+ *  JSON, TTL-expired) is pruned on the way through. */
 export function listWatches(dir: string): ListedWatch[] {
   const wd = watchesDir(dir)
   if (!wd) {
     return []
   }
-  const out: ListedWatch[] = []
   let files: string[]
   try {
     files = readdirSync(wd)
   } catch {
-    return out
+    return []
   }
+  const out: ListedWatch[] = []
   for (const f of files) {
     const file = join(wd, f)
-    if (!f.endsWith('.json')) {
-      // residue of an interrupted atomic write — prune
-      try {
-        rmSync(file)
-      } catch {
-        // prune is best-effort
-      }
+    const w = f.endsWith('.json') ? readMarker(file) : null
+    if (w === null || Date.now() - w.startedAt > WATCH_TTL_MS) {
+      pruneFile(file)
       continue
     }
-    try {
-      const w = JSON.parse(readFileSync(file, 'utf8')) as PendingWatch
-      if (
-        typeof w.pr !== 'number' ||
-        typeof w.pid !== 'number' ||
-        typeof w.startedAt !== 'number'
-      ) {
-        throw new Error('malformed marker')
-      }
-      if (Date.now() - w.startedAt > WATCH_TTL_MS) {
-        rmSync(file)
-        continue
-      }
-      out.push({ watch: w, file, alive: pidAlive(w.pid) })
-    } catch {
-      // malformed or unreadable marker — prune so it never lingers
-      try {
-        rmSync(file)
-      } catch {
-        // prune is best-effort
-      }
-    }
+    out.push({ watch: w, file, alive: pidAlive(w.pid) })
   }
   return out
 }
+
