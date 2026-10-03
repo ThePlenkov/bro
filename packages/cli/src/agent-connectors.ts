@@ -150,41 +150,51 @@ export function resolveAgentConnector(
   const url = gitTry(['-C', ctx.dir, 'remote', 'get-url', 'origin'])
   const remote = url.code === 0 ? url.out.trim() : ''
   // matchers run on a probe instance — construction must be side-effect
-  // free; a backend that can't even construct is skipped as no-match
+  // free; a backend that can't even construct is skipped as no-match,
+  // but the failure is collected and surfaced, not swallowed silently
+  const probeFailures = new Map<string, string>()
+  const probe = (c: (typeof agentRegistry)[number]): AgentConnector | undefined => {
+    try {
+      return c.make(ctx, env)
+    } catch (err) {
+      probeFailures.set(c.name, err instanceof Error ? err.message : String(err))
+      return undefined
+    }
+  }
+  let chosen: AgentConnector | undefined
   if (remote !== '') {
     for (const c of agentRegistry) {
-      const probe = probeAgentConnector(c, ctx, env)
-      if (probe?.matchRemote?.(remote) === true) {
-        return probe
+      const p = probe(c)
+      if (p?.matchRemote?.(remote) === true) {
+        chosen = p
+        break
       }
     }
   }
-  for (const c of agentRegistry) {
-    const probe = probeAgentConnector(c, ctx, env)
-    if (probe?.matchDir?.(ctx.dir) === true) {
-      return probe
+  if (chosen === undefined) {
+    for (const c of agentRegistry) {
+      const p = probe(c)
+      if (p?.matchDir?.(ctx.dir) === true) {
+        chosen = p
+        break
+      }
     }
   }
-  const first = agentRegistry[0]
-  if (!first) {
-    throw new Error('no agent connector registered')
+  if (chosen === undefined) {
+    const first = agentRegistry[0]
+    if (!first) {
+      throw new Error('no agent connector registered')
+    }
+    chosen = makeAgentConnector(first, ctx, env)
   }
-  return makeAgentConnector(first, ctx, env)
-}
-
-/** Constructor failure while probing a backend — a connector that
- *  cannot instantiate has no matcher to run, so probe loops treat it
- *  as no-match rather than failing the whole resolution. */
-function probeAgentConnector(
-  c: (typeof agentRegistry)[number],
-  ctx: ConnectorCtx,
-  env: AgentConnectorEnv
-): AgentConnector | undefined {
-  try {
-    return c.make(ctx, env)
-  } catch {
-    return undefined
+  // a backend that failed to even construct is diagnosable config rot —
+  // name it so silent failover doesn't hide a broken registration
+  for (const [n, why] of probeFailures) {
+    if (n !== chosen.name) {
+      console.error(`warning: agent connector "${n}" skipped — failed to initialize: ${why}`)
+    }
   }
+  return chosen
 }
 
 /** The chosen connector's constructor threw — a broken backend is a

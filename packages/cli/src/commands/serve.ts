@@ -269,7 +269,10 @@ export function acquireServeLock(dir: string): (() => void) | undefined {
   const staged = `${lock}.${process.pid}.tmp`
   writeFileSync(staged, `${process.pid}`)
   try {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    // extra attempts with a beat between them cover the wx fallback's
+    // create-then-write window — a live writer fills the lock in
+    // microseconds, so a fresh-empty verdict resolves on retry 2+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
       const verdict = tryLockOnce(staged, lock)
       if (verdict === 'acquired') {
         return () => releaseServeLock(lock)
@@ -277,6 +280,7 @@ export function acquireServeLock(dir: string): (() => void) | undefined {
       if (verdict === 'held') {
         return undefined
       }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25)
     }
     return undefined
   } finally {
