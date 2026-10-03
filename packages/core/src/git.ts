@@ -63,6 +63,11 @@ export function gitLogStamp(
   pathspecs: string[],
   opts?: { follow?: boolean }
 ): GitLogStamp {
+  if (pathspecs.length === 0) {
+    // `git log ref --` with no pathspecs audits the whole repo —
+    // silent widening, so an empty scope is an error, never fresh data
+    return { state: 'error', err: 'empty pathspecs' }
+  }
   const args = ['-C', dir, 'log', '-1', '--format=%H%x09%cI%x09%ct']
   if (opts?.follow === true) {
     args.push('--follow')
@@ -77,7 +82,11 @@ export function gitLogStamp(
     return { state: 'none' }
   }
   const [sha = '', iso = '', ts = ''] = line.split('\t')
-  return { state: 'commit', stamp: { sha, iso, ts: Number(ts) } }
+  const epoch = ts === '' ? Number.NaN : Number(ts)
+  if (sha === '' || Number.isNaN(epoch)) {
+    return { state: 'error', err: `unparseable git log line: ${line}` }
+  }
+  return { state: 'commit', stamp: { sha, iso, ts: epoch } }
 }
 
 /** `git merge-base --is-ancestor` — the drift tie-break: equal

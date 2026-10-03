@@ -116,6 +116,14 @@ describe('gitLogStamp', () => {
     })
   })
 
+  test('empty pathspecs are an error — never a whole-repo audit', () => {
+    withRepo((dir) => {
+      const r = gitLogStamp(dir, 'HEAD', [])
+      assert.equal(r.state, 'error')
+      assert.match(r.state === 'error' ? r.err : '', /empty pathspecs/)
+    })
+  })
+
   test('a bad ref and unborn history are error, not throw', () => {
     withRepo((dir) => {
       const r = gitLogStamp(dir, 'nonexistent-ref', ['src/'])
