@@ -5,16 +5,23 @@
  *   bro serve [--port <n>]
  *
  * HTTP/JSON bound to 127.0.0.1 — the loopback bind IS the v1 trust
- * boundary: no remote exposure, no auth model. Write ops (spawn/stop)
- * are safe because the server runs inside the local session context;
- * remote orchestration, if ever, is a separate spec. Loopback alone is
- * not a write barrier though — a hostile web page can fire simple
- * cross-origin POSTs, so every write (POST/PUT/PATCH/DELETE) refuses a
- * non-loopback `Origin` (the browser stamps every cross-site request —
- * a foreign one is 403), and body-bearing writes additionally require
- * `content-type: application/json` (a request a browser can't make
- * without a preflight this server never answers). Every request needs
- * a loopback `Host` — a rebound name is 403 (DNS rebinding).
+ * boundary: no remote exposure. "Local session context" is concrete:
+ * writes (spawn/stop mutate agents and beads claims) must present
+ * `Authorization: Bearer <token>` where the token is a per-server
+ * random secret published inside serve.json — written mode 0600, so
+ * read access to that file IS the authorization boundary (same-UID
+ * local process, the same privilege needed to run `bro agents up`
+ * directly). A browser can't mint the header cross-site (non-simple
+ * headers force a preflight this server never answers) and a
+ * non-owner local process can't read the file. Remote orchestration,
+ * if ever, is a separate spec. The browser layers stay on top: every
+ * write also refuses a non-loopback `Origin` (the browser stamps every
+ * cross-site request — a foreign one is 403), and body-bearing writes
+ * require `content-type: application/json` (a request a browser can't
+ * make without a preflight). Every request needs a loopback `Host` —
+ * a rebound name is 403 (DNS rebinding). Reads keep the Host guard
+ * alone: the planes expose repo state a same-UID process can read
+ * from disk anyway.
  *
  *   GET    /                    service index
  *   GET    /fleet               the fleet webui — an HTML dashboard over
@@ -31,13 +38,15 @@
  *                               degraded backend is 503 (unverifiable),
  *                               a clean miss 404
  *
- * Discovery: `<git-common-dir>/bro/serve.json` {pid, url, dir,
- * startedAt} written on listen (tmp+rename), removed on shutdown. A
- * second serve on the same repo refuses while the recorded pid is
- * alive — two live servers would make the file a coin flip.
+ * Discovery + credentials: `<git-common-dir>/bro/serve.json` {pid,
+ * url, dir, startedAt, token} written on listen (tmp+rename, mode
+ * 0600), removed on shutdown. A second serve on the same repo refuses
+ * while the recorded pid is alive — two live servers would make the
+ * file a coin flip.
  */
-import { randomBytes } from 'node:crypto'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import {
+  chmodSync,
   closeSync,
   linkSync,
   mkdirSync,
@@ -81,12 +90,16 @@ import { FLEET_PAGE, WEBUI_CSP } from './webui.ts'
 
 // --- serve state (discovery) ---------------------------------------------------
 
-/** What a client needs to find and trust the server for a repo. */
+/** What a client needs to find and trust the server for a repo. The
+ *  token is the session credential: every write must present it as
+ *  `Authorization: Bearer`, and the file's 0600 mode makes "can read
+ *  the token" mean "same-UID local process". */
 export interface ServeState {
   pid: number
   url: string
   dir: string
   startedAt: string
+  token: string
 }
 
 /** `<git-common-dir>/bro/serve.json` — shared across linked worktrees,
@@ -109,7 +122,11 @@ export function readServeState(dir: string): ServeState | undefined {
     if (
       typeof v.pid === 'number' &&
       typeof v.url === 'string' &&
-      typeof v.dir === 'string'
+      typeof v.dir === 'string' &&
+      typeof v.token === 'string' &&
+      // an empty token would validate yet never authenticate — a
+      // malformed record is torn state, not a live server
+      v.token.length > 0
     ) {
       return v as ServeState
     }
@@ -127,7 +144,16 @@ export function writeServeState(dir: string, state: ServeState): void {
   }
   mkdirSync(dirname(path), { recursive: true })
   const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
-  writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`)
+  // the file carries the session token — publish at 0600 so "can read
+  // it" equals "same-UID local process". rm first so the create-mode
+  // always applies (a pre-existing tmp would keep its old mode through
+  // the truncate, leaving a permissive file until a later chmod); the
+  // chmod then pins 0600 exactly — create-mode is `mode & ~umask`, and
+  // a pathological umask could strip even owner bits, leaving the token
+  // unreadable to its own clients
+  rmSync(tmp, { force: true })
+  writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 })
+  chmodSync(tmp, 0o600)
   renameSync(tmp, path)
 }
 
@@ -686,9 +712,65 @@ function send(
   res.end(contentType === 'application/json' ? `${JSON.stringify(body)}\n` : String(body))
 }
 
+/** The session-token check — a write must carry `Authorization:
+ *  Bearer <token>` (scheme case-insensitive, token exact). Constant-time
+ *  compare: the token is a
+ *  random secret, so the compare is hygiene, not load-bearing — but a
+ *  naive === would leak prefix length to a same-box attacker who
+ *  somehow can't read the 0600 file. */
+function bearerMatch(header: string | undefined, token: string): boolean {
+  // string ops, not a regex — the credential check stays linear even on
+  // a megabyte-long header a hostile client could send. The auth SCHEME
+  // is case-insensitive (RFC 7235); the token compare stays exact
+  const presented =
+    header?.slice(0, 7).toLowerCase() === 'bearer ' ? header.slice(7) : ''
+  const a = Buffer.from(presented, 'utf8')
+  const b = Buffer.from(token, 'utf8')
+  return a.length === b.length && a.length > 0 && timingSafeEqual(a, b)
+}
+
+/** The guards on state-changing requests — returns the refusal to
+ *  send, or undefined when the write may proceed. Order: bearer token
+ *  first (the "local session context" check — spawn/stop mutate agents
+ *  and beads claims, so the caller must present the session token from
+ *  serve.json, mode 0600 — normally readable only by the owner, so
+ *  possession means a same-UID process, the privilege `bro agents up`
+ *  itself needs; a browser can't send Authorization cross-site without
+ *  a preflight we never answer), then the Origin allowlist (a hostile
+ *  page can't hide its Origin — a present-but-foreign one is refused;
+ *  Origin-less clients like curl/TUI/node fetch pass, the content-type
+ *  gate is the second barrier for the simple-request shape), then the
+ *  non-simple content-type on body-bearing writes (a browser can't
+ *  send it cross-site without a preflight this server never answers). */
+function writeGuard(
+  req: IncomingMessage,
+  meta: ServeMeta,
+  token: string,
+  wantsBody: boolean
+): ServeResponse | undefined {
+  if (!bearerMatch(req.headers.authorization, token)) {
+    return {
+      status: 401,
+      body: {
+        error: `session token required — read it from ${serveStatePath(meta.dir) ?? '<git-common-dir>/bro/serve.json'}`,
+      },
+      headers: { 'www-authenticate': 'Bearer' },
+    }
+  }
+  const origin = req.headers.origin
+  if (origin !== undefined && !isLoopbackOrigin(origin)) {
+    return { status: 403, body: { error: 'loopback origin only' } }
+  }
+  if (wantsBody && !(req.headers['content-type'] ?? '').startsWith('application/json')) {
+    return { status: 415, body: { error: 'writes need content-type: application/json' } }
+  }
+  return undefined
+}
+
 export function createServeHandler(
   deps: ServeDeps,
-  meta: ServeMeta
+  meta: ServeMeta,
+  token: string
 ): (req: IncomingMessage, res: ServerResponse) => void {
   return (req, res) => {
     void (async () => {
@@ -705,32 +787,16 @@ export function createServeHandler(
           send(res, 403, { error: 'loopback host only' })
           return
         }
-        // Origin allowlist on writes — a hostile page can't hide its
-        // Origin (the browser sets it), so a present-but-foreign one is
-        // refused outright. Clients that send none (curl, TUI, node
-        // fetch) pass here; the content-type gate below is the second
-        // barrier for the Origin-less simple-request shape.
+        const wantsBody =
+          req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
         if (WRITE_METHODS.has(req.method ?? 'GET')) {
-          const origin = req.headers.origin
-          if (origin !== undefined && !isLoopbackOrigin(origin)) {
-            send(res, 403, { error: 'loopback origin only' })
+          const refusal = writeGuard(req, meta, token, wantsBody)
+          if (refusal !== undefined) {
+            send(res, refusal.status, refusal.body, refusal)
             return
           }
         }
         const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-        const wantsBody =
-          req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
-        // loopback alone is not a write barrier — a hostile web page can
-        // POST simple requests (text/plain/form) cross-origin. Requiring
-        // a non-simple content-type forces a preflight this server never
-        // answers, so the browser blocks the write before it lands.
-        if (
-          wantsBody &&
-          !(req.headers['content-type'] ?? '').startsWith('application/json')
-        ) {
-          send(res, 415, { error: 'writes need content-type: application/json' })
-          return
-        }
         const rawBody = wantsBody ? await readBody(req) : undefined
         const r = await routeRequest(req.method ?? 'GET', url.pathname, rawBody, deps, meta)
         send(res, r.status, r.body, r)
@@ -812,7 +878,11 @@ export async function runServeCommand(argv: string[]): Promise<void> {
 
   const env = loadAgentEnv(dir)
   const meta: ServeMeta = { dir, startedAt: '' }
-  const server = createServer(createServeHandler(realDeps(dir, env), meta))
+  // the session token — the "local session context" made concrete.
+  // Generated per serve, never printed: clients read it out of the
+  // 0600 serve.json below, so possession implies same-UID file access
+  const token = randomBytes(32).toString('hex')
+  const server = createServer(createServeHandler(realDeps(dir, env), meta, token))
 
   try {
     const url = await new Promise<string>((resolve, reject) => {
@@ -829,7 +899,16 @@ export async function runServeCommand(argv: string[]): Promise<void> {
       process.exit(1)
     })
 
-    writeServeState(dir, { pid: process.pid, url, dir, startedAt: meta.startedAt })
+    writeServeState(dir, { pid: process.pid, url, dir, startedAt: meta.startedAt, token })
+    // filesystems that ignore mode bits (some fuse/9p/drvfs mounts) can
+    // leave the token group/other-readable — the auth boundary then
+    // doesn't hold, so say so loudly rather than trusting silently
+    const statePath = serveStatePath(dir)
+    if (statePath !== null && (statSync(statePath).mode & 0o077) !== 0) {
+      console.error(
+        `warning: ${statePath} is readable by group/other — the session token is exposed to other local users on this filesystem`
+      )
+    }
     console.log(`bro serve — ${url}`)
     console.log('discovery: <git-common-dir>/bro/serve.json · ctrl-c to stop')
 

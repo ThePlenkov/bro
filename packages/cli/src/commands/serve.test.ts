@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request, type IncomingMessage } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { dirname, join } from 'node:path'
@@ -311,7 +311,7 @@ describe('serve state discovery', () => {
       const path = serveStatePath(main)
       assert.ok(path?.endsWith(join('.git', 'bro', 'serve.json')), String(path))
 
-      const state = { pid: process.pid, url: 'http://127.0.0.1:9999', dir: main, startedAt: 't' }
+      const state = { pid: process.pid, url: 'http://127.0.0.1:9999', dir: main, startedAt: 't', token: 'sekret' }
       writeServeState(main, state)
       assert.deepEqual(readServeState(main), state)
       // our own pid is alive → the file reports a live server
@@ -323,11 +323,28 @@ describe('serve state discovery', () => {
     })
   })
 
+  test('serve.json publishes at owner-only mode and a token-less record reads as torn', () => {
+    const { root, main } = initRepo('bro-serve-state-')
+    inside(main, root, () => {
+      writeServeState(main, { pid: process.pid, url: 'u', dir: main, startedAt: 't', token: 'sekret' })
+      // the file carries the session credential — group/other must get nothing
+      const mode = statSync(serveStatePath(main)!).mode & 0o777
+      assert.equal(mode & 0o077, 0, `serve.json mode ${mode.toString(8)} leaks to group/other`)
+
+      // a state without a token is a foreign/torn record — fail closed
+      writeFileSync(serveStatePath(main)!, JSON.stringify({ pid: 1, url: 'u', dir: main, startedAt: 't' }))
+      assert.equal(readServeState(main), undefined)
+      // an EMPTY token validates yet can never authenticate — torn too
+      writeFileSync(serveStatePath(main)!, JSON.stringify({ pid: 1, url: 'u', dir: main, startedAt: 't', token: '' }))
+      assert.equal(readServeState(main), undefined)
+    })
+  })
+
   test('a dead recorded pid reads as stale, not live', () => {
     const { root, main } = initRepo('bro-serve-state-')
     inside(main, root, () => {
       // pid 2^30 is an implausible live pid on any host
-      writeServeState(main, { pid: 1 << 30, url: 'http://127.0.0.1:1', dir: main, startedAt: 't' })
+      writeServeState(main, { pid: 1 << 30, url: 'http://127.0.0.1:1', dir: main, startedAt: 't', token: 'sekret' })
       assert.equal(liveServeState(main), undefined)
       assert.notEqual(readServeState(main), undefined)
     })
@@ -337,7 +354,7 @@ describe('serve state discovery', () => {
     const { root, main } = initRepo('bro-serve-state-')
     inside(main, root, () => {
       // the file names another pid — our shutdown must not unregister it
-      writeServeState(main, { pid: process.ppid, url: 'u', dir: main, startedAt: 't' })
+      writeServeState(main, { pid: process.ppid, url: 'u', dir: main, startedAt: 't', token: 'sekret' })
       clearServeState(main)
       assert.equal(readServeState(main)?.pid, process.ppid)
     })
@@ -391,7 +408,9 @@ describe('serve state discovery', () => {
 
 describe('serve handler over a real socket', () => {
   test('health, JSON envelope, 413 cap, and bad-JSON 400 all hold on the wire', async () => {
-    const server = createServer(createServeHandler(deps(), { dir: '/repo', startedAt: 't0' }))
+    const TOKEN = 'test-session-token'
+    const auth = { authorization: `Bearer ${TOKEN}` }
+    const server = createServer(createServeHandler(deps(), { dir: '/repo', startedAt: 't0' }, TOKEN))
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
     const port = (server.address() as AddressInfo).port
     const base = `http://127.0.0.1:${port}`
@@ -402,16 +421,56 @@ describe('serve handler over a real socket', () => {
 
       const json = { 'content-type': 'application/json' }
 
+      // writes without the session token are 401 — every write method
+      // alike; a wrong token and a non-Bearer scheme fail closed too
+      for (const [m, p] of [
+        ['POST', '/api/v1/agents'],
+        ['PUT', '/api/v1/agents/native-aa11'],
+        ['PATCH', '/api/v1/agents/native-aa11'],
+        ['DELETE', '/api/v1/agents/native-aa11'],
+      ] as const) {
+        const r = await fetch(`${base}${p}`, { method: m, headers: json })
+        assert.equal(r.status, 401, `${m} ${p}`)
+        assert.equal(r.headers.get('www-authenticate'), 'Bearer')
+      }
+      const wrongToken = await fetch(`${base}/api/v1/agents`, {
+        method: 'POST',
+        headers: { ...json, authorization: 'Bearer nope' },
+        body: '{"molStep":"fx-1"}',
+      })
+      assert.equal(wrongToken.status, 401)
+      const notBearer = await fetch(`${base}/api/v1/agents`, {
+        method: 'POST',
+        headers: { ...json, authorization: `token ${TOKEN}` },
+        body: '{"molStep":"fx-1"}',
+      })
+      assert.equal(notBearer.status, 401)
+
+      // a valid write through the auth gate — the 201 proves the token
+      // path reaches the facade, not just the validators. The auth
+      // scheme itself is case-insensitive (RFC 7235)
+      const spawned = await fetch(`${base}/api/v1/agents`, {
+        method: 'POST',
+        headers: { ...json, authorization: `bearer ${TOKEN}` },
+        body: '{"molStep":"fx-1"}',
+      })
+      assert.equal(spawned.status, 201)
+      const stopped = await fetch(`${base}/api/v1/agents/native-aa11`, {
+        method: 'DELETE',
+        headers: auth,
+      })
+      assert.equal(stopped.status, 200)
+
       const badJson = await fetch(`${base}/api/v1/agents`, {
         method: 'POST',
-        headers: json,
+        headers: { ...json, ...auth },
         body: 'not json',
       })
       assert.equal(badJson.status, 400)
 
       const tooBig = await fetch(`${base}/api/v1/agents`, {
         method: 'POST',
-        headers: json,
+        headers: { ...json, ...auth },
         body: 'x'.repeat(300 * 1024),
       })
       assert.equal(tooBig.status, 413)
@@ -420,6 +479,7 @@ describe('serve handler over a real socket', () => {
       // loopback CSRF guard; a browser simple-request can't set it
       const csrf = await fetch(`${base}/api/v1/agents`, {
         method: 'POST',
+        headers: auth,
         body: '{"molStep":"fx-1"}',
       })
       assert.equal(csrf.status, 415)
@@ -428,26 +488,26 @@ describe('serve handler over a real socket', () => {
       // refused before routing, on body-carrying and DELETE alike
       const foreignPost = await fetch(`${base}/api/v1/agents`, {
         method: 'POST',
-        headers: { ...json, origin: 'http://evil.example' },
+        headers: { ...json, ...auth, origin: 'http://evil.example' },
         body: '{"molStep":"fx-1"}',
       })
       assert.equal(foreignPost.status, 403)
       const foreignDelete = await fetch(`${base}/api/v1/agents/native-aa11`, {
         method: 'DELETE',
-        headers: { origin: 'http://evil.example' },
+        headers: { ...auth, origin: 'http://evil.example' },
       })
       assert.equal(foreignDelete.status, 403)
       // an unparseable or non-origin-shaped Origin fails closed — a
       // loopback hostname with a path is not a value browsers send
       const badOrigin = await fetch(`${base}/api/v1/agents`, {
         method: 'POST',
-        headers: { ...json, origin: 'not a url' },
+        headers: { ...json, ...auth, origin: 'not a url' },
         body: '{"molStep":"fx-1"}',
       })
       assert.equal(badOrigin.status, 403)
       const pathOrigin = await fetch(`${base}/api/v1/agents`, {
         method: 'POST',
-        headers: { ...json, origin: 'http://localhost/path' },
+        headers: { ...json, ...auth, origin: 'http://localhost/path' },
         body: '{"molStep":"fx-1"}',
       })
       assert.equal(pathOrigin.status, 403)
@@ -455,7 +515,7 @@ describe('serve handler over a real socket', () => {
       // the 400 proves the request reached the body parser
       const sameOrigin = await fetch(`${base}/api/v1/agents`, {
         method: 'POST',
-        headers: { ...json, origin: base },
+        headers: { ...json, ...auth, origin: base },
         body: 'not json',
       })
       assert.equal(sameOrigin.status, 400)

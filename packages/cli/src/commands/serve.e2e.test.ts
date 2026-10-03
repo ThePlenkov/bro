@@ -5,7 +5,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   CLI_DIST,
@@ -95,9 +95,38 @@ describe('bro serve e2e', () => {
         const miss = await fetch(`${url}/api/v1/agents/native-nope`)
         assert.equal(miss.status, 404)
 
-        const bad = await fetch(`${url}/api/v1/agents`, {
+        // a credential-less write is refused — the session-token check
+        // ("local session context"): loopback alone authorizes nothing
+        const anon = await fetch(`${url}/api/v1/agents`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
+          body: '{}',
+        })
+        assert.equal(anon.status, 401)
+        assert.equal(anon.headers.get('www-authenticate'), 'Bearer')
+
+        // discovery file lives in the common dir while the server runs —
+        // owner-only: it carries the token writes must present
+        const stateFile = join(main, '.git', 'bro', 'serve.json')
+        assert.equal(existsSync(stateFile), true)
+        assert.equal(statSync(stateFile).mode & 0o077, 0)
+        const state = JSON.parse(readFileSync(stateFile, 'utf8')) as {
+          pid: number
+          url: string
+          token: string
+        }
+        assert.equal(state.pid, child.pid)
+        assert.equal(state.url, url)
+        assert.equal(typeof state.token, 'string')
+        assert.ok(state.token.length > 0)
+        const auth = {
+          'content-type': 'application/json',
+          authorization: `Bearer ${state.token}`,
+        }
+
+        const bad = await fetch(`${url}/api/v1/agents`, {
+          method: 'POST',
+          headers: auth,
           body: '{}',
         })
         assert.equal(bad.status, 400)
@@ -105,19 +134,10 @@ describe('bro serve e2e', () => {
         // a non-JSON write is refused — the loopback CSRF guard
         const forged = await fetch(`${url}/api/v1/agents`, {
           method: 'POST',
+          headers: { authorization: `Bearer ${state.token}` },
           body: '{"molStep":"fx-1"}',
         })
         assert.equal(forged.status, 415)
-
-        // discovery file lives in the common dir while the server runs
-        const stateFile = join(main, '.git', 'bro', 'serve.json')
-        assert.equal(existsSync(stateFile), true)
-        const state = JSON.parse(readFileSync(stateFile, 'utf8')) as {
-          pid: number
-          url: string
-        }
-        assert.equal(state.pid, child.pid)
-        assert.equal(state.url, url)
 
         await stop(child)
         // shutdown retracts the discovery file — a stale URL must not
