@@ -446,6 +446,21 @@ describe('serve handler over a real socket', () => {
       })
       assert.equal(notBearer.status, 401)
 
+      // a valid write through the auth gate — the 201 proves the token
+      // path reaches the facade, not just the validators. The auth
+      // scheme itself is case-insensitive (RFC 7235)
+      const spawned = await fetch(`${base}/api/v1/agents`, {
+        method: 'POST',
+        headers: { ...json, authorization: `bearer ${TOKEN}` },
+        body: '{"molStep":"fx-1"}',
+      })
+      assert.equal(spawned.status, 201)
+      const stopped = await fetch(`${base}/api/v1/agents/native-aa11`, {
+        method: 'DELETE',
+        headers: auth,
+      })
+      assert.equal(stopped.status, 200)
+
       const badJson = await fetch(`${base}/api/v1/agents`, {
         method: 'POST',
         headers: { ...json, ...auth },

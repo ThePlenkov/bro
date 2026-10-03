@@ -708,14 +708,17 @@ function send(
 }
 
 /** The session-token check — a write must carry `Authorization:
- *  Bearer <token>` verbatim. Constant-time compare: the token is a
+ *  Bearer <token>` (scheme case-insensitive, token exact). Constant-time
+ *  compare: the token is a
  *  random secret, so the compare is hygiene, not load-bearing — but a
  *  naive === would leak prefix length to a same-box attacker who
  *  somehow can't read the 0600 file. */
 function bearerMatch(header: string | undefined, token: string): boolean {
   // string ops, not a regex — the credential check stays linear even on
-  // a megabyte-long header a hostile client could send
-  const presented = header?.startsWith('Bearer ') === true ? header.slice(7) : ''
+  // a megabyte-long header a hostile client could send. The auth SCHEME
+  // is case-insensitive (RFC 7235); the token compare stays exact
+  const presented =
+    header?.slice(0, 7).toLowerCase() === 'bearer ' ? header.slice(7) : ''
   const a = Buffer.from(presented, 'utf8')
   const b = Buffer.from(token, 'utf8')
   return a.length === b.length && a.length > 0 && timingSafeEqual(a, b)
@@ -751,7 +754,9 @@ export function createServeHandler(
         // can't read the file. Checked before Origin so the refusal is
         // the same 401 for every credential-less write.
         if (WRITE_METHODS.has(req.method ?? 'GET') && !bearerMatch(req.headers.authorization, token)) {
-          send(res, 401, { error: 'session token required — read it from <git-common-dir>/bro/serve.json' }, { headers: { 'www-authenticate': 'Bearer' } })
+          send(res, 401, {
+            error: `session token required — read it from ${serveStatePath(meta.dir) ?? '<git-common-dir>/bro/serve.json'}`,
+          }, { headers: { 'www-authenticate': 'Bearer' } })
           return
         }
         // Origin allowlist on writes — a hostile page can't hide its
@@ -883,6 +888,15 @@ export async function runServeCommand(argv: string[]): Promise<void> {
     })
 
     writeServeState(dir, { pid: process.pid, url, dir, startedAt: meta.startedAt, token })
+    // filesystems that ignore mode bits (some fuse/9p/drvfs mounts) can
+    // leave the token group/other-readable — the auth boundary then
+    // doesn't hold, so say so loudly rather than trusting silently
+    const statePath = serveStatePath(dir)
+    if (statePath !== null && (statSync(statePath).mode & 0o077) !== 0) {
+      console.error(
+        `warning: ${statePath} is readable by group/other — the session token is exposed to other local users on this filesystem`
+      )
+    }
     console.log(`bro serve — ${url}`)
     console.log('discovery: <git-common-dir>/bro/serve.json · ctrl-c to stop')
 
