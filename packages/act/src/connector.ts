@@ -87,7 +87,7 @@ function mergeSlotLine(): string | null {
 function watchLines(dir: string): string[] {
   try {
     const out: string[] = []
-    for (const { watch, file, alive } of listWatches(dir)) {
+    for (const { watch, file, alive, reported } of listWatches(dir)) {
       if (alive) {
         out.push(
           `act watch active on ${watch.link} (pid ${watch.pid}) — another process is polling`
@@ -95,8 +95,11 @@ function watchLines(dir: string): string[] {
         continue
       }
       // the retire is an atomic claim — a racing session start already
-      // reporting this stale promise loses the rename and skips it
-      if (!watchRetire(file)) {
+      // reporting this stale promise loses the rename and skips it. An
+      // already-retired marker still re-flags: the claim proves nothing
+      // about delivery, so a warning dropped with its session (hook
+      // budget, crash) resurfaces until the marker ages out.
+      if (reported !== true && !watchRetire(file)) {
         continue
       }
       const mode = watch.merge ? ' (was set to merge on green)' : ''

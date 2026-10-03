@@ -44,6 +44,18 @@ describe('filelock', () => {
     }
   })
 
+  test('a non-finite waitMs is rejected — a NaN deadline would hang forever', () => {
+    const { dir, done } = tmp()
+    try {
+      const lock = join(dir, 'x.lock')
+      writeFileSync(lock, `${process.pid}:held`) // held — the wait would engage
+      assert.throws(() => acquireFileLock(lock, { waitMs: NaN }), RangeError)
+      assert.throws(() => acquireFileLock(lock, { waitMs: -1 }), RangeError)
+    } finally {
+      done()
+    }
+  })
+
   test('a held lock is released on process.exit — finally-bypassing exits are covered', () => {
     const { dir, done } = tmp()
     try {

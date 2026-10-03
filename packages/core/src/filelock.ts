@@ -201,6 +201,11 @@ export interface FileLockOptions {
  *  process.exit() inside the section can't strand the file. */
 export function acquireFileLock(lock: string, opts: FileLockOptions = {}): () => void {
   const { waitMs = LOCK_WAIT_MS, label = 'file lock' } = opts
+  // a NaN/negative deadline compares false forever — the wait would
+  // never time out. Reject it instead of hanging.
+  if (!Number.isFinite(waitMs) || waitMs < 0) {
+    throw new RangeError(`${label}: waitMs must be a finite non-negative number — got ${waitMs}`)
+  }
   mkdirSync(dirname(lock), { recursive: true })
   if (heldLocks.has(lock)) {
     return () => {} // re-entrant — the outer section owns it
