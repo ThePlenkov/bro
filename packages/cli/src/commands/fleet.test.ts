@@ -15,7 +15,7 @@ import {
   type FleetPayload,
   type FleetRow,
 } from './fleet.ts'
-import { registerAgentConnector } from '../agent-connectors.ts'
+import { registerAgentConnector, unregisterAgentConnector } from '../agent-connectors.ts'
 import { initRepo } from './testrepo.ts'
 import type { WorktreeInfo } from './work.ts'
 
@@ -218,7 +218,12 @@ function installFleetBd(dir: string, mol: Molecule): () => void {
   process.env.PATH = `${bin}:${prevPath ?? ''}`
   process.env.FLEET_BD_LIST = join(dir, 'list.json')
   process.env.FLEET_BD_SHOW = join(dir, 'show.json')
+  let restored = false
   return () => {
+    if (restored) {
+      return
+    }
+    restored = true
     if (prevPath === undefined) delete process.env.PATH
     else process.env.PATH = prevPath
     if (prevList === undefined) delete process.env.FLEET_BD_LIST
@@ -256,53 +261,59 @@ const stubRev = (prs: number[], seen: string[]): ReviewFacade =>
 describe('fleetRows', () => {
   test('lost agent, degraded read, and pr wiring all reach the row', () => {
     const { root, main } = initRepo('bro-fleetrows-')
-    const restore = installFleetBd(
-      root,
-      molWith([molIssue('s-1', 'in_progress', 'me'), molIssue('s-2', 'in_progress'), molIssue('s-3', 'open')])
-    )
     try {
-      const seen: string[] = []
-      const rev = stubRev([42, 43], seen)
-      const byStep = new Map<string, AgentInfo>([
-        ['s-1', { ...agent('lost', 4242), id: 'native-dead1', worktree: main }],
-      ])
-      const prErrors: string[] = []
-      const rows = fleetRows(byStep, true, rev, 'o/r', [wt(main)], prErrors)
-      assert.equal(rows.length, 3)
-      const r1 = rows.find((r) => r.step === 's-1')!
-      // the respawn cell survives composition — this is the assertion the
-      // review asked for: agentCell's 'lost — respawn?' on a real FleetRow
-      assert.equal(r1.agent, 'lost — respawn?')
-      assert.equal(r1.worktree, basename(main))
-      assert.equal(r1.pr, '[#42](https://example.test/o/r/pull/42)')
-      assert.equal(r1.prNum, 42)
-      assert.deepEqual(r1.prNums, [42, 43])
-      assert.deepEqual(seen, ['main'])
-      // a claimed step with no agent under a degraded read is 'unknown',
-      // never 'lost' — the failed read must not look like a dead fleet
-      assert.equal(rows.find((r) => r.step === 's-2')!.agent, 'unknown')
-      assert.equal(rows.find((r) => r.step === 's-3')!.agent, '—')
-      assert.deepEqual(prErrors, [])
+      const restore = installFleetBd(
+        root,
+        molWith([molIssue('s-1', 'in_progress', 'me'), molIssue('s-2', 'in_progress'), molIssue('s-3', 'open')])
+      )
+      try {
+        const seen: string[] = []
+        const rev = stubRev([42, 43], seen)
+        const byStep = new Map<string, AgentInfo>([
+          ['s-1', { ...agent('lost', 4242), id: 'native-dead1', worktree: main }],
+        ])
+        const prErrors: string[] = []
+        const rows = fleetRows(byStep, true, rev, 'o/r', [wt(main)], prErrors)
+        assert.equal(rows.length, 3)
+        const r1 = rows.find((r) => r.step === 's-1')!
+        // the respawn cell survives composition — this is the assertion the
+        // review asked for: agentCell's 'lost — respawn?' on a real FleetRow
+        assert.equal(r1.agent, 'lost — respawn?')
+        assert.equal(r1.worktree, basename(main))
+        assert.equal(r1.pr, '[#42](https://example.test/o/r/pull/42)')
+        assert.equal(r1.prNum, 42)
+        assert.deepEqual(r1.prNums, [42, 43])
+        assert.deepEqual(seen, ['main'])
+        // a claimed step with no agent under a degraded read is 'unknown',
+        // never 'lost' — the failed read must not look like a dead fleet
+        assert.equal(rows.find((r) => r.step === 's-2')!.agent, 'unknown')
+        assert.equal(rows.find((r) => r.step === 's-3')!.agent, '—')
+        assert.deepEqual(prErrors, [])
+      } finally {
+        restore()
+      }
     } finally {
-      restore()
       rmSync(root, { recursive: true, force: true })
     }
   })
 
   test('a healthy read names the claim holder instead of unknown', () => {
     const { root, main } = initRepo('bro-fleetrows-')
-    const restore = installFleetBd(
-      root,
-      molWith([molIssue('s-1', 'in_progress', 'alice'), molIssue('s-2', 'open')])
-    )
     try {
-      const seen: string[] = []
-      const rows = fleetRows(new Map(), false, stubRev([], seen), 'o/r', [wt(main)])
-      assert.equal(rows.find((r) => r.step === 's-1')!.agent, 'claimed — alice')
-      // no worktree anywhere → no branch probe at all
-      assert.deepEqual(seen, [])
+      const restore = installFleetBd(
+        root,
+        molWith([molIssue('s-1', 'in_progress', 'alice'), molIssue('s-2', 'open')])
+      )
+      try {
+        const seen: string[] = []
+        const rows = fleetRows(new Map(), false, stubRev([], seen), 'o/r', [wt(main)])
+        assert.equal(rows.find((r) => r.step === 's-1')!.agent, 'claimed — alice')
+        // no worktree anywhere → no branch probe at all
+        assert.deepEqual(seen, [])
+      } finally {
+        restore()
+      }
     } finally {
-      restore()
       rmSync(root, { recursive: true, force: true })
     }
   })
@@ -376,6 +387,11 @@ describe('collectAgents', () => {
       assert.ok(degraded.includes('gone: socket gone'), `degraded: ${JSON.stringify(degraded)}`)
       assert.ok(degraded.includes('explody: factory boom'), `degraded: ${JSON.stringify(degraded)}`)
     } finally {
+      // the registry is module-global — fixture connectors must not leak
+      // into whatever runs after this file's process
+      for (const n of ['dupa', 'dupb', 'gone', 'explody']) {
+        unregisterAgentConnector(n)
+      }
       rmSync(root, { recursive: true, force: true })
     }
   })

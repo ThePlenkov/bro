@@ -76,6 +76,16 @@ export function registerAgentConnector(name: string, make: AgentConnectorFactory
   agentRegistry.push({ name, make })
 }
 
+/** Remove a registered backend — test fixtures unregister what they add;
+ *  a skipped duplicate registration should never silently change which
+ *  factory a name resolves to. No-op for unknown names. */
+export function unregisterAgentConnector(name: string): void {
+  const i = agentRegistry.findIndex((x) => x.name === name)
+  if (i >= 0) {
+    agentRegistry.splice(i, 1)
+  }
+}
+
 export function agentConnectorNames(): string[] {
   return agentRegistry.map((x) => x.name)
 }
