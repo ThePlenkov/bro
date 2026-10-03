@@ -26,13 +26,16 @@ wave 4 (polish):
 
 ## Delegation mechanics
 
-Each wave-1+ bead pours `ship-bead` (a **dolt-resident proto** — `.beads/`
-is stealth, so it is not a repo file; `bd mol list` shows it) → convoy
-session in own worktree. `bro fleet` (once wave 2 lands) is the supervisor
-that monitors the convoys building it — the system observes itself.
+Each wave-1+ bead pours `ship-bead` — tracked at
+`formulas/ship-bead.formula.toml` and installed into `.beads/formulas/`
+by `bro setup --beads` — → convoy session in own worktree. `bro fleet`
+(once wave 2 lands) is the supervisor that monitors the convoys building
+it — the system observes itself.
 
-Gates: human merge-gate per PR (formula default), except spec/docs-only
-PRs may `act wait --merge` armed by the orchestrating session.
+Gates: the ship-bead proto takes `merge=auto|human` — `auto` (the convoy
+default) covers the merge inside the act formula via `bro act wait --merge`
+armed in-session or by a driver; `--var merge=human` pours a human
+merge-gate per PR instead.
 
 ## Risks named up front
 
