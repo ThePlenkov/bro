@@ -28,6 +28,7 @@ import {
   bdTry,
   checkBeads,
   gitTry,
+  LockTimeout,
   reviewHost,
   taskStore,
   withFileLock,
@@ -469,10 +470,22 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<ItemResult> {
       }
     }
     const lockPath = ctx.stack === undefined ? null : stackPushLockPath(ctx.stack)
-    if (lockPath === null) {
-      planAndCreate()
-    } else {
-      withFileLock(lockPath, planAndCreate, { label: `stack ${ctx.stack} push lock` })
+    // a live competing push can outlast one 20s wait — the hold is
+    // short, so retry the window a few times before flunking the item;
+    // flunking parks the bead unreclaimed for the whole run
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        if (lockPath === null) {
+          planAndCreate()
+        } else {
+          withFileLock(lockPath, planAndCreate, { label: `stack ${ctx.stack} push lock` })
+        }
+        break
+      } catch (err) {
+        if (!(err instanceof LockTimeout) || attempt >= 2) {
+          throw err
+        }
+      }
     }
   } catch (err) {
     noteBead(bead.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
