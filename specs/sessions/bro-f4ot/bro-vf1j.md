@@ -25,15 +25,20 @@ today they only surface when someone thinks to look.
 - **gates** — the act exit gate per PR discovered through the fleet
   (worktree branch → open PR). `fetchPrActState` +
   `evaluateExitGate` with the repo's `act.ignoreChecks`/`maxRounds`.
-  Best-effort: no review host (or a dead one) renders the section
-  `unavailable`, never kills the snapshot.
+  Best-effort, three failure levels: no review host (or a dead one)
+  renders the section `unavailable — <reason>`; a probe machinery
+  failure renders `probe failed — <err>`; a single PR's lookup
+  failure lands on that row (`WatchPrGate.error`). None kills the
+  snapshot.
 - **fleet** — the `bro fleet` rows (mols × steps × agents ×
   worktrees × PRs), same machinery, same honesty rules: a degraded
   backend renders `unknown`, never `lost`.
 
 The snapshot leads with an **attention** list — the heartbeat's
 answer: ready human gates, `lost — respawn?` agents, BLOCKED exit
-gates. Empty list = the fleet is quiet.
+gates. Empty list = no attention condition fired — read it alongside
+the degraded/unavailable/probe-failed lines (those land as warnings,
+not attention) before calling the fleet quiet.
 
 ```text
 bro watch [--once]      one snapshot (default — the heartbeat call)
@@ -46,15 +51,21 @@ bro watch --json        machine-readable: {ts, attention, mols, gates, fleet}
 the deployment — a supervisor that wants ticks on a schedule re-invokes
 `--once`; the flags compose (`--every 60 --notify`).
 
-**Read-only.** `bro watch` never claims, never mutates beads, never
-touches the registry. The only write is `--notify`'s mailbox drop.
+**Read-only.** `bro watch` never claims and never mutates beads. The
+native agent connector's `list()` may still do registry bookkeeping
+(status/work markers) as a read side effect — snapshots aren't
+side-effect-free, but no claim or bead ever changes. The only
+deliberate write is `--notify`'s mailbox drop.
 
 **Mailbox** — `<git-common-dir>/bro/notify/`, the contract bro-d8zo's
 notify connector drains. Each emission is one atomic file
 (`watch-<epoch_ms>-<rand>.txt`, tmp+rename — a reader never sees a
-half-written event) containing the rendered snapshot. In `--every`
-mode an unchanged snapshot is not re-emitted — a heartbeat reports
-transitions, not noise. No common dir → `--notify` warns and skips.
+half-written event) containing the rendered snapshot. The mailbox
+receives the initial snapshot plus each transition — in `--every`
+mode an unchanged snapshot is not re-emitted (a heartbeat reports
+transitions, not noise), and the dedup state lives in-process, so
+every scheduled `--once --notify` run emits. No common dir →
+`--notify` warns and skips.
 
 The `watch` skill carries arming policy only (when a session should
 run a watcher) — all mechanics live here.

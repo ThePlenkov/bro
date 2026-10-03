@@ -86,6 +86,11 @@ default store, so standard installs already have it).
   `bro act threads <PR>` as a separate command (never `status && threads`
   — a failing exit must not hide the threads). `gh pr checks --watch` is
   the fallback only where bro isn't installed.
+- **A background task dies when your turn ends** — it is only watching
+  while you are. Never end a reply that promises "will report when it
+  lands" on a session-bound watcher: keep polling inside the reply until
+  the gate settles, spawn the watch detached (`nohup`/`systemd-run`/
+  `tmux`), or hand off with the exact open state spelled out.
 - **Resolve silently when you fixed it.** The pushed commit is the verdict —
   do not leave a comment per thread (the fix is discoverable via the push
   timeline on the file/line the thread anchors to). Reply only when

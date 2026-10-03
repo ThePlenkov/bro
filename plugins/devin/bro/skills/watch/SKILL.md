@@ -17,25 +17,29 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd` initialized.
 | ------- | ------------ |
 | `bro watch [--once]` | One snapshot — the heartbeat call: attention list + open molecules + act gates per fleet PR + fleet rows |
 | `bro watch --every N` | Tick the snapshot every N seconds until killed |
-| `bro watch --notify` | Drop each tick's snapshot into the mailbox (`<git-common>/bro/notify/`) — a notify connector drains it into the parent session |
+| `bro watch --notify` | Drop the initial snapshot plus each transition into the mailbox (`<git-common>/bro/notify/`) — a notify connector drains it into the parent session |
 | `bro watch --json` | Machine-readable `{ts, attention, mols, gates, fleet}` |
 
 ## Policy
 
 - **Read the attention list, not the table.** The snapshot leads with
   what needs a decision: ready human gates, `lost — respawn?` agents,
-  blocked PR exit gates, failed gate probes. `(quiet)` means act on
-  nothing — do not go hunting for work the heartbeat didn't raise.
+  blocked PR exit gates, failed gate probes. `(quiet)` means no
+  listed attention condition fired — not an all-clear: check the
+  degraded / unavailable / probe-failed lines before treating the
+  snapshot as healthy, and don't go hunting for work the heartbeat
+  didn't raise.
 - **Detach the watcher, don't block on it.** `--every` runs until
   killed — spawn it detached (nohup, background subagent, systemd-run)
   or let the deployment own the cadence by re-invoking `--once` on a
   schedule. Never sit in a foreground poll.
 - **`--notify` is how a watcher reaches its parent.** With a notify
   connector installed, mailbox drops surface mid-turn in the parent
-  session — transitions only, not every tick.
+  session — the initial snapshot plus each transition. Dedup is
+  per-process: a scheduled `--once --notify` run always emits.
 - **Watch is read-only.** It never claims steps, never mutates beads,
   never respawns agents — a `lost — respawn?` row is the decision
-  surface; `bro agents` owns the respawn.
+  surface; respawning is a manual act (`bro spawn`).
 - **Degraded is not dead.** A backend whose `list()` failed renders its
   rows `unknown`, never `lost` — don't respawn on a failed read.
 - **Report progress in words, not IDs.** When relaying snapshot state

@@ -26,15 +26,17 @@ bro stack sync [<name>]   → retarget/rebase after a member merges
 - `gh pr create --base <prev-branch>`; merge order bottom-up — on a
   member's squash-merge, `stack sync` retargets open child PRs and
   rebases child branches. A dirty or locked child worktree is never
-  touched: sync skips it and reports, the owner rebases on `enter`.
+  touched: sync skips it and reports; the owner rebases by hand
+  before continuing (`work enter` never rebases).
 - Stacks reuse `bro work enter --base <ref>` (the existing arbitrary-
   base primitive — no new flag) and the existing `.git/bro/stack/`
   edge registry; a named stack is a view over edges + bead deps, not a
   parallel registry.
-- `stack push` is ordered failure-safe: worktree first, then branch,
-  then registry edge — a failed step leaves no half-member (registry
-  write is last, and `stack list` reconciles edges against live
-  worktrees/branches).
+- `stack push` is ordered failure-safe: worktree+branch atomically
+  (`git worktree add <path> -b <branch> <base>` inside `enter`), then
+  the registry edge last — a failed step leaves no half-member
+  (registry write is last, and `stack list` reconciles edges against
+  live worktrees/branches).
 - `bro loop --stack <name>` drives the chain.
 
 ## Plan

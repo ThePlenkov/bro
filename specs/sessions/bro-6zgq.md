@@ -31,7 +31,12 @@ result: "<one line — quoted scalars: result/prevention text may
 prevention: ["<one line>", …]   # list — --prevent is repeatable
 ---
 # drill report — <title>
-## Result …  ## Prevention …  ## Trail (children, evidence links)
+
+## Result …
+
+## Prevention …
+
+## Trail (children, evidence links)
 ```
 
 - `drill.report` config section (loaded like other sections via
