@@ -341,8 +341,9 @@ async function cmdMerge(argv: string[]): Promise<void> {
  * (a checkout cannot delete its own branch). Deletes only when the local
  * tip IS the merged head (or its ancestor) — a same-named branch with
  * extra commits is kept, which also covers the fork-PR case where
- * headRef names a branch we never had. */
-function deleteMergedLocalBranch(headRef: string, headSha: string): void {
+ * headRef names a branch we never had. Exported for `bro drive`'s
+ * post-merge retirement — same guards, different caller. */
+export function deleteMergedLocalBranch(headRef: string, headSha: string): void {
   // a prunable entry (directory already gone) still lists its branch —
   // it must not count as checked out or the branch is never deleted
   const checkedOut = parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out).some(
@@ -403,8 +404,9 @@ function defaultBranch(): string {
  *  modifications, no untracked files — is the guard for --force being
  *  safe: only ignored debris remains. The check is config-independent
  *  (`-c status.showUntrackedFiles=all` overrides a user config that
- *  would hide untracked files) and fail-closed. */
-function removeMergedWorktree(root: string, here: WorktreeInfo, main: WorktreeInfo): boolean {
+ *  would hide untracked files) and fail-closed. Exported for `bro
+ *  drive`'s post-merge retirement — same guards, different caller. */
+export function removeMergedWorktree(root: string, here: WorktreeInfo, main: WorktreeInfo): boolean {
   if (here.locked !== undefined) {
     const why = here.locked ? ` (${here.locked})` : ''
     console.error(`cleanup: ${root} is locked${why} — worktree kept; unlock with \`git worktree unlock\``)

@@ -355,6 +355,10 @@ export interface StepSpawnRequest {
   promptFile?: string
   prompt?: string
   beadsDir?: string
+  /** Extra env for the spawned process — identity pins (BEADS_DIR,
+   *  BRO_BEAD_ID, BRO_AGENT_ID) still win, so a caller can't redirect
+   *  the claim store or re-badge the worker. */
+  env?: Record<string, string>
 }
 
 /** The spawn behind `up <step>` and POST /api/v1/agents — resolve the
@@ -380,7 +384,7 @@ export function spawnStepAgent(
     throw new SpawnInputError(`worktree ${repoRoot} does not exist`)
   }
   const prompt = req.prompt ?? resolvePrompt(dir, beads, req.molStep, req.promptFile, conn.name)
-  return conn.spawn({ molStep: req.molStep, repoRoot, beadsDir: beads, prompt })
+  return conn.spawn({ molStep: req.molStep, repoRoot, beadsDir: beads, prompt, env: req.env })
 }
 
 /** The stop behind `down <target>` and DELETE /api/v1/agents/<ref>. */

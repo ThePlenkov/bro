@@ -43,6 +43,8 @@ import { parseNextPlan, PLAN_VERSION as NEXT_PLAN_VERSION, type NextPlan } from 
 import { resolvePlanDoc, runPlanCommand } from './commands/plan.ts'
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
 import { runDoctorCommand } from './commands/doctor.ts'
+import { driveSection } from './commands/drive-config.ts'
+import { runDriveCommand } from './commands/drive.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runFleetCommand } from './commands/fleet.ts'
 import { runHooksCommand } from './commands/hooks.ts'
@@ -151,6 +153,15 @@ export const PLUGINS: BroPlugin[] = [
       'Orchestrator heartbeat — mols × act gates × fleet snapshot [--once|--every N|--notify|--json]',
     run: runWatchCommand,
     skill: 'watch',
+  }),
+  definePlugin({
+    name: 'drive',
+    summary:
+      'Post-PR review driver — poll act gates, spawn fixer agents, merge on green [--once|--every N|--no-merge]',
+    run: runDriveCommand,
+    skill: 'drive',
+    configKey: 'drive',
+    configSchema: driveSection,
   }),
   definePlugin({
     name: 'serve',
