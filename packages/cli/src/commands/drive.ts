@@ -581,6 +581,40 @@ async function spawnFixer(
   }
 }
 
+/** The merge side of a green gate: `act merge`, then prove the merge
+ *  landed — a merge-queue acceptance exits 0 without a landed head, so
+ *  only a MERGED re-probe entitles retirement. Anything else keeps the
+ *  PR for the next pass instead of retiring its worktree early. */
+async function mergeAndRetire(
+  ctx: Ctx,
+  pr: number,
+  link: string,
+  worktree: string | undefined,
+  fixer: TaskRow | undefined
+): Promise<PrVerdict> {
+  if (!(await mergeGreen(ctx, pr))) {
+    return { pr, link, verdict: 'merge-refused' }
+  }
+  const after = await fetchPrActState(
+    ctx.rev,
+    { repo: ctx.repo, pr },
+    { ignoreChecks: ctx.act.ignoreChecks, maxRounds: ctx.act.maxRounds }
+  ).catch(() => undefined)
+  if (after?.state !== 'MERGED') {
+    return {
+      pr,
+      link,
+      verdict: 'merge-unverified',
+      detail: after === undefined ? 'state re-probe failed' : `state ${after.state.toLowerCase()}`,
+    }
+  }
+  retireLanding(ctx, after, worktree)
+  if (fixer) {
+    closeFixer(ctx.store, fixer.id, `merged via ${link}`)
+  }
+  return { pr, link, verdict: 'merged' }
+}
+
 async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict> {
   const link = ctx.rev.prLink(ctx.repo, pr)
   let state: PrActState
@@ -617,30 +651,7 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     if (!ctx.merge) {
       return { pr, link, verdict: 'green' }
     }
-    if (!(await mergeGreen(ctx, pr))) {
-      return { pr, link, verdict: 'merge-refused' }
-    }
-    // a merge-queue acceptance exits 0 without a landed merge — only a
-    // MERGED re-probe proves the head; anything else keeps the PR for
-    // the next pass instead of retiring its worktree early
-    const after = await fetchPrActState(
-      ctx.rev,
-      { repo: ctx.repo, pr },
-      { ignoreChecks: ctx.act.ignoreChecks, maxRounds: ctx.act.maxRounds }
-    ).catch(() => undefined)
-    if (after?.state !== 'MERGED') {
-      return {
-        pr,
-        link,
-        verdict: 'merge-unverified',
-        detail: after === undefined ? 'state re-probe failed' : `state ${after.state.toLowerCase()}`,
-      }
-    }
-    retireLanding(ctx, after, worktree)
-    if (fixer) {
-      closeFixer(ctx.store, fixer.id, `merged via ${link}`)
-    }
-    return { pr, link, verdict: 'merged' }
+    return mergeAndRetire(ctx, pr, link, worktree, fixer)
   }
   if (gate.open_threads > 0) {
     if (occ !== undefined) {
@@ -658,24 +669,23 @@ function hooksDirOf(root: string): string | null {
   return common === '' ? null : join(common, 'bro', 'hooks')
 }
 
-/** One pass: enumerate, probe every open PR, act per verdict. */
-async function driveOnce(ctx: Ctx): Promise<void> {
-  const wt = gitTry(['-C', ctx.mainRoot, 'worktree', 'list', '--porcelain'])
-  const worktreeByBranch = new Map<string, string>()
+/** branch → worktree path across every checkout. */
+function worktreeMap(root: string): Map<string, string> {
+  const map = new Map<string, string>()
+  const wt = gitTry(['-C', root, 'worktree', 'list', '--porcelain'])
   if (wt.code === 0) {
     for (const w of parseWorktreePorcelain(wt.out)) {
       if (w.branch) {
-        worktreeByBranch.set(w.branch, w.path)
+        map.set(w.branch, w.path)
       }
     }
   }
-  const { byStep, degraded } = await collectAgents(ctx.mainRoot)
-  for (const d of degraded) {
-    say(ctx, `warning: backend degraded — ${d}`)
-  }
-  const hooks = hooksDirOf(ctx.mainRoot)
-  const workDetails = hooks === null ? [] : liveWorkDetails(hooks)
+  return map
+}
 
+/** Open PR numbers across every candidate branch — a failed lookup on
+ *  one branch is a warning, never a dead pass. */
+function openFleetPrs(ctx: Ctx): Set<number> {
   const prs = new Set<number>()
   for (const branch of candidateBranches(ctx.mainRoot)) {
     try {
@@ -686,31 +696,12 @@ async function driveOnce(ctx: Ctx): Promise<void> {
       say(ctx, `warning: PR lookup failed for ${branch} — ${errText(err)}`)
     }
   }
-  const work: PassWork = {
-    worktreeByBranch,
-    agents: [...byStep.values()],
-    workDetails,
-  }
-  for (const pr of prs) {
-    // a throwing probe on one PR must not kill the pass — in --every
-    // mode an unhandled throw would end the driver entirely
-    const v = await drivePr(ctx, pr, work).catch((err) => ({
-      pr,
-      link: ctx.rev.prLink(ctx.repo, pr),
-      verdict: 'error',
-      detail: errText(err),
-    }))
-    if (ctx.json) {
-      console.log(JSON.stringify(v))
-    } else {
-      say(ctx, `drive ${v.link} ${v.verdict}${v.detail === undefined ? '' : ` — ${v.detail}`}`)
-    }
-  }
-  if (prs.size === 0) {
-    say(ctx, 'drive: no open PRs on fleet branches')
-  }
-  // a settled PR drops out of prsForBranch entirely — without this sweep
-  // its fixer bead hangs open forever after the merge/close
+  return prs
+}
+
+/** A settled PR drops out of prsForBranch entirely — without this sweep
+ *  its fixer bead hangs open forever after the merge/close. */
+async function sweepSettledFixers(ctx: Ctx, prs: Set<number>): Promise<void> {
   for (const row of ctx.store.list({ labels: [FIXER_LABEL], all: true })) {
     const m = /^drive:pr:(\d+)$/.exec(row.external_ref ?? '')
     if (m === null || row.status === 'closed' || prs.has(Number(m[1]))) {
@@ -732,6 +723,40 @@ async function driveOnce(ctx: Ctx): Promise<void> {
       say(ctx, `warning: fixer sweep probe failed for ${link} — ${errText(err)}`)
     }
   }
+}
+
+/** One pass: enumerate, probe every open PR, act per verdict. */
+async function driveOnce(ctx: Ctx): Promise<void> {
+  const { byStep, degraded } = await collectAgents(ctx.mainRoot)
+  for (const d of degraded) {
+    say(ctx, `warning: backend degraded — ${d}`)
+  }
+  const hooks = hooksDirOf(ctx.mainRoot)
+  const work: PassWork = {
+    worktreeByBranch: worktreeMap(ctx.mainRoot),
+    agents: [...byStep.values()],
+    workDetails: hooks === null ? [] : liveWorkDetails(hooks),
+  }
+  const prs = openFleetPrs(ctx)
+  for (const pr of prs) {
+    // a throwing probe on one PR must not kill the pass — in --every
+    // mode an unhandled throw would end the driver entirely
+    const v = await drivePr(ctx, pr, work).catch((err) => ({
+      pr,
+      link: ctx.rev.prLink(ctx.repo, pr),
+      verdict: 'error',
+      detail: errText(err),
+    }))
+    if (ctx.json) {
+      console.log(JSON.stringify(v))
+    } else {
+      say(ctx, `drive ${v.link} ${v.verdict}${v.detail === undefined ? '' : ` — ${v.detail}`}`)
+    }
+  }
+  if (prs.size === 0) {
+    say(ctx, 'drive: no open PRs on fleet branches')
+  }
+  await sweepSettledFixers(ctx, prs)
 }
 
 export async function runDriveCommand(argv: string[]): Promise<void> {
