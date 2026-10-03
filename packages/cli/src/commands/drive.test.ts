@@ -213,7 +213,7 @@ describe('agentProcessesIn', () => {
       mk(301, main, 'devin\0-p\0--permission-mode\0dangerous') // the session, cwd = launch dir
       mk(302, main, 'devin\0acp', undefined, 301) // its acp child, still outside
       mk(303, wt, 'bash', undefined, 302) // tool shell inside the worktree
-      mk(304, join(wt, 'x'), 'sleep\030', undefined, 303) // its command, one hop deeper
+      mk(304, join(wt, 'x'), 'sleep 30', undefined, 303) // its command, one hop deeper
       mk(305, wt, 'bash', undefined, 999) // a human shell — no agent ancestor
       const hits = agentProcessesIn(wt, proc).map((h) => h.pid)
       assert.deepEqual(hits.sort(), [303, 304])
