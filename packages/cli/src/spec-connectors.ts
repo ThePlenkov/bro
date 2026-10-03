@@ -206,6 +206,48 @@ function specParent(path: string): string | undefined {
   }
 }
 
+const unquote = (s: string): string => {
+  const t = s.trim()
+  return t.length >= 2 && t[0] === t[t.length - 1] && (t[0] === '"' || t[0] === "'")
+    ? t.slice(1, -1)
+    : t
+}
+
+/** `scope:` frontmatter — repo-relative pathspecs the spec claims for
+ *  itself (spec drift's audit surface). A YAML list or a single string;
+ *  an empty/absent key declares nothing and returns []. */
+function specScope(path: string): string[] {
+  try {
+    const head = readFileSync(path, 'utf8').slice(0, 2000)
+    const fm = /^---\n([\s\S]*?)\n---/.exec(head)
+    if (fm === null) {
+      return []
+    }
+    const lines = fm[1]!.split('\n')
+    const i = lines.findIndex((l) => /^scope:\s*/.test(l))
+    if (i === -1) {
+      return []
+    }
+    const inline = lines[i]!.replace(/^scope:\s*/, '').trim()
+    if (inline !== '') {
+      return inline.startsWith('[') && inline.endsWith(']')
+        ? inline.slice(1, -1).split(',').map(unquote).filter((s) => s !== '')
+        : [unquote(inline)]
+    }
+    const items: string[] = []
+    for (const l of lines.slice(i + 1)) {
+      const m = /^\s*-\s+(.+?)\s*$/.exec(l)
+      if (m === null) {
+        break
+      }
+      items.push(unquote(m[1]!))
+    }
+    return items.filter((s) => s !== '')
+  } catch {
+    return []
+  }
+}
+
 /** Scaffold body — optional parent edge for spec-of-specs trees. */
 function scaffoldBody(id: string, title: string, parent?: string): string {
   const fm = parent ? `---\nparent: ${parent}\n---\n\n` : ''
@@ -265,6 +307,17 @@ export const nativeSpecConnector: Connector = {
         `write ${specDir}/${id}.md (\`bro spec new ${id}\`), add a spec: link, or label 'trivial'`,
       policy: () =>
         `spec before code — ${specDir}/<id>.md or <id>/ dir, or a spec: link in the bead (exempt: chore / 'trivial' / 'debt')`,
+      // the tool's explicit scope only — `scope:` frontmatter on the
+      // resolved spec file; the commit-refs fallback is the drift
+      // engine's, not the connector's
+      scope: (id) => {
+        const node = findSpec(root, specDir, id)
+        if (node === undefined) {
+          return null
+        }
+        const entries = specScope(node.abs)
+        return entries.length === 0 ? null : entries
+      },
       tree() {
         const base = specDirAbs(root, specDir)
         if (base === null || !existsSync(base)) {

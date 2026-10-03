@@ -22,3 +22,43 @@ export function gitTry(args: string[]): { code: number; out: string; err: string
   })
   return { code: proc.status ?? 1, out: proc.stdout ?? '', err: (proc.stderr ?? '').trim() }
 }
+
+/** One commit of a `git log --name-only` pass — `paths` is every file
+ *  the commit touched. */
+export interface GitLogPathRecord {
+  sha: string
+  subject: string
+  paths: string[]
+}
+
+/** `git log --format=%H%x09%s -z --name-only <ref>` parsed into
+ *  per-commit records — callers filter subjects in-process (`--grep`
+ *  would search bodies too). Output is unbounded (full history ×
+ *  touched paths), so spawnSync gets an explicit cap rather than the
+ *  1 MB default. null on git failure — the caller decides the honest
+ *  state (unborn ref, bad ref). */
+export function gitLogPathRecords(dir: string, ref: string): GitLogPathRecord[] | null {
+  const proc = spawnSync('git', ['-C', dir, 'log', '--format=%H%x09%s', '-z', '--name-only', ref], { // NOSONAR — PATH lookup is the contract
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    maxBuffer: 256 * 1024 * 1024,
+  })
+  if (proc.status !== 0) {
+    return null
+  }
+  const records: GitLogPathRecord[] = []
+  let cur: GitLogPathRecord | undefined
+  for (const tok of (proc.stdout ?? '').split('\0')) {
+    if (tok === '') {
+      continue
+    }
+    const head = /^([0-9a-f]{40,64})\t([\s\S]*)$/.exec(tok)
+    if (head !== null) {
+      cur = { sha: head[1]!, subject: head[2]!, paths: [] }
+      records.push(cur)
+    } else if (cur !== undefined) {
+      cur.paths.push(tok.replace(/^\n/, ''))
+    }
+  }
+  return records
+}

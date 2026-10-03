@@ -3,6 +3,7 @@ parent: sdd
 scope:
   - packages/cli/src/commands/spec.ts
   - packages/cli/src/spec-connectors.ts
+  - packages/cli/src/spec-drift.ts
   - packages/core/src/specs.ts
   - packages/core/src/git.ts
 ---
@@ -132,7 +133,7 @@ no new accessor needed. Recency helpers go next to
 ## Plan
 
 - [x] this spec (bro-fvhz.1)
-- [ ] bro-fvhz.2 scope resolver — `SpecStore.scope?` + native
+- [x] bro-fvhz.2 scope resolver — `SpecStore.scope?` + native
       frontmatter parse + commit-refs fallback in the drift engine
 - [ ] bro-fvhz.3 recency probe — git.ts helpers: `--follow` last-commit
       ts for the spec, newest ts over pathspecs, ref resolution,
