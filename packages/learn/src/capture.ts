@@ -38,7 +38,7 @@ import {
   type LessonTrigger,
   type TriggerMatch,
 } from './lesson.ts'
-import { LessonStoreError, listLessons, putLesson } from './store.ts'
+import { getLesson, LessonStoreError, listLessons, putLesson } from './store.ts'
 
 export const CAPTURE_SOURCES = ['drill', 'retro', 'act', 'mol'] as const
 export type CaptureSource = (typeof CAPTURE_SOURCES)[number]
@@ -101,11 +101,14 @@ function collect(re: RegExp, text: string, cap: number): string[] {
  *  doesn't carry a whole file tree in its trigger. */
 function scopeMatch(text: string): TriggerMatch {
   const match: TriggerMatch = {}
+  // URLs are not trigger paths — strip them so `example.com/foo` can't
+  // ride SLASH_PATH_RE into a post-tool trigger on a non-local "path"
+  const t = text.replace(/\bhttps?:\/\/\S+/g, ' ')
   const paths = [
-    ...collect(SLASH_PATH_RE, text, 5),
-    ...collect(FILE_RE, text, 4),
+    ...collect(SLASH_PATH_RE, t, 5),
+    ...collect(FILE_RE, t, 4),
   ]
-  const commands = collect(COMMAND_RE, text, 5)
+  const commands = collect(COMMAND_RE, t, 5)
   if (paths.length > 0) match.paths = [...new Set(paths)].slice(0, 6)
   if (commands.length > 0) match.commands = commands
   return match
@@ -283,7 +286,7 @@ function harvestDrill(dir?: string): Harvest {
  *  `WHAT:`/`WHY:`/`PREVENT:` inline form. The prevention text wins —
  *  it is already imperative; else the root cause is the durable bit. */
 function retroLesson(description: string): string {
-  const prevent = /PREVENT:\s*([\s\S]+?)(?=\n[A-Z]+:|$)/.exec(description)?.[1]
+  const prevent = /PREVENT:\s*([\s\S]+?)(?=\n(?:##|[A-Z]+:)|$)/.exec(description)?.[1]
   if (prevent !== undefined && prevent.trim() !== '') {
     return oneLine(prevent)
   }
@@ -291,7 +294,7 @@ function retroLesson(description: string): string {
   if (why !== undefined && why.trim() !== '') {
     return oneLine(why)
   }
-  const whyInline = /WHY:\s*([\s\S]+?)(?=\n[A-Z]+:|$)/.exec(description)?.[1]
+  const whyInline = /WHY:\s*([\s\S]+?)(?=\n(?:##|[A-Z]+:)|$)/.exec(description)?.[1]
   if (whyInline !== undefined && whyInline.trim() !== '') {
     return oneLine(whyInline)
   }
@@ -504,6 +507,12 @@ export function planCapture(candidates: CaptureCandidate[], dir?: string): Captu
       continue
     }
     const existing = byId.get(id)
+    // a 40-char slug can collide — different lesson text on the same id
+    // is not the same rule: never fold its evidence into the other lesson
+    if (existing !== undefined && oneLine(existing.lesson) !== oneLine(c.lesson)) {
+      plan.skipped.push({ origin: c.origin, reason: `${id} collides with a different lesson` })
+      continue
+    }
     if (existing === undefined) {
       const lesson: Lesson = {
         id,
@@ -524,10 +533,11 @@ export function planCapture(candidates: CaptureCandidate[], dir?: string): Captu
     const added = merged.filter(
       (e) => !existing.evidence.some((x) => x.kind === e.kind && x.ref === e.ref)
     )
-    if (added.length === 0) {
+    const derived = deriveConfidence(merged, { heldUnderGate: c.heldUnderGate === true })
+    const upgraded = CONFIDENCE_RANK[derived] > CONFIDENCE_RANK[existing.confidence]
+    if (added.length === 0 && !upgraded) {
       continue // already captured — nothing new to teach the store
     }
-    const derived = deriveConfidence(merged, { heldUnderGate: c.heldUnderGate === true })
     const lesson: Lesson = {
       ...existing,
       evidence: merged,
@@ -555,7 +565,22 @@ export function applyCapture(plan: CapturePlan, dir?: string): void {
   }
   for (const m of plan.merge) {
     try {
-      putLesson(m.lesson, dir)
+      // re-read at write time and re-union — a concurrent capture may
+      // have added evidence since plan() ran (bd kv has no CAS; this
+      // narrows the lost-update window to one store round-trip)
+      const fresh = getLesson(m.lesson.id, dir)
+      const lesson =
+        fresh === null
+          ? m.lesson
+          : {
+              ...m.lesson,
+              evidence: unionEvidence(fresh.evidence, m.lesson.evidence),
+              confidence:
+                CONFIDENCE_RANK[m.lesson.confidence] > CONFIDENCE_RANK[fresh.confidence]
+                  ? m.lesson.confidence
+                  : fresh.confidence,
+            }
+      putLesson(lesson, dir)
     } catch (err) {
       throw new LessonStoreError(
         `merge of ${m.lesson.id} failed — ${err instanceof Error ? err.message : String(err)}`,

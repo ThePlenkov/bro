@@ -296,7 +296,7 @@ export function writeBeads(
   rows: Array<Record<string, unknown>>,
   extra: Record<string, unknown> = {}
 ): void {
-  writeFileSync(db, JSON.stringify({ rows, ...extra }))
+  writeFileSync(db, JSON.stringify({ ...extra, rows }))
 }
 
 export function readBeads(db: string): Array<Record<string, unknown>> {

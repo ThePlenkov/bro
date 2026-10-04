@@ -135,23 +135,15 @@ describe('bro learn', () => {
     })
   })
 
-  test('capture --dry-run proposes without writing', () => {
+  test('capture --dry-run (bare or =true) proposes without writing', () => {
     const f = learnFixture([DRILL_ROW])
     inside(f.main, f.root, () => {
-      const r = f.run(['capture', '--source', 'drill', '--dry-run'])
-      assert.equal(r.code, 0, r.stderr)
-      assert.match(r.stdout, /would capture learn-/)
-      assert.equal(f.run(['list', '--json']).stdout.trim(), '[]')
-    })
-  })
-
-  test('capture --dry-run=true honors the = spelling (still writes nothing)', () => {
-    const f = learnFixture([DRILL_ROW])
-    inside(f.main, f.root, () => {
-      const r = f.run(['capture', '--source', 'drill', '--dry-run=true'])
-      assert.equal(r.code, 0, r.stderr)
-      assert.match(r.stdout, /would capture learn-/)
-      assert.equal(f.run(['list', '--json']).stdout.trim(), '[]')
+      for (const dry of ['--dry-run', '--dry-run=true']) {
+        const r = f.run(['capture', '--source', 'drill', dry])
+        assert.equal(r.code, 0, r.stderr)
+        assert.match(r.stdout, /would capture learn-/)
+        assert.equal(f.run(['list', '--json']).stdout.trim(), '[]')
+      }
     })
   })
 

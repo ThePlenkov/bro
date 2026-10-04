@@ -140,6 +140,15 @@ const row = (id: string, over: Record<string, unknown> = {}): Record<string, unk
 
 const DRILL_MEMO = '## Result\n\nconvoy next resolves the single open molecule\n\n## Prevention\n\n- pass --mol explicitly'
 
+const beadEv = (...refs: string[]): { kind: 'bead'; ref: string }[] =>
+  refs.map((ref) => ({ kind: 'bead', ref }))
+
+/** plan.write holds exactly one lesson — return it for field asserts. */
+const singleWrite = (plan: ReturnType<typeof captureLessons>['plan']): Lesson => {
+  assert.equal(plan.write.length, 1)
+  return plan.write[0]!.lesson
+}
+
 describe('capture', { skip: WIN32 }, () => {
   it('drill: a closed frame memo becomes a post-tool lesson', () => {
     withFakeBd(
@@ -190,14 +199,9 @@ describe('capture', { skip: WIN32 }, () => {
         deps: [{ issue_id: 'fx-p1', depends_on_id: 'fx-r1', type: 'discovered-from' }],
       },
       () => {
-        const { plan } = captureLessons({ sources: ['drill'] })
-        assert.equal(plan.write.length, 1)
-        const l = plan.write[0]!.lesson
+        const l = singleWrite(captureLessons({ sources: ['drill'] }).plan)
         assert.equal(l.lesson, 'docs-only PRs — cap inline fix rounds')
-        assert.deepEqual(l.evidence, [
-          { kind: 'bead', ref: 'fx-p1' },
-          { kind: 'bead', ref: 'fx-r1' },
-        ])
+        assert.deepEqual(l.evidence, beadEv('fx-p1', 'fx-r1'))
         assert.equal(l.confidence, 'established')
       }
     )
@@ -238,14 +242,9 @@ describe('capture', { skip: WIN32 }, () => {
         deps: [{ issue_id: 'fx-r1', depends_on_id: 'fx-w1', type: 'discovered-from' }],
       },
       () => {
-        const { plan } = captureLessons({ sources: ['retro'] })
-        assert.equal(plan.write.length, 1)
-        const l = plan.write[0]!.lesson
+        const l = singleWrite(captureLessons({ sources: ['retro'] }).plan)
         assert.equal(l.lesson, 'Chose a blocking wait instead of polling logs between turns.')
-        assert.deepEqual(l.evidence, [
-          { kind: 'bead', ref: 'fx-r1' },
-          { kind: 'bead', ref: 'fx-w1' },
-        ])
+        assert.deepEqual(l.evidence, beadEv('fx-r1', 'fx-w1'))
         assert.equal(l.source, 'capture:retro')
         assert.equal(l.confidence, 'established')
       }

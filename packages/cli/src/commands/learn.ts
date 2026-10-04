@@ -282,6 +282,9 @@ function captureSources(argv: string[]): CaptureSource[] | undefined {
       out.add(s as CaptureSource)
     }
   }
+  if (out.size === 0) {
+    fail('--source requires at least one source')
+  }
   return [...out]
 }
 
