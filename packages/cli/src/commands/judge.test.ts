@@ -224,10 +224,18 @@ describe('bro judge stats', () => {
     }
   })
 
-  test('a bad --since exits 2', async () => {
-    const r = await capture(() => runJudgeCommand(['stats', '--since', 'not-a-date']))
+  test('a bad --since exits 2 — including Date.parse-parsable non-ISO', async () => {
+    for (const bad of ['not-a-date', 'January 1, 2025']) {
+      const r = await capture(() => runJudgeCommand(['stats', '--since', bad]))
+      assert.equal(r.code, 2)
+      assert.match(r.err.join('\n'), /--since must be an ISO timestamp/)
+    }
+  })
+
+  test('unknown options exit 2 instead of silently reporting', async () => {
+    const r = await capture(() => runJudgeCommand(['stats', '--replai']))
     assert.equal(r.code, 2)
-    assert.match(r.err.join('\n'), /--since must be an ISO timestamp/)
+    assert.match(r.err.join('\n'), /unknown stats option/)
   })
 })
 

@@ -204,6 +204,11 @@ async function decide(argv: string[]): Promise<void> {
   }
 }
 
+/** ISO-8601 date or datetime — `YYYY-MM-DD` with optional `T` time and
+ *  `Z`/offset. */
+const ISO_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/
+const isIso = (v: string): boolean => ISO_RE.test(v) && Number.isFinite(Date.parse(v))
+
 /** `bro judge stats` — reads only: the journal is the input, no
  *  backend is touched, so no auth and no connector resolution. */
 function stats(argv: string[]): void {
@@ -224,7 +229,10 @@ function stats(argv: string[]): void {
   const since = flag(argv, '--since')
   const asJson = argv.includes('--json')
   const replay = argv.includes('--replay')
-  if (since !== undefined && !Number.isFinite(Date.parse(since))) {
+  // ISO shape required — Date.parse also accepts locale strings like
+  // 'January 1, 2025' that resolve to local midnight, so the same input
+  // would filter differently per time zone
+  if (since !== undefined && !isIso(since)) {
     console.error(`error: --since must be an ISO timestamp — got ${JSON.stringify(since)}`)
     process.exit(2)
   }

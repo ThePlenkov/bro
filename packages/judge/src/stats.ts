@@ -114,8 +114,11 @@ function findOutcome(verdict: Verdict, dispositions: Disposition[]): string | un
     if (d.subject.threadId !== tid) {
       continue
     }
-    const dc = d.subject.commentSha
-    if (dc !== undefined && vc !== undefined && dc !== vc) {
+    // a verdict that knows its commentSha only joins a disposition
+    // carrying the same one — a SHA-less disposition may predate the
+    // comment's last edit, and scoring it here would grade the new
+    // comment by the old finding's outcome
+    if (vc !== undefined && d.subject.commentSha !== vc) {
       continue
     }
     return d.outcome

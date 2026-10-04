@@ -107,6 +107,16 @@ describe('computeStats', () => {
     assert.equal(({} as Record<string, unknown>).polluted, undefined)
   })
 
+  test('a SHA-less disposition does not score a commentSha-bearing verdict', () => {
+    const rows: JournalRow[] = [
+      verdict({ subject: { threadId: 'T1', commentSha: 'cur' } }),
+      disp('T1', 'fixed'), // recorded before the verdict — different comment era
+    ]
+    const s = computeStats(rows)
+    assert.equal(s.agreement.n, 0)
+    assert.equal(s.agreement.unscored, 1)
+  })
+
   test('a moved commentSha does not join the old disposition', () => {
     const rows: JournalRow[] = [
       verdict({ subject: { threadId: 'T1', commentSha: 'new' } }),
