@@ -492,73 +492,88 @@ function unionEvidence(a: Evidence[], b: Evidence[]): Evidence[] {
   return [...new Map([...a, ...b].map((e) => [`${e.kind}:${e.ref}`, e])).values()]
 }
 
+interface PlanCtx {
+  /** corrupt keys squatting lesson ids — never merge into unreadable data */
+  corrupt: Set<string>
+  byId: Map<string, Lesson>
+  /** ids queued in plan.write this run — a repeat candidate folds into
+   *  the pending write in place, not a write+merge pair for one lesson */
+  pending: Map<string, CaptureWrite>
+  plan: CapturePlan
+}
+
+function foldNew(ctx: PlanCtx, id: string, c: CaptureCandidate): void {
+  const lesson: Lesson = {
+    id,
+    trigger: c.trigger,
+    lesson: c.lesson,
+    evidence: c.evidence,
+    confidence: deriveConfidence(c.evidence, { heldUnderGate: c.heldUnderGate === true }),
+    source: c.source,
+    createdAt: new Date().toISOString(),
+  }
+  const w: CaptureWrite = { lesson, origin: c.origin }
+  ctx.plan.write.push(w)
+  ctx.pending.set(id, w)
+  ctx.byId.set(id, lesson)
+}
+
+function foldMerge(ctx: PlanCtx, id: string, existing: Lesson, c: CaptureCandidate): void {
+  const merged = unionEvidence(existing.evidence, c.evidence)
+  const added = merged.filter(
+    (e) => !existing.evidence.some((x) => x.kind === e.kind && x.ref === e.ref)
+  )
+  const derived = deriveConfidence(merged, { heldUnderGate: c.heldUnderGate === true })
+  const upgraded = CONFIDENCE_RANK[derived] > CONFIDENCE_RANK[existing.confidence]
+  if (added.length === 0 && !upgraded) {
+    return // already captured — nothing new to teach the store
+  }
+  const lesson: Lesson = {
+    ...existing,
+    evidence: merged,
+    confidence: upgraded ? derived : existing.confidence,
+    updatedAt: new Date().toISOString(),
+  }
+  const w = ctx.pending.get(id)
+  if (w !== undefined) {
+    w.lesson = lesson // fold into the pending write
+  } else {
+    ctx.plan.merge.push({ lesson, added, origin: c.origin })
+  }
+  ctx.byId.set(id, lesson)
+}
+
 /** Fold candidates against the store: same normalized lesson text merges
  *  evidence and recomputes confidence; a corrupt key squatting the id
  *  skips (never overwrites a lesson it can't read). */
 export function planCapture(candidates: CaptureCandidate[], dir?: string): CapturePlan {
   const { lessons, skipped: storeSkipped } = listLessons(dir)
-  const corrupt = new Set(storeSkipped.map((s) => s.key))
-  const byId = new Map(lessons.map((l) => [l.id, l]))
-  // ids queued in plan.write this run — a repeat candidate folds into the
-  // pending write in place, not into a write+merge pair for one lesson
-  const pending = new Map<string, CaptureWrite>()
-  const plan: CapturePlan = { write: [], merge: [], skipped: [] }
+  const ctx: PlanCtx = {
+    corrupt: new Set(storeSkipped.map((s) => s.key)),
+    byId: new Map(lessons.map((l) => [l.id, l])),
+    pending: new Map(),
+    plan: { write: [], merge: [], skipped: [] },
+  }
   for (const c of candidates) {
     const id = lessonId(c.lesson)
-    if (corrupt.has(`learn/${id}`)) {
-      plan.skipped.push({ origin: c.origin, reason: `${id} exists but fails schema` })
+    if (ctx.corrupt.has(`learn/${id}`)) {
+      ctx.plan.skipped.push({ origin: c.origin, reason: `${id} exists but fails schema` })
       continue
     }
-    const existing = byId.get(id)
+    const existing = ctx.byId.get(id)
     // a 40-char slug can collide — different lesson text on the same id
     // is not the same rule: never fold its evidence into the other lesson
     if (existing !== undefined && oneLine(existing.lesson) !== oneLine(c.lesson)) {
-      plan.skipped.push({ origin: c.origin, reason: `${id} collides with a different lesson` })
+      ctx.plan.skipped.push({ origin: c.origin, reason: `${id} collides with a different lesson` })
       continue
     }
     if (existing === undefined) {
-      const lesson: Lesson = {
-        id,
-        trigger: c.trigger,
-        lesson: c.lesson,
-        evidence: c.evidence,
-        confidence: deriveConfidence(c.evidence, { heldUnderGate: c.heldUnderGate === true }),
-        source: c.source,
-        createdAt: new Date().toISOString(),
-      }
-      const w: CaptureWrite = { lesson, origin: c.origin }
-      plan.write.push(w)
-      pending.set(id, w)
-      byId.set(id, lesson)
-      continue
-    }
-    const merged = unionEvidence(existing.evidence, c.evidence)
-    const added = merged.filter(
-      (e) => !existing.evidence.some((x) => x.kind === e.kind && x.ref === e.ref)
-    )
-    const derived = deriveConfidence(merged, { heldUnderGate: c.heldUnderGate === true })
-    const upgraded = CONFIDENCE_RANK[derived] > CONFIDENCE_RANK[existing.confidence]
-    if (added.length === 0 && !upgraded) {
-      continue // already captured — nothing new to teach the store
-    }
-    const lesson: Lesson = {
-      ...existing,
-      evidence: merged,
-      confidence:
-        CONFIDENCE_RANK[derived] > CONFIDENCE_RANK[existing.confidence]
-          ? derived
-          : existing.confidence,
-      updatedAt: new Date().toISOString(),
-    }
-    const w = pending.get(id)
-    if (w !== undefined) {
-      w.lesson = lesson // fold into the pending write
+      foldNew(ctx, id, c)
     } else {
-      plan.merge.push({ lesson, added, origin: c.origin })
+      foldMerge(ctx, id, existing, c)
     }
-    byId.set(id, lesson)
   }
-  return plan
+  return ctx.plan
 }
 
 /** The plan is the contract — writes happen here or nowhere. */
