@@ -25,6 +25,7 @@ answers under `judge.confidence`.
 | Command | What it does |
 | ------- | ------------ |
 | `bro judge decide --state <file\|-> --questions <file>` | One decide() over the resolved chain — prints answers, decidedBy, model, latency, usage. `--connector <name>` pins the primary, `--json` prints the raw DecideResult |
+| `bro judge stats [--since <iso>] [--json] [--replay]` | Scores the verdict journal — agreement matrix (`action` vs recorded outcome, per decider), `blocks_correctness` proxy-scored separately, calibration buckets, p50/p95 latency, mean/total cost per provider+model, and the dogfood thresholds (≥85% agreement, p50 <1s, mean <$0.01). `--replay` scores dogfood verdicts instead of live ones |
 
 Config (`bro.config.json` `judge` section): `mode` (off|shadow — v1
 has no acting mode), `model` (pin in production), `baseUrl`,
@@ -57,13 +58,13 @@ a fresh decide(), bounded by `maxDecisionsPerRun` per invocation
   thread resolution still needs `bro act resolve/reply`, the exit gate
   still reads deterministic state, fixer spawns stay deterministic.
   The judge earns advisory weight by measured dogfood agreement
-  (`bro judge stats`/`replay` — later milestones), not enthusiasm.
-  Never wire a verdict into a gate decision.
+  (`bro judge stats` over the journal; `replay` is a later milestone),
+  not enthusiasm. Never wire a verdict into a gate decision.
 - **Fail-open, always.** A wedged backend throws `JudgeUnavailable` —
   consumers treat "no verdict" as "no annotation", never a gate input.
 - **One call, many questions.** Batch a subject's questions into one
   `decide()` — a question-per-call loop is a cost bug.
-- **`decidedBy` is honest.** Escalated answers say `llm-judge`; stats
-  (a later milestone) score each backend on its own record.
+- **`decidedBy` is honest.** Escalated answers say `llm-judge`;
+  `bro judge stats` scores each backend on its own record.
 - **Keys ride env vars only.** `apiKeyEnv` names the variable; config
   never holds a key value.

@@ -3,7 +3,13 @@
  * connector's smoke path (spec: specs/sessions/bro-f4ot.2-judge.md,
  * milestone bro-f4ot.2.2). One decide() call over the resolved chain
  * (primary → `judge.fallback` escalation), printing answers, model,
- * latency, and usage. stats/replay land in later milestones.
+ * latency, and usage.
+ *
+ * `bro judge stats [--since <iso>] [--json]` — the shadow report
+ * (milestone bro-f4ot.2.4): agreement matrix (judge action vs recorded
+ * outcome), calibration buckets, latency/cost — including spend per
+ * provider+model — over the verdict journal. Replay lands in its own
+ * milestone.
  *
  * The smoke test exercises the connector, not the mode gate — it runs
  * whatever `judge.mode` says; `mode` governs consumers (annotation),
@@ -12,7 +18,14 @@
 import { readFileSync } from 'node:fs'
 import { ensureAuth, JudgeUnavailable } from '@broject/core'
 import type { DecideResult, JudgeAnswer, JudgeQuestion } from '@broject/core'
-import { appendRow, judgeConfig, judgeFacade } from '@broject/judge'
+import {
+  appendRow,
+  computeStats,
+  formatStats,
+  judgeConfig,
+  judgeFacade,
+  readJournal,
+} from '@broject/judge'
 import { flag } from './args.ts'
 import { loadBroConfig } from '../plugins.ts'
 
@@ -191,16 +204,41 @@ async function decide(argv: string[]): Promise<void> {
   }
 }
 
+/** `bro judge stats` — reads only: the journal is the input, no
+ *  backend is touched, so no auth and no connector resolution. */
+function stats(argv: string[]): void {
+  const since = flag(argv, '--since')
+  const asJson = argv.includes('--json')
+  const replay = argv.includes('--replay')
+  if (since !== undefined && !Number.isFinite(Date.parse(since))) {
+    console.error(`error: --since must be an ISO timestamp — got ${JSON.stringify(since)}`)
+    process.exit(2)
+  }
+  const s = computeStats(readJournal(process.cwd()), { since, replay })
+  if (asJson) {
+    console.log(JSON.stringify(s, null, 2))
+    return
+  }
+  console.log(formatStats(s, { since, replay }))
+}
+
+const JUDGE_USAGE =
+  'usage: bro judge <decide|stats>\n' +
+  '  bro judge decide --state <file|-> --questions <file> [--connector <name>] [--json]\n' +
+  '  bro judge stats [--since <iso>] [--json] [--replay]'
+
 export async function runJudgeCommand(argv: string[]): Promise<void> {
   const sub = argv[0]
   if (sub === 'decide') {
     await decide(argv.slice(1))
     return
   }
+  if (sub === 'stats') {
+    stats(argv.slice(1))
+    return
+  }
   console.error(
-    sub === undefined
-      ? 'usage: bro judge decide --state <file|-> --questions <file> [--connector <name>] [--json]'
-      : `unknown judge subcommand: ${sub} — available: decide`
+    sub === undefined ? JUDGE_USAGE : `unknown judge subcommand: ${sub}\n${JUDGE_USAGE}`
   )
   process.exit(2)
 }
