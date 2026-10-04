@@ -31,11 +31,14 @@ write what the next step needs, not a diary.
 | Command | What it does |
 | ------- | ------------ |
 | `bro convoy pour <formula>` | Instantiate a formula as a molecule |
-| `bro convoy status [mol]` | The DAG — ✓ done / ▸ ready / · blocked |
+| `bro convoy status [mol]` | The DAG — ✓ done / ◐ in progress / ▸ ready / · blocked |
 | `bro convoy next [mol]` | Scheduler as code — the next executable step as JSON |
-| `bro convoy claim <step>` | Atomic claim before starting — required with parallel agents |
-| `bro convoy done <step> --result T` | Close the step, hand the result downstream |
+| `bro convoy claim <step> [--mol ID]` | Atomic claim before starting — required with parallel agents |
+| `bro convoy done <step> --result T [--mol ID]` | Close the step, hand the result downstream |
 | `bro convoy list` | Open molecules in this workspace |
+
+With several open molecules, pass `--mol <id>` — no-arg resolution errors
+on ambiguity rather than guessing.
 
 ## Human gates
 
