@@ -499,10 +499,10 @@ export function registryEntryState(
   e: AgentRegistryEntry
 ): AgentState {
   const pid = typeof e.pid === 'number' ? e.pid : undefined
-  if (
-    pid !== undefined &&
-    pidAlive(pid, typeof e.pidStart === 'string' ? e.pidStart : undefined)
-  ) {
+  // '' pidStart is unverified identity, not reuse proof — pidAlive('')
+  // can never match a real starttime and would read a live agent dead
+  const start = typeof e.pidStart === 'string' && e.pidStart !== '' ? e.pidStart : undefined
+  if (pid !== undefined && pidAlive(pid, start)) {
     return 'running'
   }
   if (e.stopped === true) {
@@ -543,6 +543,7 @@ export function registryAgents(dir: string): AgentInfo[] {
   const home = reg === null ? null : join(dirname(reg), 'agents')
   return Object.entries(readAgentRegistry(dir)).map(([molStep, e]) => ({
     id: e.agentId,
+    spawnedAt: typeof e.spawnedAt === 'string' ? e.spawnedAt : undefined,
     molStep,
     backend: e.backend,
     pid: typeof e.pid === 'number' ? e.pid : undefined,
@@ -558,22 +559,27 @@ export function registryAgents(dir: string): AgentInfo[] {
  *  planes only — registry, .work markers — so the hold stays far under
  *  the 20s lock wait (bro-taq6). 'spawned' is registryEntryState's
  *  "nothing cheap could prove" — a pid-less remote-backend entry
- *  inherits the pass's real probe when it's the same agent (a lost
- *  fixer stays respawn-able); an entry the pass never saw, or a
- *  re-minted agentId (a respawn landed mid-wait), keeps the
- *  conservative live verdict. */
-function freshOccupancy(
-  ctx: Ctx,
+ *  inherits the pass's real probe when it's the same agent GENERATION
+ *  (a lost fixer stays respawn-able); an entry the pass never saw, a
+ *  re-minted agentId, or a respawned same-id entry (a fresh spawnedAt)
+ *  keeps the conservative live verdict — the pass's probe measured a
+ *  dead generation, not this run (cubic). */
+export function freshOccupancy(
+  dir: string,
   known: AgentInfo[]
 ): Pick<PassWork, 'agents' | 'workDetails'> {
   const byStep = new Map(known.map((a) => [a.molStep, a]))
-  const agents = registryAgents(ctx.mainRoot).map((a) => {
+  const agents = registryAgents(dir).map((a) => {
     const seen = byStep.get(a.molStep)
-    return a.state === 'spawned' && seen !== undefined && seen.id === a.id
+    return a.state === 'spawned' &&
+      seen !== undefined &&
+      seen.id === a.id &&
+      seen.spawnedAt !== undefined &&
+      seen.spawnedAt === a.spawnedAt
       ? { ...a, state: seen.state }
       : a
   })
-  const hooks = hooksDirOf(ctx.mainRoot)
+  const hooks = hooksDirOf(dir)
   return {
     agents,
     workDetails: hooks === null ? [] : liveWorkDetails(hooks),
@@ -632,7 +638,7 @@ async function retireIfOrphaned(
     return `occupancy re-check failed — ${errText(err)}`
   }
   try {
-    const fresh = freshOccupancy(ctx, known)
+    const fresh = freshOccupancy(ctx.mainRoot, known)
     const occ = occupied({
       agents: fresh.agents,
       fixerBead: fixer?.id,
@@ -712,7 +718,7 @@ async function spawnFixer(
     }
   }
   try {
-    const fresh = freshOccupancy(ctx, known)
+    const fresh = freshOccupancy(ctx.mainRoot, known)
     const occ = occupied({
       agents: fresh.agents,
       fixerBead: fixer?.id,

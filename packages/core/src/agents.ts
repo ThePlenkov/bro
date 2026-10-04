@@ -43,6 +43,10 @@ export interface SpawnSpec {
 export interface AgentInfo {
   /** Stable per molStep — survives process death, reused on respawn. */
   id: string
+  /** Registry generation token — a respawn reuses `id` but re-stamps
+   *  spawnedAt, so a liveness verdict probed for one generation must
+   *  not be inherited by the next. */
+  spawnedAt?: string
   /** Backend-liveness handle; absent for remote backends. */
   pid?: number
   molStep: string
