@@ -230,12 +230,11 @@ const opensScalar = (t: string, i: number): boolean => {
   return true
 }
 
-/** The index just past a quoted scalar's closing quote starting at
- *  `start` (t[start] is the quote), or -1 when it never closes. `\\`
+/** The index just past the close of quote `q`, scanning from `from`
+ *  (`t[from]` is inside the scalar), or -1 when it never closes. `\\`
  *  escapes inside double quotes, `''` doubles inside single quotes. */
-const closeQuote = (t: string, start: number): number => {
-  const q = t[start]!
-  for (let i = start + 1; i < t.length; i++) {
+const quoteEnd = (t: string, q: string, from: number): number => {
+  for (let i = from; i < t.length; i++) {
     if (q === '"' && t[i] === '\\') {
       i++
     } else if (t[i] === q) {
@@ -249,18 +248,40 @@ const closeQuote = (t: string, start: number): number => {
   return -1
 }
 
+/** The index just past a quoted scalar's closing quote starting at
+ *  `start` (t[start] is the quote), or -1 when it never closes. */
+const closeQuote = (t: string, start: number): number => quoteEnd(t, t[start]!, start + 1)
+
+/** The quote char `t` ends inside, or '' — a quoted scalar wrapped
+ *  across lines continues on the next fragment. */
+const openQuoteAtEnd = (t: string): string => {
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i]!
+    if ((ch === '"' || ch === "'") && opensScalar(t, i)) {
+      const end = closeQuote(t, i)
+      if (end === -1) {
+        return ch
+      }
+      i = end - 1
+    }
+  }
+  return ''
+}
+
 /** Index where a YAML comment begins — a `#` at the head or after a
  *  space/tab, outside quotes. Quotes only quote inside a flow list —
  *  in a bare scalar `docs/it's.md` the apostrophe is an ordinary
- *  character. -1 when the scalar runs to the end. */
+ *  character; an unclosed quote swallows the rest of the fragment.
+ *  -1 when the scalar runs to the end. */
 const commentStart = (t: string, flow: boolean): number => {
   for (let i = 0; i < t.length; i++) {
     const ch = t[i]!
     if (flow && (ch === '"' || ch === "'") && opensScalar(t, i)) {
       const end = closeQuote(t, i)
-      if (end !== -1) {
-        i = end - 1
+      if (end === -1) {
+        return -1
       }
+      i = end - 1
     } else if (ch === '#' && (i === 0 || t[i - 1] === ' ' || t[i - 1] === '\t')) {
       return i
     }
@@ -312,16 +333,39 @@ const flowItems = (s: string): string[] => {
   return items
 }
 
-/** The scope value's items — a wrapped flow list joins its lines until
- *  the closing `]` (comments strip quote-aware per fragment, brackets
- *  survive); a block list reads `- ` items, skipping blank and
- *  comment-only lines as YAML allows. */
-const scopeItems = (inline: string, body: string[]): string[] => {
+/** Join wrapped flow-list lines until the `]` — comments strip
+ *  quote-aware per fragment, brackets survive; a quoted scalar wrapped
+ *  across lines (unclosed quote at fragment end) keeps going raw until
+ *  its close, so a `#` inside it is content, not a comment. */
+const flowJoin = (inline: string, body: string[]): string => {
+  let inQuote = openQuoteAtEnd(inline)
   for (let j = 0; inline.startsWith('[') && !inline.endsWith(']') && j < body.length; j++) {
     const frag = body[j]!.trim()
+    if (inQuote !== '') {
+      const end = quoteEnd(frag, inQuote, 0)
+      if (end === -1) {
+        inline += ` ${frag}`
+        continue
+      }
+      inQuote = ''
+      const rest = frag.slice(end)
+      const c = commentStart(rest, true)
+      inline += ` ${(frag.slice(0, end) + (c === -1 ? rest : rest.slice(0, c))).trimEnd()}`
+      continue
+    }
     const c = commentStart(frag, true)
-    inline += ` ${(c === -1 ? frag : frag.slice(0, c)).trimEnd()}`
+    const piece = (c === -1 ? frag : frag.slice(0, c)).trimEnd()
+    inline += ` ${piece}`
+    inQuote = openQuoteAtEnd(piece)
   }
+  return inline
+}
+
+/** The scope value's items — a wrapped flow list joins its lines until
+ *  the closing `]`; a block list reads `- ` items, skipping blank and
+ *  comment-only lines as YAML allows. */
+const scopeItems = (inline: string, body: string[]): string[] => {
+  inline = flowJoin(inline, body)
   if (inline !== '') {
     return inline.startsWith('[') && inline.endsWith(']')
       ? flowItems(inline.slice(1, -1)).map(yamlScalar).filter((s) => s !== '')
