@@ -175,6 +175,12 @@ export interface ReviewFacade {
   /** Distinct reviewed head SHAs — pushes that entered the review loop. */
   reviewedShas(t: PrTarget): string[]
 
+  /** ISO timestamps of the PR's head-branch commits — lifecycle
+   *  inference answers "did the head move after this comment's
+   *  createdAt". Optional — a host without it leaves that question
+   *  unknown; callers exclude rather than guess. */
+  commitTimes?(t: PrTarget): Promise<string[]>
+
   reviewThreads(t: PrTarget): Promise<ReviewThread[]>
   resolveThread(id: string, unresolve?: boolean): void
   replyThread(id: string, body: string): void

@@ -345,6 +345,16 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     return [...shas]
   }
 
+  /** Head-branch commit timestamps — lifecycle inference asks "did the
+   *  head move after this comment's createdAt". */
+  async function commitTimes(t: PrTarget): Promise<string[]> {
+    const rows = await glabPagedAsync<{ created_at?: string }>(
+      api(t.repo, `merge_requests/${t.pr}/commits`),
+      gopts()
+    )
+    return rows.flatMap((r) => (r.created_at ? [r.created_at] : []))
+  }
+
   async function reviewThreads(t: PrTarget): Promise<ReviewThread[]> {
     // the MR row is fetched for diff_refs.head_sha — the anchor that
     // tells current-diff threads from outdated ones
@@ -573,6 +583,7 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
       return new Map<string, number | null>()
     },
     reviewedShas,
+    commitTimes,
     prFiles(t) {
       // the MR's current diff list — a rename reports BOTH paths so a
       // code→docs rename still counts as touching code

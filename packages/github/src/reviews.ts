@@ -3,7 +3,7 @@
  * `gh` CLI. Ported from act/github.ts and debt/github.ts — same calls,
  * same semantics, normalized onto the domain types in @broject/core/review.
  */
-import { gh, ghAsync, ghJson, ghTry, prLink, resolveRepo } from '@broject/core'
+import { gh, ghAsync, ghJson, ghJsonAsync, ghTry, prLink, resolveRepo } from '@broject/core'
 import type {
   CheckInfo,
   MergeOpts,
@@ -156,6 +156,32 @@ function reviewedShas(t: PrTarget): string[] {
     }
   }
   return [...shas]
+}
+
+/** Head-branch commit timestamps — the pulls/commits endpoint caps at
+ *  250 (3 full pages); a PR past that is an outlier, and the missing
+ *  tail only widens "did the head move after this comment" toward
+ *  unknown, never toward a wrong yes. */
+async function commitTimes(t: PrTarget): Promise<string[]> {
+  const times: string[] = []
+  for (let page = 1; page <= 3; page += 1) {
+    const rows = await ghJsonAsync<
+      Array<{ commit?: { committer?: { date?: string } } }>
+    >([
+      'api',
+      `repos/${t.repo}/pulls/${t.pr}/commits?per_page=100&page=${page}`,
+    ])
+    for (const r of rows ?? []) {
+      const date = r.commit?.committer?.date
+      if (date) {
+        times.push(date)
+      }
+    }
+    if ((rows?.length ?? 0) < 100) {
+      break
+    }
+  }
+  return times
 }
 
 // --- review threads -----------------------------------------------------------
@@ -742,6 +768,7 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
     checks,
     checkAnnotations,
     reviewedShas,
+    commitTimes,
     prFiles,
     reviewThreads,
     labels,

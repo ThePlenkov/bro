@@ -8,15 +8,20 @@
  * `bro judge stats [--since <iso>] [--json]` — the shadow report
  * (milestone bro-f4ot.2.4): agreement matrix (judge action vs recorded
  * outcome), calibration buckets, latency/cost — including spend per
- * provider+model — over the verdict journal. Replay lands in its own
- * milestone.
+ * provider+model — over the verdict journal.
+ *
+ * `bro judge replay [--pr <n>… | --merged-since <iso>]` — the dogfood
+ * pass (milestone bro-f4ot.2.5): re-judge archived review threads from
+ * merged PRs, journal replay verdicts carrying their inferred outcomes,
+ * then print the replay-scoped stats — the accuracy report the bead
+ * publishes.
  *
  * The smoke test exercises the connector, not the mode gate — it runs
  * whatever `judge.mode` says; `mode` governs consumers (annotation),
  * not explicit invocation.
  */
 import { readFileSync } from 'node:fs'
-import { ensureAuth, JudgeUnavailable } from '@broject/core'
+import { ensureAuth, JudgeUnavailable, reviewHost } from '@broject/core'
 import type { DecideResult, JudgeAnswer, JudgeQuestion } from '@broject/core'
 import {
   appendRow,
@@ -25,8 +30,9 @@ import {
   judgeConfig,
   judgeFacade,
   readJournal,
+  replayMergedThreads,
 } from '@broject/judge'
-import { flag } from './args.ts'
+import { flag, flagAll } from './args.ts'
 import { loadBroConfig } from '../plugins.ts'
 
 const QUESTION_TYPES = ['choice', 'score', 'noul'] as const
@@ -254,10 +260,102 @@ function stats(argv: string[]): void {
   console.log(formatStats(s, { since, replay }))
 }
 
+/** `bro judge replay` — the dogfood pass (spec §CLI): re-judge archived
+ *  threads from merged PRs on the live chain, journal the verdicts as
+ *  replay:true rows carrying their inferred outcomes, then print the
+ *  replay-scoped stats report. The journal rows ARE the artifact —
+ *  replay writes them regardless of judge.mode (replay:true keeps
+ *  them out of live stats either way). */
+async function replay(argv: string[]): Promise<void> {
+  const REPLAY_VALUE_FLAGS = new Set(['--pr', '--merged-since', '--limit', '--connector'])
+  const unknown: string[] = []
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i]!
+    const name = a.split('=')[0]!
+    if (REPLAY_VALUE_FLAGS.has(name)) {
+      if (a === name) {
+        i += 1 // separate-value form consumes its value
+      }
+      continue
+    }
+    if (a !== '--json') {
+      unknown.push(a)
+    }
+  }
+  if (unknown.length > 0) {
+    console.error(`error: unknown replay option(s): ${unknown.join(', ')}`)
+    process.exit(2)
+  }
+  const prs = flagAll(argv, '--pr')
+    .flatMap((v) => v.split(','))
+    .map((v) => v.trim())
+    .filter((v) => v !== '')
+    .map((v) => {
+      const n = Number(v)
+      if (!Number.isInteger(n) || n <= 0) {
+        console.error(`error: --pr expects PR numbers — got ${JSON.stringify(v)}`)
+        process.exit(2)
+      }
+      return n
+    })
+  const mergedSince = flag(argv, '--merged-since')
+  if (mergedSince !== undefined && !isIso(mergedSince)) {
+    console.error(
+      `error: --merged-since must be an ISO timestamp — got ${JSON.stringify(mergedSince)}`
+    )
+    process.exit(2)
+  }
+  const limitRaw = flag(argv, '--limit')
+  const limit =
+    limitRaw === undefined
+      ? undefined
+      : (() => {
+          const n = Number(limitRaw)
+          if (!Number.isInteger(n) || n <= 0) {
+            console.error(`error: --limit expects a positive integer — got ${JSON.stringify(limitRaw)}`)
+            process.exit(2)
+          }
+          return n
+        })()
+  const connector = flag(argv, '--connector')
+  const asJson = argv.includes('--json')
+
+  const dir = process.cwd()
+  const prefer = loadBroConfig().connectors
+  ensureAuth('reviews', { dir }, { prefer })
+  ensureAuth('judge', { dir }, { connector, prefer })
+  const rev = reviewHost(dir, prefer)
+  const judge = judgeFacade(dir, { connector })
+  const res = await replayMergedThreads({
+    dir,
+    repo: rev.resolveRepo([]),
+    rev,
+    judge,
+    prs: prs.length > 0 ? prs : undefined,
+    mergedSince,
+    limit,
+    budget: judgeConfig(dir).judge.maxDecisionsPerRun,
+    onProgress: (msg) => console.error(msg),
+  })
+  console.error(
+    `judge replay: ${res.prs} merged PR(s) · ${res.threads} thread(s) · ` +
+      `${res.candidates} classifiable · ${res.judged} judged · ${res.cached} cached · ` +
+      `${res.excluded} excluded · ${res.failed} failed`
+  )
+  // the report is the replay set's stats — the artifact reviewers read
+  const s = computeStats(readJournal(dir), { replay: true })
+  if (asJson) {
+    console.log(JSON.stringify({ replay: res, stats: s }, null, 2))
+    return
+  }
+  console.log(formatStats(s, { replay: true }))
+}
+
 const JUDGE_USAGE =
-  'usage: bro judge <decide|stats>\n' +
+  'usage: bro judge <decide|stats|replay>\n' +
   '  bro judge decide --state <file|-> --questions <file> [--connector <name>] [--json]\n' +
-  '  bro judge stats [--since <iso>] [--json] [--replay]'
+  '  bro judge stats [--since <iso>] [--json] [--replay]\n' +
+  '  bro judge replay [--pr <n>[,<n>…]…] [--merged-since <iso>] [--limit <n>] [--connector <name>] [--json]'
 
 export async function runJudgeCommand(argv: string[]): Promise<void> {
   const sub = argv[0]
@@ -267,6 +365,10 @@ export async function runJudgeCommand(argv: string[]): Promise<void> {
   }
   if (sub === 'stats') {
     stats(argv.slice(1))
+    return
+  }
+  if (sub === 'replay') {
+    await replay(argv.slice(1))
     return
   }
   console.error(
