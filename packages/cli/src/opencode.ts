@@ -167,7 +167,10 @@ function hasHooksCommand(): Promise<boolean> {
   return new Promise((resolve) => {
     let child: ChildProcess
     try {
-      child = spawn('bro', ['hooks'], { stdio: ['pipe', 'ignore', 'ignore'] })
+      // PATH lookup is the point of this tier — a partial install has no
+      // bundled CLI, and the probe below verifies the answer before any hook
+      // trusts it
+      child = spawn('bro', ['hooks'], { stdio: ['pipe', 'ignore', 'ignore'] }) // NOSONAR typescript:S4036
     } catch {
       resolve(false)
       return
