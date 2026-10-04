@@ -90,6 +90,10 @@ describe('bro learn', () => {
       f.run(ADD)
       const all = JSON.parse(f.run(['list', '--json']).stdout) as unknown[]
       assert.equal(all.length, 1)
+      const matching = JSON.parse(
+        f.run(['list', '--json', '--source', 'manual']).stdout
+      ) as unknown[]
+      assert.equal(matching.length, 1)
       const filtered = JSON.parse(
         f.run(['list', '--json', '--source', 'probe']).stdout
       ) as unknown[]

@@ -25,6 +25,7 @@ switch (args[1]) {
     break
   case 'clear': delete map[args[2]]; save(map); break
   case 'list': process.stdout.write(JSON.stringify(map)); break
+  default: console.error('fake bd: unhandled kv ' + args[1]); process.exit(1)
 }
 `
 
