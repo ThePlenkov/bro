@@ -58,7 +58,8 @@ a fresh decide(), bounded by `maxDecisionsPerRun` per invocation
   thread resolution still needs `bro act resolve/reply`, the exit gate
   still reads deterministic state, fixer spawns stay deterministic.
   The judge earns advisory weight by measured dogfood agreement
-  (`bro judge stats` over the journal; `replay` is a later milestone),
+  (`bro judge stats` over the journal; the `replay` dogfood subcommand
+  is a later milestone),
   not enthusiasm. Never wire a verdict into a gate decision.
 - **Fail-open, always.** A wedged backend throws `JudgeUnavailable` —
   consumers treat "no verdict" as "no annotation", never a gate input.
