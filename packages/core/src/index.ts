@@ -171,6 +171,7 @@ export {
 export type {
   BusBroker,
   BusBrokerOptions,
+  BusCursor,
   BusEnvelope,
   BusEventInput,
   BusFilter,

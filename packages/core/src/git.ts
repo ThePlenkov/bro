@@ -3,6 +3,7 @@
  * git, their config, their credentials.
  */
 import { spawnSync } from 'node:child_process'
+import { resolve } from 'node:path'
 
 /** `git -C` must select the repo on argv alone — an inherited
  *  GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR silently retargets the probe at
@@ -59,8 +60,16 @@ export function gitTry(args: string[]): { code: number; out: string; err: string
  *  state, broker socket). */
 export function gitCommonDir(dir: string): string | null {
   const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
-  const common = r.code === 0 ? r.out.trim() : ''
-  return common === '' ? null : common
+  if (r.code === 0) {
+    const common = r.out.trim()
+    return common === '' ? null : common
+  }
+  // --path-format arrived in git 2.31: on older git the option itself
+  // fails, which must not read as "not a repository". The plain output
+  // is relative to `dir`, so resolve() absolutizes it the same way.
+  const fallback = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'])
+  const common = fallback.code === 0 ? fallback.out.trim() : ''
+  return common === '' ? null : resolve(dir, common)
 }
 
 /** The drift comparison ref — landed spec vs landed code, so a feature

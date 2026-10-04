@@ -9,12 +9,14 @@ parent: project
 `bro bus` is the transport under agent communication: a local broker
 process on a Unix socket, topics with subscriber-side filters, one-to-many
 and many-to-many fan-out, monotonic `seq` cursors, and a bounded replay
-ring so a reconnecting consumer resumes instead of losing events.
+ring that replays retained history and reports a gap when requested
+events are unavailable.
 
 Reactivity is delivered by pushing onto what bro already owns — the
 `postTool` probe drain point (`packages/cli/src/commands/hooks.ts`) — not
 by waking a model. Nothing here may stall a session: the broker is
-optional infrastructure and every client path fails open.
+optional infrastructure; publish, probe, and status fail open, while
+subscribe reports errors.
 
 ## Owns
 

@@ -126,10 +126,12 @@ baked into every caller.
 The repo already has the abstraction that fixes this, and the broker was
 built to its shape rather than around it:
 
-- **facade** `events` — the capability, named by domain semantics, never
-  by vendor (`packages/core/src/connectors.ts:45`). Its contract is
-  exactly `publish` / `subscribe(filter, {since})` / `probe`, which is
-  what this PR already exposes.
+- **facade** `events` — a capability the next PR adds using the existing
+  domain-named facade pattern (`packages/core/src/connectors.ts`):
+  `FacadeMap` holds `tasks`, `reviews`, `specs`, `judge` today, no
+  `events` yet. The contract it must define is exactly `publish` /
+  `subscribe(filter, {since})` / `probe`, which is what this PR already
+  exposes as transport functions.
 - **connectors** — `mailbox` (today's `notify`: the file drop plus a
   per-session `.seen-<sid>` cursor) and `bus` (this PR). `mqtt` / `amqp`
   join when the fleet goes multi-host, which the bead already predicts.

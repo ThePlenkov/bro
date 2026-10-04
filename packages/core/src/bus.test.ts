@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, statSync } from 'node:fs'
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -92,7 +92,7 @@ describe('isBusEventInput', () => {
 
 describe('BusRing', () => {
   const T = Date.parse('2026-10-04T12:00:00.000Z')
-  const env = (seq: number): BusEnvelope => ({ seq, ts: '2026-10-04T12:00:00.000Z', topic: 't', kind: 'k' })
+  const env = (seq: number): BusEnvelope => ({ gen: 'g1', seq, ts: '2026-10-04T12:00:00.000Z', topic: 't', kind: 'k' })
 
   test('rejects a nonsense limit rather than silently truncating', () => {
     assert.throws(() => new BusRing({ limit: 0 }), RangeError)
@@ -123,7 +123,7 @@ describe('BusRing', () => {
   test('a count bound alone still leaks: age evicts too', () => {
     const T = Date.parse('2026-10-04T12:00:00.000Z')
     const ring = new BusRing({ limit: 100, ttlMs: 60_000 })
-    const at = (seq: number, ts: string): BusEnvelope => ({ seq, ts, topic: 't', kind: 'k' })
+    const at = (seq: number, ts: string): BusEnvelope => ({ gen: 'g1', seq, ts, topic: 't', kind: 'k' })
     ring.push(at(1, '2026-10-04T12:00:00.000Z'), T)
     ring.push(at(2, '2026-10-04T12:00:30.000Z'), T)
     // still inside the ttl
@@ -140,9 +140,9 @@ describe('BusRing', () => {
     const T = Date.parse('2026-10-04T12:00:00.000Z')
     const ring = new BusRing({ limit: 1000, maxBytes: 4096 })
     for (const s of [1, 2, 3]) {
-      ring.push({ seq: s, ts: '2026-10-04T12:00:00.000Z', topic: 't', kind: 'k' }, T)
+      ring.push({ gen: 'g1', seq: s, ts: '2026-10-04T12:00:00.000Z', topic: 't', kind: 'k' }, T)
     }
-    ring.push({ seq: 4, ts: '2026-10-04T12:00:00.000Z', topic: 't', kind: 'k', payload: 'x'.repeat(8192) }, T)
+    ring.push({ gen: 'g1', seq: 4, ts: '2026-10-04T12:00:00.000Z', topic: 't', kind: 'k', payload: 'x'.repeat(8192) }, T)
     assert.ok(ring.size < 4, 'the byte bound has to bite')
     assert.equal(ring.since(0, T), null, 'whatever it dropped shows up as a gap, never a short list')
   })
@@ -518,6 +518,32 @@ describe('broker restart', () => {
         await settle()
         sub2.close()
         assert.deepEqual(caught.map((e) => e.key), ['after-restart'])
+
+        // The durable cursor is {gen, seq}: a cursor the dead run issued
+        // must read as a gap even when the fresh seq space has grown
+        // past it — a bare number cannot see the restart.
+        assert.notEqual(first.gen, second.gen)
+        let foreignGap = false
+        const foreign: BusEnvelope[] = []
+        const sub3 = await busSubscribe(socketPath, {}, {
+          onEvent: (e) => foreign.push(e),
+          onGap: () => {
+            foreignGap = true
+          },
+        }, { since: { gen: first.gen, seq: 1 } })
+        await settle()
+        sub3.close()
+        assert.equal(foreignGap, true, 'a {gen, seq} cursor from a dead run must report a gap')
+        assert.deepEqual(foreign, [])
+
+        // The same run's gen honours the cursor normally.
+        const same: BusEnvelope[] = []
+        const sub4 = await busSubscribe(socketPath, {}, { onEvent: (e) => same.push(e) }, {
+          since: { gen: second.gen, seq: 0 },
+        })
+        await settle()
+        sub4.close()
+        assert.deepEqual(same.map((e) => e.key), ['after-restart'])
       } finally {
         await second.close()
       }
@@ -603,6 +629,27 @@ describe('broker startup', () => {
     }
   })
 
+  test('a stale socket inode does not block a restart', async () => {
+    // A SIGKILLed broker never runs close(), so the socket file
+    // survives. ECONNREFUSED is the proof nothing listens — unlink it
+    // and bind instead of dying on EADDRINUSE.
+    const dir = mkdtempSync(join(tmpdir(), 'bro-bus-'))
+    const socketPath = join(dir, 'bus.sock')
+    writeFileSync(socketPath, 'stale')
+    try {
+      const broker = await startBusBrokerAt(socketPath, {
+        now: () => Date.parse('2026-10-04T12:00:00.000Z'),
+      })
+      try {
+        assert.equal((await busPublish(socketPath, { topic: 'a', kind: 'x' })).published, true)
+      } finally {
+        await broker.close()
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('the socket dir is owner-only', async () => {
     const root = mkdtempSync(join(tmpdir(), 'bro-bus-'))
     const socketDir = join(root, 'sub')
@@ -624,17 +671,24 @@ describe('broker startup', () => {
 describe('socket path', () => {
   test('is null outside a repository and short enough for sun_path', () => {
     // outside a repo: no git-common-dir, so no bus
-    const outside = busSocketPath(mkdtempSync(join(tmpdir(), 'bro-bus-out-')))
+    const dirA = mkdtempSync(join(tmpdir(), 'bro-bus-out-'))
+    const dirB = mkdtempSync(join(tmpdir(), 'bro-bus-out-'))
     try {
+      const outside = busSocketPath(dirA)
       // tmpdir is not a repository, so this must be null or a valid path
       if (outside !== null) {
-        assert.ok(outside.length < 104, `socket path too long for sun_path: ${String(outside.length)} bytes`)
-      }
-    } finally {
-      if (outside !== null) {
+        // sun_path counts UTF-8 bytes, not UTF-16 code units — a
+        // non-ASCII path can fit the first and still overflow the second
+        assert.ok(
+          Buffer.byteLength(outside, 'utf8') < 104,
+          `socket path too long for sun_path: ${String(Buffer.byteLength(outside, 'utf8'))} bytes`
+        )
         rmSync(outside.replace(/\/[^/]+$/, ''), { recursive: true, force: true })
       }
-      rmSync(busSocketPath(mkdtempSync(join(tmpdir(), 'bro-bus-out-'))) ?? '', { force: true })
+      rmSync(busSocketPath(dirB) ?? '', { force: true })
+    } finally {
+      rmSync(dirA, { recursive: true, force: true })
+      rmSync(dirB, { recursive: true, force: true })
     }
   })
 })

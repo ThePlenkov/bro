@@ -79,7 +79,10 @@ function rejectUnknownFlags(sub: string, rest: string[]): void {
       continue
     }
     const name = arg.split('=')[0] ?? arg
-    if (!known.has(name)) {
+    // A `--bool=value` spelling must not pass as `--bool`: it validates
+    // and then silently reads as absent downstream (`--json=true` would
+    // emit human output). `=` is legal only for value flags.
+    if (!known.has(name) || (arg !== name && !VALUE_FLAGS.has(name))) {
       usage()
     }
   }
@@ -206,8 +209,14 @@ async function cmdSubscribe(rest: string[]): Promise<void> {
       },
       onGap: (seq) => {
         // An honest hole beats silent loss: the cursor fell outside the
-        // broker's replay window, so state must be re-derived.
-        console.error(json ? JSON.stringify({ gap: true, seq }) : `gap: cursor older than the replay window (broker at ${String(seq)}) — re-derive state`)
+        // broker's replay window, so state must be re-derived. In --json
+        // mode the gap is part of the event stream — stderr would drop
+        // it from a consumer that only parses stdout.
+        if (json) {
+          console.log(JSON.stringify({ gap: true, seq }))
+        } else {
+          console.error(`gap: cursor older than the replay window (broker at ${String(seq)}) — re-derive state`)
+        }
       },
     }, since !== undefined ? { since } : {})
   } catch (err) {
