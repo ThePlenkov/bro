@@ -294,8 +294,13 @@ export const llmJudgeConnector: Connector = {
     if (judge.llm === undefined) {
       return 'judge.llm is not configured — set judge.llm { baseUrl, model } in bro.config.json'
     }
-    return judge.llm.apiKeyEnv !== undefined && !process.env[judge.llm.apiKeyEnv]
-      ? `${judge.llm.apiKeyEnv} is not set — export it for llm-judge`
+    const { apiKeyEnv } = judge.llm
+    if (apiKeyEnv !== undefined && !isEnvName(apiKeyEnv)) {
+      // a pasted key value must never echo back in an auth message
+      return 'judge.llm.apiKeyEnv is not a valid environment variable name'
+    }
+    return apiKeyEnv !== undefined && !process.env[apiKeyEnv]
+      ? `${apiKeyEnv} is not set — export it for llm-judge`
       : null
   },
   judge: (ctx) => llmJudge(judgeConfig(ctx.dir).judge),
