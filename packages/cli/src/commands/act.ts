@@ -15,6 +15,7 @@ import {
   taskStore,
   type PrTarget,
   type ReviewFacade,
+  type ReviewThread,
 } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import { isAncestor } from './cleanup.ts'
@@ -32,6 +33,12 @@ import {
   type ExitGate,
   type PrActState,
 } from '@broject/act'
+import {
+  annotateThreads,
+  judgeConfig,
+  judgeFacade,
+  recordDisposition,
+} from '@broject/judge'
 
 function usage(): never {
   console.error(`Usage: bro act <command> [args…]
@@ -496,6 +503,11 @@ async function cmdThreads(argv: string[]): Promise<void> {
   // threads only needs the threads API — fetching checks/SAST here would
   // make a read-only listing fail on unrelated check-service flakes
   const threads = await rev.reviewThreads(t)
+  // shadow-mode judge verdicts render beside each unresolved thread —
+  // annotation only, never applied; every failure mode degrades to
+  // "no annotation" (a judge that can stall `act threads` gets turned
+  // off, per the spec's fail-open rule)
+  const notes = await shadowNotes(rev, t, threads)
   let open = 0
   for (const thread of threads) {
     if (thread.resolved) {
@@ -508,8 +520,73 @@ async function cmdThreads(argv: string[]): Promise<void> {
     const line = c?.line ?? '-'
     const body = (c?.body ?? '').replace(/[\n\t]/g, ' ').slice(0, 120)
     console.log(`${thread.id}\t${author}\t${path}:${line}\t${body}`)
+    const note = notes?.get(thread.id)
+    if (note !== undefined) {
+      console.log(`  ${note}`)
+    }
   }
   console.error(`act threads: ${open} unresolved`)
+}
+
+/** Shadow-mode judge annotation for the threads listing — the
+ *  `judge: …` line under each unresolved row when `judge.mode:
+ *  shadow`, undefined otherwise. The journal dedups on
+ *  (threadId, commentSha, headSha), so repeat polls annotate for
+ *  free and only a moved subject pays for a fresh decide(). */
+async function shadowNotes(
+  rev: ReviewFacade,
+  t: PrTarget,
+  threads: ReviewThread[]
+): Promise<Map<string, string> | undefined> {
+  const dir = process.cwd()
+  const cfg = judgeConfig(dir).judge
+  if (cfg.mode !== 'shadow') {
+    return undefined
+  }
+  try {
+    // headSha is the "inputs moved" half of the dedup key — a push
+    // re-judges the thread; an unfetchable head just loosens the key
+    let headSha: string | undefined
+    try {
+      headSha = rev.prMeta(t).headSha
+    } catch {
+      // no head — dedup keys on commentSha alone
+    }
+    const res = await annotateThreads(threads, {
+      dir,
+      pr: t.pr,
+      headSha,
+      judge: judgeFacade(dir),
+      budget: cfg.maxDecisionsPerRun,
+    })
+    if (res.decided > 0) {
+      console.error(`act: judge decided ${res.decided} thread(s) — verdicts journaled`)
+    }
+    return res.annotations
+  } catch (err) {
+    console.error(
+      `act: judge annotation skipped — ${err instanceof Error ? err.message : String(err)}`
+    )
+    return undefined
+  }
+}
+
+/** The observed outcome for a thread — journaled beside its shadow
+ *  verdict so stats can score judge-vs-outcome agreement. Runs only
+ *  in shadow mode (off writes no judge artifacts); a failed journal
+ *  write never fails the mutation that produced the outcome. */
+function disposition(threadId: string, outcome: string, pr?: number): void {
+  const dir = process.cwd()
+  if (judgeConfig(dir).judge.mode !== 'shadow') {
+    return
+  }
+  try {
+    recordDisposition(dir, { pr, threadId }, outcome)
+  } catch (err) {
+    console.error(
+      `act: disposition not journaled — ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
 }
 
 function threadArg(argv: string[]): string {
@@ -548,6 +625,9 @@ function cmdResolve(argv: string[]): void {
   } else {
     rev.resolveThread(id)
     console.error(`act: resolved ${id}`)
+    // a silent resolve is the fix verdict; a comment is a reject/defer
+    // reason (skills/act/SKILL.md) — journaled for judge agreement
+    disposition(id, comment ? 'rejected' : 'fixed')
   }
 }
 
@@ -582,6 +662,7 @@ function cmdReply(argv: string[]): void {
     for (const row of rows) {
       rev.replyThread(row.id, row.body)
       console.error(`act: replied on ${row.id}`)
+      disposition(row.id, 'replied')
     }
     console.error(`act reply: ${rows.length} repl(ies)`)
     if (skipped > 0) {
@@ -598,6 +679,7 @@ function cmdReply(argv: string[]): void {
   }
   rev.replyThread(id, comment!)
   console.error(`act: replied on ${id}`)
+  disposition(id, 'replied')
 }
 
 const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
@@ -637,23 +719,26 @@ function deferThread(
   const reply = `deferred to ${bead}` + (v.comment ? ` — ${v.comment}` : '')
   rev.replyThread(v.thread_id, reply)
   rev.resolveThread(v.thread_id)
+  disposition(v.thread_id, 'deferred', pr)
   return bead
 }
 
-function replyVerdict(rev: ReviewFacade, v: ActThreadVerdict): void {
+function replyVerdict(rev: ReviewFacade, v: ActThreadVerdict, pr?: number): void {
   if (!v.comment) {
     throw new Error(`reply verdict for ${v.thread_id} has no comment`)
   }
   rev.replyThread(v.thread_id, v.comment)
   console.error(`act: replied on ${v.thread_id}`)
+  disposition(v.thread_id, 'replied', pr)
 }
 
-function resolveVerdict(rev: ReviewFacade, v: ActThreadVerdict): void {
+function resolveVerdict(rev: ReviewFacade, v: ActThreadVerdict, pr?: number): void {
   if (v.comment) {
     rev.replyThread(v.thread_id, v.comment)
   }
   rev.resolveThread(v.thread_id)
   console.error(`act: resolved ${v.thread_id}`)
+  disposition(v.thread_id, v.comment ? 'rejected' : 'fixed', pr)
 }
 
 /** Apply an `act` plan (`bro run act.toml`) — batch thread verdicts.
@@ -685,11 +770,11 @@ export function applyActPlan(plan: ActPlan): void {
   for (const v of plan.threads) {
     try {
       if (v.action === 'reply') {
-        replyVerdict(rev, v)
+        replyVerdict(rev, v, plan.pr)
       } else if (v.action === 'defer') {
         console.error(`act: deferred ${v.thread_id} → ${deferThread(rev, v, repoForDefers(), plan.pr)}`)
       } else {
-        resolveVerdict(rev, v)
+        resolveVerdict(rev, v, plan.pr)
       }
     } catch (err) {
       failed.push(v.thread_id)

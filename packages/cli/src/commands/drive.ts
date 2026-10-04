@@ -46,10 +46,16 @@ import {
   type AgentRegistryEntry,
   type AgentState,
   type ReviewFacade,
+  type ReviewThread,
   type TaskRow,
   type TaskStore,
 } from '@broject/core'
 import { evaluateExitGate, fetchPrActState, type PrActState } from '@broject/act'
+import {
+  annotateThreads,
+  judgeConfig,
+  judgeFacade,
+} from '@broject/judge'
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { flag } from './args.ts'
 import {
@@ -367,17 +373,27 @@ export function ensureFixerWorktree(
 }
 
 /** The fixer's work order — unresolved threads at spawn time (the prompt
- *  tells it to re-fetch; more may land while it works). */
+ *  tells it to re-fetch; more may land while it works). `judge` carries
+ *  the shadow verdict line for a thread — annotation the fixer may
+ *  read, never an instruction it must obey. */
 export function buildFixerPrompt(opts: {
   pr: number
   link: string
   branch: string
   worktree: string
-  threads: { path?: string | null; line?: number | null; author?: string; body?: string }[]
+  threads: {
+    path?: string | null
+    line?: number | null
+    author?: string
+    body?: string
+    judge?: string
+  }[]
 }): string {
   const list = opts.threads
     .map(
-      (t) => `- ${t.path ?? ''}:${t.line ?? ''} [${t.author ?? '?'}] ${(t.body ?? '').trim()}`
+      (t) =>
+        `- ${t.path ?? ''}:${t.line ?? ''} [${t.author ?? '?'}] ${(t.body ?? '').trim()}` +
+        (t.judge !== undefined ? `\n    ${t.judge}` : '')
     )
     .join('\n')
   return [
@@ -400,6 +416,34 @@ export function buildFixerPrompt(opts: {
     '- Exit when threads are zero or all deferred.',
     '',
   ].join('\n')
+}
+
+/** Shadow-mode judge verdicts for the fixer prompt's thread list —
+ *  annotation only, journaled beside `bro act threads`' own verdicts
+ *  (same journal, same dedup key). Every failure degrades to "no
+ *  annotation" — a dead judge must never stall a fixer spawn. */
+async function driveShadowNotes(
+  dir: string,
+  pr: number,
+  headSha: string,
+  open: ReviewThread[]
+): Promise<Map<string, string> | undefined> {
+  const cfg = judgeConfig(dir).judge
+  if (cfg.mode !== 'shadow') {
+    return undefined
+  }
+  try {
+    const res = await annotateThreads(open, {
+      dir,
+      pr,
+      headSha,
+      judge: judgeFacade(dir),
+      budget: cfg.maxDecisionsPerRun,
+    })
+    return res.annotations
+  } catch {
+    return undefined
+  }
 }
 
 // --- the pass -------------------------------------------------------------------------
@@ -741,6 +785,10 @@ async function spawnFixer(
       return { pr, link, verdict: 'occupied', detail: occ }
     }
     const bead = fixer ?? ensureFixerBead(ctx.store, pr, link, state.headRef)
+    // shadow-mode judge verdicts annotate the prompt's thread list —
+    // journaled and rendered, never applied (the fixer still resolves,
+    // replies, and defers by its own reading)
+    const notes = await driveShadowNotes(ctx.mainRoot, pr, state.headSha, open)
     const prompt = buildFixerPrompt({
       pr,
       link,
@@ -751,6 +799,7 @@ async function spawnFixer(
         line: t.comment?.line,
         author: t.comment?.author,
         body: t.comment?.body,
+        judge: notes?.get(t.id),
       })),
     })
     try {
