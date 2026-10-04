@@ -56,6 +56,24 @@ export const BUS_RING_LIMIT = 10_000
  *  would turn a 10k ring into 10k lines per hook. */
 export const BUS_PROBE_LIMIT = 64
 
+/** How long a probe listens before it reports what it has. The bead's
+ *  constraint is a hard sub-second budget: a hook must never wait on a
+ *  wedged broker, so this is a ceiling and not a suggestion. */
+export const BUS_PROBE_WINDOW_MS = 250
+
+/** Retention, on the age and byte axes. The count bound alone still
+ *  lets a slow trickle of events sit in memory indefinitely, and one
+ *  fat payload can carry a whole ring's worth of bytes. */
+export const BUS_RING_TTL_MS = 60 * 60_000
+
+export const BUS_RING_MAX_BYTES = 32 * 1024 * 1024
+
+/** Bytes an envelope occupies in the ring — measured, not estimated,
+ *  so the byte bound cannot drift from what is actually retained. */
+function busEventBytes(event: BusEnvelope): number {
+  return Buffer.byteLength(JSON.stringify(event), 'utf8')
+}
+
 /** A slow subscriber is dropped rather than buffered without bound —
  *  `writableLength` past this and the event is skipped, with a `gap`
  *  frame before the next delivered one so the consumer knows to
@@ -63,12 +81,20 @@ export const BUS_PROBE_LIMIT = 64
 const SLOW_CONSUMER_BYTES = 1024 * 1024
 
 /** One event as published. `seq` and `ts` are the broker's to assign —
- *  a publisher cannot forge an order. */
+ *  a publisher cannot forge an order. `cause` and `ref` are what make a
+ *  chain readable later: `cause` is the `seq` (or bead id) this event
+ *  answers, `ref` an opaque handle back to the artifact — both belong in
+ *  the envelope from day one, because adding them after a transport
+ *  change turns every stored event into a migration. */
 export interface BusEventInput {
   topic: string
   kind: string
   key?: string
   source?: string
+  /** What this event answers — a prior `seq`, or a bead/step id. */
+  cause?: string
+  /** Opaque pointer to an artifact: a worktree, a PR, a log file. */
+  ref?: string
   payload?: unknown
 }
 
@@ -116,42 +142,81 @@ export function isBusEventInput(value: unknown): value is BusEventInput {
   return typeof v['topic'] === 'string' && v['topic'] !== '' && typeof v['kind'] === 'string' && v['kind'] !== ''
 }
 
-/** Bounded replay window. `since` is the caller's last seen seq. */
+/** Bounded replay window. `since` is the caller's last seen seq.
+ *
+ *  Retention is part of the contract, not a follow-up: a window that is
+ *  load-bearing for replay is also an unbounded liability, so it is
+ *  bounded on three axes — count (`limit`), age (`ttlMs`) and bytes
+ *  (`maxBytes`). All three make an event disappear, and every
+ *  disappearance is a `gap`, never a silent hole. */
 export class BusRing {
   private readonly limit: number
+  private readonly ttlMs: number
+  private readonly maxBytes: number
   private readonly buf: BusEnvelope[] = []
+  private bytes = 0
+  /** Highest seq ever dropped by a bound. An empty ring cannot tell
+   *  "nothing was published" from "everything aged out", and answering
+   *  the second with an empty list is the silent hole this contract
+   *  forbids — so the drop watermark is what makes a cursor honest. */
+  private evictedThrough = 0
 
-  constructor(limit: number = BUS_RING_LIMIT) {
+  constructor(opts: { limit?: number; ttlMs?: number; maxBytes?: number } = {}) {
+    const limit = opts.limit ?? BUS_RING_LIMIT
     if (!Number.isInteger(limit) || limit < 1) {
       throw new RangeError(`bus ring limit must be a positive integer, got ${String(limit)}`)
     }
     this.limit = limit
+    this.ttlMs = opts.ttlMs ?? BUS_RING_TTL_MS
+    this.maxBytes = opts.maxBytes ?? BUS_RING_MAX_BYTES
   }
 
   get size(): number {
     return this.buf.length
   }
 
-  push(event: BusEnvelope): void {
+  push(event: BusEnvelope, now: number): void {
     this.buf.push(event)
-    if (this.buf.length > this.limit) {
-      this.buf.splice(0, this.buf.length - this.limit)
+    this.bytes += busEventBytes(event)
+    this.evict(now)
+  }
+
+  /** Drop whatever the bounds no longer admit. Always from the head:
+   *  seq and `ts` both advance with the stream, so the head is always
+   *  the oldest event and the loop terminates on all three axes. */
+  private evict(now: number): void {
+    while (this.buf.length > 0) {
+      const oldest = this.buf[0]
+      if (oldest === undefined) {
+        return
+      }
+      const overCount = this.buf.length > this.limit
+      const overBytes = this.bytes > this.maxBytes
+      const expired = now - Date.parse(oldest.ts) > this.ttlMs
+      if (!overCount && !overBytes && !expired) {
+        return
+      }
+      this.buf.shift()
+      this.bytes -= busEventBytes(oldest)
+      this.evictedThrough = Math.max(this.evictedThrough, oldest.seq)
     }
   }
 
   /** Events after `since`, or null when they are unobtainable — the
-   *  cursor predates the window (evicted) or claims a seq this broker
-   *  run never issued (it restarted, so seq counts from 1 again).
+   *  cursor predates the window (evicted or expired) or claims a seq this
+   *  broker run never issued (it restarted, so seq counts from 1 again).
    *  Both mean the same thing to a consumer: re-derive from state. */
-  since(since: number): BusEnvelope[] | null {
-    const first = this.buf[0]
-    if (first === undefined) {
-      // nothing published yet: a cursor past our seq is still a gap,
-      // an empty window is not
-      return since > 0 ? null : []
-    }
-    if (since < first.seq - 1) {
+  since(since: number, now: number = Date.now()): BusEnvelope[] | null {
+    this.evict(now)
+    // The cursor wants events after `since`, so the first one it needs is
+    // `since + 1`. If a bound has already dropped past that, the range is
+    // gone and no answer can be honest.
+    if (since < this.evictedThrough) {
       return null
+    }
+    if (this.buf.length === 0) {
+      // nothing retained: a cursor past anything ever published is a gap
+      return since > this.evictedThrough ? null : []
     }
     return this.buf.filter((e) => e.seq > since)
   }
@@ -190,7 +255,8 @@ interface Subscriber {
 }
 
 export interface BusBrokerOptions {
-  ringLimit?: number
+  /** Retention bounds for the replay window — see `BusRing`. */
+  ring?: { limit?: number; ttlMs?: number; maxBytes?: number }
   /** Injectable clock for deterministic tests. */
   now?: () => number
 }
@@ -240,7 +306,7 @@ export async function startBusBrokerAt(
   socketPath: string,
   opts: BusBrokerOptions = {}
 ): Promise<BusBroker> {
-  const ring = new BusRing(opts.ringLimit)
+  const ring = new BusRing(opts.ring ?? {})
   const now = opts.now ?? Date.now
   const subs = new Set<Subscriber>()
   // net.Server has no closeAllConnections (that is http.Server), so the
@@ -276,7 +342,7 @@ export async function startBusBrokerAt(
       seq,
       ts: new Date(now()).toISOString(),
     }
-    ring.push(envelope)
+    ring.push(envelope, now())
     const out = { op: 'event', event: envelope }
     for (const s of subs) {
       if (busMatches(s.filter, envelope)) {
@@ -295,7 +361,7 @@ export async function startBusBrokerAt(
     const entry: Subscriber = sub ?? { filter, sock, dropped: false }
     entry.filter = filter
     subs.add(entry)
-    const replay = ring.since(since)
+    const replay = ring.since(since, now())
     if (replay === null) {
       sendFrame(sock, { op: 'gap', seq })
       return entry
@@ -693,7 +759,7 @@ export async function busProbe(
   socketPath: string,
   opts: { since?: number; windowMs?: number; limit?: number } = {}
 ): Promise<BusProbeResult> {
-  const windowMs = opts.windowMs ?? 250
+  const windowMs = opts.windowMs ?? BUS_PROBE_WINDOW_MS
   const events: BusEnvelope[] = []
   let gapped = false
   let sub: BusSubscription | undefined

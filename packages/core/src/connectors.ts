@@ -454,7 +454,7 @@ export function connectorHooks(ctx: ConnectorCtx): ConnectorHooks[] {
 /** Per-probe budget — a hung connector (dead network, wedged CLI) must
  *  not stall the whole hook. Racing the probe means the output goes out
  *  on time even if a spawned child lingers. */
-const PROBE_TIMEOUT_MS = 4_000
+export const PROBE_TIMEOUT_MS = 4_000
 
 async function probeWithTimeout<T>(p: MaybePromise<T>, fallback: T): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined

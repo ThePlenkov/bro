@@ -106,5 +106,36 @@ dependencies, `node:net`, newline-delimited JSON, one envelope per line:
 - [x] tests: filter matching, ring eviction + `gap` marker, two
       subscribers with different filters from one publish, reconnect
       replay from `seq`, broker-down fail-open, socket-path length
+- [x] retention on all three axes — count, `ttlMs`, `maxBytes` — plus a
+      drop watermark so an aged-out ring reads as a `gap`, never as an
+      empty list
+- [x] `cause` / `ref` in the envelope from day one (offsets belong in
+      the envelope, or every later transport change is a migration)
+- [x] acceptance: broker restart degrades to `gap` + re-derive, and a
+      probe that stalls is asserted against both a down broker and a
+      broker that accepts and never answers
 - [ ] hook probe integration (separate PR)
 - [ ] `bro watch` / `bro drive` migrate to subscriptions (separate PR)
+
+## Deviation from the bead: the log is not truth here
+
+The bead's transport note requires that "the log is truth and the
+transport is only a wakeup hint — a missed notification must never mean
+a missed event". This implementation does not do that, and the deviation
+is deliberate rather than overlooked:
+
+- the replay window is **memory-only**. A broker restart loses every
+  event a consumer had not yet replayed.
+- what makes that safe is that **the registry stays the source of
+  truth**. A consumer that loses an event gets a `gap` and re-derives
+  from the registry, which is exactly the fallback the bead's own
+  "broker restart degrades to registry polling" criterion asks for. The
+  bus is a latency and admission-control optimisation, never the
+  durable record.
+
+What this costs, stated plainly: a consumer can miss an event while the
+broker is down, so anything that must not be lost cannot be bus-only.
+Durable per-agent JSONL remains audit, not the delivery path. If a
+future requirement makes "no missed event" absolute, this becomes an
+append-only log with the bus as its wakeup hint — which is why `seq`,
+`cause` and `ref` are already in the envelope.

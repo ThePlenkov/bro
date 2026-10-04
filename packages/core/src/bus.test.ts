@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createServer, type Socket } from 'node:net'
 import { describe, test } from 'node:test'
 import {
   BusRing,
@@ -13,23 +14,25 @@ import {
   busStatus,
   busSubscribe,
   busTopicMatches,
+  BUS_PROBE_WINDOW_MS,
   isBusEventInput,
   startBusBrokerAt,
   type BusBroker,
   type BusEnvelope,
 } from './bus.ts'
+import { PROBE_TIMEOUT_MS } from './connectors.ts'
 
 /** A broker on a throwaway socket. The path (not a repo dir) is the
  *  seam that keeps these tests free of git fixtures — `startBusBroker`
  *  is the dir-shaped wrapper, `startBusBrokerAt` the transport. */
 async function withBroker(
   fn: (broker: BusBroker, socketPath: string) => Promise<void>,
-  opts: { ringLimit?: number } = {}
+  opts: { ring?: { limit?: number; ttlMs?: number; maxBytes?: number } } = {}
 ): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'bro-bus-'))
   const socketPath = join(dir, 'bus.sock')
   const broker = await startBusBrokerAt(socketPath, {
-    ...(opts.ringLimit !== undefined ? { ringLimit: opts.ringLimit } : {}),
+    ...(opts.ring !== undefined ? { ring: opts.ring } : {}),
     now: () => Date.parse('2026-10-04T12:00:00.000Z'),
   })
   try {
@@ -88,40 +91,68 @@ describe('isBusEventInput', () => {
 })
 
 describe('BusRing', () => {
+  const T = Date.parse('2026-10-04T12:00:00.000Z')
   const env = (seq: number): BusEnvelope => ({ seq, ts: '2026-10-04T12:00:00.000Z', topic: 't', kind: 'k' })
 
   test('rejects a nonsense limit rather than silently truncating', () => {
-    assert.throws(() => new BusRing(0), RangeError)
-    assert.throws(() => new BusRing(1.5), RangeError)
+    assert.throws(() => new BusRing({ limit: 0 }), RangeError)
+    assert.throws(() => new BusRing({ limit: 1.5 }), RangeError)
   })
 
   test('evicts oldest past the limit', () => {
-    const ring = new BusRing(3)
+    const ring = new BusRing({ limit: 3 })
     for (const s of [1, 2, 3, 4]) {
-      ring.push(env(s))
+      ring.push(env(s), T)
     }
     assert.equal(ring.size, 3)
-    assert.deepEqual(ring.since(1)?.map((e) => e.seq), [2, 3, 4], 'cursor at the eviction edge still answers')
-    assert.equal(ring.since(0), null, 'asking from evicted seq 1 is a hole, not a short list')
+    assert.deepEqual(ring.since(1, T)?.map((e) => e.seq), [2, 3, 4], 'cursor at the eviction edge still answers')
+    assert.equal(ring.since(0, T), null, 'asking from evicted seq 1 is a hole, not a short list')
   })
 
   test('a cursor older than the window is a gap, not a short answer', () => {
-    const ring = new BusRing(2)
+    const ring = new BusRing({ limit: 2 })
     for (const s of [1, 2, 3]) {
-      ring.push(env(s))
+      ring.push(env(s), T)
     }
     // seq 1 is gone but the consumer holds cursor 1: everything it asks
     // for (2, 3) is still present, so there is no hole to report
-    assert.deepEqual(ring.since(1)?.map((e) => e.seq), [2, 3])
-    assert.equal(ring.since(0), null, 'cursor 0 needs seq 1, which was evicted')
+    assert.deepEqual(ring.since(1, T)?.map((e) => e.seq), [2, 3])
+    assert.equal(ring.since(0, T), null, 'cursor 0 needs seq 1, which was evicted')
+  })
+
+  test('a count bound alone still leaks: age evicts too', () => {
+    const T = Date.parse('2026-10-04T12:00:00.000Z')
+    const ring = new BusRing({ limit: 100, ttlMs: 60_000 })
+    const at = (seq: number, ts: string): BusEnvelope => ({ seq, ts, topic: 't', kind: 'k' })
+    ring.push(at(1, '2026-10-04T12:00:00.000Z'), T)
+    ring.push(at(2, '2026-10-04T12:00:30.000Z'), T)
+    // still inside the ttl
+    assert.equal(ring.since(0, T)?.length, 2)
+
+    // An hour later the head is past its ttl even though the count
+    // bound (100) is nowhere near — a slow trickle must still forget.
+    const later = T + 3_600_000
+    assert.equal(ring.since(0, later), null, 'the cursor now predates the window: a gap, not silence')
+    assert.equal(ring.size, 0)
+  })
+
+  test('one fat payload cannot evict the whole ring by accident', () => {
+    const T = Date.parse('2026-10-04T12:00:00.000Z')
+    const ring = new BusRing({ limit: 1000, maxBytes: 4096 })
+    for (const s of [1, 2, 3]) {
+      ring.push({ seq: s, ts: '2026-10-04T12:00:00.000Z', topic: 't', kind: 'k' }, T)
+    }
+    ring.push({ seq: 4, ts: '2026-10-04T12:00:00.000Z', topic: 't', kind: 'k', payload: 'x'.repeat(8192) }, T)
+    assert.ok(ring.size < 4, 'the byte bound has to bite')
+    assert.equal(ring.since(0, T), null, 'whatever it dropped shows up as a gap, never a short list')
   })
 
   test('an empty ring answers a fresh cursor but not a future one', () => {
-    const ring = new BusRing(4)
-    assert.deepEqual(ring.since(0), [])
+    const ring = new BusRing({ limit: 4 })
+    assert.deepEqual(ring.since(0, T), [])
     // broker restarted: seq counts from 1 again, so a client claiming
     // seq 41 must be told to re-derive rather than wait forever
-    assert.equal(ring.since(41), null)
+    assert.equal(ring.since(41, T), null)
   })
 })
 
@@ -158,6 +189,26 @@ describe('broker fan-out', () => {
       assert.deepEqual([first.seq, second.seq], [1, 2])
       assert.equal(broker.seq, 2)
       assert.equal(first.seq !== second.seq, true)
+    })
+  })
+
+  test('cause and ref survive the round trip — the chain stays readable', async () => {
+    await withBroker(async (_broker, socketPath) => {
+      const seen: BusEnvelope[] = []
+      const sub = await busSubscribe(socketPath, {}, { onEvent: (e) => seen.push(e) }, { since: 0 })
+      await settle()
+      await busPublish(socketPath, {
+        topic: 'pr:fix',
+        kind: 'landed',
+        cause: 'bro-2hno',
+        ref: '/tmp/wt/fixer-1',
+      })
+      await settle()
+      sub.close()
+      // Offsets and handles belong in the envelope from day one: a later
+      // transport that stores events must not have to migrate them.
+      assert.equal(seen[0]?.cause, 'bro-2hno')
+      assert.equal(seen[0]?.ref, '/tmp/wt/fixer-1')
     })
   })
 
@@ -245,7 +296,7 @@ describe('replay from a cursor', () => {
       // empty result would read as "nothing happened".
       assert.equal(gapped, true)
       assert.deepEqual(seen, [])
-    }, { ringLimit: 2 })
+    }, { ring: { limit: 2 } })
   })
 
   test('a reconnecting consumer receives what it missed', async () => {
@@ -279,7 +330,7 @@ describe('replay from a cursor', () => {
       sub.close()
       assert.equal(gapped, true, 'a fresh cursor needs seq 1 and 2, both evicted')
       assert.ok(seen.length < 4, 'a gap must not be papered over with a full-looking list')
-    }, { ringLimit: 2 })
+    }, { ring: { limit: 2 } })
   })
 
   test('gap is reported when the cursor predates the surviving ring', async () => {
@@ -299,7 +350,7 @@ describe('replay from a cursor', () => {
       sub.close()
       assert.equal(gapped, true, 'seq 1 was evicted — the consumer must re-derive')
       assert.ok(seen.length < 4, 'a gap must not be papered over with a full-looking list')
-    }, { ringLimit: 2 })
+    }, { ring: { limit: 2 } })
   })
 })
 
@@ -424,6 +475,112 @@ describe('malformed frames', () => {
         sock.destroy()
       }
     })
+  })
+})
+
+describe('broker restart', () => {
+  test('a restarted broker tells a stale cursor to re-derive, not to wait', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-bus-'))
+    const socketPath = join(dir, 'bus.sock')
+    try {
+      const first = await startBusBrokerAt(socketPath, {
+        now: () => Date.parse('2026-10-04T12:00:00.000Z'),
+      })
+      await busPublish(socketPath, { topic: 'a', kind: 'x', key: 'before-restart' })
+      assert.equal((await busPublish(socketPath, { topic: 'a', kind: 'x' })).seq, 2)
+      await first.close()
+
+      const second = await startBusBrokerAt(socketPath, {
+        now: () => Date.parse('2026-10-04T12:00:05.000Z'),
+      })
+      try {
+        let gapped = false
+        const seen: BusEnvelope[] = []
+        const sub = await busSubscribe(socketPath, {}, {
+          onEvent: (e) => seen.push(e),
+          onGap: () => {
+            gapped = true
+          },
+          // a cursor the dead broker issued: seq restarts at 1, so this
+          // consumer's "seq 2" can never be satisfied
+        }, { since: 2 })
+        await settle()
+        sub.close()
+        assert.equal(gapped, true, 'a restart must read as a hole, not as silence')
+
+        // And the registry stays the source of truth: the fresh broker
+        // keeps counting from its own head, so a consumer that
+        // re-derives lands on a consistent cursor again.
+        const fresh = await busPublish(socketPath, { topic: 'a', kind: 'x', key: 'after-restart' })
+        assert.equal(fresh.seq, 1)
+        const caught: BusEnvelope[] = []
+        const sub2 = await busSubscribe(socketPath, {}, { onEvent: (e) => caught.push(e) }, { since: 0 })
+        await settle()
+        sub2.close()
+        assert.deepEqual(caught.map((e) => e.key), ['after-restart'])
+      } finally {
+        await second.close()
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('probe never stalls', () => {
+  // The bead names the existing per-probe budget
+  // (packages/core/src/connectors.ts:439) rather than a second invented
+  // one, and rates any hook path that can hang a critical finding. This
+  // is the assertion that keeps that true from the outside.
+  test('the default probe window is sub-second and under the hook budget', () => {
+    assert.ok(BUS_PROBE_WINDOW_MS < 1000, 'the bead requires a hard sub-second budget')
+    assert.ok(BUS_PROBE_WINDOW_MS < PROBE_TIMEOUT_MS, 'the bus budget must be the tighter of the two')
+  })
+
+  test('a down broker costs the probe budget and no more', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-bus-'))
+    try {
+      const socketPath = join(dir, 'absent.sock')
+      const started = Date.now()
+      const result = await busProbe(socketPath, { windowMs: BUS_PROBE_WINDOW_MS })
+      const elapsed = Date.now() - started
+      assert.equal(result.gapped, false)
+      assert.ok(
+        elapsed <= BUS_PROBE_WINDOW_MS + 250,
+        `probe took ${String(elapsed)}ms with no broker — it must fail open inside its budget`
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a broker that accepts and then says nothing still costs the budget', async () => {
+    // The worst shape for a hook: the socket connects, so there is no
+    // ECONNREFUSED shortcut, and then the peer stalls forever.
+    const dir = mkdtempSync(join(tmpdir(), 'bro-bus-'))
+    const socketPath = join(dir, 'silent.sock')
+    // Accept, then never answer. The accepted sockets are tracked so the
+    // cleanup can actually finish: `server.close()` waits for its
+    // connections, and a wedged peer is precisely what is being simulated.
+    const held: Socket[] = []
+    const silent = createServer((sock) => held.push(sock))
+    await new Promise<void>((resolve) => silent.listen(socketPath, resolve))
+    try {
+      const started = Date.now()
+      const result = await busProbe(socketPath, { windowMs: BUS_PROBE_WINDOW_MS })
+      const elapsed = Date.now() - started
+      assert.equal(result.events.length, 0)
+      assert.ok(
+        elapsed <= BUS_PROBE_WINDOW_MS + 250,
+        `probe took ${String(elapsed)}ms against a silent peer — a hung broker must not outlive the probe`
+      )
+    } finally {
+      for (const sock of held) {
+        sock.destroy()
+      }
+      await new Promise<void>((resolve) => silent.close(() => resolve()))
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

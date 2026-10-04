@@ -28,6 +28,8 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
   '--kind',
   '--key',
   '--source',
+  '--cause',
+  '--ref',
   '--since',
   '--payload',
 ])
@@ -36,7 +38,7 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
  *  same option (flag() honors it; flagAll's gap is bro-mzb9 debt). */
 const KNOWN_FLAGS: Record<string, ReadonlySet<string>> = {
   serve: new Set(['--json']),
-  publish: new Set(['--topic', '--kind', '--key', '--source', '--payload', '--json']),
+  publish: new Set(['--topic', '--kind', '--key', '--source', '--cause', '--ref', '--payload', '--json']),
   subscribe: new Set(['--topic', '--kind', '--since', '--json']),
   status: new Set(['--json']),
 }
@@ -51,6 +53,8 @@ function usage(): never {
   publish                     publish one event and exit — connect, write, close
     --topic T --kind K        required; topic accepts a trailing-* glob for subscribers
     --key K --source S        optional identity fields
+    --cause C --ref R        what this event answers (a prior seq, a bead
+                              id) and an opaque handle to an artifact
     --payload JSON            optional payload, parsed as JSON
   subscribe                   stream events until interrupted
     --topic T (repeatable)    subscriber-side filter; default: everything
@@ -107,7 +111,7 @@ function filterFrom(rest: string[]): BusFilter {
 }
 
 async function cmdServe(rest: string[]): Promise<void> {
-  const json = flag(rest, '--json') !== undefined
+  const json = rest.includes('--json')
   let broker
   try {
     broker = await startBusBroker(process.cwd())
@@ -142,6 +146,8 @@ async function cmdPublish(rest: string[]): Promise<void> {
   }
   const key = flag(rest, '--key')
   const source = flag(rest, '--source')
+  const cause = flag(rest, '--cause')
+  const ref = flag(rest, '--ref')
   const payloadRaw = flag(rest, '--payload')
   let payload: unknown
   if (payloadRaw !== undefined) {
@@ -156,9 +162,11 @@ async function cmdPublish(rest: string[]): Promise<void> {
     kind,
     ...(key !== undefined ? { key } : {}),
     ...(source !== undefined ? { source } : {}),
+    ...(cause !== undefined ? { cause } : {}),
+    ...(ref !== undefined ? { ref } : {}),
     ...(payload !== undefined ? { payload } : {}),
   })
-  const json = flag(rest, '--json') !== undefined
+  const json = rest.includes('--json')
   if (!result.published) {
     // Not a failure: the broker being down is a routine state, and a
     // publisher that made it here explicitly is reporting, not erroring.
@@ -189,7 +197,7 @@ async function cmdSubscribe(rest: string[]): Promise<void> {
     }
     since = Math.floor(parsed)
   }
-  const json = flag(rest, '--json') !== undefined
+  const json = rest.includes('--json')
   let sub
   try {
     sub = await busSubscribe(socketPath, filterFrom(rest), {
@@ -218,7 +226,7 @@ async function cmdSubscribe(rest: string[]): Promise<void> {
 async function cmdStatus(rest: string[]): Promise<void> {
   const socketPath = socketOrDie()
   const status = await busStatus(socketPath)
-  if (flag(rest, '--json') !== undefined) {
+  if (rest.includes('--json')) {
     console.log(JSON.stringify(status))
     return
   }

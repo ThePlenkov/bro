@@ -98,6 +98,7 @@ export {
   sessionTaskClaims,
   stopGateContributions,
 } from './connectors.ts'
+export { PROBE_TIMEOUT_MS } from './connectors.ts'
 export {
   drainDirs,
   drainMailbox,
