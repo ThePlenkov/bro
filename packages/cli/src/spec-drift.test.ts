@@ -64,32 +64,21 @@ describe('native scope() — the tool\u2019s explicit scope', () => {
     )
   })
 
-  test('a tab-separated comment drops; a # inside quotes is kept', () => {
-    withRepo(
-      (m) => {
-        seedSpec(m, 'b1', '---\nscope: src/x.ts\t# note\n---\n')
-        seedSpec(m, 'b2', '---\nscope: ["a #b.ts", c.ts]\n---\n')
-      },
-      (main) => {
-        const spec = specStore(main)
-        assert.deepEqual(spec.scope?.('b1'), ['src/x.ts'])
-        assert.deepEqual(spec.scope?.('b2'), ['a #b.ts', 'c.ts'])
-      }
-    )
-  })
-
-  test('a comment after a quoted scalar drops; apostrophes stay literal', () => {
-    withRepo(
-      (m) => {
-        seedSpec(m, 'b1', '---\nscope: "src/x.ts" # note\n---\n')
-        seedSpec(m, 'b2', "---\nscope: docs/it's.md # note\n---\n")
-      },
-      (main) => {
-        const spec = specStore(main)
-        assert.deepEqual(spec.scope?.('b1'), ['src/x.ts'])
-        assert.deepEqual(spec.scope?.('b2'), ["docs/it's.md"])
-      }
-    )
+  test('comment forms — tab, post-quote, apostrophe — and # inside quotes', () => {
+    const scopeOf = (frontmatter: string): string[] | null => {
+      let out: string[] | null = null
+      withRepo(
+        (m) => seedSpec(m, 'b1', frontmatter),
+        (main) => {
+          out = specStore(main).scope?.('b1') ?? null
+        }
+      )
+      return out
+    }
+    assert.deepEqual(scopeOf('---\nscope: src/x.ts\t# note\n---\n'), ['src/x.ts'])
+    assert.deepEqual(scopeOf('---\nscope: ["a #b.ts", c.ts]\n---\n'), ['a #b.ts', 'c.ts'])
+    assert.deepEqual(scopeOf('---\nscope: "src/x.ts" # note\n---\n'), ['src/x.ts'])
+    assert.deepEqual(scopeOf("---\nscope: docs/it's.md # note\n---\n"), ["docs/it's.md"])
   })
 
   test('no frontmatter scope and no spec both return null', () => {
@@ -247,14 +236,9 @@ describe('resolveScope', () => {
 
   test('an OS-form audited spec path still builds a git-form exclusion', () => {
     // join() is what tree() paths look like — `specs\b1.md` on Windows.
-    // The self-exclusion and the own comparison must speak git's
-    // `/`-form or they never match there.
+    // The self-exclusion must speak git's `/`-form or it never matches.
     withRepo(
-      (m) => {
-        seedSpec(m, 'b1', '')
-        mkdirSync(join(m, 'src'))
-        writeFileSync(join(m, 'src', 'a.ts'), 'x\n')
-      },
+      (m) => seedSpec(m, 'b1', ''),
       (main) => {
         commit(main, 'work (b1)', { 'src/b.ts': 'y\n', 'specs/b1.md': '# v2\n' })
         assert.deepEqual(
