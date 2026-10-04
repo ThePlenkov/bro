@@ -65,11 +65,13 @@ export function mapUsage(
   const raw = objOr(body.usage)
   const usage: { inputTokens?: number; costUsd?: number } = {}
   const tokens = raw[tokensKey]
-  if (typeof tokens === 'number' && Number.isFinite(tokens)) {
-    usage.inputTokens = tokens
+  // a token count is a nonnegative integer — a fractional or negative
+  // wire value is drift, not usage
+  if (Number.isSafeInteger(tokens) && (tokens as number) >= 0) {
+    usage.inputTokens = tokens as number
   }
   const cost = raw.cost_usd
-  if (typeof cost === 'number' && Number.isFinite(cost)) {
+  if (isNum(cost) && cost >= 0) {
     usage.costUsd = cost
   }
   return Object.keys(usage).length > 0 ? usage : undefined

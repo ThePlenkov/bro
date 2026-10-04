@@ -66,7 +66,9 @@ function questionProblems(id: string, q: unknown): string[] {
       typeof c !== 'object' ||
       c === null ||
       Array.isArray(c) ||
-      !Object.values(c).every(isJudgeText)
+      !Object.entries(c).every(
+        ([k, v]) => (k === 'true' || k === 'false') && isJudgeText(v)
+      )
     ) {
       problems.push(`"${id}".criteria must be a {true?, false?} text map for noul`)
     }

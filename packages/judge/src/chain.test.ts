@@ -6,9 +6,13 @@ import { chainedJudge } from './chain.ts'
 
 const OPTS = { confidence: 0.6, timeoutMs: 3_000 }
 
+// a choice answer can legitimately self-report confidence under 0.5 —
+// a noul can't (its derived confidence is max(p, 1-p) ≥ 0.5), so the
+// low-confidence fixtures use choice to stay self-consistent
 const ans = (confidence: number, decidedBy = 'primary'): JudgeAnswer => ({
-  type: 'noul',
-  noul: confidence >= 0.5 ? confidence : 1 - confidence,
+  type: 'choice',
+  choice: 'a',
+  probabilities: { a: confidence },
   confidence,
   decidedBy,
 })
