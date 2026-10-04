@@ -86,8 +86,8 @@ function evidence(values: string[]): Evidence[] {
   return values.map((v) => {
     const i = v.indexOf(':')
     const kind = i < 0 ? '' : v.slice(0, i)
-    const ref = i < 0 ? '' : v.slice(i + 1)
-    if (!(EVIDENCE_KINDS as readonly string[]).includes(kind) || ref.trim() === '') {
+    const ref = i < 0 ? '' : v.slice(i + 1).trim()
+    if (!(EVIDENCE_KINDS as readonly string[]).includes(kind) || ref === '') {
       fail(`--evidence must be <kind>:<ref>, kind one of: ${EVIDENCE_KINDS.join(', ')} — got "${v}"`)
     }
     return { kind: kind as Evidence['kind'], ref }
