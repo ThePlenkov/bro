@@ -7,6 +7,7 @@ const clients = [
     cmd: 'codex plugin marketplace add ThePlenkov/bro\n# then install bro from the marketplace',
   },
   { name: 'Devin', cmd: 'devin plugins install ThePlenkov/bro' },
+  { name: 'OpenCode', cmd: '// opencode.json\n"plugin": ["@broject/bro"]' },
   { name: 'just the CLI', cmd: 'npx -y @broject/bro --help' },
 ]
 

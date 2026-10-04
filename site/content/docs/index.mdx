@@ -6,7 +6,8 @@ description: Install bro and wire it into a repo in under a minute.
 ## Requirements
 
 - **Node ≥ 22** — bro runs TypeScript natively, no build step
-- **`gh`**, authenticated — review data comes from the GitHub API
+- **`gh`**, authenticated — review data comes from the GitHub API; for
+  GitLab reviews, use an authenticated **`glab`** instead
 - **`bd`** ([beads](https://github.com/gastownhall/beads)) — the default
   store. Opt out with `"stores": ["jsonl"]` if you must
 
@@ -47,6 +48,7 @@ same skills and lifecycle hooks everywhere:
 | Devin | `devin plugins install ThePlenkov/bro` |
 | Claude Code | `/plugin marketplace add ThePlenkov/bro` → `/plugin install bro@bro` |
 | Codex | `codex plugin marketplace add ThePlenkov/bro` → install `bro` |
+| OpenCode | add `"plugin": ["@broject/bro"]` to `opencode.json` |
 
 Every adapter ships session rehydration, the review-gate stop hook, and
 self-approve for `bro`/`bd` — wired through `hooks/run.sh`, always

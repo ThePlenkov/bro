@@ -25,7 +25,10 @@ can build on the same primitives instead of forking them.
 | `@broject/drill` | Scoped descent frames — drill down/up with result + prevention memos |
 | `@broject/convoy` | Molecule runner — beads DAG workflows scheduled inside the agent |
 | `@broject/github` | GitHub connector — the `reviews` facade over the `gh` CLI |
+| `@broject/gitlab` | GitLab connector — the `reviews` facade over the `glab` CLI |
+| `@broject/learn` | Lesson store — schema and `bd kv` CRUD behind `bro learn` |
 | `@broject/loop` | Autonomous backlog loop — claim beads, spawn agents, drive the gate |
+| `@broject/bro-pack` | Default capability pack — skills and formulas installed by `bro setup --pack` |
 | `@broject/stack` | Stacked bead→worktree→PR chains — branch-namespace parsing + sync planning |
 | `@broject/retro` | Retrospect engine — TOML retro plans → prevention actions |
 
