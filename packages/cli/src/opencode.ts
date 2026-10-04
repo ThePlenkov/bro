@@ -264,8 +264,9 @@ function callHook(
     let out = ''
     child.stdout?.setEncoding('utf8')
     child.stdout?.on('data', (chunk: string) => {
-      if (out.length <= MAX_OUTPUT) {
-        out += chunk
+      const remaining = MAX_OUTPUT - out.length
+      if (remaining > 0) {
+        out += chunk.slice(0, remaining)
       }
     })
     child.on('error', () => {
@@ -339,7 +340,7 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-export const BroPlugin = async (
+export const BroPlugin = (
   input: PluginInput,
   options?: PluginOptions
 ): Promise<Hooks> => {
@@ -388,7 +389,80 @@ export const BroPlugin = async (
   /** Sessions whose last assistant turn finished cleanly. */
   const clean = new Set<string>()
 
-  return {
+  /** `session.created` primes rehydration while opencode is still waiting on a
+   *  prompt — the probe costs real seconds, and this is the only window where
+   *  paying it doesn't sit on the critical path of a turn. */
+  const onSessionCreated = (props: Record<string, unknown>): void => {
+    const sessionID = props.sessionID
+    if (typeof sessionID === 'string') {
+      void hydrate(sessionID, 'session-start')
+    }
+  }
+
+  /** `message.updated` arrives before the matching `session.idle` —
+   *  `time.completed` with no `error` is what separates a finished turn from
+   *  one the user aborted or the provider failed. */
+  const onMessageUpdated = (props: Record<string, unknown>): void => {
+    const info = asRecord(props.info)
+    if (
+      info?.role === 'assistant' &&
+      typeof info.sessionID === 'string' &&
+      info.time !== undefined &&
+      asRecord(info.time)?.completed !== undefined &&
+      info.error === undefined
+    ) {
+      clean.add(info.sessionID)
+    }
+  }
+
+  /** `session.compacted` re-primes the cache so the next turn pushes
+   *  post-compaction state instead of the pre-compaction snapshot. */
+  const onSessionCompacted = (props: Record<string, unknown>): void => {
+    const sessionID = props.sessionID
+    if (typeof sessionID !== 'string') {
+      return
+    }
+    rehydration.delete(sessionID)
+    void hydrate(sessionID, 'post-compaction')
+  }
+
+  /** `session.idle` is the stop gate. Gated sessions pass `stop_hook_active`,
+   *  so bro skips its own re-evaluation — the one-shot guard is bro's, not
+   *  duplicated here. */
+  const onSessionIdle = async (props: Record<string, unknown>): Promise<void> => {
+    const sessionID = props.sessionID
+    if (typeof sessionID !== 'string' || !clean.delete(sessionID)) {
+      return
+    }
+    const control = await probe('stop', {
+      session_id: sessionID,
+      stop_hook_active: gated.has(sessionID),
+    })
+    const reason =
+      typeof control?.reason === 'string' ? control.reason.trim() : ''
+    if (control?.decision !== 'block') {
+      const hint = contextOf(control)
+      if (hint) {
+        await log('info', hint)
+      }
+      return
+    }
+    await log('warn', `stop gate: ${reason || 'unfinished bro work'}`)
+    if (gated.has(sessionID)) {
+      return
+    }
+    gated.add(sessionID)
+    try {
+      await input.client?.session?.promptAsync({
+        path: { id: sessionID },
+        body: { parts: [{ type: 'text', text: reason }] },
+      })
+    } catch (err) {
+      await log('error', `stop gate could not re-prompt: ${errorText(err)}`)
+    }
+  }
+
+  return Promise.resolve({
     async 'experimental.chat.system.transform'(hookInput, output) {
       const sessionID = hookInput.sessionID
       if (!sessionID) {
@@ -452,83 +526,21 @@ export const BroPlugin = async (
     async event({ event }) {
       const props = event.properties ?? {}
       switch (event.type) {
-        case 'session.created': {
-          // prime rehydration while opencode is still waiting on a prompt —
-          // the probe costs real seconds, and this is the only window where
-          // paying it doesn't sit on the critical path of a turn
-          const sessionID = props.sessionID
-          if (typeof sessionID === 'string') {
-            void hydrate(sessionID, 'session-start')
-          }
+        case 'session.created':
+          onSessionCreated(props)
           break
-        }
-
-        case 'message.updated': {
-          const info = asRecord(props.info)
-          // `time.completed` with no `error` is what separates a finished turn
-          // from one the user aborted or the provider failed.
-          if (
-            info?.role === 'assistant' &&
-            typeof info.sessionID === 'string' &&
-            info.time !== undefined &&
-            asRecord(info.time)?.completed !== undefined &&
-            info.error === undefined
-          ) {
-            clean.add(info.sessionID)
-          }
+        case 'message.updated':
+          onMessageUpdated(props)
           break
-        }
-
-        case 'session.compacted': {
-          const sessionID = props.sessionID
-          if (typeof sessionID !== 'string') {
-            break
-          }
-          // re-primes the cache so the next turn pushes post-compaction state
-          // instead of the pre-compaction snapshot
-          rehydration.delete(sessionID)
-          void hydrate(sessionID, 'post-compaction')
+        case 'session.compacted':
+          onSessionCompacted(props)
           break
-        }
-
-        case 'session.idle': {
-          const sessionID = props.sessionID
-          if (typeof sessionID !== 'string' || !clean.delete(sessionID)) {
-            return
-          }
-          // gated sessions pass stop_hook_active, so bro skips its own
-          // re-evaluation — the one-shot guard is bro's, not duplicated here
-          const control = await probe('stop', {
-            session_id: sessionID,
-            stop_hook_active: gated.has(sessionID),
-          })
-          const reason =
-            typeof control?.reason === 'string' ? control.reason.trim() : ''
-          if (control?.decision !== 'block') {
-            const hint = contextOf(control)
-            if (hint) {
-              await log('info', hint)
-            }
-            return
-          }
-          await log('warn', `stop gate: ${reason || 'unfinished bro work'}`)
-          if (gated.has(sessionID)) {
-            return
-          }
-          gated.add(sessionID)
-          try {
-            await input.client?.session?.promptAsync({
-              path: { id: sessionID },
-              body: { parts: [{ type: 'text', text: reason }] },
-            })
-          } catch (err) {
-            await log('error', `stop gate could not re-prompt: ${errorText(err)}`)
-          }
+        case 'session.idle':
+          await onSessionIdle(props)
           break
-        }
       }
     },
-  }
+  })
 }
 
 /** opencode's loader requires a v1 module — a default export carrying `id`
