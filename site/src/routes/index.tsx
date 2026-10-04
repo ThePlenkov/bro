@@ -30,7 +30,7 @@ const vocabGroups = [
       ['bro drill', 'go deeper. you must come back with a result.'],
       ['bro act', 'done? prove it. threads, checks, mergeable.'],
       ['bro learn', 'fool me once. the lesson fires next time, at the trigger.'],
-      ['bro spec', 'no spec, no code. and it notices when the spec rots.'],
+      ['bro spec', 'opt-in spec gates for claimed work; on-demand drift audits.'],
       ['bro next', 'what now? bro picks. you ship.'],
     ],
   },
@@ -39,7 +39,7 @@ const vocabGroups = [
     entries: [
       ['bro loop', 'fine, bro drives. you review.'],
       ['bro stack', 'PRs on PRs. bro rebases the tower.'],
-      ['bro drive', 'PRs left alone at night get a fixer. merged only on green.'],
+      ['bro drive', 'unowned review threads get a fixer. merged only on green.'],
       ['bro watch', 'one heartbeat. no polling, no token bonfire.'],
       ['bro fleet', "who's alive, who's lost, who needs a respawn."],
     ],

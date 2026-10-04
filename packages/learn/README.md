@@ -13,7 +13,9 @@ The learn store for `bro` — lesson schema and `bd-kv` CRUD behind `bro learn`.
 npm i @broject/learn
 ```
 
-Requires Node ≥ 22. ESM only.
+Requires Node ≥ 22. ESM only. Store operations shell out to the `bd`
+CLI (`bd kv`), so `bd` must be on PATH and the repo needs an
+initialized beads store.
 
 ## Surface
 

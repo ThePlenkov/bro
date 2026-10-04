@@ -20,7 +20,9 @@ take the deliberate actions.
 
 The agents facade resolves native detached processes, tmux, and Gas City
 backends. A lost or exited worker can be respawned with `bro agents up
-<step>`; the same `agentId`, worktree, and stored prompt are preserved.
+<step>`; the same `agentId` is preserved, and the recorded worktree and
+stored prompt are reused when they still exist — otherwise it falls back
+to the conventional `<repo>--<step>` worktree and the bead's own text.
 `--worktree`, `--prompt-file`, and `--beads-dir` are available on `up`
 when an override is needed.
 
@@ -48,12 +50,12 @@ the parent session without a wait loop.
 `bro drive` is the write-side counterpart to watch. It walks open PRs on
 fleet branches and uses the act gate to decide what happens:
 
-| Gate | Occupied? | Action |
-| ---- | --------- | ------ |
-| `open_threads > 0` | yes | Skip; the live owner keeps its work |
-| `open_threads > 0` | no | Spawn or respawn a fixer on the PR worktree |
-| `gate.ok` | yes | Report; the owner's merge step lands it |
-| `gate.ok` | no | Merge through `bro act merge` when green, retire clean work, close the fixer |
+| Gate state | Owner | Action |
+| ---------- | ----- | ------ |
+| `open_threads > 0` | occupied | Skip; the live owner keeps its work |
+| `open_threads > 0` | orphaned | Spawn or respawn a fixer on the PR worktree |
+| green | occupied | Report; the owner's merge step lands it |
+| green | orphaned | Merge through `bro act merge`, retire clean work, close the fixer |
 
 ```text
 bro drive [--once] [--every [N]] [--no-merge] [--connector <name>] [--json]

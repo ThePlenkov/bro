@@ -38,8 +38,8 @@ evidence record even when the beads projection is disabled.
 
 OpenCode loads the package's `./server` export rather than a shell-hook
 manifest. It uses the same bro hook bus, but OpenCode has no pre-stop hook:
-the first stop-gate blocker is fed back as one synthetic prompt, and a
-later block is logged rather than re-prompted.
+the first stop-gate blocker is fed back as one synthetic prompt; later stop
+checks are skipped rather than re-evaluated (`stop_hook_active`).
 
 ## Agent backends
 

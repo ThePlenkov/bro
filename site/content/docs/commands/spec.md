@@ -3,8 +3,10 @@ title: bro spec — spec-driven development
 description: Spec coverage, freshness, hierarchy, and connectors for claimed work.
 ---
 
-`bro spec` is the spec-driven development facade. A claimed bead gets a
-written spec before code when `sdd.mode` is enabled. The spec rides the
+`bro spec` is the spec-driven development facade. With `sdd.mode`
+enabled it pushes a claimed bead toward a written spec — `remind` is
+advisory (a session-start policy plus a prompt-submit nudge), `gate`
+also blocks the stop once under the `task` aspect. The spec rides the
 feature branch and stays with the implementation.
 
 ## What counts as a spec
@@ -39,7 +41,7 @@ scope with the spec and reports `STALE`, `fresh`, `no-scope`, or
 | --------- | ----------- | ---------- |
 | `native` | `<sdd.dir>/` exists, or no other tool matches | `<sdd.dir>/<id>.md` or a directory spec |
 | `speckit` | `.specify/` | `specs/<NNN>-<slug>/spec.md`, linked with `spec:` |
-| `openspec` | `openspec/` | `openspec/changes/<id>/proposal.md` |
+| `openspec` | `openspec/` | `openspec/changes/<id>/proposal.md` or `openspec/specs/<id>/spec.md` |
 | `agent` | Explicit selection only | No files; `spec:` links are the evidence |
 
 Detection can be overridden with

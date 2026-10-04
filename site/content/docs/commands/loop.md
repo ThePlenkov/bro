@@ -64,8 +64,9 @@ Linked worktrees keep parallel sessions from colliding:
 | `bro work list` | List worktrees and clean/dirty state |
 | `bro work prune` | Remove administrative entries for deleted worktrees |
 
-`--stack` makes a new worktree base on the current worktree's branch.
-`stack.mode` controls the default: `manual` (default) requires explicit
-`--stack` or `--base`; `auto` uses the current worktree branch when it is
-not the main checkout's branch. The edge is recorded for bottom-up merge
-order.
+`--stack` makes a new worktree base on the current worktree's branch; it
+needs a checked-out work branch — from the main checkout's branch, the
+default branch, or a detached HEAD it errors. `stack.mode` controls the
+default: `manual` (default) requires explicit `--stack` or `--base`;
+`auto` uses the current worktree branch when it is not the main
+checkout's branch. The edge is recorded for bottom-up merge order.

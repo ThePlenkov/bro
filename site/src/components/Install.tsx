@@ -1,20 +1,24 @@
 import { useState } from 'react'
 
-const clients = [
+const clients: { name: string; cmd: string; file?: boolean }[] = [
   { name: 'Claude Code', cmd: '/plugin marketplace add ThePlenkov/bro\n/plugin install bro@bro' },
   {
     name: 'Codex',
     cmd: 'codex plugin marketplace add ThePlenkov/bro\n# then install bro from the marketplace',
   },
   { name: 'Devin', cmd: 'devin plugins install ThePlenkov/bro' },
-  { name: 'OpenCode', cmd: '// opencode.json\n"plugin": ["@broject/bro"]' },
+  {
+    name: 'OpenCode',
+    cmd: '// opencode.json\n{\n  "plugin": ["@broject/bro"]\n}',
+    file: true,
+  },
   { name: 'just the CLI', cmd: 'npx -y @broject/bro --help' },
 ]
 
 export function Install() {
   const [active, setActive] = useState(0)
   const [copied, setCopied] = useState(false)
-  const { cmd } = clients[active]
+  const { cmd, file } = clients[active]
 
   const copy = async () => {
     try {
@@ -45,9 +49,7 @@ export function Install() {
       <div className="install-cmd">
         <pre>
           {cmd.split('\n').map((l) => (
-            <div key={l}>
-              <span className="prompt">$</span> {l}
-            </div>
+            <div key={l}>{file ? l : <><span className="prompt">$</span> {l}</>}</div>
           ))}
         </pre>
         <button type="button" className="copy" onClick={copy} aria-label="Copy install command">
