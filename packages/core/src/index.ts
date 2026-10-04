@@ -55,6 +55,7 @@ export type { TaskFilter, TaskInput, TaskRow, TaskStore } from './tasks.ts'
 export { JudgeUnavailable } from './judge.ts'
 export type {
   DecideResult,
+  JsonValue,
   JudgeAnswer,
   JudgeFacade,
   JudgeQuestion,

@@ -8,6 +8,7 @@ import type { FetchFn } from './http.ts'
 
 const CFG: JudgeConfig = {
   mode: 'off',
+  model: 'jev-test',
   baseUrl: 'https://jev.example/api',
   apiKeyEnv: 'JEV_TEST_KEY',
   confidence: 0.6,
@@ -77,7 +78,7 @@ describe('llmJudge', () => {
         200,
         chatBody({
           route: { type: 'choice', choice: 'b', confidence: 0.7 },
-          urgency: { type: 'score', score: 1.2, confidence: 0.66 },
+          urgency: { type: 'score', score: 0.8, confidence: 0.66 },
           escalate: { type: 'noul', noul: 0.9, confidence: 0.8 },
         })
       )
@@ -89,6 +90,7 @@ describe('llmJudge', () => {
       assert.equal(res.answers.route!.decidedBy, 'llm-judge')
       assert.equal(res.answers.route!.confidence, 0.7)
       assert.equal(res.answers.urgency!.type, 'score')
+      assert.equal((res.answers.urgency as { score: number }).score, 0.8)
       assert.equal(res.answers.escalate!.type, 'noul')
       assert.equal(res.usage?.inputTokens, 42)
       assert.equal(res.model, 'test-model-r1')

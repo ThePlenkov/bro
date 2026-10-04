@@ -13,13 +13,14 @@ export interface JudgeConfig {
   /** 'off' | 'shadow' — v1 has no acting mode; shadow is annotate-only.
    *  The `bro judge decide` smoke path runs regardless. */
   mode: 'off' | 'shadow'
-  /** Model pin for the primary backend — unset sends the backend's
-   *  own default (`jev-latest`). Pin in production so thresholds
+  /** Model for the primary backend — the API requires it. Defaults to
+   *  the `jev-latest` alias; pin a version in production so thresholds
    *  don't drift under the same inputs. */
-  model?: string
-  /** Jev API base — `${baseUrl}/v1/decide` is the decide endpoint. */
+  model: string
+  /** TypeSafe API base — `${baseUrl}/v1/systemone` is the evaluate
+   *  endpoint; `TYPESAFE_BASE_URL` in the environment overrides. */
   baseUrl: string
-  /** Env var NAME holding the `jv_live_…` key — never the value. */
+  /** Env var NAME holding the TypeSafe API key — never the value. */
   apiKeyEnv: string
   /** Per-answer confidence threshold — below it the answer escalates
    *  to `fallback` (when configured) and lands in lowConfidence. */
@@ -40,8 +41,9 @@ export interface JudgeConfig {
 
 export const DEFAULT_JUDGE_CONFIG: JudgeConfig = {
   mode: 'off',
-  baseUrl: 'https://jevtypesafeai.com/api',
-  apiKeyEnv: 'JEV_API_KEY',
+  model: 'jev-latest',
+  baseUrl: 'https://api.typesafe.ai',
+  apiKeyEnv: 'TYPESAFE_API_KEY',
   confidence: 0.6,
   timeoutMs: 3000,
   maxDecisionsPerRun: 50,
@@ -50,9 +52,10 @@ export const DEFAULT_JUDGE_CONFIG: JudgeConfig = {
 const JUDGE_MODES = ['off', 'shadow'] as const
 
 /** Env var NAME sanity — `apiKeyEnv` names a variable, never holds the
- *  key value; a blob that isn't a NAME-shaped identifier is a config
- *  bug the connector fails on loudly (and never echoes back). */
-export const isEnvName = (v: string): boolean => /^[A-Za-z_][A-Za-z0-9_]*$/.test(v)
+ *  key value. Names must be SCREAMING_SNAKE: a pasted key value
+ *  (`ts_live_…`, `sk-…`) fails here, so the name is always safe to
+ *  echo back in a missing-key error. */
+export const isEnvName = (v: string): boolean => /^[A-Z_][A-Z0-9_]*$/.test(v)
 
 const str = (v: unknown): string | undefined =>
   typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined
@@ -90,19 +93,28 @@ export const judgeSection: ConfigSection<JudgeConfig> = (raw) => {
       'bro.config: judge.llm needs both "baseUrl" and "model" — llm-judge disabled'
     )
   }
+  // a supplied-but-invalid scalar warns, then falls back — a config
+  // mistake must never silently change escalation behavior
+  const numField = (name: string, min: number, max: number): number | undefined => {
+    const v = num(obj[name], min, max)
+    if (v === undefined && obj[name] !== undefined) {
+      console.error(`bro.config: judge.${name} must be a number in ${min}..${max}`)
+    }
+    return v
+  }
   return {
     mode: (JUDGE_MODES as readonly unknown[]).includes(obj.mode)
       ? (obj.mode as JudgeConfig['mode'])
       : DEFAULT_JUDGE_CONFIG.mode,
-    model: str(obj.model),
+    model: str(obj.model) ?? DEFAULT_JUDGE_CONFIG.model,
     baseUrl: str(obj.baseUrl) ?? DEFAULT_JUDGE_CONFIG.baseUrl,
     apiKeyEnv: str(obj.apiKeyEnv) ?? DEFAULT_JUDGE_CONFIG.apiKeyEnv,
-    confidence: num(obj.confidence, 0, 1) ?? DEFAULT_JUDGE_CONFIG.confidence,
+    confidence: numField('confidence', 0, 1) ?? DEFAULT_JUDGE_CONFIG.confidence,
     fallback: str(obj.fallback),
     timeoutMs:
-      num(obj.timeoutMs, 1, Number.MAX_SAFE_INTEGER) ?? DEFAULT_JUDGE_CONFIG.timeoutMs,
+      numField('timeoutMs', 1, Number.MAX_SAFE_INTEGER) ?? DEFAULT_JUDGE_CONFIG.timeoutMs,
     maxDecisionsPerRun:
-      num(obj.maxDecisionsPerRun, 1, Number.MAX_SAFE_INTEGER) ??
+      numField('maxDecisionsPerRun', 1, Number.MAX_SAFE_INTEGER) ??
       DEFAULT_JUDGE_CONFIG.maxDecisionsPerRun,
     llm,
   }

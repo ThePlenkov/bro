@@ -117,6 +117,28 @@ describe('chainedJudge', () => {
     assert.deepEqual(res.lowConfidence, ['q1'])
   })
 
+  test('a question the primary never answered escalates too', async () => {
+    const fbCalls: string[] = []
+    const j = chainedJudge(
+      fakeFacade({ answers: { q1: ans(0.9) } }), // q2 absent entirely
+      fakeFacade({ answers: { q2: ans(0.8, 'llm-judge') } }, fbCalls),
+      OPTS
+    )
+    const res = await j.decide('s', { q1: Q.q1, q2: Q.q1 })
+    assert.deepEqual(fbCalls, ['q2'])
+    assert.equal(res.answers.q2!.decidedBy, 'llm-judge')
+    assert.deepEqual(res.lowConfidence, [])
+  })
+
+  test('a fallback bug (plain error) propagates — only unavailability fails open', async () => {
+    const j = chainedJudge(
+      fakeFacade({ answers: { q1: ans(0.4) } }),
+      { decide: () => Promise.reject(new Error('422 validation — caller bug')) },
+      OPTS
+    )
+    await assert.rejects(j.decide('s', { ...Q }), /caller bug/)
+  })
+
   test('the deadline bounds the whole chain — a spent budget skips escalation', async () => {
     const fbCalls: string[] = []
     // a deadline-aware backend that overshoots — the chain sees no

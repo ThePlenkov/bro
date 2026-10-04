@@ -6,6 +6,7 @@ describe('judgeSection', () => {
   test('undefined yields the defaults', () => {
     const cfg = judgeSection(undefined)
     assert.equal(cfg.mode, DEFAULT_JUDGE_CONFIG.mode)
+    assert.equal(cfg.model, DEFAULT_JUDGE_CONFIG.model)
     assert.equal(cfg.baseUrl, DEFAULT_JUDGE_CONFIG.baseUrl)
     assert.equal(cfg.apiKeyEnv, DEFAULT_JUDGE_CONFIG.apiKeyEnv)
     assert.equal(cfg.confidence, DEFAULT_JUDGE_CONFIG.confidence)
@@ -55,7 +56,15 @@ describe('judgeSection', () => {
     assert.equal(cfg.fallback, 'llm-judge')
     assert.equal(cfg.timeoutMs, 5000)
     assert.equal(cfg.llm?.apiKeyEnv, 'K')
-    // out-of-range confidence falls back
-    assert.equal(judgeSection({ confidence: 1.5 }).confidence, 0.6)
+    // out-of-range confidence falls back — with a warning, never silent
+    const errs: string[] = []
+    const orig = console.error
+    console.error = (m: unknown) => errs.push(String(m))
+    try {
+      assert.equal(judgeSection({ confidence: 1.5 }).confidence, 0.6)
+    } finally {
+      console.error = orig
+    }
+    assert.ok(errs.some((l) => l.includes('judge.confidence')))
   })
 })

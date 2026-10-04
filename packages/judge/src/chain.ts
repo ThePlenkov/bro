@@ -55,7 +55,7 @@ export function deadlineJudge(
 /** decide() against the shared deadline — native when the backend
  *  speaks decideWithin, raced otherwise (the foreign call may outlive
  *  its welcome in the background; the chain still returns on time). */
-function callWithin(
+async function callWithin(
   backend: JudgeFacade,
   state: unknown,
   questions: Record<string, JudgeQuestion>,
@@ -68,12 +68,22 @@ function callWithin(
   if (left <= 0) {
     return Promise.reject(new JudgeUnavailable('judge budget spent'))
   }
-  return Promise.race([
-    backend.decide(state, questions),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new JudgeUnavailable('judge backend timed out')), left)
-    ),
-  ])
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      backend.decide(state, questions),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new JudgeUnavailable('judge backend timed out')),
+          left
+        )
+      }),
+    ])
+  } finally {
+    // an armed timer pinning the process after the race settled is a
+    // resource leak, not patience
+    clearTimeout(timer)
+  }
 }
 
 const lowKeys = (answers: Record<string, JudgeAnswer>, threshold: number): string[] =>

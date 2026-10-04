@@ -99,16 +99,16 @@ interface JudgeFacade {
 
 Contract rules:
 
-- **Fail-open, always.** A wedged backend (network, 401, 402,
+- **Fail-open, always.** A wedged backend (network, 401/403,
   5xx-after-retries) throws `JudgeUnavailable` — consumers treat "no
   verdict" as "no annotation", never as a gate input. A judge that can
   stall the act loop is a judge that gets turned off; it must not be
   able to.
 - **`state` is the caller's payload** — string, object, or array; the
-  connector serializes. Input budgets live at the backend (jev: 64k
-  tokens state+questions, 32k state+longest question); the facade
-  surfaces `max_tokens_exceeded` as an ordinary error — callers trim,
-  they don't retry bigger.
+  connector serializes. Input budgets live at the backend: an
+  over-limit or malformed payload comes back `422`, which the facade
+  surfaces as an ordinary error — callers trim, they don't retry
+  bigger.
 - **One call, many questions.** Consumers batch a subject's questions
   into one `decide()` — jev evaluates them in parallel in one round
   trip; a question-per-call loop is a cost bug.
@@ -127,29 +127,37 @@ Contract rules:
 
 ### `jev` — the primary
 
-Hosted decision API. Facts pinned from
-`https://jevtypesafeai.com/docs` (the bead's cited source):
+Hosted decision API — TypeSafe's System One. Facts pinned from
+`https://docs.typesafe.ai/api.md` (the live contract; the bead's
+`jevtypesafeai.com` citation described a dead `/v1/decide` endpoint):
 
 ```text
-POST {baseUrl}/v1/decide        baseUrl default https://jevtypesafeai.com/api
-Authorization: Bearer $JEV_API_KEY   (jv_live_… — env var only, never
-                                      committed, never in bro.config.json)
-→ { model, answers: {<q>: typed answer}, usage: {input_tokens, cost_usd, …} }
+POST {baseUrl}/v1/systemone   baseUrl default https://api.typesafe.ai
+                              (env override: TYPESAFE_BASE_URL)
+Authorization: Bearer $TYPESAFE_API_KEY   (env var only, never
+                              committed, never in bro.config.json)
+{ state, model, questions: {<qid>: typed question} }
+    model is required — `jev-latest` alias by default, `judge.model`
+    pins a version in production
+→ { model, answers: {<qid>: typed answer}, usage: {input_tokens, output_tokens} }
+    choice:  { type, choice, probabilities: {<option>: p}, confidence }
+    score:   { type, score (0..N-1, fractional), legend, probabilities, confidence }
+    noul:    { type, noul }   — no confidence on the wire; derived below
 ```
 
-Error semantics the connector maps: `400` validation (our bug — throw),
-`401/403` auth (throw `JudgeUnavailable` with the remediation line),
-`402` insufficient credits (`JudgeUnavailable` — fail-open, same as
-down), `502` upstream (bounded retry with backoff, then
-`JudgeUnavailable`). `judge.timeoutMs` (default 3000) bounds the
-**whole `decide()` call**, not one backend attempt — the chain spends
-it across primary, retries, and escalation within one deadline (an
-escalation that starts with 200ms of budget left gets 200ms, not a
-fresh 3000). The decision's value is cheapness; a judge slower than
-the thing it annotates is overhead, not help.
+Error semantics the connector maps: `401/403` auth (throw
+`JudgeUnavailable` with the remediation line), `422` validation (our
+bug — throw a plain error, don't fail-open), `429`/`529` and 5xx
+upstream (bounded retry with backoff, then `JudgeUnavailable`).
+`judge.timeoutMs` (default 3000) bounds the **whole `decide()` call**,
+not one backend attempt — the chain spends it across primary, retries,
+and escalation within one deadline (an escalation that starts with
+200ms of budget left gets 200ms, not a fresh 3000). The decision's
+value is cheapness; a judge slower than the thing it annotates is
+overhead, not help.
 
 The bead notes jev also rides OrcaRouter's OpenAI-compat wrapper as
-`typesafe/jev-1.13`; the **native `/v1/decide` shape is the v1
+`typesafe/jev-1.13`; the **native `/v1/systemone` shape is the v1
 connector** (typed answers, no parsing), the OpenAI-compat path is what
 `llm-judge` already is. If a deployment only has OrcaRouter access,
 `connectors.judge: llm-judge` + `judge.llm.model: typesafe/jev-1.13`
@@ -319,9 +327,9 @@ Config section (plugin-shaped, `judge` in `bro.config.json`):
 {
   "judge": {
     "mode": "shadow",                    // off | shadow — v1 has no acting mode
-    "model": "jev-1.13.0",               // pinned
-    "baseUrl": "https://jevtypesafeai.com/api",
-    "apiKeyEnv": "JEV_API_KEY",
+    "model": "jev-1.13.0",               // pinned (default: jev-latest)
+    "baseUrl": "https://api.typesafe.ai",
+    "apiKeyEnv": "TYPESAFE_API_KEY",
     "confidence": 0.6,                   // below → escalate / mark lowConfidence
     "fallback": "llm-judge",             // connector name; omit for none
     "timeoutMs": 3000,
@@ -339,7 +347,7 @@ same seam as `connectors.reviews`.
 ```text
 packages/core/src/judge.ts            JudgeFacade contract, Verdict, JudgeUnavailable
 packages/core/src/connectors.ts       FacadeMap.judge + Connector.judge?
-packages/judge/src/jev.ts             jev connector — /v1/decide client + error mapping
+packages/judge/src/jev.ts             jev connector — /v1/systemone client + error mapping
 packages/judge/src/llm-judge.ts       llm-judge connector — OpenAI-compat → typed answers
 packages/judge/src/chain.ts           primary→fallback decide(), low-confidence merge
 packages/judge/src/journal.ts         verdicts.jsonl append + read (common git dir)
@@ -354,7 +362,7 @@ skills/judge/SKILL.md                 policy only — mechanics live in the CLI
 ## Milestones
 
 1. `bro-f4ot.2.1` this spec.
-2. `bro-f4ot.2.2` connector — `JudgeFacade` + jev `/v1/decide` client,
+2. `bro-f4ot.2.2` connector — `JudgeFacade` + jev `/v1/systemone` client,
    llm-judge fallback on low confidence, `bro judge decide` smoke path.
 3. `bro-f4ot.2.3` shadow — verdict journal + act/drive thread
    annotation; nothing applied, gate unchanged.
@@ -379,7 +387,7 @@ skills/judge/SKILL.md                 policy only — mechanics live in the CLI
 - **Confidence that lies.** llm-judge self-reporting confidence is
   calibration theatre until proven — the stats buckets are the only
   evidence accepted, per-decider.
-- **Secret handling.** `jv_live_` keys ride env vars only —
+- **Secret handling.** TypeSafe keys ride env vars only —
   `apiKeyEnv` names the variable, config never holds the value; same
   rule as every credential this repo touches.
 - **Archived-thread reconstruction is lossy.** A replayed thread lacks

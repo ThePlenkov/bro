@@ -8,6 +8,7 @@ import type { FetchFn } from './http.ts'
 
 const CFG: JudgeConfig = {
   mode: 'off',
+  model: 'jev-test',
   baseUrl: 'https://jev.example/api',
   apiKeyEnv: 'JEV_TEST_KEY',
   confidence: 0.6,
@@ -61,18 +62,19 @@ const OK_BODY = {
     },
     urgency: {
       type: 'score',
-      score: 1.8,
+      score: 0.9,
+      legend: { '0': 'low', '1': 'high' },
       probabilities: { '0': 0.1, '1': 0.9 },
       confidence: 0.8,
     },
     escalate: { type: 'noul', noul: 0.12 },
   },
-  usage: { input_tokens: 62, cost_usd: 0.000026 },
+  usage: { input_tokens: 62, output_tokens: 8 },
 }
 
 function withKey(fn: () => Promise<void>): Promise<void> {
   const prev = process.env.JEV_TEST_KEY
-  process.env.JEV_TEST_KEY = 'jv_live_test'
+  process.env.JEV_TEST_KEY = 'ts_live_test'
   return fn().finally(() => {
     if (prev === undefined) {
       delete process.env.JEV_TEST_KEY
@@ -88,8 +90,8 @@ describe('jevJudge', () => {
       const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
       const res = await jevJudge(CFG, { fetch }).decide('state text', { ...QUESTIONS })
       assert.equal(calls.length, 1)
-      assert.equal(calls[0]!.url, 'https://jev.example/api/v1/decide')
-      assert.equal(calls[0]!.init.headers?.authorization, 'Bearer jv_live_test')
+      assert.equal(calls[0]!.url, 'https://jev.example/api/v1/systemone')
+      assert.equal(calls[0]!.init.headers?.authorization, 'Bearer ts_live_test')
       const route = res.answers.route!
       assert.equal(route.type, 'choice')
       assert.equal((route as { choice: string }).choice, 'a')
@@ -97,7 +99,7 @@ describe('jevJudge', () => {
       assert.equal(route.decidedBy, 'jev')
       const urg = res.answers.urgency!
       assert.equal(urg.type, 'score')
-      assert.equal((urg as { score: number }).score, 1.8)
+      assert.equal((urg as { score: number }).score, 0.9)
       const esc = res.answers.escalate!
       assert.equal(esc.type, 'noul')
       assert.equal((esc as { noul: number }).noul, 0.12)
@@ -105,14 +107,18 @@ describe('jevJudge', () => {
       assert.equal(esc.confidence, 0.88)
       assert.equal(res.model, 'jev-1.13.0')
       assert.equal(res.usage?.inputTokens, 62)
-      assert.equal(res.usage?.costUsd, 0.000026)
+      // the wire carries output_tokens, never a cost — absent stays absent
+      assert.equal(res.usage?.costUsd, undefined)
     }))
 
-  test('sends model only when configured', () =>
+  test('the wire always carries the configured model — the API requires it', () =>
     withKey(async () => {
       const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
       await jevJudge(CFG, { fetch }).decide('s', { ...QUESTIONS })
-      assert.ok(!('model' in JSON.parse(calls[0]!.init.body!)))
+      assert.equal(
+        (JSON.parse(calls[0]!.init.body!) as { model?: string }).model,
+        'jev-test'
+      )
       const pinned = { ...CFG, model: 'jev-1.13.0' }
       await jevJudge(pinned, { fetch }).decide('s', { ...QUESTIONS })
       assert.equal(
@@ -132,13 +138,12 @@ describe('jevJudge', () => {
       assert.equal(calls.length, 0)
     }))
 
-  test('401/402 are JudgeUnavailable; 400 is the caller\'s bug — a plain error', () =>
+  test('401/403 are JudgeUnavailable; 422 is the caller\'s bug — a plain error', () =>
     withKey(async () => {
       for (const [status, kind] of [
         [401, 'unavailable'],
         [403, 'unavailable'],
-        [402, 'unavailable'],
-        [400, 'error'],
+        [422, 'error'],
       ] as const) {
         const { fetch } = fakeFetch({ status, body: { error: 'nope' } })
         await assert.rejects(
@@ -149,23 +154,48 @@ describe('jevJudge', () => {
               : e instanceof Error && !(e instanceof JudgeUnavailable)
         )
       }
-      // max_tokens_exceeded surfaces as an ordinary error — callers trim
-      const { fetch } = fakeFetch({
-        status: 400,
-        body: { error: { code: 'max_tokens_exceeded', message: 'too big' } },
-      })
-      await assert.rejects(jevJudge(CFG, { fetch }).decide('s', { ...QUESTIONS }), Error)
     }))
 
-  test('502 retries with backoff then succeeds; persistent 502 is JudgeUnavailable', () =>
+  test('an answer typed for the wrong question is drift — JudgeUnavailable', () =>
     withKey(async () => {
-      const { fetch, calls } = fakeFetch(
-        { status: 502, body: {} },
-        { status: 200, body: OK_BODY }
+      // a noul verdict on a choice question fails open, it doesn't
+      // silently become a typed answer
+      const { fetch } = fakeFetch({
+        status: 200,
+        body: { model: 'm', answers: { route: { type: 'noul', noul: 0.9 } } },
+      })
+      await assert.rejects(
+        jevJudge(CFG, { fetch }).decide('s', { route: QUESTIONS.route }),
+        JudgeUnavailable
       )
-      const res = await jevJudge(CFG, { fetch }).decide('s', { ...QUESTIONS })
-      assert.equal(calls.length, 2)
-      assert.equal(res.model, 'jev-1.13.0')
+      // an off-criteria choice likewise
+      const off = fakeFetch({
+        status: 200,
+        body: {
+          model: 'm',
+          answers: {
+            route: { type: 'choice', choice: 'z', probabilities: { z: 1 }, confidence: 0.9 },
+          },
+        },
+      })
+      await assert.rejects(
+        jevJudge(CFG, { fetch: off.fetch }).decide('s', { route: QUESTIONS.route }),
+        JudgeUnavailable
+      )
+    }))
+
+  test('429/502/529 retry with backoff then succeed; persistent failure is JudgeUnavailable', () =>
+    withKey(async () => {
+      // every documented transient status retries into a success
+      for (const status of [429, 502, 529]) {
+        const { fetch, calls } = fakeFetch(
+          { status, body: {} },
+          { status: 200, body: OK_BODY }
+        )
+        const res = await jevJudge(CFG, { fetch }).decide('s', { ...QUESTIONS })
+        assert.equal(calls.length, 2)
+        assert.equal(res.model, 'jev-1.13.0')
+      }
 
       const dead = fakeFetch({ status: 502, body: {} })
       await assert.rejects(

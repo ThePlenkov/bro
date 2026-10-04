@@ -9,10 +9,21 @@
  * exit gate stays deterministic by design.
  */
 
+/** Connectors serialize questions with JSON.stringify — the wire
+ *  carries JSON values only; a BigInt/function/class instance fails
+ *  here at compile time instead of throwing inside the retry loop. */
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue }
+
 /** Instructions and criteria values — the wire shape accepts a plain
  *  string or structured JSON (object/array) on both; the model reads
  *  the structure (e.g. named data fields referenced from `question`). */
-export type JudgeText = string | Record<string, unknown> | unknown[]
+export type JudgeText = string | { [key: string]: JsonValue } | JsonValue[]
 
 /** One typed question — the three kinds the contract speaks.
  *  `choice` picks among labelled options; `score` rates on an ordered

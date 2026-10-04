@@ -88,6 +88,10 @@ export async function postJson(
   retryStatuses: readonly number[],
   fetchImpl: FetchFn = fetch
 ): Promise<HttpResult> {
+  // serialize once, up front — a cyclic or BigInt payload is the
+  // caller's bug and must throw as an ordinary error, not be retried
+  // and reported as the backend being unreachable
+  const bodyJson = JSON.stringify(payload)
   let lastErr: unknown
   for (let attempt = 0; attempt < RETRYABLE_NETWORK; attempt += 1) {
     const left = remaining(deadline)
@@ -98,7 +102,7 @@ export async function postJson(
       const res = await fetchImpl(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...headers },
-        body: JSON.stringify(payload),
+        body: bodyJson,
         signal: AbortSignal.timeout(left),
       })
       const text = await res.text()

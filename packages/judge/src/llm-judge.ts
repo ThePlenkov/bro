@@ -54,7 +54,7 @@ Respond with STRICT JSON only — no prose, no markdown fences:
 Answer shape per question type — copy the question's "type":
 - "noul":   {"type":"noul","noul":<0..1 probability the answer is yes>}
 - "choice": {"type":"choice","choice":"<one criteria key>","probabilities":{"<key>":<p>, …}}
-- "score":  {"type":"score","score":<number on the 1..N level scale — 1 = first/lowest level, N = last/highest, fractional allowed>,"probabilities":{"<level>":<p>, …}}
+- "score":  {"type":"score","score":<probability-weighted level — 0 = first/lowest level, N-1 = last/highest, fractional allowed>,"probabilities":{"<level index>":<p>, …}}
 
 Add "confidence": <0..1> to every answer — an honest self-assessment, low when unsure.
 Answer EVERY question id exactly once.`
@@ -80,7 +80,8 @@ function mapAnswer(q: JudgeQuestion, raw: unknown): JudgeAnswer | undefined {
   switch (q.type) {
     case 'choice': {
       const choice = typeof a.choice === 'string' ? a.choice : undefined
-      if (choice === undefined || !(choice in q.criteria)) {
+      // own-property — `in` would accept inherited keys like "toString"
+      if (choice === undefined || !Object.hasOwn(q.criteria, choice)) {
         return undefined
       }
       return {
@@ -92,7 +93,9 @@ function mapAnswer(q: JudgeQuestion, raw: unknown): JudgeAnswer | undefined {
       }
     }
     case 'score': {
-      if (!isNum(a.score)) {
+      // the scale is 0..N-1 over the question's levels — an off-scale
+      // self-report is unusable, not clamped into a wrong verdict
+      if (!isNum(a.score) || a.score < 0 || a.score > q.criteria.length - 1) {
         return undefined
       }
       return {

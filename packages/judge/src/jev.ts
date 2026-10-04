@@ -1,13 +1,14 @@
 /**
- * The `jev` connector — TypeSafe's hosted decision API as a JudgeFacade
- * (spec: specs/sessions/bro-f4ot.2-judge.md). POST {baseUrl}/v1/decide
- * with Bearer $JEV_API_KEY (jv_live_… — env var only, never in config).
+ * The `jev` connector — TypeSafe's System One API as a JudgeFacade
+ * (spec: specs/sessions/bro-f4ot.2-judge.md, contract per
+ * https://docs.typesafe.ai/api.md). POST {baseUrl}/v1/systemone with
+ * Bearer $TYPESAFE_API_KEY (env var only, never in config; base URL
+ * overridable via TYPESAFE_BASE_URL).
  *
- * Error mapping per spec: 400 validation → throw (caller's bug);
- * 401/403/402 → JudgeUnavailable (fail-open — credits and auth are
- * "unavailable", never a gate input); 502 + network → bounded retry
- * with backoff inside the shared deadline, then JudgeUnavailable.
- * noul answers carry no confidence on the wire — the connector derives
+ * Error mapping per the documented contract: 401/403 auth and
+ * 429/529/5xx-after-retries → JudgeUnavailable (fail-open); 422
+ * validation → throw (the caller's bug, not an outage). noul answers
+ * carry no confidence on the wire — the connector derives
  * confidence = max(noul, 1 - noul): a confident "no" is still confident.
  */
 import { JudgeUnavailable } from '@broject/core'
@@ -56,17 +57,28 @@ function deriveConfidence(v: unknown, probs: unknown): number {
   return vals.length > 0 ? clamp01(Math.max(...vals)) : 0
 }
 
-/** Map one wire answer to the contract — `qid` is the caller's question
- *  key (not sent to the model). A malformed entry is contract drift:
- *  JudgeUnavailable, fail-open. */
-function mapAnswer(qid: string, raw: unknown): JudgeAnswer {
+/** Map one wire answer to the contract, validated against the asked
+ *  question — a `noul` answer to a `choice` question or an off-criteria
+ *  pick is contract drift: JudgeUnavailable, fail-open. `qid` is the
+ *  caller's question key (not sent to the model). */
+function mapAnswer(qid: string, q: JudgeQuestion, raw: unknown): JudgeAnswer {
   if (typeof raw !== 'object' || raw === null) {
     throw new JudgeUnavailable(`jev returned a malformed answer for "${qid}"`)
   }
   const a = raw as RawAnswer
+  if (a.type !== q.type) {
+    throw new JudgeUnavailable(
+      `jev answered "${qid}" with type ${JSON.stringify(a.type)} — expected ${q.type}`
+    )
+  }
   switch (a.type) {
     case 'choice': {
-      if (typeof a.choice !== 'string' || !isProbs(a.probabilities)) {
+      if (
+        typeof a.choice !== 'string' ||
+        q.type !== 'choice' ||
+        !Object.hasOwn(q.criteria, a.choice) ||
+        !isProbs(a.probabilities)
+      ) {
         break
       }
       return {
@@ -78,7 +90,14 @@ function mapAnswer(qid: string, raw: unknown): JudgeAnswer {
       }
     }
     case 'score': {
-      if (!isNum(a.score) || !isProbs(a.probabilities)) {
+      // the wire scale is 0..N-1 over the question's level array
+      if (
+        !isNum(a.score) ||
+        q.type !== 'score' ||
+        a.score < 0 ||
+        a.score > q.criteria.length - 1 ||
+        !isProbs(a.probabilities)
+      ) {
         break
       }
       return {
@@ -120,19 +139,18 @@ function apiKey(cfg: JudgeConfig): string {
   const key = process.env[cfg.apiKeyEnv]
   if (key === undefined || key === '') {
     throw new JudgeUnavailable(
-      `${cfg.apiKeyEnv} is not set — export a jv_live_ key (https://jevtypesafeai.com → Get API key)`
+      `${cfg.apiKeyEnv} is not set — export a TypeSafe API key (https://docs.typesafe.ai)`
     )
   }
   return key
 }
 
-/** jev's error contract → the throw the caller sees (spec:
- *  bro-f4ot.2-judge). The body's own error detail wins over the status
- *  when both exist; `max_tokens_exceeded` is a caller bug even on a
- *  non-400 status. */
+/** jev's error contract → the throw the caller sees: 401/403 auth is
+ *  "unavailable" (fail-open — never a gate input), 422 validation is
+ *  the caller's bug (a plain error, not fail-open), everything else is
+ *  the service being down. */
 function throwForStatus(res: HttpResult): never {
-  const body = objOr(res.body)
-  const err = body.error
+  const err = objOr(res.body).error
   const errObj = objOr(err)
   let detail = `HTTP ${res.status}`
   if (typeof err === 'string') {
@@ -140,23 +158,19 @@ function throwForStatus(res: HttpResult): never {
   } else if (typeof errObj.message === 'string') {
     detail = errObj.message
   }
-  const code = typeof errObj.code === 'string' ? errObj.code : undefined
   if (res.status === 401 || res.status === 403) {
     throw new JudgeUnavailable(`jev auth failed — ${detail}`)
   }
-  if (res.status === 402) {
-    throw new JudgeUnavailable(`jev out of credits — ${detail}`)
-  }
-  if (res.status === 400 || res.status === 404 || code === 'max_tokens_exceeded') {
-    // validation / unknown endpoint / over budget — the caller's
-    // bug or payload, not an outage: throw, don't fail-open
+  if (res.status === 422) {
+    // validation — the caller's payload, not an outage
     throw new Error(`jev rejected the request — ${detail}`)
   }
   throw new JudgeUnavailable(`jev unavailable — ${detail}`)
 }
 
 export function jevJudge(cfg: JudgeConfig, opts: JevJudgeOpts = {}): DeadlineJudge {
-  const endpoint = `${stripTrailingSlashes(cfg.baseUrl)}/v1/decide`
+  const base = process.env.TYPESAFE_BASE_URL ?? cfg.baseUrl
+  const endpoint = `${stripTrailingSlashes(base)}/v1/systemone`
   async function decideWithin(
     state: unknown,
     questions: Record<string, JudgeQuestion>,
@@ -166,10 +180,10 @@ export function jevJudge(cfg: JudgeConfig, opts: JevJudgeOpts = {}): DeadlineJud
     const started = Date.now()
     const res = await postJson(
       endpoint,
-      { ...(cfg.model !== undefined ? { model: cfg.model } : {}), state, questions },
+      { model: cfg.model, state, questions },
       { authorization: `Bearer ${key}` },
       deadline,
-      [502],
+      [429, 502, 503, 529],
       opts.fetch
     )
     if (res.status !== 200) {
@@ -181,12 +195,18 @@ export function jevJudge(cfg: JudgeConfig, opts: JevJudgeOpts = {}): DeadlineJud
       throw new JudgeUnavailable('jev returned no answers map')
     }
     const answers: Record<string, JudgeAnswer> = {}
-    for (const [qid, a] of Object.entries(rawAnswers)) {
-      answers[qid] = mapAnswer(qid, a)
+    // map only asked questions — an unasked id in the reply is drift
+    // we ignore, an asked-but-absent one is "no verdict" (the chain
+    // marks it low), an asked-but-malformed one fails open
+    for (const [qid, q] of Object.entries(questions)) {
+      const a = (rawAnswers as Record<string, unknown>)[qid]
+      if (a !== undefined) {
+        answers[qid] = mapAnswer(qid, q, a)
+      }
     }
     return {
       answers,
-      model: typeof body.model === 'string' ? body.model : (cfg.model ?? 'jev'),
+      model: typeof body.model === 'string' ? body.model : cfg.model,
       latencyMs: Date.now() - started,
       usage: mapUsage(body, 'input_tokens'),
       // the chain owns thresholding — a raw backend reports none
@@ -205,7 +225,7 @@ export const jevConnector: Connector = {
     }
     return process.env[apiKeyEnv]
       ? null
-      : `${apiKeyEnv} is not set — export a jv_live_ key (https://jevtypesafeai.com → Get API key)`
+      : `${apiKeyEnv} is not set — export a TypeSafe API key (https://docs.typesafe.ai)`
   },
   judge: (ctx) => jevJudge(judgeConfig(ctx.dir).judge),
 }
