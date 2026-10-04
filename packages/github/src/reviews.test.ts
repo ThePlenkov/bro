@@ -268,10 +268,7 @@ describe('githubReview', { skip: WIN32 }, () => {
         mergedSince: '2026-01-01T00:00:00Z',
       })
       assert.equal(prs.length, 1)
-      assert.match(
-        readFileSync(log, 'utf8'),
-        /pr list .*--search merged:>=2026-01-01T00:00:00Z/
-      )
+      assert.match(readFileSync(log, 'utf8'), /pr list .*--search merged:>=2026-01-01\n/)
     })
   })
 
