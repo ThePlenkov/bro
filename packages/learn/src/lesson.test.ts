@@ -41,10 +41,18 @@ describe('lessonProblems', () => {
 
   it('rejects empty evidence — a lesson must cite where it was learned', () => {
     assert.ok(lessonProblems(valid({ evidence: [] })).some((p) => p.includes('evidence')))
+  })
+
+  it('rejects an unknown evidence kind and a blank ref independently', () => {
     assert.ok(
-      lessonProblems(
-        valid({ evidence: [{ kind: 'pr' as never, ref: '' }] })
-      ).some((p) => p.includes('evidence'))
+      lessonProblems(valid({ evidence: [{ kind: 'hunch' as never, ref: 'x' }] })).some((p) =>
+        p.includes('evidence')
+      )
+    )
+    assert.ok(
+      lessonProblems(valid({ evidence: [{ kind: 'bead', ref: ' ' }] })).some((p) =>
+        p.includes('evidence')
+      )
     )
   })
 

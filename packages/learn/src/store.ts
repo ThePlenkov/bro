@@ -7,12 +7,14 @@
  * stealth property of beads — nothing lands in git.
  *
  * `bro learn` writes through `bd` — the CLI never opens Dolt itself.
- * Read paths fail open: a kv entry that fails the lesson schema is
+ * Enumeration fails open: a kv entry that fails the lesson schema is
  * reported in `skipped`, never thrown — lessons written by a newer bro
- * must not wedge an older one.
+ * must not wedge an older one. Exact reads (`getLesson`) are the
+ * exception: a corrupt entry throws so `show` can say "exists but
+ * broken" rather than lying "no such lesson".
  */
 import { bd, bdTry } from '@broject/core'
-import { isLesson, lessonProblems, type Lesson } from './lesson.ts'
+import { lessonProblems, type Lesson } from './lesson.ts'
 
 export const KV_PREFIX = 'learn/'
 
@@ -38,27 +40,35 @@ export interface LessonListing {
   skipped: SkippedEntry[]
 }
 
-function parseEntry(key: string, raw: string): Lesson | SkippedEntry {
+/** Explicit discriminant — a forward-compatible Lesson may itself gain
+ *  a `key`/`problems` field, so field-sniffing is not a safe tag. */
+type ParsedEntry = { ok: true; lesson: Lesson } | { ok: false; skipped: SkippedEntry }
+
+function parseEntry(key: string, raw: string): ParsedEntry {
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
   } catch (err) {
-    return { key, problems: [`malformed JSON — ${err instanceof Error ? err.message : String(err)}`] }
+    return {
+      ok: false,
+      skipped: {
+        key,
+        problems: [`malformed JSON — ${err instanceof Error ? err.message : String(err)}`],
+      },
+    }
   }
   const problems = lessonProblems(parsed)
   if (problems.length > 0) {
-    return { key, problems }
+    return { ok: false, skipped: { key, problems } }
   }
   const lesson = parsed as Lesson
   const id = key.slice(KV_PREFIX.length)
   if (lesson.id !== id) {
     // store.ts only ever writes key = learn/<id>; divergence is corruption
-    return { key, problems: [`id "${lesson.id}" does not match key "${key}"`] }
+    return { ok: false, skipped: { key, problems: [`id "${lesson.id}" does not match key "${key}"`] } }
   }
-  return lesson
+  return { ok: true, lesson }
 }
-
-const isSkipped = (e: Lesson | SkippedEntry): e is SkippedEntry => 'key' in e
 
 /** Every lesson in the store — schema violations land in `skipped`. */
 export function listLessons(cwd?: string): LessonListing {
@@ -89,16 +99,19 @@ export function listLessons(cwd?: string): LessonListing {
       continue
     }
     const entry = parseEntry(key, value)
-    if (isSkipped(entry)) {
-      skipped.push(entry)
+    if (entry.ok) {
+      lessons.push(entry.lesson)
     } else {
-      lessons.push(entry)
+      skipped.push(entry.skipped)
     }
   }
   return { lessons, skipped }
 }
 
-const KV_MISS = /not set|not found/i
+/** bd's exact kv miss signal — `<key> (not set)` on stderr, exit 1.
+ *  Deliberately narrow: a dead store, a missing db, or bd usage drift
+ *  must throw, not masquerade as an absent key. */
+const KV_MISS = /\(not set\)/
 
 /** Exact read — null when absent. Corrupt entries throw: `show` must
  *  be able to say "this key exists but is broken". */
@@ -111,10 +124,10 @@ export function getLesson(id: string, cwd?: string): Lesson | null {
     throw new LessonStoreError(`bd kv get ${keyOf(id)} failed — ${res.err || `exit ${res.code}`}`)
   }
   const entry = parseEntry(keyOf(id), res.out.trim())
-  if (isSkipped(entry)) {
-    throw new LessonStoreError(`lesson ${id} fails schema: ${entry.problems.join('; ')}`)
+  if (!entry.ok) {
+    throw new LessonStoreError(`lesson ${id} fails schema: ${entry.skipped.problems.join('; ')}`)
   }
-  return entry
+  return entry.lesson
 }
 
 /** Write — fails closed: an invalid lesson never reaches the store. */

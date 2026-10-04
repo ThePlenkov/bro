@@ -82,10 +82,17 @@ export interface Lesson {
 const isObj = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
 
+/** ISO-shape prefix + a Date.parse sanity check — "yesterday" is a
+ *  non-empty string but not a timestamp. */
+const isIsoTimestamp = (v: unknown): v is string =>
+  typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v) && !Number.isNaN(Date.parse(v))
+
 const isNonEmptyStr = (v: unknown): v is string => typeof v === 'string' && v.trim() !== ''
 
+/** A present match list needs ≥1 entry — `every` on [] is vacuously
+ *  true but an empty list can never satisfy its key. */
 function stringList(v: unknown): boolean {
-  return Array.isArray(v) && v.every((s) => isNonEmptyStr(s))
+  return Array.isArray(v) && v.length > 0 && v.every((s) => isNonEmptyStr(s))
 }
 
 /**
@@ -98,7 +105,7 @@ export function lessonProblems(v: unknown): string[] {
   if (!isObj(v)) {
     return ['not an object']
   }
-  if (!isNonEmptyStr(v.id) || !v.id.startsWith('learn-')) {
+  if (!isNonEmptyStr(v.id) || !/^learn-\S/.test(v.id)) {
     problems.push('id must be a non-empty "learn-<slug>" string')
   }
   if (!isNonEmptyStr(v.lesson)) {
@@ -156,11 +163,11 @@ export function lessonProblems(v: unknown): string[] {
   if (!(LESSON_SOURCES as readonly string[]).includes(v.source as string)) {
     problems.push(`source must be one of: ${LESSON_SOURCES.join(', ')}`)
   }
-  if (!isNonEmptyStr(v.createdAt)) {
+  if (!isIsoTimestamp(v.createdAt)) {
     problems.push('createdAt must be an ISO timestamp string')
   }
-  if (v.updatedAt !== undefined && !isNonEmptyStr(v.updatedAt)) {
-    problems.push('updatedAt must be a string when present')
+  if (v.updatedAt !== undefined && !isIsoTimestamp(v.updatedAt)) {
+    problems.push('updatedAt must be an ISO timestamp string when present')
   }
   if (v.promotedTo !== undefined && !isNonEmptyStr(v.promotedTo)) {
     problems.push('promotedTo must be a string when present')

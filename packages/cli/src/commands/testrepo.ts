@@ -231,7 +231,12 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     // the learn store's surface — a flat {key: value} map beside rows
     db.kv = db.kv || {}
     const sub = pos[1]
-    if (sub === 'set') { db.kv[pos[2]] = pos[3]; save(db) }
+    if (sub === 'set') {
+      // missing operands must fail loudly — a silent no-write would
+      // green a test while real bd errors
+      if (pos[2] === undefined || pos[3] === undefined) fail('kv set <key> <value>')
+      db.kv[pos[2]] = pos[3]; save(db)
+    }
     else if (sub === 'get') {
       if (db.kv[pos[2]] === undefined) { console.error(pos[2] + ' (not set)'); process.exit(1) }
       console.log(db.kv[pos[2]])

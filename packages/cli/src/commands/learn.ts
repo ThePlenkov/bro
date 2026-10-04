@@ -13,12 +13,15 @@
  */
 import { checkBeads } from '@broject/core'
 import {
+  CONFIDENCES,
   deriveConfidence,
   deleteLesson,
   EVIDENCE_KINDS,
   getLesson,
   HOOK_EVENTS,
+  LESSON_SOURCES,
   lessonId,
+  lessonIds,
   listLessons,
   putLesson,
 } from '@broject/learn'
@@ -60,7 +63,37 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
   '--confidence',
 ])
 
+/** Options each verb accepts — a `--name=value` spelling counts as the
+ *  same option (flag() honors it; flagAll's gap is bro-mzb9 debt). */
+const KNOWN_FLAGS: Record<string, ReadonlySet<string>> = {
+  add: new Set([
+    '--lesson',
+    '--on',
+    '--match-terms',
+    '--match-commands',
+    '--match-paths',
+    '--match-tools',
+    '--match-errors',
+    '--budget',
+    '--evidence',
+  ]),
+  list: new Set(['--json', '--source', '--confidence']),
+  show: new Set(),
+  forget: new Set(),
+}
+
 const learnPositionals = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
+
+/** A misspelled option is a typo, not input — writes fail closed. */
+function rejectUnknownFlags(sub: string, rest: string[]): void {
+  const known = KNOWN_FLAGS[sub] ?? new Set<string>()
+  for (const arg of rest) {
+    if (arg.startsWith('--') && !known.has(arg.split('=')[0]!)) {
+      console.error(`error: unknown option "${arg}" for learn ${sub}`)
+      process.exit(2)
+    }
+  }
+}
 
 function fail(msg: string, code = 2): never {
   console.error(`error: ${msg}`)
@@ -127,32 +160,56 @@ function cmdAdd(argv: string[]): void {
     ...(commands.length > 0 ? { commands } : {}),
     ...(paths.length > 0 ? { paths } : {}),
     ...(tools.length > 0 ? { tools } : {}),
-    ...(argv.includes('--match-errors') ? { errors: true } : {}),
+    ...(argv.some((a) => a === '--match-errors' || a.startsWith('--match-errors='))
+      ? { errors: true }
+      : {}),
   }
+  // the contract is one imperative line — a pasted multi-line rule
+  // would spill `list` output into continuation rows
+  const rule = text.trim().replace(/\s+/g, ' ')
   const lesson: Lesson = {
-    id: lessonId(text),
+    id: lessonId(rule),
     trigger: {
       on,
       ...(Object.keys(match).length > 0 ? { match } : {}),
       ...(budget !== undefined ? { budget } : {}),
     },
-    lesson: text.trim(),
+    lesson: rule,
     evidence: ev,
     confidence: deriveConfidence(ev),
     source: 'manual',
     createdAt: new Date().toISOString(),
   }
-  if (getLesson(lesson.id) !== null) {
+  // validation before checkBeads — a missing flag must report itself,
+  // not a beads setup error
+  checkBeads()
+  // lessonIds, not getLesson — a corrupt key squats its id too, and
+  // dedup must refuse it the same way
+  if (lessonIds().has(lesson.id)) {
     fail(`${lesson.id} already exists — forget it first, or the rule is already stored`, 1)
   }
   putLesson(lesson)
   console.log(lesson.id)
 }
 
+function enumFlag(argv: string[], name: string, allowed: readonly string[]): Set<string> {
+  const values = flagAll(argv, name)
+  for (const v of values) {
+    if (!allowed.includes(v)) {
+      fail(`${name} must be one of: ${allowed.join(', ')} — got "${v}"`)
+    }
+  }
+  return new Set(values)
+}
+
 function cmdList(argv: string[]): void {
+  if (learnPositionals(argv).length > 0) {
+    fail(`usage: bro learn list [--json] [--source X] [--confidence X]`)
+  }
   const json = argv.includes('--json')
-  const sources = new Set(flagAll(argv, '--source'))
-  const confidences = new Set(flagAll(argv, '--confidence'))
+  const sources = enumFlag(argv, '--source', LESSON_SOURCES)
+  const confidences = enumFlag(argv, '--confidence', CONFIDENCES)
+  checkBeads()
   const { lessons, skipped } = listLessons()
   warnSkipped(skipped)
   const rows = lessons.filter(
@@ -169,12 +226,18 @@ function cmdList(argv: string[]): void {
   }
 }
 
-function cmdShow(argv: string[]): void {
-  const [id] = learnPositionals(argv)
-  if (id === undefined) {
-    fail('usage: bro learn show <learn-id>')
+function oneId(argv: string[], sub: string): string {
+  const pos = learnPositionals(argv)
+  if (pos.length !== 1) {
+    fail(`usage: bro learn ${sub} <learn-id>`)
   }
-  const lesson = getLesson(id.replace(/^learn\//, ''))
+  return pos[0]!.replace(/^learn\//, '')
+}
+
+function cmdShow(argv: string[]): void {
+  const id = oneId(argv, 'show')
+  checkBeads()
+  const lesson = getLesson(id)
   if (lesson === null) {
     fail(`no lesson ${id}`, 1)
   }
@@ -182,16 +245,13 @@ function cmdShow(argv: string[]): void {
 }
 
 function cmdForget(argv: string[]): void {
-  const [id] = learnPositionals(argv)
-  if (id === undefined) {
-    fail('usage: bro learn forget <learn-id>')
-  }
-  const normalized = id.replace(/^learn\//, '')
-  if (getLesson(normalized) === null) {
+  const id = oneId(argv, 'forget')
+  checkBeads()
+  if (getLesson(id) === null) {
     fail(`no lesson ${id}`, 1)
   }
-  deleteLesson(normalized)
-  console.log(`forgot ${normalized}`)
+  deleteLesson(id)
+  console.log(`forgot ${id}`)
 }
 
 export function runLearnCommand(argv: string[]): void {
@@ -199,9 +259,22 @@ export function runLearnCommand(argv: string[]): void {
   if (cmd === undefined || cmd === '--help' || cmd === '-h') {
     usage(cmd === undefined ? 1 : 0)
   }
-  checkBeads()
+  // own-key lookup — an inherited key like `toString` is not a subcommand
+  if (!Object.hasOwn(KNOWN_FLAGS, cmd)) {
+    console.error(`error: unknown learn command "${cmd}"`)
+    usage()
+  }
+  if (rest.includes('--help') || rest.includes('-h')) {
+    usage(0)
+  }
+  rejectUnknownFlags(cmd, rest)
+  // each verb validates its input before checkBeads — a missing flag or
+  // argument must report itself, not a beads setup error
   switch (cmd) {
     case 'add':
+      if (learnPositionals(rest).length > 0) {
+        fail(`unexpected argument "${learnPositionals(rest)[0]!}" — add takes flags only`)
+      }
       cmdAdd(rest)
       return
     case 'list':
@@ -213,8 +286,5 @@ export function runLearnCommand(argv: string[]): void {
     case 'forget':
       cmdForget(rest)
       return
-    default:
-      console.error(`error: unknown learn command "${cmd}"`)
-      usage()
   }
 }
