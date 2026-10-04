@@ -66,7 +66,7 @@ async function callWithin(
   }
   const left = deadline - Date.now()
   if (left <= 0) {
-    return Promise.reject(new JudgeUnavailable('judge budget spent'))
+    throw new JudgeUnavailable('judge budget spent')
   }
   let timer: ReturnType<typeof setTimeout> | undefined
   try {

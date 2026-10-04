@@ -35,6 +35,42 @@ export function loadState(spec: string): unknown {
 const isJudgeText = (v: unknown): boolean =>
   typeof v === 'string' || (typeof v === 'object' && v !== null)
 
+/** Per-type criteria contract — one problem message or none. */
+function criteriaProblem(id: string, o: Record<string, unknown>): string | undefined {
+  const c = o.criteria
+  if (o.type === 'choice') {
+    if (typeof c !== 'object' || c === null || Array.isArray(c) || Object.keys(c).length === 0) {
+      return `"${id}".criteria must be a non-empty option map for choice`
+    }
+    if (!Object.values(c).every((v) => v === null || isJudgeText(v))) {
+      return `"${id}".criteria values must be text, structured JSON, or null`
+    }
+    return undefined
+  }
+  if (o.type === 'score') {
+    if (!Array.isArray(c) || c.length < 2 || c.length > 10) {
+      return `"${id}".criteria must be a 2–10 level array for score`
+    }
+    if (!c.every(isJudgeText)) {
+      return `"${id}".criteria entries must be text or structured JSON`
+    }
+    return undefined
+  }
+  if (o.type === 'noul' && c !== undefined) {
+    const bad =
+      typeof c !== 'object' ||
+      c === null ||
+      Array.isArray(c) ||
+      !Object.entries(c).every(
+        ([k, v]) => (k === 'true' || k === 'false') && isJudgeText(v)
+      )
+    if (bad) {
+      return `"${id}".criteria must be a {true?, false?} text map for noul`
+    }
+  }
+  return undefined
+}
+
 function questionProblems(id: string, q: unknown): string[] {
   const o = (typeof q === 'object' && q !== null ? q : {}) as Record<string, unknown>
   const problems: string[] = []
@@ -44,34 +80,9 @@ function questionProblems(id: string, q: unknown): string[] {
   if (!isJudgeText(o.instructions)) {
     problems.push(`"${id}".instructions must be a string or structured JSON`)
   }
-  if (o.type === 'choice') {
-    const c = o.criteria
-    if (typeof c !== 'object' || c === null || Array.isArray(c) || Object.keys(c).length === 0) {
-      problems.push(`"${id}".criteria must be a non-empty option map for choice`)
-    } else if (!Object.values(c).every((v) => v === null || isJudgeText(v))) {
-      problems.push(`"${id}".criteria values must be text, structured JSON, or null`)
-    }
-  }
-  if (o.type === 'score') {
-    const c = o.criteria
-    if (!Array.isArray(c) || c.length < 2 || c.length > 10) {
-      problems.push(`"${id}".criteria must be a 2–10 level array for score`)
-    } else if (!c.every(isJudgeText)) {
-      problems.push(`"${id}".criteria entries must be text or structured JSON`)
-    }
-  }
-  if (o.type === 'noul' && o.criteria !== undefined) {
-    const c = o.criteria
-    if (
-      typeof c !== 'object' ||
-      c === null ||
-      Array.isArray(c) ||
-      !Object.entries(c).every(
-        ([k, v]) => (k === 'true' || k === 'false') && isJudgeText(v)
-      )
-    ) {
-      problems.push(`"${id}".criteria must be a {true?, false?} text map for noul`)
-    }
+  const crit = criteriaProblem(id, o)
+  if (crit !== undefined) {
+    problems.push(crit)
   }
   return problems
 }
