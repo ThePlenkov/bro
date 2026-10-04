@@ -219,6 +219,17 @@ const unquote = (s: string): string => {
     : t
 }
 
+/** Can a scalar begin at index i? — after `[`, `,`, or the fragment
+ *  start (whitespace skipped). */
+const opensScalar = (t: string, i: number): boolean => {
+  for (let k = i - 1; k >= 0; k--) {
+    if (t[k] !== ' ' && t[k] !== '\t') {
+      return t[k] === '[' || t[k] === ','
+    }
+  }
+  return true
+}
+
 /** Index where a YAML comment begins — a `#` at the head or after a
  *  space/tab, outside quotes. Quotes only quote inside a flow list —
  *  in a bare scalar `docs/it's.md` the apostrophe is an ordinary
@@ -231,9 +242,20 @@ const commentStart = (t: string, flow: boolean): number => {
       if (q === '"' && ch === '\\') {
         i++
       } else if (ch === q) {
-        q = ''
+        // '' inside a single-quoted scalar is an escaped quote, not a close
+        if (q === "'" && t[i + 1] === "'") {
+          i++
+        } else {
+          q = ''
+        }
       }
-    } else if (flow && (ch === '"' || ch === "'")) {
+    } else if (
+      flow &&
+      (ch === '"' || ch === "'") &&
+      // a quote only opens a scalar where one can begin — after `[`,
+      // `,`, or the fragment start; `a'ts` keeps its literal apostrophe
+      opensScalar(t, i)
+    ) {
       q = ch
     } else if (ch === '#' && (i === 0 || t[i - 1] === ' ' || t[i - 1] === '\t')) {
       return i
@@ -255,31 +277,39 @@ const yamlScalar = (s: string): string => {
       if (q === '"' && t[i] === '\\') {
         i++
       } else if (t[i] === q) {
-        end = i
-        break
+        // '' inside a single-quoted scalar is an escaped quote
+        if (q === "'" && t[i + 1] === "'") {
+          i++
+        } else {
+          end = i
+          break
+        }
       }
     }
-    return unquote(
-      end !== -1 && /^\s*(#.*)?$/.test(t.slice(end + 1)) ? t.slice(0, end + 1) : t
-    )
+    const v = end !== -1 && /^\s*(#.*)?$/.test(t.slice(end + 1)) ? t.slice(0, end + 1) : t
+    const u = unquote(v)
+    // doubled single quotes collapse to one inside a single-quoted scalar
+    return q === "'" && v.startsWith(q) && v.endsWith(q) ? u.replaceAll("''", "'") : u
   }
   const c = commentStart(t, t.startsWith('['))
   return unquote(c === -1 ? t : t.slice(0, c))
 }
 
 /** Split a flow list on commas outside quotes — `["a,b", 'c']` is two
- *  entries, not three. */
+ *  entries, not three. Quotes only open at scalar position — a bare
+ *  `a'ts.ts` keeps its apostrophe. */
 const flowItems = (s: string): string[] => {
   const items: string[] = []
   let cur = ''
   let q = ''
-  for (const ch of s) {
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!
     if (q !== '') {
       cur += ch
       if (ch === q) {
         q = ''
       }
-    } else if (ch === '"' || ch === "'") {
+    } else if ((ch === '"' || ch === "'") && opensScalar(s, i)) {
       q = ch
       cur += ch
     } else if (ch === ',') {
@@ -315,8 +345,11 @@ export function specScope(path: string): string[] {
     const body = lines.slice(i + 1)
     let inline = yamlScalar(lines[i]!.replace(/^scope:\s*/, ''))
     // a flow list may wrap — `scope: [a,\n  b]` joins until the closing ]
+    // — comments strip quote-aware but `]`/`[` must survive the join
     for (let j = 0; inline.startsWith('[') && !inline.endsWith(']') && j < body.length; j++) {
-      inline += ` ${yamlScalar(body[j]!)}`
+      const frag = body[j]!.trim()
+      const c = commentStart(frag, true)
+      inline += ` ${(c === -1 ? frag : frag.slice(0, c)).trimEnd()}`
     }
     if (inline !== '') {
       return inline.startsWith('[') && inline.endsWith(']')

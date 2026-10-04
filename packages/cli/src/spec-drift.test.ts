@@ -79,6 +79,12 @@ describe('native scope() — the tool\u2019s explicit scope', () => {
     assert.deepEqual(scopeOf('---\nscope: ["a #b.ts", c.ts]\n---\n'), ['a #b.ts', 'c.ts'])
     assert.deepEqual(scopeOf('---\nscope: "src/x.ts" # note\n---\n'), ['src/x.ts'])
     assert.deepEqual(scopeOf("---\nscope: docs/it's.md # note\n---\n"), ["docs/it's.md"])
+    // '' is YAML's escaped quote; a comment after the last quoted item
+    // of a wrapped flow list still strips; a bare apostrophe in flow
+    // stays literal
+    assert.deepEqual(scopeOf("---\nscope: 'a''b' # note\n---\n"), ["a'b"])
+    assert.deepEqual(scopeOf('---\nscope: ["a.ts",\n  "b.ts"] # note\n---\n'), ['a.ts', 'b.ts'])
+    assert.deepEqual(scopeOf("---\nscope: [a'ts.ts, b.ts]\n---\n"), ["a'ts.ts", 'b.ts'])
   })
 
   test('no frontmatter scope and no spec both return null', () => {
