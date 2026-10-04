@@ -45,7 +45,7 @@ import {
   type Lesson,
   type LessonTrigger,
 } from './lesson.ts'
-import { listLessons, LessonStoreError, type SkippedEntry } from './store.ts'
+import { listLessons, LessonStoreError, withStoreLock, type SkippedEntry } from './store.ts'
 
 /** "Live" for marker sessions — the same day-window the parallel-work
  *  nudge and the connector's previous-trace exclusion use. */
@@ -401,12 +401,18 @@ export function recordProbeAnswer(opts: RecordProbeOptions): RecordProbeResult {
     source: 'probe',
     origin: `probe:${question !== '' ? question : sid}`,
   }
-  const plan = planCapture([candidate], dir)
-  if (plan.skipped.length > 0) {
-    const s = plan.skipped[0]!
-    throw new LessonStoreError(`${s.reason} — the answer was not stored`)
-  }
-  applyCapture(plan, dir)
+  // plan→apply is one critical section — the store lock keeps a
+  // concurrent probe/capture from overwriting this write's merged
+  // evidence between the plan's read and apply's write
+  const plan = withStoreLock(dir, () => {
+    const p = planCapture([candidate], dir)
+    if (p.skipped.length > 0) {
+      const s = p.skipped[0]!
+      throw new LessonStoreError(`${s.reason} — the answer was not stored`)
+    }
+    applyCapture(p, dir)
+    return p
+  })
   const written = plan.write[0]?.lesson ?? plan.merge[0]?.lesson
   if (written === undefined) {
     // nothing written and nothing merged: the same probe evidence was

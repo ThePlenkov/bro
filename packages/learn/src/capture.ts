@@ -38,7 +38,13 @@ import {
   type LessonTrigger,
   type TriggerMatch,
 } from './lesson.ts'
-import { getLesson, LessonStoreError, listLessons, putLesson } from './store.ts'
+import {
+  getLesson,
+  LessonStoreError,
+  listLessons,
+  putLesson,
+  withStoreLock,
+} from './store.ts'
 
 export const CAPTURE_SOURCES = ['drill', 'retro', 'act', 'mol'] as const
 export type CaptureSource = (typeof CAPTURE_SOURCES)[number]
@@ -645,10 +651,17 @@ export function captureLessons(opts: CaptureOptions = {}): CaptureReport {
   }
   const candidates = harvests.flatMap((h) => h.candidates)
   const skipped = harvests.flatMap((h) => h.skipped)
-  const plan = planCapture(candidates, opts.dir)
+  // non-dryRun plan→apply runs under the store lock — a concurrent
+  // learn writer must not read the same store state and overwrite the
+  // merged evidence this section produces (bd kv has no CAS)
+  const plan =
+    opts.dryRun === true
+      ? planCapture(candidates, opts.dir)
+      : withStoreLock(opts.dir, () => {
+          const p = planCapture(candidates, opts.dir)
+          applyCapture(p, opts.dir)
+          return p
+        })
   plan.skipped.push(...skipped)
-  if (opts.dryRun !== true) {
-    applyCapture(plan, opts.dir)
-  }
   return { plan, dryRun: opts.dryRun === true }
 }
