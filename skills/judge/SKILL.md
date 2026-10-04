@@ -25,7 +25,7 @@ answers under `judge.confidence`.
 | Command | What it does |
 | ------- | ------------ |
 | `bro judge decide --state <file\|-> --questions <file>` | One decide() over the resolved chain — prints answers, decidedBy, model, latency, usage. `--connector <name>` pins the primary, `--json` prints the raw DecideResult |
-| `bro judge stats [--since <iso>] [--json] [--replay]` | Scores the verdict journal — agreement matrix (`action` vs recorded outcome, per decider), `blocks_correctness` proxy-scored separately, calibration buckets, p50/p95 latency, mean/total cost per provider+model, and the dogfood thresholds (≥85% agreement, p50 <1s, mean <$0.01). `--replay` scores dogfood verdicts instead of live ones |
+| `bro judge stats [--since <iso>] [--json] [--replay]` | Scores the verdict journal — agreement matrix (`action` vs recorded outcome, overall) + agreement rate per decider, `blocks_correctness` proxy-scored separately, calibration buckets, p50/p95 latency, mean/total cost per provider+model, and the dogfood thresholds (≥85% agreement, p50 <1s, mean <$0.01). `--replay` scores dogfood verdicts instead of live ones |
 
 Config (`bro.config.json` `judge` section): `mode` (off|shadow — v1
 has no acting mode), `model` (pin in production), `baseUrl`,

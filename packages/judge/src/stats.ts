@@ -11,29 +11,34 @@
  * dogfood milestone. Unclassifiable subjects (no outcome) are dropped
  * from the agreement set — silent misclassification is worse than a
  * smaller sample.
+ *
+ * Journal fields (`outcome`, `choice`, `decidedBy`, `model`) are
+ * untrusted keys: every aggregate they index is a Map internally, and
+ * the public Record shapes are built via Object.fromEntries — a
+ * '__proto__' outcome can't reach Object.prototype through this file.
  */
 import type { Disposition, JournalRow, Verdict } from '@broject/core'
 
 /** What an `action` choice claims will happen — the agreement test is
- *  `ACTION_FOR_OUTCOME[outcome] === choice`: `resolve` covers both
+ *  `ACTION_FOR_OUTCOME.get(outcome) === choice`: `resolve` covers both
  *  fix-then-resolve and invalid-finding-resolve per spec, so `fixed`
  *  and `rejected` both map to it. */
-const ACTION_FOR_OUTCOME: Record<string, string> = {
-  fixed: 'resolve',
-  rejected: 'resolve',
-  replied: 'reply',
-  deferred: 'defer',
-}
+const ACTION_FOR_OUTCOME = new Map<string, string>([
+  ['fixed', 'resolve'],
+  ['rejected', 'resolve'],
+  ['replied', 'reply'],
+  ['deferred', 'defer'],
+])
 
 /** The blocks_correctness proxy — an outcome says what happened, not
  *  whether the thread truly blocked correctness: `fixed` ≈ blocking,
  *  `deferred`/`rejected` ≈ not. `replied` is genuinely ambiguous
  *  (a rebuttal can be right on a blocking finding) — excluded. */
-const BLOCKING_FOR_OUTCOME: Record<string, boolean> = {
-  fixed: true,
-  deferred: false,
-  rejected: false,
-}
+const BLOCKING_FOR_OUTCOME = new Map<string, boolean>([
+  ['fixed', true],
+  ['deferred', false],
+  ['rejected', false],
+])
 
 export interface StatsOpts {
   /** ISO timestamp — verdicts older than this are excluded.
@@ -93,7 +98,8 @@ const isVerdict = (r: JournalRow): r is Verdict => r.kind !== 'act-disposition'
 /** Latest disposition for a subject — threadId must match; a commentSha
  *  present on both sides must equal (a moved comment is a different
  *  subject). Later journal rows win: the most recent observation is
- *  the outcome. */
+ *  the outcome. A verdict carrying its own `outcome` (replay,
+ *  dogfood) is the first hit and wins over any disposition. */
 function findOutcome(verdict: Verdict, dispositions: Disposition[]): string | undefined {
   if (verdict.outcome !== undefined) {
     return verdict.outcome
@@ -124,7 +130,9 @@ const percentile = (sorted: number[], p: number): number =>
  *  decider; an escalated set keys as 'jev+llm-judge/<model>' so the
  *  report shows what escalation spends, not just the primary. */
 const providerModel = (v: Verdict): string => {
-  const providers = [...new Set(Object.values(v.answers).map((a) => a.decidedBy))].sort()
+  const providers = [...new Set(Object.values(v.answers).map((a) => a.decidedBy))].sort(
+    (a, b) => a.localeCompare(b)
+  )
   return `${providers.length > 0 ? providers.join('+') : 'unknown'}/${v.model}`
 }
 
@@ -153,6 +161,158 @@ const bump = (t: Tally, agreed: boolean): void => {
   }
 }
 
+/** get-or-create for Map<string, T> — the S1121-clean form of
+ *  `(m[k] ??= init())`. */
+function mapGet<K, V>(m: Map<K, V>, k: K, init: () => V): V {
+  const cur = m.get(k)
+  if (cur !== undefined) {
+    return cur
+  }
+  const v = init()
+  m.set(k, v)
+  return v
+}
+
+/** `action` answer vs outcome — agreement matrix, per-decider tallies,
+ *  and the confidence bucket this prediction lands in. */
+function scoreAction(
+  v: Verdict,
+  outcome: string | undefined,
+  agreement: { n: number; agreed: number; unscored: number },
+  matrix: Map<string, Map<string, number>>,
+  byDecider: Map<string, Tally>,
+  calibration: Map<string, Tally>
+): void {
+  const action = v.answers.action
+  if (action?.type !== 'choice') {
+    return
+  }
+  const expected = outcome === undefined ? undefined : ACTION_FOR_OUTCOME.get(outcome)
+  if (expected === undefined) {
+    agreement.unscored += 1
+    return
+  }
+  const agreed = expected === action.choice
+  bump(agreement, agreed)
+  const row = mapGet(matrix, action.choice, () => new Map<string, number>())
+  row.set(outcome!, (row.get(outcome!) ?? 0) + 1)
+  bump(mapGet(byDecider, action.decidedBy, () => ({ n: 0, agreed: 0 })), agreed)
+  bump(mapGet(calibration, bucketFor(action.confidence), () => ({ n: 0, agreed: 0 })), agreed)
+}
+
+/** `blocks_correctness` noul vs the outcome proxy — fixed ≈ blocking,
+ *  deferred/rejected ≈ not; anything else is unscored. */
+function scoreBlocking(
+  v: Verdict,
+  outcome: string | undefined,
+  proxy: Tally & { unscored: number }
+): void {
+  const bc = v.answers.blocks_correctness
+  if (bc?.type !== 'noul') {
+    return
+  }
+  const truth = outcome === undefined ? undefined : BLOCKING_FOR_OUTCOME.get(outcome)
+  if (truth === undefined) {
+    proxy.unscored += 1
+    return
+  }
+  bump(proxy, bc.noul >= 0.5 === truth)
+}
+
+interface SubjectScoring {
+  agreement: JudgeStats['agreement']
+  blockingProxy: JudgeStats['blockingProxy']
+  calibration: JudgeStats['calibration']
+}
+
+/** Agreement over the deduped subject set — one verdict per
+ *  (threadId, commentSha) pair stands, per spec. */
+function scoreSubjects(subjects: Verdict[], dispositions: Disposition[]): SubjectScoring {
+  const agreement = { n: 0, agreed: 0, unscored: 0 }
+  const matrix = new Map<string, Map<string, number>>()
+  const byDecider = new Map<string, Tally>()
+  const calibration = new Map<string, Tally>()
+  const proxy: Tally & { unscored: number } = { n: 0, agreed: 0, unscored: 0 }
+  for (const v of subjects) {
+    const outcome = findOutcome(v, dispositions)
+    scoreAction(v, outcome, agreement, matrix, byDecider, calibration)
+    scoreBlocking(v, outcome, proxy)
+  }
+  return {
+    agreement: {
+      ...agreement,
+      matrix: Object.fromEntries(
+        [...matrix.entries()].map(([k, row]) => [k, Object.fromEntries(row)])
+      ),
+      byDecider: Object.fromEntries(byDecider),
+    },
+    blockingProxy: proxy,
+    calibration: CALIBRATION_BUCKETS.map(([, , bucket]) => ({
+      bucket,
+      ...(calibration.get(bucket) ?? { n: 0, agreed: 0 }),
+    })),
+  }
+}
+
+interface CallStats {
+  latency: JudgeStats['latency']
+  cost: JudgeStats['cost']
+}
+
+/** Latency and spend over EVERY recorded decide() — a deduped re-judge
+ *  still paid for its call, so per-call metrics never run on the
+ *  subject set (agreement does — one verdict per pair stands). */
+function tallyCalls(scoped: Verdict[]): CallStats {
+  const latencies = scoped.map((v) => v.latencyMs).sort((a, b) => a - b)
+  const byPM = new Map<string, { n: number; total: number; mean: number }>()
+  const cost = { n: 0, noCost: 0, total: 0, mean: 0 }
+  for (const v of scoped) {
+    if (v.costUsd === undefined) {
+      cost.noCost += 1
+      continue
+    }
+    cost.n += 1
+    cost.total += v.costUsd
+    const pm = mapGet(byPM, providerModel(v), () => ({ n: 0, total: 0, mean: 0 }))
+    pm.n += 1
+    pm.total += v.costUsd
+  }
+  for (const pm of byPM.values()) {
+    pm.mean = pm.total / pm.n
+  }
+  cost.mean = cost.n > 0 ? cost.total / cost.n : 0
+  return {
+    latency: {
+      n: latencies.length,
+      p50: latencies.length > 0 ? percentile(latencies, 0.5) : 0,
+      p95: latencies.length > 0 ? percentile(latencies, 0.95) : 0,
+      mean:
+        latencies.length > 0
+          ? latencies.reduce((a, b) => a + b, 0) / latencies.length
+          : 0,
+    },
+    cost: { ...cost, byProviderModel: Object.fromEntries(byPM) },
+  }
+}
+
+/** The subject set for agreement — at most one verdict per
+ *  (threadId, commentSha) pair; journal order is append order, so the
+ *  last write stands. Verdicts with no subject identity (smoke calls)
+ *  are each their own. */
+function dedupeSubjects(scoped: Verdict[]): Verdict[] {
+  const bySubject = new Map<string, Verdict>()
+  const subjectless: Verdict[] = []
+  for (const v of scoped) {
+    const tid = v.subject.threadId
+    if (tid === undefined) {
+      subjectless.push(v)
+      continue
+    }
+    bySubject.set(`${tid} ${v.subject.commentSha ?? ''}`, v)
+  }
+  return [...subjectless, ...bySubject.values()]
+}
+
 /** Score the journal — pure over rows, so tests and `bro judge stats`
  *  share the exact computation. */
 export function computeStats(rows: JournalRow[], opts: StatsOpts = {}): JudgeStats {
@@ -165,97 +325,17 @@ export function computeStats(rows: JournalRow[], opts: StatsOpts = {}): JudgeSta
     sinceMs !== undefined && Number.isFinite(sinceMs)
       ? inSet.filter((v) => Date.parse(v.ts) >= sinceMs)
       : inSet
-
-  // at most one verdict per (threadId, commentSha) pair — journal order
-  // is append order, so the last write is the verdict that stood
-  const bySubject = new Map<string, Verdict>()
-  const subjects: Verdict[] = []
-  for (const v of scoped) {
-    const tid = v.subject.threadId
-    if (tid === undefined) {
-      subjects.push(v) // no subject identity — every call counts
-      continue
-    }
-    const key = `${tid}${v.subject.commentSha ?? ''}`
-    const prev = bySubject.get(key)
-    if (prev === undefined) {
-      bySubject.set(key, v)
-      subjects.push(v)
-    } else {
-      bySubject.set(key, v)
-      subjects[subjects.indexOf(prev)] = v
-    }
-  }
-
-  const stats: JudgeStats = {
+  const subjects = dedupeSubjects(scoped)
+  const { latency, cost } = tallyCalls(scoped)
+  const scored = scoreSubjects(subjects, dispositions)
+  return {
     verdicts: scoped.length,
     excluded: all.length - inSet.length,
     deduped: scoped.length - subjects.length,
-    agreement: { n: 0, agreed: 0, matrix: {}, byDecider: {}, unscored: 0 },
-    blockingProxy: { n: 0, agreed: 0, unscored: 0 },
-    calibration: CALIBRATION_BUCKETS.map(([, , bucket]) => ({ bucket, n: 0, agreed: 0 })),
-    latency: { n: 0, p50: 0, p95: 0, mean: 0 },
-    cost: { n: 0, noCost: 0, total: 0, mean: 0, byProviderModel: {} },
+    ...scored,
+    latency,
+    cost,
   }
-
-  const latencies: number[] = []
-  for (const v of subjects) {
-    latencies.push(v.latencyMs)
-    if (v.costUsd !== undefined) {
-      stats.cost.n += 1
-      stats.cost.total += v.costUsd
-      const key = providerModel(v)
-      const pm = (stats.cost.byProviderModel[key] ??= { n: 0, total: 0, mean: 0 })
-      pm.n += 1
-      pm.total += v.costUsd
-    } else {
-      stats.cost.noCost += 1
-    }
-
-    const outcome = findOutcome(v, dispositions)
-    const action = v.answers.action
-    if (action?.type === 'choice') {
-      if (outcome === undefined || ACTION_FOR_OUTCOME[outcome] === undefined) {
-        stats.agreement.unscored += 1
-      } else {
-        const agreed = ACTION_FOR_OUTCOME[outcome] === action.choice
-        bump(stats.agreement, agreed)
-        const row = (stats.agreement.matrix[action.choice] ??= {})
-        row[outcome] = (row[outcome] ?? 0) + 1
-        bump((stats.agreement.byDecider[action.decidedBy] ??= { n: 0, agreed: 0 }), agreed)
-        bump(
-          stats.calibration.find((b) => b.bucket === bucketFor(action.confidence))!,
-          agreed
-        )
-      }
-    }
-
-    const bc = v.answers.blocks_correctness
-    if (bc?.type === 'noul') {
-      const truth = outcome !== undefined ? BLOCKING_FOR_OUTCOME[outcome] : undefined
-      if (truth === undefined) {
-        stats.blockingProxy.unscored += 1
-      } else {
-        bump(stats.blockingProxy, bc.noul >= 0.5 === truth)
-      }
-    }
-  }
-
-  latencies.sort((a, b) => a - b)
-  stats.latency = {
-    n: latencies.length,
-    p50: latencies.length > 0 ? percentile(latencies, 0.5) : 0,
-    p95: latencies.length > 0 ? percentile(latencies, 0.95) : 0,
-    mean:
-      latencies.length > 0
-        ? latencies.reduce((a, b) => a + b, 0) / latencies.length
-        : 0,
-  }
-  stats.cost.mean = stats.cost.n > 0 ? stats.cost.total / stats.cost.n : 0
-  for (const pm of Object.values(stats.cost.byProviderModel)) {
-    pm.mean = pm.n > 0 ? pm.total / pm.n : 0
-  }
-  return stats
 }
 
 const pct = (t: Tally): string => (t.n > 0 ? `${((100 * t.agreed) / t.n).toFixed(1)}%` : '—')
@@ -265,57 +345,40 @@ const usd = (v: number): string => `$${v.toFixed(4)}`
  *  outcome), p50 latency <1s, mean cost <$0.01 (spec §success
  *  metrics). Insufficient sample reports 'no data', not a pass. */
 function thresholdLine(s: JudgeStats): string {
-  const parts: string[] = []
-  parts.push(
+  const agreement =
     s.agreement.n === 0
       ? 'agreement no-data'
       : `agreement ${pct(s.agreement)} ${s.agreement.agreed / s.agreement.n >= 0.85 ? '≥' : '<'} 85%`
-  )
-  parts.push(
+  const latency =
     s.latency.n === 0
       ? 'latency no-data'
       : `p50 ${Math.round(s.latency.p50)}ms ${s.latency.p50 < 1000 ? '<' : '≥'} 1s`
-  )
-  parts.push(
+  const cost =
     s.cost.n === 0
       ? 'cost no-data'
       : `mean ${usd(s.cost.mean)} ${s.cost.mean < 0.01 ? '<' : '≥'} $0.01`
-  )
-  return `thresholds: ${parts.join(' · ')}`
+  return `thresholds: ${[agreement, latency, cost].join(' · ')}`
 }
 
-/** Text report — compact, monospace-safe; --json carries the same
- *  JudgeStats structure for scripting. */
-export function formatStats(s: JudgeStats, opts: StatsOpts = {}): string {
-  const lines: string[] = []
-  const scope = [
-    `${s.verdicts} verdicts${opts.replay === true ? ' (replay)' : ''}`,
-    opts.since !== undefined ? `since ${opts.since}` : undefined,
-    s.excluded > 0 ? `${s.excluded} ${opts.replay === true ? 'live' : 'replay'} excluded` : undefined,
-    s.deduped > 0 ? `${s.deduped} deduped` : undefined,
-  ]
-    .filter(Boolean)
-    .join(' · ')
-  lines.push(`judge stats — ${scope}`)
-  lines.push('')
-
-  lines.push(
+function agreementLines(s: JudgeStats): string[] {
+  const head =
     `agreement (action vs outcome): ${pct(s.agreement)} — ${s.agreement.agreed}/${s.agreement.n}` +
-      (s.agreement.unscored > 0 ? ` · ${s.agreement.unscored} unscored (no outcome)` : '')
-  )
+    (s.agreement.unscored > 0 ? ` · ${s.agreement.unscored} unscored (no outcome)` : '')
   const outcomes = [
     ...new Set(Object.values(s.agreement.matrix).flatMap((r) => Object.keys(r))),
-  ].sort()
-  const actions = Object.keys(s.agreement.matrix).sort()
+  ].sort((a, b) => a.localeCompare(b))
+  const actions = Object.keys(s.agreement.matrix).sort((a, b) => a.localeCompare(b))
+  const lines = [head]
   if (actions.length > 0) {
     const w = Math.max(7, ...actions.map((a) => a.length))
-    lines.push(`  ${'predicted'.padEnd(w)}  ${outcomes.map((o) => o.padStart(8)).join('')}`)
-    for (const a of actions) {
-      const row = s.agreement.matrix[a]!
-      lines.push(
-        `  ${a.padEnd(w)}  ${outcomes.map((o) => String(row[o] ?? 0).padStart(8)).join('')}`
-      )
-    }
+    const header = `  ${'predicted'.padEnd(w)}  ${outcomes.map((o) => o.padStart(8)).join('')}`
+    const rows = actions.map(
+      (a) =>
+        `  ${a.padEnd(w)}  ${outcomes
+          .map((o) => String(s.agreement.matrix[a]![o] ?? 0).padStart(8))
+          .join('')}`
+    )
+    lines.push(header, ...rows)
   }
   const deciders = Object.entries(s.agreement.byDecider)
   if (deciders.length > 0) {
@@ -325,35 +388,53 @@ export function formatStats(s: JudgeStats, opts: StatsOpts = {}): string {
         .join(' · ')}`
     )
   }
-  lines.push('')
+  return lines
+}
 
-  lines.push(
-    `blocks_correctness (proxy-scored — does not count toward the bar): ${pct(s.blockingProxy)} — ${s.blockingProxy.agreed}/${s.blockingProxy.n}` +
-      (s.blockingProxy.unscored > 0 ? ` · ${s.blockingProxy.unscored} unscored` : '')
-  )
-  lines.push('')
-
-  lines.push('calibration (confidence × agreement):')
-  for (const b of s.calibration) {
-    lines.push(`  ${b.bucket}  n=${b.n}  ${pct(b)}`)
-  }
-  lines.push('')
-
-  lines.push(
-    `latency: n=${s.latency.n} p50=${Math.round(s.latency.p50)}ms p95=${Math.round(s.latency.p95)}ms mean=${Math.round(s.latency.mean)}ms`
-  )
+function costLines(s: JudgeStats): string[] {
   const costTail = s.cost.noCost > 0 ? ` · ${s.cost.noCost} calls without cost data` : ''
-  lines.push(
-    `cost: n=${s.cost.n} total=${usd(s.cost.total)} mean=${usd(s.cost.mean)}${costTail}`
-  )
+  const lines = [
+    `latency: n=${s.latency.n} p50=${Math.round(s.latency.p50)}ms p95=${Math.round(s.latency.p95)}ms mean=${Math.round(s.latency.mean)}ms`,
+    `cost: n=${s.cost.n} total=${usd(s.cost.total)} mean=${usd(s.cost.mean)}${costTail}`,
+  ]
   const pm = Object.entries(s.cost.byProviderModel).sort((a, b) => b[1].total - a[1].total)
-  if (pm.length > 0) {
-    lines.push('  per provider/model:')
-    for (const [k, t] of pm) {
-      lines.push(`    ${k}  n=${t.n} total=${usd(t.total)} mean=${usd(t.mean)}`)
-    }
+  if (pm.length === 0) {
+    return lines
   }
-  lines.push('')
-  lines.push(thresholdLine(s))
-  return lines.join('\n')
+  return [
+    ...lines,
+    '  per provider/model:',
+    ...pm.map(([k, t]) => `    ${k}  n=${t.n} total=${usd(t.total)} mean=${usd(t.mean)}`),
+  ]
+}
+
+/** Text report — compact, monospace-safe; --json carries the same
+ *  JudgeStats structure for scripting. */
+export function formatStats(s: JudgeStats, opts: StatsOpts = {}): string {
+  const scope = [
+    `${s.verdicts} verdicts${opts.replay === true ? ' (replay)' : ''}`,
+    opts.since !== undefined ? `since ${opts.since}` : undefined,
+    s.excluded > 0
+      ? `${s.excluded} ${opts.replay === true ? 'live' : 'replay'} excluded`
+      : undefined,
+    s.deduped > 0 ? `${s.deduped} deduped` : undefined,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  const proxyTail =
+    s.blockingProxy.unscored > 0 ? ` · ${s.blockingProxy.unscored} unscored` : ''
+  const sections = [
+    [`judge stats — ${scope}`],
+    agreementLines(s),
+    [
+      `blocks_correctness (proxy-scored — does not count toward the bar): ${pct(s.blockingProxy)} — ${s.blockingProxy.agreed}/${s.blockingProxy.n}${proxyTail}`,
+    ],
+    [
+      'calibration (confidence × agreement):',
+      ...s.calibration.map((b) => `  ${b.bucket}  n=${b.n}  ${pct(b)}`),
+    ],
+    costLines(s),
+    [thresholdLine(s)],
+  ]
+  return sections.map((sec) => sec.join('\n')).join('\n\n') + '\n'
 }

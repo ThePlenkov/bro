@@ -207,6 +207,20 @@ async function decide(argv: string[]): Promise<void> {
 /** `bro judge stats` — reads only: the journal is the input, no
  *  backend is touched, so no auth and no connector resolution. */
 function stats(argv: string[]): void {
+  const STATS_FLAGS = new Set(['--json', '--replay'])
+  const unknown: string[] = []
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i]!
+    if (a === '--since') {
+      i += 1 // consumes its value
+    } else if (!STATS_FLAGS.has(a) && !a.startsWith('--since=')) {
+      unknown.push(a)
+    }
+  }
+  if (unknown.length > 0) {
+    console.error(`error: unknown stats option(s): ${unknown.join(', ')}`)
+    process.exit(2)
+  }
   const since = flag(argv, '--since')
   const asJson = argv.includes('--json')
   const replay = argv.includes('--replay')

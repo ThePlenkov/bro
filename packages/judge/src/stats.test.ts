@@ -75,15 +75,36 @@ describe('computeStats', () => {
     assert.equal(s.verdicts, 3)
   })
 
-  test('verdict.outcome wins; dispositions join by threadId + commentSha', () => {
+  test('verdict.outcome wins over a conflicting disposition; dispositions join by threadId + commentSha', () => {
     const rows: JournalRow[] = [
       verdict({ subject: { threadId: 'T1', commentSha: 'a' }, outcome: 'fixed' }),
       verdict({ subject: { threadId: 'T2', commentSha: 'b' } }),
       verdict({ subject: { threadId: 'T2', commentSha: 'c' } }),
+      disp('T1', 'deferred', 'a'), // contradicts the verdict's own outcome — loses
       disp('T2', 'deferred', 'b'), // joins only the matching commentSha
     ]
     const s = computeStats(rows)
     assert.equal(s.agreement.n, 2) // T1 (own outcome) + T2/b
+    assert.equal(s.agreement.matrix.resolve?.fixed, 1) // T1 scored as fixed, not deferred
+    assert.equal(s.agreement.matrix.resolve?.deferred, 1) // T2/b
+  })
+
+  test('journal-controlled keys cannot reach Object.prototype', () => {
+    const rows: JournalRow[] = [
+      verdict({
+        subject: { threadId: 'T1' },
+        answers: answers({ action: ['__proto__', 0.9, '__proto__'] }),
+      }),
+      disp('T1', '__proto__'), // unknown outcome → unscored, no pollution
+      verdict({ subject: { threadId: 'T2' } }),
+      disp('T2', 'fixed'),
+    ]
+    const s = computeStats(rows)
+    assert.equal(s.agreement.unscored, 1)
+    assert.equal(s.agreement.n, 1)
+    const protoKey = '__proto__'
+    assert.equal(Object.keys(s.agreement.matrix).includes(protoKey), false)
+    assert.equal(({} as Record<string, unknown>).polluted, undefined)
   })
 
   test('a moved commentSha does not join the old disposition', () => {
@@ -114,6 +135,7 @@ describe('computeStats', () => {
     assert.equal(s.deduped, 1)
     assert.equal(s.agreement.n, 1)
     assert.equal(s.agreement.agreed, 1) // latest said resolve, outcome fixed
+    assert.equal(s.latency.n, 2) // per-call metrics count every decide()
   })
 
   test('replay rows stay out of live stats; --replay scores them', () => {
