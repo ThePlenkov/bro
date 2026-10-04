@@ -227,6 +227,20 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     else if (pos[1] === 'release') jsonOut({ released: true })
     else if (pos[1] !== 'create') fail('merge-slot ' + pos[1])
     break
+  case 'kv': {
+    // the learn store's surface — a flat {key: value} map beside rows
+    db.kv = db.kv || {}
+    const sub = pos[1]
+    if (sub === 'set') { db.kv[pos[2]] = pos[3]; save(db) }
+    else if (sub === 'get') {
+      if (db.kv[pos[2]] === undefined) { console.error(pos[2] + ' (not set)'); process.exit(1) }
+      console.log(db.kv[pos[2]])
+    }
+    else if (sub === 'clear') { delete db.kv[pos[2]]; save(db) }
+    else if (sub === 'list') { jsonOut(db.kv) }
+    else fail('kv ' + sub)
+    break
+  }
   case 'dep':
     jsonOut([])
     break
