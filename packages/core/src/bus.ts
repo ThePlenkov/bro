@@ -51,6 +51,11 @@ export const BUS_TIMEOUT_MS = 2_000
  *  this design refuses to create. */
 export const BUS_RING_LIMIT = 10_000
 
+/** How much a cursorless probe catches up: the newest slice of the ring,
+ *  not all of it. A hook runs on every event, so an unbounded catch-up
+ *  would turn a 10k ring into 10k lines per hook. */
+export const BUS_PROBE_LIMIT = 64
+
 /** A slow subscriber is dropped rather than buffered without bound —
  *  `writableLength` past this and the event is skipped, with a `gap`
  *  frame before the next delivered one so the consumer knows to
@@ -686,7 +691,7 @@ export interface BusProbeResult {
  *  throws is a critical finding per REVIEW.md. */
 export async function busProbe(
   socketPath: string,
-  opts: { since?: number; windowMs?: number } = {}
+  opts: { since?: number; windowMs?: number; limit?: number } = {}
 ): Promise<BusProbeResult> {
   const windowMs = opts.windowMs ?? 250
   const events: BusEnvelope[] = []
@@ -715,5 +720,13 @@ export async function busProbe(
     timer.unref?.()
   })
   sub.close()
+  // With no cursor the probe catches up from the start of the ring, and
+  // an unbounded ring would hand a hook run thousands of lines. Keep the
+  // newest slice and say so: `gapped` already means "you are not seeing
+  // everything, re-derive", which is exactly what truncation is.
+  const limit = opts.limit ?? BUS_PROBE_LIMIT
+  if (opts.since === undefined && events.length > limit) {
+    return { events: events.slice(-limit), gapped: true }
+  }
   return { events, gapped }
 }

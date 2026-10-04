@@ -371,6 +371,24 @@ describe('probe collects what is waiting', () => {
     })
   })
 
+  test('a cursorless probe is bounded and admits the truncation', async () => {
+    await withBroker(async (_broker, socketPath) => {
+      for (let i = 1; i <= 10; i += 1) {
+        await busPublish(socketPath, { topic: 't', kind: 'k', key: `e${String(i)}` })
+      }
+      // A hook run must not inherit the whole ring; the newest slice is
+      // what "what happened" means, and gapped says the rest was cut.
+      const result = await busProbe(socketPath, { windowMs: 120, limit: 3 })
+      assert.deepEqual(result.events.map((e) => e.key), ['e8', 'e9', 'e10'])
+      assert.equal(result.gapped, true)
+
+      // An explicit cursor is the caller's own bound — never truncated.
+      const cursor = await busProbe(socketPath, { since: 1, windowMs: 120, limit: 3 })
+      assert.equal(cursor.events.length, 9)
+      assert.equal(cursor.gapped, false)
+    })
+  })
+
   test('a quiet broker yields nothing and stays quiet', async () => {
     await withBroker(async (_broker, socketPath) => {
       const result = await busProbe(socketPath, { windowMs: 80 })
