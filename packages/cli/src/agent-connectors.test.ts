@@ -14,6 +14,7 @@ import {
   agentRegistryPath,
   bdActor,
   patchAgentRegistry,
+  procStat,
   readAgentRegistry,
   SpawnError,
   AgentNotFound,
@@ -565,6 +566,12 @@ describe('tmux connector', () => {
     capabilities: { attach: true, respawn: true, supervisor: 'none' },
     entryChecks: (entry, info) => {
       assert.equal(entry.session, `bro-${info.id}`)
+      // pane_pid carries the identity pin native's child pid has — a
+      // recycled pid must not keep a dead session 'running' (bro-i5oq)
+      assert.equal(
+        entry.pidStart ?? null,
+        typeof entry.pid === 'number' ? (procStat(entry.pid)?.start ?? null) : null
+      )
     },
   })
 

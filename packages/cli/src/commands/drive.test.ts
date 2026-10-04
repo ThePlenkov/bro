@@ -504,6 +504,18 @@ describe('freshOccupancy', () => {
       assert.equal(same.agents.find((a) => a.molStep === 'fx-1')!.state, 'lost')
     })
   })
+
+  test('a registry read error degrades to the pass snapshot, never an error verdict (bro-yhfj)', () => {
+    const { root, main } = initRepo('bro-fresh-deg-')
+    inside(main, root, () => {
+      // agents.json as a directory → EISDIR — readAgentRegistry
+      // rethrows it like EACCES/EIO (degradation, not emptiness)
+      mkdirSync(join(main, '.git', 'bro', 'agents.json'), { recursive: true })
+      const known = [agent({ molStep: 'fx-1', id: 'native-a', state: 'lost', spawnedAt: 't' })]
+      const fresh = freshOccupancy(main, known)
+      assert.equal(fresh.agents.find((a) => a.molStep === 'fx-1')!.state, 'lost')
+    })
+  })
 })
 
 describe('fixerBeadFor', () => {
