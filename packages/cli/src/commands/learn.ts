@@ -11,6 +11,7 @@
  *   show <id>
  *   forget <id>
  *   capture [--source drill|retro|act|mol|all] [--mol ID] [--dry-run] [--json]
+ *   probe <question> [--lesson "…" --on … --match-… …] [--session ID] [--json]
  */
 import { checkBeads } from '@broject/core'
 import {
@@ -26,9 +27,19 @@ import {
   lessonId,
   lessonIds,
   listLessons,
+  probeQuestion,
+  probeTrigger,
   putLesson,
+  recordProbeAnswer,
 } from '@broject/learn'
-import type { CaptureSource, Evidence, HookEvent, Lesson } from '@broject/learn'
+import type {
+  CaptureSource,
+  Evidence,
+  HookEvent,
+  Lesson,
+  LessonTrigger,
+  TriggerMatch,
+} from '@broject/learn'
 import { flag, flagAll, positionals } from './args.ts'
 
 function usage(exitCode = 1): never {
@@ -41,6 +52,9 @@ Commands:
   forget   Remove a lesson: bro learn forget learn-<slug>
   capture  Harvest finished artifacts into lessons
            [--source drill|retro|act|mol|all] [--mol ID] [--dry-run] [--json]
+  probe    Store-first query: bro learn probe <question>
+           hit → print ranked lessons; miss → question + candidates, gap logged
+           phase 2 stores the answer: --lesson "…" [--on E] [--match-… …]
 
 add flags:
   --lesson TEXT        the rule — imperative, quotable as one line (required)
@@ -51,7 +65,14 @@ add flags:
   --match-tools V      tool names in the trace (repeatable)
   --match-errors       fire when the trace shows a failed tool landing
   --budget N           max fires per session (default 1)
-  --evidence K:R       where it was learned, repeatable — kind: ${EVIDENCE_KINDS.join(' | ')} (required ≥1)`)
+  --evidence K:R       where it was learned, repeatable — kind: ${EVIDENCE_KINDS.join(' | ')} (required ≥1)
+
+probe flags:
+  --session ID         attribute the probe to a session (default: BRO_SESSION_ID,
+                       else the newest live session marker, else 'cli')
+  --json               machine-readable phase-1 result
+  --lesson/--on/--match-…/--budget/--evidence  phase 2 — as add, but
+                       --evidence is optional (session + question auto-record)`)
   process.exit(exitCode)
 }
 
@@ -67,6 +88,7 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
   '--source',
   '--confidence',
   '--mol',
+  '--session',
 ])
 
 /** Options each verb accepts — a `--name=value` spelling counts as the
@@ -87,6 +109,19 @@ const KNOWN_FLAGS: Record<string, ReadonlySet<string>> = {
   show: new Set(),
   forget: new Set(),
   capture: new Set(['--source', '--mol', '--dry-run', '--json']),
+  probe: new Set([
+    '--lesson',
+    '--on',
+    '--match-terms',
+    '--match-commands',
+    '--match-paths',
+    '--match-tools',
+    '--match-errors',
+    '--budget',
+    '--evidence',
+    '--session',
+    '--json',
+  ]),
 }
 
 const learnPositionals = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
@@ -140,6 +175,32 @@ function warnSkipped(skipped: { key: string; problems: string[] }[]): void {
   }
 }
 
+/** The --match-* cluster, shared by add and probe's phase 2. */
+function matchFlags(argv: string[]): TriggerMatch {
+  const terms = flagAll(argv, '--match-terms')
+  const commands = flagAll(argv, '--match-commands')
+  const paths = flagAll(argv, '--match-paths')
+  const tools = flagAll(argv, '--match-tools')
+  return {
+    ...(terms.length > 0 ? { terms } : {}),
+    ...(commands.length > 0 ? { commands } : {}),
+    ...(paths.length > 0 ? { paths } : {}),
+    ...(tools.length > 0 ? { tools } : {}),
+    ...(argv.some((a) => a === '--match-errors' || a.startsWith('--match-errors='))
+      ? { errors: true }
+      : {}),
+  }
+}
+
+function budgetFlag(argv: string[]): number | undefined {
+  const raw = flag(argv, '--budget')
+  const budget = raw === undefined ? undefined : Number(raw)
+  if (budget !== undefined && (!Number.isInteger(budget) || budget < 1)) {
+    fail('--budget must be a positive integer')
+  }
+  return budget
+}
+
 function cmdAdd(argv: string[]): void {
   const text = flag(argv, '--lesson')
   if (text === undefined || text.trim() === '') {
@@ -153,24 +214,8 @@ function cmdAdd(argv: string[]): void {
   if (ev.length === 0) {
     fail('--evidence is required — a lesson must cite where it was learned')
   }
-  const budgetRaw = flag(argv, '--budget')
-  const budget = budgetRaw === undefined ? undefined : Number(budgetRaw)
-  if (budget !== undefined && (!Number.isInteger(budget) || budget < 1)) {
-    fail('--budget must be a positive integer')
-  }
-  const terms = flagAll(argv, '--match-terms')
-  const commands = flagAll(argv, '--match-commands')
-  const paths = flagAll(argv, '--match-paths')
-  const tools = flagAll(argv, '--match-tools')
-  const match = {
-    ...(terms.length > 0 ? { terms } : {}),
-    ...(commands.length > 0 ? { commands } : {}),
-    ...(paths.length > 0 ? { paths } : {}),
-    ...(tools.length > 0 ? { tools } : {}),
-    ...(argv.some((a) => a === '--match-errors' || a.startsWith('--match-errors='))
-      ? { errors: true }
-      : {}),
-  }
+  const budget = budgetFlag(argv)
+  const match = matchFlags(argv)
   // the contract is one imperative line — a pasted multi-line rule
   // would spill `list` output into continuation rows
   const rule = text.trim().replace(/\s+/g, ' ')
@@ -349,6 +394,89 @@ function cmdCapture(argv: string[]): void {
   }
 }
 
+/**
+ * `probe <question>` — the two-phase query (spec §Probe).
+ * Phase 1 ranks stored lessons against the question's terms: hits print
+ * ranked and exit 0 (the knowledge was already paid for). A miss prints
+ * the question plus gathered candidates and logs it to the fired set as
+ * an open gap — exit 1 (grep semantics: found / not found / 2 = usage).
+ * `--lesson` switches to phase 2: store the distilled answer as a
+ * `source: probe` lesson; evidence auto-records the probe session and
+ * the question itself, explicit --evidence adds citations on top.
+ */
+function cmdProbe(argv: string[]): void {
+  const pos = learnPositionals(argv)
+  const question = pos.join(' ').trim()
+  if (question === '') {
+    fail(`usage: bro learn probe <question> [--lesson "…" --on … --match-… …]`)
+  }
+  const sessionId = flag(argv, '--session')
+  const answer = flag(argv, '--lesson')
+  checkBeads()
+  if (answer === undefined) {
+    const res = probeQuestion(question, { ...(sessionId !== undefined ? { sessionId } : {}) })
+    warnSkipped(res.skipped)
+    if (boolFlag(argv, '--json')) {
+      console.log(JSON.stringify(res, null, 2))
+      process.exit(res.hits.length > 0 ? 0 : 1)
+    }
+    if (res.hits.length > 0) {
+      for (const h of res.hits) {
+        const l = h.lesson
+        console.log(`${l.id}\t${l.confidence}\t${l.source}\t${l.trigger.on.join(',')}\t${l.lesson}`)
+      }
+      return
+    }
+    console.log(`probe: ${res.question}`)
+    for (const c of res.candidates) {
+      console.log(`  ${c}`)
+    }
+    console.log(
+      'no stored lesson — investigate, then store the answer: ' +
+        `bro learn probe "${res.question}" --lesson "…"`
+    )
+    process.exit(1)
+  }
+  // phase 2 — trigger: explicit flags win; absent them the question's
+  // own terms index the answer (the question IS the trigger)
+  const on = hookEvents(flagAll(argv, '--on'))
+  const match = matchFlags(argv)
+  const budget = budgetFlag(argv)
+  let trigger: LessonTrigger | undefined
+  if (on.length > 0) {
+    trigger = {
+      on,
+      ...(Object.keys(match).length > 0 ? { match } : {}),
+      ...(budget !== undefined ? { budget } : {}),
+    }
+  } else if (Object.keys(match).length > 0 || budget !== undefined) {
+    // structured keys still evaluate on these events — both probes'
+    // contexts carry a trace tail
+    trigger = {
+      on: ['session-start', 'prompt-submit'],
+      ...(Object.keys(match).length > 0 ? { match } : {}),
+      ...(budget !== undefined ? { budget } : {}),
+    }
+  } else {
+    trigger = probeTrigger(question)
+    if (trigger === undefined) {
+      fail('probe needs a trigger — give --on/--match-* or a question with usable terms')
+    }
+  }
+  const extra = evidence(flagAll(argv, '--evidence'))
+  const res = recordProbeAnswer({
+    question,
+    lesson: answer,
+    trigger,
+    evidence: extra,
+    ...(sessionId !== undefined ? { sessionId } : {}),
+  })
+  if (res.merged) {
+    console.error(`merged evidence into existing ${res.lesson.id}`)
+  }
+  console.log(res.lesson.id)
+}
+
 export function runLearnCommand(argv: string[]): void {
   const [cmd, ...rest] = argv
   if (cmd === undefined || cmd === '--help' || cmd === '-h') {
@@ -383,6 +511,9 @@ export function runLearnCommand(argv: string[]): void {
       return
     case 'capture':
       cmdCapture(rest)
+      return
+    case 'probe':
+      cmdProbe(rest)
       return
   }
 }

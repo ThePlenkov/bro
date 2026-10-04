@@ -71,11 +71,11 @@ const SLASH_PATH_RE = /[\w@.*+-]+(?:\/[\w@.*+-]+)+\/?/g
 const FILE_RE =
   /\b[\w.-]+\.(?:ts|tsx|mts|cts|js|mjs|cjs|jsx|md|json|jsonc|toml|ya?ml|sh|py|rs|go|sql|lock|env|ini|cfg|txt)\b/g
 
-const TERM_RE = /[a-z][a-z0-9-]{3,}/g
+export const TERM_RE = /[a-z][a-z0-9-]{3,}/g
 
 /** Words too common to discriminate a prompt/context — a term that
  *  matches every session is a fire-on-everything trigger. */
-const TERM_STOPWORDS = new Set([
+export const TERM_STOPWORDS = new Set([
   'this', 'that', 'with', 'from', 'when', 'then', 'than', 'have', 'been',
   'were', 'will', 'would', 'should', 'could', 'about', 'into', 'over',
   'after', 'before', 'because', 'through', 'their', 'there', 'where',

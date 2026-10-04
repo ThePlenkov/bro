@@ -44,3 +44,18 @@ export type {
   CaptureSource,
   CaptureWrite,
 } from './capture.ts'
+export {
+  probeQuestion,
+  probeTerms,
+  probeTrigger,
+  rankLessons,
+  recordProbeAnswer,
+  resolveSessionId,
+} from './probe.ts'
+export type {
+  ProbeHit,
+  ProbeQuery,
+  ProbeQueryOptions,
+  RecordProbeOptions,
+  RecordProbeResult,
+} from './probe.ts'
