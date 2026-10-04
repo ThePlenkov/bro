@@ -64,6 +64,20 @@ describe('native scope() — the tool\u2019s explicit scope', () => {
     )
   })
 
+  test('a tab-separated comment drops; a # inside quotes is kept', () => {
+    withRepo(
+      (m) => {
+        seedSpec(m, 'b1', '---\nscope: src/x.ts\t# note\n---\n')
+        seedSpec(m, 'b2', '---\nscope: ["a #b.ts", c.ts]\n---\n')
+      },
+      (main) => {
+        const spec = specStore(main)
+        assert.deepEqual(spec.scope?.('b1'), ['src/x.ts'])
+        assert.deepEqual(spec.scope?.('b2'), ['a #b.ts', 'c.ts'])
+      }
+    )
+  })
+
   test('no frontmatter scope and no spec both return null', () => {
     withRepo(
       (m) => {
@@ -203,7 +217,7 @@ describe('resolveScope', () => {
     )
   })
 
-  test('a scope covering only its own spec file matches nothing', () => {
+  test('a scope covering only its own spec file audits nothing', () => {
     withRepo(
       (m) => {
         seedSpec(m, 'b1', '---\nscope:\n  - specs/b1.md\n---\n')
@@ -211,8 +225,31 @@ describe('resolveScope', () => {
       (main) => {
         assert.deepEqual(resolveScope(main, 'HEAD', 'b1', specStore(main)), {
           state: 'unverifiable',
-          reason: 'scope matches nothing',
+          reason: 'scope names only the spec file',
         })
+      }
+    )
+  })
+
+  test('a backslashed audited spec path still builds its exclusion', () => {
+    // Windows tree nodes carry `\` — the self-exclusion and the own
+    // comparison must speak git's `/`-form or they never match
+    withRepo(
+      (m) => {
+        seedSpec(m, 'b1', '')
+        mkdirSync(join(m, 'src'))
+        writeFileSync(join(m, 'src', 'a.ts'), 'x\n')
+      },
+      (main) => {
+        commit(main, 'work (b1)', { 'src/b.ts': 'y\n', 'specs/b1.md': '# v2\n' })
+        assert.deepEqual(
+          resolveScope(main, 'HEAD', 'b1', specStore(main), join('specs', 'b1.md').replace(/\//g, '\\')),
+          {
+            state: 'scoped',
+            via: 'commits',
+            pathspecs: [':(literal)src/b.ts', ':(exclude,literal)specs/b1.md'],
+          }
+        )
       }
     )
   })

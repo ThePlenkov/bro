@@ -7,6 +7,7 @@ import {
   BdCompatError,
   checkBeads,
   isBdCompatError,
+  isBdNotFound,
   probeBdCompat,
 } from './bd.ts'
 
@@ -151,6 +152,24 @@ describe('probeBdCompat', { skip: WIN32 }, () => {
       assert.match(c.storeErr ?? '', /database is locked/)
       assert.deepEqual(c.problems, [])
     })
+  })
+})
+
+describe('isBdNotFound', () => {
+  test('malformed thrown values are non-matches, never a throw', () => {
+    assert.equal(isBdNotFound(null), false)
+    assert.equal(isBdNotFound(undefined), false)
+    assert.equal(isBdNotFound('Issue b1 not found'), true)
+    assert.equal(isBdNotFound(new Error('Issue b1 not found')), true)
+    assert.equal(
+      isBdNotFound(
+        Object.assign(new Error('exit 1'), {
+          stdout: '{"error":"no issues found matching the provided IDs"}',
+        })
+      ),
+      true
+    )
+    assert.equal(isBdNotFound(new Error('database is locked')), false)
   })
 })
 

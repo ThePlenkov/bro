@@ -4,10 +4,29 @@
  */
 import { spawnSync } from 'node:child_process'
 
+/** `git -C` must select the repo on argv alone — an inherited
+ *  GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR silently retargets the probe at
+ *  whatever repository the parent process was spawned inside (agent
+ *  envs carry them). GIT_INDEX_FILE stays: data-ref writes use it as a
+ *  private index. undefined for non-`-C` calls — inherit as usual. */
+const GIT_REPO_ENV = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR'] as const
+
+function repoEnv(args: string[]): NodeJS.ProcessEnv | undefined {
+  if (!args.includes('-C')) {
+    return undefined
+  }
+  const env = { ...process.env }
+  for (const k of GIT_REPO_ENV) {
+    delete env[k]
+  }
+  return env
+}
+
 export function git(args: string[]): string {
   const proc = spawnSync('git', args, { // NOSONAR — PATH lookup is the contract (same as gh/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
+    env: repoEnv(args),
   })
   if (proc.status !== 0) {
     throw new Error(`git ${args[0]} failed: ${(proc.stderr ?? '').trim()}`)
@@ -19,6 +38,7 @@ export function gitTry(args: string[]): { code: number; out: string; err: string
   const proc = spawnSync('git', args, { // NOSONAR — PATH lookup is the contract
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
+    env: repoEnv(args),
   })
   // status null = spawn failure or signal, not a real verdict —
   // callers read exit 1 as one, so surface git's own fatal code
@@ -71,9 +91,12 @@ export type GitLogStamp =
 
 /** `git log -1` over pathspecs — the newest commit on `ref` touching
  *  any of them. `follow` opts into rename-following (spec side: a
- *  renamed spec isn't freshly written); git only honours it for a
- *  single path, so the scope side never passes it. Pathspecs are argv
- *  entries verbatim — magic like `:(exclude…)` is the caller's. */
+ *  renamed spec isn't freshly written — `--diff-filter=r` drops the
+ *  pure-rename commit so the stamp is the last content write, not the
+ *  move; a rename that also rewrote content is R-classified and goes
+ *  with it); git only honours it for a single path, so the scope side
+ *  never passes it. Pathspecs are argv entries verbatim — magic like
+ *  `:(exclude…)` is the caller's. */
 export function gitLogStamp(
   dir: string,
   ref: string,
@@ -87,7 +110,7 @@ export function gitLogStamp(
   }
   const args = ['-C', dir, 'log', '-1', '--format=%H%x09%cI%x09%ct']
   if (opts?.follow === true) {
-    args.push('--follow')
+    args.push('--follow', '--diff-filter=r')
   }
   args.push('--end-of-options', ref, '--', ...pathspecs)
   const r = gitTry(args)
@@ -140,10 +163,12 @@ export interface GitLogPathRecord {
  *  default. null on git failure — the caller decides the honest state
  *  (unborn ref, bad ref). */
 export function gitLogPathRecords(dir: string, ref: string): GitLogPathRecord[] | null {
-  const proc = spawnSync('git', ['-C', dir, 'log', '--format=%x1e%H%x09%s', '-z', '--name-only', '--end-of-options', ref], { // NOSONAR — PATH lookup is the contract
+  const args = ['-C', dir, 'log', '--format=%x1e%H%x09%s', '-z', '--name-only', '--end-of-options', ref]
+  const proc = spawnSync('git', args, { // NOSONAR — PATH lookup is the contract
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
+    env: repoEnv(args),
   })
   if (proc.status !== 0) {
     return null

@@ -219,14 +219,36 @@ const unquote = (s: string): string => {
     : t
 }
 
-/** One YAML scalar: a ` #…` comment drops off a bare value (quoted
- *  values keep their #), then quotes strip. */
+/** Index where a YAML comment begins — a `#` at the head or after a
+ *  space/tab, outside quotes. -1 when the scalar runs to the end. */
+const commentStart = (t: string): number => {
+  let q = ''
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i]!
+    if (q !== '') {
+      if (q === '"' && ch === '\\') {
+        i++
+      } else if (ch === q) {
+        q = ''
+      }
+    } else if (ch === '"' || ch === "'") {
+      q = ch
+    } else if (ch === '#' && (i === 0 || t[i - 1] === ' ' || t[i - 1] === '\t')) {
+      return i
+    }
+  }
+  return -1
+}
+
+/** One YAML scalar: a ` #…` comment (space- or tab-separated, outside
+ *  quotes — `src/x.ts\t# note` drops its note) drops off a bare value;
+ *  quoted values keep their #. */
 const yamlScalar = (s: string): string => {
   const t = s.trim()
   if (t.startsWith('"') || t.startsWith("'")) {
     return unquote(t)
   }
-  const c = t.indexOf(' #')
+  const c = commentStart(t)
   return unquote(c === -1 ? t : t.slice(0, c))
 }
 

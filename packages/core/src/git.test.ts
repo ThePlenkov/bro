@@ -193,27 +193,53 @@ describe('gitLogStamp', () => {
     }
   })
 
-  test('a renamed spec still yields its newest touch, not none', () => {
+  test('a renamed spec stamps the last content write, not the move', () => {
     withRepo((dir) => {
-      commit(dir, 'spec', { 'specs/x.md': '# x\n' })
+      const written = commit(dir, 'spec', { 'specs/x.md': '# x\n' })
       mkdirSync(join(dir, 'specs', 'x'), { recursive: true })
       renameSync(join(dir, 'specs', 'x.md'), join(dir, 'specs', 'x', 'spec.md'))
       const renamed = commit(dir, 'move spec', {})
-      // `log -1` always surfaces the newest touch, so --follow can't be
-      // differentially observed here — the spec still mandates it. The
-      // checkable contract: the renamed path's stamp is the rename
-      // commit, and the pre-rename name reads that same commit as its
-      // last touch (the delete half of the rename) — never a throw
+      // --follow --diff-filter=r drops the pure-rename commit: a spec
+      // merely moved yesterday must not look freshly written
       const r = gitLogStamp(dir, 'HEAD', ['specs/x/spec.md'], { follow: true })
       if (r.state !== 'commit') {
         assert.fail(`expected commit, got ${JSON.stringify(r)}`)
       }
-      assert.equal(r.stamp.sha, renamed)
+      assert.equal(r.stamp.sha, written)
+      // without follow the rename commit is the path's last touch
       const old = gitLogStamp(dir, 'HEAD', ['specs/x.md'])
       if (old.state !== 'commit') {
         assert.fail(`expected commit, got ${JSON.stringify(old)}`)
       }
       assert.equal(old.stamp.sha, renamed)
+    })
+  })
+})
+
+describe('repo env sanitization', () => {
+  test('-C probes ignore an inherited GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR', () => {
+    withRepo((dir) => {
+      const other = makeRepo()
+      try {
+        const touched = commit(dir, 'code', { 'src/a.ts': 'a\n' })
+        const prev = { ...process.env }
+        process.env.GIT_DIR = join(other, '.git')
+        process.env.GIT_WORK_TREE = other
+        process.env.GIT_COMMON_DIR = join(other, '.git')
+        try {
+          const r = gitLogStamp(dir, 'HEAD', ['src/'])
+          if (r.state !== 'commit') {
+            assert.fail(`expected commit, got ${JSON.stringify(r)}`)
+          }
+          assert.equal(r.stamp.sha, touched)
+          assert.equal(gitIsShallow(dir), false)
+          assert.equal(gitDriftRef(dir), 'refs/heads/main')
+        } finally {
+          process.env = prev
+        }
+      } finally {
+        rmSync(other, { recursive: true, force: true })
+      }
     })
   })
 })

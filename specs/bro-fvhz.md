@@ -92,8 +92,8 @@ Honest-failure states — always a row, never a throw:
   file to date), shallow history (`git rev-parse --is-shallow-repository`
   — boundary commits masquerade as roots, so path-limited logs can
   attribute spec and scope to the same boundary commit and fake
-  `fresh`), git failure. Shallow is checked before any timestamp
-  comparison.
+  `fresh`), git failure. Shallow is checked before scope resolution or
+  any timestamp comparison.
 - `no-scope` — no frontmatter scope, no bead-id commits.
 - `fresh` — `spec-ts` wins the comparison above.
 - `STALE` — the scope commit is newer than the spec commit per the
