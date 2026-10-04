@@ -5,7 +5,8 @@
  * chat → typed answers), `judgeFacade()` — the primary→fallback
  * composition consumers call — and shadow mode: the verdict journal
  * (`<git-common>/bro/judge/verdicts.jsonl`) plus act/drive annotation.
- * Stats and dogfood replay land in their own milestones.
+ * `computeStats`/`formatStats` back `bro judge stats`; dogfood replay
+ * lands in its own milestone.
  */
 export { judgeSection, DEFAULT_JUDGE_CONFIG } from './config.ts'
 export type { JudgeConfig, JudgeLlmConfig } from './config.ts'
@@ -31,3 +32,5 @@ export {
   threadState,
 } from './shadow.ts'
 export type { AnnotateOpts, AnnotateResult } from './shadow.ts'
+export { computeStats, formatStats } from './stats.ts'
+export type { JudgeStats, StatsOpts } from './stats.ts'

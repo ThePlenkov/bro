@@ -3,7 +3,13 @@
  * connector's smoke path (spec: specs/sessions/bro-f4ot.2-judge.md,
  * milestone bro-f4ot.2.2). One decide() call over the resolved chain
  * (primary → `judge.fallback` escalation), printing answers, model,
- * latency, and usage. stats/replay land in later milestones.
+ * latency, and usage.
+ *
+ * `bro judge stats [--since <iso>] [--json]` — the shadow report
+ * (milestone bro-f4ot.2.4): agreement matrix (judge action vs recorded
+ * outcome), calibration buckets, latency/cost — including spend per
+ * provider+model — over the verdict journal. Replay lands in its own
+ * milestone.
  *
  * The smoke test exercises the connector, not the mode gate — it runs
  * whatever `judge.mode` says; `mode` governs consumers (annotation),
@@ -12,7 +18,14 @@
 import { readFileSync } from 'node:fs'
 import { ensureAuth, JudgeUnavailable } from '@broject/core'
 import type { DecideResult, JudgeAnswer, JudgeQuestion } from '@broject/core'
-import { appendRow, judgeConfig, judgeFacade } from '@broject/judge'
+import {
+  appendRow,
+  computeStats,
+  formatStats,
+  judgeConfig,
+  judgeFacade,
+  readJournal,
+} from '@broject/judge'
 import { flag } from './args.ts'
 import { loadBroConfig } from '../plugins.ts'
 
@@ -191,16 +204,73 @@ async function decide(argv: string[]): Promise<void> {
   }
 }
 
+/** ISO-8601 date or datetime — `YYYY-MM-DD` with optional `T` time that
+ *  must carry a `Z`/offset so parsing is host-TZ independent. */
+const ISO_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2}))?$/
+const isIso = (v: string): boolean => {
+  if (!ISO_RE.test(v) || !Number.isFinite(Date.parse(v))) return false
+  // Date.parse normalizes out-of-range days ('2025-02-31' -> Mar 3) —
+  // reject dates that do not exist on the calendar
+  const year = Number(v.slice(0, 4))
+  const month = Number(v.slice(5, 7))
+  const day = Number(v.slice(8, 10))
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+  return day <= (daysInMonth[month - 1] ?? 0)
+}
+
+/** `bro judge stats` — reads only: the journal is the input, no
+ *  backend is touched, so no auth and no connector resolution. */
+function stats(argv: string[]): void {
+  const STATS_FLAGS = new Set(['--json', '--replay'])
+  const unknown: string[] = []
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i]!
+    if (a === '--since') {
+      i += 1 // consumes its value
+    } else if (!STATS_FLAGS.has(a) && !a.startsWith('--since=')) {
+      unknown.push(a)
+    }
+  }
+  if (unknown.length > 0) {
+    console.error(`error: unknown stats option(s): ${unknown.join(', ')}`)
+    process.exit(2)
+  }
+  const since = flag(argv, '--since')
+  const asJson = argv.includes('--json')
+  const replay = argv.includes('--replay')
+  // ISO shape required — Date.parse also accepts locale strings like
+  // 'January 1, 2025' that resolve to local midnight, so the same input
+  // would filter differently per time zone
+  if (since !== undefined && !isIso(since)) {
+    console.error(`error: --since must be an ISO timestamp — got ${JSON.stringify(since)}`)
+    process.exit(2)
+  }
+  const s = computeStats(readJournal(process.cwd()), { since, replay })
+  if (asJson) {
+    console.log(JSON.stringify(s, null, 2))
+    return
+  }
+  console.log(formatStats(s, { since, replay }))
+}
+
+const JUDGE_USAGE =
+  'usage: bro judge <decide|stats>\n' +
+  '  bro judge decide --state <file|-> --questions <file> [--connector <name>] [--json]\n' +
+  '  bro judge stats [--since <iso>] [--json] [--replay]'
+
 export async function runJudgeCommand(argv: string[]): Promise<void> {
   const sub = argv[0]
   if (sub === 'decide') {
     await decide(argv.slice(1))
     return
   }
+  if (sub === 'stats') {
+    stats(argv.slice(1))
+    return
+  }
   console.error(
-    sub === undefined
-      ? 'usage: bro judge decide --state <file|-> --questions <file> [--connector <name>] [--json]'
-      : `unknown judge subcommand: ${sub} — available: decide`
+    sub === undefined ? JUDGE_USAGE : `unknown judge subcommand: ${sub}\n${JUDGE_USAGE}`
   )
   process.exit(2)
 }

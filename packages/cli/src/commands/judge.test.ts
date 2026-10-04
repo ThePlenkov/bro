@@ -1,10 +1,12 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerConnector } from '@broject/core'
 import type { DecideResult, JudgeFacade } from '@broject/core'
+import { appendRow } from '@broject/judge'
 import { loadQuestions, loadState, runJudgeCommand } from './judge.ts'
 
 class Exit extends Error {
@@ -161,9 +163,84 @@ describe('bro judge decide', () => {
   })
 
   test('unknown subcommand exits 2', async () => {
-    const r = await capture(() => runJudgeCommand(['stats']))
+    const r = await capture(() => runJudgeCommand(['bogus']))
     assert.equal(r.code, 2)
     assert.match(r.err.join('\n'), /unknown judge subcommand/)
+  })
+})
+
+describe('bro judge stats', () => {
+  const inDir = async <T>(dir: string, fn: () => Promise<T>): Promise<T> => {
+    const cwd = process.cwd()
+    process.chdir(dir)
+    try {
+      return await fn()
+    } finally {
+      process.chdir(cwd)
+    }
+  }
+
+  test('empty journal renders a zeroed report, exit 0', async () => {
+    const fx = tmpdirWith('bro-judge-stats-')
+    try {
+      const r = await capture(() => inDir(fx.dir, () => runJudgeCommand(['stats'])))
+      assert.equal(r.code, 0)
+      assert.match(r.out.join('\n'), /judge stats — 0 verdicts/)
+    } finally {
+      fx.done()
+    }
+  })
+
+  test('reads the repo journal; --json prints the stats object', async () => {
+    const fx = tmpdirWith('bro-judge-stats-')
+    try {
+      execFileSync('git', ['init', '-q', fx.dir])
+      appendRow(fx.dir, {
+        ts: '2026-01-01T00:00:00Z',
+        kind: 'act-thread',
+        subject: { pr: 1, threadId: 'T1' },
+        questions: {},
+        answers: {
+          action: {
+            type: 'choice',
+            choice: 'resolve',
+            probabilities: {},
+            confidence: 0.9,
+            decidedBy: 'jev',
+          },
+        },
+        model: 'jev-1.13.0',
+        latencyMs: 120,
+        costUsd: 0.001,
+      })
+      const r = await capture(() =>
+        inDir(fx.dir, () => runJudgeCommand(['stats', '--json']))
+      )
+      assert.equal(r.code, 0)
+      const parsed = JSON.parse(r.out.join('\n')) as { verdicts: number }
+      assert.equal(parsed.verdicts, 1)
+    } finally {
+      fx.done()
+    }
+  })
+
+  test('a bad --since exits 2 — including Date.parse-parsable non-ISO', async () => {
+    for (const bad of [
+      'not-a-date',
+      'January 1, 2025',
+      '2025-02-31', // Date.parse normalizes to Mar 3 — not a real date
+      '2025-01-01T00:00', // no Z/offset: parses in host TZ
+    ]) {
+      const r = await capture(() => runJudgeCommand(['stats', '--since', bad]))
+      assert.equal(r.code, 2)
+      assert.match(r.err.join('\n'), /--since must be an ISO timestamp/)
+    }
+  })
+
+  test('unknown options exit 2 instead of silently reporting', async () => {
+    const r = await capture(() => runJudgeCommand(['stats', '--replai']))
+    assert.equal(r.code, 2)
+    assert.match(r.err.join('\n'), /unknown stats option/)
   })
 })
 
