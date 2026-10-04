@@ -212,8 +212,12 @@ export async function annotateThreads(
         res = await opts.judge.decide(threadState(item.thread), ACT_THREAD_QUESTIONS)
       } catch (err) {
         // a dead backend ends the loop — re-asking every thread burns
-        // one timeout each and buys nothing (fail-open per contract)
-        dead = err instanceof JudgeUnavailable
+        // one timeout each and buys nothing (fail-open per contract).
+        // Set-only: an ordinary error must never clear a dead flag
+        // another worker already raised
+        if (err instanceof JudgeUnavailable) {
+          dead = true
+        }
         continue
       }
       judged += 1

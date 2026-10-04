@@ -35,7 +35,7 @@ has no acting mode), `model` (pin in production), `baseUrl`,
 
 ## Shadow mode — what `mode: shadow` does
 
-Every decide() a bro command makes in shadow mode is journaled to
+Every verdict a bro command's decide() returns in shadow mode is journaled to
 `<git-common>/bro/judge/verdicts.jsonl` (append-only, shared across
 linked worktrees, nothing lands in git): act/drive thread annotation
 as `kind: 'act-thread'` rows, `bro judge decide` smoke calls as

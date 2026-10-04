@@ -432,7 +432,7 @@ async function driveShadowNotes(
   budget: { remaining: number }
 ): Promise<Map<string, string> | undefined> {
   const cfg = judgeConfig(dir).judge
-  if (cfg.mode !== 'shadow' || budget.remaining <= 0) {
+  if (cfg.mode !== 'shadow') {
     return undefined
   }
   try {
@@ -441,7 +441,9 @@ async function driveShadowNotes(
       pr,
       headSha,
       judge: judgeFacade(dir),
-      budget: budget.remaining,
+      // a spent budget still renders journaled verdicts — re-reads
+      // are free; only fresh decide() calls are bounded
+      budget: Math.max(0, budget.remaining),
     })
     budget.remaining -= res.decided
     return res.annotations
