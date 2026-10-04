@@ -30,28 +30,45 @@ export function loadState(spec: string): unknown {
   }
 }
 
+/** JudgeText on the wire: a plain string or structured JSON (object or
+ *  array) — never null, never a bare number/boolean. */
+const isJudgeText = (v: unknown): boolean =>
+  typeof v === 'string' || (typeof v === 'object' && v !== null)
+
 function questionProblems(id: string, q: unknown): string[] {
   const o = (typeof q === 'object' && q !== null ? q : {}) as Record<string, unknown>
   const problems: string[] = []
   if (!(QUESTION_TYPES as readonly unknown[]).includes(o.type)) {
     problems.push(`"${id}".type must be one of ${QUESTION_TYPES.join('|')}`)
   }
-  if (
-    typeof o.instructions !== 'string' &&
-    typeof o.instructions !== 'object'
-  ) {
+  if (!isJudgeText(o.instructions)) {
     problems.push(`"${id}".instructions must be a string or structured JSON`)
   }
   if (o.type === 'choice') {
     const c = o.criteria
     if (typeof c !== 'object' || c === null || Array.isArray(c) || Object.keys(c).length === 0) {
       problems.push(`"${id}".criteria must be a non-empty option map for choice`)
+    } else if (!Object.values(c).every((v) => v === null || isJudgeText(v))) {
+      problems.push(`"${id}".criteria values must be text, structured JSON, or null`)
     }
   }
   if (o.type === 'score') {
     const c = o.criteria
     if (!Array.isArray(c) || c.length < 2 || c.length > 10) {
       problems.push(`"${id}".criteria must be a 2–10 level array for score`)
+    } else if (!c.every(isJudgeText)) {
+      problems.push(`"${id}".criteria entries must be text or structured JSON`)
+    }
+  }
+  if (o.type === 'noul' && o.criteria !== undefined) {
+    const c = o.criteria
+    if (
+      typeof c !== 'object' ||
+      c === null ||
+      Array.isArray(c) ||
+      !Object.values(c).every(isJudgeText)
+    ) {
+      problems.push(`"${id}".criteria must be a {true?, false?} text map for noul`)
     }
   }
   return problems
@@ -107,9 +124,8 @@ function render(res: DecideResult): void {
           .filter(Boolean)
           .join(' · ')
       : ''
-  console.log(
-    `model ${res.model} · ${res.latencyMs}ms${usage !== '' ? ` · ${usage}` : ''}`
-  )
+  const usageTail = usage !== '' ? ` · ${usage}` : ''
+  console.log(`model ${res.model} · ${res.latencyMs}ms${usageTail}`)
   if (res.lowConfidence.length > 0) {
     console.log(`low confidence: ${res.lowConfidence.join(', ')}`)
   }

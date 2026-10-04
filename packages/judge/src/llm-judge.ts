@@ -20,9 +20,19 @@ import type {
   JudgeAnswer,
   JudgeQuestion,
 } from '@broject/core'
-import type { JudgeConfig, JudgeLlmConfig } from './config.ts'
-import { judgeConfig, type DeadlineJudge } from './chain.ts'
-import { postJson, remaining, type FetchFn } from './http.ts'
+import { isEnvName, type JudgeConfig, type JudgeLlmConfig } from './config.ts'
+import { deadlineJudge, judgeConfig, type DeadlineJudge } from './chain.ts'
+import {
+  clamp01,
+  isNum,
+  isProbs,
+  mapUsage,
+  objOr,
+  postJson,
+  stripTrailingSlashes,
+  type FetchFn,
+  type HttpResult,
+} from './http.ts'
 
 const LLM_NAME = 'llm-judge'
 
@@ -44,20 +54,11 @@ Respond with STRICT JSON only — no prose, no markdown fences:
 Answer shape per question type — copy the question's "type":
 - "noul":   {"type":"noul","noul":<0..1 probability the answer is yes>}
 - "choice": {"type":"choice","choice":"<one criteria key>","probabilities":{"<key>":<p>, …}}
-- "score":  {"type":"score","score":<number on the level scale: 0 = first level, N-1 = last>,"probabilities":{"<level index>":<p>, …}}
+- "score":  {"type":"score","score":<number on the 1..N level scale — 1 = first/lowest level, N = last/highest, fractional allowed>,"probabilities":{"<level>":<p>, …}}
 
 Add "confidence": <0..1> to every answer — an honest self-assessment, low when unsure.
 Answer EVERY question id exactly once.`
 }
-
-const clamp01 = (v: number): number => Math.min(1, Math.max(0, v))
-
-const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
-
-const isProbs = (v: unknown): v is Record<string, number> =>
-  typeof v === 'object' &&
-  v !== null &&
-  Object.values(v).every((p) => isNum(p))
 
 /** Self-reported confidence, clamped; absent/unparsable → 0.5 — mapped,
  *  never fabricated high. */
@@ -116,13 +117,36 @@ function mapAnswer(q: JudgeQuestion, raw: unknown): JudgeAnswer | undefined {
   }
 }
 
+/** Strip a ```lang … ``` wrapper without regex — a lazy-match pattern
+ *  on untrusted model text is a SAST finding, a string walk isn't. */
+function unfence(text: string): string {
+  if (!text.startsWith('```') || !text.endsWith('```') || text.length < 6) {
+    return text
+  }
+  const nl = text.indexOf('\n')
+  if (nl === -1 || nl >= text.length - 3) {
+    return text
+  }
+  return text.slice(nl + 1, -3).trim()
+}
+
 /** Strict JSON, forgiving extraction — a fence or preamble around an
  *  otherwise-valid payload is a formatting quirk, not a new question. */
 function parseReply(content: string): Record<string, unknown> {
-  const trimmed = content.trim()
-  const fence = /^```(?:json)?\s*([\s\S]*?)\s*```$/.exec(trimmed)
-  const text = fence?.[1] ?? trimmed
-  const parsed = JSON.parse(text) as unknown
+  const text = unfence(content.trim())
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    // a preamble like "Here is the JSON:" is a formatting quirk — the
+    // outermost {…} still carries the payload
+    const open = text.indexOf('{')
+    const close = text.lastIndexOf('}')
+    if (open === -1 || close <= open) {
+      throw new Error('not an object')
+    }
+    parsed = JSON.parse(text.slice(open, close + 1))
+  }
   if (typeof parsed !== 'object' || parsed === null) {
     throw new Error('not an object')
   }
@@ -143,10 +167,74 @@ function unconfigured(): never {
   )
 }
 
+/** Auth headers from the configured env var — a non-NAME apiKeyEnv is
+ *  a config bug (throws, never echoed); a missing var is fail-open. */
+function authHeaders(llm: JudgeLlmConfig): Record<string, string> {
+  if (llm.apiKeyEnv === undefined) {
+    return {}
+  }
+  if (!isEnvName(llm.apiKeyEnv)) {
+    throw new Error('judge.llm.apiKeyEnv is not a valid environment variable name')
+  }
+  const key = process.env[llm.apiKeyEnv]
+  if (key === undefined || key === '') {
+    throw new JudgeUnavailable(`${llm.apiKeyEnv} is not set — export it for llm-judge`)
+  }
+  return { authorization: `Bearer ${key}` }
+}
+
+/** llm error contract → throw. 400/404 are caller bugs; everything
+ *  else (incl. 401/403 — an unprovisioned fallback is "unavailable",
+ *  not a gate input) is JudgeUnavailable. */
+function throwForStatus(res: HttpResult): never {
+  const err = objOr(res.body).error
+  const errObj = objOr(err)
+  const msg =
+    typeof errObj.message === 'string' ? errObj.message : `HTTP ${res.status}`
+  if (res.status === 400 || res.status === 404) {
+    throw new Error(`llm-judge rejected the request — ${msg}`)
+  }
+  throw new JudgeUnavailable(`llm-judge unavailable — ${msg}`)
+}
+
+/** choices[0].message.content — a missing/typed-wrong reply is "no
+ *  verdict", not a gate input. */
+function replyContent(body: unknown): string {
+  const choices = objOr(body).choices
+  const content =
+    Array.isArray(choices) && choices.length > 0
+      ? (choices[0] as { message?: { content?: unknown } }).message?.content
+      : undefined
+  if (typeof content !== 'string') {
+    throw new JudgeUnavailable('llm-judge returned no message content')
+  }
+  return content
+}
+
+/** Map every asked question against the raw reply — an unusable entry
+ *  is omitted (the chain marks it low), never sinks the batch. */
+function collectAnswers(
+  questions: Record<string, JudgeQuestion>,
+  rawAnswers: Record<string, unknown>
+): Record<string, JudgeAnswer> {
+  const answers: Record<string, JudgeAnswer> = {}
+  for (const [qid, q] of Object.entries(questions)) {
+    const raw = rawAnswers[qid]
+    if (raw === undefined) {
+      continue // unanswered questions just stay absent — the chain marks them low
+    }
+    const mapped = mapAnswer(q, raw)
+    if (mapped !== undefined) {
+      answers[qid] = mapped
+    }
+  }
+  return answers
+}
+
 export function llmJudge(cfg: JudgeConfig, opts: LlmJudgeOpts = {}): DeadlineJudge {
   const llm: JudgeLlmConfig | undefined = cfg.llm
   const endpoint =
-    llm !== undefined ? `${llm.baseUrl.replace(/\/+$/, '')}/chat/completions` : ''
+    llm !== undefined ? `${stripTrailingSlashes(llm.baseUrl)}/chat/completions` : ''
   async function decideWithin(
     state: unknown,
     questions: Record<string, JudgeQuestion>,
@@ -154,14 +242,6 @@ export function llmJudge(cfg: JudgeConfig, opts: LlmJudgeOpts = {}): DeadlineJud
   ): Promise<DecideResult> {
     if (llm === undefined) {
       unconfigured()
-    }
-    const headers: Record<string, string> = {}
-    if (llm.apiKeyEnv !== undefined) {
-      const key = process.env[llm.apiKeyEnv]
-      if (key === undefined || key === '') {
-        throw new JudgeUnavailable(`${llm.apiKeyEnv} is not set — export it for llm-judge`)
-      }
-      headers.authorization = `Bearer ${key}`
     }
     const started = Date.now()
     const res = await postJson(
@@ -172,80 +252,36 @@ export function llmJudge(cfg: JudgeConfig, opts: LlmJudgeOpts = {}): DeadlineJud
         response_format: { type: 'json_object' },
         temperature: 0,
       },
-      headers,
+      authHeaders(llm),
       deadline,
       [429, 500, 502, 503, 504],
       opts.fetch
     )
-    const body = (typeof res.body === 'object' && res.body !== null
-      ? res.body
-      : {}) as Record<string, unknown>
-    const errMsg =
-      typeof (body.error as Record<string, unknown> | undefined)?.message === 'string'
-        ? String((body.error as Record<string, unknown>).message)
-        : `HTTP ${res.status}`
-    switch (res.status) {
-      case 200:
-        break
-      case 400:
-      case 404:
-        throw new Error(`llm-judge rejected the request — ${errMsg}`)
-      default:
-        throw new JudgeUnavailable(`llm-judge unavailable — ${errMsg}`)
+    if (res.status !== 200) {
+      throwForStatus(res)
     }
-    const choices = body.choices
-    const content =
-      Array.isArray(choices) && choices.length > 0
-        ? (choices[0] as { message?: { content?: unknown } }).message?.content
-        : undefined
-    if (typeof content !== 'string') {
-      throw new JudgeUnavailable('llm-judge returned no message content')
-    }
+    const body = objOr(res.body)
     let rawAnswers: Record<string, unknown>
     try {
-      rawAnswers = parseReply(content)
+      rawAnswers = parseReply(replyContent(body))
     } catch (err) {
+      if (err instanceof JudgeUnavailable) {
+        throw err
+      }
       // an unparsable reply is "no verdict", not a gate input — fail open
       throw new JudgeUnavailable(
         `llm-judge returned unparseable JSON — ${err instanceof Error ? err.message : err}`
       )
     }
-    const answers: Record<string, JudgeAnswer> = {}
-    for (const [qid, q] of Object.entries(questions)) {
-      const raw = rawAnswers[qid]
-      if (raw === undefined) {
-        continue // unanswered questions just stay absent — the chain marks them low
-      }
-      const mapped = mapAnswer(q, raw)
-      if (mapped !== undefined) {
-        answers[qid] = mapped
-      }
-    }
-    const rawUsage = (
-      typeof body.usage === 'object' && body.usage !== null ? body.usage : {}
-    ) as Record<string, unknown>
-    const usage: DecideResult['usage'] = {}
-    if (isNum(rawUsage.prompt_tokens)) {
-      usage.inputTokens = rawUsage.prompt_tokens
-    }
     return {
-      answers,
+      answers: collectAnswers(questions, rawAnswers),
       model: typeof body.model === 'string' ? body.model : llm.model,
       latencyMs: Date.now() - started,
-      usage: Object.keys(usage).length > 0 ? usage : undefined,
+      usage: mapUsage(body, 'prompt_tokens'),
       lowConfidence: [],
     }
   }
-  return {
-    decide: (state, questions) =>
-      decideWithin(state, questions, Date.now() + cfg.timeoutMs),
-    decideWithin: (state, questions, deadline) => {
-      if (remaining(deadline) <= 0) {
-        return Promise.reject(new JudgeUnavailable('judge budget spent'))
-      }
-      return decideWithin(state, questions, deadline)
-    },
-  }
+  return deadlineJudge(cfg.timeoutMs, decideWithin)
 }
 
 export const llmJudgeConnector: Connector = {

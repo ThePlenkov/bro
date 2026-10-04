@@ -6,7 +6,7 @@
  * `lowConfidence` lists whatever neither backend answered confidently.
  * Facade-internal: the consumer called one decide().
  */
-import { facade, loadConfig, JudgeUnavailable } from '@broject/core'
+import { facade, facadeName, loadConfig, JudgeUnavailable } from '@broject/core'
 import type {
   ConnectorCtx,
   DecideResult,
@@ -15,6 +15,7 @@ import type {
   JudgeQuestion,
 } from '@broject/core'
 import { judgeSection, type JudgeConfig } from './config.ts'
+import { remaining } from './http.ts'
 
 /** Internal deadline seam — backends built by this package accept the
  *  run's absolute deadline (epoch ms) so `judge.timeoutMs` bounds the
@@ -30,6 +31,25 @@ export interface DeadlineJudge extends JudgeFacade {
 
 function isDeadlineJudge(f: JudgeFacade): f is DeadlineJudge {
   return typeof (f as DeadlineJudge).decideWithin === 'function'
+}
+
+/** The decide()/decideWithin() pair every in-package backend returns —
+ *  `judge.timeoutMs` is the whole-call budget; a spent deadline fails
+ *  open before any fetch. */
+export function deadlineJudge(
+  timeoutMs: number,
+  decideWithin: DeadlineJudge['decideWithin']
+): DeadlineJudge {
+  return {
+    decide: (state, questions) =>
+      decideWithin(state, questions, Date.now() + timeoutMs),
+    decideWithin: (state, questions, deadline) => {
+      if (remaining(deadline) <= 0) {
+        return Promise.reject(new JudgeUnavailable('judge budget spent'))
+      }
+      return decideWithin(state, questions, deadline)
+    },
+  }
 }
 
 /** decide() against the shared deadline — native when the backend
@@ -95,7 +115,13 @@ export function chainedJudge(
       const started = Date.now()
       const deadline = started + opts.timeoutMs
       const res = await callWithin(primary, state, questions, deadline)
-      const low = lowKeys(res.answers, opts.confidence)
+      // an asked question with no answer at all is as unconfident as a
+      // low one — it escalates and lands in lowConfidence the same way
+      const unconfident = (ans: Record<string, JudgeAnswer>): string[] => [
+        ...Object.keys(questions).filter((k) => !(k in ans)),
+        ...lowKeys(ans, opts.confidence),
+      ]
+      const low = unconfident(res.answers)
       if (low.length === 0) {
         return { ...res, lowConfidence: [] }
       }
@@ -108,8 +134,13 @@ export function chainedJudge(
       let esc: DecideResult
       try {
         esc = await callWithin(fallback, state, retry, deadline)
-      } catch {
-        // a dead fallback must not lose the primary's answers
+      } catch (err) {
+        // unavailability is fail-open; an ordinary error is the
+        // caller's bug (validation) — propagate, don't masquerade as
+        // "no confident answer"
+        if (!(err instanceof JudgeUnavailable)) {
+          throw err
+        }
         return { ...res, lowConfidence: low }
       }
       const answers = { ...res.answers }
@@ -124,7 +155,7 @@ export function chainedJudge(
         model: res.model,
         latencyMs: Date.now() - started,
         usage: mergeUsage(res.usage, esc.usage),
-        lowConfidence: lowKeys(answers, opts.confidence),
+        lowConfidence: unconfident(answers),
       }
     },
   }
@@ -164,10 +195,13 @@ export interface JudgeFacadeOpts {
 export function judgeFacade(dir: string, opts: JudgeFacadeOpts = {}): JudgeFacade {
   const { judge: cfg, connectors } = judgeConfig(dir)
   const ctx: ConnectorCtx = { dir }
-  const primaryName = opts.connector ?? connectors.judge
+  const serving = facadeName('judge', ctx, {
+    connector: opts.connector,
+    prefer: connectors,
+  })
   const primary = facade('judge', ctx, { connector: opts.connector, prefer: connectors })
   const fallback =
-    cfg.fallback !== undefined && cfg.fallback !== primaryName
+    cfg.fallback !== undefined && cfg.fallback !== serving
       ? facade('judge', ctx, { connector: cfg.fallback })
       : undefined
   return chainedJudge(primary, fallback, cfg)

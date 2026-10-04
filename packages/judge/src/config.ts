@@ -49,6 +49,11 @@ export const DEFAULT_JUDGE_CONFIG: JudgeConfig = {
 
 const JUDGE_MODES = ['off', 'shadow'] as const
 
+/** Env var NAME sanity — `apiKeyEnv` names a variable, never holds the
+ *  key value; a blob that isn't a NAME-shaped identifier is a config
+ *  bug the connector fails on loudly (and never echoes back). */
+export const isEnvName = (v: string): boolean => /^[A-Za-z_][A-Za-z0-9_]*$/.test(v)
+
 const str = (v: unknown): string | undefined =>
   typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined
 

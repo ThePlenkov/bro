@@ -82,6 +82,7 @@ export {
   ensureAuth,
   facade,
   facadeAuth,
+  facadeName,
   isOwnClaim,
   parallelWorkLines,
   postToolLines,

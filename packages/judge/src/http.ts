@@ -5,6 +5,7 @@
  * and escalation spend the same budget (spec: bro-f4ot.2-judge).
  */
 import { JudgeUnavailable } from '@broject/core'
+import type { DecideResult } from '@broject/core'
 
 export type FetchFn = typeof fetch
 
@@ -16,6 +17,7 @@ export interface HttpResult {
 
 const RETRYABLE_NETWORK = 3 // total attempts on retryable failure
 const BACKOFF_MS = 150
+const MAX_BACKOFF_MS = 1000
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((r) => setTimeout(r, Math.max(0, ms)))
@@ -24,6 +26,53 @@ const sleep = (ms: number): Promise<void> =>
  *  starts, so an escalation can't restart the clock. */
 export function remaining(deadline: number): number {
   return deadline - Date.now()
+}
+
+export const isNum = (v: unknown): v is number =>
+  typeof v === 'number' && Number.isFinite(v)
+
+/** A probability map — a plain object (never an array) of 0..1
+ *  weights; anything else is contract drift. */
+export const isProbs = (v: unknown): v is Record<string, number> =>
+  typeof v === 'object' &&
+  v !== null &&
+  !Array.isArray(v) &&
+  Object.values(v).every((p) => isNum(p) && p >= 0 && p <= 1)
+
+export const clamp01 = (v: number): number => Math.min(1, Math.max(0, v))
+
+/** Trailing-slash strip without a regex — a `/+$` expression on a
+ *  configured URL trips the polynomial-regex scanner; a walk can't. */
+export function stripTrailingSlashes(s: string): string {
+  let end = s.length
+  while (end > 0 && s.charCodeAt(end - 1) === 47) {
+    end -= 1
+  }
+  return s.slice(0, end)
+}
+
+/** Response body as a plain object — a scalar/null body reads as {}. */
+export const objOr = (v: unknown): Record<string, unknown> =>
+  typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : {}
+
+/** Wire usage (`input_tokens`/`prompt_tokens`, `cost_usd`) → contract
+ *  shape; a field absent on the wire stays absent — never fabricate a
+ *  cost. */
+export function mapUsage(
+  body: Record<string, unknown>,
+  tokensKey: 'input_tokens' | 'prompt_tokens'
+): DecideResult['usage'] {
+  const raw = objOr(body.usage)
+  const usage: { inputTokens?: number; costUsd?: number } = {}
+  const tokens = raw[tokensKey]
+  if (typeof tokens === 'number' && Number.isFinite(tokens)) {
+    usage.inputTokens = tokens
+  }
+  const cost = raw.cost_usd
+  if (typeof cost === 'number' && Number.isFinite(cost)) {
+    usage.costUsd = cost
+  }
+  return Object.keys(usage).length > 0 ? usage : undefined
 }
 
 /** POST a JSON payload; returns status + parsed body for the caller's
@@ -70,12 +119,13 @@ export async function postJson(
       }
       lastErr = err
     }
-    // bounded backoff — the next attempt must still fit the deadline
-    const wait = BACKOFF_MS * 2 ** attempt
+    // bounded backoff — capped, and the next attempt must still fit
+    // the deadline
+    const wait = Math.min(BACKOFF_MS * 2 ** attempt, MAX_BACKOFF_MS)
     if (remaining(deadline) - wait <= 0) {
       break
     }
-    await sleep(wait)
+    await sleep(wait) // NOSONAR — bounded serial retries; overlapping attempts would defeat the backoff
   }
   const msg = lastErr instanceof Error ? lastErr.message : String(lastErr)
   throw new JudgeUnavailable(`judge backend unreachable — ${msg}`)

@@ -360,6 +360,18 @@ export function facade<K extends keyof FacadeMap>(
   return provides(ctx) as FacadeMap[K]
 }
 
+/** The name of the connector facade() would pick for `kind` — same
+ *  precedence, for callers that need the serving connector's identity
+ *  (e.g. "is the configured fallback the same connector as the
+ *  primary?"). */
+export function facadeName<K extends keyof FacadeMap>(
+  kind: K,
+  ctx: ConnectorCtx,
+  opts: FacadeOpts = {}
+): string {
+  return pickConnector(kind, ctx, opts).name
+}
+
 /** The serving connector's auth probe — null when ready, else the
  *  remediation line. Resolution failures surface as the message: a
  *  missing provider is as unusable as a missing credential. */

@@ -15,7 +15,8 @@ A calibrated decision judge for agent loops — typed questions
 (`choice`/`score`/`noul`) over a compact state, typed answers with
 confidence back, sub-second, priced in fractions of a cent. The primary
 backend is **jev** (`POST {judge.baseUrl}/v1/decide`,
-`Authorization: Bearer $JEV_API_KEY`); `judge.fallback` names an
+`Authorization: Bearer $<judge.apiKeyEnv>` — the var named by
+`judge.apiKeyEnv`, `JEV_API_KEY` by default); `judge.fallback` names an
 escalation connector (**llm-judge** — any OpenAI-compatible chat
 endpoint) re-asked on answers under `judge.confidence`.
 
