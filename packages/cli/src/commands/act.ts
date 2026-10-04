@@ -522,7 +522,9 @@ async function cmdThreads(argv: string[]): Promise<void> {
     console.log(`${thread.id}\t${author}\t${path}:${line}\t${body}`)
     const note = notes?.get(thread.id)
     if (note !== undefined) {
-      console.log(`  ${note}`)
+      // stderr — stdout is the documented TSV contract; a `judge:` line
+      // there reads as a malformed thread record to TSV consumers
+      console.error(`  ${note}`)
     }
   }
   console.error(`act threads: ${open} unresolved`)
@@ -626,8 +628,10 @@ function cmdResolve(argv: string[]): void {
     rev.resolveThread(id)
     console.error(`act: resolved ${id}`)
     // a silent resolve is the fix verdict; a comment is a reject/defer
-    // reason (skills/act/SKILL.md) — journaled for judge agreement
-    disposition(id, comment ? 'rejected' : 'fixed')
+    // reason (skills/act/SKILL.md) — the documented defer reply names
+    // its bead ("deferred to <id>"), which is the one defer signal a
+    // bare resolve can see
+    disposition(id, comment ? (/deferred to \S+/i.test(comment) ? 'deferred' : 'rejected') : 'fixed')
   }
 }
 
@@ -662,7 +666,7 @@ function cmdReply(argv: string[]): void {
     for (const row of rows) {
       rev.replyThread(row.id, row.body)
       console.error(`act: replied on ${row.id}`)
-      disposition(row.id, 'replied')
+      disposition(row.id, /deferred to \S+/i.test(row.body) ? 'deferred' : 'replied')
     }
     console.error(`act reply: ${rows.length} repl(ies)`)
     if (skipped > 0) {
@@ -679,7 +683,10 @@ function cmdReply(argv: string[]): void {
   }
   rev.replyThread(id, comment!)
   console.error(`act: replied on ${id}`)
-  disposition(id, 'replied')
+  // the documented defer flow replies "deferred to <bead>" then
+  // resolves silently — journaled as deferred here (stats join
+  // first-hit wins) so the silent resolve's 'fixed' can't mask it
+  disposition(id, /deferred to \S+/i.test(comment!) ? 'deferred' : 'replied')
 }
 
 const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {

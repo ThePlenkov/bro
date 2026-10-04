@@ -116,10 +116,10 @@ describe('formatAnnotation', () => {
     costUsd: 0.0009,
   }
 
-  test('renders the spec line', () => {
+  test('renders the spec line — the 0-based score indexes levels directly', () => {
     assert.equal(
       formatAnnotation(v),
-      'judge: blocks_correctness 0.91 · severity 2.8/4 (should-fix) · action resolve — decided by jev-1.13.0 (240ms, $0.0009)'
+      'judge: blocks_correctness 0.91 · severity 2.8/4 (blocking) · action resolve — decided by jev-1.13.0 (240ms, $0.0009)'
     )
   })
 
@@ -187,7 +187,7 @@ describe('annotateThreads', () => {
     })
   })
 
-  test('budget bounds fresh decide() calls; the rest are unjudged', async () => {
+  test('budget bounds fresh decide() attempts; the rest are unjudged', async () => {
     await withRepo(async (dir) => {
       const judge = fakeJudge()
       const res = await annotateThreads([thread('T1'), thread('T2'), thread('T3')], {
@@ -197,21 +197,36 @@ describe('annotateThreads', () => {
         budget: 1,
       })
       assert.equal(judge.calls, 1)
+      assert.equal(res.decided, 1)
       assert.equal(res.unjudged, 2)
       assert.equal(res.annotations.size, 1)
     })
   })
 
-  test('a dead backend stops the loop fast — no per-thread timeouts', async () => {
+  test('a dead backend stops the workers — bounded attempts, no verdicts', async () => {
     await withRepo(async (dir) => {
-      const res = await annotateThreads([thread('T1'), thread('T2')], {
-        dir,
-        pr: 7,
-        judge: failingJudge(new JudgeUnavailable('no key')),
-      })
-      assert.equal(res.unjudged, 1) // first failure breaks; T2 never attempted
+      const threads = Array.from({ length: 8 }, (_, n) => thread(`T${n}`))
+      const judge = failingJudge(new JudgeUnavailable('no key'))
+      const res = await annotateThreads(threads, { dir, pr: 7, judge })
+      // at most one in-flight batch (concurrency 4) pays before the
+      // dead flag lands — never one timeout per thread
+      assert.ok(res.decided <= 4)
+      assert.equal(res.unjudged, 8)
       assert.equal(res.annotations.size, 0)
       assert.equal(readJournal(dir).length, 0)
+    })
+  })
+
+  test('failed attempts still consume the budget', async () => {
+    await withRepo(async (dir) => {
+      const judge = failingJudge(new Error('max_tokens_exceeded'))
+      const res = await annotateThreads(
+        Array.from({ length: 6 }, (_, n) => thread(`T${n}`)),
+        { dir, pr: 7, judge, budget: 2 }
+      )
+      assert.equal(res.decided, 2)
+      assert.equal(res.unjudged, 6)
+      assert.equal(res.annotations.size, 0)
     })
   })
 

@@ -135,8 +135,9 @@ export interface Verdict {
 export interface Disposition {
   /** ISO timestamp. */
   ts: string
-  /** Always 'act-disposition' — the consumer surface. */
-  kind: string
+  /** Always 'act-disposition' — a literal, so a typoed kind can't
+   *  smuggle a non-verdict row into the verdict shape. */
+  kind: 'act-disposition'
   /** Subject identity — the join key onto the matching verdict. */
   subject: { pr?: number; threadId?: string; headSha?: string; commentSha?: string }
   /** What happened: 'fixed' | 'replied' | 'deferred' | 'rejected'. */

@@ -35,17 +35,21 @@ has no acting mode), `model` (pin in production), `baseUrl`,
 
 ## Shadow mode — what `mode: shadow` does
 
-Every decide() a bro command makes is journaled to
+Every decide() a bro command makes in shadow mode is journaled to
 `<git-common>/bro/judge/verdicts.jsonl` (append-only, shared across
-linked worktrees, nothing lands in git) — one row per verdict
-(`kind: 'act-thread'`) plus `kind: 'act-disposition'` rows where
-`bro act resolve/reply/defer` observes what actually happened.
+linked worktrees, nothing lands in git): act/drive thread annotation
+as `kind: 'act-thread'` rows, `bro judge decide` smoke calls as
+`kind: 'judge-decide'` (kept out of the triage agreement set), plus
+`kind: 'act-disposition'` rows where `bro act resolve/reply/defer`
+observes what actually happened.
 
 `bro act threads` and the drive fixer prompt render a `judge:` line
 beside each unresolved thread — `blocks_correctness`, `severity`,
 `action` — under the same dedup key (`threadId`, `commentSha`,
-`headSha`): repeat polls re-read the journal for free, only a moved
-subject pays for a fresh decide(), bounded by `maxDecisionsPerRun`.
+`headSha`): a subject with a recorded verdict re-reads it for free on
+repeat polls; a moved subject — or one with no verdict yet — pays for
+a fresh decide(), bounded by `maxDecisionsPerRun` per invocation
+(shared across a whole drive pass).
 
 ## Policy
 

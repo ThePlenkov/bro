@@ -12,7 +12,7 @@
 import { readFileSync } from 'node:fs'
 import { ensureAuth, JudgeUnavailable } from '@broject/core'
 import type { DecideResult, JudgeAnswer, JudgeQuestion } from '@broject/core'
-import { judgeFacade } from '@broject/judge'
+import { appendRow, judgeConfig, judgeFacade } from '@broject/judge'
 import { flag } from './args.ts'
 import { loadBroConfig } from '../plugins.ts'
 
@@ -161,6 +161,22 @@ async function decide(argv: string[]): Promise<void> {
   const questions = loadQuestions(questionsRef)
   try {
     const res = await judgeFacade(dir, { connector }).decide(state, questions)
+    // shadow mode journals every decide() a bro command makes — the
+    // smoke path included, under its own kind so stats keep it out of
+    // the act-thread agreement set
+    if (judgeConfig(dir).judge.mode === 'shadow') {
+      appendRow(dir, {
+        ts: new Date().toISOString(),
+        kind: 'judge-decide',
+        subject: {},
+        questions,
+        answers: res.answers,
+        model: res.model,
+        latencyMs: res.latencyMs,
+        ...(res.usage?.costUsd !== undefined ? { costUsd: res.usage.costUsd } : {}),
+        ...(res.lowConfidence.length > 0 ? { lowConfidence: res.lowConfidence } : {}),
+      })
+    }
     if (asJson) {
       console.log(JSON.stringify(res, null, 2))
     } else {

@@ -59,8 +59,9 @@ export const ACT_THREAD_QUESTIONS: Record<string, JudgeQuestion> = {
   },
 }
 
-/** Severity level names for rendering — index of the rounded score.
- *  `2.8` on the 4-level scale renders `2.8/4 (should-fix)`. */
+/** Severity level names for rendering — the wire scale is 0..N-1
+ *  (0 = first/lowest level), so the rounded score IS the index:
+ *  `2.8` on the 4-level scale rounds to level 3, `blocking`. */
 const SEVERITY_LABELS = ['cosmetic', 'minor', 'should-fix', 'blocking']
 
 /** The decide() state for one thread — the compact payload the backend
@@ -92,7 +93,7 @@ export function formatAnnotation(v: Verdict): string {
   if (sev?.type === 'score') {
     const levels = SEVERITY_LABELS.length
     const label =
-      SEVERITY_LABELS[Math.min(levels - 1, Math.max(0, Math.round(sev.score) - 1))]!
+      SEVERITY_LABELS[Math.min(levels - 1, Math.max(0, Math.round(sev.score)))]!
     parts.push(`severity ${sev.score.toFixed(1)}/${levels} (${label})`)
   }
   const act = v.answers.action
@@ -138,19 +139,27 @@ export interface AnnotateOpts {
 export interface AnnotateResult {
   /** threadId → rendered annotation line. */
   annotations: Map<string, string>
-  /** Fresh decide() calls paid this run — the cost signal a caller
-   *  logs when it wants spend visible. */
+  /** Fresh decide() attempts this run — the cost signal a caller
+   *  logs when it wants spend visible; attempts count against the
+   *  budget, a failed call paid its timeout too. */
   decided: number
-  /** Threads judged fresh minus dedup re-reads — i.e. threads that
-   *  still have no verdict (budget spent or backend down). */
+  /** Threads with no verdict at the end — budget spent, backend down,
+   *  or a per-thread failure. */
   unjudged: number
 }
 
+/** In-flight decide() ceiling — enough parallelism that a healthy
+ *  backend annotates a full budget in seconds instead of a ~150s
+ *  sequential stall, small enough not to hammer it. */
+const ANNOTATION_CONCURRENCY = 4
+
 /** Judge every unresolved thread once — dedup re-reads first, fresh
- *  decide() calls bounded by `budget`, everything journaled. A wedged
- *  backend (JudgeUnavailable) stops the loop fast rather than burning
- *  a timeout per thread; a per-thread failure skips that thread only.
- *  Rendered output is annotation — it is never applied to any gate. */
+ *  decide() calls bounded by `budget` (attempts count, not just
+ *  successes — a failed call still spent its timeout), everything
+ *  journaled. A wedged backend (JudgeUnavailable) stops the workers
+ *  fast rather than burning a timeout per thread; a per-thread failure
+ *  skips that thread only. Rendered output is annotation — it is never
+ *  applied to any gate. */
 export async function annotateThreads(
   threads: ReviewThread[],
   opts: AnnotateOpts
@@ -158,41 +167,49 @@ export async function annotateThreads(
   const budget = opts.budget ?? 50
   const rows = readJournal(opts.dir)
   const annotations = new Map<string, string>()
-  let decided = 0
-  let unjudged = 0
+  const pending: { thread: ReviewThread; subject: Verdict['subject'] }[] = []
   for (const thread of threads) {
     if (thread.resolved) {
       continue
     }
     const subject = threadSubject(opts.pr, thread.id, thread.comment, opts.headSha)
-    let verdict = findVerdict(rows, {
+    const cached = findVerdict(rows, {
       threadId: thread.id,
       commentSha: subject.commentSha,
       headSha: opts.headSha,
     })
-    if (verdict === undefined) {
+    if (cached !== undefined) {
+      annotations.set(thread.id, formatAnnotation(cached))
+    } else {
+      pending.push({ thread, subject })
+    }
+  }
+  let decided = 0
+  let judged = 0
+  let i = 0
+  let dead = false
+  const worker = async (): Promise<void> => {
+    while (!dead && i < pending.length) {
+      const item = pending[i]!
+      i += 1
       if (decided >= budget) {
-        unjudged += 1
         continue
       }
+      decided += 1 // an attempt consumes budget — it paid its timeout either way
       let res
       try {
-        res = await opts.judge.decide(threadState(thread), ACT_THREAD_QUESTIONS)
+        res = await opts.judge.decide(threadState(item.thread), ACT_THREAD_QUESTIONS)
       } catch (err) {
         // a dead backend ends the loop — re-asking every thread burns
-        // one timeout each and buys nothing (fail-open per the contract)
-        if (err instanceof JudgeUnavailable) {
-          unjudged += 1
-          break
-        }
-        unjudged += 1
+        // one timeout each and buys nothing (fail-open per contract)
+        dead = err instanceof JudgeUnavailable
         continue
       }
-      decided += 1
-      verdict = {
+      judged += 1
+      const verdict: Verdict = {
         ts: new Date().toISOString(),
         kind: 'act-thread',
-        subject,
+        subject: item.subject,
         questions: ACT_THREAD_QUESTIONS,
         answers: res.answers,
         model: res.model,
@@ -202,8 +219,11 @@ export async function annotateThreads(
       }
       appendRow(opts.dir, verdict)
       rows.push(verdict)
+      annotations.set(item.thread.id, formatAnnotation(verdict))
     }
-    annotations.set(thread.id, formatAnnotation(verdict))
   }
-  return { annotations, decided, unjudged }
+  await Promise.all(
+    Array.from({ length: Math.min(ANNOTATION_CONCURRENCY, pending.length) }, worker)
+  )
+  return { annotations, decided, unjudged: pending.length - judged }
 }

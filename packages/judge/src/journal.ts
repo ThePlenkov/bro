@@ -41,8 +41,10 @@ export function journalPath(dir: string): string | null {
  *  revision) hashes differently and earns a fresh decide(); an
  *  unchanged thread re-reads its verdict for free. */
 export function commentKey(c: ReviewComment): string {
+  // JSON.stringify frames the tuple — a bare join lets distinct
+  // path/line pairs collide into one key
   return createHash('sha256')
-    .update([c.author, c.createdAt, c.path ?? '', c.line ?? '', c.body].join(''))
+    .update(JSON.stringify([c.author, c.createdAt, c.path, c.line, c.body]))
     .digest('hex')
     .slice(0, 16)
 }
