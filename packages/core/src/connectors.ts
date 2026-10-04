@@ -24,6 +24,7 @@
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { gitTry } from './git.ts'
+import type { JudgeFacade } from './judge.ts'
 import type { ReviewFacade } from './review.ts'
 import type { SpecStore } from './specs.ts'
 import type { TaskRow, TaskStore } from './tasks.ts'
@@ -46,6 +47,7 @@ export interface FacadeMap {
   tasks: TaskStore
   reviews: ReviewFacade
   specs: SpecStore
+  judge: JudgeFacade
 }
 
 export type MaybePromise<T> = T | Promise<T>
@@ -109,6 +111,7 @@ export interface Connector {
   tasks?(ctx: ConnectorCtx): TaskStore
   reviews?(ctx: ConnectorCtx): ReviewFacade
   specs?(ctx: ConnectorCtx): SpecStore
+  judge?(ctx: ConnectorCtx): JudgeFacade
   hooks?(ctx: ConnectorCtx): ConnectorHooks
 }
 
@@ -355,6 +358,18 @@ export function facade<K extends keyof FacadeMap>(
   const pick = pickConnector(kind, ctx, opts)
   const provides = pick[kind as keyof Connector] as (ctx: ConnectorCtx) => unknown
   return provides(ctx) as FacadeMap[K]
+}
+
+/** The name of the connector facade() would pick for `kind` — same
+ *  precedence, for callers that need the serving connector's identity
+ *  (e.g. "is the configured fallback the same connector as the
+ *  primary?"). */
+export function facadeName<K extends keyof FacadeMap>(
+  kind: K,
+  ctx: ConnectorCtx,
+  opts: FacadeOpts = {}
+): string {
+  return pickConnector(kind, ctx, opts).name
 }
 
 /** The serving connector's auth probe — null when ready, else the

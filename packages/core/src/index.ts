@@ -52,6 +52,16 @@ export { docTypeNamed, docVerbs, STANDARD_VERBS, verbMethod } from './docs.ts'
 export type { DocAdapter, DocCtx, DocFlags, DocType, DocVerb, Scope } from './docs.ts'
 export { bdActor, taskStore } from './tasks.ts'
 export type { TaskFilter, TaskInput, TaskRow, TaskStore } from './tasks.ts'
+export { JudgeUnavailable } from './judge.ts'
+export type {
+  DecideResult,
+  JsonValue,
+  JudgeAnswer,
+  JudgeFacade,
+  JudgeQuestion,
+  JudgeText,
+  Verdict,
+} from './judge.ts'
 export type {
   CheckInfo,
   MergeOpts,
@@ -73,6 +83,7 @@ export {
   ensureAuth,
   facade,
   facadeAuth,
+  facadeName,
   isOwnClaim,
   parallelWorkLines,
   postToolLines,

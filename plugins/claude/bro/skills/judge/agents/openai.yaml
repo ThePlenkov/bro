@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Judge"
+  short_description: "Calibrated decision judge via the bro CLI — TypeSafe System One (jev) with llm-judge fallback"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $judge to get started."
+policy:
+  allow_implicit_invocation: false
