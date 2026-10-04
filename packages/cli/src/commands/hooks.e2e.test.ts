@@ -6,7 +6,7 @@
  *  the thing is blocked; ambient state is passive context). */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import {
   CLI_DIST,
@@ -152,6 +152,56 @@ describe('hooks e2e — post-tool arming', () => {
       const r = hook(f, 'post-tool', postTool('git push origin work/x', false))
       assert.equal(r.code, 0)
       assert.equal(markerExists(f, 's1', 'act'), false)
+    })
+  })
+})
+
+describe('hooks e2e — session trace journal', () => {
+  /** <git-common>/bro/hooks/trace/<session>.jsonl */
+  const tracePath = (f: Fixture, sessionId: string): string =>
+    join(f.markerDir, 'trace', `${sessionId}.jsonl`)
+
+  test('every post-tool event journals one trace line — success or not', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const ok = hook(f, 'post-tool', {
+        tool_name: 'exec',
+        tool_input: { command: 'true' },
+        tool_response: { success: true },
+        session_id: 's1',
+      })
+      assert.equal(ok.code, 0)
+      const fail = hook(f, 'post-tool', {
+        tool_name: 'edit',
+        tool_input: { file_path: join(f.main, 'x.ts') },
+        tool_response: { success: false },
+        session_id: 's1',
+      })
+      const lines = readFileSync(tracePath(f, 's1'), 'utf8').trim().split('\n')
+      assert.equal(lines.length, 2)
+      const first = JSON.parse(lines[0]!) as Record<string, unknown>
+      assert.equal(first.tool, 'exec')
+      assert.equal(first.command, 'true')
+      assert.equal(first.ok, true)
+      const second = JSON.parse(lines[1]!) as Record<string, unknown>
+      assert.equal(second.tool, 'edit')
+      assert.deepEqual(second.paths, [join(f.main, 'x.ts')])
+      assert.equal(second.ok, false)
+      // the journal is a subdir — never a flat <session>.trace.jsonl
+      // sibling the stop gate would read as an arming aspect
+      assert.equal(existsSync(join(f.markerDir, 's1.trace.jsonl')), false)
+    })
+  })
+
+  test('no session id → no journal', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const r = hook(f, 'post-tool', {
+        tool_input: { command: 'true' },
+        tool_response: { success: true },
+      })
+      assert.equal(r.code, 0)
+      assert.equal(existsSync(join(f.markerDir, 'trace')), false)
     })
   })
 })

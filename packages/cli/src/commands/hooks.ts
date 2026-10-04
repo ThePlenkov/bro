@@ -26,6 +26,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -46,7 +47,13 @@ import {
 import { markerLive, ownerTag } from './proc-owner.ts'
 
 interface HookInput {
-  tool_input?: { command?: unknown }
+  tool_name?: unknown
+  tool_input?: {
+    command?: unknown
+    file_path?: unknown
+    path?: unknown
+    files?: unknown
+  }
   tool_response?: { success?: unknown }
   prompt?: unknown
   stop_hook_active?: unknown
@@ -599,6 +606,82 @@ function markSkillHinted(sessionId: string, skill: string): void {
   }
 }
 
+// --- session trace journal ------------------------------------------------------
+//
+// The learn connector's evidence plane: emitPostTool appends one JSONL
+// line per event to `<git-common>/bro/hooks/trace/<session>.jsonl` —
+// `{ts, tool, command?, paths?, ok}`. The journal lives in a `trace/`
+// SUBDIR, never flat beside the markers: readArmed scans `<session>.*`
+// files as gate aspects, so a flat `<session>.trace.jsonl` would arm a
+// phantom `trace.jsonl` aspect on every post-tool event (same rule as
+// `hinted/`). Fields the payload lacks stay absent from the line.
+
+/** One trace entry from a post-tool payload — the fields each tool
+ *  family actually carries (`command` on exec, `file_path`/`path` on
+ *  edit/write, `files` where present). */
+export function traceEntry(
+  input: HookInput,
+  ts: number = Date.now()
+): Record<string, unknown> {
+  const entry: Record<string, unknown> = { ts }
+  if (typeof input.tool_name === 'string' && input.tool_name !== '') {
+    entry.tool = input.tool_name
+  }
+  const ti = input.tool_input
+  if (typeof ti?.command === 'string') {
+    entry.command = ti.command
+  }
+  const paths = [
+    ...(typeof ti?.file_path === 'string' ? [ti.file_path] : []),
+    ...(typeof ti?.path === 'string' ? [ti.path] : []),
+    ...(Array.isArray(ti?.files)
+      ? ti.files.filter((f): f is string => typeof f === 'string')
+      : []),
+  ]
+  if (paths.length > 0) {
+    entry.paths = paths
+  }
+  if (typeof input.tool_response?.success === 'boolean') {
+    entry.ok = input.tool_response.success
+  }
+  return entry
+}
+
+/** `<git-common>/bro/hooks/trace/<session>.jsonl` — null without a git
+ *  dir or session id (untraceable events degrade to nothing). */
+function traceFile(sessionId: string): string | null {
+  const dir = hooksStateDir()
+  const safe = sessionId.replace(/[^\w.-]/g, '_')
+  return dir && safe ? join(dir, 'trace', `${safe}.jsonl`) : null
+}
+
+/** Append the post-tool event to this session's journal, then prune
+ *  trace files past the marker TTL — the journal shares the arming
+ *  markers' per-session lifecycle. Best-effort like arming: a failed
+ *  append must never stall the hook. */
+function journalTrace(input: HookInput, sessionId: string): void {
+  try {
+    const path = traceFile(sessionId)
+    if (!path) {
+      return
+    }
+    mkdirSync(dirname(path), { recursive: true })
+    appendFileSync(path, `${JSON.stringify(traceEntry(input))}\n`)
+    const cutoff = Date.now() - MARKER_TTL_MS
+    for (const f of readdirSync(dirname(path))) {
+      try {
+        if (statSync(join(dirname(path), f)).mtimeMs < cutoff) {
+          rmSync(join(dirname(path), f))
+        }
+      } catch {
+        // prune is best-effort
+      }
+    }
+  } catch {
+    // journaling must never stall a session
+  }
+}
+
 // --- event handlers -----------------------------------------------------------
 
 async function emitSessionContext(
@@ -628,6 +711,9 @@ async function emitPromptContext(input: HookInput): Promise<void> {
 async function emitPostTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
   const lines: string[] = []
+  // journal before the probes run — a lesson triggered on this exact
+  // tool landing must see its own trace line in the same event
+  journalTrace(input, sessionId)
   if (input.tool_response?.success === true) {
     const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
     const aspects = classifyArmCommands(cmd)

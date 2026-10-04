@@ -28,3 +28,8 @@ export {
   putLesson,
 } from './store.ts'
 export type { LessonListing, SkippedEntry } from './store.ts'
+export { matchPath, parseTraceLine, triggerMatches } from './match.ts'
+export type { MatchContext, TraceEntry } from './match.ts'
+export { DEFAULT_LEARN_CONFIG, learnSection } from './config.ts'
+export type { LearnConfig } from './config.ts'
+export { learnConnector } from './connector.ts'
