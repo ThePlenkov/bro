@@ -78,6 +78,20 @@ describe('native scope() — the tool\u2019s explicit scope', () => {
     )
   })
 
+  test('a comment after a quoted scalar drops; apostrophes stay literal', () => {
+    withRepo(
+      (m) => {
+        seedSpec(m, 'b1', '---\nscope: "src/x.ts" # note\n---\n')
+        seedSpec(m, 'b2', "---\nscope: docs/it's.md # note\n---\n")
+      },
+      (main) => {
+        const spec = specStore(main)
+        assert.deepEqual(spec.scope?.('b1'), ['src/x.ts'])
+        assert.deepEqual(spec.scope?.('b2'), ["docs/it's.md"])
+      }
+    )
+  })
+
   test('no frontmatter scope and no spec both return null', () => {
     withRepo(
       (m) => {
@@ -231,9 +245,10 @@ describe('resolveScope', () => {
     )
   })
 
-  test('a backslashed audited spec path still builds its exclusion', () => {
-    // Windows tree nodes carry `\` — the self-exclusion and the own
-    // comparison must speak git's `/`-form or they never match
+  test('an OS-form audited spec path still builds a git-form exclusion', () => {
+    // join() is what tree() paths look like — `specs\b1.md` on Windows.
+    // The self-exclusion and the own comparison must speak git's
+    // `/`-form or they never match there.
     withRepo(
       (m) => {
         seedSpec(m, 'b1', '')
@@ -243,7 +258,7 @@ describe('resolveScope', () => {
       (main) => {
         commit(main, 'work (b1)', { 'src/b.ts': 'y\n', 'specs/b1.md': '# v2\n' })
         assert.deepEqual(
-          resolveScope(main, 'HEAD', 'b1', specStore(main), join('specs', 'b1.md').replace(/\//g, '\\')),
+          resolveScope(main, 'HEAD', 'b1', specStore(main), join('specs', 'b1.md')),
           {
             state: 'scoped',
             via: 'commits',

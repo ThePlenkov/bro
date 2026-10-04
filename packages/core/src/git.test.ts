@@ -214,6 +214,23 @@ describe('gitLogStamp', () => {
       assert.equal(old.stamp.sha, renamed)
     })
   })
+
+  test('a rename that also rewrites content stamps the move commit', () => {
+    withRepo((dir) => {
+      commit(dir, 'spec', { 'specs/x.md': '# x\n' })
+      mkdirSync(join(dir, 'specs', 'x'), { recursive: true })
+      renameSync(join(dir, 'specs', 'x.md'), join(dir, 'specs', 'x', 'spec.md'))
+      writeFileSync(join(dir, 'specs', 'x', 'spec.md'), '# x rewritten\n')
+      const moved = commit(dir, 'move+edit spec', {})
+      // below the -M100% similarity threshold the move reads as a
+      // rewrite — the spec WAS touched, so the stamp is the commit
+      const r = gitLogStamp(dir, 'HEAD', ['specs/x/spec.md'], { follow: true })
+      if (r.state !== 'commit') {
+        assert.fail(`expected commit, got ${JSON.stringify(r)}`)
+      }
+      assert.equal(r.stamp.sha, moved)
+    })
+  })
 })
 
 describe('repo env sanitization', () => {

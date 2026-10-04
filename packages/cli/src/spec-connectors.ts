@@ -220,8 +220,10 @@ const unquote = (s: string): string => {
 }
 
 /** Index where a YAML comment begins — a `#` at the head or after a
- *  space/tab, outside quotes. -1 when the scalar runs to the end. */
-const commentStart = (t: string): number => {
+ *  space/tab, outside quotes. Quotes only quote inside a flow list —
+ *  in a bare scalar `docs/it's.md` the apostrophe is an ordinary
+ *  character. -1 when the scalar runs to the end. */
+const commentStart = (t: string, flow: boolean): number => {
   let q = ''
   for (let i = 0; i < t.length; i++) {
     const ch = t[i]!
@@ -231,7 +233,7 @@ const commentStart = (t: string): number => {
       } else if (ch === q) {
         q = ''
       }
-    } else if (ch === '"' || ch === "'") {
+    } else if (flow && (ch === '"' || ch === "'")) {
       q = ch
     } else if (ch === '#' && (i === 0 || t[i - 1] === ' ' || t[i - 1] === '\t')) {
       return i
@@ -242,13 +244,26 @@ const commentStart = (t: string): number => {
 
 /** One YAML scalar: a ` #…` comment (space- or tab-separated, outside
  *  quotes — `src/x.ts\t# note` drops its note) drops off a bare value;
- *  quoted values keep their #. */
+ *  quoted values keep their #, and a comment may follow the closing
+ *  quote — `"x" # note` is still x. */
 const yamlScalar = (s: string): string => {
   const t = s.trim()
   if (t.startsWith('"') || t.startsWith("'")) {
-    return unquote(t)
+    const q = t[0]!
+    let end = -1
+    for (let i = 1; i < t.length; i++) {
+      if (q === '"' && t[i] === '\\') {
+        i++
+      } else if (t[i] === q) {
+        end = i
+        break
+      }
+    }
+    return unquote(
+      end !== -1 && /^\s*(#.*)?$/.test(t.slice(end + 1)) ? t.slice(0, end + 1) : t
+    )
   }
-  const c = commentStart(t)
+  const c = commentStart(t, t.startsWith('['))
   return unquote(c === -1 ? t : t.slice(0, c))
 }
 

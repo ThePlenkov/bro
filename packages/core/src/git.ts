@@ -91,12 +91,13 @@ export type GitLogStamp =
 
 /** `git log -1` over pathspecs — the newest commit on `ref` touching
  *  any of them. `follow` opts into rename-following (spec side: a
- *  renamed spec isn't freshly written — `--diff-filter=r` drops the
- *  pure-rename commit so the stamp is the last content write, not the
- *  move; a rename that also rewrote content is R-classified and goes
- *  with it); git only honours it for a single path, so the scope side
- *  never passes it. Pathspecs are argv entries verbatim — magic like
- *  `:(exclude…)` is the caller's. */
+ *  renamed spec isn't freshly written — `-M100% --diff-filter=r` drops
+ *  the pure-rename commit so the stamp is the last content write, not
+ *  the move; a rename that also edited content is below the similarity
+ *  threshold, reads as a rewrite, and stamps that commit); git only
+ *  honours it for a single path, so the scope side never passes it.
+ *  Pathspecs are argv entries verbatim — magic like `:(exclude…)` is
+ *  the caller's. */
 export function gitLogStamp(
   dir: string,
   ref: string,
@@ -110,7 +111,7 @@ export function gitLogStamp(
   }
   const args = ['-C', dir, 'log', '-1', '--format=%H%x09%cI%x09%ct']
   if (opts?.follow === true) {
-    args.push('--follow', '--diff-filter=r')
+    args.push('--follow', '-M100%', '--diff-filter=r')
   }
   args.push('--end-of-options', ref, '--', ...pathspecs)
   const r = gitTry(args)

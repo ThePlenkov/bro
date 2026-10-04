@@ -14,7 +14,7 @@
  *  The spec's own path is always excluded (`:(exclude)<spec-path>`) —
  *  a `scope: specs/**` cannot mask its own drift. */
 import { existsSync, lstatSync, readFileSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join } from 'node:path'
+import { basename, dirname, isAbsolute, join, sep } from 'node:path'
 import {
   gitDriftRef,
   gitIsAncestor,
@@ -63,8 +63,9 @@ export function pickSpecPath(dir: string, nodes: SpecNode[], id: string): string
 /** Spec paths come from the filesystem (tree nodes use `join`, a `spec:`
  *  link is verbatim) — on Windows they carry `\`, while git touched
  *  paths and pathspecs are `/`-form. Normalize before a spec path
- *  becomes a pathspec or gets compared to one. */
-const gitPath = (p: string): string => p.replace(/\\/g, '/')
+ *  becomes a pathspec or gets compared to one. Windows-only: on POSIX a
+ *  `\` is a legal filename character, not a separator. */
+const gitPath = (p: string): string => (sep === '\\' ? p.replaceAll('\\', '/') : p)
 
 /** A scope entry that can't name a repo path — an absolute path or a
  *  `..` segment — makes the row unverifiable ("bad scope path"),
