@@ -520,7 +520,11 @@ function unionTrigger(a: LessonTrigger, b: LessonTrigger): LessonTrigger {
   if (paths !== undefined) match.paths = paths
   const tools = list(a.match?.tools, b.match?.tools)
   if (tools !== undefined) match.tools = tools
-  if (a.match?.errors === true || b.match?.errors === true) match.errors = true
+  // incoming wins when it defines errors; an existing defined value is
+  // preserved — dropping `errors: false` would let the lesson fire on
+  // failed traces
+  const errors = b.match?.errors ?? a.match?.errors
+  if (errors !== undefined) match.errors = errors
   return {
     on: [...new Set([...a.on, ...b.on])],
     ...(Object.keys(match).length > 0 ? { match } : {}),

@@ -31,6 +31,7 @@ import {
   probeTrigger,
   putLesson,
   recordProbeAnswer,
+  withStoreLock,
 } from '@broject/learn'
 import type {
   CaptureSource,
@@ -233,12 +234,16 @@ function cmdAdd(argv: string[]): void {
   // validation before checkBeads — a missing flag must report itself,
   // not a beads setup error
   checkBeads()
-  // lessonIds, not getLesson — a corrupt key squats its id too, and
-  // dedup must refuse it the same way
-  if (lessonIds().has(lesson.id)) {
-    fail(`${lesson.id} already exists — forget it first, or the rule is already stored`, 1)
-  }
-  putLesson(lesson)
+  // check-and-write under the store lock — a concurrent capture/probe
+  // merge between the read and the write could be overwritten otherwise
+  // (bd kv has no CAS). lessonIds, not getLesson — a corrupt key squats
+  // its id too, and dedup must refuse it the same way
+  withStoreLock(undefined, () => {
+    if (lessonIds().has(lesson.id)) {
+      fail(`${lesson.id} already exists — forget it first, or the rule is already stored`, 1)
+    }
+    putLesson(lesson)
+  })
   console.log(lesson.id)
 }
 
@@ -429,10 +434,13 @@ function cmdProbe(argv: string[]): void {
     if (stray !== undefined) {
       fail(`${stray.split('=')[0]} records an answer — it needs --lesson`)
     }
+    // flag errors must beat a beads setup error — validate --json
+    // before checkBeads (and before a miss can log a gap)
+    const json = boolFlag(argv, '--json')
     checkBeads()
     const res = probeQuestion(question, { ...(sessionId !== undefined ? { sessionId } : {}) })
     warnSkipped(res.skipped)
-    if (boolFlag(argv, '--json')) {
+    if (json) {
       console.log(JSON.stringify(res, null, 2))
       process.exit(res.hits.length > 0 ? 0 : 1)
     }

@@ -26,6 +26,7 @@ export {
   LessonStoreError,
   listLessons,
   putLesson,
+  withStoreLock,
 } from './store.ts'
 export type { LessonListing, SkippedEntry } from './store.ts'
 export { matchPath, parseTraceLine, triggerMatches } from './match.ts'

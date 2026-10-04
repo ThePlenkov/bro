@@ -238,7 +238,12 @@ function traceCandidates(
         const hitPaths = paths.filter((p) =>
           terms.some((t) => p.toLowerCase().includes(t))
         )
-        what = cmd !== '' ? [cmd, ...hitPaths].join(' ') : paths.join(' ')
+        const joined = cmd !== '' ? [cmd, ...hitPaths].join(' ') : paths.join(' ')
+        // a tool-only match (no command, no paths) keeps the raw line —
+        // the candidate must stay visible
+        if (joined !== '') {
+          what = joined
+        }
       } catch {
         // torn line — keep raw
       }
