@@ -608,10 +608,14 @@ export function finishWorktreeEnter(
       try {
         const releaseOcc = acquireAgentRegistryLock(opts.main.path)
         try {
-          const movedIn = Object.values(readAgentRegistry(opts.main.path)).some(
-            (e) =>
-              typeof e.worktree === 'string' && resolve(e.worktree) === resolve(path)
-          )
+          // the registry pins agent occupants; the in-tree claim marker
+          // pins a session that won a `work enter`/`stack push` stamp
+          // during our wait — neither is visible in the other plane
+          const movedIn =
+            Object.values(readAgentRegistry(opts.main.path)).some(
+              (e) =>
+                typeof e.worktree === 'string' && resolve(e.worktree) === resolve(path)
+            ) || worktreeClaim(path) !== undefined
           partialRemoved =
             !movedIn &&
             gitTry(['-C', opts.main.path, 'worktree', 'remove', '--force', path])

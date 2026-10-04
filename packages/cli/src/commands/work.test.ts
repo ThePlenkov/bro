@@ -229,6 +229,23 @@ describe('claimWorktree', () => {
       assert.equal(existsSync(tree), true)
     })
   })
+
+  test('a tree a sibling enter claimed via its in-tree marker is kept', () => {
+    const { root, main } = initRepo('bro-claim-timeout-')
+    const tree = join(root, 'main--w')
+    git(['worktree', 'add', '-q', tree, '-b', 'work/w'], main)
+    inside(main, root, () => {
+      heldClaimLock(main)
+      // a racing enter won the stamp during our wait — sessions don't
+      // write the agent registry, only the in-tree claim marker
+      const gd = join(main, '.git', 'worktrees', 'main--w', 'bro')
+      writeFileSync(join(gd, 'work'), `${Date.now()}\nw\n`)
+      const r = finishWorktreeEnter(finishOpts(main), createdFor(tree))
+      assert.equal(r.claimLockTimedOut, true)
+      assert.equal(r.partialRemoved, false)
+      assert.equal(existsSync(tree), true)
+    })
+  })
 })
 
 /** Real-repo enter: linked worktree on work/a + --stack/auto must base

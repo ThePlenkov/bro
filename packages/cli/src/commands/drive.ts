@@ -69,11 +69,13 @@ import {
 import { loadBroConfig } from '../plugins.ts'
 import {
   claimLockPath,
+  LIVE_MARKER_MS,
   mainWorktree,
   parseWorktreePorcelain,
-  worktreeGitDir,
+  worktreeClaim,
   worktreePathFor,
 } from './work.ts'
+export { LIVE_MARKER_MS, worktreeClaim }
 
 function usage(): never {
   console.error(`Usage: bro drive [--once] [--every [SEC]] [--no-merge] [--connector <name>] [--json]`)
@@ -169,10 +171,6 @@ export function branchSlug(branch: string): string {
 
 // --- occupancy --------------------------------------------------------------------
 
-/** The freshness horizon for `.work` markers — same as hooks.ts's
- *  LIVE_SESSION_MS: a marker younger than this names a live session. */
-export const LIVE_MARKER_MS = 24 * 60 * 60 * 1000
-
 /** A `.work` marker's detail may be a bead id, a slug, a worktree path
  *  or basename. Match conservatively — an over-match costs a skipped
  *  pass; an under-match costs a raced owner. */
@@ -246,28 +244,6 @@ export interface OccupancyCtx {
   scanProc?: (worktree: string) => ProcHit[]
   /** Injectable worktree-claim probe — tests pass a stub. */
   scanClaim?: (worktree: string) => string | undefined
-}
-
-/** The worktree's own claim marker — `<gitdir>/bro/work`, stamped by
- *  `bro work enter` (bro-pywx). Unlike .work marker details it needs no
- *  name matching: presence inside THIS tree is the claim. Returns the
- *  marker detail ('' when fresh but anonymous), undefined when absent
- *  or stale. */
-export function worktreeClaim(worktree: string, now: number = Date.now()): string | undefined {
-  try {
-    const gd = worktreeGitDir(worktree)
-    if (gd === null) {
-      return undefined
-    }
-    const marker = join(gd, 'bro', 'work')
-    const lines = readFileSync(marker, 'utf8').split('\n')
-    if (!markerLive(lines[0], statSync(marker).mtimeMs, LIVE_MARKER_MS, now)) {
-      return undefined
-    }
-    return lines[1]?.trim() ?? ''
-  } catch {
-    return undefined
-  }
 }
 
 /** Why a PR's worktree is owned right now — undefined = orphaned, the
