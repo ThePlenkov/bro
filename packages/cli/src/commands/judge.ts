@@ -260,14 +260,12 @@ function stats(argv: string[]): void {
   console.log(formatStats(s, { since, replay }))
 }
 
-/** `bro judge replay` — the dogfood pass (spec §CLI): re-judge archived
- *  threads from merged PRs on the live chain, journal the verdicts as
- *  replay:true rows carrying their inferred outcomes, then print the
- *  replay-scoped stats report. The journal rows ARE the artifact —
- *  replay writes them regardless of judge.mode (replay:true keeps
- *  them out of live stats either way). */
-async function replay(argv: string[]): Promise<void> {
-  const REPLAY_VALUE_FLAGS = new Set(['--pr', '--merged-since', '--limit', '--connector'])
+const REPLAY_VALUE_FLAGS = new Set(['--pr', '--merged-since', '--limit', '--connector'])
+
+/** Replay's option set — anything else exits 2 before a backend is
+ *  touched. `--name=value` counts as one arg; a bare value flag
+ *  consumes the next. */
+function checkReplayArgs(argv: string[]): void {
   const unknown: string[] = []
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]!
@@ -286,6 +284,16 @@ async function replay(argv: string[]): Promise<void> {
     console.error(`error: unknown replay option(s): ${unknown.join(', ')}`)
     process.exit(2)
   }
+}
+
+/** `bro judge replay` — the dogfood pass (spec §CLI): re-judge archived
+ *  threads from merged PRs on the live chain, journal the verdicts as
+ *  replay:true rows carrying their inferred outcomes, then print the
+ *  replay-scoped stats report. The journal rows ARE the artifact —
+ *  replay writes them regardless of judge.mode (replay:true keeps
+ *  them out of live stats either way). */
+async function replay(argv: string[]): Promise<void> {
+  checkReplayArgs(argv)
   const prFlags = flagAll(argv, '--pr')
   const prs = prFlags
     .flatMap((v) => v.split(','))
