@@ -225,7 +225,12 @@ describe('bro judge stats', () => {
   })
 
   test('a bad --since exits 2 — including Date.parse-parsable non-ISO', async () => {
-    for (const bad of ['not-a-date', 'January 1, 2025']) {
+    for (const bad of [
+      'not-a-date',
+      'January 1, 2025',
+      '2025-02-31', // Date.parse normalizes to Mar 3 — not a real date
+      '2025-01-01T00:00', // no Z/offset: parses in host TZ
+    ]) {
       const r = await capture(() => runJudgeCommand(['stats', '--since', bad]))
       assert.equal(r.code, 2)
       assert.match(r.err.join('\n'), /--since must be an ISO timestamp/)

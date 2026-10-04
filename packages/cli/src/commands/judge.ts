@@ -204,10 +204,20 @@ async function decide(argv: string[]): Promise<void> {
   }
 }
 
-/** ISO-8601 date or datetime — `YYYY-MM-DD` with optional `T` time and
- *  `Z`/offset. */
-const ISO_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/
-const isIso = (v: string): boolean => ISO_RE.test(v) && Number.isFinite(Date.parse(v))
+/** ISO-8601 date or datetime — `YYYY-MM-DD` with optional `T` time that
+ *  must carry a `Z`/offset so parsing is host-TZ independent. */
+const ISO_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2}))?$/
+const isIso = (v: string): boolean => {
+  if (!ISO_RE.test(v) || !Number.isFinite(Date.parse(v))) return false
+  // Date.parse normalizes out-of-range days ('2025-02-31' -> Mar 3) —
+  // reject dates that do not exist on the calendar
+  const year = Number(v.slice(0, 4))
+  const month = Number(v.slice(5, 7))
+  const day = Number(v.slice(8, 10))
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+  return day <= (daysInMonth[month - 1] ?? 0)
+}
 
 /** `bro judge stats` — reads only: the journal is the input, no
  *  backend is touched, so no auth and no connector resolution. */
