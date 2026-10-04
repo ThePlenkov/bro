@@ -97,7 +97,7 @@ function Home() {
           <p>
             No swarm. No extra sessions by default. No token bonfire. Your agent keeps its own session — bro hooks
             into its lifecycle and keeps it honest. When you do want many agents, one agents facade supervises
-            native detached processes, tmux panes, or Gas City. Watchers reach your session through a mailbox with
+            native detached processes, tmux panes, or Gas City. Watchers reach your session through a mailbox with{' '}
             <code>bro notify</code>, not a wait loop. <strong>Gates, not loops.</strong>
           </p>
         </section>
