@@ -299,7 +299,12 @@ describe('replayMergedThreads', () => {
   test('--prs explicit selection goes through mergedPrs ids', async () => {
     await withRepo(async (dir) => {
       const judge = fakeJudge()
-      const threads = new Map([[9, [thread('T9', { outdated: true })]]])
+      const threads = new Map([
+        [9, [thread('T9', { outdated: true })]],
+        // an unselected PR — a fall-through to the scan path would
+        // sweep it in and break the counts below
+        [10, [thread('T10', { outdated: true })]],
+      ])
       const res = await replayMergedThreads({
         dir,
         repo: 'acme/widgets',
