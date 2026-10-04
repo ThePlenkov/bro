@@ -49,7 +49,7 @@ capped by `budget` per session and `learn.maxInject` per probe.
   shared term can surface an unrelated lesson, so check it actually
   answers the question before skipping the investigation. On a real
   miss, finish the work and store the answer via `probe --lesson` —
-  the next session never has to pay for it again.
+  a later session whose context matches the trigger gets it for free.
 - **Capture at artifact close, dry-run first.** `capture --dry-run`
   renders the would-be lessons without writing — capture is a proposal
   surface. Re-capturing merges evidence and recomputes confidence
