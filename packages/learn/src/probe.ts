@@ -229,11 +229,16 @@ function traceCandidates(
       let what = line
       try {
         const e = JSON.parse(line) as { command?: unknown; paths?: unknown }
-        if (typeof e.command === 'string' && e.command !== '') {
-          what = e.command
-        } else if (Array.isArray(e.paths) && e.paths.length > 0) {
-          what = e.paths.filter((p): p is string => typeof p === 'string').join(' ')
-        }
+        const cmd = typeof e.command === 'string' ? e.command : ''
+        const paths = (Array.isArray(e.paths) ? e.paths : []).filter(
+          (p): p is string => typeof p === 'string'
+        )
+        // a term that matched only a path must stay visible next to
+        // the command — keep the matched paths, not the whole entry
+        const hitPaths = paths.filter((p) =>
+          terms.some((t) => p.toLowerCase().includes(t))
+        )
+        what = cmd !== '' ? [cmd, ...hitPaths].join(' ') : paths.join(' ')
       } catch {
         // torn line — keep raw
       }
@@ -293,16 +298,17 @@ function logGap(hooks: string, sid: string, question: string): boolean {
       return true
     }
     mkdirSync(dir, { recursive: true })
-    // count-check-append is one critical section, same as the
-    // connector's fired-set write — two parallel probes must not
-    // double-log one question
+    // count-check-append is one critical section — two parallel probes
+    // must not double-log one question. A failed lock drops the gap
+    // line rather than racing it: a lost line costs observability,
+    // a doubled one costs trust in the gap record
     try {
       return withFileLock(`${path}.lock`, run, {
         waitMs: 2_000,
         label: 'learn gap lock',
       })
     } catch {
-      return run()
+      return false
     }
   } catch {
     return false
@@ -340,8 +346,11 @@ export function probeQuestion(question: string, opts: ProbeQueryOptions = {}): P
   const sid = resolveSessionId(dir, opts.sessionId)
   const q = oneLine(question)
   const { lessons, skipped } = listLessons(dir)
-  const hits = rankLessons(q, lessons).slice(0, opts.limit ?? HIT_CAP)
-  if (hits.length > 0) {
+  // hit-vs-miss is decided on the full ranking — a `limit` slice can
+  // hide every hit and a false miss would log a phantom gap
+  const ranked = rankLessons(q, lessons)
+  const hits = ranked.slice(0, opts.limit ?? HIT_CAP)
+  if (ranked.length > 0) {
     return { question: q, hits, candidates: [], sessionId: sid, gapLogged: false, skipped }
   }
   const hooks = hooksDir(dir)
@@ -400,6 +409,14 @@ export function recordProbeAnswer(opts: RecordProbeOptions): RecordProbeResult {
     evidence,
     source: 'probe',
     origin: `probe:${question !== '' ? question : sid}`,
+    // the session+question pair cites one investigation — one evidence
+    // unit, not two; caller-supplied evidence is what lifts confidence
+    ...(opts.evidence !== undefined && opts.evidence.length > 0
+      ? {}
+      : { confidence: 'tentative' as const }),
+    // on a merge the existing rule keeps the store, but this question's
+    // terms must still index it — a repeat probe should find it
+    mergeTrigger: true,
   }
   // plan→apply is one critical section — the store lock keeps a
   // concurrent probe/capture from overwriting this write's merged

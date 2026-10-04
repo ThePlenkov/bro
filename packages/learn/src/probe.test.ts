@@ -290,6 +290,8 @@ describe('recordProbeAnswer', { skip: WIN32 }, () => {
       assert.equal(res.merged, false)
       const stored = getLesson(res.lesson.id, fx.dir)!
       assert.equal(stored.source, 'probe')
+      // session+question cite one investigation — tentative, not established
+      assert.equal(stored.confidence, 'tentative')
       assert.deepEqual(stored.evidence.slice(0, 2), [
         { kind: 'session', ref: 'sess-1' },
         { kind: 'text', ref: 'how does the merge slot work' },
@@ -315,7 +317,7 @@ describe('recordProbeAnswer', { skip: WIN32 }, () => {
       const second = recordProbeAnswer({
         question: 'q2',
         lesson: 'one PR merges at a time',
-        trigger,
+        trigger: { on: ['session-start' as const], match: { terms: ['slot'] } },
         dir: fx.dir,
         sessionId: 'sess-2',
       })
@@ -325,6 +327,10 @@ describe('recordProbeAnswer', { skip: WIN32 }, () => {
       assert.equal(stored.evidence.length, 4)
       // two independent evidences → established
       assert.equal(stored.confidence, 'established')
+      // mergeTrigger unions the probe's index into the existing rule —
+      // a repeat of the second question's context still finds it
+      assert.deepEqual(stored.trigger.on.sort(), ['prompt-submit', 'session-start'].sort())
+      assert.deepEqual(stored.trigger.match?.terms, ['merge', 'slot'])
     } finally {
       fx.restore()
     }

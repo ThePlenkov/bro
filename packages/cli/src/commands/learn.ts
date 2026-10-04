@@ -392,6 +392,18 @@ function cmdCapture(argv: string[]): void {
   }
 }
 
+/** Phase-2 flags — meaningless on a query; reject rather than drop. */
+const PHASE2_FLAGS: readonly string[] = [
+  '--on',
+  '--match-terms',
+  '--match-commands',
+  '--match-paths',
+  '--match-tools',
+  '--match-errors',
+  '--budget',
+  '--evidence',
+]
+
 /**
  * `probe <question>` — the two-phase query (spec §Probe).
  * Phase 1 ranks stored lessons against the question's terms: hits print
@@ -410,8 +422,14 @@ function cmdProbe(argv: string[]): void {
   }
   const sessionId = flag(argv, '--session')
   const answer = flag(argv, '--lesson')
-  checkBeads()
   if (answer === undefined) {
+    const stray = argv.find((a) =>
+      PHASE2_FLAGS.some((f) => a === f || a.startsWith(`${f}=`))
+    )
+    if (stray !== undefined) {
+      fail(`${stray.split('=')[0]} records an answer — it needs --lesson`)
+    }
+    checkBeads()
     const res = probeQuestion(question, { ...(sessionId !== undefined ? { sessionId } : {}) })
     warnSkipped(res.skipped)
     if (boolFlag(argv, '--json')) {
@@ -435,11 +453,16 @@ function cmdProbe(argv: string[]): void {
     )
     process.exit(1)
   }
-  // phase 2 — trigger: explicit flags win; absent them the question's
-  // own terms index the answer (the question IS the trigger)
+  // phase 2 — validate before touching the store, as cmdAdd does:
+  // a malformed flag must report the flag, not a beads setup error.
+  // Trigger: explicit flags win; absent them the question's own terms
+  // index the answer (the question IS the trigger). A bare --budget is
+  // a policy on that trigger, never a reason to fire on everything.
   const on = hookEvents(flagAll(argv, '--on'))
   const match = matchFlags(argv)
   const budget = budgetFlag(argv)
+  const extra = evidence(flagAll(argv, '--evidence'))
+  checkBeads()
   let trigger: LessonTrigger | undefined
   if (on.length > 0) {
     trigger = {
@@ -447,21 +470,21 @@ function cmdProbe(argv: string[]): void {
       ...(Object.keys(match).length > 0 ? { match } : {}),
       ...(budget !== undefined ? { budget } : {}),
     }
-  } else if (Object.keys(match).length > 0 || budget !== undefined) {
+  } else if (Object.keys(match).length > 0) {
     // structured keys still evaluate on these events — both probes'
     // contexts carry a trace tail
     trigger = {
       on: ['session-start', 'prompt-submit'],
-      ...(Object.keys(match).length > 0 ? { match } : {}),
+      match,
       ...(budget !== undefined ? { budget } : {}),
     }
   } else {
-    trigger = probeTrigger(question)
-    if (trigger === undefined) {
+    const base = probeTrigger(question)
+    if (base === undefined) {
       fail('probe needs a trigger — give --on/--match-* or a question with usable terms')
     }
+    trigger = { ...base, ...(budget !== undefined ? { budget } : {}) }
   }
-  const extra = evidence(flagAll(argv, '--evidence'))
   const res = recordProbeAnswer({
     question,
     lesson: answer,

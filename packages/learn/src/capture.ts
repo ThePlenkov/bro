@@ -163,6 +163,13 @@ export interface CaptureCandidate {
   /** a closed+routed artifact already held under its gate (spec
    *  confidence ladder: one gated evidence is 'established') */
   heldUnderGate?: boolean
+  /** pins a fresh write's confidence instead of deriving it — for
+   *  sources whose whole evidence set is one investigation citing
+   *  itself. Merges always derive from the union. */
+  confidence?: Confidence
+  /** union this trigger into the existing lesson's on merge — a repeat
+   *  of the new context must still index the rule it joined */
+  mergeTrigger?: boolean
 }
 
 export interface CaptureSkip {
@@ -498,6 +505,29 @@ function unionEvidence(a: Evidence[], b: Evidence[]): Evidence[] {
   return [...new Map([...a, ...b].map((e) => [`${e.kind}:${e.ref}`, e])).values()]
 }
 
+/** Union two triggers for a merge — `on` and each match list deduped,
+ *  errors OR'd; budget keeps the existing lesson's value (a firing
+ *  policy, not index material). */
+function unionTrigger(a: LessonTrigger, b: LessonTrigger): LessonTrigger {
+  const list = (x?: string[], y?: string[]): string[] | undefined =>
+    x === undefined && y === undefined ? undefined : [...new Set([...(x ?? []), ...(y ?? [])])]
+  const match: TriggerMatch = {}
+  const terms = list(a.match?.terms, b.match?.terms)
+  if (terms !== undefined) match.terms = terms
+  const commands = list(a.match?.commands, b.match?.commands)
+  if (commands !== undefined) match.commands = commands
+  const paths = list(a.match?.paths, b.match?.paths)
+  if (paths !== undefined) match.paths = paths
+  const tools = list(a.match?.tools, b.match?.tools)
+  if (tools !== undefined) match.tools = tools
+  if (a.match?.errors === true || b.match?.errors === true) match.errors = true
+  return {
+    on: [...new Set([...a.on, ...b.on])],
+    ...(Object.keys(match).length > 0 ? { match } : {}),
+    ...(a.budget !== undefined ? { budget: a.budget } : {}),
+  }
+}
+
 interface PlanCtx {
   /** corrupt keys squatting lesson ids — never merge into unreadable data */
   corrupt: Set<string>
@@ -514,7 +544,8 @@ function foldNew(ctx: PlanCtx, id: string, c: CaptureCandidate): void {
     trigger: c.trigger,
     lesson: c.lesson,
     evidence: c.evidence,
-    confidence: deriveConfidence(c.evidence, { heldUnderGate: c.heldUnderGate === true }),
+    confidence:
+      c.confidence ?? deriveConfidence(c.evidence, { heldUnderGate: c.heldUnderGate === true }),
     source: c.source,
     createdAt: new Date().toISOString(),
   }
@@ -531,11 +562,15 @@ function foldMerge(ctx: PlanCtx, id: string, existing: Lesson, c: CaptureCandida
   )
   const derived = deriveConfidence(merged, { heldUnderGate: c.heldUnderGate === true })
   const upgraded = CONFIDENCE_RANK[derived] > CONFIDENCE_RANK[existing.confidence]
-  if (added.length === 0 && !upgraded) {
+  const trigger =
+    c.mergeTrigger === true ? unionTrigger(existing.trigger, c.trigger) : existing.trigger
+  const widened = JSON.stringify(trigger) !== JSON.stringify(existing.trigger)
+  if (added.length === 0 && !upgraded && !widened) {
     return // already captured — nothing new to teach the store
   }
   const lesson: Lesson = {
     ...existing,
+    trigger,
     evidence: merged,
     confidence: upgraded ? derived : existing.confidence,
     updatedAt: new Date().toISOString(),
