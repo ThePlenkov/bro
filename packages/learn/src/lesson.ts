@@ -193,14 +193,14 @@ export function deriveConfidence(
   return 'tentative'
 }
 
-const slugify = (s: string): string =>
-  s
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+/, '')
-    .replace(/-+$/, '')
-    .slice(0, 40)
-    .replace(/-+$/, '')
+/** join('-') emits single dashes only — the slice can leave at most one
+ *  trailing '-', so no trailing-repeat regex is needed (CodeQL: a
+ *  `+-quantified` pattern on uncontrolled input is a polynomial-regex
+ *  finding). */
+const slugify = (s: string): string => {
+  const slug = (s.toLowerCase().match(/[a-z0-9]+/g) ?? []).join('-').slice(0, 40)
+  return slug.endsWith('-') ? slug.slice(0, -1) : slug
+}
 
 /**
  * Lesson id from its rule text — `learn-<slug>`, stable so the same

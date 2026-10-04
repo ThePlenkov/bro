@@ -62,7 +62,7 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
 
 const learnPositionals = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
 
-const fail = (msg: string, code = 2): never => {
+function fail(msg: string, code = 2): never {
   console.error(`error: ${msg}`)
   process.exit(code)
 }
