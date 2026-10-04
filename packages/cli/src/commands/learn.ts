@@ -291,7 +291,11 @@ function captureSources(argv: string[]): CaptureSource[] | undefined {
 /** Boolean flags accept the bare and `=true|false` spellings — anything
  *  else fails closed rather than silently writing on a typo'd value. */
 function boolFlag(argv: string[], name: string): boolean {
-  const arg = argv.find((a) => a === name || a.startsWith(`${name}=`))
+  const occurrences = argv.filter((a) => a === name || a.startsWith(`${name}=`))
+  if (occurrences.length > 1) {
+    fail(`${name} may be given only once`)
+  }
+  const arg = occurrences[0]
   if (arg === undefined) return false
   if (arg === name) return true
   const v = arg.slice(name.length + 1)
@@ -311,6 +315,9 @@ function cmdCapture(argv: string[]): void {
   const json = boolFlag(argv, '--json')
   if (mol === undefined && sources?.includes('mol')) {
     fail('--source mol requires --mol <id> — name the molecule to harvest')
+  }
+  if (mol !== undefined && sources !== undefined && !sources.includes('mol')) {
+    fail('--mol given but mol is not in --source — the molecule would never run')
   }
   checkBeads()
   const { plan } = captureLessons({

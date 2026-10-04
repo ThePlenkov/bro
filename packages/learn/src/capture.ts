@@ -425,6 +425,9 @@ interface MolShow {
 function harvestMol(molId: string, dir?: string): Harvest {
   const out: Harvest = { candidates: [], skipped: [] }
   const mol = bdJson<MolShow>(['mol', 'show', molId], dir)
+  if (typeof mol?.root?.status !== 'string' || !Array.isArray(mol.issues)) {
+    throw new Error(`mol show ${molId} returned an unexpected shape — a drifted bd payload is not a molecule`)
+  }
   if (!CLOSED.has(mol.root.status)) {
     throw new Error(`molecule ${molId} is ${mol.root.status} — capture harvests closed molecules`)
   }
@@ -612,6 +615,9 @@ export function captureLessons(opts: CaptureOptions = {}): CaptureReport {
     opts.sources ??
       (opts.mol !== undefined ? ['mol' as const] : CAPTURE_SOURCES.filter((s) => s !== 'mol'))
   )
+  if (opts.mol !== undefined && opts.sources !== undefined && !sources.has('mol')) {
+    throw new Error('--mol given but mol is not in --source — the molecule would never run')
+  }
   const harvests: Harvest[] = []
   if (sources.has('drill')) harvests.push(harvestDrill(opts.dir))
   if (sources.has('retro')) harvests.push(harvestRetro(opts.dir))

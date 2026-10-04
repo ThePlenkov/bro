@@ -141,7 +141,8 @@ for (let i = 0; i < args.length; i++) {
     if (args[i + 1] !== undefined && !args[i + 1].startsWith('-')) flags[k] = args[++i]
     else flags[k] = true
   } else if (/^-\\w$/.test(t) && args[i + 1] !== undefined && !args[i + 1].startsWith('-')) {
-    flags[t.slice(1)] = args[++i]
+    const k = t.slice(1)
+    flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[i])
   } else pos.push(t)
 }
 const db = load()
