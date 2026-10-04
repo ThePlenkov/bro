@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyArmCommand, classifyArmCommands, classifyExecCommand, classifySkillMutation, isSelfToolCommand, readArmed, armDetail, otherLiveWork } from './hooks.ts'
+import { classifyArmCommand, classifyArmCommands, classifyExecCommand, classifySkillMutation, isSelfToolCommand, readArmed, armDetail, otherLiveWork, traceEntry } from './hooks.ts'
 
 describe('classifyExecCommand', () => {
   test('detects gh pr merge', () => {
@@ -235,6 +235,33 @@ describe('armDetail', () => {
       assert.equal(armDetail(cmd, aspect), want)
     })
   }
+})
+
+describe('traceEntry', () => {
+  test('maps the fields each tool family carries', () => {
+    assert.deepEqual(traceEntry({
+      tool_name: 'exec',
+      tool_input: { command: 'git push' },
+      tool_response: { success: true },
+    }, 7), { ts: 7, tool: 'exec', command: 'git push', ok: true })
+    assert.deepEqual(traceEntry({
+      tool_name: 'edit',
+      tool_input: { file_path: '/a/b.ts' },
+      tool_response: { success: false },
+    }, 7), { ts: 7, tool: 'edit', paths: ['/a/b.ts'], ok: false })
+    assert.deepEqual(traceEntry({
+      tool_name: 'write',
+      tool_input: { path: '/a/c.ts', files: ['/a/d.ts', 9] },
+    }, 7), { ts: 7, tool: 'write', paths: ['/a/c.ts', '/a/d.ts'] })
+  })
+
+  test('fields the payload lacks stay absent', () => {
+    assert.deepEqual(traceEntry({}, 7), { ts: 7 })
+    assert.deepEqual(
+      traceEntry({ tool_input: { command: 42 }, tool_response: {} }, 7),
+      { ts: 7 }
+    )
+  })
 })
 
 describe('otherLiveWork', () => {

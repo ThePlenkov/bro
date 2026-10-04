@@ -28,6 +28,7 @@ import { CONVOY_PLAN_VERSION, parseConvoyPlan, type ConvoyPlan } from '@broject/
 import { DEBT_PLAN_VERSION, debtConnector, parseDebtPlan, type DebtPlan } from '@broject/debt'
 import { DRILL_PLAN_VERSION, drillConnector, drillSection, parseDrillPlan, type DrillPlan } from '@broject/drill'
 import { parsePlanDoc, RETRO_PLAN_VERSION, type RetroPlan } from '@broject/retro'
+import { learnConnector, learnSection } from '@broject/learn'
 import { loopSection } from '@broject/loop'
 import { githubConnector } from '@broject/github'
 import { gitlabConnector } from '@broject/gitlab'
@@ -72,6 +73,7 @@ registerConnector(actConnector)
 registerConnector(debtConnector)
 registerConnector(sddConnector)
 registerConnector(notifyConnector)
+registerConnector(learnConnector)
 // specs facade providers — registry order is detection precedence:
 // native first (its matchDir claims the configured sdd.dir), then
 // tool-layout matchers, agent last (explicit pick only, never detects)
@@ -221,11 +223,12 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'learn',
-    // the bd-kv lesson store; matcher/capture/probe/promote and the
-    // skill land with bro-f4ot.1.3+ — the config section waits for the
-    // connector that consumes it
+    // lesson store + the connector that injects them; capture/probe/
+    // promote and the skill land with bro-f4ot.1.4+
     summary: 'Self-improvement loop — lesson store: add|list|show|forget',
     run: runLearnCommand,
+    configKey: 'learn',
+    configSchema: learnSection,
   }),
   definePlugin({
     name: 'docs',
