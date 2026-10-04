@@ -341,7 +341,14 @@ describe('post-tool', () => {
       { tool: 'bash', sessionID: 'ses_1' },
       { output: 'ok', metadata: { exit: 0, truncated: false } }
     )
-    assert.deepEqual(calls()[0]?.payload.tool_response, { success: true })
+    await hooks['tool.execute.after']?.(
+      { tool: 'bash', sessionID: 'ses_1' },
+      { output: 'ok' }
+    )
+    assert.deepEqual(
+      calls().map((call) => call.payload.tool_response),
+      [{ success: true }, { success: true }]
+    )
   })
 })
 

@@ -176,18 +176,19 @@ function siblingCli(): string | null {
   return null
 }
 
-/** Does a PATH `bro` actually answer `bro hooks`? Without an event the hook
- *  command is a silent no-op, so exit 0 is the probe — an older bro without
- *  the subcommand fails it instead of failing every hook. Same discriminator
- *  hooks/run.sh uses. */
-function hasHooksCommand(): Promise<boolean> {
+/** Spawn `cmd args`, resolve true iff it exits 0 within the hook budget. One
+ *  probe serves both launch tiers: `bro hooks` answers "is this a bro that
+ *  speaks the hook contract", `node --version` answers "can the bundled CLI
+ *  even start". A spawn error, timeout, or nonzero exit is "no" — selecting
+ *  a command that cannot launch is worse than falling through to the next
+ *  tier. */
+function exitsZero(cmd: string, args: string[]): Promise<boolean> {
   return new Promise((resolve) => {
     let child: ChildProcess
     try {
-      // PATH lookup is the point of this tier — a partial install has no
-      // bundled CLI, and the probe below verifies the answer before any hook
-      // trusts it
-      child = spawn('bro', ['hooks'], { stdio: ['pipe', 'ignore', 'ignore'], detached: process.platform !== 'win32' }) // NOSONAR typescript:S4036
+      // PATH lookup is the point of both tiers — the probe verifies the
+      // answer before any hook trusts it
+      child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'ignore'], detached: process.platform !== 'win32' }) // NOSONAR typescript:S4036
     } catch {
       resolve(false)
       return
@@ -204,6 +205,14 @@ function hasHooksCommand(): Promise<boolean> {
     child.stdin?.on('error', () => {})
     child.stdin?.end('')
   })
+}
+
+/** Does a PATH `bro` actually answer `bro hooks`? Without an event the hook
+ *  command is a silent no-op, so exit 0 is the probe — an older bro without
+ *  the subcommand fails it instead of failing every hook. Same discriminator
+ *  hooks/run.sh uses. */
+function hasHooksCommand(): Promise<boolean> {
+  return exitsZero('bro', ['hooks'])
 }
 
 /** SIGKILL a hung child on a timer. The spawns below are detached, so the
@@ -247,7 +256,11 @@ async function resolveCommand(options: PluginOptions | undefined): Promise<Comma
     }
   }
   const entry = siblingCli()
-  if (entry) {
+  // a bundled CLI still needs `node` on PATH to launch, and opencode itself
+  // is a compiled binary that guarantees no such thing — without the probe
+  // this tier would win over a working PATH `bro` and every hook would fail
+  // open into silence
+  if (entry && (await exitsZero(jsRuntime(), ['--version']))) {
     return { cmd: jsRuntime(), args: [entry] }
   }
   // partial install — no bundled CLI next to the plugin. Fall back to PATH,
