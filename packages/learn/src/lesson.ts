@@ -95,67 +95,13 @@ function stringList(v: unknown): boolean {
   return Array.isArray(v) && v.length > 0 && v.every((s) => isNonEmptyStr(s))
 }
 
-/**
- * Schema check — returns the list of problems, empty when valid.
- * Shared by the write path (fail closed) and the read path (fail open:
- * a non-empty result means "skip this entry, warn, keep going").
- */
-export function lessonProblems(v: unknown): string[] {
+function scalarProblems(v: Record<string, unknown>): string[] {
   const problems: string[] = []
-  if (!isObj(v)) {
-    return ['not an object']
-  }
   if (!isNonEmptyStr(v.id) || !/^learn-\S/.test(v.id)) {
     problems.push('id must be a non-empty "learn-<slug>" string')
   }
   if (!isNonEmptyStr(v.lesson)) {
     problems.push('lesson must be a non-empty string')
-  }
-  const t = v.trigger
-  if (!isObj(t)) {
-    problems.push('trigger must be an object')
-  } else {
-    if (
-      !Array.isArray(t.on) ||
-      t.on.length === 0 ||
-      !t.on.every((e) => (HOOK_EVENTS as readonly string[]).includes(e as string))
-    ) {
-      problems.push(`trigger.on must be a non-empty list of: ${HOOK_EVENTS.join(', ')}`)
-    }
-    if (t.match !== undefined) {
-      if (!isObj(t.match)) {
-        problems.push('trigger.match must be an object')
-      } else {
-        for (const key of ['terms', 'commands', 'paths', 'tools'] as const) {
-          if (t.match[key] !== undefined && !stringList(t.match[key])) {
-            problems.push(`trigger.match.${key} must be a list of non-empty strings`)
-          }
-        }
-        if (t.match.errors !== undefined && typeof t.match.errors !== 'boolean') {
-          problems.push('trigger.match.errors must be a boolean')
-        }
-      }
-    }
-    if (
-      t.budget !== undefined &&
-      (typeof t.budget !== 'number' || !Number.isInteger(t.budget) || t.budget < 1)
-    ) {
-      problems.push('trigger.budget must be a positive integer')
-    }
-  }
-  if (!Array.isArray(v.evidence) || v.evidence.length === 0) {
-    problems.push('evidence must be a non-empty list')
-  } else {
-    for (const e of v.evidence) {
-      if (
-        !isObj(e) ||
-        !(EVIDENCE_KINDS as readonly string[]).includes(e.kind as string) ||
-        !isNonEmptyStr(e.ref)
-      ) {
-        problems.push(`evidence items must be {kind: ${EVIDENCE_KINDS.join('|')}, ref: string}`)
-        break
-      }
-    }
   }
   if (!(CONFIDENCES as readonly string[]).includes(v.confidence as string)) {
     problems.push(`confidence must be one of: ${CONFIDENCES.join(', ')}`)
@@ -173,6 +119,75 @@ export function lessonProblems(v: unknown): string[] {
     problems.push('promotedTo must be a string when present')
   }
   return problems
+}
+
+function matchProblems(m: unknown): string[] {
+  if (!isObj(m)) {
+    return ['trigger.match must be an object']
+  }
+  const problems: string[] = []
+  for (const key of ['terms', 'commands', 'paths', 'tools'] as const) {
+    if (m[key] !== undefined && !stringList(m[key])) {
+      problems.push(`trigger.match.${key} must be a list of non-empty strings`)
+    }
+  }
+  if (m.errors !== undefined && typeof m.errors !== 'boolean') {
+    problems.push('trigger.match.errors must be a boolean')
+  }
+  return problems
+}
+
+function triggerProblems(t: unknown): string[] {
+  if (!isObj(t)) {
+    return ['trigger must be an object']
+  }
+  const problems: string[] = []
+  if (
+    !Array.isArray(t.on) ||
+    t.on.length === 0 ||
+    !t.on.every((e) => (HOOK_EVENTS as readonly string[]).includes(e as string))
+  ) {
+    problems.push(`trigger.on must be a non-empty list of: ${HOOK_EVENTS.join(', ')}`)
+  }
+  if (t.match !== undefined) {
+    problems.push(...matchProblems(t.match))
+  }
+  if (
+    t.budget !== undefined &&
+    (typeof t.budget !== 'number' || !Number.isInteger(t.budget) || t.budget < 1)
+  ) {
+    problems.push('trigger.budget must be a positive integer')
+  }
+  return problems
+}
+
+function evidenceProblems(ev: unknown): string[] {
+  if (!Array.isArray(ev) || ev.length === 0) {
+    return ['evidence must be a non-empty list']
+  }
+  const itemOk = (e: unknown): boolean =>
+    isObj(e) &&
+    (EVIDENCE_KINDS as readonly string[]).includes(e.kind as string) &&
+    isNonEmptyStr(e.ref)
+  return ev.every(itemOk)
+    ? []
+    : [`evidence items must be {kind: ${EVIDENCE_KINDS.join('|')}, ref: string}`]
+}
+
+/**
+ * Schema check — returns the list of problems, empty when valid.
+ * Shared by the write path (fail closed) and the read path (fail open:
+ * a non-empty result means "skip this entry, warn, keep going").
+ */
+export function lessonProblems(v: unknown): string[] {
+  if (!isObj(v)) {
+    return ['not an object']
+  }
+  return [
+    ...scalarProblems(v),
+    ...triggerProblems(v.trigger),
+    ...evidenceProblems(v.evidence),
+  ]
 }
 
 /** Type-guard form of {@link lessonProblems}. */
