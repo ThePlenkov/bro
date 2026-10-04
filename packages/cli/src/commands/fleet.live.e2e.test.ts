@@ -51,6 +51,18 @@ function runLive(args: string[], opts: { cwd: string; env?: Record<string, strin
   return { proc, out: () => out, done }
 }
 
+/** Bound a quit wait — a wedged live mode must fail the assert and let
+ *  finally kill `script`, never park on a pending `done` (the test
+ *  timeout reports but does not cancel the callback). */
+async function boundedDone(live: LiveProc, ms = 15_000): Promise<{ code: number | null; out: string }> {
+  const r = await Promise.race([
+    live.done.then((v) => ({ ok: true as const, v })),
+    new Promise<{ ok: false }>((res) => setTimeout(() => res({ ok: false }), ms)),
+  ])
+  assert.equal(r.ok, true, 'fleet --live did not exit within the bound')
+  return r.ok ? r.v : { code: null, out: live.out() }
+}
+
 async function waitFor(cond: () => boolean, ms = 15_000): Promise<boolean> {
   const deadline = Date.now() + ms
   while (Date.now() < deadline) {
@@ -126,7 +138,7 @@ describe('bro fleet --live under a PTY', () => {
 
       // q quits: clean exit, primary screen restored
       live.proc.stdin!.write('q')
-      const { code, out } = await live.done
+      const { code, out } = await boundedDone(live)
       assert.equal(code, 0, out)
       assert.ok(out.includes(ALT_OFF), 'expected alt-screen restore on quit')
       assert.ok(
@@ -149,7 +161,7 @@ describe('bro fleet --live under a PTY', () => {
     try {
       assert.equal(await waitFor(() => live.out().includes(HEADER)), true, live.out())
       live.proc.stdin!.write('\x03') // raw mode delivers ^C as data
-      const { code, out } = await live.done
+      const { code, out } = await boundedDone(live)
       assert.equal(code, 0, out)
       assert.ok(out.includes(ALT_OFF), 'expected alt-screen restore on ^C')
     } finally {
