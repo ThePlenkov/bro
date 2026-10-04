@@ -227,6 +227,7 @@ export const PLUGINS: BroPlugin[] = [
     // promote is still pending (spec: bro-f4ot.1-learn.md)
     summary: 'Self-improvement loop — lessons: add|list|show|forget|capture|probe',
     run: runLearnCommand,
+    skill: 'learn',
     configKey: 'learn',
     configSchema: learnSection,
   }),
