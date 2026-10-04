@@ -409,6 +409,66 @@ const PHASE2_FLAGS: readonly string[] = [
   '--evidence',
 ]
 
+/** Phase 1 — the store-first query. Never returns. */
+function probePhase1(argv: string[], question: string, sessionId?: string): never {
+  const stray = argv.find((a) => PHASE2_FLAGS.some((f) => a === f || a.startsWith(`${f}=`)))
+  if (stray !== undefined) {
+    fail(`${stray.split('=')[0]} records an answer — it needs --lesson`)
+  }
+  // flag errors must beat a beads setup error — validate --json
+  // before checkBeads (and before a miss can log a gap)
+  const json = boolFlag(argv, '--json')
+  checkBeads()
+  const res = probeQuestion(question, { ...(sessionId !== undefined ? { sessionId } : {}) })
+  warnSkipped(res.skipped)
+  if (json) {
+    console.log(JSON.stringify(res, null, 2))
+    process.exit(res.hits.length > 0 ? 0 : 1)
+  }
+  if (res.hits.length > 0) {
+    for (const h of res.hits) {
+      const l = h.lesson
+      console.log(`${l.id}\t${l.confidence}\t${l.source}\t${l.trigger.on.join(',')}\t${l.lesson}`)
+    }
+    process.exit(0)
+  }
+  console.log(`probe: ${res.question}`)
+  for (const c of res.candidates) {
+    console.log(`  ${c}`)
+  }
+  console.log(
+    'no stored lesson — investigate, then store the answer: ' +
+      `bro learn probe "${res.question}" --lesson "…"`
+  )
+  process.exit(1)
+}
+
+/** The phase-2 trigger — explicit flags win; absent them the question's
+ *  own terms index the answer (the question IS the trigger). A bare
+ *  --budget is a policy on that trigger, never a reason to fire on
+ *  everything. */
+function probePhase2Trigger(
+  question: string,
+  on: HookEvent[],
+  match: TriggerMatch,
+  budget?: number
+): LessonTrigger {
+  if (on.length > 0 || Object.keys(match).length > 0) {
+    return {
+      // structured keys still evaluate on these events — both probes'
+      // contexts carry a trace tail
+      on: on.length > 0 ? on : ['session-start', 'prompt-submit'],
+      ...(Object.keys(match).length > 0 ? { match } : {}),
+      ...(budget !== undefined ? { budget } : {}),
+    }
+  }
+  const base = probeTrigger(question)
+  if (base === undefined) {
+    fail('probe needs a trigger — give --on/--match-* or a question with usable terms')
+  }
+  return { ...base, ...(budget !== undefined ? { budget } : {}) }
+}
+
 /**
  * `probe <question>` — the two-phase query (spec §Probe).
  * Phase 1 ranks stored lessons against the question's terms: hits print
@@ -428,75 +488,19 @@ function cmdProbe(argv: string[]): void {
   const sessionId = flag(argv, '--session')
   const answer = flag(argv, '--lesson')
   if (answer === undefined) {
-    const stray = argv.find((a) =>
-      PHASE2_FLAGS.some((f) => a === f || a.startsWith(`${f}=`))
-    )
-    if (stray !== undefined) {
-      fail(`${stray.split('=')[0]} records an answer — it needs --lesson`)
-    }
-    // flag errors must beat a beads setup error — validate --json
-    // before checkBeads (and before a miss can log a gap)
-    const json = boolFlag(argv, '--json')
-    checkBeads()
-    const res = probeQuestion(question, { ...(sessionId !== undefined ? { sessionId } : {}) })
-    warnSkipped(res.skipped)
-    if (json) {
-      console.log(JSON.stringify(res, null, 2))
-      process.exit(res.hits.length > 0 ? 0 : 1)
-    }
-    if (res.hits.length > 0) {
-      for (const h of res.hits) {
-        const l = h.lesson
-        console.log(`${l.id}\t${l.confidence}\t${l.source}\t${l.trigger.on.join(',')}\t${l.lesson}`)
-      }
-      return
-    }
-    console.log(`probe: ${res.question}`)
-    for (const c of res.candidates) {
-      console.log(`  ${c}`)
-    }
-    console.log(
-      'no stored lesson — investigate, then store the answer: ' +
-        `bro learn probe "${res.question}" --lesson "…"`
-    )
-    process.exit(1)
+    probePhase1(argv, question, sessionId)
   }
   // phase 2 — validate before touching the store, as cmdAdd does:
-  // a malformed flag must report the flag, not a beads setup error.
-  // Trigger: explicit flags win; absent them the question's own terms
-  // index the answer (the question IS the trigger). A bare --budget is
-  // a policy on that trigger, never a reason to fire on everything.
+  // a malformed flag must report the flag, not a beads setup error
   const on = hookEvents(flagAll(argv, '--on'))
   const match = matchFlags(argv)
   const budget = budgetFlag(argv)
   const extra = evidence(flagAll(argv, '--evidence'))
   checkBeads()
-  let trigger: LessonTrigger | undefined
-  if (on.length > 0) {
-    trigger = {
-      on,
-      ...(Object.keys(match).length > 0 ? { match } : {}),
-      ...(budget !== undefined ? { budget } : {}),
-    }
-  } else if (Object.keys(match).length > 0) {
-    // structured keys still evaluate on these events — both probes'
-    // contexts carry a trace tail
-    trigger = {
-      on: ['session-start', 'prompt-submit'],
-      match,
-      ...(budget !== undefined ? { budget } : {}),
-    }
-  } else {
-    const base = probeTrigger(question)
-    if (base === undefined) {
-      fail('probe needs a trigger — give --on/--match-* or a question with usable terms')
-    }
-    trigger = { ...base, ...(budget !== undefined ? { budget } : {}) }
-  }
   const res = recordProbeAnswer({
     question,
     lesson: answer,
-    trigger,
+    trigger: probePhase2Trigger(question, on, match, budget),
     evidence: extra,
     ...(sessionId !== undefined ? { sessionId } : {}),
   })

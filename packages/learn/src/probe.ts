@@ -30,7 +30,7 @@ import {
   readFileSync,
   statSync,
 } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { gitTry, markerLive, taskStore, withFileLock } from '@broject/core'
 import {
   applyCapture,
@@ -185,37 +185,68 @@ export function rankLessons(question: string, lessons: Lesson[]): ProbeHit[] {
   )
 }
 
+/** A trace line → the rerun-able candidate text: the command plus the
+ *  paths that carry a question term; a tool-only match (no command, no
+ *  paths) and torn lines keep the raw entry — the candidate must stay
+ *  visible. */
+function traceLineCandidate(line: string, terms: string[]): string {
+  try {
+    const e = JSON.parse(line) as { command?: unknown; paths?: unknown }
+    const cmd = typeof e.command === 'string' ? e.command : ''
+    const paths = (Array.isArray(e.paths) ? e.paths : []).filter(
+      (p): p is string => typeof p === 'string'
+    )
+    // a term that matched only a path must stay visible next to the
+    // command — keep the matched paths, not the whole entry
+    const hitPaths = paths.filter((p) => terms.some((t) => p.toLowerCase().includes(t)))
+    const joined = cmd !== '' ? [cmd, ...hitPaths].join(' ') : paths.join(' ')
+    return joined !== '' ? joined : line
+  } catch {
+    return line // torn line — keep raw
+  }
+}
+
+/** The trace file a probe reads — the probing session's own journal
+ *  first; when it hasn't journaled yet (fresh session, or a 'cli'
+ *  probe) the newest trace file on disk is the fallback. */
+function traceFile(hooks: string, sid: string): string | null {
+  const dir = join(hooks, 'trace')
+  const own = join(dir, `${safeId(sid)}.jsonl`)
+  try {
+    if (existsSync(own)) {
+      return own
+    }
+    let best: { path: string; mtime: number } | null = null
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith('.jsonl')) {
+        continue
+      }
+      const p = join(dir, f)
+      const mtime = statSync(p).mtimeMs
+      if (best === null || mtime > best.mtime) {
+        best = { path: p, mtime }
+      }
+    }
+    return best?.path ?? null
+  } catch {
+    return null // no trace dir yet
+  }
+}
+
 /** Trace lines worth investigating — journal entries whose command or
- *  touched paths carry a question term. The probing session's own
- *  journal first; when it hasn't journaled yet (fresh session, or a
- *  'cli' probe) the newest trace file on disk is the fallback. */
+ *  touched paths carry a question term. */
 function traceCandidates(
   hooks: string,
   sid: string,
   terms: string[],
   cap: number
 ): string[] {
-  const dir = join(hooks, 'trace')
-  let file = join(dir, `${safeId(sid)}.jsonl`)
+  const file = traceFile(hooks, sid)
+  if (file === null) {
+    return []
+  }
+  const out: string[] = []
   try {
-    if (!existsSync(file)) {
-      let best: { path: string; mtime: number } | null = null
-      for (const f of readdirSync(dir)) {
-        if (!f.endsWith('.jsonl')) {
-          continue
-        }
-        const p = join(dir, f)
-        const mtime = statSync(p).mtimeMs
-        if (best === null || mtime > best.mtime) {
-          best = { path: p, mtime }
-        }
-      }
-      if (best === null) {
-        return []
-      }
-      file = best.path
-    }
-    const out: string[] = []
     for (const line of readFileSync(file, 'utf8')
       .split('\n')
       .filter((l) => l.trim() !== '')
@@ -226,28 +257,7 @@ function traceCandidates(
       }
       // keep the raw command/paths, not the JSON — a candidate the agent
       // can rerun or open, not a serialization it has to parse
-      let what = line
-      try {
-        const e = JSON.parse(line) as { command?: unknown; paths?: unknown }
-        const cmd = typeof e.command === 'string' ? e.command : ''
-        const paths = (Array.isArray(e.paths) ? e.paths : []).filter(
-          (p): p is string => typeof p === 'string'
-        )
-        // a term that matched only a path must stay visible next to
-        // the command — keep the matched paths, not the whole entry
-        const hitPaths = paths.filter((p) =>
-          terms.some((t) => p.toLowerCase().includes(t))
-        )
-        const joined = cmd !== '' ? [cmd, ...hitPaths].join(' ') : paths.join(' ')
-        // a tool-only match (no command, no paths) keeps the raw line —
-        // the candidate must stay visible
-        if (joined !== '') {
-          what = joined
-        }
-      } catch {
-        // torn line — keep raw
-      }
-      const flat = oneLine(what)
+      const flat = oneLine(traceLineCandidate(line, terms))
       if (flat !== '' && !out.includes(flat)) {
         out.push(flat)
       }
@@ -255,10 +265,10 @@ function traceCandidates(
         break
       }
     }
-    return out.map((c) => `trace: ${c}`)
   } catch {
-    return [] // no trace dir yet — no candidates
+    // unreadable journal mid-rotation — return what gathered
   }
+  return out.map((c) => `trace: ${c}`)
 }
 
 /** In-progress beads whose title carries a question term — a live bead
