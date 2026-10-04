@@ -10,9 +10,12 @@
  *   list [--json] [--source …] [--confidence …]
  *   show <id>
  *   forget <id>
+ *   capture [--source drill|retro|act|mol|all] [--mol ID] [--dry-run] [--json]
  */
 import { checkBeads } from '@broject/core'
 import {
+  CAPTURE_SOURCES,
+  captureLessons,
   CONFIDENCES,
   deriveConfidence,
   deleteLesson,
@@ -25,7 +28,7 @@ import {
   listLessons,
   putLesson,
 } from '@broject/learn'
-import type { Evidence, HookEvent, Lesson } from '@broject/learn'
+import type { CaptureSource, Evidence, HookEvent, Lesson } from '@broject/learn'
 import { flag, flagAll, positionals } from './args.ts'
 
 function usage(exitCode = 1): never {
@@ -36,6 +39,8 @@ Commands:
   list     All lessons [--json] [--source X] [--confidence X]
   show     One lesson as JSON: bro learn show learn-<slug>
   forget   Remove a lesson: bro learn forget learn-<slug>
+  capture  Harvest finished artifacts into lessons
+           [--source drill|retro|act|mol|all] [--mol ID] [--dry-run] [--json]
 
 add flags:
   --lesson TEXT        the rule — imperative, quotable as one line (required)
@@ -61,6 +66,7 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
   '--evidence',
   '--source',
   '--confidence',
+  '--mol',
 ])
 
 /** Options each verb accepts — a `--name=value` spelling counts as the
@@ -80,6 +86,7 @@ const KNOWN_FLAGS: Record<string, ReadonlySet<string>> = {
   list: new Set(['--json', '--source', '--confidence']),
   show: new Set(),
   forget: new Set(),
+  capture: new Set(['--source', '--mol', '--dry-run', '--json']),
 }
 
 const learnPositionals = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
@@ -254,6 +261,94 @@ function cmdForget(argv: string[]): void {
   console.log(`forgot ${id}`)
 }
 
+/** `--source drill|retro|act|mol|all` — repeatable, 'all' folds to every
+ *  source (mol still needs --mol; it can't harvest an unnamed molecule). */
+function captureSources(argv: string[]): CaptureSource[] | undefined {
+  const values = flagAll(argv, '--source')
+  if (values.length === 0) {
+    return undefined
+  }
+  const allowed = [...CAPTURE_SOURCES, 'all']
+  const out = new Set<CaptureSource>()
+  for (const v of values.flatMap((s) => s.split(','))) {
+    const s = v.trim()
+    if (s === '') continue
+    if (!allowed.includes(s)) {
+      fail(`--source must be one of: ${allowed.join(', ')} — got "${s}"`)
+    }
+    if (s === 'all') {
+      for (const src of CAPTURE_SOURCES) out.add(src)
+    } else {
+      out.add(s as CaptureSource)
+    }
+  }
+  if (out.size === 0) {
+    fail('--source requires at least one source')
+  }
+  return [...out]
+}
+
+/** Boolean flags accept the bare and `=true|false` spellings — anything
+ *  else fails closed rather than silently writing on a typo'd value. */
+function boolFlag(argv: string[], name: string): boolean {
+  const occurrences = argv.filter((a) => a === name || a.startsWith(`${name}=`))
+  if (occurrences.length > 1) {
+    fail(`${name} may be given only once`)
+  }
+  const arg = occurrences[0]
+  if (arg === undefined) return false
+  if (arg === name) return true
+  const v = arg.slice(name.length + 1)
+  if (v !== 'true' && v !== 'false') {
+    fail(`${name} must be true|false — got "${v}"`)
+  }
+  return v === 'true'
+}
+
+function cmdCapture(argv: string[]): void {
+  if (learnPositionals(argv).length > 0) {
+    fail(`usage: bro learn capture [--source X] [--mol ID] [--dry-run] [--json]`)
+  }
+  const sources = captureSources(argv)
+  const mol = flag(argv, '--mol')
+  const dryRun = boolFlag(argv, '--dry-run')
+  const json = boolFlag(argv, '--json')
+  if (mol === undefined && sources?.includes('mol')) {
+    fail('--source mol requires --mol <id> — name the molecule to harvest')
+  }
+  if (mol !== undefined && sources !== undefined && !sources.includes('mol')) {
+    fail('--mol given but mol is not in --source — the molecule would never run')
+  }
+  checkBeads()
+  const { plan } = captureLessons({
+    ...(sources !== undefined ? { sources } : {}),
+    ...(mol !== undefined ? { mol } : {}),
+    dryRun,
+  })
+  if (json) {
+    console.log(JSON.stringify(plan, null, 2))
+    return
+  }
+  const verb = dryRun ? 'would capture' : 'captured'
+  for (const w of plan.write) {
+    const l = w.lesson
+    console.log(
+      `${verb} ${l.id}\t${l.source}\t${l.trigger.on.join(',')}\t` +
+        `${l.evidence.length} evidence\t${l.lesson}`
+    )
+  }
+  const mergeVerb = dryRun ? 'would merge' : 'merged'
+  for (const m of plan.merge) {
+    console.log(`${mergeVerb} ${m.lesson.id}\t+${m.added.length} evidence\t${m.lesson.lesson}`)
+  }
+  for (const s of plan.skipped) {
+    console.error(`skip ${s.origin} — ${s.reason}`)
+  }
+  if (plan.write.length === 0 && plan.merge.length === 0) {
+    console.log('nothing to capture')
+  }
+}
+
 export function runLearnCommand(argv: string[]): void {
   const [cmd, ...rest] = argv
   if (cmd === undefined || cmd === '--help' || cmd === '-h') {
@@ -285,6 +380,9 @@ export function runLearnCommand(argv: string[]): void {
       return
     case 'forget':
       cmdForget(rest)
+      return
+    case 'capture':
+      cmdCapture(rest)
       return
   }
 }

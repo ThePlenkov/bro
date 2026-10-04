@@ -141,7 +141,8 @@ for (let i = 0; i < args.length; i++) {
     if (args[i + 1] !== undefined && !args[i + 1].startsWith('-')) flags[k] = args[++i]
     else flags[k] = true
   } else if (/^-\\w$/.test(t) && args[i + 1] !== undefined && !args[i + 1].startsWith('-')) {
-    flags[t.slice(1)] = args[++i]
+    const k = t.slice(1)
+    flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[i])
   } else pos.push(t)
 }
 const db = load()
@@ -164,7 +165,10 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     let rows = db.rows
     if (flags.status) rows = rows.filter((r) => r.status === flags.status)
     if (!flags.all) rows = rows.filter((r) => r.status !== 'closed')
-    if (flags.n !== undefined) rows = rows.slice(0, Number(flags.n))
+    const labs = [].concat(flags.l || [])
+    for (const l of labs) rows = rows.filter((r) => (r.labels || []).includes(l))
+    // real bd reads -n 0 as unlimited — slice(0,0) would eat every row
+    if (flags.n !== undefined && Number(flags.n) > 0) rows = rows.slice(0, Number(flags.n))
     jsonOut(rows)
     break
   }
@@ -252,6 +256,14 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
   case 'children':
     jsonOut([])
     break
+  case 'mol': {
+    // learn capture --mol harvests bd mol show — db.mols[id] seeds it
+    if (pos[1] !== 'show') fail('mol ' + (pos[1] || ''))
+    const m = (db.mols || {})[pos[2]]
+    if (!m) fail('no molecule ' + pos[2])
+    jsonOut(m)
+    break
+  }
   case 'delete': {
     const i = db.rows.findIndex((r) => r.id === pos[1])
     if (i >= 0) db.rows.splice(i, 1)
@@ -280,8 +292,12 @@ export function installFakeBd(
   return { binDir, db }
 }
 
-export function writeBeads(db: string, rows: Array<Record<string, unknown>>): void {
-  writeFileSync(db, JSON.stringify({ rows }))
+export function writeBeads(
+  db: string,
+  rows: Array<Record<string, unknown>>,
+  extra: Record<string, unknown> = {}
+): void {
+  writeFileSync(db, JSON.stringify({ ...extra, rows }))
 }
 
 export function readBeads(db: string): Array<Record<string, unknown>> {
