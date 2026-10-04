@@ -286,7 +286,8 @@ async function replay(argv: string[]): Promise<void> {
     console.error(`error: unknown replay option(s): ${unknown.join(', ')}`)
     process.exit(2)
   }
-  const prs = flagAll(argv, '--pr')
+  const prFlags = flagAll(argv, '--pr')
+  const prs = prFlags
     .flatMap((v) => v.split(','))
     .map((v) => v.trim())
     .filter((v) => v !== '')
@@ -298,6 +299,10 @@ async function replay(argv: string[]): Promise<void> {
       }
       return n
     })
+  if (prFlags.length > 0 && prs.length === 0) {
+    console.error('error: --pr was given but named no PR numbers')
+    process.exit(2)
+  }
   const mergedSince = flag(argv, '--merged-since')
   if (mergedSince !== undefined && !isIso(mergedSince)) {
     console.error(
@@ -340,7 +345,7 @@ async function replay(argv: string[]): Promise<void> {
   console.error(
     `judge replay: ${res.prs} merged PR(s) · ${res.threads} thread(s) · ` +
       `${res.candidates} classifiable · ${res.judged} judged · ${res.cached} cached · ` +
-      `${res.excluded} excluded · ${res.failed} failed`
+      `${res.excluded} excluded · ${res.failed} failed · ${res.skipped} over budget`
   )
   // the report is the replay set's stats — the artifact reviewers read
   const s = computeStats(readJournal(dir), { replay: true })

@@ -152,6 +152,9 @@ export interface ReplayResult {
   excluded: number
   /** decide() failures (attempts still consumed budget). */
   failed: number
+  /** Candidates dropped because the decision budget ran out — the
+   *  truncation signal: another run finishes them. */
+  skipped: number
 }
 
 const REPLAY_CONCURRENCY = 4
@@ -242,7 +245,7 @@ async function probeThreads(
 function loadDeferRefs(dir: string): Set<string> {
   const out = new Set<string>()
   try {
-    for (const row of taskStore(dir).list({ all: true, labels: ['debt'] })) {
+    for (const row of taskStore(dir).list({ all: true, labels: ['debt'], limit: 0 })) {
       if (typeof row.external_ref === 'string' && row.external_ref !== '') {
         out.add(row.external_ref)
       }
@@ -336,6 +339,7 @@ async function judgePending(
       const item = pending[i]!
       i += 1
       if (decided >= budget) {
+        res.skipped += 1
         continue
       }
       decided += 1 // an attempt consumes budget — it paid either way
@@ -399,6 +403,7 @@ export async function replayMergedThreads(opts: ReplayOpts): Promise<ReplayResul
     cached: 0,
     excluded: 0,
     failed: 0,
+    skipped: 0,
   }
   const pending: PendingItem[] = []
   for (const pr of selected) {
