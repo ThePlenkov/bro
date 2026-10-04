@@ -44,6 +44,9 @@
  * the `bd ready` queue and walks the sibling worktrees). That budget is why
  * rehydration is primed on `session.created` instead of on the first turn.
  *
+ * The CLI is spawned with `node` from PATH, never `process.execPath` — see
+ * `jsRuntime()` below for why that distinction is load-bearing.
+ *
  * Upstream hook shapes mirror `@opencode-ai/plugin` 1.18.x, declared
  * structurally rather than imported: opencode loads this module at runtime and
  * nobody typechecks it against the real package, so a devDependency on
@@ -145,6 +148,18 @@ const REHYDRATION_TIMEOUT_MS = 45_000
 
 const MAX_OUTPUT = 1 << 20
 
+/** The runtime that executes the sibling CLI.
+ *
+ *  NOT `process.execPath`. opencode ships as a compiled binary, so inside its
+ *  own plugin process `process.execPath` IS opencode — spawning it with
+ *  `hooks <event>` starts a TUI instead of running the hook, and the plugin
+ *  fails open into silence. `node` on PATH is the right ask anyway: it is what
+ *  bro itself requires (`engines.node >= 22.18`), it is what hooks/run.sh
+ *  resolves, and the CLI is plain ESM JS, so any runtime will do. */
+export function jsRuntime(): string {
+  return process.platform === 'win32' ? 'node.exe' : 'node'
+}
+
 /**
  * The CLI shipped beside this module: installed as
  * `node_modules/@broject/bro/dist/{opencode,index}.js`, built in a checkout as
@@ -161,18 +176,19 @@ function siblingCli(): string | null {
   return null
 }
 
-/** Does a PATH `bro` actually answer `bro hooks`? Without an event the hook
- *  command is a silent no-op, so exit 0 is the probe — an older bro without
- *  the subcommand fails it instead of failing every hook. Same discriminator
- *  hooks/run.sh uses. */
-function hasHooksCommand(): Promise<boolean> {
+/** Spawn `cmd args`, resolve true iff it exits 0 within the hook budget. One
+ *  probe serves both launch tiers: `bro hooks` answers "is this a bro that
+ *  speaks the hook contract", `node --version` answers "can the bundled CLI
+ *  even start". A spawn error, timeout, or nonzero exit is "no" — selecting
+ *  a command that cannot launch is worse than falling through to the next
+ *  tier. */
+function exitsZero(cmd: string, args: string[]): Promise<boolean> {
   return new Promise((resolve) => {
     let child: ChildProcess
     try {
-      // PATH lookup is the point of this tier — a partial install has no
-      // bundled CLI, and the probe below verifies the answer before any hook
-      // trusts it
-      child = spawn('bro', ['hooks'], { stdio: ['pipe', 'ignore', 'ignore'], detached: process.platform !== 'win32' }) // NOSONAR typescript:S4036
+      // PATH lookup is the point of both tiers — the probe verifies the
+      // answer before any hook trusts it
+      child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'ignore'], detached: process.platform !== 'win32' }) // NOSONAR typescript:S4036
     } catch {
       resolve(false)
       return
@@ -189,6 +205,14 @@ function hasHooksCommand(): Promise<boolean> {
     child.stdin?.on('error', () => {})
     child.stdin?.end('')
   })
+}
+
+/** Does a PATH `bro` actually answer `bro hooks`? Without an event the hook
+ *  command is a silent no-op, so exit 0 is the probe — an older bro without
+ *  the subcommand fails it instead of failing every hook. Same discriminator
+ *  hooks/run.sh uses. */
+function hasHooksCommand(): Promise<boolean> {
+  return exitsZero('bro', ['hooks'])
 }
 
 /** SIGKILL a hung child on a timer. The spawns below are detached, so the
@@ -232,8 +256,12 @@ async function resolveCommand(options: PluginOptions | undefined): Promise<Comma
     }
   }
   const entry = siblingCli()
-  if (entry) {
-    return { cmd: process.execPath, args: [entry] }
+  // a bundled CLI still needs `node` on PATH to launch, and opencode itself
+  // is a compiled binary that guarantees no such thing — without the probe
+  // this tier would win over a working PATH `bro` and every hook would fail
+  // open into silence
+  if (entry && (await exitsZero(jsRuntime(), ['--version']))) {
+    return { cmd: jsRuntime(), args: [entry] }
   }
   // partial install — no bundled CLI next to the plugin. Fall back to PATH,
   // and only to a bro that passes the hooks probe.
@@ -358,6 +386,20 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+/** Did the tool succeed? bro arms its gates and cites skills only on success,
+ *  so a false positive here is worse than a false negative.
+ *
+ *  opencode's bash metadata is `{ output, exit, truncated }` — there is no
+ *  `error` field on a nonzero exit, so keying on `error` alone reads every
+ *  failure as a success. Honour `exit` when the tool reports it and fall back
+ *  to the error key for tools that only set that. */
+export function toolSucceeded(metadata: Record<string, unknown> | null): boolean {
+  if (metadata?.error !== undefined) {
+    return false
+  }
+  return typeof metadata?.exit === 'number' ? metadata.exit === 0 : true
 }
 
 export const BroPlugin = (
@@ -543,7 +585,7 @@ export const BroPlugin = (
           session_id: hookInput.sessionID,
           tool_name: hookInput.tool,
           tool_input: asRecord(hookInput.args) ?? {},
-          tool_response: { success: metadata?.error === undefined },
+          tool_response: { success: toolSucceeded(metadata) },
         })
       )
       if (text) {

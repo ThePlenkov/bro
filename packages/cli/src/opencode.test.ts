@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import plugin from './opencode.ts'
+import plugin, { jsRuntime, toolSucceeded } from './opencode.ts'
 
 // opencode's plugin loader only accepts a v1 module — a default export with an
 // `id` (mandatory for file plugins) and a `server` function. A module that
@@ -12,6 +12,21 @@ describe('loader shape', () => {
   test('default export declares id and server', () => {
     assert.equal(plugin.id, 'bro')
     assert.equal(typeof plugin.server, 'function')
+  })
+})
+
+describe('jsRuntime', () => {
+  // Regression pin: `process.execPath` inside the opencode binary IS
+  // opencode, so spawning it with `hooks <event>` launches a TUI instead of
+  // running the hook. The plugin then fails open into silence and no bro
+  // context ever reaches the model — which unit tests miss, because they run
+  // the plugin under node where execPath happens to be a JS runtime.
+  test('never resolves to process.execPath', () => {
+    assert.notEqual(jsRuntime(), process.execPath)
+  })
+
+  test('names a JS runtime bro can rely on', () => {
+    assert.match(jsRuntime(), /^(node|node\.exe)$/)
   })
 })
 
@@ -306,6 +321,45 @@ describe('post-tool', () => {
     )
     assert.deepEqual(calls()[0]?.payload.tool_input, {})
     assert.deepEqual(calls()[0]?.payload.tool_response, { success: false })
+  })
+
+  // opencode's bash metadata is `{ output, exit, truncated }` — a nonzero exit
+  // sets no `error` key, so keying on `error` alone read every failure as a
+  // success and armed bro's gates for commands that never worked.
+  test('a nonzero exit with no error key still reports failure', async () => {
+    const { hooks } = await makeHooks()
+    await hooks['tool.execute.after']?.(
+      { tool: 'bash', sessionID: 'ses_1', args: { command: 'gh pr create' } },
+      { output: 'fatal', metadata: { exit: 1, truncated: false } }
+    )
+    assert.deepEqual(calls()[0]?.payload.tool_response, { success: false })
+  })
+
+  test('exit 0 and a metadata-free tool both report success', async () => {
+    const { hooks } = await makeHooks()
+    await hooks['tool.execute.after']?.(
+      { tool: 'bash', sessionID: 'ses_1' },
+      { output: 'ok', metadata: { exit: 0, truncated: false } }
+    )
+    await hooks['tool.execute.after']?.(
+      { tool: 'bash', sessionID: 'ses_1' },
+      { output: 'ok' }
+    )
+    assert.deepEqual(
+      calls().map((call) => call.payload.tool_response),
+      [{ success: true }, { success: true }]
+    )
+  })
+})
+
+describe('toolSucceeded', () => {
+  test('exit code wins over a missing error key', () => {
+    assert.equal(toolSucceeded({ exit: 0 }), true)
+    assert.equal(toolSucceeded({ exit: 1 }), false)
+    assert.equal(toolSucceeded({ error: 'boom' }), false)
+    assert.equal(toolSucceeded({ error: 'boom', exit: 0 }), false)
+    assert.equal(toolSucceeded({}), true)
+    assert.equal(toolSucceeded(null), true)
   })
 })
 
