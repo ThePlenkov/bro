@@ -744,15 +744,15 @@ function bearerMatch(header: string | undefined, token: string): boolean {
  *  send it cross-site without a preflight this server never answers). */
 function writeGuard(
   req: IncomingMessage,
-  meta: ServeMeta,
   token: string,
-  wantsBody: boolean
+  wantsBody: boolean,
+  statePathHint: string
 ): ServeResponse | undefined {
   if (!bearerMatch(req.headers.authorization, token)) {
     return {
       status: 401,
       body: {
-        error: `session token required — read it from ${serveStatePath(meta.dir) ?? '<git-common-dir>/bro/serve.json'}`,
+        error: `session token required — read it from ${statePathHint}`,
       },
       headers: { 'www-authenticate': 'Bearer' },
     }
@@ -772,6 +772,11 @@ export function createServeHandler(
   meta: ServeMeta,
   token: string
 ): (req: IncomingMessage, res: ServerResponse) => void {
+  // resolved once at handler creation — the path is stable for the
+  // server lifetime, and a per-request resolve would spawnSync('git')
+  // on every unauthenticated write, blocking the loop under 401 spam
+  const statePathHint =
+    serveStatePath(meta.dir) ?? '<git-common-dir>/bro/serve.json'
   return (req, res) => {
     void (async () => {
       try {
@@ -790,7 +795,7 @@ export function createServeHandler(
         const wantsBody =
           req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
         if (WRITE_METHODS.has(req.method ?? 'GET')) {
-          const refusal = writeGuard(req, meta, token, wantsBody)
+          const refusal = writeGuard(req, token, wantsBody, statePathHint)
           if (refusal !== undefined) {
             send(res, refusal.status, refusal.body, refusal)
             return
