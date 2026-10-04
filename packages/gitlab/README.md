@@ -26,6 +26,6 @@ Requires Node ≥ 22 and an authenticated `glab`. ESM only.
 
 ## Links
 
-- Docs: https://broject.dev/docs
-- Source: https://github.com/ThePlenkov/bro/tree/main/packages/gitlab
-- CLI: https://www.npmjs.com/package/@broject/bro
+- Docs: <https://broject.dev/docs/integrations>
+- Source: <https://github.com/ThePlenkov/bro/tree/main/packages/gitlab>
+- CLI: <https://www.npmjs.com/package/@broject/bro>

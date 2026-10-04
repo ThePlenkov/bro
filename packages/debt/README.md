@@ -26,9 +26,10 @@ ESM only.
 - `DebtPrState` — `debt:collected` / `debt:clean` label management
 - `syncDebtToBeads` / `listDebtBeads` — ledger → bd projection
 - `parseDebtPlan` / `DEBT_PLAN_KIND` — the unified debt plan payload
+- `buildTrend` / `TrendOptions` / `TrendPoint` — debt history over time
 
 ## Links
 
-- Docs: https://broject.dev/docs/commands/debt
-- Source: https://github.com/ThePlenkov/bro/tree/main/packages/debt
-- CLI: https://www.npmjs.com/package/@broject/bro
+- Docs: <https://broject.dev/docs/commands/debt>
+- Source: <https://github.com/ThePlenkov/bro/tree/main/packages/debt>
+- CLI: <https://www.npmjs.com/package/@broject/bro>

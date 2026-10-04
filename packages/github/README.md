@@ -25,6 +25,6 @@ Requires Node ≥ 22 and an authenticated `gh`. ESM only.
 
 ## Links
 
-- Docs: https://broject.dev/docs
-- Source: https://github.com/ThePlenkov/bro/tree/main/packages/github
-- CLI: https://www.npmjs.com/package/@broject/bro
+- Docs: <https://broject.dev/docs/integrations>
+- Source: <https://github.com/ThePlenkov/bro/tree/main/packages/github>
+- CLI: <https://www.npmjs.com/package/@broject/bro>
