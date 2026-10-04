@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, statSync } from 'node:fs'
+import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
@@ -352,10 +353,58 @@ describe('fail-open contract', () => {
 })
 
 describe('probe collects what is waiting', () => {
+  test('probe catches up on the backlog, a subscriber does not', async () => {
+    await withBroker(async (_broker, socketPath) => {
+      await busPublish(socketPath, { topic: 'agent:finished', kind: 'done', key: 'bro-1' })
+      await busPublish(socketPath, { topic: 'agent:failed', kind: 'failed', key: 'bro-2' })
+
+      // Same socket, two shapes: the probe asks what it missed, the
+      // stream consumer asks what comes next.
+      const probed = await busProbe(socketPath, { windowMs: 120 })
+      assert.deepEqual(probed.events.map((e) => e.key), ['bro-1', 'bro-2'])
+
+      const live: BusEnvelope[] = []
+      const sub = await busSubscribe(socketPath, {}, { onEvent: (e) => live.push(e) })
+      await settle()
+      assert.equal(live.length, 0)
+      sub.close()
+    })
+  })
+
   test('a quiet broker yields nothing and stays quiet', async () => {
     await withBroker(async (_broker, socketPath) => {
       const result = await busProbe(socketPath, { windowMs: 80 })
       assert.deepEqual(result.events, [], 'an unchanged bus must produce no note')
+    })
+  })
+
+  test('a probe with a cursor still replays what it missed', async () => {
+    await withBroker(async (_broker, socketPath) => {
+      await busPublish(socketPath, { topic: 'a', kind: 'x', key: 'old-1' })
+      await busPublish(socketPath, { topic: 'a', kind: 'x', key: 'old-2' })
+      const result = await busProbe(socketPath, { since: 1, windowMs: 80 })
+      assert.deepEqual(result.events.map((e) => e.key), ['old-2'])
+    })
+  })
+})
+
+describe('malformed frames', () => {
+  test('a malformed frame drops the subscriber, not just the socket', async () => {
+    await withBroker(async (broker, socketPath) => {
+      const sock = connect(socketPath)
+      try {
+        sock.write(`${JSON.stringify({ op: 'sub', filter: {} })}\n`)
+        await settle()
+        assert.equal(broker.subscriberCount, 1)
+        // end() only schedules the close event that untracks the
+        // subscriber — until the peer FINs back the broker would keep
+        // delivering into a dead half of the socket.
+        sock.write('not json\n')
+        await settle()
+        assert.equal(broker.subscriberCount, 0, 'a dead peer must not linger in the delivery set')
+      } finally {
+        sock.destroy()
+      }
     })
   })
 })

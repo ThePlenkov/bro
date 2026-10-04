@@ -313,6 +313,12 @@ export async function startBusBrokerAt(
       parsed = JSON.parse(line)
     } catch {
       sendFrame(sock, { op: 'err', message: 'malformed frame' })
+      // end() only schedules a close — the 'close' handler that drops
+      // the subscriber can trail a peer that never FINs back, so the
+      // entry leaves the set here, not whenever the socket gets there.
+      if (sub !== undefined) {
+        subs.delete(sub)
+      }
       sock.end()
       return undefined
     }
@@ -696,6 +702,9 @@ export async function busProbe(
           gapped = true
         },
       },
+      // Probe asks "what happened while I was away", so it defaults to
+      // catching up from the start of the ring — the opposite of a plain
+      // `busSubscribe`, which is a live stream.
       { since: opts.since ?? 0, timeoutMs: Math.max(1, windowMs) }
     )
   } catch (err) {
