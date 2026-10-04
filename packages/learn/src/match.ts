@@ -96,14 +96,39 @@ export function matchPath(path: string, pattern: string): boolean {
 /** `commands` match prefixes against each command position in the
  *  traced shell line — `cd x && gh pr merge` still hits `gh pr merge`,
  *  while quoted text never reaches a command position: separators
- *  inside arguments are stripped before segmenting (`echo "x; gh pr
- *  merge"` is one echo, not two commands — the same read the hooks
- *  arming classifier makes). */
+ *  inside arguments are skipped by the scan (`echo "x; gh pr merge"`
+ *  is one echo, not two commands — the same read the hooks arming
+ *  classifier makes). Char-scan, not regex: a quoted-span alternation
+ *  on uncontrolled trace data is a polynomial-regex finding. */
 function commandHits(command: string, prefixes: string[]): boolean {
-  return command
-    .replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, ' ')
-    .split(/[;&|]+/)
-    .some((seg) => prefixes.some((p) => seg.trimStart().startsWith(p)))
+  const hits = (seg: string): boolean =>
+    prefixes.some((p) => seg.trimStart().startsWith(p))
+  let seg = ''
+  let quote = ''
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i]!
+    if (quote !== '') {
+      if (c === '\\') {
+        i++ // an escaped char can't close the quote
+      } else if (c === quote) {
+        quote = ''
+      }
+      continue
+    }
+    if (c === '"' || c === "'") {
+      quote = c
+      continue
+    }
+    if (c === ';' || c === '&' || c === '|') {
+      if (hits(seg)) {
+        return true
+      }
+      seg = ''
+      continue
+    }
+    seg += c
+  }
+  return hits(seg)
 }
 
 /**
