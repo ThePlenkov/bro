@@ -75,6 +75,19 @@ registerConnector({
 })
 
 describe('bro judge decide', () => {
+  // decide() reads config/journal from process.cwd() — run inside the
+  // fixture so a shadow-mode repo config can't journal fake-1 verdicts
+  // into the real dogfood journal
+  const inDir = async <T>(dir: string, fn: () => Promise<T>): Promise<T> => {
+    const cwd = process.cwd()
+    process.chdir(dir)
+    try {
+      return await fn()
+    } finally {
+      process.chdir(cwd)
+    }
+  }
+
   test('decide prints typed answers + footer; low-confidence marked', async () => {
     const fx = tmpdirWith('bro-judge-')
     try {
@@ -89,15 +102,17 @@ describe('bro judge decide', () => {
         })
       )
       const r = await capture(() =>
-        runJudgeCommand([
-          'decide',
-          '--state',
-          state,
-          '--questions',
-          questions,
-          '--connector',
-          'judge-test',
-        ])
+        inDir(fx.dir, () =>
+          runJudgeCommand([
+            'decide',
+            '--state',
+            state,
+            '--questions',
+            questions,
+            '--connector',
+            'judge-test',
+          ])
+        )
       )
       assert.equal(r.code, 0)
       const text = r.out.join('\n')
@@ -118,16 +133,18 @@ describe('bro judge decide', () => {
       writeFileSync(state, 'plain text state')
       writeFileSync(questions, JSON.stringify({ e: { type: 'noul', instructions: '?' } }))
       const r = await capture(() =>
-        runJudgeCommand([
-          'decide',
-          '--state',
-          state,
-          '--questions',
-          questions,
-          '--connector',
-          'judge-test',
-          '--json',
-        ])
+        inDir(fx.dir, () =>
+          runJudgeCommand([
+            'decide',
+            '--state',
+            state,
+            '--questions',
+            questions,
+            '--connector',
+            'judge-test',
+            '--json',
+          ])
+        )
       )
       assert.equal(r.code, 0)
       const parsed = JSON.parse(r.out.join('\n')) as { model: string }

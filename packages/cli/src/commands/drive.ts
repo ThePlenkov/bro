@@ -46,10 +46,16 @@ import {
   type AgentRegistryEntry,
   type AgentState,
   type ReviewFacade,
+  type ReviewThread,
   type TaskRow,
   type TaskStore,
 } from '@broject/core'
 import { evaluateExitGate, fetchPrActState, type PrActState } from '@broject/act'
+import {
+  annotateThreads,
+  judgeConfig,
+  judgeFacade,
+} from '@broject/judge'
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { flag } from './args.ts'
 import {
@@ -367,17 +373,27 @@ export function ensureFixerWorktree(
 }
 
 /** The fixer's work order — unresolved threads at spawn time (the prompt
- *  tells it to re-fetch; more may land while it works). */
+ *  tells it to re-fetch; more may land while it works). `judge` carries
+ *  the shadow verdict line for a thread — annotation the fixer may
+ *  read, never an instruction it must obey. */
 export function buildFixerPrompt(opts: {
   pr: number
   link: string
   branch: string
   worktree: string
-  threads: { path?: string | null; line?: number | null; author?: string; body?: string }[]
+  threads: {
+    path?: string | null
+    line?: number | null
+    author?: string
+    body?: string
+    judge?: string
+  }[]
 }): string {
   const list = opts.threads
     .map(
-      (t) => `- ${t.path ?? ''}:${t.line ?? ''} [${t.author ?? '?'}] ${(t.body ?? '').trim()}`
+      (t) =>
+        `- ${t.path ?? ''}:${t.line ?? ''} [${t.author ?? '?'}] ${(t.body ?? '').trim()}` +
+        (t.judge !== undefined ? `\n    ${t.judge}` : '')
     )
     .join('\n')
   return [
@@ -400,6 +416,40 @@ export function buildFixerPrompt(opts: {
     '- Exit when threads are zero or all deferred.',
     '',
   ].join('\n')
+}
+
+/** Shadow-mode judge verdicts for the fixer prompt's thread list —
+ *  annotation only, journaled beside `bro act threads`' own verdicts
+ *  (same journal, same dedup key). The budget is shared across the
+ *  whole pass: `maxDecisionsPerRun` bounds a run, not each fixer PR.
+ *  Every failure degrades to "no annotation" — a dead judge must
+ *  never stall a fixer spawn. */
+async function driveShadowNotes(
+  dir: string,
+  pr: number,
+  headSha: string,
+  open: ReviewThread[],
+  budget: { remaining: number }
+): Promise<Map<string, string> | undefined> {
+  const cfg = judgeConfig(dir).judge
+  if (cfg.mode !== 'shadow') {
+    return undefined
+  }
+  try {
+    const res = await annotateThreads(open, {
+      dir,
+      pr,
+      headSha,
+      judge: judgeFacade(dir),
+      // a spent budget still renders journaled verdicts — re-reads
+      // are free; only fresh decide() calls are bounded
+      budget: Math.max(0, budget.remaining),
+    })
+    budget.remaining -= res.decided
+    return res.annotations
+  } catch {
+    return undefined
+  }
 }
 
 // --- the pass -------------------------------------------------------------------------
@@ -425,6 +475,9 @@ interface PassWork {
   worktreeByBranch: Map<string, string>
   agents: AgentInfo[]
   workDetails: string[]
+  /** Fresh decide() calls the pass may still pay for — the shadow
+   *  judge's `maxDecisionsPerRun` bound is per run, not per PR. */
+  judgeBudget: { remaining: number }
 }
 
 export interface PrVerdict {
@@ -675,7 +728,8 @@ async function spawnFixer(
   state: PrActState,
   worktree: string | undefined,
   fixer: TaskRow | undefined,
-  known: AgentInfo[]
+  known: AgentInfo[],
+  judgeBudget: { remaining: number }
 ): Promise<PrVerdict> {
   const link = ctx.rev.prLink(ctx.repo, pr)
   let wt = worktree
@@ -709,6 +763,14 @@ async function spawnFixer(
     }
     return { pr, link, verdict: 'threads-resolved' }
   }
+  // shadow-mode judge verdicts annotate the prompt's thread list —
+  // journaled and rendered, never applied (the fixer still resolves,
+  // replies, and defers by its own reading). Runs BEFORE the occupancy
+  // locks: a budget of sequential decide() calls under the locks would
+  // hold them past other claimants' lock timeouts. Occupancy is still
+  // re-read under the locks immediately before the spawn, so a claim
+  // landing during annotation is caught the same way.
+  const notes = await driveShadowNotes(ctx.mainRoot, pr, state.headSha, open, judgeBudget)
   // a last occupancy read right before the spawn — the gap since the
   // pass-level check covered the worktree create + thread refetch,
   // long enough for another owner to arm this branch. Both occupancy
@@ -751,6 +813,7 @@ async function spawnFixer(
         line: t.comment?.line,
         author: t.comment?.author,
         body: t.comment?.body,
+        judge: notes?.get(t.id),
       })),
     })
     try {
@@ -862,7 +925,7 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     if (occ !== undefined) {
       return { pr, link, verdict: 'occupied', detail: occ }
     }
-    return spawnFixer(ctx, pr, state, worktree, fixer, work.agents)
+    return spawnFixer(ctx, pr, state, worktree, fixer, work.agents, work.judgeBudget)
   }
   return { pr, link, verdict: 'blocked', detail: gate.blockers.join('; ') }
 }
@@ -946,6 +1009,7 @@ async function driveOnce(ctx: Ctx): Promise<void> {
     worktreeByBranch: worktreeMap(ctx.mainRoot),
     agents: [...byStep.values()],
     workDetails: hooks === null ? [] : liveWorkDetails(hooks),
+    judgeBudget: { remaining: judgeConfig(ctx.mainRoot).judge.maxDecisionsPerRun },
   }
   const prs = openFleetPrs(ctx)
   for (const pr of prs) {

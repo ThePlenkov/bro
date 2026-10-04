@@ -29,18 +29,36 @@ answers under `judge.confidence`.
 Config (`bro.config.json` `judge` section): `mode` (off|shadow — v1
 has no acting mode), `model` (pin in production), `baseUrl`,
 `apiKeyEnv` (env var NAME, never the value), `confidence` (0.6),
-`fallback`, `timeoutMs` (bounds the whole chained call), `llm`
-({baseUrl, model, apiKeyEnv}).
+`fallback`, `timeoutMs` (bounds the whole chained call),
+`maxDecisionsPerRun` (50 — fresh decide() calls per invocation),
+`llm` ({baseUrl, model, apiKeyEnv}).
+
+## Shadow mode — what `mode: shadow` does
+
+Every verdict a bro command's decide() returns in shadow mode is journaled to
+`<git-common>/bro/judge/verdicts.jsonl` (append-only, shared across
+linked worktrees, nothing lands in git): act/drive thread annotation
+as `kind: 'act-thread'` rows, `bro judge decide` smoke calls as
+`kind: 'judge-decide'` (kept out of the triage agreement set), plus
+`kind: 'act-disposition'` rows where `bro act resolve/reply` or an act
+plan applies a verdict.
+
+`bro act threads` and the drive fixer prompt render a `judge:` line
+beside each unresolved thread — `blocks_correctness`, `severity`,
+`action` — under the same dedup key (`threadId`, `commentSha`,
+`headSha`): a subject with a recorded verdict re-reads it for free on
+repeat polls; a moved subject — or one with no verdict yet — pays for
+a fresh decide(), bounded by `maxDecisionsPerRun` per invocation
+(shared across a whole drive pass).
 
 ## Policy
 
-- **Shadow is a boundary, not a mood.** The verdict journal and
-  act/drive annotation land in bro-f4ot.2.3+ — when they do, verdicts
-  will annotate, never act: thread resolution, the exit gate, and fixer
-  spawns stay deterministic, and the judge earns advisory weight by
-  measured dogfood agreement, not enthusiasm. (This milestone ships
-  the connector + `bro judge decide` smoke path only — don't promise
-  journaling, stats, or replay to users yet.)
+- **Shadow is a boundary, not a mood.** Verdicts annotate, never act:
+  thread resolution still needs `bro act resolve/reply`, the exit gate
+  still reads deterministic state, fixer spawns stay deterministic.
+  The judge earns advisory weight by measured dogfood agreement
+  (`bro judge stats`/`replay` — later milestones), not enthusiasm.
+  Never wire a verdict into a gate decision.
 - **Fail-open, always.** A wedged backend throws `JudgeUnavailable` —
   consumers treat "no verdict" as "no annotation", never a gate input.
 - **One call, many questions.** Batch a subject's questions into one

@@ -118,6 +118,33 @@ export interface Verdict {
   costUsd?: number
   /** Filled once observed: 'fixed' | 'replied' | 'deferred' | 'rejected'. */
   outcome?: string
+  /** Answer keys that stayed under the confidence threshold after
+   *  escalation — carried over from DecideResult so a dedup re-read
+   *  renders the same dimming the live call did. */
+  lowConfidence?: string[]
   /** Dogfood verdicts — kept out of live stats. */
   replay?: boolean
 }
+
+/** The observed outcome half of the shadow journal — recorded where the
+ *  disposition happens (`bro act resolve/reply/defer`), carrying the
+ *  subject's join keys (threadId + commentSha when the journal knows
+ *  them) so stats can pair it with the matching verdict. `replied` vs
+ *  `rejected` is unrecoverable from facade state later — this row is
+ *  the only reliable signal. */
+export interface Disposition {
+  /** ISO timestamp. */
+  ts: string
+  /** Always 'act-disposition' — a literal, so a typoed kind can't
+   *  smuggle a non-verdict row into the verdict shape. */
+  kind: 'act-disposition'
+  /** Subject identity — the join key onto the matching verdict. */
+  subject: { pr?: number; threadId?: string; headSha?: string; commentSha?: string }
+  /** What happened: 'fixed' | 'replied' | 'deferred' | 'rejected'. */
+  outcome: string
+}
+
+/** One line of the verdicts journal — a verdict the judge produced, or
+ *  a disposition the act plane observed. Consumers discriminate on
+ *  `kind` ('act-thread', 'act-disposition', …). */
+export type JournalRow = Verdict | Disposition
