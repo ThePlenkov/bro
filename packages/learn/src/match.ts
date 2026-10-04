@@ -95,10 +95,13 @@ export function matchPath(path: string, pattern: string): boolean {
 
 /** `commands` match prefixes against each command position in the
  *  traced shell line — `cd x && gh pr merge` still hits `gh pr merge`,
- *  while quoted text never reaches a command position (the trace stores
- *  the raw command; segment-splitting is the matcher's job). */
+ *  while quoted text never reaches a command position: separators
+ *  inside arguments are stripped before segmenting (`echo "x; gh pr
+ *  merge"` is one echo, not two commands — the same read the hooks
+ *  arming classifier makes). */
 function commandHits(command: string, prefixes: string[]): boolean {
   return command
+    .replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, ' ')
     .split(/[;&|]+/)
     .some((seg) => prefixes.some((p) => seg.trimStart().startsWith(p)))
 }

@@ -28,7 +28,14 @@ import {
   statSync,
 } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import { gitTry, loadConfig, sessionTaskClaims, taskStore } from '@broject/core'
+import {
+  gitTry,
+  loadConfig,
+  markerLive,
+  sessionTaskClaims,
+  taskStore,
+  withFileLock,
+} from '@broject/core'
 import type { Connector, ConnectorCtx } from '@broject/core'
 import { learnSection, type LearnConfig } from './config.ts'
 import type { HookEvent, Lesson } from './lesson.ts'
@@ -47,6 +54,11 @@ const STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 /** How much journal a probe evaluates — deep enough for the session's
  *  recent work, shallow enough to stay a tail read. */
 const TRACE_TAIL_LINES = 100
+
+/** "Live" for previous-trace exclusion — the same day-window the
+ *  parallel-work nudge uses: an owned marker stays live while its pid
+ *  does, an ownerless one only inside the window. */
+const LIVE_SESSION_MS = 24 * 60 * 60 * 1000
 
 const safeId = (s: string): string => s.replace(/[^\w.-]/g, '_')
 
@@ -92,24 +104,62 @@ function readTraceTail(path: string, max = TRACE_TAIL_LINES): TraceTail {
   }
 }
 
+/** True when the session behind `safe` (an already-sanitized id) is
+ *  provably alive — any `<safe>.<aspect>` marker reading live proves
+ *  it. No markers → unverifiable → not-live: an advisory resume tail
+ *  beats silence. `markerLive` is the same read otherLiveWork makes:
+ *  an owned marker lives while its pid does, an ownerless one inside
+ *  the day window. */
+function sessionStillLive(hooks: string, safe: string, now: number): boolean {
+  try {
+    for (const f of readdirSync(hooks)) {
+      if (!f.startsWith(`${safe}.`)) {
+        continue
+      }
+      try {
+        const p = join(hooks, f)
+        const st = statSync(p)
+        if (!st.isFile()) {
+          continue
+        }
+        const first = readFileSync(p, 'utf8').split('\n', 1)[0]
+        if (markerLive(first, st.mtimeMs, LIVE_SESSION_MS, now)) {
+          return true
+        }
+      } catch {
+        // unreadable marker — skip
+      }
+    }
+  } catch {
+    // no marker dir — nothing proves live
+  }
+  return false
+}
+
 /** The newest trace file that isn't this session's — the previous
  *  session's tail a fresh session can still match lessons against
  *  ("when resumable": a resuming session's own file IS the previous
  *  one only when no events landed yet, which a same-named skip can't
- *  tell apart — new-session matching uses other sessions' traces). */
+ *  tell apart — new-session matching uses other sessions' traces).
+ *  A provably-live session's trace is concurrent work, not a resume
+ *  tail, and is skipped. */
 function previousTraceFile(hooks: string, sessionId: string): string | null {
   try {
     const dir = join(hooks, 'trace')
     const mine = `${safeId(sessionId)}.jsonl`
+    const now = Date.now()
     let best: { path: string; mtime: number } | null = null
     for (const f of readdirSync(dir)) {
       if (!f.endsWith('.jsonl') || f === mine) {
         continue
       }
+      if (sessionStillLive(hooks, f.slice(0, -'.jsonl'.length), now)) {
+        continue
+      }
       try {
         const p = join(dir, f)
         const mtime = statSync(p).mtimeMs
-        if (mtime >= Date.now() - STATE_TTL_MS && (best === null || mtime > best.mtime)) {
+        if (mtime >= now - STATE_TTL_MS && (best === null || mtime > best.mtime)) {
           best = { path: p, mtime }
         }
       } catch {
@@ -197,10 +247,23 @@ function sessionContextText(ctx: ConnectorCtx): string {
         )
       }
     }
+    // mol steps are children of a molecule-typed bead — the task
+    // relationship is the contract; the `-mol-` id/parent substring is
+    // the fallback for stores that can't enumerate types or parents
+    let molIds: Set<string> | null = null
+    try {
+      molIds = new Set(
+        store.list({ type: 'molecule', all: true }).map((r) => r.id)
+      )
+    } catch {
+      molIds = null
+    }
     for (const row of store.list({ status: 'in_progress' })) {
-      // mol steps are beads whose parent is the molecule — the id's
-      // `-mol-` segment covers stores that don't report parent
-      if (row.id.includes('-mol-') || (row.parent ?? '').includes('-mol-')) {
+      const isStep =
+        (molIds !== null && row.parent !== undefined && molIds.has(row.parent)) ||
+        row.id.includes('-mol-') ||
+        (molIds === null && (row.parent ?? '').includes('-mol-'))
+      if (isStep) {
         parts.push(`mol-step:${`${row.id} ${row.title ?? ''}`.trim()}`)
       }
     }
@@ -230,7 +293,13 @@ function relativize(dir: string, entries: TraceEntry[]): TraceEntry[] {
  *  eligible when the event is in `on`, its source passes the config
  *  filter, it hasn't spent its per-session budget, and its match keys
  *  hit. Emitted ids are appended to the fired set — re-probes and
- *  restarts don't re-fire. */
+ *  restarts don't re-fire.
+ *
+ *  The count-check-append is ONE critical section: concurrent post-tool
+ *  hooks are separate processes, and without the lock two of them read
+ *  the same fired count and both emit a budget-1 lesson. The lock is
+ *  best-effort — a timeout degrades to the unlocked race, never a
+ *  stalled hook. */
 function inject(
   lessons: Lesson[],
   event: HookEvent,
@@ -238,34 +307,44 @@ function inject(
   cfg: LearnConfig,
   fired: string
 ): string[] {
-  const counts = firedCounts(fired)
-  const lines: string[] = []
-  const firedNow: string[] = []
-  for (const l of lessons) {
-    if (lines.length >= cfg.maxInject) {
-      break
+  const run = (): string[] => {
+    const counts = firedCounts(fired)
+    const lines: string[] = []
+    const firedNow: string[] = []
+    for (const l of lessons) {
+      if (lines.length >= cfg.maxInject) {
+        break
+      }
+      if (!l.trigger.on.includes(event)) {
+        continue
+      }
+      if (cfg.sources.length > 0 && !cfg.sources.includes(l.source)) {
+        continue
+      }
+      const used = counts.get(l.id) ?? 0
+      if (used >= (l.trigger.budget ?? 1)) {
+        continue
+      }
+      if (!triggerMatches(l.trigger, mctx)) {
+        continue
+      }
+      lines.push(`bro learn ${l.id}: ${l.lesson}`)
+      counts.set(l.id, used + 1)
+      firedNow.push(l.id)
     }
-    if (!l.trigger.on.includes(event)) {
-      continue
+    if (firedNow.length > 0) {
+      recordFired(fired, firedNow)
     }
-    if (cfg.sources.length > 0 && !cfg.sources.includes(l.source)) {
-      continue
-    }
-    const used = counts.get(l.id) ?? 0
-    if (used >= (l.trigger.budget ?? 1)) {
-      continue
-    }
-    if (!triggerMatches(l.trigger, mctx)) {
-      continue
-    }
-    lines.push(`bro learn ${l.id}: ${l.lesson}`)
-    counts.set(l.id, used + 1)
-    firedNow.push(l.id)
+    return lines
   }
-  if (firedNow.length > 0) {
-    recordFired(fired, firedNow)
+  try {
+    return withFileLock(`${fired}.lock`, run, {
+      waitMs: 2_000,
+      label: 'learn fired lock',
+    })
+  } catch {
+    return run()
   }
-  return lines
 }
 
 /** Shared probe preface — session id, hooks dir, config, store. null
@@ -314,7 +393,7 @@ export const learnConnector: Connector = {
         'session-start',
         // the previous session's tail is context too — terms may match
         // what it was doing ("mid-merge") as well as the repo's shape
-        { text: `${sessionContextText(ctx)}\n${tail.raw}`, trace: tail.entries },
+        { text: `${sessionContextText(ctx)}\n${tail.raw}`, trace: relativize(ctx.dir, tail.entries) },
         p.cfg,
         firedFile(p.hooks, p.sid)
       )

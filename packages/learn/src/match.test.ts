@@ -48,6 +48,14 @@ describe('triggerMatches', () => {
       triggerMatches(t, ctx('', [{ command: 'echo "gh pr merge"' }])),
       false // 'echo' is the command position — quoted text isn't
     )
+    assert.equal(
+      triggerMatches(t, ctx('', [{ command: 'echo "x; gh pr merge"' }])),
+      false // a separator inside quotes can't fake a command position
+    )
+    assert.equal(
+      triggerMatches(t, ctx('', [{ command: "echo 'x; gh pr merge'" }])),
+      false
+    )
   })
 
   it('paths match globs against touched paths — basename without a slash', () => {

@@ -655,10 +655,18 @@ function traceFile(sessionId: string): string | null {
   return dir && safe ? join(dir, 'trace', `${safe}.jsonl`) : null
 }
 
-/** Append the post-tool event to this session's journal, then prune
- *  trace files past the marker TTL — the journal shares the arming
- *  markers' per-session lifecycle. Best-effort like arming: a failed
- *  append must never stall the hook. */
+/** Journal bound — a long session must not grow a file every probe
+ *  rereads whole. Past the cap the oldest lines drop; the keep window
+ *  stays well beyond the connector's tail read (100 lines). */
+const TRACE_JOURNAL_MAX_BYTES = 256 * 1024
+const TRACE_JOURNAL_KEEP_LINES = 500
+
+/** Append the post-tool event to this session's journal, bound it, and
+ *  — only on the session's first event — prune trace files past the
+ *  marker TTL. The journal shares the arming markers' per-session
+ *  lifecycle, but a weekly TTL doesn't need a per-event dir scan: a new
+ *  journal is the once-per-session tick that sweeps residue. Best-effort
+ *  like arming: a failed append must never stall the hook. */
 function journalTrace(input: HookInput, sessionId: string): void {
   try {
     const path = traceFile(sessionId)
@@ -666,7 +674,18 @@ function journalTrace(input: HookInput, sessionId: string): void {
       return
     }
     mkdirSync(dirname(path), { recursive: true })
+    const fresh = !existsSync(path)
     appendFileSync(path, `${JSON.stringify(traceEntry(input))}\n`)
+    if (statSync(path).size > TRACE_JOURNAL_MAX_BYTES) {
+      const kept = readFileSync(path, 'utf8')
+        .split('\n')
+        .filter((l) => l !== '')
+        .slice(-TRACE_JOURNAL_KEEP_LINES)
+      writeFileSync(path, `${kept.join('\n')}\n`)
+    }
+    if (!fresh) {
+      return
+    }
     const cutoff = Date.now() - MARKER_TTL_MS
     for (const f of readdirSync(dirname(path))) {
       try {

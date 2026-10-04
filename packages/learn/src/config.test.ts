@@ -31,4 +31,12 @@ describe('learnSection', () => {
     assert.deepEqual(learnSection({ sources: ['manual', 'bogus'] }).sources, ['manual'])
     assert.deepEqual(learnSection({ sources: 'manual' }).sources, [])
   })
+
+  it('an all-invalid nonempty allowlist fails closed — never widens to "all"', () => {
+    // '' matches no LessonSource; [] would read as unrestricted
+    assert.deepEqual(learnSection({ sources: ['bogus'] }).sources, [''])
+    assert.deepEqual(learnSection({ sources: [42] }).sources, [''])
+    // an explicit empty list still means "all sources"
+    assert.deepEqual(learnSection({ sources: [] }).sources, [])
+  })
 })

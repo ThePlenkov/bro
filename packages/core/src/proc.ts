@@ -55,3 +55,35 @@ export function pidAlive(pid: number, pidStart?: string): boolean {
     pidStart === undefined || st === null || st.start === '' || st.start === pidStart
   )
 }
+
+/** Line 1 of a session/work marker: `<millis> [pid start]` — the pid
+ *  pair is the owning process's identity (start disambiguates reuse).
+ *  A pid without a start can't disambiguate, so it reads as ownerless:
+ *  a reuse-blind owner would suppress the mtime fallback while still
+ *  trusting a recycled pid — the worst of both planes. */
+export function markerOwner(
+  firstLine: string | undefined
+): { pid: number; start: string } | null {
+  const parts = (firstLine ?? '').trim().split(' ')
+  const pid = Number(parts[1])
+  const start = parts[2] ?? ''
+  return Number.isInteger(pid) && pid > 0 && start !== ''
+    ? { pid, start }
+    : null
+}
+
+/** Is this marker's owning session alive? A recorded owner decides by
+ *  pid liveness alone — a dead session's marker is residue even when
+ *  its mtime is fresh, and a live session's marker stays live past the
+ *  freshness window. Ownerless markers fall back to the window. */
+export function markerLive(
+  firstLine: string | undefined,
+  mtimeMs: number,
+  liveMs: number,
+  now: number = Date.now()
+): boolean {
+  const owner = markerOwner(firstLine)
+  return owner === null
+    ? mtimeMs >= now - liveMs
+    : pidAlive(owner.pid, owner.start || undefined)
+}

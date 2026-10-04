@@ -40,6 +40,11 @@ export const learnSection: ConfigSection<LearnConfig> = (raw) => {
         return ok
       })
     : DEFAULT_LEARN_CONFIG.sources
+  // a nonempty allowlist that validates to nothing fails CLOSED — ''
+  // matches no LessonSource, where [] reads as "all sources" downstream
+  if (Array.isArray(obj.sources) && obj.sources.length > 0 && sources.length === 0) {
+    sources.push('')
+  }
   return {
     enabled:
       typeof obj.enabled === 'boolean' ? obj.enabled : DEFAULT_LEARN_CONFIG.enabled,

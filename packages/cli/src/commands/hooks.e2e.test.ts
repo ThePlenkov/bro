@@ -177,6 +177,9 @@ describe('hooks e2e — session trace journal', () => {
         tool_response: { success: false },
         session_id: 's1',
       })
+      // the fail-open contract covers failed landings too — a nonzero
+      // exit here would stall the session while the journal still passes
+      assert.equal(fail.code, 0)
       const lines = readFileSync(tracePath(f, 's1'), 'utf8').trim().split('\n')
       assert.equal(lines.length, 2)
       const first = JSON.parse(lines[0]!) as Record<string, unknown>
@@ -190,6 +193,29 @@ describe('hooks e2e — session trace journal', () => {
       // the journal is a subdir — never a flat <session>.trace.jsonl
       // sibling the stop gate would read as an arming aspect
       assert.equal(existsSync(join(f.markerDir, 's1.trace.jsonl')), false)
+    })
+  })
+
+  test('the journal trims to the keep window once it crosses the byte cap', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      // >256KB of prior events — the next append must drop the oldest
+      const prior = Array.from({ length: 600 }, (_, i) =>
+        JSON.stringify({ ts: i, tool: 'exec', command: `c${i} ${'x'.repeat(512)}` })
+      )
+      mkdirSync(join(f.markerDir, 'trace'), { recursive: true })
+      writeFileSync(tracePath(f, 's1'), `${prior.join('\n')}\n`)
+      const r = hook(f, 'post-tool', {
+        tool_name: 'exec',
+        tool_input: { command: 'true' },
+        tool_response: { success: true },
+        session_id: 's1',
+      })
+      assert.equal(r.code, 0)
+      const lines = readFileSync(tracePath(f, 's1'), 'utf8').trim().split('\n')
+      assert.equal(lines.length, 500)
+      const last = JSON.parse(lines.at(-1)!) as Record<string, unknown>
+      assert.equal(last.command, 'true')
     })
   })
 

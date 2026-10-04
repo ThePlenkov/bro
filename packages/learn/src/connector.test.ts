@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -52,6 +53,8 @@ switch (pos[0]) {
     let rows = db.rows || []
     const st = flagVal('--status')
     if (st) rows = rows.filter((r) => r.status === st)
+    const ty = flagVal('--type')
+    if (ty) rows = rows.filter((r) => r.issue_type === ty)
     console.log(JSON.stringify(rows)); break
   }
   case 'show': {
@@ -269,6 +272,105 @@ describe('learnConnector', { skip: WIN32 }, () => {
       const lines = (await probe.sessionStart(fx.dir, 's1')) as string[]
       assert.ok(lines.some((l) => l.includes('learn-repo-rule')))
       assert.ok(lines.some((l) => l.includes('learn-prev-trace')))
+    } finally {
+      fx.restore()
+    }
+  })
+
+  it('sessionStart relativizes the previous session’s trace paths', async () => {
+    const fx = fixture({
+      lessons: [
+        lesson('learn-spec-first', {
+          trigger: { on: ['session-start'], match: { paths: ['specs/**'] } },
+          lesson: 'spec edits need the spec gate',
+        }),
+      ],
+    })
+    try {
+      // journaled paths are absolute — a repo-relative glob must still hit
+      trace(fx, 'prev', [
+        { ts: 1, tool: 'edit', paths: [join(fx.dir, 'specs', 'x.md')], ok: true },
+      ])
+      const lines = (await probe.sessionStart(fx.dir, 's1')) as string[]
+      assert.ok(lines.some((l) => l.includes('learn-spec-first')))
+    } finally {
+      fx.restore()
+    }
+  })
+
+  it('sessionStart skips a live session’s trace — concurrent work is not resume context', async () => {
+    const fx = fixture({
+      lessons: [
+        lesson('learn-resume', {
+          trigger: { on: ['session-start'], match: { commands: ['bro act wait'] } },
+          lesson: 'previous session was watching a PR gate',
+        }),
+        lesson('learn-live-leak', {
+          trigger: { on: ['session-start'], match: { commands: ['secret-cmd'] } },
+          lesson: 'live peer context leaked',
+        }),
+      ],
+    })
+    try {
+      trace(fx, 'live-peer', [
+        { ts: 9, tool: 'exec', command: 'secret-cmd', ok: true },
+      ])
+      trace(fx, 'dead-peer', [
+        { ts: 8, tool: 'exec', command: 'bro act wait', ok: true },
+      ])
+      // an ownerless marker reads live inside the day window; aging the
+      // dead peer's out of it leaves its trace eligible
+      mkdirSync(fx.hooks, { recursive: true })
+      writeFileSync(join(fx.hooks, 'live-peer.work'), `${Date.now()}\nfx-9\n`)
+      writeFileSync(join(fx.hooks, 'dead-peer.work'), `${Date.now()}\nfx-1\n`)
+      const old = new Date(Date.now() - 25 * 60 * 60 * 1000)
+      utimesSync(join(fx.hooks, 'dead-peer.work'), old, old)
+      const lines = (await probe.sessionStart(fx.dir, 's1')) as string[]
+      assert.ok(lines.some((l) => l.includes('learn-resume')))
+      assert.ok(!lines.some((l) => l.includes('learn-live-leak')))
+    } finally {
+      fx.restore()
+    }
+  })
+
+  it('sessionStart finds mol steps via the parent relationship, not the id shape', async () => {
+    const fx = fixture({
+      lessons: [
+        lesson('learn-mol', {
+          trigger: { on: ['session-start'], match: { terms: ['mol-step:fx-9'] } },
+          lesson: 'mid-molecule — resume the convoy',
+        }),
+        lesson('learn-not-mol', {
+          trigger: { on: ['session-start'], match: { terms: ['mol-step:fx-10'] } },
+          lesson: 'a plain child is not a mol step',
+        }),
+      ],
+      rows: [
+        { id: 'mol-1', title: 'the molecule', status: 'open', issue_type: 'molecule' },
+        { id: 'fx-9', title: 'step nine', status: 'in_progress', parent: 'mol-1' },
+        { id: 'fx-10', title: 'plain child', status: 'in_progress', parent: 'fx-1' },
+        { id: 'fx-1', title: 'a feature', status: 'open', issue_type: 'task' },
+      ],
+    })
+    try {
+      const lines = (await probe.sessionStart(fx.dir, 's1')) as string[]
+      assert.ok(lines.some((l) => l.includes('learn-mol')))
+      assert.ok(!lines.some((l) => l.includes('learn-not-mol')))
+    } finally {
+      fx.restore()
+    }
+  })
+
+  it('a stale fired lock is stolen — the probe still emits', async () => {
+    const fx = fixture({
+      lessons: [lesson('learn-x', { trigger: { on: ['post-tool'] } })],
+    })
+    try {
+      trace(fx, 's1', [{ ts: 1, tool: 'exec', command: 'x', ok: true }])
+      // a crashed holder's lock — the dead pid makes it stealable
+      mkdirSync(join(fx.hooks, 'fired'), { recursive: true })
+      writeFileSync(join(fx.hooks, 'fired', 's1.lock'), '2000000000:dead')
+      assert.equal((await probe.postTool(fx.dir, 's1')).length, 1)
     } finally {
       fx.restore()
     }
