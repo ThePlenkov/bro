@@ -77,17 +77,20 @@ export function mapUsage(
   return Object.keys(usage).length > 0 ? usage : undefined
 }
 
+/** A status → retriable test — e.g. jev's `429` + every `5xx`. */
+export type RetryWhen = (status: number) => boolean
+
 /** POST a JSON payload; returns status + parsed body for the caller's
- *  error mapping. `retryStatuses` (502/429/…) and network failures get
- *  bounded backoff retries inside the deadline; expiry, exhaustion, and
- *  DNS/TLS-style failures all surface as JudgeUnavailable — fail-open
- *  is the contract. */
+ *  error mapping. `retryWhen` (429 + 5xx for jev) and network failures
+ *  get bounded backoff retries inside the deadline; expiry, exhaustion,
+ *  and DNS/TLS-style failures all surface as JudgeUnavailable —
+ *  fail-open is the contract. */
 export async function postJson(
   url: string,
   payload: unknown,
   headers: Record<string, string>,
   deadline: number,
-  retryStatuses: readonly number[],
+  retryWhen: RetryWhen,
   fetchImpl: FetchFn = fetch
 ): Promise<HttpResult> {
   // serialize once, up front — a cyclic or BigInt payload is the
@@ -114,7 +117,7 @@ export async function postJson(
       } catch {
         body = undefined
       }
-      if (!retryStatuses.includes(res.status) || attempt === RETRYABLE_NETWORK - 1) {
+      if (!retryWhen(res.status) || attempt === RETRYABLE_NETWORK - 1) {
         return { status: res.status, body }
       }
       lastErr = new Error(`HTTP ${res.status}`)

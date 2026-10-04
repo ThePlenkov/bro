@@ -257,7 +257,7 @@ export function llmJudge(cfg: JudgeConfig, opts: LlmJudgeOpts = {}): DeadlineJud
       },
       authHeaders(llm),
       deadline,
-      [429, 500, 502, 503, 504],
+      (s) => s === 429 || s >= 500,
       opts.fetch
     )
     if (res.status !== 200) {

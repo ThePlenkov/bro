@@ -183,7 +183,8 @@ export function jevJudge(cfg: JudgeConfig, opts: JevJudgeOpts = {}): DeadlineJud
       { model: cfg.model, state, questions },
       { authorization: `Bearer ${key}` },
       deadline,
-      [429, 502, 503, 529],
+      // the documented transient contract: rate-limited + every 5xx
+      (s) => s === 429 || s >= 500,
       opts.fetch
     )
     if (res.status !== 200) {
@@ -199,8 +200,10 @@ export function jevJudge(cfg: JudgeConfig, opts: JevJudgeOpts = {}): DeadlineJud
     // we ignore, an asked-but-absent one is "no verdict" (the chain
     // marks it low), an asked-but-malformed one fails open
     for (const [qid, q] of Object.entries(questions)) {
+      // hasOwn — an unanswered "constructor" qid would otherwise read
+      // Object.prototype.constructor and fail open as malformed
       const a = (rawAnswers as Record<string, unknown>)[qid]
-      if (a !== undefined) {
+      if (Object.hasOwn(rawAnswers, qid) && a !== undefined) {
         answers[qid] = mapAnswer(qid, q, a)
       }
     }

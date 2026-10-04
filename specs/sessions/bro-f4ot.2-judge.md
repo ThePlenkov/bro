@@ -147,8 +147,8 @@ Authorization: Bearer $TYPESAFE_API_KEY   (env var only, never
 
 Error semantics the connector maps: `401/403` auth (throw
 `JudgeUnavailable` with the remediation line), `422` validation (our
-bug — throw a plain error, don't fail-open), `429`/`529` and 5xx
-upstream (bounded retry with backoff, then `JudgeUnavailable`).
+bug — throw a plain error, don't fail-open), `429` and every `5xx`
+(bounded retry with backoff, then `JudgeUnavailable`).
 `judge.timeoutMs` (default 3000) bounds the **whole `decide()` call**,
 not one backend attempt — the chain spends it across primary, retries,
 and escalation within one deadline (an escalation that starts with

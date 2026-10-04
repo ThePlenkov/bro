@@ -1,6 +1,6 @@
 ---
 name: judge
-description: "Use when judging calibrated decisions for agent loops — act triage annotation, fallback escalation. Thin wrapper over the bro CLI: `bro judge decide` smokes the connector; the jev → llm-judge chain lives in packages/judge. Requires `bro` (npx -y @broject/bro@0) and a TypeSafe API key."
+description: "Use when judging calibrated decisions for agent loops — act triage annotation, fallback escalation. Thin wrapper over the bro CLI: `bro judge decide` smokes the connector; the jev → llm-judge chain lives in packages/judge. Requires `bro` (npx -y @broject/bro@0); the default jev backend needs a TypeSafe API key, llm-judge needs its own `judge.llm` config."
 ---
 
 # /judge (bro)
@@ -19,8 +19,8 @@ backend is **jev** — TypeSafe's System One API (`POST
 $<judge.apiKeyEnv>` — the var named by `judge.apiKeyEnv`,
 `TYPESAFE_API_KEY` by default; `TYPESAFE_BASE_URL` overrides the base);
 `judge.fallback` names an escalation connector (**llm-judge** — any
-OpenAI-compatible chat endpoint) re-asked on answers under
-`judge.confidence`.
+OpenAI-compatible chat endpoint) re-asked on unanswered questions and
+answers under `judge.confidence`.
 
 | Command | What it does |
 | ------- | ------------ |
@@ -34,13 +34,13 @@ has no acting mode), `model` (pin in production), `baseUrl`,
 
 ## Policy
 
-- **Shadow is a boundary, not a mood.** Verdicts annotate and journal —
-  they never act. Thread resolution, the exit gate, and fixer spawns
-  stay deterministic; the judge earns advisory weight by measured
-  dogfood agreement, not enthusiasm. (This milestone ships the
-  connector + smoke path only — the verdict journal, act/drive
-  annotation, and `bro judge stats`/`replay` land in bro-f4ot.2.3+;
-  don't promise them to users yet.)
+- **Shadow is a boundary, not a mood.** The verdict journal and
+  act/drive annotation land in bro-f4ot.2.3+ — when they do, verdicts
+  will annotate, never act: thread resolution, the exit gate, and fixer
+  spawns stay deterministic, and the judge earns advisory weight by
+  measured dogfood agreement, not enthusiasm. (This milestone ships
+  the connector + `bro judge decide` smoke path only — don't promise
+  journaling, stats, or replay to users yet.)
 - **Fail-open, always.** A wedged backend throws `JudgeUnavailable` —
   consumers treat "no verdict" as "no annotation", never a gate input.
 - **One call, many questions.** Batch a subject's questions into one

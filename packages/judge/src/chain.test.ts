@@ -34,7 +34,11 @@ function fakeFacade(
   }
 }
 
-const Q = { q1: { type: 'noul', instructions: '?' } } as const
+// choice questions — the ans() fixtures return choice answers, so the
+// question/answer pairs stay contract-consistent
+const Q = {
+  q1: { type: 'choice', instructions: '?', criteria: { a: 'A', b: 'B' } },
+} as const
 
 describe('chainedJudge', () => {
   test('all-confident answers never touch the fallback', async () => {
