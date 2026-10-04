@@ -56,11 +56,26 @@ per client:
 | Devin | `devin plugins install ThePlenkov/bro` (or `ThePlenkov/bro#plugins/devin/bro`) |
 | Claude Code | `/plugin marketplace add ThePlenkov/bro` → `/plugin install bro@bro` |
 | Codex | `codex plugin marketplace add ThePlenkov/bro` → install `bro` |
+| OpenCode | add `"plugin": ["@broject/bro"]` to `opencode.json` |
 
 Every adapter ships the same skills and lifecycle hooks (session
 rehydration, review-gate stop, self-approve for `bro`/`bd`) wired through
 `hooks/run.sh` — local dist → `bro` on PATH → major-pinned `npx`, always
 fail-open.
+
+OpenCode is the exception: it loads JS/TS modules instead of a hook manifest,
+so `bro` ships as a native plugin (`packages/cli/src/opencode.ts`, published
+as the package's `./server` export) that spawns its own CLI. Two consequences:
+
+- **Install by package name only.** OpenCode's loader reads `exports["./server"]`
+  from the installed package and does not accept subpath specifiers — `"@broject/bro/opencode"`
+  is not a valid entry. Pin a build with
+  `"plugin": [["@broject/bro", { "command": { "cmd": "/path/to/bro" } }]]`.
+- **The stop gate re-prompts instead of blocking.** OpenCode has no pre-stop
+  hook; `session.idle` arrives after the turn is over. bro feeds the blocker
+  back as a synthetic turn **once per session** — a second block is logged, not
+  re-prompted. Same "gates, not loops" rule the other adapters get from
+  `stop_hook_active`, and an aborted or errored turn never gates at all.
 
 ## Commands
 

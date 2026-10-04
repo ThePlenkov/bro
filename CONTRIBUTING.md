@@ -51,6 +51,15 @@ the built snapshot is current (run after `npm run build`).
 Never edit generated files — `npm run gen:plugins` rewrites them,
 `npm run check:plugins` verifies freshness.
 
+OpenCode is not a generated adapter: it loads JS/TS modules instead of a hook
+manifest, so it ships as a hand-written plugin at
+`packages/cli/src/opencode.ts` — a tsdown entry published as the package's
+`./server` export (the subpath OpenCode's loader looks for, hardcoded as
+`PluginKind = "server"` upstream). It speaks the same `bro hooks <event>`
+stdin/stdout contract as `hooks/run.sh` rather than importing bro, so the
+plugin and the CLI can never be different versions. Any bro policy added to
+that contract lands in all five adapters at once.
+
 ## Setup
 
 Prereqs: `node >= 22.18` (native TS type-stripping) and `gh` authenticated.
@@ -123,6 +132,10 @@ skipped: a plugin cannot shadow a built-in.
   if it needs logic, that logic belongs in `packages/`.
 - **Hooks fail open.** `bro hooks <event>` must never stall a session: gate on
   bro-enabled repos, wrap every probe, exit 0 on any failure.
+- **Adapter hooks never throw into the host.** Every host hook is wrapped and
+  every failure — missing binary, nonzero exit, timeout, garbage stdout,
+  unparseable payload — yields no context and no block. A wedged adapter must
+  be indistinguishable from an absent one.
 
 ## Stability & deprecations
 
