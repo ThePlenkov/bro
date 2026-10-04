@@ -11,3 +11,4 @@ packages/cli/.pack-stash.json
 .agents/skills/
 packages/pack/skills/
 packages/pack/formulas/
+.kilo/
