@@ -253,7 +253,12 @@ function reportPush(
   slug: string
 ): void {
   if (r.claimLockTimedOut) {
-    console.error(`error: claim lock for ${r.path} timed out — retry push`)
+    console.error(
+      `error: claim lock for ${r.path} timed out — ` +
+        (r.partialRemoved === true
+          ? 'removed the partial worktree; retry push'
+          : `worktree left at ${r.path} — remove it before retrying`)
+    )
     process.exit(1)
   }
   if (r.gone) {

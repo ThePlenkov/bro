@@ -29,17 +29,22 @@
  * safe verdict (a skipped pass, never double-work).
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import {
   acquireAgentRegistryLock,
   acquireFileLock,
+  agentRegistryPath,
   checkBeads,
   ensureAuth,
   gitTry,
+  pidAlive,
+  readAgentRegistry,
   reviewHost,
   SpawnError,
   taskStore,
   type AgentInfo,
+  type AgentRegistryEntry,
+  type AgentState,
   type ReviewFacade,
   type TaskRow,
   type TaskStore,
@@ -508,26 +513,101 @@ function retireLanding(ctx: Ctx, state: PrActState, worktree: string | undefined
   }
 }
 
+/** Agent liveness derived from the registry entry alone — no backend
+ *  list() probes. A live pid is running; a recorded or on-disk death is
+ *  terminal; anything unproven counts as live ('spawned') — occupied is
+ *  always the safe verdict, and a false-occupied only costs a skipped
+ *  pass. */
+export function registryEntryState(
+  home: string | null,
+  e: AgentRegistryEntry
+): AgentState {
+  const pid = typeof e.pid === 'number' ? e.pid : undefined
+  if (
+    pid !== undefined &&
+    pidAlive(pid, typeof e.pidStart === 'string' ? e.pidStart : undefined)
+  ) {
+    return 'running'
+  }
+  if (e.stopped === true) {
+    return 'stopped'
+  }
+  if (e.exitStatus !== undefined) {
+    return 'exited'
+  }
+  // an .exit file not yet harvested into the registry is death proof too
+  if (home !== null && typeof e.agentId === 'string') {
+    try {
+      const v = readFileSync(join(home, `${e.agentId}.exit`), 'utf8').trim()
+      if (v !== '' && Number.isInteger(Number(v))) {
+        return 'exited'
+      }
+    } catch {
+      // no exit file — falls through
+    }
+  }
+  // a dead pid is proven — 'lost' keeps the fixer respawn-able; a
+  // pid-less entry (remote backend) is unproven → conservative live
+  return pid !== undefined ? 'lost' : 'spawned'
+}
+
+/** The agents plane for the in-lock occupancy refresh — a registry
+ *  re-read, never conn.list(): a backend liveness probe (a slow
+ *  `gc session list` runs ~30s) inside the hold would outlast the 20s
+ *  lock wait and time out `bro work enter` stamps and competing spawns
+ *  (bro-taq6). The registry is written under the lock we hold, so the
+ *  read catches every spawn that landed during the wait. */
+export function registryAgents(dir: string): AgentInfo[] {
+  const reg = agentRegistryPath(dir)
+  const home = reg === null ? null : join(dirname(reg), 'agents')
+  return Object.entries(readAgentRegistry(dir)).map(([molStep, e]) => ({
+    id: e.agentId,
+    molStep,
+    backend: e.backend,
+    pid: typeof e.pid === 'number' ? e.pid : undefined,
+    state: registryEntryState(home, e),
+    worktree: typeof e.worktree === 'string' ? e.worktree : undefined,
+  }))
+}
+
 /** Fresh occupancy inputs — the pass-level snapshot predates the
  *  thread refetch by seconds, long enough for a claim to land unseen.
  *  Call under the occupancy locks: a pre-lock snapshot can still miss a
- *  claim that lands while the registry lock is being waited on. */
-async function freshOccupancy(ctx: Ctx): Promise<Pick<PassWork, 'agents' | 'workDetails'>> {
-  const { byStep } = await collectAgents(ctx.mainRoot)
+ *  claim that lands while the registry lock is being waited on. Cheap
+ *  planes only — registry, .work markers — so the hold stays far under
+ *  the 20s lock wait (bro-taq6). 'spawned' is registryEntryState's
+ *  "nothing cheap could prove" — a pid-less remote-backend entry
+ *  inherits the pass's real probe when it's the same agent (a lost
+ *  fixer stays respawn-able); an entry the pass never saw, or a
+ *  re-minted agentId (a respawn landed mid-wait), keeps the
+ *  conservative live verdict. */
+function freshOccupancy(
+  ctx: Ctx,
+  known: AgentInfo[]
+): Pick<PassWork, 'agents' | 'workDetails'> {
+  const byStep = new Map(known.map((a) => [a.molStep, a]))
+  const agents = registryAgents(ctx.mainRoot).map((a) => {
+    const seen = byStep.get(a.molStep)
+    return a.state === 'spawned' && seen !== undefined && seen.id === a.id
+      ? { ...a, state: seen.state }
+      : a
+  })
   const hooks = hooksDirOf(ctx.mainRoot)
   return {
-    agents: [...byStep.values()],
+    agents,
     workDetails: hooks === null ? [] : liveWorkDetails(hooks),
   }
 }
 
-/** Lock order is registry → claim, everywhere. A spawning claimant
- *  writes its registry entry + .work marker under the registry lock;
- *  `bro work enter` stamps its claim under the worktree's claim lock.
- *  Occupancy-check→remove / check→spawn sections hold BOTH so a claim
- *  lands before the probe or after the action — never between. The
- *  spawn path re-acquires the registry lock re-entrantly, which is why
- *  registry must come first. */
+/** Lock order is registry → claim, everywhere, and the registry lock
+ *  is THE shared occupancy lock every claimant plane serializes on
+ *  (bro-qry9): a spawning claimant writes its registry entry + agent
+ *  .work marker under it, `bro work enter` stamps its claim under it
+ *  (then the worktree's own claim lock), and a session's .work arm
+ *  writes under it too. Occupancy-check→remove / check→spawn sections
+ *  hold BOTH so a claim lands before the probe or after the action —
+ *  never between. The spawn path re-acquires the registry lock
+ *  re-entrantly, which is why registry must come first. */
 function acquireOccupancyLocks(dir: string, wt: string | undefined): () => void {
   const releaseReg = acquireAgentRegistryLock(dir)
   let releaseClaim: () => void = () => {}
@@ -559,7 +639,8 @@ async function retireIfOrphaned(
   ctx: Ctx,
   wt: string,
   branch: string,
-  fixer: TaskRow | undefined
+  fixer: TaskRow | undefined,
+  known: AgentInfo[]
 ): Promise<string | undefined> {
   let release: () => void
   try {
@@ -570,7 +651,7 @@ async function retireIfOrphaned(
     return `occupancy re-check failed — ${errText(err)}`
   }
   try {
-    const fresh = await freshOccupancy(ctx)
+    const fresh = freshOccupancy(ctx, known)
     const occ = occupied({
       agents: fresh.agents,
       fixerBead: fixer?.id,
@@ -596,7 +677,8 @@ async function spawnFixer(
   pr: number,
   state: PrActState,
   worktree: string | undefined,
-  fixer: TaskRow | undefined
+  fixer: TaskRow | undefined,
+  known: AgentInfo[]
 ): Promise<PrVerdict> {
   const link = ctx.rev.prLink(ctx.repo, pr)
   let wt = worktree
@@ -623,7 +705,7 @@ async function spawnFixer(
       // both occupancy locks: a claimant writes its registry entry +
       // .work marker under the same locks, so a claim lands before the
       // check or after the remove — never between
-      const retire = await retireIfOrphaned(ctx, wt, state.headRef, fixer)
+      const retire = await retireIfOrphaned(ctx, wt, state.headRef, fixer, known)
       if (retire !== undefined) {
         return { pr, link, verdict: 'occupied', detail: retire }
       }
@@ -649,7 +731,7 @@ async function spawnFixer(
     }
   }
   try {
-    const fresh = await freshOccupancy(ctx)
+    const fresh = freshOccupancy(ctx, known)
     const occ = occupied({
       agents: fresh.agents,
       fixerBead: fixer?.id,
@@ -783,7 +865,7 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     if (occ !== undefined) {
       return { pr, link, verdict: 'occupied', detail: occ }
     }
-    return spawnFixer(ctx, pr, state, worktree, fixer)
+    return spawnFixer(ctx, pr, state, worktree, fixer, work.agents)
   }
   return { pr, link, verdict: 'blocked', detail: gate.blockers.join('; ') }
 }

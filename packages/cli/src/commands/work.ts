@@ -23,11 +23,13 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import {
+  acquireAgentRegistryLock,
   acquireFileLock,
   git,
   gitTry,
   loadConfig,
   LockTimeout,
+  readAgentRegistry,
   stackSection,
   taskStore,
   type Connector,
@@ -150,7 +152,8 @@ export function claimLockPath(path: string): string | null {
  *  advisory write failure. */
 export function claimWorktree(
   path: string,
-  detail: string
+  detail: string,
+  opts: { waitMs?: number } = {}
 ): 'stamped' | 'gone' | 'lock-timeout' | 'skipped' {
   try {
     const lock = claimLockPath(path)
@@ -159,26 +162,47 @@ export function claimWorktree(
       // unresolvable one is just an unclaimable checkout
       return existsSync(join(path, '.git')) ? 'skipped' : 'gone'
     }
-    const release = acquireFileLock(lock, { label: `${basename(path)} claim lock` })
+    // The stamp also takes the shared occupancy lock — `bro drive`
+    // holds the registry lock across its occupancy-check→spawn/remove
+    // sections, so this claim lands before the driver's probe or after
+    // the action, never between (bro-qry9). Registry first, claim
+    // second — the driver's order. A non-contention failure degrades
+    // to claim-lock-only: the stamp is still the occupancy record.
+    let releaseShared: () => void = () => {}
     try {
-      // a driver holding the lock just retired the tree — stamping a
-      // claim now would resurrect a dead checkout's marker
-      if (!existsSync(join(path, '.git'))) {
-        return 'gone'
+      releaseShared = acquireAgentRegistryLock(path, { waitMs: opts.waitMs })
+    } catch (err) {
+      if (err instanceof LockTimeout) {
+        return 'lock-timeout'
       }
-      const gd = worktreeGitDir(path)
-      if (gd === null) {
-        return 'skipped'
+    }
+    try {
+      const release = acquireFileLock(lock, {
+        label: `${basename(path)} claim lock`,
+        waitMs: opts.waitMs,
+      })
+      try {
+        // a driver holding the lock just retired the tree — stamping a
+        // claim now would resurrect a dead checkout's marker
+        if (!existsSync(join(path, '.git'))) {
+          return 'gone'
+        }
+        const gd = worktreeGitDir(path)
+        if (gd === null) {
+          return 'skipped'
+        }
+        const dir = join(gd, 'bro')
+        mkdirSync(dir, { recursive: true })
+        writeFileSync(
+          join(dir, 'work'),
+          `${Date.now()}${ownerTag()}\n${detail}\n`
+        )
+        return 'stamped'
+      } finally {
+        release()
       }
-      const dir = join(gd, 'bro')
-      mkdirSync(dir, { recursive: true })
-      writeFileSync(
-        join(dir, 'work'),
-        `${Date.now()}${ownerTag()}\n${detail}\n`
-      )
-      return 'stamped'
     } finally {
-      release()
+      releaseShared()
     }
   } catch (err) {
     // contention is not advisory — a driver holding the claim lock may
@@ -434,6 +458,10 @@ export interface EnterWorktreeResult {
   /** the claim-lock wait expired on a live holder — a driver may still
    *  be mid-retire, so callers must abort rather than report ready */
   claimLockTimedOut?: boolean
+  /** set with claimLockTimedOut: the just-added tree was retired so a
+   *  retry doesn't die on 'path already exists' (bro-0fiq). Absent/false
+   *  means the tree is still there — occupied, or removal failed. */
+  partialRemoved?: boolean
 }
 
 export interface EnterWorktreeOpts {
@@ -444,6 +472,9 @@ export interface EnterWorktreeOpts {
   defaultRef?: string
   allowExisting?: boolean
   reusePath?: boolean
+  /** claim-stamp lock wait — tests bound it; production uses the
+   *  default (the 20s shared-lock/claim-lock bound). */
+  claimWaitMs?: number
 }
 
 export interface WorktreeCreateResult {
@@ -531,14 +562,28 @@ export function finishWorktreeEnter(
 ): EnterWorktreeResult {
   const { slug, branch, base } = opts
   const { path } = created
-  const stamp = claimWorktree(path, slug)
+  const stamp = claimWorktree(path, slug, { waitMs: opts.claimWaitMs })
   if (stamp === 'gone') {
     // a driver retired the tree between the add and the stamp — claiming
     // the bead and reporting success would strand both on a dead path
     return { path, branch, stacked: false, claim: {}, gone: true }
   }
   if (stamp === 'lock-timeout') {
-    return { path, branch, stacked: false, claim: {}, claimLockTimedOut: true }
+    // a fresh tree left behind dies the retry on 'path already exists'
+    // (bro-0fiq) — retire it unless an agent provably moved in during
+    // the lock wait (its registry entry pins this path as worktree);
+    // evicting a live fixer is worse than leaving the dir. A reused
+    // tree is never ours to remove.
+    let partialRemoved = false
+    if (!created.reused) {
+      const movedIn = Object.values(readAgentRegistry(opts.main.path)).some(
+        (e) => typeof e.worktree === 'string' && resolve(e.worktree) === resolve(path)
+      )
+      partialRemoved =
+        !movedIn &&
+        gitTry(['-C', opts.main.path, 'worktree', 'remove', '--force', path]).code === 0
+    }
+    return { path, branch, stacked: false, claim: {}, claimLockTimedOut: true, partialRemoved }
   }
   if (created.reused) {
     const edgeBase = readStackEdges().get(branch)
@@ -575,7 +620,12 @@ function cmdEnter(argv: string[]): void {
   }
   const r = enterWorktree({ slug, branch, base, main, defaultRef })
   if (r.claimLockTimedOut) {
-    console.error(`error: claim lock for ${r.path} timed out — retry enter`)
+    console.error(
+      `error: claim lock for ${r.path} timed out — ` +
+        (r.partialRemoved === true
+          ? 'removed the partial worktree; retry enter'
+          : `worktree left at ${r.path} — remove it before retrying`)
+    )
     process.exit(1)
   }
   if (r.gone) {

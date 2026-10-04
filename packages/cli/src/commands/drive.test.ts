@@ -16,6 +16,8 @@ import {
   fixerRef,
   liveWorkDetails,
   occupied,
+  registryAgents,
+  registryEntryState,
   worktreeClaim,
 } from './drive.ts'
 import { driveSection } from './drive-config.ts'
@@ -402,6 +404,71 @@ describe('worktreeClaim', () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('registryEntryState', () => {
+  const entry = (over: Record<string, unknown> = {}) => ({
+    agentId: 'native-a',
+    backend: 'native',
+    spawnedAt: 't',
+    ...over,
+  })
+
+  test('a live pid is running; a dead one is lost — the respawn path survives (bro-taq6)', () => {
+    assert.equal(registryEntryState(null, entry({ pid: process.pid })), 'running')
+    assert.equal(registryEntryState(null, entry({ pid: 2000000000 })), 'lost')
+  })
+
+  test('recorded death is terminal', () => {
+    assert.equal(registryEntryState(null, entry({ stopped: true })), 'stopped')
+    assert.equal(registryEntryState(null, entry({ exitStatus: 3 })), 'exited')
+  })
+
+  test('an unharvested .exit file still proves the exit', () => {
+    const home = mkdtempSync(join(tmpdir(), 'bro-reg-state-'))
+    try {
+      writeFileSync(join(home, 'a1.exit'), '0')
+      assert.equal(registryEntryState(home, entry({ agentId: 'a1' })), 'exited')
+      assert.equal(registryEntryState(home, entry({ agentId: 'a2' })), 'spawned')
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test('a pid-less entry with no death proof is conservatively live', () => {
+    assert.equal(
+      registryEntryState(null, { agentId: 'gc-1', backend: 'gascity', spawnedAt: 't' }),
+      'spawned'
+    )
+  })
+})
+
+describe('registryAgents', () => {
+  test('maps registry entries to agent info — cheap in-lock occupancy view', () => {
+    const { root, main } = initRepo('bro-reg-agents-')
+    inside(main, root, () => {
+      mkdirSync(join(main, '.git', 'bro'), { recursive: true })
+      writeFileSync(
+        join(main, '.git', 'bro', 'agents.json'),
+        JSON.stringify({
+          'fx-1': {
+            agentId: 'native-a',
+            backend: 'native',
+            spawnedAt: 't',
+            pid: process.pid,
+            worktree: join(root, 'main--w'),
+          },
+          'fx-2': { agentId: 'gc-b', backend: 'gascity', spawnedAt: 't' },
+        })
+      )
+      const agents = registryAgents(main)
+      assert.equal(agents.length, 2)
+      const live = agents.find((a) => a.molStep === 'fx-1')!
+      assert.equal(live.state, 'running')
+      assert.equal(live.worktree, join(root, 'main--w'))
+      assert.equal(agents.find((a) => a.molStep === 'fx-2')!.state, 'spawned')
+    })
   })
 })
 
