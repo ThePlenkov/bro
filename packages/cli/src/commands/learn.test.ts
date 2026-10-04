@@ -145,6 +145,16 @@ describe('bro learn', () => {
     })
   })
 
+  test('capture --dry-run=true honors the = spelling (still writes nothing)', () => {
+    const f = learnFixture([DRILL_ROW])
+    inside(f.main, f.root, () => {
+      const r = f.run(['capture', '--source', 'drill', '--dry-run=true'])
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /would capture learn-/)
+      assert.equal(f.run(['list', '--json']).stdout.trim(), '[]')
+    })
+  })
+
   test('capture --source mol requires --mol', () => {
     const f = learnFixture()
     inside(f.main, f.root, () => {

@@ -285,14 +285,27 @@ function captureSources(argv: string[]): CaptureSource[] | undefined {
   return [...out]
 }
 
+/** Boolean flags accept the bare and `=true|false` spellings — anything
+ *  else fails closed rather than silently writing on a typo'd value. */
+function boolFlag(argv: string[], name: string): boolean {
+  const arg = argv.find((a) => a === name || a.startsWith(`${name}=`))
+  if (arg === undefined) return false
+  if (arg === name) return true
+  const v = arg.slice(name.length + 1)
+  if (v !== 'true' && v !== 'false') {
+    fail(`${name} must be true|false — got "${v}"`)
+  }
+  return v === 'true'
+}
+
 function cmdCapture(argv: string[]): void {
   if (learnPositionals(argv).length > 0) {
     fail(`usage: bro learn capture [--source X] [--mol ID] [--dry-run] [--json]`)
   }
   const sources = captureSources(argv)
   const mol = flag(argv, '--mol')
-  const dryRun = argv.includes('--dry-run')
-  const json = argv.includes('--json')
+  const dryRun = boolFlag(argv, '--dry-run')
+  const json = boolFlag(argv, '--json')
   if (mol === undefined && sources?.includes('mol')) {
     fail('--source mol requires --mol <id> — name the molecule to harvest')
   }

@@ -581,14 +581,12 @@ export interface CaptureReport {
 /** Harvest → dedup plan → optional apply. `dryRun` stops after the
  *  plan — capture is a proposal surface; nothing it can't show. */
 export function captureLessons(opts: CaptureOptions = {}): CaptureReport {
-  // --mol alone scopes to the molecule; --source wins when both are given
+  // --mol alone scopes to the molecule; an explicit --source is the
+  // allowlist — it wins, and --mol only names the molecule it harvests
   const sources = new Set(
     opts.sources ??
       (opts.mol !== undefined ? ['mol' as const] : CAPTURE_SOURCES.filter((s) => s !== 'mol'))
   )
-  if (opts.mol !== undefined) {
-    sources.add('mol')
-  }
   const harvests: Harvest[] = []
   if (sources.has('drill')) harvests.push(harvestDrill(opts.dir))
   if (sources.has('retro')) harvests.push(harvestRetro(opts.dir))
