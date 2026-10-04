@@ -563,13 +563,23 @@ export function registryAgents(dir: string): AgentInfo[] {
  *  (a lost fixer stays respawn-able); an entry the pass never saw, a
  *  re-minted agentId, or a respawned same-id entry (a fresh spawnedAt)
  *  keeps the conservative live verdict — the pass's probe measured a
- *  dead generation, not this run (cubic). */
+ *  dead generation, not this run (cubic). A thrown registry read
+ *  (readAgentRegistry rethrows EACCES/EIO) is degradation, not
+ *  emptiness — it falls back to the pass snapshot the way
+ *  collectAgents did rather than propagate an 'error' verdict out
+ *  of the lock-held section. */
 export function freshOccupancy(
   dir: string,
   known: AgentInfo[]
 ): Pick<PassWork, 'agents' | 'workDetails'> {
   const byStep = new Map(known.map((a) => [a.molStep, a]))
-  const agents = registryAgents(dir).map((a) => {
+  let fresh: AgentInfo[]
+  try {
+    fresh = registryAgents(dir)
+  } catch {
+    fresh = known
+  }
+  const agents = fresh.map((a) => {
     const seen = byStep.get(a.molStep)
     return a.state === 'spawned' &&
       seen !== undefined &&

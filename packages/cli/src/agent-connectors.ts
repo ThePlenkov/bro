@@ -485,9 +485,9 @@ function prepareSpawn(
   writeFileSync(promptFile, spec.prompt)
   // exitStatus: undefined clears a respawned entry's stale harvest — the
   // new run must not read as already-exited (undefined keys drop out of
-  // the serialized registry). pid/spawnError likewise — a claim failure
-  // before the backend patches its handle would leave a stale value that
-  // could alias an unrelated process/session later
+  // the serialized registry). pid/pidStart/spawnError likewise — a claim
+  // failure before the backend patches its handle would leave a stale
+  // value that could alias an unrelated process/session later
   patchAgentRegistry(dir, spec.molStep, {
     agentId,
     backend,
@@ -499,6 +499,7 @@ function prepareSpawn(
     stopped: false,
     exitStatus: undefined,
     pid: undefined,
+    pidStart: undefined,
     spawnError: undefined,
     ...opts.entry?.(agentId),
   })
@@ -1034,20 +1035,19 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           throw new SpawnError(`tmux new-session failed — ${res.err}`, 'unavailable')
         }
         // pane pid — a display handle like native's child pid, not the
-        // liveness signal (has-session is)
+        // liveness signal (has-session is); pidStart pins its identity
+        // anyway so registry-side pidAlive probes (drive's cheap
+        // occupancy plane runs no backend list()) can tell a recycled
+        // pid from the live pane (bro-i5oq)
         const pp = tmuxRun(socket, ['list-panes', '-t', session, '-F', '#{pane_pid}'])
         const panePid = pp.code === 0 ? Number(pp.out.trim().split('\n')[0]) : Number.NaN
+        const hasPanePid = Number.isInteger(panePid) && panePid > 0
         const spawned = patchAgentRegistry(
           dir,
           spec.molStep,
-          Number.isInteger(panePid) && panePid > 0 ? { pid: panePid } : {}
+          hasPanePid ? { pid: panePid, pidStart: procStat(panePid)?.start ?? null } : {}
         )
-        writeWorkMarker(
-          dir,
-          agentId,
-          spec.molStep,
-          Number.isInteger(panePid) && panePid > 0 ? panePid : undefined
-        )
+        writeWorkMarker(dir, agentId, spec.molStep, hasPanePid ? panePid : undefined)
         return toTmuxInfo(socket, dir, home, spec.molStep, spawned)
       })
     },
