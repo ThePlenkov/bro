@@ -18,8 +18,12 @@ const ALT_ON = '\u001b[?1049h'
 const ALT_OFF = '\u001b[?1049l'
 const HEADER = 'bro fleet — live'
 
-const HAS_SCRIPT = spawnSync('script', ['--version']).status === 0
-const skip = { skip: process.platform !== 'linux' || !HAS_SCRIPT }
+// script allocates the pty; pgrep/stty drive the resize probe — any
+// missing tool means skip, not fail
+const HAS_TOOLS = ['script', 'pgrep', 'stty'].every(
+  (c) => spawnSync('sh', ['-c', `command -v ${c}`]).status === 0
+)
+const skip = { skip: process.platform !== 'linux' || !HAS_TOOLS }
 
 interface LiveProc {
   proc: ChildProcess

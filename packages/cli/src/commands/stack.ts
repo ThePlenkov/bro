@@ -257,7 +257,7 @@ function reportPush(
       `error: claim lock for ${r.path} timed out — ` +
         (r.partialRemoved === true
           ? 'removed the partial worktree; retry push'
-          : `worktree left at ${r.path} — remove it before retrying`)
+          : `worktree left at ${r.path} — inspect it before retrying`)
     )
     process.exit(1)
   }

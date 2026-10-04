@@ -536,7 +536,12 @@ export function registryEntryState(
     return 'exited'
   }
   // an .exit file not yet harvested into the registry is death proof too
-  if (home !== null && typeof e.agentId === 'string') {
+  // — basename-only ids: '../' must never escape the agents home
+  if (
+    home !== null &&
+    typeof e.agentId === 'string' &&
+    basename(e.agentId) === e.agentId
+  ) {
     try {
       const v = readFileSync(join(home, `${e.agentId}.exit`), 'utf8').trim()
       if (v !== '' && Number.isInteger(Number(v))) {
