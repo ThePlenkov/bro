@@ -342,6 +342,13 @@ function listMergedPrs(repo: string, q: MergedPrQuery): MergedPr[] {
   if (q.label) {
     args.push('--label', q.label)
   }
+  if (q.mergedSince) {
+    // server-side cutoff — the list caps by recency, so a mergedAt
+    // filter applied after the cap would lose eligible PRs. The
+    // merged: qualifier takes a YYYY-MM-DD date — slice the ISO stamp;
+    // the over-inclusive day edge is fine, callers filter exactly.
+    args.push('--search', `merged:>=${q.mergedSince.slice(0, 10)}`)
+  }
   return ghJson<MergedPrRow[]>(args)
     .filter((row): row is MergedPrRow & { mergedAt: string } => row.mergedAt !== null)
     .map(toMergedPr)
@@ -742,6 +749,7 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
     checks,
     checkAnnotations,
     reviewedShas,
+
     prFiles,
     reviewThreads,
     labels,

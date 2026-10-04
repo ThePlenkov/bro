@@ -229,11 +229,14 @@ where it isn't — first hit wins:
    `rejected` signal — `ReviewThread` exposes only current state and
    the first comment.
 2. **lifecycle inference** — for pre-judge history and threads
-   resolved outside `bro act`: resolved with a fix commit on a later
-   `headSha` → `fixed`; resolved with a defer-bead external ref →
-   `deferred`; resolved after a reply with no code change →
-   `replied`/`rejected` is **unresolvable** from facade state →
-   excluded; unresolved when the PR settled → excluded.
+   resolved outside `bro act`: resolved with the anchor moved off the
+   diff (the host's `outdated` flag — the observable proxy for a fix
+   commit on a later `headSha`) → `fixed`; resolved with a defer-bead
+   external ref → `deferred`; resolved after a reply with no code
+   change → `replied`/`rejected` is **unresolvable** from facade state
+   → excluded; unresolved when the PR settled → excluded. A push alone
+   never counts — a commit stamped after the comment may be unrelated
+   to the finding.
 3. **unclassifiable** → dropped from the agreement set — silent
    misclassification is worse than a smaller sample.
 

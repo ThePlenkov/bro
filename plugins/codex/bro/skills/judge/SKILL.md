@@ -26,6 +26,7 @@ answers under `judge.confidence`.
 | ------- | ------------ |
 | `bro judge decide --state <file\|-> --questions <file>` | One decide() over the resolved chain — prints answers, decidedBy, model, latency, usage. `--connector <name>` pins the primary, `--json` prints the raw DecideResult |
 | `bro judge stats [--since <iso>] [--json] [--replay]` | Scores the verdict journal — agreement matrix (`action` vs recorded outcome, overall) + agreement rate per decider, `blocks_correctness` proxy-scored separately, calibration buckets, p50/p95 latency, mean/total cost per provider+model, and the dogfood thresholds (≥85% agreement, p50 <1s, mean <$0.01). `--replay` scores dogfood verdicts instead of live ones |
+| `bro judge replay [--pr <n>[,<n>…]…] [--merged-since <iso>] [--limit <n>] [--connector <name>] [--json]` | Dogfood: re-judges archived review threads from merged PRs on the live chain, journals each verdict as `replay: true` with the outcome inferred from the record (act disposition → defer bead → resolved with an outdated anchor; a push alone is not evidence — unresolved or unrecoverable threads drop out), then prints the replay-scoped stats report. Idempotent — a replayed subject is never re-judged |
 
 Config (`bro.config.json` `judge` section): `mode` (off|shadow — v1
 has no acting mode), `model` (pin in production), `baseUrl`,
@@ -58,9 +59,9 @@ a fresh decide(), bounded by `maxDecisionsPerRun` per invocation
   thread resolution still needs `bro act resolve/reply`, the exit gate
   still reads deterministic state, fixer spawns stay deterministic.
   The judge earns advisory weight by measured dogfood agreement
-  (`bro judge stats` over the journal; the `replay` dogfood subcommand
-  is a later milestone),
-  not enthusiasm. Never wire a verdict into a gate decision.
+  (`bro judge replay` over archived threads, `bro judge stats --replay`
+  for the report), not enthusiasm. Never wire a verdict into a gate
+  decision.
 - **Fail-open, always.** A wedged backend throws `JudgeUnavailable` —
   consumers treat "no verdict" as "no annotation", never a gate input.
 - **One call, many questions.** Batch a subject's questions into one
