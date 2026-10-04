@@ -13,7 +13,8 @@
  * exception: a corrupt entry throws so `show` can say "exists but
  * broken" rather than lying "no such lesson".
  */
-import { bd, bdTry } from '@broject/core'
+import { bd, bdTry, gitTry, withFileLock } from '@broject/core'
+import { join } from 'node:path'
 import { lessonProblems, type Lesson } from './lesson.ts'
 
 export const KV_PREFIX = 'learn/'
@@ -153,6 +154,23 @@ export function deleteLesson(id: string, cwd?: string): void {
   if (res.code !== 0) {
     throw new LessonStoreError(`bd kv clear ${keyOf(id)} failed — ${res.err || `exit ${res.code}`}`)
   }
+}
+
+/** `<git-common>/bro/learn-store.lock` serializes a read-modify-write
+ *  across every learn writer in this repo — bd kv has no CAS, so two
+ *  concurrent plan→apply sections can overwrite each other's merged
+ *  evidence. Outside a git repo there is no shared store to race on:
+ *  run unlocked. */
+export function withStoreLock<T>(cwd: string | undefined, fn: () => T): T {
+  const r = gitTry(
+    ['-C', cwd ?? process.cwd(), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+  )
+  if (r.code !== 0 || r.out.trim() === '') {
+    return fn()
+  }
+  return withFileLock(join(r.out.trim(), 'bro', 'learn-store.lock'), fn, {
+    label: 'learn store lock',
+  })
 }
 
 /** Every stored lesson id — the dedup surface for `add`. */

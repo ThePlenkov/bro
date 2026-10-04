@@ -26,6 +26,7 @@ export {
   LessonStoreError,
   listLessons,
   putLesson,
+  withStoreLock,
 } from './store.ts'
 export type { LessonListing, SkippedEntry } from './store.ts'
 export { matchPath, parseTraceLine, triggerMatches } from './match.ts'
@@ -44,3 +45,18 @@ export type {
   CaptureSource,
   CaptureWrite,
 } from './capture.ts'
+export {
+  probeQuestion,
+  probeTerms,
+  probeTrigger,
+  rankLessons,
+  recordProbeAnswer,
+  resolveSessionId,
+} from './probe.ts'
+export type {
+  ProbeHit,
+  ProbeQuery,
+  ProbeQueryOptions,
+  RecordProbeOptions,
+  RecordProbeResult,
+} from './probe.ts'

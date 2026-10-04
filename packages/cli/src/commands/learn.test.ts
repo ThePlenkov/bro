@@ -156,6 +156,89 @@ describe('bro learn', () => {
     })
   })
 
+  test('probe phase 1: miss prints candidates + hint, exits 1; hit exits 0', () => {
+    const f = learnFixture([
+      { id: 'fx-ms9', title: 'merge slot occupancy gate', status: 'in_progress' },
+    ])
+    inside(f.main, f.root, () => {
+      const miss = f.run(['probe', 'how does the merge slot work'])
+      assert.equal(miss.code, 1)
+      assert.match(miss.stdout, /probe: how does the merge slot work/)
+      assert.match(miss.stdout, /bead: fx-ms9 merge slot occupancy gate/)
+      assert.match(miss.stdout, /no stored lesson/)
+
+      assert.equal(f.run(ADD).code, 0)
+      const hit = f.run(['probe', 'what happens after gh pr merge'])
+      assert.equal(hit.code, 0, hit.stderr)
+      assert.match(hit.stdout, /learn-after-gh-pr-merge\S*\t.*post-tool/)
+    })
+  })
+
+  test('probe --lesson stores a source:probe lesson indexed by question terms', () => {
+    const f = learnFixture()
+    inside(f.main, f.root, () => {
+      const r = f.run([
+        'probe',
+        'who holds the merge slot',
+        '--lesson',
+        'one PR merges at a time — bd merge-slot acquire holds it',
+        '--session',
+        'sess-e2e',
+        '--budget',
+        '3',
+      ])
+      assert.equal(r.code, 0, r.stderr)
+      const id = r.stdout.trim()
+      const lesson = JSON.parse(f.run(['show', id]).stdout) as Record<string, unknown>
+      assert.equal(lesson.source, 'probe')
+      assert.equal(lesson.confidence, 'tentative')
+      assert.deepEqual(
+        (lesson.evidence as Array<{ kind: string; ref: string }>).slice(0, 2),
+        [
+          { kind: 'session', ref: 'sess-e2e' },
+          { kind: 'text', ref: 'who holds the merge slot' },
+        ]
+      )
+      const trigger = lesson.trigger as {
+        on: string[]
+        match?: { terms?: string[] }
+        budget?: number
+      }
+      assert.deepEqual(trigger.on, ['session-start', 'prompt-submit'])
+      assert.ok(trigger.match?.terms?.includes('merge'))
+      // --budget alone rides the question-term trigger, never event-only
+      assert.equal(trigger.budget, 3)
+
+      // the stored answer now short-circuits a repeat probe
+      const again = f.run(['probe', 'who holds the merge slot'])
+      assert.equal(again.code, 0, again.stderr)
+      assert.match(again.stdout, new RegExp(id))
+    })
+  })
+
+  test('probe requires a question and validates trigger flags like add', () => {
+    const f = learnFixture()
+    inside(f.main, f.root, () => {
+      assert.equal(f.run(['probe']).code, 2)
+      const r = f.run(['probe', 'q words here', '--lesson', 'x', '--on', 'bogus'])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /--on must be one of/)
+      const badBool = f.run([
+        'probe',
+        'q words here',
+        '--lesson',
+        'x',
+        '--match-errors=bogus',
+      ])
+      assert.equal(badBool.code, 2)
+      assert.match(badBool.stderr, /--match-errors must be true\|false/)
+      // phase-2 flags without --lesson are rejected, not dropped
+      const stray = f.run(['probe', 'q words here', '--on', 'post-tool'])
+      assert.equal(stray.code, 2)
+      assert.match(stray.stderr, /--on records an answer — it needs --lesson/)
+    })
+  })
+
   test('capture --mol distills flagged learn: lines from step results', () => {
     const f = learnFixture(
       [

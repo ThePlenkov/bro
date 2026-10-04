@@ -38,7 +38,13 @@ import {
   type LessonTrigger,
   type TriggerMatch,
 } from './lesson.ts'
-import { getLesson, LessonStoreError, listLessons, putLesson } from './store.ts'
+import {
+  getLesson,
+  LessonStoreError,
+  listLessons,
+  putLesson,
+  withStoreLock,
+} from './store.ts'
 
 export const CAPTURE_SOURCES = ['drill', 'retro', 'act', 'mol'] as const
 export type CaptureSource = (typeof CAPTURE_SOURCES)[number]
@@ -71,11 +77,11 @@ const SLASH_PATH_RE = /[\w@.*+-]+(?:\/[\w@.*+-]+)+\/?/g
 const FILE_RE =
   /\b[\w.-]+\.(?:ts|tsx|mts|cts|js|mjs|cjs|jsx|md|json|jsonc|toml|ya?ml|sh|py|rs|go|sql|lock|env|ini|cfg|txt)\b/g
 
-const TERM_RE = /[a-z][a-z0-9-]{3,}/g
+export const TERM_RE = /[a-z][a-z0-9-]{3,}/g
 
 /** Words too common to discriminate a prompt/context — a term that
  *  matches every session is a fire-on-everything trigger. */
-const TERM_STOPWORDS = new Set([
+export const TERM_STOPWORDS = new Set([
   'this', 'that', 'with', 'from', 'when', 'then', 'than', 'have', 'been',
   'were', 'will', 'would', 'should', 'could', 'about', 'into', 'over',
   'after', 'before', 'because', 'through', 'their', 'there', 'where',
@@ -157,6 +163,13 @@ export interface CaptureCandidate {
   /** a closed+routed artifact already held under its gate (spec
    *  confidence ladder: one gated evidence is 'established') */
   heldUnderGate?: boolean
+  /** pins a fresh write's confidence instead of deriving it — for
+   *  sources whose whole evidence set is one investigation citing
+   *  itself. Merges always derive from the union. */
+  confidence?: Confidence
+  /** union this trigger into the existing lesson's on merge — a repeat
+   *  of the new context must still index the rule it joined */
+  mergeTrigger?: boolean
 }
 
 export interface CaptureSkip {
@@ -492,6 +505,33 @@ function unionEvidence(a: Evidence[], b: Evidence[]): Evidence[] {
   return [...new Map([...a, ...b].map((e) => [`${e.kind}:${e.ref}`, e])).values()]
 }
 
+/** Union two triggers for a merge — `on` and each match list deduped,
+ *  errors OR'd; budget keeps the existing lesson's value (a firing
+ *  policy, not index material). */
+function unionTrigger(a: LessonTrigger, b: LessonTrigger): LessonTrigger {
+  const list = (x?: string[], y?: string[]): string[] | undefined =>
+    x === undefined && y === undefined ? undefined : [...new Set([...(x ?? []), ...(y ?? [])])]
+  const match: TriggerMatch = {}
+  const terms = list(a.match?.terms, b.match?.terms)
+  if (terms !== undefined) match.terms = terms
+  const commands = list(a.match?.commands, b.match?.commands)
+  if (commands !== undefined) match.commands = commands
+  const paths = list(a.match?.paths, b.match?.paths)
+  if (paths !== undefined) match.paths = paths
+  const tools = list(a.match?.tools, b.match?.tools)
+  if (tools !== undefined) match.tools = tools
+  // incoming wins when it defines errors; an existing defined value is
+  // preserved — dropping `errors: false` would let the lesson fire on
+  // failed traces
+  const errors = b.match?.errors ?? a.match?.errors
+  if (errors !== undefined) match.errors = errors
+  return {
+    on: [...new Set([...a.on, ...b.on])],
+    ...(Object.keys(match).length > 0 ? { match } : {}),
+    ...(a.budget !== undefined ? { budget: a.budget } : {}),
+  }
+}
+
 interface PlanCtx {
   /** corrupt keys squatting lesson ids — never merge into unreadable data */
   corrupt: Set<string>
@@ -508,7 +548,8 @@ function foldNew(ctx: PlanCtx, id: string, c: CaptureCandidate): void {
     trigger: c.trigger,
     lesson: c.lesson,
     evidence: c.evidence,
-    confidence: deriveConfidence(c.evidence, { heldUnderGate: c.heldUnderGate === true }),
+    confidence:
+      c.confidence ?? deriveConfidence(c.evidence, { heldUnderGate: c.heldUnderGate === true }),
     source: c.source,
     createdAt: new Date().toISOString(),
   }
@@ -525,11 +566,15 @@ function foldMerge(ctx: PlanCtx, id: string, existing: Lesson, c: CaptureCandida
   )
   const derived = deriveConfidence(merged, { heldUnderGate: c.heldUnderGate === true })
   const upgraded = CONFIDENCE_RANK[derived] > CONFIDENCE_RANK[existing.confidence]
-  if (added.length === 0 && !upgraded) {
+  const trigger =
+    c.mergeTrigger === true ? unionTrigger(existing.trigger, c.trigger) : existing.trigger
+  const widened = JSON.stringify(trigger) !== JSON.stringify(existing.trigger)
+  if (added.length === 0 && !upgraded && !widened) {
     return // already captured — nothing new to teach the store
   }
   const lesson: Lesson = {
     ...existing,
+    trigger,
     evidence: merged,
     confidence: upgraded ? derived : existing.confidence,
     updatedAt: new Date().toISOString(),
@@ -645,10 +690,17 @@ export function captureLessons(opts: CaptureOptions = {}): CaptureReport {
   }
   const candidates = harvests.flatMap((h) => h.candidates)
   const skipped = harvests.flatMap((h) => h.skipped)
-  const plan = planCapture(candidates, opts.dir)
+  // non-dryRun plan→apply runs under the store lock — a concurrent
+  // learn writer must not read the same store state and overwrite the
+  // merged evidence this section produces (bd kv has no CAS)
+  const plan =
+    opts.dryRun === true
+      ? planCapture(candidates, opts.dir)
+      : withStoreLock(opts.dir, () => {
+          const p = planCapture(candidates, opts.dir)
+          applyCapture(p, opts.dir)
+          return p
+        })
   plan.skipped.push(...skipped)
-  if (opts.dryRun !== true) {
-    applyCapture(plan, opts.dir)
-  }
   return { plan, dryRun: opts.dryRun === true }
 }
