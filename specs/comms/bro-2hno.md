@@ -117,6 +117,41 @@ dependencies, `node:net`, newline-delimited JSON, one envelope per line:
 - [ ] hook probe integration (separate PR)
 - [ ] `bro watch` / `bro drive` migrate to subscriptions (separate PR)
 
+## Transport, not capability — the facade layer is the next PR
+
+This PR ships a **transport**. `busPublish` / `busSubscribe` / `busProbe`
+are hardwired to `connect(socketPath)`, so the choice of transport is
+baked into every caller.
+
+The repo already has the abstraction that fixes this, and the broker was
+built to its shape rather than around it:
+
+- **facade** `events` — the capability, named by domain semantics, never
+  by vendor (`packages/core/src/connectors.ts:45`). Its contract is
+  exactly `publish` / `subscribe(filter, {since})` / `probe`, which is
+  what this PR already exposes.
+- **connectors** — `mailbox` (today's `notify`: the file drop plus a
+  per-session `.seen-<sid>` cursor) and `bus` (this PR). `mqtt` / `amqp`
+  join when the fleet goes multi-host, which the bead already predicts.
+- **config** — `"connectors": { "events": "bus" }`, resolved by the
+  existing precedence at `connectors.ts:315`.
+
+Two constraints the next PR must hold:
+
+1. **`mailbox` stays the default.** `bro notify` works with zero setup
+   today, and that is its most valuable property. Defaulting `events` to
+   `bus` would make `notify` depend on a running daemon — a regression
+   traded for flexibility nobody asked for. The broker is opt-in.
+2. **`notify`'s CLI and on-disk layout must not change.** Only the
+   transport underneath moves; otherwise the migration breaks scripts
+   that already parse its output.
+
+That the facade joins "only when a real consumer exists"
+(`connectors.ts:20-21`) is what makes this the right moment: `notify` is
+the existing consumer, and until it moves, the broker has no user but its
+own tests. `bro watch` / `bro drive` follow once `events` is the path
+they use.
+
 ## Deviation from the bead: the log is not truth here
 
 The bead's transport note requires that "the log is truth and the
