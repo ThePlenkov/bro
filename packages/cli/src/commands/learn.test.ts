@@ -211,6 +211,15 @@ describe('bro learn', () => {
       const r = f.run(['probe', 'q words here', '--lesson', 'x', '--on', 'bogus'])
       assert.equal(r.code, 2)
       assert.match(r.stderr, /--on must be one of/)
+      const badBool = f.run([
+        'probe',
+        'q words here',
+        '--lesson',
+        'x',
+        '--match-errors=bogus',
+      ])
+      assert.equal(badBool.code, 2)
+      assert.match(badBool.stderr, /--match-errors must be true\|false/)
     })
   })
 

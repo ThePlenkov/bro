@@ -108,11 +108,9 @@ function fixture(opts: {
   const prev = {
     PATH: process.env.PATH,
     FAKE_BD_DB: process.env.FAKE_BD_DB,
-    BRO_SESSION_ID: process.env.BRO_SESSION_ID,
   }
   process.env.PATH = `${binDir}:${prev.PATH}`
   process.env.FAKE_BD_DB = db
-  delete process.env.BRO_SESSION_ID
   const hooks = join(dir, '.git', 'bro', 'hooks')
   return {
     dir,
@@ -122,8 +120,6 @@ function fixture(opts: {
       process.env.PATH = prev.PATH
       if (prev.FAKE_BD_DB === undefined) delete process.env.FAKE_BD_DB
       else process.env.FAKE_BD_DB = prev.FAKE_BD_DB
-      if (prev.BRO_SESSION_ID === undefined) delete process.env.BRO_SESSION_ID
-      else process.env.BRO_SESSION_ID = prev.BRO_SESSION_ID
       rmSync(root, { recursive: true, force: true })
     },
   }
@@ -176,13 +172,10 @@ describe('rankLessons', { skip: WIN32 }, () => {
 })
 
 describe('resolveSessionId', { skip: WIN32 }, () => {
-  it('explicit flag wins, then BRO_SESSION_ID, then newest live marker, then cli', () => {
+  it('explicit flag wins, then newest live marker, then cli', () => {
     const fx = fixture()
     try {
       assert.equal(resolveSessionId(fx.dir, 'flag-sid'), 'flag-sid')
-      process.env.BRO_SESSION_ID = 'env-sid'
-      assert.equal(resolveSessionId(fx.dir), 'env-sid')
-      delete process.env.BRO_SESSION_ID
       // no markers → cli
       assert.equal(resolveSessionId(fx.dir), 'cli')
       mkdirSync(fx.hooks, { recursive: true })

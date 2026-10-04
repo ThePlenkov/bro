@@ -15,9 +15,12 @@
  *            trigger-indexed knowledge.
  *
  * A probe runs as a plain CLI call — no hook payload carries the firing
- * session, so the sid resolves from --session / BRO_SESSION_ID, else the
- * newest live marker session in this repo (the session that spawned the
- * probe is almost always the freshest live one), else 'cli'.
+ * session, so the sid resolves from --session, else the newest live
+ * marker session in this repo (the session that spawned the probe is
+ * almost always the freshest live one), else 'cli'. No env-var lookup —
+ * the sid lands in stored evidence and probe output, and a
+ * process-environment source there reads as credential leakage to
+ * scanners for zero gain over the explicit flag.
  */
 import {
   appendFileSync,
@@ -87,16 +90,15 @@ export function probeTerms(question: string): string[] {
 }
 
 /**
- * The session a bare `bro learn probe` runs inside. Explicit flag/env
- * wins; else the newest *live* marker in the repo's hooks dir names it
- * (marker aspect sits after the last '.' — session ids may carry dots);
- * else 'cli'. Returns a real session when one can be proven, never a
- * guessed dead one.
+ * The session a bare `bro learn probe` runs inside. An explicit
+ * --session wins; else the newest *live* marker in the repo's hooks dir
+ * names it (marker aspect sits after the last '.' — session ids may
+ * carry dots); else 'cli'. Returns a real session when one can be
+ * proven, never a guessed dead one.
  */
 export function resolveSessionId(dir: string, explicit?: string): string {
-  const named = explicit ?? process.env.BRO_SESSION_ID
-  if (named !== undefined && named.trim() !== '') {
-    return named.trim()
+  if (explicit !== undefined && explicit.trim() !== '') {
+    return explicit.trim()
   }
   const hooks = hooksDir(dir)
   if (hooks === null) {

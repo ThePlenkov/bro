@@ -68,8 +68,8 @@ add flags:
   --evidence K:R       where it was learned, repeatable — kind: ${EVIDENCE_KINDS.join(' | ')} (required ≥1)
 
 probe flags:
-  --session ID         attribute the probe to a session (default: BRO_SESSION_ID,
-                       else the newest live session marker, else 'cli')
+  --session ID         attribute the probe to a session (default: the
+                       newest live session marker, else 'cli')
   --json               machine-readable phase-1 result
   --lesson/--on/--match-…/--budget/--evidence  phase 2 — as add, but
                        --evidence is optional (session + question auto-record)`)
@@ -186,9 +186,7 @@ function matchFlags(argv: string[]): TriggerMatch {
     ...(commands.length > 0 ? { commands } : {}),
     ...(paths.length > 0 ? { paths } : {}),
     ...(tools.length > 0 ? { tools } : {}),
-    ...(argv.some((a) => a === '--match-errors' || a.startsWith('--match-errors='))
-      ? { errors: true }
-      : {}),
+    ...(boolFlag(argv, '--match-errors') ? { errors: true } : {}),
   }
 }
 
