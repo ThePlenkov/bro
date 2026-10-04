@@ -47,12 +47,23 @@ export function flag(argv: string[], name: string): string | undefined {
   return flagValue(argv, argv.indexOf(name), name)
 }
 
+/** Repeatable flags collect every occurrence. Matches both spellings,
+ * `--name value` and `--name=value`, for parity with `flag` — a missed
+ * `=` form would silently drop values instead of failing closed. */
 export function flagAll(argv: string[], name: string): string[] {
   const out: string[] = []
   for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === name) {
+    const arg = argv[i]!
+    if (arg === name) {
       out.push(flagValue(argv, i, name))
       i += 1
+    } else if (arg.startsWith(`${name}=`)) {
+      const v = arg.slice(name.length + 1)
+      if (v === '') {
+        console.error(`error: ${name} requires a value`)
+        process.exit(2)
+      }
+      out.push(v)
     }
   }
   return out

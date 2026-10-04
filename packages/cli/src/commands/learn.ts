@@ -1,0 +1,290 @@
+/**
+ * `bro learn <verb>` — the lesson store (spec:
+ * specs/sessions/bro-f4ot.1-learn.md). Lessons live in `bd kv` under
+ * the `learn/` prefix; this command is the CRUD surface — matcher,
+ * capture, probe, and promote land in later milestones.
+ *
+ *   add --lesson "…" --on <event> [--on …] --evidence <kind>:<ref> [--evidence …]
+ *        [--match-terms …] [--match-commands …] [--match-paths …]
+ *        [--match-tools …] [--match-errors] [--budget N]
+ *   list [--json] [--source …] [--confidence …]
+ *   show <id>
+ *   forget <id>
+ */
+import { checkBeads } from '@broject/core'
+import {
+  CONFIDENCES,
+  deriveConfidence,
+  deleteLesson,
+  EVIDENCE_KINDS,
+  getLesson,
+  HOOK_EVENTS,
+  LESSON_SOURCES,
+  lessonId,
+  lessonIds,
+  listLessons,
+  putLesson,
+} from '@broject/learn'
+import type { Evidence, HookEvent, Lesson } from '@broject/learn'
+import { flag, flagAll, positionals } from './args.ts'
+
+function usage(exitCode = 1): never {
+  console.error(`Usage: bro learn <command> [args…]
+
+Commands:
+  add      Store a lesson — --lesson and ≥1 --evidence required
+  list     All lessons [--json] [--source X] [--confidence X]
+  show     One lesson as JSON: bro learn show learn-<slug>
+  forget   Remove a lesson: bro learn forget learn-<slug>
+
+add flags:
+  --lesson TEXT        the rule — imperative, quotable as one line (required)
+  --on EVENT           hook event, repeatable: ${HOOK_EVENTS.join(' | ')} (required ≥1)
+  --match-terms V      substring triggers vs prompt/trace text (repeatable)
+  --match-commands V   exec command prefixes in the trace (repeatable)
+  --match-paths V      globs vs touched paths (repeatable)
+  --match-tools V      tool names in the trace (repeatable)
+  --match-errors       fire when the trace shows a failed tool landing
+  --budget N           max fires per session (default 1)
+  --evidence K:R       where it was learned, repeatable — kind: ${EVIDENCE_KINDS.join(' | ')} (required ≥1)`)
+  process.exit(exitCode)
+}
+
+const VALUE_FLAGS: ReadonlySet<string> = new Set([
+  '--lesson',
+  '--on',
+  '--match-terms',
+  '--match-commands',
+  '--match-paths',
+  '--match-tools',
+  '--budget',
+  '--evidence',
+  '--source',
+  '--confidence',
+])
+
+/** Options each verb accepts — a `--name=value` spelling counts as the
+ *  same option (flag() honors it; flagAll's gap is bro-mzb9 debt). */
+const KNOWN_FLAGS: Record<string, ReadonlySet<string>> = {
+  add: new Set([
+    '--lesson',
+    '--on',
+    '--match-terms',
+    '--match-commands',
+    '--match-paths',
+    '--match-tools',
+    '--match-errors',
+    '--budget',
+    '--evidence',
+  ]),
+  list: new Set(['--json', '--source', '--confidence']),
+  show: new Set(),
+  forget: new Set(),
+}
+
+const learnPositionals = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
+
+/** A misspelled option is a typo, not input — writes fail closed. */
+function rejectUnknownFlags(sub: string, rest: string[]): void {
+  const known = KNOWN_FLAGS[sub] ?? new Set<string>()
+  for (const arg of rest) {
+    if (arg.startsWith('--') && !known.has(arg.split('=')[0]!)) {
+      console.error(`error: unknown option "${arg}" for learn ${sub}`)
+      process.exit(2)
+    }
+  }
+}
+
+function fail(msg: string, code = 2): never {
+  console.error(`error: ${msg}`)
+  process.exit(code)
+}
+
+/** `--on post-tool` / `--on a,b` → validated hook events, deduped. */
+function hookEvents(values: string[]): HookEvent[] {
+  const out: HookEvent[] = []
+  for (const v of values.flatMap((s) => s.split(','))) {
+    const e = v.trim()
+    if (e === '') continue
+    if (!(HOOK_EVENTS as readonly string[]).includes(e)) {
+      fail(`--on must be one of: ${HOOK_EVENTS.join(', ')} — got "${e}"`)
+    }
+    if (!out.includes(e as HookEvent)) out.push(e as HookEvent)
+  }
+  return out
+}
+
+/** `--evidence bead:bro-abc` — kind:ref, both halves required. */
+function evidence(values: string[]): Evidence[] {
+  return values.map((v) => {
+    const i = v.indexOf(':')
+    const kind = i < 0 ? '' : v.slice(0, i)
+    const ref = i < 0 ? '' : v.slice(i + 1).trim()
+    if (!(EVIDENCE_KINDS as readonly string[]).includes(kind) || ref === '') {
+      fail(`--evidence must be <kind>:<ref>, kind one of: ${EVIDENCE_KINDS.join(', ')} — got "${v}"`)
+    }
+    return { kind: kind as Evidence['kind'], ref }
+  })
+}
+
+function warnSkipped(skipped: { key: string; problems: string[] }[]): void {
+  for (const s of skipped) {
+    console.error(`warning: skipped ${s.key} — ${s.problems[0]}`)
+  }
+}
+
+function cmdAdd(argv: string[]): void {
+  const text = flag(argv, '--lesson')
+  if (text === undefined || text.trim() === '') {
+    fail('--lesson is required')
+  }
+  const on = hookEvents(flagAll(argv, '--on'))
+  if (on.length === 0) {
+    fail('--on is required (≥1 of: ' + HOOK_EVENTS.join(', ') + ')')
+  }
+  const ev = evidence(flagAll(argv, '--evidence'))
+  if (ev.length === 0) {
+    fail('--evidence is required — a lesson must cite where it was learned')
+  }
+  const budgetRaw = flag(argv, '--budget')
+  const budget = budgetRaw === undefined ? undefined : Number(budgetRaw)
+  if (budget !== undefined && (!Number.isInteger(budget) || budget < 1)) {
+    fail('--budget must be a positive integer')
+  }
+  const terms = flagAll(argv, '--match-terms')
+  const commands = flagAll(argv, '--match-commands')
+  const paths = flagAll(argv, '--match-paths')
+  const tools = flagAll(argv, '--match-tools')
+  const match = {
+    ...(terms.length > 0 ? { terms } : {}),
+    ...(commands.length > 0 ? { commands } : {}),
+    ...(paths.length > 0 ? { paths } : {}),
+    ...(tools.length > 0 ? { tools } : {}),
+    ...(argv.some((a) => a === '--match-errors' || a.startsWith('--match-errors='))
+      ? { errors: true }
+      : {}),
+  }
+  // the contract is one imperative line — a pasted multi-line rule
+  // would spill `list` output into continuation rows
+  const rule = text.trim().replace(/\s+/g, ' ')
+  const lesson: Lesson = {
+    id: lessonId(rule),
+    trigger: {
+      on,
+      ...(Object.keys(match).length > 0 ? { match } : {}),
+      ...(budget !== undefined ? { budget } : {}),
+    },
+    lesson: rule,
+    evidence: ev,
+    confidence: deriveConfidence(ev),
+    source: 'manual',
+    createdAt: new Date().toISOString(),
+  }
+  // validation before checkBeads — a missing flag must report itself,
+  // not a beads setup error
+  checkBeads()
+  // lessonIds, not getLesson — a corrupt key squats its id too, and
+  // dedup must refuse it the same way
+  if (lessonIds().has(lesson.id)) {
+    fail(`${lesson.id} already exists — forget it first, or the rule is already stored`, 1)
+  }
+  putLesson(lesson)
+  console.log(lesson.id)
+}
+
+function enumFlag(argv: string[], name: string, allowed: readonly string[]): Set<string> {
+  const values = flagAll(argv, name)
+  for (const v of values) {
+    if (!allowed.includes(v)) {
+      fail(`${name} must be one of: ${allowed.join(', ')} — got "${v}"`)
+    }
+  }
+  return new Set(values)
+}
+
+function cmdList(argv: string[]): void {
+  if (learnPositionals(argv).length > 0) {
+    fail(`usage: bro learn list [--json] [--source X] [--confidence X]`)
+  }
+  const json = argv.includes('--json')
+  const sources = enumFlag(argv, '--source', LESSON_SOURCES)
+  const confidences = enumFlag(argv, '--confidence', CONFIDENCES)
+  checkBeads()
+  const { lessons, skipped } = listLessons()
+  warnSkipped(skipped)
+  const rows = lessons.filter(
+    (l) =>
+      (sources.size === 0 || sources.has(l.source)) &&
+      (confidences.size === 0 || confidences.has(l.confidence))
+  )
+  if (json) {
+    console.log(JSON.stringify(rows, null, 2))
+    return
+  }
+  for (const l of rows) {
+    console.log(`${l.id}\t${l.confidence}\t${l.source}\t${l.trigger.on.join(',')}\t${l.lesson}`)
+  }
+}
+
+function oneId(argv: string[], sub: string): string {
+  const pos = learnPositionals(argv)
+  if (pos.length !== 1) {
+    fail(`usage: bro learn ${sub} <learn-id>`)
+  }
+  return pos[0]!.replace(/^learn\//, '')
+}
+
+function cmdShow(argv: string[]): void {
+  const id = oneId(argv, 'show')
+  checkBeads()
+  const lesson = getLesson(id)
+  if (lesson === null) {
+    fail(`no lesson ${id}`, 1)
+  }
+  console.log(JSON.stringify(lesson, null, 2))
+}
+
+function cmdForget(argv: string[]): void {
+  const id = oneId(argv, 'forget')
+  checkBeads()
+  if (getLesson(id) === null) {
+    fail(`no lesson ${id}`, 1)
+  }
+  deleteLesson(id)
+  console.log(`forgot ${id}`)
+}
+
+export function runLearnCommand(argv: string[]): void {
+  const [cmd, ...rest] = argv
+  if (cmd === undefined || cmd === '--help' || cmd === '-h') {
+    usage(cmd === undefined ? 1 : 0)
+  }
+  // own-key lookup — an inherited key like `toString` is not a subcommand
+  if (!Object.hasOwn(KNOWN_FLAGS, cmd)) {
+    console.error(`error: unknown learn command "${cmd}"`)
+    usage()
+  }
+  if (rest.includes('--help') || rest.includes('-h')) {
+    usage(0)
+  }
+  rejectUnknownFlags(cmd, rest)
+  // each verb validates its input before checkBeads — a missing flag or
+  // argument must report itself, not a beads setup error
+  switch (cmd) {
+    case 'add':
+      if (learnPositionals(rest).length > 0) {
+        fail(`unexpected argument "${learnPositionals(rest)[0]!}" — add takes flags only`)
+      }
+      cmdAdd(rest)
+      return
+    case 'list':
+      cmdList(rest)
+      return
+    case 'show':
+      cmdShow(rest)
+      return
+    case 'forget':
+      cmdForget(rest)
+      return
+  }
+}

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
-import { deprecatedFlag, flag } from './args.ts'
+import { deprecatedFlag, flag, flagAll } from './args.ts'
 
 class Exit extends Error {
   constructor(public code: number) {
@@ -93,5 +93,29 @@ describe('flag', () => {
     const r = exits(() => flag(['--label', 'a', '--label=b'], '--label'))
     assert.equal(r.code, 2)
     assert.match(r.err.join('\n'), /may be given only once/)
+  })
+})
+
+describe('flagAll', () => {
+  test('collects repeated values', () => {
+    assert.deepEqual(flagAll(['--on', 'a', '--on', 'b'], '--on'), ['a', 'b'])
+  })
+
+  test('collects --name=value spellings', () => {
+    assert.deepEqual(flagAll(['--on=a', '--on=b'], '--on'), ['a', 'b'])
+  })
+
+  test('mixes bare and = spellings', () => {
+    assert.deepEqual(flagAll(['--on', 'a', '--on=b'], '--on'), ['a', 'b'])
+  })
+
+  test('--name= empty value fails closed', () => {
+    const r = exits(() => flagAll(['--on='], '--on'))
+    assert.equal(r.code, 2)
+    assert.match(r.err.join('\n'), /requires a value/)
+  })
+
+  test('does not match a longer flag sharing the prefix', () => {
+    assert.deepEqual(flagAll(['--only=x'], '--on'), [])
   })
 })

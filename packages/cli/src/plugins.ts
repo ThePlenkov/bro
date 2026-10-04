@@ -48,6 +48,7 @@ import { runDriveCommand } from './commands/drive.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runFleetCommand } from './commands/fleet.ts'
 import { runHooksCommand } from './commands/hooks.ts'
+import { runLearnCommand } from './commands/learn.ts'
 import { runWatchCommand } from './commands/watch.ts'
 import { runAgentsCommand } from './commands/agents.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
@@ -217,6 +218,14 @@ export const PLUGINS: BroPlugin[] = [
     // bare `bro wtf` has nothing to capture — report open wtfs instead
     run: (argv) =>
       runRetrospectCommand(argv.length === 0 ? ['status'] : ['capture', ...argv]),
+  }),
+  definePlugin({
+    name: 'learn',
+    // the bd-kv lesson store; matcher/capture/probe/promote and the
+    // skill land with bro-f4ot.1.3+ — the config section waits for the
+    // connector that consumes it
+    summary: 'Self-improvement loop — lesson store: add|list|show|forget',
+    run: runLearnCommand,
   }),
   definePlugin({
     name: 'docs',
