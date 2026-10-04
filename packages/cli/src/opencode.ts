@@ -170,7 +170,7 @@ function hasHooksCommand(): Promise<boolean> {
       // PATH lookup is the point of this tier — a partial install has no
       // bundled CLI, and the probe below verifies the answer before any hook
       // trusts it
-      child = spawn('bro', ['hooks'], { stdio: ['pipe', 'ignore', 'ignore'] }) // NOSONAR typescript:S4036
+      child = spawn('bro', ['hooks'], { stdio: ['pipe', 'ignore', 'ignore'], detached: process.platform !== 'win32' }) // NOSONAR typescript:S4036
     } catch {
       resolve(false)
       return
@@ -189,9 +189,9 @@ function hasHooksCommand(): Promise<boolean> {
   })
 }
 
-/** SIGKILL a hung child on a timer. bro's own probe timeouts let a spawned
- *  `gh`/`bd` outlive the hook, so the timeout kills the whole group rather
- *  than leaving children behind. */
+/** SIGKILL a hung child on a timer. The spawns below are detached, so the
+ *  child leads its own process group and `-pid` takes a spawned `gh`/`bd`
+ *  down with it — a lone child.kill would leave them orphaned. */
 function killAfter(
   child: ChildProcess,
   ms: number,
@@ -199,9 +199,16 @@ function killAfter(
 ): ReturnType<typeof setTimeout> {
   const timer = setTimeout(() => {
     try {
-      child.kill('SIGKILL')
+      if (child.pid !== undefined) {
+        process.kill(-child.pid, 'SIGKILL')
+      }
     } catch {
-      // already gone
+      // no group to kill (not detached, already gone, or windows)
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        // already gone
+      }
     }
     onTimeout()
   }, ms)
@@ -251,6 +258,8 @@ function callHook(
       child = spawn(command.cmd, [...command.args, 'hooks', event], {
         cwd: directory,
         stdio: ['pipe', 'pipe', 'ignore'],
+        // own process group so killAfter can take spawned children down too
+        detached: process.platform !== 'win32',
       })
     } catch {
       resolve(null)
@@ -376,14 +385,22 @@ export const BroPlugin = (
    *  request, so the probe runs once and the answer is re-pushed each turn —
    *  which is also what carries it across compaction. The cache holds the
    *  in-flight promise, not its result, so a `session.created` prime and a
-   *  first turn racing each other share one probe instead of two. */
+   *  first turn racing each other share one probe instead of two. A FAILED
+   *  probe is evicted rather than cached — timing out once is not the
+   *  session's verdict, and the next turn deserves a retry; only a real
+   *  answer (including an empty one) is sticky. */
   const rehydration = new Map<string, Promise<string>>()
   const hydrate = (sessionID: string, event: 'session-start' | 'post-compaction'): Promise<string> => {
     const pending = rehydration.get(sessionID)
     if (pending) {
       return pending
     }
-    const started = probe(event, { session_id: sessionID }, REHYDRATION_TIMEOUT_MS).then(contextOf)
+    const started = probe(event, { session_id: sessionID }, REHYDRATION_TIMEOUT_MS).then((control) => {
+      if (control === null) {
+        rehydration.delete(sessionID)
+      }
+      return contextOf(control)
+    })
     rehydration.set(sessionID, started)
     return started
   }

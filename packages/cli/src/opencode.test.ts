@@ -174,6 +174,34 @@ describe('session rehydration', () => {
     assert.equal(calls().filter((c) => c.event === 'session-start').length, 2)
   })
 
+  test('a failed probe is not cached — the next turn retries', async () => {
+    respond({ 'session-start': JSON.stringify(ctx('never')) }, 1)
+    const { hooks } = await makeHooks()
+
+    const first = { sessionID: 'ses_1', system: [] as string[] }
+    await hooks['experimental.chat.system.transform']?.(first, first)
+    assert.deepEqual(first.system, [])
+
+    respond({ 'session-start': JSON.stringify(ctx('recovered state')) })
+    const second = { sessionID: 'ses_1', system: [] as string[] }
+    await hooks['experimental.chat.system.transform']?.(second, second)
+
+    assert.deepEqual(second.system, ['recovered state'])
+    assert.equal(calls().filter((c) => c.event === 'session-start').length, 2)
+  })
+
+  test('an answered-but-empty probe stays cached — no per-turn re-probe', async () => {
+    respond({ 'session-start': '{}' })
+    const { hooks } = await makeHooks()
+
+    for (let i = 0; i < 2; i++) {
+      const out = { sessionID: 'ses_1', system: [] as string[] }
+      await hooks['experimental.chat.system.transform']?.(out, out)
+      assert.deepEqual(out.system, [])
+    }
+    assert.equal(calls().filter((c) => c.event === 'session-start').length, 1)
+  })
+
   test('an empty session without an id contributes nothing', async () => {
     const { hooks } = await makeHooks()
     const out = { system: [] as string[] }
