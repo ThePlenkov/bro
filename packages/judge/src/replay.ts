@@ -167,31 +167,44 @@ const replayKey = (v: Verdict): string | undefined =>
 
 const isVerdict = (r: JournalRow): r is Verdict => r.kind !== 'act-disposition'
 
-/** Threads for the selected PRs — the connector's bulk scan when it
- *  exists, the serial per-PR fetch for what the bulk pass missed. */
-async function probeThreads(
+type PrKey = { repo: string; pr: number }
+type ThreadMap = Map<number, ReviewThread[]>
+
+/** The connector's bulk scan — covers the target set it returns; a
+ *  connector-level failure degrades to the serial probe. */
+async function bulkScan(
   opts: ReplayOpts,
-  targets: { repo: string; pr: number }[]
-): Promise<Map<number, ReviewThread[]>> {
-  const out = new Map<number, ReviewThread[]>()
-  const missing = new Set(targets.map((t) => t.pr))
-  if (typeof opts.rev.scanMergedPrs === 'function' && targets.length > 0) {
-    try {
-      const scans = await opts.rev.scanMergedPrs(targets, {
-        onProgress: (done, total) =>
-          opts.onProgress?.(`judge replay: probed ${done}/${total} merged PR(s)`),
-      })
-      for (const [pr, scan] of scans) {
-        out.set(pr, scan.threads)
-        missing.delete(pr)
-      }
-    } catch (err) {
-      console.error(
-        `warning: bulk scan failed — falling back to serial probes ` +
-          `(${err instanceof Error ? err.message : err})`
-      )
-    }
+  targets: PrKey[],
+  missing: Set<number>,
+  out: ThreadMap
+): Promise<void> {
+  if (typeof opts.rev.scanMergedPrs !== 'function' || targets.length === 0) {
+    return
   }
+  try {
+    const scans = await opts.rev.scanMergedPrs(targets, {
+      onProgress: (done, total) =>
+        opts.onProgress?.(`judge replay: probed ${done}/${total} merged PR(s)`),
+    })
+    for (const [pr, scan] of scans) {
+      out.set(pr, scan.threads)
+      missing.delete(pr)
+    }
+  } catch (err) {
+    console.error(
+      `warning: bulk scan failed — falling back to serial probes ` +
+        `(${err instanceof Error ? err.message : err})`
+    )
+  }
+}
+
+/** Serial per-PR fetch for whatever the bulk pass missed. */
+async function serialProbe(
+  opts: ReplayOpts,
+  targets: PrKey[],
+  missing: Set<number>,
+  out: ThreadMap
+): Promise<void> {
   for (const t of targets) {
     if (!missing.has(t.pr)) {
       continue
@@ -205,6 +218,18 @@ async function probeThreads(
       )
     }
   }
+}
+
+/** Threads for the selected PRs — the connector's bulk scan when it
+ *  exists, the serial per-PR fetch for what the bulk pass missed. */
+async function probeThreads(
+  opts: ReplayOpts,
+  targets: PrKey[]
+): Promise<ThreadMap> {
+  const out: ThreadMap = new Map()
+  const missing = new Set(targets.map((t) => t.pr))
+  await bulkScan(opts, targets, missing, out)
+  await serialProbe(opts, targets, missing, out)
   return out
 }
 
@@ -231,78 +256,77 @@ function loadDeferRefs(dir: string): Set<string> {
   return out
 }
 
-/** `bro judge replay` engine — select merged PRs, reconstruct the
- *  triage inputs, decide, journal replay verdicts with their inferred
- *  outcomes. Idempotent: a subject that already carries a replay
- *  verdict counts as cached, never re-judged. */
-export async function replayMergedThreads(opts: ReplayOpts): Promise<ReplayResult> {
+type PendingItem = {
+  thread: ReviewThread
+  subject: Verdict['subject']
+  outcome: string
+}
+
+/** Merged-PR selection — explicit ids, or the connector's merged scan
+ *  capped at --limit, narrowed by --merged-since. */
+function selectMerged(opts: ReplayOpts): ReturnType<ReviewFacade['mergedPrs']> {
   const merged =
     opts.prs !== undefined
       ? opts.rev.mergedPrs(opts.repo, { ids: opts.prs })
       : opts.rev.mergedPrs(opts.repo, { limit: opts.limit ?? DEFAULT_SCAN_LIMIT })
   const sinceMs =
     opts.mergedSince !== undefined ? Date.parse(opts.mergedSince) : undefined
-  const selected =
-    sinceMs !== undefined && Number.isFinite(sinceMs)
-      ? merged.filter((p) => Date.parse(p.mergedAt) >= sinceMs)
-      : merged
+  return sinceMs !== undefined && Number.isFinite(sinceMs)
+    ? merged.filter((p) => Date.parse(p.mergedAt) >= sinceMs)
+    : merged
+}
 
-  const rows = readJournal(opts.dir)
-  const dispositions = rows.filter((r): r is Disposition => r.kind === 'act-disposition')
-  const replayed = new Set(
-    rows.filter((r) => isVerdict(r) && r.replay === true).map((v) => replayKey(v as Verdict))
-  )
-
-  const threadsByPr = await probeThreads(
-    opts,
-    selected.map((p) => ({ repo: opts.repo, pr: p.number }))
-  )
-
-  const deferRefs = opts.deferRefs ?? loadDeferRefs(opts.dir)
-  const res: ReplayResult = {
-    prs: selected.length,
-    threads: 0,
-    candidates: 0,
-    judged: 0,
-    cached: 0,
-    excluded: 0,
-    failed: 0,
-  }
-  const pending: { thread: ReviewThread; subject: Verdict['subject']; outcome: string }[] = []
-
-  for (const pr of selected) {
-    const threads = threadsByPr.get(pr.number) ?? []
-    // commitTimes is paid for lazily — only a resolved, non-outdated,
-    // unrecorded thread needs the "did the head move" answer
-    let commitTimes: string[] | undefined
-    let commitFetched = false
-    const ctx = (): InferenceCtx => ({ dispositions, deferRefs, commitTimes })
-    for (const thread of threads) {
-      res.threads += 1
-      const subject = threadSubject(pr.number, thread.id, thread.comment, pr.headSha)
-      let outcome = inferOutcome(thread, ctx())
-      if (outcome === undefined && thread.resolved && !thread.outdated && !commitFetched) {
-        commitFetched = true
-        try {
-          commitTimes = await opts.rev.commitTimes?.({ repo: opts.repo, pr: pr.number })
-        } catch {
-          commitTimes = undefined // a failed fetch leaves the question unknown
-        }
-        outcome = inferOutcome(thread, ctx())
+/** Classify one PR's threads into pending candidates — dispositions
+ *  and defer refs answer most; commitTimes is paid for lazily, only
+ *  when a resolved, non-outdated, unrecorded thread needs the "did the
+ *  head move" answer. */
+async function collectPr(
+  opts: ReplayOpts,
+  pr: { number: number; headSha: string },
+  threads: ReviewThread[],
+  base: { dispositions: Disposition[]; deferRefs: Set<string> },
+  replayed: Set<string | undefined>,
+  pending: PendingItem[],
+  res: ReplayResult
+): Promise<void> {
+  let commitTimes: string[] | undefined
+  let commitFetched = false
+  const ctx = (): InferenceCtx => ({ ...base, commitTimes })
+  for (const thread of threads) {
+    res.threads += 1
+    const subject = threadSubject(pr.number, thread.id, thread.comment, pr.headSha)
+    let outcome = inferOutcome(thread, ctx())
+    if (outcome === undefined && thread.resolved && !thread.outdated && !commitFetched) {
+      commitFetched = true
+      try {
+        commitTimes = await opts.rev.commitTimes?.({ repo: opts.repo, pr: pr.number })
+      } catch {
+        commitTimes = undefined // a failed fetch leaves the question unknown
       }
-      if (outcome === undefined) {
-        res.excluded += 1
-        continue
-      }
-      res.candidates += 1
-      if (replayed.has(`${thread.id} ${subject.commentSha ?? ''}`)) {
-        res.cached += 1
-        continue
-      }
-      pending.push({ thread, subject, outcome })
+      outcome = inferOutcome(thread, ctx())
     }
+    if (outcome === undefined) {
+      res.excluded += 1
+      continue
+    }
+    res.candidates += 1
+    if (replayed.has(`${thread.id} ${subject.commentSha ?? ''}`)) {
+      res.cached += 1
+      continue
+    }
+    pending.push({ thread, subject, outcome })
   }
+}
 
+/** The bounded worker pool — fresh decide() calls are capped at
+ *  budget; a wedged backend ends the run, a per-thread failure skips
+ *  it. Index claims are synchronous before any await — JS's
+ *  run-to-completion makes the grab atomic. */
+async function judgePending(
+  opts: ReplayOpts,
+  pending: PendingItem[],
+  res: ReplayResult
+): Promise<void> {
   const budget = opts.budget ?? 50
   let decided = 0
   let i = 0
@@ -326,7 +350,7 @@ export async function replayMergedThreads(opts: ReplayOpts): Promise<ReplayResul
         }
         continue
       }
-      const verdict: Verdict = {
+      appendRow(opts.dir, {
         ts: new Date().toISOString(),
         kind: 'act-thread',
         subject: item.subject,
@@ -342,13 +366,44 @@ export async function replayMergedThreads(opts: ReplayOpts): Promise<ReplayResul
           : {}),
         outcome: item.outcome,
         replay: true,
-      }
-      appendRow(opts.dir, verdict)
+      } satisfies Verdict)
       res.judged += 1
     }
   }
   await Promise.all(
     Array.from({ length: Math.min(REPLAY_CONCURRENCY, pending.length) }, worker)
   )
+}
+
+/** `bro judge replay` engine — select merged PRs, reconstruct the
+ *  triage inputs, decide, journal replay verdicts with their inferred
+ *  outcomes. Idempotent: a subject that already carries a replay
+ *  verdict counts as cached, never re-judged. */
+export async function replayMergedThreads(opts: ReplayOpts): Promise<ReplayResult> {
+  const selected = selectMerged(opts)
+  const rows = readJournal(opts.dir)
+  const dispositions = rows.filter((r): r is Disposition => r.kind === 'act-disposition')
+  const replayed = new Set(
+    rows.filter((r) => isVerdict(r) && r.replay === true).map((v) => replayKey(v as Verdict))
+  )
+  const threadsByPr = await probeThreads(
+    opts,
+    selected.map((p) => ({ repo: opts.repo, pr: p.number }))
+  )
+  const base = { dispositions, deferRefs: opts.deferRefs ?? loadDeferRefs(opts.dir) }
+  const res: ReplayResult = {
+    prs: selected.length,
+    threads: 0,
+    candidates: 0,
+    judged: 0,
+    cached: 0,
+    excluded: 0,
+    failed: 0,
+  }
+  const pending: PendingItem[] = []
+  for (const pr of selected) {
+    await collectPr(opts, pr, threadsByPr.get(pr.number) ?? [], base, replayed, pending, res)
+  }
+  await judgePending(opts, pending, res)
   return res
 }
