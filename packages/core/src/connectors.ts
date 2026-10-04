@@ -24,6 +24,7 @@
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { gitTry } from './git.ts'
+import type { JudgeFacade } from './judge.ts'
 import type { ReviewFacade } from './review.ts'
 import type { SpecStore } from './specs.ts'
 import type { TaskRow, TaskStore } from './tasks.ts'
@@ -46,6 +47,7 @@ export interface FacadeMap {
   tasks: TaskStore
   reviews: ReviewFacade
   specs: SpecStore
+  judge: JudgeFacade
 }
 
 export type MaybePromise<T> = T | Promise<T>
@@ -109,6 +111,7 @@ export interface Connector {
   tasks?(ctx: ConnectorCtx): TaskStore
   reviews?(ctx: ConnectorCtx): ReviewFacade
   specs?(ctx: ConnectorCtx): SpecStore
+  judge?(ctx: ConnectorCtx): JudgeFacade
   hooks?(ctx: ConnectorCtx): ConnectorHooks
 }
 

@@ -32,6 +32,7 @@ import { learnConnector, learnSection } from '@broject/learn'
 import { loopSection } from '@broject/loop'
 import { githubConnector } from '@broject/github'
 import { gitlabConnector } from '@broject/gitlab'
+import { jevConnector, judgeSection, llmJudgeConnector } from '@broject/judge'
 import { applyActPlan, runActCommand } from './commands/act.ts'
 import { checkSection } from './commands/check-config.ts'
 import { runCheckCommand } from './commands/check.ts'
@@ -49,6 +50,7 @@ import { runDriveCommand } from './commands/drive.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runFleetCommand } from './commands/fleet.ts'
 import { runHooksCommand } from './commands/hooks.ts'
+import { runJudgeCommand } from './commands/judge.ts'
 import { runLearnCommand } from './commands/learn.ts'
 import { runWatchCommand } from './commands/watch.ts'
 import { runAgentsCommand } from './commands/agents.ts'
@@ -74,6 +76,8 @@ registerConnector(debtConnector)
 registerConnector(sddConnector)
 registerConnector(notifyConnector)
 registerConnector(learnConnector)
+registerConnector(jevConnector)
+registerConnector(llmJudgeConnector)
 // specs facade providers — registry order is detection precedence:
 // native first (its matchDir claims the configured sdd.dir), then
 // tool-layout matchers, agent last (explicit pick only, never detects)
@@ -230,6 +234,14 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'learn',
     configKey: 'learn',
     configSchema: learnSection,
+  }),
+  definePlugin({
+    name: 'judge',
+    summary: 'Calibrated decision judge — decide smoke test over jev + llm-judge',
+    run: runJudgeCommand,
+    skill: 'judge',
+    configKey: 'judge',
+    configSchema: judgeSection,
   }),
   definePlugin({
     name: 'docs',
