@@ -85,6 +85,7 @@ describe('native scope() — the tool\u2019s explicit scope', () => {
     assert.deepEqual(scopeOf("---\nscope: 'a''b' # note\n---\n"), ["a'b"])
     assert.deepEqual(scopeOf('---\nscope: ["a.ts",\n  "b.ts"] # note\n---\n'), ['a.ts', 'b.ts'])
     assert.deepEqual(scopeOf("---\nscope: [a'ts.ts, b.ts]\n---\n"), ["a'ts.ts", 'b.ts'])
+    assert.deepEqual(scopeOf("---\nscope: ['a'',b', c]\n---\n"), ["a',b", 'c'])
   })
 
   test('no frontmatter scope and no spec both return null', () => {
