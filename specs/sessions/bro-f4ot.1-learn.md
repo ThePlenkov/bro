@@ -1,7 +1,7 @@
 # bro-f4ot.1 — bro learn — self-improvement loop
 
 Parent: `bro-f4ot` (agents facade + bro fleet) → `sessions` capability.
-See `bro-f4ot/spec.md` and `../spec.md`.
+See `bro-f4ot/spec.md` and `spec.md`.
 
 ## Problem
 
@@ -128,12 +128,26 @@ probe — a wedged store yields zero lines, never a stalled hook.
   against the session trace. To give the matcher its evidence plane, the
   hooks layer gains a **session trace journal**: `emitPostTool` appends
   one JSONL line per event to
-  `<git-common>/bro/hooks/<session>.trace.jsonl` —
-  `{ts, tool, command?, paths?, ok}` — alongside the existing arming
-  markers, same lifecycle, same per-session naming. The learn probe
-  reads the trace tail, matches, and renders at most `budget` fires per
-  lesson per session — the fired set lives in
-  `<common>/bro/hooks/<session>.learn-fired` so restarts don't re-fire.
+  `<git-common>/bro/hooks/trace/<session>.jsonl` —
+  `{ts, tool, command?, paths?, ok}` — same per-session lifecycle as the
+  arming markers but **in a `trace/` subdir, never flat beside them**:
+  `readArmed` scans `<session>.*` files as gate aspects within the
+  marker TTL, so a flat `<session>.trace.jsonl` would arm a phantom
+  `trace.jsonl` aspect on every post-tool event (the `hinted/` subdir
+  exists for exactly this reason — same rule applies here). The learn
+  probe reads the trace tail, matches, and renders at most `budget`
+  fires per lesson per session — the fired set lives in
+  `<common>/bro/hooks/fired/<session>` (subdir for the same reason) so
+  restarts don't re-fire.
+
+  The journal records what the hook payload actually carries —
+  `HookInput` widens to read `tool_name` and the path-bearing
+  `tool_input` fields each tool family uses (`command` on exec,
+  `file_path`/`path` on edit/write, `files` where present). Fields the
+  payload lacks stay absent from the trace line — a `paths`/`tools`
+  trigger key on a tool family that never reports them simply can't
+  match, which degrades the lesson to its other keys rather than
+  misfiring.
 
   The trace is the reusable part: it is also what a future `stopGate`
   "did you repeat a mistake a lesson warned about" contribution reads.
@@ -196,7 +210,11 @@ session never has to.
 bro learn add --lesson "<rule>" --on session-start|prompt-submit|post-tool
               [--match-terms …] [--match-commands …] [--match-paths …]
               [--match-tools …] [--match-errors] [--budget N]
-              [--evidence <kind>:<ref>]…        → stores a manual lesson
+              --evidence <kind>:<ref>…          → stores a manual lesson —
+              ≥1 --evidence REQUIRED (schema: never empty); `capture`
+              synthesizes evidence from source ids and `probe --lesson`
+              auto-records {kind:'session', ref:<probe session>} plus the
+              question — only `add` asks for it by hand
 bro learn list [--json] [--source …] [--confidence …]
 bro learn show <id>
 bro learn forget <id>                          → bd kv clear learn/<id>
