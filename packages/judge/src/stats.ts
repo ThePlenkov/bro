@@ -356,7 +356,8 @@ function thresholdLine(s: JudgeStats): string {
   const cost =
     s.cost.n === 0
       ? 'cost no-data'
-      : `mean ${usd(s.cost.mean)} ${s.cost.mean < 0.01 ? '<' : '≥'} $0.01`
+      : `mean ${usd(s.cost.mean)} ${s.cost.mean < 0.01 ? '<' : '≥'} $0.01` +
+        (s.cost.noCost > 0 ? ` (${s.cost.noCost} unmeasured)` : '')
   return `thresholds: ${[agreement, latency, cost].join(' · ')}`
 }
 

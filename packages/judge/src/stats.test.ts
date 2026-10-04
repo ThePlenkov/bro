@@ -268,4 +268,13 @@ describe('formatStats', () => {
     assert.match(text, /per provider\/model:/)
     assert.match(text, /thresholds: agreement 100\.0% ≥ 85%/)
   })
+
+  test('cost threshold flags unmeasured calls — the mean is a floor', () => {
+    const rows: JournalRow[] = [
+      verdict({ subject: { threadId: 'T1' }, costUsd: 0.001 }),
+      verdict({ subject: {}, costUsd: undefined }),
+    ]
+    const text = formatStats(computeStats(rows))
+    assert.match(text, /mean \$0\.0010 < \$0\.01 \(1 unmeasured\)/)
+  })
 })
