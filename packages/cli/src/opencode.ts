@@ -64,7 +64,9 @@ interface LogInput {
 interface PermissionAsk {
   id?: string
   type?: string
+  permission?: string
   pattern?: string | string[]
+  patterns?: string[]
   sessionID?: string
   metadata?: Record<string, unknown>
 }
@@ -323,10 +325,16 @@ function contextOf(control: HookControl | null): string {
   return typeof text === 'string' ? text.trim() : ''
 }
 
-/** opencode describes a bash ask by `pattern` (the command); other tools carry
- *  it in metadata. Either way bro's classifier wants the raw command string in
- *  the slot Claude puts it. */
+/** opencode describes a bash ask by `patterns` — one entry per command
+ *  segment — while the older `Permission` shape used `pattern`, and other
+ *  tools carry the command in metadata. Joining keeps the whole ask visible
+ *  to the classifier: `bd ready` approves, `bd ready && rm -rf x` must not.
+ *  Either way bro's classifier wants the raw command string in the slot
+ *  Claude puts it. */
 function permissionCommand(input: PermissionAsk): string {
+  if (Array.isArray(input.patterns) && input.patterns.length > 0) {
+    return input.patterns.join(' && ')
+  }
   if (typeof input.pattern === 'string') {
     return input.pattern
   }
@@ -421,18 +429,32 @@ export const BroPlugin = (
 
   /** `message.updated` arrives before the matching `session.idle` —
    *  `time.completed` with no `error` is what separates a finished turn from
-   *  one the user aborted or the provider failed. */
+   *  one the user aborted or the provider failed. The latest assistant update
+   *  is the verdict: a clean step followed by one that aborts, errors, or is
+   *  still streaming erases the earlier completion. */
   const onMessageUpdated = (props: Record<string, unknown>): void => {
     const info = asRecord(props.info)
-    if (
-      info?.role === 'assistant' &&
-      typeof info.sessionID === 'string' &&
-      info.time !== undefined &&
-      asRecord(info.time)?.completed !== undefined &&
-      info.error === undefined
-    ) {
-      clean.add(info.sessionID)
+    if (info?.role !== 'assistant' || typeof info.sessionID !== 'string') {
+      return
     }
+    if (asRecord(info.time)?.completed !== undefined && info.error === undefined) {
+      clean.add(info.sessionID)
+    } else {
+      clean.delete(info.sessionID)
+    }
+  }
+
+  /** `session.deleted` retires the per-session structures — they live as
+   *  long as the plugin process, not the session, so without this a
+   *  long-lived server accumulates dead entries. */
+  const onSessionDeleted = (props: Record<string, unknown>): void => {
+    const sessionID = asRecord(props.info)?.id ?? props.sessionID
+    if (typeof sessionID !== 'string') {
+      return
+    }
+    rehydration.delete(sessionID)
+    gated.delete(sessionID)
+    clean.delete(sessionID)
   }
 
   /** `session.compacted` re-primes the cache so the next turn pushes
@@ -554,6 +576,9 @@ export const BroPlugin = (
           break
         case 'session.compacted':
           onSessionCompacted(props)
+          break
+        case 'session.deleted':
+          onSessionDeleted(props)
           break
         case 'session.idle':
           await onSessionIdle(props)

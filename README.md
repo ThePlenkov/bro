@@ -77,7 +77,6 @@ as the package's `./server` export) that spawns its own CLI. Two consequences:
   re-prompted. Same "gates, not loops" rule the other adapters get from
   `stop_hook_active`, and an aborted or errored turn never gates at all.
 
-
 ## Commands
 
 | Command | What bro does |

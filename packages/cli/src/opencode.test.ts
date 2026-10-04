@@ -1,6 +1,6 @@
-import { describe, test, beforeEach, afterEach } from 'node:test'
+import { describe, test, beforeEach, afterEach, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import plugin from './opencode.ts'
@@ -35,9 +35,13 @@ if (process.env.BRO_STUB_LOG) {
 }
 const map = process.env.BRO_STUB_MAP ? JSON.parse(process.env.BRO_STUB_MAP) : {}
 if (event in map) process.stdout.write(map[event] ?? '')
-process.exit(Number(process.env.BRO_STUB_STATUS ?? '0'))
+const done = () => process.exit(Number(process.env.BRO_STUB_STATUS ?? '0'))
+const sleep = Number(process.env.BRO_STUB_SLEEP_MS ?? '0')
+sleep > 0 ? setTimeout(done, sleep) : done()
 `
 )
+
+after(() => rmSync(dir, { recursive: true, force: true }))
 
 interface Call {
   event: string
@@ -132,6 +136,7 @@ afterEach(() => {
   delete process.env.BRO_STUB_LOG
   delete process.env.BRO_STUB_MAP
   delete process.env.BRO_STUB_STATUS
+  delete process.env.BRO_STUB_SLEEP_MS
 })
 
 describe('session rehydration', () => {
@@ -321,6 +326,27 @@ describe('permission', () => {
     assert.equal(out.status, 'ask')
   })
 
+  test('reads the native patterns array and keeps every segment visible', async () => {
+    respond({ permission: JSON.stringify({ decision: 'approve' }) })
+    const { hooks } = await makeHooks()
+    const out = { status: 'ask' as const }
+    await hooks['permission.ask']?.(
+      { permission: 'bash', patterns: ['bd ready'], sessionID: 'ses_1' },
+      out
+    )
+    assert.equal(out.status, 'allow')
+    assert.equal(calls()[0]?.payload.tool_input?.command, 'bd ready')
+
+    // a compound ask reaches bro as the whole chain — the classifier, not
+    // this hook, decides that `bd ready && rm -rf x` is not a self-tool call
+    const chained = { status: 'ask' as const }
+    await hooks['permission.ask']?.(
+      { permission: 'bash', patterns: ['bd ready', 'rm -rf x'] },
+      chained
+    )
+    assert.equal(calls()[1]?.payload.tool_input?.command, 'bd ready && rm -rf x')
+  })
+
   test('reads the command out of metadata and single-entry patterns', async () => {
     respond({ permission: JSON.stringify({ decision: 'approve' }) })
     const { hooks } = await makeHooks()
@@ -410,6 +436,59 @@ describe('stop gate', () => {
     assert.equal(calls().length, 0)
   })
 
+  test('a clean step followed by an abort in the same turn never gates', async () => {
+    respond({ stop: JSON.stringify(blocked) })
+    const { hooks, prompts } = await makeHooks()
+
+    await finishTurn(hooks, 'ses_1')
+    // the next assistant step of the same turn dies — its message.updated is
+    // the verdict, not the earlier clean one
+    await hooks.event?.({
+      event: {
+        type: 'message.updated',
+        properties: {
+          info: {
+            role: 'assistant',
+            sessionID: 'ses_1',
+            time: { created: 3 },
+            error: { name: 'MessageAbortedError' },
+          },
+        },
+      },
+    })
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
+
+    assert.deepEqual(prompts, [])
+    assert.equal(calls().length, 0)
+  })
+
+  test('session.deleted clears rehydration and the one-shot gate', async () => {
+    respond({
+      'session-start': JSON.stringify(ctx('state')),
+      stop: JSON.stringify(blocked),
+    })
+    const { hooks, prompts } = await makeHooks()
+
+    const first = { sessionID: 'ses_1', system: [] as string[] }
+    await hooks['experimental.chat.system.transform']?.(first, first)
+    assert.deepEqual(first.system, ['state'])
+    await finishTurn(hooks, 'ses_1')
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
+    assert.equal(prompts.length, 1)
+
+    await hooks.event?.({
+      event: { type: 'session.deleted', properties: { info: { id: 'ses_1' } } },
+    })
+
+    // a session reusing the id probes fresh and gets a fresh one-shot
+    const second = { sessionID: 'ses_1', system: [] as string[] }
+    await hooks['experimental.chat.system.transform']?.(second, second)
+    assert.equal(calls().filter((c) => c.event === 'session-start').length, 2)
+    await finishTurn(hooks, 'ses_1')
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
+    assert.equal(prompts.length, 2)
+  })
+
   test('idle without a finished turn never gates', async () => {
     respond({ stop: JSON.stringify(blocked) })
     const { hooks, prompts } = await makeHooks()
@@ -459,7 +538,7 @@ describe('stop gate', () => {
 describe('fail-open', () => {
   test('a nonzero exit yields no context anywhere', async () => {
     respond({ 'session-start': JSON.stringify(ctx('state')) }, 1)
-    const { hooks, logs } = await makeHooks()
+    const { hooks, logs, prompts } = await makeHooks()
     const system = { system: [] as string[] }
     await hooks['experimental.chat.system.transform']?.({ sessionID: 'ses_1' }, system)
     await hooks.event?.({
@@ -468,10 +547,9 @@ describe('fail-open', () => {
         properties: { info: { role: 'assistant', sessionID: 'ses_1', time: { completed: 2 } } },
       },
     })
-    const stop: string[] = []
     await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
     assert.deepEqual(system.system, [])
-    assert.deepEqual(stop, [])
+    assert.deepEqual(prompts, [])
     assert.equal(logs.filter((l) => l.level === 'warn').length, 0)
   })
 
@@ -490,6 +568,29 @@ describe('fail-open', () => {
     await hooks['permission.ask']?.({ pattern: 'bro act status' }, perm)
     assert.deepEqual(system.system, [])
     assert.equal(perm.status, 'ask')
+  })
+
+  test('a probe that outlives its budget resolves with no context', async (t) => {
+    // the stub sleeps past HOOK_TIMEOUT_MS; fake timers fire the reap without
+    // waiting the real 15s — process.kill on the child is still real
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    process.env.BRO_STUB_SLEEP_MS = '60000'
+    try {
+      const { hooks } = await makeHooks()
+      const out = { sessionID: 'ses_1', system: [] as string[] }
+      const pending = hooks['experimental.chat.system.transform']?.(out, out)
+      // the stub logs on startup, before its sleep — give the real child a
+      // bounded wall-clock window to boot, then fire the fake reap timer
+      for (let i = 0; i < 20_000 && calls().length === 0; i++) {
+        await new Promise((resolve) => setImmediate(resolve))
+      }
+      t.mock.timers.tick(60_000)
+      await pending
+      assert.deepEqual(out.system, [])
+      assert.equal(calls().length, 1)
+    } finally {
+      t.mock.timers.reset()
+    }
   })
 
   test('garbage on stdout is not parsed as context', async () => {
