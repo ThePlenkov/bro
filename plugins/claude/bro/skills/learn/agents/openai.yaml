@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Learn"
+  short_description: "Self-improvement loop via the bro CLI — store trigger-gated lessons, inject them when they fire"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $learn to get started."
+policy:
+  allow_implicit_invocation: false

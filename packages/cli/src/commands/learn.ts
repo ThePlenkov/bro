@@ -1,8 +1,8 @@
 /**
  * `bro learn <verb>` — the lesson store (spec:
  * specs/sessions/bro-f4ot.1-learn.md). Lessons live in `bd kv` under
- * the `learn/` prefix; this command is the CRUD surface — matcher,
- * capture, probe, and promote land in later milestones.
+ * the `learn/` prefix; this command is the CRUD surface — the matcher
+ * and connector live in @broject/learn, promote is still pending.
  *
  *   add --lesson "…" --on <event> [--on …] --evidence <kind>:<ref> [--evidence …]
  *        [--match-terms …] [--match-commands …] [--match-paths …]
