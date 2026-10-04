@@ -40,8 +40,8 @@ Every decide() a bro command makes in shadow mode is journaled to
 linked worktrees, nothing lands in git): act/drive thread annotation
 as `kind: 'act-thread'` rows, `bro judge decide` smoke calls as
 `kind: 'judge-decide'` (kept out of the triage agreement set), plus
-`kind: 'act-disposition'` rows where `bro act resolve/reply/defer`
-observes what actually happened.
+`kind: 'act-disposition'` rows where `bro act resolve/reply` or an act
+plan applies a verdict.
 
 `bro act threads` and the drive fixer prompt render a `judge:` line
 beside each unresolved thread — `blocks_correctness`, `severity`,

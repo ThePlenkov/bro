@@ -134,6 +134,10 @@ export interface AnnotateOpts {
   /** Fresh decide() calls this run may pay for — re-reads are free.
    *  Defaults to 50 (`judge.maxDecisionsPerRun`). */
   budget?: number
+  /** Wall-clock ceiling for fresh calls — workers stop picking up new
+   *  threads once it passes (in-flight decides still land). Keeps an
+   *  interactive listing from stalling behind a slow-but-alive backend. */
+  deadlineMs?: number
 }
 
 export interface AnnotateResult {
@@ -154,7 +158,8 @@ export interface AnnotateResult {
 const ANNOTATION_CONCURRENCY = 4
 
 /** Judge every unresolved thread once — dedup re-reads first, fresh
- *  decide() calls bounded by `budget` (attempts count, not just
+ *  decide() calls bounded by `budget` and optional `deadlineMs`
+ *  (attempts count, not just
  *  successes — a failed call still spent its timeout), everything
  *  journaled. A wedged backend (JudgeUnavailable) stops the workers
  *  fast rather than burning a timeout per thread; a per-thread failure
@@ -184,12 +189,18 @@ export async function annotateThreads(
       pending.push({ thread, subject })
     }
   }
+  const deadline =
+    opts.deadlineMs !== undefined ? Date.now() + opts.deadlineMs : undefined
   let decided = 0
   let judged = 0
   let i = 0
   let dead = false
   const worker = async (): Promise<void> => {
-    while (!dead && i < pending.length) {
+    while (
+      !dead &&
+      i < pending.length &&
+      (deadline === undefined || Date.now() < deadline)
+    ) {
       const item = pending[i]!
       i += 1
       if (decided >= budget) {

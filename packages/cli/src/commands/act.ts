@@ -507,7 +507,10 @@ async function cmdThreads(argv: string[]): Promise<void> {
   // annotation only, never applied; every failure mode degrades to
   // "no annotation" (a judge that can stall `act threads` gets turned
   // off, per the spec's fail-open rule)
-  const notes = await shadowNotes(rev, t, threads)
+  // judging runs beside the listing, not in front of it — TSV rows
+  // print immediately; annotations land on stderr once the batch
+  // resolves (a full fresh-decide budget must never blank the listing)
+  const pendingNotes = shadowNotes(rev, t, threads).catch(() => undefined)
   let open = 0
   for (const thread of threads) {
     if (thread.resolved) {
@@ -520,11 +523,14 @@ async function cmdThreads(argv: string[]): Promise<void> {
     const line = c?.line ?? '-'
     const body = (c?.body ?? '').replace(/[\n\t]/g, ' ').slice(0, 120)
     console.log(`${thread.id}\t${author}\t${path}:${line}\t${body}`)
+  }
+  const notes = await pendingNotes
+  for (const thread of threads) {
     const note = notes?.get(thread.id)
     if (note !== undefined) {
       // stderr — stdout is the documented TSV contract; a `judge:` line
       // there reads as a malformed thread record to TSV consumers
-      console.error(`  ${note}`)
+      console.error(`${thread.id} ${note}`)
     }
   }
   console.error(`act threads: ${open} unresolved`)
@@ -560,6 +566,9 @@ async function shadowNotes(
       headSha,
       judge: judgeFacade(dir),
       budget: cfg.maxDecisionsPerRun,
+      // a listing must stay a listing — a slow-but-alive backend gets a
+      // few decide rounds, then the rows print unjudged
+      deadlineMs: 10_000,
     })
     if (res.decided > 0) {
       console.error(`act: judge decided ${res.decided} thread(s) — verdicts journaled`)
