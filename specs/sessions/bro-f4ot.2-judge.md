@@ -76,7 +76,7 @@ type JudgeAnswer =
       confidence: number; decidedBy: string }
   | { type: 'score'; score: number; probabilities: Record<string, number>
       confidence: number; decidedBy: string }
-  | { type: 'noul'; noul: number; decidedBy: string }
+  | { type: 'noul'; noul: number; confidence: number; decidedBy: string }
 
 interface DecideResult {
   answers: Record<string, JudgeAnswer>  // keyed to the questions asked
@@ -112,6 +112,10 @@ Contract rules:
 - **One call, many questions.** Consumers batch a subject's questions
   into one `decide()` — jev evaluates them in parallel in one round
   trip; a question-per-call loop is a cost bug.
+- **`noul` confidence is derived.** jev returns only the P(yes)
+  probability; the connector sets `confidence = max(noul, 1 - noul)` —
+  a confident "no" is still confident, and the escalation/calibration
+  machinery treats every answer type uniformly.
 - **Confidence is per-answer.** The threshold (`judge.confidence`,
   default 0.6) is applied by the chain, not the caller: low-confidence
   answers escalate to `judge.fallback` when configured; answers that
@@ -137,9 +141,12 @@ Error semantics the connector maps: `400` validation (our bug — throw),
 `401/403` auth (throw `JudgeUnavailable` with the remediation line),
 `402` insufficient credits (`JudgeUnavailable` — fail-open, same as
 down), `502` upstream (bounded retry with backoff, then
-`JudgeUnavailable`). Timeouts default `judge.timeoutMs` 3000 — the
-decision's value is cheapness; a judge slower than the thing it
-annotates is overhead, not help.
+`JudgeUnavailable`). `judge.timeoutMs` (default 3000) bounds the
+**whole `decide()` call**, not one backend attempt — the chain spends
+it across primary, retries, and escalation within one deadline (an
+escalation that starts with 200ms of budget left gets 200ms, not a
+fresh 3000). The decision's value is cheapness; a judge slower than
+the thing it annotates is overhead, not help.
 
 The bead notes jev also rides OrcaRouter's OpenAI-compat wrapper as
 `typesafe/jev-1.13`; the **native `/v1/decide` shape is the v1
@@ -181,7 +188,7 @@ interface Verdict {
   ts: string                    // ISO
   kind: string                  // 'act-thread' v1 — the consumer surface
   subject: { pr?: number; threadId?: string; headSha?: string
-             commentSha?: string }       // replay dedup key
+             commentSha?: string }       // subject identity — call-site dedup key
   questions: Record<string, JudgeQuestion>
   answers: Record<string, JudgeAnswer>
   model: string
@@ -189,14 +196,28 @@ interface Verdict {
   costUsd?: number
   outcome?: string              // filled by stats once observed:
                                 // 'fixed' | 'replied' | 'deferred' | 'rejected'
+  replay?: boolean              // dogfood verdicts — kept out of live stats
 }
 ```
 
 Append-only, one line per verdict, tmp+rename not needed (append is
-atomic at this size). `subject.commentSha` dedups replays: the same
-thread re-judged is a new verdict, not a duplicate to suppress — but
-stats counts one verdict per (threadId, commentSha) pair when scoring
-agreement.
+atomic at this size). `subject.commentSha` keys the subject: a caller
+whose (threadId, commentSha) already has a verdict in the journal
+re-reads it instead of paying for a second `decide()` — cost dedup
+happens at the call site, not in the journal. The journal appends a
+new verdict only when the inputs moved (new `commentSha`/`headSha`)
+or the call is an intentional replay (marked `replay: true`, excluded
+from live stats); stats scores at most one verdict per
+(threadId, commentSha) pair either way.
+
+`outcome` is inferred, not read back — the review facade exposes only
+a thread's current state, so stats reconstructs what happened:
+resolved with a fix commit on a later `headSha` → `fixed`; resolved
+with a defer-bead external ref → `deferred`; resolved after an agent
+reply with no code change → `replied` or `rejected` (the reply's own
+verdict); unresolved when the PR settled → excluded. A thread whose
+outcome resists classification drops out of the agreement set —
+silent misclassification is worse than a smaller sample.
 
 The journal lives in the common git dir for the same reason the agents
 registry and hook traces do: linked worktrees share it, nothing lands
@@ -210,7 +231,7 @@ judge answers beside each unresolved thread when `judge.mode: shadow`:
 ```text
 PRRT_…  src/x.ts:42  cubic
   "…deref of possibly-null…"
-  judge: blocks_correctness 0.91 · severity 3/4 (blocking) · action fix
+  judge: blocks_correctness 0.91 · severity 2.8/4 (should-fix) · action resolve
         — decided by jev-1.13.0 (240ms, $0.0009)
 ```
 
@@ -220,10 +241,16 @@ in dogfood):
 - `blocks_correctness` — **noul**: "Does this thread report an issue
   that must be fixed before merge for correctness/security reasons?"
 - `severity` — **score** on 4 levels: cosmetic/docs · minor (debt
-  material) · should-fix-before-merge · blocking correctness.
-- `action` — **choice**: fix | reply | defer | resolve — the act plan's
-  own verdict space, so agreement is measurable against the actual
-  `ActThreadVerdict` outcome.
+  material) · should-fix-before-merge · blocking correctness. (The
+  contract's 2–10 is the allowed level *count*; `score` is a possibly
+  fractional value on the declared scale — `2.8` of 4 levels renders
+  `2.8/4`.)
+- `action` — **choice**: resolve | reply | defer — the act plan's own
+  verdict space (`ActThreadVerdict`), so agreement is measurable
+  against the recorded outcome: `resolve` covers both
+  fix-then-resolve and invalid-finding-resolve (the outcome field
+  distinguishes them); `reply` a substantive answer; `defer` a debt
+  bead.
 
 Non-negotiable: annotation is rendered, **never applied**. Thread
 resolution still needs `bro act resolve/reply`, the exit gate still
@@ -235,10 +262,17 @@ a verdict applied unmeasured is an unearned gate.
 
 From the bead, as measurable thresholds `bro judge stats` reports:
 
-- **agreement ≥ 85%** — judge `action`/`blocks_correctness` vs recorded
-  outcomes on archived review threads (merged PRs' resolved threads,
-  where the outcome is known). Per-decider: jev alone, llm-judge alone,
+- **agreement ≥ 85%** — judge `action` vs recorded outcomes on
+  archived review threads (merged PRs' resolved threads, where the
+  outcome is known). Per-decider: jev alone, llm-judge alone,
   escalated set.
+- **`blocks_correctness` is proxy-scored** — an outcome says what
+  happened, not whether the thread truly blocked correctness. It is
+  measured against the outcome proxy (`deferred`/`rejected` ≈
+  not-blocking, `fixed` ≈ blocking) and **reported separately** with
+  that caveat; it does not count toward the 85% bar. If proxy
+  agreement is poor, a hand-adjudicated subset is the follow-up, not
+  a relaxed threshold.
 - **latency < 1s** — p50 `latencyMs` per `decide()` call (jev advertises
   70–500ms; the margin absorbs fallback escalations).
 - **cost < $0.01** — mean `costUsd` per `decide()` call (jev advertises
@@ -328,8 +362,10 @@ skills/judge/SKILL.md                 policy only — mechanics live in the CLI
   application needs the dogfood report *and* a follow-up spec.
 - **Cost as a rate, not a price.** $0.001/decision × every thread ×
   every poll = real money at convoy scale. `maxDecisionsPerRun` bounds
-  a run; verdicts dedup on (threadId, commentSha) so a re-poll re-reads
-  the journal before re-paying.
+  a run; callers dedup on (threadId, commentSha) — a re-poll re-reads
+  the journal's verdict for an unchanged subject before re-paying,
+  and only moved inputs (new `commentSha`/`headSha`) or a marked
+  replay justify a fresh `decide()`.
 - **Confidence that lies.** llm-judge self-reporting confidence is
   calibration theatre until proven — the stats buckets are the only
   evidence accepted, per-decider.
