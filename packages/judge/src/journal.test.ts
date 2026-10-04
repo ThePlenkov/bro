@@ -1,7 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ReviewComment, Verdict } from '@broject/core'
@@ -78,9 +78,8 @@ describe('append + read', () => {
         subject: { threadId: 'T1' },
         outcome: 'fixed',
       })
-      const path = journalPath(dir)!
       appendRow(dir, v) // third row — then corrupt the tail
-      execFileSync('sh', ['-c', `printf '{bad json' >> ${JSON.stringify(path)}`])
+      appendFileSync(journalPath(dir)!, '{bad json\n')
       const rows = readJournal(dir)
       assert.equal(rows.length, 3)
       assert.deepEqual(rows[0], v)
