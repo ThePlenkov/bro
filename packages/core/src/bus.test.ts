@@ -700,8 +700,15 @@ describe('bus: a broker that goes away ends the stream', () => {
     const broker = await startBusBrokerAt(socketPath)
     try {
       let sub: { close(): void } | undefined
+      let closes = 0
       const closed = new Promise<void>((resolve) => {
-        void busSubscribe(socketPath, {}, { onEvent: () => undefined, onClose: resolve }).then((s) => {
+        void busSubscribe(socketPath, {}, {
+          onEvent: () => undefined,
+          onClose: () => {
+            closes += 1
+            resolve()
+          },
+        }).then((s) => {
           sub = s
         })
       })
@@ -710,6 +717,7 @@ describe('bus: a broker that goes away ends the stream', () => {
       // Without onClose this never resolves and the CLI sits silent
       // until SIGINT — a shutdown that reads as a lull, not an ending.
       await closed
+      assert.equal(closes, 1)
       sub?.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })

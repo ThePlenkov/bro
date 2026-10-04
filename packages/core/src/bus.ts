@@ -163,6 +163,30 @@ export function isBusEventInput(value: unknown): value is BusEventInput {
   return typeof v['topic'] === 'string' && v['topic'] !== '' && typeof v['kind'] === 'string' && v['kind'] !== ''
 }
 
+/** A durable cursor is {gen, seq}: the gen pins it to one broker run, so
+ *  a restart reads as a gap instead of colliding with a seq space that
+ *  counts from 1 again. A bare number stays legal as a run-local cursor
+ *  (--since on the CLI); absent or unparseable means "from now". */
+function parseSince(raw: unknown, gen: string): number | 'now' | 'foreign' {
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    return Math.floor(raw)
+  }
+  if (typeof raw === 'object' && raw !== null) {
+    const cursor = raw as Partial<BusCursor>
+    if (typeof cursor.gen === 'string' && typeof cursor.seq === 'number' && Number.isFinite(cursor.seq)) {
+      return cursor.gen === gen ? Math.floor(cursor.seq) : 'foreign'
+    }
+  }
+  return 'now'
+}
+
+/** `limit` bounds a catch-up replay inside the broker — a cursorless
+ *  probe would otherwise serialize the whole retained ring through the
+ *  socket before its own slice runs. */
+function parseReplayLimit(raw: unknown): number | undefined {
+  return typeof raw === 'number' && Number.isInteger(raw) && raw > 0 ? raw : undefined
+}
+
 /** Bounded replay window. `since` is the caller's last seen seq.
  *
  *  Retention is part of the contract, not a follow-up: a window that is
@@ -440,24 +464,16 @@ export async function startBusBrokerAt(
   const onSub = (sock: Socket, frame: Record<string, unknown>, sub: Subscriber | undefined): Subscriber => {
     const raw = frame['filter']
     const filter: BusFilter = typeof raw === 'object' && raw !== null ? (raw as BusFilter) : {}
-    const sinceRaw = frame['since']
-    // A durable cursor is {gen, seq}: the gen pins it to one broker run,
-    // so a restart reads as a gap instead of colliding with a seq space
-    // that counts from 1 again. A bare number stays legal as a
-    // run-local cursor (--since on the CLI); absent means "from now".
-    let since: number | 'now' | 'foreign' = 'now'
-    if (typeof sinceRaw === 'number' && Number.isFinite(sinceRaw)) {
-      since = Math.floor(sinceRaw)
-    } else if (typeof sinceRaw === 'object' && sinceRaw !== null) {
-      const cursor = sinceRaw as Partial<BusCursor>
-      if (typeof cursor.gen === 'string' && typeof cursor.seq === 'number' && Number.isFinite(cursor.seq)) {
-        since = cursor.gen === gen ? Math.floor(cursor.seq) : 'foreign'
-      }
-    }
+    const since = parseSince(frame['since'], gen)
     const entry: Subscriber = sub ?? { filter, sock, dropped: false }
     entry.filter = filter
     subs.add(entry)
-    const replay = since === 'foreign' ? null : ring.since(since === 'now' ? seq : since, now())
+    let replay: BusEnvelope[] | null
+    if (since === 'foreign') {
+      replay = null
+    } else {
+      replay = ring.since(since === 'now' ? seq : since, now())
+    }
     if (replay === null) {
       sendFrame(sock, { op: 'gap', seq })
       return entry
@@ -467,13 +483,9 @@ export async function startBusBrokerAt(
     // handed still go through its filter, or replay would hand it topics
     // it never asked for.
     const matched = replay.filter((e) => busMatches(entry.filter, e))
-    // `limit` bounds a catch-up replay inside the broker — a cursorless
-    // probe would otherwise serialize the whole retained ring through
-    // the socket before its own slice runs. The omitted prefix is a
-    // hole, so it reports as a gap like any other loss.
-    const limitRaw = frame['limit']
-    const limit =
-      typeof limitRaw === 'number' && Number.isInteger(limitRaw) && limitRaw > 0 ? limitRaw : undefined
+    // The omitted prefix is a hole, so a truncated catch-up reports as a
+    // gap like any other loss.
+    const limit = parseReplayLimit(frame['limit'])
     const kept = limit === undefined ? matched : matched.slice(-limit)
     if (kept.length < matched.length) {
       sendFrame(sock, { op: 'gap', seq })
