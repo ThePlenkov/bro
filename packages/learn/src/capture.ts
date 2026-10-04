@@ -202,12 +202,12 @@ function listLabeled(label: string, dir?: string): TaskRow[] {
 
 /** The up-memo `drillUp` wrote: `## Result\n\nX\n\n## Prevention\n\n- a`. */
 function drillMemo(notes: string | undefined): { result: string; prevents: string[] } | null {
-  if (notes === undefined || notes === null || !notes.includes('## Result')) {
+  if (!notes?.includes('## Result')) {
     return null
   }
   const result = /##\s*Result\s*\n+([\s\S]*?)(?=\n##|\s*$)/.exec(notes)?.[1]?.trim() ?? ''
   const prevents = [
-    ...(notes.match(/##\s*Prevention\s*\n+([\s\S]*)$/)?.[1] ?? '').matchAll(/^\s*-\s+(.+)$/gm),
+    ...(/##\s*Prevention\s*\n+([\s\S]*)$/.exec(notes)?.[1] ?? '').matchAll(/^\s*-\s+(.+)$/gm),
   ]
     .map((m) => m[1]!.trim())
     .filter((p) => p !== '')
@@ -361,7 +361,7 @@ function harvestAct(dir?: string): Harvest {
   for (const group of groups.values()) {
     const prs = new Set(group.map((r) => numMeta(r, 'source_pr')).filter((p) => p > 0))
     const recurring = prs.size >= 2 || group.some((r) => numMeta(r, 'times_seen') >= 2)
-    const origin = group.map((r) => r.id).sort()[0]!
+    const origin = group.map((r) => r.id).sort((a, b) => a.localeCompare(b))[0]!
     if (!recurring) {
       out.skipped.push({ origin, reason: 'finding seen once — not a recurrence' })
       continue
@@ -383,7 +383,8 @@ function harvestAct(dir?: string): Harvest {
           .filter((p): p is string => p !== undefined)
       ),
     ]
-    const scopeText = `${paths.join(' ')}\n${group.map((r) => `${r.title ?? ''}\n${r.description ?? ''}`).join('\n')}`
+    const findingText = group.map((r) => `${r.title ?? ''}\n${r.description ?? ''}`).join('\n')
+    const scopeText = `${paths.join(' ')}\n${findingText}`
     const trigger = buildTrigger(title, scopeText)
     if (trigger === undefined) {
       out.skipped.push({ origin, reason: 'no trigger scope (paths/commands/terms)' })

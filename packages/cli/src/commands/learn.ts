@@ -28,8 +28,7 @@ import {
   listLessons,
   putLesson,
 } from '@broject/learn'
-import type { CaptureSource } from '@broject/learn'
-import type { Evidence, HookEvent, Lesson } from '@broject/learn'
+import type { CaptureSource, Evidence, HookEvent, Lesson } from '@broject/learn'
 import { flag, flagAll, positionals } from './args.ts'
 
 function usage(exitCode = 1): never {
