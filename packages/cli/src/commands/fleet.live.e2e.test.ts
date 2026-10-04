@@ -39,8 +39,10 @@ function runLive(args: string[], opts: { cwd: string; env?: Record<string, strin
   let out = ''
   proc.stdout.on('data', (d) => (out += String(d)))
   proc.stderr.on('data', (d) => (out += String(d)))
+  // 'close', not 'exit' — the restore bytes must have flushed before the
+  // quit tests assert on `out` (exit can beat the last stdout chunk)
   const done = new Promise<{ code: number | null; out: string }>((resolve) => {
-    proc.on('exit', (code) => resolve({ code, out }))
+    proc.on('close', (code) => resolve({ code, out }))
   })
   return { proc, out: () => out, done }
 }
@@ -85,7 +87,11 @@ function slaveOf(pid: number): string | undefined {
 const occurrences = (hay: string, needle: string): number => hay.split(needle).length - 1
 
 describe('bro fleet --live under a PTY', () => {
-  test('alt screen in, frames paint, resize repaints, q restores and exits 0', skip, async () => {
+  // a wedged CLI must hit the timeout → finally kills the proc — never
+  // stall the suite on a pending `done`
+  const T = { ...skip, timeout: 60_000 }
+
+  test('alt screen in, frames paint, resize repaints, q restores and exits 0', T, async () => {
     const { root, main } = initRepo('bro-fleet-live-')
     const { binDir, db } = installFakeBd(root, [])
     const live = runLive(['fleet', '--live', '--every', '30'], {
@@ -129,7 +135,7 @@ describe('bro fleet --live under a PTY', () => {
     }
   })
 
-  test('Ctrl-C under raw mode quits with the screen restored', skip, async () => {
+  test('Ctrl-C under raw mode quits with the screen restored', T, async () => {
     const { root, main } = initRepo('bro-fleet-live-')
     const { binDir, db } = installFakeBd(root, [])
     const live = runLive(['fleet', '--live'], {
