@@ -507,15 +507,17 @@ function armSession(sessionId: string, aspect: GateAspect, detail: string = ''):
     }
     // a .work arm writes under the shared occupancy lock — `bro drive`
     // holds it across its occupancy-check→spawn section, so this marker
-    // lands before the driver's probe or after the spawn, never between
-    // (bro-qry9). Bounded wait and the marker writes either way: arming
-    // must never stall a session over lock contention.
+    // lands before the driver's probe or after the action, never
+    // between (bro-qry9). The wait is the standard lock bound — long
+    // enough to cover a real driver's hold, so the write-anyway
+    // fallback only fires on a pathological holder (the marker is the
+    // session record; dropping it loses the arm entirely).
     let release: () => void = () => {}
     if (aspect === 'work') {
       try {
         release = acquireFileLock(
           join(dirname(dirname(path)), 'agents.json.lock'),
-          { waitMs: 2_000, label: 'occupancy lock' }
+          { label: 'occupancy lock' }
         )
       } catch {
         // held past the bound — write anyway; the marker is the record

@@ -573,15 +573,29 @@ export function finishWorktreeEnter(
     // (bro-0fiq) — retire it unless an agent provably moved in during
     // the lock wait (its registry entry pins this path as worktree);
     // evicting a live fixer is worse than leaving the dir. A reused
-    // tree is never ours to remove.
+    // tree is never ours to remove. The check→remove runs under the
+    // shared occupancy lock — without it a claimant could pin this path
+    // after the check and lose its live tree to the remove. A holder
+    // past the bound is itself a claimant mid-act → keep the tree.
     let partialRemoved = false
     if (!created.reused) {
-      const movedIn = Object.values(readAgentRegistry(opts.main.path)).some(
-        (e) => typeof e.worktree === 'string' && resolve(e.worktree) === resolve(path)
-      )
-      partialRemoved =
-        !movedIn &&
-        gitTry(['-C', opts.main.path, 'worktree', 'remove', '--force', path]).code === 0
+      try {
+        const releaseOcc = acquireAgentRegistryLock(opts.main.path)
+        try {
+          const movedIn = Object.values(readAgentRegistry(opts.main.path)).some(
+            (e) =>
+              typeof e.worktree === 'string' && resolve(e.worktree) === resolve(path)
+          )
+          partialRemoved =
+            !movedIn &&
+            gitTry(['-C', opts.main.path, 'worktree', 'remove', '--force', path])
+              .code === 0
+        } finally {
+          releaseOcc()
+        }
+      } catch {
+        // occupancy lock contended past the bound — keep the tree
+      }
     }
     return { path, branch, stacked: false, claim: {}, claimLockTimedOut: true, partialRemoved }
   }
