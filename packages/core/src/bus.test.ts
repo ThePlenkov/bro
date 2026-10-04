@@ -692,3 +692,40 @@ describe('socket path', () => {
     }
   })
 })
+
+describe('bus: a broker that goes away ends the stream', () => {
+  test('onClose fires when the broker shuts down, so a subscriber does not wait on a signal', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-bus-'))
+    const socketPath = join(dir, 'bus.sock')
+    const broker = await startBusBrokerAt(socketPath)
+    try {
+      let sub: { close(): void } | undefined
+      const closed = new Promise<void>((resolve) => {
+        void busSubscribe(socketPath, {}, { onEvent: () => undefined, onClose: resolve }).then((s) => {
+          sub = s
+        })
+      })
+      await settle()
+      await broker.close()
+      // Without onClose this never resolves and the CLI sits silent
+      // until SIGINT — a shutdown that reads as a lull, not an ending.
+      await closed
+      sub?.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('bus: a cursor past the head is a gap', () => {
+  test('since() reports unobtainable rather than empty when the cursor outran the run', () => {
+    const ring = new BusRing()
+    const ts = '2026-10-04T12:00:00.000Z'
+    ring.push({ gen: 'g1', seq: 1, ts, topic: 'a', kind: 'b' }, Date.parse(ts))
+    // A cursor at head is an ordinary tail: empty is the truth.
+    assert.deepEqual(ring.since(1, Date.parse(ts)), [])
+    // Above it, nothing in this run ever issued that seq — a restart
+    // collision or a bogus cursor. `[]` would read as "caught up".
+    assert.equal(ring.since(9, Date.parse(ts)), null)
+  })
+})

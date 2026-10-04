@@ -201,6 +201,16 @@ async function cmdSubscribe(rest: string[]): Promise<void> {
     since = Math.floor(parsed)
   }
   const json = rest.includes('--json')
+  // Armed before the subscribe, because the end can arrive before the
+  // first event: a broker that shuts down mid-stream must end the
+  // command, not leave it blocked on a signal for a socket that can
+  // never deliver again.
+  let end: () => void = () => undefined
+  const ended = new Promise<void>((resolve) => {
+    end = resolve
+  })
+  process.once('SIGINT', end)
+  process.once('SIGTERM', end)
   let sub
   try {
     sub = await busSubscribe(socketPath, filterFrom(rest), {
@@ -218,17 +228,12 @@ async function cmdSubscribe(rest: string[]): Promise<void> {
           console.error(`gap: cursor older than the replay window (broker at ${String(seq)}) — re-derive state`)
         }
       },
+      onClose: end,
     }, since !== undefined ? { since } : {})
   } catch (err) {
     die(err instanceof Error ? err.message : String(err))
   }
-  await new Promise<void>((resolve) => {
-    const shutdown = (): void => {
-      resolve()
-    }
-    process.once('SIGINT', shutdown)
-    process.once('SIGTERM', shutdown)
-  })
+  await ended
   sub.close()
 }
 

@@ -30,7 +30,7 @@
  * bytes (Linux) / 104 (macOS) and a deep worktree path truncates
  * silently into EADDRINUSE.
  */
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { connect, createServer, type Server, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { createHash, randomBytes } from 'node:crypto'
@@ -142,7 +142,10 @@ export function busMatches(filter: BusFilter, event: { topic: string; kind: stri
   // `topics` has no `.some`, and throwing inside the broker's socket
   // callback would take the whole bus down over one bad frame.
   const topics = filter.topics
-  if (Array.isArray(topics) && topics.length > 0 && !topics.some((t) => busTopicMatches(t, event.topic))) {
+  // `Array.isArray` alone is not enough — `{topics: [null]}` is an
+  // array, and `busTopicMatches` would call `.endsWith` on null in the
+  // socket callback. A non-string entry matches nothing, not throws.
+  if (Array.isArray(topics) && topics.length > 0 && !topics.some((t) => typeof t === 'string' && busTopicMatches(t, event.topic))) {
     return false
   }
   const kinds = filter.kinds
@@ -196,11 +199,6 @@ export class BusRing {
 
   get size(): number {
     return this.buf.length
-  }
-
-  /** Highest seq issued so far — the head a live subscriber starts from. */
-  get head(): number {
-    return this.lastSeq
   }
 
   push(event: BusEnvelope, now: number): void {
@@ -344,6 +342,26 @@ function probeSocket(socketPath: string, timeoutMs: number): Promise<SocketProbe
       }
     })
   })
+}
+
+/** Fail closed unless `dir` is ours and unreachable by anyone else. The
+ *  socket is the only thing between a local user and every event in the
+ *  repository, so this is a precondition on the broker, not a nicety —
+ *  and it is checked after the chmod, because that is the only thing that
+ *  can have fixed it. */
+function assertPrivateDir(dir: string): void {
+  const uid = process.getuid?.()
+  if (uid !== undefined && statSync(dir).uid !== uid) {
+    throw new Error(`bro bus: ${dir} is not owned by this user`)
+  }
+  try {
+    chmodSync(dir, 0o700)
+  } catch {
+    // reported by the mode check below
+  }
+  if ((statSync(dir).mode & 0o077) !== 0) {
+    throw new Error(`bro bus: ${dir} is accessible to other users`)
+  }
 }
 
 function sendFrame(sock: Socket, frame: unknown): void {
@@ -562,14 +580,13 @@ export async function startBusBrokerAt(
   // The socket lives in a shared dir, so it must be owner-only or another
   // local user could plant the name and receive every event. mkdir is
   // required — binding into a missing dir fails — so it is not
-  // best-effort; the mode is, and `recursive` leaves an existing dir's
-  // mode alone, hence the explicit chmod.
-  mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 })
-  try {
-    chmodSync(dirname(socketPath), 0o700)
-  } catch {
-    // best effort — a mode failure must not stop the broker
-  }
+  // best-effort; `recursive` leaves an existing dir's mode alone, and a
+  // chmod on a dir owned by somebody else fails, which is precisely the
+  // case that must not be swallowed: an ignored failure here is a socket
+  // any local user can replace and read the stream through.
+  const socketDir = dirname(socketPath)
+  mkdirSync(socketDir, { recursive: true, mode: 0o700 })
+  assertPrivateDir(socketDir)
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
     server.listen(socketPath, () => {
@@ -630,7 +647,16 @@ export async function startBusBroker(dir: string, opts: BusBrokerOptions = {}): 
     null,
     2
   )}\n`
-  writeFileSync(statePath, record, { mode: 0o600 })
+  try {
+    writeFileSync(statePath, record, { mode: 0o600 })
+  } catch (err) {
+    // Discovery state is how a client finds the socket without
+    // re-deriving the hash, so a broker nobody can find is worse than no
+    // broker: it would hold the name, answer nothing, and look alive in
+    // `bus status`. Take it back down and report why.
+    await broker.close()
+    throw err
+  }
   return {
     socketPath,
     pid: process.pid,
@@ -738,6 +764,10 @@ export interface BusSubscriptionHandlers {
   /** Cursor fell out of the replay window (or the broker restarted) —
    *  re-derive from state before trusting the next event. */
   onGap?: (seq: number) => void
+  /** The broker went away and the stream ended. Without this a
+   *  subscriber waits on a signal for a socket that can never deliver
+   *  again, so a shutdown reads as silence rather than as an ending. */
+  onClose?: () => void
 }
 
 export interface BusSubscription {
@@ -814,6 +844,14 @@ export function busSubscribe(
           }
         }
         nl = buf.indexOf('\n')
+      }
+    })
+    // The broker closing its end is the end of the stream, not a lull in
+    // it. Fired once, and only after the promise settled, so a subscribe
+    // that never connected cannot report a close it never had.
+    sock.on('close', () => {
+      if (settled) {
+        handlers.onClose?.()
       }
     })
   })
@@ -897,6 +935,12 @@ export async function busProbe(
   opts: { since?: number; windowMs?: number; limit?: number } = {}
 ): Promise<BusProbeResult> {
   const windowMs = opts.windowMs ?? BUS_PROBE_WINDOW_MS
+  // One budget, spent once. The connect and the listen window are two
+  // waits, and giving each the full window would let a probe take twice
+  // the budget it advertises — on the hook path that ceiling is the
+  // contract, so the deadline is taken before the connect and what is
+  // left is what the listen gets.
+  const deadline = Date.now() + windowMs
   const events: BusEnvelope[] = []
   let gapped = false
   let sub: BusSubscription | undefined
@@ -918,14 +962,14 @@ export async function busProbe(
       {
         since: opts.since ?? 0,
         ...(opts.since === undefined ? { limit: opts.limit ?? BUS_PROBE_LIMIT } : {}),
-        timeoutMs: Math.max(1, windowMs),
+        timeoutMs: Math.max(1, deadline - Date.now()),
       }
     )
   } catch (err) {
     return { events, gapped, reason: brokerDownReason(err) }
   }
   await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, windowMs)
+    const timer = setTimeout(resolve, Math.max(0, deadline - Date.now()))
     timer.unref?.()
   })
   sub.close()
