@@ -34,6 +34,7 @@ import { githubConnector } from '@broject/github'
 import { gitlabConnector } from '@broject/gitlab'
 import { jevConnector, judgeSection, llmJudgeConnector } from '@broject/judge'
 import { applyActPlan, runActCommand } from './commands/act.ts'
+import { runBusCommand } from './commands/bus.ts'
 import { checkSection } from './commands/check-config.ts'
 import { runCheckCommand } from './commands/check.ts'
 import { runCleanupCommand } from './commands/cleanup.ts'
@@ -175,6 +176,14 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Facade host for thin clients — HTTP/JSON on 127.0.0.1 [--port N]',
     run: runServeCommand,
     skill: 'serve',
+  }),
+  definePlugin({
+    // No `skill` yet: the skill documents the hook integration, which is
+    // the follow-up PR — shipping a stub skill now would document a
+    // capability that does not exist.
+    name: 'bus',
+    summary: 'Local event bus — serve/publish/subscribe agent events by topic',
+    run: runBusCommand,
   }),
   definePlugin({
     name: 'check',

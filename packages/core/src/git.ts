@@ -49,6 +49,20 @@ export function gitTry(args: string[]): { code: number; out: string; err: string
   }
 }
 
+/** The repo's common git dir, absolute — the one place per-repo runtime
+ *  state belongs, so linked worktrees resolve to the SAME directory
+ *  instead of each getting its own copy. `--path-format=absolute` keeps
+ *  it absolute even when git would print a relative `.git`. null outside
+ *  a repository, and on git failure: callers treat "no repo" as an
+ *  ordinary state, never a throw. Canonical probe for the several
+ *  features that keep re-inlining it (agents registry, mailbox, serve
+ *  state, broker socket). */
+export function gitCommonDir(dir: string): string | null {
+  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  const common = r.code === 0 ? r.out.trim() : ''
+  return common === '' ? null : common
+}
+
 /** The drift comparison ref — landed spec vs landed code, so a feature
  *  branch's own commits can't flag the spec it's about to update.
  *  Chain: `origin/HEAD` → local `main`/`master` → remote-tracking

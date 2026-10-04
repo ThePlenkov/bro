@@ -2,6 +2,7 @@ export { gh, ghAsync, ghJson, ghJsonAsync, ghTry, prLink, resolveRepo } from './
 export {
   git,
   gitTry,
+  gitCommonDir,
   gitLogPathRecords,
   gitDriftRef,
   gitLogStamp,
@@ -150,3 +151,31 @@ export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts'
 export type { PlanSchema } from './plan.ts'
 export { makePrinter } from './output.ts'
 export type { Printer } from './output.ts'
+export {
+  BUS_RING_LIMIT,
+  BUS_TIMEOUT_MS,
+  BusRing,
+  busMatches,
+  busProbe,
+  busPublish,
+  busSocketPath,
+  busStatePath,
+  busStatus,
+  busSubscribe,
+  busTopicMatches,
+  isBusEventInput,
+  startBusBroker,
+  startBusBrokerAt,
+} from './bus.ts'
+export type {
+  BusBroker,
+  BusBrokerOptions,
+  BusEnvelope,
+  BusEventInput,
+  BusFilter,
+  BusProbeResult,
+  BusPublishResult,
+  BusStatus,
+  BusSubscription,
+  BusSubscriptionHandlers,
+} from './bus.ts'

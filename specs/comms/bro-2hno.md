@@ -1,0 +1,110 @@
+# bro-2hno — local event bus: topics, filters, fan-out, seq cursors
+
+## Problem
+
+Every consumer of agent state in bro is a polling engine, and three of
+them re-implement subscription semantics independently:
+
+- `bro watch` diffs a rendered snapshot against `lastNotified`
+  (`packages/cli/src/commands/watch.ts:460-472`)
+- the notify drain tracks per-session `.seen-*` cursor files
+  (`packages/core/src/notify.ts`)
+- the hook probe walks shared directories on every event
+
+So one-to-many, many-to-many and per-subscriber filters exist nowhere, and
+N consumers polling M sources is the shape that keeps failing. The shared
+directory is also why 83 orphaned `.seen-*` cursors exist as of
+2026-10-04: per-session state with no owner and no expiry.
+
+What a shared directory cannot give at all is a **total order**. 83
+separate cursor files have no global sequence, so "which fixer finished
+before which" is unrecoverable — exactly the causality an orchestrator
+needs when it decides what to respawn.
+
+Two candidate sources were rejected on their own merits:
+
+- **devin MCP** (`devin_session_events`, `devin_session_gather`,
+  `devin_session_interact`) is pull-only by construction: they are tools,
+  callable only from inside an agent turn, and only by the agent that owns
+  the ACP session. A host-side bro process cannot reach them at all. The
+  first revision of this bead proposed a zero-inference bridge over them,
+  which is impossible by construction rather than merely inefficient.
+- **Poll cost.** The contention argument for dropping files is not real at
+  this workload: roughly one event per agent exit, ~25/hour at eight
+  agents, and atomic rename does not lock. The strong reason is
+  subscription semantics, and that is what this spec builds.
+
+## Design
+
+A broker process on a Unix domain socket in the repo-common dir. Zero
+dependencies, `node:net`, newline-delimited JSON, one envelope per line:
+
+```json
+{"seq":41,"ts":"2026-10-04T12:00:00.000Z","topic":"agent","kind":"failed","key":"bro-7xgk.2","source":"wrapper","payload":{}}
+```
+
+- **`seq` is the cursor.** Monotonic per broker run, assigned under the
+  single-threaded server loop. A consumer reconnects with its last `seq`
+  and receives what it missed.
+- **Replay ring.** The broker keeps the last `RING_LIMIT` envelopes
+  (default 10 000). A consumer asking for a `seq` still inside the ring
+  gets the tail from there; older than the ring, it gets a single
+  `gap` marker and must re-derive state from the registry, which stays
+  the source of truth. Durable per-agent JSONL is **not** the delivery
+  path — the ring plus the registry is enough, and a delivery path that
+  needs its own compaction is the debris this design refuses to create.
+- **Filters are subscriber-side.** `{topics, kinds}` with trailing-`*`
+  glob on topic. Matching happens once, in the broker: one publish, N
+  subscribers, each receiving only its subset. This is the capability the
+  three hand-rolled pollers each lack.
+- **Ephemeral publishers.** `bro bus publish` connects, writes one line,
+  exits. No long-lived connection is ever required of an agent — the only
+  component that must stay connected is a host-side subscriber, because
+  the only receiver inside a live Devin session is the host-side
+  `postTool` probe.
+- **Addressability.** `sun_path` is capped at 108 bytes on Linux and 104
+  on macOS; a deep worktree path truncates silently into `EADDRINUSE`.
+  The socket path is therefore `join(tmpdir(), bro-bus-<hash>.sock)` where
+  the hash is over the absolute git-common dir, so it is short and stable
+  per repo regardless of path depth.
+- **No supervision.** The server starts on demand and publishes
+  `<git-common>/bro/bus.json` (same discovery shape as `serve.json`).
+  A client that finds the socket already bound connects instead of
+  binding; the `EADDRINUSE` path is the normal path, not an error.
+
+### Non-negotiable: fail open
+
+`REVIEW.md` rates any path that can hang or `exit 1` on a hook event as a
+**critical** finding. So:
+
+- the client carries a hard budget — `BUS_TIMEOUT_MS`, default 2000 for
+  `publish`, and the probe path uses a shorter one — and resolves "nothing
+  to report" on expiry rather than throwing
+- connection-refused is an ordinary empty result, never an error
+- `bro bus status` reports `down` and exits 0; only a real protocol fault
+  is an error
+- a broker restart loses nothing durable: subscribers fall back to
+  registry polling
+
+### Out of scope for this PR
+
+- wiring the broker into the `postTool` probe — the critical fail-open
+  path gets its own PR and its own test that the probe never stalls
+- `bro watch` / `bro drive` migrating off their pollers
+- durable audit log (deferred to `bro-f6zp` janitor, which owns retention)
+- removal of the 83 existing `.seen-*` cursors (janitor bead)
+
+## Plan
+
+- [x] `packages/core/src/bus.ts` — envelope, filter match, ring buffer,
+      broker server, client, socket path, fail-open probe helper
+- [x] core barrel export
+- [x] `packages/cli/src/commands/bus.ts` — `serve` / `publish` /
+      `subscribe` / `status` verbs
+- [x] plugin registry entry (`skill` omitted — the skill ships with the
+      hook integration, not before)
+- [x] tests: filter matching, ring eviction + `gap` marker, two
+      subscribers with different filters from one publish, reconnect
+      replay from `seq`, broker-down fail-open, socket-path length
+- [ ] hook probe integration (separate PR)
+- [ ] `bro watch` / `bro drive` migrate to subscriptions (separate PR)
