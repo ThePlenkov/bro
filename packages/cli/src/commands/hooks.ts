@@ -43,6 +43,7 @@ import {
   promptContextLines,
   sessionStartLines,
   stopGateContributions,
+  withFileLock,
 } from '@broject/core'
 import { markerLive, ownerTag } from './proc-owner.ts'
 
@@ -675,13 +676,28 @@ function journalTrace(input: HookInput, sessionId: string): void {
     }
     mkdirSync(dirname(path), { recursive: true })
     const fresh = !existsSync(path)
-    appendFileSync(path, `${JSON.stringify(traceEntry(input))}\n`)
-    if (statSync(path).size > TRACE_JOURNAL_MAX_BYTES) {
-      const kept = readFileSync(path, 'utf8')
-        .split('\n')
-        .filter((l) => l !== '')
-        .slice(-TRACE_JOURNAL_KEEP_LINES)
-      writeFileSync(path, `${kept.join('\n')}\n`)
+    // append + cap-check + trim is one critical section: concurrent
+    // post-tool hooks are separate processes, and an append landing
+    // between the snapshot read and the rewrite would be silently
+    // discarded. Best-effort — a lock timeout degrades to the plain
+    // append, never a stalled hook.
+    const append = (): void => {
+      appendFileSync(path, `${JSON.stringify(traceEntry(input))}\n`)
+      if (statSync(path).size > TRACE_JOURNAL_MAX_BYTES) {
+        const kept = readFileSync(path, 'utf8')
+          .split('\n')
+          .filter((l) => l !== '')
+          .slice(-TRACE_JOURNAL_KEEP_LINES)
+        writeFileSync(path, `${kept.join('\n')}\n`)
+      }
+    }
+    try {
+      withFileLock(`${path}.lock`, append, {
+        waitMs: 2_000,
+        label: 'trace journal lock',
+      })
+    } catch {
+      append()
     }
     if (!fresh) {
       return
