@@ -223,10 +223,11 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'learn',
-    // lesson store + the connector that injects them; capture/probe/
-    // promote and the skill land with bro-f4ot.1.4+
-    summary: 'Self-improvement loop — lesson store: add|list|show|forget',
+    // lesson store + capture/probe + the connector that injects them;
+    // promote is still pending (spec: bro-f4ot.1-learn.md)
+    summary: 'Self-improvement loop — lessons: add|list|show|forget|capture|probe',
     run: runLearnCommand,
+    skill: 'learn',
     configKey: 'learn',
     configSchema: learnSection,
   }),

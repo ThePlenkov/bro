@@ -10,6 +10,10 @@ over beads. In a repo with `bro.config.json` or `.beads/`:
   picks the top open finding.
 - `bro drill down`/`up` creates scoped descent frames; an open frame must be
   closed with `--result` before stopping.
+- `bro learn` is the lesson store — `bro learn probe <question>` checks
+  whether the store already knows the answer before re-investigating,
+  `bro learn capture` distills finished drill/retro/act/mol artifacts into
+  trigger-gated lessons.
 - Plugin hooks rehydrate state at session start/post-compaction and block
   Stop once while a drill frame, unresolved review threads, a dirty
   worktree, or this session's open bead claims remain — a repeated stop
