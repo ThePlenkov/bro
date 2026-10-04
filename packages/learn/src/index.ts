@@ -33,3 +33,14 @@ export type { MatchContext, TraceEntry } from './match.ts'
 export { DEFAULT_LEARN_CONFIG, learnSection } from './config.ts'
 export type { LearnConfig } from './config.ts'
 export { learnConnector } from './connector.ts'
+export { applyCapture, captureLessons, CAPTURE_SOURCES, planCapture } from './capture.ts'
+export type {
+  CaptureCandidate,
+  CaptureMerge,
+  CaptureOptions,
+  CapturePlan,
+  CaptureReport,
+  CaptureSkip,
+  CaptureSource,
+  CaptureWrite,
+} from './capture.ts'
