@@ -64,6 +64,32 @@ describe('native scope() — the tool\u2019s explicit scope', () => {
     )
   })
 
+  test('comment forms — tab, post-quote, apostrophe — and # inside quotes', () => {
+    const scopeOf = (frontmatter: string): string[] | null => {
+      let out: string[] | null = null
+      withRepo(
+        (m) => seedSpec(m, 'b1', frontmatter),
+        (main) => {
+          out = specStore(main).scope?.('b1') ?? null
+        }
+      )
+      return out
+    }
+    assert.deepEqual(scopeOf('---\nscope: src/x.ts\t# note\n---\n'), ['src/x.ts'])
+    assert.deepEqual(scopeOf('---\nscope: ["a #b.ts", c.ts]\n---\n'), ['a #b.ts', 'c.ts'])
+    assert.deepEqual(scopeOf('---\nscope: "src/x.ts" # note\n---\n'), ['src/x.ts'])
+    assert.deepEqual(scopeOf("---\nscope: docs/it's.md # note\n---\n"), ["docs/it's.md"])
+    // '' is YAML's escaped quote; a comment after the last quoted item
+    // of a wrapped flow list still strips; a bare apostrophe in flow
+    // stays literal
+    assert.deepEqual(scopeOf("---\nscope: 'a''b' # note\n---\n"), ["a'b"])
+    assert.deepEqual(scopeOf('---\nscope: ["a.ts",\n  "b.ts"] # note\n---\n'), ['a.ts', 'b.ts'])
+    assert.deepEqual(scopeOf("---\nscope: [a'ts.ts, b.ts]\n---\n"), ["a'ts.ts", 'b.ts'])
+    assert.deepEqual(scopeOf("---\nscope: ['a'',b', c]\n---\n"), ["a',b", 'c'])
+    // a quoted scalar wrapped across lines keeps its # as content
+    assert.deepEqual(scopeOf('---\nscope: ["a\n  b #c", d]\n---\n'), ['a b #c', 'd'])
+  })
+
   test('no frontmatter scope and no spec both return null', () => {
     withRepo(
       (m) => {
@@ -203,7 +229,7 @@ describe('resolveScope', () => {
     )
   })
 
-  test('a scope covering only its own spec file matches nothing', () => {
+  test('a scope covering only its own spec file audits nothing', () => {
     withRepo(
       (m) => {
         seedSpec(m, 'b1', '---\nscope:\n  - specs/b1.md\n---\n')
@@ -211,8 +237,27 @@ describe('resolveScope', () => {
       (main) => {
         assert.deepEqual(resolveScope(main, 'HEAD', 'b1', specStore(main)), {
           state: 'unverifiable',
-          reason: 'scope matches nothing',
+          reason: 'scope names only the spec file',
         })
+      }
+    )
+  })
+
+  test('an OS-form audited spec path still builds a git-form exclusion', () => {
+    // join() is what tree() paths look like — `specs\b1.md` on Windows.
+    // The self-exclusion must speak git's `/`-form or it never matches.
+    withRepo(
+      (m) => seedSpec(m, 'b1', ''),
+      (main) => {
+        commit(main, 'work (b1)', { 'src/b.ts': 'y\n', 'specs/b1.md': '# v2\n' })
+        assert.deepEqual(
+          resolveScope(main, 'HEAD', 'b1', specStore(main), join('specs', 'b1.md')),
+          {
+            state: 'scoped',
+            via: 'commits',
+            pathspecs: [':(literal)src/b.ts', ':(exclude,literal)specs/b1.md'],
+          }
+        )
       }
     )
   })

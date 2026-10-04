@@ -737,13 +737,18 @@ describe('bro spec drift', () => {
 
   /** capture() minus connector-collision warnings — earlier describes
    *  register fake tasks connectors process-wide, so facade resolution
-   *  warns on every run; it is fixture noise, not drift output. */
+   *  warns on every run; it is fixture noise, not drift output. Only
+   *  the collision line is filtered — a real drift-command warning
+   *  still reaches the assertions. */
   const drift = async (
     dir: string,
     argv: string[]
   ): Promise<{ out: string[]; err: string[]; exit: number }> => {
     const r = await capture(dir, argv)
-    return { ...r, err: r.err.filter((l) => !l.startsWith('warning:')) }
+    return {
+      ...r,
+      err: r.err.filter((l) => !/^warning: .+ all provide "tasks" — using /.test(l)),
+    }
   }
 
   const beadRow = (id: string, over: object = {}): Record<string, unknown> => ({

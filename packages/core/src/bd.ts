@@ -96,7 +96,7 @@ const BD_NOT_FOUND = /Issue .+ not found|no issues found matching the provided I
  *  requested id absent. Scans stderr *and* stdout — bd writes the
  *  miss's JSON error object to stdout. */
 export function isBdNotFound(err: unknown): boolean {
-  const out = (err as { stdout?: unknown }).stdout
+  const out = (err as { stdout?: unknown } | null | undefined)?.stdout
   return BD_NOT_FOUND.test(`${errText(err)}\n${typeof out === 'string' ? out : ''}`)
 }
 

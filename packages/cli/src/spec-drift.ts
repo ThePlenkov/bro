@@ -14,7 +14,7 @@
  *  The spec's own path is always excluded (`:(exclude)<spec-path>`) —
  *  a `scope: specs/**` cannot mask its own drift. */
 import { existsSync, lstatSync, readFileSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join } from 'node:path'
+import { basename, dirname, isAbsolute, join, sep } from 'node:path'
 import {
   gitDriftRef,
   gitIsAncestor,
@@ -60,6 +60,13 @@ export function pickSpecPath(dir: string, nodes: SpecNode[], id: string): string
     )[0]?.path
 }
 
+/** Spec paths come from the filesystem (tree nodes use `join`, a `spec:`
+ *  link is verbatim) — on Windows they carry `\`, while git touched
+ *  paths and pathspecs are `/`-form. Normalize before a spec path
+ *  becomes a pathspec or gets compared to one. Windows-only: on POSIX a
+ *  `\` is a legal filename character, not a separator. */
+const gitPath = (p: string): string => (sep === '\\' ? p.replaceAll('\\', '/') : p)
+
 /** A scope entry that can't name a repo path — an absolute path or a
  *  `..` segment — makes the row unverifiable ("bad scope path"),
  *  never silently widens. */
@@ -97,8 +104,10 @@ function negativePathspec(entry: string): boolean {
 export function resolveScope(dir: string, ref: string, id: string, spec: SpecStore, auditedSpecPath?: string): ScopeResult {
   const specPath = auditedSpecPath ?? pickSpecPath(dir, spec.tree(), id)
   // the spec path is a filesystem path, not a user pathspec — literal
-  // keeps a `specs/[id].md` name from globbing
-  const exclude = specPath === undefined ? [] : [`:(exclude,literal)${specPath}`]
+  // keeps a `specs/[id].md` name from globbing; gitPath keeps a
+  // `specs\b1.md` name matching on Windows
+  const specGitPath = specPath === undefined ? undefined : gitPath(specPath)
+  const exclude = specGitPath === undefined ? [] : [`:(exclude,literal)${specGitPath}`]
   // the audited file's own declared scope — the connector's id-keyed
   // scope() can resolve a different same-id file than the one being
   // audited (a spec: link wins the audit), which would compare the
@@ -106,21 +115,30 @@ export function resolveScope(dir: string, ref: string, id: string, spec: SpecSto
   const explicit =
     specPath !== undefined ? specScope(join(dir, specPath)) : (spec.scope?.(id) ?? [])
   return explicit.length > 0
-    ? explicitScope(dir, ref, explicit, exclude)
-    : commitScope(dir, ref, id, specPath, exclude)
+    ? explicitScope(dir, ref, explicit, exclude, specGitPath)
+    : commitScope(dir, ref, id, specGitPath, exclude)
 }
 
 /** Frontmatter scope — validated, never widened: bad entries and
  *  exclusion-only sets are unverifiable, and the match probe counts
  *  paths *after* the spec's own exclusion so `scope: <its own file>`
  *  can't pass as "covers something". */
-function explicitScope(dir: string, ref: string, entries: string[], exclude: string[]): ScopeResult {
+function explicitScope(dir: string, ref: string, entries: string[], exclude: string[], specPath?: string): ScopeResult {
   const bad = entries.find(badScopeEntry)
   if (bad !== undefined) {
     return { state: 'unverifiable', reason: `bad scope path: ${bad}` }
   }
   if (entries.every(negativePathspec)) {
     return { state: 'unverifiable', reason: 'bad scope path: exclusion-only scope' }
+  }
+  // count effective paths post-exclusion: a scope naming only the
+  // spec's own file audits nothing — `scope: specs/b1.md` must not
+  // report scoped on the file the self-exclusion erases
+  if (
+    specPath !== undefined &&
+    entries.every((e) => negativePathspec(e) || gitPath(e) === specPath)
+  ) {
+    return { state: 'unverifiable', reason: 'scope names only the spec file' }
   }
   // an explicit scope matching zero committed paths is a typo the
   // audit must not bless — history, not just the tree, so a scoped
@@ -250,7 +268,7 @@ export function driftRow(dir: string, id: string, spec: SpecStore, env: DriftEnv
     // covers the `spec:` external link — there is no local file to date
     return unverifiable(id, 'no local spec file to date')
   }
-  const specStamp = gitLogStamp(dir, env.ref, [`:(literal)${specPath}`], { follow: true })
+  const specStamp = gitLogStamp(dir, env.ref, [`:(literal)${gitPath(specPath)}`], { follow: true })
   if (specStamp.state === 'error') {
     return unverifiable(id, specStamp.err)
   }
