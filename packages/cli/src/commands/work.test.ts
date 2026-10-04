@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { stackSection } from '@broject/core'
@@ -170,6 +170,80 @@ describe('claimWorktree', () => {
         }
       )
       assert.equal(r.gone, true)
+    })
+  })
+
+  /** A claim.lock held by a live foreign owner — our own pid reads
+   *  alive, so the lock is never stealable and the wait expires. */
+  function heldClaimLock(main: string): void {
+    const gd = join(main, '.git', 'worktrees', 'main--w')
+    mkdirSync(join(gd, 'bro'), { recursive: true })
+    writeFileSync(join(gd, 'bro', 'claim.lock'), `${process.pid}:cafe`)
+  }
+
+  const finishOpts = (main: string) => ({
+    slug: 'w',
+    branch: 'work/w',
+    main: { path: main, head: '', bare: false, detached: false },
+    claimWaitMs: 100,
+  })
+
+  const createdFor = (tree: string) => ({
+    path: tree,
+    branch: 'work/w',
+    branchExists: false,
+    reused: false,
+    stacked: false,
+  })
+
+  test('a held claim lock times out — the fresh tree is retired so retry works (bro-0fiq)', () => {
+    const { root, main } = initRepo('bro-claim-timeout-')
+    const tree = join(root, 'main--w')
+    git(['worktree', 'add', '-q', tree, '-b', 'work/w'], main)
+    inside(main, root, () => {
+      heldClaimLock(main)
+      const r = finishWorktreeEnter(finishOpts(main), createdFor(tree))
+      assert.equal(r.claimLockTimedOut, true)
+      assert.equal(r.partialRemoved, true)
+      assert.equal(existsSync(tree), false)
+    })
+  })
+
+  test('a tree an agent moved into during the lock wait is kept (bro-0fiq)', () => {
+    const { root, main } = initRepo('bro-claim-timeout-')
+    const tree = join(root, 'main--w')
+    git(['worktree', 'add', '-q', tree, '-b', 'work/w'], main)
+    inside(main, root, () => {
+      heldClaimLock(main)
+      // a driver spawned a fixer here — its registry entry pins the path
+      mkdirSync(join(main, '.git', 'bro'), { recursive: true })
+      writeFileSync(
+        join(main, '.git', 'bro', 'agents.json'),
+        JSON.stringify({
+          'fx-1': { agentId: 'native-x', backend: 'native', spawnedAt: 't', worktree: tree },
+        })
+      )
+      const r = finishWorktreeEnter(finishOpts(main), createdFor(tree))
+      assert.equal(r.claimLockTimedOut, true)
+      assert.equal(r.partialRemoved, false)
+      assert.equal(existsSync(tree), true)
+    })
+  })
+
+  test('a tree a sibling enter claimed via its in-tree marker is kept', () => {
+    const { root, main } = initRepo('bro-claim-timeout-')
+    const tree = join(root, 'main--w')
+    git(['worktree', 'add', '-q', tree, '-b', 'work/w'], main)
+    inside(main, root, () => {
+      heldClaimLock(main)
+      // a racing enter won the stamp during our wait — sessions don't
+      // write the agent registry, only the in-tree claim marker
+      const gd = join(main, '.git', 'worktrees', 'main--w', 'bro')
+      writeFileSync(join(gd, 'work'), `${Date.now()}\nw\n`)
+      const r = finishWorktreeEnter(finishOpts(main), createdFor(tree))
+      assert.equal(r.claimLockTimedOut, true)
+      assert.equal(r.partialRemoved, false)
+      assert.equal(existsSync(tree), true)
     })
   })
 })

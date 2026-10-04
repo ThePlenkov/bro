@@ -14,8 +14,11 @@ import {
   ensureFixerWorktree,
   fixerBeadFor,
   fixerRef,
+  freshOccupancy,
   liveWorkDetails,
   occupied,
+  registryAgents,
+  registryEntryState,
   worktreeClaim,
 } from './drive.ts'
 import { driveSection } from './drive-config.ts'
@@ -402,6 +405,104 @@ describe('worktreeClaim', () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('registryEntryState', () => {
+  const entry = (over: Record<string, unknown> = {}) => ({
+    agentId: 'native-a',
+    backend: 'native',
+    spawnedAt: 't',
+    ...over,
+  })
+
+  test('a live pid is running; a dead one is lost — the respawn path survives (bro-taq6)', () => {
+    assert.equal(registryEntryState(null, entry({ pid: process.pid })), 'running')
+    assert.equal(registryEntryState(null, entry({ pid: 2000000000 })), 'lost')
+  })
+
+  test('recorded death is terminal', () => {
+    assert.equal(registryEntryState(null, entry({ stopped: true })), 'stopped')
+    assert.equal(registryEntryState(null, entry({ exitStatus: 3 })), 'exited')
+  })
+
+  test('an unharvested .exit file still proves the exit', () => {
+    const home = mkdtempSync(join(tmpdir(), 'bro-reg-state-'))
+    try {
+      writeFileSync(join(home, 'a1.exit'), '0')
+      assert.equal(registryEntryState(home, entry({ agentId: 'a1' })), 'exited')
+      assert.equal(registryEntryState(home, entry({ agentId: 'a2' })), 'spawned')
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test('a pid-less entry with no death proof is conservatively live', () => {
+    assert.equal(
+      registryEntryState(null, { agentId: 'gc-1', backend: 'gascity', spawnedAt: 't' }),
+      'spawned'
+    )
+  })
+
+  test("an empty pidStart is unverified identity, not reuse proof — a live agent must not read 'lost' (cubic)", () => {
+    assert.equal(
+      registryEntryState(null, entry({ pid: process.pid, pidStart: '' })),
+      'running'
+    )
+  })
+})
+
+describe('registryAgents', () => {
+  test('maps registry entries to agent info — cheap in-lock occupancy view', () => {
+    const { root, main } = initRepo('bro-reg-agents-')
+    inside(main, root, () => {
+      mkdirSync(join(main, '.git', 'bro'), { recursive: true })
+      writeFileSync(
+        join(main, '.git', 'bro', 'agents.json'),
+        JSON.stringify({
+          'fx-1': {
+            agentId: 'native-a',
+            backend: 'native',
+            spawnedAt: 't',
+            pid: process.pid,
+            worktree: join(root, 'main--w'),
+          },
+          'fx-2': { agentId: 'gc-b', backend: 'gascity', spawnedAt: 't' },
+        })
+      )
+      const agents = registryAgents(main)
+      assert.equal(agents.length, 2)
+      const live = agents.find((a) => a.molStep === 'fx-1')!
+      assert.equal(live.state, 'running')
+      assert.equal(live.worktree, join(root, 'main--w'))
+      assert.equal(agents.find((a) => a.molStep === 'fx-2')!.state, 'spawned')
+    })
+  })
+})
+
+describe('freshOccupancy', () => {
+  test('a respawned same-id entry keeps the live verdict — the pass probed a dead generation (cubic)', () => {
+    const { root, main } = initRepo('bro-fresh-occ-')
+    inside(main, root, () => {
+      mkdirSync(join(main, '.git', 'bro'), { recursive: true })
+      writeFileSync(
+        join(main, '.git', 'bro', 'agents.json'),
+        JSON.stringify({
+          'fx-1': { agentId: 'native-a', backend: 'native', spawnedAt: 't2' },
+        })
+      )
+      // the pass probed generation t1 as lost — a respawn landed since;
+      // its fresh 'spawned' must not inherit the stale death verdict
+      const stale = freshOccupancy(main, [
+        agent({ molStep: 'fx-1', id: 'native-a', state: 'lost', spawnedAt: 't1' }),
+      ])
+      assert.equal(stale.agents.find((a) => a.molStep === 'fx-1')!.state, 'spawned')
+      // same generation does inherit — a lost fixer stays respawn-able
+      const same = freshOccupancy(main, [
+        agent({ molStep: 'fx-1', id: 'native-a', state: 'lost', spawnedAt: 't2' }),
+      ])
+      assert.equal(same.agents.find((a) => a.molStep === 'fx-1')!.state, 'lost')
+    })
   })
 })
 

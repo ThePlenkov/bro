@@ -36,6 +36,7 @@ import {
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
+  acquireFileLock,
   parallelWorkLines,
   postToolLines,
   promptContextLines,
@@ -504,7 +505,29 @@ function armSession(sessionId: string, aspect: GateAspect, detail: string = ''):
     if (detail && !body.split('\n').includes(detail)) {
       body = `${body.replace(/\n?$/, '\n')}${detail}\n`
     }
-    writeFileSync(path, body)
+    // a .work arm writes under the shared occupancy lock — `bro drive`
+    // holds it across its occupancy-check→spawn section, so this marker
+    // lands before the driver's probe or after the action, never
+    // between (bro-qry9). The wait is the standard lock bound — long
+    // enough to cover a real driver's hold, so the write-anyway
+    // fallback only fires on a pathological holder (the marker is the
+    // session record; dropping it loses the arm entirely).
+    let release: () => void = () => {}
+    if (aspect === 'work') {
+      try {
+        release = acquireFileLock(
+          join(dirname(dirname(path)), 'agents.json.lock'),
+          { label: 'occupancy lock' }
+        )
+      } catch {
+        // held past the bound — write anyway; the marker is the record
+      }
+    }
+    try {
+      writeFileSync(path, body)
+    } finally {
+      release()
+    }
     const cutoff = Date.now() - MARKER_TTL_MS
     for (const f of readdirSync(dirname(path))) {
       try {

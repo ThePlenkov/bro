@@ -627,6 +627,7 @@ function nativeState(dir: string, home: string | null, molStep: string, entry: A
 function toInfo(dir: string, home: string | null, molStep: string, entry: AgentRegistryEntry): AgentInfo {
   return {
     id: entry.agentId,
+    spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
     pid: typeof entry.pid === 'number' ? entry.pid : undefined,
     molStep,
     backend: entry.backend,
@@ -915,6 +916,7 @@ function toTmuxInfo(
   }
   return {
     id: entry.agentId,
+    spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
     pid: typeof entry.pid === 'number' ? entry.pid : undefined,
     molStep,
     backend: entry.backend,
@@ -1483,6 +1485,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     const s = sessions === undefined ? undefined : gcSessionFor(entry, molStep, sessions)
     return {
       id: entry.agentId,
+      spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
       molStep,
       backend: entry.backend,
       state: sessions === undefined || s === undefined ? missing : gcState(s),
