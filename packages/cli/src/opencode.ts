@@ -1,0 +1,536 @@
+/**
+ * bro as an OpenCode plugin — bro mechanics on opencode's native hook bus.
+ *
+ * OpenCode ships no shell-hook manifest (the Claude/Devin/Codex adapters
+ * ship hooks.json + run.sh). It loads JS/TS modules and calls the `Hooks`
+ * object they return, so this file is the whole adapter: every hook is one
+ * `bro hooks <event>` call with the payload on stdin, and the hook control
+ * JSON that comes back on stdout is translated into whatever that hook's
+ * output slot is called. No bro policy lives here — arming, rehydration, the
+ * stop gate and permission auto-approve stay in the CLI, which is the same
+ * contract the other three adapters speak.
+ *
+ *   system.transform            → session-start       (cached per session)
+ *   session.compacted event     → post-compaction     (re-primes the cache)
+ *   session.compacting hook     → pre-compact
+ *   chat.message                → prompt-submit
+ *   tool.execute.after          → post-tool
+ *   session.idle event          → stop                (see below)
+ *   permission.ask              → permission
+ *
+ * Two deliberate deviations from the shell adapters:
+ *
+ * - **The stop gate re-prompts instead of blocking.** opencode has no pre-stop
+ *   hook — `session.idle` arrives after the turn is over, and nothing can
+ *   refuse the stop. The nearest equivalent is feeding the blocker back as a
+ *   synthetic turn, ONCE per session: the first block re-prompts, every later
+ *   one is logged and let through. That is bro's own "gates, not loops" rule,
+ *   and Claude's `stop_hook_active` retry flag is emulated by the same
+ *   in-memory set, so bro skips its own re-evaluation on the second pass.
+ * - **Only a cleanly finished turn gates.** `session.idle` also fires when the
+ *   user aborts or the provider errors. Re-prompting a user who hit ESC is
+ *   hostile, so the gate needs an assistant message carrying `time.completed`
+ *   and no `error` — tracked from `message.updated`, which opencode delivers
+ *   before the matching idle.
+ *
+ * Fail-open is the whole contract. Every hook is wrapped, a missing bro binary
+ * is not an error, and a spawn that throws, times out, exits nonzero or prints
+ * garbage yields no context, no permission and no re-prompt. Nothing in this
+ * file may throw into opencode.
+ *
+ * Every spawn is ASYNC on purpose. Plugin hooks run on opencode's server event
+ * loop, so a synchronous child would freeze the session — and bro's probes are
+ * not cheap: `hooks session-start` measures 20-40s in a loaded repo (it lists
+ * the `bd ready` queue and walks the sibling worktrees). That budget is why
+ * rehydration is primed on `session.created` instead of on the first turn.
+ *
+ * Upstream hook shapes mirror `@opencode-ai/plugin` 1.18.x, declared
+ * structurally rather than imported: opencode loads this module at runtime and
+ * nobody typechecks it against the real package, so a devDependency on
+ * `@opencode-ai/plugin` would buy type fidelity at the cost of dragging its
+ * sdk/effect/zod trees into the repo for types alone. Field names are verbatim;
+ * upstream is the only place they should change.
+ */
+import { spawn, type ChildProcess } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
+type Level = 'debug' | 'info' | 'warn' | 'error'
+
+interface LogInput {
+  body: { service: string; level: Level; message: string; extra?: unknown }
+}
+
+interface PermissionAsk {
+  id?: string
+  type?: string
+  pattern?: string | string[]
+  sessionID?: string
+  metadata?: Record<string, unknown>
+}
+
+interface EventEnvelope {
+  type: string
+  properties?: Record<string, unknown>
+}
+
+interface PluginInput {
+  directory: string
+  client?: {
+    app?: { log(input: LogInput): Promise<unknown> }
+    session?: {
+      promptAsync(input: {
+        path: { id: string }
+        body: { parts: { type: 'text'; text: string }[] }
+      }): Promise<unknown>
+    }
+  }
+}
+
+/** `["@broject/bro", { command: … }]` — opencode's tuple plugin form. The
+ *  override is a real escape hatch (pin a specific bro build) and the seam
+ *  the tests drive; unresolvable options degrade to the default ladder. */
+interface PluginOptions {
+  command?: string | { cmd: string; args?: string[] }
+}
+
+interface Hooks {
+  event?(input: { event: EventEnvelope }): Promise<void>
+  'chat.message'?(
+    input: { sessionID: string },
+    output: { parts: { type: string; text?: string }[] }
+  ): Promise<void>
+  'permission.ask'?(input: PermissionAsk, output: { status: 'ask' | 'deny' | 'allow' }): Promise<void>
+  'tool.execute.after'?(
+    input: { tool: string; sessionID: string; args?: unknown },
+    output: { output: string; metadata?: unknown }
+  ): Promise<void>
+  'experimental.chat.system.transform'?(
+    input: { sessionID?: string },
+    output: { system: string[] }
+  ): Promise<void>
+  'experimental.session.compacting'?(
+    input: { sessionID: string },
+    output: { context: string[] }
+  ): Promise<void>
+}
+
+/** The one control object `bro hooks <event>` prints. `decision`/`reason`
+ *  carry the stop gate and permission answers; `additionalContext` carries
+ *  everything the probes want the agent to read. */
+interface HookControl {
+  hookSpecificOutput?: { hookEventName?: string; additionalContext?: unknown }
+  decision?: string
+  reason?: unknown
+}
+
+interface Command {
+  cmd: string
+  args: string[]
+}
+
+/** Per-probe budget for the events that ride on a turn. A wedged connector
+ *  already costs up to 4s each and bro runs probes sequentially, so this is an
+ *  outer bound, not the expected wait — on timeout the event degrades to "no
+ *  context", which is the fail-open answer anyway. */
+const HOOK_TIMEOUT_MS = 15_000
+
+/** Rehydration gets a longer budget because it shells out to `bd ready` and
+ *  scans the worktree set — measured at 20-40s in a loaded repo. It is primed
+ *  on `session.created` (see below) so that cost overlaps the user's first
+ *  prompt instead of serializing after it. */
+const REHYDRATION_TIMEOUT_MS = 45_000
+
+const MAX_OUTPUT = 1 << 20
+
+/**
+ * The CLI shipped beside this module: installed as
+ * `node_modules/@broject/bro/dist/{opencode,index}.js`, built in a checkout as
+ * `packages/cli/dist/{opencode,index}.js`. Same package, so the hook policy
+ * can never be a different version than the plugin calling it.
+ */
+function siblingCli(): string | null {
+  for (const rel of ['./index.js', '../dist/index.js']) {
+    const candidate = fileURLToPath(new URL(rel, import.meta.url))
+    if (existsSync(candidate)) {
+      return candidate
+    }
+  }
+  return null
+}
+
+/** Does a PATH `bro` actually answer `bro hooks`? Without an event the hook
+ *  command is a silent no-op, so exit 0 is the probe — an older bro without
+ *  the subcommand fails it instead of failing every hook. Same discriminator
+ *  hooks/run.sh uses. */
+function hasHooksCommand(): Promise<boolean> {
+  return new Promise((resolve) => {
+    let child: ChildProcess
+    try {
+      child = spawn('bro', ['hooks'], { stdio: ['pipe', 'ignore', 'ignore'] })
+    } catch {
+      resolve(false)
+      return
+    }
+    const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(false))
+    child.on('error', () => {
+      clearTimeout(timer)
+      resolve(false)
+    })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      resolve(code === 0)
+    })
+    child.stdin?.on('error', () => {})
+    child.stdin?.end('')
+  })
+}
+
+/** SIGKILL a hung child on a timer. bro's own probe timeouts let a spawned
+ *  `gh`/`bd` outlive the hook, so the timeout kills the whole group rather
+ *  than leaving children behind. */
+function killAfter(
+  child: ChildProcess,
+  ms: number,
+  onTimeout: () => void
+): ReturnType<typeof setTimeout> {
+  const timer = setTimeout(() => {
+    try {
+      child.kill('SIGKILL')
+    } catch {
+      // already gone
+    }
+    onTimeout()
+  }, ms)
+  timer.unref?.()
+  return timer
+}
+
+async function resolveCommand(options: PluginOptions | undefined): Promise<Command | null> {
+  const override = options?.command
+  if (typeof override === 'string' && override.trim() !== '') {
+    return { cmd: override, args: [] }
+  }
+  if (override && typeof override === 'object' && typeof override.cmd === 'string') {
+    return {
+      cmd: override.cmd,
+      args: Array.isArray(override.args)
+        ? override.args.filter((a): a is string => typeof a === 'string')
+        : [],
+    }
+  }
+  const entry = siblingCli()
+  if (entry) {
+    return { cmd: process.execPath, args: [entry] }
+  }
+  // partial install — no bundled CLI next to the plugin. Fall back to PATH,
+  // and only to a bro that passes the hooks probe.
+  return (await hasHooksCommand()) ? { cmd: 'bro', args: [] } : null
+}
+
+/** Run one bro hook event. Resolves null for every failure mode, including
+ *  "bro isn't there" — the caller's only question is whether a valid control
+ *  object came back.
+ *
+ *  Async spawn, not spawnSync: opencode runs plugin hooks on the server's event
+ *  loop, so a synchronous child would freeze the whole session — and bro's
+ *  rehydration probes are measured in tens of seconds, not milliseconds. */
+function callHook(
+  command: Command,
+  event: string,
+  payload: unknown,
+  directory: string,
+  timeoutMs: number
+): Promise<HookControl | null> {
+  return new Promise((resolve) => {
+    let child: ChildProcess
+    try {
+      child = spawn(command.cmd, [...command.args, 'hooks', event], {
+        cwd: directory,
+        stdio: ['pipe', 'pipe', 'ignore'],
+      })
+    } catch {
+      resolve(null)
+      return
+    }
+    let settled = false
+    const settle = (value: HookControl | null): void => {
+      if (!settled) {
+        settled = true
+        resolve(value)
+      }
+    }
+    const timer = killAfter(child, timeoutMs, () => settle(null))
+    let out = ''
+    child.stdout?.setEncoding('utf8')
+    child.stdout?.on('data', (chunk: string) => {
+      if (out.length <= MAX_OUTPUT) {
+        out += chunk
+      }
+    })
+    child.on('error', () => {
+      clearTimeout(timer)
+      settle(null)
+    })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      // `bro hooks` always exits 0; anything else means the run failed, and a
+      // failed run's stdout is not a control object even if it parses
+      settle(code === 0 ? parseControl(out) : null)
+    })
+    // bro can exit before reading stdin (unrecognized event) — EPIPE here is
+    // bro's answer, not a crash
+    child.stdin?.on('error', () => {})
+    child.stdin?.end(JSON.stringify(payload))
+  })
+}
+
+/** bro prints a single control object per event, but scan for the first
+ *  parseable line so unrelated chatter on stdout can't swallow the answer. */
+function parseControl(out: string): HookControl | null {
+  for (const line of out.split('\n')) {
+    const text = line.trim()
+    if (!text) {
+      continue
+    }
+    try {
+      const parsed = JSON.parse(text) as unknown
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as HookControl
+      }
+    } catch {
+      // not a control line — keep scanning
+    }
+  }
+  return null
+}
+
+function contextOf(control: HookControl | null): string {
+  const text = control?.hookSpecificOutput?.additionalContext
+  return typeof text === 'string' ? text.trim() : ''
+}
+
+/** opencode describes a bash ask by `pattern` (the command); other tools carry
+ *  it in metadata. Either way bro's classifier wants the raw command string in
+ *  the slot Claude puts it. */
+function permissionCommand(input: PermissionAsk): string {
+  if (typeof input.pattern === 'string') {
+    return input.pattern
+  }
+  if (Array.isArray(input.pattern) && input.pattern.length === 1) {
+    return input.pattern[0] ?? ''
+  }
+  for (const key of ['command', 'cmd', 'pattern']) {
+    const value = input.metadata?.[key]
+    if (typeof value === 'string') {
+      return value
+    }
+  }
+  return ''
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+export const BroPlugin = async (
+  input: PluginInput,
+  options?: PluginOptions
+): Promise<Hooks> => {
+  const directory = input.directory
+  // resolved on first use, not at load — the PATH tier costs a spawn probe
+  // and opencode loads plugins even in repos where bro is inert.
+  let command: Promise<Command | null> | undefined
+
+  const log = (level: Level, message: string): Promise<unknown> => {
+    try {
+      return Promise.resolve(
+        input.client?.app?.log({ body: { service: 'bro', level, message } })
+      ).catch(() => undefined)
+    } catch {
+      return Promise.resolve(undefined)
+    }
+  }
+
+  const probe = async (
+    event: string,
+    payload: unknown,
+    timeoutMs = HOOK_TIMEOUT_MS
+  ): Promise<HookControl | null> => {
+    command ??= resolveCommand(options)
+    const resolved = await command
+    return resolved ? callHook(resolved, event, payload, directory, timeoutMs) : null
+  }
+
+  /** Rehydration is per session, not per turn: system.transform runs on every
+   *  request, so the probe runs once and the answer is re-pushed each turn —
+   *  which is also what carries it across compaction. The cache holds the
+   *  in-flight promise, not its result, so a `session.created` prime and a
+   *  first turn racing each other share one probe instead of two. */
+  const rehydration = new Map<string, Promise<string>>()
+  const hydrate = (sessionID: string, event: 'session-start' | 'post-compaction'): Promise<string> => {
+    const pending = rehydration.get(sessionID)
+    if (pending) {
+      return pending
+    }
+    const started = probe(event, { session_id: sessionID }, REHYDRATION_TIMEOUT_MS).then(contextOf)
+    rehydration.set(sessionID, started)
+    return started
+  }
+  /** Sessions that already got their one re-prompt. */
+  const gated = new Set<string>()
+  /** Sessions whose last assistant turn finished cleanly. */
+  const clean = new Set<string>()
+
+  return {
+    async 'experimental.chat.system.transform'(hookInput, output) {
+      const sessionID = hookInput.sessionID
+      if (!sessionID) {
+        return
+      }
+      const text = await hydrate(sessionID, 'session-start')
+      if (text) {
+        output.system.push(text)
+      }
+    },
+
+    async 'experimental.session.compacting'(hookInput, output) {
+      const text = contextOf(
+        await probe('pre-compact', { session_id: hookInput.sessionID }, REHYDRATION_TIMEOUT_MS)
+      )
+      if (text) {
+        output.context.push(text)
+      }
+    },
+
+    async 'chat.message'(hookInput, output) {
+      const prompt = output.parts
+        .filter((part) => part.type === 'text')
+        .map((part) => part.text ?? '')
+        .join('\n')
+      const text = contextOf(await probe('prompt-submit', { session_id: hookInput.sessionID, prompt }))
+      if (text) {
+        output.parts.push({ type: 'text', text })
+      }
+    },
+
+    async 'tool.execute.after'(hookInput, output) {
+      const metadata = asRecord(output.metadata)
+      const text = contextOf(
+        await probe('post-tool', {
+          session_id: hookInput.sessionID,
+          tool_name: hookInput.tool,
+          tool_input: asRecord(hookInput.args) ?? {},
+          tool_response: { success: metadata?.error === undefined },
+        })
+      )
+      if (text) {
+        output.output = `${output.output}\n\n${text}`
+      }
+    },
+
+    async 'permission.ask'(hookInput, output) {
+      const command = permissionCommand(hookInput)
+      if (!command) {
+        return
+      }
+      const control = await probe('permission', {
+        tool_input: { command },
+        session_id: hookInput.sessionID,
+      })
+      if (control?.decision === 'approve') {
+        output.status = 'allow'
+      }
+    },
+
+    async event({ event }) {
+      const props = event.properties ?? {}
+      switch (event.type) {
+        case 'session.created': {
+          // prime rehydration while opencode is still waiting on a prompt —
+          // the probe costs real seconds, and this is the only window where
+          // paying it doesn't sit on the critical path of a turn
+          const sessionID = props.sessionID
+          if (typeof sessionID === 'string') {
+            void hydrate(sessionID, 'session-start')
+          }
+          break
+        }
+
+        case 'message.updated': {
+          const info = asRecord(props.info)
+          // `time.completed` with no `error` is what separates a finished turn
+          // from one the user aborted or the provider failed.
+          if (
+            info?.role === 'assistant' &&
+            typeof info.sessionID === 'string' &&
+            info.time !== undefined &&
+            asRecord(info.time)?.completed !== undefined &&
+            info.error === undefined
+          ) {
+            clean.add(info.sessionID)
+          }
+          break
+        }
+
+        case 'session.compacted': {
+          const sessionID = props.sessionID
+          if (typeof sessionID !== 'string') {
+            break
+          }
+          // re-primes the cache so the next turn pushes post-compaction state
+          // instead of the pre-compaction snapshot
+          rehydration.delete(sessionID)
+          void hydrate(sessionID, 'post-compaction')
+          break
+        }
+
+        case 'session.idle': {
+          const sessionID = props.sessionID
+          if (typeof sessionID !== 'string' || !clean.delete(sessionID)) {
+            return
+          }
+          // gated sessions pass stop_hook_active, so bro skips its own
+          // re-evaluation — the one-shot guard is bro's, not duplicated here
+          const control = await probe('stop', {
+            session_id: sessionID,
+            stop_hook_active: gated.has(sessionID),
+          })
+          const reason =
+            typeof control?.reason === 'string' ? control.reason.trim() : ''
+          if (control?.decision !== 'block') {
+            const hint = contextOf(control)
+            if (hint) {
+              await log('info', hint)
+            }
+            return
+          }
+          await log('warn', `stop gate: ${reason || 'unfinished bro work'}`)
+          if (gated.has(sessionID)) {
+            return
+          }
+          gated.add(sessionID)
+          try {
+            await input.client?.session?.promptAsync({
+              path: { id: sessionID },
+              body: { parts: [{ type: 'text', text: reason }] },
+            })
+          } catch (err) {
+            await log('error', `stop gate could not re-prompt: ${errorText(err)}`)
+          }
+          break
+        }
+      }
+    },
+  }
+}
+
+/** opencode's loader requires a v1 module — a default export carrying `id`
+ *  (a file plugin MUST declare one) and `server`. */
+export default { id: 'bro', server: BroPlugin }
