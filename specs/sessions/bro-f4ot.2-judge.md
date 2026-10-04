@@ -210,14 +210,24 @@ or the call is an intentional replay (marked `replay: true`, excluded
 from live stats); stats scores at most one verdict per
 (threadId, commentSha) pair either way.
 
-`outcome` is inferred, not read back — the review facade exposes only
-a thread's current state, so stats reconstructs what happened:
-resolved with a fix commit on a later `headSha` → `fixed`; resolved
-with a defer-bead external ref → `deferred`; resolved after an agent
-reply with no code change → `replied` or `rejected` (the reply's own
-verdict); unresolved when the PR settled → excluded. A thread whose
-outcome resists classification drops out of the agreement set —
-silent misclassification is worse than a smaller sample.
+`outcome` is recorded where the disposition happens, then inferred
+where it isn't — first hit wins:
+
+1. **act disposition** — `bro act resolve/reply/defer` knows the
+   verdict when it mutates the thread; the act plane appends a
+   disposition record (`kind: 'act-disposition'`, carrying
+   threadId + commentSha + outcome) that stats joins onto the
+   matching verdict. This is the only reliable `replied` vs
+   `rejected` signal — `ReviewThread` exposes only current state and
+   the first comment.
+2. **lifecycle inference** — for pre-judge history and threads
+   resolved outside `bro act`: resolved with a fix commit on a later
+   `headSha` → `fixed`; resolved with a defer-bead external ref →
+   `deferred`; resolved after a reply with no code change →
+   `replied`/`rejected` is **unresolvable** from facade state →
+   excluded; unresolved when the PR settled → excluded.
+3. **unclassifiable** → dropped from the agreement set — silent
+   misclassification is worse than a smaller sample.
 
 The journal lives in the common git dir for the same reason the agents
 registry and hook traces do: linked worktrees share it, nothing lands
