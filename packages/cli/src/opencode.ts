@@ -44,6 +44,9 @@
  * the `bd ready` queue and walks the sibling worktrees). That budget is why
  * rehydration is primed on `session.created` instead of on the first turn.
  *
+ * The CLI is spawned with `node` from PATH, never `process.execPath` — see
+ * `jsRuntime()` below for why that distinction is load-bearing.
+ *
  * Upstream hook shapes mirror `@opencode-ai/plugin` 1.18.x, declared
  * structurally rather than imported: opencode loads this module at runtime and
  * nobody typechecks it against the real package, so a devDependency on
@@ -145,6 +148,18 @@ const REHYDRATION_TIMEOUT_MS = 45_000
 
 const MAX_OUTPUT = 1 << 20
 
+/** The runtime that executes the sibling CLI.
+ *
+ *  NOT `process.execPath`. opencode ships as a compiled binary, so inside its
+ *  own plugin process `process.execPath` IS opencode — spawning it with
+ *  `hooks <event>` starts a TUI instead of running the hook, and the plugin
+ *  fails open into silence. `node` on PATH is the right ask anyway: it is what
+ *  bro itself requires (`engines.node >= 22.18`), it is what hooks/run.sh
+ *  resolves, and the CLI is plain ESM JS, so any runtime will do. */
+export function jsRuntime(): string {
+  return process.platform === 'win32' ? 'node.exe' : 'node'
+}
+
 /**
  * The CLI shipped beside this module: installed as
  * `node_modules/@broject/bro/dist/{opencode,index}.js`, built in a checkout as
@@ -233,7 +248,7 @@ async function resolveCommand(options: PluginOptions | undefined): Promise<Comma
   }
   const entry = siblingCli()
   if (entry) {
-    return { cmd: process.execPath, args: [entry] }
+    return { cmd: jsRuntime(), args: [entry] }
   }
   // partial install — no bundled CLI next to the plugin. Fall back to PATH,
   // and only to a bro that passes the hooks probe.
@@ -358,6 +373,20 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+/** Did the tool succeed? bro arms its gates and cites skills only on success,
+ *  so a false positive here is worse than a false negative.
+ *
+ *  opencode's bash metadata is `{ output, exit, truncated }` — there is no
+ *  `error` field on a nonzero exit, so keying on `error` alone reads every
+ *  failure as a success. Honour `exit` when the tool reports it and fall back
+ *  to the error key for tools that only set that. */
+export function toolSucceeded(metadata: Record<string, unknown> | null): boolean {
+  if (metadata?.error !== undefined) {
+    return false
+  }
+  return typeof metadata?.exit === 'number' ? metadata.exit === 0 : true
 }
 
 export const BroPlugin = (
@@ -543,7 +572,7 @@ export const BroPlugin = (
           session_id: hookInput.sessionID,
           tool_name: hookInput.tool,
           tool_input: asRecord(hookInput.args) ?? {},
-          tool_response: { success: metadata?.error === undefined },
+          tool_response: { success: toolSucceeded(metadata) },
         })
       )
       if (text) {
