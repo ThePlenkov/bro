@@ -230,33 +230,37 @@ const opensScalar = (t: string, i: number): boolean => {
   return true
 }
 
+/** The index just past a quoted scalar's closing quote starting at
+ *  `start` (t[start] is the quote), or -1 when it never closes. `\\`
+ *  escapes inside double quotes, `''` doubles inside single quotes. */
+const closeQuote = (t: string, start: number): number => {
+  const q = t[start]!
+  for (let i = start + 1; i < t.length; i++) {
+    if (q === '"' && t[i] === '\\') {
+      i++
+    } else if (t[i] === q) {
+      if (q === "'" && t[i + 1] === "'") {
+        i++
+      } else {
+        return i + 1
+      }
+    }
+  }
+  return -1
+}
+
 /** Index where a YAML comment begins — a `#` at the head or after a
  *  space/tab, outside quotes. Quotes only quote inside a flow list —
  *  in a bare scalar `docs/it's.md` the apostrophe is an ordinary
  *  character. -1 when the scalar runs to the end. */
 const commentStart = (t: string, flow: boolean): number => {
-  let q = ''
   for (let i = 0; i < t.length; i++) {
     const ch = t[i]!
-    if (q !== '') {
-      if (q === '"' && ch === '\\') {
-        i++
-      } else if (ch === q) {
-        // '' inside a single-quoted scalar is an escaped quote, not a close
-        if (q === "'" && t[i + 1] === "'") {
-          i++
-        } else {
-          q = ''
-        }
+    if (flow && (ch === '"' || ch === "'") && opensScalar(t, i)) {
+      const end = closeQuote(t, i)
+      if (end !== -1) {
+        i = end - 1
       }
-    } else if (
-      flow &&
-      (ch === '"' || ch === "'") &&
-      // a quote only opens a scalar where one can begin — after `[`,
-      // `,`, or the fragment start; `a'ts` keeps its literal apostrophe
-      opensScalar(t, i)
-    ) {
-      q = ch
     } else if (ch === '#' && (i === 0 || t[i - 1] === ' ' || t[i - 1] === '\t')) {
       return i
     }
@@ -271,25 +275,11 @@ const commentStart = (t: string, flow: boolean): number => {
 const yamlScalar = (s: string): string => {
   const t = s.trim()
   if (t.startsWith('"') || t.startsWith("'")) {
-    const q = t[0]!
-    let end = -1
-    for (let i = 1; i < t.length; i++) {
-      if (q === '"' && t[i] === '\\') {
-        i++
-      } else if (t[i] === q) {
-        // '' inside a single-quoted scalar is an escaped quote
-        if (q === "'" && t[i + 1] === "'") {
-          i++
-        } else {
-          end = i
-          break
-        }
-      }
-    }
-    const v = end !== -1 && /^\s*(#.*)?$/.test(t.slice(end + 1)) ? t.slice(0, end + 1) : t
+    const end = closeQuote(t, 0)
+    const v = end !== -1 && /^\s*(#.*)?$/.test(t.slice(end)) ? t.slice(0, end) : t
     const u = unquote(v)
     // doubled single quotes collapse to one inside a single-quoted scalar
-    return q === "'" && v.startsWith(q) && v.endsWith(q) ? u.replaceAll("''", "'") : u
+    return v.startsWith("'") && v.endsWith("'") ? u.replaceAll("''", "'") : u
   }
   const c = commentStart(t, t.startsWith('['))
   return unquote(c === -1 ? t : t.slice(0, c))
@@ -301,18 +291,17 @@ const yamlScalar = (s: string): string => {
 const flowItems = (s: string): string[] => {
   const items: string[] = []
   let cur = ''
-  let q = ''
   for (let i = 0; i < s.length; i++) {
     const ch = s[i]!
-    if (q !== '') {
-      cur += ch
-      if (ch === q) {
-        q = ''
+    if ((ch === '"' || ch === "'") && opensScalar(s, i)) {
+      const end = closeQuote(s, i)
+      if (end !== -1) {
+        cur += s.slice(i, end)
+        i = end - 1
+        continue
       }
-    } else if ((ch === '"' || ch === "'") && opensScalar(s, i)) {
-      q = ch
-      cur += ch
-    } else if (ch === ',') {
+    }
+    if (ch === ',') {
       items.push(cur)
       cur = ''
     } else {
@@ -321,6 +310,35 @@ const flowItems = (s: string): string[] => {
   }
   items.push(cur)
   return items
+}
+
+/** The scope value's items — a wrapped flow list joins its lines until
+ *  the closing `]` (comments strip quote-aware per fragment, brackets
+ *  survive); a block list reads `- ` items, skipping blank and
+ *  comment-only lines as YAML allows. */
+const scopeItems = (inline: string, body: string[]): string[] => {
+  for (let j = 0; inline.startsWith('[') && !inline.endsWith(']') && j < body.length; j++) {
+    const frag = body[j]!.trim()
+    const c = commentStart(frag, true)
+    inline += ` ${(c === -1 ? frag : frag.slice(0, c)).trimEnd()}`
+  }
+  if (inline !== '') {
+    return inline.startsWith('[') && inline.endsWith(']')
+      ? flowItems(inline.slice(1, -1)).map(yamlScalar).filter((s) => s !== '')
+      : [inline]
+  }
+  const items: string[] = []
+  for (const l of body) {
+    const m = /^\s*-\s+/.exec(l)
+    if (m === null) {
+      if (/^\s*(#.*)?$/.test(l)) {
+        continue
+      }
+      break
+    }
+    items.push(yamlScalar(l.slice(m[0].length)))
+  }
+  return items.filter((s) => s !== '')
 }
 
 /** `scope:` frontmatter — repo-relative pathspecs the spec claims for
@@ -342,33 +360,10 @@ export function specScope(path: string): string[] {
     if (i === -1) {
       return []
     }
-    const body = lines.slice(i + 1)
-    let inline = yamlScalar(lines[i]!.replace(/^scope:\s*/, ''))
-    // a flow list may wrap — `scope: [a,\n  b]` joins until the closing ]
-    // — comments strip quote-aware but `]`/`[` must survive the join
-    for (let j = 0; inline.startsWith('[') && !inline.endsWith(']') && j < body.length; j++) {
-      const frag = body[j]!.trim()
-      const c = commentStart(frag, true)
-      inline += ` ${(c === -1 ? frag : frag.slice(0, c)).trimEnd()}`
-    }
-    if (inline !== '') {
-      return inline.startsWith('[') && inline.endsWith(']')
-        ? flowItems(inline.slice(1, -1)).map(yamlScalar).filter((s) => s !== '')
-        : [inline]
-    }
-    const items: string[] = []
-    for (const l of body) {
-      const m = /^\s*-\s+/.exec(l)
-      if (m === null) {
-        // blank and comment-only lines are YAML-legal inside a list
-        if (/^\s*(#.*)?$/.test(l)) {
-          continue
-        }
-        break
-      }
-      items.push(yamlScalar(l.slice(m[0].length)))
-    }
-    return items.filter((s) => s !== '')
+    return scopeItems(
+      yamlScalar(lines[i]!.replace(/^scope:\s*/, '')),
+      lines.slice(i + 1)
+    )
   } catch {
     return []
   }
