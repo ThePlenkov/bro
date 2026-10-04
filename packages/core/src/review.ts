@@ -110,6 +110,12 @@ export interface MergedPrQuery {
   author?: string
   label?: string
   limit?: number
+  /** List path only: merged at/after this ISO stamp, pushed into the
+   *  host query so the `limit` cap can't crowd window-eligible PRs out
+   *  behind post-merge updates (hosts cap by updated_at). The
+   *  explicit-ids path ignores it — named PRs are the selection. A
+   *  caller that needs a hard guarantee still filters the result. */
+  mergedSince?: string
 }
 
 export interface MergeOpts {

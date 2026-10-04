@@ -9,11 +9,11 @@
  * only under `--replay`, live traffic is untouched.
  *
  * Outcome inference is first-hit-wins, per spec: an act-disposition
- * row beats a defer bead beats a resolved+push heuristic. Threads
- * with no recoverable outcome — unresolved at merge, or resolved
- * after a reply with no code movement — classify OUT: 'replied' vs
- * 'rejected' is unrecoverable from facade state and a silent guess
- * would poison the agreement set.
+ * row beats a defer bead beats the anchor signal — resolved with an
+ * outdated anchor reads 'fixed'. Threads with no recoverable outcome —
+ * unresolved at merge, or resolved after a reply with the anchor still
+ * on the diff — classify OUT: 'replied' vs 'rejected' is unrecoverable
+ * from facade state and a silent guess would poison the agreement set.
  */
 import { JudgeUnavailable, taskStore } from '@broject/core'
 import type {
@@ -33,16 +33,13 @@ import {
 import { ACT_THREAD_QUESTIONS, threadState } from './shadow.ts'
 
 /** Everything inference needs that isn't on the thread itself —
- *  dispositions and defer refs are run-wide; commitTimes is per-PR. */
+ *  dispositions and defer refs are run-wide. */
 export interface InferenceCtx {
   /** Journal's act-disposition rows. */
   dispositions: Disposition[]
   /** Bead ids are irrelevant — the set holds thread_ids carried as
    *  bead external_refs (the act defer flow's link). */
   deferRefs: Set<string>
-  /** Head-branch commit stamps for the thread's PR — undefined when
-   *  the host can't answer: the push question stays unknown. */
-  commitTimes?: string[]
 }
 
 /** Latest disposition for the subject. Replay's join is looser than
@@ -76,10 +73,15 @@ function dispositionFor(
 }
 
 /** The outcome half of the dogfood pair. Order: the recorded
- *  disposition wins; an explicit defer bead beats the push heuristic;
- *  resolved with the head moved (outdated anchor or a commit stamped
- *  after the comment) reads 'fixed'; anything else is unrecoverable —
- *  replied/rejected look identical on the facade. */
+ *  disposition wins; an explicit defer bead outranks thread state —
+ *  the bead is the record of the defer, a reopened or resolve-dropped
+ *  thread doesn't undo it; resolved with an outdated anchor — the
+ *  flagged lines left the diff — reads 'fixed'. A push alone is not
+ *  evidence: a commit stamped after the comment may be unrelated to
+ *  the finding, so resolved with the anchor still on the diff is
+ *  unrecoverable — replied/rejected look identical on the facade, and
+ *  a wrong 'fixed' poisons the agreement set worse than a smaller
+ *  sample does. */
 export function inferOutcome(
   thread: ReviewThread,
   ctx: InferenceCtx
@@ -89,25 +91,14 @@ export function inferOutcome(
   if (recorded !== undefined) {
     return recorded
   }
-  if (!thread.resolved) {
-    return undefined // unresolved when the PR settled → excluded
-  }
   if (ctx.deferRefs.has(thread.id)) {
     return 'deferred'
   }
+  if (!thread.resolved) {
+    return undefined // unresolved when the PR settled → excluded
+  }
   if (thread.outdated) {
     return 'fixed' // the diff moved past the finding — a later headSha
-  }
-  const created = thread.comment?.createdAt
-  const commentedMs = created !== undefined && created !== '' ? Date.parse(created) : Number.NaN
-  if (
-    Number.isFinite(commentedMs) &&
-    ctx.commitTimes?.some((t) => {
-      const ms = Date.parse(t)
-      return Number.isFinite(ms) && ms > commentedMs
-    })
-  ) {
-    return 'fixed'
   }
   return undefined
 }
@@ -266,57 +257,56 @@ type PendingItem = {
 }
 
 /** Merged-PR selection — explicit ids, or the connector's merged scan
- *  capped at --limit, narrowed by --merged-since. */
+ *  capped at --limit, narrowed by --merged-since. The since stamp goes
+ *  into the host query, not just the result filter: hosts cap by
+ *  updated_at, so post-merge updates would crowd window-eligible PRs
+ *  out before the filter ever saw them. The result-side filter stays —
+ *  it also narrows the explicit-ids path, which ignores the hint. */
 function selectMerged(opts: ReplayOpts): ReturnType<ReviewFacade['mergedPrs']> {
+  const sinceMs =
+    opts.mergedSince !== undefined ? Date.parse(opts.mergedSince) : undefined
   const merged =
     opts.prs !== undefined
       ? opts.rev.mergedPrs(opts.repo, { ids: opts.prs })
-      : opts.rev.mergedPrs(opts.repo, { limit: opts.limit ?? DEFAULT_SCAN_LIMIT })
-  const sinceMs =
-    opts.mergedSince !== undefined ? Date.parse(opts.mergedSince) : undefined
+      : opts.rev.mergedPrs(opts.repo, {
+          limit: opts.limit ?? DEFAULT_SCAN_LIMIT,
+          ...(sinceMs !== undefined && Number.isFinite(sinceMs)
+            ? { mergedSince: opts.mergedSince }
+            : {}),
+        })
   return sinceMs !== undefined && Number.isFinite(sinceMs)
     ? merged.filter((p) => Date.parse(p.mergedAt) >= sinceMs)
     : merged
 }
 
-/** Classify one PR's threads into pending candidates — dispositions
- *  and defer refs answer most; commitTimes is paid for lazily, only
- *  when a resolved, non-outdated, unrecorded thread needs the "did the
- *  head move" answer. */
-async function collectPr(
-  opts: ReplayOpts,
+/** Classify one PR's threads into pending candidates — dispositions,
+ *  defer refs, and the anchor signal answer the outcome question;
+ *  everything unresolved by them is excluded, never guessed. */
+function collectPr(
   pr: { number: number; headSha: string },
   threads: ReviewThread[],
-  base: { dispositions: Disposition[]; deferRefs: Set<string> },
+  base: InferenceCtx,
   replayed: Set<string | undefined>,
   pending: PendingItem[],
   res: ReplayResult
-): Promise<void> {
-  let commitTimes: string[] | undefined
-  let commitFetched = false
-  const ctx = (): InferenceCtx => ({ ...base, commitTimes })
+): void {
   for (const thread of threads) {
     res.threads += 1
     const subject = threadSubject(pr.number, thread.id, thread.comment, pr.headSha)
-    let outcome = inferOutcome(thread, ctx())
-    if (outcome === undefined && thread.resolved && !thread.outdated && !commitFetched) {
-      commitFetched = true
-      try {
-        commitTimes = await opts.rev.commitTimes?.({ repo: opts.repo, pr: pr.number })
-      } catch {
-        commitTimes = undefined // a failed fetch leaves the question unknown
-      }
-      outcome = inferOutcome(thread, ctx())
+    // a subject that already carries a replay verdict is cached — its
+    // outcome was inferred at judgment time; re-inferring can only
+    // miscount it (e.g. as excluded when a signal went missing)
+    if (replayed.has(`${thread.id} ${subject.commentSha ?? ''}`)) {
+      res.candidates += 1
+      res.cached += 1
+      continue
     }
+    const outcome = inferOutcome(thread, base)
     if (outcome === undefined) {
       res.excluded += 1
       continue
     }
     res.candidates += 1
-    if (replayed.has(`${thread.id} ${subject.commentSha ?? ''}`)) {
-      res.cached += 1
-      continue
-    }
     pending.push({ thread, subject, outcome })
   }
 }
@@ -407,7 +397,7 @@ export async function replayMergedThreads(opts: ReplayOpts): Promise<ReplayResul
   }
   const pending: PendingItem[] = []
   for (const pr of selected) {
-    await collectPr(opts, pr, threadsByPr.get(pr.number) ?? [], base, replayed, pending, res)
+    collectPr(pr, threadsByPr.get(pr.number) ?? [], base, replayed, pending, res)
   }
   await judgePending(opts, pending, res)
   return res

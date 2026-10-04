@@ -90,25 +90,24 @@ function fakeJudge(result?: Partial<DecideResult>): JudgeFacade & { calls: numbe
 interface FakeRevSpec {
   prs?: MergedPr[]
   threads?: Map<number, ReviewThread[]>
-  commits?: Map<number, string[]>
+  /** captures the query mergedPrs was called with */
+  lastQuery?: { current?: unknown }
   /** when true the facade offers scanMergedPrs; when false only serial */
   bulk?: boolean
 }
 
-function fakeRev(spec: FakeRevSpec): ReviewFacade & { commitCalls: number[] } {
-  const commitCalls: number[] = []
+function fakeRev(spec: FakeRevSpec): ReviewFacade {
   const threads = spec.threads ?? new Map()
   const base = {
-    commitCalls,
-    mergedPrs: (_repo: string, q?: { ids?: number[] }) =>
-      q?.ids !== undefined
+    mergedPrs: (_repo: string, q?: { ids?: number[] }) => {
+      if (spec.lastQuery !== undefined) {
+        spec.lastQuery.current = q
+      }
+      return q?.ids !== undefined
         ? q.ids.map((n) => mergedPr(n))
-        : (spec.prs ?? [...threads.keys()].map((n) => mergedPr(n))),
-    reviewThreads: async (t: PrTarget) => threads.get(t.pr) ?? [],
-    commitTimes: async (t: PrTarget) => {
-      commitCalls.push(t.pr)
-      return spec.commits?.get(t.pr) ?? []
+        : (spec.prs ?? [...threads.keys()].map((n) => mergedPr(n)))
     },
+    reviewThreads: async (t: PrTarget) => threads.get(t.pr) ?? [],
   }
   const rev: Record<string, unknown> = { ...base }
   if (spec.bulk !== false) {
@@ -125,7 +124,7 @@ function fakeRev(spec: FakeRevSpec): ReviewFacade & { commitCalls: number[] } {
       return out
     }
   }
-  return rev as unknown as ReviewFacade & { commitCalls: number[] }
+  return rev as unknown as ReviewFacade
 }
 
 const disp = (
@@ -180,24 +179,22 @@ describe('inferOutcome', () => {
     assert.equal(inferOutcome(thread('T1', { resolved: false }), ctx()), undefined)
   })
 
+  test('a defer bead outranks thread state — unresolved with a bead is deferred', () => {
+    assert.equal(
+      inferOutcome(
+        thread('T1', { resolved: false }),
+        ctx({ deferRefs: new Set(['T1']) })
+      ),
+      'deferred'
+    )
+  })
+
   test('resolved + outdated anchor → fixed', () => {
     assert.equal(inferOutcome(thread('T1', { outdated: true }), ctx()), 'fixed')
   })
 
-  test('resolved + a commit stamped after the comment → fixed', () => {
+  test('resolved with the anchor still on the diff → excluded — a push alone is not a fix', () => {
     const t = thread('T1')
-    assert.equal(
-      inferOutcome(t, ctx({ commitTimes: ['2026-01-02T00:00:00Z'] })),
-      'fixed'
-    )
-  })
-
-  test('resolved with no movement and no records → excluded', () => {
-    const t = thread('T1')
-    assert.equal(
-      inferOutcome(t, ctx({ commitTimes: ['2025-12-31T00:00:00Z'] })),
-      undefined
-    )
     assert.equal(inferOutcome(t, ctx()), undefined)
   })
 })
@@ -240,22 +237,23 @@ describe('replayMergedThreads', () => {
     })
   })
 
-  test('commitTimes fetch is lazy — only unresolved-by-records resolved threads pay', async () => {
+  test('mergedSince goes into the host query — the cap cannot crowd the window out', async () => {
     await withRepo(async (dir) => {
       const judge = fakeJudge()
-      const threads = new Map([
-        [7, [thread('T1', { outdated: true })]], // outdated → no fetch needed
-        [8, [thread('T2')]], // resolved, no signal → fetch
-      ])
-      const rev = fakeRev({ threads, commits: new Map([[8, ['2026-01-02T00:00:00Z']]]) })
+      const lastQuery: { current?: unknown } = {}
+      const threads = new Map([[7, [thread('T1', { outdated: true })]]])
       const res = await replayMergedThreads({
         dir,
         repo: 'acme/widgets',
-        rev,
+        rev: fakeRev({ threads, lastQuery }),
         judge,
+        mergedSince: '2026-01-01T00:00:00Z',
       })
-      assert.deepEqual(rev.commitCalls, [8])
-      assert.equal(res.judged, 2)
+      assert.equal(res.prs, 1) // merged 2026-02-01 survives the cutoff
+      assert.equal(
+        (lastQuery.current as { mergedSince?: string }).mergedSince,
+        '2026-01-01T00:00:00Z'
+      )
     })
   })
 
@@ -273,6 +271,7 @@ describe('replayMergedThreads', () => {
         rev: fakeRev({ threads }),
         judge,
       })
+      assert.ok(res.failed >= 1) // the dead-backend path was attempted
       assert.ok(res.failed <= 4)
       assert.equal(res.judged, 0)
       assert.equal(readJournal(dir).length, 0)

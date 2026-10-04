@@ -391,6 +391,11 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     if (q.label) {
       endpoint += `&labels=${encodeURIComponent(q.label)}`
     }
+    if (q.mergedSince) {
+      // server-side cutoff — the list caps by updated_at, so a
+      // merged_at filter applied after the cap would lose eligible MRs
+      endpoint += `&merged_after=${encodeURIComponent(q.mergedSince)}`
+    }
     return glabPaged<MrRow>(endpoint, { ...gopts(), limit: q.limit ?? 100 })
       .filter((row): row is MrRow & { merged_at: string } => row.merged_at != null)
       .map(toMergedPr)

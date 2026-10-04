@@ -368,6 +368,11 @@ function listMergedPrs(repo: string, q: MergedPrQuery): MergedPr[] {
   if (q.label) {
     args.push('--label', q.label)
   }
+  if (q.mergedSince) {
+    // server-side cutoff — the list caps by recency, so a mergedAt
+    // filter applied after the cap would lose eligible PRs
+    args.push('--search', `merged:>=${q.mergedSince}`)
+  }
   return ghJson<MergedPrRow[]>(args)
     .filter((row): row is MergedPrRow & { mergedAt: string } => row.mergedAt !== null)
     .map(toMergedPr)

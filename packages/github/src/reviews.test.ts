@@ -21,6 +21,7 @@ case "$1 $2" in
       *",$3,"*) echo 'gh: authentication required' >&2; exit 1 ;; esac; fi
       if [ "$FAKE_GH_NO_MERGED_AT" = "1" ]; then echo '{"state":"MERGED"}';
       else echo '{"state":"MERGED","title":"did the thing","url":"https://github.com/acme/widgets/pull/7","mergedAt":"2026-01-02T00:00:00Z","mergeCommit":{"oid":"abc123"}}'; fi ;;
+  "pr list") echo '[{"number":9,"mergedAt":"2026-01-02T00:00:00Z","updatedAt":null,"author":{"login":"dev"},"labels":[],"headRefName":"x","headRefOid":"s1"}]' ;;
   "pr merge") echo 'Merging pull request' ;;
   "api graphql") case "$@" in
       *"s0: pullRequest"*) echo '{"data":{"repository":{"s0":${SCAN_NODE},"s1":${SCAN_NODE}}}}' ;;
@@ -257,6 +258,20 @@ describe('githubReview', { skip: WIN32 }, () => {
       const lines = readFileSync(log, 'utf8')
       assert.equal(lines.split('\n').filter((l) => l.startsWith('pr view 7 ')).length, 1)
       assert.equal(lines.split('\n').filter((l) => l.startsWith('pr view 8 ')).length, 1)
+    })
+  })
+
+  test('mergedPrs mergedSince goes into the search query — the cap cannot crowd the window out', () => {
+    withFakeGh({}, (log) => {
+      const prs = githubReview().mergedPrs('acme/widgets', {
+        limit: 10,
+        mergedSince: '2026-01-01T00:00:00Z',
+      })
+      assert.equal(prs.length, 1)
+      assert.match(
+        readFileSync(log, 'utf8'),
+        /pr list .*--search merged:>=2026-01-01T00:00:00Z/
+      )
     })
   })
 

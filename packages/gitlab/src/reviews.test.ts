@@ -348,6 +348,10 @@ describe('gitlabReview', { skip: WIN32 }, () => {
         assert.match(readFileSync(log, 'utf8'), /state=merged.*author_username=dev/)
       }
     )
+    withFakeGlab({ FAKE_GLAB_MERGED_LIST: '[]' }, (log) => {
+      gitlabReview().mergedPrs('acme/widgets', { mergedSince: '2026-01-01T00:00:00Z' })
+      assert.match(readFileSync(log, 'utf8'), /state=merged.*merged_after=2026-01-01/)
+    })
   })
 
   test('scanMergedPrs pools per-MR meta+threads probes', async () => {
