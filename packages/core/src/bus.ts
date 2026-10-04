@@ -114,7 +114,7 @@ export function isBusEventInput(value: unknown): value is BusEventInput {
 /** Bounded replay window. `since` is the caller's last seen seq. */
 export class BusRing {
   private readonly limit: number
-  private buf: BusEnvelope[] = []
+  private readonly buf: BusEnvelope[] = []
 
   constructor(limit: number = BUS_RING_LIMIT) {
     if (!Number.isInteger(limit) || limit < 1) {
@@ -260,6 +260,53 @@ export async function startBusBrokerAt(
     sendFrame(sub.sock, frame)
   }
 
+  const onPub = (sock: Socket, input: unknown): void => {
+    if (!isBusEventInput(input)) {
+      sendFrame(sock, { op: 'err', message: 'pub needs event {topic, kind}' })
+      return
+    }
+    seq += 1
+    const envelope: BusEnvelope = {
+      ...input,
+      seq,
+      ts: new Date(now()).toISOString(),
+    }
+    ring.push(envelope)
+    const out = { op: 'event', event: envelope }
+    for (const s of subs) {
+      if (busMatches(s.filter, envelope)) {
+        deliver(s, out)
+      }
+    }
+    sendFrame(sock, { op: 'ack', seq })
+  }
+
+  const onSub = (sock: Socket, frame: Record<string, unknown>, sub: Subscriber | undefined): Subscriber => {
+    const raw = frame['filter']
+    const filter: BusFilter = typeof raw === 'object' && raw !== null ? (raw as BusFilter) : {}
+    const sinceRaw = frame['since']
+    // An absent cursor starts at the current head: replay nothing.
+    const since = typeof sinceRaw === 'number' && Number.isFinite(sinceRaw) ? Math.floor(sinceRaw) : seq
+    const entry: Subscriber = sub ?? { filter, sock, dropped: false }
+    entry.filter = filter
+    subs.add(entry)
+    const replay = ring.since(since)
+    if (replay === null) {
+      sendFrame(sock, { op: 'gap', seq })
+      return entry
+    }
+    // The gap check is against the raw ring — a hole in the stream is a
+    // hole whatever this subscriber cares about — but the events it is
+    // handed still go through its filter, or replay would hand it topics
+    // it never asked for.
+    for (const e of replay) {
+      if (busMatches(entry.filter, e)) {
+        sendFrame(sock, { op: 'event', event: e })
+      }
+    }
+    return entry
+  }
+
   const handleFrame = (sock: Socket, line: string, sub: Subscriber | undefined): Subscriber | undefined => {
     let parsed: unknown
     try {
@@ -276,53 +323,11 @@ export async function startBusBrokerAt(
     const frame = parsed as Record<string, unknown>
     switch (frame['op']) {
       case 'pub': {
-        const input = frame['event']
-        if (!isBusEventInput(input)) {
-          sendFrame(sock, { op: 'err', message: 'pub needs event {topic, kind}' })
-          return undefined
-        }
-        seq += 1
-        const envelope: BusEnvelope = {
-          ...input,
-          seq,
-          ts: new Date(now()).toISOString(),
-        }
-        ring.push(envelope)
-        const out = { op: 'event', event: envelope }
-        for (const s of subs) {
-          if (busMatches(s.filter, envelope)) {
-            deliver(s, out)
-          }
-        }
-        sendFrame(sock, { op: 'ack', seq })
+        onPub(sock, frame['event'])
         return undefined
       }
       case 'sub': {
-        const raw = frame['filter']
-        const filter: BusFilter =
-          typeof raw === 'object' && raw !== null ? (raw as BusFilter) : {}
-        const sinceRaw = frame['since']
-        // An absent cursor starts at the current head: replay nothing.
-        const since =
-          typeof sinceRaw === 'number' && Number.isFinite(sinceRaw) ? Math.floor(sinceRaw) : seq
-        const entry: Subscriber = sub ?? { filter, sock, dropped: false }
-        entry.filter = filter
-        subs.add(entry)
-        const replay = ring.since(since)
-        if (replay === null) {
-          sendFrame(sock, { op: 'gap', seq })
-        } else {
-          // The gap check is against the raw ring — a hole in the stream
-          // is a hole whatever this subscriber cares about — but the
-          // events it is handed still go through its filter, or replay
-          // would hand it topics it never asked for.
-          for (const e of replay) {
-            if (busMatches(entry.filter, e)) {
-              sendFrame(sock, { op: 'event', event: e })
-            }
-          }
-        }
-        return entry
+        return onSub(sock, frame, sub)
       }
       case 'stats': {
         sendFrame(sock, { op: 'stats', seq, subscribers: subs.size, ring: ring.size })
@@ -701,5 +706,5 @@ export async function busProbe(
     timer.unref?.()
   })
   sub.close()
-  return events.length > 0 || gapped ? { events, gapped } : { events, gapped }
+  return { events, gapped }
 }

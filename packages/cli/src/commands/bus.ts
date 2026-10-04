@@ -18,6 +18,7 @@ import {
   busStatus,
   busSubscribe,
   startBusBroker,
+  type BusEnvelope,
   type BusFilter,
 } from '@broject/core'
 import { flag, flagAll, positionals } from './args.ts'
@@ -88,6 +89,12 @@ function socketOrDie(): string {
     die('bro bus: not inside a git repository')
   }
   return path
+}
+
+/** One line per event for a human reader: `[seq] topic/kind key`. */
+function formatEvent(event: BusEnvelope): string {
+  const head = `[${String(event.seq)}] ${event.topic}/${event.kind}`
+  return event.key === undefined || event.key === '' ? head : `${head} ${event.key}`
 }
 
 function filterFrom(rest: string[]): BusFilter {
@@ -187,7 +194,7 @@ async function cmdSubscribe(rest: string[]): Promise<void> {
   try {
     sub = await busSubscribe(socketPath, filterFrom(rest), {
       onEvent: (event) => {
-        console.log(json ? JSON.stringify(event) : `[${String(event.seq)}] ${event.topic}/${event.kind}${event.key === undefined ? '' : ` ${event.key}`}`)
+        console.log(json ? JSON.stringify(event) : formatEvent(event))
       },
       onGap: (seq) => {
         // An honest hole beats silent loss: the cursor fell outside the
