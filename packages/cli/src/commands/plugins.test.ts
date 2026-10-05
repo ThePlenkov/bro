@@ -74,12 +74,15 @@ describe('plugins install/uninstall/list', () => {
     )
   })
 
-  test('install on a differing file reports updated; list shows stale first', () => {
+  /** sentinel-bearing but differing content — a stale/edited adapter */
+  const staleAdapter = '// older bro build\nexport default {id:"bro",server:BroPlugin}\n'
+
+  test('install on a stale adapter reports updated; list shows stale first', () => {
     const f = fixture()
     mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'opencode', 'plugins'), { recursive: true })
-    writeFileSync(f.globalPath, '// garbage')
+    writeFileSync(f.globalPath, staleAdapter)
     mkdirSync(join(f.cwd, '.opencode', 'plugins'), { recursive: true })
-    writeFileSync(f.localPath, '// garbage')
+    writeFileSync(f.localPath, staleAdapter)
 
     const rows = pluginRows(f.cwd, f.opts.env)
     assert.deepEqual(
@@ -106,6 +109,17 @@ describe('plugins install/uninstall/list', () => {
     assert.ok(!existsSync(f.localPath))
   })
 
+  test('install refuses a foreign file at our slot without --force', () => {
+    const f = fixture()
+    mkdirSync(join(f.cwd, '.opencode', 'plugins'), { recursive: true })
+    writeFileSync(f.localPath, '// user-written plugin, no bro sentinel')
+    const out = installClient('opencode', ['local'], f.opts)
+    assert.equal(out[0]!.action, 'refused')
+    assert.equal(readFileSync(f.localPath, 'utf8'), '// user-written plugin, no bro sentinel')
+    const forced = installClient('opencode', ['local'], { ...f.opts, force: true })
+    assert.equal(forced[0]!.action, 'updated')
+  })
+
   test('uninstall removes ours, skips absent, refuses foreign without --force', () => {
     const f = fixture()
     installClient('opencode', ['global'], f.opts)
@@ -128,6 +142,17 @@ describe('plugins install/uninstall/list', () => {
       gone.map((o) => o.action),
       ['absent', 'absent']
     )
+  })
+
+  test('uninstall refuses a stale/edited adapter without --force', () => {
+    const f = fixture()
+    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'opencode', 'plugins'), { recursive: true })
+    writeFileSync(f.globalPath, staleAdapter)
+    const out = uninstallClient('opencode', ['global'], f.opts)
+    assert.equal(out[0]!.action, 'refused')
+    assert.match(out[0]!.note ?? '', /stale or edited/)
+    const forced = uninstallClient('opencode', ['global'], { ...f.opts, force: true })
+    assert.equal(forced[0]!.action, 'removed')
   })
 
   test('list reflects install state per scope', () => {

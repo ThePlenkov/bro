@@ -38,12 +38,16 @@ The `plugins` plugin's `run` routes on argv[0]:
 `stale` = installed content differs from the artifact this bro would
 write (upgrade path = re-run `install`, which reports `updated`).
 `install` on a current file is a no-op (`already installed`) —
-idempotent by content, not by existence.
+idempotent by content, not by existence. `install` refuses to clobber
+a file at our slot that carries no bro sentinel — a foreign plugin
+squatting the name needs `--force` to overwrite.
 
-`uninstall` refuses to remove a file that is not recognizably ours
-(the shipped module carries the `server: BroPlugin` / `id: 'bro'`
-sentinel); `--force` overrides. A foreign or hand-edited file is never
-silently deleted.
+`uninstall` only removes a file that is *provably* ours — byte-equal
+to the artifact this bro would write today (or, when no artifact
+resolves, carrying the `server: BroPlugin` / `id: 'bro'` sentinel).
+A sentinel-bearing but differing file — stale version or hand edit —
+is refused without `--force`: edits and old versions are
+indistinguishable by shape, and deletion is irreversible.
 
 ### Clients registry
 

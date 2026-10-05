@@ -51,7 +51,8 @@ if (process.env.BRO_STUB_LOG) {
 const map = process.env.BRO_STUB_MAP ? JSON.parse(process.env.BRO_STUB_MAP) : {}
 if (event in map) process.stdout.write(map[event] ?? '')
 const done = () => process.exit(Number(process.env.BRO_STUB_STATUS ?? '0'))
-const sleep = Number(process.env.BRO_STUB_SLEEP_MS ?? '0')
+const perEvent = process.env.BRO_STUB_SLEEP_EVENTS ? JSON.parse(process.env.BRO_STUB_SLEEP_EVENTS) : {}
+const sleep = Number(perEvent[event] ?? process.env.BRO_STUB_SLEEP_MS ?? '0')
 sleep > 0 ? setTimeout(done, sleep) : done()
 `
 )
@@ -92,7 +93,7 @@ interface Logged {
   message: string
 }
 
-async function makeHooks(options?: Record<string, unknown>) {
+async function makeHooks(options?: Record<string, unknown>, onLog?: () => Promise<void>) {
   const logs: Logged[] = []
   const prompts: { id: string; text: string }[] = []
   const hooks = await plugin.server(
@@ -102,6 +103,7 @@ async function makeHooks(options?: Record<string, unknown>) {
         app: {
           log: async (input: { body: { level: string; message: string } }) => {
             logs.push({ level: input.body.level, message: input.body.message })
+            await onLog?.()
           },
         },
         session: {
@@ -152,6 +154,7 @@ afterEach(() => {
   delete process.env.BRO_STUB_MAP
   delete process.env.BRO_STUB_STATUS
   delete process.env.BRO_STUB_SLEEP_MS
+  delete process.env.BRO_STUB_SLEEP_EVENTS
 })
 
 describe('session rehydration', () => {
@@ -546,6 +549,60 @@ describe('stop gate', () => {
     await finishTurn(hooks, 'ses_1')
     await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
     assert.equal(prompts.length, 1)
+  })
+
+  test('a session deleted during the gate log is not re-prompted', async () => {
+    respond({ stop: JSON.stringify(blocked) })
+    let release: () => void = () => {}
+    const suspended = new Promise<void>((r) => (release = r))
+    let held = false
+    const { hooks, logs, prompts } = await makeHooks(undefined, async () => {
+      if (!held) {
+        held = true
+        await suspended
+      }
+    })
+
+    await finishTurn(hooks, 'ses_1')
+    const idle = hooks.event?.({
+      event: { type: 'session.idle', properties: { sessionID: 'ses_1' } },
+    })
+    // wait until the gate is provably parked inside its warn log —
+    // only then is the deletion guaranteed to land in the suspended window
+    const deadline = Date.now() + 5_000
+    while (!logs.some((l) => l.message.startsWith('stop gate:')) && Date.now() < deadline) {
+      await new Promise((r) => setImmediate(r))
+    }
+    await hooks.event?.({
+      event: { type: 'session.deleted', properties: { info: { id: 'ses_1' } } },
+    })
+    release()
+    await idle
+    assert.deepEqual(prompts, [])
+  })
+
+  test('a failed pre-compaction probe does not evict the post-compaction one', async () => {
+    respond({ 'post-compaction': JSON.stringify(ctx('fresh')) })
+    // the session-start probe lingers and resolves to nothing (the event is
+    // absent from the map) — only after the faster post-compaction probe has
+    // already taken the slot. Identity-checked eviction keeps it in place.
+    process.env.BRO_STUB_SLEEP_EVENTS = JSON.stringify({ 'session-start': 100 })
+    const { hooks } = await makeHooks()
+
+    await hooks.event?.({ event: { type: 'session.created', properties: { sessionID: 'ses_1' } } })
+    await hooks.event?.({ event: { type: 'session.compacted', properties: { sessionID: 'ses_1' } } })
+    // let both children settle before the transform reads the cache —
+    // eviction of a live entry would surface as a *second* session-start probe
+    await new Promise((r) => setTimeout(r, 300))
+
+    const out = { sessionID: 'ses_1', system: [] as string[] }
+    await hooks['experimental.chat.system.transform']?.(out, out)
+    assert.deepEqual(out.system, ['fresh'])
+    assert.equal(
+      calls().filter((c) => c.event === 'session-start').length,
+      1,
+      'evicted post-compaction entry re-probed on transform'
+    )
   })
 
   test('session.deleted clears rehydration and the one-shot gate', async () => {

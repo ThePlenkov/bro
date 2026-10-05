@@ -203,9 +203,10 @@ function checkoutCli(): string | null {
 const NPX_PIN = '@broject/bro@0.2.4'
 
 /** Spawn `cmd args`, resolve true iff it exits 0 within the hook budget. One
- *  probe serves both launch tiers: `bro hooks` answers "is this a bro that
- *  speaks the hook contract", `node --version` answers "can the bundled CLI
- *  even start". A spawn error, timeout, or nonzero exit is "no" — selecting
+ *  probe serves both launch tiers: `hooks` with no event answers "is this
+ *  a bro that speaks the hook contract" — a bare `bro hooks` returns before
+ *  it reads stdin, and an older build without the subcommand exits nonzero.
+ *  A spawn error, timeout, or nonzero exit is "no" — selecting
  *  a command that cannot launch is worse than falling through to the next
  *  tier. */
 function exitsZero(cmd: string, args: string[]): Promise<boolean> {
@@ -283,12 +284,11 @@ async function resolveCommand(options: PluginOptions | undefined): Promise<Comma
   }
   // local-dist tiers: the bundled sibling (npm `plugin` config-entry form)
   // first, then the checkout walk-up for a materialized module inside a
-  // clone. A found CLI still needs `node` on PATH to launch, and opencode
-  // itself is a compiled binary that guarantees no such thing — without
-  // the probe this tier would win over a working PATH `bro` and every
-  // hook would fail open into silence
+  // clone. The probe asks for the hook contract itself — `--version` would
+  // also pass on a stale dist that predates `bro hooks`, shadowing a
+  // working PATH `bro` while every hook fails open into silence.
   const entry = siblingCli() ?? checkoutCli()
-  if (entry && (await exitsZero(jsRuntime(), ['--version']))) {
+  if (entry && (await exitsZero(jsRuntime(), [entry, 'hooks']))) {
     return { cmd: jsRuntime(), args: [entry] }
   }
   // no local dist — fall back to PATH, and only to a bro that passes the
@@ -483,7 +483,10 @@ export const BroPlugin = (
       return pending
     }
     const started = probe(event, { session_id: sessionID }, REHYDRATION_TIMEOUT_MS).then((control) => {
-      if (control === null) {
+      // evict only our own failed entry — a compaction may have already
+      // replaced it with a newer probe, which must not be deleted out
+      // from under the session that owns it
+      if (control === null && rehydration.get(sessionID) === started) {
         rehydration.delete(sessionID)
       }
       return contextOf(control)
@@ -585,6 +588,11 @@ export const BroPlugin = (
     gated.add(sessionID)
     const message = reason || 'unfinished bro work'
     await log('warn', `stop gate: ${message}`)
+    // the log await is real I/O — a session.deleted landing inside it
+    // retires the id, and prompting now would hit a reused session
+    if (!live.has(sessionID)) {
+      return
+    }
     try {
       await input.client?.session?.promptAsync({
         path: { id: sessionID },

@@ -187,6 +187,8 @@ export interface Outcome {
   scope: PluginScope
   action: Action
   path: string
+  /** refusal reason, when action === 'refused' */
+  note?: string
 }
 
 function knownClient(name: string): ClientSpec {
@@ -217,6 +219,18 @@ export function installClient(
     if (prior === content) {
       return { client: name, scope, action: 'current', path }
     }
+    // a file already holding the slot that carries no bro sentinel is a
+    // foreign plugin under our name — clobbering it needs --force. A
+    // sentinel-bearing difference is a shipped version → plain update.
+    if (prior !== null && !isBroAdapter(prior) && !opts.force) {
+      return {
+        client: name,
+        scope,
+        action: 'refused',
+        path,
+        note: 'a foreign file holds this slot — pass --force to overwrite',
+      }
+    }
     if (opts.dryRun) {
       return {
         client: name,
@@ -237,13 +251,29 @@ export function uninstallClient(
 ): Outcome[] {
   const client = knownClient(name)
   const targets = client.targets(opts.cwd, opts.env)
+  const artifact = client.artifact(opts.cwd)
+  const clean = artifact === null ? null : readFileSync(artifact, 'utf8')
   return scopes.map((scope): Outcome => {
     const path = targets[scope]
     if (!existsSync(path)) {
       return { client: name, scope, action: 'absent', path }
     }
-    if (!opts.force && !isBroAdapter(readFileSync(path, 'utf8'))) {
-      return { client: name, scope, action: 'refused', path }
+    const prior = readFileSync(path, 'utf8')
+    // provably ours = byte-equal to this bro's artifact. A sentinel-only
+    // match is a different version or a hand edit — indistinguishable by
+    // shape, and deletion is irreversible, so it refuses without --force
+    // (sentinel alone only suffices when no artifact resolves to compare)
+    const ours = clean === null ? isBroAdapter(prior) : prior === clean
+    if (!opts.force && !ours) {
+      return {
+        client: name,
+        scope,
+        action: 'refused',
+        path,
+        note: isBroAdapter(prior)
+          ? 'differs from this bro’s adapter (stale or edited) — pass --force to remove'
+          : 'not a bro adapter — pass --force to remove',
+      }
     }
     if (opts.dryRun) {
       return { client: name, scope, action: 'would-remove', path }
@@ -255,11 +285,7 @@ export function uninstallClient(
 
 function printOutcomes(outcomes: Outcome[]): void {
   for (const o of outcomes) {
-    const note =
-      o.action === 'refused'
-        ? ' — not a bro adapter; remove manually or pass --force'
-        : ''
-    console.log(`${o.client} ${o.scope}: ${o.action} — ${o.path}${note}`)
+    console.log(`${o.client} ${o.scope}: ${o.action} — ${o.path}${o.note ? ` (${o.note})` : ''}`)
   }
 }
 
