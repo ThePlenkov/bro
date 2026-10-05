@@ -1195,6 +1195,23 @@ interface PerfAgg {
   bad: number
 }
 
+/** One journal line → a row, or undefined for a torn/non-row write.
+ *  JSON.parse succeeding doesn't mean a row — `null`, a scalar, or `{}`
+ *  would poison the aggregates below. */
+function parsePerfRow(line: string): PerfRow | undefined {
+  try {
+    const r: unknown = JSON.parse(line)
+    return typeof r === 'object' &&
+      r !== null &&
+      typeof (r as PerfRow).event === 'string' &&
+      typeof (r as PerfRow).ms === 'number'
+      ? (r as PerfRow)
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** Read the journal rows under perfDir — a session filter narrows to
  *  that session's file; a torn write skips itself, not the report. */
 function readPerfRows(perfDir: string | null, sessionFilter?: string): PerfRow[] {
@@ -1211,23 +1228,9 @@ function readPerfRows(perfDir: string | null, sessionFilter?: string): PerfRow[]
       continue
     }
     for (const line of readFileSync(join(perfDir, f), 'utf8').split('\n')) {
-      if (line.trim() === '') {
-        continue
-      }
-      try {
-        const r: unknown = JSON.parse(line)
-        // JSON.parse succeeding doesn't mean a row — `null`, a scalar,
-        // or `{}` would poison the aggregates below
-        if (
-          typeof r === 'object' &&
-          r !== null &&
-          typeof (r as PerfRow).event === 'string' &&
-          typeof (r as PerfRow).ms === 'number'
-        ) {
-          rows.push(r as PerfRow)
-        }
-      } catch {
-        // a torn write skips itself, not the report
+      const row = line.trim() === '' ? undefined : parsePerfRow(line)
+      if (row !== undefined) {
+        rows.push(row)
       }
     }
   }
