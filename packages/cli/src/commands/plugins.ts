@@ -393,22 +393,10 @@ export function uninstallClient(
   return scopes.map((scope): Outcome => {
     const path = targets[scope]
     const reg = client.registration?.(scope, path, opts.env) ?? null
-    const wasRegistered = reg?.registered ?? false
     if (!existsSync(path)) {
-      // the file is gone but the manifest entry may dangle — clean it
-      if (wasRegistered && !opts.dryRun) {
-        reg!.unregister()
-      }
-      return {
-        client: name,
-        scope,
-        action: 'absent',
-        path,
-        note: wasRegistered
-          ? `${opts.dryRun ? 'would remove' : 'removed'} dangling kilo.json entry`
-          : undefined,
-      }
+      return absentOutcome(name, scope, path, reg, opts.dryRun)
     }
+    const wasRegistered = reg?.registered ?? false
     const prior = readFileSync(path, 'utf8')
     // provably ours = byte-equal to this bro's artifact. A sentinel-only
     // match is a different version or a hand edit — indistinguishable by
@@ -441,6 +429,30 @@ export function uninstallClient(
       note: wasRegistered ? 'removed kilo.json entry' : undefined,
     }
   })
+}
+
+/** The plugin file is already gone — an absent slot can still carry a
+ *  dangling manifest entry, which gets swept here. */
+function absentOutcome(
+  name: string,
+  scope: PluginScope,
+  path: string,
+  reg: Registration | null,
+  dryRun: boolean
+): Outcome {
+  const wasRegistered = reg?.registered ?? false
+  if (wasRegistered && !dryRun) {
+    reg!.unregister()
+  }
+  return {
+    client: name,
+    scope,
+    action: 'absent',
+    path,
+    note: wasRegistered
+      ? `${dryRun ? 'would remove' : 'removed'} dangling kilo.json entry`
+      : undefined,
+  }
 }
 
 function printOutcomes(outcomes: Outcome[]): void {
