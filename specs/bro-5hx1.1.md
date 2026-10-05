@@ -179,7 +179,11 @@ name and the `/experimental/v2` import stay out, per bro-ribc.1):
 
 1. **spawn** `command` via `sh -c` as the stdio peer (env: `process.env`
    + spec.env + the identity pins — the agent process sees the same
-   badge set a template worker does).
+   badge set a template worker does). `sh -c` is the mechanism, not a
+   sanitization gap: `entry.command` is the operator's own command line
+   (args included — `kilo --acp --profile work`), the same trust
+   boundary `agents.<backend>.command` already draws. Nothing untrusted
+   reaches this line to sanitize.
 2. **`initialize`** — `protocolVersion: 1`, `clientInfo` naming bro, and
    `clientCapabilities` with **fs and terminal advertised false**: v1
    grants the agent no client-side services — the CLI's own tool surface
