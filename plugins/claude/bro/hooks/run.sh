@@ -15,12 +15,13 @@
 # next, and the script always exits 0.
 set -u
 
-# each client exports its own plugin-root var — take whichever exists.
+# each client exports its own plugin-root var — take whichever exists
+# (Cursor, Devin, Claude, or the generic PLUGIN_ROOT).
 # a relative or nonexistent root is untrusted input: canonicalize an
 # absolute root, and fall back to this script's own dir otherwise so the
 # walk-up can't wander off CWD and execute an unrelated dist.
 SCRIPT_ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd)"
-ROOT="${DEVIN_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}"
+ROOT="${CURSOR_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}}"
 case "$ROOT" in
   /*) ROOT="$(CDPATH='' cd -- "$ROOT" 2>/dev/null && pwd)" ;;
   *)  ROOT= ;;

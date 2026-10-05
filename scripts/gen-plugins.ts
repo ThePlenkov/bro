@@ -10,10 +10,12 @@
  *   plugins/claude/bro/  .claude-plugin/plugin.json derived from plugin.json
  *                        + hand-written hooks/hooks.json (Claude event names)
  *   plugins/codex/bro/   .codex-plugin/plugin.json derived from plugin.json
+ *   plugins/cursor/bro/  .cursor-plugin/plugin.json + hooks/hooks.json
+ *                        (Cursor event names, command shape, output schema)
  *
  * Every adapter gets skills/ and hooks/run.sh. Only the Claude hooks wiring
- * is authored by hand — everything else is generated, so `check:plugins`
- * fails CI when an adapter drifts from its source.
+ * is authored by hand — Cursor's hooks.json is generated from the event
+ * map below. `check:plugins` fails CI when an adapter drifts from its source.
  *
  *   node scripts/gen-plugins.ts           # write
  *   node scripts/gen-plugins.ts --check   # verify freshness, exit 1 on drift
@@ -21,6 +23,7 @@
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { CURSOR_SELF_TOOL_MATCHER } from '../packages/cli/src/cursor-hook.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CHECK = process.argv.includes('--check')
@@ -143,10 +146,136 @@ for (const m of MARKETPLACES) {
   }
 }
 
+// Cursor's marketplace schema rejects a per-entry version, so this file
+// is not in MARKETPLACES (nothing to stamp). The source path is the
+// contract check:plugins can still enforce.
+const cursorMarketplace = readJson('.cursor-plugin/marketplace.json')
+const cursorEntry = (cursorMarketplace.plugins ?? []).find((p) => p?.name === 'bro')
+if (cursorMarketplace.name !== 'bro' || cursorEntry?.source !== 'plugins/cursor/bro') {
+  console.error(
+    '.cursor-plugin/marketplace.json: name "bro" must source "plugins/cursor/bro"'
+  )
+  process.exit(1)
+}
+if (cursorEntry.version !== undefined && cursorEntry.version !== cliVersion) {
+  console.error(
+    `.cursor-plugin/marketplace.json: version ${cursorEntry.version} != packages/cli version ${cliVersion}`
+  )
+  process.exit(1)
+}
+
 /** Claude/Codex manifests reuse the agent-plugins fields minus $schema. */
 function clientManifest(extra = {}) {
   const { $schema: _drop, ...fields } = manifest
   return `${JSON.stringify({ ...fields, ...extra }, null, 2)}\n`
+}
+
+/** Cursor's plugin schema is additionalProperties:false and its own
+ * field set — don't spread agent-plugins fields it doesn't know. */
+function cursorManifest() {
+  const author = manifest.author
+  const authorName =
+    typeof author === 'string'
+      ? author.trim()
+      : author && typeof author === 'object' && typeof author.name === 'string'
+        ? author.name.trim()
+        : ''
+  const body = {
+    name: manifest.name,
+    displayName: 'bro',
+    version: manifest.version,
+    description: manifest.description,
+    ...(authorName ? { author: { name: authorName } } : {}),
+    homepage: manifest.homepage,
+    repository: manifest.repository,
+    license: manifest.license,
+    keywords: manifest.keywords,
+    category: 'developer-tools',
+    skills: './skills/',
+    hooks: './hooks/hooks.json',
+  }
+  return `${JSON.stringify(body, null, 2)}\n`
+}
+
+/** ${CURSOR_PLUGIN_ROOT} is a bare token so Cursor expands it before the
+ * shell runs. Quoted, so a path with spaces survives. Fallback is bro on
+ * PATH, then the version-pinned package. Always exit 0. */
+function cursorHookCommand(event) {
+  const pin = `@broject/bro@${manifest.version}`
+  return `if [ -f "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ]; then "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ${event} || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks ${event} || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline "${pin}" hooks ${event} || true; fi; exit 0`
+}
+
+function cursorHook(event, timeout, extra = {}) {
+  return { command: cursorHookCommand(event), timeout, ...extra }
+}
+
+/** sessionStart is absent on cloud agents, and a loaded repo's
+ * session-start probe measures 20–40s — the first beforeSubmitPrompt
+ * does that work, so both timeouts sit above it. stop's loop_limit is
+ * 1: one follow-up, then the turn ends (gates, not loops). */
+function cursorHooksJson() {
+  const body = {
+    version: 1,
+    hooks: {
+      sessionStart: [cursorHook('session-start', 45)],
+      preCompact: [cursorHook('pre-compact', 20)],
+      beforeSubmitPrompt: [cursorHook('prompt-submit', 45)],
+      postToolUse: [cursorHook('post-tool', 10, { matcher: '^Shell$' })],
+      postToolUseFailure: [cursorHook('post-tool', 10, { matcher: '^Shell$' })],
+      stop: [cursorHook('stop', 25, { loop_limit: 1 })],
+      beforeShellExecution: [
+        cursorHook('permission', 10, { matcher: CURSOR_SELF_TOOL_MATCHER }),
+      ],
+    },
+  }
+  return `${JSON.stringify(body, null, 2)}\n`
+}
+
+function cursorReadme() {
+  return `# bro — Cursor plugin
+
+Agent's sidekick for Cursor: review debt, the PR review loop, drill frames,
+and wtf→retro. Mechanics live in the \`bro\` CLI. This directory is the
+Cursor plugin — skills plus lifecycle hooks.
+
+## Install
+
+In Cursor:
+
+\`\`\`text
+/add-plugin https://github.com/ThePlenkov/bro
+\`\`\`
+
+Then install **bro** from Customize. The marketplace manifest is
+\`.cursor-plugin/marketplace.json\` at the repo root; this directory is
+the plugin it points at.
+
+For a local checkout, symlink or copy \`plugins/cursor/bro\` to
+\`~/.cursor/plugins/local/bro\`.
+
+Context and stop hooks stay quiet until the workspace opts in
+(\`bro.config.json\` or \`.beads/\`, which \`bro setup\` writes). A missing
+CLI or a timeout never stalls the session. \`beforeShellExecution\` still
+answers when the workspace has not opted in — Cursor treats an empty
+reply as a deny. A plain \`bro\` / \`bd\` / \`npx @broject/bro\` is allowed;
+anything else that matched is left as a prompt.
+
+## Hooks
+
+| Cursor hook | bro event | Effect |
+| --- | --- | --- |
+| \`sessionStart\` | \`session-start\` | Rehydrate beads, drill, debt, and PR state |
+| \`beforeSubmitPrompt\` | \`prompt-submit\` | Prompt context. The first one also rehydrates when \`sessionStart\` did not run (cloud agents) |
+| \`preCompact\` | \`pre-compact\` | Drop the rehydration mark so the next prompt reloads state |
+| \`postToolUse\` / \`postToolUseFailure\` | \`post-tool\` | Arm the stop gate, cite the governing skill, drain \`bro notify\` |
+| \`stop\` | \`stop\` | One follow-up when this session armed a gate (\`loop_limit: 1\`) |
+| \`beforeShellExecution\` | \`permission\` | Auto-approve a plain \`bro\` / \`bd\` / \`npx @broject/bro\` command |
+
+A chained command (\`bro act status && …\`) is not auto-approved.
+
+Requires Node ≥ 22.18. The hook resolves a built checkout, then \`bro\` on
+PATH, then \`npx -y @broject/bro@${manifest.version}\`.
+`
 }
 
 // files written per adapter — value is source path, or [text] literal content
@@ -164,6 +293,12 @@ const ADAPTERS = {
     '.codex-plugin/plugin.json': [
       clientManifest({ interface: { displayName: 'bro' } }),
     ],
+  },
+  'plugins/cursor/bro': {
+    '.cursor-plugin/plugin.json': [cursorManifest()],
+    'hooks/hooks.json': [cursorHooksJson()],
+    'README.md': [cursorReadme()],
+    'LICENSE': 'LICENSE',
   },
 }
 

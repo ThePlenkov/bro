@@ -28,6 +28,13 @@
  * stdout, exit 0. Everything is best-effort — hooks only fire in bro-enabled
  * repos (bro.config.json or .beads/ walking up) and every connector probe is
  * fail-open so a missing bd/gh or a dead network can never stall the session.
+ *
+ * Cursor's stdin (`cursor_version` / `hook_event_name`) is translated at
+ * this edge: `conversation_id` → session id, `loop_count > 0` →
+ * `stop_hook_active`, successful `postToolUse` → `tool_response.success`.
+ * Stdout becomes `additional_context`, `followup_message`, or `permission`.
+ * Cloud agents do not fire sessionStart, so the first Cursor prompt
+ * rehydrates once; preCompact clears that mark.
  */
 import { execFileSync } from 'node:child_process'
 import {
@@ -57,6 +64,14 @@ import {
   installCommitHook,
   uninstallCommitHook,
 } from './githooks.ts'
+import {
+  CURSOR_HYDRATED_SKILL,
+  cursorStopIgnored,
+  cursorToHookInput,
+  cursorWorkspaceRoots,
+  isCursorHookPayload,
+  toCursorHookOutput,
+} from '../cursor-hook.ts'
 
 interface HookInput {
   tool_name?: unknown
@@ -87,16 +102,53 @@ function broEnabled(startDir: string): boolean {
   }
 }
 
-function readInput(): HookInput {
+function readRaw(): unknown {
   try {
-    return JSON.parse(readFileSync(0, 'utf8')) as HookInput
+    return JSON.parse(readFileSync(0, 'utf8')) as unknown
   } catch {
     return {}
   }
 }
 
+function asHookInput(raw: unknown): HookInput {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return {}
+  }
+  return raw as HookInput
+}
+
+/** Set for the life of this process when stdin is a Cursor payload.
+ * Each hook invocation is its own process. */
+let cursorClient = false
+
 function emit(out: unknown): void {
-  process.stdout.write(`${JSON.stringify(out)}\n`)
+  const payload = cursorClient ? toCursorHookOutput(out) : out
+  process.stdout.write(`${JSON.stringify(payload)}\n`)
+}
+
+function isAbsoluteProject(p: string): boolean {
+  return p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p)
+}
+
+/** Cursor plugin hooks run with cwd = the open folder, which is not
+ * always the workspace root. Prefer `CURSOR_PROJECT_DIR`, then cwd,
+ * then `workspace_roots` — the first absolute path that walks up to a
+ * bro-enabled repo. Non-Cursor hosts keep the Devin/cwd rule. */
+function hookProjectDir(raw: unknown): string {
+  if (!cursorClient) {
+    return process.env.DEVIN_PROJECT_DIR ?? process.cwd()
+  }
+  const candidates = [
+    process.env.CURSOR_PROJECT_DIR,
+    process.cwd(),
+    ...cursorWorkspaceRoots(raw),
+  ]
+  for (const c of candidates) {
+    if (c && isAbsoluteProject(c) && broEnabled(c)) {
+      return c
+    }
+  }
+  return process.env.DEVIN_PROJECT_DIR ?? process.cwd()
 }
 
 function context(event: string, text: string): void {
@@ -748,10 +800,27 @@ async function emitSessionContext(
 async function emitPromptContext(input: HookInput): Promise<void> {
   const prompt = typeof input.prompt === 'string' ? input.prompt : ''
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
-  const parts = await promptContextLines({ dir: process.cwd(), sessionId }, prompt)
-  if (parts.length > 0) {
-    context('UserPromptSubmit', parts.join('\n'))
+  const parts: string[] = []
+  // Cloud agents never fire sessionStart. The first prompt carries that
+  // rehydration; a later prompt does not repeat it. preCompact drops the
+  // mark so the summary's successor turn loads fresh state. Mark only
+  // after the probes return — a throw retries next prompt.
+  const hydrate = cursorClient && sessionId && !skillHinted(sessionId, CURSOR_HYDRATED_SKILL)
+  if (hydrate) {
+    parts.push(...(await sessionStartLines({ dir: process.cwd(), sessionId })))
+    parts.push(...(await parallelLines(sessionId)))
   }
+  const sessionCount = parts.length
+  parts.push(...(await promptContextLines({ dir: process.cwd(), sessionId }, prompt)))
+  if (hydrate) {
+    markSkillHinted(sessionId, CURSOR_HYDRATED_SKILL)
+  }
+  if (parts.length === 0) {
+    return
+  }
+  const text =
+    sessionCount > 0 ? `bro state — resume from here:\n${parts.join('\n')}` : parts.join('\n')
+  context('UserPromptSubmit', text)
 }
 
 async function emitPostTool(input: HookInput): Promise<void> {
@@ -845,20 +914,38 @@ async function emitStopGate(input: HookInput): Promise<void> {
   }
 }
 
-function emitPermission(input: HookInput): void {
+/** True when the command was approved. Cursor's beforeShellExecution
+ * blocks on empty or invalid stdout, so a non-match must still answer
+ * `ask` — silence is a deny. Chained commands match the plugin matcher
+ * and land here; they are not self-tool calls, so they stay a prompt. */
+function emitPermission(input: HookInput): boolean {
   const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
   if (isSelfToolCommand(cmd)) {
     emit({ decision: 'approve' })
+    return true
+  }
+  return false
+}
+
+function clearCursorHydrated(sessionId: string): void {
+  try {
+    const path = hintedPath(sessionId, CURSOR_HYDRATED_SKILL)
+    if (path) {
+      rmSync(path, { force: true })
+    }
+  } catch {
+    // a stuck mark rehydrates on the next prompt — never a stalled hook
   }
 }
 
 // --- dispatch -----------------------------------------------------------------
 
 export async function runHooksCommand(argv: string[]): Promise<void> {
+  cursorClient = false
   const event = argv[0]
   // install/uninstall are operator commands, not hook events — they
   // report a verdict on stderr and never read stdin (a git hook's stdin
-  // can be a terminal, and readInput would block on it forever). They
+  // can be a terminal, and reading stdin would block on it forever). They
   // also run before the broEnabled gate: wiring a repo is how it opts in.
   if (event === 'install' || event === 'uninstall') {
     const r =
@@ -885,8 +972,24 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     }
     return
   }
-  const root = process.env.DEVIN_PROJECT_DIR ?? process.cwd()
+  // stdin before the opt-in check: Cursor's project dir is on the
+  // payload / CURSOR_PROJECT_DIR, and cwd may be outside the repo.
+  const raw = readRaw()
+  cursorClient = isCursorHookPayload(raw)
+  const root = hookProjectDir(raw)
+  const input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw)
+  // Cursor blocks a beforeShellExecution hook that prints nothing. Answer
+  // even when the repo has not opted in and even when chdir fails.
+  const answerCursorPermission = (): void => {
+    if (!(cursorClient && event === 'permission')) {
+      return
+    }
+    if (!emitPermission(input)) {
+      emit({ permission: 'ask' })
+    }
+  }
   if (!event || !broEnabled(root)) {
+    answerCursorPermission()
     return
   }
   // bd/gh probes inherit cwd — run them in the project the hook fired for,
@@ -895,21 +998,29 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     try {
       process.chdir(root)
     } catch {
+      answerCursorPermission()
       return
     }
   }
-  const input = readInput()
   try {
     const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
     switch (event) {
       case 'session-start':
         await emitSessionContext('SessionStart', sessionId)
+        if (cursorClient) {
+          markSkillHinted(sessionId, CURSOR_HYDRATED_SKILL)
+        }
         return
       case 'post-compaction':
         await emitSessionContext('PostCompaction', sessionId)
         return
       case 'pre-compact':
-        // Claude Code requires hookEventName to match the firing event
+        // Claude Code requires hookEventName to match the firing event.
+        // Cursor's preCompact cannot feed the summary; drop the hydration
+        // mark so the next prompt reloads state after compaction.
+        if (cursorClient) {
+          clearCursorHydrated(sessionId)
+        }
         await emitSessionContext('PreCompact', sessionId)
         return
       case 'prompt-submit':
@@ -919,16 +1030,24 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
         await emitPostTool(input)
         return
       case 'stop':
+        if (cursorClient && cursorStopIgnored(raw)) {
+          return
+        }
         await emitStopGate(input)
         return
       case 'permission':
-        emitPermission(input)
+        if (!emitPermission(input) && cursorClient) {
+          emit({ permission: 'ask' })
+        }
         return
       default:
         // forward-compat: hooks.json may name events this bro doesn't know
         return
     }
   } catch {
-    // hooks fail open — a bro bug must never break the session
+    // hooks fail open — a bro bug must never break the session.
+    // A permission hook that already answered returned above; this
+    // covers a throw before that answer.
+    answerCursorPermission()
   }
 }

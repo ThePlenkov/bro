@@ -30,12 +30,14 @@ skills/<name>/                   — thin skills: policy only, call `bro *`
                                    loop, next, sdd, stack, sync, work, wtf)
 plugin.json                      — agent-plugins.org manifest (repo root IS the Devin plugin)
 hooks.json + hooks/run.sh        — Devin lifecycle hooks → `bro hooks <event>`
-.claude-plugin/marketplace.json  — marketplace manifest (Claude + Codex + Cursor read it)
-.agents/plugins/marketplace.json — Codex-native marketplace manifest
+.claude-plugin/marketplace.json  — Claude marketplace manifest
+.agents/plugins/marketplace.json — Codex marketplace manifest
+.cursor-plugin/marketplace.json  — Cursor marketplace manifest
 plugins/<client>/bro/            — GENERATED per-client adapters (self-contained:
                                    manifest + skills/ + hooks/run.sh copies;
                                    plugins/claude/bro/hooks/hooks.json is the only
-                                   hand-written adapter file — Claude event names)
+                                   hand-written adapter file — Claude event names.
+                                   Cursor's hooks.json is generated)
 formulas/                        — beads formulas (debt-pipeline)
 ```
 
@@ -58,7 +60,7 @@ manifest, so it ships as a hand-written plugin at
 `PluginKind = "server"` upstream). It speaks the same `bro hooks <event>`
 stdin/stdout contract as `hooks/run.sh` rather than importing bro, so the
 plugin and the CLI can never be different versions. Any bro policy added to
-that contract lands in all five adapters at once.
+that contract lands in every adapter at once.
 
 ## Setup
 
