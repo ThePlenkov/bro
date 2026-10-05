@@ -104,11 +104,16 @@ them):
   value comes from the operator's environment.
 - **Read-only.** `planSchema` rejects a step whose document contains
   `mutation` or `subscription` as a word-boundary keyword after
-  stripping `#` comments and string literals. Conservative by design:
-  a legal field *named* `mutation` false-positives and cannot be
-  expressed in v1 — aliasing does not help since the keyword still
-  appears. Mutations need dry-run/idempotency semantics (epic's open
-  question); they are a `version = 2` discussion, not a silent v1 hole.
+  stripping `#` comments and string literals. The gate fails *closed*:
+  an actual mutation cannot evade it — the operation keyword must
+  appear verbatim in executable position — while over-rejection is the
+  documented cost (a legal field, alias, directive, or enum value
+  spelled `mutation` trips it and cannot be expressed in v1). For a
+  read-only gate, erring toward rejection is the safe direction: the
+  worst case is a query the plan cannot write, never a mutation that
+  slips through. Mutations need dry-run/idempotency semantics (epic's
+  open question); they are a `version = 2` discussion, not a silent
+  v1 hole.
 - No `needs`/ordering between steps in v1 — steps are independent by
   definition; output order is declaration order regardless of
   completion order.
@@ -129,7 +134,7 @@ operator's existing login, exactly the `gh`/`glab` precedent:
   carries the `env`/`GITLAB_HOST` pinning contract.
 - **atlassian** — `atlassian gql '<doc>' --variables '<json>' --json`.
   Verified 2026-10-05 in the gqlb repo
-  (`/home/pepl/projects/gqlb/packages/atlassian-cli/src/commands/gql.ts`):
+  (`packages/atlassian-cli/src/commands/gql.ts`):
   the CLI is a raw-GraphQL passthrough — takes a query string or
   `--file`, a `--variables` JSON body, `--url`/`--token` overrides, and
   prints `{data, errors}` JSON. Auth is the CLI's own: `atlassian auth
@@ -154,7 +159,9 @@ config surface).
 
 `runPlan` fans steps out under `concurrency` (default 4 — the
 `pooled(items, 4)` precedent in both review packages), bounded the same
-way. Results merge into one JSON document on stdout, declaration order:
+way. The runner awaits every step, then emits one JSON document on
+stdout — results are buffered, never streamed, and keys are written in
+declaration order, so completion order never leaks into output:
 
 ```jsonc
 {
@@ -168,14 +175,17 @@ way. Results merge into one JSON document on stdout, declaration order:
 ```
 
 - A step failure is recorded, never fatal — one dead provider must not
-  starve the rest. `error` carries the CLI's stderr line;
-  GraphQL-level `errors` pass through untouched next to `data`.
+  starve the rest. Per-step result shape is fixed: `{ provider, data?,
+  errors? }` on a completed call, `{ provider, error }` when the CLI
+  itself failed. `data`/`errors` are the provider's GraphQL response
+  fields passed through raw; `error` is transport-level (spawn failure,
+  non-zero exit) and carries the CLI's stderr line.
 - Exit code is 1 when any step failed, 0 otherwise — results print
   regardless, so a partial answer is still machine-usable.
-- Output is raw `{data, errors}` per step — no normalization. A
-  normalized `items` shape (title/status/url for bead import) is the
-  epic's second open question and a follow-up spec, not v1: raw output
-  is the honest substrate, normalization is opinionated per consumer.
+- No normalization. A normalized `items` shape (title/status/url for
+  bead import) is the epic's second open question and a follow-up spec,
+  not v1: raw output is the honest substrate, normalization is
+  opinionated per consumer.
 - `bro query <plan.toml>` is the convenience surface — validate + run
   in one step over the same `resolvePlanDoc` pipeline `bro run` uses;
   there is no second parser.
