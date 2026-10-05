@@ -124,6 +124,36 @@ describe('providers section', () => {
     assert.deepEqual(cfg.providers, {})
   })
 
+  test('a __proto__ model id lands as an own key — never pollutes the prototype', () => {
+    const cfg = load({
+      providers: {
+        host: {
+          type: 'api',
+          baseUrl: 'https://x',
+          // JSON.parse produces a real own '__proto__' key — an object
+          // literal would run the setter instead
+          models: JSON.parse('{"__proto__":"systemone","m":null}'),
+        },
+      },
+    })
+    const models = cfg.providers.host!.type === 'api' ? cfg.providers.host!.models : {}
+    assert.equal(Object.hasOwn(models, '__proto__'), true)
+    assert.equal(models['__proto__'], 'systemone')
+    // an inherited member is still not a declared model — allowlist
+    // checks pin to own keys (hasOwn), never to prototype lookups
+    const badDefault = load({
+      providers: {
+        host: {
+          type: 'api',
+          baseUrl: 'https://x',
+          model: 'constructor',
+          models: { m: 'systemone' },
+        },
+      },
+    })
+    assert.equal(badDefault.providers.host, undefined)
+  })
+
   test('retired kinds name the migration — the error IS the note', () => {
     const cfg = load({
       providers: {

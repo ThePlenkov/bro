@@ -207,14 +207,25 @@ function parseApiModels(
         : typeof v === 'object' && v !== null
           ? (v as Record<string, unknown>).wire
           : undefined
-    if (wire === undefined || wire === null) {
-      out[key] = isSystemoneFamily(key) ? 'systemone' : 'openai-compat'
-      continue
-    }
-    if (typeof wire !== 'string' || !(API_WIRES as readonly string[]).includes(wire)) {
+    const resolved =
+      wire === undefined || wire === null
+        ? isSystemoneFamily(key)
+          ? 'systemone'
+          : 'openai-compat'
+        : typeof wire === 'string' && (API_WIRES as readonly string[]).includes(wire)
+          ? (wire as ApiWire)
+          : undefined
+    if (resolved === undefined) {
       return { err: `models.${key}.wire must be one of ${API_WIRES.join('|')}` }
     }
-    out[key] = wire as ApiWire
+    // defineProperty, not assignment — a model id like '__proto__'
+    // must land as an own key, never trigger the prototype setter
+    Object.defineProperty(out, key, {
+      value: resolved,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    })
   }
   if (Object.keys(out).length === 0) {
     return { err: 'models must name at least one served model' }
@@ -264,7 +275,7 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
       return fail(parsed.err)
     }
     models = parsed
-    if (typeof picked.model === 'string' && models[picked.model] === undefined) {
+    if (typeof picked.model === 'string' && !Object.hasOwn(models, picked.model)) {
       return fail(`model '${picked.model}' is not in the models allowlist`)
     }
   }
