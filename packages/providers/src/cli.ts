@@ -38,7 +38,9 @@ class CliConfigError extends Error {
  *  providers package must not grow a dep edge on the loop for seven
  *  lines of quoting. */
 export function expandPromptFile(command: string, promptFile: string): string {
-  const q = `'${promptFile.replaceAll("'", String.raw`'\''`)}'`
+  // ' → '\'' — the only character with meaning inside single quotes
+  const esc = promptFile.replaceAll("'", String.raw`'\''`)
+  const q = `'${esc}'`
   return command.includes('{promptFile}')
     ? command.replaceAll('{promptFile}', q)
     : `${command} ${q}`
@@ -56,6 +58,8 @@ function runTemplate(by: string, command: string, deadline: number): Promise<str
       reject(new JudgeUnavailable(`${by} (cli) timed out — budget spent`))
       return
     }
+    // NOSONAR — operator-configured provider command (same contract as
+    // loop.agent / agents.*.command everywhere: PATH lookup, sh -c)
     const child = spawn('sh', ['-c', command], { stdio: ['ignore', 'pipe', 'pipe'] })
     const out: Buffer[] = []
     let tail = ''
