@@ -95,7 +95,7 @@ function renderFleet(fleet) {
       if (r.title) step.title = r.title;
       tr.appendChild(step);
       tr.appendChild(el('td', r.state));
-      tr.appendChild(el('td', r.agent || '—', r.agent === 'lost — respawn?' ? 'bad' : r.agent === 'unknown' ? 'warn' : undefined));
+      tr.appendChild(el('td', r.agent || '—', r.agent === 'lost — respawn?' ? 'bad' : (r.agent === 'unknown' || (r.agent || '').startsWith('blocked — ')) ? 'warn' : undefined));
       tr.appendChild(el('td', r.worktree || '—', 'muted'));
       var pr = el('td');
       appendPrLink(pr, r.pr);

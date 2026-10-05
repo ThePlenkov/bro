@@ -16,21 +16,27 @@ import { spawn, spawnSync } from 'node:child_process'
 import {
   closeSync,
   existsSync,
+  fstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import {
   AgentNotFound,
+  agentEntryBlocked,
   agentsSection,
   bdActor,
   claimStep,
+  classifyExitCause,
   DEFAULT_CONFIG,
   gitTry,
+  isAgentCause,
   loadConfig,
   mintAgentId,
   patchAgentRegistry,
@@ -41,6 +47,7 @@ import {
   SpawnError,
   readAgentRegistry,
   withAgentRegistryLock,
+  writeAgentRegistry,
   type AgentConnector,
   type AgentInfo,
   type AgentRegistryEntry,
@@ -622,6 +629,24 @@ function prepareSpawn(
       `${spec.molStep} already has a live agent (${existing.agentId}, ${detail})`
     )
   }
+  if (existing !== undefined) {
+    // a recorded death can carry a respawn-blocking cause — classify now
+    // (backends whose isLive doesn't walk the death ladder never saw it)
+    // and refuse respawn into the same exhausted budget (bro-7xgk.2)
+    ensureExitCause(dir, home, spec.molStep, existing)
+    if (agentEntryBlocked(existing)) {
+      const reset = typeof existing.resetAt === 'string' ? existing.resetAt : undefined
+      const detail =
+        existing.cause === 'rate_limited'
+          ? reset !== undefined
+            ? `rate_limited until ${reset}`
+            : 'rate_limited — provider reported no reset'
+          : 'quota exhausted'
+      throw new SpawnError(
+        `respawn of ${spec.molStep} refused — ${detail}; \`bro agents down ${spec.molStep}\` clears the block`
+      )
+    }
+  }
   const step = probeStep(spec.beadsDir, spec.molStep)
   const claimed = step?.status === 'in_progress'
   if (claimed && existing === undefined) {
@@ -656,6 +681,15 @@ function prepareSpawn(
   const exitFile = join(home, `${agentId}.exit`)
   rmSync(exitFile, { force: true })
   writeFileSync(promptFile, spec.prompt)
+  // the log is append-mode across respawns — pin where THIS run's output
+  // starts so a later exit classifies on new text only, not the old run's
+  // rate-limit wall (which would re-block the fresh run forever)
+  let logFrom = 0
+  try {
+    logFrom = statSync(log).size
+  } catch {
+    // no log yet — the run starts at byte 0
+  }
   // exitStatus: undefined clears a respawned entry's stale harvest — the
   // new run must not read as already-exited (undefined keys drop out of
   // the serialized registry). pid/pidStart/spawnError likewise — a claim
@@ -669,8 +703,13 @@ function prepareSpawn(
     // reader's cwd differs from the spawner's (bro-qoqt)
     worktree: resolve(spec.repoRoot),
     log,
+    logFrom,
     stopped: false,
     exitStatus: undefined,
+    // a respawned entry's cause/resetAt belonged to the PREVIOUS run —
+    // the new agent must not inherit a 'blocked' it didn't earn
+    cause: undefined,
+    resetAt: undefined,
     pid: undefined,
     pidStart: undefined,
     spawnError: undefined,
@@ -699,14 +738,97 @@ function readExitFile(home: string, agentId: string): number | undefined {
   }
 }
 
+/** The tail of the agent's log — budget/auth walls print at the end of
+ *  the output, so a bounded tail read classifies them and a huge log
+ *  costs nothing. '' on any read failure — the classifier then falls
+ *  through to 'crash' on a non-zero exit. */
+const LOG_TAIL_BYTES = 64 * 1024
+
+function readLogTail(log: unknown, from?: unknown): string {
+  if (typeof log !== 'string' || log === '') {
+    return ''
+  }
+  try {
+    const fd = openSync(log, 'r')
+    try {
+      const size = fstatSync(fd).size
+      // classification reads only THIS run's segment — a respawned entry
+      // carries logFrom so the previous run's output can't re-classify
+      const base = typeof from === 'number' && from > 0 ? Math.min(from, size) : 0
+      const len = Math.min(size - base, LOG_TAIL_BYTES)
+      if (len <= 0) {
+        return ''
+      }
+      const buf = Buffer.alloc(len)
+      const n = readSync(fd, buf, 0, len, size - len)
+      return buf.toString('utf8', 0, n)
+    } finally {
+      closeSync(fd)
+    }
+  } catch {
+    return ''
+  }
+}
+
+/** Cause a recorded exit onto the entry — classified from the log tail,
+ *  never the rc (the same rc=1 covers a crash and a rate-limit wall).
+ *  Runs once: at .exit harvest (one patch writes exitStatus+cause
+ *  together) and lazily on entries carrying an exitStatus but no cause
+ *  (pre-taxonomy runs, or a harvested entry whose patch failed). The
+ *  registry write is advisory — the entry object is updated either way
+ *  so callers decide on THIS read's verdict, not the store's health. */
+function ensureExitCause(
+  dir: string,
+  home: string | null,
+  molStep: string,
+  entry: AgentRegistryEntry
+): void {
+  if (entry.exitStatus === undefined && home !== null) {
+    const code = readExitFile(home, entry.agentId)
+    if (code !== undefined) {
+      entry.exitStatus = code
+    }
+  }
+  if (typeof entry.exitStatus !== 'number' || isAgentCause(entry.cause)) {
+    return
+  }
+  const c = classifyExitCause(readLogTail(entry.log, entry.logFrom), entry.exitStatus)
+  entry.cause = c.cause
+  entry.resetAt = c.resetAt
+  try {
+    // the merge must bind to the SAME generation we classified — a
+    // respawn between our snapshot read and this patch owns the entry
+    // now, and the old run's exit fields would mislabel it
+    withAgentRegistryLock(dir, () => {
+      const reg = readAgentRegistry(dir)
+      const cur = reg[molStep]
+      if (cur === undefined || cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt) {
+        return
+      }
+      reg[molStep] = {
+        ...cur,
+        exitStatus: entry.exitStatus,
+        cause: c.cause,
+        resetAt: c.resetAt,
+      }
+      writeAgentRegistry(dir, reg)
+    })
+  } catch {
+    // the registry write is advisory — .exit still proves the exit
+  }
+}
+
 /** The recorded-death ladder both backends walk once liveness fails —
  *  stopped flag → harvested exitStatus → the .exit file (lazily
  *  harvested into the registry so `agents.json` keeps pid+exit-status
- *  alongside the handle, and the harvest is once). Terminal states
- *  also retire the .work marker: a dead agent must not keep reporting
- *  as live work to parallel-session detection. Returns undefined when
- *  nothing recorded a death — the caller decides what unproven means
- *  ('lost' for a confirmed-dead backend, 'spawned' for a failed probe). */
+ *  alongside the handle, and the harvest is once). A recorded exit whose
+ *  cause is a budget wall reads 'blocked' while the block holds — a
+ *  waiting worker is not a missing one ('lost' stays dead-without-a-
+ *  record). Terminal states also retire the .work marker: a dead agent
+ *  must not keep reporting as live work to parallel-session detection.
+ *  Returns undefined when nothing recorded a death — the caller decides
+ *  what unproven means ('lost' for a confirmed-dead backend, 'spawned'
+ *  for a failed probe). */
 function recordedDeath(
   dir: string,
   home: string | null,
@@ -717,23 +839,12 @@ function recordedDeath(
     dropWorkMarker(dir, molStep, entry)
     return 'stopped'
   }
-  if (entry.exitStatus !== undefined) {
-    dropWorkMarker(dir, molStep, entry)
-    return 'exited'
+  ensureExitCause(dir, home, molStep, entry)
+  if (entry.exitStatus === undefined) {
+    return undefined
   }
-  if (home) {
-    const code = readExitFile(home, entry.agentId)
-    if (code !== undefined) {
-      try {
-        patchAgentRegistry(dir, molStep, { exitStatus: code })
-      } catch {
-        // harvest is advisory — the .exit file still proves the exit
-      }
-      dropWorkMarker(dir, molStep, entry)
-      return 'exited'
-    }
-  }
-  return undefined
+  dropWorkMarker(dir, molStep, entry)
+  return agentEntryBlocked(entry) ? 'blocked' : 'exited'
 }
 
 /** Registry scan by agentId within one backend — status()/stop()
@@ -798,6 +909,13 @@ function nativeState(dir: string, home: string | null, molStep: string, entry: A
   return 'lost'
 }
 
+/** cause/resetAt ride from the registry entry to AgentInfo — the
+ *  recorded-death ladder may have just classified them. */
+const infoCause = (entry: AgentRegistryEntry): Pick<AgentInfo, 'cause' | 'resetAt'> => ({
+  cause: isAgentCause(entry.cause) ? entry.cause : undefined,
+  resetAt: typeof entry.resetAt === 'string' ? entry.resetAt : undefined,
+})
+
 function toInfo(dir: string, home: string | null, molStep: string, entry: AgentRegistryEntry): AgentInfo {
   return {
     id: entry.agentId,
@@ -806,6 +924,7 @@ function toInfo(dir: string, home: string | null, molStep: string, entry: AgentR
     molStep,
     backend: entry.backend,
     state: nativeState(dir, home, molStep, entry),
+    ...infoCause(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     log: typeof entry.log === 'string' ? entry.log : undefined,
   }
@@ -1096,6 +1215,7 @@ function toTmuxInfo(
     molStep,
     backend: entry.backend,
     state: tmuxState(dir, home, molStep, entry, probe),
+    ...infoCause(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     log: typeof entry.log === 'string' ? entry.log : undefined,
   }
@@ -1664,6 +1784,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       molStep,
       backend: entry.backend,
       state: sessions === undefined || s === undefined ? missing : gcState(s),
+      ...infoCause(entry),
       worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
       log: typeof entry.log === 'string' ? entry.log : undefined,
     }

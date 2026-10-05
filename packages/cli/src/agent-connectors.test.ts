@@ -238,15 +238,15 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /** Poll until fn() holds or the budget runs out — process death and
  *  exit-file writes are async from the test's point of view. */
-async function until(fn: () => boolean, ms = 5000): Promise<void> {
+async function until(fn: () => boolean | Promise<boolean>, ms = 5000): Promise<void> {
   const deadline = Date.now() + ms
   while (Date.now() < deadline) {
-    if (fn()) {
+    if (await fn()) {
       return
     }
     await sleep(50)
   }
-  assert.ok(fn(), 'condition did not hold within budget')
+  assert.ok(await fn(), 'condition did not hold within budget')
 }
 
 const SPEC = (main: string, beadsDir: string, molStep: string, prompt: string) => ({
@@ -502,6 +502,99 @@ function connectorContract(b: BackendCase): void {
       const st = await c.status(info.id)
       assert.equal(st.state, 'exited')
       assert.equal(readAgentRegistry(f.main)['fx-1']!.exitStatus, 3)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  // the taxonomy contract (bro-7xgk.2): the same rc=1 splits on the log
+  // tail — a crash is respawnable, a budget wall reads 'blocked' and
+  // refuses respawn until the provider's reset (or `down` clears it).
+  // spawnRun exits the agent with `program`, waits on the .exit file
+  // (pid death can beat the write), and returns the classified status.
+  const spawnRun = async (f: Fixture, c: AgentConnector, program: string) => {
+    const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', program))
+    await until(() =>
+      existsSync(join(f.main, '.git', 'bro', 'agents', `${info.id}.exit`))
+    )
+    // the .exit file can beat the wrapper's death — a single read may
+    // still report running/spawned, so poll for a terminal state
+    let status = await c.status(info.id)
+    await until(async () => {
+      status = await c.status(info.id)
+      return status.state !== 'running' && status.state !== 'spawned'
+    })
+    return { info, status }
+  }
+  const respawn = (c: AgentConnector, f: Fixture) =>
+    c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+
+  test('rc=1 rate-limit output reads blocked and refuses respawn until reset', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      const c = conn(f)
+      const { info, status: st } = await spawnRun(
+        f,
+        c,
+        "console.log('Reached free model rate limit — try again in 90 minutes'); process.exit(1)"
+      )
+      assert.equal(st.state, 'blocked')
+      assert.equal(st.cause, 'rate_limited')
+      assert.ok(st.resetAt !== undefined && Date.parse(st.resetAt) > Date.now())
+      // the registry carries the cause
+      const entry = readAgentRegistry(f.main)['fx-1']!
+      assert.equal(entry.cause, 'rate_limited')
+      assert.equal(typeof entry.resetAt, 'string')
+      // respawn into the same wall is refused, naming the reset
+      await assert.rejects(respawn(c, f), /respawn of fx-1 refused — rate_limited until/)
+      // the claim stayed with the blocked agent — no rebind happened
+      assert.equal(f.dbRows()[0]!.status, 'in_progress')
+      // down is the manual clear — the block lifts and respawn proceeds
+      await c.stop(info.id)
+      const second = await respawn(c, f)
+      assert.equal(second.id, info.id)
+      assert.equal(second.state, 'running')
+      // the fresh run did not inherit the previous life's cause
+      assert.equal(readAgentRegistry(f.main)['fx-1']!.cause, undefined)
+      await c.stop(second.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('rc=1 with no infra text is a crash — exited and respawnable', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      const c = conn(f)
+      const { info, status: st } = await spawnRun(
+        f,
+        c,
+        "console.error('kaboom'); process.exit(1)"
+      )
+      assert.equal(st.state, 'exited')
+      assert.equal(st.cause, 'crash')
+      const second = await respawn(c, f)
+      assert.equal(second.id, info.id)
+      assert.equal(second.state, 'running')
+      await c.stop(second.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('a quota exit blocks respawn until an operator clears it', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      const c = conn(f)
+      const { info, status: st } = await spawnRun(
+        f,
+        c,
+        "console.log('insufficient credits — quota exhausted'); process.exit(1)"
+      )
+      assert.equal(st.state, 'blocked')
+      assert.equal(st.cause, 'quota')
+      await assert.rejects(respawn(c, f), /respawn of fx-1 refused — quota exhausted.*down/)
+      await c.stop(info.id)
     } finally {
       cleanup(f)
     }

@@ -78,6 +78,17 @@ describe('agentCell', () => {
       'lost — respawn?'
     )
   })
+
+  test('a blocked agent renders cause and reset, never respawn?', () => {
+    const reset = { ...agent('blocked'), cause: 'rate_limited' as const, resetAt: '2026-10-06T00:00:00Z' }
+    assert.equal(
+      agentCell(step('in_progress'), reset, 'me', false),
+      'blocked — rate_limited til 2026-10-06T00:00:00Z'
+    )
+    const noReset = { ...agent('blocked'), cause: 'quota' as const }
+    assert.equal(agentCell(step('in_progress'), noReset, 'me', false), 'blocked — quota')
+    assert.equal(agentCell(step('in_progress'), agent('blocked'), 'me', false), 'blocked — ?')
+  })
 })
 
 const wt = (path: string): WorktreeInfo => ({ path, head: 'x', bare: false, detached: false })

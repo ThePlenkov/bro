@@ -23,7 +23,115 @@ import type { ConfigSection } from './config.ts'
 import { acquireFileLock } from './filelock.ts'
 import { gitTry } from './git.ts'
 
-export type AgentState = 'spawned' | 'running' | 'exited' | 'lost' | 'stopped'
+export type AgentState = 'spawned' | 'running' | 'exited' | 'lost' | 'stopped' | 'blocked'
+
+/** Why a recorded exit happened — classified from the agent's log TAIL,
+ *  never the exit code: the same rc=1 covers a crash and a provider
+ *  budget wall (specs/bro-7xgk.2.md). */
+export const AGENT_CAUSES = ['ok', 'crash', 'rate_limited', 'quota', 'auth'] as const
+export type AgentCause = (typeof AGENT_CAUSES)[number]
+
+export const isAgentCause = (v: unknown): v is AgentCause =>
+  typeof v === 'string' && (AGENT_CAUSES as readonly string[]).includes(v)
+
+export interface ExitClassification {
+  cause: AgentCause
+  /** Provider-reported reset, ISO — parsed from the same log tail. */
+  resetAt?: string
+}
+
+const CAUSE_PATTERNS: [AgentCause, RegExp][] = [
+  // no trailing \b on the rate-limit stem — identifier forms
+  // (`rate_limit_exceeded`, `RateLimitError`) continue with word chars
+  [
+    'rate_limited',
+    /\brate[_ -]?limits?|\b429\b|too many requests|requests?\s*(?:per|[-/])\s*(?:window|second|minute|hour|day)\b/i,
+  ],
+  [
+    'quota',
+    /\bquota\b|insufficient[_ ]?(?:credits?|funds?|balance)|\bbilling\b|out of (?:credits?|funds?)|spend(?:ing)? limit|(?:monthly|daily|usage) limit (?:reached|exceeded)/i,
+  ],
+  [
+    'auth',
+    /\b401\b|\bunauthori[sz]ed\b|invalid (?:api[_ -]?key|token|credentials?)|authentication (?:failed|required|error)|not (?:authenticated|logged in|signed in)|(?:api[_ -]?key|token|credentials?) (?:expired|revoked|invalid)|expired (?:api[_ -]?key|token|credentials?)/i,
+  ],
+]
+
+/** Provider reset extraction — relative durations (`retry-after: 120`,
+ *  `try again in 5 minutes`, `resets in 1h`), keyword-anchored ISO
+ *  stamps (`resets at 2026-10-05T23:00:00Z`), and epoch-seconds
+ *  rate-limit reset headers. */
+function parseResetAt(text: string, now: number): string | undefined {
+  const rel =
+    /retry[- ]?after\s*[:=]\s*(\d+)\b/i.exec(text) ??
+    /(?:try again|retry|resets?|available|ready) in (\d+)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/i.exec(
+      text
+    )
+  if (rel !== null) {
+    const n = Number(rel[1])
+    if (Number.isFinite(n) && n >= 0) {
+      const unit = rel[2]?.toLowerCase() ?? 's'
+      const ms = n * (unit.startsWith('h') ? 3_600_000 : unit.startsWith('m') ? 60_000 : 1_000)
+      // an absurd but finite delay overflows Date — toISOString() throws
+      // RangeError, so validate before formatting and fall through
+      const reset = new Date(now + ms)
+      if (!Number.isNaN(reset.getTime())) {
+        return reset.toISOString()
+      }
+    }
+  }
+  // Retry-After's HTTP-date form — the numeric matcher above skips it
+  const httpDate =
+    /retry[- ]?after\s*[:=]\s*([A-Za-z]{3},\s*\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}:\d{2}\s*GMT)/i.exec(
+      text
+    )
+  if (httpDate !== null) {
+    const t = Date.parse(httpDate[1]!)
+    if (!Number.isNaN(t)) {
+      return new Date(t).toISOString()
+    }
+  }
+  const iso =
+    /(?:resets?|resetting|try again|retry|until|available)\b[^\d\n]{0,32}?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)/i.exec(
+      text
+    )
+  if (iso !== null) {
+    const raw = iso[1]!
+    const t = Date.parse(/Z$|[+-]\d{2}:?\d{2}$/.test(raw) ? raw : `${raw}Z`)
+    if (!Number.isNaN(t)) {
+      return new Date(t).toISOString()
+    }
+  }
+  const epoch = /(?:x-ratelimit-reset|rate[_ -]?limit[_ -]?reset)\s*[:=]\s*(\d{10})\b/i.exec(text)
+  if (epoch !== null) {
+    return new Date(Number(epoch[1]) * 1000).toISOString()
+  }
+  return undefined
+}
+
+/** Classify a recorded exit from the log tail — the exit code only
+ *  proves death; the TEXT says why. exit 0 is always `ok`; a non-zero
+ *  exit matching no budget/auth pattern is `crash`. Reset parsing runs
+ *  for the budget causes (a quota can carry a reset too). */
+export function classifyExitCause(
+  logTail: string,
+  exitStatus: number,
+  now = Date.now()
+): ExitClassification {
+  if (exitStatus === 0) {
+    return { cause: 'ok' }
+  }
+  for (const [cause, re] of CAUSE_PATTERNS) {
+    if (re.test(logTail)) {
+      const resetAt =
+        cause === 'rate_limited' || cause === 'quota'
+          ? parseResetAt(logTail, now)
+          : undefined
+      return resetAt === undefined ? { cause } : { cause, resetAt }
+    }
+  }
+  return { cause: 'crash' }
+}
 
 /** What a backend needs to start a worker. `beadsDir` is the resolved
  *  shared-store identity — connectors MUST claim there, never in a
@@ -52,6 +160,12 @@ export interface AgentInfo {
   molStep: string
   backend: string
   state: AgentState
+  /** Exit classification — set once a recorded death was classified;
+   *  absent on live agents, unclassifiable deaths, and pre-taxonomy
+   *  entries not yet re-read. */
+  cause?: AgentCause
+  /** Provider-reported reset (ISO) riding a rate_limited/quota cause. */
+  resetAt?: string
   worktree?: string
   log?: string
 }
@@ -132,6 +246,25 @@ export interface AgentRegistryEntry {
   backend: string
   spawnedAt: string
   [key: string]: unknown
+}
+
+/** Whether the entry's recorded cause still forbids respawn — a
+ *  `rate_limited` death blocks until the provider's `resetAt` passes,
+ *  or indefinitely when none was reported; `quota` is an account wall
+ *  and holds until the operator clears it whatever resetAt says.
+ *  `stopped` lifts it: `bro agents down` is the manual clear. */
+export function agentEntryBlocked(entry: AgentRegistryEntry, now = Date.now()): boolean {
+  if (entry.stopped === true) {
+    return false
+  }
+  if (entry.cause === 'quota') {
+    return true
+  }
+  if (entry.cause !== 'rate_limited') {
+    return false
+  }
+  const reset = typeof entry.resetAt === 'string' ? Date.parse(entry.resetAt) : Number.NaN
+  return Number.isNaN(reset) || reset > now
 }
 
 /** `<git-common-dir>/bro/agents.json` — shared across linked worktrees,
