@@ -239,6 +239,13 @@ export function agentCell(
     return '—'
   }
   const pid = agent.pid !== undefined ? ` (pid ${agent.pid})` : ''
+  // a budget-walled agent is waiting on its provider's reset, not lost —
+  // the respawn decision surface is for corpses, and this spawn would be
+  // refused anyway (bro-7xgk.2)
+  if (agent.state === 'blocked') {
+    const reset = agent.resetAt !== undefined ? ` til ${agent.resetAt}` : ''
+    return `blocked — ${agent.cause ?? '?'}${reset}`
+  }
   // a clean exit while the step stays claimed is the same respawn
   // decision as a lost worker — the claim outlived its agent either way
   if ((agent.state === 'lost' || agent.state === 'exited') && step.state === 'in_progress') {

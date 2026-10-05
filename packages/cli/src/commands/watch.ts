@@ -111,6 +111,9 @@ export function attentionOf(
     if (r.agent === 'lost — respawn?') {
       attention.push(`agent lost — ${r.step} (${r.title}) — respawn?`)
     }
+    if (r.agent.startsWith('blocked — ')) {
+      attention.push(`agent ${r.agent} — ${r.step} (${r.title})`)
+    }
   }
   for (const g of prs) {
     if (g.error !== undefined) {

@@ -14,6 +14,9 @@
  *                       with <step>: spawn the step's agent — a lost /
  *                       exited agent is RESPAWNED on the same agentId
  *                       (the claim rebinds), a live one is a SpawnError.
+ *                       A `blocked` one (rate_limited/quota cause with
+ *                       the block still held) is refused with the
+ *                       provider's reset — `down` clears it.
  *                       This is the action behind fleet's
  *                       `lost — respawn?` decision surface.
  *   bro agents down [<id|step>] [--connector <name>]
@@ -170,11 +173,11 @@ export function occupancyLine(o: FleetOccupancy): string {
 
 function printStatusTable(backends: AgentBackendPlane[], occupancy: FleetOccupancy): void {
   console.log(occupancyLine(occupancy))
-  const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'pid', 'worktree']
+  const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'cause', 'pid', 'worktree']
   const rows = backends.flatMap(({ conn, agents }) => {
     const sup = conn.capabilities().supervisor
     if (agents.length === 0) {
-      return [[conn.name, sup, '—', '—', '—', '—', '—']]
+      return [[conn.name, sup, '—', '—', '—', '—', '—', '—']]
     }
     return agents.map((a) => [
       conn.name,
@@ -182,6 +185,7 @@ function printStatusTable(backends: AgentBackendPlane[], occupancy: FleetOccupan
       a.id,
       a.molStep,
       a.state,
+      a.cause === undefined ? '—' : a.cause,
       a.pid === undefined ? '—' : String(a.pid),
       a.worktree === undefined ? '—' : basename(a.worktree),
     ])
@@ -227,6 +231,8 @@ function statusDetail(
   console.log(`backend   ${a.backend} (supervisor: ${hit.conn.capabilities().supervisor})`)
   console.log(`step      ${a.molStep}`)
   console.log(`state     ${a.state}`)
+  if (a.cause !== undefined) console.log(`cause     ${a.cause}`)
+  if (a.resetAt !== undefined) console.log(`resetAt   ${a.resetAt}`)
   if (a.pid !== undefined) console.log(`pid       ${a.pid}`)
   if (a.worktree !== undefined) console.log(`worktree  ${a.worktree}`)
   if (a.log !== undefined) console.log(`log       ${a.log}`)
@@ -460,7 +466,10 @@ export async function stopAgent(
     // the read failed — stop() still binds to the observed id
   }
   const terminal =
-    current.state === 'exited' || current.state === 'stopped' || current.state === 'lost'
+    current.state === 'exited' ||
+    current.state === 'stopped' ||
+    current.state === 'lost' ||
+    current.state === 'blocked'
   const respawned =
     current.pid !== hit.agent.pid ? { from: hit.agent.pid, to: current.pid } : undefined
   await hit.conn.stop(hit.agent.id)

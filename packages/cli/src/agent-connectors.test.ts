@@ -507,6 +507,104 @@ function connectorContract(b: BackendCase): void {
     }
   })
 
+  // the taxonomy contract (bro-7xgk.2): the same rc=1 splits on the log
+  // tail — a crash is respawnable, a budget wall reads 'blocked' and
+  // refuses respawn until the provider's reset (or `down` clears it)
+  const exitFileOf = (f: Fixture, id: string) =>
+    join(f.main, '.git', 'bro', 'agents', `${id}.exit`)
+
+  test('rc=1 rate-limit output reads blocked and refuses respawn until reset', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      const c = conn(f)
+      const info = await c.spawn(
+        SPEC(
+          f.main,
+          f.beadsDir,
+          'fx-1',
+          "console.log('Reached free model rate limit — try again in 90 minutes'); process.exit(1)"
+        )
+      )
+      // the .exit file is the death proof — pid death can beat the write
+      await until(() => existsSync(exitFileOf(f, info.id)))
+      const st = await c.status(info.id)
+      assert.equal(st.state, 'blocked')
+      assert.equal(st.cause, 'rate_limited')
+      assert.ok(st.resetAt !== undefined && Date.parse(st.resetAt) > Date.now())
+      // the registry carries the cause
+      const entry = readAgentRegistry(f.main)['fx-1']!
+      assert.equal(entry.cause, 'rate_limited')
+      assert.equal(typeof entry.resetAt, 'string')
+      // respawn into the same wall is refused, naming the reset
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'true')),
+        /respawn of fx-1 refused — rate_limited until/
+      )
+      // the claim stayed with the blocked agent — no rebind happened
+      assert.equal(f.dbRows()[0]!.status, 'in_progress')
+      // down is the manual clear — the block lifts and respawn proceeds
+      await c.stop(info.id)
+      const second = await c.spawn(
+        SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+      )
+      assert.equal(second.id, info.id)
+      assert.equal(second.state, 'running')
+      // the fresh run did not inherit the previous life's cause
+      assert.equal(readAgentRegistry(f.main)['fx-1']!.cause, undefined)
+      await c.stop(second.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('rc=1 with no infra text is a crash — exited and respawnable', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      const c = conn(f)
+      const info = await c.spawn(
+        SPEC(f.main, f.beadsDir, 'fx-1', "console.error('kaboom'); process.exit(1)")
+      )
+      await until(() => existsSync(exitFileOf(f, info.id)))
+      const st = await c.status(info.id)
+      assert.equal(st.state, 'exited')
+      assert.equal(st.cause, 'crash')
+      const second = await c.spawn(
+        SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+      )
+      assert.equal(second.id, info.id)
+      assert.equal(second.state, 'running')
+      await c.stop(second.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('a quota exit blocks respawn until an operator clears it', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      const c = conn(f)
+      const info = await c.spawn(
+        SPEC(
+          f.main,
+          f.beadsDir,
+          'fx-1',
+          "console.log('insufficient credits — quota exhausted'); process.exit(1)"
+        )
+      )
+      await until(() => existsSync(exitFileOf(f, info.id)))
+      const st = await c.status(info.id)
+      assert.equal(st.state, 'blocked')
+      assert.equal(st.cause, 'quota')
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'true')),
+        /respawn of fx-1 refused — quota exhausted.*down/
+      )
+      await c.stop(info.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
   test('stop is idempotent and marks the entry stopped', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }])
     try {

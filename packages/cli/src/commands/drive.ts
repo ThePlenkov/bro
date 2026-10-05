@@ -33,6 +33,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import {
   acquireAgentRegistryLock,
   acquireFileLock,
+  agentEntryBlocked,
   agentRegistryPath,
   checkBeads,
   ensureAuth,
@@ -562,7 +563,9 @@ export function registryEntryState(
     return 'stopped'
   }
   if (e.exitStatus !== undefined) {
-    return 'exited'
+    // recorded cause decides — a budget-walled entry reads 'blocked'
+    // here the same as in the connector ladder (bro-7xgk.2)
+    return agentEntryBlocked(e) ? 'blocked' : 'exited'
   }
   // an .exit file not yet harvested into the registry is death proof too
   // — basename-only ids: '../' must never escape the agents home

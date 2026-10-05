@@ -118,11 +118,15 @@ export type {
 } from './connectors.ts'
 export {
   AgentNotFound,
+  AGENT_CAUSES,
   acquireAgentRegistryLock,
+  agentEntryBlocked,
   agentRegistryPath,
   agentsSection,
   bdAt,
   claimStep,
+  classifyExitCause,
+  isAgentCause,
   mintAgentId,
   patchAgentRegistry,
   probeStep,
@@ -134,10 +138,12 @@ export {
 } from './agents.ts'
 export type {
   AgentCapabilities,
+  AgentCause,
   AgentConnector,
   AgentInfo,
   AgentRegistryEntry,
   AgentState,
+  ExitClassification,
   ListResult,
   SpawnErrorKind,
   SpawnSpec,
