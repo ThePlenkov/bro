@@ -29,8 +29,9 @@ A closed bead is *harvested* when it carries the state label
 `sweep:distilled`, written via `bd set-state <id> sweep=distilled`
 (creates a provenance event + dimension label; `bd state <id> sweep`
 reads it back, `bd list` filters on the `sweep:distilled` label). The
-marker is the gate's only input — sweep itself never writes it; the
-agent that ran the distillation does, one `set-state` per source bead.
+marker is the gate's only input. `bro sweep distill` auto-marks beads
+already cited as learn evidence; for each generated step the agent that
+ran the distillation writes it, one `set-state` per source bead.
 Prune deletes the label with the bead, which is correct: the
 certification's job ends at deletion.
 
@@ -69,16 +70,18 @@ nothing:
 2. **Archive** — `bd export` snapshot written to
    `<sweep.dir>/<utc-timestamp>.jsonl` (default `.agents/sweep/`, a new
    `.gitignore` entry alongside `.agents/review-debt/`). Ignored +
-   untracked is the transport contract: `bro sync` commits it to
-   `refs/bro/data` automatically — same git-memory channel as the
-   review-debt ledger and drill evidence, outside `refs/heads`, never in
-   MR diffs. Memories stay excluded (bd default — they may carry
-   sensitive context and survive in their own store anyway). The sync
-   contract is positional, so `run` checks it: a `sweep.dir` resolving
-   outside the synced set (`.agents/` + the debt dir, ignored +
-   untracked) archives locally but never reaches `refs/bro/data` —
-   that configuration warns at `status` and `run`, it does not pass
-   silently.
+   untracked is the transport contract: `bro sync` commits the archive
+   to `refs/bro/data` — same git-memory channel as the review-debt
+   ledger and drill evidence, outside `refs/heads`, never in MR diffs.
+   Memories stay excluded (bd default — they may carry sensitive context
+   and survive in their own store anyway). Before pruning, `run` syncs
+   the archive and verifies it reached `refs/bro/data`; if sync fails or
+   the archive is absent from the ref, `run` stops without pruning — a
+   `bro loop` end-of-run sync arrives too late to cover standalone runs.
+   The sync contract is positional: a `sweep.dir` resolving outside the
+   synced set (`.agents/` + the debt dir, ignored + untracked) cannot
+   pass that check, so `status` warns and `run` refuses rather than
+   archiving locally and pruning anyway.
 3. **Prune** — `bd prune --older-than <N>d --force`. bd's own
    protections apply unchanged: pinned beads, open/in-progress,
    ephemeral, and any closed bead cited by an open bead's description,
