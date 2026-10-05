@@ -301,12 +301,17 @@ export function resolveApiModel(
       `api provider serves ${Object.keys(entry.models).length} models — name one (e.g. judge.model)`
     )
   }
-  if (!Object.hasOwn(entry.models, model)) {
+  // hasOwn pins the check to a declared key — an inherited member
+  // ('constructor' & co) must not satisfy the allowlist either
+  const wire = Object.hasOwn(entry.models, model)
+    ? (entry.models as Record<string, ApiWire | undefined>)[model]
+    : undefined
+  if (wire === undefined) {
     throw new Error(
       `model '${model}' is not served by this provider — declared: ${Object.keys(entry.models).join(', ')}`
     )
   }
-  return { model, wire: entry.models[model]! }
+  return { model, wire }
 }
 
 /** Lookup by consumer reference — `judge.provider`, `agents.*.provider`.
