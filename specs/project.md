@@ -23,6 +23,7 @@ answer — the index every capability spec links back to.
 | `specs/distro/` | npm publish, packs, adapters, releases (`bro setup`, nx release) |
 | `specs/backends/` | connector/facade seam: task stores, review hosts, sync data-refs |
 | `specs/retro/` | `bro wtf` — failure capture → retro notes → debt |
+| `specs/judgments/` | typed calibrated decisions: judge facade, provider registry, shadow→advisory→enforce trust ladder (`bro judge`) |
 
 ## Filetree (capability → code)
 
@@ -39,6 +40,9 @@ packages/
     src/agents.ts             AgentConnector contract      → sessions
   github/     gh review connector                          → backends
   gitlab/     glab review connector                        → backends
+  judge/      judge facade: chain, journal, shadow, replay → judgments
+  providers/  provider wire clients (systemone/acp/openai/cli) → judgments
+  core/src/{judge,providers}.ts                            → judgments
   cli/        bro: plugin registry + command dispatch      → all
     src/commands/spec.ts, spec-connectors.ts               → sdd
     src/commands/{hooks,work,drill,loop,next}.ts           → sessions

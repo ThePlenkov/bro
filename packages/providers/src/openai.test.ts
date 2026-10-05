@@ -108,6 +108,21 @@ describe('openaiCompatChat', () => {
       }
     }))
 
+  test('a spent deadline skips the key lookup — fail-open before it can block', () =>
+    withKey(async () => {
+      const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
+      const entry = { ...ENTRY, apiKeyCommand: `printf 'sk_cmd'` }
+      await assert.rejects(
+        openaiCompatChat(entry, { fetch, keyField: 'providers.orca.apiKeyCommand' })(
+          'p',
+          Date.now() - 1
+        ),
+        (e: unknown) =>
+          e instanceof JudgeUnavailable && /apiKeyCommand/.test((e as Error).message)
+      )
+      assert.equal(calls.length, 0)
+    }))
+
   test('a reply with no message content is JudgeUnavailable — no verdict', () =>
     withKey(async () => {
       const { fetch } = fakeFetch({ status: 200, body: { choices: [] } })

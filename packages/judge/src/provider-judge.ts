@@ -318,6 +318,13 @@ export function providerJudgeAuth(
   entry: ProviderEntry,
   keyField = `providers.${name}.apiKeyEnv`
 ): string | null {
+  // apiKeyCommand wins over apiKeyEnv at call time, so a configured
+  // command satisfies auth — a missing env var must not veto it (the
+  // preflight probes; it never runs the secret lookup itself, whose
+  // failures surface at call time as fail-open JudgeUnavailable)
+  if ('apiKeyCommand' in entry && entry.apiKeyCommand !== undefined) {
+    return null
+  }
   const envName = 'apiKeyEnv' in entry ? entry.apiKeyEnv : undefined
   if (envName === undefined) {
     return null

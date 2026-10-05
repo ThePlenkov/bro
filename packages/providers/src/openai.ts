@@ -13,6 +13,7 @@ import {
   mapUsage,
   objOr,
   postJson,
+  runKeyCommand,
   stripTrailingSlashes,
   type HttpResult,
 } from './http.ts'
@@ -26,7 +27,14 @@ type OpenAiCompatEntry = Extract<ProviderEntry, { type: 'openai-compat' }>
  *  and its message names the config FIELD, never the value — an
  *  all-caps pasted key passes isEnvName and would echo the secret
  *  verbatim. */
-function authHeaders(entry: OpenAiCompatEntry, keyField: string): Record<string, string> {
+function authHeaders(
+  entry: OpenAiCompatEntry,
+  keyField: string,
+  deadline: number
+): Record<string, string> {
+  if (entry.apiKeyCommand !== undefined) {
+    return { authorization: `Bearer ${runKeyCommand(entry.apiKeyCommand, keyField, deadline)}` }
+  }
   if (entry.apiKeyEnv === undefined) {
     return {}
   }
@@ -86,7 +94,7 @@ export function openaiCompatChat(
         response_format: { type: 'json_object' },
         temperature: 0,
       },
-      authHeaders(entry, keyField),
+      authHeaders(entry, keyField, deadline),
       deadline,
       (s) => s === 429 || s >= 500,
       opts.fetch

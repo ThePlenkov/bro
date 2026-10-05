@@ -133,8 +133,8 @@ describe('PROVIDER_REGISTRY capability matrix', () => {
     assert.deepEqual(PROVIDER_REGISTRY.systemone, {
       call: 'typed',
       spawn: false,
-      required: ['apiKeyEnv', 'model'],
-      optional: ['baseUrl'],
+      required: ['model'],
+      optional: ['baseUrl', 'apiKeyEnv', 'apiKeyCommand'],
     })
     assert.equal(PROVIDER_REGISTRY['openai-compat'].call, 'prose')
     assert.equal(PROVIDER_REGISTRY['openai-compat'].spawn, false)
@@ -214,5 +214,27 @@ describe('parseProviderEntry', () => {
     assert.equal(parseProviderEntry('p', 'cli'), null)
     assert.equal(parseProviderEntry('p', { type: 'wat' }), null)
     assert.equal(parseProviderEntry('p', {}), null)
+  })
+
+  test('an apiKeyCommand smuggling a key value drops the entry', () => {
+    for (const cmd of [
+      'echo sk-abc123',
+      'printf ts_live_abc123',
+      'printf ts_test_abc123',
+      'curl -H "Bearer x" https://x',
+    ]) {
+      const e = parseProviderEntry('p', {
+        type: 'systemone',
+        apiKeyCommand: cmd,
+        model: 'jev',
+      })
+      assert.equal(e, null, cmd)
+    }
+    const ok = parseProviderEntry('p', {
+      type: 'systemone',
+      apiKeyCommand: 'pass show bro/typesafe',
+      model: 'jev',
+    })
+    assert.equal(ok?.type, 'systemone')
   })
 })

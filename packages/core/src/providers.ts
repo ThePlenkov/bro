@@ -19,8 +19,23 @@ export const PROVIDER_KINDS = ['systemone', 'openai-compat', 'acp', 'cli'] as co
 export type ProviderKind = (typeof PROVIDER_KINDS)[number]
 
 export type ProviderEntry =
-  | { type: 'systemone'; baseUrl?: string; apiKeyEnv: string; model: string }
-  | { type: 'openai-compat'; baseUrl: string; apiKeyEnv?: string; model: string }
+  | {
+      type: 'systemone'
+      baseUrl?: string
+      apiKeyEnv?: string
+      /** Secret-store command (secret-tool/pass/op …) whose stdout is
+       *  the key — the secure alternative to apiKeyEnv. Either it or
+       *  apiKeyEnv must be set; the command wins when both exist. */
+      apiKeyCommand?: string
+      model: string
+    }
+  | {
+      type: 'openai-compat'
+      baseUrl: string
+      apiKeyEnv?: string
+      apiKeyCommand?: string
+      model: string
+    }
   | {
       type: 'acp'
       command: string
@@ -72,12 +87,17 @@ export interface ProviderKindSpec {
 }
 
 export const PROVIDER_REGISTRY: Record<ProviderKind, ProviderKindSpec> = {
-  systemone: { call: 'typed', spawn: false, required: ['apiKeyEnv', 'model'], optional: ['baseUrl'] },
+  systemone: {
+    call: 'typed',
+    spawn: false,
+    required: ['model'],
+    optional: ['baseUrl', 'apiKeyEnv', 'apiKeyCommand'],
+  },
   'openai-compat': {
     call: 'prose',
     spawn: false,
     required: ['baseUrl', 'model'],
-    optional: ['apiKeyEnv'],
+    optional: ['apiKeyEnv', 'apiKeyCommand'],
   },
   acp: {
     call: 'auto',
@@ -185,6 +205,18 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
   }
   if (typeof picked.apiKeyEnv === 'string' && !isEnvName(picked.apiKeyEnv)) {
     return fail('apiKeyEnv must NAME an env var (SCREAMING_SNAKE) — config never holds a key value')
+  }
+  if (type === 'systemone' && picked.apiKeyEnv === undefined && picked.apiKeyCommand === undefined) {
+    return fail('requires apiKeyEnv or apiKeyCommand')
+  }
+  // an `echo sk-…`/`printf ts_live_…` "command" smuggles the key into
+  // config — the whole point of apiKeyCommand is that the file never
+  // holds the value
+  if (
+    typeof picked.apiKeyCommand === 'string' &&
+    /sk-[A-Za-z0-9]|ts_(?:live|test)_|Bearer\s/i.test(picked.apiKeyCommand)
+  ) {
+    return fail('apiKeyCommand must RUN a secret lookup — it may not contain a key value')
   }
   return { type, ...picked } as ProviderEntry
 }

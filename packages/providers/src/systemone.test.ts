@@ -108,6 +108,60 @@ describe('systemoneCall', () => {
       )
     }))
 
+  test('apiKeyCommand runs the lookup and wins over apiKeyEnv', () =>
+    withKey(async () => {
+      const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
+      const entry: Extract<ProviderEntry, { type: 'systemone' }> = {
+        ...ENTRY,
+        apiKeyEnv: 'SYSTEMONE_TEST_KEY_UNSET',
+        apiKeyCommand: `printf 'ts_cmd_key'`,
+      }
+      await systemoneCall('b', entry, { fetch })('s', QUESTIONS, DEADLINE())
+      assert.equal(calls.length, 1)
+      assert.equal(calls[0]!.init.headers?.authorization, 'Bearer ts_cmd_key')
+    }))
+
+  test('an empty or failing apiKeyCommand is fail-open naming the field', () =>
+    withKey(async () => {
+      const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
+      const empty = { ...ENTRY, apiKeyCommand: `printf ''` }
+      await assert.rejects(
+        systemoneCall('b', empty, { fetch, keyField: 'providers.t.apiKeyCommand' })(
+          's',
+          QUESTIONS,
+          DEADLINE()
+        ),
+        (e: unknown) =>
+          e instanceof JudgeUnavailable && /apiKeyCommand/.test(e.message)
+      )
+      const dead = { ...ENTRY, apiKeyCommand: 'definitely-not-a-binary-xyz' }
+      await assert.rejects(
+        systemoneCall('b', dead, { fetch, keyField: 'providers.t.apiKeyCommand' })(
+          's',
+          QUESTIONS,
+          DEADLINE()
+        ),
+        JudgeUnavailable
+      )
+      assert.equal(calls.length, 0)
+    }))
+
+  test('a spent deadline skips the key lookup — fail-open before it can block', () =>
+    withKey(async () => {
+      const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
+      const entry = { ...ENTRY, apiKeyCommand: `printf 'ts_cmd_key'` }
+      await assert.rejects(
+        systemoneCall('b', entry, { fetch, keyField: 'providers.t.apiKeyCommand' })(
+          's',
+          QUESTIONS,
+          Date.now() - 1
+        ),
+        (e: unknown) =>
+          e instanceof JudgeUnavailable && /apiKeyCommand/.test((e as Error).message)
+      )
+      assert.equal(calls.length, 0)
+    }))
+
   test('absent baseUrl falls back to the hosted API; TYPESAFE_BASE_URL overrides both', () =>
     withKey(async () => {
       const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })

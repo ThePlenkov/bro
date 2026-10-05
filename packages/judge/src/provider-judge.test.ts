@@ -292,6 +292,20 @@ describe('providerJudgeAuth', () => {
     })
   })
 
+  test('a configured apiKeyCommand satisfies auth — the env var is not probed', async () => {
+    await withEnv('MISSING_PROVIDER_KEY', undefined, async () => {
+      assert.equal(
+        providerJudgeAuth('typesafe', {
+          type: 'systemone',
+          apiKeyEnv: 'MISSING_PROVIDER_KEY',
+          apiKeyCommand: 'pass show bro/typesafe',
+          model: 'm',
+        }),
+        null
+      )
+    })
+  })
+
   test('a synthesized alias names its legacy field — the registry path does not exist', async () => {
     await withEnv('TYPESAFE_API_KEY', undefined, async () => {
       const msg = providerJudgeAuth(

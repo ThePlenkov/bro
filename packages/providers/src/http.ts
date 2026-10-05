@@ -4,6 +4,7 @@
  * per-attempt timeout: retries spend the same budget (spec:
  * bro-f4ot.2-judge, bro-ribc.1).
  */
+import { execFileSync } from 'node:child_process'
 import { JudgeUnavailable } from '@broject/core'
 import type { DecideResult } from '@broject/core'
 
@@ -138,4 +139,80 @@ export async function postJson(
   }
   const msg = lastErr instanceof Error ? lastErr.message : String(lastErr)
   throw new JudgeUnavailable(`judge backend unreachable — ${msg}`)
+}
+
+/** Minimal operator-config tokenizer — the same rules acp.ts exposes
+ *  as shellWords, minus the acp-specific error type so non-acp
+ *  consumers (key commands) can share it. */
+export function splitShellWords(command: string): string[] {
+  const words: string[] = []
+  let cur = ''
+  let open = false
+  let quote: string | undefined
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!
+    if (quote === undefined && (ch === "'" || ch === '"')) {
+      quote = ch
+      open = true
+    } else if (ch === quote) {
+      quote = undefined
+    } else if (quote === undefined && ch === '\\' && i + 1 < command.length) {
+      cur += command[++i]
+      open = true
+    } else if (quote === undefined && /\s/.test(ch)) {
+      if (open) {
+        words.push(cur)
+        cur = ''
+        open = false
+      }
+    } else {
+      cur += ch
+      open = true
+    }
+  }
+  if (quote !== undefined) {
+    throw new Error(`unclosed ${quote} quote`)
+  }
+  if (open) {
+    words.push(cur)
+  }
+  return words
+}
+
+const KEY_COMMAND_TIMEOUT_MS = 10_000
+
+/** A secret from an operator-configured command (`apiKeyCommand`) —
+ *  the config names a PROGRAM (secret-tool, pass, op …), the key only
+ *  ever exists on its stdout. Exec'd without a shell under a short
+ *  timeout; anything but a non-empty stdout is fail-open, and the
+ *  message names the field, never the command's stderr (a tool may
+ *  echo fragments of what it was fed). The wait is synchronous, so it
+ *  shares the caller's deadline: a hung lookup can't burn past the
+ *  budget postJson would check only after stdout returns. */
+export function runKeyCommand(command: string, keyField: string, deadline?: number): string {
+  const argv = splitShellWords(command)
+  const bin = argv[0]
+  if (bin === undefined) {
+    throw new Error(`${keyField} is empty`)
+  }
+  const left = deadline === undefined ? KEY_COMMAND_TIMEOUT_MS : remaining(deadline)
+  if (left <= 0) {
+    throw new JudgeUnavailable(`${keyField} command never ran — the call's budget is spent`)
+  }
+  let out: string
+  try {
+    out = execFileSync(bin, argv.slice(1), {
+      encoding: 'utf8',
+      timeout: Math.min(KEY_COMMAND_TIMEOUT_MS, left),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message.split('\n')[0]! : String(err)
+    throw new JudgeUnavailable(`${keyField} command failed — ${msg}`)
+  }
+  const key = out.trim()
+  if (key === '') {
+    throw new JudgeUnavailable(`${keyField} command produced no key`)
+  }
+  return key
 }
