@@ -3,14 +3,22 @@
   "defaultBase": "main",
   "targetDefaults": {
     "typecheck": {
-      "dependsOn": ["^build"]
+      "dependsOn": [
+        "^build"
+      ]
     },
     "test": {
-      "dependsOn": ["^build", "build"]
+      "dependsOn": [
+        "^build",
+        "build"
+      ]
     }
   },
   "release": {
-    "projects": ["@broject/*", "!@broject/site"],
+    "projects": [
+      "@broject/*",
+      "!@broject/site"
+    ],
     "changelog": {
       "workspaceChangelog": {
         "createRelease": false
@@ -40,5 +48,6 @@
       "plugin": "@nx-devkit/prepare-for-release",
       "options": {}
     }
-  ]
+  ],
+  "nxCloudId": "6ac40919e891443e6ed11ebf"
 }
