@@ -530,8 +530,6 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
       ? check('repo', 'warn', 'not inside a git worktree', 'worktree/branch/sync commands need a repo')
       : check('repo', 'ok', `worktree root ${root} · stores: ${cfg.stores.join(', ')}`)
   )
-  checks.push(checkGh())
-
   // a store is live when .beads exists at the root OR BEADS_DIR pins one
   // (the loop harness runs worktrees against a shared store that way)
   const envDir = process.env.BEADS_DIR
@@ -539,18 +537,16 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
     (root !== null && isDir(join(root, '.beads'))) ||
     (typeof envDir === 'string' && envDir !== '' && isDir(envDir))
   const bd = probeBin('bd')
-  checks.push(...bdChecks(dir, bd, beadsDir, cfg.stores.includes('beads')))
-
+  const janitor = checkJanitor(dir)
   checks.push(
+    checkGh(),
+    ...bdChecks(dir, bd, beadsDir, cfg.stores.includes('beads')),
     checkHooks(dir),
     checkConfig([dir, root, mainRoot(dir)].filter((d): d is string => d !== null)),
-    ...providerChecks(dir)
+    ...providerChecks(dir),
+    ...(janitor === null ? [] : [janitor]),
+    ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found)
   )
-  const janitor = checkJanitor(dir)
-  if (janitor !== null) {
-    checks.push(janitor)
-  }
-  checks.push(...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found))
 
   return checks
 }

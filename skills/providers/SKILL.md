@@ -65,8 +65,10 @@ serve.
   off, never a silent vendor. A consumer naming a missing entry errors
   at use — `providers.<name> is not configured` — never falls through.
 - **Secrets ride env var names only.** `apiKeyEnv` names the variable
-  (SCREAMING_SNAKE) — the key value never lands in config, and error
-  messages name the config field, not the var.
+  (SCREAMING_SNAKE) — the key value never lands in error output. A
+  pasted key that happens to look SCREAMING_SNAKE passes `isEnvName`
+  (indistinguishable from a name), which is exactly why messages name
+  the config field and never echo the value.
 - **Surface errors are config errors.** Asking a `systemone` entry to
   spawn, or a non-call kind to judge, fails at resolution naming
   kind + surface.

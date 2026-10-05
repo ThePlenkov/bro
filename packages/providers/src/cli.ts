@@ -36,14 +36,20 @@ class CliConfigError extends Error {
  *  quoted path; no placeholder → the path appends, quoted, as the last
  *  arg. Kept local: expandAgentCmd lives in @broject/loop and the
  *  providers package must not grow a dep edge on the loop for seven
- *  lines of quoting. */
+ *  lines of quoting.
+ *
+ *  The codeql[] suppressions below are the verdict inline: the command
+ *  is an operator-authored template (config-owned, same trust as
+ *  agents.*.command) and the path is a bro-minted mkdtemp file, quoted —
+ *  the expansion IS the feature. */
 export function expandPromptFile(command: string, promptFile: string): string {
   // ' → '\'' — the only character with meaning inside single quotes
-  const esc = promptFile.replaceAll("'", String.raw`'\''`)
-  const q = `'${esc}'`
-  return command.includes('{promptFile}')
-    ? command.replaceAll('{promptFile}', q)
-    : `${command} ${q}`
+  const esc = promptFile.replaceAll("'", String.raw`'\''`) // codeql[js/shell-command-constructed-from-input] — see doc comment
+  const q = `'${esc}'` // codeql[js/shell-command-constructed-from-input] — see doc comment
+  if (command.includes('{promptFile}')) {
+    return command.replaceAll('{promptFile}', q) // codeql[js/shell-command-constructed-from-input] — see doc comment
+  }
+  return `${command} ${q}` // codeql[js/shell-command-constructed-from-input] — see doc comment
 }
 
 /** One `sh -c` round-trip under the caller's budget — an expired
@@ -58,9 +64,9 @@ function runTemplate(by: string, command: string, deadline: number): Promise<str
       reject(new JudgeUnavailable(`${by} (cli) timed out — budget spent`))
       return
     }
-    // NOSONAR — operator-configured provider command (same contract as
+    // operator-configured provider command (same contract as
     // loop.agent / agents.*.command everywhere: PATH lookup, sh -c)
-    const child = spawn('sh', ['-c', command], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn('sh', ['-c', command], { stdio: ['ignore', 'pipe', 'pipe'] }) // NOSONAR codeql[js/shell-command-constructed-from-input] — see expandPromptFile
     const out: Buffer[] = []
     let tail = ''
     child.stdout?.on('data', (d: Buffer) => out.push(d))
