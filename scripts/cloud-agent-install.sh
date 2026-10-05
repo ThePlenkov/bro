@@ -12,19 +12,22 @@ need_node() {
   '
 }
 
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$WORKDIR"' EXIT
+
 if ! need_node 2>/dev/null; then
   NODE_VERSION="${NODE_VERSION:-22.23.3}"
-  ARCH="$(uname -m)"
-  case "$ARCH" in
+  case "$(uname -m)" in
     x86_64)        NODE_ARCH=x64 ;;
     aarch64|arm64) NODE_ARCH=arm64 ;;
-    *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
+    *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
   esac
   NODE_DIST="node-v${NODE_VERSION}-linux-${NODE_ARCH}"
-  NODE_TARBALL="$(mktemp)"
-  trap 'rm -f "$NODE_TARBALL"' EXIT
-  curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_DIST}.tar.xz" -o "$NODE_TARBALL"
-  NODE_SHA256="${NODE_SHA256:-$(curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" \
+  NODE_TARBALL="$WORKDIR/${NODE_DIST}.tar.xz"
+  curl --proto '=https' --tlsv1.2 -fsSL \
+    "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_DIST}.tar.xz" -o "$NODE_TARBALL"
+  NODE_SHA256="${NODE_SHA256:-$(curl --proto '=https' --tlsv1.2 -fsSL \
+    "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" \
     | awk -v f="${NODE_DIST}.tar.xz" '$2 == f { print $1 }')}"
   if [ -z "$NODE_SHA256" ]; then
     echo "No checksum found for ${NODE_DIST}.tar.xz" >&2; exit 1
@@ -35,7 +38,24 @@ if ! need_node 2>/dev/null; then
 fi
 
 if ! command -v bd >/dev/null 2>&1; then
-  sudo npm install -g @beads/bd --no-audit --no-fund
+  BD_VERSION="${BD_VERSION:-1.3.1}"
+  case "$(uname -m)" in
+    x86_64)        BD_ARCH=amd64 ;;
+    aarch64|arm64) BD_ARCH=arm64 ;;
+    *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+  esac
+  BD_DIST="beads_${BD_VERSION}_linux_${BD_ARCH}"
+  BD_TARBALL="$WORKDIR/${BD_DIST}.tar.gz"
+  curl --proto '=https' --tlsv1.2 -fsSL \
+    "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/${BD_DIST}.tar.gz" -o "$BD_TARBALL"
+  BD_SHA256="${BD_SHA256:-$(curl --proto '=https' --tlsv1.2 -fsSL \
+    "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/checksums.txt" \
+    | awk -v f="${BD_DIST}.tar.gz" '$2 == f { print $1 }')}"
+  if [ -z "$BD_SHA256" ]; then
+    echo "No checksum found for ${BD_DIST}.tar.gz" >&2; exit 1
+  fi
+  echo "${BD_SHA256}  ${BD_TARBALL}" | sha256sum --check -
+  sudo tar -xzf "$BD_TARBALL" -C /usr/local/bin --no-same-owner bd
 fi
 
 npm ci --no-audit --no-fund
