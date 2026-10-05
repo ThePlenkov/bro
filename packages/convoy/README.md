@@ -27,6 +27,6 @@ Requires Node ≥ 22 and `bd`. ESM only.
 
 ## Links
 
-- Docs: https://broject.dev/docs
-- Source: https://github.com/ThePlenkov/bro/tree/main/packages/convoy
-- CLI: https://www.npmjs.com/package/@broject/bro
+- Docs: <https://broject.dev/docs/commands/convoy>
+- Source: <https://github.com/ThePlenkov/bro/tree/main/packages/convoy>
+- CLI: <https://www.npmjs.com/package/@broject/bro>

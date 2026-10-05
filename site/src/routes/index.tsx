@@ -15,16 +15,35 @@ const DOCS = `${BASE_URL}docs`
 const pieces = [
   { name: 'plugin', what: 'skills + hooks', gloss: 'lives inside your agent. rehydrates context on start, blocks the stop while work is unfinished.' },
   { name: 'bro', what: 'one CLI', gloss: 'the mechanics your prompts kept forgetting. one command, one verdict.' },
-  { name: 'connectors', what: 'your systems', gloss: 'beads, GitHub, GitLab — and whatever you plug in next — behind the same facades.' },
+  {
+    name: 'connectors',
+    what: 'your systems',
+    gloss: 'facades for tasks, reviews, agents, and specs — beads, GitHub, GitLab, tmux, Gas City, and whatever you plug in next.',
+  },
 ]
 
-const vocab = [
-  ['bro wtf', 'log the frustration. verbatim. with receipts.'],
-  ['bro drill', 'go deeper. you must come back with a result.'],
-  ['bro act', 'done? prove it. threads, checks, mergeable.'],
-  ['bro debt', 'merged PRs still owe you. bro collects.'],
-  ['bro next', 'what now? bro picks. you ship.'],
-  ['bro loop', 'fine, bro drives. you review.'],
+const vocabGroups = [
+  {
+    heading: 'one agent',
+    entries: [
+      ['bro wtf', 'log the frustration. verbatim. with receipts.'],
+      ['bro drill', 'go deeper. you must come back with a result.'],
+      ['bro act', 'done? prove it. threads, checks, mergeable.'],
+      ['bro learn', 'fool me once. the lesson fires next time, at the trigger.'],
+      ['bro spec', 'opt-in spec gates for claimed work; on-demand drift audits.'],
+      ['bro next', 'what now? bro picks. you ship.'],
+    ],
+  },
+  {
+    heading: 'a fleet, if you insist',
+    entries: [
+      ['bro loop', 'fine, bro drives. you review.'],
+      ['bro stack', 'PRs on PRs. bro rebases the tower.'],
+      ['bro drive', 'unowned review threads get a fixer. merged only on green.'],
+      ['bro watch', 'one heartbeat. no polling, no token bonfire.'],
+      ['bro fleet', "who's alive, who's lost, who needs a respawn."],
+    ],
+  },
 ]
 
 function Home() {
@@ -49,7 +68,8 @@ function Home() {
           </h1>
           <p className="lede">
             bro is a hook system that organizes and orchestrates tasks for any agent. Install the plugin —
-            Claude, Codex or Devin calls <code>bro</code> and stops forgetting, faking "done", and wandering off.
+            Claude, Codex or Devin calls <code>bro</code> and stops forgetting, faking "done", wandering off, and
+            repeating the same mistake.
           </p>
           <Install />
         </section>
@@ -75,21 +95,28 @@ function Home() {
         <section className="not">
           <h2>Not another orchestrator</h2>
           <p>
-            No swarm. No extra sessions. No token bonfire. Your agent keeps its own session — bro hooks into its
-            lifecycle and keeps it honest. <strong>Gates, not loops.</strong>
+            No swarm. No extra sessions by default. No token bonfire. Your agent keeps its own session — bro hooks
+            into its lifecycle and keeps it honest. When you do want many agents, one agents facade supervises
+            native detached processes, tmux panes, or Gas City. Watchers reach your session through a mailbox with{' '}
+            <code>bro notify</code>, not a wait loop. <strong>Gates, not loops.</strong>
           </p>
         </section>
 
         <section className="vocab">
           <h2>The whole vocabulary</h2>
-          <dl>
-            {vocab.map(([cmd, gloss]) => (
-              <div key={cmd}>
-                <dt>{cmd}</dt>
-                <dd>{gloss}</dd>
-              </div>
-            ))}
-          </dl>
+          {vocabGroups.map((group) => (
+            <div className="vocab-group" key={group.heading}>
+              <h3>{group.heading}</h3>
+              <dl>
+                {group.entries.map(([cmd, gloss]) => (
+                  <div key={cmd}>
+                    <dt>{cmd}</dt>
+                    <dd>{gloss}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          ))}
         </section>
       </main>
 

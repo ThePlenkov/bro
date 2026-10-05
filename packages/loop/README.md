@@ -27,6 +27,6 @@ bro.config.json). ESM only.
 
 ## Links
 
-- Docs: https://broject.dev/docs
-- Source: https://github.com/ThePlenkov/bro/tree/main/packages/loop
-- CLI: https://www.npmjs.com/package/@broject/bro
+- Docs: <https://broject.dev/docs/commands/loop>
+- Source: <https://github.com/ThePlenkov/bro/tree/main/packages/loop>
+- CLI: <https://www.npmjs.com/package/@broject/bro>

@@ -21,11 +21,12 @@ Requires Node ≥ 22 and `bd` (frames are beads). ESM only.
 
 - `drillConnector` — registers `bro drill *` subcommands
 - `PreventionPlan` — the required close-out artifact
+- `listReports` / `renderReport` / `writeReport` — durable drill reports
 - `parseDrillPlan` / `DRILL_PLAN_KIND` — the unified drill plan payload
 - Re-exports `bd`/`taskStore` primitives from `@broject/core`
 
 ## Links
 
-- Docs: https://broject.dev/docs/commands/drill
-- Source: https://github.com/ThePlenkov/bro/tree/main/packages/drill
-- CLI: https://www.npmjs.com/package/@broject/bro
+- Docs: <https://broject.dev/docs/commands/drill>
+- Source: <https://github.com/ThePlenkov/bro/tree/main/packages/drill>
+- CLI: <https://www.npmjs.com/package/@broject/bro>

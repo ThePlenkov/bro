@@ -18,4 +18,8 @@ The CLI resolves packs from the project's own `node_modules` first, then
 its installation tree — pinning the pack version pins your agents'
 capabilities.
 
-Part of https://github.com/ThePlenkov/bro
+Part of <https://github.com/ThePlenkov/bro>
+
+## Links
+
+- Docs: <https://broject.dev/docs/skills>

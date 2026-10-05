@@ -7,7 +7,7 @@
 
 > Your agent's sidekick. Skills are instructions — **bro is the brain.**
 >
-> **Landing:** https://broject.dev · **Docs:** https://broject.dev/docs/
+> **Landing:** [broject.dev](https://broject.dev) · **Docs:** [broject.dev/docs](https://broject.dev/docs/)
 
 Your AI agent can read a PR. Can it tell which merged PRs still have
 unresolved review threads rotting in them? Can it say "bro, what's left?"
@@ -32,6 +32,12 @@ PR merged → bro debt collect → findings land in .agents/review-debt/
                             → PR gets debt:collected (or debt:clean)
                             → you see exactly what's left: bro debt prs
 ```
+
+## What bro does now
+
+- **One agent:** `act`, `drill`, `wtf`/`retrospect`, `learn`, `spec` — review, descend, remember, and keep work pointed at a spec.
+- **The queue:** `next`, `loop`, `convoy`, `stack`, `work` — move beads through worktrees and PRs without another status meeting.
+- **The fleet:** `agents`, `fleet`, `watch`, `notify`, `drive`, `serve` — supervise detached work; wake up when there's news.
 
 ## Install
 
@@ -79,39 +85,81 @@ as the package's `./server` export) that spawns its own CLI. Two consequences:
 
 ## Commands
 
+Full reference: [broject.dev/docs](https://broject.dev/docs).
+
+### Review & debt
+
 | Command | What bro does |
 | ------- | ------------- |
-| `bro debt collect` | Scans merged PRs missing a `debt:*` label, harvests unresolved threads, labels the PR `debt:collected` or `debt:clean` |
-| `bro debt prs` | The queue — merged PRs still unprocessed (`--all` for the full picture) |
-| `bro debt status` | Ledger stats: open/done/wontfix, by area, by author, dupes |
-| `bro debt stats [--by author\|source\|area]` | **Which reviewer is worth reading** — findings per reviewer with fix% (done share of decided rows); `--by source` scores the collectors too |
-| `bro debt list` | Raw rows, filterable |
-| `bro debt mark <pr> <state>` | Manual override — `skipped` is the human opt-out, bro respects it |
-| `bro debt set <status> --thread-id ID` | Row status: `claimed` / `done --fix-pr N` / `wontfix` / `duplicate` — feeds `sync` |
-| `bro debt sync` | Projects the ledger into beads — idempotent (`thread_id` → `external_ref`), so `bd ready -l debt` becomes the work queue. Needs `bd` installed; `.beads` auto-inits stealth when missing |
-| `bro debt next [--claim] [--json]` | The top open finding — priority-ranked, oldest first. The agent-fix primitive: claim it, fix it, `set done --fix-pr N` |
-| `bro debt watch [--interval SEC]` | Collect on a timer (default 300s) — post-merge bot comments get picked up by the stale-rescan without a manual run. All collect flags pass through |
-| `bro act status [PR]` | **Exit gate as code** — open threads, pending CI, SAST findings, mergeable. Non-zero while blocked. `--json` for machines |
-| `bro act threads [PR]` | Unresolved review threads on the PR |
-| `bro act resolve --thread ID [--comment T]` | Resolve (or `--unresolve`) — replies first if a comment is given |
-| `bro act reply --thread ID --comment T` | Reply without resolving; `--file TSV` for batch |
-| `bro act wait [PR] [--merge]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green — the whole watcher loop in one command |
-| `bro act merge [PR] [--squash\|--merge\|--rebase]` | Merge **only when the exit gate is green** — refuses and names blockers when BLOCKED. Deletes the merged local branch too |
-| `bro cleanup [--remote] [--dry-run]` | Delete local branches whose PR merged — squash makes `git branch --merged` useless, so merged state comes from `gh pr list --state merged` |
-| `bro check [--evaluate] [--json]` | Run the repo's sverka workflow (`sverka run --format json`) — per-step status/duration + findings/verdict when evaluated. Exit code mirrors the executor. Resolves repo-local `sverka` → PATH → the `@sverka/cli` bundled with bro |
-| `bro drill down <title> [--under ID] [--ephemeral]` | Scoped descent — a child frame under the current leaf, as a `drill`-labeled bead |
-| `bro drill up --result T [--prevent T]… [--evidence R]…` | Ascend. `--result` is mandatory; each `--prevent` becomes a `discovered-from` task; evidence refs land in `bd provenance` (skipped for `--ephemeral` wisps) |
+| `bro act status [PR]` | **Exit gate as code** — open threads, pending CI, SAST findings, mergeability; non-zero while blocked |
+| `bro act threads [PR]` | List unresolved review threads |
+| `bro act resolve --thread ID [--comment T]` | Resolve (or `--unresolve`); reply first when given a comment |
+| `bro act reply --thread ID --comment T` | Reply without resolving; `--file TSV` for batches |
+| `bro act wait [PR] [--merge] [--cleanup]` | Poll the gate; optionally merge on green and clean up the merged worktree |
+| `bro act merge [PR] [--squash\|--merge\|--rebase]` | Merge only when the exit gate is green |
+| `bro debt collect` | Harvest unresolved threads from merged PRs and label them `debt:collected` or `debt:clean` |
+| `bro debt prs` | List merged PRs not yet processed (`--all` for the full picture) |
+| `bro debt status` | Ledger counts by state, area, author, and duplicate |
+| `bro debt stats [--by author\|source\|area]` | Compare findings and fix rates by reviewer or collector |
+| `bro debt list` | List raw ledger rows |
+| `bro debt mark <pr> <state>` | Manually mark a PR; `skipped` is the human opt-out |
+| `bro debt set <status> --thread-id ID` | Update a row to `claimed`, `done`, `wontfix`, or `duplicate` |
+| `bro debt sync` | Project ledger findings into beads |
+| `bro debt next [--claim] [--json]` | Pick the highest-priority open finding |
+| `bro debt watch [--interval SEC]` | Collect debt on a timer |
+| `bro debt trend` | Show debt volume over time |
+
+### Drill, retros & learn
+
+| Command | What bro does |
+| ------- | ------------- |
+| `bro drill down <title> [--under ID] [--ephemeral]` | Create a scoped child frame under the current leaf |
+| `bro drill up --result T [--prevent T]… [--evidence R]… [--report]` | Close the frame, record prevention and evidence, optionally write a report |
 | `bro unwind …` | Alias for `drill up` |
-| `bro drill current` / `tree` / `list` | Active leaf frame · all hierarchies · open frames |
-| `bro drill distill <id>` | `bd mol distill` — a good drill tree becomes a reusable proto |
-| `bro wtf <complaint>` | Capture the user's frustration verbatim as a `wtf` bead — timestamp + git snapshot included |
-| `bro retrospect record <plan.toml>` | Validate a TOML retro plan and fan it out: `retro` bead + `prevention` beads per action, linked `discovered-from`, wtf answered |
-| `bro retrospect status` | Exit gate — non-zero while a `wtf` bead is unanswered. The agent can't self-declare "sorry, fixed" |
-| `bro retrospect schema` / `list` | Print the commented TOML template · retros and open wtfs |
-| `bro setup [--beads] [--skills]` | Wires bro into the current repo: checks `gh` auth + `bd`, writes `bro.config.json`, optionally `bd init --stealth` + installs the debt-pipeline formula and thin skill wrappers |
-| `bro doctor [--json]` | Environment diagnostics — node, git, `gh` auth, `bd` presence + Dolt-era compat, hook resolution path, config sanity, sync + dolt remotes. Exit 1 on failures |
-| `bro next [--list] [--json]` | **The autonomous loop's scheduler** — claims the top ready bead (priority, then age) and prints the work order. Skips human gates, epics, and molecule steps. `bro next → implement → PR → merge → bd close → bro next` until `state: idle` — no per-item "go?" prompts |
-| `bro loop [--max N] [--dry-run]` | **The autonomous loop as a command** — claim → worktree → spawn `loop.agent` → act gate → `bd close` → repeat. Review threads respawn the agent (≤ `loop.fixRounds`); failures land as bead notes, never silent |
+| `bro drill current` / `tree` / `list` | Show the active leaf, frame hierarchies, or open frames |
+| `bro drill distill <id>` | Turn a drill tree into a reusable proto |
+| `bro wtf <complaint>` | Capture the complaint as a bead; see [retrospect](https://broject.dev/docs/commands/retrospect) |
+| `bro retrospect record <plan.toml>` | Validate and fan out a retro plan into prevention work |
+| `bro retrospect status` | Gate on unanswered `wtf` beads |
+| `bro retrospect schema` / `list` | Print the TOML template or list retros and open `wtf`s |
+| `bro learn add\|list\|show\|forget\|capture\|probe` | Store lessons and surface them when their triggers match |
+| `bro spec check\|drift\|new\|tree\|init` | Check spec coverage and drift, scaffold specs, and inspect their tree |
+
+### Queue & stacks
+
+| Command | What bro does |
+| ------- | ------------- |
+| `bro next [--list] [--json]` | Claim the top ready bead and print the work order |
+| `bro loop [--max N] [--dry-run] [--stack NAME] [--label a,b]` | Claim, work, pass the gate, close, and repeat |
+| `bro convoy pour\|status\|next\|claim\|done\|list` | Run a beads formula as a claimable molecule |
+| `bro stack push\|list\|sync` | Build and retarget stacked PR chains |
+| `bro work enter\|leave\|list\|prune` | Manage sibling worktrees and their recorded stack membership |
+
+### Fleet
+
+| Command | What bro does |
+| ------- | ------------- |
+| `bro fleet [--json\|--live]` | View molecules, steps, agents, worktrees, and PRs |
+| `bro agents status\|up\|down` | Inspect, start, respawn, or stop detached agents |
+| `bro watch [--once\|--every N\|--notify\|--json]` | Read-only heartbeat; optionally send transitions to the mailbox |
+| `bro notify <text>` | Drop a message in the live session's mailbox |
+| `bro drive [--once\|--every N\|--no-merge]` | Apply the act gate to fleet PRs; merge only on green |
+| `bro serve [--port N]` | Serve the fleet API and web UI on loopback |
+
+### Setup & utility
+
+| Command | What bro does |
+| ------- | ------------- |
+| `bro setup [--beads] [--skills] [--pack [NAME]]` | Configure the repo and optionally install beads, skills, or a capability pack |
+| `bro doctor [--json]` | Diagnose Node, git, auth, beads, hooks, and configuration |
+| `bro check [--evaluate] [--json] [--root <dir>]` | Run the repo's Sverka workflow; `--evaluate` applies its policy gate |
+| `bro run <plan.toml>` | Execute a validated plan |
+| `bro plan validate <file>` | Validate a plan without executing it |
+| `bro sync [--pull]` | Push or restore bro artifacts on `refs/bro/data` |
+| `bro plugins` | Print the live plugin registry |
+| `bro task list\|show\|new\|set\|close\|exec` | Use the document verbs; `list`, `show`, and `close` also work verb-first |
+| `bro store list\|show\|init\|path` | Inspect or manage stores; `--global` targets the user-level store where supported |
+| `bro cleanup [--remote] [--dry-run]` | Delete local branches whose PR merged |
 
 ## The pipeline (beads)
 
@@ -154,6 +202,10 @@ self-hosted GitLab, a future Jira connector) resolves through this map.
 session/prompt hook context when a claimed bead lacks `specs/<id>.md`
 (or a `spec:` link), `gate` also lets the stop gate block once. Commit
 the section — it then applies to every agent in the repo.
+
+For the `loop`, `drive`, `agents`, `learn`, `sdd`, `check`, `drill`,
+`stack`, and `beads` sections, see the
+[configuration reference](https://broject.dev/docs/configuration).
 
 `stores` lists the backends debt writes to. `jsonl` is the evidence ledger
 (always written — drop it and bro adds it back). `beads` is on **by

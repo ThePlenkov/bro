@@ -62,3 +62,72 @@ Explicit `"stores": ["jsonl"]` is the beads opt-out.
 External plugin specifiers — relative paths (contained to the repo) or
 package names, imported at startup. Each module's default export must be
 a `BroPlugin`. See [Plugins](/docs/plugins).
+
+### `loop`
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `agent` | `""` | Shell template for the agent command; `{promptFile}` is replaced by the work order |
+| `bootstrap` | `""` | Optional command run in each fresh worktree before the agent |
+| `agentTimeoutMin` | `45` | Per-agent time budget in minutes |
+| `mergeTimeoutMin` | `45` | Review-gate budget in minutes |
+| `fixRounds` | `3` | Maximum review-fix respawns per bead |
+| `maxItems` | `0` | Maximum beads per run; `0` means until idle or gated |
+
+### `drive`
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `intervalSec` | `300` | Cadence for `--every` and scheduled `--once` runs |
+| `merge` | `"auto"` | `auto` merges orphaned green PRs; `never` reports them without merging |
+
+### `agents`
+
+`agents` contains object-valued backend-specific configuration bags.
+Their keys are defined by the selected backend; there is no universal
+backend option set or schema default. Choose the backend under
+`connectors.agents`, not `agents`.
+
+### `learn`
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `enabled` | `true` | Disable lesson injection without deleting the store |
+| `maxInject` | `3` | Maximum lesson lines emitted by one hook probe |
+| `sources` | `[]` | Empty means all lesson sources; a non-empty list is an allowlist |
+
+### `sdd`
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `mode` | `"off"` | `off`, `remind`, or `gate`; gate blocks once at the stop hook |
+| `dir` | `"specs"` | Directory used by the native specs connector |
+
+### `check`
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `bin` | unset | Sverka executable or path |
+| `config` | unset | Sverka config path |
+| `entry` | unset | Sverka entry name |
+| `executor` | unset | `host` or `docker` |
+| `evaluate` | `false` | Collect SARIF artifacts and run the policy gate |
+
+### `drill`
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `report.dir` | `"drills"` | Repo-relative directory for durable drill reports |
+| `report.mode` | `"off"` | `off`, `prompt`, or `always`; explicit `--report` still wins |
+
+### `stack`
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `mode` | `"manual"` | `manual` stacks only on explicit `--stack`/`--base`; `auto` uses the current worktree branch when appropriate |
+
+### `beads`
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `global` | `~/.local/share/bro/beads` | User-level beads directory; `BRO_GLOBAL_BEADS` overrides the file value, and `~` expands to the home directory |

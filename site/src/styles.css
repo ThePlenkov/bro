@@ -51,7 +51,13 @@ h1 em { font-style: normal; color: var(--accent); }
 .lede { text-wrap: balance; max-width: 600px; margin: 24px auto 36px; color: var(--dim); font-size: 18px; }
 
 .install { max-width: 520px; margin: 0 auto; text-align: left; }
-.install-tabs, .term-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.install-tabs, .term-tabs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
 .install-tabs button, .term-tabs button {
   font: 13px var(--mono);
   color: var(--dim);
@@ -60,6 +66,7 @@ h1 em { font-style: normal; color: var(--accent); }
   padding: 6px 10px;
   border-radius: 6px;
   cursor: pointer;
+  flex: 0 0 auto;
 }
 .install-tabs button:hover, .term-tabs button:hover { color: var(--text); }
 .install-tabs button.on, .term-tabs button.on { color: var(--bg); background: var(--accent); }
@@ -156,6 +163,9 @@ section.how, section.not, section.vocab { padding: 64px 0 0; }
 .not p { font-size: 20px; line-height: 1.5; margin: 0; max-width: 720px; color: var(--dim); }
 .not strong { color: var(--text); }
 
+.vocab-group + .vocab-group { margin-top: 28px; }
+.vocab h3 { margin: 0 0 10px; font: 12px var(--mono); color: var(--faint); }
+.vocab h3::before { content: ':: '; color: var(--accent); }
 .vocab dl { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 14px 32px; }
 .vocab dt { font: 600 14px var(--mono); color: var(--text); }
 .vocab dd { margin: 2px 0 0; color: var(--dim); font-size: 14px; }
