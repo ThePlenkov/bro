@@ -118,6 +118,11 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
   // every turn so it survives compaction.
   let hydratedSession: string | null = null
   let hydratedContext: string | null = null
+  const hydrate = (sessionId: string): void => {
+    const out = runBroHook('session-start', { session_id: sessionId })
+    hydratedContext = hookContext(out)
+    hydratedSession = sessionId
+  }
 
   return {
     tool: {
@@ -148,9 +153,7 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
       const sessionId = input.sessionID ?? ''
       // hydrate once per session — the probes shell out to gh/bd
       if (sessionId && hydratedSession !== sessionId) {
-        const out = runBroHook('session-start', { session_id: sessionId })
-        hydratedContext = hookContext(out)
-        hydratedSession = sessionId
+        hydrate(sessionId)
       }
       if (hydratedContext) {
         output.system.push(`bro state — resume from here:\n${hydratedContext}`)
@@ -165,6 +168,23 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
     // sees it before it would otherwise miss it.
 
     event: async ({ event }) => {
+      // the cache is re-keyed on session boundaries — a created session
+      // primes its own probe, a deleted one retires it. Without this a
+      // new session's first (id-less) transform pushes the prior
+      // session's cached context.
+      const props = (event.properties ?? {}) as Record<string, unknown>
+      const sid =
+        typeof props.sessionID === 'string'
+          ? props.sessionID
+          : typeof (props.info as { id?: unknown } | undefined)?.id === 'string'
+            ? (props.info as { id: string }).id
+            : null
+      if (event.type === 'session.created' && sid !== null && sid !== hydratedSession) {
+        hydrate(sid)
+      } else if (event.type === 'session.deleted' && (sid === null || sid === hydratedSession)) {
+        hydratedSession = null
+        hydratedContext = null
+      }
       if (event.type !== 'session.idle') {
         return
       }
