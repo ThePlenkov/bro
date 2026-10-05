@@ -302,11 +302,41 @@ describe('janitor — locks', () => {
       // a path nothing acquires — agents.json.lock would already be
       // stolen by acquireFileLock's own dead-holder steal in the sweeps
       touch(join(bro, 'stale.json.lock'), '99999999:deadbeef', DAY)
-      touch(join(bro, 'other.json.lock'), `${process.pid}:livebeef`, DAY)
+      // a live holder inside the abandoned bound — an actual hold,
+      // not residue; the filelock's own steal rule keeps it
+      touch(join(bro, 'other.json.lock'), `${process.pid}:livebeef`)
       const r = janitorBroDir(bro, deps(bro))
       assert.equal(existsSync(join(bro, 'stale.json.lock')), false)
       assert.equal(existsSync(join(bro, 'other.json.lock')), true)
       assert.equal(r.reaped.locks, 1)
+    })
+  })
+
+  test('a live holder past the abandoned bound reaps — the same verdict a contender\'s steal reaches', () => {
+    withBro((bro) => {
+      // alive pid, but a hold older than LOCK_ABANDONED_MS (15m) is
+      // rob-by-rule — a contender would steal it on its next acquire
+      touch(join(bro, 'abandoned.json.lock'), `${process.pid}:livebeef`, 20 * 60_000)
+      const r = janitorBroDir(bro, deps(bro))
+      assert.equal(existsSync(join(bro, 'abandoned.json.lock')), false)
+      assert.equal(r.reaped.locks, 1)
+    })
+  })
+
+  test('a lock that cannot be acquired skips the serialized passes — fail-closed, never unlocked', () => {
+    withBro((bro) => {
+      const hooks = mkdir(bro, 'hooks')
+      mkdir(bro, 'notify')
+      touch(join(hooks, 'dead-sess.work'), `${deadStamp()}\nbro-x\n`, 2 * DAY)
+      touch(join(bro, 'notify', '.seen-idle-sess'), 'drop-a\n', 2 * DAY)
+      const broken = { ...deps(bro), registryLock: () => { throw new Error('held') } }
+      const r = janitorBroDir(bro, broken)
+      // the session sweep and its idle-cursor verdict both skip — a
+      // sweep without the occupancy lock proves nothing about liveness
+      assert.equal(existsSync(join(hooks, 'dead-sess.work')), true)
+      assert.equal(existsSync(join(bro, 'notify', '.seen-idle-sess')), true)
+      assert.equal(r.sessions.length, 0)
+      assert.equal(r.reaped.cursors, 0)
     })
   })
 

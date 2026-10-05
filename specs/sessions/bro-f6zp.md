@@ -59,13 +59,15 @@ Reap rules (bead RULES, made concrete):
    fired / trace / cursor file reaps past `MARKER_TTL_MS` (7d) as the
    absolute floor. Trace journals reap on TTL/size only — never on
    session death; they are the postmortem record `bro learn` reads.
-4. **A lock older than the agent it guards is garbage.** `*.lock` files
-   under `bro/` whose `<pid>:<rand>` token names a dead pid unlink —
-   the filelock already steals them on acquire, the janitor reaps the
-   file itself. Lock-adjacent debris (`<lock>.<pid>.<rand>.tmp` staged
-   tokens, `<lock>.cap-*` captured instances, mailbox `.*.tmp` drops)
-   reaps past a one-minute floor; expired `*.txt` drops reap without
-   waiting for a drain.
+4. **A lock older than the agent it guards is garbage.** `*.lock`
+   files under `bro/` reap by the filelock's own steal rule — a dead
+   `<pid>:<rand>` owner, or a live hold past the abandoned bound — via
+   `reapStaleLock`'s capture-then-check: the instance is renamed aside
+   and re-verified, so a live replacement swapped in mid-race is put
+   back rather than unlinked. Lock-adjacent debris
+   (`<lock>.<pid>.<rand>.tmp` staged tokens, `<lock>.cap-*` captured
+   instances, mailbox `.*.tmp` drops) reaps past a one-minute floor;
+   expired `*.txt` drops reap without waiting for a drain.
 5. **The janitor prints what it removed.** `bro watch` folds a
    `janitor: …` line into attention (and a `janitor` field into
    `--json`) only when it did work; `bro doctor` reports pending debris
@@ -73,9 +75,14 @@ Reap rules (bead RULES, made concrete):
 
 Every unlink revalidates just before `rmSync` (a marker re-armed or an
 agent file recreated between scan and delete is a live file, not
-debris), and registry mutation runs inside `agents.json.lock` — the
+debris; a lock is capture-then-checked by the filelock's own steal
+path), and registry mutation runs inside `agents.json.lock` — the
 same lock spawns and `.work` arms hold — so a respawn mid-sweep keeps
-its identity.
+its identity. The janitor's lock wait is 250ms, far under the 20s
+filelock default: a held lock skips the serialized passes rather than
+stalling the heartbeat, and a failed acquisition FAILS CLOSED — the
+session sweep and the idle-cursor verdict it feeds never run
+unlocked.
 
 ## Out of scope / approximations
 

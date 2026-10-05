@@ -27,6 +27,7 @@
 import {
   closeSync,
   existsSync,
+  fstatSync,
   ftruncateSync,
   openSync,
   readdirSync,
@@ -45,10 +46,10 @@ import {
   acquireAgentRegistryLock,
   type AgentRegistryEntry,
 } from './agents.ts'
-import { acquireFileLock } from './filelock.ts'
+import { acquireFileLock, reapStaleLock, staleLock } from './filelock.ts'
 import { gitTry } from './git.ts'
 import { DROP_TTL_MS } from './notify.ts'
-import { markerLive, pidAlive } from './proc.ts'
+import { markerLive } from './proc.ts'
 
 /** Marker presence window — mirrors commands/hooks.ts. A session counts
  *  as registry-present while ANY marker could still arm a gate:
@@ -78,6 +79,12 @@ const LOG_KEEP_BYTES = 512 * 1024
  *  than this is crash residue, not an in-flight write (mirrors
  *  filelock's staged-token sweep). */
 const DEBRIS_FLOOR_MS = 60_000
+/** The janitor's lock-wait bound — far under the filelock's 20s
+ *  default: housekeeping that can't get `agents.json.lock` skips its
+ *  serialized passes and retries next tick rather than stalling the
+ *  heartbeat behind a slow holder (a gascity spawn's lock section can
+ *  span backend calls). */
+const JANITOR_LOCK_WAIT_MS = 250
 
 export interface JanitorReaped {
   markers: number
@@ -324,7 +331,10 @@ function sweepSessions(ctx: Ctx): Set<string> {
 
 // --- mailbox ------------------------------------------------------------------------
 
-function sweepMailbox(ctx: Ctx, markerSids: Set<string>): void {
+/** `markerSids` null means the session sweep never ran (its lock
+ *  timed out) — the idle-cursor path needs that verdict and skips;
+ *  the absolute TTL floor and drop/tmp debris still reap. */
+function sweepMailbox(ctx: Ctx, markerSids: Set<string> | null): void {
   const notify = join(ctx.bro, 'notify')
   const dead = new Set(ctx.report.sessions)
   for (const f of listDir(notify)) {
@@ -342,7 +352,10 @@ function sweepMailbox(ctx: Ctx, markerSids: Set<string>): void {
       // so idle means ownerless — and the absolute TTL floor covers
       // the rest
       const reapable =
-        (!dead.has(sid) && !markerSids.has(sid) && age > CURSOR_IDLE_MS) ||
+        (markerSids !== null &&
+          !dead.has(sid) &&
+          !markerSids.has(sid) &&
+          age > CURSOR_IDLE_MS) ||
         age > SEEN_TTL_MS
       if (reapable) {
         reap(ctx, path, 'cursors')
@@ -479,26 +492,13 @@ function sweepAgents(ctx: Ctx): void {
 
 // --- lock debris ------------------------------------------------------------------------
 
-/** What one top-level file under bro/ is to the lock sweep. A `*.lock`
- *  whose `<pid>:<rand>` token names a dead pid is garbage — the
- *  filelock would steal it on next acquire; the janitor removes the
- *  file itself. An unverifiable token gets the TTL floor — a week-old
- *  lock is abandoned whatever its token said. `*.cap-*` captured
+/** `*.lock` reaps by the filelock's own steal rule — dead owner or a
+ *  hold past the abandoned bound — through `reapStaleLock`'s
+ *  capture-then-check: the instance is renamed aside and re-verified,
+ *  so a live replacement swapped in mid-race is put back, not
+ *  unlinked (a plain check-then-rm can delete the replacement and
+ *  leave two writers inside the same section). `*.cap-*` captured
  *  instances and `*.tmp` staged writes reap past the debris floor. */
-function lockKind(f: string, path: string, age: number): keyof JanitorReaped | null {
-  if (f.endsWith('.lock')) {
-    const pid = Number((firstLine(path)?.trim() ?? '').split(':')[0])
-    if (Number.isInteger(pid) && pid > 0) {
-      return pidAlive(pid) ? null : 'locks'
-    }
-    return age > MARKER_TTL_MS ? 'locks' : null
-  }
-  if (f.includes('.cap-') || f.endsWith('.tmp')) {
-    return age > DEBRIS_FLOOR_MS ? 'debris' : null
-  }
-  return null
-}
-
 function sweepLocks(ctx: Ctx): void {
   for (const f of listDir(ctx.bro)) {
     const path = join(ctx.bro, f)
@@ -506,9 +506,14 @@ function sweepLocks(ctx: Ctx): void {
     if (!st?.isFile) {
       continue
     }
-    const kind = lockKind(f, path, ctx.now - st.mtimeMs)
-    if (kind !== null) {
-      reap(ctx, path, kind)
+    if (f.endsWith('.lock')) {
+      if (ctx.dryRun ? staleLock(path) : reapStaleLock(path)) {
+        ctx.report.reaped.locks += 1
+      }
+      continue
+    }
+    if ((f.includes('.cap-') || f.endsWith('.tmp')) && ctx.now - st.mtimeMs > DEBRIS_FLOOR_MS) {
+      reap(ctx, path, 'debris')
     }
   }
 }
@@ -534,8 +539,13 @@ function capFile(ctx: Ctx, path: string, size: number): void {
     return
   }
   try {
-    const buf = Buffer.alloc(keep)
-    const n = readSync(fd, buf, 0, keep, size - keep)
+    // fstat inside the open, not the caller's stat — records appended
+    // between the scan's stat and this open land inside the read tail
+    // instead of being cut by the truncate (a writer's bytes after
+    // THIS point still race; the held-fd hole note above stands)
+    const sz = fstatSync(fd).size
+    const buf = Buffer.alloc(Math.min(keep, sz))
+    const n = readSync(fd, buf, 0, buf.length, sz - buf.length)
     let tail = buf.subarray(0, n)
     const nl = tail.indexOf(0x0a)
     if (nl >= 0 && nl + 1 < tail.length) {
@@ -543,7 +553,7 @@ function capFile(ctx: Ctx, path: string, size: number): void {
     }
     writeSync(fd, tail, 0, tail.length, 0)
     ftruncateSync(fd, tail.length)
-    ctx.report.truncated.push({ path, bytes: size - tail.length })
+    ctx.report.truncated.push({ path, bytes: sz - tail.length })
   } catch {
     // a racing writer or a read error — skip; the cap retries next tick
   } finally {
@@ -620,7 +630,7 @@ export function janitorBroDir(
     deps,
     liveAgentIds: new Set(),
   }
-  let markerSids = new Set<string>()
+  let markerSids: Set<string> | null = null
   const run = (fn: () => void): void => {
     try {
       fn()
@@ -652,14 +662,16 @@ export function runJanitor(dir: string, opts: JanitorOpts = {}): JanitorReport |
     {
       readRegistry: () => readAgentRegistry(dir),
       writeRegistry: (reg) => writeAgentRegistry(dir, reg),
-      registryLock: () => acquireAgentRegistryLock(dir),
+      registryLock: () => acquireAgentRegistryLock(dir, { waitMs: JANITOR_LOCK_WAIT_MS }),
     },
     opts
   )
 }
 
 /** File-backed deps for a bare `<common>/bro` dir — tests and any
- *  caller working on a state dir that isn't reachable through git. */
+ *  caller working on a state dir that isn't reachable through git.
+ *  `registryLock` propagates acquisition failure: a serialized pass
+ *  that can't take the lock must SKIP, never run unlocked. */
 export function fileBackedJanitorDeps(bro: string): JanitorDeps {
   const reg = join(bro, 'agents.json')
   return {
@@ -679,11 +691,10 @@ export function fileBackedJanitorDeps(bro: string): JanitorDeps {
       renameSync(tmp, reg)
     },
     registryLock() {
-      try {
-        return acquireFileLock(`${reg}.lock`, { label: 'agents.json lock' })
-      } catch {
-        return () => {}
-      }
+      return acquireFileLock(`${reg}.lock`, {
+        label: 'agents.json lock',
+        waitMs: JANITOR_LOCK_WAIT_MS,
+      })
     },
   }
 }
