@@ -24,6 +24,7 @@ import { gitDirOf, hasSubmodules, isLinkedGitDir, parseWorktreePorcelain } from 
 import type { WorktreeInfo } from './work.ts'
 import {
   acquireMergeSlot,
+  checkHistory,
   evaluateExitGate,
   fetchPrActState,
   releaseMergeSlot,
@@ -109,6 +110,7 @@ async function cmdStatus(argv: string[]): Promise<void> {
   const act = loadBroConfig().act
   const state = await fetchPrActState(rev, t, {
     ignoreChecks: act.ignoreChecks,
+    checkHistory: checkHistory(process.cwd()),
     maxRounds: act.maxRounds,
     docsPaths: act.docsPaths,
     docsMaxRounds: act.docsMaxRounds,
@@ -142,6 +144,9 @@ function printStatus(state: PrActState, gate: ExitGate): void {
   for (const b of gate.blockers) {
     console.log(`  blocker: ${b}`)
   }
+  for (const a of gate.alerts) {
+    console.log(`  alert: ${a}`)
+  }
 }
 
 /**
@@ -165,6 +170,7 @@ async function cmdWait(argv: string[]): Promise<void> {
     async () => {
       const state = await fetchPrActState(rev, t, {
         ignoreChecks: act.ignoreChecks,
+        checkHistory: checkHistory(process.cwd()),
         maxRounds: act.maxRounds,
         docsPaths: act.docsPaths,
         docsMaxRounds: act.docsMaxRounds,
@@ -312,6 +318,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
     const act = loadBroConfig().act
     const state = await fetchPrActState(rev, t, {
       ignoreChecks: act.ignoreChecks,
+      checkHistory: checkHistory(process.cwd()),
       maxRounds: act.maxRounds,
       docsPaths: act.docsPaths,
       docsMaxRounds: act.docsMaxRounds,

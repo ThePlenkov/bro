@@ -28,6 +28,8 @@ export {
   debtSection,
   DEFAULT_CONFIG,
   DEFAULT_GLOBAL_BEADS_DIR,
+  DEFAULT_IGNORE_CONSECUTIVE_FAILURES,
+  DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
   defineConfig,
   fleetSection,
   loadConfig,
@@ -39,6 +41,7 @@ export {
   STORE_BACKENDS,
   syncSection,
 } from './config.ts'
+export type { IgnoreCheckEntry, IgnoreCheckRule } from './config.ts'
 export {
   DATA_REF,
   dataRefCommit,

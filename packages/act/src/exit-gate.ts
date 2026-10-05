@@ -35,6 +35,9 @@ export function evaluateExitGate(state: PrActState): ExitGate {
     fix_rounds: state.fixRounds,
     max_rounds: state.maxRounds,
     docs_only: state.docsOnly,
+    // advisory-check alerts are a report, not a gate — a silent reviewer
+    // must surface everywhere the verdict does without ever blocking it
+    alerts: state.alerts,
   }
   if (state.state !== 'OPEN') {
     return { ok: true, blockers: [], ...base }

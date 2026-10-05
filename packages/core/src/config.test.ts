@@ -118,9 +118,45 @@ describe('loadConfig root shape', () => {
     assert.equal(load({ sync: { beads: 'no' } }).sync.beads, true)
   })
 
-  test('act.ignoreChecks keeps only strings', () => {
+  test('act.ignoreChecks normalizes strings to rules with defaults', () => {
     const cfg = load({ act: { ignoreChecks: ['kilo', 42, 'flaky-bot', '', '  '] } })
-    assert.deepEqual(cfg.act.ignoreChecks, ['kilo', 'flaky-bot'])
+    assert.deepEqual(cfg.act.ignoreChecks, [
+      { name: 'kilo', consecutiveFailures: 3, threadWindowDays: 7 },
+      { name: 'flaky-bot', consecutiveFailures: 3, threadWindowDays: 7 },
+    ])
+  })
+
+  test('act.ignoreChecks rule objects tune the condition', () => {
+    const cfg = load({
+      act: {
+        ignoreChecks: [
+          { name: 'kilo', consecutiveFailures: 5, threadWindowDays: 2 },
+          { name: 'partial' }, // missing knobs take the defaults
+          { name: '' }, // blank name is dropped
+          { consecutiveFailures: 2 }, // nameless is dropped
+          ['nope'], // nested junk is dropped
+        ],
+      },
+    })
+    assert.deepEqual(cfg.act.ignoreChecks, [
+      { name: 'kilo', consecutiveFailures: 5, threadWindowDays: 2 },
+      { name: 'partial', consecutiveFailures: 3, threadWindowDays: 7 },
+    ])
+  })
+
+  test('act.ignoreChecks invalid rule fields fall back to defaults', () => {
+    const cfg = load({
+      act: {
+        ignoreChecks: [
+          { name: 'kilo', consecutiveFailures: 0, threadWindowDays: -1 },
+          { name: 'x', consecutiveFailures: 'many', threadWindowDays: null },
+        ],
+      },
+    })
+    assert.deepEqual(cfg.act.ignoreChecks, [
+      { name: 'kilo', consecutiveFailures: 3, threadWindowDays: 7 },
+      { name: 'x', consecutiveFailures: 3, threadWindowDays: 7 },
+    ])
   })
 
   test('non-object act section falls back to defaults', () => {
@@ -361,7 +397,9 @@ describe('loadConfig linked worktree', () => {
     )
     const cfg = loadConfig(wt)
     assert.equal(cfg.personality, 'mentor')
-    assert.deepEqual(cfg.act.ignoreChecks, ['kilo'])
+    assert.deepEqual(cfg.act.ignoreChecks, [
+      { name: 'kilo', consecutiveFailures: 3, threadWindowDays: 7 },
+    ])
   })
 
   test('worktree-local config wins over the main checkout', () => {

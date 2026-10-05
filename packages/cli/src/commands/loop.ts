@@ -34,7 +34,7 @@ import {
   withFileLock,
   type ReviewFacade,
 } from '@broject/core'
-import { evaluateExitGate, fetchPrActState, waitForGate } from '@broject/act'
+import { checkHistory, evaluateExitGate, fetchPrActState, waitForGate } from '@broject/act'
 import {
   buildFixPrompt,
   buildWorkPrompt,
@@ -540,6 +540,7 @@ async function driveGate(
       { repo: ctx.repo, pr },
       {
         ignoreChecks: act.ignoreChecks,
+        checkHistory: checkHistory(ctx.root),
         maxRounds: act.maxRounds,
         docsPaths: act.docsPaths,
         docsMaxRounds: act.docsMaxRounds,

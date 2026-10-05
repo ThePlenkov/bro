@@ -42,6 +42,11 @@ export interface PrActState {
    *  open (the cap's sole consumer): false means "not docs-only OR not
    *  probed". */
   docsOnly: boolean
+  /** Conditional-ignore alerts — advisory checks (act.ignoreChecks)
+   *  that are failing without having earned the quiet ignore (repeated
+   *  failure + fresh thread activity). The silent-reviewer signal:
+   *  visible, never blocking. */
+  alerts: string[]
 }
 
 export interface ExitGate {
@@ -58,4 +63,7 @@ export interface ExitGate {
   fix_rounds: number
   max_rounds: number
   docs_only: boolean
+  /** Advisory-check alerts — see PrActState.alerts. Surfaced for
+   *  visibility; never part of `blockers`. */
+  alerts: string[]
 }

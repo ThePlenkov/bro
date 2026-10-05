@@ -33,7 +33,10 @@ checks, SAST annotations, mergeability, and fix rounds.
 failures don't.** A failed AI-reviewer *check* (`reviewers_failing`) is
 infra noise — crash, quota, outage — reported but never blocking. Its
 real findings arrive as threads, which do block. Chronically flaky checks
-go on [`act.ignoreChecks`](/docs/configuration#act).
+go on [`act.ignoreChecks`](/docs/configuration#act) — a conditional
+ignore: a failing advisory check stays quiet only while it keeps failing
+*and* producing thread output, otherwise `alerts` carries a
+silent-reviewer line (still non-blocking).
 
 ## The severity-aware loop
 

@@ -21,7 +21,7 @@
  * transitions, not noise.
  */
 import { dropMailbox, git, mailboxDir, reviewHost, type ReviewFacade } from '@broject/core'
-import { evaluateExitGate, fetchPrActState } from '@broject/act'
+import { checkHistory, evaluateExitGate, fetchPrActState } from '@broject/act'
 import { listMolecules, loadMolecule, nextStep } from '@broject/convoy'
 import { loadBroConfig } from '../plugins.ts'
 import { flag } from './args.ts'
@@ -49,6 +49,8 @@ export interface WatchPrGate {
   /** absent = the exit gate evaluated; present = the probe itself failed */
   ok?: boolean
   blockers?: string[]
+  /** advisory-check alerts (silent reviewers) — never blockers */
+  alerts?: string[]
   error?: string
 }
 
@@ -120,6 +122,9 @@ export function attentionOf(
       attention.push(`PR ${g.link} gate probe failed — ${g.error}`)
     } else if (g.ok === false) {
       attention.push(`PR ${g.link} blocked — ${(g.blockers ?? []).join('; ')}`)
+    }
+    for (const a of g.alerts ?? []) {
+      attention.push(`PR ${g.link} — ${a}`)
     }
   }
   return attention
@@ -212,12 +217,13 @@ async function gateFleetPrs(
       try {
         const state = await fetchPrActState(rev, { repo, pr }, {
           ignoreChecks: act.ignoreChecks,
+          checkHistory: checkHistory(dir),
           maxRounds: act.maxRounds,
           docsPaths: act.docsPaths,
           docsMaxRounds: act.docsMaxRounds,
         })
         const gate = evaluateExitGate(state)
-        return { pr, link, ok: gate.ok, blockers: gate.blockers }
+        return { pr, link, ok: gate.ok, blockers: gate.blockers, alerts: gate.alerts }
       } catch (err) {
         return { pr, link, error: err instanceof Error ? err.message : String(err) }
       }
@@ -359,7 +365,8 @@ function gateVerdict(g: WatchPrGate): string {
   if (g.error !== undefined) {
     return `probe failed — ${g.error}`
   }
-  return g.ok ? 'ok' : `blocked — ${(g.blockers ?? []).join('; ')}`
+  const verdict = g.ok ? 'ok' : `blocked — ${(g.blockers ?? []).join('; ')}`
+  return (g.alerts ?? []).length === 0 ? verdict : `${verdict} +alert: ${g.alerts!.join('; ')}`
 }
 
 function gateLines(gates: WatchGates): string[] {
