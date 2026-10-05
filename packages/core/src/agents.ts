@@ -71,7 +71,7 @@ function parseResetAt(text: string, now: number): string | undefined {
     }
   }
   const iso =
-    /(?:resets?|resetting|try again|retry|until|available)\s*(?:at)?\s*:?\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)/i.exec(
+    /(?:resets?|resetting|try again|retry|until|available)\b[^\d\n]{0,32}?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)/i.exec(
       text
     )
   if (iso !== null) {
