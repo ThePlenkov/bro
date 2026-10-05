@@ -177,7 +177,9 @@ describe('bro agents status', () => {
     try {
       const r = await agents(['status'])
       assert.equal(r.code, 0)
-      assert.match(r.out[0]!, /backend\s+supervisor\s+agent/)
+      // the fleet line heads the table — empty registry, default cap 3
+      assert.match(r.out[0]!, /fleet: 0\/3 agent slots occupied/)
+      assert.match(r.out.join('\n'), /backend\s+supervisor\s+agent/)
       assert.match(r.out.join('\n'), /native\s+none/)
     } finally {
       fx.restore()
@@ -199,6 +201,7 @@ describe('bro agents status', () => {
       })
       const table = await agents(['status'])
       assert.equal(table.code, 0)
+      assert.match(table.out.join('\n'), /fleet: 1\/3 agent slots occupied/)
       assert.match(table.out.join('\n'), /native-aa11\s+fx-1\s+running/)
 
       const detail = await agents(['status', 'native-aa11'])
@@ -219,10 +222,12 @@ describe('bro agents status', () => {
       const r = await agents(['status', '--json'])
       assert.equal(r.code, 0)
       const doc = JSON.parse(r.out.join('\n')) as {
+        occupancy: { occupied: number; maxConcurrent: number }
         backends: { name: string; capabilities: { supervisor: string } }[]
       }
       assert.equal(doc.backends[0]!.name, 'native')
       assert.equal(doc.backends[0]!.capabilities.supervisor, 'none')
+      assert.deepEqual(doc.occupancy, { occupied: 0, maxConcurrent: 3 })
 
       const miss = await agents(['status', 'native-nope'])
       assert.equal(miss.code, 1)

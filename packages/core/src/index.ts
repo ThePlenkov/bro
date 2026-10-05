@@ -29,6 +29,7 @@ export {
   DEFAULT_CONFIG,
   DEFAULT_GLOBAL_BEADS_DIR,
   defineConfig,
+  fleetSection,
   loadConfig,
   PERSONALITIES,
   probeConfigFile,

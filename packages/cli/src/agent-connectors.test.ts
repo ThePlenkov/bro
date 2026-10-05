@@ -363,6 +363,52 @@ function connectorContract(b: BackendCase): void {
     }
   })
 
+  test('the fleet cap refuses a spawn at maxConcurrent — names cap and occupancy', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ])
+    try {
+      const env = { ...f.env, fleet: { maxConcurrent: 1 } }
+      const c = b.make({ dir: f.main }, env)
+      const first = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+      // a second step's spawn hits the cap — the refusal names both numbers
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)')),
+        /fleet cap reached — 1\/1 agent slots occupied.*fx-2/
+      )
+      // the refused spawn left no claim and no registry entry
+      assert.equal(f.dbRows().find((r) => r.id === 'fx-2')!.status, 'open')
+      assert.equal(readAgentRegistry(f.main)['fx-2'], undefined)
+      // a dead worker frees its slot — the same spawn now lands
+      kill(first)
+      await until(() => !pidAlive(first.pid!))
+      const second = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)'))
+      assert.equal(second.state, 'running')
+      await c.stop(second.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('fleet.maxConcurrent 0 means uncapped', async () => {
+    const rows = Array.from({ length: 4 }, (_, i) => ({ id: `fx-${i + 1}`, status: 'open' }))
+    const f = fx(rows)
+    try {
+      const c = b.make({ dir: f.main }, { ...f.env, fleet: { maxConcurrent: 0 } })
+      // one over the default cap — proof the knob, not the default, drives
+      for (const r of rows) {
+        const info = await c.spawn(
+          SPEC(f.main, f.beadsDir, String(r.id), 'setTimeout(() => {}, 30000)')
+        )
+        assert.equal(info.state, 'running')
+        await c.stop(info.id)
+      }
+    } finally {
+      cleanup(f)
+    }
+  })
+
   test('a foreign claim (no registry entry) refuses spawn', async () => {
     const f = fx([{ id: 'fx-1', status: 'in_progress', assignee: 'human' }])
     try {
@@ -573,6 +619,30 @@ describe('tmux connector', () => {
         typeof entry.pid === 'number' ? (procStat(entry.pid)?.start ?? null) : null
       )
     },
+  })
+
+  test('a live native agent counts against tmux spawns — the cap is fleet-wide', async () => {
+    const f = fixture(
+      [
+        { id: 'fx-1', status: 'open' },
+        { id: 'fx-2', status: 'open' },
+      ],
+      undefined,
+      { tmux: true }
+    )
+    try {
+      const env = { ...f.env, fleet: { maxConcurrent: 1 } }
+      const n = makeNativeConnector({ dir: f.main }, env)
+      const first = await n.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+      const t = makeTmuxConnector({ dir: f.main }, env)
+      await assert.rejects(
+        t.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)')),
+        /fleet cap reached — 1\/1 agent slots occupied/
+      )
+      await n.stop(first.id)
+    } finally {
+      cleanup(f)
+    }
   })
 
   test('a failing tmux binary degrades list() and refuses spawn', async () => {

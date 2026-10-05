@@ -29,6 +29,7 @@ import {
   agentsSection,
   bdActor,
   claimStep,
+  DEFAULT_CONFIG,
   gitTry,
   loadConfig,
   mintAgentId,
@@ -57,6 +58,9 @@ export interface AgentConnectorEnv {
   /** Facade → connector precedence — `connectors.agents` selects here. */
   connectors: Record<string, string>
   loop?: LoopConfig
+  /** Fleet cap — the config's `fleet` section. Absent in hand-built
+   *  envs → the DEFAULT_CONFIG value applies (fleetCapOf). */
+  fleet?: { maxConcurrent: number }
 }
 
 export type AgentConnectorFactory = (
@@ -139,8 +143,34 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
     agents?: Record<string, Record<string, unknown>>
     connectors?: Record<string, string>
     loop?: LoopConfig
+    // core section — applySections always resolves it on a successful
+    // load; the `?` covers only a loadConfig shape that predates it
+    fleet?: { maxConcurrent: number }
   }
-  return { agents: cfg.agents ?? {}, connectors: cfg.connectors ?? {}, loop: cfg.loop }
+  return {
+    agents: cfg.agents ?? {},
+    connectors: cfg.connectors ?? {},
+    loop: cfg.loop,
+    fleet: cfg.fleet,
+  }
+}
+
+/** The fleet ceiling a spawn must fit under — `fleet.maxConcurrent`
+ *  from the resolved config, the DEFAULT_CONFIG value when the env was
+ *  hand-built (tests, embedded callers). 0 disables the cap. */
+export function fleetCapOf(env: AgentConnectorEnv): number {
+  return env.fleet?.maxConcurrent ?? DEFAULT_CONFIG.fleet.maxConcurrent
+}
+
+/** Agent states that hold a fleet slot — 'spawned' (registered,
+ *  unverified) counts: a maybe-starting worker is budget already
+ *  committed, the same admission semantics the cap enforces. */
+const OCCUPYING_STATES: ReadonlySet<AgentState> = new Set(['running', 'spawned'])
+
+/** Slots in use across one or more backend agent lists — the N in the
+ *  `fleet: N/M` surfaces and the count the cap compares against. */
+export function occupiedSlots(agents: AgentInfo[]): number {
+  return agents.filter((a) => OCCUPYING_STATES.has(a.state)).length
 }
 
 /** Pick the serving backend: explicit --connector → connectors.agents →
@@ -407,6 +437,75 @@ const agentEnvPins = (spec: SpawnSpec, agentId: string, promptFile: string): [st
   ['BRO_PROMPT_FILE', promptFile],
 ]
 
+/** How many fleet slots a registry occupies — the cap counts ACROSS
+ *  backends (the account's inference budget doesn't care which runtime
+ *  burns it). An entry occupies until it is proven dead; every
+ *  unverifiable probe keeps the slot — a maybe-live agent is a
+ *  maybe-burning worker, and the cap exists to not overshoot an
+ *  invisible budget. `gc sessions` resolves lazily: no gascity entries
+ *  means no `gc session list` round-trip. */
+export function fleetOccupancy(
+  dir: string,
+  home: string | null,
+  registry: Record<string, AgentRegistryEntry>,
+  env: AgentConnectorEnv
+): number {
+  let gc: { sessions?: GcSession[]; err?: string } | undefined
+  const gcSessions = (city: string): { sessions?: GcSession[]; err?: string } =>
+    (gc ??= listGcSessions(city))
+  let occupied = 0
+  for (const [molStep, entry] of Object.entries(registry)) {
+    switch (entry.backend) {
+      case 'native':
+        // nativeState also harvests recorded death and retires stale
+        // markers — the same side effects list() has on a dead entry
+        if (nativeState(dir, home, molStep, entry) === 'running') {
+          occupied++
+        }
+        break
+      case 'tmux': {
+        const socket =
+          typeof env.agents['tmux']?.socket === 'string' ? env.agents['tmux'].socket : 'bro'
+        const name = tmuxSessionName(entry)
+        // a dead session frees the slot; running AND inconclusive
+        // ('unknown') both occupy — same honesty rule as the spawn dedup
+        if (name !== undefined && tmuxProbe(socket, name).live !== 'dead') {
+          occupied++
+        }
+        break
+      }
+      case 'gascity': {
+        const city = gcConfigDir(dir, env)
+        const sessions = city === null ? undefined : gcSessions(city).sessions
+        if (sessions === undefined) {
+          occupied++ // city unverifiable — the session may still be live
+          break
+        }
+        const s = gcSessionFor(entry, molStep, sessions)
+        if (s === undefined) {
+          // absent from the listing — dead only when the supervisor can
+          // verify the fleet (same rule gascity's list() applies)
+          if (gcSupervisorRunning() !== true) {
+            occupied++
+          }
+          break
+        }
+        if (gcState(s) === 'running' || gcState(s) === 'spawned') {
+          occupied++
+        }
+        break
+      }
+      default:
+        // a backend this build doesn't know — no probe exists. Recorded
+        // death frees the slot; anything else may still be a live worker
+        if (entry.stopped !== true && entry.exitStatus === undefined) {
+          occupied++
+        }
+    }
+  }
+  return occupied
+}
+
 /** The shared spawn prologue every built-in backend runs under the
  *  registry lock — dedup across the two state planes (registry liveness
  *  + beads claim), the claim/rebind, and the shared-dir artifacts
@@ -434,6 +533,12 @@ function prepareSpawn(
      *  work_query picks up in_progress work assigned to the session).
      *  Also counts as "our own claim" in the rebind guard. */
     claimAs?: string
+    /** Fleet admission — `max` is fleetCapOf(env) (0 disables the
+     *  check). Counted under the registry lock, after dedup and the
+     *  claim guards, before any write: a spawn that would overshoot
+     *  the cap refuses while OTHER live entries fill it (a respawn's
+     *  own dead entry holds no slot). */
+    cap?: { max: number; env: AgentConnectorEnv }
   }
 ): { agentId: string; promptFile: string; log: string; exitFile: string } {
   const registry = readAgentRegistry(dir)
@@ -470,6 +575,19 @@ function prepareSpawn(
     throw new SpawnError(
       `${spec.molStep} is claimed by ${step?.assignee ?? '?'} — rebind only takes our own claim`
     )
+  }
+  // fleet cap — the count rides the same critical section as the write,
+  // so two racing spawns can't both see headroom. A refusal names the
+  // cap and the occupancy, never fails silently — and lands before the
+  // registry write + claim so it leaves no half-spawned state
+  if (opts.cap !== undefined && opts.cap.max > 0) {
+    const occupied = fleetOccupancy(dir, home, registry, opts.cap.env)
+    if (occupied >= opts.cap.max) {
+      throw new SpawnError(
+        `fleet cap reached — ${occupied}/${opts.cap.max} agent slots occupied ` +
+          `(fleet.maxConcurrent in bro.config) — spawn of ${spec.molStep} refused`
+      )
+    }
   }
   // a reused id must stay filename-safe — a tampered entry gets a fresh
   // mint, not a path escape into <home>/
@@ -665,6 +783,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       return withAgentRegistryLock(dir, () => {
         const { agentId, promptFile, log, exitFile } = prepareSpawn(dir, home, 'native', spec, {
           isLive: (e) => nativeState(dir, home, spec.molStep, e) === 'running',
+          cap: { max: fleetCapOf(env), env },
         })
         const fd = openSync(log, 'a')
         let spawned: AgentRegistryEntry
@@ -983,6 +1102,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           },
           liveDetail: (e) => `session ${tmuxSessionName(e) ?? '?'}`,
           entry: (id) => ({ session: `bro-${id}` }),
+          cap: { max: fleetCapOf(env), env },
         })
         const session = `bro-${agentId}`
         // a leftover session with our name (crash between entry and
@@ -1624,6 +1744,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
             `session ${typeof e.sessionId === 'string' ? e.sessionId : spec.molStep}`,
           entry: () => ({ sessionId: undefined }),
           claimAs: spec.molStep,
+          cap: { max: fleetCapOf(env), env },
         })
         let sessionId: string | undefined
         try {

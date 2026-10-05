@@ -39,7 +39,9 @@ import { beadsDir } from '@broject/convoy'
 import {
   agentPromptPath,
   eachAgentConnector,
+  fleetCapOf,
   loadAgentEnv,
+  occupiedSlots,
   resolveAgentConnector,
   type AgentConnectorEnv,
 } from '../agent-connectors.ts'
@@ -141,7 +143,30 @@ export async function findAgent(
 
 // --- status -------------------------------------------------------------------
 
-function printStatusTable(backends: AgentBackendPlane[]): void {
+/** Fleet slot accounting the table and --json both surface — the cap
+ *  (0 = uncapped) plus how many slots `list()` saw occupied. A degraded
+ *  backend's share is uncounted; its warning shows right after. */
+export interface FleetOccupancy {
+  occupied: number
+  maxConcurrent: number
+}
+
+function occupancyOf(backends: AgentBackendPlane[], env: AgentConnectorEnv): FleetOccupancy {
+  return {
+    occupied: occupiedSlots(backends.flatMap((b) => b.agents)),
+    maxConcurrent: fleetCapOf(env),
+  }
+}
+
+/** `fleet: 2/3 slots occupied` — `uncapped` instead of the ceiling when
+ *  the config disables it. */
+export function occupancyLine(o: FleetOccupancy): string {
+  const cap = o.maxConcurrent > 0 ? `/${o.maxConcurrent}` : ''
+  return `fleet: ${o.occupied}${cap} agent slots occupied${o.maxConcurrent > 0 ? '' : ' (uncapped)'}`
+}
+
+function printStatusTable(backends: AgentBackendPlane[], occupancy: FleetOccupancy): void {
+  console.log(occupancyLine(occupancy))
   const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'pid', 'worktree']
   const rows = backends.flatMap(({ conn, agents }) => {
     const sup = conn.capabilities().supervisor
@@ -226,6 +251,7 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
     console.log(
       JSON.stringify(
         {
+          occupancy: occupancyOf(backends, env),
           backends: backends.map(({ conn, agents, degraded }) => ({
             name: conn.name,
             capabilities: conn.capabilities(),
@@ -239,7 +265,7 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
     )
     return
   }
-  printStatusTable(backends)
+  printStatusTable(backends, occupancyOf(backends, env))
 }
 
 // --- up / down ------------------------------------------------------------------

@@ -25,7 +25,14 @@
 import { basename } from 'node:path'
 import { git, gitTry, reviewHost, type AgentInfo, type ReviewFacade } from '@broject/core'
 import { listMolecules, loadMolecule, stepsOf, type ConvoyStep } from '@broject/convoy'
-import { eachAgentConnector, loadAgentEnv } from '../agent-connectors.ts'
+import {
+  eachAgentConnector,
+  fleetCapOf,
+  loadAgentEnv,
+  occupiedSlots,
+  type AgentConnectorEnv,
+} from '../agent-connectors.ts'
+import { occupancyLine, type FleetOccupancy } from './agents.ts'
 import { flag } from './args.ts'
 import { parseWorktreePorcelain, worktreePathFor, type WorktreeInfo } from './work.ts'
 
@@ -54,7 +61,10 @@ export interface FleetRow {
  *  failure of the whole view. Two backends reporting the same step is a
  *  `conflict`: registry order decides (same precedence as connector
  *  resolution) and the loser is reported, not silently overwritten. */
-export async function collectAgents(dir: string): Promise<{
+export async function collectAgents(
+  dir: string,
+  env: AgentConnectorEnv = loadAgentEnv(dir)
+): Promise<{
   byStep: Map<string, AgentInfo>
   degraded: string[]
   conflicts: string[]
@@ -62,7 +72,6 @@ export async function collectAgents(dir: string): Promise<{
   const byStep = new Map<string, AgentInfo>()
   const degraded: string[] = []
   const conflicts: string[] = []
-  const env = loadAgentEnv(dir)
   for (const conn of eachAgentConnector({ dir }, env, (name, err) => {
     degraded.push(`${name}: ${err instanceof Error ? err.message : String(err)}`)
   })) {
@@ -246,10 +255,15 @@ export interface FleetPayload {
   degraded: string[]
   conflicts: string[]
   prErrors: string[]
+  /** Fleet slot accounting — the cap plus live occupancy across
+   *  backends (degraded backends' share is uncounted; their warnings
+   *  show alongside). */
+  occupancy: FleetOccupancy
 }
 
 async function collectFleet(dir: string): Promise<FleetPayload> {
-  const { byStep, degraded, conflicts } = await collectAgents(dir)
+  const env = loadAgentEnv(dir)
+  const { byStep, degraded, conflicts } = await collectAgents(dir, env)
 
   const worktrees = (() => {
     try {
@@ -272,7 +286,16 @@ async function collectFleet(dir: string): Promise<FleetPayload> {
 
   const prErrors: string[] = []
   const rows = fleetRows(byStep, degraded.length > 0, rev, repo, worktrees, prErrors)
-  return { rows, degraded, conflicts, prErrors }
+  return {
+    rows,
+    degraded,
+    conflicts,
+    prErrors,
+    occupancy: {
+      occupied: occupiedSlots([...byStep.values()]),
+      maxConcurrent: fleetCapOf(env),
+    },
+  }
 }
 
 export interface FleetArgs {
@@ -331,6 +354,7 @@ const CLEAR_REST = '\u001b[J'
 export function liveFrame(payload: FleetPayload, ts: Date, everySec: number): string {
   const lines = [
     `bro fleet — live · ${ts.toISOString()} · every ${everySec}s`,
+    occupancyLine(payload.occupancy),
     '',
     ...(payload.rows.length === 0
       ? ['no open molecules — nothing in the fleet']
@@ -488,12 +512,13 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
     return
   }
 
-  const { rows, degraded, conflicts, prErrors } = await collectFleet(dir)
+  const { rows, degraded, conflicts, prErrors, occupancy } = await collectFleet(dir)
 
   if (args.json) {
-    console.log(JSON.stringify({ rows, degraded, conflicts, prErrors }, null, 2))
+    console.log(JSON.stringify({ rows, degraded, conflicts, prErrors, occupancy }, null, 2))
     return
   }
+  console.log(occupancyLine(occupancy))
   if (rows.length === 0) {
     console.log('no open molecules — nothing in the fleet')
     return

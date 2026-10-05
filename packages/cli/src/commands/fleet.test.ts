@@ -154,6 +154,7 @@ const payload = (over: Partial<FleetPayload> = {}): FleetPayload => ({
   degraded: [],
   conflicts: [],
   prErrors: [],
+  occupancy: { occupied: 1, maxConcurrent: 3 },
   ...over,
 })
 
