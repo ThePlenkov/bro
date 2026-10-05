@@ -189,10 +189,26 @@ function pickOptBool(
   picked[f] = v
 }
 
-/** The api kind's `models` map → resolved wires, or the fail string.
- *  A model's wire may be written as a bare string ('systemone'), an
- *  object {wire}, or null — null/absent infers: systemone-family ids
- *  get 'systemone', everything else 'openai-compat'. */
+/** One model entry → its wire. A bare string wins; `{wire}` unwraps;
+ *  null/absent infers: systemone-family ids get 'systemone',
+ *  everything else 'openai-compat'. undefined = the declared wire was
+ *  not a known wire name. */
+function resolveModelWire(key: string, v: unknown): ApiWire | undefined {
+  const wire =
+    typeof v === 'string'
+      ? v
+      : typeof v === 'object' && v !== null
+        ? (v as Record<string, unknown>).wire
+        : undefined
+  if (wire === undefined || wire === null) {
+    return isSystemoneFamily(key) ? 'systemone' : 'openai-compat'
+  }
+  return typeof wire === 'string' && (API_WIRES as readonly string[]).includes(wire)
+    ? (wire as ApiWire)
+    : undefined
+}
+
+/** The api kind's `models` map → resolved wires, or the fail string. */
 function parseApiModels(
   raw: unknown
 ): Record<string, ApiWire> | { err: string } {
@@ -205,20 +221,7 @@ function parseApiModels(
     if (key === '') {
       return { err: 'models keys must be non-empty model ids' }
     }
-    const wire =
-      typeof v === 'string'
-        ? v
-        : typeof v === 'object' && v !== null
-          ? (v as Record<string, unknown>).wire
-          : undefined
-    const resolved =
-      wire === undefined || wire === null
-        ? isSystemoneFamily(key)
-          ? 'systemone'
-          : 'openai-compat'
-        : typeof wire === 'string' && (API_WIRES as readonly string[]).includes(wire)
-          ? (wire as ApiWire)
-          : undefined
+    const resolved = resolveModelWire(key, v)
     if (resolved === undefined) {
       return { err: `models.${key}.wire must be one of ${API_WIRES.join('|')}` }
     }
@@ -235,6 +238,34 @@ function parseApiModels(
     return { err: 'models must name at least one served model' }
   }
   return out
+}
+
+/** api-kind extras: the models map is required; the pinned default
+ *  must sit in the allowlist; a systemone wire needs a key source —
+ *  checked here, while the error still names the config field. */
+function parseApiEntry(
+  picked: Record<string, string | boolean>,
+  rawModels: unknown
+): Record<string, ApiWire> | { err: string } {
+  const models = parseApiModels(rawModels)
+  if ('err' in models) {
+    return models
+  }
+  if (typeof picked.model === 'string' && !Object.hasOwn(models, picked.model)) {
+    return { err: `model '${picked.model}' is not in the models allowlist` }
+  }
+  // the systemone wire always sends Bearer — an entry resolving a
+  // model to it with no key source parses but fails every call
+  if (
+    Object.values(models).includes('systemone') &&
+    picked.apiKeyEnv === undefined &&
+    picked.apiKeyCommand === undefined
+  ) {
+    return {
+      err: 'serves a systemone-wire model with no key source — set apiKeyEnv or apiKeyCommand',
+    }
+  }
+  return models
 }
 
 export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | null {
@@ -274,26 +305,11 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
   }
   let models: Record<string, ApiWire> | undefined
   if (type === 'api') {
-    const parsed = parseApiModels(o.models)
+    const parsed = parseApiEntry(picked, o.models)
     if ('err' in parsed) {
       return fail(parsed.err)
     }
     models = parsed
-    if (typeof picked.model === 'string' && !Object.hasOwn(models, picked.model)) {
-      return fail(`model '${picked.model}' is not in the models allowlist`)
-    }
-    // the systemone wire always sends Bearer — an entry resolving a
-    // model to it with no key source parses but fails every call;
-    // reject here, while the error still names the config field
-    if (
-      Object.values(models).includes('systemone') &&
-      picked.apiKeyEnv === undefined &&
-      picked.apiKeyCommand === undefined
-    ) {
-      return fail(
-        'serves a systemone-wire model with no key source — set apiKeyEnv or apiKeyCommand'
-      )
-    }
   }
   if (typeof picked.apiKeyEnv === 'string' && !isEnvName(picked.apiKeyEnv)) {
     return fail('apiKeyEnv must NAME an env var (SCREAMING_SNAKE) — config never holds a key value')
