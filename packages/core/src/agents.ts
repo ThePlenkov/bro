@@ -133,6 +133,25 @@ export function classifyExitCause(
   return { cause: 'crash' }
 }
 
+/** The resolved worker payload the provider layer computed for one
+ *  spawn (spec bro-5hx1.1). Opaque to the backend: when present, run
+ *  IT instead of the connector's own command template.
+ *    - `template`: a command string with the existing `{promptFile}`
+ *      contract — cli providers and anything else that wraps an agent
+ *      CLI directly.
+ *    - `argv`: an executable argv — the acp driver. Backends MUST NOT
+ *      string-concat it into `sh -c`; the prepared prompt file is
+ *      appended as the LAST element. */
+export type SpawnWorker =
+  | { kind: 'template'; command: string }
+  | {
+      kind: 'argv'
+      argv: string[]
+      /** Display/agent-cli name for pins and trailers — the wrapped
+       *  agent's own cli name, not the driver's. */
+      cliName?: string
+    }
+
 /** What a backend needs to start a worker. `beadsDir` is the resolved
  *  shared-store identity — connectors MUST claim there, never in a
  *  backend-private store. */
@@ -146,6 +165,14 @@ export interface SpawnSpec {
   /** Rendered instructions (convoy formula text). */
   prompt: string
   env?: Record<string, string>
+  /** Provider provenance — the configured `providers.<name>` this
+   *  spawn resolved to. Recorded into the registry and pinned into
+   *  the worker's env; never set for the legacy template path. */
+  provider?: string
+  /** The effective model (spawn flag > profile > provider entry). */
+  model?: string
+  /** Provider-resolved spawn payload — see SpawnWorker. */
+  worker?: SpawnWorker
 }
 
 export interface AgentInfo {
@@ -166,6 +193,11 @@ export interface AgentInfo {
   cause?: AgentCause
   /** Provider-reported reset (ISO) riding a rate_limited/quota cause. */
   resetAt?: string
+  /** Provider provenance — which `providers.<name>` ran this agent,
+   *  and the effective model the worker reported or was pinned to.
+   *  Absent on legacy template spawns. */
+  provider?: string
+  model?: string
   worktree?: string
   log?: string
 }
@@ -240,11 +272,18 @@ export class AgentNotFound extends Error {
 // --- agentId registry ----------------------------------------------------------
 
 /** One agents.json entry — molStep → handle. Connector-private fields
- *  (pid, exitStatus, log, worktree, stopped) ride along untyped. */
+ *  (pid, exitStatus, log, worktree, stopped) ride along untyped.
+ *  `provider`/`model`/`acpSessionId` are typed because they carry the
+ *  fleet's provenance contract (spec bro-5hx1.1), not a backend's
+ *  bookkeeping — `acpSessionId` is written by the acp driver AFTER
+ *  session/new, proving which protocol session ran the prompt. */
 export interface AgentRegistryEntry {
   agentId: string
   backend: string
   spawnedAt: string
+  provider?: string
+  model?: string
+  acpSessionId?: string
   [key: string]: unknown
 }
 

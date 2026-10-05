@@ -14,7 +14,11 @@ import { homedir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { gitTry } from './git.ts'
-import { parseProviderEntry, type ProviderEntry } from './providers.ts'
+import {
+  parseProviderEntry,
+  type FleetProfile,
+  type ProviderEntry,
+} from './providers.ts'
 
 export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const
 export type StoreBackend = (typeof STORE_BACKENDS)[number]
@@ -287,13 +291,74 @@ export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = (raw) =
   }
 }
 
+const strField = (v: unknown): string | undefined =>
+  typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined
+
+/** fleet.profiles normalization — an entry is a {provider, model?,
+ *  backend?, autoApprove?} preset (spec bro-5hx1.1). A missing
+ *  provider drops the whole entry with a warning; a bad optional
+ *  field drops just the field, providers.ts' convention. */
+function fleetProfiles(raw: unknown): Record<string, FleetProfile> {
+  if (raw === undefined) {
+    return {}
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    console.error('bro.config: fleet.profiles must be an object — section dropped')
+    return {}
+  }
+  const out: Record<string, FleetProfile> = {}
+  for (const [name, v] of Object.entries(raw)) {
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+      console.error(`bro.config: fleet.profiles.${name} must be an object — entry dropped`)
+      continue
+    }
+    const p = v as Record<string, unknown>
+    const provider = strField(p.provider)
+    if (provider === undefined) {
+      console.error(`bro.config: fleet.profiles.${name} requires "provider" — entry dropped`)
+      continue
+    }
+    const prof: FleetProfile = { provider }
+    for (const f of ['model', 'backend'] as const) {
+      const raw2 = p[f]
+      if (raw2 === undefined) {
+        continue
+      }
+      const s = strField(raw2)
+      if (s === undefined) {
+        console.error(
+          `bro.config: fleet.profiles.${name}.${f} must be a non-empty string — field dropped`
+        )
+        continue
+      }
+      prof[f] = s
+    }
+    if (p.autoApprove !== undefined) {
+      if (typeof p.autoApprove === 'boolean') {
+        prof.autoApprove = p.autoApprove
+      } else {
+        console.error(
+          `bro.config: fleet.profiles.${name}.autoApprove must be a boolean — field dropped`
+        )
+      }
+    }
+    out[name] = prof
+  }
+  return out
+}
+
 /** bro.config.json `fleet` section — the live-agent ceiling the spawn
- *  prologue enforces. `maxConcurrent` counts registry agents across ALL
+ *  prologue enforces plus the named spawn presets (`profiles`, spec
+ *  bro-5hx1.1). `maxConcurrent` counts registry agents across ALL
  *  backends (the budget wall is per-account, not per-runtime); 0
  *  disables the cap, matching act.maxRounds' convention. */
-export const fleetSection: ConfigSection<{ maxConcurrent: number }> = (raw) => {
+export const fleetSection: ConfigSection<{
+  maxConcurrent: number
+  profiles: Record<string, FleetProfile>
+}> = (raw) => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     maxConcurrent?: unknown
+    profiles?: unknown
   }
   return {
     maxConcurrent:
@@ -302,6 +367,7 @@ export const fleetSection: ConfigSection<{ maxConcurrent: number }> = (raw) => {
       obj.maxConcurrent >= 0
         ? obj.maxConcurrent
         : DEFAULT_CONFIG.fleet.maxConcurrent,
+    profiles: fleetProfiles(obj.profiles),
   }
 }
 
@@ -376,10 +442,11 @@ export interface BroConfig {
    *  context; `gate` also lets the stop gate block once. `dir` holds
    *  `specs/<id>.md` files; a `spec:` link in the description counts. */
   sdd: { mode: SddMode; dir: string }
-  /** Fleet size admission — the cap `prepareSpawn` enforces on every
-   *  backend's spawn. `maxConcurrent` counts live registry agents
-   *  across all backends; 0 means uncapped. Default 3. */
-  fleet: { maxConcurrent: number }
+  /** Fleet knobs. `maxConcurrent` is the cap `prepareSpawn` enforces
+   *  on every backend's spawn — counts live registry agents across all
+   *  backends; 0 means uncapped. Default 3. `profiles` holds the named
+   *  spawn presets `bro agents up --profile` resolves (spec bro-5hx1.1). */
+  fleet: { maxConcurrent: number; profiles: Record<string, FleetProfile> }
   /** External plugin specifiers — relative paths or package names the CLI
    *  resolves from the repo and imports at startup. Each module's default
    *  export must be a BroPlugin (or an array of them). */
@@ -405,7 +472,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   connectors: {},
   providers: {},
   sdd: { mode: 'off', dir: 'specs' },
-  fleet: { maxConcurrent: 3 },
+  fleet: { maxConcurrent: 3, profiles: {} },
   plugins: [],
 }
 

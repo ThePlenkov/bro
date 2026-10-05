@@ -19,6 +19,12 @@
  *                       provider's reset — `down` clears it.
  *                       This is the action behind fleet's
  *                       `lost — respawn?` decision surface.
+ *                       Provider vocabulary (spec bro-5hx1.1):
+ *                       --provider/--model/--profile/--auto-approve
+ *                       resolve through fleet.profiles →
+ *                       agents.<backend>.provider → the legacy
+ *                       command template, pinning BRO_AGENT_PROVIDER/
+ *                       BRO_AGENT_MODEL provenance onto the worker.
  *   bro agents down [<id|step>] [--connector <name>]
  *                       no arg: supervisor down. With a target: stop
  *                       that one agent — idempotent, a gone agent is
@@ -44,8 +50,10 @@ import {
   eachAgentConnector,
   fleetCapOf,
   fleetOccupancyFor,
+  fleetProfileOf,
   loadAgentEnv,
   resolveAgentConnector,
+  resolveSpawnProvider,
   type AgentConnectorEnv,
 } from '../agent-connectors.ts'
 import { flag, positionals } from './args.ts'
@@ -55,6 +63,7 @@ function usage(): never {
   console.error(`usage:
   bro agents status [<id|step>] [--json] [--connector <name>]
   bro agents up [<step>] [--connector <name>] [--worktree <path>] [--prompt-file <file>] [--beads-dir <dir>]
+                [--provider <name>] [--model <m>] [--profile <name>] [--auto-approve]
   bro agents down [<id|step>] [--connector <name>]`)
   process.exit(2)
 }
@@ -231,6 +240,8 @@ function statusDetail(
   console.log(`backend   ${a.backend} (supervisor: ${hit.conn.capabilities().supervisor})`)
   console.log(`step      ${a.molStep}`)
   console.log(`state     ${a.state}`)
+  if (a.provider !== undefined) console.log(`provider  ${a.provider}`)
+  if (a.model !== undefined) console.log(`model     ${a.model}`)
   if (a.cause !== undefined) console.log(`cause     ${a.cause}`)
   if (a.resetAt !== undefined) console.log(`resetAt   ${a.resetAt}`)
   if (a.pid !== undefined) console.log(`pid       ${a.pid}`)
@@ -382,7 +393,11 @@ export class SpawnInputError extends Error {
 
 /** A spawn request — `bro agents up <step>` flags and `bro serve`'s
  *  POST body share this shape. `prompt` is literal text (serve);
- *  `promptFile` is a path (both). */
+ *  `promptFile` is a path (both). The provider vocabulary (spec
+ *  bro-5hx1.1) resolves in one order everywhere: these explicit
+ *  fields → the named fleet.profiles preset (piecewise — an explicit
+ *  provider/model beats the preset's) → agents.<backend>.provider →
+ *  the legacy command template. */
 export interface StepSpawnRequest {
   molStep: string
   connector?: string
@@ -391,15 +406,30 @@ export interface StepSpawnRequest {
   prompt?: string
   beadsDir?: string
   /** Extra env for the spawned process — identity pins (BEADS_DIR,
-   *  BRO_BEAD_ID, BRO_AGENT_ID) still win, so a caller can't redirect
-   *  the claim store or re-badge the worker. */
+   *  BRO_BEAD_ID, BRO_AGENT_ID, BRO_AGENT_PROVIDER/MODEL) still win,
+   *  so a caller can't redirect the claim store, re-badge the worker,
+   *  or forge which provider ran it. */
   env?: Record<string, string>
+  /** A `providers.<name>` entry — the spawn must honor it (spawn-
+   *  surface required) or refuse. */
+  provider?: string
+  /** Model override — beats the profile's and the entry's pin. */
+  model?: string
+  /** A `fleet.profiles.<name>` preset — expands provider/model/backend
+   *  piecewise; `backend` redirects connector resolution only when no
+   *  explicit connector was named. */
+  profile?: string
+  /** acp permission policy override — the driver's
+   *  session/request_permission allow answer. */
+  autoApprove?: boolean
 }
 
 /** The spawn behind `up <step>` and POST /api/v1/agents — resolve the
- *  connector, worktree, prompt, and shared store, then conn.spawn.
- *  Throws on every failure (SpawnError on conflict/refusal) — callers
- *  render; nothing exits here. */
+ *  connector, provider, worktree, prompt, and shared store, then
+ *  conn.spawn. Throws on every failure (SpawnError on conflict/
+ *  refusal) — callers render; nothing exits here. Validation before
+ *  the async resolution chain throws SYNCHRONOUSLY (callers/tests
+ *  rely on it); provider errors arrive as a rejected promise. */
 export function spawnStepAgent(
   dir: string,
   env: AgentConnectorEnv,
@@ -412,14 +442,42 @@ export function spawnStepAgent(
   if (req.prompt?.trim() === '') {
     throw new SpawnInputError('prompt must not be empty')
   }
-  const conn = resolveAgentConnector({ dir }, { connector: req.connector }, env)
+  // --profile expands piecewise BEFORE connector resolution — the
+  // preset's `backend` picks the connector only when --connector was
+  // not named, and its provider/model lose to explicit fields
+  const profile = req.profile === undefined ? undefined : fleetProfileOf(env, req.profile)
+  const conn = resolveAgentConnector(
+    { dir },
+    { connector: req.connector ?? profile?.backend },
+    env
+  )
   const beads = req.beadsDir ?? beadsDir()
   const repoRoot = resolveWorktree(dir, req.molStep, req.worktree, conn.name)
   if (!existsSync(repoRoot)) {
     throw new SpawnInputError(`worktree ${repoRoot} does not exist`)
   }
   const prompt = req.prompt ?? resolvePrompt(dir, beads, req.molStep, req.promptFile, conn.name)
-  return conn.spawn({ molStep: req.molStep, repoRoot, beadsDir: beads, prompt, env: req.env })
+  return resolveSpawnProvider(
+    env,
+    conn.name,
+    {
+      provider: req.provider ?? profile?.provider,
+      model: req.model ?? profile?.model,
+      autoApprove: req.autoApprove ?? profile?.autoApprove,
+    },
+    req.provider !== undefined ? 'flag' : profile === undefined ? 'backend' : 'profile'
+  ).then((pick) =>
+    conn.spawn({
+      molStep: req.molStep,
+      repoRoot,
+      beadsDir: beads,
+      prompt,
+      env: req.env,
+      provider: pick.provider,
+      model: pick.model,
+      worker: pick.worker,
+    })
+  )
 }
 
 /** The stop behind `down <target>` and DELETE /api/v1/agents/<ref>. */
@@ -490,7 +548,18 @@ export async function stopAgent(
 }
 
 async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
-  const pos = positionals(argv, new Set(['--connector', '--worktree', '--prompt-file', '--beads-dir']))
+  const pos = positionals(
+    argv,
+    new Set([
+      '--connector',
+      '--worktree',
+      '--prompt-file',
+      '--beads-dir',
+      '--provider',
+      '--model',
+      '--profile',
+    ])
+  )
   const connectorName = flag(argv, '--connector')
   if (pos.length > 1) {
     usage()
@@ -508,12 +577,19 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
       worktree: flag(argv, '--worktree'),
       promptFile: flag(argv, '--prompt-file'),
       beadsDir: flag(argv, '--beads-dir'),
+      provider: flag(argv, '--provider'),
+      model: flag(argv, '--model'),
+      profile: flag(argv, '--profile'),
+      autoApprove: argv.includes('--auto-approve') ? true : undefined,
     })
   } catch (err) {
     die(err instanceof Error ? err.message : String(err))
   }
   const pid = info.pid === undefined ? '' : ` pid ${info.pid}`
   console.log(`agent ${info.id} ${info.state} for ${molStep} (${info.backend}${pid})`)
+  if (info.provider !== undefined) {
+    console.log(`  provider: ${info.provider}${info.model === undefined ? '' : ` · model ${info.model}`}`)
+  }
   if (info.log !== undefined) {
     console.log(`  log: ${info.log}`)
   }

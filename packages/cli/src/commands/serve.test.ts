@@ -275,7 +275,32 @@ describe('parseSpawnBody', () => {
     const req = parseSpawnBody(
       JSON.stringify({ molStep: 'fx-1', worktree: '/w', prompt: 'p', connector: 'native' })
     )
-    assert.deepEqual(req, { molStep: 'fx-1', worktree: '/w', prompt: 'p', connector: 'native', promptFile: undefined, beadsDir: undefined })
+    assert.deepEqual(req, { molStep: 'fx-1', worktree: '/w', prompt: 'p', connector: 'native', promptFile: undefined, beadsDir: undefined, provider: undefined, model: undefined, profile: undefined, autoApprove: undefined })
+  })
+
+  test('the provider vocabulary rides the body — strings plus boolean autoApprove', () => {
+    const req = parseSpawnBody(
+      JSON.stringify({
+        molStep: 'fx-1',
+        provider: 'kilo',
+        model: 'qwen3-coder',
+        profile: 'cheap',
+        autoApprove: true,
+      })
+    )
+    assert.equal(req.provider, 'kilo')
+    assert.equal(req.model, 'qwen3-coder')
+    assert.equal(req.profile, 'cheap')
+    assert.equal(req.autoApprove, true)
+    // a stringified autoApprove is a type error, not a truthy coercion
+    assert.throws(
+      () => parseSpawnBody(JSON.stringify({ molStep: 'fx-1', autoApprove: 'yes' })),
+      /autoApprove.*boolean/
+    )
+    assert.throws(
+      () => parseSpawnBody(JSON.stringify({ molStep: 'fx-1', provider: 3 })),
+      /provider.*string/
+    )
   })
 
   test('rejects empty, non-JSON, non-object, unknown fields, and non-strings', () => {

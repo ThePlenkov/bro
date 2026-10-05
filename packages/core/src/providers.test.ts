@@ -182,8 +182,29 @@ describe('parseProviderEntry', () => {
       command: '  kilo --acp ',
       profile: 'work',
       apiKeyEnv: 'KILO_KEY',
+      autoApprove: true,
     })
-    assert.deepEqual(e, { type: 'acp', command: 'kilo --acp', profile: 'work', apiKeyEnv: 'KILO_KEY' })
+    assert.deepEqual(e, {
+      type: 'acp',
+      command: 'kilo --acp',
+      profile: 'work',
+      apiKeyEnv: 'KILO_KEY',
+      autoApprove: true,
+    })
+  })
+
+  test('a non-boolean autoApprove drops the field, keeps the entry', () => {
+    const e = parseProviderEntry('p', {
+      type: 'acp',
+      command: 'kilo --acp',
+      autoApprove: 'yes',
+    })
+    assert.deepEqual(e, { type: 'acp', command: 'kilo --acp' })
+  })
+
+  test('autoApprove on a kind without the knob is stripped like any unknown key', () => {
+    const e = parseProviderEntry('p', { type: 'cli', command: 'devin -p', autoApprove: true })
+    assert.deepEqual(e, { type: 'cli', command: 'devin -p' })
   })
 
   test('returns null on non-object and bad type', () => {

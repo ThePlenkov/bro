@@ -45,6 +45,11 @@ export interface FleetRow {
   /** Rendered agent cell — states, `lost — respawn?`, `claimed — <a>`,
    *  `unknown` on a degraded backend read, `—` when nothing holds it. */
   agent: string
+  /** Provider provenance — the providers.<name> + effective model the
+   *  spawn resolved to; absent on legacy template spawns (the column
+   *  says '—' by omission, honestly). */
+  provider?: string
+  model?: string
   worktree?: string
   pr?: string
   /** The PR's number — `pr` is the rendered link; watch feeds the number
@@ -175,6 +180,8 @@ export function fleetRows(
         kind: s.kind,
         state: s.state,
         agent: agentCell(s, agent, issue?.assignee, degradedAny),
+        provider: agent?.provider,
+        model: agent?.model,
         worktree: wt === undefined ? undefined : basename(wt),
         pr: rev === undefined || prNum === undefined ? undefined : rev.prLink(repo, prNum),
         prNum,
@@ -193,6 +200,8 @@ export function fleetTableLines(rows: FleetRow[]): string[] {
     ['step', 'step'],
     ['state', 'state'],
     ['agent', 'agent'],
+    ['provider', 'provider'],
+    ['model', 'model'],
     ['worktree', 'worktree'],
     ['pr', 'pr'],
   ]

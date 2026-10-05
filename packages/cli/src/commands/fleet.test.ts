@@ -296,7 +296,16 @@ describe('fleetRows', () => {
         const seen: string[] = []
         const rev = stubRev([42, 43], seen)
         const byStep = new Map<string, AgentInfo>([
-          ['s-1', { ...agent('lost', 4242), id: 'native-dead1', worktree: main }],
+          [
+            's-1',
+            {
+              ...agent('lost', 4242),
+              id: 'native-dead1',
+              worktree: main,
+              provider: 'kilo',
+              model: 'typesafe/jev-1.13',
+            },
+          ],
         ])
         const prErrors: string[] = []
         const rows = fleetRows(byStep, true, rev, 'o/r', [wt(main)], prErrors)
@@ -305,6 +314,9 @@ describe('fleetRows', () => {
         // the respawn cell survives composition — this is the assertion the
         // review asked for: agentCell's 'lost — respawn?' on a real FleetRow
         assert.equal(r1.agent, 'lost — respawn?')
+        // provenance rides the same row — the table renders it verbatim
+        assert.equal(r1.provider, 'kilo')
+        assert.equal(r1.model, 'typesafe/jev-1.13')
         assert.equal(r1.worktree, basename(main))
         assert.equal(r1.pr, '[#42](https://example.test/o/r/pull/42)')
         assert.equal(r1.prNum, 42)

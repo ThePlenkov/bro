@@ -5,10 +5,12 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   agentRegistryPath,
@@ -27,17 +29,21 @@ import {
 } from '@broject/core'
 import {
   agentConnectorNames,
+  broSpawnArgv,
   budgetLines,
   budgetSnapshot,
   BUDGET_LIMITS,
   eachAgentConnector,
   fleetOccupancy,
+  fleetProfileOf,
   loadAgentEnv,
+  makeGascityConnector,
   makeNativeConnector,
   makeTmuxConnector,
   pidAlive,
   registerAgentConnector,
   resolveAgentConnector,
+  resolveSpawnProvider,
   unregisterAgentConnector,
   type AgentConnectorEnv,
   type BudgetSnapshot,
@@ -1062,5 +1068,278 @@ describe('budgetLines', () => {
     assert.match(lines[0]!, /live\s+0 \(uncapped\) agent slots/)
     assert.match(lines.join('\n'), /resets\s+a rate_limited til t1 \(holding\)/)
     assert.match(lines.join('\n'), /causes\s+b: crash/)
+  })
+})
+
+// --- provider resolution (spec bro-5hx1.1) -------------------------------------
+
+describe('resolveSpawnProvider', () => {
+  const providers = {
+    kilo: { type: 'acp', command: 'kilo --acp', model: 'jev' },
+    local: { type: 'cli', command: 'devin -p', model: 'devin-1' },
+    typesafe: { type: 'systemone', apiKeyEnv: 'K', model: 'jev' },
+    'backend-p': { type: 'cli', command: 'backend-cli {promptFile}' },
+  } as const
+  const env: AgentConnectorEnv = {
+    agents: { native: { command: 'node {promptFile}', provider: 'backend-p' } },
+    connectors: {},
+    providers,
+  }
+
+  test('no provider named anywhere → legacy template, a model pin only', async () => {
+    const bare: AgentConnectorEnv = { agents: {}, connectors: {} }
+    assert.deepEqual(await resolveSpawnProvider(bare, 'native', {}), { model: undefined })
+    assert.deepEqual(await resolveSpawnProvider(bare, 'native', { model: 'm1' }), { model: 'm1' })
+  })
+
+  test('agents.<backend>.provider names the entry when nothing explicit', async () => {
+    const pick = await resolveSpawnProvider(env, 'native', {})
+    assert.equal(pick.provider, 'backend-p')
+    assert.deepEqual(pick.worker, { kind: 'template', command: 'backend-cli {promptFile}' })
+  })
+
+  test('an explicit provider beats the backend knob; unknown names classify by origin', async () => {
+    const pick = await resolveSpawnProvider(env, 'native', { provider: 'local' }, 'flag')
+    assert.equal(pick.provider, 'local')
+    // a flag's typo is caller input
+    await assert.rejects(
+      resolveSpawnProvider(env, 'native', { provider: 'nope' }, 'flag'),
+      (e: unknown) =>
+        e instanceof SpawnError && e.kind === 'input' && /providers\.nope/.test(e.message)
+    )
+    // the same name written in config is a config error
+    await assert.rejects(
+      resolveSpawnProvider(
+        { ...env, agents: { native: { provider: 'nope' } } },
+        'native',
+        {}
+      ),
+      (e: unknown) => e instanceof SpawnError && e.kind === 'config'
+    )
+  })
+
+  test('a non-spawnable kind is a surface error — even when a flag named it', async () => {
+    await assert.rejects(
+      resolveSpawnProvider(env, 'native', { provider: 'typesafe' }, 'flag'),
+      (e: unknown) =>
+        e instanceof SpawnError &&
+        e.kind === 'config' &&
+        /providers\.typesafe \(type 'systemone'\) has no spawn surface/.test(e.message)
+    )
+  })
+
+  test('cli resolves to a template worker carrying the entry command', async () => {
+    const pick = await resolveSpawnProvider(env, 'native', { provider: 'local' }, 'flag')
+    assert.deepEqual(pick.worker, { kind: 'template', command: 'devin -p' })
+    assert.equal(pick.model, 'devin-1')
+  })
+
+  test('acp resolves to an argv worker — `bro acp-worker` slots, never a shell string', async () => {
+    const pick = await resolveSpawnProvider(
+      env,
+      'native',
+      { provider: 'kilo', model: 'qwen3-coder', autoApprove: true },
+      'flag'
+    )
+    assert.equal(pick.provider, 'kilo')
+    assert.equal(pick.model, 'qwen3-coder')
+    assert.equal(pick.worker?.kind, 'argv')
+    const argv = pick.worker?.kind === 'argv' ? pick.worker.argv : []
+    const i = argv.indexOf('acp-worker')
+    assert.ok(i > 0, `argv: ${argv.join(' ')}`)
+    assert.deepEqual(argv.slice(i + 1), [
+      '--command',
+      'kilo --acp',
+      '--model',
+      'qwen3-coder',
+      '--auto-approve',
+    ])
+    assert.equal(pick.worker?.kind === 'argv' ? pick.worker.cliName : undefined, 'kilo')
+  })
+
+  test('model precedence — explicit pin > profile merge > entry pin', async () => {
+    const pinned = await resolveSpawnProvider(env, 'native', { provider: 'kilo' }, 'flag')
+    assert.equal(pinned.model, 'jev') // the entry's own pin
+    const over = await resolveSpawnProvider(
+      env,
+      'native',
+      { provider: 'kilo', model: 'm2' },
+      'flag'
+    )
+    assert.equal(over.model, 'm2')
+  })
+})
+
+describe('fleetProfileOf', () => {
+  const env: AgentConnectorEnv = {
+    agents: {},
+    connectors: {},
+    fleet: { maxConcurrent: 3, profiles: { cheap: { provider: 'kilo' } } },
+  }
+
+  test('a configured preset returns; a missing name is an input error naming the key', () => {
+    assert.deepEqual(fleetProfileOf(env, 'cheap'), { provider: 'kilo' })
+    assert.throws(
+      () => fleetProfileOf(env, 'nope'),
+      (e: unknown) =>
+        e instanceof SpawnError &&
+        e.kind === 'input' &&
+        /fleet\.profiles\.nope is not configured/.test(e.message)
+    )
+  })
+})
+
+describe('broSpawnArgv', () => {
+  test('bro on PATH wins; an empty PATH falls back to the npx shim', () => {
+    assert.deepEqual(broSpawnArgv({ PATH: '' }), ['npx', '-y', '@broject/bro@0'])
+    // whatever dir holds this test's node binary doubles as a fake bin dir
+    const binDir = join(process.execPath, '..')
+    assert.deepEqual(broSpawnArgv({ PATH: binDir }), ['npx', '-y', '@broject/bro@0'])
+    // drop a `bro` shim next to it — PATH-first picks the plain name
+    const dir = mkdtempSync(join(tmpdir(), 'bro-bin-'))
+    try {
+      writeFileSync(join(dir, 'bro'), '#!/bin/sh\n')
+      chmodSync(join(dir, 'bro'), 0o755)
+      assert.deepEqual(broSpawnArgv({ PATH: dir }), ['bro'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+// Provider-driven spawns through the real backends — env pins, registry
+// provenance, and the worker payloads (spec bro-5hx1.1).
+describe('provider-resolved spawns', () => {
+  test('native: provider/model pin env + registry + info; spec.env cannot forge them', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const env = {
+        ...f.env,
+        providers: { local: { type: 'cli', command: 'node {promptFile}' } },
+      } as AgentConnectorEnv
+      const pick = await resolveSpawnProvider(
+        env,
+        'native',
+        { provider: 'local', model: 'm1' },
+        'flag'
+      )
+      const c = makeNativeConnector({ dir: f.main }, env)
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', "require('fs').writeFileSync('env.out', [process.env.BRO_AGENT_PROVIDER, process.env.BRO_AGENT_MODEL].join('|'))"),
+        provider: pick.provider,
+        model: pick.model,
+        worker: pick.worker,
+        env: { BRO_AGENT_PROVIDER: 'forged', BRO_AGENT_MODEL: 'forged' },
+      })
+      await until(() => existsSync(join(f.main, 'env.out')))
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), 'local|m1')
+      const entry = readAgentRegistry(f.main)['fx-1']!
+      assert.equal(entry.provider, 'local')
+      assert.equal(entry.model, 'm1')
+      assert.equal(info.provider, 'local')
+      assert.equal(info.model, 'm1')
+      await c.stop(info.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('native: an argv worker execs slots verbatim — promptFile is the appended last element', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const script = join(f.main, 'agent.mjs')
+      writeFileSync(
+        script,
+        "import { writeFileSync } from 'node:fs'\nwriteFileSync('argv.out', process.argv.slice(2).join('|'))\n"
+      )
+      const c = makeNativeConnector({ dir: f.main }, f.env)
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'unused — the worker owns the program'),
+        worker: { kind: 'argv', argv: [process.execPath, script] },
+      })
+      await until(() => existsSync(join(f.main, 'argv.out')))
+      // exactly one appended arg — the rendered prompt file's path
+      const entry = readAgentRegistry(f.main)['fx-1']!
+      const out = readFileSync(join(f.main, 'argv.out'), 'utf8')
+      assert.ok(out.endsWith(`${entry.agentId}.prompt.md`), out)
+      await until(() => !pidAlive(info.pid!))
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('tmux: an argv worker pane execs slots verbatim', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true })
+    try {
+      const script = join(f.main, 'agent.mjs')
+      writeFileSync(
+        script,
+        "import { writeFileSync } from 'node:fs'\nwriteFileSync('argv.out', process.argv.slice(2).join('|'))\n"
+      )
+      const c = makeTmuxConnector({ dir: f.main }, f.env)
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'unused'),
+        worker: { kind: 'argv', argv: [process.execPath, script] },
+      })
+      await until(() => existsSync(join(f.main, 'argv.out')))
+      const entry = readAgentRegistry(f.main)['fx-1']!
+      assert.ok(
+        readFileSync(join(f.main, 'argv.out'), 'utf8').endsWith(`${entry.agentId}.prompt.md`)
+      )
+      await c.stop(info.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('tmux: provenance pins ride -e, never the ambient env file', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { tmux: true })
+    try {
+      const env = {
+        ...f.env,
+        providers: { local: { type: 'cli', command: 'node {promptFile}' } },
+      } as AgentConnectorEnv
+      const pick = await resolveSpawnProvider(env, 'tmux', { provider: 'local' }, 'flag')
+      const c = makeTmuxConnector({ dir: f.main }, env)
+      const info = await c.spawn({
+        ...SPEC(
+          f.main,
+          f.beadsDir,
+          'fx-1',
+          "require('fs').writeFileSync('env.out', [process.env.BRO_AGENT_PROVIDER, process.env.BRO_AGENT_MODEL ?? 'none'].join('|'))"
+        ),
+        provider: pick.provider,
+        model: pick.model,
+        worker: pick.worker,
+        env: { BRO_AGENT_PROVIDER: 'forged' },
+      })
+      await until(() => existsSync(join(f.main, 'env.out')))
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), 'local|none')
+      // and the env file itself never carried the forged key
+      assert.equal(existsSync(join(f.main, '.git', 'bro', 'agents', `${info.id}.env`)), false)
+      await c.stop(info.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('gascity: a provider-resolved worker refuses before any gc call', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const c = makeGascityConnector({ dir: f.main }, f.env)
+      await assert.rejects(
+        c.spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'x'),
+          provider: 'kilo',
+          worker: { kind: 'template', command: 'kilo {promptFile}' },
+        }),
+        (e: unknown) =>
+          e instanceof SpawnError && e.kind === 'config' && /gascity/.test(e.message)
+      )
+      // no claim landed — the refusal precedes everything
+      assert.equal(f.dbRows()[0]!.status, 'open')
+    } finally {
+      cleanup(f)
+    }
   })
 })

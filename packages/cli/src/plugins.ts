@@ -33,6 +33,7 @@ import { loopSection } from '@broject/loop'
 import { githubConnector } from '@broject/github'
 import { gitlabConnector } from '@broject/gitlab'
 import { judgeSection, llmJudgeConnector, systemoneConnector } from '@broject/judge'
+import { runAcpWorkerCommand } from './commands/acp-worker.ts'
 import { applyActPlan, runActCommand } from './commands/act.ts'
 import { checkSection } from './commands/check-config.ts'
 import { runCheckCommand } from './commands/check.ts'
@@ -284,6 +285,12 @@ export const PLUGINS: BroPlugin[] = [
     name: 'hooks',
     summary: 'Agent lifecycle hooks',
     run: runHooksCommand,
+    hidden: true,
+  }),
+  definePlugin({
+    name: 'acp-worker',
+    summary: 'ACP provider spawn unit — backends exec this; never typed',
+    run: runAcpWorkerCommand,
     hidden: true,
   }),
   definePlugin({

@@ -6,6 +6,7 @@ import { agent, RequestError } from '@agentclientprotocol/sdk'
 import type {
   AgentApp,
   AuthMethod,
+  PermissionOption,
   SessionConfigOption,
   StopReason,
 } from '@agentclientprotocol/sdk'
@@ -39,6 +40,8 @@ export interface FakeAcpAgent {
   configSets: Array<{ configId: string; value: unknown }>
   /** session/new requests (cwd recorded). */
   sessions: Array<{ cwd: string }>
+  /** The client's answer to a scripted session/request_permission. */
+  permissionOutcome?: unknown
 }
 
 /** A scripted in-process ACP agent — the real protocol round-trip
@@ -58,6 +61,9 @@ export function fakeAcpAgent(
     /** set_config_option fails: 'refuse' answers a peer error,
      *  'cancel' answers -32800 like an aborted request. */
     failConfig?: 'refuse' | 'cancel'
+    /** Ask session/request_permission mid-prompt with these options —
+     *  the outcome lands in `permissionOutcome`. */
+    askPermission?: PermissionOption[]
   } = {}
 ): FakeAcpAgent {
   const seen: FakeAcpAgent = {
@@ -97,6 +103,14 @@ export function fakeAcpAgent(
       seen.prompts.push(
         ctx.params.prompt.map((b) => (b.type === 'text' ? b.text : '')).join('')
       )
+      if (opts.askPermission !== undefined) {
+        const res = await ctx.client.request('session/request_permission', {
+          sessionId: ctx.params.sessionId,
+          toolCall: { toolCallId: 'tc-1', title: 'run tests' },
+          options: opts.askPermission,
+        })
+        seen.permissionOutcome = res.outcome
+      }
       await ctx.client.notify('session/update', {
         sessionId: ctx.params.sessionId,
         update: {
