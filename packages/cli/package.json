@@ -22,6 +22,10 @@
     "./kilo": {
       "types": "./dist/kilo.d.ts",
       "default": "./dist/kilo.js"
+    },
+    "./pi": {
+      "types": "./dist/pi.d.ts",
+      "default": "./dist/pi.js"
     }
   },
   "files": [
