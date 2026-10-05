@@ -76,6 +76,13 @@ describe('isSystemoneFamily', () => {
   test('typesafe/jev-* and bare jev-* are family; others and absent are not', () => {
     assert.equal(isSystemoneFamily('typesafe/jev-1.13'), true)
     assert.equal(isSystemoneFamily('jev-1.13.0'), true)
+    assert.equal(isSystemoneFamily('jev-latest'), true)
+    // router-prefixed ids kilo serves — the upstream jev model reached
+    // through orcarouter is still the typed contract
+    assert.equal(isSystemoneFamily('kilo/orcarouter/typesafe/jev-1.13'), true)
+    // jev-router is a router product, not a jev model — never family
+    assert.equal(isSystemoneFamily('kilo/typesafe/jev-router'), false)
+    assert.equal(isSystemoneFamily('typesafe/jev-router'), false)
     assert.equal(isSystemoneFamily('qwen3-coder'), false)
     assert.equal(isSystemoneFamily('other/jev-1'), false)
     assert.equal(isSystemoneFamily(undefined), false)
@@ -135,14 +142,16 @@ describe('acp call surface — typed mode', () => {
     assert.equal(res.model, 'typesafe/jev-1.13')
   })
 
-  test('the prompt carries {state, questions} as JSON', async () => {
+  test('the prompt carries the typed contract + {state, questions} as JSON', async () => {
     const fake = fakeAcpAgent({ replyText: TYPED_REPLY, configOptions: [MODEL_OPTION] })
     await acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
       'the-state',
       QUESTIONS,
       deadline()
     )
-    const sent = JSON.parse(fake.prompts[0]!) as Record<string, unknown>
+    const [preamble, body] = fake.prompts[0]!.split('BODY:\n')
+    assert.match(preamble!, /System One decision endpoint/)
+    const sent = JSON.parse(body!) as Record<string, unknown>
     assert.equal(sent.state, 'the-state')
     assert.deepEqual(Object.keys(sent.questions as object), ['route', 'blocks'])
   })
@@ -171,15 +180,42 @@ describe('acp call surface — typed mode', () => {
     assert.equal(fake.prompts.length, 0)
   })
 
-  test('an agent requiring interactive auth is a startup error naming the methods', async () => {
+  test('advertised authMethods do not gate the call — stored creds may already cover it', async () => {
+    const fake = fakeAcpAgent({
+      authMethods: [{ id: 'oauth', name: 'OAuth' } as AuthMethod],
+      replyText: TYPED_REPLY,
+      configOptions: [MODEL_OPTION],
+    })
+    const res = await acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+      's',
+      QUESTIONS,
+      deadline()
+    )
+    assert.equal(res.answers.blocks!.type, 'noul')
+    assert.equal(fake.prompts.length, 1)
+  })
+
+  test('a prompt-time auth failure is a startup error naming the methods', async () => {
     const fake = fakeAcpAgent({
       authMethods: [{ id: 'oauth', name: 'OAuth' } as AuthMethod],
       configOptions: [MODEL_OPTION],
+      failPrompt: 'auth',
     })
     await assert.rejects(
       acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!('s', QUESTIONS, deadline()),
       (e: unknown) =>
         e instanceof Error && !(e instanceof JudgeUnavailable) && /oauth/.test(e.message)
+    )
+  })
+
+  test('a non-auth prompt failure stays JudgeUnavailable — backend flake, not config', async () => {
+    const fake = fakeAcpAgent({
+      configOptions: [MODEL_OPTION],
+      failPrompt: 'generic',
+    })
+    await assert.rejects(
+      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!('s', QUESTIONS, deadline()),
+      JudgeUnavailable
     )
   })
 

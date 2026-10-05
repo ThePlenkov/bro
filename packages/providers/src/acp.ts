@@ -56,11 +56,14 @@ class AcpConfigError extends Error {
   override name = 'AcpConfigError'
 }
 
-/** A systemone-family model id — `typesafe/jev-*` on a router, or a
- *  bare `jev-*` pin. Only these get the typed contract; every other
- *  served model is prose-grade. */
+/** A systemone-family model id — `typesafe/jev-<version|latest>`,
+ *  possibly router-prefixed (`kilo/orcarouter/typesafe/jev-1.13`), or a
+ *  bare `jev-*` pin. The version anchor is deliberate: `jev-router` is
+ *  a router PRODUCT pointing at arbitrary upstreams, not a jev model —
+ *  classifying it family would let a config silently spend on it. */
 export const isSystemoneFamily = (model: string | undefined): boolean =>
-  model !== undefined && /^(?:typesafe\/)?jev-/.test(model)
+  model !== undefined &&
+  /(?:^|\/)typesafe\/jev-(?:\d|latest)|^jev-(?:\d|latest)/.test(model)
 
 /** JSON-RPC request-cancelled — the code both ends use for an aborted
  *  request. A cancel is availability (deadline, transport), never the
@@ -254,17 +257,28 @@ async function acpOp(
       `${by}: agent negotiated protocol ${init.protocolVersion} — the binding speaks v${PROTOCOL_VERSION} only`
     )
   }
+  // authMethods is an OFFER, not a requirement — an agent with stored
+  // credentials (e.g. kilo's saved oauth) still advertises its login
+  // methods and serves sessions fine. Only a session/prompt failure
+  // that actually names auth is the operator's problem; keep the
+  // advertised ids for the remediation line.
   const authMethods = init.authMethods ?? []
-  if (authMethods.length > 0) {
-    throw new AcpConfigError(
-      `${by}: agent requires interactive auth (${authMethods
-        .map((m) => m.id)
-        .join(', ')}) — a judge call can't log in; authenticate the agent CLI itself`
-    )
+  const authHint = (): string =>
+    authMethods.length > 0 ? ` (${authMethods.map((m) => m.id).join(', ')})` : ''
+  const asAuthError = (err: unknown): never => {
+    const isAuth =
+      (err instanceof RequestError && err.code === -32000) ||
+      (err instanceof Error && /auth|login|credential/i.test(err.message))
+    throw isAuth
+      ? new AcpConfigError(
+          `${by}: agent requires interactive auth${authHint()} — a judge call can't log in; authenticate the agent CLI itself`
+        )
+      : err
   }
   const session = await ctx
     .buildSession({ cwd: opts.acp?.cwd ?? process.cwd(), mcpServers: [] })
     .start(req())
+    .catch(asAuthError)
   try {
     const model = await applyModel(
       ctx,
@@ -275,7 +289,7 @@ async function acpOp(
       req
     )
     const [resp, text] = await Promise.all([
-      session.prompt(promptText, req()),
+      session.prompt(promptText, req()).catch(asAuthError),
       session.readText(),
     ])
     if (resp.stopReason !== 'end_turn') {
@@ -380,6 +394,23 @@ function typedReply(text: string, by: string): { answers: unknown; model?: strin
   }
 }
 
+/** The typed contract as prompt preamble — an ACP session is a chat
+ *  surface, so unlike the systemone HTTP endpoint the wire format isn't
+ *  baked in; the body alone gets answered as an agent task (the model
+ *  even ran tools in dogfooding). The preamble states the shapes
+ *  mapAnswer validates — field names are the wire's, not aliases. */
+const TYPED_PREAMBLE = [
+  'You are a System One decision endpoint. The user message below is a JSON body {state, questions}.',
+  'Reply with STRICT JSON only — no prose, no markdown fences:',
+  '{"answers": {"<question-id>": <answer>, ...}}',
+  'Answer shape per question type — copy the question\'s "type":',
+  '- "noul":   {"type":"noul","noul":<0..1 probability the answer is yes>}',
+  '- "choice": {"type":"choice","choice":"<one criteria key>","probabilities":{"<key>":<p>, ...}}',
+  '- "score":  {"type":"score","score":<0..N-1 probability-weighted level>,"probabilities":{"<level index>":<p>, ...}}',
+  'Add "confidence": <0..1> to every answer. Answer EVERY question id exactly once.',
+  'BODY:',
+].join('\n')
+
 /** The typed call surface for an `acp` entry on a systemone-family
  *  model — `{state, questions}` in, typed judgments out. */
 export function acpCall(
@@ -397,7 +428,7 @@ export function acpCall(
       by,
       entry,
       opts,
-      JSON.stringify({ state, questions }),
+      `${TYPED_PREAMBLE}\n${JSON.stringify({ state, questions })}`,
       deadline
     )
     const body = typedReply(reply.text, by)
