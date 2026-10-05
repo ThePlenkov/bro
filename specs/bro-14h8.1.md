@@ -57,7 +57,7 @@ concurrency = 4            # optional plan-level fan-out cap, ≥1
 
 [[steps]]
 id = "gh-prs"
-provider = "github"        # optional — absent resolves via facade()
+provider = "github"        # optional — absent → connectors.queries pin, then auto-detect
 graphql = """
 query ($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
@@ -84,10 +84,16 @@ them):
 
 - `id` required, unique, non-empty string — it is the output key.
 - `graphql` required, non-empty string — the raw document.
-- `provider` optional string; when present it is passed as the explicit
-  connector name to `facade('queries', { dir }, { connector: provider })`,
-  so a name that serves no `queries` facade errors at resolution with
-  the connector's name, exactly like every other facade lookup.
+- `provider` optional string; the runner resolves
+  `facade('queries', { dir }, { connector: provider, prefer: loadConfig(dir).connectors })`
+  — `facade()` never reads config itself, so the runner threads the
+  loaded `connectors` map through `prefer`. When `provider` is present
+  it wins (`opts.connector` outranks `prefer`), and a name that serves
+  no `queries` facade errors at resolution with the connector's name,
+  exactly like every other facade lookup. When absent, a
+  `connectors.queries` pin in `bro.config.json` applies first, then
+  auto-detect — so an omitted provider can never silently land on an
+  unrelated connector the config already pinned away.
 - `vars` — a table of scalar values (string/number/bool). github/gitlab
   serialize each entry as a CLI field (`-f k=v` — strings on the wire,
   matching the existing `reviews.ts` usage); atlassian serializes the
@@ -95,13 +101,18 @@ them):
   arrays) are rejected for gh/glab steps at run time — the provider is
   not always known at validate time.
 - `env` — a string→string table merged over `process.env` for that
-  step's spawn only. This is the one mechanism for instance pinning and
-  credential selection: `GITLAB_HOST` for self-hosted GitLab (the
-  existing `GlabOpts.env` contract), `GH_HOST` for GitHub Enterprise,
-  `ATLASSIAN_API_URL`/`ATLASSIAN_TOKEN` for Atlassian. Secrets ride env
-  var *names* in the step, never values the plan didn't write — same
-  rule as `apiKeyEnv` elsewhere: a plan may name `ATLASSIAN_TOKEN`, the
-  value comes from the operator's environment.
+  step's spawn only, values **literal** (the `GlabOpts.env` contract:
+  `{ ...process.env, ...env }`). This is the mechanism for instance
+  pinning, not credentials: `GITLAB_HOST` for self-hosted GitLab,
+  `GH_HOST` for GitHub Enterprise, `ATLASSIAN_API_URL` for Atlassian.
+  Credentials are never named — because the overlay *inherits*
+  `process.env`, the operator's `ATLASSIAN_TOKEN` / `GH_TOKEN` /
+  `glab` login reaches the spawned CLI by omission. Writing
+  `ATLASSIAN_TOKEN = "ATLASSIAN_TOKEN"` is not indirection — it sets
+  that literal string and shadows the real credential. (Unlike
+  `apiKeyEnv`, which *is* name-indirection resolved at runtime, `env`
+  carries no indirection; choosing among multiple operator-held
+  credentials is a v2 question.)
 - **Read-only.** `planSchema` rejects a step whose document contains
   `mutation` or `subscription` as a word-boundary keyword after
   stripping `#` comments and string literals. The gate fails *closed*:
@@ -127,8 +138,12 @@ operator's existing login, exactly the `gh`/`glab` precedent:
 - **github** — `gh api graphql -f query=<doc> -f <k>=<v>…`. The exact
   pattern already running in `packages/github/src/reviews.ts:700` for
   thread mutations; helpers live in `packages/core/src/gh.ts`
-  (`ghJsonAsync` — the fan-out must not block the loop). Ambient
-  `gh auth`; `env.GH_HOST` pins an enterprise host.
+  (`ghJsonAsync` — the fan-out must not block the loop). `ghAsync`
+  takes `(args, cwd)` today and **gains an `opts.env` overlay**
+  mirroring `GlabOpts.env` (`{ ...process.env, ...env }` at spawn) so
+  the step's `env` actually reaches `gh` — without it the promised
+  `env.GH_HOST` pin would be dropped. Ambient `gh auth`;
+  `env.GH_HOST` pins an enterprise host.
 - **gitlab** — `glab api graphql -f query=<doc> -f <k>=<v>…` via the
   existing `glabAsync` in `packages/gitlab/src/glab.ts`, which already
   carries the `env`/`GITLAB_HOST` pinning contract.
@@ -207,6 +222,8 @@ precedent: nothing here silently picks a provider the plan didn't name.
 ```text
 packages/core/src/queries.ts        QueryFacade { graphql } + FacadeMap.queries
                                     + Connector.queries
+packages/core/src/gh.ts             gh/ghAsync/ghJsonAsync gain an opts bag with
+                                    env — parity with GlabOpts.env
 packages/query/package.json         @broject/query
 packages/query/src/plan.ts          parseQueryPlan + PLAN_VERSION — strict
                                     unknown-key rejection, errors listed once
@@ -242,11 +259,14 @@ skills/query/SKILL.md               thin wrapper — mechanics live in the CLI
 - **Read-only is a gate, not a hope.** `mutation`/`subscription` are
   rejected at `planSchema` time — `bro plan validate` catches a
   mutating plan before any provider sees it.
-- **Secrets ride env names only.** A plan may set `env.ATLASSIAN_TOKEN`
-  (pointing the CLI at the variable), never embed a token value;
-  `vars`/`env` values that look like secrets are the author's leak,
-  but the schema never *requires* a secret — auth always resolves
-  through the provider CLI's own login.
+- **Secrets never appear in a plan.** `env` is a literal overlay, so
+  `env.ATLASSIAN_TOKEN = "…"` would embed a token value outright —
+  there is no name-indirection here. Operator credentials reach the
+  spawned CLI through the inherited `process.env`; the plan writes only
+  non-secret pins (`*_HOST`, `*_API_URL`). `vars`/`env` values that
+  look like secrets are the author's leak, but the schema never
+  *requires* a secret — auth always resolves through the provider
+  CLI's own login.
 
 ## Milestones
 
