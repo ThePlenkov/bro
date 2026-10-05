@@ -59,11 +59,11 @@ already has (`judge.llm.model` picks the model, the connector is
 
 ## Plan
 
-- [ ] `git mv` jev.ts/jev.test.ts → systemone.ts/systemone.test.ts;
+- [x] `git mv` jev.ts/jev.test.ts → systemone.ts/systemone.test.ts;
       rename exports, connector name, decidedBy, error strings
-- [ ] Update imports (`index.ts`, `cli/plugins.ts`) and tests
+- [x] Update imports (`index.ts`, `cli/plugins.ts`) and tests
       (stats/replay/shadow/cli judge fixtures)
-- [ ] Update skill + docs + parent spec connector refs; `npm run
+- [x] Update skill + docs + parent spec connector refs; `npm run
       gen:plugins`
-- [ ] `npm test` (exact CI command) + `npm run lint`
-- [ ] Commit, push, `gh pr create` — spec rides the same PR
+- [x] `npm test` (exact CI command) + `npm run lint`
+- [x] Commit, push, `gh pr create` — spec rides the same PR
