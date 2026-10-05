@@ -201,6 +201,19 @@ function kiloArtifact(cwd: string): string | null {
   ])
 }
 
+/** Same artifact ladder as opencode — source, bundled dist, the repo
+ *  adapter. jiti loads the raw .ts, so the source entry is the real
+ *  artifact; the dist bundle is the tarball fallback. */
+function piArtifact(cwd: string): string | null {
+  const pkg = packageRoot()
+  const root = gitRoot(cwd)
+  return firstExisting([
+    pkg === null ? null : join(pkg, 'src', 'pi.ts'),
+    pkg === null ? null : join(pkg, 'dist', 'pi.js'),
+    root === null ? null : join(root, 'plugins', 'pi', 'bro', 'bro.ts'),
+  ])
+}
+
 const CLIENTS: Record<string, ClientSpec> = {
   opencode: {
     artifact: opencodeArtifact,
@@ -223,6 +236,20 @@ const CLIENTS: Record<string, ClientSpec> = {
     registration: (scope, path, env) =>
       scope === 'global' ? kiloRegistration(path, env) : null,
   },
+  pi: {
+    artifact: piArtifact,
+    // pi discovers <cwd>/.pi/extensions/ locally and
+    // <agentDir>/extensions/ globally; the agent dir is
+    // $PI_CODING_AGENT_DIR or ~/.pi/agent
+    targets: (cwd, env) => ({
+      global: join(
+        env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'),
+        'extensions',
+        'bro.ts'
+      ),
+      local: join(gitRoot(cwd) ?? cwd, '.pi', 'extensions', 'bro.ts'),
+    }),
+  },
 }
 
 export function clientNames(): string[] {
@@ -230,10 +257,15 @@ export function clientNames(): string[] {
 }
 
 /** The materialized module's fingerprint — holds for the TS source and
- *  the compiled bundle (`export default {id:"bro",server:BroPlugin}`),
- *  so any version we ever shipped is recognized as ours. */
+ *  the compiled bundle. Each adapter family carries the same `id:"bro"`
+ *  marker plus its own second token: opencode ships
+ *  `export default {id:"bro",server:BroPlugin}`; the pi extension ships
+ *  `export const adapter = {id:"bro",kind:"pi-extension"}`. */
 export function isBroAdapter(text: string): boolean {
-  return /\bid:\s*["']bro["']/.test(text) && /\bserver:\s*BroPlugin\b/.test(text)
+  if (!/\bid:\s*["']bro["']/.test(text)) {
+    return false
+  }
+  return /\bserver:\s*BroPlugin\b/.test(text) || /\bkind:\s*["']pi-extension["']/.test(text)
 }
 
 function stateAt(

@@ -29,7 +29,13 @@ function fixture(): { cwd: string; opts: MutateOpts; globalPath: string; localPa
     dryRun: false,
     force: false,
     cwd,
-    env: { ...process.env, XDG_CONFIG_HOME: xdg },
+    env: {
+      ...process.env,
+      XDG_CONFIG_HOME: xdg,
+      // keep the pi global target inside the fixture — the default
+      // (~/.pi/agent) is the real home dir, and tests must never write it
+      PI_CODING_AGENT_DIR: join(xdg, 'pi-agent'),
+    },
   }
   return {
     cwd,
@@ -63,6 +69,13 @@ describe('isBroAdapter', () => {
 
   test('recognizes the kilo module', () => {
     assert.ok(isBroAdapter(readFileSync(new URL('../kilo.ts', import.meta.url), 'utf8')))
+  })
+
+  test('recognizes the pi extension sentinel', () => {
+    const src = new URL('../pi.ts', import.meta.url)
+    assert.ok(isBroAdapter(readFileSync(src, 'utf8')))
+    assert.ok(isBroAdapter('const adapter={id:"bro",kind:"pi-extension"}\n'))
+    assert.ok(!isBroAdapter('export default function x(){}\n'))
   })
 })
 
@@ -99,8 +112,14 @@ describe('plugins install/uninstall/list', () => {
 
     const rows = pluginRows(f.cwd, f.opts.env).filter((r) => r.client === 'opencode')
     assert.deepEqual(
-      rows.map((r) => `${r.scope}:${r.state}`),
-      ['global:stale', 'local:stale']
+      rows.map((r) => `${r.client}:${r.scope}:${r.state}`),
+      ['opencode:global:stale', 'opencode:local:stale']
+    )
+    assert.deepEqual(
+      pluginRows(f.cwd, f.opts.env)
+        .filter((r) => r.client === 'pi')
+        .map((r) => `${r.client}:${r.scope}:${r.state}`),
+      ['pi:global:absent', 'pi:local:absent']
     )
 
     const out = installClient('opencode', ['global'], f.opts)
@@ -173,19 +192,36 @@ describe('plugins install/uninstall/list', () => {
 
   test('list reflects install state per scope', () => {
     const f = fixture()
-    const opencodeRows = () =>
+    const rowsFor = (client: string) =>
       pluginRows(f.cwd, f.opts.env)
-        .filter((r) => r.client === 'opencode')
+        .filter((r) => r.client === client)
         .map((r) => `${r.client}:${r.scope}:${r.state}`)
-    assert.deepEqual(opencodeRows(), [
+    assert.deepEqual(rowsFor('opencode'), [
       'opencode:global:absent',
       'opencode:local:absent',
     ])
+    assert.deepEqual(rowsFor('pi'), ['pi:global:absent', 'pi:local:absent'])
     installClient('opencode', ['local'], f.opts)
-    assert.deepEqual(opencodeRows(), [
+    assert.deepEqual(rowsFor('opencode'), [
       'opencode:global:absent',
       'opencode:local:installed',
     ])
+    assert.deepEqual(rowsFor('pi'), ['pi:global:absent', 'pi:local:absent'])
+  })
+
+  test('pi install lands in .pi/extensions/ and the agent dir', () => {
+    const f = fixture()
+    const out = installClient('pi', ['global', 'local'], f.opts)
+    assert.deepEqual(
+      out.map((o) => o.action),
+      ['installed', 'installed']
+    )
+    const piGlobal = join(f.opts.env.PI_CODING_AGENT_DIR!, 'extensions', 'bro.ts')
+    const piLocal = join(f.cwd, '.pi', 'extensions', 'bro.ts')
+    assert.ok(existsSync(piGlobal))
+    assert.ok(existsSync(piLocal))
+    const shipped = readFileSync(new URL('../pi.ts', import.meta.url), 'utf8')
+    assert.equal(readFileSync(piGlobal, 'utf8'), shipped)
   })
 })
 

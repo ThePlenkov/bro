@@ -57,6 +57,7 @@ import { runLearnCommand } from './commands/learn.ts'
 import { runWatchCommand } from './commands/watch.ts'
 import { watchSection } from './commands/watch-config.ts'
 import { runAgentsCommand } from './commands/agents.ts'
+import { runStatusCommand } from './commands/status.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runServeCommand } from './commands/serve.ts'
 import { runSetupCommand } from './commands/setup.ts'
@@ -150,6 +151,12 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'agents',
     configKey: 'agents',
     configSchema: agentsSection,
+  }),
+  definePlugin({
+    name: 'status',
+    summary: 'The compact live board — beads + fleet + drill + git [--json|--deep]',
+    run: runStatusCommand,
+    skill: 'status',
   }),
   definePlugin({
     name: 'notify',
