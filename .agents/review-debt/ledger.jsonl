@@ -69,3 +69,25 @@
 {"thread_id":"PRRT_kwDOUamqtM6nYVoa","status":"wontfix","fix_pr":null,"fixed_at":"2026-09-30T16:24:23.422Z","notes":"fail-fast with remediation is intended — silent retry loop would hide the auth fix; watch restart is cheap"}
 {"thread_id":"PRRT_kwDOUamqtM6nYVoN","status":"done","fix_pr":159,"fixed_at":"2026-09-30T15:56:37.741Z","notes":null}
 {"thread_id":"PRRT_kwDOUamqtM6nYY8-","status":"done","fix_pr":159,"fixed_at":"2026-09-30T15:56:39.317Z","notes":null}
+{"thread_id":"PRRT_kwDOUamqtM6oDL21","status":"done","fix_pr":212,"fixed_at":"2026-10-04T08:59:20.379Z","notes":"spec describes two ordered steps: worktree+branch atomically, edge last"}
+{"thread_id":"PRRT_kwDOUamqtM6oDL26","status":"done","fix_pr":212,"fixed_at":"2026-10-04T08:59:20.129Z","notes":"template sections each on own line"}
+{"thread_id":"PRRT_kwDOUamqtM6oDL2d","status":"done","fix_pr":212,"fixed_at":"2026-10-04T08:59:20.618Z","notes":"spec says owner rebases by hand; enter never rebases"}
+{"thread_id":"PRRT_kwDOUamqtM6ola--","status":"done","fix_pr":222,"fixed_at":"2026-10-04T08:59:19.853Z","notes":"header fixed within #222 — content-type scoped to body-bearing writes"}
+{"thread_id":"PRRT_kwDOUamqtM6omNhN","status":"done","fix_pr":221,"fixed_at":"2026-10-04T08:59:19.319Z","notes":"gate requires @broject/bro cli package + markers; comment corrected"}
+{"thread_id":"PRRT_kwDOUamqtM6omNhS","status":"done","fix_pr":221,"fixed_at":"2026-10-04T08:59:19.031Z","notes":"embedded.test.ts fixture tree covers collectEmbedded"}
+{"thread_id":"PRRT_kwDOUamqtM6omPHm","status":"done","fix_pr":206,"fixed_at":"2026-10-04T08:59:19.610Z","notes":"JSDoc reads <pr>-<pid>-<nonce>.json"}
+{"thread_id":"stale-pr:198","status":"done","fix_pr":null,"fixed_at":"2026-10-03T08:23:47.853Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"stale-pr:203","status":"done","fix_pr":null,"fixed_at":"2026-10-03T16:36:14.557Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"stale-pr:204","status":"done","fix_pr":null,"fixed_at":"2026-10-03T13:40:03.710Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"stale-pr:211","status":"done","fix_pr":null,"fixed_at":"2026-10-03T17:17:27.061Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"stale-pr:214","status":"done","fix_pr":null,"fixed_at":"2026-10-03T17:51:16.434Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"stale-pr:216","status":"done","fix_pr":null,"fixed_at":"2026-10-03T18:24:26.294Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"stale-pr:217","status":"done","fix_pr":null,"fixed_at":"2026-10-03T18:29:04.421Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"stale-pr:219","status":"done","fix_pr":null,"fixed_at":"2026-10-03T19:25:22.292Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"stale-pr:220","status":"done","fix_pr":null,"fixed_at":"2026-10-03T18:29:04.421Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"stale-pr:221","status":"done","fix_pr":null,"fixed_at":"2026-10-03T19:25:22.292Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"stale-pr:239","status":"done","fix_pr":null,"fixed_at":"2026-10-04T18:03:20.659Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"stale-pr:242","status":"done","fix_pr":null,"fixed_at":"2026-10-05T00:18:50.992Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"stale-pr:243","status":"done","fix_pr":null,"fixed_at":"2026-10-04T22:27:50.869Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"stale-pr:244","status":"done","fix_pr":null,"fixed_at":"2026-10-05T00:01:30.819Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"stale-pr:245","status":"done","fix_pr":null,"fixed_at":"2026-10-04T22:27:50.869Z","notes":"resolved upstream — no longer reported"}
