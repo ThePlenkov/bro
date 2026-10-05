@@ -36,6 +36,19 @@ describe('fileCheckHistory', () => {
     assert.equal(h.consecutiveFailures('kilo'), 2)
   })
 
+  test('a stale same-sha observation does not end a live streak', () => {
+    const h = fileCheckHistory(tmp())
+    // B's head transitioned pending→fail; the older pending entry must
+    // not break the trailing run — the sha's latest observation is fail
+    h.record(obs('kilo', 'a'.repeat(40), 'fail'))
+    h.record(obs('kilo', 'b'.repeat(40), 'pending'))
+    h.record(obs('kilo', 'b'.repeat(40), 'fail'))
+    assert.equal(h.consecutiveFailures('kilo'), 2)
+    // …but a sha whose LATEST observation is a pass still ends it
+    h.record(obs('kilo', 'c'.repeat(40), 'pass'))
+    assert.equal(h.consecutiveFailures('kilo'), 0)
+  })
+
   test('a non-fail observation breaks the streak', () => {
     const h = fileCheckHistory(tmp())
     h.record(obs('kilo', 'a'.repeat(40), 'fail'))

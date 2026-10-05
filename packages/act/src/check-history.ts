@@ -16,9 +16,9 @@
  * the history reads as empty (streak 0) and records as a no-op, so a
  * failing conditional check trends to "unproven", never to a crash.
  */
-import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
-import { gitTry } from '@broject/core'
+import { appendFileSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { gitTry, withFileLock } from '@broject/core'
 
 export interface CheckObservation {
   ts: number
@@ -97,14 +97,22 @@ export function fileCheckHistory(file: string): CheckHistory {
   return {
     record(obs) {
       try {
-        const entries = read()
-        const last = [...entries].reverse().find((e) => e.name === obs.name)
-        if (last !== undefined && last.sha === obs.sha && last.bucket === obs.bucket) {
-          return
-        }
-        mkdirSync(dirname(file), { recursive: true })
-        compactIfNeeded(file)
-        appendFileSync(file, `${JSON.stringify({ ...obs, ts: Date.now() })}\n`)
+        // dedup-check + compact + append is one read-modify-write —
+        // concurrent `act`/`watch` processes on the shared ledger must
+        // serialize it or the loser drops observations
+        withFileLock(
+          `${file}.lock`,
+          () => {
+            const entries = read()
+            const last = [...entries].reverse().find((e) => e.name === obs.name)
+            if (last !== undefined && last.sha === obs.sha && last.bucket === obs.bucket) {
+              return
+            }
+            compactIfNeeded(file)
+            appendFileSync(file, `${JSON.stringify({ ...obs, ts: Date.now() })}\n`)
+          },
+          { waitMs: 2000, label: 'act-checks ledger' }
+        )
       } catch {
         // an unwritable ledger is an empty ledger — recording never throws
       }
@@ -117,11 +125,10 @@ export function fileCheckHistory(file: string): CheckHistory {
       for (let i = entries.length - 1; i >= 0; i -= 1) {
         const e = entries[i]!
         // a re-observed sha is one check run, not a new failure —
-        // collapse repeats so streak counts heads, not polls
+        // collapse repeats so streak counts heads, not polls; an older
+        // non-fail under an already-counted sha is history, not the
+        // streak's end (the sha's latest observation already spoke)
         if (e.sha === lastSha) {
-          if (e.bucket !== 'fail') {
-            break
-          }
           continue
         }
         if (e.bucket !== 'fail') {
