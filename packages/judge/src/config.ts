@@ -1,5 +1,9 @@
 import type { ConfigSection } from '@broject/core'
 
+// the SCREAMING_SNAKE rule moved to core with the providers registry —
+// re-exported here so `import { isEnvName } from './config.ts'` keeps working
+export { isEnvName } from '@broject/core'
+
 export interface JudgeLlmConfig {
   /** OpenAI-compatible base URL — the connector POSTs
    *  `${baseUrl}/chat/completions` (include `/v1` when the host needs it). */
@@ -50,13 +54,6 @@ export const DEFAULT_JUDGE_CONFIG: JudgeConfig = {
 }
 
 const JUDGE_MODES = ['off', 'shadow'] as const
-
-/** Env var NAME sanity — `apiKeyEnv` names a variable, never holds the
- *  key value. Names must be SCREAMING_SNAKE: a pasted key value
- *  (`ts_live_…`, `sk-…`) fails here — but an ALL-CAPS key passes too,
- *  so a validated name is still never echoed back in a missing-key
- *  message (it may be the secret itself). */
-export const isEnvName = (v: string): boolean => /^[A-Z_][A-Z0-9_]*$/.test(v)
 
 const str = (v: unknown): string | undefined =>
   typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined
