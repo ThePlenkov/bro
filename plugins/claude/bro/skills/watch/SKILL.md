@@ -19,6 +19,8 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd` initialized.
 | `bro watch --every N` | Tick the snapshot every N seconds until killed |
 | `bro watch --notify` | Drop the initial snapshot plus each transition into the mailbox (`<git-common>/bro/notify/`) — a notify connector drains it into the parent session |
 | `bro watch --json` | Machine-readable `{ts, attention, mols, gates, fleet, janitor?}` |
+| `bro watch install [--every N] [--print]` | Install the heartbeat on a non-agent timer — a systemd user unit running `--once --notify` per repo (crontab fallback); cadence is `--every N` or `watch.intervalSec` (default 60) |
+| `bro watch uninstall` | Remove the installed timer/cron entry for this repo |
 
 ## Policy
 
@@ -37,6 +39,20 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd` initialized.
   connector installed, mailbox drops surface mid-turn in the parent
   session — the initial snapshot plus each transition. Dedup is
   per-process: a scheduled `--once --notify` run always emits.
+- **The holder is not the watcher.** A session that must stay alive
+  waiting on background work keeps a bare-sleep **holder** — a
+  background subagent whose ONLY tool call is a sleep (~15 min
+  cadence). It collects no snapshot, runs no `bro watch`, writes no
+  report; its completion is the parent's wake boundary. Polling,
+  snapshotting, and reporting all belong to `bro watch install`'s
+  timer — zero inference per tick — never to a billed agent loop. A
+  3-min holder polling the fleet cost ~18–40% of a session's measured
+  requests; a 15-min bare-sleep holder is ~8–12 req/hour. Shorten only
+  when measured completion-notification latency demands it.
+- **The mailbox is pull-based.** A drop never wakes a sleeping
+  parent — it lands in context on the session's next tool call (the
+  postTool drain). The holder is load-bearing for exactly that reason:
+  removing it requires a push path first.
 - **Watch never touches your work.** It never claims steps, never
   mutates beads, never respawns agents — a `lost — respawn?` row is the
   decision surface; respawning is a manual act (`bro agents up <step>`).

@@ -53,6 +53,7 @@ import { runHooksCommand } from './commands/hooks.ts'
 import { runJudgeCommand } from './commands/judge.ts'
 import { runLearnCommand } from './commands/learn.ts'
 import { runWatchCommand } from './commands/watch.ts'
+import { watchSection } from './commands/watch-config.ts'
 import { runAgentsCommand } from './commands/agents.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runServeCommand } from './commands/serve.ts'
@@ -157,9 +158,11 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'watch',
     summary:
-      'Orchestrator heartbeat — mols × act gates × fleet snapshot [--once|--every N|--notify|--json]',
+      'Orchestrator heartbeat — mols × act gates × fleet snapshot [--once|--every N|--notify|--json|install|uninstall]',
     run: runWatchCommand,
     skill: 'watch',
+    configKey: 'watch',
+    configSchema: watchSection,
   }),
   definePlugin({
     name: 'drive',
