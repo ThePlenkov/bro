@@ -36,7 +36,7 @@ import type {
   JudgeQuestion,
   ProviderEntry,
 } from '@broject/core'
-import { objOr, remaining } from './http.ts'
+import { objOr, remaining, splitShellWords } from './http.ts'
 import type {
   ProviderCall,
   ProviderChat,
@@ -80,38 +80,13 @@ const errMsg = (err: unknown): string =>
  *  program. An unclosed quote is a config error, named as such.
  *  Exported for the suite — the split IS the trust boundary. */
 export function shellWords(command: string): string[] {
-  const words: string[] = []
-  let cur = ''
-  let open = false
-  let quote: string | undefined
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]!
-    if (quote === undefined && (ch === "'" || ch === '"')) {
-      quote = ch
-      open = true
-    } else if (ch === quote) {
-      quote = undefined
-    } else if (quote === undefined && ch === '\\' && i + 1 < command.length) {
-      cur += command[++i]
-      open = true
-    } else if (quote === undefined && /\s/.test(ch)) {
-      if (open) {
-        words.push(cur)
-        cur = ''
-        open = false
-      }
-    } else {
-      cur += ch
-      open = true
-    }
+  try {
+    return splitShellWords(command)
+  } catch (err) {
+    throw new AcpConfigError(
+      `acp command has an ${err instanceof Error ? err.message : 'unclosed quote'}`
+    )
   }
-  if (quote !== undefined) {
-    throw new AcpConfigError(`acp command has an unclosed ${quote} quote`)
-  }
-  if (open) {
-    words.push(cur)
-  }
-  return words
 }
 
 /** The last bytes of peer stderr — the diagnostic that survives the

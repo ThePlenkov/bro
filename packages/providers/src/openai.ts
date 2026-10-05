@@ -13,6 +13,7 @@ import {
   mapUsage,
   objOr,
   postJson,
+  runKeyCommand,
   stripTrailingSlashes,
   type HttpResult,
 } from './http.ts'
@@ -27,6 +28,9 @@ type OpenAiCompatEntry = Extract<ProviderEntry, { type: 'openai-compat' }>
  *  all-caps pasted key passes isEnvName and would echo the secret
  *  verbatim. */
 function authHeaders(entry: OpenAiCompatEntry, keyField: string): Record<string, string> {
+  if (entry.apiKeyCommand !== undefined) {
+    return { authorization: `Bearer ${runKeyCommand(entry.apiKeyCommand, keyField)}` }
+  }
   if (entry.apiKeyEnv === undefined) {
     return {}
   }

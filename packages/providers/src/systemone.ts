@@ -17,6 +17,7 @@ import {
   mapUsage,
   objOr,
   postJson,
+  runKeyCommand,
   stripTrailingSlashes,
   type FetchFn,
   type HttpResult,
@@ -46,11 +47,15 @@ export interface ProviderWireOpts {
   acp?: AcpSeam
 }
 
-/** The configured key from its env var — a non-NAME apiKeyEnv is a
- *  config bug (throws, never echoed); a missing var is fail-open, and
- *  its message names the config FIELD, never the value. */
+/** The configured key — apiKeyCommand (secret-store lookup) wins over
+ *  apiKeyEnv; a non-NAME apiKeyEnv is a config bug (throws, never
+ *  echoed); a missing var is fail-open, and every message names the
+ *  config FIELD, never the value. */
 function apiKey(entry: SystemoneEntry, keyField: string): string {
-  if (!isEnvName(entry.apiKeyEnv)) {
+  if (entry.apiKeyCommand !== undefined) {
+    return runKeyCommand(entry.apiKeyCommand, keyField)
+  }
+  if (entry.apiKeyEnv === undefined || !isEnvName(entry.apiKeyEnv)) {
     throw new Error(`${keyField} is not a valid environment variable name`)
   }
   const key = process.env[entry.apiKeyEnv]

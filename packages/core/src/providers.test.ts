@@ -133,8 +133,8 @@ describe('PROVIDER_REGISTRY capability matrix', () => {
     assert.deepEqual(PROVIDER_REGISTRY.systemone, {
       call: 'typed',
       spawn: false,
-      required: ['apiKeyEnv', 'model'],
-      optional: ['baseUrl'],
+      required: ['model'],
+      optional: ['baseUrl', 'apiKeyEnv', 'apiKeyCommand'],
     })
     assert.equal(PROVIDER_REGISTRY['openai-compat'].call, 'prose')
     assert.equal(PROVIDER_REGISTRY['openai-compat'].spawn, false)
