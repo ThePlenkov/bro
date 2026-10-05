@@ -133,9 +133,32 @@ describe('systemoneJudge', () => {
       const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
       await assert.rejects(
         systemoneJudge(CFG, { fetch }).decide('s', { ...QUESTIONS }),
-        (e: unknown) => e instanceof JudgeUnavailable && /SYSTEMONE_TEST_KEY/.test((e as Error).message)
+        (e: unknown) => e instanceof JudgeUnavailable && /judge\.apiKeyEnv/.test((e as Error).message)
       )
       assert.equal(calls.length, 0)
+    }))
+
+  test('a pasted ALL-CAPS key in apiKeyEnv is never echoed in the missing-key message', () =>
+    withKey(async () => {
+      // MYAPPKEY123 passes isEnvName — the message must still not leak it
+      const prevPasted = process.env.MYAPPKEY123
+      delete process.env.MYAPPKEY123
+      try {
+        const pasted = { ...CFG, apiKeyEnv: 'MYAPPKEY123' }
+        const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
+        await assert.rejects(
+          systemoneJudge(pasted, { fetch }).decide('s', { ...QUESTIONS }),
+          (e: unknown) =>
+            e instanceof JudgeUnavailable && !/MYAPPKEY123/.test((e as Error).message)
+        )
+        assert.equal(calls.length, 0)
+      } finally {
+        if (prevPasted === undefined) {
+          delete process.env.MYAPPKEY123
+        } else {
+          process.env.MYAPPKEY123 = prevPasted
+        }
+      }
     }))
 
   test('401/403 are JudgeUnavailable; 422 is the caller\'s bug — a plain error', () =>

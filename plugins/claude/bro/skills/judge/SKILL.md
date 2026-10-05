@@ -43,7 +43,9 @@ linked worktrees, nothing lands in git): act/drive thread annotation
 as `kind: 'act-thread'` rows, `bro judge decide` smoke calls as
 `kind: 'judge-decide'` (kept out of the triage agreement set), plus
 `kind: 'act-disposition'` rows where `bro act resolve/reply` or an act
-plan applies a verdict.
+plan applies a verdict. Journaling needs a git repo — outside one
+there is no common dir, the append is a silent no-op, and verdicts are
+not journaled.
 
 `bro act threads` and the drive fixer prompt render a `judge:` line
 beside each unresolved thread — `blocks_correctness`, `severity`,

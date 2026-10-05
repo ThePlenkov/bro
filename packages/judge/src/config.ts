@@ -53,8 +53,9 @@ const JUDGE_MODES = ['off', 'shadow'] as const
 
 /** Env var NAME sanity — `apiKeyEnv` names a variable, never holds the
  *  key value. Names must be SCREAMING_SNAKE: a pasted key value
- *  (`ts_live_…`, `sk-…`) fails here, so the name is always safe to
- *  echo back in a missing-key error. */
+ *  (`ts_live_…`, `sk-…`) fails here — but an ALL-CAPS key passes too,
+ *  so a validated name is still never echoed back in a missing-key
+ *  message (it may be the secret itself). */
 export const isEnvName = (v: string): boolean => /^[A-Z_][A-Z0-9_]*$/.test(v)
 
 const str = (v: unknown): string | undefined =>
