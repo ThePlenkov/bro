@@ -13,7 +13,15 @@
 import { spawnSync } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
-import { bdTry, gitTry, probeBdCompat, probeConfigFile } from '@broject/core'
+import {
+  bdTry,
+  gitTry,
+  janitorDidWork,
+  janitorLine,
+  probeBdCompat,
+  probeConfigFile,
+  runJanitor,
+} from '@broject/core'
 import { loadBroConfig, pluginConfigSections } from '../plugins.ts'
 
 export type DoctorStatus = 'ok' | 'warn' | 'fail' | 'skip'
@@ -356,6 +364,24 @@ function remoteChecks(
   return out
 }
 
+/** Janitor probe — a dry run over `<git-common>/bro/` reporting the
+ *  retention debris the next `bro watch` tick would reap. Probes stay
+ *  read-only: this counts, it never unlinks (bro-f6zp). */
+function checkJanitor(dir: string): DoctorCheck | null {
+  let r
+  try {
+    r = runJanitor(dir, { dryRun: true })
+  } catch {
+    return check('janitor', 'ok', 'probe failed — reaping still runs on `bro watch` ticks')
+  }
+  if (r === null || !janitorDidWork(r)) {
+    return check('janitor', 'ok', 'no retention debris')
+  }
+  // pending debris is routine, not a defect — the line says what the
+  // next watch tick removes
+  return check('janitor', 'ok', janitorLine(r))
+}
+
 export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
   const checks: DoctorCheck[] = [checkNode()]
 
@@ -386,6 +412,10 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
 
   checks.push(checkHooks(dir))
   checks.push(checkConfig([dir, root, mainRoot(dir)].filter((d): d is string => d !== null)))
+  const janitor = checkJanitor(dir)
+  if (janitor !== null) {
+    checks.push(janitor)
+  }
   checks.push(...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found))
 
   return checks

@@ -53,8 +53,9 @@ const lockStealable = (path: string): boolean => {
  *  at `lock` atomically, `verify` re-checks THAT instance — a fresh
  *  replacement swapped in mid-race is put back instead of unlinked.
  *  (A plain read-then-rm can delete a lock that was stolen-and-
- *  recreated between the check and the remove.) */
-const removeCaptured = (lock: string, verify: (captured: string) => boolean): void => {
+ *  recreated between the check and the remove.) True when the
+ *  captured instance passed verification and was dropped. */
+const removeCaptured = (lock: string, verify: (captured: string) => boolean): boolean => {
   const dest = `${lock}.cap-${process.pid}-${randomBytes(4).toString('hex')}`
   const drop = (): void => {
     try {
@@ -67,7 +68,7 @@ const removeCaptured = (lock: string, verify: (captured: string) => boolean): vo
   try {
     renameSync(lock, dest)
   } catch {
-    return // already gone or renamed by a contender — the retry decides
+    return false // already gone or renamed by a contender — the retry decides
   }
   let ok = false
   try {
@@ -77,13 +78,14 @@ const removeCaptured = (lock: string, verify: (captured: string) => boolean): vo
   }
   if (ok) {
     drop()
-    return
+    return true
   }
   try {
     renameSync(dest, lock)
   } catch {
     drop() // a new lock already sits there — drop the captured
   }
+  return false
 }
 
 /** Steal a held lock once its instance proves stale. The pre-check on
@@ -237,4 +239,24 @@ export function withFileLock<T>(lock: string, fn: () => T, opts: FileLockOptions
   } finally {
     release()
   }
+}
+
+/** Would a contender steal the instance at `lock`? Dead owner, or a
+ *  live hold past the abandoned bound — the system's own staleness
+ *  test, exported so reapers judge a lock by the rule its contenders
+ *  already apply (bro-f6zp). */
+export function staleLock(lock: string): boolean {
+  return lockStealable(lock)
+}
+
+/** Remove `lock` when its instance proves stealable — the same
+ *  capture-then-check as a contender's steal: the file is renamed
+ *  aside, the CAPTURED instance re-verified, and a live replacement
+ *  swapped in mid-race is put back rather than unlinked. True only
+ *  when this call dropped a provably stale instance. */
+export function reapStaleLock(lock: string): boolean {
+  if (!lockStealable(lock)) {
+    return false
+  }
+  return removeCaptured(lock, lockStealable)
 }
