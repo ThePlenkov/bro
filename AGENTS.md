@@ -104,3 +104,10 @@ nohup: an unregistered worker has no claim, no `.exit` record, no
   run` already supervises its own spawns to a verdict — hand a mol list
   to it instead of babysitting. Never promise "I'll report when it
   lands" from a foreground wait.
+
+## Cursor Cloud specific instructions
+
+- **Node on PATH:** the platform shim may expose Node <22.18. `scripts/cloud-agent-install.sh` installs Node ≥22.18 into `/usr/local/bin`; prefer `export PATH="/usr/local/bin:$PATH"` (or rely on `install`) before `node`, `npm`, or `bro`.
+- **Bootstrap:** `bash scripts/cloud-agent-install.sh` (same as `.cursor/environment.json` `install`) — `npm ci`, global `@beads/bd` when missing.
+- **Verify like CI:** `npm run build`, `npm run typecheck`, `npm test` (root `package.json`; matches `.github/workflows/ci.yml` plus `check:plugins` / `check:embedded`).
+- **Smoke the CLI:** after build, `./packages/cli/dist/index.js doctor` and `./packages/cli/dist/index.js debt status` (needs `gh` authenticated).
