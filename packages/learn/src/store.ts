@@ -114,7 +114,8 @@ export function listLessons(cwd?: string): LessonListing {
 export async function listLessonsAsync(cwd?: string): Promise<LessonListing> {
   const res = await bdTryAsync(['kv', 'list', '--json'], 15_000, cwd)
   if (res.code !== 0) {
-    throw new LessonStoreError(`bd kv list failed — ${res.err || `exit ${res.code}`}`)
+    const detail = res.err !== '' ? res.err : `exit ${res.code}`
+    throw new LessonStoreError(`bd kv list failed — ${detail}`)
   }
   let map: Record<string, unknown>
   try {

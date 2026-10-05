@@ -28,7 +28,7 @@ import type { JudgeFacade } from './judge.ts'
 import type { ReviewFacade } from './review.ts'
 import type { SpecStore } from './specs.ts'
 import type { TaskRow, TaskStore, TaskStoreAsync } from './tasks.ts'
-import { bdActor, bdActorAsync, taskStore, taskStoreAsync } from './tasks.ts'
+import { bdActorAsync, taskStore, taskStoreAsync } from './tasks.ts'
 
 export interface ConnectorCtx {
   /** Working dir — repo root for project-scoped facades, the resolved
@@ -520,14 +520,17 @@ export const PROBE_TIMEOUT_MS = 4_000
  *  from a probe that genuinely answered `undefined`. */
 const PROBE_TIMED_OUT: unique symbol = Symbol('probe-timed-out')
 
-async function probeWithTimeout<T>(p: MaybePromise<T>, fallback: T): Promise<T> {
+async function probeWithTimeout<T>(p: () => MaybePromise<T>, fallback: T): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<T>((resolve) => {
     timer = setTimeout(() => resolve(fallback), PROBE_TIMEOUT_MS)
     timer.unref?.()
   })
   try {
-    return await Promise.race([Promise.resolve(p), timeout])
+    // The thunk runs AFTER the timer is armed — for a sync probe that's
+    // still a blocking call no timer can preempt, but the budget is at
+    // least honest about what it measured.
+    return await Promise.race([Promise.resolve().then(p), timeout])
   } finally {
     clearTimeout(timer)
   }
@@ -572,7 +575,7 @@ async function collectLines(
       const t0 = Date.now()
       try {
         const r = await probeWithTimeout<string[] | undefined | typeof PROBE_TIMED_OUT>(
-          probe(hooks),
+          () => probe(hooks),
           PROBE_TIMED_OUT
         )
         return {
@@ -656,7 +659,7 @@ export async function stopGateContributions(
       try {
         const r = await probeWithTimeout<
           GateContribution[] | undefined | typeof PROBE_TIMED_OUT
-        >(hooks.stopGate?.(ctx), PROBE_TIMED_OUT)
+        >(() => hooks.stopGate?.(ctx), PROBE_TIMED_OUT)
         return {
           contributions: r === PROBE_TIMED_OUT ? [] : (r ?? []),
           timing: {

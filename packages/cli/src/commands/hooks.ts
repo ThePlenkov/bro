@@ -1195,50 +1195,44 @@ interface PerfAgg {
   bad: number
 }
 
-/** `bro hooks perf [--session <id>] [--json]` — aggregate the perf
- *  journals: per event×probe×connector count/avg/max plus the event
- *  totals. Operator command — reads the journal dir, never stdin. */
-function runPerf(argv: string[]): void {
-  const args = argv.slice(1)
-  const json = args.includes('--json')
-  const si = args.indexOf('--session')
-  const sessionFilter = si >= 0 ? args[si + 1] : undefined
-  const dir = hooksStateDir()
-  const perfDir = dir ? join(dir, 'perf') : null
+/** Read the journal rows under perfDir — a session filter narrows to
+ *  that session's file; a torn write skips itself, not the report. */
+function readPerfRows(perfDir: string | null, sessionFilter?: string): PerfRow[] {
   const rows: PerfRow[] = []
-  if (perfDir && existsSync(perfDir)) {
-    for (const f of readdirSync(perfDir)) {
-      if (!f.endsWith('.jsonl')) {
+  if (!perfDir || !existsSync(perfDir)) {
+    return rows
+  }
+  const wanted =
+    sessionFilter === undefined
+      ? undefined
+      : `${sessionFilter.replace(/[^\w.-]/g, '_')}.jsonl`
+  for (const f of readdirSync(perfDir)) {
+    if (!f.endsWith('.jsonl') || (wanted !== undefined && f !== wanted)) {
+      continue
+    }
+    for (const line of readFileSync(join(perfDir, f), 'utf8').split('\n')) {
+      if (line.trim() === '') {
         continue
       }
-      if (sessionFilter && f !== `${sessionFilter.replace(/[^\w.-]/g, '_')}.jsonl`) {
-        continue
-      }
-      for (const line of readFileSync(join(perfDir, f), 'utf8').split('\n')) {
-        if (line.trim() === '') {
-          continue
-        }
-        try {
-          rows.push(JSON.parse(line) as PerfRow)
-        } catch {
-          // a torn write skips itself, not the report
-        }
+      try {
+        rows.push(JSON.parse(line) as PerfRow)
+      } catch {
+        // a torn write skips itself, not the report
       }
     }
   }
-  if (json) {
-    console.log(JSON.stringify({ rows }, null, 2))
-    return
-  }
-  if (rows.length === 0) {
-    console.log('no perf rows yet — hook events journal to bro/hooks/perf/')
-    return
-  }
+  return rows
+}
+
+/** Count/avg/max per key — probe rows keyed event+probe+connector,
+ *  event totals keyed by event alone. */
+function perfAggs(rows: PerfRow[]): { probes: Map<string, PerfAgg>; totals: Map<string, PerfAgg> } {
   const probes = new Map<string, PerfAgg>()
   const totals = new Map<string, PerfAgg>()
   for (const r of rows) {
-    const key = r.probe === undefined ? `${r.event}` : `${r.event} ${r.probe} ${r.connector}`
-    const map = r.probe === undefined ? totals : probes
+    const isTotal = r.probe === undefined
+    const key = isTotal ? `${r.event}` : `${r.event} ${r.probe} ${r.connector}`
+    const map = isTotal ? totals : probes
     const a = map.get(key) ?? { n: 0, sum: 0, max: 0, bad: 0 }
     a.n++
     a.sum += r.ms
@@ -1248,19 +1242,46 @@ function runPerf(argv: string[]): void {
     }
     map.set(key, a)
   }
-  const fmt = (a: PerfAgg): string => `${a.n} avg:${Math.round(a.sum / a.n)} max:${a.max}`
-  const rowsOut: string[] = []
-  for (const [k, a] of [...probes.entries()].sort((x, y) => y[1].max - x[1].max)) {
-    rowsOut.push(`  ${k.padEnd(58)} ${fmt(a)}${a.bad > 0 ? ` bad:${a.bad}` : ''}`)
+  return { probes, totals }
+}
+
+const fmtAgg = (a: PerfAgg): string => `${a.n} avg:${Math.round(a.sum / a.n)} max:${a.max}`
+
+/** Worst-max-first report lines — `bad` flags probes that timed out or
+ *  threw; totals have no bad dimension. */
+function aggLines(map: Map<string, PerfAgg>, showBad: boolean): string[] {
+  return [...map.entries()]
+    .sort((x, y) => y[1].max - x[1].max)
+    .map(([k, a]) => {
+      const bad = showBad && a.bad > 0 ? ` bad:${a.bad}` : ''
+      return `  ${k.padEnd(58)} ${fmtAgg(a)}${bad}`
+    })
+}
+
+/** `bro hooks perf [--session <id>] [--json]` — aggregate the perf
+ *  journals: per event×probe×connector count/avg/max plus the event
+ *  totals. Operator command — reads the journal dir, never stdin. */
+function runPerf(argv: string[]): void {
+  const args = argv.slice(1)
+  const json = args.includes('--json')
+  const si = args.indexOf('--session')
+  const sessionFilter = si >= 0 ? args[si + 1] : undefined
+  const dir = hooksStateDir()
+  const rows = readPerfRows(dir ? join(dir, 'perf') : null, sessionFilter)
+  if (json) {
+    console.log(JSON.stringify({ rows }, null, 2))
+    return
   }
+  if (rows.length === 0) {
+    console.log('no perf rows yet — hook events journal to bro/hooks/perf/')
+    return
+  }
+  const { probes, totals } = perfAggs(rows)
+  const probeLines = aggLines(probes, true)
   console.log('per-probe (event probe connector → n avg max):')
-  console.log(rowsOut.length > 0 ? rowsOut.join('\n') : '  (none)')
-  const totalsOut: string[] = []
-  for (const [k, a] of [...totals.entries()].sort((x, y) => y[1].max - x[1].max)) {
-    totalsOut.push(`  ${k.padEnd(58)} ${fmt(a)}`)
-  }
+  console.log(probeLines.length > 0 ? probeLines.join('\n') : '  (none)')
   console.log('totals (event → n avg max):')
-  console.log(totalsOut.join('\n'))
+  console.log(aggLines(totals, false).join('\n'))
 }
 
 // --- dispatch -----------------------------------------------------------------
