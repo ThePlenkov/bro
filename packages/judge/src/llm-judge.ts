@@ -171,7 +171,10 @@ function unconfigured(): never {
 }
 
 /** Auth headers from the configured env var — a non-NAME apiKeyEnv is
- *  a config bug (throws, never echoed); a missing var is fail-open. */
+ *  a config bug (throws, never echoed); a missing var is fail-open,
+ *  and its message names the config FIELD, never the value — an
+ *  all-caps pasted key passes isEnvName and would echo the secret
+ *  verbatim. */
 function authHeaders(llm: JudgeLlmConfig): Record<string, string> {
   if (llm.apiKeyEnv === undefined) {
     return {}
@@ -181,7 +184,9 @@ function authHeaders(llm: JudgeLlmConfig): Record<string, string> {
   }
   const key = process.env[llm.apiKeyEnv]
   if (key === undefined || key === '') {
-    throw new JudgeUnavailable(`${llm.apiKeyEnv} is not set — export it for llm-judge`)
+    throw new JudgeUnavailable(
+      'the env var named by judge.llm.apiKeyEnv is not set — export it for llm-judge'
+    )
   }
   return { authorization: `Bearer ${key}` }
 }
@@ -300,7 +305,7 @@ export const llmJudgeConnector: Connector = {
       return 'judge.llm.apiKeyEnv is not a valid environment variable name'
     }
     return apiKeyEnv !== undefined && !process.env[apiKeyEnv]
-      ? `${apiKeyEnv} is not set — export it for llm-judge`
+      ? 'the env var named by judge.llm.apiKeyEnv is not set — export it for llm-judge'
       : null
   },
   judge: (ctx) => llmJudge(judgeConfig(ctx.dir).judge),

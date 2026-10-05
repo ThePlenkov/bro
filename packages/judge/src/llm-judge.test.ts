@@ -164,7 +164,10 @@ describe('llmJudge', () => {
       const { fetch, calls } = fakeFetch(200, chatBody({}))
       await assert.rejects(
         llmJudge(CFG, { fetch }).decide('s', { ...QUESTIONS }),
-        JudgeUnavailable
+        (e: unknown) =>
+          // the message names the config field, never the configured
+          // value — an all-caps pasted key would echo the secret
+          e instanceof JudgeUnavailable && !/LLM_TEST_KEY/.test((e as Error).message)
       )
       assert.equal(calls.length, 0)
     }))

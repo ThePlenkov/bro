@@ -131,7 +131,9 @@ export interface SystemoneJudgeOpts {
 }
 
 /** The configured key from its env var — a non-NAME apiKeyEnv is a
- *  config bug (throws, never echoed); a missing var is fail-open. */
+ *  config bug (throws, never echoed); a missing var is fail-open, and
+ *  its message names the config FIELD, never the value — an all-caps
+ *  pasted key passes isEnvName and would echo the secret verbatim. */
 function apiKey(cfg: JudgeConfig): string {
   if (!isEnvName(cfg.apiKeyEnv)) {
     throw new Error('judge.apiKeyEnv is not a valid environment variable name')
@@ -139,7 +141,7 @@ function apiKey(cfg: JudgeConfig): string {
   const key = process.env[cfg.apiKeyEnv]
   if (key === undefined || key === '') {
     throw new JudgeUnavailable(
-      `${cfg.apiKeyEnv} is not set — export a TypeSafe API key (https://docs.typesafe.ai)`
+      `the env var named by judge.apiKeyEnv is not set — export a TypeSafe API key (https://docs.typesafe.ai)`
     )
   }
   return key
@@ -228,7 +230,7 @@ export const systemoneConnector: Connector = {
     }
     return process.env[apiKeyEnv]
       ? null
-      : `${apiKeyEnv} is not set — export a TypeSafe API key (https://docs.typesafe.ai)`
+      : 'the env var named by judge.apiKeyEnv is not set — export a TypeSafe API key (https://docs.typesafe.ai)'
   },
   judge: (ctx) => systemoneJudge(judgeConfig(ctx.dir).judge),
 }

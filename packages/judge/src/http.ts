@@ -45,7 +45,7 @@ export const clamp01 = (v: number): number => Math.min(1, Math.max(0, v))
  *  configured URL trips the polynomial-regex scanner; a walk can't. */
 export function stripTrailingSlashes(s: string): string {
   let end = s.length
-  while (end > 0 && s.charCodeAt(end - 1) === 47) {
+  while (end > 0 && s.codePointAt(end - 1) === 47) {
     end -= 1
   }
   return s.slice(0, end)
