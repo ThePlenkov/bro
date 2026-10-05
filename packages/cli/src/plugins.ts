@@ -112,7 +112,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'convoy',
-    summary: 'Convoy execution over beads molecules: status|next|done|pour|list',
+    summary: 'Convoy execution over beads molecules: status|next|done|pour|list|run',
     run: runConvoyCommand,
     skill: 'convoy',
     planSchema: (doc, source) => parseConvoyPlan(doc, source),

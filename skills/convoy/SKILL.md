@@ -26,6 +26,8 @@ bro convoy status [mol]       → DAG: ✓ done / ▸ ready / · blocked
 bro convoy next   [mol]       → JSON: what to do now
 bro convoy claim <step-id>            → atomic claim — do this before starting
 bro convoy done <step-id> --result "…"   → closes the step, emits the new next
+bro convoy run <mol>… [--open]        → the queue — a convoy-runner agent per
+                                      mol through the facade, to 'complete'
 ```
 
 Repeat `next` → `claim` → work → `done` until `next` reports
@@ -56,6 +58,26 @@ starting the step.
 
 With several open molecules, pass `--mol <id>` explicitly — no-arg
 resolution errors on ambiguity rather than guessing.
+
+## The queue — `bro convoy run`
+
+`run` is the in-session loop above as a **detached worker**: one
+convoy-runner agent per molecule, spawned through the agents facade
+(registry entry, pinned prompt/log/exit, shared-beads claim on the mol
+root — `bro agents status`/`bro fleet`/`bro watch` see it). Sequential
+like the mol-queue script it replaced; `fleet.maxConcurrent` still
+applies at spawn.
+
+- `--attempts N` (4) bounds crash retries per mol — over it, the mol is
+  `failed` and the queue moves on.
+- `rate_limited` with a provider `resetAt` waits the reset out (no
+  attempt burned); `quota`/no-reset walls and operator `down`s are
+  `parked`/`stopped` verdicts — reported, never retried.
+- A mol already claimed by a live worker reads `occupied` — skipped,
+  never double-run. A mol that ends on a human gate reads `gated`.
+- Run it detached for real queues (`nohup`/`systemd-run`/tmux) — it is
+  a supervisor loop like `bro drive --every`, and exit 1 means some mol
+  exhausted attempts.
 
 ## Policy
 
