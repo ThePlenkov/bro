@@ -206,7 +206,7 @@ describe('bro judge stats', () => {
             choice: 'resolve',
             probabilities: {},
             confidence: 0.9,
-            decidedBy: 'jev',
+            decidedBy: 'systemone',
           },
         },
         model: 'jev-1.13.0',

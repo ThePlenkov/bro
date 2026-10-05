@@ -2,15 +2,15 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { JudgeUnavailable } from '@broject/core'
 import type { JudgeQuestion } from '@broject/core'
-import { jevJudge } from './jev.ts'
+import { systemoneJudge } from './systemone.ts'
 import type { JudgeConfig } from './config.ts'
 import type { FetchFn } from './http.ts'
 
 const CFG: JudgeConfig = {
   mode: 'off',
   model: 'jev-test',
-  baseUrl: 'https://jev.example/api',
-  apiKeyEnv: 'JEV_TEST_KEY',
+  baseUrl: 'https://systemone.example/api',
+  apiKeyEnv: 'SYSTEMONE_TEST_KEY',
   confidence: 0.6,
   timeoutMs: 3_000,
   maxDecisionsPerRun: 50,
@@ -73,30 +73,30 @@ const OK_BODY = {
 }
 
 function withKey(fn: () => Promise<void>): Promise<void> {
-  const prev = process.env.JEV_TEST_KEY
-  process.env.JEV_TEST_KEY = 'ts_live_test'
+  const prev = process.env.SYSTEMONE_TEST_KEY
+  process.env.SYSTEMONE_TEST_KEY = 'ts_live_test'
   return fn().finally(() => {
     if (prev === undefined) {
-      delete process.env.JEV_TEST_KEY
+      delete process.env.SYSTEMONE_TEST_KEY
     } else {
-      process.env.JEV_TEST_KEY = prev
+      process.env.SYSTEMONE_TEST_KEY = prev
     }
   })
 }
 
-describe('jevJudge', () => {
+describe('systemoneJudge', () => {
   test('maps the three answer types; noul confidence is derived', () =>
     withKey(async () => {
       const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
-      const res = await jevJudge(CFG, { fetch }).decide('state text', { ...QUESTIONS })
+      const res = await systemoneJudge(CFG, { fetch }).decide('state text', { ...QUESTIONS })
       assert.equal(calls.length, 1)
-      assert.equal(calls[0]!.url, 'https://jev.example/api/v1/systemone')
+      assert.equal(calls[0]!.url, 'https://systemone.example/api/v1/systemone')
       assert.equal(calls[0]!.init.headers?.authorization, 'Bearer ts_live_test')
       const route = res.answers.route!
       assert.equal(route.type, 'choice')
       assert.equal((route as { choice: string }).choice, 'a')
       assert.equal(route.confidence, 0.81)
-      assert.equal(route.decidedBy, 'jev')
+      assert.equal(route.decidedBy, 'systemone')
       const urg = res.answers.urgency!
       assert.equal(urg.type, 'score')
       assert.equal((urg as { score: number }).score, 0.9)
@@ -114,13 +114,13 @@ describe('jevJudge', () => {
   test('the wire always carries the configured model — the API requires it', () =>
     withKey(async () => {
       const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
-      await jevJudge(CFG, { fetch }).decide('s', { ...QUESTIONS })
+      await systemoneJudge(CFG, { fetch }).decide('s', { ...QUESTIONS })
       assert.equal(
         (JSON.parse(calls[0]!.init.body!) as { model?: string }).model,
         'jev-test'
       )
       const pinned = { ...CFG, model: 'jev-1.13.0' }
-      await jevJudge(pinned, { fetch }).decide('s', { ...QUESTIONS })
+      await systemoneJudge(pinned, { fetch }).decide('s', { ...QUESTIONS })
       assert.equal(
         (JSON.parse(calls[1]!.init.body!) as { model?: string }).model,
         'jev-1.13.0'
@@ -129,11 +129,11 @@ describe('jevJudge', () => {
 
   test('missing API key fails open — no request leaves the process', () =>
     withKey(async () => {
-      delete process.env.JEV_TEST_KEY
+      delete process.env.SYSTEMONE_TEST_KEY
       const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
       await assert.rejects(
-        jevJudge(CFG, { fetch }).decide('s', { ...QUESTIONS }),
-        (e: unknown) => e instanceof JudgeUnavailable && /JEV_TEST_KEY/.test((e as Error).message)
+        systemoneJudge(CFG, { fetch }).decide('s', { ...QUESTIONS }),
+        (e: unknown) => e instanceof JudgeUnavailable && /SYSTEMONE_TEST_KEY/.test((e as Error).message)
       )
       assert.equal(calls.length, 0)
     }))
@@ -147,7 +147,7 @@ describe('jevJudge', () => {
       ] as const) {
         const { fetch } = fakeFetch({ status, body: { error: 'nope' } })
         await assert.rejects(
-          jevJudge(CFG, { fetch }).decide('s', { ...QUESTIONS }),
+          systemoneJudge(CFG, { fetch }).decide('s', { ...QUESTIONS }),
           (e: unknown) =>
             kind === 'unavailable'
               ? e instanceof JudgeUnavailable
@@ -165,7 +165,7 @@ describe('jevJudge', () => {
         body: { model: 'm', answers: { route: { type: 'noul', noul: 0.9 } } },
       })
       await assert.rejects(
-        jevJudge(CFG, { fetch }).decide('s', { route: QUESTIONS.route }),
+        systemoneJudge(CFG, { fetch }).decide('s', { route: QUESTIONS.route }),
         JudgeUnavailable
       )
       // an off-criteria choice likewise
@@ -179,7 +179,7 @@ describe('jevJudge', () => {
         },
       })
       await assert.rejects(
-        jevJudge(CFG, { fetch: off.fetch }).decide('s', { route: QUESTIONS.route }),
+        systemoneJudge(CFG, { fetch: off.fetch }).decide('s', { route: QUESTIONS.route }),
         JudgeUnavailable
       )
     }))
@@ -192,14 +192,14 @@ describe('jevJudge', () => {
           { status, body: {} },
           { status: 200, body: OK_BODY }
         )
-        const res = await jevJudge(CFG, { fetch }).decide('s', { ...QUESTIONS })
+        const res = await systemoneJudge(CFG, { fetch }).decide('s', { ...QUESTIONS })
         assert.equal(calls.length, 2)
         assert.equal(res.model, 'jev-1.13.0')
       }
 
       const dead = fakeFetch({ status: 502, body: {} })
       await assert.rejects(
-        jevJudge(CFG, { fetch: dead.fetch }).decide('s', { ...QUESTIONS }),
+        systemoneJudge(CFG, { fetch: dead.fetch }).decide('s', { ...QUESTIONS }),
         JudgeUnavailable
       )
       assert.equal(dead.calls.length, 3)
@@ -212,7 +212,7 @@ describe('jevJudge', () => {
         body: { model: 'm', answers: { escalate: { type: 'noul' } } },
       })
       await assert.rejects(
-        jevJudge(CFG, { fetch }).decide('s', { escalate: QUESTIONS.escalate }),
+        systemoneJudge(CFG, { fetch }).decide('s', { escalate: QUESTIONS.escalate }),
         JudgeUnavailable
       )
     }))
@@ -221,7 +221,7 @@ describe('jevJudge', () => {
     withKey(async () => {
       const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
       await assert.rejects(
-        jevJudge(CFG, { fetch }).decideWithin('s', { ...QUESTIONS }, Date.now() - 1),
+        systemoneJudge(CFG, { fetch }).decideWithin('s', { ...QUESTIONS }, Date.now() - 1),
         JudgeUnavailable
       )
       assert.equal(calls.length, 0)

@@ -1,6 +1,6 @@
 ---
 name: judge
-description: "Use when judging calibrated decisions for agent loops — act triage annotation, fallback escalation. Thin wrapper over the bro CLI: `bro judge decide` smokes the connector; the jev → llm-judge chain lives in packages/judge. Requires `bro` (npx -y @broject/bro@0); the default jev backend needs a TypeSafe API key, llm-judge needs its own `judge.llm` config."
+description: "Use when judging calibrated decisions for agent loops — act triage annotation, fallback escalation. Thin wrapper over the bro CLI: `bro judge decide` smokes the connector; the systemone → llm-judge chain lives in packages/judge. Requires `bro` (npx -y @broject/bro@0); the default systemone backend needs a TypeSafe API key, llm-judge needs its own `judge.llm` config."
 ---
 
 # /judge (bro)
@@ -14,7 +14,7 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`.
 A calibrated decision judge for agent loops — typed questions
 (`choice`/`score`/`noul`) over a compact state, typed answers with
 confidence back, sub-second, priced in fractions of a cent. The primary
-backend is **jev** — TypeSafe's System One API (`POST
+backend is **systemone** — TypeSafe's System One API (`POST
 {judge.baseUrl}/v1/systemone`, `Authorization: Bearer
 $<judge.apiKeyEnv>` — the var named by `judge.apiKeyEnv`,
 `TYPESAFE_API_KEY` by default; `TYPESAFE_BASE_URL` overrides the base);

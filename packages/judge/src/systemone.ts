@@ -1,5 +1,5 @@
 /**
- * The `jev` connector — TypeSafe's System One API as a JudgeFacade
+ * The `systemone` connector — TypeSafe's System One API as a JudgeFacade
  * (spec: specs/sessions/bro-f4ot.2-judge.md, contract per
  * https://docs.typesafe.ai/api.md). POST {baseUrl}/v1/systemone with
  * Bearer $TYPESAFE_API_KEY (env var only, never in config; base URL
@@ -32,7 +32,7 @@ import {
   type HttpResult,
 } from './http.ts'
 
-const JEV_NAME = 'jev'
+const SYSTEMONE_NAME = 'systemone'
 
 interface RawAnswer {
   type?: unknown
@@ -63,12 +63,12 @@ function deriveConfidence(v: unknown, probs: unknown): number {
  *  caller's question key (not sent to the model). */
 function mapAnswer(qid: string, q: JudgeQuestion, raw: unknown): JudgeAnswer {
   if (typeof raw !== 'object' || raw === null) {
-    throw new JudgeUnavailable(`jev returned a malformed answer for "${qid}"`)
+    throw new JudgeUnavailable(`systemone returned a malformed answer for "${qid}"`)
   }
   const a = raw as RawAnswer
   if (a.type !== q.type) {
     throw new JudgeUnavailable(
-      `jev answered "${qid}" with type ${JSON.stringify(a.type)} — expected ${q.type}`
+      `systemone answered "${qid}" with type ${JSON.stringify(a.type)} — expected ${q.type}`
     )
   }
   switch (a.type) {
@@ -86,7 +86,7 @@ function mapAnswer(qid: string, q: JudgeQuestion, raw: unknown): JudgeAnswer {
         choice: a.choice,
         probabilities: a.probabilities,
         confidence: deriveConfidence(a.confidence, a.probabilities),
-        decidedBy: JEV_NAME,
+        decidedBy: SYSTEMONE_NAME,
       }
     }
     case 'score': {
@@ -105,7 +105,7 @@ function mapAnswer(qid: string, q: JudgeQuestion, raw: unknown): JudgeAnswer {
         score: a.score,
         probabilities: a.probabilities,
         confidence: deriveConfidence(a.confidence, a.probabilities),
-        decidedBy: JEV_NAME,
+        decidedBy: SYSTEMONE_NAME,
       }
     }
     case 'noul': {
@@ -116,16 +116,16 @@ function mapAnswer(qid: string, q: JudgeQuestion, raw: unknown): JudgeAnswer {
       return {
         type: 'noul',
         noul: a.noul,
-        // derived — jev returns only P(yes); a confident no is confident
+        // derived — the API returns only P(yes); a confident no is confident
         confidence: Math.max(a.noul, 1 - a.noul),
-        decidedBy: JEV_NAME,
+        decidedBy: SYSTEMONE_NAME,
       }
     }
   }
-  throw new JudgeUnavailable(`jev returned a malformed answer for "${qid}"`)
+  throw new JudgeUnavailable(`systemone returned a malformed answer for "${qid}"`)
 }
 
-export interface JevJudgeOpts {
+export interface SystemoneJudgeOpts {
   /** Test seam — injects a scripted transport. */
   fetch?: FetchFn
 }
@@ -145,7 +145,7 @@ function apiKey(cfg: JudgeConfig): string {
   return key
 }
 
-/** jev's error contract → the throw the caller sees: 401/403 auth is
+/** System One's error contract → the throw the caller sees: 401/403 auth is
  *  "unavailable" (fail-open — never a gate input), 422 validation is
  *  the caller's bug (a plain error, not fail-open), everything else is
  *  the service being down. */
@@ -159,16 +159,16 @@ function throwForStatus(res: HttpResult): never {
     detail = errObj.message
   }
   if (res.status === 401 || res.status === 403) {
-    throw new JudgeUnavailable(`jev auth failed — ${detail}`)
+    throw new JudgeUnavailable(`systemone auth failed — ${detail}`)
   }
   if (res.status === 422) {
     // validation — the caller's payload, not an outage
-    throw new Error(`jev rejected the request — ${detail}`)
+    throw new Error(`systemone rejected the request — ${detail}`)
   }
-  throw new JudgeUnavailable(`jev unavailable — ${detail}`)
+  throw new JudgeUnavailable(`systemone unavailable — ${detail}`)
 }
 
-export function jevJudge(cfg: JudgeConfig, opts: JevJudgeOpts = {}): DeadlineJudge {
+export function systemoneJudge(cfg: JudgeConfig, opts: SystemoneJudgeOpts = {}): DeadlineJudge {
   const base = process.env.TYPESAFE_BASE_URL ?? cfg.baseUrl
   const endpoint = `${stripTrailingSlashes(base)}/v1/systemone`
   async function decideWithin(
@@ -193,7 +193,7 @@ export function jevJudge(cfg: JudgeConfig, opts: JevJudgeOpts = {}): DeadlineJud
     const body = objOr(res.body)
     const rawAnswers = body.answers
     if (typeof rawAnswers !== 'object' || rawAnswers === null) {
-      throw new JudgeUnavailable('jev returned no answers map')
+      throw new JudgeUnavailable('systemone returned no answers map')
     }
     const answers: Record<string, JudgeAnswer> = {}
     // map only asked questions — an unasked id in the reply is drift
@@ -219,8 +219,8 @@ export function jevJudge(cfg: JudgeConfig, opts: JevJudgeOpts = {}): DeadlineJud
   return deadlineJudge(cfg.timeoutMs, decideWithin)
 }
 
-export const jevConnector: Connector = {
-  name: JEV_NAME,
+export const systemoneConnector: Connector = {
+  name: SYSTEMONE_NAME,
   auth(ctx) {
     const { apiKeyEnv } = judgeConfig(ctx.dir).judge
     if (!isEnvName(apiKeyEnv)) {
@@ -230,5 +230,5 @@ export const jevConnector: Connector = {
       ? null
       : `${apiKeyEnv} is not set — export a TypeSafe API key (https://docs.typesafe.ai)`
   },
-  judge: (ctx) => jevJudge(judgeConfig(ctx.dir).judge),
+  judge: (ctx) => systemoneJudge(judgeConfig(ctx.dir).judge),
 }

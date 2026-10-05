@@ -9,8 +9,8 @@ import type { FetchFn } from './http.ts'
 const CFG: JudgeConfig = {
   mode: 'off',
   model: 'jev-test',
-  baseUrl: 'https://jev.example/api',
-  apiKeyEnv: 'JEV_TEST_KEY',
+  baseUrl: 'https://systemone.example/api',
+  apiKeyEnv: 'SYSTEMONE_TEST_KEY',
   confidence: 0.6,
   timeoutMs: 3_000,
   maxDecisionsPerRun: 50,

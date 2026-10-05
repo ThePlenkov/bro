@@ -63,7 +63,7 @@ const ANSWERS: Record<string, JudgeAnswer> = {
     choice: 'resolve',
     probabilities: { resolve: 0.8 },
     confidence: 0.8,
-    decidedBy: 'jev',
+    decidedBy: 'systemone',
   },
 }
 

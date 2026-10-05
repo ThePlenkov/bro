@@ -35,11 +35,11 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Judge connectors for bro — TypeSafe /v1/systemone (jev) + llm-judge fallback behind the judge facade",
+  "description": "Judge connectors for bro — TypeSafe /v1/systemone (systemone) + llm-judge fallback behind the judge facade",
   "keywords": [
     "judge",
     "decisions",
-    "jev",
+    "systemone",
     "connector",
     "agent",
     "bro"

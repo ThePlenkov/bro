@@ -24,7 +24,7 @@ const verdict = (over: Partial<Verdict> = {}): Verdict => ({
   kind: 'act-thread',
   subject: { pr: 7, threadId: 'T1', commentSha: 'abc' },
   questions: {},
-  answers: answers({ action: ['resolve', 0.9, 'jev'] }),
+  answers: answers({ action: ['resolve', 0.9, 'systemone'] }),
   model: 'jev-1.13.0',
   latencyMs: 100,
   costUsd: 0.001,
@@ -41,11 +41,11 @@ const disp = (threadId: string, outcome: string, commentSha?: string): Dispositi
 describe('computeStats', () => {
   test('agreement: resolve covers fixed + rejected; reply/defer map 1:1', () => {
     const rows: JournalRow[] = [
-      verdict({ subject: { threadId: 'T1' }, answers: answers({ action: ['resolve', 0.9, 'jev'] }) }),
-      verdict({ subject: { threadId: 'T2' }, answers: answers({ action: ['resolve', 0.9, 'jev'] }) }),
-      verdict({ subject: { threadId: 'T3' }, answers: answers({ action: ['reply', 0.8, 'jev'] }) }),
-      verdict({ subject: { threadId: 'T4' }, answers: answers({ action: ['defer', 0.7, 'jev'] }) }),
-      verdict({ subject: { threadId: 'T5' }, answers: answers({ action: ['resolve', 0.9, 'jev'] }) }),
+      verdict({ subject: { threadId: 'T1' }, answers: answers({ action: ['resolve', 0.9, 'systemone'] }) }),
+      verdict({ subject: { threadId: 'T2' }, answers: answers({ action: ['resolve', 0.9, 'systemone'] }) }),
+      verdict({ subject: { threadId: 'T3' }, answers: answers({ action: ['reply', 0.8, 'systemone'] }) }),
+      verdict({ subject: { threadId: 'T4' }, answers: answers({ action: ['defer', 0.7, 'systemone'] }) }),
+      verdict({ subject: { threadId: 'T5' }, answers: answers({ action: ['resolve', 0.9, 'systemone'] }) }),
       disp('T1', 'fixed'),
       disp('T2', 'rejected'), // resolve-as-invalid still agrees
       disp('T3', 'replied'),
@@ -59,7 +59,7 @@ describe('computeStats', () => {
     assert.equal(s.agreement.matrix.resolve?.rejected, 1)
     assert.equal(s.agreement.matrix.resolve?.deferred, 1)
     assert.equal(s.agreement.matrix.defer?.fixed, 1)
-    assert.equal(s.agreement.byDecider.jev?.agreed, 3)
+    assert.equal(s.agreement.byDecider.systemone?.agreed, 3)
   })
 
   test('unscored: no outcome, unknown outcome kind, or no action answer', () => {
@@ -131,12 +131,12 @@ describe('computeStats', () => {
     const rows: JournalRow[] = [
       verdict({
         subject: { threadId: 'T1', commentSha: 'a' },
-        answers: answers({ action: ['defer', 0.7, 'jev'] }),
+        answers: answers({ action: ['defer', 0.7, 'systemone'] }),
       }),
       verdict({
         ts: '2026-01-01T01:00:00Z',
         subject: { threadId: 'T1', commentSha: 'a' },
-        answers: answers({ action: ['resolve', 0.9, 'jev'] }),
+        answers: answers({ action: ['resolve', 0.9, 'systemone'] }),
       }),
       disp('T1', 'fixed', 'a'),
     ]
@@ -178,10 +178,10 @@ describe('computeStats', () => {
 
   test('blockingProxy: fixed≈blocking, deferred/rejected≈not, replied excluded', () => {
     const rows: JournalRow[] = [
-      verdict({ subject: { threadId: 'T1' }, answers: answers({ noul: [0.9, 'jev'] }) }),
-      verdict({ subject: { threadId: 'T2' }, answers: answers({ noul: [0.2, 'jev'] }) }),
-      verdict({ subject: { threadId: 'T3' }, answers: answers({ noul: [0.9, 'jev'] }) }),
-      verdict({ subject: { threadId: 'T4' }, answers: answers({ noul: [0.8, 'jev'] }) }),
+      verdict({ subject: { threadId: 'T1' }, answers: answers({ noul: [0.9, 'systemone'] }) }),
+      verdict({ subject: { threadId: 'T2' }, answers: answers({ noul: [0.2, 'systemone'] }) }),
+      verdict({ subject: { threadId: 'T3' }, answers: answers({ noul: [0.9, 'systemone'] }) }),
+      verdict({ subject: { threadId: 'T4' }, answers: answers({ noul: [0.8, 'systemone'] }) }),
       disp('T1', 'fixed'),
       disp('T2', 'deferred'),
       disp('T3', 'replied'), // ambiguous → excluded
@@ -195,9 +195,9 @@ describe('computeStats', () => {
 
   test('calibration buckets count scored action answers', () => {
     const rows: JournalRow[] = [
-      verdict({ subject: { threadId: 'T1' }, answers: answers({ action: ['resolve', 0.95, 'jev'] }) }),
-      verdict({ subject: { threadId: 'T2' }, answers: answers({ action: ['resolve', 0.55, 'jev'] }) }),
-      verdict({ subject: { threadId: 'T3' }, answers: answers({ action: ['defer', 0.55, 'jev'] }) }),
+      verdict({ subject: { threadId: 'T1' }, answers: answers({ action: ['resolve', 0.95, 'systemone'] }) }),
+      verdict({ subject: { threadId: 'T2' }, answers: answers({ action: ['resolve', 0.55, 'systemone'] }) }),
+      verdict({ subject: { threadId: 'T3' }, answers: answers({ action: ['defer', 0.55, 'systemone'] }) }),
       disp('T1', 'fixed'),
       disp('T2', 'fixed'),
       disp('T3', 'fixed'),
@@ -230,23 +230,23 @@ describe('computeStats', () => {
     assert.equal(s.cost.n, 3)
     assert.equal(s.cost.noCost, 1)
     assert.ok(Math.abs(s.cost.total - 0.006) < 1e-9)
-    assert.ok(s.cost.byProviderModel['jev/jev-1.13.0']!.n === 2)
+    assert.ok(s.cost.byProviderModel['systemone/jev-1.13.0']!.n === 2)
     assert.ok(s.cost.byProviderModel['llm-judge/gpt-x']!.n === 1)
   })
 
-  test('escalated verdicts key cost as jev+llm-judge/<model>', () => {
+  test('escalated verdicts key cost as llm-judge+systemone/<model>', () => {
     const rows: JournalRow[] = [
       verdict({
         subject: { threadId: 'T1' },
         costUsd: 0.004,
         answers: {
           action: { type: 'choice', choice: 'resolve', probabilities: {}, confidence: 0.9, decidedBy: 'llm-judge' },
-          severity: { type: 'score', score: 3, probabilities: {}, confidence: 0.9, decidedBy: 'jev' },
+          severity: { type: 'score', score: 3, probabilities: {}, confidence: 0.9, decidedBy: 'systemone' },
         },
       }),
     ]
     const s = computeStats(rows)
-    assert.ok(s.cost.byProviderModel['jev+llm-judge/jev-1.13.0']!.total === 0.004)
+    assert.ok(s.cost.byProviderModel['llm-judge+systemone/jev-1.13.0']!.total === 0.004)
   })
 
   test('empty journal yields zeros, not NaN', () => {
@@ -271,7 +271,7 @@ describe('formatStats', () => {
     ]
     const text = formatStats(computeStats(rows))
     assert.match(text, /agreement \(action vs outcome\): 100\.0% — 2\/2/)
-    assert.match(text, /by decider: .*jev 1\/1.*llm-judge 1\/1/)
+    assert.match(text, /by decider: .*systemone 1\/1.*llm-judge 1\/1/)
     assert.match(text, /blocks_correctness \(proxy-scored/)
     assert.match(text, /calibration \(confidence × agreement\)/)
     assert.match(text, /latency: n=2 p50=100ms/)
