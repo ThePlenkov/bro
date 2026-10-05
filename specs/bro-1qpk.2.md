@@ -36,6 +36,14 @@ unchanged. Three mechanical adjustments:
 - `permission.ask` reads `input.patterns` first, falls back to the
   declared `input.pattern` (`string | string[]`) — the typed field the
   old code's plural-only read could miss
+- `permission.ask` also hardens: EVERY pattern must match
+  `bro|bd|npx @broject/bro` with no shell metacharacters — the old
+  `patterns[0]` + prefix regex auto-approved `['bd ready','rm -rf x']`
+  and `'bro x && rm'` (review: codeant-ai #284). Fail-closed: a
+  metachar just falls through to the user's prompt
+- `export default {…, server: BroPlugin as unknown}` — the emitted
+  `kilo.d.ts` must not reference `@kilocode/plugin` types (a
+  devDependency consumers don't install)
 
 The module keeps `import { tool } from '@kilocode/plugin/tool'` +
 `import type { Plugin }`. That specifier resolves at runtime because

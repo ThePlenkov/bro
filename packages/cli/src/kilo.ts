@@ -87,6 +87,14 @@ function hookContext(out: unknown): string | null {
   return typeof ctx === 'string' && ctx.trim() !== '' ? ctx : null
 }
 
+/** Auto-approve only a plain bro/bd/npx-bro invocation — no shell
+ *  metacharacters in args (a metachar just means the ask goes to the
+ *  user; auto-approve fails closed, never wrong). */
+const SAFE_CMD = [
+  /^\s*(?:bro|bd)(?:\s+[^;&|`<>&$()\\\n]*)?\s*$/,
+  /^\s*npx\s+(?:-y\s+)?@broject\/bro(?:\s+[^;&|`<>&$()\\\n]*)?\s*$/,
+]
+
 const BroPlugin: Plugin = async ({ directory, client }) => {
   // --- tools: bro subcommands the model can call directly -------------------
 
@@ -176,10 +184,14 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
 
     'permission.ask': async (input, output) => {
       // the Permission type declares `pattern` (string|string[]) but this
-      // hook was written against `patterns` — read both, first wins
+      // hook was written against `patterns` — read both, array-normalized.
+      // EVERY pattern must be a plain bro/bd/npx-bro invocation with no
+      // shell metacharacters: checking only the first would let
+      // ['bd ready','rm -rf x'] ride the allow, and a prefix-only match
+      // approves the compound 'bro x && rm'.
       const pats = (input as { patterns?: string[] }).patterns ?? input.pattern
-      const cmd = (Array.isArray(pats) ? pats[0] : pats) ?? ''
-      if (/^\s*(bro|bd)(\s|$)/.test(cmd) || /npx\s+(-y\s+)?@broject\/bro/.test(cmd)) {
+      const cmds = pats === undefined ? [] : Array.isArray(pats) ? pats : [pats]
+      if (cmds.length > 0 && cmds.every((c) => SAFE_CMD.some((re) => re.test(c)))) {
         output.status = 'allow'
       }
     },

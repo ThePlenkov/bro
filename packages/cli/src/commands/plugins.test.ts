@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
@@ -265,6 +273,16 @@ describe('plugins install/uninstall/list — kilo', () => {
     const m = f.manifest()
     assert.deepEqual(m.plugin, ['file:///other/plugin.ts', f.entry])
     assert.deepEqual(m.permission, { bash: 'allow' })
+  })
+
+  test('rewriting kilo.json preserves a restrictive file mode', () => {
+    const f = kiloFixture()
+    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'kilo'), { recursive: true })
+    writeFileSync(f.manifestPath, '{}\n')
+    chmodSync(f.manifestPath, 0o600)
+    installClient('kilo', ['global'], f.opts)
+    assert.equal(statSync(f.manifestPath).mode & 0o777, 0o600)
+    assert.deepEqual(f.manifest().plugin, [f.entry])
   })
 
   test('list reports an unregistered global module as stale', () => {

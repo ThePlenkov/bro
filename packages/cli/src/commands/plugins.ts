@@ -17,11 +17,13 @@
  * an import cycle (the registry imports this module for `run`).
  */
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
@@ -268,11 +270,19 @@ export function pluginRows(
   return rows
 }
 
-/** `write tmp; rename` — a torn write must never leave a half module. */
+/** `write tmp; rename` — a torn write must never leave a half module.
+ *  The tmp file gets umask defaults, so a restrictive existing mode is
+ *  copied over before the rename: a 0600 kilo.json carrying permission
+ *  rules must not silently widen to 0644. */
 function atomicWrite(path: string, content: string): void {
   mkdirSync(dirname(path), { recursive: true })
   const tmp = `${path}.${process.pid}.tmp`
   writeFileSync(tmp, content)
+  try {
+    chmodSync(tmp, statSync(path).mode)
+  } catch {
+    // no prior file — the default mode stands
+  }
   renameSync(tmp, path)
 }
 
