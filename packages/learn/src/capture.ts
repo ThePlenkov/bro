@@ -66,16 +66,31 @@ const beadEvidence = (id: string): Evidence => ({ kind: 'bead', ref: id })
 // skips the artifact.
 
 /** CLIs a trigger prefix makes sense for — `bro act merge` is a useful
- *  prefix, `the fix` is not. 2–3 leading words, no flags. */
-const COMMAND_RE =
-  /\b(?:bro|bd|gh|glab|npm|npx|pnpm|yarn|bun|node|tsx|git|docker|cargo|curl)\s+[a-z][\w-]*(?:\s+[a-z][\w-]*)?/g
+ *  prefix, `the fix` is not. 2–3 leading words, no flags. The command
+ *  list is a Set + word scan: a 15-branch alternation pushed the old
+ *  regex past sonar's complexity cap (S5843) — branches live in code
+ *  now, not in the pattern. */
+const CLI_WORDS = new Set([
+  'bro', 'bd', 'gh', 'glab', 'npm', 'npx', 'pnpm', 'yarn', 'bun', 'node',
+  'tsx', 'git', 'docker', 'cargo', 'curl',
+])
+const WORD_RE = /\b[a-z]\w*/g
+const SUBWORD_RE = /^\s+[a-z][\w-]*/
 
 /** Repo-ish paths: anything containing a '/' (`specs/sessions`,
  *  `packages/learn/**`) and bare filenames with a real extension
- *  (`bro.config.json`, `SKILL.md`, `AGENTS.md`). */
+ *  (`bro.config.json`, `SKILL.md`, `AGENTS.md`). The extension list is
+ *  a Set for the same reason — a 23-branch alternation was the other
+ *  S5843 hit. */
 const SLASH_PATH_RE = /[\w@.*+-]+(?:\/[\w@.*+-]+)+\/?/g
-const FILE_RE =
-  /\b[\w.-]+\.(?:ts|tsx|mts|cts|js|mjs|cjs|jsx|md|json|jsonc|toml|ya?ml|sh|py|rs|go|sql|lock|env|ini|cfg|txt)\b/g
+const FILE_TOKEN_RE = /\b[\w.-]+\.[a-z]+\b/g
+const FILE_EXTS = new Set([
+  'ts', 'tsx', 'mts', 'cts', 'js', 'mjs', 'cjs', 'jsx', 'md', 'json',
+  'jsonc', 'toml', 'yml', 'yaml', 'sh', 'py', 'rs', 'go', 'sql', 'lock',
+  'env', 'ini', 'cfg', 'txt',
+])
+const EXT_RUN_RE = /^[a-z]+/
+const WORD_CHAR_RE = /\w/
 
 export const TERM_RE = /[a-z][a-z0-9-]{3,}/g
 
@@ -91,12 +106,87 @@ export const TERM_STOPWORDS = new Set([
   'they', 'does', 'done', 'doing', 'being', 'same', 'must', 'still',
 ])
 
+/** A scope key is stripped of trailing punctuation and is never a URL
+ *  fragment — the same cleaning `collect` always applied. The trailing
+ *  strip is a char loop: the `+$` quantifier version read as
+ *  super-linear backtracking to sonar (S8786). */
+const TRAIL_PUNCT = new Set([')', ',', '.', ';', ':', "'", '"', '`', ']'])
+const scopeKey = (v: string): string => {
+  let end = v.length
+  while (end > 0 && TRAIL_PUNCT.has(v[end - 1]!)) {
+    end -= 1
+  }
+  return v.slice(0, end)
+}
+const keepKey = (v: string): boolean => v !== '' && !v.includes('://')
+
 function collect(re: RegExp, text: string, cap: number): string[] {
   const out = new Set<string>()
   for (const m of text.matchAll(re)) {
-    const v = m[0].replace(/[),.;:'"`\]]+$/, '')
-    if (v !== '' && !v.includes('://')) {
+    const v = scopeKey(m[0])
+    if (keepKey(v)) {
       out.add(v)
+    }
+    if (out.size >= cap) break
+  }
+  return [...out]
+}
+
+/** `<cli> <sub> [<sub>]` — a CLI_WORDS member plus 1–2 lowercase
+ *  sub-words, extended one match at a time so a word can't belong to
+ *  two commands (the old matchAll consumed non-overlapping, so does
+ *  this: a freshly emitted command marks its span consumed). */
+function collectCommands(text: string, cap: number): string[] {
+  const out = new Set<string>()
+  let consumedUntil = -1
+  for (const m of text.matchAll(WORD_RE)) {
+    const start = m.index ?? 0
+    if (start < consumedUntil || !CLI_WORDS.has(m[0])) {
+      continue
+    }
+    let end = start + m[0].length
+    const sub = SUBWORD_RE.exec(text.slice(end))
+    if (sub === null) {
+      continue // a bare CLI word is not a command — `\s+sub` is required
+    }
+    end += sub[0].length
+    const sub2 = SUBWORD_RE.exec(text.slice(end))
+    if (sub2 !== null) {
+      end += sub2[0].length
+    }
+    const v = scopeKey(text.slice(start, end))
+    if (keepKey(v)) {
+      out.add(v)
+    }
+    consumedUntil = end
+    if (out.size >= cap) break
+  }
+  return [...out]
+}
+
+/** `name.ext` tokens — dots scanned right-to-left because the old
+ *  greedy `[\w.-]+` matched the longest prefix ending in a known
+ *  extension at a word boundary: `a.txt.bak` still yields `a.txt`,
+ *  `a.txt2` yields nothing (the ext must end at a boundary). */
+function collectFiles(text: string, cap: number): string[] {
+  const out = new Set<string>()
+  for (const m of text.matchAll(FILE_TOKEN_RE)) {
+    const tok = m[0]
+    for (let i = tok.lastIndexOf('.'); i > 0; i = tok.lastIndexOf('.', i - 1)) {
+      const ext = EXT_RUN_RE.exec(tok.slice(i + 1))?.[0]
+      const after = ext === undefined ? '' : tok[i + 1 + ext.length]
+      if (
+        ext === undefined ||
+        !FILE_EXTS.has(ext) ||
+        (after !== undefined && WORD_CHAR_RE.test(after))
+      ) {
+        continue
+      }
+      const v = scopeKey(tok.slice(0, i + 1 + ext.length))
+      if (keepKey(v)) {
+        out.add(v)
+      }
+      break
     }
     if (out.size >= cap) break
   }
@@ -112,9 +202,9 @@ function scopeMatch(text: string): TriggerMatch {
   const t = text.replace(/\bhttps?:\/\/\S+/g, ' ')
   const paths = [
     ...collect(SLASH_PATH_RE, t, 5),
-    ...collect(FILE_RE, t, 4),
+    ...collectFiles(t, 4),
   ]
-  const commands = collect(COMMAND_RE, t, 5)
+  const commands = collectCommands(t, 5)
   if (paths.length > 0) match.paths = [...new Set(paths)].slice(0, 6)
   if (commands.length > 0) match.commands = commands
   return match
@@ -216,17 +306,82 @@ function listLabeled(label: string, dir?: string): TaskRow[] {
 
 // --- drill ----------------------------------------------------------------------
 
+/** Body under a `## <name>` heading — index scans, not a lazy
+ *  `[\s\S]*?` + lookahead pair (sonar S8786 super-linear backtracking).
+ *  The heading must end its line: whitespace after the name has to
+ *  contain a newline, and the body starts right after that line's last
+ *  newline — the same span the old `\s*\n+` left behind. `stop` is
+ *  tested against each following line's start; no stop runs to EOF. */
+function mdSection(text: string, name: string, stop?: RegExp): string | undefined {
+  const head = new RegExp(String.raw`##\s*${name}`, 'g')
+  let m: RegExpExecArray | null
+  while ((m = head.exec(text)) !== null) {
+    const after = m.index + m[0].length
+    let end = after
+    while (end < text.length && /\s/.test(text[end]!)) {
+      end += 1
+    }
+    const gap = text.slice(after, end)
+    if (!gap.includes('\n')) {
+      continue // `## Name: x` mid-line is a mention, not a heading
+    }
+    const rest = text.slice(after + gap.lastIndexOf('\n') + 1)
+    if (stop === undefined) {
+      return rest
+    }
+    for (let p = rest.indexOf('\n'); p >= 0; p = rest.indexOf('\n', p + 1)) {
+      if (stop.test(rest.slice(p + 1))) {
+        return rest.slice(0, p)
+      }
+    }
+    return rest
+  }
+  return undefined
+}
+
+/** Body of an inline `KEY:` memo field — from after `KEY:` (leading
+ *  whitespace skipped, as the old `\s*` did) to the next line starting
+ *  `##` or `CAPS:`. Same scan-for-`\n` mechanics as mdSection. */
+const CAPS_FIELD = /^(?:##|[A-Z]+:)/
+const SECTION_FIELD = /^##/
+
+function inlineField(text: string, key: string): string | undefined {
+  const i = text.indexOf(key)
+  if (i < 0) {
+    return undefined
+  }
+  const rest = text.slice(i + key.length).replace(/^\s+/, '')
+  if (rest === '') {
+    return undefined
+  }
+  for (let p = rest.indexOf('\n'); p >= 0; p = rest.indexOf('\n', p + 1)) {
+    if (CAPS_FIELD.test(rest.slice(p + 1))) {
+      return rest.slice(0, p)
+    }
+  }
+  return rest
+}
+
 /** The up-memo `drillUp` wrote: `## Result\n\nX\n\n## Prevention\n\n- a`. */
 function drillMemo(notes: string | undefined): { result: string; prevents: string[] } | null {
   if (!notes?.includes('## Result')) {
     return null
   }
-  const result = /##\s*Result\s*\n+([\s\S]*?)(?=\n##|\s*$)/.exec(notes)?.[1]?.trim() ?? ''
-  const prevents = [
-    ...(/##\s*Prevention\s*\n+([\s\S]*)$/.exec(notes)?.[1] ?? '').matchAll(/^\s*-\s+(.+)$/gm),
-  ]
-    .map((m) => m[1]!.trim())
-    .filter((p) => p !== '')
+  const result = mdSection(notes, 'Result', SECTION_FIELD)?.trim() ?? ''
+  // the old regex ate to EOF — a later `## ` section's bullets counted
+  // too; keeping that quirk is cheaper than inventing new semantics.
+  // Bullet scan is per-line (the `^\s*-\s+(.+)$`m pattern was another
+  // S8786 super-linear flag).
+  const prevents: string[] = []
+  for (const line of (mdSection(notes, 'Prevention') ?? '').split('\n')) {
+    const t = line.trimStart()
+    if (t.startsWith('-') && t[1] !== undefined && t[1].trim() === '') {
+      const item = t.slice(1).trim()
+      if (item !== '') {
+        prevents.push(item)
+      }
+    }
+  }
   if (result === '' && prevents.length === 0) {
     return null
   }
@@ -298,21 +453,22 @@ function harvestDrill(dir?: string): Harvest {
 /** `## What`/`## Why`/`scope:` (recordRetro's memo) or the legacy
  *  `WHAT:`/`WHY:`/`PREVENT:` inline form. The prevention text wins —
  *  it is already imperative; else the root cause is the durable bit. */
+const SCOPE_STOP = /^(?:##|scope:)/
+
 function retroLesson(description: string): string {
-  const prevent = /PREVENT:\s*([\s\S]+?)(?=\n(?:##|[A-Z]+:)|$)/.exec(description)?.[1]
+  const prevent = inlineField(description, 'PREVENT:')
   if (prevent !== undefined && prevent.trim() !== '') {
     return oneLine(prevent)
   }
-  const why = /##\s*Why\s*\n+([\s\S]*?)(?=\n##|\nscope:|$)/.exec(description)?.[1]
+  const why = mdSection(description, 'Why', SCOPE_STOP)
   if (why !== undefined && why.trim() !== '') {
     return oneLine(why)
   }
-  const whyInline = /WHY:\s*([\s\S]+?)(?=\n(?:##|[A-Z]+:)|$)/.exec(description)?.[1]
+  const whyInline = inlineField(description, 'WHY:')
   if (whyInline !== undefined && whyInline.trim() !== '') {
     return oneLine(whyInline)
   }
-  const what = /##\s*What\s*\n+([\s\S]*?)(?=\n##|\nscope:|$)/.exec(description)?.[1]
-  return oneLine(what ?? description)
+  return oneLine(mdSection(description, 'What', SCOPE_STOP) ?? description)
 }
 
 function harvestRetro(dir?: string): Harvest {

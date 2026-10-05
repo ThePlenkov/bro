@@ -24,8 +24,10 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import {
@@ -347,6 +349,99 @@ function inject(
   }
 }
 
+// --- lesson list snapshot ------------------------------------------------------
+// probeCtx runs `listLessons` — a full `bd kv list` subprocess — on
+// every hook landing, and hook events are fresh processes so an
+// in-process cache can't help. The snapshot is a file under the hooks
+// dir keyed on the store's write barometer: every bd mutation bumps an
+// embedded-dolt noms manifest, reads don't. A store without that
+// layout (server-mode bd, a scripted fake, no .beads at all) yields no
+// stamp and every probe reads live — the cache only ever skips a
+// subprocess, it never invents an answer.
+
+interface LessonSnapshot {
+  /** resolved `.beads` dir + each embeddeddolt manifest's mtime:size */
+  stamp: string
+  lessons: Lesson[]
+}
+
+/** `.beads` for this ctx — BEADS_DIR when an agent spawn pinned it,
+ *  else the sibling of the common git dir (the main checkout; linked
+ *  worktrees share it). null when neither resolves. */
+function beadsDir(dir: string): string | null {
+  const env = process.env.BEADS_DIR
+  if (env !== undefined && env !== '') {
+    return env
+  }
+  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  if (r.code !== 0 || r.out.trim() === '') {
+    return null
+  }
+  return join(dirname(r.out.trim()), '.beads')
+}
+
+/** `<beads>/embeddeddolt/<db>/.dolt/noms/manifest` mtime+size for every
+ *  db dir — bumped on any bd write, so a snapshot keyed on it cannot
+ *  be stale (issue writes over-invalidate, which is safe). null means
+ *  "no recognizable embeddeddolt store" → read live every probe. */
+function storeStamp(dir: string): string | null {
+  const beads = beadsDir(dir)
+  if (beads === null) {
+    return null
+  }
+  const parts: string[] = []
+  try {
+    for (const db of readdirSync(join(beads, 'embeddeddolt'))) {
+      try {
+        const st = statSync(join(beads, 'embeddeddolt', db, '.dolt', 'noms', 'manifest'))
+        if (st.isFile()) {
+          parts.push(`${db}:${st.mtimeMs}:${st.size}`)
+        }
+      } catch {
+        // not a db dir / unreadable entry — try the next
+      }
+    }
+  } catch {
+    return null // no embeddeddolt dir — not a cacheable layout
+  }
+  if (parts.length === 0) {
+    return null
+  }
+  parts.sort((a, b) => a.localeCompare(b))
+  return `${beads}|${parts.join('|')}`
+}
+
+const snapshotFile = (hooks: string): string => join(hooks, 'cache', 'lessons.json')
+
+function listLessonsCached(dir: string, hooks: string): Lesson[] {
+  const stamp = storeStamp(dir)
+  const file = snapshotFile(hooks)
+  if (stamp !== null) {
+    try {
+      const snap = JSON.parse(readFileSync(file, 'utf8')) as LessonSnapshot
+      if (snap.stamp === stamp && Array.isArray(snap.lessons)) {
+        return snap.lessons
+      }
+    } catch {
+      // absent or torn snapshot — refresh below
+    }
+  }
+  const lessons = listLessons(dir).lessons
+  if (stamp !== null) {
+    try {
+      // tmp+rename — a racing hook process can observe the file
+      // mid-write; a torn snapshot just re-reads live next time
+      mkdirSync(dirname(file), { recursive: true })
+      const tmp = `${file}.${process.pid}.tmp`
+      writeFileSync(tmp, JSON.stringify({ stamp, lessons } satisfies LessonSnapshot))
+      renameSync(tmp, file)
+    } catch {
+      // a lost snapshot costs one extra subprocess next probe — never a stall
+    }
+  }
+  return lessons
+}
+
 /** Shared probe preface — session id, hooks dir, config, store. null
  *  means "emit nothing": no session id leaves the fired set homeless
  *  (an unbudgeted post-tool lesson would nudge on every tool landing),
@@ -372,7 +467,7 @@ function probeCtx(ctx: ConnectorCtx): {
     return null
   }
   try {
-    return { hooks, sid, cfg, lessons: listLessons(ctx.dir).lessons }
+    return { hooks, sid, cfg, lessons: listLessonsCached(ctx.dir, hooks) }
   } catch {
     return null
   }

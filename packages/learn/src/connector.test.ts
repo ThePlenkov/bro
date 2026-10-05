@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { describe, it } from 'node:test'
 import { learnConnector } from './connector.ts'
 import type { Lesson } from './lesson.ts'
@@ -33,6 +33,8 @@ const fail = (m) => { console.error('fake bd: ' + m); process.exit(1) }
 const load = () => { try { return JSON.parse(fs.readFileSync(DB, 'utf8')) } catch { return { rows: [], kv: {} } } }
 const save = (m) => fs.writeFileSync(DB, JSON.stringify(m))
 const args = process.argv.slice(2).filter((a) => a !== '--json')
+const LOG = process.env.FAKE_BD_LOG
+if (LOG) fs.appendFileSync(LOG, args.join(' ') + '\\n')
 const pos = args.filter((a) => !a.startsWith('-'))
 const flagVal = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : undefined }
 const db = load()
@@ -357,6 +359,38 @@ describe('learnConnector', { skip: WIN32 }, () => {
       assert.ok(lines.some((l) => l.includes('learn-mol')))
       assert.ok(!lines.some((l) => l.includes('learn-not-mol')))
     } finally {
+      fx.restore()
+    }
+  })
+
+  it('postTool caches the lesson list — a store write invalidates the snapshot', async () => {
+    const fx = fixture({
+      lessons: [lesson('learn-x', { trigger: { on: ['post-tool'] } })],
+    })
+    const prevLog = process.env.FAKE_BD_LOG
+    const log = join(fx.dir, 'bd.log')
+    process.env.FAKE_BD_LOG = log
+    // a recognizable embeddeddolt layout makes the store cacheable —
+    // the noms manifest is the write barometer the snapshot keys on
+    const manifest = join(fx.dir, '.beads', 'embeddeddolt', 'x', '.dolt', 'noms', 'manifest')
+    mkdirSync(dirname(manifest), { recursive: true })
+    writeFileSync(manifest, 'm1')
+    const kvLists = (): number =>
+      readFileSync(log, 'utf8').split('\n').filter((l) => l === 'kv list').length
+    try {
+      trace(fx, 's1', [{ ts: 1, tool: 'exec', command: 'x', ok: true }])
+      assert.equal((await probe.postTool(fx.dir, 's1')).length, 1)
+      // second probe hits the snapshot — no second `bd kv list` spawn
+      await probe.postTool(fx.dir, 's1')
+      assert.equal(kvLists(), 1)
+      // a store write bumps the manifest — the next probe reads live
+      const later = new Date(Date.now() + 60_000)
+      utimesSync(manifest, later, later)
+      await probe.postTool(fx.dir, 's1')
+      assert.equal(kvLists(), 2)
+    } finally {
+      if (prevLog === undefined) delete process.env.FAKE_BD_LOG
+      else process.env.FAKE_BD_LOG = prevLog
       fx.restore()
     }
   })
