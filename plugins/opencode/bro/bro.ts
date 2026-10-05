@@ -286,10 +286,13 @@ async function resolveCommand(options: PluginOptions | undefined): Promise<Comma
   // first, then the checkout walk-up for a materialized module inside a
   // clone. The probe asks for the hook contract itself — `--version` would
   // also pass on a stale dist that predates `bro hooks`, shadowing a
-  // working PATH `bro` while every hook fails open into silence.
-  const entry = siblingCli() ?? checkoutCli()
-  if (entry && (await exitsZero(jsRuntime(), [entry, 'hooks']))) {
-    return { cmd: jsRuntime(), args: [entry] }
+  // working PATH `bro` while every hook fails open into silence. Each
+  // candidate is probed in order: a sibling that fails must not hide a
+  // working checkout build behind it.
+  for (const entry of [siblingCli(), checkoutCli()]) {
+    if (entry !== null && (await exitsZero(jsRuntime(), [entry, 'hooks']))) {
+      return { cmd: jsRuntime(), args: [entry] }
+    }
   }
   // no local dist — fall back to PATH, and only to a bro that passes the
   // hooks probe.
