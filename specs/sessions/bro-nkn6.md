@@ -178,7 +178,7 @@ Three independent bounds, each pinned to machinery that already exists:
 - **Per-session budget** — `when.budget` (default 1) enforced through
   the shared fired set: `guard:<name>` lines appended to
   `<git-common>/bro/hooks/fired/<session>` inside the same
-  `withFileLock(`${fired}.lock`)` critical section learn uses —
+  `` `withFileLock(`${fired}.lock`)` `` critical section learn uses —
   concurrent post-tool hooks can't double-fire a budget-1 guard. No
   session id → no fired set → guards don't fire (the learn rule:
   an unbudgeted post-tool nudge on every landing is the failure this
