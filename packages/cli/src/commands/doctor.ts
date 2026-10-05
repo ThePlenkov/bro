@@ -23,6 +23,12 @@ import {
   runJanitor,
 } from '@broject/core'
 import { loadBroConfig, pluginConfigSections } from '../plugins.ts'
+import {
+  budgetLines,
+  budgetSnapshotFor,
+  loadAgentEnv,
+  type BudgetSnapshot,
+} from '../agent-connectors.ts'
 
 export type DoctorStatus = 'ok' | 'warn' | 'fail' | 'skip'
 
@@ -427,16 +433,41 @@ export function doctorExitCode(checks: DoctorCheck[]): number {
 
 const ICONS: Record<DoctorStatus, string> = { ok: '✓', warn: '!', fail: '✗', skip: '-' }
 
+/** The budget section (specs/bro-7xgk.3.md) — bro's own registry as a
+ *  local proxy for the provider's hourly window: live agents, spawns in
+ *  the last hour, observed resets, last failure causes. The snapshot is
+ *  telemetry, not a probe — it never affects the exit code, and a broken
+ *  registry degrades the section instead of crashing the run. */
+function readBudget(dir: string): { snap: BudgetSnapshot | null; err?: string } {
+  try {
+    return { snap: budgetSnapshotFor(dir, loadAgentEnv(dir)) }
+  } catch (err) {
+    return { snap: null, err: err instanceof Error ? err.message : String(err) }
+  }
+}
+
 export function runDoctorCommand(argv: string[]): void {
   const json = argv.includes('--json')
-  const checks = runDoctorChecks()
+  const dir = process.cwd()
+  const checks = runDoctorChecks(dir)
+  const budget = readBudget(dir)
   if (json) {
-    console.log(JSON.stringify({ ok: doctorExitCode(checks) === 0, checks }, null, 2))
+    console.log(
+      JSON.stringify({ ok: doctorExitCode(checks) === 0, checks, budget: budget.snap }, null, 2)
+    )
   } else {
     for (const c of checks) {
       console.log(`${ICONS[c.status]} ${c.name.padEnd(10)} ${c.detail}`)
       if (c.hint) {
         console.log(`  ${' '.repeat(10)} → ${c.hint}`)
+      }
+    }
+    console.log('\nbudget — local estimates (bro registry only, not provider quota data)')
+    if (budget.snap === null) {
+      console.log(`  unreadable — ${budget.err ?? 'unknown error'}`)
+    } else {
+      for (const l of budgetLines(budget.snap)) {
+        console.log(l)
       }
     }
     const fails = checks.filter((c) => c.status === 'fail').length

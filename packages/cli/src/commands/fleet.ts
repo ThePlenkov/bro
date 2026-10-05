@@ -26,11 +26,11 @@ import { basename } from 'node:path'
 import { git, gitTry, reviewHost, type AgentInfo, type ReviewFacade } from '@broject/core'
 import { listMolecules, loadMolecule, stepsOf, type ConvoyStep } from '@broject/convoy'
 import {
+  budgetSnapshotFor,
   eachAgentConnector,
-  fleetCapOf,
-  fleetOccupancyFor,
   loadAgentEnv,
   type AgentConnectorEnv,
+  type BudgetSnapshot,
 } from '../agent-connectors.ts'
 import { occupancyLine, type FleetOccupancy } from './agents.ts'
 import { flag } from './args.ts'
@@ -267,6 +267,9 @@ export interface FleetPayload {
    *  degraded backend's entries still occupy, so the number never
    *  under-reports what a spawn would count. */
   occupancy: FleetOccupancy
+  /** The local-estimate budget picture (specs/bro-7xgk.3.md) — one
+   *  registry walk, the same walk occupancy derives from. */
+  budget: BudgetSnapshot
 }
 
 async function collectFleet(dir: string): Promise<FleetPayload> {
@@ -294,15 +297,17 @@ async function collectFleet(dir: string): Promise<FleetPayload> {
 
   const prErrors: string[] = []
   const rows = fleetRows(byStep, degraded.length > 0, rev, repo, worktrees, prErrors)
+  // one registry walk produces both planes — occupancy.occupied IS
+  // budget.live, so the table line and the budget section can never
+  // disagree about how much of the fleet is up
+  const budget = budgetSnapshotFor(dir, env)
   return {
     rows,
     degraded,
     conflicts,
     prErrors,
-    occupancy: {
-      occupied: fleetOccupancyFor(dir, env),
-      maxConcurrent: fleetCapOf(env),
-    },
+    occupancy: { occupied: budget.live, maxConcurrent: budget.maxConcurrent },
+    budget,
   }
 }
 
@@ -520,10 +525,12 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
     return
   }
 
-  const { rows, degraded, conflicts, prErrors, occupancy } = await collectFleet(dir)
+  const { rows, degraded, conflicts, prErrors, occupancy, budget } = await collectFleet(dir)
 
   if (args.json) {
-    console.log(JSON.stringify({ rows, degraded, conflicts, prErrors, occupancy }, null, 2))
+    console.log(
+      JSON.stringify({ rows, degraded, conflicts, prErrors, occupancy, budget }, null, 2)
+    )
     return
   }
   console.log(occupancyLine(occupancy))
