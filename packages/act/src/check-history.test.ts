@@ -49,6 +49,18 @@ describe('fileCheckHistory', () => {
     assert.equal(h.consecutiveFailures('kilo'), 0)
   })
 
+  test('interleaved shas — a stale same-sha entry mid-walk is skipped', () => {
+    const h = fileCheckHistory(tmp())
+    // D/fail, A/pending, B/fail, A/fail, C/fail — A's latest is fail;
+    // the streak over distinct heads is all four
+    h.record(obs('kilo', 'd'.repeat(40), 'fail'))
+    h.record(obs('kilo', 'a'.repeat(40), 'pending'))
+    h.record(obs('kilo', 'b'.repeat(40), 'fail'))
+    h.record(obs('kilo', 'a'.repeat(40), 'fail'))
+    h.record(obs('kilo', 'c'.repeat(40), 'fail'))
+    assert.equal(h.consecutiveFailures('kilo'), 4)
+  })
+
   test('a non-fail observation breaks the streak', () => {
     const h = fileCheckHistory(tmp())
     h.record(obs('kilo', 'a'.repeat(40), 'fail'))

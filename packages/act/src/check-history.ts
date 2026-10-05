@@ -121,21 +121,21 @@ export function fileCheckHistory(file: string): CheckHistory {
       const lower = name.toLowerCase()
       const entries = read().filter((e) => e.name.toLowerCase() === lower)
       let streak = 0
-      let lastSha: string | null = null
+      const seen = new Set<string>()
       for (let i = entries.length - 1; i >= 0; i -= 1) {
         const e = entries[i]!
         // a re-observed sha is one check run, not a new failure —
-        // collapse repeats so streak counts heads, not polls; an older
-        // non-fail under an already-counted sha is history, not the
-        // streak's end (the sha's latest observation already spoke)
-        if (e.sha === lastSha) {
+        // collapse repeats so streak counts heads, not polls. Entries
+        // for a sha can be non-adjacent when PRs interleave, so every
+        // counted sha is tracked, not just the previous one
+        if (seen.has(e.sha)) {
           continue
         }
         if (e.bucket !== 'fail') {
           break
         }
         streak += 1
-        lastSha = e.sha
+        seen.add(e.sha)
       }
       return streak
     },
