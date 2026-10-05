@@ -211,6 +211,46 @@ describe('loadConfig fleet', () => {
   test('non-object fleet section falls back to defaults', () => {
     assert.equal(load({ fleet: 'wide' }).fleet.maxConcurrent, 3)
   })
+
+  test('fleet.profiles parses named presets; absent section → {}', () => {
+    assert.deepEqual(load().fleet.profiles, {})
+    const cfg = load({
+      fleet: {
+        profiles: {
+          cheap: { provider: 'kilo', model: 'qwen3-coder', backend: 'tmux' },
+          strong: { provider: 'kilo', autoApprove: true },
+        },
+      },
+    })
+    assert.deepEqual(cfg.fleet.profiles.cheap, {
+      provider: 'kilo',
+      model: 'qwen3-coder',
+      backend: 'tmux',
+    })
+    assert.deepEqual(cfg.fleet.profiles.strong, { provider: 'kilo', autoApprove: true })
+  })
+
+  test('a profile with no provider drops; bad optional fields drop alone', () => {
+    const cfg = load({
+      fleet: {
+        profiles: {
+          noprov: { model: 'x' },
+          badmodel: { provider: 'kilo', model: 42, autoApprove: 'yes' },
+          junk: 'nope',
+          ok: { provider: 'kilo' },
+        },
+      },
+    })
+    assert.equal(cfg.fleet.profiles.noprov, undefined)
+    assert.equal(cfg.fleet.profiles.junk, undefined)
+    assert.deepEqual(cfg.fleet.profiles.badmodel, { provider: 'kilo' })
+    assert.deepEqual(cfg.fleet.profiles.ok, { provider: 'kilo' })
+  })
+
+  test('a non-object profiles map drops the whole section', () => {
+    assert.deepEqual(load({ fleet: { profiles: 'x' } }).fleet.profiles, {})
+    assert.deepEqual(load({ fleet: { profiles: [1] } }).fleet.profiles, {})
+  })
 })
 
 function loadTs(

@@ -355,6 +355,97 @@ describe('bro agents up <step>', () => {
   })
 })
 
+// the provider vocabulary (spec bro-5hx1.1) — --provider/--model/
+// --profile resolve through config into the spawned worker's env pins
+// and the registry's provenance
+describe('bro agents up — provider resolution', () => {
+  /** The fixture's config plus a providers registry + fleet profiles. */
+  const withProviders = (fx: Fixture): void => {
+    writeFileSync(
+      join(fx.main, 'bro.config.json'),
+      JSON.stringify({
+        agents: { native: { command: 'node {promptFile}' } },
+        providers: {
+          local: { type: 'cli', command: 'node {promptFile}' },
+          typesafe: { type: 'systemone', apiKeyEnv: 'K', model: 'jev' },
+        },
+        fleet: {
+          profiles: {
+            cheap: { provider: 'local', model: 'cheap-1' },
+          },
+        },
+      })
+    )
+  }
+
+  test('--provider + --model pin provenance through registry + status', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      withProviders(fx)
+      const r = await agents([
+        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN),
+        '--provider', 'local', '--model', 'm1',
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      assert.match(r.out.join('\n'), /provider: local · model m1/)
+      const entry = readAgentRegistry(fx.main)['fx-1']!
+      assert.equal(entry.provider, 'local')
+      assert.equal(entry.model, 'm1')
+      const st = await agents(['status', 'fx-1'])
+      assert.match(st.out.join('\n'), /provider\s+local/)
+      assert.match(st.out.join('\n'), /model\s+m1/)
+      await agents(['down', 'fx-1'])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('--profile expands the preset; explicit flags beat it piecewise', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      withProviders(fx)
+      const r = await agents([
+        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN),
+        '--profile', 'cheap', '--model', 'm2',
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      const entry = readAgentRegistry(fx.main)['fx-1']!
+      assert.equal(entry.provider, 'local')
+      assert.equal(entry.model, 'm2') // flag beat the preset's cheap-1
+      await agents(['down', 'fx-1'])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('unknown --provider/--profile fail as input; a non-spawnable kind as config', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      withProviders(fx)
+      const args = (extra: string[]) => [
+        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN),
+        ...extra,
+      ]
+      const badProvider = await agents(args(['--provider', 'nope']))
+      assert.equal(badProvider.code, 1)
+      assert.match(badProvider.err.join('\n'), /providers\.nope is not configured/)
+      const badProfile = await agents(args(['--profile', 'nope']))
+      assert.equal(badProfile.code, 1)
+      assert.match(badProfile.err.join('\n'), /fleet\.profiles\.nope is not configured/)
+      const wrongKind = await agents(args(['--provider', 'typesafe']))
+      assert.equal(wrongKind.code, 1)
+      assert.match(wrongKind.err.join('\n'), /type 'systemone'.*no spawn surface/)
+      // nothing claimed or spawned through any of the refusals
+      assert.equal(readAgentRegistry(fx.main)['fx-1'], undefined)
+    } finally {
+      fx.restore()
+    }
+  })
+})
+
 describe('bro agents down <target>', () => {
   test('stops by molStep and is idempotent for gone agents', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])

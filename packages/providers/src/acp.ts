@@ -426,6 +426,41 @@ export function acpChat(
   }
 }
 
+/** Shell-quote for the profile render — `command` is a trusted config
+ *  string (sh -c'd inside the driver), and the profile lands on it as a
+ *  separate `--profile <value>` (spec bro-5hx1.1: the field exists so
+ *  operators don't hand-edit profile variants into `command`). */
+const shQ = (s: string): string => `'${s.replaceAll("'", String.raw`'\''`)}'`
+
+/** The spawn surface — argv for `bro acp-worker` (spec bro-5hx1.1).
+ *  Rendered fully at spawn time so the worker never re-reads config;
+ *  `broBin` is the resolver's PATH-first `['bro']` or the
+ *  `npx -y @broject/bro@0` fallback. `opts` carries the EFFECTIVE
+ *  values — model/autoApprove already resolved through the spawn →
+ *  profile → entry ladder (entry fields are the final fallback, so a
+ *  bare call still lands the configured values). The backend appends
+ *  the prepared prompt file as the LAST element — the SpawnWorker
+ *  argv contract — and never string-concats this into `sh -c`: a
+ *  model value carrying shell metachars must not escape its argv
+ *  slot. */
+export function acpWorkerArgv(
+  broBin: string[],
+  entry: AcpEntry,
+  opts: { model?: string; autoApprove?: boolean } = {}
+): string[] {
+  const command =
+    entry.profile === undefined ? entry.command : `${entry.command} --profile ${shQ(entry.profile)}`
+  const argv = [...broBin, 'acp-worker', '--command', command]
+  const model = opts.model ?? entry.model
+  if (model !== undefined) {
+    argv.push('--model', model)
+  }
+  if (opts.autoApprove ?? entry.autoApprove) {
+    argv.push('--auto-approve')
+  }
+  return argv
+}
+
 /** The 'auto' capability resolves on the served model: systemone-family
  *  → typed `call`; anything else (or no pin at all — an unpinned model
  *  can never be trusted typed) → prose `chat`. */

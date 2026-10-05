@@ -55,6 +55,7 @@ export {
 } from './providers.ts'
 export type {
   CallSurfaceGrade,
+  FleetProfile,
   ProviderEntry,
   ProviderKind,
   ProviderKindSpec,
@@ -170,6 +171,7 @@ export type {
   ListResult,
   SpawnErrorKind,
   SpawnSpec,
+  SpawnWorker,
 } from './agents.ts'
 export { acquireFileLock, LockTimeout, withFileLock } from './filelock.ts'
 export type { FileLockOptions } from './filelock.ts'

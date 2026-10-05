@@ -31,7 +31,8 @@
  *   GET    /api/v1/agents       per-backend agent plane
  *   GET    /api/v1/agents/<ref> one agent — ref is agentId or molStep
  *   POST   /api/v1/agents       spawn {molStep, worktree?, prompt?|promptFile?,
- *                               connector?, beadsDir?} → 201 {agent}
+ *                               connector?, beadsDir?, provider?, model?,
+ *                               profile?, autoApprove?} → 201 {agent}
  *   DELETE /api/v1/agents/<ref> stop — always invokes the connector's
  *                               idempotent stop; terminal agents report
  *                               `terminal:true` + a note. A miss beside a
@@ -441,6 +442,10 @@ const SPAWN_FIELDS = new Set([
   'promptFile',
   'connector',
   'beadsDir',
+  'provider',
+  'model',
+  'profile',
+  'autoApprove',
 ])
 
 /** POST body → StepSpawnRequest — strict: a misspelled field must be a
@@ -464,8 +469,14 @@ export function parseSpawnBody(raw: string | undefined): StepSpawnRequest {
   }
   const req = doc as Record<string, unknown>
   for (const [k, v] of Object.entries(req)) {
-    if (v !== undefined && typeof v !== 'string') {
-      throw new HttpError(400, `field "${k}" must be a string`)
+    if (k === 'autoApprove') {
+      if (v !== undefined && typeof v !== 'boolean') {
+        throw new HttpError(400, 'field "autoApprove" must be a boolean')
+      }
+    } else if (v !== undefined && (typeof v !== 'string' || v.trim() === '')) {
+      // an empty string is not "unset" — it would ride through as an
+      // empty argv element or lookup key and fail AFTER the 201
+      throw new HttpError(400, `field "${k}" must be a non-empty string`)
     }
   }
   if (typeof req.molStep !== 'string' || req.molStep.trim() === '') {
@@ -478,6 +489,10 @@ export function parseSpawnBody(raw: string | undefined): StepSpawnRequest {
     promptFile: req.promptFile as string | undefined,
     connector: req.connector as string | undefined,
     beadsDir: req.beadsDir as string | undefined,
+    provider: req.provider as string | undefined,
+    model: req.model as string | undefined,
+    profile: req.profile as string | undefined,
+    autoApprove: req.autoApprove as boolean | undefined,
   }
 }
 

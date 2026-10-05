@@ -14,7 +14,9 @@
  */
 import { spawn, spawnSync } from 'node:child_process'
 import {
+  accessSync,
   closeSync,
+  constants,
   existsSync,
   fstatSync,
   mkdirSync,
@@ -26,7 +28,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import {
   AgentNotFound,
   agentEntryBlocked,
@@ -45,9 +47,12 @@ import {
   probeStep,
   procStat,
   rebindStep,
+  requireProviderSurface,
   SpawnError,
   stepParent,
+  ProviderSurfaceError,
   readAgentRegistry,
+  UnknownProviderError,
   withAgentRegistryLock,
   writeAgentRegistry,
   type AgentCause,
@@ -56,8 +61,11 @@ import {
   type AgentRegistryEntry,
   type AgentState,
   type ConnectorCtx,
+  type FleetProfile,
   type ListResult,
+  type ProviderEntry,
   type SpawnSpec,
+  type SpawnWorker,
 } from '@broject/core'
 import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop'
 
@@ -68,9 +76,14 @@ export interface AgentConnectorEnv {
   /** Facade → connector precedence — `connectors.agents` selects here. */
   connectors: Record<string, string>
   loop?: LoopConfig
-  /** Fleet cap — the config's `fleet` section. Absent in hand-built
-   *  envs → the DEFAULT_CONFIG value applies (fleetCapOf). */
-  fleet?: { maxConcurrent: number }
+  /** Fleet section — `maxConcurrent` is the cap (fleetCapOf defaults it
+   *  on hand-built envs); `profiles` holds the named spawn presets
+   *  `--profile` resolves (spec bro-5hx1.1). */
+  fleet?: { maxConcurrent: number; profiles?: Record<string, FleetProfile> }
+  /** The named provider registry — spawn resolution reads entries by
+   *  name (`agents.<backend>.provider`, `--provider`, profiles). Absent
+   *  means provider behavior is off, never defaulted to a vendor. */
+  providers?: Record<string, ProviderEntry>
 }
 
 export type AgentConnectorFactory = (
@@ -153,15 +166,18 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
     agents?: Record<string, Record<string, unknown>>
     connectors?: Record<string, string>
     loop?: LoopConfig
-    // core section — applySections always resolves it on a successful
-    // load; the `?` covers only a loadConfig shape that predates it
-    fleet?: { maxConcurrent: number }
+    // core sections — applySections always resolves them on a
+    // successful load; the `?`s cover a loadConfig shape that predates
+    // them and a section whose schema itself dropped
+    fleet?: { maxConcurrent: number; profiles?: Record<string, FleetProfile> }
+    providers?: Record<string, ProviderEntry>
   }
   return {
     agents: cfg.agents ?? {},
     connectors: cfg.connectors ?? {},
     loop: cfg.loop,
     fleet: cfg.fleet,
+    providers: cfg.providers,
   }
 }
 
@@ -170,6 +186,142 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
  *  hand-built (tests, embedded callers). 0 disables the cap. */
 export function fleetCapOf(env: AgentConnectorEnv): number {
   return env.fleet?.maxConcurrent ?? DEFAULT_CONFIG.fleet.maxConcurrent
+}
+
+// --- provider resolution (spec bro-5hx1.1) -------------------------------------
+//
+// One total order, resolved BEFORE conn.spawn — the backend receives an
+// already-resolved spec and never learns what a provider is:
+//   explicit spawn fields (--provider/--model/--profile/… or the
+//     StepSpawnRequest fields) → fleet.profiles.<name> preset
+//     (--provider/--model beat the preset's values piecewise, so the
+//     caller merges before we run) → agents.<backend>.provider → the
+//     legacy command template (agents.<backend>.command → loop.agent).
+// No provider named anywhere = today's behavior, unchanged — bro never
+// picks a vendor the user didn't name.
+
+/** `fleet.profiles.<name>` lookup — a named-but-missing preset is a
+ *  spawn error naming the key, never a silent no-op (ribc.1's
+ *  no-silent-fallthrough rule). */
+export function fleetProfileOf(env: AgentConnectorEnv, name: string): FleetProfile {
+  const profiles = env.fleet?.profiles
+  // hasOwn pins the lookup to configured keys — 'constructor' must not
+  // resolve to an inherited member and skip the missing-profile error
+  const profile =
+    profiles !== undefined && Object.hasOwn(profiles, name) ? profiles[name] : undefined
+  if (profile === undefined) {
+    throw new SpawnError(
+      `fleet.profiles.${name} is not configured — name a configured profile`,
+      'input'
+    )
+  }
+  return profile
+}
+
+/** `agents.<backend>.provider` — the backend's default provider. */
+function backendProvider(env: AgentConnectorEnv, backend: string): string | undefined {
+  const v = env.agents[backend]?.provider
+  return typeof v === 'string' && v.trim() !== '' ? v : undefined
+}
+
+/** The `bro` invocation for a provider driver — PATH-first, then the
+ *  `npx -y @broject/bro@0` fallback, the same contract the hooks shim
+ *  pins at install time (spec bro-5hx1.1). A spawned env that strips
+ *  both is a startup error the driver itself reports. */
+export function broSpawnArgv(env: NodeJS.ProcessEnv = process.env): string[] {
+  const names = process.platform === 'win32' ? ['bro.cmd', 'bro.exe', 'bro'] : ['bro']
+  for (const dir of (env.PATH ?? '').split(delimiter)) {
+    if (dir === '') {
+      continue
+    }
+    for (const name of names) {
+      try {
+        accessSync(join(dir, name), constants.X_OK)
+        return ['bro']
+      } catch {
+        // not in this dir — keep walking PATH
+      }
+    }
+  }
+  return ['npx', '-y', '@broject/bro@0']
+}
+
+/** What resolution computed for a spawn — provenance labels plus the
+ *  worker payload the backend runs. Opaque labels stay vendor-blind;
+ *  `worker` is the only backend-visible piece. */
+export interface SpawnProviderPick {
+  provider?: string
+  model?: string
+  worker?: SpawnWorker
+}
+
+/** Resolve the spawn's provider into a worker payload. `sel` carries
+ *  the explicit fields already merged over the profile's piecewise;
+ *  `backend` is the RESOLVED connector name (a profile's `backend`
+ *  redirect already applied) so `agents.<backend>.provider` binds the
+ *  backend that will actually run it. Errors name the key —
+ *  UnknownProviderError becomes 'input' when a flag named it, 'config'
+ *  when config (profile/backend knob) did; a kind with no spawn
+ *  surface is always 'config'. */
+export async function resolveSpawnProvider(
+  env: AgentConnectorEnv,
+  backend: string,
+  sel: { provider?: string; model?: string; autoApprove?: boolean },
+  /** Where the provider name came from — a flag's typo is caller
+   *  'input'; a name in config (profile preset, backend knob) is
+   *  'config'. Used only for the SpawnError kind. */
+  namedBy: 'flag' | 'profile' | 'backend' = 'backend'
+): Promise<SpawnProviderPick> {
+  const providerName = sel.provider ?? backendProvider(env, backend)
+  const source = sel.provider === undefined ? 'backend' : namedBy
+  if (providerName === undefined) {
+    // legacy template path — an explicit model still pins provenance
+    // env/registry labels without changing what runs
+    return { model: sel.model }
+  }
+  let entry: ProviderEntry
+  try {
+    entry = requireProviderSurface(env.providers ?? {}, providerName, 'spawn')
+  } catch (err) {
+    if (err instanceof UnknownProviderError || err instanceof ProviderSurfaceError) {
+      // a surface mismatch is the ENTRY's capability gap — always
+      // config; an unknown name is caller input only when a flag wrote it
+      const kind =
+        err instanceof ProviderSurfaceError || source !== 'flag' ? 'config' : 'input'
+      throw new SpawnError(err.message, kind)
+    }
+    throw err
+  }
+  const model = sel.model ?? entry.model
+  switch (entry.type) {
+    case 'cli':
+      // the entry's command substitutes for the backend's template —
+      // {promptFile} mechanics apply verbatim
+      return { provider: providerName, model, worker: { kind: 'template', command: entry.command } }
+    case 'acp': {
+      // the providers package owns the argv render — a lazy import keeps
+      // a providers-less checkout (and every non-acp spawn) from paying
+      // for the SDK
+      const { acpWorkerArgv } = await import('@broject/providers')
+      const autoApprove = sel.autoApprove ?? entry.autoApprove
+      return {
+        provider: providerName,
+        model,
+        worker: {
+          kind: 'argv',
+          argv: acpWorkerArgv(broSpawnArgv(), entry, { model, autoApprove }),
+          cliName: commandCliName(entry.command),
+        },
+      }
+    }
+    default:
+      // spawn:false kinds already threw in requireProviderSurface — a
+      // registry-table change must still never reach here silently
+      throw new SpawnError(
+        `providers.${providerName} (type '${entry.type}') has no spawn surface`,
+        'config'
+      )
+  }
 }
 
 /** Pick the serving backend: explicit --connector → connectors.agents →
@@ -430,6 +582,10 @@ const AGENT_PIN_KEYS = new Set([
   'BRO_AGENT',
   'BRO_SESSION_ID',
   'BRO_MOL_ID',
+  // provider provenance is connector-owned too — a caller-supplied
+  // BRO_AGENT_PROVIDER would let a spawn forge which provider ran it
+  'BRO_AGENT_PROVIDER',
+  'BRO_AGENT_MODEL',
 ])
 
 /** The real pin values a backend injects over/around caller env —
@@ -462,6 +618,15 @@ const agentEnvPins = (
   }
   if (mol !== undefined) {
     pins.push(['BRO_MOL_ID', mol])
+  }
+  // provenance pins (spec bro-5hx1.1) — BRO_AGENT_MODEL doubles as
+  // MODEL_ENV[0] so the Agent-Model: commit trailer lands the day a
+  // provider is named
+  if (spec.provider !== undefined) {
+    pins.push(['BRO_AGENT_PROVIDER', spec.provider])
+  }
+  if (spec.model !== undefined) {
+    pins.push(['BRO_AGENT_MODEL', spec.model])
   }
   return pins
 }
@@ -959,6 +1124,15 @@ function prepareSpawn(
     pid: undefined,
     pidStart: undefined,
     spawnError: undefined,
+    // provenance — the resolution verdict rides the same write
+    // (spec bro-5hx1.1), even if the child never starts; a respawn
+    // re-stamps it, so a legacy respawn clears a stale pin instead of
+    // keeping the previous run's provider
+    provider: spec.provider,
+    model: spec.model,
+    // the acp driver patches the real session id after session/new —
+    // clear the previous run's so it never masquerades as this run's
+    acpSessionId: undefined,
     ...opts.entry?.(agentId),
   })
   if (claimed) {
@@ -1113,9 +1287,9 @@ function findAgentEntry(
  *  nonexistent worktree, or an unanchorable agents home. Returns the
  *  shared artifacts dir on success. */
 function spawnHome(dir: string, backend: string, command: string, spec: SpawnSpec): string {
-  if (command === '') {
+  if (command === '' && spec.worker === undefined) {
     throw new SpawnError(
-      `no agent command configured — set agents.${backend}.command or loop.agent in bro.config.json`,
+      `no agent command configured — set agents.${backend}.command, agents.${backend}.provider, or loop.agent in bro.config.json`,
       'config'
     )
   }
@@ -1162,6 +1336,15 @@ const infoCause = (entry: AgentRegistryEntry): Pick<AgentInfo, 'cause' | 'resetA
   resetAt: typeof entry.resetAt === 'string' ? entry.resetAt : undefined,
 })
 
+/** provider/model provenance — absent fields read as a legacy spawn
+ *  (the row says so by omission, honestly). */
+const infoProvenance = (
+  entry: AgentRegistryEntry
+): Pick<AgentInfo, 'provider' | 'model'> => ({
+  provider: typeof entry.provider === 'string' ? entry.provider : undefined,
+  model: typeof entry.model === 'string' ? entry.model : undefined,
+})
+
 function toInfo(dir: string, home: string | null, molStep: string, entry: AgentRegistryEntry): AgentInfo {
   return {
     id: entry.agentId,
@@ -1171,6 +1354,7 @@ function toInfo(dir: string, home: string | null, molStep: string, entry: AgentR
     backend: entry.backend,
     state: nativeState(dir, home, molStep, entry),
     ...infoCause(entry),
+    ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     log: typeof entry.log === 'string' ? entry.log : undefined,
   }
@@ -1212,10 +1396,38 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         let spawned: AgentRegistryEntry
         try {
           // the wrapper captures $? into the .exit file — the only exit
-          // record a detached process can leave once the parent is gone
+          // record a detached process can leave once the parent is gone.
+          // Worker payloads (spec bro-5hx1.1): a 'template' worker's
+          // command substitutes for the backend's own template; an
+          // 'argv' worker execs verbatim through the wrapper's "$@"
+          // positional passthrough — the provider argv (a `model` value
+          // could carry shell metachars) is never string-concatenated.
+          const worker = spec.worker
+          const args =
+            worker?.kind === 'argv'
+              ? [
+                  '-c',
+                  'out=$1; shift; "$@"; s=$?; printf %s "$s" > "$out"',
+                  'bro-agent',
+                  exitFile,
+                  ...worker.argv,
+                  promptFile,
+                ]
+              : [
+                  '-c',
+                  `${expandAgentCmd(worker?.kind === 'template' ? worker.command : command, promptFile)}; s=$?; printf %s "$s" > "$1"`,
+                  'bro-agent',
+                  exitFile,
+                ]
+          const cliBadge =
+            worker === undefined
+              ? commandCliName(command)
+              : worker.kind === 'argv'
+                ? worker.cliName
+                : commandCliName(worker.command)
           const child = spawn(
             'sh', // NOSONAR — PATH lookup is the contract (same as git/bd everywhere)
-            ['-c', `${expandAgentCmd(command, promptFile)}; s=$?; printf %s "$s" > "$1"`, 'bro-agent', exitFile],
+            args,
             { // NOSONAR — operator-configured agent command (same contract as loop)
               cwd: spec.repoRoot,
               env: {
@@ -1224,7 +1436,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 // identity pins last — spec.env must never redirect the
                 // claim store or re-badge the worker as another bead/agent
                 ...Object.fromEntries(
-                  agentEnvPins(spec, agentId, promptFile, commandCliName(command), mol)
+                  agentEnvPins(spec, agentId, promptFile, cliBadge, mol)
                 ),
               },
               stdio: ['ignore', fd, fd],
@@ -1467,6 +1679,7 @@ function toTmuxInfo(
     backend: entry.backend,
     state: tmuxState(dir, home, molStep, entry, probe),
     ...infoCause(entry),
+    ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     log: typeof entry.log === 'string' ? entry.log : undefined,
   }
@@ -1553,7 +1766,14 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           .map(([k, v]) => `export ${k}=${shQuote(v)}`)
           .join('\n')
         writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
-        const envArgs = agentEnvPins(spec, agentId, promptFile, commandCliName(command), mol).flatMap(
+        const worker = spec.worker
+        const cliBadge =
+          worker === undefined
+            ? commandCliName(command)
+            : worker.kind === 'argv'
+              ? worker.cliName
+              : commandCliName(worker.command)
+        const envArgs = agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(
           ([k, v]) => ['-e', `${k}=${v}`]
         )
         // the pane sources the ambient env and drops the file, then runs
@@ -1562,8 +1782,18 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // Session dies with the pane → has-session IS liveness. tmux
         // runs the command through the user's default-shell — a
         // non-POSIX one (fish) would eat the braces, so sh -c pins the
-        // dialect the same way native's spawn does
-        const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${expandAgentCmd(command, promptFile)}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>&1 | tee -a ${shQuote(log)}`
+        // dialect the same way native's spawn does.
+        // Worker payloads (spec bro-5hx1.1): a 'template' command
+        // substitutes wholesale; an 'argv' worker becomes an exec line
+        // with every element single-quoted — the provider argv never
+        // re-parses into a different program.
+        const runLine =
+          worker === undefined
+            ? expandAgentCmd(command, promptFile)
+            : worker.kind === 'argv'
+              ? [...worker.argv, promptFile].map(shQuote).join(' ')
+              : expandAgentCmd(worker.command, promptFile)
+        const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>&1 | tee -a ${shQuote(log)}`
         const paneCmd = `sh -c ${shQuote(paneScript)}` // NOSONAR — operator-configured agent command (same contract as native/loop)
         const res = tmuxRun(socket, [
           'new-session',
@@ -2035,6 +2265,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       backend: entry.backend,
       state: sessions === undefined || s === undefined ? missing : gcState(s),
       ...infoCause(entry),
+      ...infoProvenance(entry),
       worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
       log: typeof entry.log === 'string' ? entry.log : undefined,
     }
@@ -2135,6 +2366,16 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     matchDir: () => gcMatchDir(dir, env),
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+      // a provider-resolved worker can't ride gc — the city's provider
+      // command is written once in city.toml at init, so recording
+      // provenance while gc runs its own configured provider would be
+      // laundering. Model labels alone still pin (env table).
+      if (spec.worker !== undefined) {
+        throw new SpawnError(
+          `providers.${spec.provider ?? '?'} resolved a spawn worker, but the gascity backend runs its own provider sessions (city.toml owns the command) — run it on native/tmux or drop the provider`,
+          'config'
+        )
+      }
       // gc session submit has no --file/stdin mode (v1.4.2), so the
       // prompt rides argv — Linux caps a single element at 128KiB
       // (MAX_ARG_STRLEN) and E2BIG there reads as an opaque spawn
