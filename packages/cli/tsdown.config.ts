@@ -13,7 +13,7 @@ export default defineConfig({
   // package's exports["./server"] (see packages/cli/package.json), and it
   // spawns the sibling dist/index.js rather than importing bro, so the two
   // never share a process.
-  entry: ['src/index.ts', 'src/plugin.ts', 'src/opencode.ts'],
+  entry: ['src/index.ts', 'src/plugin.ts', 'src/opencode.ts', 'src/kilo.ts'],
   format: ['esm'],
   dts: true,
   // Bundle workspace libs into the published CLI — consumers get one file.

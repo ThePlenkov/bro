@@ -17,16 +17,18 @@
  * an import cycle (the registry imports this module for `run`).
  */
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { gitTry, type BroPlugin } from '@broject/core'
 import { positionals } from './args.ts'
 
@@ -42,10 +44,25 @@ export interface PluginRow {
   path: string
 }
 
+/** A manifest step beyond the module file — kilo's global install also
+ *  needs a file:/// entry in kilo.json's `plugin` array. */
+interface Registration {
+  /** Reading this parses the manifest — a malformed one exits before
+   *  any file is written. */
+  readonly registered: boolean
+  register(): void
+  unregister(): void
+}
+
 interface ClientSpec {
   /** The shippable module's source path, or null when unresolvable. */
   artifact(cwd: string): string | null
   targets(cwd: string, env: NodeJS.ProcessEnv): Record<PluginScope, string>
+  registration?(
+    scope: PluginScope,
+    path: string,
+    env: NodeJS.ProcessEnv
+  ): Registration | null
 }
 
 /** The bro package root — this module sits at src/commands/ in a
@@ -101,6 +118,89 @@ function opencodeArtifact(cwd: string): string | null {
   ])
 }
 
+function kiloConfigDir(env: NodeJS.ProcessEnv): string {
+  return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'kilo')
+}
+
+function kiloManifestPath(env: NodeJS.ProcessEnv): string {
+  return join(kiloConfigDir(env), 'kilo.json')
+}
+
+/** kilo.json is strict JSON — kilo.jsonc exists too but kilo merges both
+ *  files, so writing only kilo.json is always correct and a comment-
+ *  bearing file we can't parse is left for the user, never rewritten. */
+function readKiloManifest(env: NodeJS.ProcessEnv): Record<string, unknown> {
+  const path = kiloManifestPath(env)
+  if (!existsSync(path)) {
+    return {}
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    console.error(
+      `plugins: ${path} is not plain JSON — edit the "plugin" array by hand`
+    )
+    process.exit(1)
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    console.error(`plugins: ${path} must be a JSON object — edit it by hand`)
+    process.exit(1)
+  }
+  return parsed as Record<string, unknown>
+}
+
+function kiloRegistration(path: string, env: NodeJS.ProcessEnv): Registration {
+  const manifestPath = kiloManifestPath(env)
+  const entry = pathToFileURL(path).href
+  const pluginList = (m: Record<string, unknown>): unknown[] =>
+    Array.isArray(m.plugin) ? m.plugin : []
+  const writeManifest = (m: Record<string, unknown>): void => {
+    atomicWrite(manifestPath, `${JSON.stringify(m, null, 2)}\n`)
+  }
+  return {
+    get registered() {
+      return pluginList(readKiloManifest(env)).includes(entry)
+    },
+    register() {
+      const fresh = !existsSync(manifestPath)
+      const m = readKiloManifest(env)
+      const list = pluginList(m)
+      if (list.includes(entry)) {
+        return
+      }
+      const body = fresh
+        ? { $schema: 'https://app.kilo.ai/config.json', ...m }
+        : m
+      writeManifest({ ...body, plugin: [...list, entry] })
+    },
+    unregister() {
+      if (!existsSync(manifestPath)) {
+        return
+      }
+      const m = readKiloManifest(env)
+      const list = pluginList(m)
+      if (!list.includes(entry)) {
+        return
+      }
+      writeManifest({ ...m, plugin: list.filter((e) => e !== entry) })
+    },
+  }
+}
+
+/** kilo's artifact ladder mirrors opencode's — but the global target is
+ *  NOT `plugin/`/`plugins/` (kilo auto-scans those; a file there would
+ *  double-register against the kilo.json `plugin[]` entry). */
+function kiloArtifact(cwd: string): string | null {
+  const pkg = packageRoot()
+  const root = gitRoot(cwd)
+  return firstExisting([
+    pkg === null ? null : join(pkg, 'src', 'kilo.ts'),
+    pkg === null ? null : join(pkg, 'dist', 'kilo.js'),
+    root === null ? null : join(root, 'plugins', 'kilo', 'bro', 'bro.ts'),
+  ])
+}
+
 const CLIENTS: Record<string, ClientSpec> = {
   opencode: {
     artifact: opencodeArtifact,
@@ -113,6 +213,15 @@ const CLIENTS: Record<string, ClientSpec> = {
       ),
       local: join(gitRoot(cwd) ?? cwd, '.opencode', 'plugins', 'bro.ts'),
     }),
+  },
+  kilo: {
+    artifact: kiloArtifact,
+    targets: (cwd, env) => ({
+      global: join(kiloConfigDir(env), 'bro', 'bro.ts'),
+      local: join(gitRoot(cwd) ?? cwd, '.kilo', 'plugin', 'bro.ts'),
+    }),
+    registration: (scope, path, env) =>
+      scope === 'global' ? kiloRegistration(path, env) : null,
   },
 }
 
@@ -127,16 +236,20 @@ export function isBroAdapter(text: string): boolean {
   return /\bid:\s*["']bro["']/.test(text) && /\bserver:\s*BroPlugin\b/.test(text)
 }
 
-function stateAt(target: string, artifact: string | null): InstallState {
+function stateAt(
+  target: string,
+  artifact: string | null,
+  reg: Registration | null
+): InstallState {
   if (!existsSync(target)) {
     return 'absent'
   }
   if (artifact === null) {
     return 'present'
   }
-  return readFileSync(target, 'utf8') === readFileSync(artifact, 'utf8')
-    ? 'installed'
-    : 'stale'
+  const current = readFileSync(target, 'utf8') === readFileSync(artifact, 'utf8')
+  // a matching file with its manifest entry missing is "install me again"
+  return current && (reg === null || reg.registered) ? 'installed' : 'stale'
 }
 
 /** The client × scope matrix — `bro plugins list` and doctor's row. */
@@ -150,17 +263,26 @@ export function pluginRows(
     const targets = client.targets(cwd, env)
     for (const scope of ['global', 'local'] as const) {
       const path = targets[scope]
-      rows.push({ client: name, scope, state: stateAt(path, artifact), path })
+      const reg = client.registration?.(scope, path, env) ?? null
+      rows.push({ client: name, scope, state: stateAt(path, artifact, reg), path })
     }
   }
   return rows
 }
 
-/** `write tmp; rename` — a torn write must never leave a half module. */
+/** `write tmp; rename` — a torn write must never leave a half module.
+ *  The tmp file gets umask defaults, so a restrictive existing mode is
+ *  copied over before the rename: a 0600 kilo.json carrying permission
+ *  rules must not silently widen to 0644. */
 function atomicWrite(path: string, content: string): void {
   mkdirSync(dirname(path), { recursive: true })
   const tmp = `${path}.${process.pid}.tmp`
   writeFileSync(tmp, content)
+  try {
+    chmodSync(tmp, statSync(path).mode)
+  } catch {
+    // no prior file — the default mode stands
+  }
   renameSync(tmp, path)
 }
 
@@ -215,14 +337,18 @@ export function installClient(
   const targets = client.targets(opts.cwd, opts.env)
   return scopes.map((scope): Outcome => {
     const path = targets[scope]
+    // registration parses the manifest — a malformed one exits here,
+    // before the module file is touched
+    const reg = client.registration?.(scope, path, opts.env) ?? null
+    const needsRegistration = reg !== null && !reg.registered
     const prior = existsSync(path) ? readFileSync(path, 'utf8') : null
-    if (prior === content) {
+    if (prior === content && !needsRegistration) {
       return { client: name, scope, action: 'current', path }
     }
     // a file already holding the slot that carries no bro sentinel is a
     // foreign plugin under our name — clobbering it needs --force. A
     // sentinel-bearing difference is a shipped version → plain update.
-    if (prior !== null && !isBroAdapter(prior) && !opts.force) {
+    if (prior !== null && prior !== content && !isBroAdapter(prior) && !opts.force) {
       return {
         client: name,
         scope,
@@ -239,8 +365,19 @@ export function installClient(
         path,
       }
     }
-    atomicWrite(path, content)
-    return { client: name, scope, action: prior === null ? 'installed' : 'updated', path }
+    if (prior !== content) {
+      atomicWrite(path, content)
+    }
+    if (needsRegistration) {
+      reg.register()
+    }
+    return {
+      client: name,
+      scope,
+      action: prior === null ? 'installed' : 'updated',
+      path,
+      note: needsRegistration ? 'registered in kilo.json' : undefined,
+    }
   })
 }
 
@@ -255,9 +392,11 @@ export function uninstallClient(
   const clean = artifact === null ? null : readFileSync(artifact, 'utf8')
   return scopes.map((scope): Outcome => {
     const path = targets[scope]
+    const reg = client.registration?.(scope, path, opts.env) ?? null
     if (!existsSync(path)) {
-      return { client: name, scope, action: 'absent', path }
+      return absentOutcome(name, scope, path, reg, opts.dryRun)
     }
+    const wasRegistered = reg?.registered ?? false
     const prior = readFileSync(path, 'utf8')
     // provably ours = byte-equal to this bro's artifact. A sentinel-only
     // match is a different version or a hand edit — indistinguishable by
@@ -279,8 +418,41 @@ export function uninstallClient(
       return { client: name, scope, action: 'would-remove', path }
     }
     rmSync(path)
-    return { client: name, scope, action: 'removed', path }
+    if (wasRegistered) {
+      reg!.unregister()
+    }
+    return {
+      client: name,
+      scope,
+      action: 'removed',
+      path,
+      note: wasRegistered ? 'removed kilo.json entry' : undefined,
+    }
   })
+}
+
+/** The plugin file is already gone — an absent slot can still carry a
+ *  dangling manifest entry, which gets swept here. */
+function absentOutcome(
+  name: string,
+  scope: PluginScope,
+  path: string,
+  reg: Registration | null,
+  dryRun: boolean
+): Outcome {
+  const wasRegistered = reg?.registered ?? false
+  if (wasRegistered && !dryRun) {
+    reg!.unregister()
+  }
+  return {
+    client: name,
+    scope,
+    action: 'absent',
+    path,
+    note: wasRegistered
+      ? `${dryRun ? 'would remove' : 'removed'} dangling kilo.json entry`
+      : undefined,
+  }
 }
 
 function printOutcomes(outcomes: Outcome[]): void {
