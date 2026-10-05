@@ -311,19 +311,28 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
     }
     models = parsed
   }
-  if (typeof picked.apiKeyEnv === 'string' && !isEnvName(picked.apiKeyEnv)) {
-    return fail('apiKeyEnv must NAME an env var (SCREAMING_SNAKE) — config never holds a key value')
+  const keyErr = keySourceErr(picked)
+  if (keyErr !== null) {
+    return fail(keyErr)
   }
-  // an `echo sk-…`/`printf ts_live_…` "command" smuggles the key into
-  // config — the whole point of apiKeyCommand is that the file never
-  // holds the value
+  return { type, ...picked, ...(models === undefined ? {} : { models }) } as ProviderEntry
+}
+
+/** Key-source guards shared by every kind: apiKeyEnv names an env var
+ *  (config never holds a value); apiKeyCommand must RUN a lookup — an
+ *  `echo sk-…`/`printf ts_live_…` "command" smuggles the key into
+ *  config, which is the whole point the field exists to prevent. */
+function keySourceErr(picked: Record<string, string | boolean>): string | null {
+  if (typeof picked.apiKeyEnv === 'string' && !isEnvName(picked.apiKeyEnv)) {
+    return 'apiKeyEnv must NAME an env var (SCREAMING_SNAKE) — config never holds a key value'
+  }
   if (
     typeof picked.apiKeyCommand === 'string' &&
     /sk-[A-Za-z0-9]|ts_(?:live|test)_|Bearer\s/i.test(picked.apiKeyCommand)
   ) {
-    return fail('apiKeyCommand must RUN a secret lookup — it may not contain a key value')
+    return 'apiKeyCommand must RUN a secret lookup — it may not contain a key value'
   }
-  return { type, ...picked, ...(models === undefined ? {} : { models }) } as ProviderEntry
+  return null
 }
 
 export type ApiEntry = Extract<ProviderEntry, { type: 'api' }>
