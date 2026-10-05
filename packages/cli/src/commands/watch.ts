@@ -465,6 +465,22 @@ export function watchArgs(argv: string[]): {
   return { ...base, everySec }
 }
 
+/** One reap for one tick — the report when it did work plus the
+ *  attention line. Housekeeping must never kill the heartbeat: a
+ *  throwing janitor surfaces as an attention line, not a dead watch
+ *  (bro-f6zp — a silent janitor is indistinguishable from a broken one). */
+function tickJanitor(dir: string): { janitor?: JanitorReport; note: string } {
+  try {
+    const j = runJanitor(dir)
+    if (j !== null && janitorDidWork(j)) {
+      return { janitor: j, note: janitorLine(j) }
+    }
+    return { note: '' }
+  } catch (err) {
+    return { note: `janitor failed — ${err instanceof Error ? err.message : String(err)}` }
+  }
+}
+
 export async function runWatchCommand(argv: string[]): Promise<void> {
   let args: ReturnType<typeof watchArgs>
   try {
@@ -485,25 +501,12 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
   let lastNotified = ''
   const tick = async (): Promise<void> => {
     // the janitor rides the heartbeat — one reap per tick, before the
-    // snapshot so the planes read post-reap state. Housekeeping must
-    // never kill the heartbeat: a throwing janitor surfaces as an
-    // attention line, not a dead watch (bro-f6zp — a silent janitor is
-    // indistinguishable from a broken one)
-    let janitorNote = ''
-    let janitor: JanitorReport | undefined
-    try {
-      const j = runJanitor(dir)
-      if (j !== null && janitorDidWork(j)) {
-        janitor = j
-        janitorNote = janitorLine(j)
-      }
-    } catch (err) {
-      janitorNote = `janitor failed — ${err instanceof Error ? err.message : String(err)}`
-    }
+    // snapshot so the planes read post-reap state (bro-f6zp)
+    const { janitor, note } = tickJanitor(dir)
     const snap = await collectSnapshot(dir)
     snap.janitor = janitor
-    if (janitorNote !== '') {
-      snap.attention.push(janitorNote)
+    if (note !== '') {
+      snap.attention.push(note)
     }
     const text = renderSnapshot(snap)
     console.log(json ? JSON.stringify(snap, null, 2) : text)

@@ -281,7 +281,7 @@ function sweepSessions(ctx: Ctx): Set<string> {
     }
     const path = join(hooks, f)
     const st = statOf(path)
-    if (st === null || !st.isFile) {
+    if (!st?.isFile) {
       continue
     }
     sids.add(parts.sid)
@@ -330,7 +330,7 @@ function sweepMailbox(ctx: Ctx, markerSids: Set<string>): void {
   for (const f of listDir(notify)) {
     const path = join(notify, f)
     const st = statOf(path)
-    if (st === null || !st.isFile) {
+    if (!st?.isFile) {
       continue
     }
     const age = ctx.now - st.mtimeMs
@@ -388,105 +388,127 @@ function deadSince(agentsDir: string, entry: AgentRegistryEntry): number | null 
   return newest > 0 ? newest : null
 }
 
-function sweepAgents(ctx: Ctx): void {
-  const agentsDir = join(ctx.bro, 'agents')
-  const before = ctx.deps.readRegistry()
-  const deadKeys: string[] = []
-  for (const [molStep, e] of Object.entries(before)) {
-    // only RECORDED deaths reap — a live or merely-lost entry's
-    // liveness is the connector's probe, not the janitor's guess
+/** Registry keys whose recorded death aged past retention — only
+ *  RECORDED deaths reap; a live or merely-lost entry's liveness is the
+ *  connector's probe, not the janitor's guess. */
+function retiredKeys(
+  agentsDir: string,
+  reg: Record<string, AgentRegistryEntry>,
+  now: number
+): string[] {
+  const keys: string[] = []
+  for (const [molStep, e] of Object.entries(reg)) {
     if (e.stopped !== true && typeof e.exitStatus !== 'number') {
       continue
     }
     const since = deadSince(agentsDir, e)
-    if (since !== null && ctx.now - since > DEAD_RETENTION_MS) {
-      deadKeys.push(molStep)
+    if (since !== null && now - since > DEAD_RETENTION_MS) {
+      keys.push(molStep)
     }
   }
+  return keys
+}
 
-  let after = before
-  if (deadKeys.length > 0) {
-    const release = ctx.deps.registryLock()
-    try {
-      const cur = ctx.deps.readRegistry()
-      let changed = false
-      for (const k of deadKeys) {
-        const orig = before[k]
-        const c = cur[k]
-        // revalidate inside the lock — a respawn that reused the entry
-        // (same molStep, new generation) owns it now
-        if (
-          c === undefined ||
-          orig === undefined ||
-          c.agentId !== orig.agentId ||
-          c.spawnedAt !== orig.spawnedAt
-        ) {
-          continue
-        }
-        delete cur[k]
-        changed = true
-        ctx.report.agentEntries.push(k)
+/** Drop the retired keys inside the registry lock, revalidating each
+ *  entry — a respawn that reused the key (same molStep, new
+ *  generation) owns it now. Returns the effective registry. */
+function dropRetired(
+  ctx: Ctx,
+  before: Record<string, AgentRegistryEntry>,
+  deadKeys: string[]
+): Record<string, AgentRegistryEntry> {
+  const release = ctx.deps.registryLock()
+  try {
+    const cur = ctx.deps.readRegistry()
+    let changed = false
+    for (const k of deadKeys) {
+      if (cur[k]?.agentId !== before[k]?.agentId || cur[k]?.spawnedAt !== before[k]?.spawnedAt) {
+        continue
       }
-      if (changed && !ctx.dryRun) {
-        ctx.deps.writeRegistry(cur)
-      }
-      after = changed ? cur : before
-    } finally {
-      release()
+      delete cur[k]
+      changed = true
+      ctx.report.agentEntries.push(k)
     }
+    if (changed && !ctx.dryRun) {
+      ctx.deps.writeRegistry(cur)
+    }
+    return changed ? cur : before
+  } finally {
+    release()
   }
+}
 
-  ctx.liveAgentIds = new Set(
-    Object.values(after)
-      .map((e) => e.agentId)
-      .filter((id) => SAFE_AGENT_ID.test(id))
-  )
-  // files no live entry points at are debris — the `<agentId>.*`
-  // naming makes the whole home one unlink set, no extra bookkeeping
+/** `<agentId>.*` files no live entry points at are debris — the
+ *  naming makes the whole home one unlink set, no extra bookkeeping.
+ *  Prefix-match against live ids first (minted ids are `<backend>-hex`,
+ *  but a hand-edited entry could carry a dot — first-dot split would
+ *  orphan its files); an mtime at-or-after the scan start is a file a
+ *  respawn recreated mid-sweep. */
+function reapOrphanHomes(ctx: Ctx, agentsDir: string): void {
+  const lives = [...ctx.liveAgentIds]
   for (const f of listDir(agentsDir)) {
-    const m = /^([A-Za-z0-9][A-Za-z0-9._-]*)\..+$/.exec(f)
-    if (m === null || ctx.liveAgentIds.has(m[1]!)) {
+    const dot = f.indexOf('.')
+    if (
+      dot <= 0 ||
+      !SAFE_AGENT_ID.test(f.slice(0, dot)) ||
+      lives.some((id) => f.startsWith(`${id}.`))
+    ) {
       continue
     }
     const path = join(agentsDir, f)
     const st = statOf(path)
-    // an mtime at-or-after the scan start is a file a respawn recreated
-    // mid-sweep — its new entry may not be in our snapshot yet
-    if (st === null || !st.isFile || st.mtimeMs >= ctx.now) {
+    if (!st?.isFile || st.mtimeMs >= ctx.now) {
       continue
     }
     reap(ctx, path, 'agentFiles')
   }
 }
 
+function sweepAgents(ctx: Ctx): void {
+  const agentsDir = join(ctx.bro, 'agents')
+  const before = ctx.deps.readRegistry()
+  const deadKeys = retiredKeys(agentsDir, before, ctx.now)
+  const after = deadKeys.length === 0 ? before : dropRetired(ctx, before, deadKeys)
+  ctx.liveAgentIds = new Set(
+    Object.values(after)
+      .map((e) => e.agentId)
+      .filter((id) => SAFE_AGENT_ID.test(id))
+  )
+  reapOrphanHomes(ctx, agentsDir)
+}
+
 // --- lock debris ------------------------------------------------------------------------
 
-/** `*.lock` whose `<pid>:<rand>` token names a dead pid — the filelock
- *  would steal it on next acquire; the janitor removes the file itself.
- *  An unverifiable token gets the TTL floor — a week-old lock is
- *  abandoned whatever its token said. `*.cap-*` captured instances and
- *  `*.tmp` staged writes reap past the debris floor. */
+/** What one top-level file under bro/ is to the lock sweep. A `*.lock`
+ *  whose `<pid>:<rand>` token names a dead pid is garbage — the
+ *  filelock would steal it on next acquire; the janitor removes the
+ *  file itself. An unverifiable token gets the TTL floor — a week-old
+ *  lock is abandoned whatever its token said. `*.cap-*` captured
+ *  instances and `*.tmp` staged writes reap past the debris floor. */
+function lockKind(f: string, path: string, age: number): keyof JanitorReaped | null {
+  if (f.endsWith('.lock')) {
+    const pid = Number((firstLine(path)?.trim() ?? '').split(':')[0])
+    if (Number.isInteger(pid) && pid > 0) {
+      return pidAlive(pid) ? null : 'locks'
+    }
+    return age > MARKER_TTL_MS ? 'locks' : null
+  }
+  if (f.includes('.cap-') || f.endsWith('.tmp')) {
+    return age > DEBRIS_FLOOR_MS ? 'debris' : null
+  }
+  return null
+}
+
 function sweepLocks(ctx: Ctx): void {
   for (const f of listDir(ctx.bro)) {
     const path = join(ctx.bro, f)
     const st = statOf(path)
-    if (st === null || !st.isFile) {
+    if (!st?.isFile) {
       continue
     }
-    const age = ctx.now - st.mtimeMs
-    if (f.endsWith('.lock')) {
-      const pid = Number((firstLine(path)?.trim() ?? '').split(':')[0])
-      if (Number.isInteger(pid) && pid > 0) {
-        if (!pidAlive(pid)) {
-          reap(ctx, path, 'locks')
-        }
-      } else if (age > MARKER_TTL_MS) {
-        reap(ctx, path, 'locks')
-      }
-    } else if (f.includes('.cap-') || f.endsWith('.tmp')) {
-      if (age > DEBRIS_FLOOR_MS) {
-        reap(ctx, path, 'debris')
-      }
+    const kind = lockKind(f, path, ctx.now - st.mtimeMs)
+    if (kind !== null) {
+      reap(ctx, path, kind)
     }
   }
 }
@@ -545,8 +567,7 @@ function capLogs(ctx: Ctx): void {
     capIfLarge(ctx, join(ctx.bro, 'judge', f), f.endsWith('.jsonl'))
   }
   for (const f of listDir(join(ctx.bro, 'agents'))) {
-    const m = /^([A-Za-z0-9][A-Za-z0-9._-]*)\.log$/.exec(f)
-    if (m !== null && ctx.liveAgentIds.has(m[1]!)) {
+    if (f.endsWith('.log') && ctx.liveAgentIds.has(f.slice(0, -'.log'.length))) {
       capIfLarge(ctx, join(ctx.bro, 'agents', f), true)
     }
   }

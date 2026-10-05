@@ -18,7 +18,7 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd` initialized.
 | `bro watch [--once]` | One snapshot — the heartbeat call: attention list + open molecules + act gates per fleet PR + fleet rows |
 | `bro watch --every N` | Tick the snapshot every N seconds until killed |
 | `bro watch --notify` | Drop the initial snapshot plus each transition into the mailbox (`<git-common>/bro/notify/`) — a notify connector drains it into the parent session |
-| `bro watch --json` | Machine-readable `{ts, attention, mols, gates, fleet}` |
+| `bro watch --json` | Machine-readable `{ts, attention, mols, gates, fleet, janitor?}` |
 
 ## Policy
 
@@ -37,9 +37,12 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd` initialized.
   connector installed, mailbox drops surface mid-turn in the parent
   session — the initial snapshot plus each transition. Dedup is
   per-process: a scheduled `--once --notify` run always emits.
-- **Watch is read-only.** It never claims steps, never mutates beads,
-  never respawns agents — a `lost — respawn?` row is the decision
-  surface; respawning is a manual act (`bro agents up <step>`).
+- **Watch never touches your work.** It never claims steps, never
+  mutates beads, never respawns agents — a `lost — respawn?` row is the
+  decision surface; respawning is a manual act (`bro agents up <step>`).
+  The one write besides `--notify` drops is the janitor: each tick
+  reaps dead session/agent state under `<git-common>/bro/` (retention,
+  not workflow) and reports it in the attention list.
 - **Degraded is not dead.** A backend whose `list()` failed renders its
   rows `unknown`, never `lost` — don't respawn on a failed read.
 - **Report progress in words, not IDs.** When relaying snapshot state
