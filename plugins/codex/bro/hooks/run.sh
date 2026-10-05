@@ -40,7 +40,10 @@ done
 if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; then
   node "$DIR/packages/cli/dist/index.js" hooks "$@" && exit 0
 fi
-if command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then
+# stdin is the host's hook payload — the capability probe must not
+# consume it, so it runs with stdin closed (a pre-0.2.5 `bro hooks`
+# would otherwise eat the payload the real invocation needs)
+if command -v bro >/dev/null 2>&1 && bro hooks </dev/null >/dev/null 2>&1; then
   bro hooks "$@" && exit 0
 fi
 if command -v npx >/dev/null 2>&1; then

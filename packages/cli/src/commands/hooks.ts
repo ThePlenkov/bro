@@ -50,13 +50,14 @@ import {
 import { dirname, join } from 'node:path'
 import {
   acquireFileLock,
-  parallelWorkLines,
+  parallelWorkProbe,
   postToolLines,
   promptContextLines,
-  sessionStartLines,
+  sessionStartProbe,
   stopGateContributions,
   withFileLock,
 } from '@broject/core'
+import type { ProbeResult } from '@broject/core'
 import { markerLive, ownerTag } from './proc-owner.ts'
 import {
   cliVersion,
@@ -487,25 +488,30 @@ function liveSessionLines(dir: string, selfId: string): string[] {
  *  work here, or a connector reports live work (claimed beads, sibling
  *  worktrees, held slots) — passive context naming what's occupied,
  *  never a block. */
-async function parallelLines(sessionId: string): Promise<string[]> {
+async function parallelLines(sessionId: string): Promise<ProbeResult> {
   try {
     const parts: string[] = []
     const dir = hooksStateDir()
     if (dir) {
       parts.push(...liveSessionLines(dir, sessionId))
     }
-    parts.push(...(await parallelWorkLines({ dir: process.cwd(), sessionId })))
+    const work = await parallelWorkProbe({ dir: process.cwd(), sessionId })
+    parts.push(...work.lines)
     if (parts.length === 0) {
-      return []
+      return { lines: [], settled: work.settled }
     }
-    return [
-      'parallel work detected in this repo:',
-      ...parts.map((p) => `  ${p}`),
-      '  → for new work prefer `bro work enter <slug>` — a separate worktree, not this checkout',
-    ]
+    return {
+      lines: [
+        'parallel work detected in this repo:',
+        ...parts.map((p) => `  ${p}`),
+        '  → for new work prefer `bro work enter <slug>` — a separate worktree, not this checkout',
+      ],
+      settled: work.settled,
+    }
   } catch {
-    // detection is passive — a probe failure must not break rehydrate
-    return []
+    // detection is passive — a probe failure must not break rehydrate,
+    // but the sweep did not settle, so hydration may retry
+    return { lines: [], settled: false }
   }
 }
 
@@ -785,16 +791,17 @@ function journalTrace(input: HookInput, sessionId: string): void {
 async function emitSessionContext(
   event: 'SessionStart' | 'PostCompaction' | 'PreCompact',
   sessionId = ''
-): Promise<void> {
-  const parts: string[] = []
+): Promise<boolean> {
   // sessionStart probes collect from every connector — beads reports
   // the ready queue, drill the open frame, act the PR gate + merge slot,
   // debt the open findings; a jira connector would add assigned issues
-  parts.push(...(await sessionStartLines({ dir: process.cwd(), sessionId })))
-  parts.push(...(await parallelLines(sessionId)))
+  const start = await sessionStartProbe({ dir: process.cwd(), sessionId })
+  const par = await parallelLines(sessionId)
+  const parts = [...start.lines, ...par.lines]
   if (parts.length > 0) {
     context(event, `bro state — resume from here:\n${parts.join('\n')}`)
   }
+  return start.settled && par.settled
 }
 
 async function emitPromptContext(input: HookInput): Promise<void> {
@@ -806,15 +813,19 @@ async function emitPromptContext(input: HookInput): Promise<void> {
   // mark so the summary's successor turn loads fresh state. Mark only
   // after the probes return — a throw retries next prompt.
   const hydrate = cursorClient && sessionId && !skillHinted(sessionId, CURSOR_HYDRATED_SKILL)
+  let settled = true
   if (hydrate) {
-    parts.push(
-      ...(await sessionStartLines({ dir: process.cwd(), sessionId })),
-      ...(await parallelLines(sessionId))
-    )
+    const start = await sessionStartProbe({ dir: process.cwd(), sessionId })
+    const par = await parallelLines(sessionId)
+    parts.push(...start.lines, ...par.lines)
+    settled = start.settled && par.settled
   }
   const sessionCount = parts.length
   parts.push(...(await promptContextLines({ dir: process.cwd(), sessionId }, prompt)))
-  if (hydrate) {
+  // a timed-out or thrown probe masquerades as "no state" — mark only
+  // when every probe answered, else the marker suppresses a retry for
+  // the marker's whole TTL
+  if (hydrate && settled) {
     markSkillHinted(sessionId, CURSOR_HYDRATED_SKILL)
   }
   if (parts.length === 0) {
@@ -988,12 +999,13 @@ function enterHookProject(root: string): boolean {
 async function dispatchHook(event: string, raw: unknown, input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
   switch (event) {
-    case 'session-start':
-      await emitSessionContext('SessionStart', sessionId)
-      if (cursorClient) {
+    case 'session-start': {
+      const settled = await emitSessionContext('SessionStart', sessionId)
+      if (cursorClient && settled) {
         markSkillHinted(sessionId, CURSOR_HYDRATED_SKILL)
       }
       return
+    }
     case 'post-compaction':
       await emitSessionContext('PostCompaction', sessionId)
       return
@@ -1050,13 +1062,20 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     runPrepareCommitMsg(argv)
     return
   }
+  // a bare `bro hooks` is a capability probe — launchers test the
+  // subcommand exists before calling it with the real event. Return
+  // before readRaw: the probe must not consume a payload still waiting
+  // on the caller's stdin for that next invocation.
+  if (!event) {
+    return
+  }
   // stdin before the opt-in check: Cursor's project dir is on the
   // payload / CURSOR_PROJECT_DIR, and cwd may be outside the repo.
   const raw = readRaw()
   cursorClient = isCursorHookPayload(raw)
   const root = hookProjectDir(raw)
   const input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw)
-  if (!event || !broEnabled(root) || !enterHookProject(root)) {
+  if (!broEnabled(root) || !enterHookProject(root)) {
     answerCursorPermission(event, input)
     return
   }

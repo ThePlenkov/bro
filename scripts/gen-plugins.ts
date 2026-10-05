@@ -212,7 +212,10 @@ function cursorHookCommand(event) {
     throw new Error(`invalid hook event name: ${event}`)
   }
   const pin = `@broject/bro@${manifest.version}`
-  return `if [ -f "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ]; then "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ${event} || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks ${event} || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline "${pin}" hooks ${event} || true; fi; exit 0`
+  // the `bro hooks` capability probe runs with stdin closed — a bare
+  // invocation must not consume the payload stdin still holds for the
+  // real `bro hooks ${event}` call that follows
+  return `if [ -f "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ]; then "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ${event} || true; elif command -v bro >/dev/null 2>&1 && bro hooks </dev/null >/dev/null 2>&1; then bro hooks ${event} || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline "${pin}" hooks ${event} || true; fi; exit 0`
 }
 
 function cursorHook(event, timeout, extra = {}) {

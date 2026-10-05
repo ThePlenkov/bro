@@ -110,12 +110,14 @@ export {
   facadeName,
   isOwnClaim,
   parallelWorkLines,
+  parallelWorkProbe,
   postToolLines,
   promptContextLines,
   registerConnector,
   reviewHost,
   specStore,
   sessionStartLines,
+  sessionStartProbe,
   sessionTaskClaims,
   stopGateContributions,
 } from './connectors.ts'
@@ -136,6 +138,7 @@ export type {
   FacadeOpts,
   GateContribution,
   MaybePromise,
+  ProbeResult,
 } from './connectors.ts'
 export {
   AgentNotFound,

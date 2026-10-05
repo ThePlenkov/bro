@@ -31,8 +31,10 @@ continue?" between items.** The queue is the approval.
   else proceeds without waiting on the gate.
 - **Epics** — surface as `epic:` lines. Decompose into beads first
   (`bd create` children), don't implement an epic directly.
-- **Molecule steps** — beads with a `parent` belong to `bro convoy`;
-  the flat queue doesn't steal them.
+- **Molecule steps** — beads whose `parent` is a molecule belong to
+  `bro convoy`; the flat queue doesn't steal them. Epic children carry
+  a `parent` too but stay claimable — `bro next` checks the parent's
+  type, not just the field.
 - **Foreign-scope beads** — ids outside this checkout's `issue_prefix`
   are never claimed; they surface as `foreign: N` when the shared db
   carries other projects' work. `scope = "all"` in a plan opts out.
