@@ -807,8 +807,10 @@ async function emitPromptContext(input: HookInput): Promise<void> {
   // after the probes return — a throw retries next prompt.
   const hydrate = cursorClient && sessionId && !skillHinted(sessionId, CURSOR_HYDRATED_SKILL)
   if (hydrate) {
-    parts.push(...(await sessionStartLines({ dir: process.cwd(), sessionId })))
-    parts.push(...(await parallelLines(sessionId)))
+    parts.push(
+      ...(await sessionStartLines({ dir: process.cwd(), sessionId })),
+      ...(await parallelLines(sessionId))
+    )
   }
   const sessionCount = parts.length
   parts.push(...(await promptContextLines({ dir: process.cwd(), sessionId }, prompt)))
@@ -938,6 +940,95 @@ function clearCursorHydrated(sessionId: string): void {
   }
 }
 
+/** Cursor blocks a beforeShellExecution hook that prints nothing. Answer
+ * even when the repo has not opted in and even when chdir fails. */
+function answerCursorPermission(event: string | undefined, input: HookInput): void {
+  if (!(cursorClient && event === 'permission')) {
+    return
+  }
+  if (!emitPermission(input)) {
+    emit({ permission: 'ask' })
+  }
+}
+
+function runCommitHookCommand(event: 'install' | 'uninstall'): void {
+  const r =
+    event === 'install'
+      ? installCommitHook(process.cwd(), cliVersion())
+      : uninstallCommitHook(process.cwd())
+  if (r.state === 'error') {
+    console.error(`bro hooks ${event}: ${r.err}`)
+    process.exitCode = 1
+    return
+  }
+  console.error(`bro hooks ${event}: ${r.state} ${r.path}`)
+}
+
+function runPrepareCommitMsg(argv: string[]): void {
+  try {
+    emitCommitTrailers(argv.slice(1))
+  } catch {
+    // fail-open — provenance must never block a commit
+  }
+}
+
+/** bd/gh probes inherit cwd — run them in the project the hook fired for. */
+function enterHookProject(root: string): boolean {
+  if (root === process.cwd()) {
+    return true
+  }
+  try {
+    process.chdir(root)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function dispatchHook(event: string, raw: unknown, input: HookInput): Promise<void> {
+  const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
+  switch (event) {
+    case 'session-start':
+      await emitSessionContext('SessionStart', sessionId)
+      if (cursorClient) {
+        markSkillHinted(sessionId, CURSOR_HYDRATED_SKILL)
+      }
+      return
+    case 'post-compaction':
+      await emitSessionContext('PostCompaction', sessionId)
+      return
+    case 'pre-compact':
+      // Claude Code requires hookEventName to match the firing event.
+      // Cursor's preCompact cannot feed the summary; drop the hydration
+      // mark so the next prompt reloads state after compaction.
+      if (cursorClient) {
+        clearCursorHydrated(sessionId)
+      }
+      await emitSessionContext('PreCompact', sessionId)
+      return
+    case 'prompt-submit':
+      await emitPromptContext(input)
+      return
+    case 'post-tool':
+      await emitPostTool(input)
+      return
+    case 'stop':
+      if (cursorClient && cursorStopIgnored(raw)) {
+        return
+      }
+      await emitStopGate(input)
+      return
+    case 'permission':
+      if (!emitPermission(input) && cursorClient) {
+        emit({ permission: 'ask' })
+      }
+      return
+    default:
+      // forward-compat: hooks.json may name events this bro doesn't know
+      return
+  }
+}
+
 // --- dispatch -----------------------------------------------------------------
 
 export async function runHooksCommand(argv: string[]): Promise<void> {
@@ -948,16 +1039,7 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   // can be a terminal, and reading stdin would block on it forever). They
   // also run before the broEnabled gate: wiring a repo is how it opts in.
   if (event === 'install' || event === 'uninstall') {
-    const r =
-      event === 'install'
-        ? installCommitHook(process.cwd(), cliVersion())
-        : uninstallCommitHook(process.cwd())
-    if (r.state === 'error') {
-      console.error(`bro hooks ${event}: ${r.err}`)
-      process.exitCode = 1
-      return
-    }
-    console.error(`bro hooks ${event}: ${r.state} ${r.path}`)
+    runCommitHookCommand(event)
     return
   }
   // prepare-commit-msg is a git-hook event (argv, not a JSON payload) —
@@ -965,11 +1047,7 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   // placement: the installed shim IS the opt-in, so gating on
   // .beads/bro.config would silently deaden a hook the repo installed
   if (event === 'prepare-commit-msg') {
-    try {
-      emitCommitTrailers(argv.slice(1))
-    } catch {
-      // fail-open — provenance must never block a commit
-    }
+    runPrepareCommitMsg(argv)
     return
   }
   // stdin before the opt-in check: Cursor's project dir is on the
@@ -978,76 +1056,16 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   cursorClient = isCursorHookPayload(raw)
   const root = hookProjectDir(raw)
   const input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw)
-  // Cursor blocks a beforeShellExecution hook that prints nothing. Answer
-  // even when the repo has not opted in and even when chdir fails.
-  const answerCursorPermission = (): void => {
-    if (!(cursorClient && event === 'permission')) {
-      return
-    }
-    if (!emitPermission(input)) {
-      emit({ permission: 'ask' })
-    }
-  }
-  if (!event || !broEnabled(root)) {
-    answerCursorPermission()
+  if (!event || !broEnabled(root) || !enterHookProject(root)) {
+    answerCursorPermission(event, input)
     return
   }
-  // bd/gh probes inherit cwd — run them in the project the hook fired for,
-  // not wherever this process happened to start.
-  if (root !== process.cwd()) {
-    try {
-      process.chdir(root)
-    } catch {
-      answerCursorPermission()
-      return
-    }
-  }
   try {
-    const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
-    switch (event) {
-      case 'session-start':
-        await emitSessionContext('SessionStart', sessionId)
-        if (cursorClient) {
-          markSkillHinted(sessionId, CURSOR_HYDRATED_SKILL)
-        }
-        return
-      case 'post-compaction':
-        await emitSessionContext('PostCompaction', sessionId)
-        return
-      case 'pre-compact':
-        // Claude Code requires hookEventName to match the firing event.
-        // Cursor's preCompact cannot feed the summary; drop the hydration
-        // mark so the next prompt reloads state after compaction.
-        if (cursorClient) {
-          clearCursorHydrated(sessionId)
-        }
-        await emitSessionContext('PreCompact', sessionId)
-        return
-      case 'prompt-submit':
-        await emitPromptContext(input)
-        return
-      case 'post-tool':
-        await emitPostTool(input)
-        return
-      case 'stop':
-        if (cursorClient && cursorStopIgnored(raw)) {
-          return
-        }
-        await emitStopGate(input)
-        return
-      case 'permission':
-        if (!emitPermission(input) && cursorClient) {
-          emit({ permission: 'ask' })
-        }
-        return
-      default:
-        // forward-compat: hooks.json may name events this bro doesn't know
-        return
-    }
+    await dispatchHook(event, raw, input)
   } catch {
     // hooks fail open — a bro bug must never break the session.
     // A permission hook that already answered returned above; this
     // covers a throw before that answer.
-    answerCursorPermission()
+    answerCursorPermission(event, input)
   }
 }

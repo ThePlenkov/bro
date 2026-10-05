@@ -170,16 +170,20 @@ function clientManifest(extra = {}) {
   return `${JSON.stringify({ ...fields, ...extra }, null, 2)}\n`
 }
 
+function cursorAuthorName(author) {
+  if (typeof author === 'string') {
+    return author.trim()
+  }
+  if (author && typeof author === 'object' && typeof author.name === 'string') {
+    return author.name.trim()
+  }
+  return ''
+}
+
 /** Cursor's plugin schema is additionalProperties:false and its own
  * field set — don't spread agent-plugins fields it doesn't know. */
 function cursorManifest() {
-  const author = manifest.author
-  const authorName =
-    typeof author === 'string'
-      ? author.trim()
-      : author && typeof author === 'object' && typeof author.name === 'string'
-        ? author.name.trim()
-        : ''
+  const authorName = cursorAuthorName(manifest.author)
   const body = {
     name: manifest.name,
     displayName: 'bro',
