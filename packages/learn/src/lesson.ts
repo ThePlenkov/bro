@@ -169,7 +169,9 @@ function evidenceProblems(ev: unknown): string[] {
     isObj(e) &&
     (EVIDENCE_KINDS as readonly string[]).includes(e.kind as string) &&
     isNonEmptyStr(e.ref)
-  return ev.every(itemOk)
+  // Array.from materializes holes — every() skips a sparse array's
+  // empty slots, so [,,] would pass itemOk without ever calling it
+  return Array.from(ev).every(itemOk)
     ? []
     : [`evidence items must be {kind: ${EVIDENCE_KINDS.join('|')}, ref: string}`]
 }

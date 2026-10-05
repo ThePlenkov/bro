@@ -506,8 +506,9 @@ function unionEvidence(a: Evidence[], b: Evidence[]): Evidence[] {
 }
 
 /** Union two triggers for a merge — `on` and each match list deduped,
- *  errors OR'd; budget keeps the existing lesson's value (a firing
- *  policy, not index material). */
+ *  errors takes the incoming value when it defines one (an existing
+ *  `errors: false` survives an undefined incoming); budget keeps the
+ *  existing lesson's value (a firing policy, not index material). */
 function unionTrigger(a: LessonTrigger, b: LessonTrigger): LessonTrigger {
   const list = (x?: string[], y?: string[]): string[] | undefined =>
     x === undefined && y === undefined ? undefined : [...new Set([...(x ?? []), ...(y ?? [])])]
