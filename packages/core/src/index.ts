@@ -129,6 +129,7 @@ export {
   bdAt,
   claimStep,
   classifyExitCause,
+  commandCliName,
   isAgentCause,
   mintAgentId,
   patchAgentRegistry,
@@ -136,6 +137,7 @@ export {
   readAgentRegistry,
   rebindStep,
   SpawnError,
+  stepParent,
   withAgentRegistryLock,
   writeAgentRegistry,
 } from './agents.ts'

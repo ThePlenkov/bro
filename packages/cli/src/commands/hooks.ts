@@ -18,6 +18,11 @@
  *                                       unfinished work; the hook blocks only aspects this
  *                                       session armed, ambient state is passive context
  *   permission                        auto-approve bro/bd invocations
+ *   install | uninstall               (git-hook ops, not events) write/remove the
+ *                                       prepare-commit-msg shim that tags commits with
+ *                                       provenance trailers (specs/bro-fzot.md)
+ *   prepare-commit-msg                git-hook entrypoint — appends Agent/Agent-Model/
+ *                                       Session/Bead/Molecule trailers to the message file
  *
  * Contract: read the event payload on stdin, print hook control JSON on
  * stdout, exit 0. Everything is best-effort — hooks only fire in bro-enabled
@@ -46,6 +51,12 @@ import {
   withFileLock,
 } from '@broject/core'
 import { markerLive, ownerTag } from './proc-owner.ts'
+import {
+  cliVersion,
+  emitCommitTrailers,
+  installCommitHook,
+  uninstallCommitHook,
+} from './githooks.ts'
 
 interface HookInput {
   tool_name?: unknown
@@ -845,6 +856,23 @@ function emitPermission(input: HookInput): void {
 
 export async function runHooksCommand(argv: string[]): Promise<void> {
   const event = argv[0]
+  // install/uninstall are operator commands, not hook events — they
+  // report a verdict on stderr and never read stdin (a git hook's stdin
+  // can be a terminal, and readInput would block on it forever). They
+  // also run before the broEnabled gate: wiring a repo is how it opts in.
+  if (event === 'install' || event === 'uninstall') {
+    const r =
+      event === 'install'
+        ? installCommitHook(process.cwd(), cliVersion())
+        : uninstallCommitHook(process.cwd())
+    if (r.state === 'error') {
+      console.error(`bro hooks ${event}: ${r.err}`)
+      process.exitCode = 1
+      return
+    }
+    console.error(`bro hooks ${event}: ${r.state} ${r.path}`)
+    return
+  }
   const root = process.env.DEVIN_PROJECT_DIR ?? process.cwd()
   if (!event || !broEnabled(root)) {
     return
@@ -857,6 +885,16 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     } catch {
       return
     }
+  }
+  // git-hook events carry argv, not a JSON payload — dispatch them before
+  // the stdin read for the same tty reason as install/uninstall above
+  if (event === 'prepare-commit-msg') {
+    try {
+      emitCommitTrailers(argv.slice(1))
+    } catch {
+      // fail-open — provenance must never block a commit
+    }
+    return
   }
   const input = readInput()
   try {

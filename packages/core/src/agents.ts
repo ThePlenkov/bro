@@ -416,6 +416,32 @@ export function bdAt(
   }
 }
 
+/** The agent command's cli name — first token, basename'd and
+ *  sanitized; 'agent' when nothing usable resolves. gascity's provider
+ *  label and the `Agent:` commit-trailer pin (specs/bro-fzot.md) both
+ *  read it. */
+export function commandCliName(command: string): string {
+  const first = command.trim().split(/\s+/)[0] ?? ''
+  const base = first.split('/').pop() ?? ''
+  return /^[a-zA-Z][\w-]*$/.test(base) ? base : 'agent'
+}
+
+/** The molStep's molecule parent — `bd show`'s `parent` field, the
+ *  `Molecule:` commit trailer's source. Best-effort like probeStep: a
+ *  root bead or a dead store resolves nothing. */
+export function stepParent(beadsDir: string, molStep: string): string | undefined {
+  const r = bdAt(beadsDir, ['show', molStep, '--json'])
+  if (r.code !== 0) {
+    return undefined
+  }
+  try {
+    const parent = (JSON.parse(r.out) as { parent?: unknown }[])[0]?.parent
+    return typeof parent === 'string' && parent !== '' ? parent : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** The molStep's claim state in the shared store — undefined when the
  *  bead doesn't exist (or the store can't answer). */
 export function probeStep(

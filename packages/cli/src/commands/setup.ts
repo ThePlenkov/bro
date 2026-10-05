@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { initBeadsStealth, PERSONALITIES, type BroConfig } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
+import { cliVersion, installCommitHook } from './githooks.ts'
 import { FORMULA_FILES, SKILL_FILES } from '../skills-data.ts'
 
 function hasBin(name: string): boolean {
@@ -282,6 +283,17 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
 
   if (packDir !== null) {
     setupPack(packDir, pack || loadBroConfig().pack || DEFAULT_PACK, wantsBeads)
+  }
+
+  // commit provenance (bro-fzot): the prepare-commit-msg hook rides
+  // setup — a repo that opts into bro gets Agent/Session/Bead trailers
+  // on machine-made commits without a second step; `bro hooks
+  // uninstall` is the opt-out. Best-effort: a non-git dir just skips.
+  const hook = installCommitHook(process.cwd(), cliVersion())
+  if (hook.state === 'error') {
+    console.error(`  note: commit-provenance hook not installed — ${hook.err}`)
+  } else if (hook.state !== 'already') {
+    console.error(`  ${hook.state} prepare-commit-msg hook (${hook.path})`)
   }
 
   console.error('bro setup: done. Next: `bro debt prs` to see the queue, `bro debt collect` to sweep.')
