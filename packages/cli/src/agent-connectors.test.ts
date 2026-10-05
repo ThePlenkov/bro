@@ -963,60 +963,49 @@ describe('budgetSnapshot', () => {
     }
   })
 
-  test('an occupying unknown-backend entry still harvests its recorded death', () => {
-    const { root, main } = initRepo('bro-budget-')
-    try {
-      const home = agentsHomeOf(main)
-      mkdirSync(home, { recursive: true })
-      const log = join(home, 'gc-9.log')
-      writeFileSync(join(home, 'gc-9.exit'), '1')
-      writeFileSync(log, 'boom\n429 too many requests\n')
-      // a backend this build doesn't know occupies whenever exitStatus
-      // is absent — harvesting first turns the .exit into a proven
-      // death: no slot held, and the cause lands in the section
-      const registry: Record<string, AgentRegistryEntry> = {
-        'step-x': {
-          agentId: 'gc-9',
-          backend: 'gone-plugin',
-          spawnedAt: '2026-10-05T14:00:00Z',
-          log,
-        },
-      }
-      const snap = budgetSnapshot(main, home, registry, ENV, NOW)
-      assert.equal(snap.live, 0)
-      assert.equal(snap.causes[0]!.cause, 'rate_limited')
-      assert.equal(snap.blocked, 1) // no reset reported — the block holds
-      assert.equal(registry['step-x']!.cause, 'rate_limited')
-    } finally {
-      rmSync(root, { recursive: true, force: true })
-    }
-  })
-
   test('an unharvested death on an unknown backend frees the slot and classifies', () => {
     const { root, main } = initRepo('bro-budget-')
     try {
       const home = agentsHomeOf(main)
       mkdirSync(home, { recursive: true })
-      const log = join(home, 'foreign-1.log')
-      writeFileSync(join(home, 'foreign-1.exit'), '1')
-      writeFileSync(log, 'boom\nReached free model rate limit — resets at 2999-01-01T00:00:00Z\n')
-      const registry: Record<string, AgentRegistryEntry> = {
-        'step-x': {
-          agentId: 'foreign-1',
-          backend: 'backend-from-the-future',
+      // a backend this build doesn't know occupies whenever exitStatus
+      // is absent — harvesting first turns the .exit into a proven
+      // death: no slot held, and the cause lands in the section
+      const dead = (id: string, tail: string): AgentRegistryEntry => {
+        writeFileSync(join(home, `${id}.exit`), '1')
+        const log = join(home, `${id}.log`)
+        writeFileSync(log, tail)
+        return {
+          agentId: id,
+          backend: 'gone-plugin',
           spawnedAt: '2026-10-05T14:00:00Z',
           log,
-        },
+        }
       }
-      // occupancy reads the .exit the unknown arm harvested — a recorded
-      // death frees the fleet slot, not just the budget row
+      const registry: Record<string, AgentRegistryEntry> = {
+        'step-wall': dead(
+          'x-1',
+          'boom\nReached free model rate limit — resets at 2999-01-01T00:00:00Z\n'
+        ),
+        // a wall with no reported reset — the block holds anyway
+        'step-noreset': dead('x-2', 'boom\n429 too many requests\n'),
+      }
       assert.equal(fleetOccupancy(main, home, registry, ENV), 0)
       const snap = budgetSnapshot(main, home, registry, ENV, NOW)
       assert.equal(snap.live, 0)
-      assert.equal(snap.blocked, 1)
-      assert.equal(snap.causes.length, 1)
-      assert.equal(snap.causes[0]!.cause, 'rate_limited')
-      assert.equal(snap.resets[0]!.resetAt, '2999-01-01T00:00:00.000Z')
+      assert.equal(snap.blocked, 2)
+      assert.deepEqual(
+        snap.causes.map((c) => [c.step, c.cause]),
+        [
+          ['step-wall', 'rate_limited'],
+          ['step-noreset', 'rate_limited'],
+        ]
+      )
+      assert.deepEqual(
+        snap.resets.map((r) => [r.step, r.resetAt, r.holding]),
+        [['step-wall', '2999-01-01T00:00:00.000Z', true]]
+      )
+      assert.equal(registry['step-wall']!.cause, 'rate_limited')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
