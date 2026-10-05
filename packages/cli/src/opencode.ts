@@ -458,6 +458,10 @@ export const BroPlugin = (
   const gated = new Set<string>()
   /** Sessions whose last assistant turn finished cleanly. */
   const clean = new Set<string>()
+  /** Sessions observed alive. `session.deleted` is the only retirement, and
+   *  the idle gate suspends on real I/O — liveness is re-checked after each
+   *  await rather than assumed. */
+  const live = new Set<string>()
 
   /** `session.created` primes rehydration while opencode is still waiting on a
    *  prompt — the probe costs real seconds, and this is the only window where
@@ -465,6 +469,7 @@ export const BroPlugin = (
   const onSessionCreated = (props: Record<string, unknown>): void => {
     const sessionID = props.sessionID
     if (typeof sessionID === 'string') {
+      live.add(sessionID)
       void hydrate(sessionID, 'session-start')
     }
   }
@@ -479,6 +484,7 @@ export const BroPlugin = (
     if (info?.role !== 'assistant' || typeof info.sessionID !== 'string') {
       return
     }
+    live.add(info.sessionID)
     if (asRecord(info.time)?.completed !== undefined && info.error === undefined) {
       clean.add(info.sessionID)
     } else {
@@ -497,6 +503,7 @@ export const BroPlugin = (
     rehydration.delete(sessionID)
     gated.delete(sessionID)
     clean.delete(sessionID)
+    live.delete(sessionID)
   }
 
   /** `session.compacted` re-primes the cache so the next turn pushes
@@ -531,15 +538,20 @@ export const BroPlugin = (
       }
       return
     }
-    await log('warn', `stop gate: ${reason || 'unfinished bro work'}`)
-    if (gated.has(sessionID)) {
+    // the probe awaited real I/O — a session.deleted that interleaved retired
+    // this id, and gating it now would resurrect the entry and suppress a
+    // session reusing it. The gate is set before the log/prompt awaits for
+    // the same reason: a delete during them must clear it, not race it.
+    if (!live.has(sessionID) || gated.has(sessionID)) {
       return
     }
     gated.add(sessionID)
+    const message = reason || 'unfinished bro work'
+    await log('warn', `stop gate: ${message}`)
     try {
       await input.client?.session?.promptAsync({
         path: { id: sessionID },
-        body: { parts: [{ type: 'text', text: reason }] },
+        body: { parts: [{ type: 'text', text: message }] },
       })
     } catch (err) {
       await log('error', `stop gate could not re-prompt: ${errorText(err)}`)
