@@ -505,7 +505,7 @@ function runWatchSched(argv: string[]): void {
   const everyRaw = flag(argv, '--every')
   const everySec = everyRaw === undefined ? cfg.intervalSec : Number(everyRaw)
   if (!Number.isFinite(everySec) || everySec <= 0 || everySec * 1000 > 0x7fffffff) {
-    console.error(`error: --every needs a positive seconds value, got "${everyRaw}"`)
+    console.error(`error: --every needs a positive seconds value, got "${everyRaw ?? everySec}"`)
     process.exit(2)
   }
   const r = installWatch(dir, { everySec, print: argv.includes('--print') })
