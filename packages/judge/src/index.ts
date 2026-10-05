@@ -17,6 +17,15 @@ export { llmJudge, llmJudgeConnector } from './llm-judge.ts'
 export type { LlmJudgeOpts } from './llm-judge.ts'
 export { chainedJudge, judgeConfig, judgeFacade } from './chain.ts'
 export type { JudgeFacadeOpts } from './chain.ts'
+export type { DeadlineJudge } from './deadline.ts'
+export {
+  providerJudge,
+  providerJudgeAuth,
+  providerKeyField,
+  proseDecide,
+  synthesizedProviders,
+} from './provider-judge.ts'
+export type { ProviderJudgeOpts } from './provider-judge.ts'
 export {
   appendRow,
   commentKey,

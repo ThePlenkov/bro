@@ -5,86 +5,41 @@
  * connector → merge (fallback answers keep `decidedBy` honest) →
  * `lowConfidence` lists whatever neither backend answered confidently.
  * Facade-internal: the consumer called one decide().
+ *
+ * Provider mode (spec: bro-ribc.1): `judge.provider` names a
+ * `providers` entry and bypasses connector resolution — the entry's
+ * kind picks the adapter; `judge.fallback` then names a provider, not
+ * a connector. Legacy judge.* + connectors.judge config keeps working
+ * through synthesized entries — one deprecation line per command.
  */
-import { facade, facadeName, loadConfig, JudgeUnavailable } from '@broject/core'
+import {
+  facade,
+  facadeName,
+  loadConfig,
+  JudgeUnavailable,
+  requireProviderSurface,
+  warnDeprecated,
+} from '@broject/core'
 import type {
   ConnectorCtx,
   DecideResult,
   JudgeAnswer,
   JudgeFacade,
-  JudgeQuestion,
+  ProviderEntry,
 } from '@broject/core'
 import { judgeSection, type JudgeConfig } from './config.ts'
-import { remaining } from './http.ts'
+import { callWithin } from './deadline.ts'
+import {
+  providerJudge,
+  providerKeyField,
+  synthesizedProviders,
+} from './provider-judge.ts'
+import type { FetchFn } from './http.ts'
 
-/** Internal deadline seam — backends built by this package accept the
- *  run's absolute deadline (epoch ms) so `judge.timeoutMs` bounds the
- *  whole chained call: primary, retries, and escalation included. A
- *  foreign JudgeFacade without it is raced against the same clock. */
-export interface DeadlineJudge extends JudgeFacade {
-  decideWithin(
-    state: unknown,
-    questions: Record<string, JudgeQuestion>,
-    deadline: number
-  ): Promise<DecideResult>
-}
-
-function isDeadlineJudge(f: JudgeFacade): f is DeadlineJudge {
-  return typeof (f as DeadlineJudge).decideWithin === 'function'
-}
-
-/** The decide()/decideWithin() pair every in-package backend returns —
- *  `judge.timeoutMs` is the whole-call budget; a spent deadline fails
- *  open before any fetch. */
-export function deadlineJudge(
-  timeoutMs: number,
-  decideWithin: DeadlineJudge['decideWithin']
-): DeadlineJudge {
-  return {
-    decide: (state, questions) =>
-      decideWithin(state, questions, Date.now() + timeoutMs),
-    decideWithin: (state, questions, deadline) => {
-      if (remaining(deadline) <= 0) {
-        return Promise.reject(new JudgeUnavailable('judge budget spent'))
-      }
-      return decideWithin(state, questions, deadline)
-    },
-  }
-}
-
-/** decide() against the shared deadline — native when the backend
- *  speaks decideWithin, raced otherwise (the foreign call may outlive
- *  its welcome in the background; the chain still returns on time). */
-async function callWithin(
-  backend: JudgeFacade,
-  state: unknown,
-  questions: Record<string, JudgeQuestion>,
-  deadline: number
-): Promise<DecideResult> {
-  if (isDeadlineJudge(backend)) {
-    return backend.decideWithin(state, questions, deadline)
-  }
-  const left = deadline - Date.now()
-  if (left <= 0) {
-    throw new JudgeUnavailable('judge budget spent')
-  }
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      backend.decide(state, questions),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new JudgeUnavailable('judge backend timed out')),
-          left
-        )
-      }),
-    ])
-  } finally {
-    // an armed timer pinning the process after the race settled is a
-    // resource leak, not patience
-    clearTimeout(timer)
-  }
-}
+// the deadline seam moved to ./deadline.ts — re-exported so importers
+// of './chain.ts' (systemone, llm-judge, provider-judge) keep working
+export { deadlineJudge } from './deadline.ts'
+export type { DeadlineJudge } from './deadline.ts'
 
 const lowKeys = (answers: Record<string, JudgeAnswer>, threshold: number): string[] =>
   Object.entries(answers)
@@ -128,7 +83,9 @@ export function chainedJudge(
       // an asked question with no answer at all is as unconfident as a
       // low one — it escalates and lands in lowConfidence the same way
       const unconfident = (ans: Record<string, JudgeAnswer>): string[] => [
-        ...Object.keys(questions).filter((k) => !(k in ans)),
+        // hasOwn — 'constructor' in ans is true via the prototype even
+        // when no answer landed; `in` would hide an unanswered qid
+        ...Object.keys(questions).filter((k) => !Object.hasOwn(ans, k)),
         ...lowKeys(ans, opts.confidence),
       ]
       const low = unconfident(res.answers)
@@ -140,7 +97,11 @@ export function chainedJudge(
       if (fallback === undefined || Date.now() >= deadline) {
         return { ...res, lowConfidence: low }
       }
-      const retry = Object.fromEntries(low.map((k) => [k, questions[k]!]))
+      // a low key that isn't an asked question (or is an inherited name
+      // like 'toString') has no question payload to re-ask
+      const retry = Object.fromEntries(
+        low.filter((k) => Object.hasOwn(questions, k)).map((k) => [k, questions[k]!])
+      )
       let esc: DecideResult
       try {
         esc = await callWithin(fallback, state, retry, deadline)
@@ -155,7 +116,9 @@ export function chainedJudge(
       }
       const answers = { ...res.answers }
       for (const k of low) {
-        const a = esc.answers[k]
+        // hasOwn — an inherited member (esc.answers['constructor'] is
+        // Object itself) is not an answer and must not be merged in
+        const a = Object.hasOwn(esc.answers, k) ? esc.answers[k] : undefined
         if (a !== undefined) {
           answers[k] = a
         }
@@ -171,44 +134,131 @@ export function chainedJudge(
   }
 }
 
-/** The normalized judge config + connector preferences for a dir —
- *  loadConfig normalizes the section through the same schema the CLI
- *  registers, so package consumers and the command read identical
- *  values. */
+/** The normalized judge config + connector preferences + provider
+ *  registry for a dir — loadConfig normalizes every section through
+ *  the same schema the CLI registers, so package consumers and the
+ *  command read identical values. */
 export function judgeConfig(dir: string): {
   judge: JudgeConfig
   connectors: Record<string, string>
+  providers: Record<string, ProviderEntry>
 } {
   try {
     const cfg = loadConfig(dir, { judge: judgeSection }) as Record<string, unknown>
     return {
       judge: cfg.judge as JudgeConfig,
       connectors: cfg.connectors as Record<string, string>,
+      providers: cfg.providers as Record<string, ProviderEntry>,
     }
   } catch {
-    return { judge: judgeSection(undefined), connectors: {} }
+    return { judge: judgeSection(undefined), connectors: {}, providers: {} }
   }
 }
 
 export interface JudgeFacadeOpts {
-  /** Explicit primary connector — wins over connectors.judge config. */
+  /** Explicit primary connector — wins over connectors.judge config.
+   *  The connector namespace is the legacy surface: passing it keeps
+   *  the synthesized-entry path even when judge.provider is set. */
   connector?: string
+  /** Test seam — provider-mode bindings take a scripted transport. */
+  fetch?: FetchFn
 }
 
-/** Resolve the serving judge facade for `dir`: primary via the standard
- *  precedence (explicit → connectors.judge → registry order), the
- *  `judge.fallback` connector (when configured) resolved by name, and
- *  the chain over both. A fallback naming the primary itself is skipped
- *  (double-asking one backend buys nothing); a name with no `judge`
- *  capability throws — a misconfigured name should be loud, not
- *  silently downgrade to primary-only. */
+/** Judge config keys that feed a provider-shaped decision — the
+ *  deprecation line keys off the user having written one, not off the
+ *  default path a bare config walks. */
+const LEGACY_PROVIDER_KEYS = new Set(['model', 'baseUrl', 'apiKeyEnv', 'llm', 'fallback'])
+
+/** The names legacy config materializes — a resolve that lands on one
+ *  the user didn't define is consuming a synthesized entry. */
+const SYNTHESIZED_ALIASES = new Set(['systemone', 'llm-judge'])
+
+let legacyWarned = false
+
+function warnLegacyJudgeOnce(): void {
+  if (legacyWarned) {
+    return
+  }
+  legacyWarned = true
+  warnDeprecated(
+    'judge resolution via connectors.judge / judge.{model,baseUrl,apiKeyEnv,llm,fallback} — they synthesize provider entries',
+    'write a providers entry + judge.provider (spec bro-ribc.1)'
+  )
+}
+
+/** One deprecation line per command — the legacy surfaces still work
+ *  (they synthesize provider entries), the warning is the migration
+ *  nudge. A serving connector outside the judge aliases isn't ours to
+ *  deprecate, and a config with no provider-shaping keys written is
+ *  the default path, not a legacy config. */
+function warnLegacyJudge(
+  cfg: JudgeConfig,
+  connectors: Record<string, string>,
+  connectorOpt: string | undefined,
+  serving: string
+): void {
+  if (legacyWarned || (serving !== 'systemone' && serving !== 'llm-judge')) {
+    return
+  }
+  const legacyInUse =
+    connectorOpt !== undefined ||
+    connectors.judge !== undefined ||
+    (cfg.provided ?? []).some((k) => LEGACY_PROVIDER_KEYS.has(k))
+  if (legacyInUse) {
+    warnLegacyJudgeOnce()
+  }
+}
+
+/** Resolve the serving judge facade for `dir`. Provider mode:
+ *  `judge.provider` names a registry entry — kind picks the adapter,
+ *  `judge.fallback` names a second provider (the synthesized legacy
+ *  aliases resolve too), an unknown name is a startup error.
+ *  Legacy mode: the standard precedence (explicit → connectors.judge
+ *  → registry order) over connectors that now wrap synthesized
+ *  entries, then the `judge.fallback` connector — a name with no
+ *  `judge` capability throws: a misconfigured name is loud, never a
+ *  silent downgrade to primary-only. */
 export function judgeFacade(dir: string, opts: JudgeFacadeOpts = {}): JudgeFacade {
-  const { judge: cfg, connectors } = judgeConfig(dir)
+  const { judge: cfg, connectors, providers } = judgeConfig(dir)
   const ctx: ConnectorCtx = { dir }
+  if (cfg.provider !== undefined && opts.connector === undefined) {
+    const entries = synthesizedProviders(cfg, providers)
+    // a resolve that lands on a synthesized alias is consuming legacy
+    // judge.* config — it works, but it's the surface we're retiring
+    const hitsAlias = (n: string | undefined): boolean =>
+      n !== undefined && providers[n] === undefined && SYNTHESIZED_ALIASES.has(n)
+    if (hitsAlias(cfg.provider) || hitsAlias(cfg.fallback)) {
+      warnLegacyJudgeOnce()
+    }
+    // judge.model is the PRIMARY's knob — it overrides the entry pin
+    // only when the user wrote a usable value, and it never touches
+    // the fallback's pin (that's its own contract)
+    const model = cfg.provided?.includes('model') ? cfg.model : undefined
+    const primary = providerJudge(
+      cfg.provider,
+      requireProviderSurface(entries, cfg.provider, 'call'),
+      cfg,
+      { fetch: opts.fetch, model, keyField: providerKeyField(cfg.provider, providers) }
+    )
+    const fallback =
+      cfg.fallback !== undefined && cfg.fallback !== cfg.provider
+        ? providerJudge(
+            cfg.fallback,
+            requireProviderSurface(entries, cfg.fallback, 'call'),
+            cfg,
+            {
+              fetch: opts.fetch,
+              keyField: providerKeyField(cfg.fallback, providers),
+            }
+          )
+        : undefined
+    return chainedJudge(primary, fallback, cfg)
+  }
   const serving = facadeName('judge', ctx, {
     connector: opts.connector,
     prefer: connectors,
   })
+  warnLegacyJudge(cfg, connectors, opts.connector, serving)
   const primary = facade('judge', ctx, { connector: opts.connector, prefer: connectors })
   const fallback =
     cfg.fallback !== undefined && cfg.fallback !== serving

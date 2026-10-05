@@ -21,7 +21,7 @@
  * not explicit invocation.
  */
 import { readFileSync } from 'node:fs'
-import { ensureAuth, JudgeUnavailable, reviewHost } from '@broject/core'
+import { ensureAuth, JudgeUnavailable, requireProviderSurface, reviewHost } from '@broject/core'
 import type { DecideResult, JudgeAnswer, JudgeQuestion } from '@broject/core'
 import {
   appendRow,
@@ -29,8 +29,11 @@ import {
   formatStats,
   judgeConfig,
   judgeFacade,
+  providerJudgeAuth,
+  providerKeyField,
   readJournal,
   replayMergedThreads,
+  synthesizedProviders,
 } from '@broject/judge'
 import { flag, flagAll } from './args.ts'
 import { loadBroConfig } from '../plugins.ts'
@@ -163,6 +166,71 @@ function render(res: DecideResult): void {
   }
 }
 
+/** Provider-mode auth preflight — the entry's apiKeyEnv is the probe,
+ *  not a connector's; an unresolvable name is the startup error the
+ *  spec wants, not a silent fallthrough. */
+function providerModeAuth(dir: string): void {
+  const { judge: jcfg, providers } = judgeConfig(dir)
+  try {
+    const entry = requireProviderSurface(
+      synthesizedProviders(jcfg, providers),
+      jcfg.provider!,
+      'call'
+    )
+    const problem = providerJudgeAuth(
+      jcfg.provider!,
+      entry,
+      providerKeyField(jcfg.provider!, providers)
+    )
+    if (problem !== null) {
+      console.error(`error: ${problem}`)
+      process.exit(1)
+    }
+  } catch (err) {
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+}
+
+/** shadow mode journals every decide() a bro command makes — the smoke
+ *  path included, under its own kind so stats keep it out of the
+ *  act-thread agreement set. */
+function journalDecide(
+  dir: string,
+  questions: Record<string, JudgeQuestion>,
+  res: DecideResult
+): void {
+  if (judgeConfig(dir).judge.mode !== 'shadow') {
+    return
+  }
+  appendRow(dir, {
+    ts: new Date().toISOString(),
+    kind: 'judge-decide',
+    subject: {},
+    questions,
+    answers: res.answers,
+    model: res.model,
+    latencyMs: res.latencyMs,
+    ...(res.usage?.costUsd !== undefined ? { costUsd: res.usage.costUsd } : {}),
+    ...(res.lowConfidence.length > 0 ? { lowConfidence: res.lowConfidence } : {}),
+  })
+}
+
+/** Judge backend auth — provider mode probes the named entry's own
+ *  apiKeyEnv (a missing legacy key would be the wrong field to name);
+ *  connector mode keeps the legacy probe. */
+function judgeAuth(
+  dir: string,
+  connector: string | undefined,
+  prefer: Record<string, string>
+): void {
+  if (judgeConfig(dir).judge.provider !== undefined && connector === undefined) {
+    providerModeAuth(dir)
+  } else {
+    ensureAuth('judge', { dir }, { connector, prefer })
+  }
+}
+
 async function decide(argv: string[]): Promise<void> {
   const stateRef = flag(argv, '--state')
   const questionsRef = flag(argv, '--questions')
@@ -175,27 +243,12 @@ async function decide(argv: string[]): Promise<void> {
     process.exit(2)
   }
   const dir = process.cwd()
-  ensureAuth('judge', { dir }, { connector, prefer: loadBroConfig().connectors })
+  judgeAuth(dir, connector, loadBroConfig().connectors)
   const state = loadState(stateRef)
   const questions = loadQuestions(questionsRef)
   try {
     const res = await judgeFacade(dir, { connector }).decide(state, questions)
-    // shadow mode journals every decide() a bro command makes — the
-    // smoke path included, under its own kind so stats keep it out of
-    // the act-thread agreement set
-    if (judgeConfig(dir).judge.mode === 'shadow') {
-      appendRow(dir, {
-        ts: new Date().toISOString(),
-        kind: 'judge-decide',
-        subject: {},
-        questions,
-        answers: res.answers,
-        model: res.model,
-        latencyMs: res.latencyMs,
-        ...(res.usage?.costUsd !== undefined ? { costUsd: res.usage.costUsd } : {}),
-        ...(res.lowConfidence.length > 0 ? { lowConfidence: res.lowConfidence } : {}),
-      })
-    }
+    journalDecide(dir, questions, res)
     if (asJson) {
       console.log(JSON.stringify(res, null, 2))
     } else {
@@ -336,7 +389,7 @@ async function replay(argv: string[]): Promise<void> {
   const dir = process.cwd()
   const prefer = loadBroConfig().connectors
   ensureAuth('reviews', { dir }, { prefer })
-  ensureAuth('judge', { dir }, { connector, prefer })
+  judgeAuth(dir, connector, prefer)
   const rev = reviewHost(dir, prefer)
   const judge = judgeFacade(dir, { connector })
   const res = await replayMergedThreads({
