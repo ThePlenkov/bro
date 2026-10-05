@@ -87,9 +87,8 @@ function agentState(e: AgentRegistryEntry): string {
   }
   const pid = typeof e.pid === 'number' ? e.pid : undefined
   if (pid !== undefined) {
-    return pidAlive(pid, typeof e.pidStart === 'string' ? e.pidStart : undefined)
-      ? 'running'
-      : 'exited'
+    const pidStart = typeof e.pidStart === 'string' ? e.pidStart : undefined
+    return pidAlive(pid, pidStart) ? 'running' : 'exited'
   }
   return 'unknown'
 }
@@ -115,7 +114,9 @@ function readBeads(dir: string): BroStatus['beads'] {
       }
       return v.map((r): BeadRow => {
         const src = r as Record<string, unknown>
-        const row: BeadRow = { id: String(src.id ?? ''), title: String(src.title ?? '') }
+        const text = (value: unknown): string =>
+          typeof value === 'string' || typeof value === 'number' ? String(value) : ''
+        const row: BeadRow = { id: text(src.id), title: text(src.title) }
         if (typeof src.priority === 'number') {
           row.priority = src.priority
         }
@@ -182,7 +183,7 @@ async function readAct(dir: string): Promise<BroStatus['act']> {
     const rev = reviewHost(undefined, loadBroConfig(dir).connectors)
     const repo = rev.resolveRepo([])
     const pr = rev.currentPr()
-    if (!pr || pr.state !== 'OPEN') {
+    if (pr?.state !== 'OPEN') {
       return null
     }
     const act = loadBroConfig(dir).act
@@ -235,6 +236,21 @@ export function collectStatus(dir: string): BroStatus {
   }
 }
 
+function agentLine(a: StatusAgent): string {
+  const extra = [a.step, a.cause].filter((x): x is string => x !== undefined).join(' · ')
+  const glyph = a.state === 'running' ? '▶' : '·'
+  const suffix = extra === '' ? '' : `  ${extra}`
+  return `  ${glyph} ${a.id}  ${a.backend}  ${a.state}${suffix}`
+}
+
+function actLine(act: NonNullable<BroStatus['act']> | null): string {
+  if (act === null) {
+    return 'act: no open PR for this branch'
+  }
+  const blockers = act.blockers.length > 0 ? ` — ${act.blockers.join('; ')}` : ''
+  return `act: [#${act.pr}](${act.url}) ${act.gate}${blockers}`
+}
+
 function render(s: BroStatus): string[] {
   const lines: string[] = []
   lines.push(`board: ${basename(s.dir)} · ${s.branch}${s.dirty > 0 ? ` · dirty ${s.dirty}` : ''}`)
@@ -253,15 +269,10 @@ function render(s: BroStatus): string[] {
   const live = s.fleet.agents.filter((a) => a.state === 'running')
   lines.push(`fleet: ${live.length}${cap} running`)
   for (const a of s.fleet.agents) {
-    const extra = [a.step, a.cause].filter((x): x is string => x !== undefined).join(' · ')
-    lines.push(`  ${a.state === 'running' ? '▶' : '·'} ${a.id}  ${a.backend}  ${a.state}${extra === '' ? '' : `  ${extra}`}`)
+    lines.push(agentLine(a))
   }
   if (s.act !== undefined) {
-    lines.push(
-      s.act === null
-        ? 'act: no open PR for this branch'
-        : `act: [#${s.act.pr}](${s.act.url}) ${s.act.gate}${s.act.blockers.length > 0 ? ` — ${s.act.blockers.join('; ')}` : ''}`
-    )
+    lines.push(actLine(s.act))
   }
   return lines
 }

@@ -448,7 +448,8 @@ function boardLines(s: BoardStatus): string[] {
     lines.push(`  ◐ ${b.id ?? '?'}  ${clip(b.title ?? '', 64)}`)
   }
   for (const a of running.slice(0, 2)) {
-    lines.push(`  ▶ ${a.id ?? '?'}  ${a.backend ?? ''}${a.step ? `  ${a.step}` : ''}`)
+    const step = a.step ? `  ${a.step}` : ''
+    lines.push(`  ▶ ${a.id ?? '?'}  ${a.backend ?? ''}${step}`)
   }
   return lines
 }
@@ -743,7 +744,8 @@ export default function broExtension(pi: PiApi): void {
       )
       const text = (out.stdout || out.stderr).trim()
       if (out.code !== 0) {
-        ctx.ui.notify(`bro ${trimmed}: exit ${out.code}${text === '' ? '' : ` — ${clip(text.split('\n')[0] ?? '', 120)}`}`, 'error')
+        const detail = text === '' ? '' : ` — ${clip(text.split('\n')[0] ?? '', 120)}`
+        ctx.ui.notify(`bro ${trimmed}: exit ${out.code}${detail}`, 'error')
         return
       }
       pi.sendMessage(
