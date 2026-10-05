@@ -1215,7 +1215,17 @@ function readPerfRows(perfDir: string | null, sessionFilter?: string): PerfRow[]
         continue
       }
       try {
-        rows.push(JSON.parse(line) as PerfRow)
+        const r: unknown = JSON.parse(line)
+        // JSON.parse succeeding doesn't mean a row — `null`, a scalar,
+        // or `{}` would poison the aggregates below
+        if (
+          typeof r === 'object' &&
+          r !== null &&
+          typeof (r as PerfRow).event === 'string' &&
+          typeof (r as PerfRow).ms === 'number'
+        ) {
+          rows.push(r as PerfRow)
+        }
       } catch {
         // a torn write skips itself, not the report
       }

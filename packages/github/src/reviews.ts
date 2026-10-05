@@ -567,12 +567,11 @@ async function checkAnnotationsAsync(
       'api',
       `repos/${repo}/commits/${headSha}/check-runs?per_page=100&page=${page}`,
     ])
-    // a page's annotation fetches are independent — overlap them
-    await Promise.all(
+    // a page's annotation fetches are independent — overlap them; each
+    // run reports to its own slot first so a name shared by concurrent
+    // runs can't let a success overwrite a sibling's failure
+    const results = await Promise.all(
       (res.check_runs ?? []).map(async (run) => {
-        if (out.get(run.name) === null) {
-          return
-        }
         try {
           const pages = await ghJsonAsync<Array<Array<{ annotation_level?: string }>>>([
             'api',
@@ -580,13 +579,24 @@ async function checkAnnotationsAsync(
             '--slurp',
             `repos/${repo}/check-runs/${run.id}/annotations?per_page=100`,
           ])
-          const failures = pages.flat().filter((a) => a.annotation_level === 'failure').length
-          out.set(run.name, (out.get(run.name) ?? 0) + failures)
+          return {
+            name: run.name,
+            count: pages.flat().filter((a) => a.annotation_level === 'failure').length as
+              | number
+              | null,
+          }
         } catch {
-          out.set(run.name, null)
+          return { name: run.name, count: null }
         }
       })
     )
+    for (const r of results) {
+      const prev = out.get(r.name)
+      if (prev === null) {
+        continue
+      }
+      out.set(r.name, r.count === null ? null : (prev ?? 0) + r.count)
+    }
     if ((res.check_runs?.length ?? 0) < 100) {
       break
     }

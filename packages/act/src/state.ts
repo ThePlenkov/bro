@@ -211,7 +211,9 @@ export async function fetchPrActState(
     checksP(false),
     checksP(true),
     (rev.reviewedShasAsync === undefined
-      ? Promise.resolve(rev.reviewedShas(target))
+      ? // .then() — a sync throw must become a rejection, not escape
+        // before the catch below
+        Promise.resolve().then(() => rev.reviewedShas(target))
       : rev.reviewedShasAsync(target)
     ).catch((): string[] => []),
   ])
