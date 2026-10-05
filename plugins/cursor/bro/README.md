@@ -16,8 +16,10 @@ Then install **bro** from Customize. The marketplace manifest is
 `.cursor-plugin/marketplace.json` at the repo root; this directory is
 the plugin it points at.
 
-For a local checkout, symlink or copy `plugins/cursor/bro` to
-`~/.cursor/plugins/local/bro`.
+For a local checkout, symlink `plugins/cursor/bro` to
+`~/.cursor/plugins/local/bro`. `skills` in that directory is a link to
+the repository `skills/` tree — one copy for every client — so the
+adapter has to stay inside the checkout.
 
 Context and stop hooks stay quiet until the workspace opts in
 (`bro.config.json` or `.beads/`, which `bro setup` writes). A missing

@@ -22,7 +22,8 @@ code nobody edits by hand.
 - `packages/cli/dist` and PATH fallbacks are the production path for
   installed plugins — treat breakage there as **major**, not minor.
 - `scripts/gen-plugins.ts` drift between canonical sources and generated
-  adapters is **major** — stale copies ship to users verbatim.
+  adapters is **major** — a stale manifest or a skills link that is not
+  the repo `skills/` tree ships to users verbatim.
 
 ## Verification expectations
 

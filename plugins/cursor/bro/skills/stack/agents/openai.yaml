@@ -1,7 +1,0 @@
-interface:
-  display_name: "Bro Stack"
-  short_description: "Stacked bead→worktree→PR chains via the bro CLI — push, list, sync"
-  brand_color: "#0E8A16"
-  default_prompt: "Use $stack to get started."
-policy:
-  allow_implicit_invocation: false

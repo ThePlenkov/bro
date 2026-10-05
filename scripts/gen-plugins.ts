@@ -2,9 +2,12 @@
  * gen-plugins — materialize per-client plugin adapters under plugins/.
  *
  * The repo root is the canonical Devin plugin (plugin.json + hooks.json +
- * skills/). `plugins/<client>/bro/` are self-contained copies a client can
- * install standalone — remote installs can't follow links outside their
- * checkout, so content is copied, not referenced.
+ * skills/). `plugins/<client>/bro/` carries that client's manifest and
+ * hooks. Skills are not copied: each adapter's `skills` entry is a
+ * relative symlink to the one `skills/` tree. A marketplace install
+ * clones the whole repo, so the link stays inside that checkout. Copying
+ * an adapter directory out of the repo does not bring the skill files
+ * with it.
  *
  *   plugins/devin/bro/   plugin.json + hooks.json copied from root
  *   plugins/claude/bro/  .claude-plugin/plugin.json derived from plugin.json
@@ -13,15 +16,15 @@
  *   plugins/cursor/bro/  .cursor-plugin/plugin.json + hooks/hooks.json
  *                        (Cursor event names, command shape, output schema)
  *
- * Every adapter gets skills/ and hooks/run.sh. Only the Claude hooks wiring
+ * Every adapter links skills/ and copies hooks/run.sh. Only the Claude hooks wiring
  * is authored by hand — Cursor's hooks.json is generated from the event
  * map below. `check:plugins` fails CI when an adapter drifts from its source.
  *
  *   node scripts/gen-plugins.ts           # write
  *   node scripts/gen-plugins.ts --check   # verify freshness, exit 1 on drift
  */
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CURSOR_SELF_TOOL_MATCHER } from '../packages/cli/src/cursor-hook.ts'
 
@@ -263,8 +266,10 @@ Then install **bro** from Customize. The marketplace manifest is
 \`.cursor-plugin/marketplace.json\` at the repo root; this directory is
 the plugin it points at.
 
-For a local checkout, symlink or copy \`plugins/cursor/bro\` to
-\`~/.cursor/plugins/local/bro\`.
+For a local checkout, symlink \`plugins/cursor/bro\` to
+\`~/.cursor/plugins/local/bro\`. \`skills\` in that directory is a link to
+the repository \`skills/\` tree — one copy for every client — so the
+adapter has to stay inside the checkout.
 
 Context and stop hooks stay quiet until the workspace opts in
 (\`bro.config.json\` or \`.beads/\`, which \`bro setup\` writes). A missing
@@ -367,9 +372,35 @@ for (const src of VERSIONED_SOURCES) {
   }
 }
 
+/** plugins/<client>/bro/skills → the one repo skills/ tree. Forward
+ * slashes so the git symlink is the same on every OS. */
+function skillsLinkTarget(adapterRel) {
+  return relative(join(ROOT, adapterRel), join(ROOT, 'skills')).split(sep).join('/')
+}
+
+function skillsLinkFresh(adapterRel) {
+  const link = join(ROOT, adapterRel, 'skills')
+  try {
+    const st = lstatSync(link)
+    return st.isSymbolicLink() && readlinkSync(link) === skillsLinkTarget(adapterRel)
+  } catch {
+    return false
+  }
+}
+
+function ensureSkillsLink(adapterRel) {
+  if (skillsLinkFresh(adapterRel)) {
+    return
+  }
+  const link = join(ROOT, adapterRel, 'skills')
+  rmSync(link, { recursive: true, force: true })
+  mkdirSync(join(ROOT, adapterRel), { recursive: true })
+  symlinkSync(skillsLinkTarget(adapterRel), link)
+}
+
 for (const [dir, files] of Object.entries(ADAPTERS)) {
-  // expected file set: declared entries + skills/ + hooks/run.sh —
-  // anything else on disk under the adapter is stale generated content
+  // expected file set: declared entries + the skills symlink + hooks/run.sh.
+  // Skill files are not expected here — they live once, under skills/.
   const expected = new Set(Object.keys(files).map((rel) => `${dir}/${rel}`))
   for (const [rel, src] of Object.entries(files)) {
     if (src === null) {
@@ -391,10 +422,13 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
   }
   const skillsOut = `${dir}/skills`
   const runShOut = `${dir}/hooks/run.sh`
-  for (const f of walk(join(ROOT, 'skills'))) {
-    expected.add(`${skillsOut}/${f}`)
-  }
+  expected.add(skillsOut)
   expected.add(runShOut)
+  if (!CHECK) {
+    ensureSkillsLink(dir)
+  } else if (!skillsLinkFresh(dir)) {
+    drift.push(skillsOut)
+  }
   // the adapter dir itself may be a stale file or symlink — never
   // traverse into it: flag/remove the entry, let emit recreate the real
   // directory. readdirSync would follow the link and the stale sweep
@@ -415,13 +449,6 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
     dirStat = undefined
   }
   if (CHECK) {
-    for (const f of walk(join(ROOT, 'skills'))) {
-      const rel = `${skillsOut}/${f}`
-      const want = readFileSync(join(ROOT, 'skills', f), 'utf8')
-      if (!existsSync(join(ROOT, rel)) || readFileSync(join(ROOT, rel), 'utf8') !== want) {
-        drift.push(rel)
-      }
-    }
     const wantSh = readFileSync(join(ROOT, 'hooks/run.sh'), 'utf8')
     if (!existsSync(join(ROOT, runShOut)) || readFileSync(join(ROOT, runShOut), 'utf8') !== wantSh) {
       drift.push(runShOut)
@@ -429,6 +456,10 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
     // stale leftovers — files on disk that generation no longer produces
     if (dirStat !== undefined) {
       for (const f of walk(dirPath)) {
+        // a copied skills tree is one drift (the link), not one line per file
+        if (f === 'skills' || f.startsWith('skills/')) {
+          continue
+        }
         if (!expected.has(`${dir}/${f}`)) {
           drift.push(`${dir}/${f}`)
         }
@@ -436,7 +467,8 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
     }
   } else {
     // remove stale outputs first so `gen:plugins` repairs what --check
-    // flags; declared hand-written files are in `expected` and survive
+    // flags; declared hand-written files are in `expected` and survive.
+    // skills/ is already the symlink, so this walk does not enter it.
     if (dirStat !== undefined) {
       for (const f of walk(join(ROOT, dir))) {
         if (!expected.has(`${dir}/${f}`)) {
@@ -444,8 +476,6 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
         }
       }
     }
-    rmSync(join(ROOT, skillsOut), { recursive: true, force: true })
-    cpSync(join(ROOT, 'skills'), join(ROOT, skillsOut), { recursive: true })
     mkdirSync(join(ROOT, `${dir}/hooks`), { recursive: true })
     cpSync(join(ROOT, 'hooks/run.sh'), join(ROOT, runShOut))
   }
