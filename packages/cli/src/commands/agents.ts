@@ -566,6 +566,14 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
   }
   const molStep = pos[0]
   if (molStep === undefined) {
+    // spawn-only flags have no step to land on — 'up --provider x'
+    // riding the supervisor branch would read as a spawn that happened
+    const stray = ['--worktree', '--prompt-file', '--beads-dir', '--provider', '--model', '--profile', '--auto-approve'].find(
+      (f) => argv.includes(f) || argv.some((a) => a.startsWith(`${f}=`))
+    )
+    if (stray !== undefined) {
+      die(`${stray} requires a molStep`)
+    }
     await supervisorVerb(resolveAgentConnector({ dir }, { connector: connectorName }, env), 'up')
     return
   }

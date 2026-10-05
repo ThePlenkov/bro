@@ -155,6 +155,9 @@ describe('provider lookup + surfaces', () => {
   test('unknown name throws naming the missing key', () => {
     assert.throws(() => getProvider(providers, 'nope'), UnknownProviderError)
     assert.throws(() => getProvider(providers, 'nope'), /providers\.nope is not configured/)
+    // inherited members are not configured entries — 'constructor'
+    // must throw, not return Function.prototype.constructor
+    assert.throws(() => getProvider(providers, 'constructor'), UnknownProviderError)
   })
 
   test('asking a non-spawn kind to spawn throws naming kind + surface', () => {

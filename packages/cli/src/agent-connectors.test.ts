@@ -1186,6 +1186,9 @@ describe('fleetProfileOf', () => {
         e.kind === 'input' &&
         /fleet\.profiles\.nope is not configured/.test(e.message)
     )
+    // inherited members are not configured profiles — 'constructor'
+    // must take the missing-profile error, not resolve via the chain
+    assert.throws(() => fleetProfileOf(env, 'constructor'), SpawnError)
   })
 })
 

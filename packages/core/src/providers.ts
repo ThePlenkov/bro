@@ -195,7 +195,9 @@ export function getProvider(
   providers: Record<string, ProviderEntry>,
   name: string
 ): ProviderEntry {
-  const entry = providers[name]
+  // hasOwn pins the lookup to configured keys — 'constructor' must not
+  // resolve to an inherited member instead of UnknownProviderError
+  const entry = Object.hasOwn(providers, name) ? providers[name] : undefined
   if (entry === undefined) {
     throw new UnknownProviderError(name)
   }

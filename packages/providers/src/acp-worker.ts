@@ -350,7 +350,9 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         // forbidden from the shell — everything else rides argv/params.
         cwd: spec.cwd,
         env: { ...process.env, ...spec.env },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        // stdin is the request channel — 'ignore' would leave
+        // proc.stdin null and the driver dead before initialize
+        stdio: ['pipe', 'pipe', 'pipe'],
       }
     )
     child = proc
