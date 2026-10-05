@@ -186,4 +186,8 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
   }
 }
 
-export default { id: 'bro', server: BroPlugin }
+// `server` widens to unknown at the export boundary: the emitted kilo.d.ts
+// must not reference @kilocode/plugin (a devDependency — consumers would
+// fail to resolve the Plugin type), so BroPlugin keeps the SDK type above
+// and sheds it here.
+export default { id: 'bro', server: BroPlugin as unknown }
