@@ -2,8 +2,9 @@
  *  providers and judge suites. Each queued `{status, body}` is served
  *  in order (the last repeats); `calls` records url + init so tests
  *  assert on the request that went out. */
-import { agent, type AgentApp } from '@agentclientprotocol/sdk'
+import { agent } from '@agentclientprotocol/sdk'
 import type {
+  AgentApp,
   AuthMethod,
   SessionConfigOption,
   StopReason,

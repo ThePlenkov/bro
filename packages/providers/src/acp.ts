@@ -30,7 +30,7 @@ import type {
   SendRequestOptions,
   SessionConfigOption,
 } from '@agentclientprotocol/sdk'
-import { isEnvName, JudgeUnavailable } from '@broject/core'
+import { JudgeUnavailable } from '@broject/core'
 import type {
   DecideResult,
   JudgeQuestion,
@@ -188,11 +188,25 @@ async function applyModel(
       { sessionId, configId: modelOpt.id, value: model },
       req()
     )
-    .catch((err) => {
+    .catch((err: unknown) => {
+      // a transport drop or the caller's deadline is an outage, not a
+      // refusal — fail open as JudgeUnavailable, never mislabel config
+      if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+        throw new JudgeUnavailable(`${by} (acp) model pin aborted — ${errMsg(err)}`)
+      }
       throw new AcpConfigError(`${by}: agent refused model '${model}' — ${errMsg(err)}`)
     })
-  const cur = res.configOptions.find((o) => o.id === modelOpt.id)?.currentValue
-  return typeof cur === 'string' ? cur : model
+  const served = res.configOptions.find((o) => o.id === modelOpt.id)?.currentValue
+  const reported = typeof served === 'string' ? served : model
+  // a family swap is laundering — asked jev, served qwen must never
+  // parse as a typed answer. Same-family drift is canonicalization:
+  // provenance carries the reported id.
+  if (isSystemoneFamily(reported) !== isSystemoneFamily(model)) {
+    throw new AcpConfigError(
+      `${by}: asked for '${model}' but the agent reports '${reported}' — refusing a model-family swap`
+    )
+  }
+  return reported
 }
 
 interface AcpReply {
@@ -276,9 +290,9 @@ async function acpOp(
 }
 
 /** One minimal ACP session for the prompt — `opts.acp.peer` is the
- *  in-process test seam; production spawns `entry.command` (+ the
- *  entry's profile flag) under `sh -c` and kills it when the call
- *  settles. */
+ *  in-process test seam; production execs the tokenized `entry.command`
+ *  argv (profile as a separate arg — no shell) and kills the child when
+ *  the call settles. */
 async function acpRoundTrip(
   by: string,
   entry: AcpEntry,
@@ -333,9 +347,8 @@ async function acpRoundTrip(
       throw new AcpConfigError(`${by}: cannot exec acp command — ${spawnError}`)
     }
     const stderr = tail()
-    throw new JudgeUnavailable(
-      `acp ${by} unavailable — ${errMsg(err)}${stderr === '' ? '' : ` (${stderr})`}`
-    )
+    const detail = stderr === '' ? '' : ` (${stderr})`
+    throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
   } finally {
     child?.kill('SIGKILL')
   }

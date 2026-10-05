@@ -19,6 +19,20 @@ interface RawAnswer {
   probabilities?: unknown
 }
 
+/** A probs map whose keys all satisfy `on` — a weight keyed to an
+ *  un-asked option isn't part of the question's contract, and its max
+ *  would inflate derived confidence, so the answer is drift. */
+const isProbsOn = (
+  v: unknown,
+  on: (key: string) => boolean
+): v is Record<string, number> => isProbs(v) && Object.keys(v).every(on)
+
+/** A canonical level index — '0'..'N-1', not '01', '-1', or 'x'. */
+const isLevelKey = (key: string, levels: number): boolean => {
+  const i = Number(key)
+  return i >= 0 && i < levels && String(i) === key
+}
+
 /** Confidence off the wire: explicit value wins (clamped to 0..1 —
  *  out-of-range must never skip the escalation threshold); else the
  *  probability map's max; else 0. */
@@ -55,11 +69,12 @@ function mapAnswer(
   }
   switch (a.type) {
     case 'choice': {
+      const criteria = q.type === 'choice' ? q.criteria : {}
       if (
         typeof a.choice !== 'string' ||
         q.type !== 'choice' ||
-        !Object.hasOwn(q.criteria, a.choice) ||
-        !isProbs(a.probabilities)
+        !Object.hasOwn(criteria, a.choice) ||
+        !isProbsOn(a.probabilities, (k) => Object.hasOwn(criteria, k))
       ) {
         break
       }
@@ -127,7 +142,14 @@ export function mapTypedAnswers(
     // Object.prototype.constructor and fail open as malformed
     const a = raw[qid]
     if (Object.hasOwn(raw, qid) && a !== undefined) {
-      answers[qid] = mapAnswer(qid, q, a, by, backend)
+      // defineProperty — `answers["__proto__"] = v` would mutate the
+      // map's prototype instead of owning the answer
+      Object.defineProperty(answers, qid, {
+        value: mapAnswer(qid, q, a, by, backend),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      })
     }
   }
   return answers

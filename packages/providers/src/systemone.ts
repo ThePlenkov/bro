@@ -12,11 +12,7 @@
  * var's NAME — an all-caps pasted key would echo the secret).
  */
 import { isEnvName, JudgeUnavailable } from '@broject/core'
-import type {
-  DecideResult,
-  JudgeQuestion,
-  ProviderEntry,
-} from '@broject/core'
+import type { DecideResult, ProviderEntry } from '@broject/core'
 import {
   mapUsage,
   objOr,
