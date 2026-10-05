@@ -37,12 +37,14 @@ import {
   loadConfig,
   sessionTaskClaims,
   specStore,
+  tasksAsync,
   type Connector,
   type ConnectorCtx,
   type SpecNode,
   type SpecStore,
   type TaskRow,
   type TaskStore,
+  type TaskStoreAsync,
 } from '@broject/core'
 import { specDirAbs, validBeadId } from '../spec-connectors.ts'
 import { driftEnv, driftRow, specLinkPath } from '../spec-drift.ts'
@@ -94,10 +96,16 @@ function specs(dir: string): SpecStore {
   }
 }
 
+/** Async tasks facade — the probe path awaits instead of serializing
+ *  bd spawns behind the event loop. */
+function tasksProbe(dir: string): TaskStoreAsync {
+  return tasksAsync(dir, loadConfig(dir).connectors)
+}
+
 /** This session's claimed beads that lack a spec — the nudge scope is
  *  always own claims; foreign work is never this session's to spec.
  *  Fail-open: a dead task store must not eat the policy line. */
-function ownClaimsMissingSpec(ctx: ConnectorCtx): TaskRow[] {
+async function ownClaimsMissingSpec(ctx: ConnectorCtx): Promise<TaskRow[]> {
   try {
     const mine = sessionTaskClaims(ctx)
     if (mine.size === 0) {
@@ -109,12 +117,13 @@ function ownClaimsMissingSpec(ctx: ConnectorCtx): TaskRow[] {
     // backend's identity space — comparing it to beads/git identity
     // would wrongly disprove every claim; a store that exposes no actor
     // keeps the marker's word (fail-open)
-    const store = tasks(ctx.dir)
-    const me = store.actor?.() ?? ''
+    const store = tasksProbe(ctx.dir)
+    const [me, rows] = await Promise.all([
+      store.actor?.() ?? Promise.resolve(''),
+      store.list({ status: 'in_progress' }),
+    ])
     const spec = specs(ctx.dir)
-    return store
-      .list({ status: 'in_progress' })
-      .filter((r) => isOwnClaim(r, mine, me) && specState(r, spec) === 'missing')
+    return rows.filter((r) => isOwnClaim(r, mine, me) && specState(r, spec) === 'missing')
   } catch {
     return []
   }
@@ -130,21 +139,21 @@ const fmt = (r: TaskRow): string => `${r.id} ${shortTitle(r.title)}`.trim()
 export const sddConnector: Connector = {
   name: 'sdd',
   hooks: () => ({
-    sessionStart(ctx) {
+    async sessionStart(ctx) {
       const { mode } = loadConfig(ctx.dir).sdd
       if (mode === 'off') {
         return []
       }
       const spec = specs(ctx.dir)
-      const missing = ownClaimsMissingSpec(ctx).map((r) => `  spec missing: ${fmt(r)}`)
+      const missing = (await ownClaimsMissingSpec(ctx)).map((r) => `  spec missing: ${fmt(r)}`)
       return [`SDD (${mode}): ${spec.policy()}`, ...missing]
     },
-    promptSubmit(ctx) {
+    async promptSubmit(ctx) {
       const { mode } = loadConfig(ctx.dir).sdd
       if (mode === 'off') {
         return []
       }
-      const missing = ownClaimsMissingSpec(ctx)
+      const missing = await ownClaimsMissingSpec(ctx)
       if (missing.length === 0) {
         return []
       }
@@ -153,12 +162,12 @@ export const sddConnector: Connector = {
         `SDD: claimed beads without a spec: ${missing.map(fmt).join(', ')} — ${missing.length === 1 ? spec.remedy(missing[0]!.id) : 'write the spec first'}`,
       ]
     },
-    stopGate(ctx) {
+    async stopGate(ctx) {
       const { mode } = loadConfig(ctx.dir).sdd
       if (mode === 'off') {
         return []
       }
-      const missing = ownClaimsMissingSpec(ctx)
+      const missing = await ownClaimsMissingSpec(ctx)
       if (missing.length === 0) {
         return []
       }

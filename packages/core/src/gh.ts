@@ -3,6 +3,7 @@
  * carrying an Octokit client, so auth, proxies and GHES setups just work.
  */
 import { spawn, spawnSync } from 'node:child_process'
+import { trackChild } from './live-procs.ts'
 
 export function gh(args: string[], cwd?: string): string {
   const proc = spawnSync('gh', args, {
@@ -25,6 +26,7 @@ export function ghAsync(args: string[], cwd?: string): Promise<string> {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
+    trackChild(proc)
     let out = ''
     let err = ''
     proc.stdout.setEncoding('utf8').on('data', (d: string) => (out += d))
@@ -61,6 +63,28 @@ export function ghTry(args: string[], cwd?: string): { code: number; out: string
   return { code: proc.status ?? 1, out: proc.stdout ?? '', err: (proc.stderr ?? '').trim() }
 }
 
+/** Async ghTry — same exit-code contract without the event-loop block.
+ *  The act-gate probe path stacks several gh calls; spawnSync would
+ *  serialize them AND starve every other probe's timeout timer. */
+export function ghTryAsync(
+  args: string[],
+  cwd?: string
+): Promise<{ code: number; out: string; err: string }> {
+  return new Promise((resolve) => {
+    const proc = spawn('gh', args, { // NOSONAR — PATH lookup is the contract (same as gh/git)
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    trackChild(proc)
+    let out = ''
+    let err = ''
+    proc.stdout.setEncoding('utf8').on('data', (d: string) => (out += d))
+    proc.stderr.setEncoding('utf8').on('data', (d: string) => (err += d))
+    proc.on('error', (e) => resolve({ code: 1, out, err: (err + '\n' + e.message).trim() }))
+    proc.on('close', (code) => resolve({ code: code ?? 1, out, err: err.trim() }))
+  })
+}
+
 /** `OWNER/REPO` from args, or `gh repo view` in the current clone. Any
  *  other arity is a usage error — silently falling back to the checkout's
  *  repo could target the wrong repository. */
@@ -73,6 +97,23 @@ export function resolveRepo(positional: string[], cwd?: string): string {
     throw new Error(`expected OWNER REPO, got: ${positional.join(' ')}`)
   }
   const viewed = ghJson<{ owner: { login: string }; name: string }>(
+    ['repo', 'view', '--json', 'owner,name'],
+    cwd
+  )
+  return `${viewed.owner.login}/${viewed.name}`
+}
+
+/** Async resolveRepo — the gate probe's `gh repo view` must not freeze
+ *  the sweep while a sync spawnSync is the only wait it has. */
+export async function resolveRepoAsync(positional: string[], cwd?: string): Promise<string> {
+  const [owner, repo] = positional
+  if (positional.length === 2 && owner && repo) {
+    return `${owner}/${repo}`
+  }
+  if (positional.length !== 0) {
+    throw new Error(`expected OWNER REPO, got: ${positional.join(' ')}`)
+  }
+  const viewed = await ghJsonAsync<{ owner: { login: string }; name: string }>(
     ['repo', 'view', '--json', 'owner,name'],
     cwd
   )

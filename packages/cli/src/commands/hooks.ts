@@ -58,6 +58,7 @@ import {
   promptContextLines,
   sessionStartProbe,
   stopGateContributions,
+  unrefPendingChildren,
   withFileLock,
 } from '@broject/core'
 import type { ProbeReporter, ProbeResult, ProbeTiming } from '@broject/core'
@@ -1319,5 +1320,9 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   } finally {
     const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
     flushPerf(sessionId, event, t0)
+    // A probe that raced past its budget leaves its bd/gh child running —
+    // unref the stragglers so the hook exits with the answer it sent,
+    // not when the last subprocess closes.
+    unrefPendingChildren()
   }
 }

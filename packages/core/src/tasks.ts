@@ -13,7 +13,7 @@
  * mol/wisp (molecules), provenance (evidence), merge-slot, config,
  * init/info. Those keep calling bd() until they get doc types.
  */
-import { bd, BdCompatError, bdJson, bdTry, isBdNotFound } from './bd.ts'
+import { bd, BdCompatError, bdJson, bdJsonAsync, bdTry, bdTryAsync, isBdNotFound } from './bd.ts'
 import { gitTry } from './git.ts'
 
 /** Resolved probe results per dir — hook surfaces ask for the actor
@@ -56,6 +56,36 @@ function probeActor(dir: string): string {
     return git.out.trim()
   }
   return process.env.USER?.trim() ?? ''
+}
+
+/** Async bdActor — same resolution chain, but the bd probe doesn't
+ *  block the event loop. Hook sweeps await this; the sync twin stays
+ *  for command paths where a Promise would just be awaited anyway. */
+export async function bdActorAsync(dir: string): Promise<string> {
+  const env = process.env.BEADS_ACTOR?.trim() || process.env.BD_ACTOR?.trim() || ''
+  if (env !== '') {
+    return env
+  }
+  const cached = actorCache.get(dir)
+  if (cached !== undefined) {
+    return cached
+  }
+  const cfg = await bdTryAsync(['config', 'get', 'actor'], 3_000, dir)
+  const line = cfg.code === 0 ? (cfg.out.trim().split('\n').pop()?.trim() ?? '') : ''
+  let actor = ''
+  if (line !== '' && !/not set/i.test(line)) {
+    const eq = line.indexOf('=')
+    actor = (eq >= 0 ? line.slice(eq + 1) : line).trim().replace(/^['"]|['"]$/g, '')
+  }
+  if (actor === '') {
+    const git = gitTry(['-C', dir, 'config', 'user.name'])
+    actor =
+      git.code === 0 && git.out.trim() !== ''
+        ? git.out.trim()
+        : (process.env.USER?.trim() ?? '')
+  }
+  actorCache.set(dir, actor)
+  return actor
 }
 
 /** The row shape the task backend returns — fields optional, extras
@@ -281,5 +311,61 @@ export function taskStore(dir?: string): TaskStore {
       const v = (eq >= 0 ? line.slice(eq + 1) : line).trim().replace(/^['"]|['"]$/g, '')
       return v === '' ? undefined : v
     },
+  }
+}
+
+/** The read surface of TaskStore in Promise form — the hook-probe
+ *  contract. Mutations stay sync: they run on command paths, never in
+ *  a connector sweep where parallel probes are the whole point. The
+ *  same taskRows/taskRow guards apply — drift fails the same way. */
+export interface TaskStoreAsync {
+  list(f?: TaskFilter): Promise<TaskRow[]>
+  ready(f?: TaskFilter): Promise<TaskRow[]>
+  get<T extends TaskRow = TaskRow>(id: string): Promise<T | undefined>
+  children<T extends TaskRow = TaskRow>(id: string): Promise<T[]>
+  deps<T = unknown>(
+    ids: string[],
+    opts?: { type?: string; direction?: string }
+  ): Promise<T[]>
+  actor?(): Promise<string>
+}
+
+/** Async twin of taskStore — reads only. Every call lands on
+ *  bdJsonAsync, so a connector sweep's bd spawns overlap instead of
+ *  serializing through the event loop. */
+export function taskStoreAsync(dir?: string): TaskStoreAsync {
+  return {
+    list: async (f = {}) => taskRows(await bdJsonAsync(['list', '--json', ...filterArgs(f)], dir), 'list'),
+    ready: async (f = {}) => taskRows(await bdJsonAsync(['ready', ...filterArgs(f)], dir), 'ready'),
+    get: async (id) => {
+      let r: TaskRow | TaskRow[]
+      try {
+        r = await bdJsonAsync<TaskRow | TaskRow[]>(['show', id], dir)
+      } catch (err) {
+        if (isBdNotFound(err)) {
+          return undefined as never
+        }
+        throw err
+      }
+      return taskRow(Array.isArray(r) ? r[0] : r, 'show') as never
+    },
+    children: async (id) => taskRows(await bdJsonAsync(['children', id], dir), 'children'),
+    deps: async (ids, opts = {}) => {
+      const v = await bdJsonAsync(
+        [
+          'dep',
+          'list',
+          ...ids,
+          ...(opts.type ? ['-t', opts.type] : []),
+          ...(opts.direction ? [`--direction=${opts.direction}`] : []),
+        ],
+        dir
+      )
+      if (!Array.isArray(v)) {
+        throw new BdCompatError('bd dep list --json returned a non-array — output drifted')
+      }
+      return v as never
+    },
+    actor: () => bdActorAsync(dir ?? process.cwd()),
   }
 }

@@ -4,12 +4,14 @@
  * contribution under the 'drill' arming aspect.
  */
 import type { Connector } from '@broject/core'
-import { currentFrame } from './frames.ts'
+import { currentFrameAsync } from './frames.ts'
 
-/** The open-frame line, or null — the same text every surface shares. */
-function frameLine(): string | null {
+/** The open-frame line, or null — the same text every surface shares.
+ *  Async: the frame lookup is two bd spawns that would serialize and
+ *  freeze the probe sweep in sync form. */
+async function frameLine(dir?: string): Promise<string | null> {
   try {
-    const frame = currentFrame()
+    const frame = await currentFrameAsync(dir)
     if (!frame) {
       return null
     }
@@ -22,16 +24,16 @@ function frameLine(): string | null {
 export const drillConnector: Connector = {
   name: 'drill',
   hooks: () => ({
-    sessionStart() {
-      const line = frameLine()
+    async sessionStart(ctx) {
+      const line = await frameLine(ctx.dir)
       return line ? [line] : []
     },
-    promptSubmit() {
-      const line = frameLine()
+    async promptSubmit(ctx) {
+      const line = await frameLine(ctx.dir)
       return line ? [line] : []
     },
-    stopGate() {
-      const line = frameLine()
+    async stopGate(ctx) {
+      const line = await frameLine(ctx.dir)
       if (!line) {
         return []
       }

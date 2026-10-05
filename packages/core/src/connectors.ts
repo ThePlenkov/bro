@@ -27,8 +27,8 @@ import { gitTry } from './git.ts'
 import type { JudgeFacade } from './judge.ts'
 import type { ReviewFacade } from './review.ts'
 import type { SpecStore } from './specs.ts'
-import type { TaskRow, TaskStore } from './tasks.ts'
-import { bdActor, taskStore } from './tasks.ts'
+import type { TaskRow, TaskStore, TaskStoreAsync } from './tasks.ts'
+import { bdActor, bdActorAsync, taskStore, taskStoreAsync } from './tasks.ts'
 
 export interface ConnectorCtx {
   /** Working dir — repo root for project-scoped facades, the resolved
@@ -45,6 +45,11 @@ export interface ConnectorCtx {
  *  consumer lands. */
 export interface FacadeMap {
   tasks: TaskStore
+  /** The probe-path read surface — parallel sweeps await these instead
+   *  of blocking on each other's bd spawns. Connectors without it are
+   *  wrapped sync→Promise by tasksAsync() — API-compatible, just not
+   *  parallel (no worse than before). */
+  tasksAsync: TaskStoreAsync
   reviews: ReviewFacade
   specs: SpecStore
   judge: JudgeFacade
@@ -127,6 +132,9 @@ export interface Connector {
    *  plugin's defect, never awaited. */
   auth?(ctx: ConnectorCtx): string | null
   tasks?(ctx: ConnectorCtx): TaskStore
+  /** Async read surface for probe paths — when absent, tasksAsync()
+   *  wraps the sync `tasks` store in Promise.resolve. */
+  tasksAsync?(ctx: ConnectorCtx): TaskStoreAsync
   reviews?(ctx: ConnectorCtx): ReviewFacade
   specs?(ctx: ConnectorCtx): SpecStore
   judge?(ctx: ConnectorCtx): JudgeFacade
@@ -197,11 +205,11 @@ export function isOwnClaim(row: TaskRow, mine: Set<string>, actor: string): bool
 const beadsConnector: Connector = {
   name: 'beads',
   tasks: (ctx) => taskStore(ctx.dir),
+  tasksAsync: (ctx) => taskStoreAsync(ctx.dir),
   hooks: () => ({
-    sessionStart(ctx) {
+    async sessionStart(ctx) {
       try {
-        const ready = taskStore(ctx.dir)
-          .ready()
+        const ready = (await taskStoreAsync(ctx.dir).ready())
           .slice(0, 8)
           .map((r) => `  ${r.id} ${shortTitle(r.title)}`.trimEnd())
         return ready.length > 0 ? [`bd ready:\n${ready.join('\n')}`] : []
@@ -209,16 +217,16 @@ const beadsConnector: Connector = {
         return []
       }
     },
-    parallelWork(ctx) {
+    async parallelWork(ctx) {
       try {
         // other sessions' live work — own claims are already this
         // session's business, naming them again would be a false nudge.
         // "Own" is verified: a marker id whose claim was refused is
         // foreign work — the exact collision this nudge exists for.
         const mine = sessionTaskClaims(ctx)
-        const me = bdActor(ctx.dir)
-        const claimed = taskStore(ctx.dir)
-          .list({ status: 'in_progress' })
+        const store = taskStoreAsync(ctx.dir)
+        const [me, rows] = await Promise.all([bdActorAsync(ctx.dir), store.list({ status: 'in_progress' })])
+        const claimed = rows
           .filter((r) => !isOwnClaim(r, mine, me))
           .slice(0, 5)
           .map((r) => `${r.id} ${shortTitle(r.title)}`.trim())
@@ -227,9 +235,14 @@ const beadsConnector: Connector = {
         return []
       }
     },
-    stopGate(ctx) {
+    async stopGate(ctx) {
       try {
-        const claimed = taskStore(ctx.dir).list({ status: 'in_progress' })
+        const store = taskStoreAsync(ctx.dir)
+        const [mine, me, claimed] = await Promise.all([
+          Promise.resolve(sessionTaskClaims(ctx)),
+          bdActorAsync(ctx.dir),
+          store.list({ status: 'in_progress' }),
+        ])
         if (claimed.length === 0) {
           return []
         }
@@ -237,8 +250,6 @@ const beadsConnector: Connector = {
         // doesn't own, so they stay passive context. Ownership is the
         // store's assignee, not the marker: a refused claim still arms
         // the id, and a bead held by another actor is never ours to close
-        const mine = sessionTaskClaims(ctx)
-        const me = bdActor(ctx.dir)
         const own = claimed.filter((r) => isOwnClaim(r, mine, me))
         const foreign = claimed.filter((r) => !isOwnClaim(r, mine, me))
         const fmt = (r: { id: string; title?: string }): string =>
@@ -450,6 +461,36 @@ export function specStore(
   prefer?: Record<string, string>
 ): SpecStore {
   return facade('specs', { dir }, { prefer })
+}
+
+/** facade('tasksAsync') bound to a dir — the probe-path task surface.
+ *  A connector without `tasksAsync` gets its sync `tasks` store
+ *  wrapped in async signatures — reads stay sequential for it, which
+ *  is exactly the status quo; the API just stops forcing sync on
+ *  everyone else. */
+export function tasksAsync(
+  dir: string = process.cwd(),
+  prefer?: Record<string, string>
+): TaskStoreAsync {
+  // `connectors.tasks` steers the async surface too — the async store is
+  // the same backend in Promise form, not a separate provider choice.
+  // A preferred connector without `tasksAsync` throws below and lands
+  // on its wrapped sync `tasks` store.
+  const named = prefer?.tasksAsync ?? prefer?.tasks
+  const asyncPrefer = named === undefined ? prefer : { ...prefer, tasksAsync: named }
+  try {
+    return facade('tasksAsync', { dir }, { prefer: asyncPrefer })
+  } catch {
+    const s = facade('tasks', { dir }, { prefer })
+    return {
+      list: (f) => Promise.resolve(s.list(f)),
+      ready: (f) => Promise.resolve(s.ready(f)),
+      get: (id) => Promise.resolve(s.get(id)),
+      children: (id) => Promise.resolve(s.children(id)),
+      deps: (ids, opts) => Promise.resolve(s.deps(ids, opts)),
+      actor: () => Promise.resolve(s.actor?.() ?? ''),
+    }
+  }
 }
 
 /** Every registered connector's hook probes paired with its name —

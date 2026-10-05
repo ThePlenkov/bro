@@ -11,7 +11,7 @@
  *   check   → { available: boolean, holder: string|null, waiters }
  *   acquire → { acquired: boolean, holder: string }
  */
-import { bdTry } from '@broject/core'
+import { bdTry, bdTryAsync } from '@broject/core'
 
 export type MergeSlot =
   | { kind: 'acquired' }
@@ -83,5 +83,12 @@ export function mergeSlotHolder(): string | null {
   // hooks call this inline on every lifecycle event — a wedged dolt must
   // cost ~seconds, not the default 15s budget
   const res = bdTry(['merge-slot', 'check', '--json'], 3_000)
+  return res.code === 0 ? parseCheck(res.out) : null
+}
+
+/** Async twin — the session-start probe runs inside a parallel sweep
+ *  where a spawnSync would freeze every sibling's timeout timer. */
+export async function mergeSlotHolderAsync(): Promise<string | null> {
+  const res = await bdTryAsync(['merge-slot', 'check', '--json'], 3_000)
   return res.code === 0 ? parseCheck(res.out) : null
 }

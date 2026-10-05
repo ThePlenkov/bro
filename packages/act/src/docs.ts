@@ -54,13 +54,14 @@ export function docsOnly(files: string[], patterns: string[]): boolean {
 /** Docs-only verdict for a PR — positive evidence only. A facade
  *  without `prFiles`, a failed fetch, or an empty diff is unknown scope
  *  and reports false: the cap may only tighten on real data. */
-export function docsOnlyPr(
+export async function docsOnlyPr(
   rev: ReviewFacade,
   t: PrTarget,
   opts?: { docsPaths?: string[] }
-): boolean {
+): Promise<boolean> {
   try {
-    const files = rev.prFiles?.(t)
+    const files =
+      rev.prFilesAsync === undefined ? rev.prFiles?.(t) : await rev.prFilesAsync(t)
     return (
       files !== undefined &&
       docsOnly(files, opts?.docsPaths ?? DEFAULT_CONFIG.act.docsPaths)

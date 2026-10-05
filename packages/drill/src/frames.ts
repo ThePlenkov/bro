@@ -6,7 +6,15 @@
  * (`claim` on down, `handoff` on up). No claim.json, no .drills/ tree —
  * beads IS the memory system.
  */
-import { bd, bdJson, evidenceKind, refKind, taskStore } from '@broject/core'
+import {
+  bd,
+  bdJson,
+  bdJsonAsync,
+  evidenceKind,
+  refKind,
+  taskStore,
+  taskStoreAsync,
+} from '@broject/core'
 import { writeReport } from './report.ts'
 import type { DrillReportInput } from './report.ts'
 import type { DownOptions, DrillFrame, DrillRow, UpOptions, UpResult } from './types.ts'
@@ -41,6 +49,33 @@ export function listDrills(): DrillRow[] {
       throw err
     }
   }
+  return [...persistent, ...wisps]
+}
+
+/** Async listDrills — the probe-path twin; the wisp and persistent
+ *  reads are independent, so they overlap instead of stacking. */
+export async function listDrillsAsync(dir?: string): Promise<DrillRow[]> {
+  const [persistent, wisps] = await Promise.all([
+    taskStoreAsync(dir)
+      .list({
+        labels: [DRILL_LABEL],
+        all: true,
+        limit: 0,
+      })
+      .then((rows) => rows as DrillRow[]),
+    (async (): Promise<DrillRow[]> => {
+      try {
+        const out = await bdJsonAsync<{ wisps?: DrillRow[] }>(['mol', 'wisp', 'list', '--all'], dir)
+        return (out.wisps ?? []).filter(isDrill)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (!/unknown command|unrecognized command/i.test(msg)) {
+          throw err
+        }
+        return []
+      }
+    })(),
+  ])
   return [...persistent, ...wisps]
 }
 
@@ -91,6 +126,16 @@ function drillRelations(rows: DrillRow[]): {
     rows.map((r) => r.id),
     { type: 'parent-child' }
   )
+  return foldDepEdges(rows, byId, edges)
+}
+
+function foldDepEdges(
+  rows: DrillRow[],
+  byId: Map<string, DrillRow>,
+  edges: DepEdge[]
+): { kids: Map<string, DrillRow[]>; parents: Map<string, string> } {
+  const kids = new Map<string, DrillRow[]>()
+  const parents = new Map<string, string>()
   for (const e of edges) {
     const kid = byId.get(e.issue_id)
     const parent = byId.get(e.depends_on_id)
@@ -101,6 +146,21 @@ function drillRelations(rows: DrillRow[]): {
     parents.set(kid.id, parent.id)
   }
   return { kids, parents }
+}
+
+async function drillRelationsAsync(
+  rows: DrillRow[],
+  dir?: string
+): Promise<{ kids: Map<string, DrillRow[]>; parents: Map<string, string> }> {
+  if (rows.length === 0) {
+    return { kids: new Map(), parents: new Map() }
+  }
+  const byId = new Map(rows.map((r) => [r.id, r]))
+  const edges = await taskStoreAsync(dir).deps<DepEdge>(
+    rows.map((r) => r.id),
+    { type: 'parent-child' }
+  )
+  return foldDepEdges(rows, byId, edges)
 }
 
 /**
@@ -114,6 +174,25 @@ export function currentFrame(): DrillFrame | undefined {
     return undefined
   }
   const { kids, parents } = drillRelations(rows)
+  return pickLeaf(rows, kids, parents)
+}
+
+/** Async currentFrame — the lifecycle probes' read path; bd spawns
+ *  overlap with the rest of the sweep instead of freezing it. */
+export async function currentFrameAsync(dir?: string): Promise<DrillFrame | undefined> {
+  const rows = (await listDrillsAsync(dir)).filter(isOpen)
+  if (rows.length === 0) {
+    return undefined
+  }
+  const { kids, parents } = await drillRelationsAsync(rows, dir)
+  return pickLeaf(rows, kids, parents)
+}
+
+function pickLeaf(
+  rows: DrillRow[],
+  kids: Map<string, DrillRow[]>,
+  parents: Map<string, string>
+): DrillFrame | undefined {
   const depthOf = (id: string): number => {
     let d = 0
     let cur: string | undefined = id

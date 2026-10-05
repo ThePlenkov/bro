@@ -13,7 +13,7 @@
  * exception: a corrupt entry throws so `show` can say "exists but
  * broken" rather than lying "no such lesson".
  */
-import { bd, bdTry, gitTry, withFileLock } from '@broject/core'
+import { bd, bdTry, bdTryAsync, gitTry, withFileLock } from '@broject/core'
 import { join } from 'node:path'
 import { lessonProblems, type Lesson } from './lesson.ts'
 
@@ -74,6 +74,45 @@ function parseEntry(key: string, raw: string): ParsedEntry {
 /** Every lesson in the store — schema violations land in `skipped`. */
 export function listLessons(cwd?: string): LessonListing {
   const res = bdTry(['kv', 'list', '--json'], 15_000, cwd)
+  if (res.code !== 0) {
+    throw new LessonStoreError(`bd kv list failed — ${res.err || `exit ${res.code}`}`)
+  }
+  let map: Record<string, unknown>
+  try {
+    const parsed: unknown = JSON.parse(res.out)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('expected a JSON object')
+    }
+    map = parsed as Record<string, unknown>
+  } catch (err) {
+    throw new LessonStoreError(
+      `bd kv list returned malformed JSON — ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+  const lessons: Lesson[] = []
+  const skipped: SkippedEntry[] = []
+  for (const [key, value] of Object.entries(map)) {
+    if (!key.startsWith(KV_PREFIX)) {
+      continue
+    }
+    if (typeof value !== 'string') {
+      skipped.push({ key, problems: ['kv value is not a string'] })
+      continue
+    }
+    const entry = parseEntry(key, value)
+    if (entry.ok) {
+      lessons.push(entry.lesson)
+    } else {
+      skipped.push(entry.skipped)
+    }
+  }
+  return { lessons, skipped }
+}
+
+/** Async listLessons — the probe path; a sync bdTry would freeze the
+ *  connector sweep's timeout timers for the full dolt startup. */
+export async function listLessonsAsync(cwd?: string): Promise<LessonListing> {
+  const res = await bdTryAsync(['kv', 'list', '--json'], 15_000, cwd)
   if (res.code !== 0) {
     throw new LessonStoreError(`bd kv list failed — ${res.err || `exit ${res.code}`}`)
   }

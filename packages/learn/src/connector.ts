@@ -35,10 +35,10 @@ import {
   loadConfig,
   markerLive,
   sessionTaskClaims,
-  taskStore,
+  taskStoreAsync,
   withFileLock,
 } from '@broject/core'
-import type { Connector, ConnectorCtx } from '@broject/core'
+import type { Connector, ConnectorCtx, TaskRow } from '@broject/core'
 import { learnSection, type LearnConfig } from './config.ts'
 import type { HookEvent, Lesson } from './lesson.ts'
 import {
@@ -47,7 +47,7 @@ import {
   type MatchContext,
   type TraceEntry,
 } from './match.ts'
-import { listLessons } from './store.ts'
+import { listLessons, listLessonsAsync } from './store.ts'
 
 /** Fired-set/trace files share the arming markers' lifecycle — residue
  *  past a week is a dead session's. */
@@ -231,7 +231,7 @@ function learnConfig(dir: string): LearnConfig {
  *  claimed beads (id + title + labels), in-progress mol steps. Each
  *  component is independently fail-open: a dead bd or a non-repo dir
  *  degrades the text, it doesn't kill the probe. */
-function sessionContextText(ctx: ConnectorCtx): string {
+async function sessionContextText(ctx: ConnectorCtx): Promise<string> {
   const parts: string[] = []
   const top = gitTry(['-C', ctx.dir, 'rev-parse', '--show-toplevel'])
   parts.push(`repo:${basename(top.code === 0 && top.out.trim() !== '' ? top.out.trim() : ctx.dir)}`)
@@ -240,9 +240,16 @@ function sessionContextText(ctx: ConnectorCtx): string {
     parts.push(`branch:${br.out.trim()}`)
   }
   try {
-    const store = taskStore(ctx.dir)
-    for (const id of sessionTaskClaims(ctx)) {
-      const row = store.get(id)
+    const store = taskStoreAsync(ctx.dir)
+    // claim rows, the mol-id set, and the in-progress list overlap —
+    // N claimed beads are N bd show spawns that only cost one latency
+    const claims = [...sessionTaskClaims(ctx)]
+    const [rows, molRows, inProgress] = await Promise.all([
+      Promise.all(claims.map((id) => store.get(id).catch(() => undefined))),
+      store.list({ type: 'molecule', all: true }).catch((): TaskRow[] | null => null),
+      store.list({ status: 'in_progress' }),
+    ])
+    for (const row of rows) {
       if (row) {
         parts.push(
           `claimed:${[row.id, row.title ?? '', ...(row.labels ?? [])].join(' ')}`.trim()
@@ -252,15 +259,9 @@ function sessionContextText(ctx: ConnectorCtx): string {
     // mol steps are children of a molecule-typed bead — the task
     // relationship is the contract; the `-mol-` id/parent substring is
     // the fallback for stores that can't enumerate types or parents
-    let molIds: Set<string> | null = null
-    try {
-      molIds = new Set(
-        store.list({ type: 'molecule', all: true }).map((r) => r.id)
-      )
-    } catch {
-      molIds = null
-    }
-    for (const row of store.list({ status: 'in_progress' })) {
+    const molIds: Set<string> | null =
+      molRows === null ? null : new Set(molRows.map((r) => r.id))
+    for (const row of inProgress) {
       const isStep =
         (molIds !== null && row.parent !== undefined && molIds.has(row.parent)) ||
         row.id.includes('-mol-') ||
@@ -416,30 +417,54 @@ const snapshotFile = (hooks: string): string => join(hooks, 'cache', 'lessons.js
 function listLessonsCached(dir: string, hooks: string): Lesson[] {
   const stamp = storeStamp(dir)
   const file = snapshotFile(hooks)
-  if (stamp !== null) {
-    try {
-      const snap = JSON.parse(readFileSync(file, 'utf8')) as LessonSnapshot
-      if (snap.stamp === stamp && Array.isArray(snap.lessons)) {
-        return snap.lessons
-      }
-    } catch {
-      // absent or torn snapshot — refresh below
-    }
+  const hit = readSnapshot(file, stamp)
+  if (hit !== null) {
+    return hit
   }
   const lessons = listLessons(dir).lessons
-  if (stamp !== null) {
-    try {
-      // tmp+rename — a racing hook process can observe the file
-      // mid-write; a torn snapshot just re-reads live next time
-      mkdirSync(dirname(file), { recursive: true })
-      const tmp = `${file}.${process.pid}.tmp`
-      writeFileSync(tmp, JSON.stringify({ stamp, lessons } satisfies LessonSnapshot))
-      renameSync(tmp, file)
-    } catch {
-      // a lost snapshot costs one extra subprocess next probe — never a stall
-    }
-  }
+  writeSnapshot(file, stamp, lessons)
   return lessons
+}
+
+async function listLessonsCachedAsync(dir: string, hooks: string): Promise<Lesson[]> {
+  const stamp = storeStamp(dir)
+  const file = snapshotFile(hooks)
+  const hit = readSnapshot(file, stamp)
+  if (hit !== null) {
+    return hit
+  }
+  const lessons = (await listLessonsAsync(dir)).lessons
+  writeSnapshot(file, stamp, lessons)
+  return lessons
+}
+
+function readSnapshot(file: string, stamp: string | null): Lesson[] | null {
+  if (stamp === null) {
+    return null
+  }
+  try {
+    const snap = JSON.parse(readFileSync(file, 'utf8')) as LessonSnapshot
+    return snap.stamp === stamp && Array.isArray(snap.lessons) ? snap.lessons : null
+  } catch {
+    // absent or torn snapshot — refresh below
+    return null
+  }
+}
+
+function writeSnapshot(file: string, stamp: string | null, lessons: Lesson[]): void {
+  if (stamp === null) {
+    return
+  }
+  try {
+    // tmp+rename — a racing hook process can observe the file
+    // mid-write; a torn snapshot just re-reads live next time
+    mkdirSync(dirname(file), { recursive: true })
+    const tmp = `${file}.${process.pid}.tmp`
+    writeFileSync(tmp, JSON.stringify({ stamp, lessons } satisfies LessonSnapshot))
+    renameSync(tmp, file)
+  } catch {
+    // a lost snapshot costs one extra subprocess next probe — never a stall
+  }
 }
 
 /** Shared probe preface — session id, hooks dir, config, store. null
@@ -473,11 +498,38 @@ function probeCtx(ctx: ConnectorCtx): {
   }
 }
 
+/** Async probeCtx — the lesson store read is a bd spawn; in a parallel
+ *  probe sweep its sync form freezes every sibling's timeout timer. */
+async function probeCtxAsync(ctx: ConnectorCtx): Promise<{
+  hooks: string
+  sid: string
+  cfg: LearnConfig
+  lessons: Lesson[]
+} | null> {
+  const sid = ctx.sessionId ?? ''
+  if (sid === '') {
+    return null
+  }
+  const hooks = hooksDir(ctx.dir)
+  if (hooks === null) {
+    return null
+  }
+  const cfg = learnConfig(ctx.dir)
+  if (!cfg.enabled) {
+    return null
+  }
+  try {
+    return { hooks, sid, cfg, lessons: await listLessonsCachedAsync(ctx.dir, hooks) }
+  } catch {
+    return null
+  }
+}
+
 export const learnConnector: Connector = {
   name: 'learn',
   hooks: () => ({
-    sessionStart(ctx) {
-      const p = probeCtx(ctx)
+    async sessionStart(ctx) {
+      const p = await probeCtxAsync(ctx)
       if (p === null) {
         return []
       }
@@ -488,13 +540,13 @@ export const learnConnector: Connector = {
         'session-start',
         // the previous session's tail is context too — terms may match
         // what it was doing ("mid-merge") as well as the repo's shape
-        { text: `${sessionContextText(ctx)}\n${tail.raw}`, trace: relativize(ctx.dir, tail.entries) },
+        { text: `${await sessionContextText(ctx)}\n${tail.raw}`, trace: relativize(ctx.dir, tail.entries) },
         p.cfg,
         firedFile(p.hooks, p.sid)
       )
     },
-    promptSubmit(ctx, prompt) {
-      const p = probeCtx(ctx)
+    async promptSubmit(ctx, prompt) {
+      const p = await probeCtxAsync(ctx)
       if (p === null) {
         return []
       }
@@ -507,8 +559,8 @@ export const learnConnector: Connector = {
         firedFile(p.hooks, p.sid)
       )
     },
-    postTool(ctx) {
-      const p = probeCtx(ctx)
+    async postTool(ctx) {
+      const p = await probeCtxAsync(ctx)
       if (p === null) {
         return []
       }

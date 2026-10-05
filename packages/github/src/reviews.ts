@@ -3,7 +3,17 @@
  * `gh` CLI. Ported from act/github.ts and debt/github.ts — same calls,
  * same semantics, normalized onto the domain types in @broject/core/review.
  */
-import { gh, ghAsync, ghJson, ghTry, prLink, resolveRepo } from '@broject/core'
+import {
+  gh,
+  ghAsync,
+  ghJson,
+  ghJsonAsync,
+  ghTry,
+  ghTryAsync,
+  prLink,
+  resolveRepo,
+  resolveRepoAsync,
+} from '@broject/core'
 import type {
   CheckInfo,
   MergeOpts,
@@ -467,6 +477,167 @@ function prUpdatedAt(t: PrTarget): string | null {
   return viewed.updatedAt ?? null
 }
 
+// --- async twins — the hook-probe read path -------------------------------------
+//
+// fetchPrActState awaits these inside a parallel connector sweep; the sync
+// twins stay for command paths where one awaited call is the whole job.
+// Same bodies, ghJsonAsync/ghTryAsync in place of the spawnSync forms —
+// semantics identical, only the event loop notices.
+
+async function prMetaAsync(t: PrTarget): Promise<PrMeta> {
+  const { owner, name } = parts(t.repo)
+  const pr = (
+    await ghJsonAsync<{
+      data?: {
+        repository?: {
+          pullRequest?: {
+            headRefOid: string
+            headRefName: string
+            baseRefName: string
+            mergeable: string
+            mergeStateStatus: string
+            state: string
+            url: string
+            isDraft: boolean
+          }
+        }
+      }
+      errors?: unknown
+    }>([
+      'api',
+      'graphql',
+      '-f',
+      `query=query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid headRefName baseRefName mergeable mergeStateStatus state url isDraft}}}`,
+      '-f',
+      `o=${owner}`,
+      '-f',
+      `r=${name}`,
+      '-F',
+      `pr=${t.pr}`,
+    ])
+  ).data?.repository?.pullRequest
+  if (!pr) {
+    throw new Error(`pull request #${t.pr} not found`)
+  }
+  return {
+    state: (pr.state || 'UNKNOWN').toUpperCase(),
+    isDraft: pr.isDraft,
+    url: pr.url,
+    headSha: pr.headRefOid,
+    headRef: pr.headRefName,
+    baseRef: pr.baseRefName,
+    mergeable: (pr.mergeable || 'UNKNOWN').toUpperCase(),
+    mergeState: (pr.mergeStateStatus || 'UNKNOWN').toUpperCase(),
+  }
+}
+
+async function checksAsync(t: PrTarget, requiredOnly = false): Promise<CheckInfo[]> {
+  const args = [
+    'pr',
+    'checks',
+    String(t.pr),
+    '--repo',
+    t.repo,
+    '--json',
+    'name,state,bucket',
+  ]
+  if (requiredOnly) {
+    args.push('--required')
+  }
+  const res = await ghTryAsync(args)
+  if (res.out.trim().startsWith('[')) {
+    return JSON.parse(res.out) as CheckInfo[]
+  }
+  if (res.code !== 0 && /no (checks|required checks)/i.test(res.err)) {
+    return []
+  }
+  if (res.code !== 0) {
+    throw new Error(`gh pr checks failed: ${res.err}`)
+  }
+  return []
+}
+
+async function checkAnnotationsAsync(
+  repo: string,
+  headSha: string
+): Promise<Map<string, number | null>> {
+  const out = new Map<string, number | null>()
+  for (let page = 1; ; page += 1) {
+    const res = await ghJsonAsync<{ check_runs: Array<{ id: number; name: string }> }>([
+      'api',
+      `repos/${repo}/commits/${headSha}/check-runs?per_page=100&page=${page}`,
+    ])
+    // a page's annotation fetches are independent — overlap them
+    await Promise.all(
+      (res.check_runs ?? []).map(async (run) => {
+        if (out.get(run.name) === null) {
+          return
+        }
+        try {
+          const pages = await ghJsonAsync<Array<Array<{ annotation_level?: string }>>>([
+            'api',
+            '--paginate',
+            '--slurp',
+            `repos/${repo}/check-runs/${run.id}/annotations?per_page=100`,
+          ])
+          const failures = pages.flat().filter((a) => a.annotation_level === 'failure').length
+          out.set(run.name, (out.get(run.name) ?? 0) + failures)
+        } catch {
+          out.set(run.name, null)
+        }
+      })
+    )
+    if ((res.check_runs?.length ?? 0) < 100) {
+      break
+    }
+  }
+  return out
+}
+
+async function reviewedShasAsync(t: PrTarget): Promise<string[]> {
+  const shas = new Set<string>()
+  for (let page = 1; ; page += 1) {
+    const reviews = await ghJsonAsync<Array<{ commit_id?: string }>>([
+      'api',
+      `repos/${t.repo}/pulls/${t.pr}/reviews?per_page=100&page=${page}`,
+    ])
+    for (const r of reviews ?? []) {
+      if (r.commit_id) {
+        shas.add(r.commit_id)
+      }
+    }
+    if ((reviews?.length ?? 0) < 100) {
+      break
+    }
+  }
+  return [...shas]
+}
+
+async function prFilesAsync(t: PrTarget): Promise<string[]> {
+  const files: string[] = []
+  for (let page = 1; ; page += 1) {
+    if (page > 30) {
+      throw new Error(`prFiles: ${prLink(t.repo, t.pr)} exceeds the 3,000-file API limit`)
+    }
+    const rows = await ghJsonAsync<Array<{ filename?: string; previous_filename?: string }>>([
+      'api',
+      `repos/${t.repo}/pulls/${t.pr}/files?per_page=100&page=${page}`,
+    ])
+    for (const f of rows ?? []) {
+      if (f.filename) {
+        files.push(f.filename)
+      }
+      if (f.previous_filename) {
+        files.push(f.previous_filename)
+      }
+    }
+    if ((rows?.length ?? 0) < 100) {
+      break
+    }
+  }
+  return files
+}
+
 // --- bulk probes ---------------------------------------------------------------
 //
 // `debt collect` pays several gh round-trips per merged PR when driven
@@ -713,12 +884,21 @@ function graphql(query: string, vars: Record<string, string>): void {
 export function githubReview(dir: string = process.cwd()): ReviewFacade {
   return {
     resolveRepo: (positional: string[] = []) => resolveRepo(positional, dir),
+    resolveRepoAsync: (positional: string[] = []) => resolveRepoAsync(positional, dir),
     prLink,
     currentPr() {
       // `gh pr view` resolves the PR for the checked-out branch — `gh pr
       // list --limit 1` would grab an arbitrary open PR instead. It also
       // resolves CLOSED/MERGED PRs, so the caller must check state.
       const res = ghTry(['pr', 'view', '--json', 'number,state,url'], dir)
+      if (res.code !== 0 || res.out.trim() === '') {
+        return null
+      }
+      const view = JSON.parse(res.out) as { number: number; state: string; url: string }
+      return { pr: view.number, state: view.state, url: view.url }
+    },
+    async currentPrAsync() {
+      const res = await ghTryAsync(['pr', 'view', '--json', 'number,state,url'], dir)
       if (res.code !== 0 || res.out.trim() === '') {
         return null
       }
@@ -749,6 +929,12 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
     checks,
     checkAnnotations,
     reviewedShas,
+
+    prMetaAsync,
+    checksAsync,
+    checkAnnotationsAsync,
+    reviewedShasAsync,
+    prFilesAsync,
 
     prFiles,
     reviewThreads,
