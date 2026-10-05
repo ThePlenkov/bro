@@ -44,6 +44,7 @@ import { applyNextPlan, runNextCommand } from './commands/next.ts'
 import { runNotifyCommand } from './commands/notify.ts'
 import { parseNextPlan, PLAN_VERSION as NEXT_PLAN_VERSION, type NextPlan } from './commands/next-plan.ts'
 import { resolvePlanDoc, runPlanCommand } from './commands/plan.ts'
+import { runPluginsCommand } from './commands/plugins.ts'
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
 import { runDoctorCommand } from './commands/doctor.ts'
 import { driveSection } from './commands/drive-config.ts'
@@ -323,16 +324,8 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'plugins',
-    summary: 'List registered plugins — name, skill, config section',
-    run() {
-      for (const p of PLUGINS) {
-        const src = p.external ? 'ext' : 'core'
-        const plan = p.planSchema ? 'plan' : '-'
-        console.log(
-          `${p.name.padEnd(12)} ${(p.skill ?? '-').padEnd(10)} ${(p.configKey ?? '-').padEnd(8)} ${src.padEnd(4)} ${plan.padEnd(4)} ${p.summary}`
-        )
-      }
-    },
+    summary: 'Plugin registry + client adapters: install|uninstall|list <client>',
+    run: (argv) => runPluginsCommand(argv, PLUGINS),
   }),
 ]
 
