@@ -26,19 +26,26 @@ describe('providerClient', () => {
     assert.equal(client.call, undefined)
   })
 
+  test('an acp entry binds a surface by its resolved model', () => {
+    const typed = providerClient('kilo', {
+      type: 'acp',
+      command: 'kilo --acp',
+      model: 'typesafe/jev-1.13',
+    })
+    assert.equal(typeof typed.call, 'function')
+    const prose = providerClient('kilo', { type: 'acp', command: 'kilo --acp' })
+    assert.equal(typeof prose.chat, 'function')
+  })
+
   test('a kind with no binding yet throws — naming provider + kind', () => {
-    for (const entry of [
-      { type: 'acp', command: 'kilo --acp' },
-      { type: 'cli', command: 'devin -p' },
-    ] as const) {
-      assert.throws(
-        () => providerClient('kilo', entry),
-        (e: unknown) =>
-          e instanceof Error &&
-          /providers\.kilo/.test(e.message) &&
-          new RegExp(`'${entry.type}'`).test(e.message) &&
-          /no client binding yet/.test(e.message)
-      )
-    }
+    const entry = { type: 'cli', command: 'devin -p' } as const
+    assert.throws(
+      () => providerClient('kilo', entry),
+      (e: unknown) =>
+        e instanceof Error &&
+        /providers\.kilo/.test(e.message) &&
+        /'cli'/.test(e.message) &&
+        /no client binding yet/.test(e.message)
+    )
   })
 })

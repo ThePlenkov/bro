@@ -7,9 +7,11 @@
  * by name and ask for a surface (`call`, `chat`, `spawn`); they never
  * name a vendor.
  */
+export { acpCall, acpChat, acpClient, isSystemoneFamily } from './acp.ts'
 export { openaiCompatChat } from './openai.ts'
 export { providerClient } from './registry.ts'
 export type {
+  AcpSeam,
   ProviderCall,
   ProviderChat,
   ProviderChatResult,
@@ -32,5 +34,5 @@ export {
 export type { FetchFn, HttpResult, RetryWhen } from './http.ts'
 // test seam — one scripted transport shared by the providers and
 // judge suites (was four identical copies; sonar flagged the blocks)
-export { fakeFetch } from './testkit.ts'
-export type { Call } from './testkit.ts'
+export { fakeAcpAgent, fakeFetch } from './testkit.ts'
+export type { Call, FakeAcpAgent } from './testkit.ts'

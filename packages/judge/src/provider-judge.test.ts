@@ -7,7 +7,7 @@ import { JudgeUnavailable, UnknownProviderError } from '@broject/core'
 import type { JudgeQuestion, ProviderEntry } from '@broject/core'
 import { judgeFacade } from './chain.ts'
 import type { JudgeConfig } from './config.ts'
-import { fakeFetch } from '@broject/providers'
+import { fakeAcpAgent, fakeFetch } from '@broject/providers'
 import {
   providerJudge,
   providerJudgeAuth,
@@ -33,6 +33,16 @@ const QUESTIONS: Record<string, JudgeQuestion> = {
     criteria: { a: 'option a', b: 'option b' },
   },
 }
+
+/** A category:"model" select option advertising exactly `value`. */
+const modelOption = (value: string) => ({
+  type: 'select' as const,
+  id: 'm',
+  name: 'Model',
+  category: 'model' as const,
+  currentValue: value,
+  options: [{ value, name: value }],
+})
 
 const TYPED_BODY = {
   model: 'jev-1.13.0',
@@ -141,11 +151,56 @@ describe('providerJudge', () => {
     }))
 
   test('a kind with no binding yet is a startup error naming provider + kind', () => {
-    const entry: ProviderEntry = { type: 'acp', command: 'kilo --acp' }
+    const entry: ProviderEntry = { type: 'cli', command: 'devin -p' }
     assert.throws(
-      () => providerJudge('kilo', entry, CFG),
-      /providers\.kilo \(type 'acp'\) has no client binding yet/
+      () => providerJudge('cli', entry, CFG),
+      /providers\.cli \(type 'cli'\) has no client binding yet/
     )
+  })
+
+  test('an acp entry on a systemone-family model is a typed call', async () => {
+    const peer = fakeAcpAgent({
+      replyText: JSON.stringify({
+        answers: {
+          route: {
+            type: 'choice',
+            choice: 'a',
+            probabilities: { a: 0.9, b: 0.1 },
+            confidence: 0.9,
+          },
+        },
+      }),
+      configOptions: [modelOption('typesafe/jev-1.13')],
+    })
+    const entry: ProviderEntry = {
+      type: 'acp',
+      command: 'kilo --acp',
+      model: 'typesafe/jev-1.13',
+    }
+    const res = await providerJudge('kilo', entry, CFG, {
+      acp: { peer: peer.app },
+    }).decide('s', QUESTIONS)
+    assert.equal(res.answers.route!.decidedBy, 'provider:kilo')
+    assert.equal(res.answers.route!.confidence, 0.9)
+  })
+
+  test('an acp entry on a prose model flags decidedBy :prose — uncalibrated', async () => {
+    const peer = fakeAcpAgent({
+      replyText: JSON.stringify({
+        answers: { route: { type: 'choice', choice: 'b', confidence: 0.7 } },
+      }),
+      configOptions: [modelOption('qwen3-coder')],
+    })
+    const entry: ProviderEntry = {
+      type: 'acp',
+      command: 'kilo --acp',
+      model: 'qwen3-coder',
+    }
+    const res = await providerJudge('kilo', entry, CFG, {
+      acp: { peer: peer.app },
+    }).decide('s', QUESTIONS)
+    // parsed answers never share the provider's typed bucket in stats
+    assert.equal(res.answers.route!.decidedBy, 'provider:kilo:prose')
   })
 })
 

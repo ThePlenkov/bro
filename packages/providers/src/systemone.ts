@@ -12,16 +12,8 @@
  * var's NAME — an all-caps pasted key would echo the secret).
  */
 import { isEnvName, JudgeUnavailable } from '@broject/core'
-import type {
-  DecideResult,
-  JudgeAnswer,
-  JudgeQuestion,
-  ProviderEntry,
-} from '@broject/core'
+import type { DecideResult, ProviderEntry } from '@broject/core'
 import {
-  clamp01,
-  isNum,
-  isProbs,
   mapUsage,
   objOr,
   postJson,
@@ -29,109 +21,14 @@ import {
   type FetchFn,
   type HttpResult,
 } from './http.ts'
-import type { ProviderCall } from './registry.ts'
+import type { AcpSeam, ProviderCall } from './registry.ts'
+import { mapTypedAnswers } from './typed.ts'
 
 type SystemoneEntry = Extract<ProviderEntry, { type: 'systemone' }>
 
 /** The hosted API default — the entry's baseUrl is optional for this
  *  kind (PROVIDER_REGISTRY), so the binding owns the fallback. */
 const DEFAULT_BASE_URL = 'https://api.typesafe.ai'
-
-interface RawAnswer {
-  type?: unknown
-  choice?: unknown
-  score?: unknown
-  noul?: unknown
-  confidence?: unknown
-  probabilities?: unknown
-}
-
-/** Confidence off the wire: explicit value wins (clamped to 0..1 —
- *  out-of-range must never skip the escalation threshold); else the
- *  probability map's max; else 0. */
-function deriveConfidence(v: unknown, probs: unknown): number {
-  if (isNum(v)) {
-    return clamp01(v)
-  }
-  if (!isProbs(probs)) {
-    return 0
-  }
-  const vals = Object.values(probs)
-  return vals.length > 0 ? clamp01(Math.max(...vals)) : 0
-}
-
-/** Map one wire answer to the contract, validated against the asked
- *  question — a `noul` answer to a `choice` question or an off-criteria
- *  pick is contract drift: JudgeUnavailable, fail-open. `qid` is the
- *  caller's question key (not sent to the model). */
-function mapAnswer(
-  qid: string,
-  q: JudgeQuestion,
-  raw: unknown,
-  by: string
-): JudgeAnswer {
-  if (typeof raw !== 'object' || raw === null) {
-    throw new JudgeUnavailable(`systemone returned a malformed answer for "${qid}"`)
-  }
-  const a = raw as RawAnswer
-  if (a.type !== q.type) {
-    throw new JudgeUnavailable(
-      `systemone answered "${qid}" with type ${JSON.stringify(a.type)} — expected ${q.type}`
-    )
-  }
-  switch (a.type) {
-    case 'choice': {
-      if (
-        typeof a.choice !== 'string' ||
-        q.type !== 'choice' ||
-        !Object.hasOwn(q.criteria, a.choice) ||
-        !isProbs(a.probabilities)
-      ) {
-        break
-      }
-      return {
-        type: 'choice',
-        choice: a.choice,
-        probabilities: a.probabilities,
-        confidence: deriveConfidence(a.confidence, a.probabilities),
-        decidedBy: by,
-      }
-    }
-    case 'score': {
-      // the wire scale is 0..N-1 over the question's level array
-      if (
-        !isNum(a.score) ||
-        q.type !== 'score' ||
-        a.score < 0 ||
-        a.score > q.criteria.length - 1 ||
-        !isProbs(a.probabilities)
-      ) {
-        break
-      }
-      return {
-        type: 'score',
-        score: a.score,
-        probabilities: a.probabilities,
-        confidence: deriveConfidence(a.confidence, a.probabilities),
-        decidedBy: by,
-      }
-    }
-    case 'noul': {
-      // P(yes) is a probability — outside [0,1] is contract drift
-      if (!isNum(a.noul) || a.noul < 0 || a.noul > 1) {
-        break
-      }
-      return {
-        type: 'noul',
-        noul: a.noul,
-        // derived — the API returns only P(yes); a confident no is confident
-        confidence: Math.max(a.noul, 1 - a.noul),
-        decidedBy: by,
-      }
-    }
-  }
-  throw new JudgeUnavailable(`systemone returned a malformed answer for "${qid}"`)
-}
 
 export interface ProviderWireOpts {
   /** Test seam — injects a scripted transport. */
@@ -143,6 +40,10 @@ export interface ProviderWireOpts {
   /** The config FIELD path error messages name — never the env var's
    *  name, which could BE the pasted secret. */
   keyField?: string
+  /** acp-kind session seam (spec bro-ribc.1 §acp) — `peer` replaces the
+   *  spawned `command` with an in-process AgentApp (tests), `cwd` is
+   *  the session's working directory (default: process.cwd()). */
+  acp?: AcpSeam
 }
 
 /** The configured key from its env var — a non-NAME apiKeyEnv is a
@@ -211,22 +112,10 @@ export function systemoneCall(
       throwForStatus(res)
     }
     const body = objOr(res.body)
-    const rawAnswers = body.answers
-    if (typeof rawAnswers !== 'object' || rawAnswers === null) {
-      throw new JudgeUnavailable('systemone returned no answers map')
-    }
-    const answers: Record<string, JudgeAnswer> = {}
     // map only asked questions — an unasked id in the reply is drift
     // we ignore, an asked-but-absent one is "no verdict" (the chain
     // marks it low), an asked-but-malformed one fails open
-    for (const [qid, q] of Object.entries(questions)) {
-      // hasOwn — an unanswered "constructor" qid would otherwise read
-      // Object.prototype.constructor and fail open as malformed
-      const a = (rawAnswers as Record<string, unknown>)[qid]
-      if (Object.hasOwn(rawAnswers, qid) && a !== undefined) {
-        answers[qid] = mapAnswer(qid, q, a, by)
-      }
-    }
+    const answers = mapTypedAnswers(body.answers, questions, by, 'systemone')
     return {
       answers,
       model: typeof body.model === 'string' ? body.model : model,

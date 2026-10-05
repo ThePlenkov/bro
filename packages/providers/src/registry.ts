@@ -12,6 +12,7 @@ import type {
   JudgeQuestion,
   ProviderEntry,
 } from '@broject/core'
+import { acpClient } from './acp.ts'
 import { openaiCompatChat } from './openai.ts'
 import { systemoneCall, type ProviderWireOpts } from './systemone.ts'
 
@@ -46,11 +47,19 @@ export interface ProviderClient {
   chat?: ProviderChat
 }
 
+/** The acp kind's session seam — `peer` replaces the spawned `command`
+ *  with an in-process agent (the SDK's AgentApp; tests wire a scripted
+ *  one), `cwd` is the session's working directory. */
+export interface AcpSeam {
+  peer?: import('@agentclientprotocol/sdk').AgentApp
+  cwd?: string
+}
+
 /** Load an entry → its typed client. `name` is the registry key —
  *  provenance stamps answers `provider:<name>` so stats score each
  *  service on its own record. Throws for a kind with no binding yet
- *  (acp lands with bro-ribc.9, cli with the fleet milestone) — a
- *  startup error naming provider + kind, not a runtime surprise. */
+ *  (cli lands with the fleet milestone) — a startup error naming
+ *  provider + kind, not a runtime surprise. */
 export function providerClient(
   name: string,
   entry: ProviderEntry,
@@ -62,6 +71,10 @@ export function providerClient(
       return { call: systemoneCall(`provider:${name}`, entry, { ...opts, keyField }) }
     case 'openai-compat':
       return { chat: openaiCompatChat(entry, { ...opts, keyField }) }
+    case 'acp':
+      // 'auto' grade — the binding picks call vs chat on the resolved
+      // model (systemone-family → typed, else prose)
+      return acpClient(`provider:${name}`, entry, { ...opts, keyField })
     default:
       throw new Error(
         `providers.${name} (type '${entry.type}') has no client binding yet — ` +
