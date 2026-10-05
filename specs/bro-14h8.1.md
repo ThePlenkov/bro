@@ -76,7 +76,8 @@ id = "jira-open"
 provider = "atlassian"
 graphql = "query { jira { issueSearch(...) { issues { key status } } } }"
 [steps.env]                # per-step env overlay for the spawned CLI
-ATLASSIAN_API_URL = "https://api.atlassian.com/gateway/api/graphql"
+ATLASSIAN_PROFILE = "corp" # literal pass-through vars only — never
+                           # endpoint-redirecting vars (see env rule)
 ```
 
 Step rules (all enforced in `planSchema`, so `bro plan validate` catches
@@ -104,10 +105,18 @@ them):
   step's spawn only, values **literal** (the `GlabOpts.env` contract:
   `{ ...process.env, ...env }`). This is the mechanism for instance
   pinning, not credentials: `GITLAB_HOST` for self-hosted GitLab,
-  `GH_HOST` for GitHub Enterprise, `ATLASSIAN_API_URL` for Atlassian.
-  Credentials are never named — because the overlay *inherits*
-  `process.env`, the operator's `ATLASSIAN_TOKEN` / `GH_TOKEN` /
-  `glab` login reaches the spawned CLI by omission. Writing
+  `GH_HOST` for GitHub Enterprise. `ATLASSIAN_API_URL` is **rejected in
+  plan `env` at `planSchema` time** (it remains settable in the
+  operator-authored `query.env` config overlay and the CLI's own
+  `apiUrl` config): the Atlassian CLI sends its authenticated
+  `Authorization` header to whatever endpoint that variable names, so a
+  plan that could rewrite it could redirect inherited credentials to an
+  arbitrary endpoint (SSRF / credential exfil). The atlassian connector
+  additionally requires the *effective* endpoint scheme be `https:`
+  before spawning. Credentials are never named — because the overlay
+  *inherits* `process.env`, the operator's `ATLASSIAN_TOKEN` /
+  `GH_TOKEN` / `glab` login reaches the spawned CLI by omission.
+  Writing
   `ATLASSIAN_TOKEN = "ATLASSIAN_TOKEN"` is not indirection — it sets
   that literal string and shadows the real credential. (Unlike
   `apiKeyEnv`, which *is* name-indirection resolved at runtime, `env`
@@ -196,7 +205,13 @@ declaration order, so completion order never leaks into output:
   fields passed through raw; `error` is transport-level (spawn failure,
   non-zero exit) and carries the CLI's stderr line.
 - Exit code is 1 when any step failed, 0 otherwise — results print
-  regardless, so a partial answer is still machine-usable.
+  regardless, so a partial answer is still machine-usable. A step
+  "failed" means either the CLI failed (transport error → `error`
+  field) **or the completed response's top-level `errors` array is
+  non-empty** — even when `data` is also present. A partially denied
+  GraphQL response is not a clean success, and executors must agree on
+  the same status for the same response; the raw `errors` payload still
+  passes through verbatim for the consumer to judge.
 - No normalization. A normalized `items` shape (title/status/url for
   bead import) is the epic's second open question and a follow-up spec,
   not v1: raw output is the honest substrate, normalization is
@@ -263,7 +278,9 @@ skills/query/SKILL.md               thin wrapper — mechanics live in the CLI
   `env.ATLASSIAN_TOKEN = "…"` would embed a token value outright —
   there is no name-indirection here. Operator credentials reach the
   spawned CLI through the inherited `process.env`; the plan writes only
-  non-secret pins (`*_HOST`, `*_API_URL`). `vars`/`env` values that
+  non-secret pins (`*_HOST`) — endpoint-URL variables like
+  `ATLASSIAN_API_URL` are rejected outright, not trusted. `vars`/`env`
+  values that
   look like secrets are the author's leak, but the schema never
   *requires* a secret — auth always resolves through the provider
   CLI's own login.
