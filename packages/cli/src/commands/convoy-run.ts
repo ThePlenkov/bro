@@ -165,12 +165,17 @@ const STATUS_FAIL_LIMIT = 10
 const sleepWall = (sec: number): Promise<void> =>
   new Promise((r) => setTimeout(r, sec * 1000))
 
-const isoEta = (ms: number): string =>
-  ms >= 3_600_000
-    ? `${Math.round(ms / 360_000) / 10}h`
-    : ms >= 60_000
-      ? `${Math.ceil(ms / 60_000)}m`
-      : `${Math.ceil(ms / 1000)}s`
+const isoEta = (ms: number): string => {
+  if (ms >= 3_600_000) {
+    return `${Math.round(ms / 360_000) / 10}h`
+  }
+  if (ms >= 60_000) {
+    return `${Math.ceil(ms / 60_000)}m`
+  }
+  return `${Math.ceil(ms / 1000)}s`
+}
+
+const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
 /** The blocked-entry decision: a rate limit with a provider reset is a
  *  wait (sleep until it, respawn, no attempt burned); every other block
@@ -190,12 +195,12 @@ function blockedDecision(
   if (cause === 'rate_limited' && !Number.isNaN(reset)) {
     return { waitSec: Math.max(1, Math.ceil((reset - deps.now()) / 1000)) }
   }
-  const why =
-    cause === 'quota'
-      ? 'quota exhausted'
-      : cause === 'rate_limited'
-        ? 'rate_limited — provider reported no reset'
-        : (cause ?? 'blocked')
+  let why = cause ?? 'blocked'
+  if (cause === 'quota') {
+    why = 'quota exhausted'
+  } else if (cause === 'rate_limited') {
+    why = 'rate_limited — provider reported no reset'
+  }
   return { parked: `${why} — \`bro agents down\` clears the block` }
 }
 
@@ -230,6 +235,131 @@ async function pollAgent(
   }
 }
 
+/** A loop step's outcome: a settled mol, a timed wait (no attempt
+ *  burned), or a burned attempt to retry after. */
+type RunStep = MolResult | { waitSec: number } | { retry: true }
+
+const isResult = (s: RunStep): s is MolResult => 'verdict' in s
+const isWait = (s: RunStep): s is { waitSec: number } => 'waitSec' in s
+
+/** The pre-spawn read: load + next. Returns the ConvoyNext to act on,
+ *  or a MolResult when the mol already settles the run (complete, a
+ *  pending human gate, unreadable). */
+function precheck(deps: RunDeps, molId: string, attempts: number): ConvoyNext | MolResult {
+  let mol: Molecule
+  try {
+    mol = deps.loadMol(molId)
+  } catch (err) {
+    return { mol: molId, verdict: 'error', attempts, detail: errText(err) }
+  }
+  const n = deps.next(mol)
+  if (n.state === 'complete') {
+    return { mol: molId, verdict: 'done', attempts }
+  }
+  if (n.state === 'gate') {
+    return { mol: molId, verdict: 'gated', attempts, detail: n.gates.join(', ') }
+  }
+  return n
+}
+
+/** A spawn refusal is a signal, not a verdict. The error's kind is the
+ *  thrower's own word when it knows (cap → capacity — wait a tick, no
+ *  attempt); the registry re-read classifies the rest: a blocked entry
+ *  takes the wall path, a live entry means another worker owns the mol,
+ *  a stopped one is the operator's verdict. What remains is a bare
+ *  refusal — it burns an attempt. */
+function refusalOutcome(
+  deps: RunDeps,
+  cfg: RunArgs,
+  molId: string,
+  err: SpawnError,
+  attempts: number
+): RunStep {
+  if (err.kind === 'cap') {
+    deps.say(`run ${molId}: fleet cap full — waiting a poll tick`)
+    return { waitSec: cfg.pollSec }
+  }
+  const e = deps.entry(molId)
+  if (e !== undefined && agentEntryBlocked(e, deps.now())) {
+    const d = blockedDecision(e, e.cause as string | undefined, e.resetAt as string | undefined, deps)
+    if ('parked' in d) {
+      return { mol: molId, verdict: 'parked', attempts, detail: d.parked }
+    }
+    deps.say(`run ${molId}: rate_limited until reset — waiting ${isoEta(d.waitSec * 1000)}`)
+    return d
+  }
+  if (e !== undefined) {
+    const st = deps.entryState(e)
+    if (st === 'running' || st === 'spawned') {
+      return { mol: molId, verdict: 'occupied', attempts, detail: err.message }
+    }
+    if (st === 'stopped') {
+      return { mol: molId, verdict: 'stopped', attempts }
+    }
+  }
+  // an untyped refusal while the fleet reads full is capacity — same
+  // wait, just classified by occupancy instead of the kind
+  if (deps.fleetFull()) {
+    deps.say(`run ${molId}: fleet cap full — waiting a poll tick`)
+    return { waitSec: cfg.pollSec }
+  }
+  const spent = attempts + 1
+  if (spent >= cfg.attempts) {
+    return { mol: molId, verdict: 'failed', attempts: spent, detail: err.message }
+  }
+  deps.say(`run ${molId}: spawn refused (${err.message}) — attempt ${spent}`)
+  return { retry: true }
+}
+
+/** The terminal-state classification: re-read the mol first — its
+ *  state outranks the agent's (a worker that died after finishing
+ *  still counts done). Then the agent's own terminal state decides:
+ *  blocked → the wall path, stopped → the operator verdict, anything
+ *  else with the mol still open → a burned attempt. */
+function afterRun(
+  deps: RunDeps,
+  cfg: RunArgs,
+  molId: string,
+  last: AgentInfo,
+  attempts: number
+): RunStep {
+  const spent = attempts + 1
+  let after: ConvoyNext
+  try {
+    after = deps.next(deps.loadMol(molId))
+  } catch (err) {
+    return { mol: molId, verdict: 'error', attempts: spent, detail: errText(err) }
+  }
+  if (after.state === 'complete') {
+    return { mol: molId, verdict: 'done', attempts: spent }
+  }
+  if (after.state === 'gate') {
+    return { mol: molId, verdict: 'gated', attempts: spent, detail: after.gates.join(', ') }
+  }
+  if (last.state === 'blocked') {
+    const d = blockedDecision(deps.entry(molId), last.cause, last.resetAt, deps)
+    if ('parked' in d) {
+      return { mol: molId, verdict: 'parked', attempts: spent, detail: d.parked }
+    }
+    deps.say(`run ${molId}: ${last.cause} until ${last.resetAt} — waiting ${isoEta(d.waitSec * 1000)}`)
+    return d
+  }
+  if (last.state === 'stopped') {
+    return { mol: molId, verdict: 'stopped', attempts: spent }
+  }
+  if (spent >= cfg.attempts) {
+    const cause = last.cause === undefined ? '' : ` (${last.cause})`
+    return {
+      mol: molId,
+      verdict: 'failed',
+      attempts: spent,
+      detail: `agent ${last.state}${cause}, mol incomplete`,
+    }
+  }
+  deps.say(`run ${molId}: agent ${last.state} with mol incomplete — attempt ${spent}`)
+  return { retry: true }
+}
+
 /** One molecule end-to-end: spawn → await → classify → respawn, until
  *  the mol completes, the attempts cap lands, or a wait/park verdict
  *  decides. */
@@ -240,128 +370,30 @@ export async function runMol(
 ): Promise<MolResult> {
   let attempts = 0
   for (;;) {
-    let mol: Molecule
+    const pre = precheck(deps, molId, attempts)
+    if ('verdict' in pre) {
+      return pre
+    }
+    let step: RunStep
     try {
-      mol = deps.loadMol(molId)
-    } catch (err) {
-      return {
-        mol: molId,
-        verdict: 'error',
-        attempts,
-        detail: err instanceof Error ? err.message : String(err),
-      }
-    }
-    const before = deps.next(mol)
-    if (before.state === 'complete') {
-      return { mol: molId, verdict: 'done', attempts }
-    }
-    if (before.state === 'gate') {
-      return { mol: molId, verdict: 'gated', attempts, detail: before.gates.join(', ') }
-    }
-
-    let agent: AgentInfo
-    try {
-      agent = await deps.spawn(molId)
+      const agent = await deps.spawn(molId)
+      deps.say(`run ${molId}: agent ${agent.id} up — polling`)
+      const last = await pollAgent(deps, cfg, agent)
+      step = afterRun(deps, cfg, molId, last, attempts)
     } catch (err) {
       if (!(err instanceof SpawnError)) {
-        return {
-          mol: molId,
-          verdict: 'error',
-          attempts,
-          detail: err instanceof Error ? err.message : String(err),
-        }
+        return { mol: molId, verdict: 'error', attempts, detail: errText(err) }
       }
-      // a refusal is a signal — the kind says which kind when the
-      // thrower knows (cap → capacity, wait a tick, no attempt); the
-      // registry re-read classifies the rest: blocked → the wall path,
-      // live entry → another worker owns the mol
-      if (err.kind === 'cap') {
-        deps.say(`run ${molId}: fleet cap full — waiting a poll tick`)
-        await deps.sleepSec(cfg.pollSec)
-        continue
-      }
-      const e = deps.entry(molId)
-      if (e !== undefined && agentEntryBlocked(e, deps.now())) {
-        const d = blockedDecision(e, e.cause as string | undefined, e.resetAt as string | undefined, deps)
-        if ('parked' in d) {
-          return { mol: molId, verdict: 'parked', attempts, detail: d.parked }
-        }
-        deps.say(`run ${molId}: rate_limited until reset — waiting ${isoEta(d.waitSec * 1000)}`)
-        await deps.sleepSec(d.waitSec)
-        continue
-      }
-      if (e !== undefined) {
-        const st = deps.entryState(e)
-        if (st === 'running' || st === 'spawned') {
-          return {
-            mol: molId,
-            verdict: 'occupied',
-            attempts,
-            detail: `${err.message}`,
-          }
-        }
-        if (st === 'stopped') {
-          return { mol: molId, verdict: 'stopped', attempts }
-        }
-      }
-      if (deps.fleetFull()) {
-        // an untyped refusal while the fleet reads full is capacity —
-        // same wait, just classified by occupancy instead of the kind
-        deps.say(`run ${molId}: fleet cap full — waiting a poll tick`)
-        await deps.sleepSec(cfg.pollSec)
-        continue
-      }
-      attempts += 1
-      if (attempts >= cfg.attempts) {
-        return { mol: molId, verdict: 'failed', attempts, detail: err.message }
-      }
-      deps.say(`run ${molId}: spawn refused (${err.message}) — attempt ${attempts}`)
-      await deps.sleepSec(cfg.retryDelaySec)
+      step = refusalOutcome(deps, cfg, molId, err, attempts)
+    }
+    if (isResult(step)) {
+      return step
+    }
+    if (isWait(step)) {
+      await deps.sleepSec(step.waitSec)
       continue
-    }
-
-    deps.say(`run ${molId}: agent ${agent.id} up — polling`)
-    const last = await pollAgent(deps, cfg, agent)
-
-    let after: ConvoyNext
-    try {
-      after = deps.next(deps.loadMol(molId))
-    } catch (err) {
-      return {
-        mol: molId,
-        verdict: 'error',
-        attempts,
-        detail: err instanceof Error ? err.message : String(err),
-      }
-    }
-    if (after.state === 'complete') {
-      return { mol: molId, verdict: 'done', attempts: attempts + 1 }
-    }
-    if (after.state === 'gate') {
-      return { mol: molId, verdict: 'gated', attempts: attempts + 1, detail: after.gates.join(', ') }
-    }
-    if (last.state === 'blocked') {
-      const d = blockedDecision(deps.entry(molId), last.cause, last.resetAt, deps)
-      if ('parked' in d) {
-        return { mol: molId, verdict: 'parked', attempts: attempts + 1, detail: d.parked }
-      }
-      deps.say(`run ${molId}: ${last.cause} until ${last.resetAt} — waiting ${isoEta(d.waitSec * 1000)}`)
-      await deps.sleepSec(d.waitSec)
-      continue
-    }
-    if (last.state === 'stopped') {
-      return { mol: molId, verdict: 'stopped', attempts: attempts + 1 }
     }
     attempts += 1
-    if (attempts >= cfg.attempts) {
-      return {
-        mol: molId,
-        verdict: 'failed',
-        attempts,
-        detail: `agent ${last.state}${last.cause === undefined ? '' : ` (${last.cause})`}, mol incomplete`,
-      }
-    }
-    deps.say(`run ${molId}: agent ${last.state} with mol incomplete — attempt ${attempts}`)
     await deps.sleepSec(cfg.retryDelaySec)
   }
 }
@@ -449,7 +481,8 @@ export async function runConvoyRun(argv: string[]): Promise<void> {
     if (cfg.json) {
       console.log(JSON.stringify(r))
     } else {
-      console.log(`run ${r.mol} ${r.verdict}${r.detail === undefined ? '' : ` — ${r.detail}`}`)
+      const detail = r.detail === undefined ? '' : ` — ${r.detail}`
+      console.log(`run ${r.mol} ${r.verdict}${detail}`)
     }
     if (r.verdict === 'failed' || r.verdict === 'error') {
       failed += 1
