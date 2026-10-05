@@ -34,6 +34,7 @@ import {
   providerKeyField,
   synthesizedProviders,
 } from './provider-judge.ts'
+import type { AcpSeam } from '@broject/providers'
 import type { FetchFn } from './http.ts'
 
 // the deadline seam moved to ./deadline.ts — re-exported so importers
@@ -162,6 +163,8 @@ export interface JudgeFacadeOpts {
   connector?: string
   /** Test seam — provider-mode bindings take a scripted transport. */
   fetch?: FetchFn
+  /** acp-kind session seam — provider-mode tests inject a peer. */
+  acp?: AcpSeam
 }
 
 /** Judge config keys that feed a provider-shaped decision — the
@@ -238,7 +241,12 @@ export function judgeFacade(dir: string, opts: JudgeFacadeOpts = {}): JudgeFacad
       cfg.provider,
       requireProviderSurface(entries, cfg.provider, 'call'),
       cfg,
-      { fetch: opts.fetch, model, keyField: providerKeyField(cfg.provider, providers) }
+      {
+        fetch: opts.fetch,
+        model,
+        keyField: providerKeyField(cfg.provider, providers),
+        acp: opts.acp,
+      }
     )
     const fallback =
       cfg.fallback !== undefined && cfg.fallback !== cfg.provider
@@ -249,6 +257,7 @@ export function judgeFacade(dir: string, opts: JudgeFacadeOpts = {}): JudgeFacad
             {
               fetch: opts.fetch,
               keyField: providerKeyField(cfg.fallback, providers),
+              acp: opts.acp,
             }
           )
         : undefined

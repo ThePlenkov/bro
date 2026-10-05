@@ -13,7 +13,12 @@
  * comparable. A prompt-and-parsed answer is prose-grade evidence —
  * it never masquerades as a calibrated typed judgment.
  */
-import { isEnvName, JudgeUnavailable, ProviderSurfaceError } from '@broject/core'
+import {
+  isEnvName,
+  JudgeUnavailable,
+  PROVIDER_REGISTRY,
+  ProviderSurfaceError,
+} from '@broject/core'
 import type {
   DecideResult,
   JudgeAnswer,
@@ -21,7 +26,7 @@ import type {
   ProviderEntry,
 } from '@broject/core'
 import { clamp01, isNum, isProbs, providerClient } from '@broject/providers'
-import type { FetchFn, ProviderChat } from '@broject/providers'
+import type { AcpSeam, FetchFn, ProviderChat } from '@broject/providers'
 import { deadlineJudge, type DeadlineJudge } from './deadline.ts'
 import type { JudgeConfig } from './config.ts'
 
@@ -237,6 +242,8 @@ export interface ProviderJudgeOpts {
   /** The config field key errors name — providerKeyField() resolves
    *  synthesized aliases back to their legacy source field. */
   keyField?: string
+  /** acp-kind session seam — tests inject an in-process agent peer. */
+  acp?: AcpSeam
 }
 
 /** JudgeFacade over a named provider entry — the kind selects the
@@ -251,6 +258,7 @@ export function providerJudge(
     fetch: opts.fetch,
     model: opts.model,
     keyField: opts.keyField,
+    acp: opts.acp,
   })
   const by = `provider:${name}`
   if (client.call !== undefined) {
@@ -258,8 +266,15 @@ export function providerJudge(
   }
   if (client.chat !== undefined) {
     const chat = client.chat
+    // an 'auto' kind (acp) serving prose flags the stamp — a
+    // prompt-and-parsed answer must never share the provider's typed
+    // bucket in stats' byDecider (spec: fidelity laundering is the
+    // failure this guards; always-prose kinds need no marker — their
+    // name already says what they are)
+    const proseBy =
+      PROVIDER_REGISTRY[entry.type].call === 'auto' ? `${by}:prose` : by
     return deadlineJudge(cfg.timeoutMs, (state, questions, deadline) =>
-      proseDecide(by, chat, state, questions, deadline)
+      proseDecide(proseBy, chat, state, questions, deadline)
     )
   }
   // unreachable while every bound kind serves a surface — a kind that
