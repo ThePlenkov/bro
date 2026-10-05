@@ -162,17 +162,6 @@ export function fleetCapOf(env: AgentConnectorEnv): number {
   return env.fleet?.maxConcurrent ?? DEFAULT_CONFIG.fleet.maxConcurrent
 }
 
-/** Agent states that hold a fleet slot — 'spawned' (registered,
- *  unverified) counts: a maybe-starting worker is budget already
- *  committed, the same admission semantics the cap enforces. */
-const OCCUPYING_STATES: ReadonlySet<AgentState> = new Set(['running', 'spawned'])
-
-/** Slots in use across one or more backend agent lists — the N in the
- *  `fleet: N/M` surfaces and the count the cap compares against. */
-export function occupiedSlots(agents: AgentInfo[]): number {
-  return agents.filter((a) => OCCUPYING_STATES.has(a.state)).length
-}
-
 /** Pick the serving backend: explicit --connector → connectors.agents →
  *  matchRemote/matchDir → registry order. Provisional factories are
  *  cheap — a connector that must not be picked stays unconstructed
@@ -546,6 +535,16 @@ export function fleetOccupancy(
     }
   }
   return occupied
+}
+
+/** The display-side occupancy count — the same fail-closed registry
+ *  view admission enforces, so `bro agents status`/`bro fleet` report
+ *  the numerator the cap actually checks. Registry-wide (a
+ *  --connector-scoped view still shows the fleet numerator) and
+ *  unverifiable entries still occupy, so a degraded backend can't make
+ *  the surface under-report the fleet. */
+export function fleetOccupancyFor(dir: string, env: AgentConnectorEnv): number {
+  return fleetOccupancy(dir, agentsHome(dir), readAgentRegistry(dir), env)
 }
 
 /** Fleet admission under the spawn lock — refuse while OTHER live

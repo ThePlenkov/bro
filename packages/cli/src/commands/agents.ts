@@ -40,8 +40,8 @@ import {
   agentPromptPath,
   eachAgentConnector,
   fleetCapOf,
+  fleetOccupancyFor,
   loadAgentEnv,
-  occupiedSlots,
   resolveAgentConnector,
   type AgentConnectorEnv,
 } from '../agent-connectors.ts'
@@ -144,16 +144,19 @@ export async function findAgent(
 // --- status -------------------------------------------------------------------
 
 /** Fleet slot accounting the table and --json both surface — the cap
- *  (0 = uncapped) plus how many slots `list()` saw occupied. A degraded
- *  backend's share is uncounted; its warning shows right after. */
+ *  (0 = uncapped) plus the registry-based, fail-closed occupancy the
+ *  admission check enforces. Counted across every backend: a
+ *  --connector-scoped view still shows the fleet numerator, and an
+ *  unverifiable entry keeps its slot, so a degraded backend can't make
+ *  the line under-report what a spawn would count. */
 export interface FleetOccupancy {
   occupied: number
   maxConcurrent: number
 }
 
-function occupancyOf(backends: AgentBackendPlane[], env: AgentConnectorEnv): FleetOccupancy {
+function occupancyOf(dir: string, env: AgentConnectorEnv): FleetOccupancy {
   return {
-    occupied: occupiedSlots(backends.flatMap((b) => b.agents)),
+    occupied: fleetOccupancyFor(dir, env),
     maxConcurrent: fleetCapOf(env),
   }
 }
@@ -251,7 +254,7 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
     console.log(
       JSON.stringify(
         {
-          occupancy: occupancyOf(backends, env),
+          occupancy: occupancyOf(dir, env),
           backends: backends.map(({ conn, agents, degraded }) => ({
             name: conn.name,
             capabilities: conn.capabilities(),
@@ -265,7 +268,7 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
     )
     return
   }
-  printStatusTable(backends, occupancyOf(backends, env))
+  printStatusTable(backends, occupancyOf(dir, env))
 }
 
 // --- up / down ------------------------------------------------------------------

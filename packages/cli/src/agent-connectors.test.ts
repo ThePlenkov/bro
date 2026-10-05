@@ -394,17 +394,22 @@ function connectorContract(b: BackendCase): void {
   test('fleet.maxConcurrent 0 means uncapped', async () => {
     const rows = Array.from({ length: 4 }, (_, i) => ({ id: `fx-${i + 1}`, status: 'open' }))
     const f = fx(rows)
+    const c = b.make({ dir: f.main }, { ...f.env, fleet: { maxConcurrent: 0 } })
+    const spawned: string[] = []
     try {
-      const c = b.make({ dir: f.main }, { ...f.env, fleet: { maxConcurrent: 0 } })
-      // one over the default cap — proof the knob, not the default, drives
+      // four live at once — one over the default cap, so the last spawn
+      // only succeeds when the knob itself disables admission
       for (const r of rows) {
         const info = await c.spawn(
           SPEC(f.main, f.beadsDir, String(r.id), 'setTimeout(() => {}, 30000)')
         )
         assert.equal(info.state, 'running')
-        await c.stop(info.id)
+        spawned.push(info.id)
       }
     } finally {
+      for (const id of spawned) {
+        await c.stop(id).catch(() => {})
+      }
       cleanup(f)
     }
   })

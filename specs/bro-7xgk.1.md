@@ -69,12 +69,13 @@ worker under a full cap is refused only when OTHER live agents fill it.
 
 ### Surfaces
 
-- `bro agents status` — the table gains a `fleet: N/M occupied` line;
-  `--json` gains `occupancy: { occupied, maxConcurrent }`.
-- `bro fleet` — same line under the table (and in the `--live` header);
-  `--json` gains the same `occupancy` object. Occupancy counts agents
-  with state `running`/`spawned` across backends — the same semantics
-  the prologue enforces.
+- `bro agents status` — the table gains a `fleet: N/M occupied` line
+  above it; `--json` gains `occupancy: { occupied, maxConcurrent }`.
+- `bro fleet` — same line above the table (and in the `--live` header);
+  `--json` gains the same `occupancy` object. Occupancy is the same
+  fail-closed registry count the prologue enforces — unverifiable
+  entries keep their slots, so a degraded backend can't make the
+  surface under-report the fleet.
 
 ### Out of scope
 

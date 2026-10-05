@@ -28,8 +28,8 @@ import { listMolecules, loadMolecule, stepsOf, type ConvoyStep } from '@broject/
 import {
   eachAgentConnector,
   fleetCapOf,
+  fleetOccupancyFor,
   loadAgentEnv,
-  occupiedSlots,
   type AgentConnectorEnv,
 } from '../agent-connectors.ts'
 import { occupancyLine, type FleetOccupancy } from './agents.ts'
@@ -255,9 +255,10 @@ export interface FleetPayload {
   degraded: string[]
   conflicts: string[]
   prErrors: string[]
-  /** Fleet slot accounting — the cap plus live occupancy across
-   *  backends (degraded backends' share is uncounted; their warnings
-   *  show alongside). */
+  /** Fleet slot accounting — the cap plus the registry-based,
+   *  fail-closed occupancy admission enforces: an unverifiable or
+   *  degraded backend's entries still occupy, so the number never
+   *  under-reports what a spawn would count. */
   occupancy: FleetOccupancy
 }
 
@@ -292,7 +293,7 @@ async function collectFleet(dir: string): Promise<FleetPayload> {
     conflicts,
     prErrors,
     occupancy: {
-      occupied: occupiedSlots([...byStep.values()]),
+      occupied: fleetOccupancyFor(dir, env),
       maxConcurrent: fleetCapOf(env),
     },
   }
