@@ -24,6 +24,10 @@ real-time child→parent events with no tokens spent in a wait loop.
 
 ## Policy
 
+- **Delivery is pull-based.** A drop never wakes a sleeping session —
+  it lands in context on the session's next tool call (the postTool
+  probe). Reaching an idle parent needs its own tool cadence (a
+  bare-sleep holder), not a louder drop.
 - **Write, don't wait.** A worker that finished early, a watcher that
   saw a transition, a fixer that needs attention — `bro notify` the
   event and get on with it; never poll the parent for attention.

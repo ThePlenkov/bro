@@ -37,6 +37,8 @@ non-interactive ticker, use `bro watch --every N`.
 | `bro watch --every N` | Repeat the heartbeat on a cadence |
 | `bro watch --notify` | Drop the initial snapshot and transitions into the mailbox |
 | `bro watch --json` | Emit `{ts, attention, mols, gates, fleet}` |
+| `bro watch install [--every N] [--print]` | Install the heartbeat on a non-agent timer — a systemd user unit per repo (crontab fallback), cadence `watch.intervalSec` (default 60) |
+| `bro watch uninstall` | Remove the installed timer/cron entry for this repo |
 | `bro notify <text>` | Write one mailbox event for live sessions |
 
 Watch never claims steps, mutates beads, or respawns workers. Its attention

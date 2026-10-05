@@ -143,6 +143,7 @@ Full reference: [broject.dev/docs](https://broject.dev/docs).
 | `bro fleet [--json\|--live]` | View molecules, steps, agents, worktrees, and PRs |
 | `bro agents status\|up\|down` | Inspect, start, respawn, or stop detached agents |
 | `bro watch [--once\|--every N\|--notify\|--json]` | Read-only heartbeat; optionally send transitions to the mailbox |
+| `bro watch install [--every N]` \| `uninstall` | The heartbeat on a non-agent timer — systemd user unit, crontab fallback |
 | `bro notify <text>` | Drop a message in the live session's mailbox |
 | `bro drive [--once\|--every N\|--no-merge]` | Apply the act gate to fleet PRs; merge only on green |
 | `bro serve [--port N]` | Serve the fleet API and web UI on loopback |

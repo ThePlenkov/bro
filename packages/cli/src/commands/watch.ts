@@ -8,6 +8,9 @@
  *   bro watch --every N     tick the snapshot every N seconds
  *   bro watch --notify      drop each tick's snapshot into the mailbox
  *   bro watch --json        machine-readable {ts, attention, mols, gates, fleet}
+ *   bro watch install [--every N] [--print]   the heartbeat on a
+ *         non-agent timer — systemd user unit, crontab fallback
+ *   bro watch uninstall     remove the installed entry
  *
  * `--every` exists so watch *can* loop, but the cadence owner is the
  * deployment — a supervisor that wants ticks on a schedule re-invokes
@@ -44,6 +47,8 @@ import {
   type FleetRow,
 } from './fleet.ts'
 import { parseWorktreePorcelain, type WorktreeInfo } from './work.ts'
+import { installWatch, uninstallWatch } from './watch-install.ts'
+import { watchSection, type WatchConfig } from './watch-config.ts'
 
 export interface WatchMol {
   mol: string
@@ -481,7 +486,40 @@ function tickJanitor(dir: string): { janitor?: JanitorReport; note: string } {
   }
 }
 
+/** `install|uninstall` — the heartbeat on a real scheduler so polling
+ *  costs zero inference (bro-7xgk.5); the session's holder keeps the
+ *  turn alive, this owns the cadence. */
+function runWatchSched(argv: string[]): void {
+  const dir = process.cwd()
+  const cfg =
+    ((loadBroConfig(dir) as Record<string, unknown>).watch as WatchConfig | undefined) ??
+    watchSection(undefined)
+  if (argv[0] === 'uninstall') {
+    const r = uninstallWatch(dir)
+    console.log(r.detail)
+    if (r.state === 'error') {
+      process.exit(1)
+    }
+    return
+  }
+  const everyRaw = flag(argv, '--every')
+  const everySec = everyRaw === undefined ? cfg.intervalSec : Number(everyRaw)
+  if (!Number.isFinite(everySec) || everySec <= 0 || everySec * 1000 > 0x7fffffff) {
+    console.error(`error: --every needs a positive seconds value, got "${everyRaw}"`)
+    process.exit(2)
+  }
+  const r = installWatch(dir, { everySec, print: argv.includes('--print') })
+  console.log(r.detail)
+  if (r.state === 'error') {
+    process.exit(1)
+  }
+}
+
 export async function runWatchCommand(argv: string[]): Promise<void> {
+  if (argv[0] === 'install' || argv[0] === 'uninstall') {
+    runWatchSched(argv.slice(1))
+    return
+  }
   let args: ReturnType<typeof watchArgs>
   try {
     args = watchArgs(argv)
