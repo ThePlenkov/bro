@@ -472,24 +472,31 @@ export function tasksAsync(
   dir: string = process.cwd(),
   prefer?: Record<string, string>
 ): TaskStoreAsync {
-  // `connectors.tasks` steers the async surface too — the async store is
-  // the same backend in Promise form, not a separate provider choice.
-  // A preferred connector without `tasksAsync` throws below and lands
-  // on its wrapped sync `tasks` store.
-  const named = prefer?.tasksAsync ?? prefer?.tasks
-  const asyncPrefer = named === undefined ? prefer : { ...prefer, tasksAsync: named }
-  try {
-    return facade('tasksAsync', { dir }, { prefer: asyncPrefer })
-  } catch {
-    const s = facade('tasks', { dir }, { prefer })
-    return {
-      list: (f) => Promise.resolve(s.list(f)),
-      ready: (f) => Promise.resolve(s.ready(f)),
-      get: (id) => Promise.resolve(s.get(id)),
-      children: (id) => Promise.resolve(s.children(id)),
-      deps: (ids, opts) => Promise.resolve(s.deps(ids, opts)),
-      actor: () => Promise.resolve(s.actor?.() ?? ''),
+  // An explicit connectors.tasksAsync preference wins outright. Else
+  // resolve the SAME connector `tasks` would pick — prefer/matchDir/
+  // remote all apply — so the probe path never silently reads a
+  // different backend than command paths do. A connector without
+  // `tasksAsync` gets its sync store wrapped: reads stay sequential for
+  // it, which is exactly the status quo.
+  if (prefer?.tasksAsync !== undefined) {
+    try {
+      return facade('tasksAsync', { dir }, { prefer })
+    } catch {
+      // fall through to the selected tasks connector
     }
+  }
+  const pick = pickConnector('tasks', { dir }, { prefer })
+  if (pick.tasksAsync !== undefined) {
+    return pick.tasksAsync({ dir })
+  }
+  const s = pick.tasks!({ dir })
+  return {
+    list: (f) => Promise.resolve(s.list(f)),
+    ready: (f) => Promise.resolve(s.ready(f)),
+    get: (id) => Promise.resolve(s.get(id)),
+    children: (id) => Promise.resolve(s.children(id)),
+    deps: (ids, opts) => Promise.resolve(s.deps(ids, opts)),
+    actor: () => Promise.resolve(s.actor?.() ?? ''),
   }
 }
 

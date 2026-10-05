@@ -180,12 +180,15 @@ function advisoryFilter(
 
 /** Resolve an async facade method, falling back to its sync twin when
  *  the host doesn't implement one — the sweep must not stall on a
- *  backend that only knows the spawnSync surface. */
+ *  backend that only knows the spawnSync surface. The sync call is
+ *  deferred through .then so a synchronous throw becomes a rejection
+ *  the caller's .catch sees, not a throw that escapes fetchPrActState. */
 const orSync = <T, A extends unknown[]>(
   asyncFn: ((...a: A) => Promise<T>) | undefined,
   syncFn: (...a: A) => T,
   ...args: A
-): Promise<T> => (asyncFn === undefined ? Promise.resolve(syncFn(...args)) : asyncFn(...args))
+): Promise<T> =>
+  asyncFn === undefined ? Promise.resolve().then(() => syncFn(...args)) : asyncFn(...args)
 
 /** Full open-PR state for the act loop — threads + checks + mergeability. */
 export async function fetchPrActState(
@@ -202,20 +205,21 @@ export async function fetchPrActState(
   // The reads are independent — overlap them. Inside a hook sweep each
   // sync variant would serialize AND block the probe-timeout timers.
   const checksP = (requiredOnly: boolean): Promise<CheckInfo[]> =>
-    rev.checksAsync === undefined
-      ? Promise.resolve(rev.checks(target, requiredOnly))
-      : rev.checksAsync(target, requiredOnly)
+    orSync(
+      rev.checksAsync?.bind(rev),
+      (t: PrTarget, req?: boolean) => rev.checks(t, req),
+      target,
+      requiredOnly
+    )
   const [meta, threads, checksAll, required, shas] = await Promise.all([
     orSync(rev.prMetaAsync?.bind(rev), (t: PrTarget) => rev.prMeta(t), target),
     rev.reviewThreads(target),
     checksP(false),
     checksP(true),
-    (rev.reviewedShasAsync === undefined
-      ? // .then() — a sync throw must become a rejection, not escape
-        // before the catch below
-        Promise.resolve().then(() => rev.reviewedShas(target))
-      : rev.reviewedShasAsync(target)
-    ).catch((): string[] => []),
+    // a flaky reviews endpoint degrades to [] — fixRounds just reads low
+    orSync(rev.reviewedShasAsync?.bind(rev), (t: PrTarget) => rev.reviewedShas(t), target).catch(
+      (): string[] => []
+    ),
   ])
   const rules = ignoreRules(opts?.ignoreChecks ?? [])
   const alerts: string[] = []

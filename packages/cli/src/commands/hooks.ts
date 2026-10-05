@@ -1197,14 +1197,19 @@ interface PerfAgg {
 
 /** One journal line → a row, or undefined for a torn/non-row write.
  *  JSON.parse succeeding doesn't mean a row — `null`, a scalar, or `{}`
- *  would poison the aggregates below. */
+ *  would poison the aggregates below: every field the report reads must
+ *  be present and typed. */
 function parsePerfRow(line: string): PerfRow | undefined {
   try {
     const r: unknown = JSON.parse(line)
-    return typeof r === 'object' &&
-      r !== null &&
-      typeof (r as PerfRow).event === 'string' &&
-      typeof (r as PerfRow).ms === 'number'
+    if (typeof r !== 'object' || r === null) {
+      return undefined
+    }
+    const p = r as Partial<PerfRow>
+    return typeof p.event === 'string' &&
+      typeof p.connector === 'string' &&
+      typeof p.ms === 'number' &&
+      typeof p.ts === 'number'
       ? (r as PerfRow)
       : undefined
   } catch {

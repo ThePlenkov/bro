@@ -3,8 +3,8 @@
  * package. PATH lookup is the contract (same as gh); a generous maxBuffer
  * keeps large `bd list --json` payloads from hitting Node's 1 MiB default.
  */
-import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { trackChild } from './live-procs.ts'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { spawnCollect } from './live-procs.ts'
 import { statSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -70,40 +70,42 @@ export function bdJson<T>(args: string[], cwd?: string): T {
  *  execFileSync-style shape (`.code/.stdout/.stderr`) so isBdNotFound
  *  and friends classify async failures exactly like sync ones. */
 export function bdAsync(args: string[], cwd?: string): Promise<string> {
+  const { proc, done } = spawnCollect('bd', args, cwd)
   return new Promise((resolve, reject) => {
-    const proc = spawn('bd', args, { // NOSONAR — PATH lookup is the contract (same as gh/git)
-      cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    trackChild(proc)
-    let out = ''
-    let err = ''
-    proc.stdout.setEncoding('utf8').on('data', (d: string) => {
-      out += d
-    })
-    proc.stderr.setEncoding('utf8').on('data', (d: string) => {
-      err += d
-    })
+    let timedOut = false
     const timer = setTimeout(() => {
+      timedOut = true
       proc.kill('SIGKILL')
-      const e = new Error(`bd ${args[0] ?? ''} timed out after 15000ms`)
-      Object.assign(e, { code: 'ETIMEDOUT', stdout: out, stderr: err, killed: true })
-      reject(e)
     }, 15_000)
     timer.unref?.()
-    proc.on('error', (e) => {
+    void done.then(({ code, out, err, error }) => {
       clearTimeout(timer)
-      reject(Object.assign(e, { stdout: out, stderr: err }))
-    })
-    proc.on('close', (code) => {
-      clearTimeout(timer)
+      if (timedOut) {
+        reject(
+          Object.assign(new Error(`bd ${args[0] ?? ''} timed out after 15000ms`), {
+            code: 'ETIMEDOUT',
+            stdout: out,
+            stderr: err,
+            killed: true,
+          })
+        )
+        return
+      }
+      if (error !== undefined) {
+        reject(Object.assign(error, { stdout: out, stderr: err }))
+        return
+      }
       if (code === 0) {
         resolve(out)
         return
       }
-      const e = new Error(`bd ${args.join(' ')} failed (${code}): ${err.trim()}`)
-      Object.assign(e, { code: code ?? 1, stdout: out, stderr: err })
-      reject(e)
+      reject(
+        Object.assign(new Error(`bd ${args.join(' ')} failed (${code ?? 1}): ${err}`), {
+          code: code ?? 1,
+          stdout: out,
+          stderr: err,
+        })
+      )
     })
   })
 }
@@ -115,32 +117,21 @@ export function bdTryAsync(
   timeoutMs = 15_000,
   cwd?: string
 ): Promise<{ code: number; out: string; err: string }> {
+  const { proc, done } = spawnCollect('bd', args, cwd)
   return new Promise((resolve) => {
-    const proc = spawn('bd', args, { // NOSONAR — PATH lookup is the contract (same as gh/git)
-      cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    trackChild(proc)
-    let out = ''
-    let err = ''
-    proc.stdout.setEncoding('utf8').on('data', (d: string) => {
-      out += d
-    })
-    proc.stderr.setEncoding('utf8').on('data', (d: string) => {
-      err += d
-    })
+    let timedOut = false
     const timer = setTimeout(() => {
+      timedOut = true
       proc.kill('SIGKILL')
-      resolve({ code: 124, out, err: `timed out after ${timeoutMs}ms` })
     }, timeoutMs)
     timer.unref?.()
-    proc.on('error', (e) => {
+    void done.then((r) => {
       clearTimeout(timer)
-      resolve({ code: 1, out, err: (err + '\n' + e.message).trim() })
-    })
-    proc.on('close', (code) => {
-      clearTimeout(timer)
-      resolve({ code: code ?? 1, out, err: err.trim() })
+      resolve(
+        timedOut
+          ? { code: 124, out: r.out, err: `timed out after ${timeoutMs}ms` }
+          : { code: r.code ?? 1, out: r.out, err: r.err }
+      )
     })
   })
 }

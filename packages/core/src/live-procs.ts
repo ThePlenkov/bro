@@ -7,7 +7,7 @@
  * paths never call this, so ordinary `await`ed spawns still pin the
  * process exactly like before.
  */
-import type { ChildProcess } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import type { Socket } from 'node:net'
 
 const live = new Set<ChildProcess>()
@@ -19,6 +19,42 @@ export function trackChild(proc: ChildProcess): void {
   proc.on('close', () => {
     live.delete(proc)
   })
+}
+
+export interface SpawnResult {
+  code: number | null
+  out: string
+  err: string
+  /** Set when 'error' (spawn failure) beat 'close' — the raw Error. */
+  error?: Error
+}
+
+/** Spawn `cmd` with piped stdout/stderr collected — the shared skeleton
+ *  behind the async CLI twins (bdAsync, ghTryAsync, …). Timeouts and
+ *  exit-code policy stay with the caller; `done` resolves exactly once,
+ *  on 'close' or 'error' (a spawn failure still surfaces via `error`
+ *  with its message merged into `err`). */
+export function spawnCollect(
+  cmd: string,
+  args: string[],
+  cwd?: string
+): { proc: ChildProcess; done: Promise<SpawnResult> } {
+  const proc = spawn(cmd, args, { // NOSONAR — PATH lookup is the contract (same as gh/git)
+    cwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  trackChild(proc)
+  let out = ''
+  let err = ''
+  proc.stdout.setEncoding('utf8').on('data', (d: string) => (out += d))
+  proc.stderr.setEncoding('utf8').on('data', (d: string) => (err += d))
+  const done = new Promise<SpawnResult>((resolve) => {
+    proc.on('error', (error) =>
+      resolve({ code: null, out, err: (err + '\n' + error.message).trim(), error })
+    )
+    proc.on('close', (code) => resolve({ code, out, err: err.trim() }))
+  })
+  return { proc, done }
 }
 
 /** Unref every still-running child and its stdio pipes — the pipes are

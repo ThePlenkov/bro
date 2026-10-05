@@ -2,8 +2,8 @@
  * GitHub CLI helpers. `gh` is a hard dependency — bro shells out rather than
  * carrying an Octokit client, so auth, proxies and GHES setups just work.
  */
-import { spawn, spawnSync } from 'node:child_process'
-import { trackChild } from './live-procs.ts'
+import { spawnSync } from 'node:child_process'
+import { spawnCollect } from './live-procs.ts'
 
 export function gh(args: string[], cwd?: string): string {
   const proc = spawnSync('gh', args, {
@@ -21,24 +21,15 @@ export function gh(args: string[], cwd?: string): string {
  *  probes that run host calls under a concurrency cap need this to
  *  actually overlap. Same contract: resolve stdout, throw on non-zero. */
 export function ghAsync(args: string[], cwd?: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn('gh', args, { // NOSONAR — PATH lookup is the contract (same as gh/git)
-      cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    trackChild(proc)
-    let out = ''
-    let err = ''
-    proc.stdout.setEncoding('utf8').on('data', (d: string) => (out += d))
-    proc.stderr.setEncoding('utf8').on('data', (d: string) => (err += d))
-    proc.on('error', reject)
-    proc.on('close', (code) => {
-      if (code === 0) {
-        resolve(out)
-      } else {
-        reject(new Error(`gh ${args[0]} failed: ${err.trim()}`))
-      }
-    })
+  const { done } = spawnCollect('gh', args, cwd)
+  return done.then(({ code, out, err, error }) => {
+    if (error !== undefined) {
+      throw error
+    }
+    if (code === 0) {
+      return out
+    }
+    throw new Error(`gh ${args[0]} failed: ${err}`)
   })
 }
 
@@ -70,19 +61,8 @@ export function ghTryAsync(
   args: string[],
   cwd?: string
 ): Promise<{ code: number; out: string; err: string }> {
-  return new Promise((resolve) => {
-    const proc = spawn('gh', args, { // NOSONAR — PATH lookup is the contract (same as gh/git)
-      cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    trackChild(proc)
-    let out = ''
-    let err = ''
-    proc.stdout.setEncoding('utf8').on('data', (d: string) => (out += d))
-    proc.stderr.setEncoding('utf8').on('data', (d: string) => (err += d))
-    proc.on('error', (e) => resolve({ code: 1, out, err: (err + '\n' + e.message).trim() }))
-    proc.on('close', (code) => resolve({ code: code ?? 1, out, err: err.trim() }))
-  })
+  const { done } = spawnCollect('gh', args, cwd)
+  return done.then((r) => ({ code: r.code ?? 1, out: r.out, err: r.err }))
 }
 
 /** `OWNER/REPO` from args, or `gh repo view` in the current clone. Any
