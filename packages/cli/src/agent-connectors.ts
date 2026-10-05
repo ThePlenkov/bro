@@ -437,73 +437,139 @@ const agentEnvPins = (spec: SpawnSpec, agentId: string, promptFile: string): [st
   ['BRO_PROMPT_FILE', promptFile],
 ]
 
+/** Run `f` at most once — the batched probes a fleetOccupancy scan
+ *  shares across registry entries (a per-entry subprocess under the
+ *  spawn lock would let accumulated dead entries stall every spawn). */
+const memo = <T>(f: () => T): (() => T) => {
+  let state: { v: T } | undefined
+  return () => (state ??= { v: f() }).v
+}
+
+/** The tmux occupancy input — one `list-sessions` for the whole scan,
+ *  not a `has-session` per entry (each probe is a spawnSync with a 10s
+ *  timeout under the spawn lock). `undefined` = inconclusive; a Set =
+ *  the live session names, possibly empty — the dead-server error is
+ *  proof every session is gone (same semantics tmux's list() applies). */
+function tmuxLiveSessions(env: AgentConnectorEnv): Set<string> | undefined {
+  const socket =
+    typeof env.agents['tmux']?.socket === 'string' ? env.agents['tmux'].socket : 'bro'
+  const ls = tmuxRun(socket, ['list-sessions', '-F', '#{session_name}'])
+  if (ls.code === 0) {
+    return new Set(ls.out.split('\n').filter((s) => s !== ''))
+  }
+  return TMUX_DEAD_ERR.test(ls.err) ? new Set() : undefined
+}
+
+/** tmux occupancy — a session absent from the live set (or with no
+ *  legal name) frees the slot; an inconclusive probe occupies — the
+ *  same honesty rule as the spawn dedup's 'unknown' verdict. */
+function tmuxOccupies(entry: AgentRegistryEntry, live: Set<string> | undefined): boolean {
+  const name = tmuxSessionName(entry)
+  return name !== undefined && (live === undefined || live.has(name))
+}
+
+/** gascity occupancy — `sessions` is the memoized session list
+ *  (undefined when the city can't answer → occupies); a session absent
+ *  from it frees the slot only when the supervisor is verifiably up
+ *  (same rule gascity's list() applies); `supervisor` is probed lazily
+ *  since only the missing-session case needs it. */
+function gcOccupies(
+  molStep: string,
+  entry: AgentRegistryEntry,
+  sessions: GcSession[] | undefined,
+  supervisor: () => boolean | undefined
+): boolean {
+  if (sessions === undefined) {
+    return true
+  }
+  const s = gcSessionFor(entry, molStep, sessions)
+  if (s === undefined) {
+    return supervisor() !== true
+  }
+  return gcState(s) === 'running' || gcState(s) === 'spawned'
+}
+
+/** One registry entry's occupancy verdict — an entry occupies until it
+ *  is proven dead; every unverifiable probe keeps the slot — a
+ *  maybe-live agent is a maybe-burning worker, and the cap exists to
+ *  not overshoot an invisible budget. */
+function entryOccupies(
+  dir: string,
+  home: string | null,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  probes: {
+    tmuxLive: () => Set<string> | undefined
+    gcSessions: () => GcSession[] | undefined
+    gcSupervisor: () => boolean | undefined
+  }
+): boolean {
+  switch (entry.backend) {
+    case 'native':
+      // nativeState also harvests recorded death and retires stale
+      // markers — the same side effects list() has on a dead entry
+      return nativeState(dir, home, molStep, entry) === 'running'
+    case 'tmux':
+      return tmuxOccupies(entry, probes.tmuxLive())
+    case 'gascity':
+      return gcOccupies(molStep, entry, probes.gcSessions(), probes.gcSupervisor)
+    default:
+      // a backend this build doesn't know — no probe exists. Recorded
+      // death frees the slot; anything else may still be a live worker
+      return entry.stopped !== true && entry.exitStatus === undefined
+  }
+}
+
 /** How many fleet slots a registry occupies — the cap counts ACROSS
  *  backends (the account's inference budget doesn't care which runtime
- *  burns it). An entry occupies until it is proven dead; every
- *  unverifiable probe keeps the slot — a maybe-live agent is a
- *  maybe-burning worker, and the cap exists to not overshoot an
- *  invisible budget. `gc sessions` resolves lazily: no gascity entries
- *  means no `gc session list` round-trip. */
+ *  burns it). Backend probes are memoized: N entries never pay N
+ *  subprocesses inside the spawn lock, and a backend with no entries
+ *  costs no round-trip at all. */
 export function fleetOccupancy(
   dir: string,
   home: string | null,
   registry: Record<string, AgentRegistryEntry>,
   env: AgentConnectorEnv
 ): number {
-  let gc: { sessions?: GcSession[]; err?: string } | undefined
-  const gcSessions = (city: string): { sessions?: GcSession[]; err?: string } =>
-    (gc ??= listGcSessions(city))
+  const probes = {
+    tmuxLive: memo(() => tmuxLiveSessions(env)),
+    gcSessions: memo(() => {
+      const city = gcConfigDir(dir, env)
+      return city === null ? undefined : listGcSessions(city).sessions
+    }),
+    gcSupervisor: memo(() => gcSupervisorRunning()),
+  }
   let occupied = 0
   for (const [molStep, entry] of Object.entries(registry)) {
-    switch (entry.backend) {
-      case 'native':
-        // nativeState also harvests recorded death and retires stale
-        // markers — the same side effects list() has on a dead entry
-        if (nativeState(dir, home, molStep, entry) === 'running') {
-          occupied++
-        }
-        break
-      case 'tmux': {
-        const socket =
-          typeof env.agents['tmux']?.socket === 'string' ? env.agents['tmux'].socket : 'bro'
-        const name = tmuxSessionName(entry)
-        // a dead session frees the slot; running AND inconclusive
-        // ('unknown') both occupy — same honesty rule as the spawn dedup
-        if (name !== undefined && tmuxProbe(socket, name).live !== 'dead') {
-          occupied++
-        }
-        break
-      }
-      case 'gascity': {
-        const city = gcConfigDir(dir, env)
-        const sessions = city === null ? undefined : gcSessions(city).sessions
-        if (sessions === undefined) {
-          occupied++ // city unverifiable — the session may still be live
-          break
-        }
-        const s = gcSessionFor(entry, molStep, sessions)
-        if (s === undefined) {
-          // absent from the listing — dead only when the supervisor can
-          // verify the fleet (same rule gascity's list() applies)
-          if (gcSupervisorRunning() !== true) {
-            occupied++
-          }
-          break
-        }
-        if (gcState(s) === 'running' || gcState(s) === 'spawned') {
-          occupied++
-        }
-        break
-      }
-      default:
-        // a backend this build doesn't know — no probe exists. Recorded
-        // death frees the slot; anything else may still be a live worker
-        if (entry.stopped !== true && entry.exitStatus === undefined) {
-          occupied++
-        }
+    if (entryOccupies(dir, home, molStep, entry, probes)) {
+      occupied++
     }
   }
   return occupied
+}
+
+/** Fleet admission under the spawn lock — refuse while OTHER live
+ *  entries fill the cap (a respawn's own dead entry holds no slot). The
+ *  count rides the same critical section as the registry write, so two
+ *  racing spawns can't both see headroom; a refusal names the cap and
+ *  the occupancy, never fails silently. `cap.max <= 0` disables. */
+function enforceFleetCap(
+  dir: string,
+  home: string | null,
+  registry: Record<string, AgentRegistryEntry>,
+  spec: SpawnSpec,
+  cap: { max: number; env: AgentConnectorEnv } | undefined
+): void {
+  if (cap === undefined || cap.max <= 0) {
+    return
+  }
+  const occupied = fleetOccupancy(dir, home, registry, cap.env)
+  if (occupied >= cap.max) {
+    throw new SpawnError(
+      `fleet cap reached — ${occupied}/${cap.max} agent slots occupied ` +
+        `(fleet.maxConcurrent in bro.config) — spawn of ${spec.molStep} refused`
+    )
+  }
 }
 
 /** The shared spawn prologue every built-in backend runs under the
@@ -576,19 +642,9 @@ function prepareSpawn(
       `${spec.molStep} is claimed by ${step?.assignee ?? '?'} — rebind only takes our own claim`
     )
   }
-  // fleet cap — the count rides the same critical section as the write,
-  // so two racing spawns can't both see headroom. A refusal names the
-  // cap and the occupancy, never fails silently — and lands before the
-  // registry write + claim so it leaves no half-spawned state
-  if (opts.cap !== undefined && opts.cap.max > 0) {
-    const occupied = fleetOccupancy(dir, home, registry, opts.cap.env)
-    if (occupied >= opts.cap.max) {
-      throw new SpawnError(
-        `fleet cap reached — ${occupied}/${opts.cap.max} agent slots occupied ` +
-          `(fleet.maxConcurrent in bro.config) — spawn of ${spec.molStep} refused`
-      )
-    }
-  }
+  // fleet admission — before the registry write + claim land, so a
+  // refusal leaves no half-spawned state
+  enforceFleetCap(dir, home, registry, spec, opts.cap)
   // a reused id must stay filename-safe — a tampered entry gets a fresh
   // mint, not a path escape into <home>/
   const agentId =
