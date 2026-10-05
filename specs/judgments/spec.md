@@ -143,7 +143,9 @@ off → shadow → (stats + replay prove it) → advisory → enforce
   several wires (direct api.typesafe.ai, or a gateway like orcarouter
   serving `/v1/systemone` for jev and `/v1/chat/completions` for chat
   models); the `models` map is the allowlist that pins which ids the
-  host may serve and on which wire.
+  host may serve and on which wire. A configured baseUrl always wins
+  over env — `TYPESAFE_BASE_URL` redirects the *default* host only,
+  never a provider the operator named.
 
 ## Design invariants
 

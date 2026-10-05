@@ -52,6 +52,15 @@ export function stripTrailingSlashes(s: string): string {
   return s.slice(0, end)
 }
 
+/** Host root → wire base: an api entry's baseUrl is the HOST, and
+ *  each wire mounts its versioned prefix — a baseUrl that already
+ *  carries one (`…/v1`, `…/v2beta`) keeps it, so the same host root
+ *  works for /v1/systemone and /v1/chat/completions alike. */
+export function apiVersionedBase(baseUrl: string): string {
+  const base = stripTrailingSlashes(baseUrl)
+  return /\/v\d+[a-z]*$/i.test(base) ? base : `${base}/v1`
+}
+
 /** Response body as a plain object — a scalar/null body reads as {}. */
 export const objOr = (v: unknown): Record<string, unknown> =>
   typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : {}

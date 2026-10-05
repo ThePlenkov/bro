@@ -15,7 +15,6 @@ import type {
 } from '@broject/core'
 import { acpClient } from './acp.ts'
 import { cliChat } from './cli.ts'
-import { stripTrailingSlashes } from './http.ts'
 import { openaiCompatChat } from './openai.ts'
 import { systemoneCall, type ProviderWireOpts } from './systemone.ts'
 
@@ -75,23 +74,11 @@ export function providerClient(
       // an undeclared id is a config error (the allowlist is the point)
       const { model, wire } = resolveApiModel(entry, opts.model)
       const target = { ...entry, model }
+      // each wire binding owns its own versioned mount — the host's
+      // baseUrl flows through unchanged
       return wire === 'systemone'
         ? { call: systemoneCall(`provider:${name}`, target, { ...opts, model, keyField }) }
-        : {
-            chat: openaiCompatChat(
-              {
-                ...target,
-                // the api entry's baseUrl is the host root; the openai
-                // wire mounts at /v1 (same convention systemone applies
-                // to its own endpoint internally) — unless the author
-                // already pointed baseUrl at the versioned path
-                baseUrl: stripTrailingSlashes(entry.baseUrl).endsWith('/v1')
-                  ? stripTrailingSlashes(entry.baseUrl)
-                  : `${stripTrailingSlashes(entry.baseUrl)}/v1`,
-              },
-              { ...opts, model, keyField }
-            ),
-          }
+        : { chat: openaiCompatChat(target, { ...opts, model, keyField }) }
     }
     case 'acp':
       // 'auto' grade — the binding picks call vs chat on the resolved

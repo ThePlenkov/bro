@@ -2,9 +2,12 @@
  * The `systemone` provider binding — TypeSafe's System One API
  * (spec: specs/bro-ribc.1.md, wire contract per
  * specs/sessions/bro-f4ot.2-judge.md). POST {baseUrl}/v1/systemone with
- * Bearer $<apiKeyEnv>; `baseUrl` defaults to the hosted API, env
- * TYPESAFE_BASE_URL overrides. Typed fidelity — the wire speaks
- * choice/score/noul natively; drift fails open (JudgeUnavailable).
+ * Bearer $<apiKeyEnv>; `baseUrl` defaults to the hosted API; the
+ * TYPESAFE_BASE_URL env is a dev redirect for the DEFAULT host only —
+ * a configured api host is never overridden by env (config is the
+ * source of truth for which provider a request lands on). Typed
+ * fidelity — the wire speaks choice/score/noul natively; drift fails
+ * open (JudgeUnavailable).
  *
  * `by` is the caller's provenance stamp — `provider:<name>` for a
  * registry entry, the bare alias for a synthesized legacy one.
@@ -14,6 +17,7 @@
 import { isEnvName, JudgeUnavailable } from '@broject/core'
 import type { DecideResult, ProviderEntry } from '@broject/core'
 import {
+  apiVersionedBase,
   mapUsage,
   objOr,
   postJson,
@@ -108,8 +112,15 @@ export function systemoneCall(
 ): ProviderCall {
   const keyField = opts.keyField ?? 'apiKeyEnv'
   const model = opts.model ?? entry.model
-  const base = process.env.TYPESAFE_BASE_URL ?? entry.baseUrl ?? DEFAULT_BASE_URL
-  const endpoint = `${stripTrailingSlashes(base)}/v1/systemone`
+  // env redirects the DEFAULT host only — a configured api host is the
+  // operator's choice and a stray TYPESAFE_BASE_URL must never reroute
+  // a router's traffic to TypeSafe (or vice versa)
+  const configured = entry.baseUrl ?? DEFAULT_BASE_URL
+  const base =
+    stripTrailingSlashes(configured) === stripTrailingSlashes(DEFAULT_BASE_URL)
+      ? (process.env.TYPESAFE_BASE_URL ?? configured)
+      : configured
+  const endpoint = `${apiVersionedBase(base)}/systemone`
   return async (state, questions, deadline): Promise<DecideResult> => {
     const key = apiKey(entry, keyField, deadline)
     const started = Date.now()

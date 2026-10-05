@@ -9,11 +9,11 @@
  */
 import { isEnvName, JudgeUnavailable } from '@broject/core'
 import {
+  apiVersionedBase,
   mapUsage,
   objOr,
   postJson,
   runKeyCommand,
-  stripTrailingSlashes,
   type HttpResult,
 } from './http.ts'
 import type { ProviderChat, ProviderChatResult } from './registry.ts'
@@ -84,7 +84,9 @@ export function openaiCompatChat(
 ): ProviderChat {
   const keyField = opts.keyField ?? 'apiKeyEnv'
   const model = opts.model ?? entry.model
-  const endpoint = `${stripTrailingSlashes(entry.baseUrl)}/chat/completions`
+  // the api entry's baseUrl is the HOST root — the openai wire mounts
+  // /v1 on it, unless the author already versioned the path
+  const endpoint = `${apiVersionedBase(entry.baseUrl)}/chat/completions`
   return async (prompt, deadline): Promise<ProviderChatResult> => {
     const res = await postJson(
       endpoint,

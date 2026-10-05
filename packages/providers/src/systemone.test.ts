@@ -162,7 +162,7 @@ describe('systemoneCall', () => {
       assert.equal(calls.length, 0)
     }))
 
-  test('absent baseUrl falls back to the hosted API; TYPESAFE_BASE_URL overrides both', () =>
+  test('absent baseUrl falls back to the hosted API; TYPESAFE_BASE_URL redirects the default host only — a configured api host wins over env', () =>
     withKey(async () => {
       const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
       const bare: ApiTarget = {
@@ -174,8 +174,13 @@ describe('systemoneCall', () => {
       const prev = process.env.TYPESAFE_BASE_URL
       process.env.TYPESAFE_BASE_URL = 'https://proxy.example/'
       try {
-        await systemoneCall('b', ENTRY, { fetch })('s', QUESTIONS, DEADLINE())
+        // default host: the env redirect applies
+        await systemoneCall('b', bare, { fetch })('s', QUESTIONS, DEADLINE())
         assert.equal(calls[1]!.url, 'https://proxy.example/v1/systemone')
+        // configured host: config is the source of truth — env must
+        // never reroute an api provider's traffic
+        await systemoneCall('b', ENTRY, { fetch })('s', QUESTIONS, DEADLINE())
+        assert.equal(calls[2]!.url, 'https://systemone.example/api/v1/systemone')
       } finally {
         if (prev === undefined) {
           delete process.env.TYPESAFE_BASE_URL
