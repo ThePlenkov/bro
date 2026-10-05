@@ -67,18 +67,19 @@ judge facade (packages/judge)
                answers stamped :prose — never the calibrated bucket
         ↓ named provider from the user-owned registry
 provider registry (packages/core/providers.ts + packages/providers/)
-  systemone    → typed, no spawn   (native wire contract)
+  api          → host + models allowlist; wire per model:
+                 systemone → typed, openai-compat → prose; no spawn
   acp          → auto: typed on systemone-family models, prose else
-  openai-compat→ prose (chat completions shape)
   cli          → prose (process execution)
 ```
 
 Rules that keep the layer honest:
 
 - **Consumers never name transports.** They name a provider from the
-  user's registry (`judge.provider`, `agents.*.provider`); the registry
-  resolves kind → wire client. Model pins live in config, never in
-  connector names (`systemone` is the protocol; `jev-*` is a model).
+  user's registry (`judge.provider`, `agents.*.provider`) plus a model
+  from that provider's allowlist (`judge.model`); the registry resolves
+  kind + model → wire client. Model pins live in config, never in
+  connector names (`systemone` is the wire; `jev-*` is a model).
 - **Provenance is mechanical.** Every answer is stamped `decidedBy`
   (`provider:<name>`, `:prose` flag for uncalibrated paths) and the
   DecideResult carries the served model id.
@@ -138,9 +139,11 @@ off → shadow → (stats + replay prove it) → advisory → enforce
 - Typed answers are validated against the asked questions:
   off-criteria choices, wrong answer types, out-of-range values, and
   prototype-polluting qids are contract drift → fail-open.
-- `systemone` baseUrl is operator-owned — the same wire contract can
-  front any System One-speaking endpoint (direct api.typesafe.ai or
-  a gateway passthrough like orcarouter's `/v1/systemone`).
+- An `api` entry's baseUrl is operator-owned — the same host can front
+  several wires (direct api.typesafe.ai, or a gateway like orcarouter
+  serving `/v1/systemone` for jev and `/v1/chat/completions` for chat
+  models); the `models` map is the allowlist that pins which ids the
+  host may serve and on which wire.
 
 ## Design invariants
 

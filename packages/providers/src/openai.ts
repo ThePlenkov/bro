@@ -8,7 +8,6 @@
  * contract.
  */
 import { isEnvName, JudgeUnavailable } from '@broject/core'
-import type { ProviderEntry } from '@broject/core'
 import {
   mapUsage,
   objOr,
@@ -18,9 +17,10 @@ import {
   type HttpResult,
 } from './http.ts'
 import type { ProviderChat, ProviderChatResult } from './registry.ts'
-import type { ProviderWireOpts } from './systemone.ts'
+import type { ApiTarget, ProviderWireOpts } from './systemone.ts'
 
-type OpenAiCompatEntry = Extract<ProviderEntry, { type: 'openai-compat' }>
+/** The openai-compat wire needs baseUrl — the api kind's host root. */
+type OpenAiCompatEntry = ApiTarget & { baseUrl: string }
 
 /** Auth headers from the configured env var — a non-NAME apiKeyEnv is
  *  a config bug (throws, never echoed); a missing var is fail-open,

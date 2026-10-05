@@ -36,7 +36,8 @@
   },
   "judge": {
     "mode": "shadow",
-    "provider": "typesafe",
+    "provider": "orcarouter",
+    "model": "typesafe/jev-1.13",
     "timeoutMs": 30000
   },
   "providers": {
@@ -45,11 +46,14 @@
       "command": "kilo acp",
       "model": "kilo/orcarouter/typesafe/jev-1.13"
     },
-    "typesafe": {
-      "type": "systemone",
+    "orcarouter": {
+      "type": "api",
       "baseUrl": "https://api.orcarouter.ai",
-      "model": "typesafe/jev-1.13",
-      "apiKeyCommand": "secret-tool lookup service typesafe.ai"
+      "apiKeyCommand": "secret-tool lookup service typesafe.ai",
+      "models": {
+        "typesafe/jev-1.13": "systemone",
+        "typesafe/jev-latest": "systemone"
+      }
     }
   }
 }

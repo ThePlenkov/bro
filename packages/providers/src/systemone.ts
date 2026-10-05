@@ -25,10 +25,19 @@ import {
 import type { AcpSeam, ProviderCall } from './registry.ts'
 import { mapTypedAnswers } from './typed.ts'
 
-type SystemoneEntry = Extract<ProviderEntry, { type: 'systemone' }>
+/** A resolved api-model on the systemone wire — the registry hands the
+ *  binding host + auth + the picked model; `type:'api'` itself never
+ *  reaches here (the api entry is a host, the wire is per-model). */
+export interface ApiTarget {
+  baseUrl?: string
+  apiKeyEnv?: string
+  apiKeyCommand?: string
+  model: string
+}
 
 /** The hosted API default — the entry's baseUrl is optional for this
- *  kind (PROVIDER_REGISTRY), so the binding owns the fallback. */
+ *  wire (the api kind requires baseUrl, but the legacy synthesized
+ *  path may omit it), so the binding owns the fallback. */
 const DEFAULT_BASE_URL = 'https://api.typesafe.ai'
 
 export interface ProviderWireOpts {
@@ -51,7 +60,7 @@ export interface ProviderWireOpts {
  *  apiKeyEnv; a non-NAME apiKeyEnv is a config bug (throws, never
  *  echoed); a missing var is fail-open, and every message names the
  *  config FIELD, never the value. */
-function apiKey(entry: SystemoneEntry, keyField: string, deadline: number): string {
+function apiKey(entry: ApiTarget, keyField: string, deadline: number): string {
   if (entry.apiKeyCommand !== undefined) {
     return runKeyCommand(entry.apiKeyCommand, keyField, deadline)
   }
@@ -94,7 +103,7 @@ function throwForStatus(res: HttpResult): never {
  *  the shared deadline. */
 export function systemoneCall(
   by: string,
-  entry: SystemoneEntry,
+  entry: ApiTarget,
   opts: ProviderWireOpts = {}
 ): ProviderCall {
   const keyField = opts.keyField ?? 'apiKeyEnv'

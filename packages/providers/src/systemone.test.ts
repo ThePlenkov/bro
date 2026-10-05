@@ -1,12 +1,12 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { JudgeUnavailable } from '@broject/core'
-import type { JudgeQuestion, ProviderEntry } from '@broject/core'
+import type { JudgeQuestion } from '@broject/core'
+import type { ApiTarget } from './systemone.ts'
 import { systemoneCall } from './systemone.ts'
 import { fakeFetch } from './testkit.ts'
 
-const ENTRY: Extract<ProviderEntry, { type: 'systemone' }> = {
-  type: 'systemone',
+const ENTRY: ApiTarget = {
   baseUrl: 'https://systemone.example/api',
   apiKeyEnv: 'SYSTEMONE_TEST_KEY',
   model: 'jev-test',
@@ -111,7 +111,7 @@ describe('systemoneCall', () => {
   test('apiKeyCommand runs the lookup and wins over apiKeyEnv', () =>
     withKey(async () => {
       const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
-      const entry: Extract<ProviderEntry, { type: 'systemone' }> = {
+      const entry: ApiTarget = {
         ...ENTRY,
         apiKeyEnv: 'SYSTEMONE_TEST_KEY_UNSET',
         apiKeyCommand: `printf 'ts_cmd_key'`,
@@ -165,8 +165,7 @@ describe('systemoneCall', () => {
   test('absent baseUrl falls back to the hosted API; TYPESAFE_BASE_URL overrides both', () =>
     withKey(async () => {
       const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
-      const bare: Extract<ProviderEntry, { type: 'systemone' }> = {
-        type: 'systemone',
+      const bare: ApiTarget = {
         apiKeyEnv: 'SYSTEMONE_TEST_KEY',
         model: 'm',
       }

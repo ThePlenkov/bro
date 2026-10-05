@@ -43,9 +43,13 @@ once makes it a judge backend *and* a fleet runtime in the same edit.
 - **provider** — a named entry in `bro.config.json` `providers`:
   `{ type, …connection }`. Names are user-chosen (`'typesafe'`,
   `'kilo-cli'`, `'orca'`, `'local'`); a name carries no semantics.
-- **provider kind** — the `type` discriminant: `systemone`,
-  `openai-compat`, `acp`, `cli`. The kind fixes the wire protocol, the
-  SDK binding, and which consumer surfaces the entry can serve.
+- **provider kind** — the `type` discriminant: `api`, `acp`, `cli`.
+  The kind fixes the connection shape and which consumer surfaces the
+  entry can serve — not the wire protocol.
+- **wire** — the request/response protocol a *model* is served over:
+  `systemone` (typed judgments) or `openai-compat` (chat-completions
+  prose). Wire lives on the model, not the provider — one API host
+  legitimately serves models over different protocols.
 - **call surface** — request/answer inference: typed judgments
   (`decide`) or prose generation. Serves the judge.
 - **spawn surface** — a session/process a worker lives inside. Serves
@@ -62,18 +66,17 @@ because the consumer reference is `provider: '<name>'`:
 ```jsonc
 {
   "providers": {
-    "typesafe": { "type": "systemone",
-      "baseUrl": "https://api.typesafe.ai",
-      "apiKeyEnv": "TYPESAFE_API_KEY",
-      "model": "jev-1.13.0" },
-    "kilo-cli": { "type": "acp",
+    "orcarouter": { "type": "api",
+      "baseUrl": "https://api.orcarouter.ai",
+      "apiKeyCommand": "secret-tool lookup service typesafe.ai",
+      "models": {
+        "typesafe/jev-1.13": "systemone",
+        "acme/cheap-chat":   "openai-compat"
+      } },
+    "kilo-cli":   { "type": "acp",
       "command": "kilo --acp",
       "model": "typesafe/jev-1.13" },
-    "orca":     { "type": "openai-compat",
-      "baseUrl": "https://orca.example/v1",
-      "apiKeyEnv": "ORCA_API_KEY",
-      "model": "qwen3-coder" },
-    "local":    { "type": "cli", "command": "devin -p", "model": "devin-1" }
+    "local":      { "type": "cli", "command": "devin -p", "model": "devin-1" }
   }
 }
 ```
@@ -82,11 +85,12 @@ Each kind's entry:
 
 ```ts
 type ProviderEntry =
-  | { type: 'systemone';     baseUrl?: string; apiKeyEnv: string;  model: string }
-  | { type: 'openai-compat'; baseUrl: string;  apiKeyEnv?: string; model: string }
-  | { type: 'acp';           command: string;  profile?: string;
-                             model?: string;   apiKeyEnv?: string }
-  | { type: 'cli';           command: string;  model?: string }
+  | { type: 'api'; baseUrl: string; apiKeyEnv?: string;
+      apiKeyCommand?: string; model?: string;
+      models: Record<string, 'systemone' | 'openai-compat'> }
+  | { type: 'acp'; command: string; profile?: string;
+      model?: string; apiKeyEnv?: string; autoApprove?: boolean }
+  | { type: 'cli'; command: string; model?: string }
 ```
 
 Rules:
@@ -100,44 +104,46 @@ Rules:
 - **`type` is validated against known kinds**; an unknown type drops
   the entry with a warning (same policy as `connectors` section
   normalization) — and a consumer referencing it errors at use.
-- **Secrets ride env var names only** — `apiKeyEnv` names the variable
-  (SCREAMING_SNAKE via `isEnvName`), config never holds a value. Same
-  rule as `judge.apiKeyEnv` today.
+  Retired kinds (`systemone`, `openai-compat` as a `type`) fail the
+  config with a migration line — they never silently parse.
+- **Secrets ride env var names or commands** — `apiKeyEnv` names the
+  variable (SCREAMING_SNAKE via `isEnvName`); `apiKeyCommand` names a
+  secret-lookup command whose stdout is the key. Config never holds a
+  value; a command smuggling one inline is rejected.
+- **`models` is the allowlist** — an `api` entry serves only the model
+  ids it declares, each mapped to its wire. A model value of a bare
+  wire string, `{ "wire": … }`, or `null` (wire inferred: jev-family →
+  `systemone`, else `openai-compat`) all parse. Asking for an
+  undeclared model is a config error naming the allowlist — a router
+  can never reroute a request to a model the config didn't admit.
 - **`model` pins the default**; consumers may override per-call
-  (fleet per-profile) — the override lands in provenance
-  (`DecideResult.model`, the agent registry entry) so a verdict or a
-  worker is always attributable to the model that ran it.
+  (`judge.model`, fleet per-profile) — the override must be in
+  `models`, and it lands in provenance (`DecideResult.model`, the
+  agent registry entry) so a verdict or a worker is always
+  attributable to the model that ran it.
 
 ## Provider kinds
 
-### `systemone` — typed decisions, hosted
+### `api` — one host serving models over model-level wires
 
-TypeSafe System One (`POST {baseUrl}/v1/systemone`, Bearer
-`$apiKeyEnv`; wire contract pinned in
-`specs/sessions/bro-f4ot.2-judge.md`). **Call surface only** — there is
-no session to spawn into. Serves judge at full typed fidelity:
-choice/score/noul + probabilities + confidence.
+An HTTP API host (`baseUrl` + `apiKeyEnv`/`apiKeyCommand`) serving a
+declared set of models — each on its own wire protocol. This models
+reality: a router like orcarouter is *one* provider, and the same
+host serves `typesafe/jev-*` over `POST {baseUrl}/v1/systemone` while
+chat models go over `POST {baseUrl}/v1/chat/completions`.
+**Call surface only** — there is no session to spawn into.
 
-SDK: `@typesafe-ai/sdk` 0.6.x (verified npm 2026-10-05 — 0.6.0, zero
-deps, `TypeSafeClient().systemOne({state, questions})` with
-`choice`/`score`/`noul` builders). The raw-fetch systemone client that
-already exists in `packages/judge/src/systemone.ts` stays valid — the
-SDK is the pinned upgrade path, not a requirement of this spec.
+The resolved model's wire selects the binding:
 
-### `openai-compat` — prose models, chat-completions wire
-
-Any OpenAI-compatible endpoint (`POST {baseUrl}/chat/completions`).
-**Call surface only**, prose-grade: answers are prompt-and-parsed, so
-the judge adapter applies llm-judge semantics and marks
-`decidedBy` honestly — these answers never masquerade as calibrated
-typed judgments.
-
-SDK: `@ai-sdk/openai-compatible` (verified npm 2026-10-05 — 3.0.62) or
-raw fetch; the umbrella `ai` package only when a real consumer needs
-its chat-LLM features. The prompt-and-parse machinery from
-`packages/judge/src/llm-judge.ts` moves under the provider adapter —
-`llm-judge` stops being a connector name and becomes what an
-`openai-compat` provider *is* when a judge consumes it.
+- `systemone` wire — typed decisions (`POST {baseUrl}/v1/systemone`,
+  Bearer; wire contract pinned in
+  `specs/sessions/bro-f4ot.2-judge.md`). Full fidelity:
+  choice/score/noul + probabilities + confidence. SDK:
+  `@typesafe-ai/sdk` 0.6.x or the raw-fetch client in
+  `packages/judge/src/systemone.ts`.
+- `openai-compat` wire — prose-grade chat completions. Answers are
+  prompt-and-parsed under llm-judge semantics and `decidedBy` is
+  marked honestly — never masquerading as calibrated typed judgments.
 
 ### `acp` — an agent process speaking ACP
 
@@ -172,16 +178,16 @@ backend, calibrated no better than llm-judge and marked accordingly.
 
 ### Capability matrix
 
-| kind           | call (judge)                    | spawn (fleet) |
-| -------------- | ------------------------------- | ------------- |
-| `systemone`    | typed (native)                  | —             |
-| `openai-compat`| prose (llm-judge semantics)     | —             |
-| `acp`          | typed if jev-model, else prose  | yes           |
-| `cli`          | prose (stdout parse)            | yes           |
+| kind   | call (judge)                             | spawn (fleet) |
+| ------ | ---------------------------------------- | ------------- |
+| `api`  | by model wire — `systemone` → typed,     | —             |
+|        | `openai-compat` → prose                  |               |
+| `acp`  | typed if jev-model, else prose           | yes           |
+| `cli`  | prose (stdout parse)                     | yes           |
 
 A consumer asking a provider for a surface its kind doesn't have gets
 a startup error naming kind + surface — `providers.local.type: 'cli'`
-serving `judge.provider` is legal-but-prose; asking `typesafe` to
+serving `judge.provider` is legal-but-prose; asking an `api` host to
 spawn a fleet worker is a config error, not a runtime surprise.
 
 ## Consumer contracts
@@ -205,12 +211,16 @@ questions) → DecideResult`. What the provider changes is *who answers*:
 - `judge.model`, when set, overrides the entry's `model` for decisions
   only — pinning for calibration stays a per-consumer concern.
 
-**Compatibility** — existing configs keep working one release at a
-warning: `judge.baseUrl`/`judge.model`/`judge.apiKeyEnv` synthesize an
-anonymous `systemone` entry; `judge.llm` synthesizes an anonymous
-`openai-compat` entry; `connectors.judge: 'systemone'|'llm-judge'`
-resolve to those. A deprecation line prints once per command. New
-configs should only ever write `providers` + `judge.provider`.
+**Compatibility** — `judge.baseUrl`/`judge.model`/`judge.apiKeyEnv`
+synthesize an anonymous single-model `api` entry on the `systemone`
+wire; `judge.llm` synthesizes one on `openai-compat`;
+`connectors.judge: 'systemone'|'llm-judge'` resolve to those. A
+deprecation line prints once per command. Provider *entries* get no
+such grace — `type: 'systemone'` or `type: 'openai-compat'` in
+`providers` is a hard config error with the migration hint; the entry
+shape changed semantics (host + model allowlist), so silent parsing
+would hide a real misconfiguration. New configs only ever write
+`providers` + `judge.provider`/`judge.model`.
 
 ### Fleet — provider+model per profile
 
@@ -234,8 +244,8 @@ needs; ACP-mode spawn mechanics are its child spec, bro-5hx1.1).
   in the `AgentRegistryEntry` — provenance, so `bro fleet` can show a
   heterogeneous fleet truthfully and budget accounting can split cost
   by model.
-- A provider that can't spawn (`systemone`, `openai-compat`) named on
-  an agents config errors at `agents up`, not at list.
+- A provider that can't spawn (`api`) named on an agents config
+  errors at `agents up`, not at list.
 
 ## Where it lives
 
@@ -280,9 +290,14 @@ an entry.
 - **Supersession, not duplication.** This replaces bro-4goa's shape:
   `acp` is a provider *type* consumed by judge and fleet alike — not a
   third judge connector. `llm-judge` dissolves into the
-  `openai-compat` kind's judge adapter; `systemone` the connector
-  becomes the `systemone` kind's adapter. Connector names survive only
+  `openai-compat` wire's judge adapter; `systemone` the connector
+  becomes the `systemone` wire's adapter. Connector names survive only
   as compatibility aliases.
+- **Provider ≠ protocol.** `systemone` and `openai-compat` are wires a
+  model is served over, not provider kinds — a host is declared once
+  and each served model picks its wire. The union of kinds is closed
+  at three (`api`, `acp`, `cli`); a fourth kind is a spec discussion,
+  not a PR.
 
 ## Milestones
 
@@ -301,10 +316,11 @@ an entry.
 
 ## Risks named up front
 
-- **Kind proliferation.** The union is closed at four for a reason —
-  the fifth kind is a spec discussion, not a PR. Kinds exist for
-  *protocol* differences, not vendor differences (two OpenAI-compat
-  hosts are two entries, one kind).
+- **Kind proliferation.** The union is closed at three for a reason —
+  the fourth kind is a spec discussion, not a PR. Kinds exist for
+  *connection shape* differences (HTTP host vs. spawned process); wire
+  protocol differences inside an HTTP host are model properties, not
+  new kinds.
 - **ACP drift.** The SDK is v1-stable with a draft v2 beside it; the
   provider pins v1 and the bead re-verifies at implementation time —
   a spec that hardcodes an experimental import rots on arrival.

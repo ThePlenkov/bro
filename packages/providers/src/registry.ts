@@ -7,6 +7,7 @@
  * absent, and an entry whose kind has no binding at all throws —
  * naming provider + kind, never silently falling through.
  */
+import { resolveApiModel } from '@broject/core'
 import type {
   DecideResult,
   JudgeQuestion,
@@ -14,6 +15,7 @@ import type {
 } from '@broject/core'
 import { acpClient } from './acp.ts'
 import { cliChat } from './cli.ts'
+import { stripTrailingSlashes } from './http.ts'
 import { openaiCompatChat } from './openai.ts'
 import { systemoneCall, type ProviderWireOpts } from './systemone.ts'
 
@@ -68,10 +70,29 @@ export function providerClient(
 ): ProviderClient {
   const keyField = opts.keyField ?? `providers.${name}.apiKeyEnv`
   switch (entry.type) {
-    case 'systemone':
-      return { call: systemoneCall(`provider:${name}`, entry, { ...opts, keyField }) }
-    case 'openai-compat':
-      return { chat: openaiCompatChat(entry, { ...opts, keyField }) }
+    case 'api': {
+      // one host, per-model wire — resolve the served model first;
+      // an undeclared id is a config error (the allowlist is the point)
+      const { model, wire } = resolveApiModel(entry, opts.model)
+      const target = { ...entry, model }
+      return wire === 'systemone'
+        ? { call: systemoneCall(`provider:${name}`, target, { ...opts, model, keyField }) }
+        : {
+            chat: openaiCompatChat(
+              {
+                ...target,
+                // the api entry's baseUrl is the host root; the openai
+                // wire mounts at /v1 (same convention systemone applies
+                // to its own endpoint internally) — unless the author
+                // already pointed baseUrl at the versioned path
+                baseUrl: stripTrailingSlashes(entry.baseUrl).endsWith('/v1')
+                  ? stripTrailingSlashes(entry.baseUrl)
+                  : `${stripTrailingSlashes(entry.baseUrl)}/v1`,
+              },
+              { ...opts, model, keyField }
+            ),
+          }
+    }
     case 'acp':
       // 'auto' grade — the binding picks call vs chat on the resolved
       // model (systemone-family → typed, else prose)

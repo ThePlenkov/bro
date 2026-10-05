@@ -1,12 +1,10 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { JudgeUnavailable } from '@broject/core'
-import type { ProviderEntry } from '@broject/core'
 import { openaiCompatChat } from './openai.ts'
 import { fakeFetch } from './testkit.ts'
 
-const ENTRY: Extract<ProviderEntry, { type: 'openai-compat' }> = {
-  type: 'openai-compat',
+const ENTRY = {
   baseUrl: 'https://orca.example/v1/',
   model: 'qwen3-coder',
   apiKeyEnv: 'ORCA_TEST_KEY',
@@ -63,8 +61,7 @@ describe('openaiCompatChat', () => {
     }))
 
   test('no apiKeyEnv means no auth header — some endpoints are open', async () => {
-    const open: Extract<ProviderEntry, { type: 'openai-compat' }> = {
-      type: 'openai-compat',
+    const open = {
       baseUrl: 'http://localhost:8080/v1',
       model: 'm',
     }

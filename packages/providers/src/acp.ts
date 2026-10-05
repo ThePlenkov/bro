@@ -30,7 +30,7 @@ import type {
   SendRequestOptions,
   SessionConfigOption,
 } from '@agentclientprotocol/sdk'
-import { JudgeUnavailable } from '@broject/core'
+import { isSystemoneFamily, JudgeUnavailable } from '@broject/core'
 import type {
   DecideResult,
   JudgeQuestion,
@@ -56,14 +56,9 @@ class AcpConfigError extends Error {
   override name = 'AcpConfigError'
 }
 
-/** A systemone-family model id — `typesafe/jev-<version|latest>`,
- *  possibly router-prefixed (`kilo/orcarouter/typesafe/jev-1.13`), or a
- *  bare `jev-*` pin. The version anchor is deliberate: `jev-router` is
- *  a router PRODUCT pointing at arbitrary upstreams, not a jev model —
- *  classifying it family would let a config silently spend on it. */
-export const isSystemoneFamily = (model: string | undefined): boolean =>
-  model !== undefined &&
-  /(?:^|\/)typesafe\/jev-(?:\d|latest)|^jev-(?:\d|latest)/.test(model)
+// the family test lives in core (the api kind's parse-time wire
+// inference consumes it) — re-exported so acp importers keep working
+export { isSystemoneFamily } from '@broject/core'
 
 /** JSON-RPC request-cancelled — the code both ends use for an aborted
  *  request. A cancel is availability (deadline, transport), never the

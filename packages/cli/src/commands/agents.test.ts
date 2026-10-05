@@ -367,7 +367,12 @@ describe('bro agents up — provider resolution', () => {
         agents: { native: { command: 'node {promptFile}' } },
         providers: {
           local: { type: 'cli', command: 'node {promptFile}' },
-          typesafe: { type: 'systemone', apiKeyEnv: 'K', model: 'jev' },
+          typesafe: {
+   type: 'api',
+   baseUrl: 'https://api.typesafe.ai',
+   apiKeyEnv: 'K',
+   models: { ['jev']: 'systemone' },
+ },
         },
         fleet: {
           profiles: {
@@ -437,7 +442,7 @@ describe('bro agents up — provider resolution', () => {
       assert.match(badProfile.err.join('\n'), /fleet\.profiles\.nope is not configured/)
       const wrongKind = await agents(args(['--provider', 'typesafe']))
       assert.equal(wrongKind.code, 1)
-      assert.match(wrongKind.err.join('\n'), /type 'systemone'.*no spawn surface/)
+      assert.match(wrongKind.err.join('\n'), /type 'api'.*no spawn surface/)
       // nothing claimed or spawned through any of the refusals
       assert.equal(readAgentRegistry(fx.main)['fx-1'], undefined)
     } finally {
