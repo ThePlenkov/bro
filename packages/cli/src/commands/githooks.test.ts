@@ -4,7 +4,15 @@
  *  ancestor verdict is injected — a test process can't shape it. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -12,12 +20,13 @@ import {
   BRO_HOOK_MARK,
   commitTrailers,
   envProvenance,
+  gitHooksDir,
   hookShim,
   installCommitHook,
   liveSessionClaims,
   uninstallCommitHook,
 } from './githooks.ts'
-import { initRepo, inside } from './testrepo.ts'
+import { git, initRepo, inside } from './testrepo.ts'
 
 describe('envProvenance', () => {
   test('BRO_* pins map straight to trailers', () => {
@@ -207,6 +216,13 @@ describe('hookShim', () => {
     assert.match(shim, /@broject\/bro@1\.2\.3/)
     assert.ok(shim.includes(BRO_HOOK_MARK))
   })
+
+  test("a chained hook's nonzero exit propagates — its veto survives chaining", () => {
+    const shim = hookShim('1.2.3')
+    assert.match(shim, /"\$chain" "\$@" \|\| exit \$\?/)
+    // bro's own half still fails open — only the chain keeps its veto
+    assert.match(shim, /bro hooks prepare-commit-msg "\$@" \|\| true/)
+  })
 })
 
 describe('install/uninstall', () => {
@@ -265,6 +281,37 @@ describe('install/uninstall', () => {
   test('non-git dir → error, nothing written', () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-githooks-'))
     assert.equal(installCommitHook(dir, '9.9.9').state, 'error')
+  })
+
+  test('a relative core.hooksPath resolves against the worktree root, not the install cwd', () => {
+    const { root, main } = initRepo('bro-githooks-')
+    inside(main, root, () => {
+      git(['config', 'core.hooksPath', '.githooks'], main)
+      mkdirSync(join(main, 'sub', 'deep'), { recursive: true })
+      assert.equal(gitHooksDir(join(main, 'sub', 'deep')), join(main, '.githooks'))
+      // and installing from there lands the hook where git runs it
+      const r = installCommitHook(join(main, 'sub', 'deep'), '9.9.9')
+      assert.equal(r.state, 'installed')
+      assert.equal(readFileSync(join(main, '.githooks', 'prepare-commit-msg'), 'utf8').includes(BRO_HOOK_MARK), true)
+    })
+  })
+
+  test('a failed chain-install leaves the original hook in place', () => {
+    const { root, main } = initRepo('bro-githooks-')
+    inside(main, root, () => {
+      const hp = hookPath(main)
+      writeFileSync(hp, '#!/bin/sh\nexit 0\n')
+      // read-only hooks dir: the rename can't complete — and nothing may
+      // strand the user's hook as .local-only
+      chmodSync(join(main, '.git', 'hooks'), 0o555)
+      try {
+        const r = installCommitHook(main, '9.9.9')
+        assert.equal(r.state, 'error')
+        assert.equal(readFileSync(hp, 'utf8'), '#!/bin/sh\nexit 0\n')
+      } finally {
+        chmodSync(join(main, '.git', 'hooks'), 0o755)
+      }
+    })
   })
 })
 

@@ -873,6 +873,18 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     console.error(`bro hooks ${event}: ${r.state} ${r.path}`)
     return
   }
+  // prepare-commit-msg is a git-hook event (argv, not a JSON payload) —
+  // same no-stdin rule as the operator commands, and same pre-gate
+  // placement: the installed shim IS the opt-in, so gating on
+  // .beads/bro.config would silently deaden a hook the repo installed
+  if (event === 'prepare-commit-msg') {
+    try {
+      emitCommitTrailers(argv.slice(1))
+    } catch {
+      // fail-open — provenance must never block a commit
+    }
+    return
+  }
   const root = process.env.DEVIN_PROJECT_DIR ?? process.cwd()
   if (!event || !broEnabled(root)) {
     return
@@ -885,16 +897,6 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     } catch {
       return
     }
-  }
-  // git-hook events carry argv, not a JSON payload — dispatch them before
-  // the stdin read for the same tty reason as install/uninstall above
-  if (event === 'prepare-commit-msg') {
-    try {
-      emitCommitTrailers(argv.slice(1))
-    } catch {
-      // fail-open — provenance must never block a commit
-    }
-    return
   }
   const input = readInput()
   try {

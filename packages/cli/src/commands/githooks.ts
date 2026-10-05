@@ -364,13 +364,17 @@ export const BRO_HOOK_MARK = '# bro: prepare-commit-msg — commit provenance'
 const LOCAL_HOOK = 'prepare-commit-msg.local'
 const HOOK_NAME = 'prepare-commit-msg'
 
-/** The shim: a pre-existing hook (renamed .local) runs first, then
- *  bro — PATH first, npx-pinned fallback baked at install time. */
+/** The shim: a pre-existing hook (renamed .local) runs first and keeps
+ *  its veto — a nonzero exit propagates, aborting the commit the way
+ *  the un-chained hook would have — then bro adds its trailers
+ *  (fail-open): PATH first, npx-pinned fallback baked at install time. */
 export function hookShim(version: string): string {
   return `#!/bin/sh
 ${BRO_HOOK_MARK} — https://github.com/theplenkov/bro
 chain="$(dirname "$0")/${LOCAL_HOOK}"
-[ -x "$chain" ] && "$chain" "$@" || true
+if [ -x "$chain" ]; then
+  "$chain" "$@" || exit $?
+fi
 if command -v bro >/dev/null 2>&1; then
   bro hooks prepare-commit-msg "$@" || true
 elif command -v npx >/dev/null 2>&1; then
@@ -382,12 +386,22 @@ exit 0
 
 /** Directory prepare-commit-msg lands in: `core.hooksPath` when the
  *  repo overrode it, else `<git-common>/hooks` — shared by every
- *  linked worktree, so one install covers `bro work enter` siblings. */
+ *  linked worktree, so one install covers `bro work enter` siblings.
+ *  A RELATIVE hooksPath is resolved against the worktree root (where
+ *  git runs the hook), not cwd — installing from a repo subdirectory
+ *  must land the same hook. */
 export function gitHooksDir(cwd: string): string | null {
   const hp = gitTry(['-C', cwd, 'config', '--get', 'core.hooksPath'])
   if (hp.code === 0 && hp.out.trim() !== '') {
     const p = hp.out.trim()
-    return p.startsWith('/') ? p : resolve(cwd, p)
+    if (p.startsWith('/')) {
+      return p
+    }
+    const top = gitTry(['-C', cwd, 'rev-parse', '--show-toplevel'])
+    if (top.code !== 0 || top.out.trim() === '') {
+      return null
+    }
+    return resolve(top.out.trim(), p)
   }
   const common = gitTry(['-C', cwd, 'rev-parse', '--git-common-dir'])
   if (common.code !== 0 || common.out.trim() === '') {
@@ -436,8 +450,15 @@ export function installCommitHook(cwd: string, version: string): InstallResult {
         }
       }
       renameSync(hook, local)
-      writeFileSync(hook, hookShim(version))
-      chmodSync(hook, 0o755)
+      try {
+        writeFileSync(hook, hookShim(version))
+        chmodSync(hook, 0o755)
+      } catch (e) {
+        // restore — a failed shim write must not strand the user's hook
+        // as .local-only, where git would never run it again
+        renameSync(local, hook)
+        throw e
+      }
       return { state: 'chained', path: hook }
     }
     mkdirSync(dir, { recursive: true })

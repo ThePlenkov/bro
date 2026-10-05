@@ -402,8 +402,8 @@ describe('hooks e2e — commit provenance (prepare-commit-msg)', () => {
     })
   })
 
-  test('a commit outside a bro-enabled repo lands nothing — fail-open', () => {
-    const { root, main } = initRepo('bro-githooks-bare-') // no bro.config.json
+  test('a config-less repo still tags — the installed shim is the opt-in, not broEnabled', () => {
+    const { root, main } = initRepo('bro-githooks-bare-') // no bro.config.json/.beads
     inside(main, root, () => {
       writeFileSync(join(main, 'm.txt'), 'feat: x\n')
       const r = runCli(['hooks', 'prepare-commit-msg', join(main, 'm.txt')], {
@@ -411,7 +411,7 @@ describe('hooks e2e — commit provenance (prepare-commit-msg)', () => {
         env: { AI_AGENT: 'devin_1' },
       })
       assert.equal(r.code, 0)
-      assert.equal(readFileSync(join(main, 'm.txt'), 'utf8'), 'feat: x\n')
+      assert.match(readFileSync(join(main, 'm.txt'), 'utf8'), /^Agent: devin$/m)
     })
   })
 })

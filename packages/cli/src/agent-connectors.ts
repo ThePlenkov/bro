@@ -438,12 +438,16 @@ const AGENT_PIN_KEYS = new Set([
  *  artifact prepareSpawn writes. BRO_AGENT/BRO_SESSION_ID/BRO_MOL_ID
  *  are the commit-provenance trailers (bro-fzot): the agent cli name
  *  (command's first token, like gcProviderName reads it), the spawn's
- *  stable agentId as session, and the step's molecule parent. */
+ *  stable agentId as session, and the step's molecule parent — `mol`
+ *  is resolved by the caller BEFORE the registry lock; a bd show
+ *  subprocess inside the critical section would let a slow beads
+ *  store stall every spawn. */
 const agentEnvPins = (
   spec: SpawnSpec,
   agentId: string,
   promptFile: string,
-  agentCli?: string
+  agentCli?: string,
+  mol?: string
 ): [string, string][] => {
   const pins: [string, string][] = [
     ['BEADS_DIR', spec.beadsDir],
@@ -455,7 +459,6 @@ const agentEnvPins = (
   if (agentCli !== undefined && agentCli !== '') {
     pins.push(['BRO_AGENT', agentCli])
   }
-  const mol = stepParent(spec.beadsDir, spec.molStep)
   if (mol !== undefined) {
     pins.push(['BRO_MOL_ID', mol])
   }
@@ -983,6 +986,9 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       // check between our read and our write and double-spawn (TOCTOU).
       // Everything inside is synchronous — the bd subprocesses are
       // spawnSync — so the hold is milliseconds in the common case.
+      // stepParent's bd show runs OUTSIDE it for the same reason the
+      // fleet memo exists: a slow beads store must not hold the lock.
+      const mol = stepParent(spec.beadsDir, spec.molStep)
       return withAgentRegistryLock(dir, () => {
         const { agentId, promptFile, log, exitFile } = prepareSpawn(dir, home, 'native', spec, {
           isLive: (e) => nativeState(dir, home, spec.molStep, e) === 'running',
@@ -1004,7 +1010,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 // identity pins last — spec.env must never redirect the
                 // claim store or re-badge the worker as another bead/agent
                 ...Object.fromEntries(
-                  agentEnvPins(spec, agentId, promptFile, commandCliName(command))
+                  agentEnvPins(spec, agentId, promptFile, commandCliName(command), mol)
                 ),
               },
               stdio: ['ignore', fd, fd],
@@ -1284,7 +1290,9 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         throw new SpawnError(`tmux unavailable — ${ver.missing ? 'not on PATH' : ver.err}`, 'unavailable')
       }
       // same critical section as native: dedup → claim → session →
-      // pid-patch under the registry lock, all synchronous shell-outs
+      // pid-patch under the registry lock, all synchronous shell-outs;
+      // the molecule pin's bd show resolves before the lock is taken
+      const mol = stepParent(spec.beadsDir, spec.molStep)
       return withAgentRegistryLock(dir, () => {
         // the session name derives from the agentId prepareSpawn
         // resolves — entry callback, not a precomputed name, because a
@@ -1331,7 +1339,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           .map(([k, v]) => `export ${k}=${shQuote(v)}`)
           .join('\n')
         writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
-        const envArgs = agentEnvPins(spec, agentId, promptFile, commandCliName(command)).flatMap(
+        const envArgs = agentEnvPins(spec, agentId, promptFile, commandCliName(command), mol).flatMap(
           ([k, v]) => ['-e', `${k}=${v}`]
         )
         // the pane sources the ambient env and drops the file, then runs
@@ -1719,7 +1727,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
    *  dir comes from its agent's work_dir — so each step gets its own
    *  agent named after the molStep, pinned to spec.repoRoot. Written on
    *  every spawn; gc reads config per command. */
-  const writeStepAgent = (spec: SpawnSpec, city: string, agentId: string, promptFile: string): void => {
+  const writeStepAgent = (spec: SpawnSpec, city: string, agentId: string, promptFile: string, mol?: string): void => {
     // leading-alnum guard: '.'/'..' would escape the per-step dir and a
     // template-named step would overwrite the shared template
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(spec.molStep)) {
@@ -1750,7 +1758,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     // render so the table exists even when spec.env is empty
     const allEnv = [
       ...envEntries,
-      ...agentEnvPins(spec, agentId, promptFile, commandCliName(command)),
+      ...agentEnvPins(spec, agentId, promptFile, commandCliName(command), mol),
     ]
     const envToml = `env = { ${allEnv.map(([k, v]) => `${k} = "${tomlStr(v)}"`).join(', ')} }\n`
     // work_dir (+ env) are top-level — they must precede any [table] in
@@ -1827,10 +1835,11 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     city: string,
     prior: unknown,
     agentId: string,
-    promptFile: string
+    promptFile: string,
+    mol?: string
   ): string => {
     initCity(city)
-    writeStepAgent(spec, city, agentId, promptFile)
+    writeStepAgent(spec, city, agentId, promptFile, mol)
     ensureRig(spec, city)
     ensureStarted(city)
     const priorId = typeof prior === 'string' ? prior : undefined
@@ -1929,7 +1938,9 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         throw new SpawnError(`no git common dir for ${spec.repoRoot}`, 'config')
       }
       // same TOCTOU critical section as native: dedup → claim → backend
-      // spawn → registry patch, all under the agents.json lock.
+      // spawn → registry patch, all under the agents.json lock — and the
+      // molecule pin's bd show resolves before it, off the critical path
+      const mol = stepParent(spec.beadsDir, spec.molStep)
       return withAgentRegistryLock(dir, () => {
         const existing = readAgentRegistry(dir)[spec.molStep]
         const { agentId, promptFile } = prepareSpawn(dir, home, 'gascity', spec, {
@@ -1952,7 +1963,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         })
         let sessionId: string | undefined
         try {
-          sessionId = ensureGcSession(spec, city, existing?.sessionId, agentId, promptFile)
+          sessionId = ensureGcSession(spec, city, existing?.sessionId, agentId, promptFile, mol)
           dispatchStep(spec, city)
         } catch (err) {
           // leave the entry respawn-able: close the orphan session so a
