@@ -146,6 +146,22 @@ describe('systemoneCall', () => {
       assert.equal(calls.length, 0)
     }))
 
+  test('a spent deadline skips the key lookup — fail-open before it can block', () =>
+    withKey(async () => {
+      const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
+      const entry = { ...ENTRY, apiKeyCommand: `printf 'ts_cmd_key'` }
+      await assert.rejects(
+        systemoneCall('b', entry, { fetch, keyField: 'providers.t.apiKeyCommand' })(
+          's',
+          QUESTIONS,
+          Date.now() - 1
+        ),
+        (e: unknown) =>
+          e instanceof JudgeUnavailable && /apiKeyCommand/.test((e as Error).message)
+      )
+      assert.equal(calls.length, 0)
+    }))
+
   test('absent baseUrl falls back to the hosted API; TYPESAFE_BASE_URL overrides both', () =>
     withKey(async () => {
       const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })

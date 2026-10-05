@@ -51,9 +51,9 @@ export interface ProviderWireOpts {
  *  apiKeyEnv; a non-NAME apiKeyEnv is a config bug (throws, never
  *  echoed); a missing var is fail-open, and every message names the
  *  config FIELD, never the value. */
-function apiKey(entry: SystemoneEntry, keyField: string): string {
+function apiKey(entry: SystemoneEntry, keyField: string, deadline: number): string {
   if (entry.apiKeyCommand !== undefined) {
-    return runKeyCommand(entry.apiKeyCommand, keyField)
+    return runKeyCommand(entry.apiKeyCommand, keyField, deadline)
   }
   if (entry.apiKeyEnv === undefined || !isEnvName(entry.apiKeyEnv)) {
     throw new Error(`${keyField} is not a valid environment variable name`)
@@ -102,7 +102,7 @@ export function systemoneCall(
   const base = process.env.TYPESAFE_BASE_URL ?? entry.baseUrl ?? DEFAULT_BASE_URL
   const endpoint = `${stripTrailingSlashes(base)}/v1/systemone`
   return async (state, questions, deadline): Promise<DecideResult> => {
-    const key = apiKey(entry, keyField)
+    const key = apiKey(entry, keyField, deadline)
     const started = Date.now()
     const res = await postJson(
       endpoint,

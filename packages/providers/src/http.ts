@@ -179,23 +179,31 @@ export function splitShellWords(command: string): string[] {
   return words
 }
 
+const KEY_COMMAND_TIMEOUT_MS = 10_000
+
 /** A secret from an operator-configured command (`apiKeyCommand`) —
  *  the config names a PROGRAM (secret-tool, pass, op …), the key only
  *  ever exists on its stdout. Exec'd without a shell under a short
  *  timeout; anything but a non-empty stdout is fail-open, and the
  *  message names the field, never the command's stderr (a tool may
- *  echo fragments of what it was fed). */
-export function runKeyCommand(command: string, keyField: string): string {
+ *  echo fragments of what it was fed). The wait is synchronous, so it
+ *  shares the caller's deadline: a hung lookup can't burn past the
+ *  budget postJson would check only after stdout returns. */
+export function runKeyCommand(command: string, keyField: string, deadline?: number): string {
   const argv = splitShellWords(command)
   const bin = argv[0]
   if (bin === undefined) {
     throw new Error(`${keyField} is empty`)
   }
+  const left = deadline === undefined ? KEY_COMMAND_TIMEOUT_MS : remaining(deadline)
+  if (left <= 0) {
+    throw new JudgeUnavailable(`${keyField} command never ran — the call's budget is spent`)
+  }
   let out: string
   try {
     out = execFileSync(bin, argv.slice(1), {
       encoding: 'utf8',
-      timeout: 10_000,
+      timeout: Math.min(KEY_COMMAND_TIMEOUT_MS, left),
       stdio: ['ignore', 'pipe', 'pipe'],
     })
   } catch (err) {

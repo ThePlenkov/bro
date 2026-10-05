@@ -209,9 +209,13 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
   if (type === 'systemone' && picked.apiKeyEnv === undefined && picked.apiKeyCommand === undefined) {
     return fail('requires apiKeyEnv or apiKeyCommand')
   }
-  // an `echo sk-…` "command" smuggles the key into config — the whole
-  // point of apiKeyCommand is that the file never holds the value
-  if (typeof picked.apiKeyCommand === 'string' && /sk-[A-Za-z0-9]|Bearer\s/i.test(picked.apiKeyCommand)) {
+  // an `echo sk-…`/`printf ts_live_…` "command" smuggles the key into
+  // config — the whole point of apiKeyCommand is that the file never
+  // holds the value
+  if (
+    typeof picked.apiKeyCommand === 'string' &&
+    /sk-[A-Za-z0-9]|ts_(?:live|test)_|Bearer\s/i.test(picked.apiKeyCommand)
+  ) {
     return fail('apiKeyCommand must RUN a secret lookup — it may not contain a key value')
   }
   return { type, ...picked } as ProviderEntry
