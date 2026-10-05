@@ -404,7 +404,11 @@ function storeStamp(dir: string): string | null {
   } catch {
     return null // no embeddeddolt dir — not a cacheable layout
   }
-  return parts.length === 0 ? null : `${beads}|${parts.sort().join('|')}`
+  if (parts.length === 0) {
+    return null
+  }
+  parts.sort((a, b) => a.localeCompare(b))
+  return `${beads}|${parts.join('|')}`
 }
 
 const snapshotFile = (hooks: string): string => join(hooks, 'cache', 'lessons.json')

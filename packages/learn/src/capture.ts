@@ -74,7 +74,7 @@ const CLI_WORDS = new Set([
   'bro', 'bd', 'gh', 'glab', 'npm', 'npx', 'pnpm', 'yarn', 'bun', 'node',
   'tsx', 'git', 'docker', 'cargo', 'curl',
 ])
-const WORD_RE = /\b[a-z][\w]*/g
+const WORD_RE = /\b[a-z]\w*/g
 const SUBWORD_RE = /^\s+[a-z][\w-]*/
 
 /** Repo-ish paths: anything containing a '/' (`specs/sessions`,
@@ -107,8 +107,17 @@ export const TERM_STOPWORDS = new Set([
 ])
 
 /** A scope key is stripped of trailing punctuation and is never a URL
- *  fragment — the same cleaning `collect` always applied. */
-const scopeKey = (v: string): string => v.replace(/[),.;:'"`\]]+$/, '')
+ *  fragment — the same cleaning `collect` always applied. The trailing
+ *  strip is a char loop: the `+$` quantifier version read as
+ *  super-linear backtracking to sonar (S8786). */
+const TRAIL_PUNCT = new Set([')', ',', '.', ';', ':', "'", '"', '`', ']'])
+const scopeKey = (v: string): string => {
+  let end = v.length
+  while (end > 0 && TRAIL_PUNCT.has(v[end - 1]!)) {
+    end -= 1
+  }
+  return v.slice(0, end)
+}
 const keepKey = (v: string): boolean => v !== '' && !v.includes('://')
 
 function collect(re: RegExp, text: string, cap: number): string[] {
@@ -304,7 +313,7 @@ function listLabeled(label: string, dir?: string): TaskRow[] {
  *  newline — the same span the old `\s*\n+` left behind. `stop` is
  *  tested against each following line's start; no stop runs to EOF. */
 function mdSection(text: string, name: string, stop?: RegExp): string | undefined {
-  const head = new RegExp(`##\\s*${name}`, 'g')
+  const head = new RegExp(String.raw`##\s*${name}`, 'g')
   let m: RegExpExecArray | null
   while ((m = head.exec(text)) !== null) {
     const after = m.index + m[0].length
@@ -360,10 +369,19 @@ function drillMemo(notes: string | undefined): { result: string; prevents: strin
   }
   const result = mdSection(notes, 'Result', SECTION_FIELD)?.trim() ?? ''
   // the old regex ate to EOF — a later `## ` section's bullets counted
-  // too; keeping that quirk is cheaper than inventing new semantics
-  const prevents = [...(mdSection(notes, 'Prevention') ?? '').matchAll(/^\s*-\s+(.+)$/gm)]
-    .map((m) => m[1]!.trim())
-    .filter((p) => p !== '')
+  // too; keeping that quirk is cheaper than inventing new semantics.
+  // Bullet scan is per-line (the `^\s*-\s+(.+)$`m pattern was another
+  // S8786 super-linear flag).
+  const prevents: string[] = []
+  for (const line of (mdSection(notes, 'Prevention') ?? '').split('\n')) {
+    const t = line.trimStart()
+    if (t.startsWith('-') && t[1] !== undefined && t[1].trim() === '') {
+      const item = t.slice(1).trim()
+      if (item !== '') {
+        prevents.push(item)
+      }
+    }
+  }
   if (result === '' && prevents.length === 0) {
     return null
   }
