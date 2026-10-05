@@ -51,9 +51,11 @@ route — so the command does not judge inline. It materializes the work:
 the unharvested closed set becomes a molecule whose steps an agent
 executes (convoy/`bro agents up`), ending each with
 `bd set-state <id> sweep=distilled`. `bro learn capture` stays the
-distill engine for drill/retro/act/mol artifacts — sweep's set is
-closed beads with no structured artifact, i.e. judgment, not parsing.
-`--dry-run` prints the set it would materialize.
+distill engine for drill/retro/act/mol artifacts — and a bead already
+cited as learn evidence is distilled by fact, not by judgment: distill
+auto-marks it `sweep=distilled` instead of emitting a step for it, so
+pre-sweep captures never wedge the marker-only gate. `--dry-run` prints
+the set it would materialize plus the auto-marked.
 
 ### `bro sweep run` — the gated pipeline
 
@@ -71,7 +73,12 @@ nothing:
    `refs/bro/data` automatically — same git-memory channel as the
    review-debt ledger and drill evidence, outside `refs/heads`, never in
    MR diffs. Memories stay excluded (bd default — they may carry
-   sensitive context and survive in their own store anyway).
+   sensitive context and survive in their own store anyway). The sync
+   contract is positional, so `run` checks it: a `sweep.dir` resolving
+   outside the synced set (`.agents/` + the debt dir, ignored +
+   untracked) archives locally but never reaches `refs/bro/data` —
+   that configuration warns at `status` and `run`, it does not pass
+   silently.
 3. **Prune** — `bd prune --older-than <N>d --force`. bd's own
    protections apply unchanged: pinned beads, open/in-progress,
    ephemeral, and any closed bead cited by an open bead's description,
