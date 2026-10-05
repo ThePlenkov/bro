@@ -1,8 +1,8 @@
 {
   "act": {
     "ignoreChecks": [
-      "kilo",
-      "github-advanced-security"
+      { "name": "kilo", "consecutiveFailures": 3, "threadWindowDays": 7 },
+      { "name": "github-advanced-security", "consecutiveFailures": 3, "threadWindowDays": 7 }
     ],
     "docsPaths": [
       "*.md",

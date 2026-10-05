@@ -23,6 +23,7 @@ const open = (over: Partial<PrActState> = {}): PrActState => ({
   fixRounds: 0,
   maxRounds: 3,
   docsOnly: false,
+  alerts: [],
   ...over,
 })
 
@@ -91,6 +92,16 @@ describe('evaluateExitGate', () => {
     )
     // no open threads → cap is moot
     assert.equal(evaluateExitGate(open({ fixRounds: 9, maxRounds: 3 })).ok, true)
+  })
+
+  it('carries advisory alerts through without blocking', () => {
+    const g = evaluateExitGate(
+      open({ alerts: ['advisory check "Kilo" failing — the reviewer may be down'] })
+    )
+    assert.equal(g.ok, true)
+    assert.deepEqual(g.blockers, [])
+    assert.equal(g.alerts.length, 1)
+    assert.match(g.alerts[0]!, /may be down/)
   })
 
   it('names the docs-only PR in the cap blocker and reports docs_only', () => {

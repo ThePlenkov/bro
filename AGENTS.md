@@ -54,7 +54,12 @@ Developing bro itself: see CONTRIBUTING.md.
   is pure infra — its findings arrive as threads, which block on their
   own. Reviewers that are *reliably* flaky go on `act.ignoreChecks` in
   bro.config.json so a stuck pending state doesn't block either —
-  currently `"kilo"` (rate limits; advisory, may still be read).
+  currently `"kilo"` (rate limits; advisory, may still be read). The
+  ignore is conditional: a failing ignored check is dropped quietly
+  only after `consecutiveFailures` failing heads in a row *with*
+  thread activity inside `threadWindowDays` — a failing check with no
+  recent thread output surfaces as an alert (advisory, never a
+  blocker), because a reviewer producing nothing is down, not flaky.
 - **PR refs are links** — any user-facing reply or bro output line that
   names a PR renders it as `[#N](https://github.com/<owner>/<repo>/pull/N)`,
   never bare `#N`. `prLink()` in `@broject/core` formats it; TSV/data rows

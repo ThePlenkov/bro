@@ -3,8 +3,20 @@
  * aggregated into the PrActState the exit gate reads. Domain rules only;
  * every host call goes through the injected ReviewFacade.
  */
-import { DEFAULT_CONFIG } from '@broject/core'
-import type { CheckInfo, PrTarget, ReviewFacade } from '@broject/core'
+import {
+  DEFAULT_CONFIG,
+  DEFAULT_IGNORE_CONSECUTIVE_FAILURES,
+  DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
+} from '@broject/core'
+import type {
+  CheckInfo,
+  IgnoreCheckEntry,
+  IgnoreCheckRule,
+  PrTarget,
+  ReviewFacade,
+  ReviewThread,
+} from '@broject/core'
+import type { CheckHistory } from './check-history.ts'
 import { docsOnlyPr, effectiveMaxRounds } from './docs.ts'
 import type { PrActState } from './types.ts'
 
@@ -71,12 +83,105 @@ function sastCounts(
   return out
 }
 
+/** Ignore entries reach here already normalized by the config schema —
+ *  this second pass keeps direct callers (tests, embedders) on the same
+ *  contract: a bare string is a rule with default thresholds. */
+function ignoreRules(entries: IgnoreCheckEntry[]): IgnoreCheckRule[] {
+  const rules: IgnoreCheckRule[] = []
+  for (const e of entries) {
+    const rule: IgnoreCheckRule =
+      typeof e === 'string'
+        ? {
+            name: e,
+            consecutiveFailures: DEFAULT_IGNORE_CONSECUTIVE_FAILURES,
+            threadWindowDays: DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
+          }
+        : e
+    // an empty substring would match EVERY check name
+    if (rule.name.trim() !== '') {
+      rules.push(rule)
+    }
+  }
+  return rules
+}
+
+/** Does this PR carry fresh thread output BY the ignored check's bot —
+ *  the evidence that a failing reviewer is flaky-but-alive rather than
+ *  down? Attribution is a name-stem match on the comment author
+ *  (`kilo` covers `kilo-code[bot]`); human threads must not certify a
+ *  silent reviewer. */
+function hasFreshThreadActivity(
+  threads: ReviewThread[],
+  ruleName: string,
+  windowDays: number
+): boolean {
+  const stem = ruleName.toLowerCase().replace(/[^a-z0-9]/g, '')
+  if (stem === '') {
+    return false
+  }
+  const cutoff = Date.now() - windowDays * 86_400_000
+  return threads.some((t) => {
+    const c = t.comment
+    if (c === null) {
+      return false
+    }
+    const author = c.author.toLowerCase().replace(/[^a-z0-9]/g, '')
+    const ts = Date.parse(c.createdAt)
+    return author.includes(stem) && Number.isFinite(ts) && ts >= cutoff
+  })
+}
+
+/** Advisory checks (act.ignoreChecks) never gate — but a *failing* one
+ *  earns the quiet ignore only with proof of life: `consecutiveFailures`
+ *  failing head shas in a row AND fresh thread activity. Without it the
+ *  check is still excluded from the gate and recorded as an alert — a
+ *  downed reviewer must not read as a pass. The observation is recorded
+ *  before the verdict so the current failure counts toward the streak. */
+function advisoryFilter(
+  c: CheckInfo,
+  rules: IgnoreCheckRule[],
+  history: CheckHistory | null,
+  threads: ReviewThread[],
+  target: PrTarget,
+  headSha: string,
+  alerts: string[]
+): boolean {
+  const rule = rules.find((r) => c.name.toLowerCase().includes(r.name.toLowerCase()))
+  if (rule === undefined) {
+    return true
+  }
+  history?.record({
+    repo: target.repo,
+    pr: target.pr,
+    sha: headSha,
+    name: c.name,
+    bucket: c.bucket,
+  })
+  // only 'fail' is judged — pending/pass/cancel stay quietly ignored;
+  // shielding a stuck pending state is the option's original purpose
+  if (c.bucket !== 'fail') {
+    return false
+  }
+  const streak = history?.consecutiveFailures(c.name) ?? 0
+  const alive = hasFreshThreadActivity(threads, rule.name, rule.threadWindowDays)
+  if (streak >= rule.consecutiveFailures && alive) {
+    return false // proven flaky and still producing findings — quiet ignore
+  }
+  alerts.push(
+    alive
+      ? `advisory check "${c.name}" failing (${streak}/${rule.consecutiveFailures} consecutive) — not yet proven flaky`
+      : `advisory check "${c.name}" failing with no thread activity in ${rule.threadWindowDays}d — the reviewer may be down`
+  )
+  return false
+}
+
 /** Full open-PR state for the act loop — threads + checks + mergeability. */
 export async function fetchPrActState(
   rev: ReviewFacade,
   target: PrTarget,
   opts?: {
-    ignoreChecks?: string[]
+    ignoreChecks?: IgnoreCheckEntry[]
+    checkHistory?: CheckHistory | null
     maxRounds?: number
     docsPaths?: string[]
     docsMaxRounds?: number
@@ -84,14 +189,12 @@ export async function fetchPrActState(
 ): Promise<PrActState> {
   const meta = rev.prMeta(target)
   const threads = await rev.reviewThreads(target)
-  // Advisory checks (act.ignoreChecks) drop out of the gate entirely —
-  // a flaky external reviewer must not hold merges hostage
-  const ignored = (opts?.ignoreChecks ?? [])
-    .map((s) => s.trim().toLowerCase())
-    .filter((s) => s !== '')
+  const rules = ignoreRules(opts?.ignoreChecks ?? [])
+  const alerts: string[] = []
+  const history = opts?.checkHistory ?? null
   const checks = rev
     .checks(target, false)
-    .filter((c) => !ignored.some((i) => c.name.toLowerCase().includes(i)))
+    .filter((c) => advisoryFilter(c, rules, history, threads, target, meta.headSha, alerts))
 
   // "CI green" means every check — an optional check that fails is still
   // a red job on the PR. Required names are only kept to decide whether a
@@ -173,5 +276,6 @@ export async function fetchPrActState(
     fixRounds,
     maxRounds,
     docsOnly: isDocsOnly,
+    alerts,
   }
 }

@@ -52,7 +52,7 @@ Explicit `"stores": ["jsonl"]` is the beads opt-out.
 
 | Key | Default | What |
 | --- | ------- | ---- |
-| `ignoreChecks` | `[]` | Check-name substrings excluded from the exit gate — for chronically flaky external reviewers |
+| `ignoreChecks` | `[]` | Advisory checks excluded from the exit gate — for chronically flaky external reviewers. Entries are name substrings or `{ name, consecutiveFailures, threadWindowDays }` (defaults `3`, `7`): a *failing* check stays quiet only after that many consecutive failing heads with matching thread activity — otherwise it surfaces as a non-blocking alert |
 | `maxRounds` | `3` | Inline fix-round cap. Past it, remaining threads must defer to debt beads. `0` unbounds non-docs PRs — a docs-only PR is still capped while `docsMaxRounds > 0` |
 | `docsPaths` | `['*.md', '*.mdx', '*.rst', 'docs/']` | Path patterns classifying a file as docs. No slash → basename glob (`*.md`); trailing `/` → dir at any depth, name globs too (`docs*/` hits `docs-v2/`); otherwise full-path glob (`**` crosses `/`) |
 | `docsMaxRounds` | `2` | Tighter round cap for docs-only PRs (every changed file matches `docsPaths`). `0` disables the docs-specific cap — `(maxRounds: 0, docsMaxRounds: 0)` is fully uncapped |

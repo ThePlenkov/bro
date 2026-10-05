@@ -6,6 +6,7 @@
  * ReviewFacade; this connector owns no vendor calls.
  */
 import { loadConfig, reviewHost, type Connector, type PrTarget } from '@broject/core'
+import { checkHistory } from './check-history.ts'
 import { evaluateExitGate } from './exit-gate.ts'
 import { mergeSlotHolder } from './merge-slot.ts'
 import { listWatches, watchRetire } from './pending-watch.ts'
@@ -26,15 +27,18 @@ async function gateLine(dir: string, target?: PrTarget): Promise<string | null> 
     }
     const state = await fetchPrActState(rev, t, {
       ignoreChecks: cfg.act.ignoreChecks,
+      checkHistory: checkHistory(dir),
       maxRounds: cfg.act.maxRounds,
       docsPaths: cfg.act.docsPaths,
       docsMaxRounds: cfg.act.docsMaxRounds,
     })
     const gate = evaluateExitGate(state)
     const link = rev.prLink(t.repo, state.pr)
+    const alertSuffix =
+      gate.alerts.length === 0 ? '' : `; alert: ${gate.alerts.join('; ')}`
     return gate.ok
-      ? `pr ${link}: gate OK`
-      : `pr ${link}: gate BLOCKED (${gate.blockers.join('; ')}) — \`bro act status\``
+      ? `pr ${link}: gate OK${alertSuffix}`
+      : `pr ${link}: gate BLOCKED (${gate.blockers.join('; ')})${alertSuffix} — \`bro act status\``
   } catch {
     return null
   }
@@ -54,6 +58,7 @@ async function blockerLine(dir: string): Promise<string | null> {
       { repo: rev.resolveRepo([]), pr: cur.pr },
       {
         ignoreChecks: cfg.act.ignoreChecks,
+        checkHistory: checkHistory(dir),
         maxRounds: cfg.act.maxRounds,
         docsPaths: cfg.act.docsPaths,
         docsMaxRounds: cfg.act.docsMaxRounds,

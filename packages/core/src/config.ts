@@ -78,8 +78,60 @@ export const syncSection: ConfigSection<{
   }
 }
 
+/** A conditional ignoreChecks entry — `name` keeps the bare-string
+ *  substring match; the two knobs say when a *failing* check has earned
+ *  the quiet ignore: `consecutiveFailures` failing head shas in a row
+ *  AND thread activity by the check's bot inside `threadWindowDays`. A
+ *  failing check without that evidence is an alert, not a pass. */
+export interface IgnoreCheckRule {
+  name: string
+  consecutiveFailures: number
+  threadWindowDays: number
+}
+
+export type IgnoreCheckEntry = string | IgnoreCheckRule
+
+export const DEFAULT_IGNORE_CONSECUTIVE_FAILURES = 3
+export const DEFAULT_IGNORE_THREAD_WINDOW_DAYS = 7
+
+function normalizeIgnoreEntry(v: unknown): IgnoreCheckRule | null {
+  const posInt = (x: unknown, dflt: number, min: number): number =>
+    typeof x === 'number' && Number.isInteger(x) && x >= min ? x : dflt
+  if (typeof v === 'string') {
+    // a bare substring is a rule with default thresholds — the
+    // silent-reviewer detection applies without a config migration
+    return v.trim() === ''
+      ? null
+      : {
+          name: v,
+          consecutiveFailures: DEFAULT_IGNORE_CONSECUTIVE_FAILURES,
+          threadWindowDays: DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
+        }
+  }
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+    return null
+  }
+  const o = v as { name?: unknown; consecutiveFailures?: unknown; threadWindowDays?: unknown }
+  if (typeof o.name !== 'string' || o.name.trim() === '') {
+    return null
+  }
+  return {
+    name: o.name,
+    consecutiveFailures: posInt(
+      o.consecutiveFailures,
+      DEFAULT_IGNORE_CONSECUTIVE_FAILURES,
+      1
+    ),
+    threadWindowDays: posInt(
+      o.threadWindowDays,
+      DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
+      1
+    ),
+  }
+}
+
 export const actSection: ConfigSection<{
-  ignoreChecks: string[]
+  ignoreChecks: IgnoreCheckRule[]
   maxRounds: number
   docsPaths: string[]
   docsMaxRounds: number
@@ -91,13 +143,12 @@ export const actSection: ConfigSection<{
     docsMaxRounds?: unknown
   }
   return {
-    // only a list of substrings may reach the check filter — anything
-    // else falls back to the default
+    // only name substrings (bare or rule objects) may reach the check
+    // filter — anything else falls back to the default
     ignoreChecks: Array.isArray(obj.ignoreChecks)
-      ? obj.ignoreChecks.filter(
-          // an empty substring would match EVERY check name
-          (v): v is string => typeof v === 'string' && v.trim() !== ''
-        )
+      ? obj.ignoreChecks
+          .map(normalizeIgnoreEntry)
+          .filter((r): r is IgnoreCheckRule => r !== null)
       : [],
     maxRounds:
       typeof obj.maxRounds === 'number' &&
@@ -268,10 +319,13 @@ export interface BroConfig {
     beads: boolean
   }
   act: {
-    /** Check-name substrings (case-insensitive) excluded from the exit
-     *  gate — advisory-only checks like a flaky external reviewer whose
-     *  infra is not this repo's problem. */
-    ignoreChecks: string[]
+    /** Advisory checks excluded from the exit gate — a flaky external
+     *  reviewer's infra is not this repo's problem. The ignore is
+     *  conditional: a *failing* check stays quiet only after
+     *  `consecutiveFailures` failing heads in a row WITH thread
+     *  activity inside `threadWindowDays` — otherwise it surfaces as a
+     *  silent-reviewer alert (still non-blocking). */
+    ignoreChecks: IgnoreCheckRule[]
     /** Inline fix-round cap — past it, remaining threads must defer to
      *  debt beads instead of another push. 0 disables the cap. */
     maxRounds: number

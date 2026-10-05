@@ -46,12 +46,13 @@ import {
   type AgentInfo,
   type AgentRegistryEntry,
   type AgentState,
+  type IgnoreCheckRule,
   type ReviewFacade,
   type ReviewThread,
   type TaskRow,
   type TaskStore,
 } from '@broject/core'
-import { evaluateExitGate, fetchPrActState, type PrActState } from '@broject/act'
+import { checkHistory, evaluateExitGate, fetchPrActState, type PrActState } from '@broject/act'
 import {
   annotateThreads,
   judgeConfig,
@@ -460,7 +461,7 @@ interface Ctx {
   rev: ReviewFacade
   repo: string
   act: {
-    ignoreChecks: string[]
+    ignoreChecks: IgnoreCheckRule[]
     maxRounds: number
     docsPaths: string[]
     docsMaxRounds: number
@@ -861,6 +862,7 @@ async function mergeAndRetire(
     { repo: ctx.repo, pr },
     {
         ignoreChecks: ctx.act.ignoreChecks,
+        checkHistory: checkHistory(ctx.mainRoot),
         maxRounds: ctx.act.maxRounds,
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
@@ -890,6 +892,7 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
       { repo: ctx.repo, pr },
       {
         ignoreChecks: ctx.act.ignoreChecks,
+        checkHistory: checkHistory(ctx.mainRoot),
         maxRounds: ctx.act.maxRounds,
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
@@ -986,6 +989,7 @@ async function sweepSettledFixers(ctx: Ctx, prs: Set<number>): Promise<void> {
         { repo: ctx.repo, pr },
         {
         ignoreChecks: ctx.act.ignoreChecks,
+        checkHistory: checkHistory(ctx.mainRoot),
         maxRounds: ctx.act.maxRounds,
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
