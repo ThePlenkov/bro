@@ -71,7 +71,8 @@ fail-open.
 
 OpenCode is the exception: it loads JS/TS modules instead of a hook manifest,
 so `bro` ships as a native plugin (`packages/cli/src/opencode.ts`, published
-as the package's `./server` export) that spawns its own CLI. Two consequences:
+as the package's `./server` export) that spawns its own CLI. This entry uses
+OpenCode's V1 plugin API and does not run on V2. Two consequences:
 
 - **Install by package name only.** OpenCode's loader reads `exports["./server"]`
   from the installed package and does not accept subpath specifiers — `"@broject/bro/opencode"`

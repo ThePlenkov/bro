@@ -441,6 +441,17 @@ describe('stop gate', () => {
     assert.equal(calls()[0]?.payload.stop_hook_active, false)
   })
 
+  test('a whitespace-only reason re-prompts the fallback, not an empty turn', async () => {
+    respond({ stop: JSON.stringify({ decision: 'block', reason: '   ' }) })
+    const { hooks, logs, prompts } = await makeHooks()
+
+    await finishTurn(hooks, 'ses_1')
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
+
+    assert.deepEqual(prompts, [{ id: 'ses_1', text: 'unfinished bro work' }])
+    assert.match(logs[0]?.message ?? '', /stop gate: unfinished bro work/)
+  })
+
   test('a second block is logged, never re-prompted — a gate, not a loop', async () => {
     respond({ stop: JSON.stringify(blocked) })
     const { hooks, prompts } = await makeHooks()
@@ -634,14 +645,16 @@ describe('fail-open', () => {
       const out = { sessionID: 'ses_1', system: [] as string[] }
       const pending = hooks['experimental.chat.system.transform']?.(out, out)
       // the stub logs on startup, before its sleep — give the real child a
-      // bounded wall-clock window to boot, then fire the fake reap timer
-      for (let i = 0; i < 20_000 && calls().length === 0; i++) {
+      // bounded wall-clock window to boot (Date is not a mocked api), then
+      // fire the fake reap timer
+      const deadline = Date.now() + 5_000
+      while (calls().length === 0 && Date.now() < deadline) {
         await new Promise((resolve) => setImmediate(resolve))
       }
       t.mock.timers.tick(60_000)
       await pending
       assert.deepEqual(out.system, [])
-      assert.equal(calls().length, 1)
+      assert.equal(calls().length, 1, 'stub child did not start within 5s')
     } finally {
       t.mock.timers.reset()
     }

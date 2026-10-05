@@ -531,7 +531,8 @@ export const BroPlugin = (
       }
       return
     }
-    await log('warn', `stop gate: ${reason || 'unfinished bro work'}`)
+    const message = reason || 'unfinished bro work'
+    await log('warn', `stop gate: ${message}`)
     if (gated.has(sessionID)) {
       return
     }
@@ -539,7 +540,7 @@ export const BroPlugin = (
     try {
       await input.client?.session?.promptAsync({
         path: { id: sessionID },
-        body: { parts: [{ type: 'text', text: reason }] },
+        body: { parts: [{ type: 'text', text: message }] },
       })
     } catch (err) {
       await log('error', `stop gate could not re-prompt: ${errorText(err)}`)
