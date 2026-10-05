@@ -6,6 +6,11 @@ import { join } from 'node:path'
 import { describe, test } from 'node:test'
 import { collectStatus } from './status.ts'
 
+// bd resolves BEADS_DIR before any .beads discovery — a session that
+// pinned it (agent env) would leak the real store into the bare-repo
+// fixture. Point it at a guaranteed-empty dir for this file.
+process.env.BEADS_DIR = mkdtempSync(join(tmpdir(), 'bro-status-beads-'))
+
 function gitRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'bro-status-'))
   execFileSync('git', ['init', '-b', 'main'], { cwd: dir })

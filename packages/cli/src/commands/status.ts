@@ -214,7 +214,15 @@ export function collectStatus(dir: string): BroStatus {
     gitTry(['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD']).out.trim() || 'HEAD'
   const dirtyOut = gitTry(['-C', dir, 'status', '--porcelain']).out
   const dirty = dirtyOut === '' ? 0 : dirtyOut.split('\n').filter((l) => l !== '').length
-  const frame = currentFrame()
+  // currentFrame() → bdJson → spawnSync('bd') throws ENOENT where bd
+  // isn't installed — the board's contract is empty sections, never
+  // errors, so a missing/failed drill read is a null frame
+  let frame: ReturnType<typeof currentFrame>
+  try {
+    frame = currentFrame()
+  } catch {
+    frame = undefined
+  }
   return {
     dir,
     branch,

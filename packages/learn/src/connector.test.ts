@@ -117,9 +117,16 @@ function fixture(opts: {
       ),
     })
   )
-  const prev = { PATH: process.env.PATH, FAKE_BD_DB: process.env.FAKE_BD_DB }
+  const prev = {
+    PATH: process.env.PATH,
+    FAKE_BD_DB: process.env.FAKE_BD_DB,
+    BEADS_DIR: process.env.BEADS_DIR,
+  }
   process.env.PATH = `${binDir}:${prev.PATH}`
   process.env.FAKE_BD_DB = db
+  // a session-pinned BEADS_DIR (agent env) would resolve the real store
+  // instead of the fixture's — the snapshot stamp must key on fx.dir
+  delete process.env.BEADS_DIR
   const hooks = join(dir, '.git', 'bro', 'hooks')
   return {
     dir,
@@ -129,6 +136,8 @@ function fixture(opts: {
       process.env.PATH = prev.PATH
       if (prev.FAKE_BD_DB === undefined) delete process.env.FAKE_BD_DB
       else process.env.FAKE_BD_DB = prev.FAKE_BD_DB
+      if (prev.BEADS_DIR === undefined) delete process.env.BEADS_DIR
+      else process.env.BEADS_DIR = prev.BEADS_DIR
       rmSync(root, { recursive: true, force: true })
     },
   }
