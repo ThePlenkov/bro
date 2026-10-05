@@ -184,12 +184,13 @@ export const providersSection: ConfigSection<Record<string, ProviderEntry>> = (r
     return out
   }
   for (const [name, v] of Object.entries(raw)) {
-    if (name.trim() === '') {
+    const trimmed = name.trim()
+    if (trimmed === '') {
       continue
     }
-    const entry = parseProviderEntry(name.trim(), v)
+    const entry = parseProviderEntry(trimmed, v)
     if (entry !== null) {
-      out[name.trim()] = entry
+      out[trimmed] = entry
     }
   }
   return out
