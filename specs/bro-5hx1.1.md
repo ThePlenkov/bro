@@ -169,6 +169,18 @@ hooks shim pins at install time. `entry.profile` is *not* a driver flag —
 it's already inside `entry.command` where the operator wrote it
 (`kilo --acp --profile work`); the driver never parses the command.
 
+**Trust boundary, pinned.** `command` is operator-authored config — the
+same trusted-code contract `loop.agent`/`agents.<backend>.command`
+already carry (NOSONAR-documented `sh -c`); the driver does not
+"sanitize" it because sanitizing a shell string is theatre. What the
+spec forbids is *data* reaching the shell: the driver argv is built as
+an argument ARRAY — `spawn(bro, ['acp-worker', '--command', command,
+'--model', model, promptFile])`, never string-concatenated into one
+`sh -c` line — so a `model` value carrying shell metachars (a
+`StepSpawnRequest` field, reachable through `bro serve`) can't escape
+its argv slot. Inside the driver only the trusted `command` string
+meets `sh -c`; the prompt rides `session/prompt` params, never argv.
+
 The driver's pid is the registry pid — one liveness story: detached →
 own process group → `bro agents down` group-signals it exactly like a
 template worker today, and the agent CLI dies with its driver.
@@ -177,13 +189,10 @@ Driver flow — ACP **v1** over `@agentclientprotocol/sdk` (1.7.0, verified
 npm 2026-10-05; the deprecated `zed-industries/agent-client-protocol`
 name and the `/experimental/v2` import stay out, per bro-ribc.1):
 
-1. **spawn** `command` via `sh -c` as the stdio peer (env: `process.env`
-   + spec.env + the identity pins — the agent process sees the same
-   badge set a template worker does). `sh -c` is the mechanism, not a
-   sanitization gap: `entry.command` is the operator's own command line
-   (args included — `kilo --acp --profile work`), the same trust
-   boundary `agents.<backend>.command` already draws. Nothing untrusted
-   reaches this line to sanitize.
+1. **spawn** `command` via `sh -c` as the stdio peer — the trusted
+   config string only, per the trust boundary above (env:
+   `process.env` + spec.env + the identity pins — the agent process
+   sees the same badge set a template worker does).
 2. **`initialize`** — `protocolVersion: 1`, `clientInfo` naming bro, and
    `clientCapabilities` with **fs and terminal advertised false**: v1
    grants the agent no client-side services — the CLI's own tool surface
