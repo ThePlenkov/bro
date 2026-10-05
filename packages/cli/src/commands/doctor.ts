@@ -16,12 +16,16 @@ import { basename, dirname, join, resolve } from 'node:path'
 import {
   bdTry,
   gitTry,
+  isEnvName,
   janitorDidWork,
   janitorLine,
   probeBdCompat,
   probeConfigFile,
+  PROVIDER_REGISTRY,
   runJanitor,
 } from '@broject/core'
+import type { ProviderSurface } from '@broject/core'
+import { judgeConfig, synthesizedProviders } from '@broject/judge'
 import { loadBroConfig, pluginConfigSections } from '../plugins.ts'
 import {
   budgetLines,
@@ -370,6 +374,111 @@ function remoteChecks(
   return out
 }
 
+/** Providers section (specs/bro-ribc.1.md milestone 6) — the configured
+ *  registry as doctor rows: one ok line listing entries, a warn per
+ *  entry whose apiKeyEnv names a var that isn't set or isn't a NAME
+ *  (the value is never echoed — an all-caps pasted key passes
+ *  isEnvName), and a warn per consumer reference (judge.provider /
+ *  fallback, agents.<backend>.provider, fleet.profiles.*.provider)
+ *  resolving to no entry — a dangling ref is a startup error waiting;
+ *  refs resolve against the effective registry the judge uses (the
+ *  user's entries plus the synthesized legacy aliases). */
+function providerChecks(dir: string): DoctorCheck[] {
+  const env = loadAgentEnv(dir)
+  const providers = env.providers ?? {}
+  const names = Object.keys(providers)
+  const label = (n: string): string => {
+    const e = providers[n]!
+    const model = 'model' in e && typeof e.model === 'string' ? `, ${e.model}` : ''
+    return `${n} (${e.type}${model})`
+  }
+  const out: DoctorCheck[] = [
+    names.length === 0
+      ? check('providers', 'ok', 'none configured')
+      : check('providers', 'ok', `${names.length} configured: ${names.map(label).join(', ')}`),
+  ]
+  for (const n of names) {
+    const e = providers[n]!
+    if (!('apiKeyEnv' in e) || e.apiKeyEnv === undefined) {
+      continue
+    }
+    out.push(
+      !isEnvName(e.apiKeyEnv)
+        ? check(
+            'providers',
+            'warn',
+            `providers.${n}.apiKeyEnv is not a valid env var name`,
+            'name the variable holding the key (SCREAMING_SNAKE) — config never holds the key itself'
+          )
+        : process.env[e.apiKeyEnv] === undefined || process.env[e.apiKeyEnv] === ''
+          ? check(
+              'providers',
+              'warn',
+              `the env var named by providers.${n}.apiKeyEnv is not set`,
+              'export it — the provider fails at first use without it'
+            )
+          : check('providers', 'ok', `providers.${n} auth env set`)
+    )
+  }
+  // dangling/surface-mismatched refs — judge refs resolve against the
+  // effective registry (entries + synthesized legacy aliases); the
+  // fallback is provider-mode only (in connector mode it names a
+  // connector, which is not this check's business)
+  const { judge: jcfg } = judgeConfig(dir)
+  const effective = synthesizedProviders(jcfg, providers)
+  const refs: Array<[string, string | undefined, ProviderSurface]> = [
+    ['judge.provider', jcfg.provider, 'call'],
+    ...(jcfg.provider === undefined
+      ? []
+      : ([['judge.fallback', jcfg.fallback, 'call']] as Array<
+          [string, string | undefined, ProviderSurface]
+        >)),
+    ...Object.entries(env.agents).map(
+      ([b, a]): [string, string | undefined, ProviderSurface] => [
+        `agents.${b}.provider`,
+        typeof a.provider === 'string' ? a.provider : undefined,
+        'spawn',
+      ]
+    ),
+    ...Object.entries(env.fleet?.profiles ?? {}).map(
+      ([p, f]): [string, string | undefined, ProviderSurface] => [
+        `fleet.profiles.${p}.provider`,
+        f.provider,
+        'spawn',
+      ]
+    ),
+  ]
+  for (const [field, name, surface] of refs) {
+    if (name === undefined || name === '') {
+      continue
+    }
+    const entry = effective[name]
+    if (entry === undefined) {
+      out.push(
+        check(
+          'providers',
+          'warn',
+          `${field} names '${name}' — no such provider entry`,
+          'add it under providers{} or fix the reference — use-time resolution errors out'
+        )
+      )
+    } else {
+      const kind = PROVIDER_REGISTRY[entry.type]
+      if (surface === 'call' ? kind.call === null : !kind.spawn) {
+        out.push(
+          check(
+            'providers',
+            'warn',
+            `${field} names '${name}' (${entry.type}) — no ${surface} surface`,
+            'the kind lacks that surface — use-time resolution errors out'
+          )
+        )
+      }
+    }
+  }
+  return out
+}
+
 /** Janitor probe — a dry run over `<git-common>/bro/` reporting the
  *  retention debris the next `bro watch` tick would reap. Probes stay
  *  read-only: this counts, it never unlinks (bro-f6zp). */
@@ -418,6 +527,7 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
 
   checks.push(checkHooks(dir))
   checks.push(checkConfig([dir, root, mainRoot(dir)].filter((d): d is string => d !== null)))
+  checks.push(...providerChecks(dir))
   const janitor = checkJanitor(dir)
   if (janitor !== null) {
     checks.push(janitor)

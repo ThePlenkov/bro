@@ -37,15 +37,21 @@ describe('providerClient', () => {
     assert.equal(typeof prose.chat, 'function')
   })
 
-  test('a kind with no binding yet throws — naming provider + kind', () => {
-    const entry = { type: 'cli', command: 'devin -p' } as const
+  test('a cli entry binds the prose chat surface', () => {
+    const client = providerClient('local', { type: 'cli', command: 'devin -p' })
+    assert.equal(typeof client.chat, 'function')
+    assert.equal(client.call, undefined)
+  })
+
+  test('a kind with no binding throws — naming provider + kind', () => {
+    const entry = { type: 'vllm' } as unknown as ProviderEntry
     assert.throws(
       () => providerClient('kilo', entry),
       (e: unknown) =>
         e instanceof Error &&
         /providers\.kilo/.test(e.message) &&
-        /'cli'/.test(e.message) &&
-        /no client binding yet/.test(e.message)
+        /'vllm'/.test(e.message) &&
+        /no client binding/.test(e.message)
     )
   })
 })

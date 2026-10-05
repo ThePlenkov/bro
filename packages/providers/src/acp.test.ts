@@ -475,10 +475,9 @@ describe('providerClient wiring', () => {
     assert.equal(typeof prose.chat, 'function')
   })
 
-  test('cli is still the unbound kind — startup error naming provider + kind', () => {
-    assert.throws(
-      () => providerClient('d', { type: 'cli', command: 'devin -p' }),
-      /providers\.d \(type 'cli'\) has no client binding yet/
-    )
+  test('a cli entry binds the prose chat surface', () => {
+    const client = providerClient('d', { type: 'cli', command: 'devin -p' })
+    assert.equal(typeof client.chat, 'function')
+    assert.equal(client.call, undefined)
   })
 })

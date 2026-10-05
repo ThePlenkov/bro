@@ -9,6 +9,8 @@ scope:
   - packages/cli/src/commands/fleet.ts
   - packages/cli/src/commands/agents.ts
   - packages/cli/src/commands/judge.ts
+  - packages/cli/src/commands/doctor.ts
+  - skills/providers/
 ---
 
 # bro-ribc.1 — provider facade: one typed provider registry for judge and fleet
@@ -252,6 +254,9 @@ packages/judge/src/provider-judge.ts  JudgeFacade over a provider entry;
                                       llm-judge parse moves here for prose kinds
 packages/cli/src/agent-connectors.ts  SpawnSpec + provider resolution for fleet
 packages/cli/src/commands/fleet.ts    provider+model columns, --json fields
+packages/cli/src/commands/doctor.ts   provider rows — entries, auth env,
+                                      dangling/surface-mismatched refs
+skills/providers/                     the providers skill (pack copy generated)
 ```
 
 One new package because the SDK deps must be optional weight: a repo

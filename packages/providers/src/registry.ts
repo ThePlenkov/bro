@@ -13,6 +13,7 @@ import type {
   ProviderEntry,
 } from '@broject/core'
 import { acpClient } from './acp.ts'
+import { cliChat } from './cli.ts'
 import { openaiCompatChat } from './openai.ts'
 import { systemoneCall, type ProviderWireOpts } from './systemone.ts'
 
@@ -75,10 +76,17 @@ export function providerClient(
       // 'auto' grade — the binding picks call vs chat on the resolved
       // model (systemone-family → typed, else prose)
       return acpClient(`provider:${name}`, entry, { ...opts, keyField })
-    default:
+    case 'cli':
+      return { chat: cliChat(`provider:${name}`, entry, opts) }
+    default: {
+      // entry is `never` here — the union is fully bound; a raw entry
+      // reaching this branch bypassed validation, so read the kind
+      // defensively for the message
+      const bad = (entry as { type?: string }).type ?? 'unknown'
       throw new Error(
-        `providers.${name} (type '${entry.type}') has no client binding yet — ` +
-          'the kind is registered but ships with a later milestone (spec bro-ribc.1)'
+        `providers.${name} (type '${bad}') has no client binding — ` +
+          'a registered kind with no binding is a registry defect (spec bro-ribc.1)'
       )
+    }
   }
 }
