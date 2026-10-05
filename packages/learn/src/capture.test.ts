@@ -34,7 +34,7 @@ for (let i = 0; i < args.length; i++) {
     else flags[k] = true
   } else if (/^-\\w$/.test(t) && args[i + 1] !== undefined && !args[i + 1].startsWith('-')) {
     const k = t.slice(1)
-    flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[i])
+    flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
   } else pos.push(t)
 }
 const db = load()

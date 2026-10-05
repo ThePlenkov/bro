@@ -169,9 +169,16 @@ function evidenceProblems(ev: unknown): string[] {
     isObj(e) &&
     (EVIDENCE_KINDS as readonly string[]).includes(e.kind as string) &&
     isNonEmptyStr(e.ref)
-  return ev.every(itemOk)
-    ? []
-    : [`evidence items must be {kind: ${EVIDENCE_KINDS.join('|')}, ref: string}`]
+  // index the slots directly — every() skips a sparse array's holes
+  // without calling itemOk (internal property check, the original
+  // bug), and iterator traversal (Array.from, for..of) inherits
+  // whatever a custom iterator would skip
+  for (let i = 0; i < ev.length; i++) {
+    if (!itemOk(ev[i])) {
+      return [`evidence items must be {kind: ${EVIDENCE_KINDS.join('|')}, ref: string}`]
+    }
+  }
+  return []
 }
 
 /**

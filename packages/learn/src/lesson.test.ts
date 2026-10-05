@@ -43,6 +43,12 @@ describe('lessonProblems', () => {
     assert.ok(lessonProblems(valid({ evidence: [] })).some((p) => p.includes('evidence')))
   })
 
+  it('rejects a sparse evidence array — every() must not skip holes', () => {
+    assert.ok(
+      lessonProblems(valid({ evidence: new Array(2) })).some((p) => p.includes('evidence'))
+    )
+  })
+
   it('rejects an unknown evidence kind and a blank ref independently', () => {
     assert.ok(
       lessonProblems(valid({ evidence: [{ kind: 'hunch' as never, ref: 'x' }] })).some((p) =>
