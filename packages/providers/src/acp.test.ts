@@ -220,6 +220,134 @@ describe('acp call surface — typed mode', () => {
     )
     assert.equal(fake.sessions.length, 0)
   })
+
+  test('an agent reporting another family is refused — a swap never parses typed', async () => {
+    const fake = fakeAcpAgent({
+      replyText: TYPED_REPLY,
+      configOptions: [MODEL_OPTION],
+      reportedModel: 'qwen3-coder',
+    })
+    await assert.rejects(
+      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+        's',
+        QUESTIONS,
+        deadline()
+      ),
+      (e: unknown) =>
+        e instanceof Error &&
+        !(e instanceof JudgeUnavailable) &&
+        /qwen3-coder/.test(e.message) &&
+        /model-family swap/.test(e.message)
+    )
+  })
+
+  test('a same-family model report canonicalizes — provenance carries it', async () => {
+    const fake = fakeAcpAgent({
+      replyText: TYPED_REPLY,
+      configOptions: [MODEL_OPTION],
+      reportedModel: 'typesafe/jev-2.0',
+    })
+    const res = await acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+      's',
+      QUESTIONS,
+      deadline()
+    )
+    assert.equal(res.model, 'typesafe/jev-1.13')
+  })
+
+  test('a peer refusal of set_config_option is a config error naming the model', async () => {
+    const fake = fakeAcpAgent({
+      replyText: TYPED_REPLY,
+      configOptions: [MODEL_OPTION],
+      failConfig: 'refuse',
+    })
+    await assert.rejects(
+      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+        's',
+        QUESTIONS,
+        deadline()
+      ),
+      (e: unknown) =>
+        e instanceof Error &&
+        !(e instanceof JudgeUnavailable) &&
+        /refused model 'typesafe\/jev-1\.13'/.test(e.message)
+    )
+  })
+
+  test('a cancelled set_config_option fails open — availability, not config', async () => {
+    const fake = fakeAcpAgent({
+      replyText: TYPED_REPLY,
+      configOptions: [MODEL_OPTION],
+      failConfig: 'cancel',
+    })
+    await assert.rejects(
+      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+        's',
+        QUESTIONS,
+        deadline()
+      ),
+      (e: unknown) => e instanceof JudgeUnavailable
+    )
+  })
+
+  test('choice probabilities keyed off the asked options are drift — fail open', async () => {
+    const bad = JSON.stringify({
+      answers: {
+        route: { type: 'choice', choice: 'a', probabilities: { other: 1 } },
+      },
+    })
+    const fake = fakeAcpAgent({ replyText: bad, configOptions: [MODEL_OPTION] })
+    await assert.rejects(
+      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+        's',
+        QUESTIONS,
+        deadline()
+      ),
+      (e: unknown) => e instanceof JudgeUnavailable && /route/.test(e.message)
+    )
+  })
+
+  test('score probabilities keyed off the level range are drift — fail open', async () => {
+    const questions: Record<string, JudgeQuestion> = {
+      rate: {
+        type: 'score',
+        instructions: 'rate?',
+        criteria: ['low', 'mid', 'high'],
+      },
+    }
+    const bad = JSON.stringify({
+      answers: { rate: { type: 'score', score: 1, probabilities: { x: 1 } } },
+    })
+    const fake = fakeAcpAgent({ replyText: bad, configOptions: [MODEL_OPTION] })
+    await assert.rejects(
+      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+        's',
+        questions,
+        deadline()
+      ),
+      (e: unknown) => e instanceof JudgeUnavailable && /rate/.test(e.message)
+    )
+  })
+
+  test('a "__proto__" question id lands as an own answer key', async () => {
+    const questions = Object.fromEntries([
+      ['__proto__', { type: 'noul', instructions: 'blocking?' } as JudgeQuestion],
+    ])
+    const body = JSON.stringify({
+      model: 'typesafe/jev-1.13',
+      answers: Object.fromEntries([
+        ['__proto__', { type: 'noul', noul: 0.6 }],
+      ]),
+    })
+    const fake = fakeAcpAgent({ replyText: body, configOptions: [MODEL_OPTION] })
+    const res = await acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+      's',
+      questions,
+      deadline()
+    )
+    assert.equal(Object.hasOwn(res.answers, '__proto__'), true)
+    assert.equal(res.answers['__proto__' as keyof typeof res.answers]?.type, 'noul')
+  })
 })
 
 describe('acp chat surface — prose mode', () => {

@@ -2,7 +2,7 @@
  *  providers and judge suites. Each queued `{status, body}` is served
  *  in order (the last repeats); `calls` records url + init so tests
  *  assert on the request that went out. */
-import { agent } from '@agentclientprotocol/sdk'
+import { agent, RequestError } from '@agentclientprotocol/sdk'
 import type {
   AgentApp,
   AuthMethod,
@@ -52,6 +52,12 @@ export function fakeAcpAgent(
     authMethods?: AuthMethod[]
     protocolVersion?: number
     configOptions?: SessionConfigOption[]
+    /** set_config_option reports this value instead of the pin — an
+     *  agent that "applied" the request but kept running another model. */
+    reportedModel?: string
+    /** set_config_option fails: 'refuse' answers a peer error,
+     *  'cancel' answers -32800 like an aborted request. */
+    failConfig?: 'refuse' | 'cancel'
   } = {}
 ): FakeAcpAgent {
   const seen: FakeAcpAgent = {
@@ -72,10 +78,17 @@ export function fakeAcpAgent(
     })
     .onRequest('session/set_config_option', (ctx) => {
       seen.configSets.push({ configId: ctx.params.configId, value: ctx.params.value })
+      if (opts.failConfig === 'cancel') {
+        throw RequestError.requestCancelled({ configId: ctx.params.configId })
+      }
+      if (opts.failConfig === 'refuse') {
+        throw new Error('model not supported')
+      }
+      const currentValue = opts.reportedModel ?? String(ctx.params.value)
       return {
         configOptions: (opts.configOptions ?? []).map((o) =>
           o.id === ctx.params.configId && o.type === 'select'
-            ? { ...o, currentValue: String(ctx.params.value) }
+            ? { ...o, currentValue }
             : o
         ),
       }

@@ -21,7 +21,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { Readable, Writable } from 'node:stream'
-import { client, ndJsonStream, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
+import { client, ndJsonStream, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk'
 import type {
   ClientContext,
   ClientRequestHandler,
@@ -61,6 +61,11 @@ class AcpConfigError extends Error {
  *  served model is prose-grade. */
 export const isSystemoneFamily = (model: string | undefined): boolean =>
   model !== undefined && /^(?:typesafe\/)?jev-/.test(model)
+
+/** JSON-RPC request-cancelled — the code both ends use for an aborted
+ *  request. A cancel is availability (deadline, transport), never the
+ *  peer refusing a value. */
+const REQUEST_CANCELLED = -32800
 
 const errMsg = (err: unknown): string =>
   err instanceof Error ? err.message : String(err)
@@ -189,12 +194,13 @@ async function applyModel(
       req()
     )
     .catch((err: unknown) => {
-      // a transport drop or the caller's deadline is an outage, not a
-      // refusal — fail open as JudgeUnavailable, never mislabel config
-      if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
-        throw new JudgeUnavailable(`${by} (acp) model pin aborted — ${errMsg(err)}`)
+      // only the peer's own error reply is a refusal — a cancel or a
+      // dropped transport is availability, not config: it rides up to
+      // the JudgeUnavailable mapping in acpRoundTrip
+      if (err instanceof RequestError && err.code !== REQUEST_CANCELLED) {
+        throw new AcpConfigError(`${by}: agent refused model '${model}' — ${errMsg(err)}`)
       }
-      throw new AcpConfigError(`${by}: agent refused model '${model}' — ${errMsg(err)}`)
+      throw err
     })
   const served = res.configOptions.find((o) => o.id === modelOpt.id)?.currentValue
   const reported = typeof served === 'string' ? served : model

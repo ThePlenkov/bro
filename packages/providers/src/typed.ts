@@ -69,13 +69,15 @@ function mapAnswer(
   }
   switch (a.type) {
     case 'choice': {
-      const criteria = q.type === 'choice' ? q.criteria : {}
       if (
         typeof a.choice !== 'string' ||
         q.type !== 'choice' ||
-        !Object.hasOwn(criteria, a.choice) ||
-        !isProbsOn(a.probabilities, (k) => Object.hasOwn(criteria, k))
+        !Object.hasOwn(q.criteria, a.choice)
       ) {
+        break
+      }
+      const criteria = q.criteria
+      if (!isProbsOn(a.probabilities, (k) => Object.hasOwn(criteria, k))) {
         break
       }
       return {
@@ -92,9 +94,12 @@ function mapAnswer(
         !isNum(a.score) ||
         q.type !== 'score' ||
         a.score < 0 ||
-        a.score > q.criteria.length - 1 ||
-        !isProbs(a.probabilities)
+        a.score > q.criteria.length - 1
       ) {
+        break
+      }
+      const levels = q.criteria.length
+      if (!isProbsOn(a.probabilities, (k) => isLevelKey(k, levels))) {
         break
       }
       return {

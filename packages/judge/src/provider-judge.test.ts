@@ -34,6 +34,16 @@ const QUESTIONS: Record<string, JudgeQuestion> = {
   },
 }
 
+/** A category:"model" select option advertising exactly `value`. */
+const modelOption = (value: string) => ({
+  type: 'select' as const,
+  id: 'm',
+  name: 'Model',
+  category: 'model' as const,
+  currentValue: value,
+  options: [{ value, name: value }],
+})
+
 const TYPED_BODY = {
   model: 'jev-1.13.0',
   answers: {
@@ -160,16 +170,7 @@ describe('providerJudge', () => {
           },
         },
       }),
-      configOptions: [
-        {
-          type: 'select',
-          id: 'm',
-          name: 'Model',
-          category: 'model',
-          currentValue: 'typesafe/jev-1.13',
-          options: [{ value: 'typesafe/jev-1.13', name: 'jev' }],
-        },
-      ],
+      configOptions: [modelOption('typesafe/jev-1.13')],
     })
     const entry: ProviderEntry = {
       type: 'acp',
@@ -188,16 +189,7 @@ describe('providerJudge', () => {
       replyText: JSON.stringify({
         answers: { route: { type: 'choice', choice: 'b', confidence: 0.7 } },
       }),
-      configOptions: [
-        {
-          type: 'select',
-          id: 'm',
-          name: 'Model',
-          category: 'model',
-          currentValue: 'qwen3-coder',
-          options: [{ value: 'qwen3-coder', name: 'qwen' }],
-        },
-      ],
+      configOptions: [modelOption('qwen3-coder')],
     })
     const entry: ProviderEntry = {
       type: 'acp',
