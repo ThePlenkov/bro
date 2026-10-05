@@ -148,7 +148,9 @@ export type {
   GateContribution,
   MaybePromise,
   PreToolVerdict,
+  ProbeReporter,
   ProbeResult,
+  ProbeTiming,
 } from './connectors.ts'
 export {
   AgentNotFound,

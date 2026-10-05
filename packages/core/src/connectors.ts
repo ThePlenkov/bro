@@ -452,15 +452,16 @@ export function specStore(
   return facade('specs', { dir }, { prefer })
 }
 
-/** Every registered connector's hook probes — hooks collect, never pick:
- *  each system reports its own ambient state. */
-export function connectorHooks(ctx: ConnectorCtx): ConnectorHooks[] {
-  const out: ConnectorHooks[] = []
+/** Every registered connector's hook probes paired with its name —
+ *  hooks collect, never pick: each system reports its own ambient
+ *  state. The name rides along so perf rows can blame a connector. */
+export function connectorHooks(ctx: ConnectorCtx): { name: string; hooks: ConnectorHooks }[] {
+  const out: { name: string; hooks: ConnectorHooks }[] = []
   for (const c of registry) {
     try {
       const h = c.hooks?.(ctx)
       if (h) {
-        out.push(h)
+        out.push({ name: c.name, hooks: h })
       }
     } catch {
       // a wedged connector contributes no probes — fail-open
@@ -499,33 +500,61 @@ export interface ProbeResult {
   settled: boolean
 }
 
+/** One probe's timing row — the perf journal's per-connector record.
+ *  `timedOut` = the probe raced past its budget; `failed` = it threw
+ *  (or a missing probe was skipped — absent probes report nothing). */
+export interface ProbeTiming {
+  connector: string
+  ms: number
+  timedOut?: true
+  failed?: true
+}
+
+/** Report one timing row per probe — wired to the perf journal by the
+ *  hooks bus; collectors default to silent so tests and non-hook
+ *  callers see no behavior change. */
+export type ProbeReporter = (rows: ProbeTiming[]) => void
+
 /** Collect a line-producing probe across all connectors — fail-open
  *  per connector, one wedged system must not starve the rest. A probe
  *  that times out or throws still contributes nothing, but flips
- *  `settled` so the caller can retry instead of caching the miss. */
+ *  `settled` so the caller can retry instead of caching the miss.
+ *  Probes run in parallel — the sweep's worst case is ONE probe
+ *  budget, not N; output order stays registry order. */
 async function collectLines(
   ctx: ConnectorCtx,
-  probe: (h: ConnectorHooks) => MaybePromise<string[] | undefined>
+  probe: (h: ConnectorHooks) => MaybePromise<string[] | undefined>,
+  onProbe?: ProbeReporter
 ): Promise<ProbeResult> {
-  const out: string[] = []
-  let settled = true
-  for (const h of connectorHooks(ctx)) {
-    try {
-      const r = await probeWithTimeout<string[] | undefined | typeof PROBE_TIMED_OUT>(
-        probe(h),
-        PROBE_TIMED_OUT
-      )
-      if (r === PROBE_TIMED_OUT) {
-        settled = false
-        continue
+  const rows = await Promise.all(
+    connectorHooks(ctx).map(async ({ name, hooks }) => {
+      const t0 = Date.now()
+      try {
+        const r = await probeWithTimeout<string[] | undefined | typeof PROBE_TIMED_OUT>(
+          probe(hooks),
+          PROBE_TIMED_OUT
+        )
+        return {
+          name,
+          lines: r === PROBE_TIMED_OUT ? [] : (r ?? []),
+          timing: { connector: name, ms: Date.now() - t0, ...(r === PROBE_TIMED_OUT ? { timedOut: true as const } : {}) },
+          settled: r !== PROBE_TIMED_OUT,
+        }
+      } catch {
+        return {
+          name,
+          lines: [] as string[],
+          timing: { connector: name, ms: Date.now() - t0, failed: true as const },
+          settled: false,
+        }
       }
-      out.push(...(r ?? []))
-    } catch {
-      // fail-open output, but the sweep did not settle
-      settled = false
-    }
+    })
+  )
+  onProbe?.(rows.map((r) => r.timing))
+  return {
+    lines: rows.flatMap((r) => r.lines),
+    settled: rows.every((r) => r.settled),
   }
-  return { lines: out, settled }
 }
 
 /** Collect session-start context lines from all connectors. */
@@ -535,8 +564,11 @@ export async function sessionStartLines(ctx: ConnectorCtx): Promise<string[]> {
 
 /** Session-start lines plus the settle flag — rehydrate marks are only
  *  honest when every probe answered. */
-export function sessionStartProbe(ctx: ConnectorCtx): Promise<ProbeResult> {
-  return collectLines(ctx, (h) => h.sessionStart?.(ctx))
+export function sessionStartProbe(
+  ctx: ConnectorCtx,
+  onProbe?: ProbeReporter
+): Promise<ProbeResult> {
+  return collectLines(ctx, (h) => h.sessionStart?.(ctx), onProbe)
 }
 
 /** Collect parallel-work signals from all connectors. */
@@ -545,35 +577,63 @@ export async function parallelWorkLines(ctx: ConnectorCtx): Promise<string[]> {
 }
 
 /** Parallel-work lines plus the settle flag. */
-export function parallelWorkProbe(ctx: ConnectorCtx): Promise<ProbeResult> {
-  return collectLines(ctx, (h) => h.parallelWork?.(ctx))
+export function parallelWorkProbe(
+  ctx: ConnectorCtx,
+  onProbe?: ProbeReporter
+): Promise<ProbeResult> {
+  return collectLines(ctx, (h) => h.parallelWork?.(ctx), onProbe)
 }
 
 /** Collect prompt-submit context from all connectors. */
-export async function promptContextLines(ctx: ConnectorCtx, prompt: string): Promise<string[]> {
-  return (await collectLines(ctx, (h) => h.promptSubmit?.(ctx, prompt))).lines
+export async function promptContextLines(
+  ctx: ConnectorCtx,
+  prompt: string,
+  onProbe?: ProbeReporter
+): Promise<string[]> {
+  return (await collectLines(ctx, (h) => h.promptSubmit?.(ctx, prompt), onProbe)).lines
 }
 
 /** Collect post-tool context lines from all connectors — mailbox
  *  drains and other per-event probes. */
-export async function postToolLines(ctx: ConnectorCtx): Promise<string[]> {
-  return (await collectLines(ctx, (h) => h.postTool?.(ctx))).lines
+export async function postToolLines(
+  ctx: ConnectorCtx,
+  onProbe?: ProbeReporter
+): Promise<string[]> {
+  return (await collectLines(ctx, (h) => h.postTool?.(ctx), onProbe)).lines
 }
 
 /** Collect stop-gate contributions from all connectors — the caller
- *  applies the session-arming policy to each. */
+ *  applies the session-arming policy to each. Parallel like the line
+ *  sweeps: one wedged probe must not serialize the gate. */
 export async function stopGateContributions(
-  ctx: ConnectorCtx
+  ctx: ConnectorCtx,
+  onProbe?: ProbeReporter
 ): Promise<GateContribution[]> {
-  const out: GateContribution[] = []
-  for (const h of connectorHooks(ctx)) {
-    try {
-      out.push(...((await probeWithTimeout(h.stopGate?.(ctx), undefined)) ?? []))
-    } catch {
-      // fail-open
-    }
-  }
-  return out
+  const rows = await Promise.all(
+    connectorHooks(ctx).map(async ({ name, hooks }) => {
+      const t0 = Date.now()
+      try {
+        const r = await probeWithTimeout<
+          GateContribution[] | undefined | typeof PROBE_TIMED_OUT
+        >(hooks.stopGate?.(ctx), PROBE_TIMED_OUT)
+        return {
+          contributions: r === PROBE_TIMED_OUT ? [] : (r ?? []),
+          timing: {
+            connector: name,
+            ms: Date.now() - t0,
+            ...(r === PROBE_TIMED_OUT ? { timedOut: true as const } : {}),
+          },
+        }
+      } catch {
+        return {
+          contributions: [] as GateContribution[],
+          timing: { connector: name, ms: Date.now() - t0, failed: true as const },
+        }
+      }
+    })
+  )
+  onProbe?.(rows.map((r) => r.timing))
+  return rows.flatMap((r) => r.contributions)
 }
 
 /** Collect pre-tool verdicts from all connectors — the caller decides
