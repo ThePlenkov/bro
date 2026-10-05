@@ -527,6 +527,27 @@ describe('stop gate', () => {
     assert.equal(calls().length, 0)
   })
 
+  test('a session deleted mid-gate is not re-prompted and does not stay gated', async () => {
+    respond({ stop: JSON.stringify(blocked) })
+    const { hooks, prompts } = await makeHooks()
+
+    await finishTurn(hooks, 'ses_1')
+    const idle = hooks.event?.({
+      event: { type: 'session.idle', properties: { sessionID: 'ses_1' } },
+    })
+    // the stop probe is in flight — the session dies before the gate lands
+    await hooks.event?.({
+      event: { type: 'session.deleted', properties: { info: { id: 'ses_1' } } },
+    })
+    await idle
+    assert.deepEqual(prompts, [])
+
+    // a session reusing the id gets a fresh one-shot, not a suppressed gate
+    await finishTurn(hooks, 'ses_1')
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
+    assert.equal(prompts.length, 1)
+  })
+
   test('session.deleted clears rehydration and the one-shot gate', async () => {
     respond({
       'session-start': JSON.stringify(ctx('state')),
