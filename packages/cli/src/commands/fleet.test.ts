@@ -160,12 +160,26 @@ const payloadRow = (agent: string): FleetRow => ({
   agent,
 })
 
+const STUB_BUDGET: FleetPayload['budget'] = {
+  basis: 'local-estimate',
+  limits: [],
+  entries: 0,
+  live: 0,
+  blocked: 0,
+  maxConcurrent: 3,
+  spawnedLastHour: 0,
+  spawnedPerHour: [],
+  resets: [],
+  causes: [],
+}
+
 const payload = (over: Partial<FleetPayload> = {}): FleetPayload => ({
   rows: [payloadRow('running (pid 42)')],
   degraded: [],
   conflicts: [],
   prErrors: [],
   occupancy: { occupied: 1, maxConcurrent: 3 },
+  budget: STUB_BUDGET,
   ...over,
 })
 

@@ -50,6 +50,7 @@ import {
   readAgentRegistry,
   withAgentRegistryLock,
   writeAgentRegistry,
+  type AgentCause,
   type AgentConnector,
   type AgentInfo,
   type AgentRegistryEntry,
@@ -542,9 +543,32 @@ function entryOccupies(
     case 'gascity':
       return gcOccupies(molStep, entry, probes.gcSessions(), probes.gcSupervisor)
     default:
-      // a backend this build doesn't know — no probe exists. Recorded
-      // death frees the slot; anything else may still be a live worker
+      // a backend this build doesn't know — no probe exists, so the
+      // .exit file is the only death record readable. Harvest before
+      // the verdict: an unharvested .exit would occupy forever, and its
+      // recorded cause would never reach the budget walk
+      ensureExitCause(dir, home, molStep, entry)
       return entry.stopped !== true && entry.exitStatus === undefined
+  }
+}
+
+/** The memoized probe set one registry walk shares across entries — N
+ *  entries never pay N subprocesses, and a backend with no entries costs
+ *  no round-trip at all. fleetOccupancy and budgetSnapshot share it. */
+interface OccupancyProbes {
+  tmuxLive: () => Set<string> | undefined
+  gcSessions: () => GcSession[] | undefined
+  gcSupervisor: () => boolean | undefined
+}
+
+function occupancyProbes(dir: string, env: AgentConnectorEnv): OccupancyProbes {
+  return {
+    tmuxLive: memo(() => tmuxLiveSessions(env)),
+    gcSessions: memo(() => {
+      const city = gcConfigDir(dir, env)
+      return city === null ? undefined : listGcSessions(city).sessions
+    }),
+    gcSupervisor: memo(() => gcSupervisorRunning()),
   }
 }
 
@@ -559,14 +583,7 @@ export function fleetOccupancy(
   registry: Record<string, AgentRegistryEntry>,
   env: AgentConnectorEnv
 ): number {
-  const probes = {
-    tmuxLive: memo(() => tmuxLiveSessions(env)),
-    gcSessions: memo(() => {
-      const city = gcConfigDir(dir, env)
-      return city === null ? undefined : listGcSessions(city).sessions
-    }),
-    gcSupervisor: memo(() => gcSupervisorRunning()),
-  }
+  const probes = occupancyProbes(dir, env)
   let occupied = 0
   for (const [molStep, entry] of Object.entries(registry)) {
     if (entryOccupies(dir, home, molStep, entry, probes)) {
@@ -584,6 +601,203 @@ export function fleetOccupancy(
  *  the surface under-report the fleet. */
 export function fleetOccupancyFor(dir: string, env: AgentConnectorEnv): number {
   return fleetOccupancy(dir, agentsHome(dir), readAgentRegistry(dir), env)
+}
+
+// --- budget observability -----------------------------------------------------
+// specs/bro-7xgk.3.md — a local proxy for the provider's hourly budget:
+// the wall is only actionable when it's visible before it lands. bro
+// never reads provider quota internals; it counts what it causes —
+// the registry's spawns, deaths, and observed resets.
+
+/** One provider reset observed in an agent's log tail — `holding` is
+ *  whether the respawn block still applies; a reset whose time passed
+ *  is history, not a live block. */
+export interface BudgetReset {
+  step: string
+  agent: string
+  cause: AgentCause
+  resetAt: string
+  holding: boolean
+}
+
+/** The last known failure cause one registry entry carries — the
+ *  registry keeps the latest run per step, so earlier failures are gone. */
+export interface BudgetCause {
+  step: string
+  agent: string
+  backend: string
+  cause: AgentCause
+}
+
+/** The measurement limits every consumer must be able to repeat — the
+ *  numbers are bro's own accounting, never provider quota data. Local
+ *  accounting CAN be wrong (double-persisted spawns, rewritten history)
+ *  which is why the snapshot says so in-band instead of relying on docs. */
+export const BUDGET_LIMITS: readonly string[] = [
+  'counts bro registry agents only — interactive sessions and foreign tools are invisible',
+  'spawn history is bounded by janitor retention — reaped entries no longer count',
+  "causes classify from log tails — a provider wall that prints nothing reads 'crash'",
+  "the registry keeps the latest run per step — earlier failures' causes are gone",
+]
+
+/** The local-estimate budget picture (specs/bro-7xgk.3.md). `basis` is
+ *  in-band so a consumer can't strip the disclaimer. */
+export interface BudgetSnapshot {
+  basis: 'local-estimate'
+  /** The measurement limits, spelled out — BUDGET_LIMITS verbatim. */
+  limits: string[]
+  /** Registry rows read — the snapshot's whole evidence base. */
+  entries: number
+  /** Live agents — the same fail-closed occupancy verdict admission
+   *  enforces; a maybe-live entry counts. */
+  live: number
+  /** Agents dead on a budget wall whose respawn block still holds. */
+  blocked: number
+  /** fleet.maxConcurrent — 0 = uncapped. */
+  maxConcurrent: number
+  /** Spawns in the trailing 60 minutes — a respawn re-stamps spawnedAt
+   *  and counts again: a respawn IS a fresh burn. */
+  spawnedLastHour: number
+  /** Per-hour spawn histogram over the registry's retention window,
+   *  ascending by truncated UTC hour. */
+  spawnedPerHour: { hour: string; count: number }[]
+  /** Provider resets observed in log tails, with the reported time. */
+  resets: BudgetReset[]
+  /** Last known failure cause per registry entry. */
+  causes: BudgetCause[]
+}
+
+/** The per-entry tallies a walk accumulates into a BudgetSnapshot. */
+interface BudgetWalk {
+  live: number
+  blocked: number
+  spawnedLastHour: number
+  perHour: Map<string, number>
+  resets: BudgetReset[]
+  causes: BudgetCause[]
+}
+
+/** One entry's contribution — fail-closed liveness, the lazy cause
+ *  harvest (only native's liveness probe walks the death ladder, so
+ *  this read is what classifies tmux/unknown/foreign entries), the
+ *  spawnedAt hour bucket, and the reset/cause records. */
+function budgetEntry(
+  dir: string,
+  home: string | null,
+  probes: OccupancyProbes,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  now: number,
+  acc: BudgetWalk
+): void {
+  // harvest BEFORE the liveness verdict — an unknown backend occupies
+  // whenever exitStatus is absent, and an unharvested .exit file is a
+  // proven death that frees the slot, not a maybe-live agent; running
+  // the ladder first also lands the cause this section exists to show
+  ensureExitCause(dir, home, molStep, entry)
+  if (entryOccupies(dir, home, molStep, entry, probes)) {
+    acc.live++
+  }
+  const spawned = Date.parse(entry.spawnedAt)
+  if (!Number.isNaN(spawned)) {
+    const hour = `${new Date(spawned).toISOString().slice(0, 13)}:00:00.000Z`
+    acc.perHour.set(hour, (acc.perHour.get(hour) ?? 0) + 1)
+    if (now - spawned < 3_600_000) {
+      acc.spawnedLastHour++
+    }
+  }
+  const holding = agentEntryBlocked(entry, now)
+  if (holding) {
+    acc.blocked++
+  }
+  if (isAgentCause(entry.cause)) {
+    acc.causes.push({
+      step: molStep,
+      agent: entry.agentId,
+      backend: entry.backend,
+      cause: entry.cause,
+    })
+  }
+  if (typeof entry.resetAt === 'string' && entry.resetAt !== '') {
+    acc.resets.push({
+      step: molStep,
+      agent: entry.agentId,
+      cause: isAgentCause(entry.cause) ? entry.cause : 'crash',
+      resetAt: entry.resetAt,
+      holding,
+    })
+  }
+}
+
+/** The local budget proxy — one registry walk: fail-closed liveness per
+ *  entry (the same verdict admission enforces) plus the spawn/reset/
+ *  cause tallies. Mutates the passed entries like every read path here:
+ *  harvested fields land on the entry objects whether or not the
+ *  advisory registry write does. */
+export function budgetSnapshot(
+  dir: string,
+  home: string | null,
+  registry: Record<string, AgentRegistryEntry>,
+  env: AgentConnectorEnv,
+  now = Date.now()
+): BudgetSnapshot {
+  const probes = occupancyProbes(dir, env)
+  const rows = Object.entries(registry)
+  const acc: BudgetWalk = {
+    live: 0,
+    blocked: 0,
+    spawnedLastHour: 0,
+    perHour: new Map(),
+    resets: [],
+    causes: [],
+  }
+  for (const [molStep, entry] of rows) {
+    budgetEntry(dir, home, probes, molStep, entry, now, acc)
+  }
+  return {
+    basis: 'local-estimate',
+    limits: [...BUDGET_LIMITS],
+    entries: rows.length,
+    live: acc.live,
+    blocked: acc.blocked,
+    maxConcurrent: fleetCapOf(env),
+    spawnedLastHour: acc.spawnedLastHour,
+    spawnedPerHour: [...acc.perHour.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([hour, count]) => ({ hour, count })),
+    resets: acc.resets,
+    causes: acc.causes,
+  }
+}
+
+/** The display-side snapshot — reads the registry itself, same pattern
+ *  as fleetOccupancyFor. */
+export function budgetSnapshotFor(dir: string, env: AgentConnectorEnv): BudgetSnapshot {
+  return budgetSnapshot(dir, agentsHome(dir), readAgentRegistry(dir), env)
+}
+
+/** The snapshot as section lines — `bro doctor` renders them under a
+ *  `budget` heading. The limits line travels with the numbers so they
+ *  can't read as provider truth. */
+export function budgetLines(b: BudgetSnapshot): string[] {
+  const cap = b.maxConcurrent > 0 ? `/${b.maxConcurrent}` : ' (uncapped)'
+  const blocked = b.blocked > 0 ? ` · ${b.blocked} blocked` : ''
+  const lines = [
+    `  live    ${b.live}${cap} agent slots${blocked}`,
+    `  spawned ${b.spawnedLastHour} in the last hour`,
+  ]
+  if (b.resets.length > 0) {
+    const cells = b.resets.map((r) => {
+      const holding = r.holding ? ' (holding)' : ''
+      return `${r.step} ${r.cause} til ${r.resetAt}${holding}`
+    })
+    lines.push(`  resets  ${cells.join(' · ')}`)
+  }
+  if (b.causes.length > 0) {
+    lines.push(`  causes  ${b.causes.map((c) => `${c.step}: ${c.cause}`).join(' · ')}`)
+  }
+  lines.push(`  limits  ${b.limits.join(' · ')}`)
+  return lines
 }
 
 /** Fleet admission under the spawn lock — refuse while OTHER live

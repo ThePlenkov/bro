@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import {
   agentRegistryPath,
   bdActor,
+  DEFAULT_CONFIG,
   patchAgentRegistry,
   procStat,
   readAgentRegistry,
@@ -26,7 +27,11 @@ import {
 } from '@broject/core'
 import {
   agentConnectorNames,
+  budgetLines,
+  budgetSnapshot,
+  BUDGET_LIMITS,
   eachAgentConnector,
+  fleetOccupancy,
   loadAgentEnv,
   makeNativeConnector,
   makeTmuxConnector,
@@ -35,6 +40,7 @@ import {
   resolveAgentConnector,
   unregisterAgentConnector,
   type AgentConnectorEnv,
+  type BudgetSnapshot,
 } from './agent-connectors.ts'
 import { initRepo, installFakeBd, readBeads, writeBeads } from './commands/testrepo.ts'
 
@@ -827,5 +833,234 @@ describe('loadAgentEnv', () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+// the taxonomy reads (bro-7xgk.3): the snapshot is the registry rendered
+// as a budget picture — fail-closed liveness, spawn hour-buckets, and the
+// resets/causes the death ladder recorded. NOW is fixed so the hour
+// buckets and the 60-minute window are deterministic.
+describe('budgetSnapshot', () => {
+  const NOW = Date.parse('2026-10-05T14:30:00Z')
+  const ENV: AgentConnectorEnv = { agents: {}, connectors: {} }
+  const agentsHomeOf = (main: string) => join(main, '.git', 'bro', 'agents')
+
+  test('empty registry → zeroed local-estimate that names its limits', () => {
+    const { root, main } = initRepo('bro-budget-')
+    try {
+      const snap = budgetSnapshot(main, agentsHomeOf(main), {}, ENV, NOW)
+      assert.equal(snap.basis, 'local-estimate')
+      assert.deepEqual(snap.limits, [...BUDGET_LIMITS])
+      assert.ok(snap.limits.length >= 3)
+      assert.equal(snap.entries, 0)
+      assert.equal(snap.live, 0)
+      assert.equal(snap.blocked, 0)
+      assert.equal(snap.spawnedLastHour, 0)
+      assert.deepEqual(snap.spawnedPerHour, [])
+      assert.deepEqual(snap.resets, [])
+      assert.deepEqual(snap.causes, [])
+      assert.equal(snap.maxConcurrent, DEFAULT_CONFIG.fleet.maxConcurrent)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('live count, hour buckets, resets and causes ride the registry', () => {
+    const { root, main } = initRepo('bro-budget-')
+    try {
+      const registry: Record<string, AgentRegistryEntry> = {
+        // pid: process.pid — a verifiably-live agent without a spawn
+        'step-live': {
+          agentId: 'native-1',
+          backend: 'native',
+          spawnedAt: '2026-10-05T14:10:00Z',
+          pid: process.pid,
+        },
+        // a budget wall still holding — the reset is in the future
+        'step-wall': {
+          agentId: 'native-2',
+          backend: 'native',
+          spawnedAt: '2026-10-05T14:20:00Z',
+          exitStatus: 1,
+          cause: 'rate_limited',
+          resetAt: '2026-10-05T15:00:00Z',
+        },
+        // a plain crash — a cause, no reset, no block
+        'step-old': {
+          agentId: 'native-3',
+          backend: 'native',
+          spawnedAt: '2026-10-05T12:40:00Z',
+          exitStatus: 1,
+          cause: 'crash',
+        },
+        // a rate-limit whose reset already passed — history, not a block
+        'step-past': {
+          agentId: 'native-4',
+          backend: 'native',
+          spawnedAt: '2026-10-05T11:05:00Z',
+          exitStatus: 1,
+          cause: 'rate_limited',
+          resetAt: '2026-10-05T12:00:00Z',
+        },
+      }
+      const snap = budgetSnapshot(main, agentsHomeOf(main), registry, ENV, NOW)
+      assert.equal(snap.entries, 4)
+      assert.equal(snap.live, 1)
+      assert.equal(snap.blocked, 1)
+      assert.equal(snap.spawnedLastHour, 2) // 14:10 + 14:20 — the window excludes the rest
+      assert.deepEqual(snap.spawnedPerHour, [
+        { hour: '2026-10-05T11:00:00.000Z', count: 1 },
+        { hour: '2026-10-05T12:00:00.000Z', count: 1 },
+        { hour: '2026-10-05T14:00:00.000Z', count: 2 },
+      ])
+      assert.deepEqual(
+        snap.resets.map((r) => [r.step, r.cause, r.resetAt, r.holding]),
+        [
+          ['step-wall', 'rate_limited', '2026-10-05T15:00:00Z', true],
+          ['step-past', 'rate_limited', '2026-10-05T12:00:00Z', false],
+        ]
+      )
+      assert.deepEqual(
+        snap.causes.map((c) => [c.step, c.backend, c.cause]),
+        [
+          ['step-wall', 'native', 'rate_limited'],
+          ['step-old', 'native', 'crash'],
+          ['step-past', 'native', 'rate_limited'],
+        ]
+      )
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('an unharvested death classifies during the walk — .exit + log tail', () => {
+    const { root, main } = initRepo('bro-budget-')
+    try {
+      const home = agentsHomeOf(main)
+      mkdirSync(home, { recursive: true })
+      const log = join(home, 'native-9.log')
+      writeFileSync(join(home, 'native-9.exit'), '1')
+      // an absolute reset far in the future — the block holds at any real now
+      writeFileSync(log, 'boom\nReached free model rate limit — resets at 2999-01-01T00:00:00Z\n')
+      const registry: Record<string, AgentRegistryEntry> = {
+        'step-x': {
+          agentId: 'native-9',
+          backend: 'native',
+          spawnedAt: '2026-10-05T14:00:00Z',
+          log,
+        },
+      }
+      const snap = budgetSnapshot(main, home, registry, ENV, NOW)
+      assert.equal(snap.causes.length, 1)
+      assert.equal(snap.causes[0]!.cause, 'rate_limited')
+      assert.equal(snap.blocked, 1)
+      assert.equal(snap.resets[0]!.resetAt, '2999-01-01T00:00:00.000Z')
+      assert.equal(snap.resets[0]!.holding, true)
+      // the harvest landed on the entry object, not just the report
+      assert.equal(registry['step-x']!.cause, 'rate_limited')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('an unharvested death on an unknown backend frees the slot and classifies', () => {
+    const { root, main } = initRepo('bro-budget-')
+    try {
+      const home = agentsHomeOf(main)
+      mkdirSync(home, { recursive: true })
+      // a backend this build doesn't know occupies whenever exitStatus
+      // is absent — harvesting first turns the .exit into a proven
+      // death: no slot held, and the cause lands in the section
+      const dead = (id: string, tail: string): AgentRegistryEntry => {
+        writeFileSync(join(home, `${id}.exit`), '1')
+        const log = join(home, `${id}.log`)
+        writeFileSync(log, tail)
+        return {
+          agentId: id,
+          backend: 'gone-plugin',
+          spawnedAt: '2026-10-05T14:00:00Z',
+          log,
+        }
+      }
+      const registry: Record<string, AgentRegistryEntry> = {
+        'step-wall': dead(
+          'x-1',
+          'boom\nReached free model rate limit — resets at 2999-01-01T00:00:00Z\n'
+        ),
+        // a wall with no reported reset — the block holds anyway
+        'step-noreset': dead('x-2', 'boom\n429 too many requests\n'),
+      }
+      assert.equal(fleetOccupancy(main, home, registry, ENV), 0)
+      const snap = budgetSnapshot(main, home, registry, ENV, NOW)
+      assert.equal(snap.live, 0)
+      assert.equal(snap.blocked, 2)
+      assert.deepEqual(
+        snap.causes.map((c) => [c.step, c.cause]),
+        [
+          ['step-wall', 'rate_limited'],
+          ['step-noreset', 'rate_limited'],
+        ]
+      )
+      assert.deepEqual(
+        snap.resets.map((r) => [r.step, r.resetAt, r.holding]),
+        [['step-wall', '2999-01-01T00:00:00.000Z', true]]
+      )
+      assert.equal(registry['step-wall']!.cause, 'rate_limited')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('an unparseable spawnedAt skips the histogram but keeps the row', () => {
+    const { root, main } = initRepo('bro-budget-')
+    try {
+      const registry: Record<string, AgentRegistryEntry> = {
+        'step-x': { agentId: 'native-1', backend: 'native', spawnedAt: 'not a date' },
+      }
+      const snap = budgetSnapshot(main, agentsHomeOf(main), registry, ENV, NOW)
+      assert.equal(snap.entries, 1)
+      assert.equal(snap.spawnedLastHour, 0)
+      assert.deepEqual(snap.spawnedPerHour, [])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('budgetLines', () => {
+  const snap = (over: Partial<BudgetSnapshot> = {}): BudgetSnapshot => ({
+    basis: 'local-estimate',
+    limits: [...BUDGET_LIMITS],
+    entries: 0,
+    live: 0,
+    blocked: 0,
+    maxConcurrent: 3,
+    spawnedLastHour: 0,
+    spawnedPerHour: [],
+    resets: [],
+    causes: [],
+    ...over,
+  })
+
+  test('renders live/spawned and always carries the limits line', () => {
+    const lines = budgetLines(snap({ live: 2, blocked: 1, spawnedLastHour: 5 }))
+    assert.match(lines[0]!, /live\s+2\/3 agent slots · 1 blocked/)
+    assert.match(lines[1]!, /spawned\s+5 in the last hour/)
+    assert.match(lines.at(-1)!, /limits\s+.*registry agents only/)
+  })
+
+  test('uncapped cap renders without a ceiling; resets and causes list entries', () => {
+    const lines = budgetLines(
+      snap({
+        maxConcurrent: 0,
+        resets: [
+          { step: 'a', agent: 'native-1', cause: 'rate_limited', resetAt: 't1', holding: true },
+        ],
+        causes: [{ step: 'b', agent: 'native-2', backend: 'native', cause: 'crash' }],
+      })
+    )
+    assert.match(lines[0]!, /live\s+0 \(uncapped\) agent slots/)
+    assert.match(lines.join('\n'), /resets\s+a rate_limited til t1 \(holding\)/)
+    assert.match(lines.join('\n'), /causes\s+b: crash/)
   })
 })
