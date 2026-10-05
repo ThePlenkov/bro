@@ -25,7 +25,6 @@ import type {
   DecideResult,
   JudgeAnswer,
   JudgeFacade,
-  JudgeQuestion,
   ProviderEntry,
 } from '@broject/core'
 import { judgeSection, type JudgeConfig } from './config.ts'

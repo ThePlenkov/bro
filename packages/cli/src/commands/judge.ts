@@ -165,6 +165,28 @@ function render(res: DecideResult): void {
   }
 }
 
+/** Provider-mode auth preflight — the entry's apiKeyEnv is the probe,
+ *  not a connector's; an unresolvable name is the startup error the
+ *  spec wants, not a silent fallthrough. */
+function providerModeAuth(dir: string): void {
+  const { judge: jcfg, providers } = judgeConfig(dir)
+  try {
+    const entry = requireProviderSurface(
+      synthesizedProviders(jcfg, providers),
+      jcfg.provider!,
+      'call'
+    )
+    const problem = providerJudgeAuth(jcfg.provider!, entry)
+    if (problem !== null) {
+      console.error(`error: ${problem}`)
+      process.exit(1)
+    }
+  } catch (err) {
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+}
+
 async function decide(argv: string[]): Promise<void> {
   const stateRef = flag(argv, '--state')
   const questionsRef = flag(argv, '--questions')
@@ -177,26 +199,8 @@ async function decide(argv: string[]): Promise<void> {
     process.exit(2)
   }
   const dir = process.cwd()
-  const { judge: jcfg, providers } = judgeConfig(dir)
-  if (jcfg.provider !== undefined && connector === undefined) {
-    // provider mode — the auth probe is the entry's apiKeyEnv, not a
-    // connector's; an unresolvable name is the startup error the spec
-    // wants, not a silent fallthrough
-    try {
-      const entry = requireProviderSurface(
-        synthesizedProviders(jcfg, providers),
-        jcfg.provider,
-        'call'
-      )
-      const problem = providerJudgeAuth(jcfg.provider, entry)
-      if (problem !== null) {
-        console.error(`error: ${problem}`)
-        process.exit(1)
-      }
-    } catch (err) {
-      console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
-      process.exit(1)
-    }
+  if (judgeConfig(dir).judge.provider !== undefined && connector === undefined) {
+    providerModeAuth(dir)
   } else {
     ensureAuth('judge', { dir }, { connector, prefer: loadBroConfig().connectors })
   }
