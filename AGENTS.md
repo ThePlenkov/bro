@@ -71,38 +71,36 @@ Developing bro itself: see CONTRIBUTING.md.
 ## Convoy fan-out — detach + pins
 
 Running several molecules at once means spawning detached workers, never
-serializing them inside one session. The pattern has two halves: the
-spawn is **detached**, its handles are **pinned** somewhere durable.
+serializing them inside one session. The spawn path is the facade —
+`bro agents`, `bro convoy run`, `bro drive` — never a hand-rolled
+nohup: an unregistered worker has no claim, no `.exit` record, no
+`bro agents status`/`down` reach, and it burns budget outside
+`fleet.maxConcurrent` and the exit-cause taxonomy.
 
-- **Spawn detached.** `bro agents up <mol-step>` is the path — the
-  native backend is a `sh -c` spawn in its own process group,
-  parent-unref'd (nohup-equivalent), wired through connector resolution,
-  the configured agent template, and the shared beads environment. The
-  hand-rolled form —
-  `(umask 077; mkdir -p -m 700 ~/.bro/agents; nohup devin -p --prompt-file <prompt.md> --export ~/.bro/agents/<mol>.json >> ~/.bro/agents/<mol>.log 2>&1 &)`
-  (systemd-run/tmux also count) — skips all of that: no registry entry,
-  no managed claim, no `bro agents status`/`down` reach. Prompts go in a
-  file, logs in a user-owned dir: a prompt on argv is visible to every
-  local user via `ps`, and world-readable `/tmp` is out. An
-  exec-background shell dies with the turn — a worker spawned that way
-  is already unwatched.
-- **Pin the handles at spawn.** pid, log path, claimed step. `bro agents`
-  writes them to `<git-common>/bro/agents.json` plus
+- **Spawn through the registry.** `bro agents up <mol-step>` spawns one
+  step's worker — the native backend is a `sh -c` spawn in its own
+  process group, parent-unref'd (nohup-equivalent), wired through
+  connector resolution, the `agents.<backend>.command` template, and
+  the shared beads environment. A molecule **queue** is `bro convoy run
+  <mol>…` (or `--open`) — sequential runner agents on the mol roots,
+  crash/exit classification and the fleet cap included. Post-PR
+  supervision is `bro drive` — orphaned threads get a fixer agent,
+  orphaned green PRs merge. Prompts and logs land in
+  `<git-common>/bro/agents/` — never argv (every local user reads `ps`),
+  never world-readable `/tmp`.
+- **Pin the handles at spawn.** pid, log path, claimed step. The
+  registry writes them to `<git-common>/bro/agents.json` plus
   `<git-common>/bro/agents/<agentId>.{prompt.md,log,exit}` and pins the
-  claim into the shared beads store — a hand-rolled spawn must record
-  pid + log + claimed step itself (a file, a bead comment); it stays
-  outside the registry, so its pin file is the only handle `status`,
-  `stop`, or respawn will never see. An unpinned worker is unfindable
-  next session.
-- **Monitor by point checks, never by waiting.** `tail` the log,
-  `kill -0 <pid>`, `pgrep -f <pattern>`, `bro agents status`,
-  `bro fleet`, a fresh `bro convoy next` — between turns, not in a
-  blocking loop. A synchronous `get_output` or `sleep` wait on detached
-  work blocks the conversation and buys nothing (retro bro-lmdj).
+  claim into the shared beads store — `bro agents status`, `down`, and
+  respawn all key off that entry.
+- **Monitor by point checks, never by waiting.** `bro agents status`,
+  `bro fleet`, `bro watch`, a fresh `bro convoy next` — between turns,
+  not in a blocking loop. A synchronous `get_output` or `sleep` wait on
+  detached work blocks the conversation and buys nothing (retro
+  bro-lmdj).
 - **Completion is detected, not awaited.** `bro agents status` →
-  `exited`, then read the exit record — `<agentId>.exit` holds the code;
-  `status` reports state only. For hand-rolled workers the step closing
-  in beads is the proof — or a detached watcher shell that polls and
-  `bro notify`s. An empty `pgrep` only proves the process died, not that
-  it finished. Never promise "I'll report when it lands" from a
-  foreground wait.
+  `exited`/`blocked`, then read the exit record — `<agentId>.exit`
+  holds the code, the entry's `cause`/`resetAt` the why. `bro convoy
+  run` already supervises its own spawns to a verdict — hand a mol list
+  to it instead of babysitting. Never promise "I'll report when it
+  lands" from a foreground wait.

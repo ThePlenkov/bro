@@ -10,6 +10,9 @@
  *   done <step> [--result T]  close a step, then emit the new `next`
  *   pour <formula> [--var K=V]…  register agent/human types, bd mol pour
  *   list                      open molecules in this workspace
+ *   run <mol>… [--open]       the queue runner — spawn a convoy agent per
+ *                             mol through the facade, sequential, to
+ *                             'complete' (spec bro-7xgk.4)
  */
 import { randomBytes } from 'node:crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -40,6 +43,7 @@ import type {
   StepState,
 } from '@broject/convoy'
 import { flag, flagAll, positionals } from './args.ts'
+import { runConvoyRun, RUN_KNOWN_FLAGS } from './convoy-run.ts'
 
 function usage(exitCode = 1): never {
   console.error(`Usage: bro convoy <command> [args…]
@@ -51,6 +55,9 @@ Commands:
   claim <step-id> [--mol ID]               Atomically claim a step (assignee + in_progress)
   pour <formula> [--var K=V]…     Pour a formula into a molecule (registers agent/human types)
   list                            Open molecules in this workspace
+  run <mol>… [--open] [--attempts N] [--poll SEC] [--retry-delay SEC] [--json]
+                                The queue runner — spawn a convoy agent per mol
+                                through the facade, sequential, to 'complete'
 
   With no mol id, the single open molecule is used; ambiguity is an error.`)
   process.exit(exitCode)
@@ -178,16 +185,18 @@ function rollbackPoured(poured: string[]): string[] {
 export async function runConvoyCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
   if (!sub || sub === '--help' || sub === '-h') usage()
-  const SUBS = new Set(['list', 'status', 'next', 'done', 'claim', 'pour'])
+  const SUBS = new Set(['list', 'status', 'next', 'done', 'claim', 'pour', 'run'])
   if (!SUBS.has(sub)) {
     console.error(`unknown convoy command: ${sub}`)
     usage()
   }
   // reject unknown options — a misspelled flag (e.g. --reslut) must not
   // silently degrade a `done` into a close with no reason
-  const KNOWN_FLAGS = new Set([...VALUE_FLAGS])
+  const KNOWN_FLAGS = new Set(sub === 'run' ? [...RUN_KNOWN_FLAGS] : [...VALUE_FLAGS])
   for (const a of rest) {
-    if (a.startsWith('--') && !KNOWN_FLAGS.has(a)) {
+    // `--x=v` — match the flag name, not the whole arg; flag()/flagAll()
+    // accept both spellings, so the unknown-option check must too
+    if (a.startsWith('--') && !KNOWN_FLAGS.has(a.split('=', 1)[0]!)) {
       console.error(`error: unknown option ${a}`)
       process.exit(2)
     }
@@ -277,6 +286,10 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
       claimStep(stepId)
       const fresh = resolveMolecule(mol.root.id)
       console.log(JSON.stringify(withInputs(nextStep(fresh), fresh), null, 2))
+      return
+    }
+    case 'run': {
+      await runConvoyRun(rest)
       return
     }
     case 'pour': {

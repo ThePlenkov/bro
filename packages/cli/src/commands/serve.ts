@@ -595,6 +595,7 @@ async function routeAgents(
 
 const SPAWN_ERROR_STATUS: Record<SpawnErrorKind, number> = {
   conflict: 409,
+  cap: 503,
   input: 400,
   config: 500,
   unavailable: 503,
