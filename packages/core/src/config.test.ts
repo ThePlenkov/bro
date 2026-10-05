@@ -156,6 +156,27 @@ describe('loadConfig root shape', () => {
   })
 })
 
+describe('loadConfig fleet', () => {
+  test('no fleet section → the default cap of 3', () => {
+    assert.equal(load().fleet.maxConcurrent, 3)
+  })
+
+  test('fleet.maxConcurrent keeps only non-negative integers — 0 disables', () => {
+    assert.equal(load({ fleet: { maxConcurrent: 7 } }).fleet.maxConcurrent, 7)
+    assert.equal(load({ fleet: { maxConcurrent: 0 } }).fleet.maxConcurrent, 0)
+    for (const bad of [-1, 1.5, '4', true, null]) {
+      assert.equal(
+        load({ fleet: { maxConcurrent: bad } }).fleet.maxConcurrent,
+        DEFAULT_CONFIG.fleet.maxConcurrent
+      )
+    }
+  })
+
+  test('non-object fleet section falls back to defaults', () => {
+    assert.equal(load({ fleet: 'wide' }).fleet.maxConcurrent, 3)
+  })
+})
+
 function loadTs(
   source: string,
   json?: unknown,
@@ -301,6 +322,14 @@ describe('loadConfig plugin sections', () => {
     const cfg = loadConfig(dir, { myplug: () => ({ opt: 'default' }) })
     assert.deepEqual(cfg.stores, ['jsonl'])
     assert.equal((cfg.myplug as { opt: string }).opt, 'default')
+  })
+
+  test('a plugin section cannot shadow a core section', () => {
+    const cfg = loadWith(
+      { fleet: { maxConcurrent: 7 } },
+      { fleet: () => ({ maxConcurrent: 99 }) }
+    )
+    assert.equal(cfg.fleet.maxConcurrent, 7)
   })
 
   test('non-string debt.dir falls back to the default', () => {

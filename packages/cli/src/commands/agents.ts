@@ -39,6 +39,8 @@ import { beadsDir } from '@broject/convoy'
 import {
   agentPromptPath,
   eachAgentConnector,
+  fleetCapOf,
+  fleetOccupancyFor,
   loadAgentEnv,
   resolveAgentConnector,
   type AgentConnectorEnv,
@@ -141,7 +143,33 @@ export async function findAgent(
 
 // --- status -------------------------------------------------------------------
 
-function printStatusTable(backends: AgentBackendPlane[]): void {
+/** Fleet slot accounting the table and --json both surface — the cap
+ *  (0 = uncapped) plus the registry-based, fail-closed occupancy the
+ *  admission check enforces. Counted across every backend: a
+ *  --connector-scoped view still shows the fleet numerator, and an
+ *  unverifiable entry keeps its slot, so a degraded backend can't make
+ *  the line under-report what a spawn would count. */
+export interface FleetOccupancy {
+  occupied: number
+  maxConcurrent: number
+}
+
+function occupancyOf(dir: string, env: AgentConnectorEnv): FleetOccupancy {
+  return {
+    occupied: fleetOccupancyFor(dir, env),
+    maxConcurrent: fleetCapOf(env),
+  }
+}
+
+/** `fleet: 2/3 slots occupied` — `uncapped` instead of the ceiling when
+ *  the config disables it. */
+export function occupancyLine(o: FleetOccupancy): string {
+  const cap = o.maxConcurrent > 0 ? `/${o.maxConcurrent}` : ''
+  return `fleet: ${o.occupied}${cap} agent slots occupied${o.maxConcurrent > 0 ? '' : ' (uncapped)'}`
+}
+
+function printStatusTable(backends: AgentBackendPlane[], occupancy: FleetOccupancy): void {
+  console.log(occupancyLine(occupancy))
   const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'pid', 'worktree']
   const rows = backends.flatMap(({ conn, agents }) => {
     const sup = conn.capabilities().supervisor
@@ -226,6 +254,7 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
     console.log(
       JSON.stringify(
         {
+          occupancy: occupancyOf(dir, env),
           backends: backends.map(({ conn, agents, degraded }) => ({
             name: conn.name,
             capabilities: conn.capabilities(),
@@ -239,7 +268,7 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
     )
     return
   }
-  printStatusTable(backends)
+  printStatusTable(backends, occupancyOf(dir, env))
 }
 
 // --- up / down ------------------------------------------------------------------

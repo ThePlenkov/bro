@@ -211,6 +211,24 @@ export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = (raw) =
   }
 }
 
+/** bro.config.json `fleet` section — the live-agent ceiling the spawn
+ *  prologue enforces. `maxConcurrent` counts registry agents across ALL
+ *  backends (the budget wall is per-account, not per-runtime); 0
+ *  disables the cap, matching act.maxRounds' convention. */
+export const fleetSection: ConfigSection<{ maxConcurrent: number }> = (raw) => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
+    maxConcurrent?: unknown
+  }
+  return {
+    maxConcurrent:
+      typeof obj.maxConcurrent === 'number' &&
+      Number.isInteger(obj.maxConcurrent) &&
+      obj.maxConcurrent >= 0
+        ? obj.maxConcurrent
+        : DEFAULT_CONFIG.fleet.maxConcurrent,
+  }
+}
+
 /** Sections core normalizes itself — identical to what the built-in
  *  plugins declare as their configSchema. */
 const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
@@ -219,6 +237,7 @@ const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   act: actSection as ConfigSection<unknown>,
   connectors: connectorsSection as ConfigSection<unknown>,
   sdd: sddSection as ConfigSection<unknown>,
+  fleet: fleetSection as ConfigSection<unknown>,
 }
 
 export interface BroConfig {
@@ -273,6 +292,10 @@ export interface BroConfig {
    *  context; `gate` also lets the stop gate block once. `dir` holds
    *  `specs/<id>.md` files; a `spec:` link in the description counts. */
   sdd: { mode: SddMode; dir: string }
+  /** Fleet size admission — the cap `prepareSpawn` enforces on every
+   *  backend's spawn. `maxConcurrent` counts live registry agents
+   *  across all backends; 0 means uncapped. Default 3. */
+  fleet: { maxConcurrent: number }
   /** External plugin specifiers — relative paths or package names the CLI
    *  resolves from the repo and imports at startup. Each module's default
    *  export must be a BroPlugin (or an array of them). */
@@ -297,6 +320,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   },
   connectors: {},
   sdd: { mode: 'off', dir: 'specs' },
+  fleet: { maxConcurrent: 3 },
   plugins: [],
 }
 
@@ -457,7 +481,9 @@ function applySections(
   raw: Record<string, unknown>,
   sections: Record<string, ConfigSection<unknown>>
 ): void {
-  for (const [key, schema] of Object.entries({ ...CORE_SECTIONS, ...sections })) {
+  // core wins on a key collision — an external configKey must never
+  // shadow a section whose semantics the CLI enforces (fleet cap)
+  for (const [key, schema] of Object.entries({ ...sections, ...CORE_SECTIONS })) {
     try {
       config[key] = schema(raw[key])
     } catch (err) {
