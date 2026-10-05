@@ -3,8 +3,8 @@ import assert from 'node:assert/strict'
 import { JudgeUnavailable } from '@broject/core'
 import type { JudgeQuestion } from '@broject/core'
 import { systemoneJudge } from './systemone.ts'
+import { fakeFetch } from '@broject/providers'
 import type { JudgeConfig } from './config.ts'
-import type { FetchFn } from './http.ts'
 
 const CFG: JudgeConfig = {
   mode: 'off',
@@ -14,27 +14,6 @@ const CFG: JudgeConfig = {
   confidence: 0.6,
   timeoutMs: 3_000,
   maxDecisionsPerRun: 50,
-}
-
-interface Call {
-  url: string
-  init: { headers?: Record<string, string>; body?: string }
-}
-
-/** Scripted transport — records calls, serves each queued response. */
-function fakeFetch(
-  ...queue: Array<{ status: number; body: unknown }>
-): { fetch: FetchFn; calls: Call[] } {
-  const calls: Call[] = []
-  const fetch = (async (url: unknown, init: unknown) => {
-    calls.push({ url: String(url), init: init as Call['init'] })
-    const next = queue[Math.min(calls.length - 1, queue.length - 1)]!
-    return {
-      status: next.status,
-      text: async () => JSON.stringify(next.body),
-    } as Response
-  }) as FetchFn
-  return { fetch, calls }
 }
 
 const QUESTIONS: Record<string, JudgeQuestion> = {

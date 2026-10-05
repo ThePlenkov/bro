@@ -3,33 +3,13 @@ import assert from 'node:assert/strict'
 import { JudgeUnavailable } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import { openaiCompatChat } from './openai.ts'
-import type { FetchFn } from './http.ts'
+import { fakeFetch } from './testkit.ts'
 
 const ENTRY: Extract<ProviderEntry, { type: 'openai-compat' }> = {
   type: 'openai-compat',
   baseUrl: 'https://orca.example/v1/',
   model: 'qwen3-coder',
   apiKeyEnv: 'ORCA_TEST_KEY',
-}
-
-interface Call {
-  url: string
-  init: { headers?: Record<string, string>; body?: string }
-}
-
-function fakeFetch(
-  ...queue: Array<{ status: number; body: unknown }>
-): { fetch: FetchFn; calls: Call[] } {
-  const calls: Call[] = []
-  const fetch = (async (url: unknown, init: unknown) => {
-    calls.push({ url: String(url), init: init as Call['init'] })
-    const next = queue[Math.min(calls.length - 1, queue.length - 1)]!
-    return {
-      status: next.status,
-      text: async () => JSON.stringify(next.body),
-    } as Response
-  }) as FetchFn
-  return { fetch, calls }
 }
 
 const OK_BODY = {

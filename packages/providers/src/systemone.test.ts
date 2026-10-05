@@ -3,33 +3,13 @@ import assert from 'node:assert/strict'
 import { JudgeUnavailable } from '@broject/core'
 import type { JudgeQuestion, ProviderEntry } from '@broject/core'
 import { systemoneCall } from './systemone.ts'
-import type { FetchFn } from './http.ts'
+import { fakeFetch } from './testkit.ts'
 
 const ENTRY: Extract<ProviderEntry, { type: 'systemone' }> = {
   type: 'systemone',
   baseUrl: 'https://systemone.example/api',
   apiKeyEnv: 'SYSTEMONE_TEST_KEY',
   model: 'jev-test',
-}
-
-interface Call {
-  url: string
-  init: { headers?: Record<string, string>; body?: string }
-}
-
-function fakeFetch(
-  ...queue: Array<{ status: number; body: unknown }>
-): { fetch: FetchFn; calls: Call[] } {
-  const calls: Call[] = []
-  const fetch = (async (url: unknown, init: unknown) => {
-    calls.push({ url: String(url), init: init as Call['init'] })
-    const next = queue[Math.min(calls.length - 1, queue.length - 1)]!
-    return {
-      status: next.status,
-      text: async () => JSON.stringify(next.body),
-    } as Response
-  }) as FetchFn
-  return { fetch, calls }
 }
 
 const QUESTIONS: Record<string, JudgeQuestion> = {
