@@ -11,8 +11,10 @@
  *
  * `--every` exists so watch *can* loop, but the cadence owner is the
  * deployment — a supervisor that wants ticks on a schedule re-invokes
- * `--once`. Read-only: never claims, never mutates beads, never touches
- * the registry — the only write is `--notify`'s mailbox drop.
+ * `--once`. Never claims, never mutates beads; the two writes are
+ * `--notify`'s mailbox drop and the janitor — `runJanitor` (bro-f6zp)
+ * reaps dead session/agent state under `<git-common>/bro/` on each
+ * tick, because watch is the cadence a reaper survives on.
  *
  * Mailbox — `<git-common-dir>/bro/notify/`, the contract the notify
  * connector (bro-d8zo) drains. One atomic file per emission
@@ -20,7 +22,17 @@
  * unchanged snapshot is not re-emitted — a heartbeat reports
  * transitions, not noise.
  */
-import { dropMailbox, git, mailboxDir, reviewHost, type ReviewFacade } from '@broject/core'
+import {
+  dropMailbox,
+  git,
+  janitorDidWork,
+  janitorLine,
+  mailboxDir,
+  reviewHost,
+  runJanitor,
+  type JanitorReport,
+  type ReviewFacade,
+} from '@broject/core'
 import { checkHistory, evaluateExitGate, fetchPrActState } from '@broject/act'
 import { listMolecules, loadMolecule, nextStep } from '@broject/convoy'
 import { loadBroConfig } from '../plugins.ts'
@@ -88,6 +100,9 @@ export interface WatchSnapshot {
      *  `unavailable`, never a false empty fleet */
     error?: string
   }
+  /** This tick's janitor report — set only when it reaped or capped
+   *  something; the attention line carries the same news in text. */
+  janitor?: JanitorReport
 }
 
 /** The heartbeat's answer: ready human gates, lost agents, blocked and
@@ -469,7 +484,27 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
   // only on transitions, a heartbeat reports change not noise.
   let lastNotified = ''
   const tick = async (): Promise<void> => {
+    // the janitor rides the heartbeat — one reap per tick, before the
+    // snapshot so the planes read post-reap state. Housekeeping must
+    // never kill the heartbeat: a throwing janitor surfaces as an
+    // attention line, not a dead watch (bro-f6zp — a silent janitor is
+    // indistinguishable from a broken one)
+    let janitorNote = ''
+    let janitor: JanitorReport | undefined
+    try {
+      const j = runJanitor(dir)
+      if (j !== null && janitorDidWork(j)) {
+        janitor = j
+        janitorNote = janitorLine(j)
+      }
+    } catch (err) {
+      janitorNote = `janitor failed — ${err instanceof Error ? err.message : String(err)}`
+    }
     const snap = await collectSnapshot(dir)
+    snap.janitor = janitor
+    if (janitorNote !== '') {
+      snap.attention.push(janitorNote)
+    }
     const text = renderSnapshot(snap)
     console.log(json ? JSON.stringify(snap, null, 2) : text)
     if (notify) {

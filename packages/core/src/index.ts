@@ -153,6 +153,14 @@ export type {
 } from './agents.ts'
 export { acquireFileLock, LockTimeout, withFileLock } from './filelock.ts'
 export type { FileLockOptions } from './filelock.ts'
+export {
+  fileBackedJanitorDeps,
+  janitorBroDir,
+  janitorDidWork,
+  janitorLine,
+  runJanitor,
+} from './janitor.ts'
+export type { JanitorDeps, JanitorOpts, JanitorReaped, JanitorReport } from './janitor.ts'
 export type { SpecNode, SpecStore } from './specs.ts'
 export { warnDeprecated } from './deprecation.ts'
 export { markerLive, markerOwner, pidAlive, procStat } from './proc.ts'
