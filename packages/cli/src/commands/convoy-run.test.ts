@@ -3,6 +3,7 @@ import { describe, test } from 'node:test'
 import {
   AgentNotFound,
   SpawnError,
+  type AgentCause,
   type AgentInfo,
   type AgentRegistryEntry,
   type AgentState,
@@ -215,7 +216,7 @@ describe('runMol', () => {
 
   /** The shared parked-block rig: the worker dies blocked on `cause`,
    *  the registry entry agrees, and the run must park the mol. */
-  const parkedBlock = async (w: World, cause: string) => {
+  const parkedBlock = async (w: World, cause: AgentCause) => {
     w.nexts.set('m-1', [next('step')])
     w.states.set('n-1', [{ state: 'blocked', cause }])
     w.entries.set('m-1', {
