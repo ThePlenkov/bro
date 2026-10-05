@@ -136,7 +136,7 @@ describe('providerJudge', () => {
       assert.equal(res.model, 'chat-model-r1')
     }))
 
-  test('judge.model overrides the entry pin only when the user wrote it', () =>
+  test('opts.model overrides the entry pin; absent, the pin stands', () =>
     withEnv('TYPESAFE_TEST_KEY', 'k', async () => {
       const { fetch, calls } = fakeFetch({ status: 200, body: TYPED_BODY })
       const entry: ProviderEntry = {
@@ -149,8 +149,10 @@ describe('providerJudge', () => {
         (JSON.parse(calls[0]!.init.body!) as { model: string }).model,
         'jev-entry'
       )
-      const wrote = { ...CFG, model: 'jev-override', provided: ['model'] as const }
-      await providerJudge('t', entry, wrote, { fetch }).decide('s', QUESTIONS)
+      await providerJudge('t', entry, CFG, { fetch, model: 'jev-override' }).decide(
+        's',
+        QUESTIONS
+      )
       assert.equal(
         (JSON.parse(calls[1]!.init.body!) as { model: string }).model,
         'jev-override'
@@ -273,12 +275,13 @@ describe('judgeFacade provider mode', () => {
             typesafe: {
               type: 'systemone',
               apiKeyEnv: 'TYPESAFE_TEST_KEY',
-              model: 'jev-1.13.0',
+              model: 'jev-entry-pin',
             },
           },
           judge: {
             provider: 'typesafe',
             fallback: 'llm-judge',
+            model: 'jev-override',
             confidence: 0.9,
             llm: { baseUrl: 'https://llm.example/v1', model: 'm' },
           },
@@ -316,6 +319,16 @@ describe('judgeFacade provider mode', () => {
           try {
             const res = await judgeFacade(dir, { fetch }).decide('s', QUESTIONS)
             assert.equal(calls.length, 2)
+            // judge.model overrides the primary's pin — the fallback's
+            // pin ('m' from judge.llm) is its own contract, untouched
+            assert.equal(
+              (JSON.parse(calls[0]!.init.body!) as { model: string }).model,
+              'jev-override'
+            )
+            assert.equal(
+              (JSON.parse(calls[1]!.init.body!) as { model: string }).model,
+              'm'
+            )
             assert.equal(calls[1]!.url, 'https://llm.example/v1/chat/completions')
             assert.equal(res.answers.route!.decidedBy, 'provider:llm-judge')
             assert.equal(res.answers.route!.confidence, 0.95)

@@ -162,7 +162,9 @@ function collectAnswers(
 ): Record<string, JudgeAnswer> {
   const answers: Record<string, JudgeAnswer> = {}
   for (const [qid, q] of Object.entries(questions)) {
-    const raw = rawAnswers[qid]
+    // hasOwn — an unanswered "constructor" qid would otherwise read
+    // Object.prototype.constructor and be treated as answered
+    const raw = Object.hasOwn(rawAnswers, qid) ? rawAnswers[qid] : undefined
     if (raw === undefined) {
       continue // unanswered questions just stay absent — the chain marks them low
     }
@@ -209,20 +211,21 @@ export async function proseDecide(
 export interface ProviderJudgeOpts {
   /** Test seam — the bindings take a scripted transport. */
   fetch?: FetchFn
+  /** Model override — wins over the entry's pinned model. The caller
+   *  decides when `judge.model` applies (judgeFacade: the primary
+   *  only — the fallback's pin is its own contract). */
+  model?: string
 }
 
 /** JudgeFacade over a named provider entry — the kind selects the
- *  adapter (spec's capability matrix). `judge.model` overrides the
- *  entry's pinned model, but only when the user actually wrote it —
- *  the shipped jev-latest default must not clobber the entry's pin. */
+ *  adapter (spec's capability matrix). */
 export function providerJudge(
   name: string,
   entry: ProviderEntry,
   cfg: JudgeConfig,
   opts: ProviderJudgeOpts = {}
 ): DeadlineJudge {
-  const model = cfg.provided?.includes('model') ? cfg.model : undefined
-  const client = providerClient(name, entry, { fetch: opts.fetch, model })
+  const client = providerClient(name, entry, { fetch: opts.fetch, model: opts.model })
   const by = `provider:${name}`
   if (client.call !== undefined) {
     return deadlineJudge(cfg.timeoutMs, client.call)

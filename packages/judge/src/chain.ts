@@ -218,11 +218,15 @@ export function judgeFacade(dir: string, opts: JudgeFacadeOpts = {}): JudgeFacad
     if (hitsAlias(cfg.provider) || hitsAlias(cfg.fallback)) {
       warnLegacyJudgeOnce()
     }
+    // judge.model is the PRIMARY's knob — it overrides the entry pin
+    // only when the user wrote a usable value, and it never touches
+    // the fallback's pin (that's its own contract)
+    const model = cfg.provided?.includes('model') ? cfg.model : undefined
     const primary = providerJudge(
       cfg.provider,
       requireProviderSurface(entries, cfg.provider, 'call'),
       cfg,
-      { fetch: opts.fetch }
+      { fetch: opts.fetch, model }
     )
     const fallback =
       cfg.fallback !== undefined && cfg.fallback !== cfg.provider
