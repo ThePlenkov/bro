@@ -21,7 +21,7 @@
  * not explicit invocation.
  */
 import { readFileSync } from 'node:fs'
-import { ensureAuth, JudgeUnavailable, reviewHost } from '@broject/core'
+import { ensureAuth, JudgeUnavailable, requireProviderSurface, reviewHost } from '@broject/core'
 import type { DecideResult, JudgeAnswer, JudgeQuestion } from '@broject/core'
 import {
   appendRow,
@@ -29,8 +29,10 @@ import {
   formatStats,
   judgeConfig,
   judgeFacade,
+  providerJudgeAuth,
   readJournal,
   replayMergedThreads,
+  synthesizedProviders,
 } from '@broject/judge'
 import { flag, flagAll } from './args.ts'
 import { loadBroConfig } from '../plugins.ts'
@@ -175,7 +177,29 @@ async function decide(argv: string[]): Promise<void> {
     process.exit(2)
   }
   const dir = process.cwd()
-  ensureAuth('judge', { dir }, { connector, prefer: loadBroConfig().connectors })
+  const { judge: jcfg, providers } = judgeConfig(dir)
+  if (jcfg.provider !== undefined && connector === undefined) {
+    // provider mode — the auth probe is the entry's apiKeyEnv, not a
+    // connector's; an unresolvable name is the startup error the spec
+    // wants, not a silent fallthrough
+    try {
+      const entry = requireProviderSurface(
+        synthesizedProviders(jcfg, providers),
+        jcfg.provider,
+        'call'
+      )
+      const problem = providerJudgeAuth(jcfg.provider, entry)
+      if (problem !== null) {
+        console.error(`error: ${problem}`)
+        process.exit(1)
+      }
+    } catch (err) {
+      console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(1)
+    }
+  } else {
+    ensureAuth('judge', { dir }, { connector, prefer: loadBroConfig().connectors })
+  }
   const state = loadState(stateRef)
   const questions = loadQuestions(questionsRef)
   try {

@@ -41,6 +41,15 @@ export interface JudgeConfig {
   /** llm-judge backend config — required only when the fallback (or
    *  primary, via connectors.judge) is llm-judge. */
   llm?: JudgeLlmConfig
+  /** `providers` registry entry the judge resolves instead of a
+   *  connector (spec: bro-ribc.1). When set, `fallback` names a
+   *  provider too — never a connector. */
+  provider?: string
+  /** Keys the user actually wrote — normalization can't otherwise
+   *  tell a written value from a shipped default, and provider mode
+   *  needs to know whether `model` is an override or the jev-latest
+   *  default (the legacy path also keys the deprecation line off it). */
+  provided?: readonly string[]
 }
 
 export const DEFAULT_JUDGE_CONFIG: JudgeConfig = {
@@ -115,5 +124,7 @@ export const judgeSection: ConfigSection<JudgeConfig> = (raw) => {
       numField('maxDecisionsPerRun', 1, Number.MAX_SAFE_INTEGER) ??
       DEFAULT_JUDGE_CONFIG.maxDecisionsPerRun,
     llm,
+    provider: str(obj.provider),
+    provided: Object.keys(obj),
   }
 }
