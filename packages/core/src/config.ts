@@ -14,6 +14,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { gitTry } from './git.ts'
+import { parseProviderEntry, type ProviderEntry } from './providers.ts'
 
 export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const
 export type StoreBackend = (typeof STORE_BACKENDS)[number]
@@ -171,6 +172,30 @@ export const actSection: ConfigSection<{
   }
 }
 
+/** bro.config.json `providers` section — the typed provider registry
+ *  (spec: specs/bro-ribc.1.md). A name → entry map, kind-validated via
+ *  PROVIDER_REGISTRY with apiKeyEnv checked by isEnvName: unknown types
+ *  and entries missing required fields are dropped with a warning. The
+ *  absent/empty section is valid — consumers fall back to their
+ *  pre-registry behavior, never to a vendor the user didn't name. */
+export const providersSection: ConfigSection<Record<string, ProviderEntry>> = (raw) => {
+  const out: Record<string, ProviderEntry> = {}
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return out
+  }
+  for (const [name, v] of Object.entries(raw)) {
+    const trimmed = name.trim()
+    if (trimmed === '') {
+      continue
+    }
+    const entry = parseProviderEntry(trimmed, v)
+    if (entry !== null) {
+      out[trimmed] = entry
+    }
+  }
+  return out
+}
+
 /** bro.config.json `connectors` section — facade → connector precedence,
  *  e.g. { "reviews": "gitlab", "tasks": "jira" }. Only string→string
  *  entries survive; anything else is dropped. */
@@ -287,6 +312,7 @@ const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   sync: syncSection as ConfigSection<unknown>,
   act: actSection as ConfigSection<unknown>,
   connectors: connectorsSection as ConfigSection<unknown>,
+  providers: providersSection as ConfigSection<unknown>,
   sdd: sddSection as ConfigSection<unknown>,
   fleet: fleetSection as ConfigSection<unknown>,
 }
@@ -341,6 +367,10 @@ export interface BroConfig {
   }
   /** Facade → connector precedence, e.g. { reviews: 'gitlab' }. */
   connectors: Record<string, string>
+  /** Named provider registry — judge (`judge.provider`) and fleet
+   *  (`agents.<backend>.provider`) reference entries by name. Empty
+   *  means provider behavior is off, not defaulted to a vendor. */
+  providers: Record<string, ProviderEntry>
   /** Spec-driven development policy — spec before code for claimed
    *  beads. `off` (default) emits nothing; `remind` adds session/prompt
    *  context; `gate` also lets the stop gate block once. `dir` holds
@@ -373,6 +403,7 @@ export const DEFAULT_CONFIG: BroConfig = {
     docsMaxRounds: 2,
   },
   connectors: {},
+  providers: {},
   sdd: { mode: 'off', dir: 'specs' },
   fleet: { maxConcurrent: 3 },
   plugins: [],

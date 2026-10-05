@@ -35,6 +35,7 @@ export {
   loadConfig,
   PERSONALITIES,
   probeConfigFile,
+  providersSection,
   sddSection,
   SDD_MODES,
   stackSection,
@@ -42,6 +43,23 @@ export {
   syncSection,
 } from './config.ts'
 export type { IgnoreCheckEntry, IgnoreCheckRule } from './config.ts'
+export {
+  getProvider,
+  isEnvName,
+  parseProviderEntry,
+  PROVIDER_KINDS,
+  PROVIDER_REGISTRY,
+  ProviderSurfaceError,
+  requireProviderSurface,
+  UnknownProviderError,
+} from './providers.ts'
+export type {
+  CallSurfaceGrade,
+  ProviderEntry,
+  ProviderKind,
+  ProviderKindSpec,
+  ProviderSurface,
+} from './providers.ts'
 export {
   DATA_REF,
   dataRefCommit,
