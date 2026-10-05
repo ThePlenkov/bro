@@ -245,6 +245,10 @@ export interface AgentConnector {
 export type SpawnErrorKind =
   /** claim refused, live agent, foreign backend — a real conflict */
   | 'conflict'
+  /** fleet admission refused — capacity, not conflict; callers wait.
+   *  The kind rides the error so a post-refusal occupancy re-read can't
+   *  race the slot that just freed */
+  | 'cap'
   /** caller input — a worktree path that doesn't exist, an unsafe name */
   | 'input'
   /** server-side misconfiguration — no agent command, no common dir */

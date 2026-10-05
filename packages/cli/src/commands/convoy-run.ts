@@ -271,9 +271,15 @@ export async function runMol(
           detail: err instanceof Error ? err.message : String(err),
         }
       }
-      // a refusal is a signal — the registry re-read says which kind:
-      // blocked → the wall path; live entry → another worker owns the
-      // mol; a full fleet cap → capacity, wait a tick, no attempt
+      // a refusal is a signal — the kind says which kind when the
+      // thrower knows (cap → capacity, wait a tick, no attempt); the
+      // registry re-read classifies the rest: blocked → the wall path,
+      // live entry → another worker owns the mol
+      if (err.kind === 'cap') {
+        deps.say(`run ${molId}: fleet cap full — waiting a poll tick`)
+        await deps.sleepSec(cfg.pollSec)
+        continue
+      }
       const e = deps.entry(molId)
       if (e !== undefined && agentEntryBlocked(e, deps.now())) {
         const d = blockedDecision(e, e.cause as string | undefined, e.resetAt as string | undefined, deps)
@@ -299,6 +305,8 @@ export async function runMol(
         }
       }
       if (deps.fleetFull()) {
+        // an untyped refusal while the fleet reads full is capacity —
+        // same wait, just classified by occupancy instead of the kind
         deps.say(`run ${molId}: fleet cap full — waiting a poll tick`)
         await deps.sleepSec(cfg.pollSec)
         continue

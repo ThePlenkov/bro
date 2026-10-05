@@ -281,27 +281,40 @@ describe('runMol', () => {
 
   test('a full fleet cap waits a poll tick — capacity is not an attempt', async () => {
     const w = world()
-    w.nexts.set('m-1', [next('step'), next('complete')])
-    w.full = true
+    w.nexts.set('m-1', [next('step'), next('step'), next('complete')])
     let calls = 0
-    // the cap was full at refusal; the slot frees during the wait —
-    // fleetFull answers true once (the refusal-time re-check), then false
-    w.deps.fleetFull = () => {
-      const f = w.full
-      w.full = false
-      return f
-    }
     w.deps.spawn = async (molId) => {
       w.spawns.push(molId)
       calls += 1
       if (calls === 1) {
-        throw new SpawnError('fleet cap reached — 3/3 agent slots occupied')
+        throw new SpawnError('fleet cap reached — 3/3 agent slots occupied', 'cap')
       }
       return agent('n-1')
     }
     const r = await runMol(w.deps, CFG, 'm-1')
     assert.equal(r.verdict, 'done')
     assert.deepEqual(w.sleeps[0], 15) // waited one poll tick, not an attempt
+    assert.equal(r.attempts, 1) // only the successful spawn counted
+  })
+
+  test('an untyped refusal while the fleet reads full also waits', async () => {
+    const w = world()
+    w.nexts.set('m-1', [next('step'), next('step'), next('complete')])
+    let calls = 0
+    // a foreign connector's cap refusal carries no kind — the
+    // occupancy re-check still reads it as capacity, never an attempt
+    w.deps.fleetFull = () => calls === 1
+    w.deps.spawn = async (molId) => {
+      w.spawns.push(molId)
+      calls += 1
+      if (calls === 1) {
+        throw new SpawnError('spawn refused — backend at capacity', 'conflict')
+      }
+      return agent('n-1')
+    }
+    const r = await runMol(w.deps, CFG, 'm-1')
+    assert.equal(r.verdict, 'done')
+    assert.deepEqual(w.sleeps[0], 15)
   })
 
   test('a live registry entry on refusal means occupied — never double-work', async () => {

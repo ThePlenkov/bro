@@ -194,7 +194,9 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
   // silently degrade a `done` into a close with no reason
   const KNOWN_FLAGS = new Set(sub === 'run' ? [...RUN_KNOWN_FLAGS] : [...VALUE_FLAGS])
   for (const a of rest) {
-    if (a.startsWith('--') && !KNOWN_FLAGS.has(a)) {
+    // `--x=v` — match the flag name, not the whole arg; flag()/flagAll()
+    // accept both spellings, so the unknown-option check must too
+    if (a.startsWith('--') && !KNOWN_FLAGS.has(a.split('=', 1)[0]!)) {
       console.error(`error: unknown option ${a}`)
       process.exit(2)
     }

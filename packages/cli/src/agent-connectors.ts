@@ -984,7 +984,8 @@ function enforceFleetCap(
   if (occupied >= cap.max) {
     throw new SpawnError(
       `fleet cap reached — ${occupied}/${cap.max} agent slots occupied ` +
-        `(fleet.maxConcurrent in bro.config) — spawn of ${spec.molStep} refused`
+        `(fleet.maxConcurrent in bro.config) — spawn of ${spec.molStep} refused`,
+      'cap'
     )
   }
 }

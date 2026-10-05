@@ -68,8 +68,9 @@ root — `bro agents status`/`bro fleet`/`bro watch` see it). Sequential
 like the mol-queue script it replaced; `fleet.maxConcurrent` still
 applies at spawn.
 
-- `--attempts N` (4) bounds crash retries per mol — over it, the mol is
-  `failed` and the queue moves on.
+- `--attempts N` (4) bounds spawn attempts per mol — crashes, bare
+  refusals, and workers that exit with the mol incomplete all count;
+  over it, the mol is `failed` and the queue moves on.
 - `rate_limited` with a provider `resetAt` waits the reset out (no
   attempt burned); `quota`/no-reset walls and operator `down`s are
   `parked`/`stopped` verdicts — reported, never retried.
