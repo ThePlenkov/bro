@@ -55,6 +55,9 @@ walks the registry and counts an entry unless it is proven dead:
 - `native`: `nativeState === 'running'` (pid alive + identity pin).
 - `tmux`: `has-session` running OR the probe inconclusive — an
   unverifiable session may still be a live worker, so it occupies.
+  An entry with no legal session name (corrupt `session`, unsafe
+  `agentId`) has nothing the probe could find — it frees the slot,
+  the same verdict `list()` reports.
 - `gascity`: `gc session list` (one lazy call) — running or unstarted
   (`spawned`) sessions occupy; an absent session frees the slot only
   when the supervisor can verify; an unreachable city counts occupied.

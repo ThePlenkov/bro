@@ -481,7 +481,9 @@ function applySections(
   raw: Record<string, unknown>,
   sections: Record<string, ConfigSection<unknown>>
 ): void {
-  for (const [key, schema] of Object.entries({ ...CORE_SECTIONS, ...sections })) {
+  // core wins on a key collision — an external configKey must never
+  // shadow a section whose semantics the CLI enforces (fleet cap)
+  for (const [key, schema] of Object.entries({ ...sections, ...CORE_SECTIONS })) {
     try {
       config[key] = schema(raw[key])
     } catch (err) {

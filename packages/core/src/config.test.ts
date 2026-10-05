@@ -324,6 +324,14 @@ describe('loadConfig plugin sections', () => {
     assert.equal((cfg.myplug as { opt: string }).opt, 'default')
   })
 
+  test('a plugin section cannot shadow a core section', () => {
+    const cfg = loadWith(
+      { fleet: { maxConcurrent: 7 } },
+      { fleet: () => ({ maxConcurrent: 99 }) }
+    )
+    assert.equal(cfg.fleet.maxConcurrent, 7)
+  })
+
   test('non-string debt.dir falls back to the default', () => {
     assert.equal(load({ debt: { dir: 42 } }).debt.dir, DEFAULT_CONFIG.debt.dir)
     assert.equal(load({ debt: { dir: '' } }).debt.dir, DEFAULT_CONFIG.debt.dir)
