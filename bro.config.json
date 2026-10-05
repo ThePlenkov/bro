@@ -26,6 +26,9 @@
   "sdd": {
     "mode": "gate"
   },
+  "fleet": {
+    "maxConcurrent": 3
+  },
   "judge": {
     "mode": "shadow"
   }
