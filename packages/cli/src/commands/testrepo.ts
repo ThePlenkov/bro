@@ -76,7 +76,7 @@ export const CLI_DIST = join(
 )
 
 /** Sanitized env for spawned e2e processes — ambient GIT_/BEADS_/DEVIN_/
- *  CLAUDE_/BRO_ vars from the outer agent session must not redirect a
+ *  CLAUDE_/CURSOR_/BRO_ vars from the outer agent session must not redirect a
  *  fixture's git dir, hook root, or beads store. Whitelist, not
  *  strip-list: a new leak variable can't sneak in. */
 export function e2eEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {

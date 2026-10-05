@@ -34,7 +34,19 @@ evidence record even when the beads projection is disabled.
 | Devin | `plugins/devin/bro` |
 | Claude Code | `plugins/claude/bro` |
 | Codex | `plugins/codex/bro` |
+| Cursor | `plugins/cursor/bro` |
 | OpenCode | native `@broject/bro` plugin |
+
+Cursor installs from `.cursor-plugin/marketplace.json`. The adapter's
+`hooks/hooks.json` uses Cursor event names; `bro hooks` translates that
+stdin (`conversation_id`, `loop_count`, shell `command`) into the shared
+contract and writes Cursor output (`additional_context`,
+`followup_message`, `permission`). Cloud agents do not run `sessionStart`,
+so the first `beforeSubmitPrompt` rehydrates once and `preCompact` clears
+that mark. `stop` allows a single follow-up. A plain `bro` or `bd` command
+is auto-approved even when the workspace has not opted in — an empty
+permission reply would block the command — and a chained command stays a
+prompt.
 
 OpenCode loads the package's `./server` export rather than a shell-hook
 manifest. It uses the same bro hook bus, but OpenCode has no pre-stop hook:

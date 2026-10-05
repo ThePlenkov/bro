@@ -1,0 +1,16 @@
+{
+  "name": "bro",
+  "owner": {
+    "name": "Petr Plenkov"
+  },
+  "metadata": {
+    "description": "Agent's sidekick: review debt, the PR review loop, drill frames, and wtf→retro — mechanics in the bro CLI"
+  },
+  "plugins": [
+    {
+      "name": "bro",
+      "source": "plugins/cursor/bro",
+      "description": "Agent's sidekick: review-debt pipeline, PR review loop, and scoped drill frames — all mechanics in the bro CLI over gh + beads"
+    }
+  ]
+}

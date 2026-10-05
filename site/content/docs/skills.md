@@ -32,14 +32,16 @@ and why to use the command. The CLI owns how.
 
 ## Adapters and generation
 
-Claude Code, Codex, Devin, and OpenCode receive the same policy through
-their adapters. OpenCode is a native plugin (`@broject/bro`); the other
-adapters use generated skill and lifecycle-hook files.
+Claude Code, Codex, Cursor, Devin, and OpenCode receive the same policy
+through their adapters. OpenCode is a native plugin (`@broject/bro`). The
+other adapters share one `skills/` tree: each `plugins/<client>/bro/skills`
+entry is a symlink, not a second copy. Cursor's hook manifest is generated
+too — only Claude's event map is hand-written.
 
-The source of truth is `skills/`. `scripts/gen-plugins.ts` renders the
-published adapters, while the CLI bundle embeds a snapshot of skills and
-formulas. Edit the source, then use the repository freshness checks before
-committing generated output.
+The source of truth is `skills/`. `scripts/gen-plugins.ts` keeps the adapter
+links and hook files in step, while the CLI bundle embeds a snapshot of
+skills and formulas at build time. Edit the source, then use the repository
+freshness checks before committing generated output.
 
 ## Skill discipline
 

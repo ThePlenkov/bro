@@ -86,7 +86,8 @@ jobs:
           git checkout -B "release/v$v"
           git add CHANGELOG.md packages/*/package.json package.json package-lock.json \
             plugin.json .claude-plugin/marketplace.json \
-            .agents/plugins/marketplace.json plugins/ hooks.json hooks/run.sh
+            .agents/plugins/marketplace.json .cursor-plugin/marketplace.json \
+            plugins/ hooks.json hooks/run.sh
           if git diff --cached --quiet; then
             echo "no version change — nothing to release"
             exit 0

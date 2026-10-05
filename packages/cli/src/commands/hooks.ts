@@ -28,6 +28,13 @@
  * stdout, exit 0. Everything is best-effort — hooks only fire in bro-enabled
  * repos (bro.config.json or .beads/ walking up) and every connector probe is
  * fail-open so a missing bd/gh or a dead network can never stall the session.
+ *
+ * Cursor's stdin (`cursor_version` / `hook_event_name`) is translated at
+ * this edge: `conversation_id` → session id, `loop_count > 0` →
+ * `stop_hook_active`, successful `postToolUse` → `tool_response.success`.
+ * Stdout becomes `additional_context`, `followup_message`, or `permission`.
+ * Cloud agents do not fire sessionStart, so the first Cursor prompt
+ * rehydrates once; preCompact clears that mark.
  */
 import { execFileSync } from 'node:child_process'
 import {
@@ -43,13 +50,14 @@ import {
 import { dirname, join } from 'node:path'
 import {
   acquireFileLock,
-  parallelWorkLines,
+  parallelWorkProbe,
   postToolLines,
   promptContextLines,
-  sessionStartLines,
+  sessionStartProbe,
   stopGateContributions,
   withFileLock,
 } from '@broject/core'
+import type { ProbeResult } from '@broject/core'
 import { markerLive, ownerTag } from './proc-owner.ts'
 import {
   cliVersion,
@@ -57,6 +65,14 @@ import {
   installCommitHook,
   uninstallCommitHook,
 } from './githooks.ts'
+import {
+  CURSOR_HYDRATED_SKILL,
+  cursorStopIgnored,
+  cursorToHookInput,
+  cursorWorkspaceRoots,
+  isCursorHookPayload,
+  toCursorHookOutput,
+} from '../cursor-hook.ts'
 
 interface HookInput {
   tool_name?: unknown
@@ -87,16 +103,53 @@ function broEnabled(startDir: string): boolean {
   }
 }
 
-function readInput(): HookInput {
+function readRaw(): unknown {
   try {
-    return JSON.parse(readFileSync(0, 'utf8')) as HookInput
+    return JSON.parse(readFileSync(0, 'utf8')) as unknown
   } catch {
     return {}
   }
 }
 
+function asHookInput(raw: unknown): HookInput {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return {}
+  }
+  return raw as HookInput
+}
+
+/** Set for the life of this process when stdin is a Cursor payload.
+ * Each hook invocation is its own process. */
+let cursorClient = false
+
 function emit(out: unknown): void {
-  process.stdout.write(`${JSON.stringify(out)}\n`)
+  const payload = cursorClient ? toCursorHookOutput(out) : out
+  process.stdout.write(`${JSON.stringify(payload)}\n`)
+}
+
+function isAbsoluteProject(p: string): boolean {
+  return p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p)
+}
+
+/** Cursor plugin hooks run with cwd = the open folder, which is not
+ * always the workspace root. Prefer `CURSOR_PROJECT_DIR`, then cwd,
+ * then `workspace_roots` — the first absolute path that walks up to a
+ * bro-enabled repo. Non-Cursor hosts keep the Devin/cwd rule. */
+function hookProjectDir(raw: unknown): string {
+  if (!cursorClient) {
+    return process.env.DEVIN_PROJECT_DIR ?? process.cwd()
+  }
+  const candidates = [
+    process.env.CURSOR_PROJECT_DIR,
+    process.cwd(),
+    ...cursorWorkspaceRoots(raw),
+  ]
+  for (const c of candidates) {
+    if (c && isAbsoluteProject(c) && broEnabled(c)) {
+      return c
+    }
+  }
+  return process.env.DEVIN_PROJECT_DIR ?? process.cwd()
 }
 
 function context(event: string, text: string): void {
@@ -435,25 +488,30 @@ function liveSessionLines(dir: string, selfId: string): string[] {
  *  work here, or a connector reports live work (claimed beads, sibling
  *  worktrees, held slots) — passive context naming what's occupied,
  *  never a block. */
-async function parallelLines(sessionId: string): Promise<string[]> {
+async function parallelLines(sessionId: string): Promise<ProbeResult> {
   try {
     const parts: string[] = []
     const dir = hooksStateDir()
     if (dir) {
       parts.push(...liveSessionLines(dir, sessionId))
     }
-    parts.push(...(await parallelWorkLines({ dir: process.cwd(), sessionId })))
+    const work = await parallelWorkProbe({ dir: process.cwd(), sessionId })
+    parts.push(...work.lines)
     if (parts.length === 0) {
-      return []
+      return { lines: [], settled: work.settled }
     }
-    return [
-      'parallel work detected in this repo:',
-      ...parts.map((p) => `  ${p}`),
-      '  → for new work prefer `bro work enter <slug>` — a separate worktree, not this checkout',
-    ]
+    return {
+      lines: [
+        'parallel work detected in this repo:',
+        ...parts.map((p) => `  ${p}`),
+        '  → for new work prefer `bro work enter <slug>` — a separate worktree, not this checkout',
+      ],
+      settled: work.settled,
+    }
   } catch {
-    // detection is passive — a probe failure must not break rehydrate
-    return []
+    // detection is passive — a probe failure must not break rehydrate,
+    // but the sweep did not settle, so hydration may retry
+    return { lines: [], settled: false }
   }
 }
 
@@ -733,25 +791,49 @@ function journalTrace(input: HookInput, sessionId: string): void {
 async function emitSessionContext(
   event: 'SessionStart' | 'PostCompaction' | 'PreCompact',
   sessionId = ''
-): Promise<void> {
-  const parts: string[] = []
+): Promise<boolean> {
   // sessionStart probes collect from every connector — beads reports
   // the ready queue, drill the open frame, act the PR gate + merge slot,
   // debt the open findings; a jira connector would add assigned issues
-  parts.push(...(await sessionStartLines({ dir: process.cwd(), sessionId })))
-  parts.push(...(await parallelLines(sessionId)))
+  const start = await sessionStartProbe({ dir: process.cwd(), sessionId })
+  const par = await parallelLines(sessionId)
+  const parts = [...start.lines, ...par.lines]
   if (parts.length > 0) {
     context(event, `bro state — resume from here:\n${parts.join('\n')}`)
   }
+  return start.settled && par.settled
 }
 
 async function emitPromptContext(input: HookInput): Promise<void> {
   const prompt = typeof input.prompt === 'string' ? input.prompt : ''
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
-  const parts = await promptContextLines({ dir: process.cwd(), sessionId }, prompt)
-  if (parts.length > 0) {
-    context('UserPromptSubmit', parts.join('\n'))
+  const parts: string[] = []
+  // Cloud agents never fire sessionStart. The first prompt carries that
+  // rehydration; a later prompt does not repeat it. preCompact drops the
+  // mark so the summary's successor turn loads fresh state. Mark only
+  // after the probes return — a throw retries next prompt.
+  const hydrate = cursorClient && sessionId && !skillHinted(sessionId, CURSOR_HYDRATED_SKILL)
+  let settled = true
+  if (hydrate) {
+    const start = await sessionStartProbe({ dir: process.cwd(), sessionId })
+    const par = await parallelLines(sessionId)
+    parts.push(...start.lines, ...par.lines)
+    settled = start.settled && par.settled
   }
+  const sessionCount = parts.length
+  parts.push(...(await promptContextLines({ dir: process.cwd(), sessionId }, prompt)))
+  // a timed-out or thrown probe masquerades as "no state" — mark only
+  // when every probe answered, else the marker suppresses a retry for
+  // the marker's whole TTL
+  if (hydrate && settled) {
+    markSkillHinted(sessionId, CURSOR_HYDRATED_SKILL)
+  }
+  if (parts.length === 0) {
+    return
+  }
+  const text =
+    sessionCount > 0 ? `bro state — resume from here:\n${parts.join('\n')}` : parts.join('\n')
+  context('UserPromptSubmit', text)
 }
 
 async function emitPostTool(input: HookInput): Promise<void> {
@@ -845,32 +927,131 @@ async function emitStopGate(input: HookInput): Promise<void> {
   }
 }
 
-function emitPermission(input: HookInput): void {
+/** True when the command was approved. Cursor's beforeShellExecution
+ * blocks on empty or invalid stdout, so a non-match must still answer
+ * `ask` — silence is a deny. Chained commands match the plugin matcher
+ * and land here; they are not self-tool calls, so they stay a prompt. */
+function emitPermission(input: HookInput): boolean {
   const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
   if (isSelfToolCommand(cmd)) {
     emit({ decision: 'approve' })
+    return true
+  }
+  return false
+}
+
+function clearCursorHydrated(sessionId: string): void {
+  try {
+    const path = hintedPath(sessionId, CURSOR_HYDRATED_SKILL)
+    if (path) {
+      rmSync(path, { force: true })
+    }
+  } catch {
+    // a stuck mark rehydrates on the next prompt — never a stalled hook
+  }
+}
+
+/** Cursor blocks a beforeShellExecution hook that prints nothing. Answer
+ * even when the repo has not opted in and even when chdir fails. */
+function answerCursorPermission(event: string | undefined, input: HookInput): void {
+  if (!(cursorClient && event === 'permission')) {
+    return
+  }
+  if (!emitPermission(input)) {
+    emit({ permission: 'ask' })
+  }
+}
+
+function runCommitHookCommand(event: 'install' | 'uninstall'): void {
+  const r =
+    event === 'install'
+      ? installCommitHook(process.cwd(), cliVersion())
+      : uninstallCommitHook(process.cwd())
+  if (r.state === 'error') {
+    console.error(`bro hooks ${event}: ${r.err}`)
+    process.exitCode = 1
+    return
+  }
+  console.error(`bro hooks ${event}: ${r.state} ${r.path}`)
+}
+
+function runPrepareCommitMsg(argv: string[]): void {
+  try {
+    emitCommitTrailers(argv.slice(1))
+  } catch {
+    // fail-open — provenance must never block a commit
+  }
+}
+
+/** bd/gh probes inherit cwd — run them in the project the hook fired for. */
+function enterHookProject(root: string): boolean {
+  if (root === process.cwd()) {
+    return true
+  }
+  try {
+    process.chdir(root)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function dispatchHook(event: string, raw: unknown, input: HookInput): Promise<void> {
+  const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
+  switch (event) {
+    case 'session-start': {
+      const settled = await emitSessionContext('SessionStart', sessionId)
+      if (cursorClient && settled) {
+        markSkillHinted(sessionId, CURSOR_HYDRATED_SKILL)
+      }
+      return
+    }
+    case 'post-compaction':
+      await emitSessionContext('PostCompaction', sessionId)
+      return
+    case 'pre-compact':
+      // Claude Code requires hookEventName to match the firing event.
+      // Cursor's preCompact cannot feed the summary; drop the hydration
+      // mark so the next prompt reloads state after compaction.
+      if (cursorClient) {
+        clearCursorHydrated(sessionId)
+      }
+      await emitSessionContext('PreCompact', sessionId)
+      return
+    case 'prompt-submit':
+      await emitPromptContext(input)
+      return
+    case 'post-tool':
+      await emitPostTool(input)
+      return
+    case 'stop':
+      if (cursorClient && cursorStopIgnored(raw)) {
+        return
+      }
+      await emitStopGate(input)
+      return
+    case 'permission':
+      if (!emitPermission(input) && cursorClient) {
+        emit({ permission: 'ask' })
+      }
+      return
+    default:
+      // forward-compat: hooks.json may name events this bro doesn't know
+      return
   }
 }
 
 // --- dispatch -----------------------------------------------------------------
 
 export async function runHooksCommand(argv: string[]): Promise<void> {
+  cursorClient = false
   const event = argv[0]
   // install/uninstall are operator commands, not hook events — they
   // report a verdict on stderr and never read stdin (a git hook's stdin
-  // can be a terminal, and readInput would block on it forever). They
+  // can be a terminal, and reading stdin would block on it forever). They
   // also run before the broEnabled gate: wiring a repo is how it opts in.
   if (event === 'install' || event === 'uninstall') {
-    const r =
-      event === 'install'
-        ? installCommitHook(process.cwd(), cliVersion())
-        : uninstallCommitHook(process.cwd())
-    if (r.state === 'error') {
-      console.error(`bro hooks ${event}: ${r.err}`)
-      process.exitCode = 1
-      return
-    }
-    console.error(`bro hooks ${event}: ${r.state} ${r.path}`)
+    runCommitHookCommand(event)
     return
   }
   // prepare-commit-msg is a git-hook event (argv, not a JSON payload) —
@@ -878,57 +1059,32 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   // placement: the installed shim IS the opt-in, so gating on
   // .beads/bro.config would silently deaden a hook the repo installed
   if (event === 'prepare-commit-msg') {
-    try {
-      emitCommitTrailers(argv.slice(1))
-    } catch {
-      // fail-open — provenance must never block a commit
-    }
+    runPrepareCommitMsg(argv)
     return
   }
-  const root = process.env.DEVIN_PROJECT_DIR ?? process.cwd()
-  if (!event || !broEnabled(root)) {
+  // a bare `bro hooks` is a capability probe — launchers test the
+  // subcommand exists before calling it with the real event. Return
+  // before readRaw: the probe must not consume a payload still waiting
+  // on the caller's stdin for that next invocation.
+  if (!event) {
     return
   }
-  // bd/gh probes inherit cwd — run them in the project the hook fired for,
-  // not wherever this process happened to start.
-  if (root !== process.cwd()) {
-    try {
-      process.chdir(root)
-    } catch {
-      return
-    }
+  // stdin before the opt-in check: Cursor's project dir is on the
+  // payload / CURSOR_PROJECT_DIR, and cwd may be outside the repo.
+  const raw = readRaw()
+  cursorClient = isCursorHookPayload(raw)
+  const root = hookProjectDir(raw)
+  const input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw)
+  if (!broEnabled(root) || !enterHookProject(root)) {
+    answerCursorPermission(event, input)
+    return
   }
-  const input = readInput()
   try {
-    const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
-    switch (event) {
-      case 'session-start':
-        await emitSessionContext('SessionStart', sessionId)
-        return
-      case 'post-compaction':
-        await emitSessionContext('PostCompaction', sessionId)
-        return
-      case 'pre-compact':
-        // Claude Code requires hookEventName to match the firing event
-        await emitSessionContext('PreCompact', sessionId)
-        return
-      case 'prompt-submit':
-        await emitPromptContext(input)
-        return
-      case 'post-tool':
-        await emitPostTool(input)
-        return
-      case 'stop':
-        await emitStopGate(input)
-        return
-      case 'permission':
-        emitPermission(input)
-        return
-      default:
-        // forward-compat: hooks.json may name events this bro doesn't know
-        return
-    }
+    await dispatchHook(event, raw, input)
   } catch {
-    // hooks fail open — a bro bug must never break the session
+    // hooks fail open — a bro bug must never break the session.
+    // A permission hook that already answered returned above; this
+    // covers a throw before that answer.
+    answerCursorPermission(event, input)
   }
 }

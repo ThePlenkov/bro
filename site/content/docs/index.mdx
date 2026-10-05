@@ -49,9 +49,12 @@ same skills and lifecycle hooks everywhere:
 | Devin | `devin plugins install ThePlenkov/bro` |
 | Claude Code | `/plugin marketplace add ThePlenkov/bro` → `/plugin install bro@bro` |
 | Codex | `codex plugin marketplace add ThePlenkov/bro` → install `bro` |
+| Cursor | `/add-plugin https://github.com/ThePlenkov/bro`, then install `bro` |
 | OpenCode | add `"plugin": ["@broject/bro"]` to `opencode.json` |
 
 The shell adapters ship session rehydration, the review-gate stop hook,
 and self-approve for `bro`/`bd` — wired through `hooks/run.sh`, always
-fail-open. OpenCode is a native plugin on the same hook bus; it has no
+fail-open. Cursor uses that bus with its own hook schema: context comes
+back as `additional_context`, and the stop gate is a single follow-up.
+OpenCode is a native plugin on the same hook bus; it has no
 pre-stop hook, so its stop gate re-prompts once rather than blocking.

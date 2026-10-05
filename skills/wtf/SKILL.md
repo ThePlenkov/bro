@@ -24,12 +24,13 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd init` done.
 ## Policy
 
 - **Capture before apologizing.** The first move is
-  `bro wtf "<the user's words, verbatim>"` — never a paraphrase, never a
+  `bro wtf '<the user's words, verbatim>'` — never a paraphrase, never a
   softened version. The quote is evidence; every arg is captured
   literally, `--`-leading text included (only a leading `-h`/`--help`
-  prints usage). Invoke it as a single argv value — never interpolate
-  the complaint into a compound shell command where metacharacters or
-  quotes could execute.
+  prints usage). Invoke it as a single argv value, single-quoted —
+  escape an embedded `'` as `'\''`. Never double quotes: `$()` and
+  backticks still expand inside them, and never a compound shell
+  command where metacharacters could execute.
 - **Analyze your own actions, not the user.** The wtf is a defect in the
   agent's process. Review your recent turns in context: what you were
   asked, what you assumed, what you skipped. Post-compaction and unsure?

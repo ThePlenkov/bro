@@ -456,6 +456,10 @@ export function connectorHooks(ctx: ConnectorCtx): ConnectorHooks[] {
  *  on time even if a spawned child lingers. */
 const PROBE_TIMEOUT_MS = 4_000
 
+/** Sentinel fallback — lets a collector tell "probe timed out" apart
+ *  from a probe that genuinely answered `undefined`. */
+const PROBE_TIMED_OUT: unique symbol = Symbol('probe-timed-out')
+
 async function probeWithTimeout<T>(p: MaybePromise<T>, fallback: T): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<T>((resolve) => {
@@ -469,42 +473,73 @@ async function probeWithTimeout<T>(p: MaybePromise<T>, fallback: T): Promise<T> 
   }
 }
 
+/** A connector sweep's lines plus whether every probe answered inside
+ *  its budget — `settled: false` means a timeout or throw hid state, so
+ *  empty `lines` reads "unknown", not "nothing to report". */
+export interface ProbeResult {
+  lines: string[]
+  settled: boolean
+}
+
 /** Collect a line-producing probe across all connectors — fail-open
- *  per connector, one wedged system must not starve the rest. */
+ *  per connector, one wedged system must not starve the rest. A probe
+ *  that times out or throws still contributes nothing, but flips
+ *  `settled` so the caller can retry instead of caching the miss. */
 async function collectLines(
   ctx: ConnectorCtx,
   probe: (h: ConnectorHooks) => MaybePromise<string[] | undefined>
-): Promise<string[]> {
+): Promise<ProbeResult> {
   const out: string[] = []
+  let settled = true
   for (const h of connectorHooks(ctx)) {
     try {
-      out.push(...((await probeWithTimeout(probe(h), undefined)) ?? []))
+      const r = await probeWithTimeout<string[] | undefined | typeof PROBE_TIMED_OUT>(
+        probe(h),
+        PROBE_TIMED_OUT
+      )
+      if (r === PROBE_TIMED_OUT) {
+        settled = false
+        continue
+      }
+      out.push(...(r ?? []))
     } catch {
-      // fail-open
+      // fail-open output, but the sweep did not settle
+      settled = false
     }
   }
-  return out
+  return { lines: out, settled }
 }
 
 /** Collect session-start context lines from all connectors. */
-export function sessionStartLines(ctx: ConnectorCtx): Promise<string[]> {
+export async function sessionStartLines(ctx: ConnectorCtx): Promise<string[]> {
+  return (await sessionStartProbe(ctx)).lines
+}
+
+/** Session-start lines plus the settle flag — rehydrate marks are only
+ *  honest when every probe answered. */
+export function sessionStartProbe(ctx: ConnectorCtx): Promise<ProbeResult> {
   return collectLines(ctx, (h) => h.sessionStart?.(ctx))
 }
 
 /** Collect parallel-work signals from all connectors. */
-export function parallelWorkLines(ctx: ConnectorCtx): Promise<string[]> {
+export async function parallelWorkLines(ctx: ConnectorCtx): Promise<string[]> {
+  return (await parallelWorkProbe(ctx)).lines
+}
+
+/** Parallel-work lines plus the settle flag. */
+export function parallelWorkProbe(ctx: ConnectorCtx): Promise<ProbeResult> {
   return collectLines(ctx, (h) => h.parallelWork?.(ctx))
 }
 
 /** Collect prompt-submit context from all connectors. */
-export function promptContextLines(ctx: ConnectorCtx, prompt: string): Promise<string[]> {
-  return collectLines(ctx, (h) => h.promptSubmit?.(ctx, prompt))
+export async function promptContextLines(ctx: ConnectorCtx, prompt: string): Promise<string[]> {
+  return (await collectLines(ctx, (h) => h.promptSubmit?.(ctx, prompt))).lines
 }
 
 /** Collect post-tool context lines from all connectors — mailbox
  *  drains and other per-event probes. */
-export function postToolLines(ctx: ConnectorCtx): Promise<string[]> {
-  return collectLines(ctx, (h) => h.postTool?.(ctx))
+export async function postToolLines(ctx: ConnectorCtx): Promise<string[]> {
+  return (await collectLines(ctx, (h) => h.postTool?.(ctx))).lines
 }
 
 /** Collect stop-gate contributions from all connectors — the caller

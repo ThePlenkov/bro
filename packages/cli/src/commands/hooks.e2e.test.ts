@@ -416,6 +416,193 @@ describe('hooks e2e — commit provenance (prepare-commit-msg)', () => {
   })
 })
 
+function cursorPayload(event: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    hook_event_name: event,
+    cursor_version: '1.7.2',
+    conversation_id: 's1',
+    ...extra,
+  }
+}
+
+describe('hooks e2e — cursor schema', () => {
+  test('session-start emits additional_context, not the Claude envelope', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const r = hook(f, 'session-start', cursorPayload('sessionStart', { session_id: 's1' }))
+      assert.equal(r.code, 0)
+      assert.match(r.stdout, /"additional_context":/)
+      assert.match(r.stdout, /parallel-friendly/)
+      assert.doesNotMatch(r.stdout, /hookSpecificOutput/)
+    })
+  })
+
+  test('postToolUse arms from tool_input.command and emits additional_context', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const r = hook(
+        f,
+        'post-tool',
+        cursorPayload('postToolUse', {
+          tool_name: 'Shell',
+          tool_input: { command: 'gh pr merge 3 --squash' },
+        })
+      )
+      assert.equal(r.code, 0)
+      assert.match(r.stdout, /additional_context/)
+      assert.match(r.stdout, /bro debt collect/)
+      assert.equal(markerExists(f, 's1', 'act'), true)
+    })
+  })
+
+  test('postToolUseFailure does not arm', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const r = hook(
+        f,
+        'post-tool',
+        cursorPayload('postToolUseFailure', { tool_input: { command: 'git push' } })
+      )
+      assert.equal(r.code, 0)
+      assert.equal(markerExists(f, 's1', 'act'), false)
+      assert.doesNotMatch(r.stdout, /additional_context/)
+    })
+  })
+
+  test('stop follow-up fires once; a later loop_count and an abort stay quiet', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const wt = linked(f, true)
+      arm(f, 's1', 'work')
+      const first = hook(f, 'stop', cursorPayload('stop', { status: 'completed', loop_count: 0 }), wt)
+      assert.equal(first.code, 0)
+      assert.match(first.stdout, /"followup_message":/)
+      assert.match(first.stdout, /uncommitted/)
+      assert.doesNotMatch(first.stdout, /"decision"/)
+      const again = hook(f, 'stop', cursorPayload('stop', { status: 'completed', loop_count: 1 }), wt)
+      assert.equal(again.stdout.trim(), '')
+      const aborted = hook(f, 'stop', cursorPayload('stop', { status: 'aborted', loop_count: 0 }), wt)
+      assert.equal(aborted.stdout.trim(), '')
+    })
+  })
+
+  test('permission in a repo that has not opted in still answers', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const bare = join(f.root, 'bare')
+      mkdirSync(bare)
+      const env = { XDG_STATE_HOME: join(f.root, 'xdg-state') }
+      const allow = runCli(['hooks', 'permission'], {
+        cwd: bare,
+        input: JSON.stringify(cursorPayload('beforeShellExecution', { command: 'bd ready' })),
+        env,
+      })
+      assert.equal(allow.code, 0)
+      assert.match(allow.stdout, /"permission":"allow"/)
+      const ask = runCli(['hooks', 'permission'], {
+        cwd: bare,
+        input: JSON.stringify(cursorPayload('beforeShellExecution', { command: 'bro act status && true' })),
+        env,
+      })
+      assert.equal(ask.code, 0)
+      assert.match(ask.stdout, /"permission":"ask"/)
+    })
+  })
+
+  test('permission allows a self-tool and asks on a chain', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const allow = hook(f, 'permission', cursorPayload('beforeShellExecution', { command: 'bd ready -n 5' }))
+      assert.match(allow.stdout, /"permission":"allow"/)
+      const ask = hook(
+        f,
+        'permission',
+        cursorPayload('beforeShellExecution', { command: 'bro act status && rm -rf x' })
+      )
+      assert.match(ask.stdout, /"permission":"ask"/)
+      assert.doesNotMatch(ask.stdout, /allow/)
+    })
+  })
+
+  test('the first prompt rehydrates once; preCompact lets the next prompt do it again', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      arm(f, 'other-session', 'work', 'fx-9')
+      const first = hook(f, 'prompt-submit', cursorPayload('beforeSubmitPrompt', { prompt: 'hello' }))
+      assert.match(first.stdout, /additional_context/)
+      assert.match(first.stdout, /fx-9/)
+      assert.match(first.stdout, /"continue":true/)
+      const second = hook(f, 'prompt-submit', cursorPayload('beforeSubmitPrompt', { prompt: 'hello again' }))
+      assert.doesNotMatch(second.stdout, /fx-9/)
+      hook(f, 'pre-compact', cursorPayload('preCompact'))
+      const third = hook(f, 'prompt-submit', cursorPayload('beforeSubmitPrompt', { prompt: 'after compact' }))
+      assert.match(third.stdout, /fx-9/)
+    })
+  })
+
+  test('session-start marks the session hydrated so the next prompt does not repeat it', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      arm(f, 'other-session', 'work', 'fx-9')
+      const start = hook(f, 'session-start', cursorPayload('sessionStart', { session_id: 's1' }))
+      assert.match(start.stdout, /fx-9/)
+      const prompt = hook(f, 'prompt-submit', cursorPayload('beforeSubmitPrompt', { prompt: 'hello' }))
+      assert.doesNotMatch(prompt.stdout, /fx-9/)
+    })
+  })
+
+  test('CURSOR_PROJECT_DIR wins over cwd; a non-cursor payload ignores it', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const elsewhere = join(f.root, 'elsewhere')
+      mkdirSync(elsewhere)
+      const wt = linked(f, true)
+      arm(f, 's1', 'work')
+      const env = { CURSOR_PROJECT_DIR: wt, XDG_STATE_HOME: join(f.root, 'xdg-state') }
+      const hit = runCli(['hooks', 'stop'], {
+        cwd: elsewhere,
+        input: JSON.stringify(cursorPayload('stop', { status: 'completed', loop_count: 0 })),
+        env,
+      })
+      assert.equal(hit.code, 0)
+      assert.match(hit.stdout, /followup_message/)
+      assert.match(hit.stdout, /uncommitted/)
+      const miss = runCli(['hooks', 'stop'], {
+        cwd: elsewhere,
+        input: JSON.stringify({ session_id: 's1' }),
+        env,
+      })
+      assert.equal(miss.code, 0)
+      assert.doesNotMatch(miss.stdout, /followup_message/)
+      assert.doesNotMatch(miss.stdout, /"decision"/)
+    })
+  })
+
+  test('workspace_roots is the project when cwd is outside the repo', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const elsewhere = join(f.root, 'elsewhere')
+      mkdirSync(elsewhere)
+      const wt = linked(f, true)
+      arm(f, 's1', 'work')
+      const r = runCli(['hooks', 'stop'], {
+        cwd: elsewhere,
+        input: JSON.stringify(
+          cursorPayload('stop', {
+            status: 'completed',
+            loop_count: 0,
+            workspace_roots: [wt],
+          })
+        ),
+        env: { XDG_STATE_HOME: join(f.root, 'xdg-state') },
+      })
+      assert.equal(r.code, 0)
+      assert.match(r.stdout, /followup_message/)
+      assert.match(r.stdout, /uncommitted/)
+    })
+  })
+})
+
 describe('hooks e2e — session-start + the run.sh launcher', () => {
   test('session-start in the main checkout emits the parallel-friendly nudge', () => {
     const f = hookFixture()

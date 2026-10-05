@@ -15,12 +15,13 @@
 # next, and the script always exits 0.
 set -u
 
-# each client exports its own plugin-root var — take whichever exists.
+# each client exports its own plugin-root var — take whichever exists
+# (Cursor, Devin, Claude, or the generic PLUGIN_ROOT).
 # a relative or nonexistent root is untrusted input: canonicalize an
 # absolute root, and fall back to this script's own dir otherwise so the
 # walk-up can't wander off CWD and execute an unrelated dist.
 SCRIPT_ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd)"
-ROOT="${DEVIN_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}"
+ROOT="${CURSOR_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}}}"
 case "$ROOT" in
   /*) ROOT="$(CDPATH='' cd -- "$ROOT" 2>/dev/null && pwd)" ;;
   *)  ROOT= ;;
@@ -39,7 +40,10 @@ done
 if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; then
   node "$DIR/packages/cli/dist/index.js" hooks "$@" && exit 0
 fi
-if command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then
+# stdin is the host's hook payload — the capability probe must not
+# consume it, so it runs with stdin closed (a pre-0.2.5 `bro hooks`
+# would otherwise eat the payload the real invocation needs)
+if command -v bro >/dev/null 2>&1 && bro hooks </dev/null >/dev/null 2>&1; then
   bro hooks "$@" && exit 0
 fi
 if command -v npx >/dev/null 2>&1; then

@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "if [ -f \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" ]; then \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" session-start || true; elif command -v bro >/dev/null 2>&1 && bro hooks </dev/null >/dev/null 2>&1; then bro hooks session-start || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@broject/bro@0.2.4\" hooks session-start || true; fi; exit 0",
+        "timeout": 45
+      }
+    ],
+    "preCompact": [
+      {
+        "command": "if [ -f \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" ]; then \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" pre-compact || true; elif command -v bro >/dev/null 2>&1 && bro hooks </dev/null >/dev/null 2>&1; then bro hooks pre-compact || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@broject/bro@0.2.4\" hooks pre-compact || true; fi; exit 0",
+        "timeout": 20
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "if [ -f \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" ]; then \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" prompt-submit || true; elif command -v bro >/dev/null 2>&1 && bro hooks </dev/null >/dev/null 2>&1; then bro hooks prompt-submit || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@broject/bro@0.2.4\" hooks prompt-submit || true; fi; exit 0",
+        "timeout": 45
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "if [ -f \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" ]; then \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" post-tool || true; elif command -v bro >/dev/null 2>&1 && bro hooks </dev/null >/dev/null 2>&1; then bro hooks post-tool || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@broject/bro@0.2.4\" hooks post-tool || true; fi; exit 0",
+        "timeout": 10,
+        "matcher": "^Shell$"
+      }
+    ],
+    "postToolUseFailure": [
+      {
+        "command": "if [ -f \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" ]; then \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" post-tool || true; elif command -v bro >/dev/null 2>&1 && bro hooks </dev/null >/dev/null 2>&1; then bro hooks post-tool || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@broject/bro@0.2.4\" hooks post-tool || true; fi; exit 0",
+        "timeout": 10,
+        "matcher": "^Shell$"
+      }
+    ],
+    "stop": [
+      {
+        "command": "if [ -f \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" ]; then \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" stop || true; elif command -v bro >/dev/null 2>&1 && bro hooks </dev/null >/dev/null 2>&1; then bro hooks stop || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@broject/bro@0.2.4\" hooks stop || true; fi; exit 0",
+        "timeout": 25,
+        "loop_limit": 1
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "if [ -f \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" ]; then \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" permission || true; elif command -v bro >/dev/null 2>&1 && bro hooks </dev/null >/dev/null 2>&1; then bro hooks permission || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@broject/bro@0.2.4\" hooks permission || true; fi; exit 0",
+        "timeout": 10,
+        "matcher": "^\\s*(bro|bd)(\\s|$)|^\\s*npx\\s+(-y\\s+)?@broject/bro(@[\\w.:-]+)?(\\s|$)"
+      }
+    ]
+  }
+}
