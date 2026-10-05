@@ -621,8 +621,14 @@ async function routeAgentDelete(ref: string, deps: ServeDeps): Promise<ServeResp
       // machine-readable "was already terminal" — clients shouldn't
       // string-match the note to tell it from a live stop
       ...(outcome.terminal === true ? { terminal: true } : {}),
+      ...(outcome.cleared === true ? { cleared: true } : {}),
       ...(outcome.terminal === true && outcome.agent !== undefined
-        ? { note: `already ${outcome.agent.state}` }
+        ? {
+            note:
+              outcome.cleared === true
+                ? 'blocked — cleared'
+                : `already ${outcome.agent.state}`,
+          }
         : {}),
       ...(outcome.respawned !== undefined ? { respawned: outcome.respawned } : {}),
     },

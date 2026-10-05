@@ -22,6 +22,7 @@ import {
   readFileSync,
   readSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs'
@@ -46,6 +47,7 @@ import {
   SpawnError,
   readAgentRegistry,
   withAgentRegistryLock,
+  writeAgentRegistry,
   type AgentConnector,
   type AgentInfo,
   type AgentRegistryEntry,
@@ -679,6 +681,15 @@ function prepareSpawn(
   const exitFile = join(home, `${agentId}.exit`)
   rmSync(exitFile, { force: true })
   writeFileSync(promptFile, spec.prompt)
+  // the log is append-mode across respawns — pin where THIS run's output
+  // starts so a later exit classifies on new text only, not the old run's
+  // rate-limit wall (which would re-block the fresh run forever)
+  let logFrom = 0
+  try {
+    logFrom = statSync(log).size
+  } catch {
+    // no log yet — the run starts at byte 0
+  }
   // exitStatus: undefined clears a respawned entry's stale harvest — the
   // new run must not read as already-exited (undefined keys drop out of
   // the serialized registry). pid/pidStart/spawnError likewise — a claim
@@ -692,6 +703,7 @@ function prepareSpawn(
     // reader's cwd differs from the spawner's (bro-qoqt)
     worktree: resolve(spec.repoRoot),
     log,
+    logFrom,
     stopped: false,
     exitStatus: undefined,
     // a respawned entry's cause/resetAt belonged to the PREVIOUS run —
@@ -732,7 +744,7 @@ function readExitFile(home: string, agentId: string): number | undefined {
  *  through to 'crash' on a non-zero exit. */
 const LOG_TAIL_BYTES = 64 * 1024
 
-function readLogTail(log: unknown): string {
+function readLogTail(log: unknown, from?: unknown): string {
   if (typeof log !== 'string' || log === '') {
     return ''
   }
@@ -740,9 +752,16 @@ function readLogTail(log: unknown): string {
     const fd = openSync(log, 'r')
     try {
       const size = fstatSync(fd).size
-      const buf = Buffer.alloc(Math.min(size, LOG_TAIL_BYTES))
-      readSync(fd, buf, 0, buf.length, Math.max(0, size - buf.length))
-      return buf.toString('utf8')
+      // classification reads only THIS run's segment — a respawned entry
+      // carries logFrom so the previous run's output can't re-classify
+      const base = typeof from === 'number' && from > 0 ? Math.min(from, size) : 0
+      const len = Math.min(size - base, LOG_TAIL_BYTES)
+      if (len <= 0) {
+        return ''
+      }
+      const buf = Buffer.alloc(len)
+      const n = readSync(fd, buf, 0, len, size - len)
+      return buf.toString('utf8', 0, n)
     } finally {
       closeSync(fd)
     }
@@ -773,14 +792,26 @@ function ensureExitCause(
   if (typeof entry.exitStatus !== 'number' || isAgentCause(entry.cause)) {
     return
   }
-  const c = classifyExitCause(readLogTail(entry.log), entry.exitStatus)
+  const c = classifyExitCause(readLogTail(entry.log, entry.logFrom), entry.exitStatus)
   entry.cause = c.cause
   entry.resetAt = c.resetAt
   try {
-    patchAgentRegistry(dir, molStep, {
-      exitStatus: entry.exitStatus,
-      cause: c.cause,
-      resetAt: c.resetAt,
+    // the merge must bind to the SAME generation we classified — a
+    // respawn between our snapshot read and this patch owns the entry
+    // now, and the old run's exit fields would mislabel it
+    withAgentRegistryLock(dir, () => {
+      const reg = readAgentRegistry(dir)
+      const cur = reg[molStep]
+      if (cur === undefined || cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt) {
+        return
+      }
+      reg[molStep] = {
+        ...cur,
+        exitStatus: entry.exitStatus,
+        cause: c.cause,
+        resetAt: c.resetAt,
+      }
+      writeAgentRegistry(dir, reg)
     })
   } catch {
     // the registry write is advisory — .exit still proves the exit

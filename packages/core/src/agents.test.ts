@@ -433,6 +433,14 @@ describe('classifyExitCause', () => {
       'rate_limited'
     )
     assert.equal(classifyExitCause('HTTP 429 too many requests', 1).cause, 'rate_limited')
+    // identifier forms — the suffix continues with word chars
+    assert.equal(classifyExitCause('rate_limit_exceeded', 1).cause, 'rate_limited')
+    assert.equal(classifyExitCause('RateLimitError: slow down', 1).cause, 'rate_limited')
+    // requests-per-window phrasing
+    assert.equal(
+      classifyExitCause('30 requests per minute exceeded', 1).cause,
+      'rate_limited'
+    )
   })
 
   test('quota and auth classify from their own phrasing', () => {
@@ -443,6 +451,7 @@ describe('classifyExitCause', () => {
     assert.equal(classifyExitCause('billing hard limit exceeded', 1).cause, 'quota')
     assert.equal(classifyExitCause('401 Unauthorized: invalid api key', 1).cause, 'auth')
     assert.equal(classifyExitCause('token expired — not authenticated', 1).cause, 'auth')
+    assert.equal(classifyExitCause('error: expired API key', 1).cause, 'auth')
   })
 
   test('a provider reset rides the classification', () => {
@@ -462,6 +471,17 @@ describe('classifyExitCause', () => {
     assert.equal(
       classifyExitCause('x-ratelimit-reset: 1759700000', 1, now).resetAt,
       new Date(1759700000 * 1000).toISOString()
+    )
+    // Retry-After's HTTP-date form parses too
+    assert.equal(
+      classifyExitCause('rate limit — retry-after: Wed, 07 Oct 2026 07:28:00 GMT', 1, now)
+        .resetAt,
+      '2026-10-07T07:28:00.000Z'
+    )
+    // an absurd delay is out of Date range — no throw, no reset
+    assert.equal(
+      classifyExitCause('rate limit — retry-after: 99999999999999999', 1, now).resetAt,
+      undefined
     )
     // no reset reported → undefined, the caller's block stays held
     assert.equal(classifyExitCause('rate limit reached', 1, now).resetAt, undefined)
@@ -490,8 +510,10 @@ describe('agentEntryBlocked', () => {
     assert.equal(agentEntryBlocked(entry({ cause: 'rate_limited' })), true)
   })
 
-  test('quota blocks until an operator clears it', () => {
+  test('quota blocks until an operator clears it — resetAt does not lift it', () => {
     assert.equal(agentEntryBlocked(entry({ cause: 'quota' })), true)
+    const past = entry({ cause: 'quota', resetAt: '2000-01-01T00:00:00Z' })
+    assert.equal(agentEntryBlocked(past), true)
   })
 
   test('stopped lifts the block — down is the manual clear', () => {

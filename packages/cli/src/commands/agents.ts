@@ -436,6 +436,10 @@ export interface StopOutcome {
   /** the agent already read terminal when we looked — stop() still ran
    *  (idempotent), the flag just says there was nothing live to kill */
   terminal?: boolean
+  /** the agent read `blocked` — stop() still ran and lifted the block,
+   *  so callers confirm the manual clear instead of reporting
+   *  "nothing to stop" */
+  cleared?: boolean
   /** pid changed between list() and status() — a respawn raced us */
   respawned?: { from?: number; to?: number }
 }
@@ -480,6 +484,7 @@ export async function stopAgent(
     backend: hit.conn.name,
     stopped: true,
     terminal,
+    cleared: current.state === 'blocked' ? true : undefined,
     respawned,
   }
 }
@@ -545,7 +550,13 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
   }
   const agent = outcome.agent!
   if (outcome.terminal) {
-    console.log(`down: ${agent.id} is ${agent.state} — nothing to stop`)
+    // a blocked entry is terminal BUT the stop was the manual clear —
+    // confirm that, don't report "nothing to stop"
+    console.log(
+      outcome.cleared === true
+        ? `down: ${agent.id} was blocked (${agent.cause ?? '?'}) — cleared`
+        : `down: ${agent.id} is ${agent.state} — nothing to stop`
+    )
     return
   }
   if (outcome.respawned) {

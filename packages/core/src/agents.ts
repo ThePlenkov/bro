@@ -41,14 +41,19 @@ export interface ExitClassification {
 }
 
 const CAUSE_PATTERNS: [AgentCause, RegExp][] = [
-  ['rate_limited', /\brate[_ -]?limits?\b|\b429\b|too many requests/i],
+  // no trailing \b on the rate-limit stem — identifier forms
+  // (`rate_limit_exceeded`, `RateLimitError`) continue with word chars
+  [
+    'rate_limited',
+    /\brate[_ -]?limits?|\b429\b|too many requests|requests?\s*(?:per|[-/])\s*(?:window|second|minute|hour|day)\b/i,
+  ],
   [
     'quota',
     /\bquota\b|insufficient[_ ]?(?:credits?|funds?|balance)|\bbilling\b|out of (?:credits?|funds?)|spend(?:ing)? limit|(?:monthly|daily|usage) limit (?:reached|exceeded)/i,
   ],
   [
     'auth',
-    /\b401\b|\bunauthori[sz]ed\b|invalid (?:api[_ -]?key|token|credentials?)|authentication (?:failed|required|error)|not (?:authenticated|logged in|signed in)|token (?:expired|revoked|invalid)/i,
+    /\b401\b|\bunauthori[sz]ed\b|invalid (?:api[_ -]?key|token|credentials?)|authentication (?:failed|required|error)|not (?:authenticated|logged in|signed in)|(?:api[_ -]?key|token|credentials?) (?:expired|revoked|invalid)|expired (?:api[_ -]?key|token|credentials?)/i,
   ],
 ]
 
@@ -67,7 +72,23 @@ function parseResetAt(text: string, now: number): string | undefined {
     if (Number.isFinite(n) && n >= 0) {
       const unit = rel[2]?.toLowerCase() ?? 's'
       const ms = n * (unit.startsWith('h') ? 3_600_000 : unit.startsWith('m') ? 60_000 : 1_000)
-      return new Date(now + ms).toISOString()
+      // an absurd but finite delay overflows Date — toISOString() throws
+      // RangeError, so validate before formatting and fall through
+      const reset = new Date(now + ms)
+      if (!Number.isNaN(reset.getTime())) {
+        return reset.toISOString()
+      }
+    }
+  }
+  // Retry-After's HTTP-date form — the numeric matcher above skips it
+  const httpDate =
+    /retry[- ]?after\s*[:=]\s*([A-Za-z]{3},\s*\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}:\d{2}\s*GMT)/i.exec(
+      text
+    )
+  if (httpDate !== null) {
+    const t = Date.parse(httpDate[1]!)
+    if (!Number.isNaN(t)) {
+      return new Date(t).toISOString()
     }
   }
   const iso =
@@ -228,14 +249,18 @@ export interface AgentRegistryEntry {
 }
 
 /** Whether the entry's recorded cause still forbids respawn — a
- *  `rate_limited`/`quota` death blocks until the provider's `resetAt`
- *  passes, or indefinitely when none was reported. `stopped` lifts it:
- *  `bro agents down` is the operator's manual clear. */
+ *  `rate_limited` death blocks until the provider's `resetAt` passes,
+ *  or indefinitely when none was reported; `quota` is an account wall
+ *  and holds until the operator clears it whatever resetAt says.
+ *  `stopped` lifts it: `bro agents down` is the manual clear. */
 export function agentEntryBlocked(entry: AgentRegistryEntry, now = Date.now()): boolean {
   if (entry.stopped === true) {
     return false
   }
-  if (entry.cause !== 'rate_limited' && entry.cause !== 'quota') {
+  if (entry.cause === 'quota') {
+    return true
+  }
+  if (entry.cause !== 'rate_limited') {
     return false
   }
   const reset = typeof entry.resetAt === 'string' ? Date.parse(entry.resetAt) : Number.NaN

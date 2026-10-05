@@ -114,7 +114,8 @@ so `entryOccupies`/`fleetOccupancy` need no change.
 - `bro fleet` — a `blocked` agent renders `blocked — <cause>`, never
   `lost — respawn?`: the respawn decision surface is for corpses.
 - `bro watch` — a blocked row surfaces as attention
-  (`agent blocked — <step> — <cause>`).
+  (`agent blocked — <cause>[ til <resetAt>] — <step> (<title>)` — the
+  fleet cell leads, then the step).
 - `bro agents down` / `stopAgent` — `blocked` joins `exited|stopped|lost`
   as terminal.
 - `webui` fleet cell — `blocked — …` renders `warn`.
