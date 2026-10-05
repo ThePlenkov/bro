@@ -201,12 +201,12 @@ describe('agent registry IO', () => {
     })
   })
 
-  test('malformed json reads empty, not a crash', () => {
+  test('malformed json throws — corruption is degradation, not emptiness', () => {
     withRepo((dir) => {
       const path = agentRegistryPath(dir)!
       mkdirSync(join(path, '..'), { recursive: true })
       writeFileSync(path, '{oops')
-      assert.deepEqual(readAgentRegistry(dir), {})
+      assert.throws(() => readAgentRegistry(dir), SyntaxError)
     })
   })
 

@@ -422,41 +422,13 @@ function retiredKeys(
   return keys
 }
 
-/** Drop the retired keys inside the registry lock, revalidating each
- *  entry — a respawn that reused the key (same molStep, new
- *  generation) owns it now. Returns the effective registry. */
-function dropRetired(
-  ctx: Ctx,
-  before: Record<string, AgentRegistryEntry>,
-  deadKeys: string[]
-): Record<string, AgentRegistryEntry> {
-  const release = ctx.deps.registryLock()
-  try {
-    const cur = ctx.deps.readRegistry()
-    let changed = false
-    for (const k of deadKeys) {
-      if (cur[k]?.agentId !== before[k]?.agentId || cur[k]?.spawnedAt !== before[k]?.spawnedAt) {
-        continue
-      }
-      delete cur[k]
-      changed = true
-      ctx.report.agentEntries.push(k)
-    }
-    if (changed && !ctx.dryRun) {
-      ctx.deps.writeRegistry(cur)
-    }
-    return changed ? cur : before
-  } finally {
-    release()
-  }
-}
-
 /** `<agentId>.*` files no live entry points at are debris — the
  *  naming makes the whole home one unlink set, no extra bookkeeping.
  *  Prefix-match against live ids first (minted ids are `<backend>-hex`,
  *  but a hand-edited entry could carry a dot — first-dot split would
- *  orphan its files); an mtime at-or-after the scan start is a file a
- *  respawn recreated mid-sweep. */
+ *  orphan its files); the debris age floor covers a spawn whose home
+ *  files landed before its registry write could (spawn writes
+ *  `<id>.prompt.md` ahead of `patchAgentRegistry`). */
 function reapOrphanHomes(ctx: Ctx, agentsDir: string): void {
   const lives = [...ctx.liveAgentIds]
   for (const f of listDir(agentsDir)) {
@@ -470,7 +442,7 @@ function reapOrphanHomes(ctx: Ctx, agentsDir: string): void {
     }
     const path = join(agentsDir, f)
     const st = statOf(path)
-    if (!st?.isFile || st.mtimeMs >= ctx.now) {
+    if (!st?.isFile || ctx.now - st.mtimeMs <= DEBRIS_FLOOR_MS) {
       continue
     }
     reap(ctx, path, 'agentFiles')
@@ -479,15 +451,30 @@ function reapOrphanHomes(ctx: Ctx, agentsDir: string): void {
 
 function sweepAgents(ctx: Ctx): void {
   const agentsDir = join(ctx.bro, 'agents')
-  const before = ctx.deps.readRegistry()
-  const deadKeys = retiredKeys(agentsDir, before, ctx.now)
-  const after = deadKeys.length === 0 ? before : dropRetired(ctx, before, deadKeys)
-  ctx.liveAgentIds = new Set(
-    Object.values(after)
-      .map((e) => e.agentId)
-      .filter((id) => SAFE_AGENT_ID.test(id))
-  )
-  reapOrphanHomes(ctx, agentsDir)
+  // one hold across read → mutate → orphan-reap: the registry state the
+  // dead-entry and live-id verdicts judged IS the state the unlinks
+  // run against — a concurrent spawn's registry write lands before or
+  // after the sweep, never inside it
+  const release = ctx.deps.registryLock()
+  try {
+    const cur = ctx.deps.readRegistry()
+    const deadKeys = retiredKeys(agentsDir, cur, ctx.now)
+    for (const k of deadKeys) {
+      delete cur[k]
+      ctx.report.agentEntries.push(k)
+    }
+    if (deadKeys.length > 0 && !ctx.dryRun) {
+      ctx.deps.writeRegistry(cur)
+    }
+    ctx.liveAgentIds = new Set(
+      Object.values(cur)
+        .map((e) => e.agentId)
+        .filter((id) => SAFE_AGENT_ID.test(id))
+    )
+    reapOrphanHomes(ctx, agentsDir)
+  } finally {
+    release()
+  }
 }
 
 // --- lock debris ------------------------------------------------------------------------
@@ -630,6 +617,12 @@ export function janitorBroDir(
     deps,
     liveAgentIds: new Set(),
   }
+  // dry-run is read-only END TO END — a real registry lock would
+  // create-and-remove agents.json.lock on the filesystem (doctor's
+  // probe contract); verdicts tolerate the racy read for a report
+  if (ctx.dryRun) {
+    ctx.deps = { ...ctx.deps, registryLock: () => () => {} }
+  }
   let markerSids: Set<string> | null = null
   const run = (fn: () => void): void => {
     try {
@@ -676,14 +669,21 @@ export function fileBackedJanitorDeps(bro: string): JanitorDeps {
   const reg = join(bro, 'agents.json')
   return {
     readRegistry() {
+      let v: unknown
       try {
-        const v = JSON.parse(readFileSync(reg, 'utf8')) as unknown
-        return typeof v === 'object' && v !== null && !Array.isArray(v)
-          ? (v as Record<string, AgentRegistryEntry>)
-          : {}
-      } catch {
-        return {}
+        v = JSON.parse(readFileSync(reg, 'utf8')) as unknown
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          return {}
+        }
+        // corruption is degradation, not emptiness — a silent {} would
+        // orphan every agent home in this dir
+        throw err
       }
+      if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+        throw new SyntaxError('agents.json must contain an object')
+      }
+      return v as Record<string, AgentRegistryEntry>
     },
     writeRegistry(r) {
       const tmp = `${reg}.${process.pid}.tmp`

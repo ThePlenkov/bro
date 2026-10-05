@@ -294,6 +294,33 @@ describe('janitor — agent homes', () => {
       assert.equal('step-live' in (JSON.parse(readFileSync(join(bro, 'agents.json'), 'utf8')) as object), true)
     })
   })
+
+  test('a corrupt registry aborts the agent pass — malformed JSON is degradation, not emptiness', () => {
+    withBro((bro) => {
+      const agents = mkdir(bro, 'agents')
+      writeFileSync(join(bro, 'agents.json'), '{oops')
+      touch(join(agents, 'native-orphan.log'), 'orphan\n', DAY)
+      const r = janitorBroDir(bro, deps(bro))
+      // a silent {} would read every home as orphaned — the pass must
+      // skip, not reap-everything
+      assert.equal(existsSync(join(agents, 'native-orphan.log')), true)
+      assert.equal(r.reaped.agentFiles, 0)
+      assert.equal(r.agentEntries.length, 0)
+    })
+  })
+
+  test('orphan files inside the debris floor keep — an in-flight spawn writes home files before its registry entry', () => {
+    withBro((bro) => {
+      const agents = mkdir(bro, 'agents')
+      writeRegistry(bro, {})
+      touch(join(agents, 'native-new.prompt.md'), 'prompt\n') // fresh — mid-registration
+      touch(join(agents, 'native-old.prompt.md'), 'prompt\n', DAY)
+      const r = janitorBroDir(bro, deps(bro))
+      assert.equal(existsSync(join(agents, 'native-new.prompt.md')), true)
+      assert.equal(existsSync(join(agents, 'native-old.prompt.md')), false)
+      assert.equal(r.reaped.agentFiles, 1)
+    })
+  })
 })
 
 describe('janitor — locks', () => {
@@ -382,6 +409,10 @@ describe('janitor — size caps', () => {
       const orphanLog = join(agents, 'native-orphan.log')
       writeFileSync(liveLog, big.repeat(6000))
       writeFileSync(orphanLog, big.repeat(6000))
+      // aged past the debris floor — a fresh orphan is an in-flight
+      // spawn, not reapable yet
+      const old = new Date(Date.now() - DAY)
+      utimesSync(orphanLog, old, old)
       const r = janitorBroDir(bro, deps(bro))
       assert.ok(statSync(liveLog).size <= 600 * 1024)
       assert.equal(existsSync(liveLog), true)

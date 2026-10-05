@@ -283,7 +283,7 @@ export function readAgentRegistry(dir: string): Record<string, AgentRegistryEntr
   try {
     const v = JSON.parse(readFileSync(path, 'utf8')) as unknown
     if (typeof v !== 'object' || v === null || Array.isArray(v)) {
-      return {}
+      throw new SyntaxError('agents.json must contain an object')
     }
     // entries with no agentId/backend are torn writes — drop rather than
     // let them masquerade as live agents in dedup
@@ -302,11 +302,12 @@ export function readAgentRegistry(dir: string): Record<string, AgentRegistryEntr
     return out
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code
-    if (err instanceof SyntaxError || code === 'ENOENT') {
+    if (code === 'ENOENT') {
       return {}
     }
-    // EACCES/EIO/etc. is degradation, not emptiness — a silent {} would
-    // let the next patch discard every known agent
+    // corruption/EACCES/EIO is degradation, not emptiness — a silent {}
+    // lets a read-modify-write discard every known agent and lets a
+    // reaper orphan every home file (bro-f6zp review)
     throw err
   }
 }
