@@ -73,12 +73,20 @@ what the CLI actually does.
 /** The catalog entry — what a transport iterates. */
 interface PlaneDescriptor {
   name: 'work' | 'agents' | 'queue' | 'gates' | 'events' | 'judge' | 'debt'
+  /** named read projections beyond list/get — 'ready', 'next',
+   *  'stats', 'tail', 'summary'. Every transport enumerates them:
+   *  REST serves GET /<plane>/<read>, MCP emits bro_<plane>_<read>.
+   *  A name not declared here cannot be a tool — generation, not
+   *  convention, is the contract. */
+  reads: string[]
   /** declared verbs, plane vocabulary only */
   verbs: string[]
   /** live-evaluated — presence means probed-capable, not configured */
   capabilities(): Promise<Record<string, boolean>>
   list(filter?: PlaneFilter): Promise<PlaneRow[]>
   get(ref: string): Promise<PlaneRow | undefined>
+  /** a declared named read — every entry in `reads` resolves here */
+  read(name: string, args?: Record<string, unknown>): Promise<unknown>
   /** throws PlaneVerbError — client bug (bad args) vs
    *  PlaneUnavailable — the backend can't serve it now */
   exec(verb: string, args: Record<string, unknown>): Promise<PlaneRow | void>
@@ -91,15 +99,20 @@ capability; planes declare what *bro* serves a client. Each plane
 implementation is a thin adapter over machinery that already exists —
 no plane owns state:
 
-| plane   | rows from                           | verbs from                         |
-| ------- | ----------------------------------- | ---------------------------------- |
-| work    | `taskStore(dir)` list/ready/get     | claim, close, reopen, note, create |
-| agents  | `collectAgentBackends` / AgentInfo  | spawn, stop, respawn               |
-| queue   | `loadMolecule`/`nextStep` per mol   | pour, claim, done                  |
-| gates   | `reviewHost` checks/threads per PR  | resolve, reply, merge              |
-| events  | `BusEnvelope` ring + notify drops   | publish, tail                      |
-| judge   | verdicts.jsonl rows (`Verdict`)     | decide, stats                      |
-| debt    | `readDebtRecords` / `DebtSummary`   | collect, set                       |
+| plane   | rows from                          | named reads              | verbs                              |
+| ------- | ---------------------------------- | ------------------------ | ---------------------------------- |
+| work    | `taskStore(dir)` list/ready/get    | `ready`                  | claim, close, reopen, note, create |
+| agents  | `collectAgentBackends` / AgentInfo | —                        | spawn, stop, respawn               |
+| queue   | `loadMolecule`/`nextStep` per mol  | `next` (ConvoyNext)      | pour, claim, done                  |
+| gates   | `reviewHost` checks/threads per PR | `status`, `threads`      | resolve, reply, merge              |
+| events  | `BusEnvelope` ring + notify drops  | `tail` (ring slice)      | publish                            |
+| judge   | verdicts.jsonl rows (`Verdict`)    | `stats` (agreement)      | decide                             |
+| debt    | `readDebtRecords` / `DebtSummary`  | `summary`                | collect, set                       |
+
+`list`/`get` are on every descriptor — `reads` holds only the *named*
+projections a plane adds on top (`bro act status`'s exit gate is
+`gates.status`, `bro convoy next` is `queue.next`). A row-level read
+that isn't a named projection stays `list`+`get`.
 
 **Vocabulary rule — the hard contract.** Plane rows and verbs carry
 plane nouns only. A client renders `worker.state: 'lost'`, never
@@ -136,7 +149,10 @@ spec `sessions/bro-f4ot/spec.md`). The plane catalog adds:
 GET  /api/v1/planes              plane index — descriptors + live
                                  capabilities; THE discovery document
 GET  /api/v1/<plane>             list — filter params per descriptor
-GET  /api/v1/<plane>/<ref>       get — 404 {error, capabilities} on miss
+GET  /api/v1/<plane>/<name>      named read when <name> ∈ descriptor's
+                                 `reads`, else get(<ref>) — read names are
+                                 plane-declared constants, so a shadowed
+                                 ref is a spec-visible choice, not a bug
 POST /api/v1/<plane>/<verb>      exec — JSON arg body, same write auth
 ```
 
@@ -186,10 +202,11 @@ MIT — verified npm 2026-10-05; lazy import, a repo that never runs
 server and reads orchestration state as tools instead of shelling
 `bro` and parsing text.
 
-- **Tools are generated from descriptors** — `bro_work_ready`,
-  `bro_work_list`, `bro_agents_list`, `bro_queue_next`,
-  `bro_gates_status`, `bro_events_tail`, `bro_judge_verdicts`,
-  `bro_debt_list`. An absent capability means an absent *tool* —
+- **Tools are generated from descriptors** — `bro_<plane>_list` and
+  `bro_<plane>_get` on every plane, `bro_<plane>_<read>` for each
+  declared named read (`bro_work_ready`, `bro_queue_next`,
+  `bro_gates_status`, `bro_events_tail`, `bro_judge_stats`,
+  `bro_debt_summary`). An absent capability means an absent *tool* —
   agents enumerate `tools/list` and see only what this repo can serve.
 - **v1 is read-only.** The trust argument is the same as serve's reads
   (the spawning principal is same-UID and could read the state anyway),
