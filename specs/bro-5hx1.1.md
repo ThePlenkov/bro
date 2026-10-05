@@ -2,6 +2,7 @@
 parent: bro-5hx1
 scope:
   - packages/core/src/agents.ts
+  - packages/core/src/config.ts
   - packages/core/src/providers.ts
   - packages/providers/src/acp.ts
   - packages/cli/src/agent-connectors.ts
@@ -82,14 +83,23 @@ resolution lands there — a fleet consumed through one seam, not three.
 }
 ```
 
+`fleetSection` (`packages/core/src/config.ts`) gains a `profiles`
+member — today it keeps only `maxConcurrent` and would normalize the
+map away. A profile is `{provider: string, model?: string,
+backend?: string, autoApprove?: boolean}`, validated the way every
+config section is: non-object dropped, missing `provider` dropped
+with a warning.
+
 Selection surface (new — all optional):
 
 ```text
 bro agents up <step> [--provider <name>] [--model <m>] [--profile <name>]
+                     [--auto-approve]
 ```
 
-`StepSpawnRequest` gains the same three fields, so serve and drive get
-the vocabulary for free. `bro loop` keeps its own `spawnAgent` path over
+`StepSpawnRequest` gains the same fields (`provider`, `model`,
+`profile`, `autoApprove`), so serve and drive get the vocabulary for
+free. `bro loop` keeps its own `spawnAgent` path over
 `loop.agent` — provider consumption does not reach it in v1 (its contract
 is the command template; a `cli`-kind entry could feed it later, which is
 a follow-up, not a hole).
@@ -165,9 +175,12 @@ bro acp-worker --command '<entry.command>' [--model <m>]
 The argv is rendered at spawn time, self-contained — a worker must not
 depend on `bro.config.json` staying stable mid-run. `bro` resolves on
 PATH with the `npx -y @broject/bro@0` fallback, the same contract the
-hooks shim pins at install time. `entry.profile` is *not* a driver flag —
-it's already inside `entry.command` where the operator wrote it
-(`kilo --acp --profile work`); the driver never parses the command.
+hooks shim pins at install time. `entry.profile` (the `acp` union's
+typed field, bro-ribc.1) renders onto the spawned command as
+`--profile <value>` — the field exists so operators don't hand-edit
+profile variants into `command`; a CLI that spells the flag
+differently takes it inline in `command` and leaves `profile` unset.
+The driver never parses the command — it receives the rendered string.
 
 **Trust boundary, pinned.** `command` is operator-authored config — the
 same trusted-code contract `loop.agent`/`agents.<backend>.command`
@@ -222,12 +235,18 @@ name and the `/experimental/v2` import stay out, per bro-ribc.1):
    per update — the log stays the observability plane *and* the exit-
    cause classifier's input: provider walls (rate-limit/quota text the
    agent prints) must reach it or `classifyExitCause` reads 'crash'.
-7. **`session/request_permission` → the entry's policy**, passed as
-   `--auto-approve` on the driver argv: set → pick the allow option;
-   unset (default) → reject and log the denial. The honest consequence
-   is documented, not softened: a headless worker against a permissions-
-   asking agent stalls at the first request — the fix is the CLI's own
-   auto-approve flag inside `entry.command`, or opting in.
+7. **`session/request_permission` → a defined policy field.** The
+   `acp` entry union gains `autoApprove?: boolean` (this spec amends
+   bro-ribc.1's union — the kind file owns the wire detail); a spawn
+   override rides `StepSpawnRequest.autoApprove` / `--auto-approve` on
+   `bro agents up`, and `fleet.profiles.<name>.autoApprove` names it in
+   a preset. Resolution is the same ladder as `model`: spawn field →
+   profile → entry → default **false**. Set → the driver answers with
+   the allow option; unset → reject and log the denial. The honest
+   consequence is documented, not softened: a headless worker against
+   a permissions-asking agent stalls at the first request — the fix
+   is the CLI's own auto-approve flag inside `entry.command`, or
+   opting in.
 8. **unadvertised agent→client calls** (fs, terminal) → JSON-RPC
    method-not-found, logged. Capability honesty beats partial
    emulation.
@@ -278,8 +297,15 @@ history is a real feature — it earns a spec when a consumer needs it.
 ```text
 packages/core/src/agents.ts            SpawnSpec/AgentInfo/AgentRegistryEntry
                                        gain provider?/model?
+packages/core/src/config.ts            fleetSection gains profiles; acp
+                                       ProviderEntry gains autoApprove
+packages/core/src/config.ts            fleetSection gains the profiles
+                                       preset map — today it returns only
+                                       maxConcurrent and would normalize
+                                       the new half away
 packages/core/src/providers.ts         spawn-surface capability check
-                                       (kind → canSpawn), profile preset types
+                                       (kind → canSpawn), profile preset
+                                       types, acp entry gains autoApprove?
 packages/providers/src/acp.ts          spawn surface → driver argv builder
 packages/providers/src/acp-worker.ts   the driver — initialize → session/new →
                                        set_config_option → prompt → updates
