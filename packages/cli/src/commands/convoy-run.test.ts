@@ -213,17 +213,23 @@ describe('runMol', () => {
     assert.ok(w.sleeps.includes(900)) // slept until the provider reset
   })
 
-  test('quota parks the mol — a wall with no end is reported, not waited', async () => {
-    const w = world()
+  /** The shared parked-block rig: the worker dies blocked on `cause`,
+   *  the registry entry agrees, and the run must park the mol. */
+  const parkedBlock = async (w: World, cause: string) => {
     w.nexts.set('m-1', [next('step')])
-    w.states.set('n-1', [{ state: 'blocked', cause: 'quota' }])
+    w.states.set('n-1', [{ state: 'blocked', cause }])
     w.entries.set('m-1', {
       agentId: 'n-1',
       backend: 'native',
       spawnedAt: 'x',
-      cause: 'quota',
+      cause,
     })
-    const r = await runMol(w.deps, CFG, 'm-1')
+    return runMol(w.deps, CFG, 'm-1')
+  }
+
+  test('quota parks the mol — a wall with no end is reported, not waited', async () => {
+    const w = world()
+    const r = await parkedBlock(w, 'quota')
     assert.equal(r.verdict, 'parked')
     assert.match(r.detail ?? '', /quota/)
     assert.equal(w.spawns.length, 1)
@@ -231,15 +237,7 @@ describe('runMol', () => {
 
   test('rate_limited with no reported reset parks, not an infinite wait', async () => {
     const w = world()
-    w.nexts.set('m-1', [next('step')])
-    w.states.set('n-1', [{ state: 'blocked', cause: 'rate_limited' }])
-    w.entries.set('m-1', {
-      agentId: 'n-1',
-      backend: 'native',
-      spawnedAt: 'x',
-      cause: 'rate_limited',
-    })
-    const r = await runMol(w.deps, CFG, 'm-1')
+    const r = await parkedBlock(w, 'rate_limited')
     assert.equal(r.verdict, 'parked')
     assert.match(r.detail ?? '', /no reset/)
   })

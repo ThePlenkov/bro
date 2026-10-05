@@ -166,7 +166,11 @@ const sleepWall = (sec: number): Promise<void> =>
   new Promise((r) => setTimeout(r, sec * 1000))
 
 const isoEta = (ms: number): string =>
-  ms >= 3600_000 ? `${Math.round(ms / 3600_00) / 10}h` : ms >= 60_000 ? `${Math.ceil(ms / 60_000)}m` : `${Math.ceil(ms / 1000)}s`
+  ms >= 3_600_000
+    ? `${Math.round(ms / 360_000) / 10}h`
+    : ms >= 60_000
+      ? `${Math.ceil(ms / 60_000)}m`
+      : `${Math.ceil(ms / 1000)}s`
 
 /** The blocked-entry decision: a rate limit with a provider reset is a
  *  wait (sleep until it, respawn, no attempt burned); every other block
