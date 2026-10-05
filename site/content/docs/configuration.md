@@ -81,6 +81,12 @@ a `BroPlugin`. See [Plugins](/docs/plugins).
 | `intervalSec` | `300` | Cadence for `--every` and scheduled `--once` runs |
 | `merge` | `"auto"` | `auto` merges orphaned green PRs; `never` reports them without merging |
 
+### `fleet`
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `maxConcurrent` | `3` | Cap on live registry agents, counted across all backends. `0` is uncapped. Enforced in the shared spawn prologue under the registry lock; an unverifiable entry occupies its slot (fail-closed) |
+
 ### `agents`
 
 `agents` contains object-valued backend-specific configuration bags.
