@@ -473,8 +473,10 @@ export function parseSpawnBody(raw: string | undefined): StepSpawnRequest {
       if (v !== undefined && typeof v !== 'boolean') {
         throw new HttpError(400, 'field "autoApprove" must be a boolean')
       }
-    } else if (v !== undefined && typeof v !== 'string') {
-      throw new HttpError(400, `field "${k}" must be a string`)
+    } else if (v !== undefined && (typeof v !== 'string' || v.trim() === '')) {
+      // an empty string is not "unset" — it would ride through as an
+      // empty argv element or lookup key and fail AFTER the 201
+      throw new HttpError(400, `field "${k}" must be a non-empty string`)
     }
   }
   if (typeof req.molStep !== 'string' || req.molStep.trim() === '') {

@@ -294,10 +294,48 @@ export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = (raw) =
 const strField = (v: unknown): string | undefined =>
   typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined
 
-/** fleet.profiles normalization — an entry is a {provider, model?,
- *  backend?, autoApprove?} preset (spec bro-5hx1.1). A missing
- *  provider drops the whole entry with a warning; a bad optional
- *  field drops just the field, providers.ts' convention. */
+/** One fleet.profiles entry — {provider, model?, backend?,
+ *  autoApprove?} (spec bro-5hx1.1). A missing provider drops the whole
+ *  entry with a warning; a bad optional field drops just the field,
+ *  providers.ts' convention. */
+function fleetProfile(name: string, v: unknown): FleetProfile | null {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+    console.error(`bro.config: fleet.profiles.${name} must be an object — entry dropped`)
+    return null
+  }
+  const p = v as Record<string, unknown>
+  const provider = strField(p.provider)
+  if (provider === undefined) {
+    console.error(`bro.config: fleet.profiles.${name} requires "provider" — entry dropped`)
+    return null
+  }
+  const prof: FleetProfile = { provider }
+  for (const f of ['model', 'backend'] as const) {
+    const raw2 = p[f]
+    if (raw2 === undefined) {
+      continue
+    }
+    const s = strField(raw2)
+    if (s === undefined) {
+      console.error(
+        `bro.config: fleet.profiles.${name}.${f} must be a non-empty string — field dropped`
+      )
+      continue
+    }
+    prof[f] = s
+  }
+  if (p.autoApprove !== undefined) {
+    if (typeof p.autoApprove === 'boolean') {
+      prof.autoApprove = p.autoApprove
+    } else {
+      console.error(
+        `bro.config: fleet.profiles.${name}.autoApprove must be a boolean — field dropped`
+      )
+    }
+  }
+  return prof
+}
+
 function fleetProfiles(raw: unknown): Record<string, FleetProfile> {
   if (raw === undefined) {
     return {}
@@ -308,41 +346,10 @@ function fleetProfiles(raw: unknown): Record<string, FleetProfile> {
   }
   const out: Record<string, FleetProfile> = {}
   for (const [name, v] of Object.entries(raw)) {
-    if (typeof v !== 'object' || v === null || Array.isArray(v)) {
-      console.error(`bro.config: fleet.profiles.${name} must be an object — entry dropped`)
-      continue
+    const prof = fleetProfile(name, v)
+    if (prof !== null) {
+      out[name] = prof
     }
-    const p = v as Record<string, unknown>
-    const provider = strField(p.provider)
-    if (provider === undefined) {
-      console.error(`bro.config: fleet.profiles.${name} requires "provider" — entry dropped`)
-      continue
-    }
-    const prof: FleetProfile = { provider }
-    for (const f of ['model', 'backend'] as const) {
-      const raw2 = p[f]
-      if (raw2 === undefined) {
-        continue
-      }
-      const s = strField(raw2)
-      if (s === undefined) {
-        console.error(
-          `bro.config: fleet.profiles.${name}.${f} must be a non-empty string — field dropped`
-        )
-        continue
-      }
-      prof[f] = s
-    }
-    if (p.autoApprove !== undefined) {
-      if (typeof p.autoApprove === 'boolean') {
-        prof.autoApprove = p.autoApprove
-      } else {
-        console.error(
-          `bro.config: fleet.profiles.${name}.autoApprove must be a boolean — field dropped`
-        )
-      }
-    }
-    out[name] = prof
   }
   return out
 }

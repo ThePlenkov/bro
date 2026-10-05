@@ -313,9 +313,19 @@ describe('parseSpawnBody', () => {
     )
     assert.throws(
       () => parseSpawnBody(JSON.stringify({ molStep: 'fx-1', worktree: 3 })),
-      /must be a string/
+      /non-empty string/
     )
     assert.throws(() => parseSpawnBody('{}'), /molStep/)
+  })
+
+  test('empty-string fields are 400 — they would fail only after the 201', () => {
+    for (const f of ['model', 'provider', 'profile', 'connector', 'promptFile']) {
+      assert.throws(
+        () => parseSpawnBody(JSON.stringify({ molStep: 'fx-1', [f]: '' })),
+        new RegExp(`${f}.*non-empty`),
+        f
+      )
+    }
   })
 })
 

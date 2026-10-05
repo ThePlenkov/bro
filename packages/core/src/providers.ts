@@ -114,6 +114,43 @@ export class ProviderSurfaceError extends Error {
 const str = (v: unknown): string | undefined =>
   typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined
 
+/** Optional string field — a present-but-blank value drops the field
+ *  with a warning, never the entry (the required fields do that). */
+function pickOptStr(
+  name: string,
+  o: Record<string, unknown>,
+  f: string,
+  picked: Record<string, string | boolean>
+): void {
+  const v = o[f]
+  if (v === undefined) {
+    return
+  }
+  const s = str(v)
+  if (s === undefined) {
+    console.error(`bro.config: providers.${name}.${f} must be a non-empty string — field dropped`)
+    return
+  }
+  picked[f] = s
+}
+
+function pickOptBool(
+  name: string,
+  o: Record<string, unknown>,
+  f: string,
+  picked: Record<string, string | boolean>
+): void {
+  const v = o[f]
+  if (v === undefined) {
+    return
+  }
+  if (typeof v !== 'boolean') {
+    console.error(`bro.config: providers.${name}.${f} must be a boolean — field dropped`)
+    return
+  }
+  picked[f] = v
+}
+
 /** Validates one raw entry against its kind spec. Returns the typed
  *  entry, or null after warning — a malformed entry is dropped, never
  *  half-registered (a pasted key value in apiKeyEnv drops the whole
@@ -141,27 +178,10 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
     picked[f] = v
   }
   for (const f of spec.optional) {
-    const v = o[f]
-    if (v === undefined) {
-      continue
-    }
-    const s = str(v)
-    if (s === undefined) {
-      console.error(`bro.config: providers.${name}.${f} must be a non-empty string — field dropped`)
-      continue
-    }
-    picked[f] = s
+    pickOptStr(name, o, f, picked)
   }
   for (const f of spec.optionalBool ?? []) {
-    const v = o[f]
-    if (v === undefined) {
-      continue
-    }
-    if (typeof v !== 'boolean') {
-      console.error(`bro.config: providers.${name}.${f} must be a boolean — field dropped`)
-      continue
-    }
-    picked[f] = v
+    pickOptBool(name, o, f, picked)
   }
   if (typeof picked.apiKeyEnv === 'string' && !isEnvName(picked.apiKeyEnv)) {
     return fail('apiKeyEnv must NAME an env var (SCREAMING_SNAKE) — config never holds a key value')

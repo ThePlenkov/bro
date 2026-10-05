@@ -232,7 +232,17 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
       void cx.notify('session/cancel', { sessionId }).catch(() => {})
     }
     if (killTimer === undefined) {
-      killTimer = setTimeout(() => child?.kill('SIGKILL'), grace)
+      killTimer = setTimeout(() => {
+        // `child` is read at fire time — a signal that lands in the
+        // spawn window still stops the process it was meant for once
+        // grace elapses; nothing spawned (the peer seam) means the
+        // signal's only remaining stop is the driver itself
+        if (child !== undefined) {
+          child.kill('SIGKILL')
+        } else {
+          process.exit(1)
+        }
+      }, grace)
       killTimer.unref()
     }
   }
@@ -331,14 +341,18 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
     if (spec.peer !== undefined) {
       return await app.connectWith(spec.peer, op)
     }
-    const proc = spawn('sh', ['-c', spec.command], {
-      // NOSONAR — operator-authored config string; the trust contract
-      // loop.agent/agents.*.command already carry. Only DATA is
-      // forbidden from the shell — everything else rides argv/params.
-      cwd: spec.cwd,
-      env: { ...process.env, ...spec.env },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    const proc = spawn(
+      'sh', // NOSONAR — PATH lookup is the contract (same as git/bd everywhere)
+      ['-c', spec.command],
+      {
+        // NOSONAR — operator-authored config string; the trust contract
+        // loop.agent/agents.*.command already carry. Only DATA is
+        // forbidden from the shell — everything else rides argv/params.
+        cwd: spec.cwd,
+        env: { ...process.env, ...spec.env },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    )
     child = proc
     // provider walls print on the agent's stderr — mirror them so the
     // .log tail still classifies rate_limit/quota, not 'crash'
