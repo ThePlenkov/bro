@@ -201,6 +201,12 @@ function cursorManifest() {
  * shell runs. Quoted, so a path with spaces survives. Fallback is bro on
  * PATH, then the version-pinned package. Always exit 0. */
 function cursorHookCommand(event) {
+  // events are code-owned literals today; keep that a checked invariant —
+  // the string lands in a shell command, so a future caller passing
+  // metachars must fail here, not in the generated hooks.json
+  if (!/^[a-z-]+$/.test(event)) {
+    throw new Error(`invalid hook event name: ${event}`)
+  }
   const pin = `@broject/bro@${manifest.version}`
   return `if [ -f "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ]; then "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ${event} || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks ${event} || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline "${pin}" hooks ${event} || true; fi; exit 0`
 }
