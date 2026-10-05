@@ -262,6 +262,118 @@ describe('bro doctor', () => {
       })
     ))
 
+  test('providers: configured entries are listed as name (kind, model)', () =>
+    withEnv(
+      {
+        config: {
+          providers: {
+            orca: { type: 'openai-compat', baseUrl: 'http://x/v1', model: 'qwen3-coder' },
+            local: { type: 'cli', command: 'devin -p' },
+          },
+        },
+        bins: ['gh'],
+      },
+      (dir) => {
+        const c = byName(runDoctorChecks(dir), 'providers')
+        assert.equal(c.status, 'ok')
+        assert.match(c.detail, /orca \(openai-compat, qwen3-coder\)/)
+        assert.match(c.detail, /local \(cli\)/)
+      }
+    ))
+
+  test('providers: an apiKeyEnv naming an unset var warns — the name is never echoed', () =>
+    withEnv(
+      {
+        config: {
+          providers: {
+            orca: {
+              type: 'openai-compat',
+              baseUrl: 'http://x/v1',
+              model: 'm',
+              apiKeyEnv: 'ORCA_UNSET_KEY',
+            },
+          },
+        },
+        bins: ['gh'],
+      },
+      (dir) => {
+        const rows = runDoctorChecks(dir).filter((c) => c.name === 'providers')
+        const warn = rows.find((c) => c.status === 'warn')
+        assert.ok(warn, JSON.stringify(rows))
+        assert.match(warn.detail, /providers\.orca\.apiKeyEnv/)
+        // an all-caps pasted key passes isEnvName — the value is never echoed
+        assert.doesNotMatch(warn.detail, /ORCA_UNSET_KEY/)
+      }
+    ))
+
+  test('providers: a set auth env reports ok', () =>
+    withEnv(
+      {
+        config: {
+          providers: {
+            orca: {
+              type: 'openai-compat',
+              baseUrl: 'http://x/v1',
+              model: 'm',
+              apiKeyEnv: 'ORCA_SET_KEY',
+            },
+          },
+        },
+        bins: ['gh'],
+        env: { ORCA_SET_KEY: 'sk-test' },
+      },
+      (dir) => {
+        const rows = runDoctorChecks(dir).filter(
+          (c) => c.name === 'providers' && c.status === 'ok'
+        )
+        assert.ok(rows.some((c) => /auth env set/.test(c.detail)))
+      }
+    ))
+
+  test('providers: consumer refs to missing entries warn — even with an empty registry', () =>
+    withEnv(
+      {
+        config: {
+          judge: { provider: 'ghost' },
+          agents: { native: { provider: 'also-ghost' } },
+        },
+        bins: ['gh'],
+      },
+      (dir) => {
+        const rows = runDoctorChecks(dir).filter((c) => c.name === 'providers')
+        assert.match(rows[0]!.detail, /none configured/)
+        const warns = rows.filter((c) => c.status === 'warn')
+        assert.ok(warns.some((c) => /judge\.provider.*'ghost'/.test(c.detail)))
+        assert.ok(warns.some((c) => /agents\.native\.provider.*'also-ghost'/.test(c.detail)))
+      }
+    ))
+
+  test('providers: a call-surface kind named for spawn warns', () =>
+    withEnv(
+      {
+        config: {
+          providers: {
+            typesafe: { type: 'systemone', apiKeyEnv: 'TYPESAFE_API_KEY', model: 'jev-1' },
+          },
+          agents: { native: { provider: 'typesafe' } },
+        },
+        bins: ['gh'],
+        env: { TYPESAFE_API_KEY: 'sk-test' },
+      },
+      (dir) => {
+        const rows = runDoctorChecks(dir).filter((c) => c.name === 'providers')
+        const warn = rows.find((c) => c.status === 'warn')
+        assert.ok(warn, JSON.stringify(rows))
+        assert.match(warn.detail, /agents\.native\.provider.*no spawn surface/)
+      }
+    ))
+
+  test('providers: judge.provider resolving a synthesized alias does not warn', () =>
+    withEnv({ config: { judge: { provider: 'systemone' } }, bins: ['gh'] }, (dir) => {
+      const rows = runDoctorChecks(dir).filter((c) => c.name === 'providers')
+      assert.ok(!rows.some((c) => c.status === 'warn'), JSON.stringify(rows))
+    }))
+
   test('not a git repo — repo warns, remote probes are skipped', () =>
     withEnv({ bins: ['gh'] }, (dir) => {
       const bare = mkdtempSync(join(tmpdir(), 'bro-doctor-bare-'))

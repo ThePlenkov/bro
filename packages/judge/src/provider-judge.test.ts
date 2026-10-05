@@ -150,12 +150,20 @@ describe('providerJudge', () => {
       )
     }))
 
-  test('a kind with no binding yet is a startup error naming provider + kind', () => {
-    const entry: ProviderEntry = { type: 'cli', command: 'devin -p' }
-    assert.throws(
-      () => providerJudge('cli', entry, CFG),
-      /providers\.cli \(type 'cli'\) has no client binding yet/
-    )
+  test('a cli entry is a prose call — the command runs the prompt file, stdout parses', async () => {
+    const entry: ProviderEntry = {
+      type: 'cli',
+      // the prompt file arg lands harmlessly — node -e ignores extra argv
+      command: `node -e 'console.log(JSON.stringify({answers:{route:{type:"choice",choice:"a",probabilities:{a:0.9,b:0.1},confidence:0.8}}}))'`,
+      model: 'devin-1',
+    }
+    const res = await providerJudge('local', entry, CFG).decide('s', QUESTIONS)
+    const route = res.answers.route
+    assert.ok(route?.type === 'choice')
+    assert.equal(route.choice, 'a')
+    // always-prose kinds need no :prose marker — the kind says the grade
+    assert.equal(route.decidedBy, 'provider:local')
+    assert.equal(res.model, 'devin-1')
   })
 
   test('an acp entry on a systemone-family model is a typed call', async () => {

@@ -16,17 +16,23 @@ import { basename, dirname, join, resolve } from 'node:path'
 import {
   bdTry,
   gitTry,
+  isEnvName,
   janitorDidWork,
   janitorLine,
   probeBdCompat,
   probeConfigFile,
+  PROVIDER_REGISTRY,
   runJanitor,
 } from '@broject/core'
+import type { ProviderEntry, ProviderSurface } from '@broject/core'
+import { judgeConfig, synthesizedProviders } from '@broject/judge'
+import type { JudgeConfig } from '@broject/judge'
 import { loadBroConfig, pluginConfigSections } from '../plugins.ts'
 import {
   budgetLines,
   budgetSnapshotFor,
   loadAgentEnv,
+  type AgentConnectorEnv,
   type BudgetSnapshot,
 } from '../agent-connectors.ts'
 
@@ -370,6 +376,125 @@ function remoteChecks(
   return out
 }
 
+// --- providers (specs/bro-ribc.1.md milestone 6) ----------------------
+// The configured registry as doctor rows: a listing line, an auth-env
+// row per entry, and a warn per consumer ref that dangles or asks a
+// kind for a surface it lacks — use-time resolution errors out either
+// way; doctor just says it first.
+
+/** The listing row — entries as `name (kind, model)`. */
+function providerListCheck(providers: Record<string, ProviderEntry>): DoctorCheck {
+  const names = Object.keys(providers)
+  if (names.length === 0) {
+    return check('providers', 'ok', 'none configured')
+  }
+  const label = (n: string): string => {
+    const e = providers[n]!
+    const model = 'model' in e && typeof e.model === 'string' ? `, ${e.model}` : ''
+    return `${n} (${e.type}${model})`
+  }
+  return check('providers', 'ok', `${names.length} configured: ${names.map(label).join(', ')}`)
+}
+
+/** One entry's auth env var — the NAME is config; the value is never
+ *  echoed (an all-caps pasted key passes isEnvName), so messages name
+ *  the config field only. */
+function providerAuthCheck(name: string, entry: ProviderEntry): DoctorCheck | null {
+  const keyName = 'apiKeyEnv' in entry ? entry.apiKeyEnv : undefined
+  if (keyName === undefined) {
+    return null
+  }
+  if (!isEnvName(keyName)) {
+    return check(
+      'providers',
+      'warn',
+      `providers.${name}.apiKeyEnv is not a valid env var name`,
+      'name the variable holding the key (SCREAMING_SNAKE) — config never holds the key itself'
+    )
+  }
+  if (process.env[keyName] === undefined || process.env[keyName] === '') {
+    return check(
+      'providers',
+      'warn',
+      `the env var named by providers.${name}.apiKeyEnv is not set`,
+      'export it — the provider fails at first use without it'
+    )
+  }
+  return check('providers', 'ok', `providers.${name} auth env set`)
+}
+
+type ProviderRef = [field: string, name: string, surface: ProviderSurface]
+
+/** Every provider name a consumer config references — `judge.provider`
+ *  (and `judge.fallback` — provider mode only: a connector-mode
+ *  fallback names a connector, not this check's business),
+ *  `agents.<backend>.provider`, `fleet.profiles.*.provider`. */
+function providerRefs(jcfg: JudgeConfig, env: AgentConnectorEnv): ProviderRef[] {
+  return [
+    ...(jcfg.provider === undefined || jcfg.provider === ''
+      ? []
+      : ([['judge.provider', jcfg.provider, 'call']] as ProviderRef[])),
+    ...(jcfg.provider === undefined || jcfg.fallback === undefined || jcfg.fallback === ''
+      ? []
+      : ([['judge.fallback', jcfg.fallback, 'call']] as ProviderRef[])),
+    ...Object.entries(env.agents).flatMap(
+      ([b, a]): ProviderRef[] =>
+        typeof a.provider === 'string' && a.provider !== ''
+          ? [[`agents.${b}.provider`, a.provider, 'spawn']]
+          : []
+    ),
+    ...Object.entries(env.fleet?.profiles ?? {}).map(
+      ([p, f]): ProviderRef => [`fleet.profiles.${p}.provider`, f.provider, 'spawn']
+    ),
+  ]
+}
+
+/** One ref row → a warn when the name resolves to no entry, or to a
+ *  kind lacking the asked surface. Judge names resolve against the
+ *  effective registry — the user's entries plus the synthesized legacy
+ *  aliases ('systemone' always, 'llm-judge' when judge.llm is set). */
+function providerRefCheck(
+  effective: Record<string, ProviderEntry>,
+  [field, name, surface]: ProviderRef
+): DoctorCheck | null {
+  const entry = effective[name]
+  if (entry === undefined) {
+    return check(
+      'providers',
+      'warn',
+      `${field} names '${name}' — no such provider entry`,
+      'add it under providers{} or fix the reference — use-time resolution errors out'
+    )
+  }
+  const kind = PROVIDER_REGISTRY[entry.type]
+  if (surface === 'call' ? kind.call === null : !kind.spawn) {
+    return check(
+      'providers',
+      'warn',
+      `${field} names '${name}' (${entry.type}) — no ${surface} surface`,
+      'the kind lacks that surface — use-time resolution errors out'
+    )
+  }
+  return null
+}
+
+function providerChecks(dir: string): DoctorCheck[] {
+  const env = loadAgentEnv(dir)
+  const providers = env.providers ?? {}
+  const { judge: jcfg } = judgeConfig(dir)
+  const effective = synthesizedProviders(jcfg, providers)
+  const present = (c: DoctorCheck | null): c is DoctorCheck => c !== null
+  return [
+    providerListCheck(providers),
+    ...Object.entries(providers)
+      .map(([n, e]) => providerAuthCheck(n, e))
+      .filter(present),
+    ...providerRefs(jcfg, env)
+      .map((r) => providerRefCheck(effective, r))
+      .filter(present),
+  ]
+}
+
 /** Janitor probe — a dry run over `<git-common>/bro/` reporting the
  *  retention debris the next `bro watch` tick would reap. Probes stay
  *  read-only: this counts, it never unlinks (bro-f6zp). */
@@ -405,8 +530,6 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
       ? check('repo', 'warn', 'not inside a git worktree', 'worktree/branch/sync commands need a repo')
       : check('repo', 'ok', `worktree root ${root} · stores: ${cfg.stores.join(', ')}`)
   )
-  checks.push(checkGh())
-
   // a store is live when .beads exists at the root OR BEADS_DIR pins one
   // (the loop harness runs worktrees against a shared store that way)
   const envDir = process.env.BEADS_DIR
@@ -414,15 +537,16 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
     (root !== null && isDir(join(root, '.beads'))) ||
     (typeof envDir === 'string' && envDir !== '' && isDir(envDir))
   const bd = probeBin('bd')
-  checks.push(...bdChecks(dir, bd, beadsDir, cfg.stores.includes('beads')))
-
-  checks.push(checkHooks(dir))
-  checks.push(checkConfig([dir, root, mainRoot(dir)].filter((d): d is string => d !== null)))
   const janitor = checkJanitor(dir)
-  if (janitor !== null) {
-    checks.push(janitor)
-  }
-  checks.push(...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found))
+  checks.push(
+    checkGh(),
+    ...bdChecks(dir, bd, beadsDir, cfg.stores.includes('beads')),
+    checkHooks(dir),
+    checkConfig([dir, root, mainRoot(dir)].filter((d): d is string => d !== null)),
+    ...providerChecks(dir),
+    ...(janitor === null ? [] : [janitor]),
+    ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found)
+  )
 
   return checks
 }

@@ -10,6 +10,7 @@
 export { acpCall, acpChat, acpClient, acpWorkerArgv, isSystemoneFamily } from './acp.ts'
 export { AcpWorkerError, renderAcpUpdate, runAcpWorker } from './acp-worker.ts'
 export type { AcpWorkerSpec } from './acp-worker.ts'
+export { cliChat, expandPromptFile } from './cli.ts'
 export { openaiCompatChat } from './openai.ts'
 export { providerClient } from './registry.ts'
 export type {
