@@ -91,8 +91,8 @@ function hookContext(out: unknown): string | null {
  *  metacharacters in args (a metachar just means the ask goes to the
  *  user; auto-approve fails closed, never wrong). */
 const SAFE_CMD = [
-  /^\s*(?:bro|bd)(?:\s+[^;&|`<>&$()\\\n]*)?\s*$/,
-  /^\s*npx\s+(?:-y\s+)?@broject\/bro(?:\s+[^;&|`<>&$()\\\n]*)?\s*$/,
+  /^\s*(?:bro|bd)(?:\s+[^;&|`<>$()\\\n]*)?\s*$/,
+  /^\s*npx\s+(?:-y\s+)?@broject\/bro(?:\s+[^;&|`<>$()\\\n]*)?\s*$/,
 ]
 
 const BroPlugin: Plugin = async ({ directory, client }) => {
