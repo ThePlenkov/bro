@@ -67,7 +67,7 @@ const LIVE_SESSION_MS = 24 * 60 * 60 * 1000
 /** `<slug>` that names a bead — `bro-fzot`, `fx-9`, `bro-mol-h7cp`.
  *  Bead-ish enough for provenance; a worktree slug that isn't a bead
  *  just skips the fallback, it never invents one. */
-const BEAD_ID = /^[a-z][\w]*-[\w.]+$/i
+const BEAD_ID = /^[a-z]\w*-[\w.]+$/i
 
 export interface CommitProvenance {
   agent?: string
@@ -135,6 +135,30 @@ export function envProvenance(env: NodeJS.ProcessEnv): CommitProvenance {
   return p
 }
 
+/** One marker file → its session + aspect, or null when it isn't a
+ *  live session marker (subdir, no extension, stale, unreadable). */
+function markerInfo(
+  path: string,
+  file: string,
+  now: number
+): { session: string; isTask: boolean } | null {
+  try {
+    const st = statSync(path)
+    const dot = file.lastIndexOf('.')
+    // hinted/, trace/ subdirs are not markers; neither are extensionless files
+    if (!st.isFile() || dot <= 0) {
+      return null
+    }
+    const head = readFileSync(path, 'utf8').split('\n')[0]
+    if (!markerLive(head, st.mtimeMs, LIVE_SESSION_MS, now)) {
+      return null
+    }
+    return { session: file.slice(0, dot), isTask: file.endsWith('.task') }
+  } catch {
+    return null // unreadable marker — skip
+  }
+}
+
 /** Live sessions under `<git-common>/bro/hooks/` → bead ids their
  *  `.task` markers recorded. Session = filename minus the last
  *  `.aspect`; a session is live while ANY of its markers is (owner pid
@@ -154,26 +178,12 @@ export function liveSessionClaims(
     return new Map()
   }
   for (const f of files) {
-    const path = join(hooksDir, f)
-    try {
-      const st = statSync(path)
-      if (!st.isFile()) {
-        continue // hinted/, trace/ subdirs are not markers
-      }
-      const dot = f.lastIndexOf('.')
-      if (dot <= 0) {
-        continue
-      }
-      const lines = readFileSync(path, 'utf8').split('\n')
-      if (!markerLive(lines[0], st.mtimeMs, LIVE_SESSION_MS, now)) {
-        continue
-      }
-      live.add(f.slice(0, dot))
-      if (f.endsWith('.task')) {
+    const info = markerInfo(join(hooksDir, f), f, now)
+    if (info !== null) {
+      live.add(info.session)
+      if (info.isTask) {
         taskFiles.push(f)
       }
-    } catch {
-      // unreadable marker — skip
     }
   }
   const out = new Map<string, string[]>()
@@ -182,11 +192,10 @@ export function liveSessionClaims(
     if (!live.has(session)) {
       continue
     }
-    const path = join(hooksDir, f)
     try {
       const beads = [
         ...new Set(
-          readFileSync(path, 'utf8')
+          readFileSync(join(hooksDir, f), 'utf8')
             .split('\n')
             .slice(1)
             .map((l) => l.trim())
@@ -239,12 +248,7 @@ export function inAgentSession(env: NodeJS.ProcessEnv): boolean {
   )
 }
 
-/** All trailers for this commit — empty when no agent identity
- *  resolves (a human commit stays clean). Fallbacks fill only fields
- *  env didn't pin, and only unambiguous ones: the single-live-session
- *  rule means two agents in one repo tag from env/branch or not at
- *  all, never by coin flip. */
-export function commitTrailers(opts: {
+interface TrailersOpts {
   env: NodeJS.ProcessEnv
   cwd: string
   /** Injectable for tests — defaults to the real marker dir under cwd's
@@ -254,29 +258,48 @@ export function commitTrailers(opts: {
   moleculeOf?: (bead: string) => string | undefined
   /** Injectable agent-ancestor verdict — tests can't shape /proc. */
   agentProc?: boolean
-}): [string, string][] {
+}
+
+/** Single-live-session fallback — fills only fields env/branch left
+ *  empty, and only when exactly one session is live: two agents in one
+ *  repo tag from env/branch or not at all, never by coin flip. */
+function markerFallback(
+  opts: TrailersOpts,
+  session: string | undefined,
+  bead: string | undefined
+): { session: string | undefined; bead: string | undefined } {
+  const hooksDir =
+    opts.hooksDir === undefined ? defaultHooksDir(opts.cwd) : (opts.hooksDir ?? undefined)
+  if (hooksDir === undefined || (session !== undefined && bead !== undefined)) {
+    return { session, bead }
+  }
+  const claims = liveSessionClaims(hooksDir)
+  if (claims.size !== 1) {
+    return { session, bead }
+  }
+  const [id, beads] = [...claims.entries()][0]!
+  return {
+    session: session ?? id,
+    bead: bead ?? (beads.length === 1 ? beads[0] : undefined),
+  }
+}
+
+/** All trailers for this commit — empty when no agent identity
+ *  resolves (a human commit stays clean). Fallbacks fill only fields
+ *  env didn't pin, and only unambiguous ones. */
+export function commitTrailers(opts: TrailersOpts): [string, string][] {
   const env = envProvenance(opts.env)
-  const agentProc = opts.agentProc ?? agentOwner() !== null
   if (
     env.agent === undefined &&
     opts.env.BRO_AGENT_ID === undefined &&
-    !agentProc
+    !(opts.agentProc ?? agentOwner() !== null)
   ) {
     return []
   }
-  let session = env.session
-  let bead = env.bead ?? (opts.branch !== undefined ? branchBead(opts.branch) : undefined)
-  const hooksDir =
-    opts.hooksDir === undefined ? defaultHooksDir(opts.cwd) : (opts.hooksDir ?? undefined)
-  if (hooksDir !== undefined && (session === undefined || bead === undefined)) {
-    const claims = liveSessionClaims(hooksDir)
-    if (claims.size === 1) {
-      const [id, beads] = [...claims.entries()][0]!
-      session ??= id
-      bead ??= beads.length === 1 ? beads[0] : undefined
-    }
-  }
-  const molecule = env.molecule ?? (bead !== undefined ? (opts.moleculeOf ?? ((b) => beadMolecule(b, opts.cwd)))(bead) : undefined)
+  const beadFromBranch = opts.branch !== undefined ? branchBead(opts.branch) : undefined
+  const { session, bead } = markerFallback(opts, env.session, env.bead ?? beadFromBranch)
+  const moleculeOf = opts.moleculeOf ?? ((b: string) => beadMolecule(b, opts.cwd))
+  const molecule = env.molecule ?? (bead !== undefined ? moleculeOf(bead) : undefined)
   const out: [string, string][] = [['Agent', env.agent ?? 'agent']]
   if (env.model !== undefined) {
     out.push(['Agent-Model', env.model])
