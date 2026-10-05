@@ -543,8 +543,11 @@ function entryOccupies(
     case 'gascity':
       return gcOccupies(molStep, entry, probes.gcSessions(), probes.gcSupervisor)
     default:
-      // a backend this build doesn't know — no probe exists. Recorded
-      // death frees the slot; anything else may still be a live worker
+      // a backend this build doesn't know — no probe exists, so the
+      // .exit file is the only death record readable. Harvest before
+      // the verdict: an unharvested .exit would occupy forever, and its
+      // recorded cause would never reach the budget walk
+      ensureExitCause(dir, home, molStep, entry)
       return entry.stopped !== true && entry.exitStatus === undefined
   }
 }
@@ -674,10 +677,10 @@ interface BudgetWalk {
   causes: BudgetCause[]
 }
 
-/** One entry's contribution — fail-closed liveness, lazy cause harvest
- *  on the dead (tmux/unknown backends' occupancy probes never walk the
- *  death ladder — this read is what classifies them), the spawnedAt
- *  hour bucket, and the reset/cause records. */
+/** One entry's contribution — fail-closed liveness, the lazy cause
+ *  harvest (only native's liveness probe walks the death ladder, so
+ *  this read is what classifies tmux/unknown/foreign entries), the
+ *  spawnedAt hour bucket, and the reset/cause records. */
 function budgetEntry(
   dir: string,
   home: string | null,
@@ -687,10 +690,13 @@ function budgetEntry(
   now: number,
   acc: BudgetWalk
 ): void {
+  // harvest BEFORE the liveness verdict — an unknown backend occupies
+  // whenever exitStatus is absent, and an unharvested .exit file is a
+  // proven death that frees the slot, not a maybe-live agent; running
+  // the ladder first also lands the cause this section exists to show
+  ensureExitCause(dir, home, molStep, entry)
   if (entryOccupies(dir, home, molStep, entry, probes)) {
     acc.live++
-  } else {
-    ensureExitCause(dir, home, molStep, entry)
   }
   const spawned = Date.parse(entry.spawnedAt)
   if (!Number.isNaN(spawned)) {
