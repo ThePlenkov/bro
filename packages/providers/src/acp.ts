@@ -2,9 +2,9 @@
  * The `acp` provider binding — an agent process speaking ACP v1 over
  * stdio (spec: specs/bro-ribc.1.md §acp, milestone 4 — call surface;
  * the spawn surface lands with bro-5hx1.1). `command` is a CLI serving
- * ACP (`kilo --acp`, `devin -p --acp`) — operator-authored config, the
- * same trusted-string contract loop.agent carries; it runs under
- * `sh -c` with `profile` appended as `--profile <value>`.
+ * ACP (`kilo --acp`, `devin -p --acp`) — operator-authored config
+ * tokenized to argv and exec'd without a shell; `profile` lands as a
+ * separate `--profile <value>` arg.
  *
  * One minimal session per decide(): initialize → session/new →
  * optional session/set_config_option for the entry's model (looked up
@@ -64,6 +64,47 @@ export const isSystemoneFamily = (model: string | undefined): boolean =>
 
 const errMsg = (err: unknown): string =>
   err instanceof Error ? err.message : String(err)
+
+/** Minimal shell-words split for an operator-authored command line —
+ *  whitespace-separated argv honoring '…', "…" and \x escapes. NOT a
+ *  shell: no $expansion, globs, `;` or `|` — the provider command execs
+ *  directly, so config text can never re-parse into a different
+ *  program. An unclosed quote is a config error, named as such.
+ *  Exported for the suite — the split IS the trust boundary. */
+export function shellWords(command: string): string[] {
+  const words: string[] = []
+  let cur = ''
+  let open = false
+  let quote: string | undefined
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!
+    if (quote === undefined && (ch === "'" || ch === '"')) {
+      quote = ch
+      open = true
+    } else if (ch === quote) {
+      quote = undefined
+    } else if (quote === undefined && ch === '\\' && i + 1 < command.length) {
+      cur += command[++i]
+      open = true
+    } else if (quote === undefined && /\s/.test(ch)) {
+      if (open) {
+        words.push(cur)
+        cur = ''
+        open = false
+      }
+    } else {
+      cur += ch
+      open = true
+    }
+  }
+  if (quote !== undefined) {
+    throw new AcpConfigError(`acp command has an unclosed ${quote} quote`)
+  }
+  if (open) {
+    words.push(cur)
+  }
+  return words
+}
 
 /** The last bytes of peer stderr — the diagnostic that survives the
  *  process dying mid-turn (rate-limit walls, crash text). */
@@ -254,16 +295,25 @@ async function acpRoundTrip(
   const peer = opts.acp?.peer
   let child: ChildProcess | undefined
   let tail = (): string => ''
+  let spawnError: string | undefined
   const run = (): Promise<AcpReply> => {
     if (peer !== undefined) {
       return app.connectWith(peer, op)
     }
-    const command =
-      entry.profile === undefined
-        ? entry.command
-        : `${entry.command} --profile ${entry.profile}`
-    const proc = spawn('sh', ['-c', command], { stdio: 'pipe' })
+    const argv = [
+      ...shellWords(entry.command),
+      ...(entry.profile === undefined ? [] : ['--profile', entry.profile]),
+    ]
+    const bin = argv[0]
+    if (bin === undefined) {
+      throw new AcpConfigError(`${by}: acp command is empty`)
+    }
+    const proc = spawn(bin, argv.slice(1), { stdio: 'pipe' })
     child = proc
+    // a binary that can't exec is operator misconfig — name it as such
+    proc.once('error', (e) => {
+      spawnError = e.message
+    })
     tail = stderrTail(proc)
     const stream = ndJsonStream(
       Writable.toWeb(proc.stdin) as WritableStream<Uint8Array>,
@@ -278,6 +328,9 @@ async function acpRoundTrip(
     child?.kill('SIGKILL')
     if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
       throw err
+    }
+    if (spawnError !== undefined) {
+      throw new AcpConfigError(`${by}: cannot exec acp command — ${spawnError}`)
     }
     const stderr = tail()
     throw new JudgeUnavailable(

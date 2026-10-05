@@ -1,9 +1,11 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { AuthMethod, SessionConfigOption } from '@agentclientprotocol/sdk'
 import { JudgeUnavailable } from '@broject/core'
 import type { JudgeQuestion, ProviderEntry } from '@broject/core'
-import { acpClient, isSystemoneFamily } from './acp.ts'
+import { acpClient, isSystemoneFamily, shellWords } from './acp.ts'
 import { providerClient } from './registry.ts'
 import { fakeAcpAgent } from './testkit.ts'
 
@@ -44,6 +46,31 @@ const MODEL_OPTION: SessionConfigOption = {
 }
 
 const deadline = (ms = 10_000): number => Date.now() + ms
+
+describe('shellWords', () => {
+  test('splits whitespace, honors quotes and escapes, no expansion', () => {
+    assert.deepEqual(shellWords('kilo --acp'), ['kilo', '--acp'])
+    assert.deepEqual(shellWords('  a   b  '), ['a', 'b'])
+    assert.deepEqual(shellWords(`bin "arg with spaces" x`), ['bin', 'arg with spaces', 'x'])
+    assert.deepEqual(shellWords(`bin 'a b'`), ['bin', 'a b'])
+    assert.deepEqual(shellWords(String.raw`bin a\ b`), ['bin', 'a b'])
+    assert.deepEqual(shellWords('bin "" tail'), ['bin', '', 'tail'])
+    // no shell: metacharacters stay literal argv, never re-parse
+    assert.deepEqual(shellWords('bin $HOME; rm -rf / | cat'), [
+      'bin', '$HOME;', 'rm', '-rf', '/', '|', 'cat',
+    ])
+  })
+  test('unclosed quote and empty command are config errors', async () => {
+    assert.throws(() => shellWords(`bin 'oops`), /unclosed/)
+    await assert.rejects(
+      acpClient('provider:x', { type: 'acp', command: '   ' }).chat!(
+        'p',
+        deadline()
+      ),
+      /command is empty/
+    )
+  })
+})
 
 describe('isSystemoneFamily', () => {
   test('typesafe/jev-* and bare jev-* are family; others and absent are not', () => {
@@ -221,6 +248,90 @@ describe('acp chat surface — prose mode', () => {
     )
     assert.equal(fake.configSets.length, 0)
     assert.equal(res.model, 'typesafe/jev-1.13')
+  })
+})
+
+describe('spawn path — a real child process on stdio', () => {
+  test('node script serving ACP answers a typed turn; the child is reaped', async () => {
+    // lives under the package dir so the SDK resolves from node_modules
+    const dir = mkdtempSync(join(process.cwd(), '.acp-fake-'))
+    const script = join(dir, 'agent.mjs')
+    writeFileSync(
+      script,
+      `import { agent, ndJsonStream } from '@agentclientprotocol/sdk'
+import { Readable, Writable } from 'node:stream'
+const stream = ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin))
+await agent({ name: 'fake' })
+  .onRequest('initialize', (ctx) => ({
+    protocolVersion: ctx.params.protocolVersion,
+    authMethods: [],
+  }))
+  .onRequest('session/new', () => ({
+    sessionId: 's1',
+    configOptions: [
+      {
+        type: 'select',
+        id: 'm',
+        name: 'Model',
+        category: 'model',
+        currentValue: 'typesafe/jev-1.13',
+        options: [{ value: 'typesafe/jev-1.13', name: 'jev' }],
+      },
+    ],
+  }))
+  .onRequest('session/set_config_option', (ctx) => ({
+    configOptions: [
+      {
+        type: 'select',
+        id: 'm',
+        name: 'Model',
+        category: 'model',
+        currentValue: ctx.params.value,
+        options: [{ value: 'typesafe/jev-1.13', name: 'jev' }],
+      },
+    ],
+  }))
+  .onRequest('session/prompt', async (ctx) => {
+    await ctx.client.notify('session/update', {
+      sessionId: ctx.params.sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '{"answers":{"route":{"type":"choice","choice":"a","probabilities":{"a":0.8,"b":0.2},"confidence":0.8}},"model":"typesafe/jev-1.13"}' },
+      },
+    })
+    return { stopReason: 'end_turn' }
+  })
+  .connectWith(stream, () => new Promise(() => {}))
+`
+    )
+    try {
+      const res = await acpClient(
+        'provider:fake',
+        {
+          type: 'acp',
+          command: `"${process.execPath}" "${script}"`,
+          model: 'typesafe/jev-1.13',
+        },
+        {}
+      ).call!('s', QUESTIONS, deadline(30_000))
+      const route = res.answers.route!
+      assert.ok(route.type === 'choice')
+      assert.equal(route.choice, 'a')
+      assert.equal(res.model, 'typesafe/jev-1.13')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a missing binary is a config error naming the provider', async () => {
+    await assert.rejects(
+      acpClient(
+        'provider:kilo',
+        { type: 'acp', command: 'definitely-not-a-real-bin-xyz' },
+        {}
+      ).chat!('p', deadline()),
+      /cannot exec acp command/
+    )
   })
 })
 
