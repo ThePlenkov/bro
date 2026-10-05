@@ -28,6 +28,7 @@ import type { ProviderEntry, ProviderSurface } from '@broject/core'
 import { judgeConfig, synthesizedProviders } from '@broject/judge'
 import type { JudgeConfig } from '@broject/judge'
 import { loadBroConfig, pluginConfigSections } from '../plugins.ts'
+import { pluginRows } from './plugins.ts'
 import {
   budgetLines,
   budgetSnapshotFor,
@@ -513,6 +514,24 @@ function checkJanitor(dir: string): DoctorCheck | null {
   return check('janitor', 'ok', janitorLine(r))
 }
 
+/** Client-adapter install state (specs/bro-1qpk.1.md) — informational:
+ *  "not installed" is a choice, never a defect; the row exists so a
+ *  broken install ("I installed but hooks never fire") has a visible
+ *  verdict. */
+function checkClientPlugins(dir: string): DoctorCheck {
+  const rows = pluginRows(dir)
+  const perClient = new Map<string, string[]>()
+  for (const r of rows) {
+    if (r.state !== 'absent') {
+      perClient.set(r.client, [...(perClient.get(r.client) ?? []), `${r.scope}:${r.state}`])
+    }
+  }
+  const detail = [...perClient.entries()].map(([c, s]) => `${c}: ${s.join(',')}`).join(' · ')
+  return detail === ''
+    ? check('plugins', 'ok', 'no client adapters installed', '`bro plugins install <client>`')
+    : check('plugins', 'ok', detail)
+}
+
 export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
   const checks: DoctorCheck[] = [checkNode()]
 
@@ -544,6 +563,7 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
     checkHooks(dir),
     checkConfig([dir, root, mainRoot(dir)].filter((d): d is string => d !== null)),
     ...providerChecks(dir),
+    checkClientPlugins(dir),
     ...(janitor === null ? [] : [janitor]),
     ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found)
   )
