@@ -156,6 +156,15 @@ describe('bro learn', () => {
     })
   })
 
+  test('capture rejects a repeated boolean flag — contradictory values fail closed', () => {
+    const f = learnFixture()
+    inside(f.main, f.root, () => {
+      const r = f.run(['capture', '--dry-run=false', '--dry-run=true'])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /--dry-run may be given only once/)
+    })
+  })
+
   test('probe phase 1: miss prints candidates + hint, exits 1; hit exits 0', () => {
     const f = learnFixture([
       { id: 'fx-ms9', title: 'merge slot occupancy gate', status: 'in_progress' },
