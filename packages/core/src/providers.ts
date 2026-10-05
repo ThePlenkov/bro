@@ -33,11 +33,13 @@ export const API_WIRES = ['systemone', 'openai-compat'] as const
  *  bare `jev-*` pin. The version anchor is deliberate: `jev-router` is
  *  a router PRODUCT pointing at arbitrary upstreams, not a jev model —
  *  inferring its wire as systemone would let a config silently spend on
- *  it. Lives in core because api-entry normalization consumes it at
- *  parse time, before any provider binding exists. */
+ *  it. `latest` must complete the segment for the same reason —
+ *  `jev-latest-router` is a product, not the model pin. Lives in core
+ *  because api-entry normalization consumes it at parse time, before
+ *  any provider binding exists. */
 export const isSystemoneFamily = (model: string | undefined): boolean =>
   model !== undefined &&
-  /(?:^|\/)typesafe\/jev-(?:\d|latest)|^jev-(?:\d|latest)/.test(model)
+  /(?:^|\/)typesafe\/jev-(?:\d|latest(?=$|\/))|^jev-(?:\d|latest(?=$|\/))/.test(model)
 
 export type ProviderEntry =
   | {
@@ -279,6 +281,18 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
     models = parsed
     if (typeof picked.model === 'string' && !Object.hasOwn(models, picked.model)) {
       return fail(`model '${picked.model}' is not in the models allowlist`)
+    }
+    // the systemone wire always sends Bearer — an entry resolving a
+    // model to it with no key source parses but fails every call;
+    // reject here, while the error still names the config field
+    if (
+      Object.values(models).includes('systemone') &&
+      picked.apiKeyEnv === undefined &&
+      picked.apiKeyCommand === undefined
+    ) {
+      return fail(
+        'serves a systemone-wire model with no key source — set apiKeyEnv or apiKeyCommand'
+      )
     }
   }
   if (typeof picked.apiKeyEnv === 'string' && !isEnvName(picked.apiKeyEnv)) {

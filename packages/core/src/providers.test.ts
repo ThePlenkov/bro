@@ -87,6 +87,7 @@ describe('providers section', () => {
         orca: {
           type: 'api',
           baseUrl: 'https://x',
+          apiKeyEnv: 'ORCA_API_KEY',
           models: {
             'typesafe/jev-1.13': 'systemone',
             'acme/chat': { wire: 'openai-compat' },
@@ -124,12 +125,49 @@ describe('providers section', () => {
     assert.deepEqual(cfg.providers, {})
   })
 
+  test('a systemone-wire model with no key source drops the entry — Bearer is the wire contract', () => {
+    const cfg = load({
+      providers: {
+        nokey: {
+          type: 'api',
+          baseUrl: 'https://x',
+          models: { 'typesafe/jev-1.13': 'systemone' },
+        },
+        // inference lands on the same wire — a null mapping is no
+        // escape from the credential requirement
+        inferred: {
+          type: 'api',
+          baseUrl: 'https://x',
+          models: { 'typesafe/jev-1.13': null },
+        },
+        keyed: {
+          type: 'api',
+          baseUrl: 'https://x',
+          apiKeyEnv: 'X',
+          models: { 'typesafe/jev-1.13': 'systemone' },
+        },
+        // the prose wire tolerates no key — openai-compat serves
+        // anonymous hosts, so an all-prose map needs no key source
+        prose: {
+          type: 'api',
+          baseUrl: 'https://x',
+          models: { 'acme/chat': 'openai-compat' },
+        },
+      },
+    })
+    assert.equal(cfg.providers.nokey, undefined)
+    assert.equal(cfg.providers.inferred, undefined)
+    assert.equal(cfg.providers.keyed.type, 'api')
+    assert.equal(cfg.providers.prose.type, 'api')
+  })
+
   test('a __proto__ model id lands as an own key — never pollutes the prototype', () => {
     const cfg = load({
       providers: {
         host: {
           type: 'api',
           baseUrl: 'https://x',
+          apiKeyEnv: 'X',
           // JSON.parse produces a real own '__proto__' key — an object
           // literal would run the setter instead
           models: JSON.parse('{"__proto__":"systemone","m":null}'),
