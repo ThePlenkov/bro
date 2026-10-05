@@ -7,10 +7,10 @@
  * high; the stats buckets decide whether that self-report earns trust.
  *
  * Two jobs: escalation on low primary confidence (`judge.fallback`),
- * and the whole judge where jev isn't provisioned — including jev
+ * and the whole judge where systemone isn't provisioned — including jev
  * itself over OrcaRouter's OpenAI-compat wrapper
  * (`connectors.judge: llm-judge` + `judge.llm.model: typesafe/jev-1.13`).
- * Slower and costlier than jev — answers carry decidedBy 'llm-judge' so
+ * Slower and costlier than systemone — answers carry decidedBy 'llm-judge' so
  * stats score each backend on its own record.
  */
 import { JudgeUnavailable } from '@broject/core'

@@ -32,7 +32,7 @@ import { learnConnector, learnSection } from '@broject/learn'
 import { loopSection } from '@broject/loop'
 import { githubConnector } from '@broject/github'
 import { gitlabConnector } from '@broject/gitlab'
-import { jevConnector, judgeSection, llmJudgeConnector } from '@broject/judge'
+import { judgeSection, llmJudgeConnector, systemoneConnector } from '@broject/judge'
 import { applyActPlan, runActCommand } from './commands/act.ts'
 import { checkSection } from './commands/check-config.ts'
 import { runCheckCommand } from './commands/check.ts'
@@ -76,7 +76,7 @@ registerConnector(debtConnector)
 registerConnector(sddConnector)
 registerConnector(notifyConnector)
 registerConnector(learnConnector)
-registerConnector(jevConnector)
+registerConnector(systemoneConnector)
 registerConnector(llmJudgeConnector)
 // specs facade providers — registry order is detection precedence:
 // native first (its matchDir claims the configured sdd.dir), then
@@ -237,7 +237,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'judge',
-    summary: 'Calibrated decision judge — decide smoke test over jev + llm-judge',
+    summary: 'Calibrated decision judge — decide smoke test over systemone + llm-judge',
     run: runJudgeCommand,
     skill: 'judge',
     configKey: 'judge',

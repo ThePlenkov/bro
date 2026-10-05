@@ -49,20 +49,20 @@ const thread = (id: string, over: Partial<ReviewThread> = {}): ReviewThread => (
 })
 
 const ANSWERS: Record<string, JudgeAnswer> = {
-  blocks_correctness: { type: 'noul', noul: 0.91, confidence: 0.91, decidedBy: 'jev' },
+  blocks_correctness: { type: 'noul', noul: 0.91, confidence: 0.91, decidedBy: 'systemone' },
   severity: {
     type: 'score',
     score: 2.8,
     probabilities: { '1': 0.05, '2': 0.2, '3': 0.6, '4': 0.15 },
     confidence: 0.8,
-    decidedBy: 'jev',
+    decidedBy: 'systemone',
   },
   action: {
     type: 'choice',
     choice: 'resolve',
     probabilities: { resolve: 0.8, reply: 0.1, defer: 0.1 },
     confidence: 0.8,
-    decidedBy: 'jev',
+    decidedBy: 'systemone',
   },
 }
 

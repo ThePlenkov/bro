@@ -77,11 +77,11 @@ export function mapUsage(
   return Object.keys(usage).length > 0 ? usage : undefined
 }
 
-/** A status → retriable test — e.g. jev's `429` + every `5xx`. */
+/** A status → retriable test — e.g. systemone's `429` + every `5xx`. */
 export type RetryWhen = (status: number) => boolean
 
 /** POST a JSON payload; returns status + parsed body for the caller's
- *  error mapping. `retryWhen` (429 + 5xx for jev) and network failures
+ *  error mapping. `retryWhen` (429 + 5xx for systemone) and network failures
  *  get bounded backoff retries inside the deadline; expiry, exhaustion,
  *  and DNS/TLS-style failures all surface as JudgeUnavailable —
  *  fail-open is the contract. */

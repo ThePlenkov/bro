@@ -88,7 +88,7 @@ export interface JudgeStats {
     total: number
     mean: number
     /** "<provider(s)>/<model>" → spend — escalation verdicts key as
-     *  'jev+llm-judge/<model>' so fallback cost is attributable. */
+     *  'llm-judge+systemone/<model>' so fallback cost is attributable. */
     byProviderModel: Record<string, { n: number; total: number; mean: number }>
   }
 }
@@ -130,7 +130,7 @@ const percentile = (sorted: number[], p: number): number =>
   sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))]!
 
 /** The cost attribution key — a verdict's answers usually share one
- *  decider; an escalated set keys as 'jev+llm-judge/<model>' so the
+ *  decider; an escalated set keys as 'llm-judge+systemone/<model>' so the
  *  report shows what escalation spends, not just the primary. */
 const providerModel = (v: Verdict): string => {
   const providers = [...new Set(Object.values(v.answers).map((a) => a.decidedBy))].sort(

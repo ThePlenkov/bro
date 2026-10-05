@@ -9,7 +9,7 @@ scope:
   - skills/judge/
 ---
 
-# bro-f4ot.2 — judge facade + jev connector: calibrated decisions for act triage
+# bro-f4ot.2 — judge facade + systemone connector: calibrated decisions for act triage
 
 Parent: `bro-f4ot` (agents facade + bro fleet) → `sessions` capability.
 See `bro-f4ot/spec.md` and `spec.md`.
@@ -38,7 +38,7 @@ not an assumed one.
 ## Terms
 
 - **judge** — the `judge` facade: `decide(state, questions) → typed
-  answers`. One capability, many backends (jev, llm-judge cascade).
+  answers`. One capability, many backends (systemone, llm-judge cascade).
 - **verdict** — the recorded output of one `decide()` call: the
   questions asked, the answers returned, who answered, what it cost.
 - **shadow mode** — the only v1 mode: verdicts are logged and rendered
@@ -60,7 +60,7 @@ contract is named by domain semantics (`decide`, `choice`, `score`,
 `noul`), never vendor API names.
 
 ```ts
-/** One typed question — the three kinds jev (and the contract) speak.
+/** One typed question — the three kinds systemone (and the contract) speak.
  *  `choice` picks among labelled options; `score` rates on an ordered
  *  2–10 level scale; `noul` is a calibrated yes/no probability. */
 type JudgeQuestion =
@@ -110,9 +110,9 @@ Contract rules:
   surfaces as an ordinary error — callers trim, they don't retry
   bigger.
 - **One call, many questions.** Consumers batch a subject's questions
-  into one `decide()` — jev evaluates them in parallel in one round
+  into one `decide()` — systemone evaluates them in parallel in one round
   trip; a question-per-call loop is a cost bug.
-- **`noul` confidence is derived.** jev returns only the P(yes)
+- **`noul` confidence is derived.** systemone returns only the P(yes)
   probability; the connector sets `confidence = max(noul, 1 - noul)` —
   a confident "no" is still confident, and the escalation/calibration
   machinery treats every answer type uniformly.
@@ -120,12 +120,12 @@ Contract rules:
   default 0.6) is applied by the chain, not the caller: low-confidence
   answers escalate to `judge.fallback` when configured; answers that
   stay low land in `lowConfidence` marked, not hidden.
-- **Model pinned.** `judge.model` pins the version (jev docs: pin in
+- **Model pinned.** `judge.model` pins the version (System One docs: pin in
   production so thresholds don't drift under the same inputs).
 
 ## Connectors
 
-### `jev` — the primary
+### `systemone` — the primary
 
 Hosted decision API — TypeSafe's System One. Facts pinned from
 `https://docs.typesafe.ai/api.md` (the live contract; the bead's
@@ -171,7 +171,7 @@ prompt, maps the model's reply back onto typed answers, and reports its
 own confidence (parsed or mapped — never fabricated high). Config:
 `judge.llm: { baseUrl, model, apiKeyEnv }`. It exists for two jobs:
 escalation on low confidence (the bead's "LLM cascade"), and as the
-whole judge where jev isn't provisioned. It is slower and costlier —
+whole judge where systemone isn't provisioned. It is slower and costlier —
 its answers carry `decidedBy: 'llm-judge'` so stats can score each
 backend on its own record.
 
@@ -285,7 +285,7 @@ From the bead, as measurable thresholds `bro judge stats` reports:
 
 - **agreement ≥ 85%** — judge `action` vs recorded outcomes on
   archived review threads (merged PRs' resolved threads, where the
-  outcome is known). Per-decider: jev alone, llm-judge alone,
+  outcome is known). Per-decider: systemone alone, llm-judge alone,
   escalated set.
 - **`blocks_correctness` is proxy-scored** — an outcome says what
   happened, not whether the thread truly blocked correctness. It is
@@ -294,9 +294,9 @@ From the bead, as measurable thresholds `bro judge stats` reports:
   that caveat; it does not count toward the 85% bar. If proxy
   agreement is poor, a hand-adjudicated subset is the follow-up, not
   a relaxed threshold.
-- **latency < 1s** — p50 `latencyMs` per `decide()` call (jev advertises
+- **latency < 1s** — p50 `latencyMs` per `decide()` call (systemone advertises
   70–500ms; the margin absorbs fallback escalations).
-- **cost < $0.01** — mean `costUsd` per `decide()` call (jev advertises
+- **cost < $0.01** — mean `costUsd` per `decide()` call (systemone advertises
   ~$0.001). Reported with total spend so a noisy week is visible.
 - **calibration buckets** — confidence 0.5–0.6, …, 0.9–1.0 × empirical
   agreement: a judge that says 0.9 and is right 60% of the time is not
@@ -304,7 +304,7 @@ From the bead, as measurable thresholds `bro judge stats` reports:
 
 Dogfood verdict: pass → `judge.mode` may gain `advisory` (verdicts
 pre-fill the agent's act plan as suggestions, still overridable — a
-separate spec); fail or inconclusive → jev stays shadow or the feature
+separate spec); fail or inconclusive → systemone stays shadow or the feature
 is shelved. The judge earns advisory by measurement, not enthusiasm.
 
 ## CLI surface
@@ -342,7 +342,7 @@ Config section (plugin-shaped, `judge` in `bro.config.json`):
 }
 ```
 
-`connectors.judge: "jev"` picks the primary when several register —
+`connectors.judge: "systemone"` picks the primary when several register —
 same seam as `connectors.reviews`.
 
 ## Filetree
@@ -350,7 +350,7 @@ same seam as `connectors.reviews`.
 ```text
 packages/core/src/judge.ts            JudgeFacade contract, Verdict, JudgeUnavailable
 packages/core/src/connectors.ts       FacadeMap.judge + Connector.judge?
-packages/judge/src/jev.ts             jev connector — /v1/systemone client + error mapping
+packages/judge/src/systemone.ts       systemone connector — /v1/systemone client + error mapping
 packages/judge/src/llm-judge.ts       llm-judge connector — OpenAI-compat → typed answers
 packages/judge/src/chain.ts           primary→fallback decide(), low-confidence merge
 packages/judge/src/journal.ts         verdicts.jsonl append + read (common git dir)
@@ -365,7 +365,7 @@ skills/judge/SKILL.md                 policy only — mechanics live in the CLI
 ## Milestones
 
 1. `bro-f4ot.2.1` this spec.
-2. `bro-f4ot.2.2` connector — `JudgeFacade` + jev `/v1/systemone` client,
+2. `bro-f4ot.2.2` connector — `JudgeFacade` + systemone `/v1/systemone` client,
    llm-judge fallback on low confidence, `bro judge decide` smoke path.
 3. `bro-f4ot.2.3` shadow — verdict journal + act/drive thread
    annotation; nothing applied, gate unchanged.
