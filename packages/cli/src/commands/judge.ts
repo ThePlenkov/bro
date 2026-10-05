@@ -216,6 +216,21 @@ function journalDecide(
   })
 }
 
+/** Judge backend auth — provider mode probes the named entry's own
+ *  apiKeyEnv (a missing legacy key would be the wrong field to name);
+ *  connector mode keeps the legacy probe. */
+function judgeAuth(
+  dir: string,
+  connector: string | undefined,
+  prefer: Record<string, string>
+): void {
+  if (judgeConfig(dir).judge.provider !== undefined && connector === undefined) {
+    providerModeAuth(dir)
+  } else {
+    ensureAuth('judge', { dir }, { connector, prefer })
+  }
+}
+
 async function decide(argv: string[]): Promise<void> {
   const stateRef = flag(argv, '--state')
   const questionsRef = flag(argv, '--questions')
@@ -228,11 +243,7 @@ async function decide(argv: string[]): Promise<void> {
     process.exit(2)
   }
   const dir = process.cwd()
-  if (judgeConfig(dir).judge.provider !== undefined && connector === undefined) {
-    providerModeAuth(dir)
-  } else {
-    ensureAuth('judge', { dir }, { connector, prefer: loadBroConfig().connectors })
-  }
+  judgeAuth(dir, connector, loadBroConfig().connectors)
   const state = loadState(stateRef)
   const questions = loadQuestions(questionsRef)
   try {
@@ -378,11 +389,7 @@ async function replay(argv: string[]): Promise<void> {
   const dir = process.cwd()
   const prefer = loadBroConfig().connectors
   ensureAuth('reviews', { dir }, { prefer })
-  if (judgeConfig(dir).judge.provider !== undefined && connector === undefined) {
-    providerModeAuth(dir)
-  } else {
-    ensureAuth('judge', { dir }, { connector, prefer })
-  }
+  judgeAuth(dir, connector, prefer)
   const rev = reviewHost(dir, prefer)
   const judge = judgeFacade(dir, { connector })
   const res = await replayMergedThreads({
