@@ -13,6 +13,7 @@ import {
   e2eEnv,
   git,
   initRepo,
+  installFakeBd,
   inside,
   runCli,
 } from './testrepo.ts'
@@ -311,6 +312,106 @@ describe('hooks e2e — permission + fail-open', () => {
       const outside = hook(f, 'stop', { session_id: 's1' }, bare)
       assert.equal(outside.code, 0)
       assert.doesNotMatch(outside.stdout, BLOCK)
+    })
+  })
+})
+
+describe('hooks e2e — commit provenance (prepare-commit-msg)', () => {
+  const msgFile = (f: Fixture): string => join(f.main, 'COMMIT_MSG.txt')
+
+  /** A `bro` on PATH that execs the CLI under test — what the installed
+   *  shim resolves first (the npx fallback would hit the network). */
+  const fakeBro = (f: Fixture): string => {
+    const bin = join(f.root, 'brobin')
+    mkdirSync(bin, { recursive: true })
+    writeFileSync(join(bin, 'bro'), `#!/bin/sh\nexec "${process.execPath}" "${CLI_DIST}" "$@"\n`)
+    spawnSync('chmod', ['+x', join(bin, 'bro')])
+    return bin
+  }
+
+  test('the event writes env-pinned trailers into the message file', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      writeFileSync(msgFile(f), 'feat: thing\n')
+      const r = runCli(['hooks', 'prepare-commit-msg', msgFile(f)], {
+        cwd: f.main,
+        env: {
+          AI_AGENT: 'devin_3000-11-3_agent',
+          BRO_SESSION_ID: 'native-abc',
+          BRO_BEAD_ID: 'fx-9',
+        },
+      })
+      assert.equal(r.code, 0)
+      const msg = readFileSync(msgFile(f), 'utf8')
+      assert.match(msg, /^Agent: devin$/m)
+      assert.match(msg, /^Session: native-abc$/m)
+      assert.match(msg, /^Bead: fx-9$/m)
+    })
+  })
+
+  test('the molecule parent resolves through bd show — and a repeat run adds nothing', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const { binDir, db } = installFakeBd(f.root, [
+        { id: 'fx-9', parent: 'fx-mol-1', status: 'in_progress' },
+      ])
+      writeFileSync(msgFile(f), 'feat: thing\n')
+      const env = {
+        PATH: `${binDir}:${process.env.PATH}`,
+        FAKE_BD_DB: db,
+        BRO_AGENT: 'devin',
+        BRO_BEAD_ID: 'fx-9',
+      }
+      const r = runCli(['hooks', 'prepare-commit-msg', msgFile(f)], { cwd: f.main, env })
+      assert.equal(r.code, 0)
+      const once = readFileSync(msgFile(f), 'utf8')
+      assert.match(once, /^Molecule: fx-mol-1$/m)
+      runCli(['hooks', 'prepare-commit-msg', msgFile(f)], { cwd: f.main, env })
+      const twice = readFileSync(msgFile(f), 'utf8')
+      assert.equal(twice, once) // doNothing — provenance is first-writer-wins
+      assert.equal(twice.match(/^Agent:/gm)?.length, 1)
+    })
+  })
+
+  test('install writes the shim and a real commit lands trailers end-to-end', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const inst = runCli(['hooks', 'install'], { cwd: f.main })
+      assert.equal(inst.code, 0, inst.stderr)
+      const shim = join(f.main, '.git', 'hooks', 'prepare-commit-msg')
+      assert.equal(existsSync(shim), true)
+      writeFileSync(join(f.main, 'work.txt'), 'x\n')
+      git(['add', '-A'], f.main)
+      const commit = spawnSync('git', ['commit', '-qm', 'feat: tagged'], {
+        cwd: f.main,
+        env: e2eEnv({
+          PATH: `${fakeBro(f)}:${process.env.PATH}`,
+          AI_AGENT: 'devin_3000-11-3_agent',
+          BRO_BEAD_ID: 'fx-9',
+        }),
+        encoding: 'utf8',
+      })
+      assert.equal(commit.status, 0, commit.stderr)
+      const body = git(['log', '-1', '--format=%B'], f.main)
+      assert.match(body, /^Agent: devin$/m)
+      assert.match(body, /^Bead: fx-9$/m)
+      // uninstall restores a clean hooks dir
+      const un = runCli(['hooks', 'uninstall'], { cwd: f.main })
+      assert.equal(un.code, 0)
+      assert.equal(existsSync(shim), false)
+    })
+  })
+
+  test('a config-less repo still tags — the installed shim is the opt-in, not broEnabled', () => {
+    const { root, main } = initRepo('bro-githooks-bare-') // no bro.config.json/.beads
+    inside(main, root, () => {
+      writeFileSync(join(main, 'm.txt'), 'feat: x\n')
+      const r = runCli(['hooks', 'prepare-commit-msg', join(main, 'm.txt')], {
+        cwd: main,
+        env: { AI_AGENT: 'devin_1' },
+      })
+      assert.equal(r.code, 0)
+      assert.match(readFileSync(join(main, 'm.txt'), 'utf8'), /^Agent: devin$/m)
     })
   })
 })

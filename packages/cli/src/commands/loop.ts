@@ -27,9 +27,11 @@ import { dirname } from 'node:path'
 import {
   bdTry,
   checkBeads,
+  commandCliName,
   gitTry,
   LockTimeout,
   reviewHost,
+  stepParent,
   taskStore,
   withFileLock,
   type ReviewFacade,
@@ -158,13 +160,32 @@ export function resolveBeadsDir(root: string, warn?: (msg: string) => void): str
 }
 
 /** Spawn env shared by agent and bootstrap — BEADS_DIR pins every bd
- *  the child runs to the loop's store. */
+ *  the child runs to the loop's store. Provenance pins the ambient env
+ *  can't spoof: BRO_AGENT/BRO_MOL_ID come from the connector (extra),
+ *  and ambient copies are stripped so a parent worker's badge can't
+ *  bleed into the child's commits (bro-fzot). */
 function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  for (const k of ['BRO_AGENT', 'BRO_SESSION_ID', 'BRO_MOL_ID']) {
+    delete env[k]
+  }
   return {
-    ...process.env,
+    ...env,
     ...(ctx.beadsDir ? { BEADS_DIR: ctx.beadsDir } : {}),
     ...extra,
   }
+}
+
+/** Commit-provenance pins for the loop's agent (bro-fzot) — the cli the
+ *  configured command names, and the bead's molecule parent when the
+ *  shared store can answer. */
+function provenancePins(ctx: Ctx, beadId: string): Record<string, string> {
+  const pins: Record<string, string> = { BRO_AGENT: commandCliName(ctx.agent) }
+  const mol = ctx.beadsDir !== undefined ? stepParent(ctx.beadsDir, beadId) : undefined
+  if (mol !== undefined) {
+    pins.BRO_MOL_ID = mol
+  }
+  return pins
 }
 
 /** Fresh sibling worktree on loop/<id> off origin/main (falls back to
@@ -203,6 +224,7 @@ function spawnAgent(ctx: Ctx, beadId: string, title: string, promptFile: string,
         BRO_BEAD_ID: beadId,
         BRO_BEAD_TITLE: title,
         BRO_PROMPT_FILE: promptFile,
+        ...provenancePins(ctx, beadId),
       }),
       stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
       detached: true,
