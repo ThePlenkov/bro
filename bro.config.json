@@ -30,6 +30,15 @@
     "maxConcurrent": 3
   },
   "judge": {
-    "mode": "shadow"
+    "mode": "shadow",
+    "provider": "kilo-cli",
+    "timeoutMs": 300000
+  },
+  "providers": {
+    "kilo-cli": {
+      "type": "acp",
+      "command": "kilo acp",
+      "model": "kilo/orcarouter/typesafe/jev-1.13"
+    }
   }
 }

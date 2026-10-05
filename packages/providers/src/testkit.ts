@@ -64,6 +64,10 @@ export function fakeAcpAgent(
     /** Ask session/request_permission mid-prompt with these options —
      *  the outcome lands in `permissionOutcome`. */
     askPermission?: PermissionOption[]
+    /** session/prompt fails: 'auth' answers the wire's auth_required
+     *  error (code −32000), 'generic' a plain handler error that
+     *  arrives as "Internal error" like any backend flake would. */
+    failPrompt?: 'auth' | 'generic'
   } = {}
 ): FakeAcpAgent {
   const seen: FakeAcpAgent = {
@@ -103,6 +107,12 @@ export function fakeAcpAgent(
       seen.prompts.push(
         ctx.params.prompt.map((b) => (b.type === 'text' ? b.text : '')).join('')
       )
+      if (opts.failPrompt === 'auth') {
+        throw RequestError.authRequired()
+      }
+      if (opts.failPrompt === 'generic') {
+        throw new Error('upstream connection reset')
+      }
       if (opts.askPermission !== undefined) {
         const res = await ctx.client.request('session/request_permission', {
           sessionId: ctx.params.sessionId,
