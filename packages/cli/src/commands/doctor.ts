@@ -446,6 +446,31 @@ function readBudget(dir: string): { snap: BudgetSnapshot | null; err?: string } 
   }
 }
 
+/** The text report — check lines, the budget section, the summary. */
+function printDoctor(checks: DoctorCheck[], budget: ReturnType<typeof readBudget>): void {
+  for (const c of checks) {
+    console.log(`${ICONS[c.status]} ${c.name.padEnd(10)} ${c.detail}`)
+    if (c.hint) {
+      console.log(`  ${' '.repeat(10)} → ${c.hint}`)
+    }
+  }
+  console.log('\nbudget — local estimates (bro registry only, not provider quota data)')
+  if (budget.snap === null) {
+    console.log(`  unreadable — ${budget.err ?? 'unknown error'}`)
+  } else {
+    for (const l of budgetLines(budget.snap)) {
+      console.log(l)
+    }
+  }
+  const fails = checks.filter((c) => c.status === 'fail').length
+  const warns = checks.filter((c) => c.status === 'warn').length
+  console.log(
+    fails === 0 && warns === 0
+      ? '\nbro doctor: all checks pass'
+      : `\nbro doctor: ${fails} failure(s), ${warns} warning(s)`
+  )
+}
+
 export function runDoctorCommand(argv: string[]): void {
   const json = argv.includes('--json')
   const dir = process.cwd()
@@ -456,27 +481,7 @@ export function runDoctorCommand(argv: string[]): void {
       JSON.stringify({ ok: doctorExitCode(checks) === 0, checks, budget: budget.snap }, null, 2)
     )
   } else {
-    for (const c of checks) {
-      console.log(`${ICONS[c.status]} ${c.name.padEnd(10)} ${c.detail}`)
-      if (c.hint) {
-        console.log(`  ${' '.repeat(10)} → ${c.hint}`)
-      }
-    }
-    console.log('\nbudget — local estimates (bro registry only, not provider quota data)')
-    if (budget.snap === null) {
-      console.log(`  unreadable — ${budget.err ?? 'unknown error'}`)
-    } else {
-      for (const l of budgetLines(budget.snap)) {
-        console.log(l)
-      }
-    }
-    const fails = checks.filter((c) => c.status === 'fail').length
-    const warns = checks.filter((c) => c.status === 'warn').length
-    console.log(
-      fails === 0 && warns === 0
-        ? '\nbro doctor: all checks pass'
-        : `\nbro doctor: ${fails} failure(s), ${warns} warning(s)`
-    )
+    printDoctor(checks, budget)
   }
   process.exit(doctorExitCode(checks))
 }

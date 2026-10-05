@@ -549,14 +549,16 @@ function entryOccupies(
   }
 }
 
-/** The batched probes one registry walk shares — memoized so N entries
- *  never pay N subprocesses, and a backend with no entries costs no
- *  round-trip at all. fleetOccupancy and budgetSnapshot share the set. */
-function occupancyProbes(dir: string, env: AgentConnectorEnv): {
+/** The memoized probe set one registry walk shares across entries — N
+ *  entries never pay N subprocesses, and a backend with no entries costs
+ *  no round-trip at all. fleetOccupancy and budgetSnapshot share it. */
+interface OccupancyProbes {
   tmuxLive: () => Set<string> | undefined
   gcSessions: () => GcSession[] | undefined
   gcSupervisor: () => boolean | undefined
-} {
+}
+
+function occupancyProbes(dir: string, env: AgentConnectorEnv): OccupancyProbes {
   return {
     tmuxLive: memo(() => tmuxLiveSessions(env)),
     gcSessions: memo(() => {
@@ -662,13 +664,70 @@ export interface BudgetSnapshot {
   causes: BudgetCause[]
 }
 
+/** The per-entry tallies a walk accumulates into a BudgetSnapshot. */
+interface BudgetWalk {
+  live: number
+  blocked: number
+  spawnedLastHour: number
+  perHour: Map<string, number>
+  resets: BudgetReset[]
+  causes: BudgetCause[]
+}
+
+/** One entry's contribution — fail-closed liveness, lazy cause harvest
+ *  on the dead (tmux/unknown backends' occupancy probes never walk the
+ *  death ladder — this read is what classifies them), the spawnedAt
+ *  hour bucket, and the reset/cause records. */
+function budgetEntry(
+  dir: string,
+  home: string | null,
+  probes: OccupancyProbes,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  now: number,
+  acc: BudgetWalk
+): void {
+  if (entryOccupies(dir, home, molStep, entry, probes)) {
+    acc.live++
+  } else {
+    ensureExitCause(dir, home, molStep, entry)
+  }
+  const spawned = Date.parse(entry.spawnedAt)
+  if (!Number.isNaN(spawned)) {
+    const hour = `${new Date(spawned).toISOString().slice(0, 13)}:00:00.000Z`
+    acc.perHour.set(hour, (acc.perHour.get(hour) ?? 0) + 1)
+    if (now - spawned < 3_600_000) {
+      acc.spawnedLastHour++
+    }
+  }
+  const holding = agentEntryBlocked(entry, now)
+  if (holding) {
+    acc.blocked++
+  }
+  if (isAgentCause(entry.cause)) {
+    acc.causes.push({
+      step: molStep,
+      agent: entry.agentId,
+      backend: entry.backend,
+      cause: entry.cause,
+    })
+  }
+  if (typeof entry.resetAt === 'string' && entry.resetAt !== '') {
+    acc.resets.push({
+      step: molStep,
+      agent: entry.agentId,
+      cause: isAgentCause(entry.cause) ? entry.cause : 'crash',
+      resetAt: entry.resetAt,
+      holding,
+    })
+  }
+}
+
 /** The local budget proxy — one registry walk: fail-closed liveness per
- *  entry (the same verdict admission enforces), a lazy cause harvest on
- *  every entry (tmux/unknown backends' occupancy probes never walk the
- *  death ladder — read-side classification is what ensures it), and the
- *  spawnedAt hour-bucketing the "per hour" question needs. Mutates the
- *  passed entries like every read path here: harvested fields land on
- *  the entry objects whether or not the advisory registry write does. */
+ *  entry (the same verdict admission enforces) plus the spawn/reset/
+ *  cause tallies. Mutates the passed entries like every read path here:
+ *  harvested fields land on the entry objects whether or not the
+ *  advisory registry write does. */
 export function budgetSnapshot(
   dir: string,
   home: string | null,
@@ -678,61 +737,30 @@ export function budgetSnapshot(
 ): BudgetSnapshot {
   const probes = occupancyProbes(dir, env)
   const rows = Object.entries(registry)
-  let live = 0
-  let blocked = 0
-  let spawnedLastHour = 0
-  const perHour = new Map<string, number>()
-  const resets: BudgetReset[] = []
-  const causes: BudgetCause[] = []
+  const acc: BudgetWalk = {
+    live: 0,
+    blocked: 0,
+    spawnedLastHour: 0,
+    perHour: new Map(),
+    resets: [],
+    causes: [],
+  }
   for (const [molStep, entry] of rows) {
-    if (entryOccupies(dir, home, molStep, entry, probes)) {
-      live++
-    } else {
-      ensureExitCause(dir, home, molStep, entry)
-    }
-    const spawned = Date.parse(entry.spawnedAt)
-    if (!Number.isNaN(spawned)) {
-      const hour = `${new Date(spawned).toISOString().slice(0, 13)}:00:00.000Z`
-      perHour.set(hour, (perHour.get(hour) ?? 0) + 1)
-      if (now - spawned < 3_600_000) {
-        spawnedLastHour++
-      }
-    }
-    const holding = agentEntryBlocked(entry, now)
-    if (holding) {
-      blocked++
-    }
-    if (isAgentCause(entry.cause)) {
-      causes.push({
-        step: molStep,
-        agent: entry.agentId,
-        backend: entry.backend,
-        cause: entry.cause,
-      })
-    }
-    if (typeof entry.resetAt === 'string' && entry.resetAt !== '') {
-      resets.push({
-        step: molStep,
-        agent: entry.agentId,
-        cause: isAgentCause(entry.cause) ? entry.cause : 'crash',
-        resetAt: entry.resetAt,
-        holding,
-      })
-    }
+    budgetEntry(dir, home, probes, molStep, entry, now, acc)
   }
   return {
     basis: 'local-estimate',
     limits: [...BUDGET_LIMITS],
     entries: rows.length,
-    live,
-    blocked,
+    live: acc.live,
+    blocked: acc.blocked,
     maxConcurrent: fleetCapOf(env),
-    spawnedLastHour,
-    spawnedPerHour: [...perHour.entries()]
+    spawnedLastHour: acc.spawnedLastHour,
+    spawnedPerHour: [...acc.perHour.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([hour, count]) => ({ hour, count })),
-    resets,
-    causes,
+    resets: acc.resets,
+    causes: acc.causes,
   }
 }
 
@@ -747,16 +775,17 @@ export function budgetSnapshotFor(dir: string, env: AgentConnectorEnv): BudgetSn
  *  can't read as provider truth. */
 export function budgetLines(b: BudgetSnapshot): string[] {
   const cap = b.maxConcurrent > 0 ? `/${b.maxConcurrent}` : ' (uncapped)'
+  const blocked = b.blocked > 0 ? ` · ${b.blocked} blocked` : ''
   const lines = [
-    `  live    ${b.live}${cap} agent slots${b.blocked > 0 ? ` · ${b.blocked} blocked` : ''}`,
+    `  live    ${b.live}${cap} agent slots${blocked}`,
     `  spawned ${b.spawnedLastHour} in the last hour`,
   ]
   if (b.resets.length > 0) {
-    lines.push(
-      `  resets  ${b.resets
-        .map((r) => `${r.step} ${r.cause} til ${r.resetAt}${r.holding ? ' (holding)' : ''}`)
-        .join(' · ')}`
-    )
+    const cells = b.resets.map((r) => {
+      const holding = r.holding ? ' (holding)' : ''
+      return `${r.step} ${r.cause} til ${r.resetAt}${holding}`
+    })
+    lines.push(`  resets  ${cells.join(' · ')}`)
   }
   if (b.causes.length > 0) {
     lines.push(`  causes  ${b.causes.map((c) => `${c.step}: ${c.cause}`).join(' · ')}`)
