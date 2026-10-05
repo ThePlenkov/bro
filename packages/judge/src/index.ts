@@ -21,6 +21,7 @@ export type { DeadlineJudge } from './deadline.ts'
 export {
   providerJudge,
   providerJudgeAuth,
+  providerKeyField,
   proseDecide,
   synthesizedProviders,
 } from './provider-judge.ts'

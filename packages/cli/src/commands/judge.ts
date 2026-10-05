@@ -30,6 +30,7 @@ import {
   judgeConfig,
   judgeFacade,
   providerJudgeAuth,
+  providerKeyField,
   readJournal,
   replayMergedThreads,
   synthesizedProviders,
@@ -176,7 +177,11 @@ function providerModeAuth(dir: string): void {
       jcfg.provider!,
       'call'
     )
-    const problem = providerJudgeAuth(jcfg.provider!, entry)
+    const problem = providerJudgeAuth(
+      jcfg.provider!,
+      entry,
+      providerKeyField(jcfg.provider!, providers)
+    )
     if (problem !== null) {
       console.error(`error: ${problem}`)
       process.exit(1)

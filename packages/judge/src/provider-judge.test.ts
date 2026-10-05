@@ -11,6 +11,7 @@ import type { FetchFn } from './http.ts'
 import {
   providerJudge,
   providerJudgeAuth,
+  providerKeyField,
   synthesizedProviders,
 } from './provider-judge.ts'
 
@@ -205,6 +206,27 @@ describe('synthesizedProviders', () => {
   })
 })
 
+describe('providerKeyField', () => {
+  test('synthesized aliases name the legacy field that feeds them', () => {
+    assert.equal(providerKeyField('systemone', {}), 'judge.apiKeyEnv')
+    assert.equal(providerKeyField('llm-judge', {}), 'judge.llm.apiKeyEnv')
+    assert.equal(
+      providerKeyField('typesafe', {}),
+      'providers.typesafe.apiKeyEnv'
+    )
+    // a user-defined entry claimed the alias — its registry path is real
+    const mine: ProviderEntry = {
+      type: 'systemone',
+      apiKeyEnv: 'K',
+      model: 'm',
+    }
+    assert.equal(
+      providerKeyField('systemone', { systemone: mine }),
+      'providers.systemone.apiKeyEnv'
+    )
+  })
+})
+
 describe('providerJudgeAuth', () => {
   test('no apiKeyEnv means no auth to probe', () => {
     assert.equal(
@@ -232,6 +254,18 @@ describe('providerJudgeAuth', () => {
         }),
         null
       )
+    })
+  })
+
+  test('a synthesized alias names its legacy field — the registry path does not exist', async () => {
+    await withEnv('TYPESAFE_API_KEY', undefined, async () => {
+      const msg = providerJudgeAuth(
+        'systemone',
+        { type: 'systemone', apiKeyEnv: 'TYPESAFE_API_KEY', model: 'm' },
+        providerKeyField('systemone', {})
+      )
+      assert.match(msg!, /judge\.apiKeyEnv/)
+      assert.doesNotMatch(msg!, /providers\./)
     })
   })
 })

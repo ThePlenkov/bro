@@ -29,7 +29,11 @@ import type {
 } from '@broject/core'
 import { judgeSection, type JudgeConfig } from './config.ts'
 import { callWithin } from './deadline.ts'
-import { providerJudge, synthesizedProviders } from './provider-judge.ts'
+import {
+  providerJudge,
+  providerKeyField,
+  synthesizedProviders,
+} from './provider-judge.ts'
 import type { FetchFn } from './http.ts'
 
 // the deadline seam moved to ./deadline.ts — re-exported so importers
@@ -234,7 +238,7 @@ export function judgeFacade(dir: string, opts: JudgeFacadeOpts = {}): JudgeFacad
       cfg.provider,
       requireProviderSurface(entries, cfg.provider, 'call'),
       cfg,
-      { fetch: opts.fetch, model }
+      { fetch: opts.fetch, model, keyField: providerKeyField(cfg.provider, providers) }
     )
     const fallback =
       cfg.fallback !== undefined && cfg.fallback !== cfg.provider
@@ -242,7 +246,10 @@ export function judgeFacade(dir: string, opts: JudgeFacadeOpts = {}): JudgeFacad
             cfg.fallback,
             requireProviderSurface(entries, cfg.fallback, 'call'),
             cfg,
-            { fetch: opts.fetch }
+            {
+              fetch: opts.fetch,
+              keyField: providerKeyField(cfg.fallback, providers),
+            }
           )
         : undefined
     return chainedJudge(primary, fallback, cfg)

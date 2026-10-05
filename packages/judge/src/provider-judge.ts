@@ -208,6 +208,25 @@ export async function proseDecide(
   }
 }
 
+/** The config field an entry's apiKeyEnv actually lives at — a
+ *  resolve that hit a synthesized alias is fed by the legacy field,
+ *  so auth/key errors must name THAT field, not a registry path the
+ *  user never wrote. */
+export function providerKeyField(
+  name: string,
+  providers: Record<string, ProviderEntry>
+): string {
+  if (providers[name] === undefined) {
+    if (name === 'systemone') {
+      return 'judge.apiKeyEnv'
+    }
+    if (name === 'llm-judge') {
+      return 'judge.llm.apiKeyEnv'
+    }
+  }
+  return `providers.${name}.apiKeyEnv`
+}
+
 export interface ProviderJudgeOpts {
   /** Test seam — the bindings take a scripted transport. */
   fetch?: FetchFn
@@ -215,6 +234,9 @@ export interface ProviderJudgeOpts {
    *  decides when `judge.model` applies (judgeFacade: the primary
    *  only — the fallback's pin is its own contract). */
   model?: string
+  /** The config field key errors name — providerKeyField() resolves
+   *  synthesized aliases back to their legacy source field. */
+  keyField?: string
 }
 
 /** JudgeFacade over a named provider entry — the kind selects the
@@ -225,7 +247,11 @@ export function providerJudge(
   cfg: JudgeConfig,
   opts: ProviderJudgeOpts = {}
 ): DeadlineJudge {
-  const client = providerClient(name, entry, { fetch: opts.fetch, model: opts.model })
+  const client = providerClient(name, entry, {
+    fetch: opts.fetch,
+    model: opts.model,
+    keyField: opts.keyField,
+  })
   const by = `provider:${name}`
   if (client.call !== undefined) {
     return deadlineJudge(cfg.timeoutMs, client.call)
@@ -268,18 +294,23 @@ export function synthesizedProviders(
   return out
 }
 
-/** Provider-mode auth preflight for `bro judge decide` — the entry's
- *  apiKeyEnv resolves to an env var or the remediation line names the
- *  field (never the var name, never the value). */
-export function providerJudgeAuth(name: string, entry: ProviderEntry): string | null {
+/** Provider-mode auth preflight for `bro judge decide`/`replay` — the
+ *  entry's apiKeyEnv resolves to an env var or the remediation line
+ *  names the field the user actually wrote (never the var name,
+ *  never the value). */
+export function providerJudgeAuth(
+  name: string,
+  entry: ProviderEntry,
+  keyField = `providers.${name}.apiKeyEnv`
+): string | null {
   const envName = 'apiKeyEnv' in entry ? entry.apiKeyEnv : undefined
   if (envName === undefined) {
     return null
   }
   if (!isEnvName(envName)) {
-    return `providers.${name}.apiKeyEnv is not a valid environment variable name`
+    return `${keyField} is not a valid environment variable name`
   }
   return process.env[envName]
     ? null
-    : `the env var named by providers.${name}.apiKeyEnv is not set — export it for judge.provider "${name}"`
+    : `the env var named by ${keyField} is not set — export it for judge.provider "${name}"`
 }
