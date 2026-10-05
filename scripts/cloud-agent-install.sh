@@ -4,6 +4,8 @@ set -euo pipefail
 # Node ≥22.18 is required for native .ts execution (gen-pack, bro.config.ts).
 export PATH="/usr/local/bin:${PATH:-}"
 
+fetch() { curl --proto '=https' --tlsv1.2 -fsSL "$@"; }
+
 need_node() {
   node -e '
     const p = process.versions.node.split(".").map(Number);
@@ -24,12 +26,10 @@ if ! need_node 2>/dev/null; then
   esac
   NODE_DIST="node-v${NODE_VERSION}-linux-${NODE_ARCH}"
   NODE_TARBALL="$WORKDIR/${NODE_DIST}.tar.xz"
-  curl --proto '=https' --tlsv1.2 -fsSL \
-    "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_DIST}.tar.xz" -o "$NODE_TARBALL"
-  NODE_SHA256="${NODE_SHA256:-$(curl --proto '=https' --tlsv1.2 -fsSL \
-    "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" \
+  fetch "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_DIST}.tar.xz" -o "$NODE_TARBALL"
+  NODE_SHA256="${NODE_SHA256:-$(fetch "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" \
     | awk -v f="${NODE_DIST}.tar.xz" '$2 == f { print $1 }')}"
-  if [ -z "$NODE_SHA256" ]; then
+  if [[ -z $NODE_SHA256 ]]; then
     echo "No checksum found for ${NODE_DIST}.tar.xz" >&2; exit 1
   fi
   echo "${NODE_SHA256}  ${NODE_TARBALL}" | sha256sum --check -
@@ -46,16 +46,16 @@ if ! command -v bd >/dev/null 2>&1; then
   esac
   BD_DIST="beads_${BD_VERSION}_linux_${BD_ARCH}"
   BD_TARBALL="$WORKDIR/${BD_DIST}.tar.gz"
-  curl --proto '=https' --tlsv1.2 -fsSL \
-    "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/${BD_DIST}.tar.gz" -o "$BD_TARBALL"
-  BD_SHA256="${BD_SHA256:-$(curl --proto '=https' --tlsv1.2 -fsSL \
-    "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/checksums.txt" \
+  fetch "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/${BD_DIST}.tar.gz" -o "$BD_TARBALL"
+  BD_SHA256="${BD_SHA256:-$(fetch "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/checksums.txt" \
     | awk -v f="${BD_DIST}.tar.gz" '$2 == f { print $1 }')}"
-  if [ -z "$BD_SHA256" ]; then
+  if [[ -z $BD_SHA256 ]]; then
     echo "No checksum found for ${BD_DIST}.tar.gz" >&2; exit 1
   fi
   echo "${BD_SHA256}  ${BD_TARBALL}" | sha256sum --check -
   sudo tar -xzf "$BD_TARBALL" -C /usr/local/bin --no-same-owner bd
 fi
 
-npm ci --no-audit --no-fund
+# --ignore-scripts matches publish.yml/release.yml: dep lifecycle scripts are
+# a supply-chain surface, and the repo builds fine without them.
+npm ci --no-audit --no-fund --ignore-scripts
