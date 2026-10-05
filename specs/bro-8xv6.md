@@ -75,8 +75,10 @@ gating.
 - [x] cli: wire `checkHistory` into every `fetchPrActState` caller
       (act, drive, loop, watch) and the act connector; print alerts in
       `act status`, `watch` attention, connector gate lines
-- [x] `bro.config.json`: entries → object form; AGENTS.md gate
-      paragraph + `site/content/docs/configuration.md` updated
+- [x] `bro.config.json`: entries stay strings — they already gain the
+      conditional semantics under the new code, and object form would
+      read as an empty list under the released CLI (compat); AGENTS.md
+      gate paragraph + `site/content/docs/configuration.md` updated
 - [x] tests: config normalization, ledger streak/dedup/fail-open,
       conditional-ignore verdicts, exit-gate alert pass-through
 - [x] `npm test` + typecheck, PR
