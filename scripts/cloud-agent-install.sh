@@ -9,7 +9,7 @@ fetch() { curl --proto '=https' --tlsv1.2 -fsSL "$@"; }
 need_node() {
   node -e '
     const p = process.versions.node.split(".").map(Number);
-    const ok = p[0] > 22 || (p[0] === 22 && p[1] >= 18) || p[0] >= 24;
+    const ok = (p[0] === 22 && p[1] >= 18) || (p[0] === 23 && p[1] >= 6) || p[0] >= 24;
     process.exit(ok ? 0 : 1);
   '
 }
