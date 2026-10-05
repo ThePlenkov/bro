@@ -238,15 +238,15 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /** Poll until fn() holds or the budget runs out — process death and
  *  exit-file writes are async from the test's point of view. */
-async function until(fn: () => boolean, ms = 5000): Promise<void> {
+async function until(fn: () => boolean | Promise<boolean>, ms = 5000): Promise<void> {
   const deadline = Date.now() + ms
   while (Date.now() < deadline) {
-    if (fn()) {
+    if (await fn()) {
       return
     }
     await sleep(50)
   }
-  assert.ok(fn(), 'condition did not hold within budget')
+  assert.ok(await fn(), 'condition did not hold within budget')
 }
 
 const SPEC = (main: string, beadsDir: string, molStep: string, prompt: string) => ({
@@ -517,7 +517,14 @@ function connectorContract(b: BackendCase): void {
     await until(() =>
       existsSync(join(f.main, '.git', 'bro', 'agents', `${info.id}.exit`))
     )
-    return { info, status: await c.status(info.id) }
+    // the .exit file can beat the wrapper's death — a single read may
+    // still report running/spawned, so poll for a terminal state
+    let status = await c.status(info.id)
+    await until(async () => {
+      status = await c.status(info.id)
+      return status.state !== 'running' && status.state !== 'spawned'
+    })
+    return { info, status }
   }
   const respawn = (c: AgentConnector, f: Fixture) =>
     c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
