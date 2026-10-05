@@ -138,6 +138,31 @@ describe('chainedJudge', () => {
     assert.deepEqual(res.lowConfidence, [])
   })
 
+  test('an unanswered "constructor" qid escalates — prototype members are not answers', async () => {
+    const fbCalls: string[] = []
+    const j = chainedJudge(
+      fakeFacade({ answers: {} }),
+      fakeFacade({ answers: { constructor: ans(0.9, 'llm-judge') } }, fbCalls),
+      OPTS
+    )
+    const res = await j.decide('s', { constructor: Q.q1 })
+    assert.deepEqual(fbCalls, ['constructor'])
+    assert.equal(res.answers['constructor']!.decidedBy, 'llm-judge')
+    assert.deepEqual(res.lowConfidence, [])
+  })
+
+  test('a fallback that left "constructor" unanswered merges no prototype member', async () => {
+    const j = chainedJudge(
+      fakeFacade({ answers: {} }),
+      fakeFacade({ answers: {} }), // fallback answered nothing
+      OPTS
+    )
+    const res = await j.decide('s', { constructor: Q.q1 })
+    // Object.prototype.constructor must not surface as an answer
+    assert.equal(Object.hasOwn(res.answers, 'constructor'), false)
+    assert.deepEqual(res.lowConfidence, ['constructor'])
+  })
+
   test('a fallback bug (plain error) propagates — only unavailability fails open', async () => {
     const j = chainedJudge(
       fakeFacade({ answers: { q1: ans(0.4) } }),

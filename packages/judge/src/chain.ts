@@ -79,7 +79,9 @@ export function chainedJudge(
       // an asked question with no answer at all is as unconfident as a
       // low one — it escalates and lands in lowConfidence the same way
       const unconfident = (ans: Record<string, JudgeAnswer>): string[] => [
-        ...Object.keys(questions).filter((k) => !(k in ans)),
+        // hasOwn — 'constructor' in ans is true via the prototype even
+        // when no answer landed; `in` would hide an unanswered qid
+        ...Object.keys(questions).filter((k) => !Object.hasOwn(ans, k)),
         ...lowKeys(ans, opts.confidence),
       ]
       const low = unconfident(res.answers)
@@ -91,7 +93,11 @@ export function chainedJudge(
       if (fallback === undefined || Date.now() >= deadline) {
         return { ...res, lowConfidence: low }
       }
-      const retry = Object.fromEntries(low.map((k) => [k, questions[k]!]))
+      // a low key that isn't an asked question (or is an inherited name
+      // like 'toString') has no question payload to re-ask
+      const retry = Object.fromEntries(
+        low.filter((k) => Object.hasOwn(questions, k)).map((k) => [k, questions[k]!])
+      )
       let esc: DecideResult
       try {
         esc = await callWithin(fallback, state, retry, deadline)
@@ -106,7 +112,9 @@ export function chainedJudge(
       }
       const answers = { ...res.answers }
       for (const k of low) {
-        const a = esc.answers[k]
+        // hasOwn — an inherited member (esc.answers['constructor'] is
+        // Object itself) is not an answer and must not be merged in
+        const a = Object.hasOwn(esc.answers, k) ? esc.answers[k] : undefined
         if (a !== undefined) {
           answers[k] = a
         }
