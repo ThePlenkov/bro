@@ -22,7 +22,9 @@ export type ProviderKind = (typeof PROVIDER_KINDS)[number]
 /** The wire protocol one served model speaks — the api kind's per-model
  *  knob: 'systemone' is the native typed-judgment contract
  *  (POST {baseUrl}/v1/systemone), 'openai-compat' is generic
- *  chat-completions prose (POST {baseUrl}/chat/completions). */
+ *  chat-completions prose (POST {baseUrl}/v1/chat/completions —
+ *  each wire mounts its versioned prefix on the host root; a base
+ *  the author already versioned is kept). */
 export type ApiWire = 'systemone' | 'openai-compat'
 export const API_WIRES = ['systemone', 'openai-compat'] as const
 

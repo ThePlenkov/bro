@@ -1,6 +1,8 @@
 /**
  * The `openai-compat` provider binding — any OpenAI-compatible chat
- * endpoint (POST {baseUrl}/chat/completions) as a raw prose call
+ * endpoint (POST {baseUrl}/v1/chat/completions — the wire mounts /v1
+ * on the host root and keeps an already-versioned base) as a raw
+ * prose call
  * (spec: specs/bro-ribc.1.md). The wire answer is free text; turning
  * it into typed judgments is the consumer's prompt-and-parse problem
  * (the judge's prose adapter lives in @broject/judge) — this binding

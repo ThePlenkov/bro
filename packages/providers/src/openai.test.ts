@@ -48,6 +48,20 @@ describe('openaiCompatChat', () => {
       assert.equal(res.usage?.inputTokens, 42)
     }))
 
+  test('the wire mounts /v1 on a host root and keeps an already-versioned base', async () => {
+    const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
+    await openaiCompatChat({ baseUrl: 'https://host.example', model: 'm' }, { fetch })(
+      'p',
+      DEADLINE()
+    )
+    assert.equal(calls[0]!.url, 'https://host.example/v1/chat/completions')
+    await openaiCompatChat(
+      { baseUrl: 'https://host.example/api/v2beta/', model: 'm' },
+      { fetch }
+    )('p', DEADLINE())
+    assert.equal(calls[1]!.url, 'https://host.example/api/v2beta/chat/completions')
+  })
+
   test('a wire with no model echoes the sent one; opts.model overrides the pin', () =>
     withKey(async () => {
       const { fetch, calls } = fakeFetch({ status: 200, body: { choices: OK_BODY.choices } })
