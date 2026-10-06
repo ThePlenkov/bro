@@ -10,6 +10,7 @@ import {
   facadeAuth,
   isOwnClaim,
   parallelWorkLines,
+  preToolVerdicts,
   promptContextLines,
   registerConnector,
   sessionStartLines,
@@ -319,6 +320,45 @@ describe('isOwnClaim', () => {
   test('unverifiable rows keep the marker — fail-open', () => {
     assert.equal(isOwnClaim({ id: 'b1' }, mine, 'me'), true)
     assert.equal(isOwnClaim({ id: 'b1', assignee: 'x' }, mine, ''), true)
+  })
+})
+
+describe('preToolVerdicts', () => {
+  test('collects blocks and input overrides in registry order', async () => {
+    registerConnector({
+      name: 'guard-block',
+      hooks: () => ({
+        preTool: () => [{ block: 'gate is red' }],
+      }),
+    })
+    registerConnector({
+      name: 'guard-rewrite',
+      hooks: () => ({
+        preTool: (_ctx, input) => [{ input: { ...input.input, command: 'rewritten' } }],
+      }),
+    })
+    const verdicts = await preToolVerdicts(
+      { dir: process.cwd() },
+      'bash',
+      { command: 'gh pr merge 1' }
+    )
+    const blocks = verdicts.flatMap((v) => (v.block !== undefined ? [v.block] : []))
+    const inputs = verdicts.flatMap((v) => (v.input !== undefined ? [v.input] : []))
+    assert.ok(blocks.includes('gate is red'))
+    assert.ok(inputs.some((i) => i.command === 'rewritten'))
+  })
+
+  test('a throwing probe contributes nothing — fail-open', async () => {
+    registerConnector({
+      name: 'guard-wedged',
+      hooks: () => ({
+        preTool: () => {
+          throw new Error('offline')
+        },
+      }),
+    })
+    const verdicts = await preToolVerdicts({ dir: process.cwd() }, 'read', {})
+    assert.ok(verdicts.every((v) => v !== undefined))
   })
 })
 

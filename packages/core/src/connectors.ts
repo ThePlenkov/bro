@@ -66,6 +66,17 @@ export interface GateContribution {
   passive?: string
 }
 
+/** A connector's verdict on an about-to-run tool call — the guard plane's
+ *  vocabulary. `block` vetoes the call outright; `input` rewrites the
+ *  call's tool_input (merged across connectors in order). Both absent is
+ *  abstention. */
+export interface PreToolVerdict {
+  /** Reason line — presence means "do not run this". */
+  block?: string
+  /** Args override — merged onto the call's tool_input. */
+  input?: Record<string, unknown>
+}
+
 /** Context a connector contributes to the agent lifecycle — the
  *  per-connector answer to "what does this system know that the session
  *  must see". All probes are fail-open: a wedged system yields no lines,
@@ -88,6 +99,13 @@ export interface ConnectorHooks {
   /** Stop-gate contributions — non-empty `block` means the session has
    *  unfinished business in this system. */
   stopGate?(ctx: ConnectorCtx): MaybePromise<GateContribution[]>
+  /** Pre-execution verdicts — the guard plane: veto a tool call or
+   *  rewrite its args before it runs (opencode `tool.execute.before`,
+   *  claude `PreToolUse`). */
+  preTool?(
+    ctx: ConnectorCtx,
+    input: { tool: string; input: Record<string, unknown> }
+  ): MaybePromise<PreToolVerdict[]>
 }
 
 export interface Connector {
@@ -556,4 +574,25 @@ export async function stopGateContributions(
     }
   }
   return out
+}
+
+/** Collect pre-tool verdicts from all connectors — the caller decides
+ *  whether a block or an input override wins. */
+export async function preToolVerdicts(
+  ctx: ConnectorCtx,
+  tool: string,
+  input: Record<string, unknown>
+): Promise<PreToolVerdict[]> {
+  // parallel probes, registry-order merge — a wedged connector can't
+  // stall the queue and verdict order stays the config's
+  const verdicts = await Promise.all(
+    connectorHooks(ctx).map(async (h) => {
+      try {
+        return (await probeWithTimeout(h.preTool?.(ctx, { tool, input }), undefined)) ?? []
+      } catch {
+        return [] // fail-open
+      }
+    })
+  )
+  return verdicts.flat()
 }

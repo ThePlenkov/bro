@@ -19,6 +19,10 @@
       "types": "./dist/opencode.d.ts",
       "default": "./dist/opencode.js"
     },
+    "./tui": {
+      "types": "./dist/opencode-tui.d.ts",
+      "default": "./dist/opencode-tui.js"
+    },
     "./kilo": {
       "types": "./dist/kilo.d.ts",
       "default": "./dist/kilo.js"

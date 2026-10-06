@@ -1,0 +1,5 @@
+
+> bro@0.0.0 check:plugins
+> node scripts/gen-plugins.ts --check
+
+plugin adapters fresh

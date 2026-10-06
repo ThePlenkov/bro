@@ -648,4 +648,17 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
       assert.equal(r.status, 0)
     })
   })
+
+  test('pre-tool is a known event — silent and green while no connector guards', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const r = hook(f, 'pre-tool', {
+        session_id: 's1',
+        tool_name: 'bash',
+        tool_input: { command: 'gh pr merge 12' },
+      })
+      assert.equal(r.code, 0)
+      assert.equal(r.stdout.trim(), '')
+    })
+  })
 })

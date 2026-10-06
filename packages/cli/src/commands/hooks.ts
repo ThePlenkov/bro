@@ -7,6 +7,8 @@
  *                                       drill frame, PR gate, debt, merge slot, work nudge
  *   prompt-submit                     connector prompt probes — drill-frame reminder;
  *                                       the review host parses its own PR URLs → act snapshot
+ *   pre-tool                          connector preTool verdicts — the guard plane:
+ *                                       first block vetoes the call, input overrides merge
  *   post-tool                         exec nudges: gh pr create → act gate; merge → debt sweep;
  *                                       first mutating bro subcommand per session cites its
  *                                       governing skill (skills/<name>/SKILL.md); arms the
@@ -52,6 +54,7 @@ import {
   acquireFileLock,
   parallelWorkProbe,
   postToolLines,
+  preToolVerdicts,
   promptContextLines,
   sessionStartProbe,
   stopGateContributions,
@@ -927,6 +930,35 @@ async function emitStopGate(input: HookInput): Promise<void> {
   }
 }
 
+/** Connector pre-tool verdicts — the guard plane. The first `block`
+ *  vetoes the call (`decision: block` — the opencode V2 adapter throws
+ *  on it); `input` overrides merge in connector order and the adapter
+ *  applies them over the original tool_input. No verdicts → silence →
+ *  the call runs untouched (fail-open, like every hook). */
+async function emitPreTool(input: HookInput): Promise<void> {
+  const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
+  const tool = typeof input.tool_name === 'string' ? input.tool_name : ''
+  const verdicts = await preToolVerdicts(
+    { dir: process.cwd(), sessionId },
+    tool,
+    (input.tool_input ?? {}) as Record<string, unknown>
+  )
+  const block = verdicts.find((v) => v.block !== undefined)?.block
+  if (block !== undefined) {
+    emit({ decision: 'block', reason: block })
+    return
+  }
+  const merged: Record<string, unknown> = {}
+  for (const v of verdicts) {
+    if (v.input !== undefined) {
+      Object.assign(merged, v.input)
+    }
+  }
+  if (Object.keys(merged).length > 0) {
+    emit({ hookSpecificOutput: { hookEventName: 'PreToolUse', tool_input: merged } })
+  }
+}
+
 /** True when the command was approved. Cursor's beforeShellExecution
  * blocks on empty or invalid stdout, so a non-match must still answer
  * `ask` — silence is a deny. Chained commands match the plugin matcher
@@ -1020,6 +1052,9 @@ async function dispatchHook(event: string, raw: unknown, input: HookInput): Prom
       return
     case 'prompt-submit':
       await emitPromptContext(input)
+      return
+    case 'pre-tool':
+      await emitPreTool(input)
       return
     case 'post-tool':
       await emitPostTool(input)
