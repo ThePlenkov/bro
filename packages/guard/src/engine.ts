@@ -223,16 +223,21 @@ async function evalJudge(
     })
     return
   }
-  j.journal?.({
-    ts: new Date().toISOString(),
-    kind: 'guard',
-    subject: { threadId: `guard:${g.name}` },
-    questions: { fire: question },
-    answers: res.answers,
-    model: res.model,
-    latencyMs: res.latencyMs,
-    ...(res.usage?.costUsd !== undefined ? { costUsd: res.usage.costUsd } : {}),
-  })
+  try {
+    j.journal?.({
+      ts: new Date().toISOString(),
+      kind: 'guard',
+      subject: { threadId: `guard:${g.name}` },
+      questions: { fire: question },
+      answers: res.answers,
+      model: res.model,
+      latencyMs: res.latencyMs,
+      ...(res.usage?.costUsd !== undefined ? { costUsd: res.usage.costUsd } : {}),
+    })
+  } catch {
+    // journaling is observability — a filesystem failure loses a row,
+    // never the verdict and never the other guards' lines
+  }
   if (a.noul < threshold) {
     clauses.push({
       clause: 'judge',

@@ -291,6 +291,26 @@ describe('runGuards', () => {
     assert.equal(journaled[0]!.subject.threadId, 'guard:tests-with-src')
   })
 
+  test('a throwing journal loses its row, never the verdict', async () => {
+    const dir = repo()
+    dirty(dir, 'src/a.ts')
+    const g: Guard = { ...GUARD, when: { ...GUARD.when, judge: { question: 'fire?' } } }
+    const run = await runGuards(
+      opts(dir, {
+        defs: [g],
+        judge: () => ({
+          facade: noulFacade(0.2),
+          confidence: 0.6,
+          maxDecisions: 5,
+          journal: () => { throw new Error('ENOSPC') },
+        }),
+      })
+    )
+    const v = run.verdicts[0]!
+    assert.equal(v.fire, false, 'the veto still lands')
+    assert.match(v.clauses.find((c) => c.clause === 'judge')!.detail!, /vetoed — noul 0\.2 < 0\.5/)
+  })
+
   test('judge allow fires; abstains on throw and low confidence', async () => {
     const dir = repo()
     dirty(dir, 'src/a.ts')
