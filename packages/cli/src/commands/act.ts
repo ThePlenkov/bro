@@ -27,6 +27,7 @@ import {
   checkHistory,
   evaluateExitGate,
   fetchPrActState,
+  listWatches,
   releaseMergeSlot,
   waitForGate,
   type ActPlan,
@@ -141,6 +142,12 @@ function printStatus(state: PrActState, gate: ExitGate): void {
       `fix_rounds=${gate.fix_rounds} docs_only=${gate.docs_only}`
   )
   console.log(`exit_gate=${gate.ok ? 'OK' : 'BLOCKED'}`)
+  const live = listWatches(process.cwd()).filter(
+    (l) => l.alive && l.watch.pr === state.pr
+  )
+  console.log(
+    `watch=${live.length > 0 ? `live pid=${live[0]!.watch.pid}` : `none — \`bro act wait ${state.pr}\` arms one`}`
+  )
   for (const b of gate.blockers) {
     console.log(`  blocker: ${b}`)
   }

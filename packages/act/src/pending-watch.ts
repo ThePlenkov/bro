@@ -171,6 +171,64 @@ export function watchEnd(path: string | null): void {
   }
 }
 
+/** A heartbeat marker for a long-lived supervisor (`bro drive --every`)
+ *  that can't bracket its coverage with begin/end — it polls forever, so
+ *  the marker's name is deterministic per (pr, kind, pid) and each sweep
+ *  rewrites the same file. Coverage lives exactly as long as the
+ *  supervisor's pid: a dead drive leaves a dead marker, which is exactly
+ *  the stale-supervision flag the session-start hook reports. */
+export function watchHeartbeat(
+  dir: string,
+  w: Omit<PendingWatch, 'pid' | 'startedAt'>,
+  kind = 'supervisor'
+): string | null {
+  const wd = watchesDir(dir)
+  if (!wd) {
+    return null
+  }
+  try {
+    mkdirSync(wd, { recursive: true })
+    const path = join(wd, `${w.pr}-${kind}-${process.pid}.json`)
+    const tmp = `${path}.tmp`
+    writeFileSync(
+      tmp,
+      JSON.stringify(
+        {
+          ...w,
+          pid: process.pid,
+          pidStart: procStat(process.pid)?.start ?? undefined,
+          startedAt: Date.now(),
+        },
+        null,
+        2
+      )
+    )
+    renameSync(tmp, path)
+    return path
+  } catch {
+    return null
+  }
+}
+
+/** Is a live watch covering `pr`? Tri-state for gate decisions:
+ *  `true`/`false` are verdicts; `null` means the store could not be
+ *  read (no git dir, EACCES, ...) — callers that block on "unwatched"
+ *  must treat `null` as fail-open, since listWatches' empty list cannot
+ *  distinguish "no markers" from "markers unreadable". A missing dir
+ *  (ENOENT) IS a verdict: no markers have ever been written. */
+export function hasLiveWatch(dir: string, pr: number): boolean | null {
+  const wd = watchesDir(dir)
+  if (!wd) {
+    return null
+  }
+  try {
+    readdirSync(wd)
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? false : null
+  }
+  return listWatchesIn(wd).some((l) => l.alive && l.watch.pr === pr)
+}
+
 /** Claim a reported stale marker — the rename is the atomic claim:
  *  exactly one concurrent caller wins it. The `.retired` file is kept,
  *  not deleted — the claim proves nothing about delivery, so the marker

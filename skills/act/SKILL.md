@@ -106,6 +106,11 @@ default store, so standard installs already have it).
   `bro act wait <PR> --merge` in the background is the default end-state;
   a watcher exit is a state to inspect, not silence — a `timed_out` exit
   means the PR is still open, so re-arm the watcher or hand off.
+  The stop gate enforces this: an armed session ending with an open,
+  unwatched current-branch PR is blocked once and pointed at the detached
+  `act wait` form — a running `bro drive --every` counts as coverage via
+  its per-PR heartbeat markers. `bro act status` prints `watch=` so the
+  coverage is visible before you stop.
 - **Report with links, not text.** Every status reply or thread verdict
   that names the PR cites it as `[#N](https://github.com/<owner>/<repo>/pull/N)`
   — `bro act status` prints the URL on its `pr=` line, carry it through.

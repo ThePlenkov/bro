@@ -52,7 +52,15 @@ import {
   type TaskRow,
   type TaskStore,
 } from '@broject/core'
-import { checkHistory, evaluateExitGate, fetchPrActState, type PrActState } from '@broject/act'
+import {
+  checkHistory,
+  evaluateExitGate,
+  fetchPrActState,
+  listWatches,
+  watchEnd,
+  watchHeartbeat,
+  type PrActState,
+} from '@broject/act'
 import {
   annotateThreads,
   judgeConfig,
@@ -469,6 +477,10 @@ interface Ctx {
   merge: boolean
   json: boolean
   connector?: string
+  /** --every interval in seconds — defined only in loop mode, which is
+   *  also what turns on watch heartbeats; a --once pass is a report,
+   *  not supervision. */
+  everySec?: number
   env: AgentConnectorEnv
   store: TaskStore
 }
@@ -960,19 +972,23 @@ function worktreeMap(root: string): Map<string, string> {
 }
 
 /** Open PR numbers across every candidate branch — a failed lookup on
- *  one branch is a warning, never a dead pass. */
-function openFleetPrs(ctx: Ctx): Set<number> {
+ *  one branch is a warning, never a dead pass. `complete` is false when
+ *  any lookup failed: the set then under-counts open PRs, so consumers
+ *  must not use it to conclude a PR is gone. */
+function openFleetPrs(ctx: Ctx): { prs: Set<number>; complete: boolean } {
   const prs = new Set<number>()
+  let complete = true
   for (const branch of candidateBranches(ctx.mainRoot)) {
     try {
       for (const pr of ctx.rev.prsForBranch(branch)) {
         prs.add(pr)
       }
     } catch (err) {
+      complete = false
       say(ctx, `warning: PR lookup failed for ${branch} — ${errText(err)}`)
     }
   }
-  return prs
+  return { prs, complete }
 }
 
 /** A settled PR drops out of prsForBranch entirely — without this sweep
@@ -1007,6 +1023,42 @@ async function sweepSettledFixers(ctx: Ctx, prs: Set<number>): Promise<void> {
   }
 }
 
+/** Heartbeat per supervised PR — deterministic name per drive pid, so
+ *  each pass rewrites the same marker and a dead drive leaves exactly
+ *  the stale-supervision flag the session-start hook reports. The TTL
+ *  covers the sweep interval so a live drive's marker can't age out
+ *  between passes. Also retires this drive's markers for PRs that left
+ *  the open set — a live marker on a merged PR would keep reporting
+ *  "watch active". Skipped on an incomplete enumeration: a failed
+ *  lookup must not delete the marker of a PR that is still open. */
+function emitWatchHeartbeats(ctx: Ctx, prs: Set<number>, complete: boolean): void {
+  for (const pr of prs) {
+    watchHeartbeat(
+      ctx.mainRoot,
+      {
+        pr,
+        link: ctx.rev.prLink(ctx.repo, pr),
+        merge: ctx.merge,
+        timeoutMin: Math.ceil(ctx.everySec! / 60) + 1,
+      },
+      'drive'
+    )
+  }
+  if (!complete) {
+    return
+  }
+  for (const l of listWatches(ctx.mainRoot)) {
+    if (
+      l.alive &&
+      l.watch.pid === process.pid &&
+      basename(l.file).endsWith(`-drive-${process.pid}.json`) &&
+      !prs.has(l.watch.pr)
+    ) {
+      watchEnd(l.file)
+    }
+  }
+}
+
 /** One pass: enumerate, probe every open PR, act per verdict. */
 async function driveOnce(ctx: Ctx): Promise<void> {
   const { byStep, degraded } = await collectAgents(ctx.mainRoot)
@@ -1020,7 +1072,10 @@ async function driveOnce(ctx: Ctx): Promise<void> {
     workDetails: hooks === null ? [] : liveWorkDetails(hooks),
     judgeBudget: { remaining: judgeConfig(ctx.mainRoot).judge.maxDecisionsPerRun },
   }
-  const prs = openFleetPrs(ctx)
+  const { prs, complete } = openFleetPrs(ctx)
+  if (ctx.everySec !== undefined) {
+    emitWatchHeartbeats(ctx, prs, complete)
+  }
   for (const pr of prs) {
     // a throwing probe on one PR must not kill the pass — in --every
     // mode an unhandled throw would end the driver entirely
@@ -1070,6 +1125,7 @@ export async function runDriveCommand(argv: string[]): Promise<void> {
     merge: args.merge && drive.merge === 'auto',
     json: args.json,
     connector: args.connector,
+    everySec: args.everySec,
     env: loadAgentEnv(main.path),
     store: taskStore(main.path),
   }

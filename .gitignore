@@ -13,3 +13,5 @@ packages/cli/.pack-stash.json
 packages/pack/skills/
 packages/pack/formulas/
 .kilo/
+bun.lock
+bun.lockb
