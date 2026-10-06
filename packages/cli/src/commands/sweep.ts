@@ -104,11 +104,11 @@ function burnSet(rows: TaskRow[], olderThanDays: number, now: number): TaskRow[]
 function syncedArtifactDir(root: string, dir: string, debtDir: string): string | null {
   // resolve() collapses `..`/`.`/symlink-shape segments before the
   // prefix check — `.agents/../x` must not slip through as `.agents/*`
-  const rel = relative(root, resolve(root, dir)).replace(/\\/g, '/').replace(/\/+$/, '')
+  const rel = relative(root, resolve(root, dir)).replaceAll('\\', '/').replace(/\/+$/, '')
   if (rel === '' || rel === '..' || rel.startsWith('../')) {
     return null
   }
-  const debt = debtDir.replace(/\\/g, '/').replace(/\/+$/, '')
+  const debt = debtDir.replaceAll('\\', '/').replace(/\/+$/, '')
   if (rel === '.agents' || rel.startsWith('.agents/')) {
     return '.agents'
   }
@@ -246,6 +246,70 @@ function cmdDistill(dir: string, dryRun: boolean): void {
   }
 }
 
+/** `bro sweep run --dry-run` — the plan, printed and nothing else. */
+function printRunDryRun(cfg: SweepCfg, gate: TaskRow[], burn: TaskRow[], flatten: boolean): void {
+  console.log(`sweep --dry-run (olderThanDays=${cfg.olderThanDays}):`)
+  console.log(`  gate:    ${gate.length === 0 ? 'PASS' : `REFUSE — ${gate.length} unharvested/undated bead(s)`}`)
+  console.log(`  archive: bd export → ${cfg.dir}/<ts>.jsonl + provenance dump`)
+  console.log(`  sync:    commit ${cfg.dir} to the data ref, verify present`)
+  console.log(`  prune:   bd prune --older-than ${cfg.olderThanDays}d — ${burn.length} bead(s)`)
+  console.log(`  flatten: ${flatten ? 'bd flatten' : 'skipped'}`)
+  for (const r of gate) {
+    console.log(`  gate\t${r.id}\t${r.title ?? ''}`)
+  }
+}
+
+/** Archive — issues JSONL + per-bead provenance dump (bd prune drops
+ *  provenance rows with the bead — verified behavior, so the dump
+ *  joins the archive). Returns the issues file for the sync check. */
+function archiveBurn(root: string, cfg: SweepCfg, burn: TaskRow[], ts: string): string {
+  const absDir = resolve(root, cfg.dir)
+  mkdirSync(absDir, { recursive: true })
+  const issuesFile = join(absDir, `${ts}.jsonl`)
+  const provFile = join(absDir, `${ts}.provenance.jsonl`)
+  bd(['export', '-o', issuesFile], root)
+  let provRows = 0
+  const provLines: string[] = []
+  for (const r of burn) {
+    try {
+      const rows = bdJson<unknown[]>(['provenance', 'log', r.id, '--json'], root)
+      for (const row of rows) {
+        provLines.push(JSON.stringify(row))
+        provRows++
+      }
+    } catch {
+      provLines.push(JSON.stringify({ issue: r.id, error: 'provenance dump failed' }))
+    }
+  }
+  writeFileSync(provFile, provLines.join('\n') + (provLines.length > 0 ? '\n' : ''))
+  console.log(`archive: ${cfg.dir}/${ts}.jsonl (+${provRows} provenance rows)`)
+  return issuesFile
+}
+
+/** The archive must reach the data ref before prune — verify against
+ *  the ref, not the remote (a push failure is transport, not loss). */
+function verifyArchiveSynced(
+  root: string,
+  cfgAll: ReturnType<typeof loadBroConfig>,
+  syncDir: string,
+  issuesFile: string,
+  ts: string
+): void {
+  const head = dataRefCommit(root, syncDir, `bro data: sweep ${ts}`, cfgAll.sync.ref)
+  if (head === null) {
+    fail('archive did not commit to the data ref — not pruning', 1)
+  }
+  const relFile = relative(root, issuesFile).replaceAll('\\', '/')
+  const inRef = gitTry(['-C', root, 'cat-file', '-e', `${cfgAll.sync.ref}:${relFile}`])
+  if (inRef.code !== 0) {
+    fail(`archive absent from ${cfgAll.sync.ref}:${relFile} — not pruning`, 1)
+  }
+  if (!dataRefPush(root, cfgAll.sync.remote, cfgAll.sync.ref)) {
+    // local ref holds the archive — the next sync carries it
+    console.error('warning: data-ref push failed — archive is local-only until the next sync')
+  }
+}
+
 /** `bro sweep run` — gate → archive → sync-verify → prune → flatten. */
 function cmdRun(dir: string, dryRun: boolean, force: boolean, flatten: boolean): void {
   const cfg = sweepCfg(dir)
@@ -255,15 +319,7 @@ function cmdRun(dir: string, dryRun: boolean, force: boolean, flatten: boolean):
   const burn = burnSet(rows, cfg.olderThanDays, now)
 
   if (dryRun) {
-    console.log(`sweep --dry-run (olderThanDays=${cfg.olderThanDays}):`)
-    console.log(`  gate:    ${gate.length === 0 ? 'PASS' : `REFUSE — ${gate.length} unharvested/undated bead(s)`}`)
-    console.log(`  archive: bd export → ${cfg.dir}/<ts>.jsonl + provenance dump`)
-    console.log(`  sync:    commit ${cfg.dir} to the data ref, verify present`)
-    console.log(`  prune:   bd prune --older-than ${cfg.olderThanDays}d — ${burn.length} bead(s)`)
-    console.log(`  flatten: ${flatten ? 'bd flatten' : 'skipped'}`)
-    for (const r of gate) {
-      console.log(`  gate\t${r.id}\t${r.title ?? ''}`)
-    }
+    printRunDryRun(cfg, gate, burn, flatten)
     return
   }
 
@@ -297,46 +353,9 @@ function cmdRun(dir: string, dryRun: boolean, force: boolean, flatten: boolean):
     )
   }
 
-  // archive — issues JSONL + per-bead provenance dump (bd prune drops
-  // provenance rows with the bead — verified behavior, so the dump
-  // joins the archive)
-  const absDir = resolve(root, cfg.dir)
-  mkdirSync(absDir, { recursive: true })
   const ts = new Date().toISOString().replace(/[:.]/g, '-')
-  const issuesFile = join(absDir, `${ts}.jsonl`)
-  const provFile = join(absDir, `${ts}.provenance.jsonl`)
-  bd(['export', '-o', issuesFile], root)
-  let provRows = 0
-  const provLines: string[] = []
-  for (const r of burn) {
-    try {
-      const rows = bdJson<unknown[]>(['provenance', 'log', r.id, '--json'], root)
-      for (const row of rows) {
-        provLines.push(JSON.stringify(row))
-        provRows++
-      }
-    } catch {
-      provLines.push(JSON.stringify({ issue: r.id, error: 'provenance dump failed' }))
-    }
-  }
-  writeFileSync(provFile, provLines.join('\n') + (provLines.length > 0 ? '\n' : ''))
-  console.log(`archive: ${cfg.dir}/${ts}.jsonl (+${provRows} provenance rows)`)
-
-  // sync-verify — the archive must reach the data ref before prune
-  const head = dataRefCommit(root, syncDir, `bro data: sweep ${ts}`, cfgAll.sync.ref)
-  if (head === null) {
-    fail('archive did not commit to the data ref — not pruning', 1)
-  }
-  const relFile = relative(root, issuesFile).replace(/\\/g, '/')
-  const inRef = gitTry(['-C', root, 'cat-file', '-e', `${cfgAll.sync.ref}:${relFile}`])
-  if (inRef.code !== 0) {
-    fail(`archive absent from ${cfgAll.sync.ref}:${relFile} — not pruning`, 1)
-  }
-  if (!dataRefPush(root, cfgAll.sync.remote, cfgAll.sync.ref)) {
-    // local ref holds the archive — push is transport, the next sync
-    // carries it (spec: verify reach is against the ref, not the remote)
-    console.error('warning: data-ref push failed — archive is local-only until the next sync')
-  }
+  const issuesFile = archiveBurn(root, cfg, burn, ts)
+  verifyArchiveSynced(root, cfgAll, syncDir, issuesFile, ts)
 
   // prune — bd's own protections apply unchanged (pinned, open,
   // ephemeral, cited-by-open all skip)
