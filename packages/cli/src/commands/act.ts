@@ -7,6 +7,7 @@
  *   resolve --thread ID [--comment TEXT] [--unresolve]
  *   reply   --thread ID --comment TEXT | --file TSV
  */
+import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import {
   ensureAuth,
@@ -28,6 +29,7 @@ import {
   evaluateExitGate,
   fetchPrActState,
   listWatches,
+  rearmWatches,
   releaseMergeSlot,
   waitForGate,
   type ActPlan,
@@ -54,6 +56,9 @@ Commands:
   merge [PR] [--squash|--merge|--rebase] [--admin] [--cleanup]
                                     Merge only if the exit gate is green;
                                     --cleanup also retires the worktree + local branch
+  rearm [--dry-run] [--json]        Resurrect dead watch markers: for each PR whose
+                                    watcher died (host reboot, turn teardown) a fresh
+                                    detached act wait goes up with the recorded mode
   resolve --thread ID [--comment T] Resolve a thread — a fix resolves silently
                                     (the push is the verdict); --comment is for
                                     reject/defer reasons
@@ -194,6 +199,7 @@ async function cmdWait(argv: string[]): Promise<void> {
         pr: t.pr,
         link: rev.prLink(t.repo, t.pr),
         merge: argv.includes('--merge'),
+        cleanup: argv.includes('--cleanup'),
         timeoutMin: timeout,
       },
       onPoll: (s, g) =>
@@ -230,6 +236,80 @@ async function cmdWait(argv: string[]): Promise<void> {
     return
   }
   await mergeIfAsked(argv, t.pr)
+}
+
+/** Detached `act wait` resurrection — own process group, parent's
+ *  stdio ignored, unref'd: the same nohup-equivalent the watcher needs
+ *  to survive the session that re-armed it (bro-tafj). `argv[1]` is the
+ *  running cli entry, so the child re-runs this same binary. */
+export function respawnWatcher(
+  dir: string,
+  plan: { pr: number; merge: boolean; cleanup: boolean; timeoutMin: number }
+): number | undefined {
+  const entry = process.argv[1]
+  if (entry === undefined) {
+    return undefined
+  }
+  const args = [entry, 'act', 'wait', String(plan.pr), '--timeout', String(plan.timeoutMin)]
+  if (plan.merge) {
+    args.push('--merge')
+    // --cleanup only has meaning behind --merge — a wait armed with
+    // cleanup alone exits on the post-wait dispatch, so a merge:false
+    // marker's cleanup bit (user error at arm time) isn't replayed
+    if (plan.cleanup) {
+      args.push('--cleanup')
+    }
+  }
+  const child = spawn(process.execPath, args, {
+    cwd: dir,
+    detached: true,
+    stdio: 'ignore',
+  })
+  child.unref()
+  return child.pid
+}
+
+/** `bro act rearm` — dead watch markers mean their watcher died with
+ *  the promise unkept (bro-tafj). Per still-open PR a detached wait
+ *  goes back up with the recorded mode; settled PRs' markers sweep.
+ *  --dry-run prints the plan without spawning or touching markers. */
+async function cmdRearm(argv: string[]): Promise<void> {
+  const dry = argv.includes('--dry-run')
+  const dir = process.cwd()
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  const repo = await (rev.resolveRepoAsync === undefined
+    ? Promise.resolve(rev.resolveRepo([]))
+    : rev.resolveRepoAsync([]))
+  const res = await rearmWatches({
+    dir,
+    isOpen: async (pr) => {
+      const meta =
+        rev.prMetaAsync === undefined
+          ? rev.prMeta({ repo, pr })
+          : await rev.prMetaAsync({ repo, pr })
+      return meta.state === 'OPEN'
+    },
+    respawn: dry ? undefined : (plan) => respawnWatcher(dir, plan),
+  })
+  if (argv.includes('--json')) {
+    console.log(JSON.stringify({ dryRun: dry, ...res }, null, 2))
+    return
+  }
+  for (const r of res.rearmed) {
+    console.log(
+      `rearm: ${rev.prLink(repo, r.pr)} — ` +
+        (dry ? 'would respawn a watcher' : `watcher up (pid ${r.pid})`)
+    )
+  }
+  for (const pr of res.settled) {
+    console.log(`rearm: ${rev.prLink(repo, pr)} settled — marker swept`)
+  }
+  for (const k of res.kept) {
+    console.error(`rearm: ${rev.prLink(repo, k.pr)} kept — ${k.reason}`)
+  }
+  if (res.rearmed.length === 0 && res.settled.length === 0 && res.kept.length === 0) {
+    console.log('rearm: no dead watches')
+  }
 }
 
 /** Post-wait merge dispatch: `--merge` lands the PR (with `--cleanup`
@@ -722,6 +802,7 @@ const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
   status: cmdStatus,
   wait: cmdWait,
   merge: cmdMerge,
+  rearm: cmdRearm,
   threads: cmdThreads,
   resolve: cmdResolve,
   reply: cmdReply,

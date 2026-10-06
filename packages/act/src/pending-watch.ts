@@ -33,6 +33,9 @@ export interface PendingWatch {
    *  is a reused pid, not the watch that recorded this marker. */
   pidStart?: string
   merge: boolean
+  /** The original wait's --cleanup — rearm replays it so a resurrected
+   *  watch keeps the whole promise, not just the poll. */
+  cleanup?: boolean
   startedAt: number
   timeoutMin: number
 }
@@ -252,6 +255,7 @@ function readMarker(file: string): PendingWatch | null {
       typeof w.pid === 'number' &&
       (w.pidStart === undefined || typeof w.pidStart === 'string') &&
       typeof w.merge === 'boolean' &&
+      (w.cleanup === undefined || typeof w.cleanup === 'boolean') &&
       // an Infinity/NaN startedAt poisons the TTL check — Date.now() -
       // Infinity is never > ttl, so the marker would never be pruned
       typeof w.startedAt === 'number' &&
@@ -330,5 +334,101 @@ export function listWatches(dir: string): ListedWatch[] {
   const out = listWatchesIn(wd)
   const live = out.filter((l) => l.alive)
   return out.filter((l) => l.alive || !coveredBy(live, l.watch))
+}
+
+/** Dead watches deduped to one rearm plan per PR — the strongest
+ *  recorded mode wins (a dead merge:true marker re-arms as --merge even
+ *  when a watch-only marker died alongside). The caller checks the PR
+ *  is still open before respawning; `files` are this PR's dead markers
+ *  to drop once the replacement watch is up. */
+export function deadWatchPlan(
+  dir: string
+): Array<{ pr: number; merge: boolean; cleanup: boolean; timeoutMin: number; files: string[] }> {
+  const byPr = new Map<
+    number,
+    { merge: boolean; cleanup: boolean; timeoutMin: number; files: string[] }
+  >()
+  for (const l of listWatches(dir)) {
+    if (l.alive) {
+      continue
+    }
+    const cur = byPr.get(l.watch.pr)
+    if (cur === undefined) {
+      byPr.set(l.watch.pr, {
+        merge: l.watch.merge,
+        cleanup: l.watch.cleanup === true,
+        timeoutMin: l.watch.timeoutMin,
+        files: [l.file],
+      })
+      continue
+    }
+    cur.files.push(l.file)
+    cur.merge = cur.merge || l.watch.merge
+    cur.cleanup = cur.cleanup || l.watch.cleanup === true
+    cur.timeoutMin = Math.max(cur.timeoutMin, l.watch.timeoutMin)
+  }
+  return [...byPr.entries()].map(([pr, p]) => ({ pr, ...p }))
+}
+
+/** Resurrect dead watchers: host reboot / turn teardown kills the
+ *  polling process but the promise — and a still-open PR — stays. Per
+ *  open PR `respawn` puts a fresh `act wait` up (its marker covers the
+ *  dead one); a settled PR's markers just get swept — reality already
+ *  kept the promise. A host probe that can't answer keeps the marker:
+ *  dropping the flag on an unverified PR is exactly the silent loss the
+ *  marker exists to prevent. */
+export async function rearmWatches(opts: {
+  dir: string
+  isOpen: (pr: number) => Promise<boolean>
+  /** Absent → plan-only dry run: nothing respawns, no marker moves,
+   *  open PRs report as `rearmed` with pid 0. */
+  respawn?: (plan: {
+    pr: number
+    merge: boolean
+    cleanup: boolean
+    timeoutMin: number
+  }) => number | undefined
+}): Promise<{
+  rearmed: Array<{ pr: number; pid: number }>
+  settled: number[]
+  kept: Array<{ pr: number; reason: string }>
+}> {
+  const rearmed: Array<{ pr: number; pid: number }> = []
+  const settled: number[] = []
+  const kept: Array<{ pr: number; reason: string }> = []
+  for (const plan of deadWatchPlan(opts.dir)) {
+    let open: boolean
+    try {
+      open = await opts.isOpen(plan.pr)
+    } catch (err) {
+      kept.push({ pr: plan.pr, reason: err instanceof Error ? err.message : String(err) })
+      continue
+    }
+    if (!open) {
+      settled.push(plan.pr)
+      // a dry run reports but never mutates — markers move only on a
+      // real sweep
+      if (opts.respawn !== undefined) {
+        for (const f of plan.files) {
+          pruneFile(f)
+        }
+      }
+      continue
+    }
+    if (opts.respawn === undefined) {
+      rearmed.push({ pr: plan.pr, pid: 0 })
+      continue
+    }
+    const pid = opts.respawn(plan)
+    if (pid === undefined) {
+      kept.push({ pr: plan.pr, reason: 'respawn failed' })
+      continue
+    }
+    rearmed.push({ pr: plan.pr, pid })
+    for (const f of plan.files) {
+      pruneFile(f)
+    }
+  }
+  return { rearmed, settled, kept }
 }
 

@@ -142,7 +142,7 @@ function watchLines(dir: string): string[] {
       const mode = watch.merge ? ' (was set to merge on green)' : ''
       out.push(
         `stale act watch on ${watch.link}${mode} — the watching session died; ` +
-          `check \`bro act status --pr ${watch.pr}\``
+          `\`bro act rearm\` resurrects it, \`bro act status --pr ${watch.pr}\` inspects`
       )
     }
     return out
