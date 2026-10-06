@@ -3,6 +3,7 @@
  * git, their config, their credentials.
  */
 import { spawnSync } from 'node:child_process'
+import { realpathSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 /** `git -C` must select the repo on argv alone — an inherited
@@ -66,10 +67,20 @@ export function gitCommonDir(dir: string): string | null {
   }
   // --path-format arrived in git 2.31: on older git the option itself
   // fails, which must not read as "not a repository". The plain output
-  // is relative to `dir`, so resolve() absolutizes it the same way.
+  // is relative to `dir`, so resolve() absolutizes it the same way —
+  // but keeps a symlinked dir's alias, and callers hash the result
+  // (busSocketPath) — canonicalize so one repo yields one socket.
   const fallback = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'])
   const common = fallback.code === 0 ? fallback.out.trim() : ''
-  return common === '' ? null : resolve(dir, common)
+  if (common === '') {
+    return null
+  }
+  const abs = resolve(dir, common)
+  try {
+    return realpathSync(abs)
+  } catch {
+    return abs
+  }
 }
 
 /** The drift comparison ref — landed spec vs landed code, so a feature

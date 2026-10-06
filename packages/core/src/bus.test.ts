@@ -717,11 +717,16 @@ describe('bus: a broker that goes away ends the stream', () => {
     try {
       let sub: { close(): void } | undefined
       let closes = 0
-      const closed = new Promise<void>((resolve) => {
+      const closed = new Promise<void>((resolve, reject) => {
+        // bounded wait — without onClose the promise never resolves
+        // and a hanging test must fail, not stall the suite
+        const t = setTimeout(() => reject(new Error('onClose never fired')), 5_000)
+        t.unref()
         void busSubscribe(socketPath, {}, {
           onEvent: () => undefined,
           onClose: () => {
             closes += 1
+            clearTimeout(t)
             resolve()
           },
         }).then((s) => {
@@ -736,6 +741,47 @@ describe('bus: a broker that goes away ends the stream', () => {
       assert.equal(closes, 1)
       sub?.close()
     } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a rejected connect never fires onClose — there was no stream to end', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-bus-'))
+    const socketPath = join(dir, 'bus.sock') // nothing listening
+    try {
+      let closes = 0
+      await assert.rejects(
+        busSubscribe(socketPath, {}, {
+          onEvent: () => undefined,
+          onClose: () => {
+            closes += 1
+          },
+        })
+      )
+      await settle() // let a stray 'close' event land
+      assert.equal(closes, 0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a local close() never fires onClose — the caller chose to end it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-bus-'))
+    const socketPath = join(dir, 'bus.sock')
+    const broker = await startBusBrokerAt(socketPath)
+    try {
+      let closes = 0
+      const sub = await busSubscribe(socketPath, {}, {
+        onEvent: () => undefined,
+        onClose: () => {
+          closes += 1
+        },
+      })
+      sub.close()
+      await settle() // let the 'close' event land
+      assert.equal(closes, 0)
+    } finally {
+      await broker.close()
       rmSync(dir, { recursive: true, force: true })
     }
   })
