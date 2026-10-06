@@ -993,9 +993,90 @@ function enforceFleetCap(
 /** The shared spawn prologue every built-in backend runs under the
  *  registry lock — dedup across the two state planes (registry liveness
  *  + beads claim), the claim/rebind, and the shared-dir artifacts
- *  (prompt/log/exit). Returns the paths the backend tail needs.
- *
- *  Dedup correlates both planes: a claim alone is not a conflict — a
+ *  (prompt/log/exit). Returns the paths the backend tail needs. */
+/** Why a dead entry still refuses a respawn — the recorded cause. */
+function blockedRespawnDetail(existing: AgentRegistryEntry): string {
+  if (existing.cause !== 'rate_limited') {
+    return 'quota exhausted'
+  }
+  const reset = typeof existing.resetAt === 'string' ? existing.resetAt : undefined
+  return reset !== undefined
+    ? `rate_limited until ${reset}`
+    : 'rate_limited — provider reported no reset'
+}
+
+/** Guard the registry entry the spawn would reuse or replace: one
+ *  backend never adopts another's entry, a live agent is never
+ *  double-spawned, an exhausted-budget death is never respawned into. */
+function guardExistingEntry(
+  dir: string,
+  home: string,
+  backend: string,
+  spec: SpawnSpec,
+  existing: AgentRegistryEntry | undefined,
+  opts: {
+    isLive: (existing: AgentRegistryEntry) => boolean
+    liveDetail?: (existing: AgentRegistryEntry) => string
+  }
+): void {
+  if (existing === undefined) {
+    return
+  }
+  if (existing.backend !== backend) {
+    throw new SpawnError(
+      `${spec.molStep} is registered to backend "${existing.backend}" — respawn belongs to it`
+    )
+  }
+  if (opts.isLive(existing)) {
+    const detail = opts.liveDetail?.(existing) ?? `pid ${String(existing.pid)}`
+    throw new SpawnError(
+      `${spec.molStep} already has a live agent (${existing.agentId}, ${detail})`
+    )
+  }
+  // a recorded death can carry a respawn-blocking cause — classify now
+  // (backends whose isLive doesn't walk the death ladder never saw it)
+  // and refuse respawn into the same exhausted budget (bro-7xgk.2)
+  ensureExitCause(dir, home, spec.molStep, existing)
+  if (agentEntryBlocked(existing)) {
+    throw new SpawnError(
+      `respawn of ${spec.molStep} refused — ${blockedRespawnDetail(existing)}; \`bro agents down ${spec.molStep}\` clears the block`
+    )
+  }
+}
+
+/** Guard the beads claim — a spawn must own (or create) the claim it
+ *  will pin, never steal a live worker's or a human's step. Returns the
+ *  claim state the write phase needs for claim-vs-rebind. */
+function guardClaim(
+  spec: SpawnSpec,
+  hasEntry: boolean,
+  claimAs: string | undefined
+): { claimed: boolean; actor: string | undefined } {
+  const step = probeStep(spec.beadsDir, spec.molStep)
+  if (step?.status !== 'in_progress') {
+    return { claimed: false, actor: undefined }
+  }
+  if (!hasEntry) {
+    // claimed with no registry entry — an interactive session or a
+    // foreign backend owns it; spawning would double-claim
+    throw new SpawnError(
+      `${spec.molStep} is claimed outside the agent registry (assignee ${step.assignee ?? '?'})`
+    )
+  }
+  // a dead entry doesn't entitle us to whatever claim sits on the step
+  // now — if another actor picked it up meanwhile, rebinding would steal
+  // a live worker's (or a human's) step. The actor resolves in the
+  // pinned store's context — the same context the claim was written under.
+  const actor = bdActor(spec.beadsDir)
+  if (step.assignee !== actor && step.assignee !== claimAs) {
+    throw new SpawnError(
+      `${spec.molStep} is claimed by ${step.assignee ?? '?'} — rebind only takes our own claim`
+    )
+  }
+  return { claimed: true, actor }
+}
+
+/* Dedup correlates both planes: a claim alone is not a conflict — a
  *  crashed worker's stale in_progress must not block respawn — and a
  *  live agent alone is not spawnable-over either. The registry entry
  *  goes in FIRST: every later failure (claim refused, spawn error)
@@ -1027,57 +1108,8 @@ function prepareSpawn(
 ): { agentId: string; promptFile: string; log: string; exitFile: string } {
   const registry = readAgentRegistry(dir)
   const existing = registry[spec.molStep]
-  // a registry entry belongs to the backend that wrote it — the respawn
-  // contract (same agentId, same claim rebind) is per-runtime; one
-  // backend must not adopt another's entry
-  if (existing !== undefined && existing.backend !== backend) {
-    throw new SpawnError(
-      `${spec.molStep} is registered to backend "${existing.backend}" — respawn belongs to it`
-    )
-  }
-  if (existing !== undefined && opts.isLive(existing)) {
-    const detail = opts.liveDetail?.(existing) ?? `pid ${String(existing.pid)}`
-    throw new SpawnError(
-      `${spec.molStep} already has a live agent (${existing.agentId}, ${detail})`
-    )
-  }
-  if (existing !== undefined) {
-    // a recorded death can carry a respawn-blocking cause — classify now
-    // (backends whose isLive doesn't walk the death ladder never saw it)
-    // and refuse respawn into the same exhausted budget (bro-7xgk.2)
-    ensureExitCause(dir, home, spec.molStep, existing)
-    if (agentEntryBlocked(existing)) {
-      const reset = typeof existing.resetAt === 'string' ? existing.resetAt : undefined
-      const detail =
-        existing.cause === 'rate_limited'
-          ? reset !== undefined
-            ? `rate_limited until ${reset}`
-            : 'rate_limited — provider reported no reset'
-          : 'quota exhausted'
-      throw new SpawnError(
-        `respawn of ${spec.molStep} refused — ${detail}; \`bro agents down ${spec.molStep}\` clears the block`
-      )
-    }
-  }
-  const step = probeStep(spec.beadsDir, spec.molStep)
-  const claimed = step?.status === 'in_progress'
-  if (claimed && existing === undefined) {
-    // claimed with no registry entry — an interactive session or a
-    // foreign backend owns it; spawning would double-claim
-    throw new SpawnError(
-      `${spec.molStep} is claimed outside the agent registry (assignee ${step?.assignee ?? '?'})`
-    )
-  }
-  // a dead entry doesn't entitle us to whatever claim sits on the step
-  // now — if another actor picked it up meanwhile, rebinding would steal
-  // a live worker's (or a human's) step. The actor resolves in the
-  // pinned store's context — the same context the claim was written under.
-  const actor = claimed ? bdActor(spec.beadsDir) : undefined
-  if (claimed && step?.assignee !== actor && step?.assignee !== opts.claimAs) {
-    throw new SpawnError(
-      `${spec.molStep} is claimed by ${step?.assignee ?? '?'} — rebind only takes our own claim`
-    )
-  }
+  guardExistingEntry(dir, home, backend, spec, existing, opts)
+  const { claimed, actor } = guardClaim(spec, existing !== undefined, opts.claimAs)
   // fleet admission — before the registry write + claim land, so a
   // refusal leaves no half-spawned state
   enforceFleetCap(dir, home, registry, spec, opts.cap)

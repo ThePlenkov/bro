@@ -40,73 +40,99 @@ export interface ExitClassification {
   resetAt?: string
 }
 
-const CAUSE_PATTERNS: [AgentCause, RegExp][] = [
+const CAUSE_PATTERNS: [AgentCause, RegExp[]][] = [
   // no trailing \b on the rate-limit stem — identifier forms
   // (`rate_limit_exceeded`, `RateLimitError`) continue with word chars
   [
     'rate_limited',
-    /\brate[_ -]?limits?|\b429\b|too many requests|requests?\s*(?:per|[-/])\s*(?:window|second|minute|hour|day)\b/i,
+    [
+      /\brate[_ -]?limits?/i,
+      /\b429\b/,
+      /too many requests/i,
+      /requests?\s*(?:per|[-/])\s*(?:window|second|minute|hour|day)\b/i,
+    ],
   ],
   [
     'quota',
-    /\bquota\b|insufficient[_ ]?(?:credits?|funds?|balance)|\bbilling\b|out of (?:credits?|funds?)|spend(?:ing)? limit|(?:monthly|daily|usage) limit (?:reached|exceeded)/i,
+    [
+      /\bquota\b/i,
+      /insufficient[_ ]?(?:credits?|funds?|balance)/i,
+      /\bbilling\b/i,
+      /out of (?:credits?|funds?)/i,
+      /spend(?:ing)? limit/i,
+      /(?:monthly|daily|usage) limit (?:reached|exceeded)/i,
+    ],
   ],
   [
     'auth',
-    /\b401\b|\bunauthori[sz]ed\b|invalid (?:api[_ -]?key|token|credentials?)|authentication (?:failed|required|error)|not (?:authenticated|logged in|signed in)|(?:api[_ -]?key|token|credentials?) (?:expired|revoked|invalid)|expired (?:api[_ -]?key|token|credentials?)/i,
+    [
+      /\b401\b/,
+      /\bunauthori[sz]ed\b/i,
+      /invalid (?:api[_ -]?key|token|credentials?)/i,
+      /authentication (?:failed|required|error)/i,
+      /not (?:authenticated|logged in|signed in)/i,
+      /(?:api[_ -]?key|token|credentials?) (?:expired|revoked|invalid)/i,
+      /expired (?:api[_ -]?key|token|credentials?)/i,
+    ],
   ],
 ]
 
-/** Provider reset extraction — relative durations (`retry-after: 120`,
- *  `try again in 5 minutes`, `resets in 1h`), keyword-anchored ISO
- *  stamps (`resets at 2026-10-05T23:00:00Z`), and epoch-seconds
- *  rate-limit reset headers. */
-function parseResetAt(text: string, now: number): string | undefined {
+const UNIT_MS: Record<string, number> = { h: 3_600_000, m: 60_000, s: 1_000 }
+
+const toIso = (ms: number): string | undefined => {
+  // an absurd but finite delay overflows Date — toISOString() throws
+  // RangeError, so validate before formatting and fall through
+  const d = new Date(ms)
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString()
+}
+
+/** `retry-after: 120`, `try again in 5 minutes`, `resets in 1h` */
+function relReset(text: string, now: number): string | undefined {
   const rel =
     /retry[- ]?after\s*[:=]\s*(\d+)\b/i.exec(text) ??
     /(?:try again|retry|resets?|available|ready) in (\d+)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/i.exec(
       text
     )
-  if (rel !== null) {
-    const n = Number(rel[1])
-    if (Number.isFinite(n) && n >= 0) {
-      const unit = rel[2]?.toLowerCase() ?? 's'
-      const ms = n * (unit.startsWith('h') ? 3_600_000 : unit.startsWith('m') ? 60_000 : 1_000)
-      // an absurd but finite delay overflows Date — toISOString() throws
-      // RangeError, so validate before formatting and fall through
-      const reset = new Date(now + ms)
-      if (!Number.isNaN(reset.getTime())) {
-        return reset.toISOString()
-      }
-    }
+  if (rel === null) {
+    return undefined
   }
-  // Retry-After's HTTP-date form — the numeric matcher above skips it
-  const httpDate =
-    /retry[- ]?after\s*[:=]\s*([A-Za-z]{3},\s*\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}:\d{2}\s*GMT)/i.exec(
-      text
-    )
-  if (httpDate !== null) {
-    const t = Date.parse(httpDate[1]!)
-    if (!Number.isNaN(t)) {
-      return new Date(t).toISOString()
-    }
+  const n = Number(rel[1])
+  if (!Number.isFinite(n) || n < 0) {
+    return undefined
   }
-  const iso =
+  return toIso(now + n * (UNIT_MS[(rel[2]?.toLowerCase() ?? 's')[0]!] ?? 1_000))
+}
+
+/** Retry-After's HTTP-date form — the numeric matcher above skips it */
+function httpDateReset(text: string): string | undefined {
+  const m = /retry[- ]?after\s*[:=]\s*([a-z]{3},\s*\d{1,2}\s+[a-z]{3}\s+\d{4}\s+\d{2}:\d{2}:\d{2}\s*GMT)/i.exec(
+    text
+  )
+  return m === null ? undefined : toIso(Date.parse(m[1]!))
+}
+
+/** Keyword-anchored ISO stamps (`resets at 2026-10-05T23:00:00Z`) */
+function isoReset(text: string): string | undefined {
+  const m =
     /(?:resets?|resetting|try again|retry|until|available)\b[^\d\n]{0,32}?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)/i.exec(
       text
     )
-  if (iso !== null) {
-    const raw = iso[1]!
-    const t = Date.parse(/Z$|[+-]\d{2}:?\d{2}$/.test(raw) ? raw : `${raw}Z`)
-    if (!Number.isNaN(t)) {
-      return new Date(t).toISOString()
-    }
+  if (m === null) {
+    return undefined
   }
-  const epoch = /(?:x-ratelimit-reset|rate[_ -]?limit[_ -]?reset)\s*[:=]\s*(\d{10})\b/i.exec(text)
-  if (epoch !== null) {
-    return new Date(Number(epoch[1]) * 1000).toISOString()
-  }
-  return undefined
+  const raw = m[1]!
+  return toIso(Date.parse(/Z$|[+-]\d{2}:?\d{2}$/.test(raw) ? raw : `${raw}Z`))
+}
+
+/** Epoch-seconds rate-limit reset headers */
+function epochReset(text: string): string | undefined {
+  const m = /(?:x-ratelimit-reset|rate[_ -]?limit[_ -]?reset)\s*[:=]\s*(\d{10})\b/i.exec(text)
+  return m === null ? undefined : toIso(Number(m[1]) * 1000)
+}
+
+/** Provider reset extraction across the known header/prose forms. */
+function parseResetAt(text: string, now: number): string | undefined {
+  return relReset(text, now) ?? httpDateReset(text) ?? isoReset(text) ?? epochReset(text)
 }
 
 /** Classify a recorded exit from the log tail — the exit code only
@@ -121,8 +147,8 @@ export function classifyExitCause(
   if (exitStatus === 0) {
     return { cause: 'ok' }
   }
-  for (const [cause, re] of CAUSE_PATTERNS) {
-    if (re.test(logTail)) {
+  for (const [cause, patterns] of CAUSE_PATTERNS) {
+    if (patterns.some((re) => re.test(logTail))) {
       const resetAt =
         cause === 'rate_limited' || cause === 'quota'
           ? parseResetAt(logTail, now)
