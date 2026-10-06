@@ -155,6 +155,28 @@ describe('providerJudge', () => {
       )
     }))
 
+  test('a prose probabilities map outside the asked options drops to {}', () =>
+    withEnv('ORCA_TEST_KEY', 'sk-test', async () => {
+      const { fetch } = fakeFetch({
+        status: 200,
+        body: chatBody({
+          route: { type: 'choice', choice: 'b', probabilities: { other: 1 } },
+        }),
+      })
+      const entry: ProviderEntry = {
+        type: 'api',
+        baseUrl: 'https://orca.example/v1',
+        apiKeyEnv: 'ORCA_TEST_KEY',
+        models: { ['qwen3-coder']: 'openai-compat' },
+      }
+      const res = await providerJudge('orca', entry, CFG, { fetch }).decide('s', QUESTIONS)
+      const route = res.answers.route
+      assert.ok(route?.type === 'choice')
+      // {other:1} must not survive as the answer's probs — its max
+      // would read as fabricated confidence on an un-asked option
+      assert.deepEqual(route.probabilities, {})
+    }))
+
   test('a cli entry is a prose call — the command runs the prompt file, stdout parses', async () => {
     const entry: ProviderEntry = {
       type: 'cli',

@@ -178,11 +178,17 @@ export async function annotateThreads(
       continue
     }
     const subject = threadSubject(opts.pr, thread.id, thread.comment, opts.headSha)
-    const cached = findVerdict(rows, {
-      threadId: thread.id,
-      commentSha: subject.commentSha,
-      headSha: opts.headSha,
-    })
+    // an unresolved headSha loosens the dedup key — a cached verdict
+    // could be from a different head entirely, so a moved head would be
+    // served the old verdict; no headSha → no reuse, judge fresh
+    const cached =
+      opts.headSha === undefined
+        ? undefined
+        : findVerdict(rows, {
+            threadId: thread.id,
+            commentSha: subject.commentSha,
+            headSha: opts.headSha,
+          })
     if (cached !== undefined) {
       annotations.set(thread.id, formatAnnotation(cached))
     } else {
@@ -209,7 +215,27 @@ export async function annotateThreads(
       decided += 1 // an attempt consumes budget — it paid its timeout either way
       let res
       try {
-        res = await opts.judge.decide(threadState(item.thread), ACT_THREAD_QUESTIONS)
+        const call = opts.judge.decide(threadState(item.thread), ACT_THREAD_QUESTIONS)
+        // bound the in-flight call by the REMAINING listing deadline —
+        // judge.timeoutMs can exceed it, so a decide started at
+        // deadline-ε would otherwise run past the listing's ceiling.
+        // The raced-off promise keeps running to completion but is
+        // muted — its late rejection must never surface as unhandled.
+        call.catch(() => {})
+        if (deadline === undefined) {
+          res = await call
+        } else {
+          const left = deadline - Date.now()
+          if (left <= 0) {
+            continue
+          }
+          res = await Promise.race([
+            call,
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('listing deadline')), left).unref()
+            ),
+          ])
+        }
       } catch (err) {
         // a dead backend ends the loop — re-asking every thread burns
         // one timeout each and buys nothing (fail-open per contract).

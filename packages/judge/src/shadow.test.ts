@@ -187,6 +187,47 @@ describe('annotateThreads', () => {
     })
   })
 
+  test('an unknown headSha never serves a journal verdict — it may be a different head', async () => {
+    await withRepo(async (dir) => {
+      const judge = fakeJudge()
+      const threads = [thread('T1')]
+      await annotateThreads(threads, { dir, pr: 7, headSha: 'h1', judge })
+      const res = await annotateThreads(threads, { dir, pr: 7, judge })
+      assert.equal(judge.calls, 2)
+      assert.equal(res.decided, 1)
+    })
+  })
+
+  test('the listing deadline bounds an in-flight decide() — a slow backend does not stall the sweep', async () => {
+    await withRepo(async (dir) => {
+      const started = Date.now()
+      const judge: JudgeFacade = {
+        decide: () =>
+          new Promise((resolve) =>
+            setTimeout(
+              () =>
+                resolve({
+                  answers: ANSWERS,
+                  model: 'jev-1.13.0',
+                  latencyMs: 500,
+                  lowConfidence: [],
+                }),
+              500
+            )
+          ),
+      }
+      const res = await annotateThreads([thread('T1'), thread('T2')], {
+        dir,
+        pr: 7,
+        judge,
+        deadlineMs: 50,
+      })
+      assert.ok(Date.now() - started < 400)
+      assert.equal(res.annotations.size, 0)
+      assert.equal(res.unjudged, 2)
+    })
+  })
+
   test('budget bounds fresh decide() attempts; the rest are unjudged', async () => {
     await withRepo(async (dir) => {
       const judge = fakeJudge()

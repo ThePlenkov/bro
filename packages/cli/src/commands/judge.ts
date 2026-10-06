@@ -246,20 +246,29 @@ async function decide(argv: string[]): Promise<void> {
   judgeAuth(dir, connector, loadBroConfig().connectors)
   const state = loadState(stateRef)
   const questions = loadQuestions(questionsRef)
+  let res: DecideResult
   try {
-    const res = await judgeFacade(dir, { connector }).decide(state, questions)
-    journalDecide(dir, questions, res)
-    if (asJson) {
-      console.log(JSON.stringify(res, null, 2))
-    } else {
-      render(res)
-    }
+    res = await judgeFacade(dir, { connector }).decide(state, questions)
   } catch (err) {
     // a wedged judge is "no verdict" — the message carries the
     // remediation (missing key, out of credits, timed out)
     const msg = err instanceof Error ? err.message : String(err)
     console.error(`error: ${err instanceof JudgeUnavailable ? 'judge unavailable — ' : ''}${msg}`)
     process.exit(1)
+  }
+  // a journal append that throws is not a failed decide — the verdict
+  // still renders; the shadow-log gap gets named instead of eaten
+  try {
+    journalDecide(dir, questions, res)
+  } catch (err) {
+    console.error(
+      `warn: verdict journal append failed — ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+  if (asJson) {
+    console.log(JSON.stringify(res, null, 2))
+  } else {
+    render(res)
   }
 }
 

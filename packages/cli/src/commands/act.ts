@@ -514,10 +514,10 @@ async function cmdThreads(argv: string[]): Promise<void> {
   // annotation only, never applied; every failure mode degrades to
   // "no annotation" (a judge that can stall `act threads` gets turned
   // off, per the spec's fail-open rule)
-  // judging runs beside the listing, not in front of it — TSV rows
-  // print immediately; annotations land on stderr once the batch
-  // resolves (a full fresh-decide budget must never blank the listing)
-  const pendingNotes = shadowNotes(rev, t, threads).catch(() => undefined)
+  // judging runs behind the listing, not beside it — TSV rows print
+  // first; shadowNotes can open with a slow prMeta call, and starting
+  // it before the row loop would still stall the listing. Annotations
+  // land on stderr once the batch resolves.
   let open = 0
   for (const thread of threads) {
     if (thread.resolved) {
@@ -531,7 +531,7 @@ async function cmdThreads(argv: string[]): Promise<void> {
     const body = (c?.body ?? '').replace(/[\n\t]/g, ' ').slice(0, 120)
     console.log(`${thread.id}\t${author}\t${path}:${line}\t${body}`)
   }
-  const notes = await pendingNotes
+  const notes = await shadowNotes(rev, t, threads).catch(() => undefined)
   for (const thread of threads) {
     const note = notes?.get(thread.id)
     if (note !== undefined) {
@@ -563,7 +563,13 @@ async function shadowNotes(
     // re-judges the thread; an unfetchable head just loosens the key
     let headSha: string | undefined
     try {
-      headSha = rev.prMeta(t).headSha
+      // async twin when the facade has one — a sync CLI call inside an
+      // async fn still freezes the loop this listing shares
+      const meta =
+        rev.prMetaAsync !== undefined
+          ? await rev.prMetaAsync(t)
+          : rev.prMeta(t)
+      headSha = meta.headSha
     } catch {
       // no head — dedup keys on commentSha alone
     }

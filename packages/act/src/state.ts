@@ -51,19 +51,24 @@ function isSast(name: string): boolean {
  *  value means the run's annotations could not be fetched — unknown,
  *  and only counted for required checks (an optional SAST must not hold
  *  the gate; with no required checks configured at all, a flaky
- *  annotations endpoint stays infra noise). */
+ *  annotations endpoint stays infra noise). An advisory-ignored SAST
+ *  check never gates — but one carrying failure annotations earns an
+ *  alert: quietly dropping real findings is not what ignore is for. */
 async function sastCounts(
   rev: ReviewFacade,
   target: PrTarget,
   checks: CheckInfo[],
+  ignored: CheckInfo[],
   requiredNames: Set<string>,
-  headSha: string
+  headSha: string,
+  alerts: string[]
 ): Promise<{ pending: number; unknown: number }> {
   const out = { pending: 0, unknown: 0 }
-  const sastChecks = checks.filter(
-    (c) => isSast(c.name) && c.state !== 'SKIPPED' && c.state !== 'NEUTRAL'
-  )
-  if (sastChecks.length === 0) {
+  const isLiveSast = (c: CheckInfo): boolean =>
+    isSast(c.name) && c.state !== 'SKIPPED' && c.state !== 'NEUTRAL'
+  const sastChecks = checks.filter(isLiveSast)
+  const ignoredSast = ignored.filter(isLiveSast)
+  if (sastChecks.length === 0 && ignoredSast.length === 0) {
     return out
   }
   const annotations =
@@ -81,6 +86,14 @@ async function sastCounts(
       }
     } else {
       out.pending += count
+    }
+  }
+  for (const check of ignoredSast) {
+    const count = annotations.get(check.name)
+    if (typeof count === 'number' && count > 0) {
+      alerts.push(
+        `ignored SAST check "${check.name}" carries ${count} failure annotation(s) — suppressed by act.ignoreChecks, review manually`
+      )
     }
   }
   return out
@@ -224,9 +237,14 @@ export async function fetchPrActState(
   const rules = ignoreRules(opts?.ignoreChecks ?? [])
   const alerts: string[] = []
   const history = opts?.checkHistory ?? null
-  const checks = checksAll.filter((c) =>
-    advisoryFilter(c, rules, history, threads, target, meta.headSha, alerts)
-  )
+  const ignored: CheckInfo[] = []
+  const checks = checksAll.filter((c) => {
+    const gated = advisoryFilter(c, rules, history, threads, target, meta.headSha, alerts)
+    if (!gated) {
+      ignored.push(c)
+    }
+    return gated
+  })
 
   // "CI green" means every check — an optional check that fails is still
   // a red job on the PR. Required names are only kept to decide whether a
@@ -258,7 +276,15 @@ export async function fetchPrActState(
 
   // A SAST scan can report "success" while still carrying failure-level
   // annotations — inspect every non-skipped SAST check, not just pending.
-  const sast = await sastCounts(rev, target, checks, requiredNames, meta.headSha)
+  const sast = await sastCounts(
+    rev,
+    target,
+    checks,
+    ignored,
+    requiredNames,
+    meta.headSha,
+    alerts
+  )
   const sastPending = sast.pending
   const sastUnknown = sast.unknown
 

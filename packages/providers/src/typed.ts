@@ -21,14 +21,16 @@ interface RawAnswer {
 
 /** A probs map whose keys all satisfy `on` — a weight keyed to an
  *  un-asked option isn't part of the question's contract, and its max
- *  would inflate derived confidence, so the answer is drift. */
-const isProbsOn = (
+ *  would inflate derived confidence, so the answer is drift. Exported:
+ *  the prose path (provider-judge) needs the same keyspace restriction,
+ *  or {other:1} survives as an answer's probabilities. */
+export const isProbsOn = (
   v: unknown,
   on: (key: string) => boolean
 ): v is Record<string, number> => isProbs(v) && Object.keys(v).every(on)
 
 /** A canonical level index — '0'..'N-1', not '01', '-1', or 'x'. */
-const isLevelKey = (key: string, levels: number): boolean => {
+export const isLevelKey = (key: string, levels: number): boolean => {
   const i = Number(key)
   return i >= 0 && i < levels && String(i) === key
 }
