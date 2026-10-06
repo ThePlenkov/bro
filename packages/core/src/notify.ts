@@ -140,7 +140,10 @@ function pruneStaleCursors(mb: string, files: string[], now: number): void {
   }
 }
 
-/** One drop: reap when expired, deliver into `out` when unseen. Drops
+/** One drop: reap when expired, deliver into `out` when unseen and
+ *  wanted. `keep` is the drain-side filter — a drop it rejects is left
+ *  unseen, so a filtered consumer cannot eat drops a later, different
+ *  consumer was due (they expire on TTL like any other residue). Drops
  *  stay on disk for other sessions until the TTL takes them, so a
  *  crash mid-drain loses nothing — the unwritten cursor redelivers. */
 function drainDrop(
@@ -148,7 +151,8 @@ function drainDrop(
   f: string,
   seen: Set<string>,
   out: string[],
-  now: number
+  now: number,
+  keep?: (text: string) => boolean
 ): void {
   const path = join(mb, f)
   try {
@@ -160,10 +164,15 @@ function drainDrop(
       return
     }
     const text = readFileSync(path, 'utf8')
-    seen.add(f)
-    if (text.trim() !== '') {
-      out.push(text)
+    if (text.trim() === '') {
+      seen.add(f) // an empty drop is noise, not an event — consume it
+      return
     }
+    if (keep !== undefined && !keep(text)) {
+      return
+    }
+    seen.add(f)
+    out.push(text)
   } catch {
     // unreadable drop — skip; the next drain retries
   }
@@ -172,7 +181,7 @@ function drainDrop(
 /** Drain one mailbox dir for a session, oldest-first by embedded drop
  *  time. Drops are injected verbatim — a heartbeat's formatting is
  *  part of the event. */
-function drainDir(mb: string, sessionId: string, now: number): string[] {
+function drainDir(mb: string, sessionId: string, now: number, keep?: (text: string) => boolean): string[] {
   let files: string[]
   try {
     files = readdirSync(mb)
@@ -185,7 +194,7 @@ function drainDir(mb: string, sessionId: string, now: number): string[] {
   for (const f of files
     .filter((f) => f.endsWith('.txt') && !f.startsWith('.'))
     .sort((a, b) => dropTime(a) - dropTime(b) || a.localeCompare(b))) {
-    drainDrop(mb, f, seen, out, now)
+    drainDrop(mb, f, seen, out, now, keep)
   }
   writeSeen(cursor, seen, files)
   pruneStaleCursors(mb, files, now)
@@ -193,12 +202,17 @@ function drainDir(mb: string, sessionId: string, now: number): string[] {
 }
 
 /** Every pending drop this session hasn't seen, oldest-first by the
- *  embedded drop time. Seen drops stay for other sessions until they
- *  expire; a drop is deleted once it is older than DROP_TTL_MS,
- *  delivered or not. */
-export function drainMailbox(dir: string, sessionId: string): string[] {
+ *  embedded drop time. `keep` selects which drops count as seen — a
+ *  rejected drop stays pending for this session's later drains. Seen
+ *  drops stay for other sessions until they expire; a drop is deleted
+ *  once it is older than DROP_TTL_MS, delivered or not. */
+export function drainMailbox(
+  dir: string,
+  sessionId: string,
+  keep?: (text: string) => boolean
+): string[] {
   const now = Date.now()
-  return drainDirs(dir).flatMap((mb) => drainDir(mb, sessionId, now))
+  return drainDirs(dir).flatMap((mb) => drainDir(mb, sessionId, now, keep))
 }
 
 /** The notify connector — the read side of the mailbox. Its postTool

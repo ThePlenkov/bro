@@ -14,6 +14,8 @@ import {
   debtSection,
   definePlugin,
   loadConfig,
+  busConnector,
+  mailboxConnector,
   notifyConnector,
   registerConnector,
   sddSection,
@@ -83,6 +85,11 @@ registerConnector(notifyConnector)
 registerConnector(learnConnector)
 registerConnector(systemoneConnector)
 registerConnector(llmJudgeConnector)
+// events facade providers — registry order is the fallback precedence,
+// so `mailbox` first: `bro notify` must keep working with no broker and
+// no config. The bus is opt-in via `connectors.events` in bro.config.json.
+registerConnector(mailboxConnector)
+registerConnector(busConnector)
 // specs facade providers — registry order is detection precedence:
 // native first (its matchDir claims the configured sdd.dir), then
 // tool-layout matchers, agent last (explicit pick only, never detects)

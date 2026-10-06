@@ -18,6 +18,7 @@ import {
   isBusEventInput,
   startBusBrokerAt,
   type BusBroker,
+  type BusRecord,
   type BusEnvelope,
 } from './bus.ts'
 import { PROBE_TIMEOUT_MS } from './connectors.ts'
@@ -47,6 +48,21 @@ async function withBroker(
  *  for the publish to be acked, one for the event frame to land. */
 async function settle(): Promise<void> {
   await new Promise((r) => setTimeout(r, 60))
+}
+
+/** Wait for a condition instead of guessing a sleep. `busSubscribe`
+ *  resolves on connect, before the broker has read the `sub` frame, so
+ *  anything the broker sends in reply — a `gap`, a replay — has no
+ *  "arrived" signal. A fixed sleep made those assertions a coin flip
+ *  under a loaded test run. */
+async function waitFor(what: string, predicate: () => boolean, timeoutMs = 4_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() > deadline) {
+      throw new Error(`timed out after ${String(timeoutMs)}ms waiting for ${what}`)
+    }
+    await new Promise((r) => setTimeout(r, 10))
+  }
 }
 
 describe('busTopicMatches', () => {
@@ -92,7 +108,7 @@ describe('isBusEventInput', () => {
 
 describe('BusRing', () => {
   const T = Date.parse('2026-10-04T12:00:00.000Z')
-  const env = (seq: number): BusEnvelope => ({ gen: 'g1', seq, ts: '2026-10-04T12:00:00.000Z', topic: 't', kind: 'k' })
+  const env = (seq: number): BusRecord => ({ gen: 'g1', seq, ts: '2026-10-04T12:00:00.000Z', topic: 't', kind: 'k' })
 
   test('rejects a nonsense limit rather than silently truncating', () => {
     assert.throws(() => new BusRing({ limit: 0 }), RangeError)
@@ -123,7 +139,7 @@ describe('BusRing', () => {
   test('a count bound alone still leaks: age evicts too', () => {
     const T = Date.parse('2026-10-04T12:00:00.000Z')
     const ring = new BusRing({ limit: 100, ttlMs: 60_000 })
-    const at = (seq: number, ts: string): BusEnvelope => ({ gen: 'g1', seq, ts, topic: 't', kind: 'k' })
+    const at = (seq: number, ts: string): BusRecord => ({ gen: 'g1', seq, ts, topic: 't', kind: 'k' })
     ring.push(at(1, '2026-10-04T12:00:00.000Z'), T)
     ring.push(at(2, '2026-10-04T12:00:30.000Z'), T)
     // still inside the ttl
@@ -290,7 +306,7 @@ describe('replay from a cursor', () => {
           gapped = true
         },
       }, { since: 0 })
-      await settle()
+      await waitFor('the gap frame', () => gapped)
       sub.close()
       // Nothing in the ring matched, yet the hole is real: a silent
       // empty result would read as "nothing happened".
@@ -326,7 +342,7 @@ describe('replay from a cursor', () => {
           gapped = true
         },
       }, { since: 0 })
-      await settle()
+      await waitFor('the gap frame', () => gapped)
       sub.close()
       assert.equal(gapped, true, 'a fresh cursor needs seq 1 and 2, both evicted')
       assert.ok(seen.length < 4, 'a gap must not be papered over with a full-looking list')
@@ -504,7 +520,7 @@ describe('broker restart', () => {
           // a cursor the dead broker issued: seq restarts at 1, so this
           // consumer's "seq 2" can never be satisfied
         }, { since: 2 })
-        await settle()
+        await waitFor('the gap frame after restart', () => gapped)
         sub.close()
         assert.equal(gapped, true, 'a restart must read as a hole, not as silence')
 

@@ -8,7 +8,7 @@ parent: project
 
 `bro bus` is the transport under agent communication: a local broker
 process on a Unix socket, topics with subscriber-side filters, one-to-many
-and many-to-many fan-out, monotonic `seq` cursors, and a bounded replay
+and many-to-many fan-out, run-scoped `{gen, seq}` cursors, and a bounded replay
 ring that replays retained history and reports a gap when requested
 events are unavailable.
 
@@ -21,7 +21,14 @@ subscribe reports errors.
 ## Owns
 
 ```text
-packages/core/src/bus.ts       broker, client, envelope, filters, ring
+packages/core/src/bus.ts       broker, client, cursors, retention window
+packages/core/src/events.ts   the event contract itself (the `events` facade)
 packages/cli/src/commands/bus.ts   serve / publish / subscribe / status
 skills/bus/
 ```
+
+The envelope and the filter shape are `events.ts`'s, not `bus.ts`'s: the
+bus is one provider of the `events` capability, so the contract is named
+by domain and lives above the transport. `bus.ts` keeps only what the
+transport owns — the socket, the framing, `{gen, seq}` cursors and the
+ring — and narrows the facade's envelope to a `BusRecord`.
