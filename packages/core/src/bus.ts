@@ -618,13 +618,15 @@ export async function startBusBroker(dir: string, opts: BusBrokerOptions = {}): 
   if (statePath === null) {
     return broker
   }
-  mkdirSync(dirname(statePath), { recursive: true })
   const record = `${JSON.stringify(
     { socketPath, pid: process.pid, startedAt: new Date().toISOString() },
     null,
     2
   )}\n`
   try {
+    // mkdir lives inside the guard too — its failure must not leave a
+    // broker listening without discovery, same rule as the write
+    mkdirSync(dirname(statePath), { recursive: true })
     writeFileSync(statePath, record, { mode: 0o600 })
   } catch (err) {
     // Discovery state is how a client finds the socket without
@@ -767,6 +769,11 @@ export function busSubscribe(
   const timeoutMs = opts.timeoutMs ?? BUS_TIMEOUT_MS
   return new Promise<BusSubscription>((resolve, reject) => {
     let settled = false
+    // onClose reports the stream ended BY THE BROKER — a rejected
+    // connect never had a stream to end, and a local close() was the
+    // caller's own choice; neither should read as "the broker went away"
+    let established = false
+    let closedByUs = false
     let buf = ''
     const sock = connect(socketPath)
     const timer = setTimeout(() => {
@@ -798,8 +805,14 @@ export function busSubscribe(
         return
       }
       settled = true
+      established = true
       clearTimeout(timer)
-      resolve({ close: () => sock.destroy() })
+      resolve({
+        close: () => {
+          closedByUs = true
+          sock.destroy()
+        },
+      })
     })
     sock.on('data', (chunk: Buffer) => {
       buf += chunk.toString('utf8')
@@ -824,10 +837,10 @@ export function busSubscribe(
       }
     })
     // The broker closing its end is the end of the stream, not a lull in
-    // it. Fired once, and only after the promise settled, so a subscribe
-    // that never connected cannot report a close it never had.
+    // it. Fired once, and only on a remote close — a rejected connect
+    // reports the rejection, a local close() was the caller's choice.
     sock.on('close', () => {
-      if (settled) {
+      if (established && !closedByUs) {
         handlers.onClose?.()
       }
     })
