@@ -2,7 +2,7 @@
  *  `<git-common>/bro/hooks/fired/<session>` exactly like learn's. */
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { gitTry, type Guard } from '@broject/core'
@@ -12,6 +12,9 @@ import { runGuards, type GuardEvalOpts } from './engine.ts'
 function repo(branch = 'main'): string {
   const dir = mkdtempSync(join(tmpdir(), 'bro-guard-'))
   assert.equal(gitTry(['-C', dir, 'init', '-b', branch]).code, 0)
+  // pin the commit identity — CI runners have no global git user
+  assert.equal(gitTry(['-C', dir, 'config', 'user.email', 't@t']).code, 0)
+  assert.equal(gitTry(['-C', dir, 'config', 'user.name', 't']).code, 0)
   assert.equal(gitTry(['-C', dir, 'commit', '-qm', 'init', '--allow-empty']).code, 0)
   return dir
 }
@@ -118,6 +121,24 @@ describe('runGuards', () => {
     const unarmed = await runGuards({ ...base, armed: () => new Set<string>() })
     assert.equal(unarmed.verdicts[0]!.clauses.find((c) => c.clause === 'armed')!.ok, false)
     assert.equal(unarmed.verdicts[0]!.fire, false)
+  })
+
+  test('exists stays repo-relative — ../ escapes read as missing', async () => {
+    const dir = repo()
+    // real file outside the repo — a verdict must never reveal it
+    const escape = `${basename(dir)}.esc`
+    writeFileSync(join(dir, '..', escape), 'x')
+    const g: Guard = {
+      name: 'esc',
+      when: { on: ['stop'], state: { exists: [`../${escape}`] } },
+      say: 'host file is visible',
+    }
+    const run = await runGuards(opts(dir, { defs: [g] }))
+    const v = run.verdicts[0]!
+    assert.equal(v.fire, false)
+    const c = v.clauses.find((c) => c.clause === 'exists')!
+    assert.equal(c.ok, false)
+    assert.equal(c.detail, `missing: ../${escape}`)
   })
 
   test('an unknown named probe fails its clause', async () => {

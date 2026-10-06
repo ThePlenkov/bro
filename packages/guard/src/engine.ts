@@ -104,8 +104,9 @@ async function evalClauses(
   probes: Record<string, NamedProbe>,
   dir: string
 ): Promise<ClauseVerdict[]> {
-  const clauses: ClauseVerdict[] = [{ clause: 'on', ok: g.when.on.includes(event), detail: event }]
-  if (!clauses[0]!.ok) {
+  const on: ClauseVerdict = { clause: 'on', ok: g.when.on.includes(event), detail: event }
+  const clauses: ClauseVerdict[] = [on]
+  if (!on.ok) {
     return clauses
   }
   if (g.when.match !== undefined) {

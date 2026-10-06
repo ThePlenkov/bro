@@ -6,7 +6,7 @@
  * whose condition can't be verified doesn't assert it.
  */
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { gitTry, type GuardState } from '@broject/core'
 import { matchPath } from '@broject/learn'
 
@@ -60,13 +60,18 @@ export function liveState(dir: string, armed?: () => Set<string>): LiveState {
       return branchCache
     },
     armed() {
-      if (armedCache === undefined) {
-        armedCache = armed?.() ?? new Set<string>()
-      }
+      armedCache ??= armed?.() ?? new Set<string>()
       return armedCache
     },
     exists(path) {
-      return existsSync(join(dir, path))
+      // contract is repo-relative — a '../' or absolute path resolves
+      // outside and would leak host filesystem state into a verdict
+      const resolved = resolve(dir, path)
+      const rel = relative(dir, resolved)
+      if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+        return false
+      }
+      return existsSync(resolved)
     },
   }
 }
@@ -113,32 +118,7 @@ export function evalState(
 ): ClauseVerdict[] {
   const out: ClauseVerdict[] = []
   if (state.diff !== undefined) {
-    const paths = live.diffPaths()
-    if (paths === null) {
-      if (state.diff.changed !== undefined) {
-        out.push({ clause: 'diff.changed', ok: false, detail: 'git status unavailable' })
-      }
-      if (state.diff.without !== undefined) {
-        out.push({ clause: 'diff.without', ok: false, detail: 'git status unavailable' })
-      }
-    } else {
-      if (state.diff.changed !== undefined) {
-        const hit = state.diff.changed.find((g) => paths.some((p) => matchPath(p, g)))
-        out.push({
-          clause: 'diff.changed',
-          ok: hit !== undefined,
-          detail: hit === undefined ? `no diff path hits ${state.diff.changed.join(' | ')}` : hit,
-        })
-      }
-      if (state.diff.without !== undefined) {
-        const hit = state.diff.without.find((g) => paths.some((p) => matchPath(p, g)))
-        out.push({
-          clause: 'diff.without',
-          ok: hit === undefined,
-          detail: hit === undefined ? undefined : `diff touches ${hit}`,
-        })
-      }
-    }
+    out.push(...evalDiff(state.diff, live.diffPaths()))
   }
   if (state.branch !== undefined) {
     const b = live.branch()
@@ -162,7 +142,54 @@ export function evalState(
       detail: missing.length > 0 ? `missing: ${missing.join(',')}` : undefined,
     })
   }
-  for (const p of state.probes ?? []) {
+  out.push(...evalProbes(state.probes ?? [], dir, probes))
+  return out
+}
+
+/** `diff` rows — `git status` failing fails every declared diff clause
+ *  (a guard whose condition can't be verified doesn't assert it). */
+function evalDiff(
+  diff: NonNullable<GuardState['diff']>,
+  paths: string[] | null
+): ClauseVerdict[] {
+  const out: ClauseVerdict[] = []
+  if (paths === null) {
+    if (diff.changed !== undefined) {
+      out.push({ clause: 'diff.changed', ok: false, detail: 'git status unavailable' })
+    }
+    if (diff.without !== undefined) {
+      out.push({ clause: 'diff.without', ok: false, detail: 'git status unavailable' })
+    }
+    return out
+  }
+  if (diff.changed !== undefined) {
+    const hit = diff.changed.find((g) => paths.some((p) => matchPath(p, g)))
+    out.push({
+      clause: 'diff.changed',
+      ok: hit !== undefined,
+      detail: hit === undefined ? `no diff path hits ${diff.changed.join(' | ')}` : hit,
+    })
+  }
+  if (diff.without !== undefined) {
+    const hit = diff.without.find((g) => paths.some((p) => matchPath(p, g)))
+    out.push({
+      clause: 'diff.without',
+      ok: hit === undefined,
+      detail: hit === undefined ? undefined : `diff touches ${hit}`,
+    })
+  }
+  return out
+}
+
+/** `probes` rows — a throwing probe fails its clause with the error as
+ *  detail; an unknown name fails closed (the registry is closed). */
+function evalProbes(
+  list: NonNullable<GuardState['probes']>,
+  dir: string,
+  probes: Record<string, NamedProbe>
+): ClauseVerdict[] {
+  const out: ClauseVerdict[] = []
+  for (const p of list) {
     const fn = probes[p.name]
     if (fn === undefined) {
       // the registry is closed — an unknown name fails the clause and
