@@ -106,6 +106,10 @@ export interface TaskRow {
   parent?: string
   external_ref?: string | null
   close_reason?: string
+  /** close timestamp — `bd list` emits it on closed rows */
+  closed_at?: string
+  /** backend-level ephemeral/wisp flag — sweep's harvest set skips it */
+  ephemeral?: boolean
   metadata?: Record<string, unknown> | null
 }
 

@@ -20,6 +20,7 @@ import {
   registerConnector,
   sddSection,
   stackSection,
+  sweepSection,
   syncSection,
   type BroPlugin,
   type ConfigSection,
@@ -69,6 +70,7 @@ import { runSetupCommand } from './commands/setup.ts'
 import { runSpecCommand, sddConnector } from './commands/spec.ts'
 import { runStackCommand } from './commands/stack.ts'
 import { SPEC_CONNECTORS } from './spec-connectors.ts'
+import { runSweepCommand } from './commands/sweep.ts'
 import { runSyncCommand } from './commands/sync.ts'
 import { runWorkCommand, workConnector } from './commands/work.ts'
 
@@ -349,6 +351,14 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'sync',
     configKey: 'sync',
     configSchema: syncSection,
+  }),
+  definePlugin({
+    name: 'sweep',
+    summary: 'Gated disposal for closed beads: status|distill|run — gate → archive → prune',
+    run: runSweepCommand,
+    skill: 'sweep',
+    configKey: 'sweep',
+    configSchema: sweepSection,
   }),
   definePlugin({
     name: 'run',
