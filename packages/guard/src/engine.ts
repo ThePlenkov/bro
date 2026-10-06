@@ -18,7 +18,15 @@ import {
   GUARD_SAY_MAX_LINES,
   withFileLock,
 } from '@broject/core'
-import type { ConnectorCtx, Guard, GuardEvent, JudgeFacade, Verdict } from '@broject/core'
+import type {
+  ConnectorCtx,
+  DecideResult,
+  Guard,
+  GuardEvent,
+  JudgeFacade,
+  JudgeQuestion,
+  Verdict,
+} from '@broject/core'
 import {
   firedCounts,
   firedFile,
@@ -142,6 +150,58 @@ async function evalClauses(
  *  is suppressed. `when.judge.threshold` overrides. */
 const GUARD_JUDGE_VETO = 0.5
 
+/** An abstain verdict — every non-answer path ends as ok:true. */
+function abstain(clauses: ClauseVerdict[], detail: string): void {
+  clauses.push({ clause: 'judge', ok: true, detail: `abstained — ${detail}` })
+}
+
+/** Lazy-resolve the judge input once per run — a wedged resolution
+ *  (no judge connector, bad provider pin) abstains like judge.mode:off,
+ *  never a veto. Returns undefined after pushing the abstain clause. */
+function resolveJudgeInput(
+  judge: () => GuardJudgeInput | undefined,
+  input: { value: GuardJudgeInput | undefined; resolved: boolean },
+  clauses: ClauseVerdict[]
+): GuardJudgeInput | undefined {
+  if (!input.resolved) {
+    input.resolved = true
+    try {
+      input.value = judge()
+    } catch (err) {
+      abstain(clauses, `resolution threw: ${err instanceof Error ? err.message : err}`)
+      return undefined
+    }
+  }
+  if (input.value === undefined) {
+    abstain(clauses, 'judge off')
+  }
+  return input.value
+}
+
+/** Journal the decided answer — observability: a write failure loses
+ *  a row, never the verdict and never the other guards' lines. */
+function journalGuardDecision(
+  g: Guard,
+  j: GuardJudgeInput,
+  question: JudgeQuestion,
+  res: DecideResult
+): void {
+  try {
+    j.journal?.({
+      ts: new Date().toISOString(),
+      kind: 'guard',
+      subject: { threadId: `guard:${g.name}` },
+      questions: { fire: question },
+      answers: res.answers,
+      model: res.model,
+      latencyMs: res.latencyMs,
+      ...(res.usage?.costUsd !== undefined ? { costUsd: res.usage.costUsd } : {}),
+    })
+  } catch {
+    // see doc — the row is the only thing at stake here
+  }
+}
+
 /** The one `noul` question a judge clause asks (spec: bro-nkn6 —
  *  veto-only). Runs only when the deterministic `when` already passed
  *  — a guard the diff never triggered never spends a decision.
@@ -156,32 +216,12 @@ async function evalJudge(
   input: { value: GuardJudgeInput | undefined; resolved: boolean },
   decisions: { used: number }
 ): Promise<void> {
-  if (!input.resolved) {
-    input.resolved = true
-    try {
-      input.value = judge()
-    } catch (err) {
-      // a wedged resolution (no judge connector, bad provider pin)
-      // abstains like judge.mode:off — never a veto
-      clauses.push({
-        clause: 'judge',
-        ok: true,
-        detail: `abstained — resolution threw: ${err instanceof Error ? err.message : err}`,
-      })
-      return
-    }
-  }
-  const j = input.value
+  const j = resolveJudgeInput(judge, input, clauses)
   if (j === undefined) {
-    clauses.push({ clause: 'judge', ok: true, detail: 'abstained — judge off' })
     return
   }
   if (decisions.used >= j.maxDecisions) {
-    clauses.push({
-      clause: 'judge',
-      ok: true,
-      detail: `abstained — decision budget spent (${j.maxDecisions}/run)`,
-    })
+    abstain(clauses, `decision budget spent (${j.maxDecisions}/run)`)
     return
   }
   const question = {
@@ -198,46 +238,24 @@ async function evalJudge(
     clauses: clauses.map((c) => ({ clause: c.clause, ok: c.ok, detail: c.detail ?? null })),
   }
   decisions.used += 1
-  let res
+  let res: DecideResult
   try {
     res = await j.facade.decide(state, { fire: question })
   } catch (err) {
-    clauses.push({
-      clause: 'judge',
-      ok: true,
-      detail: `abstained — ${err instanceof Error ? err.message : err}`,
-    })
+    abstain(clauses, `${err instanceof Error ? err.message : err}`)
     return
   }
   const a = res.answers.fire
   const threshold = g.when.judge!.threshold ?? GUARD_JUDGE_VETO
   if (a === undefined || a.type !== 'noul') {
-    clauses.push({ clause: 'judge', ok: true, detail: 'abstained — no noul answer' })
+    abstain(clauses, 'no noul answer')
     return
   }
   if (res.lowConfidence.includes('fire') || a.confidence < j.confidence) {
-    clauses.push({
-      clause: 'judge',
-      ok: true,
-      detail: `abstained — confidence ${a.confidence} < ${j.confidence}`,
-    })
+    abstain(clauses, `confidence ${a.confidence} < ${j.confidence}`)
     return
   }
-  try {
-    j.journal?.({
-      ts: new Date().toISOString(),
-      kind: 'guard',
-      subject: { threadId: `guard:${g.name}` },
-      questions: { fire: question },
-      answers: res.answers,
-      model: res.model,
-      latencyMs: res.latencyMs,
-      ...(res.usage?.costUsd !== undefined ? { costUsd: res.usage.costUsd } : {}),
-    })
-  } catch {
-    // journaling is observability — a filesystem failure loses a row,
-    // never the verdict and never the other guards' lines
-  }
+  journalGuardDecision(g, j, question, res)
   if (a.noul < threshold) {
     clauses.push({
       clause: 'judge',
