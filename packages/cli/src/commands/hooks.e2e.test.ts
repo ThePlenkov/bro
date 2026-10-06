@@ -711,3 +711,92 @@ describe('hooks e2e — perf journal', () => {
     })
   })
 })
+
+describe('hooks e2e — guard injection', () => {
+  const guardFixture = (defs: Record<string, unknown>[]): Fixture => {
+    const { root, main } = initRepo('bro-guard-e2e-', (m) => {
+      writeFileSync(
+        join(m, 'bro.config.json'),
+        JSON.stringify({ guard: { defs } })
+      )
+    })
+    const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim())
+    return { root, main, markerDir: join(common, 'bro', 'hooks') }
+  }
+
+  test('post-tool: a commands-match guard fires once, then the budget is spent', () => {
+    const f = guardFixture([
+      {
+        name: 'push-nudge',
+        when: { on: ['post-tool'], match: { commands: ['git push'] } },
+        say: 'remember the review gate',
+      },
+    ])
+    inside(f.main, f.root, () => {
+      const ev = {
+        session_id: 's1',
+        tool_input: { command: 'git push origin x' },
+        tool_response: { success: true },
+      }
+      const r1 = hook(f, 'post-tool', ev)
+      assert.equal(r1.code, 0, r1.stderr)
+      assert.match(r1.stdout, /bro guard push-nudge: remember the review gate/)
+      const r2 = hook(f, 'post-tool', ev)
+      assert.doesNotMatch(r2.stdout, /push-nudge/)
+      // the fired set is the shared file — guard:<name> beside lesson ids
+      const fired = join(f.markerDir, 'fired', 's1')
+      assert.match(readFileSync(fired, 'utf8'), /^guard:push-nudge$/m)
+    })
+  })
+
+  test('prompt-submit: a terms guard fires on the raw prompt', () => {
+    const f = guardFixture([
+      {
+        name: 'deploy-terms',
+        when: { on: ['prompt-submit'], match: { terms: ['deploy'] } },
+        say: 'deploys need the checklist',
+      },
+    ])
+    inside(f.main, f.root, () => {
+      const r = hook(f, 'prompt-submit', { session_id: 's1', prompt: 'please deploy this' })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /bro guard deploy-terms: deploys need the checklist/)
+      const miss = hook(f, 'prompt-submit', { session_id: 's2', prompt: 'hello' })
+      assert.doesNotMatch(miss.stdout, /deploy-terms/)
+    })
+  })
+
+  test('stop: a state guard joins hints, never blocks', () => {
+    const f = guardFixture([
+      {
+        name: 'dirty-src',
+        when: { on: ['stop'], state: { diff: { changed: ['src/**'], without: ['**/*.test.*'] } } },
+        say: 'src changed without a test',
+      },
+    ])
+    inside(f.main, f.root, () => {
+      mkdirSync(join(f.main, 'src'), { recursive: true })
+      writeFileSync(join(f.main, 'src', 'a.ts'), 'x\n')
+      const r = hook(f, 'stop', { session_id: 's1' })
+      assert.equal(r.code, 0, r.stderr)
+      assert.doesNotMatch(r.stdout, BLOCK)
+      assert.match(r.stdout, /bro guard dirty-src: src changed without a test/)
+      // a second stop on a fresh session refires; the same session's spent
+      const r2 = hook(f, 'stop', { session_id: 's1' })
+      assert.doesNotMatch(r2.stdout, /dirty-src/)
+    })
+  })
+
+  test('no guard config → no guard output, hooks stay silent', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const r = hook(f, 'post-tool', {
+        session_id: 's1',
+        tool_input: { command: 'true' },
+        tool_response: { success: true },
+      })
+      assert.equal(r.code, 0, r.stderr)
+      assert.doesNotMatch(r.stdout, /bro guard/)
+    })
+  })
+})
