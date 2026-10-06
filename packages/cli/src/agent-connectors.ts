@@ -36,6 +36,7 @@ import {
   bdActor,
   claimStep,
   classifyExitCause,
+  cliCommandModel,
   commandCliName,
   DEFAULT_CONFIG,
   gitTry,
@@ -294,10 +295,30 @@ export async function resolveSpawnProvider(
   }
   const model = sel.model ?? entry.model
   switch (entry.type) {
-    case 'cli':
+    case 'cli': {
       // the entry's command substitutes for the backend's template —
-      // {promptFile} mechanics apply verbatim
-      return { provider: providerName, model, worker: { kind: 'template', command: entry.command } }
+      // {promptFile} mechanics apply verbatim. `{model}` is the
+      // template's only wire for an override; one it can't consume
+      // would be provenance the worker never ran — refuse, don't
+      // relabel the spawn.
+      const { command } = cliCommandModel(
+        entry.command,
+        entry.model,
+        sel.model,
+        (m) =>
+          new SpawnError(
+            `providers.${providerName} (type 'cli') cannot honor model '${m}' — ` +
+              'its command has no {model} placeholder',
+            'input'
+          ),
+        () =>
+          new SpawnError(
+            `providers.${providerName} (type 'cli') uses {model} but pins no default model`,
+            'config'
+          )
+      )
+      return { provider: providerName, model, worker: { kind: 'template', command } }
+    }
     case 'acp': {
       // the providers package owns the argv render — a lazy import keeps
       // a providers-less checkout (and every non-acp spawn) from paying

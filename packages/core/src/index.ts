@@ -60,6 +60,8 @@ export {
 export type { IgnoreCheckEntry, IgnoreCheckRule } from './config.ts'
 export {
   API_WIRES,
+  cliCommandModel,
+  expandModelArg,
   getProvider,
   isEnvName,
   isSystemoneFamily,

@@ -417,6 +417,47 @@ export function resolveApiModel(
   return { model, wire }
 }
 
+/** `{model}` — a cli command template's only wire for a model
+ *  override: expands to the resolved effective model, quoted for
+ *  `sh -c` like `{promptFile}` (an id could carry shell metachars).
+ *  Absent the placeholder the command is returned verbatim — call
+ *  sites own the rule that an override a bare command can't consume
+ *  is a loud error, never a relabel. */
+export function expandModelArg(command: string, model: string): string {
+  const esc = model.replaceAll("'", String.raw`'\''`) // codeql[js/shell-command-constructed-from-input] — operator-authored template, resolved value quoted
+  return command.replaceAll('{model}', `'${esc}'`) // codeql[js/shell-command-constructed-from-input] — see above
+}
+
+/** The cli kind's model resolution — `resolveApiModel`'s analogue for
+ *  a bare command template, shared by the call and spawn surfaces:
+ *  `{model}` present → the resolved model (override > entry pin) must
+ *  exist to substitute, else the entry uses the placeholder with no
+ *  default (a config bug); absent → an override differing from the
+ *  pin can never reach the process, so recording it would be
+ *  provenance the worker never ran. Returns the effective model and
+ *  the command to run, or throws the caller's error — the surfaces
+ *  disagree on error type (CliConfigError vs SpawnError) but not on
+ *  the rule. */
+export function cliCommandModel(
+  command: string,
+  pinned: string | undefined,
+  override: string | undefined,
+  unhonorable: (model: string) => Error,
+  unpinned: () => Error
+): { command: string; model: string | undefined } {
+  const model = override ?? pinned
+  if (command.includes('{model}')) {
+    if (model === undefined) {
+      throw unpinned()
+    }
+    return { command: expandModelArg(command, model), model }
+  }
+  if (override !== undefined && override !== pinned) {
+    throw unhonorable(override)
+  }
+  return { command, model }
+}
+
 /** Lookup by consumer reference — `judge.provider`, `agents.*.provider`.
  *  Throws UnknownProviderError naming the missing key. */
 export function getProvider(

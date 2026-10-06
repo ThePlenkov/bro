@@ -89,7 +89,7 @@
     },
     "opencode-free": {
       "type": "cli",
-      "command": "opencode run --model opencode/space-bunny-free --auto -f {promptFile} 'Follow the attached instructions.'",
+      "command": "opencode run --model {model} --auto -f {promptFile} 'Follow the attached instructions.'",
       "model": "opencode/space-bunny-free"
     }
   }
