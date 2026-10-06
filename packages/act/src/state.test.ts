@@ -165,4 +165,30 @@ describe('fetchPrActState — conditional ignoreChecks', () => {
     })
     assert.deepEqual(h.recorded, [`Kilo Code@${SHA.slice(0, 7)}=fail`])
   })
+
+  test('an ignored SAST check carrying failure annotations alerts — ignored ≠ clean', async () => {
+    const rev = fakeRev([check('SonarCloud Code Analysis', 'pass')], [])
+    rev.checkAnnotations = () => new Map([['SonarCloud Code Analysis', 3]])
+    const s = await fetchPrActState(rev, target, {
+      ignoreChecks: ['sonarcloud'],
+      checkHistory: memHistory(0),
+    })
+    // never gates on an advisory check…
+    assert.equal(s.sastPending, 0)
+    // …but suppressed findings surface
+    assert.equal(s.alerts.length, 1)
+    assert.match(s.alerts[0]!, /ignored SAST check "SonarCloud Code Analysis"/)
+    assert.match(s.alerts[0]!, /3 failure annotation/)
+  })
+
+  test('an ignored SAST check with no findings stays quiet', async () => {
+    const rev = fakeRev([check('SonarCloud Code Analysis', 'pass')], [])
+    rev.checkAnnotations = () => new Map([['SonarCloud Code Analysis', 0]])
+    const s = await fetchPrActState(rev, target, {
+      ignoreChecks: ['sonarcloud'],
+      checkHistory: memHistory(0),
+    })
+    assert.equal(s.sastPending, 0)
+    assert.deepEqual(s.alerts, [])
+  })
 })

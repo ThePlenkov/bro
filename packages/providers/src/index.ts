@@ -22,6 +22,9 @@ export type {
 } from './registry.ts'
 export { systemoneCall } from './systemone.ts'
 export type { ApiTarget, ProviderWireOpts } from './systemone.ts'
+// typed-contract keyspace guards — the prose path validates its
+// probabilities map against the asked criteria with the same rule
+export { isLevelKey, isProbsOn } from './typed.ts'
 // the shared transport — the judge package's http helpers moved here
 // with the bindings that use them; consumers re-export, not reimplement
 export {

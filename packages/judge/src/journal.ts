@@ -98,7 +98,17 @@ export function readJournal(dir: string): JournalRow[] {
     }
     try {
       const row = JSON.parse(line) as JournalRow
-      if (typeof row === 'object' && row !== null && typeof row.kind === 'string') {
+      // subject must be an OBJECT (possibly {}) — a torn-but-valid tail
+      // like {"kind":"x"} or "subject":"s" makes findVerdict's
+      // r.subject.threadId throw; threadId itself is legitimately
+      // absent on judge-decide rows
+      if (
+        typeof row === 'object' &&
+        row !== null &&
+        typeof row.kind === 'string' &&
+        typeof row.subject === 'object' &&
+        row.subject !== null
+      ) {
         rows.push(row)
       }
     } catch {

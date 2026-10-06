@@ -25,7 +25,13 @@ import type {
   JudgeQuestion,
   ProviderEntry,
 } from '@broject/core'
-import { clamp01, isNum, isProbs, providerClient } from '@broject/providers'
+import {
+  clamp01,
+  isLevelKey,
+  isNum,
+  isProbsOn,
+  providerClient,
+} from '@broject/providers'
 import type { AcpSeam, FetchFn, ProviderChat } from '@broject/providers'
 import { deadlineJudge, type DeadlineJudge } from './deadline.ts'
 import type { JudgeConfig } from './config.ts'
@@ -85,7 +91,13 @@ function mapAnswer(
       return {
         type: 'choice',
         choice,
-        probabilities: isProbs(a.probabilities) ? a.probabilities : {},
+        // probs must live on the asked options — {other:1} would park a
+        // fabricated max-confidence on an option nobody asked about
+        probabilities: isProbsOn(a.probabilities, (k) =>
+          Object.hasOwn(q.criteria, k)
+        )
+          ? a.probabilities
+          : {},
         confidence: modelConfidence(a.confidence),
         decidedBy: by,
       }
@@ -99,7 +111,11 @@ function mapAnswer(
       return {
         type: 'score',
         score: a.score,
-        probabilities: isProbs(a.probabilities) ? a.probabilities : {},
+        probabilities: isProbsOn(a.probabilities, (k) =>
+          isLevelKey(k, q.criteria.length)
+        )
+          ? a.probabilities
+          : {},
         confidence: modelConfidence(a.confidence),
         decidedBy: by,
       }

@@ -86,6 +86,19 @@ describe('append + read', () => {
       assert.equal(rows[1]!.kind, 'act-disposition')
     })
   })
+
+  test('rows with a missing or non-object subject are skipped — findVerdict would throw', async () => {
+    await withRepo((dir) => {
+      appendRow(dir, verdict())
+      appendFileSync(
+        journalPath(dir)!,
+        '{"kind":"x"}\n{"kind":"x","subject":"oops"}\n{"kind":"x","subject":null}\n{"kind":"x","subject":{}}\n'
+      )
+      const rows = readJournal(dir)
+      assert.equal(rows.length, 2)
+      assert.deepEqual(rows[1]!.subject, {}) // judge-decide's empty subject is legit
+    })
+  })
 })
 
 describe('findVerdict', () => {
