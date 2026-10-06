@@ -50,6 +50,11 @@
           }
         },
         "say": "specs/sessions/bro-nkn6.md is stale vs the code it scopes — refresh it"
+      },
+      {
+        "name": "retro-on-stop",
+        "when": { "on": ["stop"] },
+        "say": "session ending — run the retro checklist (skills/retro): loose ends, hand-rolled mechanics → bd gap beads, call economy, `bro learn capture`, `bro debt collect`"
       }
     ]
   },
