@@ -27,6 +27,8 @@ import { gitTry } from './git.ts'
 import type { EventsFacade } from './events.ts'
 import type { JudgeFacade } from './judge.ts'
 import type { ReviewFacade } from './review.ts'
+import type { Guard } from './guards.ts'
+import { guardProblems } from './guards.ts'
 import type { SpecStore } from './specs.ts'
 import type { TaskRow, TaskStore, TaskStoreAsync } from './tasks.ts'
 import { bdActorAsync, taskStore, taskStoreAsync } from './tasks.ts'
@@ -148,6 +150,10 @@ export interface Connector {
    *  has only opt-in alternatives is not ambiguous, it is configured. */
   optIn?: boolean
   hooks?(ctx: ConnectorCtx): ConnectorHooks
+  /** Declarative prompt contributions (spec specs/sessions/bro-nkn6.md)
+   *  — pure declarations the guard engine evaluates centrally; a
+   *  connector never evaluates its own `when`. */
+  guards?(ctx: ConnectorCtx): Guard[]
 }
 
 // --- built-in: beads -----------------------------------------------------------
@@ -540,6 +546,96 @@ export function connectorHooks(ctx: ConnectorCtx): { name: string; hooks: Connec
     }
   }
   return out
+}
+
+/** One collected guard declaration — `guard` set means it validated;
+ *  `problems` set means a malformed contribution (connector) or a def
+ *  dropped at config parse (config defs never reach collection). */
+export interface CollectedGuard {
+  /** 'config' for repo defs, else the contributing connector's name. */
+  source: string
+  guard?: Guard
+  /** The offending declaration's name when it was readable — lets
+   *  `bro guard list` identify a skipped entry. */
+  name?: string
+  problems?: string[]
+}
+
+/** All guard declarations in resolution order — config defs first,
+ *  then connectors in registry order; a duplicate name loses to the
+ *  earlier declaration (warn + annotated, never silently). Connector
+ *  contributions fail open: throws and malformed entries are skipped. */
+export function collectGuards(ctx: ConnectorCtx, defs: Guard[] = []): CollectedGuard[] {
+  const seen = new Set<string>()
+  const out: CollectedGuard[] = []
+  const push = (source: string, guard?: Guard, problems?: string[], name?: string): void => {
+    out.push(collectRow(seen, source, guard, problems, name))
+  }
+  for (const g of defs) {
+    push('config', g)
+  }
+  for (const c of registry) {
+    collectConnectorGuards(ctx, c, push)
+  }
+  return out
+}
+
+/** One declaration → its collected row. A live guard de-dupes by name;
+ *  a `problems` carry means the row annotates a skipped entry. */
+function collectRow(
+  seen: Set<string>,
+  source: string,
+  guard: Guard | undefined,
+  problems: string[] | undefined,
+  name: string | undefined,
+): CollectedGuard {
+  if (guard !== undefined && seen.has(guard.name)) {
+    console.error(
+      `bro: guard '${guard.name}' from ${source} duplicates an earlier declaration — skipped`
+    )
+    return {
+      source,
+      name: guard.name,
+      problems: [`duplicate name — shadowed by an earlier declaration`],
+    }
+  }
+  if (guard !== undefined) {
+    seen.add(guard.name)
+  }
+  return problems === undefined ? { source, guard } : { source, name, problems }
+}
+
+/** One connector's contributions — fail open: a throwing `guards()` or
+ *  a malformed entry is warned + skipped, never fatal. */
+function collectConnectorGuards(
+  ctx: ConnectorCtx,
+  c: Connector,
+  push: (source: string, guard?: Guard, problems?: string[], name?: string) => void,
+): void {
+  let declared: Guard[] | undefined
+  try {
+    declared = c.guards?.(ctx)
+  } catch (err) {
+    console.error(`bro: connector '${c.name}' guards() threw — skipped: ${err instanceof Error ? err.message : err}`)
+    return
+  }
+  if (declared !== undefined && !Array.isArray(declared)) {
+    console.error(`bro: connector '${c.name}' guards() returned a non-array — skipped`)
+    return
+  }
+  for (const raw of declared ?? []) {
+    const problems = guardProblems(raw)
+    if (problems.length === 0) {
+      push(c.name, raw)
+      continue
+    }
+    const id = (raw as { name?: unknown } | null)?.name
+    const label = typeof id === 'string' ? `'${id}'` : '<unnamed>'
+    console.error(
+      `bro: connector '${c.name}' guard ${label} is malformed — skipped: ${problems.join('; ')}`
+    )
+    push(c.name, undefined, problems, typeof id === 'string' ? id : undefined)
+  }
 }
 
 /** Per-probe budget — a hung connector (dead network, wedged CLI) must

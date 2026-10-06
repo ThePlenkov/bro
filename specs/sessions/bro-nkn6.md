@@ -125,10 +125,11 @@ contribution is skipped with a warn line, never a crash).
 - **Connector contribution** — `Connector` gains
   `guards?(ctx: ConnectorCtx): Guard[]`, collected by a `collectGuards`
   mirroring `connectorHooks`: every registered connector's declarations,
-  fail-open per connector under `PROBE_TIMEOUT_MS`. Declarations are
-  data — collection stays cheap; *evaluation* is centralized in the
-  engine, not in the connector (the 4s probe bound protects
-  declaration, and state probes never run inside a connector).
+  fail-open per connector. `guards()` runs synchronously and is not
+  bounded by `PROBE_TIMEOUT_MS`; each declaration must return promptly.
+  Declarations are data — collection stays cheap; *evaluation* is
+  centralized in the engine, not in the connector; state probes never
+  run inside a connector.
 - **Repo config** — `bro.config.json` gains a `guard` section; `defs`
   is the repo's own guard list so a project can nudge without shipping
   a connector:
@@ -239,7 +240,9 @@ errors, 0 on FIRE.
 ## Filetree
 
 ```text
-packages/guard/src/guard.ts       Guard/GuardWhen schema, guardProblems, slug
+packages/core/src/guards.ts       Guard/GuardWhen schema + guardProblems — the
+                                  seam types live beside Connector, which owns
+                                  guards?; @broject/guard re-exports them
 packages/guard/src/probes.ts      state predicate impls — diff/branch/armed/exists
 packages/guard/src/engine.ts      collect→evaluate→budget→fired-set, per event
 packages/guard/src/config.ts      `guard` config section (enabled/maxPerEvent/defs)
@@ -254,7 +257,7 @@ skills/guard/SKILL.md                 policy only — mechanics live in the CLI
 ## Plan
 
 - [ ] bro-nkn6.1 this spec
-- [ ] guard schema + `guard` config section + `collectGuards` seam
+- [x] guard schema + `guard` config section + `collectGuards` seam
       (`Connector.guards?`, config defs, dedup/warn rules) +
       `bro guard list`
 - [ ] state probes (diff/branch/armed/exists) + engine evaluation +
