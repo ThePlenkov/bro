@@ -115,18 +115,19 @@ describe('act rearm', () => {
     // marker lands a tick after rearm returns — poll, don't assume.
     const wd = join(main, '.git', 'bro', 'watches')
     type Marker = { pr: number; pid: number; merge: boolean; cleanup: boolean }
-    let live: Marker | null = null
-    const deadline = Date.now() + 10_000
-    while (live === null && Date.now() < deadline) {
-      for (const f of readdirSync(wd)) {
-        const w = JSON.parse(readFileSync(join(wd, f), 'utf8')) as Marker
-        if (w.pid === pid) live = w
+    const pollMarker = async (): Promise<Marker | null> => {
+      const deadline = Date.now() + 10_000
+      while (Date.now() < deadline) {
+        for (const f of readdirSync(wd)) {
+          const w = JSON.parse(readFileSync(join(wd, f), 'utf8')) as Marker
+          if (w.pid === pid) return w
+        }
+        await new Promise((res) => setTimeout(res, 50))
       }
-      if (live === null) await new Promise((res) => setTimeout(res, 50))
+      return null
     }
-    if (live === null) {
-      assert.fail('respawned watcher never wrote its marker')
-    }
+    const live = await pollMarker()
+    assert.ok(live !== null, 'respawned watcher never wrote its marker')
     assert.equal(live.pr, 7)
     assert.equal(live.merge, true)
     assert.equal(live.cleanup, true)

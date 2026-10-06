@@ -21,7 +21,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { pidAlive, procStat } from '@broject/core'
 
 export interface PendingWatch {
@@ -368,6 +368,13 @@ export function deadWatchPlan(
   >()
   for (const l of listWatches(dir)) {
     if (l.alive) {
+      continue
+    }
+    // only plain `act wait` markers (<pr>-<pid>.json) resurrect — a dead
+    // supervisor heartbeat (<pr>-<kind>-<pid>.json) belongs to a drive's
+    // own restart story; respawning it as a bare wait would degrade the
+    // coverage it recorded
+    if (basename(l.file) !== `${l.watch.pr}-${l.watch.pid}.json`) {
       continue
     }
     const cur = byPr.get(l.watch.pr)

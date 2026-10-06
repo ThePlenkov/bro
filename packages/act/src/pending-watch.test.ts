@@ -431,15 +431,18 @@ describe('hasLiveWatch', () => {
     watchHeartbeat(dir, base, 'drive')
     assert.equal(hasLiveWatch(dir, 42), true)
     assert.equal(hasLiveWatch(dir, 43), false)
+  })
+})
+
 /** Drop a dead-pid marker straight into the watches dir — the state a
  *  host reboot leaves behind. */
 function deadMarker(dir: string, w: Partial<PendingWatch> & { pr: number }): string {
   const wd = join(dir, '.git', 'bro', 'watches')
   mkdirSync(wd, { recursive: true })
-  const file = join(
-    wd,
-    `${w.pr}-2000000000-${Math.random().toString(36).slice(2)}.json`
-  )
+  // canonical wait-marker name is <pr>-<pid>.json — dead pid varies so
+  // several markers on one PR don't collide
+  const deadPid = 2_000_000_000 + Math.floor(Math.random() * 100_000)
+  const file = join(wd, `${w.pr}-${deadPid}.json`)
   writeFileSync(
     file,
     JSON.stringify({
@@ -447,7 +450,7 @@ function deadMarker(dir: string, w: Partial<PendingWatch> & { pr: number }): str
       merge: false,
       timeoutMin: 45,
       ...w,
-      pid: 2_000_000_000,
+      pid: deadPid,
       startedAt: Date.now(),
     })
   )
@@ -538,6 +541,29 @@ describe('act rearm', () => {
     const plan = deadWatchPlan(dir)
     assert.equal(plan.length, 1)
     assert.equal(plan[0]!.workdir, dir)
+  })
+
+  test('a dead supervisor heartbeat is not resurrected as a bare wait', async () => {
+    const dir = repo()
+    // <pr>-<kind>-<pid>.json — a drive heartbeat, not an act wait marker
+    const wd = join(dir, '.git', 'bro', 'watches')
+    mkdirSync(wd, { recursive: true })
+    const hb = join(wd, '13-drive-2000000001.json')
+    writeFileSync(
+      hb,
+      JSON.stringify({
+        pr: 13,
+        link: 'x',
+        pid: 2_000_000_001,
+        merge: false,
+        timeoutMin: 45,
+        startedAt: Date.now(),
+      })
+    )
+    assert.deepEqual(deadWatchPlan(dir), [])
+    const res = await rearmWatches({ dir, isOpen: async () => true, respawn: () => 1 })
+    assert.deepEqual(res, { rearmed: [], settled: [], kept: [] })
+    assert.equal(existsSync(hb), true) // the drive's own restart path owns it
   })
 
   test('a live watcher is never in the plan — parallel work, not a corpse', async () => {
