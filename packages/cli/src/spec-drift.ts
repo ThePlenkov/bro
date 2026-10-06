@@ -13,8 +13,8 @@
  *    3. neither resolves → `no-scope`.
  *  The spec's own path is always excluded (`:(exclude)<spec-path>`) —
  *  a `scope: specs/**` cannot mask its own drift. */
-import { existsSync, lstatSync, readFileSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join, sep } from 'node:path'
+import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path'
 import {
   gitDriftRef,
   gitIsAncestor,
@@ -225,11 +225,19 @@ export function driftEnv(dir: string, ref?: string): DriftEnv {
 
 const unverifiable = (id: string, detail: string): DriftRow => ({ id, state: 'unverifiable', detail })
 
+/** The `spec:` declaration marker in free text — presence is a
+ *  different question from resolution (specLinkPath): a declared link
+ *  that resolves to no local file is `unverifiable` on its own, never
+ *  tree-picked over. `bro spec drift` and the spec-drift probe share it
+ *  so both audit the same contract. */
+export const SPEC_LINK = /\bspec:\s*\S+/i
+
 /** The bead's `spec:` link target when it names a repo-relative file
  *  that exists in the checkout — a local spec the drift audit can date.
  *  URLs, escapes, absolute paths, and prose mentions (`spec: linked
- *  external docs`) yield undefined: there is no local file to date
- *  (unverifiable), and the tree pick still gets its say. Trailing
+ *  external docs`) yield undefined: there is no local file to date —
+ *  for a bead that *declared* `spec:` the callers fail closed there
+ *  (the tree pick substitutes only when nothing was declared). Trailing
  *  delimiters are stripped — the target often sits inside parentheses. */
 export function specLinkPath(dir: string, desc: string | undefined): string | undefined {
   const t = /\bspec:\s*(\S+)/i.exec(desc ?? '')?.[1]?.replace(/[)\].,;:'"]+$/, '')
@@ -246,13 +254,28 @@ export function localSpecPath(dir: string, target: string): string | undefined {
     /^[a-z][a-z0-9+.-]*:/i.test(target) ||
     badScopeEntry(target) ||
     !existsSync(join(dir, target)) ||
-    !lstatSync(join(dir, target)).isFile()
+    !lstatSync(join(dir, target)).isFile() ||
+    escapesRepo(dir, target)
   ) {
     return undefined
   }
   // `spec: ./…` must normalize to the tracked path — git pathspecs
   // never match a leading `./`
   return target.replace(/^(?:\.[/\\])+/, '')
+}
+
+/** `lstatSync` vets only the final component — `linked/spec.md` with
+ *  `linked` a symlink outside the repo passes every lexical check while
+ *  its frontmatter scope is read off-repo. realpath both ends so a
+ *  symlinked `dir` itself (linked worktrees, macOS /tmp) isn't a false
+ *  reject; an unresolvable path fails closed as an escape. */
+function escapesRepo(dir: string, target: string): boolean {
+  try {
+    const rel = relative(realpathSync(dir), realpathSync(join(dir, target)))
+    return rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)
+  } catch {
+    return true
+  }
 }
 
 /** One drift row for bead `id` — every failure mode is a row, never a

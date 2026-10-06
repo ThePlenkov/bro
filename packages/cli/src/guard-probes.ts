@@ -7,7 +7,7 @@
  */
 import { facade, loadConfig, specStore, type SpecStore, type TaskStore } from '@broject/core'
 import type { NamedProbe, ProbeResult } from '@broject/guard'
-import { driftEnv, driftRow, localSpecPath, specLinkPath } from './spec-drift.ts'
+import { driftEnv, driftRow, localSpecPath, specLinkPath, SPEC_LINK } from './spec-drift.ts'
 
 /** `spec-drift` — the bro-fvhz freshness audit as a guard predicate.
  *
@@ -15,6 +15,9 @@ import { driftEnv, driftRow, localSpecPath, specLinkPath } from './spec-drift.ts
  *             scope comes from the file's own frontmatter.
  *  args.id:   drift a bead — its `spec:` link wins, else the tree pick;
  *             when the spec lacks frontmatter, `(<id>)` commits scope it.
+ *             A declared `spec:` resolving to no local file fails closed
+ *             (unverifiable) — the tree pick must not substitute a spec
+ *             the bead never declared, same as `bro spec drift`.
  *  args.ref:  comparison ref override (default: driftEnv's origin/HEAD
  *             → main → HEAD chain).
  *
@@ -69,7 +72,14 @@ const specDrift: NamedProbe = (args, dir): ProbeResult => {
   if (row0 === undefined) {
     return { ok: false, detail: `no bead ${idArg}` }
   }
-  const row = driftRow(dir, idArg!, spec, driftEnv(dir, ref), specLinkPath(dir, row0.description))
+  // a declared `spec:` that resolves to no local file is unverifiable
+  // on its own — the tree pick must not silently substitute a spec the
+  // bead never declared (same contract as `bro spec drift`)
+  const link = specLinkPath(dir, row0.description)
+  if (SPEC_LINK.test(row0.description ?? '') && link === undefined) {
+    return { ok: false, detail: 'unverifiable — no local spec file to date' }
+  }
+  const row = driftRow(dir, idArg!, spec, driftEnv(dir, ref), link)
   return { ok: row.state === 'STALE', detail: `${row.state} — ${row.detail}` }
 }
 
