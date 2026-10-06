@@ -17,12 +17,21 @@
  */
 import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { ConfigSection } from './config.ts'
-import { acquireFileLock } from './filelock.ts'
+import { acquireFileLock, LockTimeout, withFileLock } from './filelock.ts'
 import { gitTry } from './git.ts'
+import { pidAlive } from './proc.ts'
 
 export type AgentState = 'spawned' | 'running' | 'exited' | 'lost' | 'stopped' | 'blocked'
 
@@ -319,6 +328,9 @@ export interface AgentRegistryEntry {
   provider?: string
   model?: string
   acpSessionId?: string
+  /** Session-kind lane the run was admitted under ('devin') — written at
+   *  spawn so status/debug can see which quota a live agent consumes. */
+  sessionKind?: string
   [key: string]: unknown
 }
 
@@ -561,55 +573,226 @@ export function rebindStep(beadsDir: string, molStep: string, actor: string): vo
 /** The devin CLI's session-lock dir — `$XDG_DATA_HOME/devin/cli/
  *  session_locks` (its own state plane: every local devin session —
  *  interactive, `-p`, `acp` — drops a `<name>.lock` holding its pid).
- *  `agents.devin.lockDir` overrides for odd installs/tests. */
-export function devinLocksDir(lockDir?: string): string {
+ *  `agents.devin.lockDir` overrides for odd installs/tests. `env` is
+ *  the environment the derivation reads — a worker spawned with its
+ *  own XDG_DATA_HOME/HOME resolves a different dir. */
+export function devinLocksDir(
+  lockDir?: string,
+  env: NodeJS.ProcessEnv = process.env
+): string {
   if (typeof lockDir === 'string' && lockDir.trim() !== '') {
     return lockDir
   }
-  const xdg = process.env['XDG_DATA_HOME']
-  const base = xdg !== undefined && xdg.trim() !== '' ? xdg : join(homedir(), '.local', 'share')
+  const xdg = env['XDG_DATA_HOME']
+  const home = env['HOME']
+  const base =
+    xdg !== undefined && xdg.trim() !== ''
+      ? xdg
+      : join(
+          home !== undefined && home.trim() !== '' ? home : homedir(),
+          '.local',
+          'share'
+        )
   return join(base, 'devin', 'cli', 'session_locks')
+}
+
+/** Every dir the admission scan must cover: the resolved lock dir
+ *  plus the worker's own effective one — `spec.env` can hand the
+ *  spawned session a different XDG_DATA_HOME/HOME, and its devin lock
+ *  lands THERE, invisible to a scan of only the spawner's dir. The
+ *  quota stays per-account: sessions under other OS users' homes are
+ *  unreadable and out of scope. */
+export function devinLocksDirs(
+  lockDir?: string,
+  workerEnv?: Record<string, string>
+): string[] {
+  const dirs = [devinLocksDir(lockDir)]
+  if (workerEnv !== undefined) {
+    const eff = devinLocksDir(undefined, { ...process.env, ...workerEnv })
+    if (eff !== dirs[0]) {
+      dirs.push(eff)
+    }
+  }
+  return dirs
 }
 
 /** Live devin sessions on this host — lock files whose pid is alive,
  *  deduplicated (a resumed session holds a second lock for the same
- *  process). Missing dir/unreadable lock/non-pid content counts as
- *  nothing: no devin install → zero sessions. Cloud-side sessions
- *  (devin_session_create via MCP) never write a local lock — this is a
- *  host-local count, the blind spot is documented. */
-export function countDevinSessions(lockDir?: string): number {
-  const dir = devinLocksDir(lockDir)
-  let names: string[]
-  try {
-    names = readdirSync(dir)
-  } catch {
-    return 0
-  }
+ *  process). A missing dir means no devin install → zero sessions; any
+ *  OTHER read failure throws SpawnError('unavailable') — an unverifiable
+ *  quota must fail closed, never silently admit past the cap. Same
+ *  rule per lock file: one that vanished mid-scan was never counted,
+ *  one that can't be read (EACCES, EISDIR) fails the count.
+ *  Non-pid content counts nothing — a strict digit check keeps a
+ *  corrupt `123oops`/`0x10` lock from aliasing an unrelated live pid.
+ *  Cloud-side sessions (devin_session_create via MCP) never write a
+ *  local lock — this is a host-local count, the blind spot is
+ *  documented. Accepts one dir or several (the worker's effective
+ *  env can put its locks elsewhere — see devinLocksDirs). */
+export function countDevinSessions(lockDir?: string | string[]): number {
+  const dirs = Array.isArray(lockDir) ? lockDir : [devinLocksDir(lockDir)]
   const live = new Set<number>()
-  for (const name of names) {
-    if (!name.endsWith('.lock')) {
-      continue
-    }
-    let pid: number
+  for (const dir of dirs) {
+    let names: string[]
     try {
-      pid = Number.parseInt(readFileSync(join(dir, name), 'utf8').trim(), 10)
-    } catch {
-      continue
-    }
-    if (!Number.isInteger(pid) || pid <= 0) {
-      continue
-    }
-    try {
-      process.kill(pid, 0)
-      live.add(pid)
+      names = readdirSync(dir)
     } catch (err) {
-      // EPERM: the process lives but isn't ours — still a live session
-      if ((err as NodeJS.ErrnoException).code === 'EPERM') {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        continue
+      }
+      throw new SpawnError(`cannot verify devin session count — ${dir}: ${(err as Error).message}`, 'unavailable')
+    }
+    for (const name of names) {
+      if (!name.endsWith('.lock')) {
+        continue
+      }
+      let raw: string
+      try {
+        raw = readFileSync(join(dir, name), 'utf8').trim()
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          continue
+        }
+        throw new SpawnError(`cannot verify devin session count — ${dir}/${name}: ${(err as Error).message}`, 'unavailable')
+      }
+      if (!/^\d+$/.test(raw)) {
+        continue
+      }
+      const pid = Number.parseInt(raw, 10)
+      if (pidAlive(pid)) {
         live.add(pid)
       }
     }
   }
   return live.size
+}
+
+// --- spawn reservations --------------------------------------------------------
+
+/** How long a claimed-but-not-yet-locked devin session counts. The real
+ *  devin lock lands within seconds of the child starting; 120s covers
+ *  that handoff plus failure cleanup, then the file self-expires. */
+export const DEVIN_RESERVATION_TTL_MS = 120_000
+
+/** Host-shared reservation dir — `$XDG_DATA_HOME/bro/devin-reservations`.
+ *  Cross-repo by construction: every bro process on this host admits
+ *  against the same set, closing the window between "count says headroom"
+ *  and "the spawned devin wrote its own lock". */
+export function devinReservationsDir(resDir?: string): string {
+  if (typeof resDir === 'string' && resDir.trim() !== '') {
+    return resDir
+  }
+  const xdg = process.env['XDG_DATA_HOME']
+  const base = xdg !== undefined && xdg.trim() !== '' ? xdg : join(homedir(), '.local', 'share')
+  return join(base, 'bro', 'devin-reservations')
+}
+
+/** Fresh reservations — files younger than the TTL count as claimed
+ *  slots; stale files are reaped in passing. A missing dir is zero
+ *  reservations; other read failures throw 'unavailable', same
+ *  fail-closed rule as the lock scan. */
+export function countDevinReservations(resDir?: string): number {
+  const dir = devinReservationsDir(resDir)
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return 0
+    }
+    throw new SpawnError(`cannot verify devin reservations — ${dir}: ${(err as Error).message}`, 'unavailable')
+  }
+  const now = Date.now()
+  let fresh = 0
+  for (const name of names) {
+    if (!name.endsWith('.lock')) {
+      continue
+    }
+    const path = join(dir, name)
+    try {
+      if (now - statSync(path).mtimeMs < DEVIN_RESERVATION_TTL_MS) {
+        fresh++
+      } else {
+        rmSync(path, { force: true })
+      }
+    } catch {
+      // stat raced a reap — ignore
+    }
+  }
+  return fresh
+}
+
+/** Claim a host-wide slot — the filename carries a random suffix, so a
+ *  same-named spawn from another repo never overwrites a live claim.
+ *  Returns the reservation path for release on failure. */
+export function reserveDevinSession(resDir: string | undefined, key: string): string {
+  const dir = devinReservationsDir(resDir)
+  mkdirSync(dir, { recursive: true })
+  const path = join(dir, `${key}-${randomBytes(4).toString('hex')}.lock`)
+  writeFileSync(path, String(Date.now()), { flag: 'wx' })
+  return path
+}
+
+/** Drop a reservation — spawn-failure cleanup; on success the file is
+ *  left to expire behind the devin child's own lock. */
+export function releaseDevinSession(path: string): void {
+  rmSync(path, { force: true })
+}
+
+/** Atomic host-wide admission: the session+reservation count and the
+ *  claim write run under ONE mutex shared by every repo — the agents
+ *  registry lock is per-repo and cannot serialize this, so without it
+ *  two spawns each count below the cap and both start. Returns the
+ *  reservation path — released by the caller when the spawn fails
+ *  before a session exists; a landed session needs no release (its
+ *  own lock is the count, the file ages out). Throws SpawnError —
+ *  'config' when the cap is misconfigured, 'cap' when full,
+ *  'unavailable' when the count can't be established or the mutex
+ *  outlives its wait. */
+export function admitDevinSession(
+  quota: {
+    maxSessions: number
+    lockDir?: string
+    reservationsDir?: string
+    invalid?: boolean
+  },
+  opts: { key: string; molStep?: string; workerEnv?: Record<string, string> }
+): string {
+  const resDir = devinReservationsDir(quota.reservationsDir)
+  try {
+    return withFileLock(
+      join(resDir, 'admission.lock'),
+      () => {
+        if (quota.invalid === true) {
+          // a present-but-unparsable cap is a config bug — refuse
+          // loudly rather than spawn past a quota the operator armed
+          throw new SpawnError(
+            `agents.devin.maxSessions must be a positive integer` +
+              (opts.molStep !== undefined ? ` — spawn of ${opts.molStep} refused` : ''),
+            'config'
+          )
+        }
+        const live =
+          countDevinSessions(devinLocksDirs(quota.lockDir, opts.workerEnv)) +
+          countDevinReservations(quota.reservationsDir)
+        if (live >= quota.maxSessions) {
+          throw new SpawnError(
+            `devin session quota reached — ${live}/${quota.maxSessions} live sessions ` +
+              `(agents.devin.maxSessions in bro.config)` +
+              (opts.molStep !== undefined ? ` — spawn of ${opts.molStep} refused` : ''),
+            'cap'
+          )
+        }
+        return reserveDevinSession(quota.reservationsDir, opts.key)
+      },
+      { label: 'devin session quota admission' }
+    )
+  } catch (err) {
+    if (err instanceof LockTimeout) {
+      throw new SpawnError(`devin quota admission lock held — ${err.message}`, 'unavailable')
+    }
+    throw err
+  }
 }
 
 export interface DevinSessionQuota {
@@ -619,6 +802,12 @@ export interface DevinSessionQuota {
   /** `agents.devin.lockDir` — override for the lock scan (tests, odd
    *  installs). */
   lockDir?: string
+  /** `agents.devin.reservationsDir` — override for the reservation scan. */
+  reservationsDir?: string
+  /** `maxSessions` was present but not a positive integer — a config
+   *  typo must surface as an error at admission, never silently
+   *  unguard the quota. */
+  invalid?: boolean
 }
 
 /** `agents.devin` → the quota a devin-session spawn must fit under.
@@ -632,10 +821,20 @@ export function devinSessionQuota(
     return undefined
   }
   const max = bag['maxSessions']
-  const maxSessions =
-    typeof max === 'number' && Number.isInteger(max) && max > 0 ? max : 0
   const lockDir = typeof bag['lockDir'] === 'string' ? bag['lockDir'] : undefined
-  return maxSessions > 0 ? { maxSessions, lockDir } : undefined
+  const reservationsDir =
+    typeof bag['reservationsDir'] === 'string' ? bag['reservationsDir'] : undefined
+  if (max === undefined || max === 0) {
+    // absent or an explicit 0 — the deliberate "off", same convention as
+    // fleet.maxConcurrent
+    return undefined
+  }
+  if (typeof max !== 'number' || !Number.isInteger(max) || max < 0) {
+    // the key exists — a typo silently disabling the guard is the worst
+    // outcome; mark it so admission refuses with a config error
+    return { maxSessions: 0, lockDir, reservationsDir, invalid: true }
+  }
+  return { maxSessions: max, lockDir, reservationsDir }
 }
 
 // --- config --------------------------------------------------------------------

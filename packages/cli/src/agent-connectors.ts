@@ -37,9 +37,12 @@ import {
   claimStep,
   classifyExitCause,
   commandCliName,
+  countDevinReservations,
   countDevinSessions,
   DEFAULT_CONFIG,
   devinSessionQuota,
+  releaseDevinSession,
+  reserveDevinSession,
   gitTry,
   isAgentCause,
   loadConfig,
@@ -999,12 +1002,28 @@ function enforceFleetCap(
  *  'conflict' — callers wait for a slot, same as the fleet ceiling. */
 function enforceSessionQuota(
   spec: SpawnSpec,
-  quota: { kind: 'devin'; max: number; lockDir?: string } | undefined
+  quota:
+    | { kind: 'devin'; max: number; lockDir?: string; reservationsDir?: string; invalid?: boolean }
+    | undefined
 ): void {
-  if (quota === undefined || quota.max <= 0) {
+  if (quota === undefined) {
     return
   }
-  const live = countDevinSessions(quota.lockDir)
+  if (quota.invalid === true) {
+    // a present-but-unparsable cap is a config bug — refuse loudly
+    // rather than spawn past a quota the operator thinks is armed
+    throw new SpawnError(
+      `agents.devin.maxSessions must be a positive integer — spawn of ${spec.molStep} refused`,
+      'config'
+    )
+  }
+  if (quota.max <= 0) {
+    return
+  }
+  // locks (live devin sessions, any repo) + reservations (admitted
+  // spawns whose devin lock hasn't landed yet) — the union is what a
+  // concurrent admission anywhere on this host must see
+  const live = countDevinSessions(quota.lockDir) + countDevinReservations(quota.reservationsDir)
   if (live >= quota.max) {
     throw new SpawnError(
       `devin session quota reached — ${live}/${quota.max} live sessions ` +
@@ -1027,9 +1046,11 @@ export function sessionKindOf(
   if (declared === 'devin') {
     return 'devin'
   }
+  // an argv worker's argv[0] is the DRIVER (bro acp-worker, npx) — the
+  // wrapped agent's own cli rides cliName; argv0 is only the fallback
   const cli =
     spec.worker?.kind === 'argv'
-      ? commandCliName(spec.worker.argv[0] ?? '')
+      ? commandCliName(spec.worker.cliName ?? spec.worker.argv[0] ?? '')
       : commandCliName(spec.worker?.kind === 'template' ? spec.worker.command : command)
   return cli === 'devin' ? 'devin' : undefined
 }
@@ -1042,15 +1063,34 @@ export function sessionQuotaOf(
   backend: string,
   spec: SpawnSpec,
   command: string
-): { kind: 'devin'; max: number; lockDir?: string } | undefined {
+):
+  | { kind: 'devin'; max: number; lockDir?: string; reservationsDir?: string; invalid?: boolean }
+  | undefined {
   const kind = sessionKindOf(env, backend, spec, command)
   if (kind !== 'devin') {
     return undefined
   }
   const quota = devinSessionQuota(env.agents)
-  return quota === undefined
-    ? undefined
-    : { kind, max: quota.maxSessions, lockDir: quota.lockDir }
+  if (quota === undefined) {
+    return undefined
+  }
+  const out: {
+    kind: 'devin'
+    max: number
+    lockDir?: string
+    reservationsDir?: string
+    invalid?: boolean
+  } = { kind, max: quota.maxSessions }
+  if (quota.lockDir !== undefined) {
+    out.lockDir = quota.lockDir
+  }
+  if (quota.reservationsDir !== undefined) {
+    out.reservationsDir = quota.reservationsDir
+  }
+  if (quota.invalid === true) {
+    out.invalid = true
+  }
+  return out
 }
 
 /** The shared spawn prologue every built-in backend runs under the
@@ -1169,10 +1209,14 @@ function prepareSpawn(
     cap?: { max: number; env: AgentConnectorEnv }
     /** Session-kind admission — the spawn consumes a `kind` session
      *  ('devin') and refuses when live sessions already hit `max`.
-     *  Checked after the fleet cap, still before any write. */
-    sessionQuota?: { kind: 'devin'; max: number; lockDir?: string }
+     *  Checked after the fleet cap, still before any write. A passing
+     *  check immediately writes a host-shared reservation so the next
+     *  admission anywhere on this host sees the claimed slot. */
+    sessionQuota?:
+      | { kind: 'devin'; max: number; lockDir?: string; reservationsDir?: string; invalid?: boolean }
+      | undefined
   }
-): { agentId: string; promptFile: string; log: string; exitFile: string } {
+): { agentId: string; promptFile: string; log: string; exitFile: string; reservation?: string } {
   const registry = readAgentRegistry(dir)
   const existing = registry[spec.molStep]
   guardExistingEntry(dir, home, backend, spec, existing, opts)
@@ -1189,6 +1233,15 @@ function prepareSpawn(
     existing !== undefined && SAFE_AGENT_ID.test(existing.agentId)
       ? existing.agentId
       : mintAgentId(backend)
+  // the slot is OURS now — claim it host-wide before any write, so a
+  // concurrent spawn in another repo can't see phantom headroom; the
+  // backend releases it on failure, the TTL retires it behind the
+  // devin child's own lock on success
+  const reservation =
+    opts.sessionQuota !== undefined
+      ? reserveDevinSession(opts.sessionQuota.reservationsDir, agentId)
+      : undefined
+  try {
   mkdirSync(home, { recursive: true })
   const promptFile = join(home, `${agentId}.prompt.md`)
   const log = join(home, `${agentId}.log`)
@@ -1236,6 +1289,9 @@ function prepareSpawn(
     // the acp driver patches the real session id after session/new —
     // clear the previous run's so it never masquerades as this run's
     acpSessionId: undefined,
+    // the session kind this run consumed — the quota lane it was
+    // admitted under; absent for non-kind spawns
+    sessionKind: opts.sessionQuota?.kind,
     ...opts.entry?.(agentId),
   })
   if (claimed) {
@@ -1246,7 +1302,15 @@ function prepareSpawn(
   if (opts.claimAs !== undefined) {
     rebindStep(spec.beadsDir, spec.molStep, opts.claimAs)
   }
-  return { agentId, promptFile, log, exitFile }
+  return { agentId, promptFile, log, exitFile, reservation }
+  } catch (err) {
+    // a write/claim failure after the reservation — the caller never saw
+    // the key, so this is the only place that can hand the slot back
+    if (reservation !== undefined) {
+      releaseDevinSession(reservation)
+    }
+    throw err
+  }
 }
 
 /** Exit status the wrapper dropped at `<agentId>.exit` — absent when the
@@ -1491,11 +1555,17 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       // fleet memo exists: a slow beads store must not hold the lock.
       const mol = stepParent(spec.beadsDir, spec.molStep)
       return withAgentRegistryLock(dir, () => {
-        const { agentId, promptFile, log, exitFile } = prepareSpawn(dir, home, 'native', spec, {
-          isLive: (e) => nativeState(dir, home, spec.molStep, e) === 'running',
-          cap: { max: fleetCapOf(env), env },
-          sessionQuota: sessionQuotaOf(env, 'native', spec, command),
-        })
+        const { agentId, promptFile, log, exitFile, reservation } = prepareSpawn(
+          dir,
+          home,
+          'native',
+          spec,
+          {
+            isLive: (e) => nativeState(dir, home, spec.molStep, e) === 'running',
+            cap: { max: fleetCapOf(env), env },
+            sessionQuota: sessionQuotaOf(env, 'native', spec, command),
+          }
+        )
         const fd = openSync(log, 'a')
         let spawned: AgentRegistryEntry
         try {
@@ -1560,6 +1630,11 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 return
               }
               patchAgentRegistry(dir, spec.molStep, { spawnError: err.message })
+              // the devin session never started — hand the slot back now
+              // rather than block peers for the reservation's whole TTL
+              if (reservation !== undefined) {
+                releaseDevinSession(reservation)
+              }
             } catch {
               // the entry may not have landed yet — nothing else to do
             }
@@ -1576,6 +1651,12 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 : null,
           })
           writeWorkMarker(dir, agentId, spec.molStep, child.pid)
+        } catch (err) {
+          // sync failure after the reservation — hand the slot back
+          if (reservation !== undefined) {
+            releaseDevinSession(reservation)
+          }
+          throw err
         } finally {
           closeSync(fd)
         }
@@ -1828,28 +1909,34 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // the session name derives from the agentId prepareSpawn
         // resolves — entry callback, not a precomputed name, because a
         // tampered entry's unsafe id is reminted inside
-        const { agentId, promptFile, log, exitFile } = prepareSpawn(dir, home, 'tmux', spec, {
-          isLive: (e) => {
-            const n = tmuxSessionName(e)
-            if (n === undefined) {
-              return false
-            }
-            const p = tmuxProbe(socket, n)
-            if (p.live === 'unknown') {
-              // an unverifiable liveness probe must not let a duplicate
-              // spawn kill-session a worker that may still be alive
-              throw new SpawnError(`cannot verify ${spec.molStep}'s tmux session — ${p.err}`, 'unavailable')
-            }
-            if (p.live === 'running') {
-              touchWorkMarker(dir, e.agentId)
-            }
-            return p.live === 'running'
-          },
-          liveDetail: (e) => `session ${tmuxSessionName(e) ?? '?'}`,
-          entry: (id) => ({ session: `bro-${id}` }),
-          cap: { max: fleetCapOf(env), env },
-          sessionQuota: sessionQuotaOf(env, 'tmux', spec, command),
-        })
+        const { agentId, promptFile, log, exitFile, reservation } = prepareSpawn(
+          dir,
+          home,
+          'tmux',
+          spec,
+          {
+            isLive: (e) => {
+              const n = tmuxSessionName(e)
+              if (n === undefined) {
+                return false
+              }
+              const p = tmuxProbe(socket, n)
+              if (p.live === 'unknown') {
+                // an unverifiable liveness probe must not let a duplicate
+                // spawn kill-session a worker that may still be alive
+                throw new SpawnError(`cannot verify ${spec.molStep}'s tmux session — ${p.err}`, 'unavailable')
+              }
+              if (p.live === 'running') {
+                touchWorkMarker(dir, e.agentId)
+              }
+              return p.live === 'running'
+            },
+            liveDetail: (e) => `session ${tmuxSessionName(e) ?? '?'}`,
+            entry: (id) => ({ session: `bro-${id}` }),
+            cap: { max: fleetCapOf(env), env },
+            sessionQuota: sessionQuotaOf(env, 'tmux', spec, command),
+          }
+        )
         const session = `bro-${agentId}`
         // a leftover session with our name (crash between entry and
         // kill, a respawn over a zombie) would make new-session fail
@@ -1912,6 +1999,9 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         ])
         if (res.code !== 0) {
           rmSync(envFile, { force: true }) // a failed spawn must not leave ambient env on disk
+          if (reservation !== undefined) {
+            releaseDevinSession(reservation)
+          }
           try {
             patchAgentRegistry(dir, spec.molStep, { spawnError: res.err })
           } catch {
@@ -2222,6 +2312,27 @@ function gcConfigDir(dir: string, env: AgentConnectorEnv): string | null {
   return home === null ? null : dirname(home) + '/gascity'
 }
 
+/** The command a Gas City actually runs — `initCity` writes city.toml
+ *  once and never rewrites, so for an existing city the EFFECTIVE
+ *  provider command is the stored one, not today's config. Falls back
+ *  to the configured command when no toml exists or it can't be read. */
+function gcEffectiveCommand(city: string | null, configured: string): string {
+  if (city === null) {
+    return configured
+  }
+  try {
+    const toml = readFileSync(join(city, 'city.toml'), 'utf8')
+    const m = toml.match(/^command\s*=\s*"((?:[^"\\]|\\.)*)"/m)
+    if (m?.[1] !== undefined) {
+      // tomlStr wrote it — the same escape contract reads it back
+      return JSON.parse(`"${m[1]}"`) as string
+    }
+  } catch {
+    // unreadable/malformed toml → admit against the configured command
+  }
+  return configured
+}
+
 /** gascity claims a configDir layout — an authored city.toml at the
  *  resolved configDir is the marker (spec: agents.gascity.configDir).
  *  Factory-level: resolution probes this without constructing. */
@@ -2503,7 +2614,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       const mol = stepParent(spec.beadsDir, spec.molStep)
       return withAgentRegistryLock(dir, () => {
         const existing = readAgentRegistry(dir)[spec.molStep]
-        const { agentId, promptFile } = prepareSpawn(dir, home, 'gascity', spec, {
+        const { agentId, promptFile, reservation } = prepareSpawn(dir, home, 'gascity', spec, {
           isLive: (e) => {
             const { sessions, err } = listGcSessions(city)
             if (sessions === undefined) {
@@ -2520,7 +2631,9 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           entry: () => ({ sessionId: undefined }),
           claimAs: spec.molStep,
           cap: { max: fleetCapOf(env), env },
-          sessionQuota: sessionQuotaOf(env, 'gascity', spec, command),
+          // the quota admits against what gc will actually RUN — the
+          // command pinned in city.toml at init, not today's config
+          sessionQuota: sessionQuotaOf(env, 'gascity', spec, gcEffectiveCommand(city, command)),
         })
         let sessionId: string | undefined
         try {
@@ -2531,6 +2644,9 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           // retry can't run alongside a zombie, then record the failure.
           if (sessionId !== undefined) {
             gcRun(['session', 'close', sessionId, '--city', city])
+          }
+          if (reservation !== undefined) {
+            releaseDevinSession(reservation)
           }
           patchAgentRegistry(dir, spec.molStep, {
             sessionId,

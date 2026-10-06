@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   utimesSync,
@@ -20,7 +21,9 @@ import {
   bdAt,
   claimStep,
   classifyExitCause,
+  countDevinReservations,
   countDevinSessions,
+  DEVIN_RESERVATION_TTL_MS,
   devinLocksDir,
   devinSessionQuota,
   mintAgentId,
@@ -28,6 +31,8 @@ import {
   probeStep,
   readAgentRegistry,
   rebindStep,
+  releaseDevinSession,
+  reserveDevinSession,
   SpawnError,
   withAgentRegistryLock,
   writeAgentRegistry,
@@ -586,12 +591,65 @@ describe('countDevinSessions', () => {
       // non-numeric content and non-lock files are skipped entirely
       writeFileSync(join(dir, 'junk.lock'), 'not-a-pid')
       writeFileSync(join(dir, 'note.txt'), String(process.pid))
+      // strict pid parse — '123abc' is NOT 123; a trailing-garbage lock
+      // must not collapse onto an innocent process's pid
+      writeFileSync(join(dir, 'partial.lock'), `${process.pid}garbage`)
       assert.equal(countDevinSessions(dir), 1)
     })
   })
 
   test('a missing lock dir reads as zero sessions', () => {
     assert.equal(countDevinSessions(join(tmpdir(), 'bro-devin-locks-absent-')), 0)
+  })
+
+  test('an unreadable lock dir fails closed — refuse, never pretend zero', () => {
+    // a path where readdirSync fails non-ENOENT: a file posing as the dir
+    const file = join(mkdtempSync(join(tmpdir(), 'bro-devin-nodir-')), 'notdir')
+    writeFileSync(file, 'x')
+    assert.throws(() => countDevinSessions(file), /not a directory|ENOTDIR/)
+  })
+})
+
+describe('devin session reservations', () => {
+  const withResvDir = (fn: (dir: string) => void): void => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-devin-resv-'))
+    try {
+      fn(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  test('reserve counts, release frees, a missing dir reads as zero', () => {
+    assert.equal(countDevinReservations(join(tmpdir(), 'bro-resv-absent-')), 0)
+    withResvDir((dir) => {
+      const key = reserveDevinSession(dir, 'native-abc123')
+      assert.equal(countDevinReservations(dir), 1)
+      releaseDevinSession(key)
+      assert.equal(countDevinReservations(dir), 0)
+    })
+  })
+
+  test('expired reservations are reaped, not counted', () => {
+    withResvDir((dir) => {
+      reserveDevinSession(dir, 'native-old')
+      const [f] = readdirSync(dir)
+      const stale = join(dir, f)
+      const past = new Date(Date.now() - DEVIN_RESERVATION_TTL_MS - 60_000)
+      utimesSync(stale, past, past)
+      assert.equal(countDevinReservations(dir), 0)
+      assert.equal(readdirSync(dir).length, 0) // reaped, not just skipped
+    })
+  })
+
+  test('same-id spawns still claim two slots — no cross-repo clobber', () => {
+    withResvDir((dir) => {
+      // two bro processes minting the same agentId in different repos
+      // must each hold a slot — a shared filename would double-admit
+      reserveDevinSession(dir, 'native-abc123')
+      reserveDevinSession(dir, 'native-abc123')
+      assert.equal(countDevinReservations(dir), 2)
+    })
   })
 })
 
@@ -613,19 +671,25 @@ describe('devinLocksDir', () => {
 })
 
 describe('devinSessionQuota', () => {
-  test('absent bag or non-positive cap → undefined', () => {
+  test('absent bag or explicit 0 → undefined (the deliberate off)', () => {
     assert.equal(devinSessionQuota(undefined), undefined)
     assert.equal(devinSessionQuota({}), undefined)
     assert.equal(devinSessionQuota({ devin: {} }), undefined)
     assert.equal(devinSessionQuota({ devin: { maxSessions: 0 } }), undefined)
-    assert.equal(devinSessionQuota({ devin: { maxSessions: '6' } }), undefined)
-    assert.equal(devinSessionQuota({ devin: { maxSessions: 6.5 } }), undefined)
   })
 
-  test('a positive integer cap + lockDir pass through', () => {
-    assert.deepEqual(devinSessionQuota({ devin: { maxSessions: 6, lockDir: '/tmp/locks' } }), {
-      maxSessions: 6,
-      lockDir: '/tmp/locks',
-    })
+  test('a present-but-malformed cap flags invalid — a typo must never silently unguard', () => {
+    assert.equal(devinSessionQuota({ devin: { maxSessions: '6' } })?.invalid, true)
+    assert.equal(devinSessionQuota({ devin: { maxSessions: 6.5 } })?.invalid, true)
+    assert.equal(devinSessionQuota({ devin: { maxSessions: -2 } })?.invalid, true)
+  })
+
+  test('a positive integer cap + dir overrides pass through', () => {
+    assert.deepEqual(
+      devinSessionQuota({
+        devin: { maxSessions: 6, lockDir: '/tmp/locks', reservationsDir: '/tmp/resv' },
+      }),
+      { maxSessions: 6, lockDir: '/tmp/locks', reservationsDir: '/tmp/resv' }
+    )
   })
 })

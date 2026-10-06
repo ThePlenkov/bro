@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import {
   agentRegistryPath,
   bdActor,
+  countDevinReservations,
   DEFAULT_CONFIG,
   patchAgentRegistry,
   procStat,
@@ -436,6 +437,46 @@ function connectorContract(b: BackendCase): void {
     }
   })
 
+  test('an admitted devin spawn holds a host-wide reservation the next admission sees', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ])
+    const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
+    const reservationsDir = mkdtempSync(join(tmpdir(), 'bro-devin-resv-'))
+    // cap 2: one live lock + one reservation = full — the second devin
+    // spawn must refuse even though its own repo registry is empty
+    writeFileSync(join(lockDir, 'other.lock'), String(process.pid))
+    const env: AgentConnectorEnv = {
+      ...f.env,
+      agents: {
+        ...f.env.agents,
+        native: { ...f.env.agents['native'], sessionKind: 'devin' },
+        tmux: { ...f.env.agents['tmux'], sessionKind: 'devin' },
+        devin: { maxSessions: 2, lockDir, reservationsDir },
+      },
+    }
+    try {
+      const c = b.make({ dir: f.main }, env)
+      const first = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+      assert.equal(first.state, 'running')
+      assert.equal(readAgentRegistry(f.main)['fx-1']?.sessionKind, 'devin')
+      // the spawned run claimed a reservation — its devin lock would
+      // land here in production; in the fixture the file IS the slot
+      assert.equal(countDevinReservations(reservationsDir), 1)
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)')),
+        /devin session quota reached — 2\/2 live sessions.*fx-2/
+      )
+      assert.equal(readAgentRegistry(f.main)['fx-2'], undefined)
+      await c.stop(first.id)
+    } finally {
+      rmSync(lockDir, { recursive: true, force: true })
+      rmSync(reservationsDir, { recursive: true, force: true })
+      cleanup(f)
+    }
+  })
+
   test('a non-devin spawn ignores the session quota entirely', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }])
     const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
@@ -493,6 +534,12 @@ function connectorContract(b: BackendCase): void {
     })
     // a devin kind with a non-devin command → still undefined
     assert.equal(sessionQuotaOf(capped, 'native', spec, 'node {promptFile}'), undefined)
+    // a malformed cap surfaces as invalid, never silently unguarded
+    const bad: AgentConnectorEnv = {
+      agents: { devin: { maxSessions: 'six' } },
+      connectors: {},
+    }
+    assert.equal(sessionQuotaOf(bad, 'native', spec, 'devin -p')?.invalid, true)
   })
 
   test('fleet.maxConcurrent 0 means uncapped', async () => {

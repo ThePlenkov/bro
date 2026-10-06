@@ -40,6 +40,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import {
   bdAt,
+  countDevinReservations,
   countDevinSessions,
   devinSessionQuota,
   readAgentRegistry,
@@ -176,18 +177,34 @@ function occupancyOf(dir: string, env: AgentConnectorEnv): FleetOccupancy {
 }
 
 /** Session-kind quotas the status surfaces — devin locks counted by
- *  unique live pid across the whole host, not just bro's registry. An
- *  empty list means `agents.devin` is unconfigured — the lock scan
- *  doesn't run at all. */
+ *  unique live pid across the whole host, not just bro's registry, plus
+ *  admitted reservations whose devin lock hasn't landed yet. An empty
+ *  list means `agents.devin` is unconfigured — the scans don't run. A
+ *  present-but-broken cap shows `invalid`; an unverifiable count shows
+ *  `live: -1` rather than pretending zero. */
 export interface SessionQuotaView {
   kind: string
   live: number
   max: number
+  invalid?: boolean
 }
 
 function sessionQuotaViewsOf(env: AgentConnectorEnv): SessionQuotaView[] {
   const q = devinSessionQuota(env.agents)
-  return q === undefined ? [] : [{ kind: 'devin', live: countDevinSessions(q.lockDir), max: q.maxSessions }]
+  if (q === undefined) {
+    return []
+  }
+  if (q.invalid === true) {
+    return [{ kind: 'devin', live: -1, max: 0, invalid: true }]
+  }
+  let live = -1
+  try {
+    live = countDevinSessions(q.lockDir) + countDevinReservations(q.reservationsDir)
+  } catch {
+    // unverifiable — the -1 renders as `?`, a scan failure must not take
+    // down the status view
+  }
+  return [{ kind: 'devin', live, max: q.maxSessions }]
 }
 
 /** `fleet: 2/3 slots occupied` — `uncapped` instead of the ceiling when
@@ -204,7 +221,11 @@ function printStatusTable(
 ): void {
   console.log(occupancyLine(occupancy))
   for (const s of sessions) {
-    console.log(`${s.kind} sessions: ${s.live}/${s.max} live`)
+    if (s.invalid === true) {
+      console.log(`${s.kind} sessions: invalid agents.devin.maxSessions — must be a positive integer`)
+    } else {
+      console.log(`${s.kind} sessions: ${s.live >= 0 ? `${s.live}/${s.max}` : `?/${s.max}`} live`)
+    }
   }
   const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'cause', 'pid', 'worktree']
   const rows = backends.flatMap(({ conn, agents }) => {
