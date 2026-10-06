@@ -113,6 +113,7 @@ export {
   parallelWorkLines,
   parallelWorkProbe,
   postToolLines,
+  preToolVerdicts,
   promptContextLines,
   registerConnector,
   reviewHost,
@@ -139,6 +140,7 @@ export type {
   FacadeOpts,
   GateContribution,
   MaybePromise,
+  PreToolVerdict,
   ProbeResult,
 } from './connectors.ts'
 export {

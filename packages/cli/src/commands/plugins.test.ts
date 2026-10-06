@@ -22,7 +22,14 @@ import {
 } from './plugins.ts'
 
 /** tmp cwd (non-repo → local target lands under it) + tmp XDG home. */
-function fixture(): { cwd: string; opts: MutateOpts; globalPath: string; localPath: string } {
+function fixture(): {
+  cwd: string
+  opts: MutateOpts
+  globalPath: string
+  localPath: string
+  globalCliPath: string
+  localCliPath: string
+} {
   const cwd = mkdtempSync(join(tmpdir(), 'bro-plugins-cwd-'))
   const xdg = mkdtempSync(join(tmpdir(), 'bro-plugins-xdg-'))
   const opts: MutateOpts = {
@@ -42,6 +49,8 @@ function fixture(): { cwd: string; opts: MutateOpts; globalPath: string; localPa
     opts,
     globalPath: join(xdg, 'opencode', 'plugins', 'bro.ts'),
     localPath: join(cwd, '.opencode', 'plugins', 'bro.ts'),
+    globalCliPath: join(xdg, 'opencode', 'plugins', 'bro-cli.ts'),
+    localCliPath: join(cwd, '.opencode', 'plugins', 'bro-cli.ts'),
   }
 }
 
@@ -77,26 +86,39 @@ describe('isBroAdapter', () => {
     assert.ok(isBroAdapter('const adapter={id:"bro",kind:"pi-extension"}\n'))
     assert.ok(!isBroAdapter('export default function x(){}\n'))
   })
+
+  test('recognizes the opencode TUI module', () => {
+    const src = new URL('../opencode-tui.ts', import.meta.url)
+    assert.ok(isBroAdapter(readFileSync(src, 'utf8')))
+    assert.ok(isBroAdapter('export default {id:"bro.cli",kind:"opencode-tui"}\n'))
+    // the cli id alone does not suffice — the kind token must be there too
+    assert.ok(!isBroAdapter('export default {id:"bro.cli",setup(){}}\n'))
+  })
 })
 
 describe('plugins install/uninstall/list', () => {
-  test('install writes both scopes; a second run reports current', () => {
+  test('install writes both scopes and both modules; a second run reports current', () => {
     const f = fixture()
     const out = installClient('opencode', ['global', 'local'], f.opts)
     assert.deepEqual(
-      out.map((o) => o.action),
-      ['installed', 'installed']
+      out.map((o) => `${o.action}:${o.path}`),
+      [
+        `installed:${f.globalPath}`,
+        `installed:${f.globalCliPath}`,
+        `installed:${f.localPath}`,
+        `installed:${f.localCliPath}`,
+      ]
     )
-    assert.ok(existsSync(f.globalPath))
-    assert.ok(existsSync(f.localPath))
     // materialized content is the shipped adapter source verbatim
     const shipped = readFileSync(new URL('../opencode.ts', import.meta.url), 'utf8')
+    const shippedCli = readFileSync(new URL('../opencode-tui.ts', import.meta.url), 'utf8')
     assert.equal(readFileSync(f.globalPath, 'utf8'), shipped)
+    assert.equal(readFileSync(f.globalCliPath, 'utf8'), shippedCli)
 
     const again = installClient('opencode', ['global', 'local'], f.opts)
     assert.deepEqual(
       again.map((o) => o.action),
-      ['current', 'current']
+      ['current', 'current', 'current', 'current']
     )
   })
 
@@ -113,7 +135,12 @@ describe('plugins install/uninstall/list', () => {
     const rows = pluginRows(f.cwd, f.opts.env).filter((r) => r.client === 'opencode')
     assert.deepEqual(
       rows.map((r) => `${r.client}:${r.scope}:${r.state}`),
-      ['opencode:global:stale', 'opencode:local:stale']
+      [
+        'opencode:global:stale',
+        'opencode:global:absent',
+        'opencode:local:stale',
+        'opencode:local:absent',
+      ]
     )
     assert.deepEqual(
       pluginRows(f.cwd, f.opts.env)
@@ -124,12 +151,13 @@ describe('plugins install/uninstall/list', () => {
 
     const out = installClient('opencode', ['global'], f.opts)
     assert.equal(out[0]!.action, 'updated')
+    assert.equal(out[1]!.action, 'installed')
     assert.equal(
       pluginRows(f.cwd, f.opts.env)
         .filter((r) => r.client === 'opencode')
         .map((r) => `${r.scope}:${r.state}`)
         .join(','),
-      'global:installed,local:stale'
+      'global:installed,global:installed,local:stale,local:absent'
     )
   })
 
@@ -138,10 +166,12 @@ describe('plugins install/uninstall/list', () => {
     const out = installClient('opencode', ['global', 'local'], { ...f.opts, dryRun: true })
     assert.deepEqual(
       out.map((o) => o.action),
-      ['would-install', 'would-install']
+      ['would-install', 'would-install', 'would-install', 'would-install']
     )
     assert.ok(!existsSync(f.globalPath))
     assert.ok(!existsSync(f.localPath))
+    assert.ok(!existsSync(f.globalCliPath))
+    assert.ok(!existsSync(f.localCliPath))
   })
 
   test('install refuses a foreign file at our slot without --force', () => {
@@ -163,7 +193,9 @@ describe('plugins install/uninstall/list', () => {
     const refused = uninstallClient('opencode', ['global', 'local'], f.opts)
     assert.deepEqual(
       refused.map((o) => o.action),
-      ['removed', 'refused']
+      // global bro.ts removed, global bro-cli.ts installed→removed, then
+      // the foreign local bro.ts refuses and its sibling is absent
+      ['removed', 'removed', 'refused', 'absent']
     )
     assert.ok(!existsSync(f.globalPath))
     assert.ok(existsSync(f.localPath))
@@ -175,7 +207,7 @@ describe('plugins install/uninstall/list', () => {
     const gone = uninstallClient('opencode', ['global', 'local'], f.opts)
     assert.deepEqual(
       gone.map((o) => o.action),
-      ['absent', 'absent']
+      ['absent', 'absent', 'absent', 'absent']
     )
   })
 
@@ -198,12 +230,16 @@ describe('plugins install/uninstall/list', () => {
         .map((r) => `${r.client}:${r.scope}:${r.state}`)
     assert.deepEqual(rowsFor('opencode'), [
       'opencode:global:absent',
+      'opencode:global:absent',
+      'opencode:local:absent',
       'opencode:local:absent',
     ])
     assert.deepEqual(rowsFor('pi'), ['pi:global:absent', 'pi:local:absent'])
     installClient('opencode', ['local'], f.opts)
     assert.deepEqual(rowsFor('opencode'), [
       'opencode:global:absent',
+      'opencode:global:absent',
+      'opencode:local:installed',
       'opencode:local:installed',
     ])
     assert.deepEqual(rowsFor('pi'), ['pi:global:absent', 'pi:local:absent'])

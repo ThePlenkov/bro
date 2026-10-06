@@ -12,10 +12,18 @@ export default defineConfig({
   // src/opencode.ts is the opencode plugin entry — its loader reads the
   // package's exports["./server"] (see packages/cli/package.json), and it
   // spawns the sibling dist/index.js rather than importing bro, so the two
-  // never share a process. src/kilo.ts and src/pi.ts are the kilo/pi
+  // never share a process. src/opencode-tui.ts is the opencode CLI/TUI
+  // plugin (exports["./tui"]). src/kilo.ts and src/pi.ts are the kilo/pi
   // adapters — same standalone module contract (pi's jiti loader reads
   // the raw .ts or the bundle).
-  entry: ['src/index.ts', 'src/plugin.ts', 'src/opencode.ts', 'src/kilo.ts', 'src/pi.ts'],
+  entry: [
+    'src/index.ts',
+    'src/plugin.ts',
+    'src/opencode.ts',
+    'src/opencode-tui.ts',
+    'src/kilo.ts',
+    'src/pi.ts',
+  ],
   format: ['esm'],
   dts: true,
   // Bundle workspace libs into the published CLI — consumers get one file.

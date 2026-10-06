@@ -523,7 +523,11 @@ function checkClientPlugins(dir: string): DoctorCheck {
   const perClient = new Map<string, string[]>()
   for (const r of rows) {
     if (r.state !== 'absent') {
-      perClient.set(r.client, [...(perClient.get(r.client) ?? []), `${r.scope}:${r.state}`])
+      // a client with several module files (opencode's bro.ts + bro-cli.ts)
+      // names the file after the scope
+      const file = basename(r.path)
+      const slot = file === 'bro.ts' ? r.scope : `${r.scope}(${file})`
+      perClient.set(r.client, [...(perClient.get(r.client) ?? []), `${slot}:${r.state}`])
     }
   }
   const detail = [...perClient.entries()].map(([c, s]) => `${c}: ${s.join(',')}`).join(' · ')

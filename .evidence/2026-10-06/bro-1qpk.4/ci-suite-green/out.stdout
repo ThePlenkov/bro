@@ -1,0 +1,71 @@
+
+> bro@0.0.0 test
+> nx run-many -t test --exclude=skills-*,plugins-*-skills-*
+
+
+ NX   Running target test for 15 projects and 15 tasks they depend on:
+
+- @broject/providers
+- @broject/convoy
+- @broject/github
+- @broject/gitlab
+- @broject/drill
+- @broject/judge
+- @broject/learn
+- @broject/retro
+- @broject/stack
+- @broject/bro-pack
+- @broject/core
+- @broject/debt
+- @broject/loop
+- @broject/act
+- @broject/bro
+
+
+✔  nx run @broject/core:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/stack:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/bro-pack:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/providers:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/debt:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/github:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/convoy:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/retro:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/learn:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/drill:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/loop:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/act:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/judge:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/gitlab:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/bro:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/debt:test
+✔  nx run @broject/github:test
+✔  nx run @broject/core:test
+✔  nx run @broject/act:test
+✔  nx run @broject/judge:test
+✔  nx run @broject/gitlab:test
+✔  nx run @broject/learn:test
+✔  nx run @broject/stack:test
+✔  nx run @broject/drill:test
+✔  nx run @broject/convoy:test
+✔  nx run @broject/retro:test
+✔  nx run @broject/loop:test
+✔  nx run @broject/bro-pack:test
+✔  nx run @broject/providers:test
+✔  nx run @broject/bro:test
+
+
+
+ NX   Successfully ran target test for 15 projects and 15 tasks they depend on
+
+Nx read the output from the cache instead of running the command for 15 out of 30 tasks.
+
+Output of 30 successful tasks were not shown. Run with --verbose or --output-style=static to see it.
+
+View logs and investigate cache misses at https://nx.app/runs/RJ23okvUSO
+
+  Run duration:      1m 53s
+  Cache:             15/30 hit (50%)
+  Critical path:     1m 21s (5 tasks)
+  Recoverable time:  31.8s (28% of the run)
+
+  Recommendation: Increase parallelism to recover up to 31.8s → https://nx.dev/docs/concepts/ci-concepts/parallelization-distribution?utm_source=nx-cli&utm_medium=cli&utm_campaign=performance-report&utm_content=parallelization.

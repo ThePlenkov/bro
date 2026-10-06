@@ -1,0 +1,68 @@
+
+> bro@0.0.0 typecheck
+> nx run-many -t typecheck --exclude=skills-*,plugins-*-skills-*
+
+
+ NX   Running target typecheck for 15 projects and 14 tasks they depend on:
+
+- @broject/providers
+- @broject/convoy
+- @broject/github
+- @broject/gitlab
+- @broject/drill
+- @broject/judge
+- @broject/learn
+- @broject/retro
+- @broject/stack
+- @broject/bro-pack
+- @broject/core
+- @broject/debt
+- @broject/loop
+- @broject/act
+- @broject/bro
+
+
+✔  nx run @broject/core:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/stack:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/bro-pack:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/providers:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/debt:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/github:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/convoy:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/retro:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/learn:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/drill:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/loop:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/act:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/judge:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/gitlab:build  [existing outputs match the cache, left as is]
+✔  nx run @broject/providers:typecheck
+✔  nx run @broject/debt:typecheck
+✔  nx run @broject/core:typecheck
+✔  nx run @broject/github:typecheck
+✔  nx run @broject/learn:typecheck
+✔  nx run @broject/judge:typecheck
+✔  nx run @broject/bro-pack:typecheck
+✔  nx run @broject/act:typecheck
+✔  nx run @broject/drill:typecheck
+✔  nx run @broject/gitlab:typecheck
+✔  nx run @broject/convoy:typecheck
+✔  nx run @broject/retro:typecheck
+✔  nx run @broject/stack:typecheck
+✔  nx run @broject/loop:typecheck
+✔  nx run @broject/bro:typecheck
+
+
+
+ NX   Successfully ran target typecheck for 15 projects and 14 tasks they depend on
+
+Nx read the output from the cache instead of running the command for 14 out of 29 tasks.
+
+Output of 29 successful tasks were not shown. Run with --verbose or --output-style=static to see it.
+
+View logs and investigate cache misses at https://nx.app/runs/3i920FbiBX
+
+  Run duration:      14.3s
+  Cache:             14/29 hit (48%)
+  Critical path:     4.4s (4 tasks)
+  Recoverable time:  9.6s (67% of the run)

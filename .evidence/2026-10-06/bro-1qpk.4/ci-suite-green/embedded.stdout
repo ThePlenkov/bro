@@ -1,0 +1,5 @@
+
+> bro@0.0.0 check:embedded
+> node scripts/check-embedded.ts
+
+embedded snapshot is current: 40 skill file(s), 2 formula(s)

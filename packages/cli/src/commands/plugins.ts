@@ -54,10 +54,20 @@ interface Registration {
   unregister(): void
 }
 
+/** A second module file installed beside the primary — opencode's TUI
+ *  plugin lands as `bro-cli.ts` next to `bro.ts`. Extras carry their own
+ *  artifact ladder; they never own a registration (where a manifest
+ *  entry exists it belongs to the primary module). */
+interface ExtraFile {
+  artifact: string | null
+  targets: Record<PluginScope, string>
+}
+
 interface ClientSpec {
   /** The shippable module's source path, or null when unresolvable. */
   artifact(cwd: string): string | null
   targets(cwd: string, env: NodeJS.ProcessEnv): Record<PluginScope, string>
+  extras?(cwd: string, env: NodeJS.ProcessEnv): ExtraFile[]
   registration?(
     scope: PluginScope,
     path: string,
@@ -115,6 +125,18 @@ function opencodeArtifact(cwd: string): string | null {
     pkg === null ? null : join(pkg, 'src', 'opencode.ts'),
     pkg === null ? null : join(pkg, 'dist', 'opencode.js'),
     root === null ? null : join(root, 'plugins', 'opencode', 'bro', 'bro.ts'),
+  ])
+}
+
+/** The TUI half's ladder mirrors the server module's — source, bundled
+ *  dist (`./tui` export → dist/opencode-tui.js), the repo artifact. */
+function opencodeTuiArtifact(cwd: string): string | null {
+  const pkg = packageRoot()
+  const root = gitRoot(cwd)
+  return firstExisting([
+    pkg === null ? null : join(pkg, 'src', 'opencode-tui.ts'),
+    pkg === null ? null : join(pkg, 'dist', 'opencode-tui.js'),
+    root === null ? null : join(root, 'plugins', 'opencode', 'bro', 'cli.ts'),
   ])
 }
 
@@ -226,6 +248,20 @@ const CLIENTS: Record<string, ClientSpec> = {
       ),
       local: join(gitRoot(cwd) ?? cwd, '.opencode', 'plugins', 'bro.ts'),
     }),
+    extras: (cwd, env) => [
+      {
+        artifact: opencodeTuiArtifact(cwd),
+        targets: {
+          global: join(
+            env.XDG_CONFIG_HOME || join(homedir(), '.config'),
+            'opencode',
+            'plugins',
+            'bro-cli.ts'
+          ),
+          local: join(gitRoot(cwd) ?? cwd, '.opencode', 'plugins', 'bro-cli.ts'),
+        },
+      },
+    ],
   },
   kilo: {
     artifact: kiloArtifact,
@@ -259,13 +295,18 @@ export function clientNames(): string[] {
 /** The materialized module's fingerprint — holds for the TS source and
  *  the compiled bundle. Each adapter family carries the same `id:"bro"`
  *  marker plus its own second token: opencode ships
- *  `export default {id:"bro",server:BroPlugin}`; the pi extension ships
+ *  `export default {id:"bro",server:BroPlugin}` (its TUI module ships
+ *  `id:"bro.cli"` + `kind:"opencode-tui"`); the pi extension ships
  *  `export const adapter = {id:"bro",kind:"pi-extension"}`. */
 export function isBroAdapter(text: string): boolean {
-  if (!/\bid:\s*["']bro["']/.test(text)) {
+  if (!/\bid:\s*["']bro(?:\.cli)?["']/.test(text)) {
     return false
   }
-  return /\bserver:\s*BroPlugin\b/.test(text) || /\bkind:\s*["']pi-extension["']/.test(text)
+  return (
+    /\bserver:\s*BroPlugin\b/.test(text) ||
+    /\bkind:\s*["']pi-extension["']/.test(text) ||
+    /\bkind:\s*["']opencode-tui["']/.test(text)
+  )
 }
 
 function stateAt(
@@ -284,19 +325,24 @@ function stateAt(
   return current && (reg === null || reg.registered) ? 'installed' : 'stale'
 }
 
-/** The client × scope matrix — `bro plugins list` and doctor's row. */
+/** The client × scope matrix — `bro plugins list` and doctor's row. A
+ *  client's extra files get their own rows, distinguished by path. */
 export function pluginRows(
   cwd: string = process.cwd(),
   env: NodeJS.ProcessEnv = process.env
 ): PluginRow[] {
   const rows: PluginRow[] = []
   for (const [name, client] of Object.entries(CLIENTS)) {
-    const artifact = client.artifact(cwd)
-    const targets = client.targets(cwd, env)
+    const files = [
+      { artifact: client.artifact(cwd), targets: client.targets(cwd, env), primary: true },
+      ...(client.extras?.(cwd, env) ?? []).map((e) => ({ ...e, primary: false })),
+    ]
     for (const scope of ['global', 'local'] as const) {
-      const path = targets[scope]
-      const reg = client.registration?.(scope, path, env) ?? null
-      rows.push({ client: name, scope, state: stateAt(path, artifact, reg), path })
+      for (const f of files) {
+        const path = f.targets[scope]
+        const reg = f.primary ? (client.registration?.(scope, path, env) ?? null) : null
+        rows.push({ client: name, scope, state: stateAt(path, f.artifact, reg), path })
+      }
     }
   }
   return rows
@@ -367,50 +413,70 @@ export function installClient(
   }
   const content = readFileSync(artifact, 'utf8')
   const targets = client.targets(opts.cwd, opts.env)
-  return scopes.map((scope): Outcome => {
-    const path = targets[scope]
-    // registration parses the manifest — a malformed one exits here,
-    // before the module file is touched
-    const reg = client.registration?.(scope, path, opts.env) ?? null
-    const needsRegistration = reg !== null && !reg.registered
-    const prior = existsSync(path) ? readFileSync(path, 'utf8') : null
-    if (prior === content && !needsRegistration) {
-      return { client: name, scope, action: 'current', path }
+  // extras with no resolvable artifact are additive surfaces — skipped,
+  // never fatal (an old dist may predate the module)
+  const extras = (client.extras?.(opts.cwd, opts.env) ?? [])
+    .filter((e): e is ExtraFile & { artifact: string } => e.artifact !== null)
+    .map((e) => ({ content: readFileSync(e.artifact, 'utf8'), targets: e.targets }))
+  const outcomes: Outcome[] = []
+  for (const scope of scopes) {
+    for (const f of [{ content, targets, primary: true }, ...extras.map((e) => ({ ...e, primary: false }))]) {
+      outcomes.push(installOne(name, scope, f, f.primary ? client : { ...client, registration: undefined }, opts))
     }
-    // a file already holding the slot that carries no bro sentinel is a
-    // foreign plugin under our name — clobbering it needs --force. A
-    // sentinel-bearing difference is a shipped version → plain update.
-    if (prior !== null && prior !== content && !isBroAdapter(prior) && !opts.force) {
-      return {
-        client: name,
-        scope,
-        action: 'refused',
-        path,
-        note: 'a foreign file holds this slot — pass --force to overwrite',
-      }
-    }
-    if (opts.dryRun) {
-      return {
-        client: name,
-        scope,
-        action: prior === null ? 'would-install' : 'would-update',
-        path,
-      }
-    }
-    if (prior !== content) {
-      atomicWrite(path, content)
-    }
-    if (needsRegistration) {
-      reg.register()
-    }
+  }
+  return outcomes
+}
+
+function installOne(
+  name: string,
+  scope: PluginScope,
+  file: { content: string; targets: Record<PluginScope, string> },
+  client: ClientSpec,
+  opts: MutateOpts
+): Outcome {
+  const { content } = file
+  const path = file.targets[scope]
+  // registration parses the manifest — a malformed one exits here,
+  // before the module file is touched
+  const reg = client.registration?.(scope, path, opts.env) ?? null
+  const needsRegistration = reg !== null && !reg.registered
+  const prior = existsSync(path) ? readFileSync(path, 'utf8') : null
+  if (prior === content && !needsRegistration) {
+    return { client: name, scope, action: 'current', path }
+  }
+  // a file already holding the slot that carries no bro sentinel is a
+  // foreign plugin under our name — clobbering it needs --force. A
+  // sentinel-bearing difference is a shipped version → plain update.
+  if (prior !== null && prior !== content && !isBroAdapter(prior) && !opts.force) {
     return {
       client: name,
       scope,
-      action: prior === null ? 'installed' : 'updated',
+      action: 'refused',
       path,
-      note: needsRegistration ? 'registered in kilo.json' : undefined,
+      note: 'a foreign file holds this slot — pass --force to overwrite',
     }
-  })
+  }
+  if (opts.dryRun) {
+    return {
+      client: name,
+      scope,
+      action: prior === null ? 'would-install' : 'would-update',
+      path,
+    }
+  }
+  if (prior !== content) {
+    atomicWrite(path, content)
+  }
+  if (needsRegistration) {
+    reg.register()
+  }
+  return {
+    client: name,
+    scope,
+    action: prior === null ? 'installed' : 'updated',
+    path,
+    note: needsRegistration ? 'registered in kilo.json' : undefined,
+  }
 }
 
 export function uninstallClient(
@@ -422,45 +488,66 @@ export function uninstallClient(
   const targets = client.targets(opts.cwd, opts.env)
   const artifact = client.artifact(opts.cwd)
   const clean = artifact === null ? null : readFileSync(artifact, 'utf8')
-  return scopes.map((scope): Outcome => {
-    const path = targets[scope]
-    const reg = client.registration?.(scope, path, opts.env) ?? null
-    if (!existsSync(path)) {
-      return absentOutcome(name, scope, path, reg, opts.dryRun)
+  // extras keep a possibly-null artifact — no artifact to compare means
+  // the sentinel check alone decides ownership, same as the primary
+  const extras = (client.extras?.(opts.cwd, opts.env) ?? []).map((e) => ({
+    clean: e.artifact === null ? null : readFileSync(e.artifact, 'utf8'),
+    targets: e.targets,
+  }))
+  const outcomes: Outcome[] = []
+  for (const scope of scopes) {
+    for (const f of [{ clean, targets, primary: true }, ...extras.map((e) => ({ ...e, primary: false }))]) {
+      outcomes.push(uninstallOne(name, scope, f, f.primary ? client : { ...client, registration: undefined }, opts))
     }
-    const wasRegistered = reg?.registered ?? false
-    const prior = readFileSync(path, 'utf8')
-    // provably ours = byte-equal to this bro's artifact. A sentinel-only
-    // match is a different version or a hand edit — indistinguishable by
-    // shape, and deletion is irreversible, so it refuses without --force
-    // (sentinel alone only suffices when no artifact resolves to compare)
-    const ours = clean === null ? isBroAdapter(prior) : prior === clean
-    if (!opts.force && !ours) {
-      return {
-        client: name,
-        scope,
-        action: 'refused',
-        path,
-        note: isBroAdapter(prior)
-          ? 'differs from this bro’s adapter (stale or edited) — pass --force to remove'
-          : 'not a bro adapter — pass --force to remove',
-      }
-    }
-    if (opts.dryRun) {
-      return { client: name, scope, action: 'would-remove', path }
-    }
-    rmSync(path)
-    if (wasRegistered) {
-      reg!.unregister()
-    }
+  }
+  return outcomes
+}
+
+function uninstallOne(
+  name: string,
+  scope: PluginScope,
+  file: { clean: string | null; targets: Record<PluginScope, string> },
+  client: ClientSpec,
+  opts: MutateOpts
+): Outcome {
+  const { clean } = file
+  const path = file.targets[scope]
+  const reg = client.registration?.(scope, path, opts.env) ?? null
+  if (!existsSync(path)) {
+    return absentOutcome(name, scope, path, reg, opts.dryRun)
+  }
+  const wasRegistered = reg?.registered ?? false
+  const prior = readFileSync(path, 'utf8')
+  // provably ours = byte-equal to this bro's artifact. A sentinel-only
+  // match is a different version or a hand edit — indistinguishable by
+  // shape, and deletion is irreversible, so it refuses without --force
+  // (sentinel alone only suffices when no artifact resolves to compare)
+  const ours = clean === null ? isBroAdapter(prior) : prior === clean
+  if (!opts.force && !ours) {
     return {
       client: name,
       scope,
-      action: 'removed',
+      action: 'refused',
       path,
-      note: wasRegistered ? 'removed kilo.json entry' : undefined,
+      note: isBroAdapter(prior)
+        ? 'differs from this bro’s adapter (stale or edited) — pass --force to remove'
+        : 'not a bro adapter — pass --force to remove',
     }
-  })
+  }
+  if (opts.dryRun) {
+    return { client: name, scope, action: 'would-remove', path }
+  }
+  rmSync(path)
+  if (wasRegistered) {
+    reg!.unregister()
+  }
+  return {
+    client: name,
+    scope,
+    action: 'removed',
+    path,
+    note: wasRegistered ? 'removed kilo.json entry' : undefined,
+  }
 }
 
 /** The plugin file is already gone — an absent slot can still carry a
