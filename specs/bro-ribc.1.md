@@ -103,7 +103,12 @@ Rules:
   defaults; once `providers` exists, every consumer reference must
   resolve to an entry. A provider name that resolves to no entry is a
   startup error naming the missing key, never a silent fallthrough to
-  a vendor the user didn't pick.
+  a vendor the user didn't pick. Scope note: the no-selection rule
+  governs the `providers` layer. The legacy judge path it defers to
+  still carries its pre-provider default (`connectors.judge` unset →
+  `systemone`) — that default is the status-quo this spec preserves,
+  and tightening it is a separate migration, not a silent part of this
+  one.
 - **`type` is validated against known kinds**; an unknown type drops
   the entry with a warning (same policy as `connectors` section
   normalization). A dropped entry is indistinguishable from an absent
@@ -200,7 +205,13 @@ backend, calibrated no better than llm-judge and marked accordingly.
 | ------ | ---------------------------------------- | ------------- |
 | `api`  | by model wire — `systemone` → typed,     | —             |
 |        | `openai-compat` → prose                  |               |
-| `acp`  | typed if jev-model, else prose           | yes           |
+| `acp`  | typed only when the resolved model       | yes           |
+|        | (pin, else `entry.model`) is jev-family  |               |
+|        | — no pin binds prose even if the session |               |
+|        | reports one — and the reply validates    |               |
+|        | against the typed contract; an           |               |
+|        | unparseable one fails open, never        |               |
+|        | counts as typed                          |               |
 | `cli`  | prose (stdout parse)                     | yes           |
 
 A consumer asking a provider for a surface its kind doesn't have gets
