@@ -724,7 +724,13 @@ describe('admitDevinSession', () => {
       await new Promise<void>((res) => {
         // hand the child a beat to plant the file
         const t0 = Date.now()
-        const tick = (): void => (existsSync(mutex) || Date.now() - t0 > 3000 ? res() : setTimeout(tick, 20))
+        const tick = (): void => {
+          if (existsSync(mutex) || Date.now() - t0 > 3000) {
+            res()
+          } else {
+            setTimeout(tick, 20)
+          }
+        }
         tick()
       })
       const started = Date.now()
