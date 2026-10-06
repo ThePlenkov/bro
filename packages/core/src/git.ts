@@ -3,6 +3,7 @@
  * git, their config, their credentials.
  */
 import { spawnSync } from 'node:child_process'
+import { resolve } from 'node:path'
 
 /** `git -C` must select the repo on argv alone — an inherited
  *  GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR silently retargets the probe at
@@ -47,6 +48,28 @@ export function gitTry(args: string[]): { code: number; out: string; err: string
     out: proc.stdout ?? '',
     err: (proc.stderr ?? proc.error?.message ?? '').trim(),
   }
+}
+
+/** The repo's common git dir, absolute — the one place per-repo runtime
+ *  state belongs, so linked worktrees resolve to the SAME directory
+ *  instead of each getting its own copy. `--path-format=absolute` keeps
+ *  it absolute even when git would print a relative `.git`. null outside
+ *  a repository, and on git failure: callers treat "no repo" as an
+ *  ordinary state, never a throw. Canonical probe for the several
+ *  features that keep re-inlining it (agents registry, mailbox, serve
+ *  state, broker socket). */
+export function gitCommonDir(dir: string): string | null {
+  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  if (r.code === 0) {
+    const common = r.out.trim()
+    return common === '' ? null : common
+  }
+  // --path-format arrived in git 2.31: on older git the option itself
+  // fails, which must not read as "not a repository". The plain output
+  // is relative to `dir`, so resolve() absolutizes it the same way.
+  const fallback = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'])
+  const common = fallback.code === 0 ? fallback.out.trim() : ''
+  return common === '' ? null : resolve(dir, common)
 }
 
 /** The drift comparison ref — landed spec vs landed code, so a feature
