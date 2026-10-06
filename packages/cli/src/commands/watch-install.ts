@@ -462,35 +462,46 @@ function installCronPath(
   return { ...res, backend }
 }
 
+/** systemd side of uninstall: disable the timer, delete both unit
+ *  files, reload so the manager re-reads the dir. A disable that fails
+ *  while units existed warns — files are gone but the loaded timer may
+ *  linger, and a clean 'removed' would lie. */
+function retireSystemdUnits(r: Resolved): { removed: boolean; warn: string } {
+  const hadUnits =
+    existsSync(join(r.unitDir, `${r.unit}.service`)) ||
+    existsSync(join(r.unitDir, `${r.unit}.timer`))
+  const disable = r.run('systemctl', ['--user', 'disable', '--now', `${r.unit}.timer`])
+  let removed = false
+  for (const ext of ['service', 'timer']) {
+    const p = join(r.unitDir, `${r.unit}.${ext}`)
+    if (existsSync(p)) {
+      rmSync(p)
+      removed = true
+    }
+  }
+  if (removed) {
+    r.run('systemctl', ['--user', 'daemon-reload'])
+  }
+  return {
+    removed,
+    warn:
+      hadUnits && disable.code !== 0
+        ? `warning: systemd disable failed — a live timer may linger (${disable.err.trim() || `exited ${disable.code}`})`
+        : '',
+  }
+}
+
 export function uninstallWatch(dir: string, deps: WatchSchedDeps = {}): WatchInstallResult {
   const r = resolveSched(dir, deps)
   if ('error' in r) {
     return { state: 'error', detail: r.error }
   }
   const tag = cronTag(r.common)
-  let removed = false
-  let warn = ''
   const backend = detectBackend(r.run)
-  if (backend === 'systemd' || r.run('systemctl', ['--version']).code !== 127) {
-    const hadUnits = existsSync(join(r.unitDir, `${r.unit}.service`)) ||
-      existsSync(join(r.unitDir, `${r.unit}.timer`))
-    const disable = r.run('systemctl', ['--user', 'disable', '--now', `${r.unit}.timer`])
-    for (const ext of ['service', 'timer']) {
-      const p = join(r.unitDir, `${r.unit}.${ext}`)
-      if (existsSync(p)) {
-        rmSync(p)
-        removed = true
-      }
-    }
-    if (removed) {
-      r.run('systemctl', ['--user', 'daemon-reload'])
-    }
-    if (hadUnits && disable.code !== 0) {
-      // files are deleted but the loaded timer may linger — say so
-      // instead of reporting a clean removal
-      warn = `warning: systemd disable failed — a live timer may linger (${disable.err.trim() || `exited ${disable.code}`})`
-    }
-  }
+  const retired =
+    backend === 'systemd' || r.run('systemctl', ['--version']).code !== 127
+      ? retireSystemdUnits(r)
+      : { removed: false, warn: '' }
   const stripped = stripCronTag(r.run, tag)
   if ('failed' in stripped) {
     // the managed line may still be in the table — 'absent' would lie
@@ -500,11 +511,11 @@ export function uninstallWatch(dir: string, deps: WatchSchedDeps = {}): WatchIns
       detail: `crontab strip failed — the managed line may remain: ${stripped.failed}`,
     }
   }
-  removed = removed || ('removed' in stripped && stripped.removed > 0)
+  const removed = retired.removed || ('removed' in stripped && stripped.removed > 0)
   return {
     state: removed ? 'removed' : 'absent',
     backend: backend ?? undefined,
-    detail: [removed ? `${r.unit} removed` : `no entry for ${r.unit}`, warn]
+    detail: [removed ? `${r.unit} removed` : `no entry for ${r.unit}`, retired.warn]
       .filter((s) => s !== '')
       .join(' — '),
   }
