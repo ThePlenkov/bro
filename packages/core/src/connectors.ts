@@ -697,9 +697,12 @@ export async function preToolVerdicts(
   // parallel probes, registry-order merge — a wedged connector can't
   // stall the queue and verdict order stays the config's
   const verdicts = await Promise.all(
-    connectorHooks(ctx).map(async (h) => {
+    connectorHooks(ctx).map(async ({ hooks }) => {
       try {
-        return (await probeWithTimeout(h.preTool?.(ctx, { tool, input }), undefined)) ?? []
+        return (
+          (await probeWithTimeout(() => hooks.preTool?.(ctx, { tool, input }), undefined)) ??
+          []
+        )
       } catch {
         return [] // fail-open
       }
