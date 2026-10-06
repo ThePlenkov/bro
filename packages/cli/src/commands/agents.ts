@@ -40,6 +40,8 @@ import { existsSync, readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import {
   bdAt,
+  countDevinSessions,
+  devinSessionQuota,
   readAgentRegistry,
   type AgentConnector,
   type AgentInfo,
@@ -173,6 +175,21 @@ function occupancyOf(dir: string, env: AgentConnectorEnv): FleetOccupancy {
   }
 }
 
+/** Session-kind quotas the status surfaces — devin locks counted by
+ *  unique live pid across the whole host, not just bro's registry. An
+ *  empty list means `agents.devin` is unconfigured — the lock scan
+ *  doesn't run at all. */
+export interface SessionQuotaView {
+  kind: string
+  live: number
+  max: number
+}
+
+function sessionQuotaViewsOf(env: AgentConnectorEnv): SessionQuotaView[] {
+  const q = devinSessionQuota(env.agents)
+  return q === undefined ? [] : [{ kind: 'devin', live: countDevinSessions(q.lockDir), max: q.maxSessions }]
+}
+
 /** `fleet: 2/3 slots occupied` — `uncapped` instead of the ceiling when
  *  the config disables it. */
 export function occupancyLine(o: FleetOccupancy): string {
@@ -180,8 +197,15 @@ export function occupancyLine(o: FleetOccupancy): string {
   return `fleet: ${o.occupied}${cap} agent slots occupied${o.maxConcurrent > 0 ? '' : ' (uncapped)'}`
 }
 
-function printStatusTable(backends: AgentBackendPlane[], occupancy: FleetOccupancy): void {
+function printStatusTable(
+  backends: AgentBackendPlane[],
+  occupancy: FleetOccupancy,
+  sessions: SessionQuotaView[]
+): void {
   console.log(occupancyLine(occupancy))
+  for (const s of sessions) {
+    console.log(`${s.kind} sessions: ${s.live}/${s.max} live`)
+  }
   const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'cause', 'pid', 'worktree']
   const rows = backends.flatMap(({ conn, agents }) => {
     const sup = conn.capabilities().supervisor
@@ -272,6 +296,7 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
       JSON.stringify(
         {
           occupancy: occupancyOf(dir, env),
+          sessions: sessionQuotaViewsOf(env),
           backends: backends.map(({ conn, agents, degraded }) => ({
             name: conn.name,
             capabilities: conn.capabilities(),
@@ -285,7 +310,7 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
     )
     return
   }
-  printStatusTable(backends, occupancyOf(dir, env))
+  printStatusTable(backends, occupancyOf(dir, env), sessionQuotaViewsOf(env))
 }
 
 // --- up / down ------------------------------------------------------------------

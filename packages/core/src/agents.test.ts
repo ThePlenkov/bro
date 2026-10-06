@@ -20,6 +20,9 @@ import {
   bdAt,
   claimStep,
   classifyExitCause,
+  countDevinSessions,
+  devinLocksDir,
+  devinSessionQuota,
   mintAgentId,
   patchAgentRegistry,
   probeStep,
@@ -559,5 +562,70 @@ describe('agentsSection', () => {
     assert.deepEqual(agentsSection(undefined), {})
     assert.deepEqual(agentsSection('nope'), {})
     assert.deepEqual(agentsSection([]), {})
+  })
+})
+
+describe('countDevinSessions', () => {
+  const withLockDir = (fn: (dir: string) => void): void => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
+    try {
+      fn(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  test('counts unique live pids — duped locks and dead pids collapse', () => {
+    withLockDir((dir) => {
+      // two locks, one live process (a resumed session's residue) — counts once
+      writeFileSync(join(dir, 'a.lock'), String(process.pid))
+      writeFileSync(join(dir, 'b.lock'), String(process.pid))
+      // a pid guaranteed dead — the just-reaped child's pid
+      const dead = spawnSync('true', [], { stdio: 'ignore' }).pid
+      writeFileSync(join(dir, 'dead.lock'), String(dead))
+      // non-numeric content and non-lock files are skipped entirely
+      writeFileSync(join(dir, 'junk.lock'), 'not-a-pid')
+      writeFileSync(join(dir, 'note.txt'), String(process.pid))
+      assert.equal(countDevinSessions(dir), 1)
+    })
+  })
+
+  test('a missing lock dir reads as zero sessions', () => {
+    assert.equal(countDevinSessions(join(tmpdir(), 'bro-devin-locks-absent-')), 0)
+  })
+})
+
+describe('devinLocksDir', () => {
+  test('explicit override wins; XDG_DATA_HOME otherwise', () => {
+    assert.equal(devinLocksDir('/tmp/x'), '/tmp/x')
+    const prev = process.env['XDG_DATA_HOME']
+    try {
+      process.env['XDG_DATA_HOME'] = '/tmp/xdg'
+      assert.equal(devinLocksDir(), join('/tmp/xdg', 'devin', 'cli', 'session_locks'))
+    } finally {
+      if (prev === undefined) {
+        delete process.env['XDG_DATA_HOME']
+      } else {
+        process.env['XDG_DATA_HOME'] = prev
+      }
+    }
+  })
+})
+
+describe('devinSessionQuota', () => {
+  test('absent bag or non-positive cap → undefined', () => {
+    assert.equal(devinSessionQuota(undefined), undefined)
+    assert.equal(devinSessionQuota({}), undefined)
+    assert.equal(devinSessionQuota({ devin: {} }), undefined)
+    assert.equal(devinSessionQuota({ devin: { maxSessions: 0 } }), undefined)
+    assert.equal(devinSessionQuota({ devin: { maxSessions: '6' } }), undefined)
+    assert.equal(devinSessionQuota({ devin: { maxSessions: 6.5 } }), undefined)
+  })
+
+  test('a positive integer cap + lockDir pass through', () => {
+    assert.deepEqual(devinSessionQuota({ devin: { maxSessions: 6, lockDir: '/tmp/locks' } }), {
+      maxSessions: 6,
+      lockDir: '/tmp/locks',
+    })
   })
 })

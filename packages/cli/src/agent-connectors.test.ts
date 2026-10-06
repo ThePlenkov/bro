@@ -44,6 +44,8 @@ import {
   registerAgentConnector,
   resolveAgentConnector,
   resolveSpawnProvider,
+  sessionKindOf,
+  sessionQuotaOf,
   unregisterAgentConnector,
   type AgentConnectorEnv,
   type BudgetSnapshot,
@@ -401,6 +403,96 @@ function connectorContract(b: BackendCase): void {
     } finally {
       cleanup(f)
     }
+  })
+
+  test('the devin session quota refuses a spawn at maxSessions — nothing half-lands', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
+    // one live devin session (this process) fills the cap of 1
+    writeFileSync(join(lockDir, 'me.lock'), String(process.pid))
+    const env: AgentConnectorEnv = {
+      ...f.env,
+      agents: {
+        ...f.env.agents,
+        // whichever backend this suite's connector is — it claims a
+        // devin session, so the quota applies
+        native: { ...f.env.agents['native'], sessionKind: 'devin' },
+        tmux: { ...f.env.agents['tmux'], sessionKind: 'devin' },
+        devin: { maxSessions: 1, lockDir },
+      },
+    }
+    try {
+      const c = b.make({ dir: f.main }, env)
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+        /devin session quota reached — 1\/1 live sessions.*fx-1/
+      )
+      // a refused spawn leaves no claim and no registry entry
+      assert.equal(f.dbRows().find((r) => r.id === 'fx-1')!.status, 'open')
+      assert.equal(readAgentRegistry(f.main)['fx-1'], undefined)
+    } finally {
+      rmSync(lockDir, { recursive: true, force: true })
+      cleanup(f)
+    }
+  })
+
+  test('a non-devin spawn ignores the session quota entirely', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
+    writeFileSync(join(lockDir, 'me.lock'), String(process.pid))
+    // quota configured and FULL — but the node command isn't a devin
+    // session, so sessionQuotaOf never engages and the spawn lands
+    const env: AgentConnectorEnv = {
+      ...f.env,
+      agents: {
+        ...f.env.agents,
+        devin: { maxSessions: 1, lockDir },
+      },
+    }
+    try {
+      const c = b.make({ dir: f.main }, env)
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+      assert.equal(info.state, 'running')
+      await c.stop(info.id)
+    } finally {
+      rmSync(lockDir, { recursive: true, force: true })
+      cleanup(f)
+    }
+  })
+
+  test('sessionKindOf — declared override beats argv detection', () => {
+    const spec = SPEC('/r', '/b', 'fx-1', 'p')
+    const env: AgentConnectorEnv = { agents: {}, connectors: {} }
+    // command basename detection
+    assert.equal(sessionKindOf(env, 'native', spec, 'devin -p {promptFile}'), 'devin')
+    assert.equal(sessionKindOf(env, 'native', spec, '/usr/bin/devin acp'), 'devin')
+    assert.equal(sessionKindOf(env, 'native', spec, 'node {promptFile}'), undefined)
+    // declared sessionKind wins over a non-devin command (wrapper script)
+    const declared: AgentConnectorEnv = {
+      agents: { tmux: { sessionKind: 'devin' } },
+      connectors: {},
+    }
+    assert.equal(sessionKindOf(declared, 'tmux', spec, 'my-wrapper {promptFile}'), 'devin')
+    // a worker payload's own command drives detection, not the backend's
+    const withWorker = { ...spec, worker: { kind: 'argv' as const, argv: ['/opt/devin', '-p'], cliName: 'devin' } }
+    assert.equal(sessionKindOf(env, 'native', withWorker, 'node {promptFile}'), 'devin')
+  })
+
+  test('sessionQuotaOf — uncapped or non-devin → undefined (no scan paid)', () => {
+    const spec = SPEC('/r', '/b', 'fx-1', 'p')
+    const uncapped: AgentConnectorEnv = { agents: {}, connectors: {} }
+    assert.equal(sessionQuotaOf(uncapped, 'native', spec, 'devin -p'), undefined)
+    const capped: AgentConnectorEnv = {
+      agents: { devin: { maxSessions: 6, lockDir: '/l' } },
+      connectors: {},
+    }
+    assert.deepEqual(sessionQuotaOf(capped, 'native', spec, 'devin -p'), {
+      kind: 'devin',
+      max: 6,
+      lockDir: '/l',
+    })
+    // a devin kind with a non-devin command → still undefined
+    assert.equal(sessionQuotaOf(capped, 'native', spec, 'node {promptFile}'), undefined)
   })
 
   test('fleet.maxConcurrent 0 means uncapped', async () => {

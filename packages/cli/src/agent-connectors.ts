@@ -37,7 +37,9 @@ import {
   claimStep,
   classifyExitCause,
   commandCliName,
+  countDevinSessions,
   DEFAULT_CONFIG,
+  devinSessionQuota,
   gitTry,
   isAgentCause,
   loadConfig,
@@ -990,6 +992,67 @@ function enforceFleetCap(
   }
 }
 
+/** Session-kind admission — a devin-spawning backend refuses when the
+ *  live session count already fills `agents.devin.maxSessions`. The
+ *  count is host-wide (devin's own session_locks), not registry-scoped:
+ *  interactive sessions and MCP-less spawns count too. 'cap', not
+ *  'conflict' — callers wait for a slot, same as the fleet ceiling. */
+function enforceSessionQuota(
+  spec: SpawnSpec,
+  quota: { kind: 'devin'; max: number; lockDir?: string } | undefined
+): void {
+  if (quota === undefined || quota.max <= 0) {
+    return
+  }
+  const live = countDevinSessions(quota.lockDir)
+  if (live >= quota.max) {
+    throw new SpawnError(
+      `devin session quota reached — ${live}/${quota.max} live sessions ` +
+        `(agents.devin.maxSessions in bro.config) — spawn of ${spec.molStep} refused`,
+      'cap'
+    )
+  }
+}
+
+/** The session kind a spawn consumes — 'devin' when the backend declares
+ *  `agents.<backend>.sessionKind` or the resolved command's CLI is the
+ *  devin binary (worker argv0 / worker template / backend command). */
+export function sessionKindOf(
+  env: AgentConnectorEnv,
+  backend: string,
+  spec: SpawnSpec,
+  command: string
+): 'devin' | undefined {
+  const declared = env.agents[backend]?.['sessionKind']
+  if (declared === 'devin') {
+    return 'devin'
+  }
+  const cli =
+    spec.worker?.kind === 'argv'
+      ? commandCliName(spec.worker.argv[0] ?? '')
+      : commandCliName(spec.worker?.kind === 'template' ? spec.worker.command : command)
+  return cli === 'devin' ? 'devin' : undefined
+}
+
+/** The session quota this spawn must fit under — undefined for
+ *  non-devin kinds and uncapped `agents.devin`, so the lock scan only
+ *  runs where it can refuse. */
+export function sessionQuotaOf(
+  env: AgentConnectorEnv,
+  backend: string,
+  spec: SpawnSpec,
+  command: string
+): { kind: 'devin'; max: number; lockDir?: string } | undefined {
+  const kind = sessionKindOf(env, backend, spec, command)
+  if (kind !== 'devin') {
+    return undefined
+  }
+  const quota = devinSessionQuota(env.agents)
+  return quota === undefined
+    ? undefined
+    : { kind, max: quota.maxSessions, lockDir: quota.lockDir }
+}
+
 /** The shared spawn prologue every built-in backend runs under the
  *  registry lock — dedup across the two state planes (registry liveness
  *  + beads claim), the claim/rebind, and the shared-dir artifacts
@@ -1104,6 +1167,10 @@ function prepareSpawn(
      *  the cap refuses while OTHER live entries fill it (a respawn's
      *  own dead entry holds no slot). */
     cap?: { max: number; env: AgentConnectorEnv }
+    /** Session-kind admission — the spawn consumes a `kind` session
+     *  ('devin') and refuses when live sessions already hit `max`.
+     *  Checked after the fleet cap, still before any write. */
+    sessionQuota?: { kind: 'devin'; max: number; lockDir?: string }
   }
 ): { agentId: string; promptFile: string; log: string; exitFile: string } {
   const registry = readAgentRegistry(dir)
@@ -1113,6 +1180,9 @@ function prepareSpawn(
   // fleet admission — before the registry write + claim land, so a
   // refusal leaves no half-spawned state
   enforceFleetCap(dir, home, registry, spec, opts.cap)
+  // session-kind admission — same ordering argument: refuse before the
+  // registry write, while OTHER live sessions fill the quota
+  enforceSessionQuota(spec, opts.sessionQuota)
   // a reused id must stay filename-safe — a tampered entry gets a fresh
   // mint, not a path escape into <home>/
   const agentId =
@@ -1424,6 +1494,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         const { agentId, promptFile, log, exitFile } = prepareSpawn(dir, home, 'native', spec, {
           isLive: (e) => nativeState(dir, home, spec.molStep, e) === 'running',
           cap: { max: fleetCapOf(env), env },
+          sessionQuota: sessionQuotaOf(env, 'native', spec, command),
         })
         const fd = openSync(log, 'a')
         let spawned: AgentRegistryEntry
@@ -1777,6 +1848,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           liveDetail: (e) => `session ${tmuxSessionName(e) ?? '?'}`,
           entry: (id) => ({ session: `bro-${id}` }),
           cap: { max: fleetCapOf(env), env },
+          sessionQuota: sessionQuotaOf(env, 'tmux', spec, command),
         })
         const session = `bro-${agentId}`
         // a leftover session with our name (crash between entry and
@@ -2448,6 +2520,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           entry: () => ({ sessionId: undefined }),
           claimAs: spec.molStep,
           cap: { max: fleetCapOf(env), env },
+          sessionQuota: sessionQuotaOf(env, 'gascity', spec, command),
         })
         let sessionId: string | undefined
         try {

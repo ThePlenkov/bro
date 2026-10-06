@@ -17,7 +17,8 @@
  */
 import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { ConfigSection } from './config.ts'
 import { acquireFileLock } from './filelock.ts'
@@ -553,6 +554,88 @@ export function rebindStep(beadsDir: string, molStep: string, actor: string): vo
     const why = r.err !== '' ? r.err : `bd exited ${r.code}`
     throw new SpawnError(`rebind of ${molStep} failed — ${why}`, r.ran ? 'conflict' : 'unavailable')
   }
+}
+
+// --- devin session quota -------------------------------------------------------
+
+/** The devin CLI's session-lock dir — `$XDG_DATA_HOME/devin/cli/
+ *  session_locks` (its own state plane: every local devin session —
+ *  interactive, `-p`, `acp` — drops a `<name>.lock` holding its pid).
+ *  `agents.devin.lockDir` overrides for odd installs/tests. */
+export function devinLocksDir(lockDir?: string): string {
+  if (typeof lockDir === 'string' && lockDir.trim() !== '') {
+    return lockDir
+  }
+  const xdg = process.env['XDG_DATA_HOME']
+  const base = xdg !== undefined && xdg.trim() !== '' ? xdg : join(homedir(), '.local', 'share')
+  return join(base, 'devin', 'cli', 'session_locks')
+}
+
+/** Live devin sessions on this host — lock files whose pid is alive,
+ *  deduplicated (a resumed session holds a second lock for the same
+ *  process). Missing dir/unreadable lock/non-pid content counts as
+ *  nothing: no devin install → zero sessions. Cloud-side sessions
+ *  (devin_session_create via MCP) never write a local lock — this is a
+ *  host-local count, the blind spot is documented. */
+export function countDevinSessions(lockDir?: string): number {
+  const dir = devinLocksDir(lockDir)
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return 0
+  }
+  const live = new Set<number>()
+  for (const name of names) {
+    if (!name.endsWith('.lock')) {
+      continue
+    }
+    let pid: number
+    try {
+      pid = Number.parseInt(readFileSync(join(dir, name), 'utf8').trim(), 10)
+    } catch {
+      continue
+    }
+    if (!Number.isInteger(pid) || pid <= 0) {
+      continue
+    }
+    try {
+      process.kill(pid, 0)
+      live.add(pid)
+    } catch (err) {
+      // EPERM: the process lives but isn't ours — still a live session
+      if ((err as NodeJS.ErrnoException).code === 'EPERM') {
+        live.add(pid)
+      }
+    }
+  }
+  return live.size
+}
+
+export interface DevinSessionQuota {
+  /** Host-wide cap on live devin sessions — spawn refuses at/above it.
+   *  0 or absent means uncapped. */
+  maxSessions: number
+  /** `agents.devin.lockDir` — override for the lock scan (tests, odd
+   *  installs). */
+  lockDir?: string
+}
+
+/** `agents.devin` → the quota a devin-session spawn must fit under.
+ *  undefined when the section is missing or uncapped — callers skip the
+ *  count entirely, so a non-devin host never pays for the scan. */
+export function devinSessionQuota(
+  agents: Record<string, Record<string, unknown>> | undefined
+): DevinSessionQuota | undefined {
+  const bag = agents?.['devin']
+  if (bag === undefined) {
+    return undefined
+  }
+  const max = bag['maxSessions']
+  const maxSessions =
+    typeof max === 'number' && Number.isInteger(max) && max > 0 ? max : 0
+  const lockDir = typeof bag['lockDir'] === 'string' ? bag['lockDir'] : undefined
+  return maxSessions > 0 ? { maxSessions, lockDir } : undefined
 }
 
 // --- config --------------------------------------------------------------------

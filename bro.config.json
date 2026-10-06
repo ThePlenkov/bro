@@ -61,6 +61,9 @@
   "agents": {
     "native": {
       "command": "devin -p --permission-mode dangerous --prompt-file {promptFile}"
+    },
+    "devin": {
+      "maxSessions": 6
     }
   },
   "fleet": {

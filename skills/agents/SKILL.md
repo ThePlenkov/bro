@@ -40,3 +40,10 @@ recorded/conventional `<repo>--<step>` lookup), `--prompt-file <file>`
 - **Claims are the coordination plane.** A step claimed by a live agent
   refuses a second spawn; a claim held by another actor (or no agent at
   all) refuses a rebind — release the stale claim first, don't force it.
+- **Two caps, different axes.** `fleet.maxConcurrent` counts bro's own
+  registry agents; `agents.devin.maxSessions` counts live devin CLI
+  sessions host-wide (its `session_locks`, deduped by pid) — interactive
+  sessions included, so a spawn can refuse while the fleet looks empty.
+  A spawn counts as devin when the resolved command's CLI is `devin` or
+  the backend sets `agents.<backend>.sessionKind: 'devin'`; the
+  host-local count misses cloud-side `devin_session_create` sessions.
