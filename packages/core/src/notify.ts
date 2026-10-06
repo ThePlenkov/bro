@@ -247,10 +247,18 @@ function addressedTo(to: string, identity: MailboxIdentity): boolean {
   return to === 'orchestrator' && identity.agentId === undefined
 }
 
-/** Coalescing (bro-22jd): pending drops carrying the same {key, source}
- *  are superseded — the writer that repeats a key has fresher news.
- *  Same-key drops from a different source are independent notes. */
-export function coalesceDrops(dir: string, key: string, source: string | undefined): void {
+/** Coalescing (bro-22jd): pending drops carrying the same
+ *  {key, source, topic, to} are superseded — the writer that repeats a
+ *  key has fresher news. The identity is EXACT equality: a same-key
+ *  drop on another topic, to another recipient (or broadcast where the
+ *  pending drop was addressed), or from a different source is an
+ *  independent note — a keyed publish must never delete a drop it does
+ *  not replace. */
+export function coalesceDrops(
+  dir: string,
+  key: string,
+  identity: { source?: string; topic: string; to?: string }
+): void {
   let files: string[]
   try {
     files = readdirSync(dir)
@@ -261,7 +269,13 @@ export function coalesceDrops(dir: string, key: string, source: string | undefin
     const path = join(dir, f)
     try {
       const ev = parseEvent(readFileSync(path, 'utf8'))
-      if (ev !== undefined && ev.key === key && ev.source === source) {
+      if (
+        ev !== undefined &&
+        ev.key === key &&
+        ev.source === identity.source &&
+        ev.topic === identity.topic &&
+        ev.to === identity.to
+      ) {
         rmSync(path, { force: true })
       }
     } catch {

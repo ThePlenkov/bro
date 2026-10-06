@@ -72,6 +72,13 @@ describe('event contract', () => {
     assert.equal(isEventInput(null), false)
     assert.equal(isEventInput({ topic: 'a', kind: 'b', to: 'x' }), true)
     assert.equal(isEventInput({ topic: 'a', kind: 'b', to: 7 }), false)
+    // empty identity strings are malformed, not "absent" — `to: ''`
+    // must never widen to broadcast
+    assert.equal(isEventInput({ topic: 'a', kind: 'b', to: '' }), false)
+    assert.equal(isEventInput({ topic: 'a', kind: 'b', key: '' }), false)
+    assert.equal(isEventInput({ topic: 'a', kind: 'b', source: '' }), false)
+    assert.equal(isEventInput({ topic: 'a', kind: 'b', cause: '' }), false)
+    assert.equal(isEventInput({ topic: 'a', kind: 'b', ref: '' }), false)
   })
 })
 
@@ -142,6 +149,17 @@ describe('mailbox connector', () => {
       // and the addressed drop still waits for ses-9
       const nines = await mailboxEvents(dir, 'ses-9').probe()
       assert.equal(nines.events.length, 2)
+    })
+  })
+
+  test('an invalid event envelope is refused, not written', async () => {
+    await withRepo(async (dir) => {
+      const events = mailboxEvents(dir, 'ses-1')
+      // `to: ''` would read as broadcast downstream — reject it at the door
+      const res = await events.publish({ topic: 'notify', kind: 'ask', to: '', payload: 'nobody' })
+      assert.equal(res.published, false)
+      assert.match(res.reason ?? '', /invalid/)
+      assert.equal((await events.probe()).events.length, 0, 'nothing landed')
     })
   })
 

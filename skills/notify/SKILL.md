@@ -21,6 +21,7 @@ real-time child→parent events with no tokens spent in a wait loop.
 | Command | What it does |
 | ------- | ------------ |
 | `bro notify <text>` | Drop an event into the mailbox — delivered to every session's next postTool probe |
+| `bro notify -- <text>` | Same, with the text taken verbatim — needed when it contains option-looking words like `--help` |
 
 ## Policy
 

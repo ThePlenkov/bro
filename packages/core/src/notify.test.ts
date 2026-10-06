@@ -328,7 +328,7 @@ describe('coalesceDrops', () => {
           JSON.stringify({ topic: 'notify', kind: 'info', payload, key: 'pr-7', source: 'watch' })
         dropMailbox(mb, note('v1'), 'note')
         // publish order: the new write coalesces pending same-key drops first
-        coalesceDrops(mb, 'pr-7', 'watch')
+        coalesceDrops(mb, 'pr-7', { source: 'watch', topic: 'notify' })
         dropMailbox(mb, note('v2'), 'note')
         const txts = drainMailbox(dir, 's1')
         assert.equal(txts.length, 1)
@@ -347,7 +347,7 @@ describe('coalesceDrops', () => {
           'note'
         )
         // b publishes key 'k': coalescing removes b's pending drops only, then b's drop lands
-        coalesceDrops(mb, 'k', 'b')
+        coalesceDrops(mb, 'k', { source: 'b', topic: 'notify' })
         dropMailbox(
           mb,
           JSON.stringify({ topic: 'notify', kind: 'info', payload: 'theirs', key: 'k', source: 'b' }),
@@ -364,8 +364,88 @@ describe('coalesceDrops', () => {
         const mb = mailboxDir(dir)!
         dropMailbox(mb, 'one', 'note')
         dropMailbox(mb, 'two', 'note')
-        coalesceDrops(mb, 'k', 'w') // nothing carries key 'k' — no-op
+        coalesceDrops(mb, 'k', { source: 'w', topic: 'notify' }) // nothing carries key 'k' — no-op
         assert.equal(drainMailbox(dir, 's1').length, 2)
+      })
+    })
+  })
+
+  test('same key+source on a different topic is an independent drop', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        dropMailbox(
+          mb,
+          JSON.stringify({ topic: 'notify', kind: 'info', payload: 'kept', key: 'k', source: 'w' }),
+          'note'
+        )
+        dropMailbox(
+          mb,
+          JSON.stringify({ topic: 'watch', kind: 'info', payload: 'kept too', key: 'k', source: 'w' }),
+          'note'
+        )
+        // a new 'watch' drop with key 'k' from 'w' supersedes only the watch one
+        coalesceDrops(mb, 'k', { source: 'w', topic: 'watch' })
+        dropMailbox(
+          mb,
+          JSON.stringify({ topic: 'watch', kind: 'info', payload: 'fresh', key: 'k', source: 'w' }),
+          'note'
+        )
+        const txts = drainMailbox(dir, 's1')
+        assert.equal(txts.length, 2)
+        assert.ok(txts.some((t) => t.includes('kept')))
+        assert.ok(txts.some((t) => t.includes('fresh')))
+      })
+    })
+  })
+
+  test('same key+source+topic addressed to another recipient is independent', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        dropMailbox(
+          mb,
+          JSON.stringify({ topic: 'notify', kind: 'ask', payload: 'for a', key: 'k', source: 'w', to: 'a' }),
+          'note'
+        )
+        coalesceDrops(mb, 'k', { source: 'w', topic: 'notify', to: 'b' })
+        dropMailbox(
+          mb,
+          JSON.stringify({ topic: 'notify', kind: 'ask', payload: 'for b', key: 'k', source: 'w', to: 'b' }),
+          'note'
+        )
+        // addressed drops stay pending for their recipient — count the
+        // mailbox, not a drain by a third session
+        assert.equal(readdirSync(mb).filter((f) => !f.startsWith('.')).length, 2)
+      })
+    })
+  })
+
+  test('a broadcast drop never supersedes an addressed one (and back)', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        const pending = () => readdirSync(mb).filter((f) => !f.startsWith('.')).length
+        dropMailbox(
+          mb,
+          JSON.stringify({ topic: 'notify', kind: 'info', payload: 'addressed', key: 'k', source: 'w', to: 'a' }),
+          'note'
+        )
+        // broadcast publisher (no to) must not remove the addressed drop
+        coalesceDrops(mb, 'k', { source: 'w', topic: 'notify' })
+        dropMailbox(
+          mb,
+          JSON.stringify({ topic: 'notify', kind: 'info', payload: 'broadcast', key: 'k', source: 'w' }),
+          'note'
+        )
+        // and an addressed publisher must not remove the broadcast drop
+        coalesceDrops(mb, 'k', { source: 'w', topic: 'notify', to: 'b' })
+        dropMailbox(
+          mb,
+          JSON.stringify({ topic: 'notify', kind: 'info', payload: 'for b', key: 'k', source: 'w', to: 'b' }),
+          'note'
+        )
+        assert.equal(pending(), 3)
       })
     })
   })

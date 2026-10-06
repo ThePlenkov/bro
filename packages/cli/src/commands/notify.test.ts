@@ -122,4 +122,56 @@ describe('bro notify', () => {
       assert.equal(files.length, 2)
     })
   })
+
+  test('message text behind `--` keeps option-looking words verbatim', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-notify-dashes-'))
+    try {
+      mkdirSync(join(dir, 'xdg'))
+      const r = runCli(['notify', '--', 'deploy', '--help', 'now'], {
+        cwd: dir,
+        env: { XDG_STATE_HOME: join(dir, 'xdg') },
+      })
+      assert.equal(r.code, 0, r.stderr)
+      const files = readdirSync(join(dir, 'xdg', 'bro', 'notify'))
+      assert.equal(files.length, 1)
+      assert.equal(
+        readFileSync(join(dir, 'xdg', 'bro', 'notify', files[0]!), 'utf8'),
+        'deploy --help now'
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('an unknown option is a usage error, not a swallowed word', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-notify-unkflag-'))
+    try {
+      mkdirSync(join(dir, 'xdg'))
+      const r = runCli(['notify', '--knd', 'ask', 'hi'], {
+        cwd: dir,
+        env: { XDG_STATE_HOME: join(dir, 'xdg') },
+      })
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /unknown option --knd/)
+      assert.equal(readdirSync(join(dir, 'xdg')).length, 0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a session env pins source so two publishers do not collide', () => {
+    const { root, main } = initRepo('bro-notify-sessrc-')
+    inside(main, root, () => {
+      runCli(['notify', '--key', 'k', 'from session'], {
+        cwd: main,
+        env: { BRO_SESSION_ID: 'ses-9' },
+      })
+      const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim())
+      const mb = join(common, 'bro', 'notify')
+      const files = readdirSync(mb).filter((f) => !f.startsWith('.'))
+      assert.equal(files.length, 1)
+      const ev = JSON.parse(readFileSync(join(mb, files[0]!), 'utf8'))
+      assert.equal(ev.source, 'ses-9')
+    })
+  })
 })

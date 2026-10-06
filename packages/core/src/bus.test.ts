@@ -239,6 +239,22 @@ describe('broker fan-out', () => {
       sub.close()
     })
   })
+
+  test('a `to` filter gets broadcast and its own address, never a foreign one', async () => {
+    await withBroker(async (_broker, socketPath) => {
+      const mine: BusEnvelope[] = []
+      const sub = await busSubscribe(socketPath, { to: 'fixer-1' }, {
+        onEvent: (e) => mine.push(e),
+      })
+      await settle()
+      await busPublish(socketPath, { topic: 'notify', kind: 'ask', to: 'fixer-1', payload: 'yours' })
+      await busPublish(socketPath, { topic: 'notify', kind: 'ask', to: 'fixer-9', payload: 'not yours' })
+      await busPublish(socketPath, { topic: 'notify', kind: 'note', payload: 'everyone' })
+      await settle()
+      assert.deepEqual(mine.map((e) => e.payload), ['yours', 'everyone'])
+      sub.close()
+    })
+  })
 })
 
 describe('replay from a cursor', () => {
