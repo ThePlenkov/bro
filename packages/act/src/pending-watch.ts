@@ -210,6 +210,25 @@ export function watchHeartbeat(
   }
 }
 
+/** Is a live watch covering `pr`? Tri-state for gate decisions:
+ *  `true`/`false` are verdicts; `null` means the store could not be
+ *  read (no git dir, EACCES, ...) — callers that block on "unwatched"
+ *  must treat `null` as fail-open, since listWatches' empty list cannot
+ *  distinguish "no markers" from "markers unreadable". A missing dir
+ *  (ENOENT) IS a verdict: no markers have ever been written. */
+export function hasLiveWatch(dir: string, pr: number): boolean | null {
+  const wd = watchesDir(dir)
+  if (!wd) {
+    return null
+  }
+  try {
+    readdirSync(wd)
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? false : null
+  }
+  return listWatchesIn(wd).some((l) => l.alive && l.watch.pr === pr)
+}
+
 /** Claim a reported stale marker — the rename is the atomic claim:
  *  exactly one concurrent caller wins it. The `.retired` file is kept,
  *  not deleted — the claim proves nothing about delivery, so the marker

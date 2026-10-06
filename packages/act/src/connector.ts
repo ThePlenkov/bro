@@ -9,7 +9,7 @@ import { loadConfig, reviewHost, type Connector, type PrTarget } from '@broject/
 import { checkHistory } from './check-history.ts'
 import { evaluateExitGate } from './exit-gate.ts'
 import { mergeSlotHolderAsync } from './merge-slot.ts'
-import { listWatches, watchRetire } from './pending-watch.ts'
+import { hasLiveWatch, listWatches, watchRetire } from './pending-watch.ts'
 import { fetchPrActState } from './state.ts'
 
 /** The bound-dir PR — async when the host has the twin, else a resolved
@@ -59,13 +59,13 @@ async function gateLine(dir: string, target?: PrTarget): Promise<string | null> 
 
 /** A live watch marker covering `pr` — any mode counts (the agent chose
  *  merge or watch-only deliberately); a dead-pid marker is unwatched by
- *  definition. Fail-open: marker I/O trouble must never fabricate a
- *  block. */
-function hasLiveWatch(dir: string, pr: number): boolean {
+ *  definition. `null` (store unreadable) is fail-open: a gate must never
+ *  fabricate a block on a probe failure. */
+function watchCover(dir: string, pr: number): boolean {
   try {
-    return listWatches(dir).some((l) => l.alive && l.watch.pr === pr)
+    return hasLiveWatch(dir, pr) ?? true
   } catch {
-    return true // can't prove unwatched — don't block on a probe failure
+    return true
   }
 }
 
@@ -183,7 +183,7 @@ export const actConnector: Connector = {
       if (!p) {
         return []
       }
-      const watched = hasLiveWatch(ctx.dir, p.pr)
+      const watched = watchCover(ctx.dir, p.pr)
       const head = `bro: PR [#${p.pr}](${p.url})`
       if (!p.gate.ok) {
         const line = `${head}: ${p.gate.blockers.join('; ')}`

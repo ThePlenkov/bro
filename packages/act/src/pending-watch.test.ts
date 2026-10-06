@@ -12,6 +12,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  hasLiveWatch,
   listWatches,
   watchBegin,
   watchEnd,
@@ -412,5 +413,20 @@ describe('watchHeartbeat', () => {
     const listed = listWatches(dir)
     assert.equal(listed.length, 1)
     assert.equal(listed[0]!.alive, false)
+  })
+})
+
+describe('hasLiveWatch', () => {
+  test('no git dir → null (store unknown, callers fail open)', () => {
+    assert.equal(hasLiveWatch(join(tmpdir(), `no-git-${process.pid}`), 42), null)
+  })
+  test('git repo without a watches dir → false (legitimately empty)', () => {
+    assert.equal(hasLiveWatch(repo(), 42), false)
+  })
+  test('live marker covers; dead pid does not', () => {
+    const dir = repo()
+    watchHeartbeat(dir, base, 'drive')
+    assert.equal(hasLiveWatch(dir, 42), true)
+    assert.equal(hasLiveWatch(dir, 43), false)
   })
 })
