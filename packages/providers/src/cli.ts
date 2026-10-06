@@ -18,7 +18,7 @@ import { spawn } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { JudgeUnavailable } from '@broject/core'
+import { cliCommandModel, JudgeUnavailable } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import { remaining } from './http.ts'
 import type { ProviderChat, ProviderChatResult } from './registry.ts'
@@ -99,22 +99,32 @@ function runTemplate(by: string, command: string, deadline: number): Promise<str
 /** The raw prose call surface for a `cli` entry — the prompt written
  *  to a private (0700) temp file, `{promptFile}` expanded, stdout back.
  *  `model` reports the pin the user declared (or 'unknown' unpinned) —
- *  a bare command has no wire to report on; provenance carries the
- *  config's claim, nothing more. */
+ *  and only models the command can actually run: an override reaches
+ *  the process through `{model}` or the call refuses to relabel. */
 export function cliChat(
   by: string,
   entry: CliEntry,
   opts: ProviderWireOpts = {}
 ): ProviderChat {
-  const model = opts.model ?? entry.model ?? 'unknown'
+  const { command, model } = cliCommandModel(
+    entry.command,
+    entry.model,
+    opts.model,
+    (m) =>
+      new CliConfigError(
+        `${by}: cli command cannot honor model '${m}' — it has no {model} placeholder`
+      ),
+    () => new CliConfigError(`${by}: cli command uses {model} but no model is pinned`)
+  )
+  const reported = model ?? 'unknown'
   return async (prompt, deadline): Promise<ProviderChatResult> => {
     // mkdtemp gives a 0700 dir — the prompt file never lands world-readable
     const dir = mkdtempSync(join(tmpdir(), 'bro-cli-'))
     try {
       const promptFile = join(dir, 'prompt.md')
       writeFileSync(promptFile, prompt)
-      const content = await runTemplate(by, expandPromptFile(entry.command, promptFile), deadline)
-      return { content, model }
+      const content = await runTemplate(by, expandPromptFile(command, promptFile), deadline)
+      return { content, model: reported }
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

@@ -51,7 +51,11 @@ can serve.
   anything else is a config error listing the allowlist.
 - `cli.command` is a shell template: `{promptFile}` expands to the
   quoted path of a file holding the prompt (appended as the last arg
-  when absent); the process runs and exits, stdout is the answer.
+  when absent); `{model}` expands to the resolved effective model,
+  quoted. The process runs and exits, stdout is the answer. A model
+  override the template can't consume — `--model`/profile/`judge.model`
+  on a command with no `{model}` — is a loud error, not a relabel:
+  provenance never claims a model the worker didn't run.
 - An `acp` entry's call grade is decided by the served model —
   `typesafe/jev-*` (or bare `jev-*`) is typed transport; anything else
   is prose and stamps `provider:<name>:prose` in `decidedBy`.

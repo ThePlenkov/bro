@@ -1077,6 +1077,8 @@ describe('resolveSpawnProvider', () => {
   const providers = {
     kilo: { type: 'acp', command: 'kilo --acp', model: 'jev' },
     local: { type: 'cli', command: 'devin -p', model: 'devin-1' },
+    zen: { type: 'cli', command: 'opencode run --model {model} -f {promptFile}', model: 'zen/free' },
+    'zen-unpinned': { type: 'cli', command: 'opencode run --model {model} -f {promptFile}' },
     typesafe: {
    type: 'api',
    baseUrl: 'https://api.typesafe.ai',
@@ -1162,6 +1164,55 @@ describe('resolveSpawnProvider', () => {
     assert.equal(pick.worker?.kind === 'argv' ? pick.worker.cliName : undefined, 'kilo')
   })
 
+  test('cli {model} placeholder wires the resolved model into the worker command', async () => {
+    const pin = await resolveSpawnProvider(env, 'native', { provider: 'zen' }, 'flag')
+    assert.equal(pin.model, 'zen/free')
+    assert.deepEqual(pin.worker, {
+      kind: 'template',
+      command: "opencode run --model 'zen/free' -f {promptFile}",
+    })
+    const over = await resolveSpawnProvider(
+      env,
+      'native',
+      { provider: 'zen', model: 'zen/pro' },
+      'flag'
+    )
+    assert.equal(over.model, 'zen/pro')
+    assert.deepEqual(over.worker, {
+      kind: 'template',
+      command: "opencode run --model 'zen/pro' -f {promptFile}",
+    })
+  })
+
+  test('cli override a verbatim command cannot consume is a loud error — never a relabel', async () => {
+    // 'local' pins devin-1 in a command with no {model}: reporting 'm2'
+    // while devin-1 runs would be provenance the worker never ran
+    await assert.rejects(
+      resolveSpawnProvider(env, 'native', { provider: 'local', model: 'm2' }, 'flag'),
+      (e: unknown) =>
+        e instanceof SpawnError &&
+        e.kind === 'input' &&
+        /cannot honor model 'm2'.*\{model\} placeholder/.test(e.message)
+    )
+    // an override matching the pin reports truthfully — verbatim is fine
+    const same = await resolveSpawnProvider(
+      env,
+      'native',
+      { provider: 'local', model: 'devin-1' },
+      'flag'
+    )
+    assert.equal(same.model, 'devin-1')
+    assert.deepEqual(same.worker, { kind: 'template', command: 'devin -p' })
+    // a {model} placeholder with no model to resolve is a config bug
+    await assert.rejects(
+      resolveSpawnProvider(env, 'native', { provider: 'zen-unpinned' }, 'flag'),
+      (e: unknown) =>
+        e instanceof SpawnError &&
+        e.kind === 'config' &&
+        /uses \{model\} but pins no default model/.test(e.message)
+    )
+  })
+
   test('model precedence — explicit pin > profile merge > entry pin', async () => {
     const pinned = await resolveSpawnProvider(env, 'native', { provider: 'kilo' }, 'flag')
     assert.equal(pinned.model, 'jev') // the entry's own pin
@@ -1223,7 +1274,9 @@ describe('provider-resolved spawns', () => {
     try {
       const env = {
         ...f.env,
-        providers: { local: { type: 'cli', command: 'node {promptFile}' } },
+        // {model} placeholder — the override must reach the command,
+        // a verbatim cli command refuses an honorless pin
+        providers: { local: { type: 'cli', command: 'node {promptFile} -m {model}' } },
       } as AgentConnectorEnv
       const pick = await resolveSpawnProvider(
         env,

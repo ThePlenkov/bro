@@ -366,7 +366,9 @@ describe('bro agents up — provider resolution', () => {
       JSON.stringify({
         agents: { native: { command: 'node {promptFile}' } },
         providers: {
-          local: { type: 'cli', command: 'node {promptFile}' },
+          // {model} — the fixture honors overrides; a verbatim cli
+          // command would refuse a pin it can't consume
+          local: { type: 'cli', command: 'node {promptFile} -m {model}' },
           typesafe: {
    type: 'api',
    baseUrl: 'https://api.typesafe.ai',
