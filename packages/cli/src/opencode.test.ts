@@ -557,6 +557,32 @@ describe('stop gate', () => {
     assert.equal(prompts.length, 1)
   })
 
+  test('a session deleted and recreated mid-gate is not re-prompted — the live entry is a different session', async () => {
+    respond({ stop: JSON.stringify(blocked) })
+    process.env.BRO_STUB_SLEEP_EVENTS = JSON.stringify({ stop: 300 })
+    const { hooks, prompts } = await makeHooks()
+
+    await finishTurn(hooks, 'ses_1')
+    const idle = hooks.event?.({
+      event: { type: 'session.idle', properties: { sessionID: 'ses_1' } },
+    })
+    // the stop probe is in flight: the session dies and the id is reused —
+    // `live` holds an entry again, but it is not the session that went idle
+    await hooks.event?.({
+      event: { type: 'session.deleted', properties: { info: { id: 'ses_1' } } },
+    })
+    await hooks.event?.({
+      event: { type: 'session.created', properties: { sessionID: 'ses_1' } },
+    })
+    await idle
+    assert.deepEqual(prompts, [])
+
+    // and the reused session still earns its own one-shot
+    await finishTurn(hooks, 'ses_1')
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
+    assert.equal(prompts.length, 1)
+  })
+
   test('a session deleted during the gate log is not re-prompted', async () => {
     respond({ stop: JSON.stringify(blocked) })
     let release: () => void = () => {}
