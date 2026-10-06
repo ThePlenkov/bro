@@ -173,6 +173,24 @@ describe('runGuards', () => {
     assert.equal(run.verdicts[0]!.clauses.find((c) => c.clause === 'probe:has-marker')!.ok, true)
   })
 
+  test('a ProbeResult answer surfaces its detail on the clause row', async () => {
+    const dir = repo()
+    const g: Guard = {
+      name: 'p',
+      when: { on: ['stop'], state: { probes: [{ name: 'drift' }] } },
+      say: 'x',
+    }
+    const run = await runGuards(opts(dir, {
+      defs: [g],
+      probes: { drift: () => ({ ok: false, detail: 'unverifiable — shallow history' }) },
+    }))
+    assert.deepEqual(run.verdicts[0]!.clauses.find((c) => c.clause === 'probe:drift'), {
+      clause: 'probe:drift',
+      ok: false,
+      detail: 'unverifiable — shallow history',
+    })
+  })
+
   test('maxPerEvent caps emitted lines', async () => {
     const dir = repo()
     dirty(dir, 'src/a.ts')

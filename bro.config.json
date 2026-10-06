@@ -26,6 +26,33 @@
   "sdd": {
     "mode": "gate"
   },
+  "guard": {
+    "defs": [
+      {
+        "name": "test-coverage-on-stop",
+        "when": {
+          "on": ["stop"],
+          "state": {
+            "diff": {
+              "changed": ["src/**", "packages/*/src/**"],
+              "without": ["**/*.test.*", "**/*.spec.*"]
+            }
+          }
+        },
+        "say": "src changed and no test file moved — is the new behavior covered?"
+      },
+      {
+        "name": "spec-drift-nkn6",
+        "when": {
+          "on": ["stop"],
+          "state": {
+            "probes": [{ "name": "spec-drift", "args": { "spec": "specs/sessions/bro-nkn6.md" } }]
+          }
+        },
+        "say": "specs/sessions/bro-nkn6.md is stale vs the code it scopes — refresh it"
+      }
+    ]
+  },
   "agents": {
     "native": {
       "command": "devin -p --permission-mode dangerous --prompt-file {promptFile}"

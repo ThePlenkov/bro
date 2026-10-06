@@ -17,13 +17,22 @@ export interface ClauseVerdict {
   detail?: string
 }
 
+/** A probe's richer answer — `ok` is the verdict, `detail` the why a
+ *  `bro guard test` row shows ('unverifiable: shallow history' reads
+ *  very differently from 'fresh'). A bare boolean is fine when the
+ *  name already says everything. */
+export interface ProbeResult {
+  ok: boolean
+  detail?: string
+}
+
 /** Engine-registered named probes — the extensible slot for costlier
  *  predicates (spec-drift, docs freshness). Closed: a new predicate is
  *  an engine change, not config. Args are the guard's own `args` map. */
 export type NamedProbe = (
   args: Record<string, unknown> | undefined,
   dir: string
-) => boolean
+) => boolean | ProbeResult
 
 /** Live-state reads, lazy + memoized per event — an `armed`-only guard
  *  never pays for `git status`, and `changed`/`without` clauses share
@@ -200,7 +209,9 @@ function evalProbes(
     let ok = false
     let detail: string | undefined
     try {
-      ok = fn(p.args, dir)
+      const r = fn(p.args, dir)
+      ok = typeof r === 'boolean' ? r : r.ok
+      detail = typeof r === 'boolean' ? undefined : r.detail
     } catch (err) {
       detail = `threw: ${err instanceof Error ? err.message : err}`
     }

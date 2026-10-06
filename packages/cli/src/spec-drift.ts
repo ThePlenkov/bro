@@ -233,21 +233,26 @@ const unverifiable = (id: string, detail: string): DriftRow => ({ id, state: 'un
  *  delimiters are stripped — the target often sits inside parentheses. */
 export function specLinkPath(dir: string, desc: string | undefined): string | undefined {
   const t = /\bspec:\s*(\S+)/i.exec(desc ?? '')?.[1]?.replace(/[)\].,;:'"]+$/, '')
+  return t === undefined ? undefined : localSpecPath(dir, t)
+}
+
+/** `target` validated as a repo-relative spec file — the same rules a
+ *  `spec:` link applies: URLs, escapes, absolute paths, and prose
+ *  mentions yield undefined, and only a regular file counts (a dir
+ *  would date every commit under it; lstat keeps a symlink out — git
+ *  dates the link entry, not its target's edits). */
+export function localSpecPath(dir: string, target: string): string | undefined {
   if (
-    t === undefined ||
-    /^[a-z][a-z0-9+.-]*:/i.test(t) ||
-    badScopeEntry(t) ||
-    // a regular file only — a dir target would date every commit under
-    // it, conflating the spec with everything it documents; lstat keeps
-    // a symlink out — git dates the link entry, not its target's edits
-    !existsSync(join(dir, t)) ||
-    !lstatSync(join(dir, t)).isFile()
+    /^[a-z][a-z0-9+.-]*:/i.test(target) ||
+    badScopeEntry(target) ||
+    !existsSync(join(dir, target)) ||
+    !lstatSync(join(dir, target)).isFile()
   ) {
     return undefined
   }
   // `spec: ./…` must normalize to the tracked path — git pathspecs
   // never match a leading `./`
-  return t.replace(/^(?:\.[/\\])+/, '')
+  return target.replace(/^(?:\.[/\\])+/, '')
 }
 
 /** One drift row for bead `id` — every failure mode is a row, never a

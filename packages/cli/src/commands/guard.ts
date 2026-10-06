@@ -24,6 +24,7 @@ import {
   traceFile,
 } from '@broject/learn'
 import { runGuards, type GuardConfig, type GuardJudgeInput } from '@broject/guard'
+import { GUARD_PROBES } from '../guard-probes.ts'
 import { judgeConfig, judgeFacade } from '@broject/judge'
 import { flag, positionals } from './args.ts'
 import { readArmed } from './hooks.ts'
@@ -133,6 +134,7 @@ async function cmdTest(argv: string[]): Promise<void> {
     cfg,
     record: false,
     armed: () => readArmed(sessionId),
+    probes: GUARD_PROBES,
     // a live decide() when the clause exists — test is the honest read
     // of what the hook would do; no journal sink keeps it a read
     judge: () => {
