@@ -57,8 +57,26 @@ async function gateLine(dir: string, target?: PrTarget): Promise<string | null> 
   }
 }
 
-/** Current-branch open PR blocker text, or null when clean/absent. */
-async function blockerLine(dir: string): Promise<string | null> {
+/** A live watch marker covering `pr` — any mode counts (the agent chose
+ *  merge or watch-only deliberately); a dead-pid marker is unwatched by
+ *  definition. Fail-open: marker I/O trouble must never fabricate a
+ *  block. */
+function hasLiveWatch(dir: string, pr: number): boolean {
+  try {
+    return listWatches(dir).some((l) => l.alive && l.watch.pr === pr)
+  } catch {
+    return true // can't prove unwatched — don't block on a probe failure
+  }
+}
+
+interface PrProbe {
+  pr: number
+  url: string
+  gate: ReturnType<typeof evaluateExitGate>
+}
+
+/** Current-branch open PR + its gate, or null when absent/closed. */
+async function prProbe(dir: string): Promise<PrProbe | null> {
   try {
     const cfg = loadConfig(dir)
     const rev = reviewHost(dir, cfg.connectors)
@@ -79,8 +97,7 @@ async function blockerLine(dir: string): Promise<string | null> {
     )
     // The same gate `bro act status` enforces: open threads, pending/failed
     // CI and AI reviewers, SAST findings, unknown mergeability, BEHIND.
-    const gate = evaluateExitGate(state)
-    return gate.ok ? null : `bro: PR [#${cur.pr}](${cur.url}): ${gate.blockers.join('; ')}`
+    return { pr: cur.pr, url: cur.url, gate: evaluateExitGate(state) }
   } catch {
     // no repo/PR/auth — nothing to gate on
     return null
@@ -162,19 +179,43 @@ export const actConnector: Connector = {
       }
     },
     async stopGate(ctx) {
-      const line = await blockerLine(ctx.dir)
-      if (!line) {
+      const p = await prProbe(ctx.dir)
+      if (!p) {
         return []
       }
+      const watched = hasLiveWatch(ctx.dir, p.pr)
+      const head = `bro: PR [#${p.pr}](${p.url})`
+      if (!p.gate.ok) {
+        const line = `${head}: ${p.gate.blockers.join('; ')}`
+        const watchNote = watched ? 'live act watch' : 'no live act watch'
+        return [
+          {
+            aspect: 'act',
+            block:
+              `${line} (${watchNote}) — ` +
+              'list with `bro act threads` — fix inline or defer to a debt bead ' +
+              '(reply + resolve); when fix_rounds exceeds the round cap ' +
+              '(act.maxRounds — tighter on docs-only PRs) only defer ' +
+              'counts; recheck `bro act status`',
+            passive: `${line} (${watchNote}; current branch — this session did not touch it)`,
+          },
+        ]
+      }
+      if (watched) {
+        return []
+      }
+      // green gate is not "done" — a pushed PR ends the turn only while
+      // somebody keeps polling it. A turn-bound `act wait` dies with the
+      // turn (bro-97lk): the block points at the detached form.
+      const line = `${head}: gate OK but no live act watch`
       return [
         {
           aspect: 'act',
           block:
-            `${line} — ` +
-            'list with `bro act threads` — fix inline or defer to a debt bead ' +
-            '(reply + resolve); when fix_rounds exceeds the round cap ' +
-            '(act.maxRounds — tighter on docs-only PRs) only defer ' +
-            'counts; recheck `bro act status`',
+            `${line} — arm one: \`bro act wait ${p.pr} --merge --cleanup\` ` +
+            'detached (setsid/systemd-run/tmux — a watcher in a turn-bound ' +
+            'shell dies with the turn); or state the exact open state and ' +
+            'stop again',
           passive: `${line} (current branch — this session did not touch it)`,
         },
       ]

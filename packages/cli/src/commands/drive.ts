@@ -52,7 +52,15 @@ import {
   type TaskRow,
   type TaskStore,
 } from '@broject/core'
-import { checkHistory, evaluateExitGate, fetchPrActState, type PrActState } from '@broject/act'
+import {
+  checkHistory,
+  evaluateExitGate,
+  fetchPrActState,
+  listWatches,
+  watchEnd,
+  watchHeartbeat,
+  type PrActState,
+} from '@broject/act'
 import {
   annotateThreads,
   judgeConfig,
@@ -469,6 +477,9 @@ interface Ctx {
   merge: boolean
   json: boolean
   connector?: string
+  /** --every loop mode — only a looping drive supervises PRs and writes
+   *  watch heartbeats; a --once pass is a report, not a watcher. */
+  supervise: boolean
   env: AgentConnectorEnv
   store: TaskStore
 }
@@ -1021,6 +1032,30 @@ async function driveOnce(ctx: Ctx): Promise<void> {
     judgeBudget: { remaining: judgeConfig(ctx.mainRoot).judge.maxDecisionsPerRun },
   }
   const prs = openFleetPrs(ctx)
+  if (ctx.supervise) {
+    // heartbeat per supervised PR — deterministic name per drive pid, so
+    // each pass rewrites the same marker and a dead drive leaves exactly
+    // the stale-supervision flag the session-start hook reports
+    for (const pr of prs) {
+      watchHeartbeat(
+        ctx.mainRoot,
+        { pr, link: ctx.rev.prLink(ctx.repo, pr), merge: ctx.merge, timeoutMin: 0 },
+        'drive'
+      )
+    }
+    // retire this drive's markers for PRs that left the open set — a live
+    // marker on a merged PR would keep reporting "watch active"
+    for (const l of listWatches(ctx.mainRoot)) {
+      if (
+        l.alive &&
+        l.watch.pid === process.pid &&
+        basename(l.file).endsWith(`-drive-${process.pid}.json`) &&
+        !prs.has(l.watch.pr)
+      ) {
+        watchEnd(l.file)
+      }
+    }
+  }
   for (const pr of prs) {
     // a throwing probe on one PR must not kill the pass — in --every
     // mode an unhandled throw would end the driver entirely
@@ -1070,6 +1105,7 @@ export async function runDriveCommand(argv: string[]): Promise<void> {
     merge: args.merge && drive.merge === 'auto',
     json: args.json,
     connector: args.connector,
+    supervise: args.everySec !== undefined,
     env: loadAgentEnv(main.path),
     store: taskStore(main.path),
   }

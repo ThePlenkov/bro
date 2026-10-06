@@ -15,6 +15,7 @@ import {
   listWatches,
   watchBegin,
   watchEnd,
+  watchHeartbeat,
   watchRetire,
   type PendingWatch,
 } from './pending-watch.ts'
@@ -376,5 +377,40 @@ describe('pending-watch markers', () => {
     const listed = listWatches(dir)
     assert.equal(listed.length, 2)
     assert.ok(listed.some((l) => !l.alive && l.watch.merge))
+  })
+})
+
+describe('watchHeartbeat', () => {
+  test('upserts one deterministic marker per (pr, kind, pid) across sweeps', () => {
+    const dir = repo()
+    const first = watchHeartbeat(dir, base, 'drive')
+    const second = watchHeartbeat(dir, base, 'drive')
+    assert.ok(first)
+    assert.equal(first, second)
+    const listed = listWatches(dir)
+    assert.equal(listed.length, 1)
+    assert.equal(listed[0]!.watch.pr, 42)
+    assert.equal(listed[0]!.alive, true)
+  })
+
+  test('different kinds on the same pr keep separate markers', () => {
+    const dir = repo()
+    assert.ok(watchHeartbeat(dir, base, 'drive'))
+    assert.ok(watchHeartbeat(dir, base, 'convoy'))
+    assert.equal(listWatches(dir).length, 2)
+  })
+
+  test('a dead supervisor pid lists as a stale, flaggable watch', () => {
+    const dir = repo()
+    const seed = watchHeartbeat(dir, base, 'drive')
+    assert.ok(seed)
+    // simulate the dead drive by rewriting the marker pid to a dead one
+    writeFileSync(
+      seed,
+      JSON.stringify({ ...base, pid: 2_000_000_000, startedAt: Date.now() })
+    )
+    const listed = listWatches(dir)
+    assert.equal(listed.length, 1)
+    assert.equal(listed[0]!.alive, false)
   })
 })
