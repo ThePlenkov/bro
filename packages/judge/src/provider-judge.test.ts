@@ -93,9 +93,10 @@ describe('providerJudge', () => {
     withEnv('TYPESAFE_TEST_KEY', 'ts_live_test', async () => {
       const { fetch, calls } = fakeFetch({ status: 200, body: TYPED_BODY })
       const entry: ProviderEntry = {
-        type: 'systemone',
+        type: 'api',
+        baseUrl: 'https://api.typesafe.ai',
         apiKeyEnv: 'TYPESAFE_TEST_KEY',
-        model: 'jev-1.13.0',
+        models: { ['jev-1.13.0']: 'systemone' },
       }
       const res = await providerJudge('typesafe', entry, CFG, { fetch }).decide(
         's',
@@ -115,14 +116,16 @@ describe('providerJudge', () => {
         }),
       })
       const entry: ProviderEntry = {
-        type: 'openai-compat',
+        type: 'api',
         baseUrl: 'https://orca.example/v1',
         apiKeyEnv: 'ORCA_TEST_KEY',
-        model: 'qwen3-coder',
+        models: { ['qwen3-coder']: 'openai-compat' },
       }
       const res = await providerJudge('orca', entry, CFG, { fetch }).decide('s', QUESTIONS)
       assert.equal(calls[0]!.url, 'https://orca.example/v1/chat/completions')
-      assert.equal(res.answers.route!.decidedBy, 'provider:orca')
+      // an api host serves both wires — the :prose stamp keeps a
+      // prompt-and-parsed answer out of the provider's typed bucket
+      assert.equal(res.answers.route!.decidedBy, 'provider:orca:prose')
       assert.equal(res.answers.route!.confidence, 0.7)
       assert.equal(res.model, 'chat-model-r1')
     }))
@@ -131,9 +134,11 @@ describe('providerJudge', () => {
     withEnv('TYPESAFE_TEST_KEY', 'k', async () => {
       const { fetch, calls } = fakeFetch({ status: 200, body: TYPED_BODY })
       const entry: ProviderEntry = {
-        type: 'systemone',
+        type: 'api',
+        baseUrl: 'https://api.typesafe.ai',
         apiKeyEnv: 'TYPESAFE_TEST_KEY',
         model: 'jev-entry',
+        models: { 'jev-entry': 'systemone', 'jev-override': 'systemone' },
       }
       await providerJudge('t', entry, CFG, { fetch }).decide('s', QUESTIONS)
       assert.equal(
@@ -220,24 +225,24 @@ describe('synthesizedProviders', () => {
     }
     const out = synthesizedProviders(cfg, {})
     assert.deepEqual(out.systemone, {
-      type: 'systemone',
-      baseUrl: 'https://systemone.example/api',
-      apiKeyEnv: 'SYSTEMONE_TEST_KEY',
-      model: 'jev-test',
-    })
+        type: 'api',
+        baseUrl: 'https://systemone.example/api',
+        apiKeyEnv: 'SYSTEMONE_TEST_KEY',
+        models: { ['jev-test']: 'systemone' },
+      })
     assert.deepEqual(out['llm-judge'], {
-      type: 'openai-compat',
-      baseUrl: 'https://llm.example/v1',
-      apiKeyEnv: 'K',
-      model: 'm',
-    })
+        type: 'api',
+        baseUrl: 'https://llm.example/v1',
+        apiKeyEnv: 'K',
+        models: { ['m']: 'openai-compat' },
+      })
   })
 
   test('a named entry wins over the synthesized alias — the user claimed it', () => {
     const mine: ProviderEntry = {
-      type: 'openai-compat',
+      type: 'api',
       baseUrl: 'https://my-systemone-mirror.example/v1',
-      model: 'mine',
+      models: { ['mine']: 'openai-compat' },
     }
     const out = synthesizedProviders(CFG, { systemone: mine })
     assert.equal(out.systemone, mine)
@@ -259,9 +264,10 @@ describe('providerKeyField', () => {
     )
     // a user-defined entry claimed the alias — its registry path is real
     const mine: ProviderEntry = {
-      type: 'systemone',
+      type: 'api',
+      baseUrl: 'https://api.typesafe.ai',
       apiKeyEnv: 'K',
-      model: 'm',
+      models: { ['m']: 'systemone' },
     }
     assert.equal(
       providerKeyField('systemone', { systemone: mine }),
@@ -281,20 +287,22 @@ describe('providerJudgeAuth', () => {
   test('missing env names the field, never the var name', async () => {
     await withEnv('MISSING_PROVIDER_KEY', undefined, async () => {
       const msg = providerJudgeAuth('typesafe', {
-        type: 'systemone',
-        apiKeyEnv: 'MISSING_PROVIDER_KEY',
-        model: 'm',
-      })
+          type: 'api',
+          baseUrl: 'https://api.typesafe.ai',
+          apiKeyEnv: 'MISSING_PROVIDER_KEY',
+          models: { ['m']: 'systemone' },
+        })
       assert.match(msg!, /providers\.typesafe\.apiKeyEnv/)
       assert.doesNotMatch(msg!, /MISSING_PROVIDER_KEY/)
     })
     await withEnv('PRESENT_PROVIDER_KEY', 'v', async () => {
       assert.equal(
         providerJudgeAuth('typesafe', {
-          type: 'systemone',
-          apiKeyEnv: 'PRESENT_PROVIDER_KEY',
-          model: 'm',
-        }),
+            type: 'api',
+            baseUrl: 'https://api.typesafe.ai',
+            apiKeyEnv: 'PRESENT_PROVIDER_KEY',
+            models: { ['m']: 'systemone' },
+          }),
         null
       )
     })
@@ -304,11 +312,12 @@ describe('providerJudgeAuth', () => {
     await withEnv('MISSING_PROVIDER_KEY', undefined, async () => {
       assert.equal(
         providerJudgeAuth('typesafe', {
-          type: 'systemone',
-          apiKeyEnv: 'MISSING_PROVIDER_KEY',
-          apiKeyCommand: 'pass show bro/typesafe',
-          model: 'm',
-        }),
+            type: 'api',
+            baseUrl: 'https://api.typesafe.ai',
+            apiKeyEnv: 'MISSING_PROVIDER_KEY',
+            apiKeyCommand: 'pass show bro/typesafe',
+            models: { ['m']: 'systemone' },
+          }),
         null
       )
     })
@@ -318,7 +327,12 @@ describe('providerJudgeAuth', () => {
     await withEnv('TYPESAFE_API_KEY', undefined, async () => {
       const msg = providerJudgeAuth(
         'systemone',
-        { type: 'systemone', apiKeyEnv: 'TYPESAFE_API_KEY', model: 'm' },
+        {
+   type: 'api',
+   baseUrl: 'https://api.typesafe.ai',
+   apiKeyEnv: 'TYPESAFE_API_KEY',
+   models: { ['m']: 'systemone' },
+ },
         providerKeyField('systemone', {})
       )
       assert.match(msg!, /judge\.apiKeyEnv/)
@@ -334,10 +348,11 @@ describe('judgeFacade provider mode', () => {
         {
           providers: {
             typesafe: {
-              type: 'systemone',
-              apiKeyEnv: 'TYPESAFE_TEST_KEY',
-              model: 'jev-1.13.0',
-            },
+                type: 'api',
+                baseUrl: 'https://api.typesafe.ai',
+                apiKeyEnv: 'TYPESAFE_TEST_KEY',
+                models: { ['jev-1.13.0']: 'systemone' },
+              },
           },
           judge: { provider: 'typesafe' },
         },
@@ -364,10 +379,11 @@ describe('judgeFacade provider mode', () => {
         {
           providers: {
             typesafe: {
-              type: 'systemone',
-              apiKeyEnv: 'TYPESAFE_TEST_KEY',
-              model: 'jev-entry-pin',
-            },
+                type: 'api',
+                baseUrl: 'https://api.typesafe.ai',
+                apiKeyEnv: 'TYPESAFE_TEST_KEY',
+                models: { 'jev-entry-pin': 'systemone', 'jev-override': 'systemone' },
+              },
           },
           judge: {
             provider: 'typesafe',
@@ -421,7 +437,9 @@ describe('judgeFacade provider mode', () => {
               'm'
             )
             assert.equal(calls[1]!.url, 'https://llm.example/v1/chat/completions')
-            assert.equal(res.answers.route!.decidedBy, 'provider:llm-judge')
+            // the alias serves on the openai-compat wire — :prose keeps
+            // the prompt-and-parsed answer out of any typed bucket
+            assert.equal(res.answers.route!.decidedBy, 'provider:llm-judge:prose')
             assert.equal(res.answers.route!.confidence, 0.95)
           } finally {
             console.error = orig

@@ -5,8 +5,9 @@ import type { ConfigSection } from '@broject/core'
 export { isEnvName } from '@broject/core'
 
 export interface JudgeLlmConfig {
-  /** OpenAI-compatible base URL — the connector POSTs
-   *  `${baseUrl}/chat/completions` (include `/v1` when the host needs it). */
+  /** OpenAI-compatible host base — the connector POSTs
+   *  `${baseUrl}/v1/chat/completions`; a baseUrl already carrying a
+   *  version (`…/v1`, `…/v2beta`) keeps it. */
   baseUrl: string
   model: string
   /** Env var NAME holding the key — config never carries the value. */
@@ -22,7 +23,8 @@ export interface JudgeConfig {
    *  don't drift under the same inputs. */
   model: string
   /** TypeSafe API base — `${baseUrl}/v1/systemone` is the evaluate
-   *  endpoint; `TYPESAFE_BASE_URL` in the environment overrides. */
+   *  endpoint; `TYPESAFE_BASE_URL` in the environment redirects the
+   *  default host only — never a configured one. */
   baseUrl: string
   /** Env var NAME holding the TypeSafe API key — never the value. */
   apiKeyEnv: string

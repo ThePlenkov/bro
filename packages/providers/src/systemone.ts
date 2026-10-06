@@ -2,9 +2,12 @@
  * The `systemone` provider binding — TypeSafe's System One API
  * (spec: specs/bro-ribc.1.md, wire contract per
  * specs/sessions/bro-f4ot.2-judge.md). POST {baseUrl}/v1/systemone with
- * Bearer $<apiKeyEnv>; `baseUrl` defaults to the hosted API, env
- * TYPESAFE_BASE_URL overrides. Typed fidelity — the wire speaks
- * choice/score/noul natively; drift fails open (JudgeUnavailable).
+ * Bearer $<apiKeyEnv>; `baseUrl` defaults to the hosted API; the
+ * TYPESAFE_BASE_URL env is a dev redirect for the DEFAULT host only —
+ * a configured api host is never overridden by env (config is the
+ * source of truth for which provider a request lands on). Typed
+ * fidelity — the wire speaks choice/score/noul natively; drift fails
+ * open (JudgeUnavailable).
  *
  * `by` is the caller's provenance stamp — `provider:<name>` for a
  * registry entry, the bare alias for a synthesized legacy one.
@@ -14,6 +17,7 @@
 import { isEnvName, JudgeUnavailable } from '@broject/core'
 import type { DecideResult, ProviderEntry } from '@broject/core'
 import {
+  apiVersionedBase,
   mapUsage,
   objOr,
   postJson,
@@ -25,10 +29,19 @@ import {
 import type { AcpSeam, ProviderCall } from './registry.ts'
 import { mapTypedAnswers } from './typed.ts'
 
-type SystemoneEntry = Extract<ProviderEntry, { type: 'systemone' }>
+/** A resolved api-model on the systemone wire — the registry hands the
+ *  binding host + auth + the picked model; `type:'api'` itself never
+ *  reaches here (the api entry is a host, the wire is per-model). */
+export interface ApiTarget {
+  baseUrl?: string
+  apiKeyEnv?: string
+  apiKeyCommand?: string
+  model: string
+}
 
 /** The hosted API default — the entry's baseUrl is optional for this
- *  kind (PROVIDER_REGISTRY), so the binding owns the fallback. */
+ *  wire (the api kind requires baseUrl, but the legacy synthesized
+ *  path may omit it), so the binding owns the fallback. */
 const DEFAULT_BASE_URL = 'https://api.typesafe.ai'
 
 export interface ProviderWireOpts {
@@ -51,7 +64,7 @@ export interface ProviderWireOpts {
  *  apiKeyEnv; a non-NAME apiKeyEnv is a config bug (throws, never
  *  echoed); a missing var is fail-open, and every message names the
  *  config FIELD, never the value. */
-function apiKey(entry: SystemoneEntry, keyField: string, deadline: number): string {
+function apiKey(entry: ApiTarget, keyField: string, deadline: number): string {
   if (entry.apiKeyCommand !== undefined) {
     return runKeyCommand(entry.apiKeyCommand, keyField, deadline)
   }
@@ -94,13 +107,20 @@ function throwForStatus(res: HttpResult): never {
  *  the shared deadline. */
 export function systemoneCall(
   by: string,
-  entry: SystemoneEntry,
+  entry: ApiTarget,
   opts: ProviderWireOpts = {}
 ): ProviderCall {
   const keyField = opts.keyField ?? 'apiKeyEnv'
   const model = opts.model ?? entry.model
-  const base = process.env.TYPESAFE_BASE_URL ?? entry.baseUrl ?? DEFAULT_BASE_URL
-  const endpoint = `${stripTrailingSlashes(base)}/v1/systemone`
+  // env redirects the DEFAULT host only — a configured api host is the
+  // operator's choice and a stray TYPESAFE_BASE_URL must never reroute
+  // a router's traffic to TypeSafe (or vice versa)
+  const configured = entry.baseUrl ?? DEFAULT_BASE_URL
+  const base =
+    stripTrailingSlashes(configured) === stripTrailingSlashes(DEFAULT_BASE_URL)
+      ? (process.env.TYPESAFE_BASE_URL ?? configured)
+      : configured
+  const endpoint = `${apiVersionedBase(base)}/systemone`
   return async (state, questions, deadline): Promise<DecideResult> => {
     const key = apiKey(entry, keyField, deadline)
     const started = Date.now()

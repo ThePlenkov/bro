@@ -17,7 +17,8 @@ confidence back, sub-second, priced in fractions of a cent. The primary
 backend is **systemone** — TypeSafe's System One API (`POST
 {judge.baseUrl}/v1/systemone`, `Authorization: Bearer
 $<judge.apiKeyEnv>` — the var named by `judge.apiKeyEnv`,
-`TYPESAFE_API_KEY` by default; `TYPESAFE_BASE_URL` overrides the base);
+`TYPESAFE_API_KEY` by default; `TYPESAFE_BASE_URL` redirects the
+default base only, never a configured host);
 `judge.fallback` names an escalation connector (**llm-judge** — any
 OpenAI-compatible chat endpoint) re-asked on unanswered questions and
 answers under `judge.confidence`.

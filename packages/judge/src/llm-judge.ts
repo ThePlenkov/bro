@@ -35,7 +35,6 @@ export function llmJudge(cfg: JudgeConfig, opts: LlmJudgeOpts = {}): DeadlineJud
       ? undefined
       : openaiCompatChat(
           {
-            type: 'openai-compat',
             baseUrl: llm.baseUrl,
             apiKeyEnv: llm.apiKeyEnv,
             model: llm.model,

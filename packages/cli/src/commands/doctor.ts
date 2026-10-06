@@ -383,7 +383,8 @@ function remoteChecks(
 // kind for a surface it lacks — use-time resolution errors out either
 // way; doctor just says it first.
 
-/** The listing row — entries as `name (kind, model)`. */
+/** The listing row — entries as `name (kind, model)`; an api host
+ *  shows its default pin or the served-model count. */
 function providerListCheck(providers: Record<string, ProviderEntry>): DoctorCheck {
   const names = Object.keys(providers)
   if (names.length === 0) {
@@ -391,6 +392,11 @@ function providerListCheck(providers: Record<string, ProviderEntry>): DoctorChec
   }
   const label = (n: string): string => {
     const e = providers[n]!
+    if (e.type === 'api') {
+      const keys = Object.keys(e.models)
+      const shown = e.model ?? (keys.length === 1 ? keys[0] : `${keys.length} models`)
+      return `${n} (api, ${shown})`
+    }
     const model = 'model' in e && typeof e.model === 'string' ? `, ${e.model}` : ''
     return `${n} (${e.type}${model})`
   }

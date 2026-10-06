@@ -1,6 +1,8 @@
 /**
  * The `openai-compat` provider binding — any OpenAI-compatible chat
- * endpoint (POST {baseUrl}/chat/completions) as a raw prose call
+ * endpoint (POST {baseUrl}/v1/chat/completions — the wire mounts /v1
+ * on the host root and keeps an already-versioned base) as a raw
+ * prose call
  * (spec: specs/bro-ribc.1.md). The wire answer is free text; turning
  * it into typed judgments is the consumer's prompt-and-parse problem
  * (the judge's prose adapter lives in @broject/judge) — this binding
@@ -8,19 +10,19 @@
  * contract.
  */
 import { isEnvName, JudgeUnavailable } from '@broject/core'
-import type { ProviderEntry } from '@broject/core'
 import {
+  apiVersionedBase,
   mapUsage,
   objOr,
   postJson,
   runKeyCommand,
-  stripTrailingSlashes,
   type HttpResult,
 } from './http.ts'
 import type { ProviderChat, ProviderChatResult } from './registry.ts'
-import type { ProviderWireOpts } from './systemone.ts'
+import type { ApiTarget, ProviderWireOpts } from './systemone.ts'
 
-type OpenAiCompatEntry = Extract<ProviderEntry, { type: 'openai-compat' }>
+/** The openai-compat wire needs baseUrl — the api kind's host root. */
+type OpenAiCompatEntry = ApiTarget & { baseUrl: string }
 
 /** Auth headers from the configured env var — a non-NAME apiKeyEnv is
  *  a config bug (throws, never echoed); a missing var is fail-open,
@@ -84,7 +86,9 @@ export function openaiCompatChat(
 ): ProviderChat {
   const keyField = opts.keyField ?? 'apiKeyEnv'
   const model = opts.model ?? entry.model
-  const endpoint = `${stripTrailingSlashes(entry.baseUrl)}/chat/completions`
+  // the api entry's baseUrl is the HOST root — the openai wire mounts
+  // /v1 on it, unless the author already versioned the path
+  const endpoint = `${apiVersionedBase(entry.baseUrl)}/chat/completions`
   return async (prompt, deadline): Promise<ProviderChatResult> => {
     const res = await postJson(
       endpoint,

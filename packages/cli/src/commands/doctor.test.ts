@@ -267,7 +267,11 @@ describe('bro doctor', () => {
       {
         config: {
           providers: {
-            orca: { type: 'openai-compat', baseUrl: 'http://x/v1', model: 'qwen3-coder' },
+            orca: {
+   type: 'api',
+   baseUrl: 'http://x/v1',
+   models: { ['qwen3-coder']: 'openai-compat' },
+ },
             local: { type: 'cli', command: 'devin -p' },
           },
         },
@@ -276,7 +280,7 @@ describe('bro doctor', () => {
       (dir) => {
         const c = byName(runDoctorChecks(dir), 'providers')
         assert.equal(c.status, 'ok')
-        assert.match(c.detail, /orca \(openai-compat, qwen3-coder\)/)
+        assert.match(c.detail, /orca \(api, qwen3-coder\)/)
         assert.match(c.detail, /local \(cli\)/)
       }
     ))
@@ -287,11 +291,11 @@ describe('bro doctor', () => {
         config: {
           providers: {
             orca: {
-              type: 'openai-compat',
-              baseUrl: 'http://x/v1',
-              model: 'm',
-              apiKeyEnv: 'ORCA_UNSET_KEY',
-            },
+                type: 'api',
+                baseUrl: 'http://x/v1',
+                apiKeyEnv: 'ORCA_UNSET_KEY',
+                models: { ['m']: 'openai-compat' },
+              },
           },
         },
         bins: ['gh'],
@@ -312,11 +316,11 @@ describe('bro doctor', () => {
         config: {
           providers: {
             orca: {
-              type: 'openai-compat',
-              baseUrl: 'http://x/v1',
-              model: 'm',
-              apiKeyEnv: 'ORCA_SET_KEY',
-            },
+                type: 'api',
+                baseUrl: 'http://x/v1',
+                apiKeyEnv: 'ORCA_SET_KEY',
+                models: { ['m']: 'openai-compat' },
+              },
           },
         },
         bins: ['gh'],
@@ -353,7 +357,12 @@ describe('bro doctor', () => {
       {
         config: {
           providers: {
-            typesafe: { type: 'systemone', apiKeyEnv: 'TYPESAFE_API_KEY', model: 'jev-1' },
+            typesafe: {
+   type: 'api',
+   baseUrl: 'https://api.typesafe.ai',
+   apiKeyEnv: 'TYPESAFE_API_KEY',
+   models: { ['jev-1']: 'systemone' },
+ },
           },
           agents: { native: { provider: 'typesafe' } },
         },

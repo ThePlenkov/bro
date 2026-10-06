@@ -1077,7 +1077,12 @@ describe('resolveSpawnProvider', () => {
   const providers = {
     kilo: { type: 'acp', command: 'kilo --acp', model: 'jev' },
     local: { type: 'cli', command: 'devin -p', model: 'devin-1' },
-    typesafe: { type: 'systemone', apiKeyEnv: 'K', model: 'jev' },
+    typesafe: {
+   type: 'api',
+   baseUrl: 'https://api.typesafe.ai',
+   apiKeyEnv: 'K',
+   models: { ['jev']: 'systemone' },
+ },
     'backend-p': { type: 'cli', command: 'backend-cli {promptFile}' },
   } as const
   const env: AgentConnectorEnv = {
@@ -1124,7 +1129,7 @@ describe('resolveSpawnProvider', () => {
       (e: unknown) =>
         e instanceof SpawnError &&
         e.kind === 'config' &&
-        /providers\.typesafe \(type 'systemone'\) has no spawn surface/.test(e.message)
+        /providers\.typesafe \(type 'api'\) has no spawn surface/.test(e.message)
     )
   })
 

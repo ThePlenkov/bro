@@ -292,18 +292,21 @@ export function synthesizedProviders(
   providers: Record<string, ProviderEntry>
 ): Record<string, ProviderEntry> {
   const out = { ...providers }
+  // legacy judge.* config → anonymous api entries under their
+  // connector aliases — the host is the user's baseUrl, the one
+  // pinned model rides its wire
   out.systemone ??= {
-    type: 'systemone',
+    type: 'api',
     baseUrl: cfg.baseUrl,
     apiKeyEnv: cfg.apiKeyEnv,
-    model: cfg.model,
+    models: { [cfg.model]: 'systemone' },
   }
   if (cfg.llm !== undefined) {
     out['llm-judge'] ??= {
-      type: 'openai-compat',
+      type: 'api',
       baseUrl: cfg.llm.baseUrl,
       apiKeyEnv: cfg.llm.apiKeyEnv,
-      model: cfg.llm.model,
+      models: { [cfg.llm.model]: 'openai-compat' },
     }
   }
   return out

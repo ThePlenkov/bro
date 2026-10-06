@@ -21,7 +21,7 @@ export type {
   ProviderClient,
 } from './registry.ts'
 export { systemoneCall } from './systemone.ts'
-export type { ProviderWireOpts } from './systemone.ts'
+export type { ApiTarget, ProviderWireOpts } from './systemone.ts'
 // the shared transport — the judge package's http helpers moved here
 // with the bindings that use them; consumers re-export, not reimplement
 export {

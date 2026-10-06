@@ -4,26 +4,44 @@ import type { ProviderEntry } from '@broject/core'
 import { providerClient } from './registry.ts'
 
 describe('providerClient', () => {
-  test('a systemone entry binds the typed call surface', () => {
+  test('an api entry binds a surface by its resolved model wire', () => {
     const entry: ProviderEntry = {
-      type: 'systemone',
+      type: 'api',
+      baseUrl: 'https://orca.example',
       apiKeyEnv: 'K',
-      model: 'jev-1.13.0',
+      models: {
+        'typesafe/jev-1.13': 'systemone',
+        'acme/cheap-chat': 'openai-compat',
+      },
     }
-    const client = providerClient('typesafe', entry)
-    assert.equal(typeof client.call, 'function')
-    assert.equal(client.chat, undefined)
+    const typed = providerClient('orca', entry, { model: 'typesafe/jev-1.13' })
+    assert.equal(typeof typed.call, 'function')
+    assert.equal(typed.chat, undefined)
+    const prose = providerClient('orca', entry, { model: 'acme/cheap-chat' })
+    assert.equal(typeof prose.chat, 'function')
+    assert.equal(prose.call, undefined)
+    // a single-model entry needs no explicit model
+    const solo = providerClient('solo', {
+      type: 'api',
+      baseUrl: 'https://x',
+      models: { 'typesafe/jev-1.13': 'systemone' },
+    })
+    assert.equal(typeof solo.call, 'function')
   })
 
-  test('an openai-compat entry binds the raw chat surface', () => {
+  test('an api entry refuses an undeclared model — the allowlist is the point', () => {
     const entry: ProviderEntry = {
-      type: 'openai-compat',
-      baseUrl: 'https://orca.example/v1',
-      model: 'qwen3-coder',
+      type: 'api',
+      baseUrl: 'https://orca.example',
+      models: { 'typesafe/jev-1.13': 'systemone' },
     }
-    const client = providerClient('orca', entry)
-    assert.equal(typeof client.chat, 'function')
-    assert.equal(client.call, undefined)
+    assert.throws(
+      () => providerClient('orca', entry, { model: 'kilo/typesafe/jev-router' }),
+      (e: unknown) =>
+        e instanceof Error &&
+        /not served/.test(e.message) &&
+        /typesafe\/jev-1\.13/.test(e.message)
+    )
   })
 
   test('an acp entry binds a surface by its resolved model', () => {

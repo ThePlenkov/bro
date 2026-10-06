@@ -44,16 +44,21 @@ export {
 } from './config.ts'
 export type { IgnoreCheckEntry, IgnoreCheckRule } from './config.ts'
 export {
+  API_WIRES,
   getProvider,
   isEnvName,
+  isSystemoneFamily,
   parseProviderEntry,
   PROVIDER_KINDS,
   PROVIDER_REGISTRY,
   ProviderSurfaceError,
   requireProviderSurface,
+  resolveApiModel,
   UnknownProviderError,
 } from './providers.ts'
 export type {
+  ApiEntry,
+  ApiWire,
   CallSurfaceGrade,
   FleetProfile,
   ProviderEntry,

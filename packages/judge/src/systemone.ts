@@ -25,7 +25,6 @@ export function systemoneJudge(cfg: JudgeConfig, opts: SystemoneJudgeOpts = {}):
     systemoneCall(
       SYSTEMONE_NAME,
       {
-        type: 'systemone',
         baseUrl: cfg.baseUrl,
         apiKeyEnv: cfg.apiKeyEnv,
         model: cfg.model,

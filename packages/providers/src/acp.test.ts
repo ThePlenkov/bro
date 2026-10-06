@@ -83,6 +83,10 @@ describe('isSystemoneFamily', () => {
     // jev-router is a router product, not a jev model — never family
     assert.equal(isSystemoneFamily('kilo/typesafe/jev-router'), false)
     assert.equal(isSystemoneFamily('typesafe/jev-router'), false)
+    // 'latest' is the same trap — jev-latest-router is a product name,
+    // not the model pin; the segment must complete
+    assert.equal(isSystemoneFamily('typesafe/jev-latest-router'), false)
+    assert.equal(isSystemoneFamily('jev-latest-router'), false)
     assert.equal(isSystemoneFamily('qwen3-coder'), false)
     assert.equal(isSystemoneFamily('other/jev-1'), false)
     assert.equal(isSystemoneFamily(undefined), false)

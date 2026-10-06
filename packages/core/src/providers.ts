@@ -12,29 +12,51 @@
  *  message (it may be the secret itself). */
 export const isEnvName = (v: string): boolean => /^[A-Z_][A-Z0-9_]*$/.test(v)
 
-/** Closed union — kinds exist for *protocol* differences, not vendors
- *  (two OpenAI-compat hosts are two entries, one kind). A fifth kind is
- *  a spec discussion, not a PR. */
-export const PROVIDER_KINDS = ['systemone', 'openai-compat', 'acp', 'cli'] as const
+/** Closed union — kinds exist for *connection shape* differences, not
+ *  vendors or wires (an api host serves many models on many wires; two
+ *  OpenAI-compat hosts are two entries, one kind). A fourth kind is a
+ *  spec discussion, not a PR. */
+export const PROVIDER_KINDS = ['api', 'acp', 'cli'] as const
 export type ProviderKind = (typeof PROVIDER_KINDS)[number]
+
+/** The wire protocol one served model speaks — the api kind's per-model
+ *  knob: 'systemone' is the native typed-judgment contract
+ *  (POST {baseUrl}/v1/systemone), 'openai-compat' is generic
+ *  chat-completions prose (POST {baseUrl}/v1/chat/completions —
+ *  each wire mounts its versioned prefix on the host root; a base
+ *  the author already versioned is kept). */
+export type ApiWire = 'systemone' | 'openai-compat'
+export const API_WIRES = ['systemone', 'openai-compat'] as const
+
+/** A systemone-family model id — `typesafe/jev-<version|latest>`,
+ *  possibly router-prefixed (`kilo/orcarouter/typesafe/jev-1.13`), or a
+ *  bare `jev-*` pin. The version anchor is deliberate: `jev-router` is
+ *  a router PRODUCT pointing at arbitrary upstreams, not a jev model —
+ *  inferring its wire as systemone would let a config silently spend on
+ *  it. `latest` must complete the segment for the same reason —
+ *  `jev-latest-router` is a product, not the model pin. Lives in core
+ *  because api-entry normalization consumes it at parse time, before
+ *  any provider binding exists. */
+export const isSystemoneFamily = (model: string | undefined): boolean =>
+  model !== undefined &&
+  /(?:^|\/)typesafe\/jev-(?:\d|latest(?=$|\/))|^jev-(?:\d|latest(?=$|\/))/.test(model)
 
 export type ProviderEntry =
   | {
-      type: 'systemone'
-      baseUrl?: string
+      type: 'api'
+      /** Host root — every model is served under it on its own wire. */
+      baseUrl: string
+      /** The allowlist: served model id → resolved wire. Values in
+       *  config may be a wire string, {wire}, or null (wire inferred —
+       *  systemone-family ids land on 'systemone', the rest on
+       *  'openai-compat'); parsing always materializes the wire. */
+      models: Record<string, ApiWire>
+      /** Default model — must be a key of models. */
+      model?: string
       apiKeyEnv?: string
       /** Secret-store command (secret-tool/pass/op …) whose stdout is
-       *  the key — the secure alternative to apiKeyEnv. Either it or
-       *  apiKeyEnv must be set; the command wins when both exist. */
+       *  the key — the secure alternative to apiKeyEnv. */
       apiKeyCommand?: string
-      model: string
-    }
-  | {
-      type: 'openai-compat'
-      baseUrl: string
-      apiKeyEnv?: string
-      apiKeyCommand?: string
-      model: string
     }
   | {
       type: 'acp'
@@ -87,17 +109,13 @@ export interface ProviderKindSpec {
 }
 
 export const PROVIDER_REGISTRY: Record<ProviderKind, ProviderKindSpec> = {
-  systemone: {
-    call: 'typed',
+  // call is 'auto': the resolved model's wire picks the surface —
+  // systemone → typed, openai-compat → prose
+  api: {
+    call: 'auto',
     spawn: false,
-    required: ['model'],
-    optional: ['baseUrl', 'apiKeyEnv', 'apiKeyCommand'],
-  },
-  'openai-compat': {
-    call: 'prose',
-    spawn: false,
-    required: ['baseUrl', 'model'],
-    optional: ['apiKeyEnv', 'apiKeyCommand'],
+    required: ['baseUrl'],
+    optional: ['model', 'apiKeyEnv', 'apiKeyCommand'],
   },
   acp: {
     call: 'auto',
@@ -171,10 +189,85 @@ function pickOptBool(
   picked[f] = v
 }
 
-/** Validates one raw entry against its kind spec. Returns the typed
- *  entry, or null after warning — a malformed entry is dropped, never
- *  half-registered (a pasted key value in apiKeyEnv drops the whole
- *  entry rather than silently downgrading auth). */
+/** One model entry → its wire. A bare string wins; `{wire}` unwraps;
+ *  null/absent infers: systemone-family ids get 'systemone',
+ *  everything else 'openai-compat'. undefined = the declared wire was
+ *  not a known wire name. */
+function resolveModelWire(key: string, v: unknown): ApiWire | undefined {
+  const wire =
+    typeof v === 'string'
+      ? v
+      : typeof v === 'object' && v !== null
+        ? (v as Record<string, unknown>).wire
+        : undefined
+  if (wire === undefined || wire === null) {
+    return isSystemoneFamily(key) ? 'systemone' : 'openai-compat'
+  }
+  return typeof wire === 'string' && (API_WIRES as readonly string[]).includes(wire)
+    ? (wire as ApiWire)
+    : undefined
+}
+
+/** The api kind's `models` map → resolved wires, or the fail string. */
+function parseApiModels(
+  raw: unknown
+): Record<string, ApiWire> | { err: string } {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return { err: 'models must be a model→wire map' }
+  }
+  const out: Record<string, ApiWire> = {}
+  for (const [id, v] of Object.entries(raw)) {
+    const key = id.trim()
+    if (key === '') {
+      return { err: 'models keys must be non-empty model ids' }
+    }
+    const resolved = resolveModelWire(key, v)
+    if (resolved === undefined) {
+      return { err: `models.${key}.wire must be one of ${API_WIRES.join('|')}` }
+    }
+    // defineProperty, not assignment — a model id like '__proto__'
+    // must land as an own key, never trigger the prototype setter
+    Object.defineProperty(out, key, {
+      value: resolved,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    })
+  }
+  if (Object.keys(out).length === 0) {
+    return { err: 'models must name at least one served model' }
+  }
+  return out
+}
+
+/** api-kind extras: the models map is required; the pinned default
+ *  must sit in the allowlist; a systemone wire needs a key source —
+ *  checked here, while the error still names the config field. */
+function parseApiEntry(
+  picked: Record<string, string | boolean>,
+  rawModels: unknown
+): Record<string, ApiWire> | { err: string } {
+  const models = parseApiModels(rawModels)
+  if ('err' in models) {
+    return models
+  }
+  if (typeof picked.model === 'string' && !Object.hasOwn(models, picked.model)) {
+    return { err: `model '${picked.model}' is not in the models allowlist` }
+  }
+  // the systemone wire always sends Bearer — an entry resolving a
+  // model to it with no key source parses but fails every call
+  if (
+    Object.values(models).includes('systemone') &&
+    picked.apiKeyEnv === undefined &&
+    picked.apiKeyCommand === undefined
+  ) {
+    return {
+      err: 'serves a systemone-wire model with no key source — set apiKeyEnv or apiKeyCommand',
+    }
+  }
+  return models
+}
+
 export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | null {
   const fail = (why: string): null => {
     console.error(`bro.config: providers.${name} ${why} — entry dropped`)
@@ -184,6 +277,13 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
     return fail('must be an object')
   }
   const o = raw as Record<string, unknown>
+  // the retired per-protocol kinds fold into one api host entry — name
+  // the old spelling so the error IS the migration note
+  if (o.type === 'systemone' || o.type === 'openai-compat') {
+    return fail(
+      `type '${o.type}' is retired — use type 'api' with models: { "<model>": "${o.type}" }`
+    )
+  }
   if (typeof o.type !== 'string' || !(PROVIDER_KINDS as readonly string[]).includes(o.type)) {
     return fail(`type must be one of ${PROVIDER_KINDS.join('|')} — got ${JSON.stringify(o.type)}`)
   }
@@ -203,22 +303,67 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
   for (const f of spec.optionalBool ?? []) {
     pickOptBool(name, o, f, picked)
   }
+  let models: Record<string, ApiWire> | undefined
+  if (type === 'api') {
+    const parsed = parseApiEntry(picked, o.models)
+    if ('err' in parsed) {
+      return fail(parsed.err)
+    }
+    models = parsed
+  }
+  const keyErr = keySourceErr(picked)
+  if (keyErr !== null) {
+    return fail(keyErr)
+  }
+  return { type, ...picked, ...(models === undefined ? {} : { models }) } as ProviderEntry
+}
+
+/** Key-source guards shared by every kind: apiKeyEnv names an env var
+ *  (config never holds a value); apiKeyCommand must RUN a lookup — an
+ *  `echo sk-…`/`printf ts_live_…` "command" smuggles the key into
+ *  config, which is the whole point the field exists to prevent. */
+function keySourceErr(picked: Record<string, string | boolean>): string | null {
   if (typeof picked.apiKeyEnv === 'string' && !isEnvName(picked.apiKeyEnv)) {
-    return fail('apiKeyEnv must NAME an env var (SCREAMING_SNAKE) — config never holds a key value')
+    return 'apiKeyEnv must NAME an env var (SCREAMING_SNAKE) — config never holds a key value'
   }
-  if (type === 'systemone' && picked.apiKeyEnv === undefined && picked.apiKeyCommand === undefined) {
-    return fail('requires apiKeyEnv or apiKeyCommand')
-  }
-  // an `echo sk-…`/`printf ts_live_…` "command" smuggles the key into
-  // config — the whole point of apiKeyCommand is that the file never
-  // holds the value
   if (
     typeof picked.apiKeyCommand === 'string' &&
     /sk-[A-Za-z0-9]|ts_(?:live|test)_|Bearer\s/i.test(picked.apiKeyCommand)
   ) {
-    return fail('apiKeyCommand must RUN a secret lookup — it may not contain a key value')
+    return 'apiKeyCommand must RUN a secret lookup — it may not contain a key value'
   }
-  return { type, ...picked } as ProviderEntry
+  return null
+}
+
+export type ApiEntry = Extract<ProviderEntry, { type: 'api' }>
+
+/** One served model resolved out of an api entry — baseUrl + auth live
+ *  on the host, the wire is the model's. `requested` is the consumer's
+ *  pin (judge.model, spawn --model); the entry's `model` is the default.
+ *  A model outside the allowlist is a config error — a provider that
+ *  silently reroutes to a model the user never declared is the
+ *  jev-router failure, rebuilt. */
+export function resolveApiModel(
+  entry: ApiEntry,
+  requested: string | undefined
+): { model: string; wire: ApiWire } {
+  const model = requested ?? entry.model ?? (Object.keys(entry.models).length === 1 ? Object.keys(entry.models)[0] : undefined)
+  if (model === undefined) {
+    throw new Error(
+      `api provider serves ${Object.keys(entry.models).length} models — name one (e.g. judge.model)`
+    )
+  }
+  // hasOwn pins the check to a declared key — an inherited member
+  // ('constructor' & co) must not satisfy the allowlist either
+  const wire = Object.hasOwn(entry.models, model)
+    ? (entry.models as Record<string, ApiWire | undefined>)[model]
+    : undefined
+  if (wire === undefined) {
+    throw new Error(
+      `model '${model}' is not served by this provider — declared: ${Object.keys(entry.models).join(', ')}`
+    )
+  }
+  return { model, wire }
 }
 
 /** Lookup by consumer reference — `judge.provider`, `agents.*.provider`.

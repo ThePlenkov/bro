@@ -7,6 +7,7 @@
  * absent, and an entry whose kind has no binding at all throws —
  * naming provider + kind, never silently falling through.
  */
+import { resolveApiModel } from '@broject/core'
 import type {
   DecideResult,
   JudgeQuestion,
@@ -68,10 +69,17 @@ export function providerClient(
 ): ProviderClient {
   const keyField = opts.keyField ?? `providers.${name}.apiKeyEnv`
   switch (entry.type) {
-    case 'systemone':
-      return { call: systemoneCall(`provider:${name}`, entry, { ...opts, keyField }) }
-    case 'openai-compat':
-      return { chat: openaiCompatChat(entry, { ...opts, keyField }) }
+    case 'api': {
+      // one host, per-model wire — resolve the served model first;
+      // an undeclared id is a config error (the allowlist is the point)
+      const { model, wire } = resolveApiModel(entry, opts.model)
+      const target = { ...entry, model }
+      // each wire binding owns its own versioned mount — the host's
+      // baseUrl flows through unchanged
+      return wire === 'systemone'
+        ? { call: systemoneCall(`provider:${name}`, target, { ...opts, model, keyField }) }
+        : { chat: openaiCompatChat(target, { ...opts, model, keyField }) }
+    }
     case 'acp':
       // 'auto' grade — the binding picks call vs chat on the resolved
       // model (systemone-family → typed, else prose)

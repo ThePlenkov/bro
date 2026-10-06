@@ -1,12 +1,10 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { JudgeUnavailable } from '@broject/core'
-import type { ProviderEntry } from '@broject/core'
 import { openaiCompatChat } from './openai.ts'
 import { fakeFetch } from './testkit.ts'
 
-const ENTRY: Extract<ProviderEntry, { type: 'openai-compat' }> = {
-  type: 'openai-compat',
+const ENTRY = {
   baseUrl: 'https://orca.example/v1/',
   model: 'qwen3-coder',
   apiKeyEnv: 'ORCA_TEST_KEY',
@@ -50,6 +48,20 @@ describe('openaiCompatChat', () => {
       assert.equal(res.usage?.inputTokens, 42)
     }))
 
+  test('the wire mounts /v1 on a host root and keeps an already-versioned base', async () => {
+    const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
+    await openaiCompatChat({ baseUrl: 'https://host.example', model: 'm' }, { fetch })(
+      'p',
+      DEADLINE()
+    )
+    assert.equal(calls[0]!.url, 'https://host.example/v1/chat/completions')
+    await openaiCompatChat(
+      { baseUrl: 'https://host.example/api/v2beta/', model: 'm' },
+      { fetch }
+    )('p', DEADLINE())
+    assert.equal(calls[1]!.url, 'https://host.example/api/v2beta/chat/completions')
+  })
+
   test('a wire with no model echoes the sent one; opts.model overrides the pin', () =>
     withKey(async () => {
       const { fetch, calls } = fakeFetch({ status: 200, body: { choices: OK_BODY.choices } })
@@ -63,8 +75,7 @@ describe('openaiCompatChat', () => {
     }))
 
   test('no apiKeyEnv means no auth header — some endpoints are open', async () => {
-    const open: Extract<ProviderEntry, { type: 'openai-compat' }> = {
-      type: 'openai-compat',
+    const open = {
       baseUrl: 'http://localhost:8080/v1',
       model: 'm',
     }

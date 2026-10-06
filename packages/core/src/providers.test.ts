@@ -12,6 +12,7 @@ import {
   PROVIDER_REGISTRY,
   ProviderSurfaceError,
   requireProviderSurface,
+  resolveApiModel,
   UnknownProviderError,
   type ProviderEntry,
 } from './providers.ts'
@@ -52,25 +53,154 @@ describe('providers section', () => {
   test('valid entry of each kind parses', () => {
     const cfg = load({
       providers: {
-        typesafe: { type: 'systemone', apiKeyEnv: 'TYPESAFE_API_KEY', model: 'jev-1.13.0' },
         orca: {
-          type: 'openai-compat',
-          baseUrl: 'https://orca.example/v1',
-          apiKeyEnv: 'ORCA_API_KEY',
-          model: 'qwen3-coder',
+          type: 'api',
+          baseUrl: 'https://api.orcarouter.ai',
+          apiKeyCommand: 'secret-tool lookup service orca',
+          model: 'typesafe/jev-1.13',
+          models: {
+            'typesafe/jev-1.13': 'systemone',
+            'acme/cheap-chat': 'openai-compat',
+          },
         },
         'kilo-cli': { type: 'acp', command: 'kilo --acp', model: 'typesafe/jev-1.13' },
         local: { type: 'cli', command: 'devin -p', model: 'devin-1' },
       },
     })
-    assert.deepEqual(cfg.providers.typesafe, {
-      type: 'systemone',
-      apiKeyEnv: 'TYPESAFE_API_KEY',
-      model: 'jev-1.13.0',
+    assert.deepEqual(cfg.providers.orca, {
+      type: 'api',
+      baseUrl: 'https://api.orcarouter.ai',
+      apiKeyCommand: 'secret-tool lookup service orca',
+      model: 'typesafe/jev-1.13',
+      models: {
+        'typesafe/jev-1.13': 'systemone',
+        'acme/cheap-chat': 'openai-compat',
+      },
     })
-    assert.equal(cfg.providers.orca.type, 'openai-compat')
     assert.equal(cfg.providers['kilo-cli'].type, 'acp')
     assert.equal(cfg.providers.local.type, 'cli')
+  })
+
+  test('api models map: bare wire, {wire} object, and null all resolve — null infers by family', () => {
+    const cfg = load({
+      providers: {
+        orca: {
+          type: 'api',
+          baseUrl: 'https://x',
+          apiKeyEnv: 'ORCA_API_KEY',
+          models: {
+            'typesafe/jev-1.13': 'systemone',
+            'acme/chat': { wire: 'openai-compat' },
+            'auto/inferred-jev': null,
+            'typesafe/jev-2.0': null,
+            'other/plain': null,
+          },
+        },
+      },
+    })
+    const m = cfg.providers.orca.type === 'api' ? cfg.providers.orca.models : {}
+    assert.equal(m['typesafe/jev-1.13'], 'systemone')
+    assert.equal(m['acme/chat'], 'openai-compat')
+    // inference: typesafe/jev-* → systemone; the version anchor means
+    // jev-router is NOT family → openai-compat (prose), never typed
+    assert.equal(m['auto/inferred-jev'], 'openai-compat')
+    assert.equal(m['typesafe/jev-2.0'], 'systemone')
+    assert.equal(m['other/plain'], 'openai-compat')
+  })
+
+  test('api entry: missing/empty models, bad wire, or a default model outside the allowlist drop the entry', () => {
+    const cfg = load({
+      providers: {
+        nomodels: { type: 'api', baseUrl: 'https://x' },
+        empty: { type: 'api', baseUrl: 'https://x', models: {} },
+        badwire: { type: 'api', baseUrl: 'https://x', models: { m: 'graphql' } },
+        baddefault: {
+          type: 'api',
+          baseUrl: 'https://x',
+          model: 'ghost',
+          models: { m: 'systemone' },
+        },
+      },
+    })
+    assert.deepEqual(cfg.providers, {})
+  })
+
+  test('a systemone-wire model with no key source drops the entry — Bearer is the wire contract', () => {
+    const cfg = load({
+      providers: {
+        nokey: {
+          type: 'api',
+          baseUrl: 'https://x',
+          models: { 'typesafe/jev-1.13': 'systemone' },
+        },
+        // inference lands on the same wire — a null mapping is no
+        // escape from the credential requirement
+        inferred: {
+          type: 'api',
+          baseUrl: 'https://x',
+          models: { 'typesafe/jev-1.13': null },
+        },
+        keyed: {
+          type: 'api',
+          baseUrl: 'https://x',
+          apiKeyEnv: 'X',
+          models: { 'typesafe/jev-1.13': 'systemone' },
+        },
+        // the prose wire tolerates no key — openai-compat serves
+        // anonymous hosts, so an all-prose map needs no key source
+        prose: {
+          type: 'api',
+          baseUrl: 'https://x',
+          models: { 'acme/chat': 'openai-compat' },
+        },
+      },
+    })
+    assert.equal(cfg.providers.nokey, undefined)
+    assert.equal(cfg.providers.inferred, undefined)
+    assert.equal(cfg.providers.keyed.type, 'api')
+    assert.equal(cfg.providers.prose.type, 'api')
+  })
+
+  test('a __proto__ model id lands as an own key — never pollutes the prototype', () => {
+    const cfg = load({
+      providers: {
+        host: {
+          type: 'api',
+          baseUrl: 'https://x',
+          apiKeyEnv: 'X',
+          // JSON.parse produces a real own '__proto__' key — an object
+          // literal would run the setter instead
+          models: JSON.parse('{"__proto__":"systemone","m":null}'),
+        },
+      },
+    })
+    const models = cfg.providers.host!.type === 'api' ? cfg.providers.host!.models : {}
+    assert.equal(Object.hasOwn(models, '__proto__'), true)
+    assert.equal(models['__proto__'], 'systemone')
+    // an inherited member is still not a declared model — allowlist
+    // checks pin to own keys (hasOwn), never to prototype lookups
+    const badDefault = load({
+      providers: {
+        host: {
+          type: 'api',
+          baseUrl: 'https://x',
+          model: 'constructor',
+          models: { m: 'systemone' },
+        },
+      },
+    })
+    assert.equal(badDefault.providers.host, undefined)
+  })
+
+  test('retired kinds name the migration — the error IS the note', () => {
+    const cfg = load({
+      providers: {
+        old: { type: 'systemone', apiKeyEnv: 'K', model: 'jev' },
+        ok: { type: 'cli', command: 'devin -p' },
+      },
+    })
+    assert.equal(cfg.providers.old, undefined)
+    assert.equal(cfg.providers.ok.type, 'cli')
   })
 
   test('unknown type drops the entry, keeps the rest', () => {
@@ -87,8 +217,7 @@ describe('providers section', () => {
   test('missing required field drops the entry', () => {
     const cfg = load({
       providers: {
-        nokey: { type: 'systemone', model: 'jev-1.13.0' },
-        nomodel: { type: 'openai-compat', baseUrl: 'https://x/v1' },
+        nobase: { type: 'api', models: { 'jev-1.13.0': 'systemone' } },
         nocmd: { type: 'acp', model: 'x' },
       },
     })
@@ -98,12 +227,22 @@ describe('providers section', () => {
   test('apiKeyEnv holding a key value (not SCREAMING_SNAKE) drops the entry', () => {
     const cfg = load({
       providers: {
-        leaked: { type: 'systemone', apiKeyEnv: 'ts_live_abc123', model: 'jev' },
-        ok: { type: 'openai-compat', baseUrl: 'https://x/v1', apiKeyEnv: 'ORCA_API_KEY', model: 'm' },
+        leaked: {
+          type: 'api',
+          baseUrl: 'https://x',
+          apiKeyEnv: 'ts_live_abc123',
+          models: { jev: 'systemone' },
+        },
+        ok: {
+          type: 'api',
+          baseUrl: 'https://x/v1',
+          apiKeyEnv: 'ORCA_API_KEY',
+          models: { m: 'openai-compat' },
+        },
       },
     })
     assert.equal(cfg.providers.leaked, undefined)
-    assert.equal(cfg.providers.ok.type, 'openai-compat')
+    assert.equal(cfg.providers.ok.type, 'api')
   })
 
   test('optional field with wrong type drops the field, keeps the entry', () => {
@@ -126,18 +265,16 @@ describe('providers section', () => {
 
 describe('PROVIDER_REGISTRY capability matrix', () => {
   test('kind set is the closed spec union', () => {
-    assert.deepEqual(PROVIDER_KINDS, ['systemone', 'openai-compat', 'acp', 'cli'])
+    assert.deepEqual(PROVIDER_KINDS, ['api', 'acp', 'cli'])
   })
 
-  test('matrix matches spec: systemone typed-call only, openai-compat prose-call only, acp auto+both, cli prose+spawn', () => {
-    assert.deepEqual(PROVIDER_REGISTRY.systemone, {
-      call: 'typed',
+  test('matrix matches spec: api is auto-call (wire picks the surface), acp auto+spawn, cli prose+spawn', () => {
+    assert.deepEqual(PROVIDER_REGISTRY.api, {
+      call: 'auto',
       spawn: false,
-      required: ['model'],
-      optional: ['baseUrl', 'apiKeyEnv', 'apiKeyCommand'],
+      required: ['baseUrl'],
+      optional: ['model', 'apiKeyEnv', 'apiKeyCommand'],
     })
-    assert.equal(PROVIDER_REGISTRY['openai-compat'].call, 'prose')
-    assert.equal(PROVIDER_REGISTRY['openai-compat'].spawn, false)
     assert.equal(PROVIDER_REGISTRY.acp.call, 'auto')
     assert.equal(PROVIDER_REGISTRY.acp.spawn, true)
     assert.equal(PROVIDER_REGISTRY.cli.call, 'prose')
@@ -147,7 +284,12 @@ describe('PROVIDER_REGISTRY capability matrix', () => {
 
 describe('provider lookup + surfaces', () => {
   const providers: Record<string, ProviderEntry> = {
-    typesafe: { type: 'systemone', apiKeyEnv: 'TYPESAFE_API_KEY', model: 'jev' },
+    orca: {
+      type: 'api',
+      baseUrl: 'https://x',
+      apiKeyEnv: 'ORCA_KEY',
+      models: { 'typesafe/jev-1.13': 'systemone' },
+    },
     'kilo-cli': { type: 'acp', command: 'kilo --acp' },
     local: { type: 'cli', command: 'devin -p' },
   }
@@ -162,10 +304,10 @@ describe('provider lookup + surfaces', () => {
 
   test('asking a non-spawn kind to spawn throws naming kind + surface', () => {
     assert.throws(
-      () => requireProviderSurface(providers, 'typesafe', 'spawn'),
+      () => requireProviderSurface(providers, 'orca', 'spawn'),
       (e: unknown) =>
         e instanceof ProviderSurfaceError &&
-        /providers\.typesafe \(type 'systemone'\) has no spawn surface/.test(e.message)
+        /providers\.orca \(type 'api'\) has no spawn surface/.test(e.message)
     )
   })
 
@@ -224,17 +366,50 @@ describe('parseProviderEntry', () => {
       'curl -H "Bearer x" https://x',
     ]) {
       const e = parseProviderEntry('p', {
-        type: 'systemone',
+        type: 'api',
+        baseUrl: 'https://x',
         apiKeyCommand: cmd,
-        model: 'jev',
+        models: { jev: 'systemone' },
       })
       assert.equal(e, null, cmd)
     }
     const ok = parseProviderEntry('p', {
-      type: 'systemone',
+      type: 'api',
+      baseUrl: 'https://x',
       apiKeyCommand: 'pass show bro/typesafe',
-      model: 'jev',
+      models: { jev: 'systemone' },
     })
-    assert.equal(ok?.type, 'systemone')
+    assert.equal(ok?.type, 'api')
+  })
+
+  test('resolveApiModel: requested wins, default pin is the fallback, single-model needs neither', () => {
+    const entry: ProviderEntry = {
+      type: 'api',
+      baseUrl: 'https://x',
+      model: 'typesafe/jev-1.13',
+      models: { 'typesafe/jev-1.13': 'systemone', 'acme/x': 'openai-compat' },
+    }
+    assert.deepEqual(resolveApiModel(entry, 'acme/x'), {
+      model: 'acme/x',
+      wire: 'openai-compat',
+    })
+    assert.deepEqual(resolveApiModel(entry, undefined), {
+      model: 'typesafe/jev-1.13',
+      wire: 'systemone',
+    })
+    const solo: ProviderEntry = {
+      type: 'api',
+      baseUrl: 'https://x',
+      models: { 'typesafe/jev-1.13': 'systemone' },
+    }
+    assert.deepEqual(resolveApiModel(solo, undefined), {
+      model: 'typesafe/jev-1.13',
+      wire: 'systemone',
+    })
+    assert.throws(
+      () => resolveApiModel(entry, 'kilo/typesafe/jev-router'),
+      /not served.*declared: typesafe\/jev-1\.13, acme\/x/
+    )
+    assert.throws(() => resolveApiModel({ ...entry, model: undefined }, undefined), /name one/)
   })
 })
