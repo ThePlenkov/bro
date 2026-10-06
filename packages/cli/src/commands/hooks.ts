@@ -63,7 +63,8 @@ import {
 } from '@broject/core'
 import type { ProbeReporter, ProbeResult, ProbeTiming } from '@broject/core'
 import { markerLive, ownerTag } from './proc-owner.ts'
-import { runGuards, type GuardConfig } from '@broject/guard'
+import { runGuards, type GuardConfig, type GuardJudgeInput } from '@broject/guard'
+import { appendRow, judgeConfig, judgeFacade } from '@broject/judge'
 import {
   hooksDir,
   previousTraceFile,
@@ -918,6 +919,22 @@ async function guardLines(
       cfg,
       record: true,
       armed: () => readArmed(sessionId),
+      // the veto seam — resolved lazily and only when a judge-clause
+      // guard's deterministic clauses pass. mode:'off' abstains here;
+      // mode:'shadow' decides + journals kind:'guard' verdicts
+      judge: () => {
+        const jcfg = judgeConfig(dir).judge
+        if (jcfg.mode !== 'shadow') {
+          return undefined
+        }
+        const input: GuardJudgeInput = {
+          facade: judgeFacade(dir),
+          confidence: jcfg.confidence,
+          maxDecisions: jcfg.maxDecisionsPerRun,
+          journal: (v) => appendRow(dir, v),
+        }
+        return input
+      },
     })
     return run.lines
   } catch {
