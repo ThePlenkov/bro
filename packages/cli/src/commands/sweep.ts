@@ -126,6 +126,9 @@ function cmdStatus(dir: string, cfg: SweepCfg): void {
   const unh = rows.filter((r) => !harvested(r))
   const old = burnSet(rows, cfg.olderThanDays, now)
   const oldUnharvested = old.filter((r) => !harvested(r))
+  // would-burn must predict run's gate — undated unharvested beads
+  // refuse it even when every old bead is harvested
+  const gate = gateSet(rows, cfg.olderThanDays, now)
   console.log(
     `closed: ${rows.length}  harvested: ${rows.length - unh.length}  ` +
       `unharvested: ${unh.length}  undated: ${undated.length}`
@@ -134,7 +137,7 @@ function cmdStatus(dir: string, cfg: SweepCfg): void {
     `older-than ${cfg.olderThanDays}d: ${old.length} ` +
       `(${oldUnharvested.length} unharvested)`
   )
-  console.log(`would-burn now: ${oldUnharvested.length === 0 ? old.length : 0}`)
+  console.log(`would-burn now: ${gate.length === 0 ? old.length : 0}`)
   if (undated.length > 0) {
     console.log(`undated (gate-blocking): ${undated.map((r) => r.id).join(' ')}`)
   }

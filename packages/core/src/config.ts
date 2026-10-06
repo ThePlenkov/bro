@@ -91,12 +91,13 @@ export const sweepSection: ConfigSection<{
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
   return {
     // the gate threshold and `bd prune --older-than` read the same knob
-    // so the two can never disagree (spec: specs/bro-pj2g.1.md)
+    // so the two can never disagree (spec: specs/bro-pj2g.1.md) —
+    // Math.ceil keeps the integer `bd` expects from a fractional config
     olderThanDays:
       typeof obj.olderThanDays === 'number' &&
       Number.isFinite(obj.olderThanDays) &&
       obj.olderThanDays > 0
-        ? obj.olderThanDays
+        ? Math.ceil(obj.olderThanDays)
         : DEFAULT_CONFIG.sweep.olderThanDays,
     dir:
       typeof obj.dir === 'string' && obj.dir.trim() !== ''
