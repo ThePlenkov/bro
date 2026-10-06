@@ -157,6 +157,28 @@ export interface AnnotateResult {
  *  sequential stall, small enough not to hammer it. */
 const ANNOTATION_CONCURRENCY = 4
 
+/** Bound an in-flight call by the remaining listing deadline —
+ *  judge.timeoutMs can exceed it, so a decide started at deadline-ε
+ *  would otherwise run past the listing's ceiling. The raced-off
+ *  promise keeps running to completion but is muted — its late
+ *  rejection must never surface as unhandled. */
+function boundedBy<T>(call: Promise<T>, deadline?: number): Promise<T> {
+  if (deadline === undefined) {
+    return call
+  }
+  call.catch(() => {})
+  const left = deadline - Date.now()
+  if (left <= 0) {
+    return Promise.reject(new Error('listing deadline'))
+  }
+  return Promise.race([
+    call,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('listing deadline')), left).unref()
+    ),
+  ])
+}
+
 /** Judge every unresolved thread once — dedup re-reads first, fresh
  *  decide() calls bounded by `budget` and optional `deadlineMs`
  *  (attempts count, not just
@@ -215,27 +237,10 @@ export async function annotateThreads(
       decided += 1 // an attempt consumes budget — it paid its timeout either way
       let res
       try {
-        const call = opts.judge.decide(threadState(item.thread), ACT_THREAD_QUESTIONS)
-        // bound the in-flight call by the REMAINING listing deadline —
-        // judge.timeoutMs can exceed it, so a decide started at
-        // deadline-ε would otherwise run past the listing's ceiling.
-        // The raced-off promise keeps running to completion but is
-        // muted — its late rejection must never surface as unhandled.
-        call.catch(() => {})
-        if (deadline === undefined) {
-          res = await call
-        } else {
-          const left = deadline - Date.now()
-          if (left <= 0) {
-            continue
-          }
-          res = await Promise.race([
-            call,
-            new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error('listing deadline')), left).unref()
-            ),
-          ])
-        }
+        res = await boundedBy(
+          opts.judge.decide(threadState(item.thread), ACT_THREAD_QUESTIONS),
+          deadline
+        )
       } catch (err) {
         // a dead backend ends the loop — re-asking every thread burns
         // one timeout each and buys nothing (fail-open per contract).

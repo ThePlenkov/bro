@@ -47,6 +47,30 @@ function isSast(name: string): boolean {
   return SAST_NAMES.some((s) => lower.includes(s))
 }
 
+const isLiveSast = (c: CheckInfo): boolean =>
+  isSast(c.name) && c.state !== 'SKIPPED' && c.state !== 'NEUTRAL'
+
+function countFindings(
+  checks: CheckInfo[],
+  annotations: Map<string, number | null>,
+  requiredNames: Set<string>,
+  out: { pending: number; unknown: number }
+): void {
+  for (const check of checks) {
+    const count = annotations.get(check.name)
+    if (count === undefined) {
+      continue
+    }
+    if (count === null) {
+      if (requiredNames.has(check.name)) {
+        out.unknown += 1
+      }
+    } else {
+      out.pending += count
+    }
+  }
+}
+
 /** Failure-level SAST annotations → gate counts. A `null` annotation
  *  value means the run's annotations could not be fetched — unknown,
  *  and only counted for required checks (an optional SAST must not hold
@@ -64,8 +88,6 @@ async function sastCounts(
   alerts: string[]
 ): Promise<{ pending: number; unknown: number }> {
   const out = { pending: 0, unknown: 0 }
-  const isLiveSast = (c: CheckInfo): boolean =>
-    isSast(c.name) && c.state !== 'SKIPPED' && c.state !== 'NEUTRAL'
   const sastChecks = checks.filter(isLiveSast)
   const ignoredSast = ignored.filter(isLiveSast)
   if (sastChecks.length === 0 && ignoredSast.length === 0) {
@@ -75,19 +97,7 @@ async function sastCounts(
     rev.checkAnnotationsAsync === undefined
       ? rev.checkAnnotations(target.repo, headSha)
       : await rev.checkAnnotationsAsync(target.repo, headSha)
-  for (const check of sastChecks) {
-    if (!annotations.has(check.name)) {
-      continue
-    }
-    const count = annotations.get(check.name)!
-    if (count === null) {
-      if (requiredNames.has(check.name)) {
-        out.unknown += 1
-      }
-    } else {
-      out.pending += count
-    }
-  }
+  countFindings(sastChecks, annotations, requiredNames, out)
   for (const check of ignoredSast) {
     const count = annotations.get(check.name)
     if (typeof count === 'number' && count > 0) {
