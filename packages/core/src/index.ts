@@ -122,6 +122,7 @@ export type {
   ScanOpts,
 } from './review.ts'
 export {
+  collectGuards,
   connectorHooks,
   connectors,
   ensureAuth,
@@ -144,6 +145,24 @@ export {
   tasksAsync,
 } from './connectors.ts'
 export { PROBE_TIMEOUT_MS } from './connectors.ts'
+export type { CollectedGuard } from './connectors.ts'
+export {
+  GUARD_DEFAULT_BUDGET,
+  GUARD_EVENTS,
+  GUARD_NAME_RE,
+  GUARD_SAY_MAX_CHARS,
+  GUARD_SAY_MAX_LINES,
+  guardProblems,
+  isGuardEvent,
+} from './guards.ts'
+export type {
+  Guard,
+  GuardEvent,
+  GuardJudge,
+  GuardMatch,
+  GuardState,
+  GuardWhen,
+} from './guards.ts'
 export {
   eventMatches,
   eventTopicMatches,

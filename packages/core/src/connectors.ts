@@ -27,6 +27,8 @@ import { gitTry } from './git.ts'
 import type { EventsFacade } from './events.ts'
 import type { JudgeFacade } from './judge.ts'
 import type { ReviewFacade } from './review.ts'
+import type { Guard } from './guards.ts'
+import { guardProblems } from './guards.ts'
 import type { SpecStore } from './specs.ts'
 import type { TaskRow, TaskStore, TaskStoreAsync } from './tasks.ts'
 import { bdActorAsync, taskStore, taskStoreAsync } from './tasks.ts'
@@ -148,6 +150,10 @@ export interface Connector {
    *  has only opt-in alternatives is not ambiguous, it is configured. */
   optIn?: boolean
   hooks?(ctx: ConnectorCtx): ConnectorHooks
+  /** Declarative prompt contributions (spec specs/sessions/bro-nkn6.md)
+   *  — pure declarations the guard engine evaluates centrally; a
+   *  connector never evaluates its own `when`. */
+  guards?(ctx: ConnectorCtx): Guard[]
 }
 
 // --- built-in: beads -----------------------------------------------------------
@@ -537,6 +543,70 @@ export function connectorHooks(ctx: ConnectorCtx): { name: string; hooks: Connec
       }
     } catch {
       // a wedged connector contributes no probes — fail-open
+    }
+  }
+  return out
+}
+
+/** One collected guard declaration — `guard` set means it validated;
+ *  `problems` set means a malformed contribution (connector) or a def
+ *  dropped at config parse (config defs never reach collection). */
+export interface CollectedGuard {
+  /** 'config' for repo defs, else the contributing connector's name. */
+  source: string
+  guard?: Guard
+  /** The offending declaration's name when it was readable — lets
+   *  `bro guard list` identify a skipped entry. */
+  name?: string
+  problems?: string[]
+}
+
+/** All guard declarations in resolution order — config defs first,
+ *  then connectors in registry order; a duplicate name loses to the
+ *  earlier declaration (warn + annotated, never silently). Connector
+ *  contributions fail open: throws and malformed entries are skipped. */
+export function collectGuards(ctx: ConnectorCtx, defs: Guard[] = []): CollectedGuard[] {
+  const seen = new Set<string>()
+  const out: CollectedGuard[] = []
+  const push = (source: string, guard: Guard | undefined, problems?: string[], name?: string): void => {
+    if (guard !== undefined) {
+      if (seen.has(guard.name)) {
+        console.error(
+          `bro: guard '${guard.name}' from ${source} duplicates an earlier declaration — skipped`
+        )
+        out.push({
+          source,
+          name: guard.name,
+          problems: [`duplicate name — shadowed by an earlier declaration`],
+        })
+        return
+      }
+      seen.add(guard.name)
+    }
+    out.push(problems === undefined ? { source, guard } : { source, name, problems })
+  }
+  for (const g of defs) {
+    push('config', g)
+  }
+  for (const c of registry) {
+    let declared: Guard[] | undefined
+    try {
+      declared = c.guards?.(ctx)
+    } catch (err) {
+      console.error(`bro: connector '${c.name}' guards() threw — skipped: ${err instanceof Error ? err.message : err}`)
+      continue
+    }
+    for (const raw of declared ?? []) {
+      const problems = guardProblems(raw)
+      if (problems.length > 0) {
+        const id = (raw as { name?: unknown }).name
+        console.error(
+          `bro: connector '${c.name}' guard ${typeof id === 'string' ? `'${id}'` : '<unnamed>'} is malformed — skipped: ${problems.join('; ')}`
+        )
+        push(c.name, undefined, problems, typeof id === 'string' ? id : undefined)
+      } else {
+        push(c.name, raw)
+      }
     }
   }
   return out

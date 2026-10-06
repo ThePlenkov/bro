@@ -34,6 +34,7 @@ import { learnConnector, learnSection } from '@broject/learn'
 import { loopSection } from '@broject/loop'
 import { githubConnector } from '@broject/github'
 import { gitlabConnector } from '@broject/gitlab'
+import { guardSection } from '@broject/guard'
 import { judgeSection, llmJudgeConnector, systemoneConnector } from '@broject/judge'
 import { runAcpWorkerCommand } from './commands/acp-worker.ts'
 import { applyActPlan, runActCommand } from './commands/act.ts'
@@ -54,6 +55,7 @@ import { driveSection } from './commands/drive-config.ts'
 import { runDriveCommand } from './commands/drive.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runFleetCommand } from './commands/fleet.ts'
+import { runGuardCommand } from './commands/guard.ts'
 import { runHooksCommand } from './commands/hooks.ts'
 import { runJudgeCommand } from './commands/judge.ts'
 import { runLearnCommand } from './commands/learn.ts'
@@ -270,6 +272,16 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'judge',
     configKey: 'judge',
     configSchema: judgeSection,
+  }),
+  definePlugin({
+    // No `skill` yet: the skill documents the hook-side evaluation,
+    // which lands with the engine (bro-nkn6.3) — same stub-skill
+    // reasoning as `bus` above.
+    name: 'guard',
+    summary: 'Declarative prompt guards — list resolved declarations [--json]',
+    run: runGuardCommand,
+    configKey: 'guard',
+    configSchema: guardSection,
   }),
   definePlugin({
     name: 'docs',
