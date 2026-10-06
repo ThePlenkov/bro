@@ -189,19 +189,32 @@ export interface GitLogPathRecord {
   paths: string[]
 }
 
+/** The scan's wall-clock bound — hooks host these probes on a 10–25s
+ *  budget (spec: bro-nkn6, "probes must be argv-git/file reads with
+ *  their own bounds"), and a full-history `--name-only` walk on a large
+ *  repo is the one read that can blow it. Overrun returns null — the
+ *  caller's `unverifiable`, never a stalled hook. */
+const LOG_SCAN_TIMEOUT_MS = 10_000
+
 /** `git log --format=%x1e%H%x09%s -z --name-only <ref>` parsed into
  *  per-commit records — callers filter subjects in-process (`--grep`
  *  would search bodies too). Each header is framed by the \x1e record
  *  separator, so a filename that happens to look like `<sha>\t<subject>`
  *  can't pose as a commit. Output is unbounded (full history × touched
- *  paths), so spawnSync gets an explicit cap rather than the 1 MB
- *  default. null on git failure — the caller decides the honest state
- *  (unborn ref, bad ref). */
-export function gitLogPathRecords(dir: string, ref: string): GitLogPathRecord[] | null {
+ *  paths), so spawnSync gets explicit caps — a 256 MB buffer and a
+ *  LOG_SCAN_TIMEOUT_MS wall clock — rather than the 1 MB/unbounded
+ *  defaults. null on git failure or overrun — the caller decides the
+ *  honest state (unborn ref, bad ref). */
+export function gitLogPathRecords(
+  dir: string,
+  ref: string,
+  opts?: { timeoutMs?: number }
+): GitLogPathRecord[] | null {
   const args = ['-C', dir, 'log', '--format=%x1e%H%x09%s', '-z', '--name-only', '--end-of-options', ref]
   const proc = spawnSync('git', args, { // NOSONAR — PATH lookup is the contract
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
+    timeout: opts?.timeoutMs ?? LOG_SCAN_TIMEOUT_MS,
     maxBuffer: 256 * 1024 * 1024,
     env: repoEnv(args),
   })

@@ -8,6 +8,7 @@ import {
   gitDriftRef,
   gitIsAncestor,
   gitIsShallow,
+  gitLogPathRecords,
   gitLogStamp,
 } from './git.ts'
 
@@ -229,6 +230,32 @@ describe('gitLogStamp', () => {
         assert.fail(`expected commit, got ${JSON.stringify(r)}`)
       }
       assert.equal(r.stamp.sha, moved)
+    })
+  })
+})
+
+describe('gitLogPathRecords', () => {
+  test('per-commit records — sha, subject, touched paths', () => {
+    withRepo((dir) => {
+      const sha = commit(dir, 'code (b1)', { 'src/a.ts': 'a\n' })
+      const recs = gitLogPathRecords(dir, 'HEAD')
+      assert.ok(recs !== null)
+      const tip = recs.find((r) => r.sha === sha)
+      assert.ok(tip !== undefined)
+      assert.equal(tip.subject, 'code (b1)')
+      assert.ok(tip.paths.includes('src/a.ts'))
+    })
+  })
+
+  test('a blown wall-clock bound is null — unverifiable, never a stall', () => {
+    withRepo((dir) => {
+      assert.equal(gitLogPathRecords(dir, 'HEAD', { timeoutMs: 1 }), null)
+    })
+  })
+
+  test('null on a bad ref, never a throw', () => {
+    withRepo((dir) => {
+      assert.equal(gitLogPathRecords(dir, 'nonexistent-ref'), null)
     })
   })
 })
