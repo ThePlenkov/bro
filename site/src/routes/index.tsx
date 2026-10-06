@@ -54,7 +54,6 @@ function Home() {
           bro <span aria-hidden="true">🤝</span>
         </a>
         <nav>
-          <a href={`${BASE_URL}debt`}>debt</a>
           <a href={DOCS}>docs</a>
           <a href={GITHUB}>github</a>
         </nav>
@@ -124,7 +123,7 @@ function Home() {
         <p>bro doesn't fix your code. bro makes sure it gets fixed.</p>
         <p className="links">
           <a href={GITHUB}>github</a> · <a href="https://www.npmjs.com/package/@broject/bro">npm</a> ·{' '}
-          <a href={DOCS}>docs</a> · MIT
+          <a href={DOCS}>docs</a> · <a href={`${BASE_URL}debt`}>debt</a> · MIT
         </p>
       </footer>
     </>
