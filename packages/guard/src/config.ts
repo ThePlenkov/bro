@@ -32,8 +32,9 @@ export const guardSection: ConfigSection<GuardConfig> = (raw) => {
     const problems = guardProblems(d)
     if (problems.length > 0) {
       const name = (d as { name?: unknown }).name
+      const label = typeof name === 'string' ? `'${name}'` : '<unnamed>'
       console.error(
-        `bro.config: guard.defs ${typeof name === 'string' ? `'${name}'` : '<unnamed>'} is malformed — dropped: ${problems.join('; ')}`
+        `bro.config: guard.defs ${label} is malformed — dropped: ${problems.join('; ')}`
       )
       return false
     }

@@ -11,7 +11,7 @@ export type GuardEvent = (typeof GUARD_EVENTS)[number]
 export const isGuardEvent = (v: unknown): v is GuardEvent =>
   typeof v === 'string' && (GUARD_EVENTS as readonly string[]).includes(v)
 
-export const GUARD_NAME_RE = /^[\w][\w.-]*$/
+export const GUARD_NAME_RE = /^\w[\w.-]*$/
 
 /** Trace/prompt conditions — deliberately the same shape as learn's
  *  TriggerMatch (structurally interchangeable; keep the DSLs from
@@ -38,7 +38,7 @@ export interface GuardState {
   probes?: { name: string; args?: Record<string, unknown> }[]
 }
 
-/** Judge veto clause — one noul question; can only suppress, abstains
+/** Judge veto clause — one null question; can only suppress, abstains
  *  when the judge is off/unavailable/low-confidence. */
 export interface GuardJudge {
   question: string
@@ -74,13 +74,13 @@ const isStrList = (v: unknown): v is string[] =>
  *  Two faces per the learn convention: config defs fail closed (dropped
  *  with a warning), connector contributions fail open (skipped). */
 export function guardProblems(v: unknown): string[] {
-  const problems: string[] = []
   if (typeof v !== 'object' || v === null || Array.isArray(v)) {
     return ['not an object']
   }
   const g = v as { name?: unknown; when?: unknown; say?: unknown }
+  const problems: string[] = []
   if (typeof g.name !== 'string' || !GUARD_NAME_RE.test(g.name)) {
-    problems.push('name must match /\\w[\\w.-]*/')
+    problems.push(String.raw`name must match /\w[\w.-]*/`)
   }
   if (typeof g.say !== 'string' || g.say.trim() === '') {
     problems.push('say must be a non-empty string')
@@ -89,7 +89,13 @@ export function guardProblems(v: unknown): string[] {
     problems.push('when must be an object')
     return problems
   }
-  const w = g.when as Record<string, unknown>
+  problems.push(...whenProblems(g.when))
+  return problems
+}
+
+function whenProblems(v: unknown): string[] {
+  const w = v as Record<string, unknown>
+  const problems: string[] = []
   if (!Array.isArray(w.on) || w.on.length === 0) {
     problems.push('when.on must name ≥1 event')
   } else {
@@ -98,36 +104,38 @@ export function guardProblems(v: unknown): string[] {
       problems.push(`when.on has unknown event(s) ${JSON.stringify(bad)} — expected ${GUARD_EVENTS.join('|')}`)
     }
   }
-  if (w.match !== undefined) {
-    if (typeof w.match !== 'object' || w.match === null || Array.isArray(w.match)) {
-      problems.push('when.match must be an object')
-    } else {
-      const m = w.match as Record<string, unknown>
-      for (const k of ['terms', 'commands', 'paths', 'tools'] as const) {
-        if (m[k] !== undefined && !isStrList(m[k])) {
-          problems.push(`when.match.${k} must be a non-empty-string list`)
-        }
-      }
-      if (m.errors !== undefined && typeof m.errors !== 'boolean') {
-        problems.push('when.match.errors must be a boolean')
-      }
-    }
-  }
-  if (w.state !== undefined) {
-    problems.push(...stateProblems(w.state))
-  }
-  if (w.judge !== undefined) {
-    const j = w.judge as Record<string, unknown>
-    if (typeof j !== 'object' || j === null || typeof j.question !== 'string' || j.question === '') {
-      problems.push('when.judge.question must be a non-empty string')
-    } else if (j.threshold !== undefined && (typeof j.threshold !== 'number' || j.threshold < 0 || j.threshold > 1)) {
-      problems.push('when.judge.threshold must be a number in [0,1]')
-    }
-  }
+  if (w.match !== undefined) problems.push(...matchProblems(w.match))
+  if (w.state !== undefined) problems.push(...stateProblems(w.state))
+  if (w.judge !== undefined) problems.push(...judgeProblems(w.judge))
   if (w.budget !== undefined && (typeof w.budget !== 'number' || !Number.isInteger(w.budget) || w.budget < 1)) {
     problems.push('when.budget must be an integer ≥1')
   }
   return problems
+}
+
+function matchProblems(v: unknown): string[] {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+    return ['when.match must be an object']
+  }
+  const m = v as Record<string, unknown>
+  const problems = (['terms', 'commands', 'paths', 'tools'] as const)
+    .filter((k) => m[k] !== undefined && !isStrList(m[k]))
+    .map((k) => `when.match.${k} must be a non-empty-string list`)
+  if (m.errors !== undefined && typeof m.errors !== 'boolean') {
+    problems.push('when.match.errors must be a boolean')
+  }
+  return problems
+}
+
+function judgeProblems(v: unknown): string[] {
+  const j = v as Record<string, unknown>
+  if (typeof j !== 'object' || j === null || typeof j.question !== 'string' || j.question === '') {
+    return ['when.judge.question must be a non-empty string']
+  }
+  if (j.threshold !== undefined && (typeof j.threshold !== 'number' || j.threshold < 0 || j.threshold > 1)) {
+    return ['when.judge.threshold must be a number in [0,1]']
+  }
+  return []
 }
 
 function stateProblems(v: unknown): string[] {
@@ -136,18 +144,7 @@ function stateProblems(v: unknown): string[] {
   }
   const s = v as Record<string, unknown>
   const out: string[] = []
-  if (s.diff !== undefined) {
-    const d = s.diff as Record<string, unknown>
-    if (typeof d !== 'object' || d === null || Array.isArray(d)) {
-      out.push('when.state.diff must be an object')
-    } else {
-      for (const k of ['changed', 'without'] as const) {
-        if (d[k] !== undefined && !isStrList(d[k])) {
-          out.push(`when.state.diff.${k} must be a non-empty-string list`)
-        }
-      }
-    }
-  }
+  if (s.diff !== undefined) out.push(...diffProblems(s.diff))
   if (s.branch !== undefined && (typeof s.branch !== 'string' || s.branch === '')) {
     out.push('when.state.branch must be a non-empty glob string')
   }
@@ -157,17 +154,30 @@ function stateProblems(v: unknown): string[] {
   if (s.exists !== undefined && !isStrList(s.exists)) {
     out.push('when.state.exists must be a non-empty-string list')
   }
-  if (s.probes !== undefined) {
-    if (!Array.isArray(s.probes)) {
-      out.push('when.state.probes must be a list')
-    } else {
-      s.probes.forEach((p, i) => {
-        const probe = p as Record<string, unknown>
-        if (typeof probe !== 'object' || probe === null || typeof probe.name !== 'string' || probe.name === '') {
-          out.push(`when.state.probes[${i}] must name a probe`)
-        }
-      })
-    }
+  if (s.probes !== undefined) out.push(...probesProblems(s.probes))
+  return out
+}
+
+function diffProblems(v: unknown): string[] {
+  const d = v as Record<string, unknown>
+  if (typeof d !== 'object' || d === null || Array.isArray(d)) {
+    return ['when.state.diff must be an object']
   }
+  return (['changed', 'without'] as const)
+    .filter((k) => d[k] !== undefined && !isStrList(d[k]))
+    .map((k) => `when.state.diff.${k} must be a non-empty-string list`)
+}
+
+function probesProblems(v: unknown): string[] {
+  if (!Array.isArray(v)) {
+    return ['when.state.probes must be a list']
+  }
+  const out: string[] = []
+  v.forEach((p, i) => {
+    const probe = p as Record<string, unknown>
+    if (typeof probe !== 'object' || probe === null || typeof probe.name !== 'string' || probe.name === '') {
+      out.push(`when.state.probes[${i}] must name a probe`)
+    }
+  })
   return out
 }

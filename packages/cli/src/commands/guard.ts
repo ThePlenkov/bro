@@ -85,18 +85,16 @@ function cmdList(argv: string[]): void {
 export function runGuardCommand(argv: string[]): void {
   const sub = argv[0]
   const rest = argv.slice(1)
-  switch (sub) {
-    case 'list':
-      cmdList(rest)
-      return
-    default:
-      console.error(`Usage: bro guard <command> [args…]
+  if (sub === 'list') {
+    cmdList(rest)
+    return
+  }
+  console.error(`Usage: bro guard <command> [args…]
 
 Commands:
   list     Every resolved guard — name, source, on-events, budget,
            validation state [--json]
 
 test/evaluation lands with the guard engine (bro-nkn6.3).`)
-      process.exit(sub === undefined ? 1 : 2)
-  }
+  process.exit(sub === undefined ? 1 : 2)
 }
