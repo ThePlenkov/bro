@@ -18,7 +18,7 @@
     "typescript": "^5.9.0"
   },
   "dependencies": {
-    "smol-toml": "1.7.1"
+    "smol-toml": "^1.9.0"
   },
   "files": [
     "dist"
