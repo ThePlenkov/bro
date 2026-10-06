@@ -12,6 +12,7 @@
  */
 import { JudgeUnavailable } from '@broject/core'
 import type {
+  DecideResult,
   JudgeFacade,
   JudgeQuestion,
   ReviewThread,
@@ -157,6 +158,8 @@ export interface AnnotateResult {
  *  sequential stall, small enough not to hammer it. */
 const ANNOTATION_CONCURRENCY = 4
 
+type PendingItem = { thread: ReviewThread; subject: Verdict['subject'] }
+
 /** Bound an in-flight call by the remaining listing deadline —
  *  judge.timeoutMs can exceed it, so a decide started at deadline-ε
  *  would otherwise run past the listing's ceiling. The raced-off
@@ -194,7 +197,7 @@ export async function annotateThreads(
   const budget = opts.budget ?? 50
   const rows = readJournal(opts.dir)
   const annotations = new Map<string, string>()
-  const pending: { thread: ReviewThread; subject: Verdict['subject'] }[] = []
+  const pending: PendingItem[] = []
   for (const thread of threads) {
     if (thread.resolved) {
       continue
@@ -223,6 +226,24 @@ export async function annotateThreads(
   let judged = 0
   let i = 0
   let dead = false
+  /** Build + journal + annotate a verdict for one pending item — shared
+   *  by the in-time path and the late-answer harvest below. */
+  const record = (item: PendingItem, res: DecideResult): void => {
+    const verdict: Verdict = {
+      ts: new Date().toISOString(),
+      kind: 'act-thread',
+      subject: item.subject,
+      questions: ACT_THREAD_QUESTIONS,
+      answers: res.answers,
+      model: res.model,
+      latencyMs: res.latencyMs,
+      ...(res.usage?.costUsd !== undefined ? { costUsd: res.usage.costUsd } : {}),
+      ...(res.lowConfidence.length > 0 ? { lowConfidence: res.lowConfidence } : {}),
+    }
+    appendRow(opts.dir, verdict)
+    rows.push(verdict)
+    annotations.set(item.thread.id, formatAnnotation(verdict))
+  }
   const worker = async (): Promise<void> => {
     while (
       !dead &&
@@ -235,13 +256,29 @@ export async function annotateThreads(
         continue
       }
       decided += 1 // an attempt consumes budget — it paid its timeout either way
+      const call = opts.judge.decide(threadState(item.thread), ACT_THREAD_QUESTIONS)
+      // the listing deadline can beat a call the provider still answers
+      // — harvest the late verdict into the journal so the next run
+      // re-reads it instead of re-paying the same decide
+      let abandoned = false
+      call.then(
+        (late) => {
+          if (abandoned) {
+            try {
+              record(item, late)
+            } catch {
+              // a journal failure on a background harvest is silent —
+              // the next listing just re-decides
+            }
+          }
+        },
+        () => {}
+      )
       let res
       try {
-        res = await boundedBy(
-          opts.judge.decide(threadState(item.thread), ACT_THREAD_QUESTIONS),
-          deadline
-        )
+        res = await boundedBy(call, deadline)
       } catch (err) {
+        abandoned = true
         // a dead backend ends the loop — re-asking every thread burns
         // one timeout each and buys nothing (fail-open per contract).
         // Set-only: an ordinary error must never clear a dead flag
@@ -252,20 +289,7 @@ export async function annotateThreads(
         continue
       }
       judged += 1
-      const verdict: Verdict = {
-        ts: new Date().toISOString(),
-        kind: 'act-thread',
-        subject: item.subject,
-        questions: ACT_THREAD_QUESTIONS,
-        answers: res.answers,
-        model: res.model,
-        latencyMs: res.latencyMs,
-        ...(res.usage?.costUsd !== undefined ? { costUsd: res.usage.costUsd } : {}),
-        ...(res.lowConfidence.length > 0 ? { lowConfidence: res.lowConfidence } : {}),
-      }
-      appendRow(opts.dir, verdict)
-      rows.push(verdict)
-      annotations.set(item.thread.id, formatAnnotation(verdict))
+      record(item, res)
     }
   }
   await Promise.all(

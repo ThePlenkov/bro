@@ -93,10 +93,19 @@ async function sastCounts(
   if (sastChecks.length === 0 && ignoredSast.length === 0) {
     return out
   }
-  const annotations =
-    rev.checkAnnotationsAsync === undefined
-      ? rev.checkAnnotations(target.repo, headSha)
-      : await rev.checkAnnotationsAsync(target.repo, headSha)
+  let annotations: Map<string, number | null>
+  try {
+    annotations =
+      rev.checkAnnotationsAsync === undefined
+        ? rev.checkAnnotations(target.repo, headSha)
+        : await rev.checkAnnotationsAsync(target.repo, headSha)
+  } catch {
+    // a transient check-runs failure must not sink the whole gate
+    // state — every gated SAST check reads as "unknown" (required
+    // ones count below); ignored checks stay silent — their alert
+    // would claim findings we never saw
+    annotations = new Map(sastChecks.map((c) => [c.name, null]))
+  }
   countFindings(sastChecks, annotations, requiredNames, out)
   for (const check of ignoredSast) {
     const count = annotations.get(check.name)

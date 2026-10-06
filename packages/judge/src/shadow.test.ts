@@ -228,6 +228,46 @@ describe('annotateThreads', () => {
     })
   })
 
+  test('a deadline-losing decide still journals its verdict — the provider was paid', async () => {
+    await withRepo(async (dir) => {
+      const judge: JudgeFacade = {
+        decide: () =>
+          new Promise((resolve) =>
+            setTimeout(
+              () =>
+                resolve({
+                  answers: ANSWERS,
+                  model: 'jev-1.13.0',
+                  latencyMs: 80,
+                  lowConfidence: [],
+                }),
+              80
+            )
+          ),
+      }
+      const res = await annotateThreads([thread('T1')], {
+        dir,
+        pr: 7,
+        headSha: 'h1',
+        judge,
+        deadlineMs: 20,
+      })
+      assert.equal(res.annotations.size, 0)
+      await new Promise((r) => setTimeout(r, 150))
+      const rows = readJournal(dir)
+      assert.equal(rows.length, 1) // harvested after the deadline
+      // the next listing on the same head re-reads it — no re-payment
+      const again = await annotateThreads([thread('T1')], {
+        dir,
+        pr: 7,
+        headSha: 'h1',
+        judge: fakeJudge(),
+      })
+      assert.equal(again.decided, 0)
+      assert.equal(again.annotations.size, 1)
+    })
+  })
+
   test('budget bounds fresh decide() attempts; the rest are unjudged', async () => {
     await withRepo(async (dir) => {
       const judge = fakeJudge()
