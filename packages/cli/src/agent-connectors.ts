@@ -34,15 +34,13 @@ import {
   agentEntryBlocked,
   agentsSection,
   bdActor,
+  admitDevinSession,
   claimStep,
   classifyExitCause,
   commandCliName,
-  countDevinReservations,
-  countDevinSessions,
   DEFAULT_CONFIG,
   devinSessionQuota,
   releaseDevinSession,
-  reserveDevinSession,
   gitTry,
   isAgentCause,
   loadConfig,
@@ -995,42 +993,15 @@ function enforceFleetCap(
   }
 }
 
-/** Session-kind admission — a devin-spawning backend refuses when the
- *  live session count already fills `agents.devin.maxSessions`. The
- *  count is host-wide (devin's own session_locks), not registry-scoped:
- *  interactive sessions and MCP-less spawns count too. 'cap', not
- *  'conflict' — callers wait for a slot, same as the fleet ceiling. */
-function enforceSessionQuota(
-  spec: SpawnSpec,
-  quota:
-    | { kind: 'devin'; max: number; lockDir?: string; reservationsDir?: string; invalid?: boolean }
-    | undefined
-): void {
-  if (quota === undefined) {
-    return
-  }
-  if (quota.invalid === true) {
-    // a present-but-unparsable cap is a config bug — refuse loudly
-    // rather than spawn past a quota the operator thinks is armed
-    throw new SpawnError(
-      `agents.devin.maxSessions must be a positive integer — spawn of ${spec.molStep} refused`,
-      'config'
-    )
-  }
-  if (quota.max <= 0) {
-    return
-  }
-  // locks (live devin sessions, any repo) + reservations (admitted
-  // spawns whose devin lock hasn't landed yet) — the union is what a
-  // concurrent admission anywhere on this host must see
-  const live = countDevinSessions(quota.lockDir) + countDevinReservations(quota.reservationsDir)
-  if (live >= quota.max) {
-    throw new SpawnError(
-      `devin session quota reached — ${live}/${quota.max} live sessions ` +
-        `(agents.devin.maxSessions in bro.config) — spawn of ${spec.molStep} refused`,
-      'cap'
-    )
-  }
+/** The session-quota lane prepareSpawn admits through — a devin-kind
+ *  spawn counts live devin sessions + held reservations host-wide and
+ *  refuses at/above `maxSessions`. */
+export interface SessionQuotaLane {
+  kind: 'devin'
+  maxSessions: number
+  lockDir?: string
+  reservationsDir?: string
+  invalid?: boolean
 }
 
 /** The session kind a spawn consumes — 'devin' when the backend declares
@@ -1063,9 +1034,7 @@ export function sessionQuotaOf(
   backend: string,
   spec: SpawnSpec,
   command: string
-):
-  | { kind: 'devin'; max: number; lockDir?: string; reservationsDir?: string; invalid?: boolean }
-  | undefined {
+): SessionQuotaLane | undefined {
   const kind = sessionKindOf(env, backend, spec, command)
   if (kind !== 'devin') {
     return undefined
@@ -1074,13 +1043,7 @@ export function sessionQuotaOf(
   if (quota === undefined) {
     return undefined
   }
-  const out: {
-    kind: 'devin'
-    max: number
-    lockDir?: string
-    reservationsDir?: string
-    invalid?: boolean
-  } = { kind, max: quota.maxSessions }
+  const out: SessionQuotaLane = { kind, maxSessions: quota.maxSessions }
   if (quota.lockDir !== undefined) {
     out.lockDir = quota.lockDir
   }
@@ -1208,13 +1171,11 @@ function prepareSpawn(
      *  own dead entry holds no slot). */
     cap?: { max: number; env: AgentConnectorEnv }
     /** Session-kind admission — the spawn consumes a `kind` session
-     *  ('devin') and refuses when live sessions already hit `max`.
-     *  Checked after the fleet cap, still before any write. A passing
-     *  check immediately writes a host-shared reservation so the next
-     *  admission anywhere on this host sees the claimed slot. */
-    sessionQuota?:
-      | { kind: 'devin'; max: number; lockDir?: string; reservationsDir?: string; invalid?: boolean }
-      | undefined
+     *  ('devin') and refuses when live sessions already hit
+     *  `maxSessions`. The count+claim runs under ONE host-wide mutex
+     *  (the repo's registry lock can't serialize cross-repo), still
+     *  before any write — a refused spawn leaves no half-state. */
+    sessionQuota?: SessionQuotaLane | undefined
   }
 ): { agentId: string; promptFile: string; log: string; exitFile: string; reservation?: string } {
   const registry = readAgentRegistry(dir)
@@ -1224,23 +1185,24 @@ function prepareSpawn(
   // fleet admission — before the registry write + claim land, so a
   // refusal leaves no half-spawned state
   enforceFleetCap(dir, home, registry, spec, opts.cap)
-  // session-kind admission — same ordering argument: refuse before the
-  // registry write, while OTHER live sessions fill the quota
-  enforceSessionQuota(spec, opts.sessionQuota)
   // a reused id must stay filename-safe — a tampered entry gets a fresh
   // mint, not a path escape into <home>/
   const agentId =
     existing !== undefined && SAFE_AGENT_ID.test(existing.agentId)
       ? existing.agentId
       : mintAgentId(backend)
-  // the slot is OURS now — claim it host-wide before any write, so a
-  // concurrent spawn in another repo can't see phantom headroom; the
-  // backend releases it on failure, the TTL retires it behind the
-  // devin child's own lock on success
+  // session-kind admission — count + slot claim under ONE host-wide
+  // mutex: the registry lock above is per-repo and cannot serialize a
+  // cross-repo check-then-reserve. A refusal leaves no half-spawned
+  // state; an admit means the next spawn anywhere sees the slot taken.
   const reservation =
-    opts.sessionQuota !== undefined
-      ? reserveDevinSession(opts.sessionQuota.reservationsDir, agentId)
-      : undefined
+    opts.sessionQuota === undefined
+      ? undefined
+      : admitDevinSession(opts.sessionQuota, {
+          key: agentId,
+          molStep: spec.molStep,
+          workerEnv: spec.env,
+        })
   try {
   mkdirSync(home, { recursive: true })
   const promptFile = join(home, `${agentId}.prompt.md`)

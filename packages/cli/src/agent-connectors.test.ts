@@ -529,7 +529,7 @@ function connectorContract(b: BackendCase): void {
     }
     assert.deepEqual(sessionQuotaOf(capped, 'native', spec, 'devin -p'), {
       kind: 'devin',
-      max: 6,
+      maxSessions: 6,
       lockDir: '/l',
     })
     // a devin kind with a non-devin command → still undefined

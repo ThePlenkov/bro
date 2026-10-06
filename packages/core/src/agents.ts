@@ -761,7 +761,9 @@ export function admitDevinSession(
   const resDir = devinReservationsDir(quota.reservationsDir)
   try {
     return withFileLock(
-      join(resDir, 'admission.lock'),
+      // no .lock suffix — the reservation counter globs '*.lock' and
+      // the mutex must never count itself as a claimed slot
+      join(resDir, 'admission.mutex'),
       () => {
         if (quota.invalid === true) {
           // a present-but-unparsable cap is a config bug — refuse

@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
   acquireAgentRegistryLock,
+  admitDevinSession,
   agentEntryBlocked,
   agentRegistryPath,
   agentsSection,
@@ -649,6 +650,106 @@ describe('devin session reservations', () => {
       reserveDevinSession(dir, 'native-abc123')
       reserveDevinSession(dir, 'native-abc123')
       assert.equal(countDevinReservations(dir), 2)
+    })
+  })
+})
+
+describe('admitDevinSession', () => {
+  const fixture = (fn: (dirs: { locks: string; resv: string }) => void): void => {
+    const locks = mkdtempSync(join(tmpdir(), 'bro-admit-locks-'))
+    const resv = mkdtempSync(join(tmpdir(), 'bro-admit-resv-'))
+    try {
+      fn({ locks, resv })
+    } finally {
+      rmSync(locks, { recursive: true, force: true })
+      rmSync(resv, { recursive: true, force: true })
+    }
+  }
+
+  test('admits under the cap, refuses at it, releases the slot', () => {
+    fixture(({ locks, resv }) => {
+      const quota = { maxSessions: 1, lockDir: locks, reservationsDir: resv }
+      const key = admitDevinSession(quota, { key: 'native-aa' })
+      assert.equal(countDevinReservations(resv), 1)
+      // the held reservation fills the cap — the next admit refuses
+      assert.throws(
+        () => admitDevinSession(quota, { key: 'native-bb', molStep: 'fx-2' }),
+        (e: unknown) =>
+          e instanceof SpawnError && e.kind === 'cap' && /1\/1 live sessions.*fx-2/.test(e.message)
+      )
+      releaseDevinSession(key)
+      assert.doesNotThrow(() => admitDevinSession(quota, { key: 'native-bb' }))
+    })
+  })
+
+  test('a live lock plus reservations share the same count', () => {
+    fixture(({ locks, resv }) => {
+      writeFileSync(join(locks, 'me.lock'), String(process.pid))
+      const quota = { maxSessions: 2, lockDir: locks, reservationsDir: resv }
+      admitDevinSession(quota, { key: 'native-aa' })
+      // 1 live lock + 1 reservation = 2/2 — full
+      assert.throws(
+        () => admitDevinSession(quota, { key: 'native-bb' }),
+        (e: unknown) => e instanceof SpawnError && e.kind === 'cap'
+      )
+    })
+  })
+
+  test('a malformed cap refuses config, never a silent admit', () => {
+    fixture(({ locks, resv }) => {
+      const quota = { maxSessions: 0, lockDir: locks, reservationsDir: resv, invalid: true }
+      assert.throws(
+        () => admitDevinSession(quota, { key: 'native-aa', molStep: 'fx-9' }),
+        (e: unknown) => e instanceof SpawnError && e.kind === 'config' && /fx-9/.test(e.message)
+      )
+      assert.equal(countDevinReservations(resv), 0)
+    })
+  })
+
+  test('a live mutex holder in ANOTHER process serializes the admit', async () => {
+    const locks = mkdtempSync(join(tmpdir(), 'bro-admit-locks-'))
+    const resv = mkdtempSync(join(tmpdir(), 'bro-admit-resv-'))
+    try {
+      // a child plants the admission mutex with its own live pid and
+      // holds it ~600ms — the parent's admit must wait, then succeed
+      const mutex = join(resv, 'admission.mutex')
+      const child = spawn(
+        process.execPath,
+        [
+          '-e',
+          `const fs=require('fs');fs.mkdirSync(${JSON.stringify(resv)},{recursive:true});fs.writeFileSync(${JSON.stringify(mutex)},String(process.pid),{flag:'wx'});setTimeout(()=>process.exit(0),600)`,
+        ],
+        { stdio: 'ignore' }
+      )
+      await new Promise<void>((res) => {
+        // hand the child a beat to plant the file
+        const t0 = Date.now()
+        const tick = (): void => (existsSync(mutex) || Date.now() - t0 > 3000 ? res() : setTimeout(tick, 20))
+        tick()
+      })
+      const started = Date.now()
+      const key = admitDevinSession(
+        { maxSessions: 4, lockDir: locks, reservationsDir: resv },
+        { key: 'native-aa' }
+      )
+      // admitted only after the child's hold ended — serialization visible in wall time
+      assert.ok(Date.now() - started >= 400, `admit returned in ${Date.now() - started}ms — the mutex was not honored`)
+      releaseDevinSession(key)
+      await new Promise<void>((res) => child.on('exit', res))
+    } finally {
+      rmSync(locks, { recursive: true, force: true })
+      rmSync(resv, { recursive: true, force: true })
+    }
+  })
+
+  test('the admission mutex never counts as a reservation', () => {
+    fixture(({ locks, resv }) => {
+      writeFileSync(join(resv, 'admission.mutex'), String(process.pid), { flag: 'wx' })
+      try {
+        assert.equal(countDevinReservations(resv), 0)
+      } finally {
+        rmSync(join(resv, 'admission.mutex'), { force: true })
+      }
     })
   })
 })
