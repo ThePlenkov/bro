@@ -544,14 +544,14 @@ describe('agentEntryBlocked', () => {
 describe('agentsSection', () => {
   test('keeps per-backend object bags, drops scalars and arrays', () => {
     const s = agentsSection({
-      native: { command: 'devin -p' },
-      gascity: { configDir: '~/.gascity' },
+      native: { command: 'agent-cli --run' },
+      fleet: { configDir: '~/.fleet' },
       bad: 'string',
       worse: [1, 2],
     })
     assert.deepEqual(s, {
-      native: { command: 'devin -p' },
-      gascity: { configDir: '~/.gascity' },
+      native: { command: 'agent-cli --run' },
+      fleet: { configDir: '~/.fleet' },
     })
   })
 

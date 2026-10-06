@@ -40,7 +40,11 @@ import { existsSync, readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import {
   bdAt,
+  countSessionReservations,
   readAgentRegistry,
+  sessionPlanes,
+  sessionQuotaConfig,
+  sessionSlotsDir,
   type AgentConnector,
   type AgentInfo,
 } from '@broject/core'
@@ -173,6 +177,44 @@ function occupancyOf(dir: string, env: AgentConnectorEnv): FleetOccupancy {
   }
 }
 
+/** Session-kind quotas the status surfaces — each registered plane
+ *  counts its own live sessions host-wide (the plane owns how), plus
+ *  admitted reservations whose session mark hasn't landed yet. A plane
+ *  whose `agents.<kind>` lane is unconfigured shows nothing — the
+ *  scans don't run. A present-but-broken cap shows `invalid`; an
+ *  unverifiable count shows `live: -1` rather than pretending zero. */
+export interface SessionQuotaView {
+  kind: string
+  live: number
+  max: number
+  invalid?: boolean
+}
+
+function sessionQuotaViewsOf(env: AgentConnectorEnv): SessionQuotaView[] {
+  const out: SessionQuotaView[] = []
+  for (const plane of sessionPlanes()) {
+    const q = sessionQuotaConfig(env.agents, plane.kind)
+    if (q === undefined) {
+      continue
+    }
+    if (q.invalid === true) {
+      out.push({ kind: plane.kind, live: -1, max: 0, invalid: true })
+      continue
+    }
+    let live = -1
+    try {
+      live =
+        plane.countLive(env.agents[plane.kind] ?? {}) +
+        countSessionReservations(sessionSlotsDir(plane.kind, q.reservationsDir))
+    } catch {
+      // unverifiable — the -1 renders as `?`, a scan failure must not
+      // take down the status view
+    }
+    out.push({ kind: plane.kind, live, max: q.maxSessions })
+  }
+  return out
+}
+
 /** `fleet: 2/3 slots occupied` — `uncapped` instead of the ceiling when
  *  the config disables it. */
 export function occupancyLine(o: FleetOccupancy): string {
@@ -180,8 +222,19 @@ export function occupancyLine(o: FleetOccupancy): string {
   return `fleet: ${o.occupied}${cap} agent slots occupied${o.maxConcurrent > 0 ? '' : ' (uncapped)'}`
 }
 
-function printStatusTable(backends: AgentBackendPlane[], occupancy: FleetOccupancy): void {
+function printStatusTable(
+  backends: AgentBackendPlane[],
+  occupancy: FleetOccupancy,
+  sessions: SessionQuotaView[]
+): void {
   console.log(occupancyLine(occupancy))
+  for (const s of sessions) {
+    if (s.invalid === true) {
+      console.log(`${s.kind} sessions: invalid agents.${s.kind}.maxSessions — must be a positive integer`)
+    } else {
+      console.log(`${s.kind} sessions: ${s.live >= 0 ? `${s.live}/${s.max}` : `?/${s.max}`} live`)
+    }
+  }
   const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'cause', 'pid', 'worktree']
   const rows = backends.flatMap(({ conn, agents }) => {
     const sup = conn.capabilities().supervisor
@@ -272,6 +325,7 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
       JSON.stringify(
         {
           occupancy: occupancyOf(dir, env),
+          sessions: sessionQuotaViewsOf(env),
           backends: backends.map(({ conn, agents, degraded }) => ({
             name: conn.name,
             capabilities: conn.capabilities(),
@@ -285,7 +339,7 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
     )
     return
   }
-  printStatusTable(backends, occupancyOf(dir, env))
+  printStatusTable(backends, occupancyOf(dir, env), sessionQuotaViewsOf(env))
 }
 
 // --- up / down ------------------------------------------------------------------

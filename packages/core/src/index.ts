@@ -249,6 +249,21 @@ export type {
   SpawnSpec,
   SpawnWorker,
 } from './agents.ts'
+export {
+  admitSessionSlot,
+  clearSessionPlanes,
+  countSessionReservations,
+  registerSessionPlane,
+  releaseSessionSlot,
+  reserveSessionSlot,
+  SESSION_SLOT_TTL_MS,
+  sessionPlane,
+  sessionPlaneForCli,
+  sessionPlanes,
+  sessionQuotaConfig,
+  sessionSlotsDir,
+} from './session-planes.ts'
+export type { SessionPlane, SessionQuota } from './session-planes.ts'
 export { acquireFileLock, LockTimeout, withFileLock } from './filelock.ts'
 export type { FileLockOptions } from './filelock.ts'
 export {

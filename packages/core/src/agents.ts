@@ -2,8 +2,8 @@
  * Agents facade — the orchestrator-connector contract for bro-managed
  * workers. Spec: specs/sessions/bro-f4ot/spec.md.
  *
- * A connector is one backend runtime (native detached processes, gascity,
- * tmux, paseo, cao). Commands never name a backend — they resolve through
+ * A connector is one backend runtime (detached processes, multiplexer
+ * sessions, managed fleets). Commands never name a backend — they resolve through
  * the `connectors.agents` seam in bro.config.json (explicit pick → config
  * → matchRemote/matchDir → registry order); `native` is the designed
  * default. Backend knobs live under `agents.<backend>`.
@@ -17,7 +17,15 @@
  */
 import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { ConfigSection } from './config.ts'
 import { acquireFileLock } from './filelock.ts'
@@ -233,7 +241,8 @@ export interface AgentInfo {
 }
 
 export interface AgentCapabilities {
-  /** A live session can be attached to (tmux yes, native log-only no). */
+  /** A live session can be attached to (a multiplexer backend yes, a
+   *  detached log-only backend no). */
   attach?: boolean
   /** spawn() can rebind a dead agent's claim to a new worker. */
   respawn?: boolean
@@ -251,7 +260,7 @@ export interface AgentConnector {
   readonly name: string
   /** Remote-URL matcher — same precedence role as Connector.matchRemote. */
   matchRemote?(url: string): boolean
-  /** Project-layout matcher — e.g. gascity claims a configDir layout. */
+  /** Project-layout matcher — e.g. a fleet backend claims a configDir layout. */
   matchDir?(dir: string): boolean
   /** Start a worker for spec.molStep. Throws SpawnError on
    *  duplicate/conflict (claimed by a LIVE agent). */
@@ -283,7 +292,7 @@ export type SpawnErrorKind =
   | 'input'
   /** server-side misconfiguration — no agent command, no common dir */
   | 'config'
-  /** backend tooling missing or down — tmux absent, gc unreachable */
+  /** backend tooling missing or down — the multiplexer absent, the fleet manager unreachable */
   | 'unavailable'
 
 /** Duplicate/conflict on spawn — distinct from operational failures so
@@ -318,6 +327,9 @@ export interface AgentRegistryEntry {
   provider?: string
   model?: string
   acpSessionId?: string
+  /** Session-kind lane the run was admitted under — written at spawn so
+   *  status/debug can see which session quota a live agent consumes. */
+  sessionKind?: string
   [key: string]: unknown
 }
 
@@ -490,9 +502,9 @@ export function bdAt(
 }
 
 /** The agent command's cli name — first token, basename'd and
- *  sanitized; 'agent' when nothing usable resolves. gascity's provider
- *  label and the `Agent:` commit-trailer pin (specs/bro-fzot.md) both
- *  read it. */
+ *  sanitized; 'agent' when nothing usable resolves. A fleet backend's
+ *  provider label and the `Agent:` commit-trailer pin
+ *  (specs/bro-fzot.md) both read it. */
 export function commandCliName(command: string): string {
   const first = command.trim().split(/\s+/)[0] ?? ''
   const base = first.split('/').pop() ?? ''
@@ -558,7 +570,7 @@ export function rebindStep(beadsDir: string, molStep: string, actor: string): vo
 // --- config --------------------------------------------------------------------
 
 /** bro.config.json `agents` section — per-backend knob bags
- *  (`agents.gascity.configDir`, `agents.native.command`). Only
+ *  (`agents.<backend>.configDir`, `agents.<backend>.command`). Only
  *  object-valued entries survive; connector selection stays in
  *  `connectors.agents`, not here. */
 export const agentsSection: ConfigSection<Record<string, Record<string, unknown>>> = (raw) => {

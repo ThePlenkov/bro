@@ -24,6 +24,15 @@ code nobody edits by hand.
 - `scripts/gen-plugins.ts` drift between canonical sources and generated
   adapters is **major** — a stale manifest or a skills link that is not
   the repo `skills/` tree ships to users verbatim.
+- `packages/core` is vendor-neutral: it holds contracts, registries, and
+  generic mechanics only (`agents.<kind>` knob bags, `sessionPlanes`,
+  `connectors.*` seam). An import, path, identifier, or hard-coded state
+  layout that names a concrete agent backend or provider (devin, tmux,
+  gascity, opencode, …) in `packages/core` is a **major** finding —
+  vendor knowledge lives in the plugin layer (`packages/cli`, connector
+  packages), which registers with the core registry. Low-level shell
+  helpers for tools bro itself invokes (`gh.ts`, `git.ts`) are plumbing,
+  not facades, and stay in scope as their own modules.
 
 ## Verification expectations
 

@@ -34,6 +34,7 @@ import {
   agentEntryBlocked,
   agentsSection,
   bdActor,
+  admitSessionSlot,
   claimStep,
   classifyExitCause,
   cliCommandModel,
@@ -48,7 +49,11 @@ import {
   probeStep,
   procStat,
   rebindStep,
+  releaseSessionSlot,
   requireProviderSurface,
+  sessionPlane,
+  sessionPlaneForCli,
+  sessionQuotaConfig,
   SpawnError,
   stepParent,
   ProviderSurfaceError,
@@ -65,10 +70,15 @@ import {
   type FleetProfile,
   type ListResult,
   type ProviderEntry,
+  type SessionPlane,
   type SpawnSpec,
   type SpawnWorker,
 } from '@broject/core'
 import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop'
+// builtin session planes self-register on import — the connector layer
+// is the plugin host for agent backends, and admission planes ride the
+// same surface
+import './session-planes/devin.ts'
 
 /** Everything a factory needs: the repo ctx + the resolved config
  *  (agents.<backend> knobs, connectors.agents pick, loop.agent fallback). */
@@ -1011,6 +1021,68 @@ function enforceFleetCap(
   }
 }
 
+/** The session-quota lane prepareSpawn admits through — the resolved
+ *  plane plus the agents bag it reads its `agents.<kind>` knobs from.
+ *  The plane owns how a live session is counted; core owns the
+ *  serialized admit under the host-wide mutex. */
+export interface SessionQuotaLane {
+  plane: SessionPlane
+  agents: Record<string, Record<string, unknown>>
+}
+
+/** The session kind a spawn consumes — `agents.<backend>.sessionKind`
+ *  when declared (sessionQuotaOf then demands a registered plane),
+ *  else the first registered plane that detects the resolved command's
+ *  CLI (worker cliName / worker template / backend command). */
+export function sessionKindOf(
+  env: AgentConnectorEnv,
+  backend: string,
+  spec: SpawnSpec,
+  command: string
+): string | undefined {
+  const declared = env.agents[backend]?.['sessionKind']
+  if (typeof declared === 'string' && declared !== '') {
+    return declared
+  }
+  // an argv worker's argv[0] is the DRIVER (bro acp-worker, npx) — the
+  // wrapped agent's own cli rides cliName; argv0 is only the fallback
+  const cli =
+    spec.worker?.kind === 'argv'
+      ? commandCliName(spec.worker.cliName ?? spec.worker.argv[0] ?? '')
+      : commandCliName(spec.worker?.kind === 'template' ? spec.worker.command : command)
+  return sessionPlaneForCli(cli)?.kind
+}
+
+/** The session quota this spawn must fit under — undefined when no
+ *  plane claims the spawn or its `agents.<kind>` lane is uncapped, so
+ *  the host scan only runs where it can refuse. */
+export function sessionQuotaOf(
+  env: AgentConnectorEnv,
+  backend: string,
+  spec: SpawnSpec,
+  command: string
+): SessionQuotaLane | undefined {
+  const kind = sessionKindOf(env, backend, spec, command)
+  if (kind === undefined) {
+    return undefined
+  }
+  const quota = sessionQuotaConfig(env.agents, kind)
+  if (quota === undefined) {
+    return undefined
+  }
+  const plane = sessionPlane(kind)
+  if (plane === undefined) {
+    // a capped kind with no registered plane is a config bug — refuse
+    // loudly rather than spawn past a quota the operator armed
+    throw new SpawnError(
+      `agents.${backend}.sessionKind '${kind}' has no registered session plane — ` +
+        `cannot enforce agents.${kind}.maxSessions`,
+      'config'
+    )
+  }
+  return { plane, agents: env.agents }
+}
+
 /** The shared spawn prologue every built-in backend runs under the
  *  registry lock — dedup across the two state planes (registry liveness
  *  + beads claim), the claim/rebind, and the shared-dir artifacts
@@ -1125,8 +1197,15 @@ function prepareSpawn(
      *  the cap refuses while OTHER live entries fill it (a respawn's
      *  own dead entry holds no slot). */
     cap?: { max: number; env: AgentConnectorEnv }
+    /** Session-kind admission — the spawn consumes one of the lane
+     *  plane's sessions and refuses when live ones already hit
+     *  `agents.<kind>.maxSessions`. The count+claim runs under ONE
+     *  host-wide mutex (the repo's registry lock can't serialize
+     *  cross-repo), still before any write — a refused spawn leaves no
+     *  half-state. */
+    sessionQuota?: SessionQuotaLane | undefined
   }
-): { agentId: string; promptFile: string; log: string; exitFile: string } {
+): { agentId: string; promptFile: string; log: string; exitFile: string; reservation?: string } {
   const registry = readAgentRegistry(dir)
   const existing = registry[spec.molStep]
   guardExistingEntry(dir, home, backend, spec, existing, opts)
@@ -1140,6 +1219,19 @@ function prepareSpawn(
     existing !== undefined && SAFE_AGENT_ID.test(existing.agentId)
       ? existing.agentId
       : mintAgentId(backend)
+  // session-kind admission — count + slot claim under ONE host-wide
+  // mutex: the registry lock above is per-repo and cannot serialize a
+  // cross-repo check-then-reserve. A refusal leaves no half-spawned
+  // state; an admit means the next spawn anywhere sees the slot taken.
+  const reservation =
+    opts.sessionQuota === undefined
+      ? undefined
+      : admitSessionSlot(opts.sessionQuota.plane, opts.sessionQuota.agents, {
+          key: agentId,
+          molStep: spec.molStep,
+          workerEnv: spec.env,
+        })
+  try {
   mkdirSync(home, { recursive: true })
   const promptFile = join(home, `${agentId}.prompt.md`)
   const log = join(home, `${agentId}.log`)
@@ -1187,6 +1279,9 @@ function prepareSpawn(
     // the acp driver patches the real session id after session/new —
     // clear the previous run's so it never masquerades as this run's
     acpSessionId: undefined,
+    // the session kind this run consumed — the quota lane it was
+    // admitted under; absent for non-kind spawns
+    sessionKind: opts.sessionQuota?.plane.kind,
     ...opts.entry?.(agentId),
   })
   if (claimed) {
@@ -1197,7 +1292,15 @@ function prepareSpawn(
   if (opts.claimAs !== undefined) {
     rebindStep(spec.beadsDir, spec.molStep, opts.claimAs)
   }
-  return { agentId, promptFile, log, exitFile }
+  return { agentId, promptFile, log, exitFile, reservation }
+  } catch (err) {
+    // a write/claim failure after the reservation — the caller never saw
+    // the key, so this is the only place that can hand the slot back
+    if (reservation !== undefined) {
+      releaseSessionSlot(reservation)
+    }
+    throw err
+  }
 }
 
 /** Exit status the wrapper dropped at `<agentId>.exit` — absent when the
@@ -1442,10 +1545,17 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       // fleet memo exists: a slow beads store must not hold the lock.
       const mol = stepParent(spec.beadsDir, spec.molStep)
       return withAgentRegistryLock(dir, () => {
-        const { agentId, promptFile, log, exitFile } = prepareSpawn(dir, home, 'native', spec, {
-          isLive: (e) => nativeState(dir, home, spec.molStep, e) === 'running',
-          cap: { max: fleetCapOf(env), env },
-        })
+        const { agentId, promptFile, log, exitFile, reservation } = prepareSpawn(
+          dir,
+          home,
+          'native',
+          spec,
+          {
+            isLive: (e) => nativeState(dir, home, spec.molStep, e) === 'running',
+            cap: { max: fleetCapOf(env), env },
+            sessionQuota: sessionQuotaOf(env, 'native', spec, command),
+          }
+        )
         const fd = openSync(log, 'a')
         let spawned: AgentRegistryEntry
         try {
@@ -1510,6 +1620,11 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 return
               }
               patchAgentRegistry(dir, spec.molStep, { spawnError: err.message })
+              // the devin session never started — hand the slot back now
+              // rather than block peers for the reservation's whole TTL
+              if (reservation !== undefined) {
+                releaseSessionSlot(reservation)
+              }
             } catch {
               // the entry may not have landed yet — nothing else to do
             }
@@ -1526,6 +1641,12 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 : null,
           })
           writeWorkMarker(dir, agentId, spec.molStep, child.pid)
+        } catch (err) {
+          // sync failure after the reservation — hand the slot back
+          if (reservation !== undefined) {
+            releaseSessionSlot(reservation)
+          }
+          throw err
         } finally {
           closeSync(fd)
         }
@@ -1778,27 +1899,34 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // the session name derives from the agentId prepareSpawn
         // resolves — entry callback, not a precomputed name, because a
         // tampered entry's unsafe id is reminted inside
-        const { agentId, promptFile, log, exitFile } = prepareSpawn(dir, home, 'tmux', spec, {
-          isLive: (e) => {
-            const n = tmuxSessionName(e)
-            if (n === undefined) {
-              return false
-            }
-            const p = tmuxProbe(socket, n)
-            if (p.live === 'unknown') {
-              // an unverifiable liveness probe must not let a duplicate
-              // spawn kill-session a worker that may still be alive
-              throw new SpawnError(`cannot verify ${spec.molStep}'s tmux session — ${p.err}`, 'unavailable')
-            }
-            if (p.live === 'running') {
-              touchWorkMarker(dir, e.agentId)
-            }
-            return p.live === 'running'
-          },
-          liveDetail: (e) => `session ${tmuxSessionName(e) ?? '?'}`,
-          entry: (id) => ({ session: `bro-${id}` }),
-          cap: { max: fleetCapOf(env), env },
-        })
+        const { agentId, promptFile, log, exitFile, reservation } = prepareSpawn(
+          dir,
+          home,
+          'tmux',
+          spec,
+          {
+            isLive: (e) => {
+              const n = tmuxSessionName(e)
+              if (n === undefined) {
+                return false
+              }
+              const p = tmuxProbe(socket, n)
+              if (p.live === 'unknown') {
+                // an unverifiable liveness probe must not let a duplicate
+                // spawn kill-session a worker that may still be alive
+                throw new SpawnError(`cannot verify ${spec.molStep}'s tmux session — ${p.err}`, 'unavailable')
+              }
+              if (p.live === 'running') {
+                touchWorkMarker(dir, e.agentId)
+              }
+              return p.live === 'running'
+            },
+            liveDetail: (e) => `session ${tmuxSessionName(e) ?? '?'}`,
+            entry: (id) => ({ session: `bro-${id}` }),
+            cap: { max: fleetCapOf(env), env },
+            sessionQuota: sessionQuotaOf(env, 'tmux', spec, command),
+          }
+        )
         const session = `bro-${agentId}`
         // a leftover session with our name (crash between entry and
         // kill, a respawn over a zombie) would make new-session fail
@@ -1861,6 +1989,9 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         ])
         if (res.code !== 0) {
           rmSync(envFile, { force: true }) // a failed spawn must not leave ambient env on disk
+          if (reservation !== undefined) {
+            releaseSessionSlot(reservation)
+          }
           try {
             patchAgentRegistry(dir, spec.molStep, { spawnError: res.err })
           } catch {
@@ -2171,6 +2302,27 @@ function gcConfigDir(dir: string, env: AgentConnectorEnv): string | null {
   return home === null ? null : dirname(home) + '/gascity'
 }
 
+/** The command a Gas City actually runs — `initCity` writes city.toml
+ *  once and never rewrites, so for an existing city the EFFECTIVE
+ *  provider command is the stored one, not today's config. Falls back
+ *  to the configured command when no toml exists or it can't be read. */
+function gcEffectiveCommand(city: string | null, configured: string): string {
+  if (city === null) {
+    return configured
+  }
+  try {
+    const toml = readFileSync(join(city, 'city.toml'), 'utf8')
+    const m = toml.match(/^command\s*=\s*"((?:[^"\\]|\\.)*)"/m)
+    if (m?.[1] !== undefined) {
+      // tomlStr wrote it — the same escape contract reads it back
+      return JSON.parse(`"${m[1]}"`) as string
+    }
+  } catch {
+    // unreadable/malformed toml → admit against the configured command
+  }
+  return configured
+}
+
 /** gascity claims a configDir layout — an authored city.toml at the
  *  resolved configDir is the marker (spec: agents.gascity.configDir).
  *  Factory-level: resolution probes this without constructing. */
@@ -2452,7 +2604,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       const mol = stepParent(spec.beadsDir, spec.molStep)
       return withAgentRegistryLock(dir, () => {
         const existing = readAgentRegistry(dir)[spec.molStep]
-        const { agentId, promptFile } = prepareSpawn(dir, home, 'gascity', spec, {
+        const { agentId, promptFile, reservation } = prepareSpawn(dir, home, 'gascity', spec, {
           isLive: (e) => {
             const { sessions, err } = listGcSessions(city)
             if (sessions === undefined) {
@@ -2469,6 +2621,9 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           entry: () => ({ sessionId: undefined }),
           claimAs: spec.molStep,
           cap: { max: fleetCapOf(env), env },
+          // the quota admits against what gc will actually RUN — the
+          // command pinned in city.toml at init, not today's config
+          sessionQuota: sessionQuotaOf(env, 'gascity', spec, gcEffectiveCommand(city, command)),
         })
         let sessionId: string | undefined
         try {
@@ -2479,6 +2634,9 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           // retry can't run alongside a zombie, then record the failure.
           if (sessionId !== undefined) {
             gcRun(['session', 'close', sessionId, '--city', city])
+          }
+          if (reservation !== undefined) {
+            releaseSessionSlot(reservation)
           }
           patchAgentRegistry(dir, spec.molStep, {
             sessionId,

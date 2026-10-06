@@ -13,8 +13,8 @@
  * "which agent finished before which" is unrecoverable, which is
  * exactly the causality an orchestrator needs.
  *
- * Why not the devin MCP tools (`devin_session_events`,
- * `devin_session_gather`, `devin_session_interact`): they are tools,
+ * Why not the host's own vendor session tools (`*_session_events`,
+ * `*_session_gather`, `*_session_interact`): they are tools,
  * callable only from inside an agent turn, and only by the agent that
  * owns the ACP session. A host-side process cannot reach them at all,
  * so a "bridge" over them is impossible by construction, not merely

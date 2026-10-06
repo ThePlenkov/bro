@@ -5,6 +5,8 @@
  * mode is `{ ok: false, detail }` — a predicate that can't verify
  * doesn't assert (and the detail is what `bro guard test` shows).
  */
+import { readdirSync, readFileSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
 import { facade, loadConfig, specStore, type SpecStore, type TaskStore } from '@broject/core'
 import type { NamedProbe, ProbeResult } from '@broject/guard'
 import { driftEnv, driftRow, localSpecPath, specLinkPath, SPEC_LINK } from './spec-drift.ts'
@@ -102,8 +104,64 @@ const specDrift: NamedProbe = (args, dir): ProbeResult => {
   return probeIdArg(dir, idArg!, ref, spec)
 }
 
+/** `core-vendor` — the REVIEW.md layering rule as a guard predicate:
+ *  `args.terms` (string[]) are vendor identifiers that must not appear
+ *  as word tokens in `args.path` (default `packages/core/src`), `*.ts`
+ *  only; `*.test.*` files are skipped — a fixture naming a vendor as
+ *  data is not coupling, the boundary lives in shipped source. ok = a
+ *  violation exists (the guard fires). Any fs error is
+ *  `{ ok: false, detail }` — a probe that can't scan doesn't assert. */
+const coreVendor: NamedProbe = (args, dir): ProbeResult => {
+  const terms = Array.isArray(args?.terms)
+    ? args.terms.filter((t): t is string => typeof t === 'string' && t !== '')
+    : []
+  if (terms.length === 0) {
+    return { ok: false, detail: 'args.terms (string[]) required' }
+  }
+  const root = typeof args?.path === 'string' && args.path !== '' ? args.path : 'packages/core/src'
+  // the scan root must stay inside the repo — a config-supplied `..`
+  // or absolute escape is a config bug, not a verdict
+  if (isAbsolute(root) || root.split('/').includes('..')) {
+    return { ok: false, detail: `path escapes the repo: ${root}` }
+  }
+  const base = join(dir, root)
+  const hits: string[] = []
+  const re = new RegExp(
+    `\\b(${terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`,
+    'i'
+  )
+  const walk = (d: string): void => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name)
+      if (e.isDirectory()) {
+        walk(p)
+      } else if (e.name.endsWith('.ts') && !e.name.includes('.test.')) {
+        const lines = readFileSync(p, 'utf8').split('\n')
+        for (let i = 0; i < lines.length; i++) {
+          const m = re.exec(lines[i]!)
+          if (m !== null) {
+            hits.push(`${p.slice(dir.length + 1)}:${i + 1} ${m[1]}`)
+            break // one hit per file-line suffices for the say
+          }
+        }
+      }
+    }
+  }
+  try {
+    walk(base)
+  } catch (err) {
+    return { ok: false, detail: `scan failed: ${err instanceof Error ? err.message : err}` }
+  }
+  return hits.length === 0
+    ? { ok: false, detail: `${root} clean of ${terms.length} terms` }
+    : { ok: true, detail: hits.slice(0, 8).join('; ') + (hits.length > 8 ? `; +${hits.length - 8} more` : '') }
+}
+
 /** The registry — closed on purpose (spec: unknown names fail their
  *  clause, so an engine that doesn't get this map can't silently
  *  approve a spec-drift guard). `guard test` and the hook emit paths
  *  both install it. */
-export const GUARD_PROBES: Readonly<Record<string, NamedProbe>> = { 'spec-drift': specDrift }
+export const GUARD_PROBES: Readonly<Record<string, NamedProbe>> = {
+  'spec-drift': specDrift,
+  'core-vendor': coreVendor,
+}

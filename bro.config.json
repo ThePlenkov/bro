@@ -52,6 +52,25 @@
         "say": "specs/sessions/bro-nkn6.md is stale vs the code it scopes — refresh it"
       },
       {
+        "name": "core-vendor-boundary",
+        "when": {
+          "on": ["stop"],
+          "state": {
+            "diff": { "changed": ["packages/core/src/**"] },
+            "probes": [
+              {
+                "name": "core-vendor",
+                "args": {
+                  "path": "packages/core/src",
+                  "terms": ["devin", "opencode", "gascity", "tmux", "claude", "codex", "gemini", "aider", "paseo", "cao"]
+                }
+              }
+            ]
+          }
+        },
+        "say": "vendor name in packages/core — REVIEW.md: core is vendor-neutral (major); move vendor knowledge to packages/cli/src/session-planes/ or a connector package"
+      },
+      {
         "name": "retro-on-stop",
         "when": { "on": ["stop"] },
         "say": "session ending — run the retro checklist (skills/retro): loose ends, hand-rolled mechanics → bd gap beads, call economy, `bro learn capture`, `bro debt collect`"
@@ -61,6 +80,9 @@
   "agents": {
     "native": {
       "command": "devin -p --permission-mode dangerous --prompt-file {promptFile}"
+    },
+    "devin": {
+      "maxSessions": 6
     }
   },
   "fleet": {
