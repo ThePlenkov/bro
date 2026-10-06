@@ -264,7 +264,7 @@ skills/guard/SKILL.md                 policy only — mechanics live in the CLI
       fired-set budget in the four emit paths; `bro guard test`
 - [x] `when.judge` veto clause through the judge facade,
       `kind: 'guard'` verdicts
-- [ ] first real guards: test-coverage-on-stop
+- [x] first real guards: test-coverage-on-stop
       (`stop` + `diff.changed src/**` + `without` tests) and the
       spec-drift nudge probe (bro-fvhz); docs/site freshness and
       changelog/debt linkage land as their consumer beads add probes

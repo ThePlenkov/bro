@@ -47,12 +47,10 @@ import {
   type TaskStoreAsync,
 } from '@broject/core'
 import { specDirAbs, validBeadId } from '../spec-connectors.ts'
-import { driftEnv, driftRow, specLinkPath } from '../spec-drift.ts'
+import { driftEnv, driftRow, specLinkPath, SPEC_LINK } from '../spec-drift.ts'
 import { flag, positionals } from './args.ts'
 
 export type SpecState = 'spec' | 'link' | 'exempt' | 'missing'
-
-const SPEC_LINK = /\bspec:\s*\S+/i
 
 /** Labels that exempt a bead from the spec rule — `trivial` needs no
  *  design mass, `debt` rows are harvested findings that already carry

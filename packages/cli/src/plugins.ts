@@ -34,7 +34,7 @@ import { learnConnector, learnSection } from '@broject/learn'
 import { loopSection } from '@broject/loop'
 import { githubConnector } from '@broject/github'
 import { gitlabConnector } from '@broject/gitlab'
-import { guardSection } from '@broject/guard'
+import { guardConnector, guardSection } from '@broject/guard'
 import { judgeSection, llmJudgeConnector, systemoneConnector } from '@broject/judge'
 import { runAcpWorkerCommand } from './commands/acp-worker.ts'
 import { applyActPlan, runActCommand } from './commands/act.ts'
@@ -87,6 +87,9 @@ registerConnector(notifyConnector)
 registerConnector(learnConnector)
 registerConnector(systemoneConnector)
 registerConnector(llmJudgeConnector)
+// the builtins' home — guard defs contributed here shadow by name
+// behind config defs, so a project's `guard.defs` always wins a rename
+registerConnector(guardConnector)
 // events facade providers — registry order is the fallback precedence,
 // so `mailbox` first: `bro notify` must keep working with no broker and
 // no config. The bus is opt-in via `connectors.events` in bro.config.json.

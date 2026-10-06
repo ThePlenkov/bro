@@ -1,9 +1,10 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { registerConnector, specStore, type SpecStore } from '@broject/core'
-import { pickSpecPath, resolveScope } from './spec-drift.ts'
+import { localSpecPath, pickSpecPath, resolveScope } from './spec-drift.ts'
 import { SPEC_CONNECTORS } from './spec-connectors.ts'
 import { git, initRepo, inside } from './commands/testrepo.ts'
 
@@ -172,6 +173,30 @@ describe('pickSpecPath', () => {
           assert.fail(`expected scoped, got ${JSON.stringify(r)}`)
         }
         assert.deepEqual(r.pathspecs, ['src/**', `:(exclude,literal)${picked}`])
+      }
+    )
+  })
+})
+
+describe('localSpecPath', () => {
+  test('a symlinked parent dir is an escape, not a spec', () => {
+    withRepo(
+      (m) => {
+        seedSpec(m, 'b1', '---\nscope: src/**\n---\n')
+      },
+      (main) => {
+        const outside = mkdtempSync(join(tmpdir(), 'bro-ext-'))
+        try {
+          writeFileSync(join(outside, 'spec.md'), '---\nscope: src/**\n---\n# external\n')
+          symlinkSync(outside, join(main, 'linked'), 'dir')
+          // lstat vets the final component only — without the ancestor
+          // check this target resolves an off-repo file's frontmatter
+          assert.equal(localSpecPath(main, 'linked/spec.md'), undefined)
+          // the legit path beside it still resolves
+          assert.equal(localSpecPath(main, 'specs/b1.md'), join('specs', 'b1.md'))
+        } finally {
+          rmSync(outside, { recursive: true, force: true })
+        }
       }
     )
   })
