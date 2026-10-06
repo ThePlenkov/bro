@@ -108,6 +108,46 @@ describe('providers section', () => {
     assert.equal(m['other/plain'], 'openai-compat')
   })
 
+  test('api models map: a value that is not a wire string, {wire}, or null is an error — never an inference', () => {
+    const cfg = load({
+      providers: {
+        flag: {
+          type: 'api',
+          baseUrl: 'https://x',
+          apiKeyEnv: 'X',
+          models: { 'a/b': false },
+        },
+        num: {
+          type: 'api',
+          baseUrl: 'https://x',
+          apiKeyEnv: 'X',
+          models: { 'a/b': 42 },
+        },
+        list: {
+          type: 'api',
+          baseUrl: 'https://x',
+          apiKeyEnv: 'X',
+          models: { 'a/b': ['systemone'] },
+        },
+      },
+    })
+    assert.deepEqual(cfg.providers, {})
+  })
+
+  test("a model literally named 'err' stays a valid id — the parse failure shape is tagged, not key-probed", () => {
+    const cfg = load({
+      providers: {
+        host: {
+          type: 'api',
+          baseUrl: 'https://x',
+          models: { err: 'openai-compat' },
+        },
+      },
+    })
+    const m = cfg.providers.host!.type === 'api' ? cfg.providers.host!.models : {}
+    assert.equal(m.err, 'openai-compat')
+  })
+
   test('api entry: missing/empty models, bad wire, or a default model outside the allowlist drop the entry', () => {
     const cfg = load({
       providers: {

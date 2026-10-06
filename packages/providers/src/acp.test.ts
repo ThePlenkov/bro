@@ -87,6 +87,10 @@ describe('isSystemoneFamily', () => {
     // not the model pin; the segment must complete
     assert.equal(isSystemoneFamily('typesafe/jev-latest-router'), false)
     assert.equal(isSystemoneFamily('jev-latest-router'), false)
+    // the version token needs a boundary too — jev-1.13-router is a
+    // suffixed product id, not the jev-1.13 pin
+    assert.equal(isSystemoneFamily('typesafe/jev-1.13-router'), false)
+    assert.equal(isSystemoneFamily('jev-2-router'), false)
     assert.equal(isSystemoneFamily('qwen3-coder'), false)
     assert.equal(isSystemoneFamily('other/jev-1'), false)
     assert.equal(isSystemoneFamily(undefined), false)

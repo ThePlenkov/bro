@@ -58,7 +58,10 @@ export function stripTrailingSlashes(s: string): string {
  *  works for /v1/systemone and /v1/chat/completions alike. */
 export function apiVersionedBase(baseUrl: string): string {
   const base = stripTrailingSlashes(baseUrl)
-  return /\/v\d+[a-z]*$/i.test(base) ? base : `${base}/v1`
+  // /v\d then optional letter/digit tail — /v1beta1 ends in a DIGIT
+  // but is still a versioned base; a bare /vabc without a leading
+  // digit is not a version segment and still gets /v1 appended
+  return /\/v\d[\da-z]*$/i.test(base) ? base : `${base}/v1`
 }
 
 /** Response body as a plain object — a scalar/null body reads as {}. */
