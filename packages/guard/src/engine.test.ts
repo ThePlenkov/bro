@@ -61,6 +61,21 @@ describe('runGuards', () => {
     })
   })
 
+  test('concurrent fires cannot double-spend — the fired set lock serializes', async () => {
+    const dir = repo()
+    dirty(dir, 'src/a.ts')
+    // two hook processes racing the same budget-1 guard: the check +
+    // append is atomic under learn's file lock, so exactly one fires
+    const [a, b] = await Promise.all([
+      runGuards(opts(dir, { defs: [GUARD], record: true })),
+      runGuards(opts(dir, { defs: [GUARD], record: true })),
+    ])
+    const fired = [a, b].filter((r) => r.lines.length === 1)
+    assert.equal(fired.length, 1, `expected exactly one fire, got ${a.lines.length}+${b.lines.length}`)
+    const spent = [a, b].find((r) => r.lines.length === 0)!
+    assert.equal(spent.verdicts[0]!.fire, false)
+  })
+
   test('record:false reports FIRE but never writes the fired set', async () => {
     const dir = repo()
     dirty(dir, 'src/a.ts')

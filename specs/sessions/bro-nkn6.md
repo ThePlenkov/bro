@@ -256,7 +256,7 @@ skills/guard/SKILL.md                 policy only — mechanics live in the CLI
 
 ## Plan
 
-- [ ] bro-nkn6.1 this spec
+- [x] bro-nkn6.1 this spec
 - [x] guard schema + `guard` config section + `collectGuards` seam
       (`Connector.guards?`, config defs, dedup/warn rules) +
       `bro guard list`
@@ -268,9 +268,10 @@ skills/guard/SKILL.md                 policy only — mechanics live in the CLI
       (`stop` + `diff.changed src/**` + `without` tests) and the
       spec-drift nudge probe (bro-fvhz); docs/site freshness and
       changelog/debt linkage land as their consumer beads add probes
-- [ ] tests — schema, matcher reuse, per-probe fixtures, fired-set
+- [x] tests — schema, matcher reuse, per-probe fixtures, fired-set
       concurrency, per-event cap, judge abstain paths; CHANGELOG +
-      embedded-data regen
+      embedded-data regen (changelog lands via nx release conventional
+      commits; `skills/guard/SKILL.md` ships the policy doc)
 
 ## Risks named up front
 
