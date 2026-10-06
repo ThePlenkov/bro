@@ -1023,6 +1023,42 @@ async function sweepSettledFixers(ctx: Ctx, prs: Set<number>): Promise<void> {
   }
 }
 
+/** Heartbeat per supervised PR — deterministic name per drive pid, so
+ *  each pass rewrites the same marker and a dead drive leaves exactly
+ *  the stale-supervision flag the session-start hook reports. The TTL
+ *  covers the sweep interval so a live drive's marker can't age out
+ *  between passes. Also retires this drive's markers for PRs that left
+ *  the open set — a live marker on a merged PR would keep reporting
+ *  "watch active". Skipped on an incomplete enumeration: a failed
+ *  lookup must not delete the marker of a PR that is still open. */
+function emitWatchHeartbeats(ctx: Ctx, prs: Set<number>, complete: boolean): void {
+  for (const pr of prs) {
+    watchHeartbeat(
+      ctx.mainRoot,
+      {
+        pr,
+        link: ctx.rev.prLink(ctx.repo, pr),
+        merge: ctx.merge,
+        timeoutMin: Math.ceil(ctx.everySec! / 60) + 1,
+      },
+      'drive'
+    )
+  }
+  if (!complete) {
+    return
+  }
+  for (const l of listWatches(ctx.mainRoot)) {
+    if (
+      l.alive &&
+      l.watch.pid === process.pid &&
+      basename(l.file).endsWith(`-drive-${process.pid}.json`) &&
+      !prs.has(l.watch.pr)
+    ) {
+      watchEnd(l.file)
+    }
+  }
+}
+
 /** One pass: enumerate, probe every open PR, act per verdict. */
 async function driveOnce(ctx: Ctx): Promise<void> {
   const { byStep, degraded } = await collectAgents(ctx.mainRoot)
@@ -1038,39 +1074,7 @@ async function driveOnce(ctx: Ctx): Promise<void> {
   }
   const { prs, complete } = openFleetPrs(ctx)
   if (ctx.everySec !== undefined) {
-    // heartbeat per supervised PR — deterministic name per drive pid, so
-    // each pass rewrites the same marker and a dead drive leaves exactly
-    // the stale-supervision flag the session-start hook reports. The TTL
-    // covers the sweep interval so a live drive's marker can't age out
-    // between passes.
-    for (const pr of prs) {
-      watchHeartbeat(
-        ctx.mainRoot,
-        {
-          pr,
-          link: ctx.rev.prLink(ctx.repo, pr),
-          merge: ctx.merge,
-          timeoutMin: Math.ceil(ctx.everySec / 60) + 1,
-        },
-        'drive'
-      )
-    }
-    // retire this drive's markers for PRs that left the open set — a live
-    // marker on a merged PR would keep reporting "watch active". Skipped
-    // on an incomplete enumeration: a failed lookup must not delete the
-    // marker of a PR that is still open.
-    if (complete) {
-      for (const l of listWatches(ctx.mainRoot)) {
-        if (
-          l.alive &&
-          l.watch.pid === process.pid &&
-          basename(l.file).endsWith(`-drive-${process.pid}.json`) &&
-          !prs.has(l.watch.pr)
-        ) {
-          watchEnd(l.file)
-        }
-      }
-    }
+    emitWatchHeartbeats(ctx, prs, complete)
   }
   for (const pr of prs) {
     // a throwing probe on one PR must not kill the pass — in --every
