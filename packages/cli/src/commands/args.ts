@@ -78,6 +78,33 @@ export function flagAll(argv: string[], name: string): string[] {
   return out
 }
 
+/** What one `--…` token is: 'value' consumes a value (inline via `=`,
+ *  else the next token), 'bool' is a known no-value flag, 'drop' is an
+ *  unrecognized flag lenient callers swallow, 'positional' isn't a
+ *  flag at all. `strict` turns an unrecognized flag into a usage error
+ *  instead of a silent drop. */
+function flagTokenKind(
+  arg: string,
+  valueFlags: ReadonlySet<string>,
+  opts?: { boolFlags?: ReadonlySet<string>; strict?: boolean }
+): 'value' | 'bool' | 'drop' | 'positional' {
+  if (!arg.startsWith('--')) {
+    return 'positional'
+  }
+  const name = arg.split('=', 1)[0]!
+  if (valueFlags.has(name)) {
+    return 'value'
+  }
+  if (opts?.boolFlags?.has(name) === true) {
+    return 'bool'
+  }
+  if (opts?.strict === true) {
+    console.error(`error: unknown option ${name}`)
+    process.exit(2)
+  }
+  return 'drop'
+}
+
 /** Positional args = everything that isn't a flag or its value.
  *  `--` ends flag parsing — everything after is positional verbatim
  *  (a message containing `--help` survives only behind it). A
@@ -102,24 +129,16 @@ export function positionals(
       verbatim = true
       continue
     }
-    if (arg.startsWith('--')) {
-      const name = arg.split('=', 1)[0]!
-      if (valueFlags.has(name)) {
-        if (arg === name) {
-          i += 1 // `--name value` — the value is the next token
-        }
-        continue
-      }
-      if (opts?.boolFlags?.has(name) === true) {
-        continue
-      }
-      if (opts?.strict === true) {
-        console.error(`error: unknown option ${name}`)
-        process.exit(2)
-      }
+    const kind = flagTokenKind(arg, valueFlags, opts)
+    if (kind === 'positional') {
+      out.push(arg)
       continue
     }
-    out.push(arg)
+    // `--name value` — the value is the next token; `--name=value` is
+    // self-contained
+    if (kind === 'value' && arg === arg.split('=', 1)[0]) {
+      i += 1
+    }
   }
   return out
 }

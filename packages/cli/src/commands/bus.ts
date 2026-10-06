@@ -20,6 +20,7 @@ import {
   startBusBroker,
   type BusEnvelope,
   type BusFilter,
+  type EventInput,
 } from '@broject/core'
 import { flag, flagAll, positionals } from './args.ts'
 
@@ -148,17 +149,24 @@ async function cmdServe(rest: string[]): Promise<void> {
   await broker.close()
 }
 
-async function cmdPublish(rest: string[]): Promise<void> {
+/** Optional identity fields publish forwards verbatim — an empty `--to`
+ *  stays in the event so input validation rejects it rather than
+ *  silently widening it into a broadcast. */
+const IDENTITY_FLAGS = [
+  ['--key', 'key'],
+  ['--source', 'source'],
+  ['--to', 'to'],
+  ['--cause', 'cause'],
+  ['--ref', 'ref'],
+] as const
+
+/** argv → EventInput: topic/kind are mandatory, the rest optional. */
+function publishEventInput(rest: string[]): EventInput {
   const topic = flag(rest, '--topic')
   const kind = flag(rest, '--kind')
   if (topic === undefined || topic === '' || kind === undefined || kind === '') {
     usage()
   }
-  const key = flag(rest, '--key')
-  const source = flag(rest, '--source')
-  const to = flag(rest, '--to')
-  const cause = flag(rest, '--cause')
-  const ref = flag(rest, '--ref')
   const payloadRaw = flag(rest, '--payload')
   let payload: unknown
   if (payloadRaw !== undefined) {
@@ -168,16 +176,21 @@ async function cmdPublish(rest: string[]): Promise<void> {
       die(`--payload is not valid JSON: ${payloadRaw}`)
     }
   }
-  const result = await busPublish(socketOrDie(), {
-    topic,
-    kind,
-    ...(key !== undefined ? { key } : {}),
-    ...(source !== undefined ? { source } : {}),
-    ...(to !== undefined && to !== '' ? { to } : {}),
-    ...(cause !== undefined ? { cause } : {}),
-    ...(ref !== undefined ? { ref } : {}),
-    ...(payload !== undefined ? { payload } : {}),
-  })
+  const event: EventInput = { topic, kind }
+  for (const [flagName, prop] of IDENTITY_FLAGS) {
+    const v = flag(rest, flagName)
+    if (v !== undefined) {
+      event[prop] = v
+    }
+  }
+  if (payload !== undefined) {
+    event.payload = payload
+  }
+  return event
+}
+
+async function cmdPublish(rest: string[]): Promise<void> {
+  const result = await busPublish(socketOrDie(), publishEventInput(rest))
   const json = rest.includes('--json')
   if (!result.published) {
     // Not a failure: the broker being down is a routine state, and a
