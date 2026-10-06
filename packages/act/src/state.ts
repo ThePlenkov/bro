@@ -52,13 +52,13 @@ function isSast(name: string): boolean {
  *  and only counted for required checks (an optional SAST must not hold
  *  the gate; with no required checks configured at all, a flaky
  *  annotations endpoint stays infra noise). */
-function sastCounts(
+async function sastCounts(
   rev: ReviewFacade,
   target: PrTarget,
   checks: CheckInfo[],
   requiredNames: Set<string>,
   headSha: string
-): { pending: number; unknown: number } {
+): Promise<{ pending: number; unknown: number }> {
   const out = { pending: 0, unknown: 0 }
   const sastChecks = checks.filter(
     (c) => isSast(c.name) && c.state !== 'SKIPPED' && c.state !== 'NEUTRAL'
@@ -66,7 +66,10 @@ function sastCounts(
   if (sastChecks.length === 0) {
     return out
   }
-  const annotations = rev.checkAnnotations(target.repo, headSha)
+  const annotations =
+    rev.checkAnnotationsAsync === undefined
+      ? rev.checkAnnotations(target.repo, headSha)
+      : await rev.checkAnnotationsAsync(target.repo, headSha)
   for (const check of sastChecks) {
     if (!annotations.has(check.name)) {
       continue
@@ -175,6 +178,18 @@ function advisoryFilter(
   return false
 }
 
+/** Resolve an async facade method, falling back to its sync twin when
+ *  the host doesn't implement one — the sweep must not stall on a
+ *  backend that only knows the spawnSync surface. The sync call is
+ *  deferred through .then so a synchronous throw becomes a rejection
+ *  the caller's .catch sees, not a throw that escapes fetchPrActState. */
+const orSync = <T, A extends unknown[]>(
+  asyncFn: ((...a: A) => Promise<T>) | undefined,
+  syncFn: (...a: A) => T,
+  ...args: A
+): Promise<T> =>
+  asyncFn === undefined ? Promise.resolve().then(() => syncFn(...args)) : asyncFn(...args)
+
 /** Full open-PR state for the act loop — threads + checks + mergeability. */
 export async function fetchPrActState(
   rev: ReviewFacade,
@@ -187,19 +202,35 @@ export async function fetchPrActState(
     docsMaxRounds?: number
   }
 ): Promise<PrActState> {
-  const meta = rev.prMeta(target)
-  const threads = await rev.reviewThreads(target)
+  // The reads are independent — overlap them. Inside a hook sweep each
+  // sync variant would serialize AND block the probe-timeout timers.
+  const checksP = (requiredOnly: boolean): Promise<CheckInfo[]> =>
+    orSync(
+      rev.checksAsync?.bind(rev),
+      (t: PrTarget, req?: boolean) => rev.checks(t, req),
+      target,
+      requiredOnly
+    )
+  const [meta, threads, checksAll, required, shas] = await Promise.all([
+    orSync(rev.prMetaAsync?.bind(rev), (t: PrTarget) => rev.prMeta(t), target),
+    rev.reviewThreads(target),
+    checksP(false),
+    checksP(true),
+    // a flaky reviews endpoint degrades to [] — fixRounds just reads low
+    orSync(rev.reviewedShasAsync?.bind(rev), (t: PrTarget) => rev.reviewedShas(t), target).catch(
+      (): string[] => []
+    ),
+  ])
   const rules = ignoreRules(opts?.ignoreChecks ?? [])
   const alerts: string[] = []
   const history = opts?.checkHistory ?? null
-  const checks = rev
-    .checks(target, false)
-    .filter((c) => advisoryFilter(c, rules, history, threads, target, meta.headSha, alerts))
+  const checks = checksAll.filter((c) =>
+    advisoryFilter(c, rules, history, threads, target, meta.headSha, alerts)
+  )
 
   // "CI green" means every check — an optional check that fails is still
   // a red job on the PR. Required names are only kept to decide whether a
   // SAST annotation fetch failure counts as unknown below.
-  const required = rev.checks(target, true)
   const requiredNames = new Set(required.map((c) => c.name))
   // Pending and failing split here: pending is worth
   // waiting out (act wait), failing is a settled verdict to act on.
@@ -227,7 +258,7 @@ export async function fetchPrActState(
 
   // A SAST scan can report "success" while still carrying failure-level
   // annotations — inspect every non-skipped SAST check, not just pending.
-  const sast = sastCounts(rev, target, checks, requiredNames, meta.headSha)
+  const sast = await sastCounts(rev, target, checks, requiredNames, meta.headSha)
   const sastPending = sast.pending
   const sastUnknown = sast.unknown
 
@@ -236,20 +267,16 @@ export async function fetchPrActState(
   // committer dates are commit-time, not push-time. The first reviewed
   // head is the baseline (the PR as submitted); every head reviewed after
   // it is one round of the fix loop. Reviews exist without threads
-  // (approvals), so this isn't gated on threads.
-  let fixRounds = 0
-  try {
-    fixRounds = Math.max(0, rev.reviewedShas(target).length - 1)
-  } catch {
-    // best-effort — a flaky reviews endpoint must not break the gate
-  }
+  // (approvals), so this isn't gated on threads. `shas` already carries
+  // the reviews fetch — a flaky endpoint degraded to [] above.
+  const fixRounds = Math.max(0, shas.length - 1)
 
   // A docs-only PR churns reviewer threads on every push — the tighter
   // docsMaxRounds cap moves the tail to debt sooner. The file list is
   // only probed while threads are open: that's the cap's sole consumer,
   // and it keeps a per-poll host call off a quiet PR.
   const isDocsOnly =
-    threads.some((t) => !t.resolved) && docsOnlyPr(rev, target, opts)
+    threads.some((t) => !t.resolved) && (await docsOnlyPr(rev, target, opts))
   const maxRounds = effectiveMaxRounds(
     opts?.maxRounds ?? 0,
     isDocsOnly,

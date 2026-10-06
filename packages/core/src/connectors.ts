@@ -27,8 +27,8 @@ import { gitTry } from './git.ts'
 import type { JudgeFacade } from './judge.ts'
 import type { ReviewFacade } from './review.ts'
 import type { SpecStore } from './specs.ts'
-import type { TaskRow, TaskStore } from './tasks.ts'
-import { bdActor, taskStore } from './tasks.ts'
+import type { TaskRow, TaskStore, TaskStoreAsync } from './tasks.ts'
+import { bdActorAsync, taskStore, taskStoreAsync } from './tasks.ts'
 
 export interface ConnectorCtx {
   /** Working dir — repo root for project-scoped facades, the resolved
@@ -45,6 +45,11 @@ export interface ConnectorCtx {
  *  consumer lands. */
 export interface FacadeMap {
   tasks: TaskStore
+  /** The probe-path read surface — parallel sweeps await these instead
+   *  of blocking on each other's bd spawns. Connectors without it are
+   *  wrapped sync→Promise by tasksAsync() — API-compatible, just not
+   *  parallel (no worse than before). */
+  tasksAsync: TaskStoreAsync
   reviews: ReviewFacade
   specs: SpecStore
   judge: JudgeFacade
@@ -127,6 +132,9 @@ export interface Connector {
    *  plugin's defect, never awaited. */
   auth?(ctx: ConnectorCtx): string | null
   tasks?(ctx: ConnectorCtx): TaskStore
+  /** Async read surface for probe paths — when absent, tasksAsync()
+   *  wraps the sync `tasks` store in Promise.resolve. */
+  tasksAsync?(ctx: ConnectorCtx): TaskStoreAsync
   reviews?(ctx: ConnectorCtx): ReviewFacade
   specs?(ctx: ConnectorCtx): SpecStore
   judge?(ctx: ConnectorCtx): JudgeFacade
@@ -197,11 +205,11 @@ export function isOwnClaim(row: TaskRow, mine: Set<string>, actor: string): bool
 const beadsConnector: Connector = {
   name: 'beads',
   tasks: (ctx) => taskStore(ctx.dir),
+  tasksAsync: (ctx) => taskStoreAsync(ctx.dir),
   hooks: () => ({
-    sessionStart(ctx) {
+    async sessionStart(ctx) {
       try {
-        const ready = taskStore(ctx.dir)
-          .ready()
+        const ready = (await taskStoreAsync(ctx.dir).ready())
           .slice(0, 8)
           .map((r) => `  ${r.id} ${shortTitle(r.title)}`.trimEnd())
         return ready.length > 0 ? [`bd ready:\n${ready.join('\n')}`] : []
@@ -209,16 +217,16 @@ const beadsConnector: Connector = {
         return []
       }
     },
-    parallelWork(ctx) {
+    async parallelWork(ctx) {
       try {
         // other sessions' live work — own claims are already this
         // session's business, naming them again would be a false nudge.
         // "Own" is verified: a marker id whose claim was refused is
         // foreign work — the exact collision this nudge exists for.
         const mine = sessionTaskClaims(ctx)
-        const me = bdActor(ctx.dir)
-        const claimed = taskStore(ctx.dir)
-          .list({ status: 'in_progress' })
+        const store = taskStoreAsync(ctx.dir)
+        const [me, rows] = await Promise.all([bdActorAsync(ctx.dir), store.list({ status: 'in_progress' })])
+        const claimed = rows
           .filter((r) => !isOwnClaim(r, mine, me))
           .slice(0, 5)
           .map((r) => `${r.id} ${shortTitle(r.title)}`.trim())
@@ -227,9 +235,14 @@ const beadsConnector: Connector = {
         return []
       }
     },
-    stopGate(ctx) {
+    async stopGate(ctx) {
       try {
-        const claimed = taskStore(ctx.dir).list({ status: 'in_progress' })
+        const store = taskStoreAsync(ctx.dir)
+        const [mine, me, claimed] = await Promise.all([
+          Promise.resolve(sessionTaskClaims(ctx)),
+          bdActorAsync(ctx.dir),
+          store.list({ status: 'in_progress' }),
+        ])
         if (claimed.length === 0) {
           return []
         }
@@ -237,8 +250,6 @@ const beadsConnector: Connector = {
         // doesn't own, so they stay passive context. Ownership is the
         // store's assignee, not the marker: a refused claim still arms
         // the id, and a bead held by another actor is never ours to close
-        const mine = sessionTaskClaims(ctx)
-        const me = bdActor(ctx.dir)
         const own = claimed.filter((r) => isOwnClaim(r, mine, me))
         const foreign = claimed.filter((r) => !isOwnClaim(r, mine, me))
         const fmt = (r: { id: string; title?: string }): string =>
@@ -452,15 +463,53 @@ export function specStore(
   return facade('specs', { dir }, { prefer })
 }
 
-/** Every registered connector's hook probes — hooks collect, never pick:
- *  each system reports its own ambient state. */
-export function connectorHooks(ctx: ConnectorCtx): ConnectorHooks[] {
-  const out: ConnectorHooks[] = []
+/** facade('tasksAsync') bound to a dir — the probe-path task surface.
+ *  A connector without `tasksAsync` gets its sync `tasks` store
+ *  wrapped in async signatures — reads stay sequential for it, which
+ *  is exactly the status quo; the API just stops forcing sync on
+ *  everyone else. */
+export function tasksAsync(
+  dir: string = process.cwd(),
+  prefer?: Record<string, string>
+): TaskStoreAsync {
+  // An explicit connectors.tasksAsync preference wins outright. Else
+  // resolve the SAME connector `tasks` would pick — prefer/matchDir/
+  // remote all apply — so the probe path never silently reads a
+  // different backend than command paths do. A connector without
+  // `tasksAsync` gets its sync store wrapped: reads stay sequential for
+  // it, which is exactly the status quo.
+  if (prefer?.tasksAsync !== undefined) {
+    try {
+      return facade('tasksAsync', { dir }, { prefer })
+    } catch {
+      // fall through to the selected tasks connector
+    }
+  }
+  const pick = pickConnector('tasks', { dir }, { prefer })
+  if (pick.tasksAsync !== undefined) {
+    return pick.tasksAsync({ dir })
+  }
+  const s = pick.tasks!({ dir })
+  return {
+    list: (f) => Promise.resolve(s.list(f)),
+    ready: (f) => Promise.resolve(s.ready(f)),
+    get: (id) => Promise.resolve(s.get(id)),
+    children: (id) => Promise.resolve(s.children(id)),
+    deps: (ids, opts) => Promise.resolve(s.deps(ids, opts)),
+    actor: () => Promise.resolve(s.actor?.() ?? ''),
+  }
+}
+
+/** Every registered connector's hook probes paired with its name —
+ *  hooks collect, never pick: each system reports its own ambient
+ *  state. The name rides along so perf rows can blame a connector. */
+export function connectorHooks(ctx: ConnectorCtx): { name: string; hooks: ConnectorHooks }[] {
+  const out: { name: string; hooks: ConnectorHooks }[] = []
   for (const c of registry) {
     try {
       const h = c.hooks?.(ctx)
       if (h) {
-        out.push(h)
+        out.push({ name: c.name, hooks: h })
       }
     } catch {
       // a wedged connector contributes no probes — fail-open
@@ -478,14 +527,17 @@ export const PROBE_TIMEOUT_MS = 4_000
  *  from a probe that genuinely answered `undefined`. */
 const PROBE_TIMED_OUT: unique symbol = Symbol('probe-timed-out')
 
-async function probeWithTimeout<T>(p: MaybePromise<T>, fallback: T): Promise<T> {
+async function probeWithTimeout<T>(p: () => MaybePromise<T>, fallback: T): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<T>((resolve) => {
     timer = setTimeout(() => resolve(fallback), PROBE_TIMEOUT_MS)
     timer.unref?.()
   })
   try {
-    return await Promise.race([Promise.resolve(p), timeout])
+    // The thunk runs AFTER the timer is armed — for a sync probe that's
+    // still a blocking call no timer can preempt, but the budget is at
+    // least honest about what it measured.
+    return await Promise.race([Promise.resolve().then(p), timeout])
   } finally {
     clearTimeout(timer)
   }
@@ -499,33 +551,61 @@ export interface ProbeResult {
   settled: boolean
 }
 
+/** One probe's timing row — the perf journal's per-connector record.
+ *  `timedOut` = the probe raced past its budget; `failed` = it threw
+ *  (or a missing probe was skipped — absent probes report nothing). */
+export interface ProbeTiming {
+  connector: string
+  ms: number
+  timedOut?: true
+  failed?: true
+}
+
+/** Report one timing row per probe — wired to the perf journal by the
+ *  hooks bus; collectors default to silent so tests and non-hook
+ *  callers see no behavior change. */
+export type ProbeReporter = (rows: ProbeTiming[]) => void
+
 /** Collect a line-producing probe across all connectors — fail-open
  *  per connector, one wedged system must not starve the rest. A probe
  *  that times out or throws still contributes nothing, but flips
- *  `settled` so the caller can retry instead of caching the miss. */
+ *  `settled` so the caller can retry instead of caching the miss.
+ *  Probes run in parallel — the sweep's worst case is ONE probe
+ *  budget, not N; output order stays registry order. */
 async function collectLines(
   ctx: ConnectorCtx,
-  probe: (h: ConnectorHooks) => MaybePromise<string[] | undefined>
+  probe: (h: ConnectorHooks) => MaybePromise<string[] | undefined>,
+  onProbe?: ProbeReporter
 ): Promise<ProbeResult> {
-  const out: string[] = []
-  let settled = true
-  for (const h of connectorHooks(ctx)) {
-    try {
-      const r = await probeWithTimeout<string[] | undefined | typeof PROBE_TIMED_OUT>(
-        probe(h),
-        PROBE_TIMED_OUT
-      )
-      if (r === PROBE_TIMED_OUT) {
-        settled = false
-        continue
+  const rows = await Promise.all(
+    connectorHooks(ctx).map(async ({ name, hooks }) => {
+      const t0 = Date.now()
+      try {
+        const r = await probeWithTimeout<string[] | undefined | typeof PROBE_TIMED_OUT>(
+          () => probe(hooks),
+          PROBE_TIMED_OUT
+        )
+        return {
+          name,
+          lines: r === PROBE_TIMED_OUT ? [] : (r ?? []),
+          timing: { connector: name, ms: Date.now() - t0, ...(r === PROBE_TIMED_OUT ? { timedOut: true as const } : {}) },
+          settled: r !== PROBE_TIMED_OUT,
+        }
+      } catch {
+        return {
+          name,
+          lines: [] as string[],
+          timing: { connector: name, ms: Date.now() - t0, failed: true as const },
+          settled: false,
+        }
       }
-      out.push(...(r ?? []))
-    } catch {
-      // fail-open output, but the sweep did not settle
-      settled = false
-    }
+    })
+  )
+  onProbe?.(rows.map((r) => r.timing))
+  return {
+    lines: rows.flatMap((r) => r.lines),
+    settled: rows.every((r) => r.settled),
   }
-  return { lines: out, settled }
 }
 
 /** Collect session-start context lines from all connectors. */
@@ -535,8 +615,11 @@ export async function sessionStartLines(ctx: ConnectorCtx): Promise<string[]> {
 
 /** Session-start lines plus the settle flag — rehydrate marks are only
  *  honest when every probe answered. */
-export function sessionStartProbe(ctx: ConnectorCtx): Promise<ProbeResult> {
-  return collectLines(ctx, (h) => h.sessionStart?.(ctx))
+export function sessionStartProbe(
+  ctx: ConnectorCtx,
+  onProbe?: ProbeReporter
+): Promise<ProbeResult> {
+  return collectLines(ctx, (h) => h.sessionStart?.(ctx), onProbe)
 }
 
 /** Collect parallel-work signals from all connectors. */
@@ -545,35 +628,63 @@ export async function parallelWorkLines(ctx: ConnectorCtx): Promise<string[]> {
 }
 
 /** Parallel-work lines plus the settle flag. */
-export function parallelWorkProbe(ctx: ConnectorCtx): Promise<ProbeResult> {
-  return collectLines(ctx, (h) => h.parallelWork?.(ctx))
+export function parallelWorkProbe(
+  ctx: ConnectorCtx,
+  onProbe?: ProbeReporter
+): Promise<ProbeResult> {
+  return collectLines(ctx, (h) => h.parallelWork?.(ctx), onProbe)
 }
 
 /** Collect prompt-submit context from all connectors. */
-export async function promptContextLines(ctx: ConnectorCtx, prompt: string): Promise<string[]> {
-  return (await collectLines(ctx, (h) => h.promptSubmit?.(ctx, prompt))).lines
+export async function promptContextLines(
+  ctx: ConnectorCtx,
+  prompt: string,
+  onProbe?: ProbeReporter
+): Promise<string[]> {
+  return (await collectLines(ctx, (h) => h.promptSubmit?.(ctx, prompt), onProbe)).lines
 }
 
 /** Collect post-tool context lines from all connectors — mailbox
  *  drains and other per-event probes. */
-export async function postToolLines(ctx: ConnectorCtx): Promise<string[]> {
-  return (await collectLines(ctx, (h) => h.postTool?.(ctx))).lines
+export async function postToolLines(
+  ctx: ConnectorCtx,
+  onProbe?: ProbeReporter
+): Promise<string[]> {
+  return (await collectLines(ctx, (h) => h.postTool?.(ctx), onProbe)).lines
 }
 
 /** Collect stop-gate contributions from all connectors — the caller
- *  applies the session-arming policy to each. */
+ *  applies the session-arming policy to each. Parallel like the line
+ *  sweeps: one wedged probe must not serialize the gate. */
 export async function stopGateContributions(
-  ctx: ConnectorCtx
+  ctx: ConnectorCtx,
+  onProbe?: ProbeReporter
 ): Promise<GateContribution[]> {
-  const out: GateContribution[] = []
-  for (const h of connectorHooks(ctx)) {
-    try {
-      out.push(...((await probeWithTimeout(h.stopGate?.(ctx), undefined)) ?? []))
-    } catch {
-      // fail-open
-    }
-  }
-  return out
+  const rows = await Promise.all(
+    connectorHooks(ctx).map(async ({ name, hooks }) => {
+      const t0 = Date.now()
+      try {
+        const r = await probeWithTimeout<
+          GateContribution[] | undefined | typeof PROBE_TIMED_OUT
+        >(() => hooks.stopGate?.(ctx), PROBE_TIMED_OUT)
+        return {
+          contributions: r === PROBE_TIMED_OUT ? [] : (r ?? []),
+          timing: {
+            connector: name,
+            ms: Date.now() - t0,
+            ...(r === PROBE_TIMED_OUT ? { timedOut: true as const } : {}),
+          },
+        }
+      } catch {
+        return {
+          contributions: [] as GateContribution[],
+          timing: { connector: name, ms: Date.now() - t0, failed: true as const },
+        }
+      }
+    })
+  )
+  onProbe?.(rows.map((r) => r.timing))
+  return rows.flatMap((r) => r.contributions)
 }
 
 /** Collect pre-tool verdicts from all connectors — the caller decides
@@ -586,9 +697,12 @@ export async function preToolVerdicts(
   // parallel probes, registry-order merge — a wedged connector can't
   // stall the queue and verdict order stays the config's
   const verdicts = await Promise.all(
-    connectorHooks(ctx).map(async (h) => {
+    connectorHooks(ctx).map(async ({ hooks }) => {
       try {
-        return (await probeWithTimeout(h.preTool?.(ctx, { tool, input }), undefined)) ?? []
+        return (
+          (await probeWithTimeout(() => hooks.preTool?.(ctx, { tool, input }), undefined)) ??
+          []
+        )
       } catch {
         return [] // fail-open
       }

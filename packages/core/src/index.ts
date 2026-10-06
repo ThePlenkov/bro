@@ -1,4 +1,14 @@
-export { gh, ghAsync, ghJson, ghJsonAsync, ghTry, prLink, resolveRepo } from './gh.ts'
+export {
+  gh,
+  ghAsync,
+  ghJson,
+  ghJsonAsync,
+  ghTry,
+  ghTryAsync,
+  prLink,
+  resolveRepo,
+  resolveRepoAsync,
+} from './gh.ts'
 export {
   git,
   gitTry,
@@ -13,8 +23,11 @@ export type { GitLogPathRecord, GitStamp, GitLogStamp } from './git.ts'
 export {
   bd,
   BdCompatError,
+  bdAsync,
   bdJson,
+  bdJsonAsync,
   bdTry,
+  bdTryAsync,
   checkBeads,
   evidenceKind,
   initBeadsStealth,
@@ -79,8 +92,8 @@ export { definePlugin } from './plugin.ts'
 export type { BroPlugin } from './plugin.ts'
 export { docTypeNamed, docVerbs, STANDARD_VERBS, verbMethod } from './docs.ts'
 export type { DocAdapter, DocCtx, DocFlags, DocType, DocVerb, Scope } from './docs.ts'
-export { bdActor, taskStore } from './tasks.ts'
-export type { TaskFilter, TaskInput, TaskRow, TaskStore } from './tasks.ts'
+export { bdActor, bdActorAsync, taskStore, taskStoreAsync } from './tasks.ts'
+export type { TaskFilter, TaskInput, TaskRow, TaskStore, TaskStoreAsync } from './tasks.ts'
 export { JudgeUnavailable } from './judge.ts'
 export type {
   DecideResult,
@@ -128,6 +141,7 @@ export {
   sessionStartProbe,
   sessionTaskClaims,
   stopGateContributions,
+  tasksAsync,
 } from './connectors.ts'
 export { PROBE_TIMEOUT_MS } from './connectors.ts'
 export {
@@ -148,7 +162,9 @@ export type {
   GateContribution,
   MaybePromise,
   PreToolVerdict,
+  ProbeReporter,
   ProbeResult,
+  ProbeTiming,
 } from './connectors.ts'
 export {
   AgentNotFound,
@@ -231,3 +247,4 @@ export type {
   BusSubscription,
   BusSubscriptionHandlers,
 } from './bus.ts'
+export { trackChild, unrefPendingChildren } from './live-procs.ts'

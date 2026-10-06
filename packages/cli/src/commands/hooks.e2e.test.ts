@@ -662,3 +662,52 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
     })
   })
 })
+
+describe('hooks e2e — perf journal', () => {
+  test('a hook event journals per-probe timings plus the event total', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const r = hook(f, 'post-tool', {
+        session_id: 's1',
+        tool_name: 'Bash',
+        tool_input: { command: 'ls' },
+        tool_response: { success: true },
+      })
+      assert.equal(r.code, 0)
+      const journal = join(f.markerDir, 'perf', 's1.jsonl')
+      assert.ok(existsSync(journal), 'perf journal must exist after a hook event')
+      const rows = readFileSync(journal, 'utf8')
+        .split('\n')
+        .filter((l) => l !== '')
+        .map((l) => JSON.parse(l) as Record<string, unknown>)
+      assert.ok(
+        rows.some((x) => x.probe === 'postTool' && typeof x.connector === 'string'),
+        'per-probe rows name their connector'
+      )
+      assert.ok(
+        rows.some((x) => x.probe === undefined && x.event === 'post-tool' && typeof x.ms === 'number'),
+        'the event total row closes the batch'
+      )
+    })
+  })
+
+  test('bro hooks perf aggregates the journal — probe stats and totals', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      hook(f, 'post-tool', {
+        session_id: 's1',
+        tool_name: 'Bash',
+        tool_input: { command: 'ls' },
+        tool_response: { success: true },
+      })
+      const r = runCli(['hooks', 'perf'], { cwd: f.main })
+      assert.equal(r.code, 0)
+      assert.match(r.stdout, /post-tool postTool \w+/)
+      assert.match(r.stdout, /totals/)
+      assert.match(r.stdout, /post-tool/)
+      const j = runCli(['hooks', 'perf', '--json'], { cwd: f.main })
+      const doc = JSON.parse(j.stdout) as { rows: unknown[] }
+      assert.ok(Array.isArray(doc.rows) && doc.rows.length > 0)
+    })
+  })
+})

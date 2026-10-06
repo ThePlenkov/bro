@@ -8,9 +8,22 @@
 import { loadConfig, reviewHost, type Connector, type PrTarget } from '@broject/core'
 import { checkHistory } from './check-history.ts'
 import { evaluateExitGate } from './exit-gate.ts'
-import { mergeSlotHolder } from './merge-slot.ts'
+import { mergeSlotHolderAsync } from './merge-slot.ts'
 import { listWatches, watchRetire } from './pending-watch.ts'
 import { fetchPrActState } from './state.ts'
+
+/** The bound-dir PR — async when the host has the twin, else a resolved
+ *  sync call (a facade without currentPrAsync still answers, just not
+ *  non-blocking). */
+const currentPr = (rev: ReturnType<typeof reviewHost>) =>
+  rev.currentPrAsync === undefined
+    ? Promise.resolve(rev.currentPr())
+    : rev.currentPrAsync()
+
+const resolvedRepo = (rev: ReturnType<typeof reviewHost>) =>
+  rev.resolveRepoAsync === undefined
+    ? Promise.resolve(rev.resolveRepo([]))
+    : rev.resolveRepoAsync([])
 
 /** One-line gate summary for a PR — null when no PR/host resolves. */
 async function gateLine(dir: string, target?: PrTarget): Promise<string | null> {
@@ -19,11 +32,11 @@ async function gateLine(dir: string, target?: PrTarget): Promise<string | null> 
     const rev = reviewHost(dir, cfg.connectors)
     let t = target
     if (!t) {
-      const cur = rev.currentPr()
+      const cur = await currentPr(rev)
       if (!cur || cur.state !== 'OPEN') {
         return null
       }
-      t = { repo: rev.resolveRepo([]), pr: cur.pr }
+      t = { repo: await resolvedRepo(rev), pr: cur.pr }
     }
     const state = await fetchPrActState(rev, t, {
       ignoreChecks: cfg.act.ignoreChecks,
@@ -49,13 +62,13 @@ async function blockerLine(dir: string): Promise<string | null> {
   try {
     const cfg = loadConfig(dir)
     const rev = reviewHost(dir, cfg.connectors)
-    const cur = rev.currentPr()
+    const cur = await currentPr(rev)
     if (!cur || cur.state !== 'OPEN') {
       return null
     }
     const state = await fetchPrActState(
       rev,
-      { repo: rev.resolveRepo([]), pr: cur.pr },
+      { repo: await resolvedRepo(rev), pr: cur.pr },
       {
         ignoreChecks: cfg.act.ignoreChecks,
         checkHistory: checkHistory(dir),
@@ -76,9 +89,9 @@ async function blockerLine(dir: string): Promise<string | null> {
 
 /** Merge-slot holder line — a session seeing the slot held knows not to
  *  start a merge right now. Fail-open: no beads → no line. */
-function mergeSlotLine(): string | null {
+async function mergeSlotLine(): Promise<string | null> {
   try {
-    const holder = mergeSlotHolder()
+    const holder = await mergeSlotHolderAsync()
     return holder ? `merge slot: held by ${holder} — serialize merges via \`bro act merge\`` : null
   } catch {
     return null
@@ -133,7 +146,7 @@ export const actConnector: Connector = {
       if (gate) {
         out.push(gate)
       }
-      const slot = mergeSlotLine()
+      const slot = await mergeSlotLine()
       if (slot) {
         out.push(slot)
       }

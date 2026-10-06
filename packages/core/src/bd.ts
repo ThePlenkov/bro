@@ -4,6 +4,7 @@
  * keeps large `bd list --json` payloads from hitting Node's 1 MiB default.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
+import { spawnCollect } from './live-procs.ts'
 import { statSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -50,6 +51,93 @@ export function bdTry(
 
 export function bdJson<T>(args: string[], cwd?: string): T {
   const out = bd([...args, '--json'], cwd)
+  try {
+    return JSON.parse(out) as T
+  } catch (err) {
+    throw new Error(
+      `bd returned malformed JSON — ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+}
+
+// --- async variants ------------------------------------------------------------
+
+/** Async `bd` — the probe-path contract. `spawnSync` inside a hook
+ *  probe blocks the whole event loop: with N serial probes each bd call
+ *  (~1.3s of dolt startup) stacks into the observed 30s session-start.
+ *  The async form lets connector sweeps overlap their bd calls, so the
+ *  hook costs one bd latency, not the sum. Rejects carry the
+ *  execFileSync-style shape (`.code/.stdout/.stderr`) so isBdNotFound
+ *  and friends classify async failures exactly like sync ones. */
+export function bdAsync(args: string[], cwd?: string): Promise<string> {
+  const { proc, done } = spawnCollect('bd', args, cwd)
+  return new Promise((resolve, reject) => {
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      proc.kill('SIGKILL')
+    }, 15_000)
+    timer.unref?.()
+    void done.then(({ code, out, err, error }) => {
+      clearTimeout(timer)
+      if (timedOut) {
+        reject(
+          Object.assign(new Error(`bd ${args[0] ?? ''} timed out after 15000ms`), {
+            code: 'ETIMEDOUT',
+            stdout: out,
+            stderr: err,
+            killed: true,
+          })
+        )
+        return
+      }
+      if (error !== undefined) {
+        reject(Object.assign(error, { stdout: out, stderr: err }))
+        return
+      }
+      if (code === 0) {
+        resolve(out)
+        return
+      }
+      reject(
+        Object.assign(new Error(`bd ${args.join(' ')} failed (${code ?? 1}): ${err}`), {
+          code: code ?? 1,
+          stdout: out,
+          stderr: err,
+        })
+      )
+    })
+  })
+}
+
+/** Non-throwing async bd — the spawnSync bdTry's twin for probe paths
+ *  where beads is optional and must degrade, never stall. */
+export function bdTryAsync(
+  args: string[],
+  timeoutMs = 15_000,
+  cwd?: string
+): Promise<{ code: number; out: string; err: string }> {
+  const { proc, done } = spawnCollect('bd', args, cwd)
+  return new Promise((resolve) => {
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      proc.kill('SIGKILL')
+    }, timeoutMs)
+    timer.unref?.()
+    void done.then((r) => {
+      clearTimeout(timer)
+      resolve(
+        timedOut
+          ? { code: 124, out: r.out, err: `timed out after ${timeoutMs}ms` }
+          : { code: r.code ?? 1, out: r.out, err: r.err }
+      )
+    })
+  })
+}
+
+export async function bdJsonAsync<T>(args: string[], cwd?: string): Promise<T> {
+  const out = await bdAsync([...args, '--json'], cwd)
   try {
     return JSON.parse(out) as T
   } catch (err) {

@@ -130,11 +130,14 @@ export interface MergeOpts {
 export interface ReviewFacade {
   /** 'owner/repo' — from positional args or the bound dir's remote. */
   resolveRepo(positional?: string[]): string
+  /** Async twin — probe paths must not serialize behind a sync `gh`. */
+  resolveRepoAsync?(positional?: string[]): Promise<string>
   /** Clickable PR reference for user-facing output — vendor URL shape. */
   prLink(ownerRepo: string, pr: number): string
   /** The PR for the bound dir's checked-out branch — null when the
    *  branch has none or the host is unreachable. */
   currentPr(): { pr: number; state: string; url: string } | null
+  currentPrAsync?(): Promise<{ pr: number; state: string; url: string } | null>
   /** PR numbers whose head is this branch — the loop's "did the agent
    *  open one" probe. Default `open`; `all` adds merged/closed PRs in
    *  the host's listing order — stack sync needs them to see a member's
@@ -146,6 +149,11 @@ export interface ReviewFacade {
   parsePrRef(text: string): PrTarget | null
 
   prMeta(t: PrTarget): PrMeta
+  /** Async twins of the gate-path reads — sync spawnSync methods block
+   *  the event loop AND every other probe's timeout timer when they run
+   *  inside a hook sweep. Optional: `fetchPrActState` falls back to the
+   *  sync method wrapped in a resolved Promise for hosts without them. */
+  prMetaAsync?(t: PrTarget): Promise<PrMeta>
   /** Merged-PR detail for harvest — throws when the PR isn't merged or a
    *  MERGED PR reports no mergedAt. */
   mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo
@@ -173,13 +181,18 @@ export interface ReviewFacade {
   prFiles?(t: PrTarget): string[]
 
   checks(t: PrTarget, requiredOnly?: boolean): CheckInfo[]
+  checksAsync?(t: PrTarget, requiredOnly?: boolean): Promise<CheckInfo[]>
   /** Check name → failure-annotation count at a head sha. `null` means
    *  the run exists but its annotations could not be fetched — a caller
    *  that gates on findings must count it as unknown, not zero. An
    *  absent key means the check has no annotations endpoint at all. */
   checkAnnotations(repo: string, headSha: string): Map<string, number | null>
+  checkAnnotationsAsync?(repo: string, headSha: string): Promise<Map<string, number | null>>
   /** Distinct reviewed head SHAs — pushes that entered the review loop. */
   reviewedShas(t: PrTarget): string[]
+  reviewedShasAsync?(t: PrTarget): Promise<string[]>
+  /** prFiles async twin — docsOnlyPr awaits it on the gate path. */
+  prFilesAsync?(t: PrTarget): Promise<string[]>
 
   reviewThreads(t: PrTarget): Promise<ReviewThread[]>
   resolveThread(id: string, unresolve?: boolean): void

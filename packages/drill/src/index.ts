@@ -2,6 +2,7 @@ export { bd, bdJson, checkBeads, refKind, taskStore } from '@broject/core'
 export {
   childrenOf,
   currentFrame,
+  currentFrameAsync,
   drillChain,
   drillDown,
   drillTree,

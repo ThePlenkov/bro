@@ -58,9 +58,10 @@ import {
   promptContextLines,
   sessionStartProbe,
   stopGateContributions,
+  unrefPendingChildren,
   withFileLock,
 } from '@broject/core'
-import type { ProbeResult } from '@broject/core'
+import type { ProbeReporter, ProbeResult, ProbeTiming } from '@broject/core'
 import { markerLive, ownerTag } from './proc-owner.ts'
 import {
   cliVersion,
@@ -491,14 +492,14 @@ function liveSessionLines(dir: string, selfId: string): string[] {
  *  work here, or a connector reports live work (claimed beads, sibling
  *  worktrees, held slots) — passive context naming what's occupied,
  *  never a block. */
-async function parallelLines(sessionId: string): Promise<ProbeResult> {
+async function parallelLines(sessionId: string, onProbe?: ProbeReporter): Promise<ProbeResult> {
   try {
     const parts: string[] = []
     const dir = hooksStateDir()
     if (dir) {
       parts.push(...liveSessionLines(dir, sessionId))
     }
-    const work = await parallelWorkProbe({ dir: process.cwd(), sessionId })
+    const work = await parallelWorkProbe({ dir: process.cwd(), sessionId }, onProbe)
     parts.push(...work.lines)
     if (parts.length === 0) {
       return { lines: [], settled: work.settled }
@@ -789,17 +790,107 @@ function journalTrace(input: HookInput, sessionId: string): void {
   }
 }
 
+// --- perf journal --------------------------------------------------------------
+
+/** One perf row — a per-probe timing (`probe` set) or the event total
+ *  (`probes` set, no probe). Same journal discipline as trace/: locked
+ *  append, bounded file, prune on first write, fail-open. */
+interface PerfRow extends ProbeTiming {
+  ts: number
+  event: string
+  probe?: string
+  /** Total-row marker: how many probe rows the event produced. */
+  probes?: number
+}
+
+/** `<git-common>/bro/hooks/perf/<session>.jsonl` — null without a git
+ *  dir or session id, same as the trace journal. */
+function perfFile(sessionId: string): string | null {
+  const dir = hooksStateDir()
+  const safe = sessionId.replace(/[^\w.-]/g, '_')
+  return dir && safe ? join(dir, 'perf', `${safe}.jsonl`) : null
+}
+
+/** Buffer for the current dispatch — rows land here via probeReporter
+ *  and flush once at event end: one locked write per hook, not one
+ *  per probe. */
+let perfBuf: PerfRow[] | null = null
+
+/** Build the collector's callback: stamps probe + event onto each
+ *  timing row and buffers it for the event-end flush. */
+function probeReporter(event: string, probe: string): ProbeReporter {
+  return (rows) => {
+    if (!perfBuf) {
+      return
+    }
+    const ts = Date.now()
+    for (const r of rows) {
+      perfBuf.push({ ts, event, probe, ...r })
+    }
+  }
+}
+
+/** Flush the buffered rows plus the event total to the session's perf
+ *  journal. Called in a finally — a hook that threw still reports the
+ *  time it burned. */
+function flushPerf(sessionId: string, event: string, t0: number): void {
+  try {
+    const path = perfFile(sessionId)
+    if (!path || !perfBuf) {
+      return
+    }
+    const rows = perfBuf
+    perfBuf = null
+    rows.push({ ts: Date.now(), event, ms: Date.now() - t0, connector: '', probes: rows.length })
+    mkdirSync(dirname(path), { recursive: true })
+    const fresh = !existsSync(path)
+    const line = `${rows.map((r) => JSON.stringify(r)).join('\n')}\n`
+    const append = (): void => {
+      appendFileSync(path, line)
+      if (statSync(path).size > TRACE_JOURNAL_MAX_BYTES) {
+        const kept = readFileSync(path, 'utf8')
+          .split('\n')
+          .filter((l) => l !== '')
+          .slice(-TRACE_JOURNAL_KEEP_LINES)
+        writeFileSync(path, `${kept.join('\n')}\n`)
+      }
+    }
+    try {
+      withFileLock(`${path}.lock`, append, { waitMs: 2_000, label: 'perf journal lock' })
+    } catch {
+      append()
+    }
+    if (fresh) {
+      const cutoff = Date.now() - MARKER_TTL_MS
+      for (const f of readdirSync(dirname(path))) {
+        try {
+          if (statSync(join(dirname(path), f)).mtimeMs < cutoff) {
+            rmSync(join(dirname(path), f))
+          }
+        } catch {
+          // prune is best-effort
+        }
+      }
+    }
+  } catch {
+    // perf must never stall a session
+  }
+}
+
 // --- event handlers -----------------------------------------------------------
 
 async function emitSessionContext(
   event: 'SessionStart' | 'PostCompaction' | 'PreCompact',
-  sessionId = ''
+  sessionId = '',
+  cliEvent: string = event
 ): Promise<boolean> {
   // sessionStart probes collect from every connector — beads reports
   // the ready queue, drill the open frame, act the PR gate + merge slot,
   // debt the open findings; a jira connector would add assigned issues
-  const start = await sessionStartProbe({ dir: process.cwd(), sessionId })
-  const par = await parallelLines(sessionId)
+  const [start, par] = await Promise.all([
+    sessionStartProbe({ dir: process.cwd(), sessionId }, probeReporter(cliEvent, 'sessionStart')),
+    parallelLines(sessionId, probeReporter(cliEvent, 'parallelWork')),
+  ])
   const parts = [...start.lines, ...par.lines]
   if (parts.length > 0) {
     context(event, `bro state — resume from here:\n${parts.join('\n')}`)
@@ -818,13 +909,24 @@ async function emitPromptContext(input: HookInput): Promise<void> {
   const hydrate = cursorClient && sessionId && !skillHinted(sessionId, CURSOR_HYDRATED_SKILL)
   let settled = true
   if (hydrate) {
-    const start = await sessionStartProbe({ dir: process.cwd(), sessionId })
-    const par = await parallelLines(sessionId)
+    const [start, par] = await Promise.all([
+      sessionStartProbe(
+        { dir: process.cwd(), sessionId },
+        probeReporter('prompt-submit', 'sessionStart')
+      ),
+      parallelLines(sessionId, probeReporter('prompt-submit', 'parallelWork')),
+    ])
     parts.push(...start.lines, ...par.lines)
     settled = start.settled && par.settled
   }
   const sessionCount = parts.length
-  parts.push(...(await promptContextLines({ dir: process.cwd(), sessionId }, prompt)))
+  parts.push(
+    ...(await promptContextLines(
+      { dir: process.cwd(), sessionId },
+      prompt,
+      probeReporter('prompt-submit', 'promptSubmit')
+    ))
+  )
   // a timed-out or thrown probe masquerades as "no state" — mark only
   // when every probe answered, else the marker suppresses a retry for
   // the marker's whole TTL
@@ -877,7 +979,12 @@ async function emitPostTool(input: HookInput): Promise<void> {
   }
   // connector postTool probes run on every event — a failed exec is
   // still a delivery tick for a drained mailbox (notify)
-  lines.push(...(await postToolLines({ dir: process.cwd(), sessionId })))
+  lines.push(
+    ...(await postToolLines(
+      { dir: process.cwd(), sessionId },
+      probeReporter('post-tool', 'postTool')
+    ))
+  )
   if (lines.length > 0) {
     context('PostToolUse', lines.join('\n'))
   }
@@ -906,7 +1013,10 @@ async function emitStopGate(input: HookInput): Promise<void> {
     return i === -1 ? GATE_PRIORITY.length : i
   }
   const contributions = (
-    await stopGateContributions({ dir: process.cwd(), sessionId })
+    await stopGateContributions(
+      { dir: process.cwd(), sessionId },
+      probeReporter('stop', 'stopGate')
+    )
   ).sort((a, b) => rank(a.aspect) - rank(b.aspect))
   const hints: string[] = []
   for (const c of contributions) {
@@ -1032,14 +1142,14 @@ async function dispatchHook(event: string, raw: unknown, input: HookInput): Prom
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
   switch (event) {
     case 'session-start': {
-      const settled = await emitSessionContext('SessionStart', sessionId)
+      const settled = await emitSessionContext('SessionStart', sessionId, 'session-start')
       if (cursorClient && settled) {
         markSkillHinted(sessionId, CURSOR_HYDRATED_SKILL)
       }
       return
     }
     case 'post-compaction':
-      await emitSessionContext('PostCompaction', sessionId)
+      await emitSessionContext('PostCompaction', sessionId, 'post-compaction')
       return
     case 'pre-compact':
       // Claude Code requires hookEventName to match the firing event.
@@ -1048,7 +1158,7 @@ async function dispatchHook(event: string, raw: unknown, input: HookInput): Prom
       if (cursorClient) {
         clearCursorHydrated(sessionId)
       }
-      await emitSessionContext('PreCompact', sessionId)
+      await emitSessionContext('PreCompact', sessionId, 'pre-compact')
       return
     case 'prompt-submit':
       await emitPromptContext(input)
@@ -1076,6 +1186,122 @@ async function dispatchHook(event: string, raw: unknown, input: HookInput): Prom
   }
 }
 
+// --- perf report --------------------------------------------------------------
+
+interface PerfAgg {
+  n: number
+  sum: number
+  max: number
+  bad: number
+}
+
+/** One journal line → a row, or undefined for a torn/non-row write.
+ *  JSON.parse succeeding doesn't mean a row — `null`, a scalar, or `{}`
+ *  would poison the aggregates below: every field the report reads must
+ *  be present and typed. */
+function parsePerfRow(line: string): PerfRow | undefined {
+  try {
+    const r: unknown = JSON.parse(line)
+    if (typeof r !== 'object' || r === null) {
+      return undefined
+    }
+    const p = r as Partial<PerfRow>
+    return typeof p.event === 'string' &&
+      typeof p.connector === 'string' &&
+      typeof p.ms === 'number' &&
+      typeof p.ts === 'number'
+      ? (r as PerfRow)
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Read the journal rows under perfDir — a session filter narrows to
+ *  that session's file; a torn write skips itself, not the report. */
+function readPerfRows(perfDir: string | null, sessionFilter?: string): PerfRow[] {
+  const rows: PerfRow[] = []
+  if (!perfDir || !existsSync(perfDir)) {
+    return rows
+  }
+  const wanted =
+    sessionFilter === undefined
+      ? undefined
+      : `${sessionFilter.replace(/[^\w.-]/g, '_')}.jsonl`
+  for (const f of readdirSync(perfDir)) {
+    if (!f.endsWith('.jsonl') || (wanted !== undefined && f !== wanted)) {
+      continue
+    }
+    for (const line of readFileSync(join(perfDir, f), 'utf8').split('\n')) {
+      const row = line.trim() === '' ? undefined : parsePerfRow(line)
+      if (row !== undefined) {
+        rows.push(row)
+      }
+    }
+  }
+  return rows
+}
+
+/** Count/avg/max per key — probe rows keyed event+probe+connector,
+ *  event totals keyed by event alone. */
+function perfAggs(rows: PerfRow[]): { probes: Map<string, PerfAgg>; totals: Map<string, PerfAgg> } {
+  const probes = new Map<string, PerfAgg>()
+  const totals = new Map<string, PerfAgg>()
+  for (const r of rows) {
+    const isTotal = r.probe === undefined
+    const key = isTotal ? `${r.event}` : `${r.event} ${r.probe} ${r.connector}`
+    const map = isTotal ? totals : probes
+    const a = map.get(key) ?? { n: 0, sum: 0, max: 0, bad: 0 }
+    a.n++
+    a.sum += r.ms
+    a.max = Math.max(a.max, r.ms)
+    if (r.timedOut === true || r.failed === true) {
+      a.bad++
+    }
+    map.set(key, a)
+  }
+  return { probes, totals }
+}
+
+const fmtAgg = (a: PerfAgg): string => `${a.n} avg:${Math.round(a.sum / a.n)} max:${a.max}`
+
+/** Worst-max-first report lines — `bad` flags probes that timed out or
+ *  threw; totals have no bad dimension. */
+function aggLines(map: Map<string, PerfAgg>, showBad: boolean): string[] {
+  return [...map.entries()]
+    .sort((x, y) => y[1].max - x[1].max)
+    .map(([k, a]) => {
+      const bad = showBad && a.bad > 0 ? ` bad:${a.bad}` : ''
+      return `  ${k.padEnd(58)} ${fmtAgg(a)}${bad}`
+    })
+}
+
+/** `bro hooks perf [--session <id>] [--json]` — aggregate the perf
+ *  journals: per event×probe×connector count/avg/max plus the event
+ *  totals. Operator command — reads the journal dir, never stdin. */
+function runPerf(argv: string[]): void {
+  const args = argv.slice(1)
+  const json = args.includes('--json')
+  const si = args.indexOf('--session')
+  const sessionFilter = si >= 0 ? args[si + 1] : undefined
+  const dir = hooksStateDir()
+  const rows = readPerfRows(dir ? join(dir, 'perf') : null, sessionFilter)
+  if (json) {
+    console.log(JSON.stringify({ rows }, null, 2))
+    return
+  }
+  if (rows.length === 0) {
+    console.log('no perf rows yet — hook events journal to bro/hooks/perf/')
+    return
+  }
+  const { probes, totals } = perfAggs(rows)
+  const probeLines = aggLines(probes, true)
+  console.log('per-probe (event probe connector → n avg max):')
+  console.log(probeLines.length > 0 ? probeLines.join('\n') : '  (none)')
+  console.log('totals (event → n avg max):')
+  console.log(aggLines(totals, false).join('\n'))
+}
+
 // --- dispatch -----------------------------------------------------------------
 
 export async function runHooksCommand(argv: string[]): Promise<void> {
@@ -1097,6 +1323,13 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     runPrepareCommitMsg(argv)
     return
   }
+  // `bro hooks perf` is a report over the perf journal — same no-stdin
+  // operator placement as install/uninstall: it must not block reading
+  // a payload that was never sent.
+  if (event === 'perf') {
+    runPerf(argv)
+    return
+  }
   // a bare `bro hooks` is a capability probe — launchers test the
   // subcommand exists before calling it with the real event. Return
   // before readRaw: the probe must not consume a payload still waiting
@@ -1114,6 +1347,8 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     answerCursorPermission(event, input)
     return
   }
+  perfBuf = []
+  const t0 = Date.now()
   try {
     await dispatchHook(event, raw, input)
   } catch {
@@ -1121,5 +1356,12 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     // A permission hook that already answered returned above; this
     // covers a throw before that answer.
     answerCursorPermission(event, input)
+  } finally {
+    const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
+    flushPerf(sessionId, event, t0)
+    // A probe that raced past its budget leaves its bd/gh child running —
+    // unref the stragglers so the hook exits with the answer it sent,
+    // not when the last subprocess closes.
+    unrefPendingChildren()
   }
 }
