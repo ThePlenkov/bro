@@ -40,6 +40,29 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 
 const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim() !== ''
 
+/** Index just past the token starting at `i`, or doc.length when the
+ *  token never terminates — a malformed doc scans what remains either
+ *  way, and the gate only ever errs toward rejection. */
+function skipToken(doc: string, i: number): number {
+  if (doc.startsWith('"""', i)) {
+    const end = doc.indexOf('"""', i + 3)
+    return end === -1 ? doc.length : end + 3
+  }
+  const ch = doc[i]!
+  if (ch === '"') {
+    i++
+    while (i < doc.length && doc[i] !== '"') {
+      i += doc[i] === '\\' ? 2 : 1
+    }
+    return i + 1 // past the closing quote (or EOF)
+  }
+  if (ch === '#') {
+    const nl = doc.indexOf('\n', i)
+    return nl === -1 ? doc.length : nl
+  }
+  return i
+}
+
 /** Strip GraphQL comments (# …) and string literals ("…" plus the
  *  """…""" block form) so the keyword scan sees only operations and
  *  field names. Handles backslash escapes inside short strings. */
@@ -47,27 +70,11 @@ export function stripCommentsAndStrings(doc: string): string {
   let out = ''
   let i = 0
   while (i < doc.length) {
-    if (doc.startsWith('"""', i)) {
-      const end = doc.indexOf('"""', i + 3)
-      i = end === -1 ? doc.length : end + 3
-      continue
+    const next = skipToken(doc, i)
+    if (next === i) {
+      out += doc[i]!
     }
-    const ch = doc[i]!
-    if (ch === '"') {
-      i++
-      while (i < doc.length && doc[i] !== '"') {
-        i += doc[i] === '\\' ? 2 : 1
-      }
-      i++ // past the closing quote (or EOF — malformed doc, scan anyway)
-      continue
-    }
-    if (ch === '#') {
-      const nl = doc.indexOf('\n', i)
-      i = nl === -1 ? doc.length : nl
-      continue
-    }
-    out += ch
-    i++
+    i = next === i ? i + 1 : next
   }
   return out
 }
@@ -79,6 +86,27 @@ const WRITE_KEYWORD = /\b(?:mutation|subscription)\b/
  *  `mutationCount`, string contents and `# mutation` comments pass. */
 export function isReadOnly(doc: string): boolean {
   return !WRITE_KEYWORD.test(stripCommentsAndStrings(doc))
+}
+
+function stepEnv(raw: unknown, at: string, errors: string[]): Record<string, string> | undefined {
+  if (raw === undefined) {
+    return undefined
+  }
+  if (!isRecord(raw)) {
+    errors.push(`${at}.env: must be a string→string table ([steps.env])`)
+    return undefined
+  }
+  const env: Record<string, string> = {}
+  for (const [k, v] of Object.entries(raw)) {
+    if (FORBIDDEN_ENV.has(k)) {
+      errors.push(`${at}.env.${k}: endpoint-redirecting var — operator config only, never a plan`)
+    } else if (typeof v !== 'string') {
+      errors.push(`${at}.env.${k}: must be a string — env is a literal overlay`)
+    } else {
+      env[k] = v
+    }
+  }
+  return env
 }
 
 function parseStep(raw: unknown, i: number, errors: string[]): QueryStep | undefined {
@@ -98,12 +126,10 @@ function parseStep(raw: unknown, i: number, errors: string[]): QueryStep | undef
   } else {
     step.id = raw.id.trim()
   }
-  if (raw.provider !== undefined) {
-    if (!nonEmpty(raw.provider)) {
-      errors.push(`${at}.provider: must be a non-empty string naming a connector`)
-    } else {
-      step.provider = raw.provider.trim()
-    }
+  if (raw.provider !== undefined && !nonEmpty(raw.provider)) {
+    errors.push(`${at}.provider: must be a non-empty string naming a connector`)
+  } else if (typeof raw.provider === 'string') {
+    step.provider = raw.provider.trim()
   }
   if (!nonEmpty(raw.graphql)) {
     errors.push(`${at}.graphql: required non-empty string — the raw document`)
@@ -120,23 +146,7 @@ function parseStep(raw: unknown, i: number, errors: string[]): QueryStep | undef
       step.vars = raw.vars
     }
   }
-  if (raw.env !== undefined) {
-    if (!isRecord(raw.env)) {
-      errors.push(`${at}.env: must be a string→string table ([steps.env])`)
-    } else {
-      const env: Record<string, string> = {}
-      for (const [k, v] of Object.entries(raw.env)) {
-        if (FORBIDDEN_ENV.has(k)) {
-          errors.push(`${at}.env.${k}: endpoint-redirecting var — operator config only, never a plan`)
-        } else if (typeof v !== 'string') {
-          errors.push(`${at}.env.${k}: must be a string — env is a literal overlay`)
-        } else {
-          env[k] = v
-        }
-      }
-      step.env = env
-    }
-  }
+  step.env = stepEnv(raw.env, at, errors)
   return errors.length > 0 && !nonEmpty(step.id) ? undefined : step
 }
 

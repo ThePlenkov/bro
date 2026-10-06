@@ -13,7 +13,7 @@ function fieldVars(vars: Record<string, unknown> | undefined): string[] {
   const args: string[] = []
   for (const [k, v] of Object.entries(vars ?? {})) {
     if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') {
-      throw new Error(
+      throw new TypeError(
         `gitlab queries: var "${k}" is non-scalar — glab -f fields take string/number/bool only`
       )
     }
