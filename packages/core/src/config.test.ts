@@ -413,6 +413,30 @@ describe('loadConfig plugin sections', () => {
     assert.equal(load({ debt: { dir: '' } }).debt.dir, DEFAULT_CONFIG.debt.dir)
     assert.equal(load({ debt: { dir: 'custom/dir' } }).debt.dir, 'custom/dir')
   })
+
+  test('sweep section normalizes fields, falls back on bad values', () => {
+    assert.deepEqual(load({}).sweep, DEFAULT_CONFIG.sweep)
+    assert.deepEqual(load({ sweep: 'junk' }).sweep, DEFAULT_CONFIG.sweep)
+    const cfg = load({ sweep: { olderThanDays: 7, dir: '.agents/vault', flatten: false } })
+    assert.equal(cfg.sweep.olderThanDays, 7)
+    assert.equal(cfg.sweep.dir, '.agents/vault')
+    assert.equal(cfg.sweep.flatten, false)
+    // zero/negative/NaN days can never be a safe threshold
+    for (const bad of [0, -3, Number.NaN, '30']) {
+      assert.equal(
+        load({ sweep: { olderThanDays: bad } }).sweep.olderThanDays,
+        DEFAULT_CONFIG.sweep.olderThanDays
+      )
+    }
+    assert.equal(
+      load({ sweep: { dir: '  ' } }).sweep.dir,
+      DEFAULT_CONFIG.sweep.dir
+    )
+    assert.equal(
+      load({ sweep: { flatten: 'yes' } }).sweep.flatten,
+      DEFAULT_CONFIG.sweep.flatten
+    )
+  })
 })
 
 describe('loadConfig linked worktree', () => {

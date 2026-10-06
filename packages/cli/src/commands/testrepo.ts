@@ -159,6 +159,8 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
   case 'config':
     if (pos[1] === 'get' && pos[2] === 'issue_prefix') console.log('issue_prefix = fx')
     else if (pos[1] === 'get' && pos[2] === 'actor') console.log('actor = tester')
+    else if (pos[1] === 'get' && pos[2] === 'types.custom') console.log((db.cfg || {})['types.custom'] || '')
+    else if (pos[1] === 'set') { db.cfg = db.cfg || {}; db.cfg[pos[2]] = pos[3]; save(db) }
     else fail('config ' + pos.slice(1).join(' '))
     break
   case 'list': {
@@ -257,13 +259,65 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     jsonOut([])
     break
   case 'mol': {
-    // learn capture --mol harvests bd mol show — db.mols[id] seeds it
+    // learn capture --mol harvests bd mol show — db.mols[id] seeds it;
+    // convoy/sweep pours a generated formula — a root row + the line
+    // pourFormula parses is the contract
+    if (pos[1] === 'pour') {
+      const id = 'fx-mol-' + (db.rows.length + 1)
+      db.rows.push({ id, title: pos[2], status: 'open', issue_type: 'epic' })
+      save(db)
+      console.log('Root issue: ' + id)
+      break
+    }
     if (pos[1] !== 'show') fail('mol ' + (pos[1] || ''))
     const m = (db.mols || {})[pos[2]]
     if (!m) fail('no molecule ' + pos[2])
     jsonOut(m)
     break
   }
+  case 'set-state': {
+    // dim=value → label dim:value (drop the dimension's old label first)
+    const r = row(pos[1])
+    if (!r) fail('not found: ' + pos[1])
+    const eq = (pos[2] || '').indexOf('=')
+    if (eq < 0) fail('set-state <id> dim=value')
+    const dim = pos[2].slice(0, eq), val = pos[2].slice(eq + 1)
+    r.labels = (r.labels || []).filter((l) => !l.startsWith(dim + ':'))
+    r.labels.push(dim + ':' + val)
+    save(db)
+    break
+  }
+  case 'export': {
+    const lines = db.rows.filter((r) => r.ephemeral !== true).map((r) => JSON.stringify(r))
+    const out = lines.join('\\n') + (lines.length ? '\\n' : '')
+    if (flags.o) { require('node:fs').writeFileSync(flags.o, out) }
+    else process.stdout.write(out)
+    break
+  }
+  case 'provenance': {
+    if (pos[1] !== 'log') fail('provenance ' + (pos[1] || ''))
+    jsonOut((db.prov || {})[pos[2]] || [])
+    break
+  }
+  case 'prune': {
+    const m = /^(\\d+)d$/.exec(flags['older-than'] || '')
+    const days = m ? Number(m[1]) : 0
+    const cut = Date.now() - days * 86400000
+    const drop = (r) => r.status === 'closed' && r.ephemeral !== true &&
+      Date.parse(r.closed_at || '') < cut
+    const n = db.rows.filter(drop).length
+    if (!flags.force && !flags['dry-run']) { console.log(n + ' bead(s) would prune'); break }
+    db.rows = db.rows.filter((r) => !drop(r))
+    save(db)
+    console.log('Pruned ' + n + ' issue(s)')
+    break
+  }
+  case 'flatten':
+    console.log('flattened')
+    break
+  case 'info':
+    jsonOut({ database_path: path.join(path.dirname(DB), 'beads.db') })
+    break
   case 'delete': {
     const i = db.rows.findIndex((r) => r.id === pos[1])
     if (i >= 0) db.rows.splice(i, 1)

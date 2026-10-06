@@ -83,6 +83,29 @@ export const syncSection: ConfigSection<{
   }
 }
 
+export const sweepSection: ConfigSection<{
+  olderThanDays: number
+  dir: string
+  flatten: boolean
+}> = (raw) => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
+  return {
+    // the gate threshold and `bd prune --older-than` read the same knob
+    // so the two can never disagree (spec: specs/bro-pj2g.1.md)
+    olderThanDays:
+      typeof obj.olderThanDays === 'number' &&
+      Number.isFinite(obj.olderThanDays) &&
+      obj.olderThanDays > 0
+        ? obj.olderThanDays
+        : DEFAULT_CONFIG.sweep.olderThanDays,
+    dir:
+      typeof obj.dir === 'string' && obj.dir.trim() !== ''
+        ? obj.dir
+        : DEFAULT_CONFIG.sweep.dir,
+    flatten: typeof obj.flatten === 'boolean' ? obj.flatten : DEFAULT_CONFIG.sweep.flatten,
+  }
+}
+
 /** A conditional ignoreChecks entry — `name` keeps the bare-string
  *  substring match; the two knobs say when a *failing* check has earned
  *  the quiet ignore: `consecutiveFailures` failing head shas in a row
@@ -383,6 +406,7 @@ export const fleetSection: ConfigSection<{
 const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   debt: debtSection as ConfigSection<unknown>,
   sync: syncSection as ConfigSection<unknown>,
+  sweep: sweepSection as ConfigSection<unknown>,
   act: actSection as ConfigSection<unknown>,
   connectors: connectorsSection as ConfigSection<unknown>,
   providers: providersSection as ConfigSection<unknown>,
@@ -417,6 +441,12 @@ export interface BroConfig {
      *  sync only bro artifacts. */
     beads: boolean
   }
+  /** `bro sweep` — gated lifecycle disposal for closed beads
+   *  (spec: specs/bro-pj2g.1.md). `olderThanDays` feeds both the gate
+   *  and `bd prune --older-than`; `dir` is the JSONL archive dir under
+   *  the synced set (`.agents/`); `flatten` controls the post-prune
+   *  `bd flatten` stage. BRO_SWEEP_DIR wins over `dir` at use sites. */
+  sweep: { olderThanDays: number; dir: string; flatten: boolean }
   act: {
     /** Advisory checks excluded from the exit gate — a flaky external
      *  reviewer's infra is not this repo's problem. The ignore is
@@ -469,6 +499,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   personality: 'terse',
   debt: { dir: '.agents/review-debt', sources: ['review-threads'], stale_days: 14 },
   sync: { ref: 'refs/bro/data', remote: 'origin', beads: true },
+  sweep: { olderThanDays: 30, dir: '.agents/sweep', flatten: true },
   act: {
     ignoreChecks: [],
     maxRounds: 3,

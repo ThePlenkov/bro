@@ -127,20 +127,22 @@ two can never disagree. `BRO_SWEEP_DIR` env wins over `dir`, mirroring
 
 ## Plan
 
-- [ ] verify: does `bd prune` drop `bd provenance` rows bound to
+- [x] verify: does `bd prune` drop `bd provenance` rows bound to
       pruned beads? (test bead → `provenance record` → prune →
-      `provenance by-ref`); if yes, archive gains a provenance dump
-- [ ] `packages/core/src/config.ts`: `sweepSection` —
+      `provenance by-ref`); if yes, archive gains a provenance dump —
+      **yes, verified**; `run` writes `<ts>.provenance.jsonl` beside the
+      issues dump before pruning
+- [x] `packages/core/src/config.ts`: `sweepSection` —
       `olderThanDays`, `dir` (`BRO_SWEEP_DIR` env wins), `flatten`
-- [ ] `packages/cli/src/commands/sweep.ts`: `status`, `distill`
+- [x] `packages/cli/src/commands/sweep.ts`: `status`, `distill`
       (`--dry-run`), `run` (`--dry-run`, `--force`, `--no-flatten`) —
       prune/flatten/remember/provenance via the existing `bd` wrapper
-- [ ] plugin registry entry in `plugins.ts` (name, summary, config
+- [x] plugin registry entry in `plugins.ts` (name, summary, config
       key, skill) + `bro plugins` visibility
-- [ ] `.gitignore`: `.agents/sweep/` next to `.agents/review-debt/`
-- [ ] `skills/sweep/SKILL.md` — thin policy wrapper (gate semantics,
+- [x] `.gitignore`: `.agents/sweep/` next to `.agents/review-debt/`
+- [x] `skills/sweep/SKILL.md` — thin policy wrapper (gate semantics,
       distill-is-a-convoy, marker contract)
-- [ ] tests: `sweep.test.ts` — gate refuse/pass, dry-run purity,
+- [x] tests: `sweep.test.ts` — gate refuse/pass, dry-run purity,
       marker set membership, config normalization
 - [ ] `npm test` (exact CI command), typecheck, commit + push +
       `gh pr create`

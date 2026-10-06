@@ -54,6 +54,7 @@ export {
   SDD_MODES,
   stackSection,
   STORE_BACKENDS,
+  sweepSection,
   syncSection,
 } from './config.ts'
 export type { IgnoreCheckEntry, IgnoreCheckRule } from './config.ts'
