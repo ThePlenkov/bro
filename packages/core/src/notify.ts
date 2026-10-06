@@ -257,7 +257,8 @@ function addressedTo(to: string, identity: MailboxIdentity): boolean {
 export function coalesceDrops(
   dir: string,
   key: string,
-  identity: { source?: string; topic: string; to?: string }
+  identity: { source?: string; topic: string; to?: string },
+  exclude?: string
 ): void {
   let files: string[]
   try {
@@ -265,7 +266,9 @@ export function coalesceDrops(
   } catch {
     return
   }
-  for (const f of files.filter((f) => f.endsWith('.txt') && !f.startsWith('.'))) {
+  for (const f of files.filter(
+    (f) => f.endsWith('.txt') && !f.startsWith('.') && join(dir, f) !== exclude
+  )) {
     const path = join(dir, f)
     try {
       const ev = parseEvent(readFileSync(path, 'utf8'))
