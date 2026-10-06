@@ -474,7 +474,7 @@ export function patchAgentRegistry(
 export function removeAgentRegistryEntries(
   dir: string,
   molSteps: string[],
-  expected?: ReadonlyMap<string, Pick<AgentRegistryEntry, 'agentId' | 'spawnedAt' | 'pid'>>
+  expected?: ReadonlyMap<string, Partial<Pick<AgentRegistryEntry, 'agentId' | 'spawnedAt' | 'pid'>>>
 ): string[] {
   return withAgentRegistryLock(dir, () => {
     const reg = readAgentRegistry(dir)
