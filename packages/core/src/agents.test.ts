@@ -449,6 +449,16 @@ describe('classifyExitCause', () => {
       'quota'
     )
     assert.equal(classifyExitCause('billing hard limit exceeded', 1).cause, 'quota')
+    // a bare 'billing' mention is not a wall — transient billing-service
+    // errors must not pin the quota block that only `bro agents down` lifts
+    assert.equal(
+      classifyExitCause('billing service unavailable — retrying', 1).cause,
+      'crash'
+    )
+    assert.equal(
+      classifyExitCause('account suspended — unpaid billing invoice', 1).cause,
+      'quota'
+    )
     assert.equal(classifyExitCause('401 Unauthorized: invalid api key', 1).cause, 'auth')
     assert.equal(classifyExitCause('token expired — not authenticated', 1).cause, 'auth')
     assert.equal(classifyExitCause('error: expired API key', 1).cause, 'auth')

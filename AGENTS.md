@@ -54,7 +54,9 @@ Developing bro itself: see CONTRIBUTING.md.
   is pure infra — its findings arrive as threads, which block on their
   own. Reviewers that are *reliably* flaky go on `act.ignoreChecks` in
   bro.config.json so a stuck pending state doesn't block either —
-  currently `"kilo"` (rate limits; advisory, may still be read). The
+  currently `"github-advanced-security"`, `"kilo"` (rate limits;
+  advisory, may still be read — `check:docs` fails if this quote rots).
+  The
   ignore is conditional: a failing ignored check is dropped quietly
   only after `consecutiveFailures` failing heads in a row *with*
   thread activity inside `threadWindowDays` — a failing check with no

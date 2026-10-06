@@ -568,25 +568,27 @@ export function registryEntryState(
     // here the same as in the connector ladder (bro-7xgk.2)
     return agentEntryBlocked(e) ? 'blocked' : 'exited'
   }
-  // an .exit file not yet harvested into the registry is death proof too
-  // — basename-only ids: '../' must never escape the agents home
-  if (
-    home !== null &&
-    typeof e.agentId === 'string' &&
-    basename(e.agentId) === e.agentId
-  ) {
-    try {
-      const v = readFileSync(join(home, `${e.agentId}.exit`), 'utf8').trim()
-      if (v !== '' && Number.isInteger(Number(v))) {
-        return 'exited'
-      }
-    } catch {
-      // no exit file — falls through
-    }
+  if (exitFileProves(home, e)) {
+    return 'exited'
   }
   // a dead pid is proven — 'lost' keeps the fixer respawn-able; a
   // pid-less entry (remote backend) is unproven → conservative live
   return pid !== undefined ? 'lost' : 'spawned'
+}
+
+/** An .exit file not yet harvested into the registry is death proof too
+ *  — basename-only ids: '../' must never escape the agents home. */
+function exitFileProves(home: string | null, e: AgentRegistryEntry): boolean {
+  if (home === null || typeof e.agentId !== 'string' || basename(e.agentId) !== e.agentId) {
+    return false
+  }
+  try {
+    const v = readFileSync(join(home, `${e.agentId}.exit`), 'utf8').trim()
+    return v !== '' && Number.isInteger(Number(v))
+  } catch {
+    // no exit file — not proof
+    return false
+  }
 }
 
 /** The agents plane for the in-lock occupancy refresh — a registry

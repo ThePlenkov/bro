@@ -41,7 +41,8 @@ crash and a wall:
   success);
 - `rate_limited` — `rate limit`, `429`, `too many requests`,
   requests-per-window messages;
-- `quota` — `quota`, `insufficient credits/funds`, `billing`,
+- `quota` — `quota`, `insufficient credits/funds`, `billing` beside an
+  account-wall word (`billing limit exceeded`, `suspended for billing`),
   spending/usage-limit exhaustion (a budget wall with no per-window
   reset semantics);
 - `auth` — `401`, `unauthorized`, invalid/expired token or API key,

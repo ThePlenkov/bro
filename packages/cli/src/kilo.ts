@@ -115,7 +115,12 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
 
   // session-start probes are idempotent but not free (they shell out to
   // gh/bd) — run them once per session, then push the cached context on
-  // every turn so it survives compaction.
+  // every turn so it survives compaction. The plugin instance is shared
+  // across sessions, so `liveSessions` records which session each event
+  // belongs to: a sessionless transform may only push context whose
+  // owning session is still live — otherwise the prior session's
+  // hydrate leaks into a reused instance.
+  const liveSessions = new Set<string>()
   let hydratedSession: string | null = null
   let hydratedContext: string | null = null
   const hydrate = (sessionId: string): void => {
@@ -153,9 +158,16 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
       const sessionId = input.sessionID ?? ''
       // hydrate once per session — the probes shell out to gh/bd
       if (sessionId && hydratedSession !== sessionId) {
+        liveSessions.add(sessionId)
         hydrate(sessionId)
       }
-      if (hydratedContext) {
+      // A sessionless transform inherits whichever session hydrated last;
+      // push only when that owner is still live, so a reused instance can
+      // never inject a retired session's context into an early turn.
+      const ownerLive =
+        hydratedSession !== null &&
+        (hydratedSession === sessionId || liveSessions.has(hydratedSession))
+      if (hydratedContext && ownerLive) {
         output.system.push(`bro state — resume from here:\n${hydratedContext}`)
       }
     },
@@ -179,11 +191,17 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
           : typeof (props.info as { id?: unknown } | undefined)?.id === 'string'
             ? (props.info as { id: string }).id
             : null
-      if (event.type === 'session.created' && sid !== null && sid !== hydratedSession) {
-        hydrate(sid)
-      } else if (event.type === 'session.deleted' && (sid === null || sid === hydratedSession)) {
-        hydratedSession = null
-        hydratedContext = null
+      if (event.type === 'session.created' && sid !== null) {
+        liveSessions.add(sid)
+        if (sid !== hydratedSession) {
+          hydrate(sid)
+        }
+      } else if (event.type === 'session.deleted') {
+        liveSessions.delete(sid ?? '')
+        if (sid === null || sid === hydratedSession) {
+          hydratedSession = null
+          hydratedContext = null
+        }
       }
       if (event.type !== 'session.idle') {
         return

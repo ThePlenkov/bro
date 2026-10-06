@@ -119,8 +119,11 @@ probe — a wedged store yields zero lines, never a stalled hook.
 - **`sessionStart`** — match `on: session-start` lessons against session
   context: repo name, branch, this session's claimed beads (titles +
   labels), in-progress mol steps, and the previous session's trace tail
-  when resumable. Matched lessons render as context lines under the
-  rehydration block.
+  when resumable. Resumable discovery is pinned, not invented: a resume
+  payload that names the prior session id wins; absent that, the probe
+  falls back to the most recently modified `trace/` file not owned by
+  this session, still bounded by the marker TTL. Matched lessons render
+  as context lines under the rehydration block.
 - **`promptSubmit`** — match `terms` against the raw prompt. This is the
   highest-precision trigger (the user just said the thing the lesson is
   about) and the cheapest (no store scan beyond the terms index).
@@ -129,16 +132,20 @@ probe — a wedged store yields zero lines, never a stalled hook.
   hooks layer gains a **session trace journal**: `emitPostTool` appends
   one JSONL line per event to
   `<git-common>/bro/hooks/trace/<session>.jsonl` —
-  `{ts, tool, command?, paths?, ok}` — same per-session lifecycle as the
-  arming markers but **in a `trace/` subdir, never flat beside them**:
+  `{ts, tool, command?, paths?, ok}` — per-session keyed like the arming
+  markers but **in a `trace/` subdir, never flat beside them**:
   `readArmed` scans `<session>.*` files as gate aspects within the
   marker TTL, so a flat `<session>.trace.jsonl` would arm a phantom
   `trace.jsonl` aspect on every post-tool event (the `hinted/` subdir
-  exists for exactly this reason — same rule applies here). The learn
-  probe reads the trace tail, matches, and renders at most `budget`
-  fires per lesson per session — the fired set lives in
-  `<common>/bro/hooks/fired/<session>` (subdir for the same reason) so
-  restarts don't re-fire.
+  exists for exactly this reason — same rule applies here). The subdir
+  sits **below** the dir `armSession` prunes, so the same `hinted/`
+  precedent applies to the sweep too: each `trace/` append runs a
+  same-TTL best-effort sweep of its own subdir (and `fired/` sweeps on
+  the same rule), or the journals accumulate one file per session
+  forever. The learn probe reads the trace tail, matches, and renders
+  at most `budget` fires per lesson per session — the fired set lives
+  in `<git-common>/bro/hooks/fired/<session>` (subdir for the same
+  reason) so restarts don't re-fire.
 
   The journal records what the hook payload actually carries —
   `HookInput` widens to read `tool_name` and the path-bearing
@@ -207,7 +214,7 @@ session never has to.
 ## CLI surface
 
 ```text
-bro learn add --lesson "<rule>" --on session-start|prompt-submit|post-tool
+bro learn add --lesson "<rule>" --on <event>…
               [--match-terms …] [--match-commands …] [--match-paths …]
               [--match-tools …] [--match-errors] [--budget N]
               --evidence <kind>:<ref>…          → stores a manual lesson —
@@ -222,6 +229,10 @@ bro learn capture [--source …] [--mol <id>] [--dry-run]
 bro learn probe <question> [--lesson … --on … --match-… …]
 bro learn promote <id>                         → opens the rule-edit bead
 ```
+
+`<event> ∈ session-start|prompt-submit|post-tool` — `--on` is
+repeatable like `--evidence`/`--match-*`; each occurrence appends to the
+trigger's `on` array (a lesson may fire on several events).
 
 `promote` does not edit skills or AGENTS.md itself — it opens a bead
 carrying the lesson, its evidence, and the proposed rule text; the edit

@@ -117,37 +117,51 @@ export function attentionOf(
   rows: FleetRow[],
   prs: WatchPrGate[]
 ): string[] {
-  const attention: string[] = []
+  return [...molAttention(mols), ...agentAttention(rows), ...prAttention(prs)]
+}
+
+function molAttention(mols: WatchMol[]): string[] {
+  const out: string[] = []
   for (const m of mols) {
     if (m.state.startsWith('error')) {
-      attention.push(`mol ${m.mol} unreadable — ${m.state}`)
+      out.push(`mol ${m.mol} unreadable — ${m.state}`)
       continue
     }
     for (const g of m.gates) {
       const t = m.ready.find((s) => s.id === g)?.title
       const suffix = t === undefined ? '' : ` (${t})`
-      attention.push(`gate ready — ${m.mol}: ${g}${suffix}`)
+      out.push(`gate ready — ${m.mol}: ${g}${suffix}`)
     }
   }
+  return out
+}
+
+function agentAttention(rows: FleetRow[]): string[] {
+  const out: string[] = []
   for (const r of rows) {
     if (r.agent === 'lost — respawn?') {
-      attention.push(`agent lost — ${r.step} (${r.title}) — respawn?`)
+      out.push(`agent lost — ${r.step} (${r.title}) — respawn?`)
     }
     if (r.agent.startsWith('blocked — ')) {
-      attention.push(`agent ${r.agent} — ${r.step} (${r.title})`)
+      out.push(`agent ${r.agent} — ${r.step} (${r.title})`)
     }
   }
+  return out
+}
+
+function prAttention(prs: WatchPrGate[]): string[] {
+  const out: string[] = []
   for (const g of prs) {
     if (g.error !== undefined) {
-      attention.push(`PR ${g.link} gate probe failed — ${g.error}`)
+      out.push(`PR ${g.link} gate probe failed — ${g.error}`)
     } else if (g.ok === false) {
-      attention.push(`PR ${g.link} blocked — ${(g.blockers ?? []).join('; ')}`)
+      out.push(`PR ${g.link} blocked — ${(g.blockers ?? []).join('; ')}`)
     }
     for (const a of g.alerts ?? []) {
-      attention.push(`PR ${g.link} — ${a}`)
+      out.push(`PR ${g.link} — ${a}`)
     }
   }
-  return attention
+  return out
 }
 
 /** The notify dedup key — the snapshot minus its timestamp. --every

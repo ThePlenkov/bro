@@ -25,6 +25,9 @@ jobs:
       - name: Check generated files are fresh
         run: npm run check:plugins
 
+      - name: Check AGENTS.md config claims
+        run: npm run check:docs
+
       - name: Build
         run: npm run build
 
