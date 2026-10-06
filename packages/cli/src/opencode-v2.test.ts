@@ -82,7 +82,10 @@ type AnyCb = (event: any) => any
 /** A structural V2 ctx: hook domains record callbacks, transforms record
  *  the editors' edits, `event.subscribe` serves a test-driven queue, and
  *  storage is a Map — the shape opencode hands `setup`, nothing more. */
-async function makeSetup(options?: Record<string, unknown>) {
+async function makeSetup(
+  options?: Record<string, unknown>,
+  storageGet?: (key: string) => Promise<unknown>
+) {
   const logs: Logged[] = []
   const prompts: { sessionID: string; text: string }[] = []
   const sessionHooks = new Map<string, AnyCb>()
@@ -189,7 +192,7 @@ async function makeSetup(options?: Record<string, unknown>) {
       }),
     },
     storage: {
-      get: async (key: string) => storage.get(key),
+      get: storageGet ?? (async (key: string) => storage.get(key)),
       set: async (key: string, value: unknown) => {
         storage.set(key, value)
       },
@@ -512,6 +515,42 @@ describe('v2 event stream', () => {
     await waitFor(() => (storage.get('stop-gated') as string[] | undefined)?.includes('ses_1') === true)
     await teardown()
     assert.deepEqual(storage.get('stop-gated'), ['ses_1'])
+  })
+
+  test('a session deleted while the gated store loads does not resurrect as gated', async () => {
+    respond({ stop: JSON.stringify({ decision: 'block', reason: 'dirty' }) })
+    let releaseLoad: () => void = () => {}
+    const held = new Promise<void>((r) => (releaseLoad = r))
+    const { emit, prompts, teardown } = await makeSetup(undefined, async () => {
+      await held
+      return ['ses_1']
+    })
+
+    // the persisted snapshot is still in flight — a delete for a stored id
+    // must win over the merge, or the gate resurrects onto the session
+    // reusing it and its first block is swallowed as a repeat
+    emit('session.deleted', { info: { id: 'ses_1' } })
+    // anchor for the ordering: the stream dispatches FIFO, so a prompt
+    // earned by ses_2 proves the delete has already run
+    emit('message.updated', {
+      info: { role: 'assistant', sessionID: 'ses_2', time: { completed: 2 } },
+    })
+    emit('session.idle', { sessionID: 'ses_2' })
+    await waitFor(() => prompts.length === 1)
+
+    releaseLoad()
+    // the merge is a microtask chain — a macrotask hop drains it
+    await new Promise((r) => setTimeout(r, 0))
+
+    emit('session.created', { sessionID: 'ses_1' })
+    emit('message.updated', {
+      info: { role: 'assistant', sessionID: 'ses_1', time: { completed: 2 } },
+    })
+    emit('session.idle', { sessionID: 'ses_1' })
+    await waitFor(() => prompts.length === 2)
+    await teardown()
+    assert.equal(prompts[1]?.sessionID, 'ses_1')
+    assert.equal(prompts[1]?.text, 'dirty')
   })
 
   test('teardown disposes registrations and stops the stream', async () => {

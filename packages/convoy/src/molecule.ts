@@ -83,6 +83,32 @@ export function stepsOf(mol: Molecule): ConvoyStep[] {
     })
 }
 
+/** Blocked steps that can never unblock: a closed dependency loop, or a
+ *  chain ending in one. A step is *escapable* only while EVERY blocker is
+ *  open work — ready, in_progress, or an issue outside the mol (a claim
+ *  is open work even if its owner died; a worker can release and
+ *  re-claim it). An open blocker cannot release a step whose other
+ *  blocker is stuck in a cycle, so `some` would hide it; the residue —
+ *  steps with even one permanently blocked blocker — is the stuck set. */
+export function permanentlyBlocked(steps: ConvoyStep[]): string[] {
+  const blocked = new Map(
+    steps.filter((s) => s.state === 'blocked').map((s) => [s.id, s.blockedBy])
+  )
+  const escapable = new Set<string>()
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const [id, by] of blocked) {
+      if (escapable.has(id)) continue
+      if (by.every((b) => !blocked.has(b) || escapable.has(b))) {
+        escapable.add(id)
+        grew = true
+      }
+    }
+  }
+  return [...blocked.keys()].filter((id) => !escapable.has(id))
+}
+
 /** What the agent should do next — computed from persisted state only. */
 export function nextStep(mol: Molecule): ConvoyNext {
   const steps = stepsOf(mol)
@@ -90,7 +116,7 @@ export function nextStep(mol: Molecule): ConvoyNext {
   const blocked = steps.filter((s) => s.state === 'blocked').map((s) => s.id)
   const gates = ready.filter((s) => s.kind === 'human').map((s) => s.id)
   const inProgress = steps.filter((s) => s.state === 'in_progress').map((s) => s.id)
-  const base = { mol: mol.root.id, ready, gates, inProgress, blocked }
+  const base = { mol: mol.root.id, ready, gates, inProgress, blocked, stuck: permanentlyBlocked(steps) }
   if (steps.every((s) => s.state === 'done')) return { ...base, state: 'complete' }
   const step = ready[0]
   if (!step) return { ...base, state: 'blocked' }

@@ -83,7 +83,11 @@ const SUBWORD_RE = /^\s+[a-z][\w-]*/
  *  a Set for the same reason — a 23-branch alternation was the other
  *  S5843 hit. */
 const SLASH_PATH_RE = /[\w@.*+-]+(?:\/[\w@.*+-]+)+\/?/g
-const FILE_TOKEN_RE = /\b[\w.-]+\.[a-z]+\b/g
+/** Bare filenames `name.ext` — and a dedicated branch for leading-dot
+ *  dotfiles (`.env`, `.gitignore`, `.eslintrc.json`): the main pattern
+ *  needs a word char before the dot, which a leading dot never has.
+ *  The lookbehind keeps `.x` inside `foo.x` / `a.b` from matching. */
+const FILE_TOKEN_RE = /\b[\w.-]+\.[a-z]+\b|(?<![\w.])\.[\w-]+(?:\.[\w-]+)*/g
 const FILE_EXTS = new Set([
   'ts', 'tsx', 'mts', 'cts', 'js', 'mjs', 'cjs', 'jsx', 'md', 'json',
   'jsonc', 'toml', 'yml', 'yaml', 'sh', 'py', 'rs', 'go', 'sql', 'lock',
@@ -164,29 +168,39 @@ function collectCommands(text: string, cap: number): string[] {
   return [...out]
 }
 
-/** `name.ext` tokens — dots scanned right-to-left because the old
- *  greedy `[\w.-]+` matched the longest prefix ending in a known
- *  extension at a word boundary: `a.txt.bak` still yields `a.txt`,
- *  `a.txt2` yields nothing (the ext must end at a boundary). */
+/** The `name.ext` cut of a file token, or undefined — dots scanned
+ *  right-to-left because the old greedy `[\w.-]+` matched the longest
+ *  prefix ending in a known extension at a word boundary: `a.txt.bak`
+ *  still yields `a.txt`, `a.txt2` yields nothing (the ext must end at
+ *  a boundary). The first valid ext wins. */
+function fileTokenCut(tok: string): string | undefined {
+  for (let i = tok.lastIndexOf('.'); i > 0; i = tok.lastIndexOf('.', i - 1)) {
+    const ext = EXT_RUN_RE.exec(tok.slice(i + 1))?.[0]
+    if (ext === undefined || !FILE_EXTS.has(ext)) {
+      continue
+    }
+    // a word char after the ext means the match ran into a longer token —
+    // `a.txt2` style; keep scanning older dots
+    if (WORD_CHAR_RE.test(tok[i + 1 + ext.length] ?? '')) {
+      continue
+    }
+    return tok.slice(0, i + 1 + ext.length)
+  }
+  return undefined
+}
+
+/** `name.ext` tokens — each token contributes its first valid-ext cut;
+ *  a dotfile token is the whole name, there is no stem.ext to
+ *  decompose. */
 function collectFiles(text: string, cap: number): string[] {
   const out = new Set<string>()
   for (const m of text.matchAll(FILE_TOKEN_RE)) {
     const tok = m[0]
-    for (let i = tok.lastIndexOf('.'); i > 0; i = tok.lastIndexOf('.', i - 1)) {
-      const ext = EXT_RUN_RE.exec(tok.slice(i + 1))?.[0]
-      const after = ext === undefined ? '' : tok[i + 1 + ext.length]
-      if (
-        ext === undefined ||
-        !FILE_EXTS.has(ext) ||
-        (after !== undefined && WORD_CHAR_RE.test(after))
-      ) {
-        continue
-      }
-      const v = scopeKey(tok.slice(0, i + 1 + ext.length))
-      if (keepKey(v)) {
-        out.add(v)
-      }
-      break
+    // the dotfile branch — .env, .gitignore
+    const cut = tok.startsWith('.') ? tok : fileTokenCut(tok)
+    const v = cut === undefined ? '' : scopeKey(cut)
+    if (keepKey(v)) {
+      out.add(v)
     }
     if (out.size >= cap) break
   }

@@ -65,6 +65,11 @@ describe('watchArgs', () => {
     }
   })
 
+  test('a sub-floor --every fails closed — a busy loop is not a poll', () => {
+    assert.throws(() => watchArgs(['--every', '0.01']), /--every/)
+    assert.equal(watchArgs(['--every', '0.1']).everySec, 0.1)
+  })
+
   test('an --every beyond the timer range fails closed', () => {
     // over 2^31-1 ms setTimeout clamps to ~1ms — a busy tick, not a cadence
     assert.throws(() => watchArgs(['--every', '3000000000']), /--every/)

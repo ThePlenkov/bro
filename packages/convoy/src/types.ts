@@ -67,4 +67,7 @@ export interface ConvoyNext {
   inputs?: StepInput[]
   /** open steps still waiting on dependencies */
   blocked: string[]
+  /** subset of blocked that can never unblock — every blocker sits in a
+   *  closed loop; a worker cannot fix it, the DAG needs surgery */
+  stuck: string[]
 }

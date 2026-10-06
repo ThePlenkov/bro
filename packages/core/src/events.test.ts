@@ -145,6 +145,21 @@ describe('mailbox connector', () => {
       assert.deepEqual(seen.map((e) => e.topic), ['agent:failed'])
     })
   })
+
+  test('a verbatim note keeps its notify topic — transports are swappable', async () => {
+    await withRepo(async (dir) => {
+      const events = mailboxEvents(dir, 'ses-1')
+      await events.publish({ topic: 'notify', kind: 'note', payload: 'plain text note' })
+      const probe = await events.probe()
+      assert.equal(probe.events[0]?.topic, 'notify')
+      assert.equal(probe.events[0]?.kind, 'note')
+      // and a notify-scoped subscription actually receives it — the drain
+      // is per session, so the probe above did not consume it for ses-2
+      const seen: { topic?: string }[] = []
+      await mailboxEvents(dir, 'ses-2').subscribe({ topics: ['notify'] }, { onEvent: (e) => seen.push(e) })
+      assert.deepEqual(seen.map((e) => e.topic), ['notify'])
+    })
+  })
 })
 
 describe('bus connector', () => {

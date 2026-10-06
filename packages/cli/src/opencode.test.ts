@@ -457,7 +457,7 @@ describe('stop gate', () => {
 
   test('a second block is logged, never re-prompted — a gate, not a loop', async () => {
     respond({ stop: JSON.stringify(blocked) })
-    const { hooks, prompts } = await makeHooks()
+    const { hooks, logs, prompts } = await makeHooks()
 
     await finishTurn(hooks, 'ses_1')
     await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
@@ -470,6 +470,12 @@ describe('stop gate', () => {
     // bro skips its own re-evaluation on the repeat — stop_hook_active is the
     // same retry flag Claude uses
     assert.equal(stops[1]?.payload.stop_hook_active, true)
+    // the suppressed repeat is still traceable — the warn answers "why
+    // didn't it re-prompt?"
+    const gateLogs = logs.filter((l) => (l.message ?? '').includes('stop gate'))
+    assert.equal(gateLogs.length, 2)
+    assert.equal(gateLogs[1]?.level, 'info')
+    assert.match(gateLogs[1]?.message ?? '', /already gated/)
   })
 
   test('the one-shot guard is per session', async () => {
@@ -546,6 +552,32 @@ describe('stop gate', () => {
     assert.deepEqual(prompts, [])
 
     // a session reusing the id gets a fresh one-shot, not a suppressed gate
+    await finishTurn(hooks, 'ses_1')
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
+    assert.equal(prompts.length, 1)
+  })
+
+  test('a session deleted and recreated mid-gate is not re-prompted — the live entry is a different session', async () => {
+    respond({ stop: JSON.stringify(blocked) })
+    process.env.BRO_STUB_SLEEP_EVENTS = JSON.stringify({ stop: 300 })
+    const { hooks, prompts } = await makeHooks()
+
+    await finishTurn(hooks, 'ses_1')
+    const idle = hooks.event?.({
+      event: { type: 'session.idle', properties: { sessionID: 'ses_1' } },
+    })
+    // the stop probe is in flight: the session dies and the id is reused —
+    // `live` holds an entry again, but it is not the session that went idle
+    await hooks.event?.({
+      event: { type: 'session.deleted', properties: { info: { id: 'ses_1' } } },
+    })
+    await hooks.event?.({
+      event: { type: 'session.created', properties: { sessionID: 'ses_1' } },
+    })
+    await idle
+    assert.deepEqual(prompts, [])
+
+    // and the reused session still earns its own one-shot
     await finishTurn(hooks, 'ses_1')
     await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
     assert.equal(prompts.length, 1)

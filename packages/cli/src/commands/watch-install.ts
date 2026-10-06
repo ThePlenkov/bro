@@ -84,15 +84,24 @@ function watchInvocation(version: string): string {
 }
 
 /** % is systemd's specifier escape — a path containing one would
- *  silently expand; %% is the literal. */
-const unitEsc = (s: string): string => s.replaceAll('%', '%%')
+ *  silently expand; %% is the literal. A newline can't be expressed at
+ *  all — it would start a new directive, so the caller's `[Section]`
+ *  boundary dissolves: refuse. */
+const unitEsc = (s: string): string => {
+  if (/[\n\r]/.test(s)) {
+    throw new Error(`path contains a newline — a unit file cannot express it: ${JSON.stringify(s)}`)
+  }
+  return s.replaceAll('%', '%%')
+}
 
 /** Type=oneshot service — the scheduler owns the cadence; watch exits
  *  after one snapshot+drop. PATH is captured at install time because a
- *  user manager doesn't inherit nvm/~/.local shims. */
+ *  user manager doesn't inherit nvm/~/.local shims. Every interpolated
+ *  path goes through unitEsc — a newline in a checkout name would
+ *  otherwise inject a new directive (a8fh). */
 export function systemdService(dir: string, version: string, envPath: string): string {
   return `[Unit]
-Description=bro watch heartbeat — ${dir}
+Description=bro watch heartbeat — ${unitEsc(dir)}
 Documentation=https://github.com/theplenkov/bro
 
 [Service]
@@ -117,9 +126,50 @@ WantedBy=timers.target
 `
 }
 
+/** The 5-field schedule for a seconds cadence. The minute field tops
+ *  at 59 — a 90-minute step is not "every 90 minutes", it fires once
+ *  an hour (or is rejected). Larger intervals move up a field,
+ *  rounding UP so the effective cadence is never faster than
+ *  configured. A whole-field step resets at the boundary — a 7-minute
+ *  step fires at :56 and again at :00 — so non-divisor steps instead
+ *  range from the step value (`7-59/7`), keeping every gap ≥ the
+ *  cadence. */
+export function cronSchedule(everySec: number): string {
+  const mins = Math.ceil(everySec / 60)
+  if (mins <= 1) {
+    return '* * * * *'
+  }
+  if (mins < 60) {
+    const minuteField = 60 % mins === 0 ? `*/${mins}` : `${mins}-59/${mins}`
+    return `${minuteField} * * * *`
+  }
+  const hours = Math.ceil(mins / 60)
+  if (hours < 24) {
+    const hourField = 24 % hours === 0 ? `*/${hours}` : `${hours}-23/${hours}`
+    return `0 ${hourField} * * *`
+  }
+  const days = Math.ceil(hours / 24)
+  const dayField = days === 1 ? '*/1' : `${days}-31/${days}`
+  return `0 0 ${dayField} * *`
+}
+
+/** A managed line is a crontab TEXT FIELD: a newline starts a new job
+ *  before any shell quoting applies, and a bare `%` ends the command
+ *  (the rest becomes stdin). Newlines can't be expressed — refuse;
+ *  `%` escapes as `\%`. */
+const cronEsc = (s: string): string => {
+  if (/[\n\r]/.test(s)) {
+    throw new Error(
+      `path contains a newline — cron cannot express it safely (use systemd or rename): ${JSON.stringify(s)}`
+    )
+  }
+  return s.replaceAll('%', '\\%')
+}
+
 /** One managed crontab line — the tag is the identity; reinstall
  *  replaces by tag, uninstall strips by tag, foreign lines untouched.
- *  Cron's granularity is minutes; intervalSec rounds up. env-prefix on
+ *  Cron's granularity is minutes; intervalSec rounds up into the
+ *  minute/hour/day field that can express it. env-prefix on
  *  `sh -c` lands PATH in the child's environment. */
 export function cronLine(
   dir: string,
@@ -128,9 +178,10 @@ export function cronLine(
   commonDir: string,
   version: string
 ): string {
-  const mins = Math.max(1, Math.ceil(everySec / 60))
-  const sched = mins === 1 ? '* * * * *' : `*/${mins} * * * *`
-  return `${sched} cd ${shq(dir)} && PATH=${shq(envPath)} sh -c ${shq(watchInvocation(version))} >/dev/null 2>&1 ${cronTag(commonDir)}`
+  const sched = cronSchedule(everySec)
+  const d = cronEsc(dir)
+  const p = cronEsc(envPath)
+  return `${sched} cd ${shq(d)} && PATH=${shq(p)} sh -c ${shq(watchInvocation(version))} >/dev/null 2>&1 ${cronTag(commonDir)}`
 }
 
 export type SchedBackend = 'systemd' | 'cron'
@@ -183,13 +234,19 @@ export function printArtifacts(
   }
   const service = `${r.unit}.service`
   const timer = `${r.unit}.timer`
+  let cron: string
+  try {
+    cron = cronLine(dir, everySec, r.envPath, r.common, version)
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  }
   return [
     `# ${service} — install under ${r.unitDir}`,
     systemdService(dir, version, r.envPath),
     `# ${timer} — then: systemctl --user daemon-reload && systemctl --user enable --now ${timer}`,
     systemdTimer(r.unit, everySec),
     `# or a crontab line`,
-    cronLine(dir, everySec, r.envPath, r.common, version),
+    cron,
   ].join('\n')
 }
 
@@ -235,30 +292,49 @@ function installSystemd(
   }
 }
 
-/** Read the current crontab; a missing table (fresh user) is empty,
- *  not an error. */
-function readCrontab(run: SchedRunner): string[] | null {
+/** `crontab -l` has three outcomes, not two: the binary is absent
+ *  (missing — nothing could be scheduled), the table read failed
+ *  (failed — the state is UNKNOWN and a blind `crontab -` write would
+ *  replace every existing job with ours alone), or the lines. */
+type CrontabRead = { lines: string[] } | { missing: true } | { failed: string }
+
+function readCrontab(run: SchedRunner): CrontabRead {
   const r = run('crontab', ['-l'])
   if (r.code === 127) {
-    return null
+    return { missing: true }
   }
-  return r.code === 0 ? r.out.split('\n') : []
+  if (r.code === 0) {
+    return { lines: r.out.split('\n') }
+  }
+  // "no crontab for <user>" is an empty table — the only nonzero that
+  // is safe to treat as empty
+  if (/no crontab for/i.test(r.err) || /no crontab for/i.test(r.out)) {
+    return { lines: [] }
+  }
+  return { failed: r.err.trim() || `crontab -l exited ${r.code}` }
 }
 
-/** Remove a repo's managed lines; returns null when crontab is
- *  unusable. */
-function stripCronTag(run: SchedRunner, tag: string): number | null {
-  const lines = readCrontab(run)
-  if (lines === null) {
-    return null
+/** Remove a repo's managed lines. `missing` — no crontab binary, so
+ *  nothing exists to remove; `failed` — the read or rewrite failed and
+ *  the caller must not treat that as "nothing there". */
+function stripCronTag(
+  run: SchedRunner,
+  tag: string
+): { removed: number } | { missing: true } | { failed: string } {
+  const table = readCrontab(run)
+  if ('missing' in table) {
+    return { missing: true }
   }
-  const kept = lines.filter((l) => !l.includes(tag))
-  const removed = lines.length - kept.length
+  if ('failed' in table) {
+    return { failed: table.failed }
+  }
+  const kept = table.lines.filter((l) => !l.includes(tag))
+  const removed = table.lines.length - kept.length
   if (removed === 0) {
-    return 0
+    return { removed: 0 }
   }
   const w = run('crontab', ['-'], kept.join('\n'))
-  return w.code === 0 ? removed : null
+  return w.code === 0 ? { removed } : { failed: w.err.trim() || `crontab - exited ${w.code}` }
 }
 
 function installCron(
@@ -268,11 +344,20 @@ function installCron(
   version: string
 ): { state: 'installed' | 'updated' | 'already' | 'error'; detail: string } {
   const tag = cronTag(r.common)
-  const line = cronLine(dir, everySec, r.envPath, r.common, version)
-  const lines = readCrontab(r.run)
-  if (lines === null) {
-    return { state: 'error', detail: 'crontab -l failed' }
+  let line: string
+  try {
+    line = cronLine(dir, everySec, r.envPath, r.common, version)
+  } catch (err) {
+    return { state: 'error', detail: err instanceof Error ? err.message : String(err) }
   }
+  const table = readCrontab(r.run)
+  if ('missing' in table) {
+    return { state: 'error', detail: 'crontab not found on PATH' }
+  }
+  if ('failed' in table) {
+    return { state: 'error', detail: `crontab -l: ${table.failed}` }
+  }
+  const lines = table.lines
   const kept = lines.filter((l) => !l.includes(tag))
   // exactly one tagged line and it IS the current one — nothing to do
   if (kept.length === lines.length - 1 && lines.some((l) => l === line)) {
@@ -284,7 +369,7 @@ function installCron(
   }
   return {
     state: kept.length === lines.length ? 'installed' : 'updated',
-    detail: `crontab entry every ${Math.max(1, Math.ceil(everySec / 60))}min (${tag})`,
+    detail: `crontab "${cronSchedule(everySec)}" (${tag})`,
   }
 }
 
@@ -324,18 +409,86 @@ export function installWatch(
   // one entry per repo, one backend — a surviving foreign-backend entry
   // would double the cadence
   if (backend === 'systemd') {
-    stripCronTag(r.run, cronTag(r.common))
+    const strip = stripCronTag(r.run, cronTag(r.common))
+    if ('failed' in strip) {
+      // can't prove the crontab lost our line — enabling systemd anyway
+      // risks both schedulers ticking
+      return {
+        state: 'error',
+        backend,
+        detail: `cannot strip the crontab entry (${strip.failed}) — refusing to double-schedule`,
+      }
+    }
     const res = installSystemd(r, dir, opts.everySec, version)
     return { ...res, backend }
   }
   // cron install — a stale systemd unit for this repo goes best-effort
+  return installCronPath(r, dir, opts.everySec, version, backend)
+}
+
+/** Cron backend: a stale systemd unit for this repo is retired
+ *  best-effort — files are deleted either way; a disable that fails on
+ *  a still-loaded timer earns a warning on the result, never a
+ *  rollback (the cron entry is already live, and a lingering timer
+ *  would double-tick). */
+function installCronPath(
+  r: Resolved,
+  dir: string,
+  everySec: number,
+  version: string,
+  backend: SchedBackend
+): WatchInstallResult {
   const svc = join(r.unitDir, `${r.unit}.service`)
   const tmr = join(r.unitDir, `${r.unit}.timer`)
-  r.run('systemctl', ['--user', 'disable', '--now', `${r.unit}.timer`])
+  const hadUnits = existsSync(svc) || existsSync(tmr)
+  const disable = r.run('systemctl', ['--user', 'disable', '--now', `${r.unit}.timer`])
   rmSync(svc, { force: true })
   rmSync(tmr, { force: true })
-  const res = installCron(r, dir, opts.everySec, version)
+  if (hadUnits) {
+    // a deleted unit lingers in `systemctl --user list-timers` until
+    // the manager re-reads its unit dir
+    r.run('systemctl', ['--user', 'daemon-reload'])
+  }
+  const res = installCron(r, dir, everySec, version)
+  if (hadUnits && disable.code !== 0 && res.state !== 'error') {
+    // files are gone but the live manager may still fire the timer —
+    // cron is in, so the survivor would double-tick
+    return {
+      ...res,
+      backend,
+      detail: `${res.detail} — warning: stale systemd timer may still fire (disable: ${disable.err.trim() || `exited ${disable.code}`})`,
+    }
+  }
   return { ...res, backend }
+}
+
+/** systemd side of uninstall: disable the timer, delete both unit
+ *  files, reload so the manager re-reads the dir. A disable that fails
+ *  while units existed warns — files are gone but the loaded timer may
+ *  linger, and a clean 'removed' would lie. */
+function retireSystemdUnits(r: Resolved): { removed: boolean; warn: string } {
+  const hadUnits =
+    existsSync(join(r.unitDir, `${r.unit}.service`)) ||
+    existsSync(join(r.unitDir, `${r.unit}.timer`))
+  const disable = r.run('systemctl', ['--user', 'disable', '--now', `${r.unit}.timer`])
+  let removed = false
+  for (const ext of ['service', 'timer']) {
+    const p = join(r.unitDir, `${r.unit}.${ext}`)
+    if (existsSync(p)) {
+      rmSync(p)
+      removed = true
+    }
+  }
+  if (removed) {
+    r.run('systemctl', ['--user', 'daemon-reload'])
+  }
+  return {
+    removed,
+    warn:
+      hadUnits && disable.code !== 0
+        ? `warning: systemd disable failed — a live timer may linger (${disable.err.trim() || `exited ${disable.code}`})`
+        : '',
+  }
 }
 
 export function uninstallWatch(dir: string, deps: WatchSchedDeps = {}): WatchInstallResult {
@@ -344,26 +497,26 @@ export function uninstallWatch(dir: string, deps: WatchSchedDeps = {}): WatchIns
     return { state: 'error', detail: r.error }
   }
   const tag = cronTag(r.common)
-  let removed = false
   const backend = detectBackend(r.run)
-  if (backend === 'systemd' || r.run('systemctl', ['--version']).code !== 127) {
-    r.run('systemctl', ['--user', 'disable', '--now', `${r.unit}.timer`])
-    for (const ext of ['service', 'timer']) {
-      const p = join(r.unitDir, `${r.unit}.${ext}`)
-      if (existsSync(p)) {
-        rmSync(p)
-        removed = true
-      }
-    }
-    if (removed) {
-      r.run('systemctl', ['--user', 'daemon-reload'])
+  const retired =
+    backend === 'systemd' || r.run('systemctl', ['--version']).code !== 127
+      ? retireSystemdUnits(r)
+      : { removed: false, warn: '' }
+  const stripped = stripCronTag(r.run, tag)
+  if ('failed' in stripped) {
+    // the managed line may still be in the table — 'absent' would lie
+    return {
+      state: 'error',
+      backend: backend ?? undefined,
+      detail: `crontab strip failed — the managed line may remain: ${stripped.failed}`,
     }
   }
-  const stripped = stripCronTag(r.run, tag)
-  removed = removed || (stripped ?? 0) > 0
+  const removed = retired.removed || ('removed' in stripped && stripped.removed > 0)
   return {
     state: removed ? 'removed' : 'absent',
     backend: backend ?? undefined,
-    detail: removed ? `${r.unit} removed` : `no entry for ${r.unit}`,
+    detail: [removed ? `${r.unit} removed` : `no entry for ${r.unit}`, retired.warn]
+      .filter((s) => s !== '')
+      .join(' — '),
   }
 }
