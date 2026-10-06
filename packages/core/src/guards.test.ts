@@ -177,6 +177,7 @@ describe('collectGuards', () => {
       guards: () => [
         { name: 'bad guard!', when: { on: ['stop'] }, say: 'x' } as Guard,
         { name: 'no-say', when: { on: ['stop'] } } as unknown as Guard,
+        null as unknown as Guard,
         mk('fine-1'),
       ],
     })
@@ -184,6 +185,9 @@ describe('collectGuards', () => {
     const bad = rows.find((r) => r.name === 'bad guard!')
     assert.ok(bad?.problems?.[0]?.includes('name'))
     assert.ok(rows.find((r) => r.name === 'no-say')?.problems?.[0]?.includes('say'))
+    assert.ok(
+      rows.some((r) => r.source === 'g-bad' && r.name === undefined && r.problems?.[0]?.includes('not an object'))
+    )
     assert.ok(rows.some((r) => r.guard?.name === 'fine-1'))
   })
 
@@ -191,5 +195,14 @@ describe('collectGuards', () => {
     registerConnector({ name: 'g-none' })
     const before = collectGuards(ctx, []).filter((r) => r.source === 'g-none')
     assert.deepEqual(before, [])
+  })
+
+  test('a non-array guards() return is skipped — fail open', () => {
+    registerConnector({
+      name: 'g-nonarray',
+      guards: () => ({ not: 'a list' }) as unknown as Guard[],
+    })
+    const rows = collectGuards(ctx, [])
+    assert.deepEqual(rows.filter((r) => r.source === 'g-nonarray'), [])
   })
 })

@@ -42,14 +42,16 @@ describe('guardSection', () => {
           { name: 'ok-def', when: { on: ['stop'] }, say: 'x' },
           { name: 'bad name!', when: { on: ['stop'] }, say: 'x' },
           { name: 'no-when', say: 'x' },
+          null,
         ],
       })
       assert.deepEqual(out.defs.map((d) => d.name), ['ok-def'])
     } finally {
       console.error = orig
     }
-    assert.equal(errs.length, 2)
+    assert.equal(errs.length, 3)
     assert.match(errs[0]!, /'bad name!'.*dropped/)
     assert.match(errs[1]!, /'no-when'.*dropped/)
+    assert.match(errs[2]!, /<unnamed>.*dropped/)
   })
 })

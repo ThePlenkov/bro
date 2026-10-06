@@ -125,10 +125,11 @@ contribution is skipped with a warn line, never a crash).
 - **Connector contribution** — `Connector` gains
   `guards?(ctx: ConnectorCtx): Guard[]`, collected by a `collectGuards`
   mirroring `connectorHooks`: every registered connector's declarations,
-  fail-open per connector under `PROBE_TIMEOUT_MS`. Declarations are
-  data — collection stays cheap; *evaluation* is centralized in the
-  engine, not in the connector (the 4s probe bound protects
-  declaration, and state probes never run inside a connector).
+  fail-open per connector. `guards()` runs synchronously and is not
+  bounded by `PROBE_TIMEOUT_MS`; each declaration must return promptly.
+  Declarations are data — collection stays cheap; *evaluation* is
+  centralized in the engine, not in the connector; state probes never
+  run inside a connector.
 - **Repo config** — `bro.config.json` gains a `guard` section; `defs`
   is the repo's own guard list so a project can nudge without shipping
   a connector:

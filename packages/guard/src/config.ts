@@ -31,7 +31,7 @@ export const guardSection: ConfigSection<GuardConfig> = (raw) => {
   const defs = (Array.isArray(obj.defs) ? obj.defs : []).filter((d): d is Guard => {
     const problems = guardProblems(d)
     if (problems.length > 0) {
-      const name = (d as { name?: unknown }).name
+      const name = (d as { name?: unknown } | null)?.name
       const label = typeof name === 'string' ? `'${name}'` : '<unnamed>'
       console.error(
         `bro.config: guard.defs ${label} is malformed — dropped: ${problems.join('; ')}`

@@ -38,7 +38,7 @@ export interface GuardState {
   probes?: { name: string; args?: Record<string, unknown> }[]
 }
 
-/** Judge veto clause — one null question; can only suppress, abstains
+/** Judge veto clause — one `noul` question; can only suppress, abstains
  *  when the judge is off/unavailable/low-confidence. */
 export interface GuardJudge {
   question: string

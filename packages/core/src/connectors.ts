@@ -619,13 +619,17 @@ function collectConnectorGuards(
     console.error(`bro: connector '${c.name}' guards() threw — skipped: ${err instanceof Error ? err.message : err}`)
     return
   }
+  if (declared !== undefined && !Array.isArray(declared)) {
+    console.error(`bro: connector '${c.name}' guards() returned a non-array — skipped`)
+    return
+  }
   for (const raw of declared ?? []) {
     const problems = guardProblems(raw)
     if (problems.length === 0) {
       push(c.name, raw)
       continue
     }
-    const id = (raw as { name?: unknown }).name
+    const id = (raw as { name?: unknown } | null)?.name
     const label = typeof id === 'string' ? `'${id}'` : '<unnamed>'
     console.error(
       `bro: connector '${c.name}' guard ${label} is malformed — skipped: ${problems.join('; ')}`
