@@ -14,12 +14,14 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  coalesceDrops,
   drainDirs,
   drainMailbox,
   DROP_TTL_MS,
   dropMailbox,
   mailboxDir,
   notifyDir,
+  renderDrop,
   userMailboxDir,
 } from './notify.ts'
 
@@ -227,5 +229,167 @@ describe('drainMailbox', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  test('addressed drop reaches only its recipient and deletes on read', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        dropMailbox(
+          mb,
+          JSON.stringify({ topic: 'notify', kind: 'ask', payload: 'pick A or B', to: 'fixer-1', source: 'sdd-2' }),
+          'note'
+        )
+        // a different agent sees nothing and must not consume it
+        assert.deepEqual(
+          drainMailbox(dir, 'sA', { for: { sessionId: 'sA', agentId: 'fixer-9' } }),
+          []
+        )
+        assert.equal(readdirSync(mb).filter((f) => f.endsWith('.txt')).length, 1)
+        // an orchestrator session (no agentId) does not match an agent address
+        assert.deepEqual(drainMailbox(dir, 'sB', { for: { sessionId: 'sB' } }), [])
+        // the addressed worker drains it — and the file is gone
+        const got = drainMailbox(dir, 'sW', { for: { sessionId: 'sW', agentId: 'fixer-1' } })
+        assert.equal(got.length, 1)
+        assert.match(got[0]!, /pick A or B/)
+        assert.equal(readdirSync(mb).filter((f) => f.endsWith('.txt')).length, 0)
+      })
+    })
+  })
+
+  test('to=orchestrator drains for a sessionless-agent consumer only', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        dropMailbox(
+          mb,
+          JSON.stringify({ topic: 'notify', kind: 'info', payload: 'build done', to: 'orchestrator', source: 'w-1' }),
+          'note'
+        )
+        // a spawned worker (carries an agentId) is never the orchestrator
+        assert.deepEqual(drainMailbox(dir, 'sA', { for: { agentId: 'w-2' } }), [])
+        const got = drainMailbox(dir, 's1', { for: { sessionId: 's1' } })
+        assert.equal(got.length, 1)
+        assert.match(got[0]!, /build done/)
+        assert.equal(readdirSync(mb).filter((f) => f.endsWith('.txt')).length, 0)
+      })
+    })
+  })
+
+  test('broadcast drops still fan out next to addressed ones', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        dropMailbox(mb, 'plain note for all', 'note')
+        dropMailbox(
+          mb,
+          JSON.stringify({ topic: 'notify', kind: 'info', payload: 'only for me', to: 'agent-x' }),
+          'note'
+        )
+        assert.deepEqual(drainMailbox(dir, 'sA', { for: { sessionId: 'sA' } }), [
+          'plain note for all',
+        ])
+        const got = drainMailbox(dir, 'sB', { for: { sessionId: 'sB', agentId: 'agent-x' } })
+        assert.equal(got.length, 2)
+        // same-millisecond drops order by filename — assert membership, not position
+        assert.ok(got.includes('plain note for all'))
+        assert.ok(got.some((t) => t.includes('only for me')))
+      })
+    })
+  })
+
+  test('a rejected keep leaves addressed drops pending — a filtered drain does not eat them', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        const file = dropMailbox(
+          mb,
+          JSON.stringify({ topic: 'notify', kind: 'ask', payload: 'later', to: 'me' }),
+          'note'
+        )
+        assert.deepEqual(
+          drainMailbox(dir, 's1', { for: { agentId: 'me' }, keep: () => false }),
+          []
+        )
+        assert.ok(existsSync(file))
+        assert.equal(drainMailbox(dir, 's1', { for: { agentId: 'me' } }).length, 1)
+        assert.equal(existsSync(file), false)
+      })
+    })
+  })
+})
+
+describe('coalesceDrops', () => {
+  test('a newer same-key drop supersedes pending ones from the same source', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        const note = (payload: string) =>
+          JSON.stringify({ topic: 'notify', kind: 'info', payload, key: 'pr-7', source: 'watch' })
+        dropMailbox(mb, note('v1'), 'note')
+        // publish order: the new write coalesces pending same-key drops first
+        coalesceDrops(mb, 'pr-7', 'watch')
+        dropMailbox(mb, note('v2'), 'note')
+        const txts = drainMailbox(dir, 's1')
+        assert.equal(txts.length, 1)
+        assert.match(txts[0]!, /v2/)
+      })
+    })
+  })
+
+  test('same key from another source is an independent note, not superseded', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        dropMailbox(
+          mb,
+          JSON.stringify({ topic: 'notify', kind: 'info', payload: 'mine', key: 'k', source: 'a' }),
+          'note'
+        )
+        // b publishes key 'k': coalescing removes b's pending drops only, then b's drop lands
+        coalesceDrops(mb, 'k', 'b')
+        dropMailbox(
+          mb,
+          JSON.stringify({ topic: 'notify', kind: 'info', payload: 'theirs', key: 'k', source: 'b' }),
+          'note'
+        )
+        assert.equal(drainMailbox(dir, 's1').length, 2)
+      })
+    })
+  })
+
+  test('a drop with no key never coalesces', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        dropMailbox(mb, 'one', 'note')
+        dropMailbox(mb, 'two', 'note')
+        coalesceDrops(mb, 'k', 'w') // nothing carries key 'k' — no-op
+        assert.equal(drainMailbox(dir, 's1').length, 2)
+      })
+    })
+  })
+})
+
+describe('renderDrop', () => {
+  test('typed envelopes render addressing; plain notes stay verbatim', () => {
+    assert.equal(renderDrop('plain heartbeat'), 'plain heartbeat')
+    assert.equal(
+      renderDrop(
+        JSON.stringify({
+          topic: 'notify',
+          kind: 'ask',
+          payload: 'pick one',
+          to: 'orchestrator',
+          source: 'fixer-1',
+          cause: 'note-1-a.txt',
+        })
+      ),
+      '[ask fixer-1 → orchestrator] pick one ↳note-1-a.txt'
+    )
+    assert.equal(
+      renderDrop(JSON.stringify({ topic: 'notify', kind: 'note', payload: 'plain json note' })),
+      'plain json note'
+    )
   })
 })

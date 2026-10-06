@@ -54,11 +54,24 @@ describe('event contract', () => {
     assert.equal(eventMatches({ topics: ['pr:*'], kinds: ['done'] }, event), false)
   })
 
+  test('addressed events match only the declared recipient', () => {
+    const addressed = { topic: 'notify', kind: 'ask', to: 'fixer-1' }
+    const broadcast = { topic: 'notify', kind: 'note' }
+    assert.equal(eventMatches({ to: 'fixer-1' }, addressed), true)
+    assert.equal(eventMatches({ to: 'fixer-9' }, addressed), false)
+    assert.equal(eventMatches({}, addressed), false)
+    // broadcast reaches everyone, whatever address a subscriber declares
+    assert.equal(eventMatches({ to: 'fixer-9' }, broadcast), true)
+    assert.equal(eventMatches({}, broadcast), true)
+  })
+
   test('an event that cannot be filtered on is not an event', () => {
     assert.equal(isEventInput({ topic: 'a', kind: 'b' }), true)
     assert.equal(isEventInput({ topic: 'a' }), false)
     assert.equal(isEventInput({ topic: '', kind: 'b' }), false)
     assert.equal(isEventInput(null), false)
+    assert.equal(isEventInput({ topic: 'a', kind: 'b', to: 'x' }), true)
+    assert.equal(isEventInput({ topic: 'a', kind: 'b', to: 7 }), false)
   })
 })
 
@@ -104,6 +117,51 @@ describe('mailbox connector', () => {
         'a second session still sees it — that is the fan-out the bus generalises'
       )
       assert.equal((await mailboxEvents(dir, 'ses-1').probe()).events.length, 0, 'the cursor advanced')
+    })
+  })
+
+  test('an addressed event reaches the addressed session only', async () => {
+    await withRepo(async (dir) => {
+      await mailboxEvents(dir, 'ses-1').publish({ topic: 'notify', kind: 'ask', to: 'ses-2', payload: 'yours' })
+      assert.equal((await mailboxEvents(dir, 'ses-3').probe()).events.length, 0, 'not yours — not even seen')
+      const probe = await mailboxEvents(dir, 'ses-2').probe()
+      assert.equal(probe.events.length, 1)
+      assert.equal(probe.events[0]?.to, 'ses-2')
+      // single consumer — the same address does not see it twice
+      assert.equal((await mailboxEvents(dir, 'ses-2').probe()).events.length, 0)
+    })
+  })
+
+  test('a session cursor gets broadcast but never a foreign address', async () => {
+    await withRepo(async (dir) => {
+      await mailboxEvents(dir, 'ses-1').publish({ topic: 't', kind: 'k', payload: 'everyone' })
+      await mailboxEvents(dir, 'ses-1').publish({ topic: 't', kind: 'k', to: 'ses-9', payload: 'just nine' })
+      const mine = await mailboxEvents(dir, 'ses-1').probe()
+      assert.equal(mine.events.length, 1)
+      assert.equal(mine.events[0]?.payload, 'everyone')
+      // and the addressed drop still waits for ses-9
+      const nines = await mailboxEvents(dir, 'ses-9').probe()
+      assert.equal(nines.events.length, 2)
+    })
+  })
+
+  test('a keyed re-publish supersedes the pending drop from the same source', async () => {
+    await withRepo(async (dir) => {
+      const events = mailboxEvents(dir, 'ses-1')
+      await events.publish({ topic: 'notify', kind: 'result', key: 'pr-7', source: 'watch', payload: 'v1' })
+      await events.publish({ topic: 'notify', kind: 'result', key: 'pr-7', source: 'watch', payload: 'v2' })
+      const probe = await mailboxEvents(dir, 'ses-1').probe()
+      assert.equal(probe.events.length, 1, 'the stale drop was retired before either was read')
+      assert.equal(probe.events[0]?.payload, 'v2')
+    })
+  })
+
+  test('the same key from another source is an independent update', async () => {
+    await withRepo(async (dir) => {
+      const events = mailboxEvents(dir, 'ses-1')
+      await events.publish({ topic: 'notify', kind: 'result', key: 'pr-7', source: 'watch', payload: 'ci' })
+      await events.publish({ topic: 'notify', kind: 'result', key: 'pr-7', source: 'review', payload: 'lg' })
+      assert.equal((await mailboxEvents(dir, 'ses-1').probe()).events.length, 2)
     })
   })
 
