@@ -464,6 +464,27 @@ export function patchAgentRegistry(
   })
 }
 
+/** Remove entries by molStep key — the prune path for terminal
+ *  records (the caller decides which states are reapable; this only
+ *  guarantees the same lock+atomic-write discipline as a patch).
+ *  Returns the keys that were actually present and removed. */
+export function removeAgentRegistryEntries(dir: string, molSteps: string[]): string[] {
+  return withAgentRegistryLock(dir, () => {
+    const reg = readAgentRegistry(dir)
+    const removed: string[] = []
+    for (const k of molSteps) {
+      if (reg[k] !== undefined) {
+        delete reg[k]
+        removed.push(k)
+      }
+    }
+    if (removed.length > 0) {
+      writeAgentRegistry(dir, reg)
+    }
+    return removed
+  })
+}
+
 /** Fresh id for a molStep's first spawn — respawns reuse the registry
  *  entry's id instead of minting again. */
 export function mintAgentId(backend: string): string {

@@ -230,6 +230,7 @@ export {
   patchAgentRegistry,
   probeStep,
   readAgentRegistry,
+  removeAgentRegistryEntries,
   rebindStep,
   SpawnError,
   stepParent,
