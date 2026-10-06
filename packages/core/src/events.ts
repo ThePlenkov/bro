@@ -161,21 +161,25 @@ export function eventMatches(filter: EventFilter, event: { topic: string; kind: 
 /** `topic` and `kind` are required and non-empty — an event that cannot
  *  be filtered on cannot be routed. Optional identity fields are
  *  checked too: a `key: 7` sailing through the narrow would hand typed
- *  consumers a number where the contract promises a string. */
+ *  consumers a number where the contract promises a string, and an
+ *  empty-string `to`/`key`/`source`/`cause`/`ref` is malformed, not a
+ *  value — `to: ''` must never read as broadcast. */
 export function isEventInput(value: unknown): value is EventInput {
   if (typeof value !== 'object' || value === null) {
     return false
   }
   const v = value as Record<string, unknown>
+  const optStr = (k: string): boolean =>
+    v[k] === undefined || (typeof v[k] === 'string' && v[k] !== '')
   return (
     typeof v['topic'] === 'string' &&
     v['topic'] !== '' &&
     typeof v['kind'] === 'string' &&
     v['kind'] !== '' &&
-    (v['key'] === undefined || typeof v['key'] === 'string') &&
-    (v['to'] === undefined || typeof v['to'] === 'string') &&
-    (v['source'] === undefined || typeof v['source'] === 'string') &&
-    (v['cause'] === undefined || typeof v['cause'] === 'string') &&
-    (v['ref'] === undefined || typeof v['ref'] === 'string')
+    optStr('key') &&
+    optStr('to') &&
+    optStr('source') &&
+    optStr('cause') &&
+    optStr('ref')
   )
 }

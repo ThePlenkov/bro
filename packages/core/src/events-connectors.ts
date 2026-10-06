@@ -32,6 +32,7 @@ import {
 } from './bus.ts'
 import {
   eventMatches,
+  isEventInput,
   type EventEnvelope,
   type EventFilter,
   type EventHandlers,
@@ -85,14 +86,28 @@ export function mailboxEvents(dir: string, sessionId: string | undefined): Event
       // No seq: a set of files has no total order, and inventing one is
       // exactly the kind of lie this facade refuses to tell. A failed
       // write is a transport problem — a result, not a rejection.
+      // Malformed input is a caller bug: an event that cannot satisfy
+      // the contract (an empty-string `to` reading as broadcast is the
+      // sharp edge) must never reach a consumer as something it is not.
+      if (!isEventInput(event)) {
+        return { published: false, reason: 'invalid event input' }
+      }
       try {
+        // The drop lands first: if it fails, the still-pending same-key
+        // drop must survive — superseding before the write would lose
+        // the old news without delivering the new.
+        const locator = dropMailbox(target, mailboxText(event), 'note')
         // `--key` coalesces: pending same-key drops from this source are
         // stale by definition — the writer repeating a key has fresher
         // news, and a chatty fleet must not inflate every drain
         if (event.key !== undefined) {
-          coalesceDrops(target, event.key, event.source)
+          coalesceDrops(
+            target,
+            event.key,
+            { source: event.source, topic: event.topic, to: event.to },
+            locator
+          )
         }
-        const locator = dropMailbox(target, mailboxText(event), 'note')
         return { published: true, locator }
       } catch (err) {
         return { published: false, reason: err instanceof Error ? err.message : String(err) }

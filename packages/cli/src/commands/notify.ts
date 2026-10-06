@@ -33,8 +33,17 @@ import { flag, positionals } from './args.ts'
 const KINDS = new Set(['note', 'info', 'ask', 'result', 'block'])
 const VALUE_FLAGS = new Set(['--to', '--kind', '--in-reply-to', '--key'])
 
+const sourceOf = (): string | undefined => {
+  const a = process.env.BRO_AGENT_ID
+  const s = process.env.BRO_SESSION_ID
+  return a !== undefined && a !== '' ? a : s !== undefined && s !== '' ? s : undefined
+}
+
 export function runNotifyCommand(argv: string[]): void {
-  const text = positionals(argv, VALUE_FLAGS).join(' ').trim()
+  // strict: notify knows every `--flag` it takes — anything else is a
+  // typo'd option, never message text silently dropped. `--` ends flag
+  // parsing so a text containing an option-looking word survives.
+  const text = positionals(argv, VALUE_FLAGS, { strict: true }).join(' ').trim()
   const to = flag(argv, '--to')
   const kind = flag(argv, '--kind')
   const inReplyTo = flag(argv, '--in-reply-to')
@@ -45,7 +54,7 @@ export function runNotifyCommand(argv: string[]): void {
   }
   if (text === '') {
     console.error(
-      'usage: bro notify [--to <addr>] [--kind <k>] [--in-reply-to <r>] [--key <k>] <text>'
+      'usage: bro notify [--to <addr>] [--kind <k>] [--in-reply-to <r>] [--key <k>] [--] <text>'
     )
     process.exit(2)
   }
@@ -63,9 +72,11 @@ export function runNotifyCommand(argv: string[]): void {
       ...(inReplyTo !== undefined && { cause: inReplyTo }),
       ...(key !== undefined && { key }),
       // spawned workers pin BRO_AGENT_ID at spawn; an interactive
-      // session leaves source unset rather than claim a role
-      ...(process.env.BRO_AGENT_ID !== undefined &&
-        process.env.BRO_AGENT_ID !== '' && { source: process.env.BRO_AGENT_ID }),
+      // session under a hook host carries BRO_SESSION_ID — either pins
+      // the source so two publishers' same-key drops don't collide on
+      // the absent-source wildcard. A session with neither stays
+      // anonymous rather than claim a role.
+      ...(sourceOf() !== undefined && { source: sourceOf() }),
     })
     .then((res) => {
       if (!res.published) {

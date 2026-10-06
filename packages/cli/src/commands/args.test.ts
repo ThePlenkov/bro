@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
-import { deprecatedFlag, flag, flagAll } from './args.ts'
+import { deprecatedFlag, flag, flagAll, positionals } from './args.ts'
 
 class Exit extends Error {
   constructor(public code: number) {
@@ -117,5 +117,34 @@ describe('flagAll', () => {
 
   test('does not match a longer flag sharing the prefix', () => {
     assert.deepEqual(flagAll(['--only=x'], '--on'), [])
+  })
+
+  test('stops at `--` — trailing text is never a flag', () => {
+    assert.deepEqual(flagAll(['--on', 'a', '--', '--on', 'b'], '--on'), ['a'])
+    assert.equal(flag(['--to', 'x', '--', '--to', 'y'], '--to'), 'x')
+  })
+})
+
+describe('positionals', () => {
+  test('drops known value flags with their values', () => {
+    assert.deepEqual(positionals(['a', '--to', 'x', 'b'], new Set(['--to'])), ['a', 'b'])
+    assert.deepEqual(positionals(['a', '--to=x', 'b'], new Set(['--to'])), ['a', 'b'])
+  })
+
+  test('`--` ends flag parsing — the rest is verbatim text', () => {
+    assert.deepEqual(
+      positionals(['deploy', '--', '--help', 'now'], new Set(['--to'])),
+      ['deploy', '--help', 'now']
+    )
+  })
+
+  test('strict: an unknown option is a usage error, not a dropped word', () => {
+    const r = exits(() => positionals(['msg', '--knd', 'ask'], new Set(['--kind']), { strict: true }))
+    assert.equal(r.code, 2)
+    assert.match(r.err.join('\n'), /unknown option --knd/)
+  })
+
+  test('non-strict keeps the legacy silent drop for other commands', () => {
+    assert.deepEqual(positionals(['msg', '--future-flag', 'x'], new Set(['--kind'])), ['msg', 'x'])
   })
 })
