@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { agentPromptPath, pidAlive, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { readAgentRegistry, writeAgentRegistry } from '@broject/core'
@@ -232,6 +233,86 @@ describe('bro agents status', () => {
       const miss = await agents(['status', 'native-nope'])
       assert.equal(miss.code, 1)
       assert.match(miss.err.join('\n'), /no agent "native-nope"/)
+    } finally {
+      fx.restore()
+    }
+  })
+})
+
+describe('bro agents prune', () => {
+  test('reaps terminal entries; live and blocked ones stay', async () => {
+    const fx = fixture()
+    try {
+      // spawnSync waits for the child's exit — its pid is verifiably dead
+      const dead = spawnSync('true').pid!
+      writeAgentRegistry(fx.main, {
+        'fx-dead': {
+          agentId: 'native-dead',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          pid: dead,
+          worktree: fx.main,
+          exitStatus: 0,
+        },
+        'fx-live': {
+          agentId: 'native-live',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          pid: process.pid,
+          worktree: fx.main,
+        },
+        // wall-parked: rate_limited + a future resetAt reads 'blocked' —
+        // respawn-able debt, prune must not touch it
+        'fx-wall': {
+          agentId: 'native-wall',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          pid: dead,
+          worktree: fx.main,
+          exitStatus: 1,
+          cause: 'rate_limited',
+          resetAt: new Date(Date.now() + 86_400_000).toISOString(),
+        },
+      })
+      const r = await agents(['prune'])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      assert.match(r.out.join('\n'), /reaped 1 — fx-dead/)
+      assert.deepEqual(Object.keys(readAgentRegistry(fx.main)).sort(), ['fx-live', 'fx-wall'])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('--older-than reaps only entries past the age cutoff', async () => {
+    const fx = fixture()
+    try {
+      const dead = spawnSync('true').pid!
+      writeAgentRegistry(fx.main, {
+        'fx-old': {
+          agentId: 'native-old',
+          backend: 'native',
+          spawnedAt: new Date(Date.now() - 10 * 86_400_000).toISOString(),
+          pid: dead,
+          worktree: fx.main,
+          exitStatus: 0,
+        },
+        'fx-new': {
+          agentId: 'native-new',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          pid: dead,
+          worktree: fx.main,
+          exitStatus: 0,
+        },
+      })
+      const r = await agents(['prune', '--older-than', '7d'])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      assert.match(r.out.join('\n'), /reaped 1 — fx-old/)
+      assert.deepEqual(Object.keys(readAgentRegistry(fx.main)), ['fx-new'])
+
+      const bad = await agents(['prune', '--older-than', 'soon'])
+      assert.equal(bad.code, 1)
+      assert.match(bad.err.join('\n'), /--older-than takes <N>d/)
     } finally {
       fx.restore()
     }

@@ -42,11 +42,13 @@ import {
   bdAt,
   countSessionReservations,
   readAgentRegistry,
+  removeAgentRegistryEntries,
   sessionPlanes,
   sessionQuotaConfig,
   sessionSlotsDir,
   type AgentConnector,
   type AgentInfo,
+  type AgentState,
 } from '@broject/core'
 import { beadsDir } from '@broject/convoy'
 import {
@@ -68,7 +70,10 @@ function usage(): never {
   bro agents status [<id|step>] [--json] [--connector <name>]
   bro agents up [<step>] [--connector <name>] [--worktree <path>] [--prompt-file <file>] [--beads-dir <dir>]
                 [--provider <name>] [--model <m>] [--profile <name>] [--auto-approve]
-  bro agents down [<id|step>] [--connector <name>]`)
+  bro agents down [<id|step>] [--connector <name>]
+  bro agents prune [--connector <name>] [--older-than <N>d] [--json]
+                reap terminal registry entries (exited/lost/stopped —
+                'blocked' is respawn-able debt, never litter)`)
   process.exit(2)
 }
 
@@ -706,6 +711,79 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
   console.log(`stopped ${agent.id} (${agent.molStep}, ${outcome.backend})`)
 }
 
+/** States prune reaps — 'blocked' stays: a wall-parked worker is
+ *  respawn-able debt, not litter. */
+const REAP_STATES = new Set<AgentState>(['exited', 'lost', 'stopped'])
+
+/** Which collected entries prune may reap. `expected` pins the observed
+ *  identity per molStep — removeAgentRegistryEntries re-checks it under
+ *  the lock so a respawn between snapshot and removal can't be reaped
+ *  as the terminal agent it replaced. Age counts from spawnedAt — the
+ *  registry records no exit timestamp; an entry with none can't
+ *  age-verify and stays. */
+function selectReapable(
+  backends: Array<{ conn: { name: string }; agents: AgentInfo[]; degraded?: string }>,
+  cutoff: number | undefined
+): {
+  reapable: string[]
+  skipped: string[]
+  expected: Map<string, { agentId?: string; spawnedAt?: string; pid?: number }>
+} {
+  const reapable: string[] = []
+  const skipped: string[] = []
+  const expected = new Map<string, { agentId: string; spawnedAt?: string; pid?: number }>()
+  for (const b of backends) {
+    // a degraded backend's states are unproven — its entries stay
+    if (b.degraded !== undefined) {
+      skipped.push(`${b.conn.name}: ${b.degraded}`)
+      continue
+    }
+    for (const a of b.agents) {
+      const t = a.spawnedAt === undefined ? Number.NaN : Date.parse(a.spawnedAt)
+      if (!REAP_STATES.has(a.state) || (cutoff !== undefined && (Number.isNaN(t) || t >= cutoff))) {
+        continue
+      }
+      reapable.push(a.molStep)
+      expected.set(a.molStep, { agentId: a.id, spawnedAt: a.spawnedAt, pid: a.pid })
+    }
+  }
+  return { reapable, skipped, expected }
+}
+
+async function cmdPrune(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
+  const pos = positionals(argv, new Set(['--connector', '--older-than']))
+  const connectorName = flag(argv, '--connector')
+  const olderThan = flag(argv, '--older-than')
+  const json = argv.includes('--json')
+  if (pos.length > 0) {
+    usage()
+  }
+  let cutoff: number | undefined
+  if (olderThan !== undefined) {
+    const m = /^(\d+)d$/.exec(olderThan)
+    if (m === null) {
+      die(`--older-than takes <N>d days, got "${olderThan}"`)
+    }
+    cutoff = Date.now() - Number(m[1]) * 86_400_000
+  }
+  const { backends } = await collectAgentBackends(dir, env, connectorName)
+  const { reapable, skipped, expected } = selectReapable(backends, cutoff)
+  const removed =
+    reapable.length === 0 ? [] : removeAgentRegistryEntries(dir, reapable, expected)
+  if (json) {
+    console.log(JSON.stringify({ pruned: removed, skippedDegraded: skipped }, null, 2))
+    return
+  }
+  console.log(
+    removed.length === 0
+      ? 'prune: nothing terminal to reap'
+      : `prune: reaped ${removed.length} — ${removed.join(', ')}`
+  )
+  for (const s of skipped) {
+    console.error(`note: ${s} — entries not verified, left in place`)
+  }
+}
+
 export async function runAgentsCommand(argv: string[]): Promise<void> {
   const dir = process.cwd()
   const env = loadAgentEnv(dir)
@@ -719,6 +797,9 @@ export async function runAgentsCommand(argv: string[]): Promise<void> {
       return
     case 'down':
       await cmdDown(dir, env, argv.slice(1))
+      return
+    case 'prune':
+      await cmdPrune(dir, env, argv.slice(1))
       return
     case undefined:
     case '--help':

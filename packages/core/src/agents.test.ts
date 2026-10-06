@@ -24,6 +24,7 @@ import {
   patchAgentRegistry,
   probeStep,
   readAgentRegistry,
+  removeAgentRegistryEntries,
   rebindStep,
   SpawnError,
   withAgentRegistryLock,
@@ -223,6 +224,31 @@ describe('agent registry IO', () => {
       assert.equal(e.pid, 42)
       assert.equal(e.exitStatus, 3)
       assert.equal(e.agentId, 'native-ab12')
+    })
+  })
+
+  test('remove skips an entry rewritten since the observed snapshot', () => {
+    withRepo((dir) => {
+      patchAgentRegistry(dir, 'bro-x', {
+        agentId: 'native-ab12',
+        backend: 'native',
+        spawnedAt: 't0',
+        pid: 42,
+      })
+      // the fingerprint of what status saw — exit 0, pid 42
+      const seen = new Map([
+        ['bro-x', { agentId: 'native-ab12', spawnedAt: 't0', pid: 42 }],
+      ])
+      // a respawn lands between snapshot and removal
+      patchAgentRegistry(dir, 'bro-x', { agentId: 'native-ab12', spawnedAt: 't1', pid: 99 })
+      assert.deepEqual(removeAgentRegistryEntries(dir, ['bro-x'], seen), [])
+      assert.equal(readAgentRegistry(dir)['bro-x']!.pid, 99)
+      // same entry still observed → removed
+      const now = new Map([
+        ['bro-x', { agentId: 'native-ab12', spawnedAt: 't1', pid: 99 }],
+      ])
+      assert.deepEqual(removeAgentRegistryEntries(dir, ['bro-x'], now), ['bro-x'])
+      assert.equal(readAgentRegistry(dir)['bro-x'], undefined)
     })
   })
 })
