@@ -185,12 +185,17 @@ export {
   mailboxEvents,
 } from './events-connectors.ts'
 export {
+  coalesceDrops,
   drainDirs,
   drainMailbox,
+  type DrainOpts,
   dropMailbox,
   mailboxDir,
+  mailboxIdentity,
+  type MailboxIdentity,
   notifyConnector,
   notifyDir,
+  renderDrop,
   userMailboxDir,
 } from './notify.ts'
 export type {

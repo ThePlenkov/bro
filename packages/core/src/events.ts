@@ -24,11 +24,20 @@
 export interface EventInput {
   topic: string
   kind: string
-  /** Subject identity — a bead id, a PR number, an agent id. */
+  /** Subject identity — a bead id, a PR number, an agent id. A notify
+   *  drop with a `key` also coalesces: a newer drop replaces pending
+   *  same-key drops from the same source. */
   key?: string
+  /** Recipient address — an agent id, a session id, or the reserved
+   *  role `orchestrator` (the session that owns agents: one without
+   *  BRO_AGENT_ID). Absent means broadcast. A transport must honor it —
+   *  an addressed event that reaches unmatched consumers is a leak,
+   *  not a delivery. */
+  to?: string
   /** Who published it. */
   source?: string
-  /** What this event answers: a prior `seq`, or a bead/step id. */
+  /** What this event answers: a prior `seq`, a bead/step id, or a
+   *  mailbox drop — `--in-reply-to` threading rides this field. */
   cause?: string
   /** Opaque handle to an artifact: a worktree, a PR, a log file. */
   ref?: string
@@ -50,6 +59,10 @@ export interface EventEnvelope extends EventInput {
 export interface EventFilter {
   topics?: string[]
   kinds?: string[]
+  /** The subscriber's address. An event carrying `to` matches only a
+   *  filter declaring the same address; broadcast events (no `to`)
+   *  match any filter. */
+  to?: string
 }
 
 export interface EventHandlers {
@@ -136,6 +149,12 @@ export function eventMatches(filter: EventFilter, event: { topic: string; kind: 
   if (Array.isArray(kinds) && kinds.length > 0 && !kinds.includes(event.kind)) {
     return false
   }
+  // Addressed events reach only the declared recipient — anything else
+  // is a leak (EventInput.to's contract). Broadcast events reach all.
+  const to = (event as { to?: unknown }).to
+  if (typeof to === 'string' && to !== '' && to !== filter.to) {
+    return false
+  }
   return true
 }
 
@@ -154,6 +173,7 @@ export function isEventInput(value: unknown): value is EventInput {
     typeof v['kind'] === 'string' &&
     v['kind'] !== '' &&
     (v['key'] === undefined || typeof v['key'] === 'string') &&
+    (v['to'] === undefined || typeof v['to'] === 'string') &&
     (v['source'] === undefined || typeof v['source'] === 'string') &&
     (v['cause'] === undefined || typeof v['cause'] === 'string') &&
     (v['ref'] === undefined || typeof v['ref'] === 'string')

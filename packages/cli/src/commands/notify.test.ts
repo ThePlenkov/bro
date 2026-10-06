@@ -54,4 +54,72 @@ describe('bro notify', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  test('--to/--kind/--in-reply-to/--key write a typed envelope', () => {
+    const { root, main } = initRepo('bro-notify-typed-')
+    inside(main, root, () => {
+      const r = runCli(
+        ['notify', '--to', 'orchestrator', '--kind', 'ask', '--in-reply-to', 'bro-22jd', '--key', 'q-1', 'need a call'],
+        { cwd: main }
+      )
+      assert.equal(r.code, 0, r.stderr)
+      const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim())
+      const mb = join(common, 'bro', 'notify')
+      const files = readdirSync(mb).filter((f) => !f.startsWith('.'))
+      assert.equal(files.length, 1)
+      const ev = JSON.parse(readFileSync(join(mb, files[0]!), 'utf8'))
+      assert.equal(ev.topic, 'notify')
+      assert.equal(ev.kind, 'ask')
+      assert.equal(ev.to, 'orchestrator')
+      assert.equal(ev.cause, 'bro-22jd')
+      assert.equal(ev.key, 'q-1')
+      assert.equal(ev.payload, 'need a call')
+    })
+  })
+
+  test('an invalid --kind is a usage error, nothing is dropped', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-notify-badkind-'))
+    try {
+      mkdirSync(join(dir, 'xdg'))
+      const r = runCli(['notify', '--kind', 'shout', 'hi'], {
+        cwd: dir,
+        env: { XDG_STATE_HOME: join(dir, 'xdg') },
+      })
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /--kind must be one of/)
+      assert.equal(readdirSync(join(dir, 'xdg')).length, 0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a repeated --key supersedes the pending drop from the same source', () => {
+    const { root, main } = initRepo('bro-notify-coalesce-')
+    inside(main, root, () => {
+      const env = { BRO_AGENT_ID: 'watch-1' }
+      const r1 = runCli(['notify', '--key', 'pr-7', '--kind', 'result', 'v1'], { cwd: main, env })
+      assert.equal(r1.code, 0, r1.stderr)
+      const r2 = runCli(['notify', '--key', 'pr-7', '--kind', 'result', 'v2'], { cwd: main, env })
+      assert.equal(r2.code, 0, r2.stderr)
+      const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim())
+      const mb = join(common, 'bro', 'notify')
+      const files = readdirSync(mb).filter((f) => !f.startsWith('.'))
+      assert.equal(files.length, 1, 'the stale keyed drop was retired on publish')
+      const ev = JSON.parse(readFileSync(join(mb, files[0]!), 'utf8'))
+      assert.equal(ev.payload, 'v2')
+      assert.equal(ev.source, 'watch-1')
+    })
+  })
+
+  test('the same --key from another source stays an independent drop', () => {
+    const { root, main } = initRepo('bro-notify-sources-')
+    inside(main, root, () => {
+      runCli(['notify', '--key', 'pr-7', 'from a'], { cwd: main, env: { BRO_AGENT_ID: 'a' } })
+      runCli(['notify', '--key', 'pr-7', 'from b'], { cwd: main, env: { BRO_AGENT_ID: 'b' } })
+      const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim())
+      const mb = join(common, 'bro', 'notify')
+      const files = readdirSync(mb).filter((f) => !f.startsWith('.'))
+      assert.equal(files.length, 2)
+    })
+  })
 })

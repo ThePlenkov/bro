@@ -14,7 +14,15 @@
  * once, so `subscribe` resolves after that delivery. Absence is reported
  * as a `reason`, never faked and never thrown.
  */
-import { drainMailbox, dropMailbox, notifyDir } from './notify.ts'
+import {
+  coalesceDrops,
+  drainMailbox,
+  dropMailbox,
+  mailboxEvent,
+  mailboxIdentity,
+  mailboxText,
+  notifyDir,
+} from './notify.ts'
 import type { Connector, ConnectorCtx } from './connectors.ts'
 import {
   busProbe,
@@ -24,7 +32,6 @@ import {
 } from './bus.ts'
 import {
   eventMatches,
-  isEventInput,
   type EventEnvelope,
   type EventFilter,
   type EventHandlers,
@@ -35,78 +42,10 @@ import {
   type EventSubscription,
 } from './events.ts'
 
-/** What a verbatim mailbox drop is: a `notify` note. The write side
- *  only stores plain text for exactly that event, and a foreign file
- *  in the notify dir is a notify drop by definition — decoding it as
- *  a 'mailbox' topic would lose the identity the publisher chose and
- *  hide the drop from every `topics: ['notify']` subscription. */
-const MAILBOX_TOPIC = 'notify'
-const MAILBOX_KIND = 'note'
-
-/**
- * The mailbox text for an event. A plain note is written verbatim, because
- * drops are injected as-is and a heartbeat's formatting is part of the
- * event (`notify.ts:143-145`) — that is `bro notify` today and its bytes
- * must not move. Anything with identity beyond topic/kind is JSON, or the
- * topic would be dropped on the floor and the event could never be
- * filtered on the way back out.
- */
-function mailboxText(event: EventInput): string {
-  const plainNote =
-    event.topic === 'notify' &&
-    event.kind === 'note' &&
-    event.key === undefined &&
-    event.cause === undefined &&
-    event.ref === undefined &&
-    event.source === undefined
-  // A verbatim note whose text parses as an event would come back out of
-  // the drain as that event — a different topic and a lost payload — so
-  // JSON-shaped notes go through the envelope like everything else.
-  if (plainNote && typeof event.payload === 'string' && parseEvent(event.payload) === undefined) {
-    return event.payload
-  }
-  return JSON.stringify(event)
-}
-
-/** The one place a drop's text is asked "are you an event?" — shared by
- *  the write side (to keep raw notes distinguishable) and the read side
- *  (to decode envelopes). */
-function parseEvent(text: string): EventInput | undefined {
-  const trimmed = text.trim()
-  if (!trimmed.startsWith('{')) {
-    return undefined
-  }
-  try {
-    const parsed = JSON.parse(trimmed) as unknown
-    return isEventInput(parsed) ? parsed : undefined
-  } catch {
-    return undefined
-  }
-}
-
-/** Drops are text — a drain recovers only what the writer encoded. A
- *  verbatim drop is reported as the notify note it was published as; a
- *  JSON drop is parsed back into the exact event. */
-function mailboxEvent(text: string, locator: string | undefined): EventEnvelope {
-  const parsed = parseEvent(text)
-  if (parsed !== undefined) {
-    return {
-      ...parsed,
-      ts: new Date().toISOString(),
-      ...(locator !== undefined ? { locator } : {}),
-    }
-  }
-  return {
-    topic: MAILBOX_TOPIC,
-    kind: MAILBOX_KIND,
-    payload: text,
-    ts: new Date().toISOString(),
-    ...(locator !== undefined ? { locator } : {}),
-  }
-}
-
 /** The mailbox as an `events` provider — publish is a drop, delivery is a
- *  one-shot drain of what this session has not seen. */
+ *  one-shot drain of what this session has not seen. The codec lives in
+ *  notify.ts — the drain path parses envelopes for addressing, so the
+ *  "is this text an event" question has exactly one home. */
 export function mailboxEvents(dir: string, sessionId: string | undefined): EventsFacade {
   const noCursor: EventProbeResult = {
     events: [],
@@ -121,9 +60,16 @@ export function mailboxEvents(dir: string, sessionId: string | undefined): Event
     // The filter reaches into the drain: a drop this subscription does
     // not match stays unseen for the session, or a filtered subscribe
     // would permanently consume drops a later subscription was due.
-    const texts = drainMailbox(dir, sessionId, (text) =>
-      eventMatches(filter, mailboxEvent(text, undefined))
-    )
+    // Addressing (`to`) is gated by the consumer's real identity inside
+    // the drain — env-derived, not declared — so the keep fn strips it
+    // or a probe with no declared `to` could never see its own mail.
+    const texts = drainMailbox(dir, sessionId, {
+      keep: (text) => {
+        const { to: _addressed, ...unaddressed } = mailboxEvent(text, undefined)
+        return eventMatches(filter, unaddressed)
+      },
+      for: mailboxIdentity(sessionId),
+    })
     const out: EventEnvelope[] = []
     for (const text of texts) {
       const event = mailboxEvent(text, undefined)
@@ -140,6 +86,12 @@ export function mailboxEvents(dir: string, sessionId: string | undefined): Event
       // exactly the kind of lie this facade refuses to tell. A failed
       // write is a transport problem — a result, not a rejection.
       try {
+        // `--key` coalesces: pending same-key drops from this source are
+        // stale by definition — the writer repeating a key has fresher
+        // news, and a chatty fleet must not inflate every drain
+        if (event.key !== undefined) {
+          coalesceDrops(target, event.key, event.source)
+        }
         const locator = dropMailbox(target, mailboxText(event), 'note')
         return { published: true, locator }
       } catch (err) {

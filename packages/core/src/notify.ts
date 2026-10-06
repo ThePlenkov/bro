@@ -28,6 +28,11 @@ import {
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { Connector } from './connectors.ts'
+import {
+  isEventInput,
+  type EventEnvelope,
+  type EventInput,
+} from './events.ts'
 import { gitTry } from './git.ts'
 
 /** The repo mailbox — `<git-common>/bro/notify`; null outside a repo. */
@@ -86,6 +91,78 @@ export function dropMailbox(dir: string, text: string, prefix: string): string {
   return join(dir, name)
 }
 
+/** What a verbatim mailbox drop is: a `notify` note. The write side
+ *  only stores plain text for exactly that event, and a foreign file
+ *  in the notify dir is a notify drop by definition — decoding it as
+ *  a 'mailbox' topic would lose the identity the publisher chose and
+ *  hide the drop from every `topics: ['notify']` subscription. */
+const MAILBOX_TOPIC = 'notify'
+const MAILBOX_KIND = 'note'
+
+/**
+ * The mailbox text for an event. A plain note is written verbatim, because
+ * drops are injected as-is and a heartbeat's formatting is part of the
+ * event — that is `bro notify` today and its bytes must not move.
+ * Anything with identity beyond topic/kind is JSON, or the
+ * topic would be dropped on the floor and the event could never be
+ * filtered on the way back out.
+ */
+export function mailboxText(event: EventInput): string {
+  const plainNote =
+    event.topic === 'notify' &&
+    event.kind === 'note' &&
+    event.key === undefined &&
+    event.to === undefined &&
+    event.cause === undefined &&
+    event.ref === undefined &&
+    event.source === undefined
+  // A verbatim note whose text parses as an event would come back out of
+  // the drain as that event — a different topic and a lost payload — so
+  // JSON-shaped notes go through the envelope like everything else.
+  if (plainNote && typeof event.payload === 'string' && parseEvent(event.payload) === undefined) {
+    return event.payload
+  }
+  return JSON.stringify(event)
+}
+
+/** The one place a drop's text is asked "are you an event?" — shared by
+ *  the write side (to keep raw notes distinguishable), the drain side
+ *  (addressing checks the envelope), and coalescing (superseded drops
+ *  are found by key). */
+export function parseEvent(text: string): EventInput | undefined {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('{')) {
+    return undefined
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as unknown
+    return isEventInput(parsed) ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Drops are text — a drain recovers only what the writer encoded. A
+ *  verbatim drop is reported as the notify note it was published as; a
+ *  JSON drop is parsed back into the exact event. */
+export function mailboxEvent(text: string, locator: string | undefined): EventEnvelope {
+  const parsed = parseEvent(text)
+  if (parsed !== undefined) {
+    return {
+      ...parsed,
+      ts: new Date().toISOString(),
+      ...(locator !== undefined ? { locator } : {}),
+    }
+  }
+  return {
+    topic: MAILBOX_TOPIC,
+    kind: MAILBOX_KIND,
+    payload: text,
+    ts: new Date().toISOString(),
+    ...(locator !== undefined ? { locator } : {}),
+  }
+}
+
 /** A drop older than this is residue, not an event — a session that
  *  was idle past the TTL never sees it. */
 export const DROP_TTL_MS = 60 * 60 * 1000
@@ -140,19 +217,100 @@ function pruneStaleCursors(mb: string, files: string[], now: number): void {
   }
 }
 
-/** One drop: reap when expired, deliver into `out` when unseen and
- *  wanted. `keep` is the drain-side filter — a drop it rejects is left
- *  unseen, so a filtered consumer cannot eat drops a later, different
- *  consumer was due (they expire on TTL like any other residue). Drops
- *  stay on disk for other sessions until the TTL takes them, so a
- *  crash mid-drain loses nothing — the unwritten cursor redelivers. */
+/** Who is draining. A consumer's addresses: its session id (always
+ *  known on the hook path), its `BRO_AGENT_ID` (spawned workers carry
+ *  it — interactive sessions don't), and the reserved role
+ *  `orchestrator`, which a session with no agentId answers to — that
+ *  is the session a spawned child reports to. */
+export interface MailboxIdentity {
+  sessionId?: string
+  agentId?: string
+}
+
+/** The env-derived half of the identity — spawned workers pin
+ *  BRO_AGENT_ID at spawn; a session without it drains as an
+ *  orchestrator. */
+export function mailboxIdentity(sessionId?: string): MailboxIdentity {
+  const agentId = process.env.BRO_AGENT_ID
+  return { sessionId, agentId: agentId === undefined || agentId === '' ? undefined : agentId }
+}
+
+/** `to` names exactly one recipient: an agentId, a sessionId, or the
+ *  `orchestrator` role. Anything else is broadcast. */
+function addressedTo(to: string, identity: MailboxIdentity): boolean {
+  if (identity.agentId !== undefined && to === identity.agentId) {
+    return true
+  }
+  if (identity.sessionId !== undefined && to === identity.sessionId) {
+    return true
+  }
+  return to === 'orchestrator' && identity.agentId === undefined
+}
+
+/** Coalescing (bro-22jd): pending drops carrying the same {key, source}
+ *  are superseded — the writer that repeats a key has fresher news.
+ *  Same-key drops from a different source are independent notes. */
+export function coalesceDrops(dir: string, key: string, source: string | undefined): void {
+  let files: string[]
+  try {
+    files = readdirSync(dir)
+  } catch {
+    return
+  }
+  for (const f of files.filter((f) => f.endsWith('.txt') && !f.startsWith('.'))) {
+    const path = join(dir, f)
+    try {
+      const ev = parseEvent(readFileSync(path, 'utf8'))
+      if (ev !== undefined && ev.key === key && ev.source === source) {
+        rmSync(path, { force: true })
+      }
+    } catch {
+      // unreadable drop — leave it; TTL is the sweeper of last resort
+    }
+  }
+}
+
+/** The context line for a drained drop — typed envelopes render their
+ *  addressing (`[ask fixer-7 → orchestrator] …`), plain notes stay
+ *  verbatim (a heartbeat's formatting is part of the event). `kind` is
+ *  a label, never a grant — a `block` or `ask` carries no authority. */
+export function renderDrop(text: string): string {
+  const ev = parseEvent(text)
+  if (ev === undefined || typeof ev.payload !== 'string') {
+    return text
+  }
+  const kind = ev.kind === MAILBOX_KIND ? '' : `${ev.kind} `
+  const route =
+    ev.source === undefined && ev.to === undefined
+      ? ''
+      : `${ev.source ?? 'unknown'}${ev.to === undefined ? '' : ` → ${ev.to}`}`
+  const re = ev.cause === undefined ? '' : ` ↳${ev.cause}`
+  const head = kind + route
+  return head === '' ? ev.payload : `[${head}] ${ev.payload}${re}`
+}
+
+/** Drain options — `keep` selects which drops count as seen; `for` is
+ *  the consumer's identity for `to`-addressed drops. */
+export interface DrainOpts {
+  keep?: (text: string) => boolean
+  for?: MailboxIdentity
+}
+
+/** One drop: reap when expired, deliver into `out` when unseen,
+ *  addressed-to-us, and wanted. `keep` is the drain-side filter — a
+ *  drop it rejects is left unseen, so a filtered consumer cannot eat
+ *  drops a later, different consumer was due (they expire on TTL like
+ *  any other residue). An addressed drop expires *on read* by its
+ *  recipient — single-consumer, not broadcast. Broadcast drops stay
+ *  for other sessions until the TTL takes them, so a crash mid-drain
+ *  loses nothing — the unwritten cursor redelivers. */
 function drainDrop(
   mb: string,
   f: string,
   seen: Set<string>,
   out: string[],
   now: number,
-  keep?: (text: string) => boolean
+  opts?: DrainOpts
 ): void {
   const path = join(mb, f)
   try {
@@ -168,11 +326,21 @@ function drainDrop(
       seen.add(f) // an empty drop is noise, not an event — consume it
       return
     }
-    if (keep !== undefined && !keep(text)) {
+    const ev = parseEvent(text)
+    const addressed = typeof ev?.to === 'string' && ev.to !== ''
+    if (addressed && !addressedTo(ev!.to!, opts?.for ?? {})) {
+      return // not ours — stays pending for the addressed consumer
+    }
+    if (opts?.keep !== undefined && !opts.keep(text)) {
       return
     }
     seen.add(f)
     out.push(text)
+    if (addressed) {
+      // expire-after-read: an addressed drop is single-consumer, the
+      // delivered copy is the only copy
+      rmSync(path, { force: true })
+    }
   } catch {
     // unreadable drop — skip; the next drain retries
   }
@@ -181,7 +349,7 @@ function drainDrop(
 /** Drain one mailbox dir for a session, oldest-first by embedded drop
  *  time. Drops are injected verbatim — a heartbeat's formatting is
  *  part of the event. */
-function drainDir(mb: string, sessionId: string, now: number, keep?: (text: string) => boolean): string[] {
+function drainDir(mb: string, sessionId: string, now: number, opts?: DrainOpts): string[] {
   let files: string[]
   try {
     files = readdirSync(mb)
@@ -194,7 +362,7 @@ function drainDir(mb: string, sessionId: string, now: number, keep?: (text: stri
   for (const f of files
     .filter((f) => f.endsWith('.txt') && !f.startsWith('.'))
     .sort((a, b) => dropTime(a) - dropTime(b) || a.localeCompare(b))) {
-    drainDrop(mb, f, seen, out, now, keep)
+    drainDrop(mb, f, seen, out, now, opts)
   }
   writeSeen(cursor, seen, files)
   pruneStaleCursors(mb, files, now)
@@ -202,17 +370,17 @@ function drainDir(mb: string, sessionId: string, now: number, keep?: (text: stri
 }
 
 /** Every pending drop this session hasn't seen, oldest-first by the
- *  embedded drop time. `keep` selects which drops count as seen — a
- *  rejected drop stays pending for this session's later drains. Seen
- *  drops stay for other sessions until they expire; a drop is deleted
- *  once it is older than DROP_TTL_MS, delivered or not. */
+ *  embedded drop time. `opts.keep` selects which drops count as seen —
+ *  a rejected drop stays pending for this session's later drains.
+ *  `opts.for` is the consumer's identity: drops `to` another address
+ *  stay pending, drops `to` this consumer delete on delivery. */
 export function drainMailbox(
   dir: string,
   sessionId: string,
-  keep?: (text: string) => boolean
+  opts?: DrainOpts
 ): string[] {
   const now = Date.now()
-  return drainDirs(dir).flatMap((mb) => drainDir(mb, sessionId, now, keep))
+  return drainDirs(dir).flatMap((mb) => drainDir(mb, sessionId, now, opts))
 }
 
 /** The notify connector — the read side of the mailbox. Its postTool
@@ -224,7 +392,9 @@ export const notifyConnector: Connector = {
   hooks: () => ({
     postTool(ctx) {
       try {
-        const msgs = drainMailbox(ctx.dir, ctx.sessionId ?? '')
+        const msgs = drainMailbox(ctx.dir, ctx.sessionId ?? '', {
+          for: mailboxIdentity(ctx.sessionId),
+        }).map(renderDrop)
         return msgs.length > 0
           ? [`bro notify — ${msgs.length} mailbox message(s):`, ...msgs]
           : []
