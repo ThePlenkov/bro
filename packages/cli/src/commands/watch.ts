@@ -40,6 +40,7 @@ import { checkHistory, evaluateExitGate, fetchPrActState } from '@broject/act'
 import { listMolecules, loadMolecule, nextStep } from '@broject/convoy'
 import { loadBroConfig } from '../plugins.ts'
 import { flag } from './args.ts'
+import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
 import {
   collectAgents,
   fleetRows,
@@ -475,10 +476,11 @@ export function watchArgs(argv: string[]): {
   }
   const everySec = Number(everyRaw)
   // setTimeout clamps delays over 2^31-1 ms to ~1ms — a huge --every
-  // would busy-tick instead of waiting, so it fails closed here.
-  if (!Number.isFinite(everySec) || everySec <= 0 || everySec * 1000 > 0x7fffffff) {
+  // would busy-tick instead of waiting; a sub-floor --every is a busy
+  // loop either way. Both bounds fail closed here.
+  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
     throw new Error(
-      `--every needs a positive seconds value up to ${0x7fffffff / 1000}s, got "${everyRaw}"`
+      `--every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw}"`
     )
   }
   return { ...base, everySec }
@@ -518,8 +520,13 @@ function runWatchSched(argv: string[]): void {
   }
   const everyRaw = flag(argv, '--every')
   const everySec = everyRaw === undefined ? cfg.intervalSec : Number(everyRaw)
-  if (!Number.isFinite(everySec) || everySec <= 0 || everySec * 1000 > 0x7fffffff) {
-    console.error(`error: --every needs a positive seconds value, got "${everyRaw ?? everySec}"`)
+  // the shared floor matters most here: a systemd timer or cron line
+  // carries the cadence verbatim — a 0.05s timer is a busy loop that
+  // survives the CLI and keeps ticking after the session is gone
+  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
+    console.error(
+      `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw ?? everySec}"`
+    )
     process.exit(2)
   }
   const r = installWatch(dir, { everySec, print: argv.includes('--print') })

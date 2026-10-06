@@ -35,9 +35,12 @@ import {
   type EventSubscription,
 } from './events.ts'
 
-/** What a mailbox drop can honestly claim. It is a text transport: no
- *  order, no topics — a consumer that needs those configures a bus. */
-const MAILBOX_TOPIC = 'mailbox'
+/** What a verbatim mailbox drop is: a `notify` note. The write side
+ *  only stores plain text for exactly that event, and a foreign file
+ *  in the notify dir is a notify drop by definition — decoding it as
+ *  a 'mailbox' topic would lose the identity the publisher chose and
+ *  hide the drop from every `topics: ['notify']` subscription. */
+const MAILBOX_TOPIC = 'notify'
 const MAILBOX_KIND = 'note'
 
 /**
@@ -81,9 +84,9 @@ function parseEvent(text: string): EventInput | undefined {
   }
 }
 
-/** Drops are text, so a drain cannot recover a topic the writer did not
- *  encode. A bare note is reported as a note; a JSON drop is parsed back
- *  into the event that was published. */
+/** Drops are text — a drain recovers only what the writer encoded. A
+ *  verbatim drop is reported as the notify note it was published as; a
+ *  JSON drop is parsed back into the exact event. */
 function mailboxEvent(text: string, locator: string | undefined): EventEnvelope {
   const parsed = parseEvent(text)
   if (parsed !== undefined) {

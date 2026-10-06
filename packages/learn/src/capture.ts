@@ -83,7 +83,11 @@ const SUBWORD_RE = /^\s+[a-z][\w-]*/
  *  a Set for the same reason — a 23-branch alternation was the other
  *  S5843 hit. */
 const SLASH_PATH_RE = /[\w@.*+-]+(?:\/[\w@.*+-]+)+\/?/g
-const FILE_TOKEN_RE = /\b[\w.-]+\.[a-z]+\b/g
+/** Bare filenames `name.ext` — and a dedicated branch for leading-dot
+ *  dotfiles (`.env`, `.gitignore`, `.eslintrc.json`): the main pattern
+ *  needs a word char before the dot, which a leading dot never has.
+ *  The lookbehind keeps `.x` inside `foo.x` / `a.b` from matching. */
+const FILE_TOKEN_RE = /\b[\w.-]+\.[a-z]+\b|(?<![\w.])\.[\w-]+(?:\.[\w-]+)*/g
 const FILE_EXTS = new Set([
   'ts', 'tsx', 'mts', 'cts', 'js', 'mjs', 'cjs', 'jsx', 'md', 'json',
   'jsonc', 'toml', 'yml', 'yaml', 'sh', 'py', 'rs', 'go', 'sql', 'lock',
@@ -172,6 +176,16 @@ function collectFiles(text: string, cap: number): string[] {
   const out = new Set<string>()
   for (const m of text.matchAll(FILE_TOKEN_RE)) {
     const tok = m[0]
+    if (tok.startsWith('.')) {
+      // the dotfile branch — the whole token is the name (.env,
+      // .gitignore); there is no stem.ext to decompose
+      const v = scopeKey(tok)
+      if (keepKey(v)) {
+        out.add(v)
+      }
+      if (out.size >= cap) break
+      continue
+    }
     for (let i = tok.lastIndexOf('.'); i > 0; i = tok.lastIndexOf('.', i - 1)) {
       const ext = EXT_RUN_RE.exec(tok.slice(i + 1))?.[0]
       const after = ext === undefined ? '' : tok[i + 1 + ext.length]

@@ -128,6 +128,7 @@ export type MolVerdict =
   | 'occupied' // a live worker/session owns the mol — skip, never double-work
   | 'stopped' // operator `bro agents down` — never respawn a manual stop
   | 'parked' // a budget wall with no advertised end (quota / no-reset rate limit)
+  | 'blocked' // a closed dependency loop — 'complete' is unreachable, a worker can't fix it
   | 'failed' // attempts exhausted
   | 'error' // the mol or its probes could not be read
 
@@ -242,6 +243,23 @@ type RunStep = MolResult | { waitSec: number } | { retry: true }
 const isResult = (s: RunStep): s is MolResult => 'verdict' in s
 const isWait = (s: RunStep): s is { waitSec: number } => 'waitSec' in s
 
+/** A mol with a permanently-blocked step can never reach 'complete' —
+ *  every blocker sits in a closed loop, so no amount of worker effort
+ *  closes it. Report the defect instead of spawning into it. Waits on
+ *  open work (in-progress claims, external deps) stay spawns — claims
+ *  are claims, not proof of liveness, and a worker can release them. */
+function dagVerdict(n: ConvoyNext, molId: string, attempts: number): MolResult | undefined {
+  if (n.stuck.length === 0) {
+    return undefined
+  }
+  return {
+    mol: molId,
+    verdict: 'blocked',
+    attempts,
+    detail: `dependency cycle: ${n.stuck.join(', ')}`,
+  }
+}
+
 /** The pre-spawn read: load + next. Returns the ConvoyNext to act on,
  *  or a MolResult when the mol already settles the run (complete, a
  *  pending human gate, unreadable). */
@@ -259,7 +277,7 @@ function precheck(deps: RunDeps, molId: string, attempts: number): ConvoyNext | 
   if (n.state === 'gate') {
     return { mol: molId, verdict: 'gated', attempts, detail: n.gates.join(', ') }
   }
-  return n
+  return dagVerdict(n, molId, attempts) ?? n
 }
 
 /** A spawn refusal is a signal, not a verdict. The error's kind is the
@@ -336,6 +354,10 @@ function afterRun(
   if (after.state === 'gate') {
     return { mol: molId, verdict: 'gated', attempts: spent, detail: after.gates.join(', ') }
   }
+  const dag = dagVerdict(after, molId, spent)
+  if (dag !== undefined) {
+    return dag
+  }
   if (last.state === 'blocked') {
     const d = blockedDecision(deps.entry(molId), last.cause, last.resetAt, deps)
     if ('parked' in d) {
@@ -360,6 +382,24 @@ function afterRun(
   return { retry: true }
 }
 
+/** mol-queue2.sh's fast-fail ramp: an agent dead under ~300s never did
+ *  real work — a crash loop gets 900/1800/3600s spacing, doubling per
+ *  consecutive fast exit, capped at an hour-ish. A slow crash did work
+ *  and resets the streak — it pays the flat --retry-delay. */
+const FAST_FAIL_MS = 300_000
+const BACKOFF_BASE_SEC = 900
+const BACKOFF_CAP_SEC = 3600
+
+const backoffSec = (streak: number): number =>
+  Math.min(BACKOFF_BASE_SEC * 2 ** (streak - 1), BACKOFF_CAP_SEC)
+
+/** Agent lifetime for the fast-fail check — the registry-stamped
+ *  spawnedAt when the backend reports it, else the spawn call's start. */
+const agentLivedMs = (deps: RunDeps, spawnedAtMs: number, last: AgentInfo): number => {
+  const born = Date.parse(last.spawnedAt ?? '')
+  return deps.now() - (Number.isNaN(born) ? spawnedAtMs : born)
+}
+
 /** One molecule end-to-end: spawn → await → classify → respawn, until
  *  the mol completes, the attempts cap lands, or a wait/park verdict
  *  decides. */
@@ -369,17 +409,27 @@ export async function runMol(
   molId: string
 ): Promise<MolResult> {
   let attempts = 0
+  let fastFails = 0
   for (;;) {
     const pre = precheck(deps, molId, attempts)
     if ('verdict' in pre) {
       return pre
     }
     let step: RunStep
+    let delaySec = cfg.retryDelaySec
     try {
+      const t0 = deps.now()
       const agent = await deps.spawn(molId)
       deps.say(`run ${molId}: agent ${agent.id} up — polling`)
       const last = await pollAgent(deps, cfg, agent)
       step = afterRun(deps, cfg, molId, last, attempts)
+      if ('retry' in step) {
+        fastFails = agentLivedMs(deps, t0, last) < FAST_FAIL_MS ? fastFails + 1 : 0
+        if (fastFails > 0) {
+          delaySec = backoffSec(fastFails)
+          deps.say(`run ${molId}: fast exit #${fastFails} — respawn in ${isoEta(delaySec * 1000)}`)
+        }
+      }
     } catch (err) {
       if (!(err instanceof SpawnError)) {
         return { mol: molId, verdict: 'error', attempts, detail: errText(err) }
@@ -394,7 +444,7 @@ export async function runMol(
       continue
     }
     attempts += 1
-    await deps.sleepSec(cfg.retryDelaySec)
+    await deps.sleepSec(delaySec)
   }
 }
 
@@ -484,7 +534,7 @@ export async function runConvoyRun(argv: string[]): Promise<void> {
       const detail = r.detail === undefined ? '' : ` — ${r.detail}`
       console.log(`run ${r.mol} ${r.verdict}${detail}`)
     }
-    if (r.verdict === 'failed' || r.verdict === 'error') {
+    if (r.verdict === 'failed' || r.verdict === 'error' || r.verdict === 'blocked') {
       failed += 1
     }
   }

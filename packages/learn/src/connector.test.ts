@@ -392,7 +392,11 @@ describe('learnConnector', { skip: WIN32 }, () => {
       // second probe hits the snapshot — no second `bd kv list` spawn
       await probe.postTool(fx.dir, 's1')
       assert.equal(kvLists(), 1)
-      // a store write bumps the manifest — the next probe reads live
+      // a store write bumps the manifest — the next probe reads live.
+      // Rewrite the content too: a bare utimesSync bump relies on the
+      // fs's mtime granularity to move mtimeMs — a size change cannot
+      // be masked by it, so the stamp differs on every filesystem
+      writeFileSync(manifest, 'm1-updated')
       const later = new Date(Date.now() + 60_000)
       utimesSync(manifest, later, later)
       await probe.postTool(fx.dir, 's1')

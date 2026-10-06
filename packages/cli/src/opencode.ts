@@ -598,7 +598,7 @@ function makeCore(input: BroCoreInput) {
   const clean = new Set<string>()
   /** Sessions observed alive. `session.deleted` is the only retirement, and
    *  the idle gate suspends on real I/O — liveness is re-checked after each
-   *  await rather than assumed. */
+   *  suspending await before the re-prompt goes out, never assumed. */
   const live = new Set<string>()
 
   /** `session.created` primes rehydration while opencode is still waiting on a
@@ -682,7 +682,13 @@ function makeCore(input: BroCoreInput) {
     // this id, and gating it now would resurrect the entry and suppress a
     // session reusing it. The gate is set before the log/prompt awaits for
     // the same reason: a delete during them must clear it, not race it.
-    if (!live.has(sessionID) || gated.has(sessionID)) {
+    if (!live.has(sessionID)) {
+      return
+    }
+    if (gated.has(sessionID)) {
+      // the repeat block still earns a trace — it's the answer to
+      // "why didn't the agent get re-prompted?"
+      await log('info', `stop gate: already gated — not re-prompting (${reason || 'unfinished bro work'})`)
       return
     }
     gated.add(sessionID)

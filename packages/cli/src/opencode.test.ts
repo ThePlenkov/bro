@@ -457,7 +457,7 @@ describe('stop gate', () => {
 
   test('a second block is logged, never re-prompted — a gate, not a loop', async () => {
     respond({ stop: JSON.stringify(blocked) })
-    const { hooks, prompts } = await makeHooks()
+    const { hooks, logs, prompts } = await makeHooks()
 
     await finishTurn(hooks, 'ses_1')
     await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } })
@@ -470,6 +470,12 @@ describe('stop gate', () => {
     // bro skips its own re-evaluation on the repeat — stop_hook_active is the
     // same retry flag Claude uses
     assert.equal(stops[1]?.payload.stop_hook_active, true)
+    // the suppressed repeat is still traceable — the warn answers "why
+    // didn't it re-prompt?"
+    const gateLogs = logs.filter((l) => (l.message ?? '').includes('stop gate'))
+    assert.equal(gateLogs.length, 2)
+    assert.equal(gateLogs[1]?.level, 'info')
+    assert.match(gateLogs[1]?.message ?? '', /already gated/)
   })
 
   test('the one-shot guard is per session', async () => {

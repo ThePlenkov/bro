@@ -108,6 +108,43 @@ describe('nextStep', () => {
     const n = nextStep(m)
     assert.equal(n.state, 'blocked')
     assert.deepEqual(n.blocked.sort(), ['a', 'b'])
+    assert.deepEqual(n.stuck.sort(), ['a', 'b'])
+  })
+
+  it('marks a chain ending in a cycle stuck — nothing upstream can release it', () => {
+    const m = mol(
+      [issue('root', { issue_type: 'molecule' }), issue('a'), issue('b'), issue('c')],
+      [
+        { from: 'a', to: 'b' },
+        { from: 'b', to: 'a' },
+        { from: 'b', to: 'c' },
+      ],
+    )
+    const n = nextStep(m)
+    assert.deepEqual(n.stuck.sort(), ['a', 'b', 'c'])
+  })
+
+  it('a step waiting on an in-progress claim is transiently blocked, not stuck', () => {
+    const m = mol(
+      [
+        issue('root', { issue_type: 'molecule' }),
+        issue('a', { status: 'in_progress' }),
+        issue('b'),
+      ],
+      [{ from: 'a', to: 'b' }],
+    )
+    const n = nextStep(m)
+    assert.equal(n.state, 'blocked')
+    assert.deepEqual(n.stuck, [])
+  })
+
+  it('a blocked step waiting on open work outside the mol is not stuck', () => {
+    const m = mol([issue('root', { issue_type: 'molecule' }), issue('a')], [
+      { from: 'external-issue', to: 'a' },
+    ])
+    const n = nextStep(m)
+    assert.equal(n.state, 'blocked')
+    assert.deepEqual(n.stuck, [])
   })
 
   it('exposes independent ready steps for parallelism', () => {

@@ -409,8 +409,9 @@ const PHASE2_FLAGS: readonly string[] = [
   '--evidence',
 ]
 
-/** Phase 1 — the store-first query. Never returns. */
-function probePhase1(argv: string[], question: string, sessionId?: string): never {
+/** Phase 1 — the store-first query. Ends the command via exitCode —
+ *  never process.exit, which would truncate the output just printed. */
+function probePhase1(argv: string[], question: string, sessionId?: string): void {
   const stray = argv.find((a) => PHASE2_FLAGS.some((f) => a === f || a.startsWith(`${f}=`)))
   if (stray !== undefined) {
     fail(`${stray.split('=')[0]} records an answer — it needs --lesson`)
@@ -421,16 +422,20 @@ function probePhase1(argv: string[], question: string, sessionId?: string): neve
   checkBeads()
   const res = probeQuestion(question, { ...(sessionId !== undefined ? { sessionId } : {}) })
   warnSkipped(res.skipped)
+  // exitCode, not process.exit — a hard exit mid-flush truncates piped
+  // output (the hits the caller just printed)
   if (json) {
     console.log(JSON.stringify(res, null, 2))
-    process.exit(res.hits.length > 0 ? 0 : 1)
+    process.exitCode = res.hits.length > 0 ? 0 : 1
+    return
   }
   if (res.hits.length > 0) {
     for (const h of res.hits) {
       const l = h.lesson
       console.log(`${l.id}\t${l.confidence}\t${l.source}\t${l.trigger.on.join(',')}\t${l.lesson}`)
     }
-    process.exit(0)
+    process.exitCode = 0
+    return
   }
   console.log(`probe: ${res.question}`)
   for (const c of res.candidates) {
@@ -440,7 +445,7 @@ function probePhase1(argv: string[], question: string, sessionId?: string): neve
     'no stored lesson — investigate, then store the answer: ' +
       `bro learn probe "${res.question}" --lesson "…"`
   )
-  process.exit(1)
+  process.exitCode = 1
 }
 
 /** The phase-2 trigger — explicit flags win; absent them the question's
@@ -489,6 +494,7 @@ function cmdProbe(argv: string[]): void {
   const answer = flag(argv, '--lesson')
   if (answer === undefined) {
     probePhase1(argv, question, sessionId)
+    return // phase 1 ends the command — exitCode carries the verdict
   }
   // phase 2 — validate before touching the store, as cmdAdd does:
   // a malformed flag must report the flag, not a beads setup error

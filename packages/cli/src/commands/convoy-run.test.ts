@@ -23,13 +23,19 @@ const mol = (id: string): Molecule => ({
   dependencies: [],
 })
 
-const next = (state: ConvoyNext['state'], gates: string[] = []): ConvoyNext => ({
+const next = (
+  state: ConvoyNext['state'],
+  gates: string[] = [],
+  over: Partial<ConvoyNext> = {}
+): ConvoyNext => ({
   mol: 'm',
   state,
   ready: [],
   gates,
   inProgress: [],
   blocked: [],
+  stuck: [],
+  ...over,
 })
 
 const agent = (id: string, state: AgentState = 'running', over: Partial<AgentInfo> = {}): AgentInfo => ({
@@ -47,8 +53,8 @@ interface World {
   /** scripted nextStep states per mol — shifted per call, last repeats */
   nexts: Map<string, ConvoyNext[]>
   /** scripted status() returns per agent — shifted per call, last repeats.
-   *  An entry is an AgentState or a fuller {state, cause, resetAt}. */
-  states: Map<string, (AgentState | Pick<AgentInfo, 'state' | 'cause' | 'resetAt'>)[]>
+   *  An entry is an AgentState or a fuller {state, cause, resetAt, spawnedAt}. */
+  states: Map<string, (AgentState | Pick<AgentInfo, 'state' | 'cause' | 'resetAt' | 'spawnedAt'>)[]>
   entries: Map<string, AgentRegistryEntry>
   full: boolean
 }
@@ -83,7 +89,7 @@ function world(over: Partial<World> = {}): World {
       const item = q.length > 1 ? q.shift()! : q[0]!
       const d = typeof item === 'string' ? { state: item } : item
       if (d.state === 'lost') throw new AgentNotFound(id)
-      return agent(id, d.state, { cause: d.cause, resetAt: d.resetAt })
+      return agent(id, d.state, { cause: d.cause, resetAt: d.resetAt, spawnedAt: d.spawnedAt })
     },
     entry: (molId) => w.entries.get(molId),
     entryState: (e) => (e.stopped === true ? 'stopped' : 'exited'),
@@ -169,13 +175,81 @@ describe('runMol', () => {
   test('a crash respawns — done on the second attempt', async () => {
     const w = world()
     w.nexts.set('m-1', [next('step'), next('step'), next('step'), next('complete')])
-    w.states.set('n-1', ['exited'])
+    // lived 400s — past the fast-fail window, flat retry-delay applies
+    w.states.set('n-1', [
+      { state: 'exited', spawnedAt: new Date(1_000_000 - 400_000).toISOString() },
+    ])
     w.states.set('n-2', ['exited'])
     const r = await runMol(w.deps, CFG, 'm-1')
     assert.equal(r.verdict, 'done')
     assert.equal(r.attempts, 2)
     assert.deepEqual(w.spawns, ['m-1', 'm-1'])
     assert.deepEqual(w.sleeps, [15, 60, 15]) // poll, retry-delay, poll
+  })
+
+  test('fast exits back off — the 900/1800/3600 ramp, capped', async () => {
+    const w = world()
+    // no spawnedAt → lifetime ~0 — a crash loop, never real work
+    w.nexts.set('m-1', [
+      next('step'), next('step'), next('step'), next('step'),
+      next('step'), next('step'), next('step'), next('complete'),
+    ])
+    const r = await runMol(w.deps, CFG, 'm-1')
+    assert.equal(r.verdict, 'done')
+    assert.equal(r.attempts, 4)
+    assert.deepEqual(w.sleeps, [15, 900, 15, 1800, 15, 3600, 15])
+  })
+
+  test('a slow exit pays flat retry-delay and resets the ramp', async () => {
+    const w = world()
+    w.nexts.set('m-1', [
+      next('step'), next('step'), next('step'), next('step'),
+      next('step'), next('step'), next('step'), next('complete'),
+    ])
+    // n-2 did real work (spawned 400s ago) — its death is a crash, not a loop
+    w.states.set('n-2', [
+      { state: 'exited', spawnedAt: new Date(1_000_000 - 400_000).toISOString() },
+    ])
+    const r = await runMol(w.deps, CFG, 'm-1')
+    assert.equal(r.verdict, 'done')
+    assert.equal(r.attempts, 4)
+    assert.deepEqual(w.sleeps, [15, 900, 15, 60, 15, 900, 15])
+  })
+
+  test('a closed dependency loop is reported blocked — never spawned', async () => {
+    const w = world()
+    w.nexts.set('m-1', [
+      next('blocked', [], { blocked: ['s-1', 's-2'], stuck: ['s-1', 's-2'] }),
+    ])
+    const r = await runMol(w.deps, CFG, 'm-1')
+    assert.equal(r.verdict, 'blocked')
+    assert.match(r.detail ?? '', /dependency cycle: s-1, s-2/)
+    assert.deepEqual(w.spawns, [])
+  })
+
+  test('blocked on open work still spawns — a claim is not a cycle', async () => {
+    const w = world()
+    // blocked, but every blocker is open work (in_progress claim) — a
+    // worker can release and re-claim it
+    w.nexts.set('m-1', [
+      next('blocked', [], { blocked: ['s-1'], inProgress: ['s-0'], stuck: [] }),
+      next('complete'),
+    ])
+    const r = await runMol(w.deps, CFG, 'm-1')
+    assert.equal(r.verdict, 'done')
+    assert.equal(w.spawns.length, 1)
+  })
+
+  test('a stuck step discovered after the run is blocked, not a burned retry', async () => {
+    const w = world()
+    w.nexts.set('m-1', [
+      next('step'),
+      next('blocked', [], { blocked: ['s-2'], stuck: ['s-2'] }),
+    ])
+    w.states.set('n-1', ['exited'])
+    const r = await runMol(w.deps, CFG, 'm-1')
+    assert.equal(r.verdict, 'blocked')
+    assert.equal(w.spawns.length, 1)
   })
 
   test('attempts cap lands — failed', async () => {

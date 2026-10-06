@@ -184,6 +184,28 @@ describe('capture', { skip: WIN32 }, () => {
     )
   })
 
+  it('drill: bare dotfiles are trigger paths — .env and .gitignore count', () => {
+    withFakeBd(
+      {
+        rows: [
+          row('fx-d2', {
+            status: 'closed',
+            labels: ['drill'],
+            title: 'investigate env loading',
+            description: 'edits land in .env and .gitignore only',
+            notes: DRILL_MEMO,
+          }),
+        ],
+      },
+      () => {
+        const { plan } = captureLessons({ sources: ['drill'] })
+        const l = plan.write[0]!.lesson
+        assert.ok(l.trigger.match?.paths?.includes('.env'))
+        assert.ok(l.trigger.match?.paths?.includes('.gitignore'))
+      }
+    )
+  })
+
   it('drill: a sink-routed closed prevention bead auto-captures as established', () => {
     withFakeBd(
       {
