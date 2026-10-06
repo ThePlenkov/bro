@@ -63,6 +63,17 @@ import {
 } from '@broject/core'
 import type { ProbeReporter, ProbeResult, ProbeTiming } from '@broject/core'
 import { markerLive, ownerTag } from './proc-owner.ts'
+import { runGuards, type GuardConfig } from '@broject/guard'
+import {
+  hooksDir,
+  previousTraceFile,
+  readTraceTail,
+  relativize,
+  sessionContextText,
+} from '@broject/learn'
+import type { MatchContext } from '@broject/learn'
+import type { GuardEvent } from '@broject/core'
+import { loadBroConfig } from '../plugins.ts'
 import {
   cliVersion,
   emitCommitTrailers,
@@ -879,6 +890,41 @@ function flushPerf(sessionId: string, event: string, t0: number): void {
 
 // --- event handlers -----------------------------------------------------------
 
+/** Trace tail for this session — the MatchContext's structured half.
+ *  No hooks dir or session id means an empty tail, never a throw. */
+function sessionTail(sessionId: string): { entries: ReturnType<typeof readTraceTail>['entries']; raw: string } {
+  const path = traceFile(sessionId)
+  return path === null ? { entries: [], raw: '' } : readTraceTail(path)
+}
+
+/** One guard-engine call per emit path (spec: bro-nkn6). Declarations
+ *  resolve here — connectors only contribute `guards()`, evaluation is
+ *  centralized. Fail-open like every probe: a wedged engine emits
+ *  nothing rather than stall a hook. */
+async function guardLines(
+  event: GuardEvent,
+  sessionId: string,
+  mctx: () => Promise<MatchContext>
+): Promise<string[]> {
+  try {
+    const dir = process.cwd()
+    const cfg = (loadBroConfig(dir) as Record<string, unknown>).guard as GuardConfig
+    const run = await runGuards({
+      dir,
+      sessionId,
+      event,
+      mctx,
+      defs: cfg.defs,
+      cfg,
+      record: true,
+      armed: () => readArmed(sessionId),
+    })
+    return run.lines
+  } catch {
+    return []
+  }
+}
+
 async function emitSessionContext(
   event: 'SessionStart' | 'PostCompaction' | 'PreCompact',
   sessionId = '',
@@ -892,6 +938,21 @@ async function emitSessionContext(
     parallelLines(sessionId, probeReporter(cliEvent, 'parallelWork')),
   ])
   const parts = [...start.lines, ...par.lines]
+  // 'session-start' covers all three rehydrate events; the match
+  // haystack is the same session-context text + previous-session trace
+  // tail the learn connector assembles
+  parts.push(
+    ...(await guardLines('session-start', sessionId, async () => {
+      const dir = process.cwd()
+      const hooks = hooksDir(dir)
+      const prev = hooks !== null && sessionId !== '' ? previousTraceFile(hooks, sessionId) : null
+      const tail = prev !== null ? readTraceTail(prev) : { entries: [], raw: '' }
+      return {
+        text: `${await sessionContextText({ dir, sessionId })}\n${tail.raw}`,
+        trace: relativize(dir, tail.entries),
+      }
+    }))
+  )
   if (parts.length > 0) {
     context(event, `bro state — resume from here:\n${parts.join('\n')}`)
   }
@@ -926,6 +987,15 @@ async function emitPromptContext(input: HookInput): Promise<void> {
       prompt,
       probeReporter('prompt-submit', 'promptSubmit')
     ))
+  )
+  // guards on prompt-submit: match.terms sees the raw prompt, trace
+  // keys see this session's tail, state sees the live repo
+  parts.push(
+    ...(await guardLines('prompt-submit', sessionId, async () => {
+      const dir = process.cwd()
+      const tail = sessionTail(sessionId)
+      return { text: prompt, trace: relativize(dir, tail.entries) }
+    }))
   )
   // a timed-out or thrown probe masquerades as "no state" — mark only
   // when every probe answered, else the marker suppresses a retry for
@@ -985,6 +1055,15 @@ async function emitPostTool(input: HookInput): Promise<void> {
       probeReporter('post-tool', 'postTool')
     ))
   )
+  // guards on post-tool: match sees the journaled trace tail (this
+  // landing included — journalTrace ran first), state sees live repo
+  lines.push(
+    ...(await guardLines('post-tool', sessionId, async () => {
+      const dir = process.cwd()
+      const tail = sessionTail(sessionId)
+      return { text: tail.raw, trace: relativize(dir, tail.entries) }
+    }))
+  )
   if (lines.length > 0) {
     context('PostToolUse', lines.join('\n'))
   }
@@ -1035,6 +1114,15 @@ async function emitStopGate(input: HookInput): Promise<void> {
       hints.push(hint)
     }
   }
+  // stop guards are passive hints — additionalContext only; a guard is
+  // a nudge, never a `decision: block` (spec: bro-nkn6)
+  hints.push(
+    ...(await guardLines('stop', sessionId, async () => {
+      const dir = process.cwd()
+      const tail = sessionTail(sessionId)
+      return { text: tail.raw, trace: relativize(dir, tail.entries) }
+    }))
+  )
   if (hints.length > 0) {
     context('Stop', hints.join('\n'))
   }

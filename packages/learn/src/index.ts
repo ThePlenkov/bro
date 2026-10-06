@@ -29,11 +29,27 @@ export {
   withStoreLock,
 } from './store.ts'
 export type { LessonListing, SkippedEntry } from './store.ts'
-export { matchPath, parseTraceLine, triggerMatches } from './match.ts'
+export { matchKeys, matchPath, parseTraceLine, triggerMatches } from './match.ts'
 export type { MatchContext, TraceEntry } from './match.ts'
 export { DEFAULT_LEARN_CONFIG, learnSection } from './config.ts'
 export type { LearnConfig } from './config.ts'
 export { learnConnector } from './connector.ts'
+// shared injection-plane state — the fired set, session trace tail, and
+// session-context text are the same files/reads guards run on (spec:
+// bro-nkn6 — no second dedup plane)
+export {
+  firedCounts,
+  firedFile,
+  hooksDir,
+  previousTraceFile,
+  readTraceTail,
+  recordFired,
+  relativize,
+  safeId,
+  sessionContextText,
+  traceFile,
+  TRACE_TAIL_LINES,
+} from './connector.ts'
 export { applyCapture, captureLessons, CAPTURE_SOURCES, planCapture } from './capture.ts'
 export type {
   CaptureCandidate,

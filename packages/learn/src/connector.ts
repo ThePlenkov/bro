@@ -55,18 +55,18 @@ const STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 /** How much journal a probe evaluates — deep enough for the session's
  *  recent work, shallow enough to stay a tail read. */
-const TRACE_TAIL_LINES = 100
+export const TRACE_TAIL_LINES = 100
 
 /** "Live" for previous-trace exclusion — the same day-window the
  *  parallel-work nudge uses: an owned marker stays live while its pid
  *  does, an ownerless one only inside the window. */
 const LIVE_SESSION_MS = 24 * 60 * 60 * 1000
 
-const safeId = (s: string): string => s.replace(/[^\w.-]/g, '_')
+export const safeId = (s: string): string => s.replace(/[^\w.-]/g, '_')
 
 /** `<git-common>/bro/hooks` — shared across linked worktrees like the
  *  marker dir it sits beside. null outside a repo. */
-function hooksDir(dir: string): string | null {
+export function hooksDir(dir: string): string | null {
   const r = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'])
   if (r.code !== 0 || r.out.trim() === '') {
     return null
@@ -76,10 +76,10 @@ function hooksDir(dir: string): string | null {
   return join(resolve(dir, r.out.trim()), 'bro', 'hooks')
 }
 
-const traceFile = (hooks: string, sessionId: string): string =>
+export const traceFile = (hooks: string, sessionId: string): string =>
   join(hooks, 'trace', `${safeId(sessionId)}.jsonl`)
 
-const firedFile = (hooks: string, sessionId: string): string =>
+export const firedFile = (hooks: string, sessionId: string): string =>
   join(hooks, 'fired', safeId(sessionId))
 
 interface TraceTail {
@@ -89,7 +89,7 @@ interface TraceTail {
 }
 
 /** The last TRACE_TAIL_LINES journal entries — malformed lines skip. */
-function readTraceTail(path: string, max = TRACE_TAIL_LINES): TraceTail {
+export function readTraceTail(path: string, max = TRACE_TAIL_LINES): TraceTail {
   try {
     const lines = readFileSync(path, 'utf8')
       .split('\n')
@@ -145,7 +145,7 @@ function sessionStillLive(hooks: string, safe: string, now: number): boolean {
  *  tell apart — new-session matching uses other sessions' traces).
  *  A provably-live session's trace is concurrent work, not a resume
  *  tail, and is skipped. */
-function previousTraceFile(hooks: string, sessionId: string): string | null {
+export function previousTraceFile(hooks: string, sessionId: string): string | null {
   try {
     const dir = join(hooks, 'trace')
     const mine = `${safeId(sessionId)}.jsonl`
@@ -176,7 +176,7 @@ function previousTraceFile(hooks: string, sessionId: string): string | null {
 
 /** lesson id → fires this session — one line per fire in the fired
  *  file, so budget is a line count. */
-function firedCounts(path: string): Map<string, number> {
+export function firedCounts(path: string): Map<string, number> {
   const counts = new Map<string, number>()
   try {
     for (const id of readFileSync(path, 'utf8').split('\n')) {
@@ -195,7 +195,7 @@ function firedCounts(path: string): Map<string, number> {
  *  post-tool hooks from tearing a record; restarts re-read the file so
  *  a fired lesson stays fired. Stale fired files prune on the marker
  *  TTL. */
-function recordFired(path: string, ids: string[]): void {
+export function recordFired(path: string, ids: string[]): void {
   try {
     const dir = dirname(path)
     mkdirSync(dir, { recursive: true })
@@ -231,7 +231,7 @@ function learnConfig(dir: string): LearnConfig {
  *  claimed beads (id + title + labels), in-progress mol steps. Each
  *  component is independently fail-open: a dead bd or a non-repo dir
  *  degrades the text, it doesn't kill the probe. */
-async function sessionContextText(ctx: ConnectorCtx): Promise<string> {
+export async function sessionContextText(ctx: ConnectorCtx): Promise<string> {
   const parts: string[] = []
   const top = gitTry(['-C', ctx.dir, 'rev-parse', '--show-toplevel'])
   parts.push(`repo:${basename(top.code === 0 && top.out.trim() !== '' ? top.out.trim() : ctx.dir)}`)
@@ -279,7 +279,7 @@ async function sessionContextText(ctx: ConnectorCtx): Promise<string> {
 /** Absolute trace paths match repo-relative globs — a lesson's
  *  `paths: ['specs/**']` names the repo, not the filesystem. Paths
  *  outside ctx.dir keep their absolute form. */
-function relativize(dir: string, entries: TraceEntry[]): TraceEntry[] {
+export function relativize(dir: string, entries: TraceEntry[]): TraceEntry[] {
   return entries.map((e) => ({
     ...e,
     paths: e.paths?.map((p) => {

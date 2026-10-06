@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import type { LessonTrigger } from './lesson.ts'
 import {
+  matchKeys,
   matchPath,
   parseTraceLine,
   triggerMatches,
@@ -138,5 +139,35 @@ describe('parseTraceLine', () => {
       { tool: 'edit', paths: ['a'] }
     )
     assert.deepEqual(parseTraceLine('{"paths":[]}'), {})
+  })
+})
+
+describe('matchKeys', () => {
+  it('returns one verdict row per present key — the guard-test granularity', () => {
+    const m = { terms: ['deploy'], tools: ['exec'], errors: false }
+    const rows = matchKeys(m, ctx('deploy it', [{ tool: 'exec', ok: true }]))
+    assert.deepEqual(rows, [
+      { key: 'terms', ok: true },
+      { key: 'tools', ok: true },
+      { key: 'errors', ok: true },
+    ])
+    const miss = matchKeys(m, ctx('nope', [{ tool: 'exec', ok: false }]))
+    assert.deepEqual(
+      miss.map((r) => [r.key, r.ok]),
+      [
+        ['terms', false],
+        ['tools', true],
+        ['errors', false],
+      ]
+    )
+  })
+
+  it('absent keys produce no rows; triggerMatches is their conjunction', () => {
+    assert.deepEqual(matchKeys({}, ctx('x')), [])
+    const m = { terms: ['a'], commands: ['gh'] }
+    const t = { on: ['post-tool' as const], match: m }
+    const trace = [{ command: 'gh pr merge' }]
+    assert.equal(triggerMatches(t, ctx('a', trace)), matchKeys(m, ctx('a', trace)).every((k) => k.ok))
+    assert.equal(triggerMatches(t, ctx('zz', trace)), false)
   })
 })

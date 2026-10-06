@@ -19,3 +19,7 @@ export type {
 export { collectGuards } from '@broject/core'
 export type { GuardConfig } from './config.ts'
 export { DEFAULT_GUARD_CONFIG, guardSection } from './config.ts'
+export { evalState, liveState } from './probes.ts'
+export type { ClauseVerdict, LiveState, NamedProbe } from './probes.ts'
+export { renderSay, runGuards } from './engine.ts'
+export type { GuardEvalOpts, GuardRun, GuardVerdict } from './engine.ts'
