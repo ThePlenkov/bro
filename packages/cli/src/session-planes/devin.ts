@@ -40,14 +40,30 @@ export function devinLocksDir(
   return join(base, 'devin', 'cli', 'session_locks')
 }
 
+/** One lock file → its pid. A file that vanished mid-scan was never
+ *  counted; anything else unreadable fails the whole count closed.
+ *  Non-pid content returns nothing — the strict digit check keeps a
+ *  corrupt `123oops`/`0x10` lock from aliasing an unrelated live pid. */
+function lockPid(dir: string, name: string): number | undefined {
+  let raw: string
+  try {
+    raw = readFileSync(join(dir, name), 'utf8').trim()
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined
+    }
+    throw new SpawnError(
+      `cannot verify devin session count — ${dir}/${name}: ${(err as Error).message}`,
+      'unavailable'
+    )
+  }
+  return /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : undefined
+}
+
 /** Live devin sessions — lock files whose pid is alive, deduplicated.
  *  A missing dir means no devin install → zero sessions; any OTHER
  *  read failure throws SpawnError('unavailable') — an unverifiable
- *  count fails closed, never silently admits. Same rule per lock
- *  file: one that vanished mid-scan was never counted, one that
- *  can't be read (EACCES, EISDIR) fails the count. Non-pid content
- *  counts nothing — the strict digit check keeps a corrupt
- *  `123oops`/`0x10` lock from aliasing an unrelated live pid. */
+ *  count fails closed, never silently admits. */
 export function countDevinSessions(dirs: string[]): number {
   const live = new Set<number>()
   for (const dir of dirs) {
@@ -67,23 +83,8 @@ export function countDevinSessions(dirs: string[]): number {
       if (!name.endsWith('.lock')) {
         continue
       }
-      let raw: string
-      try {
-        raw = readFileSync(join(dir, name), 'utf8').trim()
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-          continue
-        }
-        throw new SpawnError(
-          `cannot verify devin session count — ${dir}/${name}: ${(err as Error).message}`,
-          'unavailable'
-        )
-      }
-      if (!/^\d+$/.test(raw)) {
-        continue
-      }
-      const pid = Number.parseInt(raw, 10)
-      if (pidAlive(pid)) {
+      const pid = lockPid(dir, name)
+      if (pid !== undefined && pidAlive(pid)) {
         live.add(pid)
       }
     }
