@@ -473,8 +473,9 @@ interface BroCoreInput {
   reprompt(sessionID: string, text: string): Promise<unknown>
   /** Optional durable store for the one-shot gate set — V2 hands it
    *  `ctx.storage` so a plugin reload doesn't re-prompt a session that
-   *  already blocked once. Load races early events harmlessly: `gated`
-   *  is only consulted after a full clean turn. */
+   *  already blocked once. A load that settles after a `session.deleted`
+   *  must not resurrect that id's gate — deletes landing during the
+   *  snapshot read are tombstoned out of the merge. */
   persist?: {
     load(): Promise<unknown>
     save(ids: readonly string[]): Promise<unknown>
@@ -580,26 +581,40 @@ function makeCore(input: BroCoreInput) {
   const persistGated = (): void => {
     void input.persist?.save([...gated]).catch(() => {})
   }
+  /** Ids deleted while the persisted snapshot is still in flight — the
+   *  merge would otherwise resurrect the gate onto a session reusing the
+   *  id and its first block would be swallowed as a repeat. */
+  const retiredDuringLoad = new Set<string>()
+  let persistLoaded = input.persist === undefined
   if (input.persist) {
     void input.persist
       .load()
       .then((stored) => {
         if (Array.isArray(stored)) {
           for (const id of stored) {
-            if (typeof id === 'string') {
+            if (typeof id === 'string' && !retiredDuringLoad.has(id)) {
               gated.add(id)
             }
           }
         }
       })
       .catch(() => {})
+      .finally(() => {
+        persistLoaded = true
+        retiredDuringLoad.clear()
+      })
   }
   /** Sessions whose last assistant turn finished cleanly. */
   const clean = new Set<string>()
   /** Sessions observed alive. `session.deleted` is the only retirement, and
    *  the idle gate suspends on real I/O — liveness is re-checked after each
-   *  suspending await before the re-prompt goes out, never assumed. */
-  const live = new Set<string>()
+   *  suspending await before the re-prompt goes out, never assumed. The
+   *  value is an instance token minted per observing event, not membership:
+   *  a delete followed by an id-reusing create leaves the map occupied by a
+   *  *different* session, and a bare `has` would wave a stale gate through
+   *  to it. */
+  const live = new Map<string, number>()
+  let liveSeq = 0
 
   /** `session.created` primes rehydration while opencode is still waiting on a
    *  prompt — the probe costs real seconds, and this is the only window where
@@ -607,7 +622,7 @@ function makeCore(input: BroCoreInput) {
   const onSessionCreated = (props: Record<string, unknown>): void => {
     const sessionID = props.sessionID
     if (typeof sessionID === 'string') {
-      live.add(sessionID)
+      live.set(sessionID, ++liveSeq)
       void hydrate(sessionID, 'session-start')
     }
   }
@@ -622,7 +637,11 @@ function makeCore(input: BroCoreInput) {
     if (info?.role !== 'assistant' || typeof info.sessionID !== 'string') {
       return
     }
-    live.add(info.sessionID)
+    // a fresh token only when the session wasn't already live — minting
+    // one per update would invalidate an idle gate mid-flight for no reason
+    if (!live.has(info.sessionID)) {
+      live.set(info.sessionID, ++liveSeq)
+    }
     if (asRecord(info.time)?.completed !== undefined && info.error === undefined) {
       clean.add(info.sessionID)
     } else {
@@ -639,6 +658,11 @@ function makeCore(input: BroCoreInput) {
       return
     }
     rehydration.delete(sessionID)
+    // tombstone for the in-flight snapshot merge — a persisted copy of
+    // this gate arriving now belongs to the dead session, not the id
+    if (!persistLoaded) {
+      retiredDuringLoad.add(sessionID)
+    }
     if (gated.delete(sessionID)) {
       persistGated()
     }
@@ -665,6 +689,13 @@ function makeCore(input: BroCoreInput) {
     if (typeof sessionID !== 'string' || !clean.delete(sessionID)) {
       return
     }
+    // the instance token is captured before any suspending await: a
+    // `session.deleted` followed by an id-reusing `session.created` leaves
+    // `live` occupied by a different session, and only the token tells the
+    // stale gate apart from it
+    const instance = live.get(sessionID)
+    const stillAlive = (): boolean =>
+      instance !== undefined && live.get(sessionID) === instance
     const control = await probe('stop', {
       session_id: sessionID,
       stop_hook_active: gated.has(sessionID),
@@ -679,10 +710,10 @@ function makeCore(input: BroCoreInput) {
       return
     }
     // the probe awaited real I/O — a session.deleted that interleaved retired
-    // this id, and gating it now would resurrect the entry and suppress a
-    // session reusing it. The gate is set before the log/prompt awaits for
+    // this instance, and gating it now would resurrect the entry and suppress
+    // a session reusing it. The gate is set before the log/prompt awaits for
     // the same reason: a delete during them must clear it, not race it.
-    if (!live.has(sessionID)) {
+    if (!stillAlive()) {
       return
     }
     if (gated.has(sessionID)) {
@@ -696,8 +727,9 @@ function makeCore(input: BroCoreInput) {
     const message = reason || 'unfinished bro work'
     await log('warn', `stop gate: ${message}`)
     // the log await is real I/O — a session.deleted landing inside it
-    // retires the id, and prompting now would hit a reused session
-    if (!live.has(sessionID)) {
+    // retires the instance, and prompting now could hit a session that
+    // reused the id
+    if (!stillAlive()) {
       return
     }
     try {

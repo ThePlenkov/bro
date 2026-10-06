@@ -113,9 +113,20 @@ describe('cron line', () => {
     // 90min → every 2h on the hour (rounds up), not a bogus */90
     assert.match(cronLine('/r', 5400, '/p', '/r/.git', '1'), /^0 \*\/2 \* \* \* /)
     assert.match(cronLine('/r', 3600, '/p', '/r/.git', '1'), /^0 \*\/1 \* \* \* /)
-    // a day or more moves to the day field
+    // a day or more moves to the day field — a 2-day step ranges from
+    // day 2, since `*/2` would fire on the 31st and the 1st (a 1-day gap)
     assert.match(cronLine('/r', 86400, '/p', '/r/.git', '1'), /^0 0 \*\/1 \* \* /)
-    assert.match(cronLine('/r', 172800, '/p', '/r/.git', '1'), /^0 0 \*\/2 \* \* /)
+    assert.match(cronLine('/r', 172800, '/p', '/r/.git', '1'), /^0 0 2-31\/2 \* \* /)
+  })
+
+  test('non-divisor steps range from the step value — a field reset cannot fire early', () => {
+    // */7 would fire :56 then :00 — a 4-minute gap on a 7-minute cadence
+    assert.match(cronLine('/r', 420, '/p', '/r/.git', '1'), /^7-59\/7 \* \* \* \* /)
+    // */5 hours would fire 20:00 then 00:00 — a 4-hour gap on a 5-hour cadence
+    assert.match(cronLine('/r', 18000, '/p', '/r/.git', '1'), /^0 5-23\/5 \* \* \* /)
+    // divisor steps keep the `*/N` form — they wrap evenly
+    assert.match(cronLine('/r', 900, '/p', '/r/.git', '1'), /^\*\/15 \* \* \* \* /)
+    assert.match(cronLine('/r', 21600, '/p', '/r/.git', '1'), /^0 \*\/6 \* \* \* /)
   })
 
   test('a newline in the checkout path refuses — cron cannot quote it', () => {

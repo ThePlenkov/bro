@@ -400,6 +400,42 @@ const agentLivedMs = (deps: RunDeps, spawnedAtMs: number, last: AgentInfo): numb
   return deps.now() - (Number.isNaN(born) ? spawnedAtMs : born)
 }
 
+/** One spawn → poll → classify cycle of the mol loop: the step to act
+ *  on, the delay the fast-fail streak earned, and the updated streak.
+ *  A SpawnError lands as the refusal-classified step; anything else as
+ *  an error result — both flow back through the caller's RunStep
+ *  checks unchanged. */
+async function molAttempt(
+  deps: RunDeps,
+  cfg: RunArgs,
+  molId: string,
+  attempts: number,
+  fastFails: number
+): Promise<{ step: RunStep; delaySec: number; fastFails: number }> {
+  let step: RunStep
+  let delaySec = cfg.retryDelaySec
+  try {
+    const t0 = deps.now()
+    const agent = await deps.spawn(molId)
+    deps.say(`run ${molId}: agent ${agent.id} up — polling`)
+    const last = await pollAgent(deps, cfg, agent)
+    step = afterRun(deps, cfg, molId, last, attempts)
+    if ('retry' in step) {
+      fastFails = agentLivedMs(deps, t0, last) < FAST_FAIL_MS ? fastFails + 1 : 0
+      if (fastFails > 0) {
+        delaySec = backoffSec(fastFails)
+        deps.say(`run ${molId}: fast exit #${fastFails} — respawn in ${isoEta(delaySec * 1000)}`)
+      }
+    }
+  } catch (err) {
+    step =
+      err instanceof SpawnError
+        ? refusalOutcome(deps, cfg, molId, err, attempts)
+        : { mol: molId, verdict: 'error', attempts, detail: errText(err) }
+  }
+  return { step, delaySec, fastFails }
+}
+
 /** One molecule end-to-end: spawn → await → classify → respawn, until
  *  the mol completes, the attempts cap lands, or a wait/park verdict
  *  decides. */
@@ -415,27 +451,9 @@ export async function runMol(
     if ('verdict' in pre) {
       return pre
     }
-    let step: RunStep
-    let delaySec = cfg.retryDelaySec
-    try {
-      const t0 = deps.now()
-      const agent = await deps.spawn(molId)
-      deps.say(`run ${molId}: agent ${agent.id} up — polling`)
-      const last = await pollAgent(deps, cfg, agent)
-      step = afterRun(deps, cfg, molId, last, attempts)
-      if ('retry' in step) {
-        fastFails = agentLivedMs(deps, t0, last) < FAST_FAIL_MS ? fastFails + 1 : 0
-        if (fastFails > 0) {
-          delaySec = backoffSec(fastFails)
-          deps.say(`run ${molId}: fast exit #${fastFails} — respawn in ${isoEta(delaySec * 1000)}`)
-        }
-      }
-    } catch (err) {
-      if (!(err instanceof SpawnError)) {
-        return { mol: molId, verdict: 'error', attempts, detail: errText(err) }
-      }
-      step = refusalOutcome(deps, cfg, molId, err, attempts)
-    }
+    const attempt = await molAttempt(deps, cfg, molId, attempts, fastFails)
+    const { step, delaySec } = attempt
+    fastFails = attempt.fastFails
     if (isResult(step)) {
       return step
     }

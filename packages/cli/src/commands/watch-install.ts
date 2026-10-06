@@ -130,20 +130,27 @@ WantedBy=timers.target
  *  at 59 — a 90-minute step is not "every 90 minutes", it fires once
  *  an hour (or is rejected). Larger intervals move up a field,
  *  rounding UP so the effective cadence is never faster than
- *  configured. */
+ *  configured. A whole-field step resets at the boundary — a 7-minute
+ *  step fires at :56 and again at :00 — so non-divisor steps instead
+ *  range from the step value (`7-59/7`), keeping every gap ≥ the
+ *  cadence. */
 export function cronSchedule(everySec: number): string {
   const mins = Math.ceil(everySec / 60)
   if (mins <= 1) {
     return '* * * * *'
   }
   if (mins < 60) {
-    return `*/${mins} * * * *`
+    const minuteField = 60 % mins === 0 ? `*/${mins}` : `${mins}-59/${mins}`
+    return `${minuteField} * * * *`
   }
   const hours = Math.ceil(mins / 60)
   if (hours < 24) {
-    return `0 */${hours} * * *`
+    const hourField = 24 % hours === 0 ? `*/${hours}` : `${hours}-23/${hours}`
+    return `0 ${hourField} * * *`
   }
-  return `0 0 */${Math.ceil(hours / 24)} * *`
+  const days = Math.ceil(hours / 24)
+  const dayField = days === 1 ? '*/1' : `${days}-31/${days}`
+  return `0 0 ${dayField} * *`
 }
 
 /** A managed line is a crontab TEXT FIELD: a newline starts a new job
@@ -416,6 +423,21 @@ export function installWatch(
     return { ...res, backend }
   }
   // cron install — a stale systemd unit for this repo goes best-effort
+  return installCronPath(r, dir, opts.everySec, version, backend)
+}
+
+/** Cron backend: a stale systemd unit for this repo is retired
+ *  best-effort — files are deleted either way; a disable that fails on
+ *  a still-loaded timer earns a warning on the result, never a
+ *  rollback (the cron entry is already live, and a lingering timer
+ *  would double-tick). */
+function installCronPath(
+  r: Resolved,
+  dir: string,
+  everySec: number,
+  version: string,
+  backend: SchedBackend
+): WatchInstallResult {
   const svc = join(r.unitDir, `${r.unit}.service`)
   const tmr = join(r.unitDir, `${r.unit}.timer`)
   const hadUnits = existsSync(svc) || existsSync(tmr)
@@ -427,7 +449,7 @@ export function installWatch(
     // the manager re-reads its unit dir
     r.run('systemctl', ['--user', 'daemon-reload'])
   }
-  const res = installCron(r, dir, opts.everySec, version)
+  const res = installCron(r, dir, everySec, version)
   if (hadUnits && disable.code !== 0 && res.state !== 'error') {
     // files are gone but the live manager may still fire the timer —
     // cron is in, so the survivor would double-tick

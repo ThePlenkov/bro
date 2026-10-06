@@ -138,6 +138,22 @@ describe('nextStep', () => {
     assert.deepEqual(n.stuck, [])
   })
 
+  it('an open blocker cannot release a step whose other blocker is in a cycle', () => {
+    // a↔b is a closed loop — b also waits on external work, but closing
+    // that issue never breaks the cycle, so both stay stuck
+    const m = mol(
+      [issue('root', { issue_type: 'molecule' }), issue('a'), issue('b')],
+      [
+        { from: 'a', to: 'b' },
+        { from: 'b', to: 'a' },
+        { from: 'external-issue', to: 'b' },
+      ],
+    )
+    const n = nextStep(m)
+    assert.equal(n.state, 'blocked')
+    assert.deepEqual(n.stuck.sort(), ['a', 'b'])
+  })
+
   it('a blocked step waiting on open work outside the mol is not stuck', () => {
     const m = mol([issue('root', { issue_type: 'molecule' }), issue('a')], [
       { from: 'external-issue', to: 'a' },

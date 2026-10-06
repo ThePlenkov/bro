@@ -83,12 +83,13 @@ export function stepsOf(mol: Molecule): ConvoyStep[] {
     })
 }
 
-/** Blocked steps that can never unblock: every blocker lives inside
- *  the blocked set — a closed dependency loop (or a chain ending in
- *  one). A step is *escapable* the moment any blocker is open work —
- *  ready, in_progress, or an issue outside the mol (a claim is open
- *  work even if its owner died; a worker can release and re-claim it).
- *  Only the residue is permanently blocked. */
+/** Blocked steps that can never unblock: a closed dependency loop, or a
+ *  chain ending in one. A step is *escapable* only while EVERY blocker is
+ *  open work — ready, in_progress, or an issue outside the mol (a claim
+ *  is open work even if its owner died; a worker can release and
+ *  re-claim it). An open blocker cannot release a step whose other
+ *  blocker is stuck in a cycle, so `some` would hide it; the residue —
+ *  steps with even one permanently blocked blocker — is the stuck set. */
 export function permanentlyBlocked(steps: ConvoyStep[]): string[] {
   const blocked = new Map(
     steps.filter((s) => s.state === 'blocked').map((s) => [s.id, s.blockedBy])
@@ -99,7 +100,7 @@ export function permanentlyBlocked(steps: ConvoyStep[]): string[] {
     grew = false
     for (const [id, by] of blocked) {
       if (escapable.has(id)) continue
-      if (by.some((b) => !blocked.has(b) || escapable.has(b))) {
+      if (by.every((b) => !blocked.has(b) || escapable.has(b))) {
         escapable.add(id)
         grew = true
       }
