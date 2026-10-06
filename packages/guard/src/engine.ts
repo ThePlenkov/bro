@@ -18,7 +18,7 @@ import {
   GUARD_SAY_MAX_LINES,
   withFileLock,
 } from '@broject/core'
-import type { ConnectorCtx, Guard, GuardEvent } from '@broject/core'
+import type { ConnectorCtx, Guard, GuardEvent, JudgeFacade, Verdict } from '@broject/core'
 import {
   firedCounts,
   firedFile,
@@ -54,6 +54,23 @@ export interface GuardEvalOpts {
   /** Emit path: append `guard:<name>` to the fired set under the lock.
    *  `bro guard test` passes false — it reads, never records. */
   record?: boolean
+  /** `when.judge` wiring — lazy: resolved at most once per run and only
+   *  when a judge-clause guard's deterministic clauses pass. Absent or
+   *  resolving to undefined = abstain (the judge is off/unconfigured). */
+  judge?: () => GuardJudgeInput | undefined
+}
+
+/** The judge seam's knobs — assembled by the caller from judge config
+ *  so the engine stays free of @broject/judge imports. */
+export interface GuardJudgeInput {
+  facade: JudgeFacade
+  /** Below this answer confidence the clause abstains (judge.confidence). */
+  confidence: number
+  /** decide() calls bound per run (judge.maxDecisionsPerRun). */
+  maxDecisions: number
+  /** kind:'guard' verdict sink — set on live emit paths only; `bro
+   *  guard test` leaves it off so a read never journals. */
+  journal?: (v: Verdict) => void
 }
 
 /** One guard's evaluation — clause rows in declaration order. */
@@ -91,7 +108,7 @@ export function renderSay(say: string): string {
 }
 
 const renderLine = (g: Guard): string =>
-  `bro guard ${g.name}: ${renderSay(g.say)}${g.when.judge !== undefined ? ' (unjudged)' : ''}`
+  `bro guard ${g.name}: ${renderSay(g.say)}`
 
 /** Deterministic clauses — `on`, `match.*`, `state.*` — one row each,
  *  evaluated lazily (mctx/LiveState resolve at most once per run). The
@@ -118,12 +135,113 @@ async function evalClauses(
   if (g.when.state !== undefined) {
     clauses.push(...evalState(g.when.state, dir, lazies.live(), probes))
   }
-  if (g.when.judge !== undefined) {
-    // veto-only and abstains everywhere until nkn6.4 wires the facade —
-    // it cannot suppress yet, so the row is informational
-    clauses.push({ clause: 'judge', ok: true, detail: 'abstained — veto lands in bro-nkn6.4' })
-  }
   return clauses
+}
+
+/** Default veto bar — a noul is P(should fire); below half the guard
+ *  is suppressed. `when.judge.threshold` overrides. */
+const GUARD_JUDGE_VETO = 0.5
+
+/** The one `noul` question a judge clause asks (spec: bro-nkn6 —
+ *  veto-only). Runs only when the deterministic `when` already passed
+ *  — a guard the diff never triggered never spends a decision.
+ *  Abstains (ok:true row) on: no judge input, decision budget spent,
+ *  JudgeUnavailable/any throw, low-confidence answer. A real answer
+ *  journals as kind:'guard' — suppression accuracy needs both sides. */
+async function evalJudge(
+  g: Guard,
+  event: GuardEvent,
+  clauses: ClauseVerdict[],
+  judge: () => GuardJudgeInput | undefined,
+  input: { value: GuardJudgeInput | undefined; resolved: boolean },
+  decisions: { used: number }
+): Promise<void> {
+  if (!input.resolved) {
+    input.resolved = true
+    try {
+      input.value = judge()
+    } catch (err) {
+      // a wedged resolution (no judge connector, bad provider pin)
+      // abstains like judge.mode:off — never a veto
+      clauses.push({
+        clause: 'judge',
+        ok: true,
+        detail: `abstained — resolution threw: ${err instanceof Error ? err.message : err}`,
+      })
+      return
+    }
+  }
+  const j = input.value
+  if (j === undefined) {
+    clauses.push({ clause: 'judge', ok: true, detail: 'abstained — judge off' })
+    return
+  }
+  if (decisions.used >= j.maxDecisions) {
+    clauses.push({
+      clause: 'judge',
+      ok: true,
+      detail: `abstained — decision budget spent (${j.maxDecisions}/run)`,
+    })
+    return
+  }
+  const question = {
+    type: 'noul' as const,
+    instructions: g.when.judge!.question,
+    criteria: { true: `guard '${g.name}' fires`, false: 'suppressed this time' },
+  }
+  // the evidence the judge reads — which clauses held and with what
+  // detail, the event, the bounded `say` (JsonValue-safe by shape)
+  const state = {
+    guard: g.name,
+    event,
+    say: renderSay(g.say),
+    clauses: clauses.map((c) => ({ clause: c.clause, ok: c.ok, detail: c.detail ?? null })),
+  }
+  decisions.used += 1
+  let res
+  try {
+    res = await j.facade.decide(state, { fire: question })
+  } catch (err) {
+    clauses.push({
+      clause: 'judge',
+      ok: true,
+      detail: `abstained — ${err instanceof Error ? err.message : err}`,
+    })
+    return
+  }
+  const a = res.answers.fire
+  const threshold = g.when.judge!.threshold ?? GUARD_JUDGE_VETO
+  if (a === undefined || a.type !== 'noul') {
+    clauses.push({ clause: 'judge', ok: true, detail: 'abstained — no noul answer' })
+    return
+  }
+  if (res.lowConfidence.includes('fire') || a.confidence < j.confidence) {
+    clauses.push({
+      clause: 'judge',
+      ok: true,
+      detail: `abstained — confidence ${a.confidence} < ${j.confidence}`,
+    })
+    return
+  }
+  j.journal?.({
+    ts: new Date().toISOString(),
+    kind: 'guard',
+    subject: { threadId: `guard:${g.name}` },
+    questions: { fire: question },
+    answers: res.answers,
+    model: res.model,
+    latencyMs: res.latencyMs,
+    ...(res.usage?.costUsd !== undefined ? { costUsd: res.usage.costUsd } : {}),
+  })
+  if (a.noul < threshold) {
+    clauses.push({
+      clause: 'judge',
+      ok: false,
+      detail: `vetoed — noul ${a.noul} < ${threshold}`,
+    })
+    return
+  }
+  clauses.push({ clause: 'judge', ok: true, detail: `noul ${a.noul} ≥ ${threshold}` })
 }
 
 /** Evaluate every resolved guard against this event. `record: true`
@@ -155,12 +273,30 @@ export async function runGuards(opts: GuardEvalOpts): Promise<GuardRun> {
     })(),
   }
 
-  // phase 1 — deterministic clauses (on → match.* → state.* → judge note)
+  // phase 1 — deterministic clauses (on → match.* → state.*)
   const verdicts: GuardVerdict[] = []
   for (const { source, guard } of guards) {
     const budget = guard.when.budget ?? GUARD_DEFAULT_BUDGET
     const clauses = await evalClauses(guard, opts.event, lazies, opts.probes ?? {}, opts.dir)
     verdicts.push({ name: guard.name, source, clauses, fired: 0, budget, fire: false })
+  }
+
+  // phase 1.5 — judge clauses: one noul per guard whose deterministic
+  // clauses all pass; veto-only, abstains fail-open (spec: bro-nkn6).
+  // A declared clause always earns a row — an unwired/absent judge is
+  // an 'abstained' verdict, not silence
+  const judgeInput: { value: GuardJudgeInput | undefined; resolved: boolean } = {
+    value: undefined,
+    resolved: false,
+  }
+  const decisions = { used: 0 }
+  const resolveJudge = opts.judge ?? (() => undefined)
+  for (const v of verdicts) {
+    const g = guards.find((x) => x.guard.name === v.name)!.guard
+    if (g.when.judge === undefined || !v.clauses.every((c) => c.ok)) {
+      continue
+    }
+    await evalJudge(g, opts.event, v.clauses, resolveJudge, judgeInput, decisions)
   }
 
   // phase 2 — budget rows + emission, inside the fired lock when recording

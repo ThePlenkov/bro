@@ -23,7 +23,8 @@ import {
   resolveSessionId,
   traceFile,
 } from '@broject/learn'
-import { runGuards, type GuardConfig } from '@broject/guard'
+import { runGuards, type GuardConfig, type GuardJudgeInput } from '@broject/guard'
+import { judgeConfig, judgeFacade } from '@broject/judge'
 import { flag, positionals } from './args.ts'
 import { readArmed } from './hooks.ts'
 import { loadBroConfig } from '../plugins.ts'
@@ -132,6 +133,20 @@ async function cmdTest(argv: string[]): Promise<void> {
     cfg,
     record: false,
     armed: () => readArmed(sessionId),
+    // a live decide() when the clause exists — test is the honest read
+    // of what the hook would do; no journal sink keeps it a read
+    judge: () => {
+      const jcfg = judgeConfig(cwd).judge
+      if (jcfg.mode !== 'shadow') {
+        return undefined
+      }
+      const input: GuardJudgeInput = {
+        facade: judgeFacade(cwd),
+        confidence: jcfg.confidence,
+        maxDecisions: jcfg.maxDecisionsPerRun,
+      }
+      return input
+    },
     mctx: async () => {
       const hooks = hooksDir(cwd)
       const tail = hooks === null ? { entries: [], raw: '' } : readTraceTail(traceFile(hooks, sessionId))

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { gitTry, type Guard } from '@broject/core'
+import { gitTry, JudgeUnavailable, type Guard, type Verdict } from '@broject/core'
 import type { MatchContext } from '@broject/learn'
 import { runGuards, type GuardEvalOpts } from './engine.ts'
 
@@ -209,15 +209,122 @@ describe('runGuards', () => {
     assert.match(v.clauses.find((c) => c.clause === 'budget')!.detail!, /no session/)
   })
 
-  test('judge clause abstains and marks the line (unjudged)', async () => {
+  test('judge clause: no judge wiring abstains, never vetoes', async () => {
     const dir = repo()
     dirty(dir, 'src/a.ts')
-    const g: Guard = { ...GUARD, when: { ...GUARD.when, judge: { question: 'fire?', threshold: 0.6 } } }
+    const g: Guard = { ...GUARD, when: { ...GUARD.when, judge: { question: 'fire?' } } }
     const run = await runGuards(opts(dir, { defs: [g] }))
     const v = run.verdicts[0]!
     assert.equal(v.fire, true)
-    assert.equal(v.clauses.find((c) => c.clause === 'judge')!.detail, 'abstained — veto lands in bro-nkn6.4')
-    assert.match(v.line!, /\(unjudged\)$/)
+    assert.deepEqual(v.clauses.find((c) => c.clause === 'judge'), {
+      clause: 'judge',
+      ok: true,
+      detail: 'abstained — judge off',
+    })
+  })
+
+  const noulFacade = (noul: number, confidence = 0.9, lowConfidence: string[] = []) => ({
+    decide: async () => ({
+      answers: { fire: { type: 'noul' as const, noul, confidence, decidedBy: 'test' } },
+      model: 'm',
+      latencyMs: 1,
+      lowConfidence,
+    }),
+  })
+
+  test('judge veto suppresses a firing guard and journals kind:guard', async () => {
+    const dir = repo()
+    dirty(dir, 'src/a.ts')
+    const g: Guard = { ...GUARD, when: { ...GUARD.when, judge: { question: 'fire?' } } }
+    const journaled: Verdict[] = []
+    const run = await runGuards(
+      opts(dir, {
+        defs: [g],
+        record: true,
+        judge: () => ({
+          facade: noulFacade(0.2),
+          confidence: 0.6,
+          maxDecisions: 5,
+          journal: (v) => journaled.push(v),
+        }),
+      })
+    )
+    const v = run.verdicts[0]!
+    assert.equal(v.fire, false)
+    assert.deepEqual(run.lines, [])
+    assert.match(v.clauses.find((c) => c.clause === 'judge')!.detail!, /vetoed — noul 0\.2 < 0\.5/)
+    assert.equal(journaled.length, 1)
+    assert.equal(journaled[0]!.kind, 'guard')
+    assert.equal(journaled[0]!.subject.threadId, 'guard:tests-with-src')
+  })
+
+  test('judge allow fires; abstains on throw and low confidence', async () => {
+    const dir = repo()
+    dirty(dir, 'src/a.ts')
+    const g: Guard = { ...GUARD, when: { ...GUARD.when, judge: { question: 'fire?' } } }
+    const allow = await runGuards(
+      opts(dir, {
+        defs: [g],
+        judge: () => ({ facade: noulFacade(0.9), confidence: 0.6, maxDecisions: 5 }),
+      })
+    )
+    assert.equal(allow.verdicts[0]!.fire, true)
+    assert.match(allow.verdicts[0]!.clauses.find((c) => c.clause === 'judge')!.detail!, /noul 0\.9/)
+
+    const threw = await runGuards(
+      opts(dir, {
+        defs: [g],
+        judge: () => ({
+          facade: { decide: async () => { throw new JudgeUnavailable('down') } },
+          confidence: 0.6,
+          maxDecisions: 5,
+        }),
+      })
+    )
+    assert.equal(threw.verdicts[0]!.fire, true)
+    assert.match(threw.verdicts[0]!.clauses.find((c) => c.clause === 'judge')!.detail!, /abstained — down/)
+
+    const low = await runGuards(
+      opts(dir, {
+        defs: [g],
+        judge: () => ({
+          facade: noulFacade(0.1, 0.3, ['fire']),
+          confidence: 0.6,
+          maxDecisions: 5,
+        }),
+      })
+    )
+    // noul 0.1 would veto, but confidence 0.3 < 0.6 → abstain wins
+    assert.equal(low.verdicts[0]!.fire, true)
+    assert.match(low.verdicts[0]!.clauses.find((c) => c.clause === 'judge')!.detail!, /abstained — confidence/)
+  })
+
+  test('judge is only asked when deterministic clauses pass', async () => {
+    const dir = repo()
+    // clean tree — diff.changed misses → decide must not run
+    let called = 0
+    const g: Guard = { ...GUARD, when: { ...GUARD.when, judge: { question: 'fire?' } } }
+    await runGuards(
+      opts(dir, {
+        defs: [g],
+        judge: () => ({
+          facade: {
+            decide: async () => {
+              called += 1
+              throw new JudgeUnavailable('should not be called')
+            },
+          },
+          confidence: 0.6,
+          maxDecisions: 5,
+        }),
+      })
+    )
+    assert.equal(called, 0)
+    // the judge row is absent entirely — the clause never evaluated
+    assert.equal(
+      (await runGuards(opts(dir, { defs: [g] }))).verdicts[0]!.clauses.find((c) => c.clause === 'judge'),
+      undefined
+    )
   })
 
   test('say is bounded at 2000 chars / 20 lines', async () => {

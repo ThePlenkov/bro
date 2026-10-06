@@ -262,7 +262,7 @@ skills/guard/SKILL.md                 policy only — mechanics live in the CLI
       `bro guard list`
 - [x] state probes (diff/branch/armed/exists) + engine evaluation +
       fired-set budget in the four emit paths; `bro guard test`
-- [ ] `when.judge` veto clause through the judge facade,
+- [x] `when.judge` veto clause through the judge facade,
       `kind: 'guard'` verdicts
 - [ ] first real guards: test-coverage-on-stop
       (`stop` + `diff.changed src/**` + `without` tests) and the
