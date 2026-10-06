@@ -112,14 +112,15 @@ export function systemoneCall(
 ): ProviderCall {
   const keyField = opts.keyField ?? 'apiKeyEnv'
   const model = opts.model ?? entry.model
-  // env redirects the DEFAULT host only — a configured api host is the
-  // operator's choice and a stray TYPESAFE_BASE_URL must never reroute
-  // a router's traffic to TypeSafe (or vice versa)
-  const configured = entry.baseUrl ?? DEFAULT_BASE_URL
-  const base =
-    stripTrailingSlashes(configured) === stripTrailingSlashes(DEFAULT_BASE_URL)
-      ? (process.env.TYPESAFE_BASE_URL ?? configured)
-      : configured
+  // env redirects an IMPLICIT default only — a configured baseUrl is
+  // the operator's choice even when it literally names the hosted API,
+  // and a stray TYPESAFE_BASE_URL must never reroute a router's traffic
+  // to TypeSafe (or vice versa). A set-but-empty env counts as unset:
+  // '' would win over every configured value and yield a relative
+  // endpoint that can only fail.
+  const envBase = process.env.TYPESAFE_BASE_URL?.trim() || undefined
+  const configured = entry.baseUrl?.trim() || undefined
+  const base = configured === undefined ? (envBase ?? DEFAULT_BASE_URL) : configured
   const endpoint = `${apiVersionedBase(base)}/systemone`
   return async (state, questions, deadline): Promise<DecideResult> => {
     const key = apiKey(entry, keyField, deadline)

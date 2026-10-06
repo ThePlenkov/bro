@@ -39,7 +39,7 @@ export const API_WIRES = ['systemone', 'openai-compat'] as const
  *  any provider binding exists. */
 export const isSystemoneFamily = (model: string | undefined): boolean =>
   model !== undefined &&
-  /(?:^|\/)typesafe\/jev-(?:\d|latest(?=$|\/))|^jev-(?:\d|latest(?=$|\/))/.test(model)
+  /(?:^|\/)typesafe\/jev-(?:latest|\d+(?:\.\d+)*)(?=$|\/)|^jev-(?:latest|\d+(?:\.\d+)*)(?=$|\/)/.test(model)
 
 export type ProviderEntry =
   | {
@@ -192,52 +192,77 @@ function pickOptBool(
 /** One model entry → its wire. A bare string wins; `{wire}` unwraps;
  *  null/absent infers: systemone-family ids get 'systemone',
  *  everything else 'openai-compat'. undefined = the declared wire was
- *  not a known wire name. */
+ *  not a known wire name — or the VALUE had a shape the map doesn't
+ *  speak (false/42/[...] are errors, never inferences). */
 function resolveModelWire(key: string, v: unknown): ApiWire | undefined {
-  const wire =
-    typeof v === 'string'
-      ? v
-      : typeof v === 'object' && v !== null
-        ? (v as Record<string, unknown>).wire
-        : undefined
+  const infer = (): ApiWire => (isSystemoneFamily(key) ? 'systemone' : 'openai-compat')
+  if (v === undefined || v === null) {
+    return infer()
+  }
+  const wire = typeof v === 'string' ? v : isPlainObject(v) ? v.wire : undefined
+  // false/42/[...] reach here with wire===undefined — an unknown VALUE
+  // shape is a config error, not a license to infer. Same for an object
+  // carrying foreign keys ({wrie:…} is a typo, not a pin): only {} and
+  // {wire:null} read as the object spelling of "infer".
   if (wire === undefined || wire === null) {
-    return isSystemoneFamily(key) ? 'systemone' : 'openai-compat'
+    return isPlainObject(v) && Object.keys(v).every((k) => k === 'wire')
+      ? infer()
+      : undefined
   }
   return typeof wire === 'string' && (API_WIRES as readonly string[]).includes(wire)
     ? (wire as ApiWire)
     : undefined
 }
 
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v)
+
+/** Tagged parse result — a discriminator field, not a key-name probe:
+ *  a model literally named 'err' is a valid id, so the failure shape
+ *  can't live in the same namespace as the map. */
+type ModelsParsed = { ok: true; models: Record<string, ApiWire> } | { ok: false; err: string }
+
+/** One `models` entry → the resolved map key, or the fail string. */
+function parseModelEntry(
+  out: Record<string, ApiWire>,
+  id: string,
+  v: unknown
+): string | undefined {
+  const key = id.trim()
+  if (key === '') {
+    return 'models keys must be non-empty model ids'
+  }
+  const resolved = resolveModelWire(key, v)
+  if (resolved === undefined) {
+    return `models.${key}.wire must be a wire string (${API_WIRES.join('|')}), {wire}, or null`
+  }
+  // defineProperty, not assignment — a model id like '__proto__'
+  // must land as an own key, never trigger the prototype setter
+  Object.defineProperty(out, key, {
+    value: resolved,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  })
+  return undefined
+}
+
 /** The api kind's `models` map → resolved wires, or the fail string. */
-function parseApiModels(
-  raw: unknown
-): Record<string, ApiWire> | { err: string } {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    return { err: 'models must be a model→wire map' }
+function parseApiModels(raw: unknown): ModelsParsed {
+  if (!isPlainObject(raw)) {
+    return { ok: false, err: 'models must be a model→wire map' }
   }
   const out: Record<string, ApiWire> = {}
   for (const [id, v] of Object.entries(raw)) {
-    const key = id.trim()
-    if (key === '') {
-      return { err: 'models keys must be non-empty model ids' }
+    const err = parseModelEntry(out, id, v)
+    if (err !== undefined) {
+      return { ok: false, err }
     }
-    const resolved = resolveModelWire(key, v)
-    if (resolved === undefined) {
-      return { err: `models.${key}.wire must be one of ${API_WIRES.join('|')}` }
-    }
-    // defineProperty, not assignment — a model id like '__proto__'
-    // must land as an own key, never trigger the prototype setter
-    Object.defineProperty(out, key, {
-      value: resolved,
-      enumerable: true,
-      writable: true,
-      configurable: true,
-    })
   }
   if (Object.keys(out).length === 0) {
-    return { err: 'models must name at least one served model' }
+    return { ok: false, err: 'models must name at least one served model' }
   }
-  return out
+  return { ok: true, models: out }
 }
 
 /** api-kind extras: the models map is required; the pinned default
@@ -246,13 +271,14 @@ function parseApiModels(
 function parseApiEntry(
   picked: Record<string, string | boolean>,
   rawModels: unknown
-): Record<string, ApiWire> | { err: string } {
-  const models = parseApiModels(rawModels)
-  if ('err' in models) {
-    return models
+): ModelsParsed {
+  const parsed = parseApiModels(rawModels)
+  if (!parsed.ok) {
+    return parsed
   }
+  const models = parsed.models
   if (typeof picked.model === 'string' && !Object.hasOwn(models, picked.model)) {
-    return { err: `model '${picked.model}' is not in the models allowlist` }
+    return { ok: false, err: `model '${picked.model}' is not in the models allowlist` }
   }
   // the systemone wire always sends Bearer — an entry resolving a
   // model to it with no key source parses but fails every call
@@ -262,38 +288,41 @@ function parseApiEntry(
     picked.apiKeyCommand === undefined
   ) {
     return {
+      ok: false,
       err: 'serves a systemone-wire model with no key source — set apiKeyEnv or apiKeyCommand',
     }
   }
-  return models
+  return parsed
 }
 
-export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | null {
-  const fail = (why: string): null => {
-    console.error(`bro.config: providers.${name} ${why} — entry dropped`)
-    return null
+/** The entry's `type` field → a known kind, or the fail string. The
+ *  retired per-protocol spellings fold into the api kind — their error
+ *  IS the migration note. Tagged, not raw-string: ProviderKind ⊆ string
+ *  would collapse the union. */
+function parseProviderKind(
+  o: Record<string, unknown>
+): { kind: ProviderKind } | { err: string } {
+  const t = o.type
+  if (t === 'systemone' || t === 'openai-compat') {
+    return { err: `type '${t}' is retired — use type 'api' with models: { "<model>": "${t}" }` }
   }
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    return fail('must be an object')
-  }
-  const o = raw as Record<string, unknown>
-  // the retired per-protocol kinds fold into one api host entry — name
-  // the old spelling so the error IS the migration note
-  if (o.type === 'systemone' || o.type === 'openai-compat') {
-    return fail(
-      `type '${o.type}' is retired — use type 'api' with models: { "<model>": "${o.type}" }`
-    )
-  }
-  if (typeof o.type !== 'string' || !(PROVIDER_KINDS as readonly string[]).includes(o.type)) {
-    return fail(`type must be one of ${PROVIDER_KINDS.join('|')} — got ${JSON.stringify(o.type)}`)
-  }
-  const type = o.type as ProviderKind
-  const spec = PROVIDER_REGISTRY[type]
+  return typeof t === 'string' && (PROVIDER_KINDS as readonly string[]).includes(t)
+    ? { kind: t as ProviderKind }
+    : { err: `type must be one of ${PROVIDER_KINDS.join('|')} — got ${JSON.stringify(t)}` }
+}
+
+/** required + optional + optionalBool field sweeps → the picked bag,
+ *  or the fail string on a missing required field. */
+function pickSpecFields(
+  name: string,
+  spec: ProviderKindSpec,
+  o: Record<string, unknown>
+): { picked: Record<string, string | boolean> } | { err: string } {
   const picked: Record<string, string | boolean> = {}
   for (const f of spec.required) {
     const v = str(o[f])
     if (v === undefined) {
-      return fail(`requires "${f}"`)
+      return { err: `requires "${f}"` }
     }
     picked[f] = v
   }
@@ -303,19 +332,41 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
   for (const f of spec.optionalBool ?? []) {
     pickOptBool(name, o, f, picked)
   }
+  return { picked }
+}
+
+export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | null {
+  const fail = (why: string): null => {
+    console.error(`bro.config: providers.${name} ${why} — entry dropped`)
+    return null
+  }
+  if (!isPlainObject(raw)) {
+    return fail('must be an object')
+  }
+  const kindRes = parseProviderKind(raw)
+  if ('err' in kindRes) {
+    return fail(kindRes.err)
+  }
+  const kind = kindRes.kind
+  const spec = PROVIDER_REGISTRY[kind]
+  const fields = pickSpecFields(name, spec, raw)
+  if ('err' in fields) {
+    return fail(fields.err)
+  }
+  const picked = fields.picked
   let models: Record<string, ApiWire> | undefined
-  if (type === 'api') {
-    const parsed = parseApiEntry(picked, o.models)
-    if ('err' in parsed) {
+  if (kind === 'api') {
+    const parsed = parseApiEntry(picked, raw.models)
+    if (!parsed.ok) {
       return fail(parsed.err)
     }
-    models = parsed
+    models = parsed.models
   }
   const keyErr = keySourceErr(picked)
   if (keyErr !== null) {
     return fail(keyErr)
   }
-  return { type, ...picked, ...(models === undefined ? {} : { models }) } as ProviderEntry
+  return { type: kind, ...picked, ...(models === undefined ? {} : { models }) } as ProviderEntry
 }
 
 /** Key-source guards shared by every kind: apiKeyEnv names an env var

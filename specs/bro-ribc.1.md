@@ -98,12 +98,19 @@ Rules:
 - **No defaults, no hardcoding.** The empty/absent `providers` section
   is a valid config — consumers fall back to today's behavior
   (judge's legacy config, fleet's `agents.<backend>.command` →
-  `loop.agent`). A provider name in consumer config that resolves to no
-  entry is a startup error naming the missing key, never a silent
-  fallthrough to a vendor the user didn't pick.
+  `loop.agent`). Absence never *selects* a provider — the fallback is
+  the existing connector-resolution path, which keeps its own explicit
+  defaults; once `providers` exists, every consumer reference must
+  resolve to an entry. A provider name that resolves to no entry is a
+  startup error naming the missing key, never a silent fallthrough to
+  a vendor the user didn't pick.
 - **`type` is validated against known kinds**; an unknown type drops
   the entry with a warning (same policy as `connectors` section
-  normalization) — and a consumer referencing it errors at use.
+  normalization). A dropped entry is indistinguishable from an absent
+  one — a consumer referencing it gets the same startup error naming
+  the missing key, so a typoed type fails at the same latency and with
+  the same message shape as a typoed name (the drop warning carries
+  the cause).
   Retired kinds (`systemone`, `openai-compat` as a `type`) fail the
   config with a migration line — they never silently parse.
 - **Secrets ride env var names or commands** — `apiKeyEnv` names the
@@ -113,9 +120,13 @@ Rules:
 - **`models` is the allowlist** — an `api` entry serves only the model
   ids it declares, each mapped to its wire. A model value of a bare
   wire string, `{ "wire": … }`, or `null` (wire inferred: jev-family →
-  `systemone`, else `openai-compat`) all parse. Asking for an
-  undeclared model is a config error naming the allowlist — a router
-  can never reroute a request to a model the config didn't admit.
+  `systemone`, else `openai-compat`) all parse; `{}` and
+  `{ "wire": null }` are the object spellings of "infer". An object
+  carrying other keys but no `wire` (`{ "wrie": … }` is a typo, not a
+  pin) is malformed — it drops the entry rather than silently picking
+  a wire. Asking for an undeclared model is a config error naming the
+  allowlist — a router can never reroute a request to a model the
+  config didn't admit.
 - **`model` pins the default**; consumers may override per-call
   (`judge.model`, fleet per-profile) — the override must be in
   `models`, and it lands in provenance (`DecideResult.model`, the
@@ -144,6 +155,10 @@ The resolved model's wire selects the binding:
 - `openai-compat` wire — prose-grade chat completions. Answers are
   prompt-and-parsed under llm-judge semantics and `decidedBy` is
   marked honestly — never masquerading as calibrated typed judgments.
+  An entry with no `apiKeyEnv`/`apiKeyCommand` calls the host
+  unauthenticated: anonymous compat endpoints answer, a host that
+  demands a key fails at call time with the auth error — loudly, in
+  the same decide() surface as today's connectors.
 
 ### `acp` — an agent process speaking ACP
 
@@ -153,11 +168,14 @@ An Agent Client Protocol endpoint — a CLI that serves ACP over stdio
 - *Call*: the client spawns a minimal ACP session, posts
   `{state, questions}` as a prompt, expects judgments back. Two
   sub-modes, distinguished by the session's model: (a) the model IS a
-  systemone-family model (`typesafe/jev-*`) — the wire answer is
-  already typed and the provider is just a transport, full fidelity;
-  (b) a general LLM — prompt-and-parse, flagged uncalibrated so
-  `judge stats` never mixes it into the typed agreement matrix
-  (bro-4goa's caveat, preserved).
+  systemone-family model (`typesafe/jev-*`) — the prompt carries the
+  typed contract and the reply content is validated against it: a
+  payload that verifies keeps typed fidelity, an unparseable one fails
+  open and is never counted as typed (an ACP prompt result is content,
+  not a schema response — the model id selects the contract, not the
+  wire format); (b) a general LLM — prompt-and-parse, flagged
+  uncalibrated so `judge stats` never mixes it into the typed
+  agreement matrix (bro-4goa's caveat, preserved).
 - *Spawn*: a fleet worker IS an ACP session — the persistent form of
   the same connection, driven by the agent's own turn loop rather than
   a prompt file.
@@ -214,13 +232,16 @@ questions) → DecideResult`. What the provider changes is *who answers*:
 **Compatibility** — `judge.baseUrl`/`judge.model`/`judge.apiKeyEnv`
 synthesize an anonymous single-model `api` entry on the `systemone`
 wire; `judge.llm` synthesizes one on `openai-compat`;
-`connectors.judge: 'systemone'|'llm-judge'` resolve to those. A
-deprecation line prints once per command. Provider *entries* get no
-such grace — `type: 'systemone'` or `type: 'openai-compat'` in
-`providers` is a hard config error with the migration hint; the entry
-shape changed semantics (host + model allowlist), so silent parsing
-would hide a real misconfiguration. New configs only ever write
-`providers` + `judge.provider`/`judge.model`.
+`connectors.judge: 'systemone'|'llm-judge'` resolve to those. A legacy
+`judge.fallback` naming a connector resolves the same synthesized
+entry, so an unmodified escalation config keeps working —
+`judge.fallback` only *must* name a provider when `judge.provider` is
+already set. A deprecation line prints once per command. Provider
+*entries* get no such grace — `type: 'systemone'` or `type:
+'openai-compat'` in `providers` is a hard config error with the
+migration hint; the entry shape changed semantics (host + model
+allowlist), so silent parsing would hide a real misconfiguration. New
+configs only ever write `providers` + `judge.provider`/`judge.model`.
 
 ### Fleet — provider+model per profile
 
@@ -243,7 +264,9 @@ needs; ACP-mode spawn mechanics are its child spec, bro-5hx1.1).
   `SpawnSpec.env` as `BRO_AGENT_PROVIDER`/`BRO_AGENT_MODEL` and lands
   in the `AgentRegistryEntry` — provenance, so `bro fleet` can show a
   heterogeneous fleet truthfully and budget accounting can split cost
-  by model.
+  by model. Both names join the protected `BRO_AGENT_*` pin set:
+  connector-owned, filtered from caller `spec.env` — a plan must never
+  re-badge a worker it merely describes.
 - A provider that can't spawn (`api`) named on an agents config
   errors at `agents up`, not at list.
 

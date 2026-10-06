@@ -181,6 +181,34 @@ describe('systemoneCall', () => {
         // never reroute an api provider's traffic
         await systemoneCall('b', ENTRY, { fetch })('s', QUESTIONS, DEADLINE())
         assert.equal(calls[2]!.url, 'https://systemone.example/api/v1/systemone')
+        // even when the configured host IS the hosted default — an
+        // explicit pin is an explicit pin; env redirects only the
+        // implicit fallback
+        const explicitDefault: ApiTarget = {
+          baseUrl: 'https://api.typesafe.ai',
+          apiKeyEnv: 'SYSTEMONE_TEST_KEY',
+          model: 'm',
+        }
+        await systemoneCall('b', explicitDefault, { fetch })('s', QUESTIONS, DEADLINE())
+        assert.equal(calls[3]!.url, 'https://api.typesafe.ai/v1/systemone')
+      } finally {
+        if (prev === undefined) {
+          delete process.env.TYPESAFE_BASE_URL
+        } else {
+          process.env.TYPESAFE_BASE_URL = prev
+        }
+      }
+    }))
+
+  test('a set-but-empty TYPESAFE_BASE_URL counts as unset — never a relative endpoint', () =>
+    withKey(async () => {
+      const { fetch, calls } = fakeFetch({ status: 200, body: OK_BODY })
+      const bare: ApiTarget = { apiKeyEnv: 'SYSTEMONE_TEST_KEY', model: 'm' }
+      const prev = process.env.TYPESAFE_BASE_URL
+      process.env.TYPESAFE_BASE_URL = ''
+      try {
+        await systemoneCall('b', bare, { fetch })('s', QUESTIONS, DEADLINE())
+        assert.equal(calls[0]!.url, 'https://api.typesafe.ai/v1/systemone')
       } finally {
         if (prev === undefined) {
           delete process.env.TYPESAFE_BASE_URL
