@@ -50,6 +50,7 @@ export {
   PERSONALITIES,
   probeConfigFile,
   providersSection,
+  querySection,
   sddSection,
   SDD_MODES,
   stackSection,
@@ -91,6 +92,7 @@ export {
   dataRefRoot,
 } from './dataref.ts'
 export type { BroConfig, ConfigSection, Personality, SddMode, StoreBackend } from './config.ts'
+export type { QueryFacade, QueryOpts, QueryResult } from './queries.ts'
 export { definePlugin } from './plugin.ts'
 export type { BroPlugin } from './plugin.ts'
 export { docTypeNamed, docVerbs, STANDARD_VERBS, verbMethod } from './docs.ts'

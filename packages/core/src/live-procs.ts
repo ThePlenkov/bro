@@ -37,10 +37,12 @@ export interface SpawnResult {
 export function spawnCollect(
   cmd: string,
   args: string[],
-  cwd?: string
+  cwd?: string,
+  env?: Record<string, string>
 ): { proc: ChildProcess; done: Promise<SpawnResult> } {
   const proc = spawn(cmd, args, { // NOSONAR — PATH lookup is the contract (same as gh/git)
     cwd,
+    env: env === undefined ? undefined : { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   trackChild(proc)

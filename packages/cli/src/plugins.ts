@@ -18,6 +18,7 @@ import {
   mailboxConnector,
   notifyConnector,
   registerConnector,
+  querySection,
   sddSection,
   stackSection,
   sweepSection,
@@ -35,6 +36,13 @@ import { learnConnector, learnSection } from '@broject/learn'
 import { loopSection } from '@broject/loop'
 import { githubConnector } from '@broject/github'
 import { gitlabConnector } from '@broject/gitlab'
+import {
+  applyQueryPlan,
+  atlassianConnector,
+  parseQueryPlan,
+  PLAN_VERSION as QUERY_PLAN_VERSION,
+  type QueryPlan,
+} from '@broject/query'
 import { guardConnector, guardSection } from '@broject/guard'
 import { judgeSection, llmJudgeConnector, systemoneConnector } from '@broject/judge'
 import { runAcpWorkerCommand } from './commands/acp-worker.ts'
@@ -47,6 +55,7 @@ import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts'
 import { runLoopCommand } from './commands/loop.ts'
 import { applyNextPlan, runNextCommand } from './commands/next.ts'
 import { runNotifyCommand } from './commands/notify.ts'
+import { runQueryCommand } from './commands/query.ts'
 import { parseNextPlan, PLAN_VERSION as NEXT_PLAN_VERSION, type NextPlan } from './commands/next-plan.ts'
 import { resolvePlanDoc, runPlanCommand } from './commands/plan.ts'
 import { runPluginsCommand } from './commands/plugins.ts'
@@ -80,6 +89,9 @@ import { runWorkCommand, workConnector } from './commands/work.ts'
 // decides stop-gate block priority: drill > work > act.
 registerConnector(githubConnector)
 registerConnector(gitlabConnector)
+// queries-facade provider — opt-in only (a step names it or
+// connectors.queries pins it); nothing about a repo detects Atlassian
+registerConnector(atlassianConnector)
 registerConnector(drillConnector)
 registerConnector(workConnector)
 registerConnector(actConnector)
@@ -359,6 +371,22 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'sweep',
     configKey: 'sweep',
     configSchema: sweepSection,
+  }),
+  definePlugin({
+    name: 'query',
+    summary: 'Cross-provider GraphQL plan — `bro query <plan.toml>` or `kind = "query"` via `bro run`',
+    run: (argv) => runQueryCommand(argv, PLUGINS),
+    skill: 'query',
+    configKey: 'query',
+    configSchema: querySection,
+    planSchema: (doc, source) => parseQueryPlan(doc, source),
+    planVersion: QUERY_PLAN_VERSION,
+    runPlan: async (plan) => {
+      const code = await applyQueryPlan(plan as QueryPlan)
+      if (code !== 0) {
+        process.exit(code)
+      }
+    },
   }),
   definePlugin({
     name: 'run',

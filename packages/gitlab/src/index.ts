@@ -6,8 +6,9 @@
 import type { Connector } from '@broject/core'
 import { glabTry } from './glab.ts'
 import { gitlabReview, hostFor } from './reviews.ts'
+import { gitlabQueries } from './queries.ts'
 
-export { gitlabReview }
+export { gitlabReview, gitlabQueries }
 
 export const gitlabConnector: Connector = {
   name: 'gitlab',
@@ -33,4 +34,5 @@ export const gitlabConnector: Connector = {
       : `glab not authenticated for ${host} — run \`glab auth login\``
   },
   reviews: (ctx) => gitlabReview(ctx.dir),
+  queries: (ctx) => gitlabQueries(ctx.dir),
 }

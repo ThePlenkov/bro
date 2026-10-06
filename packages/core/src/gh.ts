@@ -17,11 +17,18 @@ export function gh(args: string[], cwd?: string): string {
   return proc.stdout ?? ''
 }
 
+/** Options the async `gh` twins accept — an env overlay for plans that
+ *  pin `GH_HOST`/tokens without mutating process.env (spec bro-14h8.1:
+ *  `env` entries are literal variables, merged over the inherited set). */
+export interface GhOpts {
+  env?: Record<string, string>
+}
+
 /** Async `gh` — the spawnSync variant blocks the event loop, so bulk
  *  probes that run host calls under a concurrency cap need this to
  *  actually overlap. Same contract: resolve stdout, throw on non-zero. */
-export function ghAsync(args: string[], cwd?: string): Promise<string> {
-  const { done } = spawnCollect('gh', args, cwd)
+export function ghAsync(args: string[], cwd?: string, opts?: GhOpts): Promise<string> {
+  const { done } = spawnCollect('gh', args, cwd, opts?.env)
   return done.then(({ code, out, err, error }) => {
     if (error !== undefined) {
       throw error
@@ -37,8 +44,8 @@ export function ghJson<T>(args: string[], cwd?: string): T {
   return JSON.parse(gh(args, cwd)) as T
 }
 
-export async function ghJsonAsync<T>(args: string[], cwd?: string): Promise<T> {
-  return JSON.parse(await ghAsync(args, cwd)) as T
+export async function ghJsonAsync<T>(args: string[], cwd?: string, opts?: GhOpts): Promise<T> {
+  return JSON.parse(await ghAsync(args, cwd, opts)) as T
 }
 
 /**

@@ -15,6 +15,7 @@ import { readFileSync, statSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
   bdTry,
+  connectors,
   gitTry,
   isEnvName,
   janitorDidWork,
@@ -542,6 +543,47 @@ function checkClientPlugins(dir: string): DoctorCheck {
     : check('plugins', 'ok', detail)
 }
 
+// --- query providers (specs/bro-14h8.1 milestone 6) -----------------
+// A `query` plan shells out to the serving connector's CLI — report a
+// missing binary only for connectors relevant HERE: remote-matched or
+// config-pinned. `gh` is skipped — checkGh already owns that row.
+
+/** connector name → binary it spawns — a vendor tool name in doctor's
+ *  layer is the honest label (same as gh/bd/git rows). */
+const QUERY_CLI_BIN: Record<string, string> = { gitlab: 'glab', atlassian: 'atlassian' }
+
+function queryCliChecks(dir: string, cfgPins: Record<string, string>): DoctorCheck[] {
+  const remote = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
+  const url = remote.code === 0 ? remote.out.trim() : ''
+  const out: DoctorCheck[] = []
+  for (const c of connectors()) {
+    if (c.queries === undefined) {
+      continue
+    }
+    const bin = QUERY_CLI_BIN[c.name]
+    if (bin === undefined) {
+      continue
+    }
+    const pinned = cfgPins['queries'] === c.name
+    const detected = url !== '' && c.matchRemote?.(url) === true
+    if (!pinned && !detected) {
+      continue
+    }
+    const p = probeBin(bin)
+    if (!p.found) {
+      out.push(
+        check(
+          `query-cli-${c.name}`,
+          'warn',
+          `${c.name} query plans need \`${bin}\` — ${binProblem(p)}`,
+          `install ${bin} or drop the ${c.name} pin — query steps against it fail at run time`
+        )
+      )
+    }
+  }
+  return out
+}
+
 export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
   const checks: DoctorCheck[] = [checkNode()]
 
@@ -573,6 +615,7 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
     checkHooks(dir),
     checkConfig([dir, root, mainRoot(dir)].filter((d): d is string => d !== null)),
     ...providerChecks(dir),
+    ...queryCliChecks(dir, cfg.connectors),
     checkClientPlugins(dir),
     ...(janitor === null ? [] : [janitor]),
     ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found)
