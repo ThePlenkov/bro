@@ -9,6 +9,70 @@ import { facade, loadConfig, specStore, type SpecStore, type TaskStore } from '@
 import type { NamedProbe, ProbeResult } from '@broject/guard'
 import { driftEnv, driftRow, localSpecPath, specLinkPath, SPEC_LINK } from './spec-drift.ts'
 
+/** The specs facade degrades rather than kills the clause — an
+ *  `args.spec` drift never consults the store (scope reads the file's
+ *  own frontmatter), and an `args.id` one without a spec: link gets
+ *  'no local spec file to date' from an empty tree — unverifiable,
+ *  not a crash. Mirrors spec.ts's specs() degrade. */
+function specsOrDegraded(dir: string): SpecStore {
+  try {
+    return specStore(dir, loadConfig(dir).connectors)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return {
+      hasSpec: () => false,
+      remedy: () => `fix connectors.specs (${msg})`,
+      policy: () => `specs facade unavailable: ${msg}`,
+      tree: () => [],
+    }
+  }
+}
+
+/** args.spec — explicit file wins; validation is localSpecPath's, so a
+ *  URL/absent/dir arg is a clean `unverifiable`, not a throw. */
+function probeSpecArg(
+  dir: string,
+  specArg: string,
+  label: string,
+  ref: string | undefined,
+  spec: SpecStore
+): ProbeResult {
+  const link = localSpecPath(dir, specArg)
+  if (link === undefined) {
+    return { ok: false, detail: `no local spec file: ${specArg}` }
+  }
+  const row = driftRow(dir, label, spec, driftEnv(dir, ref), link)
+  return { ok: row.state === 'STALE', detail: `${row.state} — ${row.detail}` }
+}
+
+/** args.id — the bead's own spec declaration wins, then the tree pick. */
+function probeIdArg(
+  dir: string,
+  idArg: string,
+  ref: string | undefined,
+  spec: SpecStore
+): ProbeResult {
+  let row0: ReturnType<TaskStore['get']>
+  try {
+    const tasks = facade('tasks', { dir }, { prefer: loadConfig(dir).connectors })
+    row0 = tasks.get(idArg)
+  } catch (err) {
+    return { ok: false, detail: `tasks read failed: ${err instanceof Error ? err.message : err}` }
+  }
+  if (row0 === undefined) {
+    return { ok: false, detail: `no bead ${idArg}` }
+  }
+  // a declared `spec:` that resolves to no local file is unverifiable
+  // on its own — the tree pick must not silently substitute a spec the
+  // bead never declared (same contract as `bro spec drift`)
+  const link = specLinkPath(dir, row0.description)
+  if (SPEC_LINK.test(row0.description ?? '') && link === undefined) {
+    return { ok: false, detail: 'unverifiable — no local spec file to date' }
+  }
+  const row = driftRow(dir, idArg, spec, driftEnv(dir, ref), link)
+  return { ok: row.state === 'STALE', detail: `${row.state} — ${row.detail}` }
+}
+
 /** `spec-drift` — the bro-fvhz freshness audit as a guard predicate.
  *
  *  args.spec: drift a repo-relative spec file directly — no bead read;
@@ -31,56 +95,11 @@ const specDrift: NamedProbe = (args, dir): ProbeResult => {
   if (specArg === undefined && idArg === undefined) {
     return { ok: false, detail: 'args.spec or args.id required' }
   }
-
-  // the specs facade degrades rather than kills the clause — an
-  // `args.spec` drift never consults the store (scope reads the file's
-  // own frontmatter), and an `args.id` one without a spec: link gets
-  // 'no local spec file to date' from an empty tree — unverifiable,
-  // not a crash. Mirrors spec.ts's specs() degrade.
-  let spec: SpecStore
-  try {
-    spec = specStore(dir, loadConfig(dir).connectors)
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    spec = {
-      hasSpec: () => false,
-      remedy: () => `fix connectors.specs (${msg})`,
-      policy: () => `specs facade unavailable: ${msg}`,
-      tree: () => [],
-    }
-  }
-
-  // args.spec — explicit file wins; validation is specLinkPath's, so a
-  // URL/absent/dir arg is a clean `unverifiable`, not a throw
+  const spec = specsOrDegraded(dir)
   if (specArg !== undefined) {
-    const link = localSpecPath(dir, specArg)
-    if (link === undefined) {
-      return { ok: false, detail: `no local spec file: ${specArg}` }
-    }
-    const row = driftRow(dir, idArg ?? specArg, spec, driftEnv(dir, ref), link)
-    return { ok: row.state === 'STALE', detail: `${row.state} — ${row.detail}` }
+    return probeSpecArg(dir, specArg, idArg ?? specArg, ref, spec)
   }
-
-  // args.id — the bead's own spec declaration wins, then the tree pick
-  let row0: ReturnType<TaskStore['get']>
-  try {
-    const tasks = facade('tasks', { dir }, { prefer: loadConfig(dir).connectors })
-    row0 = tasks.get(idArg!)
-  } catch (err) {
-    return { ok: false, detail: `tasks read failed: ${err instanceof Error ? err.message : err}` }
-  }
-  if (row0 === undefined) {
-    return { ok: false, detail: `no bead ${idArg}` }
-  }
-  // a declared `spec:` that resolves to no local file is unverifiable
-  // on its own — the tree pick must not silently substitute a spec the
-  // bead never declared (same contract as `bro spec drift`)
-  const link = specLinkPath(dir, row0.description)
-  if (SPEC_LINK.test(row0.description ?? '') && link === undefined) {
-    return { ok: false, detail: 'unverifiable — no local spec file to date' }
-  }
-  const row = driftRow(dir, idArg!, spec, driftEnv(dir, ref), link)
-  return { ok: row.state === 'STALE', detail: `${row.state} — ${row.detail}` }
+  return probeIdArg(dir, idArg!, ref, spec)
 }
 
 /** The registry — closed on purpose (spec: unknown names fail their
