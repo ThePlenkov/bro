@@ -3,7 +3,8 @@
   "version": "0.2.4",
   "type": "module",
   "dependencies": {
-    "@broject/core": "^0.2.0"
+    "@broject/core": "^0.2.0",
+    "@broject/learn": "^0.2.0"
   },
   "exports": {
     ".": {

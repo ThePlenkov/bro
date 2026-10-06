@@ -12,7 +12,7 @@
  * lines, raw trace lines); commands/paths/tools/errors evaluate against
  * the parsed entries.
  */
-import type { LessonTrigger } from './lesson.ts'
+import type { LessonTrigger, TriggerMatch } from './lesson.ts'
 
 /** One journaled post-tool event. Fields absent from the hook payload
  *  stay absent — a `paths`/`tools` key on a tool family that never
@@ -131,6 +131,51 @@ function commandHits(command: string, prefixes: string[]): boolean {
   return hits(seg)
 }
 
+/** Per-key verdicts for one `match` block — every present key gets a
+ *  row; any list entry satisfies its key. `bro guard test` renders
+ *  these; `triggerMatches` is their conjunction. */
+export function matchKeys(
+  m: TriggerMatch,
+  ctx: MatchContext
+): { key: string; ok: boolean }[] {
+  const out: { key: string; ok: boolean }[] = []
+  const text = ctx.text.toLowerCase()
+  if (m.terms !== undefined) {
+    out.push({
+      key: 'terms',
+      ok: m.terms.some((t) => text.includes(t.toLowerCase())),
+    })
+  }
+  if (m.commands !== undefined) {
+    out.push({
+      key: 'commands',
+      ok: ctx.trace.some(
+        (e) => e.command !== undefined && commandHits(e.command, m.commands!)
+      ),
+    })
+  }
+  if (m.paths !== undefined) {
+    out.push({
+      key: 'paths',
+      ok: ctx.trace.some((e) =>
+        (e.paths ?? []).some((p) => m.paths!.some((g) => matchPath(p, g)))
+      ),
+    })
+  }
+  if (m.tools !== undefined) {
+    out.push({
+      key: 'tools',
+      ok: ctx.trace.some((e) => e.tool !== undefined && m.tools!.includes(e.tool)),
+    })
+  }
+  // errors is a boolean condition — `true` needs a failed landing in the
+  // trace, `false` needs their absence
+  if (m.errors !== undefined) {
+    out.push({ key: 'errors', ok: m.errors === ctx.trace.some((e) => e.ok === false) })
+  }
+  return out
+}
+
 /**
  * Does the trigger's `match` block hold against this context? Every
  * present key must hit; any entry in a key's list satisfies it. Absent
@@ -141,42 +186,5 @@ export function triggerMatches(trigger: LessonTrigger, ctx: MatchContext): boole
   if (m === undefined) {
     return true
   }
-  const text = ctx.text.toLowerCase()
-  if (
-    m.terms !== undefined &&
-    !m.terms.some((t) => text.includes(t.toLowerCase()))
-  ) {
-    return false
-  }
-  if (
-    m.commands !== undefined &&
-    !ctx.trace.some(
-      (e) => e.command !== undefined && commandHits(e.command, m.commands!)
-    )
-  ) {
-    return false
-  }
-  if (
-    m.paths !== undefined &&
-    !ctx.trace.some((e) =>
-      (e.paths ?? []).some((p) => m.paths!.some((g) => matchPath(p, g)))
-    )
-  ) {
-    return false
-  }
-  if (
-    m.tools !== undefined &&
-    !ctx.trace.some((e) => e.tool !== undefined && m.tools!.includes(e.tool))
-  ) {
-    return false
-  }
-  // errors is a boolean condition — `true` needs a failed landing in the
-  // trace, `false` needs their absence
-  if (m.errors !== undefined) {
-    const hasError = ctx.trace.some((e) => e.ok === false)
-    if (m.errors !== hasError) {
-      return false
-    }
-  }
-  return true
+  return matchKeys(m, ctx).every((k) => k.ok)
 }

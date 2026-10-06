@@ -260,7 +260,7 @@ skills/guard/SKILL.md                 policy only — mechanics live in the CLI
 - [x] guard schema + `guard` config section + `collectGuards` seam
       (`Connector.guards?`, config defs, dedup/warn rules) +
       `bro guard list`
-- [ ] state probes (diff/branch/armed/exists) + engine evaluation +
+- [x] state probes (diff/branch/armed/exists) + engine evaluation +
       fired-set budget in the four emit paths; `bro guard test`
 - [ ] `when.judge` veto clause through the judge facade,
       `kind: 'guard'` verdicts
