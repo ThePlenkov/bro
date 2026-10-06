@@ -129,7 +129,8 @@ function molAttention(mols: WatchMol[]): string[] {
     }
     for (const g of m.gates) {
       const t = m.ready.find((s) => s.id === g)?.title
-      out.push(`gate ready — ${m.mol}: ${g}${t === undefined ? '' : ` (${t})`}`)
+      const suffix = t === undefined ? '' : ` (${t})`
+      out.push(`gate ready — ${m.mol}: ${g}${suffix}`)
     }
   }
   return out

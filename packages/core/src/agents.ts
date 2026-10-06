@@ -57,7 +57,11 @@ const CAUSE_PATTERNS: [AgentCause, RegExp[]][] = [
     [
       /\bquota\b/i,
       /insufficient[_ ]?(?:credits?|funds?|balance)/i,
-      /\bbilling\b/i,
+      // 'billing' only counts beside an account-wall word — a transient
+      // billing-service error is a crash, not the quota block that only
+      // a manual `bro agents down` lifts
+      /\bbilling\b.{0,40}\b(?:limits?|exceed\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|overdue|unpaid|delinquen\w*|requir\w*|missing|invalid|inactiv\w*)/i,
+      /\b(?:overdue|unpaid|delinquen\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|requir\w*|missing|invalid|inactiv\w*)\b.{0,40}\bbilling\b/i,
       /out of (?:credits?|funds?)/i,
       /spend(?:ing)? limit/i,
       /(?:monthly|daily|usage) limit (?:reached|exceeded)/i,
