@@ -33,7 +33,12 @@ const closed = (id: string, daysAgo: number, extra: Record<string, unknown> = {}
 
 function fixture(
   rows: Array<Record<string, unknown>>,
-  opts: { config?: Record<string, unknown>; kv?: Record<string, string>; prov?: Record<string, unknown[]> } = {}
+  opts: {
+    config?: Record<string, unknown>
+    kv?: Record<string, string>
+    prov?: Record<string, unknown[]>
+    provFail?: string[]
+  } = {}
 ) {
   const { root, main } = initRepo('bro-sweep-e2e-', (dir) => {
     writeFileSync(join(dir, '.gitignore'), '.agents/\n')
@@ -43,7 +48,11 @@ function fixture(
     )
   })
   const { binDir, db } = installFakeBd(root, [])
-  writeBeads(db, rows, { kv: opts.kv ?? {}, prov: opts.prov ?? {} })
+  writeBeads(db, rows, {
+    kv: opts.kv ?? {},
+    prov: opts.prov ?? {},
+    provFail: opts.provFail ?? [],
+  })
   const env = { PATH: `${binDir}:${process.env.PATH ?? ''}`, FAKE_BD_DB: db }
   return {
     root,
@@ -217,6 +226,28 @@ describe('bro sweep run', () => {
       // the archive-really-synced assertion
       git(['cat-file', '-e', `refs/bro/data:.agents/sweep/${archives[0]}`], f.main)
       assert.equal(git(['status', '--porcelain'], f.main).trim(), '')
+    })
+  })
+
+  test('a failed provenance dump preserves the archive but refuses prune', () => {
+    const f = fixture([closed('fx-old', 60, { labels: ['sweep:distilled'] })], {
+      provFail: ['fx-old'],
+    })
+    inside(f.main, f.root, () => {
+      const r = f.run(['run'])
+      assert.equal(r.code, 1, r.stderr)
+      assert.match(r.stderr, /provenance dump failed.*fx-old/)
+      // the bead survives — an incomplete archive never reaches prune
+      assert.ok(readBeads(f.db).some((b) => b.id === 'fx-old'))
+      // and the archive, failure marker included, still reached the ref
+      const prov = readdirSync(join(f.main, '.agents', 'sweep')).find((n) =>
+        n.endsWith('.provenance.jsonl')
+      )
+      assert.ok(prov)
+      assert.match(
+        git(['show', `refs/bro/data:.agents/sweep/${prov}`], f.main),
+        /provenance dump failed/
+      )
     })
   })
 

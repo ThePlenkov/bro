@@ -296,6 +296,7 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
   }
   case 'provenance': {
     if (pos[1] !== 'log') fail('provenance ' + (pos[1] || ''))
+    if ((db.provFail || []).includes(pos[2])) fail('provenance log failed')
     jsonOut((db.prov || {})[pos[2]] || [])
     break
   }

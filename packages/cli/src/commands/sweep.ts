@@ -261,8 +261,16 @@ function printRunDryRun(cfg: SweepCfg, gate: TaskRow[], burn: TaskRow[], flatten
 
 /** Archive — issues JSONL + per-bead provenance dump (bd prune drops
  *  provenance rows with the bead — verified behavior, so the dump
- *  joins the archive). Returns the issues file for the sync check. */
-function archiveBurn(root: string, cfg: SweepCfg, burn: TaskRow[], ts: string): string {
+ *  joins the archive). Returns the issues file for the sync check plus
+ *  the ids whose dump failed — a failed dump records an error marker,
+ *  not coverage, so it must block prune (the run's own gate rule:
+ *  refuse rather than burn what the archive didn't capture). */
+function archiveBurn(
+  root: string,
+  cfg: SweepCfg,
+  burn: TaskRow[],
+  ts: string
+): { issuesFile: string; provFailed: string[] } {
   const absDir = resolve(root, cfg.dir)
   mkdirSync(absDir, { recursive: true })
   const issuesFile = join(absDir, `${ts}.jsonl`)
@@ -270,6 +278,7 @@ function archiveBurn(root: string, cfg: SweepCfg, burn: TaskRow[], ts: string): 
   bd(['export', '-o', issuesFile], root)
   let provRows = 0
   const provLines: string[] = []
+  const provFailed: string[] = []
   for (const r of burn) {
     try {
       const rows = bdJson<unknown[]>(['provenance', 'log', r.id, '--json'], root)
@@ -279,11 +288,12 @@ function archiveBurn(root: string, cfg: SweepCfg, burn: TaskRow[], ts: string): 
       }
     } catch {
       provLines.push(JSON.stringify({ issue: r.id, error: 'provenance dump failed' }))
+      provFailed.push(r.id)
     }
   }
   writeFileSync(provFile, provLines.join('\n') + (provLines.length > 0 ? '\n' : ''))
   console.log(`archive: ${cfg.dir}/${ts}.jsonl (+${provRows} provenance rows)`)
-  return issuesFile
+  return { issuesFile, provFailed }
 }
 
 /** The archive must reach the data ref before prune — verify against
@@ -354,8 +364,18 @@ function cmdRun(dir: string, dryRun: boolean, force: boolean, flatten: boolean):
   }
 
   const ts = new Date().toISOString().replace(/[:.]/g, '-')
-  const issuesFile = archiveBurn(root, cfg, burn, ts)
+  const { issuesFile, provFailed } = archiveBurn(root, cfg, burn, ts)
   verifyArchiveSynced(root, cfgAll, syncDir, issuesFile, ts)
+
+  // a dump failure leaves an error marker where provenance should be —
+  // the archive (marker included) is synced, but prune would burn what
+  // was never captured, so refuse exactly like the gate does
+  if (provFailed.length > 0) {
+    fail(
+      `provenance dump failed for ${provFailed.join(' ')} — archive preserved, not pruning`,
+      1
+    )
+  }
 
   // prune — bd's own protections apply unchanged (pinned, open,
   // ephemeral, cited-by-open all skip)
