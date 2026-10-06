@@ -467,16 +467,34 @@ export function patchAgentRegistry(
 /** Remove entries by molStep key — the prune path for terminal
  *  records (the caller decides which states are reapable; this only
  *  guarantees the same lock+atomic-write discipline as a patch).
- *  Returns the keys that were actually present and removed. */
-export function removeAgentRegistryEntries(dir: string, molSteps: string[]): string[] {
+ *  `expected` pins the observed entry: a respawn between the caller's
+ *  status snapshot and this removal rewrites agentId/spawnedAt/pid, and
+ *  a changed entry is a different agent whose state was never verified
+ *  — it stays. Returns the keys that were actually present and removed. */
+export function removeAgentRegistryEntries(
+  dir: string,
+  molSteps: string[],
+  expected?: ReadonlyMap<string, Pick<AgentRegistryEntry, 'agentId' | 'spawnedAt' | 'pid'>>
+): string[] {
   return withAgentRegistryLock(dir, () => {
     const reg = readAgentRegistry(dir)
     const removed: string[] = []
     for (const k of molSteps) {
-      if (reg[k] !== undefined) {
-        delete reg[k]
-        removed.push(k)
+      const cur = reg[k]
+      if (cur === undefined) {
+        continue
       }
+      const seen = expected?.get(k)
+      if (
+        seen !== undefined &&
+        (cur.agentId !== seen.agentId ||
+          cur.spawnedAt !== seen.spawnedAt ||
+          cur.pid !== seen.pid)
+      ) {
+        continue
+      }
+      delete reg[k]
+      removed.push(k)
     }
     if (removed.length > 0) {
       writeAgentRegistry(dir, reg)

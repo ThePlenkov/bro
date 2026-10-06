@@ -734,6 +734,10 @@ async function cmdPrune(dir: string, env: AgentConnectorEnv, argv: string[]): Pr
   const { backends } = await collectAgentBackends(dir, env, connectorName)
   const reapable: string[] = []
   const skipped: string[] = []
+  // fingerprint of the observed entries — removeAgentRegistryEntries
+  // re-checks it under the lock so a respawn between snapshot and
+  // removal can't be reaped as the terminal agent it replaced
+  const expected = new Map<string, { agentId: string; spawnedAt?: string; pid?: number }>()
   for (const b of backends) {
     // a degraded backend's states are unproven — its entries stay
     if (b.degraded !== undefined) {
@@ -753,9 +757,11 @@ async function cmdPrune(dir: string, env: AgentConnectorEnv, argv: string[]): Pr
         }
       }
       reapable.push(a.molStep)
+      expected.set(a.molStep, { agentId: a.id, spawnedAt: a.spawnedAt, pid: a.pid })
     }
   }
-  const removed = reapable.length === 0 ? [] : removeAgentRegistryEntries(dir, reapable)
+  const removed =
+    reapable.length === 0 ? [] : removeAgentRegistryEntries(dir, reapable, expected)
   if (json) {
     console.log(JSON.stringify({ pruned: removed, skippedDegraded: skipped }, null, 2))
     return
