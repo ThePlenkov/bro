@@ -205,9 +205,12 @@ backend, calibrated no better than llm-judge and marked accordingly.
 | ------ | ---------------------------------------- | ------------- |
 | `api`  | by model wire — `systemone` → typed,     | —             |
 |        | `openai-compat` → prose                  |               |
-| `acp`  | typed only when a jev-family reply       | yes           |
-|        | validates against the typed contract —   |               |
-|        | an unparseable one fails open, never     |               |
+| `acp`  | typed only when the resolved model       | yes           |
+|        | (pin, else `entry.model`) is jev-family  |               |
+|        | — no pin binds prose even if the session |               |
+|        | reports one — and the reply validates    |               |
+|        | against the typed contract; an           |               |
+|        | unparseable one fails open, never        |               |
 |        | counts as typed                          |               |
 | `cli`  | prose (stdout parse)                     | yes           |
 
