@@ -241,7 +241,7 @@ async function acpOp(
     // message that reads as auth REQUIRED names an interactive login
     const avail =
       err instanceof Error &&
-      /timeout|timed out|unavailable|network|econn|socket|502|503|deadline/i.test(err.message)
+      /timeout|timed out|unavailable|network|econn|socket|502|503|504|deadline/i.test(err.message)
     const isAuth =
       (err instanceof RequestError && err.code === -32000) ||
       (!avail && err instanceof Error && /auth|login|credential/i.test(err.message))

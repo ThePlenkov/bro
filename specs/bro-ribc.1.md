@@ -120,9 +120,13 @@ Rules:
 - **`models` is the allowlist** — an `api` entry serves only the model
   ids it declares, each mapped to its wire. A model value of a bare
   wire string, `{ "wire": … }`, or `null` (wire inferred: jev-family →
-  `systemone`, else `openai-compat`) all parse. Asking for an
-  undeclared model is a config error naming the allowlist — a router
-  can never reroute a request to a model the config didn't admit.
+  `systemone`, else `openai-compat`) all parse; `{}` and
+  `{ "wire": null }` are the object spellings of "infer". An object
+  carrying other keys but no `wire` (`{ "wrie": … }` is a typo, not a
+  pin) is malformed — it drops the entry rather than silently picking
+  a wire. Asking for an undeclared model is a config error naming the
+  allowlist — a router can never reroute a request to a model the
+  config didn't admit.
 - **`model` pins the default**; consumers may override per-call
   (`judge.model`, fleet per-profile) — the override must be in
   `models`, and it lands in provenance (`DecideResult.model`, the

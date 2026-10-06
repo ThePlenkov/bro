@@ -66,8 +66,10 @@ export function fakeAcpAgent(
     askPermission?: PermissionOption[]
     /** session/prompt fails: 'auth' answers the wire's auth_required
      *  error (code −32000), 'generic' a plain handler error that
-     *  arrives as "Internal error" like any backend flake would. */
-    failPrompt?: 'auth' | 'generic'
+     *  arrives as "Internal error" like any backend flake would,
+     *  'auth-gateway-504' an auth-worded outage message that must
+     *  classify as availability, never config. */
+    failPrompt?: 'auth' | 'generic' | 'auth-gateway-504'
   } = {}
 ): FakeAcpAgent {
   const seen: FakeAcpAgent = {
@@ -112,6 +114,9 @@ export function fakeAcpAgent(
       }
       if (opts.failPrompt === 'generic') {
         throw new Error('upstream connection reset')
+      }
+      if (opts.failPrompt === 'auth-gateway-504') {
+        throw new RequestError(-32603, 'auth gateway returned HTTP 504')
       }
       if (opts.askPermission !== undefined) {
         const res = await ctx.client.request('session/request_permission', {

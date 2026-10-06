@@ -227,6 +227,17 @@ describe('acp call surface — typed mode', () => {
     )
   })
 
+  test('an auth-worded gateway outage stays JudgeUnavailable — 504 is availability, not config', async () => {
+    const fake = fakeAcpAgent({
+      configOptions: [MODEL_OPTION],
+      failPrompt: 'auth-gateway-504',
+    })
+    await assert.rejects(
+      acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!('s', QUESTIONS, deadline()),
+      JudgeUnavailable
+    )
+  })
+
   test('a non-end_turn stop fails open — JudgeUnavailable, never a verdict', async () => {
     const fake = fakeAcpAgent({ stopReason: 'refusal', replyText: 'no', configOptions: [MODEL_OPTION] })
     await assert.rejects(

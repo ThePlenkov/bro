@@ -94,6 +94,9 @@ describe('providers section', () => {
             'auto/inferred-jev': null,
             'typesafe/jev-2.0': null,
             'other/plain': null,
+            // {} and {wire:null} are the object spellings of "no pin"
+            'auto/empty-obj': {},
+            'typesafe/jev-3.1': { wire: null },
           },
         },
       },
@@ -106,6 +109,8 @@ describe('providers section', () => {
     assert.equal(m['auto/inferred-jev'], 'openai-compat')
     assert.equal(m['typesafe/jev-2.0'], 'systemone')
     assert.equal(m['other/plain'], 'openai-compat')
+    assert.equal(m['auto/empty-obj'], 'openai-compat')
+    assert.equal(m['typesafe/jev-3.1'], 'systemone')
   })
 
   test('api models map: a value that is not a wire string, {wire}, or null is an error — never an inference', () => {
@@ -128,6 +133,14 @@ describe('providers section', () => {
           baseUrl: 'https://x',
           apiKeyEnv: 'X',
           models: { 'a/b': ['systemone'] },
+        },
+        // a foreign-keyed object ({wrie} is a typo, not a pin) is the
+        // same malformed shape — it must not silently infer a wire
+        typo: {
+          type: 'api',
+          baseUrl: 'https://x',
+          apiKeyEnv: 'X',
+          models: { 'a/b': { wrie: 'systemone' } },
         },
       },
     })

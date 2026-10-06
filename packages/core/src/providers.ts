@@ -201,9 +201,13 @@ function resolveModelWire(key: string, v: unknown): ApiWire | undefined {
   }
   const wire = typeof v === 'string' ? v : isPlainObject(v) ? v.wire : undefined
   // false/42/[...] reach here with wire===undefined — an unknown VALUE
-  // shape is a config error, not a license to infer
+  // shape is a config error, not a license to infer. Same for an object
+  // carrying foreign keys ({wrie:…} is a typo, not a pin): only {} and
+  // {wire:null} read as the object spelling of "infer".
   if (wire === undefined || wire === null) {
-    return isPlainObject(v) ? infer() : undefined
+    return isPlainObject(v) && Object.keys(v).every((k) => k === 'wire')
+      ? infer()
+      : undefined
   }
   return typeof wire === 'string' && (API_WIRES as readonly string[]).includes(wire)
     ? (wire as ApiWire)
