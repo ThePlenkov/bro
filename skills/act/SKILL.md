@@ -107,10 +107,11 @@ default store, so standard installs already have it).
   `bro act wait <PR> --merge` in the background is the default end-state;
   a watcher exit is a state to inspect, not silence — a `timed_out` exit
   means the PR is still open, so start a fresh `bro act wait --merge`
-  (a timeout retires its marker on the way out — re-arming there is
-  manual). A watcher that *died* with the host/session leaves a dead
-  marker behind — `bro act rearm` puts the watch back up (the
-  session-start nudge names the command).
+  (a timeout retires its marker on the way out, so `act rearm` has
+  nothing to resurrect — re-arming there is manual). A watcher that
+  *died* with the host/session never ran that cleanup — its dead marker
+  stays, the session-start nudge names it, and `bro act rearm` puts the
+  watch back up.
   The stop gate enforces this: an armed session ending with an open,
   unwatched current-branch PR is blocked once and pointed at the detached
   `act wait` form — a running `bro drive --every` counts as coverage via

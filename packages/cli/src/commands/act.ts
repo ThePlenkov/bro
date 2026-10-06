@@ -200,6 +200,7 @@ async function cmdWait(argv: string[]): Promise<void> {
         link: rev.prLink(t.repo, t.pr),
         merge: argv.includes('--merge'),
         cleanup: argv.includes('--cleanup'),
+        workdir: process.cwd(),
         timeoutMin: timeout,
       },
       onPoll: (s, g) =>
@@ -241,32 +242,68 @@ async function cmdWait(argv: string[]): Promise<void> {
 /** Detached `act wait` resurrection — own process group, parent's
  *  stdio ignored, unref'd: the same nohup-equivalent the watcher needs
  *  to survive the session that re-armed it (bro-tafj). `argv[1]` is the
- *  running cli entry, so the child re-runs this same binary. */
-export function respawnWatcher(
+ *  running cli entry, so the child re-runs this same binary.
+ *
+ *  The returned pid is CONFIRMED — this resolves only once the child's
+ *  own live marker shows up in listWatches, so a spawn that exits early
+ *  (auth gate, config error) resolves undefined and the dead markers
+ *  stay on disk as the still-unkept promise. */
+export async function respawnWatcher(
   dir: string,
-  plan: { pr: number; merge: boolean; cleanup: boolean; timeoutMin: number }
-): number | undefined {
+  plan: {
+    pr: number
+    merge: boolean
+    cleanup: boolean
+    timeoutMin: number
+    workdir?: string
+  }
+): Promise<number | undefined> {
   const entry = process.argv[1]
   if (entry === undefined) {
     return undefined
   }
+  // --cleanup retires the worktree containing the watcher's cwd — it is
+  // replayed only when the recorded workdir still exists. Replaying it
+  // from the rearm cwd (or a marker old enough to lack workdir) could
+  // tear down the wrong checkout.
+  const workdirOk = plan.workdir !== undefined && existsSync(plan.workdir)
   const args = [entry, 'act', 'wait', String(plan.pr), '--timeout', String(plan.timeoutMin)]
   if (plan.merge) {
     args.push('--merge')
     // --cleanup only has meaning behind --merge — a wait armed with
     // cleanup alone exits on the post-wait dispatch, so a merge:false
     // marker's cleanup bit (user error at arm time) isn't replayed
-    if (plan.cleanup) {
+    if (plan.cleanup && workdirOk) {
       args.push('--cleanup')
     }
   }
+  const cwd = workdirOk ? plan.workdir! : dir
   const child = spawn(process.execPath, args, {
-    cwd: dir,
+    cwd,
     detached: true,
     stdio: 'ignore',
   })
+  // an unhandled 'error' event (ENOENT on cwd, EACCES on the entry)
+  // would crash rearm mid-loop — swallow it; pid stays undefined and
+  // the marker is kept
+  child.on('error', () => {})
   child.unref()
-  return child.pid
+  const pid = child.pid
+  if (pid === undefined) {
+    return undefined
+  }
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline) {
+    const live = listWatches(dir).find((l) => l.alive && l.watch.pid === pid)
+    if (live !== undefined) {
+      return pid
+    }
+    if (child.exitCode !== null) {
+      return undefined // exited before ever publishing its marker
+    }
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  return undefined
 }
 
 /** `bro act rearm` — dead watch markers mean their watcher died with

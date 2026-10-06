@@ -36,6 +36,10 @@ export interface PendingWatch {
   /** The original wait's --cleanup — rearm replays it so a resurrected
    *  watch keeps the whole promise, not just the poll. */
   cleanup?: boolean
+  /** The directory the watcher ran in. --cleanup retires the worktree
+   *  containing the watcher's cwd — replaying it from another checkout
+   *  would tear down the wrong worktree, so rearm needs the original. */
+  workdir?: string
   startedAt: number
   timeoutMin: number
 }
@@ -256,6 +260,7 @@ function readMarker(file: string): PendingWatch | null {
       (w.pidStart === undefined || typeof w.pidStart === 'string') &&
       typeof w.merge === 'boolean' &&
       (w.cleanup === undefined || typeof w.cleanup === 'boolean') &&
+      (w.workdir === undefined || typeof w.workdir === 'string') &&
       // an Infinity/NaN startedAt poisons the TTL check — Date.now() -
       // Infinity is never > ttl, so the marker would never be pruned
       typeof w.startedAt === 'number' &&
@@ -343,10 +348,23 @@ export function listWatches(dir: string): ListedWatch[] {
  *  to drop once the replacement watch is up. */
 export function deadWatchPlan(
   dir: string
-): Array<{ pr: number; merge: boolean; cleanup: boolean; timeoutMin: number; files: string[] }> {
+): Array<{
+  pr: number
+  merge: boolean
+  cleanup: boolean
+  timeoutMin: number
+  workdir?: string
+  files: string[]
+}> {
   const byPr = new Map<
     number,
-    { merge: boolean; cleanup: boolean; timeoutMin: number; files: string[] }
+    {
+      merge: boolean
+      cleanup: boolean
+      timeoutMin: number
+      workdir?: string
+      files: string[]
+    }
   >()
   for (const l of listWatches(dir)) {
     if (l.alive) {
@@ -358,11 +376,19 @@ export function deadWatchPlan(
         merge: l.watch.merge,
         cleanup: l.watch.cleanup === true,
         timeoutMin: l.watch.timeoutMin,
+        workdir: l.watch.workdir,
         files: [l.file],
       })
       continue
     }
     cur.files.push(l.file)
+    // the merge marker's workdir is the cleanup target — adopt it with
+    // the mode it recorded; a watch-only marker's cwd never is one
+    if (l.watch.merge && !cur.merge) {
+      cur.workdir = l.watch.workdir ?? cur.workdir
+    } else {
+      cur.workdir = cur.workdir ?? l.watch.workdir
+    }
     cur.merge = cur.merge || l.watch.merge
     cur.cleanup = cur.cleanup || l.watch.cleanup === true
     cur.timeoutMin = Math.max(cur.timeoutMin, l.watch.timeoutMin)
@@ -381,13 +407,17 @@ export async function rearmWatches(opts: {
   dir: string
   isOpen: (pr: number) => Promise<boolean>
   /** Absent → plan-only dry run: nothing respawns, no marker moves,
-   *  open PRs report as `rearmed` with pid 0. */
+   *  open PRs report as `rearmed` with pid 0. A returned pid means the
+   *  replacement watcher is CONFIRMED up (its live marker exists) — a
+   *  bare spawn that exits early must resolve to undefined, keeping the
+   *  dead markers instead of sweeping the only record of the promise. */
   respawn?: (plan: {
     pr: number
     merge: boolean
     cleanup: boolean
     timeoutMin: number
-  }) => number | undefined
+    workdir?: string
+  }) => number | undefined | Promise<number | undefined>
 }): Promise<{
   rearmed: Array<{ pr: number; pid: number }>
   settled: number[]
@@ -419,7 +449,7 @@ export async function rearmWatches(opts: {
       rearmed.push({ pr: plan.pr, pid: 0 })
       continue
     }
-    const pid = opts.respawn(plan)
+    const pid = await opts.respawn(plan)
     if (pid === undefined) {
       kept.push({ pr: plan.pr, reason: 'respawn failed' })
       continue

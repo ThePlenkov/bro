@@ -97,7 +97,10 @@ describe('act rearm', () => {
       prState: 'OPEN',
       checks: [{ name: 'ci', state: 'PENDING', bucket: 'pending' }],
     })
-    const marker = deadWatch(main, 7, { merge: true, cleanup: true })
+    // workdir records where the original watcher ran — --cleanup is
+    // replayed only when that directory still exists (rearm could be
+    // invoked from any checkout of the repo)
+    const marker = deadWatch(main, 7, { merge: true, cleanup: true, workdir: main })
     const r = runCli(['act', 'rearm', '--json'], { cwd: main })
     assert.equal(r.code, 0, r.stderr)
     const out = JSON.parse(r.stdout) as {
@@ -121,7 +124,9 @@ describe('act rearm', () => {
       }
       if (live === null) await new Promise((res) => setTimeout(res, 50))
     }
-    assert.ok(live, 'respawned watcher never wrote its marker')
+    if (live === null) {
+      assert.fail('respawned watcher never wrote its marker')
+    }
     assert.equal(live.pr, 7)
     assert.equal(live.merge, true)
     assert.equal(live.cleanup, true)

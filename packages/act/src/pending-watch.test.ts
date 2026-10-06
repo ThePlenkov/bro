@@ -458,7 +458,13 @@ describe('act rearm', () => {
   test('a dead marker on an open PR respawns and the marker is swept', async () => {
     const dir = repo()
     const file = deadMarker(dir, { pr: 7, merge: true })
-    const spawned: Array<{ pr: number; merge: boolean; timeoutMin: number }> = []
+    const spawned: Array<{
+      pr: number
+      merge: boolean
+      cleanup: boolean
+      timeoutMin: number
+      workdir?: string
+    }> = []
     const res = await rearmWatches({
       dir,
       isOpen: async () => true,
@@ -522,6 +528,16 @@ describe('act rearm', () => {
     assert.equal(existsSync(watchOnly), false)
     assert.equal(existsSync(merging), false)
     assert.equal(res.rearmed.length, 1)
+  })
+
+  test("the merge marker's workdir is the plan's — it is the cleanup target", async () => {
+    const dir = repo()
+    const other = repo()
+    deadMarker(dir, { pr: 10, merge: false, workdir: other })
+    deadMarker(dir, { pr: 10, merge: true, workdir: dir })
+    const plan = deadWatchPlan(dir)
+    assert.equal(plan.length, 1)
+    assert.equal(plan[0]!.workdir, dir)
   })
 
   test('a live watcher is never in the plan — parallel work, not a corpse', async () => {
