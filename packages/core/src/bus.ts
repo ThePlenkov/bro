@@ -35,6 +35,13 @@ import { connect, createServer, type Server, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { createHash, randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
+import {
+  eventMatches,
+  isEventInput,
+  type EventEnvelope,
+  type EventFilter,
+  type EventInput,
+} from './events.ts'
 import { gitCommonDir } from './git.ts'
 
 /** Hard budget for every client operation. REVIEW.md rates any path
@@ -70,7 +77,7 @@ export const BUS_RING_MAX_BYTES = 32 * 1024 * 1024
 
 /** Bytes an envelope occupies in the ring — measured, not estimated,
  *  so the byte bound cannot drift from what is actually retained. */
-function busEventBytes(event: BusEnvelope): number {
+function busEventBytes(event: EventEnvelope): number {
   return Buffer.byteLength(JSON.stringify(event), 'utf8')
 }
 
@@ -80,87 +87,43 @@ function busEventBytes(event: BusEnvelope): number {
  *  re-derive instead of silently missing events. */
 const SLOW_CONSUMER_BYTES = 1024 * 1024
 
-/** One event as published. `seq` and `ts` are the broker's to assign —
- *  a publisher cannot forge an order. `cause` and `ref` are what make a
- *  chain readable later: `cause` is the `seq` (or bead id) this event
- *  answers, `ref` an opaque handle back to the artifact — both belong in
- *  the envelope from day one, because adding them after a transport
- *  change turns every stored event into a migration. */
-export interface BusEventInput {
-  topic: string
-  kind: string
-  key?: string
-  source?: string
-  /** What this event answers — a prior `seq`, or a bead/step id. */
-  cause?: string
-  /** Opaque pointer to an artifact: a worktree, a PR, a log file. */
-  ref?: string
-  payload?: unknown
-}
+/**
+ * The local bus — a CONNECTOR for the `events` facade, not the capability
+ * itself. The event contract (topic, kind, key, cause, ref, payload) and
+ * the matching rules live in events.ts; what stays here is the transport:
+ * a Unix socket, NDJSON framing, the retention window, and the fail-open
+ * client. `BusEnvelope` and friends stay exported under their bus names
+ * so this PR's public API is unchanged.
+ */
+export type {
+  EventEnvelope as BusEnvelope,
+  EventFilter as BusFilter,
+  EventInput as BusEventInput,
+} from './events.ts'
+export {
+  eventMatches as busMatches,
+  eventTopicMatches as busTopicMatches,
+  isEventInput as isBusEventInput,
+} from './events.ts'
 
-/** One event as delivered. `gen`, `seq` and `ts` are the broker's to
- *  assign — a publisher cannot forge an order or a run. */
-export interface BusEnvelope extends BusEventInput {
-  /** Per-run token: a restart re-issues `seq` from 1, so a durable
-   *  cursor is `{gen, seq}`, never seq alone — a foreign gen reads as
-   *  a gap, not as a silent resume into the wrong seq space. */
+/** A record the broker itself vouches for: inside the broker `gen` and
+ *  `seq` always exist — the facade leaves `seq` optional only because
+ *  other transports have no total order to offer. `gen` is the per-run
+ *  token: a restart re-issues `seq` from 1, so a durable cursor is
+ *  `{gen, seq}`, never seq alone — a foreign gen reads as a gap, not
+ *  as a silent resume into the wrong seq space. */
+export interface BusRecord extends EventEnvelope {
   gen: string
   seq: number
-  ts: string
 }
 
 /** A cursor that survives broker restarts — taken from the last
- *  `BusEnvelope` seen. A bare `seq` stays legal as a run-local cursor
+ *  `BusRecord` seen. A bare `seq` stays legal as a run-local cursor
  *  (`--since` on the CLI), but only `{gen, seq}` cannot collide with
  *  the seq space a restarted broker hands out. */
 export interface BusCursor {
   gen: string
   seq: number
-}
-
-/** Subscriber-side selection. Matching happens once, in the broker:
- *  one publish, N subscribers, each receiving only its subset. */
-export interface BusFilter {
-  topics?: string[]
-  kinds?: string[]
-}
-
-/** `'*'`, an exact topic, or a trailing-`*` prefix glob. */
-export function busTopicMatches(pattern: string, topic: string): boolean {
-  if (pattern === '*') {
-    return true
-  }
-  if (pattern.endsWith('*')) {
-    return topic.startsWith(pattern.slice(0, -1))
-  }
-  return pattern === topic
-}
-
-export function busMatches(filter: BusFilter, event: { topic: string; kind: string }): boolean {
-  // A filter arrives off the wire, so its shape is not this function's
-  // caller to guarantee. `Array.isArray` rather than a cast: a string
-  // `topics` has no `.some`, and throwing inside the broker's socket
-  // callback would take the whole bus down over one bad frame.
-  const topics = filter.topics
-  // `Array.isArray` alone is not enough — `{topics: [null]}` is an
-  // array, and `busTopicMatches` would call `.endsWith` on null in the
-  // socket callback. A non-string entry matches nothing, not throws.
-  if (Array.isArray(topics) && topics.length > 0 && !topics.some((t) => typeof t === 'string' && busTopicMatches(t, event.topic))) {
-    return false
-  }
-  const kinds = filter.kinds
-  if (Array.isArray(kinds) && kinds.length > 0 && !kinds.includes(event.kind)) {
-    return false
-  }
-  return true
-}
-
-export function isBusEventInput(value: unknown): value is BusEventInput {
-  if (typeof value !== 'object' || value === null) {
-    return false
-  }
-  const v = value as Record<string, unknown>
-  return typeof v['topic'] === 'string' && v['topic'] !== '' && typeof v['kind'] === 'string' && v['kind'] !== ''
 }
 
 /** A durable cursor is {gen, seq}: the gen pins it to one broker run, so
@@ -186,7 +149,6 @@ function parseSince(raw: unknown, gen: string): number | 'now' | 'foreign' {
 function parseReplayLimit(raw: unknown): number | undefined {
   return typeof raw === 'number' && Number.isInteger(raw) && raw > 0 ? raw : undefined
 }
-
 /** Bounded replay window. `since` is the caller's last seen seq.
  *
  *  Retention is part of the contract, not a follow-up: a window that is
@@ -198,7 +160,7 @@ export class BusRing {
   private readonly limit: number
   private readonly ttlMs: number
   private readonly maxBytes: number
-  private readonly buf: BusEnvelope[] = []
+  private readonly buf: BusRecord[] = []
   private bytes = 0
   /** Highest seq ever dropped by a bound. An empty ring cannot tell
    *  "nothing was published" from "everything aged out", and answering
@@ -225,7 +187,7 @@ export class BusRing {
     return this.buf.length
   }
 
-  push(event: BusEnvelope, now: number): void {
+  push(event: BusRecord, now: number): void {
     this.buf.push(event)
     this.bytes += busEventBytes(event)
     this.lastSeq = Math.max(this.lastSeq, event.seq)
@@ -257,7 +219,7 @@ export class BusRing {
    *  cursor predates the window (evicted or expired) or claims a seq this
    *  broker run never issued (it restarted, so seq counts from 1 again).
    *  Both mean the same thing to a consumer: re-derive from state. */
-  since(since: number, now: number = Date.now()): BusEnvelope[] | null {
+  since(since: number, now: number = Date.now()): BusRecord[] | null {
     this.evict(now)
     // The cursor wants events after `since`, so the first one it needs is
     // `since + 1`. If a bound has already dropped past that, the range is
@@ -304,7 +266,7 @@ export function busStatePath(dir: string): string | null {
 }
 
 interface Subscriber {
-  filter: BusFilter
+  filter: EventFilter
   sock: Socket
   dropped: boolean
 }
@@ -440,12 +402,15 @@ export async function startBusBrokerAt(
   }
 
   const onPub = (sock: Socket, input: unknown): void => {
-    if (!isBusEventInput(input)) {
+    if (!isEventInput(input)) {
       sendFrame(sock, { op: 'err', message: 'pub needs event {topic, kind}' })
       return
     }
     seq += 1
-    const envelope: BusEnvelope = {
+    // The broker assigns order, so inside here a seq always exists —
+    // the facade leaves it optional only because other transports have
+    // no total order to offer.
+    const envelope: BusRecord = {
       ...input,
       gen,
       seq,
@@ -454,7 +419,7 @@ export async function startBusBrokerAt(
     ring.push(envelope, now())
     const out = { op: 'event', event: envelope }
     for (const s of subs) {
-      if (busMatches(s.filter, envelope)) {
+      if (eventMatches(s.filter, envelope)) {
         deliver(s, out)
       }
     }
@@ -463,12 +428,12 @@ export async function startBusBrokerAt(
 
   const onSub = (sock: Socket, frame: Record<string, unknown>, sub: Subscriber | undefined): Subscriber => {
     const raw = frame['filter']
-    const filter: BusFilter = typeof raw === 'object' && raw !== null ? (raw as BusFilter) : {}
+    const filter: EventFilter = typeof raw === 'object' && raw !== null ? (raw as EventFilter) : {}
     const since = parseSince(frame['since'], gen)
     const entry: Subscriber = sub ?? { filter, sock, dropped: false }
     entry.filter = filter
     subs.add(entry)
-    let replay: BusEnvelope[] | null
+    let replay: BusRecord[] | null
     if (since === 'foreign') {
       replay = null
     } else {
@@ -482,7 +447,7 @@ export async function startBusBrokerAt(
     // hole whatever this subscriber cares about — but the events it is
     // handed still go through its filter, or replay would hand it topics
     // it never asked for.
-    const matched = replay.filter((e) => busMatches(entry.filter, e))
+    const matched = replay.filter((e) => eventMatches(entry.filter, e))
     // The omitted prefix is a hole, so a truncated catch-up reports as a
     // gap like any other loss.
     const limit = parseReplayLimit(frame['limit'])
@@ -726,7 +691,7 @@ export interface BusPublishResult {
  *  transport problem become a session problem. */
 export function busPublish(
   socketPath: string,
-  event: BusEventInput,
+  event: EventInput,
   opts: { timeoutMs?: number } = {}
 ): Promise<BusPublishResult> {
   const timeoutMs = opts.timeoutMs ?? BUS_TIMEOUT_MS
@@ -772,7 +737,7 @@ export function busPublish(
 }
 
 export interface BusSubscriptionHandlers {
-  onEvent: (event: BusEnvelope) => void
+  onEvent: (event: EventEnvelope) => void
   /** Cursor fell out of the replay window (or the broker restarted) —
    *  re-derive from state before trusting the next event. */
   onGap?: (seq: number) => void
@@ -795,7 +760,7 @@ export interface BusSubscription {
  *  replay arrives preceded by a `gap` frame. */
 export function busSubscribe(
   socketPath: string,
-  filter: BusFilter,
+  filter: EventFilter,
   handlers: BusSubscriptionHandlers,
   opts: { since?: number | BusCursor; limit?: number; timeoutMs?: number } = {}
 ): Promise<BusSubscription> {
@@ -850,7 +815,7 @@ export function busSubscribe(
             continue
           }
           if (frame['op'] === 'event') {
-            handlers.onEvent(frame['event'] as BusEnvelope)
+            handlers.onEvent(frame['event'] as EventEnvelope)
           } else if (frame['op'] === 'gap' && handlers.onGap !== undefined) {
             handlers.onGap(typeof frame['seq'] === 'number' ? frame['seq'] : 0)
           }
@@ -928,7 +893,7 @@ export function busStatus(socketPath: string, opts: { timeoutMs?: number } = {})
 }
 
 export interface BusProbeResult {
-  events: BusEnvelope[]
+  events: EventEnvelope[]
   /** True when the cursor could not be honoured — the caller must
    *  re-derive state rather than trust the events it did get. */
   gapped: boolean
@@ -953,7 +918,7 @@ export async function busProbe(
   // contract, so the deadline is taken before the connect and what is
   // left is what the listen gets.
   const deadline = Date.now() + windowMs
-  const events: BusEnvelope[] = []
+  const events: EventEnvelope[] = []
   let gapped = false
   let sub: BusSubscription | undefined
   try {

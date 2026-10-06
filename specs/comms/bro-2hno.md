@@ -40,14 +40,25 @@ A broker process on a Unix domain socket in the repo-common dir. Zero
 dependencies, `node:net`, newline-delimited JSON, one envelope per line:
 
 ```json
-{"seq":41,"ts":"2026-10-04T12:00:00.000Z","topic":"agent","kind":"failed","key":"bro-7xgk.2","source":"wrapper","payload":{}}
+{"gen":"9f2c1ab4e5d60718","seq":41,"ts":"2026-10-04T12:00:00.000Z","topic":"agent","kind":"failed","key":"bro-7xgk.2","source":"wrapper","payload":{}}
 ```
 
-- **`seq` is the cursor.** Monotonic per broker run, assigned under the
-  single-threaded server loop. A consumer reconnects with its last `seq`
-  and receives what it missed.
+- **The cursor is `{gen, seq}`.** `seq` is monotonic per broker run,
+  assigned under the single-threaded server loop; `gen` is a token minted
+  once per run. The pair is the cursor because a restart re-issues `seq`
+  from 1, so a bare `seq` from the previous run would silently resume
+  into the middle of a different sequence. A cursor whose `gen` is not
+  this run's is a **gap**, never a resume — same answer as a cursor older
+  than the ring, because both mean "re-derive". A bare `seq` stays legal
+  as an explicitly run-local cursor (`--since` on the CLI).
+- **Where the contract lives.** `gen`, `seq` and `ts` are the
+  transport's to assign, exactly like `ts`, so the envelope is the bus's
+  to fill — but the *shape* is the facade's (`events.ts`), which is where
+  the bus connector narrows it to `BusRecord`. The facade leaves `seq`
+  optional because a transport with no total order has none to offer;
+  inside the broker it always exists.
 - **Replay ring.** The broker keeps the last `RING_LIMIT` envelopes
-  (default 10 000). A consumer asking for a `seq` still inside the ring
+  (default 10 000). A consumer asking for a cursor still inside the ring
   gets the tail from there; older than the ring, it gets a single
   `gap` marker and must re-derive state from the registry, which stays
   the source of truth. Durable per-agent JSONL is **not** the delivery

@@ -24,6 +24,7 @@
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { gitTry } from './git.ts'
+import type { EventsFacade } from './events.ts'
 import type { JudgeFacade } from './judge.ts'
 import type { ReviewFacade } from './review.ts'
 import type { SpecStore } from './specs.ts'
@@ -48,6 +49,7 @@ export interface FacadeMap {
   reviews: ReviewFacade
   specs: SpecStore
   judge: JudgeFacade
+  events: EventsFacade
 }
 
 export type MaybePromise<T> = T | Promise<T>
@@ -130,6 +132,13 @@ export interface Connector {
   reviews?(ctx: ConnectorCtx): ReviewFacade
   specs?(ctx: ConnectorCtx): SpecStore
   judge?(ctx: ConnectorCtx): JudgeFacade
+  events?(ctx: ConnectorCtx): EventsFacade
+  /** Only ever picked BY NAME (`"connectors": {"<kind>": "<name>"}`) —
+   *  never by detection, and never a reason to warn about ambiguity on
+   *  its own. A transport that must be opted into (it needs a daemon, or
+   *  it changes where events go) declares this; a designed default that
+   *  has only opt-in alternatives is not ambiguous, it is configured. */
+  optIn?: boolean
   hooks?(ctx: ConnectorCtx): ConnectorHooks
 }
 
@@ -325,6 +334,13 @@ function warnIfAmbiguous(
   if (designedDefault) {
     return
   }
+  // A default whose every alternative must be named explicitly is a
+  // settled default, not a coin flip — warning on it would train people
+  // to ignore the warning that matters.
+  const others = providers.filter((c) => c !== pick)
+  if (pick === providers[0] && others.length > 0 && others.every((c) => c.optIn === true)) {
+    return
+  }
   console.error(
     `warning: ${providers.map((c) => c.name).join(', ')} all provide "${kind}" ` +
       `— using ${pick.name}; set connectors.${kind} in bro.config.json`
@@ -353,12 +369,20 @@ function pickConnector<K extends keyof FacadeMap>(
   if (memo !== undefined) {
     return memo
   }
-  const remote = url === undefined ? undefined : providers.find((c) => c.matchRemote?.(url))
+  // optIn providers are never auto-picked — the flag's whole contract is
+  // name-only selection, so an unnamed resolution that reached one would
+  // quietly configure a transport the user never asked for.
+  const eligible = providers.filter((c) => c.optIn !== true)
+  const remote = url === undefined ? undefined : eligible.find((c) => c.matchRemote?.(url))
   // no remote claim → project-layout match (specs: .specify/, openspec/)
-  const dir = remote === undefined ? providers.find((c) => c.matchDir?.(ctx.dir)) : undefined
-  const pick = remote ?? dir ?? providers[0]
+  const dir = remote === undefined ? eligible.find((c) => c.matchDir?.(ctx.dir)) : undefined
+  const pick = remote ?? dir ?? eligible[0]
   if (!pick) {
-    throw new Error(`no connector provides "${kind}"`)
+    throw new Error(
+      providers.length === 0
+        ? `no connector provides "${kind}"`
+        : `every "${kind}" provider is opt-in — set connectors.${kind} in bro.config.json`
+    )
   }
   warnIfAmbiguous(kind, providers, pick, remote !== undefined)
   pickMemo.set(key, pick)

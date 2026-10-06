@@ -131,6 +131,27 @@ export {
 } from './connectors.ts'
 export { PROBE_TIMEOUT_MS } from './connectors.ts'
 export {
+  eventMatches,
+  eventTopicMatches,
+  isEventInput,
+} from './events.ts'
+export type {
+  EventEnvelope,
+  EventFilter,
+  EventHandlers,
+  EventInput,
+  EventProbeResult,
+  EventPublishResult,
+  EventsFacade,
+  EventSubscription,
+} from './events.ts'
+export {
+  busConnector,
+  busEvents,
+  mailboxConnector,
+  mailboxEvents,
+} from './events-connectors.ts'
+export {
   drainDirs,
   drainMailbox,
   dropMailbox,
