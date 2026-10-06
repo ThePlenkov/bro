@@ -16,6 +16,12 @@ lifecycle. `bro drill` — scoped descent frames.
 emit a work order. `bro agents` + `bro fleet` — orchestrator facade
 (backend connectors: native/gascity/tmux/paseo/cao) and the read-only
 fleet view; `bro serve` — facade host for thin clients.
+Session planes — host-wide admission quotas per session kind
+(`agents.<kind>.maxSessions`): core owns the abstract registry, the
+TTL reservation lifecycle, and the serialized admit under one host
+mutex; each vendor plane (`packages/cli/src/session-planes/`)
+registers itself and owns only how its live sessions are detected and
+counted. Vendor names never reach core.
 
 ## Owns
 
@@ -24,6 +30,7 @@ hooks.json  hooks/run.sh
 packages/cli/src/commands/{hooks,work,drill,loop,next,convoy}.ts
 packages/cli/src/commands/{agents,fleet,serve}.ts
 packages/core/src/agents.ts  packages/cli/src/agent-connectors.ts
+packages/core/src/session-planes.ts  packages/cli/src/session-planes/
 packages/loop/ packages/drill/ packages/convoy/
 skills/{work,drill,loop,next,convoy}/
 ```

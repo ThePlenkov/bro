@@ -109,8 +109,8 @@ export interface ConnectorHooks {
    *  unfinished business in this system. */
   stopGate?(ctx: ConnectorCtx): MaybePromise<GateContribution[]>
   /** Pre-execution verdicts — the guard plane: veto a tool call or
-   *  rewrite its args before it runs (opencode `tool.execute.before`,
-   *  claude `PreToolUse`). */
+   *  rewrite its args before it runs (a plugin's `tool.execute.before`,
+   *  a hook host's `PreToolUse`). */
   preTool?(
     ctx: ConnectorCtx,
     input: { tool: string; input: Record<string, unknown> }

@@ -15,7 +15,7 @@ import { join } from 'node:path'
 import {
   agentRegistryPath,
   bdActor,
-  countDevinReservations,
+  countSessionReservations,
   DEFAULT_CONFIG,
   patchAgentRegistry,
   procStat,
@@ -463,7 +463,7 @@ function connectorContract(b: BackendCase): void {
       assert.equal(readAgentRegistry(f.main)['fx-1']?.sessionKind, 'devin')
       // the spawned run claimed a reservation — its devin lock would
       // land here in production; in the fixture the file IS the slot
-      assert.equal(countDevinReservations(reservationsDir), 1)
+      assert.equal(countSessionReservations(reservationsDir), 1)
       await assert.rejects(
         c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)')),
         /devin session quota reached — 2\/2 live sessions.*fx-2/
@@ -527,19 +527,27 @@ function connectorContract(b: BackendCase): void {
       agents: { devin: { maxSessions: 6, lockDir: '/l' } },
       connectors: {},
     }
-    assert.deepEqual(sessionQuotaOf(capped, 'native', spec, 'devin -p'), {
-      kind: 'devin',
-      maxSessions: 6,
-      lockDir: '/l',
-    })
+    const lane = sessionQuotaOf(capped, 'native', spec, 'devin -p')
+    assert.equal(lane?.plane.kind, 'devin')
+    assert.equal(lane?.agents, capped.agents)
     // a devin kind with a non-devin command → still undefined
     assert.equal(sessionQuotaOf(capped, 'native', spec, 'node {promptFile}'), undefined)
-    // a malformed cap surfaces as invalid, never silently unguarded
+    // a malformed cap still yields a lane — admission refuses it loudly
     const bad: AgentConnectorEnv = {
       agents: { devin: { maxSessions: 'six' } },
       connectors: {},
     }
-    assert.equal(sessionQuotaOf(bad, 'native', spec, 'devin -p')?.invalid, true)
+    assert.equal(sessionQuotaOf(bad, 'native', spec, 'devin -p')?.plane.kind, 'devin')
+    // a declared kind with NO registered plane + a configured cap →
+    // loud config refusal, never a silent ungoverned spawn
+    const unregistered: AgentConnectorEnv = {
+      agents: { native: { sessionKind: 'nope' }, nope: { maxSessions: 1 } },
+      connectors: {},
+    }
+    assert.throws(
+      () => sessionQuotaOf(unregistered, 'native', spec, 'whatever'),
+      (e: unknown) => e instanceof SpawnError && e.kind === 'config'
+    )
   })
 
   test('fleet.maxConcurrent 0 means uncapped', async () => {

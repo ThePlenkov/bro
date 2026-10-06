@@ -82,8 +82,8 @@ const DEBRIS_FLOOR_MS = 60_000
 /** The janitor's lock-wait bound — far under the filelock's 20s
  *  default: housekeeping that can't get `agents.json.lock` skips its
  *  serialized passes and retries next tick rather than stalling the
- *  heartbeat behind a slow holder (a gascity spawn's lock section can
- *  span backend calls). */
+ *  heartbeat behind a slow holder (a supervised backend's spawn lock
+ *  section can span backend calls). */
 const JANITOR_LOCK_WAIT_MS = 250
 
 export interface JanitorReaped {

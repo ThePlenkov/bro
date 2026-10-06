@@ -40,10 +40,11 @@ import { existsSync, readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import {
   bdAt,
-  countDevinReservations,
-  countDevinSessions,
-  devinSessionQuota,
+  countSessionReservations,
   readAgentRegistry,
+  sessionPlanes,
+  sessionQuotaConfig,
+  sessionSlotsDir,
   type AgentConnector,
   type AgentInfo,
 } from '@broject/core'
@@ -176,12 +177,12 @@ function occupancyOf(dir: string, env: AgentConnectorEnv): FleetOccupancy {
   }
 }
 
-/** Session-kind quotas the status surfaces — devin locks counted by
- *  unique live pid across the whole host, not just bro's registry, plus
- *  admitted reservations whose devin lock hasn't landed yet. An empty
- *  list means `agents.devin` is unconfigured — the scans don't run. A
- *  present-but-broken cap shows `invalid`; an unverifiable count shows
- *  `live: -1` rather than pretending zero. */
+/** Session-kind quotas the status surfaces — each registered plane
+ *  counts its own live sessions host-wide (the plane owns how), plus
+ *  admitted reservations whose session mark hasn't landed yet. A plane
+ *  whose `agents.<kind>` lane is unconfigured shows nothing — the
+ *  scans don't run. A present-but-broken cap shows `invalid`; an
+ *  unverifiable count shows `live: -1` rather than pretending zero. */
 export interface SessionQuotaView {
   kind: string
   live: number
@@ -190,21 +191,28 @@ export interface SessionQuotaView {
 }
 
 function sessionQuotaViewsOf(env: AgentConnectorEnv): SessionQuotaView[] {
-  const q = devinSessionQuota(env.agents)
-  if (q === undefined) {
-    return []
+  const out: SessionQuotaView[] = []
+  for (const plane of sessionPlanes()) {
+    const q = sessionQuotaConfig(env.agents, plane.kind)
+    if (q === undefined) {
+      continue
+    }
+    if (q.invalid === true) {
+      out.push({ kind: plane.kind, live: -1, max: 0, invalid: true })
+      continue
+    }
+    let live = -1
+    try {
+      live =
+        plane.countLive(env.agents[plane.kind] ?? {}) +
+        countSessionReservations(sessionSlotsDir(plane.kind, q.reservationsDir))
+    } catch {
+      // unverifiable — the -1 renders as `?`, a scan failure must not
+      // take down the status view
+    }
+    out.push({ kind: plane.kind, live, max: q.maxSessions })
   }
-  if (q.invalid === true) {
-    return [{ kind: 'devin', live: -1, max: 0, invalid: true }]
-  }
-  let live = -1
-  try {
-    live = countDevinSessions(q.lockDir) + countDevinReservations(q.reservationsDir)
-  } catch {
-    // unverifiable — the -1 renders as `?`, a scan failure must not take
-    // down the status view
-  }
-  return [{ kind: 'devin', live, max: q.maxSessions }]
+  return out
 }
 
 /** `fleet: 2/3 slots occupied` — `uncapped` instead of the ceiling when
@@ -222,7 +230,7 @@ function printStatusTable(
   console.log(occupancyLine(occupancy))
   for (const s of sessions) {
     if (s.invalid === true) {
-      console.log(`${s.kind} sessions: invalid agents.devin.maxSessions — must be a positive integer`)
+      console.log(`${s.kind} sessions: invalid agents.${s.kind}.maxSessions — must be a positive integer`)
     } else {
       console.log(`${s.kind} sessions: ${s.live >= 0 ? `${s.live}/${s.max}` : `?/${s.max}`} live`)
     }

@@ -5,7 +5,6 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   rmSync,
   utimesSync,
@@ -15,25 +14,17 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
   acquireAgentRegistryLock,
-  admitDevinSession,
   agentEntryBlocked,
   agentRegistryPath,
   agentsSection,
   bdAt,
   claimStep,
   classifyExitCause,
-  countDevinReservations,
-  countDevinSessions,
-  DEVIN_RESERVATION_TTL_MS,
-  devinLocksDir,
-  devinSessionQuota,
   mintAgentId,
   patchAgentRegistry,
   probeStep,
   readAgentRegistry,
   rebindStep,
-  releaseDevinSession,
-  reserveDevinSession,
   SpawnError,
   withAgentRegistryLock,
   writeAgentRegistry,
@@ -553,14 +544,14 @@ describe('agentEntryBlocked', () => {
 describe('agentsSection', () => {
   test('keeps per-backend object bags, drops scalars and arrays', () => {
     const s = agentsSection({
-      native: { command: 'devin -p' },
-      gascity: { configDir: '~/.gascity' },
+      native: { command: 'agent-cli --run' },
+      fleet: { configDir: '~/.fleet' },
       bad: 'string',
       worse: [1, 2],
     })
     assert.deepEqual(s, {
-      native: { command: 'devin -p' },
-      gascity: { configDir: '~/.gascity' },
+      native: { command: 'agent-cli --run' },
+      fleet: { configDir: '~/.fleet' },
     })
   })
 
@@ -568,235 +559,5 @@ describe('agentsSection', () => {
     assert.deepEqual(agentsSection(undefined), {})
     assert.deepEqual(agentsSection('nope'), {})
     assert.deepEqual(agentsSection([]), {})
-  })
-})
-
-describe('countDevinSessions', () => {
-  const withLockDir = (fn: (dir: string) => void): void => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
-    try {
-      fn(dir)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  }
-
-  test('counts unique live pids — duped locks and dead pids collapse', () => {
-    withLockDir((dir) => {
-      // two locks, one live process (a resumed session's residue) — counts once
-      writeFileSync(join(dir, 'a.lock'), String(process.pid))
-      writeFileSync(join(dir, 'b.lock'), String(process.pid))
-      // a pid guaranteed dead — the just-reaped child's pid
-      const dead = spawnSync('true', [], { stdio: 'ignore' }).pid
-      writeFileSync(join(dir, 'dead.lock'), String(dead))
-      // non-numeric content and non-lock files are skipped entirely
-      writeFileSync(join(dir, 'junk.lock'), 'not-a-pid')
-      writeFileSync(join(dir, 'note.txt'), String(process.pid))
-      // strict pid parse — '123abc' is NOT 123; a trailing-garbage lock
-      // must not collapse onto an innocent process's pid
-      writeFileSync(join(dir, 'partial.lock'), `${process.pid}garbage`)
-      assert.equal(countDevinSessions(dir), 1)
-    })
-  })
-
-  test('a missing lock dir reads as zero sessions', () => {
-    assert.equal(countDevinSessions(join(tmpdir(), 'bro-devin-locks-absent-')), 0)
-  })
-
-  test('an unreadable lock dir fails closed — refuse, never pretend zero', () => {
-    // a path where readdirSync fails non-ENOENT: a file posing as the dir
-    const file = join(mkdtempSync(join(tmpdir(), 'bro-devin-nodir-')), 'notdir')
-    writeFileSync(file, 'x')
-    assert.throws(() => countDevinSessions(file), /not a directory|ENOTDIR/)
-  })
-})
-
-describe('devin session reservations', () => {
-  const withResvDir = (fn: (dir: string) => void): void => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-devin-resv-'))
-    try {
-      fn(dir)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  }
-
-  test('reserve counts, release frees, a missing dir reads as zero', () => {
-    assert.equal(countDevinReservations(join(tmpdir(), 'bro-resv-absent-')), 0)
-    withResvDir((dir) => {
-      const key = reserveDevinSession(dir, 'native-abc123')
-      assert.equal(countDevinReservations(dir), 1)
-      releaseDevinSession(key)
-      assert.equal(countDevinReservations(dir), 0)
-    })
-  })
-
-  test('expired reservations are reaped, not counted', () => {
-    withResvDir((dir) => {
-      reserveDevinSession(dir, 'native-old')
-      const [f] = readdirSync(dir)
-      const stale = join(dir, f)
-      const past = new Date(Date.now() - DEVIN_RESERVATION_TTL_MS - 60_000)
-      utimesSync(stale, past, past)
-      assert.equal(countDevinReservations(dir), 0)
-      assert.equal(readdirSync(dir).length, 0) // reaped, not just skipped
-    })
-  })
-
-  test('same-id spawns still claim two slots — no cross-repo clobber', () => {
-    withResvDir((dir) => {
-      // two bro processes minting the same agentId in different repos
-      // must each hold a slot — a shared filename would double-admit
-      reserveDevinSession(dir, 'native-abc123')
-      reserveDevinSession(dir, 'native-abc123')
-      assert.equal(countDevinReservations(dir), 2)
-    })
-  })
-})
-
-describe('admitDevinSession', () => {
-  const fixture = (fn: (dirs: { locks: string; resv: string }) => void): void => {
-    const locks = mkdtempSync(join(tmpdir(), 'bro-admit-locks-'))
-    const resv = mkdtempSync(join(tmpdir(), 'bro-admit-resv-'))
-    try {
-      fn({ locks, resv })
-    } finally {
-      rmSync(locks, { recursive: true, force: true })
-      rmSync(resv, { recursive: true, force: true })
-    }
-  }
-
-  test('admits under the cap, refuses at it, releases the slot', () => {
-    fixture(({ locks, resv }) => {
-      const quota = { maxSessions: 1, lockDir: locks, reservationsDir: resv }
-      const key = admitDevinSession(quota, { key: 'native-aa' })
-      assert.equal(countDevinReservations(resv), 1)
-      // the held reservation fills the cap — the next admit refuses
-      assert.throws(
-        () => admitDevinSession(quota, { key: 'native-bb', molStep: 'fx-2' }),
-        (e: unknown) =>
-          e instanceof SpawnError && e.kind === 'cap' && /1\/1 live sessions.*fx-2/.test(e.message)
-      )
-      releaseDevinSession(key)
-      assert.doesNotThrow(() => admitDevinSession(quota, { key: 'native-bb' }))
-    })
-  })
-
-  test('a live lock plus reservations share the same count', () => {
-    fixture(({ locks, resv }) => {
-      writeFileSync(join(locks, 'me.lock'), String(process.pid))
-      const quota = { maxSessions: 2, lockDir: locks, reservationsDir: resv }
-      admitDevinSession(quota, { key: 'native-aa' })
-      // 1 live lock + 1 reservation = 2/2 — full
-      assert.throws(
-        () => admitDevinSession(quota, { key: 'native-bb' }),
-        (e: unknown) => e instanceof SpawnError && e.kind === 'cap'
-      )
-    })
-  })
-
-  test('a malformed cap refuses config, never a silent admit', () => {
-    fixture(({ locks, resv }) => {
-      const quota = { maxSessions: 0, lockDir: locks, reservationsDir: resv, invalid: true }
-      assert.throws(
-        () => admitDevinSession(quota, { key: 'native-aa', molStep: 'fx-9' }),
-        (e: unknown) => e instanceof SpawnError && e.kind === 'config' && /fx-9/.test(e.message)
-      )
-      assert.equal(countDevinReservations(resv), 0)
-    })
-  })
-
-  test('a live mutex holder in ANOTHER process serializes the admit', async () => {
-    const locks = mkdtempSync(join(tmpdir(), 'bro-admit-locks-'))
-    const resv = mkdtempSync(join(tmpdir(), 'bro-admit-resv-'))
-    try {
-      // a child plants the admission mutex with its own live pid and
-      // holds it ~600ms — the parent's admit must wait, then succeed
-      const mutex = join(resv, 'admission.mutex')
-      const child = spawn(
-        process.execPath,
-        [
-          '-e',
-          `const fs=require('fs');fs.mkdirSync(${JSON.stringify(resv)},{recursive:true});fs.writeFileSync(${JSON.stringify(mutex)},String(process.pid),{flag:'wx'});setTimeout(()=>process.exit(0),600)`,
-        ],
-        { stdio: 'ignore' }
-      )
-      await new Promise<void>((res) => {
-        // hand the child a beat to plant the file
-        const t0 = Date.now()
-        const tick = (): void => {
-          if (existsSync(mutex) || Date.now() - t0 > 3000) {
-            res()
-          } else {
-            setTimeout(tick, 20)
-          }
-        }
-        tick()
-      })
-      const started = Date.now()
-      const key = admitDevinSession(
-        { maxSessions: 4, lockDir: locks, reservationsDir: resv },
-        { key: 'native-aa' }
-      )
-      // admitted only after the child's hold ended — serialization visible in wall time
-      assert.ok(Date.now() - started >= 400, `admit returned in ${Date.now() - started}ms — the mutex was not honored`)
-      releaseDevinSession(key)
-      await new Promise<void>((res) => child.on('exit', res))
-    } finally {
-      rmSync(locks, { recursive: true, force: true })
-      rmSync(resv, { recursive: true, force: true })
-    }
-  })
-
-  test('the admission mutex never counts as a reservation', () => {
-    fixture(({ locks, resv }) => {
-      writeFileSync(join(resv, 'admission.mutex'), String(process.pid), { flag: 'wx' })
-      try {
-        assert.equal(countDevinReservations(resv), 0)
-      } finally {
-        rmSync(join(resv, 'admission.mutex'), { force: true })
-      }
-    })
-  })
-})
-
-describe('devinLocksDir', () => {
-  test('explicit override wins; XDG_DATA_HOME otherwise', () => {
-    assert.equal(devinLocksDir('/tmp/x'), '/tmp/x')
-    const prev = process.env['XDG_DATA_HOME']
-    try {
-      process.env['XDG_DATA_HOME'] = '/tmp/xdg'
-      assert.equal(devinLocksDir(), join('/tmp/xdg', 'devin', 'cli', 'session_locks'))
-    } finally {
-      if (prev === undefined) {
-        delete process.env['XDG_DATA_HOME']
-      } else {
-        process.env['XDG_DATA_HOME'] = prev
-      }
-    }
-  })
-})
-
-describe('devinSessionQuota', () => {
-  test('absent bag or explicit 0 → undefined (the deliberate off)', () => {
-    assert.equal(devinSessionQuota(undefined), undefined)
-    assert.equal(devinSessionQuota({}), undefined)
-    assert.equal(devinSessionQuota({ devin: {} }), undefined)
-    assert.equal(devinSessionQuota({ devin: { maxSessions: 0 } }), undefined)
-  })
-
-  test('a present-but-malformed cap flags invalid — a typo must never silently unguard', () => {
-    assert.equal(devinSessionQuota({ devin: { maxSessions: '6' } })?.invalid, true)
-    assert.equal(devinSessionQuota({ devin: { maxSessions: 6.5 } })?.invalid, true)
-    assert.equal(devinSessionQuota({ devin: { maxSessions: -2 } })?.invalid, true)
-  })
-
-  test('a positive integer cap + dir overrides pass through', () => {
-    assert.deepEqual(
-      devinSessionQuota({
-        devin: { maxSessions: 6, lockDir: '/tmp/locks', reservationsDir: '/tmp/resv' },
-      }),
-      { maxSessions: 6, lockDir: '/tmp/locks', reservationsDir: '/tmp/resv' }
-    )
   })
 })

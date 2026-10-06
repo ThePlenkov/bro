@@ -216,7 +216,6 @@ export {
   AgentNotFound,
   AGENT_CAUSES,
   acquireAgentRegistryLock,
-  admitDevinSession,
   agentEntryBlocked,
   agentRegistryPath,
   agentsSection,
@@ -224,14 +223,6 @@ export {
   claimStep,
   classifyExitCause,
   commandCliName,
-  countDevinReservations,
-  countDevinSessions,
-  devinLocksDir,
-  devinLocksDirs,
-  devinReservationsDir,
-  devinSessionQuota,
-  releaseDevinSession,
-  reserveDevinSession,
   isAgentCause,
   mintAgentId,
   patchAgentRegistry,
@@ -250,13 +241,27 @@ export type {
   AgentInfo,
   AgentRegistryEntry,
   AgentState,
-  DevinSessionQuota,
   ExitClassification,
   ListResult,
   SpawnErrorKind,
   SpawnSpec,
   SpawnWorker,
 } from './agents.ts'
+export {
+  admitSessionSlot,
+  clearSessionPlanes,
+  countSessionReservations,
+  registerSessionPlane,
+  releaseSessionSlot,
+  reserveSessionSlot,
+  SESSION_SLOT_TTL_MS,
+  sessionPlane,
+  sessionPlaneForCli,
+  sessionPlanes,
+  sessionQuotaConfig,
+  sessionSlotsDir,
+} from './session-planes.ts'
+export type { SessionPlane, SessionQuota } from './session-planes.ts'
 export { acquireFileLock, LockTimeout, withFileLock } from './filelock.ts'
 export type { FileLockOptions } from './filelock.ts'
 export {

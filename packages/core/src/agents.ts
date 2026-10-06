@@ -2,8 +2,8 @@
  * Agents facade — the orchestrator-connector contract for bro-managed
  * workers. Spec: specs/sessions/bro-f4ot/spec.md.
  *
- * A connector is one backend runtime (native detached processes, gascity,
- * tmux, paseo, cao). Commands never name a backend — they resolve through
+ * A connector is one backend runtime (detached processes, multiplexer
+ * sessions, managed fleets). Commands never name a backend — they resolve through
  * the `connectors.agents` seam in bro.config.json (explicit pick → config
  * → matchRemote/matchDir → registry order); `native` is the designed
  * default. Backend knobs live under `agents.<backend>`.
@@ -26,12 +26,10 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { ConfigSection } from './config.ts'
-import { acquireFileLock, LockTimeout, withFileLock } from './filelock.ts'
+import { acquireFileLock } from './filelock.ts'
 import { gitTry } from './git.ts'
-import { pidAlive } from './proc.ts'
 
 export type AgentState = 'spawned' | 'running' | 'exited' | 'lost' | 'stopped' | 'blocked'
 
@@ -243,7 +241,8 @@ export interface AgentInfo {
 }
 
 export interface AgentCapabilities {
-  /** A live session can be attached to (tmux yes, native log-only no). */
+  /** A live session can be attached to (a multiplexer backend yes, a
+   *  detached log-only backend no). */
   attach?: boolean
   /** spawn() can rebind a dead agent's claim to a new worker. */
   respawn?: boolean
@@ -261,7 +260,7 @@ export interface AgentConnector {
   readonly name: string
   /** Remote-URL matcher — same precedence role as Connector.matchRemote. */
   matchRemote?(url: string): boolean
-  /** Project-layout matcher — e.g. gascity claims a configDir layout. */
+  /** Project-layout matcher — e.g. a fleet backend claims a configDir layout. */
   matchDir?(dir: string): boolean
   /** Start a worker for spec.molStep. Throws SpawnError on
    *  duplicate/conflict (claimed by a LIVE agent). */
@@ -293,7 +292,7 @@ export type SpawnErrorKind =
   | 'input'
   /** server-side misconfiguration — no agent command, no common dir */
   | 'config'
-  /** backend tooling missing or down — tmux absent, gc unreachable */
+  /** backend tooling missing or down — the multiplexer absent, the fleet manager unreachable */
   | 'unavailable'
 
 /** Duplicate/conflict on spawn — distinct from operational failures so
@@ -328,8 +327,8 @@ export interface AgentRegistryEntry {
   provider?: string
   model?: string
   acpSessionId?: string
-  /** Session-kind lane the run was admitted under ('devin') — written at
-   *  spawn so status/debug can see which quota a live agent consumes. */
+  /** Session-kind lane the run was admitted under — written at spawn so
+   *  status/debug can see which session quota a live agent consumes. */
   sessionKind?: string
   [key: string]: unknown
 }
@@ -503,9 +502,9 @@ export function bdAt(
 }
 
 /** The agent command's cli name — first token, basename'd and
- *  sanitized; 'agent' when nothing usable resolves. gascity's provider
- *  label and the `Agent:` commit-trailer pin (specs/bro-fzot.md) both
- *  read it. */
+ *  sanitized; 'agent' when nothing usable resolves. A fleet backend's
+ *  provider label and the `Agent:` commit-trailer pin
+ *  (specs/bro-fzot.md) both read it. */
 export function commandCliName(command: string): string {
   const first = command.trim().split(/\s+/)[0] ?? ''
   const base = first.split('/').pop() ?? ''
@@ -568,281 +567,10 @@ export function rebindStep(beadsDir: string, molStep: string, actor: string): vo
   }
 }
 
-// --- devin session quota -------------------------------------------------------
-
-/** The devin CLI's session-lock dir — `$XDG_DATA_HOME/devin/cli/
- *  session_locks` (its own state plane: every local devin session —
- *  interactive, `-p`, `acp` — drops a `<name>.lock` holding its pid).
- *  `agents.devin.lockDir` overrides for odd installs/tests. `env` is
- *  the environment the derivation reads — a worker spawned with its
- *  own XDG_DATA_HOME/HOME resolves a different dir. */
-export function devinLocksDir(
-  lockDir?: string,
-  env: NodeJS.ProcessEnv = process.env
-): string {
-  if (typeof lockDir === 'string' && lockDir.trim() !== '') {
-    return lockDir
-  }
-  const xdg = env['XDG_DATA_HOME']
-  const home = env['HOME']
-  const base =
-    xdg !== undefined && xdg.trim() !== ''
-      ? xdg
-      : join(
-          home !== undefined && home.trim() !== '' ? home : homedir(),
-          '.local',
-          'share'
-        )
-  return join(base, 'devin', 'cli', 'session_locks')
-}
-
-/** Every dir the admission scan must cover: the resolved lock dir
- *  plus the worker's own effective one — `spec.env` can hand the
- *  spawned session a different XDG_DATA_HOME/HOME, and its devin lock
- *  lands THERE, invisible to a scan of only the spawner's dir. The
- *  quota stays per-account: sessions under other OS users' homes are
- *  unreadable and out of scope. */
-export function devinLocksDirs(
-  lockDir?: string,
-  workerEnv?: Record<string, string>
-): string[] {
-  const dirs = [devinLocksDir(lockDir)]
-  if (workerEnv !== undefined) {
-    const eff = devinLocksDir(undefined, { ...process.env, ...workerEnv })
-    if (eff !== dirs[0]) {
-      dirs.push(eff)
-    }
-  }
-  return dirs
-}
-
-/** Live devin sessions on this host — lock files whose pid is alive,
- *  deduplicated (a resumed session holds a second lock for the same
- *  process). A missing dir means no devin install → zero sessions; any
- *  OTHER read failure throws SpawnError('unavailable') — an unverifiable
- *  quota must fail closed, never silently admit past the cap. Same
- *  rule per lock file: one that vanished mid-scan was never counted,
- *  one that can't be read (EACCES, EISDIR) fails the count.
- *  Non-pid content counts nothing — a strict digit check keeps a
- *  corrupt `123oops`/`0x10` lock from aliasing an unrelated live pid.
- *  Cloud-side sessions (devin_session_create via MCP) never write a
- *  local lock — this is a host-local count, the blind spot is
- *  documented. Accepts one dir or several (the worker's effective
- *  env can put its locks elsewhere — see devinLocksDirs). */
-export function countDevinSessions(lockDir?: string | string[]): number {
-  const dirs = Array.isArray(lockDir) ? lockDir : [devinLocksDir(lockDir)]
-  const live = new Set<number>()
-  for (const dir of dirs) {
-    let names: string[]
-    try {
-      names = readdirSync(dir)
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        continue
-      }
-      throw new SpawnError(`cannot verify devin session count — ${dir}: ${(err as Error).message}`, 'unavailable')
-    }
-    for (const name of names) {
-      if (!name.endsWith('.lock')) {
-        continue
-      }
-      let raw: string
-      try {
-        raw = readFileSync(join(dir, name), 'utf8').trim()
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-          continue
-        }
-        throw new SpawnError(`cannot verify devin session count — ${dir}/${name}: ${(err as Error).message}`, 'unavailable')
-      }
-      if (!/^\d+$/.test(raw)) {
-        continue
-      }
-      const pid = Number.parseInt(raw, 10)
-      if (pidAlive(pid)) {
-        live.add(pid)
-      }
-    }
-  }
-  return live.size
-}
-
-// --- spawn reservations --------------------------------------------------------
-
-/** How long a claimed-but-not-yet-locked devin session counts. The real
- *  devin lock lands within seconds of the child starting; 120s covers
- *  that handoff plus failure cleanup, then the file self-expires. */
-export const DEVIN_RESERVATION_TTL_MS = 120_000
-
-/** Host-shared reservation dir — `$XDG_DATA_HOME/bro/devin-reservations`.
- *  Cross-repo by construction: every bro process on this host admits
- *  against the same set, closing the window between "count says headroom"
- *  and "the spawned devin wrote its own lock". */
-export function devinReservationsDir(resDir?: string): string {
-  if (typeof resDir === 'string' && resDir.trim() !== '') {
-    return resDir
-  }
-  const xdg = process.env['XDG_DATA_HOME']
-  const base = xdg !== undefined && xdg.trim() !== '' ? xdg : join(homedir(), '.local', 'share')
-  return join(base, 'bro', 'devin-reservations')
-}
-
-/** Fresh reservations — files younger than the TTL count as claimed
- *  slots; stale files are reaped in passing. A missing dir is zero
- *  reservations; other read failures throw 'unavailable', same
- *  fail-closed rule as the lock scan. */
-export function countDevinReservations(resDir?: string): number {
-  const dir = devinReservationsDir(resDir)
-  let names: string[]
-  try {
-    names = readdirSync(dir)
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return 0
-    }
-    throw new SpawnError(`cannot verify devin reservations — ${dir}: ${(err as Error).message}`, 'unavailable')
-  }
-  const now = Date.now()
-  let fresh = 0
-  for (const name of names) {
-    if (!name.endsWith('.lock')) {
-      continue
-    }
-    const path = join(dir, name)
-    try {
-      if (now - statSync(path).mtimeMs < DEVIN_RESERVATION_TTL_MS) {
-        fresh++
-      } else {
-        rmSync(path, { force: true })
-      }
-    } catch {
-      // stat raced a reap — ignore
-    }
-  }
-  return fresh
-}
-
-/** Claim a host-wide slot — the filename carries a random suffix, so a
- *  same-named spawn from another repo never overwrites a live claim.
- *  Returns the reservation path for release on failure. */
-export function reserveDevinSession(resDir: string | undefined, key: string): string {
-  const dir = devinReservationsDir(resDir)
-  mkdirSync(dir, { recursive: true })
-  const path = join(dir, `${key}-${randomBytes(4).toString('hex')}.lock`)
-  writeFileSync(path, String(Date.now()), { flag: 'wx' })
-  return path
-}
-
-/** Drop a reservation — spawn-failure cleanup; on success the file is
- *  left to expire behind the devin child's own lock. */
-export function releaseDevinSession(path: string): void {
-  rmSync(path, { force: true })
-}
-
-/** Atomic host-wide admission: the session+reservation count and the
- *  claim write run under ONE mutex shared by every repo — the agents
- *  registry lock is per-repo and cannot serialize this, so without it
- *  two spawns each count below the cap and both start. Returns the
- *  reservation path — released by the caller when the spawn fails
- *  before a session exists; a landed session needs no release (its
- *  own lock is the count, the file ages out). Throws SpawnError —
- *  'config' when the cap is misconfigured, 'cap' when full,
- *  'unavailable' when the count can't be established or the mutex
- *  outlives its wait. */
-export function admitDevinSession(
-  quota: {
-    maxSessions: number
-    lockDir?: string
-    reservationsDir?: string
-    invalid?: boolean
-  },
-  opts: { key: string; molStep?: string; workerEnv?: Record<string, string> }
-): string {
-  const resDir = devinReservationsDir(quota.reservationsDir)
-  try {
-    return withFileLock(
-      // no .lock suffix — the reservation counter globs '*.lock' and
-      // the mutex must never count itself as a claimed slot
-      join(resDir, 'admission.mutex'),
-      () => {
-        if (quota.invalid === true) {
-          // a present-but-unparsable cap is a config bug — refuse
-          // loudly rather than spawn past a quota the operator armed
-          throw new SpawnError(
-            `agents.devin.maxSessions must be a positive integer` +
-              (opts.molStep !== undefined ? ` — spawn of ${opts.molStep} refused` : ''),
-            'config'
-          )
-        }
-        const live =
-          countDevinSessions(devinLocksDirs(quota.lockDir, opts.workerEnv)) +
-          countDevinReservations(quota.reservationsDir)
-        if (live >= quota.maxSessions) {
-          throw new SpawnError(
-            `devin session quota reached — ${live}/${quota.maxSessions} live sessions ` +
-              `(agents.devin.maxSessions in bro.config)` +
-              (opts.molStep !== undefined ? ` — spawn of ${opts.molStep} refused` : ''),
-            'cap'
-          )
-        }
-        return reserveDevinSession(quota.reservationsDir, opts.key)
-      },
-      { label: 'devin session quota admission' }
-    )
-  } catch (err) {
-    if (err instanceof LockTimeout) {
-      throw new SpawnError(`devin quota admission lock held — ${err.message}`, 'unavailable')
-    }
-    throw err
-  }
-}
-
-export interface DevinSessionQuota {
-  /** Host-wide cap on live devin sessions — spawn refuses at/above it.
-   *  0 or absent means uncapped. */
-  maxSessions: number
-  /** `agents.devin.lockDir` — override for the lock scan (tests, odd
-   *  installs). */
-  lockDir?: string
-  /** `agents.devin.reservationsDir` — override for the reservation scan. */
-  reservationsDir?: string
-  /** `maxSessions` was present but not a positive integer — a config
-   *  typo must surface as an error at admission, never silently
-   *  unguard the quota. */
-  invalid?: boolean
-}
-
-/** `agents.devin` → the quota a devin-session spawn must fit under.
- *  undefined when the section is missing or uncapped — callers skip the
- *  count entirely, so a non-devin host never pays for the scan. */
-export function devinSessionQuota(
-  agents: Record<string, Record<string, unknown>> | undefined
-): DevinSessionQuota | undefined {
-  const bag = agents?.['devin']
-  if (bag === undefined) {
-    return undefined
-  }
-  const max = bag['maxSessions']
-  const lockDir = typeof bag['lockDir'] === 'string' ? bag['lockDir'] : undefined
-  const reservationsDir =
-    typeof bag['reservationsDir'] === 'string' ? bag['reservationsDir'] : undefined
-  if (max === undefined || max === 0) {
-    // absent or an explicit 0 — the deliberate "off", same convention as
-    // fleet.maxConcurrent
-    return undefined
-  }
-  if (typeof max !== 'number' || !Number.isInteger(max) || max < 0) {
-    // the key exists — a typo silently disabling the guard is the worst
-    // outcome; mark it so admission refuses with a config error
-    return { maxSessions: 0, lockDir, reservationsDir, invalid: true }
-  }
-  return { maxSessions: max, lockDir, reservationsDir }
-}
-
 // --- config --------------------------------------------------------------------
 
 /** bro.config.json `agents` section — per-backend knob bags
- *  (`agents.gascity.configDir`, `agents.native.command`). Only
+ *  (`agents.<backend>.configDir`, `agents.<backend>.command`). Only
  *  object-valued entries survive; connector selection stays in
  *  `connectors.agents`, not here. */
 export const agentsSection: ConfigSection<Record<string, Record<string, unknown>>> = (raw) => {

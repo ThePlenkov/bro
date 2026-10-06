@@ -34,13 +34,11 @@ import {
   agentEntryBlocked,
   agentsSection,
   bdActor,
-  admitDevinSession,
+  admitSessionSlot,
   claimStep,
   classifyExitCause,
   commandCliName,
   DEFAULT_CONFIG,
-  devinSessionQuota,
-  releaseDevinSession,
   gitTry,
   isAgentCause,
   loadConfig,
@@ -50,7 +48,11 @@ import {
   probeStep,
   procStat,
   rebindStep,
+  releaseSessionSlot,
   requireProviderSurface,
+  sessionPlane,
+  sessionPlaneForCli,
+  sessionQuotaConfig,
   SpawnError,
   stepParent,
   ProviderSurfaceError,
@@ -67,10 +69,15 @@ import {
   type FleetProfile,
   type ListResult,
   type ProviderEntry,
+  type SessionPlane,
   type SpawnSpec,
   type SpawnWorker,
 } from '@broject/core'
 import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop'
+// builtin session planes self-register on import — the connector layer
+// is the plugin host for agent backends, and admission planes ride the
+// same surface
+import './session-planes/devin.ts'
 
 /** Everything a factory needs: the repo ctx + the resolved config
  *  (agents.<backend> knobs, connectors.agents pick, loop.agent fallback). */
@@ -993,29 +1000,28 @@ function enforceFleetCap(
   }
 }
 
-/** The session-quota lane prepareSpawn admits through — a devin-kind
- *  spawn counts live devin sessions + held reservations host-wide and
- *  refuses at/above `maxSessions`. */
+/** The session-quota lane prepareSpawn admits through — the resolved
+ *  plane plus the agents bag it reads its `agents.<kind>` knobs from.
+ *  The plane owns how a live session is counted; core owns the
+ *  serialized admit under the host-wide mutex. */
 export interface SessionQuotaLane {
-  kind: 'devin'
-  maxSessions: number
-  lockDir?: string
-  reservationsDir?: string
-  invalid?: boolean
+  plane: SessionPlane
+  agents: Record<string, Record<string, unknown>>
 }
 
-/** The session kind a spawn consumes — 'devin' when the backend declares
- *  `agents.<backend>.sessionKind` or the resolved command's CLI is the
- *  devin binary (worker argv0 / worker template / backend command). */
+/** The session kind a spawn consumes — `agents.<backend>.sessionKind`
+ *  when declared (sessionQuotaOf then demands a registered plane),
+ *  else the first registered plane that detects the resolved command's
+ *  CLI (worker cliName / worker template / backend command). */
 export function sessionKindOf(
   env: AgentConnectorEnv,
   backend: string,
   spec: SpawnSpec,
   command: string
-): 'devin' | undefined {
+): string | undefined {
   const declared = env.agents[backend]?.['sessionKind']
-  if (declared === 'devin') {
-    return 'devin'
+  if (typeof declared === 'string' && declared !== '') {
+    return declared
   }
   // an argv worker's argv[0] is the DRIVER (bro acp-worker, npx) — the
   // wrapped agent's own cli rides cliName; argv0 is only the fallback
@@ -1023,12 +1029,12 @@ export function sessionKindOf(
     spec.worker?.kind === 'argv'
       ? commandCliName(spec.worker.cliName ?? spec.worker.argv[0] ?? '')
       : commandCliName(spec.worker?.kind === 'template' ? spec.worker.command : command)
-  return cli === 'devin' ? 'devin' : undefined
+  return sessionPlaneForCli(cli)?.kind
 }
 
-/** The session quota this spawn must fit under — undefined for
- *  non-devin kinds and uncapped `agents.devin`, so the lock scan only
- *  runs where it can refuse. */
+/** The session quota this spawn must fit under — undefined when no
+ *  plane claims the spawn or its `agents.<kind>` lane is uncapped, so
+ *  the host scan only runs where it can refuse. */
 export function sessionQuotaOf(
   env: AgentConnectorEnv,
   backend: string,
@@ -1036,24 +1042,24 @@ export function sessionQuotaOf(
   command: string
 ): SessionQuotaLane | undefined {
   const kind = sessionKindOf(env, backend, spec, command)
-  if (kind !== 'devin') {
+  if (kind === undefined) {
     return undefined
   }
-  const quota = devinSessionQuota(env.agents)
+  const quota = sessionQuotaConfig(env.agents, kind)
   if (quota === undefined) {
     return undefined
   }
-  const out: SessionQuotaLane = { kind, maxSessions: quota.maxSessions }
-  if (quota.lockDir !== undefined) {
-    out.lockDir = quota.lockDir
+  const plane = sessionPlane(kind)
+  if (plane === undefined) {
+    // a capped kind with no registered plane is a config bug — refuse
+    // loudly rather than spawn past a quota the operator armed
+    throw new SpawnError(
+      `agents.${backend}.sessionKind '${kind}' has no registered session plane — ` +
+        `cannot enforce agents.${kind}.maxSessions`,
+      'config'
+    )
   }
-  if (quota.reservationsDir !== undefined) {
-    out.reservationsDir = quota.reservationsDir
-  }
-  if (quota.invalid === true) {
-    out.invalid = true
-  }
-  return out
+  return { plane, agents: env.agents }
 }
 
 /** The shared spawn prologue every built-in backend runs under the
@@ -1170,11 +1176,12 @@ function prepareSpawn(
      *  the cap refuses while OTHER live entries fill it (a respawn's
      *  own dead entry holds no slot). */
     cap?: { max: number; env: AgentConnectorEnv }
-    /** Session-kind admission — the spawn consumes a `kind` session
-     *  ('devin') and refuses when live sessions already hit
-     *  `maxSessions`. The count+claim runs under ONE host-wide mutex
-     *  (the repo's registry lock can't serialize cross-repo), still
-     *  before any write — a refused spawn leaves no half-state. */
+    /** Session-kind admission — the spawn consumes one of the lane
+     *  plane's sessions and refuses when live ones already hit
+     *  `agents.<kind>.maxSessions`. The count+claim runs under ONE
+     *  host-wide mutex (the repo's registry lock can't serialize
+     *  cross-repo), still before any write — a refused spawn leaves no
+     *  half-state. */
     sessionQuota?: SessionQuotaLane | undefined
   }
 ): { agentId: string; promptFile: string; log: string; exitFile: string; reservation?: string } {
@@ -1198,7 +1205,7 @@ function prepareSpawn(
   const reservation =
     opts.sessionQuota === undefined
       ? undefined
-      : admitDevinSession(opts.sessionQuota, {
+      : admitSessionSlot(opts.sessionQuota.plane, opts.sessionQuota.agents, {
           key: agentId,
           molStep: spec.molStep,
           workerEnv: spec.env,
@@ -1253,7 +1260,7 @@ function prepareSpawn(
     acpSessionId: undefined,
     // the session kind this run consumed — the quota lane it was
     // admitted under; absent for non-kind spawns
-    sessionKind: opts.sessionQuota?.kind,
+    sessionKind: opts.sessionQuota?.plane.kind,
     ...opts.entry?.(agentId),
   })
   if (claimed) {
@@ -1269,7 +1276,7 @@ function prepareSpawn(
     // a write/claim failure after the reservation — the caller never saw
     // the key, so this is the only place that can hand the slot back
     if (reservation !== undefined) {
-      releaseDevinSession(reservation)
+      releaseSessionSlot(reservation)
     }
     throw err
   }
@@ -1595,7 +1602,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
               // the devin session never started — hand the slot back now
               // rather than block peers for the reservation's whole TTL
               if (reservation !== undefined) {
-                releaseDevinSession(reservation)
+                releaseSessionSlot(reservation)
               }
             } catch {
               // the entry may not have landed yet — nothing else to do
@@ -1616,7 +1623,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         } catch (err) {
           // sync failure after the reservation — hand the slot back
           if (reservation !== undefined) {
-            releaseDevinSession(reservation)
+            releaseSessionSlot(reservation)
           }
           throw err
         } finally {
@@ -1962,7 +1969,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         if (res.code !== 0) {
           rmSync(envFile, { force: true }) // a failed spawn must not leave ambient env on disk
           if (reservation !== undefined) {
-            releaseDevinSession(reservation)
+            releaseSessionSlot(reservation)
           }
           try {
             patchAgentRegistry(dir, spec.molStep, { spawnError: res.err })
@@ -2608,7 +2615,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
             gcRun(['session', 'close', sessionId, '--city', city])
           }
           if (reservation !== undefined) {
-            releaseDevinSession(reservation)
+            releaseSessionSlot(reservation)
           }
           patchAgentRegistry(dir, spec.molStep, {
             sessionId,

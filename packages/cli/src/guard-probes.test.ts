@@ -3,7 +3,8 @@
  *  commands/spec.test.ts's drift fixtures (spec@T0 < scope@T1 → STALE;
  *  spec recommitted at T2 → fresh). */
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -146,5 +147,63 @@ describe('spec-drift probe — args.id (bead-backed)', () => {
       if (prev.DB === undefined) delete process.env.FAKE_BD_DB
       else process.env.FAKE_BD_DB = prev.DB
     }
+  })
+})
+
+describe('core-vendor probe', () => {
+  const vendorProbe = GUARD_PROBES['core-vendor']!
+
+  const withTree = (
+    files: Record<string, string>,
+    fn: (dir: string) => void
+  ): void => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-vendor-probe-'))
+    try {
+      for (const [p, content] of Object.entries(files)) {
+        mkdirSync(dirname(join(dir, p)), { recursive: true })
+        writeFileSync(join(dir, p), content)
+      }
+      fn(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  test('fires on a vendor token in shipped source, with file:line detail', () => {
+    withTree({ 'src/x.ts': 'const cli = "devin"\n' }, (dir) => {
+      const r = vendorProbe({ path: 'src', terms: ['devin'] }, dir)
+      assert.equal(typeof r === 'boolean' ? r : r.ok, true)
+      assert.match(typeof r === 'boolean' ? '' : (r.detail ?? ''), /src\/x\.ts:1 devin/)
+    })
+  })
+
+  test('clean source, word-boundaries, and test fixtures all miss', () => {
+    withTree(
+      {
+        // 'devinfra' contains but is NOT 'devin'; fixtures name vendors
+        // as data — the boundary lives in shipped source only
+        'src/a.ts': 'const name = "devinfra"\n',
+        'src/a.test.ts': 'const cmd = "devin -p"\n',
+      },
+      (dir) => {
+        for (const args of [
+          { path: 'src', terms: ['devin', 'tmux'] },
+          { path: 'src' }, // no terms — unusable probe must not assert
+          { path: 'src', terms: [] },
+          { path: 'src', terms: [''], },
+        ]) {
+          const r = vendorProbe(args, dir)
+          assert.equal(typeof r === 'boolean' ? r : r.ok, false, JSON.stringify(args))
+        }
+      }
+    )
+  })
+
+  test('an unscanable path fails closed — no assertion without a scan', () => {
+    withTree({}, (dir) => {
+      const r = vendorProbe({ path: 'does/not/exist', terms: ['devin'] }, dir)
+      assert.equal(typeof r === 'boolean' ? r : r.ok, false)
+      assert.match(typeof r === 'boolean' ? '' : (r.detail ?? ''), /scan failed/)
+    })
   })
 })
