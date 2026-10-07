@@ -110,11 +110,10 @@ export function meshThread(
   state.stage = stage
   // both verdicts are terminal — a rejected thread is done, not the
   // worker's turn; a revised result re-opens as a new request thread
-  state.turn =
-    stage === 'posted' || stage === 'claimed'
-      ? 'worker'
-      : stage === 'submitted'
-        ? 'requester'
-        : undefined
+  if (stage === 'posted' || stage === 'claimed') {
+    state.turn = 'worker'
+  } else if (stage === 'submitted') {
+    state.turn = 'requester'
+  }
   return state
 }

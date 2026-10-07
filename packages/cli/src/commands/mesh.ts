@@ -356,6 +356,49 @@ function threadAnchor(dir: string, thread: string, pull: boolean) {
   return { rig, state }
 }
 
+/** The reply target for a lifecycle verb — the other side's rig,
+ *  resolved through peer-binding provenance when the record arrived
+ *  over a replica (the binding is the authoritative sender) and the
+ *  envelope's own `from` for own-store rows. Exits 2 with a precise
+ *  reason when the verb is illegal for the thread's stage or this
+ *  rig's role. */
+function lifecycleTarget(
+  kind: MeshKind,
+  rig: string,
+  state: ReturnType<typeof meshThread>,
+  thread: string
+): string {
+  const request = state.request!
+  if (state.stage === 'accepted' || state.stage === 'rejected') {
+    console.error(`error: thread "${thread}" is already ${state.stage}`)
+    process.exit(2)
+  }
+  const senderOf = (e: { id: string; from: string }): string => state.provenance[e.id] ?? e.from
+  const verb = kind === 'result' ? 'done' : kind
+  if (kind === 'claim' || kind === 'result') {
+    if (request.to !== rig) {
+      console.error(`error: thread "${thread}" is addressed to ${request.to}, not this rig (${rig})`)
+      process.exit(2)
+    }
+    const expected = kind === 'claim' ? 'posted' : 'claimed'
+    if (state.stage !== expected) {
+      console.error(`error: cannot ${verb} thread "${thread}" in stage "${state.stage}"`)
+      process.exit(2)
+    }
+    return senderOf(request)
+  }
+  if (senderOf(request) !== rig) {
+    console.error(`error: only the requester (${senderOf(request)}) can ${kind} thread "${thread}"`)
+    process.exit(2)
+  }
+  if (state.stage !== 'submitted') {
+    console.error(`error: nothing to ${kind} — no result submitted on thread "${thread}" yet`)
+    process.exit(2)
+  }
+  const worker = [...state.envelopes].reverse().find((e) => e.kind === 'result')!
+  return senderOf(worker)
+}
+
 function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
   const [thread, ...rest] = args
   if (thread === undefined) {
@@ -364,44 +407,7 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
   }
   const { rig, state } = threadAnchor(dir, thread, !args.includes('--no-pull'))
   const request = state.request!
-
-  if (state.stage === 'accepted' || state.stage === 'rejected') {
-    console.error(`error: thread "${thread}" is already ${state.stage}`)
-    process.exit(2)
-  }
-
-  // the reply's `to` is the other side's rig: the peer binding it
-  // arrived over when we have one, else the envelope's own from
-  // (own-store records were written with ours)
-  const senderOf = (e: { id: string; from: string }): string => state.provenance[e.id] ?? e.from
-
-  // worker verbs answer the requester; requester verdicts answer the worker
-  let to: string
-  if (kind === 'claim' || kind === 'result') {
-    if (request.to !== rig) {
-      console.error(`error: thread "${thread}" is addressed to ${request.to}, not this rig (${rig})`)
-      process.exit(2)
-    }
-    const expected = kind === 'claim' ? 'posted' : 'claimed'
-    if (state.stage !== expected) {
-      console.error(
-        `error: cannot ${kind === 'result' ? 'done' : kind} thread "${thread}" in stage "${state.stage}"`
-      )
-      process.exit(2)
-    }
-    to = senderOf(request)
-  } else {
-    if (senderOf(request) !== rig) {
-      console.error(`error: only the requester (${senderOf(request)}) can ${kind} thread "${thread}"`)
-      process.exit(2)
-    }
-    if (state.stage !== 'submitted') {
-      console.error(`error: nothing to ${kind} — no result submitted on thread "${thread}" yet`)
-      process.exit(2)
-    }
-    const worker = [...state.envelopes].reverse().find((e) => e.kind === 'result')!
-    to = senderOf(worker)
-  }
+  const to = lifecycleTarget(kind, rig, state, thread)
 
   const posted = postEnvelope({
     dir,
