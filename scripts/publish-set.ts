@@ -9,7 +9,12 @@ import { join } from 'node:path'
 const root = join(import.meta.dirname, '..')
 const pkgs = new Map() // dir -> { name, deps: Set<@broject/* names> }
 for (const dir of readdirSync(join(root, 'packages'))) {
-  const p = JSON.parse(readFileSync(join(root, 'packages', dir, 'package.json'), 'utf8'))
+  let p
+  try {
+    p = JSON.parse(readFileSync(join(root, 'packages', dir, 'package.json'), 'utf8'))
+  } catch {
+    continue // not a package dir — stray file or missing package.json
+  }
   if (!p.name?.startsWith('@broject/') || p.private) continue
   pkgs.set(dir, {
     name: p.name,
@@ -35,7 +40,9 @@ while (ready.length) {
   const dir = ready.shift()
   order.push(dir)
   for (const next of dependents.get(dir) ?? []) {
-    if (pending.set(next, pending.get(next) - 1).get(next) === 0) {
+    const left = pending.get(next) - 1
+    pending.set(next, left)
+    if (left === 0) {
       ready.push(next)
       ready.sort()
     }
