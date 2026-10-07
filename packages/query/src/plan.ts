@@ -113,6 +113,28 @@ function stepEnv(raw: unknown, at: string, errors: string[]): Record<string, str
   return env
 }
 
+function stepDoc(raw: unknown, at: string, errors: string[]): string {
+  if (!nonEmpty(raw)) {
+    errors.push(`${at}.graphql: required non-empty string — the raw document`)
+    return ''
+  }
+  if (!isReadOnly(raw)) {
+    errors.push(`${at}.graphql: v1 is read-only — mutation/subscription rejected`)
+  }
+  return raw
+}
+
+function stepVars(raw: unknown, at: string, errors: string[]): Record<string, unknown> | undefined {
+  if (raw === undefined) {
+    return undefined
+  }
+  if (!isRecord(raw)) {
+    errors.push(`${at}.vars: must be a table ([steps.vars])`)
+    return undefined
+  }
+  return raw
+}
+
 function parseStep(raw: unknown, i: number, errors: string[]): QueryStep | undefined {
   const at = `steps[${i}]`
   if (!isRecord(raw)) {
@@ -135,21 +157,8 @@ function parseStep(raw: unknown, i: number, errors: string[]): QueryStep | undef
   } else if (typeof raw.provider === 'string') {
     step.provider = raw.provider.trim()
   }
-  if (!nonEmpty(raw.graphql)) {
-    errors.push(`${at}.graphql: required non-empty string — the raw document`)
-  } else {
-    step.graphql = raw.graphql
-    if (!isReadOnly(step.graphql)) {
-      errors.push(`${at}.graphql: v1 is read-only — mutation/subscription rejected`)
-    }
-  }
-  if (raw.vars !== undefined) {
-    if (!isRecord(raw.vars)) {
-      errors.push(`${at}.vars: must be a table ([steps.vars])`)
-    } else {
-      step.vars = raw.vars
-    }
-  }
+  step.graphql = stepDoc(raw.graphql, at, errors)
+  step.vars = stepVars(raw.vars, at, errors)
   step.env = stepEnv(raw.env, at, errors)
   return errors.length > 0 && !nonEmpty(step.id) ? undefined : step
 }
