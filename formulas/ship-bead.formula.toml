@@ -38,7 +38,7 @@ spec reference — then implement the ready children in order.
 Rules: spec first (sdd gate), tests via `npm test` (exact CI command), commit +
 push + `gh pr create`. The draft flag mirrors the merge target: `gh pr create
 --draft` when a human merges, a ready PR when the act gate owns the merge
-(merge={{merge}}, draft={{draft}} — draft=auto ⇒ draft iff merge=human).
+(merge={{merge}}, draft={{draft}} — draft=auto means draft iff merge=human).
 Never push to main. Done when: the PR is open and pushed.
 """
 
