@@ -18,13 +18,16 @@ packages/loop     @broject/loop      — autonomous backlog runner (claim → ag
 packages/retro    @broject/retro     — wtf capture + retro plans
 packages/cli      @broject/bro — published CLI (bin: bro), bundles @broject/* into dist
 
-All `@broject/*` packages publish to npm (lockstep via `nx release`,
-`release.projects` covers everything but `site`). The CLI still bundles
-its internals — `npm i @broject/bro` stays one self-contained file —
-while libs ship standalone for SDK consumers (`@broject/core` connector
-types, `@broject/github` review host, …). `publish.yml` walks the dep
-order (core first, cli last); `prepare-for-release` placeholders +
-`npm trust` bootstrap any new package before OIDC can attach.
+Non-private `@broject/*` packages publish to npm (lockstep via
+`nx release`, `release.projects` covers everything but `site`).
+`private: true` marks bundled-only internals (mesh, query) — versioned
+in lockstep but shipped inside `@broject/bro` (`npm i @broject/bro`
+stays one self-contained file), never standalone. Libs ship standalone
+for SDK consumers (`@broject/core` connector types, `@broject/github`
+review host, …). `publish.yml` derives the publish set from
+`scripts/publish-set.ts` (dep order, core first); `prepare-for-release`
+placeholders + `npm trust` bootstrap any new package before OIDC can
+attach.
 skills/<name>/                   — thin skills: policy only, call `bro *`
                                    (act, convoy, debt, docs, drill, learn,
                                    loop, next, sdd, stack, sync, work, wtf)

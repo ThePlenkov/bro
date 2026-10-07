@@ -43,11 +43,15 @@ jobs:
       - run: npm run build
       - run: npm test
 
+      # The package set is derived, not listed — scripts/publish-set.ts
+      # emits every non-private @broject/* under packages/ in dep order.
+      # private:true marks bundled-only internals (mesh, query): versioned
+      # by `nx release` but shipped inside @broject/bro, never standalone.
       - name: Tag must match every package version
         env:
           EXPECTED_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          for dir in core retro convoy debt drill github gitlab providers judge learn guard stack loop act pack cli; do
+          for dir in $(node scripts/publish-set.ts); do
             p="packages/$dir/package.json"
             name=$(node -p "require('./$p').name")
             v=$(node -p "require('./$p').version")
@@ -62,7 +66,7 @@ jobs:
       - name: Preflight — every package must exist on npm
         run: |
           missing=""
-          for dir in core retro convoy debt drill github gitlab providers judge learn guard stack loop act pack cli; do
+          for dir in $(node scripts/publish-set.ts); do
             name=$(node -p "require('./packages/$dir/package.json').name")
             out=$(npm view "$name" name 2>&1) && continue
             # only a real E404 means "never published" — outages, rate
@@ -90,7 +94,7 @@ jobs:
           # (actions/setup-node#1551). Strip it so trusted publishing
           # can kick in.
           sed -i '/_authToken/d' "$NPM_CONFIG_USERCONFIG"
-          for dir in core retro convoy debt drill github gitlab providers judge learn guard stack loop act pack cli; do
+          for dir in $(node scripts/publish-set.ts); do
             cd "$GITHUB_WORKSPACE/packages/$dir"
             name=$(node -p "require('./package.json').name")
             v=$(node -p "require('./package.json').version")
