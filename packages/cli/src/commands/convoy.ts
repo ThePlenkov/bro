@@ -47,6 +47,7 @@ import type {
 } from '@broject/convoy'
 import { flag, flagAll, positionals } from './args.ts'
 import { runConvoyRun, RUN_KNOWN_FLAGS } from './convoy-run.ts'
+import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
 
 function usage(exitCode = 1): never {
   console.error(`Usage: bro convoy <command> [args…]
@@ -311,13 +312,18 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
       const timeoutRaw = flag(rest, '--timeout') ?? '0'
       const every = Number(everyRaw)
       const timeout = Number(timeoutRaw)
-      // a NaN --every spins setTimeout at ~0ms — a busy loop, not a poll
-      if (!Number.isFinite(every) || every <= 0) {
-        console.error(`error: --every needs a positive seconds value, got "${everyRaw}"`)
+      // a NaN --every spins setTimeout at ~0ms; one past the timer range
+      // clamps to ~1ms — both are busy loops, not polls
+      if (!Number.isFinite(every) || every < MIN_INTERVAL_SEC || every > MAX_INTERVAL_SEC) {
+        console.error(
+          `error: --every needs ${MIN_INTERVAL_SEC}..${MAX_INTERVAL_SEC}s, got "${everyRaw}"`
+        )
         process.exit(2)
       }
-      if (!Number.isFinite(timeout) || timeout < 0) {
-        console.error(`error: --timeout needs a non-negative seconds value, got "${timeoutRaw}"`)
+      // a --timeout whose ms conversion overflows the deadline is
+      // unbounded — that is not a bound, refuse it
+      if (!Number.isFinite(timeout) || timeout < 0 || !Number.isFinite(timeout * 1000)) {
+        console.error(`error: --timeout needs a finite non-negative seconds value, got "${timeoutRaw}"`)
         process.exit(2)
       }
       const json = rest.includes('--json')
@@ -325,6 +331,8 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
 
       // A wait's exit IS the event the caller slept for — the code tells
       // the orchestrator which verdict it woke to, never just "done".
+      // exitCode + return, never process.exit: a piped --json line would
+      // truncate mid-write on a hard exit.
       for (;;) {
         const unsettled: string[] = []
         const gated: string[] = []
@@ -341,43 +349,63 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
             continue
           }
           if (n.state === 'complete') continue
-          if (n.state === 'gate' || n.stuck.length > 0) {
-            ;(n.state === 'gate' ? gated : stuck).push(id)
+          if (n.stuck.length > 0) {
+            stuck.push(id)
             continue
           }
-          // blocked with nothing in flight is a stalled queue; blocked
-          // with in-progress steps is just "not ready yet"
-          if (n.state === 'blocked' && n.inProgress.length === 0) {
-            stuck.push(id)
+          // a ready human step is actionable even while agent steps are
+          // also selected — a gate surfaces the moment it exists. A mol
+          // merely blocked on open outside work stays unsettled, not
+          // stuck: the external blocker is still legitimately running.
+          if (n.gates.length > 0) {
+            gated.push(id)
             continue
           }
           unsettled.push(id)
         }
-        const emit = (verdict: string) => {
-          const summary = { verdict, settled: ids.filter((i) => ![...unsettled, ...gated, ...stuck, ...bad].includes(i)), unsettled, gated, stuck, bad }
-          console.log(json ? JSON.stringify(summary) : `convoy wait: ${verdict} — ${ids.join(' ')}`)
+        const emit = (verdict: string, code: number) => {
+          const summary = {
+            verdict,
+            settled: ids.filter((i) => ![...unsettled, ...gated, ...stuck, ...bad].includes(i)),
+            unsettled,
+            gated,
+            stuck,
+            bad,
+          }
+          console.log(
+            json
+              ? JSON.stringify(summary)
+              : `convoy wait: ${verdict}` +
+                  (unsettled.length > 0 ? ` (unsettled: ${unsettled.join(' ')})` : '')
+          )
+          process.exitCode = code
         }
         if (bad.length > 0) {
-          emit(`error: unknown mol(s) ${bad.join(' ')}`)
-          process.exit(2)
+          emit(`error: unknown mol(s) ${bad.join(' ')}`, 2)
+          return
         }
         if (unsettled.length === 0 && gated.length === 0 && stuck.length === 0) {
-          emit('complete')
-          process.exit(0)
+          emit('complete', 0)
+          return
         }
+        // a gate outranks still-running mols: human input is actionable
+        // now — the caller re-arms the wait on the unsettled ids carried
+        // in the summary
         if (gated.length > 0) {
-          emit(`gated: ${gated.join(' ')}`)
-          process.exit(3)
+          emit(`gated: ${gated.join(' ')}`, 3)
+          return
         }
         if (stuck.length > 0) {
-          emit(`stuck: ${stuck.join(' ')}`)
-          process.exit(2)
+          emit(`stuck: ${stuck.join(' ')}`, 2)
+          return
         }
-        if (Date.now() > deadline) {
-          emit(`timeout — still unsettled: ${unsettled.join(' ')}`)
-          process.exit(4)
+        if (Date.now() >= deadline) {
+          emit(`timeout — still unsettled: ${unsettled.join(' ')}`, 4)
+          return
         }
-        await new Promise((r) => setTimeout(r, every * 1000))
+        // cap the poll sleep at the remaining budget — a short --timeout
+        // exits on its boundary, not one full interval late
+        await new Promise((r) => setTimeout(r, Math.min(every * 1000, deadline - Date.now())))
       }
     }
     case 'run': {

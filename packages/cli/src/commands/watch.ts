@@ -493,8 +493,9 @@ export function watchArgs(argv: string[]): {
     return { ...base, everySec }
   }
   const forSec = Number(forRaw)
-  if (!Number.isFinite(forSec) || forSec < everySec) {
-    throw new Error(`--for needs a seconds value ≥ --every (${everySec}s), got "${forRaw}"`)
+  // a --for whose ms conversion overflows to Infinity is no bound at all
+  if (!Number.isFinite(forSec) || forSec < everySec || !Number.isFinite(forSec * 1000)) {
+    throw new Error(`--for needs a finite seconds value ≥ --every (${everySec}s), got "${forRaw}"`)
   }
   return { ...base, everySec, forSec }
 }
@@ -602,6 +603,12 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
     }
   }
 
+  // the bound starts before the first tick — a slow snapshot already
+  // spends --for budget, and expiry must not wait one more interval
+  const deadline = forSec === undefined ? Number.POSITIVE_INFINITY : Date.now() + forSec * 1000
+  const expired = () => {
+    console.log(json ? JSON.stringify({ ts: new Date().toISOString(), event: 'expired' }) : 'watch: --for expired')
+  }
   await tick()
   if (everySec === undefined) {
     return
@@ -610,11 +617,16 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
   // An unbounded watch is only legal while a supervisor owns the
   // lifecycle; session-side watchers must pass --for so their exit
   // exists as an event.
-  const deadline = forSec === undefined ? Number.POSITIVE_INFINITY : Date.now() + forSec * 1000
   for (;;) {
-    await new Promise((r) => setTimeout(r, everySec * 1000))
     if (Date.now() >= deadline) {
-      console.log('watch: --for expired')
+      expired()
+      return
+    }
+    // cap the sleep at the remaining budget so expiry lands on its
+    // boundary, not one full --every late
+    await new Promise((r) => setTimeout(r, Math.min(everySec * 1000, deadline - Date.now())))
+    if (Date.now() >= deadline) {
+      expired()
       return
     }
     await tick()
