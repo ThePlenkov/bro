@@ -89,7 +89,7 @@ const MAX_OUTPUT = 1 << 20
 /** Toasts are glanceable — a `bro status` board is not; cap the body. */
 const TOAST_MAX = 3_000
 
-const NPX_PIN = '@broject/bro@0.2.4'
+const NPX_PIN = '@broject/bro@0.2.5'
 
 function jsRuntime(): string {
   return process.platform === 'win32' ? 'node.exe' : 'node'

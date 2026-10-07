@@ -32,5 +32,5 @@ copy `bro.ts` + `cli.ts` (as `bro-cli.ts`) into the project's
 The module resolves the CLI as local dist (bundled sibling or the
 checkout's `packages/cli/dist/index.js` found walking up), then `bro`
 on PATH passing the `bro hooks` probe, then `npx -y --prefer-offline
-@broject/bro@0.2.4`. Every hook call is async and
+@broject/bro@0.2.5`. Every hook call is async and
 fail-open — a missing CLI means no context, never an error.

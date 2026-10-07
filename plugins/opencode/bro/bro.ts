@@ -218,7 +218,7 @@ function checkoutCli(): string | null {
 /** Last-resort npx package spec, pinned to this module's own version —
  *  gen-plugins lists this file in VERSIONED_SOURCES, so the pin is
  *  rewritten to plugin.json's version on every gen/release run. */
-const NPX_PIN = '@broject/bro@0.2.4'
+const NPX_PIN = '@broject/bro@0.2.5'
 
 /** Spawn `cmd args`, resolve true iff it exits 0 within the hook budget. One
  *  probe serves both launch tiers: `hooks` with no event answers "is this

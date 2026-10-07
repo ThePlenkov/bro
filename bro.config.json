@@ -47,7 +47,7 @@
             }
           }
         },
-        "say": "src changed and no test file moved — is the new behavior covered?"
+        "say": "src changed and no test file moved \u2014 is the new behavior covered?"
       },
       {
         "name": "spec-drift-nkn6",
@@ -66,7 +66,7 @@
             ]
           }
         },
-        "say": "specs/sessions/bro-nkn6.md is stale vs the code it scopes — refresh it"
+        "say": "specs/sessions/bro-nkn6.md is stale vs the code it scopes \u2014 refresh it"
       },
       {
         "name": "core-vendor-boundary",
@@ -102,7 +102,7 @@
             ]
           }
         },
-        "say": "vendor name in packages/core — REVIEW.md: core is vendor-neutral (major); move vendor knowledge to packages/cli/src/session-planes/ or a connector package"
+        "say": "vendor name in packages/core \u2014 REVIEW.md: core is vendor-neutral (major); move vendor knowledge to packages/cli/src/session-planes/ or a connector package"
       },
       {
         "name": "retro-on-stop",
@@ -111,7 +111,7 @@
             "stop"
           ]
         },
-        "say": "session ending — run the retro checklist (skills/retro): loose ends, hand-rolled mechanics → bd gap beads, call economy, `bro learn capture`, `bro debt collect`"
+        "say": "session ending \u2014 run the retro checklist (skills/retro): loose ends, hand-rolled mechanics \u2192 bd gap beads, call economy, `bro learn capture`, `bro debt collect`"
       }
     ]
   },
@@ -157,7 +157,7 @@
     "peers": {
       "sverka": {
         "rig": "mesh://sverka-dev/sverka",
-        "remote": "/home/pepl/projects/sverka"
+        "remote": "../sverka"
       }
     }
   }
