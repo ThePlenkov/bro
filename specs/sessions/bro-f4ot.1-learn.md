@@ -119,11 +119,25 @@ probe — a wedged store yields zero lines, never a stalled hook.
 - **`sessionStart`** — match `on: session-start` lessons against session
   context: repo name, branch, this session's claimed beads (titles +
   labels), in-progress mol steps, and the previous session's trace tail
-  when resumable. Resumable discovery is pinned, not invented: a resume
-  payload that names the prior session id wins; absent that, the probe
-  falls back to the most recently modified `trace/` file not owned by
-  this session, still bounded by the marker TTL. Matched lessons render
-  as context lines under the rehydration block.
+  when resumable. Resumable discovery is pinned, not invented — and
+  pinned to what the hooks actually receive: **no host supplies a
+  prior-session id**, `HookInput` carries `session_id` and nothing else
+  resumable (Cursor only renames `conversation_id` into it), so there
+  is no resume field to honour and the probe discovers the tail purely
+  by fallback. Newest mtime wins among `trace/*.jsonl` entries that are
+  **not this session's own file** and **not owned by a provably live
+  session**: a live session's trace is concurrent work, not a resume
+  tail, so it is skipped via the same `markerLive` read the
+  parallel-work nudge uses (owned marker — its pid lives; ownerless —
+  inside the 24 h window). No markers for a candidate proves nothing
+  and leaves it eligible; unverifiable is not live, and an advisory tail
+  beats silence. Candidates older than the 7-day marker TTL are past the
+  bound, and nothing eligible — no `trace/` dir yet, every candidate
+  live or stale — yields zero lines like any other failed probe. If a
+  host ever ships a prior-session field, it wins over the fallback and
+  the probe reads `trace/<prior>.jsonl` by name; that lands as a
+  `HookInput` widening in hooks, not as a field this spec assumes.
+  Matched lessons render as context lines under the rehydration block.
 - **`promptSubmit`** — match `terms` against the raw prompt. This is the
   highest-precision trigger (the user just said the thing the lesson is
   about) and the cheapest (no store scan beyond the terms index).
