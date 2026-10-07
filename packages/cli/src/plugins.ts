@@ -392,7 +392,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'mesh',
-    summary: 'Inter-rig work federation: me|peers add|list|remove — request/lifecycle lands next (specs/mesh)',
+    summary: 'Inter-rig work federation: me|peers|pull|inbox — request/lifecycle lands next (specs/mesh)',
     run: runMeshCommand,
     configKey: 'mesh',
     configSchema: meshSection,

@@ -5,7 +5,7 @@
  * `mesh.peers` config map; `me` prints this rig's derived (or pinned)
  * mesh:// URI. Request/lifecycle/wait land in later milestones.
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { gitCommonDir, gitTry, loadConfig, withFileLock } from '@broject/core'
 import {
@@ -42,7 +42,7 @@ export function selfRig(dir: string): string | null {
   if (cfg.mesh.rig !== undefined && parseRigUri(cfg.mesh.rig) !== null) {
     return cfg.mesh.rig
   }
-  const origin = gitTry(['remote', 'get-url', 'origin'])
+  const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
   if (origin.code !== 0) {
     return null
   }
@@ -70,7 +70,11 @@ function withMeshConfig<T>(dir: string, mutate: (cfg: MeshConfigFile) => T): T {
       ? (JSON.parse(readFileSync(path, 'utf8')) as MeshConfigFile)
       : ({} as MeshConfigFile)
     const out = mutate(cfg)
-    writeFileSync(path, `${JSON.stringify(cfg, null, 2)}\n`)
+    // atomic write: temp file in the same dir + rename, so a crash
+    // mid-write can't leave a truncated config
+    const tmp = join(dir, '.bro.config.json.tmp')
+    writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`)
+    renameSync(tmp, path)
     return out
   })
 }

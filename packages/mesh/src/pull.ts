@@ -39,6 +39,9 @@ export function replicaDir(gitCommon: string, alias: string): string {
  *  empty inbox, not a crash (fail-open, same policy as the bus). */
 export function syncReplica(gitCommon: string, alias: string, remote: string): { path?: string; error?: string } {
   const dir = replicaDir(gitCommon, alias)
+  if (remote.startsWith('-')) {
+    return { error: `${alias}: invalid remote '${remote}' — must not start with '-'` }
+  }
   const r = existsSync(join(dir, '.dolt'))
     ? dolt(['pull'], dir)
     : dolt(['clone', remote, dir])
