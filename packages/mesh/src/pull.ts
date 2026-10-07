@@ -22,6 +22,7 @@ function dolt(args: string[], cwd?: string): DoltResult {
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 120_000,
+    maxBuffer: 32 * 1024 * 1024,
   })
   return {
     code: p.status ?? 1,
