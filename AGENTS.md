@@ -67,8 +67,10 @@ Developing bro itself: see CONTRIBUTING.md.
   never bare `#N`. `prLink()` in `@broject/core` formats it; TSV/data rows
   keep the bare number (parsed, not read).
 - **Never leave uncommitted changes** — every unit of work lands on a
-  branch, is committed, pushed, and opened as a draft PR. A dirty tree
-  at session end is lost work.
+  branch, is committed, pushed, and opened as a PR. The draft flag
+  mirrors the merge target: draft iff a human merges (`merge=human`);
+  the convoy default (`merge=auto`) opens a ready PR — the act gate is
+  the merge mechanism. A dirty tree at session end is lost work.
 
 ## Convoy fan-out — detach + pins
 
