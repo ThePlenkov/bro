@@ -57,7 +57,14 @@ export function postEnvelope(input: PostInput): PostResult {
   }
   let id: string
   try {
-    id = (JSON.parse(create.out) as { id: string }).id
+    const parsed = JSON.parse(create.out)
+    // bd create --json prints a single row object; tolerate a
+    // one-element array for robustness across bd versions
+    const row = Array.isArray(parsed) ? parsed[0] : parsed
+    id = (row as { id?: unknown }).id as string
+    if (typeof id !== 'string' || id === '') {
+      return { error: `bd create returned no id` }
+    }
   } catch {
     return { error: `bd create returned unparseable json` }
   }
