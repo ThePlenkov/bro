@@ -36,36 +36,38 @@ accept/reject` reduction in `thread.ts` reads both planes. A request
 posted over github and one posted over wasteland are the same record
 to every other layer.
 
-### The github plane — the issue body carries the envelope
+### The github plane — the issue is the thread, a comment carries the record
 
-**Delivery.** `POST /repos/{owner}/{repo}/issues` with a
-machine-readable envelope in the body. `validateEnvelope` /
-`toEnvelope` already exist for exactly this shape ("transports that
-carry the envelope as a document — github-issue bodies, wasteland
-payloads", `packages/mesh/src/envelope.ts`).
+**Delivery.** `POST /repos/{owner}/{repo}/issues` for the human half,
+then `POST /repos/{owner}/{repo}/issues/{n}/comments` for the machine
+half — one fenced `request` envelope in a comment, authored by the
+rig's own account. `validateEnvelope` / `toEnvelope` already exist for
+exactly this shape ("transports that carry the envelope as a document —
+github-issue bodies, wasteland payloads",
+`packages/mesh/src/envelope.ts`); that comment names bodies and this
+plane lands on comments, which is the same document-carrying seam. Note
+`validateEnvelope` is deliberately kind-agnostic — it checks the mesh/1
+wire shape and accepts any `MESH_KINDS` member, which is right for a
+shared validator, so narrowing an envelope to `kind === 'request'` is
+the transport's job, not the validator's.
 
-The body is human-rendered and the envelope is fenced and marked, so a
-maintainer can read the issue and a session can parse it:
+The issue body is prose — what is wanted, from which rig, and that the
+record is the first comment — and carries **no** machine block. Every
+mesh record on this plane is a comment, `request` through `reject`
+alike. Why that split is not a preference is the provenance rule below.
 
-````text
-bro: request from mesh://theplenkov/bro — do not edit the block below
-
-```json
-{ "v": "mesh/1", "id": "req-7f2a", … }
-```
-
-<!-- mesh/1 request req-7f2a — end of machine block -->
-````
-
-**Parsing is tolerant, by necessity.** The body is a shared editable
-document: humans edit above the fence, GitHub appends checklists and
-cross-references below it, and bots inject footers. The read never
-anchors on line offsets or on "the body is only the envelope". It
-takes the **last** fenced ` ```json ` block that satisfies
-`validateEnvelope`, and an issue with no such block is not a mesh
-record at all (surfaced as an error line, never as a parsed request).
-This is the same discipline the beads inbox applies by refusing to
-hand-labelled rows (`envelopeFromBead`).
+**Parsing is tolerant, by necessity.** A comment is a shared editable
+document too: its author appends checklists, bots inject footers, and
+GitHub adds cross-reference lines below it. The read never anchors on
+line offsets or on "the comment is only the envelope". It takes the
+**last** fenced ` ```json ` block in the comment that satisfies
+`validateEnvelope`, **and admits it as a request only when that block's
+`kind` is `request`** — `claim`/`result`/`accept`/`reject` are
+lifecycle records for a thread that already exists, never a way to open
+one. A comment with no qualifying block is not a mesh record at all
+(surfaced as an error line, never as a parsed request). This is the same
+discipline the beads inbox applies by refusing to hand-labelled rows
+(`envelopeFromBead`).
 
 **Labels are a query index, never the record.** Two hard GitHub facts,
 both verified against the API on this account:
@@ -79,14 +81,14 @@ both verified against the API on this account:
   found`), while the REST `labels[]` parameter **creates** missing
   labels silently.
 
-So: the body is the single source of truth, and only routing labels
+So: the comment is the single source of truth, and only routing labels
 ride the issue, only when they fit in 50 characters. A label that
 would overflow is dropped, not truncated — a truncated `mesh:to:` is a
 different string that matches nothing, and a silently wrong routing
 label is worse than no label. Nothing in the read path parses a label
 to learn an envelope field; labels exist so `gh issue list --search
 'label:mesh:kind:request'` can narrow a repo without fetching every
-body.
+comment.
 
 **The REST path, deliberately.** Delivery uses the API's `labels[]`
 rather than `gh issue create --label`, because the API creates the
@@ -94,15 +96,35 @@ mesh labels on first use. A rig whose repo has never carried a mesh
 issue — the normal case for a new plane — would otherwise fail its
 first delivery on a missing label and every delivery after it.
 
-**Provenance is the authenticated author.** The mesh Trust rule
+**Provenance is the authenticated comment author.** The mesh Trust rule
 ("provenance is the transport, not the envelope") maps onto GitHub
-exactly: the authenticated `author` of the issue or comment *is* the
-transport. A `claim`/`result`/`accept` comment is admitted to the
-thread reduction only when its author matches the login the peer
-binding expects; a mismatch is flagged exactly like the beads
-`mismatch` case, never trusted and never silently dropped. This is
-strictly stronger than the beads plane, where provenance is the
-binding a replica arrived over.
+exactly: the authenticated author of a comment *is* the transport, and
+a comment is the only place a record lives on this plane.
+
+That is why the record is not in the issue body. A body is editable by
+anyone with write access, and a pull-only reader **cannot** authenticate
+who edited it: the `issues.edited` webhook that reports a body change
+is delivered to the repository's own side, and the reader sees nothing
+from the REST API that names a body editor. An editable body attributed
+to the issue author is precisely the broken-authentication shape — a
+maintainer rewrites the block and the record is still admitted as the
+original rig. So the body holds prose, the record lives in a comment,
+and its identity is the one identity GitHub authenticates.
+
+The check needs a name to compare against, and the peer binding has
+none today: an entry is `{ rig, remote }` with the transport derived
+(`packages/mesh/src/peers.ts`), which identifies a rig by URI, never by
+account. So the binding gains an optional `login` — the GitHub account
+that speaks for that rig, e.g.
+`mesh.peers[bro-github] = { rig, remote, login: "theplenkov-brigade" }`.
+A `claim`/`result`/`accept` is admitted to the thread reduction only
+when its comment author equals the login the peer binding expects; a
+mismatch is flagged exactly like the beads `mismatch` case, never
+trusted and never silently dropped. This is strictly stronger than the
+beads plane, where provenance is the binding a replica arrived over,
+and no weaker than GitHub account authentication itself: a rig whose
+binding has no `login` admits nothing and says so in an error line
+rather than falling back to the advisory `from`.
 
 **Reads need nothing but pull access.** A requester with no checkout
 reads the far rig's requests through `gh issue list -R <owner>/<repo>`
@@ -182,12 +204,26 @@ So the transport is genuinely pull-shaped and needs no sovereignty
 argument of its own — it is `beads-remote`'s discipline with a
 different backend.
 
+**Claims are proposals; upstream is the serialization point.** The fork
+discipline has a price, and it is a race: branches are per-rig, so two
+rigs that read the same open `wanted` row each open a claim branch and
+each open a PR for the same `w-<hash>`, and nothing on the two forks
+conflicts. The invariant this plane keeps is therefore not exclusivity
+of *effort* but a single authoritative claim *state*: reads come from
+the commons database and never from the local fork (a fork read reports
+the claim you already made), `wl accept` adjudicates by merge order —
+the first claim PR to land upstream sets `claimed_by`, and a later
+competing claim is superseded rather than merged. A second claimer
+learns it lost by re-reading the board, not by being told by the
+winner. So double-claiming is wasted work, not a corrupt board, and the
+adapter must not read its own fork to decide whether a row is open.
+
 **Field mapping.** The board's `wanted` row is close enough to a
 mesh/1 request that the adapter is a projection, not a translation:
 
 | mesh/1 | `wanted` | note |
 | --- | --- | --- |
-| `id` | `id` (`w-<hash>`) | see the id collision below |
+| — | `id` (`w-<hash>`) | board-native; the thread id on this plane, never a translation of `id` |
 | `title` | `title` | 1:1 |
 | `body` | `description` | 1:1 |
 | `terms.priority` (`p0`–`p4`) | `priority` (0–4) | same scale, `pN` → `N` |
@@ -200,13 +236,15 @@ validated/rejected state.
 
 **One id, one direction.** mesh ids are requester-side (`req-…`, bead
 ids); board ids are `w-<hash>`. A request visible on both planes has
-two identities, so exactly one is authoritative: **on the board plane
-the thread is the `wanted.id`**, and the requester's mirror bead
-records it in a single field. The reverse mapping is never
-reconstructed — the same "re-deriving the edge bd holds is a second
-source of truth" argument that keeps `--for <bead>` out of `bro wait`
-applies here, and it is why the board id is never parsed back out of
-the mirror.
+two identities and stays that way: the board row carries **no column**
+for the mesh id, so there is nothing to translate on the way out and
+nothing to reconstruct on the way back. Exactly one is authoritative:
+**on the board plane the thread is the `wanted.id`**, and the
+requester's mirror bead records it in a single field. The reverse
+mapping is never reconstructed — the same "re-deriving the edge bd
+holds is a second source of truth" argument that keeps `--for <bead>`
+out of `bro wait` applies here, and it is why the board id is never
+parsed back out of the mirror.
 
 **Reputation stays wasteland's.** `wl accept` issues reputation
 stamps; mesh/1 lists reputation scoring as a v1 non-goal
@@ -249,12 +287,14 @@ policy `syncReplica` already uses for an unfetchable peer.
 ## Owns
 
 ```text
-packages/mesh/src/github.ts       envelope→issue body render + parse,
-                                  label index (≤50 chars), author
-                                  provenance, issue/comment reads
+packages/mesh/src/github.ts       envelope→issue body prose + comment
+                                  record render/parse, label index
+                                  (≤50 chars), author provenance,
+                                  issue/comment reads
 packages/mesh/src/wasteland.ts    wl CLI adapter: wanted row projection,
                                   claim/completion verbs, handle registry
-packages/mesh/src/peers.ts        `github` | `wasteland` transport rows
+packages/mesh/src/peers.ts        `github` | `wasteland` transport rows,
+                                  optional `login` per binding
 packages/cli/src/commands/mesh.ts github/wasteland delivery + inbox
                                   pass-through; `bro request` routing
 AGENTS.md                         the no-checkout plane clause
@@ -262,21 +302,27 @@ AGENTS.md                         the no-checkout plane clause
 
 ## Plan
 
-- [ ] `packages/mesh/src/github.ts` — `renderRequestBody`
-      (fenced + marked block), `parseIssueBody` (last fenced `json`
-      block that validates; unparseable → error line, never a
-      request), `routingLabels` (drop-if-over-50, no truncation),
-      `postRequest` (REST `labels[]`, not `gh issue create --label`),
+- [ ] `packages/mesh/src/github.ts` — `renderIssueBody` (human prose,
+      no machine block), `parseComment` (last fenced `json` block that
+      validates, admitted as a request only when `kind === 'request'`;
+      unparseable → error line, never a request), `routingLabels`
+      (drop-if-over-50, no truncation), `postRequest` (REST `labels[]`
+      on the issue at create, not `gh issue create --label`; the
+      `request` record goes in a follow-up issue comment),
       `issueComments` (envelope-bearing comments → `PeerRecord`s with
-      author provenance), `scanIssues` (label-narrowed, body-verified)
+      author provenance), `scanIssues` (label-narrowed,
+      comment-verified)
 - [ ] `packages/mesh/src/wasteland.ts` — `wl` invocation + missing-
       binary fail-open, `postWanted` / `claimWanted` /
-      `completeWanted`, `browseWanted` (open board → envelopes),
+      `completeWanted`, `browseWanted` (open board → envelopes, read
+      from the commons DB and never from the rig's own fork),
       `priorityTerms` (`pN` ↔ 0–4), board id as the thread id
 - [ ] `packages/mesh/src/peers.ts` — extend `TRANSPORTS` with
       `github` and `wasteland`; derivation from remote shape (github
       URL / `wl` remote); explicit override keeps working, and an
-      unrecognised explicit value stays `null`
+      unrecognised explicit value stays `null`; optional `login` on the
+      binding, absent ⇒ the `github` plane admits nothing and reports
+      the gap rather than falling back to `from`
 - [ ] `packages/cli/src/commands/mesh.ts` — `github` and `wasteland`
       delivery in `bro request`; both planes in `bro mesh inbox`;
       thread read over issue comments in `bro mesh wait`
@@ -286,23 +332,27 @@ AGENTS.md                         the no-checkout plane clause
       reported rather than read as "no requests"
 - [ ] AGENTS.md foreign-findings bullet — one clause: a rig with no
       checkout is reached over the github issue plane, never patched
-- [ ] tests: body round-trip (render → parse → identical envelope);
-      last-fence-wins with an edited body and an appended footer; a
-      body with no valid block → error line; label budget (a >50-char
+- [ ] tests: comment round-trip (render → parse → identical envelope);
+      last-fence-wins with an appended footer on a comment; a comment
+      with no valid block → error line; a non-`request` `MESH_KINDS`
+      envelope in a comment never opens a request; a maintainer
+      rewriting the issue body leaves the record intact (the body holds
+      no machine block to rewrite); label budget (a >50-char
       `mesh:to:` is dropped, never truncated, and the envelope still
-      parses from the body); REST delivery auto-creates missing labels;
-      provenance mismatch (author ≠ binding) flagged, not admitted;
+      parses from the comment); REST delivery auto-creates missing labels;
+      provenance mismatch (author ≠ binding `login`) flagged, not
+      admitted; a binding with no `login` admits nothing;
       `external:` + `mesh://` mis-parse regression test documenting the
       project=`mesh` outcome so the mirror-bead decision cannot be
       silently reverted; wasteland wanted-row projection round-trip and
       `pN` ↔ 0–4; `wl` absent → error line naming the binary, not a
       crash
 - [ ] e2e (gated, opt-in, skipped when unauthenticated): two rigs,
-      request → issue → worker claim comment → result comment →
-      requester accept — run against two orgs the team controls, which
-      is also what settles the unverified issue-create half above; and a
-      wasteland post → claim → done against a local `wl --remote-base`
-      file provider
+      request → issue + `request` comment → worker claim comment →
+      result comment → requester accept — run against two orgs the team
+      controls, which is also what settles the unverified issue-create
+      half above; and a wasteland post → claim → done against a local
+      `wl --remote-base` file provider
 
 ## Alternatives
 
@@ -317,10 +367,16 @@ AGENTS.md                         the no-checkout plane clause
   second place to look for every request.
 - **Put the envelope in the issue *title*** — rejected: titles cap at
   256 characters and are the one field humans rewrite.
+- **Keep the record in the issue body and attribute it to the issue
+  author** — rejected: a body is editable by anyone with write access
+  and a pull-only reader has no way to authenticate the editor (no REST
+  field names one; `issues.edited` is a repo-side webhook), so a
+  maintainer could rewrite the block and have it admitted as the
+  original rig. Prose in the body, records in comments.
 - **Carry refs/evidence as labels on github, truncating to fit** —
   rejected: truncation produces a distinct string that matches
   nothing, and the 50-char budget is already exceeded by real URLs.
-  The body carries them.
+  The record carries them.
 - **`gh issue create --label` for delivery** — rejected: it hard-fails
   on a label the repo does not have yet, so the first delivery on any
   repo fails and every one after it fails the same way. The REST path
