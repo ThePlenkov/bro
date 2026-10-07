@@ -124,7 +124,23 @@
     }
   },
   "fleet": {
-    "maxConcurrent": 3
+    "maxConcurrent": 3,
+    "routing": {
+      "default": {
+        "chain": [
+          {
+            "provider": "devin"
+          }
+        ]
+      },
+      "cheap": {
+        "chain": [
+          {
+            "provider": "opencode-free"
+          }
+        ]
+      }
+    }
   },
   "judge": {
     "mode": "shadow",
@@ -146,6 +162,10 @@
         "typesafe/jev-1.13": "systemone",
         "typesafe/jev-latest": "systemone"
       }
+    },
+    "devin": {
+      "type": "cli",
+      "command": "devin -p --permission-mode dangerous --prompt-file {promptFile}"
     },
     "opencode-free": {
       "type": "cli",
