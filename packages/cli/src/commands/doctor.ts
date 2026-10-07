@@ -591,29 +591,27 @@ function queryCliChecks(dir: string, cfgPins: Record<string, string>): DoctorChe
 /** Mesh group (specs/mesh): runs only when mesh is configured — an
  *  unconfigured repo has nothing to check. Rig addressability, peer
  *  binding sanity, and `dolt` for beads-remote replicas. */
-function meshChecks(dir: string, mesh: { rig?: string; peers: Record<string, { rig: string; remote: string }> }): DoctorCheck[] {
-  const aliases = Object.keys(mesh.peers)
-  if (mesh.rig === undefined && aliases.length === 0) {
-    return []
-  }
-  const out: DoctorCheck[] = []
+function meshRigCheck(dir: string, pinned: string | undefined): DoctorCheck {
   const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
   const derived = origin.code === 0 ? rigFromRemoteUrl(origin.out.trim()) : null
-  const rig = mesh.rig ?? derived
-  out.push(
-    rig !== null && rig !== undefined
-      ? check('mesh', 'ok', `rig ${rig}${mesh.rig !== undefined ? ' (pinned)' : ''}`)
-      : check(
-          'mesh',
-          'warn',
-          'rig unaddressable — no mesh.rig pin, no derivable origin',
-          'peers cannot address requests here — set "mesh": { "rig": "mesh://org/repo" } or a forge-url origin'
-        )
-  )
+  const rig = pinned ?? derived
+  return rig !== null && rig !== undefined
+    ? check('mesh', 'ok', `rig ${rig}${pinned !== undefined ? ' (pinned)' : ''}`)
+    : check(
+        'mesh',
+        'warn',
+        'rig unaddressable — no mesh.rig pin, no derivable origin',
+        'peers cannot address requests here — set "mesh": { "rig": "mesh://org/repo" } or a forge-url origin'
+      )
+}
+
+/** Peer census — every binding must parse; beads-remote peers are
+ *  counted for the dolt probe. */
+function meshPeerChecks(aliases: string[], peers: Record<string, { rig: string; remote: string }>): { row: DoctorCheck; remotes: number } {
   let remotes = 0
   let bad = 0
   for (const alias of aliases) {
-    const p = parsePeer(alias, mesh.peers[alias])
+    const p = parsePeer(alias, peers[alias])
     if (p === null) {
       bad++
       continue
@@ -622,23 +620,36 @@ function meshChecks(dir: string, mesh: { rig?: string; peers: Record<string, { r
       remotes++
     }
   }
-  out.push(
+  const row =
     bad === 0
       ? check('mesh-peers', 'ok', `${aliases.length} peer(s), ${remotes} beads-remote`)
       : check('mesh-peers', 'warn', `${bad}/${aliases.length} peer binding(s) unparseable`, 'each needs {"rig": "mesh://org/repo", "remote": "…"}')
-  )
+  return { row, remotes }
+}
+
+/** `dolt` availability — required only when beads-remote peers exist;
+ *  its absence is a warn (replicas degrade to unreachable), not a fail. */
+function meshDoltCheck(): DoctorCheck {
+  const dolt = probeBin('dolt')
+  return dolt.found
+    ? check('mesh-dolt', 'ok', dolt.version ?? 'present')
+    : check(
+        'mesh-dolt',
+        'warn',
+        'beads-remote peers configured but `dolt` not found',
+        'replica sync runs `dolt clone|pull` — install dolt or rebind to a local checkout'
+      )
+}
+
+function meshChecks(dir: string, mesh: { rig?: string; peers: Record<string, { rig: string; remote: string }> }): DoctorCheck[] {
+  const aliases = Object.keys(mesh.peers)
+  if (mesh.rig === undefined && aliases.length === 0) {
+    return []
+  }
+  const { row, remotes } = meshPeerChecks(aliases, mesh.peers)
+  const out = [meshRigCheck(dir, mesh.rig), row]
   if (remotes > 0) {
-    const dolt = probeBin('dolt')
-    out.push(
-      dolt.found
-        ? check('mesh-dolt', 'ok', dolt.version ?? 'present')
-        : check(
-            'mesh-dolt',
-            'warn',
-            'beads-remote peers configured but `dolt` not found',
-            'replica sync runs `dolt clone|pull` — install dolt or rebind to a local checkout'
-          )
-    )
+    out.push(meshDoltCheck())
   }
   return out
 }

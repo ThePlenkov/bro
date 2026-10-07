@@ -434,6 +434,29 @@ export const querySection: ConfigSection<{
   }
 }
 
+/** One `mesh.peers.<alias>` entry — rig must be a mesh:// URI, remote a
+ *  non-empty string; transport survives verbatim (parsePeer judges it —
+ *  stripping it here would silently downgrade explicit bindings). */
+function meshPeerEntry(entry: unknown): { rig: string; remote: string; transport?: string } | null {
+  if (typeof entry !== 'object' || entry === null) {
+    return null
+  }
+  const e = entry as { rig?: unknown; remote?: unknown; transport?: unknown }
+  if (
+    typeof e.rig !== 'string' ||
+    !e.rig.startsWith('mesh://') ||
+    typeof e.remote !== 'string' ||
+    e.remote === ''
+  ) {
+    return null
+  }
+  const p: { rig: string; remote: string; transport?: string } = { rig: e.rig, remote: e.remote }
+  if (typeof e.transport === 'string' && e.transport !== '') {
+    p.transport = e.transport
+  }
+  return p
+}
+
 /** bro.config.json `mesh` section — the federation seam (specs/mesh).
  *  `rig` pins this repo's mesh:// identity when the origin remote
  *  doesn't derive one; `peers` is a map of alias → { rig, remote } —
@@ -450,15 +473,8 @@ export const meshSection: ConfigSection<{
   const peers: Record<string, { rig: string; remote: string; transport?: string }> = {}
   if (typeof obj.peers === 'object' && obj.peers !== null) {
     for (const [alias, entry] of Object.entries(obj.peers)) {
-      if (typeof entry !== 'object' || entry === null) {
-        continue
-      }
-      const e = entry as { rig?: unknown; remote?: unknown; transport?: unknown }
-      if (typeof e.rig === 'string' && e.rig.startsWith('mesh://') && typeof e.remote === 'string' && e.remote !== '') {
-        const p: { rig: string; remote: string; transport?: string } = { rig: e.rig, remote: e.remote }
-        if (typeof e.transport === 'string' && e.transport !== '') {
-          p.transport = e.transport
-        }
+      const p = meshPeerEntry(entry)
+      if (p !== null) {
         peers[alias] = p
       }
     }
