@@ -87,3 +87,12 @@ export function postEnvelope(input: PostInput): PostResult {
   }
   return { id }
 }
+
+/** Block a local bead on a posted request: `bd dep add <waiting>
+ *  external:<rig>:<id>` — the rig URI goes into the project slot
+ *  verbatim; bd stores external edges as-is and resolves them at
+ *  query time. Returns an error message, undefined on success. */
+export function wireDep(dir: string, waiting: string, toRig: string, requestId: string): string | undefined {
+  const dep = bd(dir, ['dep', 'add', waiting, `external:${toRig}:${requestId}`])
+  return dep.code === 0 ? undefined : `bd dep add failed — ${dep.err || dep.out}`
+}

@@ -270,9 +270,21 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     else fail('kv ' + sub)
     break
   }
-  case 'dep':
-    jsonOut([])
+  case 'dep': {
+    // dep add <id> <to> — records the edge verbatim (external:<…>:<…>
+    // refs included) so tests can assert dep wiring happened
+    if (pos[1] === 'add') {
+      if (pos[2] === undefined || pos[3] === undefined) fail('dep add <id> <to>')
+      const r = row(pos[2])
+      if (!r) fail('not found: ' + pos[2])
+      db.deps = db.deps || []
+      db.deps.push({ from: pos[2], to: pos[3] })
+      save(db)
+      break
+    }
+    jsonOut(db.deps || [])
     break
+  }
   case 'children':
     jsonOut([])
     break

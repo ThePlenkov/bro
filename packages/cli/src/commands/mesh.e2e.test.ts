@@ -264,4 +264,29 @@ describe('bro mesh', () => {
       assert.ok(result.labels.includes('mesh:ev:pr:https://github.com/x/y/pull/9'))
     })
   })
+
+  test('request --for blocks a local bead on external:<rig>:<id>', () => {
+    const { root, main } = initRepo('bro-mesh-e2e-dep-', (m) => {
+      execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
+    })
+    inside(main, root, () => {
+      const { binDir, db } = installFakeBd(join(root, 'tools'), [])
+      const env = { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: db }
+
+      const waiter = JSON.parse(
+        execFileSync('bd', ['-C', main, 'create', '--title', 'needs the port', '--json'], { env, encoding: 'utf8' }),
+      ) as { id: string }
+
+      const req = runCli(
+        ['mesh', 'request', 'mesh://acme/rigB', 'port the gate', '--for', waiter.id],
+        { cwd: main, env },
+      )
+      assert.equal(req.code, 0, req.stderr)
+      assert.match(req.stdout, new RegExp(`${waiter.id} now blocked by external:`))
+
+      const dbRows = JSON.parse(readFileSync(db, 'utf8')) as { deps: { from: string; to: string }[] }
+      const reqId = /request (\S+) →/.exec(req.stdout)?.[1]
+      assert.deepEqual(dbRows.deps, [{ from: waiter.id, to: `external:mesh://acme/rigb:${reqId}` }])
+    })
+  })
 })

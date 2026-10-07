@@ -16,6 +16,7 @@ import {
   parseRigUri,
   postEnvelope,
   rigFromRemoteUrl,
+  wireDep,
   syncReplica,
   type MeshKind,
   type MeshRef,
@@ -38,9 +39,10 @@ Commands:
   inbox [--json] [--no-pull]
                           requests addressed to this rig across peers —
                           pulls replicas first unless --no-pull
-  request <rig> <title> [--body T] [--priority N] [--ref K:R]…
+  request <rig> <title> [--body T] [--priority N] [--ref K:R]… [--for BEAD]
                           post a request envelope on the local beads
-                          store — the target rig pulls it
+                          store — the target rig pulls it; --for blocks
+                          a local bead on external:<rig>:<id>
   claim <thread>          worker verb: bind this rig to the thread
   done <thread> [--ev K:R]…
                           worker verb: submit the result + evidence
@@ -327,6 +329,15 @@ function cmdRequest(dir: string, args: string[]): void {
     process.exit(1)
   }
   console.log(`request ${posted.id} → ${formatRigUri(target)}`)
+  const waiting = flagValue(rest, '--for')
+  if (waiting !== undefined) {
+    const depErr = wireDep(dir, waiting, formatRigUri(target), posted.id ?? '')
+    if (depErr !== undefined) {
+      console.error(`! request posted but dep wiring failed: ${depErr}`)
+    } else {
+      console.log(`${waiting} now blocked by external:${formatRigUri(target)}:${posted.id}`)
+    }
+  }
   console.log(`thread: ${posted.id} — track it with \`bro mesh wait ${posted.id}\``)
 }
 
