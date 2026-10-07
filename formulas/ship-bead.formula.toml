@@ -20,6 +20,12 @@ required = false
 default = "auto"
 enum = ["auto", "human"]
 
+[vars.draft]
+description = "PR draft flag: 'auto' derives from merge — draft iff merge=human (marking ready IS the human gate event); 'true' forces --draft, 'false' forces a ready PR (e.g. automerge but eyes first)."
+required = false
+default = "auto"
+enum = ["auto", "true", "false"]
+
 [[steps]]
 id = "work"
 title = "Implement {{bead}} per its spec"
@@ -30,7 +36,10 @@ it per its spec file (find it via `bro spec tree` / `specs/`). For epic beads
 the first task is decomposition: child beads wired by blocks deps, each with a
 spec reference — then implement the ready children in order.
 Rules: spec first (sdd gate), tests via `npm test` (exact CI command), commit +
-push + `gh pr create`. Never push to main. Done when: the PR is open and pushed.
+push + `gh pr create` with the draft flag from draft={{draft}}: 'true' forces
+--draft; 'false' forces a ready PR; 'auto' derives from merge={{merge}} (draft
+iff merge=human — marking ready IS the human gate event). Never push to main.
+Done when: the PR is open and pushed.
 """
 
 [[steps]]
