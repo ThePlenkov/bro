@@ -78,11 +78,15 @@ On the `prepared` phase, for each stdin update
    passes everything — deliberate human intent is an env away, never
    an interactive prompt (hooks can't prompt).
 
-6. **Failure policy — asymmetrical by design.** The veto path exits
-   non-zero with an stderr explanation naming the verb and the ref;
-   every internal error (unreadable cmdline, failed `merge-base`,
-   missing git) exits 0. A broken guard reverts to today's behavior;
-   it must never wedge a repo's git operations.
+6. **Failure policy — asymmetrical by design.** The veto path prints
+   `BRO_REF_GUARD_VETO <ref>` on stdout plus an stderr explanation
+   naming the verb and the ref, and exits non-zero. The shim keys the
+   veto on the **stdout marker, never the exit code** — a dead
+   bro/npx/node (missing binary, `npx` ETARGET, crashed node) is
+   infrastructure and must exit 0. Every internal error (unreadable
+   cmdline, failed `merge-base`, missing git) exits 0. A broken guard
+   reverts to today's behavior; it must never wedge a repo's git
+   operations.
 
 ### The veto message
 

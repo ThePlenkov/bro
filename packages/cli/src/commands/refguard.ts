@@ -28,7 +28,10 @@
  *
  * `BRO_REF_GUARD=off` in the invoking env passes everything — the
  * deliberate-rewrite escape hatch. Failure policy is asymmetric:
- * the veto path exits non-zero; every internal error exits 0.
+ * the veto path prints `BRO_REF_GUARD_VETO` on stdout (the shim keys
+ * on the marker — an infra failure of bro/npx itself must exit 0, so
+ * the exit code alone can never be the signal); every internal error
+ * exits 0.
  */
 import { readFileSync } from 'node:fs'
 import { basename } from 'node:path'
@@ -239,6 +242,10 @@ export function emitRefGuard(argv: string[], stdinText: string): void {
       argv: invoker,
     })
     if (v.verdict === 'veto') {
+      // the marker IS the veto — the shim greps for it, so an infra
+      // failure of bro/npx itself (missing binary, npx ETARGET) can
+      // never masquerade as a deliberate veto
+      process.stdout.write(`BRO_REF_GUARD_VETO ${v.ref}\n`)
       console.error(
         `bro refguard: refusing non-fast-forward move of ${v.ref} ` +
           `(${v.oldSha.slice(0, 8)} → ${v.newSha.slice(0, 8)}) by 'git ${v.verb}' — ` +
@@ -277,11 +284,17 @@ case "$input" in
   *) exit 0 ;;
 esac
 if command -v bro >/dev/null 2>&1; then
-  printf '%s\\n' "$input" | bro hooks reference-transaction "$1" "$PPID"
+  out="$(printf '%s\\n' "$input" | bro hooks reference-transaction "$1" "$PPID")"
 elif command -v npx >/dev/null 2>&1; then
-  printf '%s\\n' "$input" | npx -y --prefer-offline "@broject/bro@${version}" hooks reference-transaction "$1" "$PPID"
+  out="$(printf '%s\\n' "$input" | npx -y --prefer-offline "@broject/bro@${version}" hooks reference-transaction "$1" "$PPID")"
 else
   exit 0
 fi
+# the veto is the marker, never the exit code — a dead bro/npx/node is
+# infrastructure, and infrastructure failures must not wedge git
+case "$out" in
+  *"BRO_REF_GUARD_VETO"*) exit 1 ;;
+esac
+exit 0
 `
 }

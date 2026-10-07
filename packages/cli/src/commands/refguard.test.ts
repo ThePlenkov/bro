@@ -252,4 +252,11 @@ describe('refGuardShim', () => {
     assert.match(shim, /\[ "\$1" = "prepared" \] \|\| exit 0/)
     assert.match(shim, /\*" refs\/heads\/"\*/)
   })
+
+  test('the veto is the stdout marker, never the exit code — infra failures pass', () => {
+    const shim = refGuardShim('0')
+    assert.match(shim, /\*"BRO_REF_GUARD_VETO"\*\) exit 1 ;;/)
+    // the marker check is the LAST word — a dead bro/npx/node exits 0
+    assert.match(shim, /esac\nexit 0\n$/)
+  })
 })

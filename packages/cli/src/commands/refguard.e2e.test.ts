@@ -6,7 +6,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { installRefGuardHook, uninstallRefGuardHook } from './githooks.ts'
 import { REFGUARD_HOOK_MARK } from './refguard.ts'
@@ -37,76 +37,113 @@ describe('refguard e2e', () => {
     const { root, main } = initRepo('bro-refguard-')
     inside(main, root, () => {
       const bin = fakeBroBin(root)
-      const env = e2eEnv({ PATH: `${bin}:${process.env.PATH}` })
-      const r = installRefGuardHook(main, '9.9.9')
-      assert.equal(r.state, 'installed')
-      assert.ok(readFileSync(HOOK_PATH(main), 'utf8').includes(REFGUARD_HOOK_MARK))
+      // the fixture `git()` helper inherits process.env — patch PATH so
+      // EVERY git call in this test resolves the fake bro, not ambient
+      // PATH (CI has no bro; dev machines do — both must exercise the
+      // same shim→bro path)
+      const savedPath = process.env.PATH
+      process.env.PATH = `${bin}:${savedPath}`
+      try {
+        const env = e2eEnv({})
+        const r = installRefGuardHook(main, '9.9.9')
+        assert.equal(r.state, 'installed')
+        assert.ok(readFileSync(HOOK_PATH(main), 'utf8').includes(REFGUARD_HOOK_MARK))
 
-      // commit + amend — produced-content verbs move the branch freely
-      execFileSync('git', ['commit', '-qm', 'c2', '--allow-empty'], { cwd: main, env })
-      execFileSync('git', ['commit', '-qm', 'c2a', '--allow-empty', '--amend'], {
-        cwd: main,
-        env,
-      })
-      const amended = git(['rev-parse', 'HEAD'], main).trim()
+        // commit + amend — produced-content verbs move the branch freely
+        execFileSync('git', ['commit', '-qm', 'c2', '--allow-empty'], { cwd: main, env })
+        execFileSync('git', ['commit', '-qm', 'c2a', '--allow-empty', '--amend'], {
+          cwd: main,
+          env,
+        })
+        const amended = git(['rev-parse', 'HEAD'], main).trim()
+        const before = git(['rev-parse', 'HEAD~1'], main).trim()
+
+        // the clobber itself — `git reset --hard` to a non-descendant —
+        // dies, and the branch ref stands exactly where it was
+        const rs = gitTry(['reset', '--hard', before], main, env)
+        assert.notEqual(rs.code, 0, rs.out + rs.err)
+        assert.match(rs.err, /refguard/)
+        assert.equal(git(['rev-parse', 'main'], main).trim(), amended)
+
+        // update-ref plumbing meets the same fence
+        const ur = gitTry(['update-ref', 'refs/heads/main', before], main, env)
+        assert.notEqual(ur.code, 0)
+        assert.equal(git(['rev-parse', 'main'], main).trim(), amended)
+
+        // a divergent branch for the fetch/branch -f matrix — created via
+        // switch -c + commit, both legal under the guard
+        git(['switch', '-c', 'diverge', before], main)
+        execFileSync('git', ['commit', '-qm', 'd1', '--allow-empty'], { cwd: main, env })
+        git(['switch', 'main'], main)
+
+        // forced fetch refspec: a create passes; a forced non-ff move dies
+        const create = gitTry(
+          ['fetch', `file://${main}`, '+diverge:refs/heads/forged'],
+          main,
+          env
+        )
+        assert.equal(create.code, 0, create.err)
+        const forced = gitTry(['fetch', `file://${main}`, '+main:refs/heads/forged'], main, env)
+        assert.notEqual(forced.code, 0)
+        assert.equal(
+          git(['rev-parse', 'forged'], main).trim(),
+          git(['rev-parse', 'diverge'], main).trim()
+        )
+
+        // `git branch -f` on an unchecked-out branch — the foreign-ref move
+        const bf = gitTry(['branch', '-f', 'forged', before], main, env)
+        assert.notEqual(bf.code, 0)
+
+        // rebase — a content-producing rewrite — lands
+        git(['switch', '-c', 'topic', before], main)
+        execFileSync('git', ['commit', '-qm', 't1', '--allow-empty'], { cwd: main, env })
+        execFileSync('git', ['rebase', 'main'], { cwd: main, env })
+        assert.equal(
+          git(['rev-parse', 'topic'], main).trim(),
+          git(['rev-parse', 'HEAD'], main).trim()
+        )
+
+        // merge — same class
+        git(['switch', 'main'], main)
+        execFileSync('git', ['merge', '--no-ff', '-m', 'merge', 'topic'], { cwd: main, env })
+
+        // the deliberate-rewrite escape hatch
+        const off = gitTry(['reset', '--hard', before], main, {
+          ...env,
+          BRO_REF_GUARD: 'off',
+        })
+        assert.equal(off.code, 0, off.err)
+        assert.equal(git(['rev-parse', 'main'], main).trim(), before)
+      } finally {
+        process.env.PATH = savedPath
+      }
+    })
+  })
+
+  test('a dead bro/npx path fails open — infra is never a veto', () => {
+    // the CI shape: no `bro` on PATH → shim falls to `npx`, which
+    // ETARGETs on the pinned fixture version. The veto is the stdout
+    // marker, so that infra failure must NOT block the ref move —
+    // this is the regression the first CI run caught
+    const { root, main } = initRepo('bro-refguard-')
+    inside(main, root, () => {
+      installRefGuardHook(main, '9.9.9')
+      git(['commit', '-qm', 'c2', '--allow-empty'], main)
       const before = git(['rev-parse', 'HEAD~1'], main).trim()
-
-      // the clobber itself — `git reset --hard` to a non-descendant —
-      // dies, and the branch ref stands exactly where it was
+      const tip = git(['rev-parse', 'main'], main).trim()
+      // PATH with npx but no bro — forces the npx fallback, not the
+      // neither-binary else
+      const npxBin = join(root, 'npx-bin')
+      mkdirSync(npxBin)
+      const npxPath = spawnSync('/bin/sh', ['-c', 'command -v npx'], {
+        encoding: 'utf8',
+      }).stdout.trim()
+      symlinkSync(npxPath, join(npxBin, 'npx'))
+      const env = e2eEnv({ PATH: `${npxBin}:/usr/bin:/bin` })
       const rs = gitTry(['reset', '--hard', before], main, env)
-      assert.notEqual(rs.code, 0, rs.out + rs.err)
-      assert.match(rs.err, /refguard/)
-      assert.equal(git(['rev-parse', 'main'], main).trim(), amended)
-
-      // update-ref plumbing meets the same fence
-      const ur = gitTry(['update-ref', 'refs/heads/main', before], main, env)
-      assert.notEqual(ur.code, 0)
-      assert.equal(git(['rev-parse', 'main'], main).trim(), amended)
-
-      // a divergent branch for the fetch/branch -f matrix — created via
-      // switch -c + commit, both legal under the guard
-      git(['switch', '-c', 'diverge', before], main)
-      execFileSync('git', ['commit', '-qm', 'd1', '--allow-empty'], { cwd: main, env })
-      git(['switch', 'main'], main)
-
-      // forced fetch refspec: a create passes; a forced non-ff move dies
-      const create = gitTry(
-        ['fetch', `file://${main}`, '+diverge:refs/heads/forged'],
-        main,
-        env
-      )
-      assert.equal(create.code, 0, create.err)
-      const forced = gitTry(['fetch', `file://${main}`, '+main:refs/heads/forged'], main, env)
-      assert.notEqual(forced.code, 0)
-      assert.equal(
-        git(['rev-parse', 'forged'], main).trim(),
-        git(['rev-parse', 'diverge'], main).trim()
-      )
-
-      // `git branch -f` on an unchecked-out branch — the foreign-ref move
-      const bf = gitTry(['branch', '-f', 'forged', before], main, env)
-      assert.notEqual(bf.code, 0)
-
-      // rebase — a content-producing rewrite — lands
-      git(['switch', '-c', 'topic', before], main)
-      execFileSync('git', ['commit', '-qm', 't1', '--allow-empty'], { cwd: main, env })
-      execFileSync('git', ['rebase', 'main'], { cwd: main, env })
-      assert.equal(
-        git(['rev-parse', 'topic'], main).trim(),
-        git(['rev-parse', 'HEAD'], main).trim()
-      )
-
-      // merge — same class
-      git(['switch', 'main'], main)
-      execFileSync('git', ['merge', '--no-ff', '-m', 'merge', 'topic'], { cwd: main, env })
-
-      // the deliberate-rewrite escape hatch
-      const off = gitTry(['reset', '--hard', before], main, {
-        ...env,
-        BRO_REF_GUARD: 'off',
-      })
-      assert.equal(off.code, 0, off.err)
+      assert.equal(rs.code, 0, rs.err)
       assert.equal(git(['rev-parse', 'main'], main).trim(), before)
+      assert.notEqual(tip, before)
     })
   })
 
