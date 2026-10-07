@@ -37,6 +37,21 @@ write what the next step needs, not a diary.
 | `bro convoy done <step> --result T [--mol ID]` | Close the step, hand the result downstream |
 | `bro convoy list` | Open molecules in this workspace |
 
+## `bro convoy run` — the molecule queue
+
+`run` is the bro-native runner: it drives each molecule to `complete`,
+spawning a worker agent per ready step instead of doing the work in this
+session.
+
+| Command | What it does |
+| ------- | ------------ |
+| `bro convoy run <mol>…` | Run each molecule to complete, one at a time |
+| `bro convoy run --open` | Every open molecule, in pour order |
+| `--attempts N` | Per-molecule attempt cap (default 4) |
+| `--poll SEC` | Agent-state poll interval (default 15) |
+| `--retry-delay SEC` | Spacing between crash retries (default 60) |
+| `--json` | One JSON verdict line per molecule |
+
 With several open molecules, pass `--mol <id>` — no-arg resolution errors
 on ambiguity rather than guessing.
 

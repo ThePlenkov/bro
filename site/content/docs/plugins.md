@@ -7,6 +7,27 @@ bro is a plugin system on top of beads and `gh`. Every built-in command
 is a plugin in one registry; external plugins load from config and get
 the same contract — command, skill, config section, plan schema.
 
+## Client adapters
+
+`bro plugins` also installs bro *into* agent clients — the native-plugin
+clients ship an adapter module the CLI writes to the client's own plugin
+directory:
+
+| Command | What it does |
+| ------- | ------------ |
+| `bro plugins list [--json]` | Client × scope install matrix — `installed`, `stale`, `present`, `absent` |
+| `bro plugins install <client> [--global\|--local] [--dry-run]` | Write the adapter module (a current file is a no-op; a differing one is `updated`) |
+| `bro plugins uninstall <client> [--global\|--local] [--dry-run] [--force]` | Remove it |
+
+Clients: `opencode` (global `$XDG_CONFIG_HOME/opencode/plugins/bro.ts` +
+the TUI `bro-cli.ts`, local `<repo>/.opencode/plugins/`), `kilo` (module
+plus a `file:///` entry in `kilo.json`'s `plugin` array on global
+installs), `pi` (`<agentDir>/extensions/bro.ts`). Every adapter carries a
+`bro-adapter` sentinel comment so detection survives a rename.
+Marketplace clients — Devin, Claude Code, Codex, Cursor — install from
+the repo's plugin manifests instead; see
+[Getting started](/docs).
+
 ## The contract
 
 A plugin is a plain object — or typed via the side-effect-free

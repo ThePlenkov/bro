@@ -336,8 +336,8 @@ function DebtDashboard() {
       <footer className="foot">
         <p>bro doesn't fix your code. bro makes sure it gets fixed.</p>
         <p className="links">
-          <a href={GITHUB}>github</a> · <a href="https://www.npmjs.com/package/@broject/bro">npm</a> ·{' '}
-          <a href={DOCS}>docs</a> · MIT
+          <a href={DOCS}>docs</a> · <a href={`${BASE_URL}debt`}>debt</a> · <a href={GITHUB}>github</a> ·{' '}
+          <a href="https://www.npmjs.com/package/@broject/bro">npm</a> · MIT
         </p>
       </footer>
     </>

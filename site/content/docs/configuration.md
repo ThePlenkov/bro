@@ -92,7 +92,57 @@ a `BroPlugin`. See [Plugins](/docs/plugins).
 `agents` contains object-valued backend-specific configuration bags.
 Their keys are defined by the selected backend; there is no universal
 backend option set or schema default. Choose the backend under
-`connectors.agents`, not `agents`.
+`connectors.agents`, not `agents`. Two cross-backend keys exist:
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `agents.<backend>.provider` | unset | Named [provider](/docs/commands/providers) the backend's spawns run through |
+| `agents.<kind>.maxSessions` | unset | Host-wide live-session quota for that session kind (e.g. `agents.devin.maxSessions`), admitted under a shared slot lock |
+
+### `providers`
+
+The named provider registry — `{ "<name>": { "type": "api"\|"acp"\|"cli",
+…connection } }`. Consumers pick by name; the entry's kind fixes the
+connection shape (`api`: `baseUrl` + `apiKeyEnv`/`apiKeyCommand` +
+`models` allowlist; `acp`/`cli`: `command` + `model`). See
+[Providers](/docs/commands/providers).
+
+### `judge`
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `mode` | `"off"` | `off` decides nothing on its own; `shadow` annotates `act threads` and journals verdicts |
+| `provider` / `model` | unset | Named provider + allowed model id the chain resolves through |
+| `fallback` | unset | Escalation provider name re-asked on unanswered or low-confidence answers |
+| `confidence` | `0.6` | Confidence floor below which answers escalate |
+| `timeoutMs` | — | Bounds the whole chained call |
+| `maxDecisionsPerRun` | `50` | Fresh `decide()` calls per invocation |
+| `baseUrl` / `apiKeyEnv` / `llm` | unset | Legacy single-backend shape — synthesized into anonymous `api` providers with a deprecation warning |
+
+### `guard`
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `enabled` | `true` | `false` silences the whole mechanism |
+| `defs` | `[]` | Project-owned guard declarations — `{ name, when, say }`; shadow a builtin by reusing its name |
+| `maxPerEvent` | — | Cap on guard lines one hook event emits |
+
+See [bro guard](/docs/commands/guard) for the `when` clause vocabulary.
+
+### `query`
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `concurrency` | `4` | Fan-out cap for `query` plan steps |
+| `env` | `{}` | Operator-pinned literal env overlay for connector spawns |
+
+### `sweep`
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `olderThanDays` | `30` | Age line for both the gate and `bd prune --older-than` |
+| `dir` | `.agents/sweep` | Archive directory — must live inside the synced set so `bro sync` carries it |
+| `flatten` | `true` | Run `bd flatten` as the pipeline's last stage |
 
 ### `learn`
 
@@ -108,6 +158,12 @@ backend option set or schema default. Choose the backend under
 | --- | ------- | ---- |
 | `mode` | `"off"` | `off`, `remind`, or `gate`; gate blocks once at the stop hook |
 | `dir` | `"specs"` | Directory used by the native specs connector |
+
+### `watch`
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `intervalSec` | `60` | Heartbeat cadence for `bro watch install` |
 
 ### `check`
 

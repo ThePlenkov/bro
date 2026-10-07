@@ -1,3 +1,28 @@
 {
-  "pages": ["debt", "act", "drill", "retrospect", "learn", "spec", "loop", "convoy", "fleet", "utility"]
+  "pages": [
+    "---Planning---",
+    "next",
+    "spec",
+    "stack",
+    "query",
+    "---Orchestration---",
+    "loop",
+    "convoy",
+    "fleet",
+    "events",
+    "---Review---",
+    "act",
+    "debt",
+    "judge",
+    "guard",
+    "---Self-reflection---",
+    "drill",
+    "retrospect",
+    "learn",
+    "---Plumbing---",
+    "providers",
+    "status",
+    "sweep",
+    "utility"
+  ]
 }

@@ -35,7 +35,9 @@ evidence record even when the beads projection is disabled.
 | Claude Code | `plugins/claude/bro` |
 | Codex | `plugins/codex/bro` |
 | Cursor | `plugins/cursor/bro` |
-| OpenCode | native `@broject/bro` plugin |
+| OpenCode | `bro plugins install opencode` — native plugin + TUI module |
+| Kilo | `bro plugins install kilo` — module + `kilo.json` registration |
+| pi | `bro plugins install pi` — extension module |
 
 Cursor installs from `.cursor-plugin/marketplace.json`. The adapter's
 `hooks/hooks.json` uses Cursor event names; `bro hooks` translates that
@@ -49,9 +51,14 @@ permission reply would block the command — and a chained command stays a
 prompt.
 
 OpenCode loads the package's `./server` export rather than a shell-hook
-manifest. It uses the same bro hook bus, but OpenCode has no pre-stop hook:
-the first stop-gate blocker is fed back as one synthetic prompt; later stop
-checks are skipped rather than re-evaluated (`stop_hook_active`).
+manifest — `bro plugins install` materializes it (plus the TUI module)
+into the client's plugin dir, globally under `$XDG_CONFIG_HOME` or
+locally under `.opencode/plugins/`. Kilo and pi get the same treatment:
+a module file in the client's extension dir, with Kilo's global install
+also registered in `kilo.json`'s `plugin` array. All three use the same
+bro hook bus; OpenCode has no pre-stop hook, so the first stop-gate
+blocker is fed back as one synthetic prompt and later stop checks are
+skipped rather than re-evaluated (`stop_hook_active`).
 
 ## Agent backends
 

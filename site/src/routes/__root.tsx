@@ -5,7 +5,7 @@ import DefaultSearchDialog from '../components/search'
 
 const title = 'bro — every agent needs a bro'
 const description =
-  'A hook system that organizes and orchestrates tasks for any agent. Install the plugin — your agent gets a bro.'
+  'One CLI, a plugin for every agent, hooks that gate, skills that teach, connectors to everything you run. Plan, delegate, review, reflect — your agent gets a bro.'
 
 export const Route = createRootRoute({
   head: () => ({

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { type Line, scenarios } from '../scenarios'
+import { groups, type Line } from '../scenarios'
 
 const LINE_DELAY = 650
 const TYPE_DELAY = 35
@@ -12,6 +12,9 @@ const glyph: Record<Line['kind'], string> = {
   out: '└',
   hook: '└',
 }
+
+// autoplay walks every case in reading order: a group's cases, then the next group
+const order = groups.flatMap((g, gi) => g.scenarios.map((_, si) => [gi, si] as const))
 
 function TermLine({ line, typed }: { line: Line; typed?: string }) {
   const text = typed ?? line.text
@@ -27,12 +30,13 @@ function TermLine({ line, typed }: { line: Line; typed?: string }) {
 }
 
 export function Terminal() {
-  const [active, setActive] = useState(0)
-  const [shown, setShown] = useState(scenarios[0].lines.length)
+  const [pos, setPos] = useState(0)
+  const [gi, si] = order[pos]
+  const group = groups[gi]
+  const lines = group.scenarios[si].lines
+  const [shown, setShown] = useState(lines.length)
   const [typed, setTyped] = useState<string | undefined>(undefined)
   const [animate, setAnimate] = useState(false)
-
-  const lines = scenarios[active].lines
 
   useEffect(() => {
     if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
@@ -45,7 +49,7 @@ export function Terminal() {
     if (!animate) return
     if (shown >= lines.length) {
       const t = setTimeout(() => {
-        setActive((a) => (a + 1) % scenarios.length)
+        setPos((p) => (p + 1) % order.length)
         setShown(0)
       }, HOLD)
       return () => clearTimeout(t)
@@ -67,10 +71,11 @@ export function Terminal() {
     return () => clearTimeout(t)
   }, [animate, shown, typed, lines])
 
-  const select = (i: number) => {
-    setActive(i)
+  const select = (g: number, s: number) => {
+    const p = order.findIndex(([a, b]) => a === g && b === s)
+    setPos(p)
     setTyped(undefined)
-    setShown(animate ? 0 : scenarios[i].lines.length)
+    setShown(animate ? 0 : groups[g].scenarios[s].lines.length)
   }
 
   const pending = lines[shown]
@@ -85,23 +90,38 @@ export function Terminal() {
         </span>
         <span className="term-title">your agent · ~/app · bro plugin on</span>
       </div>
-      <div className="term-tabs" role="tablist">
-        {scenarios.map((s, i) => (
+      <div className="term-groups" role="tablist" aria-label="use case groups">
+        {groups.map((g, i) => (
+          <button
+            key={g.id}
+            type="button"
+            role="tab"
+            aria-selected={i === gi}
+            className={i === gi ? 'on' : ''}
+            onClick={() => select(i, 0)}
+          >
+            {g.label}
+          </button>
+        ))}
+      </div>
+      <div className="term-tabs" role="tablist" aria-label={`${group.label} use cases`}>
+        {group.scenarios.map((s, i) => (
           <button
             key={s.id}
             type="button"
             role="tab"
-            aria-selected={i === active}
-            className={i === active ? 'on' : ''}
-            onClick={() => select(i)}
+            aria-selected={i === si}
+            className={i === si ? 'on' : ''}
+            onClick={() => select(gi, i)}
           >
             {s.tab}
           </button>
         ))}
       </div>
+      <p className="term-gist">{group.gist}</p>
       <div className="term-body" role="tabpanel">
         {lines.slice(0, shown).map((l, i) => (
-          <TermLine key={`${active}-${i}`} line={l} />
+          <TermLine key={`${pos}-${i}`} line={l} />
         ))}
         {typed !== undefined && pending && <TermLine line={pending} typed={typed} />}
         {typed === undefined && shown < lines.length && <span className="cursor idle">▋</span>}

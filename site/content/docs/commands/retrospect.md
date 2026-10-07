@@ -23,3 +23,27 @@ answered.
 
 The agent can't self-declare "sorry, fixed" — `retrospect status` holds
 the gate until every wtf has a recorded answer.
+
+## The retro-on-stop guard
+
+The wtf path is incident-driven; the session-end retro is every-session.
+The `retro` skill carries the checklist — loose ends, hand-rolled
+mechanics that should become beads or bro commands, call economy, `bro
+learn capture`, `bro debt collect`, state assertions — and a
+[`guard`](/docs/commands/guard) def fires the one-line nudge at `stop`:
+
+```jsonc
+{
+  "guard": {
+    "defs": [{
+      "name": "retro-on-stop",
+      "when": { "on": ["stop"] },
+      "say": "session ending — run the retro checklist"
+    }]
+  }
+}
+```
+
+The guard is the doorbell; the skill's checklist is what "ran the retro"
+actually means. Scale to the session — a one-shot Q&A skips with a
+line; findings land as `bd` items, never as prose the user must convert.

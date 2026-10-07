@@ -35,9 +35,19 @@ PR merged → bro debt collect → findings land in .agents/review-debt/
 
 ## What bro does now
 
-- **One agent:** `act`, `drill`, `wtf`/`retrospect`, `learn`, `spec` — review, descend, remember, and keep work pointed at a spec.
-- **The queue:** `next`, `loop`, `convoy`, `stack`, `work` — move beads through worktrees and PRs without another status meeting.
-- **The fleet:** `agents`, `fleet`, `watch`, `notify`, `drive`, `serve` — supervise detached work; wake up when there's news.
+Not a plugin — a system. The CLI is the mechanics; per-client plugins
+are transport; hooks put state back in front of the agent at every
+lifecycle boundary; skills carry the policy; connectors swap the
+backends (review host, task store, agent plane, events); guards nudge
+and the judge decides. bro runs bro's own repo — a bead becomes a convoy
+becomes a PR, `act` gates the merge, `debt` sweeps the threads, `learn`
+keeps the lesson.
+
+- **Planning:** `next`, `spec`, `stack`, `query` — pick the work, write the contract, line up the chain, ask the providers.
+- **Orchestration:** `loop`, `convoy`, `fleet`, `notify`/`bus` — run the backlog, pour the molecules, watch the workers. Non-blocking by design: long waits (`bro act wait`, `bro watch --every`) run in a background shell, not a subagent — zero tokens while they poll, and your agent keeps working.
+- **Review:** `act`, `debt`, `judge`, `guard` — the gate as code, the ledger, the verdicts, the nudges.
+- **Self-reflection:** `drill`, `wtf`/`retrospect`, `learn` — descend, vent, remember.
+- **Plumbing:** `providers`, `status`/`serve`, `sweep`, `sync`, `setup`/`doctor`/`check`/`run`/`plan`/`cleanup`/`plugins` — connect, host, dispose, move, wire.
 
 ## Install
 
@@ -63,7 +73,9 @@ per client:
 | Claude Code | `/plugin marketplace add ThePlenkov/bro` → `/plugin install bro@bro` |
 | Codex | `codex plugin marketplace add ThePlenkov/bro` → install `bro` |
 | Cursor | `/add-plugin https://github.com/ThePlenkov/bro`, then install `bro` |
-| OpenCode | add `"plugin": ["@broject/bro"]` to `opencode.json` |
+| OpenCode | add `"plugin": ["@broject/bro"]` to `opencode.json`, or `bro plugins install opencode` |
+| Kilo | `bro plugins install kilo` |
+| pi | `bro plugins install pi` |
 
 Every adapter ships the same skills and lifecycle hooks (session
 rehydration, review-gate stop, self-approve for `bro`/`bd`) wired through
@@ -73,8 +85,11 @@ Cursor's schema (`additional_context`, one `followup_message` on stop).
 Cloud agents do not run `sessionStart`, so the first prompt rehydrates
 once.
 
-OpenCode is the exception: it loads JS/TS modules instead of a hook manifest,
-so `bro` ships as a native plugin (`packages/cli/src/opencode.ts`, published
+OpenCode, Kilo, and pi are native plugins the CLI installs itself —
+`bro plugins install <client>` writes the adapter module to the client's
+own plugin dir (`bro plugins list` prints the client × scope matrix).
+OpenCode loads JS/TS modules instead of a hook manifest, so `bro` ships
+as a native plugin (`packages/cli/src/opencode.ts`, published
 as the package's `./server` export) that spawns its own CLI. This entry uses
 OpenCode's V1 plugin API and does not run on V2. Two consequences:
 
@@ -92,79 +107,64 @@ OpenCode's V1 plugin API and does not run on V2. Two consequences:
 
 Full reference: [broject.dev/docs](https://broject.dev/docs).
 
-### Review & debt
+### Planning
+
+| Command | What bro does |
+| ------- | ------------- |
+| `bro next [--list] [--json] [--global]` | Claim the top ready bead and print the work order |
+| `bro spec check\|drift\|new\|tree\|init` | Check spec coverage and drift, scaffold specs, and inspect their tree |
+| `bro stack push\|list\|sync` | Build and retarget stacked bead→worktree→PR chains |
+| `bro query <plan.toml>` | Run a cross-provider GraphQL fan-out plan — one merged JSON answer |
+| `bro work enter\|leave\|list\|prune` | Manage sibling worktrees and their recorded stack membership |
+
+### Orchestration
+
+| Command | What bro does |
+| ------- | ------------- |
+| `bro loop [--max N] [--dry-run] [--stack NAME] [--label a,b]` | Claim, work, pass the gate, close, and repeat |
+| `bro convoy pour\|status\|next\|claim\|done\|list\|run` | Run a beads formula as a claimable molecule — `run` is the molecule queue |
+| `bro fleet [--json\|--live]` | View molecules, steps, agents, worktrees, and PRs |
+| `bro agents status\|up\|down\|prune` | Inspect, spawn, respawn, stop, or reap detached agents |
+| `bro watch [--once\|--every N\|--notify]`, `watch install\|uninstall` | Read-only heartbeat, optionally on a non-agent timer |
+| `bro notify <text>` | Drop an event into the session mailbox — addressed, typed, coalesced |
+| `bro bus serve\|publish\|subscribe\|status` | The local event broker behind the events facade |
+| `bro drive [--once\|--every N\|--no-merge]` | Apply the act gate to fleet PRs; merge only on green |
+
+### Review
 
 | Command | What bro does |
 | ------- | ------------- |
 | `bro act status [PR]` | **Exit gate as code** — open threads, pending CI, SAST findings, mergeability; non-zero while blocked |
-| `bro act threads [PR]` | List unresolved review threads |
-| `bro act resolve --thread ID [--comment T]` | Resolve (or `--unresolve`); reply first when given a comment |
-| `bro act reply --thread ID --comment T` | Reply without resolving; `--file TSV` for batches |
-| `bro act wait [PR] [--merge] [--cleanup]` | Poll the gate; optionally merge on green and clean up the merged worktree |
-| `bro act merge [PR] [--squash\|--merge\|--rebase]` | Merge only when the exit gate is green |
-| `bro debt collect` | Harvest unresolved threads from merged PRs and label them `debt:collected` or `debt:clean` |
-| `bro debt prs` | List merged PRs not yet processed (`--all` for the full picture) |
-| `bro debt status` | Ledger counts by state, area, author, and duplicate |
-| `bro debt stats [--by author\|source\|area]` | Compare findings and fix rates by reviewer or collector |
-| `bro debt list` | List raw ledger rows |
-| `bro debt mark <pr> <state>` | Manually mark a PR; `skipped` is the human opt-out |
-| `bro debt set <status> --thread-id ID` | Update a row to `claimed`, `done`, `wontfix`, or `duplicate` |
-| `bro debt sync` | Project ledger findings into beads |
-| `bro debt next [--claim] [--json]` | Pick the highest-priority open finding |
-| `bro debt watch [--interval SEC]` | Collect debt on a timer |
-| `bro debt trend` | Show debt volume over time |
+| `bro act threads\|resolve\|reply\|wait\|merge` | Work the threads; merge only when the gate is green |
+| `bro act rearm [--dry-run]` | Resurrect dead PR watchers — a pushed PR is never unwatched |
+| `bro debt collect\|prs\|status\|next\|set\|sync\|stats\|trend` | Harvest unresolved threads on merged PRs into the ledger, then work them off |
+| `bro judge decide\|stats\|replay` | Calibrated decisions for agent loops — typed questions, typed answers with confidence |
+| `bro guard list\|test` | Inspect and dry-run declarative prompt guards — nudges, never gates |
 
-### Drill, retros & learn
+### Self-reflection
 
 | Command | What bro does |
 | ------- | ------------- |
-| `bro drill down <title> [--under ID] [--ephemeral]` | Create a scoped child frame under the current leaf |
-| `bro drill up --result T [--prevent T]… [--evidence R]… [--report]` | Close the frame, record prevention and evidence, optionally write a report |
-| `bro unwind …` | Alias for `drill up` |
-| `bro drill current` / `tree` / `list` | Show the active leaf, frame hierarchies, or open frames |
-| `bro drill distill <id>` | Turn a drill tree into a reusable proto |
-| `bro wtf <complaint>` | Capture the complaint as a bead; see [retrospect](https://broject.dev/docs/commands/retrospect) |
-| `bro retrospect record <plan.toml>` | Validate and fan out a retro plan into prevention work |
-| `bro retrospect status` | Gate on unanswered `wtf` beads |
-| `bro retrospect schema` / `list` | Print the TOML template or list retros and open `wtf`s |
+| `bro drill down\|up\|current\|tree\|list\|distill` | Scoped descent frames — result and prevention required on the way up |
+| `bro wtf <complaint>` | Capture the complaint verbatim as a bead |
+| `bro retrospect record\|status\|schema\|list` | Turn `wtf`s into retro records and prevention beads |
 | `bro learn add\|list\|show\|forget\|capture\|probe` | Store lessons and surface them when their triggers match |
-| `bro spec check\|drift\|new\|tree\|init` | Check spec coverage and drift, scaffold specs, and inspect their tree |
 
-### Queue & stacks
-
-| Command | What bro does |
-| ------- | ------------- |
-| `bro next [--list] [--json]` | Claim the top ready bead and print the work order |
-| `bro loop [--max N] [--dry-run] [--stack NAME] [--label a,b]` | Claim, work, pass the gate, close, and repeat |
-| `bro convoy pour\|status\|next\|claim\|done\|list` | Run a beads formula as a claimable molecule |
-| `bro stack push\|list\|sync` | Build and retarget stacked PR chains |
-| `bro work enter\|leave\|list\|prune` | Manage sibling worktrees and their recorded stack membership |
-
-### Fleet
+### Plumbing
 
 | Command | What bro does |
 | ------- | ------------- |
-| `bro fleet [--json\|--live]` | View molecules, steps, agents, worktrees, and PRs |
-| `bro agents status\|up\|down` | Inspect, start, respawn, or stop detached agents |
-| `bro watch [--once\|--every N\|--notify\|--json]` | Read-only heartbeat; optionally send transitions to the mailbox |
-| `bro watch install [--every N]` \| `uninstall` | The heartbeat on a non-agent timer — systemd user unit, crontab fallback |
-| `bro notify <text>` | Drop a message in the live session's mailbox |
-| `bro drive [--once\|--every N\|--no-merge]` | Apply the act gate to fleet PRs; merge only on green |
-| `bro serve [--port N]` | Serve the fleet API and web UI on loopback |
-
-### Setup & utility
-
-| Command | What bro does |
-| ------- | ------------- |
-| `bro setup [--beads] [--skills] [--pack [NAME]]` | Configure the repo and optionally install beads, skills, or a capability pack |
-| `bro doctor [--json]` | Diagnose Node, git, auth, beads, hooks, and configuration |
-| `bro check [--evaluate] [--json] [--root <dir>]` | Run the repo's Sverka workflow; `--evaluate` applies its policy gate |
-| `bro run <plan.toml>` | Execute a validated plan |
-| `bro plan validate <file>` | Validate a plan without executing it |
+| `providers` config | Named model-plane registry (`api`/`acp`/`cli` kinds) consumed by judge and fleet — `bro doctor` reports it |
+| `bro status [--json\|--deep]` | The compact live board — beads + fleet + drill + git in one read |
+| `bro serve [--port N]` | The fleet facade over loopback HTTP/JSON for thin clients |
+| `bro sweep status\|distill\|run` | Gated disposal for closed beads — gate → archive → prune → flatten |
 | `bro sync [--pull]` | Push or restore bro artifacts on `refs/bro/data` |
-| `bro plugins` | Print the live plugin registry |
-| `bro task list\|show\|new\|set\|close\|exec` | Use the document verbs; `list`, `show`, and `close` also work verb-first |
-| `bro store list\|show\|init\|path` | Inspect or manage stores; `--global` targets the user-level store where supported |
+| `bro setup [--beads] [--skills] [--pack [NAME]]` | Configure the repo and optionally install beads, skills, or a capability pack |
+| `bro doctor [--json]` | Diagnose Node, git, auth, beads, hooks, providers, and configuration |
+| `bro check [--evaluate] [--json]` | Run the repo's Sverka workflow; `--evaluate` applies its policy gate |
+| `bro run <plan.toml>` / `bro plan validate` | Execute or check a validated plan |
+| `bro plugins [list\|install\|uninstall]` | Print the registry, or install client adapters (opencode, kilo, pi) |
+| `bro task\|store …` | Document verbs; `--global` targets the user-level store |
 | `bro cleanup [--remote] [--dry-run]` | Delete local branches whose PR merged |
 
 ## The pipeline (beads)

@@ -51,14 +51,14 @@ h1 em { font-style: normal; color: var(--accent); }
 .lede { text-wrap: balance; max-width: 600px; margin: 24px auto 36px; color: var(--dim); font-size: 18px; }
 
 .install { max-width: 520px; margin: 0 auto; text-align: left; }
-.install-tabs, .term-tabs {
+.install-tabs, .term-tabs, .term-groups {
   display: flex;
   gap: 4px;
   flex-wrap: nowrap;
   overflow-x: auto;
   scrollbar-width: thin;
 }
-.install-tabs button, .term-tabs button {
+.install-tabs button, .term-tabs button, .term-groups button {
   font: 13px var(--mono);
   color: var(--dim);
   background: none;
@@ -68,7 +68,7 @@ h1 em { font-style: normal; color: var(--accent); }
   cursor: pointer;
   flex: 0 0 auto;
 }
-.install-tabs button:hover, .term-tabs button:hover { color: var(--text); }
+.install-tabs button:hover, .term-tabs button:hover, .term-groups button:hover { color: var(--text); }
 .install-tabs button.on, .term-tabs button.on { color: var(--bg); background: var(--accent); }
 .install-cmd {
   margin-top: 8px;
@@ -112,7 +112,19 @@ h1 em { font-style: normal; color: var(--accent); }
 .dots { display: flex; gap: 6px; }
 .dots i { width: 11px; height: 11px; border-radius: 50%; background: var(--line); }
 .term-title { font: 12px var(--mono); color: var(--faint); }
+.term-groups { padding: 10px 12px 0; gap: 2px; border-bottom: 1px solid var(--line); }
+.term-groups button {
+  font-size: 13.5px;
+  font-weight: 600;
+  padding: 8px 12px 10px;
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.term-groups button.on { color: var(--accent); border-bottom-color: var(--accent); }
 .term-tabs { padding: 10px 12px 0; }
+.term-gist { margin: 10px 22px 0; font: 12px var(--mono); color: var(--faint); }
+.term-gist::before { content: '# '; }
 .term-body {
   padding: 18px 20px 22px;
   min-height: 390px;
@@ -140,25 +152,29 @@ h2 {
   margin: 0 0 20px;
 }
 h2::before { content: '// '; color: var(--faint); }
-section.how, section.not, section.vocab { padding: 64px 0 0; }
+section.how, section.self, section.not, section.vocab { padding: 64px 0 0; }
 
 .pieces {
   list-style: none;
   padding: 0;
   margin: 0;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 1px;
   background: var(--line);
   border: 1px solid var(--line);
   border-radius: 12px;
   overflow: hidden;
 }
-.pieces li { background: var(--bg); padding: 20px; }
+.pieces li { background: var(--bg); padding: 18px 16px; }
 .piece-name { display: block; font: 700 18px var(--mono); }
 .piece-what { display: block; font: 12px var(--mono); color: var(--faint); margin-top: 2px; }
 .pieces p { margin: 12px 0 0; color: var(--dim); font-size: 14px; }
-.pieces li + li .piece-name::before { content: '→ '; color: var(--faint); }
+
+.self p { margin: 0; max-width: 720px; color: var(--dim); }
+.self .self-loop { font-size: 14px; line-height: 2; margin-bottom: 16px; }
+.self-loop i { font-style: normal; color: var(--faint); }
+.self a { color: var(--accent); }
 
 .not p { font-size: 20px; line-height: 1.5; margin: 0; max-width: 720px; color: var(--dim); }
 .not strong { color: var(--text); }
@@ -188,9 +204,13 @@ section.how, section.not, section.vocab { padding: 64px 0 0; }
 @keyframes in { from { opacity: 0; transform: translateY(3px); } }
 @keyframes blink { 50% { opacity: 0; } }
 
+@media (max-width: 860px) {
+  .pieces { grid-template-columns: repeat(2, 1fr); }
+}
+
 @media (max-width: 680px) {
   .pieces, .vocab dl { grid-template-columns: 1fr; }
-  .pieces li + li .piece-name::before { content: '↓ '; }
+  .term-gist { margin: 10px 16px 0; }
   .term-body { min-height: 470px; font-size: 12.5px; }
 }
 

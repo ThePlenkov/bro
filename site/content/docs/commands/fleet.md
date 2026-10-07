@@ -17,6 +17,7 @@ take the deliberate actions.
 | `bro agents status [<id\|step>] [--json] [--connector <name>]` | Read the agent plane or one agent |
 | `bro agents up [<step>] [--connector <name>]` | Bring up a supervisor or spawn/respawn a step |
 | `bro agents down [<id\|step>] [--connector <name>]` | Bring down a supervisor or stop one agent |
+| `bro agents prune [--connector <name>] [--older-than Nd] [--json]` | Reap terminal registry entries (exited, stopped, crashed); `blocked` stays — a wall-parked worker is still a worker |
 
 The agents facade resolves native detached processes, tmux, and Gas City
 backends. A lost or exited worker can be respawned with `bro agents up
@@ -25,6 +26,18 @@ stored prompt are reused when they still exist — otherwise it falls back
 to the conventional `<repo>--<step>` worktree and the bead's own text.
 `--worktree`, `--prompt-file`, and `--beads-dir` are available on `up`
 when an override is needed.
+
+Spawns can ride a named [provider](/docs/commands/providers) instead of
+a backend's baked-in command: `--provider`, `--model`, `--profile` (a
+`fleet.profiles.<name>` preset), and `--auto-approve` on `up`. Resolution
+order is flag → profile → `agents.<backend>.provider` config. Provider
+provenance (`BRO_AGENT_PROVIDER` / `BRO_AGENT_MODEL`) is recorded in the
+registry entry and shown by `bro fleet` and `bro agents status`.
+
+Session kinds can carry a host-wide admission quota —
+`agents.<kind>.maxSessions` caps live sessions of that kind across every
+repo on the host (the devin plane is the known instance); the count is
+admitted under a shared slot lock, and `down` releases the reservation.
 
 `--live` is a TTY dashboard and cannot be combined with `--json`. For a
 non-interactive ticker, use `bro watch --every N`.
@@ -39,13 +52,22 @@ non-interactive ticker, use `bro watch --every N`.
 | `bro watch --json` | Emit `{ts, attention, mols, gates, fleet}` |
 | `bro watch install [--every N] [--print]` | Install the heartbeat on a non-agent timer — a systemd user unit per repo (crontab fallback), cadence `watch.intervalSec` (default 60) |
 | `bro watch uninstall` | Remove the installed timer/cron entry for this repo |
-| `bro notify <text>` | Write one mailbox event for live sessions |
+| `bro notify <text>` | Write one mailbox event for live sessions — addressed drops, kinds, and the bus are in [Events](/docs/commands/events) |
 
 Watch never claims steps, mutates beads, or respawns workers. Its attention
 list is the decision surface; a `lost — respawn?` row is not permission to
 spawn blindly, especially when a backend is degraded. The notify connector
 drains unseen drops during the next post-tool probe, so a watcher can reach
 the parent session without a wait loop.
+
+Detach the watcher, don't block on it: `bro watch --every N --notify` in a
+background shell keeps a heartbeat running while the agent works — the
+`--notify` drops surface in the parent session mid-turn, on its next tool
+call (the mailbox is pull-based: a drop lands when the session next acts,
+it never wakes a sleeping one). The same caveat as `act wait` applies — a
+session-bound watcher dies with the session. When the heartbeat must
+outlive it, `bro watch install` puts `--once --notify` on a non-agent
+timer instead; `bro drive --every` is the durable write-side form.
 
 ## Drive
 
@@ -76,21 +98,8 @@ nohup bro drive --every 300 >> drive.log &
 
 ## Local service
 
-`bro serve [--port N]` is a foreground, loopback-only HTTP/JSON facade.
-It writes its discovery URL and session token to
-`<git-common-dir>/bro/serve.json`. Reads are local; every mutation requires
-`Authorization: Bearer <token>`.
-
-| Route | Purpose |
-| ----- | ------- |
-| `GET /` | Service index |
-| `GET /fleet` | Fleet web UI |
-| `GET /api/v1/health` | Liveness |
-| `GET /api/v1/snapshot` | Watch snapshot |
-| `GET /api/v1/agents` | Agent plane |
-| `GET /api/v1/agents/<ref>` | One agent by ID or molecule step |
-| `POST /api/v1/agents` | Spawn an agent |
-| `DELETE /api/v1/agents/<ref>` | Stop an agent |
+`bro serve [--port N]` hosts the fleet facade on loopback for thin
+clients — see [status + serve](/docs/commands/status).
 
 ## Convoy fan-out
 

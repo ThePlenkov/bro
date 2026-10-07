@@ -6,12 +6,14 @@ const clients: { name: string; cmd: string; file?: boolean }[] = [
     name: 'Codex',
     cmd: 'codex plugin marketplace add ThePlenkov/bro\n# then install bro from the marketplace',
   },
+  { name: 'Cursor', cmd: '/add-plugin https://github.com/ThePlenkov/bro\n# then install bro' },
   { name: 'Devin', cmd: 'devin plugins install ThePlenkov/bro' },
   {
     name: 'OpenCode',
     cmd: '// opencode.json\n{\n  "plugin": ["@broject/bro"]\n}',
     file: true,
   },
+  { name: 'Kilo · pi', cmd: 'bro plugins install kilo\nbro plugins install pi' },
   { name: 'just the CLI', cmd: 'npx -y @broject/bro --help' },
 ]
 
