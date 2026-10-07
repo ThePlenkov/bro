@@ -31,11 +31,19 @@
       {
         "name": "test-coverage-on-stop",
         "when": {
-          "on": ["stop"],
+          "on": [
+            "stop"
+          ],
           "state": {
             "diff": {
-              "changed": ["src/**", "packages/*/src/**"],
-              "without": ["**/*.test.*", "**/*.spec.*"]
+              "changed": [
+                "src/**",
+                "packages/*/src/**"
+              ],
+              "without": [
+                "**/*.test.*",
+                "**/*.spec.*"
+              ]
             }
           }
         },
@@ -44,9 +52,18 @@
       {
         "name": "spec-drift-nkn6",
         "when": {
-          "on": ["stop"],
+          "on": [
+            "stop"
+          ],
           "state": {
-            "probes": [{ "name": "spec-drift", "args": { "spec": "specs/sessions/bro-nkn6.md" } }]
+            "probes": [
+              {
+                "name": "spec-drift",
+                "args": {
+                  "spec": "specs/sessions/bro-nkn6.md"
+                }
+              }
+            ]
           }
         },
         "say": "specs/sessions/bro-nkn6.md is stale vs the code it scopes — refresh it"
@@ -54,15 +71,32 @@
       {
         "name": "core-vendor-boundary",
         "when": {
-          "on": ["stop"],
+          "on": [
+            "stop"
+          ],
           "state": {
-            "diff": { "changed": ["packages/core/src/**"] },
+            "diff": {
+              "changed": [
+                "packages/core/src/**"
+              ]
+            },
             "probes": [
               {
                 "name": "core-vendor",
                 "args": {
                   "path": "packages/core/src",
-                  "terms": ["devin", "opencode", "gascity", "tmux", "claude", "codex", "gemini", "aider", "paseo", "cao"]
+                  "terms": [
+                    "devin",
+                    "opencode",
+                    "gascity",
+                    "tmux",
+                    "claude",
+                    "codex",
+                    "gemini",
+                    "aider",
+                    "paseo",
+                    "cao"
+                  ]
                 }
               }
             ]
@@ -72,7 +106,11 @@
       },
       {
         "name": "retro-on-stop",
-        "when": { "on": ["stop"] },
+        "when": {
+          "on": [
+            "stop"
+          ]
+        },
         "say": "session ending — run the retro checklist (skills/retro): loose ends, hand-rolled mechanics → bd gap beads, call economy, `bro learn capture`, `bro debt collect`"
       }
     ]
@@ -113,6 +151,14 @@
       "type": "cli",
       "command": "opencode run --model {model} --auto -f {promptFile} 'Follow the attached instructions.'",
       "model": "opencode/space-bunny-free"
+    }
+  },
+  "mesh": {
+    "peers": {
+      "sverka": {
+        "rig": "mesh://sverka-dev/sverka",
+        "remote": "/home/pepl/projects/sverka"
+      }
     }
   }
 }
