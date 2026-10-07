@@ -7,6 +7,7 @@
  *   resolve --thread ID [--comment TEXT] [--unresolve]
  *   reply   --thread ID --comment TEXT | --file TSV
  */
+import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import {
   ensureAuth,
@@ -28,6 +29,7 @@ import {
   evaluateExitGate,
   fetchPrActState,
   listWatches,
+  rearmWatches,
   releaseMergeSlot,
   waitForGate,
   type ActPlan,
@@ -54,6 +56,9 @@ Commands:
   merge [PR] [--squash|--merge|--rebase] [--admin] [--cleanup]
                                     Merge only if the exit gate is green;
                                     --cleanup also retires the worktree + local branch
+  rearm [--dry-run] [--json]        Resurrect dead watch markers: for each PR whose
+                                    watcher died (host reboot, turn teardown) a fresh
+                                    detached act wait goes up with the recorded mode
   resolve --thread ID [--comment T] Resolve a thread — a fix resolves silently
                                     (the push is the verdict); --comment is for
                                     reject/defer reasons
@@ -194,6 +199,8 @@ async function cmdWait(argv: string[]): Promise<void> {
         pr: t.pr,
         link: rev.prLink(t.repo, t.pr),
         merge: argv.includes('--merge'),
+        cleanup: argv.includes('--cleanup'),
+        workdir: process.cwd(),
         timeoutMin: timeout,
       },
       onPoll: (s, g) =>
@@ -230,6 +237,130 @@ async function cmdWait(argv: string[]): Promise<void> {
     return
   }
   await mergeIfAsked(argv, t.pr)
+}
+
+/** Detached `act wait` resurrection — own process group, parent's
+ *  stdio ignored, unref'd: the same nohup-equivalent the watcher needs
+ *  to survive the session that re-armed it (bro-tafj). `argv[1]` is the
+ *  running cli entry, so the child re-runs this same binary.
+ *
+ *  The returned pid is CONFIRMED — this resolves only once the child's
+ *  own live marker shows up in listWatches, so a spawn that exits early
+ *  (auth gate, config error) resolves undefined and the dead markers
+ *  stay on disk as the still-unkept promise. */
+export async function respawnWatcher(
+  dir: string,
+  plan: {
+    pr: number
+    merge: boolean
+    cleanup: boolean
+    timeoutMin: number
+    workdir?: string
+  }
+): Promise<number | undefined> {
+  const entry = process.argv[1]
+  if (entry === undefined) {
+    return undefined
+  }
+  // --cleanup retires the worktree containing the watcher's cwd — it is
+  // replayed only when the recorded workdir still exists. Replaying it
+  // from the rearm cwd (or a marker old enough to lack workdir) could
+  // tear down the wrong checkout.
+  const workdirOk = plan.workdir !== undefined && existsSync(plan.workdir)
+  const args = [entry, 'act', 'wait', String(plan.pr), '--timeout', String(plan.timeoutMin)]
+  if (plan.merge) {
+    args.push('--merge')
+    // --cleanup only has meaning behind --merge — a wait armed with
+    // cleanup alone exits on the post-wait dispatch, so a merge:false
+    // marker's cleanup bit (user error at arm time) isn't replayed
+    if (plan.cleanup && workdirOk) {
+      args.push('--cleanup')
+    }
+  }
+  const cwd = workdirOk ? plan.workdir! : dir
+  const child = spawn(process.execPath, args, {
+    cwd,
+    detached: true,
+    stdio: 'ignore',
+  })
+  // an unhandled 'error' event (ENOENT on cwd, EACCES on the entry)
+  // would crash rearm mid-loop — swallow it; pid stays undefined and
+  // the marker is kept
+  child.on('error', () => {})
+  child.unref()
+  const pid = child.pid
+  if (pid === undefined) {
+    return undefined
+  }
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline) {
+    const live = listWatches(dir).find((l) => l.alive && l.watch.pid === pid)
+    if (live !== undefined) {
+      return pid
+    }
+    if (child.exitCode !== null) {
+      return undefined // exited before ever publishing its marker
+    }
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  return undefined
+}
+
+/** `bro act rearm` — dead watch markers mean their watcher died with
+ *  the promise unkept (bro-tafj). Per still-open PR a detached wait
+ *  goes back up with the recorded mode; settled PRs' markers sweep.
+ *  --dry-run prints the plan without spawning or touching markers. */
+async function cmdRearm(argv: string[]): Promise<void> {
+  const dry = argv.includes('--dry-run')
+  const dir = process.cwd()
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  const repo = await (rev.resolveRepoAsync === undefined
+    ? Promise.resolve(rev.resolveRepo([]))
+    : rev.resolveRepoAsync([]))
+  const isOpen = async (pr: number): Promise<boolean> => {
+    const meta =
+      rev.prMetaAsync === undefined
+        ? rev.prMeta({ repo, pr })
+        : await rev.prMetaAsync({ repo, pr })
+    return meta.state === 'OPEN'
+  }
+  const res = await rearmWatches({
+    dir,
+    isOpen,
+    respawn: dry ? undefined : (plan) => respawnWatcher(dir, plan),
+  })
+  if (argv.includes('--json')) {
+    console.log(JSON.stringify({ dryRun: dry, ...res }, null, 2))
+    return
+  }
+  reportRearm(res, dry, (pr) => rev.prLink(repo, pr))
+}
+
+/** Human lines for a rearm result — kept out of cmdRearm so the
+ *  command reads as resolve → run → report. */
+function reportRearm(
+  res: {
+    rearmed: Array<{ pr: number; pid: number }>
+    settled: number[]
+    kept: Array<{ pr: number; reason: string }>
+  },
+  dry: boolean,
+  link: (pr: number) => string
+): void {
+  for (const r of res.rearmed) {
+    console.log(
+      `rearm: ${link(r.pr)} — ` + (dry ? 'would respawn a watcher' : `watcher up (pid ${r.pid})`)
+    )
+  }
+  for (const pr of res.settled) {
+    console.log(`rearm: ${link(pr)} settled — marker swept`)
+  }
+  for (const k of res.kept) {
+    console.error(`rearm: ${link(k.pr)} kept — ${k.reason}`)
+  }
+  if (res.rearmed.length === 0 && res.settled.length === 0 && res.kept.length === 0) {
+    console.log('rearm: no dead watches')
+  }
 }
 
 /** Post-wait merge dispatch: `--merge` lands the PR (with `--cleanup`
@@ -722,6 +853,7 @@ const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
   status: cmdStatus,
   wait: cmdWait,
   merge: cmdMerge,
+  rearm: cmdRearm,
   threads: cmdThreads,
   resolve: cmdResolve,
   reply: cmdReply,

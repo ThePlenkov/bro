@@ -19,6 +19,7 @@ default store, so standard installs already have it).
 | `bro act status [PR] [--json]` | PR state + **exit gate** — open threads, CI failures, SAST findings. Exits non-zero while blocked |
 | `bro act threads [PR]` | Unresolved review threads, TSV |
 | `bro act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; add `--cleanup` to retire the worktree the command runs in + the local branch after the merge lands |
+| `bro act rearm [--dry-run] [--json]` | Resurrect dead watchers: each PR whose `act wait` died (host reboot, turn teardown) gets a fresh detached wait with the recorded `--merge`/`--cleanup`/`--timeout`; settled PRs' markers sweep, unverifiable PRs keep theirs |
 | `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup]` | Merge **only if the exit gate is green** — serialized on the beads merge slot (best-effort: without beads the merge proceeds unserialized); BLOCKED refuses and names blockers. `--cleanup` retires the merged branch's checkout (when run inside it) + local ref |
 | `bro act resolve --thread ID [--comment T]` | Resolve a thread (reply first if comment given) |
 | `bro act reply --thread ID --comment T` | Reply without resolving (`--file TSV` for batch) |
@@ -105,7 +106,12 @@ default store, so standard installs already have it).
 - **A pushed PR is merged, watched, or handed off — never unwatched.**
   `bro act wait <PR> --merge` in the background is the default end-state;
   a watcher exit is a state to inspect, not silence — a `timed_out` exit
-  means the PR is still open, so re-arm the watcher or hand off.
+  means the PR is still open, so start a fresh `bro act wait --merge`
+  (a timeout retires its marker on the way out, so `act rearm` has
+  nothing to resurrect — re-arming there is manual). A watcher that
+  *died* with the host/session never ran that cleanup — its dead marker
+  stays, the session-start nudge names it, and `bro act rearm` puts the
+  watch back up.
   The stop gate enforces this: an armed session ending with an open,
   unwatched current-branch PR is blocked once and pointed at the detached
   `act wait` form — a running `bro drive --every` counts as coverage via

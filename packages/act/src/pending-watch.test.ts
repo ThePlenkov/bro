@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -12,8 +13,10 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  deadWatchPlan,
   hasLiveWatch,
   listWatches,
+  rearmWatches,
   watchBegin,
   watchEnd,
   watchHeartbeat,
@@ -428,5 +431,166 @@ describe('hasLiveWatch', () => {
     watchHeartbeat(dir, base, 'drive')
     assert.equal(hasLiveWatch(dir, 42), true)
     assert.equal(hasLiveWatch(dir, 43), false)
+  })
+})
+
+/** Drop a dead-pid marker straight into the watches dir — the state a
+ *  host reboot leaves behind. */
+function deadMarker(dir: string, w: Partial<PendingWatch> & { pr: number }): string {
+  const wd = join(dir, '.git', 'bro', 'watches')
+  mkdirSync(wd, { recursive: true })
+  // canonical wait-marker name is <pr>-<pid>.json — dead pid varies so
+  // several markers on one PR don't collide
+  const deadPid = 2_000_000_000 + Math.floor(Math.random() * 100_000)
+  const file = join(wd, `${w.pr}-${deadPid}.json`)
+  writeFileSync(
+    file,
+    JSON.stringify({
+      link: `[#${w.pr}](https://github.com/o/r/pull/${w.pr})`,
+      merge: false,
+      timeoutMin: 45,
+      ...w,
+      pid: deadPid,
+      startedAt: Date.now(),
+    })
+  )
+  return file
+}
+
+describe('act rearm', () => {
+  test('a dead marker on an open PR respawns and the marker is swept', async () => {
+    const dir = repo()
+    const file = deadMarker(dir, { pr: 7, merge: true })
+    const spawned: Array<{
+      pr: number
+      merge: boolean
+      cleanup: boolean
+      timeoutMin: number
+      workdir?: string
+    }> = []
+    const res = await rearmWatches({
+      dir,
+      isOpen: async () => true,
+      respawn: (plan) => {
+        spawned.push(plan)
+        return 4242
+      },
+    })
+    assert.deepEqual(res.rearmed, [{ pr: 7, pid: 4242 }])
+    const { pr, merge, cleanup, timeoutMin } = spawned[0]!
+    assert.deepEqual({ pr, merge, cleanup, timeoutMin }, { pr: 7, merge: true, cleanup: false, timeoutMin: 45 })
+    assert.equal(existsSync(file), false)
+  })
+
+  test('a dead marker on a settled PR is swept without a respawn', async () => {
+    const dir = repo()
+    const file = deadMarker(dir, { pr: 8 })
+    let calls = 0
+    const res = await rearmWatches({
+      dir,
+      isOpen: async () => false,
+      respawn: () => {
+        calls += 1
+        return 1
+      },
+    })
+    assert.deepEqual(res.settled, [8])
+    assert.equal(calls, 0)
+    assert.equal(existsSync(file), false)
+  })
+
+  test('an unverifiable PR keeps its marker — no blind sweep', async () => {
+    const dir = repo()
+    const file = deadMarker(dir, { pr: 9 })
+    const res = await rearmWatches({
+      dir,
+      isOpen: async () => {
+        throw new Error('gh down')
+      },
+      respawn: () => 1,
+    })
+    assert.deepEqual(res.kept, [{ pr: 9, reason: 'gh down' }])
+    assert.equal(existsSync(file), true)
+  })
+
+  test('two dead markers on one PR plan one resurrection — strongest wins', async () => {
+    const dir = repo()
+    const watchOnly = deadMarker(dir, { pr: 10, merge: false })
+    const merging = deadMarker(dir, { pr: 10, merge: true })
+    const spawned: Array<{ pr: number; merge: boolean }> = []
+    const res = await rearmWatches({
+      dir,
+      isOpen: async () => true,
+      respawn: (plan) => {
+        spawned.push(plan)
+        return 7
+      },
+    })
+    assert.equal(spawned.length, 1)
+    assert.equal(spawned[0]!.merge, true)
+    assert.equal(existsSync(watchOnly), false)
+    assert.equal(existsSync(merging), false)
+    assert.equal(res.rearmed.length, 1)
+  })
+
+  test("the merge marker's workdir is the plan's — it is the cleanup target", async () => {
+    const dir = repo()
+    const other = repo()
+    deadMarker(dir, { pr: 10, merge: false, workdir: other })
+    deadMarker(dir, { pr: 10, merge: true, workdir: dir })
+    const plan = deadWatchPlan(dir)
+    assert.equal(plan.length, 1)
+    assert.equal(plan[0]!.workdir, dir)
+  })
+
+  test('a dead supervisor heartbeat is not resurrected as a bare wait', async () => {
+    const dir = repo()
+    // <pr>-<kind>-<pid>.json — a drive heartbeat, not an act wait marker
+    const wd = join(dir, '.git', 'bro', 'watches')
+    mkdirSync(wd, { recursive: true })
+    const hb = join(wd, '13-drive-2000000001.json')
+    writeFileSync(
+      hb,
+      JSON.stringify({
+        pr: 13,
+        link: 'x',
+        pid: 2_000_000_001,
+        merge: false,
+        timeoutMin: 45,
+        startedAt: Date.now(),
+      })
+    )
+    assert.deepEqual(deadWatchPlan(dir), [])
+    const res = await rearmWatches({ dir, isOpen: async () => true, respawn: () => 1 })
+    assert.deepEqual(res, { rearmed: [], settled: [], kept: [] })
+    assert.equal(existsSync(hb), true) // the drive's own restart path owns it
+  })
+
+  test('a live watcher is never in the plan — parallel work, not a corpse', async () => {
+    const dir = repo()
+    watchBegin(dir, base)
+    assert.deepEqual(deadWatchPlan(dir), [])
+    const res = await rearmWatches({ dir, isOpen: async () => true, respawn: () => 1 })
+    assert.deepEqual(res, { rearmed: [], settled: [], kept: [] })
+  })
+
+  test('no respawn callback is a dry run — reported but untouched', async () => {
+    const dir = repo()
+    const file = deadMarker(dir, { pr: 11, merge: true })
+    const res = await rearmWatches({ dir, isOpen: async () => true })
+    assert.deepEqual(res.rearmed, [{ pr: 11, pid: 0 }])
+    assert.equal(existsSync(file), true)
+  })
+
+  test('a failed respawn keeps the marker and names it', async () => {
+    const dir = repo()
+    const file = deadMarker(dir, { pr: 12 })
+    const res = await rearmWatches({
+      dir,
+      isOpen: async () => true,
+      respawn: () => undefined,
+    })
+    assert.deepEqual(res.kept, [{ pr: 12, reason: 'respawn failed' }])
+    assert.equal(existsSync(file), true)
   })
 })
