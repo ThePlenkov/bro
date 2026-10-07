@@ -80,18 +80,18 @@ export function meshIssues(dir: string): { rows: IssueRow[]; error?: string } {
   }
 }
 
-export function issueLabels(dir: string, id: string): string[] {
+export function issueLabels(dir: string, id: string): { labels: string[]; error?: string } {
   const r = dolt(
     ['sql', '-q', `select label from labels where issue_id = '${id.replaceAll("'", "''")}'`, '-r', 'json'],
     dir,
   )
   if (r.code !== 0) {
-    return []
+    return { labels: [], error: r.err || r.out }
   }
   try {
     const parsed = JSON.parse(r.out) as { rows?: { label: string }[] }
-    return (parsed.rows ?? []).map((row) => row.label)
+    return { labels: (parsed.rows ?? []).map((row) => row.label) }
   } catch {
-    return []
+    return { labels: [], error: `label query returned unparseable json` }
   }
 }

@@ -68,7 +68,12 @@ function scanReplica(dir: string, peer: MeshPeer, out: PeerRecord[], errors: str
     if (row.status === 'closed') {
       continue
     }
-    admitRow(peer, rowToBead(row, issueLabels(dir, row.id)), out)
+    const labels = issueLabels(dir, row.id)
+    if (labels.error !== undefined) {
+      errors.push(`${peer.alias}: labels for ${row.id} failed — ${labels.error}`)
+      continue
+    }
+    admitRow(peer, rowToBead(row, labels.labels), out)
   }
 }
 

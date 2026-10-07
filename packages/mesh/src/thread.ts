@@ -92,7 +92,19 @@ export function meshThread(
   const scan = meshScan(dir, peers, gitCommon, { pull: opts.pull })
   state.errors.push(...scan.errors)
   for (const r of scan.records) {
-    if (r.envelope.thread === thread && !seen.has(r.envelope.id)) {
+    if (r.envelope.thread !== thread) {
+      continue
+    }
+    // a peer can only author envelopes as itself — a record whose
+    // from doesn't match its binding is impersonation, and letting it
+    // into the reduction would let a peer forge lifecycle moves
+    if (r.envelope.from !== r.peerRig) {
+      state.errors.push(
+        `${r.peer}: ignoring ${r.envelope.kind} ${r.envelope.id} — from ${r.envelope.from} doesn't match peer rig ${r.peerRig}`
+      )
+      continue
+    }
+    if (!seen.has(r.envelope.id)) {
       seen.add(r.envelope.id)
       state.envelopes.push(r.envelope)
       state.provenance[r.envelope.id] = r.peerRig
