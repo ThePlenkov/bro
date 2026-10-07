@@ -223,17 +223,14 @@ function jsonKeysVerdict(path: string, name: string): DoctorCheck {
  *  throws during the real load reports broken here identically. */
 function checkConfig(dir: string): DoctorCheck[] {
   const { layers, broken } = loadConfigLayers(dir)
-  const checks: DoctorCheck[] = []
-  for (const file of broken) {
-    checks.push(
-      check(
-        'config',
-        'fail',
-        `${basename(file)} failed to load (${file})`,
-        'fix or remove it — a broken config silently falls back to jsonl-only stores'
-      )
+  const checks: DoctorCheck[] = broken.map((file) =>
+    check(
+      'config',
+      'fail',
+      `${basename(file)} failed to load (${file})`,
+      'fix or remove it — a broken config silently falls back to jsonl-only stores'
     )
-  }
+  )
   if (layers.length === 0) {
     checks.push(
       broken.length === 0
@@ -242,7 +239,18 @@ function checkConfig(dir: string): DoctorCheck[] {
     )
     return checks
   }
-  // one row per present layer; .json files also get the unknown-key scan
+  checks.push(...configLayerChecks(layers, broken.length))
+  checks.push(...configOwnershipChecks(layers))
+  return checks
+}
+
+/** Layer summary + unknown-key scan (.json only) + per-section
+ *  provenance — the highest-precedence layer setting each key wins. */
+function configLayerChecks(
+  layers: ReturnType<typeof loadConfigLayers>['layers'],
+  brokenCount: number
+): DoctorCheck[] {
+  const checks: DoctorCheck[] = []
   for (const hit of layers) {
     if (hit.file.endsWith('.json')) {
       const verdict = jsonKeysVerdict(hit.file, `${hit.layer} ${basename(hit.file)}`)
@@ -256,10 +264,9 @@ function checkConfig(dir: string): DoctorCheck[] {
       'config',
       'ok',
       layers.map((l) => `${l.layer} ${basename(l.file)}`).join(' + ') +
-        (broken.length > 0 ? ' — broken file present, stores jsonl-only' : '')
+        (brokenCount > 0 ? ' — broken file present' : '')
     )
   )
-  // provenance — the highest-precedence layer that sets each key
   const provenance = new Map<string, string>()
   for (const hit of layers) {
     for (const key of Object.keys(hit.raw)) {
@@ -268,22 +275,22 @@ function checkConfig(dir: string): DoctorCheck[] {
   }
   if (provenance.size > 0) {
     checks.push(
-      check(
-        'config',
-        'ok',
-        `sections: ${[...provenance.entries()].map(([k, l]) => `${k}←${l}`).join(' · ')}`
-      )
+      check('config', 'ok', `sections: ${[...provenance.entries()].map((kv) => kv.join('←')).join(' · ')}`)
     )
   }
-  // ownership — operator config in the committed file leaks the user's
-  // subscription to every clone; policy in the global file silently
-  // applies to every project this user touches
-  const misplaced = (audience: 'operator' | 'policy', layer: string): string[] =>
-    layers
-      .filter((l) => l.layer === layer)
-      .flatMap((l) => Object.keys(l.raw))
-      .filter((k) => CONFIG_SECTION_LAYERS[k] === audience)
-  const committedOps = misplaced('operator', 'project')
+  return checks
+}
+
+/** Operator config in the committed file leaks the user's subscription to
+ *  every clone; policy in the global file silently applies to every
+ *  project this user touches. Advisory — never a fail. */
+function configOwnershipChecks(
+  layers: ReturnType<typeof loadConfigLayers>['layers']
+): DoctorCheck[] {
+  const keys = (layer: string): string[] =>
+    layers.filter((l) => l.layer === layer).flatMap((l) => Object.keys(l.raw))
+  const checks: DoctorCheck[] = []
+  const committedOps = keys('project').filter((k) => CONFIG_SECTION_LAYERS[k] === 'operator')
   if (committedOps.length > 0) {
     checks.push(
       check(
@@ -294,7 +301,7 @@ function checkConfig(dir: string): DoctorCheck[] {
       )
     )
   }
-  const globalPolicy = misplaced('policy', 'global')
+  const globalPolicy = keys('global').filter((k) => CONFIG_SECTION_LAYERS[k] === 'policy')
   if (globalPolicy.length > 0) {
     checks.push(
       check(
