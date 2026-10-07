@@ -27,6 +27,7 @@ import {
   runJanitor,
 } from '@broject/core'
 import type { ProviderEntry, ProviderSurface } from '@broject/core'
+import { parsePeer, rigFromRemoteUrl } from '@broject/mesh'
 import { judgeConfig, synthesizedProviders } from '@broject/judge'
 import type { JudgeConfig } from '@broject/judge'
 import { loadBroConfig, pluginConfigSections } from '../plugins.ts'
@@ -587,6 +588,61 @@ function queryCliChecks(dir: string, cfgPins: Record<string, string>): DoctorChe
   return out
 }
 
+/** Mesh group (specs/mesh): runs only when mesh is configured — an
+ *  unconfigured repo has nothing to check. Rig addressability, peer
+ *  binding sanity, and `dolt` for beads-remote replicas. */
+function meshChecks(dir: string, mesh: { rig?: string; peers: Record<string, { rig: string; remote: string }> }): DoctorCheck[] {
+  const aliases = Object.keys(mesh.peers)
+  if (mesh.rig === undefined && aliases.length === 0) {
+    return []
+  }
+  const out: DoctorCheck[] = []
+  const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
+  const derived = origin.code === 0 ? rigFromRemoteUrl(origin.out.trim()) : null
+  const rig = mesh.rig ?? derived
+  out.push(
+    rig !== null && rig !== undefined
+      ? check('mesh', 'ok', `rig ${rig}${mesh.rig !== undefined ? ' (pinned)' : ''}`)
+      : check(
+          'mesh',
+          'warn',
+          'rig unaddressable — no mesh.rig pin, no derivable origin',
+          'peers cannot address requests here — set "mesh": { "rig": "mesh://org/repo" } or a forge-url origin'
+        )
+  )
+  let remotes = 0
+  let bad = 0
+  for (const alias of aliases) {
+    const p = parsePeer(alias, mesh.peers[alias])
+    if (p === null) {
+      bad++
+      continue
+    }
+    if (p.transport === 'beads-remote') {
+      remotes++
+    }
+  }
+  out.push(
+    bad === 0
+      ? check('mesh-peers', 'ok', `${aliases.length} peer(s), ${remotes} beads-remote`)
+      : check('mesh-peers', 'warn', `${bad}/${aliases.length} peer binding(s) unparseable`, 'each needs {"rig": "mesh://org/repo", "remote": "…"}')
+  )
+  if (remotes > 0) {
+    const dolt = probeBin('dolt')
+    out.push(
+      dolt.found
+        ? check('mesh-dolt', 'ok', dolt.version ?? 'present')
+        : check(
+            'mesh-dolt',
+            'warn',
+            'beads-remote peers configured but `dolt` not found',
+            'replica sync runs `dolt clone|pull` — install dolt or rebind to a local checkout'
+          )
+    )
+  }
+  return out
+}
+
 export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
   const checks: DoctorCheck[] = [checkNode()]
 
@@ -619,6 +675,7 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
     checkConfig([dir, root, mainRoot(dir)].filter((d): d is string => d !== null)),
     ...providerChecks(dir),
     ...queryCliChecks(dir, cfg.connectors),
+    ...meshChecks(dir, cfg.mesh),
     checkClientPlugins(dir),
     ...(janitor === null ? [] : [janitor]),
     ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found)

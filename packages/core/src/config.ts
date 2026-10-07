@@ -441,25 +441,29 @@ export const querySection: ConfigSection<{
  *  over (beads-remote binding). */
 export const meshSection: ConfigSection<{
   rig?: string
-  peers: Record<string, { rig: string; remote: string }>
+  peers: Record<string, { rig: string; remote: string; transport?: string }>
 }> = (raw) => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     rig?: unknown
     peers?: unknown
   }
-  const peers: Record<string, { rig: string; remote: string }> = {}
+  const peers: Record<string, { rig: string; remote: string; transport?: string }> = {}
   if (typeof obj.peers === 'object' && obj.peers !== null) {
     for (const [alias, entry] of Object.entries(obj.peers)) {
       if (typeof entry !== 'object' || entry === null) {
         continue
       }
-      const e = entry as { rig?: unknown; remote?: unknown }
+      const e = entry as { rig?: unknown; remote?: unknown; transport?: unknown }
       if (typeof e.rig === 'string' && e.rig.startsWith('mesh://') && typeof e.remote === 'string' && e.remote !== '') {
-        peers[alias] = { rig: e.rig, remote: e.remote }
+        const p: { rig: string; remote: string; transport?: string } = { rig: e.rig, remote: e.remote }
+        if (typeof e.transport === 'string' && e.transport !== '') {
+          p.transport = e.transport
+        }
+        peers[alias] = p
       }
     }
   }
-  const out: { rig?: string; peers: Record<string, { rig: string; remote: string }> } = { peers }
+  const out: { rig?: string; peers: Record<string, { rig: string; remote: string; transport?: string }> } = { peers }
   if (typeof obj.rig === 'string' && obj.rig.startsWith('mesh://')) {
     out.rig = obj.rig
   }
@@ -564,9 +568,10 @@ export interface BroConfig {
   query: { concurrency: number; env: Record<string, string> }
   /** Inter-rig federation (specs/mesh). `rig` pins this repo's mesh://
    *  identity when origin doesn't derive one; `peers` maps alias →
-   *  { rig, remote } — remote is the git URL the peer's beads store
-   *  federates over (read-only pulls, sovereignty rule). */
-  mesh: { rig?: string; peers: Record<string, { rig: string; remote: string }> }
+   *  { rig, remote, transport? } — remote is the git URL the peer's
+   *  beads store federates over (read-only pulls, sovereignty rule),
+   *  transport overrides derivation. */
+  mesh: { rig?: string; peers: Record<string, { rig: string; remote: string; transport?: string }> }
   /** External plugin specifiers — relative paths or package names the CLI
    *  resolves from the repo and imports at startup. Each module's default
    *  export must be a BroPlugin (or an array of them). */
