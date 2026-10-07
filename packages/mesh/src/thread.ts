@@ -11,7 +11,7 @@
 import { spawnSync } from 'node:child_process'
 import { envelopeFromBead, type BeadLike, type MeshEnvelope, type MeshKind } from './envelope.ts'
 import type { MeshPeer } from './peers.ts'
-import { meshScan } from './inbox.ts'
+import { meshScan, type PeerRecord } from './inbox.ts'
 
 export type ThreadStage = 'posted' | 'claimed' | 'submitted' | 'accepted' | 'rejected'
 
@@ -64,6 +64,27 @@ function ownBeads(dir: string): { rows: BeadLike[]; error?: string } {
   }
 }
 
+/** One scanned record → the thread, if it belongs. A peer can only
+ *  author envelopes as itself — a record whose `from` doesn't match
+ *  its binding is impersonation, and letting it into the reduction
+ *  would let a peer forge lifecycle moves. */
+function admitPeerRecord(r: PeerRecord, thread: string, seen: Set<string>, state: ThreadState): void {
+  if (r.envelope.thread !== thread) {
+    return
+  }
+  if (r.envelope.from !== r.peerRig) {
+    state.errors.push(
+      `${r.peer}: ignoring ${r.envelope.kind} ${r.envelope.id} — from ${r.envelope.from} doesn't match peer rig ${r.peerRig}`
+    )
+    return
+  }
+  if (!seen.has(r.envelope.id)) {
+    seen.add(r.envelope.id)
+    state.envelopes.push(r.envelope)
+    state.provenance[r.envelope.id] = r.peerRig
+  }
+}
+
 /** Every mesh envelope for `thread` visible from here — own store plus
  *  the peer scans. `pull:false` keeps it a pure read of what was
  *  already synced. */
@@ -92,23 +113,7 @@ export function meshThread(
   const scan = meshScan(dir, peers, gitCommon, { pull: opts.pull })
   state.errors.push(...scan.errors)
   for (const r of scan.records) {
-    if (r.envelope.thread !== thread) {
-      continue
-    }
-    // a peer can only author envelopes as itself — a record whose
-    // from doesn't match its binding is impersonation, and letting it
-    // into the reduction would let a peer forge lifecycle moves
-    if (r.envelope.from !== r.peerRig) {
-      state.errors.push(
-        `${r.peer}: ignoring ${r.envelope.kind} ${r.envelope.id} — from ${r.envelope.from} doesn't match peer rig ${r.peerRig}`
-      )
-      continue
-    }
-    if (!seen.has(r.envelope.id)) {
-      seen.add(r.envelope.id)
-      state.envelopes.push(r.envelope)
-      state.provenance[r.envelope.id] = r.peerRig
-    }
+    admitPeerRecord(r, thread, seen, state)
   }
 
   state.request = state.envelopes.find((e) => e.kind === 'request')
