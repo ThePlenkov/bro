@@ -24,6 +24,8 @@ answer — the index every capability spec links back to.
 | `specs/backends/` | connector/facade seam: task stores, review hosts, sync data-refs |
 | `specs/retro/` | `bro wtf` — failure capture → retro notes → debt |
 | `specs/judgments/` | typed calibrated decisions: judge facade, provider registry, shadow→advisory→enforce trust ladder (`bro judge`) |
+| `specs/mesh/` | inter-rig wire contract: envelope, lifecycle, transports (`bro mesh`) |
+| `specs/cross-repo/` | bro-side request protocol phases: LOCAL `bro request`, WAIT watcher, REMOTE transports |
 
 ## Filetree (capability → code)
 
@@ -43,6 +45,7 @@ packages/
   judge/      judge facade: chain, journal, shadow, replay → judgments
   providers/  provider wire clients (systemone/acp/openai/cli) → judgments
   core/src/{judge,providers}.ts                            → judgments
+  mesh/       envelope, peers, thread, local delivery      → mesh + cross-repo
   cli/        bro: plugin registry + command dispatch      → all
     src/commands/spec.ts, spec-connectors.ts               → sdd
     src/commands/{hooks,work,drill,loop,next}.ts           → sessions
