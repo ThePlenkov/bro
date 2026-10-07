@@ -145,10 +145,12 @@ probe — a wedged store yields zero lines, never a stalled hook.
   — `trace/` when a session creates its journal (the
   once-per-session tick; a weekly TTL doesn't need a dir scan on every
   post-tool event), `fired/` on every append — each best-effort at the
-  same TTL as the marker prune. *One huge file:* the journal is capped,
-  dropping the oldest lines past 256 KiB (newest 500 kept, well past
-  the 100-line tail read), so a long session never grows a file every
-  probe re-reads whole. The learn probe reads the trace tail, matches,
+  same TTL as the marker prune. *One huge file:* crossing 256 KiB
+  trims the journal — the oldest lines drop, the newest 500 stay (well
+  past the 100-line tail read), so a long session never grows a file
+  every probe re-reads whole. 256 KiB is the trim trigger, not a
+  file-size cap: entries carry no size limit, so the kept tail can
+  still sit above it. The learn probe reads the trace tail, matches,
   and renders at most `budget` fires per lesson per session — the fired
   set lives in `fired/<session>` under the same `<git-common>/bro/hooks/`
   dir (subdir for the same reason) so restarts don't re-fire.

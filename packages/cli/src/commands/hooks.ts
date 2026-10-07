@@ -742,8 +742,10 @@ function traceFile(sessionId: string): string | null {
 }
 
 /** Journal bound — a long session must not grow a file every probe
- *  rereads whole. Past the cap the oldest lines drop; the keep window
- *  stays well beyond the connector's tail read (100 lines). */
+ *  rereads whole. MAX_BYTES is the trim trigger, not a size cap: past
+ *  it the oldest lines drop and the keep window (KEEP_LINES) stays well
+ *  beyond the connector's tail read (100 lines). Entries carry no size
+ *  limit, so the trimmed file can still sit above MAX_BYTES. */
 const TRACE_JOURNAL_MAX_BYTES = 256 * 1024
 const TRACE_JOURNAL_KEEP_LINES = 500
 
