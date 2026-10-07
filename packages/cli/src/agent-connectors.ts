@@ -40,6 +40,7 @@ import {
   cliCommandModel,
   commandCliName,
   DEFAULT_CONFIG,
+  deriveProviderWalls,
   gitTry,
   isAgentCause,
   loadConfig,
@@ -68,8 +69,11 @@ import {
   type AgentState,
   type ConnectorCtx,
   type FleetProfile,
+  type FleetRouter,
   type ListResult,
   type ProviderEntry,
+  type ProviderWall,
+  type RoutingTable,
   type SessionPlane,
   type SpawnSpec,
   type SpawnWorker,
@@ -89,8 +93,14 @@ export interface AgentConnectorEnv {
   loop?: LoopConfig
   /** Fleet section — `maxConcurrent` is the cap (fleetCapOf defaults it
    *  on hand-built envs); `profiles` holds the named spawn presets
-   *  `--profile` resolves (spec bro-5hx1.1). */
-  fleet?: { maxConcurrent: number; profiles?: Record<string, FleetProfile> }
+   *  `--profile` resolves (spec bro-5hx1.1); `routing` is the task-class
+   *  → provider-chain table (spec bro-1x7p). */
+  fleet?: {
+    maxConcurrent: number
+    profiles?: Record<string, FleetProfile>
+    routing?: RoutingTable
+    router?: FleetRouter
+  }
   /** The named provider registry — spawn resolution reads entries by
    *  name (`agents.<backend>.provider`, `--provider`, profiles). Absent
    *  means provider behavior is off, never defaulted to a vendor. */
@@ -180,7 +190,12 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
     // core sections — applySections always resolves them on a
     // successful load; the `?`s cover a loadConfig shape that predates
     // them and a section whose schema itself dropped
-    fleet?: { maxConcurrent: number; profiles?: Record<string, FleetProfile> }
+    fleet?: {
+      maxConcurrent: number
+      profiles?: Record<string, FleetProfile>
+      routing?: RoutingTable
+      router?: FleetRouter
+    }
     providers?: Record<string, ProviderEntry>
   }
   return {
@@ -617,6 +632,7 @@ const AGENT_PIN_KEYS = new Set([
   // BRO_AGENT_PROVIDER would let a spawn forge which provider ran it
   'BRO_AGENT_PROVIDER',
   'BRO_AGENT_MODEL',
+  'BRO_AGENT_CLASS',
 ])
 
 /** The real pin values a backend injects over/around caller env —
@@ -658,6 +674,9 @@ const agentEnvPins = (
   }
   if (spec.model !== undefined) {
     pins.push(['BRO_AGENT_MODEL', spec.model])
+  }
+  if (spec.class !== undefined) {
+    pins.push(['BRO_AGENT_CLASS', spec.class])
   }
   return pins
 }
@@ -972,6 +991,20 @@ export function budgetSnapshotFor(dir: string, env: AgentConnectorEnv): BudgetSn
   return budgetSnapshot(dir, agentsHome(dir), readAgentRegistry(dir), env)
 }
 
+/** Provider walls — derived from the registry per spec bro-1x7p. The
+ *  same lazy cause harvest the budget walk runs fires first, so an
+ *  unharvested .exit still counts as a death (the harvest is a no-op
+ *  on already-classified entries). One registry read per call, the
+ *  per-plane convention. */
+export function providerWallsFor(dir: string): ProviderWall[] {
+  const registry = readAgentRegistry(dir)
+  const home = agentsHome(dir)
+  for (const [molStep, entry] of Object.entries(registry)) {
+    ensureExitCause(dir, home, molStep, entry)
+  }
+  return deriveProviderWalls(registry)
+}
+
 /** The snapshot as section lines — `bro doctor` renders them under a
  *  `budget` heading. The limits line travels with the numbers so they
  *  can't read as provider truth. */
@@ -1276,6 +1309,9 @@ function prepareSpawn(
     // keeping the previous run's provider
     provider: spec.provider,
     model: spec.model,
+    // the routing lane the spawn resolved to (fleet.routing class) —
+    // same provenance write as provider/model; a respawn re-stamps it
+    class: spec.class,
     // the acp driver patches the real session id after session/new —
     // clear the previous run's so it never masquerades as this run's
     acpSessionId: undefined,
@@ -1493,13 +1529,14 @@ const infoCause = (entry: AgentRegistryEntry): Pick<AgentInfo, 'cause' | 'resetA
   resetAt: typeof entry.resetAt === 'string' ? entry.resetAt : undefined,
 })
 
-/** provider/model provenance — absent fields read as a legacy spawn
- *  (the row says so by omission, honestly). */
+/** provider/model/class provenance — absent fields read as a legacy
+ *  (or unrouted) spawn (the row says so by omission, honestly). */
 const infoProvenance = (
   entry: AgentRegistryEntry
-): Pick<AgentInfo, 'provider' | 'model'> => ({
+): Pick<AgentInfo, 'provider' | 'model' | 'class'> => ({
   provider: typeof entry.provider === 'string' ? entry.provider : undefined,
   model: typeof entry.model === 'string' ? entry.model : undefined,
+  class: typeof entry.class === 'string' ? entry.class : undefined,
 })
 
 function toInfo(dir: string, home: string | null, molStep: string, entry: AgentRegistryEntry): AgentInfo {

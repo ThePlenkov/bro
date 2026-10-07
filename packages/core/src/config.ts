@@ -31,6 +31,12 @@ import {
   type FleetProfile,
   type ProviderEntry,
 } from './providers.ts'
+import {
+  fleetRouter,
+  fleetRouting,
+  type FleetRouter,
+  type RoutingTable,
+} from './routing.ts'
 
 export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const
 export type StoreBackend = (typeof STORE_BACKENDS)[number]
@@ -391,18 +397,25 @@ function fleetProfiles(raw: unknown): Record<string, FleetProfile> {
 }
 
 /** bro.config.json `fleet` section — the live-agent ceiling the spawn
- *  prologue enforces plus the named spawn presets (`profiles`, spec
- *  bro-5hx1.1). `maxConcurrent` counts registry agents across ALL
- *  backends (the budget wall is per-account, not per-runtime); 0
+ *  prologue enforces, the named spawn presets (`profiles`, spec
+ *  bro-5hx1.1), and the dispatch routing table (`routing`, spec
+ *  bro-1x7p: task class → ordered provider chain; absent = today's
+ *  static resolution). `maxConcurrent` counts registry agents across
+ *  ALL backends (the budget wall is per-account, not per-runtime); 0
  *  disables the cap, matching act.maxRounds' convention. */
 export const fleetSection: ConfigSection<{
   maxConcurrent: number
   profiles: Record<string, FleetProfile>
+  routing: RoutingTable
+  router?: FleetRouter
 }> = (raw) => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     maxConcurrent?: unknown
     profiles?: unknown
+    routing?: unknown
+    router?: unknown
   }
+  const router = fleetRouter(obj.router)
   return {
     maxConcurrent:
       typeof obj.maxConcurrent === 'number' &&
@@ -411,6 +424,8 @@ export const fleetSection: ConfigSection<{
         ? obj.maxConcurrent
         : DEFAULT_CONFIG.fleet.maxConcurrent,
     profiles: fleetProfiles(obj.profiles),
+    routing: fleetRouting(obj.routing),
+    ...(router === undefined ? {} : { router }),
   }
 }
 
@@ -593,8 +608,16 @@ export interface BroConfig {
   /** Fleet knobs. `maxConcurrent` is the cap `prepareSpawn` enforces
    *  on every backend's spawn — counts live registry agents across all
    *  backends; 0 means uncapped. Default 3. `profiles` holds the named
-   *  spawn presets `bro agents up --profile` resolves (spec bro-5hx1.1). */
-  fleet: { maxConcurrent: number; profiles: Record<string, FleetProfile> }
+   *  spawn presets `bro agents up --profile` resolves (spec bro-5hx1.1).
+   *  `routing` maps a task class to an ordered provider chain (spec
+   *  bro-1x7p) — absent/empty = today's static resolution; `router`
+   *  names the optional judge classifier (M7). */
+  fleet: {
+    maxConcurrent: number
+    profiles: Record<string, FleetProfile>
+    routing: RoutingTable
+    router?: FleetRouter
+  }
   /** `query` plan defaults — `concurrency` is the fan-out cap a plan's
    *  own field overrides (default 4); `env` is the global literal
    *  overlay applied under each step's `env`. */
@@ -631,7 +654,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   connectors: {},
   providers: {},
   sdd: { mode: 'off', dir: 'specs' },
-  fleet: { maxConcurrent: 3, profiles: {} },
+  fleet: { maxConcurrent: 3, profiles: {}, routing: {} },
   query: { concurrency: 4, env: {} },
   mesh: { peers: {} },
   plugins: [],

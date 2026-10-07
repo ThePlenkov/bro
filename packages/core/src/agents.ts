@@ -209,6 +209,10 @@ export interface SpawnSpec {
   provider?: string
   /** The effective model (spawn flag > profile > provider entry). */
   model?: string
+  /** The routing lane the spawn resolved to (fleet.routing class —
+   *  spec bro-1x7p). Provenance like provider; absent on unrouted
+   *  spawns (no fleet.routing declared). */
+  class?: string
   /** Provider-resolved spawn payload — see SpawnWorker. */
   worker?: SpawnWorker
 }
@@ -236,6 +240,9 @@ export interface AgentInfo {
    *  Absent on legacy template spawns. */
   provider?: string
   model?: string
+  /** Routing lane the spawn resolved to (fleet.routing class) —
+   *  absent on unrouted spawns. */
+  class?: string
   worktree?: string
   log?: string
 }
@@ -330,6 +337,9 @@ export interface AgentRegistryEntry {
   /** Session-kind lane the run was admitted under — written at spawn so
    *  status/debug can see which session quota a live agent consumes. */
   sessionKind?: string
+  /** Routing lane the run resolved to (fleet.routing class) — same
+   *  provenance role as provider/model (spec bro-1x7p). */
+  class?: string
   [key: string]: unknown
 }
 

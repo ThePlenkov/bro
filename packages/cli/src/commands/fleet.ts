@@ -23,12 +23,21 @@
  * The site route over `bro serve` is bro-1rir.
  */
 import { basename } from 'node:path'
-import { git, gitTry, reviewHost, type AgentInfo, type ReviewFacade } from '@broject/core'
+import {
+  git,
+  gitTry,
+  reviewHost,
+  wallText,
+  type AgentInfo,
+  type ProviderWall,
+  type ReviewFacade,
+} from '@broject/core'
 import { listMolecules, loadMolecule, stepsOf, type ConvoyStep } from '@broject/convoy'
 import {
   budgetSnapshotFor,
   eachAgentConnector,
   loadAgentEnv,
+  providerWallsFor,
   type AgentConnectorEnv,
   type BudgetSnapshot,
 } from '../agent-connectors.ts'
@@ -218,10 +227,18 @@ export function printFleetTable(
   rows: FleetRow[],
   degraded: string[],
   conflicts: string[],
-  prErrors: string[] = []
+  prErrors: string[] = [],
+  walls: ProviderWall[] = []
 ): void {
-  for (const l of fleetTableLines(rows)) {
-    console.log(l)
+  if (rows.length > 0) {
+    for (const l of fleetTableLines(rows)) {
+      console.log(l)
+    }
+  }
+  for (const w of walls) {
+    // spec bro-1x7p: a walled provider renders `walled — <cause>[ til
+    //    <resetAt>]` — operational state like occupancy, never a warning
+    console.log(wallText(w))
   }
   for (const d of degraded) {
     console.error(`warning: backend degraded — ${d}`)
@@ -279,6 +296,9 @@ export interface FleetPayload {
   /** The local-estimate budget picture (specs/bro-7xgk.3.md) — one
    *  registry walk, the same walk occupancy derives from. */
   budget: BudgetSnapshot
+  /** Provider walls derived from the registry's classified deaths
+   *  (spec bro-1x7p) — a walled provider renders here, never silently. */
+  walls: ProviderWall[]
 }
 
 async function collectFleet(dir: string): Promise<FleetPayload> {
@@ -317,6 +337,7 @@ async function collectFleet(dir: string): Promise<FleetPayload> {
     prErrors,
     occupancy: { occupied: budget.live, maxConcurrent: budget.maxConcurrent },
     budget,
+    walls: providerWallsFor(dir),
   }
 }
 
@@ -381,6 +402,7 @@ export function liveFrame(payload: FleetPayload, ts: Date, everySec: number): st
     ...(payload.rows.length === 0
       ? ['no open molecules — nothing in the fleet']
       : fleetTableLines(payload.rows)),
+    ...payload.walls.map((w) => wallText(w)),
   ]
   const warnings = [
     ...payload.degraded.map((d) => `warning: backend degraded — ${d}`),
@@ -534,18 +556,18 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
     return
   }
 
-  const { rows, degraded, conflicts, prErrors, occupancy, budget } = await collectFleet(dir)
+  const { rows, degraded, conflicts, prErrors, occupancy, budget, walls } = await collectFleet(dir)
 
   if (args.json) {
     console.log(
-      JSON.stringify({ rows, degraded, conflicts, prErrors, occupancy, budget }, null, 2)
+      JSON.stringify({ rows, degraded, conflicts, prErrors, occupancy, budget, walls }, null, 2)
     )
     return
   }
   console.log(occupancyLine(occupancy))
-  if (rows.length === 0) {
+  if (rows.length === 0 && walls.length === 0) {
     console.log('no open molecules — nothing in the fleet')
     return
   }
-  printFleetTable(rows, degraded, conflicts, prErrors)
+  printFleetTable(rows, degraded, conflicts, prErrors, walls)
 }

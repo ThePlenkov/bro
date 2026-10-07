@@ -32,7 +32,7 @@
  *   GET    /api/v1/agents/<ref> one agent — ref is agentId or molStep
  *   POST   /api/v1/agents       spawn {molStep, worktree?, prompt?|promptFile?,
  *                               connector?, beadsDir?, provider?, model?,
- *                               profile?, autoApprove?} → 201 {agent}
+ *                               profile?, class?, autoApprove?} → 201 {agent}
  *   DELETE /api/v1/agents/<ref> stop — always invokes the connector's
  *                               idempotent stop; terminal agents report
  *                               `terminal:true` + a note. A miss beside a
@@ -445,6 +445,7 @@ const SPAWN_FIELDS = new Set([
   'provider',
   'model',
   'profile',
+  'class',
   'autoApprove',
 ])
 
@@ -492,6 +493,7 @@ export function parseSpawnBody(raw: string | undefined): StepSpawnRequest {
     provider: req.provider as string | undefined,
     model: req.model as string | undefined,
     profile: req.profile as string | undefined,
+    class: req.class as string | undefined,
     autoApprove: req.autoApprove as boolean | undefined,
   }
 }

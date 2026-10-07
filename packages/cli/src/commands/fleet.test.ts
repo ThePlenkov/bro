@@ -180,6 +180,7 @@ const payload = (over: Partial<FleetPayload> = {}): FleetPayload => ({
   prErrors: [],
   occupancy: { occupied: 1, maxConcurrent: 3 },
   budget: STUB_BUDGET,
+  walls: [],
   ...over,
 })
 
@@ -196,6 +197,21 @@ describe('liveFrame', () => {
     const f = liveFrame(payload({ rows: [] }), new Date(0), 5)
     assert.match(f, /no open molecules — nothing in the fleet/)
     assert.match(f, /every 5s/)
+  })
+
+  test('provider walls render in-frame — the spec `walled — <cause>` line', () => {
+    const f = liveFrame(
+      payload({
+        walls: [
+          { provider: 'kilo-free', cause: 'rate_limited', until: '2026-10-08T00:00:00Z' },
+          { provider: 'devin', cause: 'quota' },
+        ],
+      }),
+      new Date(0),
+      2
+    )
+    assert.match(f, /kilo-free walled — rate_limited til 2026-10-08T00:00:00Z/)
+    assert.match(f, /devin walled — quota/)
   })
 
   test('warnings render in-frame — degraded, conflict, PR lookup', () => {

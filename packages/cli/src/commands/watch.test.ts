@@ -133,6 +133,17 @@ describe('attentionOf', () => {
     ])
   })
 
+  test('provider walls are attention — the spec `walled — <cause>` line', () => {
+    const walls = [
+      { provider: 'kilo-free', cause: 'rate_limited' as const, until: '2026-10-08T00:00:00Z' },
+      { provider: 'devin', cause: 'quota' as const },
+    ]
+    assert.deepEqual(attentionOf([], [], [], walls), [
+      'provider kilo-free walled — rate_limited til 2026-10-08T00:00:00Z',
+      'provider devin walled — quota',
+    ])
+  })
+
   test('ok gates and live agents are not attention', () => {
     assert.deepEqual(attentionOf([mol()], [row()], [prGate()]), [])
   })
