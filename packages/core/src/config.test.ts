@@ -10,6 +10,7 @@ import {
   globalConfigDir,
   loadConfig,
   loadConfigLayers,
+  repoOptedIn,
 } from './config.ts'
 
 // the global layer reads $XDG_CONFIG_HOME/bro — pin it to an empty tmp
@@ -692,5 +693,33 @@ describe('config layers (spec bro-9vmx)', () => {
 
   test('globalConfigDir follows XDG_CONFIG_HOME', () => {
     assert.equal(globalConfigDir(), join(XDG, 'bro'))
+  })
+})
+
+describe('repoOptedIn', () => {
+  test('any bro.config.* or .beads marks the repo, walking up', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'bro-optin-')))
+    const sub = join(dir, 'a', 'b')
+    mkdirSync(sub, { recursive: true })
+    assert.equal(repoOptedIn(sub), false)
+    for (const name of [
+      'bro.config.json',
+      'bro.config.ts',
+      'bro.config.local.json',
+      'bro.config.local.ts',
+      '.beads',
+    ]) {
+      const marker = join(dir, name)
+      if (name === '.beads') mkdirSync(marker)
+      else writeFileSync(marker, '{}')
+      assert.equal(repoOptedIn(sub), true, name)
+      rmSync(marker, { recursive: true, force: true })
+    }
+  })
+
+  test('a global-layer file alone does not opt the repo in', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'bro-optin-')))
+    writeFileSync(join(dir, 'config.json'), '{}') // global-layer name in a project dir
+    assert.equal(repoOptedIn(dir), false)
   })
 })

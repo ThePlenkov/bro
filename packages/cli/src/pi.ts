@@ -341,13 +341,21 @@ function contextOf(control: HookControl | null): string {
   return typeof text === 'string' ? text.trim() : ''
 }
 
-/** The repo opts in by carrying bro.config.json or .beads/ — the same
- *  gate `bro hooks` itself applies; checked cheaply here so non-bro dirs
- *  never even spawn the CLI. */
+/** The repo opts in by carrying any project/local bro.config.* or
+ *  .beads/ — the same gate `bro hooks` applies (core's repoOptedIn).
+ *  Duplicated here because jiti loads this file raw — it can't import
+ *  @broject/core; keep the list in sync with CONFIG_LAYER_FILES. */
 function broEnabled(startDir: string): boolean {
+  const markers = [
+    'bro.config.ts',
+    'bro.config.json',
+    'bro.config.local.ts',
+    'bro.config.local.json',
+    '.beads',
+  ]
   let dir = startDir
   for (;;) {
-    if (existsSync(join(dir, 'bro.config.json')) || existsSync(join(dir, '.beads'))) {
+    if (markers.some((m) => existsSync(join(dir, m)))) {
       return true
     }
     const parent = dirname(dir)

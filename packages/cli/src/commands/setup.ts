@@ -81,11 +81,13 @@ function writeConfig(opts: { beads: boolean; personality?: string }): string {
   const path = join(process.cwd(), 'bro.config.local.json')
   const existed = existsSync(path)
   const existing = readExistingConfig(path)!
-  // loadConfig normalizes legacy `store` into `stores`, so writing the
-  // merged shape back migrates v0.1.0 configs in place.
-  const merged: BroConfig = { ...loadBroConfig() }
-  if (opts.beads && !merged.stores.includes('beads')) {
-    merged.stores = [...merged.stores, 'beads']
+  // Only local-layer keys land in the file: spreading the merged
+  // effective config here would pin project/global values into the
+  // highest-precedence layer and mask later project edits.
+  const effective = loadBroConfig()
+  const merged: Partial<BroConfig> = { ...existing }
+  if (opts.beads && !effective.stores.includes('beads')) {
+    merged.stores = [...(merged.stores ?? effective.stores), 'beads']
   }
   if (opts.personality) {
     merged.personality = opts.personality as BroConfig['personality']
@@ -94,8 +96,9 @@ function writeConfig(opts: { beads: boolean; personality?: string }): string {
     return 'bro.config.local.json already up to date'
   }
   writeFileSync(path, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
+  const stores = merged.stores ?? effective.stores
   const hint = existed ? '' : ' — gitignored (machine-local overrides live here)'
-  return `${existed ? 'updated' : 'wrote'} bro.config.local.json (stores: ${merged.stores.join(', ')})${hint}`
+  return `${existed ? 'updated' : 'wrote'} bro.config.local.json (stores: ${stores.join(', ')})${hint}`
 }
 
 /** Install files under root; returns installed count. Warns on drift. */

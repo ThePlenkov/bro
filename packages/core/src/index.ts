@@ -58,6 +58,7 @@ export {
   probeConfigFile,
   providersSection,
   querySection,
+  repoOptedIn,
   sddSection,
   SDD_MODES,
   stackSection,

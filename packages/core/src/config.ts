@@ -900,6 +900,26 @@ export const CONFIG_SECTION_LAYERS: Record<string, 'operator' | 'policy'> = {
   pack: 'policy',
 }
 
+/** Repo opt-in probe — walks up from startDir for any project/local
+ *  bro.config.* file or a .beads/ dir. The global layer never counts:
+ *  it is the user's machine, not the repo's choice. pi.ts carries a
+ *  standalone copy of the same list — jiti loads it raw, so it cannot
+ *  import this package; keep the name list in sync. */
+export function repoOptedIn(startDir: string): boolean {
+  const markers = [...CONFIG_LAYER_FILES.project, ...CONFIG_LAYER_FILES.local, '.beads']
+  let dir = startDir
+  for (;;) {
+    if (markers.some((m) => existsSync(join(dir, m)))) {
+      return true
+    }
+    const parent = dirname(dir)
+    if (parent === dir) {
+      return false
+    }
+    dir = parent
+  }
+}
+
 /** Directory holding the global user layer — XDG config dir + `bro`. */
 export function globalConfigDir(): string {
   const xdg = process.env.XDG_CONFIG_HOME
