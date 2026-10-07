@@ -378,13 +378,28 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
   // worker verbs answer the requester; requester verdicts answer the worker
   let to: string
   if (kind === 'claim' || kind === 'result') {
-    to = senderOf(request)
-  } else {
-    const worker = [...state.envelopes].reverse().find((e) => e.kind === 'claim' || e.kind === 'result')
-    if (worker === undefined) {
-      console.error(`error: nothing to ${kind} — no claim/result on thread "${thread}" yet`)
+    if (request.to !== rig) {
+      console.error(`error: thread "${thread}" is addressed to ${request.to}, not this rig (${rig})`)
       process.exit(2)
     }
+    const expected = kind === 'claim' ? 'posted' : 'claimed'
+    if (state.stage !== expected) {
+      console.error(
+        `error: cannot ${kind === 'result' ? 'done' : kind} thread "${thread}" in stage "${state.stage}"`
+      )
+      process.exit(2)
+    }
+    to = senderOf(request)
+  } else {
+    if (senderOf(request) !== rig) {
+      console.error(`error: only the requester (${senderOf(request)}) can ${kind} thread "${thread}"`)
+      process.exit(2)
+    }
+    if (state.stage !== 'submitted') {
+      console.error(`error: nothing to ${kind} — no result submitted on thread "${thread}" yet`)
+      process.exit(2)
+    }
+    const worker = [...state.envelopes].reverse().find((e) => e.kind === 'result')!
     to = senderOf(worker)
   }
 

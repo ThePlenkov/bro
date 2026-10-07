@@ -221,8 +221,10 @@ describe('bro mesh', () => {
       const { binDir, db } = installFakeBd(join(root, 'tools'), [])
       const env = { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: db }
 
+      // the request is self-addressed so this one store can play both
+      // sides of the lifecycle
       const req = runCli(
-        ['mesh', 'request', 'mesh://acme/rigB', 'port the gate', '--body', 'needs it', '--priority', '1', '--ref', 'bead:bro-abc'],
+        ['mesh', 'request', 'mesh://theplenkov/bro', 'port the gate', '--body', 'needs it', '--priority', '1', '--ref', 'bead:bro-abc'],
         { cwd: main, env },
       )
       assert.equal(req.code, 0, req.stderr)
@@ -234,12 +236,30 @@ describe('bro mesh', () => {
       assert.ok(posted.labels.includes('mesh:v:1'))
       assert.ok(posted.labels.includes('mesh:kind:request'))
       assert.ok(posted.labels.includes(`mesh:thread:${thread}`))
-      assert.ok(posted.labels.includes('mesh:to:mesh://acme/rigb'))
+      assert.ok(posted.labels.includes('mesh:to:mesh://theplenkov/bro'))
       assert.equal(posted.external_ref, `beads://theplenkov/bro/${thread}`)
 
       const unknown = runCli(['mesh', 'claim', 'nope-1'], { cwd: main, env })
       assert.equal(unknown.code, 2)
       assert.match(unknown.stderr, /no request for thread/)
+
+      // a request addressed to another rig can't be claimed here
+      const foreign = runCli(
+        ['mesh', 'request', 'mesh://acme/rigB', 'not for us'],
+        { cwd: main, env },
+      )
+      const foreignThread = /request (\S+) →/.exec(foreign.stdout)?.[1]
+      const wrong = runCli(['mesh', 'claim', foreignThread!], { cwd: main, env })
+      assert.equal(wrong.code, 2)
+      assert.match(wrong.stderr, /addressed to .* not this rig/)
+
+      // sequencing: done before claim and verdicts before a result are refused
+      const early = runCli(['mesh', 'done', thread], { cwd: main, env })
+      assert.equal(early.code, 2)
+      assert.match(early.stderr, /stage "posted"/)
+      const premature = runCli(['mesh', 'accept', thread], { cwd: main, env })
+      assert.equal(premature.code, 2)
+      assert.match(premature.stderr, /no result submitted/)
 
       assert.equal(runCli(['mesh', 'claim', thread], { cwd: main, env }).code, 0)
       const done = runCli(['mesh', 'done', thread, '--ev', 'pr:https://github.com/x/y/pull/9'], { cwd: main, env })
