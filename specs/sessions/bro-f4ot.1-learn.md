@@ -138,14 +138,22 @@ probe — a wedged store yields zero lines, never a stalled hook.
   marker TTL, so a flat `<session>.trace.jsonl` would arm a phantom
   `trace.jsonl` aspect on every post-tool event (the `hinted/` subdir
   exists for exactly this reason — same rule applies here). The subdir
-  sits **below** the dir `armSession` prunes, so the same `hinted/`
-  precedent applies to the sweep too: each `trace/` append runs a
-  same-TTL best-effort sweep of its own subdir (and `fired/` sweeps on
-  the same rule), or the journals accumulate one file per session
-  forever. The learn probe reads the trace tail, matches, and renders
-  at most `budget` fires per lesson per session — the fired set lives
-  in `fired/<session>` under the same `<git-common>/bro/hooks/` dir
-  (subdir for the same reason) so restarts don't re-fire.
+  sits **below** the dir `armSession` prunes, so — like `hinted/` —
+  each subdir prunes itself at the marker TTL or the journals
+  accumulate one file per session forever. Two failure modes, two
+  bounds. *Stale files:* the sweep rides the write that can afford it
+  — `trace/` when a session creates its journal (the
+  once-per-session tick; a weekly TTL doesn't need a dir scan on every
+  post-tool event), `fired/` on every append — each best-effort at the
+  same TTL as the marker prune. *One huge file:* crossing 256 KiB
+  trims the journal — the oldest lines drop, the newest 500 stay (well
+  past the 100-line tail read), so a long session never grows a file
+  every probe re-reads whole. 256 KiB is the trim trigger, not a
+  file-size cap: entries carry no size limit, so the kept tail can
+  still sit above it. The learn probe reads the trace tail, matches,
+  and renders at most `budget` fires per lesson per session — the fired
+  set lives in `fired/<session>` under the same `<git-common>/bro/hooks/`
+  dir (subdir for the same reason) so restarts don't re-fire.
 
   The journal records what the hook payload actually carries —
   `HookInput` widens to read `tool_name` and the path-bearing
