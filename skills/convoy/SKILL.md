@@ -28,6 +28,12 @@ bro convoy claim <step-id>            → atomic claim — do this before starti
 bro convoy done <step-id> --result "…"   → closes the step, emits the new next
 bro convoy run <mol>… [--open]        → the queue — a convoy-runner agent per
                                       mol through the facade, to 'complete'
+bro convoy wait <mol>… [--every SEC] [--timeout SEC]
+                                    → finite watcher — exits when every mol
+                                      settles (0=complete, 2=stuck, 3=gated,
+                                      4=timeout). The exit IS the wake event —
+                                      spawn it as a background shell instead
+                                      of polling `status` in a loop.
 ```
 
 Repeat `next` → `claim` → work → `done` until `next` reports
