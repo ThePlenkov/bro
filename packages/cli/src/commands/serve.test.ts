@@ -275,7 +275,7 @@ describe('parseSpawnBody', () => {
     const req = parseSpawnBody(
       JSON.stringify({ molStep: 'fx-1', worktree: '/w', prompt: 'p', connector: 'native' })
     )
-    assert.deepEqual(req, { molStep: 'fx-1', worktree: '/w', prompt: 'p', connector: 'native', promptFile: undefined, beadsDir: undefined, provider: undefined, model: undefined, profile: undefined, autoApprove: undefined })
+    assert.deepEqual(req, { molStep: 'fx-1', worktree: '/w', prompt: 'p', connector: 'native', promptFile: undefined, beadsDir: undefined, provider: undefined, model: undefined, profile: undefined, class: undefined, autoApprove: undefined })
   })
 
   test('the provider vocabulary rides the body — strings plus boolean autoApprove', () => {

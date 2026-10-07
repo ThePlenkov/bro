@@ -25,6 +25,9 @@
  *                       agents.<backend>.provider → the legacy
  *                       command template, pinning BRO_AGENT_PROVIDER/
  *                       BRO_AGENT_MODEL provenance onto the worker.
+ *                       --class names a fleet.routing lane (spec
+ *                       bro-1x7p) — the routed chain supplies the
+ *                       provider when no explicit lane was picked.
  *   bro agents down [<id|step>] [--connector <name>]
  *                       no arg: supervisor down. With a target: stop
  *                       that one agent — idempotent, a gone agent is
@@ -43,6 +46,7 @@ import {
   countSessionReservations,
   readAgentRegistry,
   removeAgentRegistryEntries,
+  routeStepClass,
   sessionPlanes,
   sessionQuotaConfig,
   sessionSlotsDir,
@@ -69,7 +73,7 @@ function usage(): never {
   console.error(`usage:
   bro agents status [<id|step>] [--json] [--connector <name>]
   bro agents up [<step>] [--connector <name>] [--worktree <path>] [--prompt-file <file>] [--beads-dir <dir>]
-                [--provider <name>] [--model <m>] [--profile <name>] [--auto-approve]
+                [--provider <name>] [--model <m>] [--profile <name>] [--class <name>] [--auto-approve]
   bro agents down [<id|step>] [--connector <name>]
   bro agents prune [--connector <name>] [--older-than <N>d] [--json]
                 reap terminal registry entries (exited/lost/stopped —
@@ -300,6 +304,7 @@ function statusDetail(
   console.log(`state     ${a.state}`)
   if (a.provider !== undefined) console.log(`provider  ${a.provider}`)
   if (a.model !== undefined) console.log(`model     ${a.model}`)
+  if (a.class !== undefined) console.log(`class     ${a.class}`)
   if (a.cause !== undefined) console.log(`cause     ${a.cause}`)
   if (a.resetAt !== undefined) console.log(`resetAt   ${a.resetAt}`)
   if (a.pid !== undefined) console.log(`pid       ${a.pid}`)
@@ -481,6 +486,10 @@ export interface StepSpawnRequest {
   /** acp permission policy override — the driver's
    *  session/request_permission allow answer. */
   autoApprove?: boolean
+  /** The routing lane — wins over the step bead's `class:<name>` label
+   *  (spec bro-1x7p). Read only when `fleet.routing` is declared; a
+   *  resolved class with no routing entry is a config error. */
+  class?: string
 }
 
 /** The spawn behind `up <step>` and POST /api/v1/agents — resolve the
@@ -516,12 +525,23 @@ export function spawnStepAgent(
     throw new SpawnInputError(`worktree ${repoRoot} does not exist`)
   }
   const prompt = req.prompt ?? resolvePrompt(dir, beads, req.molStep, req.promptFile, conn.name)
+  // class resolution (spec bro-1x7p): runs whenever fleet.routing is
+  // declared — the lane pins provenance regardless of who named the
+  // provider. The routed chain head supplies the provider only when no
+  // explicit lane was picked (--provider/--profile outrank the table).
+  const routed = routeStepClass(env.fleet, env.providers ?? {}, beads, req.molStep, req.class)
+  const provider = req.provider ?? profile?.provider ?? routed?.provider
   return resolveSpawnProvider(
     env,
     conn.name,
     {
-      provider: req.provider ?? profile?.provider,
-      model: req.model ?? profile?.model,
+      provider,
+      // the routed model pin pairs with the routed provider — an
+      // explicit provider override must not inherit chain[0]'s model
+      model:
+        req.model ??
+        profile?.model ??
+        (provider !== undefined && provider === routed?.provider ? routed.model : undefined),
       autoApprove: req.autoApprove ?? profile?.autoApprove,
     },
     req.provider !== undefined ? 'flag' : profile === undefined ? 'backend' : 'profile'
@@ -534,6 +554,7 @@ export function spawnStepAgent(
       env: req.env,
       provider: pick.provider,
       model: pick.model,
+      class: routed?.class,
       worker: pick.worker,
     })
   )
@@ -617,6 +638,7 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
       '--provider',
       '--model',
       '--profile',
+      '--class',
     ])
   )
   const connectorName = flag(argv, '--connector')
@@ -627,7 +649,7 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
   if (molStep === undefined) {
     // spawn-only flags have no step to land on — 'up --provider x'
     // riding the supervisor branch would read as a spawn that happened
-    const stray = ['--worktree', '--prompt-file', '--beads-dir', '--provider', '--model', '--profile', '--auto-approve'].find(
+    const stray = ['--worktree', '--prompt-file', '--beads-dir', '--provider', '--model', '--profile', '--class', '--auto-approve'].find(
       (f) => argv.includes(f) || argv.some((a) => a.startsWith(`${f}=`))
     )
     if (stray !== undefined) {
@@ -647,6 +669,7 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
       provider: flag(argv, '--provider'),
       model: flag(argv, '--model'),
       profile: flag(argv, '--profile'),
+      class: flag(argv, '--class'),
       autoApprove: argv.includes('--auto-approve') ? true : undefined,
     })
   } catch (err) {

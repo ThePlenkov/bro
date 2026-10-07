@@ -93,6 +93,27 @@ export type {
   ProviderSurface,
 } from './providers.ts'
 export {
+  CLASS_LABEL_PREFIX,
+  DEFAULT_STEP_CLASS,
+  deriveProviderWalls,
+  fleetRouter,
+  fleetRouting,
+  ON_WALL,
+  resolveStepClass,
+  routeStepClass,
+  stepClassInfo,
+  wallText,
+} from './routing.ts'
+export type {
+  ChainEntry,
+  FleetRouter,
+  OnWall,
+  ProviderWall,
+  ResolvedClass,
+  RoutingClass,
+  RoutingTable,
+} from './routing.ts'
+export {
   DATA_REF,
   dataRefCommit,
   dataRefPull,

@@ -34,7 +34,9 @@ import {
   mailboxDir,
   reviewHost,
   runJanitor,
+  wallText,
   type JanitorReport,
+  type ProviderWall,
   type ReviewFacade,
 } from '@broject/core'
 import { checkHistory, evaluateExitGate, fetchPrActState } from '@broject/act'
@@ -48,6 +50,7 @@ import {
   fleetTableLines,
   type FleetRow,
 } from './fleet.ts'
+import { providerWallsFor } from '../agent-connectors.ts'
 import { parseWorktreePorcelain, type WorktreeInfo } from './work.ts'
 import { installWatch, uninstallWatch } from './watch-install.ts'
 import { watchSection, type WatchConfig } from './watch-config.ts'
@@ -102,6 +105,13 @@ export interface WatchSnapshot {
     /** branch→PR lookups that failed — a quiet PR column must not
      *  read as "no PRs exist" when the lookups errored */
     prErrors?: string[]
+    /** Provider walls derived from the registry (spec bro-1x7p) —
+     *  surfaced in attention; absent on older snapshots. */
+    walls?: ProviderWall[]
+    /** the wall derivation itself threw (corrupt registry) — additive
+     *  data failed, never the rows; renders as a warning, not
+     *  `unavailable` */
+    wallsError?: string
     /** set when the fleet plane itself threw (agent backends or the
      *  molecule re-read in fleetRows) — the section renders
      *  `unavailable`, never a false empty fleet */
@@ -112,14 +122,21 @@ export interface WatchSnapshot {
   janitor?: JanitorReport
 }
 
-/** The heartbeat's answer: ready human gates, lost agents, blocked and
- *  unprobeable PR exit gates. Empty = the fleet is quiet. */
+/** The heartbeat's answer: ready human gates, lost agents, walled
+ *  providers, blocked and unprobeable PR exit gates. Empty = the fleet
+ *  is quiet. */
 export function attentionOf(
   mols: WatchMol[],
   rows: FleetRow[],
-  prs: WatchPrGate[]
+  prs: WatchPrGate[],
+  walls: ProviderWall[] = []
 ): string[] {
-  return [...molAttention(mols), ...agentAttention(rows), ...prAttention(prs)]
+  return [
+    ...molAttention(mols),
+    ...agentAttention(rows),
+    ...walls.map((w) => `provider ${wallText(w)}`),
+    ...prAttention(prs),
+  ]
 }
 
 function molAttention(mols: WatchMol[]): string[] {
@@ -312,7 +329,16 @@ async function fleetPlane(
       worktreeList(prErrors),
       prErrors
     )
-    return { rows, degraded, conflicts, prErrors }
+    // walls are additive data — a failed derivation (corrupt registry)
+    // degrades this one datum, never the rows the plane collected
+    let walls: ProviderWall[] | undefined
+    let wallsError: string | undefined
+    try {
+      walls = providerWallsFor(dir)
+    } catch (err) {
+      wallsError = errText(err)
+    }
+    return { rows, degraded, conflicts, prErrors, walls, wallsError }
   } catch (err) {
     return { rows: [], degraded: [], conflicts: [], prErrors: [], error: errText(err) }
   }
@@ -350,7 +376,7 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
   const fleet = await fleetPlane(dir, host)
   const gates = await gatesPlane(dir, host, fleet.rows, fleet.prErrors ?? [])
 
-  const attention = attentionOf(molsPlane_.mols, fleet.rows, gates.prs)
+  const attention = attentionOf(molsPlane_.mols, fleet.rows, gates.prs, fleet.walls ?? [])
   for (const e of fleet.prErrors ?? []) {
     attention.push(`PR lookup failed — ${e}`)
   }
@@ -440,6 +466,12 @@ function fleetLines(fleet: WatchSnapshot['fleet']): string[] {
   }
   for (const e of fleet.prErrors ?? []) {
     out.push(`  warning: PR lookup failed — ${e}`)
+  }
+  for (const w of fleet.walls ?? []) {
+    out.push(`  ${wallText(w)}`)
+  }
+  if (fleet.wallsError !== undefined) {
+    out.push(`  warning: provider walls unreadable — ${fleet.wallsError}`)
   }
   return out
 }

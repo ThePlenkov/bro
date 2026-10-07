@@ -534,6 +534,129 @@ describe('bro agents up — provider resolution', () => {
   })
 })
 
+// the routing vocabulary (spec bro-1x7p M2) — fleet.routing resolves
+// the class lane → chain[0] provider; the lane rides the registry as
+// provenance, never a vendor field
+describe('bro agents up — class routing', () => {
+  /** withProviders' registry plus a routing table. */
+  const withRouting = (fx: Fixture): void => {
+    writeFileSync(
+      join(fx.main, 'bro.config.json'),
+      JSON.stringify({
+        agents: { native: { command: 'node {promptFile}' } },
+        providers: {
+          local: { type: 'cli', command: 'node {promptFile} -m {model}' },
+          alt: { type: 'cli', command: 'node {promptFile}' },
+        },
+        fleet: {
+          routing: {
+            default: { chain: ['alt'] },
+            sweep: { chain: [{ provider: 'local', model: 'sweep-1' }] },
+          },
+        },
+      })
+    )
+  }
+
+  test('a `class:<name>` bead label routes to chain[0]; the registry records the lane', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', labels: ['class:sweep'] }])
+    try {
+      withRouting(fx)
+      const r = await agents([
+        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN),
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      assert.match(r.out.join('\n'), /provider: local · model sweep-1/)
+      const entry = readAgentRegistry(fx.main)['fx-1']!
+      assert.equal(entry.class, 'sweep')
+      assert.equal(entry.provider, 'local')
+      assert.equal(entry.model, 'sweep-1')
+      const st = await agents(['status', 'fx-1'])
+      assert.match(st.out.join('\n'), /class\s+sweep/)
+      await agents(['down', 'fx-1'])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('--class beats the label; an undeclared class is a config error naming it', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', labels: ['class:sweep'] }])
+    try {
+      withRouting(fx)
+      const r = await agents([
+        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN), '--class', 'default',
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      const entry = readAgentRegistry(fx.main)['fx-1']!
+      assert.equal(entry.class, 'default')
+      assert.equal(entry.provider, 'alt') // default's chain head
+      await agents(['down', 'fx-1'])
+
+      const bad = await agents([
+        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN), '--class', 'ghost',
+      ])
+      assert.equal(bad.code, 1)
+      assert.match(bad.err.join('\n'), /fleet\.routing has no class "ghost"/)
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('an explicit provider override drops the routed chain’s model pin', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      // default's chain head pins a model — --provider picks another
+      // provider entirely, and its own default model applies instead
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({
+          agents: { native: { command: 'node {promptFile}' } },
+          providers: {
+            local: { type: 'cli', command: 'node {promptFile} -m {model}' },
+            alt: { type: 'cli', command: 'node {promptFile} -m {model}', model: 'alt-default' },
+          },
+          fleet: {
+            routing: { default: { chain: [{ provider: 'local', model: 'sweep-1' }] } },
+          },
+        })
+      )
+      const r = await agents([
+        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN), '--provider', 'alt',
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      const entry = readAgentRegistry(fx.main)['fx-1']!
+      assert.equal(entry.provider, 'alt')
+      assert.equal(entry.model, 'alt-default') // alt's own default, NOT the local lane's pin
+      await agents(['down', 'fx-1'])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('declared routing + unclassed bead resolves `default`; --provider still outranks the chain head', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      withRouting(fx)
+      const r = await agents([
+        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN), '--provider', 'local', '--model', 'm9',
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      const entry = readAgentRegistry(fx.main)['fx-1']!
+      assert.equal(entry.class, 'default') // lane pinned even under an explicit provider
+      assert.equal(entry.provider, 'local')
+      assert.equal(entry.model, 'm9')
+      await agents(['down', 'fx-1'])
+    } finally {
+      fx.restore()
+    }
+  })
+})
+
 describe('bro agents down <target>', () => {
   test('stops by molStep and is idempotent for gone agents', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])

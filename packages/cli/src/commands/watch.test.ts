@@ -133,6 +133,17 @@ describe('attentionOf', () => {
     ])
   })
 
+  test('provider walls are attention — the spec `walled — <cause>` line', () => {
+    const walls = [
+      { provider: 'kilo-free', cause: 'rate_limited' as const, until: '2026-10-08T00:00:00Z' },
+      { provider: 'devin', cause: 'quota' as const },
+    ]
+    assert.deepEqual(attentionOf([], [], [], walls), [
+      'provider kilo-free walled — rate_limited til 2026-10-08T00:00:00Z',
+      'provider devin walled — quota',
+    ])
+  })
+
   test('ok gates and live agents are not attention', () => {
     assert.deepEqual(attentionOf([mol()], [row()], [prGate()]), [])
   })
@@ -188,6 +199,15 @@ describe('renderSnapshot', () => {
       snap({ fleet: { rows: [], degraded: [], conflicts: [], prErrors: ['work/x: boom'] } })
     )
     assert.match(text, /warning: PR lookup failed — work\/x: boom/)
+  })
+
+  test('a failed wall derivation warns — rows survive, the section does not report unavailable', () => {
+    const text = renderSnapshot(
+      snap({ fleet: { rows: [row()], degraded: [], conflicts: [], wallsError: 'registry JSON corrupt' } })
+    )
+    assert.match(text, /warning: provider walls unreadable — registry JSON corrupt/)
+    assert.match(text, /s-1\s+in_progress\s+running \(pid 1\)/)
+    assert.doesNotMatch(text, /fleet\n  unavailable/)
   })
 
   test('attention and sections render their contents', () => {
