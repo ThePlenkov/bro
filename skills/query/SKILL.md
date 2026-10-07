@@ -26,9 +26,10 @@ completion order. `bro query <file>` is the same pipeline in one step;
 - **No secrets in plans.** `env` is a *literal* overlay — a token value
   written there is committed as text. Auth always comes from the
   spawned CLI's own login (`gh auth`, `glab auth`, `atlassian auth`) or
-  the operator's inherited `process.env`. Endpoint-redirecting vars
-  (`ATLASSIAN_API_URL`) are rejected outright — they could exfiltrate
-  an inherited `Authorization` header; operators pin endpoints via the
+  the operator's inherited `process.env`. Execution-shaping vars
+  (`ATLASSIAN_API_URL`, `PATH`, `HOME`) are rejected outright — they
+  could exfiltrate an inherited `Authorization` header or swap which
+  binary/config the connector spawns. Operators pin endpoints via the
   `query.env` config section instead.
 - `vars` are scalars (string/number/bool) for `github`/`gitlab` —
   serialized as `-f k=v` CLI fields. `atlassian` takes the table as the

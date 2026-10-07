@@ -188,6 +188,14 @@ describe('applyQueryPlan', () => {
     assert.match(o.steps.a.error, /nope-connector|queries|connector/i)
   })
 
+  test('a `__proto__` step id is an ordinary output key, not a proto write', async () => {
+    const { code, out } = await run({ steps: [step('__proto__'), step('b')] })
+    assert.equal(code, 0)
+    const o = out as { ok: boolean; steps: Record<string, { provider: string }> }
+    assert.deepEqual(Object.keys(o.steps), ['__proto__', 'b'])
+    assert.equal(o.steps['__proto__']!.provider, 'fq')
+  })
+
   test('providerless step resolves by connectors.queries pin', async () => {
     await withConfigDir({ connectors: { queries: 'fq' } }, async (dir) => {
       const { code, out } = await run({ steps: [{ id: 'a', graphql: 'q' }] }, dir)

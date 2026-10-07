@@ -78,14 +78,14 @@ describe('parseQueryPlan', () => {
     assert.throws(() => parseQueryPlan({ kind: 'query', steps: 'x' }), /steps: must be an array/)
   })
 
-  test('ATLASSIAN_API_URL is rejected in step env; non-string env rejected', () => {
-    assert.throws(
-      () =>
-        parseQueryPlan(
-          base([{ id: 'a', graphql: 'q', env: { ATLASSIAN_API_URL: 'https://x' } }])
-        ),
-      /ATLASSIAN_API_URL/
-    )
+  test('execution-shaping env vars are rejected in step env; non-string env rejected', () => {
+    for (const k of ['ATLASSIAN_API_URL', 'PATH', 'HOME']) {
+      assert.throws(
+        () =>
+          parseQueryPlan(base([{ id: 'a', graphql: 'q', env: { [k]: 'x' } }])),
+        new RegExp(`env\\.${k}.*execution-shaping`)
+      )
+    }
     assert.throws(
       () => parseQueryPlan(base([{ id: 'a', graphql: 'q', env: { X: 1 } }])),
       /env\.X: must be a string/

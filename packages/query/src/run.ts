@@ -60,18 +60,21 @@ export async function applyQueryPlan(plan: QueryPlan, dir = process.cwd()): Prom
   const ctx: ConnectorCtx = { dir }
   const cap = Math.max(1, plan.concurrency ?? cfg.query.concurrency)
 
-  const results: Record<string, StepResult> = {}
-  let next = 0
+  // null-proto maps: a step id like `__proto__` must stay an ordinary
+  // output key — on a plain object it would set the prototype instead
+  const results: Record<string, StepResult> = Object.create(null)
+  // a shared sync iterator hands each step to exactly one worker — the
+  // .next() call itself can't interleave, and no counter is shared
+  const it = plan.steps.values()
   await Promise.all(
     Array.from({ length: Math.min(cap, plan.steps.length) }, async () => {
-      while (next < plan.steps.length) {
-        const step = plan.steps[next++]! // NOSONAR — serial within a worker; workers overlap
+      for (const step of it) {
         results[step.id] = await runStep(step, ctx, prefer, cfg.query.env)
       }
     })
   )
 
-  const ordered: Record<string, StepResult> = {}
+  const ordered: Record<string, StepResult> = Object.create(null)
   for (const step of plan.steps) {
     ordered[step.id] = results[step.id]!
   }

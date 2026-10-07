@@ -14,11 +14,13 @@ export const PLAN_VERSION = 1
 const TOP_KEYS = new Set(['kind', 'version', 'concurrency', 'steps'])
 const STEP_KEYS = new Set(['id', 'provider', 'graphql', 'vars', 'env'])
 
-/** Endpoint-redirecting vars never travel in a plan — `env` is a
- *  literal overlay, so these would smuggle an endpoint the operator's
- *  CLI never agreed to. Operator config (`query.env`) may still set
- *  them; a committed plan may not. */
-const FORBIDDEN_ENV = new Set(['ATLASSIAN_API_URL'])
+/** Env names a plan may never set — `env` is a literal overlay, so
+ *  these smuggle control the operator never agreed to:
+ *  ATLASSIAN_API_URL redirects an authenticated endpoint; PATH swaps
+ *  which binary the connector spawns; HOME repoints gh/glab config
+ *  (hosts.yml) at attacker files. Operator config (`query.env`) may
+ *  still set them; a committed plan may not. */
+const FORBIDDEN_ENV = new Set(['ATLASSIAN_API_URL', 'PATH', 'HOME'])
 
 export interface QueryStep {
   id: string
@@ -99,7 +101,9 @@ function stepEnv(raw: unknown, at: string, errors: string[]): Record<string, str
   const env: Record<string, string> = {}
   for (const [k, v] of Object.entries(raw)) {
     if (FORBIDDEN_ENV.has(k)) {
-      errors.push(`${at}.env.${k}: endpoint-redirecting var — operator config only, never a plan`)
+      errors.push(
+        `${at}.env.${k}: execution-shaping var — operator config only, never a plan`
+      )
     } else if (typeof v !== 'string') {
       errors.push(`${at}.env.${k}: must be a string — env is a literal overlay`)
     } else {
