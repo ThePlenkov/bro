@@ -1,3 +1,4 @@
+// bro-adapter — ownership sentinel for `bro plugins` (isBroAdapter); do not remove
 /**
  * bro as a pi extension — the project board on pi's TUI, plus the same
  * lifecycle mechanics the shell adapters get, over pi's in-process

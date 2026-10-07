@@ -94,6 +94,25 @@ describe('isBroAdapter', () => {
     // the cli id alone does not suffice — the kind token must be there too
     assert.ok(!isBroAdapter('export default {id:"bro.cli",setup(){}}\n'))
   })
+
+  test('recognizes a stale-era adapter whose identifier moved (retro bro-g2f9)', () => {
+    // the shipped kilo adapter once defaulted `server: bro` — the old
+    // `server: BroPlugin` regex read that as foreign and refused updates
+    assert.ok(isBroAdapter('export default {id:"bro",server:bro}\n'))
+    assert.ok(isBroAdapter('export const adapter = {id: "bro", server: whatever}\n'))
+    // still not ours: another plugin's id, or bro-adjacent with no
+    // family token
+    assert.ok(!isBroAdapter('export default {id:"other",server:bro}\n'))
+    assert.ok(!isBroAdapter('export default {id:"bro"}\n'))
+  })
+
+  test('the sentinel alone does not own a slot — the id claim is required', () => {
+    // review finding: a foreign module that merely mentions the marker
+    // must not be overwritten without --force
+    assert.ok(isBroAdapter('// bro-adapter\nexport default {id:"bro"}\n'))
+    assert.ok(!isBroAdapter('// bro-adapter\nexport default {}\n'))
+    assert.ok(!isBroAdapter('// mentions bro-adapter in prose\nexport const x = 1\n'))
+  })
 })
 
 describe('plugins install/uninstall/list', () => {
@@ -159,6 +178,17 @@ describe('plugins install/uninstall/list', () => {
         .join(','),
       'global:installed,global:installed,local:stale,local:absent'
     )
+  })
+
+  test('a stale adapter with a moved identifier still updates without --force', () => {
+    // retro bro-g2f9: the shipped kilo adapter once wrote `server: bro`;
+    // the old ownership regex wanted `server: BroPlugin` literally and
+    // refused the slot as foreign
+    const f = fixture()
+    mkdirSync(join(f.opts.env.XDG_CONFIG_HOME!, 'opencode', 'plugins'), { recursive: true })
+    writeFileSync(f.globalPath, '// older bro build\nexport default {id:"bro",server:bro}\n')
+    const out = installClient('opencode', ['global'], f.opts)
+    assert.equal(out[0]!.action, 'updated')
   })
 
   test('--dry-run writes nothing', () => {

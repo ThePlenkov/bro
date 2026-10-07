@@ -293,17 +293,24 @@ export function clientNames(): string[] {
 }
 
 /** The materialized module's fingerprint — holds for the TS source and
- *  the compiled bundle. Each adapter family carries the same `id:"bro"`
- *  marker plus its own second token: opencode ships
- *  `export default {id:"bro",server:BroPlugin}` (its TUI module ships
- *  `id:"bro.cli"` + `kind:"opencode-tui"`); the pi extension ships
- *  `export const adapter = {id:"bro",kind:"pi-extension"}`. */
+ *  the compiled bundle. Every adapter ships an invariant
+ *  `bro-adapter` sentinel comment (the marker no rename can break);
+ *  pre-marker artifacts are recognized by the `id:"bro"` claim plus a
+ *  family shape token: opencode ships `server:<anything>` (its TUI
+ *  module ships `id:"bro.cli"` + `kind:"opencode-tui"`); the pi
+ *  extension ships `kind:"pi-extension"`. */
 export function isBroAdapter(text: string): boolean {
+  // ownership needs the `id:"bro"` claim AND a family token — a bare
+  // `bro-adapter` mention in a foreign file must not read as ours.
+  // The sentinel survives renames of every other identifier (a
+  // stale-era `server: bro` read as foreign once: retro bro-g2f9);
+  // shape checks recognize adapters shipped before the marker existed.
   if (!/\bid:\s*["']bro(?:\.cli)?["']/.test(text)) {
     return false
   }
   return (
-    /\bserver:\s*BroPlugin\b/.test(text) ||
+    text.includes('bro-adapter') ||
+    /\bserver:\s*\w+/.test(text) ||
     /\bkind:\s*["']pi-extension["']/.test(text) ||
     /\bkind:\s*["']opencode-tui["']/.test(text)
   )
