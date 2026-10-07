@@ -17,6 +17,7 @@ checks, SAST annotations, mergeability, and fix rounds.
 | `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup]` | Merge **only if the gate is green** — refuses and names blockers; `--cleanup` retires the checkout the command runs in when safe, and keeps the local branch if another worktree still checks it out |
 | `bro act resolve --thread ID [--comment T]` | Resolve (reply first if comment given); `--unresolve` reopens |
 | `bro act reply --thread ID --comment T` | Reply without resolving; `--file TSV` for batch |
+| `bro act rearm [--dry-run] [--json]` | Resurrect dead PR watchers — respawn `act wait` for open PRs whose watch marker outlived its process; settled markers are swept, live ones kept |
 
 ## The gate
 
@@ -61,6 +62,41 @@ a fix for round N can draw a contradictory finding in round N+1; a
 flip-flop commit just buys a fresh round. Pick the right reading, reply
 with the reasoning, resolve; a real concern on the losing side becomes a
 debt bead.
+
+With [`judge.mode: "shadow"`](/docs/configuration#judge), `bro act
+threads` annotates each unresolved row with a `judge: …` line — the
+verdict is journaled so `bro judge stats` can score judge-vs-outcome
+agreement.
+
+## Don't wait — background it
+
+`bro act wait` does the waiting so your turn doesn't. The pattern: push,
+then `bro act wait <PR> --merge` in a background shell — not even a
+subagent, so the wait costs zero tokens — and take the next bead. When
+the shell finishes it carries the verdict: exit 0 and the merge landed,
+or non-zero and `bro act threads <PR>` (a separate call — a failing exit
+must not hide the threads) names what settled BLOCKED. From a `bro work
+enter` worktree, `--merge --cleanup` also retires the worktree and
+branch itself — no `;`-sequenced cleanup that could run on a failed
+wait.
+
+The caveat: a session-bound background task dies when the session ends.
+For a watch that must outlive the session, spawn it detached or let
+`bro act rearm` resurrect the dead marker on the next session's nudge —
+`bro drive --every` and `bro watch install` are the durable forms.
+
+## Never unwatched
+
+A pushed PR is merged, watched, or handed off — never unwatched. `bro
+act wait <PR> --merge` in the background is the default end-state; the
+stop gate enforces it — an armed session ending with an open, unwatched
+current-branch PR is blocked once and pointed at the detached `act wait`
+form (a running `bro drive --every` counts as coverage via its per-PR
+heartbeat markers). A `timed_out` watcher retires its marker on the way
+out — start a fresh `act wait`; a watcher that *died* leaves a dead
+marker, the session-start nudge names it, and `bro act rearm` puts the
+watch back up. `bro act status` prints `watch=` so coverage is visible
+before you stop.
 
 **Merge through `bro act merge`, never `gh pr merge`** — the gate is
 enforced there.

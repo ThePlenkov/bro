@@ -11,6 +11,17 @@ rot the moment the conversation drifts.
 bro's bet: **mechanics belong in a CLI, policy belongs in a skill, and
 neither belongs inline in a prompt.**
 
+bro is not a plugin — it's a system. The CLI is the mechanics; the
+client plugins are transport; hooks put the state back in front of the
+agent at every lifecycle boundary; skills carry the policy; connectors
+swap the backends (review host, task store, agent plane, events); the
+judge and guards decide and nudge. Remove any layer and the prompt has
+to carry it again — that's the rot bro exists to prevent.
+
+And bro is developed by bro itself: a bead becomes a convoy becomes a
+PR, `act` gates the merge, `debt` sweeps what reviewers left behind,
+`learn` keeps the lesson. The dogfood is the design review.
+
 ## The shape of every capability
 
 Each feature ships the same four parts:

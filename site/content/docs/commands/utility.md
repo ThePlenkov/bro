@@ -13,11 +13,18 @@ description: setup, diagnostics, checks, plans, sync, cleanup, and stores.
 | `bro sync [--pull]` | Push or restore bro artifacts on `refs/bro/data` |
 | `bro cleanup [--remote] [--dry-run]` | Delete local branches whose PR merged |
 | `bro plugins` | Print the live plugin registry |
+| `bro plugins list [--json]` | Client × scope install matrix |
+| `bro plugins install <client> [--global\|--local] [--dry-run]` | Install a client adapter — see [Plugins](/docs/plugins) |
+| `bro plugins uninstall <client> [--global\|--local] [--dry-run] [--force]` | Remove a client adapter |
 | `bro wtf <complaint>` | Capture a complaint verbatim; see [retrospect](/docs/commands/retrospect) |
 
 `bro next`, `bro loop`, `bro stack`, and `bro work` live in
-[Backlog, loops & stacks](/docs/commands/loop). Fleet supervision lives in
-[Fleet & supervision](/docs/commands/fleet).
+[bro next](/docs/commands/next), [bro loop](/docs/commands/loop), and
+[bro stack + work](/docs/commands/stack). Fleet supervision lives in
+[Fleet & supervision](/docs/commands/fleet); the board and the loopback
+facade in [status + serve](/docs/commands/status); the mailbox and the
+broker in [Events](/docs/commands/events); the bead outflow in
+[bro sweep](/docs/commands/sweep).
 
 ## `bro check`
 

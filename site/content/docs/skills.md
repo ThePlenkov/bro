@@ -18,13 +18,21 @@ and why to use the command. The CLI owns how.
 | `docs` | Read or mutate task documents and stores, including the user-level store | Keep task and store verbs predictable; `--global` selects the user store |
 | `drill` | `/drill`, `/unwind`, or a task needing scoped descent | Narrow the investigation, return a result, and prevent recurrence |
 | `drive` | Orphaned PRs need an owner, or a request to drive the review loop | Poll gates, spawn unowned fixers, and merge only on green |
+| `guard` | A declarative nudge should fire on a hook event | Guards are context, never a gate — dry-run defs with `bro guard test` |
+| `judge` | Calibrated decisions for agent loops — act triage annotation, fallback escalation | Typed questions in, typed answers out; `judge.mode` governs consumers |
 | `learn` | Lessons should outlive the session, an artifact needs capture, or the store may know the answer | Store trigger-gated lessons with evidence instead of unconditional memory |
 | `loop` | Work the backlog autonomously end-to-end | Claim → worktree → agent → gate → close → repeat |
 | `next` | “Work the backlog,” “clean the queue,” `/next`, or a `/goal` over open beads | Claim one ready bead and emit its work order |
 | `notify` | A background worker, watcher, or fixer needs to reach a live session | Write mailbox events; let post-tool probes deliver them |
+| `providers` | Configure or debug the provider registry — kinds, wires, `judge.provider`, `agents.<backend>.provider` | Providers are configured, never hardcoded; no silent vendor defaults |
+| `query` | Write or run a `kind = "query"` cross-provider GraphQL plan | Read-only fan-out; no secrets in plans, auth comes from the connector's own login |
+| `retro` | Session end, before the final answer, or when the retro-on-stop guard fires | The session-end checklist: loose ends, hand-rolled mechanics, call economy, lesson capture, debt sweep |
 | `sdd` | The repo enables spec-driven development or asks about missing-spec nudges | Put a written spec before code for claimed work |
 | `serve` | A thin client needs the bro facade over HTTP | Expose local agents and fleet snapshots over loopback JSON |
 | `stack` | Work should land as a stacked bead → worktree → PR chain | Push beads onto ordered stacks, then sync after merges |
+| `status` | A thin client needs the live board in one read | `bro status --json` is the contract; `--deep` adds the act gate |
+| `sweep` | `/sweep`, or prune/dispose of closed beads | The burn is gated on harvest — the refusal is the feature |
+| `typesafe-ai` | Building features on TypeSafe's System One typed-judgment models | Programmable AI primitives — the same models the judge consumes |
 | `sync` | `/sync` or a request to publish/restore bro artifacts | Publish and restore runtime artifacts on the data ref |
 | `watch` | Supervise parallel convoys/agents or ask what needs attention | Read the attention list; keep the heartbeat detached and read-only |
 | `work` | Parallel sessions collide in a shared repo or worktrees need cleanup | Use sibling worktrees and leave them clean |
@@ -32,11 +40,14 @@ and why to use the command. The CLI owns how.
 
 ## Adapters and generation
 
-Claude Code, Codex, Cursor, Devin, and OpenCode receive the same policy
-through their adapters. OpenCode is a native plugin (`@broject/bro`). The
-other adapters share one `skills/` tree: each `plugins/<client>/bro/skills`
-entry is a symlink, not a second copy. Cursor's hook manifest is generated
-too — only Claude's event map is hand-written.
+Claude Code, Codex, Cursor, and Devin receive the same policy through
+their adapters — the shell adapters share one `skills/` tree: each
+`plugins/<client>/bro/skills` entry is a symlink, not a second copy.
+Cursor's hook manifest is generated too — only Claude's event map is
+hand-written. OpenCode, Kilo, and pi are different: they're native
+plugins installed by `bro plugins install <client>` — a self-contained
+module (`plugins/<client>/bro/bro.ts`) carrying hooks and policy inline,
+with no skills tree beside it.
 
 The source of truth is `skills/`. `scripts/gen-plugins.ts` keeps the adapter
 links and hook files in step, while the CLI bundle embeds a snapshot of
