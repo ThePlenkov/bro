@@ -31,6 +31,12 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { bdTry, gitTry, markerLive } from '@broject/core'
 import { agentOwner } from './proc-owner.ts'
+import {
+  REFGUARD_HOOK_MARK,
+  REFGUARD_HOOK_NAME,
+  REFGUARD_LOCAL_HOOK,
+  refGuardShim,
+} from './refguard.ts'
 
 /** The CLI's own version — baked into the installed shim's npx
  *  fallback so the hook runs the bro that installed it. Walks up from
@@ -424,34 +430,49 @@ export type InstallResult =
   | { state: 'installed' | 'already' | 'chained' | 'removed' | 'restored' | 'absent'; path: string }
   | { state: 'error'; err: string }
 
-export function installCommitHook(cwd: string, version: string): InstallResult {
+export interface HookShimSpec {
+  /** The git hook name — the file under hooksDir. */
+  name: string
+  /** A pre-existing hook renamed to this rides inside bro's shim. */
+  localName: string
+  /** Marker line the shim carries — recognizes bro's own on
+   *  re-install/uninstall, never touches a foreign hook. */
+  mark: string
+  shim: string
+}
+
+/** The chained-shim install shared by every bro git hook: a foreign
+ *  hook is renamed .local and rides inside the shim (its veto
+ *  survives), a stale bro shim refreshes in place, and a failed write
+ *  restores the original — nothing may strand a user's hook. */
+function installHookShim(cwd: string, spec: HookShimSpec): InstallResult {
   const dir = gitHooksDir(cwd)
   if (dir === null) {
     return { state: 'error', err: 'not a git repository' }
   }
-  const hook = join(dir, HOOK_NAME)
-  const local = join(dir, LOCAL_HOOK)
+  const hook = join(dir, spec.name)
+  const local = join(dir, spec.localName)
   try {
     if (existsSync(hook)) {
       const cur = readFileSync(hook, 'utf8')
-      if (cur.includes(BRO_HOOK_MARK)) {
-        if (cur === hookShim(version)) {
+      if (cur.includes(spec.mark)) {
+        if (cur === spec.shim) {
           return { state: 'already', path: hook }
         }
         // stale bro shim — refresh in place (a .local chain survives)
-        writeFileSync(hook, hookShim(version))
+        writeFileSync(hook, spec.shim)
         chmodSync(hook, 0o755)
         return { state: 'installed', path: hook }
       }
       if (existsSync(local)) {
         return {
           state: 'error',
-          err: `${LOCAL_HOOK} already exists — refusing to chain a second hook; uninstall it or merge manually`,
+          err: `${spec.localName} already exists — refusing to chain a second hook; uninstall it or merge manually`,
         }
       }
       renameSync(hook, local)
       try {
-        writeFileSync(hook, hookShim(version))
+        writeFileSync(hook, spec.shim)
         chmodSync(hook, 0o755)
       } catch (e) {
         // restore — a failed shim write must not strand the user's hook
@@ -462,7 +483,7 @@ export function installCommitHook(cwd: string, version: string): InstallResult {
       return { state: 'chained', path: hook }
     }
     mkdirSync(dir, { recursive: true })
-    writeFileSync(hook, hookShim(version))
+    writeFileSync(hook, spec.shim)
     chmodSync(hook, 0o755)
     return { state: 'installed', path: hook }
   } catch (e) {
@@ -470,18 +491,25 @@ export function installCommitHook(cwd: string, version: string): InstallResult {
   }
 }
 
-export function uninstallCommitHook(cwd: string): InstallResult {
+/** Removes a bro shim (any of the marks — a newer shim's mark is still
+ *  bro's), restores a chained .local, refuses a foreign hook. */
+function uninstallHookShim(
+  cwd: string,
+  name: string,
+  localName: string,
+  mark: string
+): InstallResult {
   const dir = gitHooksDir(cwd)
   if (dir === null) {
     return { state: 'error', err: 'not a git repository' }
   }
-  const hook = join(dir, HOOK_NAME)
-  const local = join(dir, LOCAL_HOOK)
+  const hook = join(dir, name)
+  const local = join(dir, localName)
   try {
     const had = existsSync(hook)
     if (had) {
-      if (!readFileSync(hook, 'utf8').includes(BRO_HOOK_MARK)) {
-        return { state: 'error', err: `${HOOK_NAME} is not bro's — refusing to remove it` }
+      if (!readFileSync(hook, 'utf8').includes(mark)) {
+        return { state: 'error', err: `${name} is not bro's — refusing to remove it` }
       }
       rmSync(hook)
     }
@@ -493,4 +521,30 @@ export function uninstallCommitHook(cwd: string): InstallResult {
   } catch (e) {
     return { state: 'error', err: (e as Error).message }
   }
+}
+
+export function installCommitHook(cwd: string, version: string): InstallResult {
+  return installHookShim(cwd, {
+    name: HOOK_NAME,
+    localName: LOCAL_HOOK,
+    mark: BRO_HOOK_MARK,
+    shim: hookShim(version),
+  })
+}
+
+export function uninstallCommitHook(cwd: string): InstallResult {
+  return uninstallHookShim(cwd, HOOK_NAME, LOCAL_HOOK, BRO_HOOK_MARK)
+}
+
+export function installRefGuardHook(cwd: string, version: string): InstallResult {
+  return installHookShim(cwd, {
+    name: REFGUARD_HOOK_NAME,
+    localName: REFGUARD_LOCAL_HOOK,
+    mark: REFGUARD_HOOK_MARK,
+    shim: refGuardShim(version),
+  })
+}
+
+export function uninstallRefGuardHook(cwd: string): InstallResult {
+  return uninstallHookShim(cwd, REFGUARD_HOOK_NAME, REFGUARD_LOCAL_HOOK, REFGUARD_HOOK_MARK)
 }
