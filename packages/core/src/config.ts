@@ -459,10 +459,11 @@ export const meshSection: ConfigSection<{
       }
     }
   }
-  return {
-    rig: typeof obj.rig === 'string' && obj.rig.startsWith('mesh://') ? obj.rig : undefined,
-    peers,
+  const out: { rig?: string; peers: Record<string, { rig: string; remote: string }> } = { peers }
+  if (typeof obj.rig === 'string' && obj.rig.startsWith('mesh://')) {
+    out.rig = obj.rig
   }
+  return out
 }
 
 /** Sections core normalizes itself — identical to what the built-in
