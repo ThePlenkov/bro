@@ -276,7 +276,58 @@ export interface ProviderWall {
 
 /** The spec's render: `<provider> walled — <cause>[ til <resetAt>]`. */
 export function wallText(w: ProviderWall): string {
-  return `${w.provider} walled — ${w.cause}${w.until === undefined ? '' : ` til ${w.until}`}`
+  const til = w.until === undefined ? '' : ` til ${w.until}`
+  return `${w.provider} walled — ${w.cause}${til}`
+}
+
+/** Provider walls accumulate per provider — `quota` sticks (a stopped
+ *  entry clears it, nothing else does); `rate` keeps the newest
+ *  unstopped rate_limited death (spawnedAt — a respawn re-stamps it). */
+interface WallAcc {
+  quota: boolean
+  rate?: AgentRegistryEntry
+}
+
+/** A wallable death with provider provenance — `crash`/`auth`/`ok` say
+ *  something about the worker, never the service, and a legacy spawn
+ *  without provider provenance can't map to a wall. */
+function wallable(e: AgentRegistryEntry): e is AgentRegistryEntry & { provider: string } {
+  return (
+    typeof e.provider === 'string' &&
+    e.provider !== '' &&
+    e.stopped !== true &&
+    (e.cause === 'rate_limited' || e.cause === 'quota')
+  )
+}
+
+function foldEntry(acc: WallAcc, e: AgentRegistryEntry): void {
+  if (e.cause === 'quota') {
+    acc.quota = true
+  } else if (acc.rate === undefined || e.spawnedAt > acc.rate.spawnedAt) {
+    acc.rate = e
+  }
+}
+
+/** One provider's verdict — quota dominates; otherwise the newest
+ *  rate_limited walls until its resetAt (indefinitely when none or an
+ *  unparseable one was reported); a passed resetAt is the proof of
+ *  lift. */
+function accWall(provider: string, acc: WallAcc, now: number): ProviderWall | undefined {
+  if (acc.quota) {
+    return { provider, cause: 'quota' }
+  }
+  const e = acc.rate
+  if (e === undefined) {
+    return undefined // unreachable — a non-quota acc exists only via a rate death
+  }
+  const until = typeof e.resetAt === 'string' && e.resetAt !== '' ? e.resetAt : undefined
+  const t = until === undefined ? Number.NaN : Date.parse(until)
+  if (until !== undefined && Number.isFinite(t) && t <= now) {
+    return undefined
+  }
+  return until === undefined
+    ? { provider, cause: 'rate_limited' }
+    : { provider, cause: 'rate_limited', until }
 }
 
 /** Derive walls from registry entries — `rate_limited`/`quota` deaths
@@ -296,40 +347,17 @@ export function deriveProviderWalls(
   registry: Record<string, AgentRegistryEntry>,
   now = Date.now()
 ): ProviderWall[] {
-  const byProvider = new Map<string, { quota: boolean; rate?: AgentRegistryEntry }>()
+  const byProvider = new Map<string, WallAcc>()
   for (const e of Object.values(registry)) {
-    if (
-      typeof e.provider !== 'string' ||
-      e.provider === '' ||
-      e.stopped === true ||
-      (e.cause !== 'rate_limited' && e.cause !== 'quota')
-    ) {
+    if (!wallable(e)) {
       continue
     }
     const acc = byProvider.get(e.provider) ?? { quota: false }
-    if (e.cause === 'quota') {
-      acc.quota = true
-    } else if (acc.rate === undefined || e.spawnedAt > acc.rate.spawnedAt) {
-      acc.rate = e
-    }
+    foldEntry(acc, e)
     byProvider.set(e.provider, acc)
   }
-  const walls: ProviderWall[] = []
-  for (const [provider, acc] of byProvider) {
-    if (acc.quota) {
-      walls.push({ provider, cause: 'quota' })
-      continue
-    }
-    const e = acc.rate!
-    const until = typeof e.resetAt === 'string' && e.resetAt !== '' ? e.resetAt : undefined
-    const t = until === undefined ? Number.NaN : Date.parse(until)
-    if (until === undefined || Number.isNaN(t) || t > now) {
-      walls.push(
-        until === undefined
-          ? { provider, cause: 'rate_limited' }
-          : { provider, cause: 'rate_limited', until }
-      )
-    }
-  }
-  return walls.sort((a, b) => a.provider.localeCompare(b.provider))
+  return [...byProvider]
+    .map(([provider, acc]) => accWall(provider, acc, now))
+    .filter((w): w is ProviderWall => w !== undefined)
+    .sort((a, b) => a.provider.localeCompare(b.provider))
 }
