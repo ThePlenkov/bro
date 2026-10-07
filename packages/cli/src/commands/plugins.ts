@@ -300,17 +300,16 @@ export function clientNames(): string[] {
  *  module ships `id:"bro.cli"` + `kind:"opencode-tui"`); the pi
  *  extension ships `kind:"pi-extension"`. */
 export function isBroAdapter(text: string): boolean {
-  // the invariant sentinel wins — no rename of a surrounding identifier
-  // can invalidate it (a stale-era `server: bro` read as foreign once:
-  // retro bro-g2f9). Shape checks below recognize adapters shipped
-  // before the marker existed.
-  if (text.includes('bro-adapter')) {
-    return true
-  }
+  // ownership needs the `id:"bro"` claim AND a family token — a bare
+  // `bro-adapter` mention in a foreign file must not read as ours.
+  // The sentinel survives renames of every other identifier (a
+  // stale-era `server: bro` read as foreign once: retro bro-g2f9);
+  // shape checks recognize adapters shipped before the marker existed.
   if (!/\bid:\s*["']bro(?:\.cli)?["']/.test(text)) {
     return false
   }
   return (
+    text.includes('bro-adapter') ||
     /\bserver:\s*\w+/.test(text) ||
     /\bkind:\s*["']pi-extension["']/.test(text) ||
     /\bkind:\s*["']opencode-tui["']/.test(text)

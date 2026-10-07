@@ -106,8 +106,12 @@ describe('isBroAdapter', () => {
     assert.ok(!isBroAdapter('export default {id:"bro"}\n'))
   })
 
-  test('the sentinel comment survives any shape', () => {
-    assert.ok(isBroAdapter('// bro-adapter\nexport default {}\n'))
+  test('the sentinel alone does not own a slot — the id claim is required', () => {
+    // review finding: a foreign module that merely mentions the marker
+    // must not be overwritten without --force
+    assert.ok(isBroAdapter('// bro-adapter\nexport default {id:"bro"}\n'))
+    assert.ok(!isBroAdapter('// bro-adapter\nexport default {}\n'))
+    assert.ok(!isBroAdapter('// mentions bro-adapter in prose\nexport const x = 1\n'))
   })
 })
 
