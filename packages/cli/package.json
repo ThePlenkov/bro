@@ -50,7 +50,8 @@
         "inputs": [
           "default",
           "{workspaceRoot}/skills/**/*",
-          "{workspaceRoot}/formulas/**/*"
+          "{workspaceRoot}/formulas/**/*",
+          "{workspaceRoot}/packages/*/dist/**/*"
         ]
       }
     }

@@ -47,6 +47,7 @@ export {
   DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
   defineConfig,
   fleetSection,
+  meshSection,
   loadConfig,
   PERSONALITIES,
   probeConfigFile,
