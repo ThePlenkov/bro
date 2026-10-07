@@ -84,6 +84,10 @@ describe('systemd text', () => {
     assert.match(systemdService('/r%po', '1', '/p'), /WorkingDirectory=\/r%%po/)
   })
 
+  test('a newline in the checkout path refuses — it would inject a directive', () => {
+    assert.throws(() => systemdService('/r\nExecStart=/bin/evil', '1', '/p'), /newline/)
+  })
+
   test('timer fires on boot and on a cadence', () => {
     const t = systemdTimer('bro-watch-deadbeef', 90)
     assert.match(t, /OnBootSec=90s/)
