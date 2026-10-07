@@ -402,6 +402,38 @@ export const fleetSection: ConfigSection<{
   }
 }
 
+/** bro.config.json `query` section — `query`-plan defaults (spec
+ *  bro-14h8.1). `concurrency` is the plan-level default a plan's own
+ *  `concurrency` overrides; `env` is a literal overlay applied UNDER
+ *  each step's `env` — instance pinning (`GITLAB_HOST`, `GH_HOST`,
+ *  `ATLASSIAN_API_URL`), never credentials. */
+export const querySection: ConfigSection<{
+  concurrency: number
+  env: Record<string, string>
+}> = (raw) => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
+    concurrency?: unknown
+    env?: unknown
+  }
+  const env: Record<string, string> = {}
+  if (typeof obj.env === 'object' && obj.env !== null) {
+    for (const [k, v] of Object.entries(obj.env)) {
+      if (typeof v === 'string') {
+        env[k] = v
+      }
+    }
+  }
+  return {
+    concurrency:
+      typeof obj.concurrency === 'number' &&
+      Number.isInteger(obj.concurrency) &&
+      obj.concurrency >= 1
+        ? obj.concurrency
+        : DEFAULT_CONFIG.query.concurrency,
+    env,
+  }
+}
+
 /** Sections core normalizes itself — identical to what the built-in
  *  plugins declare as their configSchema. */
 const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
@@ -413,6 +445,7 @@ const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   providers: providersSection as ConfigSection<unknown>,
   sdd: sddSection as ConfigSection<unknown>,
   fleet: fleetSection as ConfigSection<unknown>,
+  query: querySection as ConfigSection<unknown>,
 }
 
 export interface BroConfig {
@@ -485,6 +518,10 @@ export interface BroConfig {
    *  backends; 0 means uncapped. Default 3. `profiles` holds the named
    *  spawn presets `bro agents up --profile` resolves (spec bro-5hx1.1). */
   fleet: { maxConcurrent: number; profiles: Record<string, FleetProfile> }
+  /** `query` plan defaults — `concurrency` is the fan-out cap a plan's
+   *  own field overrides (default 4); `env` is the global literal
+   *  overlay applied under each step's `env`. */
+  query: { concurrency: number; env: Record<string, string> }
   /** External plugin specifiers — relative paths or package names the CLI
    *  resolves from the repo and imports at startup. Each module's default
    *  export must be a BroPlugin (or an array of them). */
@@ -512,6 +549,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   providers: {},
   sdd: { mode: 'off', dir: 'specs' },
   fleet: { maxConcurrent: 3, profiles: {} },
+  query: { concurrency: 4, env: {} },
   plugins: [],
 }
 

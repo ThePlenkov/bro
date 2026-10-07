@@ -25,6 +25,7 @@ import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { gitTry } from './git.ts'
 import type { EventsFacade } from './events.ts'
+import type { QueryFacade } from './queries.ts'
 import type { JudgeFacade } from './judge.ts'
 import type { ReviewFacade } from './review.ts'
 import type { Guard } from './guards.ts'
@@ -57,6 +58,10 @@ export interface FacadeMap {
   specs: SpecStore
   judge: JudgeFacade
   events: EventsFacade
+  /** Raw GraphQL data plane — `query` plans fan out over it
+   *  (spec bro-14h8.1). Distinct from `providers[]`, which is the
+   *  model plane. */
+  queries: QueryFacade
 }
 
 export type MaybePromise<T> = T | Promise<T>
@@ -143,6 +148,7 @@ export interface Connector {
   specs?(ctx: ConnectorCtx): SpecStore
   judge?(ctx: ConnectorCtx): JudgeFacade
   events?(ctx: ConnectorCtx): EventsFacade
+  queries?(ctx: ConnectorCtx): QueryFacade
   /** Only ever picked BY NAME (`"connectors": {"<kind>": "<name>"}`) —
    *  never by detection, and never a reason to warn about ambiguity on
    *  its own. A transport that must be opted into (it needs a daemon, or

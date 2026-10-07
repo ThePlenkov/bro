@@ -5,8 +5,9 @@
  */
 import { ghTry, type Connector } from '@broject/core'
 import { githubReview } from './reviews.ts'
+import { githubQueries } from './queries.ts'
 
-export { githubReview }
+export { githubReview, githubQueries }
 
 export const githubConnector: Connector = {
   name: 'github',
@@ -26,4 +27,5 @@ export const githubConnector: Connector = {
       : 'gh not authenticated — run `gh auth login`'
   },
   reviews: (ctx) => githubReview(ctx.dir),
+  queries: (ctx) => githubQueries(ctx.dir),
 }
