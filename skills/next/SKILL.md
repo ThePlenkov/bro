@@ -16,7 +16,7 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd init` done.
 ```text
 bro next          → claims the top ready bead, prints the work order
    implement      → branch, code, tests — verify like CI
-   PR             → gh pr create (ready — draft iff a human merges) → bro act status → bro act merge
+   PR             → gh pr create (ready — /next owns the merge; drafts are for merge=human flows) → bro act status → bro act merge
    bd close <id>  → reason = the PR that landed it
    bro next       → repeat until "backlog empty"
 ```
