@@ -431,6 +431,25 @@ describe('githubReview', { skip: WIN32 }, () => {
     })
   })
 
+  test('the queue is asked about the PR base, not the stack target', () => {
+    // STACK_PULL is position 2 of 4: it merges INTO stack/s/1-a while the
+    // stack targets main. The queue that governs this merge is the one on
+    // the branch it lands on, so the query names stack/s/1-a. Asking about
+    // main instead would push the PR at a queue that does not govern its
+    // own base -- and miss one that does, if stack/s/1-a ever requires it.
+    withFakeGh({ FAKE_GH_PULL: STACK_PULL }, (log) => {
+      githubReview().mergePr(target, {
+        method: 'squash',
+        expectedHeadSha: 'abc123',
+      })
+      const query = readFileSync(log, 'utf8')
+        .split('\n')
+        .find((l) => l.includes('mergeQueue(branch:'))
+      assert.match(query ?? '', /b=stack\/s\/1-a/)
+      assert.doesNotMatch(query ?? '', /b=main/)
+    })
+  })
+
   test('a merge rejected as stack-only falls back to merge-async (no `.stack` field seen)', () => {
     withFakeGh(
       {
