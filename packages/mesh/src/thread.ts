@@ -21,8 +21,12 @@ export interface ThreadState {
   request?: MeshEnvelope
   /** all lifecycle envelopes seen for the thread */
   envelopes: MeshEnvelope[]
+  /** envelope id → the bound peer rig the record arrived over. The
+   *  binding is the authoritative sender for replies; a record with
+   *  no entry came from our own store. */
+  provenance: Record<string, string>
   stage?: ThreadStage
-  /** the side that owes the next move */
+  /** the side that owes the next move — absent on a terminal verdict */
   turn?: 'requester' | 'worker'
   errors: string[]
 }
@@ -70,7 +74,7 @@ export function meshThread(
   gitCommon: string,
   opts: { pull?: boolean } = {},
 ): ThreadState {
-  const state: ThreadState = { envelopes: [], errors: [] }
+  const state: ThreadState = { envelopes: [], provenance: {}, errors: [] }
   const seen = new Set<string>()
 
   const own = ownBeads(dir)
@@ -91,6 +95,7 @@ export function meshThread(
     if (r.envelope.thread === thread && !seen.has(r.envelope.id)) {
       seen.add(r.envelope.id)
       state.envelopes.push(r.envelope)
+      state.provenance[r.envelope.id] = r.peerRig
     }
   }
 
@@ -103,8 +108,10 @@ export function meshThread(
     }
   }
   state.stage = stage
+  // both verdicts are terminal — a rejected thread is done, not the
+  // worker's turn; a revised result re-opens as a new request thread
   state.turn =
-    stage === 'posted' || stage === 'claimed' || stage === 'rejected'
+    stage === 'posted' || stage === 'claimed'
       ? 'worker'
       : stage === 'submitted'
         ? 'requester'

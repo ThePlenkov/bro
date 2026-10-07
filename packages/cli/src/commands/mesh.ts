@@ -365,21 +365,27 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
   const { rig, state } = threadAnchor(dir, thread, !args.includes('--no-pull'))
   const request = state.request!
 
+  if (state.stage === 'accepted' || state.stage === 'rejected') {
+    console.error(`error: thread "${thread}" is already ${state.stage}`)
+    process.exit(2)
+  }
+
+  // the reply's `to` is the other side's rig: the peer binding it
+  // arrived over when we have one, else the envelope's own from
+  // (own-store records were written with ours)
+  const senderOf = (e: { id: string; from: string }): string => state.provenance[e.id] ?? e.from
+
   // worker verbs answer the requester; requester verdicts answer the worker
   let to: string
   if (kind === 'claim' || kind === 'result') {
-    to = request.from
+    to = senderOf(request)
   } else {
     const worker = [...state.envelopes].reverse().find((e) => e.kind === 'claim' || e.kind === 'result')
     if (worker === undefined) {
       console.error(`error: nothing to ${kind} — no claim/result on thread "${thread}" yet`)
       process.exit(2)
     }
-    to = worker.from
-    if (state.stage === 'accepted' || state.stage === 'rejected') {
-      console.error(`error: thread "${thread}" is already ${state.stage}`)
-      process.exit(2)
-    }
+    to = senderOf(worker)
   }
 
   const posted = postEnvelope({
