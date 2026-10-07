@@ -82,7 +82,9 @@ Developing bro itself: see CONTRIBUTING.md.
   belongs to another repo is posted to that rig's inbox, never
   edited in place: `bro request <repo> <title> --for <bead>` drops
   the request bead and blocks mine on `external:<rig>:<id>`;
-  `bro mesh wait <id>` point-checks the answer.
+  `bro wait external:<rig>:<id>` point-checks the far bead (between
+  turns — the dep-marked block is the truth, the watcher a
+  convenience; `bro mesh wait <id>` is the thread-plane read).
 
 ## Convoy fan-out — detach + pins
 
