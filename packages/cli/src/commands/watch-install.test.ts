@@ -81,7 +81,10 @@ describe('systemd text', () => {
   })
 
   test('% is specifier-escaped in paths', () => {
-    assert.match(systemdService('/r%po', '1', '/p'), /WorkingDirectory=\/r%%po/)
+    const s = systemdService('/r%po', '1', '/p%q/bin')
+    assert.match(s, /WorkingDirectory=\/r%%po/)
+    assert.match(s, /Description=bro watch heartbeat — \/r%%po/)
+    assert.match(s, /Environment="PATH=\/p%%q\/bin"/)
   })
 
   test('a newline in the checkout path refuses — it would inject a directive', () => {
