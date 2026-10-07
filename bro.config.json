@@ -31,49 +31,87 @@
       {
         "name": "test-coverage-on-stop",
         "when": {
-          "on": ["stop"],
+          "on": [
+            "stop"
+          ],
           "state": {
             "diff": {
-              "changed": ["src/**", "packages/*/src/**"],
-              "without": ["**/*.test.*", "**/*.spec.*"]
+              "changed": [
+                "src/**",
+                "packages/*/src/**"
+              ],
+              "without": [
+                "**/*.test.*",
+                "**/*.spec.*"
+              ]
             }
           }
         },
-        "say": "src changed and no test file moved — is the new behavior covered?"
+        "say": "src changed and no test file moved \u2014 is the new behavior covered?"
       },
       {
         "name": "spec-drift-nkn6",
         "when": {
-          "on": ["stop"],
+          "on": [
+            "stop"
+          ],
           "state": {
-            "probes": [{ "name": "spec-drift", "args": { "spec": "specs/sessions/bro-nkn6.md" } }]
-          }
-        },
-        "say": "specs/sessions/bro-nkn6.md is stale vs the code it scopes — refresh it"
-      },
-      {
-        "name": "core-vendor-boundary",
-        "when": {
-          "on": ["stop"],
-          "state": {
-            "diff": { "changed": ["packages/core/src/**"] },
             "probes": [
               {
-                "name": "core-vendor",
+                "name": "spec-drift",
                 "args": {
-                  "path": "packages/core/src",
-                  "terms": ["devin", "opencode", "gascity", "tmux", "claude", "codex", "gemini", "aider", "paseo", "cao"]
+                  "spec": "specs/sessions/bro-nkn6.md"
                 }
               }
             ]
           }
         },
-        "say": "vendor name in packages/core — REVIEW.md: core is vendor-neutral (major); move vendor knowledge to packages/cli/src/session-planes/ or a connector package"
+        "say": "specs/sessions/bro-nkn6.md is stale vs the code it scopes \u2014 refresh it"
+      },
+      {
+        "name": "core-vendor-boundary",
+        "when": {
+          "on": [
+            "stop"
+          ],
+          "state": {
+            "diff": {
+              "changed": [
+                "packages/core/src/**"
+              ]
+            },
+            "probes": [
+              {
+                "name": "core-vendor",
+                "args": {
+                  "path": "packages/core/src",
+                  "terms": [
+                    "devin",
+                    "opencode",
+                    "gascity",
+                    "tmux",
+                    "claude",
+                    "codex",
+                    "gemini",
+                    "aider",
+                    "paseo",
+                    "cao"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "say": "vendor name in packages/core \u2014 REVIEW.md: core is vendor-neutral (major); move vendor knowledge to packages/cli/src/session-planes/ or a connector package"
       },
       {
         "name": "retro-on-stop",
-        "when": { "on": ["stop"] },
-        "say": "session ending — run the retro checklist (skills/retro): loose ends, hand-rolled mechanics → bd gap beads, call economy, `bro learn capture`, `bro debt collect`"
+        "when": {
+          "on": [
+            "stop"
+          ]
+        },
+        "say": "session ending \u2014 run the retro checklist (skills/retro): loose ends, hand-rolled mechanics \u2192 bd gap beads, call economy, `bro learn capture`, `bro debt collect`"
       }
     ]
   },
@@ -113,6 +151,14 @@
       "type": "cli",
       "command": "opencode run --model {model} --auto -f {promptFile} 'Follow the attached instructions.'",
       "model": "opencode/space-bunny-free"
+    }
+  },
+  "mesh": {
+    "peers": {
+      "sverka": {
+        "rig": "mesh://sverka-dev/sverka",
+        "remote": "../sverka"
+      }
     }
   }
 }

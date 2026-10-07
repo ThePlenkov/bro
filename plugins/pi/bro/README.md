@@ -35,6 +35,6 @@ or load it ad hoc: `pi --extension <path>/bro.ts`.
 The module resolves the CLI as local dist (bundled sibling or the
 checkout's `packages/cli/dist/index.js` found walking up), then `bro`
 on PATH passing the `bro hooks` probe, then `npx -y --prefer-offline
-@broject/bro@0.2.4`. Every call is async and fail-open —
+@broject/bro@0.2.5`. Every call is async and fail-open —
 a missing CLI or a non-bro directory means no widget and no context,
 never an error.

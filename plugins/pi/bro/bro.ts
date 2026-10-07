@@ -200,7 +200,7 @@ function checkoutCli(): string | null {
 
 /** Last-resort npx spec, pinned to this module's own version — the pin is
  *  rewritten by gen-plugins on every gen/release run. */
-const NPX_PIN = '@broject/bro@0.2.4'
+const NPX_PIN = '@broject/bro@0.2.5'
 
 /** SIGKILL a hung child on a timer; the detached group flag lets one
  *  kill take spawned grandchildren down with it. */
