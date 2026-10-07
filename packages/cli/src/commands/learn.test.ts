@@ -71,6 +71,36 @@ describe('bro learn', () => {
     })
   })
 
+  test('add fills the on array from repeated and comma-joined --on', () => {
+    const f = learnFixture()
+    inside(f.main, f.root, () => {
+      const r = f.run([
+        'add',
+        '--lesson',
+        'a rule that fires on several events',
+        '--on',
+        'session-start',
+        '--on',
+        'post-tool',
+        '--on',
+        'prompt-submit,session-start',
+        '--evidence',
+        'bead:bro-abc',
+      ])
+      assert.equal(r.code, 0, r.stderr)
+      const lesson = JSON.parse(f.run(['show', r.stdout.trim()]).stdout) as {
+        trigger: { on: string[] }
+      }
+      // every occurrence counts, order preserved, repeats collapse —
+      // the Array type is reachable from add, not just from capture
+      assert.deepEqual(lesson.trigger.on, [
+        'session-start',
+        'post-tool',
+        'prompt-submit',
+      ])
+    })
+  })
+
   test('add refuses a duplicate id', () => {
     const f = learnFixture()
     inside(f.main, f.root, () => {
