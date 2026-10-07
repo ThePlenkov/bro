@@ -605,6 +605,38 @@ describe('bro agents up — class routing', () => {
     }
   })
 
+  test('an explicit provider override drops the routed chain’s model pin', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      // default's chain head pins a model — --provider picks another
+      // provider entirely, and its own default model applies instead
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({
+          agents: { native: { command: 'node {promptFile}' } },
+          providers: {
+            local: { type: 'cli', command: 'node {promptFile} -m {model}' },
+            alt: { type: 'cli', command: 'node {promptFile} -m {model}', model: 'alt-default' },
+          },
+          fleet: {
+            routing: { default: { chain: [{ provider: 'local', model: 'sweep-1' }] } },
+          },
+        })
+      )
+      const r = await agents([
+        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN), '--provider', 'alt',
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      const entry = readAgentRegistry(fx.main)['fx-1']!
+      assert.equal(entry.provider, 'alt')
+      assert.equal(entry.model, 'alt-default') // alt's own default, NOT the local lane's pin
+      await agents(['down', 'fx-1'])
+    } finally {
+      fx.restore()
+    }
+  })
+
   test('declared routing + unclassed bead resolves `default`; --provider still outranks the chain head', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {

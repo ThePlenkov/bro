@@ -530,12 +530,18 @@ export function spawnStepAgent(
   // provider. The routed chain head supplies the provider only when no
   // explicit lane was picked (--provider/--profile outrank the table).
   const routed = routeStepClass(env.fleet, env.providers ?? {}, beads, req.molStep, req.class)
+  const provider = req.provider ?? profile?.provider ?? routed?.provider
   return resolveSpawnProvider(
     env,
     conn.name,
     {
-      provider: req.provider ?? profile?.provider ?? routed?.provider,
-      model: req.model ?? profile?.model ?? routed?.model,
+      provider,
+      // the routed model pin pairs with the routed provider — an
+      // explicit provider override must not inherit chain[0]'s model
+      model:
+        req.model ??
+        profile?.model ??
+        (provider !== undefined && provider === routed?.provider ? routed.model : undefined),
       autoApprove: req.autoApprove ?? profile?.autoApprove,
     },
     req.provider !== undefined ? 'flag' : profile === undefined ? 'backend' : 'profile'

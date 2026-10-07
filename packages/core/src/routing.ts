@@ -198,6 +198,10 @@ export interface ResolvedClass {
   chain: ChainEntry[]
   /** `entry.onWall` ?? priority default — P0/P1 park, P2+ fallthrough. */
   onWall: OnWall
+  /** chain[0]'s slot — `provider`/`model` are a PAIR: the pin applies
+   *  only when the routed provider is the one used; a provider
+   *  override must not inherit this model (it belongs to chain[0]'s
+   *  provider, not the override's). */
   provider: string
   model?: string
 }

@@ -228,7 +228,8 @@ export function printFleetTable(
   degraded: string[],
   conflicts: string[],
   prErrors: string[] = [],
-  walls: ProviderWall[] = []
+  walls: ProviderWall[] = [],
+  wallsError?: string
 ): void {
   if (rows.length > 0) {
     for (const l of fleetTableLines(rows)) {
@@ -239,6 +240,9 @@ export function printFleetTable(
     // spec bro-1x7p: a walled provider renders `walled — <cause>[ til
     //    <resetAt>]` — operational state like occupancy, never a warning
     console.log(wallText(w))
+  }
+  if (wallsError !== undefined) {
+    console.error(`warning: provider walls unreadable — ${wallsError}`)
   }
   for (const d of degraded) {
     console.error(`warning: backend degraded — ${d}`)
@@ -299,6 +303,9 @@ export interface FleetPayload {
   /** Provider walls derived from the registry's classified deaths
    *  (spec bro-1x7p) — a walled provider renders here, never silently. */
   walls: ProviderWall[]
+  /** the wall derivation itself threw (corrupt registry) — additive
+   *  data failed, never the rows; renders as a warning */
+  wallsError?: string
 }
 
 async function collectFleet(dir: string): Promise<FleetPayload> {
@@ -330,6 +337,15 @@ async function collectFleet(dir: string): Promise<FleetPayload> {
   // budget.live, so the table line and the budget section can never
   // disagree about how much of the fleet is up
   const budget = budgetSnapshotFor(dir, env)
+  // walls are additive data — a failed derivation (corrupt registry)
+  // degrades this one datum, never the rows/budget already collected
+  let walls: ProviderWall[] = []
+  let wallsError: string | undefined
+  try {
+    walls = providerWallsFor(dir)
+  } catch (err) {
+    wallsError = err instanceof Error ? err.message : String(err)
+  }
   return {
     rows,
     degraded,
@@ -337,7 +353,8 @@ async function collectFleet(dir: string): Promise<FleetPayload> {
     prErrors,
     occupancy: { occupied: budget.live, maxConcurrent: budget.maxConcurrent },
     budget,
-    walls: providerWallsFor(dir),
+    walls,
+    wallsError,
   }
 }
 
@@ -408,6 +425,9 @@ export function liveFrame(payload: FleetPayload, ts: Date, everySec: number): st
     ...payload.degraded.map((d) => `warning: backend degraded — ${d}`),
     ...payload.conflicts.map((c) => `warning: agent conflict — ${c}`),
     ...payload.prErrors.map((e) => `warning: PR lookup failed — ${e}`),
+    ...(payload.wallsError === undefined
+      ? []
+      : [`warning: provider walls unreadable — ${payload.wallsError}`]),
   ]
   if (warnings.length > 0) {
     lines.push('', ...warnings)
@@ -556,18 +576,23 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
     return
   }
 
-  const { rows, degraded, conflicts, prErrors, occupancy, budget, walls } = await collectFleet(dir)
+  const { rows, degraded, conflicts, prErrors, occupancy, budget, walls, wallsError } =
+    await collectFleet(dir)
 
   if (args.json) {
     console.log(
-      JSON.stringify({ rows, degraded, conflicts, prErrors, occupancy, budget, walls }, null, 2)
+      JSON.stringify(
+        { rows, degraded, conflicts, prErrors, occupancy, budget, walls, wallsError },
+        null,
+        2
+      )
     )
     return
   }
   console.log(occupancyLine(occupancy))
-  if (rows.length === 0 && walls.length === 0) {
+  if (rows.length === 0 && walls.length === 0 && wallsError === undefined) {
     console.log('no open molecules — nothing in the fleet')
     return
   }
-  printFleetTable(rows, degraded, conflicts, prErrors, walls)
+  printFleetTable(rows, degraded, conflicts, prErrors, walls, wallsError)
 }

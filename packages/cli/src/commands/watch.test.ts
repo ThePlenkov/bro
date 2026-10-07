@@ -201,6 +201,15 @@ describe('renderSnapshot', () => {
     assert.match(text, /warning: PR lookup failed — work\/x: boom/)
   })
 
+  test('a failed wall derivation warns — rows survive, the section does not report unavailable', () => {
+    const text = renderSnapshot(
+      snap({ fleet: { rows: [row()], degraded: [], conflicts: [], wallsError: 'registry JSON corrupt' } })
+    )
+    assert.match(text, /warning: provider walls unreadable — registry JSON corrupt/)
+    assert.match(text, /s-1\s+in_progress\s+running \(pid 1\)/)
+    assert.doesNotMatch(text, /fleet\n  unavailable/)
+  })
+
   test('attention and sections render their contents', () => {
     const text = renderSnapshot(
       snap({

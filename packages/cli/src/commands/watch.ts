@@ -108,6 +108,10 @@ export interface WatchSnapshot {
     /** Provider walls derived from the registry (spec bro-1x7p) —
      *  surfaced in attention; absent on older snapshots. */
     walls?: ProviderWall[]
+    /** the wall derivation itself threw (corrupt registry) — additive
+     *  data failed, never the rows; renders as a warning, not
+     *  `unavailable` */
+    wallsError?: string
     /** set when the fleet plane itself threw (agent backends or the
      *  molecule re-read in fleetRows) — the section renders
      *  `unavailable`, never a false empty fleet */
@@ -325,7 +329,16 @@ async function fleetPlane(
       worktreeList(prErrors),
       prErrors
     )
-    return { rows, degraded, conflicts, prErrors, walls: providerWallsFor(dir) }
+    // walls are additive data — a failed derivation (corrupt registry)
+    // degrades this one datum, never the rows the plane collected
+    let walls: ProviderWall[] | undefined
+    let wallsError: string | undefined
+    try {
+      walls = providerWallsFor(dir)
+    } catch (err) {
+      wallsError = errText(err)
+    }
+    return { rows, degraded, conflicts, prErrors, walls, wallsError }
   } catch (err) {
     return { rows: [], degraded: [], conflicts: [], prErrors: [], error: errText(err) }
   }
@@ -456,6 +469,9 @@ function fleetLines(fleet: WatchSnapshot['fleet']): string[] {
   }
   for (const w of fleet.walls ?? []) {
     out.push(`  ${wallText(w)}`)
+  }
+  if (fleet.wallsError !== undefined) {
+    out.push(`  warning: provider walls unreadable — ${fleet.wallsError}`)
   }
   return out
 }
