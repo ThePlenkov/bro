@@ -77,7 +77,7 @@ function withMeshConfig<T>(dir: string, mutate: (cfg: MeshConfigFile) => T): T {
 
 function cmdPeersList(dir: string): void {
   const peers = loadConfig(dir).mesh.peers
-  const aliases = Object.keys(peers).sort()
+  const aliases = Object.keys(peers).sort((a, b) => a.localeCompare(b))
   if (aliases.length === 0) {
     console.log('no peers — `bro mesh peers add <alias> <rig> <remote>` binds one')
     return
@@ -105,7 +105,7 @@ function cmdPeersAdd(dir: string, args: string[]): void {
   try {
     withMeshConfig(dir, (cfg) => {
       const mesh = cfg.mesh ?? {}
-      const peers = { ...(mesh.peers ?? {}) }
+      const peers = { ...mesh.peers }
       if (peers[alias] !== undefined) {
         console.error(`error: peer "${alias}" already bound — remove it first`)
         process.exit(2)
@@ -129,7 +129,7 @@ function cmdPeersRemove(dir: string, args: string[]): void {
   try {
     withMeshConfig(dir, (cfg) => {
       const mesh = cfg.mesh ?? {}
-      const peers = { ...(mesh.peers ?? {}) }
+      const peers = { ...mesh.peers }
       if (peers[alias] === undefined) {
         console.error(`error: no peer "${alias}"`)
         process.exit(2)

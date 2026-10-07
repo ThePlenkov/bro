@@ -30,7 +30,10 @@ export function formatRigUri(rig: RigRef): string {
  *  parseable origin is unaddressed: callers must treat null as "this
  *  rig cannot be written to by name" and surface it, not guess. */
 export function rigFromRemoteUrl(url: string): RigRef | null {
-  let rest = url.trim().replace(/\/+$/, '')
+  let rest = url.trim()
+  while (rest.endsWith('/')) {
+    rest = rest.slice(0, -1)
+  }
   if (rest.endsWith('.git')) {
     rest = rest.slice(0, -'.git'.length)
   }

@@ -41,7 +41,7 @@ function rowToBead(row: { id: string; title: string; description?: string; notes
 
 function admit(peer: MeshPeer, bead: BeadLike, selfRig: string, out: InboundRequest[]): void {
   const env = envelopeFromBead(bead)
-  if (env === null || env.kind !== 'request' || env.to !== selfRig) {
+  if (env?.kind !== 'request' || env.to !== selfRig) {
     return
   }
   out.push({ peer: peer.alias, peerRig: peer.rig, envelope: env, mismatch: env.from !== peer.rig, beadId: bead.id })
@@ -81,7 +81,7 @@ function inboxLocal(peer: MeshPeer, selfRig: string, out: InboundRequest[], erro
     errors.push(`${peer.alias}: local checkout ${peer.remote} does not resolve`)
     return
   }
-  const p = spawnSync('bd', ['-C', dir, 'list', '--json'], {
+  const p = spawnSync('bd', ['-C', dir, 'list', '--json'], {  // NOSONAR — PATH lookup is the contract (same as core/git.ts)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 30_000,

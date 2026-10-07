@@ -17,7 +17,7 @@ export interface DoltResult {
 }
 
 function dolt(args: string[], cwd?: string): DoltResult {
-  const p = spawnSync('dolt', args, {
+  const p = spawnSync('dolt', args, {  // NOSONAR — PATH lookup is the contract (same as core/git.ts)
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',

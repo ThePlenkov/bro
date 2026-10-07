@@ -169,16 +169,39 @@ export function validateEnvelope(raw: unknown): string[] {
   if (typeof e.kind !== 'string' || !(MESH_KINDS as readonly string[]).includes(e.kind)) {
     errs.push(`kind must be one of ${MESH_KINDS.join('|')}`)
   }
-  if (typeof e.thread !== 'string' || e.thread === '') {
-    errs.push('thread required')
+  errs.push(...threadErrors(e))
+  errs.push(...rigErrors(e))
+  if (typeof e.title !== 'string' || e.title === '') {
+    errs.push('title required')
   }
-  if (typeof e.thread === 'string' && e.thread !== '') {
-    if (e.kind === 'request' && e.thread !== e.id) {
-      // a request threads to itself; lifecycle messages carry their own
-      // id but must point at the request's thread
-      errs.push('a request thread must equal its id')
+  if (e.body !== undefined && typeof e.body !== 'string') {
+    errs.push('body must be a string')
+  }
+  for (const [field, name] of [
+    [e.refs, 'refs'],
+    [e.evidence, 'evidence'],
+  ] as const) {
+    if (field !== undefined && !Array.isArray(field)) {
+      errs.push(`${name} must be an array`)
     }
   }
+  return errs
+}
+
+/** thread must be a non-empty string; a request additionally threads
+ *  to itself (lifecycle messages carry their own id but must point at
+ *  the request's thread). */
+function threadErrors(e: Record<string, unknown>): string[] {
+  if (typeof e.thread !== 'string' || e.thread === '') {
+    return ['thread required']
+  }
+  return e.kind === 'request' && e.thread !== e.id
+    ? ['a request thread must equal its id']
+    : []
+}
+
+function rigErrors(e: Record<string, unknown>): string[] {
+  const errs: string[] = []
   for (const [field, name] of [
     [e.from, 'from'],
     [e.to, 'to'],
@@ -186,18 +209,6 @@ export function validateEnvelope(raw: unknown): string[] {
     if (typeof field !== 'string' || parseRigUri(field) === null) {
       errs.push(`${name} must be a mesh:// rig uri`)
     }
-  }
-  if (typeof e.title !== 'string' || e.title === '') {
-    errs.push('title required')
-  }
-  if (e.body !== undefined && typeof e.body !== 'string') {
-    errs.push('body must be a string')
-  }
-  if (e.refs !== undefined && !Array.isArray(e.refs)) {
-    errs.push('refs must be an array')
-  }
-  if (e.evidence !== undefined && !Array.isArray(e.evidence)) {
-    errs.push('evidence must be an array')
   }
   return errs
 }
