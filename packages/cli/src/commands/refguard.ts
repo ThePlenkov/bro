@@ -42,7 +42,11 @@ export const REFGUARD_HOOK_NAME = 'reference-transaction'
 export const REFGUARD_LOCAL_HOOK = 'reference-transaction.local'
 
 const HEADS = 'refs/heads/'
-const ZERO = '0'.repeat(40)
+
+/** The null oid is all-zero in EVERY object-hash size — 40 chars for
+ *  sha1 repos, 64 for sha256. Match the shape, not one length, or a
+ *  sha256 repo's 64-zero create reads as a verified old. */
+const isNullOid = (oid: string): boolean => /^0+$/.test(oid)
 
 export interface RefUpdate {
   oldSha: string
@@ -84,11 +88,11 @@ function effectiveOld(
   u: RefUpdate,
   resolveRef: (ref: string) => string | null
 ): string | null {
-  if (!u.ref.startsWith(HEADS) || u.newSha === ZERO) {
+  if (!u.ref.startsWith(HEADS) || isNullOid(u.newSha)) {
     return null // not a local branch, or a delete
   }
-  const old = u.oldSha !== ZERO ? u.oldSha : resolveRef(u.ref)
-  if (old === null || old === ZERO || old === u.newSha) {
+  const old = isNullOid(u.oldSha) ? resolveRef(u.ref) : u.oldSha
+  if (old === null || isNullOid(old) || old === u.newSha) {
     return null // genuine create or no-op write
   }
   return old

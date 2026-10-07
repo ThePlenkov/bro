@@ -188,6 +188,9 @@ describe('refGuardVerdict — the veto matrix', () => {
     for (const u of [
       head('new', ZERO, A),
       head('gone', A, ZERO),
+      // sha256 repos write 64-char null oids — same semantics
+      head('new', '0'.repeat(64), A),
+      head('gone', A, '0'.repeat(64)),
       head('main', A, A),
       { oldSha: A, newSha: B, ref: 'refs/remotes/origin/main' },
       { oldSha: A, newSha: B, ref: 'ORIG_HEAD' },
