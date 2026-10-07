@@ -71,6 +71,11 @@ Developing bro itself: see CONTRIBUTING.md.
   mirrors the merge target: draft iff a human merges (`merge=human`);
   the convoy default (`merge=auto`) opens a ready PR — the act gate is
   the merge mechanism. A dirty tree at session end is lost work.
+- **Foreign findings become requests, never patches** — work that
+  belongs to another repo is posted to that rig's inbox, never
+  edited in place: `bro request <repo> <title> --for <bead>` drops
+  the request bead and blocks mine on `external:<rig>:<id>`;
+  `bro mesh wait <id>` point-checks the answer.
 
 ## Convoy fan-out — detach + pins
 
