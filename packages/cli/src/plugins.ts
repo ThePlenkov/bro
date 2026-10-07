@@ -18,6 +18,7 @@ import {
   mailboxConnector,
   notifyConnector,
   registerConnector,
+  meshSection,
   querySection,
   sddSection,
   stackSection,
@@ -76,6 +77,7 @@ import { runStatusCommand } from './commands/status.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runServeCommand } from './commands/serve.ts'
 import { runSetupCommand } from './commands/setup.ts'
+import { runMeshCommand } from './commands/mesh.ts'
 import { runSpecCommand, sddConnector } from './commands/spec.ts'
 import { runStackCommand } from './commands/stack.ts'
 import { SPEC_CONNECTORS } from './spec-connectors.ts'
@@ -387,6 +389,13 @@ export const PLUGINS: BroPlugin[] = [
         process.exit(code)
       }
     },
+  }),
+  definePlugin({
+    name: 'mesh',
+    summary: 'Inter-rig work federation: me|peers add|list|remove — request/lifecycle lands next (specs/mesh)',
+    run: runMeshCommand,
+    configKey: 'mesh',
+    configSchema: meshSection,
   }),
   definePlugin({
     name: 'run',

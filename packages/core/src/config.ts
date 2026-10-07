@@ -434,6 +434,37 @@ export const querySection: ConfigSection<{
   }
 }
 
+/** bro.config.json `mesh` section — the federation seam (specs/mesh).
+ *  `rig` pins this repo's mesh:// identity when the origin remote
+ *  doesn't derive one; `peers` is a map of alias → { rig, remote } —
+ *  the remote is a git/dolt remote the peer's beads store federates
+ *  over (beads-remote binding). */
+export const meshSection: ConfigSection<{
+  rig?: string
+  peers: Record<string, { rig: string; remote: string }>
+}> = (raw) => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
+    rig?: unknown
+    peers?: unknown
+  }
+  const peers: Record<string, { rig: string; remote: string }> = {}
+  if (typeof obj.peers === 'object' && obj.peers !== null) {
+    for (const [alias, entry] of Object.entries(obj.peers)) {
+      if (typeof entry !== 'object' || entry === null) {
+        continue
+      }
+      const e = entry as { rig?: unknown; remote?: unknown }
+      if (typeof e.rig === 'string' && e.rig.startsWith('mesh://') && typeof e.remote === 'string' && e.remote !== '') {
+        peers[alias] = { rig: e.rig, remote: e.remote }
+      }
+    }
+  }
+  return {
+    rig: typeof obj.rig === 'string' && obj.rig.startsWith('mesh://') ? obj.rig : undefined,
+    peers,
+  }
+}
+
 /** Sections core normalizes itself — identical to what the built-in
  *  plugins declare as their configSchema. */
 const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
@@ -446,6 +477,7 @@ const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   sdd: sddSection as ConfigSection<unknown>,
   fleet: fleetSection as ConfigSection<unknown>,
   query: querySection as ConfigSection<unknown>,
+  mesh: meshSection as ConfigSection<unknown>,
 }
 
 /** Every config key core normalizes itself — the authoritative "known
@@ -529,6 +561,11 @@ export interface BroConfig {
    *  own field overrides (default 4); `env` is the global literal
    *  overlay applied under each step's `env`. */
   query: { concurrency: number; env: Record<string, string> }
+  /** Inter-rig federation (specs/mesh). `rig` pins this repo's mesh://
+   *  identity when origin doesn't derive one; `peers` maps alias →
+   *  { rig, remote } — remote is the git URL the peer's beads store
+   *  federates over (read-only pulls, sovereignty rule). */
+  mesh: { rig?: string; peers: Record<string, { rig: string; remote: string }> }
   /** External plugin specifiers — relative paths or package names the CLI
    *  resolves from the repo and imports at startup. Each module's default
    *  export must be a BroPlugin (or an array of them). */
@@ -557,6 +594,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   sdd: { mode: 'off', dir: 'specs' },
   fleet: { maxConcurrent: 3, profiles: {} },
   query: { concurrency: 4, env: {} },
+  mesh: { peers: {} },
   plugins: [],
 }
 

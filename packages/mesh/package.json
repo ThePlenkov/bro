@@ -1,0 +1,45 @@
+{
+  "name": "@broject/mesh",
+  "version": "0.2.4",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@broject/core": "^0.2.0"
+  },
+  "devDependencies": {
+    "tsdown": "^0.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/mesh"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "Inter-rig work federation for bro — mesh:// identity, mesh/1 envelopes, sovereign peers pulling requests over read federation",
+  "keywords": [
+    "federation",
+    "agents",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs"
+}
