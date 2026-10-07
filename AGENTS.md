@@ -85,6 +85,10 @@ Developing bro itself: see CONTRIBUTING.md.
   `bro wait external:<rig>:<id>` point-checks the far bead (between
   turns — the dep-marked block is the truth, the watcher a
   convenience; `bro mesh wait <id>` is the thread-plane read).
+  No checkout means no dep: a rig reachable only through its forge
+  gets a mesh request *issue* instead (body carries the envelope, the
+  thread is the read) — an `external:` ref resolves by opening a beads
+  store at a filesystem path, which an issue is not.
 
 ## Convoy fan-out — detach + pins
 

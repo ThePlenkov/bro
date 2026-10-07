@@ -98,7 +98,7 @@ posted → claimed → submitted ─┬─ accepted
 | `local`        | `bd create` in a known same-machine checkout | dev workstation, today's manual flow |
 | `beads-remote` | **read federation**: subscribe to peer `refs/dolt/data` over the repo's own git remote; inbound = beads addressed to my rig | the mesh default |
 | `wasteland`    | adapter over `wl-commons` wanted board | public rigs, reputation |
-| `github`       | issue transport, body carries the envelope | repos without federation access |
+| `github`       | issue transport, a comment carries the record | repos without federation access |
 
 **Sovereignty rule:** no transport ever writes a foreign store.
 `beads-remote` requests sit on the requester's remote and are *pulled* —
@@ -107,7 +107,9 @@ commons hub.
 
 ### Discovery
 
-- `bro.config.json` — `mesh.peers`: `{ rig, remote }` static entries.
+- `bro.config.json` — `mesh.peers`: `{ rig, remote }` static entries
+  (plus an optional `login`, the account that speaks for the rig, on
+  planes that authenticate by account — github).
 - Any commons/registry (wasteland rig registry) can act as a *public*
   directory later; private meshes need only static config.
 
