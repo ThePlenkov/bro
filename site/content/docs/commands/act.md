@@ -85,6 +85,26 @@ For a watch that must outlive the session, spawn it detached or let
 `bro act rearm` resurrect the dead marker on the next session's nudge —
 `bro drive --every` and `bro watch install` are the durable forms.
 
+## Stacked PRs
+
+GitHub refuses to merge a PR that belongs to a **stack** through either
+`gh pr merge` (GraphQL) or the synchronous merge endpoint — *"must be
+merged using the asynchronous merge REST API"*. `bro act merge` detects
+the stack (the `.stack` field on the PR, or the refusal itself) and merges
+through the async endpoint instead, polling the request's uuid until it
+settles. `bro act wait --merge` is the same merge step, so a watcher on a
+stack layer lands it too.
+
+Two details worth knowing:
+
+- A merge queue owns the strategy. On a base branch that requires one the
+  request enqueues (`enqueued`, not merged) and the command reports the
+  PR's real state — the queue merges later. Elsewhere the requested
+  `--squash`/`--merge`/`--rebase` is honored.
+- **The head branch is kept** on this path: deleting a lower layer's
+  branch closes every PR stacked on it. `--cleanup` still retires the
+  local worktree and branch.
+
 ## Never unwatched
 
 A pushed PR is merged, watched, or handed off — never unwatched. `bro

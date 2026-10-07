@@ -678,6 +678,230 @@ function chunks<T>(items: T[], size: number): T[][] {
   return out
 }
 
+// --- stacked PRs: the asynchronous merge endpoint -------------------------------
+//
+// GitHub refuses both merge paths a stack member can take: the GraphQL
+// `mergePullRequest` mutation (which `gh pr merge` is a client for) and
+// the synchronous `PUT /pulls/{n}/merge` — "must be merged using the
+// asynchronous merge REST API". The async endpoint is the only way in:
+// PUT answers a uuid, GET reports the result until it settles.
+
+interface StackProbe {
+  /** Stack membership — absent on a PR that isn't in one. */
+  stacked: boolean
+  /** Base branch — undefined when the read failed; the merge action's
+   *  queue decision needs it. */
+  base?: string
+}
+
+/** Does this PR sit in a stack, and onto what? `GET /pulls/{n}` carries
+ *  the `stack` object for members (base, size, position, number).
+ *  Every failure — no field on an older API version, an auth or network
+ *  error — reads as "not a stack": a probe must never block a merge the
+ *  sync path can still do, and the reactive net in `mergePr` catches a
+ *  stack the probe missed. */
+function stackProbe(t: PrTarget): StackProbe {
+  const res = ghTry(['api', `repos/${t.repo}/pulls/${t.pr}`])
+  if (res.code !== 0) {
+    return { stacked: false }
+  }
+  try {
+    const body = JSON.parse(res.out) as { stack?: unknown; base?: { ref?: string } }
+    return {
+      stacked: body.stack !== undefined && body.stack !== null,
+      base: body.base?.ref,
+    }
+  } catch {
+    return { stacked: false }
+  }
+}
+
+/** Does the base branch require a merge queue? GraphQL is the only
+ *  surface that answers it (REST exposes no merge-queue state), so one
+ *  `{mergeQueue(branch:){id}}` query. Any failure — GHES without the
+ *  field, a permissions gap — reads as "no queue": the direct path
+ *  keeps the caller's requested merge method, and a wrong guess fails
+ *  loudly at the endpoint instead of silently picking a strategy. */
+function queueRequired(repo: string, base: string): boolean {
+  try {
+    const { owner, name } = parts(repo)
+    const res = ghJson<{ data?: { repository?: { mergeQueue?: { id?: number } | null } } }>([
+      'api',
+      'graphql',
+      '-f',
+      'query=query($o:String!,$r:String!,$b:String!){repository(owner:$o,name:$r){mergeQueue(branch:$b){id}}}',
+      '-f',
+      `o=${owner}`,
+      '-f',
+      `r=${name}`,
+      '-f',
+      `b=${base}`,
+    ])
+    return res.data?.repository?.mergeQueue != null
+  } catch {
+    return false
+  }
+}
+
+interface AsyncMergeResult {
+  status?: 'pending' | 'merged' | 'enqueued' | 'failed'
+  uuid?: string
+  message?: string
+}
+
+/** The merge-async body, read from whichever stream `gh api` used — it
+ *  prints the JSON on stdout for a 2xx *and* for a 4xx (the `gh: … (HTTP
+ *  4xx)` line goes to stderr, verified against gh 2.102), and the 409
+ *  that means "a request for this PR is already pending" carries the
+ *  uuid worth resuming — a re-run must not double-request the merge.
+ *  Unparseable input reads as "no status", which the caller treats as
+ *  unobservable rather than as a verdict. */
+function readAsyncMerge(res: { out: string; err: string }): AsyncMergeResult {
+  for (const text of [res.out, res.err]) {
+    const start = text.indexOf('{')
+    if (start < 0) {
+      continue
+    }
+    try {
+      const body = JSON.parse(text.slice(start)) as {
+        status?: AsyncMergeResult['status']
+        message?: string
+        details?: { uuid?: string; message?: string }
+      }
+      return {
+        status: body.status,
+        uuid: body.details?.uuid,
+        message: body.details?.message ?? body.message,
+      }
+    } catch {
+      // not the merge body (gh's error prefix, a partial line) — try the
+      // other stream before giving up
+    }
+  }
+  return {}
+}
+
+export interface AsyncMergePoll {
+  /** Gap between result reads while the request is pending. */
+  intervalMs?: number
+  /** Give up watching after this long — the merge keeps running on
+   *  GitHub's side; re-running `bro act merge` resumes polling the same
+   *  uuid. */
+  deadlineMs?: number
+  /** Injectable so the poll loop is testable without wall-clock waits. */
+  sleep?: (ms: number) => void
+}
+
+/** Sync nap — the merge path is a command, not a hook probe, and
+ *  `mergePr` is a sync facade method that cannot await a poll. Same
+ *  primitive filelock uses to block on a lock. */
+const sleepSync = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/** merge-async argv — the same pin --match-head-commit gives the sync
+ *  path: a head that moved since the gate evaluated it fails closed
+ *  instead of landing a commit the gate never saw. The queue owns the
+ *  strategy — merge_method is rejected with it. */
+function mergeAsyncArgs(t: PrTarget, opts: MergeOpts, queued: boolean): string[] {
+  const args = [
+    'api',
+    '-X',
+    'PUT',
+    `repos/${t.repo}/pulls/${t.pr}/merge-async`,
+    '-f',
+    `sha=${opts.expectedHeadSha}`,
+  ]
+  if (queued) {
+    args.push('-f', 'merge_action=merge_queue')
+  } else {
+    args.push('-f', 'merge_action=direct_merge', '-f', `merge_method=${opts.method}`)
+  }
+  if (opts.admin) {
+    args.push('-F', 'bypass_rules=true')
+  }
+  return args
+}
+
+/** Poll the uuid while `pending`. Throws on a uuid-less pending, and on
+ *  the watch deadline: the request keeps running on GitHub's side —
+ *  re-running resumes polling the same uuid. The nap is clamped to the
+ *  budget left so a gap can't carry the loop past the deadline (the
+ *  remainder is positive — the guard threw on anything else). */
+function pollAsyncMerge(
+  t: PrTarget,
+  result: AsyncMergeResult,
+  intervalMs: number,
+  deadlineMs: number,
+  sleep: (ms: number) => void
+): AsyncMergeResult {
+  const started = Date.now()
+  while (result.status === 'pending') {
+    const uuid = result.uuid
+    if (uuid === undefined) {
+      throw new Error(
+        `async merge of ${prLink(t.repo, t.pr)} reports pending with no uuid — nothing to poll`
+      )
+    }
+    const elapsed = Date.now() - started
+    if (elapsed >= deadlineMs) {
+      throw new Error(
+        `async merge ${uuid} of ${prLink(t.repo, t.pr)} still pending after ` +
+          `${Math.round(elapsed / 1000)}s — the request keeps running on GitHub; ` +
+          're-run to resume polling it'
+      )
+    }
+    sleep(Math.min(intervalMs, deadlineMs - elapsed))
+    result = readAsyncMerge(ghTry(['api', `repos/${t.repo}/pulls/${t.pr}/merge-async/${uuid}`]))
+  }
+  return result
+}
+
+/** `PUT /pulls/{n}/merge-async`, then poll its uuid until the request
+ *  settles. `base` decides the merge action (undefined — the reactive
+ *  fallback path after a probe failure — means "assume no queue").
+ *  Throws on `failed`, on an unobservable status, and on a watch
+ *  timeout: an unsettled merge is never reported as a landed one. */
+export function mergeAsync(
+  t: PrTarget,
+  opts: MergeOpts,
+  base?: string,
+  poll: AsyncMergePoll = {}
+): void {
+  const queued = base !== undefined && queueRequired(t.repo, base)
+  console.log(
+    `merge: stack member — ${prLink(t.repo, t.pr)} via merge-async ` +
+      `(${queued ? 'merge queue' : opts.method}, head branch kept: a layer above may be based on it)`
+  )
+  const result = pollAsyncMerge(
+    t,
+    readAsyncMerge(ghTry(mergeAsyncArgs(t, opts, queued))),
+    poll.intervalMs ?? 2_000,
+    poll.deadlineMs ?? 10 * 60_000,
+    poll.sleep ?? sleepSync
+  )
+
+  if (result.status === 'failed') {
+    throw new Error(
+      `async merge of ${prLink(t.repo, t.pr)} failed — ${result.message ?? 'no reason reported'}`
+    )
+  }
+  if (result.status === 'enqueued') {
+    // final for the request, NOT for the PR: the queue merges later. The
+    // caller's post-merge re-read reports the real state.
+    console.log('merge: async merge accepted into the merge queue — not merged yet')
+    return
+  }
+  if (result.status !== 'merged') {
+    throw new Error(
+      `async merge of ${prLink(t.repo, t.pr)} reported no observable status` +
+        `${result.uuid === undefined ? '' : ` (uuid ${result.uuid})`}` +
+        `${result.message === undefined ? '' : ` — ${result.message}`} — ` +
+        'check the PR state; GitHub may have discarded the request'
+    )
+  }
+}
+
 /** pullRequest(number:N) under an alias — the building block for bulk
  *  probes and post-write updatedAt re-queries. */
 function aliasedPrQuery(
@@ -994,6 +1218,16 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
       return r.code === 0
     },
     mergePr(t, opts) {
+      // A stack member can only merge through the async endpoint, and the
+      // sync client below (GraphQL `mergePullRequest`) is rejected for one.
+      // The probe decides first — a clean path, no doomed attempt — and the
+      // reactive net covers a stack the probe could not see (an API version
+      // without the `stack` field answers no question either way).
+      const probe = stackProbe(t)
+      if (probe.stacked) {
+        mergeAsync(t, opts, probe.base)
+        return postMergeState(t)
+      }
       const args = [
         'pr',
         'merge',
@@ -1010,19 +1244,35 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
       if (opts.admin) {
         args.push('--admin')
       }
-      console.log(gh(args))
+      try {
+        console.log(gh(args))
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (!/asynchronous merge/i.test(msg)) {
+          throw err
+        }
+        console.error(`merge: sync merge refused — ${msg.trim()}`)
+        mergeAsync(t, opts, probe.base)
+      }
       // A merge queue accepts a PR without landing it — only the
       // authoritative state tells the caller what actually happened.
-      const after = ghJson<{ state: string }>([
-        'pr',
-        'view',
-        String(t.pr),
-        '--repo',
-        t.repo,
-        '--json',
-        'state',
-      ])
-      return (after.state || 'UNKNOWN').toUpperCase()
+      return postMergeState(t)
     },
   }
+}
+
+/** The PR's post-merge state, authoritative — a queue hold or a stack
+ *  merge that landed nothing reads here, never in the merge call's own
+ *  answer. */
+function postMergeState(t: PrTarget): string {
+  const after = ghJson<{ state: string }>([
+    'pr',
+    'view',
+    String(t.pr),
+    '--repo',
+    t.repo,
+    '--json',
+    'state',
+  ])
+  return (after.state || 'UNKNOWN').toUpperCase()
 }

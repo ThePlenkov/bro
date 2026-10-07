@@ -73,7 +73,13 @@ default store, so standard installs already have it).
   merge on the beads merge slot (`bd merge-slot`): a held slot means another
   session is mid-merge — wait for `bd merge-slot check` to report available;
   a crashed holder is freed with `bd merge-slot release`. Only a
-  user-directed override justifies merging around a BLOCKED gate.
+  user-directed override justifies merging around a BLOCKED gate. A PR in a
+  GitHub **stack** is not mergeable by `gh pr merge` at all (the API
+  refuses it) — `bro act merge` detects the stack and goes through the
+  async merge endpoint, polling until the merge settles, so don't hand-roll
+  `gh api … merge-async` either. The head branch is deliberately kept there
+  (deleting a lower layer's branch closes every PR stacked on it); local
+  cleanup with `--cleanup` is unaffected.
 - **Wait via `bro act wait <PR>` in the background, never a bespoke poll
   loop.** The command polls the exit gate until nothing is pending —
   green, settled blockers (threads, failures), or `--timeout` — then

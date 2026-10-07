@@ -5,31 +5,59 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { facade, registerConnector } from '@broject/core'
 import { githubConnector, githubReview } from './index.ts'
+import { mergeAsync } from './reviews.ts'
 
 const WIN32 = process.platform === 'win32'
 
 const SCAN_NODE = `{"title":"did the thing","url":"https://github.com/acme/widgets/pull/7","mergedAt":"2026-01-02T00:00:00Z","updatedAt":"2026-01-03T00:00:00Z","mergeCommit":{"oid":"abc123"},"labels":{"nodes":[{"name":"bug"}]},"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":"THR_1","isResolved":false,"isOutdated":false,"comments":{"nodes":[{"author":{"login":"reviewer-bot","__typename":"Bot"},"path":"a.ts","line":3,"body":"fix this","createdAt":"2026-01-01"}]}}]}}`
 
-/** Scripted gh on PATH — records argv to $FAKE_GH_LOG, answers by $1 $2. */
+/** Scripted gh on PATH — records argv to $FAKE_GH_LOG, answers by $1 $2.
+ *  The merge-async family is env-driven: FAKE_GH_PULL (the PR read that
+ *  carries `.stack`), FAKE_GH_QUEUE (a non-null GraphQL mergeQueue),
+ *  FAKE_GH_ASYNC / FAKE_GH_ASYNC_ERR (the PUT's body / a failing one on
+ *  stderr, as gh reports a 4xx), FAKE_GH_ASYNC_POLL / FAKE_GH_POLL_ERR
+ *  (the result GET), FAKE_GH_PR_MERGE_ERR, FAKE_GH_PR_STATE. */
 const FAKE_GH = `#!/bin/sh
 echo "$@" >> "$FAKE_GH_LOG"
+if [ -z "$FAKE_GH_PULL" ]; then FAKE_GH_PULL='{}'; fi
+if [ -z "$FAKE_GH_ASYNC" ]; then FAKE_GH_ASYNC='{"status":"merged","details":{"sha":"abc123"}}'; fi
+if [ -z "$FAKE_GH_ASYNC_POLL" ]; then FAKE_GH_ASYNC_POLL='{"status":"merged","details":{"sha":"abc123"}}'; fi
 case "$1 $2" in
   "pr checks") if [ "$FAKE_GH_NO_CHECKS" = "1" ]; then echo 'no checks reported' >&2; exit 8; fi
       echo '[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"kilo","state":"PENDING","bucket":"pending"}]' ;;
   "repo view") echo '{"owner":{"login":"acme"},"name":"widgets"}' ;;
-  "pr view") if [ -n "$FAKE_GH_PR_VIEW_FAIL" ]; then case ",$FAKE_GH_PR_VIEW_FAIL," in
+  "pr view") if [ -n "$FAKE_GH_PR_STATE" ]; then echo '{"state":"'"$FAKE_GH_PR_STATE"'"}'; exit 0; fi
+      if [ -n "$FAKE_GH_PR_VIEW_FAIL" ]; then case ",$FAKE_GH_PR_VIEW_FAIL," in
       *",$3,"*) echo 'gh: authentication required' >&2; exit 1 ;; esac; fi
       if [ "$FAKE_GH_NO_MERGED_AT" = "1" ]; then echo '{"state":"MERGED"}';
       else echo '{"state":"MERGED","title":"did the thing","url":"https://github.com/acme/widgets/pull/7","mergedAt":"2026-01-02T00:00:00Z","mergeCommit":{"oid":"abc123"}}'; fi ;;
   "pr list") echo '[{"number":9,"mergedAt":"2026-01-02T00:00:00Z","updatedAt":null,"author":{"login":"dev"},"labels":[],"headRefName":"x","headRefOid":"s1"}]' ;;
-  "pr merge") echo 'Merging pull request' ;;
+  "pr merge") if [ -n "$FAKE_GH_PR_MERGE_ERR" ]; then echo "$FAKE_GH_PR_MERGE_ERR" >&2; exit 1; fi
+      echo 'Merging pull request' ;;
   "api graphql") case "$@" in
+      *"mergeQueue(branch:"*) if [ "$FAKE_GH_QUEUE" = "1" ]; then echo '{"data":{"repository":{"mergeQueue":{"id":7}}}}';
+          else echo '{"data":{"repository":{"mergeQueue":null}}}'; fi ;;
       *"s0: pullRequest"*) echo '{"data":{"repository":{"s0":${SCAN_NODE},"s1":${SCAN_NODE}}}}' ;;
       *"u0: pullRequest"*) echo '{"data":{"repository":{"u0":{"updatedAt":"2026-02-02T00:00:00Z"},"u1":{"updatedAt":"2026-02-02T00:00:00Z"}}}}' ;;
       *) echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"THR_1","isResolved":false,"isOutdated":false,"comments":{"nodes":[{"author":{"login":"reviewer-bot","__typename":"Bot"},"path":"a.ts","line":3,"body":"fix this","createdAt":"2026-01-01"}]}}]}}}}}' ;;
     esac ;;
+  "api -X") if [ "$3" = "PUT" ]; then case "$4" in
+      *merge-async) if [ -n "$FAKE_GH_ASYNC_ERR" ]; then echo "$FAKE_GH_ASYNC_ERR" >&2; exit 1; fi
+          echo "$FAKE_GH_ASYNC" ;;
+      *) echo '{}' ;;
+    esac; fi ;;
   "api repos/"* ) case "$2" in
       *check-runs\\?*) echo '{"check_runs":[{"id":1,"name":"build"},{"id":2,"name":"kilo"},{"id":3,"name":"build"},{"id":4,"name":"lint"}]}' ;;
+      *merge-async/*) if [ -n "$FAKE_GH_POLL_ERR" ]; then echo "$FAKE_GH_POLL_ERR" >&2; exit 1; fi
+          echo "$FAKE_GH_ASYNC_POLL" ;;
+      */pulls/*) if [ -z "$3" ]; then
+          # a bare repos/{o}/{r}/pulls/{n} read is the stack probe; a
+          # pulls/{n}/subresource keeps the empty default
+          if [ -n "$FAKE_GH_PULL_ERR" ]; then echo 'gh: API rate limit exceeded' >&2; exit 1; fi
+          echo "$FAKE_GH_PULL"
+        else
+          echo '{}'
+        fi ;;
       *) echo '{}' ;;
     esac ;;
   "api --paginate") case "$4" in
@@ -300,6 +328,229 @@ describe('githubReview', { skip: WIN32 }, () => {
         readFileSync(log, 'utf8'),
         /pr merge 42 --squash --repo acme\/widgets --match-head-commit abc123 --delete-branch/
       )
+    })
+  })
+
+  // --- stacks: the async merge endpoint is the only way in ----------------------
+  //
+  // GitHub rejects GraphQL mergePullRequest (what `gh pr merge` is) and the
+  // sync REST merge for a stack member. Both detection signals are covered:
+  // the `.stack` field on the PR read, and the rejection itself.
+
+  const STACK_PULL = '{"base":{"ref":"stack/s/1-a"},"stack":{"base":{"ref":"main"},"id":9,"number":3,"position":2,"size":4}}'
+
+  test('mergePr sends a stack member to merge-async, never `gh pr merge`', () => {
+    withFakeGh({ FAKE_GH_PULL: STACK_PULL }, (log) => {
+      const state = githubReview().mergePr(target, {
+        method: 'squash',
+        expectedHeadSha: 'abc123',
+        // a lower layer's deletion closes every PR stacked on it — the
+        // async path must not carry the flag
+        deleteBranch: true,
+      })
+      assert.equal(state, 'MERGED')
+      const calls = readFileSync(log, 'utf8')
+      assert.doesNotMatch(calls, /pr merge 42/)
+      assert.doesNotMatch(calls, /delete-branch/)
+      assert.match(
+        calls,
+        /api -X PUT repos\/acme\/widgets\/pulls\/42\/merge-async -f sha=abc123 -f merge_action=direct_merge -f merge_method=squash/
+      )
+    })
+  })
+
+  test('mergePr reports an enqueued stack merge as the state the PR is really in', () => {
+    withFakeGh(
+      {
+        FAKE_GH_PULL: STACK_PULL,
+        FAKE_GH_ASYNC: '{"status":"enqueued","details":{"message":"added to queue"}}',
+        FAKE_GH_PR_STATE: 'OPEN',
+      },
+      () => {
+        // enqueued is final for the REQUEST, not for the PR — the
+        // authoritative re-read is what the caller sees, so a queue hold
+        // reads as "still open" instead of a landed merge
+        assert.equal(
+          githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' }),
+          'OPEN'
+        )
+      }
+    )
+  })
+
+  test('mergeAsync waits out a pending request by polling its uuid', () => {
+    withFakeGh(
+      {
+        FAKE_GH_ASYNC: '{"status":"pending","details":{"uuid":"u-1","merge_action":"direct_merge"}}',
+        FAKE_GH_ASYNC_POLL: '{"status":"merged","details":{"sha":"abc123"}}',
+      },
+      (log) => {
+        const naps: number[] = []
+        mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, 'main', {
+          sleep: (ms) => naps.push(ms),
+        })
+        assert.deepEqual(naps, [2_000])
+        assert.match(readFileSync(log, 'utf8'), /api repos\/acme\/widgets\/pulls\/42\/merge-async\/u-1/)
+      }
+    )
+  })
+
+  test('mergeAsync never naps past the watch deadline', () => {
+    // a 1s budget with the default 2s gap: an unclamped sleep carries the
+    // loop a whole interval past the deadline before it can notice
+    withFakeGh(
+      {
+        FAKE_GH_ASYNC: '{"status":"pending","details":{"uuid":"u-4"}}',
+        FAKE_GH_ASYNC_POLL: '{"status":"merged","details":{"sha":"abc123"}}',
+      },
+      () => {
+        const naps: number[] = []
+        mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, 'main', {
+          sleep: (ms) => naps.push(ms),
+          deadlineMs: 1_000,
+        })
+        assert.deepEqual(naps, [1_000])
+      }
+    )
+  })
+
+  test('mergePr asks for the merge queue when the base branch requires one', () => {
+    withFakeGh({ FAKE_GH_PULL: STACK_PULL, FAKE_GH_QUEUE: '1' }, (log) => {
+      githubReview().mergePr(target, {
+        method: 'rebase',
+        expectedHeadSha: 'abc123',
+        admin: true,
+      })
+      const call = readFileSync(log, 'utf8')
+        .split('\n')
+        .find((l) => l.includes('merge-async'))
+      assert.match(call ?? '', /-f merge_action=merge_queue/)
+      // the queue owns the strategy — a custom merge_method is rejected
+      assert.doesNotMatch(call ?? '', /merge_method/)
+      assert.match(call ?? '', /-F bypass_rules=true/)
+    })
+  })
+
+  test('the queue is asked about the PR base, not the stack target', () => {
+    // STACK_PULL is position 2 of 4: it merges INTO stack/s/1-a while the
+    // stack targets main. The queue that governs this merge is the one on
+    // the branch it lands on, so the query names stack/s/1-a. Asking about
+    // main instead would push the PR at a queue that does not govern its
+    // own base -- and miss one that does, if stack/s/1-a ever requires it.
+    withFakeGh({ FAKE_GH_PULL: STACK_PULL }, (log) => {
+      githubReview().mergePr(target, {
+        method: 'squash',
+        expectedHeadSha: 'abc123',
+      })
+      const query = readFileSync(log, 'utf8')
+        .split('\n')
+        .find((l) => l.includes('mergeQueue(branch:'))
+      assert.match(query ?? '', /b=stack\/s\/1-a/)
+      assert.doesNotMatch(query ?? '', /b=main/)
+    })
+  })
+
+  test('a merge rejected as stack-only falls back to merge-async (no `.stack` field seen)', () => {
+    withFakeGh(
+      {
+        FAKE_GH_PR_MERGE_ERR:
+          'GraphQL: This pull request must be merged using the asynchronous merge REST API.',
+        FAKE_GH_ASYNC: '{"status":"merged","details":{"sha":"abc123"}}',
+      },
+      (log) => {
+        assert.equal(
+          githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' }),
+          'MERGED'
+        )
+        assert.match(readFileSync(log, 'utf8'), /api -X PUT repos\/acme\/widgets\/pulls\/42\/merge-async/)
+      }
+    )
+  })
+
+  test('an ordinary merge failure propagates — no async retry behind a red gate', () => {
+    withFakeGh({ FAKE_GH_PR_MERGE_ERR: 'Base branch is missing required checks' }, (log) => {
+      assert.throws(
+        () => githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' }),
+        /missing required checks/
+      )
+      assert.doesNotMatch(readFileSync(log, 'utf8'), /merge-async/)
+    })
+  })
+
+  test('mergeAsync resolves a 409 by polling the uuid the rejection carries', () => {
+    withFakeGh(
+      {
+        FAKE_GH_ASYNC_ERR: '{"status":"pending","details":{"uuid":"u-9","merge_action":"direct_merge"}}',
+        FAKE_GH_ASYNC_POLL: '{"status":"merged","details":{"sha":"abc123"}}',
+      },
+      (log) => {
+        mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, 'main', {
+          sleep: () => {},
+        })
+        assert.match(readFileSync(log, 'utf8'), /merge-async\/u-9/)
+      }
+    )
+  })
+
+  test('mergeAsync throws the API reason on a failed request', () => {
+    withFakeGh(
+      {
+        FAKE_GH_ASYNC: '{"status":"failed","details":{"message":"Base branch is protected"}}',
+      },
+      () => {
+        assert.throws(
+          () =>
+            mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, 'main', {
+              sleep: () => {},
+            }),
+          /failed — Base branch is protected/
+        )
+      }
+    )
+  })
+
+  test('mergeAsync never reports an unsettled merge as landed', () => {
+    const opts = { method: 'squash' as const, expectedHeadSha: 'abc123' }
+    // pending with no uuid — nothing to poll
+    withFakeGh({ FAKE_GH_ASYNC: '{"status":"pending","details":{}}' }, () => {
+      assert.throws(
+        () => mergeAsync(target, opts, 'main', { sleep: () => {} }),
+        /pending with no uuid/
+      )
+    })
+    // a result GET that 404s (the record is gone) is unobservable, not merged
+    withFakeGh(
+      { FAKE_GH_ASYNC_ERR: '', FAKE_GH_ASYNC: '{"status":"pending","details":{"uuid":"u-2"}}', FAKE_GH_POLL_ERR: 'gh: Not Found (HTTP 404)' },
+      () => {
+        assert.throws(
+          () => mergeAsync(target, opts, 'main', { sleep: () => {} }),
+          /no observable status/
+        )
+      }
+    )
+    // the watch gives up rather than blocking forever; the merge itself
+    // keeps running on GitHub's side
+    withFakeGh({ FAKE_GH_ASYNC: '{"status":"pending","details":{"uuid":"u-3"}}' }, () => {
+      assert.throws(
+        () =>
+          mergeAsync(target, opts, 'main', {
+            sleep: () => {},
+            deadlineMs: 0,
+          }),
+        /still pending/
+      )
+    })
+  })
+
+  test('an unreadable PR read falls back to the sync merge, not a blind async one', () => {
+    withFakeGh({ FAKE_GH_PULL_ERR: '1' }, (log) => {
+      assert.equal(
+        githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' }),
+        'MERGED'
+      )
+      const calls = readFileSync(log, 'utf8')
+      assert.match(calls, /pr merge 42 --squash/)
+      assert.doesNotMatch(calls, /merge-async/)
     })
   })
 
