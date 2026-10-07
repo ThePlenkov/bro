@@ -181,9 +181,10 @@ and carries — the verdict is yours.
 
 ## Config (optional)
 
-`bro.config.json` in the repo root — written per-clone by `bro setup` and
-gitignored on purpose (store choices are machine-local), so fresh checkouts
-run on defaults until they set up. Everything's optional:
+`bro.config.json` in the repo root — committed project policy, merged over
+`~/.config/bro/config.json` (global user) and under `bro.config.local.json`
+(gitignored machine overrides — `bro setup` writes there). Everything's
+optional:
 
 ```json
 {

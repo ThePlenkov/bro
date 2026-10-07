@@ -50,6 +50,10 @@ interface EnvOpts {
   config?: object | string
   /** written verbatim as bro.config.ts */
   configTs?: string
+  /** object → bro.config.local.json (gitignored local layer) */
+  configLocal?: object
+  /** object → $XDG_CONFIG_HOME/bro/config.json (global user layer) */
+  configGlobal?: object
   beadsDir?: boolean
   /** true → a placeholder origin; a string → used verbatim as the origin url */
   remote?: boolean | string
@@ -87,12 +91,24 @@ function withEnv(opts: EnvOpts, fn: (dir: string) => void): Promise<void> {
   if (opts.configTs !== undefined) {
     writeFileSync(join(dir, 'bro.config.ts'), opts.configTs)
   }
+  if (opts.configLocal !== undefined) {
+    writeFileSync(join(dir, 'bro.config.local.json'), JSON.stringify(opts.configLocal))
+  }
+  if (opts.configGlobal !== undefined) {
+    const gdir = join(dir, 'xdg', 'bro')
+    mkdirSync(gdir, { recursive: true })
+    writeFileSync(join(gdir, 'config.json'), JSON.stringify(opts.configGlobal))
+  }
   const prevPath = process.env.PATH
   const saved: Record<string, string | undefined> = {}
   for (const [k, v] of Object.entries(opts.env ?? {})) {
     saved[k] = process.env[k]
     process.env[k] = v
   }
+  // the global config layer (~/.config/bro or $XDG_CONFIG_HOME/bro) must
+  // not leak the dev machine's real user config into probes
+  saved.XDG_CONFIG_HOME = process.env.XDG_CONFIG_HOME
+  process.env.XDG_CONFIG_HOME = join(dir, 'xdg')
   for (const k of ['DEVIN_PLUGIN_ROOT', 'CLAUDE_PLUGIN_ROOT', 'PLUGIN_ROOT', 'BEADS_DIR']) {
     saved[k] = process.env[k]
     delete process.env[k]
@@ -193,6 +209,41 @@ describe('bro doctor', () => {
       const c = byName(runDoctorChecks(dir), 'config')
       assert.equal(c.status, 'warn')
       assert.match(c.detail, /sdd2/)
+    }))
+
+  test('config layers: provenance names the winning layer per section', () =>
+    withEnv(
+      {
+        config: { stores: ['jsonl'], sdd: { mode: 'gate' } },
+        configLocal: { fleet: { maxConcurrent: 1 } },
+        configGlobal: { providers: { p: { type: 'cli', command: 'x' } } },
+        bins: ['gh'],
+      },
+      (dir) => {
+        const rows = runDoctorChecks(dir).filter((c) => c.name === 'config')
+        assert.ok(
+          rows.some((c) => /project bro\.config\.json/.test(c.detail) && /local bro\.config\.local\.json/.test(c.detail)),
+          JSON.stringify(rows)
+        )
+        const prov = rows.find((c) => c.detail.startsWith('sections:'))
+        assert.ok(prov, JSON.stringify(rows))
+        assert.match(prov.detail, /sdd←project/)
+        assert.match(prov.detail, /fleet←local/)
+        assert.match(prov.detail, /providers←global/)
+        assert.equal(doctorExitCode(runDoctorChecks(dir)), 0)
+      }
+    ))
+
+  test('operator sections in the committed file warn — they leak to every clone', () =>
+    withEnv({ config: { providers: { p: { type: 'cli', command: 'x' } } }, bins: ['gh'] }, (dir) => {
+      const rows = runDoctorChecks(dir).filter((c) => c.name === 'config' && c.status === 'warn')
+      assert.ok(rows.some((c) => /operator sections in committed config: providers/.test(c.detail)), JSON.stringify(rows))
+    }))
+
+  test('policy sections in the global file warn — they hit every project', () =>
+    withEnv({ configGlobal: { sdd: { mode: 'gate' } }, bins: ['gh'] }, (dir) => {
+      const rows = runDoctorChecks(dir).filter((c) => c.name === 'config' && c.status === 'warn')
+      assert.ok(rows.some((c) => /policy sections in global config: sdd/.test(c.detail)), JSON.stringify(rows))
     }))
 
   test('core-only sections are known — no plugin declares them (retro bro-8ccl)', () =>

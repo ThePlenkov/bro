@@ -40,6 +40,13 @@ Developing bro itself: see CONTRIBUTING.md.
   skill + config section. bro is a plugin system on top of beads (and more):
   agents orchestrate by pushing work into shared, schema-validated plans
   and workflows rather than re-deriving mechanics in prompts.
+- **Config has three layers** — `~/.config/bro/config.{ts,json}` is the
+  global operator file (providers, judge, fleet, agent spawn templates),
+  `bro.config.{ts,json}` is committed project policy (act, sdd, guard,
+  debt, stack), `bro.config.local.{ts,json}` is the gitignored
+  machine-local override. They merge local > project > global; keep
+  operator settings out of the committed file — `bro doctor` warns on
+  misplaced sections.
 - **Unified plans** — commands that take structured input (act, plan,
   backlog, retro, drill, …) accept a plan payload validated against a
   per-command plan schema; CLI flags alone are not the contract.

@@ -1,10 +1,45 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
-import { DEFAULT_CONFIG, defineConfig, loadConfig } from './config.ts'
+import {
+  DEFAULT_CONFIG,
+  defineConfig,
+  globalConfigDir,
+  loadConfig,
+  loadConfigLayers,
+} from './config.ts'
+
+// the global layer reads $XDG_CONFIG_HOME/bro — pin it to an empty tmp
+// for the whole file so a dev machine's real user config can't leak in
+const XDG = mkdtempSync(join(tmpdir(), 'bro-xdg-'))
+const prevXdg = process.env.XDG_CONFIG_HOME
+process.env.XDG_CONFIG_HOME = XDG
+process.on('exit', () => {
+  if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME
+  else process.env.XDG_CONFIG_HOME = prevXdg
+})
+
+/** Write a raw object as the global layer under a fresh XDG dir; returns
+ *  a restore function. */
+function withGlobalConfig(raw: unknown, name: 'config.json' | 'config.ts' = 'config.json'): () => void {
+  const dir = join(XDG, 'bro')
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, name)
+  writeFileSync(
+    file,
+    typeof raw === 'string' ? raw : JSON.stringify(raw)
+  )
+  return () => {
+    try {
+      rmSync(file)
+    } catch {
+      // already removed
+    }
+  }
+}
 
 function load(raw?: unknown): ReturnType<typeof loadConfig> {
   const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
@@ -529,5 +564,133 @@ describe('loadConfig linked worktree', () => {
     const wt = mkdtempSync(join(tmpdir(), 'bro-wt-'))
     execFileSync('git', ['-C', bare, 'worktree', 'add', '-qf', '--detach', wt])
     assert.equal(loadConfig(wt).personality, DEFAULT_CONFIG.personality)
+  })
+})
+
+describe('config layers (spec bro-9vmx)', () => {
+  const project = (dir: string, raw: unknown): void => {
+    writeFileSync(join(dir, 'bro.config.json'), JSON.stringify(raw))
+  }
+  const local = (dir: string, raw: unknown): void => {
+    writeFileSync(join(dir, 'bro.config.local.json'), JSON.stringify(raw))
+  }
+
+  test('local beats project beats global, per key', () => {
+    const undo = withGlobalConfig({ personality: 'sarcastic', act: { maxRounds: 9 } })
+    try {
+      const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
+      project(dir, { personality: 'mentor' })
+      local(dir, { act: { maxRounds: 1 } })
+      const cfg = loadConfig(dir)
+      assert.equal(cfg.personality, 'mentor') // project wins over global
+      assert.equal(cfg.act.maxRounds, 1) // local wins over global
+    } finally {
+      undo()
+    }
+  })
+
+  test('objects deep-merge — a layer fills only the keys it sets', () => {
+    const undo = withGlobalConfig({ act: { ignoreChecks: ['kilo'], docsMaxRounds: 5 } })
+    try {
+      const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
+      project(dir, { act: { docsPaths: ['*.mdx'] } })
+      const cfg = loadConfig(dir)
+      assert.equal(cfg.act.ignoreChecks[0]!.name, 'kilo')
+      assert.equal(cfg.act.docsMaxRounds, 5)
+      assert.deepEqual(cfg.act.docsPaths, ['*.mdx'])
+    } finally {
+      undo()
+    }
+  })
+
+  test('arrays replace, never concat', () => {
+    const undo = withGlobalConfig({ debt: { sources: ['review-threads', 'stale-prs'] } })
+    try {
+      const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
+      local(dir, { debt: { sources: ['review-threads'] } })
+      assert.deepEqual(loadConfig(dir).debt.sources, ['review-threads'])
+    } finally {
+      undo()
+    }
+  })
+
+  test('global layer alone loads — no project file needed', () => {
+    const undo = withGlobalConfig({ personality: 'sarcastic', stores: ['jsonl'] })
+    try {
+      const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
+      const cfg = loadConfig(dir)
+      assert.equal(cfg.personality, 'sarcastic')
+      assert.deepEqual(cfg.stores, ['jsonl'])
+    } finally {
+      undo()
+    }
+  })
+
+  test('config.ts works as the global file too', () => {
+    const undo = withGlobalConfig('export default { personality: "mentor" }', 'config.ts')
+    try {
+      assert.equal(loadConfig(mkdtempSync(join(tmpdir(), 'bro-config-'))).personality, 'mentor')
+    } finally {
+      undo()
+    }
+  })
+
+  test('loadConfigLayers reports hits ascending precedence', () => {
+    const undo = withGlobalConfig({ personality: 'sarcastic' })
+    try {
+      const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
+      project(dir, { sdd: { mode: 'gate' } })
+      local(dir, { fleet: { maxConcurrent: 1 } })
+      const { layers, broken } = loadConfigLayers(dir)
+      assert.deepEqual(layers.map((l) => l.layer), ['global', 'project', 'local'])
+      assert.equal(broken.length, 0)
+      assert.ok(layers[1]!.file.endsWith('bro.config.json'))
+      assert.ok(layers[2]!.file.endsWith('bro.config.local.json'))
+    } finally {
+      undo()
+    }
+  })
+
+  test('a broken layer contributes nothing but a valid layer still loads', () => {
+    const undo = withGlobalConfig({ personality: 'sarcastic' })
+    try {
+      const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
+      writeFileSync(join(dir, 'bro.config.local.json'), '{oops')
+      const { layers, broken } = loadConfigLayers(dir)
+      assert.equal(layers.length, 1)
+      assert.equal(broken.length, 1)
+      assert.equal(loadConfig(dir).personality, 'sarcastic')
+    } finally {
+      undo()
+    }
+  })
+
+  test('every layer broken/absent + a broken file → jsonl-only stores', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
+    writeFileSync(join(dir, 'bro.config.local.json'), '{oops')
+    assert.deepEqual(loadConfig(dir).stores, ['jsonl'])
+  })
+
+  test('project-layer plugin spec anchors at the project dir; local at the local dir', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-config-'))
+    project(dir, { plugins: ['./project-plug.ts'] })
+    local(dir, { plugins: ['./local-plug.ts'] })
+    // arrays replace — local wins entirely, anchored at ITS layer dir
+    assert.deepEqual(loadConfig(dir).plugins, [join(dir, 'local-plug.ts')])
+  })
+
+  test('linked worktree inherits main-root local layer', () => {
+    const main = realpathSync(mkdtempSync(join(tmpdir(), 'bro-main-')))
+    execFileSync('git', ['init', '-q', main])
+    execFileSync('git', ['-C', main, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'])
+    writeFileSync(join(main, 'bro.config.json'), JSON.stringify({ personality: 'terse' }))
+    writeFileSync(join(main, 'bro.config.local.json'), JSON.stringify({ personality: 'sarcastic' }))
+    const wt = mkdtempSync(join(tmpdir(), 'bro-wt-'))
+    execFileSync('git', ['-C', main, 'worktree', 'add', '-qf', '--detach', wt])
+    assert.equal(loadConfig(wt).personality, 'sarcastic')
+  })
+
+  test('globalConfigDir follows XDG_CONFIG_HOME', () => {
+    assert.equal(globalConfigDir(), join(XDG, 'bro'))
   })
 })
