@@ -45,9 +45,9 @@ All fields optional: `bin` skips binary resolution entirely; `config`,
 `evaluate: true` turns on SARIF collection + the policy gate.
 
 Flags win over config. Binary resolution: `check.bin` → the repo's
-pinned install (`node_modules/@sverka/cli` then `.bin` shims, walking
-up from root) → `sverka` on PATH → the `@sverka/cli` bundled with
-`@broject/bro`.
+pinned install (`node_modules/sverka`, then the deprecated
+`node_modules/@sverka/cli`, then `.bin` shims, walking up from root) →
+`sverka` on PATH → the `sverka` bundled with `@broject/bro`.
 
 ## Policy
 

@@ -14,7 +14,7 @@
  *
  * Binary resolution (first hit): bro.config `check.bin` →
  * `<root>/node_modules/.bin/sverka` walking up → `sverka` on PATH → the
- * `@sverka/cli` bundled with @broject/bro. Exit code mirrors the
+ * `sverka` bundled with @broject/bro. Exit code mirrors the
  * executor; usage errors exit 2.
  */
 import { spawnSync } from 'node:child_process'
@@ -62,7 +62,7 @@ export interface CheckReport {
 }
 
 /** A spawn target — `[file, ...prefixArgs]`: binaries run directly, the
- *  bundled @sverka/cli runs as `node dist/bin.mjs`. */
+ *  bundled sverka runs as `node dist/bin.mjs`. */
 export interface SverkaBin {
   file: string
   args: string[]
@@ -89,17 +89,27 @@ const IS_WIN = process.platform === 'win32'
  *  launchers on Windows; `.exe` covers non-npm installs. */
 const PATH_NAMES = IS_WIN ? ['sverka.exe', 'sverka.cmd', 'sverka.bat', 'sverka'] : ['sverka']
 
+/** sverka package entries, current package first. `@sverka/cli` is the
+ *  deprecated pre-rename name — kept because a consumer repo may still
+ *  pin it, and that install resolves exactly as it did before. */
+const PKG_ENTRIES = [
+  ['sverka', 'dist', 'bin.mjs'],
+  ['@sverka', 'cli', 'dist', 'bin.mjs'],
+] as const
+
 /** `<dir>/node_modules` sverka walking up — the repo's own pinned
  *  install wins over PATH and the bundled copy. The package entry
- *  (`@sverka/cli/dist/bin.mjs`) is preferred: it spawns through
+ *  (`sverka/dist/bin.mjs`) is preferred: it spawns through
  *  `process.execPath`, sidestepping shim/shebang/.cmd exec rules. */
 function repoLocalBin(root: string): SverkaBin | undefined {
   let dir = resolve(root)
   for (;;) {
     const nm = join(dir, 'node_modules')
-    const entry = join(nm, '@sverka', 'cli', 'dist', 'bin.mjs')
-    if (existsSync(entry)) {
-      return { file: process.execPath, args: [entry], via: 'repo' }
+    for (const parts of PKG_ENTRIES) {
+      const entry = join(nm, ...parts)
+      if (existsSync(entry)) {
+        return { file: process.execPath, args: [entry], via: 'repo' }
+      }
     }
     for (const name of PATH_NAMES) {
       const shim = join(nm, '.bin', name)
@@ -130,17 +140,20 @@ function pathBin(): SverkaBin | undefined {
   return undefined
 }
 
-/** The @sverka/cli bundled with @broject/bro — walk up from this
- *  module's own dir looking for `node_modules/@sverka/cli/dist/bin.mjs`
- *  (workspace layout and installed-layout both resolve; the package is
- *  ESM-only so require.resolve can't see it, and import.meta.resolve
- *  isn't guaranteed under every loader). */
+/** The sverka bundled with @broject/bro — walk up from this module's own
+ *  dir looking for `node_modules/sverka/dist/bin.mjs` (workspace layout
+ *  and installed-layout both resolve; the package is ESM-only so
+ *  require.resolve can't see it, and import.meta.resolve isn't
+ *  guaranteed under every loader). The legacy `@sverka/cli` path stays
+ *  in the probe list for installs predating the rename. */
 function bundledBin(): string | undefined {
   let dir = dirname(fileURLToPath(import.meta.url))
   for (;;) {
-    const bin = join(dir, 'node_modules', '@sverka', 'cli', 'dist', 'bin.mjs')
-    if (existsSync(bin)) {
-      return bin
+    for (const parts of PKG_ENTRIES) {
+      const bin = join(dir, 'node_modules', ...parts)
+      if (existsSync(bin)) {
+        return bin
+      }
     }
     const parent = dirname(dir)
     if (parent === dir) {
@@ -536,7 +549,7 @@ export function runCheckCommand(argv: string[]): void {
   const bin = resolveSverka(root, cfgBin)
   if (bin === null) {
     console.error(
-      'error: sverka not found — install @sverka/cli in the repo (npm i -D @sverka/cli), put sverka on PATH, or set "check": {"bin": …} in bro.config.json'
+      'error: sverka not found — install sverka in the repo (npm i -D sverka), put sverka on PATH, or set "check": {"bin": …} in bro.config.json'
     )
     process.exit(1)
   }
