@@ -69,12 +69,21 @@ A work request is a record; in beads-backed transports it **is** a bead
 
 All lifecycle messages share one `thread` — the request id.
 
+**Bead encoding** — on beads-backed transports the envelope carries no
+document body: `v`/`kind`/`thread`/`from`/`to` ride `mesh:<field>:<v>`
+labels, `title`/`body` ride the bead's native fields, `terms.priority`
+maps to the bead priority, and structured `refs`/`evidence` entries
+ride one label each — `mesh:ref:<kind>:<ref>` for `refs`,
+`mesh:ev:<kind>:<ref>` for `evidence`. `external_ref` holds the
+request's `beads://<org>/<repo>/<id>` URI. Anything richer is out of
+mesh/1 — bump the version rather than inventing per-transport escapes.
+
 ### Lifecycle
 
 ```text
-posted → claimed → submitted → accepted
-                   │            └ rejected → (requester may re-post)
-                   └ (abandoned claim → requester re-posts)
+posted → claimed → submitted ─┬─ accepted
+                              └─ rejected → (requester may re-post)
+         (abandoned claim → requester re-posts)
 ```
 
 - **posted** — requester publishes the envelope on *its own* store.
@@ -122,7 +131,9 @@ commons hub.
 - `bro mesh request <rig> <title>` — publish an envelope (`local` or
   `beads-remote`), wire `bd dep add <waiting-bead> external:<rig>:<id>`.
 - `bro mesh inbox` — surface requests addressed to me across peers.
-- `bro mesh claim|done|accept <thread>` — lifecycle transitions.
+- `bro mesh claim|done|accept|reject <thread>` — lifecycle transitions
+  (`accept`/`reject` are the requester's verdicts; `claim`/`done` the
+  worker's).
 - `bro mesh wait <thread>` — point-check watcher (act wait pattern).
 
 Out of MVP: wasteland adapter, reputation, `github` transport polish.
