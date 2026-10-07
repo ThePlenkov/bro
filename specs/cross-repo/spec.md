@@ -25,7 +25,12 @@ vendor-neutral wire contract (specs/mesh) — the bro-5nnj epic.
   exit code. The dep-marked block is the truth; the watcher is a
   convenience. Spec: specs/cross-repo/bro-y5zcw.md.
 - **REMOTE** — GitHub-issue transport for repos with no local
-  checkout; wasteland wanted board for public rigs. Unspec'd.
+  checkout (the issue body carries the envelope, labels are a query
+  index only — GitHub caps label names at 50 chars); wasteland wanted
+  board for public rigs, where posting is a fork-and-propose and the
+  board id is the thread id. No `external:` dep on either plane:
+  bd resolves external refs by opening a beads store at a filesystem
+  path, which neither surface has. Spec: specs/cross-repo/bro-kim1e.md.
 
 ## Owns
 
