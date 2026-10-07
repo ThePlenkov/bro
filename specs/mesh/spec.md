@@ -105,6 +105,13 @@ commons hub.
 ### Trust (v1)
 
 - Inbox = peers you subscribed to → spam resistance is the peer list.
+- **Provenance is the transport, not the envelope.** `from` is an
+  advisory field for display; the authenticated origin of a request is
+  the peer binding it arrived over (the `mesh.peers` remote name). A
+  conformant implementation keys inbound requests by *which remote
+  fetched them*, never by the claimed `from`, and flags a request whose
+  `from` disagrees with that peer's declared rig URI rather than
+  silently trusting either.
 - Acceptance requires the requester's `accept` → the requester owns
   quality; the worker owns delivery.
 - Evidence refs are advisory in v1; structured verdicts come as features.
