@@ -4,6 +4,10 @@
  * remote alias X counts as coming from X's declared rig; the
  * envelope's `from` is display metadata, and a mismatch is flagged,
  * never trusted.
+ *
+ * `meshScan` is the unfiltered read — every mesh envelope a peer
+ * store holds, with provenance. `meshInbox` is the request filter on
+ * top; thread tracking (thread.ts) consumes the scan directly.
  */
 import { spawnSync } from 'node:child_process'
 import { envelopeFromBead, type BeadLike, type MeshEnvelope } from './envelope.ts'
@@ -11,15 +15,23 @@ import { existsSync } from 'node:fs'
 import { localCheckout, type MeshPeer } from './peers.ts'
 import { issueLabels, meshIssues, replicaDir, syncReplica } from './pull.ts'
 
-export interface InboundRequest {
-  /** The peer alias the request arrived over — the provenance. */
+export interface PeerRecord {
+  /** The peer alias the record arrived over — the provenance. */
   peer: string
   /** The rig the binding declares for that alias. */
   peerRig: string
   envelope: MeshEnvelope
+  beadId: string
+}
+
+export interface InboundRequest extends PeerRecord {
   /** envelope.from !== peer.rig — flagged, never trusted (spec Trust). */
   mismatch: boolean
-  beadId: string
+}
+
+export interface ScanResult {
+  records: PeerRecord[]
+  errors: string[]
 }
 
 export interface InboxResult {
@@ -39,15 +51,14 @@ function rowToBead(row: { id: string; title: string; description?: string; notes
   }
 }
 
-function admit(peer: MeshPeer, bead: BeadLike, selfRig: string, out: InboundRequest[]): void {
+function admitRow(peer: MeshPeer, bead: BeadLike, out: PeerRecord[]): void {
   const env = envelopeFromBead(bead)
-  if (env?.kind !== 'request' || env.to !== selfRig) {
-    return
+  if (env !== null) {
+    out.push({ peer: peer.alias, peerRig: peer.rig, envelope: env, beadId: bead.id })
   }
-  out.push({ peer: peer.alias, peerRig: peer.rig, envelope: env, mismatch: env.from !== peer.rig, beadId: bead.id })
 }
 
-function scanReplica(dir: string, peer: MeshPeer, selfRig: string, out: InboundRequest[], errors: string[]): void {
+function scanReplica(dir: string, peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
   const found = meshIssues(dir)
   if (found.error !== undefined) {
     errors.push(`${peer.alias}: ${found.error}`)
@@ -57,25 +68,25 @@ function scanReplica(dir: string, peer: MeshPeer, selfRig: string, out: InboundR
     if (row.status === 'closed') {
       continue
     }
-    admit(peer, rowToBead(row, issueLabels(dir, row.id)), selfRig, out)
+    admitRow(peer, rowToBead(row, issueLabels(dir, row.id)), out)
   }
 }
 
 /** beads-remote: sync the replica (clone||pull), query mesh-labelled
- *  issues, admit those addressed to selfRig. */
-function inboxReplica(gitCommon: string, peer: MeshPeer, selfRig: string, out: InboundRequest[], errors: string[]): void {
+ *  issues, emit every envelope found. */
+function scanRemote(gitCommon: string, peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
   const synced = syncReplica(gitCommon, peer.alias, peer.remote)
   if (synced.path === undefined) {
     errors.push(synced.error ?? `${peer.alias}: replica sync failed`)
     return
   }
-  scanReplica(synced.path, peer, selfRig, out, errors)
+  scanReplica(synced.path, peer, out, errors)
 }
 
 /** local: read the peer's live store read-only — `bd -C <checkout>
  *  list --json` carries labels inline. A `local` peer needs no publish
  *  step — its working store is the source. */
-function inboxLocal(peer: MeshPeer, selfRig: string, out: InboundRequest[], errors: string[]): void {
+function scanLocal(peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
   const dir = localCheckout(peer.remote)
   if (dir === null) {
     errors.push(`${peer.alias}: local checkout ${peer.remote} does not resolve`)
@@ -85,6 +96,7 @@ function inboxLocal(peer: MeshPeer, selfRig: string, out: InboundRequest[], erro
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 30_000,
+    maxBuffer: 32 * 1024 * 1024,
   })
   if (p.status !== 0) {
     errors.push(`${peer.alias}: bd list failed — ${(p.stderr ?? '').trim() || 'exit ' + p.status}`)
@@ -101,12 +113,38 @@ function inboxLocal(peer: MeshPeer, selfRig: string, out: InboundRequest[], erro
     if (row.status === 'closed') {
       continue
     }
-    admit(peer, row, selfRig, out)
+    admitRow(peer, row, out)
   }
 }
 
-/** Pull + scan every configured peer. `pull:false` serves replica
- *  contents as they stand — the offline/inbox-only read. */
+/** Pull + scan every configured peer — every mesh envelope, every
+ *  kind. `pull:false` serves replica contents as they stand. */
+export function meshScan(
+  dir: string,
+  peers: MeshPeer[],
+  gitCommon: string,
+  opts: { pull?: boolean } = {},
+): ScanResult {
+  const out: PeerRecord[] = []
+  const errors: string[] = []
+  for (const peer of peers) {
+    if (peer.transport === 'local') {
+      scanLocal(peer, out, errors)
+    } else if (opts.pull === false) {
+      // serve the existing replica — an absent one is simply empty
+      const dir = replicaDir(gitCommon, peer.alias)
+      if (existsSync(dir)) {
+        scanReplica(dir, peer, out, errors)
+      }
+    } else {
+      scanRemote(gitCommon, peer, out, errors)
+    }
+  }
+  return { records: out, errors }
+}
+
+/** The request filter over the scan — open requests addressed to
+ *  selfRig, provenance attached, from≠binding flagged. */
 export function meshInbox(
   dir: string,
   peers: MeshPeer[],
@@ -114,20 +152,9 @@ export function meshInbox(
   gitCommon: string,
   opts: { pull?: boolean } = {},
 ): InboxResult {
-  const out: InboundRequest[] = []
-  const errors: string[] = []
-  for (const peer of peers) {
-    if (peer.transport === 'local') {
-      inboxLocal(peer, selfRig, out, errors)
-    } else if (opts.pull === false) {
-      // serve the existing replica — an absent one is simply empty
-      const dir = replicaDir(gitCommon, peer.alias)
-      if (existsSync(dir)) {
-        scanReplica(dir, peer, selfRig, out, errors)
-      }
-    } else {
-      inboxReplica(gitCommon, peer, selfRig, out, errors)
-    }
-  }
-  return { requests: out, errors }
+  const { records, errors } = meshScan(dir, peers, gitCommon, opts)
+  const requests = records
+    .filter((r) => r.envelope.kind === 'request' && r.envelope.to === selfRig)
+    .map((r) => ({ ...r, mismatch: r.envelope.from !== r.peerRig }))
+  return { requests, errors }
 }

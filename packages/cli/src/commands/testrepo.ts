@@ -189,6 +189,22 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     jsonOut([r])
     break
   }
+  case 'create': {
+    const id = 'fx-' + Math.random().toString(36).slice(2, 8)
+    db.rows.push({
+      id,
+      title: flags.title || '',
+      description: flags.description || '',
+      status: 'open',
+      priority: Number(flags.priority ?? 2),
+      issue_type: flags.type || 'task',
+      labels: flags.labels !== undefined ? String(flags.labels).split(',') : [],
+      created_at: new Date().toISOString(),
+    })
+    save(db)
+    jsonOut({ id })
+    break
+  }
   case 'update': {
     const r = row(pos[1])
     if (!r) fail('not found: ' + pos[1])
@@ -199,7 +215,9 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     } else {
       for (const [k, v] of Object.entries(flags)) {
         if (k === 'json') continue
-        r[k] = v === true ? true : v
+        if (k === 'set-labels' || k === 'add-label') { r.labels = String(v).split(',') }
+        else if (k === 'external-ref') { r.external_ref = v }
+        else r[k] = v === true ? true : v
       }
     }
     save(db)
