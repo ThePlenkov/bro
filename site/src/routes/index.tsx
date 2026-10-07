@@ -26,58 +26,54 @@ const pieces = [
 
 const selfLoop = ['bd ready', 'bro next', 'PR', 'bro act', 'merge', 'bro debt', 'bro retro', 'bro learn']
 
-const vocabGroups: { heading: string; entries: [string, string][] }[] = [
-  {
-    heading: 'planning',
-    entries: [
-      ['bro next', 'what now? bro picks. you ship.'],
-      ['bro spec', 'spec before code. drift is debt, not a surprise.'],
-      ['bro stack', 'PRs on PRs. bro rebases the tower.'],
-      ['bro query', 'GitHub, GitLab, Jira — one plan, one answer.'],
-    ],
-  },
-  {
-    heading: 'orchestration',
-    entries: [
-      ['bro loop', 'fine, bro drives. you review.'],
-      ['bro convoy', 'a molecule of steps, run to the end.'],
-      ['bro agents', 'spawn, respawn, stop, prune. one facade, every backend.'],
-      ['bro fleet', "who's alive, who's lost, who's over the cap."],
-      ['bro notify', "write, don't wait. lands on the next tool call."],
-      ['bro drive', 'unowned review threads get a fixer. merged only on green.'],
-      ['bro watch', 'one heartbeat. run it in the background, keep working.'],
-    ],
-  },
-  {
-    heading: 'review',
-    entries: [
-      ['bro act', 'done? prove it. threads, checks, mergeable.'],
-      ['bro debt', 'merged is not done. the ledger remembers.'],
-      ['bro judge', 'a calibrated verdict per thread. shadow until it earns trust.'],
-      ['bro guard', 'house rules as config. fire on the hook, not on hope.'],
-    ],
-  },
-  {
-    heading: 'self-reflection',
-    entries: [
-      ['bro wtf', 'log the frustration. verbatim. with receipts.'],
-      ['bro retrospect', 'every wtf owes a retro. every retro owes a task.'],
-      ['bro drill', 'go deeper. you must come back with a result.'],
-      ['bro learn', 'fool me once. the lesson fires next time, at the trigger.'],
-    ],
-  },
-  {
-    heading: 'plumbing',
-    entries: [
-      ['bro status', 'the whole board in one read. bro serve puts it on HTTP.'],
-      ['bro work', 'one worktree per agent. no checkout fights.'],
-      ['bro plugins', 'wire bro into OpenCode, Kilo, pi.'],
-      ['bro doctor', "what's broken in your setup, before an agent finds out."],
-      ['bro sync', 'ledgers on a data ref, not in your diffs.'],
-      ['bro sweep', 'closed beads: harvested, archived, pruned.'],
-    ],
-  },
-]
+const vocab: Record<string, string> = {
+  planning: `
+next | what now? bro picks. you ship.
+spec | spec before code. drift is debt, not a surprise.
+stack | PRs on PRs. bro rebases the tower.
+query | GitHub, GitLab, Jira — one plan, one answer.
+`,
+  orchestration: `
+loop | fine, bro drives. you review.
+convoy | a molecule of steps, run to the end.
+agents | spawn, respawn, stop, prune. one facade, every backend.
+fleet | who's alive, who's lost, who's over the cap.
+notify | write, don't wait. lands on the next tool call.
+drive | unowned review threads get a fixer. merged only on green.
+watch | one heartbeat. run it in the background, keep working.
+`,
+  review: `
+act | done? prove it. threads, checks, mergeable.
+debt | merged is not done. the ledger remembers.
+judge | a calibrated verdict per thread. shadow until it earns trust.
+guard | house rules as config. fire on the hook, not on hope.
+`,
+  'self-reflection': `
+wtf | log the frustration. verbatim. with receipts.
+retrospect | every wtf owes a retro. every retro owes a task.
+drill | go deeper. you must come back with a result.
+learn | fool me once. the lesson fires next time, at the trigger.
+`,
+  plumbing: `
+status | the whole board in one read. bro serve puts it on HTTP.
+work | one worktree per agent. no checkout fights.
+plugins | wire bro into OpenCode, Kilo, pi.
+doctor | what's broken in your setup, before an agent finds out.
+sync | ledgers on a data ref, not in your diffs.
+sweep | closed beads: harvested, archived, pruned.
+`,
+}
+
+const vocabGroups = Object.entries(vocab).map(([heading, text]) => ({
+  heading,
+  entries: text
+    .trim()
+    .split('\n')
+    .map((row) => {
+      const [cmd, gloss] = row.split(' | ')
+      return [`bro ${cmd}`, gloss] as const
+    }),
+}))
 
 function Home() {
   return (
