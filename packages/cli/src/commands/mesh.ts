@@ -7,7 +7,7 @@
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { gitCommonDir, gitTry, loadConfig } from '@broject/core'
+import { gitCommonDir, gitTry, loadConfig, withFileLock } from '@broject/core'
 import {
   formatRigUri,
   meshInbox,
@@ -55,17 +55,24 @@ interface MeshConfigFile {
   [k: string]: unknown
 }
 
-function readConfigFile(dir: string): MeshConfigFile {
-  const path = join(dir, 'bro.config.json')
-  try {
-    return JSON.parse(readFileSync(path, 'utf8')) as MeshConfigFile
-  } catch {
-    return {}
+/** Mutate `bro.config.json` under a file lock. Two refusals: a TS
+ *  config shadows anything we would write (edit `mesh.peers` there
+ *  instead), and a malformed file must not be silently overwritten —
+ *  the error propagates and the command exits non-zero. */
+function withMeshConfig<T>(dir: string, mutate: (cfg: MeshConfigFile) => T): T {
+  const ts = join(dir, 'bro.config.ts')
+  if (existsSync(ts)) {
+    throw new Error(`bro.config.ts shadows bro.config.json — edit mesh.peers in ${ts}`)
   }
-}
-
-function writeConfigFile(dir: string, cfg: MeshConfigFile): void {
-  writeFileSync(join(dir, 'bro.config.json'), `${JSON.stringify(cfg, null, 2)}\n`)
+  const path = join(dir, 'bro.config.json')
+  return withFileLock(`${path}.lock`, () => {
+    const cfg = existsSync(path)
+      ? (JSON.parse(readFileSync(path, 'utf8')) as MeshConfigFile)
+      : ({} as MeshConfigFile)
+    const out = mutate(cfg)
+    writeFileSync(path, `${JSON.stringify(cfg, null, 2)}\n`)
+    return out
+  })
 }
 
 function cmdPeersList(dir: string): void {
@@ -95,16 +102,21 @@ function cmdPeersAdd(dir: string, args: string[]): void {
     console.error(`error: peer rig "${rig}" is not a mesh://<org>/<repo> uri`)
     process.exit(2)
   }
-  const cfg = readConfigFile(dir)
-  const mesh = cfg.mesh ?? {}
-  const peers = { ...(mesh.peers ?? {}) }
-  if (peers[alias] !== undefined) {
-    console.error(`error: peer "${alias}" already bound — remove it first`)
+  try {
+    withMeshConfig(dir, (cfg) => {
+      const mesh = cfg.mesh ?? {}
+      const peers = { ...(mesh.peers ?? {}) }
+      if (peers[alias] !== undefined) {
+        console.error(`error: peer "${alias}" already bound — remove it first`)
+        process.exit(2)
+      }
+      peers[alias] = { rig, remote }
+      cfg.mesh = { ...mesh, peers }
+    })
+  } catch (e) {
+    console.error(`error: ${e instanceof Error ? e.message : e}`)
     process.exit(2)
   }
-  peers[alias] = { rig, remote }
-  cfg.mesh = { ...mesh, peers }
-  writeConfigFile(dir, cfg)
   console.log(`peer ${alias} → ${rig} (${remote})`)
 }
 
@@ -114,16 +126,21 @@ function cmdPeersRemove(dir: string, args: string[]): void {
     console.error('usage: bro mesh peers remove <alias>')
     process.exit(2)
   }
-  const cfg = readConfigFile(dir)
-  const mesh = cfg.mesh ?? {}
-  const peers = { ...(mesh.peers ?? {}) }
-  if (peers[alias] === undefined) {
-    console.error(`error: no peer "${alias}"`)
+  try {
+    withMeshConfig(dir, (cfg) => {
+      const mesh = cfg.mesh ?? {}
+      const peers = { ...(mesh.peers ?? {}) }
+      if (peers[alias] === undefined) {
+        console.error(`error: no peer "${alias}"`)
+        process.exit(2)
+      }
+      delete peers[alias]
+      cfg.mesh = { ...mesh, peers }
+    })
+  } catch (e) {
+    console.error(`error: ${e instanceof Error ? e.message : e}`)
     process.exit(2)
   }
-  delete peers[alias]
-  cfg.mesh = { ...mesh, peers }
-  writeConfigFile(dir, cfg)
   console.log(`peer ${alias} removed`)
 }
 

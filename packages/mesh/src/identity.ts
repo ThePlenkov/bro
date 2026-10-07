@@ -30,15 +30,27 @@ export function formatRigUri(rig: RigRef): string {
  *  parseable origin is unaddressed: callers must treat null as "this
  *  rig cannot be written to by name" and surface it, not guess. */
 export function rigFromRemoteUrl(url: string): RigRef | null {
-  const trimmed = url.trim().replace(/\.git$/, '').replace(/\/+$/, '')
-  const m =
-    /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)$/.exec(trimmed) ??
-    /^git@[^:]+:([^/]+)\/([^/]+)$/.exec(trimmed) ??
-    /^ssh:\/\/git@[^/]+\/([^/]+)\/([^/]+)$/.exec(trimmed)
-  if (m === null) {
+  let rest = url.trim().replace(/\/+$/, '')
+  if (rest.endsWith('.git')) {
+    rest = rest.slice(0, -'.git'.length)
+  }
+  // https://host/org/repo — take the two path segments after the host
+  if (/^https?:\/\//.test(rest) || rest.startsWith('ssh://')) {
+    rest = rest.slice(rest.indexOf('://') + 3)
+    const slash = rest.indexOf('/')
+    rest = slash === -1 ? '' : rest.slice(slash + 1)
+  } else if (rest.startsWith('git@')) {
+    // git@host:org/repo — after the colon
+    const colon = rest.indexOf(':')
+    rest = colon === -1 ? '' : rest.slice(colon + 1)
+  } else {
     return null
   }
-  return { org: m[1]!.toLowerCase(), repo: m[2]!.toLowerCase() }
+  const parts = rest.split('/').filter((p) => p !== '')
+  if (parts.length !== 2 || parts[0] === undefined || parts[1] === undefined) {
+    return null
+  }
+  return { org: parts[0].toLowerCase(), repo: parts[1].toLowerCase() }
 }
 
 /** The descriptor a rig commits at its repo root — mirrors the spec

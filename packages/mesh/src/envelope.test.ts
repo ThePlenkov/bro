@@ -36,11 +36,20 @@ describe('validateEnvelope', () => {
     assert.ok(validateEnvelope({ ...VALID, title: '' }).length > 0)
     assert.ok(validateEnvelope('string').length > 0)
   })
+
+  test('a request threads to itself; lifecycle messages carry their own id', () => {
+    assert.ok(validateEnvelope({ ...VALID, thread: 'other' }).length > 0)
+    assert.deepEqual(
+      validateEnvelope({ ...VALID, kind: 'claim', id: 'claim-1', thread: 'req-bro-x1' }),
+      [],
+    )
+  })
 })
 
 describe('bead mapping', () => {
   const bead = {
-    id: 'bro-x1',
+    // a request's bead id IS its thread — the mesh:thread label repeats it
+    id: 'req-bro-x1',
     title: 'fix the flake',
     description: 'please',
     priority: 2,
@@ -88,6 +97,14 @@ describe('bead mapping', () => {
       envelopeFromBead({
         ...bead,
         labels: bead.labels.map((l) => (l.startsWith('mesh:to:') ? 'mesh:to:bad' : l)),
+      }),
+      null,
+    )
+    // a request whose thread names another id was hand-labelled, not posted
+    assert.equal(
+      envelopeFromBead({
+        ...bead,
+        labels: bead.labels.map((l) => (l.startsWith('mesh:thread:') ? 'mesh:thread:other' : l)),
       }),
       null,
     )

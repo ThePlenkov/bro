@@ -32,6 +32,14 @@ describe('rigFromRemoteUrl', () => {
     assert.equal(rigFromRemoteUrl('/home/x/repo'), null)
     assert.equal(rigFromRemoteUrl(''), null)
   })
+
+  test('trailing slash after .git still strips the suffix', () => {
+    assert.deepEqual(rigFromRemoteUrl('https://github.com/ThePlenkov/bro.git/'), {
+      org: 'theplenkov',
+      repo: 'bro',
+    })
+    assert.equal(rigFromRemoteUrl('https://github.com/onlyorg/'), null)
+  })
 })
 
 describe('rig descriptor', () => {

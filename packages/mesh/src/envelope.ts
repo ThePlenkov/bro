@@ -73,6 +73,26 @@ export const MESH_VERSION_LABEL = L.v('1')
 
 const PRIORITY_NAMES = ['p0', 'p1', 'p2', 'p3', 'p4'] as const
 
+const REF_KINDS = ['bead', 'url', 'pr'] as const
+
+/** `mesh:ref:<kind>:<ref>` / `mesh:ev:<kind>:<ref>` — ref values may
+ *  themselves contain colons (urls, pr links), so split at the second
+ *  colon rather than pattern-matching. */
+function labelRefs(labels: string[], prefix: string): MeshRef[] {
+  return labels.flatMap((l) => {
+    if (!l.startsWith(prefix)) {
+      return []
+    }
+    const rest = l.slice(prefix.length)
+    const colon = rest.indexOf(':')
+    const kind = colon === -1 ? rest : rest.slice(0, colon)
+    const ref = colon === -1 ? '' : rest.slice(colon + 1)
+    return (REF_KINDS as readonly string[]).includes(kind) && ref !== ''
+      ? [{ kind: kind as MeshRef['kind'], ref }]
+      : []
+  })
+}
+
 function labelValue(labels: string[], prefix: string): string | null {
   for (const l of labels) {
     if (l.startsWith(prefix)) {
@@ -152,11 +172,11 @@ export function validateEnvelope(raw: unknown): string[] {
   if (typeof e.thread !== 'string' || e.thread === '') {
     errs.push('thread required')
   }
-  if (e.kind !== 'request' && e.thread !== e.id) {
-    // lifecycle messages may carry their own id but must point at the
-    // request's thread
-    if (typeof e.thread !== 'string' || e.thread === '') {
-      errs.push('lifecycle message must carry the request thread')
+  if (typeof e.thread === 'string' && e.thread !== '') {
+    if (e.kind === 'request' && e.thread !== e.id) {
+      // a request threads to itself; lifecycle messages carry their own
+      // id but must point at the request's thread
+      errs.push('a request thread must equal its id')
     }
   }
   for (const [field, name] of [
@@ -218,7 +238,10 @@ export function envelopeFromBead(bead: BeadLike): MeshEnvelope | null {
     from === null ||
     to === null ||
     parseRigUri(from) === null ||
-    parseRigUri(to) === null
+    parseRigUri(to) === null ||
+    (kind === 'request' && thread !== bead.id)
+    // a request threads to itself — a foreign thread id means the bead
+    // was hand-labelled, not posted through the mesh
   ) {
     return null
   }
@@ -231,17 +254,11 @@ export function envelopeFromBead(bead: BeadLike): MeshEnvelope | null {
     to: canonRig(to),
     title: bead.title,
     body: bead.description ?? bead.notes ?? '',
-    refs: labels.flatMap((l) => {
-      const m = /^mesh:ref:(bead|url|pr):(.+)$/.exec(l)
-      return m === null ? [] : [{ kind: m[1] as MeshRef['kind'], ref: m[2]! }]
-    }),
+    refs: labelRefs(labels, 'mesh:ref:'),
     terms:
       typeof bead.priority === 'number'
         ? { priority: PRIORITY_NAMES[bead.priority] ?? `p${bead.priority}` }
         : {},
-    evidence: labels.flatMap((l) => {
-      const m = /^mesh:ev:(bead|url|pr):(.+)$/.exec(l)
-      return m === null ? [] : [{ kind: m[1] as MeshRef['kind'], ref: m[2]! }]
-    }),
+    evidence: labelRefs(labels, 'mesh:ev:'),
   }
 }

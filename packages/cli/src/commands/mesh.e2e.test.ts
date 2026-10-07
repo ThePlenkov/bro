@@ -105,13 +105,19 @@ describe('bro mesh', () => {
           'mesh:ref:bead:rigB-9x',
         ],
       }
+      const selfThread = (row: Record<string, unknown>) => ({
+        ...row,
+        labels: (row.labels as string[]).map((l) =>
+          l.startsWith('mesh:thread:') ? `mesh:thread:${row.id}` : l,
+        ),
+      })
       const noise = [
         // addressed to somebody else — must not surface
-        { ...request, id: 'rigB-oth', labels: request.labels.map((l) => l.replace('ThePlenkov/bro', 'other/rig')) },
+        selfThread({ ...request, id: 'rigB-oth', labels: request.labels.map((l) => l.replace('ThePlenkov/bro', 'other/rig')) }),
         // not a mesh record at all
         { id: 'rigB-zz', title: 'plain issue', status: 'open', labels: ['bug'] },
         // closed — stale request, skip
-        { ...request, id: 'rigB-old', status: 'closed' },
+        selfThread({ ...request, id: 'rigB-old', status: 'closed' }),
       ]
       const { remoteDir, publish } = installFakeDoltRemote(root, [request, ...noise])
 
@@ -128,7 +134,7 @@ describe('bro mesh', () => {
       assert.doesNotMatch(inbox.stdout, /rigB-oth|rigB-zz|rigB-old/)
 
       // refresh: a newly published request appears only after a pull
-      publish([request, ...noise, { ...request, id: 'rigB-new', title: 'fresh ask' }])
+      publish([request, ...noise, selfThread({ ...request, id: 'rigB-new', title: 'fresh ask' })])
       const stale = runCli(['mesh', 'inbox', '--no-pull'], { cwd: main, env })
       assert.doesNotMatch(stale.stdout, /rigB-new/)
       const fresh = runCli(['mesh', 'inbox'], { cwd: main, env })
@@ -190,6 +196,19 @@ describe('bro mesh', () => {
       const inbox = runCli(['mesh', 'inbox'], { cwd: main, env })
       assert.equal(inbox.code, 0)
       assert.match(inbox.stderr, /ghost.*failed|failed.*ghost/i)
+    })
+  })
+
+  test('peers add refuses to clobber a malformed config or a ts-shadowed one', () => {
+    const { root, main } = initRepo('bro-mesh-e2e-cfg-', (m) => {
+      execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/acme/widgets.git'], { cwd: m })
+      writeFileSync(join(m, 'bro.config.json'), '{ not json')
+    })
+    inside(main, root, () => {
+      const bad = runCli(['mesh', 'peers', 'add', 'x', 'mesh://a/b', '/tmp/r'], { cwd: main })
+      assert.equal(bad.code, 2)
+      // the malformed file was NOT overwritten
+      assert.equal(readFileSync(join(main, 'bro.config.json'), 'utf8'), '{ not json')
     })
   })
 })
