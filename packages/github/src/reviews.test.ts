@@ -395,6 +395,25 @@ describe('githubReview', { skip: WIN32 }, () => {
     )
   })
 
+  test('mergeAsync never naps past the watch deadline', () => {
+    // a 1s budget with the default 2s gap: an unclamped sleep carries the
+    // loop a whole interval past the deadline before it can notice
+    withFakeGh(
+      {
+        FAKE_GH_ASYNC: '{"status":"pending","details":{"uuid":"u-4"}}',
+        FAKE_GH_ASYNC_POLL: '{"status":"merged","details":{"sha":"abc123"}}',
+      },
+      () => {
+        const naps: number[] = []
+        mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, 'main', {
+          sleep: (ms) => naps.push(ms),
+          deadlineMs: 1_000,
+        })
+        assert.deepEqual(naps, [1_000])
+      }
+    )
+  })
+
   test('mergePr asks for the merge queue when the base branch requires one', () => {
     withFakeGh({ FAKE_GH_PULL: STACK_PULL, FAKE_GH_QUEUE: '1' }, (log) => {
       githubReview().mergePr(target, {

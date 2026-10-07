@@ -849,14 +849,18 @@ export function mergeAsync(
         `async merge of ${prLink(t.repo, t.pr)} reports pending with no uuid — nothing to poll`
       )
     }
-    if (Date.now() - started >= deadlineMs) {
+    const elapsed = Date.now() - started
+    if (elapsed >= deadlineMs) {
       throw new Error(
         `async merge ${uuid} of ${prLink(t.repo, t.pr)} still pending after ` +
-          `${Math.round(deadlineMs / 1000)}s — the request keeps running on GitHub; ` +
+          `${Math.round(elapsed / 1000)}s — the request keeps running on GitHub; ` +
           're-run to resume polling it'
       )
     }
-    sleep(intervalMs)
+    // nap no longer than the budget left: an unclamped gap carries the loop
+    // a whole interval past the deadline. The remainder is positive -- the
+    // guard above threw on anything else. Same clamp wait.ts uses.
+    sleep(Math.min(intervalMs, deadlineMs - elapsed))
     result = readAsyncMerge(ghTry(['api', `repos/${t.repo}/pulls/${t.pr}/merge-async/${uuid}`]))
   }
 
