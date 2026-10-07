@@ -189,20 +189,26 @@ function meshPeers(dir: string) {
 
 /** One coalesced mailbox/bus drop when requests addressed to us are
  *  visible — the fixed key supersedes a pending drop, so polling loops
- *  can't spam sessions (the notify connector drains it mid-turn). */
+ *  can't spam sessions (the notify connector drains it mid-turn).
+ *  Best-effort: a misconfigured events connector or a failed publish
+ *  must not break pull/inbox. */
 function announceInbox(dir: string, rig: string, n: number): void {
   if (n === 0) {
     return
   }
-  const events = facade('events', { dir }, { prefer: loadConfig(dir).connectors })
-  void events
-    .publish({
-      topic: 'mesh',
-      kind: 'info',
-      payload: `${n} mesh request(s) addressed to ${rig} — \`bro mesh inbox\``,
-      key: 'mesh-inbox',
-    })
-    .then(() => {})
+  try {
+    const events = facade('events', { dir }, { prefer: loadConfig(dir).connectors })
+    void events
+      .publish({
+        topic: 'mesh',
+        kind: 'info',
+        payload: `${n} mesh request(s) addressed to ${rig} — \`bro mesh inbox\``,
+        key: 'mesh-inbox',
+      })
+      .catch(() => {})
+  } catch {
+    // events facade unresolvable — notification is advisory only
+  }
 }
 
 function cmdPull(dir: string): void {
