@@ -7,7 +7,7 @@
  */
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { gitCommonDir, gitTry, loadConfig, withFileLock } from '@broject/core'
+import { facade, gitCommonDir, gitTry, loadConfig, withFileLock } from '@broject/core'
 import {
   formatRigUri,
   meshInbox,
@@ -187,6 +187,30 @@ function meshPeers(dir: string) {
     .filter((p): p is NonNullable<typeof p> => p !== null)
 }
 
+/** One coalesced mailbox/bus drop when requests addressed to us are
+ *  visible — the fixed key supersedes a pending drop, so polling loops
+ *  can't spam sessions (the notify connector drains it mid-turn).
+ *  Best-effort: a misconfigured events connector or a failed publish
+ *  must not break pull/inbox. */
+function announceInbox(dir: string, rig: string, n: number): void {
+  if (n === 0) {
+    return
+  }
+  try {
+    const events = facade('events', { dir }, { prefer: loadConfig(dir).connectors })
+    void events
+      .publish({
+        topic: 'mesh',
+        kind: 'info',
+        payload: `${n} mesh request(s) addressed to ${rig} — \`bro mesh inbox\``,
+        key: 'mesh-inbox',
+      })
+      .catch(() => {})
+  } catch {
+    // events facade unresolvable — notification is advisory only
+  }
+}
+
 function cmdPull(dir: string): void {
   const common = gitCommonDir(dir)
   if (common === null) {
@@ -208,6 +232,10 @@ function cmdPull(dir: string): void {
     }
   }
   console.log(`pulled ${ok}/${peers.length} peer(s)`)
+  const rig = selfRig(dir)
+  if (rig !== null) {
+    announceInbox(dir, rig, meshInbox(dir, meshPeers(dir), rig, common, { pull: false }).requests.length)
+  }
 }
 
 function cmdInbox(dir: string, args: string[]): void {
@@ -227,6 +255,7 @@ function cmdInbox(dir: string, args: string[]): void {
   for (const e of result.errors) {
     console.error(`! ${e}`)
   }
+  announceInbox(dir, rig, result.requests.length)
   if (args.includes('--json')) {
     console.log(
       JSON.stringify(

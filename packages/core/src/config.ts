@@ -434,6 +434,29 @@ export const querySection: ConfigSection<{
   }
 }
 
+/** One `mesh.peers.<alias>` entry — rig must be a mesh:// URI, remote a
+ *  non-empty string; transport survives verbatim (parsePeer judges it —
+ *  stripping it here would silently downgrade explicit bindings). */
+function meshPeerEntry(entry: unknown): { rig: string; remote: string; transport?: string } | null {
+  if (typeof entry !== 'object' || entry === null) {
+    return null
+  }
+  const e = entry as { rig?: unknown; remote?: unknown; transport?: unknown }
+  if (
+    typeof e.rig !== 'string' ||
+    !e.rig.startsWith('mesh://') ||
+    typeof e.remote !== 'string' ||
+    e.remote === ''
+  ) {
+    return null
+  }
+  const p: { rig: string; remote: string; transport?: string } = { rig: e.rig, remote: e.remote }
+  if (typeof e.transport === 'string' && e.transport !== '') {
+    p.transport = e.transport
+  }
+  return p
+}
+
 /** bro.config.json `mesh` section — the federation seam (specs/mesh).
  *  `rig` pins this repo's mesh:// identity when the origin remote
  *  doesn't derive one; `peers` is a map of alias → { rig, remote } —
@@ -441,25 +464,27 @@ export const querySection: ConfigSection<{
  *  over (beads-remote binding). */
 export const meshSection: ConfigSection<{
   rig?: string
-  peers: Record<string, { rig: string; remote: string }>
+  peers: Record<string, { rig: string; remote: string; transport?: string }>
 }> = (raw) => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     rig?: unknown
     peers?: unknown
   }
-  const peers: Record<string, { rig: string; remote: string }> = {}
+  const peers: Record<string, { rig: string; remote: string; transport?: string }> = {}
   if (typeof obj.peers === 'object' && obj.peers !== null) {
     for (const [alias, entry] of Object.entries(obj.peers)) {
-      if (typeof entry !== 'object' || entry === null) {
+      // __proto__ is a setter on Object.prototype, not an own-property
+      // write — a peer alias with that name would mutate the map
+      if (alias === '__proto__') {
         continue
       }
-      const e = entry as { rig?: unknown; remote?: unknown }
-      if (typeof e.rig === 'string' && e.rig.startsWith('mesh://') && typeof e.remote === 'string' && e.remote !== '') {
-        peers[alias] = { rig: e.rig, remote: e.remote }
+      const p = meshPeerEntry(entry)
+      if (p !== null) {
+        peers[alias] = p
       }
     }
   }
-  const out: { rig?: string; peers: Record<string, { rig: string; remote: string }> } = { peers }
+  const out: { rig?: string; peers: Record<string, { rig: string; remote: string; transport?: string }> } = { peers }
   if (typeof obj.rig === 'string' && obj.rig.startsWith('mesh://')) {
     out.rig = obj.rig
   }
@@ -564,9 +589,10 @@ export interface BroConfig {
   query: { concurrency: number; env: Record<string, string> }
   /** Inter-rig federation (specs/mesh). `rig` pins this repo's mesh://
    *  identity when origin doesn't derive one; `peers` maps alias →
-   *  { rig, remote } — remote is the git URL the peer's beads store
-   *  federates over (read-only pulls, sovereignty rule). */
-  mesh: { rig?: string; peers: Record<string, { rig: string; remote: string }> }
+   *  { rig, remote, transport? } — remote is the git URL the peer's
+   *  beads store federates over (read-only pulls, sovereignty rule),
+   *  transport overrides derivation. */
+  mesh: { rig?: string; peers: Record<string, { rig: string; remote: string; transport?: string }> }
   /** External plugin specifiers — relative paths or package names the CLI
    *  resolves from the repo and imports at startup. Each module's default
    *  export must be a BroPlugin (or an array of them). */
