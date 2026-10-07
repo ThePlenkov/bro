@@ -58,7 +58,7 @@
   },
   "dependencies": {
     "@broject/bro-pack": "^0.2.0",
-    "@sverka/cli": "^0.1.27",
+    "sverka": "^0.2.10",
     "smol-toml": "^1.9.0"
   },
   "devDependencies": {

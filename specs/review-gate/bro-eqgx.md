@@ -33,11 +33,11 @@ collects `*.sarif` from `.sverka/artifacts` and runs the policy gate).
 1. `check.bin` in bro.config (path or command name — escape hatch)
 2. `<root>/node_modules` walking up from the run root — the repo's own
    pinned install wins (stack-health case); the package entry
-   (`@sverka/cli/dist/bin.mjs`, spawned via `process.execPath`) is
+   (`sverka/dist/bin.mjs`, spawned via `process.execPath`) is
    preferred over `.bin` shims so Windows `.cmd` launchers never reach
    `spawn`
 3. `sverka` on `PATH`
-4. the `@sverka/cli` bundled with `@broject/bro` (new runtime dep —
+4. the `sverka` bundled with `@broject/bro` (new runtime dep —
    `bro check` works in any repo, not just ones that installed sverka)
 
 Nothing resolving → exit 1 with an install hint. This is the same
@@ -89,7 +89,9 @@ check` auto-wiring into `act`/the stop gate.
 ## Plan
 
 - [x] spec (this file)
-- [x] `packages/cli`: add `@sverka/cli` runtime dep; `src/commands/check.ts`
+- [x] `packages/cli`: add `sverka` runtime dep (was `@sverka/cli`; the
+      old name is deprecated and pinned a vulnerable MCP sdk — bro-u2dp5);
+      `src/commands/check.ts`
       — binary resolution, spawn, JSON parse, text/json render, exit codes
       (config section split into `check-config.ts` — leaf module, avoids
       a plugins.ts↔check.ts init-time cycle)

@@ -134,7 +134,7 @@ describe('resolveSverka', () => {
     }
   })
 
-  test('falls back to PATH or the bundled @sverka/cli', () => {
+  test('falls back to PATH or the bundled sverka', () => {
     const { dir, done } = tmpdirWith('bro-check-')
     try {
       const bin = join(dir, 'bin')
@@ -158,10 +158,35 @@ describe('resolveSverka', () => {
         const hit = resolveSverka(dir)
         assert.equal(hit?.via, 'bundled')
         assert.equal(hit?.file, process.execPath)
-        assert.match(hit?.args[0] ?? '', /@sverka[\\/]cli[\\/]dist[\\/]bin\.mjs$/)
+        assert.match(hit?.args[0] ?? '', /sverka[\\/]dist[\\/]bin\.mjs$/)
       } finally {
         process.env.PATH = prevPath
       }
+    } finally {
+      done()
+    }
+  })
+
+  // @sverka/cli is the deprecated pre-rename package — a consumer repo
+  // may still pin it, and that install has to keep resolving.
+  test('repo-local @sverka/cli entry still resolves; sverka wins when both exist', () => {
+    const { dir, done } = tmpdirWith('bro-check-')
+    try {
+      const legacy = join(dir, 'node_modules', '@sverka', 'cli', 'dist')
+      mkdirSync(legacy, { recursive: true })
+      const legacyBin = join(legacy, 'bin.mjs')
+      writeFileSync(legacyBin, '')
+      const hit = resolveSverka(dir)
+      assert.equal(hit?.via, 'repo')
+      assert.deepEqual(hit?.args, [legacyBin])
+
+      const current = join(dir, 'node_modules', 'sverka', 'dist')
+      mkdirSync(current, { recursive: true })
+      const currentBin = join(current, 'bin.mjs')
+      writeFileSync(currentBin, '')
+      const both = resolveSverka(dir)
+      assert.equal(both?.via, 'repo')
+      assert.deepEqual(both?.args, [currentBin])
     } finally {
       done()
     }
