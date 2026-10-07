@@ -51,7 +51,8 @@ interface EnvOpts {
   /** written verbatim as bro.config.ts */
   configTs?: string
   beadsDir?: boolean
-  remote?: boolean
+  /** true → a placeholder origin; a string → used verbatim as the origin url */
+  remote?: boolean | string
   /** shims to drop into bin/ — absent name = binary missing from PATH */
   bins?: Array<'bd' | 'gh' | 'bro' | 'npx'>
   env?: Record<string, string>
@@ -71,7 +72,8 @@ function withEnv(opts: EnvOpts, fn: (dir: string) => void): Promise<void> {
   }
   execFileSync('git', ['init', '-q', dir])
   if (opts.remote) {
-    execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', 'https://example.com/x.git'])
+    const url = typeof opts.remote === 'string' ? opts.remote : 'https://example.com/x.git'
+    execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', url])
   }
   if (opts.beadsDir) {
     mkdirSync(join(dir, '.beads'))
@@ -414,4 +416,65 @@ describe('bro doctor', () => {
         rmSync(bare, { recursive: true, force: true })
       }
     }))
+
+  test('mesh rows: absent when unconfigured; census + dolt probe when peers exist', async () => {
+    // no mesh section at all — the group stays silent
+    await withEnv({ remote: true, bins: ['gh', 'bd'] }, (dir) => {
+      const checks = runDoctorChecks(dir)
+      assert.equal(checks.find((c) => c.name === 'mesh'), undefined)
+      assert.equal(checks.find((c) => c.name === 'mesh-peers'), undefined)
+    })
+    // configured peers: rig derived from origin, census counts
+    // transports, dolt missing (PATH is shims only) → warn
+    await withEnv(
+      {
+        remote: 'https://github.com/acme/widgets.git',
+        bins: ['gh', 'bd'],
+        config: {
+          mesh: {
+            peers: {
+              rigb: { rig: 'mesh://acme/rigb', remote: 'https://github.com/acme/rigb.git' },
+              local: { rig: 'mesh://acme/local', remote: '/nonexistent' },
+            },
+          },
+        },
+      },
+      (dir) => {
+        const checks = runDoctorChecks(dir)
+        assert.equal(byName(checks, 'mesh').status, 'ok')
+        assert.match(byName(checks, 'mesh-peers').detail ?? '', /2 peer\(s\), 2 beads-remote/)
+        assert.equal(byName(checks, 'mesh-dolt').status, 'warn')
+      }
+    )
+    // peers configured but no rig pin and no origin → unaddressable warn
+    await withEnv(
+      {
+        bins: ['gh', 'bd'],
+        config: { mesh: { peers: { rigb: { rig: 'mesh://acme/rigb', remote: 'https://github.com/acme/rigb.git' } } } },
+      },
+      (dir) => {
+        const checks = runDoctorChecks(dir)
+        assert.equal(byName(checks, 'mesh').status, 'warn')
+      }
+    )
+    // a binding the section passes but parsePeer rejects (bogus
+    // explicit transport) → the census warns instead of miscounting
+    await withEnv(
+      {
+        remote: 'https://github.com/acme/widgets.git',
+        bins: ['gh', 'bd'],
+        config: {
+          mesh: {
+            peers: {
+              bad: { rig: 'mesh://a/b', remote: 'x', transport: 'bogus' },
+              good: { rig: 'mesh://a/b', remote: '/p' },
+            },
+          },
+        },
+      },
+      (dir) => {
+        assert.equal(byName(runDoctorChecks(dir), 'mesh-peers').status, 'warn')
+      }
+    )
+  })
 })
