@@ -26,6 +26,7 @@ answer — the index every capability spec links back to.
 | `specs/judgments/` | typed calibrated decisions: judge facade, provider registry, shadow→advisory→enforce trust ladder (`bro judge`) |
 | `specs/mesh/` | inter-rig wire contract: envelope, lifecycle, transports (`bro mesh`) |
 | `specs/cross-repo/` | bro-side request protocol phases: LOCAL `bro request`, WAIT watcher, REMOTE transports |
+| `specs/fleet-routing/` | context/quota-aware dispatch: class→chain routing, provider walls, resume, continuation |
 
 ## Filetree (capability → code)
 
@@ -40,6 +41,7 @@ packages/
     src/specs.ts              SpecStore facade contract    → sdd
     src/plan.ts               plan version check + routing → plans
     src/agents.ts             AgentConnector contract      → sessions
+    src/routing.ts            dispatch arbiter             → fleet-routing
   github/     gh review connector                          → backends
   gitlab/     glab review connector                        → backends
   judge/      judge facade: chain, journal, shadow, replay → judgments
