@@ -115,7 +115,7 @@ connection shape (`api`: `baseUrl` + `apiKeyEnv`/`apiKeyCommand` +
 | `provider` / `model` | unset | Named provider + allowed model id the chain resolves through |
 | `fallback` | unset | Escalation provider name re-asked on unanswered or low-confidence answers |
 | `confidence` | `0.6` | Confidence floor below which answers escalate |
-| `timeoutMs` | — | Bounds the whole chained call |
+| `timeoutMs` | `3000` | Bounds the whole chained call |
 | `maxDecisionsPerRun` | `50` | Fresh `decide()` calls per invocation |
 | `baseUrl` / `apiKeyEnv` / `llm` | unset | Legacy single-backend shape — synthesized into anonymous `api` providers with a deprecation warning |
 

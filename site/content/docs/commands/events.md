@@ -3,15 +3,16 @@ title: Events — notify, mailbox, bus
 description: The events facade — a session mailbox by default, a local event broker behind it.
 ---
 
-Everything event-shaped in bro goes through one `events` facade.
-`bro notify` writes there; the notify connector's postTool probe drains
-drops into session context, so a watcher, fixer, or convoy worker
-reaches a live session mid-turn instead of the recipient burning tokens
-in a wait loop.
+`bro notify` writes through one `events` facade — mailbox by default,
+or the local broker when `"connectors": { "events": "bus" }` selects it.
+The notify connector's postTool probe drains drops into session
+context, so a watcher, fixer, or convoy worker reaches a live session
+mid-turn instead of the recipient burning tokens in a wait loop.
 
-The default backend is the **mailbox** — plain files, no broker, no
-config, no daemon. `"connectors": { "events": "bus" }` routes the same
-writes through the local broker instead.
+The mailbox itself is plain files — no broker, no config, no daemon —
+and `bro watch --notify` writes there directly (a raw `dropMailbox`
+tmp+rename), bypassing the facade: `connectors.events` routes `bro
+notify` writes only, never watch drops.
 
 ## The mailbox — `bro notify`
 

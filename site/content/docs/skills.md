@@ -40,12 +40,14 @@ and why to use the command. The CLI owns how.
 
 ## Adapters and generation
 
-Claude Code, Codex, Cursor, Devin, Kilo, OpenCode, and pi receive the
-same policy through their adapters. OpenCode, Kilo, and pi are native
-plugins (`bro plugins install <client>`). The shell adapters share one
-`skills/` tree: each `plugins/<client>/bro/skills` entry is a symlink,
-not a second copy. Cursor's hook manifest is generated too — only
-Claude's event map is hand-written.
+Claude Code, Codex, Cursor, and Devin receive the same policy through
+their adapters — the shell adapters share one `skills/` tree: each
+`plugins/<client>/bro/skills` entry is a symlink, not a second copy.
+Cursor's hook manifest is generated too — only Claude's event map is
+hand-written. OpenCode, Kilo, and pi are different: they're native
+plugins installed by `bro plugins install <client>` — a self-contained
+module (`plugins/<client>/bro/bro.ts`) carrying hooks and policy inline,
+with no skills tree beside it.
 
 The source of truth is `skills/`. `scripts/gen-plugins.ts` keeps the adapter
 links and hook files in step, while the CLI bundle embeds a snapshot of

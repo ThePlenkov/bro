@@ -36,8 +36,10 @@ registry entry and shown by `bro fleet` and `bro agents status`.
 
 Session kinds can carry a host-wide admission quota —
 `agents.<kind>.maxSessions` caps live sessions of that kind across every
-repo on the host (the devin plane is the known instance); the count is
-admitted under a shared slot lock, and `down` releases the reservation.
+repo on the host (the devin plane is the known instance); admission
+claims a slot file under a shared lock, and once the child lands its own
+session mark takes over — leftover slot files are reaped on a ~120 s
+TTL rather than released by `down`.
 
 `--live` is a TTY dashboard and cannot be combined with `--json`. For a
 non-interactive ticker, use `bro watch --every N`.

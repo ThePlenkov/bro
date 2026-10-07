@@ -35,4 +35,6 @@ needs a checked-out work branch — from the main checkout's branch, the
 default branch, or a detached HEAD it errors. `stack.mode` controls the
 default: `manual` (default) requires explicit `--stack` or `--base`;
 `auto` uses the current worktree branch when it is not the main
-checkout's branch. The edge is recorded for bottom-up merge order.
+checkout's branch or the repository's default branch — on either it
+falls back to the main checkout's branch instead. The edge is recorded
+for bottom-up merge order.
