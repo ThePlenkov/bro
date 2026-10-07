@@ -39,6 +39,9 @@ export type { BdCompat } from './bd.ts'
 export {
   actSection,
   beadsSection,
+  CONFIG_LAYER_FILES,
+  CONFIG_LAYERS,
+  CONFIG_SECTION_LAYERS,
   CORE_CONFIG_SECTIONS,
   debtSection,
   DEFAULT_CONFIG,
@@ -47,12 +50,15 @@ export {
   DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
   defineConfig,
   fleetSection,
-  meshSection,
+  globalConfigDir,
   loadConfig,
+  loadConfigLayers,
+  meshSection,
   PERSONALITIES,
   probeConfigFile,
   providersSection,
   querySection,
+  repoOptedIn,
   sddSection,
   SDD_MODES,
   stackSection,
@@ -93,7 +99,7 @@ export {
   dataRefPush,
   dataRefRoot,
 } from './dataref.ts'
-export type { BroConfig, ConfigSection, Personality, SddMode, StoreBackend } from './config.ts'
+export type { BroConfig, ConfigLayerHit, ConfigLayerName, ConfigLayersResult, ConfigSection, Personality, SddMode, StoreBackend } from './config.ts'
 export type { QueryFacade, QueryOpts, QueryResult } from './queries.ts'
 export { definePlugin } from './plugin.ts'
 export type { BroPlugin } from './plugin.ts'

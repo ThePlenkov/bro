@@ -1,7 +1,19 @@
 /**
- * bro configuration. Resolution order: bro.config.ts → bro.config.json
- * in cwd → same pair in the main worktree root (linked worktrees inherit
- * the machine-local config) → defaults. The .ts file loads synchronously via createRequire —
+ * bro configuration — three merged layers, precedence local > project >
+ * global (spec: specs/bro-9vmx.md):
+ *
+ *   global  $XDG_CONFIG_HOME/bro/config.{ts,json} (default ~/.config/bro/)
+ *           — this user's cross-project operator config (providers,
+ *           judge, fleet caps, agent spawn templates)
+ *   project bro.config.{ts,json} — committed, identical-for-everyone
+ *           policy (act, sdd, guard, debt, stack, connectors)
+ *   local   bro.config.local.{ts,json} — gitignored project-private
+ *           overrides (autoApprove, machine paths, personal caps)
+ *
+ * Each layer resolves cwd → main worktree root (linked worktrees
+ * inherit), `.ts` beats `.json` inside one dir, first file found wins
+ * the layer. Layers deep-merge onto DEFAULT_CONFIG: plain objects
+ * merge per key, arrays/scalars replace. The .ts file loads synchronously via createRequire —
  * native type stripping handles it on Node ≥22.18. `export default {…}`
  * is the canonical form (works in ESM and CJS repos); `module.exports`
  * only works where the repo is CommonJS. No bro import is required, so
@@ -841,10 +853,184 @@ function mainWorktreeRoot(cwd: string): string | null {
   return null
 }
 
+/** The three config layers, ascending precedence — global user, then
+ *  committed project, then gitignored local override. */
+export const CONFIG_LAYERS = ['global', 'project', 'local'] as const
+export type ConfigLayerName = (typeof CONFIG_LAYERS)[number]
+
+/** File names tried per layer, in order — `.ts` shadows `.json`. */
+export const CONFIG_LAYER_FILES: Record<ConfigLayerName, readonly string[]> = {
+  global: ['config.ts', 'config.json'],
+  project: ['bro.config.ts', 'bro.config.json'],
+  local: ['bro.config.local.ts', 'bro.config.local.json'],
+}
+
+/** Sections and their owning layer audience — `doctor` warns (never
+ *  blocks) on a mismatch: operator config committed for everyone, or
+ *  project policy applied globally to every repo this user touches.
+ *  Unlisted sections are neutral (`mesh` mixes shared rig identity with
+ *  machine-local remotes; plugin sections are the plugin's call). */
+export const CONFIG_SECTION_LAYERS: Record<string, 'operator' | 'policy'> = {
+  // operator — the user's subscription/credentials/machine, global or local
+  stores: 'operator',
+  personality: 'operator',
+  providers: 'operator',
+  judge: 'operator',
+  agents: 'operator',
+  fleet: 'operator',
+  beads: 'operator',
+  // policy — identical-for-everyone project rules
+  act: 'policy',
+  debt: 'policy',
+  sdd: 'policy',
+  guard: 'policy',
+  sweep: 'policy',
+  stack: 'policy',
+  connectors: 'policy',
+  query: 'policy',
+  drill: 'policy',
+  learn: 'policy',
+  watch: 'policy',
+  check: 'policy',
+  loop: 'policy',
+  drive: 'policy',
+  sync: 'policy',
+  mesh: 'policy',
+  plugins: 'policy',
+  pack: 'policy',
+}
+
+/** Repo opt-in probe — walks up from startDir for any project/local
+ *  bro.config.* file or a .beads/ dir. The global layer never counts:
+ *  it is the user's machine, not the repo's choice. pi.ts carries a
+ *  standalone copy of the same list — jiti loads it raw, so it cannot
+ *  import this package; keep the name list in sync. */
+export function repoOptedIn(startDir: string): boolean {
+  const markers = [...CONFIG_LAYER_FILES.project, ...CONFIG_LAYER_FILES.local, '.beads']
+  let dir = startDir
+  for (;;) {
+    if (markers.some((m) => existsSync(join(dir, m)))) {
+      return true
+    }
+    const parent = dirname(dir)
+    if (parent === dir) {
+      return false
+    }
+    dir = parent
+  }
+}
+
+/** Directory holding the global user layer — XDG config dir + `bro`. */
+export function globalConfigDir(): string {
+  const xdg = process.env.XDG_CONFIG_HOME
+  return join(
+    typeof xdg === 'string' && xdg.trim() !== '' ? xdg : join(homedir(), '.config'),
+    'bro'
+  )
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+}
+
+/** Deep-merge overlay onto base — plain objects merge per key, arrays
+ *  and scalars replace (never concat). `__proto__` is skipped: it is a
+ *  setter on Object.prototype, not a mergeable key. */
+function deepMerge(
+  base: Record<string, unknown>,
+  overlay: Record<string, unknown>
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base }
+  for (const [k, v] of Object.entries(overlay)) {
+    if (k === '__proto__') {
+      continue
+    }
+    const cur = out[k]
+    out[k] = isPlainObject(v) && isPlainObject(cur) ? deepMerge(cur, v) : v
+  }
+  return out
+}
+
+/** One loaded layer — `file` is the absolute path of the winning file,
+ *  `raw` the parsed object (relative `plugins` specs already anchored
+ *  to `dir` so the merge can't re-root them at the wrong layer). */
+export interface ConfigLayerHit {
+  layer: ConfigLayerName
+  dir: string
+  file: string
+  raw: Record<string, unknown>
+}
+
+export interface ConfigLayersResult {
+  /** Present layers, ascending precedence (global → project → local). */
+  layers: ConfigLayerHit[]
+  /** Files that exist but failed to parse. The broken file contributes
+   *  nothing and the scan falls through to the layer's next dir — but
+   *  when NO layer loads at all, loadConfig collapses `stores` to
+   *  jsonl-only: a half-read file must never silently enable the beads
+   *  projection. */
+  broken: string[]
+}
+
+/** Reads the raw layer objects loadConfig merges — exported so `bro
+ *  doctor` reports effective layers and per-section provenance from the
+ *  same load path instead of re-reading files. */
+export function loadConfigLayers(cwd: string = process.cwd()): ConfigLayersResult {
+  const base = resolve(cwd)
+  // Linked worktrees share the main checkout's machine-local config —
+  // bro.config.local.* is gitignored, so a fresh `git worktree add`
+  // otherwise loses act.ignoreChecks and store choices (a bare `act
+  // wait` stalls on a flaky reviewer the main checkout knows to ignore).
+  // mainWorktreeRoot returns an absolute path, so a relative cwd must be
+  // absolute too or the Set dedupe compares 'foo' against '/abs/foo'.
+  const projectDirs = [...new Set(
+    [base, mainWorktreeRoot(base)].filter((d): d is string => d !== null && d.trim() !== '')
+  )]
+  const layers: ConfigLayerHit[] = []
+  const broken: string[] = []
+  const scan = (layer: ConfigLayerName, dirs: string[]): void => {
+    for (const dir of dirs) {
+      for (const name of CONFIG_LAYER_FILES[layer]) {
+        const path = join(dir, name)
+        if (!existsSync(path)) {
+          continue
+        }
+        const raw = readConfigFile(name, path)
+        // a broken file stops the dir's remaining names (.ts precedence
+        // never promotes the sibling .json) but not the layer — the next
+        // dir still gets its shot, matching pre-layering fallback
+        if (raw === undefined) {
+          broken.push(path) // warned inside readConfigFile
+          break
+        }
+        // a valid non-object root ("str", […], 42) is not a config —
+        // spreading it would silently produce garbage keys
+        if (!isPlainObject(raw)) {
+          console.error(`${name}: root must be an object — skipping`)
+          broken.push(path)
+          break
+        }
+        // anchor relative plugin specs at this layer's dir — post-merge
+        // they must not re-root at the winning layer's location. Only
+        // touch the key when present: provenance reads own-keys.
+        const anchored = 'plugins' in raw
+          ? { ...raw, plugins: normalizePluginSpecs(dir, raw.plugins) }
+          : raw
+        layers.push({ layer, dir, file: path, raw: anchored })
+        return
+      }
+    }
+  }
+  scan('global', [globalConfigDir()])
+  scan('project', projectDirs)
+  scan('local', projectDirs)
+  return { layers, broken }
+}
+
 export function loadConfig(
   cwd: string = process.cwd(),
   /** Plugin-registered section schemas — key = configKey, applied over the
-   *  raw file. A throwing schema falls back to schema(undefined). */
+   *  merged raw. A throwing schema falls back to schema(undefined). */
   sections: Record<string, ConfigSection<unknown>> = {}
 ): BroConfig & Record<string, unknown> {
   // every exit path applies section schemas — a registered plugin
@@ -854,67 +1040,31 @@ export function loadConfig(
     applySections(config, {}, sections)
     return config
   }
-  // Linked worktrees share the main checkout's machine-local config —
-  // bro.config.* is gitignored, so a fresh `git worktree add` otherwise
-  // loses act.ignoreChecks and store choices (a bare `act wait` stalls on
-  // a flaky reviewer the main checkout knows to ignore).
-  // Resolve once up front: mainWorktreeRoot returns an absolute path, so
-  // a relative cwd must be absolute too or the Set dedupe compares
-  // 'foo' against '/abs/foo' and loads the same dir twice.
-  const base = resolve(cwd)
-  const dirs = [base, mainWorktreeRoot(base)].filter(
-    (d): d is string => d !== null && d.trim() !== ''
-  )
-  // a config that exists but fails never silently enables beads — the
-  // flag keeps the final fallback at jsonl-only in that case
-  let sawBroken = false
-  for (const dir of new Set(dirs)) {
-    const r = loadDirConfig(dir, sections)
-    if (r === 'broken') {
-      sawBroken = true
-    } else if (r !== null) {
-      return r
-    }
+  const { layers, broken } = loadConfigLayers(cwd)
+  if (layers.length === 0) {
+    // a config that exists but fails never silently enables beads —
+    // jsonl-only in that case, defaults otherwise
+    return fallback(broken.length > 0 ? ['jsonl'] : [...DEFAULT_CONFIG.stores])
   }
-  return fallback(sawBroken ? ['jsonl'] : [...DEFAULT_CONFIG.stores])
-}
-
-/** Tries bro.config.ts → bro.config.json inside one dir. 'broken' = a
- *  config exists but failed (the dir's remaining names are skipped —
- *  .ts precedence never promotes the sibling .json); null = nothing
- *  here. */
-function loadDirConfig(
-  dir: string,
-  sections: Record<string, ConfigSection<unknown>>
-): (BroConfig & Record<string, unknown>) | 'broken' | null {
-  for (const name of ['bro.config.ts', 'bro.config.json']) {
-    const path = join(dir, name)
-    if (!existsSync(path)) {
-      continue
-    }
-    const raw = readConfigFile(name, path)
-    if (raw === undefined) {
-      return 'broken' // warned inside readConfigFile
-    }
-    // a valid non-object root ("str", […], 42) is not a config —
-    // spreading it would silently produce garbage keys
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-      console.error(`${name}: root must be an object — skipping`)
-      return 'broken'
-    }
-    const { stores: _s, store: _legacy, plugins: _p, pack: _pk, ...rest } = raw as RawConfig
-    const pack = normalizePack(_pk)
-    const config: BroConfig & Record<string, unknown> = {
-      ...DEFAULT_CONFIG,
-      ...rest,
-      ...(pack !== undefined ? { pack } : {}),
-      stores: normalizeStores(raw as RawConfig),
-      plugins: normalizePluginSpecs(dir, (raw as RawConfig).plugins),
-    }
-    applySections(config, raw as Record<string, unknown>, sections)
-    return config
+  let merged: Record<string, unknown> = {}
+  for (const hit of layers) {
+    merged = deepMerge(merged, hit.raw)
   }
-  return null
+  const { stores: _s, store: _legacy, plugins: _p, pack: _pk, ...rest } = merged as RawConfig
+  const pack = normalizePack(_pk)
+  const config: BroConfig & Record<string, unknown> = {
+    ...DEFAULT_CONFIG,
+    ...rest,
+    ...(pack !== undefined ? { pack } : {}),
+    stores: normalizeStores(merged as RawConfig),
+    // per-layer anchoring already resolved relative specs — anything left
+    // is a package name or an absolute path
+    plugins: Array.isArray(merged.plugins)
+      ? merged.plugins.filter((v): v is string => typeof v === 'string')
+      : [],
+  }
+  applySections(config, merged, sections)
+  return config
 }
 
 /** Relative specs anchor at the config's own dir — an inherited config's

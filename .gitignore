@@ -15,3 +15,4 @@ packages/pack/formulas/
 .kilo/
 bun.lock
 bun.lockb
+bro.config.local.*

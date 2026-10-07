@@ -60,6 +60,7 @@ import {
   postToolLines,
   preToolVerdicts,
   promptContextLines,
+  repoOptedIn,
   sessionStartProbe,
   stopGateContributions,
   unrefPendingChildren,
@@ -113,20 +114,10 @@ interface HookInput {
   session_id?: unknown
 }
 
-/** A repo opts in to bro hooks with bro.config.json or a .beads/ dir. */
-function broEnabled(startDir: string): boolean {
-  let dir = startDir
-  for (;;) {
-    if (existsSync(join(dir, 'bro.config.json')) || existsSync(join(dir, '.beads'))) {
-      return true
-    }
-    const parent = dirname(dir)
-    if (parent === dir) {
-      return false
-    }
-    dir = parent
-  }
-}
+/** A repo opts in to bro hooks with any bro.config.* file or a .beads/
+ *  dir — the local layer counts too (spec: specs/bro-9vmx.md). Shared
+ *  with pi's spawn gate via core's repoOptedIn so the two never drift. */
+const broEnabled = repoOptedIn
 
 function readRaw(): unknown {
   try {

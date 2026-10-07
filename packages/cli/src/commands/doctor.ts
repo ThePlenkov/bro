@@ -15,14 +15,15 @@ import { readFileSync, statSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
   bdTry,
+  CONFIG_SECTION_LAYERS,
   connectors,
   CORE_CONFIG_SECTIONS,
   gitTry,
   isEnvName,
   janitorDidWork,
   janitorLine,
+  loadConfigLayers,
   probeBdCompat,
-  probeConfigFile,
   PROVIDER_REGISTRY,
   runJanitor,
 } from '@broject/core'
@@ -99,17 +100,6 @@ function binProblem(p: BinProbe): string {
 function repoRoot(dir: string): string | null {
   const r = gitTry(['-C', dir, 'rev-parse', '--show-toplevel'])
   return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : null
-}
-
-/** Main checkout root — mirrors loadConfig's linked-worktree config
- *  inheritance (`--git-common-dir` → `<main>/.git`). */
-function mainRoot(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'])
-  if (r.code !== 0 || r.out.trim() === '') {
-    return null
-  }
-  const common = resolve(dir, r.out.trim())
-  return basename(common) === '.git' ? dirname(common) : null
 }
 
 function isDir(path: string): boolean {
@@ -208,28 +198,6 @@ function knownConfigKeys(): Set<string> {
   ])
 }
 
-/** One config file → verdict, or null when absent. Existence alone proves
- *  nothing — a throwing .ts silently falls back to jsonl-only stores, so
- *  the probe loads through the same readConfigFile path loadConfig uses. */
-function configFileVerdict(path: string, name: string): DoctorCheck | null {
-  const state = probeConfigFile(path)
-  if (state === null) {
-    return null
-  }
-  if (state === 'broken') {
-    return check(
-      'config',
-      'fail',
-      `${name} failed to load`,
-      'fix or remove it — a broken config silently falls back to jsonl-only stores'
-    )
-  }
-  if (name.endsWith('.ts')) {
-    return check('config', 'ok', `${name} loads (takes precedence over .json)`)
-  }
-  return jsonKeysVerdict(path, name)
-}
-
 function jsonKeysVerdict(path: string, name: string): DoctorCheck {
   let raw: Record<string, unknown>
   try {
@@ -249,18 +217,102 @@ function jsonKeysVerdict(path: string, name: string): DoctorCheck {
   )
 }
 
-/** Config-file probe: which file wins (loadConfig order — cwd .ts, cwd
- *  .json, main-root .ts, main-root .json). */
-function checkConfig(dirs: string[]): DoctorCheck {
-  for (const dir of dirs) {
-    for (const name of ['bro.config.ts', 'bro.config.json']) {
-      const verdict = configFileVerdict(join(dir, name), name)
-      if (verdict !== null) {
-        return verdict
+/** Config probe: the effective layers plus per-section provenance and
+ *  ownership warnings (spec: specs/bro-9vmx.md). Reads through
+ *  loadConfigLayers — the same path loadConfig uses — so a file that
+ *  throws during the real load reports broken here identically. */
+function checkConfig(dir: string): DoctorCheck[] {
+  const { layers, broken } = loadConfigLayers(dir)
+  const checks: DoctorCheck[] = broken.map((file) =>
+    check(
+      'config',
+      'fail',
+      `${basename(file)} failed to load (${file})`,
+      'fix or remove it — a broken config silently falls back to jsonl-only stores'
+    )
+  )
+  if (layers.length === 0) {
+    checks.push(
+      broken.length === 0
+        ? check('config', 'ok', 'no bro.config — running on defaults')
+        : check('config', 'warn', 'no usable config layer — running on defaults')
+    )
+    return checks
+  }
+  checks.push(...configLayerChecks(layers, broken.length))
+  checks.push(...configOwnershipChecks(layers))
+  return checks
+}
+
+/** Layer summary + unknown-key scan (.json only) + per-section
+ *  provenance — the highest-precedence layer setting each key wins. */
+function configLayerChecks(
+  layers: ReturnType<typeof loadConfigLayers>['layers'],
+  brokenCount: number
+): DoctorCheck[] {
+  const checks: DoctorCheck[] = []
+  for (const hit of layers) {
+    if (hit.file.endsWith('.json')) {
+      const verdict = jsonKeysVerdict(hit.file, `${hit.layer} ${basename(hit.file)}`)
+      if (verdict.status !== 'ok') {
+        checks.push(verdict)
       }
     }
   }
-  return check('config', 'ok', 'no bro.config — running on defaults')
+  checks.push(
+    check(
+      'config',
+      'ok',
+      layers.map((l) => `${l.layer} ${basename(l.file)}`).join(' + ') +
+        (brokenCount > 0 ? ' — broken file present' : '')
+    )
+  )
+  const provenance = new Map<string, string>()
+  for (const hit of layers) {
+    for (const key of Object.keys(hit.raw)) {
+      provenance.set(key, hit.layer)
+    }
+  }
+  if (provenance.size > 0) {
+    checks.push(
+      check('config', 'ok', `sections: ${[...provenance.entries()].map((kv) => kv.join('←')).join(' · ')}`)
+    )
+  }
+  return checks
+}
+
+/** Operator config in the committed file leaks the user's subscription to
+ *  every clone; policy in the global file silently applies to every
+ *  project this user touches. Advisory — never a fail. */
+function configOwnershipChecks(
+  layers: ReturnType<typeof loadConfigLayers>['layers']
+): DoctorCheck[] {
+  const keys = (layer: string): string[] =>
+    layers.filter((l) => l.layer === layer).flatMap((l) => Object.keys(l.raw))
+  const checks: DoctorCheck[] = []
+  const committedOps = keys('project').filter((k) => CONFIG_SECTION_LAYERS[k] === 'operator')
+  if (committedOps.length > 0) {
+    checks.push(
+      check(
+        'config',
+        'warn',
+        `operator sections in committed config: ${committedOps.join(', ')}`,
+        'move them to bro.config.local.json or ~/.config/bro/config.json'
+      )
+    )
+  }
+  const globalPolicy = keys('global').filter((k) => CONFIG_SECTION_LAYERS[k] === 'policy')
+  if (globalPolicy.length > 0) {
+    checks.push(
+      check(
+        'config',
+        'warn',
+        `policy sections in global config: ${globalPolicy.join(', ')}`,
+        'global policy applies to every project — move to the repo\'s bro.config.json'
+      )
+    )
+  }
+  return checks
 }
 
 /** Compat probe — verifies the contract bro calls (read-path --json
@@ -683,7 +735,7 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
     checkGh(),
     ...bdChecks(dir, bd, beadsDir, cfg.stores.includes('beads')),
     checkHooks(dir),
-    checkConfig([dir, root, mainRoot(dir)].filter((d): d is string => d !== null)),
+    ...checkConfig(dir),
     ...providerChecks(dir),
     ...queryCliChecks(dir, cfg.connectors),
     ...meshChecks(dir, cfg.mesh),

@@ -3,10 +3,22 @@ title: Configuration
 description: bro.config.ts — typed config, validated sections, safe fallbacks.
 ---
 
-`bro.config.ts` (preferred) or `bro.config.json` in the repo root.
-Everything is optional — missing keys and wrong-type values fall back
-to per-section defaults instead of crashing. (A syntactically broken
-file is different — `bro setup` will tell you to fix it.)
+Config lives in three merged layers — precedence **local > project >
+global**:
+
+| Layer | File | Audience |
+| ----- | ---- | -------- |
+| global | `$XDG_CONFIG_HOME/bro/config.{ts,json}` (default `~/.config/bro/`) | Your cross-project operator config — `providers`, `judge`, `fleet`, `agents` |
+| project | `bro.config.{ts,json}` in the repo root | Committed, identical-for-everyone policy — `act`, `sdd`, `guard`, `debt`, `stack` |
+| local | `bro.config.local.{ts,json}` in the repo root | Gitignored project-private overrides — machine paths, personal caps |
+
+Each layer resolves cwd → main worktree root (linked worktrees
+inherit), `.ts` shadows `.json` in one dir. Layers deep-merge: objects
+merge per key, arrays and scalars replace — a layer only needs the keys
+it sets. `bro doctor` prints the effective layers, per-section
+provenance, and warns when operator config sits in the committed file
+or policy sits in the global one (advisory — loading never drops a
+section for being in the "wrong" layer).
 
 ```ts
 // bro.config.ts — plain default export; every key optional
@@ -20,8 +32,8 @@ export default {
 }
 ```
 
-The config file is written per-clone by `bro setup` and gitignored on
-purpose — store choices are machine-local.
+`bro setup` writes `bro.config.local.json` — store choices are
+machine-local and never belong in the committed layer.
 
 ## Sections
 
