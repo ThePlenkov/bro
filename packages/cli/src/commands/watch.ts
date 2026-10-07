@@ -5,7 +5,8 @@
  * itself. Spec: specs/sessions/bro-f4ot/bro-vf1j.md.
  *
  *   bro watch [--once]      one snapshot (default — the heartbeat call)
- *   bro watch --every N     tick the snapshot every N seconds
+ *   bro watch --every N [--for S]   tick the snapshot every N seconds;
+ *         --for bounds the loop — the exit is the event a session waits on
  *   bro watch --notify      drop each tick's snapshot into the mailbox
  *   bro watch --json        machine-readable {ts, attention, mols, gates, fleet}
  *   bro watch install [--every N] [--print]   the heartbeat on a
@@ -468,10 +469,15 @@ export function watchArgs(argv: string[]): {
   json: boolean
   notify: boolean
   everySec?: number
+  forSec?: number
 } {
   const everyRaw = flag(argv, '--every')
+  const forRaw = flag(argv, '--for')
   const base = { json: argv.includes('--json'), notify: argv.includes('--notify') }
   if (everyRaw === undefined) {
+    if (forRaw !== undefined) {
+      throw new Error('--for bounds a --every loop — pass both or neither')
+    }
     return base
   }
   const everySec = Number(everyRaw)
@@ -483,7 +489,14 @@ export function watchArgs(argv: string[]): {
       `--every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw}"`
     )
   }
-  return { ...base, everySec }
+  if (forRaw === undefined) {
+    return { ...base, everySec }
+  }
+  const forSec = Number(forRaw)
+  if (!Number.isFinite(forSec) || forSec < everySec) {
+    throw new Error(`--for needs a seconds value ≥ --every (${everySec}s), got "${forRaw}"`)
+  }
+  return { ...base, everySec, forSec }
 }
 
 /** One reap for one tick — the report when it did work plus the
@@ -548,7 +561,7 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
     console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
     process.exit(2)
   }
-  const { json, notify, everySec } = args
+  const { json, notify, everySec, forSec } = args
   const dir = process.cwd()
 
   if (notify && mailboxDir(dir) === null) {
@@ -593,10 +606,17 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
   if (everySec === undefined) {
     return
   }
-  // --every: tick on a cadence until killed — the supervisor owns the
-  // lifecycle; watch just keeps reporting.
+  // --every: tick on a cadence until killed — or until --for expires.
+  // An unbounded watch is only legal while a supervisor owns the
+  // lifecycle; session-side watchers must pass --for so their exit
+  // exists as an event.
+  const deadline = forSec === undefined ? Number.POSITIVE_INFINITY : Date.now() + forSec * 1000
   for (;;) {
     await new Promise((r) => setTimeout(r, everySec * 1000))
+    if (Date.now() >= deadline) {
+      console.log('watch: --for expired')
+      return
+    }
     await tick()
   }
 }

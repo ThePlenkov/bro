@@ -70,6 +70,18 @@ describe('watchArgs', () => {
     assert.equal(watchArgs(['--every', '0.1']).everySec, 0.1)
   })
 
+  test('--for bounds the loop; alone or below --every it fails closed', () => {
+    assert.deepEqual(watchArgs(['--every', '30', '--for', '300']), {
+      json: false,
+      notify: false,
+      everySec: 30,
+      forSec: 300,
+    })
+    assert.throws(() => watchArgs(['--for', '60']), /--for/)
+    assert.throws(() => watchArgs(['--every', '30', '--for', '10']), /--for/)
+    assert.throws(() => watchArgs(['--every', '30', '--for', 'abc']), /--for/)
+  })
+
   test('an --every beyond the timer range fails closed', () => {
     // over 2^31-1 ms setTimeout clamps to ~1ms — a busy tick, not a cadence
     assert.throws(() => watchArgs(['--every', '3000000000']), /--every/)

@@ -10,6 +10,9 @@
  *   done <step> [--result T]  close a step, then emit the new `next`
  *   pour <formula> [--var K=V]…  register agent/human types, bd mol pour
  *   list                      open molecules in this workspace
+ *   wait <mol>…               finite watcher — exits when every mol
+ *                             settles (complete/gated/stuck/timeout);
+ *                             the exit code is the wake verdict
  *   run <mol>… [--open]       the queue runner — spawn a convoy agent per
  *                             mol through the facade, sequential, to
  *                             'complete' (spec bro-7xgk.4)
@@ -55,6 +58,10 @@ Commands:
   claim <step-id> [--mol ID]               Atomically claim a step (assignee + in_progress)
   pour <formula> [--var K=V]…     Pour a formula into a molecule (registers agent/human types)
   list                            Open molecules in this workspace
+  wait <mol>… [--every SEC] [--timeout SEC] [--json]
+                                Finite watcher — exits the moment every mol
+                                settles: 0 = all complete, 2 = stuck, 3 = a
+                                human gate is ready, 4 = timeout
   run <mol>… [--open] [--attempts N] [--poll SEC] [--retry-delay SEC] [--json]
                                 The queue runner — spawn a convoy agent per mol
                                 through the facade, sequential, to 'complete'
@@ -185,14 +192,20 @@ function rollbackPoured(poured: string[]): string[] {
 export async function runConvoyCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
   if (!sub || sub === '--help' || sub === '-h') usage()
-  const SUBS = new Set(['list', 'status', 'next', 'done', 'claim', 'pour', 'run'])
+  const SUBS = new Set(['list', 'status', 'next', 'done', 'claim', 'pour', 'wait', 'run'])
   if (!SUBS.has(sub)) {
     console.error(`unknown convoy command: ${sub}`)
     usage()
   }
   // reject unknown options — a misspelled flag (e.g. --reslut) must not
   // silently degrade a `done` into a close with no reason
-  const KNOWN_FLAGS = new Set(sub === 'run' ? [...RUN_KNOWN_FLAGS] : [...VALUE_FLAGS])
+  const KNOWN_FLAGS = new Set(
+    sub === 'run'
+      ? [...RUN_KNOWN_FLAGS]
+      : sub === 'wait'
+        ? [...VALUE_FLAGS, '--every', '--timeout', '--json']
+        : [...VALUE_FLAGS],
+  )
   for (const a of rest) {
     // `--x=v` — match the flag name, not the whole arg; flag()/flagAll()
     // accept both spellings, so the unknown-option check must too
@@ -287,6 +300,85 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
       const fresh = resolveMolecule(mol.root.id)
       console.log(JSON.stringify(withInputs(nextStep(fresh), fresh), null, 2))
       return
+    }
+    case 'wait': {
+      const ids = positionals(rest, new Set([...VALUE_FLAGS, '--every', '--timeout']))
+      if (ids.length === 0) {
+        console.error('error: wait requires at least one mol id')
+        process.exit(2)
+      }
+      const everyRaw = flag(rest, '--every') ?? '30'
+      const timeoutRaw = flag(rest, '--timeout') ?? '0'
+      const every = Number(everyRaw)
+      const timeout = Number(timeoutRaw)
+      // a NaN --every spins setTimeout at ~0ms — a busy loop, not a poll
+      if (!Number.isFinite(every) || every <= 0) {
+        console.error(`error: --every needs a positive seconds value, got "${everyRaw}"`)
+        process.exit(2)
+      }
+      if (!Number.isFinite(timeout) || timeout < 0) {
+        console.error(`error: --timeout needs a non-negative seconds value, got "${timeoutRaw}"`)
+        process.exit(2)
+      }
+      const json = rest.includes('--json')
+      const deadline = timeout > 0 ? Date.now() + timeout * 1000 : Number.POSITIVE_INFINITY
+
+      // A wait's exit IS the event the caller slept for — the code tells
+      // the orchestrator which verdict it woke to, never just "done".
+      for (;;) {
+        const unsettled: string[] = []
+        const gated: string[] = []
+        const stuck: string[] = []
+        const bad: string[] = []
+        for (const id of ids) {
+          let n: ReturnType<typeof nextStep>
+          try {
+            n = nextStep(resolveMolecule(id))
+          } catch {
+            // a mistyped or vacuumed mol id must fail the wait loudly —
+            // silently dropping it would stall the orchestrator forever
+            bad.push(id)
+            continue
+          }
+          if (n.state === 'complete') continue
+          if (n.state === 'gate' || n.stuck.length > 0) {
+            ;(n.state === 'gate' ? gated : stuck).push(id)
+            continue
+          }
+          // blocked with nothing in flight is a stalled queue; blocked
+          // with in-progress steps is just "not ready yet"
+          if (n.state === 'blocked' && n.inProgress.length === 0) {
+            stuck.push(id)
+            continue
+          }
+          unsettled.push(id)
+        }
+        const emit = (verdict: string) => {
+          const summary = { verdict, settled: ids.filter((i) => ![...unsettled, ...gated, ...stuck, ...bad].includes(i)), unsettled, gated, stuck, bad }
+          console.log(json ? JSON.stringify(summary) : `convoy wait: ${verdict} — ${ids.join(' ')}`)
+        }
+        if (bad.length > 0) {
+          emit(`error: unknown mol(s) ${bad.join(' ')}`)
+          process.exit(2)
+        }
+        if (unsettled.length === 0 && gated.length === 0 && stuck.length === 0) {
+          emit('complete')
+          process.exit(0)
+        }
+        if (gated.length > 0) {
+          emit(`gated: ${gated.join(' ')}`)
+          process.exit(3)
+        }
+        if (stuck.length > 0) {
+          emit(`stuck: ${stuck.join(' ')}`)
+          process.exit(2)
+        }
+        if (Date.now() > deadline) {
+          emit(`timeout — still unsettled: ${unsettled.join(' ')}`)
+          process.exit(4)
+        }
+        await new Promise((r) => setTimeout(r, every * 1000))
+      }
     }
     case 'run': {
       await runConvoyRun(rest)

@@ -64,6 +64,3 @@ resubmission queue. A revised result is a new `request` thread.
   empty — treat `! alias: …` output as signal, not noise.
 - `bro mesh wait` is a point check. For supervision loops use the
   `bro act wait` pattern (armed watcher), not a shell `while` spin.
-
-
-Exit code: 0
