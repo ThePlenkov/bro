@@ -327,7 +327,9 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
         process.exit(2)
       }
       const json = rest.includes('--json')
-      const deadline = timeout > 0 ? Date.now() + timeout * 1000 : Number.POSITIVE_INFINITY
+      // monotonic clock for the bound — a wall-clock step backward must
+      // not stretch a --timeout past its elapsed budget
+      const deadline = timeout > 0 ? performance.now() + timeout * 1000 : Number.POSITIVE_INFINITY
 
       // A wait's exit IS the event the caller slept for — the code tells
       // the orchestrator which verdict it woke to, never just "done".
@@ -399,13 +401,15 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
           emit(`stuck: ${stuck.join(' ')}`, 2)
           return
         }
-        if (Date.now() >= deadline) {
+        if (performance.now() >= deadline) {
           emit(`timeout — still unsettled: ${unsettled.join(' ')}`, 4)
           return
         }
         // cap the poll sleep at the remaining budget — a short --timeout
         // exits on its boundary, not one full interval late
-        await new Promise((r) => setTimeout(r, Math.min(every * 1000, deadline - Date.now())))
+        await new Promise((r) =>
+          setTimeout(r, Math.min(every * 1000, deadline - performance.now()))
+        )
       }
     }
     case 'run': {

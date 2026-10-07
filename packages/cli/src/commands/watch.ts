@@ -604,10 +604,17 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
   }
 
   // the bound starts before the first tick — a slow snapshot already
-  // spends --for budget, and expiry must not wait one more interval
-  const deadline = forSec === undefined ? Number.POSITIVE_INFINITY : Date.now() + forSec * 1000
+  // spends --for budget, and expiry must not wait one more interval.
+  // Monotonic clock for the deadline: a wall-clock step backward must
+  // not stretch the bound past its elapsed budget.
+  const deadline =
+    forSec === undefined ? Number.POSITIVE_INFINITY : performance.now() + forSec * 1000
   const expired = () => {
-    console.log(json ? JSON.stringify({ ts: new Date().toISOString(), event: 'expired' }) : 'watch: --for expired')
+    console.log(
+      json
+        ? JSON.stringify({ ts: new Date().toISOString(), event: 'expired' })
+        : 'watch: --for expired'
+    )
   }
   await tick()
   if (everySec === undefined) {
@@ -618,14 +625,16 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
   // lifecycle; session-side watchers must pass --for so their exit
   // exists as an event.
   for (;;) {
-    if (Date.now() >= deadline) {
+    if (performance.now() >= deadline) {
       expired()
       return
     }
     // cap the sleep at the remaining budget so expiry lands on its
     // boundary, not one full --every late
-    await new Promise((r) => setTimeout(r, Math.min(everySec * 1000, deadline - Date.now())))
-    if (Date.now() >= deadline) {
+    await new Promise((r) =>
+      setTimeout(r, Math.min(everySec * 1000, deadline - performance.now()))
+    )
+    if (performance.now() >= deadline) {
       expired()
       return
     }
