@@ -799,35 +799,20 @@ const sleepSync = (ms: number): void => {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
 
-/** `PUT /pulls/{n}/merge-async`, then poll its uuid until the request
- *  settles. `base` decides the merge action (undefined — the reactive
- *  fallback path after a probe failure — means "assume no queue").
- *  Throws on `failed`, on an unobservable status, and on a watch
- *  timeout: an unsettled merge is never reported as a landed one. */
-export function mergeAsync(
-  t: PrTarget,
-  opts: MergeOpts,
-  base?: string,
-  poll: AsyncMergePoll = {}
-): void {
-  const intervalMs = poll.intervalMs ?? 2_000
-  const deadlineMs = poll.deadlineMs ?? 10 * 60_000
-  const sleep = poll.sleep ?? sleepSync
-  const queued = base !== undefined && queueRequired(t.repo, base)
-
+/** merge-async argv — the same pin --match-head-commit gives the sync
+ *  path: a head that moved since the gate evaluated it fails closed
+ *  instead of landing a commit the gate never saw. The queue owns the
+ *  strategy — merge_method is rejected with it. */
+function mergeAsyncArgs(t: PrTarget, opts: MergeOpts, queued: boolean): string[] {
   const args = [
     'api',
     '-X',
     'PUT',
     `repos/${t.repo}/pulls/${t.pr}/merge-async`,
-    // the same pin --match-head-commit gives the sync path: a head that
-    // moved since the gate evaluated it fails closed instead of landing
-    // a commit the gate never saw
     '-f',
     `sha=${opts.expectedHeadSha}`,
   ]
   if (queued) {
-    // the queue owns the strategy — merge_method is rejected with it
     args.push('-f', 'merge_action=merge_queue')
   } else {
     args.push('-f', 'merge_action=direct_merge', '-f', `merge_method=${opts.method}`)
@@ -835,12 +820,21 @@ export function mergeAsync(
   if (opts.admin) {
     args.push('-F', 'bypass_rules=true')
   }
-  console.log(
-    `merge: stack member — ${prLink(t.repo, t.pr)} via merge-async ` +
-      `(${queued ? 'merge queue' : opts.method}, head branch kept: a layer above may be based on it)`
-  )
+  return args
+}
 
-  let result = readAsyncMerge(ghTry(args))
+/** Poll the uuid while `pending`. Throws on a uuid-less pending, and on
+ *  the watch deadline: the request keeps running on GitHub's side —
+ *  re-running resumes polling the same uuid. The nap is clamped to the
+ *  budget left so a gap can't carry the loop past the deadline (the
+ *  remainder is positive — the guard threw on anything else). */
+function pollAsyncMerge(
+  t: PrTarget,
+  result: AsyncMergeResult,
+  intervalMs: number,
+  deadlineMs: number,
+  sleep: (ms: number) => void
+): AsyncMergeResult {
   const started = Date.now()
   while (result.status === 'pending') {
     const uuid = result.uuid
@@ -857,12 +851,35 @@ export function mergeAsync(
           're-run to resume polling it'
       )
     }
-    // nap no longer than the budget left: an unclamped gap carries the loop
-    // a whole interval past the deadline. The remainder is positive -- the
-    // guard above threw on anything else. Same clamp wait.ts uses.
     sleep(Math.min(intervalMs, deadlineMs - elapsed))
     result = readAsyncMerge(ghTry(['api', `repos/${t.repo}/pulls/${t.pr}/merge-async/${uuid}`]))
   }
+  return result
+}
+
+/** `PUT /pulls/{n}/merge-async`, then poll its uuid until the request
+ *  settles. `base` decides the merge action (undefined — the reactive
+ *  fallback path after a probe failure — means "assume no queue").
+ *  Throws on `failed`, on an unobservable status, and on a watch
+ *  timeout: an unsettled merge is never reported as a landed one. */
+export function mergeAsync(
+  t: PrTarget,
+  opts: MergeOpts,
+  base?: string,
+  poll: AsyncMergePoll = {}
+): void {
+  const queued = base !== undefined && queueRequired(t.repo, base)
+  console.log(
+    `merge: stack member — ${prLink(t.repo, t.pr)} via merge-async ` +
+      `(${queued ? 'merge queue' : opts.method}, head branch kept: a layer above may be based on it)`
+  )
+  const result = pollAsyncMerge(
+    t,
+    readAsyncMerge(ghTry(mergeAsyncArgs(t, opts, queued))),
+    poll.intervalMs ?? 2_000,
+    poll.deadlineMs ?? 10 * 60_000,
+    poll.sleep ?? sleepSync
+  )
 
   if (result.status === 'failed') {
     throw new Error(
