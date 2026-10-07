@@ -430,42 +430,64 @@ export async function rearmWatches(opts: {
   settled: number[]
   kept: Array<{ pr: number; reason: string }>
 }> {
-  const rearmed: Array<{ pr: number; pid: number }> = []
-  const settled: number[] = []
-  const kept: Array<{ pr: number; reason: string }> = []
+  const out = {
+    rearmed: [] as Array<{ pr: number; pid: number }>,
+    settled: [] as number[],
+    kept: [] as Array<{ pr: number; reason: string }>,
+  }
   for (const plan of deadWatchPlan(opts.dir)) {
-    let open: boolean
-    try {
-      open = await opts.isOpen(plan.pr)
-    } catch (err) {
-      kept.push({ pr: plan.pr, reason: err instanceof Error ? err.message : String(err) })
-      continue
-    }
-    if (!open) {
-      settled.push(plan.pr)
-      // a dry run reports but never mutates — markers move only on a
-      // real sweep
-      if (opts.respawn !== undefined) {
-        for (const f of plan.files) {
-          pruneFile(f)
-        }
-      }
-      continue
-    }
-    if (opts.respawn === undefined) {
-      rearmed.push({ pr: plan.pr, pid: 0 })
-      continue
-    }
-    const pid = await opts.respawn(plan)
-    if (pid === undefined) {
-      kept.push({ pr: plan.pr, reason: 'respawn failed' })
-      continue
-    }
-    rearmed.push({ pr: plan.pr, pid })
+    await rearmOne(plan, opts, out)
+  }
+  return out
+}
+
+/** One dead-marker's verdict: settled sweeps, unverifiable keeps, open
+ *  respawns (or dry-run-reports). Extracted so rearmWatches reads as
+ *  the loop it is. */
+async function rearmOne(
+  plan: { pr: number; files: string[]; merge: boolean; cleanup: boolean; timeoutMin: number; workdir?: string },
+  opts: {
+    isOpen: (pr: number) => Promise<boolean>
+    respawn?: (plan: {
+      pr: number
+      merge: boolean
+      cleanup: boolean
+      timeoutMin: number
+      workdir?: string
+    }) => number | undefined | Promise<number | undefined>
+  },
+  out: { rearmed: Array<{ pr: number; pid: number }>; settled: number[]; kept: Array<{ pr: number; reason: string }> }
+): Promise<void> {
+  const sweep = (): void => {
     for (const f of plan.files) {
       pruneFile(f)
     }
   }
-  return { rearmed, settled, kept }
+  let open: boolean
+  try {
+    open = await opts.isOpen(plan.pr)
+  } catch (err) {
+    out.kept.push({ pr: plan.pr, reason: err instanceof Error ? err.message : String(err) })
+    return
+  }
+  if (!open) {
+    out.settled.push(plan.pr)
+    // a dry run reports but never mutates — markers move only on a real sweep
+    if (opts.respawn !== undefined) {
+      sweep()
+    }
+    return
+  }
+  if (opts.respawn === undefined) {
+    out.rearmed.push({ pr: plan.pr, pid: 0 })
+    return
+  }
+  const pid = await opts.respawn(plan)
+  if (pid === undefined) {
+    out.kept.push({ pr: plan.pr, reason: 'respawn failed' })
+    return
+  }
+  out.rearmed.push({ pr: plan.pr, pid })
+  sweep()
 }
 

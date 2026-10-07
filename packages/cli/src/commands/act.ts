@@ -317,32 +317,46 @@ async function cmdRearm(argv: string[]): Promise<void> {
   const repo = await (rev.resolveRepoAsync === undefined
     ? Promise.resolve(rev.resolveRepo([]))
     : rev.resolveRepoAsync([]))
+  const isOpen = async (pr: number): Promise<boolean> => {
+    const meta =
+      rev.prMetaAsync === undefined
+        ? rev.prMeta({ repo, pr })
+        : await rev.prMetaAsync({ repo, pr })
+    return meta.state === 'OPEN'
+  }
   const res = await rearmWatches({
     dir,
-    isOpen: async (pr) => {
-      const meta =
-        rev.prMetaAsync === undefined
-          ? rev.prMeta({ repo, pr })
-          : await rev.prMetaAsync({ repo, pr })
-      return meta.state === 'OPEN'
-    },
+    isOpen,
     respawn: dry ? undefined : (plan) => respawnWatcher(dir, plan),
   })
   if (argv.includes('--json')) {
     console.log(JSON.stringify({ dryRun: dry, ...res }, null, 2))
     return
   }
+  reportRearm(res, dry, (pr) => rev.prLink(repo, pr))
+}
+
+/** Human lines for a rearm result — kept out of cmdRearm so the
+ *  command reads as resolve → run → report. */
+function reportRearm(
+  res: {
+    rearmed: Array<{ pr: number; pid: number }>
+    settled: number[]
+    kept: Array<{ pr: number; reason: string }>
+  },
+  dry: boolean,
+  link: (pr: number) => string
+): void {
   for (const r of res.rearmed) {
     console.log(
-      `rearm: ${rev.prLink(repo, r.pr)} — ` +
-        (dry ? 'would respawn a watcher' : `watcher up (pid ${r.pid})`)
+      `rearm: ${link(r.pr)} — ` + (dry ? 'would respawn a watcher' : `watcher up (pid ${r.pid})`)
     )
   }
   for (const pr of res.settled) {
-    console.log(`rearm: ${rev.prLink(repo, pr)} settled — marker swept`)
+    console.log(`rearm: ${link(pr)} settled — marker swept`)
   }
   for (const k of res.kept) {
-    console.error(`rearm: ${rev.prLink(repo, k.pr)} kept — ${k.reason}`)
+    console.error(`rearm: ${link(k.pr)} kept — ${k.reason}`)
   }
   if (res.rearmed.length === 0 && res.settled.length === 0 && res.kept.length === 0) {
     console.log('rearm: no dead watches')
