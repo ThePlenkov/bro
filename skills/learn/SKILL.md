@@ -24,7 +24,7 @@ capped by `budget` per session and `learn.maxInject` per probe.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro learn add --lesson "…" --on E --evidence K:R` | Store a manual lesson — `--on` and ≥1 `--evidence` required (kinds: bead, pr, session, command, text) |
+| `bro learn add --lesson "…" --on E… --evidence K:R…` | Store a manual lesson — `--on` and ≥1 `--evidence` required, both repeatable (kinds: bead, pr, session, command, text) |
 | `bro learn list [--json] [--source X] [--confidence X]` | List lessons |
 | `bro learn show <id>` | One lesson as JSON |
 | `bro learn forget <id>` | Delete a lesson |

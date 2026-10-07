@@ -55,7 +55,7 @@ Commands:
            [--source drill|retro|act|mol|all] [--mol ID] [--dry-run] [--json]
   probe    Store-first query: bro learn probe <question>
            hit → print ranked lessons; miss → question + candidates, gap logged
-           phase 2 stores the answer: --lesson "…" [--on E] [--match-… …]
+           phase 2 stores the answer: --lesson "…" [--on E…] [--match-… …]
 
 add flags:
   --lesson TEXT        the rule — imperative, quotable as one line (required)

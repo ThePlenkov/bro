@@ -11,7 +11,7 @@ tools, or failed-tool evidence decide when it surfaces.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro learn add --lesson "…" --on E --evidence K:R` | Store a manual lesson. `--on` and at least one `--evidence` are required |
+| `bro learn add --lesson "…" --on E… --evidence K:R…` | Store a manual lesson. `--on` and at least one `--evidence` are required; both are repeatable |
 | `bro learn list [--json] [--source X] [--confidence X]` | List lessons, optionally filtered |
 | `bro learn show <id>` | Print one lesson as JSON |
 | `bro learn forget <id>` | Remove a lesson |
@@ -27,11 +27,16 @@ Manual evidence uses `K:R`: the supported kinds are `bead`, `pr`, `session`,
 
 ## Triggers and confidence
 
-The `--on` value is one or more of:
+Each `--on` value is one of:
 
 - `session-start`
 - `prompt-submit`
 - `post-tool`
+
+`--on` is repeatable, so a lesson can fire on several events: `--on
+session-start --on post-tool`. A comma-separated value (`--on
+session-start,post-tool`) works too. Repeats of the same event collapse
+to one entry.
 
 Match keys are conjunctive across categories and disjunctive within a
 category: terms match prompt or trace text, commands match command
