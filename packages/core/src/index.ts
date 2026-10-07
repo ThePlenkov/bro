@@ -39,6 +39,7 @@ export type { BdCompat } from './bd.ts'
 export {
   actSection,
   beadsSection,
+  CORE_CONFIG_SECTIONS,
   debtSection,
   DEFAULT_CONFIG,
   DEFAULT_GLOBAL_BEADS_DIR,

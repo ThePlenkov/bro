@@ -193,6 +193,26 @@ describe('bro doctor', () => {
       assert.match(c.detail, /sdd2/)
     }))
 
+  test('core-only sections are known — no plugin declares them (retro bro-8ccl)', () =>
+    withEnv(
+      {
+        config: {
+          stores: ['jsonl'],
+          connectors: { github: {} },
+          providers: [{ name: 'orcarouter', type: 'api', baseUrl: 'https://x' }],
+          fleet: { maxConcurrent: 4 },
+          query: { concurrency: 4, env: {} },
+          pack: 'packs',
+        },
+        bins: ['gh'],
+      },
+      (dir) => {
+        const c = byName(runDoctorChecks(dir), 'config')
+        assert.equal(c.status, 'ok')
+        assert.doesNotMatch(c.detail, /unknown keys/)
+      }
+    ))
+
   test('drifted bd output shape fails when beads is an active store', () =>
     withEnv(
       { config: { stores: ['jsonl', 'beads'] }, beadsDir: true, bins: ['bd', 'gh'], env: { FAKE_BD_DRIFT: '1' } },

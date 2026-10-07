@@ -1,3 +1,4 @@
+// bro-adapter — ownership sentinel for `bro plugins` (isBroAdapter); do not remove
 /**
  * bro Kilo plugin — native adapter over the bro CLI.
  *

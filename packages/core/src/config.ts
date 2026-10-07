@@ -448,6 +448,13 @@ const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   query: querySection as ConfigSection<unknown>,
 }
 
+/** Every config key core normalizes itself — the authoritative "known
+ *  section" set for surfaces that check bro.config for typos (doctor's
+ *  unknown-key warn). Exported so a new core section can't drift the
+ *  checker: sections without a plugin configKey (connectors, fleet,
+ *  providers) are still real config. */
+export const CORE_CONFIG_SECTIONS: readonly string[] = Object.keys(CORE_SECTIONS)
+
 export interface BroConfig {
   /** Active stores. The JSONL ledger is always on — extra backends are
    *  projections written alongside it. beads is on by default; gitref is

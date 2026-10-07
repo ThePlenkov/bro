@@ -1,3 +1,4 @@
+// bro-adapter — ownership sentinel for `bro plugins` (isBroAdapter); do not remove
 /**
  * bro — opencode CLI/TUI plugin (`cli.ts`), the terminal half of the
  * integration. `bro.ts` speaks to the opencode server; this module speaks

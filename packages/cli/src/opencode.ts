@@ -1,3 +1,4 @@
+// bro-adapter — ownership sentinel for `bro plugins` (isBroAdapter); do not remove
 /**
  * bro as an OpenCode plugin — bro mechanics on opencode's native hook bus.
  *

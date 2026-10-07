@@ -16,6 +16,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import {
   bdTry,
   connectors,
+  CORE_CONFIG_SECTIONS,
   gitTry,
   isEnvName,
   janitorDidWork,
@@ -200,6 +201,8 @@ function knownConfigKeys(): Set<string> {
     'store', // legacy v0.1.0
     'personality',
     'plugins',
+    'pack',
+    ...CORE_CONFIG_SECTIONS,
     ...Object.keys(pluginConfigSections()),
   ])
 }
