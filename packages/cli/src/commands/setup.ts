@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { initBeadsStealth, PERSONALITIES, type BroConfig } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
-import { cliVersion, installCommitHook } from './githooks.ts'
+import { cliVersion, installCommitHook, installRefGuardHook } from './githooks.ts'
 import { FORMULA_FILES, SKILL_FILES } from '../skills-data.ts'
 
 function hasBin(name: string): boolean {
@@ -285,15 +285,23 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
     setupPack(packDir, pack || loadBroConfig().pack || DEFAULT_PACK, wantsBeads)
   }
 
-  // commit provenance (bro-fzot): the prepare-commit-msg hook rides
-  // setup — a repo that opts into bro gets Agent/Session/Bead trailers
-  // on machine-made commits without a second step; `bro hooks
-  // uninstall` is the opt-out. Best-effort: a non-git dir just skips.
+  // git hooks ride setup — a repo that opts into bro gets both
+  // without a second step; `bro hooks uninstall` is the opt-out:
+  //   commit provenance (bro-fzot): Agent/Session/Bead trailers on
+  //     machine-made commits
+  //   refguard (bro-1c78): non-ff moves of shared branch refs vetoed
+  // Best-effort: a non-git dir just skips.
   const hook = installCommitHook(process.cwd(), cliVersion())
   if (hook.state === 'error') {
     console.error(`  note: commit-provenance hook not installed — ${hook.err}`)
   } else if (hook.state !== 'already') {
     console.error(`  ${hook.state} prepare-commit-msg hook (${hook.path})`)
+  }
+  const guard = installRefGuardHook(process.cwd(), cliVersion())
+  if (guard.state === 'error') {
+    console.error(`  note: refguard hook not installed — ${guard.err}`)
+  } else if (guard.state !== 'already') {
+    console.error(`  ${guard.state} reference-transaction hook (${guard.path})`)
   }
 
   console.error('bro setup: done. Next: `bro debt prs` to see the queue, `bro debt collect` to sweep.')

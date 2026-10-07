@@ -5,8 +5,8 @@ description: setup, diagnostics, checks, plans, sync, cleanup, and stores.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro setup [--beads] [--skills] [--pack [NAME]]` | Wire bro into the repo and optionally initialize beads, skill wrappers, and a capability pack; also installs the commit-provenance git hook |
-| `bro hooks install` / `bro hooks uninstall` | Install/remove the `prepare-commit-msg` hook that appends `Agent`/`Agent-Model`/`Session`/`Bead`/`Molecule` trailers to machine-made commits (a pre-existing hook is chained, never clobbered) |
+| `bro setup [--beads] [--skills] [--pack [NAME]]` | Wire bro into the repo and optionally initialize beads, skill wrappers, and a capability pack; also installs the commit-provenance and ref-guard git hooks |
+| `bro hooks install` / `bro hooks uninstall` | Install/remove the `prepare-commit-msg` hook that appends `Agent`/`Agent-Model`/`Session`/`Bead`/`Molecule` trailers to machine-made commits, plus the `reference-transaction` guard that vetoes non-fast-forward moves of shared branch refs (pre-existing hooks are chained, never clobbered) |
 | `bro doctor [--json]` | Inspect the local bro setup and report diagnostics |
 | `bro run <plan.toml>` | Execute a validated [plan](/docs/plans) |
 | `bro plan` / `bro plan validate <file>` | List plan kinds or validate a plan without executing it |

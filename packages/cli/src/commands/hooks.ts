@@ -21,10 +21,14 @@
  *                                       session armed, ambient state is passive context
  *   permission                        auto-approve bro/bd invocations
  *   install | uninstall               (git-hook ops, not events) write/remove the
- *                                       prepare-commit-msg shim that tags commits with
- *                                       provenance trailers (specs/bro-fzot.md)
+ *                                       git shims: prepare-commit-msg provenance
+ *                                       (specs/bro-fzot.md) + reference-transaction
+ *                                       shared-branch ref guard (specs/bro-1c78.md)
  *   prepare-commit-msg                git-hook entrypoint — appends Agent/Agent-Model/
  *                                       Session/Bead/Molecule trailers to the message file
+ *   reference-transaction             git-hook entrypoint — vetoes non-fast-forward
+ *                                       moves of refs/heads/* by ref-mover verbs
+ *                                       (reset/fetch/update-ref/branch/checkout/switch)
  *
  * Contract: read the event payload on stdin, print hook control JSON on
  * stdout, exit 0. Everything is best-effort — hooks only fire in bro-enabled
@@ -80,8 +84,12 @@ import {
   cliVersion,
   emitCommitTrailers,
   installCommitHook,
+  installRefGuardHook,
   uninstallCommitHook,
+  uninstallRefGuardHook,
+  type InstallResult,
 } from './githooks.ts'
+import { emitRefGuard } from './refguard.ts'
 import {
   CURSOR_HYDRATED_SKILL,
   cursorStopIgnored,
@@ -1212,16 +1220,26 @@ function answerCursorPermission(event: string | undefined, input: HookInput): vo
 }
 
 function runCommitHookCommand(event: 'install' | 'uninstall'): void {
-  const r =
+  // every bro git hook rides the same install — provenance tags the
+  // commit message, refguard fences shared branch refs (bro-1c78)
+  const results: [string, InstallResult][] =
     event === 'install'
-      ? installCommitHook(process.cwd(), cliVersion())
-      : uninstallCommitHook(process.cwd())
-  if (r.state === 'error') {
-    console.error(`bro hooks ${event}: ${r.err}`)
-    process.exitCode = 1
-    return
+      ? [
+          ['prepare-commit-msg', installCommitHook(process.cwd(), cliVersion())],
+          ['reference-transaction', installRefGuardHook(process.cwd(), cliVersion())],
+        ]
+      : [
+          ['prepare-commit-msg', uninstallCommitHook(process.cwd())],
+          ['reference-transaction', uninstallRefGuardHook(process.cwd())],
+        ]
+  for (const [name, r] of results) {
+    if (r.state === 'error') {
+      console.error(`bro hooks ${event} ${name}: ${r.err}`)
+      process.exitCode = 1
+      continue
+    }
+    console.error(`bro hooks ${event} ${name}: ${r.state} ${r.path}`)
   }
-  console.error(`bro hooks ${event}: ${r.state} ${r.path}`)
 }
 
 function runPrepareCommitMsg(argv: string[]): void {
@@ -1229,6 +1247,18 @@ function runPrepareCommitMsg(argv: string[]): void {
     emitCommitTrailers(argv.slice(1))
   } catch {
     // fail-open — provenance must never block a commit
+  }
+}
+
+/** The ref guard reads its update list from stdin — but only when a
+ *  pipe actually fed it. A bare `bro hooks reference-transaction` on a
+ *  terminal must not block on readFileSync(0). */
+function runRefGuard(argv: string[]): void {
+  try {
+    const stdinText = process.stdin.isTTY ? '' : readFileSync(0, 'utf8')
+    emitRefGuard(argv.slice(1), stdinText)
+  } catch {
+    // fail-open — the guard must never wedge git
   }
 }
 
@@ -1428,6 +1458,13 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   // .beads/bro.config would silently deaden a hook the repo installed
   if (event === 'prepare-commit-msg') {
     runPrepareCommitMsg(argv)
+    return
+  }
+  // reference-transaction is a git-hook event too — argv for the phase
+  // and ppid, stdin for the update list; same pre-gate placement (the
+  // installed shim is the opt-in)
+  if (event === 'reference-transaction') {
+    runRefGuard(argv)
     return
   }
   // `bro hooks perf` is a report over the perf journal — same no-stdin

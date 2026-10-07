@@ -30,6 +30,10 @@ same branch in two worktrees — that refusal is the collision fence.
   checkout. Nothing to gitignore; wiping one never strands another.
 - Gitignored dirs (`node_modules`, `dist/`) don't follow — run the repo's
   install step inside the new worktree.
+- **Shared repos fence non-fast-forward branch moves.** bro's
+  `reference-transaction` hook vetoes `reset`/`fetch`/`update-ref`-style
+  rewrites of `refs/heads/*`; content moves (commit, merge, rebase,
+  pull) always pass. A deliberate rewrite needs `BRO_REF_GUARD=off`.
 - Beads needs no setup: `bd` discovers the shared database through the
   git common dir in any worktree.
 - **Slug after the bead.** `bro work enter bro-123` tries to claim bead
