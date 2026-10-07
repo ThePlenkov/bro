@@ -12,6 +12,7 @@ import {
   installFakeBd,
   installFakeDolt,
   installFakeDoltRemote,
+  readBeads,
   runCli,
 } from './testrepo.ts'
 
@@ -209,6 +210,103 @@ describe('bro mesh', () => {
       assert.equal(bad.code, 2)
       // the malformed file was NOT overwritten
       assert.equal(readFileSync(join(main, 'bro.config.json'), 'utf8'), '{ not json')
+    })
+  })
+
+  test('request → claim → done → accept lifecycle on the local store', () => {
+    const { root, main } = initRepo('bro-mesh-e2e-life-', (m) => {
+      execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
+    })
+    inside(main, root, () => {
+      const { binDir, db } = installFakeBd(join(root, 'tools'), [])
+      const env = { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: db }
+
+      // the request is self-addressed so this one store can play both
+      // sides of the lifecycle
+      const req = runCli(
+        ['mesh', 'request', 'mesh://theplenkov/bro', 'port the gate', '--body', 'needs it', '--priority', '1', '--ref', 'bead:bro-abc'],
+        { cwd: main, env },
+      )
+      assert.equal(req.code, 0, req.stderr)
+      const thread = /request (\S+) →/.exec(req.stdout)?.[1]
+      assert.ok(thread, req.stdout)
+
+      // the posted bead carries the full mesh label set
+      const posted = readBeads(db).find((r) => r.id === thread) as { labels: string[]; external_ref: string }
+      assert.ok(posted.labels.includes('mesh:v:1'))
+      assert.ok(posted.labels.includes('mesh:kind:request'))
+      assert.ok(posted.labels.includes(`mesh:thread:${thread}`))
+      assert.ok(posted.labels.includes('mesh:to:mesh://theplenkov/bro'))
+      assert.equal(posted.external_ref, `beads://theplenkov/bro/${thread}`)
+
+      const unknown = runCli(['mesh', 'claim', 'nope-1'], { cwd: main, env })
+      assert.equal(unknown.code, 2)
+      assert.match(unknown.stderr, /no request for thread/)
+
+      // a request addressed to another rig can't be claimed here
+      const foreign = runCli(
+        ['mesh', 'request', 'mesh://acme/rigB', 'not for us'],
+        { cwd: main, env },
+      )
+      const foreignThread = /request (\S+) →/.exec(foreign.stdout)?.[1]
+      const wrong = runCli(['mesh', 'claim', foreignThread!], { cwd: main, env })
+      assert.equal(wrong.code, 2)
+      assert.match(wrong.stderr, /addressed to .* not this rig/)
+
+      // sequencing: done before claim and verdicts before a result are refused
+      const early = runCli(['mesh', 'done', thread], { cwd: main, env })
+      assert.equal(early.code, 2)
+      assert.match(early.stderr, /stage "posted"/)
+      const premature = runCli(['mesh', 'accept', thread], { cwd: main, env })
+      assert.equal(premature.code, 2)
+      assert.match(premature.stderr, /no result submitted/)
+
+      assert.equal(runCli(['mesh', 'claim', thread], { cwd: main, env }).code, 0)
+      const done = runCli(['mesh', 'done', thread, '--ev', 'pr:https://github.com/x/y/pull/9'], { cwd: main, env })
+      assert.equal(done.code, 0, done.stderr)
+
+      const wait1 = runCli(['mesh', 'wait', thread], { cwd: main, env })
+      assert.match(wait1.stdout, /submitted — requester's move/)
+
+      // reject before accept is allowed; after a verdict the thread is terminal
+      assert.equal(runCli(['mesh', 'accept', thread, '--body', 'lgtm'], { cwd: main, env }).code, 0)
+      const wait2 = runCli(['mesh', 'wait', thread], { cwd: main, env })
+      assert.match(wait2.stdout, /accepted — done/)
+
+      const late = runCli(['mesh', 'reject', thread], { cwd: main, env })
+      assert.equal(late.code, 2)
+      assert.match(late.stderr, /already accepted/)
+
+      // the verdict records carry evidence + thread labels
+      const rows = readBeads(db)
+      const result = rows.find((r) => (r.labels as string[] | undefined)?.includes('mesh:kind:result')) as { labels: string[] }
+      assert.ok(result.labels.includes(`mesh:thread:${thread}`))
+      assert.ok(result.labels.includes('mesh:ev:pr:https://github.com/x/y/pull/9'))
+    })
+  })
+
+  test('request --for blocks a local bead on external:<rig>:<id>', () => {
+    const { root, main } = initRepo('bro-mesh-e2e-dep-', (m) => {
+      execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
+    })
+    inside(main, root, () => {
+      const { binDir, db } = installFakeBd(join(root, 'tools'), [])
+      const env = { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: db }
+
+      const waiter = JSON.parse(
+        execFileSync('bd', ['-C', main, 'create', '--title', 'needs the port', '--json'], { env, encoding: 'utf8' }),
+      ) as { id: string }
+
+      const req = runCli(
+        ['mesh', 'request', 'mesh://acme/rigB', 'port the gate', '--for', waiter.id],
+        { cwd: main, env },
+      )
+      assert.equal(req.code, 0, req.stderr)
+      assert.match(req.stdout, new RegExp(`${waiter.id} now blocked by external:`))
+
+      const dbRows = JSON.parse(readFileSync(db, 'utf8')) as { deps: { from: string; to: string }[] }
+      const reqId = /request (\S+) →/.exec(req.stdout)?.[1]
+      assert.deepEqual(dbRows.deps, [{ from: waiter.id, to: `external:mesh://acme/rigb:${reqId}` }])
     })
   })
 })
