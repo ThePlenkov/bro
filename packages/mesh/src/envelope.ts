@@ -4,7 +4,14 @@
  * and native columns, no new storage type (specs/mesh/spec.md).
  */
 
-import { parseRigUri } from './identity.ts'
+import { formatRigUri, parseRigUri } from './identity.ts'
+
+/** Canonical rig uri — parse+format lowercases; invalid input returns
+ *  the input so a validation pass can flag it. */
+function canonRig(uri: string): string {
+  const r = parseRigUri(uri)
+  return r === null ? uri : formatRigUri(r)
+}
 
 export const MESH_VERSION = 'mesh/1' as const
 
@@ -182,8 +189,8 @@ export function toEnvelope(raw: unknown): MeshEnvelope | null {
         id: (raw as MeshEnvelope).id,
         kind: (raw as MeshEnvelope).kind,
         thread: (raw as MeshEnvelope).thread,
-        from: (raw as MeshEnvelope).from,
-        to: (raw as MeshEnvelope).to,
+        from: canonRig((raw as MeshEnvelope).from),
+        to: canonRig((raw as MeshEnvelope).to),
         title: (raw as MeshEnvelope).title,
         body: (raw as MeshEnvelope).body ?? '',
         refs: parseRefs((raw as MeshEnvelope).refs),
@@ -220,8 +227,8 @@ export function envelopeFromBead(bead: BeadLike): MeshEnvelope | null {
     id: bead.id,
     kind: kind as MeshKind,
     thread,
-    from,
-    to,
+    from: canonRig(from),
+    to: canonRig(to),
     title: bead.title,
     body: bead.description ?? bead.notes ?? '',
     refs: labels.flatMap((l) => {

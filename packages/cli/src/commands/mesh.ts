@@ -7,8 +7,15 @@
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { gitTry, loadConfig } from '@broject/core'
-import { formatRigUri, parseRigUri, rigFromRemoteUrl } from '@broject/mesh'
+import { gitCommonDir, gitTry, loadConfig } from '@broject/core'
+import {
+  formatRigUri,
+  meshInbox,
+  parsePeer,
+  parseRigUri,
+  rigFromRemoteUrl,
+  syncReplica,
+} from '@broject/mesh'
 
 const USAGE = `Usage: bro mesh <command> [args…]
 
@@ -17,9 +24,15 @@ Commands:
                           from origin (exits 2 when unresolvable)
   peers list              configured peers (alias, rig, remote)
   peers add <alias> <rig> <remote>
-                          bind a peer rig to a git remote — the remote's
-                          refs/dolt/data is what 'beads-remote' pulls
+                          bind a peer rig — a filesystem path is the
+                          'local' binding (live store via bd -C), a git
+                          URL is 'beads-remote' (dolt replica of
+                          refs/dolt/data)
   peers remove <alias>    drop a peer binding
+  pull                    refresh every beads-remote replica
+  inbox [--json] [--no-pull]
+                          requests addressed to this rig across peers —
+                          pulls replicas first unless --no-pull
 `
 
 /** This rig's URI: the `mesh.rig` config pin wins (a repo whose origin
@@ -129,6 +142,77 @@ function cmdMe(dir: string): void {
   }
 }
 
+function meshPeers(dir: string) {
+  return Object.entries(loadConfig(dir).mesh.peers)
+    .map(([alias, raw]) => parsePeer(alias, raw))
+    .filter((p): p is NonNullable<typeof p> => p !== null)
+}
+
+function cmdPull(dir: string): void {
+  const common = gitCommonDir(dir)
+  if (common === null) {
+    console.error('bro mesh: not inside a git repository')
+    process.exit(2)
+  }
+  const peers = meshPeers(dir).filter((p) => p.transport === 'beads-remote')
+  if (peers.length === 0) {
+    console.log('no beads-remote peers — nothing to pull')
+    return
+  }
+  let ok = 0
+  for (const peer of peers) {
+    const r = syncReplica(common, peer.alias, peer.remote)
+    if (r.error !== undefined) {
+      console.error(`! ${r.error}`)
+    } else {
+      ok++
+    }
+  }
+  console.log(`pulled ${ok}/${peers.length} peer(s)`)
+}
+
+function cmdInbox(dir: string, args: string[]): void {
+  const common = gitCommonDir(dir)
+  if (common === null) {
+    console.error('bro mesh: not inside a git repository')
+    process.exit(2)
+  }
+  const rig = selfRig(dir)
+  if (rig === null) {
+    console.error('this rig is unaddressed — set mesh.rig or a forge-url origin (see `bro mesh me`)')
+    process.exit(2)
+  }
+  const result = meshInbox(dir, meshPeers(dir), rig, common, {
+    pull: !args.includes('--no-pull'),
+  })
+  for (const e of result.errors) {
+    console.error(`! ${e}`)
+  }
+  if (args.includes('--json')) {
+    console.log(
+      JSON.stringify(
+        result.requests.map((r) => ({
+          peer: r.peer,
+          bead: r.beadId,
+          ...r.envelope,
+          mismatch: r.mismatch || undefined,
+        })),
+        null,
+        2,
+      ),
+    )
+    return
+  }
+  if (result.requests.length === 0) {
+    console.log(`inbox empty for ${rig}`)
+    return
+  }
+  for (const r of result.requests) {
+    const flag = r.mismatch ? `  ! from=${r.envelope.from} ≠ ${r.peerRig}` : ''
+    console.log(`${r.peer}\t${r.beadId}\t${r.envelope.title}${flag}`)
+  }
+}
+
 export function runMeshCommand(argv: string[]): void {
   const dir = process.cwd()
   const [verb, ...rest] = argv
@@ -153,6 +237,10 @@ export function runMeshCommand(argv: string[]): void {
       return cmdPeersAdd(dir, rest)
     case 'list':
       return cmdPeersList(dir)
+    case 'pull':
+      return cmdPull(dir)
+    case 'inbox':
+      return cmdInbox(dir, rest)
     default:
       break
   }

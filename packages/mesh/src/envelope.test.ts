@@ -49,7 +49,7 @@ describe('bead mapping', () => {
       'mesh:kind:request',
       'mesh:thread:req-bro-x1',
       'mesh:from:mesh://sverka-dev/sverka',
-      'mesh:to:mesh://ThePlenkov/bro',
+      'mesh:to:mesh://theplenkov/bro',
       'mesh:ref:bead:sv-yvkl',
     ],
   }
@@ -63,7 +63,7 @@ describe('bead mapping', () => {
     const env = envelopeFromBead(bead)
     assert.equal(env?.kind, 'request')
     assert.equal(env?.thread, 'req-bro-x1')
-    assert.equal(env?.to, 'mesh://ThePlenkov/bro')
+    assert.equal(env?.to, 'mesh://theplenkov/bro')
     assert.equal(env?.terms.priority, 'p2')
     assert.deepEqual(env?.refs, [{ kind: 'bead', ref: 'sv-yvkl' }])
   })
@@ -96,7 +96,7 @@ describe('bead mapping', () => {
 
 describe('beadUri', () => {
   test('mesh://org/repo + bead id → the upstream beads uri', () => {
-    assert.equal(beadUri('mesh://ThePlenkov/bro', 'bro-x1'), 'beads://ThePlenkov/bro/bro-x1')
+    assert.equal(beadUri('mesh://ThePlenkov/bro', 'bro-x1'), 'beads://theplenkov/bro/bro-x1')
     assert.throws(() => beadUri('nope', 'x'), /invalid rig uri/)
   })
 })

@@ -534,6 +534,85 @@ export function readHostState(state: string): Record<string, unknown> {
   return JSON.parse(readFileSync(state, 'utf8')) as Record<string, unknown>
 }
 
+// --- fake dolt — the beads-remote transport fixture -----------------------------
+//
+// `dolt clone <remote> <dir>` copies the remote's `db.json` into the
+// replica's `.dolt/`; `dolt pull` re-copies it (the publish refresh);
+// `dolt sql -q <q> -r json` answers the two queries mesh pulls run
+// (mesh-labelled issues, labels-per-issue) from that file. The remote
+// store is a plain directory holding `db.json` — the fixture stands in
+// for `refs/dolt/data` on a git remote.
+
+const FAKE_DOLT = `#!/usr/bin/env node
+const fs = require('node:fs')
+const path = require('node:path')
+const fail = (m) => { console.error('fake dolt: ' + m); process.exit(1) }
+const storeDir = process.cwd()
+const storeFile = path.join(storeDir, '.dolt', 'db.json')
+const load = () => JSON.parse(fs.readFileSync(storeFile, 'utf8'))
+const args = process.argv.slice(2)
+switch (args[0]) {
+  case 'clone': {
+    const src = path.join(args[1], 'db.json')
+    const dst = args[2]
+    fs.mkdirSync(path.join(dst, '.dolt'), { recursive: true })
+    fs.copyFileSync(src, path.join(dst, '.dolt', 'db.json'))
+    fs.writeFileSync(path.join(dst, '.dolt', 'remote'), args[1])
+    break
+  }
+  case 'pull': {
+    const src = fs.readFileSync(path.join(storeDir, '.dolt', 'remote'), 'utf8').trim()
+    fs.copyFileSync(path.join(src, 'db.json'), storeFile)
+    break
+  }
+  case 'sql': {
+    const q = args[args.indexOf('-q') + 1]
+    const db = load()
+    // order matters: the mesh-issues query contains a "from labels"
+    // subquery too — the per-issue query is the only "select label"
+    if (q.includes('select label')) {
+      const id = /issue_id = '([^']+)'/.exec(q)[1]
+      const issue = db.issues.find((i) => i.id === id)
+      const rows = (issue?.labels || []).map((label) => ({ label }))
+      process.stdout.write(JSON.stringify({ rows }))
+    } else if (q.includes('from issues')) {
+      const want = /label = '([^']+)'/.exec(q)[1]
+      const rows = db.issues
+        .filter((i) => (i.labels || []).includes(want))
+        .map(({ labels: _l, ...rest }) => rest)
+      process.stdout.write(JSON.stringify({ rows }))
+    } else fail('sql ' + q)
+    break
+  }
+  default:
+    fail(args[0])
+}
+`
+
+/** A bare "published dolt store" a peer would expose: `dir/db.json`
+ *  holding `issues` rows with inline `labels`. Returns dir + a `publish`
+ *  that rewrites it (what `bd dolt push` models). */
+export function installFakeDoltRemote(
+  dir: string,
+  issues: Array<Record<string, unknown>>
+): { remoteDir: string; publish: (issues: Array<Record<string, unknown>>) => void } {
+  const remoteDir = join(dir, 'remote-dolt')
+  mkdirSync(remoteDir, { recursive: true })
+  const publish = (rows: Array<Record<string, unknown>>) =>
+    writeFileSync(join(remoteDir, 'db.json'), JSON.stringify({ issues: rows }))
+  publish(issues)
+  return { remoteDir, publish }
+}
+
+/** Put the fake `dolt` binary next to a fake `bd` binDir (or alone). */
+export function installFakeDolt(dir: string): string {
+  const binDir = join(dir, 'bin')
+  mkdirSync(binDir, { recursive: true })
+  writeFileSync(join(binDir, 'dolt'), FAKE_DOLT)
+  chmodSync(join(binDir, 'dolt'), 0o755)
+  return binDir
+}
+
 export function writeHostState(state: string, patch: Record<string, unknown>): void {
   const cur = existsSync(state)
     ? (JSON.parse(readFileSync(state, 'utf8')) as Record<string, unknown>)

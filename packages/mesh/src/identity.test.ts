@@ -20,7 +20,7 @@ describe('rig uri', () => {
 
 describe('rigFromRemoteUrl', () => {
   test('https, .git suffix, ssh, ssh:// all derive <org>/<repo>', () => {
-    const want = { org: 'ThePlenkov', repo: 'bro' }
+    const want = { org: 'theplenkov', repo: 'bro' }
     assert.deepEqual(rigFromRemoteUrl('https://github.com/ThePlenkov/bro.git'), want)
     assert.deepEqual(rigFromRemoteUrl('https://github.com/ThePlenkov/bro'), want)
     assert.deepEqual(rigFromRemoteUrl('git@github.com:ThePlenkov/bro.git'), want)

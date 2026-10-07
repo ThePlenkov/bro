@@ -16,7 +16,9 @@ const RIG_URI = /^mesh:\/\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/
 
 export function parseRigUri(uri: string): RigRef | null {
   const m = RIG_URI.exec(uri.trim())
-  return m === null ? null : { org: m[1]!, repo: m[2]! }
+  // rig ids compare like forge paths do — case-insensitively; the
+  // canonical form is lowercase so every downstream `===` holds
+  return m === null ? null : { org: m[1]!.toLowerCase(), repo: m[2]!.toLowerCase() }
 }
 
 export function formatRigUri(rig: RigRef): string {
@@ -36,7 +38,7 @@ export function rigFromRemoteUrl(url: string): RigRef | null {
   if (m === null) {
     return null
   }
-  return { org: m[1]!, repo: m[2]! }
+  return { org: m[1]!.toLowerCase(), repo: m[2]!.toLowerCase() }
 }
 
 /** The descriptor a rig commits at its repo root — mirrors the spec
@@ -58,7 +60,7 @@ export function parseRigDescriptor(raw: unknown): RigDescriptor | null {
     return null
   }
   return {
-    rig: d.rig,
+    rig: formatRigUri(parseRigUri(d.rig)!),
     orchestrator: typeof d.orchestrator === 'string' ? d.orchestrator : undefined,
     accepts: Array.isArray(d.accepts) ? d.accepts.filter((a): a is string => typeof a === 'string') : undefined,
     inbox: typeof d.inbox === 'string' ? d.inbox : undefined,
