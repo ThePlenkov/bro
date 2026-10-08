@@ -189,6 +189,8 @@ describe('specState', () => {
       // chores and trivial-labeled beads are exempt
       assert.equal(specState(row({ issue_type: 'chore' }), nativeAt(dir, 'specs')), 'exempt')
       assert.equal(specState(row({ labels: ['trivial'] }), nativeAt(dir, 'specs')), 'exempt')
+      // molecule ship-beads are convoy scaffolding — exempt like chores
+      assert.equal(specState(row({ issue_type: 'molecule' }), nativeAt(dir, 'specs')), 'exempt')
       // an empty scaffold does not satisfy the rule
       mkdirSync(join(dir, 'specs'))
       writeFileSync(join(dir, 'specs', 'b1.md'), '  \n')
