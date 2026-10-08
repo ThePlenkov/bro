@@ -69,6 +69,13 @@ export type ProviderEntry =
        *  allow option. Default false — a headless worker denies and
        *  logs. */
       autoApprove?: boolean
+      /** Session-cleanup template run when the worker exits —
+       *  `{sessionId}` substitutes the acp session id. ACP sessions
+       *  still land in the agent CLI's session history; e.g.
+       *  `devin rm {sessionId} --force` keeps worker sessions out
+       *  of the operator's personal history. Advisory: a failed
+       *  cleanup is logged, never fails the worker. */
+      sessionRm?: string
     }
   | { type: 'cli'; command: string; model?: string }
 
@@ -121,7 +128,7 @@ export const PROVIDER_REGISTRY: Record<ProviderKind, ProviderKindSpec> = {
     call: 'auto',
     spawn: true,
     required: ['command'],
-    optional: ['profile', 'model', 'apiKeyEnv'],
+    optional: ['profile', 'model', 'apiKeyEnv', 'sessionRm'],
     optionalBool: ['autoApprove'],
   },
   cli: { call: 'prose', spawn: true, required: ['command'], optional: ['model'] },

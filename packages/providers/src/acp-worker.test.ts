@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SessionConfigOption } from '@agentclientprotocol/sdk'
@@ -84,6 +84,23 @@ describe('acpWorkerArgv', () => {
     assert.ok(!argv.includes('entry-m'))
     assert.ok(!argv.includes('--auto-approve'))
   })
+
+  test('sessionRm rides --session-rm verbatim; the flag value overrides the entry pin', () => {
+    const entry = {
+      type: 'acp' as const,
+      command: 'devin acp',
+      sessionRm: 'devin rm {sessionId} --force',
+    }
+    const argv = acpWorkerArgv(['bro'], entry)
+    const i = argv.indexOf('--session-rm')
+    assert.equal(argv[i + 1], 'devin rm {sessionId} --force')
+
+    const over = acpWorkerArgv(['bro'], entry, { sessionRm: 'rm -f {sessionId}.lock' })
+    assert.equal(over[over.indexOf('--session-rm') + 1], 'rm -f {sessionId}.lock')
+
+    const none = acpWorkerArgv(['bro'], { type: 'acp', command: 'devin acp' })
+    assert.ok(!none.includes('--session-rm'))
+  })
 })
 
 describe('runAcpWorker', () => {
@@ -142,15 +159,50 @@ describe('runAcpWorker', () => {
     }
   })
 
-  test('an agent requiring interactive auth is a startup failure naming the methods', async () => {
+  test('advertised authMethods are an offer — stored credentials still open a session', async () => {
     const fake = fakeAcpAgent({
       authMethods: [{ id: 'oauth', name: 'OAuth' }],
+      replyText: 'done',
+    })
+    const { spec, lines, dir } = workerSpec({ peer: fake.app })
+    try {
+      assert.equal(await runAcpWorker(spec), 0)
+      assert.match(lines.join('\n'), /session sess-1/)
+      assert.equal(fake.sessions.length, 1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a refused session/new names the advertised auth methods', async () => {
+    const fake = fakeAcpAgent({
+      authMethods: [{ id: 'oauth', name: 'OAuth' }],
+      failNew: 'auth',
     })
     const { spec, lines, dir } = workerSpec({ peer: fake.app })
     try {
       assert.equal(await runAcpWorker(spec), 1)
-      assert.match(lines.join('\n'), /interactive auth.*oauth/)
-      assert.equal(fake.sessions.length, 0)
+      assert.match(lines.join('\n'), /refused session.*oauth/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('sessionRm arms a deferred cleanup substituting {sessionId}', async () => {
+    const fake = fakeAcpAgent({ replyText: 'done' })
+    const { spec, lines, dir } = workerSpec({ peer: fake.app })
+    spec.sessionRm = `touch ${join(dir, 'removed-{sessionId}')}`
+    try {
+      assert.equal(await runAcpWorker(spec), 0)
+      assert.match(lines.join('\n'), /cleanup armed — deferred/)
+      // the detached retrier sleeps before its first attempt — poll
+      // for the marker file instead of sleeping a fixed beat
+      const marker = join(dir, 'removed-sess-1')
+      const deadline = Date.now() + 15_000
+      while (!existsSync(marker) && Date.now() < deadline) {
+        await new Promise((res) => setTimeout(res, 500))
+      }
+      assert.ok(existsSync(marker), 'deferred cleanup ran the template')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

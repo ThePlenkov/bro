@@ -72,6 +72,13 @@ export interface AcpWorkerSpec {
    *  sessionId after session/new and the agent-REPORTED model after
    *  set_config_option: provenance says what ran, not what was asked. */
   record?: (patch: { acpSessionId?: string; model?: string }) => void
+  /** Session-cleanup template run after the session ends —
+   *  `{sessionId}` substitutes the acp session id. ACP sessions land
+   *  in the agent CLI's history like any other; a worker session is
+   *  not the operator's personal history, so the provider may carry
+   *  e.g. `devin rm {sessionId} --force`. Advisory — a failed cleanup
+   *  logs, never changes the exit code. */
+  sessionRm?: string
   /** The in-process test seam — a fakeAcpAgent() app, skipping the
    *  process spawn entirely. */
   peer?: AgentApp
@@ -267,17 +274,21 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         `${by}: agent negotiated protocol ${init.protocolVersion} — the driver speaks v${PROTOCOL_VERSION} only`
       )
     }
+    // authMethods is an OFFER, not a requirement (same policy as the
+    // acp judge call): an agent with stored credentials still advertises
+    // its login methods — only an actual refusal at session/new names
+    // auth as required
     const authMethods = init.authMethods ?? []
-    if (authMethods.length > 0) {
-      throw new AcpWorkerError(
-        `${by}: agent requires interactive auth (${authMethods
-          .map((m) => m.id)
-          .join(', ')}) — a detached worker cannot log in; authenticate the agent CLI itself`
-      )
-    }
     const session = await ctx
       .buildSession({ cwd: spec.cwd, mcpServers: [] })
       .start()
+      .catch((err: unknown) => {
+        const hint =
+          authMethods.length > 0 ? ` (${authMethods.map((m) => m.id).join(', ')})` : ''
+        throw new AcpWorkerError(
+          `${by}: agent refused session${hint} — ${errMsg(err)}`
+        )
+      })
     sessionId = session.sessionId
     spec.record?.({ acpSessionId: session.sessionId })
     log(`session ${session.sessionId} (cwd ${spec.cwd})`)
@@ -390,7 +401,39 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
     if (killTimer !== undefined) {
       clearTimeout(killTimer)
     }
-    child?.kill('SIGKILL')
+    child?.kill('SIGTERM')
+    const proc = child
+    if (proc !== undefined) {
+      const exited = await new Promise<boolean>((res) => {
+        proc.once('exit', () => res(true))
+        setTimeout(() => res(false), 3000)
+      })
+      if (!exited) {
+        proc.kill('SIGKILL')
+        await new Promise<void>((res) => {
+          proc.once('exit', res)
+          setTimeout(res, 2000)
+        })
+      }
+    }
+    if (spec.sessionRm !== undefined && sessionId !== undefined) {
+      // the acp server holds the session 'open' until our connection's
+      // pipes close — i.e. until THIS process exits — so the delete
+      // cannot run from inside the worker. a detached retrier outlives
+      // us and removes the session once the agent has fully exited.
+      // operator-configured template — same trust boundary as
+      // spec.command (already sh -c'd)
+      const rm = spec.sessionRm.replaceAll('{sessionId}', sessionId)
+      spawn(
+        'sh',
+        [
+          '-c',
+          `for i in 1 2 3 4 5 6 7 8; do sleep 5; ${rm} && exit 0; done`,
+        ],
+        { detached: true, stdio: 'ignore' },
+      ).unref()
+      log(`session ${sessionId} cleanup armed — deferred until worker exit`)
+    }
   }
 }
 

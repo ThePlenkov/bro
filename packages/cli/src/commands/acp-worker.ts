@@ -13,10 +13,11 @@ export async function runAcpWorkerCommand(argv: string[]): Promise<void> {
   const command = flag(argv, '--command')
   const model = flag(argv, '--model')
   const autoApprove = argv.includes('--auto-approve')
-  const pos = positionals(argv, new Set(['--command', '--model']))
+  const sessionRm = flag(argv, '--session-rm')
+  const pos = positionals(argv, new Set(['--command', '--model', '--session-rm']))
   if (command === undefined || pos.length !== 1) {
     console.error(
-      'usage: bro acp-worker --command <cmd> [--model <m>] [--auto-approve] <promptFile>'
+      'usage: bro acp-worker --command <cmd> [--model <m>] [--auto-approve] [--session-rm <tmpl>] <promptFile>'
     )
     process.exit(2)
   }
@@ -27,6 +28,7 @@ export async function runAcpWorkerCommand(argv: string[]): Promise<void> {
     command,
     model,
     autoApprove,
+    sessionRm,
     promptFile,
     cwd: process.cwd(),
     provider: process.env.BRO_AGENT_PROVIDER,

@@ -241,3 +241,54 @@ describe('bro loop e2e', () => {
     })
   })
 })
+
+describe('bro loop argv parse', () => {
+  test('an unquoted --agent tail is rejected — never silently dropped', () => {
+    // the incident shape: --agent devin -p --prompt-file {promptFile} …
+    // must not degrade into a bare `devin <file>` interactive TUI
+    const f = loopFixture([])
+    inside(f.main, f.root, () => {
+      const r = f.run([
+        '--agent',
+        'devin',
+        '-p',
+        '--prompt-file',
+        '{promptFile}',
+        '--permission-mode',
+        'dangerous',
+      ])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /unknown option --prompt-file|unexpected argument/)
+    })
+  })
+
+  test('a stray positional names itself and the quoting fix', () => {
+    const f = loopFixture([])
+    inside(f.main, f.root, () => {
+      const r = f.run(['bogus-token'])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /unexpected argument 'bogus-token'/)
+      assert.match(r.stderr, /--agent 'devin -p --prompt-file \{promptFile\}'/)
+    })
+  })
+
+  test('an agent template without {promptFile} warns but still runs', () => {
+    const f = loopFixture([])
+    inside(f.main, f.root, () => {
+      const r = f.run(['--agent', 'devin'])
+      assert.equal(r.code, 0)
+      assert.match(r.stderr, /has no \{promptFile\}/)
+      assert.match(r.stdout, /0 landed/)
+    })
+  })
+
+  test('a quoted {promptFile} template parses clean', () => {
+    const f = loopFixture([])
+    inside(f.main, f.root, () => {
+      const r = f.run(['--agent', 'devin -p --prompt-file {promptFile}'])
+      assert.equal(r.code, 0)
+      assert.match(r.stdout, /0 landed/)
+      assert.doesNotMatch(r.stderr, /has no \{promptFile\}/)
+    })
+  })
+})

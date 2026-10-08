@@ -360,7 +360,11 @@ export async function resolveSpawnProvider(
         model,
         worker: {
           kind: 'argv',
-          argv: acpWorkerArgv(broSpawnArgv(), entry, { model, autoApprove }),
+          argv: acpWorkerArgv(broSpawnArgv(), entry, {
+            model,
+            autoApprove,
+            sessionRm: entry.sessionRm,
+          }),
           cliName: commandCliName(entry.command),
         },
       }
