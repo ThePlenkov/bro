@@ -1670,11 +1670,17 @@ function toInfo(dir: string, home: string | null, molStep: string, entry: AgentR
 /** Positional append is the documented contract for file-arg agent CLIs,
  *  but a TUI-capable CLI (devin, claude) spawned without the placeholder
  *  opens an interactive session carrying the file PATH as its prompt —
- *  surface the likely config typo instead of silently spawning TUIs. */
-function warnNoPromptFile(command: string): void {
-  if (!command.includes('{promptFile}')) {
+ *  surface the likely config typo instead of silently spawning TUIs.
+ *  argv workers are exempt: they append the file as an argv slot, never
+ *  string-append it. */
+function warnNoPromptFile(worker: SpawnWorker | undefined, command: string): void {
+  if (worker?.kind === 'argv') {
+    return
+  }
+  const cmd = worker?.kind === 'template' ? worker.command : command
+  if (!cmd.includes('{promptFile}')) {
     // binary name only — the template may carry inline credentials
-    const bin = command.split(/\s+/, 1)[0]
+    const bin = cmd.split(/\s+/, 1)[0]
     console.error(
       `bro agents: command '${bin}' has no {promptFile} placeholder — ` +
         'the prompt file appends as a positional arg; interactive CLIs ' +
@@ -1733,9 +1739,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // positional passthrough — the provider argv (a `model` value
           // could carry shell metachars) is never string-concatenated.
           const worker = spec.worker
-          if (worker?.kind !== 'argv') {
-            warnNoPromptFile(worker?.kind === 'template' ? worker.command : command)
-          }
+          warnNoPromptFile(worker, command)
           const args =
             worker?.kind === 'argv'
               ? [
@@ -2138,9 +2142,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // substitutes wholesale; an 'argv' worker becomes an exec line
         // with every element single-quoted — the provider argv never
         // re-parses into a different program.
-        if (worker?.kind !== 'argv') {
-          warnNoPromptFile(worker?.kind === 'template' ? worker.command : command)
-        }
+        warnNoPromptFile(worker, command)
         const runLine =
           worker === undefined
             ? expandAgentCmd(command, promptFile)

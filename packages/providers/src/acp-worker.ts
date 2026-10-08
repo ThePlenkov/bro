@@ -401,48 +401,64 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
     if (killTimer !== undefined) {
       clearTimeout(killTimer)
     }
-    child?.kill('SIGTERM')
-    const proc = child
-    if (proc !== undefined) {
-      const exited = await new Promise<boolean>((res) => {
-        proc.once('exit', () => res(true))
-        setTimeout(() => res(false), 3000)
-      })
-      if (!exited) {
-        proc.kill('SIGKILL')
-        await new Promise<void>((res) => {
-          proc.once('exit', res)
-          setTimeout(res, 2000)
-        })
-      }
-    }
-    if (spec.sessionRm !== undefined && sessionId !== undefined) {
-      // the acp server holds the session 'open' until our connection's
-      // pipes close — i.e. until THIS process exits — so the delete
-      // cannot run from inside the worker. a detached retrier outlives
-      // us and removes the session once the agent has fully exited.
-      // operator-configured template — same trust boundary as
-      // spec.command (already sh -c'd). The template rides argv, never
-      // the script text; the session id must be a slug before it may
-      // substitute into a shell template
-      if (/^[\w.-]+$/.test(sessionId)) {
-        const rm = spec.sessionRm.replaceAll('{sessionId}', sessionId)
-        spawn(
-          'sh',
-          [
-            '-c',
-            'for i in 1 2 3 4 5 6 7 8; do sleep 5; eval "$1" && exit 0; done',
-            'bro-session-rm',
-            rm,
-          ],
-          { detached: true, stdio: 'ignore' },
-        ).unref()
-        log(`session ${sessionId} cleanup armed — deferred until worker exit`)
-      } else {
-        log(`session cleanup skipped — session id is not a safe slug`)
-      }
-    }
+    await retireAgentChild(child)
+    armSessionCleanup(spec, sessionId, log)
   }
+}
+
+/** Graceful reap — SIGKILL orphans the agent's forked children and
+ *  leaves its session 'open' in the CLI's session store, so a TERM
+ *  grace window precedes the kill. */
+async function retireAgentChild(child: ChildProcess | undefined): Promise<void> {
+  child?.kill('SIGTERM')
+  if (child === undefined) {
+    return
+  }
+  const exited = await new Promise<boolean>((res) => {
+    child.once('exit', () => res(true))
+    setTimeout(() => res(false), 3000)
+  })
+  if (!exited) {
+    child.kill('SIGKILL')
+    await new Promise<void>((res) => {
+      child.once('exit', res)
+      setTimeout(res, 2000)
+    })
+  }
+}
+
+/** Arm the detached session-delete retrier. The acp server holds the
+ *  session 'open' until our connection's pipes close — i.e. until THIS
+ *  process exits — so the delete cannot run from inside the worker; a
+ *  detached retrier outlives us and removes the session once the agent
+ *  has fully exited. Operator-configured template — same trust
+ *  boundary as spec.command (already sh -c'd). The template rides
+ *  argv, never the script text; the session id must be a slug before
+ *  it may substitute into a shell template. */
+function armSessionCleanup(
+  spec: AcpWorkerSpec,
+  sessionId: string | undefined,
+  log: (line: string) => void
+): void {
+  if (spec.sessionRm === undefined || sessionId === undefined) {
+    return
+  }
+  if (!/^[\w.-]+$/.test(sessionId)) {
+    log(`session cleanup skipped — session id is not a safe slug`)
+    return
+  }
+  const rm = spec.sessionRm.replaceAll('{sessionId}', sessionId)
+  spawn(
+    'sh',
+    [
+      '-c',
+      'for i in 1 2 3 4 5 6 7 8; do sleep 5; eval "$1" && exit 0; done',
+      'bro-session-rm',
+      rm,
+    ],
+    { detached: true, stdio: 'ignore' },
+  ).unref()
+  log(`session ${sessionId} cleanup armed — deferred until worker exit`)
 }
 
 export type { StopReason }
