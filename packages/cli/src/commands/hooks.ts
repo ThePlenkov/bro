@@ -918,7 +918,7 @@ async function sessionContextTextCached(dir: string, sessionId: string): Promise
       : join(
           base,
           'cache',
-          `ctx-${createHash('sha1').update(`${dir}|${sessionId}`).digest('hex').slice(0, 16)}.json`
+          `ctx-${createHash('sha256').update(`${dir}|${sessionId}`).digest('hex').slice(0, 16)}.json`
         )
   if (file !== null) {
     try {
@@ -934,8 +934,19 @@ async function sessionContextTextCached(dir: string, sessionId: string): Promise
       // torn or absent cache — recompute
     }
   }
+  // t0 before the build: a concurrent hook that finished first wrote a
+  // FRESHER snapshot — never overwrite it with this older one
+  const t0 = Date.now()
   const text = await sessionContextText({ dir, sessionId })
   if (file !== null) {
+    try {
+      const existing = JSON.parse(readFileSync(file, 'utf8')) as { ts?: number }
+      if (typeof existing.ts === 'number' && existing.ts >= t0) {
+        return text
+      }
+    } catch {
+      // absent/torn — proceed to write
+    }
     try {
       mkdirSync(dirname(file), { recursive: true })
       // tmp+rename — a torn write never poisons a later reader
@@ -957,6 +968,13 @@ async function sessionContextTextCached(dir: string, sessionId: string): Promise
     }
   }
   return text
+}
+
+/** Soft-bound an advisory read — the value joins a hook's output budget,
+ *  so an unbounded build must degrade to undefined, never stretch the
+ *  event past the probe budget it bypasses. */
+function boundedMs<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+  return Promise.race([p, new Promise<undefined>((r) => setTimeout(r, ms).unref?.())])
 }
 
 /** One guard-engine call per emit path (spec: bro-nkn6). Declarations
@@ -1178,7 +1196,10 @@ async function emitStopGate(input: HookInput): Promise<void> {
     trace: sessionTail(sessionId).raw,
     // the judge's checkable surface — beads/gate/tree state, not just
     // tool metadata (fail-open inside; a slow probe → undefined)
-    context: sessionContextTextCached(process.cwd(), sessionId).catch(() => undefined),
+    context: boundedMs(
+      sessionContextTextCached(process.cwd(), sessionId).catch(() => undefined),
+      4_000
+    ),
   })
   if (input.stop_hook_active === true) {
     const goal = await goalP
