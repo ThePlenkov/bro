@@ -4,4 +4,4 @@ interface:
   brand_color: "#0E8A16"
   default_prompt: "Use $status to read the live bro project board."
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

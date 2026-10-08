@@ -451,6 +451,7 @@ const ADAPTERS = {
       clientManifest({
         interface: { displayName: 'bro' },
         skills: './skills/',
+        hooks: './hooks/hooks.json',
       }),
     ],
     // hand-written (Codex event names) — listed so --check doesn't flag it

@@ -4,4 +4,4 @@ interface:
   brand_color: "#0E8A16"
   default_prompt: "Use $sync to publish or restore bro artifacts."
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

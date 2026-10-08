@@ -4,4 +4,4 @@ interface:
   brand_color: "#B60205"
   default_prompt: "Use $drill to start a scoped drill frame."
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

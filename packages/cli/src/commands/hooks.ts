@@ -139,6 +139,11 @@ function asHookInput(raw: unknown): HookInput {
  * Each hook invocation is its own process. */
 let cursorClient = false
 
+/** Codex adds `turn_id` to every hook payload. Devin and Claude do not,
+ * so permission and pre-tool answers stay on their legacy shapes unless
+ * this is set. */
+let codexClient = false
+
 function emit(out: unknown): void {
   const payload = cursorClient ? toCursorHookOutput(out) : out
   process.stdout.write(`${JSON.stringify(payload)}\n`)
@@ -987,7 +992,7 @@ async function guardLines(
 }
 
 async function emitSessionContext(
-  event: 'SessionStart' | 'PostCompaction' | 'PreCompact',
+  event: 'SessionStart' | 'PostCompaction' | 'PostCompact' | 'PreCompact',
   sessionId = '',
   cliEvent: string = event
 ): Promise<boolean> {
@@ -1229,7 +1234,17 @@ async function emitPreTool(input: HookInput): Promise<void> {
   )
   const block = verdicts.find((v) => v.block !== undefined)?.block
   if (block !== undefined) {
-    emit({ decision: 'block', reason: block })
+    if (codexClient) {
+      emit({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: block,
+        },
+      })
+    } else {
+      emit({ decision: 'block', reason: block })
+    }
     return
   }
   const merged: Record<string, unknown> = {}
@@ -1239,7 +1254,19 @@ async function emitPreTool(input: HookInput): Promise<void> {
     }
   }
   if (Object.keys(merged).length > 0) {
-    emit({ hookSpecificOutput: { hookEventName: 'PreToolUse', tool_input: merged } })
+    if (codexClient) {
+      const base =
+        typeof input.tool_input === 'object' && input.tool_input !== null ? input.tool_input : {}
+      emit({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+          updatedInput: { ...base, ...merged },
+        },
+      })
+    } else {
+      emit({ hookSpecificOutput: { hookEventName: 'PreToolUse', tool_input: merged } })
+    }
   }
 }
 
@@ -1250,7 +1277,16 @@ async function emitPreTool(input: HookInput): Promise<void> {
 function emitPermission(input: HookInput): boolean {
   const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
   if (isSelfToolCommand(cmd)) {
-    emit({ decision: 'approve' })
+    if (codexClient) {
+      emit({
+        hookSpecificOutput: {
+          hookEventName: 'PermissionRequest',
+          decision: { behavior: 'allow' },
+        },
+      })
+    } else {
+      emit({ decision: 'approve' })
+    }
     return true
   }
   return false
@@ -1345,7 +1381,11 @@ async function dispatchHook(event: string, raw: unknown, input: HookInput): Prom
       return
     }
     case 'post-compaction':
-      await emitSessionContext('PostCompaction', sessionId, 'post-compaction')
+      await emitSessionContext(
+        codexClient ? 'PostCompact' : 'PostCompaction',
+        sessionId,
+        'post-compaction'
+      )
       return
     case 'pre-compact':
       // Claude Code requires hookEventName to match the firing event.
@@ -1502,6 +1542,7 @@ function runPerf(argv: string[]): void {
 
 export async function runHooksCommand(argv: string[]): Promise<void> {
   cursorClient = false
+  codexClient = false
   const event = argv[0]
   // install/uninstall are operator commands, not hook events — they
   // report a verdict on stderr and never read stdin (a git hook's stdin
@@ -1544,6 +1585,12 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   // payload / CURSOR_PROJECT_DIR, and cwd may be outside the repo.
   const raw = readRaw()
   cursorClient = isCursorHookPayload(raw)
+  codexClient =
+    !cursorClient &&
+    typeof raw === 'object' &&
+    raw !== null &&
+    !Array.isArray(raw) &&
+    typeof (raw as { turn_id?: unknown }).turn_id === 'string'
   const root = hookProjectDir(raw)
   const input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw)
   if (!broEnabled(root) || !enterHookProject(root)) {

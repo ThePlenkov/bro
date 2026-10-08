@@ -4,4 +4,4 @@ interface:
   brand_color: "#0E8A16"
   default_prompt: "Use $goal to set a completion condition for this session."
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

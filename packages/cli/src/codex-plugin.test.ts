@@ -17,6 +17,7 @@ describe('codex plugin adapter', () => {
       'PreCompact',
       'PostCompact',
       'UserPromptSubmit',
+      'PreToolUse',
       'PostToolUse',
       'PermissionRequest',
       'Stop',
@@ -24,6 +25,15 @@ describe('codex plugin adapter', () => {
     for (const ev of events) {
       assert.ok(parsed.hooks[ev], `missing Codex hook event ${ev}`)
     }
+    const session = JSON.stringify(parsed.hooks.SessionStart)
+    assert.match(
+      session,
+      /startup\|resume\|clear\|compact/,
+      'SessionStart should rehydrate every Codex source'
+    )
+    const preTool = JSON.stringify(parsed.hooks.PreToolUse)
+    assert.match(preTool, /Bash/, 'PreToolUse should match Bash tool')
+    assert.match(preTool, /pre-tool/, 'PreToolUse should call bro pre-tool')
     const postTool = JSON.stringify(parsed.hooks.PostToolUse)
     assert.match(postTool, /Bash/, 'PostToolUse should match Bash tool')
     assert.match(postTool, /post-tool/, 'PostToolUse should call bro post-tool')
@@ -52,6 +62,11 @@ describe('codex plugin adapter', () => {
       const yaml = readFileSync(join(dir, 'agents/openai.yaml'), 'utf8')
       assert.match(yaml, /display_name:/, `${name} openai.yaml missing display_name`)
       assert.match(yaml, /short_description:/, `${name} openai.yaml missing short_description`)
+      assert.match(
+        yaml,
+        /allow_implicit_invocation: true/,
+        `${name} must load into the Codex prompt automatically`
+      )
     }
   })
 })

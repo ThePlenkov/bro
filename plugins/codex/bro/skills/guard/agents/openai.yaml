@@ -4,4 +4,4 @@ interface:
   brand_color: "#0E8A16"
   default_prompt: "Use $guard to inspect or dry-run a hook guard."
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

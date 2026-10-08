@@ -4,4 +4,4 @@ interface:
   brand_color: "#1D4ED8"
   default_prompt: "Use $typesafe-ai when a decision should be a typed judgment."
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

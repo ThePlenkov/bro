@@ -4,4 +4,4 @@ interface:
   brand_color: "#0E8A16"
   default_prompt: "Use $serve to expose the bro facade over HTTP."
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

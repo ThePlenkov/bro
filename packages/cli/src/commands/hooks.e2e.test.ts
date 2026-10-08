@@ -294,6 +294,16 @@ describe('hooks e2e — permission + fail-open', () => {
       const no = hook(f, 'permission', { tool_input: { command: 'rm -rf build' } })
       assert.equal(no.code, 0)
       assert.doesNotMatch(no.stdout, /approve/)
+      // Codex PermissionRequest ignores legacy decision:approve.
+      // turn_id is the Codex-only field; Devin keeps the approve shape.
+      const codex = hook(f, 'permission', {
+        turn_id: 'turn-1',
+        hook_event_name: 'PermissionRequest',
+        tool_input: { command: 'bd ready -n 5' },
+      })
+      assert.equal(codex.code, 0)
+      assert.match(codex.stdout, /"behavior":"allow"/)
+      assert.doesNotMatch(codex.stdout, /"decision":"approve"/)
     })
   })
 

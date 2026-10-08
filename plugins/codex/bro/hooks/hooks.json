@@ -3,7 +3,7 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume",
+        "matcher": "startup|resume|clear|compact",
         "hooks": [
           {
             "type": "command",
@@ -45,6 +45,19 @@
             "type": "command",
             "command": "\"${PLUGIN_ROOT}/hooks/run.sh\" prompt-submit || true",
             "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/hooks/run.sh\" pre-tool || true",
+            "timeout": 10,
+            "statusMessage": "bro pre-tool"
           }
         ]
       }
