@@ -353,6 +353,11 @@ export const PLUGINS: BroPlugin[] = [
     hidden: true,
   }),
   definePlugin({
+    name: 'telemetry',
+    summary: 'Hook + command latency report — perf journal rollup [--session <id>] [--json]',
+    run: (argv) => runHooksCommand(['perf', ...argv]),
+  }),
+  definePlugin({
     name: 'acp-worker',
     summary: 'ACP provider spawn unit — backends exec this; never typed',
     run: runAcpWorkerCommand,

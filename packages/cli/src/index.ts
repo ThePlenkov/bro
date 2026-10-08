@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { warnDeprecated } from '@broject/core'
+import { journalCommand } from './commands/hooks.ts'
 import { docUsageLines, reservedWords, runDocVerb } from './docs.ts'
 import { loadExternalPlugins, PLUGINS } from './plugins.ts'
 
@@ -49,6 +50,17 @@ Examples:
 
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2)
+
+  // command telemetry: plugins end via process.exit() — the exit event
+  // is the only site that sees every path and its code. Meta commands
+  // and BRO_TELEMETRY=0 skip; see journalCommand for the cheap contract
+  const t0 = Date.now()
+  const META_CMDS = new Set([undefined, '--version', '-v', '--help', '-h'])
+  if (!META_CMDS.has(cmd)) {
+    process.on('exit', (code) => {
+      journalCommand(cmd as string, Date.now() - t0, code ?? 0)
+    })
+  }
 
   if (cmd === '--version' || cmd === '-v') {
     console.log(VERSION)
