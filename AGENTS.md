@@ -83,12 +83,14 @@ Developing bro itself: see CONTRIBUTING.md.
   edited in place: `bro mesh request mesh://<org>/<repo> <title>
   --for <bead>` drops the request bead on my own store — the rig's
   `bro mesh inbox` reads it through its peer binding to my store —
-  and blocks my bead on `external:<rig>:<id>`; `bro mesh wait <id>`
-  point-checks the thread between turns — the dep-marked block is
-  the truth, the check a convenience. The top-level `bro request` /
-  `bro wait` forms (same-machine delivery, the forge-issue plane)
-  are specced in specs/cross-repo/ but not shipped — `bro mesh` is
-  the only live surface.
+  and records an `external:<rig>:<id>` edge on my bead. That edge
+  is a marker, not a gate: bd 1.3.1 stores external deps verbatim
+  but never resolves them (and mis-parses the `mesh://` URI at `:`),
+  so `bd ready` still lists the bead — `bro mesh wait <id>` is the
+  block; point-check the thread between turns. The top-level
+  `bro request` / `bro wait` forms (same-machine delivery, the
+  forge-issue plane) are specced in specs/cross-repo/ but not
+  shipped — `bro mesh` is the only live surface.
 
 ## Convoy fan-out — detach + pins
 
