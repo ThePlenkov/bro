@@ -145,7 +145,9 @@ function checkGh(): DoctorCheck {
  *  by design, so a broken chain degrades to silent no-ops, not errors. */
 function checkHooks(dir: string): DoctorCheck {
   const envRoot =
-    process.env.DEVIN_PLUGIN_ROOT ?? process.env.CLAUDE_PLUGIN_ROOT ?? process.env.PLUGIN_ROOT
+    process.env.PLUGIN_ROOT ??
+    process.env.DEVIN_PLUGIN_ROOT ??
+    process.env.CLAUDE_PLUGIN_ROOT
   let d = resolve(envRoot?.startsWith('/') ? envRoot : dir)
   for (;;) {
     const dist = join(d, 'packages', 'cli', 'dist', 'index.js')
