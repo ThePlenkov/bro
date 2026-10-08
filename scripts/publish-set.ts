@@ -34,7 +34,9 @@ for (const [dir, p] of pkgs) {
     dependents.set(depDir, [...(dependents.get(depDir) ?? []), dir])
   }
 }
-const ready = [...pkgs.keys()].filter((d) => pending.get(d) === 0).sort()
+const ready = [...pkgs.keys()]
+  .filter((d) => pending.get(d) === 0)
+  .sort((a, b) => a.localeCompare(b))
 const order = []
 while (ready.length) {
   const dir = ready.shift()
@@ -44,7 +46,7 @@ while (ready.length) {
     pending.set(next, left)
     if (left === 0) {
       ready.push(next)
-      ready.sort()
+      ready.sort((a, b) => a.localeCompare(b))
     }
   }
 }
