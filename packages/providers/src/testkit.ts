@@ -70,6 +70,10 @@ export function fakeAcpAgent(
      *  'auth-gateway-504' an auth-worded outage message that must
      *  classify as availability, never config. */
     failPrompt?: 'auth' | 'generic' | 'auth-gateway-504'
+    /** session/new fails: 'auth' refuses with auth_required — the
+     *  real gate for an agent whose advertised authMethods are not
+     *  covered by stored credentials. */
+    failNew?: 'auth'
   } = {}
 ): FakeAcpAgent {
   const seen: FakeAcpAgent = {
@@ -85,6 +89,9 @@ export function fakeAcpAgent(
       agentInfo: { name: 'fake-acp', version: '0' },
     }))
     .onRequest('session/new', (ctx) => {
+      if (opts.failNew === 'auth') {
+        throw RequestError.authRequired()
+      }
       seen.sessions.push({ cwd: ctx.params.cwd })
       return { sessionId: 'sess-1', configOptions: opts.configOptions ?? [] }
     })

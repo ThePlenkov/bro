@@ -45,7 +45,7 @@ import {
   type LoopConfig,
 } from '@broject/loop'
 import { loadBroConfig } from '../plugins.ts'
-import { flag } from './args.ts'
+import { flag, positionals } from './args.ts'
 import { runActCommand } from './act.ts'
 import { runSyncCommand } from './sync.ts'
 import { mergedBranches, stackMemberFor, stackTip, syncStack } from './stack.ts'
@@ -657,9 +657,34 @@ function stackNameFlag(argv: string[]): string | undefined {
   return name
 }
 
+const LOOP_VALUE_FLAGS = new Set([
+  '--agent',
+  '--agent-timeout',
+  '--merge-timeout',
+  '--max',
+  '--interval',
+  '--label',
+  '--stack',
+])
+const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help'])
+
 export async function runLoopCommand(argv: string[]): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
     usage()
+  }
+  // strict: an unquoted `--agent devin -p --prompt-file {promptFile}` reads as
+  // agent='devin' plus a tail of unknown flags — silently spawning a bare
+  // `devin <file>` TUI per bead instead of a headless worker
+  const stray = positionals(argv, LOOP_VALUE_FLAGS, {
+    boolFlags: LOOP_BOOL_FLAGS,
+    strict: true,
+  })
+  if (stray.length > 0) {
+    console.error(
+      `bro loop: unexpected argument '${stray[0]}' — quote the agent template ` +
+        "as one arg: --agent 'devin -p --prompt-file {promptFile}'"
+    )
+    process.exit(2)
   }
   checkBeads()
   const root = gitTry(['rev-parse', '--show-toplevel']).out.trim()
@@ -676,6 +701,20 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
         '(e.g. "devin --prompt-file {promptFile} -p") or pass --agent'
     )
     process.exit(2)
+  }
+  // {promptFile} isn't strictly required — an agent may read
+  // BRO_PROMPT_FILE from env instead — but a TUI-capable CLI spawned
+  // without it opens an interactive session per bead (the file path
+  // lands positionally = the prompt). Warn loudly, don't refuse.
+  if (!agent.includes('{promptFile}')) {
+    // binary name only — the template may carry inline credentials
+    const agentBin = agent.split(/\s+/, 1)[0]
+    console.error(
+      `bro loop: agent template has no {promptFile} — "${agentBin}". ` +
+        'The prompt file appends as a positional arg; interactive CLIs ' +
+        '(devin, claude) treat that as a TUI session, not a worker prompt. ' +
+        'Intended for env-reading agents (BRO_PROMPT_FILE) only.'
+    )
   }
   const rev = reviewHost(root, broCfg.connectors)
   const ctx: Ctx = {

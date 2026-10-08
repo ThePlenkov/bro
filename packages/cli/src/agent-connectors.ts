@@ -360,7 +360,11 @@ export async function resolveSpawnProvider(
         model,
         worker: {
           kind: 'argv',
-          argv: acpWorkerArgv(broSpawnArgv(), entry, { model, autoApprove }),
+          argv: acpWorkerArgv(broSpawnArgv(), entry, {
+            model,
+            autoApprove,
+            sessionRm: entry.sessionRm,
+          }),
           cliName: commandCliName(entry.command),
         },
       }
@@ -1663,6 +1667,26 @@ function toInfo(dir: string, home: string | null, molStep: string, entry: AgentR
   }
 }
 
+/** Positional append is the documented contract for file-arg agent CLIs,
+ *  but a TUI-capable CLI (devin, claude) spawned without the placeholder
+ *  opens an interactive session carrying the file PATH as its prompt —
+ *  surface the likely config typo instead of silently spawning TUIs.
+ *  argv workers are exempt: they append the file as an argv slot, never
+ *  string-append it. */
+function warnNoPromptFile(worker: SpawnWorker | undefined, command: string): void {
+  if (worker?.kind === 'argv') {
+    return
+  }
+  const cmd = worker?.kind === 'template' ? worker.command : command
+  if (!cmd.includes('{promptFile}')) {
+    console.error(
+      'bro agents: configured command has no {promptFile} placeholder — ' +
+        'the prompt file appends as a positional arg; interactive CLIs ' +
+        '(devin, claude) treat that as a TUI session, not a worker prompt'
+    )
+  }
+}
+
 /** The native backend — detached process, self-sufficient
  *  (supervisor:'none'). Agent command template resolves as
  *  agents.native.command → loop.agent; `{promptFile}` expands like the
@@ -1713,6 +1737,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // positional passthrough — the provider argv (a `model` value
           // could carry shell metachars) is never string-concatenated.
           const worker = spec.worker
+          warnNoPromptFile(worker, command)
           const args =
             worker?.kind === 'argv'
               ? [
@@ -2115,6 +2140,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // substitutes wholesale; an 'argv' worker becomes an exec line
         // with every element single-quoted — the provider argv never
         // re-parses into a different program.
+        warnNoPromptFile(worker, command)
         const runLine =
           worker === undefined
             ? expandAgentCmd(command, promptFile)

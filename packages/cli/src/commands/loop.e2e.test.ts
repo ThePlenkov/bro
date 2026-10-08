@@ -241,3 +241,74 @@ describe('bro loop e2e', () => {
     })
   })
 })
+
+describe('bro loop argv parse', () => {
+  test('an unquoted --agent tail is rejected — never silently dropped', () => {
+    // the incident shape: --agent devin -p --prompt-file {promptFile} …
+    // must not degrade into a bare `devin <file>` interactive TUI
+    const f = loopFixture([])
+    inside(f.main, f.root, () => {
+      const r = f.run([
+        '--agent',
+        'devin',
+        '-p',
+        '--prompt-file',
+        '{promptFile}',
+        '--permission-mode',
+        'dangerous',
+      ])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /unknown option --prompt-file|unexpected argument/)
+    })
+  })
+
+  test('a stray positional names itself and the quoting fix', () => {
+    const f = loopFixture([])
+    inside(f.main, f.root, () => {
+      const r = f.run(['bogus-token'])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /unexpected argument 'bogus-token'/)
+      assert.match(r.stderr, /--agent 'devin -p --prompt-file \{promptFile\}'/)
+    })
+  })
+
+  test('an agent template without {promptFile} warns but still runs', () => {
+    const f = loopFixture([])
+    inside(f.main, f.root, () => {
+      const r = f.run(['--agent', 'devin'])
+      assert.equal(r.code, 0)
+      assert.match(r.stderr, /has no \{promptFile\}/)
+      assert.match(r.stdout, /0 landed/)
+    })
+  })
+
+  test('a bool flag carrying =value is refused — never a silent live run', () => {
+    // --dry-run=true parses as the flag but argv.includes('--dry-run')
+    // misses it — without the strict check the queue would run live
+    const f = loopFixture([])
+    inside(f.main, f.root, () => {
+      const r = f.run(['--dry-run=true'])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /option --dry-run takes no value/)
+    })
+  })
+
+  test('a value flag fed a flag token demands a real value', () => {
+    const f = loopFixture([])
+    inside(f.main, f.root, () => {
+      const r = f.run(['--agent', '--json'])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /option --agent requires a value/)
+    })
+  })
+
+  test('a quoted {promptFile} template parses clean', () => {
+    const f = loopFixture([])
+    inside(f.main, f.root, () => {
+      const r = f.run(['--agent', 'devin -p --prompt-file {promptFile}'])
+      assert.equal(r.code, 0)
+      assert.match(r.stdout, /0 landed/)
+      assert.doesNotMatch(r.stderr, /has no \{promptFile\}/)
+    })
+  })
+})

@@ -453,7 +453,7 @@ const shQ = (s: string): string => `'${s.replaceAll("'", String.raw`'\''`)}'`
 export function acpWorkerArgv(
   broBin: string[],
   entry: AcpEntry,
-  opts: { model?: string; autoApprove?: boolean } = {}
+  opts: { model?: string; autoApprove?: boolean; sessionRm?: string } = {}
 ): string[] {
   const command =
     entry.profile === undefined ? entry.command : `${entry.command} --profile ${shQ(entry.profile)}`
@@ -464,6 +464,10 @@ export function acpWorkerArgv(
   }
   if (opts.autoApprove ?? entry.autoApprove) {
     argv.push('--auto-approve')
+  }
+  const sessionRm = opts.sessionRm ?? entry.sessionRm
+  if (sessionRm !== undefined) {
+    argv.push('--session-rm', sessionRm)
   }
   return argv
 }
