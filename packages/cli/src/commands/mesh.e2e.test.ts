@@ -152,6 +152,58 @@ describe('bro mesh', () => {
     })
   })
 
+  test('inbox — verdicted threads (accepted/rejected) no longer list their request', () => {
+    const { root, main } = initRepo('bro-mesh-e2e-term-', (m) => {
+      execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
+    })
+    inside(main, root, () => {
+      const binDir = installFakeDolt(root)
+      const env = { PATH: `${binDir}:${process.env.PATH}` }
+      const me = 'mesh://theplenkov/bro'
+      const rigB = 'mesh://acme/rigb'
+      const env1 = (id: string, kind: string, thread: string, claimedFrom = rigB) => ({
+        id,
+        title: `${kind} ${id}`,
+        status: 'open',
+        priority: 1,
+        labels: [
+          'mesh:v:1',
+          `mesh:kind:${kind}`,
+          `mesh:thread:${thread}`,
+          `mesh:from:${claimedFrom}`,
+          `mesh:to:${me}`,
+        ],
+      })
+      const { remoteDir } = installFakeDoltRemote(root, [
+        // accepted — terminal, must not surface
+        env1('rigB-acc', 'request', 'rigB-acc'),
+        env1('rigB-v1', 'accept', 'rigB-acc'),
+        // rejected — terminal, must not surface
+        env1('rigB-rej', 'request', 'rigB-rej'),
+        env1('rigB-v2', 'reject', 'rigB-rej'),
+        // a verdict whose from doesn't match the peer binding is
+        // impersonation — it cannot close the thread
+        env1('rigB-frg', 'request', 'rigB-frg'),
+        env1('rigB-v3', 'accept', 'rigB-frg', 'mesh://mallory/forge'),
+        // still pending — no verdict yet
+        env1('rigB-pen', 'request', 'rigB-pen'),
+      ])
+
+      const add = runCli(['mesh', 'peers', 'add', 'rigB', rigB, remoteDir], { cwd: main, env })
+      assert.equal(add.code, 0, add.stderr)
+
+      const inbox = runCli(['mesh', 'inbox'], { cwd: main, env })
+      assert.equal(inbox.code, 0, inbox.stderr)
+      assert.match(inbox.stdout, /rigB\trigB-pen\trequest rigB-pen/)
+      assert.match(inbox.stdout, /rigB-frg/)
+      assert.doesNotMatch(inbox.stdout, /rigB-acc|rigB-rej|rigB-v\d/)
+
+      const json = runCli(['mesh', 'inbox', '--json', '--no-pull'], { cwd: main, env })
+      const beads = (JSON.parse(json.stdout) as Array<{ bead: string }>).map((r) => r.bead)
+      assert.deepEqual(beads.sort(), ['rigB-frg', 'rigB-pen'])
+    })
+  })
+
   test('inbox — a local peer is read through its live store', () => {
     const { root, main } = initRepo('bro-mesh-e2e-local-', (m) => {
       execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
