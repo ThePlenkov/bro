@@ -420,8 +420,8 @@ describe('bro doctor', () => {
         const rows = runDoctorChecks(dir).filter((c) => c.name === 'providers')
         assert.match(rows[0]!.detail, /none configured/)
         const warns = rows.filter((c) => c.status === 'warn')
-        assert.ok(warns.some((c) => /judge\.provider.*'ghost'/.test(c.detail)))
-        assert.ok(warns.some((c) => /agents\.native\.provider names 'also-ghost'/.test(c.detail)))
+        assert.ok(warns.some((c) => c.detail.includes("judge.provider names 'ghost'")))
+        assert.ok(warns.some((c) => c.detail.includes("agents.native.provider names 'also-ghost'")))
       }
     ))
 
@@ -446,7 +446,10 @@ describe('bro doctor', () => {
         const rows = runDoctorChecks(dir).filter((c) => c.name === 'providers')
         const warn = rows.find((c) => c.status === 'warn')
         assert.ok(warn, JSON.stringify(rows))
-        assert.match(warn.detail, /agents\.native\.provider.*no spawn surface/)
+        assert.ok(
+          warn.detail.includes('agents.native.provider') && warn.detail.includes('no spawn surface'),
+          warn.detail
+        )
       }
     ))
 
