@@ -358,6 +358,22 @@ describe('coalesceDrops', () => {
     })
   })
 
+  test('an anonymous publisher coalesces nothing — undefined source is no identity', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        const note = (payload: string) =>
+          JSON.stringify({ topic: 'mesh', kind: 'info', payload, key: 'mesh-inbox' })
+        dropMailbox(mb, note('pending'), 'note')
+        // a second sourceless publish of the same key must not eat the
+        // first — two sessions without a source are not the same source
+        coalesceDrops(mb, 'mesh-inbox', { topic: 'mesh' })
+        dropMailbox(mb, note('fresh'), 'note')
+        assert.equal(drainMailbox(dir, 's1').length, 2)
+      })
+    })
+  })
+
   test('a drop with no key never coalesces', () => {
     withRepo((dir) => {
       withXdg(() => {

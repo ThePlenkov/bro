@@ -204,6 +204,9 @@ function announceInbox(dir: string, rig: string, n: number): void {
         kind: 'info',
         payload: `${n} mesh request(s) addressed to ${rig} — \`bro mesh inbox\``,
         key: 'mesh-inbox',
+        // anonymous keyed publishes coalesce nothing — the mesh plane
+        // pins its name so a later announce still supersedes this one
+        source: 'mesh',
       })
       .catch(() => {})
   } catch {
