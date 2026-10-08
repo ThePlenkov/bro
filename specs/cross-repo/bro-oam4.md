@@ -31,10 +31,14 @@ resolves in order:
      siblings and no bare `<name>` is ambiguous → exit 2 listing
      candidates.
 
-   The rig comes from the checkout's `.bro-rig.json` `rig` pin, else
-   `rigFromRemoteUrl(origin)` — the same derivation `bro mesh me`
-   uses. Unresolvable → exit 2, "target rig is unaddressed" (the
-   `bro mesh me` wording).
+   The rig is resolved exactly as `bro mesh me` resolves it for that
+   checkout: the `mesh.rig` config pin wins, else
+   `rigFromRemoteUrl(origin)` — the shared `selfRig` derivation run
+   on the target dir, so `to` names the rig its own `bro mesh inbox`
+   answers to. `.bro-rig.json` is a discovery hint, never an identity
+   source — when it disagrees with the resolved rig, warn and still
+   address the resolved rig. Unresolvable → exit 2, "target rig is
+   unaddressed" (the `bro mesh me` wording).
 
 ### Delivery — the anchor store
 
@@ -106,6 +110,7 @@ session-facing rule lands in AGENTS.md (Conventions), verbatim:
 ```text
 packages/cli/src/commands/request.ts    bro request
 packages/mesh/src/request.ts            resolve + deliver + ensure-binding
+packages/mesh/src/identity.ts           selfRig hoisted in — shared rig resolver
 packages/mesh/src/inbox.ts              own-store scan (unbound flag)
 packages/cli/src/commands/mesh.ts       lifecycle writes → anchor store
 AGENTS.md                               policy bullet
@@ -115,9 +120,10 @@ AGENTS.md                               policy bullet
 
 - [ ] `packages/mesh/src/request.ts` — repo-or-alias resolution
       (alias → uri → path → peer basenames → siblings), rig
-      derivation (`.bro-rig.json` → origin), `deliverRequest`
-      (`bd -C` create + label pin + external_ref), peer-binding
-      ensure
+      derivation (target's `selfRig`: `mesh.rig` pin → origin —
+      hoist it from mesh.ts so `me` and `request` share one
+      resolver), `deliverRequest` (`bd -C` create + label pin +
+      external_ref), peer-binding ensure
 - [ ] `packages/cli/src/commands/request.ts` — `bro request
       <repo-or-alias> <title> [--body T] [--priority N] [--ref K:R]…
       [--for BEAD]`, prints `<id> → <rig>` + thread hint
