@@ -12,8 +12,13 @@ for (const dir of readdirSync(join(root, 'packages'))) {
   let p
   try {
     p = JSON.parse(readFileSync(join(root, 'packages', dir, 'package.json'), 'utf8'))
-  } catch {
-    continue // not a package dir — stray file or missing package.json
+  } catch (e) {
+    // only a missing manifest is a skippable stray — any other read
+    // error or malformed JSON in an existing manifest must not
+    // silently drop a package from the publish set
+    const code = (e as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENOTDIR') continue
+    throw e
   }
   if (!p.name?.startsWith('@broject/') || p.private) continue
   pkgs.set(dir, {

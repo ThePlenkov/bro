@@ -82,7 +82,9 @@ Developing bro itself: see CONTRIBUTING.md.
   belongs to another repo is posted for that rig to pull, never
   edited in place: `bro mesh request mesh://<org>/<repo> <title>
   --for <bead>` drops the request bead on my own store — the rig's
-  `bro mesh inbox` reads it through its peer binding to my store —
+  `bro mesh inbox` reads it through its peer binding to my store
+  (`beads-remote` pulls my refs/dolt/data replica, `local` reads the
+  live checkout read-only — the envelope never leaves my store) —
   and records an `external:<rig>:<id>` edge on my bead. That edge
   is a marker, not a gate: bd 1.3.1 stores external deps verbatim
   but never resolves them (and mis-parses the `mesh://` URI at `:`),

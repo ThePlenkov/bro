@@ -304,14 +304,28 @@ export function wallText(w: ProviderWall): string {
  *  unstopped rate_limited death (spawnedAt — a respawn re-stamps it). */
 interface WallAcc {
   quota: boolean
-  rate?: AgentRegistryEntry
+  rate?: WallRecord & { provider: string }
+}
+
+/** A scannable death record — a live registry entry or one `attempts`
+ *  record a re-dispatch retains (spec bro-1x7p: provider, model, cause,
+ *  resetAt, spawnedAt, stopped verbatim). Only the scanned fields are
+ *  contracted — everything else rides untyped. */
+interface WallRecord {
+  provider?: unknown
+  stopped?: unknown
+  cause?: unknown
+  resetAt?: unknown
+  spawnedAt?: unknown
 }
 
 /** A wallable death with provider provenance — `crash`/`auth`/`ok` say
  *  something about the worker, never the service, and a legacy spawn
  *  without provider provenance can't map to a wall. */
-function wallable(e: AgentRegistryEntry): e is AgentRegistryEntry & { provider: string } {
+function wallable(e: WallRecord): e is WallRecord & { provider: string } {
   return (
+    e !== null &&
+    typeof e === 'object' &&
     typeof e.provider === 'string' &&
     e.provider !== '' &&
     e.stopped !== true &&
@@ -319,10 +333,14 @@ function wallable(e: AgentRegistryEntry): e is AgentRegistryEntry & { provider: 
   )
 }
 
-function foldEntry(acc: WallAcc, e: AgentRegistryEntry): void {
+function stamp(e: WallRecord): string {
+  return typeof e.spawnedAt === 'string' ? e.spawnedAt : ''
+}
+
+function foldEntry(acc: WallAcc, e: WallRecord & { provider: string }): void {
   if (e.cause === 'quota') {
     acc.quota = true
-  } else if (acc.rate === undefined || e.spawnedAt > acc.rate.spawnedAt) {
+  } else if (acc.rate === undefined || stamp(e) > stamp(acc.rate)) {
     acc.rate = e
   }
 }
@@ -368,12 +386,21 @@ export function deriveProviderWalls(
 ): ProviderWall[] {
   const byProvider = new Map<string, WallAcc>()
   for (const e of Object.values(registry)) {
-    if (!wallable(e)) {
-      continue
+    // the entry's live fields plus each retained `attempts` record —
+    // a re-dispatch appends the outgoing attempt verbatim, and a
+    // superseded death still walls the provider it died on (spec
+    // bro-1x7p); entries that never re-dispatched carry no list
+    const records: WallRecord[] = Array.isArray(e.attempts)
+      ? [e, ...(e.attempts as WallRecord[])]
+      : [e]
+    for (const rec of records) {
+      if (!wallable(rec)) {
+        continue
+      }
+      const acc = byProvider.get(rec.provider) ?? { quota: false }
+      foldEntry(acc, rec)
+      byProvider.set(rec.provider, acc)
     }
-    const acc = byProvider.get(e.provider) ?? { quota: false }
-    foldEntry(acc, e)
-    byProvider.set(e.provider, acc)
   }
   return [...byProvider]
     .map(([provider, acc]) => accWall(provider, acc, now))

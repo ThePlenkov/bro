@@ -203,6 +203,39 @@ describe('deriveProviderWalls', () => {
     assert.deepEqual(w, [])
   })
 
+  test('retained attempts join the scan — a superseded death still walls its provider', () => {
+    const w = deriveProviderWalls(
+      {
+        // post-fallthrough state: the live entry respawned onto devin,
+        // the rate_limited death it superseded rides in attempts
+        a: entry({
+          provider: 'devin',
+          attempts: [
+            { provider: 'kilo', cause: 'rate_limited', spawnedAt: '2026-01-01T00:00:00Z' },
+          ],
+        }),
+      },
+      now
+    )
+    assert.deepEqual(w, [{ provider: 'kilo', cause: 'rate_limited' }])
+  })
+
+  test('a stopped attempt clears with its entry; a live quota attempt dominates', () => {
+    const w = deriveProviderWalls(
+      {
+        cleared: entry({
+          attempts: [{ provider: 'p', cause: 'quota', spawnedAt: 't', stopped: true }],
+        }),
+        live: entry({
+          provider: 'devin',
+          attempts: [{ provider: 'p', cause: 'quota', spawnedAt: 't' }],
+        }),
+      },
+      now
+    )
+    assert.deepEqual(w, [{ provider: 'p', cause: 'quota' }])
+  })
+
   test('the newest rate_limited death owns the wall horizon', () => {
     const w = deriveProviderWalls(
       {
