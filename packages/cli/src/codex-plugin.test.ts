@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { lstatSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -34,5 +34,24 @@ describe('codex plugin adapter', () => {
     assert.doesNotMatch(body, /DEVIN_PLUGIN_ROOT|CLAUDE_PLUGIN_ROOT|npx/, 'resolution stays in run.sh')
     assert.doesNotMatch(body, /\$comment/, 'Codex rejects $comment in hooks.json')
     assert.match(body, /"description"/, 'Codex hooks.json should use description')
+  })
+
+  test('every skill ships agents/openai.yaml inside the Codex plugin tree', () => {
+    const skills = join(ROOT, 'plugins/codex/bro/skills')
+    const st = lstatSync(skills)
+    assert.equal(st.isSymbolicLink(), false, 'Codex installer drops a skills symlink')
+    assert.equal(st.isDirectory(), true)
+    const manifest = JSON.parse(
+      readFileSync(join(ROOT, 'plugins/codex/bro/.codex-plugin/plugin.json'), 'utf8')
+    ) as { skills?: string }
+    assert.equal(manifest.skills, './skills/')
+    for (const name of readdirSync(skills)) {
+      const dir = join(skills, name)
+      if (!statSync(dir).isDirectory()) continue
+      if (!statSync(join(dir, 'SKILL.md'), { throwIfNoEntry: false })?.isFile()) continue
+      const yaml = readFileSync(join(dir, 'agents/openai.yaml'), 'utf8')
+      assert.match(yaml, /display_name:/, `${name} openai.yaml missing display_name`)
+      assert.match(yaml, /short_description:/, `${name} openai.yaml missing short_description`)
+    }
   })
 })

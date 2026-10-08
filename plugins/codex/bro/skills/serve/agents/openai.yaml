@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Serve"
+  short_description: "Host the bro facade as JSON on localhost for thin clients"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $serve to expose the bro facade over HTTP."
+policy:
+  allow_implicit_invocation: false

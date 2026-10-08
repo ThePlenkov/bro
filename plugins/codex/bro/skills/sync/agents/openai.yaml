@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Sync"
+  short_description: "Publish and restore bro artifacts on the data ref"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $sync to publish or restore bro artifacts."
+policy:
+  allow_implicit_invocation: false

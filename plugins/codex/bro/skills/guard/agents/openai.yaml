@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Guard"
+  short_description: "Declarative hook nudges — list what's armed and dry-run a def"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $guard to inspect or dry-run a hook guard."
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Docs"
+  short_description: "Read and update bro tasks and stores through the verb-first CLI"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $docs to read or update bro tasks and stores."
+policy:
+  allow_implicit_invocation: false

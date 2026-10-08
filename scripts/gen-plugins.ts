@@ -3,11 +3,10 @@
  *
  * The repo root is the canonical Devin plugin (plugin.json + hooks.json +
  * skills/). `plugins/<client>/bro/` carries that client's manifest and
- * hooks. Skills are not copied: each adapter's `skills` entry is a
- * relative symlink to the one `skills/` tree. A marketplace install
- * clones the whole repo, so the link stays inside that checkout. Copying
- * an adapter directory out of the repo does not bring the skill files
- * with it.
+ * hooks. Most adapters link `skills/` at the repo skills tree. Codex
+ * copies that tree: its installer keeps only the plugin directory and
+ * ignores a skill root that resolves outside it, so openai.yaml never
+ * reaches the install.
  *
  *   plugins/devin/bro/   plugin.json + hooks.json copied from root
  *   plugins/claude/bro/  .claude-plugin/plugin.json derived from plugin.json
@@ -17,7 +16,7 @@
  *   plugins/cursor/bro/  .cursor-plugin/plugin.json + hooks/hooks.json
  *                        (Cursor event names, command shape, output schema)
  *
- * Every adapter links skills/ and copies hooks/run.sh. Claude and Codex
+ * Every adapter exposes skills/ and copies hooks/run.sh. Claude and Codex
  * hooks wiring is authored by hand — Cursor's hooks.json is generated from
  * the event map below. `check:plugins` fails CI when an adapter drifts.
  *
@@ -414,10 +413,13 @@ PATH, then \`npx -y @broject/bro@${manifest.version}\`.
 
 /** Per-adapter opt-outs — opencode plugins are bare modules: no skills
  *  tree, no shell hook launcher. Anything not listed gets both. */
-const ADAPTER_OPTS: Record<string, { skills?: boolean; runSh?: boolean }> = {
+const ADAPTER_OPTS: Record<string, { skills?: boolean | 'copy'; runSh?: boolean }> = {
   'plugins/opencode/bro': { skills: false, runSh: false },
   'plugins/kilo/bro': { skills: false, runSh: false },
   'plugins/pi/bro': { skills: false, runSh: false },
+  // real tree, not a symlink — Codex copies the plugin dir and ignores
+  // skill roots that resolve outside it
+  'plugins/codex/bro': { skills: 'copy' },
 }
 
 // files written per adapter — value is source path, or [text] literal content
@@ -446,7 +448,10 @@ const ADAPTERS = {
   },
   'plugins/codex/bro': {
     '.codex-plugin/plugin.json': [
-      clientManifest({ interface: { displayName: 'bro' } }),
+      clientManifest({
+        interface: { displayName: 'bro' },
+        skills: './skills/',
+      }),
     ],
     // hand-written (Codex event names) — listed so --check doesn't flag it
     'hooks/hooks.json': null,
@@ -543,12 +548,57 @@ function ensureSkillsLink(adapterRel) {
   symlinkSync(skillsLinkTarget(adapterRel), link)
 }
 
+/** Byte-for-byte copy of skills/ inside the adapter. A symlink is stale. */
+function skillsCopyFresh(adapterRel) {
+  const dest = join(ROOT, adapterRel, 'skills')
+  let st
+  try {
+    st = lstatSync(dest)
+  } catch {
+    return false
+  }
+  if (!st.isDirectory() || st.isSymbolicLink()) {
+    return false
+  }
+  const want = new Set()
+  for (const f of walk(join(ROOT, 'skills'))) {
+    want.add(f)
+    const a = join(ROOT, 'skills', f)
+    const b = join(dest, f)
+    try {
+      if (!lstatSync(b).isFile() || !readFileSync(a).equals(readFileSync(b))) {
+        return false
+      }
+    } catch {
+      return false
+    }
+  }
+  for (const f of walk(dest)) {
+    if (!want.has(f)) {
+      return false
+    }
+  }
+  return true
+}
+
+function ensureSkillsCopy(adapterRel) {
+  if (skillsCopyFresh(adapterRel)) {
+    return
+  }
+  const dest = join(ROOT, adapterRel, 'skills')
+  rmSync(dest, { recursive: true, force: true })
+  mkdirSync(join(ROOT, adapterRel), { recursive: true })
+  cpSync(join(ROOT, 'skills'), dest, { recursive: true, dereference: true })
+}
+
 for (const [dir, files] of Object.entries(ADAPTERS)) {
   const opts = ADAPTER_OPTS[dir] ?? {}
-  const wantSkills = opts.skills !== false
+  const copySkills = opts.skills === 'copy'
+  const linkSkills = opts.skills !== false && !copySkills
+  const wantSkills = linkSkills || copySkills
   const wantRunSh = opts.runSh !== false
   // expected file set: declared entries + the skills symlink + hooks/run.sh.
-  // Skill files are not expected here — they live once, under skills/.
+  // A copied skills tree lists every file so the stale sweep can see them.
   const expected = new Set(Object.keys(files).map((rel) => `${dir}/${rel}`))
   for (const [rel, src] of Object.entries(files)) {
     if (src === null) {
@@ -570,17 +620,27 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
   }
   const skillsOut = `${dir}/skills`
   const runShOut = `${dir}/hooks/run.sh`
-  if (wantSkills) {
+  if (linkSkills) {
     expected.add(skillsOut)
+  }
+  if (copySkills) {
+    for (const f of walk(join(ROOT, 'skills'))) {
+      expected.add(`${skillsOut}/${f}`)
+    }
   }
   if (wantRunSh) {
     expected.add(runShOut)
   }
   if (!CHECK) {
-    if (wantSkills) {
+    if (linkSkills) {
       ensureSkillsLink(dir)
     }
-  } else if (wantSkills && !skillsLinkFresh(dir)) {
+    if (copySkills) {
+      ensureSkillsCopy(dir)
+    }
+  } else if (linkSkills && !skillsLinkFresh(dir)) {
+    drift.push(skillsOut)
+  } else if (copySkills && !skillsCopyFresh(dir)) {
     drift.push(skillsOut)
   }
   // the adapter dir itself may be a stale file or symlink — never
@@ -615,7 +675,7 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
         // a copied skills tree is one drift (the link), not one line per
         // file — adapters without skills get no carve-out: a `skills`
         // entry there IS the drift
-        if (wantSkills && (f === 'skills' || f.startsWith('skills/'))) {
+        if (linkSkills && (f === 'skills' || f.startsWith('skills/'))) {
           continue
         }
         if (!expected.has(`${dir}/${f}`)) {
