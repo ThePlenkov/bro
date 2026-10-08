@@ -40,8 +40,9 @@ hooks.json + hooks/run.sh        — Devin lifecycle hooks → `bro hooks <event
 plugins/<client>/bro/            — GENERATED per-client adapters (manifest +
                                    hooks/run.sh; skills/ is a symlink to the
                                    repo skills/ tree, not a copy.
-                                   plugins/claude/bro/hooks/hooks.json is the only
-                                   hand-written adapter file — Claude event names.
+                                   plugins/claude/bro/hooks/hooks.json and
+                                   plugins/codex/bro/hooks/hooks.json are
+                                   hand-written — per-client event names.
                                    Cursor's hooks.json is generated)
 formulas/                        — beads formulas (debt-pipeline)
 ```
@@ -133,7 +134,9 @@ skipped: a plugin cannot shadow a built-in.
 
 - **Node-native only.** The published CLI runs on `node >= 22` — no `Bun.*`
   APIs anywhere in `packages/`.
-- **`gh` is a hard runtime dep** — shell out, don't add Octokit.
+- **The review host's CLI is a runtime dep of that connector** — GitHub
+  shells out to `gh`, GitLab to `glab`. Domain code and skills call the
+  facade, never the CLI. Don't add an HTTP client for either forge.
 - **No deps unless needed.** Hand-rolled arg parsing beats a parser library.
 - Dev deps: tsdown (build), tsx (tests/scripts), typescript.
 - New skill → `skills/<name>/SKILL.md` + `agents/openai.yaml`; keep it thin —

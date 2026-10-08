@@ -1,0 +1,91 @@
+{
+  "$comment": "Codex-layout hooks for the bro plugin. SessionStart/PreCompact/PostCompact rehydrate beads context; PostToolUse arms session markers; PermissionRequest auto-approves bro/bd; Stop runs the gate. PLUGIN_ROOT is what Codex exports — same fail-open chain as other adapters (run.sh → bro on PATH → npx).",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=\"${PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" session-start || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks session-start || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@broject/bro@0.2.4\" hooks session-start || true; fi; exit 0",
+            "timeout": 20,
+            "statusMessage": "bro session context"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=\"${PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" pre-compact || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks pre-compact || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@broject/bro@0.2.4\" hooks pre-compact || true; fi; exit 0",
+            "timeout": 20,
+            "statusMessage": "bro pre-compact"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=\"${PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" post-compaction || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks post-compaction || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@broject/bro@0.2.4\" hooks post-compaction || true; fi; exit 0",
+            "timeout": 20,
+            "statusMessage": "bro post-compact"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=\"${PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" prompt-submit || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks prompt-submit || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@broject/bro@0.2.4\" hooks prompt-submit || true; fi; exit 0",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=\"${PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" post-tool || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks post-tool || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@broject/bro@0.2.4\" hooks post-tool || true; fi; exit 0",
+            "timeout": 10,
+            "statusMessage": "bro post-tool"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=\"${PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" permission || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks permission || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@broject/bro@0.2.4\" hooks permission || true; fi; exit 0",
+            "timeout": 10,
+            "statusMessage": "bro permission"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=\"${PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}\"; if [ -f \"$P/hooks/run.sh\" ]; then \"$P/hooks/run.sh\" stop || true; elif command -v bro >/dev/null 2>&1 && bro hooks >/dev/null 2>&1; then bro hooks stop || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline \"@broject/bro@0.2.4\" hooks stop || true; fi; exit 0",
+            "timeout": 25,
+            "statusMessage": "bro stop gate"
+          }
+        ]
+      }
+    ]
+  }
+}

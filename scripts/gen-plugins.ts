@@ -13,12 +13,13 @@
  *   plugins/claude/bro/  .claude-plugin/plugin.json derived from plugin.json
  *                        + hand-written hooks/hooks.json (Claude event names)
  *   plugins/codex/bro/   .codex-plugin/plugin.json derived from plugin.json
+ *                        + hand-written hooks/hooks.json (Codex event names)
  *   plugins/cursor/bro/  .cursor-plugin/plugin.json + hooks/hooks.json
  *                        (Cursor event names, command shape, output schema)
  *
- * Every adapter links skills/ and copies hooks/run.sh. Only the Claude hooks wiring
- * is authored by hand — Cursor's hooks.json is generated from the event
- * map below. `check:plugins` fails CI when an adapter drifts from its source.
+ * Every adapter links skills/ and copies hooks/run.sh. Claude and Codex
+ * hooks wiring is authored by hand — Cursor's hooks.json is generated from
+ * the event map below. `check:plugins` fails CI when an adapter drifts.
  *
  *   node scripts/gen-plugins.ts           # write
  *   node scripts/gen-plugins.ts --check   # verify freshness, exit 1 on drift
@@ -447,6 +448,8 @@ const ADAPTERS = {
     '.codex-plugin/plugin.json': [
       clientManifest({ interface: { displayName: 'bro' } }),
     ],
+    // hand-written (Codex event names) — listed so --check doesn't flag it
+    'hooks/hooks.json': null,
   },
   'plugins/cursor/bro': {
     '.cursor-plugin/plugin.json': [cursorManifest()],
@@ -462,6 +465,7 @@ const VERSIONED_SOURCES = [
   'hooks.json',
   'hooks/run.sh',
   'plugins/claude/bro/hooks/hooks.json',
+  'plugins/codex/bro/hooks/hooks.json',
   // the materialized opencode modules carry the npx fallback pin
   'packages/cli/src/opencode.ts',
   'packages/cli/src/opencode-tui.ts',
