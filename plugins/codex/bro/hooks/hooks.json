@@ -1,5 +1,5 @@
 {
-  "$comment": "Codex-layout hooks for the bro plugin. SessionStart/PreCompact/PostCompact rehydrate beads context; PostToolUse arms session markers; PermissionRequest auto-approves bro/bd; Stop runs the gate. PLUGIN_ROOT is what Codex exports — same fail-open chain as other adapters (run.sh → bro on PATH → npx).",
+  "description": "bro plugin hooks — SessionStart/PreCompact/PostCompact rehydrate beads context; PostToolUse arms session markers; PermissionRequest auto-approves bro/bd; Stop runs the gate. Resolves PLUGIN_ROOT → run.sh → bro hooks.",
   "hooks": {
     "SessionStart": [
       {

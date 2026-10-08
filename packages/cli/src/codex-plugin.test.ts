@@ -31,5 +31,7 @@ describe('codex plugin adapter', () => {
     assert.match(perm, /permission/, 'PermissionRequest should call bro permission')
     const body = readFileSync(HOOKS, 'utf8')
     assert.match(body, /PLUGIN_ROOT/, 'Codex hooks should resolve PLUGIN_ROOT first')
+    assert.doesNotMatch(body, /\$comment/, 'Codex rejects $comment in hooks.json')
+    assert.match(body, /"description"/, 'Codex hooks.json should use description')
   })
 })
