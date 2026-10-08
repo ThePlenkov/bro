@@ -91,6 +91,7 @@ import {
   type InstallResult,
 } from './githooks.ts'
 import { emitRefGuard } from './refguard.ts'
+import { goalContextLines, goalStopLines } from './goal.ts'
 import {
   CURSOR_HYDRATED_SKILL,
   cursorStopIgnored,
@@ -958,6 +959,9 @@ async function emitSessionContext(
     parallelLines(sessionId, probeReporter(cliEvent, 'parallelWork')),
   ])
   const parts = [...start.lines, ...par.lines]
+  // the session's active goal rehydrates like every other durable state —
+  // resume/compaction restores it (spec: specs/goal/bro-6vcll.md)
+  parts.push(...goalContextLines(process.cwd(), sessionId))
   // 'session-start' covers all three rehydrate events; the match
   // haystack is the same session-context text + previous-session trace
   // tail the learn connector assembles
@@ -998,6 +1002,9 @@ async function emitPromptContext(input: HookInput): Promise<void> {
       parallelLines(sessionId, probeReporter('prompt-submit', 'parallelWork')),
     ])
     parts.push(...start.lines, ...par.lines)
+    // Cursor's session-start runs here (cloud agents never fire
+    // SessionStart) — the goal line must hydrate on this path too
+    parts.push(...goalContextLines(process.cwd(), sessionId))
     settled = start.settled && par.settled
   }
   const sessionCount = parts.length
@@ -1099,11 +1106,31 @@ async function emitPostTool(input: HookInput): Promise<void> {
 const GATE_PRIORITY = ['drill', 'work', 'act', 'task']
 
 async function emitStopGate(input: HookInput): Promise<void> {
+  const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
+  // the goal reminder fires on EVERY stop — it is the keep-going nudge,
+  // exempt from the once-per-session block budget (context, never
+  // `decision: block`; spec: specs/goal/bro-6vcll.md)
+  const goal = await goalStopLines(process.cwd(), sessionId, {
+    trace: sessionTail(sessionId).raw,
+    // the judge's checkable surface — beads/gate/tree state, not just
+    // tool metadata (fail-open inside; a slow probe → undefined)
+    context: await sessionContextText({ dir: process.cwd(), sessionId }).catch(() => undefined),
+  })
   if (input.stop_hook_active === true) {
+    if (goal.length > 0) {
+      context('Stop', goal.join('\n'))
+    }
     return
   }
-  const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
+  await emitStopGateBody(sessionId, goal)
+}
+
+/** The armed-gate half of the stop event — split from emitStopGate so
+ *  the goal preamble's branches don't push the gate over the complexity
+ *  budget (SAST counts them together otherwise). */
+async function emitStopGateBody(sessionId: string, goal: string[]): Promise<void> {
   const armed = sessionId ? readArmed(sessionId) : new Set<string>()
+  const hints: string[] = [...goal]
   // Block priority is aspect order, not registry order — a beads gate
   // (registry-first) must not shadow a dirty-worktree block: abandoning
   // uncommitted work loses code, an open claim loses bookkeeping.
@@ -1117,7 +1144,6 @@ async function emitStopGate(input: HookInput): Promise<void> {
       probeReporter('stop', 'stopGate')
     )
   ).sort((a, b) => rank(a.aspect) - rank(b.aspect))
-  const hints: string[] = []
   for (const c of contributions) {
     if (!armed.has(c.aspect)) {
       if (c.passive) {
