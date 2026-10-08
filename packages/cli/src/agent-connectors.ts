@@ -1663,6 +1663,20 @@ function toInfo(dir: string, home: string | null, molStep: string, entry: AgentR
   }
 }
 
+/** Positional append is the documented contract for file-arg agent CLIs,
+ *  but a TUI-capable CLI (devin, claude) spawned without the placeholder
+ *  opens an interactive session carrying the file PATH as its prompt —
+ *  surface the likely config typo instead of silently spawning TUIs. */
+function warnNoPromptFile(command: string): void {
+  if (!command.includes('{promptFile}')) {
+    console.error(
+      `bro agents: command '${command}' has no {promptFile} placeholder — ` +
+        'the prompt file appends as a positional arg; interactive CLIs ' +
+        '(devin, claude) treat that as a TUI session, not a worker prompt'
+    )
+  }
+}
+
 /** The native backend — detached process, self-sufficient
  *  (supervisor:'none'). Agent command template resolves as
  *  agents.native.command → loop.agent; `{promptFile}` expands like the
@@ -1713,6 +1727,9 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // positional passthrough — the provider argv (a `model` value
           // could carry shell metachars) is never string-concatenated.
           const worker = spec.worker
+          if (worker?.kind !== 'argv') {
+            warnNoPromptFile(worker?.kind === 'template' ? worker.command : command)
+          }
           const args =
             worker?.kind === 'argv'
               ? [
@@ -2115,6 +2132,9 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // substitutes wholesale; an 'argv' worker becomes an exec line
         // with every element single-quoted — the provider argv never
         // re-parses into a different program.
+        if (worker?.kind !== 'argv') {
+          warnNoPromptFile(worker?.kind === 'template' ? worker.command : command)
+        }
         const runLine =
           worker === undefined
             ? expandAgentCmd(command, promptFile)
