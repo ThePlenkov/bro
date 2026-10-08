@@ -845,6 +845,57 @@ function probeReporter(event: string, probe: string): ProbeReporter {
   }
 }
 
+/** Locked bounded append shared by the trace/perf/commands journals —
+ *  append + cap-check + trim is one critical section (concurrent hooks
+ *  are separate processes); a lock timeout degrades to the plain
+ *  append, never a stall. */
+function appendJournal(path: string, line: string): void {
+  mkdirSync(dirname(path), { recursive: true })
+  const append = (): void => {
+    appendFileSync(path, line)
+    if (statSync(path).size > TRACE_JOURNAL_MAX_BYTES) {
+      const kept = readFileSync(path, 'utf8')
+        .split('\n')
+        .filter((l) => l !== '')
+        .slice(-TRACE_JOURNAL_KEEP_LINES)
+      writeFileSync(path, `${kept.join('\n')}\n`)
+    }
+  }
+  try {
+    withFileLock(`${path}.lock`, append, { waitMs: 2_000, label: 'journal lock' })
+  } catch {
+    append()
+  }
+}
+
+/** Journal one CLI invocation — `<git-common>/bro/hooks/perf/
+ *  commands.jsonl`, a shared repo-wide file (commands aren't
+ *  sessions). Called from `process.on('exit')` in the CLI entry:
+ *  synchronous, one git spawn + one locked append (~10–20ms),
+ *  fail-open — telemetry must never change an exit code. */
+export function journalCommand(cmd: string, ms: number, exitCode: number): void {
+  try {
+    if (process.env.BRO_TELEMETRY === '0') {
+      return
+    }
+    const dir = hooksStateDir()
+    if (dir === null) {
+      return
+    }
+    const row: PerfRow = {
+      ts: Date.now(),
+      event: 'cmd',
+      probe: 'run',
+      connector: cmd,
+      ms,
+      ...(exitCode !== 0 ? { failed: true as const } : {}),
+    }
+    appendJournal(join(dir, 'perf', 'commands.jsonl'), `${JSON.stringify(row)}\n`)
+  } catch {
+    // telemetry must never stall or fail the caller
+  }
+}
+
 /** Flush the buffered rows plus the event total to the session's perf
  *  journal. Called in a finally — a hook that threw still reports the
  *  time it burned. */
@@ -857,24 +908,11 @@ function flushPerf(sessionId: string, event: string, t0: number): void {
     const rows = perfBuf
     perfBuf = null
     rows.push({ ts: Date.now(), event, ms: Date.now() - t0, connector: '', probes: rows.length })
-    mkdirSync(dirname(path), { recursive: true })
     const fresh = !existsSync(path)
-    const line = `${rows.map((r) => JSON.stringify(r)).join('\n')}\n`
-    const append = (): void => {
-      appendFileSync(path, line)
-      if (statSync(path).size > TRACE_JOURNAL_MAX_BYTES) {
-        const kept = readFileSync(path, 'utf8')
-          .split('\n')
-          .filter((l) => l !== '')
-          .slice(-TRACE_JOURNAL_KEEP_LINES)
-        writeFileSync(path, `${kept.join('\n')}\n`)
-      }
-    }
-    try {
-      withFileLock(`${path}.lock`, append, { waitMs: 2_000, label: 'perf journal lock' })
-    } catch {
-      append()
-    }
+    appendJournal(
+      path,
+      `${rows.map((r) => JSON.stringify(r)).join('\n')}\n`
+    )
     if (fresh) {
       const cutoff = Date.now() - MARKER_TTL_MS
       for (const f of readdirSync(dirname(path))) {
