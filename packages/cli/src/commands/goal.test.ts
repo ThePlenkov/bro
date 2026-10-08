@@ -80,13 +80,13 @@ describe('readGoal/sessionGoal', () => {
 describe('goalStopLines', () => {
   test('no goal → no lines', async () => {
     const dir = repo()
-    assert.deepEqual(await goalStopLines(dir, 's1', 'trace'), [])
+    assert.deepEqual(await goalStopLines(dir, 's1', { trace: 'trace' }), [])
   })
 
   test('active goal without judge → plain reminder', async () => {
     const dir = repo()
     writeRaw(dir, 's1', ACTIVE)
-    const lines = await goalStopLines(dir, 's1', 'trace')
+    const lines = await goalStopLines(dir, 's1', { trace: 'trace' })
     assert.equal(lines.length, 1)
     assert.match(lines[0]!, /goal: "tests pass"/)
     assert.match(lines[0]!, /bro goal clear/)
@@ -95,15 +95,15 @@ describe('goalStopLines', () => {
   test('paused goal → resume hint; resolved goal → silence', async () => {
     const dir = repo()
     writeRaw(dir, 's1', { ...ACTIVE, status: 'paused' })
-    assert.match((await goalStopLines(dir, 's1', 't'))[0]!, /paused goal/)
+    assert.match((await goalStopLines(dir, 's1', { trace: 't' }))[0]!, /paused goal/)
     writeRaw(dir, 's1', { ...ACTIVE, status: 'achieved' })
-    assert.deepEqual(await goalStopLines(dir, 's1', 't'), [])
+    assert.deepEqual(await goalStopLines(dir, 's1', { trace: 't' }), [])
   })
 
   test('no session id → reminder only, never a judge call or a write', async () => {
     const dir = repo()
     writeRaw(dir, '_default', ACTIVE)
-    const lines = await goalStopLines(dir, '', 'trace')
+    const lines = await goalStopLines(dir, '', { trace: 'trace' })
     assert.equal(lines.length, 1)
     assert.match(lines[0]!, /goal: "tests pass"/)
   })

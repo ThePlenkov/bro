@@ -21,10 +21,12 @@ bro goal --json          # machine form on every verb
 
 Options: `--session <id>` pins the goal (default: `BRO_SESSION_ID`/
 `DEVIN_SESSION_ID`/… env); `--turns N` sets the evaluation budget
-(default `goal.maxTurns`, 25). Run on a bare shell — no session env —
-`bro goal` writes the **repo seed**: the next session in this repo
-materializes it as its own. That is how `bro goal "empty bd ready"`
-becomes the next worker's objective.
+(default `goal.maxTurns`, 25). `bro goal <condition>` run on a bare
+shell — no session env — writes the **repo seed**: the next session in
+this repo materializes it as its own. That is how
+`bro goal "empty bd ready"` becomes the next worker's objective.
+(Bare `bro goal` without a condition only shows status — it writes
+nothing.)
 
 Hosts with a **native** `/goal` (Claude Code) — use it; `bro goal`
 stays the scriptable, cross-host, worker-spawnable surface.

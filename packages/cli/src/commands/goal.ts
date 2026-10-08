@@ -191,7 +191,7 @@ export function goalStatusLine(goal: GoalRecord): string {
 export async function goalStopLines(
   dir: string,
   sessionId: string,
-  traceTail: string
+  evidence: { trace: string; context?: string }
 ): Promise<string[]> {
   const goal = sessionGoal(dir, sessionId)
   if (goal === null) {
@@ -205,8 +205,10 @@ export async function goalStopLines(
   }
   const cfg = goalConfig(dir)
   const jcfg = judgeConfig(dir).judge
-  const judged =
-    cfg.judge && jcfg.mode !== 'off' && jcfg.provider !== undefined && sessionId !== ''
+  // provider-mode AND legacy connector-mode judge configs both resolve
+  // through judgeFacade — a facade that cannot actually serve throws in
+  // decide() and lands in the fail-open reminder below
+  const judged = cfg.judge && jcfg.mode !== 'off' && sessionId !== ''
   if (!judged) {
     return [
       `goal: "${goal.condition}" — verify it before reporting done ` +
@@ -217,7 +219,11 @@ export async function goalStopLines(
     const res = await judgeFacade(dir).decide(
       {
         goal: goal.condition,
-        trace: traceTail.slice(-8000),
+        // the trace journal is metadata (tool/command/paths/ok), not
+        // output — the session context text carries the checkable
+        // surface (bd state, gate, tree) the verdict needs
+        trace: evidence.trace.slice(-8000),
+        context: evidence.context?.slice(-8000),
       },
       {
         verdict: {
@@ -239,6 +245,13 @@ export async function goalStopLines(
     const answer = res.answers.verdict as JudgeAnswer | undefined
     if (answer === undefined || answer.type !== 'choice' || res.lowConfidence.includes('verdict')) {
       throw new Error('no confident verdict')
+    }
+    // the decide() round-trip is async — re-read before writing so a
+    // `bro goal clear`/replace landing mid-eval is not clobbered by the
+    // stale snapshot's verdict
+    const fresh = sessionGoal(dir, sessionId)
+    if (fresh === null || fresh.createdAt !== goal.createdAt || fresh.status !== 'active') {
+      return []
     }
     goal.lastVerdict = answer.choice as GoalRecord['lastVerdict']
     goal.evals += 1
@@ -317,6 +330,45 @@ function sessionFromEnv(env: NodeJS.ProcessEnv): string | undefined {
 
 const CLEAR_ALIASES = new Set(['clear', 'stop', 'off', 'reset', 'none', 'cancel'])
 
+interface GoalArgs {
+  /** --session > env > undefined (repo seed target). */
+  session?: string
+  /** --turns override — undefined keeps the config default. */
+  turns?: number
+  asJson: boolean
+  /** Non-flag argv after consuming --session/--turns values. */
+  positional: string[]
+}
+
+function parseGoalArgs(argv: string[]): GoalArgs {
+  const si = argv.indexOf('--session')
+  const ti = argv.indexOf('--turns')
+  const valueOf = (i: number, flag: string): string => {
+    const v = argv[i + 1]
+    if (v === undefined || v.startsWith('--')) {
+      console.error(`error: ${flag} requires a value`)
+      process.exit(2)
+    }
+    return v
+  }
+  let turns: number | undefined
+  if (ti >= 0) {
+    const n = Number(valueOf(ti, '--turns'))
+    if (!Number.isInteger(n) || n < 0) {
+      console.error(`error: --turns expects a non-negative integer — got ${JSON.stringify(argv[ti + 1])}`)
+      process.exit(2)
+    }
+    turns = n
+  }
+  const valueIdx = new Set([si, ti].filter((i) => i >= 0).map((i) => i + 1))
+  return {
+    session: si >= 0 ? valueOf(si, '--session') : sessionFromEnv(process.env),
+    turns,
+    asJson: argv.includes('--json'),
+    positional: argv.filter((a, i) => !a.startsWith('--') && !valueIdx.has(i)),
+  }
+}
+
 function printStatus(goal: GoalRecord | null, session: string, asJson: boolean): void {
   if (asJson) {
     console.log(JSON.stringify({ session, goal }, null, 2))
@@ -325,34 +377,25 @@ function printStatus(goal: GoalRecord | null, session: string, asJson: boolean):
   console.log(goal === null ? 'no goal set' : goalStatusLine(goal))
 }
 
+function report(target: string, goal: GoalRecord, asJson: boolean, text: string): void {
+  if (asJson) {
+    console.log(JSON.stringify({ session: target, goal }, null, 2))
+    return
+  }
+  console.log(text)
+}
+
 export function runGoalCommand(argv: string[]): void {
   const dir = process.cwd()
-  const asJson = argv.includes('--json')
-  const si = argv.indexOf('--session')
-  const ti = argv.indexOf('--turns')
-  if (si >= 0 && (argv[si + 1] === undefined || argv[si + 1]!.startsWith('--'))) {
-    console.error('error: --session requires a value')
-    process.exit(2)
-  }
-  const turns =
-    ti >= 0
-      ? (() => {
-          const n = Number(argv[ti + 1])
-          if (!Number.isInteger(n) || n < 0) {
-            console.error(`error: --turns expects a non-negative integer — got ${JSON.stringify(argv[ti + 1])}`)
-            process.exit(2)
-          }
-          return n
-        })()
-      : undefined
-  const valueIdx = new Set([si, ti].filter((i) => i >= 0).map((i) => i + 1))
-  const positional = argv.filter((a, i) => !a.startsWith('--') && !valueIdx.has(i))
-  const session = si >= 0 ? argv[si + 1] : sessionFromEnv(process.env)
+  const { session, turns, asJson, positional } = parseGoalArgs(argv)
   const target = session ?? SEED
   const verb = positional[0]
+  // a session-scoped verb binds the session's materialized goal — the
+  // seed is consumed, not left behind to re-seed the next session
+  const verbGoal = () => (session === undefined ? readGoal(dir, SEED) : sessionGoal(dir, target))
 
   if (verb !== undefined && CLEAR_ALIASES.has(verb)) {
-    const goal = readGoal(dir, target)
+    const goal = verbGoal()
     if (goal === null) {
       console.log('No goal set')
       return
@@ -360,11 +403,11 @@ export function runGoalCommand(argv: string[]): void {
     goal.status = 'cleared'
     goal.resolvedAt = Date.now()
     writeGoal(dir, target, goal)
-    console.log(`Goal cleared: ${goal.condition}`)
+    report(target, goal, asJson, `Goal cleared: ${goal.condition}`)
     return
   }
   if (verb === 'pause' || verb === 'resume') {
-    const goal = session === undefined ? readGoal(dir, SEED) : sessionGoal(dir, target)
+    const goal = verbGoal()
     if (goal === null) {
       console.log('No goal set')
       return
@@ -375,11 +418,11 @@ export function runGoalCommand(argv: string[]): void {
       goal.resolvedAt = undefined
     }
     writeGoal(dir, target, goal)
-    console.log(`goal ${verb}d: "${goal.condition}"`)
+    report(target, goal, asJson, `goal ${verb}d: "${goal.condition}"`)
     return
   }
   if (verb === 'status' || verb === undefined) {
-    printStatus(session === undefined ? readGoal(dir, SEED) : sessionGoal(dir, target), target, asJson)
+    printStatus(verbGoal(), target, asJson)
     return
   }
 
@@ -388,20 +431,18 @@ export function runGoalCommand(argv: string[]): void {
     console.error('error: goal condition is capped at 4000 characters')
     process.exit(2)
   }
-  const cfg = goalConfig(dir)
   const goal: GoalRecord = {
     condition,
     status: 'active',
     createdAt: Date.now(),
     evals: 0,
-    maxTurns: turns ?? cfg.maxTurns,
+    maxTurns: turns ?? goalConfig(dir).maxTurns,
   }
   writeGoal(dir, target, goal)
-  if (asJson) {
-    console.log(JSON.stringify({ session: target, goal }, null, 2))
-    return
-  }
-  console.log(
+  report(
+    target,
+    goal,
+    asJson,
     `goal set (${target === SEED ? 'repo — binds to next session' : `session ${target.slice(0, 12)}`}): ` +
       `"${condition}"${goal.maxTurns > 0 ? ` · ${goal.maxTurns} turns` : ''}`
   )
