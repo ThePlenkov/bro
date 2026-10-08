@@ -45,7 +45,7 @@ jobs:
           url="https://github.com/ThePlenkov/bro/archive/refs/tags/$TAG.tar.gz"
           # codeload renders the archive on first request — retry through
           # the 404/5xx window right after the tag push
-          sha=$(curl -fsSL --retry 12 --retry-delay 5 --retry-all-errors "$url" | sha256sum | cut -d' ' -f1)
+          sha=$(curl --proto '=https' --tlsv1.2 -fsSL --retry 12 --retry-delay 5 --retry-all-errors "$url" | sha256sum | cut -d' ' -f1)
           [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::unexpected sha256 for $url: '$sha'"; exit 1; }
           echo "url=$url" >>"$GITHUB_OUTPUT"
           echo "sha256=$sha" >>"$GITHUB_OUTPUT"
