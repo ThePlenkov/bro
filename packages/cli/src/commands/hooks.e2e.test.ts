@@ -6,7 +6,7 @@
  *  the thing is blocked; ambient state is passive context). */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import {
   CLI_DIST,
@@ -797,6 +797,30 @@ describe('hooks e2e — guard injection', () => {
       })
       assert.equal(r.code, 0, r.stderr)
       assert.doesNotMatch(r.stdout, /bro guard/)
+    })
+  })
+
+  test('session context text caches across hook invocations (30s TTL)', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      // stop always builds the goal context — the first hook writes the
+      // cache entry under <git-common>/bro/hooks/cache/
+      const r = hook(f, 'stop', { session_id: 'ctx-1', stop_hook_active: false })
+      assert.equal(r.code, 0, r.stderr)
+      const cacheDir = join(f.markerDir, 'cache')
+      const file = readdirSync(cacheDir).find((n) => n.startsWith('ctx-'))
+      assert.ok(file, 'ctx cache entry missing after stop')
+      const path = join(cacheDir, file)
+      const first = JSON.parse(readFileSync(path, 'utf8'))
+      assert.equal(typeof first.text, 'string')
+      assert.match(first.text, /repo:/)
+
+      // a rewound entry is past TTL → the next hook recomputes + rewrites
+      writeFileSync(path, JSON.stringify({ ts: 0, text: first.text }))
+      const r2 = hook(f, 'stop', { session_id: 'ctx-1', stop_hook_active: false })
+      assert.equal(r2.code, 0, r2.stderr)
+      const second = JSON.parse(readFileSync(path, 'utf8'))
+      assert.ok(second.ts > first.ts, `expired entry not refreshed: ${second.ts}`)
     })
   })
 })
