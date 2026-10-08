@@ -282,6 +282,26 @@ describe('bro loop argv parse', () => {
     })
   })
 
+  test('a bool flag carrying =value is refused — never a silent live run', () => {
+    // --dry-run=true parses as the flag but argv.includes('--dry-run')
+    // misses it — without the strict check the queue would run live
+    const f = loopFixture([])
+    inside(f.main, f.root, () => {
+      const r = f.run(['--dry-run=true'])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /option --dry-run takes no value/)
+    })
+  })
+
+  test('a value flag fed a flag token demands a real value', () => {
+    const f = loopFixture([])
+    inside(f.main, f.root, () => {
+      const r = f.run(['--agent', '--json'])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /option --agent requires a value/)
+    })
+  })
+
   test('a quoted {promptFile} template parses clean', () => {
     const f = loopFixture([])
     inside(f.main, f.root, () => {

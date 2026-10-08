@@ -1673,8 +1673,10 @@ function toInfo(dir: string, home: string | null, molStep: string, entry: AgentR
  *  surface the likely config typo instead of silently spawning TUIs. */
 function warnNoPromptFile(command: string): void {
   if (!command.includes('{promptFile}')) {
+    // binary name only — the template may carry inline credentials
+    const bin = command.split(/\s+/, 1)[0]
     console.error(
-      `bro agents: command '${command}' has no {promptFile} placeholder — ` +
+      `bro agents: command '${bin}' has no {promptFile} placeholder — ` +
         'the prompt file appends as a positional arg; interactive CLIs ' +
         '(devin, claude) treat that as a TUI session, not a worker prompt'
     )

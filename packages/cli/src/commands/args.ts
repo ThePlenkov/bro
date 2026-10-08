@@ -96,6 +96,13 @@ function flagTokenKind(
     return 'value'
   }
   if (opts?.boolFlags?.has(name) === true) {
+    // `--dry-run=true` parses as the bool flag yet downstream
+    // `argv.includes('--dry-run')` checks miss it — a silent live run.
+    // strict mode refuses the inline value outright
+    if (opts?.strict === true && arg !== name) {
+      console.error(`error: option ${name} takes no value`)
+      process.exit(2)
+    }
     return 'bool'
   }
   if (opts?.strict === true) {
@@ -137,6 +144,14 @@ export function positionals(
     // `--name value` — the value is the next token; `--name=value` is
     // self-contained
     if (kind === 'value' && arg === arg.split('=', 1)[0]) {
+      const next = argv[i + 1]
+      // strict: `--agent --json` must not swallow `--json` as the
+      // value — a missing or flag-looking value is a usage error,
+      // never a silent misconfig
+      if (opts?.strict === true && (next === undefined || next.startsWith('--'))) {
+        console.error(`error: option ${arg} requires a value`)
+        process.exit(2)
+      }
       i += 1
     }
   }

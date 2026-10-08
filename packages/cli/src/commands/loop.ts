@@ -707,8 +707,10 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   // without it opens an interactive session per bead (the file path
   // lands positionally = the prompt). Warn loudly, don't refuse.
   if (!agent.includes('{promptFile}')) {
+    // binary name only — the template may carry inline credentials
+    const agentBin = agent.split(/\s+/, 1)[0]
     console.error(
-      `bro loop: agent template has no {promptFile} — "${agent}". ` +
+      `bro loop: agent template has no {promptFile} — "${agentBin}". ` +
         'The prompt file appends as a positional arg; interactive CLIs ' +
         '(devin, claude) treat that as a TUI session, not a worker prompt. ' +
         'Intended for env-reading agents (BRO_PROMPT_FILE) only.'
