@@ -56,6 +56,20 @@ requester's `accept`/`reject` — is written to that same store
 (`bd -C <anchor>`), resolved through the peer binding. Readers point-
 check with `bro mesh wait <thread>`; nothing sleeps.
 
+**Reading the anchor back rewrites one `meshThread` rule.**
+`admitPeerRecord` assumes a store's records are authored by its owner
+— true under pull transports, false here: the request and both
+requester verdicts carry a `from` that isn't the binding's rig, and
+the strict check hides exactly the records `bro mesh wait` needs
+(no `request` anchor → lifecycle verbs can't resolve the thread at
+all). On `local` peers the binding attests the *store*, not the
+author: a record whose `from` is the binding's rig **or the reader's
+own rig** is admitted with provenance = `from` — a self-authored
+record in a bound local store is the delivery working, not
+impersonation — while any other `from` still drops and flags. Pull
+transports keep the strict check: a foreign-authored record inside a
+replica cannot be legitimate.
+
 Sovereignty: same-machine checkouts are a shared trust domain — the
 writer provably has filesystem access already. The drop writes
 envelope beads only, never code, branches, or config; across
@@ -112,6 +126,7 @@ packages/cli/src/commands/request.ts    bro request
 packages/mesh/src/request.ts            resolve + deliver + ensure-binding
 packages/mesh/src/identity.ts           selfRig hoisted in — shared rig resolver
 packages/mesh/src/inbox.ts              own-store scan (unbound flag)
+packages/mesh/src/thread.ts             local-anchor admit rule
 packages/cli/src/commands/mesh.ts       lifecycle writes → anchor store
 AGENTS.md                               policy bullet
 ```
@@ -130,12 +145,17 @@ AGENTS.md                               policy bullet
 - [ ] anchor-store writes for `claim`/`done`/`accept`/`reject` —
       resolve the thread's anchor (own store today; a `local` peer's
       checkout when the thread lives there) instead of always `dir`
+- [ ] `packages/mesh/src/thread.ts` — `admitPeerRecord` widened for
+      `local` peers: `from` ∈ {binding rig, selfRig} admits with
+      provenance = `from`; any other `from` still drops and flags
 - [ ] `bro mesh inbox` own-store scan + `unbound` provenance flag
 - [ ] AGENTS.md Conventions bullet (verbatim text above)
 - [ ] tests: resolution matrix (alias / uri / path / basename /
       ambiguous / unresolvable), drop shape (labels, thread, dep),
       inbox own-scan + unbound flag, anchor-write for each verb,
-      e2e two-checkouts: request → `bd ready` in target → claim →
+      requester-side `mesh wait` on an anchored thread (request +
+      own verdicts visible, foreign `from` dropped), e2e
+      two-checkouts: request → `bd ready` in target → claim →
       done → `bro mesh wait` → accept
 
 ## Alternatives
