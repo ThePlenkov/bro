@@ -409,6 +409,7 @@ function connectorContract(b: BackendCase): void {
   test('the devin session quota refuses a spawn at maxSessions — nothing half-lands', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }])
     const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
+    const reservationsDir = mkdtempSync(join(tmpdir(), 'bro-devin-resv-'))
     // one live devin session (this process) fills the cap of 1
     writeFileSync(join(lockDir, 'me.lock'), String(process.pid))
     const env: AgentConnectorEnv = {
@@ -419,7 +420,7 @@ function connectorContract(b: BackendCase): void {
         // devin session, so the quota applies
         native: { ...f.env.agents['native'], sessionKind: 'devin' },
         tmux: { ...f.env.agents['tmux'], sessionKind: 'devin' },
-        devin: { maxSessions: 1, lockDir },
+        devin: { maxSessions: 1, lockDir, reservationsDir },
       },
     }
     try {
@@ -433,6 +434,7 @@ function connectorContract(b: BackendCase): void {
       assert.equal(readAgentRegistry(f.main)['fx-1'], undefined)
     } finally {
       rmSync(lockDir, { recursive: true, force: true })
+      rmSync(reservationsDir, { recursive: true, force: true })
       cleanup(f)
     }
   })
