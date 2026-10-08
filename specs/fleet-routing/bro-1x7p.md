@@ -122,12 +122,14 @@ demotion; `shadow` accepts prose — the verdict journals with its
 ## Provider walls — derived, not stored
 
 A provider's wall state is **computed from `agents.json`**, not kept
-in a new store: scan the registry for entries whose `provider` is P,
-take the newest classified death — `rate_limited` walls P until its
-`resetAt` (indefinitely without one), `quota` walls P until every
-quota-caused entry on P is `stopped` (`bro agents down` is the manual
-clear, same as today). `crash`/`auth` never wall a provider — they
-say something about the worker, not the service.
+in a new store: scan the registry for death records attributed to P —
+an entry's live fields plus each `attempts` record a re-dispatch left
+behind (below) — and take the newest classified death: `rate_limited`
+walls P until its `resetAt` (indefinitely without one), `quota` walls
+P until every quota-caused record on P is `stopped` (`bro agents down`
+is the manual clear — its `stopped` stamp covers the entry and its
+`attempts` alike, same as today). `crash`/`auth` never wall a
+provider — they say something about the worker, not the service.
 
 `bro fleet` renders a walled provider as `walled — <cause>[ til
 <resetAt>]`; `bro watch` surfaces it in attention. Derivation has one
@@ -146,7 +148,12 @@ recorded `provider`) to the first un-walled entry:
 
 - un-walled entry found + policy `fallthrough` → spawn there; the
   registry patch records the NEW `provider`/`model` — provenance says
-  what ran, not what was preferred.
+  what ran, not what was preferred. One row serves one step, so any
+  respawn patch that supersedes a classified death first appends the
+  outgoing attempt's fields (`provider`, `model`, `cause`, `resetAt`,
+  `spawnedAt`, `stopped`) verbatim to the entry's `attempts` list —
+  otherwise the overwrite erases the very wall the walk routed
+  around, and every later step retries provider A.
 - policy `park`, or every chain entry walled → the step stays
   `blocked` against its current provider; `resetAt` passing (or
   `agents down`) is the lift. A step with an exhausted chain parks on
@@ -224,9 +231,10 @@ for explicit parallel fan-out:
   error, never a fallthrough.
 - **Provenance follows dispatch.** The registry records the provider
   that RAN the step; a chain walk that fell to `kilo-free` says so.
-- **Walls are honest and clearable.** Derived from recorded deaths,
-  bounded by `resetAt` when the provider reports one, cleared by
-  `bro agents down` when it can't.
+- **Walls are honest and clearable.** Derived from recorded deaths —
+  superseded ones ride `attempts`, so a fallthrough never erases the
+  wall it routed around — bounded by `resetAt` when the provider
+  reports one, cleared by `bro agents down` when it can't.
 - **Watchers are finite.** Exit condition or nothing — telemetry loops
   are not supervision.
 - **Parked ≠ lost.** An exhausted chain surfaces as a parked verdict
@@ -237,7 +245,11 @@ for explicit parallel fan-out:
 ```text
 packages/core/src/routing.ts          RoutingTable types, class → chain
                                       resolution, provider-wall derivation
-                                      (scan agents.json), park/fall verdict
+                                      (scan agents.json — live fields and
+                                      attempts), park/fall verdict
+packages/core/src/agents.ts           the entry's `attempts` — superseded
+                                      death records walls still derive
+                                      from; `bro agents down` stamps them
 packages/core/src/config.ts           fleet.routing + fleet.router sections
 packages/cli/src/agent-connectors.ts  provider-scoped respawn block; chain
                                       walk in prepareSpawn/spawnStepAgent
@@ -255,7 +267,8 @@ skills/{convoy,next}/                 continuation + finite-watcher text
 2. `fleet.routing` config + class resolution + provider-wall
    derivation; `bro fleet`/`bro watch` render walls.
 3. Re-dispatch — provider-scoped blocks + the chain walk in
-   `prepareSpawn`; priority park/fall policy.
+   `prepareSpawn` (with `attempts` preservation); priority park/fall
+   policy.
 4. Resume — `acp` `session/load` on `acpSessionId`, `cli` rehydrated
    respawn.
 5. Shell-unit step kind (`run`) in the convoy formula; watcher-rule
