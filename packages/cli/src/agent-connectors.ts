@@ -418,22 +418,7 @@ export async function applyFleetRouter(
     throw err
   }
   if (router.mode === 'enforce') {
-    let grade: 'typed' | 'prose'
-    try {
-      grade = providerCallGrade(entry)
-    } catch (err) {
-      throw new SpawnError(
-        `fleet.router.provider "${router.provider}" — ${err instanceof Error ? err.message : String(err)}`,
-        'config'
-      )
-    }
-    if (grade !== 'typed') {
-      throw new SpawnError(
-        `fleet.router.provider "${router.provider}" resolves to a prose-grade call surface — ` +
-          `mode 'enforce' requires a typed judgment (a systemone-wire api model or a jev-family acp pin)`,
-        'config'
-      )
-    }
+    requireTypedRouterGrade(router.provider, entry)
   }
   // the judge + providers stack is heavy (the acp binding pulls the
   // SDK) — lazy-import it only when a router actually fires, the same
@@ -470,6 +455,28 @@ export async function applyFleetRouter(
     throw err
   }
   return pick === undefined ? routed : resolveStepClass(routing, providers, { class: pick, priority: info.priority })
+}
+
+/** enforce's typed-grade gate — a prose-grade call surface under
+ *  'enforce' is a config error naming provider + mode, never a silent
+ *  demotion ('shadow' accepts prose: it journals, picks nothing). */
+function requireTypedRouterGrade(provider: string, entry: ProviderEntry): void {
+  let grade: 'typed' | 'prose'
+  try {
+    grade = providerCallGrade(entry)
+  } catch (err) {
+    throw new SpawnError(
+      `fleet.router.provider "${provider}" — ${err instanceof Error ? err.message : String(err)}`,
+      'config'
+    )
+  }
+  if (grade !== 'typed') {
+    throw new SpawnError(
+      `fleet.router.provider "${provider}" resolves to a prose-grade call surface — ` +
+        `mode 'enforce' requires a typed judgment (a systemone-wire api model or a jev-family acp pin)`,
+      'config'
+    )
+  }
 }
 
 /** Pick the serving backend: explicit --connector → connectors.agents →
