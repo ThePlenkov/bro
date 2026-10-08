@@ -73,8 +73,12 @@ describe('routeClassQuestions', () => {
     assert.equal(q.type, 'choice')
     assert.deepEqual(Object.keys(q.criteria).sort(), ['default', 'sweep'])
     // the criterion describes the chain the lane lands on
-    assert.match(q.criteria['sweep']!, /kilo-free\(auto\/free\)/)
-    assert.match(q.criteria['default']!, /devin → kilo-free/)
+    const sweep = q.criteria['sweep']!
+    assert.ok(typeof sweep === 'string')
+    assert.match(sweep, /kilo-free\(auto\/free\)/)
+    const dflt = q.criteria['default']!
+    assert.ok(typeof dflt === 'string')
+    assert.match(dflt, /devin → kilo-free/)
   })
 
   test('a "__proto__" class lands as an own key, never a prototype write', () => {
@@ -82,7 +86,9 @@ describe('routeClassQuestions', () => {
     const qs = routeClassQuestions(t)
     const criteria = (qs['class'] as JudgeQuestion & { type: 'choice' }).criteria
     assert.ok(Object.hasOwn(criteria, '__proto__'))
-    assert.match(criteria['__proto__']!, /devin/)
+    const proto = criteria['__proto__']!
+    assert.ok(typeof proto === 'string')
+    assert.match(proto, /devin/)
   })
 })
 
