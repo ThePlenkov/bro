@@ -1,9 +1,13 @@
 name: Homebrew Tap
 
 # Bump Formula/bro.rb in ThePlenkov/homebrew-brew after a release tag.
-# release-tag.yml dispatches this on main — a GITHUB_TOKEN tag push does
-# not fire the push trigger below (same reasoning as publish.yml: the
-# latest workflow file runs, the tag only selects the payload).
+# The formula installs the published @broject/bro tarball, so the bump is
+# only correct once publish.yml has pushed the version to npm — the
+# resolve step polls the registry, which IS the ordering: a human tag
+# push fires this workflow in parallel with publish.yml, and
+# release-tag.yml dispatches it right after the publish dispatch (same
+# reasoning as publish.yml: the latest workflow file runs, the tag only
+# selects the payload).
 #
 # The tap is a separate repo, so GITHUB_TOKEN can't write it — every step
 # is gated on secrets.HOMEBREW_TAP_TOKEN. Until the secret exists the job
@@ -35,16 +39,25 @@ jobs:
         run: |
           echo "::warning::HOMEBREW_TAP_TOKEN is not set — bump Formula/bro.rb in ThePlenkov/homebrew-brew by hand (url + sha256 for $TAG)"
 
-      - name: Tarball sha256
+      - name: Resolve npm tarball (waits out publish.yml)
         if: env.TAP_TOKEN != ''
         id: tar
         run: |
           # workflow_dispatch input is free text — pin it to a tag charset so
           # no shell metacharacters can travel downstream with it
           [[ "$TAG" =~ ^v[0-9A-Za-z.+-]+$ ]] || { echo "::error::TAG '$TAG' does not look like a v* tag"; exit 1; }
-          url="https://github.com/ThePlenkov/bro/archive/refs/tags/$TAG.tar.gz"
-          # codeload renders the archive on first request — retry through
-          # the 404/5xx window right after the tag push
+          pkg="@broject/bro"
+          # publish.yml runs npm ci + build + test + per-package publishes
+          # first — poll until the version resolves (~30 min budget).
+          url=""
+          for i in $(seq 1 90); do
+            url=$(npm view "$pkg@${TAG#v}" dist.tarball 2>/dev/null || true)
+            [ -n "$url" ] && break
+            sleep 20
+          done
+          [ -n "$url" ] || { echo "::error::$pkg@${TAG#v} not on npm after ~30min — did publish.yml fail?"; exit 1; }
+          [[ "$url" =~ ^https://registry\.npmjs\.org/@broject/bro/-/bro-.+\.tgz$ ]] \
+            || { echo "::error::unexpected tarball url: '$url'"; exit 1; }
           sha=$(curl --proto '=https' --tlsv1.2 -fsSL --retry 12 --retry-delay 5 --retry-all-errors "$url" | sha256sum | cut -d' ' -f1)
           [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::unexpected sha256 for $url: '$sha'"; exit 1; }
           echo "url=$url" >>"$GITHUB_OUTPUT"
@@ -68,23 +81,34 @@ jobs:
           f=Formula/bro.rb
           [ -f "$f" ] || { echo "::error::$f not found in ThePlenkov/homebrew-brew — layout changed?"; exit 1; }
           # refuse a downgrade: a delayed run for an older tag must not revert
-          # a formula that already moved to a newer release
-          cur=$(sed -nE 's|.*refs/tags/(v[^"]+)\.tar\.gz.*|\1|p' "$f" | head -1)
-          if [ -n "$cur" ] && [ "$cur" != "$TAG" ] &&
-             [ "$(printf '%s\n%s\n' "${cur#v}" "${TAG#v}" | sort -V | head -1)" = "${TAG#v}" ]; then
-            echo "::error::$f already at $cur, newer than $TAG — refusing downgrade"
+          # a formula that already moved to a newer release. Version parses
+          # from either url shape — npm pack (.../-/bro-<v>.tgz) or the old
+          # codeload source (.../tags/v<v>.tar.gz).
+          new="${TAG#v}"
+          cur_url=$(sed -nE 's|^  url "([^"]+)".*|\1|p' "$f" | head -1)
+          cur=""
+          case "$cur_url" in
+            */-/bro-*.tgz) cur=${cur_url##*/bro-}; cur=${cur%.tgz} ;;
+            */v*.tar.gz)   cur=${cur_url##*/v};    cur=${cur%.tar.gz} ;;
+          esac
+          if [ -n "$cur" ] && [ "$cur" != "$new" ] &&
+             [ "$(printf '%s\n%s\n' "$cur" "$new" | sort -V | head -1)" = "$new" ]; then
+            echo "::error::$f already at $cur, newer than $new — refusing downgrade"
             exit 1
           fi
+          # whole-line replaces accept either url shape (mid-migration)
           sed -i -E \
-            -e "s|url \"https://github\.com/ThePlenkov/bro/archive/refs/tags/v[^\"]*\"|url \"$TAR_URL\"|" \
-            -e "s|sha256 \"[0-9a-f]{64}\"|sha256 \"$TAR_SHA\"|" \
+            -e "s|^  url \"[^\"]*\"|  url \"$TAR_URL\"|" \
+            -e "s|^  sha256 \"[0-9a-f]{64}\"|  sha256 \"$TAR_SHA\"|" \
             "$f"
           if git diff --quiet "$f"; then
-            # unchanged + no $TAG reference = sed no-op'd on a drifted format
-            grep -qF "refs/tags/$TAG.tar.gz" "$f" || { echo "::error::sed no-op and $f does not reference $TAG — format drifted?"; exit 1; }
+            # unchanged + no $TAR_URL reference = sed no-op'd on a drifted format
+            grep -qF "url \"$TAR_URL\"" "$f" || { echo "::error::sed no-op and $f does not reference $TAR_URL — format drifted?"; exit 1; }
             echo "formula already at $TAG — nothing to push"
             exit 0
           fi
+          grep -qF "url \"$TAR_URL\"" "$f" && grep -qF "sha256 \"$TAR_SHA\"" "$f" \
+            || { echo "::error::post-sed mismatch in $f — format drifted?"; exit 1; }
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "bro ${TAG#v}"
