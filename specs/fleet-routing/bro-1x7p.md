@@ -191,9 +191,17 @@ needs it" — this is that consumer.
 ## Shell-native workers — the formula contract
 
 Convoy step kinds gain explicit machinery: a step declares `agent`
-(provider-routed worker — the default today) or `run` (a shell unit —
-literal `sh -c` command, pinned `pid`/`log`/`exit` in `bro/agents/`
-through the same registry). The orchestrator point-checks both through
+(provider-routed worker — the default today) or `run` (a shell unit).
+A `run` step's payload is a `command` key on the step declaration —
+the literal `sh -c` line, required iff `type = "run"` and rejected on
+any other type. The inline-plan schema admits it (`ConvoyStepDecl` /
+`STEP_KEYS` gain the key — today's parser rejects unknown step keys,
+so without it no valid plan can supply the command); the pour
+preserves it through bd `Step.metadata` → the issue's
+`metadata.command`, and `run` joins the `types.custom` registration so
+the kind never flattens to `task`. The spawned unit is a pinned
+detached shell — `pid`/`log`/`exit` in `bro/agents/` through the same
+registry. The orchestrator point-checks both through
 `bro agents status`/`bro fleet` — a `run` step is a first-class
 watchable unit, not an invisible nested session. **No opaque subagent
 sessions unless a step explicitly requests one**: the molecule that
@@ -267,7 +275,9 @@ packages/cli/src/agent-connectors.ts  provider-scoped respawn block; chain
 packages/cli/src/commands/agents.ts   --class flag; StepSpawnRequest.class
 packages/cli/src/commands/fleet.ts    provider wall rendering
 packages/providers/src/acp-worker.ts  session/load resume path
-packages/convoy/                      step kind 'run' — shell-unit contract
+packages/convoy/                      step kind 'run' — `command` on the step
+                                      decl, carried through the pour on issue
+                                      metadata; shell-unit contract
 packages/cli/src/commands/convoy.ts   convoy done → mailbox emission
 skills/{convoy,next}/                 continuation + finite-watcher text
 ```
