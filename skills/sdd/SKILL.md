@@ -25,7 +25,8 @@ while a session's own claim lacks a spec.
   spec).
 - or a `spec:` link in the bead description (external doc).
 
-Exempt: `issue_type: chore` and beads labeled `trivial` or `debt` —
+Exempt: `issue_type: chore` or `molecule` (ship-beads are convoy
+scaffolding, not design work) and beads labeled `trivial` or `debt` —
 SDD measures design mass, not bookkeeping, and a harvested review
 finding already carries its own evidence.
 

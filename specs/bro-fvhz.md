@@ -29,7 +29,7 @@ Default: **closed** beads whose `specState` is `spec` or `link` —
 drift audits shipped specs. Open/in_progress beads are mid-change;
 their spec lagging the code is expected, not a finding. `--all` widens
 to every spec'd bead regardless of status; explicit ids scan exactly
-those beads. Exempt beads (chore / `trivial` / `debt` labels) never
+those beads. Exempt beads (chore / molecule types, `trivial` / `debt` labels) never
 enter the set — same rule as `specState`.
 
 ### Scope — bead → repo path set

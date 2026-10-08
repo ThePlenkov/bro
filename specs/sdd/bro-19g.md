@@ -18,7 +18,8 @@ Spec = an artifact that survives code review, not a bead field:
 - `specs/<bead-id>.md` in the repo (non-empty), or
 - a `spec:` link in the bead description (external doc).
 
-Exempt by nature: beads typed `chore` or labeled `trivial` (no design
+Exempt by nature: beads typed `chore` or `molecule` (ship-beads are
+convoy scaffolding, not design work) or labeled `trivial` (no design
 mass) or `debt` (a harvested finding carries its own evidence) — the
 gate measures design, not bookkeeping.
 

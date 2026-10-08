@@ -471,7 +471,7 @@ export const nativeSpecConnector: Connector = {
       remedy: (id) =>
         `write ${specDir}/${id}.md (\`bro spec new ${id}\`), add a spec: link, or label 'trivial'`,
       policy: () =>
-        `spec before code — ${specDir}/<id>.md or <id>/ dir, or a spec: link in the bead (exempt: chore / 'trivial' / 'debt')`,
+        `spec before code — ${specDir}/<id>.md or <id>/ dir, or a spec: link in the bead (exempt: chore / molecule / 'trivial' / 'debt')`,
       // the tool's explicit scope only — `scope:` frontmatter on the
       // resolved spec file; the commit-refs fallback is the drift
       // engine's, not the connector's
@@ -601,7 +601,7 @@ export const agentSpecConnector: Connector = {
       remedy: () =>
         'write the design doc first, then add `spec: <path-or-url>` to the bead description',
       policy: () =>
-        'spec before code — write the design down first and link it via spec: in the bead (exempt: chore / \'trivial\' / \'debt\')',
+        'spec before code — write the design down first and link it via spec: in the bead (exempt: chore / molecule / \'trivial\' / \'debt\')',
       tree: () => [],
     }) satisfies SpecStore,
 }

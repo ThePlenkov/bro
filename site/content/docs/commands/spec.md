@@ -17,9 +17,9 @@ A directory spec also counts when
 files and index-bearing subdirectories form its tree. A `spec:` link in
 the bead description is an external spec.
 
-Chores and beads labeled `trivial` or `debt` are exempt. SDD measures
-design mass, not bookkeeping, and a harvested review finding already
-carries evidence.
+Chores, molecule ship-beads, and beads labeled `trivial` or `debt` are
+exempt. SDD measures design mass, not bookkeeping, and a harvested
+review finding already carries evidence.
 
 ## Commands
 

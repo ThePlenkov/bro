@@ -5,8 +5,9 @@
  * (native: <dir>/<id>.md or a <dir>/<id>/ dir whose spec.md/README.md
  * is the index — nesting IS the spec tree; speckit: a linked
  * specs/<NNN>-<slug>/spec.md; openspec: changes/<id>/proposal.md)
- * or its description carries a `spec:` link. Chores and `trivial`-
- * labeled beads are exempt — SDD measures design mass, not bookkeeping.
+ * or its description carries a `spec:` link. Chores, molecule
+ * ship-beads, and `trivial`-/`debt`-labeled beads are exempt — SDD
+ * measures design mass, not bookkeeping.
  *
  *   bro spec check [id…]   coverage over in_progress beads (exit 1 on
  *                          missing — CI-able); --all includes open
@@ -52,6 +53,11 @@ import { flag, positionals } from './args.ts'
 
 export type SpecState = 'spec' | 'link' | 'exempt' | 'missing'
 
+/** Issue types that exempt a bead from the spec rule — `chore` is
+ *  bookkeeping, `molecule` roots are convoy scaffolding (ship-beads
+ *  claimed by `bro convoy run`), not design work. */
+const EXEMPT_TYPES = ['chore', 'molecule']
+
 /** Labels that exempt a bead from the spec rule — `trivial` needs no
  *  design mass, `debt` rows are harvested findings that already carry
  *  their own evidence (file/line/severity). */
@@ -59,7 +65,7 @@ const EXEMPT_LABELS = ['trivial', 'debt']
 
 export function specState(row: TaskRow, spec: SpecStore): SpecState {
   if (
-    row.issue_type === 'chore' ||
+    EXEMPT_TYPES.includes(row.issue_type ?? '') ||
     (row.labels ?? []).some((l) => EXEMPT_LABELS.includes(l))
   ) {
     return 'exempt'
@@ -302,7 +308,7 @@ function cmdDrift(dir: string, ids: string[], opts: { all: boolean; json: boolea
     process.exit(2)
   }
   // the audit set is spec'd beads — spec|link states; exempt (chore /
-  // trivial / debt) and unspec'd beads never enter it. An explicit id
+  // molecule / trivial / debt) and unspec'd beads never enter it. An explicit id
   // always yields a row — dropping it would report a clean pass for an
   // audit that never ran (driftRow answers 'no local spec file')
   const audited = rows.filter((r) => {
