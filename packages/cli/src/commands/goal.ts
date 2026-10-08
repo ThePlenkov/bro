@@ -191,7 +191,7 @@ export function goalStatusLine(goal: GoalRecord): string {
 export async function goalStopLines(
   dir: string,
   sessionId: string,
-  evidence: { trace: string; context?: string }
+  evidence: { trace: string; context?: string | Promise<string | undefined> }
 ): Promise<string[]> {
   const goal = sessionGoal(dir, sessionId)
   if (goal === null) {
@@ -223,7 +223,7 @@ export async function goalStopLines(
         // output — the session context text carries the checkable
         // surface (bd state, gate, tree) the verdict needs
         trace: evidence.trace.slice(-8000),
-        context: evidence.context?.slice(-8000),
+        context: (await evidence.context)?.slice(-8000),
       },
       {
         verdict: {

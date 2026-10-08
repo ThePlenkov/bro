@@ -43,12 +43,14 @@
  * rehydrates once; preCompact clears that mark.
  */
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -901,6 +903,62 @@ function sessionTail(sessionId: string): { entries: ReturnType<typeof readTraceT
   return path === null ? { entries: [], raw: '' } : readTraceTail(path)
 }
 
+/** `sessionContextText` costs a cold bd/dolt handshake plus git spawns —
+ *  1.5–2s built fresh — but carries only advisory claims/branch state that
+ *  barely moves inside a turn. A 30s per-(dir,session) file cache
+ *  collapses repeat builds across hook invocations (session-start's guard
+ *  mctx → the next stop's goal context read the same answers). Never fed
+ *  to gate contributions — the stop gate always probes live. */
+const CONTEXT_CACHE_TTL_MS = 30_000
+async function sessionContextTextCached(dir: string, sessionId: string): Promise<string> {
+  const base = hooksStateDir()
+  const file =
+    base === null
+      ? null
+      : join(
+          base,
+          'cache',
+          `ctx-${createHash('sha1').update(`${dir}|${sessionId}`).digest('hex').slice(0, 16)}.json`
+        )
+  if (file !== null) {
+    try {
+      const row = JSON.parse(readFileSync(file, 'utf8')) as { ts?: number; text?: string }
+      if (
+        typeof row.ts === 'number' &&
+        typeof row.text === 'string' &&
+        Date.now() - row.ts < CONTEXT_CACHE_TTL_MS
+      ) {
+        return row.text
+      }
+    } catch {
+      // torn or absent cache — recompute
+    }
+  }
+  const text = await sessionContextText({ dir, sessionId })
+  if (file !== null) {
+    try {
+      mkdirSync(dirname(file), { recursive: true })
+      // tmp+rename — a torn write never poisons a later reader
+      const tmp = `${file}.${process.pid}.tmp`
+      writeFileSync(tmp, JSON.stringify({ ts: Date.now(), text }))
+      renameSync(tmp, file)
+      // opportunistic sweep — past-TTL entries are garbage anyway
+      for (const f of readdirSync(dirname(file))) {
+        try {
+          if (f.startsWith('ctx-') && statSync(join(dirname(file), f)).mtimeMs < Date.now() - CONTEXT_CACHE_TTL_MS) {
+            rmSync(join(dirname(file), f))
+          }
+        } catch {
+          // sweep is best-effort
+        }
+      }
+    } catch {
+      // caching is best-effort — a failed write degrades to recompute
+    }
+  }
+  return text
+}
+
 /** One guard-engine call per emit path (spec: bro-nkn6). Declarations
  *  resolve here — connectors only contribute `guards()`, evaluation is
  *  centralized. Fail-open like every probe: a wedged engine emits
@@ -954,9 +1012,22 @@ async function emitSessionContext(
   // sessionStart probes collect from every connector — beads reports
   // the ready queue, drill the open frame, act the PR gate + merge slot,
   // debt the open findings; a jira connector would add assigned issues
-  const [start, par] = await Promise.all([
+  // probes and the guard sweep are independent reads — overlapping them
+  // keeps the hook total at the slowest single probe, not their sum
+  // (spec: specs/bro-wc0i6.md)
+  const [start, par, guards] = await Promise.all([
     sessionStartProbe({ dir: process.cwd(), sessionId }, probeReporter(cliEvent, 'sessionStart')),
     parallelLines(sessionId, probeReporter(cliEvent, 'parallelWork')),
+    guardLines('session-start', sessionId, async () => {
+      const dir = process.cwd()
+      const hooks = hooksDir(dir)
+      const prev = hooks !== null && sessionId !== '' ? previousTraceFile(hooks, sessionId) : null
+      const tail = prev !== null ? readTraceTail(prev) : { entries: [], raw: '' }
+      return {
+        text: `${await sessionContextTextCached(dir, sessionId)}\n${tail.raw}`,
+        trace: relativize(dir, tail.entries),
+      }
+    }),
   ])
   const parts = [...start.lines, ...par.lines]
   // the session's active goal rehydrates like every other durable state —
@@ -965,18 +1036,7 @@ async function emitSessionContext(
   // 'session-start' covers all three rehydrate events; the match
   // haystack is the same session-context text + previous-session trace
   // tail the learn connector assembles
-  parts.push(
-    ...(await guardLines('session-start', sessionId, async () => {
-      const dir = process.cwd()
-      const hooks = hooksDir(dir)
-      const prev = hooks !== null && sessionId !== '' ? previousTraceFile(hooks, sessionId) : null
-      const tail = prev !== null ? readTraceTail(prev) : { entries: [], raw: '' }
-      return {
-        text: `${await sessionContextText({ dir, sessionId })}\n${tail.raw}`,
-        trace: relativize(dir, tail.entries),
-      }
-    }))
-  )
+  parts.push(...guards)
   if (parts.length > 0) {
     context(event, `bro state — resume from here:\n${parts.join('\n')}`)
   }
@@ -993,14 +1053,33 @@ async function emitPromptContext(input: HookInput): Promise<void> {
   // after the probes return — a throw retries next prompt.
   const hydrate = cursorClient && sessionId && !skillHinted(sessionId, CURSOR_HYDRATED_SKILL)
   let settled = true
-  if (hydrate) {
-    const [start, par] = await Promise.all([
-      sessionStartProbe(
-        { dir: process.cwd(), sessionId },
-        probeReporter('prompt-submit', 'sessionStart')
-      ),
-      parallelLines(sessionId, probeReporter('prompt-submit', 'parallelWork')),
-    ])
+  // hydrate probes, prompt probes, and the guard sweep are independent
+  // reads — one parallel flight, emission order unchanged below
+  const [hydratePair, promptLines, guards] = await Promise.all([
+    hydrate
+      ? Promise.all([
+          sessionStartProbe(
+            { dir: process.cwd(), sessionId },
+            probeReporter('prompt-submit', 'sessionStart')
+          ),
+          parallelLines(sessionId, probeReporter('prompt-submit', 'parallelWork')),
+        ])
+      : undefined,
+    promptContextLines(
+      { dir: process.cwd(), sessionId },
+      prompt,
+      probeReporter('prompt-submit', 'promptSubmit')
+    ),
+    // guards on prompt-submit: match.terms sees the raw prompt, trace
+    // keys see this session's tail, state sees the live repo
+    guardLines('prompt-submit', sessionId, async () => {
+      const dir = process.cwd()
+      const tail = sessionTail(sessionId)
+      return { text: prompt, trace: relativize(dir, tail.entries) }
+    }),
+  ])
+  if (hydratePair) {
+    const [start, par] = hydratePair
     parts.push(...start.lines, ...par.lines)
     // Cursor's session-start runs here (cloud agents never fire
     // SessionStart) — the goal line must hydrate on this path too
@@ -1008,22 +1087,7 @@ async function emitPromptContext(input: HookInput): Promise<void> {
     settled = start.settled && par.settled
   }
   const sessionCount = parts.length
-  parts.push(
-    ...(await promptContextLines(
-      { dir: process.cwd(), sessionId },
-      prompt,
-      probeReporter('prompt-submit', 'promptSubmit')
-    ))
-  )
-  // guards on prompt-submit: match.terms sees the raw prompt, trace
-  // keys see this session's tail, state sees the live repo
-  parts.push(
-    ...(await guardLines('prompt-submit', sessionId, async () => {
-      const dir = process.cwd()
-      const tail = sessionTail(sessionId)
-      return { text: prompt, trace: relativize(dir, tail.entries) }
-    }))
-  )
+  parts.push(...promptLines, ...guards)
   // a timed-out or thrown probe masquerades as "no state" — mark only
   // when every probe answered, else the marker suppresses a retry for
   // the marker's whole TTL
@@ -1075,22 +1139,22 @@ async function emitPostTool(input: HookInput): Promise<void> {
     }
   }
   // connector postTool probes run on every event — a failed exec is
-  // still a delivery tick for a drained mailbox (notify)
-  lines.push(
-    ...(await postToolLines(
+  // still a delivery tick for a drained mailbox (notify). Guards read
+  // the same journaled tail — one parallel flight with the probes
+  const [postLines, guards] = await Promise.all([
+    postToolLines(
       { dir: process.cwd(), sessionId },
       probeReporter('post-tool', 'postTool')
-    ))
-  )
-  // guards on post-tool: match sees the journaled trace tail (this
-  // landing included — journalTrace ran first), state sees live repo
-  lines.push(
-    ...(await guardLines('post-tool', sessionId, async () => {
+    ),
+    // guards on post-tool: match sees the journaled trace tail (this
+    // landing included — journalTrace ran first), state sees live repo
+    guardLines('post-tool', sessionId, async () => {
       const dir = process.cwd()
       const tail = sessionTail(sessionId)
       return { text: tail.raw, trace: relativize(dir, tail.entries) }
-    }))
-  )
+    }),
+  ])
+  lines.push(...postLines, ...guards)
   if (lines.length > 0) {
     context('PostToolUse', lines.join('\n'))
   }
@@ -1110,27 +1174,27 @@ async function emitStopGate(input: HookInput): Promise<void> {
   // the goal reminder fires on EVERY stop — it is the keep-going nudge,
   // exempt from the once-per-session block budget (context, never
   // `decision: block`; spec: specs/goal/bro-6vcll.md)
-  const goal = await goalStopLines(process.cwd(), sessionId, {
+  const goalP = goalStopLines(process.cwd(), sessionId, {
     trace: sessionTail(sessionId).raw,
     // the judge's checkable surface — beads/gate/tree state, not just
     // tool metadata (fail-open inside; a slow probe → undefined)
-    context: await sessionContextText({ dir: process.cwd(), sessionId }).catch(() => undefined),
+    context: sessionContextTextCached(process.cwd(), sessionId).catch(() => undefined),
   })
   if (input.stop_hook_active === true) {
+    const goal = await goalP
     if (goal.length > 0) {
       context('Stop', goal.join('\n'))
     }
     return
   }
-  await emitStopGateBody(sessionId, goal)
+  await emitStopGateBody(sessionId, goalP)
 }
 
 /** The armed-gate half of the stop event — split from emitStopGate so
  *  the goal preamble's branches don't push the gate over the complexity
  *  budget (SAST counts them together otherwise). */
-async function emitStopGateBody(sessionId: string, goal: string[]): Promise<void> {
+async function emitStopGateBody(sessionId: string, goalP: Promise<string[]>): Promise<void> {
   const armed = sessionId ? readArmed(sessionId) : new Set<string>()
-  const hints: string[] = [...goal]
   // Block priority is aspect order, not registry order — a beads gate
   // (registry-first) must not shadow a dirty-worktree block: abandoning
   // uncommitted work loses code, an open claim loses bookkeeping.
@@ -1138,12 +1202,22 @@ async function emitStopGateBody(sessionId: string, goal: string[]): Promise<void
     const i = GATE_PRIORITY.indexOf(a)
     return i === -1 ? GATE_PRIORITY.length : i
   }
-  const contributions = (
-    await stopGateContributions(
-      { dir: process.cwd(), sessionId },
-      probeReporter('stop', 'stopGate')
-    )
-  ).sort((a, b) => rank(a.aspect) - rank(b.aspect))
+  // goal context, gate contributions, and the guard sweep are
+  // independent reads — overlap them; the total is the slowest probe,
+  // not their sum (spec: specs/bro-wc0i6.md). Guards fire eagerly — on
+  // a block their lines are dropped but the verdict rows still journal.
+  const [goal, contributions, guards] = await Promise.all([
+    goalP,
+    stopGateContributions({ dir: process.cwd(), sessionId }, probeReporter('stop', 'stopGate')).then(
+      (rows) => rows.sort((a, b) => rank(a.aspect) - rank(b.aspect))
+    ),
+    guardLines('stop', sessionId, async () => {
+      const dir = process.cwd()
+      const tail = sessionTail(sessionId)
+      return { text: tail.raw, trace: relativize(dir, tail.entries) }
+    }),
+  ])
+  const hints: string[] = [...goal]
   for (const c of contributions) {
     if (!armed.has(c.aspect)) {
       if (c.passive) {
@@ -1162,13 +1236,7 @@ async function emitStopGateBody(sessionId: string, goal: string[]): Promise<void
   }
   // stop guards are passive hints — additionalContext only; a guard is
   // a nudge, never a `decision: block` (spec: bro-nkn6)
-  hints.push(
-    ...(await guardLines('stop', sessionId, async () => {
-      const dir = process.cwd()
-      const tail = sessionTail(sessionId)
-      return { text: tail.raw, trace: relativize(dir, tail.entries) }
-    }))
-  )
+  hints.push(...guards)
   if (hints.length > 0) {
     context('Stop', hints.join('\n'))
   }
