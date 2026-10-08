@@ -75,6 +75,7 @@ export {
   isEnvName,
   isSystemoneFamily,
   parseProviderEntry,
+  providerCallGrade,
   PROVIDER_KINDS,
   PROVIDER_REGISTRY,
   ProviderSurfaceError,

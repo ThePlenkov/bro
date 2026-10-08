@@ -42,6 +42,7 @@ export {
   threadState,
 } from './shadow.ts'
 export type { AnnotateOpts, AnnotateResult } from './shadow.ts'
+export { ROUTE_CLASS_KIND, routeClass, routeClassQuestions } from './router.ts'
 export { computeStats, formatStats } from './stats.ts'
 export type { JudgeStats, StatsOpts } from './stats.ts'
 export { inferOutcome, replayMergedThreads } from './replay.ts'

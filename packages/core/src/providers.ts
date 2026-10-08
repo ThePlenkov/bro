@@ -417,6 +417,24 @@ export function resolveApiModel(
   return { model, wire }
 }
 
+/** The entry's RESOLVED call grade — 'auto' kinds settle on the served
+ *  model: an api entry grades typed on the systemone wire (the resolved
+ *  model's wire — a throw on an undeclared/ambiguous model propagates
+ *  as the config error it is), an acp entry on a jev-family pin;
+ *  'prose' kinds are always prose. Consumers that can't honor
+ *  prompt-and-parse evidence — the fleet router's `enforce` mode (spec
+ *  bro-1x7p) — gate on this, never on the registry's raw 'auto'. */
+export function providerCallGrade(entry: ProviderEntry): 'typed' | 'prose' {
+  switch (entry.type) {
+    case 'api':
+      return resolveApiModel(entry, undefined).wire === 'systemone' ? 'typed' : 'prose'
+    case 'acp':
+      return isSystemoneFamily(entry.model) ? 'typed' : 'prose'
+    case 'cli':
+      return 'prose'
+  }
+}
+
 /** `{model}` — a cli command template's only wire for a model
  *  override: expands to the resolved effective model, quoted for
  *  `sh -c` like `{promptFile}` (an id could carry shell metachars).

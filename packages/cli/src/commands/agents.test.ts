@@ -3,8 +3,15 @@ import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
-import { agentPromptPath, pidAlive, type AgentConnectorEnv } from '../agent-connectors.ts'
-import { readAgentRegistry, writeAgentRegistry } from '@broject/core'
+import {
+  agentPromptPath,
+  loadAgentEnv,
+  pidAlive,
+  type AgentConnectorEnv,
+} from '../agent-connectors.ts'
+import { readAgentRegistry, writeAgentRegistry, type Verdict } from '@broject/core'
+import { readJournal, ROUTE_CLASS_KIND } from '@broject/judge'
+import { fakeFetch } from '@broject/providers'
 import { initRepo, installFakeBd, readBeads } from './testrepo.ts'
 import { runAgentsCommand, SpawnInputError, spawnStepAgent } from './agents.ts'
 
@@ -650,6 +657,245 @@ describe('bro agents up — class routing', () => {
       assert.equal(entry.class, 'default') // lane pinned even under an explicit provider
       assert.equal(entry.provider, 'local')
       assert.equal(entry.model, 'm9')
+      await agents(['down', 'fx-1'])
+    } finally {
+      fx.restore()
+    }
+  })
+})
+
+describe('bro agents up — fleet.router (spec bro-1x7p M7)', () => {
+  /** Routing table + an api router provider; spawn seams inject fetch. */
+  const ORCA_TYPED = {
+    type: 'api',
+    baseUrl: 'https://orca.test',
+    apiKeyEnv: 'ORCA_TEST_KEY',
+    models: { 'jev-1.0': 'systemone' },
+  }
+  const ORCA_PROSE = {
+    type: 'api',
+    baseUrl: 'https://orca.test',
+    apiKeyEnv: 'ORCA_TEST_KEY',
+    models: { 'qwen3-coder': 'openai-compat' },
+  }
+
+  const withRouter = (fx: Fixture, mode: string, orca: Record<string, unknown>): void => {
+    writeFileSync(
+      join(fx.main, 'bro.config.json'),
+      JSON.stringify({
+        agents: { native: { command: 'node {promptFile}' } },
+        providers: {
+          local: { type: 'cli', command: 'node {promptFile} -m {model}' },
+          alt: { type: 'cli', command: 'node {promptFile}' },
+          orca,
+        },
+        fleet: {
+          routing: {
+            default: { chain: ['alt'] },
+            sweep: { chain: [{ provider: 'local', model: 'sweep-1' }] },
+          },
+          router: { provider: 'orca', mode },
+        },
+      })
+    )
+  }
+
+  /** A systemone-wire typed reply picking `choice` at `confidence`. */
+  const typedReply = (choice: string, confidence: number) => ({
+    status: 200,
+    body: {
+      model: 'jev-1.0',
+      answers: { class: { type: 'choice', choice, probabilities: {}, confidence } },
+    },
+  })
+
+  const spawn = (
+    fx: Fixture,
+    req: Partial<Parameters<typeof spawnStepAgent>[2]> = {},
+    opts: Parameters<typeof spawnStepAgent>[3] = {}
+  ) =>
+    spawnStepAgent(
+      fx.main,
+      loadAgentEnv(fx.main),
+      {
+        molStep: 'fx-1',
+        worktree: fx.main,
+        beadsDir: fx.beads,
+        promptFile: fx.promptFile(LONG_RUN),
+        ...req,
+      },
+      opts
+    )
+
+  const withKey = async (fn: () => Promise<void>): Promise<void> => {
+    const prev = process.env.ORCA_TEST_KEY
+    process.env.ORCA_TEST_KEY = 'test-key'
+    try {
+      await fn()
+    } finally {
+      if (prev === undefined) {
+        delete process.env.ORCA_TEST_KEY
+      } else {
+        process.env.ORCA_TEST_KEY = prev
+      }
+    }
+  }
+
+  const routeRows = (fx: Fixture): Verdict[] =>
+    readJournal(fx.main).filter(
+      (r): r is Verdict => 'questions' in r && r.kind === ROUTE_CLASS_KIND
+    )
+
+  test('shadow journals the verdict beside the resolved class — the spawn stands on it', async () => {
+    const fx = fixture([
+      { id: 'fx-1', status: 'open', title: 'sweep the ledger', description: 'tidy' },
+    ])
+    try {
+      withRouter(fx, 'shadow', ORCA_TYPED)
+      await withKey(async () => {
+        const { fetch, calls } = fakeFetch(typedReply('sweep', 0.95))
+        await spawn(fx, {}, { fetch })
+        assert.equal(calls.length, 1)
+        assert.match(calls[0]!.url, /orca\.test\/v1\/systemone$/)
+        const entry = readAgentRegistry(fx.main)['fx-1']!
+        assert.equal(entry.class, 'default') // the pick journals, nothing else
+        assert.equal(entry.provider, 'alt')
+        const v = routeRows(fx)[0]!
+        assert.equal(v.subject.threadId, 'fx-1')
+        assert.equal(v.outcome, 'default')
+        const a = v.answers['class']!
+        assert.equal(a.type, 'choice')
+        if (a.type === 'choice') {
+          assert.equal(a.choice, 'sweep')
+        }
+        await agents(['down', 'fx-1'])
+      })
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('enforce re-resolves a confident declared pick — the spawn lands on ITS chain head', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'quick sweep' }])
+    try {
+      withRouter(fx, 'enforce', ORCA_TYPED)
+      await withKey(async () => {
+        const { fetch } = fakeFetch(typedReply('sweep', 0.95))
+        await spawn(fx, {}, { fetch })
+        const entry = readAgentRegistry(fx.main)['fx-1']!
+        assert.equal(entry.class, 'sweep')
+        assert.equal(entry.provider, 'local') // sweep's chain head, not default's
+        assert.equal(entry.model, 'sweep-1')
+        assert.equal(routeRows(fx)[0]!.outcome, 'sweep')
+        await agents(['down', 'fx-1'])
+      })
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('enforce with a dimmed answer keeps the resolved class', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'x' }])
+    try {
+      withRouter(fx, 'enforce', ORCA_TYPED)
+      await withKey(async () => {
+        const { fetch } = fakeFetch(typedReply('sweep', 0.1)) // under judge.confidence (0.6)
+        await spawn(fx, {}, { fetch })
+        const entry = readAgentRegistry(fx.main)['fx-1']!
+        assert.equal(entry.class, 'default')
+        assert.equal(entry.provider, 'alt')
+        assert.equal(routeRows(fx)[0]!.outcome, 'default')
+        await agents(['down', 'fx-1'])
+      })
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('enforce on a prose-grade provider is a config error naming provider + mode', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      withRouter(fx, 'enforce', ORCA_PROSE)
+      await assert.rejects(
+        () => spawn(fx),
+        (e: unknown) =>
+          e instanceof Error &&
+          /fleet\.router\.provider "orca".*prose-grade.*enforce/.test(e.message) &&
+          // rejected before any spawn — the registry stays empty
+          Object.keys(readAgentRegistry(fx.main)).length === 0
+      )
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('a classed step never consults the router — no call, label wins', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', labels: ['class:sweep'] }])
+    try {
+      withRouter(fx, 'enforce', ORCA_TYPED)
+      const { fetch, calls } = fakeFetch(typedReply('default', 0.99))
+      await spawn(fx, {}, { fetch })
+      assert.equal(calls.length, 0)
+      const entry = readAgentRegistry(fx.main)['fx-1']!
+      assert.equal(entry.class, 'sweep')
+      assert.equal(entry.provider, 'local')
+      assert.equal(routeRows(fx).length, 0)
+      await agents(['down', 'fx-1'])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('an explicit --class skips the router the same way', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      withRouter(fx, 'enforce', ORCA_TYPED)
+      const { fetch, calls } = fakeFetch(typedReply('sweep', 0.99))
+      await spawn(fx, { class: 'default' }, { fetch })
+      assert.equal(calls.length, 0)
+      const entry = readAgentRegistry(fx.main)['fx-1']!
+      assert.equal(entry.class, 'default')
+      assert.equal(entry.provider, 'alt')
+      await agents(['down', 'fx-1'])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('JudgeUnavailable is "no verdict" — warn and stand on the resolved class', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      withRouter(fx, 'enforce', ORCA_TYPED)
+      await withKey(async () => {
+        const { fetch } = fakeFetch({ status: 500, body: {} })
+        const r = await capture(() => spawn(fx, {}, { fetch }))
+        assert.match(r.err.join('\n'), /fleet\.router\.provider "orca".*class "default" stands/)
+        const entry = readAgentRegistry(fx.main)['fx-1']!
+        assert.equal(entry.class, 'default')
+        assert.equal(entry.provider, 'alt')
+        await agents(['down', 'fx-1'])
+      })
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('router off + absent routing: the static path is untouched', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({
+          agents: { native: { command: 'node {promptFile}' } },
+          providers: { orca: ORCA_TYPED },
+          fleet: { router: { provider: 'orca', mode: 'enforce' } }, // no routing table
+        })
+      )
+      const { fetch, calls } = fakeFetch(typedReply('sweep', 0.99))
+      await spawn(fx, {}, { fetch })
+      assert.equal(calls.length, 0) // no table → no resolution → no router
+      const entry = readAgentRegistry(fx.main)['fx-1']!
+      assert.equal(entry.class, undefined)
       await agents(['down', 'fx-1'])
     } finally {
       fx.restore()

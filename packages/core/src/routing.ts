@@ -163,19 +163,28 @@ export const DEFAULT_STEP_CLASS = 'default'
 export const CLASS_LABEL_PREFIX = 'class:'
 
 /** The step bead's routing inputs — one `bd show` read: labels carry
- *  the `class:<name>` lane pin, priority feeds the onWall default.
+ *  the `class:<name>` lane pin, priority feeds the onWall default, and
+ *  title/description are the judge router's state (M7 — the same read
+ *  serves both so a routed spawn never pays a second `bd show`).
  *  Best-effort like probeStep: a missing bead or dead store reads as
  *  "no lane declared". */
 export function stepClassInfo(
   beadsDir: string,
   molStep: string
-): { label?: string; priority?: number } {
+): { label?: string; priority?: number; title?: string; description?: string } {
   const r = bdAt(beadsDir, ['show', molStep, '--json'])
   if (r.code !== 0) {
     return {}
   }
   try {
-    const row = (JSON.parse(r.out) as { labels?: unknown; priority?: unknown }[])[0]
+    const row = (
+      JSON.parse(r.out) as {
+        labels?: unknown
+        priority?: unknown
+        title?: unknown
+        description?: unknown
+      }[]
+    )[0]
     const labels = Array.isArray(row?.labels) ? row.labels : []
     const hit = labels.find(
       (l): l is string => typeof l === 'string' && l.startsWith(CLASS_LABEL_PREFIX)
@@ -184,6 +193,8 @@ export function stepClassInfo(
     return {
       ...(name === undefined || name === '' ? {} : { label: name }),
       ...(typeof row?.priority === 'number' ? { priority: row.priority } : {}),
+      ...(str(row?.title) === undefined ? {} : { title: str(row?.title) }),
+      ...(str(row?.description) === undefined ? {} : { description: str(row?.description) }),
     }
   } catch {
     return {}
@@ -251,17 +262,21 @@ export function routeStepClass(
   providers: Record<string, ProviderEntry>,
   beadsDir: string,
   molStep: string,
-  explicitClass?: string
+  explicitClass?: string,
+  /** Optional pre-read bead info — the router path reads the bead once
+   *  for label + text and hands it in rather than paying a second
+   *  `bd show`. */
+  info?: { label?: string; priority?: number }
 ): ResolvedClass | undefined {
   const routing = fleet?.routing
   if (routing === undefined || Object.keys(routing).length === 0) {
     return undefined
   }
-  const info = stepClassInfo(beadsDir, molStep)
+  const read = info ?? stepClassInfo(beadsDir, molStep)
   return resolveStepClass(routing, providers, {
     class: explicitClass,
-    label: info.label,
-    priority: info.priority,
+    label: read.label,
+    priority: read.priority,
   })
 }
 

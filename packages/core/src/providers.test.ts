@@ -8,6 +8,7 @@ import {
   getProvider,
   isEnvName,
   parseProviderEntry,
+  providerCallGrade,
   PROVIDER_KINDS,
   PROVIDER_REGISTRY,
   ProviderSurfaceError,
@@ -464,5 +465,44 @@ describe('parseProviderEntry', () => {
       /not served.*declared: typesafe\/jev-1\.13, acme\/x/
     )
     assert.throws(() => resolveApiModel({ ...entry, model: undefined }, undefined), /name one/)
+  })
+})
+
+describe('providerCallGrade — the RESOLVED grade (spec bro-1x7p M7)', () => {
+  test('an api entry grades on the resolved model wire', () => {
+    const typed: ProviderEntry = {
+      type: 'api',
+      baseUrl: 'https://x',
+      models: { 'typesafe/jev-1.13': 'systemone' },
+    }
+    assert.equal(providerCallGrade(typed), 'typed')
+    const prose: ProviderEntry = {
+      type: 'api',
+      baseUrl: 'https://x',
+      models: { 'acme/x': 'openai-compat' },
+    }
+    assert.equal(providerCallGrade(prose), 'prose')
+  })
+
+  test('an acp entry grades on its model pin — jev-family typed, else prose', () => {
+    assert.equal(
+      providerCallGrade({ type: 'acp', command: 'x', model: 'kilo/orcarouter/typesafe/jev-1.13' }),
+      'typed'
+    )
+    assert.equal(providerCallGrade({ type: 'acp', command: 'x', model: 'claude-4' }), 'prose')
+    // 'jev-router' is a router PRODUCT, not a jev model — isSystemoneFamily's
+    // version anchor keeps it prose
+    assert.equal(providerCallGrade({ type: 'acp', command: 'x', model: 'jev-router' }), 'prose')
+    assert.equal(providerCallGrade({ type: 'acp', command: 'x' }), 'prose')
+  })
+
+  test('a cli entry is always prose — an undeclared api model propagates the config error', () => {
+    assert.equal(providerCallGrade({ type: 'cli', command: 'x' }), 'prose')
+    const ambiguous: ProviderEntry = {
+      type: 'api',
+      baseUrl: 'https://x',
+      models: { 'a/m': 'systemone', 'b/m': 'openai-compat' },
+    }
+    assert.throws(() => providerCallGrade(ambiguous), /name one/)
   })
 })
