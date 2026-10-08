@@ -422,17 +422,25 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
       // cannot run from inside the worker. a detached retrier outlives
       // us and removes the session once the agent has fully exited.
       // operator-configured template — same trust boundary as
-      // spec.command (already sh -c'd)
-      const rm = spec.sessionRm.replaceAll('{sessionId}', sessionId)
-      spawn(
-        'sh',
-        [
-          '-c',
-          `for i in 1 2 3 4 5 6 7 8; do sleep 5; ${rm} && exit 0; done`,
-        ],
-        { detached: true, stdio: 'ignore' },
-      ).unref()
-      log(`session ${sessionId} cleanup armed — deferred until worker exit`)
+      // spec.command (already sh -c'd). The template rides argv, never
+      // the script text; the session id must be a slug before it may
+      // substitute into a shell template
+      if (/^[\w.-]+$/.test(sessionId)) {
+        const rm = spec.sessionRm.replaceAll('{sessionId}', sessionId)
+        spawn(
+          'sh',
+          [
+            '-c',
+            'for i in 1 2 3 4 5 6 7 8; do sleep 5; eval "$1" && exit 0; done',
+            'bro-session-rm',
+            rm,
+          ],
+          { detached: true, stdio: 'ignore' },
+        ).unref()
+        log(`session ${sessionId} cleanup armed — deferred until worker exit`)
+      } else {
+        log(`session cleanup skipped — session id is not a safe slug`)
+      }
     }
   }
 }
