@@ -1,0 +1,70 @@
+name: Homebrew Tap
+
+# Bump Formula/bro.rb in ThePlenkov/homebrew-brew after a release tag.
+# release-tag.yml dispatches this on main — a GITHUB_TOKEN tag push does
+# not fire the push trigger below (same reasoning as publish.yml: the
+# latest workflow file runs, the tag only selects the payload).
+#
+# The tap is a separate repo, so GITHUB_TOKEN can't write it — every step
+# is gated on secrets.HOMEBREW_TAP_TOKEN. Until the secret exists the job
+# warns and the formula is bumped by hand. Setup (one-time):
+#   github.com/settings/personal-access-tokens → fine-grained PAT,
+#   repository: ThePlenkov/homebrew-brew, permission: Contents rw
+#   gh secret set HOMEBREW_TAP_TOKEN --repo ThePlenkov/bro
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to bump to (e.g. v0.2.6)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: No tap token — formula stays manual
+        if: env.TAP_TOKEN == ''
+        run: |
+          echo "::warning::HOMEBREW_TAP_TOKEN is not set — bump Formula/bro.rb in ThePlenkov/homebrew-brew by hand (url + sha256 for $TAG)"
+
+      - name: Tarball sha256
+        if: env.TAP_TOKEN != ''
+        id: tar
+        run: |
+          url="https://github.com/ThePlenkov/bro/archive/refs/tags/$TAG.tar.gz"
+          # codeload renders the archive on first request — retry through
+          # the 404/5xx window right after the tag push
+          sha=$(curl -fsSL --retry 12 --retry-delay 5 --retry-all-errors "$url" | sha256sum | cut -d' ' -f1)
+          echo "url=$url" >>"$GITHUB_OUTPUT"
+          echo "sha256=$sha" >>"$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        if: env.TAP_TOKEN != ''
+        with:
+          repository: ThePlenkov/homebrew-brew
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Bump formula, push
+        if: env.TAP_TOKEN != ''
+        run: |
+          set -e
+          sed -i -E \
+            -e 's|url "https://github\.com/ThePlenkov/bro/archive/refs/tags/v[^"]*"|url "${{ steps.tar.outputs.url }}"|' \
+            -e 's|sha256 "[0-9a-f]{64}"|sha256 "${{ steps.tar.outputs.sha256 }}"|' \
+            Formula/bro.rb
+          if git diff --quiet Formula/bro.rb; then
+            echo "formula already at $TAG — nothing to push"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "bro ${TAG#v}"
+          git push origin main

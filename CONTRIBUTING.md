@@ -25,6 +25,9 @@ while libs ship standalone for SDK consumers (`@broject/core` connector
 types, `@broject/github` review host, …). `publish.yml` walks the dep
 order (core first, cli last); `prepare-for-release` placeholders +
 `npm trust` bootstrap any new package before OIDC can attach.
+`homebrew.yml` bumps the tap formula in ThePlenkov/homebrew-brew on tag —
+a `::warning::` no-op until the `HOMEBREW_TAP_TOKEN` secret exists
+(setup in the workflow header).
 skills/<name>/                   — thin skills: policy only, call `bro *`
                                    (act, convoy, debt, docs, drill, learn,
                                    loop, next, sdd, stack, sync, work, wtf)
