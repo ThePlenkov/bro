@@ -911,6 +911,56 @@ function sessionTail(sessionId: string): { entries: ReturnType<typeof readTraceT
  *  mctx → the next stop's goal context read the same answers). Never fed
  *  to gate contributions — the stop gate always probes live. */
 const CONTEXT_CACHE_TTL_MS = 30_000
+
+function cachedContextRead(file: string): string | undefined {
+  try {
+    const row = JSON.parse(readFileSync(file, 'utf8')) as { ts?: number; text?: string }
+    if (
+      typeof row.ts === 'number' &&
+      typeof row.text === 'string' &&
+      Date.now() - row.ts < CONTEXT_CACHE_TTL_MS
+    ) {
+      return row.text
+    }
+  } catch {
+    // torn or absent cache — recompute
+  }
+  return undefined
+}
+
+function cachedContextWrite(file: string, text: string, t0: number): void {
+  try {
+    const existing = JSON.parse(readFileSync(file, 'utf8')) as { ts?: number }
+    if (typeof existing.ts === 'number' && existing.ts >= t0) {
+      return
+    }
+  } catch {
+    // absent/torn — proceed to write
+  }
+  try {
+    mkdirSync(dirname(file), { recursive: true })
+    // tmp+rename — a torn write never poisons a later reader
+    const tmp = `${file}.${process.pid}.tmp`
+    writeFileSync(tmp, JSON.stringify({ ts: Date.now(), text }))
+    renameSync(tmp, file)
+    // opportunistic sweep — past-TTL entries are garbage anyway
+    for (const f of readdirSync(dirname(file))) {
+      try {
+        if (
+          f.startsWith('ctx-') &&
+          statSync(join(dirname(file), f)).mtimeMs < Date.now() - CONTEXT_CACHE_TTL_MS
+        ) {
+          rmSync(join(dirname(file), f))
+        }
+      } catch {
+        // sweep is best-effort
+      }
+    }
+  } catch {
+    // caching is best-effort — a failed write degrades to recompute
+  }
+}
+
 async function sessionContextTextCached(dir: string, sessionId: string): Promise<string> {
   const base = hooksStateDir()
   const file =
@@ -922,17 +972,9 @@ async function sessionContextTextCached(dir: string, sessionId: string): Promise
           `ctx-${createHash('sha256').update(`${dir}|${sessionId}`).digest('hex').slice(0, 16)}.json`
         )
   if (file !== null) {
-    try {
-      const row = JSON.parse(readFileSync(file, 'utf8')) as { ts?: number; text?: string }
-      if (
-        typeof row.ts === 'number' &&
-        typeof row.text === 'string' &&
-        Date.now() - row.ts < CONTEXT_CACHE_TTL_MS
-      ) {
-        return row.text
-      }
-    } catch {
-      // torn or absent cache — recompute
+    const hit = cachedContextRead(file)
+    if (hit !== undefined) {
+      return hit
     }
   }
   // t0 before the build: a concurrent hook that finished first wrote a
@@ -940,33 +982,7 @@ async function sessionContextTextCached(dir: string, sessionId: string): Promise
   const t0 = Date.now()
   const text = await sessionContextText({ dir, sessionId })
   if (file !== null) {
-    try {
-      const existing = JSON.parse(readFileSync(file, 'utf8')) as { ts?: number }
-      if (typeof existing.ts === 'number' && existing.ts >= t0) {
-        return text
-      }
-    } catch {
-      // absent/torn — proceed to write
-    }
-    try {
-      mkdirSync(dirname(file), { recursive: true })
-      // tmp+rename — a torn write never poisons a later reader
-      const tmp = `${file}.${process.pid}.tmp`
-      writeFileSync(tmp, JSON.stringify({ ts: Date.now(), text }))
-      renameSync(tmp, file)
-      // opportunistic sweep — past-TTL entries are garbage anyway
-      for (const f of readdirSync(dirname(file))) {
-        try {
-          if (f.startsWith('ctx-') && statSync(join(dirname(file), f)).mtimeMs < Date.now() - CONTEXT_CACHE_TTL_MS) {
-            rmSync(join(dirname(file), f))
-          }
-        } catch {
-          // sweep is best-effort
-        }
-      }
-    } catch {
-      // caching is best-effort — a failed write degrades to recompute
-    }
+    cachedContextWrite(file, text, t0)
   }
   return text
 }
