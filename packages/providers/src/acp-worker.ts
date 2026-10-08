@@ -402,7 +402,11 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
       clearTimeout(killTimer)
     }
     await retireAgentChild(child)
-    armSessionCleanup(spec, sessionId, log)
+    try {
+      armSessionCleanup(spec, sessionId, log)
+    } catch (err) {
+      log(`session cleanup arming failed — ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 }
 

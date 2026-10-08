@@ -1679,10 +1679,8 @@ function warnNoPromptFile(worker: SpawnWorker | undefined, command: string): voi
   }
   const cmd = worker?.kind === 'template' ? worker.command : command
   if (!cmd.includes('{promptFile}')) {
-    // binary name only — the template may carry inline credentials
-    const bin = cmd.split(/\s+/, 1)[0]
     console.error(
-      `bro agents: command '${bin}' has no {promptFile} placeholder — ` +
+      'bro agents: configured command has no {promptFile} placeholder — ' +
         'the prompt file appends as a positional arg; interactive CLIs ' +
         '(devin, claude) treat that as a TUI session, not a worker prompt'
     )
