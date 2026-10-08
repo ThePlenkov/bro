@@ -99,7 +99,10 @@ export function mailboxEvents(dir: string, sessionId: string | undefined): Event
         const locator = dropMailbox(target, mailboxText(event), 'note')
         // `--key` coalesces: pending same-key drops from this source are
         // stale by definition — the writer repeating a key has fresher
-        // news, and a chatty fleet must not inflate every drain
+        // news, and a chatty fleet must not inflate every drain. A
+        // sourceless publish claims no "same source" and supersedes
+        // nothing — deleting a stranger's pending drop is the bug, so
+        // anonymity wins over tidiness.
         if (event.key !== undefined) {
           coalesceDrops(
             target,

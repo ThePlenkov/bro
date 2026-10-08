@@ -253,13 +253,18 @@ function addressedTo(to: string, identity: MailboxIdentity): boolean {
  *  drop on another topic, to another recipient (or broadcast where the
  *  pending drop was addressed), or from a different source is an
  *  independent note — a keyed publish must never delete a drop it does
- *  not replace. */
+ *  not replace. An anonymous publish (no `source`) supersedes nothing:
+ *  `undefined` is the absence of an identity, not a shared one — two
+ *  sourceless sessions are not the same writer. */
 export function coalesceDrops(
   dir: string,
   key: string,
   identity: { source?: string; topic: string; to?: string },
   exclude?: string
 ): void {
+  if (identity.source === undefined) {
+    return
+  }
   let files: string[]
   try {
     files = readdirSync(dir)
