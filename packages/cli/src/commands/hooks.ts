@@ -849,7 +849,7 @@ function probeReporter(event: string, probe: string): ProbeReporter {
  *  append + cap-check + trim is one critical section (concurrent hooks
  *  are separate processes); a lock timeout degrades to the plain
  *  append, never a stall. */
-function appendJournal(path: string, line: string): void {
+function appendJournal(path: string, line: string, waitMs = 2_000): void {
   mkdirSync(dirname(path), { recursive: true })
   const append = (): void => {
     appendFileSync(path, line)
@@ -862,7 +862,7 @@ function appendJournal(path: string, line: string): void {
     }
   }
   try {
-    withFileLock(`${path}.lock`, append, { waitMs: 2_000, label: 'journal lock' })
+    withFileLock(`${path}.lock`, append, { waitMs, label: 'journal lock' })
   } catch {
     append()
   }
@@ -890,7 +890,9 @@ export function journalCommand(cmd: string, ms: number, exitCode: number): void 
       ms,
       ...(exitCode !== 0 ? { failed: true as const } : {}),
     }
-    appendJournal(join(dir, 'perf', 'commands.jsonl'), `${JSON.stringify(row)}\n`)
+    // waitMs 0: a contended lock must not stall the exit handler —
+    // the fallback plain append lands the line without the cap check.
+    appendJournal(join(dir, 'perf', 'commands.jsonl'), `${JSON.stringify(row)}\n`, 0)
   } catch {
     // telemetry must never stall or fail the caller
   }
