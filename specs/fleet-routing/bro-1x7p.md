@@ -221,6 +221,31 @@ telemetry buffers, never wakes. Commands that supervise
 (`convoy run`, `drive`, `watch`) audit against this rule; a new
 watcher without an exit condition does not merge.
 
+The ban lands on the infinite form, not on detached coverage — the
+stop gate counts a live `drive --every` as PR coverage through its
+pid-keyed heartbeat markers, so `drive` keeps finite supervision
+shapes or orphaned PRs lose their only owner:
+
+- **`--for` bound** — `drive --every N --for S` rides the bound
+  `bro watch` already ships (same flag, same monotonic deadline, same
+  `≥ --every` parse rule). The heartbeat contract is untouched:
+  markers stay pid-keyed, coverage lasts exactly the bound, and
+  expiry leaves the dead-marker stale-supervision flag the
+  session-start hook already reports — the re-arm signal, not a
+  silent gap. A deployment wanting durable coverage re-arms the
+  bounded loop on a non-agent timer (`watch install`'s systemd/cron
+  shape); a `drive install` generalization earns a spec when the
+  timer machinery does.
+- **Drain exit** — an `--every` pass that fully enumerates the fleet
+  and finds zero open PRs exits 0: the until-condition, convoy
+  drain's own verdict — coverage then has nothing left to cover (a
+  PR opened later is the pusher's own gate's job). An incomplete
+  enumeration never exits: a failed lookup is not a drained fleet.
+
+`drive --once` stays a report — passes still fix and merge, but
+heartbeats remain a loop-mode emission, keyed to the live
+supervisor's pid.
+
 ## Continuation — the session feeds itself
 
 The default loop is in-session continuation; `bro convoy run` stays
@@ -279,6 +304,9 @@ packages/convoy/                      step kind 'run' — `command` on the step
                                       decl, carried through the pour on issue
                                       metadata; shell-unit contract
 packages/cli/src/commands/convoy.ts   convoy done → mailbox emission
+packages/cli/src/commands/drive.ts    finite supervision — the `--for`
+                                      bound + drain exit; the heartbeat
+                                      contract unchanged
 skills/{convoy,next}/                 continuation + finite-watcher text
 ```
 
@@ -293,7 +321,8 @@ skills/{convoy,next}/                 continuation + finite-watcher text
 4. Resume — `acp` `session/load` on `acpSessionId`, `cli` rehydrated
    respawn.
 5. Shell-unit step kind (`run`) in the convoy formula; watcher-rule
-   audit across `convoy run`/`drive`/`watch`.
+   audit across `convoy run`/`drive`/`watch` — `drive` gains the
+   `--for` bound and the drain exit.
 6. Continuation — `convoy done` mailbox emission + skill text; the
    in-session loop becomes the default.
 7. Optional judge router — `fleet.router` shadow → advisory → enforce.
