@@ -24,10 +24,12 @@ deliverable didn't capture: tool gaps, repeated mechanics, ignored debt.
 3. **Call economy.** Count the calls that repeated one pattern —
    N `bd close`s, N `gh api` fetches, N status polls. If one `bro`
    command could batch them, that is the same kind of gap bead.
-4. **Lessons.** `bro learn capture --dry-run` previews what the session
-   would distill — if a reusable insight shows up (a workaround, a trap,
-   a convention), rerun without `--dry-run` to store it, so the next
-   session starts smarter, not just the next human.
+4. **Lessons.** `bro learn capture --dry-run` previews what finished
+   artifacts would distill — capture has no session filter, so a plan
+   that is all this session's persists with a bare `capture`; otherwise
+   store just this session's insight with `bro learn add --lesson "…"
+   --on … --evidence …`, so the next session starts smarter, not just
+   the next human.
 5. **Debt sweep.** PRs merged this session → `bro debt collect` picks up
    reviewer findings left unresolved. Never leave them to rot.
 6. **State assertions.** Verify from authoritative checks, not memory:
