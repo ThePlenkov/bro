@@ -51,9 +51,10 @@ the next work order in.
 - **provider chain** — the ordered list of `providers.<name>` entries
   a class tries, cheapest acceptable last.
 - **provider wall** — a provider-level blocked state derived from the
-  newest classified registry death on that provider: `rate_limited`
-  walls until `resetAt` (indefinitely when none was reported),
-  `quota` walls until the operator clears the record.
+  provider's unstopped *wallable* deaths (`rate_limited`, `quota` —
+  `crash`/`auth` never join the scan): `rate_limited` walls until
+  `resetAt` (indefinitely when none was reported), `quota` walls
+  until the operator clears the record.
 - **park vs fall** — a walled step's two verdicts: *park* waits the
   wall out on the current provider; *fall* re-dispatches the step to
   the next un-walled chain entry.
@@ -124,12 +125,16 @@ demotion; `shadow` accepts prose — the verdict journals with its
 A provider's wall state is **computed from `agents.json`**, not kept
 in a new store: scan the registry for death records attributed to P —
 an entry's live fields plus each `attempts` record a re-dispatch left
-behind (below) — and take the newest classified death: `rate_limited`
-walls P until its `resetAt` (indefinitely without one), `quota` walls
-P until every quota-caused record on P is `stopped` (`bro agents down`
-is the manual clear — its `stopped` stamp covers the entry and its
-`attempts` alike, same as today). `crash`/`auth` never wall a
-provider — they say something about the worker, not the service.
+behind (below) — and keep only the unstopped *wallable* ones: `quota`
+dominates, walling P until every quota-caused record on P is
+`stopped` (`bro agents down` is the manual clear — its `stopped`
+stamp covers the entry and its `attempts` alike, same as today);
+otherwise the newest `rate_limited` death (by `spawnedAt`) walls P
+until its `resetAt`, indefinitely without one — a passed `resetAt` is
+the lift. `crash`/`auth` never wall a provider — they say something
+about the worker, not the service — and they never join the scan: a
+fresh crash on P postdates but doesn't displace an unexpired
+rate-limit wall.
 
 `bro fleet` renders a walled provider as `walled — <cause>[ til
 <resetAt>]`; `bro watch` surfaces it in attention. Derivation has one
