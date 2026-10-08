@@ -421,7 +421,7 @@ describe('bro doctor', () => {
         assert.match(rows[0]!.detail, /none configured/)
         const warns = rows.filter((c) => c.status === 'warn')
         assert.ok(warns.some((c) => /judge\.provider.*'ghost'/.test(c.detail)))
-        assert.ok(warns.some((c) => /agents\.native\.provider.*'also-ghost'/.test(c.detail)))
+        assert.ok(warns.some((c) => /agents\.native\.provider names 'also-ghost'/.test(c.detail)))
       }
     ))
 
