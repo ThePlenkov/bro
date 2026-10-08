@@ -448,8 +448,10 @@ function armSessionCleanup(
     return
   }
   const rm = spec.sessionRm.replaceAll('{sessionId}', sessionId)
+  // absolute interpreter path — S4036: a PATH-resolved 'sh' can be
+  // shadowed by a writable dir on the worker's PATH.
   spawn(
-    'sh',
+    '/bin/sh',
     [
       '-c',
       'for i in 1 2 3 4 5 6 7 8; do sleep 5; eval "$1" && exit 0; done',
