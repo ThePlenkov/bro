@@ -56,6 +56,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { setTimeout as nodeSetTimeout } from 'node:timers'
 import {
   acquireFileLock,
   parallelWorkProbe,
@@ -974,7 +975,10 @@ async function sessionContextTextCached(dir: string, sessionId: string): Promise
  *  so an unbounded build must degrade to undefined, never stretch the
  *  event past the probe budget it bypasses. */
 function boundedMs<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
-  return Promise.race([p, new Promise<undefined>((r) => setTimeout(r, ms).unref?.())])
+  return Promise.race([
+    p,
+    new Promise<undefined>((r) => nodeSetTimeout(() => r(undefined), ms).unref()),
+  ])
 }
 
 /** One guard-engine call per emit path (spec: bro-nkn6). Declarations
