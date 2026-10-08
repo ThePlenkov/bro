@@ -66,6 +66,8 @@ import { driveSection } from './commands/drive-config.ts'
 import { runDriveCommand } from './commands/drive.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runFleetCommand } from './commands/fleet.ts'
+import { runGoalCommand } from './commands/goal.ts'
+import { goalSection } from './commands/goal-config.ts'
 import { runGuardCommand } from './commands/guard.ts'
 import { runHooksCommand } from './commands/hooks.ts'
 import { runJudgeCommand } from './commands/judge.ts'
@@ -283,6 +285,14 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'learn',
     configKey: 'learn',
     configSchema: learnSection,
+  }),
+  definePlugin({
+    name: 'goal',
+    summary: 'Session-scoped completion goal — set|status|pause|resume|clear; hooks remind + judge-verdict',
+    run: runGoalCommand,
+    skill: 'goal',
+    configKey: 'goal',
+    configSchema: goalSection,
   }),
   definePlugin({
     name: 'judge',
