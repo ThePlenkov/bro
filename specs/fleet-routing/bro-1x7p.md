@@ -177,9 +177,13 @@ dedup, wall check, claim, start stay atomic.
 | `cli` | none | **respawn + rehydrate**: new process; the prompt is regenerated from live beads state (`convoy next` inputs, the claim, the prior log tail) — never a replay of the stale prompt file |
 | `api` | no spawn surface | never a chain entry |
 
-`respawn` gains a `resume?: boolean` flag on `SpawnSpec`, or the
-backend reads `entry.acpSessionId` — the mechanism detail is the
-implementation's; the contract is: a session-capable provider gets the
+The session id is lifted at the clear point: `prepareSpawn` already
+holds the dying `existing` entry inside the registry lock, so it hands
+the `acpSessionId` it wipes back to the caller, and the resume-capable
+backend carries it to the worker (a `resumeSessionId` on the spawn
+payload). Neither shortcut works — a bare `resume` flag carries no id,
+and any `entry.acpSessionId` read after `prepareSpawn` sees the field
+already cleared. The contract: a session-capable provider gets the
 chance to continue its own session before paying for a new one.
 bro-5hx1.1 deferred `session/load` as "earns a spec when a consumer
 needs it" — this is that consumer.
@@ -257,7 +261,9 @@ packages/core/src/agents.ts           the entry's `attempts` — superseded
                                       from; `bro agents down` stamps them
 packages/core/src/config.ts           fleet.routing + fleet.router sections
 packages/cli/src/agent-connectors.ts  provider-scoped respawn block; chain
-                                      walk in prepareSpawn/spawnStepAgent
+                                      walk in prepareSpawn/spawnStepAgent;
+                                      prepareSpawn hands the cleared
+                                      acpSessionId back for resume
 packages/cli/src/commands/agents.ts   --class flag; StepSpawnRequest.class
 packages/cli/src/commands/fleet.ts    provider wall rendering
 packages/providers/src/acp-worker.ts  session/load resume path
