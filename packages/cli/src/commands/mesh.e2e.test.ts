@@ -189,18 +189,32 @@ describe('bro mesh', () => {
         env1('rigB-pen', 'request', 'rigB-pen'),
       ])
 
+      // a second peer whose request reuses rigB's verdicted thread id —
+      // thread ids are per-store, so rigB's verdict must not close it
+      const rigC = 'mesh://acme/rigc'
+      mkdirSync(join(root, 'peerC'), { recursive: true })
+      const { remoteDir: remoteC } = installFakeDoltRemote(join(root, 'peerC'), [
+        env1('rigB-acc', 'request', 'rigB-acc', rigC),
+      ])
+
       const add = runCli(['mesh', 'peers', 'add', 'rigB', rigB, remoteDir], { cwd: main, env })
       assert.equal(add.code, 0, add.stderr)
+      const addC = runCli(['mesh', 'peers', 'add', 'rigC', rigC, remoteC], { cwd: main, env })
+      assert.equal(addC.code, 0, addC.stderr)
 
       const inbox = runCli(['mesh', 'inbox'], { cwd: main, env })
       assert.equal(inbox.code, 0, inbox.stderr)
       assert.match(inbox.stdout, /rigB\trigB-pen\trequest rigB-pen/)
       assert.match(inbox.stdout, /rigB-frg/)
-      assert.doesNotMatch(inbox.stdout, /rigB-acc|rigB-rej|rigB-v\d/)
+      // rigB's verdicted threads are gone; rigC's same-id request survives
+      assert.match(inbox.stdout, /rigC\trigB-acc/)
+      assert.doesNotMatch(inbox.stdout, /rigB\trigB-acc|rigB\trigB-rej|rigB-v\d/)
 
       const json = runCli(['mesh', 'inbox', '--json', '--no-pull'], { cwd: main, env })
-      const beads = (JSON.parse(json.stdout) as Array<{ bead: string }>).map((r) => r.bead)
-      assert.deepEqual(beads.sort(), ['rigB-frg', 'rigB-pen'])
+      const keys = (JSON.parse(json.stdout) as Array<{ peer: string; bead: string }>)
+        .map((r) => `${r.peer}:${r.bead}`)
+        .sort()
+      assert.deepEqual(keys, ['rigB:rigB-frg', 'rigB:rigB-pen', 'rigC:rigB-acc'])
     })
   })
 

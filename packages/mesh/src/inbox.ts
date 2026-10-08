@@ -168,7 +168,9 @@ export function meshInbox(
       (r.envelope.kind === 'accept' || r.envelope.kind === 'reject') &&
       r.envelope.from === r.peerRig
     ) {
-      terminal.add(r.envelope.thread)
+      // thread ids are per-store — a verdict only closes requests that
+      // arrived over the same binding, never a same-id thread on a peer
+      terminal.add(`${r.peer}:${r.envelope.thread}`)
     }
   }
   const requests = records
@@ -176,7 +178,7 @@ export function meshInbox(
       (r) =>
         r.envelope.kind === 'request' &&
         r.envelope.to === selfRig &&
-        !terminal.has(r.envelope.thread),
+        !terminal.has(`${r.peer}:${r.envelope.thread}`),
     )
     .map((r) => ({ ...r, mismatch: r.envelope.from !== r.peerRig }))
   return { requests, errors }
