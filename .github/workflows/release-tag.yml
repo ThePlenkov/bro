@@ -98,3 +98,8 @@ jobs:
           # Dispatch on main so the *latest* publish.yml runs — the tag
           # only selects which ref gets checked out and published.
           gh workflow run publish.yml --ref main -f "tag=v$v"
+          # Same dispatch for the homebrew tap bump — warns + exits
+          # cleanly while HOMEBREW_TAP_TOKEN is unset (or when the file
+          # isn't on main yet, on the first run after merge).
+          gh workflow run homebrew.yml --ref main -f "tag=v$v" \
+            || echo "::warning::homebrew.yml dispatch failed — bump the tap formula by hand"
