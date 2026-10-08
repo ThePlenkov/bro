@@ -79,16 +79,18 @@ Developing bro itself: see CONTRIBUTING.md.
   the convoy default (`merge=auto`) opens a ready PR — the act gate is
   the merge mechanism. A dirty tree at session end is lost work.
 - **Foreign findings become requests, never patches** — work that
-  belongs to another repo is posted to that rig's inbox, never
-  edited in place: `bro request <repo> <title> --for <bead>` drops
-  the request bead and blocks mine on `external:<rig>:<id>`;
-  `bro wait external:<rig>:<id>` point-checks the far bead (between
-  turns — the dep-marked block is the truth, the watcher a
-  convenience; `bro mesh wait <id>` is the thread-plane read).
-  No checkout means no dep: a rig reachable only through its forge
-  gets a mesh request *issue* instead (body carries the envelope, the
-  thread is the read) — an `external:` ref resolves by opening a beads
-  store at a filesystem path, which an issue is not.
+  belongs to another repo is posted for that rig to pull, never
+  edited in place: `bro mesh request mesh://<org>/<repo> <title>
+  --for <bead>` drops the request bead on my own store — the rig's
+  `bro mesh inbox` reads it through its peer binding to my store —
+  and records an `external:<rig>:<id>` edge on my bead. That edge
+  is a marker, not a gate: bd 1.3.1 stores external deps verbatim
+  but never resolves them (and mis-parses the `mesh://` URI at `:`),
+  so `bd ready` still lists the bead — `bro mesh wait <id>` is the
+  block; point-check the thread between turns. The top-level
+  `bro request` / `bro wait` forms (same-machine delivery, the
+  forge-issue plane) are specced in specs/cross-repo/ but not
+  shipped — `bro mesh` is the only live surface.
 
 ## Convoy fan-out — detach + pins
 
