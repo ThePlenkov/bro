@@ -152,6 +152,72 @@ describe('bro mesh', () => {
     })
   })
 
+  test('inbox — verdicted threads (accepted/rejected) no longer list their request', () => {
+    const { root, main } = initRepo('bro-mesh-e2e-term-', (m) => {
+      execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
+    })
+    inside(main, root, () => {
+      const binDir = installFakeDolt(root)
+      const env = { PATH: `${binDir}:${process.env.PATH}` }
+      const me = 'mesh://theplenkov/bro'
+      const rigB = 'mesh://acme/rigb'
+      const env1 = (id: string, kind: string, thread: string, claimedFrom = rigB) => ({
+        id,
+        title: `${kind} ${id}`,
+        status: 'open',
+        priority: 1,
+        labels: [
+          'mesh:v:1',
+          `mesh:kind:${kind}`,
+          `mesh:thread:${thread}`,
+          `mesh:from:${claimedFrom}`,
+          `mesh:to:${me}`,
+        ],
+      })
+      const { remoteDir } = installFakeDoltRemote(root, [
+        // accepted — terminal, must not surface
+        env1('rigB-acc', 'request', 'rigB-acc'),
+        env1('rigB-v1', 'accept', 'rigB-acc'),
+        // rejected — terminal, must not surface
+        env1('rigB-rej', 'request', 'rigB-rej'),
+        env1('rigB-v2', 'reject', 'rigB-rej'),
+        // a verdict whose from doesn't match the peer binding is
+        // impersonation — it cannot close the thread
+        env1('rigB-frg', 'request', 'rigB-frg'),
+        env1('rigB-v3', 'accept', 'rigB-frg', 'mesh://mallory/forge'),
+        // still pending — no verdict yet
+        env1('rigB-pen', 'request', 'rigB-pen'),
+      ])
+
+      // a second peer whose request reuses rigB's verdicted thread id —
+      // thread ids are per-store, so rigB's verdict must not close it
+      const rigC = 'mesh://acme/rigc'
+      mkdirSync(join(root, 'peerC'), { recursive: true })
+      const { remoteDir: remoteC } = installFakeDoltRemote(join(root, 'peerC'), [
+        env1('rigB-acc', 'request', 'rigB-acc', rigC),
+      ])
+
+      const add = runCli(['mesh', 'peers', 'add', 'rigB', rigB, remoteDir], { cwd: main, env })
+      assert.equal(add.code, 0, add.stderr)
+      const addC = runCli(['mesh', 'peers', 'add', 'rigC', rigC, remoteC], { cwd: main, env })
+      assert.equal(addC.code, 0, addC.stderr)
+
+      const inbox = runCli(['mesh', 'inbox'], { cwd: main, env })
+      assert.equal(inbox.code, 0, inbox.stderr)
+      assert.match(inbox.stdout, /rigB\trigB-pen\trequest rigB-pen/)
+      assert.match(inbox.stdout, /rigB-frg/)
+      // rigB's verdicted threads are gone; rigC's same-id request survives
+      assert.match(inbox.stdout, /rigC\trigB-acc/)
+      assert.doesNotMatch(inbox.stdout, /rigB\trigB-acc|rigB\trigB-rej|rigB-v\d/)
+
+      const json = runCli(['mesh', 'inbox', '--json', '--no-pull'], { cwd: main, env })
+      const keys = (JSON.parse(json.stdout) as Array<{ peer: string; bead: string }>)
+        .map((r) => `${r.peer}:${r.bead}`)
+        .sort()
+      assert.deepEqual(keys, ['rigB:rigB-frg', 'rigB:rigB-pen', 'rigC:rigB-acc'])
+    })
+  })
+
   test('inbox — a local peer is read through its live store', () => {
     const { root, main } = initRepo('bro-mesh-e2e-local-', (m) => {
       execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })

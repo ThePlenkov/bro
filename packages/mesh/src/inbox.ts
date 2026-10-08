@@ -148,8 +148,12 @@ export function meshScan(
   return { records: out, errors }
 }
 
-/** The request filter over the scan — open requests addressed to
- *  selfRig, provenance attached, from≠binding flagged. */
+/** The request filter over the scan — pending requests addressed to
+ *  selfRig, provenance attached, from≠binding flagged. A thread the
+ *  requester already verdicted is terminal, not pending; a verdict
+ *  counts only when its from matches the peer binding — the same
+ *  impersonation rule the thread reduction applies, so a forged
+ *  accept can't quietly close somebody else's request. */
 export function meshInbox(
   dir: string,
   peers: MeshPeer[],
@@ -158,8 +162,24 @@ export function meshInbox(
   opts: { pull?: boolean } = {},
 ): InboxResult {
   const { records, errors } = meshScan(dir, peers, gitCommon, opts)
+  const terminal = new Set<string>()
+  for (const r of records) {
+    if (
+      (r.envelope.kind === 'accept' || r.envelope.kind === 'reject') &&
+      r.envelope.from === r.peerRig
+    ) {
+      // thread ids are per-store — a verdict only closes requests that
+      // arrived over the same binding, never a same-id thread on a peer
+      terminal.add(`${r.peer}:${r.envelope.thread}`)
+    }
+  }
   const requests = records
-    .filter((r) => r.envelope.kind === 'request' && r.envelope.to === selfRig)
+    .filter(
+      (r) =>
+        r.envelope.kind === 'request' &&
+        r.envelope.to === selfRig &&
+        !terminal.has(`${r.peer}:${r.envelope.thread}`),
+    )
     .map((r) => ({ ...r, mismatch: r.envelope.from !== r.peerRig }))
   return { requests, errors }
 }

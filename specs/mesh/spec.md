@@ -139,7 +139,9 @@ code, branches, or config (specs/cross-repo/bro-oam4.md).
 - `bro mesh request <rig> <title>` — publish an envelope (`local` drops
   into the target's store, `beads-remote` leaves it on mine for pull),
   wire `bd dep add <waiting-bead> external:<rig>:<id>`.
-- `bro mesh inbox` — surface requests addressed to me across peers.
+- `bro mesh inbox` — surface pending requests addressed to me across
+  peers; a thread the requester already verdicted (accepted/rejected)
+  no longer lists.
 - `bro mesh claim|done|accept|reject <thread>` — lifecycle transitions
   (`accept`/`reject` are the requester's verdicts; `claim`/`done` the
   worker's).
