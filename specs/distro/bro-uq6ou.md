@@ -27,7 +27,7 @@ Missed bumps ship stale `brew install bro`.
 
 ## Deferred
 
-- npm-tarball install: packages/cli publishes `files: ["dist"]`, so the
-  formula could swap the source build for a registry tarball + `npm i -g`
-  — but the bump would then have to order after publish.yml and poll the
-  registry. Revisit once OIDC publishing proves stable.
+- npm-tarball install — **done in bro-0opqd**: the formula now installs
+  the published `@broject/bro` tarball (`npm install *std_npm_args`), and
+  homebrew.yml orders itself after publish.yml by polling the registry
+  for the version before computing sha256.
