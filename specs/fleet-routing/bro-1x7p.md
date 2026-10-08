@@ -111,6 +111,13 @@ judgments ladder — `shadow` journals the verdict beside the resolved
 class, `enforce` lets it pick. `off`/absent = static classes only.
 The router never invents a class and never picks a provider directly
 — it answers *which lane*, the table still owns the chain.
+`enforce` holds the typed promise: it requires the provider's
+resolved call grade to be `typed` — an `api` entry on the systemone
+wire or an `acp` entry on a jev-family model. A prose-grade entry
+(`cli`, an `openai-compat` model, a non-jev `acp` pin) under
+`enforce` is a config error naming provider + mode, never a silent
+demotion; `shadow` accepts prose — the verdict journals with its
+`:prose` stamp and picks nothing.
 
 ## Provider walls — derived, not stored
 
