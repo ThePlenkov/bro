@@ -86,7 +86,9 @@ posted → claimed → submitted ─┬─ accepted
          (abandoned claim → requester re-posts)
 ```
 
-- **posted** — requester publishes the envelope on *its own* store.
+- **posted** — requester publishes the envelope; where it lands is the
+  transport's: `beads-remote` keeps it on the requester's store for the
+  target to pull, `local` delivers into the target's store directly.
 - **claimed** — target rig binds itself to the thread.
 - **submitted** — target attaches evidence refs (PR, commit, bead).
 - **accepted** — requester's verdict; completion is never self-declared.
@@ -95,15 +97,19 @@ posted → claimed → submitted ─┬─ accepted
 
 | Binding        | Model | When |
 |----------------|-------|------|
-| `local`        | `bd create` in a known same-machine checkout | dev workstation, today's manual flow |
+| `local`        | `bd create` into a same-machine checkout's store — direct drop | dev workstation, today's manual flow |
 | `beads-remote` | **read federation**: subscribe to peer `refs/dolt/data` over the repo's own git remote; inbound = beads addressed to my rig | the mesh default |
 | `wasteland`    | adapter over `wl-commons` wanted board | public rigs, reputation |
 | `github`       | issue transport, a comment carries the record | repos without federation access |
 
-**Sovereignty rule:** no transport ever writes a foreign store.
-`beads-remote` requests sit on the requester's remote and are *pulled* —
-the same fork-and-propose model wasteland proves, minus the mandatory
-commons hub.
+**Sovereignty rule:** no transport ever writes a foreign store
+*across a trust boundary*. `beads-remote` requests sit on the
+requester's remote and are *pulled* — the same fork-and-propose model
+wasteland proves, minus the mandatory commons hub. `local` is the
+carve-out: same-machine checkouts share a filesystem trust domain —
+the writer provably has access already — so the drop delivers
+straight into the target's store, writing envelope beads only, never
+code, branches, or config (specs/cross-repo/bro-oam4.md).
 
 ### Discovery
 
@@ -130,8 +136,9 @@ commons hub.
 ## bro MVP
 
 - `bro mesh peers add|list` — manage `mesh.peers`.
-- `bro mesh request <rig> <title>` — publish an envelope (`local` or
-  `beads-remote`), wire `bd dep add <waiting-bead> external:<rig>:<id>`.
+- `bro mesh request <rig> <title>` — publish an envelope (`local` drops
+  into the target's store, `beads-remote` leaves it on mine for pull),
+  wire `bd dep add <waiting-bead> external:<rig>:<id>`.
 - `bro mesh inbox` — surface requests addressed to me across peers.
 - `bro mesh claim|done|accept|reject <thread>` — lifecycle transitions
   (`accept`/`reject` are the requester's verdicts; `claim`/`done` the
@@ -150,8 +157,9 @@ skills/mesh/
 
 ## Alternatives
 
-- **Direct foreign-store writes** — rejected: needs write access, breaks
-  sovereignty; wasteland's PR-mode exists precisely because pull wins.
+- **Direct foreign-store writes across a trust boundary** — rejected:
+  needs write access, breaks sovereignty; wasteland's PR-mode exists
+  precisely because pull wins.
 - **Central server** — rejected: defeats decentralization; a DoltHub
   commons stays *optional* transport for public meshes.
 - **Embed wasteland SDK as core** — rejected: couples v1 to DoltHub;

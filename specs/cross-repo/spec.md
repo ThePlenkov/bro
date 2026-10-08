@@ -18,9 +18,10 @@ owns bro's concrete phases on top of the vendor-neutral wire contract
 
 - **LOCAL** — `bro request <repo-or-alias> <title>` resolves a
   same-machine checkout, drops a mesh/1 request envelope into the
-  target rig's inbox store, and `bd dep add <bead>
-  external:<rig>:<id>` wires the waiter; `bro mesh wait` is the
-  point-check. Spec: specs/cross-repo/bro-oam4.md.
+  target rig's inbox store (the mesh sovereignty rule's `local`
+  carve-out — a shared filesystem trust domain), and `bd dep add
+  <bead> external:<rig>:<id>` wires the waiter; `bro mesh wait` is
+  the point-check. Spec: specs/cross-repo/bro-oam4.md.
 - **WAIT** — dedicated `bro wait external:<ref>` point-check watcher
   (act wait pattern) over foreign bead state: read the target store for
   the closed request bead and bd's `provides:` ship label, verdict in the
