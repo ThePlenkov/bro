@@ -43,15 +43,18 @@ import {
   deriveProviderWalls,
   gitTry,
   isAgentCause,
+  JudgeUnavailable,
   loadConfig,
   mintAgentId,
   patchAgentRegistry,
   pidAlive,
   probeStep,
   procStat,
+  providerCallGrade,
   rebindStep,
   releaseSessionSlot,
   requireProviderSurface,
+  resolveStepClass,
   sessionPlane,
   sessionPlaneForCli,
   sessionQuotaConfig,
@@ -73,11 +76,13 @@ import {
   type ListResult,
   type ProviderEntry,
   type ProviderWall,
+  type ResolvedClass,
   type RoutingTable,
   type SessionPlane,
   type SpawnSpec,
   type SpawnWorker,
 } from '@broject/core'
+import type { AcpSeam, FetchFn } from '@broject/providers'
 import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop'
 // builtin session planes self-register on import — the connector layer
 // is the plugin host for agent backends, and admission planes ride the
@@ -368,6 +373,103 @@ export async function resolveSpawnProvider(
         'config'
       )
   }
+}
+
+/** The fleet router's spawn seam (spec bro-1x7p, M7) — fires only on
+ *  an UNCLASSED step: `fleet.router` configured and not 'off', a
+ *  resolved lane on the table, and the caller's `info` carrying no
+ *  `class:` label (its `bd show` also fed the explicit --class check).
+ *  `fleet.router.provider` binds on the call surface; `enforce` gates
+ *  on a typed resolved grade — a prose-grade entry under enforce is a
+ *  config error naming provider + mode, never a silent demotion;
+ *  `shadow` accepts prose — it journals, picks nothing. The pick
+ *  answers *which lane*: enforce re-resolves on the picked class so
+ *  ITS chain head and onWall rule apply — the table still owns the
+ *  chain. JudgeUnavailable is "no verdict" — warn and stand. */
+export async function applyFleetRouter(
+  dir: string,
+  env: AgentConnectorEnv,
+  molStep: string,
+  info:
+    | { label?: string; priority?: number; title?: string; description?: string }
+    | undefined,
+  routed: ResolvedClass | undefined,
+  opts: { fetch?: FetchFn; acp?: AcpSeam } = {}
+): Promise<ResolvedClass | undefined> {
+  const router = env.fleet?.router
+  if (
+    router === undefined ||
+    router.mode === 'off' ||
+    routed === undefined ||
+    info === undefined ||
+    info.label !== undefined
+  ) {
+    return routed
+  }
+  const routing = env.fleet!.routing!
+  const providers = env.providers ?? {}
+  let entry: ProviderEntry
+  try {
+    entry = requireProviderSurface(providers, router.provider, 'call')
+  } catch (err) {
+    if (err instanceof UnknownProviderError || err instanceof ProviderSurfaceError) {
+      throw new SpawnError(`fleet.router.provider — ${err.message}`, 'config')
+    }
+    throw err
+  }
+  if (router.mode === 'enforce') {
+    let grade: 'typed' | 'prose'
+    try {
+      grade = providerCallGrade(entry)
+    } catch (err) {
+      throw new SpawnError(
+        `fleet.router.provider "${router.provider}" — ${err instanceof Error ? err.message : String(err)}`,
+        'config'
+      )
+    }
+    if (grade !== 'typed') {
+      throw new SpawnError(
+        `fleet.router.provider "${router.provider}" resolves to a prose-grade call surface — ` +
+          `mode 'enforce' requires a typed judgment (a systemone-wire api model or a jev-family acp pin)`,
+        'config'
+      )
+    }
+  }
+  // the judge + providers stack is heavy (the acp binding pulls the
+  // SDK) — lazy-import it only when a router actually fires, the same
+  // trick the acp spawn path above uses for @broject/providers
+  const { chainedJudge, judgeConfig, providerJudge, routeClass } = await import('@broject/judge')
+  const jcfg = judgeConfig(dir).judge
+  const judge = chainedJudge(
+    providerJudge(router.provider, entry, jcfg, {
+      fetch: opts.fetch,
+      acp: opts.acp,
+      keyField: `providers.${router.provider}.apiKeyEnv`,
+    }),
+    undefined,
+    { confidence: jcfg.confidence, timeoutMs: jcfg.timeoutMs }
+  )
+  let pick: string | undefined
+  try {
+    pick = await routeClass({
+      dir,
+      judge,
+      molStep,
+      state: { molStep, title: info.title ?? '', description: info.description ?? '' },
+      routing,
+      resolved: routed.class,
+      mode: router.mode,
+    })
+  } catch (err) {
+    if (err instanceof JudgeUnavailable) {
+      console.error(
+        `warning: fleet.router.provider "${router.provider}" — ${err.message}; class "${routed.class}" stands`
+      )
+      return routed
+    }
+    throw err
+  }
+  return pick === undefined ? routed : resolveStepClass(routing, providers, { class: pick, priority: info.priority })
 }
 
 /** Pick the serving backend: explicit --connector → connectors.agents →

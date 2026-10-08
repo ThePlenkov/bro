@@ -50,13 +50,16 @@ import {
   sessionPlanes,
   sessionQuotaConfig,
   sessionSlotsDir,
+  stepClassInfo,
   type AgentConnector,
   type AgentInfo,
   type AgentState,
 } from '@broject/core'
+import type { AcpSeam, FetchFn } from '@broject/providers'
 import { beadsDir } from '@broject/convoy'
 import {
   agentPromptPath,
+  applyFleetRouter,
   eachAgentConnector,
   fleetCapOf,
   fleetOccupancyFor,
@@ -501,7 +504,10 @@ export interface StepSpawnRequest {
 export function spawnStepAgent(
   dir: string,
   env: AgentConnectorEnv,
-  req: StepSpawnRequest
+  req: StepSpawnRequest,
+  /** Test seams — the fleet router's provider call takes a scripted
+   *  transport or an in-process acp peer. */
+  opts: { fetch?: FetchFn; acp?: AcpSeam } = {}
 ): Promise<AgentInfo> {
   if (req.prompt !== undefined && req.promptFile !== undefined) {
     throw new SpawnInputError('prompt and promptFile are mutually exclusive')
@@ -529,35 +535,49 @@ export function spawnStepAgent(
   // declared — the lane pins provenance regardless of who named the
   // provider. The routed chain head supplies the provider only when no
   // explicit lane was picked (--provider/--profile outrank the table).
-  const routed = routeStepClass(env.fleet, env.providers ?? {}, beads, req.molStep, req.class)
-  const provider = req.provider ?? profile?.provider ?? routed?.provider
-  return resolveSpawnProvider(
-    env,
-    conn.name,
-    {
-      provider,
-      // the routed model pin pairs with the routed provider — an
-      // explicit provider override must not inherit chain[0]'s model
-      model:
-        req.model ??
-        profile?.model ??
-        (provider !== undefined && provider === routed?.provider ? routed.model : undefined),
-      autoApprove: req.autoApprove ?? profile?.autoApprove,
-    },
-    req.provider !== undefined ? 'flag' : profile === undefined ? 'backend' : 'profile'
-  ).then((pick) =>
-    conn.spawn({
-      molStep: req.molStep,
-      repoRoot,
-      beadsDir: beads,
-      prompt,
-      env: req.env,
-      provider: pick.provider,
-      model: pick.model,
-      class: routed?.class,
-      worker: pick.worker,
-    })
-  )
+  // M7 fleet.router: fires only on an UNCLASSED step (no --class, no
+  // class: label) with a table declared and the router armed — its one
+  // `bd show` carries both the label check and the title/description
+  // the judge sees.
+  const info =
+    env.fleet?.router !== undefined &&
+    env.fleet.router.mode !== 'off' &&
+    req.class === undefined &&
+    env.fleet.routing !== undefined &&
+    Object.keys(env.fleet.routing).length > 0
+      ? stepClassInfo(beads, req.molStep)
+      : undefined
+  const routed = routeStepClass(env.fleet, env.providers ?? {}, beads, req.molStep, req.class, info)
+  return applyFleetRouter(dir, env, req.molStep, info, routed, opts).then((route) => {
+    const provider = req.provider ?? profile?.provider ?? route?.provider
+    return resolveSpawnProvider(
+      env,
+      conn.name,
+      {
+        provider,
+        // the routed model pin pairs with the routed provider — an
+        // explicit provider override must not inherit chain[0]'s model
+        model:
+          req.model ??
+          profile?.model ??
+          (provider !== undefined && provider === route?.provider ? route.model : undefined),
+        autoApprove: req.autoApprove ?? profile?.autoApprove,
+      },
+      req.provider !== undefined ? 'flag' : profile === undefined ? 'backend' : 'profile'
+    ).then((pick) =>
+      conn.spawn({
+        molStep: req.molStep,
+        repoRoot,
+        beadsDir: beads,
+        prompt,
+        env: req.env,
+        provider: pick.provider,
+        model: pick.model,
+        class: route?.class,
+        worker: pick.worker,
+      })
+    )
+  })
 }
 
 /** The stop behind `down <target>` and DELETE /api/v1/agents/<ref>. */
