@@ -13,11 +13,11 @@ checks, SAST annotations, mergeability, and fix rounds.
 | ------- | ------------ |
 | `bro act status [PR] [--json]` | PR state + exit gate. Non-zero while blocked |
 | `bro act threads [PR]` | Unresolved review threads, TSV |
-| `bro act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; `--cleanup` requires `--merge` and retires the merged worktree and local branch |
-| `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup]` | Merge **only if the gate is green** — refuses and names blockers; `--cleanup` retires the checkout the command runs in when safe, and keeps the local branch if another worktree still checks it out |
+| `bro act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; `--cleanup` requires `--merge` and retires the merged worktree and local branch; `--bead` closes the loop-claimed bead once the merge lands |
+| `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup] [--bead ID]` | Merge **only if the gate is green** — refuses and names blockers; `--cleanup` retires the checkout the command runs in when safe, and keeps the local branch if another worktree still checks it out; `--bead` closes the loop-claimed bead on land |
 | `bro act resolve --thread ID [--comment T]` | Resolve (reply first if comment given); `--unresolve` reopens |
 | `bro act reply --thread ID --comment T` | Reply without resolving; `--file TSV` for batch |
-| `bro act rearm [--dry-run] [--json]` | Resurrect dead PR watchers — respawn `act wait` for open PRs whose watch marker outlived its process; settled markers are swept, live ones kept |
+| `bro act rearm [--dry-run] [--json]` | Resurrect dead PR watchers — respawn `act wait` for open PRs whose watch marker outlived its process (bead identity included); settled markers are swept — a merged one closes the bead it carried — live ones kept |
 
 ## The gate
 
