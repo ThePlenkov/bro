@@ -7,11 +7,14 @@
  *  check store state, refs, and the worktree, not just output. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  CLI_DIST,
   FAKE_BEAD,
   bead,
+  e2eEnv,
   git,
   initRepo,
   inside,
@@ -138,6 +141,10 @@ describe('bro loop e2e', () => {
       assert.equal(existsSync(f.worktree), false)
       assert.match(r.stdout, /clean — no loop tails/)
       assert.match(spawns(f), /work opened pr/)
+      // the liveness guard stays quiet on a clean run — no phantom
+      // heartbeats, no mid-run audit on a normal exit
+      assert.doesNotMatch(r.stderr, /loop: alive —/)
+      assert.doesNotMatch(r.stderr, /exiting mid-run/)
     })
   })
 
@@ -382,6 +389,76 @@ describe('bro loop e2e', () => {
       assert.equal(existsSync(dirty), true)
       assert.match(r.stdout, /worktrees: .*main--fx-y \[loop\/fx-y\]/)
     })
+  })
+})
+
+/** The liveness contract (spec bro-snga4) — verified against a running
+ *  loop, not spawnSync's finished result: a hung agent must stall the
+ *  loop visibly (heartbeat lines name the stage), and a mid-run exit
+ *  must audit itself. `inside` isn't used — it reaps the fixture root
+ *  synchronously while the spawned CLI still runs. */
+describe('bro loop liveness', () => {
+  const spawnLoop = (f: Fixture, extra: string[] = []) =>
+    spawn(process.execPath, [CLI_DIST, 'loop', ...extra], {
+      cwd: f.main,
+      env: e2eEnv({
+        PATH: `${join(f.root, 'bin')}:${process.env.PATH ?? ''}`,
+        HOME: f.root,
+        FAKE_BD_DB: f.db,
+        FAKE_HOST_STATE: f.hostState,
+        E2E_SCENARIO: 'hang',
+      }),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+
+  const until = async (fn: () => boolean, what: string): Promise<void> => {
+    const deadline = Date.now() + 20_000
+    while (!fn()) {
+      assert.ok(Date.now() < deadline, `timed out waiting for ${what}`)
+      await new Promise((r) => setTimeout(r, 50))
+    }
+  }
+
+  test('a hung agent stalls visibly — heartbeat names the stage, SIGTERM exits audited', async () => {
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'hangs' }], {}, 'hang')
+    let workerPid = 0
+    try {
+      const proc = spawnLoop(f, ['--interval', '1'])
+      let stderr = ''
+      proc.stderr!.on('data', (d: Buffer) => (stderr += d))
+      // the heartbeat holds the event loop open — a drain-shaped death
+      // would have ended the process before any `alive` line; the line
+      // names the suspension point the silent deaths hid
+      await until(
+        () => /loop: alive — worker pid=\d+ on fx-a/.test(stderr),
+        'a worker-stage heartbeat'
+      )
+      assert.equal(proc.exitCode, null, 'the loop died awaiting the hung agent')
+      workerPid = Number(/worker pid=(\d+)/.exec(stderr)![1])
+      try {
+        proc.kill('SIGTERM')
+        // the audit re-raises — the parent still sees a real signal
+        // death, not a clean exit code
+        const [code, signal] = await new Promise<[number | null, string | null]>((r) =>
+          proc.once('exit', (c, s) => r([c, s]))
+        )
+        assert.equal(signal, 'SIGTERM')
+        assert.equal(code, null)
+      } finally {
+        // the detached agent group outlives its loop — clean it up
+        try {
+          process.kill(-workerPid, 'SIGKILL')
+        } catch {
+          /* already gone */
+        }
+      }
+      // the signal handler audits before re-raising — stage + bead
+      // named, the note landed, exactly what the silent deaths denied
+      assert.match(stderr, /exiting mid-run — worker pid=\d+ on fx-a/)
+      assert.match(String(bead(f.db, 'fx-a')?.notes), /process exited mid-run/)
+    } finally {
+      rmSync(f.root, { recursive: true, force: true })
+    }
   })
 })
 
