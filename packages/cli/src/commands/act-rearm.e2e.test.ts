@@ -15,6 +15,7 @@ import {
   initRepo,
   installFakeBd,
   installFakeHost,
+  installFakeTasks,
   inside,
   runCli,
   writeHostState,
@@ -235,6 +236,63 @@ describe('act rearm', () => {
         ['act', 'wait', '7', '--interval', '1', '--timeout', '1', '--merge', '--bead', 'fx-a'],
         { cwd: main, env }
       )
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stderr, /fx-a closed/)
+      const row = bead(db, 'fx-a')
+      assert.equal(row?.status, 'closed')
+      assert.match(String(row?.close_reason), /landed via/)
+    })
+  })
+
+  test('an external merge mid-wait discharges --bead — the marker is already swept', () => {
+    const { root, main, db, env } = beadFixture()
+    inside(main, root, () => {
+      // the PR landed without this wait — the settle is MERGED, so
+      // mergeIfAsked never runs and watchEnd removed the marker a rearm
+      // reconcile would have needed
+      writeHostState(join(main, 'host.json'), { prState: 'MERGED' })
+      const r = runCli(
+        ['act', 'wait', '7', '--interval', '1', '--timeout', '1', '--merge', '--bead', 'fx-a'],
+        { cwd: main, env }
+      )
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stderr, /fx-a closed/)
+      const row = bead(db, 'fx-a')
+      assert.equal(row?.status, 'closed')
+      assert.match(String(row?.close_reason), /landed via/)
+    })
+  })
+
+  test('act merge --bead on an already-merged PR still discharges the claim', () => {
+    const { root, main, db, env } = beadFixture()
+    inside(main, root, () => {
+      // landed between the wait's last green poll and merge's own fetch
+      writeHostState(join(main, 'host.json'), { prState: 'MERGED' })
+      const r = runCli(['act', 'merge', '7', '--bead', 'fx-a'], { cwd: main, env })
+      assert.equal(r.code, 1)
+      assert.match(r.stderr, /only OPEN PRs/)
+      assert.equal(bead(db, 'fx-a')?.status, 'closed')
+    })
+  })
+
+  test('the settle close resolves connectors.tasks, not the default beads store', () => {
+    const { root, main } = fixture()
+    // connectors.tasks pins a non-beads backend — the dead loop's claim
+    // lives there, so a bare taskStore() close would never find the row
+    const { db } = installFakeTasks(main, [
+      { ...FAKE_BEAD, id: 'fx-a', status: 'in_progress' },
+    ])
+    writeFileSync(
+      join(main, 'bro.config.json'),
+      JSON.stringify({
+        plugins: ['./fakehost.ts', './faketasks.ts'],
+        connectors: { reviews: 'fakehost', tasks: 'faketasks' },
+      })
+    )
+    inside(main, root, () => {
+      writeHostState(join(main, 'host.json'), { prState: 'MERGED' })
+      deadWatch(main, 9, { bead: 'fx-a' })
+      const r = runCli(['act', 'rearm'], { cwd: main })
       assert.equal(r.code, 0, r.stderr)
       assert.match(r.stderr, /fx-a closed/)
       const row = bead(db, 'fx-a')

@@ -9,9 +9,11 @@
  */
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import { basename, dirname } from 'node:path'
 import {
   ensureAuth,
   facade,
+  gitCommonDir,
   gitTry,
   mergeQueueHost,
   reviewHost,
@@ -268,6 +270,16 @@ async function cmdWait(argv: string[]): Promise<void> {
       } catch {
         // fail-open — the verdict record must never turn the exit-code
         // contract into a failure
+      }
+    }
+    // an external merge settles the wait before mergeIfAsked ever runs —
+    // watchEnd already swept the marker, so nothing is left for `act
+    // rearm`'s settle-path reconcile to see. Discharge the loop-claimed
+    // bead here (its twin rule: MERGED closes, CLOSED-unmerged keeps)
+    if (res.state.state === 'MERGED') {
+      const bead = flag(argv, '--bead')
+      if (bead !== undefined) {
+        closeLandedBead(rev, t, bead)
       }
     }
     process.exitCode = res.timedOut || !res.gate.ok ? 1 : 0
@@ -555,6 +567,14 @@ async function cmdMerge(argv: string[]): Promise<void> {
     // a closed/merged PR can pass the gate (threads resolved, checks
     // settled) — merging it isn't a gate question, it's a lifecycle error
     if (state.state !== 'OPEN') {
+      // already landed still discharges the claim — the race where the
+      // PR merged between the wait's last green poll and this fetch
+      if (state.state === 'MERGED') {
+        const bead = flag(argv, '--bead')
+        if (bead !== undefined) {
+          closeLandedBead(rev, t, bead)
+        }
+      }
       console.error(
         `error: ${rev.prLink(t.repo, t.pr)} is ${state.state} — only OPEN PRs can be merged`
       )
@@ -606,7 +626,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
 function closeLandedBead(rev: ReviewFacade, t: PrTarget, bead: string): void {
   const link = rev.prLink(t.repo, t.pr)
   try {
-    const tasks = taskStore()
+    const tasks = claimStore(process.cwd())
     const row = tasks.get(bead)
     if (row === undefined) {
       console.error(`act: bead ${bead} not in the task store — nothing closed for ${link}`)
@@ -620,6 +640,17 @@ function closeLandedBead(rev: ReviewFacade, t: PrTarget, bead: string): void {
   } catch (err) {
     console.error(`act: closing ${bead} failed — ${err instanceof Error ? err.message : String(err)}`)
   }
+}
+
+/** The store a loop claim actually lives in — the tasks facade honors
+ *  `connectors.tasks` where bare `taskStore()` always resolves beads, and
+ *  the anchor is the main checkout (the git common dir's parent): a
+ *  settle running in the bead's own worktree — or any scoped/subdir cwd —
+ *  must not fork the close onto a store the claim was never written to. */
+function claimStore(dir: string): ReturnType<typeof taskStore> {
+  const common = gitCommonDir(dir)
+  const root = common !== null && basename(common) === '.git' ? dirname(common) : dir
+  return facade('tasks', { dir: root }, { prefer: loadBroConfig(root).connectors })
 }
 
 /** The branch a merged PR's checkout should fall back to: origin/HEAD's

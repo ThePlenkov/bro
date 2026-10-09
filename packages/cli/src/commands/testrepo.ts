@@ -656,6 +656,54 @@ export function readHostState(state: string): Record<string, unknown> {
   return JSON.parse(readFileSync(state, 'utf8')) as Record<string, unknown>
 }
 
+/** A `tasks` connector over tasks.json beside the plugin — the
+ *  configured-backend fixture half: `connectors.tasks` pins it and the
+ *  facade's TaskStore ops land on this file instead of `bd`. Only the
+ *  surface the bead-close path needs is implemented. */
+const FAKE_TASKS_PLUGIN = `// e2e fixture — a tasks connector driven by tasks.json beside this file
+import { readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+const DB = join(dirname(fileURLToPath(import.meta.url)), 'tasks.json')
+const load = () => JSON.parse(readFileSync(DB, 'utf8'))
+const save = (db) => writeFileSync(DB, JSON.stringify(db))
+export default {
+  name: 'faketasks-plugin',
+  summary: 'e2e fixture',
+  run: () => {},
+  connectors: [
+    {
+      name: 'faketasks',
+      matchRemote: () => false,
+      tasks: () => ({
+        get: (id) => load().rows.find((r) => r.id === id),
+        close: (id, reason) => {
+          const db = load()
+          const r = db.rows.find((x) => x.id === id)
+          if (r) {
+            r.status = 'closed'
+            if (reason) r.close_reason = reason
+            save(db)
+          }
+        },
+      }),
+    },
+  ],
+}
+`
+
+/** Write the fake tasks-connector plugin + its store into the fixture
+ *  repo root; `db` is the tasks.json path `bead()` can read. */
+export function installFakeTasks(
+  root: string,
+  rows: Array<Record<string, unknown>> = []
+): { db: string } {
+  writeFileSync(join(root, 'faketasks.ts'), FAKE_TASKS_PLUGIN)
+  const db = join(root, 'tasks.json')
+  writeBeads(db, rows)
+  return { db }
+}
+
 // --- fake dolt — the beads-remote transport fixture -----------------------------
 //
 // `dolt clone <remote> <dir>` copies the remote's `db.json` into the
