@@ -17,6 +17,7 @@ planned group work is [bro convoy](/docs/commands/convoy).
 | `bro loop --agent '<template>'` | Override the configured agent — a value naming a configured `providers.<name>` spawns through the registry instead |
 | `bro loop --provider <name>` | Pick a [provider](/docs/commands/providers) explicitly |
 | `bro loop --profile <name>` | Apply a `fleet.profiles` preset |
+| `bro loop --class <name>` | Pin every claimed bead to one `fleet.routing` class |
 | `bro loop --model <m>` / `--auto-approve` | Model override / acp permission policy for the provider lane |
 | `bro loop --label a,b` | Only claim beads carrying one of these labels |
 | `bro loop --stack <name>` | Put each claimed bead on a named [stack](/docs/commands/stack) |
@@ -30,3 +31,10 @@ providers substitute their command for the template), and a raw
 `mergeTimeoutMin`, `fixRounds`, and `maxItems` control the run;
 `--interval` controls gate polling. See
 [`loop` config](/docs/configuration#loop).
+
+With `fleet.routing` declared, each claimed bead resolves its class —
+the `--class` pin, else the `class:<name>` label, else `default` — and the
+class's chain head supplies the provider, exactly like `bro agents up`.
+Flag picks (`--provider`, `--agent <provider>`, `--profile`) still pin
+one provider for the whole run; a raw template `--agent` bypasses
+routing entirely.

@@ -600,7 +600,12 @@ const log = (msg) => {
     : prompt.includes('merge conflicts')
       ? 'rebase'
       : 'work'
-  fs.appendFileSync(f, kind + ' ' + msg + '\\n')
+  // provider/class provenance pins the loop sets — routing tests key
+  // off them; the bracket suffix keeps the 'work opened pr' match intact
+  const prov = ' [bead=' + (process.env.BRO_BEAD_ID || '-') +
+    ' provider=' + (process.env.BRO_AGENT_PROVIDER || '-') +
+    ' class=' + (process.env.BRO_AGENT_CLASS || '-') + ']'
+  fs.appendFileSync(f, kind + ' ' + msg + prov + '\\n')
 }
 if (prompt.includes('review-threads')) {
   // fix round — resolve the threads and stop

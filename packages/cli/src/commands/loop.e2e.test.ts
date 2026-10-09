@@ -99,6 +99,7 @@ fs.appendFileSync(
     provider: process.env.BRO_AGENT_PROVIDER || null,
     agent: process.env.BRO_AGENT || null,
     model: process.env.BRO_AGENT_MODEL || null,
+    class: process.env.BRO_AGENT_CLASS || null,
   }) + '\\n'
 )
 if (fs.readFileSync(pf, 'utf8').includes('review-threads')) {
@@ -549,6 +550,160 @@ describe('bro loop provider lane', () => {
       assert.match(r.stdout, /provider: devin/)
       assert.match(r.stdout, /acp-worker/)
       assert.match(r.stdout, /--command 'devin acp'/)
+      assert.equal(bead(f.db, 'fx-a')?.status, 'open')
+    })
+  })
+})
+
+/** Routing fixture — two cli providers over the same fake agent, a
+ *  `default` chain and a `sweep` chain. loop.agent is 'false' so only a
+ *  provider command can land anything. */
+const routedLane = (
+  rows: Array<Record<string, unknown>>,
+  loopCfg: Record<string, unknown> = {},
+  routing: Record<string, unknown> = {
+    default: { chain: ['regular'] },
+    sweep: { chain: ['sweeper'] },
+  }
+): Fixture =>
+  loopFixture(rows, { agent: 'false', ...loopCfg }, 'land', (host) => ({
+    providers: {
+      sweeper: { type: 'cli', command: `node ${host.agent}` },
+      regular: { type: 'cli', command: `node ${host.agent}` },
+    },
+    fleet: { routing },
+  }))
+
+describe('bro loop fleet.routing', () => {
+  test('each bead resolves its class — the class: label and default pick different providers', () => {
+    const f = routedLane([
+      { ...FAKE_BEAD, id: 'fx-a', title: 'sweep the queue', labels: ['class:sweep'] },
+      { ...FAKE_BEAD, id: 'fx-b', title: 'plain work' },
+    ])
+    // per-branch PR map — both beads get their own PR number
+    writeHostState(f.hostState, { prs: {} })
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /fleet\.routing — provider resolves per bead class/)
+      assert.match(r.stdout, /2 landed, 0 closed, 0 parked, 0 failed/, r.stderr)
+      const log = spawns(f)
+      assert.match(log, /work opened pr \[bead=fx-a provider=sweeper class=sweep\]/)
+      assert.match(log, /work opened pr \[bead=fx-b provider=regular class=default\]/)
+      assert.equal(bead(f.db, 'fx-a')?.status, 'closed')
+      assert.equal(bead(f.db, 'fx-b')?.status, 'closed')
+    })
+  })
+
+  test('--class pins the lane — a disagreeing class: label loses to the flag', () => {
+    const f = routedLane([
+      { ...FAKE_BEAD, id: 'fx-a', title: 'pin me', labels: ['class:nope'] },
+    ])
+    inside(f.main, f.root, () => {
+      const r = f.run(['--class', 'sweep'])
+      assert.match(r.stdout, /loop: fx-a landed/, r.stderr)
+      assert.match(spawns(f), /work opened pr \[bead=fx-a provider=sweeper class=sweep\]/)
+    })
+  })
+
+  test('an unknown --class fails before the first claim', () => {
+    const f = routedLane([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }])
+    inside(f.main, f.root, () => {
+      const r = f.run(['--class', 'bogus'])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /fleet\.routing has no class "bogus"/)
+      assert.equal(bead(f.db, 'fx-a')?.status, 'open')
+    })
+  })
+
+  test('a missing default row fails before the first claim', () => {
+    const f = routedLane(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }],
+      {},
+      { sweep: { chain: ['sweeper'] } }
+    )
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /fleet\.routing has no class "default"/)
+      assert.equal(bead(f.db, 'fx-a')?.status, 'open')
+    })
+  })
+
+  test('a dead loop.provider under armed routing cannot abort the run', () => {
+    // 'ghost' is never configured — under routing every bead takes its
+    // class chain head, so the stale lower-tier pick is unreachable and
+    // must not fail the run before the first claim
+    const f = routedLane([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }], { provider: 'ghost' })
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /loop: fx-a landed/, r.stderr)
+      assert.equal(bead(f.db, 'fx-a')?.status, 'closed')
+    })
+  })
+
+  test('an unknown class: label parks the bead — claimed and noted, no worktree litter', () => {
+    const f = routedLane([
+      { ...FAKE_BEAD, id: 'fx-a', title: 'misrouted', labels: ['class:bogus'] },
+    ])
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /1 parked/, r.stderr)
+      assert.match(r.stdout, /route failed — .*no class "bogus"/)
+      const row = bead(f.db, 'fx-a')
+      assert.equal(row?.status, 'in_progress')
+      assert.match(String(row?.notes), /route resolution failed.*no class "bogus"/)
+      assert.equal(existsSync(f.worktree), false)
+    })
+  })
+
+  test('a pinned provider still pins every bead — the class rides as provenance', () => {
+    // --agent <provider> stays the single-provider bypass: every bead
+    // lands on the pinned lane, but the resolved class still stamps
+    const f = routedLane(
+      [
+        { ...FAKE_BEAD, id: 'fx-a', title: 'sweep', labels: ['class:sweep'] },
+        { ...FAKE_BEAD, id: 'fx-b', title: 'plain' },
+      ],
+      {}
+    )
+    writeHostState(f.hostState, { prs: {} })
+    inside(f.main, f.root, () => {
+      const r = f.run(['--provider', 'regular'])
+      assert.match(r.stdout, /2 landed/, r.stderr)
+      const log = spawns(f)
+      assert.match(log, /work opened pr \[bead=fx-a provider=regular class=sweep\]/)
+      assert.match(log, /work opened pr \[bead=fx-b provider=regular class=default\]/)
+    })
+  })
+
+  test('a template --agent bypasses fleet.routing with a warn line', () => {
+    const f = routedLane([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }])
+    inside(f.main, f.root, () => {
+      const r = f.run(['--agent', `node ${f.agent}`])
+      assert.match(r.stderr, /bypasses fleet\.routing/)
+      assert.match(r.stdout, /loop: fx-a landed/)
+      assert.match(spawns(f), /work opened pr \[bead=fx-a provider=- class=-\]/)
+    })
+  })
+
+  test('--class beside a template --agent is contradictory', () => {
+    const f = routedLane([])
+    inside(f.main, f.root, () => {
+      const r = f.run(['--agent', 'raw -p {promptFile}', '--class', 'sweep'])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /raw template/)
+    })
+  })
+
+  test('--dry-run renders the claimed bead’s resolved class + provider', () => {
+    const f = routedLane([
+      { ...FAKE_BEAD, id: 'fx-a', title: 'sweep it', labels: ['class:sweep'] },
+    ])
+    inside(f.main, f.root, () => {
+      const r = f.run(['--dry-run'])
+      assert.match(r.stdout, /would claim fx-a/)
+      assert.match(r.stdout, /class: sweep/)
+      assert.match(r.stdout, /provider: sweeper/)
       assert.equal(bead(f.db, 'fx-a')?.status, 'open')
     })
   })
