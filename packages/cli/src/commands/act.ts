@@ -57,6 +57,7 @@ import {
   recordDisposition,
 } from '@broject/judge'
 import { coveredBeadIds } from '@broject/loop'
+import { githubPrWake } from '@broject/github'
 
 function usage(): never {
   console.error(`Usage: bro act <command> [args…]
@@ -208,6 +209,9 @@ async function cmdWait(argv: string[]): Promise<void> {
     {
       intervalMs: interval * 1000,
       timeoutMs: timeout * 60_000,
+      // a github:* bus subscription pokes the poll loop early (spec
+      // bro-huy5o.7) — broker down arms nothing and the timer rules
+      wake: () => githubPrWake(process.cwd(), t.pr),
       // a session-bound watcher that dies with the turn leaves a marker —
       // the session-start hook flags the stale promise (bro-97lk)
       watch: {

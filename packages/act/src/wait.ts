@@ -13,9 +13,23 @@ export interface GateWaitResult {
   polls: number
 }
 
+/** An external wake source — a subscription distilled to "something
+ *  changed, poll early". `next()` resolves on the next relevant event;
+ *  a dead or absent source degrades to pure timer polling (spec
+ *  specs/bro-huy5o.7.md). */
+export interface GateWake {
+  next(): Promise<void>
+  close(): void
+}
+
 export interface WaitOptions {
   intervalMs?: number
   timeoutMs?: number
+  /** Armed once before the loop: each interval sleep then races the
+   *  timer against `waker.next()`, so a webhook/check event polls early.
+   *  A null or throwing arm leaves the loop exactly as it was —
+   *  fail-open, polling stays the default. */
+  wake?: () => Promise<GateWake | null>
   /** Repo dir + PR identity for the pending-watch marker: while the loop
    *  polls, `<git-common-dir>/bro/watches/<pr>-<pid>-<nonce>.json` proves a watch
    *  was promised; a dead pid at session start is the stale promise the
@@ -44,7 +58,7 @@ export function gatePending(state: PrActState): boolean {
   )
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+const sleep = (ms: number): Promise<void> => new Promise<void>((r) => setTimeout(r, ms))
 
 export async function waitForGate(
   fetch: () => Promise<{ state: PrActState; gate: ExitGate }>,
@@ -59,6 +73,19 @@ export async function waitForGate(
     const { dir, ...w } = opts.watch
     marker = watchBegin(dir, w)
   }
+  // arm the wake source before the first fetch — a source that can't
+  // arm (broker down, not a repo) is just null and every nap below is
+  // the plain timer it always was
+  let waker: GateWake | null = null
+  try {
+    waker = (await opts.wake?.()) ?? null
+  } catch {
+    waker = null
+  }
+  // sleep, or wake early on an event — the loser of the race leaves a
+  // pending promise that close() or a later event retires harmlessly
+  const nap = (ms: number): Promise<void> =>
+    waker === null ? sleep(ms) : Promise.race([sleep(ms), waker.next()])
   let polls = 0
   let fetchErrors = 0
   let updatedSha = ''
@@ -74,7 +101,7 @@ export async function waitForGate(
         if (fetchErrors >= maxErrors || Date.now() >= deadline) {
           throw err
         }
-        await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())))
+        await nap(Math.min(intervalMs, Math.max(0, deadline - Date.now())))
         continue
       }
       polls += 1
@@ -102,13 +129,13 @@ export async function waitForGate(
           state.mergeable === 'MERGEABLE' &&
           gate.blockers.length === 1
         ) {
-          await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())))
+          await nap(Math.min(intervalMs, Math.max(0, deadline - Date.now())))
           continue
         }
         if (state.mergeable === 'MERGEABLE' && gate.blockers.length === 1) {
           if (await opts.updateBranch(state)) {
             updatedSha = state.headSha
-            await sleep(Math.min(5_000, Math.max(0, deadline - Date.now())))
+            await nap(Math.min(5_000, Math.max(0, deadline - Date.now())))
             continue
           }
         }
@@ -118,9 +145,10 @@ export async function waitForGate(
       }
       // cap the sleep at the deadline — a full-interval nap can overshoot
       // the configured timeout by up to intervalMs
-      await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())))
+      await nap(Math.min(intervalMs, Math.max(0, deadline - Date.now())))
     }
   } finally {
+    waker?.close()
     watchEnd(marker)
   }
 }
