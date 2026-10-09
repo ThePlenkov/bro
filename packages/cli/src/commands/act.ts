@@ -45,6 +45,7 @@ import {
   type ActPlan,
   type ActThreadVerdict,
   type ExitGate,
+  type GateWaitResult,
   type PrActState,
   type RearmPlan,
 } from '@broject/act'
@@ -247,45 +248,47 @@ async function cmdWait(argv: string[]): Promise<void> {
     }
   }
   if (res.timedOut || !res.gate.ok || res.state.state !== 'OPEN') {
-    // a settled blocked verdict is a finding, not just an exit code —
-    // a detached or turn-dead watcher leaves nobody reading it, so it
-    // lands where rehydrate looks: a verdict marker session-start flags
-    // plus a keyed mailbox drop live sessions drain mid-turn (bro-q4iq0)
     if (!res.timedOut && !res.gate.ok) {
-      const link = rev.prLink(t.repo, t.pr)
-      watchVerdict(process.cwd(), { pr: t.pr, link, timeoutMin: timeout }, res.gate.blockers)
-      try {
-        await facade('events', { dir: process.cwd() }, { prefer: loadBroConfig().connectors }).publish(
-          {
-            topic: 'act',
-            kind: 'block',
-            key: `act-wait-${t.pr}`,
-            source: 'act-wait',
-            ref: res.state.url,
-            payload:
-              `act wait on ${link} settled BLOCKED — ${res.gate.blockers.join('; ')} — ` +
-              `\`bro act threads ${t.pr}\` lists them`,
-          }
-        )
-      } catch {
-        // fail-open — the verdict record must never turn the exit-code
-        // contract into a failure
-      }
+      await recordBlockedVerdict(rev, t, res, timeout)
     }
     // an external merge settles the wait before mergeIfAsked ever runs —
     // watchEnd already swept the marker, so nothing is left for `act
     // rearm`'s settle-path reconcile to see. Discharge the loop-claimed
     // bead here (its twin rule: MERGED closes, CLOSED-unmerged keeps)
-    if (res.state.state === 'MERGED') {
-      const bead = flag(argv, '--bead')
-      if (bead !== undefined) {
-        closeLandedBead(rev, t, bead)
-      }
-    }
+    closeBeadIfLanded(argv, rev, t, res.state.state)
     process.exitCode = res.timedOut || !res.gate.ok ? 1 : 0
     return
   }
   await mergeIfAsked(argv, t.pr)
+}
+
+/** A settled blocked verdict is a finding, not just an exit code — a
+ *  detached or turn-dead watcher leaves nobody reading it, so it lands
+ *  where rehydrate looks: a verdict marker session-start flags plus a
+ *  keyed mailbox drop live sessions drain mid-turn (bro-q4iq0). */
+async function recordBlockedVerdict(
+  rev: ReviewFacade,
+  t: PrTarget,
+  res: GateWaitResult,
+  timeoutMin: number
+): Promise<void> {
+  const link = rev.prLink(t.repo, t.pr)
+  watchVerdict(process.cwd(), { pr: t.pr, link, timeoutMin }, res.gate.blockers)
+  try {
+    await facade('events', { dir: process.cwd() }, { prefer: loadBroConfig().connectors }).publish({
+      topic: 'act',
+      kind: 'block',
+      key: `act-wait-${t.pr}`,
+      source: 'act-wait',
+      ref: res.state.url,
+      payload:
+        `act wait on ${link} settled BLOCKED — ${res.gate.blockers.join('; ')} — ` +
+        `\`bro act threads ${t.pr}\` lists them`,
+    })
+  } catch {
+    // fail-open — the verdict record must never turn the exit-code
+    // contract into a failure
+  }
 }
 
 /** Detached `act wait` resurrection — own process group, parent's
@@ -569,12 +572,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
     if (state.state !== 'OPEN') {
       // already landed still discharges the claim — the race where the
       // PR merged between the wait's last green poll and this fetch
-      if (state.state === 'MERGED') {
-        const bead = flag(argv, '--bead')
-        if (bead !== undefined) {
-          closeLandedBead(rev, t, bead)
-        }
-      }
+      closeBeadIfLanded(argv, rev, t, state.state)
       console.error(
         `error: ${rev.prLink(t.repo, t.pr)} is ${state.state} — only OPEN PRs can be merged`
       )
@@ -639,6 +637,21 @@ function closeLandedBead(rev: ReviewFacade, t: PrTarget, bead: string): void {
     console.error(`act: ${bead} closed — ${link} merged`)
   } catch (err) {
     console.error(`act: closing ${bead} failed — ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+/** The claim discharge owed even when the merge didn't happen here —
+ *  an external merge (or the race past the last green poll) leaves
+ *  `--bead` to release exactly as an own-merge would. */
+function closeBeadIfLanded(
+  argv: string[],
+  rev: ReviewFacade,
+  t: PrTarget,
+  state: string
+): void {
+  const bead = flag(argv, '--bead')
+  if (state === 'MERGED' && bead !== undefined) {
+    closeLandedBead(rev, t, bead)
   }
 }
 
