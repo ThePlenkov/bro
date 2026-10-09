@@ -120,6 +120,19 @@ describe('prompts', () => {
     assert.match(p, /BEADS_DIR/)
   })
 
+  test('work prompt orders the commit+push checkpoint before deep verification', () => {
+    // bro-rbqgf: a worker killed mid-verify left commits unpushed in the
+    // worktree — the checkpoint rule must precede the expensive step
+    const p = buildWorkPrompt(bead, 'loop/bro-x1')
+    const checkpoint = p.indexOf('Checkpoint BEFORE deep verification')
+    const verify = p.indexOf('Verify like CI')
+    assert.ok(checkpoint !== -1, 'checkpoint rule present')
+    assert.ok(verify !== -1, 'verify rule present')
+    assert.ok(checkpoint < verify)
+    // the PR step keeps its own push so post-verify fixes reach the branch
+    assert.match(p, /- Push, then `gh pr create`/)
+  })
+
   test("work prompt uses the backend's own close verb", () => {
     // a github-tasks rig may have no bd at all — the verdict must ride
     // the transport the connector guarantees
