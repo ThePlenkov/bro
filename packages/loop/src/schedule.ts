@@ -102,12 +102,13 @@ function behindAction(
   ) {
     return undefined
   }
-  if (s.headSha !== m.updatedSha) {
-    return { kind: 'update' }
+  // the deadline gates the update path too — waitForGate only attempted
+  // the push inside its window; a base that keeps moving must not buy
+  // the member unlimited updates past mergeTimeoutMin
+  if (opts.now - m.since >= opts.timeoutMs) {
+    return { kind: 'park', why: `blocked: ${s.blockers.join('; ')}` }
   }
-  return opts.now - m.since >= opts.timeoutMs
-    ? { kind: 'park', why: `blocked: ${s.blockers.join('; ')}` }
-    : { kind: 'wait' }
+  return s.headSha !== m.updatedSha ? { kind: 'update' } : { kind: 'wait' }
 }
 
 /** A still-settling gate waits out the member's own deadline — the

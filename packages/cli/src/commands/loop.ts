@@ -890,17 +890,19 @@ async function serviceMember(
       noteBead(ctx.tasks, m.bead.id, `loop: PR ${prRef(ctx, m.pr)} was closed unmerged — worktree ${m.item.worktreeDir}`)
       return leave(m, 'parked')
     case 'fix':
-      m.rounds += 1
-      await runFixRound(ctx, m.bead, m.item, m.pr, m.rounds)
-      m.since = Date.now()
-      return 'active'
+      return respawnRound(ctx, m, () => runFixRound(ctx, m.bead, m.item, m.pr, m.rounds))
     case 'rebase':
-      m.rounds += 1
-      await runRebaseRound(ctx, m.bead, m.item, m.pr, m.rounds)
-      m.since = Date.now()
-      return 'active'
+      return respawnRound(ctx, m, () => runRebaseRound(ctx, m.bead, m.item, m.pr, m.rounds))
     case 'update': {
-      const ok = ctx.rev.updateBranch({ repo: ctx.repo, pr: m.pr }, snap.headSha)
+      let ok: boolean
+      try {
+        ok = ctx.rev.updateBranch({ repo: ctx.repo, pr: m.pr }, snap.headSha)
+      } catch (err) {
+        // a throw must not take the stack down — quiet keep; the
+        // member's own deadline still bounds the retries
+        console.error(`loop ${prRef(ctx, m.pr)}: update-branch threw — ${String(err)}`)
+        return 'kept'
+      }
       console.error(`loop ${prRef(ctx, m.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`)
       if (!ok) {
         // an update refusal IS the settle — same park the wait produced
@@ -922,6 +924,27 @@ async function serviceMember(
 function leave(m: GateMember, verdict: 'landed' | 'parked'): 'landed' | 'parked' {
   watchEnd(m.marker)
   return verdict
+}
+
+/** One respawn round (fix or rebase): consumes budget, resets the
+ *  member clock on success, and degrades to a quiet keep when the round
+ *  itself fails — a reviewThreads/prMeta fetch dying on ONE member must
+ *  not abort the run and orphan every other gate's claim. The clock
+ *  only resets on a round that actually ran. */
+async function respawnRound(
+  ctx: Ctx,
+  m: GateMember,
+  run: () => Promise<void>
+): Promise<'kept' | 'active'> {
+  m.rounds += 1
+  try {
+    await run()
+  } catch (err) {
+    console.error(`loop ${prRef(ctx, m.pr)}: respawn round ${m.rounds} failed — ${String(err)}`)
+    return 'kept'
+  }
+  m.since = Date.now()
+  return 'active'
 }
 
 /** The conflict round — the member's PR is CONFLICTING; the agent
@@ -1492,7 +1515,15 @@ async function runQueue(ctx: Ctx): Promise<void> {
         break
       }
       if (!busy) {
-        await sleep(ctx.intervalS * 1000)
+        // cap the nap at the earliest member deadline — waitForGate's
+        // own sleep was deadline-capped; a member at mergeTimeoutMin
+        // must park on the next tick, not an interval late
+        const deadline = Math.min(
+          ...q.stack.map((m) => m.since + ctx.cfg.mergeTimeoutMin * 60_000)
+        )
+        await sleep(
+          Math.min(ctx.intervalS * 1000, Math.max(0, deadline - Date.now()))
+        )
       }
     }
     if (ctx.json) {

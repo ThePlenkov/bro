@@ -126,6 +126,17 @@ describe('memberAction', () => {
     assert.equal(a.kind, 'wait')
   })
 
+  test('BEHIND past the member deadline parks — no update is issued', () => {
+    // a base that keeps moving must not buy the member unlimited
+    // updates: waitForGate only pushed inside its window
+    const a = memberAction(
+      snap({ mergeState: 'BEHIND', headSha: 'new', blockers: ['behind'] }),
+      clock({ since: NOW - 46 * 60_000, updatedSha: 'old' }),
+      opts()
+    )
+    assert.deepEqual(a, { kind: 'park', why: 'blocked: behind' })
+  })
+
   test('BEHIND beside another blocker does not update — it settles', () => {
     const a = memberAction(
       snap({
