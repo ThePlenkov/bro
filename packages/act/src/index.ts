@@ -30,6 +30,7 @@ export {
   watchHeartbeat,
   watchMarkerKind,
   watchRetire,
+  watchVerdict,
 } from './pending-watch.ts'
 export type { ListedWatch, PendingWatch } from './pending-watch.ts'
 export { checkHistory, checkHistoryPath, fileCheckHistory } from './check-history.ts'

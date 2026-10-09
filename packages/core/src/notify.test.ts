@@ -20,6 +20,7 @@ import {
   DROP_TTL_MS,
   dropMailbox,
   mailboxDir,
+  notifyConnector,
   notifyDir,
   renderDrop,
   userMailboxDir,
@@ -487,5 +488,30 @@ describe('renderDrop', () => {
       renderDrop(JSON.stringify({ topic: 'notify', kind: 'note', payload: 'plain json note' })),
       'plain json note'
     )
+  })
+})
+
+describe('notifyConnector', () => {
+  test('sessionStart drains pending drops — a dead session\'s mail lands at the next start', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        mkdirSync(mb, { recursive: true })
+        writeFileSync(join(mb, 'note-100-a.txt'), 'gate ready')
+        const hooks = notifyConnector.hooks?.({ dir, sessionId: 's1' })
+        assert.ok(hooks?.sessionStart)
+        assert.deepEqual(hooks.sessionStart({ dir, sessionId: 's1' }), [
+          'bro notify — 1 mailbox message(s):',
+          'gate ready',
+        ])
+        // the same session's next probe sees nothing — delivered once
+        assert.deepEqual(hooks.sessionStart({ dir, sessionId: 's1' }), [])
+        // broadcast survives for a different session
+        assert.deepEqual(hooks.sessionStart({ dir, sessionId: 's2' }), [
+          'bro notify — 1 mailbox message(s):',
+          'gate ready',
+        ])
+      })
+    })
   })
 })
