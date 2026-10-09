@@ -101,6 +101,8 @@ a `BroPlugin`. See [Plugins](/docs/plugins).
 | Key | Default | What |
 | --- | ------- | ---- |
 | `maxConcurrent` | `3` | Cap on live registry agents, counted across all backends. `0` is uncapped. Enforced in the shared spawn prologue under the registry lock; an unverifiable entry occupies its slot (fail-closed) |
+| `routing` | unset | Task-class → ordered provider-chain table. `bro loop` and `bro agents up` resolve each bead's `class:<name>` label (or `default`) to a chain; the head supplies the provider unless a flag already pinned one |
+| `router` | unset | Optional judge classifier — `{ "provider": "<name>", "mode": "shadow"\|"enforce"\|"off" }` picks the lane for unclassed work |
 
 ### `agents`
 

@@ -33,6 +33,33 @@ A `cli` entry substitutes its `command` for the template. The picks:
 `bro loop --agent kilo-cli` works too — a bare `--agent` value that
 exactly names a configured provider IS a provider pick.
 
+**Per-bead routing** — declare `fleet.routing` and each claimed bead's
+class picks its own provider chain, same as `bro agents up`: the
+`class:<name>` bead label wins, unclassed beads take `default`, and
+`--class <name>` pins the whole run to one class:
+
+```json
+{
+  "fleet": {
+    "routing": {
+      "default": { "chain": ["devin"] },
+      "sweep": { "chain": ["kilo-free"] }
+    }
+  }
+}
+```
+
+The chain head supplies the provider (and its inline `model` pin) unless
+a flag-tier pick already named one — explicit `--provider`,
+`--agent <provider>`, `--profile` still pin the lane for every bead,
+with the resolved class stamped as provenance (`BRO_AGENT_CLASS`); the
+config picks (`loop.provider`, `loop.profile`, `agents.native.provider`)
+are standing defaults the declared table outranks. A resolved class
+missing from the table is a config error — `default` is preflighted
+before the first claim, a bad `class:` label parks its bead instead of
+silently falling through. `fleet.router` (shadow/enforce) classifies
+unclassed beads by judge verdict, same as `agents up`.
+
 **Raw template** — `loop.agent` (or an `--agent` value that names no
 provider) is the escape hatch:
 
@@ -51,7 +78,8 @@ unattended work are yours to choose — e.g. devin's
 human confirmation, which is the point of the loop but obviously grants
 the agent full autonomy; scope it to machines/repos you trust. A
 template `--agent` flag wins over a configured `loop.provider` — the
-provider flags can't sit beside it.
+provider flags can't sit beside it. It also bypasses `fleet.routing`
+entirely (a warn line says so): every bead runs the literal template.
 
 Other `loop` keys: `bootstrap` (runs once per worktree), budgets
 `agentTimeoutMin`/`mergeTimeoutMin`, `fixRounds`, `maxItems`, and
@@ -67,6 +95,7 @@ Other `loop` keys: `bootstrap` (runs once per worktree), budgets
 | `bro loop --dry-run` | Print the top item's plan (claim, worktree, agent cmd) — changes nothing |
 | `bro loop --agent '<tpl>'` | One-off agent override — a provider name resolves through the registry |
 | `bro loop --provider <name>` | Provider pick (`--profile`, `--model`, `--auto-approve` tune it) |
+| `bro loop --class <name>` | Pin every claimed bead to one `fleet.routing` class (default: the bead's `class:` label, else `default`) |
 | `bro loop --label a,b` | Declared scope — only beads carrying one of these labels are claimable; the rest of the shared queue stays untouched. "Loop the debt beads" never bleeds into unrelated work |
 | `--agent-timeout MIN`, `--merge-timeout MIN`, `--interval SEC` | Budget overrides |
 

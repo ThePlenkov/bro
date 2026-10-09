@@ -260,19 +260,20 @@ export function resolveStepClass(
 export function routeStepClass(
   fleet: { routing?: RoutingTable } | undefined,
   providers: Record<string, ProviderEntry>,
-  beadsDir: string,
+  beadsDir: string | undefined,
   molStep: string,
   explicitClass?: string,
-  /** Optional pre-read bead info — the router path reads the bead once
-   *  for label + text and hands it in rather than paying a second
-   *  `bd show`. */
+  /** Optional pre-read bead info — callers that already hold the bead's
+   *  labels/priority (a `bd ready` row, a non-beads task store) hand it
+   *  in rather than paying a `bd show`; with no beadsDir it is the only
+   *  read available. */
   info?: { label?: string; priority?: number }
 ): ResolvedClass | undefined {
   const routing = fleet?.routing
   if (routing === undefined || Object.keys(routing).length === 0) {
     return undefined
   }
-  const read = info ?? stepClassInfo(beadsDir, molStep)
+  const read = info ?? (beadsDir === undefined ? {} : stepClassInfo(beadsDir, molStep))
   return resolveStepClass(routing, providers, {
     class: explicitClass,
     label: read.label,

@@ -3,9 +3,11 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import {
   bdTry,
+  resolveStepClass,
   SpawnError,
   type FleetProfile,
   type ProviderEntry,
+  type RoutingTable,
   type SpawnWorker,
 } from '@broject/core'
 import { DEFAULT_LOOP_CONFIG, type LoopConfig } from '@broject/loop'
@@ -23,11 +25,12 @@ const laneCfg = (over: Partial<LoopConfig> = {}): LoopConfig => ({
 const laneEnv = (
   providers: Record<string, ProviderEntry> = {},
   profiles: Record<string, FleetProfile> = {},
-  agents: Record<string, Record<string, unknown>> = {}
+  agents: Record<string, Record<string, unknown>> = {},
+  routing: RoutingTable = {}
 ): AgentConnectorEnv => ({
   agents,
   connectors: {},
-  fleet: { maxConcurrent: 3, profiles, routing: {} },
+  fleet: { maxConcurrent: 3, profiles, routing },
   providers,
 })
 
@@ -180,6 +183,109 @@ describe('resolveLoopLane', () => {
       laneCfg({ provider: 'devin' })
     )
     assert.deepEqual(lane, {})
+  })
+})
+
+// --- the routed lane — `route` is the bead's resolved fleet.routing class ----
+
+const ROUTING: RoutingTable = {
+  default: { chain: [{ provider: 'devin' }] },
+  sweep: { chain: [{ provider: 'kilo', model: 'free-1' }] },
+}
+
+const routedEnv = (profiles: Record<string, FleetProfile> = {}): AgentConnectorEnv =>
+  laneEnv(
+    {
+      devin: { type: 'acp', command: 'devin acp' },
+      // the entry's model pin is what lets a chain's inline {provider,
+      // model} pin honor — a bare command can't consume an override
+      kilo: { type: 'cli', command: 'kilo run {promptFile}', model: 'free-1' },
+      fancy: { type: 'cli', command: 'fancy run --model {model} {promptFile}' },
+    },
+    profiles,
+    {},
+    ROUTING
+  )
+
+describe('resolveLoopLane — fleet.routing per-bead class (bro-zmned)', () => {
+  const sweepRoute = (env: AgentConnectorEnv) =>
+    resolveStepClass(env.fleet!.routing!, env.providers ?? {}, { label: 'sweep' })
+
+  test('the class chain head supplies provider + model when no flag pins one', async () => {
+    const env = routedEnv()
+    const lane = await resolveLoopLane(
+      env,
+      {},
+      laneCfg({ agent: 'devin -p {promptFile}' }),
+      sweepRoute(env)
+    )
+    assert.equal(lane.provider, 'kilo')
+    assert.equal(lane.model, 'free-1')
+    assert.equal(lane.class, 'sweep')
+    assert.deepEqual(lane.worker, { kind: 'template', command: 'kilo run {promptFile}' })
+  })
+
+  test('an explicit provider outranks the chain head — and never inherits its model', async () => {
+    const env = routedEnv()
+    const lane = await resolveLoopLane(env, { provider: 'devin' }, laneCfg(), sweepRoute(env))
+    assert.equal(lane.provider, 'devin')
+    // free-1 belongs to kilo's chain slot — the devin pin drops it
+    assert.equal(lane.model, undefined)
+    // provenance still rides: the class resolved, the pin only overrode the provider
+    assert.equal(lane.class, 'sweep')
+    assert.equal(lane.worker?.kind, 'argv')
+  })
+
+  test('a flag-named profile outranks the route; a config-named one sits below it', async () => {
+    const env = routedEnv({ fancy: { provider: 'fancy', model: 'm-9' } })
+    const route = sweepRoute(env)
+    const flagged = await resolveLoopLane(env, { profile: 'fancy' }, laneCfg(), route)
+    assert.equal(flagged.provider, 'fancy')
+    assert.equal(flagged.model, 'm-9')
+    assert.equal(flagged.class, 'sweep')
+    // loop.profile is a standing default — the declared table wins it
+    const confd = await resolveLoopLane(env, {}, laneCfg({ profile: 'fancy' }), route)
+    assert.equal(confd.provider, 'kilo')
+    assert.equal(confd.model, 'free-1')
+  })
+
+  test('the routed head beats config defaults — loop.provider and agents.native.provider', async () => {
+    const env = routedEnv()
+    env.agents = { native: { provider: 'devin' } }
+    const lane = await resolveLoopLane(
+      env,
+      {},
+      laneCfg({ provider: 'devin', agent: 'x {promptFile}' }),
+      sweepRoute(env)
+    )
+    assert.equal(lane.provider, 'kilo')
+    assert.equal(lane.class, 'sweep')
+  })
+
+  test('a routed class matching the flag-pinned provider keeps its model pin', async () => {
+    const env = routedEnv()
+    // --provider kilo + class sweep → the chain head IS the pin: free-1 applies
+    const lane = await resolveLoopLane(env, { provider: 'kilo' }, laneCfg(), sweepRoute(env))
+    assert.equal(lane.provider, 'kilo')
+    assert.equal(lane.model, 'free-1')
+    assert.equal(lane.class, 'sweep')
+  })
+
+  test('a template --agent bypasses routing; --class beside it is contradictory', async () => {
+    const env = routedEnv()
+    await assert.rejects(
+      resolveLoopLane(env, { agent: 'raw -p {promptFile}', class: 'sweep' }, laneCfg()),
+      (err) => err instanceof SpawnError && /raw template/.test(err.message)
+    )
+    const lane = await resolveLoopLane(env, { agent: 'raw -p {promptFile}' }, laneCfg())
+    assert.deepEqual(lane, {})
+  })
+
+  test('no route → no class provenance on the lane', async () => {
+    const env = routedEnv()
+    const lane = await resolveLoopLane(env, {}, laneCfg({ agent: 'x {promptFile}' }), undefined)
+    assert.equal(lane.class, undefined)
+    assert.equal(lane.provider, undefined)
   })
 })
 
