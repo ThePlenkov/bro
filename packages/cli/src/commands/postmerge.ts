@@ -119,6 +119,10 @@ function detectPm(cwd: string): string {
   return 'npm'
 }
 
+/** sh single-quote escape: a literal ' inside '…' is written '\'' —
+ *  String.raw keeps the backslash literal. */
+const SH_SQUOTE = String.raw`'\''`
+
 /** Conventional hotpatch slots — `$XDG_DATA_HOME/bro/hotpatch.sh` first,
  *  then the path the original local patch already runs from. Only
  *  executable files count: a chmod -x script is the operator's off
@@ -130,7 +134,7 @@ function defaultPatch(): string | undefined {
   for (const p of [join(data, 'bro', 'hotpatch.sh'), join(data, 'bro-hotpatch.sh')]) {
     try {
       accessSync(p, constants.X_OK)
-      return `bash '${p.replaceAll("'", String.raw`'\''`)}'`
+      return `bash '${p.replaceAll("'", SH_SQUOTE)}'`
     } catch {
       // missing or not executable — try the next slot
     }
