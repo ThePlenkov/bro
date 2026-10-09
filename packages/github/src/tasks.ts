@@ -140,10 +140,9 @@ function bodyMeta(body: string | undefined): Record<string, unknown> {
 }
 
 /** Body without the bro trailer — description is the human text. */
-const stripMeta = (body: string | undefined): string => {
-  const b = body ?? ''
-  const t = broTrailer(b)
-  return (t === null ? b : b.slice(0, t.start) + b.slice(t.end)).trimEnd()
+const stripMeta = (body = ''): string => {
+  const t = broTrailer(body)
+  return (t === null ? body : body.slice(0, t.start) + body.slice(t.end)).trimEnd()
 }
 
 function issueTypeOf(n: IssueNode, labels: string[], meta: Record<string, unknown>): string {
@@ -327,15 +326,35 @@ function stateVars(states: string[], cursor: string | undefined): string[] {
   ]
 }
 
+/** argv for one issues page — the sync/async fetchers share the shape. */
+const issuesPageArgs =
+  (o: string, r: string, states: string[], cursor: string | undefined) =>
+  (rel: boolean): string[] => [
+    'api',
+    'graphql',
+    '-f',
+    `query=${ISSUES_QUERY(rel)}`,
+    '-f',
+    `o=${o}`,
+    '-f',
+    `r=${r}`,
+    ...stateVars(states, cursor),
+  ]
+
+/** The next page cursor — undefined ends pagination (no more pages, or
+ *  a pageInfo-less response the loop must not guess past). */
+function pageBoundary(conn: { pageInfo?: { hasNextPage?: boolean; endCursor?: string } } | undefined): string | undefined {
+  return conn?.pageInfo?.hasNextPage === true && conn.pageInfo.endCursor
+    ? conn.pageInfo.endCursor
+    : undefined
+}
+
 function queryIssuesSync(dir: string, states: string[], limit: number): IssueNode[] {
   const { o, r } = splitRepo(repoOf(dir))
   const out: IssueNode[] = []
   let cursor: string | undefined
   for (;;) {
-    const args = (rel: boolean) => [
-      'api', 'graphql', '-f', `query=${ISSUES_QUERY(rel)}`, '-f', `o=${o}`, '-f', `r=${r}`,
-      ...stateVars(states, cursor),
-    ]
+    const args = issuesPageArgs(o, r, states, cursor)
     let page: IssuePage
     try {
       page = ghJson<IssuePage>(args(true), dir)
@@ -347,10 +366,13 @@ function queryIssuesSync(dir: string, states: string[], limit: number): IssueNod
     }
     const conn = page.data?.repository?.issues
     out.push(...(conn?.nodes ?? []))
-    if (out.length >= limit || conn?.pageInfo?.hasNextPage !== true || !conn.pageInfo.endCursor) {
+    if (out.length >= limit) {
       break
     }
-    cursor = conn.pageInfo.endCursor
+    cursor = pageBoundary(conn)
+    if (cursor === undefined) {
+      break
+    }
   }
   return out.slice(0, limit)
 }
@@ -360,10 +382,7 @@ async function queryIssuesAsync(dir: string, states: string[], limit: number): P
   const out: IssueNode[] = []
   let cursor: string | undefined
   for (;;) {
-    const args = (rel: boolean) => [
-      'api', 'graphql', '-f', `query=${ISSUES_QUERY(rel)}`, '-f', `o=${o}`, '-f', `r=${r}`,
-      ...stateVars(states, cursor),
-    ]
+    const args = issuesPageArgs(o, r, states, cursor)
     let page: IssuePage
     try {
       page = await ghJsonAsync<IssuePage>(args(true), dir)
@@ -375,10 +394,13 @@ async function queryIssuesAsync(dir: string, states: string[], limit: number): P
     }
     const conn = page.data?.repository?.issues
     out.push(...(conn?.nodes ?? []))
-    if (out.length >= limit || conn?.pageInfo?.hasNextPage !== true || !conn.pageInfo.endCursor) {
+    if (out.length >= limit) {
       break
     }
-    cursor = conn.pageInfo.endCursor
+    cursor = pageBoundary(conn)
+    if (cursor === undefined) {
+      break
+    }
   }
   return out.slice(0, limit)
 }
@@ -559,34 +581,48 @@ interface DepEdge {
   type: string
 }
 
-/** blockedBy → `type: 'blocks'` edges (X depends-on Y); parent/subIssue
- *  → `parent-child`. bd's dep-list shape is the contract. */
-function depEdges(n: IssueNode, opts: { type?: string; direction?: string }): DepEdge[] {
-  const out: DepEdge[] = []
+const wants = (dir: 'up' | 'down', direction?: string): boolean =>
+  direction === undefined || direction === dir
+
+/** X depends-on Y — blockedBy reads 'up', blocking reads 'down'. */
+function blockEdges(n: IssueNode, direction?: string): DepEdge[] {
   const id = String(n.number)
-  if (opts.type === undefined || opts.type === 'blocks') {
-    if (opts.direction === undefined || opts.direction === 'up') {
-      for (const b of n.blockedBy?.nodes ?? []) {
-        out.push({ issue_id: id, depends_on_id: String(b.number), type: 'blocks' })
-      }
-    }
-    if (opts.direction === undefined || opts.direction === 'down') {
-      for (const b of n.blocking?.nodes ?? []) {
-        out.push({ issue_id: String(b.number), depends_on_id: id, type: 'blocks' })
-      }
+  const out: DepEdge[] = []
+  if (wants('up', direction)) {
+    for (const b of n.blockedBy?.nodes ?? []) {
+      out.push({ issue_id: id, depends_on_id: String(b.number), type: 'blocks' })
     }
   }
-  if (opts.type === undefined || opts.type === 'parent-child') {
-    if ((opts.direction === undefined || opts.direction === 'up') && n.parent) {
-      out.push({ issue_id: id, depends_on_id: String(n.parent.number), type: 'parent-child' })
-    }
-    if (opts.direction === undefined || opts.direction === 'down') {
-      for (const c of n.subIssues?.nodes ?? []) {
-        out.push({ issue_id: String(c.number), depends_on_id: id, type: 'parent-child' })
-      }
+  if (wants('down', direction)) {
+    for (const b of n.blocking?.nodes ?? []) {
+      out.push({ issue_id: String(b.number), depends_on_id: id, type: 'blocks' })
     }
   }
   return out
+}
+
+/** parent reads 'up' (this issue depends on its parent), subIssues 'down'. */
+function parentEdges(n: IssueNode, direction?: string): DepEdge[] {
+  const id = String(n.number)
+  const out: DepEdge[] = []
+  if (wants('up', direction) && n.parent) {
+    out.push({ issue_id: id, depends_on_id: String(n.parent.number), type: 'parent-child' })
+  }
+  if (wants('down', direction)) {
+    for (const c of n.subIssues?.nodes ?? []) {
+      out.push({ issue_id: String(c.number), depends_on_id: id, type: 'parent-child' })
+    }
+  }
+  return out
+}
+
+/** blockedBy → `type: 'blocks'` edges (X depends-on Y); parent/subIssue
+ *  → `parent-child`. bd's dep-list shape is the contract. */
+function depEdges(n: IssueNode, opts: { type?: string; direction?: string }): DepEdge[] {
+  return [
+    ...(opts.type === undefined || opts.type === 'blocks' ? blockEdges(n, opts.direction) : []),
+    ...(opts.type === undefined || opts.type === 'parent-child' ? parentEdges(n, opts.direction) : []),
+  ]
 }
 
 function depsSync(dir: string, ids: string[], opts: { type?: string; direction?: string }): DepEdge[] {
@@ -605,14 +641,8 @@ async function depsAsync(
   ids: string[],
   opts: { type?: string; direction?: string }
 ): Promise<DepEdge[]> {
-  const out: DepEdge[] = []
-  for (const id of ids) {
-    const n = await queryIssueAsync(dir, issueNumber(dir, id))
-    if (n) {
-      out.push(...depEdges(n, opts))
-    }
-  }
-  return out
+  const nodes = await Promise.all(ids.map((id) => queryIssueAsync(dir, issueNumber(dir, id))))
+  return nodes.flatMap((n) => (n === undefined ? [] : depEdges(n, opts)))
 }
 
 // --- sync mutations -----------------------------------------------------------------
@@ -661,9 +691,8 @@ function claimSync(dir: string, id: string): void {
   const labels = labelsOf(n)
   const assignees = assigneesOf(n)
   if (labels.includes(CLAIMED_LABEL) || assignees.length > 0) {
-    throw new Error(
-      `github tasks: ${id} already claimed${assignees.length > 0 ? ` by ${assignees.join(', ')}` : ''}`
-    )
+    const holders = assignees.length > 0 ? ` by ${assignees.join(', ')}` : ''
+    throw new Error(`github tasks: ${id} already claimed${holders}`)
   }
   const me = ghActor(dir)
   if (me === '') {
@@ -677,7 +706,9 @@ function claimSync(dir: string, id: string): void {
     gh(['issue', 'edit', String(n.number), '--add-label', CLAIMED_LABEL], dir)
     return
   }
-  const winner = [...others, me].sort()[0]!
+  // codepoint order — every racer must pick the same winner regardless
+  // of host locale (localeCompare ordering varies between machines)
+  const winner = [...others, me].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))[0]!
   if (winner !== me) {
     ghTry(['issue', 'edit', String(n.number), '--remove-assignee', me], dir)
     throw new Error(`github tasks: ${id} claim contested — ${winner} holds it`)
@@ -708,52 +739,66 @@ function reopenSync(dir: string, id: string): void {
   ghTry(['issue', 'edit', String(n), '--remove-label', BLOCKED_LABEL], dir)
 }
 
+/** The metadata trailer fields — every trailer-carried input must trip
+ *  the guard, or a lone `priority`/`externalRef` writes no body and
+ *  reads back a default. */
+function createMeta(i: TaskInput): Record<string, unknown> {
+  const meta: Record<string, unknown> = { ...i.metadata }
+  if (i.type !== undefined) {
+    meta.type = i.type
+  }
+  if (i.priority !== undefined) {
+    meta.priority = i.priority
+  }
+  if (i.externalRef !== undefined) {
+    meta.external_ref = i.externalRef
+  }
+  return meta
+}
+
+/** 'kind:ref' — refs may be issue URLs carrying their own colons, so
+ *  split on the FIRST colon only. */
+function depRef(d: string): { kind: string; ref: string } {
+  const colon = d.indexOf(':')
+  return { kind: d.slice(0, colon), ref: d.slice(colon + 1) }
+}
+
+/** Wire parent + deps after the issue exists — pre-validated by
+ *  createSync so an unsupported kind can't leave a half-created issue. */
+function applyDeps(dir: string, id: string, i: TaskInput): void {
+  if (i.parent !== undefined) {
+    linkSync(dir, id, i.parent, 'parent-child')
+  }
+  for (const d of i.deps ?? []) {
+    const { kind, ref } = depRef(d)
+    linkSync(dir, id, ref, kind === 'blocked-by' ? 'blocks' : kind)
+  }
+}
+
 function createSync(dir: string, i: TaskInput): TaskRow {
   // pre-validate deps before the issue exists — an unsupported dep type
   // must not leave a half-created issue
   for (const d of i.deps ?? []) {
-    const kind = d.slice(0, d.indexOf(':'))
+    const { kind } = depRef(d)
     if (!/^(blocks|blocked-by|parent-child)$/.test(kind)) {
       throw new Error(`github tasks: dep type '${kind}' unsupported (blocks | blocked-by | parent-child)`)
     }
   }
   const args = ['issue', 'create', '--title', i.title]
-  // every trailer-carried field must trip the guard — a lone `priority`
-  // or `externalRef` otherwise writes no body and reads back a default
   if (i.description || i.metadata || i.type !== undefined || i.priority !== undefined || i.externalRef !== undefined) {
-    const meta: Record<string, unknown> = { ...(i.metadata ?? {}) }
-    if (i.type !== undefined) {
-      meta.type = i.type
-    }
-    if (i.priority !== undefined) {
-      meta.priority = i.priority
-    }
-    if (i.externalRef !== undefined) {
-      meta.external_ref = i.externalRef
-    }
-    args.push('--body', withMeta(i.description, meta))
+    args.push('--body', withMeta(i.description, createMeta(i)))
   }
   for (const l of i.labels ?? []) {
     ensureLabel(dir, l)
     args.push('--label', l)
   }
   const url = gh(args, dir).trim()
-  const num = /(\d+)\s*$/.exec(url)?.[1]
+  const num = /(\d+)$/.exec(url)?.[1]
   if (num === undefined) {
     throw new Error(`github tasks: gh issue create returned no issue URL — got: ${url}`)
   }
   const id = String(Number(num))
-  if (i.parent !== undefined) {
-    linkSync(dir, id, i.parent, 'parent-child')
-  }
-  for (const d of i.deps ?? []) {
-    // 'kind:ref' — refs may be issue URLs carrying their own colons,
-    // so split on the FIRST colon only
-    const colon = d.indexOf(':')
-    const kind = d.slice(0, colon)
-    const ref = d.slice(colon + 1)
-    linkSync(dir, id, ref, kind === 'blocked-by' ? 'blocks' : kind)
-  }
+  applyDeps(dir, id, i)
   const row = queryIssueSync(dir, Number(id))
   if (row === undefined) {
     // the issue exists (the URL proved it) — a read miss is the
@@ -763,67 +808,61 @@ function createSync(dir: string, i: TaskInput): TaskRow {
   return toRow(row)
 }
 
+function updateStatus(dir: string, n: number, id: string, val: string): void {
+  if (val === 'open') {
+    reopenSync(dir, id)
+  } else if (val === 'closed') {
+    gh(['issue', 'close', String(n)], dir)
+  } else if (val === 'in_progress') {
+    claimSync(dir, id)
+  } else if (val === 'blocked') {
+    ensureLabel(dir, BLOCKED_LABEL)
+    gh(['issue', 'edit', String(n), '--add-label', BLOCKED_LABEL], dir)
+  } else {
+    throw new Error(`github tasks: unknown status '${val}'`)
+  }
+}
+
+function updateMetaField(dir: string, n: number, k: string, val: string): void {
+  const cur = queryIssueSync(dir, n)
+  const meta = bodyMeta(cur?.body)
+  const META_KEYS: Record<string, string> = { issue_type: 'type', externalRef: 'external_ref' }
+  meta[META_KEYS[k] ?? k] = k === 'priority' ? Number(val) : val
+  gh(['issue', 'edit', String(n), '--body', withMeta(cur?.body, meta)], dir)
+}
+
+function addLabels(dir: string, n: number, val: string): void {
+  for (const l of val.split(',').map((s) => s.trim()).filter((s) => s !== '')) {
+    ensureLabel(dir, l)
+    gh(['issue', 'edit', String(n), '--add-label', l], dir)
+  }
+}
+
 function updateSync(dir: string, id: string, patch: Record<string, string | number>): void {
   const n = issueNumber(dir, id)
   for (const [k, v] of Object.entries(patch)) {
     const val = String(v)
-    switch (k) {
-      case 'title':
-        gh(['issue', 'edit', String(n), '--title', val], dir)
-        break
-      case 'body':
-      case 'description': {
-        const cur = queryIssueSync(dir, n)
-        gh(['issue', 'edit', String(n), '--body', withMeta(val, bodyMeta(cur?.body))], dir)
-        break
+    if (k === 'title') {
+      gh(['issue', 'edit', String(n), '--title', val], dir)
+    } else if (k === 'body' || k === 'description') {
+      const cur = queryIssueSync(dir, n)
+      gh(['issue', 'edit', String(n), '--body', withMeta(val, bodyMeta(cur?.body))], dir)
+    } else if (k === 'status') {
+      updateStatus(dir, n, id, val)
+    } else if (k === 'claim') {
+      if (v === 'true' || val === 'true') {
+        claimSync(dir, id)
       }
-      case 'status':
-        if (val === 'open') {
-          reopenSync(dir, id)
-        } else if (val === 'closed') {
-          gh(['issue', 'close', String(n)], dir)
-        } else if (val === 'in_progress') {
-          claimSync(dir, id)
-        } else if (val === 'blocked') {
-          ensureLabel(dir, BLOCKED_LABEL)
-          gh(['issue', 'edit', String(n), '--add-label', BLOCKED_LABEL], dir)
-        } else {
-          throw new Error(`github tasks: unknown status '${val}'`)
-        }
-        break
-      case 'claim':
-        if (v === 'true' || val === 'true') {
-          claimSync(dir, id)
-        }
-        break
-      case 'labels':
-      case 'label':
-        for (const l of val.split(',').map((s) => s.trim()).filter((s) => s !== '')) {
-          ensureLabel(dir, l)
-          gh(['issue', 'edit', String(n), '--add-label', l], dir)
-        }
-        break
-      case 'assignee':
-        gh(['issue', 'edit', String(n), '--add-assignee', val], dir)
-        break
-      case 'notes':
-      case 'note':
-        gh(['issue', 'comment', String(n), '--body', val], dir)
-        break
-      case 'type':
-      case 'issue_type':
-      case 'priority':
-      case 'external_ref':
-      case 'externalRef': {
-        const cur = queryIssueSync(dir, n)
-        const meta = bodyMeta(cur?.body)
-        meta[k === 'issue_type' ? 'type' : k === 'externalRef' ? 'external_ref' : k] =
-          k === 'priority' ? Number(val) : val
-        gh(['issue', 'edit', String(n), '--body', withMeta(cur?.body, meta)], dir)
-        break
-      }
-      default:
-        throw new Error(`github tasks: unsupported update key '${k}'`)
+    } else if (k === 'labels' || k === 'label') {
+      addLabels(dir, n, val)
+    } else if (k === 'assignee') {
+      gh(['issue', 'edit', String(n), '--add-assignee', val], dir)
+    } else if (k === 'notes' || k === 'note') {
+      gh(['issue', 'comment', String(n), '--body', val], dir)
+    } else if (['type', 'issue_type', 'priority', 'external_ref', 'externalRef'].includes(k)) {
+      updateMetaField(dir, n, k, val)
+    } else {
+      throw new Error(`github tasks: unsupported update key '${k}'`)
     }
   }
 }

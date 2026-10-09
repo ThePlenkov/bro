@@ -23,8 +23,7 @@
  * queue is scoped to this checkout's issue_prefix — foreign-prefix
  * beads are reported, never claimed. scope = "all" opts out in plans.
  */
-import { ensureTasksBackend, facade, gitTry, type FacadeOpts } from '@broject/core'
-import type { TaskStore } from '@broject/core'
+import { ensureTasksBackend, facade, gitTry, type FacadeOpts, type TaskStore } from '@broject/core'
 import { flag } from './args.ts'
 import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts'
 import { requireGlobalStore } from '../doctypes/store.ts'
@@ -257,21 +256,26 @@ export function claimUpTo(
   return picked
 }
 
+function printPick(b: ReadyBead, list: boolean, backend: string): void {
+  console.log(`→ ${b.id}${list ? '' : ' (claimed)'} P${b.priority} ${b.issue_type}`)
+  console.log(`  ${b.title}`)
+  if (b.description?.trim()) {
+    console.log(`  ${b.description.trim().split('\n')[0]}`)
+  }
+  const closeVerb = backend === 'beads' ? 'bd close' : 'bro task close'
+  console.log(`  loop: implement → PR → bro act merge → ${closeVerb} → bro next`)
+}
+
 function printResult(result: NextResult, list: boolean, backend: string): void {
   for (const b of result.beads) {
-    console.log(`→ ${b.id}${list ? '' : ' (claimed)'} P${b.priority} ${b.issue_type}`)
-    console.log(`  ${b.title}`)
-    if (b.description?.trim()) {
-      console.log(`  ${b.description.trim().split('\n')[0]}`)
-    }
-    console.log(`  loop: implement → PR → bro act merge → ${backend === 'beads' ? 'bd close' : 'bro task close'} → bro next`)
+    printPick(b, list, backend)
   }
   if (result.beads.length === 0) {
-    if (result.state === 'gated') {
-      console.log('next: nothing claimable — filters, gates, epics, or molecule steps remain')
-    } else {
-      console.log('next: backlog empty — nothing ready')
-    }
+    console.log(
+      result.state === 'gated'
+        ? 'next: nothing claimable — filters, gates, epics, or molecule steps remain'
+        : 'next: backlog empty — nothing ready'
+    )
   }
   if (result.filtered > 0) {
     console.log(`  filtered: ${result.filtered} claimable bead(s) excluded by plan filters`)
@@ -300,10 +304,11 @@ function readyOrDie(dir?: string, opts?: FacadeOpts): ReadyBead[] {
     return readyBeads(dir, opts)
   } catch (err) {
     const enoent = err != null && (err as NodeJS.ErrnoException).code === 'ENOENT'
+    const detail = err instanceof Error ? err.message : String(err)
     console.error(
       enoent
         ? "error: task backend's CLI not found — install it or point connectors.tasks elsewhere"
-        : `error: task store ready failed — ${err instanceof Error ? err.message : String(err)}`
+        : `error: task store ready failed — ${detail}`
     )
     process.exit(1)
   }

@@ -387,6 +387,43 @@ function bdChecks(
   return out
 }
 
+/** The beads branch of the tasks row — mirrors the checkBeads command
+ *  gate (binary + contract + store) so the serving backend never reads
+ *  healthy on a store `bro next` would refuse. The bd rows carry the
+ *  detail; this row only repeats the verdict + remediation. */
+function beadsTasksCheck(bd: BinProbe, beadsActive: boolean, compat: BdCompat, tag: string): DoctorCheck {
+  const sev: DoctorStatus = beadsActive ? 'fail' : 'warn'
+  if (!bd.found) {
+    return check(
+      'tasks',
+      sev,
+      `beads${tag} — bd ${binProblem(bd)}`,
+      'install beads or pin connectors.tasks to another provider'
+    )
+  }
+  if (!compat.ok) {
+    return check(
+      'tasks',
+      sev,
+      `beads${tag} — ${compat.problems.join('; ')}`,
+      'fix the bd install or pin connectors.tasks to another provider'
+    )
+  }
+  if (compat.store !== 'reachable') {
+    const detail =
+      compat.store === 'error'
+        ? compat.storeErr
+        : 'no store yet — `bd init` or `bro setup` creates one'
+    return check(
+      'tasks',
+      sev,
+      `beads${tag} — ${detail}`,
+      'the serving task store must answer before next/loop can use it'
+    )
+  }
+  return check('tasks', 'ok', `beads${tag}`)
+}
+
 /** Which connector serves the `tasks` facade — the backend `bro next`,
  *  `bro task`, and the stop-gate probe actually hit (spec bro-huy5o.1).
  *  A non-beads pick is healthy without bd installed: the bd rows only
@@ -414,35 +451,7 @@ function tasksBackendCheck(
   }
   const tag = pinned !== undefined ? ` (connectors.tasks=${pinned})` : ' (default)'
   if (name === 'beads') {
-    // the command gate is checkBeads (binary + contract + store) —
-    // mirror its verdict so the serving backend never reads healthy on
-    // a store `bro next` would refuse; the bd rows carry the detail
-    if (!bd.found) {
-      return check(
-        'tasks',
-        beadsActive ? 'fail' : 'warn',
-        `beads${tag} — bd ${binProblem(bd)}`,
-        'install beads or pin connectors.tasks to another provider'
-      )
-    }
-    if (!compat.ok) {
-      return check(
-        'tasks',
-        beadsActive ? 'fail' : 'warn',
-        `beads${tag} — ${compat.problems.join('; ')}`,
-        'fix the bd install or pin connectors.tasks to another provider'
-      )
-    }
-    if (compat.store !== 'reachable') {
-      const dead = compat.store === 'error'
-      return check(
-        'tasks',
-        beadsActive ? 'fail' : 'warn',
-        `beads${tag} — ${dead ? compat.storeErr : 'no store yet — `bd init` or `bro setup` creates one'}`,
-        'the serving task store must answer before next/loop can use it'
-      )
-    }
-    return check('tasks', 'ok', `beads${tag}`)
+    return beadsTasksCheck(bd, beadsActive, compat, tag)
   }
   const auth = facadeAuth('tasks', { dir }, { prefer })
   return auth === null
