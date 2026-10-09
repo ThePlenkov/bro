@@ -25,7 +25,10 @@
  *
  * Human gates, epics, and molecule steps are never claimed (next's
  * rules). A bead whose agent fails without a PR is reopened with a
- * note; a bead whose PR stalls keeps its worktree for inspection.
+ * note — unless the spawn died inside loop.crashExitMs (default 10s):
+ * gone that fast it crashed on the environment, not the bead, and
+ * reopening is a respawn-burn, so it parks loud instead (bro-sovl3). A
+ * bead whose PR stalls keeps its worktree for inspection.
  */
 import { spawnSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
@@ -785,17 +788,38 @@ async function pushItem(ctx: Ctx, bead: ReadyBead): Promise<PushOutcome> {
     return { kind: 'done', result: 'failed' }
   }
   writePrompt(item, buildWorkPrompt(bead, item.branch, slot?.base, slot?.bottom, ctx.backend))
+  const spawnAt = Date.now()
   const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
+  // agent wall-time — measured before findPr's gh call; a slow lookup
+  // must not inflate an instant crash past the crashExitMs threshold
+  const elapsed = Date.now() - spawnAt
   const pr = findPr(ctx, item.branch)
   if (pr === 'lookup-error') {
     noteBead(ctx.tasks, bead.id, `loop: PR lookup failed for ${item.branch} — worktree ${item.worktreeDir}`)
     return { kind: 'done', result: 'parked' }
   }
   if (pr === null) {
-    return {
-      kind: 'done',
-      result: agentVerdict(ctx, bead, item.worktreeDir) ?? failNoPr(ctx, bead, item, code),
+    const verdict = agentVerdict(ctx, bead, item.worktreeDir)
+    if (verdict !== undefined) {
+      return { kind: 'done', result: verdict }
     }
+    if (ctx.cfg.crashExitMs > 0 && elapsed < ctx.cfg.crashExitMs) {
+      // gone in seconds, no PR, no verdict — the spawn died on the
+      // environment (broken dist, bad argv), never on the bead. Reopen
+      // and the next claim walks into the same wall: claim → crash →
+      // reopen → reclaim is the respawn-burn from bro-sovl3. Park loud.
+      noteBead(
+        ctx.tasks,
+        bead.id,
+        `loop: agent gone in ${elapsed}ms (exit ${code ?? 'spawn failure'}) — environment crash, not a verdict; parked — worktree kept at ${item.worktreeDir}`
+      )
+      say(
+        ctx,
+        `loop: ${bead.id} agent exited ${code ?? 'spawn failure'} in ${elapsed}ms — parked (crash, not work)`
+      )
+      return { kind: 'done', result: 'parked' }
+    }
+    return { kind: 'done', result: failNoPr(ctx, bead, item, code) }
   }
   // the loop IS the watcher — arm the same marker `act wait` drops
   // (bro-z0k2u) for the member's whole stack tenure, not per poll:

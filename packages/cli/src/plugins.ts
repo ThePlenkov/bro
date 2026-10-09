@@ -71,6 +71,7 @@ import { runGoalCommand } from './commands/goal.ts'
 import { goalSection } from './commands/goal-config.ts'
 import { runGuardCommand } from './commands/guard.ts'
 import { runHooksCommand } from './commands/hooks.ts'
+import { freshnessSection } from './commands/postmerge.ts'
 import { runJudgeCommand } from './commands/judge.ts'
 import { runLearnCommand } from './commands/learn.ts'
 import { runWatchCommand } from './commands/watch.ts'
@@ -355,6 +356,8 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Agent lifecycle hooks',
     run: runHooksCommand,
     hidden: true,
+    configKey: 'freshness',
+    configSchema: freshnessSection,
   }),
   definePlugin({
     name: 'telemetry',

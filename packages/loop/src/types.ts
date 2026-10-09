@@ -37,6 +37,10 @@ export interface LoopConfig {
    *  0 = no wall-clock limit — a working session is not decapitated;
    *  supervision is the orchestrator's check-in cadence, not a lifetime. */
   agentTimeoutMin: number
+  /** A spawn gone in under this never ran — broken dist/agent/env, not
+   *  a bead outcome: park instead of reopening into a crash-burn
+   *  (bro-sovl3). 0 = reopen on every no-PR exit (legacy). */
+  crashExitMs: number
   /** Minutes the merge gate may stay pending before the item is parked. */
   mergeTimeoutMin: number
   /** Max review-fix respawns per bead — defaults to act.maxRounds. */
@@ -56,6 +60,7 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   model: '',
   bootstrap: '',
   agentTimeoutMin: 0,
+  crashExitMs: 10_000,
   mergeTimeoutMin: 45,
   fixRounds: 3,
   maxItems: 0,

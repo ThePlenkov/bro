@@ -18,7 +18,12 @@ import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { initBeadsStealth, PERSONALITIES, type BroConfig } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
-import { cliVersion, installCommitHook, installRefGuardHook } from './githooks.ts'
+import {
+  cliVersion,
+  installCommitHook,
+  installPostMergeHook,
+  installRefGuardHook,
+} from './githooks.ts'
 import { FORMULA_FILES, SKILL_FILES } from '../skills-data.ts'
 
 function hasBin(name: string): boolean {
@@ -301,6 +306,7 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
   //   commit provenance (bro-fzot): Agent/Session/Bead trailers on
   //     machine-made commits
   //   refguard (bro-1c78): non-ff moves of shared branch refs vetoed
+  //   post-merge (bro-sovl3): install → build → patch after a merge
   // Best-effort: a non-git dir just skips.
   const hook = installCommitHook(process.cwd(), cliVersion())
   if (hook.state === 'error') {
@@ -313,6 +319,12 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
     console.error(`  note: refguard hook not installed — ${guard.err}`)
   } else if (guard.state !== 'already') {
     console.error(`  ${guard.state} reference-transaction hook (${guard.path})`)
+  }
+  const fresh = installPostMergeHook(process.cwd(), cliVersion())
+  if (fresh.state === 'error') {
+    console.error(`  note: post-merge hook not installed — ${fresh.err}`)
+  } else if (fresh.state !== 'already') {
+    console.error(`  ${fresh.state} post-merge hook (${fresh.path})`)
   }
 
   console.error('bro setup: done. Next: `bro debt prs` to see the queue, `bro debt collect` to sweep.')
