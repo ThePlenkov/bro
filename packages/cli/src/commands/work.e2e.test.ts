@@ -187,6 +187,16 @@ describe('bro work e2e — prune --loop', () => {
     PATH: `${binDir}:${process.env.PATH ?? ''}`,
     FAKE_BD_DB: db,
   })
+  /** fake review host wired via bro.config.json — the PR-veto/land
+   *  evidence plane the sweep consults. */
+  const hostFixture = (main: string) => {
+    const host = installFakeHost(main)
+    writeFileSync(
+      join(main, 'bro.config.json'),
+      JSON.stringify({ plugins: ['./fakehost.ts'], connectors: { reviews: 'fakehost' } })
+    )
+    return host
+  }
 
   test('reaps a clean closed-bead worktree and retires its branch', () => {
     const { root, main } = workFixture()
@@ -247,11 +257,7 @@ describe('bro work e2e — prune --loop', () => {
   test('an open PR vetoes the reap even with the bead closed', () => {
     const { root, main } = workFixture()
     const { binDir, db } = installFakeBd(root, [{ ...FAKE_BEAD, id: 'fx-o', status: 'closed' }])
-    const host = installFakeHost(main)
-    writeFileSync(
-      join(main, 'bro.config.json'),
-      JSON.stringify({ plugins: ['./fakehost.ts'], connectors: { reviews: 'fakehost' } })
-    )
+    const host = hostFixture(main)
     inside(main, root, () => {
       const wt = litter(root, main, 'fx-o', true)
       writeHostState(host.state, {
@@ -271,11 +277,7 @@ describe('bro work e2e — prune --loop', () => {
   test('a merged PR pins the branch delete past a squash-blind tip', () => {
     const { root, main } = workFixture()
     const { binDir, db } = installFakeBd(root, [{ ...FAKE_BEAD, id: 'fx-m', status: 'closed' }])
-    const host = installFakeHost(main)
-    writeFileSync(
-      join(main, 'bro.config.json'),
-      JSON.stringify({ plugins: ['./fakehost.ts'], connectors: { reviews: 'fakehost' } })
-    )
+    const host = hostFixture(main)
     inside(main, root, () => {
       const wt = litter(root, main, 'fx-m', true)
       // the squash-merge shape: the branch tip is nowhere in main's
