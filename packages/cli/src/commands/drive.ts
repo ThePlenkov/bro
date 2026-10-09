@@ -299,6 +299,25 @@ export function supervisedBy(
   )
 }
 
+/** Worktree-local occupancy proofs — a live agent process inside the
+ *  worktree, or a fresh claim marker on it. */
+function worktreeOccupant(opts: OccupancyCtx, live: AgentInfo[]): string | undefined {
+  if (opts.worktree === undefined) {
+    return undefined
+  }
+  const wt = resolve(opts.worktree)
+  const agent = live.find(
+    (a) => typeof a.worktree === 'string' && resolve(a.worktree) === wt
+  )
+  if (agent) {
+    return `agent ${agent.id} live in ${basename(opts.worktree)}`
+  }
+  const claim = (opts.scanClaim ?? worktreeClaim)(opts.worktree)
+  return claim === undefined
+    ? undefined
+    : `worktree ${basename(opts.worktree)} claimed${claim === '' ? '' : ` by ${claim}`}`
+}
+
 /** Why a PR's worktree is owned right now — undefined = orphaned, the
  *  driver's whole reason to exist. A live agent or session ALWAYS wins
  *  the argument: skipped pass, never double-work on one branch. */
@@ -313,18 +332,9 @@ export function occupied(opts: OccupancyCtx): string | undefined {
   if (sup !== undefined) {
     return `supervised by ${watchMarkerKind(sup.file, sup.watch)} pid ${sup.watch.pid}`
   }
-  if (opts.worktree !== undefined) {
-    const wt = resolve(opts.worktree)
-    const agent = live.find(
-      (a) => typeof a.worktree === 'string' && resolve(a.worktree) === wt
-    )
-    if (agent) {
-      return `agent ${agent.id} live in ${basename(opts.worktree)}`
-    }
-    const claim = (opts.scanClaim ?? worktreeClaim)(opts.worktree)
-    if (claim !== undefined) {
-      return `worktree ${basename(opts.worktree)} claimed${claim === '' ? '' : ` by ${claim}`}`
-    }
+  const wt = worktreeOccupant(opts, live)
+  if (wt !== undefined) {
+    return wt
   }
   const slug = branchSlug(opts.branch)
   const detail = opts.workDetails.find((d) =>
