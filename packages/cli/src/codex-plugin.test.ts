@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { lstatSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { lstatSync, readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -46,11 +46,11 @@ describe('codex plugin adapter', () => {
     assert.match(body, /"description"/, 'Codex hooks.json should use description')
   })
 
-  test('every skill ships agents/openai.yaml inside the Codex plugin tree', () => {
+  test('Codex skills are the repo skills tree, not a second copy', () => {
     const skills = join(ROOT, 'plugins/codex/bro/skills')
     const st = lstatSync(skills)
-    assert.equal(st.isSymbolicLink(), false, 'Codex installer drops a skills symlink')
-    assert.equal(st.isDirectory(), true)
+    assert.equal(st.isSymbolicLink(), true, 'plugins/codex/bro/skills must be a symlink')
+    assert.equal(readlinkSync(skills), '../../../skills')
     const manifest = JSON.parse(
       readFileSync(join(ROOT, 'plugins/codex/bro/.codex-plugin/plugin.json'), 'utf8')
     ) as { skills?: string }

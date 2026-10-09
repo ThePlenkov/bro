@@ -1,7 +1,0 @@
-interface:
-  display_name: "Bro Query"
-  short_description: "Cross-provider GraphQL fan-out as one merged JSON answer"
-  brand_color: "#0E8A16"
-  default_prompt: "Use $query to run a cross-provider query plan."
-policy:
-  allow_implicit_invocation: true

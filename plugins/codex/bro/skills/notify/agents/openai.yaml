@@ -1,7 +1,0 @@
-interface:
-  display_name: "Bro Notify"
-  short_description: "Session mailbox via the bro CLI — drop an event, the postTool probe delivers it mid-turn"
-  brand_color: "#0E8A16"
-  default_prompt: "Use $notify to get started."
-policy:
-  allow_implicit_invocation: true

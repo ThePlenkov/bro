@@ -1,7 +1,0 @@
-interface:
-  display_name: "Bro Check"
-  short_description: "sverka-backed check facade — run the repo workflow, get stats + findings"
-  brand_color: "#0E8A16"
-  default_prompt: "Use $check to run the repo's sverka checks."
-policy:
-  allow_implicit_invocation: true

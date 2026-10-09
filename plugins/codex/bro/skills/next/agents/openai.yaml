@@ -1,7 +1,0 @@
-interface:
-  display_name: "Bro Next"
-  short_description: "Claim the top ready bead and emit the work order"
-  brand_color: "#0E8A16"
-  default_prompt: "Use $next to take the next ready bead."
-policy:
-  allow_implicit_invocation: true

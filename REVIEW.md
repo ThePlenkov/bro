@@ -7,9 +7,13 @@ code nobody edits by hand.
 
 - `plugins/**` — generated client adapters (`scripts/gen-plugins.ts`);
   review the canonical sources (`skills/`, `hooks/`, `plugin.json`) and the
-  generator itself instead — except `plugins/claude/bro/hooks/hooks.json`,
-  the one hand-written adapter file (Claude event names), which stays in
-  scope
+  generator itself instead. Two exceptions stay in scope:
+  `plugins/claude/bro/hooks/hooks.json` and
+  `plugins/codex/bro/hooks/hooks.json` (hand-written event names), and
+  every `plugins/<client>/bro/skills` entry. That entry must be a symlink
+  to the repo `skills/` tree. A real directory there is a second copy of
+  the skill tree — **major**, even though the rest of `plugins/**` is
+  skipped. Review the link, not the skill bodies.
 - `vendor/**` — upstream submodule, not ours
 - `package-lock.json`, `**/dist/**`, `**/*.generated.ts`
 - `.agents/skills/`, `.agents/review-debt/` — local runtime state
@@ -24,6 +28,11 @@ code nobody edits by hand.
 - `scripts/gen-plugins.ts` drift between canonical sources and generated
   adapters is **major** — a stale manifest or a skills link that is not
   the repo `skills/` tree ships to users verbatim.
+- A second copy of `skills/` is **major**: a real directory at
+  `plugins/<client>/bro/skills`, a duplicated `SKILL.md` outside
+  `skills/`, or a generator mode that copies the tree for one host.
+  One tree, symlinks only. A host that drops symlinks at install time
+  does not justify committing the copy.
 - `packages/core` is vendor-neutral: it holds contracts, registries, and
   generic mechanics only (`agents.<kind>` knob bags, `sessionPlanes`,
   `connectors.*` seam). An import, path, identifier, or hard-coded state

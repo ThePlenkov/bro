@@ -1,7 +1,0 @@
-interface:
-  display_name: "Bro Sweep"
-  short_description: "Prune closed beads and run the harvest pipeline"
-  brand_color: "#0E8A16"
-  default_prompt: "Use $sweep to prune closed beads."
-policy:
-  allow_implicit_invocation: true

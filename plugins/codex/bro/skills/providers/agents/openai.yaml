@@ -1,7 +1,0 @@
-interface:
-  display_name: "Bro Providers"
-  short_description: "Provider registry — kinds, model wire, and judge/agent refs"
-  brand_color: "#0E8A16"
-  default_prompt: "Use $providers to configure or debug bro providers."
-policy:
-  allow_implicit_invocation: true
