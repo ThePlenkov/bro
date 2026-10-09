@@ -40,19 +40,19 @@ and why to use the command. The CLI owns how.
 
 ## Adapters and generation
 
-Claude Code, Codex, Cursor, and Devin receive the same policy through
-their adapters — the shell adapters share one `skills/` tree: each
-`plugins/<client>/bro/skills` entry is a symlink, not a second copy.
-Cursor's hook manifest is generated too — only Claude's event map is
-hand-written. OpenCode, Kilo, and pi are different: they're native
-plugins installed by `bro plugins install <client>` — a self-contained
-module (`plugins/<client>/bro/bro.ts`) carrying hooks and policy inline,
-with no skills tree beside it.
+The portable package is the repo root: `plugin.json`
+([Agent Plugins](https://agent-plugins.org/)) and `skills/<name>/SKILL.md`
+([Agent Skills](https://agentskills.io/)). Every agent reads that pair.
+Claude, Codex, Cursor, and Devin add only what their own client needs
+on top — hook event maps and a client manifest under `plugins/<client>/bro`.
+They do not carry a second `skills/` tree. OpenCode, Kilo, and pi are
+different: they're native plugins installed by `bro plugins install <client>`
+— a self-contained module (`plugins/<client>/bro/bro.ts`) carrying hooks
+inline, with no skills tree beside it.
 
-The source of truth is `skills/`. `scripts/gen-plugins.ts` keeps the adapter
-links and hook files in step, while the CLI bundle embeds a snapshot of
-skills and formulas at build time. Edit the source, then use the repository
-freshness checks before committing generated output.
+`scripts/gen-plugins.ts` keeps those host extras in step. The CLI bundle
+embeds a snapshot of skills and formulas at build time. Edit `skills/`,
+then use the repository freshness checks before committing generated output.
 
 ## Skill discipline
 

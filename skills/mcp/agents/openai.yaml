@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro MCP"
+  short_description: "Stdio MCP server over bro's read planes — bro_<plane>_<read> tools"
+  brand_color: "#5B5BD6"
+  default_prompt: "Use $mcp to register bro as a stdio MCP server in any MCP-capable client."
+policy:
+  allow_implicit_invocation: true

@@ -27,7 +27,7 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
-import type { Connector } from './connectors.ts'
+import type { Connector, ConnectorCtx } from './connectors.ts'
 import {
   isEventInput,
   type EventEnvelope,
@@ -236,8 +236,10 @@ export function mailboxIdentity(sessionId?: string): MailboxIdentity {
 }
 
 /** `to` names exactly one recipient: an agentId, a sessionId, or the
- *  `orchestrator` role. Anything else is broadcast. */
-function addressedTo(to: string, identity: MailboxIdentity): boolean {
+ *  `orchestrator` role. Anything else is broadcast. Exported so
+ *  read-only surfaces (the events plane) apply the drain's addressing
+ *  rule without consuming drops. */
+export function addressedTo(to: string, identity: MailboxIdentity): boolean {
   if (identity.agentId !== undefined && to === identity.agentId) {
     return true
   }
@@ -411,8 +413,8 @@ export function drainMailbox(
  *  summary. Probes are fail-open like every connector. */
 export const notifyConnector: Connector = {
   name: 'notify',
-  hooks: () => ({
-    postTool(ctx) {
+  hooks: () => {
+    const drain = (ctx: ConnectorCtx): string[] => {
       try {
         const msgs = drainMailbox(ctx.dir, ctx.sessionId ?? '', {
           for: mailboxIdentity(ctx.sessionId),
@@ -423,6 +425,13 @@ export const notifyConnector: Connector = {
       } catch {
         return []
       }
-    },
-  }),
+    }
+    return {
+      postTool: drain,
+      // a drop that landed after the last mid-turn drain — a detached
+      // writer's, or a dead session's — still reaches the next session
+      // at start, the same slot the goal reminder uses (bro-q4iq0)
+      sessionStart: drain,
+    }
+  },
 }

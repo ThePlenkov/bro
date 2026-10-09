@@ -23,8 +23,12 @@ import {
   gitHooksDir,
   hookShim,
   installCommitHook,
+  installPostMergeHook,
   liveSessionClaims,
+  POSTMERGE_HOOK_MARK,
+  postMergeShim,
   uninstallCommitHook,
+  uninstallPostMergeHook,
 } from './githooks.ts'
 import { git, initRepo, inside } from './testrepo.ts'
 
@@ -311,6 +315,50 @@ describe('install/uninstall', () => {
       } finally {
         chmodSync(join(main, '.git', 'hooks'), 0o755)
       }
+    })
+  })
+})
+
+describe('post-merge shim (bro-sovl3)', () => {
+  const hookPath = (main: string): string => join(main, '.git', 'hooks', 'post-merge')
+
+  test('shim chains .local, dispatches `bro hooks post-merge`, fails open', () => {
+    const shim = postMergeShim('1.2.3')
+    assert.match(shim, /post-merge\.local/)
+    // a bro that errors (older releases lack the event) falls through
+    // to the pinned npx fallback — detached, so git pull never waits
+    assert.match(shim, /command -v bro.*&& bro hooks post-merge "\$@" <\/dev\/null/)
+    assert.match(shim, /nohup npx -y --prefer-offline "@broject\/bro@1\.2\.3" hooks post-merge/)
+    assert.ok(shim.includes(POSTMERGE_HOOK_MARK))
+    // the chain keeps its veto; bro's tail always exits 0
+    assert.match(shim, /"\$chain" "\$@" \|\| exit \$\?/)
+    assert.match(shim, /exit 0\n$/)
+  })
+
+  test('install chains a pre-existing hook, uninstall restores it', () => {
+    const { root, main } = initRepo('bro-githooks-')
+    inside(main, root, () => {
+      writeFileSync(hookPath(main), '#!/bin/sh\nexit 0\n')
+      const r = installPostMergeHook(main, '9.9.9')
+      assert.equal(r.state, 'chained')
+      assert.equal(
+        readFileSync(join(main, '.git', 'hooks', 'post-merge.local'), 'utf8'),
+        '#!/bin/sh\nexit 0\n'
+      )
+      assert.ok(readFileSync(hookPath(main), 'utf8').includes(POSTMERGE_HOOK_MARK))
+      assert.equal(uninstallPostMergeHook(main).state, 'restored')
+      assert.equal(readFileSync(hookPath(main), 'utf8'), '#!/bin/sh\nexit 0\n')
+      // the restored hook is foreign again — uninstall must refuse it
+      assert.equal(uninstallPostMergeHook(main).state, 'error')
+    })
+  })
+
+  test('uninstall refuses a foreign post-merge hook', () => {
+    const { root, main } = initRepo('bro-githooks-')
+    inside(main, root, () => {
+      writeFileSync(hookPath(main), '#!/bin/sh\nexit 0\n')
+      assert.equal(uninstallPostMergeHook(main).state, 'error')
+      assert.equal(readFileSync(hookPath(main), 'utf8'), '#!/bin/sh\nexit 0\n')
     })
   })
 })

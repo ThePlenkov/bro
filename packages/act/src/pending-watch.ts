@@ -7,6 +7,11 @@
  * the stale promise — the act connector surfaces it in session-start
  * lines and retires it so it flags exactly once.
  *
+ * A wait that settles BLOCKED leaves a second, separate record — a
+ * `<pr>-blocked-*.json` verdict marker carrying the named blockers —
+ * so the settle rehydrates as a finding at session start even when
+ * nobody read the watching shell's exit (bro-q4iq0).
+ *
  * Fail-open throughout: no git dir, unwritable dir, unreadable marker —
  * the wait still runs, the hook just has nothing to report.
  */
@@ -40,6 +45,18 @@ export interface PendingWatch {
    *  containing the watcher's cwd — replaying it from another checkout
    *  would tear down the wrong worktree, so rearm needs the original. */
   workdir?: string
+  /** The loop-claimed bead a landed merge finalizes — a rearmed wait
+   *  inherits it so the merge closes the work item, not just the PR
+   *  (bro-q6ppv: a dead loop's marker replayed as `act wait --merge
+   *  --cleanup` retired everything but never ran finalizeMerge). */
+  bead?: string
+  /** A settled wait's verdict — 'blocked' markers are findings, not
+   *  promises: they never count as live coverage and never rearm; a
+   *  session-start report flags the blockers until a covering watch or
+   *  the TTL removes the record. */
+  verdict?: 'blocked'
+  /** The gate's blocker names at settle — the finding's payload. */
+  blockers?: string[]
   startedAt: number
   timeoutMin: number
 }
@@ -217,6 +234,52 @@ export function watchHeartbeat(
   }
 }
 
+/** Drop the settled wait's verdict as a marker — the finding half of a
+ *  blocked settle (bro-q4iq0). The filename's `blocked` kind segment
+ *  keeps it out of deadWatchPlan (a settled wait is not a promise to
+ *  resurrect — rewatching a blocked gate re-settles instantly), and the
+ *  record's merge:false means ANY live same-PR watch covers it: the
+ *  re-arm IS the answer to the verdict, so covering hides it and the
+ *  covering watch's watchEnd sweeps it. */
+export function watchVerdict(
+  dir: string,
+  w: { pr: number; link: string; timeoutMin: number },
+  blockers: string[]
+): string | null {
+  const wd = watchesDir(dir)
+  if (!wd) {
+    return null
+  }
+  try {
+    mkdirSync(wd, { recursive: true })
+    const path = join(
+      wd,
+      `${w.pr}-blocked-${process.pid}-${randomBytes(6).toString('hex')}.json`
+    )
+    const tmp = `${path}.tmp`
+    writeFileSync(
+      tmp,
+      JSON.stringify(
+        {
+          ...w,
+          merge: false,
+          verdict: 'blocked',
+          blockers,
+          pid: process.pid,
+          pidStart: procStat(process.pid)?.start ?? undefined,
+          startedAt: Date.now(),
+        },
+        null,
+        2
+      )
+    )
+    renameSync(tmp, path)
+    return path
+  } catch {
+    return null
+  }
+}
+
 /** Is a live watch covering `pr`? Tri-state for gate decisions:
  *  `true`/`false` are verdicts; `null` means the store could not be
  *  read (no git dir, EACCES, ...) — callers that block on "unwatched"
@@ -261,6 +324,10 @@ function readMarker(file: string): PendingWatch | null {
       typeof w.merge === 'boolean' &&
       (w.cleanup === undefined || typeof w.cleanup === 'boolean') &&
       (w.workdir === undefined || typeof w.workdir === 'string') &&
+      (w.bead === undefined || typeof w.bead === 'string') &&
+      (w.verdict === undefined || w.verdict === 'blocked') &&
+      (w.blockers === undefined ||
+        (Array.isArray(w.blockers) && w.blockers.every((b) => typeof b === 'string'))) &&
       // an Infinity/NaN startedAt poisons the TTL check — Date.now() -
       // Infinity is never > ttl, so the marker would never be pruned
       typeof w.startedAt === 'number' &&
@@ -318,8 +385,15 @@ function listWatchesIn(wd: string): ListedWatch[] {
       continue
     }
     // a retired marker is stale by definition — pid reuse since the
-    // claim must not resurrect it into a live watch
-    out.push({ watch: w, file, alive: !retired && pidAlive(w.pid, w.pidStart), reported: retired })
+    // claim must not resurrect it into a live watch. A verdict marker
+    // never reads live either — its pid is the exited wait's own, and
+    // a finding must not count as coverage
+    out.push({
+      watch: w,
+      file,
+      alive: !retired && w.verdict === undefined && pidAlive(w.pid, w.pidStart),
+      reported: retired,
+    })
   }
   return out
 }
@@ -348,7 +422,8 @@ export function listWatches(dir: string): ListedWatch[] {
  *  `<pr>-<kind>-<pid>.json` — a kind word ('drive') where the pid would
  *  sit. The `.retired` suffix a report claim adds is stripped first, so
  *  a flagged-but-still-dead marker classifies the same. Returns 'wait'
- *  or the recorded supervisor kind. */
+ *  or the recorded kind — a 'blocked' verdict classifies like a
+ *  supervisor heartbeat: it is a finding, not a promise to resurrect. */
 export function watchMarkerKind(file: string, w: PendingWatch): string {
   const second = basename(file)
     .replace(/\.json(\.retired)?$/, '')
@@ -356,21 +431,25 @@ export function watchMarkerKind(file: string, w: PendingWatch): string {
   return second === String(w.pid) ? 'wait' : (second ?? 'supervisor')
 }
 
-/** Dead watches deduped to one rearm plan per PR — the strongest
- *  recorded mode wins (a dead merge:true marker re-arms as --merge even
- *  when a watch-only marker died alongside). The caller checks the PR
- *  is still open before respawning; `files` are this PR's dead markers
- *  to drop once the replacement watch is up. */
-export function deadWatchPlan(
-  dir: string
-): Array<{
+/** The resurrection plan one dead wait-marker set yields — the fields
+ *  a respawned `act wait` replays, the loop-claimed `bead` the merge
+ *  finalizes, and `files`, this PR's dead markers to drop once the
+ *  replacement watch is up. */
+export interface RearmPlan {
   pr: number
   merge: boolean
   cleanup: boolean
   timeoutMin: number
   workdir?: string
+  bead?: string
   files: string[]
-}> {
+}
+
+/** Dead watches deduped to one rearm plan per PR — the strongest
+ *  recorded mode wins (a dead merge:true marker re-arms as --merge even
+ *  when a watch-only marker died alongside). The caller checks the PR
+ *  is still open before respawning. */
+export function deadWatchPlan(dir: string): RearmPlan[] {
   const byPr = new Map<
     number,
     {
@@ -378,6 +457,7 @@ export function deadWatchPlan(
       cleanup: boolean
       timeoutMin: number
       workdir?: string
+      bead?: string
       files: string[]
     }
   >()
@@ -399,6 +479,7 @@ export function deadWatchPlan(
         cleanup: l.watch.cleanup === true,
         timeoutMin: l.watch.timeoutMin,
         workdir: l.watch.workdir,
+        bead: l.watch.bead,
         files: [l.file],
       })
       continue
@@ -408,8 +489,10 @@ export function deadWatchPlan(
     // the mode it recorded; a watch-only marker's cwd never is one
     if (l.watch.merge && !cur.merge) {
       cur.workdir = l.watch.workdir ?? cur.workdir
+      cur.bead = l.watch.bead ?? cur.bead
     } else {
       cur.workdir = cur.workdir ?? l.watch.workdir
+      cur.bead = cur.bead ?? l.watch.bead
     }
     cur.merge = cur.merge || l.watch.merge
     cur.cleanup = cur.cleanup || l.watch.cleanup === true
@@ -424,7 +507,9 @@ export function deadWatchPlan(
  *  dead one); a settled PR's markers just get swept — reality already
  *  kept the promise. A host probe that can't answer keeps the marker:
  *  dropping the flag on an unverified PR is exactly the silent loss the
- *  marker exists to prevent. */
+ *  marker exists to prevent. `settled` carries the plan's bead so the
+ *  caller can close the loop-claimed bead whose finalizeMerge never
+ *  ran (bro-q6ppv). */
 export async function rearmWatches(opts: {
   dir: string
   isOpen: (pr: number) => Promise<boolean>
@@ -433,21 +518,15 @@ export async function rearmWatches(opts: {
    *  replacement watcher is CONFIRMED up (its live marker exists) — a
    *  bare spawn that exits early must resolve to undefined, keeping the
    *  dead markers instead of sweeping the only record of the promise. */
-  respawn?: (plan: {
-    pr: number
-    merge: boolean
-    cleanup: boolean
-    timeoutMin: number
-    workdir?: string
-  }) => number | undefined | Promise<number | undefined>
+  respawn?: (plan: RearmPlan) => number | undefined | Promise<number | undefined>
 }): Promise<{
   rearmed: Array<{ pr: number; pid: number }>
-  settled: number[]
+  settled: Array<{ pr: number; bead?: string }>
   kept: Array<{ pr: number; reason: string }>
 }> {
   const out = {
     rearmed: [] as Array<{ pr: number; pid: number }>,
-    settled: [] as number[],
+    settled: [] as Array<{ pr: number; bead?: string }>,
     kept: [] as Array<{ pr: number; reason: string }>,
   }
   for (const plan of deadWatchPlan(opts.dir)) {
@@ -460,18 +539,16 @@ export async function rearmWatches(opts: {
  *  respawns (or dry-run-reports). Extracted so rearmWatches reads as
  *  the loop it is. */
 async function rearmOne(
-  plan: { pr: number; files: string[]; merge: boolean; cleanup: boolean; timeoutMin: number; workdir?: string },
+  plan: RearmPlan,
   opts: {
     isOpen: (pr: number) => Promise<boolean>
-    respawn?: (plan: {
-      pr: number
-      merge: boolean
-      cleanup: boolean
-      timeoutMin: number
-      workdir?: string
-    }) => number | undefined | Promise<number | undefined>
+    respawn?: (plan: RearmPlan) => number | undefined | Promise<number | undefined>
   },
-  out: { rearmed: Array<{ pr: number; pid: number }>; settled: number[]; kept: Array<{ pr: number; reason: string }> }
+  out: {
+    rearmed: Array<{ pr: number; pid: number }>
+    settled: Array<{ pr: number; bead?: string }>
+    kept: Array<{ pr: number; reason: string }>
+  }
 ): Promise<void> {
   const sweep = (): void => {
     for (const f of plan.files) {
@@ -486,7 +563,9 @@ async function rearmOne(
     return
   }
   if (!open) {
-    out.settled.push(plan.pr)
+    out.settled.push(
+      plan.bead === undefined ? { pr: plan.pr } : { pr: plan.pr, bead: plan.bead }
+    )
     // a dry run reports but never mutates — markers move only on a real sweep
     if (opts.respawn !== undefined) {
       sweep()

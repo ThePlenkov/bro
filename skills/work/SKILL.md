@@ -18,7 +18,7 @@ same branch in two worktrees — that refusal is the collision fence.
 | `bro work enter <slug>` | Sibling checkout `<repo>--<slug>` on branch `work/<slug>` (`--branch`, `--base` override). Base is explicit: the main checkout's branch by default — `--stack` (or `stack.mode: "auto"` in bro.config.json) bases on the current worktree's branch instead, and the edge is recorded under `.git/bro/stack/` for bottom-up merge order. An existing branch is checked out, not recreated. Tries to init submodules and, if `<slug>` names a bead, to claim it — both best-effort |
 | `bro work leave [slug]` | Remove the worktree — the current one by default; `--force` discards dirty state, `--delete-branch` drops a merged branch. Submodule trees are force-removed without touching the shared submodule config |
 | `bro work list` | Every worktree: branch, clean/dirty count, `--sizes` adds `du` |
-| `bro work prune` | Drop admin entries for worktrees already deleted on disk |
+| `bro work prune` | Drop admin entries for worktrees already deleted on disk. `--loop` also reaps `loop/*` (and `stack/*`) litter: worktrees whose bead is closed or whose PR merged get removed with their branch — but only when verifiably clean, unclaimed, unlocked, and unoccupied. Dirty trees, open PRs, live agents, and unverifiable beads are kept with the reason named. `--dry-run` reports verdicts without touching anything |
 
 ## Policy
 

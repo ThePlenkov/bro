@@ -294,6 +294,16 @@ describe('hooks e2e — permission + fail-open', () => {
       const no = hook(f, 'permission', { tool_input: { command: 'rm -rf build' } })
       assert.equal(no.code, 0)
       assert.doesNotMatch(no.stdout, /approve/)
+      // Codex PermissionRequest ignores legacy decision:approve.
+      // turn_id is the Codex-only field; Devin keeps the approve shape.
+      const codex = hook(f, 'permission', {
+        turn_id: 'turn-1',
+        hook_event_name: 'PermissionRequest',
+        tool_input: { command: 'bd ready -n 5' },
+      })
+      assert.equal(codex.code, 0)
+      assert.match(codex.stdout, /"behavior":"allow"/)
+      assert.doesNotMatch(codex.stdout, /"decision":"approve"/)
     })
   })
 
@@ -599,6 +609,43 @@ describe('hooks e2e — cursor schema', () => {
       assert.equal(r.code, 0)
       assert.match(r.stdout, /followup_message/)
       assert.match(r.stdout, /uncommitted/)
+    })
+  })
+})
+
+describe('hooks e2e — Codex instructions', () => {
+  const pluginRoot = resolve(CLI_DIST, '..', '..', '..', '..')
+
+  test('session-start and post-compaction inject the plugin file only for Codex', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const env = { XDG_STATE_HOME: join(f.root, 'xdg-state'), PLUGIN_ROOT: pluginRoot }
+      const codex = runCli(['hooks', 'session-start'], {
+        cwd: f.main,
+        input: JSON.stringify({ session_id: 's1', turn_id: 'turn-1' }),
+        env,
+      })
+      assert.equal(codex.code, 0)
+      assert.match(codex.stdout, /# bro on Codex/)
+      const other = runCli(['hooks', 'session-start'], {
+        cwd: f.main,
+        input: JSON.stringify({ session_id: 's1' }),
+        env,
+      })
+      assert.doesNotMatch(other.stdout, /# bro on Codex/)
+      const pre = runCli(['hooks', 'pre-compact'], {
+        cwd: f.main,
+        input: JSON.stringify({ session_id: 's1', turn_id: 'turn-1' }),
+        env,
+      })
+      assert.doesNotMatch(pre.stdout, /# bro on Codex/)
+      const post = runCli(['hooks', 'post-compaction'], {
+        cwd: f.main,
+        input: JSON.stringify({ session_id: 's1', turn_id: 'turn-1' }),
+        env,
+      })
+      assert.match(post.stdout, /PostCompact/)
+      assert.match(post.stdout, /# bro on Codex/)
     })
   })
 })

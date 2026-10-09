@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Mesh"
+  short_description: "Federate work between bro rigs — peers, inbox, claim, accept"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $mesh to work across bro rigs."
+policy:
+  allow_implicit_invocation: true

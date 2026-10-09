@@ -7,9 +7,15 @@ code nobody edits by hand.
 
 - `plugins/**` — generated client adapters (`scripts/gen-plugins.ts`);
   review the canonical sources (`skills/`, `hooks/`, `plugin.json`) and the
-  generator itself instead — except `plugins/claude/bro/hooks/hooks.json`,
-  the one hand-written adapter file (Claude event names), which stays in
-  scope
+  generator itself instead. Two exceptions stay in scope:
+  `plugins/claude/bro/hooks/hooks.json` and
+  `plugins/codex/bro/hooks/hooks.json` (hand-written event names), and
+  any `skills` entry under `plugins/<client>/bro`. A directory or a
+  symlink there is a second package — **major**, even though the rest
+  of `plugins/**` is skipped. Skills are reviewed at `skills/` next to
+  root `plugin.json` ([Agent Plugins](https://agent-plugins.org/),
+  [Agent Skills](https://agentskills.io/)). Host files in scope are the
+  extras only: hook event maps and client manifests.
 - `vendor/**` — upstream submodule, not ours
 - `package-lock.json`, `**/dist/**`, `**/*.generated.ts`
 - `.agents/skills/`, `.agents/review-debt/` — local runtime state
@@ -22,8 +28,12 @@ code nobody edits by hand.
 - `packages/cli/dist` and PATH fallbacks are the production path for
   installed plugins — treat breakage there as **major**, not minor.
 - `scripts/gen-plugins.ts` drift between canonical sources and generated
-  adapters is **major** — a stale manifest or a skills link that is not
-  the repo `skills/` tree ships to users verbatim.
+  adapters is **major** — a stale manifest ships to users verbatim.
+- A second skills package is **major**: `plugins/<client>/bro/skills`
+  as a directory or a symlink, a duplicated `SKILL.md` outside
+  `skills/`, or a generator mode that copies or links the tree into a
+  host adapter. The portable tree is `skills/` beside root `plugin.json`.
+  Host adapters add hooks and client manifests only.
 - `packages/core` is vendor-neutral: it holds contracts, registries, and
   generic mechanics only (`agents.<kind>` knob bags, `sessionPlanes`,
   `connectors.*` seam). An import, path, identifier, or hard-coded state

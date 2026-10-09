@@ -43,6 +43,7 @@ import {
 } from '../agent-connectors.ts'
 import { occupancyLine, type FleetOccupancy } from './agents.ts'
 import { flag } from './args.ts'
+import { loadBroConfig } from '../plugins.ts'
 import { parseWorktreePorcelain, worktreePathFor, type WorktreeInfo } from './work.ts'
 
 export interface FleetRow {
@@ -308,7 +309,10 @@ export interface FleetPayload {
   wallsError?: string
 }
 
-async function collectFleet(dir: string): Promise<FleetPayload> {
+export async function collectFleet(
+  dir: string,
+  prefer?: Record<string, string>
+): Promise<FleetPayload> {
   const env = loadAgentEnv(dir)
   const { byStep, degraded, conflicts } = await collectAgents(dir, env)
 
@@ -325,7 +329,7 @@ async function collectFleet(dir: string): Promise<FleetPayload> {
   let rev: ReviewFacade | undefined
   let repo = ''
   try {
-    rev = reviewHost(dir)
+    rev = reviewHost(dir, prefer)
     repo = rev.resolveRepo([])
   } catch {
     rev = undefined
@@ -439,7 +443,11 @@ export function liveFrame(payload: FleetPayload, ts: Date, everySec: number): st
 /** The repaint loop — alt screen + raw keys, chained setTimeout (never
  *  setInterval: a slow collect stretches the cadence instead of
  *  stacking), repaint on resize, restore on every exit path. */
-async function runFleetLive(dir: string, everySec: number): Promise<void> {
+async function runFleetLive(
+  dir: string,
+  everySec: number,
+  prefer?: Record<string, string>
+): Promise<void> {
   const out = process.stdout
   const input = process.stdin
   if (!out.isTTY || !input.isTTY) {
@@ -540,7 +548,7 @@ async function runFleetLive(dir: string, everySec: number): Promise<void> {
       // a quit that landed mid-collect already restored the primary
       // screen — painting now would corrupt it, so both paths check
       try {
-        const frame = liveFrame(await collectFleet(dir), new Date(), everySec)
+        const frame = liveFrame(await collectFleet(dir, prefer), new Date(), everySec)
         if (!settled) {
           paint(frame)
         }
@@ -570,14 +578,15 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
     process.exit(2)
   }
   const dir = process.cwd()
+  const prefer = loadBroConfig(dir).connectors
 
   if (args.live) {
-    await runFleetLive(dir, args.everySec)
+    await runFleetLive(dir, args.everySec, prefer)
     return
   }
 
   const { rows, degraded, conflicts, prErrors, occupancy, budget, walls, wallsError } =
-    await collectFleet(dir)
+    await collectFleet(dir, prefer)
 
   if (args.json) {
     console.log(

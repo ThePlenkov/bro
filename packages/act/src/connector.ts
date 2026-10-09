@@ -144,6 +144,16 @@ function watchLines(dir: string): string[] {
       if (reported !== true && !watchRetire(file)) {
         continue
       }
+      if (watch.verdict === 'blocked') {
+        // a settled blocked wait is a finding, not a broken promise —
+        // name the blockers; a fresh `bro act wait` supersedes it
+        const list = (watch.blockers ?? []).join('; ')
+        out.push(
+          `act wait on ${watch.link} settled BLOCKED${list === '' ? '' : ` — ${list}`} — ` +
+            `\`bro act threads ${watch.pr}\` lists them`
+        )
+        continue
+      }
       const mode = watch.merge ? ' (was set to merge on green)' : ''
       const kind = watchMarkerKind(file, watch)
       // a bare `act wait` resurrects through `act rearm`; a supervisor

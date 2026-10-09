@@ -13,11 +13,11 @@ checks, SAST annotations, mergeability, and fix rounds.
 | ------- | ------------ |
 | `bro act status [PR] [--json]` | PR state + exit gate. Non-zero while blocked |
 | `bro act threads [PR]` | Unresolved review threads, TSV |
-| `bro act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; `--cleanup` requires `--merge` and retires the merged worktree and local branch |
-| `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup]` | Merge **only if the gate is green** — refuses and names blockers; `--cleanup` retires the checkout the command runs in when safe, and keeps the local branch if another worktree still checks it out |
+| `bro act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; `--cleanup` requires `--merge` and retires the merged worktree and local branch; `--bead` closes the loop-claimed bead once the merge lands |
+| `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup] [--bead ID]` | Merge **only if the gate is green** — refuses and names blockers; `--cleanup` retires the checkout the command runs in when safe, and keeps the local branch if another worktree still checks it out; `--bead` closes the loop-claimed bead on land |
 | `bro act resolve --thread ID [--comment T]` | Resolve (reply first if comment given); `--unresolve` reopens |
 | `bro act reply --thread ID --comment T` | Reply without resolving; `--file TSV` for batch |
-| `bro act rearm [--dry-run] [--json]` | Resurrect dead PR watchers — respawn `act wait` for open PRs whose watch marker outlived its process; settled markers are swept, live ones kept |
+| `bro act rearm [--dry-run] [--json]` | Resurrect dead PR watchers — respawn `act wait` for open PRs whose watch marker outlived its process (bead identity included); settled markers are swept — a merged one closes the bead it carried — live ones kept |
 
 ## The gate
 
@@ -85,7 +85,7 @@ For a watch that must outlive the session, spawn it detached or let
 `bro act rearm` resurrect the dead marker on the next session's nudge —
 `bro drive --every` and `bro watch install` are the durable forms.
 
-## Stacked PRs
+## Stacked PRs and merge queues
 
 GitHub refuses to merge a PR that belongs to a **stack** through either
 `gh pr merge` (GraphQL) or the synchronous merge endpoint — *"must be
@@ -95,15 +95,48 @@ through the async endpoint instead, polling the request's uuid until it
 settles. `bro act wait --merge` is the same merge step, so a watcher on a
 stack layer lands it too.
 
+The same is true — and the same seam — when the base branch requires a
+**merge queue**, stack or not: `bro act merge` probes the PR's base for
+one and enqueues through the async endpoint rather than attempting the
+doomed `gh pr merge`. An accepted enqueue is **parked, not failed** — the
+command reports `accepted but state=OPEN` and exits 0; the queue merges
+later. `bro drive` reads the same shape as an `enqueued` verdict — it
+retires nothing and re-checks on the next pass.
+
 Two details worth knowing:
 
-- A merge queue owns the strategy. On a base branch that requires one the
-  request enqueues (`enqueued`, not merged) and the command reports the
-  PR's real state — the queue merges later. Elsewhere the requested
-  `--squash`/`--merge`/`--rebase` is honored.
+- A merge queue owns the strategy. The request carries
+  `merge_action=merge_queue` and no merge method; elsewhere the
+  requested `--squash`/`--merge`/`--rebase` is honored.
 - **The head branch is kept** on this path: deleting a lower layer's
-  branch closes every PR stacked on it. `--cleanup` still retires the
-  local worktree and branch.
+  branch closes every PR stacked on it, and deleting a queued PR's head
+  closes it. `--cleanup` still retires the local worktree and branch once
+  the merge actually lands.
+
+### External merge queues
+
+When the queue lives outside GitHub, a connector owns the merge —
+opt-in only, by name:
+
+```json
+{ "connectors": { "mergeQueue": "mergify" } }
+```
+
+- **`mergify`** — signals the PR: applies `act.mergeQueue.label` and/or
+  posts the queue command (`act.mergeQueue.comment`, default
+  `@mergifyio queue`). Your `.mergify.yml` rules decide what the signal
+  means; bro never authors them.
+- **`graphite`** — runs `gt merge` in the PR's checkout (from `bro work
+  enter` or the worktree `bro drive` hands it). The checkout must sit on
+  the PR's head branch — `gt merge` queues the whole stack it sees, so a
+  wrong checkout is refused, not queued.
+
+Both hand off pinned to the gated head sha: a push after the gate makes
+the enqueue refuse rather than queue a commit the gate never saw.
+
+Configured or not, the merge still goes through the same exit gate and
+merge slot — the connector only replaces the final `mergePr` call. An
+`enqueued` result parks the PR exactly like a GitHub-queue hold.
 
 ## Never unwatched
 
@@ -115,7 +148,10 @@ form (a running `bro drive --every` counts as coverage via its per-PR
 heartbeat markers). A `timed_out` watcher retires its marker on the way
 out — start a fresh `act wait`; a watcher that *died* leaves a dead
 marker, the session-start nudge names it, and `bro act rearm` puts the
-watch back up. `bro act status` prints `watch=` so coverage is visible
+watch back up. A watcher that *settled BLOCKED* leaves a verdict marker
+too — session-start flags the named blockers — and drops a keyed
+mailbox event, so the finding reaches a session that never saw the
+exit. `bro act status` prints `watch=` so coverage is visible
 before you stop.
 
 **Merge through `bro act merge`, never `gh pr merge`** — the gate is

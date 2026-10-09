@@ -3,6 +3,7 @@
  *  spawner, and the fake bd/review-host the e2e matrix needs. Test files
  *  must not re-declare these — SonarCloud counts fixture clones as
  *  duplication on new code. */
+import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import {
   chmodSync,
@@ -52,6 +53,19 @@ export function inside<T>(dir: string, root: string, fn: () => T): T {
   process.chdir(dir)
   try {
     return fn()
+  } finally {
+    process.chdir(prev)
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+/** Async inside() — the cleanup must await the body: deleting the repo
+ *  while a returned promise still probes it turns the test into a race. */
+export async function insideAsync<T>(dir: string, root: string, fn: () => Promise<T>): Promise<T> {
+  const prev = process.cwd()
+  process.chdir(dir)
+  try {
+    return await fn()
   } finally {
     process.chdir(prev)
     rmSync(root, { recursive: true, force: true })
@@ -393,6 +407,18 @@ export function bead(db: string, id: string): Record<string, unknown> | undefine
   return readBeads(db).find((r) => r.id === id)
 }
 
+/** The landed-claim verdict every act settle path owes — the bead is
+ *  closed with the merge link as its close reason; stderr (when the
+ *  caller holds one) carries the `act: <id> closed` line. */
+export function assertLandedBead(db: string, id: string, stderr?: string): void {
+  if (stderr !== undefined) {
+    assert.match(stderr, new RegExp(`${id} closed`))
+  }
+  const row = bead(db, id)
+  assert.equal(row?.status, 'closed')
+  assert.match(String(row?.close_reason), /landed via/)
+}
+
 export const FAKE_BEAD = {
   priority: 1,
   issue_type: 'task',
@@ -445,13 +471,13 @@ const facade = {
       headSha: per.headSha ?? s.headSha ?? 'abc123',
       headRef: per.headRef ?? s.headRef ?? 'loop/fx-a',
       baseRef: per.baseRef ?? s.baseRef ?? 'main',
-      mergeable: s.mergeable ?? 'MERGEABLE',
-      mergeState: s.mergeState ?? 'CLEAN',
+      mergeable: per.mergeable ?? s.mergeable ?? 'MERGEABLE',
+      mergeState: per.mergeState ?? s.mergeState ?? 'CLEAN',
     }
   },
   mergedPrInfo: () => { throw new Error('not merged') },
   mergedPrs: () => [],
-  checks: () => {
+  checks: (t) => {
     const s = load()
     // mid-poll snapshot of the watch-marker dir — a waitForGate caller
     // that armed watch: holds the marker for the fetch's duration, so
@@ -465,6 +491,22 @@ const facade = {
       )
       save(s)
     } catch {}
+    // per-PR checks — a mapped entry carries its own check list (with a
+    // clearAfterMerge trigger: once that PR lands in events, this one's
+    // checks go green — the round-robin "A pending while B merges" cue)
+    if (s.prs) {
+      const p = Object.values(s.prs).find((p) => p.number === t.pr)
+      if (p) {
+        if (
+          p.clearAfterMerge !== undefined &&
+          (s.events ?? []).some((e) => e.merge === p.clearAfterMerge)
+        ) {
+          p.checks = []
+          save(s)
+        }
+        return p.checks ?? s.checks ?? []
+      }
+    }
     return s.checks ?? []
   },
   checkAnnotations: () => new Map(),
@@ -488,18 +530,39 @@ const facade = {
     save(s)
     return true
   },
-  updateBranch: () => false,
+  updateBranch: (t) => {
+    const s = load()
+    if (s.updateFails) return false
+    s.events = (s.events ?? []).concat([{ update: t.pr }])
+    if (s.prs) {
+      const p = Object.values(s.prs).find((p) => p.number === t.pr)
+      if (p) {
+        p.mergeState = 'CLEAN'
+        p.headSha = 'updated-' + t.pr
+        save(s)
+        return true
+      }
+    }
+    s.mergeState = 'CLEAN'
+    s.headSha = 'updated-' + t.pr
+    save(s)
+    return true
+  },
   mergePr: (t) => {
     const s = load()
     s.merges = (s.merges ?? 0) + 1
-    s.prState = s.mergeResult ?? 'MERGED'
+    s.events = (s.events ?? []).concat([{ merge: t.pr }])
     // a merge lands on the per-branch entry too — otherwise a mapped
     // stack member keeps reporting OPEN after its merge
     if (s.prs) {
-      for (const p of Object.values(s.prs)) {
-        if (p.number === t.pr) p.state = s.prState
+      const p = Object.values(s.prs).find((p) => p.number === t.pr)
+      if (p) {
+        p.state = p.mergeResult ?? s.mergeResult ?? 'MERGED'
+        save(s)
+        return p.state
       }
     }
+    s.prState = s.mergeResult ?? 'MERGED'
     save(s)
     return s.prState
   },
@@ -529,12 +592,18 @@ const scenario = process.env.E2E_SCENARIO || 'land'
 const load = () => JSON.parse(fs.readFileSync(STATE, 'utf8'))
 const save = (s) => fs.writeFileSync(STATE, JSON.stringify(s))
 const prompt = fs.readFileSync(promptFile, 'utf8')
+const branch = execFileSync('git', ['branch', '--show-current'], { encoding: 'utf8' }).trim()
 // stdout line — proves the loop's spawn tee lands agent output in the
 // run record's <slug>.log, not the loop's own stream (bro-9lpn3)
 console.log('agent ' + scenario + ' on ' + (process.env.BRO_BEAD_ID || '?'))
 const log = (msg) => {
   const f = path.join(path.dirname(STATE), 'spawns.log')
-  fs.appendFileSync(f, (prompt.includes('review-threads') ? 'fix' : 'work') + ' ' + msg + '\\n')
+  const kind = prompt.includes('review-threads')
+    ? 'fix'
+    : prompt.includes('merge conflicts')
+      ? 'rebase'
+      : 'work'
+  fs.appendFileSync(f, kind + ' ' + msg + '\\n')
 }
 if (prompt.includes('review-threads')) {
   // fix round — resolve the threads and stop
@@ -544,12 +613,33 @@ if (prompt.includes('review-threads')) {
   log('resolved threads')
   process.exit(0)
 }
+if (prompt.includes('merge conflicts')) {
+  // rebase round — clear the conflict and stop
+  const s = load()
+  s.mergeable = 'MERGEABLE'
+  if (s.prs?.[branch]) s.prs[branch].mergeable = 'MERGEABLE'
+  s.events = (s.events ?? []).concat([{ rebase: process.env.BRO_BEAD_ID || null, branch }])
+  save(s)
+  log('rebased onto base')
+  process.exit(0)
+}
 switch (scenario) {
   case 'land': {
     fs.writeFileSync('work.txt', 'did the thing\\n')
     execFileSync('git', ['add', '-A'])
     execFileSync('git', ['commit', '-qm', 'feat: the thing'])
     const s = load()
+    s.events = (s.events ?? []).concat([{ spawn: process.env.BRO_BEAD_ID || null, branch }])
+    // the per-branch map (seeded prs: {}) is authoritative when present
+    if (s.prs) {
+      s.prs[branch] = {
+        ...(s.prs[branch] ?? {}),
+        number: s.prs[branch]?.number ?? (s.nextPr = (s.nextPr ?? 10) + 1),
+        state: 'OPEN',
+        headRef: branch,
+        baseRef: 'main',
+      }
+    }
     s.prOpened = true
     save(s)
     log('opened pr')
@@ -580,6 +670,54 @@ export function installFakeHost(root: string): { state: string; agent: string } 
 
 export function readHostState(state: string): Record<string, unknown> {
   return JSON.parse(readFileSync(state, 'utf8')) as Record<string, unknown>
+}
+
+/** A `tasks` connector over tasks.json beside the plugin — the
+ *  configured-backend fixture half: `connectors.tasks` pins it and the
+ *  facade's TaskStore ops land on this file instead of `bd`. Only the
+ *  surface the bead-close path needs is implemented. */
+const FAKE_TASKS_PLUGIN = `// e2e fixture — a tasks connector driven by tasks.json beside this file
+import { readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+const DB = join(dirname(fileURLToPath(import.meta.url)), 'tasks.json')
+const load = () => JSON.parse(readFileSync(DB, 'utf8'))
+const save = (db) => writeFileSync(DB, JSON.stringify(db))
+export default {
+  name: 'faketasks-plugin',
+  summary: 'e2e fixture',
+  run: () => {},
+  connectors: [
+    {
+      name: 'faketasks',
+      matchRemote: () => false,
+      tasks: () => ({
+        get: (id) => load().rows.find((r) => r.id === id),
+        close: (id, reason) => {
+          const db = load()
+          const r = db.rows.find((x) => x.id === id)
+          if (r) {
+            r.status = 'closed'
+            if (reason) r.close_reason = reason
+            save(db)
+          }
+        },
+      }),
+    },
+  ],
+}
+`
+
+/** Write the fake tasks-connector plugin + its store into the fixture
+ *  repo root; `db` is the tasks.json path `bead()` can read. */
+export function installFakeTasks(
+  root: string,
+  rows: Array<Record<string, unknown>> = []
+): { db: string } {
+  writeFileSync(join(root, 'faketasks.ts'), FAKE_TASKS_PLUGIN)
+  const db = join(root, 'tasks.json')
+  writeBeads(db, rows)
+  return { db }
 }
 
 // --- fake dolt — the beads-remote transport fixture -----------------------------

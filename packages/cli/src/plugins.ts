@@ -35,8 +35,9 @@ import { DRILL_PLAN_VERSION, drillConnector, drillSection, parseDrillPlan, type 
 import { parsePlanDoc, RETRO_PLAN_VERSION, type RetroPlan } from '@broject/retro'
 import { learnConnector, learnSection } from '@broject/learn'
 import { loopSection } from '@broject/loop'
-import { githubConnector } from '@broject/github'
+import { githubConnector, graphiteConnector, mergifyConnector } from '@broject/github'
 import { gitlabConnector } from '@broject/gitlab'
+import { linearConnector } from '@broject/linear'
 import {
   applyQueryPlan,
   atlassianConnector,
@@ -70,8 +71,10 @@ import { runGoalCommand } from './commands/goal.ts'
 import { goalSection } from './commands/goal-config.ts'
 import { runGuardCommand } from './commands/guard.ts'
 import { runHooksCommand } from './commands/hooks.ts'
+import { freshnessSection } from './commands/postmerge.ts'
 import { runJudgeCommand } from './commands/judge.ts'
 import { runLearnCommand } from './commands/learn.ts'
+import { runMcpCommand } from './commands/mcp.ts'
 import { runWatchCommand } from './commands/watch.ts'
 import { watchSection } from './commands/watch-config.ts'
 import { runAgentsCommand } from './commands/agents.ts'
@@ -93,9 +96,16 @@ import { runWorkCommand, workConnector } from './commands/work.ts'
 // decides stop-gate block priority: drill > work > act.
 registerConnector(githubConnector)
 registerConnector(gitlabConnector)
+// external merge queues — opt-in only (`connectors.mergeQueue`), they
+// provide nothing but the queue facade so nothing detects them
+registerConnector(mergifyConnector)
+registerConnector(graphiteConnector)
 // queries-facade provider — opt-in only (a step names it or
 // connectors.queries pins it); nothing about a repo detects Atlassian
 registerConnector(atlassianConnector)
+// Linear — tasks + tasksAsync + queries, all name-only pins
+// (connectors.tasks=linear); a repo's remote can't name a Linear team
+registerConnector(linearConnector)
 registerConnector(drillConnector)
 registerConnector(workConnector)
 registerConnector(actConnector)
@@ -218,6 +228,12 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Facade host for thin clients — HTTP/JSON on 127.0.0.1 [--port N]',
     run: runServeCommand,
     skill: 'serve',
+  }),
+  definePlugin({
+    name: 'mcp',
+    summary: 'Stdio MCP server over the read planes — bro_<plane>_<read> tools',
+    run: runMcpCommand,
+    skill: 'mcp',
   }),
   definePlugin({
     // No `skill` yet: the skill documents the hook integration, which is
@@ -351,6 +367,8 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Agent lifecycle hooks',
     run: runHooksCommand,
     hidden: true,
+    configKey: 'freshness',
+    configSchema: freshnessSection,
   }),
   definePlugin({
     name: 'telemetry',

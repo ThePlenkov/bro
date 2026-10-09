@@ -8,6 +8,8 @@
 import { facadeAuth, git, gitTry, reviewHost } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import { positionals } from './args.ts'
+import { isAncestor } from './work.ts'
+export { isAncestor }
 
 const PROTECTED = new Set(['main', 'master'])
 const MERGED_LIMIT = 1000
@@ -106,15 +108,6 @@ function remoteTips(): Map<string, string> {
     }
   }
   return out
-}
-
-/** `tip` reachable from `oid` — only meaningful when the oid object is
- * present locally (merged heads on deleted remote branches may not be). */
-export function isAncestor(tip: string, oid: string): boolean {
-  if (gitTry(['cat-file', '-e', oid]).code !== 0) {
-    return false
-  }
-  return gitTry(['merge-base', '--is-ancestor', tip, oid]).code === 0
 }
 
 export function runCleanupCommand(argv: string[]): void {

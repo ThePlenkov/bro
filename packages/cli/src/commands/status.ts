@@ -100,8 +100,9 @@ function agentState(e: AgentRegistryEntry): string {
 }
 
 /** Ready beads are a backlog queue — the widget needs the top few plus
- *  the count, never all 60+ rows with descriptions and dependencies. */
-const READY_CAP = 10
+ *  the count, never all 60+ rows with descriptions and dependencies.
+ *  Exported for the work plane's status read, which caps identically. */
+export const READY_CAP = 10
 
 function readBeads(dir: string): BroStatus['beads'] {
   const empty = { inProgress: [], ready: [], readyTotal: 0 }

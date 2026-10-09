@@ -68,12 +68,7 @@ import {
 } from '@broject/judge'
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { flag } from './args.ts'
-import {
-  defaultBranch,
-  deleteMergedLocalBranch,
-  removeMergedWorktree,
-  runActCommand,
-} from './act.ts'
+import { defaultBranch, runActCommand } from './act.ts'
 import { spawnStepAgent } from './agents.ts'
 import { collectAgents } from './fleet.ts'
 import {
@@ -85,9 +80,11 @@ import {
 import { loadBroConfig } from '../plugins.ts'
 import {
   claimLockPath,
+  deleteMergedLocalBranch,
   LIVE_MARKER_MS,
   mainWorktree,
   parseWorktreePorcelain,
+  removeMergedWorktree,
   worktreeClaim,
   worktreePathFor,
 } from './work.ts'
@@ -882,6 +879,13 @@ async function mergeAndRetire(
         docsMaxRounds: ctx.act.docsMaxRounds,
       }
   ).catch(() => undefined)
+  // exit-0 + OPEN IS the enqueue contract — act merge exits 0 only on a
+  // landed merge or a queue acceptance (every refusal sets exit 1).
+  // Parked, never a failure: no retirement, no fixer close; the next
+  // pass re-attempts and merge-async resumes the same uuid.
+  if (after?.state === 'OPEN') {
+    return { pr, link, verdict: 'enqueued', detail: 'a merge queue owns it' }
+  }
   if (after?.state !== 'MERGED') {
     return {
       pr,

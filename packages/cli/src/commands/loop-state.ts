@@ -154,6 +154,30 @@ function silenceMs(rec: LoopRunRecord | null, recordMtime: number, now: number):
   return Number.isFinite(base) ? now - base : null
 }
 
+function fileView(home: string, f: string, now: number): LoopRunView {
+  const slug = f.slice(0, -'.json'.length)
+  const path = join(home, f)
+  let mtime = Number.NaN
+  try {
+    mtime = statSync(path).mtimeMs
+  } catch {
+    // unreadable — still reported as residue below
+  }
+  const rec = readRecord(path, slug)
+  const pid = rec?.pid ?? null
+  const live = pid !== null && pidAlive(pid, rec?.pidStart)
+  return {
+    beadId: rec?.beadId ?? slug,
+    slug,
+    pid,
+    state: live ? 'running' : 'dead',
+    startedAt: rec === null || rec.startedAt === '' ? undefined : rec.startedAt,
+    worktree: rec === null || rec.worktree === '' ? undefined : rec.worktree,
+    log: rec === null || rec.log === '' ? undefined : rec.log,
+    silentMs: live ? silenceMs(rec, mtime, now) : null,
+  }
+}
+
 /** Every run record in `<git-common>/bro/loop/` — live first, oldest
  *  silence first, then dead residue. Read-only by contract (watch and
  *  status embed it); the loop's own start reap is the only mutator. */
@@ -168,37 +192,14 @@ export function collectLoopRuns(dir: string, now: number = Date.now()): LoopRunV
   } catch {
     return []
   }
-  const out: LoopRunView[] = []
-  for (const f of files) {
-    const slug = f.slice(0, -'.json'.length)
-    const path = join(home, f)
-    let mtime = Number.NaN
-    try {
-      mtime = statSync(path).mtimeMs
-    } catch {
-      // unreadable — still reported as residue below
-    }
-    const rec = readRecord(path, slug)
-    const pid = rec?.pid ?? null
-    const live = pid !== null && pidAlive(pid, rec?.pidStart)
-    out.push({
-      beadId: rec?.beadId ?? slug,
-      slug,
-      pid,
-      state: live ? 'running' : 'dead',
-      startedAt: rec === null || rec.startedAt === '' ? undefined : rec.startedAt,
-      worktree: rec === null || rec.worktree === '' ? undefined : rec.worktree,
-      log: rec === null || rec.log === '' ? undefined : rec.log,
-      silentMs: live ? silenceMs(rec, mtime, now) : null,
+  return files
+    .map((f) => fileView(home, f, now))
+    .sort((a, b) => {
+      if (a.state !== b.state) {
+        return a.state === 'running' ? -1 : 1
+      }
+      return (b.silentMs ?? 0) - (a.silentMs ?? 0)
     })
-  }
-  out.sort((a, b) => {
-    if (a.state !== b.state) {
-      return a.state === 'running' ? -1 : 1
-    }
-    return (b.silentMs ?? 0) - (a.silentMs ?? 0)
-  })
-  return out
 }
 
 /** Reap records whose pid is gone — run at `bro loop` start so a

@@ -32,6 +32,7 @@ export {
   evidenceKind,
   initBeadsStealth,
   isBdCompatError,
+  isBdNotFound,
   probeBdCompat,
   refKind,
 } from './bd.ts'
@@ -53,6 +54,7 @@ export {
   globalConfigDir,
   loadConfig,
   loadConfigLayers,
+  mcpSection,
   meshSection,
   PERSONALITIES,
   probeConfigFile,
@@ -129,6 +131,7 @@ export { docTypeNamed, docVerbs, STANDARD_VERBS, verbMethod } from './docs.ts'
 export type { DocAdapter, DocCtx, DocFlags, DocType, DocVerb, Scope } from './docs.ts'
 export { bdActor, bdActorAsync, taskStore, taskStoreAsync } from './tasks.ts'
 export type { TaskFilter, TaskInput, TaskRow, TaskStore, TaskStoreAsync } from './tasks.ts'
+export { bodyMeta, broTrailer, stripMeta, withMeta } from './taskmeta.ts'
 export { JudgeUnavailable } from './judge.ts'
 export type {
   DecideResult,
@@ -143,7 +146,9 @@ export type {
 } from './judge.ts'
 export type {
   CheckInfo,
+  EnqueueOpts,
   MergeOpts,
+  MergeQueueFacade,
   MergedPr,
   MergedPrInfo,
   MergedPrQuery,
@@ -166,6 +171,7 @@ export {
   facadeAuth,
   facadeName,
   isOwnClaim,
+  mergeQueueHost,
   parallelWorkLines,
   parallelWorkProbe,
   postToolLines,
@@ -221,12 +227,14 @@ export {
   mailboxEvents,
 } from './events-connectors.ts'
 export {
+  addressedTo,
   coalesceDrops,
   drainDirs,
   drainMailbox,
   type DrainOpts,
   dropMailbox,
   mailboxDir,
+  mailboxEvent,
   mailboxIdentity,
   type MailboxIdentity,
   notifyConnector,
@@ -298,6 +306,31 @@ export {
   sessionSlotsDir,
 } from './session-planes.ts'
 export type { SessionPlane, SessionQuota } from './session-planes.ts'
+export {
+  clearPlanes,
+  planeNames,
+  planes,
+  PlaneUnavailable,
+  PlaneVerbError,
+  registerPlane,
+  verbsNotWired,
+} from './planes.ts'
+export type {
+  EventRow,
+  Finding,
+  Gate,
+  LessonRow,
+  PlaneArgSchema,
+  PlaneCtx,
+  PlaneDescriptor,
+  PlaneFactory,
+  PlaneFilter,
+  PlaneRow,
+  Run,
+  VerdictRow,
+  Worker,
+  WorkItem,
+} from './planes.ts'
 export { acquireFileLock, LockTimeout, withFileLock } from './filelock.ts'
 export type { FileLockOptions } from './filelock.ts'
 export {
@@ -340,6 +373,7 @@ export type {
   BusFilter,
   BusProbeResult,
   BusPublishResult,
+  BusRecord,
   BusStatus,
   BusSubscription,
   BusSubscriptionHandlers,

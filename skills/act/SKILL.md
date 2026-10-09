@@ -18,9 +18,9 @@ default store, so standard installs already have it).
 | ------- | ------------ |
 | `bro act status [PR] [--json]` | PR state + **exit gate** — open threads, CI failures, SAST findings. Exits non-zero while blocked |
 | `bro act threads [PR]` | Unresolved review threads, TSV |
-| `bro act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; add `--cleanup` to retire the worktree the command runs in + the local branch after the merge lands |
-| `bro act rearm [--dry-run] [--json]` | Resurrect dead watchers: each PR whose `act wait` died (host reboot, turn teardown) gets a fresh detached wait with the recorded `--merge`/`--cleanup`/`--timeout`; settled PRs' markers sweep, unverifiable PRs keep theirs |
-| `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup]` | Merge **only if the exit gate is green** — serialized on the beads merge slot (best-effort: without beads the merge proceeds unserialized); BLOCKED refuses and names blockers. `--cleanup` retires the merged branch's checkout (when run inside it) + local ref |
+| `bro act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; add `--cleanup` to retire the worktree the command runs in + the local branch after the merge lands; `--bead` closes the loop-claimed bead once the merge lands (rearm replays it) |
+| `bro act rearm [--dry-run] [--json]` | Resurrect dead watchers: each PR whose `act wait` died (host reboot, turn teardown) gets a fresh detached wait with the recorded `--merge`/`--cleanup`/`--timeout`/`--bead`; a settled marker carrying a bead reconciles the claim when the PR merged, unverifiable PRs keep theirs |
+| `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup] [--bead ID]` | Merge **only if the exit gate is green** — serialized on the beads merge slot (best-effort: without beads the merge proceeds unserialized); BLOCKED refuses and names blockers. `--cleanup` retires the merged branch's checkout (when run inside it) + local ref; `--bead` closes the loop-claimed bead on land |
 | `bro act resolve --thread ID [--comment T]` | Resolve a thread (reply first if comment given) |
 | `bro act reply --thread ID --comment T` | Reply without resolving (`--file TSV` for batch) |
 
@@ -74,12 +74,24 @@ default store, so standard installs already have it).
   session is mid-merge — wait for `bd merge-slot check` to report available;
   a crashed holder is freed with `bd merge-slot release`. Only a
   user-directed override justifies merging around a BLOCKED gate. A PR in a
-  GitHub **stack** is not mergeable by `gh pr merge` at all (the API
-  refuses it) — `bro act merge` detects the stack and goes through the
-  async merge endpoint, polling until the merge settles, so don't hand-roll
-  `gh api … merge-async` either. The head branch is deliberately kept there
-  (deleting a lower layer's branch closes every PR stacked on it); local
-  cleanup with `--cleanup` is unaffected.
+  GitHub **stack** or onto a base that requires the **merge queue** is not
+  mergeable by `gh pr merge` at all — `bro act merge` detects either and
+  goes through the async merge endpoint, polling until the request
+  settles, so don't hand-roll `gh api … merge-async` either. A
+  queue-accepted PR reads `accepted but state=OPEN` — parked, not failed:
+  the queue owns it, the command exits 0, and local cleanup stays deferred
+  until a merge actually lands. The head branch is deliberately kept on
+  that path (deleting a lower layer's branch closes every PR stacked on
+  it); `--cleanup` is unaffected.
+- **External merge queues are opt-in connectors, never defaults.** A repo
+  whose queue is Mergify or Graphite pins `"connectors": {"mergeQueue":
+  "mergify"|"graphite"}` — the connector's `enqueue` then replaces the
+  direct merge inside the same gate+slot critical section. `mergify`
+  signals the PR (`act.mergeQueue.label` and/or `act.mergeQueue.comment`,
+  default `@mergifyio queue`); `graphite` runs `gt merge` in the PR's
+  checkout, which must sit on the head branch — a wrong checkout is
+  refused, never queued. `enqueued` is parked, not failed — `bro drive`
+  reports it as such and the next pass re-checks.
 - **Wait via `bro act wait <PR>` in the background, never a bespoke poll
   loop.** The command polls the exit gate until nothing is pending —
   green, settled blockers (threads, failures), or `--timeout` — then
@@ -125,9 +137,12 @@ default store, so standard installs already have it).
   not a notification to idle past: `bro act threads <PR>`, then
   fix/reply/defer/resolve each named blocker, push, and re-arm
   `bro act wait --merge`. A BLOCKED event surfacing after the arming
-  turn ended is live work for the next turn, not stale mail. Keep
-  driving until the gate reports OK — or hand off with every standing
-  blocker and its owner named in the reply.
+  turn ended is live work for the next turn, not stale mail — the
+  settle itself delivers it: a keyed `act`/`block` mailbox drop (drained
+  at the next postTool or session start) plus a `<pr>-blocked-*.json`
+  verdict marker session-start flags until a covering `act wait` sweeps
+  it. Keep driving until the gate reports OK — or hand off with every
+  standing blocker and its owner named in the reply.
   The stop gate enforces this: an armed session ending with an open,
   unwatched current-branch PR is blocked once and pointed at the detached
   `act wait` form — a running `bro drive --every` counts as coverage via

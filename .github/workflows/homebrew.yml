@@ -58,7 +58,12 @@ jobs:
           [ -n "$url" ] || { echo "::error::$pkg@${TAG#v} not on npm after ~30min — did publish.yml fail?"; exit 1; }
           [[ "$url" =~ ^https://registry\.npmjs\.org/@broject/bro/-/bro-.+\.tgz$ ]] \
             || { echo "::error::unexpected tarball url: '$url'"; exit 1; }
-          sha=$(curl --proto '=https' --tlsv1.2 -fsSL --retry 12 --retry-delay 5 --retry-all-errors "$url" | sha256sum | cut -d' ' -f1)
+          # download first, hash after — a piped curl can hand sha256sum
+          # a partial stream whose digest still matches ^[0-9a-f]{64}$
+          tgz=$(mktemp)
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 12 --retry-delay 5 --retry-all-errors -o "$tgz" "$url"
+          sha=$(sha256sum "$tgz" | cut -d' ' -f1)
+          rm -f "$tgz"
           [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::unexpected sha256 for $url: '$sha'"; exit 1; }
           echo "url=$url" >>"$GITHUB_OUTPUT"
           echo "sha256=$sha" >>"$GITHUB_OUTPUT"
@@ -102,8 +107,11 @@ jobs:
             -e "s|^  sha256 \"[0-9a-f]{64}\"|  sha256 \"$TAR_SHA\"|" \
             "$f"
           if git diff --quiet "$f"; then
-            # unchanged + no $TAR_URL reference = sed no-op'd on a drifted format
-            grep -qF "url \"$TAR_URL\"" "$f" || { echo "::error::sed no-op and $f does not reference $TAR_URL — format drifted?"; exit 1; }
+            # unchanged is only trusted when BOTH pins already match —
+            # a present url with a missing/unsupported sha256 line
+            # no-op's both seds and must not pass as "updated"
+            grep -qF "url \"$TAR_URL\"" "$f" && grep -qF "sha256 \"$TAR_SHA\"" "$f" \
+              || { echo "::error::sed no-op and $f does not pin $TAR_URL + sha — format drifted?"; exit 1; }
             echo "formula already at $TAG — nothing to push"
             exit 0
           fi

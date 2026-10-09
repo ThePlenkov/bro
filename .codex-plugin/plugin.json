@@ -21,5 +21,7 @@
   ],
   "interface": {
     "displayName": "bro"
-  }
+  },
+  "skills": "./skills/",
+  "hooks": "./plugins/codex/bro/hooks/hooks.json"
 }

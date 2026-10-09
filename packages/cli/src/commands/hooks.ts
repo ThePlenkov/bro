@@ -24,11 +24,16 @@
  *                                       git shims: prepare-commit-msg provenance
  *                                       (specs/bro-fzot.md) + reference-transaction
  *                                       shared-branch ref guard (specs/bro-1c78.md)
+ *                                       + post-merge dep-graph freshness
+ *                                       (specs/bro-sovl3.md)
  *   prepare-commit-msg                git-hook entrypoint — appends Agent/Agent-Model/
  *                                       Session/Bead/Molecule trailers to the message file
  *   reference-transaction             git-hook entrypoint — vetoes non-fast-forward
  *                                       moves of refs/heads/* by ref-mover verbs
  *                                       (reset/fetch/update-ref/branch/checkout/switch)
+ *   post-merge                        git-hook entrypoint — dispatches the detached
+ *   post-merge-run                      refresh worker: install (dep manifests moved in
+ *                                       the merge) → build → machine patch slot
  *
  * Contract: read the event payload on stdin, print hook control JSON on
  * stdout, exit 0. Everything is best-effort — hooks only fire in bro-enabled
@@ -55,7 +60,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { setTimeout as nodeSetTimeout } from 'node:timers'
 import {
   acquireFileLock,
@@ -88,11 +93,14 @@ import {
   cliVersion,
   emitCommitTrailers,
   installCommitHook,
+  installPostMergeHook,
   installRefGuardHook,
   uninstallCommitHook,
+  uninstallPostMergeHook,
   uninstallRefGuardHook,
   type InstallResult,
 } from './githooks.ts'
+import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts'
 import { emitRefGuard } from './refguard.ts'
 import { goalContextLines, goalStopLines } from './goal.ts'
 import {
@@ -142,6 +150,11 @@ function asHookInput(raw: unknown): HookInput {
  * Each hook invocation is its own process. */
 let cursorClient = false
 
+/** Codex adds `turn_id` to every hook payload. Devin and Claude do not,
+ * so permission and pre-tool answers stay on their legacy shapes unless
+ * this is set. */
+let codexClient = false
+
 function emit(out: unknown): void {
   const payload = cursorClient ? toCursorHookOutput(out) : out
   process.stdout.write(`${JSON.stringify(payload)}\n`)
@@ -174,6 +187,22 @@ function hookProjectDir(raw: unknown): string {
 
 function context(event: string, text: string): void {
   emit({ hookSpecificOutput: { hookEventName: event, additionalContext: text } })
+}
+
+const CODEX_INSTRUCTIONS = 'plugins/codex/bro/INSTRUCTIONS.md'
+
+/** Codex session steer. The plugin file is the source; a missing root
+ *  or an unreadable file stays silent so the hook cannot fail closed. */
+export function readCodexInstructions(pluginRoot: string | undefined): string | undefined {
+  if (pluginRoot === undefined || !isAbsolute(pluginRoot)) {
+    return undefined
+  }
+  try {
+    const text = readFileSync(join(pluginRoot, CODEX_INSTRUCTIONS), 'utf8').trim()
+    return text === '' ? undefined : text
+  } catch {
+    return undefined
+  }
 }
 
 // --- pure probes (testable without gh/bd) -----------------------------------
@@ -1083,7 +1112,7 @@ async function guardLines(
 }
 
 async function emitSessionContext(
-  event: 'SessionStart' | 'PostCompaction' | 'PreCompact',
+  event: 'SessionStart' | 'PostCompaction' | 'PostCompact' | 'PreCompact',
   sessionId = '',
   cliEvent: string = event
 ): Promise<boolean> {
@@ -1115,6 +1144,12 @@ async function emitSessionContext(
   // haystack is the same session-context text + previous-session trace
   // tail the learn connector assembles
   parts.push(...guards)
+  if (codexClient && (event === 'SessionStart' || event === 'PostCompact')) {
+    const steer = readCodexInstructions(process.env.PLUGIN_ROOT)
+    if (steer) {
+      parts.push(steer)
+    }
+  }
   if (parts.length > 0) {
     context(event, `bro state — resume from here:\n${parts.join('\n')}`)
   }
@@ -1338,7 +1373,17 @@ async function emitPreTool(input: HookInput): Promise<void> {
   )
   const block = verdicts.find((v) => v.block !== undefined)?.block
   if (block !== undefined) {
-    emit({ decision: 'block', reason: block })
+    if (codexClient) {
+      emit({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: block,
+        },
+      })
+    } else {
+      emit({ decision: 'block', reason: block })
+    }
     return
   }
   const merged: Record<string, unknown> = {}
@@ -1348,7 +1393,19 @@ async function emitPreTool(input: HookInput): Promise<void> {
     }
   }
   if (Object.keys(merged).length > 0) {
-    emit({ hookSpecificOutput: { hookEventName: 'PreToolUse', tool_input: merged } })
+    if (codexClient) {
+      const base =
+        typeof input.tool_input === 'object' && input.tool_input !== null ? input.tool_input : {}
+      emit({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+          updatedInput: { ...base, ...merged },
+        },
+      })
+    } else {
+      emit({ hookSpecificOutput: { hookEventName: 'PreToolUse', tool_input: merged } })
+    }
   }
 }
 
@@ -1359,7 +1416,16 @@ async function emitPreTool(input: HookInput): Promise<void> {
 function emitPermission(input: HookInput): boolean {
   const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
   if (isSelfToolCommand(cmd)) {
-    emit({ decision: 'approve' })
+    if (codexClient) {
+      emit({
+        hookSpecificOutput: {
+          hookEventName: 'PermissionRequest',
+          decision: { behavior: 'allow' },
+        },
+      })
+    } else {
+      emit({ decision: 'approve' })
+    }
     return true
   }
   return false
@@ -1389,16 +1455,19 @@ function answerCursorPermission(event: string | undefined, input: HookInput): vo
 
 function runCommitHookCommand(event: 'install' | 'uninstall'): void {
   // every bro git hook rides the same install — provenance tags the
-  // commit message, refguard fences shared branch refs (bro-1c78)
+  // commit message, refguard fences shared branch refs (bro-1c78),
+  // post-merge keeps the dep graph and dist inside the just-merged head
   const results: [string, InstallResult][] =
     event === 'install'
       ? [
           ['prepare-commit-msg', installCommitHook(process.cwd(), cliVersion())],
           ['reference-transaction', installRefGuardHook(process.cwd(), cliVersion())],
+          ['post-merge', installPostMergeHook(process.cwd(), cliVersion())],
         ]
       : [
           ['prepare-commit-msg', uninstallCommitHook(process.cwd())],
           ['reference-transaction', uninstallRefGuardHook(process.cwd())],
+          ['post-merge', uninstallPostMergeHook(process.cwd())],
         ]
   for (const [name, r] of results) {
     if (r.state === 'error') {
@@ -1454,7 +1523,11 @@ async function dispatchHook(event: string, raw: unknown, input: HookInput): Prom
       return
     }
     case 'post-compaction':
-      await emitSessionContext('PostCompaction', sessionId, 'post-compaction')
+      await emitSessionContext(
+        codexClient ? 'PostCompact' : 'PostCompaction',
+        sessionId,
+        'post-compaction'
+      )
       return
     case 'pre-compact':
       // Claude Code requires hookEventName to match the firing event.
@@ -1609,8 +1682,31 @@ function runPerf(argv: string[]): void {
 
 // --- dispatch -----------------------------------------------------------------
 
+/** post-merge and its detached worker are git-hook events — same
+ *  pre-gate, no-stdin placement as the shim events: the dispatcher only
+ *  schedules the refresh, the worker does it; both fail open and never
+ *  block a merge (the catch covers a throw before the worker's own). */
+const POST_MERGE_EVENTS: Record<string, (cwd: string) => void> = {
+  'post-merge': emitPostMerge,
+  'post-merge-run': runPostMergeRefresh,
+}
+
+function runPostMergeEvent(event: string | undefined): boolean {
+  const run = POST_MERGE_EVENTS[event ?? '']
+  if (run === undefined) {
+    return false
+  }
+  try {
+    run(process.cwd())
+  } catch {
+    // fail-open
+  }
+  return true
+}
+
 export async function runHooksCommand(argv: string[]): Promise<void> {
   cursorClient = false
+  codexClient = false
   const event = argv[0]
   // install/uninstall are operator commands, not hook events — they
   // report a verdict on stderr and never read stdin (a git hook's stdin
@@ -1635,6 +1731,9 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     runRefGuard(argv)
     return
   }
+  if (runPostMergeEvent(event)) {
+    return
+  }
   // `bro hooks perf` is a report over the perf journal — same no-stdin
   // operator placement as install/uninstall: it must not block reading
   // a payload that was never sent.
@@ -1653,6 +1752,12 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   // payload / CURSOR_PROJECT_DIR, and cwd may be outside the repo.
   const raw = readRaw()
   cursorClient = isCursorHookPayload(raw)
+  codexClient =
+    !cursorClient &&
+    typeof raw === 'object' &&
+    raw !== null &&
+    !Array.isArray(raw) &&
+    typeof (raw as { turn_id?: unknown }).turn_id === 'string'
   const root = hookProjectDir(raw)
   const input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw)
   if (!broEnabled(root) || !enterHookProject(root)) {

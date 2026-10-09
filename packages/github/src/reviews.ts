@@ -857,21 +857,46 @@ function pollAsyncMerge(
   return result
 }
 
+/** How mergePr routed the call to the async endpoint. `base` feeds the
+ *  queue probe when `queued` isn't precomputed; `stacked` and a
+ *  precomputed `queued` are what the caller already knows — re-asking
+ *  GitHub would pay a second probe for the same answer. */
+export interface AsyncMergeRoute {
+  /** The PR's base branch — decides the merge action when `queued`
+   *  isn't given (the reactive fallback after a failed probe read
+   *  passes no base, which means "assume no queue"). */
+  base?: string
+  /** The PR sits in a stack — log line only; the endpoint call is the
+   *  same either way. */
+  stacked?: boolean
+  /** Precomputed queue verdict — a caller that already probed doesn't
+   *  pay the GraphQL round-trip twice. */
+  queued?: boolean
+}
+
 /** `PUT /pulls/{n}/merge-async`, then poll its uuid until the request
- *  settles. `base` decides the merge action (undefined — the reactive
- *  fallback path after a probe failure — means "assume no queue").
- *  Throws on `failed`, on an unobservable status, and on a watch
- *  timeout: an unsettled merge is never reported as a landed one. */
+ *  settles. `route.queued` decides the merge action; unset, it probes
+ *  `route.base`. Throws on `failed`, on an unobservable status, and on
+ *  a watch timeout: an unsettled merge is never reported as a landed
+ *  one. */
 export function mergeAsync(
   t: PrTarget,
   opts: MergeOpts,
-  base?: string,
+  route: AsyncMergeRoute = {},
   poll: AsyncMergePoll = {}
 ): void {
-  const queued = base !== undefined && queueRequired(t.repo, base)
+  const queued =
+    route.queued ?? (route.base !== undefined && queueRequired(t.repo, route.base))
+  const why =
+    route.stacked === true
+      ? 'stack member'
+      : queued
+        ? 'base branch requires the merge queue'
+        : 'async path'
   console.log(
-    `merge: stack member — ${prLink(t.repo, t.pr)} via merge-async ` +
-      `(${queued ? 'merge queue' : opts.method}, head branch kept: a layer above may be based on it)`
+    `merge: ${why} — ${prLink(t.repo, t.pr)} via merge-async ` +
+      `(${queued ? 'merge queue' : opts.method}, head branch kept: ` +
+      `${route.stacked === true ? 'a layer above may be based on it' : 'deleting it mid-queue closes the PR'})`
   )
   const result = pollAsyncMerge(
     t,
@@ -1218,14 +1243,17 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
       return r.code === 0
     },
     mergePr(t, opts) {
-      // A stack member can only merge through the async endpoint, and the
-      // sync client below (GraphQL `mergePullRequest`) is rejected for one.
-      // The probe decides first — a clean path, no doomed attempt — and the
-      // reactive net covers a stack the probe could not see (an API version
-      // without the `stack` field answers no question either way).
+      // The async endpoint is the path whenever `gh pr merge` can't be:
+      // a stack member (the sync client is rejected for one), or any PR
+      // whose base requires the merge queue — a queue-gated base refuses
+      // the sync POST outright, stack or not (spec specs/bro-huy5o.6.md).
+      // The probe decides first — a clean path, no doomed attempt — and
+      // the reactive net covers what the probe could not see (an API
+      // version without the field answers no question either way).
       const probe = stackProbe(t)
-      if (probe.stacked) {
-        mergeAsync(t, opts, probe.base)
+      const queued = probe.base !== undefined && queueRequired(t.repo, probe.base)
+      if (probe.stacked || queued) {
+        mergeAsync(t, opts, { base: probe.base, stacked: probe.stacked, queued })
         return postMergeState(t)
       }
       const args = [
@@ -1248,11 +1276,16 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
         console.log(gh(args))
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        if (!/asynchronous merge/i.test(msg)) {
+        if (!/asynchronous merge|merge queue/i.test(msg)) {
           throw err
         }
         console.error(`merge: sync merge refused — ${msg.trim()}`)
-        mergeAsync(t, opts, probe.base)
+        // Naming the queue forces `queued` — no second probe on a verdict
+        // GitHub just gave. An async-only refusal keeps probing the base.
+        mergeAsync(t, opts, {
+          base: probe.base,
+          queued: /merge queue/i.test(msg) || undefined,
+        })
       }
       // A merge queue accepts a PR without landing it — only the
       // authoritative state tells the caller what actually happened.

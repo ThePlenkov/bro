@@ -27,12 +27,15 @@
  * absent rather than faked.
  */
 import {
+  bodyMeta,
   gh,
   ghJson,
   ghTry,
   ghJsonAsync,
   resolveRepo,
   resolveRepoAsync,
+  stripMeta,
+  withMeta,
 } from '@broject/core'
 import type { TaskFilter, TaskInput, TaskRow, TaskStore, TaskStoreAsync } from '@broject/core'
 
@@ -97,53 +100,6 @@ const isDriftError = (err: unknown): boolean =>
 const labelsOf = (n: IssueNode): string[] => (n.labels?.nodes ?? []).map((l) => l.name)
 const assigneesOf = (n: IssueNode): string[] => (n.assignees?.nodes ?? []).map((a) => a.login)
 const anyOpen = (refs: Ref[] | undefined): boolean => (refs ?? []).some((r) => r.state === 'OPEN')
-
-const META_INNER = /^\s*bro:\s*(\{[\s\S]*\})\s*$/
-
-/** The `<!-- bro: {...} -->` trailer's JSON + span — located by comment
- *  delimiters, not a body-wide regex. A `/<!--\s*bro:...-->/` pattern
- *  re-scans the body at every `<!--` start position, which is quadratic
- *  on hostile bodies (CodeQL polynomial-regex). indexOf + an anchored
- *  inner check keeps each comment span parsed once — linear total. */
-function broTrailer(body: string): { json: string; start: number; end: number } | null {
-  let i = 0
-  for (;;) {
-    const s = body.indexOf('<!--', i)
-    if (s === -1) {
-      return null
-    }
-    const e = body.indexOf('-->', s + 4)
-    if (e === -1) {
-      return null
-    }
-    const m = META_INNER.exec(body.slice(s + 4, e))
-    if (m) {
-      return { json: m[1]!, start: s, end: e + 3 }
-    }
-    i = e + 3
-  }
-}
-
-/** The `<!-- bro: {...} -->` body trailer — type/priority/external_ref
- *  GitHub has no fields for. Malformed JSON degrades to absent. */
-function bodyMeta(body: string | undefined): Record<string, unknown> {
-  const t = broTrailer(body ?? '')
-  if (t === null) {
-    return {}
-  }
-  try {
-    const v: unknown = JSON.parse(t.json)
-    return typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : {}
-  } catch {
-    return {}
-  }
-}
-
-/** Body without the bro trailer — description is the human text. */
-const stripMeta = (body = ''): string => {
-  const t = broTrailer(body)
-  return (t === null ? body : body.slice(0, t.start) + body.slice(t.end)).trimEnd()
-}
 
 function issueTypeOf(n: IssueNode, labels: string[], meta: Record<string, unknown>): string {
   const native = n.issueType?.name?.trim()
@@ -560,17 +516,6 @@ async function ghActorAsync(dir: string): Promise<string> {
  *  (the label may exist; the later add reports the real error). */
 function ensureLabel(dir: string, name: string): void {
   ghTry(['label', 'create', name, '--force', '--color', '8b949e', '--description', 'bro-managed'], dir)
-}
-
-/** Rebuild the body with a fresh metadata trailer — preserves any text
- *  the caller didn't touch. */
-function withMeta(body: string | undefined, meta: Record<string, unknown>): string {
-  const base = stripMeta(body)
-  if (Object.keys(meta).length === 0) {
-    return base
-  }
-  const trailer = `<!-- bro: ${JSON.stringify(meta)} -->`
-  return base === '' ? trailer : `${base}\n\n${trailer}`
 }
 
 // --- deps ---------------------------------------------------------------------------

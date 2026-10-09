@@ -2,7 +2,9 @@ import type { LoopBead } from './types.ts'
 
 /** The work-order prompt written to the fresh worktree — the agent's
  *  whole world is this one bead. bro owns the gate; the agent's job ends
- *  at an open PR, not a merge. */
+ *  at an open PR, not a merge. Rules order a commit+push checkpoint
+ *  before deep verification — an end_turn/timeout must never orphan
+ *  unpushed work (bro-rbqgf). */
 export function buildWorkPrompt(
   bead: LoopBead,
   branch: string,
@@ -19,9 +21,9 @@ export function buildWorkPrompt(
     : 'a stack member; the PR targets the member below you, not the default branch'
   const prLine =
     prBase === undefined
-      ? `push, then \`gh pr create\` with a
+      ? `\`gh pr create\` with a
   summary and a test-plan checklist.`
-      : `push, then \`gh pr create --base ${prBase}\` — you are ${stackWho}. Add a summary and a test-plan checklist.`
+      : `\`gh pr create --base ${prBase}\` — you are ${stackWho}. Add a summary and a test-plan checklist.`
   // the verdict verb the SERVING task store guarantees — a github rig
   // may have no bd at all, so 'bd close' would silently never reach
   // the loop and the issue would get reopened as a failure
@@ -44,8 +46,13 @@ ${body}# Rules
 
 - Implement the task on the current branch. Follow the repo's AGENTS.md
   conventions — they are the contract.
+- Checkpoint BEFORE deep verification: as soon as the implementation
+  lands, commit with a conventional message and push — the branch has
+  no upstream, so the first push is \`git push -u origin HEAD\`. An
+  end_turn or timeout must never orphan unpushed work; verification
+  fixes ride as follow-up commits on the same branch.
 - Verify like CI before opening the PR — run the repo's real test command.
-- Commit with a conventional message, ${prLine}
+- Push, then ${prLine}
 - Do NOT merge, do NOT wait on reviewers — the orchestrator drives the
   review gate. Your job ends once the PR exists.
 - Report verdicts through the task store: if the task needs no code change
@@ -80,6 +87,38 @@ ${threads.trim().replaceAll(/<\/review-threads\s*>/gi, '<\\/review-threads>')}
   goes to a follow-up bead, then resolve.
 - Do NOT merge — the orchestrator merges when the gate goes green.
 - Push your fixes; unresolved threads without a verdict block the merge.
+`
+}
+
+/** The conflict-round prompt — the gate reports CONFLICTING; the agent
+ *  rebases the branch onto the PR's declared base, resolves, pushes.
+ *  The rebase IS the fix: no thread work is owed on this spawn. */
+export function buildRebasePrompt(bead: LoopBead, pr: number, base: string): string {
+  return `You are the same autonomous agent continuing work on bead ${bead.id}.
+Pull request #${pr} is up — it has merge conflicts with its base branch.
+The worktree and branch are unchanged; your earlier commits are here.
+
+# Task
+
+The PR's base is \`${base}\`. Rebase this branch onto the fresh base,
+resolve the conflicts, and push:
+
+- \`git fetch origin ${base}\` then \`git rebase origin/${base}\` —
+  if a rebase is already in progress here, resolve it instead
+  (\`git rebase --continue\` / \`--abort\` and restart if the state is
+  too tangled).
+- Keep this PR's own changes — conflicts are with base-branch work
+  that landed since, not with the task. When in doubt, preserve the
+  PR's intent over the incoming edit's shape.
+- \`git push --force-with-lease\` when clean — the push is the verdict.
+
+# Rules
+
+- Do NOT merge — the orchestrator merges when the gate goes green.
+- Re-verify after the rebase (build/test as the repo's contract asks)
+  before pushing.
+- If the conflicts genuinely can't be resolved without redesign, say
+  so as your final message — do not leave the rebase half-done.
 `
 }
 

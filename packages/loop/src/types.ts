@@ -37,12 +37,20 @@ export interface LoopConfig {
    *  check-in advisory (`bro watch`/`bro status`). Advisory only — the
    *  orchestrator decides; there is no agent wall-clock kill. */
   stallMin: number
+  /** A spawn gone in under this never ran — broken dist/agent/env, not
+   *  a bead outcome: park instead of reopening into a crash-burn
+   *  (bro-sovl3). 0 = reopen on every no-PR exit (legacy). */
+  crashExitMs: number
   /** Minutes the merge gate may stay pending before the item is parked. */
   mergeTimeoutMin: number
   /** Max review-fix respawns per bead — defaults to act.maxRounds. */
   fixRounds: number
   /** Max beads per `bro loop` run — 0 = until the queue is gated/idle. */
   maxItems: number
+  /** Max open PRs the run's gate stack may hold — at cap pushes stop
+   *  and only gate service runs until a merge frees a slot. 1 is the
+   *  near-serial shape (spec bro-zsmwq). */
+  maxOpen: number
 }
 
 export const DEFAULT_LOOP_CONFIG: LoopConfig = {
@@ -52,7 +60,9 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   model: '',
   bootstrap: '',
   stallMin: 45,
+  crashExitMs: 10_000,
   mergeTimeoutMin: 45,
   fixRounds: 3,
   maxItems: 0,
+  maxOpen: 3,
 }

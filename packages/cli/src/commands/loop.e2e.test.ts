@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import {
   FAKE_BEAD,
   bead,
+  git,
   initRepo,
   inside,
   installFakeBd,
@@ -163,6 +164,7 @@ describe('bro loop e2e', () => {
           merge: boolean
           cleanup?: boolean
           workdir?: string
+          bead?: string
           timeoutMin: number
         }
       }>
@@ -174,6 +176,9 @@ describe('bro loop e2e', () => {
       assert.equal(hit.marker.merge, true)
       assert.equal(hit.marker.cleanup, true)
       assert.equal(hit.marker.workdir, f.worktree)
+      // the bead rides the marker — a resurrected wait runs the
+      // finalizeMerge close the dead loop never reached (bro-q6ppv)
+      assert.equal(hit.marker.bead, 'fx-a')
     })
   })
 
@@ -189,9 +194,11 @@ describe('bro loop e2e', () => {
   })
 
   test('agent exit != 0 without a PR → bead reopened + noted, worktree kept', () => {
+    // crashExitMs:0 disables the crash-park guard — this tests the
+    // legacy reopen path for a genuine mid-work failure
     const f = loopFixture(
       [{ ...FAKE_BEAD, id: 'fx-a', title: 'doomed' }],
-      {},
+      { crashExitMs: 0 },
       'fail'
     )
     inside(f.main, f.root, () => {
@@ -202,6 +209,25 @@ describe('bro loop e2e', () => {
       assert.match(String(row?.notes), /exited 3 without a PR/)
       assert.equal(existsSync(f.worktree), true)
       assert.match(r.stdout, /worktrees: .*main--fx-a/)
+    })
+  })
+
+  test('agent gone in <crashExitMs → parked, never reopened (bro-sovl3)', () => {
+    // the exit-3-instantly shape that burned the supervisor: reopening
+    // reclaims the bead into the same broken spawn — park instead
+    const f = loopFixture(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'doomed' }],
+      {},
+      'fail'
+    )
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /1 parked/)
+      assert.match(r.stdout, /parked \(crash, not work\)/)
+      const row = bead(f.db, 'fx-a')
+      assert.equal(row?.status, 'in_progress')
+      assert.match(String(row?.notes), /environment crash, not a verdict; parked/)
+      assert.equal(existsSync(f.worktree), true)
     })
   })
 
@@ -334,6 +360,39 @@ describe('bro loop e2e', () => {
       const r = f.run()
       assert.match(r.stdout, /0 landed, 0 closed, 0 parked, 0 failed/)
       assert.match(r.stdout, /clean — no loop tails/)
+    })
+  })
+
+  test('close-out reaps leftover loop litter — clean closed-bead trees, keeps dirty', () => {
+    // the incident shape: earlier runs left loop worktrees behind and
+    // the audit listed them without removing them
+    const f = loopFixture([
+      { ...FAKE_BEAD, id: 'fx-a', title: 'ship it' },
+      { ...FAKE_BEAD, id: 'fx-z', title: 'landed earlier', status: 'closed' },
+      { ...FAKE_BEAD, id: 'fx-y', title: 'closed but dirty', status: 'closed' },
+    ])
+    // a clean orphan on a closed bead — must be reaped …
+    const orphan = join(f.root, 'main--fx-z')
+    git(['worktree', 'add', '-b', 'loop/fx-z', orphan], f.main)
+    // … and a dirty one — must be kept and still named as a tail
+    const dirty = join(f.root, 'main--fx-y')
+    git(['worktree', 'add', '-b', 'loop/fx-y', dirty], f.main)
+    writeFileSync(join(dirty, 'wip.txt'), 'uncommitted\n')
+    // a per-branch PR map makes fx-a's lookup land while the orphans
+    // read as PR-less — the map is authoritative in the fake host
+    writeHostState(f.hostState, {
+      prs: { 'loop/fx-a': { number: 7, state: 'OPEN', headRef: 'loop/fx-a', baseRef: 'main' } },
+    })
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /loop: fx-a landed/)
+      assert.match(r.stdout, /reaped: .*main--fx-z \[loop\/fx-z\]/)
+      assert.match(r.stdout, /deleted branch: loop\/fx-z/)
+      assert.equal(existsSync(orphan), false)
+      assert.equal(git(['branch', '--list', 'loop/fx-z'], f.main).trim(), '')
+      // the dirty tree stays — a surviving tail, not a silent sweep
+      assert.equal(existsSync(dirty), true)
+      assert.match(r.stdout, /worktrees: .*main--fx-y \[loop\/fx-y\]/)
     })
   })
 })
@@ -583,6 +642,117 @@ describe('bro loop argv parse', () => {
       assert.equal(r.code, 0)
       assert.match(r.stdout, /0 landed/)
       assert.doesNotMatch(r.stderr, /has no \{promptFile\}/)
+    })
+  })
+})
+
+/** Two-bead fixtures seed `prs: {}` so the per-branch map is
+ *  authoritative — the agent registers each loop branch's PR as it
+ *  "opens" it (nextPr counts up from 11). */
+const events = (f: Fixture): Array<Record<string, unknown>> =>
+  (readHostState(f.hostState).events ?? []) as Array<Record<string, unknown>>
+
+describe('bro loop gate-stack round-robin', () => {
+  test('a pending gate does not block the next claim — B lands while A waits', () => {
+    const f = loopFixture([
+      { ...FAKE_BEAD, id: 'fx-a', title: 'slow gate' },
+      { ...FAKE_BEAD, id: 'fx-b', title: 'fast gate' },
+    ])
+    // A is pending until B's PR (12 — A takes 11) merges
+    writeHostState(f.hostState, {
+      prs: {
+        'loop/fx-a': {
+          checks: [{ name: 'ci', bucket: 'pending', state: 'IN_PROGRESS' }],
+          clearAfterMerge: 12,
+        },
+      },
+    })
+    inside(f.main, f.root, () => {
+      const r = f.run(['--interval', '1'])
+      assert.match(r.stdout, /2 landed/, r.stderr)
+      assert.deepEqual(events(f), [
+        { spawn: 'fx-a', branch: 'loop/fx-a' },
+        { spawn: 'fx-b', branch: 'loop/fx-b' },
+        // B's gate settles first — the whole point: A's pending window
+        // is claimed work, not orchestrator idle
+        { merge: 12 },
+        { merge: 11 },
+      ])
+      assert.equal(bead(f.db, 'fx-a')?.status, 'closed')
+      assert.equal(bead(f.db, 'fx-b')?.status, 'closed')
+    })
+  })
+
+  test('--max-open 1 bounds the open-PR set — B spawns only after A lands', () => {
+    const f = loopFixture(
+      [
+        { ...FAKE_BEAD, id: 'fx-a', title: 'first' },
+        { ...FAKE_BEAD, id: 'fx-b', title: 'second' },
+      ],
+      { maxOpen: 1 }
+    )
+    writeHostState(f.hostState, { prs: {} })
+    inside(f.main, f.root, () => {
+      const r = f.run(['--interval', '1'])
+      assert.match(r.stdout, /2 landed/, r.stderr)
+      assert.deepEqual(events(f), [
+        { spawn: 'fx-a', branch: 'loop/fx-a' },
+        { merge: 11 },
+        { spawn: 'fx-b', branch: 'loop/fx-b' },
+        { merge: 12 },
+      ])
+    })
+  })
+
+  test('CONFLICTING respawns the agent with a rebase order, then lands', () => {
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'conflicted' }])
+    writeHostState(f.hostState, {
+      prs: { 'loop/fx-a': { mergeable: 'CONFLICTING' } },
+    })
+    inside(f.main, f.root, () => {
+      const r = f.run(['--interval', '1'])
+      assert.match(r.stdout, /rebase round 1 onto main/, r.stderr)
+      assert.match(r.stdout, /loop: fx-a landed/)
+      assert.deepEqual(events(f), [
+        { spawn: 'fx-a', branch: 'loop/fx-a' },
+        { rebase: 'fx-a', branch: 'loop/fx-a' },
+        { merge: 11 },
+      ])
+      assert.match(spawns(f), /rebase rebased onto base/)
+    })
+  })
+
+  test('BEHIND sole blocker pushes update-branch, then lands', () => {
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'behind' }])
+    writeHostState(f.hostState, {
+      prs: { 'loop/fx-a': { mergeState: 'BEHIND' } },
+    })
+    inside(f.main, f.root, () => {
+      const r = f.run(['--interval', '1'])
+      assert.match(r.stdout, /loop: fx-a landed/)
+      assert.deepEqual(events(f), [
+        { spawn: 'fx-a', branch: 'loop/fx-a' },
+        { update: 11 },
+        { merge: 11 },
+      ])
+    })
+  })
+
+  test('a parked member keeps its claim — worktree + note survive the run', () => {
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'red ci' }])
+    writeHostState(f.hostState, {
+      prs: {
+        'loop/fx-a': {
+          checks: [{ name: 'ci', bucket: 'fail', state: 'FAILURE' }],
+        },
+      },
+    })
+    inside(f.main, f.root, () => {
+      const r = f.run(['--interval', '1'])
+      assert.match(r.stdout, /1 parked/)
+      const row = bead(f.db, 'fx-a')
+      assert.equal(row?.status, 'in_progress')
+      assert.match(String(row?.notes), /blocked: 1 failing check\(s\)/)
     })
   })
 })

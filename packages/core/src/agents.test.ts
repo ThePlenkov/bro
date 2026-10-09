@@ -227,6 +227,26 @@ describe('agent registry IO', () => {
     })
   })
 
+  test('a stopped stamp cascades to retained attempts (spec bro-1x7p)', () => {
+    withRepo((dir) => {
+      patchAgentRegistry(dir, 'bro-x', {
+        agentId: 'native-ab12',
+        backend: 'native',
+        spawnedAt: 't0',
+        attempts: [{ provider: 'kilo', cause: 'quota', spawnedAt: 't0' }],
+      })
+      patchAgentRegistry(dir, 'bro-x', { stopped: true })
+      const e = readAgentRegistry(dir)['bro-x']!
+      assert.equal(e.stopped, true)
+      assert.deepEqual(e.attempts, [
+        { provider: 'kilo', cause: 'quota', spawnedAt: 't0', stopped: true },
+      ])
+      // an ordinary patch leaves the attempts stamps alone
+      patchAgentRegistry(dir, 'bro-x', { exitStatus: 3 })
+      assert.deepEqual(readAgentRegistry(dir)['bro-x']!.attempts, e.attempts)
+    })
+  })
+
   test('remove skips an entry rewritten since the observed snapshot', () => {
     withRepo((dir) => {
       patchAgentRegistry(dir, 'bro-x', {

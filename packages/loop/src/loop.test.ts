@@ -50,9 +50,11 @@ describe('loopSection', () => {
       model: 'm-1',
       bootstrap: 'npm ci',
       stallMin: 30,
+      crashExitMs: 5_000,
       mergeTimeoutMin: 60,
       fixRounds: 2,
       maxItems: 5,
+      maxOpen: 2,
     })
     assert.deepEqual(cfg, {
       agent: 'devin -p',
@@ -61,10 +63,29 @@ describe('loopSection', () => {
       model: 'm-1',
       bootstrap: 'npm ci',
       stallMin: 30,
+      crashExitMs: 5_000,
       mergeTimeoutMin: 60,
       fixRounds: 2,
       maxItems: 5,
+      maxOpen: 2,
     })
+  })
+
+  test('crashExitMs: 0 is valid (legacy reopen), negatives/junk fall back', () => {
+    assert.equal(loopSection({ crashExitMs: 0 }).crashExitMs, 0)
+    assert.equal(
+      loopSection({ crashExitMs: -1 }).crashExitMs,
+      DEFAULT_LOOP_CONFIG.crashExitMs
+    )
+    assert.equal(
+      loopSection({ crashExitMs: 'fast' }).crashExitMs,
+      DEFAULT_LOOP_CONFIG.crashExitMs
+    )
+  })
+
+  test('maxOpen has a floor of 1 — 0 would cap the stack at nothing', () => {
+    assert.equal(loopSection({ maxOpen: 0 }).maxOpen, DEFAULT_LOOP_CONFIG.maxOpen)
+    assert.equal(loopSection({ maxOpen: -2 }).maxOpen, DEFAULT_LOOP_CONFIG.maxOpen)
   })
 })
 
@@ -97,6 +118,23 @@ describe('prompts', () => {
     // the verdict channel: an agent close reaches the shared store
     assert.match(p, /bd close "\$BRO_BEAD_ID"/)
     assert.match(p, /BEADS_DIR/)
+  })
+
+  test('work prompt orders the commit+push checkpoint before deep verification', () => {
+    // bro-rbqgf: a worker killed mid-verify left commits unpushed in the
+    // worktree — the checkpoint rule must precede the expensive step
+    const p = buildWorkPrompt(bead, 'loop/bro-x1')
+    const checkpoint = p.indexOf('Checkpoint BEFORE deep verification')
+    const verify = p.indexOf('Verify like CI')
+    assert.ok(checkpoint !== -1, 'checkpoint rule present')
+    assert.ok(verify !== -1, 'verify rule present')
+    assert.ok(checkpoint < verify)
+    // fresh loop/<id> branches have no upstream — the checkpoint names
+    // the explicit first-push form so `git push` can't no-op under
+    // push.default=simple (codeant-ai review on #392)
+    assert.match(p, /git push -u origin HEAD/)
+    // the PR step keeps its own push so post-verify fixes reach the branch
+    assert.match(p, /- Push, then `gh pr create`/)
   })
 
   test("work prompt uses the backend's own close verb", () => {

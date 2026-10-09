@@ -386,7 +386,7 @@ describe('githubReview', { skip: WIN32 }, () => {
       },
       (log) => {
         const naps: number[] = []
-        mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, 'main', {
+        mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, { base: 'main' }, {
           sleep: (ms) => naps.push(ms),
         })
         assert.deepEqual(naps, [2_000])
@@ -405,7 +405,7 @@ describe('githubReview', { skip: WIN32 }, () => {
       },
       () => {
         const naps: number[] = []
-        mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, 'main', {
+        mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, { base: 'main' }, {
           sleep: (ms) => naps.push(ms),
           deadlineMs: 1_000,
         })
@@ -484,7 +484,7 @@ describe('githubReview', { skip: WIN32 }, () => {
         FAKE_GH_ASYNC_POLL: '{"status":"merged","details":{"sha":"abc123"}}',
       },
       (log) => {
-        mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, 'main', {
+        mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, { base: 'main' }, {
           sleep: () => {},
         })
         assert.match(readFileSync(log, 'utf8'), /merge-async\/u-9/)
@@ -500,7 +500,7 @@ describe('githubReview', { skip: WIN32 }, () => {
       () => {
         assert.throws(
           () =>
-            mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, 'main', {
+            mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, { base: 'main' }, {
               sleep: () => {},
             }),
           /failed — Base branch is protected/
@@ -514,7 +514,7 @@ describe('githubReview', { skip: WIN32 }, () => {
     // pending with no uuid — nothing to poll
     withFakeGh({ FAKE_GH_ASYNC: '{"status":"pending","details":{}}' }, () => {
       assert.throws(
-        () => mergeAsync(target, opts, 'main', { sleep: () => {} }),
+        () => mergeAsync(target, opts, { base: 'main' }, { sleep: () => {} }),
         /pending with no uuid/
       )
     })
@@ -523,7 +523,7 @@ describe('githubReview', { skip: WIN32 }, () => {
       { FAKE_GH_ASYNC_ERR: '', FAKE_GH_ASYNC: '{"status":"pending","details":{"uuid":"u-2"}}', FAKE_GH_POLL_ERR: 'gh: Not Found (HTTP 404)' },
       () => {
         assert.throws(
-          () => mergeAsync(target, opts, 'main', { sleep: () => {} }),
+          () => mergeAsync(target, opts, { base: 'main' }, { sleep: () => {} }),
           /no observable status/
         )
       }
@@ -533,7 +533,7 @@ describe('githubReview', { skip: WIN32 }, () => {
     withFakeGh({ FAKE_GH_ASYNC: '{"status":"pending","details":{"uuid":"u-3"}}' }, () => {
       assert.throws(
         () =>
-          mergeAsync(target, opts, 'main', {
+          mergeAsync(target, opts, { base: 'main' }, {
             sleep: () => {},
             deadlineMs: 0,
           }),
@@ -551,6 +551,80 @@ describe('githubReview', { skip: WIN32 }, () => {
       const calls = readFileSync(log, 'utf8')
       assert.match(calls, /pr merge 42 --squash/)
       assert.doesNotMatch(calls, /merge-async/)
+    })
+  })
+
+  // --- queues on unstacked PRs (spec bro-huy5o.6) ---------------------------
+
+  test('mergePr enqueues a NON-stack PR whose base requires the queue', () => {
+    withFakeGh({ FAKE_GH_PULL: '{"base":{"ref":"main"}}', FAKE_GH_QUEUE: '1' }, (log) => {
+      githubReview().mergePr(target, {
+        method: 'rebase',
+        expectedHeadSha: 'abc123',
+      })
+      const calls = readFileSync(log, 'utf8')
+      assert.doesNotMatch(calls, /pr merge 42/)
+      assert.doesNotMatch(calls, /delete-branch/)
+      const call = calls.split('\n').find((l) => l.includes('merge-async -f'))
+      assert.match(call ?? '', /-f sha=abc123 -f merge_action=merge_queue/)
+      // the queue owns the strategy — merge_method is rejected with it
+      assert.doesNotMatch(call ?? '', /merge_method/)
+    })
+  })
+
+  test('a non-stack PR on a queue-less base still merges directly — and pays one probe', () => {
+    withFakeGh({ FAKE_GH_PULL: '{"base":{"ref":"main"}}' }, (log) => {
+      githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' })
+      const calls = readFileSync(log, 'utf8')
+      // detection costs exactly one GraphQL probe, then the sync path
+      // keeps the caller's requested strategy
+      assert.equal(calls.split('\n').filter((l) => l.includes('mergeQueue(branch:')).length, 1)
+      assert.match(calls, /pr merge 42 --squash/)
+      assert.doesNotMatch(calls, /merge-async/)
+    })
+  })
+
+  test('the queue verdict the caller computed reaches mergeAsync — no second probe', () => {
+    withFakeGh({ FAKE_GH_PULL: '{"base":{"ref":"main"}}', FAKE_GH_QUEUE: '1' }, (log) => {
+      githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' })
+      assert.equal(
+        readFileSync(log, 'utf8').split('\n').filter((l) => l.includes('mergeQueue(branch:')).length,
+        1
+      )
+    })
+  })
+
+  test('a sync refusal naming the merge queue enqueues without re-probing', () => {
+    withFakeGh(
+      {
+        FAKE_GH_PULL: '{"base":{"ref":"main"}}',
+        FAKE_GH_PR_MERGE_ERR:
+          'GraphQL: the base branch requires a merge queue. Add the pull request to the merge queue.',
+        FAKE_GH_ASYNC: '{"status":"enqueued","details":{"message":"added to queue"}}',
+        FAKE_GH_PR_STATE: 'OPEN',
+      },
+      (log) => {
+        assert.equal(
+          githubReview().mergePr(target, { method: 'squash', expectedHeadSha: 'abc123' }),
+          'OPEN'
+        )
+        const calls = readFileSync(log, 'utf8')
+        const call = calls.split('\n').find((l) => l.includes('merge-async -f'))
+        assert.match(call ?? '', /-f merge_action=merge_queue/)
+        assert.doesNotMatch(call ?? '', /merge_method/)
+        // GitHub just gave the queue verdict — the proactive probe ran
+        // once up front, and the refusal doesn't pay a second one
+        assert.equal(calls.split('\n').filter((l) => l.includes('mergeQueue(branch:')).length, 1)
+      }
+    )
+  })
+
+  test('mergeAsync honors a precomputed queue verdict with no base to probe', () => {
+    withFakeGh({ FAKE_GH_ASYNC: '{"status":"enqueued","details":{}}' }, (log) => {
+      mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, { queued: true })
+      const calls = readFileSync(log, 'utf8')
+      assert.match(calls, /merge_action=merge_queue/)
+      assert.doesNotMatch(calls, /mergeQueue\(branch:/)
     })
   })
 
