@@ -34,8 +34,14 @@ function syncBeads(root: string): void {
     return
   }
   try {
-    // own exec: bd() caps at 15s — a network pull/push needs more room
-    execFileSync('bd', ['sync'], { cwd: root, stdio: 'inherit', timeout: 120_000 }) // NOSONAR — PATH lookup is the contract (same as the bd wrapper)
+    // own exec: bd() caps at 15s — a network pull/push needs more room.
+    // stdout goes through console.log, not stdio:'inherit' — a --json
+    // caller (loop's endAudit) redirects console.* to stderr, and a
+    // child's inherited stdout would write past it into the event stream
+    const out = execFileSync('bd', ['sync'], { cwd: root, encoding: 'utf8', timeout: 120_000 }) // NOSONAR — PATH lookup is the contract (same as the bd wrapper)
+    if (out.trim() !== '') {
+      console.log(out.trimEnd())
+    }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       return // bd not installed — beads state simply doesn't move

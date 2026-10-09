@@ -70,9 +70,11 @@ import { loopSlug } from '@broject/loop'
 import {
   defaultBranchName,
   parseWorktreePorcelain,
+  reapLoopLitter,
   readStackEdges,
   recordStackEdge,
   stackPushLockPath,
+  type LitterReap,
 } from './work.ts'
 import {
   claimUpTo,
@@ -1153,49 +1155,89 @@ function claimedTails(tasks: TaskStore, seen: Set<string>): { own: string[]; oth
   }
 }
 
-/** End-of-run sweep: every tail the loop left must be named in the run
- *  summary — open loop PRs, surviving loop worktrees/branches, claimed
- *  beads, and cleanup failures collected during the run. Finished with
- *  `bro sync` so artifacts and bead state travel. Never throws — an
- *  audit failure is reported, not raised. */
-function endAudit(ctx: Ctx, seen: Set<string>): void {
-  const { worktrees, worktreeBranches, branches, errors } = loopRefTails(
-    ctx.root,
-    ctx.stack === undefined ? ['loop/'] : ['loop/', `stack/${ctx.stack}/`]
-  )
-  const claimed = claimedTails(ctx.tasks, seen)
-  const sections: [string, string[]][] = [
-    // PRs live on branches — worktree'd ones (a parked bead keeps both)
-    // are just as much a tail as the bare branches
-    ['open PRs', openLoopPrs(ctx, [...branches, ...worktreeBranches])],
-    ['worktrees', worktrees],
-    ['branches', branches],
-    ['claimed beads', claimed.own],
-    ['in_progress elsewhere', claimed.other],
-    ['audit errors', errors],
-    ['cleanup errors', ctx.tails],
-  ]
-  const empty = sections.every(([, items]) => items.length === 0)
+/** The close-out litter sweep — reap the provably-done leftovers before
+ *  the audit names what survived. A sweep failure is a warning line,
+ *  never a crash. */
+function sweepLoopLitter(ctx: Ctx): LitterReap | undefined {
+  try {
+    return reapLoopLitter({
+      root: ctx.root,
+      tasks: ctx.tasks,
+      rev: { repo: ctx.repo, facade: ctx.rev },
+      stackPrefix: ctx.stack === undefined ? undefined : `stack/${ctx.stack}/`,
+    })
+  } catch (err) {
+    say(ctx, `  warning: litter sweep failed — ${err instanceof Error ? err.message : String(err)}`)
+    return undefined
+  }
+}
+
+/** The audit's printed report: what the sweep reaped, then every tail
+ *  that survived it — 'clean' only when no section has anything left. */
+function sayLoopAudit(ctx: Ctx, reap: LitterReap | undefined, sections: [string, string[]][]): void {
   say(ctx, 'loop audit:')
-  if (empty) {
+  for (const r of reap?.reaped ?? []) {
+    say(ctx, `  reaped: ${r}`)
+  }
+  for (const b of reap?.branches ?? []) {
+    say(ctx, `  deleted branch: ${b}`)
+  }
+  for (const e of reap?.errors ?? []) {
+    say(ctx, `  reap error: ${e}`)
+  }
+  if (sections.every(([, items]) => items.length === 0)) {
     say(ctx, '  clean — no loop tails')
-  } else {
-    for (const [label, items] of sections) {
-      for (const item of items) {
-        say(ctx, `  ${label}: ${item}`)
-      }
+    return
+  }
+  for (const [label, items] of sections) {
+    for (const item of items) {
+      say(ctx, `  ${label}: ${item}`)
     }
   }
-  // runSyncCommand narrates to stdout — in --json mode that would
-  // corrupt the event stream, so route its output to stderr instead
+}
+
+/** End-of-run sweep: first reap the provably-done litter (closed-bead or
+ *  merged-PR worktrees that are still clean, plus their bare branches —
+ *  `bro work prune --loop` runs the same sweep by hand), then name every
+ *  tail that survived in the run summary — open loop PRs, kept
+ *  worktrees/branches, claimed beads, and cleanup failures collected
+ *  during the run. Finished with `bro sync` so artifacts and bead state
+ *  travel. Never throws — an audit failure is reported, not raised. */
+function endAudit(ctx: Ctx, seen: Set<string>): void {
+  // the sweep's git helpers and runSyncCommand narrate via console.log —
+  // under --json that corrupts the event stream, so route the whole
+  // audit's helper output to stderr (say() already routes its own lines)
   const log = console.log
   if (ctx.json) {
     console.log = console.error
   }
   try {
-    runSyncCommand([])
+    // reap before the report — a landed bead's leftover tree is not a
+    // tail; the audit describes what survived the sweep
+    const reap = sweepLoopLitter(ctx)
+    const { worktrees, worktreeBranches, branches, errors } = loopRefTails(
+      ctx.root,
+      ctx.stack === undefined ? ['loop/'] : ['loop/', `stack/${ctx.stack}/`]
+    )
+    const claimed = claimedTails(ctx.tasks, seen)
+    sayLoopAudit(ctx, reap, [
+      // PRs live on branches — worktree'd ones (a parked bead keeps both)
+      // are just as much a tail as the bare branches
+      ['open PRs', openLoopPrs(ctx, [...branches, ...worktreeBranches])],
+      ['worktrees', worktrees],
+      ['branches', branches],
+      ['claimed beads', claimed.own],
+      ['in_progress elsewhere', claimed.other],
+      ['audit errors', errors],
+      ['cleanup errors', ctx.tails],
+    ])
+    try {
+      runSyncCommand([])
+    } catch (err) {
+      say(ctx, `  warning: bro sync failed — ${err instanceof Error ? err.message : String(err)}`)
+    }
   } catch (err) {
-    say(ctx, `  warning: bro sync failed — ${err instanceof Error ? err.message : String(err)}`)
+    say(ctx, `  warning: audit failed — ${err instanceof Error ? err.message : String(err)}`)
   } finally {
     console.log = log
   }
