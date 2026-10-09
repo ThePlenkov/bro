@@ -28,11 +28,45 @@ export interface ProbeResult {
 
 /** Engine-registered named probes — the extensible slot for costlier
  *  predicates (spec-drift, docs freshness). Closed: a new predicate is
- *  an engine change, not config. Args are the guard's own `args` map. */
+ *  an engine change, not config. Args are the guard's own `args` map.
+ *  May be async — the engine sweeps a clause list's probes (and the
+ *  guards themselves) in parallel, so a probe shelling out (bd/gh) must
+ *  use the async spawn twins: a spawnSync inside still blocks the whole
+ *  event loop and silently re-serializes the sweep. */
 export type NamedProbe = (
   args: Record<string, unknown> | undefined,
   dir: string
-) => boolean | ProbeResult
+) => boolean | ProbeResult | Promise<boolean | ProbeResult>
+
+/** Ceiling on one probe call — a probe that never settles must not hang
+ *  the sweep: runGuards' caller is a hook inside the agent's turn, so a
+ *  wedged spawn fails its clause closed on the clock instead of freezing
+ *  the event. */
+export const PROBE_TIMEOUT_MS = 10_000
+
+/** Concurrent probes inside one guard — each may shell out, so an
+ *  authored list must not become an unbounded spawn burst. */
+export const PROBE_FANOUT = 8
+
+/** Bounded parallel map — a shared sync iterator hands each item to
+ *  exactly one worker (the query runner's idiom, run.ts); indexed writes
+ *  keep declaration order regardless of completion order. */
+export async function mapPool<T, R>(
+  cap: number,
+  items: readonly T[],
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const out: R[] = new Array(items.length)
+  const it = items.entries()
+  await Promise.all(
+    Array.from({ length: Math.min(cap, items.length) }, async () => {
+      for (const [i, item] of it) {
+        out[i] = await fn(item)
+      }
+    })
+  )
+  return out
+}
 
 /** Live-state reads, lazy + memoized per event — an `armed`-only guard
  *  never pays for `git status`, and `changed`/`without` clauses share
@@ -119,12 +153,13 @@ function readDiffPaths(dir: string): string[] | null {
  *  verdict row per present key (the `guard test` rendering), plus the
  *  detail a miss needs to be diagnosable (the actual branch, the glob
  *  that hit, an unknown probe name). */
-export function evalState(
+export async function evalState(
   state: GuardState,
   dir: string,
   live: LiveState,
-  probes: Record<string, NamedProbe> = {}
-): ClauseVerdict[] {
+  probes: Record<string, NamedProbe> = {},
+  probeTimeoutMs = PROBE_TIMEOUT_MS
+): Promise<ClauseVerdict[]> {
   const out: ClauseVerdict[] = []
   if (state.diff !== undefined) {
     out.push(...evalDiff(state.diff, live.diffPaths()))
@@ -151,7 +186,7 @@ export function evalState(
       detail: missing.length > 0 ? `missing: ${missing.join(',')}` : undefined,
     })
   }
-  out.push(...evalProbes(state.probes ?? [], dir, probes))
+  out.push(...(await evalProbes(state.probes ?? [], dir, probes, probeTimeoutMs)))
   return out
 }
 
@@ -190,32 +225,53 @@ function evalDiff(
   return out
 }
 
-/** `probes` rows — a throwing probe fails its clause with the error as
- *  detail; an unknown name fails closed (the registry is closed). */
-function evalProbes(
+/** `probes` rows — evaluated in parallel but pooled at PROBE_FANOUT:
+ *  each probe may shell out (spec-drift's tasks.get is a ~1s bd spawn),
+ *  so a serial loop stacks those latencies per clause into the post-tool
+ *  spikes while an unbounded list turns one guard into a spawn storm.
+ *  Rows stay in declaration order — mapPool preserves it. A
+ *  throwing/rejecting probe fails its clause with the error as detail;
+ *  an unknown name fails closed (the registry is closed); a probe that
+ *  never settles fails closed on the timeout — the hook caller's await
+ *  must not outlive the event. */
+async function evalProbes(
   list: NonNullable<GuardState['probes']>,
   dir: string,
-  probes: Record<string, NamedProbe>
-): ClauseVerdict[] {
-  const out: ClauseVerdict[] = []
-  for (const p of list) {
+  probes: Record<string, NamedProbe>,
+  timeoutMs: number
+): Promise<ClauseVerdict[]> {
+  return mapPool(PROBE_FANOUT, list, async (p): Promise<ClauseVerdict> => {
     const fn = probes[p.name]
     if (fn === undefined) {
       // the registry is closed — an unknown name fails the clause and
       // shows in `bro guard test` (spec: never silently true)
-      out.push({ clause: `probe:${p.name}`, ok: false, detail: 'unknown probe' })
-      continue
+      return { clause: `probe:${p.name}`, ok: false, detail: 'unknown probe' }
     }
-    let ok = false
-    let detail: string | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      const r = fn(p.args, dir)
-      ok = typeof r === 'boolean' ? r : r.ok
-      detail = typeof r === 'boolean' ? undefined : r.detail
+      const r = await Promise.race([
+        Promise.resolve(fn(p.args, dir)),
+        new Promise<ProbeResult>((res) => {
+          timer = setTimeout(
+            () => res({ ok: false, detail: `timed out after ${timeoutMs / 1_000}s` }),
+            timeoutMs
+          )
+          timer.unref()
+        }),
+      ])
+      return typeof r === 'boolean'
+        ? { clause: `probe:${p.name}`, ok: r }
+        : { clause: `probe:${p.name}`, ok: r.ok, detail: r.detail }
     } catch (err) {
-      detail = `threw: ${err instanceof Error ? err.message : err}`
+      return {
+        clause: `probe:${p.name}`,
+        ok: false,
+        detail: `threw: ${err instanceof Error ? err.message : err}`,
+      }
+    } finally {
+      // an armed timer pinning the process after the race settled is a
+      // leak, not patience (same rule as judge's deadline race)
+      clearTimeout(timer)
     }
-    out.push({ clause: `probe:${p.name}`, ok, detail })
-  }
-  return out
+  })
 }
