@@ -58,6 +58,19 @@ export function inside<T>(dir: string, root: string, fn: () => T): T {
   }
 }
 
+/** Async inside() — the cleanup must await the body: deleting the repo
+ *  while a returned promise still probes it turns the test into a race. */
+export async function insideAsync<T>(dir: string, root: string, fn: () => Promise<T>): Promise<T> {
+  const prev = process.cwd()
+  process.chdir(dir)
+  try {
+    return await fn()
+  } finally {
+    process.chdir(prev)
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
 // --- spawned-CLI e2e fixtures --------------------------------------------------
 //
 // The dangerous paths (loop auto-merge, hook gates, worktree lifecycle)

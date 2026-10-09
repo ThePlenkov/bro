@@ -28,11 +28,15 @@ export interface ProbeResult {
 
 /** Engine-registered named probes — the extensible slot for costlier
  *  predicates (spec-drift, docs freshness). Closed: a new predicate is
- *  an engine change, not config. Args are the guard's own `args` map. */
+ *  an engine change, not config. Args are the guard's own `args` map.
+ *  May be async — the engine sweeps a clause list's probes (and the
+ *  guards themselves) in parallel, so a probe shelling out (bd/gh) must
+ *  use the async spawn twins: a spawnSync inside still blocks the whole
+ *  event loop and silently re-serializes the sweep. */
 export type NamedProbe = (
   args: Record<string, unknown> | undefined,
   dir: string
-) => boolean | ProbeResult
+) => boolean | ProbeResult | Promise<boolean | ProbeResult>
 
 /** Live-state reads, lazy + memoized per event — an `armed`-only guard
  *  never pays for `git status`, and `changed`/`without` clauses share
@@ -119,12 +123,12 @@ function readDiffPaths(dir: string): string[] | null {
  *  verdict row per present key (the `guard test` rendering), plus the
  *  detail a miss needs to be diagnosable (the actual branch, the glob
  *  that hit, an unknown probe name). */
-export function evalState(
+export async function evalState(
   state: GuardState,
   dir: string,
   live: LiveState,
   probes: Record<string, NamedProbe> = {}
-): ClauseVerdict[] {
+): Promise<ClauseVerdict[]> {
   const out: ClauseVerdict[] = []
   if (state.diff !== undefined) {
     out.push(...evalDiff(state.diff, live.diffPaths()))
@@ -151,7 +155,7 @@ export function evalState(
       detail: missing.length > 0 ? `missing: ${missing.join(',')}` : undefined,
     })
   }
-  out.push(...evalProbes(state.probes ?? [], dir, probes))
+  out.push(...(await evalProbes(state.probes ?? [], dir, probes)))
   return out
 }
 
@@ -190,32 +194,37 @@ function evalDiff(
   return out
 }
 
-/** `probes` rows — a throwing probe fails its clause with the error as
- *  detail; an unknown name fails closed (the registry is closed). */
-function evalProbes(
+/** `probes` rows — evaluated in parallel: each probe may shell out
+ *  (spec-drift's tasks.get is a ~1s bd spawn), so a serial loop stacks
+ *  those latencies per clause into the post-tool spikes. Rows stay in
+ *  declaration order — Promise.all preserves it. A throwing/rejecting
+ *  probe fails its clause with the error as detail; an unknown name
+ *  fails closed (the registry is closed). */
+async function evalProbes(
   list: NonNullable<GuardState['probes']>,
   dir: string,
   probes: Record<string, NamedProbe>
-): ClauseVerdict[] {
-  const out: ClauseVerdict[] = []
-  for (const p of list) {
-    const fn = probes[p.name]
-    if (fn === undefined) {
-      // the registry is closed — an unknown name fails the clause and
-      // shows in `bro guard test` (spec: never silently true)
-      out.push({ clause: `probe:${p.name}`, ok: false, detail: 'unknown probe' })
-      continue
-    }
-    let ok = false
-    let detail: string | undefined
-    try {
-      const r = fn(p.args, dir)
-      ok = typeof r === 'boolean' ? r : r.ok
-      detail = typeof r === 'boolean' ? undefined : r.detail
-    } catch (err) {
-      detail = `threw: ${err instanceof Error ? err.message : err}`
-    }
-    out.push({ clause: `probe:${p.name}`, ok, detail })
-  }
-  return out
+): Promise<ClauseVerdict[]> {
+  return Promise.all(
+    list.map(async (p): Promise<ClauseVerdict> => {
+      const fn = probes[p.name]
+      if (fn === undefined) {
+        // the registry is closed — an unknown name fails the clause and
+        // shows in `bro guard test` (spec: never silently true)
+        return { clause: `probe:${p.name}`, ok: false, detail: 'unknown probe' }
+      }
+      try {
+        const r = await fn(p.args, dir)
+        return typeof r === 'boolean'
+          ? { clause: `probe:${p.name}`, ok: r }
+          : { clause: `probe:${p.name}`, ok: r.ok, detail: r.detail }
+      } catch (err) {
+        return {
+          clause: `probe:${p.name}`,
+          ok: false,
+          detail: `threw: ${err instanceof Error ? err.message : err}`,
+        }
+      }
+    })
+  )
 }

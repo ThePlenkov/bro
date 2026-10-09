@@ -7,9 +7,32 @@
  */
 import { readdirSync, readFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
-import { facade, loadConfig, specStore, type SpecStore, type TaskStore } from '@broject/core'
+import {
+  loadConfig,
+  specStore,
+  tasksAsync,
+  type SpecStore,
+  type TaskRow,
+  type TaskStoreAsync,
+} from '@broject/core'
 import type { NamedProbe, ProbeResult } from '@broject/guard'
-import { driftEnv, driftRow, localSpecPath, specLinkPath, SPEC_LINK } from './spec-drift.ts'
+import {
+  driftEnv,
+  driftRow,
+  localSpecPath,
+  specLinkPath,
+  SPEC_LINK,
+  type DriftEnv,
+} from './spec-drift.ts'
+
+/** Per-process memos — hook invocations and `guard test` are one-shot
+ *  runs, so the sweep's N probes share one connector resolution, one
+ *  tasks facade, and one drift env instead of re-paying the resolution
+ *  spawns (remote-url probe, matchDir walks, ref/shallow checks) per
+ *  clause. Same lifetime assumption spec-drift's logRecordsCache makes. */
+const specStoreMemo = new Map<string, SpecStore>()
+const tasksStoreMemo = new Map<string, TaskStoreAsync>()
+const driftEnvMemo = new Map<string, DriftEnv>()
 
 /** The specs facade degrades rather than kills the clause — an
  *  `args.spec` drift never consults the store (scope reads the file's
@@ -17,17 +40,47 @@ import { driftEnv, driftRow, localSpecPath, specLinkPath, SPEC_LINK } from './sp
  *  'no local spec file to date' from an empty tree — unverifiable,
  *  not a crash. Mirrors spec.ts's specs() degrade. */
 function specsOrDegraded(dir: string): SpecStore {
+  let spec = specStoreMemo.get(dir)
+  if (spec !== undefined) {
+    return spec
+  }
   try {
-    return specStore(dir, loadConfig(dir).connectors)
+    spec = specStore(dir, loadConfig(dir).connectors)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    return {
+    spec = {
       hasSpec: () => false,
       remedy: () => `fix connectors.specs (${msg})`,
       policy: () => `specs facade unavailable: ${msg}`,
       tree: () => [],
     }
   }
+  specStoreMemo.set(dir, spec)
+  return spec
+}
+
+/** The tasks facade a probe's bead read goes through — async, so the
+ *  sweep's `bd show` calls overlap rather than serialize ~1s each, and
+ *  resolved once per dir (facade resolution itself shells git). */
+function tasksStore(dir: string): TaskStoreAsync {
+  let store = tasksStoreMemo.get(dir)
+  if (store === undefined) {
+    store = tasksAsync(dir, loadConfig(dir).connectors)
+    tasksStoreMemo.set(dir, store)
+  }
+  return store
+}
+
+/** driftEnv keyed by (dir, ref) — the comparison ref and shallow check
+ *  are repo facts, invariant inside one run. */
+function driftEnvFor(dir: string, ref?: string): DriftEnv {
+  const key = `${dir}\0${ref ?? ''}`
+  let env = driftEnvMemo.get(key)
+  if (env === undefined) {
+    env = driftEnv(dir, ref)
+    driftEnvMemo.set(key, env)
+  }
+  return env
 }
 
 /** args.spec — explicit file wins; validation is localSpecPath's, so a
@@ -43,21 +96,22 @@ function probeSpecArg(
   if (link === undefined) {
     return { ok: false, detail: `no local spec file: ${specArg}` }
   }
-  const row = driftRow(dir, label, spec, driftEnv(dir, ref), link)
+  const row = driftRow(dir, label, spec, driftEnvFor(dir, ref), link)
   return { ok: row.state === 'STALE', detail: `${row.state} — ${row.detail}` }
 }
 
-/** args.id — the bead's own spec declaration wins, then the tree pick. */
-function probeIdArg(
+/** args.id — the bead's own spec declaration wins, then the tree pick.
+ *  Async: the bead read is a `bd show` (~1s of dolt startup) — through
+ *  tasksAsync the whole sweep's reads overlap instead of serializing. */
+async function probeIdArg(
   dir: string,
   idArg: string,
   ref: string | undefined,
   spec: SpecStore
-): ProbeResult {
-  let row0: ReturnType<TaskStore['get']>
+): Promise<ProbeResult> {
+  let row0: TaskRow | undefined
   try {
-    const tasks = facade('tasks', { dir }, { prefer: loadConfig(dir).connectors })
-    row0 = tasks.get(idArg)
+    row0 = await tasksStore(dir).get(idArg)
   } catch (err) {
     return { ok: false, detail: `tasks read failed: ${err instanceof Error ? err.message : err}` }
   }
@@ -71,7 +125,7 @@ function probeIdArg(
   if (SPEC_LINK.test(row0.description ?? '') && link === undefined) {
     return { ok: false, detail: 'unverifiable — no local spec file to date' }
   }
-  const row = driftRow(dir, idArg, spec, driftEnv(dir, ref), link)
+  const row = driftRow(dir, idArg, spec, driftEnvFor(dir, ref), link)
   return { ok: row.state === 'STALE', detail: `${row.state} — ${row.detail}` }
 }
 
@@ -90,7 +144,7 @@ function probeIdArg(
  *  ok = STALE. `fresh`, `no-scope`, `unverifiable` all fail closed with
  *  the row's detail — a probe answers truth, and "can't date the spec"
  *  is not "the spec is stale". */
-const specDrift: NamedProbe = (args, dir): ProbeResult => {
+const specDrift: NamedProbe = async (args, dir): Promise<ProbeResult> => {
   const specArg = typeof args?.spec === 'string' ? args.spec : undefined
   const idArg = typeof args?.id === 'string' ? args.id : undefined
   const ref = typeof args?.ref === 'string' ? args.ref : undefined

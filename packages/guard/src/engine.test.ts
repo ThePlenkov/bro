@@ -206,6 +206,41 @@ describe('runGuards', () => {
     })
   })
 
+  test('defs evaluate in parallel — a pending probe does not serialize the next def', async () => {
+    const dir = repo()
+    let secondRan = false
+    const g = (name: string, probe: string): Guard => ({
+      name,
+      when: { on: ['stop'], state: { probes: [{ name: probe }] } },
+      say: 'x',
+    })
+    const run = await runGuards(
+      opts(dir, {
+        defs: [g('first', 'slow'), g('second', 'fast')],
+        probes: {
+          // resolves only once 'fast' has been invoked — a serial phase-1
+          // would exhaust the spin and answer false; passing proves the
+          // defs overlap (bd/git spawns included, via async probes)
+          slow: async () => {
+            for (let i = 0; i < 1000 && !secondRan; i++) {
+              await new Promise((r) => setImmediate(r))
+            }
+            return secondRan
+          },
+          fast: async () => {
+            secondRan = true
+            return true
+          },
+        },
+      })
+    )
+    // declaration order survives the out-of-order completion — budget
+    // accounting iterates this same order
+    assert.deepEqual(run.verdicts.map((v) => v.name), ['first', 'second'])
+    assert.equal(run.verdicts[0]!.clauses.find((c) => c.clause === 'probe:slow')!.ok, true)
+    assert.equal(run.verdicts.every((v) => v.fire), true)
+  })
+
   test('maxPerEvent caps emitted lines', async () => {
     const dir = repo()
     dirty(dir, 'src/a.ts')

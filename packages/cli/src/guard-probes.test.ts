@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { registerConnector } from '@broject/core'
 import { GUARD_PROBES } from './guard-probes.ts'
 import { SPEC_CONNECTORS } from './spec-connectors.ts'
-import { initRepo, inside, installFakeBd } from './commands/testrepo.ts'
+import { initRepo, insideAsync, installFakeBd } from './commands/testrepo.ts'
 
 // the probe resolves the specs facade through the registry — unit
 // tests must register what the CLI entrypoint would
@@ -45,36 +45,38 @@ const commit = (dir: string, subject: string, files: Record<string, string>, dat
 const SCOPED_SPEC = '---\nscope:\n  - "src/**"\n---\n# spec\n'
 const probe = GUARD_PROBES['spec-drift']!
 
-/** initRepo + spec@T0; `fn` runs inside with the main dir. */
-const withSpecRepo = (fn: (main: string) => void): void => {
+/** initRepo + spec@T0; `fn` runs inside with the main dir — async
+ *  (insideAsync): the probe's tasks read spawns bd asynchronously, so
+ *  the repo must outlive the returned promise. */
+const withSpecRepo = (fn: (main: string) => Promise<void>): Promise<void> => {
   const { root, main } = initRepo('bro-probe-', (dir) => {
     commit(dir, 'spec lands', { 'specs/b1.md': SCOPED_SPEC }, T0)
   })
-  inside(main, root, () => fn(main))
+  return insideAsync(main, root, () => fn(main))
 }
 
 describe('spec-drift probe — args.spec (bead-free)', () => {
-  test('STALE when scoped code landed after the spec', () => {
-    withSpecRepo((main) => {
+  test('STALE when scoped code landed after the spec', async () => {
+    await withSpecRepo(async (main) => {
       commit(main, 'code moved on', { 'src/a.ts': 'x\n' }, T1)
-      const r = probe({ spec: 'specs/b1.md' }, main)
+      const r = await probe({ spec: 'specs/b1.md' }, main)
       assert.equal(typeof r === 'boolean' ? r : r.ok, true)
       assert.match(typeof r === 'boolean' ? '' : (r.detail ?? ''), /^STALE/)
     })
   })
 
-  test('fresh when the spec landed after the code', () => {
-    withSpecRepo((main) => {
+  test('fresh when the spec landed after the code', async () => {
+    await withSpecRepo(async (main) => {
       commit(main, 'code moved on', { 'src/a.ts': 'x\n' }, T1)
       commit(main, 'spec catches up', { 'specs/b1.md': `${SCOPED_SPEC}more\n` }, T2)
-      const r = probe({ spec: 'specs/b1.md' }, main)
+      const r = await probe({ spec: 'specs/b1.md' }, main)
       assert.equal(typeof r === 'boolean' ? r : r.ok, false)
       assert.match(typeof r === 'boolean' ? '' : (r.detail ?? ''), /^fresh/)
     })
   })
 
-  test('usage + safety: no args / missing file / escape fail closed', () => {
-    withSpecRepo((main) => {
+  test('usage + safety: no args / missing file / escape fail closed', async () => {
+    await withSpecRepo(async (main) => {
       for (const args of [
         undefined,
         {},
@@ -83,7 +85,7 @@ describe('spec-drift probe — args.spec (bead-free)', () => {
         { spec: 'https://example.com/x.md' },
         { spec: 'specs' }, // a dir, not a file — drift must not date it
       ]) {
-        const r = probe(args, main)
+        const r = await probe(args, main)
         assert.equal(typeof r === 'boolean' ? r : r.ok, false, JSON.stringify(args))
       }
     })
@@ -91,7 +93,7 @@ describe('spec-drift probe — args.spec (bead-free)', () => {
 })
 
 describe('spec-drift probe — args.id (bead-backed)', () => {
-  test('STALE via the bead\u2019s spec: link; unknown bead fails closed', () => {
+  test('STALE via the bead\u2019s spec: link; unknown bead fails closed', async () => {
     const { root, main } = initRepo('bro-probe-id-', (dir) => {
       commit(dir, 'spec lands', { 'specs/b1.md': SCOPED_SPEC }, T0)
       commit(dir, 'code moved on', { 'src/a.ts': 'x\n' }, T1)
@@ -103,10 +105,10 @@ describe('spec-drift probe — args.id (bead-backed)', () => {
     process.env.PATH = `${binDir}:${prev.PATH ?? ''}`
     process.env.FAKE_BD_DB = db
     try {
-      inside(main, root, () => {
-        const r = probe({ id: 'b1' }, main)
+      await insideAsync(main, root, async () => {
+        const r = await probe({ id: 'b1' }, main)
         assert.equal(typeof r === 'boolean' ? r : r.ok, true)
-        const miss = probe({ id: 'ghost' }, main)
+        const miss = await probe({ id: 'ghost' }, main)
         assert.equal(typeof miss === 'boolean' ? miss : miss.ok, false)
         // fake bd's show-miss doesn't speak the real not-found phrase —
         // the probe reports the read failure, still failing closed
@@ -119,7 +121,7 @@ describe('spec-drift probe — args.id (bead-backed)', () => {
     }
   })
 
-  test('a declared spec: with no local file fails closed — no tree-pick substitution', () => {
+  test('a declared spec: with no local file fails closed — no tree-pick substitution', async () => {
     const { root, main } = initRepo('bro-probe-id-', (dir) => {
       // both tree specs are stale under the audit — b1's broken link
       // must still NOT inherit b1's tree spec verdict
@@ -134,12 +136,12 @@ describe('spec-drift probe — args.id (bead-backed)', () => {
     process.env.PATH = `${binDir}:${prev.PATH ?? ''}`
     process.env.FAKE_BD_DB = db
     try {
-      inside(main, root, () => {
-        const broken = probe({ id: 'b1' }, main)
+      await insideAsync(main, root, async () => {
+        const broken = await probe({ id: 'b1' }, main)
         assert.equal(typeof broken === 'boolean' ? broken : broken.ok, false)
         assert.match(typeof broken === 'boolean' ? '' : (broken.detail ?? ''), /no local spec file/)
         // undeclared beads keep the tree pick — b2's spec is STALE
-        const picked = probe({ id: 'b2' }, main)
+        const picked = await probe({ id: 'b2' }, main)
         assert.equal(typeof picked === 'boolean' ? picked : picked.ok, true)
       })
     } finally {
@@ -155,53 +157,55 @@ describe('core-vendor probe', () => {
 
   const withTree = (
     files: Record<string, string>,
-    fn: (dir: string) => void
-  ): void => {
+    fn: (dir: string) => Promise<void>
+  ): Promise<void> => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-vendor-probe-'))
-    try {
-      for (const [p, content] of Object.entries(files)) {
-        mkdirSync(dirname(join(dir, p)), { recursive: true })
-        writeFileSync(join(dir, p), content)
-      }
-      fn(dir)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
+    return Promise.resolve()
+      .then(() => {
+        for (const [p, content] of Object.entries(files)) {
+          mkdirSync(dirname(join(dir, p)), { recursive: true })
+          writeFileSync(join(dir, p), content)
+        }
+      })
+      .then(() => fn(dir))
+      .finally(() => {
+        rmSync(dir, { recursive: true, force: true })
+      })
   }
 
-  test('fires on a vendor token in shipped source, with file:line detail', () => {
-    withTree({ 'src/x.ts': 'const cli = "devin"\n' }, (dir) => {
-      const r = vendorProbe({ path: 'src', terms: ['devin'] }, dir)
+  test('fires on a vendor token in shipped source, with file:line detail', async () => {
+    await withTree({ 'src/x.ts': 'const cli = "devin"\n' }, async (dir) => {
+      const r = await vendorProbe({ path: 'src', terms: ['devin'] }, dir)
       assert.equal(typeof r === 'boolean' ? r : r.ok, true)
       assert.match(typeof r === 'boolean' ? '' : (r.detail ?? ''), /src\/x\.ts:1 devin/)
     })
   })
 
-  test('clean source, word-boundaries, and test fixtures all miss', () => {
-    withTree(
+  test('clean source, word-boundaries, and test fixtures all miss', async () => {
+    await withTree(
       {
         // 'devinfra' contains but is NOT 'devin'; fixtures name vendors
         // as data — the boundary lives in shipped source only
         'src/a.ts': 'const name = "devinfra"\n',
         'src/a.test.ts': 'const cmd = "devin -p"\n',
       },
-      (dir) => {
+      async (dir) => {
         for (const args of [
           { path: 'src', terms: ['devin', 'tmux'] },
           { path: 'src' }, // no terms — unusable probe must not assert
           { path: 'src', terms: [] },
           { path: 'src', terms: [''], },
         ]) {
-          const r = vendorProbe(args, dir)
+          const r = await vendorProbe(args, dir)
           assert.equal(typeof r === 'boolean' ? r : r.ok, false, JSON.stringify(args))
         }
       }
     )
   })
 
-  test('an unscanable path fails closed — no assertion without a scan', () => {
-    withTree({}, (dir) => {
-      const r = vendorProbe({ path: 'does/not/exist', terms: ['devin'] }, dir)
+  test('an unscanable path fails closed — no assertion without a scan', async () => {
+    await withTree({}, async (dir) => {
+      const r = await vendorProbe({ path: 'does/not/exist', terms: ['devin'] }, dir)
       assert.equal(typeof r === 'boolean' ? r : r.ok, false)
       assert.match(typeof r === 'boolean' ? '' : (r.detail ?? ''), /scan failed/)
     })

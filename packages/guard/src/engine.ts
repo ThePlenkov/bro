@@ -141,7 +141,7 @@ async function evalClauses(
     }
   }
   if (g.when.state !== undefined) {
-    clauses.push(...evalState(g.when.state, dir, lazies.live(), probes))
+    clauses.push(...(await evalState(g.when.state, dir, lazies.live(), probes)))
   }
   return clauses
 }
@@ -296,13 +296,25 @@ export async function runGuards(opts: GuardEvalOpts): Promise<GuardRun> {
     })(),
   }
 
-  // phase 1 — deterministic clauses (on → match.* → state.*)
-  const verdicts: GuardVerdict[] = []
-  for (const { source, guard } of guards) {
-    const budget = guard.when.budget ?? GUARD_DEFAULT_BUDGET
-    const clauses = await evalClauses(guard, opts.event, lazies, opts.probes ?? {}, opts.dir)
-    verdicts.push({ name: guard.name, source, clauses, fired: 0, budget, fire: false })
-  }
+  // phase 1 — deterministic clauses (on → match.* → state.*), every def
+  // in parallel: state probes shell out (spec-drift's tasks.get is a ~1s
+  // bd spawn), so a serial loop stacks per-def latencies into the
+  // post-tool spikes. Promise.all keeps verdicts in declaration order —
+  // the shared lazies are memoized promises/sync-caches, safe under
+  // concurrent reads, and budget accounting below is untouched.
+  const verdicts: GuardVerdict[] = await Promise.all(
+    guards.map(async ({ source, guard }): Promise<GuardVerdict> => {
+      const clauses = await evalClauses(guard, opts.event, lazies, opts.probes ?? {}, opts.dir)
+      return {
+        name: guard.name,
+        source,
+        clauses,
+        fired: 0,
+        budget: guard.when.budget ?? GUARD_DEFAULT_BUDGET,
+        fire: false,
+      }
+    })
+  )
 
   // phase 1.5 — judge clauses: one noul per guard whose deterministic
   // clauses all pass; veto-only, abstains fail-open (spec: bro-nkn6).
