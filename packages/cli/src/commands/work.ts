@@ -823,14 +823,9 @@ function cmdList(argv: string[]): void {
   }
 }
 
-function cmdPrune(argv: string[]): void {
-  const pos = positionals(argv, new Set(), {
-    boolFlags: new Set(['--loop', '--dry-run']),
-    strict: true,
-  })
-  if (pos.length > 0) {
-    usage()
-  }
+/** git's own stale-admin prune — missing-dir entries whose metadata
+ *  alone is litter. A failed prune is fatal: the report would be fiction. */
+function pruneStaleEntries(): void {
   const before = parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']))
   const prunable = before.filter((w) => w.prunable)
   const res = gitTry(['worktree', 'prune', '--verbose'])
@@ -847,33 +842,40 @@ function cmdPrune(argv: string[]): void {
   } else {
     console.log('nothing stale — all worktrees present on disk')
   }
-  if (!argv.includes('--loop')) {
-    return
-  }
-  // the litter sweep — same predicate the loop audit reaps on: bead
-  // closed (or a merged PR names the branch) + verifiably clean
-  const dry = argv.includes('--dry-run')
-  const main = mainWorktree()
+}
+
+/** tasks + review facades for the litter sweep — either may be absent.
+ *  The sweep degrades on a missing review host (closed-bead + clean
+ *  still reaps and branches fall back to git's own merged check); a
+ *  missing task store means no verdict record, so nothing is provably
+ *  done and the sweep is skipped outright. */
+function litterFacades(root: string): {
+  tasks?: TaskStore
+  rev?: { repo: string; facade: ReviewFacade }
+} {
   // core loadConfig, not loadBroConfig: this file is imported by
   // plugins.ts for workConnector — importing back would TDZ-crash any
   // entry that evaluates work.ts first (unit tests do)
-  const prefer = loadConfig(main.path).connectors
+  const prefer = loadConfig(root).connectors
   let tasks: TaskStore | undefined
   try {
-    tasks = facade('tasks', { dir: main.path }, { prefer })
+    tasks = facade('tasks', { dir: root }, { prefer })
   } catch (err) {
     console.error(`work prune --loop: no task store (${err instanceof Error ? err.message : err}) — bead state unverifiable`)
-    return
   }
   let rev: { repo: string; facade: ReviewFacade } | undefined
   try {
-    const f = reviewHost(main.path, prefer)
+    const f = reviewHost(root, prefer)
     rev = { repo: f.resolveRepo([]), facade: f }
   } catch {
-    // no review host — the PR pass is skipped; closed-bead + clean still
-    // reaps and branches fall back to git's own merged check
+    // no review host — the PR pass is skipped
   }
-  const rep = reapLoopLitter({ root: main.path, tasks, rev, stackPrefix: 'stack/', dryRun: dry })
+  return { tasks, rev }
+}
+
+/** The sweep's human report — reaped/deleted/kept lines, errors to
+ *  stderr, and the count summary. */
+function printLitterReport(rep: LitterReap, dry: boolean): void {
   for (const r of rep.reaped) {
     console.log(`  ${dry ? 'would reap' : 'reaped'} ${r}`)
   }
@@ -887,6 +889,29 @@ function cmdPrune(argv: string[]): void {
     console.error(`  error: ${e}`)
   }
   console.log(`  loop litter: ${rep.reaped.length} ${dry ? 'would be ' : ''}reaped, ${rep.kept.length} kept`)
+}
+
+function cmdPrune(argv: string[]): void {
+  const pos = positionals(argv, new Set(), {
+    boolFlags: new Set(['--loop', '--dry-run']),
+    strict: true,
+  })
+  if (pos.length > 0) {
+    usage()
+  }
+  pruneStaleEntries()
+  if (!argv.includes('--loop')) {
+    return
+  }
+  // the litter sweep — same predicate the loop audit reaps on: bead
+  // closed (or a merged PR names the branch) + verifiably clean
+  const dry = argv.includes('--dry-run')
+  const main = mainWorktree()
+  const { tasks, rev } = litterFacades(main.path)
+  if (tasks === undefined) {
+    return
+  }
+  printLitterReport(reapLoopLitter({ root: main.path, tasks, rev, stackPrefix: 'stack/', dryRun: dry }), dry)
 }
 
 // --- merged-work retirement ---------------------------------------------------
@@ -1030,13 +1055,42 @@ function litterSlug(branch: string, stackPrefix?: string): string | undefined {
   return undefined
 }
 
-export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
-  const rep: LitterReap = { reaped: [], branches: [], kept: [], errors: [] }
-  const keep = (label: string, why: string): void => {
-    rep.kept.push(`${label} (${why})`)
-  }
-  // admin debris first — a hand-deleted dir's entry is litter too; a
-  // prune failure must not turn the sweep off
+interface LitterCandidate {
+  /** the live linked worktree the litter branch is checked out in —
+   *  undefined for a bare branch */
+  w?: WorktreeInfo
+  branch: string
+  slug: string
+}
+
+/** Everything one candidate's verdict and reap need that is not the
+ *  candidate itself — shared state read once for the whole sweep. */
+interface LitterCtx {
+  opts: LitterReapOpts
+  rep: LitterReap
+  main: WorktreeInfo
+  bySlug: Map<string, TaskRow>
+  /** absolute worktree path → live registry occupant name */
+  occupied: Map<string, string>
+}
+
+interface PrEvidence {
+  /** false when the host lookup threw — the candidate stays, the PR
+   *  state is unknowable */
+  known: boolean
+  open: boolean
+  /** a merged PR's head — the land proof AND the pin the branch delete
+   *  compares against */
+  mergedSha?: string
+}
+
+/** Admin debris + the worktree scan → worktree'd candidates. A failed
+ *  list kills the sweep (the candidate set would be fiction); a failed
+ *  prune only reports — the sweep still applies. */
+function litterCandidates(
+  opts: LitterReapOpts,
+  rep: LitterReap
+): { main: WorktreeInfo; cands: LitterCandidate[] } | undefined {
   const pr = gitTry(['-C', opts.root, 'worktree', 'prune'])
   if (pr.code !== 0) {
     rep.errors.push(`worktree prune failed — ${pr.err || 'git error'}`)
@@ -1044,20 +1098,15 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
   const wt = gitTry(['-C', opts.root, 'worktree', 'list', '--porcelain'])
   if (wt.code !== 0) {
     rep.errors.push(`worktree list failed — ${wt.err || 'git error'}`)
-    return rep
+    return undefined
   }
   const all = parseWorktreePorcelain(wt.out)
   const main = all[0]
   if (main === undefined) {
     rep.errors.push('worktree list returned no main entry')
-    return rep
+    return undefined
   }
-  interface Cand {
-    w?: WorktreeInfo
-    branch: string
-    slug: string
-  }
-  const cands: Cand[] = []
+  const cands: LitterCandidate[] = []
   const onTree = new Set<string>()
   for (const w of all.slice(1)) {
     if (w.branch === undefined || w.prunable !== undefined || !existsSync(w.path)) {
@@ -1070,7 +1119,17 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
     onTree.add(w.branch)
     cands.push({ w, branch: w.branch, slug })
   }
-  // bare litter branches — a worktree-less loop/* is the same tail class
+  litterBranches(opts, rep, onTree, cands)
+  return { main, cands }
+}
+
+/** Bare litter branches — a worktree-less loop/* is the same tail class. */
+function litterBranches(
+  opts: LitterReapOpts,
+  rep: LitterReap,
+  onTree: Set<string>,
+  cands: LitterCandidate[]
+): void {
   for (const pat of ['loop/', opts.stackPrefix]) {
     if (pat === undefined) {
       continue
@@ -1087,23 +1146,25 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
       }
     }
   }
-  if (cands.length === 0) {
-    return rep
-  }
-  // slug → bead row over the whole store, closed rows included — the
-  // verdict record. An unreachable store leaves nothing provably done.
-  let bySlug: Map<string, TaskRow>
+}
+
+/** slug → bead row over the whole store, closed rows included — the
+ *  verdict record. An unreachable store leaves nothing provably done. */
+function litterBeads(opts: LitterReapOpts, rep: LitterReap): Map<string, TaskRow> | undefined {
   try {
-    bySlug = new Map(opts.tasks.list({ all: true }).map((r) => [loopSlug(r.id), r]))
+    return new Map(opts.tasks.list({ all: true }).map((r) => [loopSlug(r.id), r]))
   } catch (err) {
     rep.errors.push(`bead list failed — ${err instanceof Error ? err.message : String(err)}`)
-    return rep
+    return undefined
   }
-  // live registry occupants pinning a tree — an agent (a respawned drive
-  // fixer, say) working a closed bead's tree still owns it
+}
+
+/** Live registry occupants pinning a tree — an agent (a respawned drive
+ *  fixer, say) working a closed bead's tree still owns it. */
+function litterOccupants(root: string): Map<string, string> {
   const occupied = new Map<string, string>()
   try {
-    for (const [molStep, e] of Object.entries(readAgentRegistry(opts.root))) {
+    for (const [molStep, e] of Object.entries(readAgentRegistry(root))) {
       const path = typeof e.worktree === 'string' ? resolve(e.worktree) : undefined
       const live =
         typeof e.pid === 'number' &&
@@ -1115,98 +1176,143 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
   } catch {
     // registry unreadable — the other keep planes still apply
   }
-  for (const c of cands) {
-    const bead = bySlug.get(c.slug)
-    // PR evidence: an open PR vetoes outright, a merged one is the land
-    // proof AND the head pin the branch delete compares against
-    let openPr = false
-    let mergedSha: string | undefined
-    let prKnown = true
-    if (opts.rev !== undefined) {
-      try {
-        for (const pr of opts.rev.facade.prsForBranch(c.branch, 'all').slice(0, 5)) {
-          const meta = opts.rev.facade.prMeta({ repo: opts.rev.repo, pr })
-          if (meta.state === 'OPEN') {
-            openPr = true
-          } else if (meta.state === 'MERGED' && mergedSha === undefined) {
-            mergedSha = meta.headSha
-          }
-        }
-      } catch {
-        prKnown = false
+  return occupied
+}
+
+/** An open PR vetoes outright; a merged one is the land proof AND the
+ *  head pin the branch delete compares against. */
+function litterPrEvidence(opts: LitterReapOpts, branch: string): PrEvidence {
+  const ev: PrEvidence = { known: true, open: false }
+  if (opts.rev === undefined) {
+    return ev
+  }
+  try {
+    for (const pr of opts.rev.facade.prsForBranch(branch, 'all').slice(0, 5)) {
+      const meta = opts.rev.facade.prMeta({ repo: opts.rev.repo, pr })
+      if (meta.state === 'OPEN') {
+        ev.open = true
+      } else if (meta.state === 'MERGED' && ev.mergedSha === undefined) {
+        ev.mergedSha = meta.headSha
       }
     }
-    // 'done' evidence: the bead closed (the loop's land/verdict record)
-    // or a merged PR names the branch — either proves the work left
-    const done = bead?.status === 'closed' || mergedSha !== undefined
-    const label = c.w?.path ?? c.branch
-    if (!done) {
-      keep(label, bead === undefined ? 'no bead — unverifiable' : `bead ${bead.status ?? 'open'}`)
-      continue
+  } catch {
+    ev.known = false
+  }
+  return ev
+}
+
+/** Worktree-side keep reasons, checked only after the candidate proved
+ *  done and veto-free. Returns undefined when the tree is safe to reap. */
+function litterTreeVerdict(c: LitterCandidate, ctx: LitterCtx): string | undefined {
+  const w = c.w
+  if (w === undefined) {
+    return undefined
+  }
+  if (w.locked !== undefined) {
+    return w.locked === '' ? 'locked' : `locked (${w.locked})`
+  }
+  const occupant = ctx.occupied.get(resolve(w.path))
+  if (occupant !== undefined) {
+    return `agent ${occupant} live`
+  }
+  if (worktreeClaim(w.path, ctx.opts.now) !== undefined) {
+    return 'claimed'
+  }
+  // the same cleanliness bar removeMergedWorktree enforces, read ahead
+  // so kept candidates report a reason
+  const st = gitTry(['-c', 'status.showUntrackedFiles=all', '-C', w.path, 'status', '--porcelain'])
+  if (st.code !== 0) {
+    return 'cleanliness unverifiable'
+  }
+  return st.out.trim() === '' ? undefined : 'dirty'
+}
+
+/** The keep reason for one candidate — undefined means provably done
+ *  (the bead closed — the loop's land/verdict record — or a merged PR
+ *  names the branch; either proves the work left), veto-free, and (when
+ *  it has a tree) safe to remove. */
+function litterVerdict(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence): string | undefined {
+  const bead = ctx.bySlug.get(c.slug)
+  if (bead?.status !== 'closed' && pr.mergedSha === undefined) {
+    return bead === undefined ? 'no bead — unverifiable' : `bead ${bead.status ?? 'open'}`
+  }
+  if (!pr.known) {
+    return 'PR lookup failed'
+  }
+  if (pr.open) {
+    return 'open PR — unmerged'
+  }
+  return litterTreeVerdict(c, ctx)
+}
+
+/** Branch-side retire — a removed/absent worktree frees the branch. A
+ *  merged PR's head pins the delete (a squash merge makes git's own
+ *  --merged blind; only the host knows the landing). A closed-bead-only
+ *  verdict still compare-deletes at the read tip so a commit landing
+ *  between the read and the delete can't be dropped — and reaching this
+ *  code means the branch is never checked out (its worktree was reaped
+ *  above or never existed). */
+function retireLitterBranch(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence): void {
+  const { opts, rep } = ctx
+  if (opts.dryRun === true) {
+    rep.branches.push(c.branch)
+    return
+  }
+  if (pr.mergedSha !== undefined) {
+    deleteMergedLocalBranch(c.branch, pr.mergedSha)
+  } else {
+    const tip = gitTry(['-C', opts.root, 'rev-parse', '--verify', `refs/heads/${c.branch}`])
+    if (tip.code === 0) {
+      gitTry(['-C', opts.root, 'update-ref', '-d', `refs/heads/${c.branch}`, tip.out.trim()])
     }
-    if (!prKnown) {
-      keep(label, 'PR lookup failed')
-      continue
+  }
+  if (gitTry(['-C', opts.root, 'rev-parse', '--verify', '--quiet', `refs/heads/${c.branch}`]).code !== 0) {
+    rep.branches.push(c.branch)
+  } else {
+    rep.kept.push(`${c.branch} (branch delete refused)`)
+  }
+}
+
+/** One candidate: verdict first, then the worktree removal (the tree
+ *  must be gone before its branch retires — a failed removal keeps the
+ *  branch too, it is still checked out there), then the branch. */
+function reapCandidate(c: LitterCandidate, ctx: LitterCtx): void {
+  const { opts, rep, main } = ctx
+  const pr = litterPrEvidence(opts, c.branch)
+  const why = litterVerdict(c, ctx, pr)
+  if (why !== undefined) {
+    rep.kept.push(`${c.w?.path ?? c.branch} (${why})`)
+    return
+  }
+  if (c.w !== undefined) {
+    if (opts.dryRun !== true && !removeMergedWorktree(c.w.path, c.w, main)) {
+      rep.errors.push(`worktree ${c.w.path} not removed`)
+      return
     }
-    if (openPr) {
-      keep(label, 'open PR — unmerged')
-      continue
-    }
-    if (c.w !== undefined) {
-      const w = c.w
-      if (w.locked !== undefined) {
-        keep(label, `locked${w.locked === '' ? '' : ` (${w.locked})`}`)
-        continue
-      }
-      const occupant = occupied.get(resolve(w.path))
-      if (occupant !== undefined) {
-        keep(label, `agent ${occupant} live`)
-        continue
-      }
-      if (worktreeClaim(w.path, opts.now) !== undefined) {
-        keep(label, 'claimed')
-        continue
-      }
-      // the same cleanliness bar removeMergedWorktree enforces, read
-      // ahead so kept candidates report a reason
-      const st = gitTry(['-c', 'status.showUntrackedFiles=all', '-C', w.path, 'status', '--porcelain'])
-      if (st.code !== 0 || st.out.trim() !== '') {
-        keep(label, st.code !== 0 ? 'cleanliness unverifiable' : 'dirty')
-        continue
-      }
-      if (opts.dryRun !== true && !removeMergedWorktree(w.path, w, main)) {
-        rep.errors.push(`worktree ${w.path} not removed`)
-        continue
-      }
-      rep.reaped.push(`${w.path} [${c.branch}]`)
-    }
-    // branch side — a removed/absent worktree frees the branch
-    if (opts.dryRun === true) {
-      rep.branches.push(c.branch)
-      continue
-    }
-    if (mergedSha !== undefined) {
-      // the merged PR's head pins the delete — the branch's local tip
-      // must be inside it (a squash merge makes git's own --merged
-      // blind; only the host knows the landing)
-      deleteMergedLocalBranch(c.branch, mergedSha)
-    } else {
-      // closed-bead verdict with no merged PR in reach — the store says
-      // the work item is done, so the scratch branch is litter whatever
-      // its tip. Still a compare-delete at the current tip: a commit
-      // landing between the read and the delete can't be dropped. The
-      // branch is never checked out here — reaching this code means its
-      // worktree was reaped above or never existed.
-      const tip = gitTry(['-C', opts.root, 'rev-parse', '--verify', `refs/heads/${c.branch}`])
-      if (tip.code === 0) {
-        gitTry(['-C', opts.root, 'update-ref', '-d', `refs/heads/${c.branch}`, tip.out.trim()])
-      }
-    }
-    if (gitTry(['-C', opts.root, 'rev-parse', '--verify', '--quiet', `refs/heads/${c.branch}`]).code !== 0) {
-      rep.branches.push(c.branch)
-    } else {
-      keep(c.branch, 'branch delete refused')
-    }
+    rep.reaped.push(`${c.w.path} [${c.branch}]`)
+  }
+  retireLitterBranch(c, ctx, pr)
+}
+
+export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
+  const rep: LitterReap = { reaped: [], branches: [], kept: [], errors: [] }
+  const found = litterCandidates(opts, rep)
+  if (found === undefined || found.cands.length === 0) {
+    return rep
+  }
+  const bySlug = litterBeads(opts, rep)
+  if (bySlug === undefined) {
+    return rep
+  }
+  const ctx: LitterCtx = {
+    opts,
+    rep,
+    main: found.main,
+    bySlug,
+    occupied: litterOccupants(opts.root),
+  }
+  for (const c of found.cands) {
+    reapCandidate(c, ctx)
   }
   return rep
 }

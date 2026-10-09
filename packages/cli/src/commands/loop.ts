@@ -1155,6 +1155,47 @@ function claimedTails(tasks: TaskStore, seen: Set<string>): { own: string[]; oth
   }
 }
 
+/** The close-out litter sweep — reap the provably-done leftovers before
+ *  the audit names what survived. A sweep failure is a warning line,
+ *  never a crash. */
+function sweepLoopLitter(ctx: Ctx): LitterReap | undefined {
+  try {
+    return reapLoopLitter({
+      root: ctx.root,
+      tasks: ctx.tasks,
+      rev: { repo: ctx.repo, facade: ctx.rev },
+      stackPrefix: ctx.stack === undefined ? undefined : `stack/${ctx.stack}/`,
+    })
+  } catch (err) {
+    say(ctx, `  warning: litter sweep failed — ${err instanceof Error ? err.message : String(err)}`)
+    return undefined
+  }
+}
+
+/** The audit's printed report: what the sweep reaped, then every tail
+ *  that survived it — 'clean' only when no section has anything left. */
+function sayLoopAudit(ctx: Ctx, reap: LitterReap | undefined, sections: [string, string[]][]): void {
+  say(ctx, 'loop audit:')
+  for (const r of reap?.reaped ?? []) {
+    say(ctx, `  reaped: ${r}`)
+  }
+  for (const b of reap?.branches ?? []) {
+    say(ctx, `  deleted branch: ${b}`)
+  }
+  for (const e of reap?.errors ?? []) {
+    say(ctx, `  reap error: ${e}`)
+  }
+  if (sections.every(([, items]) => items.length === 0)) {
+    say(ctx, '  clean — no loop tails')
+    return
+  }
+  for (const [label, items] of sections) {
+    for (const item of items) {
+      say(ctx, `  ${label}: ${item}`)
+    }
+  }
+}
+
 /** End-of-run sweep: first reap the provably-done litter (closed-bead or
  *  merged-PR worktrees that are still clean, plus their bare branches —
  *  `bro work prune --loop` runs the same sweep by hand), then name every
@@ -1173,23 +1214,13 @@ function endAudit(ctx: Ctx, seen: Set<string>): void {
   try {
     // reap before the report — a landed bead's leftover tree is not a
     // tail; the audit describes what survived the sweep
-    let reap: LitterReap | undefined
-    try {
-      reap = reapLoopLitter({
-        root: ctx.root,
-        tasks: ctx.tasks,
-        rev: { repo: ctx.repo, facade: ctx.rev },
-        stackPrefix: ctx.stack === undefined ? undefined : `stack/${ctx.stack}/`,
-      })
-    } catch (err) {
-      say(ctx, `  warning: litter sweep failed — ${err instanceof Error ? err.message : String(err)}`)
-    }
+    const reap = sweepLoopLitter(ctx)
     const { worktrees, worktreeBranches, branches, errors } = loopRefTails(
       ctx.root,
       ctx.stack === undefined ? ['loop/'] : ['loop/', `stack/${ctx.stack}/`]
     )
     const claimed = claimedTails(ctx.tasks, seen)
-    const sections: [string, string[]][] = [
+    sayLoopAudit(ctx, reap, [
       // PRs live on branches — worktree'd ones (a parked bead keeps both)
       // are just as much a tail as the bare branches
       ['open PRs', openLoopPrs(ctx, [...branches, ...worktreeBranches])],
@@ -1199,27 +1230,7 @@ function endAudit(ctx: Ctx, seen: Set<string>): void {
       ['in_progress elsewhere', claimed.other],
       ['audit errors', errors],
       ['cleanup errors', ctx.tails],
-    ]
-    const empty = sections.every(([, items]) => items.length === 0)
-    say(ctx, 'loop audit:')
-    for (const r of reap?.reaped ?? []) {
-      say(ctx, `  reaped: ${r}`)
-    }
-    for (const b of reap?.branches ?? []) {
-      say(ctx, `  deleted branch: ${b}`)
-    }
-    for (const e of reap?.errors ?? []) {
-      say(ctx, `  reap error: ${e}`)
-    }
-    if (empty) {
-      say(ctx, '  clean — no loop tails')
-    } else {
-      for (const [label, items] of sections) {
-        for (const item of items) {
-          say(ctx, `  ${label}: ${item}`)
-        }
-      }
-    }
+    ])
     try {
       runSyncCommand([])
     } catch (err) {
