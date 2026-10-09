@@ -1386,73 +1386,109 @@ function syncAfterLand(ctx: Ctx): void {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
+/** The run's mutable queue state — the gate stack, the outcome tally,
+ *  and the claim bookkeeping the tick helpers share. */
+interface QueueState {
+  /** Beads already attempted this run — never re-picked. */
+  seen: Set<string>
+  /** The ordered gate stack — entry order is service priority. */
+  stack: GateMember[]
+  tally: { landed: number; closed: number; parked: number; failed: number }
+  /** Claims spent — --max bounds claims, not outcomes: a claimed bead's
+   *  verdict arrives whenever its gate settles. */
+  claimed: number
+  /** claimNext returned nothing — no more pushes, only gate service. */
+  drained: boolean
+}
+
+/** One service pass over the stack, oldest-first — a snapshot copy
+ *  because leave() splices members out mid-iteration. True when any
+ *  member moved (action, merge, park): the next tick polls immediately
+ *  instead of paying the interval. */
+async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
+  let busy = false
+  for (const m of [...q.stack]) {
+    const verdict = await serviceMember(ctx, m)
+    if (verdict === 'kept') {
+      continue
+    }
+    busy = true
+    if (verdict === 'active') {
+      continue
+    }
+    q.stack.splice(q.stack.indexOf(m), 1)
+    q.tally[verdict] += 1
+    if (verdict === 'landed') {
+      syncAfterLand(ctx)
+    }
+    if (ctx.json) {
+      console.log(JSON.stringify({ bead: m.bead.id, result: verdict }))
+    }
+  }
+  return busy
+}
+
+/** The push half of a tick — true when a bead was claimed (drained or
+ *  not, the fresh member's first poll wants an immediate pass, not an
+ *  idle interval). False when the push was skipped — queue drained,
+ *  --max spent, or the gate stack full. */
+async function tryClaim(
+  ctx: Ctx,
+  scope: NonNullable<ReturnType<typeof loopScope>>,
+  q: QueueState
+): Promise<boolean> {
+  const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems
+  if (q.drained || maxed || q.stack.length >= ctx.cfg.maxOpen) {
+    return false
+  }
+  const bead = claimNext(ctx, scope, q.seen)
+  if (bead === undefined) {
+    q.drained = true
+    return false
+  }
+  q.seen.add(bead.id)
+  q.claimed += 1
+  const out = await pushItem(ctx, bead)
+  if (out.kind === 'member') {
+    q.stack.push(out.member)
+    say(
+      ctx,
+      `loop: ${bead.id} → PR ${prRef(ctx, out.member.pr)} (gate ${q.stack.length}/${ctx.cfg.maxOpen})`
+    )
+  } else {
+    q.tally[out.result] += 1
+    if (ctx.json) {
+      console.log(JSON.stringify({ bead: bead.id, result: out.result }))
+    }
+  }
+  return true
+}
+
 /** The round-robin: each tick services the gate stack oldest-first,
  *  then pushes the next bead while a slot is free (loop.maxOpen). The
  *  run ends when the queue is drained or --max claims are spent AND
  *  the stack is empty — pending members wait out their own budgets. */
 async function runQueue(ctx: Ctx): Promise<void> {
-  const seen = new Set<string>()
-  const stack: GateMember[] = []
-  const tally = { landed: 0, closed: 0, parked: 0, failed: 0 }
-  // --max bounds claims, not outcomes — a claimed bead's verdict
-  // arrives whenever its gate settles
-  let claimed = 0
+  const q: QueueState = {
+    seen: new Set(),
+    stack: [],
+    tally: { landed: 0, closed: 0, parked: 0, failed: 0 },
+    claimed: 0,
+    drained: false,
+  }
   try {
     // inside the try: a failed scope lookup still owes the run an audit
     const scope = loopScope()
     if (!scope) {
       return
     }
-    let drained = false
     for (;;) {
-      // a pass that moved anything — action, merge, park — re-polls
-      // immediately; only an all-quiet pass pays the poll interval
-      let busy = false
-      for (const m of [...stack]) {
-        const verdict = await serviceMember(ctx, m)
-        if (verdict === 'kept') {
-          continue
-        }
-        busy = true
-        if (verdict === 'active') {
-          continue
-        }
-        stack.splice(stack.indexOf(m), 1)
-        tally[verdict] += 1
-        if (verdict === 'landed') {
-          syncAfterLand(ctx)
-        }
-        if (ctx.json) {
-          console.log(JSON.stringify({ bead: m.bead.id, result: verdict }))
-        }
+      const busy = await servicePass(ctx, q)
+      if (await tryClaim(ctx, scope, q)) {
+        continue
       }
-      const maxed = ctx.cfg.maxItems > 0 && claimed >= ctx.cfg.maxItems
-      if (!drained && !maxed && stack.length < ctx.cfg.maxOpen) {
-        const bead = claimNext(ctx, scope, seen)
-        if (bead === undefined) {
-          drained = true
-        } else {
-          seen.add(bead.id)
-          claimed += 1
-          const out = await pushItem(ctx, bead)
-          if (out.kind === 'member') {
-            stack.push(out.member)
-            say(
-              ctx,
-              `loop: ${bead.id} → PR ${prRef(ctx, out.member.pr)} (gate ${stack.length}/${ctx.cfg.maxOpen})`
-            )
-          } else {
-            tally[out.result] += 1
-            if (ctx.json) {
-              console.log(JSON.stringify({ bead: bead.id, result: out.result }))
-            }
-          }
-          // straight back to service — the new member's first poll and
-          // the next push both want a fresh pass, not an idle interval
-          continue
-        }
-      }
-      if (stack.length === 0 && (drained || maxed)) {
+      const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems
+      if (q.stack.length === 0 && (q.drained || maxed)) {
         break
       }
       if (!busy) {
@@ -1460,15 +1496,15 @@ async function runQueue(ctx: Ctx): Promise<void> {
       }
     }
     if (ctx.json) {
-      console.log(JSON.stringify({ done: true, ...tally }))
+      console.log(JSON.stringify({ done: true, ...q.tally }))
     } else {
       console.log(
-        `loop: done — ${tally.landed} landed, ${tally.closed} closed, ${tally.parked} parked, ${tally.failed} failed`
+        `loop: done — ${q.tally.landed} landed, ${q.tally.closed} closed, ${q.tally.parked} parked, ${q.tally.failed} failed`
       )
     }
   } finally {
     // idle, gated, or error — the audit always runs; a tail the loop
     // left must surface in the summary, not be discovered later
-    endAudit(ctx, seen)
+    endAudit(ctx, q.seen)
   }
 }

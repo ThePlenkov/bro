@@ -61,6 +61,73 @@ export type MemberAction =
    *  blocker the loop can't service. */
   | { kind: 'park'; why: string }
 
+/** Terminal or immediately-mergeable states — no gate to wait on. */
+function terminalAction(s: GateSnapshot): MemberAction | undefined {
+  if (s.state === 'MERGED') {
+    return { kind: 'land' }
+  }
+  if (s.state === 'CLOSED') {
+    return { kind: 'closed' }
+  }
+  return s.ok ? { kind: 'merge' } : undefined
+}
+
+/** Open threads preempt every other gate event while the member still
+ *  has respawn budget — unless the act cap already mandates debt-defer. */
+function threadsAction(
+  s: GateSnapshot,
+  m: MemberClock,
+  fixRounds: number
+): MemberAction | undefined {
+  const capHit = s.maxRounds > 0 && s.fixRounds > s.maxRounds
+  return s.openThreads > 0 && !capHit && m.rounds < fixRounds
+    ? { kind: 'fix' }
+    : undefined
+}
+
+/** BEHIND as the only blocker on a mergeable PR self-heals — the
+ *  update pushes a new head and the gate recomputes. A still-old
+ *  headSha on this poll means the update is landing: keep waiting,
+ *  don't re-push — bounded by the member deadline like the old
+ *  waitForGate's (an update that never lands settles as the blocker). */
+function behindAction(
+  s: GateSnapshot,
+  m: MemberClock,
+  opts: { timeoutMs: number; now: number }
+): MemberAction | undefined {
+  if (
+    s.mergeState !== 'BEHIND' ||
+    s.mergeable !== 'MERGEABLE' ||
+    s.blockers.length !== 1
+  ) {
+    return undefined
+  }
+  if (s.headSha !== m.updatedSha) {
+    return { kind: 'update' }
+  }
+  return opts.now - m.since >= opts.timeoutMs
+    ? { kind: 'park', why: `blocked: ${s.blockers.join('; ')}` }
+    : { kind: 'wait' }
+}
+
+/** A still-settling gate waits out the member's own deadline — the
+ *  verdict arrives on settle, not at timeout. */
+function pendingAction(
+  s: GateSnapshot,
+  m: MemberClock,
+  opts: { timeoutMs: number; now: number }
+): MemberAction {
+  if (!s.pending) {
+    return { kind: 'park', why: `blocked: ${s.blockers.join('; ')}` }
+  }
+  return opts.now - m.since >= opts.timeoutMs
+    ? {
+        kind: 'park',
+        why: `gate still pending after ${Math.round(opts.timeoutMs / 60_000)}m`,
+      }
+    : { kind: 'wait' }
+}
+
 /** One settled snapshot → one action. Mirrors the waitForGate +
  *  driveGate semantics: non-pending blockers settle immediately (the
  *  deadline only bounds pending), threads preempt while fix rounds
@@ -71,46 +138,13 @@ export function memberAction(
   m: MemberClock,
   opts: { fixRounds: number; timeoutMs: number; now: number }
 ): MemberAction {
-  if (s.state === 'MERGED') {
-    return { kind: 'land' }
-  }
-  if (s.state === 'CLOSED') {
-    return { kind: 'closed' }
-  }
-  if (s.ok) {
-    return { kind: 'merge' }
-  }
-  const capHit = s.maxRounds > 0 && s.fixRounds > s.maxRounds
-  if (s.openThreads > 0 && !capHit && m.rounds < opts.fixRounds) {
-    return { kind: 'fix' }
-  }
-  // BEHIND as the only blocker on a mergeable PR self-heals — the
-  // update pushes a new head and the gate recomputes. A still-old
-  // headSha on this poll means the update is landing: keep waiting,
-  // don't re-push — bounded by the member deadline like the old
-  // waitForGate's (an update that never lands settles as the blocker).
-  if (
-    s.mergeState === 'BEHIND' &&
-    s.mergeable === 'MERGEABLE' &&
-    s.blockers.length === 1
-  ) {
-    if (s.headSha !== m.updatedSha) {
-      return { kind: 'update' }
-    }
-    return opts.now - m.since >= opts.timeoutMs
-      ? { kind: 'park', why: `blocked: ${s.blockers.join('; ')}` }
-      : { kind: 'wait' }
-  }
-  if (s.mergeable === 'CONFLICTING' && m.rounds < opts.fixRounds) {
-    return { kind: 'rebase' }
-  }
-  if (s.pending) {
-    return opts.now - m.since >= opts.timeoutMs
-      ? {
-          kind: 'park',
-          why: `gate still pending after ${Math.round(opts.timeoutMs / 60_000)}m`,
-        }
-      : { kind: 'wait' }
-  }
-  return { kind: 'park', why: `blocked: ${s.blockers.join('; ')}` }
+  return (
+    terminalAction(s) ??
+    threadsAction(s, m, opts.fixRounds) ??
+    behindAction(s, m, opts) ??
+    (s.mergeable === 'CONFLICTING' && m.rounds < opts.fixRounds
+      ? { kind: 'rebase' }
+      : undefined) ??
+    pendingAction(s, m, opts)
+  )
 }
