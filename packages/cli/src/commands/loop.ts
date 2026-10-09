@@ -674,7 +674,8 @@ async function runFixRound(
   bead: ReadyBead,
   item: LoopItem,
   pr: number,
-  round: number
+  round: number,
+  lane: LoopLane
 ): Promise<void> {
   const threads = (await ctx.rev.reviewThreads({ repo: ctx.repo, pr }))
     .filter((t) => !t.resolved)
@@ -691,7 +692,6 @@ async function runFixRound(
   }
   writePrompt(item, buildFixPrompt(bead, pr, threads))
   say(ctx, `loop: ${prRef(ctx, pr)} has open threads — fix round ${round}`)
-  const lane = await resolveBeadLane(ctx, bead)
   const code = await spawnAgent(ctx, lane, bead.id, bead.title, item.promptFile, item.worktreeDir)
   if (code !== 0) {
     console.error(`loop: fix agent exited ${code ?? 'timeout'} — the next gate poll decides`)
@@ -871,6 +871,12 @@ interface GateMember {
   bead: ReadyBead
   item: LoopItem
   pr: number
+  /** The lane resolved at push — fix/rebase respawns reuse it. The
+   *  member's class was settled before its worktree existed (config
+   *  and bead labels are read once, never refreshed mid-run), so
+   *  re-resolving in a round can only re-hit the same route error —
+   *  silently burning a round per poll — or drift the lane mid-tenure. */
+  lane: LoopLane
   /** watchBegin marker path — armed for the member's whole stack
    *  tenure: a dead loop leaves a dead marker `act rearm` resurrects
    *  as `act wait --merge --cleanup` in the member's worktree. */
@@ -969,6 +975,7 @@ async function pushItem(ctx: Ctx, bead: ReadyBead): Promise<PushOutcome> {
     bead,
     item,
     pr,
+    lane,
     marker: watchBegin(ctx.root, {
       pr,
       link: prRef(ctx, pr),
@@ -1055,9 +1062,9 @@ async function serviceMember(
       noteBead(ctx.tasks, m.bead.id, `loop: PR ${prRef(ctx, m.pr)} was closed unmerged — worktree ${m.item.worktreeDir}`)
       return leave(m, 'parked')
     case 'fix':
-      return respawnRound(ctx, m, () => runFixRound(ctx, m.bead, m.item, m.pr, m.rounds))
+      return respawnRound(ctx, m, () => runFixRound(ctx, m.bead, m.item, m.pr, m.rounds, m.lane))
     case 'rebase':
-      return respawnRound(ctx, m, () => runRebaseRound(ctx, m.bead, m.item, m.pr, m.rounds))
+      return respawnRound(ctx, m, () => runRebaseRound(ctx, m.bead, m.item, m.pr, m.rounds, m.lane))
     case 'update': {
       let ok: boolean
       try {
@@ -1121,7 +1128,8 @@ async function runRebaseRound(
   bead: ReadyBead,
   item: LoopItem,
   pr: number,
-  round: number
+  round: number,
+  lane: LoopLane
 ): Promise<void> {
   let base: string
   try {
@@ -1132,7 +1140,6 @@ async function runRebaseRound(
   }
   writePrompt(item, buildRebasePrompt(bead, pr, base))
   say(ctx, `loop: ${prRef(ctx, pr)} conflicts — rebase round ${round} onto ${base}`)
-  const lane = await resolveBeadLane(ctx, bead)
   const code = await spawnAgent(ctx, lane, bead.id, bead.title, item.promptFile, item.worktreeDir)
   if (code !== 0) {
     console.error(`loop: rebase agent exited ${code ?? 'timeout'} — the next gate poll decides`)

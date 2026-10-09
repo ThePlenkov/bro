@@ -33,7 +33,7 @@ providers substitute their command for the template), and a raw
 [`loop` config](/docs/configuration#loop).
 
 With `fleet.routing` declared, each claimed bead resolves its class —
-the `class:<name>` label, the `--class` pin, or `default` — and the
+the `--class` pin, else the `class:<name>` label, else `default` — and the
 class's chain head supplies the provider, exactly like `bro agents up`.
 Flag picks (`--provider`, `--agent <provider>`, `--profile`) still pin
 one provider for the whole run; a raw template `--agent` bypasses
