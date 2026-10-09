@@ -37,6 +37,7 @@ import { learnConnector, learnSection } from '@broject/learn'
 import { loopSection } from '@broject/loop'
 import { githubConnector } from '@broject/github'
 import { gitlabConnector } from '@broject/gitlab'
+import { linearConnector } from '@broject/linear'
 import {
   applyQueryPlan,
   atlassianConnector,
@@ -96,6 +97,9 @@ registerConnector(gitlabConnector)
 // queries-facade provider — opt-in only (a step names it or
 // connectors.queries pins it); nothing about a repo detects Atlassian
 registerConnector(atlassianConnector)
+// Linear — tasks + tasksAsync + queries, all name-only pins
+// (connectors.tasks=linear); a repo's remote can't name a Linear team
+registerConnector(linearConnector)
 registerConnector(drillConnector)
 registerConnector(workConnector)
 registerConnector(actConnector)

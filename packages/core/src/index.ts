@@ -129,6 +129,7 @@ export { docTypeNamed, docVerbs, STANDARD_VERBS, verbMethod } from './docs.ts'
 export type { DocAdapter, DocCtx, DocFlags, DocType, DocVerb, Scope } from './docs.ts'
 export { bdActor, bdActorAsync, taskStore, taskStoreAsync } from './tasks.ts'
 export type { TaskFilter, TaskInput, TaskRow, TaskStore, TaskStoreAsync } from './tasks.ts'
+export { bodyMeta, broTrailer, stripMeta, withMeta } from './taskmeta.ts'
 export { JudgeUnavailable } from './judge.ts'
 export type {
   DecideResult,
