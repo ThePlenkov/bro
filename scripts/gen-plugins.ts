@@ -1,22 +1,22 @@
 /**
  * gen-plugins — materialize per-client plugin adapters under plugins/.
  *
- * The repo root is the canonical Devin plugin (plugin.json + hooks.json +
- * skills/). `plugins/<client>/bro/` carries that client's manifest and
- * hooks. Every adapter that ships skills links `skills/` at the repo
- * skills tree — a symlink, never a second copy. A host that drops
- * symlinks at install time is an install problem, not a reason to
- * duplicate the tree in git.
+ * The repo root is the Agent Plugin (plugin.json + skills/ per
+ * agent-plugins.org and agentskills.io) and the Devin plugin. Host
+ * directories carry only that client's extras (manifest, hooks). Codex
+ * installs the repo root, so it does not get a skills tree of its own.
  *
  *   plugins/devin/bro/   plugin.json + hooks.json copied from root
  *   plugins/claude/bro/  .claude-plugin/plugin.json derived from plugin.json
  *                        + hand-written hooks/hooks.json (Claude event names)
- *   plugins/codex/bro/   .codex-plugin/plugin.json derived from plugin.json
- *                        + hand-written hooks/hooks.json (Codex event names)
+ *   .codex-plugin/plugin.json  Codex manifest at the repo root; skills
+ *                        resolve to ./skills/, hooks to the hand-written
+ *                        plugins/codex/bro/hooks/hooks.json
  *   plugins/cursor/bro/  .cursor-plugin/plugin.json + hooks/hooks.json
  *                        (Cursor event names, command shape, output schema)
  *
- * Every adapter exposes skills/ and copies hooks/run.sh. Claude and Codex
+ * Adapters other than Codex still link skills/ until their marketplace
+ * installs the repo root. Each adapter copies hooks/run.sh. Claude and Codex
  * hooks wiring is authored by hand — Cursor's hooks.json is generated from
  * the event map below. `check:plugins` fails CI when an adapter drifts.
  *
@@ -154,6 +154,14 @@ for (const m of MARKETPLACES) {
 // contract check:plugins can still enforce.
 const cursorMarketplace = readJson('.cursor-plugin/marketplace.json')
 const cursorEntry = (cursorMarketplace.plugins ?? []).find((p) => p?.name === 'bro')
+const codexMarketplace = readJson('.agents/plugins/marketplace.json')
+const codexEntry = (codexMarketplace.plugins ?? []).find((p) => p?.name === 'bro')
+if (codexEntry?.source !== '.') {
+  console.error(
+    '.agents/plugins/marketplace.json: bro source must be "." — the repo root is the Agent Plugin'
+  )
+  process.exit(1)
+}
 if (cursorMarketplace.name !== 'bro' || cursorEntry?.source !== 'plugins/cursor/bro') {
   console.error(
     '.cursor-plugin/marketplace.json: name "bro" must source "plugins/cursor/bro"'
@@ -417,6 +425,9 @@ const ADAPTER_OPTS: Record<string, { skills?: boolean; runSh?: boolean }> = {
   'plugins/opencode/bro': { skills: false, runSh: false },
   'plugins/kilo/bro': { skills: false, runSh: false },
   'plugins/pi/bro': { skills: false, runSh: false },
+  // Codex installs the repo root (plugin.json + skills/). A skills entry
+  // here would be a second package.
+  'plugins/codex/bro': { skills: false },
 }
 
 // files written per adapter — value is source path, or [text] literal content
@@ -444,14 +455,8 @@ const ADAPTERS = {
     'hooks/hooks.json': null,
   },
   'plugins/codex/bro': {
-    '.codex-plugin/plugin.json': [
-      clientManifest({
-        interface: { displayName: 'bro' },
-        skills: './skills/',
-        hooks: './hooks/hooks.json',
-      }),
-    ],
-    // hand-written (Codex event names) — listed so --check doesn't flag it
+    // hand-written (Codex event names) — listed so --check doesn't flag it.
+    // The manifest lives at the repo root: this directory is hooks only.
     'hooks/hooks.json': null,
   },
   'plugins/cursor/bro': {
@@ -545,6 +550,15 @@ function ensureSkillsLink(adapterRel) {
   mkdirSync(join(ROOT, adapterRel), { recursive: true })
   symlinkSync(skillsLinkTarget(adapterRel), link)
 }
+
+emit(
+  '.codex-plugin/plugin.json',
+  clientManifest({
+    interface: { displayName: 'bro' },
+    skills: './skills/',
+    hooks: './plugins/codex/bro/hooks/hooks.json',
+  })
+)
 
 for (const [dir, files] of Object.entries(ADAPTERS)) {
   const opts = ADAPTER_OPTS[dir] ?? {}

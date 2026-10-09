@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "bro",
-      "source": "./plugins/codex/bro",
+      "source": ".",
       "description": "Agent's sidekick: review-debt pipeline, PR review loop, and scoped drill frames — all mechanics in the bro CLI over gh + beads",
       "version": "0.2.5",
       "license": "MIT",

@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { lstatSync, readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -46,15 +46,19 @@ describe('codex plugin adapter', () => {
     assert.match(body, /"description"/, 'Codex hooks.json should use description')
   })
 
-  test('Codex skills are the repo skills tree, not a second copy', () => {
-    const skills = join(ROOT, 'plugins/codex/bro/skills')
-    const st = lstatSync(skills)
-    assert.equal(st.isSymbolicLink(), true, 'plugins/codex/bro/skills must be a symlink')
-    assert.equal(readlinkSync(skills), '../../../skills')
+  test('Codex loads the Agent Plugin skills tree, not a host copy', () => {
+    const adapterSkills = join(ROOT, 'plugins/codex/bro/skills')
+    assert.equal(existsSync(adapterSkills), false, 'plugins/codex/bro must not carry skills')
+    const skills = join(ROOT, 'skills')
     const manifest = JSON.parse(
-      readFileSync(join(ROOT, 'plugins/codex/bro/.codex-plugin/plugin.json'), 'utf8')
-    ) as { skills?: string }
+      readFileSync(join(ROOT, '.codex-plugin/plugin.json'), 'utf8')
+    ) as { skills?: string; hooks?: string }
     assert.equal(manifest.skills, './skills/')
+    assert.equal(manifest.hooks, './plugins/codex/bro/hooks/hooks.json')
+    const market = JSON.parse(
+      readFileSync(join(ROOT, '.agents/plugins/marketplace.json'), 'utf8')
+    ) as { plugins?: { source?: string }[] }
+    assert.equal(market.plugins?.[0]?.source, '.')
     for (const name of readdirSync(skills)) {
       const dir = join(skills, name)
       if (!statSync(dir).isDirectory()) continue

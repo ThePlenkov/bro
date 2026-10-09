@@ -40,12 +40,15 @@ Developing bro itself: see CONTRIBUTING.md.
   skill + config section. bro is a plugin system on top of beads (and more):
   agents orchestrate by pushing work into shared, schema-validated plans
   and workflows rather than re-deriving mechanics in prompts.
-- **One skills tree** — `skills/` is the only copy. Every adapter's
-  `plugins/<client>/bro/skills` is a symlink to that tree, written by
-  `scripts/gen-plugins.ts`. Never commit a second tree, and never add a
-  generator mode that copies skills for one host. A client that drops
-  symlinks when it installs the plugin is an install problem; it is not
-  a reason to duplicate `SKILL.md`.
+- **One portable package** — the product is an
+  [Agent Plugin](https://agent-plugins.org/) whose skills are
+  [Agent Skills](https://agentskills.io/): root `plugin.json` plus
+  `skills/<name>/SKILL.md`. Those two specs are the contract for every
+  agent. Claude, Codex, Cursor, Devin, and the rest get only the extra
+  files that client needs on top — a hook event map, a client manifest.
+  They do not get a `skills/` tree, a symlink to one, or a second
+  portable manifest. A client that cannot see `skills/` until the
+  plugin root is the repo root is installed from the repo root.
 - **Config has three layers** — `~/.config/bro/config.{ts,json}` is the
   global operator file (providers, judge, fleet, agent spawn templates),
   `bro.config.{ts,json}` is committed project policy (act, sdd, guard,

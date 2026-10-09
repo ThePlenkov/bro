@@ -23,5 +23,5 @@
     "displayName": "bro"
   },
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json"
+  "hooks": "./plugins/codex/bro/hooks/hooks.json"
 }
