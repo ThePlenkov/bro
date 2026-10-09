@@ -23,6 +23,8 @@
  */
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { checkBeads } from './bd.ts'
+import { loadConfig } from './config.ts'
 import { gitTry } from './git.ts'
 import type { EventsFacade } from './events.ts'
 import type { QueryFacade } from './queries.ts'
@@ -32,7 +34,7 @@ import type { Guard } from './guards.ts'
 import { guardProblems } from './guards.ts'
 import type { SpecStore } from './specs.ts'
 import type { TaskRow, TaskStore, TaskStoreAsync } from './tasks.ts'
-import { bdActorAsync, taskStore, taskStoreAsync } from './tasks.ts'
+import { taskStore, taskStoreAsync } from './tasks.ts'
 
 export interface ConnectorCtx {
   /** Working dir — repo root for project-scoped facades, the resolved
@@ -155,6 +157,11 @@ export interface Connector {
    *  it changes where events go) declares this; a designed default that
    *  has only opt-in alternatives is not ambiguous, it is configured. */
   optIn?: boolean
+  /** The per-facade form of optIn — a connector whose OTHER facades are
+   *  detectable (github's reviews) but whose `tasks` must never be
+   *  silently claimed by remote/dir matching. Named picks bypass the
+   *  exclusion, same as `optIn`. */
+  optInFacades?: (keyof FacadeMap)[]
   hooks?(ctx: ConnectorCtx): ConnectorHooks
   /** Declarative prompt contributions (spec specs/sessions/bro-nkn6.md)
    *  — pure declarations the guard engine evaluates centrally; a
@@ -223,6 +230,16 @@ export function isOwnClaim(row: TaskRow, mine: Set<string>, actor: string): bool
   return row.assignee === actor
 }
 
+/** The tasks backend this repo actually serves — connector name +
+ *  facade-resolved async read surface. The claim/ready probes below
+ *  belong to whichever system `connectors.tasks` selects (beads by
+ *  default): naming the serving connector keeps the session-start
+ *  header and the actor check honest when another backend is pinned. */
+function servingTasks(dir: string): { name: string; store: TaskStoreAsync } {
+  const prefer = loadConfig(dir).connectors
+  return { name: facadeName('tasks', { dir }, { prefer }), store: tasksAsync(dir, prefer) }
+}
+
 const beadsConnector: Connector = {
   name: 'beads',
   tasks: (ctx) => taskStore(ctx.dir),
@@ -230,10 +247,11 @@ const beadsConnector: Connector = {
   hooks: () => ({
     async sessionStart(ctx) {
       try {
-        const ready = (await taskStoreAsync(ctx.dir).ready())
+        const { name, store } = servingTasks(ctx.dir)
+        const ready = (await store.ready())
           .slice(0, 8)
           .map((r) => `  ${r.id} ${shortTitle(r.title)}`.trimEnd())
-        return ready.length > 0 ? [`bd ready:\n${ready.join('\n')}`] : []
+        return ready.length > 0 ? [`${name} ready:\n${ready.join('\n')}`] : []
       } catch {
         return []
       }
@@ -245,8 +263,11 @@ const beadsConnector: Connector = {
         // "Own" is verified: a marker id whose claim was refused is
         // foreign work — the exact collision this nudge exists for.
         const mine = sessionTaskClaims(ctx)
-        const store = taskStoreAsync(ctx.dir)
-        const [me, rows] = await Promise.all([bdActorAsync(ctx.dir), store.list({ status: 'in_progress' })])
+        const { store } = servingTasks(ctx.dir)
+        const [me, rows] = await Promise.all([
+          store.actor ? store.actor() : Promise.resolve(''),
+          store.list({ status: 'in_progress' }),
+        ])
         const claimed = rows
           .filter((r) => !isOwnClaim(r, mine, me))
           .slice(0, 5)
@@ -258,10 +279,10 @@ const beadsConnector: Connector = {
     },
     async stopGate(ctx) {
       try {
-        const store = taskStoreAsync(ctx.dir)
+        const { store } = servingTasks(ctx.dir)
         const [mine, me, claimed] = await Promise.all([
           Promise.resolve(sessionTaskClaims(ctx)),
-          bdActorAsync(ctx.dir),
+          store.actor ? store.actor() : Promise.resolve(''),
           store.list({ status: 'in_progress' }),
         ])
         if (claimed.length === 0) {
@@ -359,9 +380,12 @@ function warnIfAmbiguous(
   }
   // A default whose every alternative must be named explicitly is a
   // settled default, not a coin flip — warning on it would train people
-  // to ignore the warning that matters.
+  // to ignore the warning that matters. Per-facade opt-ins count the
+  // same way for this kind — they're name-only alternatives here.
+  const nameOnly = (c: Connector): boolean =>
+    c.optIn === true || (c.optInFacades as readonly string[] | undefined)?.includes(kind) === true
   const others = providers.filter((c) => c !== pick)
-  if (pick === providers[0] && others.length > 0 && others.every((c) => c.optIn === true)) {
+  if (pick === providers[0] && others.length > 0 && others.every(nameOnly)) {
     return
   }
   console.error(
@@ -394,8 +418,11 @@ function pickConnector<K extends keyof FacadeMap>(
   }
   // optIn providers are never auto-picked — the flag's whole contract is
   // name-only selection, so an unnamed resolution that reached one would
-  // quietly configure a transport the user never asked for.
-  const eligible = providers.filter((c) => c.optIn !== true)
+  // quietly configure a transport the user never asked for. optInFacades
+  // applies the same rule per capability.
+  const eligible = providers.filter(
+    (c) => c.optIn !== true && !(c.optInFacades as readonly string[] | undefined)?.includes(kind)
+  )
   const remote = url === undefined ? undefined : eligible.find((c) => c.matchRemote?.(url))
   // no remote claim → project-layout match (specs: .specify/, openspec/)
   const dir = remote === undefined ? eligible.find((c) => c.matchDir?.(ctx.dir)) : undefined
@@ -480,6 +507,22 @@ export function ensureAuth<K extends keyof FacadeMap>(
     console.error(`error: ${msg}`)
     process.exit(1)
   }
+}
+
+/** Gate a command on the SERVING tasks backend — beads runs checkBeads
+ *  (binary + contract + store); every other connector gets its auth()
+ *  probe so a misconfigured pin fails with the connector's own
+ *  remediation. Returns the serving connector's name — callers that
+ *  still have beads-only tails (BEADS_DIR pinning, bd sync) branch on
+ *  it instead of re-resolving. */
+export function ensureTasksBackend(dir: string, prefer?: Record<string, string>): string {
+  const name = facadeName('tasks', { dir }, { prefer })
+  if (name === 'beads') {
+    checkBeads(dir)
+    return name
+  }
+  ensureAuth('tasks', { dir }, { prefer })
+  return name
 }
 
 /** facade('reviews') bound to a dir — the common resolution path for

@@ -32,17 +32,18 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import {
   bdTry,
-  checkBeads,
   commandCliName,
+  ensureTasksBackend,
+  facade,
   gitTry,
   LockTimeout,
   reviewHost,
   SpawnError,
   stepParent,
-  taskStore,
   withFileLock,
   type ReviewFacade,
   type SpawnWorker,
+  type TaskStore,
 } from '@broject/core'
 import { checkHistory, evaluateExitGate, fetchPrActState, waitForGate } from '@broject/act'
 import {
@@ -87,6 +88,12 @@ interface Ctx {
   /** Review facade bound to the main checkout — host calls follow the
    *  repo, not the caller's cwd. `repo` is its 'owner/name'. */
   rev: ReviewFacade
+  /** The serving tasks backend — beads by default, a pinned connector
+   *  (`connectors.tasks`) otherwise. All bead mutations go through it. */
+  tasks: TaskStore
+  /** Resolved tasks connector name — beads-only tails (BEADS_DIR,
+   *  molecule provenance) engage only on 'beads'. */
+  backend: string
   repo: string
   root: string
   cfg: LoopConfig
@@ -101,8 +108,9 @@ interface Ctx {
    *  beads carrying one of these labels; the rest of the shared queue
    *  stays untouched. */
   selection: Pick<NextPlan, 'filters' | 'gates' | 'order'>
-  /** Store the loop's own taskStore resolves to — pinned into agent and
-   *  bootstrap env as BEADS_DIR so worktree `bd` writes reach it. */
+  /** The beads dir the loop's task store resolves to — pinned into
+   *  agent and bootstrap env as BEADS_DIR so worktree `bd` writes reach
+   *  it. Undefined on a non-beads backend: nothing to pin. */
   beadsDir?: string
   /** `bro loop --stack <name>` — each claimed bead becomes a member of
    *  the named stack: branch stack/<name>/<n>-<slug> based on the tip,
@@ -436,18 +444,18 @@ function findPr(ctx: Ctx, branch: string): number | null | 'lookup-error' {
   }
 }
 
-function noteBead(id: string, note: string): void {
+function noteBead(tasks: TaskStore, id: string, note: string): void {
   try {
-    taskStore().update(id, { notes: note })
+    tasks.update(id, { notes: note })
   } catch {
     console.error(`loop: could not note ${id} — ${note}`)
   }
 }
 
 /** Best-effort return of a bead to the open queue. */
-function reopenBead(id: string): void {
+function reopenBead(tasks: TaskStore, id: string): void {
   try {
-    taskStore().update(id, { status: 'open' })
+    tasks.update(id, { status: 'open' })
   } catch { /* best-effort unclaim */ }
 }
 
@@ -469,6 +477,7 @@ async function finalizeMerge(
     const state = ctx.rev.prMeta({ repo: ctx.repo, pr }).state
     if (state !== 'MERGED') {
       noteBead(
+        ctx.tasks,
         bead.id,
         `loop: merge of ${prRef(ctx, pr)} did not land (state=${state}) — worktree ${item.worktreeDir}`
       )
@@ -478,6 +487,7 @@ async function finalizeMerge(
     // a merge/fetch failure must not abort the loop leaving the bead
     // claimed forever — note it and park
     noteBead(
+      ctx.tasks,
       bead.id,
       `loop: finalizing ${prRef(ctx, pr)} failed — ${err instanceof Error ? err.message : String(err)} — worktree ${item.worktreeDir}`
     )
@@ -486,11 +496,11 @@ async function finalizeMerge(
   try {
     // the agent may have closed it already — a verdict plus a PR both
     // reaching the store is fine; a second close is a noisy error
-    if (taskStore().get(bead.id)?.status !== 'closed') {
-      taskStore().close(bead.id, `landed via PR ${prRef(ctx, pr)}`)
+    if (ctx.tasks.get(bead.id)?.status !== 'closed') {
+      ctx.tasks.close(bead.id, `landed via PR ${prRef(ctx, pr)}`)
     }
   } catch (err) {
-    console.error(`loop: bd close ${bead.id} failed — ${String(err)}`)
+    console.error(`loop: ${ctx.backend} close ${bead.id} failed — ${String(err)}`)
   }
   // an agent-initialized submodule inside the worktree blocks removal —
   // deinit first; either way a failed cleanup is loud, never silent
@@ -547,26 +557,28 @@ async function runFixRound(
  *  it. */
 function agentVerdict(ctx: Ctx, bead: ReadyBead, worktreeDir: string): ItemResult | undefined {
   try {
-    if (taskStore().get(bead.id)?.status === 'closed') {
+    if (ctx.tasks.get(bead.id)?.status === 'closed') {
       say(ctx, `loop: ${bead.id} closed by the agent — verdict, not a failure`)
-      noteBead(bead.id, `loop: closed by agent verdict — worktree ${worktreeDir} kept for audit`)
+      noteBead(ctx.tasks, bead.id, `loop: closed by agent verdict — worktree ${worktreeDir} kept for audit`)
       return 'closed'
     }
-  } catch { /* bd unreachable → normal failure accounting decides */ }
+  } catch { /* store unreachable → normal failure accounting decides */ }
   return undefined
 }
 
 /** Agent exited without a PR — note + reopen, 'failed'. */
 function failNoPr(
+  ctx: Ctx,
   bead: ReadyBead,
   item: ReturnType<typeof planItem>,
   code: number | null
 ): ItemResult {
   noteBead(
+    ctx.tasks,
     bead.id,
     `loop: agent exited ${code ?? 'timeout'} without a PR — worktree kept at ${item.worktreeDir}`
   )
-  reopenBead(bead.id)
+  reopenBead(ctx.tasks, bead.id)
   return 'failed'
 }
 
@@ -586,10 +598,11 @@ function runBootstrap(ctx: Ctx, bead: ReadyBead, item: ReturnType<typeof planIte
     return true
   }
   noteBead(
+    ctx.tasks,
     bead.id,
     `loop: bootstrap failed (${b.status ?? b.signal ?? 'spawn error'}) — worktree kept at ${item.worktreeDir}`
   )
-  reopenBead(bead.id)
+  reopenBead(ctx.tasks, bead.id)
   return false
 }
 
@@ -713,8 +726,8 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<ItemResult> {
     slot = planned.slot
     item = planned.item
   } catch (err) {
-    noteBead(bead.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
-    reopenBead(bead.id)
+    noteBead(ctx.tasks, bead.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
+    reopenBead(ctx.tasks, bead.id)
     return 'failed'
   }
   if (!runBootstrap(ctx, bead, item)) {
@@ -724,11 +737,11 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<ItemResult> {
   const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
   const pr = findPr(ctx, item.branch)
   if (pr === 'lookup-error') {
-    noteBead(bead.id, `loop: PR lookup failed for ${item.branch} — worktree ${item.worktreeDir}`)
+    noteBead(ctx.tasks, bead.id, `loop: PR lookup failed for ${item.branch} — worktree ${item.worktreeDir}`)
     return 'parked'
   }
   if (pr === null) {
-    return agentVerdict(ctx, bead, item.worktreeDir) ?? failNoPr(bead, item, code)
+    return agentVerdict(ctx, bead, item.worktreeDir) ?? failNoPr(ctx, bead, item, code)
   }
   say(ctx, `loop: ${bead.id} → PR ${prRef(ctx, pr)}`)
   return driveGate(ctx, bead, item, pr)
@@ -782,6 +795,7 @@ async function driveGate(
       })
     } catch (err) {
       noteBead(
+        ctx.tasks,
         bead.id,
         `loop: gate fetch kept failing for PR ${prRef(ctx, pr)} — ${String(err)} — worktree ${item.worktreeDir}`
       )
@@ -792,7 +806,7 @@ async function driveGate(
       return finalizeMerge(ctx, bead, item, pr, true)
     }
     if (res.state.state === 'CLOSED') {
-      noteBead(bead.id, `loop: PR ${prRef(ctx, pr)} was closed unmerged — worktree ${item.worktreeDir}`)
+      noteBead(ctx.tasks, bead.id, `loop: PR ${prRef(ctx, pr)} was closed unmerged — worktree ${item.worktreeDir}`)
       return 'parked'
     }
     if (res.gate.ok) {
@@ -810,7 +824,7 @@ async function driveGate(
     const why = res.timedOut
       ? `gate still pending after ${ctx.cfg.mergeTimeoutMin}m`
       : `blocked: ${res.gate.blockers.join('; ')}`
-    noteBead(bead.id, `loop: PR ${prRef(ctx, pr)} ${why} — worktree ${item.worktreeDir}`)
+    noteBead(ctx.tasks, bead.id, `loop: PR ${prRef(ctx, pr)} ${why} — worktree ${item.worktreeDir}`)
     return 'parked'
   }
 }
@@ -864,16 +878,16 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     usage()
   }
   rejectStrayArgs(argv)
-  checkBeads()
   const root = gitTry(['rev-parse', '--show-toplevel']).out.trim()
   if (!root) {
     console.error('bro loop: not inside a git worktree')
     process.exit(1)
   }
   const broCfg = loadBroConfig(root)
+  const backend = ensureTasksBackend(root, broCfg.connectors)
   const cfg = broCfg.loop as LoopConfig
   const { lane, agent } = await resolveRunLane(root, argv, broCfg, cfg)
-  const ctx = buildCtx(root, argv, broCfg, cfg, agent, lane)
+  const ctx = buildCtx(root, argv, broCfg, cfg, agent, lane, backend)
   if (argv.includes('--dry-run')) {
     dryRunPlan(ctx)
     return
@@ -970,11 +984,14 @@ function buildCtx(
   broCfg: ReturnType<typeof loadBroConfig>,
   cfg: LoopConfig,
   agent: string,
-  lane: LoopLane
+  lane: LoopLane,
+  backend: string
 ): Ctx {
   const rev = reviewHost(root, broCfg.connectors)
   const ctx: Ctx = {
     rev,
+    tasks: facade('tasks', { dir: root }, { prefer: broCfg.connectors }),
+    backend,
     repo: rev.resolveRepo([]),
     root,
     cfg: {
@@ -992,7 +1009,9 @@ function buildCtx(
       gates: 'forbid' as const,
       order: 'priority' as const,
     },
-    beadsDir: resolveBeadsDir(root, (m) => console.error(m)),
+    // BEADS_DIR pinning is a beads tail — a non-beads store has no bd
+    // to pin and no db that could fork inside the worktree
+    beadsDir: backend === 'beads' ? resolveBeadsDir(root, (m) => console.error(m)) : undefined,
     stack: stackNameFlag(argv),
     tails: [],
   }
@@ -1013,8 +1032,8 @@ function dryRunPlan(ctx: Ctx): void {
   if (!scope) {
     return
   }
-  const ready = readyBeads()
-  const top = classify(ready, ctx.selection, scope, epicParentIds(ready)).queue[0]
+  const ready = readyBeads(ctx.root)
+  const top = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root)).queue[0]
   if (!top) {
     console.log('loop --dry-run: nothing claimable')
     return
@@ -1107,9 +1126,9 @@ export function loopRefTails(root: string, prefixes: string[] = ['loop/']): RefT
 
 /** Beads left in_progress, split by this run's claims vs pre-existing —
  *  a shared store holds other sessions' claims too. */
-function claimedTails(seen: Set<string>): { own: string[]; other: string[] } {
+function claimedTails(tasks: TaskStore, seen: Set<string>): { own: string[]; other: string[] } {
   try {
-    const rows = taskStore().list({ status: 'in_progress' })
+    const rows = tasks.list({ status: 'in_progress' })
     const fmt = (r: { id: string; title?: string }) =>
       `${r.id} ${(r.title ?? '').replace(/\s+/g, ' ').slice(0, 60)}`.trim()
     return {
@@ -1117,7 +1136,7 @@ function claimedTails(seen: Set<string>): { own: string[]; other: string[] } {
       other: rows.filter((r) => !seen.has(r.id)).map(fmt),
     }
   } catch {
-    return { own: [], other: ['warning: claimed-bead audit failed — bd unavailable'] }
+    return { own: [], other: ['warning: claimed-task audit failed — store unavailable'] }
   }
 }
 
@@ -1131,7 +1150,7 @@ function endAudit(ctx: Ctx, seen: Set<string>): void {
     ctx.root,
     ctx.stack === undefined ? ['loop/'] : ['loop/', `stack/${ctx.stack}/`]
   )
-  const claimed = claimedTails(seen)
+  const claimed = claimedTails(ctx.tasks, seen)
   const sections: [string, string[]][] = [
     // PRs live on branches — worktree'd ones (a parked bead keeps both)
     // are just as much a tail as the bare branches
@@ -1177,9 +1196,9 @@ function claimNext(
   scope: NonNullable<ReturnType<typeof nextScope>>,
   seen: Set<string>
 ): ReadyBead | undefined {
-  const ready = readyBeads()
-  const c = classify(ready, ctx.selection, scope, epicParentIds(ready))
-  const bead = claimUpTo(c.queue.filter((b) => !seen.has(b.id)), 1)[0]
+  const ready = readyBeads(ctx.root)
+  const c = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root))
+  const bead = claimUpTo(c.queue.filter((b) => !seen.has(b.id)), 1, ctx.root)[0]
   if (!bead && c.foreign > 0) {
     say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
   }

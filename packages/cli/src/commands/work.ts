@@ -25,14 +25,15 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import {
   acquireAgentRegistryLock,
   acquireFileLock,
+  facade,
   git,
   gitTry,
   loadConfig,
   LockTimeout,
   readAgentRegistry,
   stackSection,
-  taskStore,
   type Connector,
+  type TaskStore,
 } from '@broject/core'
 import { flag, positionals } from './args.ts'
 import { markerLive, ownerTag } from './proc-owner.ts'
@@ -292,15 +293,21 @@ export function hasSubmodules(worktreePath: string): boolean {
  *  bead) is reported — the worktree still stands, but the bead isn't ours
  *  and the session's `.task` marker must not read as ownership. */
 export function claimBead(slug: string): { claimed?: string; refused?: boolean } {
+  // resolve through the configured tasks backend — connectors.tasks
+  // pins a non-beads store; the anchor is the git root so a linked
+  // worktree or subdirectory resolves the same backend
+  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd()
+  let store: TaskStore
   try {
-    if (!taskStore().get(slug)) {
+    store = facade('tasks', { dir: root }, { prefer: loadConfig(root).connectors })
+    if (!store.get(slug)) {
       return {}
     }
   } catch {
-    return {} // beads-less repo or a dead store — nothing to say
+    return {} // task-store-less repo or a dead store — nothing to say
   }
   try {
-    taskStore().claim(slug)
+    store.claim(slug)
     return { claimed: slug }
   } catch {
     return { refused: true }

@@ -161,6 +161,7 @@ export {
   connectorHooks,
   connectors,
   ensureAuth,
+  ensureTasksBackend,
   facade,
   facadeAuth,
   facadeName,

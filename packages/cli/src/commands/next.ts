@@ -23,10 +23,24 @@
  * queue is scoped to this checkout's issue_prefix — foreign-prefix
  * beads are reported, never claimed. scope = "all" opts out in plans.
  */
-import { checkBeads, taskStore } from '@broject/core'
+import { ensureTasksBackend, facade, gitTry } from '@broject/core'
+import type { TaskStore } from '@broject/core'
 import { flag } from './args.ts'
 import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts'
 import { requireGlobalStore } from '../doctypes/store.ts'
+import { loadBroConfig } from '../plugins.ts'
+
+/** The serving tasks backend for `dir` — `connectors.tasks` in
+ *  bro.config selects it (beads by default, github when pinned). The
+ *  config lookup anchors at the git root so a run from a subdirectory
+ *  resolves the same backend; the global store is beads-only by
+ *  construction — its dir carries no bro.config, so resolution falls
+ *  to the registry default anyway. */
+function storeFor(dir?: string): TaskStore {
+  const root =
+    dir ?? (gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd())
+  return facade('tasks', { dir: root }, { prefer: loadBroConfig(root).connectors })
+}
 
 export interface ReadyBead {
   id: string
@@ -71,7 +85,7 @@ export const NEVER_CLAIM_LABELS = ['gt:slot']
  *  primitives are filtered out by bd itself, before classification.
  *  `dir` retargets the query at another store — `bro next --global`. */
 export function readyBeads(dir?: string): ReadyBead[] {
-  return taskStore(dir).ready<ReadyBead>({ excludeLabels: NEVER_CLAIM_LABELS })
+  return storeFor(dir).ready<ReadyBead>({ excludeLabels: NEVER_CLAIM_LABELS })
 }
 
 /** This checkout's bead id scope — what `bd init` recorded as
@@ -81,7 +95,7 @@ export function readyBeads(dir?: string): ReadyBead[] {
  *  cross-repo claiming, so it throws (fail closed). */
 export function projectPrefix(dir?: string): string | undefined {
   try {
-    return taskStore(dir).prefix()
+    return storeFor(dir).prefix()
   } catch (err) {
     throw new Error(
       `${err instanceof Error ? err.message : String(err)} ` +
@@ -123,7 +137,7 @@ export function epicParentIds(ready: ReadyBead[], dir?: string): Set<string> {
       continue
     }
     try {
-      if (taskStore(dir).get(id)?.issue_type === 'epic') {
+      if (storeFor(dir).get(id)?.issue_type === 'epic') {
         parentEpicCache.set(key, true)
         epic.add(id)
       }
@@ -206,7 +220,7 @@ export function classify(
  *  drain the queue into a fake idle. */
 function racedAway(b: ReadyBead, dir?: string): boolean {
   try {
-    const status = taskStore(dir).get(b.id)?.status
+    const status = storeFor(dir).get(b.id)?.status
     return typeof status === 'string' && status !== 'open'
   } catch {
     return false // show failed too — bd is down; the claim error is the diagnostic
@@ -222,7 +236,7 @@ export function claimUpTo(queue: ReadyBead[], limit: number, dir?: string): Read
       break
     }
     try {
-      taskStore(dir).claim(b.id)
+      storeFor(dir).claim(b.id)
       picked.push(b)
     } catch (err) {
       if (racedAway(b, dir)) {
@@ -269,9 +283,9 @@ function printResult(result: NextResult, list: boolean): void {
   }
 }
 
-/** readyBeads with a diagnostic — a missing bd is an install problem,
- *  not a queue failure, and the global path must report it the same
- *  way checkBeads() does for the project path. */
+/** readyBeads with a diagnostic — a missing backend CLI is an install
+ *  problem, not a queue failure, and the global path must report it
+ *  the same way the backend gate does for the project path. */
 function readyOrDie(dir?: string): ReadyBead[] {
   try {
     return readyBeads(dir)
@@ -279,8 +293,8 @@ function readyOrDie(dir?: string): ReadyBead[] {
     const enoent = err != null && (err as NodeJS.ErrnoException).code === 'ENOENT'
     console.error(
       enoent
-        ? 'error: bd not found — install beads first (https://github.com/gastownhall/beads)'
-        : `error: bd ready failed — ${err instanceof Error ? err.message : String(err)}`
+        ? "error: task backend's CLI not found — install it or point connectors.tasks elsewhere"
+        : `error: task store ready failed — ${err instanceof Error ? err.message : String(err)}`
     )
     process.exit(1)
   }
@@ -294,7 +308,13 @@ export function applyNextPlan(plan: NextPlan): void {
   // the project store is not required at all (global works repo-less)
   const dir = plan.scope === 'global' ? requireGlobalStore() : undefined
   if (dir === undefined) {
-    checkBeads()
+    // gate on the serving backend — beads gets the compat probe, a
+    // pinned connector gets its own auth check
+    const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd()
+    ensureTasksBackend(root, loadBroConfig(root).connectors)
+  } else {
+    // the global store is beads by construction
+    ensureTasksBackend(dir, {})
   }
   const ready = readyOrDie(dir)
   let c: ReturnType<typeof classify>

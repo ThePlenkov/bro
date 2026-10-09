@@ -167,6 +167,40 @@ describe('bro doctor', () => {
       assert.equal(doctorExitCode(checks), 0)
     }))
 
+  test('tasks row names the serving backend — beads by default', () =>
+    withEnv({ config: { stores: ['jsonl', 'beads'] }, beadsDir: true, remote: true, bins: ['bd', 'gh', 'bro'] }, (dir) => {
+      const c = byName(runDoctorChecks(dir), 'tasks')
+      assert.equal(c.status, 'ok')
+      assert.match(c.detail, /^beads/)
+    }))
+
+  test('tasks row mirrors bd health when beads serves', () =>
+    withEnv({ config: { stores: ['jsonl', 'beads'] }, beadsDir: true, bins: ['gh', 'bro'] }, (dir) => {
+      const c = byName(runDoctorChecks(dir), 'tasks')
+      assert.equal(c.status, 'fail')
+      assert.match(c.detail, /beads.*bd/)
+    }))
+
+  test('connectors.tasks=github makes the tasks row healthy without bd', () =>
+    withEnv(
+      {
+        config: { stores: ['jsonl'], connectors: { tasks: 'github' } },
+        remote: 'git@github.com:acme/widgets.git',
+        bins: ['gh', 'bro'],
+      },
+      (dir) => {
+        // githubConnector is registered by ../plugins.ts (doctor.ts
+        // imports it) — the pin resolves through the real registry
+        const checks = runDoctorChecks(dir)
+        const tasks = byName(checks, 'tasks')
+        assert.equal(tasks.status, 'ok', JSON.stringify(tasks))
+        assert.match(tasks.detail, /github.*connectors\.tasks=github/)
+        // and the absence of bd never gates the run
+        assert.equal(byName(checks, 'bd').status, 'warn')
+        assert.equal(doctorExitCode(checks), 0)
+      }
+    ))
+
   test('gh present but unauthenticated fails', () =>
     withEnv({ bins: ['gh'], env: { FAKE_GH_AUTH: '1' } }, (dir) => {
       const checks = runDoctorChecks(dir)
