@@ -74,7 +74,7 @@ function curlPost(payload: string, timeoutMs = TIMEOUT_MS): LinearResp {
     const hdr = join(dir, 'auth')
     writeFileSync(hdr, `Authorization: ${apiKey()}\n`, { mode: 0o600 })
     const res = spawnSync(
-      'curl',
+      'curl', // NOSONAR — PATH lookup is the contract (curl like gh/glab/bd)
       [
         '-sS',
         '--fail-with-body',
