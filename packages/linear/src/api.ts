@@ -217,6 +217,13 @@ export interface TeamLabel {
   name: string
 }
 
+export interface LinearUser {
+  id: string
+  displayName?: string
+  name?: string
+  email?: string
+}
+
 export interface TeamMeta {
   id: string
   key: string
@@ -225,7 +232,12 @@ export interface TeamMeta {
 }
 
 const VIEWER_Q = `query BroViewer { viewer { id displayName name email } }`
-const TEAMS_Q = `query BroTeams { teams(first: 100) { nodes { id key name } } }`
+const TEAMS_Q = `query BroTeams($cursor: String) {
+  teams(first: 100, after: $cursor) {
+    nodes { id key name }
+    pageInfo { hasNextPage endCursor }
+  }
+}`
 const TEAM_META_Q = `query BroTeamMeta($team: String!) {
   team(id: $team) {
     id key
@@ -233,7 +245,57 @@ const TEAM_META_Q = `query BroTeamMeta($team: String!) {
     labels { nodes { id name } }
   }
 }`
-const USERS_Q = `query BroUsers { users(first: 250) { nodes { id displayName name email } } }`
+const USERS_Q = `query BroUsers($cursor: String) {
+  users(first: 250, after: $cursor) {
+    nodes { id displayName name email }
+    pageInfo { hasNextPage endCursor }
+  }
+}`
+
+interface Conn<T> {
+  nodes?: T[]
+  pageInfo?: { hasNextPage?: boolean; endCursor?: string }
+}
+
+export const nextCursor = (pi: Conn<unknown>['pageInfo']): string | undefined =>
+  pi?.hasNextPage === true && pi.endCursor ? pi.endCursor : undefined
+
+/** Every page of a connection — a capped first: silently reported a
+ *  team/user beyond page one as missing (LINEAR_TEAM, assignee). */
+function collectSync<T>(
+  doc: string,
+  pick: (d: Record<string, unknown>) => Conn<T> | null | undefined
+): T[] {
+  const out: T[] = []
+  let cursor: string | undefined
+  for (;;) {
+    const conn = pick(gql(doc, { cursor: cursor ?? null }))
+    out.push(...(conn?.nodes ?? []))
+    cursor = nextCursor(conn?.pageInfo)
+    if (cursor === undefined) {
+      break
+    }
+  }
+  return out
+}
+
+async function collectAsync<T>(
+  doc: string,
+  pick: (d: Record<string, unknown>) => Conn<T> | null | undefined,
+  fetchImpl?: FetchFn
+): Promise<T[]> {
+  const out: T[] = []
+  let cursor: string | undefined
+  for (;;) {
+    const conn = pick(await gqlAsync(doc, { cursor: cursor ?? null }, fetchImpl))
+    out.push(...(conn?.nodes ?? []))
+    cursor = nextCursor(conn?.pageInfo)
+    if (cursor === undefined) {
+      break
+    }
+  }
+  return out
+}
 
 // Caches key on the credential/scope that produced them — a test that
 // swaps LINEAR_API_KEY or LINEAR_TEAM must never inherit a stale pick.
@@ -270,10 +332,11 @@ export async function viewerAsync(fetchImpl?: FetchFn): Promise<LinearViewer> {
   return v
 }
 
-const teamListFrom = (data: Record<string, unknown>): LinearTeam[] =>
-  (((data['teams'] as { nodes?: LinearTeam[] } | undefined)?.nodes) ?? []).filter(
-    (t) => typeof t.id === 'string' && typeof t.key === 'string'
-  )
+const allTeams = (d: Record<string, unknown>): Conn<LinearTeam> | undefined =>
+  d['teams'] as Conn<LinearTeam> | undefined
+
+const validTeams = (ts: LinearTeam[]): LinearTeam[] =>
+  ts.filter((t) => typeof t.id === 'string' && typeof t.key === 'string')
 
 function teamMetaFrom(data: Record<string, unknown>, want: string): TeamMeta {
   const t = data['team'] as
@@ -325,7 +388,7 @@ export function team(): LinearTeam {
   const ck = `${apiKey()}${want.toLowerCase()}`
   let t = teamCache.get(ck)
   if (t === undefined) {
-    t = resolveTeam(teamListFrom(gql(TEAMS_Q)))
+    t = resolveTeam(validTeams(collectSync(TEAMS_Q, allTeams)))
     teamCache.set(ck, t)
   }
   return t
@@ -336,7 +399,7 @@ export async function teamAsync(fetchImpl?: FetchFn): Promise<LinearTeam> {
   const ck = `${apiKey()}${want.toLowerCase()}`
   let t = teamCache.get(ck)
   if (t === undefined) {
-    t = resolveTeam(teamListFrom(await gqlAsync(TEAMS_Q, undefined, fetchImpl)))
+    t = resolveTeam(validTeams(await collectAsync(TEAMS_Q, allTeams, fetchImpl)))
     teamCache.set(ck, t)
   }
   return t
@@ -370,8 +433,7 @@ export function users(): { id: string; displayName?: string; name?: string; emai
   const key = apiKey()
   let u = usersCache.get(key)
   if (u === undefined) {
-    u =
-      ((gql(USERS_Q)['users'] as { nodes?: typeof u } | undefined)?.nodes) ?? []
+    u = collectSync(USERS_Q, (d) => d['users'] as Conn<LinearUser> | undefined)
     usersCache.set(key, u)
   }
   return u

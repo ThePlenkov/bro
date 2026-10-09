@@ -86,9 +86,9 @@ interface NodeOpts {
   state?: string // workflow state TYPE — backlog|unstarted|started|completed|canceled|triage
   assignee?: string
   labels?: string[]
-  blockedBy?: [string, string][] // [identifier, stateType]
-  blocks?: [string, string][]
-  children?: [string, string][]
+  blockedBy?: [string, string, (string | null)?][] // [identifier, stateType, archivedAt?]
+  blocks?: [string, string, (string | null)?][]
+  children?: [string, string, (string | null)?][]
   parent?: string
   priority?: number | null
   description?: string
@@ -100,7 +100,11 @@ interface NodeOpts {
 }
 
 const st = (type: string) => ({ id: `st-${type}`, name: type, type, position: 0 })
-const relRef = ([ident, type]: [string, string]) => ({ identifier: ident, state: { type } })
+const relRef = ([ident, type, archivedAt]: [string, string, (string | null)?]) => ({
+  identifier: ident,
+  state: { type },
+  archivedAt: archivedAt ?? null,
+})
 
 /** An issue node in the shape tasks.ts queries for. */
 function node(o: NodeOpts): Record<string, unknown> {
@@ -157,8 +161,9 @@ const ENV_DEFAULTS: Record<string, string> = {
   FAKE_LINEAR_TEAM_META: JSON.stringify(TEAM_META),
 }
 
-/** Env swap + a fake curl on PATH; the log records every request body. */
-function withLinear(
+/** Env swap + a scripted curl on PATH; the log records every request body. */
+function withCurl(
+  script: string,
   env: Record<string, string>,
   fn: (log: string, dir: string) => void
 ): void {
@@ -167,7 +172,7 @@ function withLinear(
   const argvLog = join(dir, 'argv.log')
   writeFileSync(log, '')
   writeFileSync(argvLog, '')
-  writeFileSync(join(dir, 'curl'), FAKE_CURL)
+  writeFileSync(join(dir, 'curl'), script)
   chmodSync(join(dir, 'curl'), 0o755)
   const prevPath = process.env.PATH
   process.env.PATH = `${dir}:${prevPath}`
@@ -186,6 +191,10 @@ function withLinear(
     delete process.env.FAKE_CURL_ARGV
     rmSync(dir, { recursive: true, force: true })
   }
+}
+
+function withLinear(env: Record<string, string>, fn: (log: string, dir: string) => void): void {
+  withCurl(FAKE_CURL, env, fn)
 }
 
 /** Request bodies — one per curl spawn; the operation name is the seam. */
@@ -305,6 +314,16 @@ describe('linearTasks', { skip: WIN32 }, () => {
       },
       (_log, dir) => {
         assert.throws(() => linearTasks(dir).claim('ENG-42'), /claim contested — rival holds it/)
+      }
+    )
+  })
+
+  test('claim refuses a triage issue — unapproved work is not claimable', () => {
+    withLinear(
+      { FAKE_LINEAR_ISSUE_1: issueRead(node({ ident: 'ENG-42', state: 'triage' })) },
+      (log, dir) => {
+        assert.throws(() => linearTasks(dir).claim('ENG-42'), /in triage — unapproved/)
+        assert.equal(callsMatching(log, /BroIssueUpdate/).length, 0)
       }
     )
   })
@@ -571,57 +590,108 @@ describe('linearTasks', { skip: WIN32 }, () => {
 
   test('pagination follows pageInfo.endCursor', () => {
     const cursorScript = `#!/bin/sh
-read body
-echo "$body" >> "$FAKE_CURL_LOG"
+IFS= read -r body
+printf '%s\\n' "$body" >> "$FAKE_CURL_LOG"
 case "$body" in
-  *BroTeams*) echo "$FAKE_LINEAR_TEAMS" ;;
+  *BroTeams*) printf '%s\\n' "$FAKE_LINEAR_TEAMS" ;;
   *BroIssues*)
     case "$body" in
-      *'"cursor":null'*) echo "$FAKE_LINEAR_ISSUES" ;;
-      *) echo "$FAKE_LINEAR_ISSUES_2" ;;
+      *'"cursor":null'*) printf '%s\\n' "$FAKE_LINEAR_ISSUES" ;;
+      *) printf '%s\\n' "$FAKE_LINEAR_ISSUES_2" ;;
     esac ;;
   *) echo '{}' ;;
 esac
 `
-    const dir = mkdtempSync(join(tmpdir(), 'bro-linear-'))
-    const log = join(dir, 'curl.log')
-    writeFileSync(log, '')
-    writeFileSync(join(dir, 'curl'), cursorScript)
-    chmodSync(join(dir, 'curl'), 0o755)
-    const prevPath = process.env.PATH
-    process.env.PATH = `${dir}:${prevPath}`
-    const all: Record<string, string> = {
-      LINEAR_API_KEY: `lin_api_test_${++keySeq}`,
-      ...ENV_DEFAULTS,
-      FAKE_LINEAR_ISSUES: JSON.stringify({
-        data: {
-          team: {
-            issues: {
-              nodes: [node({ ident: 'ENG-1' })],
-              pageInfo: { hasNextPage: true, endCursor: 'cur2' },
+    withCurl(
+      cursorScript,
+      {
+        FAKE_LINEAR_ISSUES: JSON.stringify({
+          data: {
+            team: {
+              issues: {
+                nodes: [node({ ident: 'ENG-1' })],
+                pageInfo: { hasNextPage: true, endCursor: 'cur2' },
+              },
             },
           },
-        },
-      }),
-      FAKE_LINEAR_ISSUES_2: issuesPage([node({ ident: 'ENG-2' })]),
-    }
-    const prevEnv = Object.fromEntries(Object.keys(all).map((k) => [k, process.env[k]]))
-    Object.assign(process.env, { FAKE_CURL_LOG: log, ...all })
-    try {
-      assert.deepEqual(
-        linearTasks(dir).list().map((r) => r.id),
-        ['ENG-1', 'ENG-2']
-      )
-      assert.match(callsMatching(log, /BroIssues/)[1]!, /"cursor":"cur2"/)
-    } finally {
-      process.env.PATH = prevPath
-      for (const [k, v] of Object.entries(prevEnv)) {
-        if (v === undefined) delete process.env[k]
-        else process.env[k] = v
+        }),
+        FAKE_LINEAR_ISSUES_2: issuesPage([node({ ident: 'ENG-2' })]),
+      },
+      (log, dir) => {
+        assert.deepEqual(
+          linearTasks(dir).list().map((r) => r.id),
+          ['ENG-1', 'ENG-2']
+        )
+        assert.match(callsMatching(log, /BroIssues/)[1]!, /"cursor":"cur2"/)
       }
-      delete process.env.FAKE_CURL_LOG
-      rmSync(dir, { recursive: true, force: true })
-    }
+    )
+  })
+
+  test('LINEAR_TEAM resolves past the first teams page', () => {
+    const script = `#!/bin/sh
+IFS= read -r body
+printf '%s\\n' "$body" >> "$FAKE_CURL_LOG"
+case "$body" in
+  *BroTeams*)
+    case "$body" in
+      *'"cursor":null'*) printf '%s\\n' '{"data":{"teams":{"nodes":[{"id":"t1","key":"ENG"}],"pageInfo":{"hasNextPage":true,"endCursor":"c2"}}}}' ;;
+      *) printf '%s\\n' '{"data":{"teams":{"nodes":[{"id":"t2","key":"WDG"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}' ;;
+    esac ;;
+  *BroIssues*) printf '%s\\n' "$FAKE_LINEAR_ISSUES" ;;
+  *) echo '{}' ;;
+esac
+`
+    withCurl(
+      script,
+      {
+        LINEAR_TEAM: 'wdg',
+        FAKE_LINEAR_ISSUES: issuesPage([node({ ident: 'WDG-1' })]),
+      },
+      (_log, dir) => {
+        assert.deepEqual(
+          linearTasks(dir).list().map((r) => r.id),
+          ['WDG-1']
+        )
+      }
+    )
+  })
+
+  test('an assignee past the first users page still resolves', () => {
+    const script = `#!/bin/sh
+IFS= read -r body
+printf '%s\\n' "$body" >> "$FAKE_CURL_LOG"
+case "$body" in
+  *BroUsers*)
+    case "$body" in
+      *'"cursor":null'*) printf '%s\\n' '{"data":{"users":{"nodes":[{"id":"u-a","displayName":"alice"}],"pageInfo":{"hasNextPage":true,"endCursor":"c2"}}}}' ;;
+      *) printf '%s\\n' '{"data":{"users":{"nodes":[{"id":"u-b","displayName":"bob"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}' ;;
+    esac ;;
+  *BroIssueUpdate*) echo '{"data":{"issueUpdate":{"success":true}}}' ;;
+  *) echo '{}' ;;
+esac
+`
+    withCurl(script, {}, (log, dir) => {
+      linearTasks(dir).update('ENG-1', { assignee: 'bob' })
+      assert.match(callsMatching(log, /BroIssueUpdate/)[0]!, /"assigneeId":"u-b"/)
+    })
+  })
+
+  test('an archived blocker or sub-issue does not hold the row blocked', () => {
+    withLinear(
+      {
+        FAKE_LINEAR_ISSUES: issuesPage([
+          node({ ident: 'ENG-1', blockedBy: [['ENG-9', 'started', '2026-01-05T00:00:00Z']] }),
+          node({ ident: 'ENG-2', children: [['ENG-7', 'started', '2026-01-04T00:00:00Z']] }),
+          node({ ident: 'ENG-3', blockedBy: [['ENG-9', 'started']] }),
+        ]),
+      },
+      (_log, dir) => {
+        const status = new Map(linearTasks(dir).list().map((r) => [r.id, r.status]))
+        assert.equal(status.get('ENG-1'), 'open')
+        assert.equal(status.get('ENG-2'), 'open')
+        assert.equal(status.get('ENG-3'), 'blocked')
+      }
+    )
   })
 })
 

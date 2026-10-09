@@ -29,7 +29,17 @@
 import type { TaskFilter, TaskInput, TaskRow, TaskStore, TaskStoreAsync } from '@broject/core'
 import { bodyMeta, stripMeta, withMeta } from '@broject/core'
 import type { FetchFn } from './api.ts'
-import { gql, gqlAsync, team, teamAsync, teamMeta, users, viewer, viewerAsync } from './api.ts'
+import {
+  gql,
+  gqlAsync,
+  nextCursor,
+  team,
+  teamAsync,
+  teamMeta,
+  users,
+  viewer,
+  viewerAsync,
+} from './api.ts'
 
 const BLOCKED_LABEL = 'blocked'
 const DEFAULT_PRIORITY = 2
@@ -47,6 +57,7 @@ interface StateRef {
 interface RelIssue {
   identifier?: string
   state?: { type?: string } | null
+  archivedAt?: string | null
 }
 
 interface Relation {
@@ -85,9 +96,9 @@ const NODE_FIELDS = `
   labels(first: 50) { nodes { id name } }
   parent { id identifier }
   team { id key }
-  children(first: 50) { nodes { identifier state { type } } }
-  relations(first: 25) { nodes { type relatedIssue { identifier state { type } } } }
-  inverseRelations(first: 25) { nodes { type issue { identifier state { type } } } }
+  children(first: 50) { nodes { identifier state { type } archivedAt } }
+  relations(first: 25) { nodes { type relatedIssue { identifier state { type } archivedAt } } }
+  inverseRelations(first: 25) { nodes { type issue { identifier state { type } archivedAt } } }
 `
 
 // --- row derivation -----------------------------------------------------------
@@ -97,8 +108,11 @@ const TERMINAL = new Set(['completed', 'canceled'])
 const labelsOf = (n: IssueNode): string[] => (n.labels?.nodes ?? []).map((l) => l.name)
 const stateType = (n: IssueNode): string => n.state?.type ?? ''
 const isTerminal = (n: IssueNode): boolean => TERMINAL.has(stateType(n)) || n.archivedAt != null
+/** A counterpart counts as open only while live — an archived blocker
+ *  or sub-issue keeps its workflow state but is dead work, and must not
+ *  hold the parent out of `ready` forever. */
 const relOpen = (r: RelIssue | null | undefined): boolean =>
-  r != null && !TERMINAL.has(r.state?.type ?? '')
+  r != null && r.archivedAt == null && !TERMINAL.has(r.state?.type ?? '')
 
 /** An open issue is blocked by an unresolved blocker relation, an open
  *  sub-issue, triage, or the manual label — same rule as github-issues
@@ -298,8 +312,7 @@ function queryIssuesSync(filter: Record<string, unknown> | undefined, limit: num
     if (out.length >= limit) {
       break
     }
-    const pi = conn?.pageInfo
-    cursor = pi?.hasNextPage === true && pi.endCursor ? pi.endCursor : undefined
+    cursor = nextCursor(conn?.pageInfo)
     if (cursor === undefined) {
       break
     }
@@ -326,8 +339,7 @@ async function queryIssuesAsync(
     if (out.length >= limit) {
       break
     }
-    const pi = conn?.pageInfo
-    cursor = pi?.hasNextPage === true && pi.endCursor ? pi.endCursor : undefined
+    cursor = nextCursor(conn?.pageInfo)
     if (cursor === undefined) {
       break
     }
@@ -600,6 +612,11 @@ function claimSync(ref: string): void {
   }
   if (isTerminal(n)) {
     throw new Error(`linear tasks: ${n.identifier} is ${stateType(n)} — only open issues are claimable`)
+  }
+  // triage is Linear's "not yet approved" — our own status mapping calls
+  // it blocked, so claiming one would mint work no one approved
+  if (stateType(n) === 'triage') {
+    throw new Error(`linear tasks: ${n.identifier} is in triage — unapproved issues are not claimable`)
   }
   if (n.assignee != null) {
     throw new Error(`linear tasks: ${n.identifier} already claimed by ${display(n.assignee)}`)
