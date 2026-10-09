@@ -129,6 +129,10 @@ describe('prompts', () => {
     assert.ok(checkpoint !== -1, 'checkpoint rule present')
     assert.ok(verify !== -1, 'verify rule present')
     assert.ok(checkpoint < verify)
+    // fresh loop/<id> branches have no upstream — the checkpoint names
+    // the explicit first-push form so `git push` can't no-op under
+    // push.default=simple (codeant-ai review on #392)
+    assert.match(p, /git push -u origin HEAD/)
     // the PR step keeps its own push so post-verify fixes reach the branch
     assert.match(p, /- Push, then `gh pr create`/)
   })

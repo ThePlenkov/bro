@@ -47,8 +47,9 @@ ${body}# Rules
 - Implement the task on the current branch. Follow the repo's AGENTS.md
   conventions — they are the contract.
 - Checkpoint BEFORE deep verification: as soon as the implementation
-  lands, commit with a conventional message and push the branch — an
-  end_turn or timeout must never orphan unpushed work. Verification
+  lands, commit with a conventional message and push — the branch has
+  no upstream, so the first push is \`git push -u origin HEAD\`. An
+  end_turn or timeout must never orphan unpushed work; verification
   fixes ride as follow-up commits on the same branch.
 - Verify like CI before opening the PR — run the repo's real test command.
 - Push, then ${prLine}

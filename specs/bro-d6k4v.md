@@ -22,7 +22,10 @@ expensive step:
   before deep verification** — as soon as the implementation lands,
   commit with a conventional message and push the branch; an end_turn or
   timeout must never orphan unpushed work. Verification fixes ride as
-  follow-up commits on the same branch.
+  follow-up commits on the same branch. The rule names the explicit
+  `git push -u origin HEAD` — a fresh `loop/<id>` worktree branch has no
+  upstream, so a bare `git push` fails under `push.default=simple`
+  exactly when the timeout is looming (codeant-ai, PR #392).
 - The PR step (`gh pr create`, or `--base <member>` for stack members)
   stays last among the work rules and keeps its own `push, then`
   ordering, so post-verify fixes reach the branch before the PR opens.
