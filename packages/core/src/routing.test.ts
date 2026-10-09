@@ -7,6 +7,7 @@ import {
   fleetRouter,
   fleetRouting,
   resolveStepClass,
+  routeStepClass,
   wallText,
   type RoutingTable,
 } from './routing.ts'
@@ -139,6 +140,45 @@ describe('resolveStepClass', () => {
     assert.equal(resolveStepClass(routing, providers, { priority: 1 }).onWall, 'park')
     assert.equal(resolveStepClass(routing, providers, { priority: 2 }).onWall, 'fallthrough')
     assert.equal(resolveStepClass(routing, providers, {}).onWall, 'fallthrough')
+  })
+})
+
+describe('routeStepClass', () => {
+  test('no routing table → undefined — the unrouted lane stays untouched', () => {
+    assert.equal(routeStepClass(undefined, providers, undefined, 'fx-1'), undefined)
+    assert.equal(routeStepClass({ routing: {} }, providers, undefined, 'fx-1'), undefined)
+  })
+
+  test('pre-read info answers label + priority without a beads store', () => {
+    // the loop hands its `bd ready` row in — class + onWall come from
+    // the row itself, no `bd show` runs
+    const r = routeStepClass({ routing }, providers, undefined, 'fx-1', undefined, {
+      label: 'sweep',
+      priority: 1,
+    })
+    assert.equal(r?.class, 'sweep')
+    assert.equal(r?.provider, 'kilo-free')
+    assert.equal(r?.onWall, 'park')
+    // priority rides the row's onWall default even on the default class
+    const d = routeStepClass({ routing }, providers, undefined, 'fx-1', undefined, {
+      priority: 1,
+    })
+    assert.equal(d?.class, 'default')
+    assert.equal(d?.onWall, 'park')
+  })
+
+  test('the explicit class wins over a pre-read label', () => {
+    const r = routeStepClass({ routing }, providers, undefined, 'fx-1', 'critical', {
+      label: 'sweep',
+    })
+    assert.equal(r?.class, 'critical')
+  })
+
+  test('an unknown explicit class is a config error even without a store', () => {
+    assert.throws(
+      () => routeStepClass({ routing }, providers, undefined, 'fx-1', 'bogus', {}),
+      /fleet\.routing has no class "bogus"/
+    )
   })
 })
 

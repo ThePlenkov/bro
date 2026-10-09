@@ -17,6 +17,7 @@ planned group work is [bro flow convoy](/docs/commands/convoy).
 | `bro flow loop --agent '<template>'` | Override the configured agent — a value naming a configured `providers.<name>` spawns through the registry instead |
 | `bro flow loop --provider <name>` | Pick a [provider](/docs/commands/providers) explicitly |
 | `bro flow loop --profile <name>` | Apply a `fleet.profiles` preset |
+| `bro flow loop --class <name>` | Pin every claimed bead to one `fleet.routing` class |
 | `bro flow loop --model <m>` / `--auto-approve` | Model override / acp permission policy for the provider lane |
 | `bro flow loop --label a,b` | Only claim beads carrying one of these labels |
 | `bro flow loop --batch N` | Clump up to N same-affinity beads per claim — one worktree, one worker, one PR (per-bead commits name their id; uncovered members re-queue on merge) |
@@ -35,3 +36,10 @@ silence past `loop.stallMin` as an advisory for the orchestrator, never
 a kill. `mergeTimeoutMin`, `stallMin`, `fixRounds`, and `maxItems`
 control the run; `--interval` controls gate polling. See
 [`loop` config](/docs/configuration#loop).
+
+With `fleet.routing` declared, each claimed bead resolves its class —
+the `class:<name>` label, the `--class` pin, or `default` — and the
+class's chain head supplies the provider, exactly like `bro agents up`.
+Flag picks (`--provider`, `--agent <provider>`, `--profile`) still pin
+one provider for the whole run; a raw template `--agent` bypasses
+routing entirely.
