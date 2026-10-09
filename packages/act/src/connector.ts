@@ -160,11 +160,13 @@ function watchLines(dir: string): string[] {
       // heartbeat belongs to the supervisor's own restart story —
       // pointing a dead drive's marker at rearm would report a recovery
       // that never happens
+      const restart =
+        kind === 'loop' ? 'bro loop' : `bro ${kind} --every`
       out.push(
         `stale act watch on ${watch.link}${mode} — ` +
           (kind === 'wait'
             ? 'the watching session died; `bro act rearm` resurrects it, '
-            : `the '${kind}' supervisor died — restart it (\`bro ${kind} --every\`); `) +
+            : `the '${kind}' supervisor died — restart it (\`${restart}\`); `) +
           `\`bro act status --pr ${watch.pr}\` inspects`
       )
     }
