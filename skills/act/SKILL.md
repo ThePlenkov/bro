@@ -125,9 +125,12 @@ default store, so standard installs already have it).
   not a notification to idle past: `bro act threads <PR>`, then
   fix/reply/defer/resolve each named blocker, push, and re-arm
   `bro act wait --merge`. A BLOCKED event surfacing after the arming
-  turn ended is live work for the next turn, not stale mail. Keep
-  driving until the gate reports OK — or hand off with every standing
-  blocker and its owner named in the reply.
+  turn ended is live work for the next turn, not stale mail — the
+  settle itself delivers it: a keyed `act`/`block` mailbox drop (drained
+  at the next postTool or session start) plus a `<pr>-blocked-*.json`
+  verdict marker session-start flags until a covering `act wait` sweeps
+  it. Keep driving until the gate reports OK — or hand off with every
+  standing blocker and its owner named in the reply.
   The stop gate enforces this: an armed session ending with an open,
   unwatched current-branch PR is blocked once and pointed at the detached
   `act wait` form — a running `bro drive --every` counts as coverage via

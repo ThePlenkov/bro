@@ -7,6 +7,11 @@
  * the stale promise — the act connector surfaces it in session-start
  * lines and retires it so it flags exactly once.
  *
+ * A wait that settles BLOCKED leaves a second, separate record — a
+ * `<pr>-blocked-*.json` verdict marker carrying the named blockers —
+ * so the settle rehydrates as a finding at session start even when
+ * nobody read the watching shell's exit (bro-q4iq0).
+ *
  * Fail-open throughout: no git dir, unwritable dir, unreadable marker —
  * the wait still runs, the hook just has nothing to report.
  */
@@ -40,6 +45,13 @@ export interface PendingWatch {
    *  containing the watcher's cwd — replaying it from another checkout
    *  would tear down the wrong worktree, so rearm needs the original. */
   workdir?: string
+  /** A settled wait's verdict — 'blocked' markers are findings, not
+   *  promises: they never count as live coverage and never rearm; a
+   *  session-start report flags the blockers until a covering watch or
+   *  the TTL removes the record. */
+  verdict?: 'blocked'
+  /** The gate's blocker names at settle — the finding's payload. */
+  blockers?: string[]
   startedAt: number
   timeoutMin: number
 }
@@ -217,6 +229,52 @@ export function watchHeartbeat(
   }
 }
 
+/** Drop the settled wait's verdict as a marker — the finding half of a
+ *  blocked settle (bro-q4iq0). The filename's `blocked` kind segment
+ *  keeps it out of deadWatchPlan (a settled wait is not a promise to
+ *  resurrect — rewatching a blocked gate re-settles instantly), and the
+ *  record's merge:false means ANY live same-PR watch covers it: the
+ *  re-arm IS the answer to the verdict, so covering hides it and the
+ *  covering watch's watchEnd sweeps it. */
+export function watchVerdict(
+  dir: string,
+  w: { pr: number; link: string; timeoutMin: number },
+  blockers: string[]
+): string | null {
+  const wd = watchesDir(dir)
+  if (!wd) {
+    return null
+  }
+  try {
+    mkdirSync(wd, { recursive: true })
+    const path = join(
+      wd,
+      `${w.pr}-blocked-${process.pid}-${randomBytes(6).toString('hex')}.json`
+    )
+    const tmp = `${path}.tmp`
+    writeFileSync(
+      tmp,
+      JSON.stringify(
+        {
+          ...w,
+          merge: false,
+          verdict: 'blocked',
+          blockers,
+          pid: process.pid,
+          pidStart: procStat(process.pid)?.start ?? undefined,
+          startedAt: Date.now(),
+        },
+        null,
+        2
+      )
+    )
+    renameSync(tmp, path)
+    return path
+  } catch {
+    return null
+  }
+}
+
 /** Is a live watch covering `pr`? Tri-state for gate decisions:
  *  `true`/`false` are verdicts; `null` means the store could not be
  *  read (no git dir, EACCES, ...) — callers that block on "unwatched"
@@ -261,6 +319,9 @@ function readMarker(file: string): PendingWatch | null {
       typeof w.merge === 'boolean' &&
       (w.cleanup === undefined || typeof w.cleanup === 'boolean') &&
       (w.workdir === undefined || typeof w.workdir === 'string') &&
+      (w.verdict === undefined || w.verdict === 'blocked') &&
+      (w.blockers === undefined ||
+        (Array.isArray(w.blockers) && w.blockers.every((b) => typeof b === 'string'))) &&
       // an Infinity/NaN startedAt poisons the TTL check — Date.now() -
       // Infinity is never > ttl, so the marker would never be pruned
       typeof w.startedAt === 'number' &&
@@ -318,8 +379,15 @@ function listWatchesIn(wd: string): ListedWatch[] {
       continue
     }
     // a retired marker is stale by definition — pid reuse since the
-    // claim must not resurrect it into a live watch
-    out.push({ watch: w, file, alive: !retired && pidAlive(w.pid, w.pidStart), reported: retired })
+    // claim must not resurrect it into a live watch. A verdict marker
+    // never reads live either — its pid is the exited wait's own, and
+    // a finding must not count as coverage
+    out.push({
+      watch: w,
+      file,
+      alive: !retired && w.verdict === undefined && pidAlive(w.pid, w.pidStart),
+      reported: retired,
+    })
   }
   return out
 }
@@ -348,7 +416,8 @@ export function listWatches(dir: string): ListedWatch[] {
  *  `<pr>-<kind>-<pid>.json` — a kind word ('drive') where the pid would
  *  sit. The `.retired` suffix a report claim adds is stripped first, so
  *  a flagged-but-still-dead marker classifies the same. Returns 'wait'
- *  or the recorded supervisor kind. */
+ *  or the recorded kind — a 'blocked' verdict classifies like a
+ *  supervisor heartbeat: it is a finding, not a promise to resurrect. */
 export function watchMarkerKind(file: string, w: PendingWatch): string {
   const second = basename(file)
     .replace(/\.json(\.retired)?$/, '')

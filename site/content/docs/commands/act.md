@@ -115,7 +115,10 @@ form (a running `bro drive --every` counts as coverage via its per-PR
 heartbeat markers). A `timed_out` watcher retires its marker on the way
 out — start a fresh `act wait`; a watcher that *died* leaves a dead
 marker, the session-start nudge names it, and `bro act rearm` puts the
-watch back up. `bro act status` prints `watch=` so coverage is visible
+watch back up. A watcher that *settled BLOCKED* leaves a verdict marker
+too — session-start flags the named blockers — and drops a keyed
+mailbox event, so the finding reaches a session that never saw the
+exit. `bro act status` prints `watch=` so coverage is visible
 before you stop.
 
 **Merge through `bro act merge`, never `gh pr merge`** — the gate is

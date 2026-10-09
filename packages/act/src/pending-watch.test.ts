@@ -22,6 +22,7 @@ import {
   watchHeartbeat,
   watchMarkerKind,
   watchRetire,
+  watchVerdict,
   type PendingWatch,
 } from './pending-watch.ts'
 
@@ -382,6 +383,87 @@ describe('pending-watch markers', () => {
     const listed = listWatches(dir)
     assert.equal(listed.length, 2)
     assert.ok(listed.some((l) => !l.alive && l.watch.merge))
+  })
+})
+
+describe('watchVerdict — a settled blocked wait is a finding', () => {
+  test('writes a marker that never reads live — its pid is the exited wait', () => {
+    const dir = repo()
+    const path = watchVerdict(
+      dir,
+      { pr: 42, link: base.link, timeoutMin: 45 },
+      ['3 unresolved review thread(s)', 'merge conflicts']
+    )
+    assert.ok(path)
+    // the writer is still alive yet the verdict must not count as
+    // coverage — a finding is not a promise
+    const listed = listWatches(dir)
+    assert.equal(listed.length, 1)
+    assert.equal(listed[0]!.alive, false)
+    assert.equal(listed[0]!.watch.verdict, 'blocked')
+    assert.deepEqual(listed[0]!.watch.blockers, [
+      '3 unresolved review thread(s)',
+      'merge conflicts',
+    ])
+    // the kind segment keeps it out of rearm — a settled wait is not a
+    // promise to resurrect
+    assert.equal(watchMarkerKind(listed[0]!.file, listed[0]!.watch), 'blocked')
+  })
+
+  test('a verdict marker is never a rearm plan', async () => {
+    const dir = repo()
+    watchVerdict(dir, { pr: 7, link: base.link, timeoutMin: 45 }, ['x'])
+    assert.deepEqual(deadWatchPlan(dir), [])
+    const res = await rearmWatches({ dir, isOpen: async () => true, respawn: () => 1 })
+    assert.deepEqual(res, { rearmed: [], settled: [], kept: [] })
+  })
+
+  test('a live watch on the same PR covers the verdict — the re-arm IS the answer', () => {
+    const dir = repo()
+    const verdict = watchVerdict(dir, { pr: 42, link: base.link, timeoutMin: 45 }, ['x'])
+    assert.ok(verdict)
+    // merge:false on the verdict means even a watch-only re-arm covers it
+    const live = watchBegin(dir, { ...base, merge: false })
+    assert.ok(live)
+    const listed = listWatches(dir)
+    assert.equal(listed.length, 1)
+    assert.equal(listed[0]!.file, live)
+    // hidden, not deleted — the covering watch's end sweeps it
+    assert.equal(existsSync(verdict), true)
+    watchEnd(live)
+    assert.equal(existsSync(verdict), false)
+  })
+
+  test('a verdict on another PR stays flaggable', () => {
+    const dir = repo()
+    watchVerdict(dir, { pr: 9, link: '[#9](x)', timeoutMin: 45 }, ['x'])
+    const live = watchBegin(dir, { ...base, pr: 42 })
+    assert.ok(live)
+    const listed = listWatches(dir)
+    assert.equal(listed.length, 2)
+    const v = listed.find((l) => l.watch.verdict === 'blocked')
+    assert.ok(v)
+    assert.equal(v.alive, false)
+  })
+
+  test('a marker with a bogus verdict value is residue, not listed', () => {
+    const dir = repo()
+    const path = watchVerdict(dir, { pr: 42, link: base.link, timeoutMin: 45 }, ['x'])
+    assert.ok(path)
+    const w = JSON.parse(readFileSync(path!, 'utf8')) as Record<string, unknown>
+    w.verdict = 'green'
+    writeFileSync(path!, JSON.stringify(w))
+    assert.equal(listWatches(dir).length, 0)
+    assert.equal(existsSync(path!), false)
+  })
+
+  test('watchEnd of the settling wait does not sweep another PR verdict', () => {
+    const dir = repo()
+    const verdict = watchVerdict(dir, { pr: 9, link: '[#9](x)', timeoutMin: 45 }, ['x'])
+    assert.ok(verdict)
+    const wait = watchBegin(dir, { ...base, pr: 42 })
+    watchEnd(wait)
+    assert.equal(existsSync(verdict), true)
   })
 })
 

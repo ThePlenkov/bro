@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import {
   ensureAuth,
+  facade,
   gitTry,
   reviewHost,
   taskStore,
@@ -36,6 +37,7 @@ import {
   rearmWatches,
   releaseMergeSlot,
   waitForGate,
+  watchVerdict,
   type ActPlan,
   type ActThreadVerdict,
   type ExitGate,
@@ -237,6 +239,31 @@ async function cmdWait(argv: string[]): Promise<void> {
     }
   }
   if (res.timedOut || !res.gate.ok || res.state.state !== 'OPEN') {
+    // a settled blocked verdict is a finding, not just an exit code —
+    // a detached or turn-dead watcher leaves nobody reading it, so it
+    // lands where rehydrate looks: a verdict marker session-start flags
+    // plus a keyed mailbox drop live sessions drain mid-turn (bro-q4iq0)
+    if (!res.timedOut && !res.gate.ok) {
+      const link = rev.prLink(t.repo, t.pr)
+      watchVerdict(process.cwd(), { pr: t.pr, link, timeoutMin: timeout }, res.gate.blockers)
+      try {
+        await facade('events', { dir: process.cwd() }, { prefer: loadBroConfig().connectors }).publish(
+          {
+            topic: 'act',
+            kind: 'block',
+            key: `act-wait-${t.pr}`,
+            source: 'act-wait',
+            ref: res.state.url,
+            payload:
+              `act wait on ${link} settled BLOCKED — ${res.gate.blockers.join('; ')} — ` +
+              `\`bro act threads ${t.pr}\` lists them`,
+          }
+        )
+      } catch {
+        // fail-open — the verdict record must never turn the exit-code
+        // contract into a failure
+      }
+    }
     process.exitCode = res.timedOut || !res.gate.ok ? 1 : 0
     return
   }
