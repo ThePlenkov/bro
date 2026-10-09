@@ -296,17 +296,29 @@ describe('bro loop e2e', () => {
   })
 })
 
+/** Fixture presets for the provider-lane tests — `agent: 'false'` in
+ *  loopCfg proves the provider's command ran, not the template. */
+const SHIP_IT = [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }]
+
+const cliLane = (loopCfg: Record<string, unknown> = {}): Fixture =>
+  loopFixture(SHIP_IT, { agent: 'false', ...loopCfg }, 'land', (host) => ({
+    providers: { fakecli: { type: 'cli', command: `node ${host.agent}` } },
+  }))
+
+const acpLane = (
+  loopCfg: Record<string, unknown>,
+  devin: Record<string, unknown> = {},
+  extra: Record<string, unknown> = {}
+): Fixture =>
+  loopFixture(SHIP_IT, loopCfg, 'land', () => ({
+    providers: { devin: { type: 'acp', command: 'devin acp', ...devin } },
+    ...extra,
+  }))
+
 describe('bro loop provider lane', () => {
   test('loop.provider config routes the spawn — loop.agent is not consulted', () => {
     // loop.agent would fail (`false`) — the provider's command must win
-    const f = loopFixture(
-      [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }],
-      { provider: 'fakecli', agent: 'false' },
-      'land',
-      (host) => ({
-        providers: { fakecli: { type: 'cli', command: `node ${host.agent}` } },
-      })
-    )
+    const f = cliLane({ provider: 'fakecli' })
     inside(f.main, f.root, () => {
       const r = f.run()
       assert.match(r.stdout, /loop: fx-a landed/)
@@ -316,14 +328,7 @@ describe('bro loop provider lane', () => {
   })
 
   test('--provider <name> routes the spawn through the registry', () => {
-    const f = loopFixture(
-      [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }],
-      { agent: 'false' },
-      'land',
-      (host) => ({
-        providers: { fakecli: { type: 'cli', command: `node ${host.agent}` } },
-      })
-    )
+    const f = cliLane()
     inside(f.main, f.root, () => {
       const r = f.run(['--provider', 'fakecli'])
       assert.match(r.stdout, /loop: fx-a landed/)
@@ -332,14 +337,7 @@ describe('bro loop provider lane', () => {
   })
 
   test('--agent <provider-name> names the provider, not a template', () => {
-    const f = loopFixture(
-      [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }],
-      { agent: 'false' },
-      'land',
-      (host) => ({
-        providers: { fakecli: { type: 'cli', command: `node ${host.agent}` } },
-      })
-    )
+    const f = cliLane()
     inside(f.main, f.root, () => {
       const r = f.run(['--agent', 'fakecli'])
       assert.match(r.stdout, /loop: fx-a landed/)
@@ -347,21 +345,7 @@ describe('bro loop provider lane', () => {
   })
 
   test('acp provider spawns the headless acp-worker argv — no shell template', () => {
-    const f = loopFixture(
-      [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }],
-      { agent: 'false' },
-      'land',
-      () => ({
-        providers: {
-          devin: {
-            type: 'acp',
-            command: 'devin acp',
-            model: 'swe-2',
-            autoApprove: true,
-          },
-        },
-      })
-    )
+    const f = acpLane({ agent: 'false' }, { model: 'swe-2', autoApprove: true })
     installFakeBro(f.root)
     inside(f.main, f.root, () => {
       const r = f.run(['--agent', 'devin'])
@@ -396,14 +380,10 @@ describe('bro loop provider lane', () => {
   })
 
   test('--profile <name> fills provider/model/autoApprove piecewise', () => {
-    const f = loopFixture(
-      [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }],
+    const f = acpLane(
       { agent: 'false' },
-      'land',
-      () => ({
-        providers: { devin: { type: 'acp', command: 'devin acp' } },
-        fleet: { profiles: { cheap: { provider: 'devin', model: 'swe-1.5', autoApprove: true } } },
-      })
+      {},
+      { fleet: { profiles: { cheap: { provider: 'devin', model: 'swe-1.5', autoApprove: true } } } }
     )
     installFakeBro(f.root)
     inside(f.main, f.root, () => {
@@ -418,12 +398,9 @@ describe('bro loop provider lane', () => {
   })
 
   test('a template --agent overrides a configured loop.provider (escape hatch)', () => {
-    const f = loopFixture(
-      [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }],
-      { provider: 'bad' },
-      'land',
-      () => ({ providers: { bad: { type: 'cli', command: 'false' } } })
-    )
+    const f = loopFixture(SHIP_IT, { provider: 'bad' }, 'land', () => ({
+      providers: { bad: { type: 'cli', command: 'false' } },
+    }))
     inside(f.main, f.root, () => {
       const r = f.run(['--agent', `node ${f.agent}`])
       assert.match(r.stderr, /bypasses the configured provider lane/)
@@ -432,7 +409,7 @@ describe('bro loop provider lane', () => {
   })
 
   test('an unknown --provider fails before any bead is claimed', () => {
-    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }])
+    const f = loopFixture(SHIP_IT)
     inside(f.main, f.root, () => {
       const r = f.run(['--provider', 'nope'])
       assert.equal(r.code, 2)
@@ -476,12 +453,7 @@ describe('bro loop provider lane', () => {
   })
 
   test('--dry-run renders the resolved provider + acp-worker argv', () => {
-    const f = loopFixture(
-      [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }],
-      {},
-      'land',
-      () => ({ providers: { devin: { type: 'acp', command: 'devin acp' } } })
-    )
+    const f = acpLane({})
     inside(f.main, f.root, () => {
       const r = f.run(['--agent', 'devin', '--dry-run'])
       assert.match(r.stdout, /would claim fx-a/)
