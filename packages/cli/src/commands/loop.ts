@@ -1187,7 +1187,8 @@ async function runFixRound(
   ctx: Ctx,
   m: GateMember,
   pr: number,
-  round: number
+  round: number,
+  lane: LoopLane
 ): Promise<void> {
   ctx.stage = `fix round ${round} pr=${pr}`
   const threads = (await ctx.rev.reviewThreads({ repo: ctx.repo, pr }))
@@ -1206,7 +1207,6 @@ async function runFixRound(
   const prompt = buildFixPrompt(m.beads, pr, threads)
   writePrompt(m.item, prompt)
   say(ctx, `loop: ${prRef(ctx, pr)} has open threads — fix round ${round}`)
-  const lane = await resolveBeadLane(ctx, m.beads[0]!)
   if (ctx.agents !== undefined) {
     await spawnWorker(ctx, m, prompt, lane)
     return
@@ -1435,6 +1435,12 @@ interface GateMember {
   /** The in-flight registry worker — set at push and again on every
    *  fix/rebase respawn; cleared when its exit record lands. */
   worker?: WorkerRef
+  /** The lane resolved at push — fix/rebase respawns reuse it. The
+   *  member's class was settled before its worktree existed (config
+   *  and bead labels are read once, never refreshed mid-run), so
+   *  re-resolving in a round can only re-hit the same route error —
+   *  silently burning a round per poll — or drift the lane mid-tenure. */
+  lane: LoopLane
   /** watchBegin marker path — armed for the member's whole stack
    *  tenure: a dead loop leaves a dead marker `act rearm` resurrects
    *  as `act wait --merge --cleanup` in the member's worktree. */
@@ -1617,6 +1623,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     const member: GateMember = {
       beads,
       item,
+      lane,
       marker: null,
       since: Date.now(),
       rounds: 0,
@@ -1684,6 +1691,7 @@ function armMember(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number): Ga
     beads,
     item,
     pr,
+    lane,
     marker,
     since: Date.now(),
     rounds: 0,
@@ -1994,7 +2002,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       return leave(m, 'parked')
     case 'fix': {
       gateRow('blocked', { action: 'fix', round: m.rounds + 1, blockers: snap.blockers })
-      const verdict = await respawnRound(ctx, m, () => runFixRound(ctx, m, pr, m.rounds))
+      const verdict = await respawnRound(ctx, m, () => runFixRound(ctx, m, pr, m.rounds, m.lane))
       // the snapshot that spawned the round must not be re-served —
       // a synchronous round (or a skipped spawn on already-resolved
       // threads) re-polls immediately and would re-trigger 'fix' on
@@ -2004,7 +2012,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     }
     case 'rebase': {
       gateRow('blocked', { action: 'rebase', round: m.rounds + 1 })
-      const verdict = await respawnRound(ctx, m, () => runRebaseRound(ctx, m, pr, m.rounds))
+      const verdict = await respawnRound(ctx, m, () => runRebaseRound(ctx, m, pr, m.rounds, m.lane))
       ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
       return verdict
     }
@@ -2101,7 +2109,8 @@ async function runRebaseRound(
   ctx: Ctx,
   m: GateMember,
   pr: number,
-  round: number
+  round: number,
+  lane: LoopLane
 ): Promise<void> {
   let base: string
   try {
@@ -2113,7 +2122,6 @@ async function runRebaseRound(
   const prompt = buildRebasePrompt(m.beads, pr, base)
   writePrompt(m.item, prompt)
   say(ctx, `loop: ${prRef(ctx, pr)} conflicts — rebase round ${round} onto ${base}`)
-  const lane = await resolveBeadLane(ctx, m.beads[0]!)
   if (ctx.agents !== undefined) {
     await spawnWorker(ctx, m, prompt, lane)
     return
