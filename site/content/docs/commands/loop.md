@@ -14,12 +14,19 @@ planned group work is [bro convoy](/docs/commands/convoy).
 | `bro loop` | Run until the queue is idle or gated |
 | `bro loop --max N` | Cap the number of beads in this run |
 | `bro loop --dry-run` | Print the next plan without changing state |
-| `bro loop --agent '<template>'` | Override the configured agent |
+| `bro loop --agent '<template>'` | Override the configured agent — a value naming a configured `providers.<name>` spawns through the registry instead |
+| `bro loop --provider <name>` | Pick a [provider](/docs/commands/providers) explicitly |
+| `bro loop --profile <name>` | Apply a `fleet.profiles` preset |
+| `bro loop --model <m>` / `--auto-approve` | Model override / acp permission policy for the provider lane |
 | `bro loop --label a,b` | Only claim beads carrying one of these labels |
 | `bro loop --stack <name>` | Put each claimed bead on a named [stack](/docs/commands/stack) |
 | `bro loop --json` | Emit the loop event stream as JSON |
 
-The configured `loop.agent` uses `{promptFile}` for the generated work
-order. `agentTimeoutMin`, `mergeTimeoutMin`, `fixRounds`, and `maxItems`
-control the run; `--interval` controls gate polling. See
+The agent resolves like `bro agents up`: a named provider runs its
+registry entry (`acp` providers spawn the headless `acp-worker`; `cli`
+providers substitute their command for the template), and a raw
+`loop.agent`/`--agent` template stays the escape hatch —
+`{promptFile}` expands to the generated work order. `agentTimeoutMin`,
+`mergeTimeoutMin`, `fixRounds`, and `maxItems` control the run;
+`--interval` controls gate polling. See
 [`loop` config](/docs/configuration#loop).

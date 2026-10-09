@@ -10,12 +10,18 @@
  *   bro loop --max 3            at most 3 beads
  *   bro loop --dry-run          print the first item's plan, change nothing
  *   bro loop --agent 'claude -p "$(cat {promptFile})"'
+ *   bro loop --agent kilo-cli   spawn through providers.kilo-cli (acp/cli)
  *
- * The agent contract: `{promptFile}` in `loop.agent` (bro.config) is
- * replaced with the work-order file path; without the placeholder the
- * path is appended as the last arg. Spawned in the worktree with
- * BRO_BEAD_ID / BRO_BEAD_TITLE / BRO_PROMPT_FILE in env. The agent's job
- * ends at an open PR — merging stays with the gate here.
+ * The agent contract: a `--agent` value that exactly names a configured
+ * `providers.<name>` (or `--provider`/`--profile`/`loop.provider`)
+ * resolves through the spawn facade — acp providers run `bro acp-worker`
+ * headless, cli providers substitute their command for the template.
+ * Any other `--agent` value is the raw shell template (the escape
+ * hatch): `{promptFile}` in `loop.agent` (bro.config) is replaced with
+ * the work-order file path; without the placeholder the path is appended
+ * as the last arg. Spawned in the worktree with BRO_BEAD_ID /
+ * BRO_BEAD_TITLE / BRO_PROMPT_FILE in env. The agent's job ends at an
+ * open PR — merging stays with the gate here.
  *
  * Human gates, epics, and molecule steps are never claimed (next's
  * rules). A bead whose agent fails without a PR is reopened with a
@@ -31,10 +37,12 @@ import {
   gitTry,
   LockTimeout,
   reviewHost,
+  SpawnError,
   stepParent,
   taskStore,
   withFileLock,
   type ReviewFacade,
+  type SpawnWorker,
 } from '@broject/core'
 import { checkHistory, evaluateExitGate, fetchPrActState, waitForGate } from '@broject/act'
 import {
@@ -45,6 +53,13 @@ import {
   type LoopConfig,
 } from '@broject/loop'
 import { loadBroConfig } from '../plugins.ts'
+import {
+  fleetProfileOf,
+  loadAgentEnv,
+  resolveSpawnProvider,
+  type AgentConnectorEnv,
+  type SpawnProviderPick,
+} from '../agent-connectors.ts'
 import { flag, positionals } from './args.ts'
 import { runActCommand } from './act.ts'
 import { runSyncCommand } from './sync.ts'
@@ -75,7 +90,11 @@ interface Ctx {
   repo: string
   root: string
   cfg: LoopConfig
+  /** The template `expandAgentCmd` runs — `loop.agent`/`--agent`, or a
+   *  cli provider's `command` when the provider lane resolved one. For an
+   *  acp (argv) worker this field is inert — the spawn never expands it. */
   agent: string
+  lane: LoopLane
   intervalS: number
   json: boolean
   /** Declared label scope — `bro loop --label debt,ui` only claims
@@ -99,7 +118,13 @@ const prRef = (ctx: Ctx, pr: number): string => ctx.rev.prLink(ctx.repo, pr)
 
 function usage(): never {
   console.error(`Usage: bro loop [--max N] [--dry-run] [--json] [--label a,b] [--stack NAME]
-  --agent '<cmd {promptFile}>'   agent template (config: loop.agent)
+  --agent '<cmd {promptFile}>'   agent template (config: loop.agent) —
+                                a value naming a configured providers.<name>
+                                spawns through the provider registry instead
+  --provider NAME                providers.<name> pick (acp → headless worker)
+  --profile NAME                 fleet.profiles.<name> preset
+  --model M                      model override for the provider lane
+  --auto-approve                 acp permission policy: allow, not deny
   --agent-timeout MIN            per-spawn budget (loop.agentTimeoutMin, 45)
   --merge-timeout MIN            gate budget per round (loop.mergeTimeoutMin, 45)
   --label a,b                    declared scope — only beads carrying one
@@ -166,7 +191,13 @@ export function resolveBeadsDir(root: string, warn?: (msg: string) => void): str
  *  bleed into the child's commits (bro-fzot). */
 function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
   const env = { ...process.env }
-  for (const k of ['BRO_AGENT', 'BRO_SESSION_ID', 'BRO_MOL_ID']) {
+  for (const k of [
+    'BRO_AGENT',
+    'BRO_AGENT_PROVIDER',
+    'BRO_AGENT_MODEL',
+    'BRO_SESSION_ID',
+    'BRO_MOL_ID',
+  ]) {
     delete env[k]
   }
   return {
@@ -177,16 +208,146 @@ function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
 }
 
 /** Commit-provenance pins for the loop's agent (bro-fzot) — the cli the
- *  configured command names, and the bead's molecule parent when the
- *  shared store can answer. */
+ *  effective command names (the acp worker's `cliName` on the argv lane),
+ *  the provider/model lane labels, and the bead's molecule parent when
+ *  the shared store can answer. */
 function provenancePins(ctx: Ctx, beadId: string): Record<string, string> {
-  const pins: Record<string, string> = { BRO_AGENT: commandCliName(ctx.agent) }
+  const w = ctx.lane.worker
+  const pins: Record<string, string> = {
+    BRO_AGENT: w?.kind === 'argv' ? (w.cliName ?? 'agent') : commandCliName(ctx.agent),
+  }
+  if (ctx.lane.provider !== undefined) {
+    pins.BRO_AGENT_PROVIDER = ctx.lane.provider
+  }
+  if (ctx.lane.model !== undefined) {
+    pins.BRO_AGENT_MODEL = ctx.lane.model
+  }
   const mol = ctx.beadsDir !== undefined ? stepParent(ctx.beadsDir, beadId) : undefined
   if (mol !== undefined) {
     pins.BRO_MOL_ID = mol
   }
   return pins
 }
+
+// --- the agent lane: provider registry or raw template (spec bro-c3no8) -------
+
+/** What a spawn runs — the provider-resolved worker when the provider
+ *  lane engaged, undefined for the raw `loop.agent`/`--agent` template. */
+export interface LoopLane {
+  worker?: SpawnWorker
+  /** Resolved provider name + model — provenance pins and reporting
+   *  (`bro agents up` prints the same pair). */
+  provider?: string
+  model?: string
+}
+
+/** Per-run lane picks — undefined means "not given" so config fields
+ *  still apply piecewise, mirroring the facade's merge order. */
+export interface LoopLaneSel {
+  agent?: string
+  provider?: string
+  profile?: string
+  model?: string
+  autoApprove?: boolean
+}
+
+/** Resolve which lane `bro loop` spawns through. A `--agent` value that
+ *  exactly names a configured `providers.<name>` IS a provider pick;
+ *  any other value is the escape-hatch template and wins the whole lane
+ *  (provider flags beside it are contradictory — SpawnError). The order
+ *  is the facade's own: explicit pick → fleet.profiles preset →
+ *  `loop.provider` → `agents.native.provider` → legacy template. A bad
+ *  name throws SpawnError — the caller exits before a bead is claimed. */
+export async function resolveLoopLane(
+  env: AgentConnectorEnv,
+  sel: LoopLaneSel,
+  cfg: LoopConfig
+): Promise<LoopLane> {
+  const agentIsProvider =
+    sel.agent !== undefined && Object.hasOwn(env.providers ?? {}, sel.agent)
+  if (agentIsProvider && sel.provider !== undefined && sel.provider !== sel.agent) {
+    throw new SpawnError(
+      `--agent '${sel.agent}' and --provider '${sel.provider}' name different providers`,
+      'input'
+    )
+  }
+  if (sel.agent !== undefined && !agentIsProvider) {
+    return templateEscape(sel, cfg)
+  }
+  const profileName = sel.profile ?? (cfg.profile !== '' ? cfg.profile : undefined)
+  const profile = profileName !== undefined ? fleetProfileOf(env, profileName) : undefined
+  const provider =
+    sel.provider ??
+    (agentIsProvider ? sel.agent : undefined) ??
+    profile?.provider ??
+    (cfg.provider !== '' ? cfg.provider : undefined)
+  const model = sel.model ?? profile?.model ?? (cfg.model !== '' ? cfg.model : undefined)
+  const autoApprove = sel.autoApprove ?? profile?.autoApprove
+  const pick = await resolveSpawnProvider(
+    env,
+    'native',
+    { provider, model, autoApprove },
+    sel.provider !== undefined || agentIsProvider
+      ? 'flag'
+      : profile?.provider !== undefined
+        ? 'profile'
+        : 'backend'
+  )
+  return providerLaneOrEmpty(pick, model, autoApprove)
+}
+
+/** The escape hatch — a template --agent replaces the provider lane for
+ *  this run, config picks included; provider flags beside it are
+ *  contradictory input. */
+function templateEscape(sel: LoopLaneSel, cfg: LoopConfig): LoopLane {
+  const extras = [
+    sel.provider !== undefined ? '--provider' : undefined,
+    sel.profile !== undefined ? '--profile' : undefined,
+    sel.model !== undefined ? '--model' : undefined,
+    sel.autoApprove === true ? '--auto-approve' : undefined,
+  ].filter((f): f is string => f !== undefined)
+  if (extras.length > 0) {
+    throw new SpawnError(
+      `${extras.join(', ')} pick a provider, but --agent '${sel.agent}' is a ` +
+        'raw template — name the provider instead (--agent <name>)',
+      'input'
+    )
+  }
+  if (cfg.provider !== '' || cfg.profile !== '' || cfg.model !== '') {
+    console.error(
+      'loop: --agent template bypasses the configured provider lane ' +
+        '(loop.provider/loop.profile/loop.model)'
+    )
+  }
+  return {}
+}
+
+/** A pick without a worker is the raw template lane — but only when
+ *  nothing provider-only was asked for: a dangling model/autoApprove
+ *  (flag, profile preset, or loop.model) is a config error, not a
+ *  silent drop onto the template. */
+function providerLaneOrEmpty(
+  pick: SpawnProviderPick,
+  model: string | undefined,
+  autoApprove: boolean | undefined
+): LoopLane {
+  if (pick.worker !== undefined) {
+    return { worker: pick.worker, provider: pick.provider, model: pick.model }
+  }
+  if (model !== undefined || autoApprove === true) {
+    throw new SpawnError(
+      '--model/--auto-approve (or loop.model) ride the provider lane — name a ' +
+        'provider via --provider, --agent <name>, or loop.provider',
+      'config'
+    )
+  }
+  return {}
+}
+
+/** Dry-run rendering for an argv worker — single-quotes only the args
+ *  that need it, so the printed line stays readable. */
+const shRender = (s: string): string =>
+  /[\s'"\\]/.test(s) ? `'${s.replaceAll("'", String.raw`'\''`)}'` : s
 
 /** Fresh sibling worktree on loop/<id> off origin/main (falls back to
  *  main/HEAD when no origin) — or off `base` when a stack already picked
@@ -218,17 +379,26 @@ function ensureWorktree(root: string, branch: string, dir: string, base?: string
  *  stays parseable. */
 function spawnAgent(ctx: Ctx, beadId: string, title: string, promptFile: string, dir: string): Promise<number | null> {
   return new Promise((resolve) => {
-    const child = spawn('sh', ['-c', expandAgentCmd(ctx.agent, promptFile)], { // NOSONAR — operator-configured agent command
-      cwd: dir,
-      env: agentEnv(ctx, {
-        BRO_BEAD_ID: beadId,
-        BRO_BEAD_TITLE: title,
-        BRO_PROMPT_FILE: promptFile,
-        ...provenancePins(ctx, beadId),
-      }),
-      stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
-      detached: true,
+    const env = agentEnv(ctx, {
+      BRO_BEAD_ID: beadId,
+      BRO_BEAD_TITLE: title,
+      BRO_PROMPT_FILE: promptFile,
+      ...provenancePins(ctx, beadId),
     })
+    const opts = {
+      cwd: dir,
+      env,
+      stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'] as Array<'inherit' | number>,
+      detached: true,
+    }
+    const w = ctx.lane.worker
+    const child =
+      w?.kind === 'argv'
+        ? // the same `"$@"` positional exec the native backend builds —
+          // argv workers are headless by construction (acp); sh resolves
+          // argv[0] ('bro'/'npx') on PATH the way the backend does
+          spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
+        : spawn('sh', ['-c', expandAgentCmd(ctx.agent, promptFile)], opts) // NOSONAR — operator-configured agent command
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true
@@ -464,6 +634,27 @@ function resolveStackSlot(ctx: Ctx, bead: ReadyBead): StackSlot | undefined {
   return { n: tip.n, base: tip.base ?? dflt, edge: tip.base, bottom: tip.base === undefined }
 }
 
+/** slot + planItem for a bead — the dry-run render and the real
+ *  worktree plan share the member-number/shape wiring. */
+function stackPlan(
+  ctx: Ctx,
+  bead: ReadyBead
+): { slot: StackSlot | undefined; item: ReturnType<typeof planItem> } {
+  const slot = resolveStackSlot(ctx, bead)
+  const item = planItem(
+    bead,
+    ctx.root,
+    slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
+  )
+  return { slot, item }
+}
+
+/** `P · model M` provenance label — the lane announce and the dry-run
+ *  render print the same pair. */
+const laneLabel = (ctx: Ctx): string =>
+  `${ctx.lane.provider}` +
+  (ctx.lane.model !== undefined ? ` · model ${ctx.lane.model}` : '')
+
 /** Resolve the bead's stack slot and create its worktree under the same
  *  push lock `stack push` holds — without it a loop and a push racing
  *  one stack read the same tip and both mint position n. A live
@@ -477,12 +668,9 @@ function planItemAndWorktree(
   let slot: StackSlot | undefined
   let item!: ReturnType<typeof planItem>
   const planAndCreate = (): void => {
-    slot = resolveStackSlot(ctx, bead)
-    item = planItem(
-      bead,
-      ctx.root,
-      slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
-    )
+    const plan = stackPlan(ctx, bead)
+    slot = plan.slot
+    item = plan.item
     say(ctx, `\nloop: ${bead.id} → ${item.branch} @ ${item.worktreeDir}`)
     // a surviving worktree dir is reused as-is — its branch kept its
     // original base, so the stack edge only records on fresh creation
@@ -665,16 +853,39 @@ const LOOP_VALUE_FLAGS = new Set([
   '--interval',
   '--label',
   '--stack',
+  '--provider',
+  '--profile',
+  '--model',
 ])
-const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help'])
+const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve'])
 
 export async function runLoopCommand(argv: string[]): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
     usage()
   }
-  // strict: an unquoted `--agent devin -p --prompt-file {promptFile}` reads as
-  // agent='devin' plus a tail of unknown flags — silently spawning a bare
-  // `devin <file>` TUI per bead instead of a headless worker
+  rejectStrayArgs(argv)
+  checkBeads()
+  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim()
+  if (!root) {
+    console.error('bro loop: not inside a git worktree')
+    process.exit(1)
+  }
+  const broCfg = loadBroConfig(root)
+  const cfg = broCfg.loop as LoopConfig
+  const { lane, agent } = await resolveRunLane(root, argv, broCfg, cfg)
+  const ctx = buildCtx(root, argv, broCfg, cfg, agent, lane)
+  if (argv.includes('--dry-run')) {
+    dryRunPlan(ctx)
+    return
+  }
+  await runQueue(ctx)
+}
+
+/** Strict flag parse — an unquoted `--agent devin -p --prompt-file
+ *  {promptFile}` reads as agent='devin' plus a tail of unknown flags,
+ *  silently spawning a bare `devin <file>` TUI per bead instead of a
+ *  headless worker. */
+function rejectStrayArgs(argv: string[]): void {
   const stray = positionals(argv, LOOP_VALUE_FLAGS, {
     boolFlags: LOOP_BOOL_FLAGS,
     strict: true,
@@ -686,27 +897,61 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     )
     process.exit(2)
   }
-  checkBeads()
-  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim()
-  if (!root) {
-    console.error('bro loop: not inside a git worktree')
-    process.exit(1)
+}
+
+/** The lane resolves once, up front — a bad provider name is a config
+ *  error that must fail BEFORE a bead is claimed, not mid-run with
+ *  claims held. Returns the lane plus the effective template (a cli
+ *  provider's `command` substitutes for `loop.agent`; a template
+ *  --agent stays the literal value — provider names are never
+ *  templates, resolveLoopLane consumed them). */
+async function resolveRunLane(
+  root: string,
+  argv: string[],
+  broCfg: ReturnType<typeof loadBroConfig>,
+  cfg: LoopConfig
+): Promise<{ lane: LoopLane; agent: string }> {
+  const agentFlag = flag(argv, '--agent')
+  let lane: LoopLane
+  try {
+    lane = await resolveLoopLane(
+      loadAgentEnv(root),
+      {
+        agent: agentFlag,
+        provider: flag(argv, '--provider'),
+        profile: flag(argv, '--profile'),
+        model: flag(argv, '--model'),
+        autoApprove: argv.includes('--auto-approve') ? true : undefined,
+      },
+      cfg
+    )
+  } catch (err) {
+    if (err instanceof SpawnError) {
+      console.error(`bro loop: ${err.message}`)
+      process.exit(2)
+    }
+    throw err
   }
-  const broCfg = loadBroConfig(root)
-  const cfg = broCfg.loop as LoopConfig
-  const agent = flag(argv, '--agent') ?? cfg.agent
-  if (!agent) {
+  const agent =
+    lane.worker?.kind === 'template'
+      ? lane.worker.command
+      : agentFlag !== undefined && !Object.hasOwn(broCfg.providers ?? {}, agentFlag)
+        ? agentFlag
+        : cfg.agent
+  if (lane.worker === undefined && agent === '') {
     console.error(
-      'bro loop: no agent configured — set loop.agent in bro.config ' +
-        '(e.g. "devin --prompt-file {promptFile} -p") or pass --agent'
+      'bro loop: no agent configured — set loop.agent or loop.provider in bro.config ' +
+        '(e.g. "devin --prompt-file {promptFile} -p") or pass --agent/--provider'
     )
     process.exit(2)
   }
   // {promptFile} isn't strictly required — an agent may read
   // BRO_PROMPT_FILE from env instead — but a TUI-capable CLI spawned
   // without it opens an interactive session per bead (the file path
-  // lands positionally = the prompt). Warn loudly, don't refuse.
-  if (!agent.includes('{promptFile}')) {
+  // lands positionally = the prompt). Warn loudly, don't refuse. An
+  // argv worker takes the file as a positional arg by contract — the
+  // check would only misfire on it.
+  if (lane.worker?.kind !== 'argv' && !agent.includes('{promptFile}')) {
     // binary name only — the template may carry inline credentials
     const agentBin = agent.split(/\s+/, 1)[0]
     console.error(
@@ -716,6 +961,17 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
         'Intended for env-reading agents (BRO_PROMPT_FILE) only.'
     )
   }
+  return { lane, agent }
+}
+
+function buildCtx(
+  root: string,
+  argv: string[],
+  broCfg: ReturnType<typeof loadBroConfig>,
+  cfg: LoopConfig,
+  agent: string,
+  lane: LoopLane
+): Ctx {
   const rev = reviewHost(root, broCfg.connectors)
   const ctx: Ctx = {
     rev,
@@ -728,6 +984,7 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
       maxItems: num(flag(argv, '--max'), cfg.maxItems, 0),
     },
     agent,
+    lane,
     intervalS: num(flag(argv, '--interval'), 60),
     json: argv.includes('--json'),
     selection: {
@@ -739,33 +996,46 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     stack: stackNameFlag(argv),
     tails: [],
   }
-
-  if (argv.includes('--dry-run')) {
-    const scope = loopScope()
-    if (!scope) {
-      return
-    }
-    const ready = readyBeads()
-    const top = classify(ready, ctx.selection, scope, epicParentIds(ready)).queue[0]
-    if (!top) {
-      console.log('loop --dry-run: nothing claimable')
-      return
-    }
-    const slot = resolveStackSlot(ctx, top)
-    const item = planItem(
-      top,
-      root,
-      slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
+  // announce the resolved lane once — agents.native.provider picking up
+  // the run must not be a silent behavior change for template users
+  if (ctx.lane.provider !== undefined) {
+    say(
+      ctx,
+      `loop: provider ${laneLabel(ctx)}` +
+        (ctx.lane.worker?.kind === 'argv' ? ' (acp worker)' : '')
     )
-    console.log(`would claim ${top.id} — ${top.title}`)
-    console.log(`  worktree ${item.worktreeDir} on ${item.branch}`)
-    if (slot !== undefined) {
-      console.log(`  stack ${ctx.stack} member ${slot.n} — PR base ${slot.base}`)
-    }
-    console.log(`  agent: ${expandAgentCmd(ctx.agent, item.promptFile)}`)
+  }
+  return ctx
+}
+
+function dryRunPlan(ctx: Ctx): void {
+  const scope = loopScope()
+  if (!scope) {
     return
   }
-  await runQueue(ctx)
+  const ready = readyBeads()
+  const top = classify(ready, ctx.selection, scope, epicParentIds(ready)).queue[0]
+  if (!top) {
+    console.log('loop --dry-run: nothing claimable')
+    return
+  }
+  const { slot, item } = stackPlan(ctx, top)
+  console.log(`would claim ${top.id} — ${top.title}`)
+  console.log(`  worktree ${item.worktreeDir} on ${item.branch}`)
+  if (slot !== undefined) {
+    console.log(`  stack ${ctx.stack} member ${slot.n} — PR base ${slot.base}`)
+  }
+  const w = ctx.lane.worker
+  if (ctx.lane.provider !== undefined) {
+    console.log(`  provider: ${laneLabel(ctx)}`)
+  }
+  console.log(
+    `  agent: ${
+      w?.kind === 'argv'
+        ? [...w.argv, item.promptFile].map(shRender).join(' ')
+        : expandAgentCmd(ctx.agent, item.promptFile)
+    }`
+  )
 }
 
 /** Project scope for the queue — a failed prefix lookup is reported

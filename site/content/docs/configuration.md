@@ -79,7 +79,10 @@ a `BroPlugin`. See [Plugins](/docs/plugins).
 
 | Key | Default | What |
 | --- | ------- | ---- |
-| `agent` | `""` | Shell template for the agent command; `{promptFile}` is replaced by the work order |
+| `agent` | `""` | Shell template for the agent command; `{promptFile}` is replaced by the work order. The raw lane — superseded by `provider`/`profile` |
+| `provider` | `""` | Named [provider](/docs/commands/providers) the spawn resolves through — `acp` entries run the headless `acp-worker`, `cli` entries substitute their command for `agent` |
+| `profile` | `""` | `fleet.profiles.<name>` preset — fills provider/model/autoApprove piecewise |
+| `model` | `""` | Model override for the provider lane |
 | `bootstrap` | `""` | Optional command run in each fresh worktree before the agent |
 | `agentTimeoutMin` | `45` | Per-agent time budget in minutes |
 | `mergeTimeoutMin` | `45` | Review-gate budget in minutes |

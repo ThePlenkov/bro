@@ -1,6 +1,6 @@
 ---
 name: loop
-description: "Use when the user wants the backlog worked autonomously end-to-end — 'run the backlog', 'bro loop', a hands-off /goal over open beads. Unlike /next (one scheduling step), `bro loop` IS the loop: bro claims each ready bead, spawns the configured agent in a fresh worktree, drives the act gate, closes the bead, repeats. Requires `bro` and `bd`; the agent is configured via loop.agent."
+description: "Use when the user wants the backlog worked autonomously end-to-end — 'run the backlog', 'bro loop', a hands-off /goal over open beads. Unlike /next (one scheduling step), `bro loop` IS the loop: bro claims each ready bead, spawns the configured agent in a fresh worktree, drives the act gate, closes the bead, repeats. Requires `bro` and `bd`; the agent is a providers.<name> entry (loop.provider/--provider, acp = headless) or a raw loop.agent template."
 ---
 
 # /loop (bro)
@@ -12,30 +12,49 @@ claim → worktree → agent → gate → close → repeat — with no per-item
 
 ## Configure the agent once
 
-In `bro.config.json`:
+**Prefer the provider lane** — a `providers.<name>` registry entry
+resolves the spawn exactly like `bro agents up`:
 
 ```json
 {
-  "loop": {
-    "agent": "devin --prompt-file {promptFile} -p",
-    "bootstrap": "npm install",
-    "agentTimeoutMin": 45,
-    "mergeTimeoutMin": 45,
-    "fixRounds": 3,
-    "maxItems": 0
-  }
+  "providers": {
+    "kilo-cli": { "type": "acp", "command": "kilo --acp", "model": "typesafe/jev-1.13" }
+  },
+  "loop": { "provider": "kilo-cli" }
 }
+```
+
+An `acp` entry spawns `bro acp-worker` — a stdio ACP server driven by
+the protocol, headless by construction (no TUI can open on WSL interop).
+A `cli` entry substitutes its `command` for the template. The picks:
+`--provider`/`--agent <name>` flags → `fleet.profiles` preset
+(`--profile`, `loop.profile`) → `loop.provider` →
+`agents.native.provider`. `--model` and `--auto-approve` tune the lane.
+`bro loop --agent kilo-cli` works too — a bare `--agent` value that
+exactly names a configured provider IS a provider pick.
+
+**Raw template** — `loop.agent` (or an `--agent` value that names no
+provider) is the escape hatch:
+
+```json
+{ "loop": { "agent": "devin --prompt-file {promptFile} -p" } }
 ```
 
 `{promptFile}` is replaced with the work-order file bro writes into the
 fresh worktree (no placeholder → the path is appended as the last arg).
 Examples: `claude -p "$(cat {promptFile})"`, `codex exec "$(cat
 {promptFile})"`. The spawn env carries `BRO_BEAD_ID`, `BRO_BEAD_TITLE`,
-`BRO_PROMPT_FILE`. Whatever permission flags your agent needs for
+`BRO_PROMPT_FILE` (provider lane also pins `BRO_AGENT_PROVIDER`,
+`BRO_AGENT_MODEL`). Whatever permission flags your agent needs for
 unattended work are yours to choose — e.g. devin's
 `--permission-mode dangerous --respect-workspace-trust false` skips all
 human confirmation, which is the point of the loop but obviously grants
-the agent full autonomy; scope it to machines/repos you trust.
+the agent full autonomy; scope it to machines/repos you trust. A
+template `--agent` flag wins over a configured `loop.provider` — the
+provider flags can't sit beside it.
+
+Other `loop` keys: `bootstrap` (runs once per worktree), budgets
+`agentTimeoutMin`/`mergeTimeoutMin`, `fixRounds`, `maxItems`.
 
 ## Commands
 
@@ -44,7 +63,8 @@ the agent full autonomy; scope it to machines/repos you trust.
 | `bro loop` | Run the queue until idle or gated |
 | `bro loop --max N` | At most N beads this run |
 | `bro loop --dry-run` | Print the top item's plan (claim, worktree, agent cmd) — changes nothing |
-| `bro loop --agent '<tpl>'` | One-off agent override |
+| `bro loop --agent '<tpl>'` | One-off agent override — a provider name resolves through the registry |
+| `bro loop --provider <name>` | Provider pick (`--profile`, `--model`, `--auto-approve` tune it) |
 | `bro loop --label a,b` | Declared scope — only beads carrying one of these labels are claimable; the rest of the shared queue stays untouched. "Loop the debt beads" never bleeds into unrelated work |
 | `--agent-timeout MIN`, `--merge-timeout MIN`, `--interval SEC` | Budget overrides |
 
