@@ -561,6 +561,24 @@ emit(
 )
 
 for (const [dir, files] of Object.entries(ADAPTERS)) {
+  // A symlinked adapter dir is replaced before any write. emit() only
+  // notices a symlink at the file itself; a link at the directory would
+  // let mkdir/writeFile follow it and modify a tree outside the checkout.
+  const dirPath = join(ROOT, dir)
+  let dirStat
+  try {
+    dirStat = lstatSync(dirPath)
+  } catch {
+    dirStat = undefined
+  }
+  if (dirStat !== undefined && !dirStat.isDirectory()) {
+    if (CHECK) {
+      drift.push(dir)
+      continue
+    }
+    rmSync(dirPath, { recursive: true, force: true })
+    dirStat = undefined
+  }
   const opts = ADAPTER_OPTS[dir] ?? {}
   const linkSkills = opts.skills !== false
   const wantRunSh = opts.runSh !== false
@@ -599,25 +617,6 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
     }
   } else if (linkSkills && !skillsLinkFresh(dir)) {
     drift.push(skillsOut)
-  }
-  // the adapter dir itself may be a stale file or symlink — never
-  // traverse into it: flag/remove the entry, let emit recreate the real
-  // directory. readdirSync would follow the link and the stale sweep
-  // below would then delete files OUTSIDE the repo.
-  const dirPath = join(ROOT, dir)
-  let dirStat
-  try {
-    dirStat = lstatSync(dirPath)
-  } catch {
-    dirStat = undefined
-  }
-  if (dirStat !== undefined && !dirStat.isDirectory()) {
-    if (CHECK) {
-      drift.push(dir)
-    } else {
-      rmSync(dirPath, { recursive: true, force: true })
-    }
-    dirStat = undefined
   }
   if (CHECK) {
     if (wantRunSh) {
