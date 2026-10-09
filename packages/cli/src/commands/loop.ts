@@ -169,15 +169,21 @@ function usage(): never {
   process.exit(2)
 }
 
-const num = (v: string | undefined, dflt: number, min = 1): number => {
+const num = (v: string | undefined, dflt: number, min = 1, max?: number): number => {
   if (v === undefined) return dflt
   const n = Number(v)
-  if (!Number.isFinite(n) || n < min) {
-    console.error(`bro loop: invalid numeric value "${v}" (must be >= ${min})`)
+  if (!Number.isFinite(n) || n < min || (max !== undefined && n > max)) {
+    const range = max === undefined ? `>= ${min}` : `${min}..${max}`
+    console.error(`bro loop: invalid numeric value "${v}" (must be ${range})`)
     process.exit(2)
   }
   return n
 }
+
+/** Node clamps a timer delay over 2^31-1 ms to 1 ms — a flag that becomes
+ *  a raw delay needs a ceiling or an absurd value hot-loops the
+ *  heartbeat/gate poll (or fires the agent timeout instantly). */
+const TIMER_MAX_MS = 2 ** 31 - 1
 
 /** Progress lines — stderr under --json so stdout stays a clean
  *  event stream. */
@@ -1185,7 +1191,12 @@ function buildCtx(
     root,
     cfg: {
       ...cfg,
-      agentTimeoutMin: num(flag(argv, '--agent-timeout'), cfg.agentTimeoutMin, 0),
+      agentTimeoutMin: num(
+        flag(argv, '--agent-timeout'),
+        cfg.agentTimeoutMin,
+        0,
+        Math.floor(TIMER_MAX_MS / 60_000)
+      ),
       mergeTimeoutMin: num(flag(argv, '--merge-timeout'), cfg.mergeTimeoutMin),
       maxItems: num(flag(argv, '--max'), cfg.maxItems, 0),
       maxOpen: num(flag(argv, '--max-open'), cfg.maxOpen, 1),
@@ -1193,7 +1204,7 @@ function buildCtx(
     act: broCfg.act,
     agent,
     lane,
-    intervalS: num(flag(argv, '--interval'), 60),
+    intervalS: num(flag(argv, '--interval'), 60, 1, Math.floor(TIMER_MAX_MS / 1000)),
     json: argv.includes('--json'),
     selection: {
       filters: labelSelection(argv),

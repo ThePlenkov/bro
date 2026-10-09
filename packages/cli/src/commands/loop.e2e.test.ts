@@ -421,11 +421,11 @@ describe('bro loop liveness', () => {
 
   test('a hung agent stalls visibly — heartbeat names the stage, SIGTERM exits audited', async () => {
     const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'hangs' }], {}, 'hang')
+    const proc = spawnLoop(f, ['--interval', '1'])
+    let stderr = ''
+    proc.stderr!.on('data', (d: Buffer) => (stderr += d))
     let workerPid = 0
     try {
-      const proc = spawnLoop(f, ['--interval', '1'])
-      let stderr = ''
-      proc.stderr!.on('data', (d: Buffer) => (stderr += d))
       // the heartbeat holds the event loop open — a drain-shaped death
       // would have ended the process before any `alive` line; the line
       // names the suspension point the silent deaths hid
@@ -435,28 +435,31 @@ describe('bro loop liveness', () => {
       )
       assert.equal(proc.exitCode, null, 'the loop died awaiting the hung agent')
       workerPid = Number(/worker pid=(\d+)/.exec(stderr)![1])
-      try {
-        proc.kill('SIGTERM')
-        // the audit re-raises — the parent still sees a real signal
-        // death, not a clean exit code
-        const [code, signal] = await new Promise<[number | null, string | null]>((r) =>
-          proc.once('exit', (c, s) => r([c, s]))
-        )
-        assert.equal(signal, 'SIGTERM')
-        assert.equal(code, null)
-      } finally {
-        // the detached agent group outlives its loop — clean it up
-        try {
-          process.kill(-workerPid, 'SIGKILL')
-        } catch {
-          /* already gone */
-        }
-      }
+      proc.kill('SIGTERM')
+      // the audit re-raises — the parent still sees a real signal
+      // death, not a clean exit code
+      const [code, signal] = await new Promise<[number | null, string | null]>((r) =>
+        proc.once('exit', (c, s) => r([c, s]))
+      )
+      assert.equal(signal, 'SIGTERM')
+      assert.equal(code, null)
       // the signal handler audits before re-raising — stage + bead
       // named, the note landed, exactly what the silent deaths denied
       assert.match(stderr, /exiting mid-run — worker pid=\d+ on fx-a/)
       assert.match(String(bead(f.db, 'fx-a')?.notes), /process exited mid-run/)
     } finally {
+      // a failed wait must not leave the loop or the detached agent
+      // group running — reap both before the fixture goes, or the
+      // child's open pipes hang the test run
+      proc.kill('SIGKILL')
+      const pid = workerPid || Number(/worker pid=(\d+)/.exec(stderr)?.[1] ?? 0)
+      if (pid !== 0) {
+        try {
+          process.kill(-pid, 'SIGKILL')
+        } catch {
+          /* already gone */
+        }
+      }
       rmSync(f.root, { recursive: true, force: true })
     }
   })
