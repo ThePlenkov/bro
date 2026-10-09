@@ -7,16 +7,17 @@
  * installs the repo root, so it does not get a skills tree of its own.
  *
  *   plugins/devin/bro/   plugin.json + hooks.json copied from root
- *   plugins/claude/bro/  .claude-plugin/plugin.json derived from plugin.json
- *                        + hand-written hooks/hooks.json (Claude event names)
+ *   .claude-plugin/plugin.json  Claude manifest at the repo root; skills
+ *                        are ./skills/, hooks are ./hooks/hooks.json
  *   .codex-plugin/plugin.json  Codex manifest at the repo root; skills
  *                        resolve to ./skills/, hooks to the hand-written
  *                        plugins/codex/bro/hooks/hooks.json
  *   plugins/cursor/bro/  .cursor-plugin/plugin.json + hooks/hooks.json
  *                        (Cursor event names, command shape, output schema)
  *
- * Adapters other than Codex still link skills/ until their marketplace
- * installs the repo root. Each adapter copies hooks/run.sh. Claude and Codex
+ * Claude and Codex install the repo root, so neither gets a skills tree
+ * of its own. Other adapters still link skills/ until their marketplace
+ * does the same. Each of those copies hooks/run.sh. Claude and Codex
  * hooks wiring is authored by hand — Cursor's hooks.json is generated from
  * the event map below. `check:plugins` fails CI when an adapter drifts.
  *
@@ -159,6 +160,14 @@ const codexEntry = (codexMarketplace.plugins ?? []).find((p) => p?.name === 'bro
 if (codexEntry?.source !== '.') {
   console.error(
     '.agents/plugins/marketplace.json: bro source must be "." — the repo root is the Agent Plugin'
+  )
+  process.exit(1)
+}
+const claudeMarketplace = readJson('.claude-plugin/marketplace.json')
+const claudeEntry = (claudeMarketplace.plugins ?? []).find((p) => p?.name === 'bro')
+if (claudeEntry?.source !== './') {
+  console.error(
+    '.claude-plugin/marketplace.json: bro source must be "./" — the repo root is the plugin'
   )
   process.exit(1)
 }
@@ -426,7 +435,8 @@ const ADAPTER_OPTS: Record<string, { skills?: boolean; runSh?: boolean }> = {
   'plugins/kilo/bro': { skills: false, runSh: false },
   'plugins/pi/bro': { skills: false, runSh: false },
   // Codex installs the repo root (plugin.json + skills/). A skills entry
-  // here would be a second package.
+  // here would be a second package. Claude does too: its manifest and
+  // hooks live at the repo root, so there is no plugins/claude adapter.
   'plugins/codex/bro': { skills: false },
 }
 
@@ -449,11 +459,6 @@ const ADAPTERS = {
     'plugin.json': 'plugin.json',
     'hooks.json': 'hooks.json',
   },
-  'plugins/claude/bro': {
-    '.claude-plugin/plugin.json': [clientManifest()],
-    // hand-written (Claude event names) — listed so --check doesn't flag it
-    'hooks/hooks.json': null,
-  },
   'plugins/codex/bro': {
     // hand-written (Codex event names) — listed so --check doesn't flag it.
     // The manifest lives at the repo root: this directory is hooks only.
@@ -472,7 +477,6 @@ const ADAPTERS = {
 const VERSIONED_SOURCES = [
   'hooks.json',
   'hooks/run.sh',
-  'plugins/claude/bro/hooks/hooks.json',
   'plugins/codex/bro/hooks/hooks.json',
   // the materialized opencode modules carry the npx fallback pin
   'packages/cli/src/opencode.ts',
@@ -550,6 +554,8 @@ function ensureSkillsLink(adapterRel) {
   mkdirSync(join(ROOT, adapterRel), { recursive: true })
   symlinkSync(skillsLinkTarget(adapterRel), link)
 }
+
+emit('.claude-plugin/plugin.json', clientManifest())
 
 emit(
   '.codex-plugin/plugin.json',

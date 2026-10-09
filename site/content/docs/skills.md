@@ -43,9 +43,10 @@ and why to use the command. The CLI owns how.
 The portable package is the repo root: `plugin.json`
 ([Agent Plugins](https://agent-plugins.org/)) and `skills/<name>/SKILL.md`
 ([Agent Skills](https://agentskills.io/)). Every agent reads that pair.
-Claude, Codex, Cursor, and Devin add only what their own client needs
-on top — hook event maps and a client manifest under `plugins/<client>/bro`.
-They do not carry a second `skills/` tree. OpenCode, Kilo, and pi are
+Claude and Codex install that root. Their extras are a client manifest
+and a hook map (`hooks/hooks.json` for Claude,
+`plugins/codex/bro/hooks/hooks.json` for Codex), not a second `skills/`
+tree. Cursor and Devin still add those extras under `plugins/<client>/bro`. OpenCode, Kilo, and pi are
 different: they're native plugins installed by `bro plugins install <client>`
 — a self-contained module (`plugins/<client>/bro/bro.ts`) carrying hooks
 inline, with no skills tree beside it.
