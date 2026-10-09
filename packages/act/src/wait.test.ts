@@ -211,6 +211,21 @@ test('a wake event polls early instead of sleeping the interval out', async () =
   assert.ok(elapsed < 5_000, `woke early — took ${String(elapsed)}ms`)
 })
 
+test('a wake win clears the losing sleep timer — no lingering ref', async () => {
+  const waker = {
+    next: () => Promise.resolve(), // always wins instantly
+    close: () => {},
+  }
+  const before = process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length
+  const res = await waitForGate(fetcher([open({ ciPending: 1 }), open()]), {
+    intervalMs: 60_000,
+    wake: async () => waker,
+  })
+  const after = process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length
+  assert.equal(res.polls, 2)
+  assert.equal(after, before)
+})
+
 test('a waker that cannot arm leaves pure timer polling — fail-open', async () => {
   const res = await waitForGate(fetcher([open({ ciPending: 1 }), open()]), {
     intervalMs: 0,

@@ -82,10 +82,19 @@ export async function waitForGate(
   } catch {
     waker = null
   }
-  // sleep, or wake early on an event — the loser of the race leaves a
-  // pending promise that close() or a later event retires harmlessly
-  const nap = (ms: number): Promise<void> =>
-    waker === null ? sleep(ms) : Promise.race([sleep(ms), waker.next()])
+  // sleep, or wake early on an event — a losing wake promise stays
+  // pending and close() or a later event retires it harmlessly; a losing
+  // sleep keeps its setTimeout ref'd up to intervalMs past settle, so a
+  // waker win clears it
+  const nap = (ms: number): Promise<void> => {
+    if (waker === null) return sleep(ms)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const slept = new Promise<void>((r) => {
+      timer = setTimeout(r, ms)
+    })
+    const woke = waker.next().then(() => clearTimeout(timer))
+    return Promise.race([slept, woke])
+  }
   let polls = 0
   let fetchErrors = 0
   let updatedSha = ''
