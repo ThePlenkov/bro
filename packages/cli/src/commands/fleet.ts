@@ -308,7 +308,7 @@ export interface FleetPayload {
   wallsError?: string
 }
 
-async function collectFleet(dir: string): Promise<FleetPayload> {
+export async function collectFleet(dir: string): Promise<FleetPayload> {
   const env = loadAgentEnv(dir)
   const { byStep, degraded, conflicts } = await collectAgents(dir, env)
 

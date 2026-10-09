@@ -1,0 +1,48 @@
+{
+  "name": "@broject/mcp",
+  "version": "0.2.5",
+  "type": "module",
+  "dependencies": {
+    "@broject/core": "^0.2.0",
+    "@modelcontextprotocol/sdk": "^1.31.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsdown": "^0.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/mcp"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "MCP server binding for bro's plane catalog — stdio tools generated from plane descriptors (specs/bro-9rls.1.md)",
+  "keywords": [
+    "mcp",
+    "planes",
+    "stdio",
+    "agent",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs"
+}

@@ -6,21 +6,11 @@
  * (subcommand + skill + config section); see plugins.ts for the list
  * and `bro plugins` for the live registry.
  */
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { warnDeprecated } from '@broject/core'
 import { journalCommand } from './commands/hooks.ts'
 import { docUsageLines, reservedWords, runDocVerb } from './docs.ts'
 import { loadExternalPlugins, PLUGINS } from './plugins.ts'
-
-// Single source of truth is package.json — dist/index.js sits one dir
-// below it in both the workspace and the published tarball.
-const VERSION = (
-  JSON.parse(
-    readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8')
-  ) as { version: string }
-).version
+import { VERSION } from './version.ts'
 
 function usage(exitCode = 1): never {
   const commands = PLUGINS.filter((p) => !p.hidden)
