@@ -8,8 +8,8 @@ code nobody edits by hand.
 - `plugins/**` — generated client adapters (`scripts/gen-plugins.ts`);
   review the canonical sources (`skills/`, `hooks/`, `plugin.json`) and the
   generator itself instead. Two exceptions stay in scope:
-  `hooks/hooks.json` (Claude event names) and
-  `plugins/codex/bro/hooks/hooks.json` (Codex event names), and
+  `plugins/claude/bro/hooks/hooks.json` and
+  `plugins/codex/bro/hooks/hooks.json` (hand-written event names), and
   any `skills` entry under `plugins/<client>/bro`. A directory or a
   symlink there is a second package — **major**, even though the rest
   of `plugins/**` is skipped. Skills are reviewed at `skills/` next to

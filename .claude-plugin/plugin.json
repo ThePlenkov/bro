@@ -18,5 +18,6 @@
     "wtf",
     "self-correction",
     "agent-workflow"
-  ]
+  ],
+  "hooks": "./plugins/claude/bro/hooks/hooks.json"
 }

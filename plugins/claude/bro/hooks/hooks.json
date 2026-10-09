@@ -1,5 +1,5 @@
 {
-  "description": "bro plugin hooks. Claude sets CLAUDE_PLUGIN_ROOT; hooks/run.sh resolves the bro binary.",
+  "description": "bro plugin hooks for Claude Code. Claude sets CLAUDE_PLUGIN_ROOT; the shared hooks/run.sh resolves the bro binary.",
   "hooks": {
     "SessionStart": [
       {

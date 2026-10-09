@@ -8,7 +8,8 @@
  *
  *   plugins/devin/bro/   plugin.json + hooks.json copied from root
  *   .claude-plugin/plugin.json  Claude manifest at the repo root; skills
- *                        are ./skills/, hooks are ./hooks/hooks.json
+ *                        are ./skills/. The hook map is Claude-only:
+ *                        plugins/claude/bro/hooks/hooks.json
  *   .codex-plugin/plugin.json  Codex manifest at the repo root; skills
  *                        resolve to ./skills/, hooks to the hand-written
  *                        plugins/codex/bro/hooks/hooks.json
@@ -434,10 +435,11 @@ const ADAPTER_OPTS: Record<string, { skills?: boolean; runSh?: boolean }> = {
   'plugins/opencode/bro': { skills: false, runSh: false },
   'plugins/kilo/bro': { skills: false, runSh: false },
   'plugins/pi/bro': { skills: false, runSh: false },
-  // Codex installs the repo root (plugin.json + skills/). A skills entry
-  // here would be a second package. Claude does too: its manifest and
-  // hooks live at the repo root, so there is no plugins/claude adapter.
+  // Claude and Codex install the repo root. A skills entry in the
+  // adapter would be a second package. Claude's hook map stays in the
+  // adapter; the shared hooks/ dir is only run.sh.
   'plugins/codex/bro': { skills: false },
+  'plugins/claude/bro': { skills: false, runSh: false },
 }
 
 // files written per adapter — value is source path, or [text] literal content
@@ -458,6 +460,11 @@ const ADAPTERS = {
   'plugins/devin/bro': {
     'plugin.json': 'plugin.json',
     'hooks.json': 'hooks.json',
+  },
+  'plugins/claude/bro': {
+    // hand-written (Claude event names). Not hooks/hooks.json: that path
+    // is the shared launcher directory, and Claude's root var stays here.
+    'hooks/hooks.json': null,
   },
   'plugins/codex/bro': {
     // hand-written (Codex event names) — listed so --check doesn't flag it.
@@ -555,7 +562,10 @@ function ensureSkillsLink(adapterRel) {
   symlinkSync(skillsLinkTarget(adapterRel), link)
 }
 
-emit('.claude-plugin/plugin.json', clientManifest())
+emit(
+  '.claude-plugin/plugin.json',
+  clientManifest({ hooks: './plugins/claude/bro/hooks/hooks.json' })
+)
 
 emit(
   '.codex-plugin/plugin.json',

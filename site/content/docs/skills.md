@@ -44,8 +44,8 @@ The portable package is the repo root: `plugin.json`
 ([Agent Plugins](https://agent-plugins.org/)) and `skills/<name>/SKILL.md`
 ([Agent Skills](https://agentskills.io/)). Every agent reads that pair.
 Claude and Codex install that root. Their extras are a client manifest
-and a hook map (`hooks/hooks.json` for Claude,
-`plugins/codex/bro/hooks/hooks.json` for Codex), not a second `skills/`
+and a hook map (`plugins/claude/bro/hooks/hooks.json`,
+`plugins/codex/bro/hooks/hooks.json`), not a second `skills/`
 tree. Cursor and Devin still add those extras under `plugins/<client>/bro`. OpenCode, Kilo, and pi are
 different: they're native plugins installed by `bro plugins install <client>`
 — a self-contained module (`plugins/<client>/bro/bro.ts`) carrying hooks
