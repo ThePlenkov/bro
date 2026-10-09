@@ -127,6 +127,30 @@ export interface MergeOpts {
   admin?: boolean
 }
 
+export interface EnqueueOpts {
+  /** Checkout holding the PR head — checkout-bound queue CLIs
+   *  (graphite `gt`) merge from the worktree, not the API. */
+  dir?: string
+  /** The PR's head branch — the connector verifies the checkout is on
+   *  it before running anything that merges "the current stack". */
+  headRef?: string
+  /** The sha the gate evaluated — a head that moved since must refuse
+   *  the signal rather than queue a commit the gate never saw. */
+  expectedHeadSha?: string
+}
+
+/** MergeQueueFacade — an external merge queue's capability: park a PR
+ *  on the queue instead of direct-merging it. Opt-in by name only
+ *  (`connectors.mergeQueue`) — a queue is never auto-detected, so a
+ *  connector providing it must also be `optIn`. */
+export interface MergeQueueFacade {
+  /** Park the PR on the connector's queue. Returns 'merged' when the
+   *  call landed the PR outright (a queue-less repo merges directly) —
+   *  the honest answer from a state re-read, never a guess. Throws on
+   *  refusal: a failed enqueue is a failed merge, never "maybe queued". */
+  enqueue(t: PrTarget, opts?: EnqueueOpts): 'enqueued' | 'merged'
+}
+
 export interface ReviewFacade {
   /** 'owner/repo' — from positional args or the bound dir's remote. */
   resolveRepo(positional?: string[]): string

@@ -247,11 +247,30 @@ describe('gitLogPathRecords', () => {
     })
   })
 
-  test('a blown wall-clock bound is null — unverifiable, never a stall', () => {
-    withRepo((dir) => {
-      assert.equal(gitLogPathRecords(dir, 'HEAD', { timeoutMs: 1 }), null)
-    })
-  })
+  test(
+    'a blown wall-clock bound is null — unverifiable, never a stall',
+    { skip: process.platform === 'win32' },
+    () => {
+      withRepo((dir) => {
+        // a PATH shim that sleeps makes the bound deterministic — real
+        // git can finish under a 1ms timeout on a fast runner and flake
+        const shim = mkdtempSync(join(tmpdir(), 'bro-git-shim-'))
+        try {
+          writeFileSync(join(shim, 'git'), '#!/bin/sh\nsleep 60\n', { mode: 0o755 })
+          const prev = process.env.PATH
+          process.env.PATH = `${shim}:${prev ?? ''}`
+          try {
+            assert.equal(gitLogPathRecords(dir, 'HEAD', { timeoutMs: 1 }), null)
+          } finally {
+            if (prev === undefined) delete process.env.PATH
+            else process.env.PATH = prev
+          }
+        } finally {
+          rmSync(shim, { recursive: true, force: true })
+        }
+      })
+    }
+  )
 
   test('null on a bad ref, never a throw', () => {
     withRepo((dir) => {

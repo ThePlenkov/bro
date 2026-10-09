@@ -74,12 +74,24 @@ default store, so standard installs already have it).
   session is mid-merge — wait for `bd merge-slot check` to report available;
   a crashed holder is freed with `bd merge-slot release`. Only a
   user-directed override justifies merging around a BLOCKED gate. A PR in a
-  GitHub **stack** is not mergeable by `gh pr merge` at all (the API
-  refuses it) — `bro act merge` detects the stack and goes through the
-  async merge endpoint, polling until the merge settles, so don't hand-roll
-  `gh api … merge-async` either. The head branch is deliberately kept there
-  (deleting a lower layer's branch closes every PR stacked on it); local
-  cleanup with `--cleanup` is unaffected.
+  GitHub **stack** or onto a base that requires the **merge queue** is not
+  mergeable by `gh pr merge` at all — `bro act merge` detects either and
+  goes through the async merge endpoint, polling until the request
+  settles, so don't hand-roll `gh api … merge-async` either. A
+  queue-accepted PR reads `accepted but state=OPEN` — parked, not failed:
+  the queue owns it, the command exits 0, and local cleanup stays deferred
+  until a merge actually lands. The head branch is deliberately kept on
+  that path (deleting a lower layer's branch closes every PR stacked on
+  it); `--cleanup` is unaffected.
+- **External merge queues are opt-in connectors, never defaults.** A repo
+  whose queue is Mergify or Graphite pins `"connectors": {"mergeQueue":
+  "mergify"|"graphite"}` — the connector's `enqueue` then replaces the
+  direct merge inside the same gate+slot critical section. `mergify`
+  signals the PR (`act.mergeQueue.label` and/or `act.mergeQueue.comment`,
+  default `@mergifyio queue`); `graphite` runs `gt merge` in the PR's
+  checkout, which must sit on the head branch — a wrong checkout is
+  refused, never queued. `enqueued` is parked, not failed — `bro drive`
+  reports it as such and the next pass re-checks.
 - **Wait via `bro act wait <PR>` in the background, never a bespoke poll
   loop.** The command polls the exit gate until nothing is pending —
   green, settled blockers (threads, failures), or `--timeout` — then

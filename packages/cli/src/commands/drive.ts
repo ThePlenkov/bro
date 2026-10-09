@@ -879,6 +879,13 @@ async function mergeAndRetire(
         docsMaxRounds: ctx.act.docsMaxRounds,
       }
   ).catch(() => undefined)
+  // exit-0 + OPEN IS the enqueue contract — act merge exits 0 only on a
+  // landed merge or a queue acceptance (every refusal sets exit 1).
+  // Parked, never a failure: no retirement, no fixer close; the next
+  // pass re-attempts and merge-async resumes the same uuid.
+  if (after?.state === 'OPEN') {
+    return { pr, link, verdict: 'enqueued', detail: 'a merge queue owns it' }
+  }
   if (after?.state !== 'MERGED') {
     return {
       pr,
