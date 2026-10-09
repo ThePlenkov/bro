@@ -409,7 +409,10 @@ describe('githubReview', { skip: WIN32 }, () => {
           sleep: (ms) => naps.push(ms),
           deadlineMs: 1_000,
         })
-        assert.deepEqual(naps, [1_000])
+        // the nap is clamped to the remaining deadline — elapsed since
+        // `started` can be a millisecond, so ≤1_000, never exactly it
+        assert.deepEqual(naps.length, 1)
+        assert.ok(naps[0] > 0 && naps[0] <= 1_000)
       }
     )
   })
