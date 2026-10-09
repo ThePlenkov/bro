@@ -418,7 +418,8 @@ function spawnAgent(ctx: Ctx, beadId: string, title: string, promptFile: string,
     }
     const timer =
       ctx.cfg.agentTimeoutMin > 0
-        ? setTimeout(kill, ctx.cfg.agentTimeoutMin * 60_000)
+        ? // Node clamps delays above 2^31-1ms to 1ms — cap so large budgets keep working.
+          setTimeout(kill, Math.min(ctx.cfg.agentTimeoutMin * 60_000, 2_147_483_647))
         : undefined
     child.on('error', (err) => {
       clearTimeout(timer)
