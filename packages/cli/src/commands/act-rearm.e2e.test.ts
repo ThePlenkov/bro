@@ -10,6 +10,7 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import {
+  assertLandedBead,
   bead,
   FAKE_BEAD,
   initRepo,
@@ -186,10 +187,7 @@ describe('act rearm', () => {
       deadWatch(main, 9, { bead: 'fx-a' })
       const r = runCli(['act', 'rearm'], { cwd: main, env })
       assert.equal(r.code, 0, r.stderr)
-      const row = bead(db, 'fx-a')
-      assert.equal(row?.status, 'closed')
-      assert.match(String(row?.close_reason), /landed via/)
-      assert.match(r.stderr, /fx-a closed/)
+      assertLandedBead(db, 'fx-a', r.stderr)
     })
   })
 
@@ -237,10 +235,7 @@ describe('act rearm', () => {
         { cwd: main, env }
       )
       assert.equal(r.code, 0, r.stderr)
-      assert.match(r.stderr, /fx-a closed/)
-      const row = bead(db, 'fx-a')
-      assert.equal(row?.status, 'closed')
-      assert.match(String(row?.close_reason), /landed via/)
+      assertLandedBead(db, 'fx-a', r.stderr)
     })
   })
 
@@ -256,10 +251,7 @@ describe('act rearm', () => {
         { cwd: main, env }
       )
       assert.equal(r.code, 0, r.stderr)
-      assert.match(r.stderr, /fx-a closed/)
-      const row = bead(db, 'fx-a')
-      assert.equal(row?.status, 'closed')
-      assert.match(String(row?.close_reason), /landed via/)
+      assertLandedBead(db, 'fx-a', r.stderr)
     })
   })
 
@@ -271,7 +263,7 @@ describe('act rearm', () => {
       const r = runCli(['act', 'merge', '7', '--bead', 'fx-a'], { cwd: main, env })
       assert.equal(r.code, 1)
       assert.match(r.stderr, /only OPEN PRs/)
-      assert.equal(bead(db, 'fx-a')?.status, 'closed')
+      assertLandedBead(db, 'fx-a')
     })
   })
 
@@ -294,10 +286,7 @@ describe('act rearm', () => {
       deadWatch(main, 9, { bead: 'fx-a' })
       const r = runCli(['act', 'rearm'], { cwd: main })
       assert.equal(r.code, 0, r.stderr)
-      assert.match(r.stderr, /fx-a closed/)
-      const row = bead(db, 'fx-a')
-      assert.equal(row?.status, 'closed')
-      assert.match(String(row?.close_reason), /landed via/)
+      assertLandedBead(db, 'fx-a', r.stderr)
     })
   })
 

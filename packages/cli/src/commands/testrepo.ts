@@ -3,6 +3,7 @@
  *  spawner, and the fake bd/review-host the e2e matrix needs. Test files
  *  must not re-declare these — SonarCloud counts fixture clones as
  *  duplication on new code. */
+import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import {
   chmodSync,
@@ -404,6 +405,18 @@ export function readBeads(db: string): Array<Record<string, unknown>> {
 
 export function bead(db: string, id: string): Record<string, unknown> | undefined {
   return readBeads(db).find((r) => r.id === id)
+}
+
+/** The landed-claim verdict every act settle path owes — the bead is
+ *  closed with the merge link as its close reason; stderr (when the
+ *  caller holds one) carries the `act: <id> closed` line. */
+export function assertLandedBead(db: string, id: string, stderr?: string): void {
+  if (stderr !== undefined) {
+    assert.match(stderr, new RegExp(`${id} closed`))
+  }
+  const row = bead(db, id)
+  assert.equal(row?.status, 'closed')
+  assert.match(String(row?.close_reason), /landed via/)
 }
 
 export const FAKE_BEAD = {
