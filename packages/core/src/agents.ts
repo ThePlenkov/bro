@@ -468,6 +468,14 @@ export function patchAgentRegistry(
     const reg = readAgentRegistry(dir)
     const cur = reg[molStep] ?? { agentId: '', backend: '', spawnedAt: '' }
     const next = { ...cur, ...patch }
+    // the manual clear covers the retained `attempts` too — a superseded
+    // death must stay cleared with its entry (spec bro-1x7p), otherwise a
+    // shallow top-level stamp leaves the old record walling its provider
+    if (patch.stopped === true && Array.isArray(next.attempts)) {
+      next.attempts = (next.attempts as unknown[]).map((a) =>
+        a !== null && typeof a === 'object' ? { ...a, stopped: true } : a
+      )
+    }
     reg[molStep] = next
     writeAgentRegistry(dir, reg)
     return next
