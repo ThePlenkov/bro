@@ -5,6 +5,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -165,6 +166,21 @@ describe('resolveSteps', () => {
       isolatedConfig(() => {
         writeFileSync(join(main, 'pnpm-lock.yaml'), '')
         assert.deepEqual(resolveSteps(main, {}, true), ['pnpm install', 'pnpm run build'])
+      })
+    )
+  })
+
+  test('the conventional hotpatch must be executable — chmod -x skips it', () => {
+    const { root, main } = nodeRepo('bro-pm-steps-')
+    inside(main, root, () =>
+      isolatedConfig(() => {
+        const slot = join(process.env.XDG_DATA_HOME ?? '', 'bro', 'hotpatch.sh')
+        mkdirSync(join(slot, '..'), { recursive: true })
+        writeFileSync(slot, 'echo hi')
+        chmodSync(slot, 0o644) // exists but not executable → no patch step
+        assert.deepEqual(resolveSteps(main, {}, false), ['npm run build'])
+        chmodSync(slot, 0o755)
+        assert.deepEqual(resolveSteps(main, {}, false), ['npm run build', `bash '${slot}'`])
       })
     )
   })

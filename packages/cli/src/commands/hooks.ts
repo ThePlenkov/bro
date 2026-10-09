@@ -1660,6 +1660,28 @@ function runPerf(argv: string[]): void {
 
 // --- dispatch -----------------------------------------------------------------
 
+/** post-merge and its detached worker are git-hook events — same
+ *  pre-gate, no-stdin placement as the shim events: the dispatcher only
+ *  schedules the refresh, the worker does it; both fail open and never
+ *  block a merge (the catch covers a throw before the worker's own). */
+const POST_MERGE_EVENTS: Record<string, (cwd: string) => void> = {
+  'post-merge': emitPostMerge,
+  'post-merge-run': runPostMergeRefresh,
+}
+
+function runPostMergeEvent(event: string | undefined): boolean {
+  const run = POST_MERGE_EVENTS[event ?? '']
+  if (run === undefined) {
+    return false
+  }
+  try {
+    run(process.cwd())
+  } catch {
+    // fail-open
+  }
+  return true
+}
+
 export async function runHooksCommand(argv: string[]): Promise<void> {
   cursorClient = false
   codexClient = false
@@ -1687,24 +1709,7 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     runRefGuard(argv)
     return
   }
-  // post-merge and its detached worker are git-hook events too — same
-  // pre-gate, no-stdin placement: the dispatcher only schedules the
-  // refresh, the worker does it; both fail open and never block a merge
-  if (event === 'post-merge') {
-    try {
-      emitPostMerge(process.cwd())
-    } catch {
-      // fail-open
-    }
-    return
-  }
-  if (event === 'post-merge-run') {
-    try {
-      runPostMergeRefresh(process.cwd())
-    } catch {
-      // fail-open — the worker already swallows; this covers a throw
-      // before its own try
-    }
+  if (runPostMergeEvent(event)) {
     return
   }
   // `bro hooks perf` is a report over the perf journal — same no-stdin

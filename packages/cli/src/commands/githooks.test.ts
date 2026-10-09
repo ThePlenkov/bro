@@ -325,8 +325,10 @@ describe('post-merge shim (bro-sovl3)', () => {
   test('shim chains .local, dispatches `bro hooks post-merge`, fails open', () => {
     const shim = postMergeShim('1.2.3')
     assert.match(shim, /post-merge\.local/)
-    assert.match(shim, /bro hooks post-merge "\$@" \|\| true/)
-    assert.match(shim, /@broject\/bro@1\.2\.3.*hooks post-merge/)
+    // a bro that errors (older releases lack the event) falls through
+    // to the pinned npx fallback — detached, so git pull never waits
+    assert.match(shim, /command -v bro.*&& bro hooks post-merge "\$@" <\/dev\/null/)
+    assert.match(shim, /nohup npx -y --prefer-offline "@broject\/bro@1\.2\.3" hooks post-merge/)
     assert.ok(shim.includes(POSTMERGE_HOOK_MARK))
     // the chain keeps its veto; bro's tail always exits 0
     assert.match(shim, /"\$chain" "\$@" \|\| exit \$\?/)

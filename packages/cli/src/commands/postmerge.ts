@@ -21,8 +21,10 @@
  */
 import { spawn, spawnSync } from 'node:child_process'
 import {
+  accessSync,
   appendFileSync,
   closeSync,
+  constants,
   existsSync,
   mkdirSync,
   openSync,
@@ -118,14 +120,19 @@ function detectPm(cwd: string): string {
 }
 
 /** Conventional hotpatch slots — `$XDG_DATA_HOME/bro/hotpatch.sh` first,
- *  then the path the original local patch already runs from. */
+ *  then the path the original local patch already runs from. Only
+ *  executable files count: a chmod -x script is the operator's off
+ *  switch, not an auto step. */
 function defaultPatch(): string | undefined {
   const xdg = process.env.XDG_DATA_HOME
   const data =
     typeof xdg === 'string' && xdg.trim() !== '' ? xdg : join(homedir(), '.local', 'share')
   for (const p of [join(data, 'bro', 'hotpatch.sh'), join(data, 'bro-hotpatch.sh')]) {
-    if (existsSync(p)) {
-      return `bash '${p.replaceAll("'", "'\\''")}'`
+    try {
+      accessSync(p, constants.X_OK)
+      return `bash '${p.replaceAll("'", String.raw`'\''`)}'`
+    } catch {
+      // missing or not executable — try the next slot
     }
   }
   return undefined
@@ -141,17 +148,13 @@ export function resolveSteps(
 ): string[] {
   const pm = detectPm(cwd)
   const steps: string[] = []
-  const install =
-    cfg.install === false
-      ? undefined
-      : (cfg.install ?? (pm === 'npm' ? 'npm install --no-audit --no-fund' : `${pm} install`))
+  const pmInstall = pm === 'npm' ? 'npm install --no-audit --no-fund' : `${pm} install`
+  const install = cfg.install === false ? undefined : (cfg.install ?? pmInstall)
   if (changed && install !== undefined) {
     steps.push(install)
   }
-  const build =
-    cfg.build === false
-      ? undefined
-      : (cfg.build ?? (hasBuildScript(cwd) ? `${pm} run build` : undefined))
+  const pmBuild = hasBuildScript(cwd) ? `${pm} run build` : undefined
+  const build = cfg.build === false ? undefined : (cfg.build ?? pmBuild)
   if (build !== undefined) {
     steps.push(build)
   }
@@ -262,6 +265,51 @@ const defaultRun =
     return r.status ?? 1
   }
 
+const readDoneSha = (doneFile: string): string => {
+  try {
+    return readFileSync(doneFile, 'utf8').trim()
+  } catch {
+    return ''
+  }
+}
+
+/** One refresh pass — false stops the loop: HEAD done or unresolvable,
+ *  or a step failed (done-sha stays frozen so the next merge retries
+ *  the whole range). */
+function refreshPass(
+  cwd: string,
+  doneFile: string,
+  cfg: FreshnessConfig,
+  run: (cmd: string) => number
+): boolean {
+  const head = revParse(cwd, 'HEAD')
+  if (head === null) {
+    return false
+  }
+  const done = readDoneSha(doneFile)
+  if (done === head) {
+    return false
+  }
+  // diff from the last refreshed head when it still resolves — two
+  // merges inside one refresh window would otherwise leave the first
+  // one's dep changes unseen by ORIG_HEAD's retarget
+  const base = (done !== '' ? revParse(cwd, done) : null) ?? revParse(cwd, 'ORIG_HEAD')
+  const changed = base === null || depsChanged(cwd, base, head)
+  const steps = resolveSteps(cwd, cfg, changed)
+  console.log(
+    `refresh ${done === '' ? '(first run)' : done.slice(0, 12)}..${head.slice(0, 12)}: ` +
+      (steps.length === 0 ? 'nothing to do' : steps.join(' && '))
+  )
+  for (const cmd of steps) {
+    if (run(cmd) !== 0) {
+      console.log(`post-merge: step failed — done-sha NOT advanced, next merge retries`)
+      return false
+    }
+  }
+  writeFileSync(doneFile, `${head}\n`)
+  return true
+}
+
 /** The serialized refresh: loop until HEAD stops moving under us (each
  *  pass re-reads it — a merge mid-install queues the next diff), with
  *  the file lock making back-to-back post-merge dispatches sequential
@@ -284,37 +332,9 @@ export function runPostMergeRefresh(
       join(stateDir, LOCK_FILE),
       () => {
         for (let pass = 0; pass < MAX_PASSES; pass += 1) {
-          const head = revParse(cwd, 'HEAD')
-          if (head === null) {
-            return
+          if (!refreshPass(cwd, doneFile, cfg, run)) {
+            break
           }
-          const done = (() => {
-            try {
-              return readFileSync(doneFile, 'utf8').trim()
-            } catch {
-              return ''
-            }
-          })()
-          if (done === head) {
-            return
-          }
-          // diff from the last refreshed head when it still resolves —
-          // two merges inside one refresh window would otherwise leave
-          // the first one's dep changes unseen by ORIG_HEAD's retarget
-          const base = (done !== '' ? revParse(cwd, done) : null) ?? revParse(cwd, 'ORIG_HEAD')
-          const changed = base === null ? true : depsChanged(cwd, base, head)
-          const steps = resolveSteps(cwd, cfg, changed)
-          console.log(
-            `refresh ${done === '' ? '(first run)' : done.slice(0, 12)}..${head.slice(0, 12)}: ` +
-              (steps.length === 0 ? 'nothing to do' : steps.join(' && '))
-          )
-          for (const cmd of steps) {
-            if (run(cmd) !== 0) {
-              console.log(`post-merge: step failed — done-sha NOT advanced, next merge retries`)
-              return
-            }
-          }
-          writeFileSync(doneFile, `${head}\n`)
         }
       },
       { waitMs: 10 * 60_000, label: 'post-merge refresh lock' }

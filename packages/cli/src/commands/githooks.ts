@@ -558,7 +558,9 @@ export const POSTMERGE_LOCAL_HOOK = 'post-merge.local'
 /** The shim: chained .local first (its veto survives), then bro's
  *  dispatcher — `bro hooks post-merge` returns immediately after
  *  spawning the detached refresh worker, so `git pull` never waits on
- *  npm. Fail-open like its siblings. */
+ *  npm. A missing or failing bro (older releases lack the event) falls
+ *  through to the pinned npx package, itself detached. Fail-open like
+ *  its siblings. */
 export function postMergeShim(version: string): string {
   return `#!/bin/sh
 ${POSTMERGE_HOOK_MARK} — https://github.com/theplenkov/bro
@@ -566,10 +568,10 @@ chain="$(dirname "$0")/${POSTMERGE_LOCAL_HOOK}"
 if [ -x "$chain" ]; then
   "$chain" "$@" || exit $?
 fi
-if command -v bro >/dev/null 2>&1; then
-  bro hooks post-merge "$@" || true
+if command -v bro >/dev/null 2>&1 && bro hooks post-merge "$@" </dev/null; then
+  :
 elif command -v npx >/dev/null 2>&1; then
-  npx -y --prefer-offline "@broject/bro@${version}" hooks post-merge "$@" || true
+  nohup npx -y --prefer-offline "@broject/bro@${version}" hooks post-merge "$@" </dev/null >/dev/null 2>&1 &
 fi
 exit 0
 `

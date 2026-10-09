@@ -790,6 +790,9 @@ async function pushItem(ctx: Ctx, bead: ReadyBead): Promise<PushOutcome> {
   writePrompt(item, buildWorkPrompt(bead, item.branch, slot?.base, slot?.bottom, ctx.backend))
   const spawnAt = Date.now()
   const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
+  // agent wall-time — measured before findPr's gh call; a slow lookup
+  // must not inflate an instant crash past the crashExitMs threshold
+  const elapsed = Date.now() - spawnAt
   const pr = findPr(ctx, item.branch)
   if (pr === 'lookup-error') {
     noteBead(ctx.tasks, bead.id, `loop: PR lookup failed for ${item.branch} — worktree ${item.worktreeDir}`)
@@ -800,7 +803,6 @@ async function pushItem(ctx: Ctx, bead: ReadyBead): Promise<PushOutcome> {
     if (verdict !== undefined) {
       return { kind: 'done', result: verdict }
     }
-    const elapsed = Date.now() - spawnAt
     if (ctx.cfg.crashExitMs > 0 && elapsed < ctx.cfg.crashExitMs) {
       // gone in seconds, no PR, no verdict — the spawn died on the
       // environment (broken dist, bad argv), never on the bead. Reopen
