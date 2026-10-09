@@ -182,9 +182,11 @@ describe('bro loop e2e', () => {
   })
 
   test('agent exit != 0 without a PR → bead reopened + noted, worktree kept', () => {
+    // crashExitMs:0 disables the crash-park guard — this tests the
+    // legacy reopen path for a genuine mid-work failure
     const f = loopFixture(
       [{ ...FAKE_BEAD, id: 'fx-a', title: 'doomed' }],
-      {},
+      { crashExitMs: 0 },
       'fail'
     )
     inside(f.main, f.root, () => {
@@ -195,6 +197,25 @@ describe('bro loop e2e', () => {
       assert.match(String(row?.notes), /exited 3 without a PR/)
       assert.equal(existsSync(f.worktree), true)
       assert.match(r.stdout, /worktrees: .*main--fx-a/)
+    })
+  })
+
+  test('agent gone in <crashExitMs → parked, never reopened (bro-sovl3)', () => {
+    // the exit-3-instantly shape that burned the supervisor: reopening
+    // reclaims the bead into the same broken spawn — park instead
+    const f = loopFixture(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'doomed' }],
+      {},
+      'fail'
+    )
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /1 parked/)
+      assert.match(r.stdout, /parked \(crash, not work\)/)
+      const row = bead(f.db, 'fx-a')
+      assert.equal(row?.status, 'in_progress')
+      assert.match(String(row?.notes), /environment crash, not a verdict; parked/)
+      assert.equal(existsSync(f.worktree), true)
     })
   })
 

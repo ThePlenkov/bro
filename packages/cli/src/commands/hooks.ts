@@ -24,11 +24,16 @@
  *                                       git shims: prepare-commit-msg provenance
  *                                       (specs/bro-fzot.md) + reference-transaction
  *                                       shared-branch ref guard (specs/bro-1c78.md)
+ *                                       + post-merge dep-graph freshness
+ *                                       (specs/bro-sovl3.md)
  *   prepare-commit-msg                git-hook entrypoint — appends Agent/Agent-Model/
  *                                       Session/Bead/Molecule trailers to the message file
  *   reference-transaction             git-hook entrypoint — vetoes non-fast-forward
  *                                       moves of refs/heads/* by ref-mover verbs
  *                                       (reset/fetch/update-ref/branch/checkout/switch)
+ *   post-merge                        git-hook entrypoint — dispatches the detached
+ *   post-merge-run                      refresh worker: install (dep manifests moved in
+ *                                       the merge) → build → machine patch slot
  *
  * Contract: read the event payload on stdin, print hook control JSON on
  * stdout, exit 0. Everything is best-effort — hooks only fire in bro-enabled
@@ -88,11 +93,14 @@ import {
   cliVersion,
   emitCommitTrailers,
   installCommitHook,
+  installPostMergeHook,
   installRefGuardHook,
   uninstallCommitHook,
+  uninstallPostMergeHook,
   uninstallRefGuardHook,
   type InstallResult,
 } from './githooks.ts'
+import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts'
 import { emitRefGuard } from './refguard.ts'
 import { goalContextLines, goalStopLines } from './goal.ts'
 import {
@@ -1425,16 +1433,19 @@ function answerCursorPermission(event: string | undefined, input: HookInput): vo
 
 function runCommitHookCommand(event: 'install' | 'uninstall'): void {
   // every bro git hook rides the same install — provenance tags the
-  // commit message, refguard fences shared branch refs (bro-1c78)
+  // commit message, refguard fences shared branch refs (bro-1c78),
+  // post-merge keeps the dep graph and dist inside the just-merged head
   const results: [string, InstallResult][] =
     event === 'install'
       ? [
           ['prepare-commit-msg', installCommitHook(process.cwd(), cliVersion())],
           ['reference-transaction', installRefGuardHook(process.cwd(), cliVersion())],
+          ['post-merge', installPostMergeHook(process.cwd(), cliVersion())],
         ]
       : [
           ['prepare-commit-msg', uninstallCommitHook(process.cwd())],
           ['reference-transaction', uninstallRefGuardHook(process.cwd())],
+          ['post-merge', uninstallPostMergeHook(process.cwd())],
         ]
   for (const [name, r] of results) {
     if (r.state === 'error') {
@@ -1674,6 +1685,26 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   // installed shim is the opt-in)
   if (event === 'reference-transaction') {
     runRefGuard(argv)
+    return
+  }
+  // post-merge and its detached worker are git-hook events too — same
+  // pre-gate, no-stdin placement: the dispatcher only schedules the
+  // refresh, the worker does it; both fail open and never block a merge
+  if (event === 'post-merge') {
+    try {
+      emitPostMerge(process.cwd())
+    } catch {
+      // fail-open
+    }
+    return
+  }
+  if (event === 'post-merge-run') {
+    try {
+      runPostMergeRefresh(process.cwd())
+    } catch {
+      // fail-open — the worker already swallows; this covers a throw
+      // before its own try
+    }
     return
   }
   // `bro hooks perf` is a report over the perf journal — same no-stdin

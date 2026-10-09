@@ -548,3 +548,42 @@ export function installRefGuardHook(cwd: string, version: string): InstallResult
 export function uninstallRefGuardHook(cwd: string): InstallResult {
   return uninstallHookShim(cwd, REFGUARD_HOOK_NAME, REFGUARD_LOCAL_HOOK, REFGUARD_HOOK_MARK)
 }
+
+// --- post-merge freshness (bro-sovl3) ---------------------------------------------
+
+export const POSTMERGE_HOOK_MARK = '# bro: post-merge — install → build → patch'
+export const POSTMERGE_HOOK_NAME = 'post-merge'
+export const POSTMERGE_LOCAL_HOOK = 'post-merge.local'
+
+/** The shim: chained .local first (its veto survives), then bro's
+ *  dispatcher — `bro hooks post-merge` returns immediately after
+ *  spawning the detached refresh worker, so `git pull` never waits on
+ *  npm. Fail-open like its siblings. */
+export function postMergeShim(version: string): string {
+  return `#!/bin/sh
+${POSTMERGE_HOOK_MARK} — https://github.com/theplenkov/bro
+chain="$(dirname "$0")/${POSTMERGE_LOCAL_HOOK}"
+if [ -x "$chain" ]; then
+  "$chain" "$@" || exit $?
+fi
+if command -v bro >/dev/null 2>&1; then
+  bro hooks post-merge "$@" || true
+elif command -v npx >/dev/null 2>&1; then
+  npx -y --prefer-offline "@broject/bro@${version}" hooks post-merge "$@" || true
+fi
+exit 0
+`
+}
+
+export function installPostMergeHook(cwd: string, version: string): InstallResult {
+  return installHookShim(cwd, {
+    name: POSTMERGE_HOOK_NAME,
+    localName: POSTMERGE_LOCAL_HOOK,
+    mark: POSTMERGE_HOOK_MARK,
+    shim: postMergeShim(version),
+  })
+}
+
+export function uninstallPostMergeHook(cwd: string): InstallResult {
+  return uninstallHookShim(cwd, POSTMERGE_HOOK_NAME, POSTMERGE_LOCAL_HOOK, POSTMERGE_HOOK_MARK)
+}

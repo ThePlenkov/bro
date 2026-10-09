@@ -50,6 +50,7 @@ describe('loopSection', () => {
       model: 'm-1',
       bootstrap: 'npm ci',
       agentTimeoutMin: 30,
+      crashExitMs: 5_000,
       mergeTimeoutMin: 60,
       fixRounds: 2,
       maxItems: 5,
@@ -62,11 +63,24 @@ describe('loopSection', () => {
       model: 'm-1',
       bootstrap: 'npm ci',
       agentTimeoutMin: 30,
+      crashExitMs: 5_000,
       mergeTimeoutMin: 60,
       fixRounds: 2,
       maxItems: 5,
       maxOpen: 2,
     })
+  })
+
+  test('crashExitMs: 0 is valid (legacy reopen), negatives/junk fall back', () => {
+    assert.equal(loopSection({ crashExitMs: 0 }).crashExitMs, 0)
+    assert.equal(
+      loopSection({ crashExitMs: -1 }).crashExitMs,
+      DEFAULT_LOOP_CONFIG.crashExitMs
+    )
+    assert.equal(
+      loopSection({ crashExitMs: 'fast' }).crashExitMs,
+      DEFAULT_LOOP_CONFIG.crashExitMs
+    )
   })
 
   test('maxOpen has a floor of 1 — 0 would cap the stack at nothing', () => {
