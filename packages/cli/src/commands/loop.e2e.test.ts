@@ -629,6 +629,18 @@ describe('bro loop fleet.routing', () => {
     })
   })
 
+  test('a dead loop.provider under armed routing cannot abort the run', () => {
+    // 'ghost' is never configured — under routing every bead takes its
+    // class chain head, so the stale lower-tier pick is unreachable and
+    // must not fail the run before the first claim
+    const f = routedLane([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }], { provider: 'ghost' })
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /loop: fx-a landed/, r.stderr)
+      assert.equal(bead(f.db, 'fx-a')?.status, 'closed')
+    })
+  })
+
   test('an unknown class: label parks the bead — claimed and noted, no worktree litter', () => {
     const f = routedLane([
       { ...FAKE_BEAD, id: 'fx-a', title: 'misrouted', labels: ['class:bogus'] },

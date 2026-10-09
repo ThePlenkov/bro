@@ -449,7 +449,8 @@ function classLabelOf(bead: ReadyBead): string | undefined {
  *  needs the description the list row doesn't carry. */
 function beadClassInfo(
   ctx: Ctx,
-  bead: ReadyBead
+  bead: ReadyBead,
+  routerEnabled = true
 ): { label?: string; priority?: number; title?: string; description?: string } {
   const info = {
     label: classLabelOf(bead),
@@ -459,6 +460,7 @@ function beadClassInfo(
   }
   const router = ctx.env.fleet?.router
   const routerMayFire =
+    routerEnabled &&
     router !== undefined &&
     router.mode !== 'off' &&
     ctx.sel.class === undefined &&
@@ -472,14 +474,24 @@ function beadClassInfo(
  *  supplies the provider, exactly like `bro agents up`'s spawn path
  *  (routeStepClass → applyFleetRouter → resolveSpawnProvider). The
  *  flag-tier picks still outrank the table piecewise; `ctx.lane` is the
- *  run's fixed lane when routing is off or bypassed. Throws SpawnError —
- *  a bad `class:` label or broken chain is a config error the caller
- *  settles as a failed item, never a silent template drop. */
-async function resolveBeadLane(ctx: Ctx, bead: ReadyBead): Promise<LoopLane> {
+ *  run's fixed lane when routing is off or bypassed. The judge router
+ *  fires only on a genuinely unclassed bead — an explicit `--class` pin
+ *  is the top precedence tier and must not be overruled (agents.ts
+ *  signals the pin by withholding `info`; here the flag is checked
+ *  directly) — and `router:false` skips it entirely for render-only
+ *  callers (a dry run must not spend a judge call or journal a shadow
+ *  verdict). Throws SpawnError — a bad `class:` label or broken chain
+ *  is a config error the caller settles as a failed item, never a
+ *  silent template drop. */
+async function resolveBeadLane(
+  ctx: Ctx,
+  bead: ReadyBead,
+  opts: { router?: boolean } = {}
+): Promise<LoopLane> {
   if (!ctx.routing) {
     return ctx.lane
   }
-  const info = beadClassInfo(ctx, bead)
+  const info = beadClassInfo(ctx, bead, opts.router !== false)
   const routed = routeStepClass(
     ctx.env.fleet,
     ctx.env.providers ?? {},
@@ -488,7 +500,10 @@ async function resolveBeadLane(ctx: Ctx, bead: ReadyBead): Promise<LoopLane> {
     ctx.sel.class,
     info
   )
-  const route = await applyFleetRouter(ctx.root, ctx.env, bead.id, info, routed)
+  const route =
+    opts.router === false || ctx.sel.class !== undefined
+      ? routed
+      : await applyFleetRouter(ctx.root, ctx.env, bead.id, info, routed)
   return resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, route)
 }
 
@@ -1251,6 +1266,7 @@ async function resolveRunLane(
   lane: LoopLane
   agent: string
   routing: boolean
+  flagPin: boolean
 }> {
   const env = loadAgentEnv(root)
   const agentFlag = flag(argv, '--agent')
@@ -1273,14 +1289,18 @@ async function resolveRunLane(
     Object.keys(env.fleet.routing).length > 0
   let lane: LoopLane
   try {
-    lane = await resolveLoopLane(env, sel, cfg)
-    if (routing) {
-      // preflight the class every bead falls back to — a table whose
-      // `default` (or the --class pin) doesn't resolve is a global
-      // config error, detected before the first claim. Per-bead
-      // `class:` labels still resolve per spawn inside pushItem.
-      routeStepClass(env.fleet, env.providers ?? {}, undefined, '', sel.class, {})
-    }
+    // preflight the class every bead falls back to — a table whose
+    // `default` (or the --class pin) doesn't resolve is a global
+    // config error, detected before the first claim. The route feeds
+    // the lane preflight too: under routing its chain head is the
+    // effective provider floor, so a dead lower-tier pick
+    // (loop.provider/loop.profile) can't abort a run every bead routes
+    // around. Per-bead `class:` labels still resolve per spawn inside
+    // pushItem.
+    const preflight = routing
+      ? routeStepClass(env.fleet, env.providers ?? {}, undefined, '', sel.class, {})
+      : undefined
+    lane = await resolveLoopLane(env, sel, cfg, preflight)
   } catch (err) {
     if (err instanceof SpawnError) {
       console.error(`bro loop: ${err.message}`)
@@ -1288,6 +1308,13 @@ async function resolveRunLane(
     }
     throw err
   }
+  // the flag TIER's provider pick — with routing armed, lane.provider
+  // also carries the fallback class's chain head (the floor), so
+  // "is the provider pinned?" must be read from the picks themselves
+  const flagPin =
+    sel.provider !== undefined ||
+    (sel.agent !== undefined && Object.hasOwn(env.providers ?? {}, sel.agent)) ||
+    (sel.profile !== undefined && fleetProfileOf(env, sel.profile).provider !== undefined)
   const agent =
     lane.worker?.kind === 'template'
       ? lane.worker.command
@@ -1307,10 +1334,11 @@ async function resolveRunLane(
   // lands positionally = the prompt). Warn loudly, don't refuse. An
   // argv worker takes the file as a positional arg by contract — the
   // check would only misfire on it. With fleet.routing armed and no
-  // flag-tier worker the base template is inert — each bead's routed
-  // lane carries its own command.
+  // flag-tier pin the base template is inert — each bead's routed lane
+  // carries its own command (lane.worker already holds the fallback
+  // class's floor, so the pin test is the picks, not the lane).
   if (
-    !(routing && lane.worker === undefined) &&
+    !(routing && !flagPin) &&
     lane.worker?.kind !== 'argv' &&
     !agent.includes('{promptFile}')
   ) {
@@ -1323,7 +1351,7 @@ async function resolveRunLane(
         'Intended for env-reading agents (BRO_PROMPT_FILE) only.'
     )
   }
-  return { env, sel, lane, agent, routing }
+  return { env, sel, lane, agent, routing, flagPin }
 }
 
 function buildCtx(
@@ -1337,10 +1365,11 @@ function buildCtx(
     lane: LoopLane
     agent: string
     routing: boolean
+    flagPin: boolean
   },
   backend: string
 ): Ctx {
-  const { env, sel, lane, agent, routing } = run
+  const { env, sel, lane, agent, routing, flagPin } = run
   const rev = reviewHost(root, broCfg.connectors)
   const ctx: Ctx = {
     rev,
@@ -1376,16 +1405,17 @@ function buildCtx(
   }
   // announce the resolved lane once — agents.native.provider picking up
   // the run must not be a silent behavior change for template users.
-  // With routing armed but no flag-tier pin, the provider isn't known
-  // until each bead resolves — say so instead of implying a fixed lane.
-  if (ctx.routing && ctx.lane.provider === undefined) {
+  // With routing armed the pin test is the flag TIER, not ctx.lane —
+  // the preflight route fills lane.provider with the fallback class's
+  // head, which advertises the floor, not a pin.
+  if (ctx.routing && !flagPin) {
     say(
       ctx,
       'loop: fleet.routing — provider resolves per bead class' +
         (ctx.sel.class === undefined ? '' : ` (pinned: ${ctx.sel.class})`)
     )
   }
-  if (ctx.lane.provider !== undefined) {
+  if (ctx.lane.provider !== undefined && (!ctx.routing || flagPin)) {
     say(
       ctx,
       `loop: provider ${laneLabel(ctx.lane)}` +
@@ -1415,14 +1445,26 @@ async function dryRunPlan(ctx: Ctx): Promise<void> {
   }
   // the render resolves THIS bead's lane — with fleet.routing armed the
   // provider differs per bead; a broken route reports the same error a
-  // claimed run would park on
+  // claimed run would park on. The judge router is skipped: a dry run
+  // spends no judge call and journals no shadow verdict — it reports
+  // the armed router instead.
   let lane = ctx.lane
   if (ctx.routing) {
     try {
-      lane = await resolveBeadLane(ctx, top)
+      lane = await resolveBeadLane(ctx, top, { router: false })
     } catch (err) {
       console.log(`  route: ${err instanceof Error ? err.message : String(err)}`)
       return
+    }
+    const router = ctx.env.fleet?.router
+    if (
+      router !== undefined &&
+      router.mode !== 'off' &&
+      ctx.sel.class === undefined &&
+      ctx.beadsDir !== undefined &&
+      classLabelOf(top) === undefined
+    ) {
+      console.log(`  router: ${router.provider} armed (${router.mode}) — a real run may re-class`)
     }
   }
   const w = lane.worker
