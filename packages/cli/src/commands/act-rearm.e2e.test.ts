@@ -1,4 +1,4 @@
-import { describe, test } from 'node:test'
+import { describe, test, type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   existsSync,
@@ -60,6 +60,48 @@ function deadWatch(
   return file
 }
 
+/** SIGKILL the resurrected watcher on teardown — the test leaks nothing. */
+function reaper(t: TestContext, root: string, pid: { n: number }): void {
+  t.after(() => {
+    if (pid.n > 0) {
+      try {
+        process.kill(pid.n, 'SIGKILL')
+      } catch {
+        /* already gone */
+      }
+    }
+    rmSync(root, { recursive: true, force: true })
+  })
+}
+
+/** Repo + fake host + fake beads store with fx-a claimed in_progress —
+ *  the shape a dead loop's armed marker left behind (bro-q6ppv). */
+function beadFixture() {
+  const { root, main } = fixture()
+  const { binDir, db } = installFakeBd(root, [
+    { ...FAKE_BEAD, id: 'fx-a', status: 'in_progress' },
+  ])
+  const env = { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: db }
+  return { root, main, db, env }
+}
+
+/** The respawned wait writes its own live marker a tick after rearm
+ *  returns — poll the watches dir for the child pid, don't assume. */
+async function pollMarker(
+  wd: string,
+  pid: number
+): Promise<Record<string, unknown> | null> {
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline) {
+    for (const f of readdirSync(wd)) {
+      const w = JSON.parse(readFileSync(join(wd, f), 'utf8')) as Record<string, unknown>
+      if (w.pid === pid) return w
+    }
+    await new Promise((res) => setTimeout(res, 50))
+  }
+  return null
+}
+
 describe('act rearm', () => {
   test('--dry-run reports the plan and mutates nothing', () => {
     const { root, main } = fixture()
@@ -83,18 +125,8 @@ describe('act rearm', () => {
 
   test('an open PR gets a detached watcher and the dead marker sweeps', async (t) => {
     const { root, main } = fixture()
-    let pid = 0
-    // the resurrected watcher is real — kill it so the test leaks nothing
-    t.after(() => {
-      if (pid > 0) {
-        try {
-          process.kill(pid, 'SIGKILL')
-        } catch {
-          /* already gone */
-        }
-      }
-      rmSync(root, { recursive: true, force: true })
-    })
+    const pid = { n: 0 }
+    reaper(t, root, pid)
     // a pending check keeps the gate red — the resurrected watcher
     // stays alive polling instead of merging and exiting instantly
     writeHostState(join(main, 'host.json'), {
@@ -119,26 +151,12 @@ describe('act rearm', () => {
       rearmed: Array<{ pr: number; pid: number }>
     }
     assert.equal(out.rearmed.length, 1)
-    pid = out.rearmed[0]!.pid
-    assert.ok(pid > 0)
+    pid.n = out.rearmed[0]!.pid
+    assert.ok(pid.n > 0)
     assert.equal(existsSync(marker), false)
     // the respawned `act wait` writes its own live marker — same PR,
-    // live pid, replayed mode. The child boots asynchronously, so the
-    // marker lands a tick after rearm returns — poll, don't assume.
-    const wd = join(main, '.git', 'bro', 'watches')
-    type Marker = { pr: number; pid: number; merge: boolean; cleanup: boolean }
-    const pollMarker = async (): Promise<Marker | null> => {
-      const deadline = Date.now() + 10_000
-      while (Date.now() < deadline) {
-        for (const f of readdirSync(wd)) {
-          const w = JSON.parse(readFileSync(join(wd, f), 'utf8')) as Marker
-          if (w.pid === pid) return w
-        }
-        await new Promise((res) => setTimeout(res, 50))
-      }
-      return null
-    }
-    const live = await pollMarker()
+    // live pid, replayed mode
+    const live = await pollMarker(join(main, '.git', 'bro', 'watches'), pid.n)
     assert.ok(live !== null, 'respawned watcher never wrote its marker')
     assert.equal(live.pr, 7)
     assert.equal(live.merge, true)
@@ -159,19 +177,13 @@ describe('act rearm', () => {
   })
 
   test('a settled PR carrying a bead closes the loop claim (bro-q6ppv)', () => {
-    const { root, main } = fixture()
-    const { binDir, db } = installFakeBd(root, [
-      { ...FAKE_BEAD, id: 'fx-a', status: 'in_progress' },
-    ])
+    const { root, main, db, env } = beadFixture()
     inside(main, root, () => {
       // the dead loop's marker outlived it AND the PR landed meanwhile —
       // rearm sweeps the marker and runs the finalizeMerge close
       writeHostState(join(main, 'host.json'), { prState: 'MERGED' })
       deadWatch(main, 9, { bead: 'fx-a' })
-      const r = runCli(['act', 'rearm'], {
-        cwd: main,
-        env: { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: db },
-      })
+      const r = runCli(['act', 'rearm'], { cwd: main, env })
       assert.equal(r.code, 0, r.stderr)
       const row = bead(db, 'fx-a')
       assert.equal(row?.status, 'closed')
@@ -181,17 +193,11 @@ describe('act rearm', () => {
   })
 
   test('a closed-unmerged settle keeps the bead open', () => {
-    const { root, main } = fixture()
-    const { binDir, db } = installFakeBd(root, [
-      { ...FAKE_BEAD, id: 'fx-a', status: 'in_progress' },
-    ])
+    const { root, main, db, env } = beadFixture()
     inside(main, root, () => {
       writeHostState(join(main, 'host.json'), { prState: 'CLOSED' })
       deadWatch(main, 9, { bead: 'fx-a' })
-      const r = runCli(['act', 'rearm'], {
-        cwd: main,
-        env: { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: db },
-      })
+      const r = runCli(['act', 'rearm'], { cwd: main, env })
       assert.equal(r.code, 0, r.stderr)
       assert.equal(bead(db, 'fx-a')?.status, 'in_progress')
     })
@@ -199,18 +205,8 @@ describe('act rearm', () => {
 
   test('a rearmed wait replays --bead into its own live marker', async (t) => {
     const { root, main } = fixture()
-    let pid = 0
-    // the resurrected watcher is real — kill it so the test leaks nothing
-    t.after(() => {
-      if (pid > 0) {
-        try {
-          process.kill(pid, 'SIGKILL')
-        } catch {
-          /* already gone */
-        }
-      }
-      rmSync(root, { recursive: true, force: true })
-    })
+    const pid = { n: 0 }
+    reaper(t, root, pid)
     // a pending check keeps the respawned wait alive while we read its marker
     writeHostState(join(main, 'host.json'), {
       prState: 'OPEN',
@@ -220,41 +216,25 @@ describe('act rearm', () => {
     const r = runCli(['act', 'rearm', '--json'], { cwd: main })
     assert.equal(r.code, 0, r.stderr)
     const out = JSON.parse(r.stdout) as { rearmed: Array<{ pr: number; pid: number }> }
-    pid = out.rearmed[0]!.pid
-    assert.ok(pid > 0)
+    pid.n = out.rearmed[0]!.pid
+    assert.ok(pid.n > 0)
     // the respawned wait re-records the bead in its own marker — a second
-    // crash + rearm still carries the identity (poll: it lands async)
-    const wd = join(main, '.git', 'bro', 'watches')
-    const deadline = Date.now() + 10_000
-    let live: Record<string, unknown> | null = null
-    while (Date.now() < deadline) {
-      for (const f of readdirSync(wd)) {
-        const w = JSON.parse(readFileSync(join(wd, f), 'utf8')) as Record<string, unknown>
-        if (w.pid === pid) {
-          live = w
-          break
-        }
-      }
-      if (live !== null) break
-      await new Promise((res) => setTimeout(res, 50))
-    }
+    // crash + rearm still carries the identity
+    const live = await pollMarker(join(main, '.git', 'bro', 'watches'), pid.n)
     assert.ok(live !== null, 'respawned watcher never wrote its marker')
     assert.equal(live.bead, 'fx-a')
   })
 
   test('act wait --merge --bead closes the claim once the merge lands', () => {
-    const { root, main } = fixture()
-    const { binDir, db } = installFakeBd(root, [
-      { ...FAKE_BEAD, id: 'fx-a', status: 'in_progress' },
-    ])
+    const { root, main, db, env } = beadFixture()
     inside(main, root, () => {
       // a green gate settles on the first poll — the merge + bead close
       // run in the same invocation (the shape a respawned wait executes)
       writeHostState(join(main, 'host.json'), { prState: 'OPEN' })
-      const r = runCli(['act', 'wait', '7', '--interval', '1', '--timeout', '1', '--merge', '--bead', 'fx-a'], {
-        cwd: main,
-        env: { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: db },
-      })
+      const r = runCli(
+        ['act', 'wait', '7', '--interval', '1', '--timeout', '1', '--merge', '--bead', 'fx-a'],
+        { cwd: main, env }
+      )
       assert.equal(r.code, 0, r.stderr)
       assert.match(r.stderr, /fx-a closed/)
       const row = bead(db, 'fx-a')
@@ -264,20 +244,14 @@ describe('act rearm', () => {
   })
 
   test('act merge --bead on a blocked PR refuses and closes nothing', () => {
-    const { root, main } = fixture()
-    const { binDir, db } = installFakeBd(root, [
-      { ...FAKE_BEAD, id: 'fx-a', status: 'in_progress' },
-    ])
+    const { root, main, db, env } = beadFixture()
     inside(main, root, () => {
       // a pending check blocks the gate — no merge, no bead close
       writeHostState(join(main, 'host.json'), {
         prState: 'OPEN',
         checks: [{ name: 'ci', state: 'PENDING', bucket: 'pending' }],
       })
-      const r = runCli(['act', 'merge', '7', '--bead', 'fx-a'], {
-        cwd: main,
-        env: { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: db },
-      })
+      const r = runCli(['act', 'merge', '7', '--bead', 'fx-a'], { cwd: main, env })
       assert.equal(r.code, 1)
       assert.match(r.stderr, /exit_gate=BLOCKED/)
       assert.equal(bead(db, 'fx-a')?.status, 'in_progress')
