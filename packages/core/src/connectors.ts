@@ -227,7 +227,12 @@ export function isOwnClaim(row: TaskRow, mine: Set<string>, actor: string): bool
   if (actor === '' || row.assignee === undefined || row.assignee === '') {
     return true
   }
-  return row.assignee === actor
+  // some backends join several assignees (github: 'a, b') — own when
+  // this actor is among them; exact-equality would disown a shared claim
+  return row.assignee
+    .split(',')
+    .map((a) => a.trim())
+    .includes(actor)
 }
 
 /** The tasks backend this repo actually serves — connector name +
@@ -242,6 +247,18 @@ function servingTasks(dir: string): { name: string; store: TaskStoreAsync } {
 
 const beadsConnector: Connector = {
   name: 'beads',
+  /** beads' auth probe IS the contract check — binary + call shape +
+   *  store reachability. Carrying it on the connector keeps the command
+   *  gate uniform: every serving backend answers "are you usable" the
+   *  same way. */
+  auth: (ctx) => {
+    try {
+      checkBeads(ctx.dir)
+      return null
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err)
+    }
+  },
   tasks: (ctx) => taskStore(ctx.dir),
   tasksAsync: (ctx) => taskStoreAsync(ctx.dir),
   hooks: () => ({
@@ -279,7 +296,7 @@ const beadsConnector: Connector = {
     },
     async stopGate(ctx) {
       try {
-        const { store } = servingTasks(ctx.dir)
+        const { name, store } = servingTasks(ctx.dir)
         const [mine, me, claimed] = await Promise.all([
           Promise.resolve(sessionTaskClaims(ctx)),
           store.actor ? store.actor() : Promise.resolve(''),
@@ -296,13 +313,16 @@ const beadsConnector: Connector = {
         const foreign = claimed.filter((r) => !isOwnClaim(r, mine, me))
         const fmt = (r: { id: string; title?: string }): string =>
           `${r.id} ${shortTitle(r.title)}`.trim()
+        // the close verb belongs to the SERVING backend — a zero-install
+        // rig has no bd, so naming it would leave the gate un-clearable
+        const verb = name === 'beads' ? '`bd close <id>`' : '`bro task close <id>`'
         const out: GateContribution[] = []
         if (own.length > 0) {
           out.push({
             aspect: 'task',
             block:
               `bro: claimed beads open: ${own.slice(0, 5).map(fmt).join(', ')} — ` +
-              'close (`bd close <id>`) or release the claim before stopping',
+              `close (${verb}) or release the claim before stopping`,
           })
         }
         if (foreign.length > 0) {
@@ -509,18 +529,15 @@ export function ensureAuth<K extends keyof FacadeMap>(
   }
 }
 
-/** Gate a command on the SERVING tasks backend — beads runs checkBeads
- *  (binary + contract + store); every other connector gets its auth()
- *  probe so a misconfigured pin fails with the connector's own
- *  remediation. Returns the serving connector's name — callers that
+/** Gate a command on the SERVING tasks backend — the connector's own
+ *  auth() probe answers "are you usable" (beads → checkBeads: binary +
+ *  contract + store; github → `gh auth status`; a plugin → its
+ *  remediation line), so a misconfigured pin fails with the connector's
+ *  own remediation. Returns the serving connector's name — callers that
  *  still have beads-only tails (BEADS_DIR pinning, bd sync) branch on
  *  it instead of re-resolving. */
 export function ensureTasksBackend(dir: string, prefer?: Record<string, string>): string {
   const name = facadeName('tasks', { dir }, { prefer })
-  if (name === 'beads') {
-    checkBeads(dir)
-    return name
-  }
   ensureAuth('tasks', { dir }, { prefer })
   return name
 }

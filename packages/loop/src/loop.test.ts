@@ -99,6 +99,14 @@ describe('prompts', () => {
     assert.match(p, /BEADS_DIR/)
   })
 
+  test("work prompt uses the backend's own close verb", () => {
+    // a github-tasks rig may have no bd at all — the verdict must ride
+    // the transport the connector guarantees
+    const p = buildWorkPrompt(bead, 'loop/bro-x1', undefined, undefined, 'github')
+    assert.match(p, /gh issue close "\$BRO_BEAD_ID"/)
+    assert.doesNotMatch(p, /bd close/)
+  })
+
   test('fix prompt carries the threads verbatim', () => {
     const p = buildFixPrompt(bead, 42, 'tid-1\t reviewer says fix foo')
     assert.match(p, /#42/)

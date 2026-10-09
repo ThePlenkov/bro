@@ -23,7 +23,7 @@
  * queue is scoped to this checkout's issue_prefix — foreign-prefix
  * beads are reported, never claimed. scope = "all" opts out in plans.
  */
-import { ensureTasksBackend, facade, gitTry } from '@broject/core'
+import { ensureTasksBackend, facade, gitTry, type FacadeOpts } from '@broject/core'
 import type { TaskStore } from '@broject/core'
 import { flag } from './args.ts'
 import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts'
@@ -36,10 +36,10 @@ import { loadBroConfig } from '../plugins.ts'
  *  resolves the same backend; the global store is beads-only by
  *  construction — its dir carries no bro.config, so resolution falls
  *  to the registry default anyway. */
-function storeFor(dir?: string): TaskStore {
+function storeFor(dir?: string, opts?: FacadeOpts): TaskStore {
   const root =
     dir ?? (gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd())
-  return facade('tasks', { dir: root }, { prefer: loadBroConfig(root).connectors })
+  return facade('tasks', { dir: root }, opts ?? { prefer: loadBroConfig(root).connectors })
 }
 
 export interface ReadyBead {
@@ -84,8 +84,8 @@ export const NEVER_CLAIM_LABELS = ['gt:slot']
 /** The single `bd ready` contract for next and loop: coordination
  *  primitives are filtered out by bd itself, before classification.
  *  `dir` retargets the query at another store — `bro next --global`. */
-export function readyBeads(dir?: string): ReadyBead[] {
-  return storeFor(dir).ready<ReadyBead>({ excludeLabels: NEVER_CLAIM_LABELS })
+export function readyBeads(dir?: string, opts?: FacadeOpts): ReadyBead[] {
+  return storeFor(dir, opts).ready<ReadyBead>({ excludeLabels: NEVER_CLAIM_LABELS })
 }
 
 /** This checkout's bead id scope — what `bd init` recorded as
@@ -93,9 +93,9 @@ export function readyBeads(dir?: string): ReadyBead[] {
  *  scopes apart — fail open rather than hide real work. A FAILED
  *  lookup is the opposite: on a shared db it would silently reopen
  *  cross-repo claiming, so it throws (fail closed). */
-export function projectPrefix(dir?: string): string | undefined {
+export function projectPrefix(dir?: string, opts?: FacadeOpts): string | undefined {
   try {
-    return storeFor(dir).prefix()
+    return storeFor(dir, opts).prefix()
   } catch (err) {
     throw new Error(
       `${err instanceof Error ? err.message : String(err)} ` +
@@ -107,8 +107,12 @@ export function projectPrefix(dir?: string): string | undefined {
 /** Resolve a plan's scope policy to the scope classify applies:
  *  `all` opts out entirely; `project`/`global` filter to the queried
  *  store's issue_prefix (the global store has its own). */
-export function nextScope(scope: NextPlan['scope'], dir?: string): { prefix?: string } {
-  return { prefix: scope === 'all' ? undefined : projectPrefix(dir) }
+export function nextScope(
+  scope: NextPlan['scope'],
+  dir?: string,
+  opts?: FacadeOpts
+): { prefix?: string } {
+  return { prefix: scope === 'all' ? undefined : projectPrefix(dir, opts) }
 }
 
 /** A parent's issue_type rarely changes mid-process — `bro loop`
@@ -122,7 +126,7 @@ const parentEpicCache = new Map<string, boolean>()
 /** bd reuses `parent` for both molecule steps and epic children — only
  *  a parent that IS an epic makes the child regular work. Looked up
  *  once per unique parent id; an unreadable parent stays a mol step. */
-export function epicParentIds(ready: ReadyBead[], dir?: string): Set<string> {
+export function epicParentIds(ready: ReadyBead[], dir?: string, opts?: FacadeOpts): Set<string> {
   const ids = [
     ...new Set(ready.map((b) => b.parent).filter((p): p is string => !!p)),
   ]
@@ -137,7 +141,7 @@ export function epicParentIds(ready: ReadyBead[], dir?: string): Set<string> {
       continue
     }
     try {
-      if (storeFor(dir).get(id)?.issue_type === 'epic') {
+      if (storeFor(dir, opts).get(id)?.issue_type === 'epic') {
         parentEpicCache.set(key, true)
         epic.add(id)
       }
@@ -218,9 +222,9 @@ export function classify(
 /** A failed claim is a race only when the bead actually moved on
  *  (claimed/closed elsewhere); a bd outage must surface, not silently
  *  drain the queue into a fake idle. */
-function racedAway(b: ReadyBead, dir?: string): boolean {
+function racedAway(b: ReadyBead, dir?: string, opts?: FacadeOpts): boolean {
   try {
-    const status = storeFor(dir).get(b.id)?.status
+    const status = storeFor(dir, opts).get(b.id)?.status
     return typeof status === 'string' && status !== 'open'
   } catch {
     return false // show failed too — bd is down; the claim error is the diagnostic
@@ -229,17 +233,22 @@ function racedAway(b: ReadyBead, dir?: string): boolean {
 
 /** Claim up to `limit` beads — concurrent `bro next` runs race on the
  *  same items; a raced-away claim falls through to the next candidate. */
-export function claimUpTo(queue: ReadyBead[], limit: number, dir?: string): ReadyBead[] {
+export function claimUpTo(
+  queue: ReadyBead[],
+  limit: number,
+  dir?: string,
+  opts?: FacadeOpts
+): ReadyBead[] {
   const picked: ReadyBead[] = []
   for (const b of queue) {
     if (picked.length >= limit) {
       break
     }
     try {
-      storeFor(dir).claim(b.id)
+      storeFor(dir, opts).claim(b.id)
       picked.push(b)
     } catch (err) {
-      if (racedAway(b, dir)) {
+      if (racedAway(b, dir, opts)) {
         continue // genuinely raced away — try the next candidate
       }
       throw err
@@ -248,14 +257,14 @@ export function claimUpTo(queue: ReadyBead[], limit: number, dir?: string): Read
   return picked
 }
 
-function printResult(result: NextResult, list: boolean): void {
+function printResult(result: NextResult, list: boolean, backend: string): void {
   for (const b of result.beads) {
     console.log(`→ ${b.id}${list ? '' : ' (claimed)'} P${b.priority} ${b.issue_type}`)
     console.log(`  ${b.title}`)
     if (b.description?.trim()) {
       console.log(`  ${b.description.trim().split('\n')[0]}`)
     }
-    console.log('  loop: implement → PR → bro act merge → bd close → bro next')
+    console.log(`  loop: implement → PR → bro act merge → ${backend === 'beads' ? 'bd close' : 'bro task close'} → bro next`)
   }
   if (result.beads.length === 0) {
     if (result.state === 'gated') {
@@ -286,9 +295,9 @@ function printResult(result: NextResult, list: boolean): void {
 /** readyBeads with a diagnostic — a missing backend CLI is an install
  *  problem, not a queue failure, and the global path must report it
  *  the same way the backend gate does for the project path. */
-function readyOrDie(dir?: string): ReadyBead[] {
+function readyOrDie(dir?: string, opts?: FacadeOpts): ReadyBead[] {
   try {
-    return readyBeads(dir)
+    return readyBeads(dir, opts)
   } catch (err) {
     const enoent = err != null && (err as NodeJS.ErrnoException).code === 'ENOENT'
     console.error(
@@ -307,24 +316,29 @@ export function applyNextPlan(plan: NextPlan): void {
   // the pipeline is identical, only the queue's home dir differs, and
   // the project store is not required at all (global works repo-less)
   const dir = plan.scope === 'global' ? requireGlobalStore() : undefined
+  // the global store is beads by construction — gate AND reads/claims
+  // must pin it, or a merged `connectors.tasks` preference could point
+  // the global queue at a project backend the gate never checked
+  const storeOpts: FacadeOpts | undefined = dir === undefined ? undefined : { connector: 'beads' }
+  let backend: string
   if (dir === undefined) {
     // gate on the serving backend — beads gets the compat probe, a
     // pinned connector gets its own auth check
     const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd()
-    ensureTasksBackend(root, loadBroConfig(root).connectors)
+    backend = ensureTasksBackend(root, loadBroConfig(root).connectors)
   } else {
     // the global store is beads by construction
-    ensureTasksBackend(dir, {})
+    backend = ensureTasksBackend(dir, {})
   }
-  const ready = readyOrDie(dir)
+  const ready = readyOrDie(dir, storeOpts)
   let c: ReturnType<typeof classify>
   try {
-    c = classify(ready, plan, nextScope(plan.scope, dir), epicParentIds(ready, dir))
+    c = classify(ready, plan, nextScope(plan.scope, dir, storeOpts), epicParentIds(ready, dir, storeOpts))
   } catch (err) {
     console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
     process.exit(1)
   }
-  const beads = plan.claim ? claimUpTo(c.queue, plan.limit, dir) : c.queue.slice(0, plan.limit)
+  const beads = plan.claim ? claimUpTo(c.queue, plan.limit, dir, storeOpts) : c.queue.slice(0, plan.limit)
   const picked = new Set(beads.map((b) => b.id))
   let state: NextResult['state'] = 'idle'
   if (beads.length > 0) {
@@ -351,7 +365,7 @@ export function applyNextPlan(plan: NextPlan): void {
     console.log(JSON.stringify(result, null, 2))
     return
   }
-  printResult(result, !plan.claim)
+  printResult(result, !plan.claim, backend)
 }
 
 export async function runNextCommand(argv: string[]): Promise<void> {

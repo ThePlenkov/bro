@@ -455,7 +455,7 @@ function noteBead(tasks: TaskStore, id: string, note: string): void {
 /** Best-effort return of a bead to the open queue. */
 function reopenBead(tasks: TaskStore, id: string): void {
   try {
-    tasks.update(id, { status: 'open' })
+    tasks.reopen(id)
   } catch { /* best-effort unclaim */ }
 }
 
@@ -733,7 +733,7 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<ItemResult> {
   if (!runBootstrap(ctx, bead, item)) {
     return 'failed'
   }
-  writePrompt(item, buildWorkPrompt(bead, item.branch, slot?.base, slot?.bottom))
+  writePrompt(item, buildWorkPrompt(bead, item.branch, slot?.base, slot?.bottom, ctx.backend))
   const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
   const pr = findPr(ctx, item.branch)
   if (pr === 'lookup-error') {

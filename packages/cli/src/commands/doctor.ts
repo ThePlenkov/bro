@@ -29,7 +29,7 @@ import {
   PROVIDER_REGISTRY,
   runJanitor,
 } from '@broject/core'
-import type { ProviderEntry, ProviderSurface } from '@broject/core'
+import type { BdCompat, ProviderEntry, ProviderSurface } from '@broject/core'
 import { parsePeer, rigFromRemoteUrl } from '@broject/mesh'
 import { judgeConfig, synthesizedProviders } from '@broject/judge'
 import type { JudgeConfig } from '@broject/judge'
@@ -320,8 +320,7 @@ function configOwnershipChecks(
 /** Compat probe — verifies the contract bro calls (read-path --json
  *  shapes, subcommand/flag surface, store schema) rather than trusting a
  *  pre-1.0 version number. Drift fails when beads is an active store. */
-function bdCompatCheck(dir: string, beadsActive: boolean): DoctorCheck {
-  const compat = probeBdCompat(dir)
+function bdCompatCheck(beadsActive: boolean, compat: BdCompat): DoctorCheck {
   if (!compat.ok) {
     return check(
       'bd-compat',
@@ -354,7 +353,8 @@ function bdChecks(
   dir: string,
   bd: BinProbe,
   beadsDir: boolean,
-  beadsActive: boolean
+  beadsActive: boolean,
+  compat: BdCompat
 ): DoctorCheck[] {
   if (!bd.found) {
     const fix = 'install beads (https://github.com/gastownhall/beads) or set "stores": ["jsonl"]'
@@ -364,7 +364,7 @@ function bdChecks(
         : check('bd', 'warn', binProblem(bd), 'beads store is off — nothing needs it'),
     ]
   }
-  const out: DoctorCheck[] = [check('bd', 'ok', bd.version ?? 'present'), bdCompatCheck(dir, beadsActive)]
+  const out: DoctorCheck[] = [check('bd', 'ok', bd.version ?? 'present'), bdCompatCheck(beadsActive, compat)]
   const dolt = bdTry(['dolt', 'remote', 'list'], 15_000, dir)
   if (dolt.code !== 0) {
     const err = dolt.err ? ` (${dolt.err})` : ''
@@ -396,7 +396,8 @@ function tasksBackendCheck(
   dir: string,
   pins: Record<string, string> | undefined,
   bd: BinProbe,
-  beadsActive: boolean
+  beadsActive: boolean,
+  compat: BdCompat
 ): DoctorCheck {
   const prefer = pins ?? {}
   const pinned = prefer.tasks
@@ -413,16 +414,35 @@ function tasksBackendCheck(
   }
   const tag = pinned !== undefined ? ` (connectors.tasks=${pinned})` : ' (default)'
   if (name === 'beads') {
-    // bd's own rows carry the detail — the tasks line only mirrors the
-    // verdict so the backend identity never reads healthy on a dead store
-    return bd.found
-      ? check('tasks', 'ok', `beads${tag}`)
-      : check(
-          'tasks',
-          beadsActive ? 'fail' : 'warn',
-          `beads${tag} — bd ${binProblem(bd)}`,
-          'install beads or pin connectors.tasks to another provider'
-        )
+    // the command gate is checkBeads (binary + contract + store) —
+    // mirror its verdict so the serving backend never reads healthy on
+    // a store `bro next` would refuse; the bd rows carry the detail
+    if (!bd.found) {
+      return check(
+        'tasks',
+        beadsActive ? 'fail' : 'warn',
+        `beads${tag} — bd ${binProblem(bd)}`,
+        'install beads or pin connectors.tasks to another provider'
+      )
+    }
+    if (!compat.ok) {
+      return check(
+        'tasks',
+        beadsActive ? 'fail' : 'warn',
+        `beads${tag} — ${compat.problems.join('; ')}`,
+        'fix the bd install or pin connectors.tasks to another provider'
+      )
+    }
+    if (compat.store !== 'reachable') {
+      const dead = compat.store === 'error'
+      return check(
+        'tasks',
+        beadsActive ? 'fail' : 'warn',
+        `beads${tag} — ${dead ? compat.storeErr : 'no store yet — `bd init` or `bro setup` creates one'}`,
+        'the serving task store must answer before next/loop can use it'
+      )
+    }
+    return check('tasks', 'ok', `beads${tag}`)
   }
   const auth = facadeAuth('tasks', { dir }, { prefer })
   return auth === null
@@ -775,11 +795,14 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
     (root !== null && isDir(join(root, '.beads'))) ||
     (typeof envDir === 'string' && envDir !== '' && isDir(envDir))
   const bd = probeBin('bd')
+  // one compat probe serves the bd row and the tasks row — the probe is
+  // a spawn bundle, never run it twice per doctor pass
+  const compat = probeBdCompat(dir)
   const janitor = checkJanitor(dir)
   checks.push(
     checkGh(),
-    tasksBackendCheck(dir, cfg.connectors, bd, cfg.stores.includes('beads')),
-    ...bdChecks(dir, bd, beadsDir, cfg.stores.includes('beads')),
+    tasksBackendCheck(dir, cfg.connectors, bd, cfg.stores.includes('beads'), compat),
+    ...bdChecks(dir, bd, beadsDir, cfg.stores.includes('beads'), compat),
     checkHooks(dir),
     ...checkConfig(dir),
     ...providerChecks(dir),

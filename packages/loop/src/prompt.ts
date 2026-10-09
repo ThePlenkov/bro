@@ -7,7 +7,8 @@ export function buildWorkPrompt(
   bead: LoopBead,
   branch: string,
   prBase?: string,
-  stackBottom?: boolean
+  stackBottom?: boolean,
+  backend: string = 'beads'
 ): string {
   const desc = bead.description?.trim()
   const body = desc ? `\n${desc}\n` : ''
@@ -21,6 +22,18 @@ export function buildWorkPrompt(
       ? `push, then \`gh pr create\` with a
   summary and a test-plan checklist.`
       : `push, then \`gh pr create --base ${prBase}\` — you are ${stackWho}. Add a summary and a test-plan checklist.`
+  // the verdict verb the SERVING task store guarantees — a github rig
+  // may have no bd at all, so 'bd close' would silently never reach
+  // the loop and the issue would get reopened as a failure
+  const CLOSERS: Record<string, string> = {
+    beads:
+      '`bd close "$BRO_BEAD_ID" --reason \'<why>\'` and stop — BEADS_DIR is\n  pinned to the shared store, so the verdict reaches the loop. Never\n  `bd init` in this worktree.',
+    github:
+      '`gh issue close "$BRO_BEAD_ID" --comment \'<why>\'` and stop — the issue\n  is the shared store, so the verdict reaches the loop.',
+  }
+  const closer =
+    CLOSERS[backend] ??
+    '`bro task close "$BRO_BEAD_ID" --reason \'<why>\'` and stop — the store\n  is shared, so the verdict reaches the loop.'
   return `You are an autonomous implementation agent. This worktree is already
 checked out on branch \`${branch}\` — work here, nowhere else.
 
@@ -35,11 +48,9 @@ ${body}# Rules
 - Commit with a conventional message, ${prLine}
 - Do NOT merge, do NOT wait on reviewers — the orchestrator drives the
   review gate. Your job ends once the PR exists.
-- Report verdicts through beads: if the task needs no code change
+- Report verdicts through the task store: if the task needs no code change
   (already done, invalid, obsolete), run
-  \`bd close "$BRO_BEAD_ID" --reason '<why>'\` and stop — BEADS_DIR is
-  pinned to the shared store, so the verdict reaches the loop. Never
-  \`bd init\` in this worktree.
+  ${closer}
 - If you genuinely cannot finish, push what you have and explain the
   blocker as your final message — never leave silent half-state.
 `
