@@ -156,6 +156,7 @@ describe('bro loop e2e', () => {
           merge: boolean
           cleanup?: boolean
           workdir?: string
+          bead?: string
           timeoutMin: number
         }
       }>
@@ -167,6 +168,9 @@ describe('bro loop e2e', () => {
       assert.equal(hit.marker.merge, true)
       assert.equal(hit.marker.cleanup, true)
       assert.equal(hit.marker.workdir, f.worktree)
+      // the bead rides the marker — a resurrected wait runs the
+      // finalizeMerge close the dead loop never reached (bro-q6ppv)
+      assert.equal(hit.marker.bead, 'fx-a')
     })
   })
 

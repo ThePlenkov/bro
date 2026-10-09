@@ -45,6 +45,11 @@ export interface PendingWatch {
    *  containing the watcher's cwd — replaying it from another checkout
    *  would tear down the wrong worktree, so rearm needs the original. */
   workdir?: string
+  /** The loop-claimed bead a landed merge finalizes — a rearmed wait
+   *  inherits it so the merge closes the work item, not just the PR
+   *  (bro-q6ppv: a dead loop's marker replayed as `act wait --merge
+   *  --cleanup` retired everything but never ran finalizeMerge). */
+  bead?: string
   /** A settled wait's verdict — 'blocked' markers are findings, not
    *  promises: they never count as live coverage and never rearm; a
    *  session-start report flags the blockers until a covering watch or
@@ -319,6 +324,7 @@ function readMarker(file: string): PendingWatch | null {
       typeof w.merge === 'boolean' &&
       (w.cleanup === undefined || typeof w.cleanup === 'boolean') &&
       (w.workdir === undefined || typeof w.workdir === 'string') &&
+      (w.bead === undefined || typeof w.bead === 'string') &&
       (w.verdict === undefined || w.verdict === 'blocked') &&
       (w.blockers === undefined ||
         (Array.isArray(w.blockers) && w.blockers.every((b) => typeof b === 'string'))) &&
@@ -425,21 +431,25 @@ export function watchMarkerKind(file: string, w: PendingWatch): string {
   return second === String(w.pid) ? 'wait' : (second ?? 'supervisor')
 }
 
-/** Dead watches deduped to one rearm plan per PR — the strongest
- *  recorded mode wins (a dead merge:true marker re-arms as --merge even
- *  when a watch-only marker died alongside). The caller checks the PR
- *  is still open before respawning; `files` are this PR's dead markers
- *  to drop once the replacement watch is up. */
-export function deadWatchPlan(
-  dir: string
-): Array<{
+/** The resurrection plan one dead wait-marker set yields — the fields
+ *  a respawned `act wait` replays, the loop-claimed `bead` the merge
+ *  finalizes, and `files`, this PR's dead markers to drop once the
+ *  replacement watch is up. */
+export interface RearmPlan {
   pr: number
   merge: boolean
   cleanup: boolean
   timeoutMin: number
   workdir?: string
+  bead?: string
   files: string[]
-}> {
+}
+
+/** Dead watches deduped to one rearm plan per PR — the strongest
+ *  recorded mode wins (a dead merge:true marker re-arms as --merge even
+ *  when a watch-only marker died alongside). The caller checks the PR
+ *  is still open before respawning. */
+export function deadWatchPlan(dir: string): RearmPlan[] {
   const byPr = new Map<
     number,
     {
@@ -447,6 +457,7 @@ export function deadWatchPlan(
       cleanup: boolean
       timeoutMin: number
       workdir?: string
+      bead?: string
       files: string[]
     }
   >()
@@ -468,6 +479,7 @@ export function deadWatchPlan(
         cleanup: l.watch.cleanup === true,
         timeoutMin: l.watch.timeoutMin,
         workdir: l.watch.workdir,
+        bead: l.watch.bead,
         files: [l.file],
       })
       continue
@@ -477,8 +489,10 @@ export function deadWatchPlan(
     // the mode it recorded; a watch-only marker's cwd never is one
     if (l.watch.merge && !cur.merge) {
       cur.workdir = l.watch.workdir ?? cur.workdir
+      cur.bead = l.watch.bead ?? cur.bead
     } else {
       cur.workdir = cur.workdir ?? l.watch.workdir
+      cur.bead = cur.bead ?? l.watch.bead
     }
     cur.merge = cur.merge || l.watch.merge
     cur.cleanup = cur.cleanup || l.watch.cleanup === true
@@ -493,7 +507,9 @@ export function deadWatchPlan(
  *  dead one); a settled PR's markers just get swept — reality already
  *  kept the promise. A host probe that can't answer keeps the marker:
  *  dropping the flag on an unverified PR is exactly the silent loss the
- *  marker exists to prevent. */
+ *  marker exists to prevent. `settled` carries the plan's bead so the
+ *  caller can close the loop-claimed bead whose finalizeMerge never
+ *  ran (bro-q6ppv). */
 export async function rearmWatches(opts: {
   dir: string
   isOpen: (pr: number) => Promise<boolean>
@@ -502,21 +518,15 @@ export async function rearmWatches(opts: {
    *  replacement watcher is CONFIRMED up (its live marker exists) — a
    *  bare spawn that exits early must resolve to undefined, keeping the
    *  dead markers instead of sweeping the only record of the promise. */
-  respawn?: (plan: {
-    pr: number
-    merge: boolean
-    cleanup: boolean
-    timeoutMin: number
-    workdir?: string
-  }) => number | undefined | Promise<number | undefined>
+  respawn?: (plan: RearmPlan) => number | undefined | Promise<number | undefined>
 }): Promise<{
   rearmed: Array<{ pr: number; pid: number }>
-  settled: number[]
+  settled: Array<{ pr: number; bead?: string }>
   kept: Array<{ pr: number; reason: string }>
 }> {
   const out = {
     rearmed: [] as Array<{ pr: number; pid: number }>,
-    settled: [] as number[],
+    settled: [] as Array<{ pr: number; bead?: string }>,
     kept: [] as Array<{ pr: number; reason: string }>,
   }
   for (const plan of deadWatchPlan(opts.dir)) {
@@ -529,18 +539,16 @@ export async function rearmWatches(opts: {
  *  respawns (or dry-run-reports). Extracted so rearmWatches reads as
  *  the loop it is. */
 async function rearmOne(
-  plan: { pr: number; files: string[]; merge: boolean; cleanup: boolean; timeoutMin: number; workdir?: string },
+  plan: RearmPlan,
   opts: {
     isOpen: (pr: number) => Promise<boolean>
-    respawn?: (plan: {
-      pr: number
-      merge: boolean
-      cleanup: boolean
-      timeoutMin: number
-      workdir?: string
-    }) => number | undefined | Promise<number | undefined>
+    respawn?: (plan: RearmPlan) => number | undefined | Promise<number | undefined>
   },
-  out: { rearmed: Array<{ pr: number; pid: number }>; settled: number[]; kept: Array<{ pr: number; reason: string }> }
+  out: {
+    rearmed: Array<{ pr: number; pid: number }>
+    settled: Array<{ pr: number; bead?: string }>
+    kept: Array<{ pr: number; reason: string }>
+  }
 ): Promise<void> {
   const sweep = (): void => {
     for (const f of plan.files) {
@@ -555,7 +563,9 @@ async function rearmOne(
     return
   }
   if (!open) {
-    out.settled.push(plan.pr)
+    out.settled.push(
+      plan.bead === undefined ? { pr: plan.pr } : { pr: plan.pr, bead: plan.bead }
+    )
     // a dry run reports but never mutates — markers move only on a real sweep
     if (opts.respawn !== undefined) {
       sweep()

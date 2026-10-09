@@ -9,9 +9,11 @@
  */
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import { basename, dirname } from 'node:path'
 import {
   ensureAuth,
   facade,
+  gitCommonDir,
   gitTry,
   mergeQueueHost,
   reviewHost,
@@ -43,7 +45,9 @@ import {
   type ActPlan,
   type ActThreadVerdict,
   type ExitGate,
+  type GateWaitResult,
   type PrActState,
+  type RearmPlan,
 } from '@broject/act'
 import {
   annotateThreads,
@@ -57,13 +61,15 @@ function usage(): never {
 
 Commands:
   status [PR] [--json]              PR state + exit gate JSON
-  wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--json]
+  wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID] [--json]
                                     Poll the gate until it settles; --merge lands on green,
-                                    --cleanup retires the worktree + local branch after it
+                                    --cleanup retires the worktree + local branch after it;
+                                    --bead closes the loop-claimed bead once the merge lands
   threads [PR]                      Unresolved review threads (TSV)
-  merge [PR] [--squash|--merge|--rebase] [--admin] [--cleanup]
+  merge [PR] [--squash|--merge|--rebase] [--admin] [--cleanup] [--bead ID]
                                     Merge only if the exit gate is green;
-                                    --cleanup also retires the worktree + local branch
+                                    --cleanup also retires the worktree + local branch,
+                                    --bead closes the loop-claimed bead on land
   rearm [--dry-run] [--json]        Resurrect dead watch markers: for each PR whose
                                     watcher died (host reboot, turn teardown) a fresh
                                     detached act wait goes up with the recorded mode
@@ -76,7 +82,7 @@ Commands:
   process.exit(1)
 }
 
-const VALUE_FLAGS = new Set(['--pr', '--thread', '--comment', '--file', '--interval', '--timeout'])
+const VALUE_FLAGS = new Set(['--pr', '--thread', '--comment', '--file', '--interval', '--timeout', '--bead'])
 
 /** PR number: --pr flag, first positional, or the current branch's PR. */
 function resolvePr(rev: ReviewFacade, argv: string[]): PrTarget {
@@ -209,6 +215,7 @@ async function cmdWait(argv: string[]): Promise<void> {
         merge: argv.includes('--merge'),
         cleanup: argv.includes('--cleanup'),
         workdir: process.cwd(),
+        bead: flag(argv, '--bead'),
         timeoutMin: timeout,
       },
       onPoll: (s, g) =>
@@ -241,35 +248,47 @@ async function cmdWait(argv: string[]): Promise<void> {
     }
   }
   if (res.timedOut || !res.gate.ok || res.state.state !== 'OPEN') {
-    // a settled blocked verdict is a finding, not just an exit code —
-    // a detached or turn-dead watcher leaves nobody reading it, so it
-    // lands where rehydrate looks: a verdict marker session-start flags
-    // plus a keyed mailbox drop live sessions drain mid-turn (bro-q4iq0)
     if (!res.timedOut && !res.gate.ok) {
-      const link = rev.prLink(t.repo, t.pr)
-      watchVerdict(process.cwd(), { pr: t.pr, link, timeoutMin: timeout }, res.gate.blockers)
-      try {
-        await facade('events', { dir: process.cwd() }, { prefer: loadBroConfig().connectors }).publish(
-          {
-            topic: 'act',
-            kind: 'block',
-            key: `act-wait-${t.pr}`,
-            source: 'act-wait',
-            ref: res.state.url,
-            payload:
-              `act wait on ${link} settled BLOCKED — ${res.gate.blockers.join('; ')} — ` +
-              `\`bro act threads ${t.pr}\` lists them`,
-          }
-        )
-      } catch {
-        // fail-open — the verdict record must never turn the exit-code
-        // contract into a failure
-      }
+      await recordBlockedVerdict(rev, t, res, timeout)
     }
+    // an external merge settles the wait before mergeIfAsked ever runs —
+    // watchEnd already swept the marker, so nothing is left for `act
+    // rearm`'s settle-path reconcile to see. Discharge the loop-claimed
+    // bead here (its twin rule: MERGED closes, CLOSED-unmerged keeps)
+    closeBeadIfLanded(argv, rev, t, res.state.state)
     process.exitCode = res.timedOut || !res.gate.ok ? 1 : 0
     return
   }
   await mergeIfAsked(argv, t.pr)
+}
+
+/** A settled blocked verdict is a finding, not just an exit code — a
+ *  detached or turn-dead watcher leaves nobody reading it, so it lands
+ *  where rehydrate looks: a verdict marker session-start flags plus a
+ *  keyed mailbox drop live sessions drain mid-turn (bro-q4iq0). */
+async function recordBlockedVerdict(
+  rev: ReviewFacade,
+  t: PrTarget,
+  res: GateWaitResult,
+  timeoutMin: number
+): Promise<void> {
+  const link = rev.prLink(t.repo, t.pr)
+  watchVerdict(process.cwd(), { pr: t.pr, link, timeoutMin }, res.gate.blockers)
+  try {
+    await facade('events', { dir: process.cwd() }, { prefer: loadBroConfig().connectors }).publish({
+      topic: 'act',
+      kind: 'block',
+      key: `act-wait-${t.pr}`,
+      source: 'act-wait',
+      ref: res.state.url,
+      payload:
+        `act wait on ${link} settled BLOCKED — ${res.gate.blockers.join('; ')} — ` +
+        `\`bro act threads ${t.pr}\` lists them`,
+    })
+  } catch {
+    // fail-open — the verdict record must never turn the exit-code
+    // contract into a failure
+  }
 }
 
 /** Detached `act wait` resurrection — own process group, parent's
@@ -281,16 +300,7 @@ async function cmdWait(argv: string[]): Promise<void> {
  *  own live marker shows up in listWatches, so a spawn that exits early
  *  (auth gate, config error) resolves undefined and the dead markers
  *  stay on disk as the still-unkept promise. */
-export async function respawnWatcher(
-  dir: string,
-  plan: {
-    pr: number
-    merge: boolean
-    cleanup: boolean
-    timeoutMin: number
-    workdir?: string
-  }
-): Promise<number | undefined> {
+export async function respawnWatcher(dir: string, plan: RearmPlan): Promise<number | undefined> {
   const entry = process.argv[1]
   if (entry === undefined) {
     return undefined
@@ -309,6 +319,12 @@ export async function respawnWatcher(
     if (plan.cleanup && workdirOk) {
       args.push('--cleanup')
     }
+  }
+  // the loop-claimed bead rides along in either mode — the respawned
+  // wait's own marker re-records it, so a second rearm keeps the
+  // identity; on merge it is the bead the dead loop never closed
+  if (plan.bead !== undefined) {
+    args.push('--bead', plan.bead)
   }
   const cwd = workdirOk ? plan.workdir! : dir
   const child = spawn(process.execPath, args, {
@@ -350,11 +366,15 @@ async function cmdRearm(argv: string[]): Promise<void> {
   const repo = await (rev.resolveRepoAsync === undefined
     ? Promise.resolve(rev.resolveRepo([]))
     : rev.resolveRepoAsync([]))
+  // prMeta answers both probes — the OPEN gate and the settle-path
+  // reconcile below — cache it so the second read costs nothing
+  const metas = new Map<number, { state: string }>()
   const isOpen = async (pr: number): Promise<boolean> => {
     const meta =
       rev.prMetaAsync === undefined
         ? rev.prMeta({ repo, pr })
         : await rev.prMetaAsync({ repo, pr })
+    metas.set(pr, meta)
     return meta.state === 'OPEN'
   }
   const res = await rearmWatches({
@@ -364,9 +384,20 @@ async function cmdRearm(argv: string[]): Promise<void> {
   })
   if (argv.includes('--json')) {
     console.log(JSON.stringify({ dryRun: dry, ...res }, null, 2))
-    return
+  } else {
+    reportRearm(res, dry, (pr) => rev.prLink(repo, pr))
   }
-  reportRearm(res, dry, (pr) => rev.prLink(repo, pr))
+  // the reconcile half of a dead loop's watch (bro-q6ppv): a settled
+  // marker carrying a bead means the PR resolved while nobody watched —
+  // MERGED discharges the loop's claim exactly as finalizeMerge did;
+  // CLOSED-unmerged keeps it (the work never landed)
+  if (!dry) {
+    for (const s of res.settled) {
+      if (s.bead !== undefined && metas.get(s.pr)?.state === 'MERGED') {
+        closeLandedBead(rev, { repo, pr: s.pr }, s.bead)
+      }
+    }
+  }
 }
 
 /** Human lines for a rearm result — kept out of cmdRearm so the
@@ -374,7 +405,7 @@ async function cmdRearm(argv: string[]): Promise<void> {
 function reportRearm(
   res: {
     rearmed: Array<{ pr: number; pid: number }>
-    settled: number[]
+    settled: Array<{ pr: number; bead?: string }>
     kept: Array<{ pr: number; reason: string }>
   },
   dry: boolean,
@@ -385,8 +416,8 @@ function reportRearm(
       `rearm: ${link(r.pr)} — ` + (dry ? 'would respawn a watcher' : `watcher up (pid ${r.pid})`)
     )
   }
-  for (const pr of res.settled) {
-    console.log(`rearm: ${link(pr)} settled — marker swept`)
+  for (const s of res.settled) {
+    console.log(`rearm: ${link(s.pr)} settled — marker swept`)
   }
   for (const k of res.kept) {
     console.error(`rearm: ${link(k.pr)} kept — ${k.reason}`)
@@ -397,10 +428,15 @@ function reportRearm(
 }
 
 /** Post-wait merge dispatch: `--merge` lands the PR (with `--cleanup`
- *  forwarded); `--cleanup` alone is an error — nothing was merged. */
+ *  and `--bead` forwarded); `--cleanup` alone is an error — nothing was
+ *  merged. */
 async function mergeIfAsked(argv: string[], pr: number): Promise<void> {
   if (argv.includes('--merge')) {
     const mergeArgs = argv.filter((a) => ['--squash', '--rebase', '--admin', '--cleanup'].includes(a))
+    const bead = flag(argv, '--bead')
+    if (bead !== undefined) {
+      mergeArgs.push('--bead', bead)
+    }
     await cmdMerge([String(pr), ...mergeArgs])
   } else if (argv.includes('--cleanup')) {
     console.error('error: --cleanup requires --merge — nothing was merged, nothing to clean')
@@ -534,6 +570,9 @@ async function cmdMerge(argv: string[]): Promise<void> {
     // a closed/merged PR can pass the gate (threads resolved, checks
     // settled) — merging it isn't a gate question, it's a lifecycle error
     if (state.state !== 'OPEN') {
+      // already landed still discharges the claim — the race where the
+      // PR merged between the wait's last green poll and this fetch
+      closeBeadIfLanded(argv, rev, t, state.state)
       console.error(
         `error: ${rev.prLink(t.repo, t.pr)} is ${state.state} — only OPEN PRs can be merged`
       )
@@ -561,14 +600,70 @@ async function cmdMerge(argv: string[]): Promise<void> {
     }
   }
   // local cleanup runs AFTER the merge slot is released — it is pure git
-  // plumbing and must not extend the critical section
+  // plumbing and must not extend the critical section. The bead close
+  // shares the ordering: a landed merge discharges the loop's claim
+  // before the worktree goes away.
   if (mergedHead) {
+    const bead = flag(argv, '--bead')
+    if (bead !== undefined) {
+      closeLandedBead(rev, t, bead)
+    }
     if (argv.includes('--cleanup')) {
       cleanupAfterMerge(mergedHead.ref, mergedHead.sha)
     } else {
       deleteMergedLocalBranch(mergedHead.ref, mergedHead.sha)
     }
   }
+}
+
+/** The finalizeMerge half a dead loop's rearmed wait inherits — the
+ *  watch marker's `bead` names the claim the landed PR discharges
+ *  (bro-q6ppv). Best-effort: a missing row, an already-closed verdict,
+ *  or an unreachable store reports and the merge result stands. stderr
+ *  keeps it out of a --json stdout stream. */
+function closeLandedBead(rev: ReviewFacade, t: PrTarget, bead: string): void {
+  const link = rev.prLink(t.repo, t.pr)
+  try {
+    const tasks = claimStore(process.cwd())
+    const row = tasks.get(bead)
+    if (row === undefined) {
+      console.error(`act: bead ${bead} not in the task store — nothing closed for ${link}`)
+      return
+    }
+    if (row.status === 'closed') {
+      return
+    }
+    tasks.close(bead, `landed via ${link}`)
+    console.error(`act: ${bead} closed — ${link} merged`)
+  } catch (err) {
+    console.error(`act: closing ${bead} failed — ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+/** The claim discharge owed even when the merge didn't happen here —
+ *  an external merge (or the race past the last green poll) leaves
+ *  `--bead` to release exactly as an own-merge would. */
+function closeBeadIfLanded(
+  argv: string[],
+  rev: ReviewFacade,
+  t: PrTarget,
+  state: string
+): void {
+  const bead = flag(argv, '--bead')
+  if (state === 'MERGED' && bead !== undefined) {
+    closeLandedBead(rev, t, bead)
+  }
+}
+
+/** The store a loop claim actually lives in — the tasks facade honors
+ *  `connectors.tasks` where bare `taskStore()` always resolves beads, and
+ *  the anchor is the main checkout (the git common dir's parent): a
+ *  settle running in the bead's own worktree — or any scoped/subdir cwd —
+ *  must not fork the close onto a store the claim was never written to. */
+function claimStore(dir: string): ReturnType<typeof taskStore> {
+  const common = gitCommonDir(dir)
+  const root = common !== null && basename(common) === '.git' ? dirname(common) : dir
+  return facade('tasks', { dir: root }, { prefer: loadBroConfig(root).connectors })
 }
 
 /** The branch a merged PR's checkout should fall back to: origin/HEAD's

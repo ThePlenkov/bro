@@ -24,6 +24,7 @@ import {
   watchRetire,
   watchVerdict,
   type PendingWatch,
+  type RearmPlan,
 } from './pending-watch.ts'
 
 const base: Omit<PendingWatch, 'pid' | 'startedAt'> = {
@@ -263,6 +264,19 @@ describe('pending-watch markers', () => {
     const path = watchBegin(dir, base)
     assert.ok(path)
     writeFileSync(path!, 'not json')
+    assert.equal(listWatches(dir).length, 0)
+    assert.equal(existsSync(path!), false)
+  })
+
+  test('a marker records the loop-claimed bead — malformed bead is residue', () => {
+    const dir = repo()
+    const path = watchBegin(dir, { ...base, bead: 'fx-a' })
+    assert.ok(path)
+    assert.equal(listWatches(dir)[0]!.watch.bead, 'fx-a')
+    // a non-string bead fails the marker shape check — residue, not a plan
+    const w = JSON.parse(readFileSync(path!, 'utf8')) as Record<string, unknown>
+    w.bead = 42
+    writeFileSync(path!, JSON.stringify(w))
     assert.equal(listWatches(dir).length, 0)
     assert.equal(existsSync(path!), false)
   })
@@ -590,9 +604,32 @@ describe('act rearm', () => {
         return 1
       },
     })
-    assert.deepEqual(res.settled, [8])
+    assert.deepEqual(res.settled, [{ pr: 8 }])
     assert.equal(calls, 0)
     assert.equal(existsSync(file), false)
+  })
+
+  test('a settled plan carries the recorded bead out for reconcile', async () => {
+    const dir = repo()
+    deadMarker(dir, { pr: 8, bead: 'fx-a' })
+    const res = await rearmWatches({ dir, isOpen: async () => false })
+    assert.deepEqual(res.settled, [{ pr: 8, bead: 'fx-a' }])
+  })
+
+  test('the respawn plan carries the recorded bead — the merge finalizes it', async () => {
+    const dir = repo()
+    deadMarker(dir, { pr: 8, merge: true, bead: 'fx-a' })
+    const spawned: RearmPlan[] = []
+    const res = await rearmWatches({
+      dir,
+      isOpen: async () => true,
+      respawn: (plan) => {
+        spawned.push(plan)
+        return 4242
+      },
+    })
+    assert.equal(spawned[0]!.bead, 'fx-a')
+    assert.deepEqual(res.rearmed, [{ pr: 8, pid: 4242 }])
   })
 
   test('an unverifiable PR keeps its marker — no blind sweep', async () => {
@@ -637,6 +674,15 @@ describe('act rearm', () => {
     const plan = deadWatchPlan(dir)
     assert.equal(plan.length, 1)
     assert.equal(plan[0]!.workdir, dir)
+  })
+
+  test('the merge marker upgrades a bead-less watch-only plan to its bead', async () => {
+    const dir = repo()
+    deadMarker(dir, { pr: 10, merge: false })
+    deadMarker(dir, { pr: 10, merge: true, bead: 'fx-a' })
+    const plan = deadWatchPlan(dir)
+    assert.equal(plan.length, 1)
+    assert.equal(plan[0]!.bead, 'fx-a')
   })
 
   test('a nonce-named marker — the shape watchBegin writes — is in the plan', async () => {

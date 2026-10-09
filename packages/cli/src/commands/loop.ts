@@ -824,7 +824,10 @@ async function pushItem(ctx: Ctx, bead: ReadyBead): Promise<PushOutcome> {
   // the loop IS the watcher — arm the same marker `act wait` drops
   // (bro-z0k2u) for the member's whole stack tenure, not per poll:
   // a reboot-killed loop leaves a dead marker `bro act rearm`
-  // resurrects instead of the PR sitting silently unwatched.
+  // resurrects instead of the PR sitting silently unwatched. `bead`
+  // rides the marker so the resurrected wait can run the finalizeMerge
+  // half the dead loop never reached — merge lands, claim closes
+  // (bro-q6ppv).
   const member: GateMember = {
     bead,
     item,
@@ -835,6 +838,7 @@ async function pushItem(ctx: Ctx, bead: ReadyBead): Promise<PushOutcome> {
       merge: true,
       cleanup: true,
       workdir: item.worktreeDir,
+      bead: bead.id,
       timeoutMin: ctx.cfg.mergeTimeoutMin,
     }),
     since: Date.now(),
