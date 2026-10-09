@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { gitTry } from '@broject/core'
-import { evalState, liveState } from './probes.ts'
+import { evalState, liveState, PROBE_FANOUT } from './probes.ts'
 
 function repo(branch = 'main'): string {
   const dir = mkdtempSync(join(tmpdir(), 'bro-probes-'))
@@ -158,6 +158,48 @@ describe('state probes', () => {
         ['probe:b', true],
       ]
     )
+  })
+
+  test('a never-settling probe fails closed on the timeout, not a hang', async () => {
+    const dir = repo()
+    const t0 = Date.now()
+    const vs = await evalState(
+      { probes: [{ name: 'wedged' }] },
+      dir,
+      liveState(dir),
+      { wedged: () => new Promise<boolean>(() => {}) },
+      25
+    )
+    assert.ok(Date.now() - t0 < 5_000)
+    assert.deepEqual(vs[0], {
+      clause: 'probe:wedged',
+      ok: false,
+      detail: 'timed out after 0.025s',
+    })
+  })
+
+  test('a guard’s probe list is pool-bounded — in-flight calls stay under the cap', async () => {
+    const dir = repo()
+    let inFlight = 0
+    let peak = 0
+    const slow = async (): Promise<boolean> => {
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      await new Promise((r) => setImmediate(r))
+      inFlight -= 1
+      return true
+    }
+    const names = Array.from({ length: PROBE_FANOUT * 3 }, (_, i) => `p${i}`)
+    const vs = await evalState(
+      { probes: names.map((name) => ({ name })) },
+      dir,
+      liveState(dir),
+      Object.fromEntries(names.map((n) => [n, slow]))
+    )
+    assert.equal(vs.length, names.length)
+    assert.ok(vs.every((v) => v.ok))
+    // still parallel — just never the whole list at once
+    assert.ok(peak > 1 && peak <= PROBE_FANOUT, `peak ${peak}`)
   })
 
   test('liveState memoizes — one git status serves repeated clause reads', () => {

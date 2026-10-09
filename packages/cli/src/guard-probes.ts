@@ -72,9 +72,11 @@ function tasksStore(dir: string): TaskStoreAsync {
 }
 
 /** driftEnv keyed by (dir, ref) — the comparison ref and shallow check
- *  are repo facts, invariant inside one run. */
+ *  are repo facts, invariant inside one run. `undefined` (auto-detect)
+ *  and `''` (a real arg driftEnv keeps verbatim) are different envs, so
+ *  the undefined key gets no trailer instead of collapsing into ''. */
 function driftEnvFor(dir: string, ref?: string): DriftEnv {
-  const key = `${dir}\0${ref ?? ''}`
+  const key = ref === undefined ? dir : `${dir}\0${ref}`
   let env = driftEnvMemo.get(key)
   if (env === undefined) {
     env = driftEnv(dir, ref)

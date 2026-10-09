@@ -75,6 +75,24 @@ describe('spec-drift probe — args.spec (bead-free)', () => {
     })
   })
 
+  test('args.ref cache keys keep undefined and \'\' apart — neither env poisons the other', async () => {
+    await withSpecRepo(async (main) => {
+      commit(main, 'code moved on', { 'src/a.ts': 'x\n' }, T1)
+      // '' is a real (bogus) ref — driftEnv keeps it verbatim, so every
+      // row is unverifiable; the (dir,'') env must not poison auto-detect
+      const bogus = await probe({ spec: 'specs/b1.md', ref: '' }, main)
+      assert.equal(typeof bogus === 'boolean' ? bogus : bogus.ok, false)
+      assert.match(typeof bogus === 'boolean' ? '' : (bogus.detail ?? ''), /^unverifiable/)
+      const auto = await probe({ spec: 'specs/b1.md' }, main)
+      assert.equal(typeof auto === 'boolean' ? auto : auto.ok, true)
+      assert.match(typeof auto === 'boolean' ? '' : (auto.detail ?? ''), /^STALE/)
+      // and the cached auto env must not mask a later explicit ''
+      const bogus2 = await probe({ spec: 'specs/b1.md', ref: '' }, main)
+      assert.equal(typeof bogus2 === 'boolean' ? bogus2 : bogus2.ok, false)
+      assert.match(typeof bogus2 === 'boolean' ? '' : (bogus2.detail ?? ''), /^unverifiable/)
+    })
+  })
+
   test('usage + safety: no args / missing file / escape fail closed', async () => {
     await withSpecRepo(async (main) => {
       for (const args of [

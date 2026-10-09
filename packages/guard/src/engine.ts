@@ -37,7 +37,7 @@ import {
 import type { MatchContext } from '@broject/learn'
 import type { GuardConfig } from './config.ts'
 import { DEFAULT_GUARD_CONFIG } from './config.ts'
-import { evalState, liveState } from './probes.ts'
+import { evalState, liveState, mapPool } from './probes.ts'
 import type { ClauseVerdict, LiveState, NamedProbe } from './probes.ts'
 
 export interface GuardEvalOpts {
@@ -100,6 +100,12 @@ export interface GuardRun {
 }
 
 const guardId = (name: string): string => `guard:${name}`
+
+/** Phase-1 fan-out cap — guard defs are unbounded config (plus every
+ *  connector's contribution) and each may shell out, so the sweep stays
+ *  parallel under a pool instead of launching all probes at once.
+ *  `maxPerEvent` bounds emissions, never the work behind them. */
+export const EVAL_FANOUT = 8
 
 /** `say` stays a fragment — bounded at GUARD_SAY_MAX_CHARS /
  *  GUARD_SAY_MAX_LINES with an ellipsis marker. */
@@ -296,25 +302,22 @@ export async function runGuards(opts: GuardEvalOpts): Promise<GuardRun> {
     })(),
   }
 
-  // phase 1 — deterministic clauses (on → match.* → state.*), every def
-  // in parallel: state probes shell out (spec-drift's tasks.get is a ~1s
-  // bd spawn), so a serial loop stacks per-def latencies into the
-  // post-tool spikes. Promise.all keeps verdicts in declaration order —
-  // the shared lazies are memoized promises/sync-caches, safe under
-  // concurrent reads, and budget accounting below is untouched.
-  const verdicts: GuardVerdict[] = await Promise.all(
-    guards.map(async ({ source, guard }): Promise<GuardVerdict> => {
-      const clauses = await evalClauses(guard, opts.event, lazies, opts.probes ?? {}, opts.dir)
-      return {
-        name: guard.name,
-        source,
-        clauses,
-        fired: 0,
-        budget: guard.when.budget ?? GUARD_DEFAULT_BUDGET,
-        fire: false,
-      }
-    })
-  )
+  // phase 1 — deterministic clauses (on → match.* → state.*), defs in
+  // parallel but pooled at EVAL_FANOUT: state probes shell out
+  // (spec-drift's tasks.get is a ~1s bd spawn), so a serial loop stacks
+  // per-def latencies into the post-tool spikes while an unbounded
+  // fan-out turns a large config into a spawn storm. mapPool keeps
+  // verdicts in declaration order — the shared lazies are memoized
+  // promises/sync-caches, safe under concurrent reads, and budget
+  // accounting below is untouched.
+  const verdicts: GuardVerdict[] = await mapPool(EVAL_FANOUT, guards, async ({ source, guard }) => ({
+    name: guard.name,
+    source,
+    clauses: await evalClauses(guard, opts.event, lazies, opts.probes ?? {}, opts.dir),
+    fired: 0,
+    budget: guard.when.budget ?? GUARD_DEFAULT_BUDGET,
+    fire: false,
+  }))
 
   // phase 1.5 — judge clauses: one noul per guard whose deterministic
   // clauses all pass; veto-only, abstains fail-open (spec: bro-nkn6).

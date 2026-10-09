@@ -7,7 +7,7 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { gitTry, JudgeUnavailable, type Guard, type Verdict } from '@broject/core'
 import type { MatchContext } from '@broject/learn'
-import { runGuards, type GuardEvalOpts } from './engine.ts'
+import { EVAL_FANOUT, runGuards, type GuardEvalOpts } from './engine.ts'
 
 function repo(branch = 'main'): string {
   const dir = mkdtempSync(join(tmpdir(), 'bro-guard-'))
@@ -239,6 +239,29 @@ describe('runGuards', () => {
     assert.deepEqual(run.verdicts.map((v) => v.name), ['first', 'second'])
     assert.equal(run.verdicts[0]!.clauses.find((c) => c.clause === 'probe:slow')!.ok, true)
     assert.equal(run.verdicts.every((v) => v.fire), true)
+  })
+
+  test('the def sweep is pool-bounded — in-flight probes stay under the cap', async () => {
+    const dir = repo()
+    let inFlight = 0
+    let peak = 0
+    const slow = async (): Promise<boolean> => {
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      await new Promise((r) => setImmediate(r))
+      inFlight -= 1
+      return true
+    }
+    const defs = Array.from({ length: EVAL_FANOUT * 2 }, (_, i): Guard => ({
+      name: `g${i}`,
+      when: { on: ['stop'], state: { probes: [{ name: 'p' }] } },
+      say: 'x',
+    }))
+    const run = await runGuards(opts(dir, { defs, probes: { p: slow } }))
+    assert.equal(run.verdicts.length, defs.length)
+    // every def's probe clause ran (emission itself is maxPerEvent-capped)
+    assert.ok(run.verdicts.every((v) => v.clauses.find((c) => c.clause === 'probe:p')!.ok))
+    assert.ok(peak > 1 && peak <= EVAL_FANOUT, `peak ${peak}`)
   })
 
   test('maxPerEvent caps emitted lines', async () => {
