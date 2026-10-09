@@ -39,6 +39,9 @@ describe('loopSection', () => {
   test('valid values pass through', () => {
     const cfg = loopSection({
       agent: 'devin -p',
+      provider: 'kilo-cli',
+      profile: 'cheap',
+      model: 'm-1',
       bootstrap: 'npm ci',
       agentTimeoutMin: 30,
       mergeTimeoutMin: 60,
@@ -47,6 +50,9 @@ describe('loopSection', () => {
     })
     assert.deepEqual(cfg, {
       agent: 'devin -p',
+      provider: 'kilo-cli',
+      profile: 'cheap',
+      model: 'm-1',
       bootstrap: 'npm ci',
       agentTimeoutMin: 30,
       mergeTimeoutMin: 60,

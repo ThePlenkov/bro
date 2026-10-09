@@ -7,7 +7,7 @@
  *  check store state, refs, and the worktree, not just output. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   FAKE_BEAD,
@@ -26,16 +26,23 @@ interface Fixture {
   main: string
   db: string
   hostState: string
+  /** The fake agent script's path — provider commands reference it. */
+  agent: string
   worktree: string
   run: (extra?: string[]) => CliResult
 }
 
 /** Repo + fake bd + fake host + bro.config wiring. `rows` are the ready
- *  queue; `loopCfg` merges into the loop section (fixRounds etc.). */
+ *  queue; `loopCfg` merges into the loop section (fixRounds etc.);
+ *  `extra` merges more top-level config (providers, fleet) built from
+ *  the installed host paths. HOME points at the fixture root so an
+ *  operator's ~/.config/bro providers can't hijack a bare run now that
+ *  the loop resolves the provider lane. */
 function loopFixture(
   rows: Array<Record<string, unknown>>,
   loopCfg: Record<string, unknown> = {},
-  scenario = 'land'
+  scenario = 'land',
+  extra: (host: { state: string; agent: string }) => Record<string, unknown> = () => ({})
 ): Fixture {
   const { root, main } = initRepo('bro-loop-e2e-')
   const { binDir, db } = installFakeBd(root, rows)
@@ -45,11 +52,13 @@ function loopFixture(
     JSON.stringify({
       plugins: ['./fakehost.ts'],
       connectors: { reviews: 'fakehost' },
+      ...extra(host),
       loop: { agent: `node ${host.agent}`, ...loopCfg },
     })
   )
   const env = {
     PATH: `${binDir}:${process.env.PATH ?? ''}`,
+    HOME: root,
     FAKE_BD_DB: db,
     FAKE_HOST_STATE: host.state,
     E2E_SCENARIO: scenario,
@@ -59,9 +68,54 @@ function loopFixture(
     main,
     db,
     hostState: host.state,
+    agent: host.agent,
     worktree: join(root, 'main--fx-a'),
     run: (extra = []) => runCli(['loop', ...extra], { cwd: main, env }),
   }
+}
+
+/** Fake `bro` binary — wins `broSpawnArgv`'s PATH scan ahead of any real
+ *  install, so an acp provider's `bro acp-worker …` argv lands here.
+ *  Plays the driver: records argv + provenance env, then does the land
+ *  scenario (the real driver would serve an ACP session instead). */
+const FAKE_BRO = `#!/usr/bin/env node
+const fs = require('node:fs')
+const path = require('node:path')
+const { execFileSync } = require('node:child_process')
+const args = process.argv.slice(2)
+const pf = args[args.length - 1]
+const STATE = process.env.FAKE_HOST_STATE
+const load = () => JSON.parse(fs.readFileSync(STATE, 'utf8'))
+const save = (s) => fs.writeFileSync(STATE, JSON.stringify(s))
+fs.appendFileSync(
+  path.join(path.dirname(STATE), 'acpworker.log'),
+  JSON.stringify({
+    args,
+    promptFile: pf,
+    promptOk: fs.existsSync(pf),
+    bead: process.env.BRO_BEAD_ID || null,
+    provider: process.env.BRO_AGENT_PROVIDER || null,
+    agent: process.env.BRO_AGENT || null,
+    model: process.env.BRO_AGENT_MODEL || null,
+  }) + '\\n'
+)
+if (fs.readFileSync(pf, 'utf8').includes('review-threads')) {
+  const s = load(); s.threads = []; save(s); process.exit(0)
+}
+fs.writeFileSync('work.txt', 'did the thing\\n')
+execFileSync('git', ['add', '-A'])
+execFileSync('git', ['commit', '-qm', 'feat: the thing'])
+const s = load()
+s.prOpened = true
+save(s)
+`
+
+/** Install the fake `bro` beside the fake `bd` — same dir, first on
+ *  the fixture PATH. */
+function installFakeBro(root: string): void {
+  const bro = join(root, 'bin', 'bro')
+  writeFileSync(bro, FAKE_BRO)
+  chmodSync(bro, 0o755)
 }
 
 const spawns = (f: Fixture): string =>
@@ -238,6 +292,203 @@ describe('bro loop e2e', () => {
       const r = f.run()
       assert.match(r.stdout, /0 landed, 0 closed, 0 parked, 0 failed/)
       assert.match(r.stdout, /clean — no loop tails/)
+    })
+  })
+})
+
+describe('bro loop provider lane', () => {
+  test('loop.provider config routes the spawn — loop.agent is not consulted', () => {
+    // loop.agent would fail (`false`) — the provider's command must win
+    const f = loopFixture(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }],
+      { provider: 'fakecli', agent: 'false' },
+      'land',
+      (host) => ({
+        providers: { fakecli: { type: 'cli', command: `node ${host.agent}` } },
+      })
+    )
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /loop: fx-a landed/)
+      assert.match(spawns(f), /work opened pr/)
+      assert.equal(bead(f.db, 'fx-a')?.status, 'closed')
+    })
+  })
+
+  test('--provider <name> routes the spawn through the registry', () => {
+    const f = loopFixture(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }],
+      { agent: 'false' },
+      'land',
+      (host) => ({
+        providers: { fakecli: { type: 'cli', command: `node ${host.agent}` } },
+      })
+    )
+    inside(f.main, f.root, () => {
+      const r = f.run(['--provider', 'fakecli'])
+      assert.match(r.stdout, /loop: fx-a landed/)
+      assert.match(spawns(f), /work opened pr/)
+    })
+  })
+
+  test('--agent <provider-name> names the provider, not a template', () => {
+    const f = loopFixture(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }],
+      { agent: 'false' },
+      'land',
+      (host) => ({
+        providers: { fakecli: { type: 'cli', command: `node ${host.agent}` } },
+      })
+    )
+    inside(f.main, f.root, () => {
+      const r = f.run(['--agent', 'fakecli'])
+      assert.match(r.stdout, /loop: fx-a landed/)
+    })
+  })
+
+  test('acp provider spawns the headless acp-worker argv — no shell template', () => {
+    const f = loopFixture(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }],
+      { agent: 'false' },
+      'land',
+      () => ({
+        providers: {
+          devin: {
+            type: 'acp',
+            command: 'devin acp',
+            model: 'swe-2',
+            autoApprove: true,
+          },
+        },
+      })
+    )
+    installFakeBro(f.root)
+    inside(f.main, f.root, () => {
+      const r = f.run(['--agent', 'devin'])
+      assert.match(r.stdout, /loop: fx-a landed/, r.stderr)
+      const log = readFileSync(join(f.main, 'acpworker.log'), 'utf8').trim()
+      const rec = JSON.parse(log) as {
+        args: string[]
+        promptFile: string
+        promptOk: boolean
+        bead: string
+        provider: string
+        agent: string
+        model: string
+      }
+      // `bro acp-worker --command <cmd> --model <m> --auto-approve <pf>`
+      assert.equal(rec.args[0], 'acp-worker')
+      assert.deepEqual(rec.args.slice(1, -1), [
+        '--command',
+        'devin acp',
+        '--model',
+        'swe-2',
+        '--auto-approve',
+      ])
+      assert.equal(rec.promptOk, true, `prompt file ${rec.promptFile} missing`)
+      assert.equal(rec.bead, 'fx-a')
+      // provenance pins: provider lane identity, agent cli badge
+      assert.equal(rec.provider, 'devin')
+      assert.equal(rec.agent, 'devin')
+      assert.equal(rec.model, 'swe-2')
+      assert.equal(bead(f.db, 'fx-a')?.status, 'closed')
+    })
+  })
+
+  test('--profile <name> fills provider/model/autoApprove piecewise', () => {
+    const f = loopFixture(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }],
+      { agent: 'false' },
+      'land',
+      () => ({
+        providers: { devin: { type: 'acp', command: 'devin acp' } },
+        fleet: { profiles: { cheap: { provider: 'devin', model: 'swe-1.5', autoApprove: true } } },
+      })
+    )
+    installFakeBro(f.root)
+    inside(f.main, f.root, () => {
+      const r = f.run(['--profile', 'cheap'])
+      assert.match(r.stdout, /loop: fx-a landed/, r.stderr)
+      const rec = JSON.parse(
+        readFileSync(join(f.main, 'acpworker.log'), 'utf8').trim()
+      ) as { args: string[]; model: string }
+      assert.equal(rec.args.includes('--auto-approve'), true)
+      assert.equal(rec.model, 'swe-1.5')
+    })
+  })
+
+  test('a template --agent overrides a configured loop.provider (escape hatch)', () => {
+    const f = loopFixture(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }],
+      { provider: 'bad' },
+      'land',
+      () => ({ providers: { bad: { type: 'cli', command: 'false' } } })
+    )
+    inside(f.main, f.root, () => {
+      const r = f.run(['--agent', `node ${f.agent}`])
+      assert.match(r.stderr, /bypasses the configured provider lane/)
+      assert.match(r.stdout, /loop: fx-a landed/)
+    })
+  })
+
+  test('an unknown --provider fails before any bead is claimed', () => {
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }])
+    inside(f.main, f.root, () => {
+      const r = f.run(['--provider', 'nope'])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /providers\.nope is not configured/)
+      assert.equal(bead(f.db, 'fx-a')?.status, 'open')
+    })
+  })
+
+  test('--agent <provider> and a disagreeing --provider is a usage error', () => {
+    const f = loopFixture([], {}, 'land', () => ({
+      providers: {
+        a: { type: 'cli', command: 'a-cmd' },
+        b: { type: 'cli', command: 'b-cmd' },
+      },
+    }))
+    inside(f.main, f.root, () => {
+      const r = f.run(['--agent', 'a', '--provider', 'b'])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /different providers/)
+    })
+  })
+
+  test('provider flags beside a template --agent are contradictory', () => {
+    const f = loopFixture([], {}, 'land', () => ({
+      providers: { fakecli: { type: 'cli', command: 'node x' } },
+    }))
+    inside(f.main, f.root, () => {
+      const r = f.run(['--agent', 'node x {promptFile}', '--model', 'm-1'])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /raw template/)
+    })
+  })
+
+  test('--model with no provider configured is refused, not dropped', () => {
+    const f = loopFixture([])
+    inside(f.main, f.root, () => {
+      const r = f.run(['--model', 'm-1'])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /ride the provider lane/)
+    })
+  })
+
+  test('--dry-run renders the resolved provider + acp-worker argv', () => {
+    const f = loopFixture(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }],
+      {},
+      'land',
+      () => ({ providers: { devin: { type: 'acp', command: 'devin acp' } } })
+    )
+    inside(f.main, f.root, () => {
+      const r = f.run(['--agent', 'devin', '--dry-run'])
+      assert.match(r.stdout, /would claim fx-a/)
+      assert.match(r.stdout, /provider: devin/)
+      assert.match(r.stdout, /acp-worker/)
+      assert.match(r.stdout, /--command 'devin acp'/)
+      assert.equal(bead(f.db, 'fx-a')?.status, 'open')
     })
   })
 })

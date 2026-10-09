@@ -19,6 +19,17 @@ export interface LoopConfig {
    *  -p`, `claude -p "$(cat {promptFile})"`, `codex exec "$(cat
    *  {promptFile})"`). Empty = no agent configured. */
   agent: string
+  /** `providers.<name>` — a configured provider routes the spawn through
+   *  the shared facade (acp workers are headless; cli providers supply
+   *  the command template) instead of expanding `agent`. Empty = the raw
+   *  `agent` template lane. */
+  provider: string
+  /** `fleet.profiles.<name>` preset — fills provider/model/autoApprove
+   *  piecewise for the provider lane. */
+  profile: string
+  /** Model override for the provider lane — meaningless on a raw
+   *  template (the template carries its own flags). */
+  model: string
   /** Optional shell command run once in the fresh worktree before the
    *  agent spawns (e.g. `npm install`). */
   bootstrap: string
@@ -34,6 +45,9 @@ export interface LoopConfig {
 
 export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   agent: '',
+  provider: '',
+  profile: '',
+  model: '',
   bootstrap: '',
   agentTimeoutMin: 45,
   mergeTimeoutMin: 45,

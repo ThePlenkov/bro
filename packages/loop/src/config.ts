@@ -21,6 +21,9 @@ export const loopSection: ConfigSection<LoopConfig> = (raw) => {
       : DEFAULT_LOOP_CONFIG[k]
   return {
     agent: str('agent') as string,
+    provider: str('provider') as string,
+    profile: str('profile') as string,
+    model: str('model') as string,
     bootstrap: str('bootstrap') as string,
     agentTimeoutMin: num('agentTimeoutMin', 1),
     mergeTimeoutMin: num('mergeTimeoutMin', 1),
