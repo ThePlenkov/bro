@@ -217,7 +217,7 @@ describe('loopRefTails', () => {
   })
 })
 
-describe('loopWatch — the loop supervisor heartbeat (bro-0aa87)', () => {
+describe('loopWatch — the member watch payload (bro-0aa87)', () => {
   test('claims merge+cleanup supervision and bounds the TTL to the item budget', () => {
     const w = loopWatch(7, '[#7](https://x/pull/7)', '/wt/bro--bro-x', DEFAULT_LOOP_CONFIG)
     assert.equal(w.pr, 7)
