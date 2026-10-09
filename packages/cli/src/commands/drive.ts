@@ -68,12 +68,7 @@ import {
 } from '@broject/judge'
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { flag } from './args.ts'
-import {
-  defaultBranch,
-  deleteMergedLocalBranch,
-  removeMergedWorktree,
-  runActCommand,
-} from './act.ts'
+import { defaultBranch, runActCommand } from './act.ts'
 import { spawnStepAgent } from './agents.ts'
 import { collectAgents } from './fleet.ts'
 import {
@@ -85,9 +80,11 @@ import {
 import { loadBroConfig } from '../plugins.ts'
 import {
   claimLockPath,
+  deleteMergedLocalBranch,
   LIVE_MARKER_MS,
   mainWorktree,
   parseWorktreePorcelain,
+  removeMergedWorktree,
   worktreeClaim,
   worktreePathFor,
 } from './work.ts'

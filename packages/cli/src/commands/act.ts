@@ -19,10 +19,14 @@ import {
   type ReviewThread,
 } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
-import { isAncestor } from './cleanup.ts'
 import { flag } from './args.ts'
-import { gitDirOf, hasSubmodules, isLinkedGitDir, parseWorktreePorcelain } from './work.ts'
-import type { WorktreeInfo } from './work.ts'
+import {
+  deleteMergedLocalBranch,
+  gitDirOf,
+  isLinkedGitDir,
+  parseWorktreePorcelain,
+  removeMergedWorktree,
+} from './work.ts'
 import {
   acquireMergeSlot,
   checkHistory,
@@ -502,48 +506,6 @@ async function cmdMerge(argv: string[]): Promise<void> {
   }
 }
 
-/** Best-effort local-side cleanup after a merge — the remote branch is
- * already gone via --delete-branch, but the local ref lingers. Never
- * fails the merge: a branch checked out in ANY worktree simply reports
- * (a checkout cannot delete its own branch). Deletes only when the local
- * tip IS the merged head (or its ancestor) — a same-named branch with
- * extra commits is kept, which also covers the fork-PR case where
- * headRef names a branch we never had. Exported for `bro drive`'s
- * post-merge retirement — same guards, different caller. */
-export function deleteMergedLocalBranch(headRef: string, headSha: string): void {
-  // a prunable entry (directory already gone) still lists its branch —
-  // it must not count as checked out or the branch is never deleted
-  const checkedOut = parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out).some(
-    (w) => w.branch === headRef && w.prunable === undefined && existsSync(w.path)
-  )
-  if (checkedOut) {
-    console.error(`cleanup: ${headRef} is checked out — delete it after switching`)
-    return
-  }
-  const tipRes = gitTry(['rev-parse', '--verify', `refs/heads/${headRef}`])
-  if (tipRes.code !== 0) {
-    return // no local branch — nothing to do
-  }
-  const tip = tipRes.out.trim()
-  if (tip !== headSha && !isAncestor(tip, headSha)) {
-    console.error(`cleanup: ${headRef} has commits beyond the merged head — kept`)
-    return
-  }
-  // `update-ref -d <ref> <tip>` deletes only if the ref still points at the
-  // tip we verified — a compare-and-delete, so commits landing between the
-  // check and the delete can't be silently dropped
-  const res = gitTry(['update-ref', '-d', `refs/heads/${headRef}`, tip])
-  if (res.code === 0) {
-    console.log(`cleanup: deleted local branch ${headRef}`)
-  } else if (/checked out/i.test(res.err)) {
-    console.error(`cleanup: ${headRef} is checked out — delete it after switching`)
-  } else if (/cannot lock ref/i.test(res.err)) {
-    console.error(`cleanup: ${headRef} moved past the verified tip — kept`)
-  } else {
-    console.error(`cleanup: local branch ${headRef} not deleted (${res.err})`)
-  }
-}
-
 /** The branch a merged PR's checkout should fall back to: origin/HEAD's
  *  target, else the first existing of main/master. Exported for `bro
  *  drive`'s post-merge retirement — same fallback, different caller. */
@@ -561,45 +523,6 @@ export function defaultBranch(): string {
     }
   }
   return 'main'
-}
-
-/** Remove the linked worktree the merged branch was checked out in,
- *  via the main checkout. Returns false when the tree must be kept —
- *  locked (explicit human intent; `work leave` holds the same line even
- *  under --force), dirty/unverifiable, or the removal itself failed.
- *  `worktree remove` refuses trees with ANY extra files (even ignored
- *  ones like node_modules), so a clean porcelain status — no tracked
- *  modifications, no untracked files — is the guard for --force being
- *  safe: only ignored debris remains. The check is config-independent
- *  (`-c status.showUntrackedFiles=all` overrides a user config that
- *  would hide untracked files) and fail-closed. Exported for `bro
- *  drive`'s post-merge retirement — same guards, different caller. */
-export function removeMergedWorktree(root: string, here: WorktreeInfo, main: WorktreeInfo): boolean {
-  if (here.locked !== undefined) {
-    const why = here.locked ? ` (${here.locked})` : ''
-    console.error(`cleanup: ${root} is locked${why} — worktree kept; unlock with \`git worktree unlock\``)
-    return false
-  }
-  const status = gitTry(['-c', 'status.showUntrackedFiles=all', '-C', root, 'status', '--porcelain'])
-  if (status.code !== 0 || status.out.trim() !== '') {
-    console.error(
-      status.code !== 0
-        ? `cleanup: cannot verify ${root} is clean (${status.err}) — worktree kept`
-        : `cleanup: ${root} has uncommitted changes — worktree kept`
-    )
-    return false
-  }
-  // initialized submodules need a second --force to override
-  const force = hasSubmodules(root) ? ['--force', '--force'] : ['--force']
-  const res = gitTry(['-C', main.path, 'worktree', 'remove', ...force, root])
-  if (res.code !== 0) {
-    console.error(`cleanup: worktree ${root} not removed (${res.err})`)
-    return false
-  }
-  process.chdir(main.path) // cwd is gone — git ops below need a live dir
-  console.log(`cleanup: removed worktree ${root}`)
-  console.log(`cleanup: cd ${main.path}`)
-  return true
 }
 
 /**

@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import {
   FAKE_BEAD,
   bead,
+  git,
   initRepo,
   inside,
   installFakeBd,
@@ -322,6 +323,39 @@ describe('bro loop e2e', () => {
       const r = f.run()
       assert.match(r.stdout, /0 landed, 0 closed, 0 parked, 0 failed/)
       assert.match(r.stdout, /clean — no loop tails/)
+    })
+  })
+
+  test('close-out reaps leftover loop litter — clean closed-bead trees, keeps dirty', () => {
+    // the incident shape: earlier runs left loop worktrees behind and
+    // the audit listed them without removing them
+    const f = loopFixture([
+      { ...FAKE_BEAD, id: 'fx-a', title: 'ship it' },
+      { ...FAKE_BEAD, id: 'fx-z', title: 'landed earlier', status: 'closed' },
+      { ...FAKE_BEAD, id: 'fx-y', title: 'closed but dirty', status: 'closed' },
+    ])
+    // a clean orphan on a closed bead — must be reaped …
+    const orphan = join(f.root, 'main--fx-z')
+    git(['worktree', 'add', '-b', 'loop/fx-z', orphan], f.main)
+    // … and a dirty one — must be kept and still named as a tail
+    const dirty = join(f.root, 'main--fx-y')
+    git(['worktree', 'add', '-b', 'loop/fx-y', dirty], f.main)
+    writeFileSync(join(dirty, 'wip.txt'), 'uncommitted\n')
+    // a per-branch PR map makes fx-a's lookup land while the orphans
+    // read as PR-less — the map is authoritative in the fake host
+    writeHostState(f.hostState, {
+      prs: { 'loop/fx-a': { number: 7, state: 'OPEN', headRef: 'loop/fx-a', baseRef: 'main' } },
+    })
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /loop: fx-a landed/)
+      assert.match(r.stdout, /reaped: .*main--fx-z \[loop\/fx-z\]/)
+      assert.match(r.stdout, /deleted branch: loop\/fx-z/)
+      assert.equal(existsSync(orphan), false)
+      assert.equal(git(['branch', '--list', 'loop/fx-z'], f.main).trim(), '')
+      // the dirty tree stays — a surviving tail, not a silent sweep
+      assert.equal(existsSync(dirty), true)
+      assert.match(r.stdout, /worktrees: .*main--fx-y \[loop\/fx-y\]/)
     })
   })
 })

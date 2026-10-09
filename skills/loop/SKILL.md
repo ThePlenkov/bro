@@ -111,12 +111,15 @@ bead closed per `bd show`, or parked with a `loop:` note naming the
 blocker. A process exiting is not a verdict.
 
 The loop runs this audit itself at every exit — idle, gated, or error
-(`try/finally` around the claim cycle): open `loop/*` PRs, surviving
-`loop/*` worktrees and branches, beads still `in_progress`, and cleanup
-failures collected during the run all print under `loop audit:` in the
-run summary, then `bro sync` pushes artifacts and bead state. A clean
-run prints `clean — no loop tails`. The audit is a report, not a fix —
-listed tails still need a human or a follow-up session to clear.
+(`try/finally` around the claim cycle). It first reaps provably-done
+litter — clean `loop/*` worktrees and branches whose bead is closed or
+whose PR merged (`bro work prune --loop` runs the same sweep by hand) —
+then names every surviving tail in the run summary: open `loop/*` PRs,
+kept worktrees and branches, beads still `in_progress`, and cleanup
+failures collected during the run, then `bro sync` pushes artifacts and
+bead state. A clean run prints `clean — no loop tails`. Tails that
+survive the sweep — dirty trees, open PRs, live claimants — still need
+a human or a follow-up session to clear.
 
 Cleanup after a merge wait is `&&`-sequenced or command-owned — never
 `;`: a failed `act wait` must not touch the PR, branch, worktree, or
