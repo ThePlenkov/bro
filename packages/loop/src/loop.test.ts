@@ -36,6 +36,12 @@ describe('loopSection', () => {
     assert.equal(cfg.maxItems, 0) // 0 is valid for maxItems — means unlimited
   })
 
+  test('string values are trimmed — padded keys still hit exact lookups', () => {
+    const cfg = loopSection({ provider: '  kilo-cli  ', model: ' m-1 ' })
+    assert.equal(cfg.provider, 'kilo-cli')
+    assert.equal(cfg.model, 'm-1')
+  })
+
   test('valid values pass through', () => {
     const cfg = loopSection({
       agent: 'devin -p',

@@ -10,7 +10,7 @@ export const loopSection: ConfigSection<LoopConfig> = (raw) => {
   >
   const str = (k: keyof LoopConfig) =>
     typeof obj[k] === 'string' && (obj[k] as string).trim() !== ''
-      ? (obj[k] as string)
+      ? (obj[k] as string).trim()
       : DEFAULT_LOOP_CONFIG[k]
   const num = (
     k: 'agentTimeoutMin' | 'mergeTimeoutMin' | 'fixRounds' | 'maxItems',

@@ -301,14 +301,12 @@ export async function resolveLoopLane(
     (agentIsProvider ? sel.agent : undefined) ??
     profile?.provider ??
     (cfg.provider !== '' ? cfg.provider : undefined)
+  const model = sel.model ?? profile?.model ?? (cfg.model !== '' ? cfg.model : undefined)
+  const autoApprove = sel.autoApprove ?? profile?.autoApprove
   const pick = await resolveSpawnProvider(
     env,
     'native',
-    {
-      provider,
-      model: sel.model ?? profile?.model ?? (cfg.model !== '' ? cfg.model : undefined),
-      autoApprove: sel.autoApprove ?? profile?.autoApprove,
-    },
+    { provider, model, autoApprove },
     sel.provider !== undefined || agentIsProvider
       ? 'flag'
       : profile?.provider !== undefined
@@ -316,10 +314,10 @@ export async function resolveLoopLane(
         : 'backend'
   )
   if (pick.worker === undefined) {
-    if (sel.model !== undefined || sel.autoApprove === true) {
+    if (model !== undefined || autoApprove === true) {
       throw new SpawnError(
-        '--model/--auto-approve ride the provider lane — name a provider via ' +
-          '--provider, --agent <name>, or loop.provider',
+        '--model/--auto-approve (or loop.model) ride the provider lane — name a ' +
+          'provider via --provider, --agent <name>, or loop.provider',
         'config'
       )
     }

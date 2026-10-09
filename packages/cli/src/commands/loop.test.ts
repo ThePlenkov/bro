@@ -166,6 +166,13 @@ describe('resolveLoopLane', () => {
     )
   })
 
+  test('a configured loop.model with no provider is refused the same way', async () => {
+    await assert.rejects(
+      resolveLoopLane(laneEnv(), {}, laneCfg({ model: 'm-1' })),
+      (err) => err instanceof SpawnError && /ride the provider lane/.test(err.message)
+    )
+  })
+
   test('the escape hatch: a template --agent bypasses a configured loop.provider', async () => {
     const lane = await resolveLoopLane(
       laneEnv({ devin: { type: 'acp', command: 'devin acp' } }),

@@ -26,13 +26,16 @@ and park beads. Two lanes:
   facade `bro agents up` and `bro drive` use (`agent-connectors.ts`).
   The resolved `SpawnWorker` replaces the template:
   - `acp` providers → an `argv` worker (`bro acp-worker --command …
-    <promptFile>`). The loop execs the argv directly — no `sh -c` —
-    because it awaits the exit code itself; the `.exit`-file wrapper
-    exists only for detached registry spawns.
+    <promptFile>`). The loop runs the argv through the same
+    `sh -c 'exec "$@"'` positional wrapper the native backend builds —
+    `sh` resolves `argv[0]` on PATH — and awaits the exit code itself;
+    the `.exit`-file wrapper exists only for detached registry spawns.
   - `cli` providers → a `template` worker — the provider's `command`
     substitutes for `loop.agent` and expands `{promptFile}` exactly as
     the legacy template does.
-  - `api` providers throw `ProviderSurfaceError` — loud, before claims.
+  - `api` providers have no spawn surface — `requireProviderSurface`'s
+    `ProviderSurfaceError`, re-thrown by the facade as `SpawnError`.
+    Loud, before claims.
 - **Template lane** — `loop.agent` / a non-provider `--agent` value —
   unchanged: `sh -c` + `expandAgentCmd`.
 
@@ -60,9 +63,9 @@ configured`, exit 2.
 `--model` and `--auto-approve` ride the provider lane only (model has no
 wire in a raw template; auto-approve is an acp permission policy). A
 `--model`/`--auto-approve`/`--provider`/`--profile` flag beside a
-template `--agent` is contradictory input → exit 2. The same flags with
-no provider resolvable at all → exit 2 (`--model/--auto-approve need a
-provider`).
+template `--agent` is contradictory input → exit 2. The same picks —
+flags or `loop.model`/profile config — with no provider resolvable at
+all → exit 2 (`--model/--auto-approve need a provider`).
 
 A template `--agent` flag is the escape hatch: it replaces the whole
 provider lane for that run, including a configured `loop.provider` —
@@ -74,8 +77,10 @@ one stderr line notes the bypass.
 `agentTimeoutMin` group-kill, exit code to the caller. The lane picks
 the child:
 
-- argv worker → `spawn(argv[0], [...argv.slice(1), promptFile])` — the
-  acp driver is headless by construction (spec bro-5hx1.1 §7).
+- argv worker → `spawn('sh', ['-c', 'exec "$@"', 'loop-agent', …argv,
+  promptFile])` — the same `"$@"` positional exec the native backend
+  builds; the acp driver is headless by construction (spec
+  bro-5hx1.1 §7).
 - template worker / legacy → `spawn('sh', ['-c', expandAgentCmd(cmd,
   promptFile)])` where `cmd` is `worker.command` or the configured
   template.
