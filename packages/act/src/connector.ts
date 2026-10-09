@@ -162,10 +162,9 @@ function watchLines(dir: string): string[] {
       // that never happens. The recorded merge mode is part of the
       // promise: a supervisor that ran --no-merge (or drive.merge:
       // 'never') restarted bare would merge PRs it only ever watched
+      const noMerge = watch.merge ? '' : ' --no-merge'
       const restart =
-        kind === 'loop'
-          ? 'bro loop'
-          : `bro ${kind} --every${watch.merge ? '' : ' --no-merge'}`
+        kind === 'loop' ? 'bro loop' : `bro ${kind} --every${noMerge}`
       out.push(
         `stale act watch on ${watch.link}${mode} — ` +
           (kind === 'wait'
