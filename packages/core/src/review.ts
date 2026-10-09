@@ -134,6 +134,9 @@ export interface EnqueueOpts {
   /** The PR's head branch — the connector verifies the checkout is on
    *  it before running anything that merges "the current stack". */
   headRef?: string
+  /** The sha the gate evaluated — a head that moved since must refuse
+   *  the signal rather than queue a commit the gate never saw. */
+  expectedHeadSha?: string
 }
 
 /** MergeQueueFacade — an external merge queue's capability: park a PR

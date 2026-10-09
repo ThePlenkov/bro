@@ -16,9 +16,11 @@ const WIN32 = process.platform === 'win32'
 const FAKE_GH = `#!/bin/sh
 echo "$@" >> "$FAKE_GH_LOG"
 if [ -z "$FAKE_GH_STATE" ]; then FAKE_GH_STATE='OPEN'; fi
+if [ -z "$FAKE_GH_HEAD" ]; then FAKE_GH_HEAD='sha-1'; fi
 if [ -z "$FAKE_GH_COMMENTS" ]; then FAKE_GH_COMMENTS='{"comments":[]}'; fi
 case "$1 $2" in
   "pr view") case "$@" in
+      *"--json state,headRefOid"*) echo '{"state":"'"$FAKE_GH_STATE"'","headRefOid":"'"$FAKE_GH_HEAD"'"}' ;;
       *"--json state"*) echo '{"state":"'"$FAKE_GH_STATE"'"}' ;;
       *"--json comments"*) echo "$FAKE_GH_COMMENTS" ;;
       *) echo '{}' ;;
@@ -89,11 +91,21 @@ function fakeTools(
     }
     delete process.env.FAKE_GH_LOG
     delete process.env.FAKE_GT_LOG
+    delete process.env.FAKE_GH_HEAD
     rmSync(dir, { recursive: true, force: true })
   }
 }
 
 const target = { repo: 'acme/widgets', pr: 42 }
+
+/** First commit so `git rev-parse HEAD` resolves — returns its sha. */
+function initCommit(dir: string): string {
+  spawnSync('git', [
+    '-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t',
+    'commit', '-qm', 'init', '--allow-empty',
+  ])
+  return String(spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD']).stdout ?? '').trim()
+}
 
 describe('mergifyQueue', { skip: WIN32 }, () => {
   test('zero-config enqueue posts the default queue command', () => {
@@ -160,6 +172,27 @@ describe('mergifyQueue', { skip: WIN32 }, () => {
       assert.doesNotMatch(t.ghCalls(), /pr comment/)
     })
   })
+
+  test('a head that moved since the gate refuses — the queue would park an ungated commit', () => {
+    fakeTools({ FAKE_GH_HEAD: 'sha-new' }, { branch: 'feature-x' }, (t) => {
+      assert.throws(
+        () =>
+          mergifyQueue(t.dir).enqueue(target, { dir: t.dir, expectedHeadSha: 'sha-gated' }),
+        /remote head is sha-new, the gate saw sha-gated/
+      )
+      assert.doesNotMatch(t.ghCalls(), /pr comment|pr edit/)
+    })
+  })
+
+  test('the gated head passes the pin and enqueues', () => {
+    fakeTools({ FAKE_GH_HEAD: 'sha-gated' }, { branch: 'feature-x' }, (t) => {
+      assert.equal(
+        mergifyQueue(t.dir).enqueue(target, { dir: t.dir, expectedHeadSha: 'sha-gated' }),
+        'enqueued'
+      )
+      assert.match(t.ghCalls(), /--body @mergifyio queue/)
+    })
+  })
 })
 
 describe('graphiteQueue', { skip: WIN32 }, () => {
@@ -198,6 +231,54 @@ describe('graphiteQueue', { skip: WIN32 }, () => {
         () => graphiteQueue(t.dir).enqueue(target, { dir: t.dir, headRef: 'feature-x' }),
         /gt merge failed: gt: the current branch is not tracked/
       )
+    })
+  })
+
+  test('a checkout off the gated commit refuses before gt runs', () => {
+    fakeTools({}, { branch: 'feature-x' }, (t) => {
+      initCommit(t.dir)
+      assert.throws(
+        () =>
+          graphiteQueue(t.dir).enqueue(target, {
+            dir: t.dir,
+            headRef: 'feature-x',
+            expectedHeadSha: 'sha-gated',
+          }),
+        /checkout .* HEAD is [0-9a-f]{40}, the gate saw sha-gated/
+      )
+      assert.equal(t.gtCalls().trim(), '')
+    })
+  })
+
+  test('a moved remote head refuses even when the checkout is on the gated sha', () => {
+    fakeTools({ FAKE_GH_HEAD: 'sha-remote-new' }, { branch: 'feature-x' }, (t) => {
+      const sha = initCommit(t.dir)
+      assert.throws(
+        () =>
+          graphiteQueue(t.dir).enqueue(target, {
+            dir: t.dir,
+            headRef: 'feature-x',
+            expectedHeadSha: sha,
+          }),
+        /remote head is sha-remote-new, the gate saw/
+      )
+      assert.equal(t.gtCalls().trim(), '')
+    })
+  })
+
+  test('checkout and remote both on the gated sha run gt merge', () => {
+    fakeTools({}, { branch: 'feature-x' }, (t) => {
+      const sha = initCommit(t.dir)
+      process.env.FAKE_GH_HEAD = sha
+      assert.equal(
+        graphiteQueue(t.dir).enqueue(target, {
+          dir: t.dir,
+          headRef: 'feature-x',
+          expectedHeadSha: sha,
+        }),
+        'enqueued'
+      )
+      assert.match(t.gtCalls(), /^merge$/m)
     })
   })
 })

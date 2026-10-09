@@ -10,6 +10,10 @@
  *   own rules decide what the signal means; bro never authors them.
  * - graphite: `gt merge` in the PR's checkout — it merges the stack the
  *   checkout sits on, so the headRef must match the checked-out branch.
+ *
+ * Both pin the handoff to the gated head sha (`opts.expectedHeadSha`):
+ * a push after the gate must re-enter through a fresh gate, not ride a
+ * queue signal aimed at a commit nothing reviewed.
  */
 import { spawnSync } from 'node:child_process'
 import {
@@ -35,14 +39,26 @@ function gtTry(args: string[], cwd?: string): { code: number; out: string; err: 
   return { code: proc.status ?? 1, out: proc.stdout ?? '', err: (proc.stderr ?? '').trim() }
 }
 
-/** The PR's current state — enqueue's post-call answer comes from the
- *  host, never from the tool's own output. */
-function stateOf(t: PrTarget, dir: string): string {
-  const view = ghJson<{ state?: string }>(
-    ['pr', 'view', String(t.pr), '--repo', t.repo, '--json', 'state'],
+/** The PR's current state + head sha — enqueue's post-call answer and
+ *  its pin check come from the host, never from the tool's own output. */
+function stateOf(t: PrTarget, dir: string): { state: string; headSha: string } {
+  const view = ghJson<{ state?: string; headRefOid?: string }>(
+    ['pr', 'view', String(t.pr), '--repo', t.repo, '--json', 'state,headRefOid'],
     dir
   )
-  return (view.state ?? 'UNKNOWN').toUpperCase()
+  return { state: (view.state ?? 'UNKNOWN').toUpperCase(), headSha: view.headRefOid ?? '' }
+}
+
+/** The gated-sha pin shared by both connectors — the head the gate
+ *  cleared is the only head a queue signal may park. A push since then
+ *  needs a fresh gate, not a merge of an unseen commit. */
+function assertGatedHead(t: PrTarget, expected: string, actual: string, what: string): void {
+  if (actual !== expected) {
+    throw new Error(
+      `${prLink(t.repo, t.pr)}: ${what} is ${actual || 'unknown'}, the gate saw ` +
+        `${expected} — re-run the gate; a moved head is ungated`
+    )
+  }
 }
 
 /** Is an identical queue command already on the PR? Enqueue must be
@@ -71,11 +87,14 @@ export function mergifyQueue(dir: string): MergeQueueFacade {
     enqueue(t, opts) {
       const cwd = opts?.dir ?? dir
       const before = stateOf(t, cwd)
-      if (before === 'MERGED') {
+      if (before.state === 'MERGED') {
         return 'merged'
       }
-      if (before !== 'OPEN') {
-        throw new Error(`${prLink(t.repo, t.pr)} is ${before} — nothing to enqueue`)
+      if (before.state !== 'OPEN') {
+        throw new Error(`${prLink(t.repo, t.pr)} is ${before.state} — nothing to enqueue`)
+      }
+      if (opts?.expectedHeadSha !== undefined) {
+        assertGatedHead(t, opts.expectedHeadSha, before.headSha, 'remote head')
       }
       const cfg = loadConfig(cwd).act.mergeQueue
       // label first — a label-triggered rule needs it present before the
@@ -95,10 +114,12 @@ export function mergifyQueue(dir: string): MergeQueueFacade {
 }
 
 /** Graphite: `gt merge` merges the stack the checkout sits on — the
- *  headRef check is the only thing standing between "queue this PR" and
- *  "queue whatever stack this directory happens to hold". The honest
- *  post-state read distinguishes landed-outright (a queue-less repo
- *  merges directly) from parked. */
+ *  headRef check (branch name) plus the sha pins (checkout HEAD and
+ *  remote head, since Graphite merges the remote PR) are what stand
+ *  between "queue this gated PR" and "queue whatever stack this
+ *  directory happens to hold". The honest post-state read
+ *  distinguishes landed-outright (a queue-less repo merges directly)
+ *  from parked. */
 export function graphiteQueue(dir: string): MergeQueueFacade {
   return {
     enqueue(t, opts) {
@@ -111,6 +132,14 @@ export function graphiteQueue(dir: string): MergeQueueFacade {
               `expected the PR head '${opts.headRef}' — \`gt merge\` would queue the wrong stack`
           )
         }
+      }
+      if (opts?.expectedHeadSha !== undefined) {
+        const at = gitTry(['-C', cwd, 'rev-parse', 'HEAD'])
+        if (at.code !== 0) {
+          throw new Error(`graphite: cannot verify ${cwd} HEAD — ${at.err}`)
+        }
+        assertGatedHead(t, opts.expectedHeadSha, at.out.trim(), `checkout ${cwd} HEAD`)
+        assertGatedHead(t, opts.expectedHeadSha, stateOf(t, cwd).headSha, 'remote head')
       }
       const proc = spawnSync('gt', ['merge'], { // NOSONAR — user-installed CLI
         cwd,
@@ -125,11 +154,11 @@ export function graphiteQueue(dir: string): MergeQueueFacade {
         console.log(out)
       }
       const after = stateOf(t, cwd)
-      if (after === 'MERGED') {
+      if (after.state === 'MERGED') {
         return 'merged'
       }
-      if (after !== 'OPEN') {
-        throw new Error(`${prLink(t.repo, t.pr)} is ${after} after \`gt merge\` — nothing to enqueue`)
+      if (after.state !== 'OPEN') {
+        throw new Error(`${prLink(t.repo, t.pr)} is ${after.state} after \`gt merge\` — nothing to enqueue`)
       }
       return 'enqueued'
     },

@@ -448,7 +448,11 @@ function landPr(
         parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out).find(
           (w) => w.branch === head.ref
         )?.path ?? process.cwd()
-      const r = queue.enqueue(t, { dir: checkout, headRef: head.ref })
+      const r = queue.enqueue(t, {
+        dir: checkout,
+        headRef: head.ref,
+        expectedHeadSha: head.sha,
+      })
       if (r === 'merged') {
         console.log(`act: merged ${rev.prLink(t.repo, t.pr)}`)
         return head

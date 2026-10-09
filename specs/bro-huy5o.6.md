@@ -59,6 +59,9 @@ export interface EnqueueOpts {
   /** The PR's head branch — the connector verifies the checkout is on
    *  it before running anything that merges "the current stack". */
   headRef?: string
+  /** The sha the gate evaluated — a head that moved since must refuse
+   *  the signal rather than queue a commit the gate never saw. */
+  expectedHeadSha?: string
 }
 export interface MergeQueueFacade {
   /** Park the PR on the connector's queue. Returns 'merged' when the
@@ -78,7 +81,9 @@ gains `mergeQueue`; `Connector` gains the optional member.
 The external queue is consulted inside `cmdMerge`'s critical section,
 after the gate passes, before `rev.mergePr`:
 
-- configured → `queue.enqueue(t, { dir: cwd, headRef })`:
+- configured → `queue.enqueue(t, { dir: cwd, headRef, expectedHeadSha })`
+  — the same pin `mergePr` carries, so a post-gate push can't ride the
+  queue signal:
   `'enqueued'` → report "enqueued via <connector>", return undefined
   (no cleanup — the queue merges later);
   `'merged'` → report merged, return head for the normal cleanup.
@@ -135,13 +140,18 @@ queue acceptance (every refusal sets exit 1), so a re-probe showing
   `@mergifyio queue`, `act.mergeQueue.comment` overrides; setting a
   label without a comment posts only the label — Mergify dedups a
   double signal, an unconfigured command is just noise). Both knobs are
-  optional; the comment is the zero-config default.
+  optional; the comment is the zero-config default. The pre-signal state
+  read also carries `headRefOid` — an `expectedHeadSha` mismatch refuses
+  (the signal targets whatever head the PR now has).
 - **graphite** (`optIn`, `auth` = `gt --version`): `enqueue` requires
   `opts.dir` on `opts.headRef` — `gt merge` merges the checked-out
   stack, so a wrong checkout enqueues the wrong stack; verified via
-  `git branch --show-current`, mismatch throws. After `gt merge` it
-  re-reads the PR state (`gh pr view --json state`) — `MERGED` →
-  'merged' (a queue-less repo merges directly), else 'enqueued'.
+  `git branch --show-current`, mismatch throws. `expectedHeadSha` pins
+  twice: the checkout's `HEAD` (the stack `gt merge` sees) and the
+  remote `headRefOid` (the PR Graphite would actually land). After
+  `gt merge` it re-reads the PR state (`gh pr view --json state`) —
+  `MERGED` → 'merged' (a queue-less repo merges directly), else
+  'enqueued'.
 
 Config: `act.mergeQueue = { label?, comment? }` — merge policy lives in
 the act section.

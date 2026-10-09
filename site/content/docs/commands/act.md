@@ -131,6 +131,9 @@ opt-in only, by name:
   the PR's head branch — `gt merge` queues the whole stack it sees, so a
   wrong checkout is refused, not queued.
 
+Both hand off pinned to the gated head sha: a push after the gate makes
+the enqueue refuse rather than queue a commit the gate never saw.
+
 Configured or not, the merge still goes through the same exit gate and
 merge slot — the connector only replaces the final `mergePr` call. An
 `enqueued` result parks the PR exactly like a GitHub-queue hold.
