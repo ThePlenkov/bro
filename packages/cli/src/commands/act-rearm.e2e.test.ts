@@ -18,6 +18,7 @@ import {
   installFakeHost,
   installFakeTasks,
   inside,
+  readHostState,
   runCli,
   writeHostState,
 } from './testrepo.ts'
@@ -85,6 +86,17 @@ function beadFixture() {
   ])
   const env = { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: db }
   return { root, main, db, env }
+}
+
+/** `act wait --merge --bead fx-a` on pr 7 with the gate pinned to
+ *  `prState` — the invocation both merge-discharge paths share; the
+ *  host's `merges` counter afterwards tells which path ran. */
+function mergeWait(main: string, env: Record<string, string>, prState: string) {
+  writeHostState(join(main, 'host.json'), { prState })
+  return runCli(
+    ['act', 'wait', '7', '--interval', '1', '--timeout', '1', '--merge', '--bead', 'fx-a'],
+    { cwd: main, env }
+  )
 }
 
 /** The respawned wait writes its own live marker a tick after rearm
@@ -229,12 +241,9 @@ describe('act rearm', () => {
     inside(main, root, () => {
       // a green gate settles on the first poll — the merge + bead close
       // run in the same invocation (the shape a respawned wait executes)
-      writeHostState(join(main, 'host.json'), { prState: 'OPEN' })
-      const r = runCli(
-        ['act', 'wait', '7', '--interval', '1', '--timeout', '1', '--merge', '--bead', 'fx-a'],
-        { cwd: main, env }
-      )
+      const r = mergeWait(main, env, 'OPEN')
       assert.equal(r.code, 0, r.stderr)
+      assert.equal(readHostState(join(main, 'host.json')).merges, 1)
       assertLandedBead(db, 'fx-a', r.stderr)
     })
   })
@@ -245,12 +254,9 @@ describe('act rearm', () => {
       // the PR landed without this wait — the settle is MERGED, so
       // mergeIfAsked never runs and watchEnd removed the marker a rearm
       // reconcile would have needed
-      writeHostState(join(main, 'host.json'), { prState: 'MERGED' })
-      const r = runCli(
-        ['act', 'wait', '7', '--interval', '1', '--timeout', '1', '--merge', '--bead', 'fx-a'],
-        { cwd: main, env }
-      )
+      const r = mergeWait(main, env, 'MERGED')
       assert.equal(r.code, 0, r.stderr)
+      assert.equal(readHostState(join(main, 'host.json')).merges, undefined)
       assertLandedBead(db, 'fx-a', r.stderr)
     })
   })
