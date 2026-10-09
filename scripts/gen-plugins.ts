@@ -1,24 +1,24 @@
 /**
  * gen-plugins — materialize per-client plugin adapters under plugins/.
  *
- * The repo root is the canonical Devin plugin (plugin.json + hooks.json +
- * skills/). `plugins/<client>/bro/` carries that client's manifest and
- * hooks. Skills are not copied: each adapter's `skills` entry is a
- * relative symlink to the one `skills/` tree. A marketplace install
- * clones the whole repo, so the link stays inside that checkout. Copying
- * an adapter directory out of the repo does not bring the skill files
- * with it.
+ * The repo root is the Agent Plugin (plugin.json + skills/ per
+ * agent-plugins.org and agentskills.io) and the Devin plugin. Host
+ * directories carry only that client's extras (manifest, hooks). Codex
+ * installs the repo root, so it does not get a skills tree of its own.
  *
  *   plugins/devin/bro/   plugin.json + hooks.json copied from root
  *   plugins/claude/bro/  .claude-plugin/plugin.json derived from plugin.json
  *                        + hand-written hooks/hooks.json (Claude event names)
- *   plugins/codex/bro/   .codex-plugin/plugin.json derived from plugin.json
+ *   .codex-plugin/plugin.json  Codex manifest at the repo root; skills
+ *                        resolve to ./skills/, hooks to the hand-written
+ *                        plugins/codex/bro/hooks/hooks.json
  *   plugins/cursor/bro/  .cursor-plugin/plugin.json + hooks/hooks.json
  *                        (Cursor event names, command shape, output schema)
  *
- * Every adapter links skills/ and copies hooks/run.sh. Only the Claude hooks wiring
- * is authored by hand — Cursor's hooks.json is generated from the event
- * map below. `check:plugins` fails CI when an adapter drifts from its source.
+ * Adapters other than Codex still link skills/ until their marketplace
+ * installs the repo root. Each adapter copies hooks/run.sh. Claude and Codex
+ * hooks wiring is authored by hand — Cursor's hooks.json is generated from
+ * the event map below. `check:plugins` fails CI when an adapter drifts.
  *
  *   node scripts/gen-plugins.ts           # write
  *   node scripts/gen-plugins.ts --check   # verify freshness, exit 1 on drift
@@ -154,6 +154,14 @@ for (const m of MARKETPLACES) {
 // contract check:plugins can still enforce.
 const cursorMarketplace = readJson('.cursor-plugin/marketplace.json')
 const cursorEntry = (cursorMarketplace.plugins ?? []).find((p) => p?.name === 'bro')
+const codexMarketplace = readJson('.agents/plugins/marketplace.json')
+const codexEntry = (codexMarketplace.plugins ?? []).find((p) => p?.name === 'bro')
+if (codexEntry?.source !== '.') {
+  console.error(
+    '.agents/plugins/marketplace.json: bro source must be "." — the repo root is the Agent Plugin'
+  )
+  process.exit(1)
+}
 if (cursorMarketplace.name !== 'bro' || cursorEntry?.source !== 'plugins/cursor/bro') {
   console.error(
     '.cursor-plugin/marketplace.json: name "bro" must source "plugins/cursor/bro"'
@@ -417,6 +425,9 @@ const ADAPTER_OPTS: Record<string, { skills?: boolean; runSh?: boolean }> = {
   'plugins/opencode/bro': { skills: false, runSh: false },
   'plugins/kilo/bro': { skills: false, runSh: false },
   'plugins/pi/bro': { skills: false, runSh: false },
+  // Codex installs the repo root (plugin.json + skills/). A skills entry
+  // here would be a second package.
+  'plugins/codex/bro': { skills: false },
 }
 
 // files written per adapter — value is source path, or [text] literal content
@@ -444,9 +455,9 @@ const ADAPTERS = {
     'hooks/hooks.json': null,
   },
   'plugins/codex/bro': {
-    '.codex-plugin/plugin.json': [
-      clientManifest({ interface: { displayName: 'bro' } }),
-    ],
+    // hand-written (Codex event names) — listed so --check doesn't flag it.
+    // The manifest lives at the repo root: this directory is hooks only.
+    'hooks/hooks.json': null,
   },
   'plugins/cursor/bro': {
     '.cursor-plugin/plugin.json': [cursorManifest()],
@@ -462,6 +473,7 @@ const VERSIONED_SOURCES = [
   'hooks.json',
   'hooks/run.sh',
   'plugins/claude/bro/hooks/hooks.json',
+  'plugins/codex/bro/hooks/hooks.json',
   // the materialized opencode modules carry the npx fallback pin
   'packages/cli/src/opencode.ts',
   'packages/cli/src/opencode-tui.ts',
@@ -539,12 +551,39 @@ function ensureSkillsLink(adapterRel) {
   symlinkSync(skillsLinkTarget(adapterRel), link)
 }
 
+emit(
+  '.codex-plugin/plugin.json',
+  clientManifest({
+    interface: { displayName: 'bro' },
+    skills: './skills/',
+    hooks: './plugins/codex/bro/hooks/hooks.json',
+  })
+)
+
 for (const [dir, files] of Object.entries(ADAPTERS)) {
+  // A symlinked adapter dir is replaced before any write. emit() only
+  // notices a symlink at the file itself; a link at the directory would
+  // let mkdir/writeFile follow it and modify a tree outside the checkout.
+  const dirPath = join(ROOT, dir)
+  let dirStat
+  try {
+    dirStat = lstatSync(dirPath)
+  } catch {
+    dirStat = undefined
+  }
+  if (dirStat !== undefined && !dirStat.isDirectory()) {
+    if (CHECK) {
+      drift.push(dir)
+      continue
+    }
+    rmSync(dirPath, { recursive: true, force: true })
+    dirStat = undefined
+  }
   const opts = ADAPTER_OPTS[dir] ?? {}
-  const wantSkills = opts.skills !== false
+  const linkSkills = opts.skills !== false
   const wantRunSh = opts.runSh !== false
   // expected file set: declared entries + the skills symlink + hooks/run.sh.
-  // Skill files are not expected here — they live once, under skills/.
+  // A copied skills tree lists every file so the stale sweep can see them.
   const expected = new Set(Object.keys(files).map((rel) => `${dir}/${rel}`))
   for (const [rel, src] of Object.entries(files)) {
     if (src === null) {
@@ -566,37 +605,18 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
   }
   const skillsOut = `${dir}/skills`
   const runShOut = `${dir}/hooks/run.sh`
-  if (wantSkills) {
+  if (linkSkills) {
     expected.add(skillsOut)
   }
   if (wantRunSh) {
     expected.add(runShOut)
   }
   if (!CHECK) {
-    if (wantSkills) {
+    if (linkSkills) {
       ensureSkillsLink(dir)
     }
-  } else if (wantSkills && !skillsLinkFresh(dir)) {
+  } else if (linkSkills && !skillsLinkFresh(dir)) {
     drift.push(skillsOut)
-  }
-  // the adapter dir itself may be a stale file or symlink — never
-  // traverse into it: flag/remove the entry, let emit recreate the real
-  // directory. readdirSync would follow the link and the stale sweep
-  // below would then delete files OUTSIDE the repo.
-  const dirPath = join(ROOT, dir)
-  let dirStat
-  try {
-    dirStat = lstatSync(dirPath)
-  } catch {
-    dirStat = undefined
-  }
-  if (dirStat !== undefined && !dirStat.isDirectory()) {
-    if (CHECK) {
-      drift.push(dir)
-    } else {
-      rmSync(dirPath, { recursive: true, force: true })
-    }
-    dirStat = undefined
   }
   if (CHECK) {
     if (wantRunSh) {
@@ -608,10 +628,10 @@ for (const [dir, files] of Object.entries(ADAPTERS)) {
     // stale leftovers — files on disk that generation no longer produces
     if (dirStat !== undefined) {
       for (const f of walk(dirPath)) {
-        // a copied skills tree is one drift (the link), not one line per
-        // file — adapters without skills get no carve-out: a `skills`
-        // entry there IS the drift
-        if (wantSkills && (f === 'skills' || f.startsWith('skills/'))) {
+        // the skills symlink is checked by skillsLinkFresh — don't flag
+        // the link itself. Adapters without skills get no carve-out: a
+        // `skills` entry there IS the drift.
+        if (linkSkills && (f === 'skills' || f.startsWith('skills/'))) {
           continue
         }
         if (!expected.has(`${dir}/${f}`)) {

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Retro"
+  short_description: "Session-end checklist — debt, lessons, and leftover work"
+  brand_color: "#B60205"
+  default_prompt: "Use $retro at the end of the session."
+policy:
+  allow_implicit_invocation: true

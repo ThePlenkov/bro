@@ -1,0 +1,7 @@
+interface:
+  display_name: "TypeSafe"
+  short_description: "Programmable judgments — routing, ranking, extraction, verification"
+  brand_color: "#1D4ED8"
+  default_prompt: "Use $typesafe-ai when a decision should be a typed judgment."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Goal"
+  short_description: "Session completion condition the stop hook keeps checking"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $goal to set a completion condition for this session."
+policy:
+  allow_implicit_invocation: true

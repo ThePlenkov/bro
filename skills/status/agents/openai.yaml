@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Status"
+  short_description: "One JSON board — beads, fleet, drill frame, and the PR gate"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $status to read the live bro project board."
+policy:
+  allow_implicit_invocation: true
