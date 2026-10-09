@@ -201,7 +201,7 @@ const pub = (r: TaskRow & { __node?: IssueNode }): TaskRow => {
  *  team() before we get here. */
 function issueRef(id: string): string {
   const t = id.trim()
-  const url = /^https?:\/\/[^/]*linear\.app\/[^/]+\/issue\/([A-Za-z]+-\d+)/i.exec(t)
+  const url = /^https?:\/\/[^/]*linear\.app\/[^/]+\/issue\/([a-z]+-\d+)/i.exec(t)
   if (url) {
     return url[1]!.toUpperCase()
   }
@@ -757,14 +757,13 @@ function updateStatus(n: IssueNode, val: string): void {
   }
 }
 
+const issueUpdate = (id: string, input: Record<string, unknown>): void =>
+  mutOk(gql(UPDATE_M, { id, input }), 'issueUpdate')
+
 function updateMetaField(n: IssueNode, k: string, val: string): void {
   const meta = bodyMeta(n.description ?? undefined)
-  const META_KEYS: Record<string, string> = { issue_type: 'type', externalRef: 'external_ref' }
-  meta[META_KEYS[k] ?? k] = val
-  mutOk(
-    gql(UPDATE_M, { id: n.id, input: { description: withMeta(n.description ?? '', meta) } }),
-    'issueUpdate'
-  )
+  meta[k] = val
+  issueUpdate(n.id, { description: withMeta(n.description ?? '', meta) })
 }
 
 function addLabels(n: IssueNode, val: string): void {
@@ -807,54 +806,74 @@ function resolveAssignee(val: string): string | null {
   return hits[0]!.id
 }
 
+interface PatchCtx {
+  id: string
+  ref: string
+}
+
+/** the live issue or throw — read-before-write verbs merge against the
+ *  current state (label id sets, description trailer, team for states). */
+function mustIssue(c: PatchCtx): IssueNode {
+  const n = queryIssueSync(c.ref)
+  if (n === undefined) {
+    throw new Error(`linear tasks: issue ${c.id} not found`)
+  }
+  return n
+}
+
+function patchBody(c: PatchCtx, val: string): void {
+  const cur = queryIssueSync(c.ref)
+  issueUpdate(c.ref, { description: withMeta(val, bodyMeta(cur?.description ?? undefined)) })
+}
+
+function patchPriority(c: PatchCtx, val: string): void {
+  const p = Number(val)
+  if (!Number.isFinite(p)) {
+    throw new TypeError(`linear tasks: priority '${val}' is not a number`)
+  }
+  issueUpdate(c.ref, { priority: toLinearPriority(p) })
+}
+
+const patchComment = (c: PatchCtx, val: string): void =>
+  mutOk(gql(COMMENT_M, { input: { issueId: c.ref, body: val } }), 'commentCreate')
+
+const patchMeta =
+  (k: string) =>
+  (c: PatchCtx, val: string): void =>
+    updateMetaField(mustIssue(c), k, val)
+
+/** patch key → write — a table, not a chain: one entry per verb keeps
+ *  each writer flat (S3776). Aliases resolve here, not inside helpers. */
+const PATCH: Record<string, (c: PatchCtx, val: string) => void> = {
+  title: (c, v) => issueUpdate(c.ref, { title: v }),
+  body: patchBody,
+  description: patchBody,
+  status: (c, v) => updateStatus(mustIssue(c), v),
+  claim: (c, v) => {
+    if (v === 'true') {
+      claimSync(c.ref)
+    }
+  },
+  labels: (c, v) => addLabels(mustIssue(c), v),
+  label: (c, v) => addLabels(mustIssue(c), v),
+  assignee: (c, v) => issueUpdate(c.ref, { assigneeId: resolveAssignee(v) }),
+  notes: patchComment,
+  note: patchComment,
+  priority: patchPriority,
+  type: patchMeta('type'),
+  issue_type: patchMeta('type'),
+  external_ref: patchMeta('external_ref'),
+  externalRef: patchMeta('external_ref'),
+}
+
 function updateSync(id: string, patch: Record<string, string | number>): void {
-  const ref = issueRef(id)
+  const c: PatchCtx = { id, ref: issueRef(id) }
   for (const [k, v] of Object.entries(patch)) {
-    const val = String(v)
-    if (k === 'title') {
-      mutOk(gql(UPDATE_M, { id: ref, input: { title: val } }), 'issueUpdate')
-    } else if (k === 'body' || k === 'description') {
-      const cur = queryIssueSync(ref)
-      mutOk(
-        gql(UPDATE_M, {
-          id: ref,
-          input: { description: withMeta(val, bodyMeta(cur?.description ?? undefined)) },
-        }),
-        'issueUpdate'
-      )
-    } else if (k === 'status' || k === 'claim' || k === 'labels' || k === 'label') {
-      const n = queryIssueSync(ref)
-      if (n === undefined) {
-        throw new Error(`linear tasks: issue ${id} not found`)
-      }
-      if (k === 'status') {
-        updateStatus(n, val)
-      } else if (k === 'claim') {
-        if (val === 'true') {
-          claimSync(ref)
-        }
-      } else {
-        addLabels(n, val)
-      }
-    } else if (k === 'assignee') {
-      mutOk(gql(UPDATE_M, { id: ref, input: { assigneeId: resolveAssignee(val) } }), 'issueUpdate')
-    } else if (k === 'notes' || k === 'note') {
-      mutOk(gql(COMMENT_M, { input: { issueId: ref, body: val } }), 'commentCreate')
-    } else if (k === 'priority') {
-      const p = Number(val)
-      if (!Number.isFinite(p)) {
-        throw new Error(`linear tasks: priority '${val}' is not a number`)
-      }
-      mutOk(gql(UPDATE_M, { id: ref, input: { priority: toLinearPriority(p) } }), 'issueUpdate')
-    } else if (['type', 'issue_type', 'external_ref', 'externalRef'].includes(k)) {
-      const n = queryIssueSync(ref)
-      if (n === undefined) {
-        throw new Error(`linear tasks: issue ${id} not found`)
-      }
-      updateMetaField(n, k, val)
-    } else {
+    const h = PATCH[k]
+    if (h === undefined) {
       throw new Error(`linear tasks: unsupported update key '${k}'`)
     }
+    h(c, String(v))
   }
 }
 

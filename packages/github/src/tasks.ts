@@ -27,14 +27,16 @@
  * absent rather than faked.
  */
 import {
+  bodyMeta,
   gh,
   ghJson,
   ghTry,
   ghJsonAsync,
   resolveRepo,
   resolveRepoAsync,
+  stripMeta,
+  withMeta,
 } from '@broject/core'
-import { bodyMeta, stripMeta, withMeta } from '@broject/core'
 import type { TaskFilter, TaskInput, TaskRow, TaskStore, TaskStoreAsync } from '@broject/core'
 
 const CLAIMED_LABEL = 'bro:claimed'

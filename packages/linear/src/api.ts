@@ -16,6 +16,9 @@
  * stubbed `fetch` dispatch on them.
  */
 import { spawnSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 export const LINEAR_API = 'https://api.linear.app/graphql'
 const TIMEOUT_MS = 30_000
@@ -62,46 +65,56 @@ const firstError = (r: LinearResp | undefined): string | undefined =>
 // --- sync transport: curl ------------------------------------------------------
 
 function curlPost(payload: string, timeoutMs = TIMEOUT_MS): LinearResp {
-  const res = spawnSync(
-    'curl',
-    [
-      '-sS',
-      '--fail-with-body',
-      '--max-time',
-      String(Math.ceil(timeoutMs / 1000)),
-      '-X',
-      'POST',
-      LINEAR_API,
-      '-H',
-      `Authorization: ${apiKey()}`,
-      '-H',
-      'Content-Type: application/json',
-      // the document + vars ride stdin — a GraphQL payload never belongs
-      // in argv where every local user can `ps` it
-      '--data-binary',
-      '@-',
-    ],
-    { input: payload, encoding: 'utf8', timeout: timeoutMs + 15_000, maxBuffer: 64 * 1024 * 1024 }
-  )
-  if (res.error) {
-    const code = (res.error as NodeJS.ErrnoException).code
-    throw new Error(
-      code === 'ENOENT'
-        ? 'linear: curl not found — the tasks sync transport needs curl on PATH'
-        : `linear: curl failed — ${res.error.message}`
+  // Two secrets, two channels, never argv — every local user can `ps`
+  // argv: the document + vars ride stdin (`--data-binary @-`) and the
+  // API key rides a 0600 header file (`-H @file`) in a private tmpdir
+  // that lives only for the spawn.
+  const dir = mkdtempSync(join(tmpdir(), 'bro-linear-hdr-'))
+  try {
+    const hdr = join(dir, 'auth')
+    writeFileSync(hdr, `Authorization: ${apiKey()}\n`, { mode: 0o600 })
+    const res = spawnSync(
+      'curl',
+      [
+        '-sS',
+        '--fail-with-body',
+        '--max-time',
+        String(Math.ceil(timeoutMs / 1000)),
+        '-X',
+        'POST',
+        LINEAR_API,
+        '-H',
+        `@${hdr}`,
+        '-H',
+        'Content-Type: application/json',
+        '--data-binary',
+        '@-',
+      ],
+      { input: payload, encoding: 'utf8', timeout: timeoutMs + 15_000, maxBuffer: 64 * 1024 * 1024 }
     )
+    if (res.error) {
+      const code = (res.error as NodeJS.ErrnoException).code
+      throw new Error(
+        code === 'ENOENT'
+          ? 'linear: curl not found — the tasks sync transport needs curl on PATH'
+          : `linear: curl failed — ${res.error.message}`
+      )
+    }
+    const parsed = tryJson(res.stdout)
+    if (res.status !== 0) {
+      const detail =
+        firstError(parsed) ??
+        (res.stderr.trim() !== '' ? res.stderr.trim() : res.stdout.trim().slice(0, 300))
+      const why = detail !== '' ? detail : `curl exited ${res.status}`
+      throw new Error(`linear: request failed — ${why}`)
+    }
+    if (parsed === undefined) {
+      throw new Error(`linear: non-JSON response — ${res.stdout.slice(0, 200)}`)
+    }
+    return parsed
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
-  const parsed = tryJson(res.stdout)
-  if (res.status !== 0) {
-    const detail =
-      firstError(parsed) ??
-      (res.stderr.trim() !== '' ? res.stderr.trim() : res.stdout.trim().slice(0, 300))
-    throw new Error(`linear: request failed — ${detail !== '' ? detail : `curl exited ${res.status}`}`)
-  }
-  if (parsed === undefined) {
-    throw new Error(`linear: non-JSON response — ${res.stdout.slice(0, 200)}`)
-  }
-  return parsed
 }
 
 // --- async transport: fetch -----------------------------------------------------

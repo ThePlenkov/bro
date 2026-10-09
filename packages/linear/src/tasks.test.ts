@@ -24,12 +24,15 @@ const WIN32 = process.platform === 'win32'
  *    FAKE_LINEAR_CHILDREN  — BroChildren body
  *    FAKE_LINEAR_CREATE    — BroIssueCreate body
  *    FAKE_LINEAR_USERS     — BroUsers body
- *    FAKE_CURL_EXIT        — nonzero exit for transport-failure tests */
+ *    FAKE_CURL_EXIT        — nonzero exit for transport-failure tests
+ *  argv lands one line per spawn in $FAKE_CURL_ARGV — the key must
+ *  never appear there (every local user can `ps` argv). */
 const FAKE_CURL = `#!/bin/sh
 # -r: the JSON payload's \\n and \\" escapes are DATA — plain read eats
 # the backslash and the logged body stops being the bytes that were sent
 IFS= read -r body
 printf '%s\\n' "$body" >> "$FAKE_CURL_LOG"
+printf '%s\\n' "$*" >> "$FAKE_CURL_ARGV"
 case "$body" in
   *BroIssues*) printf '%s\\n' "$FAKE_LINEAR_ISSUES" ;;
   *BroChildren*) printf '%s\\n' "$FAKE_LINEAR_CHILDREN" ;;
@@ -161,14 +164,16 @@ function withLinear(
 ): void {
   const dir = mkdtempSync(join(tmpdir(), 'bro-linear-'))
   const log = join(dir, 'curl.log')
+  const argvLog = join(dir, 'argv.log')
   writeFileSync(log, '')
+  writeFileSync(argvLog, '')
   writeFileSync(join(dir, 'curl'), FAKE_CURL)
   chmodSync(join(dir, 'curl'), 0o755)
   const prevPath = process.env.PATH
   process.env.PATH = `${dir}:${prevPath}`
   const all = { LINEAR_API_KEY: `lin_api_test_${++keySeq}`, ...ENV_DEFAULTS, ...env }
   const prevEnv = Object.fromEntries(Object.keys(all).map((k) => [k, process.env[k]]))
-  Object.assign(process.env, { FAKE_CURL_LOG: log, ...all })
+  Object.assign(process.env, { FAKE_CURL_LOG: log, FAKE_CURL_ARGV: argvLog, ...all })
   try {
     fn(log, dir)
   } finally {
@@ -178,6 +183,7 @@ function withLinear(
       else process.env[k] = v
     }
     delete process.env.FAKE_CURL_LOG
+    delete process.env.FAKE_CURL_ARGV
     rmSync(dir, { recursive: true, force: true })
   }
 }
@@ -550,6 +556,16 @@ describe('linearTasks', { skip: WIN32 }, () => {
   test('curl transport failure names the problem', () => {
     withLinear({ FAKE_CURL_EXIT: '22' }, (_log, dir) => {
       assert.throws(() => linearTasks(dir).list(), /linear: request failed/)
+    })
+  })
+
+  test('the API key never enters argv — header rides a file like the body rides stdin', () => {
+    withLinear({ FAKE_LINEAR_ISSUES: issuesPage([node({ ident: 'ENG-1' })]) }, (_log, dir) => {
+      linearTasks(dir).list()
+      const argv = readFileSync(join(dir, 'argv.log'), 'utf8')
+      // key value absent from every spawned argv — `-H @<file>` instead
+      assert.equal(argv.includes('lin_api_test'), false, argv)
+      assert.match(argv, /-H @\//)
     })
   })
 

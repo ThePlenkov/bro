@@ -34,8 +34,10 @@ Linear has no official CLI and no self-hosted tier — the transport is plain
 HTTPS to the fixed endpoint `https://api.linear.app/graphql`:
 
 - **Sync path** (`TaskStore`): `curl -sS --fail-with-body` with the JSON
-  body on stdin (`--data-binary @-` — the payload never enters argv). The
-  TaskStore contract is synchronous, so the sync path needs a blocking
+  body on stdin (`--data-binary @-` — the payload never enters argv) and
+  the `Authorization` header on `-H @file` (0600, private tmpdir, spawn
+  lifetime — every local user can `ps` argv, so neither secret rides it).
+  The TaskStore contract is synchronous, so the sync path needs a blocking
   transport; `curl` is the same "shell to the system's own tool" precedent
   as `gh`/`glab`, and ships on every platform bro runs on.
 - **Async path** (`TaskStoreAsync`, `queries` facade): native `fetch`
