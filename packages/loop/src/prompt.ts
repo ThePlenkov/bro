@@ -83,6 +83,38 @@ ${threads.trim().replaceAll(/<\/review-threads\s*>/gi, '<\\/review-threads>')}
 `
 }
 
+/** The conflict-round prompt — the gate reports CONFLICTING; the agent
+ *  rebases the branch onto the PR's declared base, resolves, pushes.
+ *  The rebase IS the fix: no thread work is owed on this spawn. */
+export function buildRebasePrompt(bead: LoopBead, pr: number, base: string): string {
+  return `You are the same autonomous agent continuing work on bead ${bead.id}.
+Pull request #${pr} is up — it has merge conflicts with its base branch.
+The worktree and branch are unchanged; your earlier commits are here.
+
+# Task
+
+The PR's base is \`${base}\`. Rebase this branch onto the fresh base,
+resolve the conflicts, and push:
+
+- \`git fetch origin ${base}\` then \`git rebase origin/${base}\` —
+  if a rebase is already in progress here, resolve it instead
+  (\`git rebase --continue\` / \`--abort\` and restart if the state is
+  too tangled).
+- Keep this PR's own changes — conflicts are with base-branch work
+  that landed since, not with the task. When in doubt, preserve the
+  PR's intent over the incoming edit's shape.
+- \`git push --force-with-lease\` when clean — the push is the verdict.
+
+# Rules
+
+- Do NOT merge — the orchestrator merges when the gate goes green.
+- Re-verify after the rebase (build/test as the repo's contract asks)
+  before pushing.
+- If the conflicts genuinely can't be resolved without redesign, say
+  so as your final message — do not leave the rebase half-done.
+`
+}
+
 /** Expand the agent template — `{promptFile}` becomes the quoted path.
  *  No placeholder → the path is appended, quoted, as the last arg. */
 export function expandAgentCmd(template: string, promptFile: string): string {

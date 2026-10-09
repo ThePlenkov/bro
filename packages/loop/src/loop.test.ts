@@ -53,6 +53,7 @@ describe('loopSection', () => {
       mergeTimeoutMin: 60,
       fixRounds: 2,
       maxItems: 5,
+      maxOpen: 2,
     })
     assert.deepEqual(cfg, {
       agent: 'devin -p',
@@ -64,7 +65,13 @@ describe('loopSection', () => {
       mergeTimeoutMin: 60,
       fixRounds: 2,
       maxItems: 5,
+      maxOpen: 2,
     })
+  })
+
+  test('maxOpen has a floor of 1 — 0 would cap the stack at nothing', () => {
+    assert.equal(loopSection({ maxOpen: 0 }).maxOpen, DEFAULT_LOOP_CONFIG.maxOpen)
+    assert.equal(loopSection({ maxOpen: -2 }).maxOpen, DEFAULT_LOOP_CONFIG.maxOpen)
   })
 })
 

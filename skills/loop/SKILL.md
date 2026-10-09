@@ -7,8 +7,8 @@ description: "Use when the user wants the backlog worked autonomously end-to-end
 
 **All mechanics live in the `bro` CLI.** This skill is policy only.
 `bro next` schedules one bead; `bro loop` runs the queue to exhaustion —
-claim → worktree → agent → gate → close → repeat — with no per-item
-"should I continue?" The backlog's existence is the approval.
+claim → worktree → agent → push onto the gate stack → repeat — with no
+per-item "should I continue?" The backlog's existence is the approval.
 
 ## Configure the agent once
 
@@ -54,7 +54,8 @@ template `--agent` flag wins over a configured `loop.provider` — the
 provider flags can't sit beside it.
 
 Other `loop` keys: `bootstrap` (runs once per worktree), budgets
-`agentTimeoutMin`/`mergeTimeoutMin`, `fixRounds`, `maxItems`.
+`agentTimeoutMin`/`mergeTimeoutMin`, `fixRounds`, `maxItems`, and
+`maxOpen` — the gate stack's open-PR cap (default 3).
 
 ## Commands
 
@@ -62,6 +63,7 @@ Other `loop` keys: `bootstrap` (runs once per worktree), budgets
 | ------- | ------------ |
 | `bro loop` | Run the queue until idle or gated |
 | `bro loop --max N` | At most N beads this run |
+| `bro loop --max-open N` | Cap the gate stack's open PRs — a full stack only services gates until a merge frees a slot |
 | `bro loop --dry-run` | Print the top item's plan (claim, worktree, agent cmd) — changes nothing |
 | `bro loop --agent '<tpl>'` | One-off agent override — a provider name resolves through the registry |
 | `bro loop --provider <name>` | Provider pick (`--profile`, `--model`, `--auto-approve` tune it) |
@@ -80,12 +82,20 @@ Other `loop` keys: `bootstrap` (runs once per worktree), budgets
    inside the worktree reach the shared db regardless of version or a
    tracked `.beads` copy — and an agent `bd close` is honored as a
    verdict (`closed`), not reopened as a failure.
-4. **Gate** — the PR is discovered via `gh pr list --head`; `bro act`'s
-   gate is polled (`mergeTimeoutMin`). Green → `bro act merge` (merge
-   slot + `--match-head-commit` apply). Threads → the agent is respawned
-   with the thread list, up to `loop.fixRounds`.
+4. **Gate stack** — the PR is discovered via `gh pr list --head` and
+   joins the run's gate stack instead of blocking the queue. Each tick
+   services the stack oldest-first, then pushes the next bead while a
+   `loop.maxOpen` slot is free — a pending gate is claimed work, never
+   orchestrator idle. A gate event is the preemption point: green →
+   `bro act merge` (merge slot + `--match-head-commit` apply); threads
+   → the agent is respawned with the thread list; `CONFLICTING` → a
+   rebase order onto the PR's base; `BEHIND` as the sole blocker →
+   update-branch. Fix and rebase rounds share `loop.fixRounds`; each
+   member waits out its own `mergeTimeoutMin`.
 5. **Close** — `bd close <id> --reason "landed via PR #N"`, worktree and
-   branch removed, next bead claimed.
+   branch removed; the freed slot claims the next bead. A member's own
+   loop IS the supervisor — `bro drive` never needs to spawn fixers
+   against loop-owned worktrees.
 
 ## Policy
 
@@ -95,6 +105,11 @@ Other `loop` keys: `bootstrap` (runs once per worktree), budgets
 - **Failures are visible, never silent** — an agent that exits without a
   PR gets the bead reopened with a `loop:` note; a stalled PR parks the
   bead with a note naming the blocker and the kept worktree path.
+- **The open-PR set is bounded** — `loop.maxOpen` (default 3) caps how
+  many gates sit on the stack; a full stack services gates only until a
+  merge frees a slot. Independent branches drift against shared files
+  fast — keep the cap tight rather than wide, or run `--stack` so
+  members chain onto each other and conflicts surface at rebase-time.
 - **Already-attempted beads aren't re-picked** within a run — a reopened
   failure can't spin the loop forever.
 - **`--dry-run` first on a new repo** — verify the agent template and

@@ -445,13 +445,13 @@ const facade = {
       headSha: per.headSha ?? s.headSha ?? 'abc123',
       headRef: per.headRef ?? s.headRef ?? 'loop/fx-a',
       baseRef: per.baseRef ?? s.baseRef ?? 'main',
-      mergeable: s.mergeable ?? 'MERGEABLE',
-      mergeState: s.mergeState ?? 'CLEAN',
+      mergeable: per.mergeable ?? s.mergeable ?? 'MERGEABLE',
+      mergeState: per.mergeState ?? s.mergeState ?? 'CLEAN',
     }
   },
   mergedPrInfo: () => { throw new Error('not merged') },
   mergedPrs: () => [],
-  checks: () => {
+  checks: (t) => {
     const s = load()
     // mid-poll snapshot of the watch-marker dir — a waitForGate caller
     // that armed watch: holds the marker for the fetch's duration, so
@@ -465,6 +465,22 @@ const facade = {
       )
       save(s)
     } catch {}
+    // per-PR checks — a mapped entry carries its own check list (with a
+    // clearAfterMerge trigger: once that PR lands in events, this one's
+    // checks go green — the round-robin "A pending while B merges" cue)
+    if (s.prs) {
+      const p = Object.values(s.prs).find((p) => p.number === t.pr)
+      if (p) {
+        if (
+          p.clearAfterMerge !== undefined &&
+          (s.events ?? []).some((e) => e.merge === p.clearAfterMerge)
+        ) {
+          p.checks = []
+          save(s)
+        }
+        return p.checks ?? s.checks ?? []
+      }
+    }
     return s.checks ?? []
   },
   checkAnnotations: () => new Map(),
@@ -488,18 +504,39 @@ const facade = {
     save(s)
     return true
   },
-  updateBranch: () => false,
+  updateBranch: (t) => {
+    const s = load()
+    if (s.updateFails) return false
+    s.events = (s.events ?? []).concat([{ update: t.pr }])
+    if (s.prs) {
+      const p = Object.values(s.prs).find((p) => p.number === t.pr)
+      if (p) {
+        p.mergeState = 'CLEAN'
+        p.headSha = 'updated-' + t.pr
+        save(s)
+        return true
+      }
+    }
+    s.mergeState = 'CLEAN'
+    s.headSha = 'updated-' + t.pr
+    save(s)
+    return true
+  },
   mergePr: (t) => {
     const s = load()
     s.merges = (s.merges ?? 0) + 1
-    s.prState = s.mergeResult ?? 'MERGED'
+    s.events = (s.events ?? []).concat([{ merge: t.pr }])
     // a merge lands on the per-branch entry too — otherwise a mapped
     // stack member keeps reporting OPEN after its merge
     if (s.prs) {
-      for (const p of Object.values(s.prs)) {
-        if (p.number === t.pr) p.state = s.prState
+      const p = Object.values(s.prs).find((p) => p.number === t.pr)
+      if (p) {
+        p.state = p.mergeResult ?? s.mergeResult ?? 'MERGED'
+        save(s)
+        return p.state
       }
     }
+    s.prState = s.mergeResult ?? 'MERGED'
     save(s)
     return s.prState
   },
@@ -529,9 +566,15 @@ const scenario = process.env.E2E_SCENARIO || 'land'
 const load = () => JSON.parse(fs.readFileSync(STATE, 'utf8'))
 const save = (s) => fs.writeFileSync(STATE, JSON.stringify(s))
 const prompt = fs.readFileSync(promptFile, 'utf8')
+const branch = execFileSync('git', ['branch', '--show-current'], { encoding: 'utf8' }).trim()
 const log = (msg) => {
   const f = path.join(path.dirname(STATE), 'spawns.log')
-  fs.appendFileSync(f, (prompt.includes('review-threads') ? 'fix' : 'work') + ' ' + msg + '\\n')
+  const kind = prompt.includes('review-threads')
+    ? 'fix'
+    : prompt.includes('merge conflicts')
+      ? 'rebase'
+      : 'work'
+  fs.appendFileSync(f, kind + ' ' + msg + '\\n')
 }
 if (prompt.includes('review-threads')) {
   // fix round — resolve the threads and stop
@@ -541,12 +584,33 @@ if (prompt.includes('review-threads')) {
   log('resolved threads')
   process.exit(0)
 }
+if (prompt.includes('merge conflicts')) {
+  // rebase round — clear the conflict and stop
+  const s = load()
+  s.mergeable = 'MERGEABLE'
+  if (s.prs?.[branch]) s.prs[branch].mergeable = 'MERGEABLE'
+  s.events = (s.events ?? []).concat([{ rebase: process.env.BRO_BEAD_ID || null, branch }])
+  save(s)
+  log('rebased onto base')
+  process.exit(0)
+}
 switch (scenario) {
   case 'land': {
     fs.writeFileSync('work.txt', 'did the thing\\n')
     execFileSync('git', ['add', '-A'])
     execFileSync('git', ['commit', '-qm', 'feat: the thing'])
     const s = load()
+    s.events = (s.events ?? []).concat([{ spawn: process.env.BRO_BEAD_ID || null, branch }])
+    // the per-branch map (seeded prs: {}) is authoritative when present
+    if (s.prs) {
+      s.prs[branch] = {
+        ...(s.prs[branch] ?? {}),
+        number: s.prs[branch]?.number ?? (s.nextPr = (s.nextPr ?? 10) + 1),
+        state: 'OPEN',
+        headRef: branch,
+        baseRef: 'main',
+      }
+    }
     s.prOpened = true
     save(s)
     log('opened pr')
