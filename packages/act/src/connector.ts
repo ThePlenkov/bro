@@ -159,9 +159,13 @@ function watchLines(dir: string): string[] {
       // a bare `act wait` resurrects through `act rearm`; a supervisor
       // heartbeat belongs to the supervisor's own restart story —
       // pointing a dead drive's marker at rearm would report a recovery
-      // that never happens
+      // that never happens. The recorded merge mode is part of the
+      // promise: a supervisor that ran --no-merge (or drive.merge:
+      // 'never') restarted bare would merge PRs it only ever watched
       const restart =
-        kind === 'loop' ? 'bro loop' : `bro ${kind} --every`
+        kind === 'loop'
+          ? 'bro loop'
+          : `bro ${kind} --every${watch.merge ? '' : ' --no-merge'}`
       out.push(
         `stale act watch on ${watch.link}${mode} — ` +
           (kind === 'wait'
