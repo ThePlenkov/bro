@@ -407,7 +407,7 @@ export const FAKE_BEAD = {
  *  round, a PR closed under the gate's feet, a merge that reports a
  *  queue hold). */
 const FAKE_HOST_PLUGIN = `// e2e fixture — a review-host connector driven by host.json beside this file
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 const STATE = join(dirname(fileURLToPath(import.meta.url)), 'host.json')
@@ -451,7 +451,22 @@ const facade = {
   },
   mergedPrInfo: () => { throw new Error('not merged') },
   mergedPrs: () => [],
-  checks: () => load().checks ?? [],
+  checks: () => {
+    const s = load()
+    // mid-poll snapshot of the watch-marker dir — a waitForGate caller
+    // that armed watch: holds the marker for the fetch's duration, so
+    // the loop's gate wait is observable exactly like act wait's
+    try {
+      const wd = join(process.cwd(), '.git', 'bro', 'watches')
+      s.watchPeeks = (s.watchPeeks ?? []).concat(
+        readdirSync(wd)
+          .filter((f) => f.endsWith('.json'))
+          .map((f) => ({ file: f, marker: JSON.parse(readFileSync(join(wd, f), 'utf8')) }))
+      )
+      save(s)
+    } catch {}
+    return s.checks ?? []
+  },
   checkAnnotations: () => new Map(),
   reviewedShas: () => load().reviewedShas ?? ['abc123'],
   reviewThreads: async () => load().threads ?? [],

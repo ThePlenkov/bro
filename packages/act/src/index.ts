@@ -28,6 +28,7 @@ export {
   watchBegin,
   watchEnd,
   watchHeartbeat,
+  watchMarkerKind,
   watchRetire,
 } from './pending-watch.ts'
 export type { ListedWatch, PendingWatch } from './pending-watch.ts'

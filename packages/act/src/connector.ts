@@ -9,7 +9,12 @@ import { loadConfig, reviewHost, type Connector, type PrTarget } from '@broject/
 import { checkHistory } from './check-history.ts'
 import { evaluateExitGate } from './exit-gate.ts'
 import { mergeSlotHolderAsync } from './merge-slot.ts'
-import { hasLiveWatch, listWatches, watchRetire } from './pending-watch.ts'
+import {
+  hasLiveWatch,
+  listWatches,
+  watchMarkerKind,
+  watchRetire,
+} from './pending-watch.ts'
 import { fetchPrActState } from './state.ts'
 
 /** The bound-dir PR — async when the host has the twin, else a resolved
@@ -140,9 +145,17 @@ function watchLines(dir: string): string[] {
         continue
       }
       const mode = watch.merge ? ' (was set to merge on green)' : ''
+      const kind = watchMarkerKind(file, watch)
+      // a bare `act wait` resurrects through `act rearm`; a supervisor
+      // heartbeat belongs to the supervisor's own restart story —
+      // pointing a dead drive's marker at rearm would report a recovery
+      // that never happens
       out.push(
-        `stale act watch on ${watch.link}${mode} — the watching session died; ` +
-          `\`bro act rearm\` resurrects it, \`bro act status --pr ${watch.pr}\` inspects`
+        `stale act watch on ${watch.link}${mode} — ` +
+          (kind === 'wait'
+            ? 'the watching session died; `bro act rearm` resurrects it, '
+            : `the '${kind}' supervisor died — restart it (\`bro ${kind} --every\`); `) +
+          `\`bro act status --pr ${watch.pr}\` inspects`
       )
     }
     return out

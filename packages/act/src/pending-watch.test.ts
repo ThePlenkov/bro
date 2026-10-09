@@ -20,6 +20,7 @@ import {
   watchBegin,
   watchEnd,
   watchHeartbeat,
+  watchMarkerKind,
   watchRetire,
   type PendingWatch,
 } from './pending-watch.ts'
@@ -457,6 +458,19 @@ function deadMarker(dir: string, w: Partial<PendingWatch> & { pr: number }): str
   return file
 }
 
+describe('watchMarkerKind', () => {
+  const w: PendingWatch = { ...base, pid: 1234, startedAt: Date.now() }
+  test('wait shapes put the recorded pid in the second segment', () => {
+    assert.equal(watchMarkerKind('42-1234-a1b2c3d4e5f6.json', w), 'wait')
+    assert.equal(watchMarkerKind('42-1234.json', w), 'wait')
+    assert.equal(watchMarkerKind('42-1234-a1b2.json.retired', w), 'wait')
+  })
+  test('supervisor heartbeats put a kind word there', () => {
+    assert.equal(watchMarkerKind('42-drive-1234.json', w), 'drive')
+    assert.equal(watchMarkerKind('42-supervisor-1234.json', w), 'supervisor')
+  })
+})
+
 describe('act rearm', () => {
   test('a dead marker on an open PR respawns and the marker is swept', async () => {
     const dir = repo()
@@ -541,6 +555,45 @@ describe('act rearm', () => {
     const plan = deadWatchPlan(dir)
     assert.equal(plan.length, 1)
     assert.equal(plan[0]!.workdir, dir)
+  })
+
+  test('a nonce-named marker — the shape watchBegin writes — is in the plan', async () => {
+    const dir = repo()
+    const wd = join(dir, '.git', 'bro', 'watches')
+    mkdirSync(wd, { recursive: true })
+    // <pr>-<pid>-<nonce>.json — the canonical watchBegin name; matching
+    // only <pr>-<pid>.json skipped every real marker (bro-z0k2u)
+    const file = join(wd, '7-2000000000-a1b2c3d4e5f6.json')
+    writeFileSync(
+      file,
+      JSON.stringify({ ...base, pr: 7, pid: 2_000_000_000, startedAt: Date.now() })
+    )
+    const plan = deadWatchPlan(dir)
+    assert.equal(plan.length, 1)
+    assert.equal(plan[0]!.pr, 7)
+    assert.equal(plan[0]!.merge, true)
+    const res = await rearmWatches({
+      dir,
+      isOpen: async () => true,
+      respawn: () => 4242,
+    })
+    assert.deepEqual(res.rearmed, [{ pr: 7, pid: 4242 }])
+    assert.equal(existsSync(file), false)
+  })
+
+  test('a report-claimed (.retired) marker still resurrects', async () => {
+    const dir = repo()
+    const file = deadMarker(dir, { pr: 8, merge: true })
+    // the session-start claim says nothing about delivery — the promise
+    // is still dead, so the plan must still see it
+    assert.equal(watchRetire(file), true)
+    const res = await rearmWatches({
+      dir,
+      isOpen: async () => true,
+      respawn: () => 9,
+    })
+    assert.deepEqual(res.rearmed, [{ pr: 8, pid: 9 }])
+    assert.equal(existsSync(`${file}.retired`), false)
   })
 
   test('a dead supervisor heartbeat is not resurrected as a bare wait', async () => {

@@ -341,6 +341,21 @@ export function listWatches(dir: string): ListedWatch[] {
   return out.filter((l) => l.alive || !coveredBy(live, l.watch))
 }
 
+/** Who a dead marker's resurrection belongs to, read off the filename.
+ *  A plain wait marker is `<pr>-<pid>[-nonce].json` — the recorded pid
+ *  sits in the second '-'-separated segment (watchBegin's nonce is a
+ *  third; pre-nonce markers have none). A supervisor heartbeat is
+ *  `<pr>-<kind>-<pid>.json` — a kind word ('drive') where the pid would
+ *  sit. The `.retired` suffix a report claim adds is stripped first, so
+ *  a flagged-but-still-dead marker classifies the same. Returns 'wait'
+ *  or the recorded supervisor kind. */
+export function watchMarkerKind(file: string, w: PendingWatch): string {
+  const second = basename(file)
+    .replace(/\.json(\.retired)?$/, '')
+    .split('-')[1]
+  return second === String(w.pid) ? 'wait' : (second ?? 'supervisor')
+}
+
 /** Dead watches deduped to one rearm plan per PR — the strongest
  *  recorded mode wins (a dead merge:true marker re-arms as --merge even
  *  when a watch-only marker died alongside). The caller checks the PR
@@ -370,11 +385,11 @@ export function deadWatchPlan(
     if (l.alive) {
       continue
     }
-    // only plain `act wait` markers (<pr>-<pid>.json) resurrect — a dead
-    // supervisor heartbeat (<pr>-<kind>-<pid>.json) belongs to a drive's
-    // own restart story; respawning it as a bare wait would degrade the
-    // coverage it recorded
-    if (basename(l.file) !== `${l.watch.pr}-${l.watch.pid}.json`) {
+    // only wait-shaped markers resurrect — a dead supervisor heartbeat
+    // (<pr>-<kind>-<pid>.json) belongs to the supervisor's own restart
+    // story; respawning it as a bare wait would degrade the coverage it
+    // recorded
+    if (watchMarkerKind(l.file, l.watch) !== 'wait') {
       continue
     }
     const cur = byPr.get(l.watch.pr)

@@ -36,11 +36,12 @@ function fixture() {
 function deadWatch(
   main: string,
   pr: number,
-  w: Record<string, unknown> = {}
+  w: Record<string, unknown> = {},
+  name = `${pr}-2000000000.json`
 ): string {
   const wd = join(main, '.git', 'bro', 'watches')
   mkdirSync(wd, { recursive: true })
-  const file = join(wd, `${pr}-2000000000.json`)
+  const file = join(wd, name)
   writeFileSync(
     file,
     JSON.stringify({
@@ -131,6 +132,37 @@ describe('act rearm', () => {
     assert.equal(live.pr, 7)
     assert.equal(live.merge, true)
     assert.equal(live.cleanup, true)
+  })
+
+  test('a nonce-named marker — the shape watchBegin actually writes — resurrects', async (t) => {
+    const { root, main } = fixture()
+    let pid = 0
+    t.after(() => {
+      if (pid > 0) {
+        try {
+          process.kill(pid, 'SIGKILL')
+        } catch {
+          /* already gone */
+        }
+      }
+      rmSync(root, { recursive: true, force: true })
+    })
+    writeHostState(join(main, 'host.json'), {
+      prState: 'OPEN',
+      checks: [{ name: 'ci', state: 'PENDING', bucket: 'pending' }],
+    })
+    // <pr>-<pid>-<nonce>.json — a plan matching only <pr>-<pid>.json
+    // skipped every real marker and reported "no dead watches" (bro-z0k2u)
+    const marker = deadWatch(main, 7, { merge: true }, '7-2000000000-a1b2c3d4e5f6.json')
+    const r = runCli(['act', 'rearm', '--json'], { cwd: main })
+    assert.equal(r.code, 0, r.stderr)
+    const out = JSON.parse(r.stdout) as {
+      rearmed: Array<{ pr: number; pid: number }>
+    }
+    assert.equal(out.rearmed.length, 1)
+    pid = out.rearmed[0]!.pid
+    assert.ok(pid > 0)
+    assert.equal(existsSync(marker), false)
   })
 
   test('a settled PR sweeps without spawning anything', () => {
