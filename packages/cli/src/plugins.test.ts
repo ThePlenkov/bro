@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
-import { loadExternalPlugins, PLUGINS, pluginConfigSections, runPlanFile } from './plugins.ts'
+import { loadExternalPlugins, PLUGINS, pluginConfigSections, pluginGroups, runPlanFile } from './plugins.ts'
 
 describe('plugin registry', () => {
   test('names are unique', () => {
@@ -32,6 +32,56 @@ describe('plugin registry', () => {
 
   test('plugins lists itself', () => {
     assert.ok(PLUGINS.some((p) => p.name === 'plugins'))
+  })
+
+  test('every visible plugin is grouped or meta (specs/cli)', () => {
+    // the blessed top-level row — operator/meta commands that stay
+    // ungrouped by design; everything else must claim a group
+    const META = new Set(['check', 'setup', 'doctor', 'plugins'])
+    const groups = pluginGroups()
+    for (const p of PLUGINS) {
+      if (p.hidden || p.external) continue
+      if (p.group) {
+        assert.ok(
+          groups.get(p.group)?.includes(p),
+          `${p.name} claims unknown group '${p.group}'`
+        )
+      } else {
+        assert.ok(
+          META.has(p.name) || p.aliasOf,
+          `${p.name} is visible but ungrouped and not meta/alias`
+        )
+      }
+    }
+  })
+
+  test('group names collide only with their host plugin', () => {
+    for (const [group, members] of pluginGroups()) {
+      const host = members.find((p) => p.name === group)
+      // a plugin named like the group must claim that group — an
+      // unrelated same-named plugin would silently shadow members
+      const stray = PLUGINS.find((p) => p.name === group && p.group !== group)
+      assert.equal(
+        stray,
+        undefined,
+        `plugin '${group}' exists but does not host its group`
+      )
+      assert.ok(
+        host === undefined || host.name === group,
+        `group '${group}' host mismatch`
+      )
+    }
+  })
+
+  test('aliasOf targets resolve to real plugins', () => {
+    for (const p of PLUGINS) {
+      if (!p.aliasOf) continue
+      const target = p.aliasOf.split(' ')[0]
+      assert.ok(
+        PLUGINS.some((q) => q.name === target),
+        `${p.name} aliases '${p.aliasOf}' — no plugin '${target}'`
+      )
+    }
   })
 
   test('configKey ⟺ configSchema pairing', () => {

@@ -40,6 +40,18 @@ export interface BroPlugin {
   planVersion?: number
   /** Executes a planSchema-validated plan — `bro run <file>` calls this. */
   runPlan?: (plan: unknown) => void | Promise<void>
+  /** Capability namespace — `bro <group> <member>` dispatch. One noun,
+   *  claimed by the capability spec that owns the plugin. Plugins
+   *  without a group stay top-level (the meta row: check, setup,
+   *  doctor, plugins) or are hidden plumbing. A plugin whose name
+   *  equals its group's name is the group HOST — unmatched argv falls
+   *  through to it (`bro plan`, `bro mesh peers`). */
+  group?: string
+  /** This entry is a spelling for another plugin — `wtf` → `retrospect`,
+   *  `unwind` → `drill`. Alias rows render as `name → target` in help,
+   *  never as independent commands, and are excluded from command
+   *  counts and ownership checks. */
+  aliasOf?: string
   /** Deprecation advice ("use `bro drill up`") — dispatch prints one
    *  stderr warning and still runs the command. Pair with `hidden:
    *  true` to drop it from `--help`; removal lands in a later release. */
