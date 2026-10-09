@@ -650,6 +650,12 @@ switch (scenario) {
     log('dying')
     process.exitCode = 3
     break
+  case 'hang':
+    // the silent-death shape — an agent that never returns; the loop
+    // must stay alive behind its heartbeat, not vanish
+    log('hanging forever')
+    setInterval(() => {}, 60_000)
+    break
   default:
     process.exit(1)
 }

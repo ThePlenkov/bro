@@ -136,6 +136,14 @@ bead state. A clean run prints `clean — no loop tails`. Tails that
 survive the sweep — dirty trees, open PRs, live claimants — still need
 a human or a follow-up session to clear.
 
+The process itself is held to the same contract: a ref'd heartbeat
+keeps the event loop open while a run is live (`loop: alive — <stage>`
+lines name the suspension point, so a stuck await is a visible stall,
+never a silent drain-exit), and an `exit` listener prints
+`loop: process exiting mid-run — <stage>` plus a bead note if the
+process dies with the queue open — signals included. A run can stall
+or die; it cannot vanish without a trail.
+
 Cleanup after a merge wait is `&&`-sequenced or command-owned — never
 `;`: a failed `act wait` must not touch the PR, branch, worktree, or
 bead.

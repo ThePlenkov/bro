@@ -31,7 +31,7 @@
  * bead whose PR stalls keeps its worktree for inspection.
  */
 import { spawnSync, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync, writeSync } from 'node:fs'
 import { dirname } from 'node:path'
 import {
   bdTry,
@@ -137,6 +137,13 @@ interface Ctx {
   /** Cleanup failures collected during the run — the end-of-run audit
    *  prints them again so a tail never dies in a scrollback line. */
   tails: string[]
+  /** Liveness — the stage the run is suspended on. The heartbeat names
+   *  it every tick; the mid-run exit audit names it once (spec
+   *  bro-snga4). A silent death becomes a named death either way. */
+  stage: string
+  /** The bead currently in play — undefined between items so a death
+   *  outside an item notes nothing stale. */
+  bead?: string
 }
 
 /** Clickable PR ref for this repo — user-facing lines never print bare #N. */
@@ -162,15 +169,21 @@ function usage(): never {
   process.exit(2)
 }
 
-const num = (v: string | undefined, dflt: number, min = 1): number => {
+const num = (v: string | undefined, dflt: number, min = 1, max?: number): number => {
   if (v === undefined) return dflt
   const n = Number(v)
-  if (!Number.isFinite(n) || n < min) {
-    console.error(`bro loop: invalid numeric value "${v}" (must be >= ${min})`)
+  if (!Number.isFinite(n) || n < min || (max !== undefined && n > max)) {
+    const range = max === undefined ? `>= ${min}` : `${min}..${max}`
+    console.error(`bro loop: invalid numeric value "${v}" (must be ${range})`)
     process.exit(2)
   }
   return n
 }
+
+/** Node clamps a timer delay over 2^31-1 ms to 1 ms — a flag that becomes
+ *  a raw delay needs a ceiling or an absurd value hot-loops the
+ *  heartbeat/gate poll (or fires the agent timeout instantly). */
+const TIMER_MAX_MS = 2 ** 31 - 1
 
 /** Progress lines — stderr under --json so stdout stays a clean
  *  event stream. */
@@ -426,6 +439,7 @@ function spawnAgent(ctx: Ctx, beadId: string, title: string, promptFile: string,
           // argv[0] ('bro'/'npx') on PATH the way the backend does
           spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
         : spawn('sh', ['-c', expandAgentCmd(ctx.agent, promptFile)], opts) // NOSONAR — operator-configured agent command
+    ctx.stage = `worker pid=${child.pid ?? '?'}`
     let timedOut = false
     const kill = () => {
       timedOut = true
@@ -494,6 +508,7 @@ async function finalizeMerge(
   pr: number,
   alreadyMerged = false
 ): Promise<'landed' | 'parked'> {
+  ctx.stage = `merge pr=${pr}`
   try {
     if (!alreadyMerged) {
       await runActCommand(['merge', String(pr)])
@@ -553,6 +568,7 @@ async function runFixRound(
   pr: number,
   round: number
 ): Promise<void> {
+  ctx.stage = `fix round ${round} pr=${pr}`
   const threads = (await ctx.rev.reviewThreads({ repo: ctx.repo, pr }))
     .filter((t) => !t.resolved)
     .map((t) => {
@@ -776,6 +792,7 @@ async function pushItem(ctx: Ctx, bead: ReadyBead): Promise<PushOutcome> {
   let slot: StackSlot | undefined
   let item!: LoopItem
   try {
+    ctx.stage = 'worktree'
     const planned = planItemAndWorktree(ctx, bead)
     slot = planned.slot
     item = planned.item
@@ -784,15 +801,18 @@ async function pushItem(ctx: Ctx, bead: ReadyBead): Promise<PushOutcome> {
     reopenBead(ctx.tasks, bead.id)
     return { kind: 'done', result: 'failed' }
   }
+  ctx.stage = 'bootstrap'
   if (!runBootstrap(ctx, bead, item)) {
     return { kind: 'done', result: 'failed' }
   }
   writePrompt(item, buildWorkPrompt(bead, item.branch, slot?.base, slot?.bottom, ctx.backend))
+  ctx.stage = 'agent spawn'
   const spawnAt = Date.now()
   const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
   // agent wall-time — measured before findPr's gh call; a slow lookup
   // must not inflate an instant crash past the crashExitMs threshold
   const elapsed = Date.now() - spawnAt
+  ctx.stage = 'pr lookup'
   const pr = findPr(ctx, item.branch)
   if (pr === 'lookup-error') {
     noteBead(ctx.tasks, bead.id, `loop: PR lookup failed for ${item.branch} — worktree ${item.worktreeDir}`)
@@ -857,6 +877,8 @@ async function serviceMember(
   ctx: Ctx,
   m: GateMember
 ): Promise<'kept' | 'active' | 'landed' | 'parked'> {
+  ctx.stage = `gate pr=${m.pr}`
+  ctx.bead = m.bead.id
   let snap: GateSnapshot
   try {
     const state = await fetchPrActState(
@@ -1065,7 +1087,7 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     dryRunPlan(ctx)
     return
   }
-  await runQueue(ctx)
+  await guardedRun(ctx)
 }
 
 /** Strict flag parse — an unquoted `--agent devin -p --prompt-file
@@ -1169,7 +1191,12 @@ function buildCtx(
     root,
     cfg: {
       ...cfg,
-      agentTimeoutMin: num(flag(argv, '--agent-timeout'), cfg.agentTimeoutMin, 0),
+      agentTimeoutMin: num(
+        flag(argv, '--agent-timeout'),
+        cfg.agentTimeoutMin,
+        0,
+        Math.floor(TIMER_MAX_MS / 60_000)
+      ),
       mergeTimeoutMin: num(flag(argv, '--merge-timeout'), cfg.mergeTimeoutMin),
       maxItems: num(flag(argv, '--max'), cfg.maxItems, 0),
       maxOpen: num(flag(argv, '--max-open'), cfg.maxOpen, 1),
@@ -1177,7 +1204,7 @@ function buildCtx(
     act: broCfg.act,
     agent,
     lane,
-    intervalS: num(flag(argv, '--interval'), 60),
+    intervalS: num(flag(argv, '--interval'), 60, 1, Math.floor(TIMER_MAX_MS / 1000)),
     json: argv.includes('--json'),
     selection: {
       filters: labelSelection(argv),
@@ -1189,6 +1216,7 @@ function buildCtx(
     beadsDir: backend === 'beads' ? resolveBeadsDir(root, (m) => console.error(m)) : undefined,
     stack: stackNameFlag(argv),
     tails: [],
+    stage: 'startup',
   }
   // announce the resolved lane once — agents.native.provider picking up
   // the run must not be a silent behavior change for template users
@@ -1364,6 +1392,7 @@ function sayLoopAudit(ctx: Ctx, reap: LitterReap | undefined, sections: [string,
  *  during the run. Finished with `bro sync` so artifacts and bead state
  *  travel. Never throws — an audit failure is reported, not raised. */
 function endAudit(ctx: Ctx, seen: Set<string>): void {
+  ctx.stage = 'audit'
   // the sweep's git helpers and runSyncCommand narrate via console.log —
   // under --json that corrupts the event stream, so route the whole
   // audit's helper output to stderr (say() already routes its own lines)
@@ -1492,6 +1521,8 @@ async function tryClaim(
   if (q.drained || maxed || q.stack.length >= ctx.cfg.maxOpen) {
     return false
   }
+  ctx.stage = 'claim'
+  ctx.bead = undefined
   const bead = claimNext(ctx, scope, q.seen)
   if (bead === undefined) {
     q.drained = true
@@ -1499,6 +1530,7 @@ async function tryClaim(
   }
   q.seen.add(bead.id)
   q.claimed += 1
+  ctx.bead = bead.id
   const out = await pushItem(ctx, bead)
   if (out.kind === 'member') {
     q.stack.push(out.member)
@@ -1546,6 +1578,8 @@ async function runQueue(ctx: Ctx): Promise<void> {
         // cap the nap at the earliest member deadline — waitForGate's
         // own sleep was deadline-capped; a member at mergeTimeoutMin
         // must park on the next tick, not an interval late
+        ctx.stage = 'idle'
+        ctx.bead = undefined
         const deadline = Math.min(
           ...q.stack.map((m) => m.since + ctx.cfg.mergeTimeoutMin * 60_000)
         )
@@ -1554,6 +1588,8 @@ async function runQueue(ctx: Ctx): Promise<void> {
         )
       }
     }
+    // the queue is idle — no bead names a settled item in the audit
+    ctx.bead = undefined
     if (ctx.json) {
       console.log(JSON.stringify({ done: true, ...q.tally }))
     } else {
@@ -1565,5 +1601,77 @@ async function runQueue(ctx: Ctx): Promise<void> {
     // idle, gated, or error — the audit always runs; a tail the loop
     // left must surface in the summary, not be discovered later
     endAudit(ctx, q.seen)
+  }
+}
+
+/** Run the queue behind the liveness contract (spec bro-snga4). A
+ *  `for(;;)` queue cannot end mid-item — the two silent-death shapes
+ *  it must not take: an await that never settles while every live
+ *  handle is unref'd (the event loop drains, Node exits 0 mid-run),
+ *  and a signal/stray-exit death before the audit.
+ *
+ *  The heartbeat is the prevention: a ref'd interval holds the event
+ *  loop open while a run is live, so a stuck await surfaces as
+ *  repeating `loop: alive — <stage>` lines instead of a vanished
+ *  process. The death audit is the diagnosis of last resort — any
+ *  exit with a run still open prints stage + bead and notes the bead,
+ *  exactly what the silent deaths denied. Two shapes it must cover:
+ *  'exit' (process.exit / natural end) — where writeSync(2) is the
+ *  only write guaranteed to outlive the process — and signals, which
+ *  never emit 'exit' and need handlers that audit then re-raise so
+ *  the parent still sees the true signal death. */
+async function guardedRun(ctx: Ctx): Promise<void> {
+  let open = true
+  const heartbeat = setInterval(() => {
+    console.error(`loop: alive — ${ctx.stage}${ctx.bead ? ` on ${ctx.bead}` : ''}`)
+  }, ctx.intervalS * 1000)
+  const auditDeath = (why: string): void => {
+    try {
+      writeSync(
+        2,
+        `loop: process exiting mid-run — ${ctx.stage}` +
+          `${ctx.bead ? ` on ${ctx.bead}` : ''} (${why})\n`
+      )
+    } catch { /* stderr may be gone — the note below still lands */ }
+    if (ctx.bead !== undefined) {
+      noteBead(
+        ctx.tasks,
+        ctx.bead,
+        `loop: process exited mid-run — ${ctx.stage} (${why})`
+      )
+    }
+  }
+  const onExit = (code: number): void => {
+    if (open) {
+      auditDeath(`exit code ${code}`)
+    }
+  }
+  const onSigint = (): void => {
+    if (open) {
+      auditDeath('signal SIGINT')
+    }
+    // restore the default disposition, then re-raise — the parent sees
+    // a real signal death, not a clean exit code
+    process.removeListener('SIGINT', onSigint)
+    process.kill(process.pid, 'SIGINT')
+  }
+  const onSigterm = (): void => {
+    if (open) {
+      auditDeath('signal SIGTERM')
+    }
+    process.removeListener('SIGTERM', onSigterm)
+    process.kill(process.pid, 'SIGTERM')
+  }
+  process.on('exit', onExit)
+  process.on('SIGINT', onSigint)
+  process.on('SIGTERM', onSigterm)
+  try {
+    await runQueue(ctx)
+  } finally {
+    open = false
+    clearInterval(heartbeat)
+    process.removeListener('exit', onExit)
+    process.removeListener('SIGINT', onSigint)
+    process.removeListener('SIGTERM', onSigterm)
   }
 }
