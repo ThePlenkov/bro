@@ -2,7 +2,7 @@
  *  over the same reviewHost facade + fetchPrActState + evaluateExitGate
  *  (specs/bro-9rls.1.md). Rows are Gate, never "act" nouns. */
 import {
-  facadeName,
+  facadeAuth,
   loadConfig,
   PlaneUnavailable,
   PlaneVerbError,
@@ -28,9 +28,10 @@ function resolveTarget(rev: ReviewFacade, args?: Record<string, unknown>): PrTar
     const cur = rev.currentPr()
     return cur !== null && cur.state === 'OPEN' ? { repo, pr: cur.pr } : null
   }
-  const pr = typeof raw === 'number' ? raw : Number(argNumber({ pr: raw }, 'pr') ?? NaN)
+  const pr = typeof raw === 'number' ? raw : Number(argNumber({ pr: raw }, 'pr') ?? Number.NaN)
   if (!Number.isInteger(pr) || pr <= 0) {
-    throw new PlaneVerbError('gates', 'get', `invalid pr "${String(raw)}"`)
+    const shown = typeof raw === 'string' ? raw : JSON.stringify(raw)
+    throw new PlaneVerbError('gates', 'get', `invalid pr "${shown}"`)
   }
   return { repo, pr }
 }
@@ -123,16 +124,14 @@ export function gatesPlane(ctx: PlaneCtx): PlaneDescriptor {
         },
       },
     },
-    capabilities: async () => {
-      let serving = false
-      try {
-        facadeName('reviews', { dir }, { prefer: ctx.connectors })
-        serving = inRepo(dir)
-      } catch {
-        serving = false
-      }
-      return { read: serving, resolve: false, reply: false, merge: false }
-    },
+    capabilities: async () => ({
+      // facadeAuth, not facadeName — connector selection alone proves
+      // nothing about auth; an unauthenticated backend has no tools
+      read: inRepo(dir) && facadeAuth('reviews', { dir }, { prefer: ctx.connectors }) === null,
+      resolve: false,
+      reply: false,
+      merge: false,
+    }),
     list: async () => {
       const rev = host()
       if (rev === null) {

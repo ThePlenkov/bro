@@ -81,6 +81,15 @@ describe('catalogTools — capability gating', () => {
     const names = (await catalogTools(catalog)).map((t) => t.name)
     assert.deepEqual(names, ['bro_debt_list', 'bro_debt_get'])
   })
+
+  test('a capabilities() that omits read is not advertised either', async () => {
+    const catalog = [
+      fakePlane({ capabilities: async () => ({}) }),
+      fakePlane({ name: 'debt', reads: [] }),
+    ]
+    const names = (await catalogTools(catalog)).map((t) => t.name)
+    assert.deepEqual(names, ['bro_debt_list', 'bro_debt_get'])
+  })
 })
 
 describe('callTool — dispatch', () => {
@@ -116,6 +125,26 @@ describe('callTool — dispatch', () => {
 
   test('a tool for an absent plane is PlaneUnavailable — enumerate first', async () => {
     await assert.rejects(() => callTool([fakePlane()], 'bro_queue_next', {}), PlaneUnavailable)
+  })
+
+  test('a call against a read-incapable plane is PlaneUnavailable, not dispatched', async () => {
+    const p = fakePlane({
+      capabilities: async () => ({ read: false }),
+      list: async () => {
+        throw new Error('list must not run')
+      },
+    })
+    await assert.rejects(() => callTool([p], 'bro_work_list', {}), PlaneUnavailable)
+  })
+
+  test('longer plane names win — bro_work_archive_list hits work_archive, not work', async () => {
+    const archive = fakePlane({
+      name: 'work_archive',
+      reads: [],
+      list: async () => [row('archived-1')],
+    })
+    const res = (await callTool([fakePlane(), archive], 'bro_work_archive_list', {})) as PlaneRow[]
+    assert.deepEqual(res, [{ id: 'archived-1' }])
   })
 
   test('a plane read that throws propagates for the { error } result', async () => {

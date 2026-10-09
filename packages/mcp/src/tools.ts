@@ -63,21 +63,23 @@ export function planeTools(plane: PlaneDescriptor): PlaneTool[] {
   return tools
 }
 
-/** capabilities → tools/list. `read: false` hides the plane entirely
- *  (absent capability = absent tool). A capabilities() that throws is
- *  the same verdict: the plane can't certify it can serve, so it is
- *  not advertised. */
+/** A plane is readable only when capabilities() certifies `read:
+ *  true` — a probe that throws or omits `read` is the same verdict:
+ *  the plane can't certify it can serve, so it is not advertised
+ *  (absent capability = absent tool). */
+async function readable(plane: PlaneDescriptor): Promise<boolean> {
+  const caps = await plane
+    .capabilities()
+    .catch(() => ({ read: false }) as Record<string, boolean>)
+  return caps['read'] === true
+}
+
+/** capabilities → tools/list. Unreadable planes hide entirely. */
 export async function catalogTools(catalog: PlaneDescriptor[]): Promise<PlaneTool[]> {
   const out: PlaneTool[] = []
-  const caps = await Promise.all(
-    catalog.map((p) =>
-      p
-        .capabilities()
-        .catch(() => ({ read: false }) as Record<string, boolean>)
-    )
-  )
+  const ok = await Promise.all(catalog.map(readable))
   for (const [i, plane] of catalog.entries()) {
-    if (caps[i]!['read'] !== false) {
+    if (ok[i] === true) {
       out.push(...planeTools(plane))
     }
   }
@@ -94,10 +96,21 @@ export async function callTool(
   name: string,
   args: Record<string, unknown> | undefined
 ): Promise<unknown> {
-  for (const plane of catalog) {
+  // longest plane name first — a `work_archive` plane must win
+  // `bro_work_archive_*` over `work`, or the shorter prefix eats
+  // the call and misreads the suffix as an op
+  for (const plane of [...catalog].sort((a, b) => b.name.length - a.name.length)) {
     const prefix = `bro_${plane.name}_`
     if (!name.startsWith(prefix)) {
       continue
+    }
+    // the same gate tools/list applies — a hidden plane's tools are
+    // absent, so a call against one is unavailable, not dispatchable
+    if (!(await readable(plane))) {
+      throw new PlaneUnavailable(
+        plane.name,
+        `read capability absent — its tools are not advertised; enumerate tools/list first`
+      )
     }
     const op = name.slice(prefix.length)
     if (op === 'list') {

@@ -38,7 +38,8 @@ export class PlaneVerbError extends Error {
     verb: string,
     detail?: string
   ) {
-    super(`${plane}.${verb}${detail === undefined ? '' : `: ${detail}`}`)
+    const suffix = detail === undefined ? '' : `: ${detail}`
+    super(`${plane}.${verb}${suffix}`)
   }
 }
 

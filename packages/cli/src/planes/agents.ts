@@ -45,8 +45,10 @@ export function agentsPlane(ctx: PlaneCtx): PlaneDescriptor {
       }
     },
     /** `bro fleet --json` — mol×step×worker×worktree×PR payload,
-     *  degraded/conflict/wall planes included. */
-    fleet: async () => collectFleet(dir),
+     *  degraded/conflict/wall planes included. The pinned reviews
+     *  connector rides through or the PR column would resolve a
+     *  different backend than the gates plane serves. */
+    fleet: async () => collectFleet(dir, ctx.connectors),
   }
   return {
     name: 'agents',
@@ -73,10 +75,8 @@ export function agentsPlane(ctx: PlaneCtx): PlaneDescriptor {
     list: async () => {
       const { backends } = await collectAgentBackends(dir, env())
       if (backends.length > 0 && backends.every((b) => b.degraded !== undefined)) {
-        throw new PlaneUnavailable(
-          'agents',
-          `every agent backend degraded — ${backends.map((b) => `${b.conn.name}: ${b.degraded}`).join('; ')}`
-        )
+        const notes = backends.map((b) => `${b.conn.name}: ${b.degraded}`).join('; ')
+        throw new PlaneUnavailable('agents', `every agent backend degraded — ${notes}`)
       }
       return backends.flatMap((b) => b.agents.map(workerRow))
     },

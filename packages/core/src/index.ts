@@ -224,6 +224,7 @@ export {
   mailboxEvents,
 } from './events-connectors.ts'
 export {
+  addressedTo,
   coalesceDrops,
   drainDirs,
   drainMailbox,

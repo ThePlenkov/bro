@@ -20,6 +20,28 @@ import {
 import type { ConvoyStep, Molecule } from '@broject/convoy'
 import { argString, beadsReachable, bounded, dispatchRead, inRepo } from './helpers.ts'
 
+/** A mol whose own read fails is a row in error — never a fake
+ *  'blocked' the whole list would have to carry, and never a thrown
+ *  list. Covers nextStep() inside molRow and loadMolecule() in list —
+ *  a mol that vanishes between listing and loading lands here. */
+const molErrorRow = (
+  id: string,
+  title: string,
+  status: string,
+  err: unknown
+): Run => ({
+  id,
+  title,
+  status,
+  state: 'error',
+  error: err instanceof Error ? err.message : String(err),
+  ready: [],
+  gates: [],
+  inProgress: [],
+  blocked: [],
+  stuck: [],
+})
+
 const molRow = (mol: Molecule): Run => {
   try {
     const n = nextStep(mol)
@@ -35,20 +57,7 @@ const molRow = (mol: Molecule): Run => {
       stuck: n.stuck,
     }
   } catch (err) {
-    // a mol whose own read fails is a row in error — never a fake
-    // 'blocked' the whole list would have to carry
-    return {
-      id: mol.root.id,
-      title: mol.root.title,
-      status: mol.root.status,
-      state: 'error',
-      error: err instanceof Error ? err.message : String(err),
-      ready: [],
-      gates: [],
-      inProgress: [],
-      blocked: [],
-      stuck: [],
-    }
+    return molErrorRow(mol.root.id, mol.root.title, mol.root.status, err)
   }
 }
 
@@ -93,7 +102,13 @@ export function queuePlane(ctx: PlaneCtx): PlaneDescriptor {
       } catch (err) {
         throw new PlaneUnavailable('queue', err instanceof Error ? err.message : String(err))
       }
-      const rows = mols.map((m) => molRow(loadMolecule(m.id)))
+      const rows = mols.map((m) => {
+        try {
+          return molRow(loadMolecule(m.id))
+        } catch (err) {
+          return molErrorRow(m.id, m.title, m.status, err)
+        }
+      })
       const limit = typeof f?.limit === 'number' ? f.limit : undefined
       return limit === undefined ? rows : rows.slice(0, limit)
     },

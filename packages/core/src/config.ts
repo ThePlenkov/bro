@@ -523,7 +523,9 @@ export const meshSection: ConfigSection<{
  *  plane; `planes: []` disables all; a non-empty list is an allowlist.
  *  The catalog itself is never enumerated here — config picks which
  *  planes are *exposed*, never which exist. `planes` stays `undefined`
- *  when unwritten so [] ≠ absent survives normalization. */
+ *  only when unwritten — a present non-array value is a malformed
+ *  allowlist and fails closed (`[]`), never silently widens to every
+ *  plane. */
 export const mcpSection: ConfigSection<{ planes?: string[] }> = (raw) => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as { planes?: unknown }
   const out: { planes?: string[] } = {}
@@ -531,6 +533,8 @@ export const mcpSection: ConfigSection<{ planes?: string[] }> = (raw) => {
     out.planes = obj.planes
       .filter((p): p is string => typeof p === 'string' && p.trim() !== '')
       .map((p) => p.trim())
+  } else if (obj.planes !== undefined) {
+    out.planes = []
   }
   return out
 }

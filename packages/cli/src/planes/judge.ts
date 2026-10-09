@@ -1,6 +1,7 @@
 /** judge plane — the verdicts journal + stats behind `bro judge`.
- *  Rows are journal rows with stable keys (threadId, else line index —
- *  the journal is append-only so the index is stable for a reader). */
+ *  Rows are keyed by append-only read-order index — a threadId recurs
+ *  whenever a subject is re-judged (fresh commentSha/headSha), so it
+ *  is never a unique key. */
 import {
   verbsNotWired,
   type JournalRow,
@@ -14,8 +15,7 @@ import { argString, dispatchRead } from './helpers.ts'
 
 const VERBS = ['decide']
 
-const rowKey = (r: JournalRow, i: number): string =>
-  r.subject.threadId ?? `row:${i}`
+const rowKey = (_r: JournalRow, i: number): string => `row:${i}`
 
 /** journal.ts/stats.ts's own predicate — Verdict.kind is `string`, so
  *  the union narrows only through a guard, never a bare !== check. */
@@ -73,11 +73,14 @@ export function judgePlane(ctx: PlaneCtx): PlaneDescriptor {
       return { read: journalPath(dir) !== null, decide }
     },
     list: async (f) => {
-      const all = rows().map(toRow)
+      const all = rows().map((r, i) => toRow(r, i))
       const limit = typeof f?.limit === 'number' ? f.limit : undefined
       return limit === undefined ? all : all.slice(-limit)
     },
-    get: async (ref) => rows().map(toRow).find((r) => r.id === ref),
+    get: async (ref) =>
+      rows()
+        .map((r, i) => toRow(r, i))
+        .find((r) => r.id === ref),
     read: (name, args) => dispatchRead('judge', reads, name, args),
     exec: verbsNotWired('judge', VERBS),
   }

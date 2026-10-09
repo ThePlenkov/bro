@@ -6,11 +6,13 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  addressedTo,
   busProbe,
   busSocketPath,
   busStatus,
   drainDirs,
   mailboxEvent,
+  mailboxIdentity,
   verbsNotWired,
   type BusRecord,
   type EventRow,
@@ -22,9 +24,12 @@ import { argNumber, bounded, dispatchRead } from './helpers.ts'
 const VERBS = ['publish']
 
 /** Mailbox drops, listed not drained — `.seen-*` cursors and `.*.tmp`
- *  staging files are plumbing, not events. */
+ *  staging files are plumbing, not events. `to:`-addressed drops are
+ *  gated by the drain's own addressing rule — a drop for another
+ *  session or agent is not this reader's event. */
 function mailboxRows(dir: string, limit: number): EventRow[] {
   const rows: EventRow[] = []
+  const me = mailboxIdentity()
   for (const d of drainDirs(dir)) {
     let names: string[]
     try {
@@ -50,6 +55,9 @@ function mailboxRows(dir: string, limit: number): EventRow[] {
         continue
       }
       const ev = mailboxEvent(text, path)
+      if (typeof ev.to === 'string' && ev.to !== '' && !addressedTo(ev.to, me)) {
+        continue
+      }
       rows.push({ ...ev, ts, id: name, origin: 'mailbox' })
     }
   }
@@ -88,11 +96,16 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
     } else {
       reason = 'no broker socket'
     }
-    const drops = mailboxRows(dir, limit)
-    const merged = [...rows, ...drops]
-      .sort((a, b) => a.ts.localeCompare(b.ts))
-      .slice(-limit)
-    return { events: merged, gapped, ...(reason === undefined ? {} : { reason }) }
+    const drops = mailboxRows(dir, limit + 1)
+    const merged = [...rows, ...drops].sort((a, b) => a.ts.localeCompare(b.ts))
+    // limit-truncation IS a gap — the mailbox facade's probe flags it
+    // the same way; a client must never read a partial replay as complete
+    const truncated = merged.length > limit
+    return {
+      events: truncated ? merged.slice(-limit) : merged,
+      gapped: gapped || truncated,
+      ...(reason === undefined ? {} : { reason }),
+    }
   }
   const reads: Record<string, (a?: Record<string, unknown>) => unknown> = {
     tail,

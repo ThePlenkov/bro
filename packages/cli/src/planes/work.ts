@@ -6,11 +6,11 @@ import {
   verbsNotWired,
   type PlaneCtx,
   type PlaneDescriptor,
-  type PlaneRow,
   type TaskRow,
+  type TaskStoreAsync,
   type WorkItem,
 } from '@broject/core'
-import { collectStatus } from '../commands/status.ts'
+import { collectStatus, READY_CAP } from '../commands/status.ts'
 import { argNumber, bounded, dispatchRead } from './helpers.ts'
 
 const toItem = (r: TaskRow): WorkItem => ({
@@ -26,14 +26,31 @@ const toItem = (r: TaskRow): WorkItem => ({
 })
 
 /** `bro status`'s board, field-renamed to plane vocabulary — `beads`,
- *  `drill`, `act` are backend/command nouns a client shouldn't need. */
-function board(dir: string): Record<string, unknown> {
+ *  `drill`, `act` are backend/command nouns a client shouldn't need.
+ *  The `work` section is re-sourced from the serving tasks store:
+ *  `collectStatus` reads bd verbatim, so a pinned non-beads connector
+ *  would otherwise show different work than list/ready serve. */
+async function board(dir: string, store: TaskStoreAsync): Promise<Record<string, unknown>> {
   const s = collectStatus(dir)
+  let work: unknown = s.beads
+  try {
+    const [inProgress, readyAll] = await Promise.all([
+      store.list({ status: 'in_progress' }),
+      store.ready({}),
+    ])
+    work = {
+      inProgress: inProgress.map(toItem),
+      ready: readyAll.slice(0, READY_CAP).map(toItem),
+      readyTotal: readyAll.length,
+    }
+  } catch {
+    // the board's contract is empty sections, never errors — s.beads stands
+  }
   return {
     dir: s.dir,
     branch: s.branch,
     dirty: s.dirty,
-    work: s.beads,
+    work,
     workers: s.fleet,
     frame: s.drill.frame,
     gate: s.act ?? null,
@@ -46,7 +63,7 @@ export function workPlane(ctx: PlaneCtx): PlaneDescriptor {
   const reads: Record<string, (a?: Record<string, unknown>) => unknown> = {
     ready: async (a) =>
       (await store().ready({ limit: argNumber(a, 'limit') })).map(toItem),
-    status: () => board(dir),
+    status: () => board(dir, store()),
   }
   return {
     name: 'work',
