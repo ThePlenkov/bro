@@ -458,6 +458,7 @@ const ADAPTERS = {
     // hand-written (Codex event names) — listed so --check doesn't flag it.
     // The manifest lives at the repo root: this directory is hooks only.
     'hooks/hooks.json': null,
+    'INSTRUCTIONS.md': null,
   },
   'plugins/cursor/bro': {
     '.cursor-plugin/plugin.json': [cursorManifest()],

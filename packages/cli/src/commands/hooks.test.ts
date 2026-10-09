@@ -1,9 +1,24 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyArmCommand, classifyArmCommands, classifyExecCommand, classifySkillMutation, isSelfToolCommand, readArmed, armDetail, otherLiveWork, traceEntry } from './hooks.ts'
+import { classifyArmCommand, classifyArmCommands, classifyExecCommand, classifySkillMutation, isSelfToolCommand, readArmed, readCodexInstructions, armDetail, otherLiveWork, traceEntry } from './hooks.ts'
+
+describe('readCodexInstructions', () => {
+  test('reads the plugin file and ignores a missing or relative root', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bro-codex-instr-'))
+    assert.equal(readCodexInstructions(undefined), undefined)
+    assert.equal(readCodexInstructions('relative/root'), undefined)
+    assert.equal(readCodexInstructions(root), undefined)
+    const path = join(root, 'plugins/codex/bro/INSTRUCTIONS.md')
+    mkdirSync(join(root, 'plugins/codex/bro'), { recursive: true })
+    writeFileSync(path, '\n# bro on Codex\n\n| When | Codex |\n')
+    assert.match(readCodexInstructions(root) ?? '', /# bro on Codex/)
+    writeFileSync(path, '   \n')
+    assert.equal(readCodexInstructions(root), undefined)
+  })
+})
 
 describe('classifyExecCommand', () => {
   test('detects gh pr merge', () => {
