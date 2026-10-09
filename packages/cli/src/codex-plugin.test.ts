@@ -46,6 +46,15 @@ describe('codex plugin adapter', () => {
     assert.match(body, /"description"/, 'Codex hooks.json should use description')
   })
 
+  test('Codex instructions route native commands and stay out of the skill tree', () => {
+    const text = readFileSync(join(ROOT, 'plugins/codex/bro/INSTRUCTIONS.md'), 'utf8')
+    assert.match(text, /\/goal/)
+    assert.match(text, /\/plan/)
+    assert.match(text, /\/ps/)
+    assert.match(text, /bro act/)
+    assert.equal(existsSync(join(ROOT, 'skills/codex/SKILL.md')), false)
+  })
+
   test('Codex loads the Agent Plugin skills tree, not a host copy', () => {
     const adapterSkills = join(ROOT, 'plugins/codex/bro/skills')
     assert.equal(existsSync(adapterSkills), false, 'plugins/codex/bro must not carry skills')

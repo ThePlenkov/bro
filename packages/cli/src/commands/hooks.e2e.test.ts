@@ -613,6 +613,43 @@ describe('hooks e2e — cursor schema', () => {
   })
 })
 
+describe('hooks e2e — Codex instructions', () => {
+  const pluginRoot = resolve(CLI_DIST, '..', '..', '..', '..')
+
+  test('session-start and post-compaction inject the plugin file only for Codex', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const env = { XDG_STATE_HOME: join(f.root, 'xdg-state'), PLUGIN_ROOT: pluginRoot }
+      const codex = runCli(['hooks', 'session-start'], {
+        cwd: f.main,
+        input: JSON.stringify({ session_id: 's1', turn_id: 'turn-1' }),
+        env,
+      })
+      assert.equal(codex.code, 0)
+      assert.match(codex.stdout, /# bro on Codex/)
+      const other = runCli(['hooks', 'session-start'], {
+        cwd: f.main,
+        input: JSON.stringify({ session_id: 's1' }),
+        env,
+      })
+      assert.doesNotMatch(other.stdout, /# bro on Codex/)
+      const pre = runCli(['hooks', 'pre-compact'], {
+        cwd: f.main,
+        input: JSON.stringify({ session_id: 's1', turn_id: 'turn-1' }),
+        env,
+      })
+      assert.doesNotMatch(pre.stdout, /# bro on Codex/)
+      const post = runCli(['hooks', 'post-compaction'], {
+        cwd: f.main,
+        input: JSON.stringify({ session_id: 's1', turn_id: 'turn-1' }),
+        env,
+      })
+      assert.match(post.stdout, /PostCompact/)
+      assert.match(post.stdout, /# bro on Codex/)
+    })
+  })
+})
+
 describe('hooks e2e — session-start + the run.sh launcher', () => {
   test('session-start in the main checkout emits the parallel-friendly nudge', () => {
     const f = hookFixture()

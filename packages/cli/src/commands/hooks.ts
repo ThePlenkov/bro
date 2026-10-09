@@ -55,7 +55,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { setTimeout as nodeSetTimeout } from 'node:timers'
 import {
   acquireFileLock,
@@ -179,6 +179,22 @@ function hookProjectDir(raw: unknown): string {
 
 function context(event: string, text: string): void {
   emit({ hookSpecificOutput: { hookEventName: event, additionalContext: text } })
+}
+
+const CODEX_INSTRUCTIONS = 'plugins/codex/bro/INSTRUCTIONS.md'
+
+/** Codex session steer. The plugin file is the source; a missing root
+ *  or an unreadable file stays silent so the hook cannot fail closed. */
+export function readCodexInstructions(pluginRoot: string | undefined): string | undefined {
+  if (pluginRoot === undefined || !isAbsolute(pluginRoot)) {
+    return undefined
+  }
+  try {
+    const text = readFileSync(join(pluginRoot, CODEX_INSTRUCTIONS), 'utf8').trim()
+    return text === '' ? undefined : text
+  } catch {
+    return undefined
+  }
 }
 
 // --- pure probes (testable without gh/bd) -----------------------------------
@@ -1120,6 +1136,12 @@ async function emitSessionContext(
   // haystack is the same session-context text + previous-session trace
   // tail the learn connector assembles
   parts.push(...guards)
+  if (codexClient && (event === 'SessionStart' || event === 'PostCompact')) {
+    const steer = readCodexInstructions(process.env.PLUGIN_ROOT)
+    if (steer) {
+      parts.push(steer)
+    }
+  }
   if (parts.length > 0) {
     context(event, `bro state — resume from here:\n${parts.join('\n')}`)
   }
