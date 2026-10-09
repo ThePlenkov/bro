@@ -839,8 +839,8 @@ function mustIssue(c: PatchCtx): IssueNode {
 }
 
 function patchBody(c: PatchCtx, val: string): void {
-  const cur = queryIssueSync(c.ref)
-  issueUpdate(c.ref, { description: withMeta(val, bodyMeta(cur?.description ?? undefined)) })
+  const cur = mustIssue(c)
+  issueUpdate(cur.id, { description: withMeta(val, bodyMeta(cur.description ?? undefined)) })
 }
 
 function patchPriority(c: PatchCtx, val: string): void {
@@ -909,7 +909,11 @@ export function linearTasks(_dir: string): TaskStore {
     ready: (f = {}) =>
       readyOf(
         applyFilter(
-          queryIssuesSync({ state: { type: { nin: [...TERMINAL] } } }, QUERY_CAP).map(toRow).map(pub),
+          // unbounded fetch — a capped page could drop a high-priority
+          // issue before readyOf sorts; the limit lands after ordering
+          queryIssuesSync({ state: { type: { nin: [...TERMINAL] } } }, Number.POSITIVE_INFINITY).map(
+            toRow
+          ).map(pub),
           { ...f, status: 'open', limit: undefined }
         ),
         f
@@ -948,9 +952,13 @@ export function linearTasksAsync(_dir: string, opts?: { fetch?: FetchFn }): Task
     ready: async (f = {}) =>
       readyOf(
         applyFilter(
-          (await queryIssuesAsync({ state: { type: { nin: [...TERMINAL] } } }, QUERY_CAP, fetchImpl)).map(
-            toRow
-          ).map(pub),
+          (
+            await queryIssuesAsync(
+              { state: { type: { nin: [...TERMINAL] } } },
+              Number.POSITIVE_INFINITY,
+              fetchImpl
+            )
+          ).map(toRow).map(pub),
           { ...f, status: 'open', limit: undefined }
         ),
         f

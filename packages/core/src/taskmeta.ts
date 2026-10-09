@@ -13,21 +13,24 @@ const META_INNER = /^\s*bro:\s*(\{[\s\S]*\})\s*$/
  *  delimiters, not a body-wide regex. A `/<!--\s*bro:...-->/` pattern
  *  re-scans the body at every `<!--` start position, which is quadratic
  *  on hostile bodies (CodeQL polynomial-regex). indexOf + an anchored
- *  inner check keeps each comment span parsed once — linear total. */
+ *  inner check keeps each comment span parsed once — linear total.
+ *  The LAST match wins: the trailer is appended, so an earlier
+ *  `bro:` comment inside the prose is an example, not metadata. */
 export function broTrailer(body: string): { json: string; start: number; end: number } | null {
   let i = 0
+  let last: { json: string; start: number; end: number } | null = null
   for (;;) {
     const s = body.indexOf('<!--', i)
     if (s === -1) {
-      return null
+      return last
     }
     const e = body.indexOf('-->', s + 4)
     if (e === -1) {
-      return null
+      return last
     }
     const m = META_INNER.exec(body.slice(s + 4, e))
     if (m) {
-      return { json: m[1]!, start: s, end: e + 3 }
+      last = { json: m[1]!, start: s, end: e + 3 }
     }
     i = e + 3
   }
@@ -42,7 +45,11 @@ export function bodyMeta(body: string | undefined): Record<string, unknown> {
   }
   try {
     const v: unknown = JSON.parse(t.json)
-    return typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : {}
+    // arrays are objects too — named keys on them don't survive
+    // JSON.stringify, so `[]` would silently eat the next update
+    return typeof v === 'object' && v !== null && !Array.isArray(v)
+      ? (v as Record<string, unknown>)
+      : {}
   } catch {
     return {}
   }
