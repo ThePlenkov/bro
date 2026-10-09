@@ -6,7 +6,7 @@
  *  in-process — spawning is the only honest coverage. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   FAKE_BEAD,
@@ -309,6 +309,42 @@ describe('bro work e2e — prune --loop', () => {
         git(['branch', '--list', 'loop/fx-z', '--format=%(refname:short)'], main).trim(),
         'loop/fx-z'
       )
+    })
+  })
+
+  test('closed bead + commits never landed → tree reaps, branch keeps', () => {
+    // the closed-bead verdict retires the scratch dir but git's own
+    // merged check refuses the branch — 'closed' is a verdict, not a
+    // landing proof; unlanded commits keep their ref
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [{ ...FAKE_BEAD, id: 'fx-u', status: 'closed' }])
+    inside(main, root, () => {
+      const wt = litter(root, main, 'fx-u', true)
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /reaped .*main--fx-u \[loop\/fx-u\]/)
+      assert.match(r.stdout, /kept loop\/fx-u \(unlanded commits\)/)
+      assert.equal(existsSync(wt), false)
+      assert.equal(
+        git(['branch', '--list', 'loop/fx-u', '--format=%(refname:short)'], main).trim(),
+        'loop/fx-u'
+      )
+    })
+  })
+
+  test('an unreadable agent registry keeps every tree — occupancy unknowable', () => {
+    // readAgentRegistry deliberately throws on corruption rather than
+    // report an empty world — the sweep must keep what it cannot verify
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [{ ...FAKE_BEAD, id: 'fx-r', status: 'closed' }])
+    inside(main, root, () => {
+      const wt = litter(root, main, 'fx-r')
+      mkdirSync(join(main, '.git', 'bro'), { recursive: true })
+      writeFileSync(join(main, '.git', 'bro', 'agents.json'), '{ not json')
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /kept .*fx-r \(agent registry unreadable\)/)
+      assert.equal(existsSync(wt), true)
     })
   })
 })

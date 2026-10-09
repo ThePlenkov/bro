@@ -1070,8 +1070,6 @@ interface LitterCtx {
   rep: LitterReap
   main: WorktreeInfo
   bySlug: Map<string, TaskRow>
-  /** absolute worktree path → live registry occupant name */
-  occupied: Map<string, string>
 }
 
 interface PrEvidence {
@@ -1160,8 +1158,12 @@ function litterBeads(opts: LitterReapOpts, rep: LitterReap): Map<string, TaskRow
 }
 
 /** Live registry occupants pinning a tree — an agent (a respawned drive
- *  fixer, say) working a closed bead's tree still owns it. */
-function litterOccupants(root: string): Map<string, string> {
+ *  fixer, say) working a closed bead's tree still owns it. Undefined
+ *  when the registry is unreadable: readAgentRegistry deliberately
+ *  re-throws on corruption (a silent {} lets a reaper orphan live
+ *  agents' trees — bro-f6zp), so an unknowable occupancy plane is a
+ *  keep verdict, not an empty map. */
+function litterOccupants(root: string): Map<string, string> | undefined {
   const occupied = new Map<string, string>()
   try {
     for (const [molStep, e] of Object.entries(readAgentRegistry(root))) {
@@ -1173,10 +1175,10 @@ function litterOccupants(root: string): Map<string, string> {
         occupied.set(path, e.agentId || molStep)
       }
     }
+    return occupied
   } catch {
-    // registry unreadable — the other keep planes still apply
+    return undefined
   }
-  return occupied
 }
 
 /** An open PR vetoes outright; a merged one is the land proof AND the
@@ -1187,7 +1189,7 @@ function litterPrEvidence(opts: LitterReapOpts, branch: string): PrEvidence {
     return ev
   }
   try {
-    for (const pr of opts.rev.facade.prsForBranch(branch, 'all').slice(0, 5)) {
+    for (const pr of opts.rev.facade.prsForBranch(branch, 'all')) {
       const meta = opts.rev.facade.prMeta({ repo: opts.rev.repo, pr })
       if (meta.state === 'OPEN') {
         ev.open = true
@@ -1201,8 +1203,11 @@ function litterPrEvidence(opts: LitterReapOpts, branch: string): PrEvidence {
   return ev
 }
 
-/** Worktree-side keep reasons, checked only after the candidate proved
- *  done and veto-free. Returns undefined when the tree is safe to reap. */
+/** Worktree-side keep reasons, called under the occupancy lock — the
+ *  check and the removal must be one section or a claimant pinning the
+ *  path after the check loses its live tree (bro-qry9, bro-0fiq). Only
+ *  read after the candidate proved done and veto-free; undefined means
+ *  the tree is safe to reap. */
 function litterTreeVerdict(c: LitterCandidate, ctx: LitterCtx): string | undefined {
   const w = c.w
   if (w === undefined) {
@@ -1211,7 +1216,11 @@ function litterTreeVerdict(c: LitterCandidate, ctx: LitterCtx): string | undefin
   if (w.locked !== undefined) {
     return w.locked === '' ? 'locked' : `locked (${w.locked})`
   }
-  const occupant = ctx.occupied.get(resolve(w.path))
+  const occupied = litterOccupants(ctx.opts.root)
+  if (occupied === undefined) {
+    return 'agent registry unreadable'
+  }
+  const occupant = occupied.get(resolve(w.path))
   if (occupant !== undefined) {
     return `agent ${occupant} live`
   }
@@ -1227,11 +1236,12 @@ function litterTreeVerdict(c: LitterCandidate, ctx: LitterCtx): string | undefin
   return st.out.trim() === '' ? undefined : 'dirty'
 }
 
-/** The keep reason for one candidate — undefined means provably done
- *  (the bead closed — the loop's land/verdict record — or a merged PR
- *  names the branch; either proves the work left), veto-free, and (when
- *  it has a tree) safe to remove. */
-function litterVerdict(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence): string | undefined {
+/** The evidence-plane keep reason — bead verdict + PR state. undefined
+ *  means provably done (the bead closed — the loop's land/verdict
+ *  record — or a merged PR names the branch; either proves the work
+ *  left) and veto-free; the tree plane is judged separately, under the
+ *  occupancy lock. */
+function litterDoneVerdict(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence): string | undefined {
   const bead = ctx.bySlug.get(c.slug)
   if (bead?.status !== 'closed' && pr.mergedSha === undefined) {
     return bead === undefined ? 'no bead — unverifiable' : `bead ${bead.status ?? 'open'}`
@@ -1242,30 +1252,34 @@ function litterVerdict(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence): stri
   if (pr.open) {
     return 'open PR — unmerged'
   }
-  return litterTreeVerdict(c, ctx)
+  return undefined
 }
 
-/** Branch-side retire — a removed/absent worktree frees the branch. A
- *  merged PR's head pins the delete (a squash merge makes git's own
- *  --merged blind; only the host knows the landing). A closed-bead-only
- *  verdict still compare-deletes at the read tip so a commit landing
- *  between the read and the delete can't be dropped — and reaching this
- *  code means the branch is never checked out (its worktree was reaped
- *  above or never existed). */
+/** Branch-side retire — a removed/absent worktree frees the branch, so
+ *  reaching this code means it is never checked out. A merged PR's head
+ *  pins the delete (a squash merge makes git's own --merged blind; only
+ *  the host knows the landing). A closed-bead verdict with no merged PR
+ *  in reach falls back to git's own merged check: `branch -d` refuses a
+ *  tip holding commits past the checked-out base — unlanded work keeps
+ *  its branch, whatever the bead says. */
 function retireLitterBranch(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence): void {
   const { opts, rep } = ctx
   if (opts.dryRun === true) {
     rep.branches.push(c.branch)
     return
   }
-  if (pr.mergedSha !== undefined) {
-    deleteMergedLocalBranch(c.branch, pr.mergedSha)
-  } else {
-    const tip = gitTry(['-C', opts.root, 'rev-parse', '--verify', `refs/heads/${c.branch}`])
-    if (tip.code === 0) {
-      gitTry(['-C', opts.root, 'update-ref', '-d', `refs/heads/${c.branch}`, tip.out.trim()])
+  if (pr.mergedSha === undefined) {
+    const del = gitTry(['-C', opts.root, 'branch', '-d', c.branch])
+    if (del.code === 0) {
+      rep.branches.push(c.branch)
+    } else {
+      rep.kept.push(
+        `${c.branch} (${/not fully merged/i.test(del.err) ? 'unlanded commits' : 'branch delete refused'})`
+      )
     }
+    return
   }
+  deleteMergedLocalBranch(c.branch, pr.mergedSha)
   if (gitTry(['-C', opts.root, 'rev-parse', '--verify', '--quiet', `refs/heads/${c.branch}`]).code !== 0) {
     rep.branches.push(c.branch)
   } else {
@@ -1273,23 +1287,48 @@ function retireLitterBranch(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence):
   }
 }
 
-/** One candidate: verdict first, then the worktree removal (the tree
- *  must be gone before its branch retires — a failed removal keeps the
- *  branch too, it is still checked out there), then the branch. */
+/** One candidate: evidence verdict first, then — for a worktree'd
+ *  branch — the tree guards and the removal as ONE locked section. The
+ *  shared registry lock is the same one claimWorktree and
+ *  finishWorktreeEnter hold across their claim→stamp / check→remove
+ *  spans: without it a claimant or respawned fixer can pin the path
+ *  after the check and lose its live tree to the removal (bro-qry9,
+ *  bro-0fiq). A lock contended past the bound is itself a claimant
+ *  mid-act → keep. A failed removal keeps the branch too — it is still
+ *  checked out there. */
 function reapCandidate(c: LitterCandidate, ctx: LitterCtx): void {
   const { opts, rep, main } = ctx
   const pr = litterPrEvidence(opts, c.branch)
-  const why = litterVerdict(c, ctx, pr)
-  if (why !== undefined) {
-    rep.kept.push(`${c.w?.path ?? c.branch} (${why})`)
+  const label = c.w?.path ?? c.branch
+  const done = litterDoneVerdict(c, ctx, pr)
+  if (done !== undefined) {
+    rep.kept.push(`${label} (${done})`)
     return
   }
-  if (c.w !== undefined) {
+  if (c.w === undefined) {
+    retireLitterBranch(c, ctx, pr)
+    return
+  }
+  let release: () => void
+  try {
+    release = acquireAgentRegistryLock(main.path)
+  } catch {
+    rep.kept.push(`${label} (occupancy lock contended)`)
+    return
+  }
+  try {
+    const why = litterTreeVerdict(c, ctx)
+    if (why !== undefined) {
+      rep.kept.push(`${label} (${why})`)
+      return
+    }
     if (opts.dryRun !== true && !removeMergedWorktree(c.w.path, c.w, main)) {
       rep.errors.push(`worktree ${c.w.path} not removed`)
       return
     }
     rep.reaped.push(`${c.w.path} [${c.branch}]`)
+  } finally {
+    release()
   }
   retireLitterBranch(c, ctx, pr)
 }
@@ -1304,13 +1343,7 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
   if (bySlug === undefined) {
     return rep
   }
-  const ctx: LitterCtx = {
-    opts,
-    rep,
-    main: found.main,
-    bySlug,
-    occupied: litterOccupants(opts.root),
-  }
+  const ctx: LitterCtx = { opts, rep, main: found.main, bySlug }
   for (const c of found.cands) {
     reapCandidate(c, ctx)
   }
