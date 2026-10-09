@@ -58,6 +58,7 @@ import {
   loadAgentEnv,
   resolveSpawnProvider,
   type AgentConnectorEnv,
+  type SpawnProviderPick,
 } from '../agent-connectors.ts'
 import { flag, positionals } from './args.ts'
 import { runActCommand } from './act.ts'
@@ -271,28 +272,7 @@ export async function resolveLoopLane(
     )
   }
   if (sel.agent !== undefined && !agentIsProvider) {
-    const extras = [
-      sel.provider !== undefined ? '--provider' : undefined,
-      sel.profile !== undefined ? '--profile' : undefined,
-      sel.model !== undefined ? '--model' : undefined,
-      sel.autoApprove === true ? '--auto-approve' : undefined,
-    ].filter((f): f is string => f !== undefined)
-    if (extras.length > 0) {
-      throw new SpawnError(
-        `${extras.join(', ')} pick a provider, but --agent '${sel.agent}' is a ` +
-          'raw template — name the provider instead (--agent <name>)',
-        'input'
-      )
-    }
-    // the escape hatch — a template --agent replaces the provider lane
-    // for this run, config picks included
-    if (cfg.provider !== '' || cfg.profile !== '' || cfg.model !== '') {
-      console.error(
-        'loop: --agent template bypasses the configured provider lane ' +
-          '(loop.provider/loop.profile/loop.model)'
-      )
-    }
-    return {}
+    return templateEscape(sel, cfg)
   }
   const profileName = sel.profile ?? (cfg.profile !== '' ? cfg.profile : undefined)
   const profile = profileName !== undefined ? fleetProfileOf(env, profileName) : undefined
@@ -313,17 +293,55 @@ export async function resolveLoopLane(
         ? 'profile'
         : 'backend'
   )
-  if (pick.worker === undefined) {
-    if (model !== undefined || autoApprove === true) {
-      throw new SpawnError(
-        '--model/--auto-approve (or loop.model) ride the provider lane — name a ' +
-          'provider via --provider, --agent <name>, or loop.provider',
-        'config'
-      )
-    }
-    return {}
+  return providerLaneOrEmpty(pick, model, autoApprove)
+}
+
+/** The escape hatch — a template --agent replaces the provider lane for
+ *  this run, config picks included; provider flags beside it are
+ *  contradictory input. */
+function templateEscape(sel: LoopLaneSel, cfg: LoopConfig): LoopLane {
+  const extras = [
+    sel.provider !== undefined ? '--provider' : undefined,
+    sel.profile !== undefined ? '--profile' : undefined,
+    sel.model !== undefined ? '--model' : undefined,
+    sel.autoApprove === true ? '--auto-approve' : undefined,
+  ].filter((f): f is string => f !== undefined)
+  if (extras.length > 0) {
+    throw new SpawnError(
+      `${extras.join(', ')} pick a provider, but --agent '${sel.agent}' is a ` +
+        'raw template — name the provider instead (--agent <name>)',
+      'input'
+    )
   }
-  return { worker: pick.worker, provider: pick.provider, model: pick.model }
+  if (cfg.provider !== '' || cfg.profile !== '' || cfg.model !== '') {
+    console.error(
+      'loop: --agent template bypasses the configured provider lane ' +
+        '(loop.provider/loop.profile/loop.model)'
+    )
+  }
+  return {}
+}
+
+/** A pick without a worker is the raw template lane — but only when
+ *  nothing provider-only was asked for: a dangling model/autoApprove
+ *  (flag, profile preset, or loop.model) is a config error, not a
+ *  silent drop onto the template. */
+function providerLaneOrEmpty(
+  pick: SpawnProviderPick,
+  model: string | undefined,
+  autoApprove: boolean | undefined
+): LoopLane {
+  if (pick.worker !== undefined) {
+    return { worker: pick.worker, provider: pick.provider, model: pick.model }
+  }
+  if (model !== undefined || autoApprove === true) {
+    throw new SpawnError(
+      '--model/--auto-approve (or loop.model) ride the provider lane — name a ' +
+        'provider via --provider, --agent <name>, or loop.provider',
+      'config'
+    )
+  }
+  return {}
 }
 
 /** Dry-run rendering for an argv worker — single-quotes only the args
@@ -827,9 +845,29 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
     usage()
   }
-  // strict: an unquoted `--agent devin -p --prompt-file {promptFile}` reads as
-  // agent='devin' plus a tail of unknown flags — silently spawning a bare
-  // `devin <file>` TUI per bead instead of a headless worker
+  rejectStrayArgs(argv)
+  checkBeads()
+  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim()
+  if (!root) {
+    console.error('bro loop: not inside a git worktree')
+    process.exit(1)
+  }
+  const broCfg = loadBroConfig(root)
+  const cfg = broCfg.loop as LoopConfig
+  const { lane, agent } = await resolveRunLane(root, argv, broCfg, cfg)
+  const ctx = buildCtx(root, argv, broCfg, cfg, agent, lane)
+  if (argv.includes('--dry-run')) {
+    dryRunPlan(ctx)
+    return
+  }
+  await runQueue(ctx)
+}
+
+/** Strict flag parse — an unquoted `--agent devin -p --prompt-file
+ *  {promptFile}` reads as agent='devin' plus a tail of unknown flags,
+ *  silently spawning a bare `devin <file>` TUI per bead instead of a
+ *  headless worker. */
+function rejectStrayArgs(argv: string[]): void {
   const stray = positionals(argv, LOOP_VALUE_FLAGS, {
     boolFlags: LOOP_BOOL_FLAGS,
     strict: true,
@@ -841,18 +879,21 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     )
     process.exit(2)
   }
-  checkBeads()
-  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim()
-  if (!root) {
-    console.error('bro loop: not inside a git worktree')
-    process.exit(1)
-  }
-  const broCfg = loadBroConfig(root)
-  const cfg = broCfg.loop as LoopConfig
+}
+
+/** The lane resolves once, up front — a bad provider name is a config
+ *  error that must fail BEFORE a bead is claimed, not mid-run with
+ *  claims held. Returns the lane plus the effective template (a cli
+ *  provider's `command` substitutes for `loop.agent`; a template
+ *  --agent stays the literal value — provider names are never
+ *  templates, resolveLoopLane consumed them). */
+async function resolveRunLane(
+  root: string,
+  argv: string[],
+  broCfg: ReturnType<typeof loadBroConfig>,
+  cfg: LoopConfig
+): Promise<{ lane: LoopLane; agent: string }> {
   const agentFlag = flag(argv, '--agent')
-  // the lane resolves once, up front — a bad provider name is a config
-  // error that must fail BEFORE a bead is claimed, not mid-run with
-  // claims held
   let lane: LoopLane
   try {
     lane = await resolveLoopLane(
@@ -873,14 +914,10 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     }
     throw err
   }
-  // the effective template — a cli provider's command substitutes for
-  // loop.agent; a template --agent stays the literal value (provider
-  // names are never templates — resolveLoopLane consumed them)
   const agent =
     lane.worker?.kind === 'template'
       ? lane.worker.command
-      : agentFlag !== undefined &&
-          !Object.hasOwn(broCfg.providers ?? {}, agentFlag)
+      : agentFlag !== undefined && !Object.hasOwn(broCfg.providers ?? {}, agentFlag)
         ? agentFlag
         : cfg.agent
   if (lane.worker === undefined && agent === '') {
@@ -906,6 +943,17 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
         'Intended for env-reading agents (BRO_PROMPT_FILE) only.'
     )
   }
+  return { lane, agent }
+}
+
+function buildCtx(
+  root: string,
+  argv: string[],
+  broCfg: ReturnType<typeof loadBroConfig>,
+  cfg: LoopConfig,
+  agent: string,
+  lane: LoopLane
+): Ctx {
   const rev = reviewHost(root, broCfg.connectors)
   const ctx: Ctx = {
     rev,
@@ -940,46 +988,45 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
         (ctx.lane.worker?.kind === 'argv' ? ' (acp worker)' : '')
     )
   }
+  return ctx
+}
 
-  if (argv.includes('--dry-run')) {
-    const scope = loopScope()
-    if (!scope) {
-      return
-    }
-    const ready = readyBeads()
-    const top = classify(ready, ctx.selection, scope, epicParentIds(ready)).queue[0]
-    if (!top) {
-      console.log('loop --dry-run: nothing claimable')
-      return
-    }
-    const slot = resolveStackSlot(ctx, top)
-    const item = planItem(
-      top,
-      root,
-      slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
-    )
-    console.log(`would claim ${top.id} — ${top.title}`)
-    console.log(`  worktree ${item.worktreeDir} on ${item.branch}`)
-    if (slot !== undefined) {
-      console.log(`  stack ${ctx.stack} member ${slot.n} — PR base ${slot.base}`)
-    }
-    const w = ctx.lane.worker
-    if (ctx.lane.provider !== undefined) {
-      console.log(
-        `  provider: ${ctx.lane.provider}` +
-          (ctx.lane.model !== undefined ? ` · model ${ctx.lane.model}` : '')
-      )
-    }
-    console.log(
-      `  agent: ${
-        w?.kind === 'argv'
-          ? [...w.argv, item.promptFile].map(shRender).join(' ')
-          : expandAgentCmd(ctx.agent, item.promptFile)
-      }`
-    )
+function dryRunPlan(ctx: Ctx): void {
+  const scope = loopScope()
+  if (!scope) {
     return
   }
-  await runQueue(ctx)
+  const ready = readyBeads()
+  const top = classify(ready, ctx.selection, scope, epicParentIds(ready)).queue[0]
+  if (!top) {
+    console.log('loop --dry-run: nothing claimable')
+    return
+  }
+  const slot = resolveStackSlot(ctx, top)
+  const item = planItem(
+    top,
+    ctx.root,
+    slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
+  )
+  console.log(`would claim ${top.id} — ${top.title}`)
+  console.log(`  worktree ${item.worktreeDir} on ${item.branch}`)
+  if (slot !== undefined) {
+    console.log(`  stack ${ctx.stack} member ${slot.n} — PR base ${slot.base}`)
+  }
+  const w = ctx.lane.worker
+  if (ctx.lane.provider !== undefined) {
+    console.log(
+      `  provider: ${ctx.lane.provider}` +
+        (ctx.lane.model !== undefined ? ` · model ${ctx.lane.model}` : '')
+    )
+  }
+  console.log(
+    `  agent: ${
+      w?.kind === 'argv'
+        ? [...w.argv, item.promptFile].map(shRender).join(' ')
+        : expandAgentCmd(ctx.agent, item.promptFile)
+    }`
+  )
 }
 
 /** Project scope for the queue — a failed prefix lookup is reported
