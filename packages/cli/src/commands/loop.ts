@@ -397,7 +397,7 @@ function spawnAgent(ctx: Ctx, beadId: string, title: string, promptFile: string,
         ? // the same `"$@"` positional exec the native backend builds —
           // argv workers are headless by construction (acp); sh resolves
           // argv[0] ('bro'/'npx') on PATH the way the backend does
-          spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts)
+          spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
         : spawn('sh', ['-c', expandAgentCmd(ctx.agent, promptFile)], opts) // NOSONAR — operator-configured agent command
     let timedOut = false
     const timer = setTimeout(() => {
@@ -634,6 +634,27 @@ function resolveStackSlot(ctx: Ctx, bead: ReadyBead): StackSlot | undefined {
   return { n: tip.n, base: tip.base ?? dflt, edge: tip.base, bottom: tip.base === undefined }
 }
 
+/** slot + planItem for a bead — the dry-run render and the real
+ *  worktree plan share the member-number/shape wiring. */
+function stackPlan(
+  ctx: Ctx,
+  bead: ReadyBead
+): { slot: StackSlot | undefined; item: ReturnType<typeof planItem> } {
+  const slot = resolveStackSlot(ctx, bead)
+  const item = planItem(
+    bead,
+    ctx.root,
+    slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
+  )
+  return { slot, item }
+}
+
+/** `P · model M` provenance label — the lane announce and the dry-run
+ *  render print the same pair. */
+const laneLabel = (ctx: Ctx): string =>
+  `${ctx.lane.provider}` +
+  (ctx.lane.model !== undefined ? ` · model ${ctx.lane.model}` : '')
+
 /** Resolve the bead's stack slot and create its worktree under the same
  *  push lock `stack push` holds — without it a loop and a push racing
  *  one stack read the same tip and both mint position n. A live
@@ -647,12 +668,9 @@ function planItemAndWorktree(
   let slot: StackSlot | undefined
   let item!: ReturnType<typeof planItem>
   const planAndCreate = (): void => {
-    slot = resolveStackSlot(ctx, bead)
-    item = planItem(
-      bead,
-      ctx.root,
-      slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
-    )
+    const plan = stackPlan(ctx, bead)
+    slot = plan.slot
+    item = plan.item
     say(ctx, `\nloop: ${bead.id} → ${item.branch} @ ${item.worktreeDir}`)
     // a surviving worktree dir is reused as-is — its branch kept its
     // original base, so the stack edge only records on fresh creation
@@ -983,8 +1001,7 @@ function buildCtx(
   if (ctx.lane.provider !== undefined) {
     say(
       ctx,
-      `loop: provider ${ctx.lane.provider}` +
-        (ctx.lane.model !== undefined ? ` · model ${ctx.lane.model}` : '') +
+      `loop: provider ${laneLabel(ctx)}` +
         (ctx.lane.worker?.kind === 'argv' ? ' (acp worker)' : '')
     )
   }
@@ -1002,12 +1019,7 @@ function dryRunPlan(ctx: Ctx): void {
     console.log('loop --dry-run: nothing claimable')
     return
   }
-  const slot = resolveStackSlot(ctx, top)
-  const item = planItem(
-    top,
-    ctx.root,
-    slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
-  )
+  const { slot, item } = stackPlan(ctx, top)
   console.log(`would claim ${top.id} — ${top.title}`)
   console.log(`  worktree ${item.worktreeDir} on ${item.branch}`)
   if (slot !== undefined) {
@@ -1015,10 +1027,7 @@ function dryRunPlan(ctx: Ctx): void {
   }
   const w = ctx.lane.worker
   if (ctx.lane.provider !== undefined) {
-    console.log(
-      `  provider: ${ctx.lane.provider}` +
-        (ctx.lane.model !== undefined ? ` · model ${ctx.lane.model}` : '')
-    )
+    console.log(`  provider: ${laneLabel(ctx)}`)
   }
   console.log(
     `  agent: ${
