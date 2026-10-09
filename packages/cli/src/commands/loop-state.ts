@@ -150,7 +150,15 @@ function silenceMs(rec: LoopRunRecord | null, recordMtime: number, now: number):
           }
         })()
       : null
-  const base = logMtime ?? recordMtime
+  // the append-only .log survives fix-round respawns — a stale log
+  // mtime must not predate this spawn's record stamp, or a fresh agent
+  // reads as long-silent on its first check-in
+  const base =
+    logMtime === null
+      ? recordMtime
+      : Number.isFinite(recordMtime)
+        ? Math.max(logMtime, recordMtime)
+        : logMtime
   return Number.isFinite(base) ? now - base : null
 }
 

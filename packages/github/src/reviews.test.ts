@@ -405,14 +405,22 @@ describe('githubReview', { skip: WIN32 }, () => {
       },
       () => {
         const naps: number[] = []
-        mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, { base: 'main' }, {
-          sleep: (ms) => naps.push(ms),
-          deadlineMs: 1_000,
-        })
-        // the nap is clamped to the remaining deadline — elapsed since
-        // `started` can be a millisecond, so ≤1_000, never exactly it
-        assert.deepEqual(naps.length, 1)
-        assert.ok(naps[0] > 0 && naps[0] <= 1_000)
+        // pin the clock: `started` reads T, every later read T+600 — the
+        // nap must be the 400ms left, not the full 1s budget nor the 2s
+        // gap (the only in-process Date.now calls on this path are
+        // pollAsyncMerge's started/elapsed reads)
+        const realNow = Date.now
+        let clockReads = 0
+        Date.now = () => (clockReads++ === 0 ? 1_000_000 : 1_000_600)
+        try {
+          mergeAsync(target, { method: 'squash', expectedHeadSha: 'abc123' }, { base: 'main' }, {
+            sleep: (ms) => naps.push(ms),
+            deadlineMs: 1_000,
+          })
+        } finally {
+          Date.now = realNow
+        }
+        assert.deepEqual(naps, [400])
       }
     )
   })

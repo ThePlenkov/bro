@@ -49,16 +49,32 @@ describe('loop run records', () => {
     })
   })
 
-  test('the log mtime is the silence signal — an old log reads stale', () => {
+  test('silence counts from the later of the log and record stamps', () => {
     const { root, main } = initRepo('bro-loopstate-')
     inside(main, root, () => {
       const r = rec(main)
       beginLoopRun(main, r)
       writeFileSync(r.log, 'agent output\n')
       const past = new Date(Date.now() - 50 * 60_000)
+      const recPath = join(loopRunsDir(main)!, 'bro-x1.json')
+
+      // the .log is append-only across respawns — a stale log beside a
+      // fresh record is a respawned agent that has not written yet:
+      // silence starts at this spawn, not at the last round's output
       utimesSync(r.log, past, past)
-      const [v] = collectLoopRuns(main)
-      assert.ok(v !== undefined && v.silentMs !== null && v.silentMs >= 50 * 60_000)
+      const freshSpawn = collectLoopRuns(main)[0]
+      assert.ok(freshSpawn !== undefined && freshSpawn.silentMs !== null && freshSpawn.silentMs < 60_000)
+
+      // a fresh write beside a stale record — the log is the signal
+      utimesSync(recPath, past, past)
+      utimesSync(r.log, new Date(), new Date(Date.now() - 30_000))
+      const written = collectLoopRuns(main)[0]
+      assert.ok(written !== undefined && written.silentMs !== null && written.silentMs < 60_000)
+
+      // both stamps old — genuinely silent
+      utimesSync(r.log, past, past)
+      const stale = collectLoopRuns(main)[0]
+      assert.ok(stale !== undefined && stale.silentMs !== null && stale.silentMs >= 50 * 60_000)
     })
   })
 

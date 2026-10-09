@@ -1056,7 +1056,7 @@ async function runRebaseRound(
   say(ctx, `loop: ${prRef(ctx, pr)} conflicts — rebase round ${round} onto ${base}`)
   const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
   if (code !== 0) {
-    console.error(`loop: rebase agent exited ${code ?? 'timeout'} — the next gate poll decides`)
+    console.error(`loop: rebase agent exited ${code ?? 'abnormal'} — the next gate poll decides`)
   }
 }
 

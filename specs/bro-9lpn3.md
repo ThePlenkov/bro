@@ -32,9 +32,11 @@ in-process supervisor thread.
 (3) **Stall detection is an advisory read at check-in, never an
 auto-kill.** The loop records each in-flight spawn at
 `<git-common>/bro/loop/<slug>.json` (`{beadId, pid, startedAt,
-worktree, log}`) and tees the child's stdout/stderr to
-`<git-common>/bro/loop/<slug>.log` while still forwarding it to the
-loop's own console. `bro watch` gains a `loop` plane and `bro status`
+worktree, log}`) and hands the child an append fd on
+`<git-common>/bro/loop/<slug>.log` for stdout/stderr — file-only,
+never a pipe back to the loop's console: a dead loop would turn the
+worker's next write into a SIGPIPE kill, and the file transcript
+survives the loop either way. `bro watch` gains a `loop` plane and `bro status`
 a `loop` line: a live record whose log mtime is older than
 `loop.stallMin` (45) renders as an attention advisory — `agent <bead>
 — output silent N min` — for the orchestrator to judge. A record whose
@@ -60,9 +62,10 @@ unregistry-owned files from `bro/agents/` anyway.
 ## Plan
 
 - [ ] `loop` config: `agentTimeoutMin` out, `stallMin` in (default 45)
-- [ ] `spawnAgent`: unconditional await; piped stdout/stderr tee'd to
-      `bro/loop/<slug>.log`; run record written at spawn, cleared on
-      settle; stale-pid records reaped at run start
+- [ ] `spawnAgent`: unconditional await; stdout/stderr appended to
+      `bro/loop/<slug>.log` over an open fd — no pipe, no console tee;
+      run record written at spawn, cleared on settle; stale-pid records
+      reaped at run start
 - [ ] `bro watch` loop plane + attention advisory; `bro status` loop
       section
 - [ ] drop `--agent-timeout` flag; docs (skill, site, bro-c3no8 spec)
