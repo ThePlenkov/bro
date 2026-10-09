@@ -686,7 +686,7 @@ function chunks<T>(items: T[], size: number): T[][] {
 // asynchronous merge REST API". The async endpoint is the only way in:
 // PUT answers a uuid, GET reports the result until it settles.
 
-interface StackProbe {
+export interface StackProbe {
   /** Stack membership — absent on a PR that isn't in one. */
   stacked: boolean
   /** Base branch — undefined when the read failed; the merge action's
@@ -699,8 +699,9 @@ interface StackProbe {
  *  Every failure — no field on an older API version, an auth or network
  *  error — reads as "not a stack": a probe must never block a merge the
  *  sync path can still do, and the reactive net in `mergePr` catches a
- *  stack the probe missed. */
-function stackProbe(t: PrTarget): StackProbe {
+ *  stack the probe missed. Exported for the stacks facade — cascade
+ *  ownership is the same probe. */
+export function stackProbe(t: PrTarget): StackProbe {
   const res = ghTry(['api', `repos/${t.repo}/pulls/${t.pr}`])
   if (res.code !== 0) {
     return { stacked: false }

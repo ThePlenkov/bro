@@ -33,6 +33,8 @@ import type { MergeQueueFacade, ReviewFacade } from './review.ts'
 import type { Guard } from './guards.ts'
 import { guardProblems } from './guards.ts'
 import type { SpecStore } from './specs.ts'
+import type { StackFacade } from './stacks.ts'
+import { gitStacks } from './stacks.ts'
 import type { TaskRow, TaskStore, TaskStoreAsync } from './tasks.ts'
 import { taskStore, taskStoreAsync } from './tasks.ts'
 
@@ -68,6 +70,9 @@ export interface FacadeMap {
    *  (spec bro-14h8.1). Distinct from `providers[]`, which is the
    *  model plane. */
   queries: QueryFacade
+  /** Stacked-change ops — chain hints, post-merge cascade ownership,
+   *  native whole-chain merge (spec bro-r6vge). */
+  stacks: StackFacade
 }
 
 export type MaybePromise<T> = T | Promise<T>
@@ -156,6 +161,7 @@ export interface Connector {
   judge?(ctx: ConnectorCtx): JudgeFacade
   events?(ctx: ConnectorCtx): EventsFacade
   queries?(ctx: ConnectorCtx): QueryFacade
+  stacks?(ctx: ConnectorCtx): StackFacade
   /** Only ever picked BY NAME (`"connectors": {"<kind>": "<name>"}`) —
    *  never by detection, and never a reason to warn about ambiguity on
    *  its own. A transport that must be opted into (it needs a daemon, or
@@ -344,9 +350,25 @@ const beadsConnector: Connector = {
   }),
 }
 
+// --- built-in: git ---------------------------------------------------------------
+
+/** Plain-git stacks — a repo no forge connector claimed still chains,
+ *  syncs, and merges locally. Only ever claims via `matchDir` (any git
+ *  dir): remote matches outrank it, and the registry-first default is
+ *  honest too — a repo without a remote's stack verbs ARE local ops. */
+const gitConnector: Connector = {
+  name: 'git',
+  matchDir: (dir) => gitTry(['-C', dir, 'rev-parse', '--git-dir']).code === 0,
+  auth: (ctx) =>
+    gitTry(['-C', ctx.dir, 'rev-parse', '--git-dir']).code === 0
+      ? null
+      : 'not a git repository',
+  stacks: (ctx) => gitStacks(ctx.dir),
+}
+
 // --- registry ------------------------------------------------------------------
 
-const registry: Connector[] = [beadsConnector]
+const registry: Connector[] = [beadsConnector, gitConnector]
 
 /** Plugin connectors register here (BroPlugin.connectors). Duplicate
  *  names are skipped — a plugin cannot shadow a built-in system. */
@@ -578,6 +600,16 @@ export function specStore(
   prefer?: Record<string, string>
 ): SpecStore {
   return facade('specs', { dir }, { prefer })
+}
+
+/** facade('stacks') bound to a dir — stack ops dispatch (sync cascade
+ *  ownership, native chain merge). Resolution never throws to callers
+ *  that probe — wrap at the call site like reviewHost users do. */
+export function stackHost(
+  dir: string = process.cwd(),
+  prefer?: Record<string, string>
+): StackFacade {
+  return facade('stacks', { dir }, { prefer })
 }
 
 /** facade('tasksAsync') bound to a dir — the probe-path task surface.

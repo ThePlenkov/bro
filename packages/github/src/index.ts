@@ -6,6 +6,7 @@
 import { ghTry, type Connector } from '@broject/core'
 import { githubReview } from './reviews.ts'
 import { githubQueries } from './queries.ts'
+import { githubStacks } from './stacks.ts'
 import { githubTasks, githubTasksAsync } from './tasks.ts'
 import {
   graphiteConnector,
@@ -17,6 +18,7 @@ import {
 export {
   githubReview,
   githubQueries,
+  githubStacks,
   githubTasks,
   githubTasksAsync,
   graphiteConnector,
@@ -49,6 +51,7 @@ export const githubConnector: Connector = {
   optInFacades: ['tasks', 'tasksAsync'],
   reviews: (ctx) => githubReview(ctx.dir),
   queries: (ctx) => githubQueries(ctx.dir),
+  stacks: (ctx) => githubStacks(ctx.dir),
   tasks: (ctx) => githubTasks(ctx.dir),
   tasksAsync: (ctx) => githubTasksAsync(ctx.dir),
 }
