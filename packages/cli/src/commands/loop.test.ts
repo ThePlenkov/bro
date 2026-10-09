@@ -9,7 +9,7 @@ import {
   type SpawnWorker,
 } from '@broject/core'
 import { DEFAULT_LOOP_CONFIG, type LoopConfig } from '@broject/loop'
-import { loopRefTails, resolveBeadsDir, resolveLoopLane } from './loop.ts'
+import { loopRefTails, loopWatch, resolveBeadsDir, resolveLoopLane } from './loop.ts'
 import type { AgentConnectorEnv } from '../agent-connectors.ts'
 import { git, initRepo, inside } from './testrepo.ts'
 
@@ -214,6 +214,20 @@ describe('loopRefTails', () => {
       assert.deepEqual(worktrees, [])
       assert.deepEqual(branches, [])
     })
+  })
+})
+
+describe('loopWatch — the loop supervisor heartbeat (bro-0aa87)', () => {
+  test('claims merge+cleanup supervision and bounds the TTL to the item budget', () => {
+    const w = loopWatch(7, '[#7](https://x/pull/7)', '/wt/bro--bro-x', DEFAULT_LOOP_CONFIG)
+    assert.equal(w.pr, 7)
+    assert.equal(w.merge, true)
+    assert.equal(w.cleanup, true)
+    assert.equal(w.workdir, '/wt/bro--bro-x')
+    // (stall 45 + merge 45) × (fixRounds 3 + 1) — the worst-case item minutes
+    assert.equal(w.timeoutMin, (45 + 45) * (3 + 1))
+    const scaled = loopWatch(7, 'l', '/wt', { stallMin: 1, mergeTimeoutMin: 2, fixRounds: 0 })
+    assert.equal(scaled.timeoutMin, 3)
   })
 })
 

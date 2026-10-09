@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { procStat, type AgentInfo, type TaskRow, type TaskStore } from '@broject/core'
+import type { ListedWatch } from '@broject/act'
 import {
   agentProcessesIn,
   branchSlug,
@@ -20,6 +21,7 @@ import {
   occupied,
   registryAgents,
   registryEntryState,
+  supervisedBy,
   worktreeClaim,
 } from './drive.ts'
 import { driveSection } from './drive-config.ts'
@@ -365,6 +367,92 @@ describe('occupied', () => {
       scanClaim: () => 'bro-a',
     })
     assert.match(why ?? '', /fixer agent live/)
+  })
+})
+
+describe('supervisedBy — the watch-marker plane (bro-0aa87)', () => {
+  const occBase = {
+    agents: [] as AgentInfo[],
+    branch: 'work/bro-a',
+    worktree: '/repos/bro--bro-a',
+    workDetails: [] as string[],
+  }
+  /** Marker names carry the kind: `<pr>-loop-<pid>.json` or
+   *  `<pr>-<pid>-<nonce>.json` (kind 'wait'). */
+  const watch = (
+    pr: number,
+    kind: string,
+    over: Partial<ListedWatch> = {}
+  ): ListedWatch => ({
+    watch: {
+      pr,
+      link: `[#${pr}](https://x/pull/${pr})`,
+      pid: 4242,
+      merge: true,
+      startedAt: Date.now(),
+      timeoutMin: 60,
+    },
+    file: `/watches/${pr}-${kind === 'wait' ? '4242-f00bad' : `${kind}-4242`}.json`,
+    alive: true,
+    ...over,
+  })
+
+  test('a live foreign marker supervises — loop heartbeat, wait, convoy', () => {
+    for (const kind of ['loop', 'wait', 'convoy']) {
+      const sup = supervisedBy([watch(7, kind)], 7)
+      assert.equal(sup?.watch.pr, 7, `${kind} marker must supervise`)
+    }
+  })
+
+  test('a live drive marker does not — drive-vs-drive is dedup elsewhere', () => {
+    assert.equal(supervisedBy([watch(7, 'drive')], 7), undefined)
+    // a second live drive beside a loop marker still reads supervised
+    const sup = supervisedBy([watch(7, 'drive'), watch(7, 'loop')], 7)
+    assert.equal(sup?.file, '/watches/7-loop-4242.json')
+  })
+
+  test('dead or unrelated markers do not supervise', () => {
+    assert.equal(supervisedBy([watch(7, 'loop', { alive: false })], 7), undefined)
+    assert.equal(supervisedBy([watch(8, 'loop')], 7), undefined)
+    assert.equal(supervisedBy([], 7), undefined)
+    assert.equal(supervisedBy(undefined, 7), undefined)
+    assert.equal(supervisedBy([watch(7, 'loop')], undefined), undefined)
+  })
+
+  test('occupied reports the supervisor, verdicts skip the PR', () => {
+    const why = occupied({
+      ...occBase,
+      pr: 7,
+      watches: [watch(7, 'loop')],
+    })
+    assert.match(why ?? '', /supervised by loop pid 4242/)
+  })
+
+  test('a dead supervisor marker frees the PR — coverage self-restores', () => {
+    const why = occupied({
+      ...occBase,
+      pr: 7,
+      watches: [watch(7, 'loop', { alive: false })],
+    })
+    assert.equal(why, undefined)
+  })
+
+  test('supervision wins over the weaker planes but not over our own fixer', () => {
+    const why = occupied({
+      ...occBase,
+      pr: 7,
+      watches: [watch(7, 'loop')],
+      workDetails: ['bro-a'],
+    })
+    assert.match(why ?? '', /supervised by loop/)
+    const fixer = occupied({
+      ...occBase,
+      pr: 7,
+      watches: [watch(7, 'loop')],
+      fixerBead: 'bro-fix1',
+      agents: [agent({ molStep: 'bro-fix1' })],
+    })
+    assert.match(fixer ?? '', /fixer agent live/)
   })
 })
 

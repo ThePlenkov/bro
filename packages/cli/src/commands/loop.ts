@@ -1111,6 +1111,29 @@ type PushOutcome =
   | { kind: 'done'; result: ItemResult }
   | { kind: 'hold'; why: string }
 
+/** The loop's watch payload for one member PR — `merge` + `cleanup`
+ *  record the promise the loop is keeping (its own merge, its own
+ *  worktree retire); `timeoutMin` bounds the marker's TTL to the item's
+ *  worst case — every fix round paying both budgets (the agent leg
+ *  prices at stallMin, the only agent-minutes knob left since the
+ *  wall-clock kill went advisory in bro-9lpn3) — so a marathon member
+ *  can't TTL-prune its own supervision marker mid-tenure. */
+export function loopWatch(
+  pr: number,
+  link: string,
+  workdir: string,
+  cfg: Pick<LoopConfig, 'stallMin' | 'mergeTimeoutMin' | 'fixRounds'>
+) {
+  return {
+    pr,
+    link,
+    merge: true,
+    cleanup: true,
+    workdir,
+    timeoutMin: (cfg.stallMin + cfg.mergeTimeoutMin) * (cfg.fixRounds + 1),
+  }
+}
+
 async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   const lead = beads[0]!
   // resolved here, not earlier — a member that landed since the last
@@ -1201,13 +1224,8 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     item,
     pr,
     marker: watchBegin(ctx.root, {
-      pr,
-      link: prRef(ctx, pr),
-      merge: true,
-      cleanup: true,
-      workdir: item.worktreeDir,
+      ...loopWatch(pr, prRef(ctx, pr), item.worktreeDir, ctx.cfg),
       bead: beads.map((b) => b.id).join(','),
-      timeoutMin: ctx.cfg.mergeTimeoutMin,
     }),
     since: Date.now(),
     rounds: 0,
@@ -1353,13 +1371,8 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   // finalizeMerge half the dead loop never reached
   m.pr = pr
   m.marker = watchBegin(ctx.root, {
-    pr,
-    link: prRef(ctx, pr),
-    merge: true,
-    cleanup: true,
-    workdir: m.item.worktreeDir,
+    ...loopWatch(pr, prRef(ctx, pr), m.item.worktreeDir, ctx.cfg),
     bead: m.beads.map((b) => b.id).join(','),
-    timeoutMin: ctx.cfg.mergeTimeoutMin,
   })
   m.since = Date.now()
   say(ctx, `loop: ${m.beads.map((b) => b.id).join(', ')} → PR ${prRef(ctx, pr)}`)
