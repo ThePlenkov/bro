@@ -236,8 +236,10 @@ export function mailboxIdentity(sessionId?: string): MailboxIdentity {
 }
 
 /** `to` names exactly one recipient: an agentId, a sessionId, or the
- *  `orchestrator` role. Anything else is broadcast. */
-function addressedTo(to: string, identity: MailboxIdentity): boolean {
+ *  `orchestrator` role. Anything else is broadcast. Exported so
+ *  read-only surfaces (the events plane) apply the drain's addressing
+ *  rule without consuming drops. */
+export function addressedTo(to: string, identity: MailboxIdentity): boolean {
   if (identity.agentId !== undefined && to === identity.agentId) {
     return true
   }

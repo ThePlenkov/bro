@@ -531,6 +531,27 @@ export const meshSection: ConfigSection<{
   return out
 }
 
+/** bro.config.json `mcp` section — the `bro mcp` stdio server's plane
+ *  exposure (specs/bro-9rls.1.md). Absent/empty section = every read
+ *  plane; `planes: []` disables all; a non-empty list is an allowlist.
+ *  The catalog itself is never enumerated here — config picks which
+ *  planes are *exposed*, never which exist. `planes` stays `undefined`
+ *  only when unwritten — a present non-array value is a malformed
+ *  allowlist and fails closed (`[]`), never silently widens to every
+ *  plane. */
+export const mcpSection: ConfigSection<{ planes?: string[] }> = (raw) => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as { planes?: unknown }
+  const out: { planes?: string[] } = {}
+  if (Array.isArray(obj.planes)) {
+    out.planes = obj.planes
+      .filter((p): p is string => typeof p === 'string' && p.trim() !== '')
+      .map((p) => p.trim())
+  } else if (obj.planes !== undefined) {
+    out.planes = []
+  }
+  return out
+}
+
 /** Sections core normalizes itself — identical to what the built-in
  *  plugins declare as their configSchema. */
 const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
@@ -544,6 +565,7 @@ const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   fleet: fleetSection as ConfigSection<unknown>,
   query: querySection as ConfigSection<unknown>,
   mesh: meshSection as ConfigSection<unknown>,
+  mcp: mcpSection as ConfigSection<unknown>,
 }
 
 /** Every config key core normalizes itself — the authoritative "known
@@ -647,6 +669,10 @@ export interface BroConfig {
    *  beads store federates over (read-only pulls, sovereignty rule),
    *  transport overrides derivation. */
   mesh: { rig?: string; peers: Record<string, { rig: string; remote: string; transport?: string }> }
+  /** `bro mcp` plane exposure. `planes` undefined = every read plane
+   *  (the default — spawning the server IS the consent), `[]` = none,
+   *  a list = allowlist. Backend selection stays on connectors.*. */
+  mcp: { planes?: string[] }
   /** External plugin specifiers — relative paths or package names the CLI
    *  resolves from the repo and imports at startup. Each module's default
    *  export must be a BroPlugin (or an array of them). */
@@ -677,6 +703,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   fleet: { maxConcurrent: 3, profiles: {}, routing: {} },
   query: { concurrency: 4, env: {} },
   mesh: { peers: {} },
+  mcp: {},
   plugins: [],
 }
 
