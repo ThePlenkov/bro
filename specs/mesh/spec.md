@@ -16,6 +16,21 @@ and the transport bindings. bro ships the reference implementation; every
 other orchestrator joins by writing a conformant connector. Wasteland is
 one such transport, not the model.
 
+## Placement in bro's axes
+
+bro already separates two adapter axes: **providers** (bro-ribc) carry
+spawns/calls *into* a rig; **planes** (bro-9rls) expose rig state *out*
+(REST/SSE/MCP over work·agents·queue·gates·events·judge). **mesh is the
+third axis** — rig ↔ rig: a request addressed to a foreign rig's work
+plane arrives through a mesh transport and surfaces in `bro mesh inbox`;
+`beads-remote` requests remain on the requester's remote.
+
+The intra-rig event broker / notify mailbox (specs/sessions) already
+carries session traffic. Mesh has a different recipient contract: `to`
+MUST be a non-empty rig URI; an absent or wildcard recipient is a
+malformed envelope, never a broadcast (bro-yyxo showed empty `to` fans
+out to every session — the protocol forbids it).
+
 ## Non-goals (v1)
 
 - Marketplace semantics — no bidding, pricing, or SLA negotiation.
