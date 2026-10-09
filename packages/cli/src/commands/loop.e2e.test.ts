@@ -16,6 +16,7 @@ import {
   inside,
   installFakeBd,
   installFakeHost,
+  readHostState,
   runCli,
   writeHostState,
   type CliResult,
@@ -136,6 +137,35 @@ describe('bro loop e2e', () => {
       assert.equal(existsSync(f.worktree), false)
       assert.match(r.stdout, /clean — no loop tails/)
       assert.match(spawns(f), /work opened pr/)
+    })
+  })
+
+  test('the gate wait arms a rearmable watch marker (bro-z0k2u)', () => {
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }])
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /loop: fx-a landed/)
+      // the marker is retired when the wait settles — the fake host
+      // snapshots the watches dir mid-poll so the arm stays observable
+      const peeks = (readHostState(f.hostState).watchPeeks ?? []) as Array<{
+        file: string
+        marker: {
+          pr: number
+          pid: number
+          merge: boolean
+          cleanup?: boolean
+          workdir?: string
+          timeoutMin: number
+        }
+      }>
+      const hit = peeks.find((p) => p.marker.pr === 7)
+      assert.ok(hit, 'gate wait never armed a watch marker')
+      // the act-wait shape <pr>-<pid>-<nonce>.json — what `act rearm`
+      // recognizes as a resurrectable wait
+      assert.match(hit.file, /^7-\d+-[0-9a-f]+\.json$/)
+      assert.equal(hit.marker.merge, true)
+      assert.equal(hit.marker.cleanup, true)
+      assert.equal(hit.marker.workdir, f.worktree)
     })
   })
 

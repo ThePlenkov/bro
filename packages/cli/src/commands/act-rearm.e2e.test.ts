@@ -36,11 +36,12 @@ function fixture() {
 function deadWatch(
   main: string,
   pr: number,
-  w: Record<string, unknown> = {}
+  w: Record<string, unknown> = {},
+  name = `${pr}-2000000000.json`
 ): string {
   const wd = join(main, '.git', 'bro', 'watches')
   mkdirSync(wd, { recursive: true })
-  const file = join(wd, `${pr}-2000000000.json`)
+  const file = join(wd, name)
   writeFileSync(
     file,
     JSON.stringify({
@@ -99,8 +100,16 @@ describe('act rearm', () => {
     })
     // workdir records where the original watcher ran — --cleanup is
     // replayed only when that directory still exists (rearm could be
-    // invoked from any checkout of the repo)
-    const marker = deadWatch(main, 7, { merge: true, cleanup: true, workdir: main })
+    // invoked from any checkout of the repo). The dead marker uses the
+    // real <pr>-<pid>-<nonce>.json shape watchBegin writes — a plan that
+    // matched only <pr>-<pid>.json skipped every real marker and
+    // reported "no dead watches" (bro-z0k2u)
+    const marker = deadWatch(
+      main,
+      7,
+      { merge: true, cleanup: true, workdir: main },
+      '7-2000000000-a1b2c3d4e5f6.json'
+    )
     const r = runCli(['act', 'rearm', '--json'], { cwd: main })
     assert.equal(r.code, 0, r.stderr)
     const out = JSON.parse(r.stdout) as {

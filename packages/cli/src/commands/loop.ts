@@ -777,6 +777,19 @@ async function driveGate(
       res = await waitForGate(fetch, {
         intervalMs: ctx.intervalS * 1000,
         timeoutMs: ctx.cfg.mergeTimeoutMin * 60_000,
+        // the loop IS the watcher — drop the same marker `act wait` does
+        // (bro-z0k2u): a reboot-killed loop leaves a dead marker `bro act
+        // rearm` resurrects as `act wait --merge --cleanup` rooted in the
+        // item's worktree, instead of the PR sitting silently unwatched
+        watch: {
+          dir: ctx.root,
+          pr,
+          link: prRef(ctx, pr),
+          merge: true,
+          cleanup: true,
+          workdir: item.worktreeDir,
+          timeoutMin: ctx.cfg.mergeTimeoutMin,
+        },
         onPoll: (s, g) =>
           console.error(
             `loop ${prRef(ctx, pr)}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f rev=${g.reviewers_pending} sast=${g.sast_pending}`
