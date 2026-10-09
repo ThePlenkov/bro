@@ -25,7 +25,7 @@ export const loopSection: ConfigSection<LoopConfig> = (raw) => {
     profile: str('profile') as string,
     model: str('model') as string,
     bootstrap: str('bootstrap') as string,
-    agentTimeoutMin: num('agentTimeoutMin', 1),
+    agentTimeoutMin: num('agentTimeoutMin'),
     mergeTimeoutMin: num('mergeTimeoutMin', 1),
     fixRounds: num('fixRounds'),
     maxItems: num('maxItems'),

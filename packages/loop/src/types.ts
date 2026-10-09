@@ -33,7 +33,9 @@ export interface LoopConfig {
   /** Optional shell command run once in the fresh worktree before the
    *  agent spawns (e.g. `npm install`). */
   bootstrap: string
-  /** Minutes a single agent spawn may run before it's killed. */
+  /** Minutes a single agent spawn may run before it's killed.
+   *  0 = no wall-clock limit — a working session is not decapitated;
+   *  supervision is the orchestrator's check-in cadence, not a lifetime. */
   agentTimeoutMin: number
   /** Minutes the merge gate may stay pending before the item is parked. */
   mergeTimeoutMin: number
@@ -49,7 +51,7 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   profile: '',
   model: '',
   bootstrap: '',
-  agentTimeoutMin: 45,
+  agentTimeoutMin: 0,
   mergeTimeoutMin: 45,
   fixRounds: 3,
   maxItems: 0,

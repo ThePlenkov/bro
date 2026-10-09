@@ -135,7 +135,7 @@ function usage(): never {
   --profile NAME                 fleet.profiles.<name> preset
   --model M                      model override for the provider lane
   --auto-approve                 acp permission policy: allow, not deny
-  --agent-timeout MIN            per-spawn budget (loop.agentTimeoutMin, 45)
+  --agent-timeout MIN            per-spawn kill budget, 0 = never (loop.agentTimeoutMin, 0)
   --merge-timeout MIN            gate budget per round (loop.mergeTimeoutMin, 45)
   --label a,b                    declared scope — only beads carrying one
                                 of these labels are claimable
@@ -410,14 +410,19 @@ function spawnAgent(ctx: Ctx, beadId: string, title: string, promptFile: string,
           spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
         : spawn('sh', ['-c', expandAgentCmd(ctx.agent, promptFile)], opts) // NOSONAR — operator-configured agent command
     let timedOut = false
-    const timer = setTimeout(() => {
+    const kill = () => {
       timedOut = true
       try {
         process.kill(-child.pid!, 'SIGKILL') // detached → own group
       } catch {
         child.kill('SIGKILL')
       }
-    }, ctx.cfg.agentTimeoutMin * 60_000)
+    }
+    const timer =
+      ctx.cfg.agentTimeoutMin > 0
+        ? // Node clamps delays above 2^31-1ms to 1ms — cap so large budgets keep working.
+          setTimeout(kill, Math.min(ctx.cfg.agentTimeoutMin * 60_000, 2_147_483_647))
+        : undefined
     child.on('error', (err) => {
       clearTimeout(timer)
       console.error(`loop: agent spawn failed — ${err.message}`)
@@ -1011,7 +1016,7 @@ function buildCtx(
     root,
     cfg: {
       ...cfg,
-      agentTimeoutMin: num(flag(argv, '--agent-timeout'), cfg.agentTimeoutMin),
+      agentTimeoutMin: num(flag(argv, '--agent-timeout'), cfg.agentTimeoutMin, 0),
       mergeTimeoutMin: num(flag(argv, '--merge-timeout'), cfg.mergeTimeoutMin),
       maxItems: num(flag(argv, '--max'), cfg.maxItems, 0),
     },
