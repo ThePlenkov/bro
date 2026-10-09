@@ -43,6 +43,10 @@ export interface LoopConfig {
   fixRounds: number
   /** Max beads per `bro loop` run — 0 = until the queue is gated/idle. */
   maxItems: number
+  /** Max open PRs the run's gate stack may hold — at cap pushes stop
+   *  and only gate service runs until a merge frees a slot. 1 is the
+   *  near-serial shape (spec bro-zsmwq). */
+  maxOpen: number
 }
 
 export const DEFAULT_LOOP_CONFIG: LoopConfig = {
@@ -55,4 +59,5 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   mergeTimeoutMin: 45,
   fixRounds: 3,
   maxItems: 0,
+  maxOpen: 3,
 }

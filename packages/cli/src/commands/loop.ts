@@ -45,13 +45,24 @@ import {
   type SpawnWorker,
   type TaskStore,
 } from '@broject/core'
-import { checkHistory, evaluateExitGate, fetchPrActState, waitForGate } from '@broject/act'
+import {
+  checkHistory,
+  evaluateExitGate,
+  fetchPrActState,
+  gatePending,
+  watchBegin,
+  watchEnd,
+} from '@broject/act'
 import {
   buildFixPrompt,
+  buildRebasePrompt,
   buildWorkPrompt,
   expandAgentCmd,
+  memberAction,
   planItem,
+  type GateSnapshot,
   type LoopConfig,
+  type LoopItem,
 } from '@broject/loop'
 import { loadBroConfig } from '../plugins.ts'
 import {
@@ -99,6 +110,8 @@ interface Ctx {
   repo: string
   root: string
   cfg: LoopConfig
+  /** The act gate's own section — service passes share the one read. */
+  act: ReturnType<typeof loadBroConfig>['act']
   /** The template `expandAgentCmd` runs — `loop.agent`/`--agent`, or a
    *  cli provider's `command` when the provider lane resolved one. For an
    *  acp (argv) worker this field is inert — the spawn never expands it. */
@@ -141,6 +154,7 @@ function usage(): never {
                                 of these labels are claimable
   --stack NAME                   chain claimed beads onto stack NAME —
                                 each PR targets the member below
+  --max-open N                   cap the gate stack's open PRs (loop.maxOpen, 3)
   --interval SEC                 gate poll interval (60)`)
   process.exit(2)
 }
@@ -473,10 +487,10 @@ function reopenBead(tasks: TaskStore, id: string): void {
 async function finalizeMerge(
   ctx: Ctx,
   bead: ReadyBead,
-  item: ReturnType<typeof planItem>,
+  item: LoopItem,
   pr: number,
   alreadyMerged = false
-): Promise<ItemResult> {
+): Promise<'landed' | 'parked'> {
   try {
     if (!alreadyMerged) {
       await runActCommand(['merge', String(pr)])
@@ -532,7 +546,7 @@ async function finalizeMerge(
 async function runFixRound(
   ctx: Ctx,
   bead: ReadyBead,
-  item: ReturnType<typeof planItem>,
+  item: LoopItem,
   pr: number,
   round: number
 ): Promise<void> {
@@ -577,7 +591,7 @@ function agentVerdict(ctx: Ctx, bead: ReadyBead, worktreeDir: string): ItemResul
 function failNoPr(
   ctx: Ctx,
   bead: ReadyBead,
-  item: ReturnType<typeof planItem>,
+  item: LoopItem,
   code: number | null
 ): ItemResult {
   noteBead(
@@ -592,7 +606,7 @@ function failNoPr(
 /** Optional bootstrap command — false (with the bead noted + reopened)
  *  when it fails; spawning the agent on a half-set-up worktree is worse
  *  than failing fast. */
-function runBootstrap(ctx: Ctx, bead: ReadyBead, item: ReturnType<typeof planItem>): boolean {
+function runBootstrap(ctx: Ctx, bead: ReadyBead, item: LoopItem): boolean {
   if (!ctx.cfg.bootstrap) {
     return true
   }
@@ -615,7 +629,7 @@ function runBootstrap(ctx: Ctx, bead: ReadyBead, item: ReturnType<typeof planIte
 
 /** The work-order file lives outside the worktree (see planItem) —
  *  its parent dir may not exist yet. */
-function writePrompt(item: ReturnType<typeof planItem>, text: string): void {
+function writePrompt(item: LoopItem, text: string): void {
   mkdirSync(dirname(item.promptFile), { recursive: true })
   writeFileSync(item.promptFile, text)
 }
@@ -659,7 +673,7 @@ function resolveStackSlot(ctx: Ctx, bead: ReadyBead): StackSlot | undefined {
 function stackPlan(
   ctx: Ctx,
   bead: ReadyBead
-): { slot: StackSlot | undefined; item: ReturnType<typeof planItem> } {
+): { slot: StackSlot | undefined; item: LoopItem } {
   const slot = resolveStackSlot(ctx, bead)
   const item = planItem(
     bead,
@@ -684,9 +698,9 @@ const laneLabel = (ctx: Ctx): string =>
 function planItemAndWorktree(
   ctx: Ctx,
   bead: ReadyBead
-): { slot: StackSlot | undefined; item: ReturnType<typeof planItem> } {
+): { slot: StackSlot | undefined; item: LoopItem } {
   let slot: StackSlot | undefined
-  let item!: ReturnType<typeof planItem>
+  let item!: LoopItem
   const planAndCreate = (): void => {
     const plan = stackPlan(ctx, bead)
     slot = plan.slot
@@ -722,12 +736,42 @@ function planItemAndWorktree(
   return { slot, item }
 }
 
-/** One bead end-to-end. */
-async function runItem(ctx: Ctx, bead: ReadyBead): Promise<ItemResult> {
+// --- the gate stack: task-stack round-robin (spec bro-zsmwq) -----------------
+
+/** A PR on the run's gate stack — bead + worktree + the per-member
+ *  clock and its armed watch marker. Entry order is service priority:
+ *  the oldest member gets serviced first. */
+interface GateMember {
+  bead: ReadyBead
+  item: LoopItem
+  pr: number
+  /** watchBegin marker path — armed for the member's whole stack
+   *  tenure: a dead loop leaves a dead marker `act rearm` resurrects
+   *  as `act wait --merge --cleanup` in the member's worktree. */
+  marker: string | null
+  /** Gate (re-)entry ms — a fix/rebase round resets the budget. */
+  since: number
+  /** Agent respawns consumed — fix and rebase rounds share the
+   *  loop.fixRounds bound. */
+  rounds: number
+  /** headSha an update-branch push last moved — the landing check. */
+  updatedSha?: string
+  /** Consecutive fetch failures — parks at the old wait's 3. */
+  fetchErrors: number
+}
+
+/** The push half of the alternation: claim → worktree → agent → PR.
+ *  The PR found joins the gate stack as the newest member; every
+ *  no-PR outcome settles inline exactly as the serial loop did. */
+type PushOutcome =
+  | { kind: 'member'; member: GateMember }
+  | { kind: 'done'; result: ItemResult }
+
+async function pushItem(ctx: Ctx, bead: ReadyBead): Promise<PushOutcome> {
   // resolved here, not earlier — a member that landed since the last
-  // item correctly yields the default branch as the next base.
+  // push correctly yields the default branch as the next base.
   let slot: StackSlot | undefined
-  let item!: ReturnType<typeof planItem>
+  let item!: LoopItem
   try {
     const planned = planItemAndWorktree(ctx, bead)
     slot = planned.slot
@@ -735,117 +779,174 @@ async function runItem(ctx: Ctx, bead: ReadyBead): Promise<ItemResult> {
   } catch (err) {
     noteBead(ctx.tasks, bead.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
     reopenBead(ctx.tasks, bead.id)
-    return 'failed'
+    return { kind: 'done', result: 'failed' }
   }
   if (!runBootstrap(ctx, bead, item)) {
-    return 'failed'
+    return { kind: 'done', result: 'failed' }
   }
   writePrompt(item, buildWorkPrompt(bead, item.branch, slot?.base, slot?.bottom, ctx.backend))
   const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
   const pr = findPr(ctx, item.branch)
   if (pr === 'lookup-error') {
     noteBead(ctx.tasks, bead.id, `loop: PR lookup failed for ${item.branch} — worktree ${item.worktreeDir}`)
-    return 'parked'
+    return { kind: 'done', result: 'parked' }
   }
   if (pr === null) {
-    return agentVerdict(ctx, bead, item.worktreeDir) ?? failNoPr(ctx, bead, item, code)
+    return {
+      kind: 'done',
+      result: agentVerdict(ctx, bead, item.worktreeDir) ?? failNoPr(ctx, bead, item, code),
+    }
   }
-  say(ctx, `loop: ${bead.id} → PR ${prRef(ctx, pr)}`)
-  return driveGate(ctx, bead, item, pr)
+  // the loop IS the watcher — arm the same marker `act wait` drops
+  // (bro-z0k2u) for the member's whole stack tenure, not per poll:
+  // a reboot-killed loop leaves a dead marker `bro act rearm`
+  // resurrects instead of the PR sitting silently unwatched.
+  const member: GateMember = {
+    bead,
+    item,
+    pr,
+    marker: watchBegin(ctx.root, {
+      pr,
+      link: prRef(ctx, pr),
+      merge: true,
+      cleanup: true,
+      workdir: item.worktreeDir,
+      timeoutMin: ctx.cfg.mergeTimeoutMin,
+    }),
+    since: Date.now(),
+    rounds: 0,
+    fetchErrors: 0,
+  }
+  return { kind: 'member', member }
 }
 
-/** The PR gate loop — poll until the gate settles; merge on green,
- *  respawn the agent on open threads (up to loop.fixRounds), park on
- *  timeout/fetch-exhaustion/hard blocks. */
-async function driveGate(
+/** One member's settled snapshot → the mapped action. 'kept' parks the
+ *  member until the next interval tick (a quiet wait); 'active' keeps
+ *  it too but asks the scheduler for an immediate re-poll — a fix/
+ *  rebase/update just moved the gate, exactly like the old serial
+ *  waitForGate re-entry did. 'landed'/'parked' remove it. */
+async function serviceMember(
   ctx: Ctx,
-  bead: ReadyBead,
-  item: ReturnType<typeof planItem>,
-  pr: number
-): Promise<ItemResult> {
-  const act = loadBroConfig(ctx.root).act
-  const fetch = async () => {
+  m: GateMember
+): Promise<'kept' | 'active' | 'landed' | 'parked'> {
+  let snap: GateSnapshot
+  try {
     const state = await fetchPrActState(
       ctx.rev,
-      { repo: ctx.repo, pr },
+      { repo: ctx.repo, pr: m.pr },
       {
-        ignoreChecks: act.ignoreChecks,
+        ignoreChecks: ctx.act.ignoreChecks,
         checkHistory: checkHistory(ctx.root),
-        maxRounds: act.maxRounds,
-        docsPaths: act.docsPaths,
-        docsMaxRounds: act.docsMaxRounds,
+        maxRounds: ctx.act.maxRounds,
+        docsPaths: ctx.act.docsPaths,
+        docsMaxRounds: ctx.act.docsMaxRounds,
       }
     )
-    return { state, gate: evaluateExitGate(state) }
+    const gate = evaluateExitGate(state)
+    console.error(
+      `loop ${prRef(ctx, m.pr)}: threads=${gate.open_threads} ci=${gate.ci_pending}+${gate.ci_failing}f rev=${gate.reviewers_pending} sast=${gate.sast_pending}`
+    )
+    snap = {
+      state: state.state,
+      headSha: state.headSha,
+      mergeable: state.mergeable,
+      mergeState: state.mergeState,
+      openThreads: state.openThreads,
+      fixRounds: state.fixRounds,
+      maxRounds: state.maxRounds,
+      ok: gate.ok,
+      blockers: gate.blockers,
+      pending: gatePending(state),
+    }
+    m.fetchErrors = 0
+  } catch (err) {
+    m.fetchErrors += 1
+    console.error(`loop ${prRef(ctx, m.pr)}: fetch failed (${m.fetchErrors}) — ${String(err)}`)
+    // the old wait gave up on 3 consecutive failures OR its deadline —
+    // a member whose fetch plane is down past mergeTimeoutMin settles
+    // the same way rather than keeping a slot forever
+    if (m.fetchErrors < 3 && Date.now() - m.since < ctx.cfg.mergeTimeoutMin * 60_000) {
+      return 'kept'
+    }
+    noteBead(
+      ctx.tasks,
+      m.bead.id,
+      `loop: gate fetch kept failing for PR ${prRef(ctx, m.pr)} — ${String(err)} — worktree ${m.item.worktreeDir}`
+    )
+    return leave(m, 'parked')
   }
-  for (let round = 0; ; round++) {
-    let res
-    try {
-      res = await waitForGate(fetch, {
-        intervalMs: ctx.intervalS * 1000,
-        timeoutMs: ctx.cfg.mergeTimeoutMin * 60_000,
-        // the loop IS the watcher — drop the same marker `act wait` does
-        // (bro-z0k2u): a reboot-killed loop leaves a dead marker `bro act
-        // rearm` resurrects as `act wait --merge --cleanup` rooted in the
-        // item's worktree, instead of the PR sitting silently unwatched
-        watch: {
-          dir: ctx.root,
-          pr,
-          link: prRef(ctx, pr),
-          merge: true,
-          cleanup: true,
-          workdir: item.worktreeDir,
-          timeoutMin: ctx.cfg.mergeTimeoutMin,
-        },
-        onPoll: (s, g) =>
-          console.error(
-            `loop ${prRef(ctx, pr)}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f rev=${g.reviewers_pending} sast=${g.sast_pending}`
-          ),
-        onError: (err, n) =>
-          console.error(`loop ${prRef(ctx, pr)}: fetch failed (${n}) — ${String(err)}`),
-        // same as `act wait`: BEHIND + mergeable is a state to fix, not
-        // to park on — conflicts still settle for a human
-        updateBranch: (s) => {
-          const ok = ctx.rev.updateBranch({ repo: ctx.repo, pr }, s.headSha)
-          console.error(
-            `loop ${prRef(ctx, pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
-          )
-          return ok
-        },
-      })
-    } catch (err) {
-      noteBead(
-        ctx.tasks,
-        bead.id,
-        `loop: gate fetch kept failing for PR ${prRef(ctx, pr)} — ${String(err)} — worktree ${item.worktreeDir}`
-      )
-      return 'parked'
+  const act = memberAction(snap, m, {
+    fixRounds: ctx.cfg.fixRounds,
+    timeoutMs: ctx.cfg.mergeTimeoutMin * 60_000,
+    now: Date.now(),
+  })
+  switch (act.kind) {
+    case 'land':
+      // landed externally while the member sat — close out, no merge call
+      return leave(m, await finalizeMerge(ctx, m.bead, m.item, m.pr, true))
+    case 'merge':
+      return leave(m, await finalizeMerge(ctx, m.bead, m.item, m.pr))
+    case 'closed':
+      noteBead(ctx.tasks, m.bead.id, `loop: PR ${prRef(ctx, m.pr)} was closed unmerged — worktree ${m.item.worktreeDir}`)
+      return leave(m, 'parked')
+    case 'fix':
+      m.rounds += 1
+      await runFixRound(ctx, m.bead, m.item, m.pr, m.rounds)
+      m.since = Date.now()
+      return 'active'
+    case 'rebase':
+      m.rounds += 1
+      await runRebaseRound(ctx, m.bead, m.item, m.pr, m.rounds)
+      m.since = Date.now()
+      return 'active'
+    case 'update': {
+      const ok = ctx.rev.updateBranch({ repo: ctx.repo, pr: m.pr }, snap.headSha)
+      console.error(`loop ${prRef(ctx, m.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`)
+      if (!ok) {
+        // an update refusal IS the settle — same park the wait produced
+        noteBead(ctx.tasks, m.bead.id, `loop: PR ${prRef(ctx, m.pr)} blocked: ${snap.blockers.join('; ')} — worktree ${m.item.worktreeDir}`)
+        return leave(m, 'parked')
+      }
+      m.updatedSha = snap.headSha
+      return 'active'
     }
-    if (res.state.state === 'MERGED') {
-      // landed externally (reviewer/bot merge) while we polled — close out
-      return finalizeMerge(ctx, bead, item, pr, true)
-    }
-    if (res.state.state === 'CLOSED') {
-      noteBead(ctx.tasks, bead.id, `loop: PR ${prRef(ctx, pr)} was closed unmerged — worktree ${item.worktreeDir}`)
-      return 'parked'
-    }
-    if (res.gate.ok) {
-      return finalizeMerge(ctx, bead, item, pr)
-    }
-    // the gate's effective cap (docs-tightened on docs-only PRs) is the
-    // respawn limit's peer — once it mandates debt-defer, another inline
-    // fix round is exactly what the cap exists to prevent
-    const capHit =
-      res.state.maxRounds > 0 && res.state.fixRounds > res.state.maxRounds
-    if (res.state.openThreads > 0 && !capHit && round < ctx.cfg.fixRounds) {
-      await runFixRound(ctx, bead, item, pr, round + 1)
-      continue
-    }
-    const why = res.timedOut
-      ? `gate still pending after ${ctx.cfg.mergeTimeoutMin}m`
-      : `blocked: ${res.gate.blockers.join('; ')}`
-    noteBead(ctx.tasks, bead.id, `loop: PR ${prRef(ctx, pr)} ${why} — worktree ${item.worktreeDir}`)
-    return 'parked'
+    case 'wait':
+      return 'kept'
+    case 'park':
+      noteBead(ctx.tasks, m.bead.id, `loop: PR ${prRef(ctx, m.pr)} ${act.why} — worktree ${m.item.worktreeDir}`)
+      return leave(m, 'parked')
+  }
+}
+
+/** A member leaving the stack ends its watch — the promise is kept. */
+function leave(m: GateMember, verdict: 'landed' | 'parked'): 'landed' | 'parked' {
+  watchEnd(m.marker)
+  return verdict
+}
+
+/** The conflict round — the member's PR is CONFLICTING; the agent
+ *  rebases onto the PR's declared base and pushes. A base that can't
+ *  be looked up skips the spawn (the round still consumed the budget —
+ *  a blind rebase order would be worse). */
+async function runRebaseRound(
+  ctx: Ctx,
+  bead: ReadyBead,
+  item: LoopItem,
+  pr: number,
+  round: number
+): Promise<void> {
+  let base: string
+  try {
+    base = ctx.rev.prMeta({ repo: ctx.repo, pr }).baseRef
+  } catch (err) {
+    console.error(`loop ${prRef(ctx, pr)}: base lookup for the rebase round failed — ${String(err)}`)
+    return
+  }
+  writePrompt(item, buildRebasePrompt(bead, pr, base))
+  say(ctx, `loop: ${prRef(ctx, pr)} conflicts — rebase round ${round} onto ${base}`)
+  const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
+  if (code !== 0) {
+    console.error(`loop: rebase agent exited ${code ?? 'timeout'} — the next gate poll decides`)
   }
 }
 
@@ -884,6 +985,7 @@ const LOOP_VALUE_FLAGS = new Set([
   '--agent-timeout',
   '--merge-timeout',
   '--max',
+  '--max-open',
   '--interval',
   '--label',
   '--stack',
@@ -1019,7 +1121,9 @@ function buildCtx(
       agentTimeoutMin: num(flag(argv, '--agent-timeout'), cfg.agentTimeoutMin, 0),
       mergeTimeoutMin: num(flag(argv, '--merge-timeout'), cfg.mergeTimeoutMin),
       maxItems: num(flag(argv, '--max'), cfg.maxItems, 0),
+      maxOpen: num(flag(argv, '--max-open'), cfg.maxOpen, 1),
     },
+    act: broCfg.act,
     agent,
     lane,
     intervalS: num(flag(argv, '--interval'), 60),
@@ -1280,33 +1384,79 @@ function syncAfterLand(ctx: Ctx): void {
   }
 }
 
-/** The claim→run→repeat cycle until the queue drains or --max hits. */
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+/** The round-robin: each tick services the gate stack oldest-first,
+ *  then pushes the next bead while a slot is free (loop.maxOpen). The
+ *  run ends when the queue is drained or --max claims are spent AND
+ *  the stack is empty — pending members wait out their own budgets. */
 async function runQueue(ctx: Ctx): Promise<void> {
   const seen = new Set<string>()
+  const stack: GateMember[] = []
   const tally = { landed: 0, closed: 0, parked: 0, failed: 0 }
+  // --max bounds claims, not outcomes — a claimed bead's verdict
+  // arrives whenever its gate settles
+  let claimed = 0
   try {
     // inside the try: a failed scope lookup still owes the run an audit
     const scope = loopScope()
     if (!scope) {
       return
     }
+    let drained = false
     for (;;) {
-      const done = tally.landed + tally.closed + tally.parked + tally.failed
-      if (ctx.cfg.maxItems > 0 && done >= ctx.cfg.maxItems) {
+      // a pass that moved anything — action, merge, park — re-polls
+      // immediately; only an all-quiet pass pays the poll interval
+      let busy = false
+      for (const m of [...stack]) {
+        const verdict = await serviceMember(ctx, m)
+        if (verdict === 'kept') {
+          continue
+        }
+        busy = true
+        if (verdict === 'active') {
+          continue
+        }
+        stack.splice(stack.indexOf(m), 1)
+        tally[verdict] += 1
+        if (verdict === 'landed') {
+          syncAfterLand(ctx)
+        }
+        if (ctx.json) {
+          console.log(JSON.stringify({ bead: m.bead.id, result: verdict }))
+        }
+      }
+      const maxed = ctx.cfg.maxItems > 0 && claimed >= ctx.cfg.maxItems
+      if (!drained && !maxed && stack.length < ctx.cfg.maxOpen) {
+        const bead = claimNext(ctx, scope, seen)
+        if (bead === undefined) {
+          drained = true
+        } else {
+          seen.add(bead.id)
+          claimed += 1
+          const out = await pushItem(ctx, bead)
+          if (out.kind === 'member') {
+            stack.push(out.member)
+            say(
+              ctx,
+              `loop: ${bead.id} → PR ${prRef(ctx, out.member.pr)} (gate ${stack.length}/${ctx.cfg.maxOpen})`
+            )
+          } else {
+            tally[out.result] += 1
+            if (ctx.json) {
+              console.log(JSON.stringify({ bead: bead.id, result: out.result }))
+            }
+          }
+          // straight back to service — the new member's first poll and
+          // the next push both want a fresh pass, not an idle interval
+          continue
+        }
+      }
+      if (stack.length === 0 && (drained || maxed)) {
         break
       }
-      const bead = claimNext(ctx, scope, seen)
-      if (!bead) {
-        break
-      }
-      seen.add(bead.id)
-      const result = await runItem(ctx, bead)
-      tally[result] += 1
-      if (result === 'landed') {
-        syncAfterLand(ctx)
-      }
-      if (ctx.json) {
-        console.log(JSON.stringify({ bead: bead.id, result }))
+      if (!busy) {
+        await sleep(ctx.intervalS * 1000)
       }
     }
     if (ctx.json) {
