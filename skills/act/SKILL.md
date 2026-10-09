@@ -118,6 +118,16 @@ default store, so standard installs already have it).
   *died* with the host/session never ran that cleanup — its dead marker
   stays, the session-start nudge names it, and `bro act rearm` puts the
   watch back up.
+  **'Watcher armed' is never the end state.** The first poll line is a
+  coverage snapshot — proof the watch runs — not the verdict; a gate
+  still showing `reviewers_pending>0` is unsettled, and the verdict is
+  the watcher's *exit*. A non-zero BLOCKED exit is the next work list,
+  not a notification to idle past: `bro act threads <PR>`, then
+  fix/reply/defer/resolve each named blocker, push, and re-arm
+  `bro act wait --merge`. A BLOCKED event surfacing after the arming
+  turn ended is live work for the next turn, not stale mail. Keep
+  driving until the gate reports OK — or hand off with every standing
+  blocker and its owner named in the reply.
   The stop gate enforces this: an armed session ending with an open,
   unwatched current-branch PR is blocked once and pointed at the detached
   `act wait` form — a running `bro drive --every` counts as coverage via
