@@ -219,8 +219,22 @@ describe('connectors', () => {
       facadeAuth('tasks', { dir }, { connector: 'acme-auth' }),
       'acme: run `acme login`'
     )
-    // beads has no auth probe — nothing to demand
-    assert.equal(facadeAuth('tasks', { dir }, { connector: 'beads' }), null)
+    // beads' auth probe IS checkBeads — with bd hidden the connector
+    // itself reports the remediation line, no core-side special-casing
+    withRepo(null, (bare) => {
+      const prev = process.env.PATH
+      const noBins = join(bare, 'no-bins')
+      mkdirSync(noBins)
+      process.env.PATH = noBins
+      try {
+        assert.match(
+          facadeAuth('tasks', { dir: bare }, { connector: 'beads' }) ?? '',
+          /bd not found/
+        )
+      } finally {
+        process.env.PATH = prev
+      }
+    })
     // no provider surfaces as the message, not a throw
     assert.equal(typeof facadeAuth('reviews', { dir }, { connector: 'acme-bare' }), 'string')
   })
@@ -315,6 +329,12 @@ describe('isOwnClaim', () => {
     assert.equal(isOwnClaim({ id: 'b1', assignee: 'me' }, mine, 'me'), true)
     assert.equal(isOwnClaim({ id: 'b1', assignee: 'other' }, mine, 'me'), false)
     assert.equal(isOwnClaim({ id: 'b2', assignee: 'me' }, mine, 'me'), false)
+  })
+
+  test('a comma-joined assignee list still counts the actor among them', () => {
+    // github rows join several assignees — a shared claim is still ours
+    assert.equal(isOwnClaim({ id: 'b1', assignee: 'other, me' }, mine, 'me'), true)
+    assert.equal(isOwnClaim({ id: 'b1', assignee: 'a, b' }, mine, 'me'), false)
   })
 
   test('unverifiable rows keep the marker — fail-open', () => {

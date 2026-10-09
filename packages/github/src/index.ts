@@ -6,8 +6,9 @@
 import { ghTry, type Connector } from '@broject/core'
 import { githubReview } from './reviews.ts'
 import { githubQueries } from './queries.ts'
+import { githubTasks, githubTasksAsync } from './tasks.ts'
 
-export { githubReview, githubQueries }
+export { githubReview, githubQueries, githubTasks, githubTasksAsync }
 
 export const githubConnector: Connector = {
   name: 'github',
@@ -26,6 +27,13 @@ export const githubConnector: Connector = {
       ? null
       : 'gh not authenticated — run `gh auth login`'
   },
+  /** `tasks` exists but is name-only — a github remote must not flip a
+   *  beads repo's task store by detection. Pin it:
+   *  `"connectors": {"tasks": "github"}` (+ `stores: ["jsonl"]` for the
+   *  zero-install shape — spec specs/bro-huy5o.1.md). */
+  optInFacades: ['tasks', 'tasksAsync'],
   reviews: (ctx) => githubReview(ctx.dir),
   queries: (ctx) => githubQueries(ctx.dir),
+  tasks: (ctx) => githubTasks(ctx.dir),
+  tasksAsync: (ctx) => githubTasksAsync(ctx.dir),
 }

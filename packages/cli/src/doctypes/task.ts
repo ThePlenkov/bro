@@ -29,8 +29,14 @@ export type { TaskRow }
  *  can point the whole surface at another work-item system. */
 function storeFor(ctx: DocCtx): () => TaskStore {
   const dir = () => (ctx.scope === 'global' ? requireGlobalStore(ctx.root) : ctx.root)
+  // the global store is beads by construction — a connectors.tasks pin
+  // targets the project store, never the user-level queue
   return () =>
-    facade('tasks', { dir: dir() }, { prefer: loadBroConfig(ctx.root).connectors })
+    facade(
+      'tasks',
+      { dir: dir() },
+      ctx.scope === 'global' ? { connector: 'beads' } : { prefer: loadBroConfig(ctx.root).connectors }
+    )
 }
 
 /** CLI flags → TaskFilter — known keys map, the rest are ignored
