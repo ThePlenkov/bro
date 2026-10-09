@@ -182,12 +182,24 @@ export const actSection: ConfigSection<{
   maxRounds: number
   docsPaths: string[]
   docsMaxRounds: number
+  mergeQueue: { label?: string; comment?: string }
 }> = (raw) => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     ignoreChecks?: unknown
     maxRounds?: unknown
     docsPaths?: unknown
     docsMaxRounds?: unknown
+    mergeQueue?: unknown
+  }
+  const queue = (typeof obj.mergeQueue === 'object' && obj.mergeQueue !== null
+    ? obj.mergeQueue
+    : {}) as { label?: unknown; comment?: unknown }
+  const mergeQueue: { label?: string; comment?: string } = {}
+  if (typeof queue.label === 'string' && queue.label.trim() !== '') {
+    mergeQueue.label = queue.label.trim()
+  }
+  if (typeof queue.comment === 'string' && queue.comment.trim() !== '') {
+    mergeQueue.comment = queue.comment.trim()
   }
   return {
     // only name substrings (bare or rule objects) may reach the check
@@ -215,6 +227,7 @@ export const actSection: ConfigSection<{
       obj.docsMaxRounds >= 0
         ? obj.docsMaxRounds
         : DEFAULT_CONFIG.act.docsMaxRounds,
+    mergeQueue,
   }
 }
 
@@ -593,6 +606,12 @@ export interface BroConfig {
      *  on a docs-only PR — doc threads churn per push, so inline fixing
      *  converges slower for less value. 0 disables the docs-specific cap. */
     docsMaxRounds: number
+    /** External-merge-queue knobs (spec specs/bro-huy5o.6.md) — the
+     *  connector pick lives in `connectors.mergeQueue`; these are the
+     *  enqueue mechanics it reads. `label` adds a queue label on the
+     *  PR (mergify's label-triggered rules), `comment` overrides the
+     *  posted queue command (default `@mergifyio queue`). */
+    mergeQueue: { label?: string; comment?: string }
   }
   /** Facade → connector precedence, e.g. { reviews: 'gitlab' }. */
   connectors: Record<string, string>
@@ -650,6 +669,7 @@ export const DEFAULT_CONFIG: BroConfig = {
     // no '*.txt' — requirements.txt and test fixtures are not docs
     docsPaths: ['*.md', '*.mdx', '*.rst', 'docs/'],
     docsMaxRounds: 2,
+    mergeQueue: {},
   },
   connectors: {},
   providers: {},

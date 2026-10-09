@@ -7,8 +7,23 @@ import { ghTry, type Connector } from '@broject/core'
 import { githubReview } from './reviews.ts'
 import { githubQueries } from './queries.ts'
 import { githubTasks, githubTasksAsync } from './tasks.ts'
+import {
+  graphiteConnector,
+  graphiteQueue,
+  mergifyConnector,
+  mergifyQueue,
+} from './merge-queue.ts'
 
-export { githubReview, githubQueries, githubTasks, githubTasksAsync }
+export {
+  githubReview,
+  githubQueries,
+  githubTasks,
+  githubTasksAsync,
+  graphiteConnector,
+  mergifyConnector,
+  mergifyQueue,
+  graphiteQueue,
+}
 
 export const githubConnector: Connector = {
   name: 'github',

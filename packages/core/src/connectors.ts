@@ -29,7 +29,7 @@ import { gitTry } from './git.ts'
 import type { EventsFacade } from './events.ts'
 import type { QueryFacade } from './queries.ts'
 import type { JudgeFacade } from './judge.ts'
-import type { ReviewFacade } from './review.ts'
+import type { MergeQueueFacade, ReviewFacade } from './review.ts'
 import type { Guard } from './guards.ts'
 import { guardProblems } from './guards.ts'
 import type { SpecStore } from './specs.ts'
@@ -57,6 +57,10 @@ export interface FacadeMap {
    *  parallel (no worse than before). */
   tasksAsync: TaskStoreAsync
   reviews: ReviewFacade
+  /** External merge queue — mergify/graphite-class connectors. Opt-in
+   *  by name only (spec specs/bro-huy5o.6.md): `mergeQueueHost` never
+   *  auto-picks. */
+  mergeQueue: MergeQueueFacade
   specs: SpecStore
   judge: JudgeFacade
   events: EventsFacade
@@ -147,6 +151,7 @@ export interface Connector {
    *  wraps the sync `tasks` store in Promise.resolve. */
   tasksAsync?(ctx: ConnectorCtx): TaskStoreAsync
   reviews?(ctx: ConnectorCtx): ReviewFacade
+  mergeQueue?(ctx: ConnectorCtx): MergeQueueFacade
   specs?(ctx: ConnectorCtx): SpecStore
   judge?(ctx: ConnectorCtx): JudgeFacade
   events?(ctx: ConnectorCtx): EventsFacade
@@ -549,6 +554,22 @@ export function reviewHost(
   prefer?: Record<string, string>
 ): ReviewFacade {
   return facade('reviews', { dir }, { prefer })
+}
+
+/** facade('mergeQueue') — null when `connectors.mergeQueue` isn't
+ *  configured. Queue connectors are opt-in only, so an unnamed
+ *  resolution would throw 'every provider is opt-in'; the explicit
+ *  null keeps "no external queue" a value, not an exception. A
+ *  configured-but-unknown name still throws — a misconfigured queue
+ *  fails loud, never silently direct-merges. */
+export function mergeQueueHost(
+  dir: string = process.cwd(),
+  prefer?: Record<string, string>
+): MergeQueueFacade | null {
+  if (prefer?.mergeQueue === undefined) {
+    return null
+  }
+  return facade('mergeQueue', { dir }, { prefer })
 }
 
 /** facade('specs') bound to a dir — the SDD tool this project runs. */

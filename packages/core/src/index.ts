@@ -144,7 +144,9 @@ export type {
 } from './judge.ts'
 export type {
   CheckInfo,
+  EnqueueOpts,
   MergeOpts,
+  MergeQueueFacade,
   MergedPr,
   MergedPrInfo,
   MergedPrQuery,
@@ -167,6 +169,7 @@ export {
   facadeAuth,
   facadeName,
   isOwnClaim,
+  mergeQueueHost,
   parallelWorkLines,
   parallelWorkProbe,
   postToolLines,

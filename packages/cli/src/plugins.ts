@@ -35,7 +35,7 @@ import { DRILL_PLAN_VERSION, drillConnector, drillSection, parseDrillPlan, type 
 import { parsePlanDoc, RETRO_PLAN_VERSION, type RetroPlan } from '@broject/retro'
 import { learnConnector, learnSection } from '@broject/learn'
 import { loopSection } from '@broject/loop'
-import { githubConnector } from '@broject/github'
+import { githubConnector, graphiteConnector, mergifyConnector } from '@broject/github'
 import { gitlabConnector } from '@broject/gitlab'
 import { linearConnector } from '@broject/linear'
 import {
@@ -95,6 +95,10 @@ import { runWorkCommand, workConnector } from './commands/work.ts'
 // decides stop-gate block priority: drill > work > act.
 registerConnector(githubConnector)
 registerConnector(gitlabConnector)
+// external merge queues — opt-in only (`connectors.mergeQueue`), they
+// provide nothing but the queue facade so nothing detects them
+registerConnector(mergifyConnector)
+registerConnector(graphiteConnector)
 // queries-facade provider — opt-in only (a step names it or
 // connectors.queries pins it); nothing about a repo detects Atlassian
 registerConnector(atlassianConnector)

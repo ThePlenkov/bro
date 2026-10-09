@@ -85,7 +85,7 @@ For a watch that must outlive the session, spawn it detached or let
 `bro act rearm` resurrect the dead marker on the next session's nudge —
 `bro drive --every` and `bro watch install` are the durable forms.
 
-## Stacked PRs
+## Stacked PRs and merge queues
 
 GitHub refuses to merge a PR that belongs to a **stack** through either
 `gh pr merge` (GraphQL) or the synchronous merge endpoint — *"must be
@@ -95,15 +95,45 @@ through the async endpoint instead, polling the request's uuid until it
 settles. `bro act wait --merge` is the same merge step, so a watcher on a
 stack layer lands it too.
 
+The same is true — and the same seam — when the base branch requires a
+**merge queue**, stack or not: `bro act merge` probes the PR's base for
+one and enqueues through the async endpoint rather than attempting the
+doomed `gh pr merge`. An accepted enqueue is **parked, not failed** — the
+command reports `accepted but state=OPEN` and exits 0; the queue merges
+later. `bro drive` reads the same shape as an `enqueued` verdict — it
+retires nothing and re-checks on the next pass.
+
 Two details worth knowing:
 
-- A merge queue owns the strategy. On a base branch that requires one the
-  request enqueues (`enqueued`, not merged) and the command reports the
-  PR's real state — the queue merges later. Elsewhere the requested
-  `--squash`/`--merge`/`--rebase` is honored.
+- A merge queue owns the strategy. The request carries
+  `merge_action=merge_queue` and no merge method; elsewhere the
+  requested `--squash`/`--merge`/`--rebase` is honored.
 - **The head branch is kept** on this path: deleting a lower layer's
-  branch closes every PR stacked on it. `--cleanup` still retires the
-  local worktree and branch.
+  branch closes every PR stacked on it, and deleting a queued PR's head
+  closes it. `--cleanup` still retires the local worktree and branch once
+  the merge actually lands.
+
+### External merge queues
+
+When the queue lives outside GitHub, a connector owns the merge —
+opt-in only, by name:
+
+```json
+{ "connectors": { "mergeQueue": "mergify" } }
+```
+
+- **`mergify`** — signals the PR: applies `act.mergeQueue.label` and/or
+  posts the queue command (`act.mergeQueue.comment`, default
+  `@mergifyio queue`). Your `.mergify.yml` rules decide what the signal
+  means; bro never authors them.
+- **`graphite`** — runs `gt merge` in the PR's checkout (from `bro work
+  enter` or the worktree `bro drive` hands it). The checkout must sit on
+  the PR's head branch — `gt merge` queues the whole stack it sees, so a
+  wrong checkout is refused, not queued.
+
+Configured or not, the merge still goes through the same exit gate and
+merge slot — the connector only replaces the final `mergePr` call. An
+`enqueued` result parks the PR exactly like a GitHub-queue hold.
 
 ## Never unwatched
 

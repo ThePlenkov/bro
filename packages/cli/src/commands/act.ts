@@ -13,8 +13,10 @@ import {
   ensureAuth,
   facade,
   gitTry,
+  mergeQueueHost,
   reviewHost,
   taskStore,
+  type MergeQueueFacade,
   type PrTarget,
   type ReviewFacade,
   type ReviewThread,
@@ -424,14 +426,39 @@ function mergeMethod(argv: string[]): 'squash' | 'merge' | 'rebase' | null {
 }
 
 /** mergePr + the landed-head handoff — a merge queue accepts a PR
- *  without landing it, so only a MERGED state returns the head. */
+ *  without landing it, so only a MERGED state returns the head.
+ *  An external queue (connectors.mergeQueue) owns the merge when
+ *  configured — its connector's `enqueue` replaces mergePr outright:
+ *  'enqueued' parks the PR (undefined → deferred cleanup), 'merged'
+ *  hands the head to cleanup same as a direct merge. */
 function landPr(
   rev: ReviewFacade,
   t: PrTarget,
   opts: { method: 'squash' | 'merge' | 'rebase'; admin: boolean },
-  head: { ref: string; sha: string }
+  head: { ref: string; sha: string },
+  queue?: MergeQueueFacade | null
 ): { ref: string; sha: string } | undefined {
   try {
+    if (queue) {
+      // the checkout holding the head — a checkout-bound queue (gt merge)
+      // operates on that stack, not the repo root the command runs in.
+      // `bro drive` merges from the main worktree while the PR's branch
+      // lives in its own; cwd is the fallback (act wait --merge's shape).
+      const checkout =
+        parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out).find(
+          (w) => w.branch === head.ref
+        )?.path ?? process.cwd()
+      const r = queue.enqueue(t, { dir: checkout, headRef: head.ref })
+      if (r === 'merged') {
+        console.log(`act: merged ${rev.prLink(t.repo, t.pr)}`)
+        return head
+      }
+      console.log(
+        `act: ${rev.prLink(t.repo, t.pr)} enqueued — an external merge queue owns it; ` +
+          'local cleanup deferred'
+      )
+      return undefined
+    }
     // expectedHeadSha pins the merge to the sha the gate evaluated —
     // a head that moved since fetch fails closed instead of landing
     // a commit the gate never saw
@@ -458,8 +485,15 @@ function landPr(
 }
 
 async function cmdMerge(argv: string[]): Promise<void> {
-  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
-  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  const cfg = loadBroConfig()
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: cfg.connectors })
+  const rev = reviewHost(undefined, cfg.connectors)
+  // A configured external queue replaces mergePr — its auth probe runs
+  // up front so a missing `gt`/`gh` fails fast, not mid-enqueue.
+  const queue = mergeQueueHost(undefined, cfg.connectors)
+  if (queue) {
+    ensureAuth('mergeQueue', { dir: process.cwd() }, { prefer: cfg.connectors })
+  }
   const t = resolvePr(rev, argv)
 
   const method = mergeMethod(argv)
@@ -516,7 +550,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
     mergedHead = landPr(rev, t, { method, admin: argv.includes('--admin') }, {
       ref: state.headRef,
       sha: state.headSha,
-    })
+    }, queue)
   } finally {
     if (slot.kind === 'acquired') {
       releaseMergeSlot()
