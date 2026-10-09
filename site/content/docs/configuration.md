@@ -84,7 +84,7 @@ a `BroPlugin`. See [Plugins](/docs/plugins).
 | `profile` | `""` | `fleet.profiles.<name>` preset — fills provider/model/autoApprove piecewise |
 | `model` | `""` | Model override for the provider lane |
 | `bootstrap` | `""` | Optional command run in each fresh worktree before the agent |
-| `agentTimeoutMin` | `45` | Per-agent time budget in minutes |
+| `stallMin` | `45` | Output-silence advisory in minutes — a live loop agent quiet this long surfaces in `bro watch`/`bro status`. Advisory only; nothing is killed |
 | `mergeTimeoutMin` | `45` | Review-gate budget in minutes |
 | `fixRounds` | `3` | Maximum review-fix respawns per bead |
 | `maxItems` | `0` | Maximum beads per run; `0` means until idle or gated |

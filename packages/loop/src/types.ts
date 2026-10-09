@@ -33,8 +33,10 @@ export interface LoopConfig {
   /** Optional shell command run once in the fresh worktree before the
    *  agent spawns (e.g. `npm install`). */
   bootstrap: string
-  /** Minutes a single agent spawn may run before it's killed. */
-  agentTimeoutMin: number
+  /** Minutes of output silence before a live loop agent surfaces as a
+   *  check-in advisory (`bro watch`/`bro status`). Advisory only — the
+   *  orchestrator decides; there is no agent wall-clock kill. */
+  stallMin: number
   /** Minutes the merge gate may stay pending before the item is parked. */
   mergeTimeoutMin: number
   /** Max review-fix respawns per bead — defaults to act.maxRounds. */
@@ -49,7 +51,7 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   profile: '',
   model: '',
   bootstrap: '',
-  agentTimeoutMin: 45,
+  stallMin: 45,
   mergeTimeoutMin: 45,
   fixRounds: 3,
   maxItems: 0,

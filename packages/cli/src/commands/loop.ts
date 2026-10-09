@@ -28,7 +28,7 @@
  * note; a bead whose PR stalls keeps its worktree for inspection.
  */
 import { spawnSync, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import {
   bdTry,
@@ -37,6 +37,7 @@ import {
   facade,
   gitTry,
   LockTimeout,
+  procStat,
   reviewHost,
   SpawnError,
   stepParent,
@@ -63,6 +64,7 @@ import {
 } from '../agent-connectors.ts'
 import { flag, positionals } from './args.ts'
 import { runActCommand } from './act.ts'
+import { beginLoopRun, endLoopRun, loopRunLog, reapLoopRuns } from './loop-state.ts'
 import { runSyncCommand } from './sync.ts'
 import { mergedBranches, stackMemberFor, stackTip, syncStack } from './stack.ts'
 import { isStackName } from '@broject/stack'
@@ -133,7 +135,6 @@ function usage(): never {
   --profile NAME                 fleet.profiles.<name> preset
   --model M                      model override for the provider lane
   --auto-approve                 acp permission policy: allow, not deny
-  --agent-timeout MIN            per-spawn budget (loop.agentTimeoutMin, 45)
   --merge-timeout MIN            gate budget per round (loop.mergeTimeoutMin, 45)
   --label a,b                    declared scope — only beads carrying one
                                 of these labels are claimable
@@ -380,12 +381,30 @@ function ensureWorktree(root: string, branch: string, dir: string, base?: string
   }
 }
 
-/** Spawn the agent detached in the worktree so the timeout can kill the
- *  whole process group — `spawnSync`'s timeout signals only the direct
- *  `sh` child, leaving a timed-out agent writing in the tree. Under
- *  --json the child's stdout is routed to stderr so the JSONL stream
- *  stays parseable. */
-function spawnAgent(ctx: Ctx, beadId: string, title: string, promptFile: string, dir: string): Promise<number | null> {
+/** Spawn the agent in the worktree and await its exit — there is no
+ *  timer and no kill path (spec bro-9lpn3): a worker's lifetime is the
+ *  orchestrator's decision, taken at check-in from the run record, never
+ *  by a wall clock inside the spawn. The child still runs `detached`
+ *  (own process group) so a terminal interrupt of `bro loop` can't
+ *  group-signal a mid-write worker — interrupting the loop is an
+ *  accident, not an orchestration decision.
+ *
+ *  stdout/stderr go straight to `<git-common>/bro/loop/<slug>.log`
+ *  (append — fix rounds continue the same trail), and the spawn leaves a
+ *  `<slug>.json` record beside it: pid/pidStart for liveness, the log's
+ *  mtime as the last-progress signal `bro watch`/`bro status` report
+ *  silence from. A file fd, not a pipe — a dead loop must not turn the
+ *  worker's next write into a SIGPIPE kill, and the transcript survives
+ *  the loop for audit either way. When no log can be opened the child
+ *  inherits our streams (stdout → stderr under --json, so the event
+ *  stream stays parseable) — a record-less spawn still works. */
+function spawnAgent(
+  ctx: Ctx,
+  beadId: string,
+  title: string,
+  promptFile: string,
+  dir: string
+): Promise<number | null> {
   return new Promise((resolve) => {
     const env = agentEnv(ctx, {
       BRO_BEAD_ID: beadId,
@@ -393,10 +412,24 @@ function spawnAgent(ctx: Ctx, beadId: string, title: string, promptFile: string,
       BRO_PROMPT_FILE: promptFile,
       ...provenancePins(ctx, beadId),
     })
+    const slug = loopSlug(beadId)
+    const log = loopRunLog(ctx.root, slug)
+    let logFd: number | null = null
+    if (log !== null) {
+      try {
+        mkdirSync(dirname(log), { recursive: true })
+        logFd = openSync(log, 'a')
+      } catch {
+        logFd = null
+      }
+    }
     const opts = {
       cwd: dir,
       env,
-      stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'] as Array<'inherit' | number>,
+      stdio:
+        logFd !== null
+          ? (['inherit', logFd, logFd] as Array<'inherit' | number>)
+          : (['inherit', ctx.json ? 2 : 'inherit', 'inherit'] as Array<'inherit' | number>),
       detached: true,
     }
     const w = ctx.lane.worker
@@ -407,28 +440,37 @@ function spawnAgent(ctx: Ctx, beadId: string, title: string, promptFile: string,
           // argv[0] ('bro'/'npx') on PATH the way the backend does
           spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
         : spawn('sh', ['-c', expandAgentCmd(ctx.agent, promptFile)], opts) // NOSONAR — operator-configured agent command
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      try {
-        process.kill(-child.pid!, 'SIGKILL') // detached → own group
-      } catch {
-        child.kill('SIGKILL')
-      }
-    }, ctx.cfg.agentTimeoutMin * 60_000)
+    if (logFd !== null) {
+      // the child holds its own dup — our copy is spent
+      closeSync(logFd)
+    }
+    if (child.pid !== undefined) {
+      beginLoopRun(ctx.root, {
+        beadId,
+        slug,
+        pid: child.pid,
+        pidStart: procStat(child.pid)?.start,
+        startedAt: new Date().toISOString(),
+        worktree: dir,
+        log: log ?? '',
+      })
+      say(ctx, `loop: agent ${beadId} on pid ${child.pid}${log === null ? '' : ` — log ${log}`}`)
+    }
+    const settle = (code: number | null): void => {
+      endLoopRun(ctx.root, slug)
+      resolve(code)
+    }
     child.on('error', (err) => {
-      clearTimeout(timer)
       console.error(`loop: agent spawn failed — ${err.message}`)
-      resolve(null)
+      settle(null)
     })
     child.on('exit', (code, signal) => {
-      clearTimeout(timer)
-      if (timedOut || signal) {
-        console.error(`loop: agent killed (${signal ?? 'timeout'}) — budget ${ctx.cfg.agentTimeoutMin}m`)
-        resolve(null)
+      if (code === null) {
+        console.error(`loop: agent died on signal ${signal ?? '?'}`)
+        settle(null)
         return
       }
-      resolve(code)
+      settle(code)
     })
   })
 }
@@ -546,7 +588,7 @@ async function runFixRound(
   say(ctx, `loop: ${prRef(ctx, pr)} has open threads — fix round ${round}`)
   const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
   if (code !== 0) {
-    console.error(`loop: fix agent exited ${code ?? 'timeout'} — the next gate poll decides`)
+    console.error(`loop: fix agent exited ${code ?? 'abnormal'} — the next gate poll decides`)
   }
 }
 
@@ -576,7 +618,7 @@ function failNoPr(
   noteBead(
     ctx.tasks,
     bead.id,
-    `loop: agent exited ${code ?? 'timeout'} without a PR — worktree kept at ${item.worktreeDir}`
+    `loop: agent exited ${code ?? 'abnormal'} without a PR — worktree kept at ${item.worktreeDir}`
   )
   reopenBead(ctx.tasks, bead.id)
   return 'failed'
@@ -874,7 +916,6 @@ function stackNameFlag(argv: string[]): string | undefined {
 
 const LOOP_VALUE_FLAGS = new Set([
   '--agent',
-  '--agent-timeout',
   '--merge-timeout',
   '--max',
   '--interval',
@@ -1009,7 +1050,6 @@ function buildCtx(
     root,
     cfg: {
       ...cfg,
-      agentTimeoutMin: num(flag(argv, '--agent-timeout'), cfg.agentTimeoutMin),
       mergeTimeoutMin: num(flag(argv, '--merge-timeout'), cfg.mergeTimeoutMin),
       maxItems: num(flag(argv, '--max'), cfg.maxItems, 0),
     },
@@ -1238,6 +1278,9 @@ async function runQueue(ctx: Ctx): Promise<void> {
   const seen = new Set<string>()
   const tally = { landed: 0, closed: 0, parked: 0, failed: 0 }
   try {
+    // sweep a crashed run's records before the first claim — a dead-pid
+    // record is residue, not a live worker; live pids are never touched
+    reapLoopRuns(ctx.root)
     // inside the try: a failed scope lookup still owes the run an audit
     const scope = loopScope()
     if (!scope) {

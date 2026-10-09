@@ -13,7 +13,7 @@ export const loopSection: ConfigSection<LoopConfig> = (raw) => {
       ? (obj[k] as string).trim()
       : DEFAULT_LOOP_CONFIG[k]
   const num = (
-    k: 'agentTimeoutMin' | 'mergeTimeoutMin' | 'fixRounds' | 'maxItems',
+    k: 'stallMin' | 'mergeTimeoutMin' | 'fixRounds' | 'maxItems',
     min = 0
   ) =>
     typeof obj[k] === 'number' && Number.isFinite(obj[k]) && (obj[k] as number) >= min
@@ -25,7 +25,7 @@ export const loopSection: ConfigSection<LoopConfig> = (raw) => {
     profile: str('profile') as string,
     model: str('model') as string,
     bootstrap: str('bootstrap') as string,
-    agentTimeoutMin: num('agentTimeoutMin', 1),
+    stallMin: num('stallMin', 1),
     mergeTimeoutMin: num('mergeTimeoutMin', 1),
     fixRounds: num('fixRounds'),
     maxItems: num('maxItems'),

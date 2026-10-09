@@ -137,6 +137,14 @@ describe('bro loop e2e', () => {
       assert.equal(existsSync(f.worktree), false)
       assert.match(r.stdout, /clean — no loop tails/)
       assert.match(spawns(f), /work opened pr/)
+      // the run record retired with the agent; its output log survives
+      // under <git-common>/bro/loop/ as the audit trail (bro-9lpn3)
+      const loopDir = join(f.main, '.git', 'bro', 'loop')
+      assert.equal(existsSync(join(loopDir, 'fx-a.json')), false)
+      assert.match(
+        readFileSync(join(loopDir, 'fx-a.log'), 'utf8'),
+        /agent land on fx-a/
+      )
     })
   })
 
@@ -274,6 +282,10 @@ describe('bro loop e2e', () => {
       const log = spawns(f)
       assert.match(log, /work opened pr/)
       assert.match(log, /fix resolved threads/)
+      // the run log appends across respawns — the fix round continues
+      // the same bead's trail
+      const runLog = readFileSync(join(f.main, '.git', 'bro', 'loop', 'fx-a.log'), 'utf8')
+      assert.equal(runLog.trim().split('\n').length, 2)
       assert.equal(bead(f.db, 'fx-a')?.status, 'closed')
     })
   })
@@ -512,6 +524,15 @@ describe('bro loop argv parse', () => {
       ])
       assert.equal(r.code, 2)
       assert.match(r.stderr, /unknown option --prompt-file|unexpected argument/)
+    })
+  })
+
+  test('the retired --agent-timeout fails closed — no kill path to arm', () => {
+    const f = loopFixture([])
+    inside(f.main, f.root, () => {
+      const r = f.run(['--agent-timeout', '5'])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /unknown option --agent-timeout|unexpected argument/)
     })
   })
 

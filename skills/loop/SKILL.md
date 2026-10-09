@@ -53,8 +53,8 @@ the agent full autonomy; scope it to machines/repos you trust. A
 template `--agent` flag wins over a configured `loop.provider` — the
 provider flags can't sit beside it.
 
-Other `loop` keys: `bootstrap` (runs once per worktree), budgets
-`agentTimeoutMin`/`mergeTimeoutMin`, `fixRounds`, `maxItems`.
+Other `loop` keys: `bootstrap` (runs once per worktree),
+`mergeTimeoutMin`, `stallMin`, `fixRounds`, `maxItems`.
 
 ## Commands
 
@@ -66,7 +66,7 @@ Other `loop` keys: `bootstrap` (runs once per worktree), budgets
 | `bro loop --agent '<tpl>'` | One-off agent override — a provider name resolves through the registry |
 | `bro loop --provider <name>` | Provider pick (`--profile`, `--model`, `--auto-approve` tune it) |
 | `bro loop --label a,b` | Declared scope — only beads carrying one of these labels are claimable; the rest of the shared queue stays untouched. "Loop the debt beads" never bleeds into unrelated work |
-| `--agent-timeout MIN`, `--merge-timeout MIN`, `--interval SEC` | Budget overrides |
+| `--merge-timeout MIN`, `--interval SEC` | Gate budget and poll overrides |
 
 ## What happens per bead
 
@@ -75,7 +75,13 @@ Other `loop` keys: `bootstrap` (runs once per worktree), budgets
 2. **Worktree** — sibling `<repo>--<bead-id>` on branch `loop/<id>` off
    `origin/main`; `loop.bootstrap` runs once per bead, before the agent.
 3. **Agent** — the work-order prompt is written to the worktree and the
-   agent runs synchronously with `loop.agentTimeoutMin` budget. Its env
+   agent runs to completion — no per-agent wall clock (a hard kill on a
+   working session is an anti-pattern; the run record is how a check-in
+   judges it instead). stdout/stderr append to
+   `<git-common>/bro/loop/<slug>.log` and a `<slug>.json` record pins
+   the pid — `bro watch`/`bro status` report output silence past
+   `loop.stallMin` (45) as an *advisory*; the orchestrator decides, bro
+   never kills. Its env
    pins `BEADS_DIR` to the runner's store (`bd where`), so `bd` writes
    inside the worktree reach the shared db regardless of version or a
    tracked `.beads` copy — and an agent `bd close` is honored as a

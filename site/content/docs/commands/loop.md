@@ -26,7 +26,10 @@ The agent resolves like `bro agents up`: a named provider runs its
 registry entry (`acp` providers spawn the headless `acp-worker`; `cli`
 providers substitute their command for the template), and a raw
 `loop.agent`/`--agent` template stays the escape hatch —
-`{promptFile}` expands to the generated work order. `agentTimeoutMin`,
-`mergeTimeoutMin`, `fixRounds`, and `maxItems` control the run;
-`--interval` controls gate polling. See
+`{promptFile}` expands to the generated work order. The agent runs to
+completion — there is no per-agent time budget; its output appends to
+`<git-common>/bro/loop/<bead>.log` and `bro watch`/`bro status` flag
+silence past `loop.stallMin` as an advisory for the orchestrator, never
+a kill. `mergeTimeoutMin`, `stallMin`, `fixRounds`, and `maxItems`
+control the run; `--interval` controls gate polling. See
 [`loop` config](/docs/configuration#loop).
