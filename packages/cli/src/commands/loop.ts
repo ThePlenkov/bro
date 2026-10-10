@@ -60,6 +60,7 @@ import {
   commandCliName,
   ensureTasksBackend,
   facade,
+  facadeName,
   gitBranchLog,
   gitCommonDir,
   gitTry,
@@ -67,11 +68,13 @@ import {
   procStat,
   reviewHost,
   SpawnError,
+  specStore,
   stepParent,
   withFileLock,
   type AgentConnector,
   type AgentInfo,
   type AgentState,
+  type MirrorPolicy,
   type ReviewFacade,
   type SpawnWorker,
   type TaskStore,
@@ -96,6 +99,7 @@ import {
   MB,
   memberAction,
   planItem,
+  projectBeads,
   type DiskProbe,
   type GateSnapshot,
   type LoopConfig,
@@ -187,6 +191,17 @@ interface Ctx {
   /** The bead currently in play — undefined between items so a death
    *  outside an item notes nothing stale. */
   bead?: string
+  /** The tracker projection target — the review-host connector's task
+   *  surface when it offers `publish` and isn't the serving store
+   *  itself (a github-backend rig's tasks already ARE issues).
+   *  Undefined = no projection (spec bro-z2z7f). */
+  mirror?: TaskStore
+  /** The projection policy — bro.config `mirror`, defaults applied. */
+  mirrorPolicy: MirrorPolicy
+  /** Spec probe for the policy's specLinked rule — the `specs` facade;
+   *  a connector-less rig answers false (description links still
+   *  count inside mirrorable). */
+  specHas: (id: string) => boolean
 }
 
 /** Clickable PR ref for this repo — user-facing lines never print bare #N. */
@@ -688,6 +703,33 @@ function noteBead(tasks: TaskStore, id: string, note: string): void {
     tasks.update(id, { notes: note })
   } catch {
     console.error(`loop: could not note ${id} — ${note}`)
+  }
+}
+
+/** The projection stamp (spec specs/backends/bro-z2z7f) — at the
+ *  PR-armed moment each bead mirrors to a tracker item and the PR
+ *  body wires the auto-close. Every leg is best-effort: the PR is the
+ *  artifact; the board is a read-model — a tracker miss never blocks
+ *  the member. */
+function stampProjection(ctx: Ctx, beads: ReadyBead[], pr: number): void {
+  const refs = projectBeads(
+    {
+      tasks: ctx.tasks,
+      mirror: ctx.mirror,
+      hasSpec: ctx.specHas,
+      policy: ctx.mirrorPolicy,
+      say: (m) => say(ctx, `loop: ${m}`),
+    },
+    beads.map((b) => b.id)
+  )
+  if (refs.length === 0 || ctx.rev.linkCloses === undefined) {
+    return
+  }
+  try {
+    ctx.rev.linkCloses({ repo: ctx.repo, pr }, refs)
+    say(ctx, `loop: ${prRef(ctx, pr)} wired Fixes ${refs.map((r) => `#${r}`).join(', ')}`)
+  } catch (err) {
+    console.error(`loop: ${prRef(ctx, pr)} Fixes wiring failed — ${String(err)}`)
   }
 }
 
@@ -1195,20 +1237,24 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   // resurrects instead of the PR sitting silently unwatched. `bead`
   // rides the marker so the resurrected wait can run the finalizeMerge
   // half the dead loop never reached — merge lands, claims close
-  // (bro-q6ppv); a clump's whole id list rides comma-joined.
+  // (bro-q6ppv); a clump's whole id list rides comma-joined. The marker
+  // lands BEFORE the stamp — a stall or death inside stampProjection's
+  // tracker calls must not strand the open PR markerless.
+  const marker = watchBegin(ctx.root, {
+    pr,
+    link: prRef(ctx, pr),
+    merge: true,
+    cleanup: true,
+    workdir: item.worktreeDir,
+    bead: beads.map((b) => b.id).join(','),
+    timeoutMin: ctx.cfg.mergeTimeoutMin,
+  })
+  stampProjection(ctx, beads, pr)
   const member: GateMember = {
     beads,
     item,
     pr,
-    marker: watchBegin(ctx.root, {
-      pr,
-      link: prRef(ctx, pr),
-      merge: true,
-      cleanup: true,
-      workdir: item.worktreeDir,
-      bead: beads.map((b) => b.id).join(','),
-      timeoutMin: ctx.cfg.mergeTimeoutMin,
-    }),
+    marker,
     since: Date.now(),
     rounds: 0,
     fetchErrors: 0,
@@ -1352,6 +1398,8 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   // resurrect (bro-q6ppv), and `bead` rides comma-joined for the
   // finalizeMerge half the dead loop never reached
   m.pr = pr
+  // marker before the stamp — stampProjection's tracker calls can
+  // stall or die, and a markerless open PR resurrects nothing
   m.marker = watchBegin(ctx.root, {
     pr,
     link: prRef(ctx, pr),
@@ -1361,6 +1409,7 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     bead: m.beads.map((b) => b.id).join(','),
     timeoutMin: ctx.cfg.mergeTimeoutMin,
   })
+  stampProjection(ctx, m.beads, pr)
   m.since = Date.now()
   say(ctx, `loop: ${m.beads.map((b) => b.id).join(', ')} → PR ${prRef(ctx, pr)}`)
   return 'active'
@@ -1763,6 +1812,31 @@ function buildCtx(
     stack: stackNameFlag(argv),
     tails: [],
     stage: 'startup',
+    // the projection target rides the REVIEW host's tasks — a named
+    // pick, so github's optInFacades doesn't apply (the operator asked
+    // for this connector's reviews already). A rig whose tasks backend
+    // IS the review host has nothing to project.
+    mirror: (() => {
+      try {
+        const name = facadeName('reviews', { dir: root }, { prefer: broCfg.connectors })
+        if (name === backend) {
+          return undefined
+        }
+        const s = facade('tasks', { dir: root }, { connector: name })
+        return s.publish === undefined ? undefined : s
+      } catch {
+        return undefined
+      }
+    })(),
+    mirrorPolicy: broCfg.mirror,
+    specHas: (() => {
+      try {
+        const specs = specStore(root, broCfg.connectors)
+        return (id: string) => specs.hasSpec(id)
+      } catch {
+        return () => false
+      }
+    })(),
   }
   // the registry spawn engages when there's a shared store to pin the
   // claim/exit record against — without one the legacy awaited spawn

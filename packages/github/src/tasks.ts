@@ -29,6 +29,7 @@
 import {
   bodyMeta,
   gh,
+  ghHost,
   ghJson,
   ghTry,
   ghJsonAsync,
@@ -40,6 +41,7 @@ import {
 } from '@broject/core'
 import type {
   DepOpts,
+  PublishResult,
   TaskDepEdge,
   TaskFilter,
   TaskInput,
@@ -50,6 +52,9 @@ import type {
 
 const CLAIMED_LABEL = 'bro:claimed'
 const BLOCKED_LABEL = 'blocked'
+/** The projection marker — every bead-materialized issue carries it,
+ *  so `gh issue list -l bro:bead` is the board's instant filter. */
+const MIRROR_LABEL = 'bro:bead'
 const DEFAULT_PRIORITY = 2
 const QUERY_CAP = 1000
 
@@ -209,14 +214,16 @@ const pub = (r: TaskRow & { __node?: IssueNode }): TaskRow => {
  *  this one. */
 function issueNumber(dir: string, id: string): number {
   const t = id.trim()
-  const url = /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/issues\/(\d+)\/?$/.exec(t)
+  const url = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/issues\/(\d+)\/?$/.exec(t)
   if (url) {
-    const slug = `${url[1]}/${url[2]}`.toLowerCase()
+    const slug = `${url[2]}/${url[3]}`.toLowerCase()
     const mine = repoOf(dir).toLowerCase()
-    if (slug !== mine) {
-      throw new Error(`github tasks: "${id}" is a ${slug} issue — this store serves ${mine}`)
+    if (url[1]!.toLowerCase() !== ghHost().toLowerCase() || slug !== mine) {
+      throw new Error(
+        `github tasks: "${id}" is a ${url[1]}/${slug} issue — this store serves ${ghHost()}/${mine}`
+      )
     }
-    return Number(url[3])
+    return Number(url[4])
   }
   if (!/^(#\d+|\d+)$/.test(t)) {
     throw new Error(`github tasks: "${id}" is not an issue reference (want 42, #42, or an issue URL)`)
@@ -900,6 +907,131 @@ function removeSync(dir: string, id: string): void {
   )
 }
 
+// --- projection (spec specs/backends/bro-z2z7f) ----------------------------------
+
+/** 'https://<this host>/<this repo>/milestone/N' → N — the epic's
+ *  external_ref round-trips through this exact shape; a milestone in
+ *  another repo or on another host is a foreign ref, not a container
+ *  here (its NUMBER would silently target this repo's milestones). */
+function milestoneRefNumber(dir: string, ref: string): number | undefined {
+  const m = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/milestone\/(\d+)\/?$/.exec(ref.trim())
+  if (
+    m === null ||
+    m[1]!.toLowerCase() !== ghHost().toLowerCase() ||
+    `${m[2]}/${m[3]}`.toLowerCase() !== repoOf(dir).toLowerCase()
+  ) {
+    return undefined
+  }
+  return Number(m[4])
+}
+
+interface MilestoneRow {
+  number: number
+  title: string
+  html_url?: string
+}
+
+const milestoneUrl = (repo: string, m: MilestoneRow): string =>
+  m.html_url ?? `https://${ghHost()}/${repo}/milestone/${m.number}`
+
+/** Epic → milestone — title-match is the lost-map fallback; the
+ *  authoritative dedup is the epic row's external_ref, which the
+ *  caller's write-back fills with this milestone's html_url. */
+function ensureMilestone(dir: string, epic: TaskRow): { number: number; url: string } {
+  const repo = repoOf(dir)
+  const title = epic.title !== undefined && epic.title.trim() !== '' ? epic.title : epic.id
+  const all = ghJson<MilestoneRow[]>(
+    ['api', '--paginate', `repos/${repo}/milestones?state=all&per_page=100`],
+    dir
+  )
+  const hit = all.find((m) => m.title === title)
+  if (hit !== undefined) {
+    return { number: hit.number, url: milestoneUrl(repo, hit) }
+  }
+  const made = ghJson<MilestoneRow>(
+    [
+      'api',
+      '-X',
+      'POST',
+      `repos/${repo}/milestones`,
+      '-f',
+      `title=${title}`,
+      '-f',
+      `description=bead ${epic.id} — projected epic`,
+    ],
+    dir
+  )
+  return { number: made.number, url: milestoneUrl(repo, made) }
+}
+
+/** The epic's container: a known milestone ref joins it; an absent
+ *  ref creates the milestone and lends the bead its URL. A foreign
+ *  ref declines — the epic projects elsewhere, no join. */
+function epicMilestone(dir: string, epic: TaskRow): { milestone?: number; epicRef?: string } {
+  const eref = epic.external_ref?.trim() ?? ''
+  if (eref !== '') {
+    const known = milestoneRefNumber(dir, eref)
+    return known === undefined ? {} : { milestone: known }
+  }
+  const ms = ensureMilestone(dir, epic)
+  return { milestone: ms.number, epicRef: ms.url }
+}
+
+/** The bead→issue projection. Dedup: an external_ref naming one of
+ *  this repo's issues returns it — the caller's write-back made the
+ *  map; a foreign ref declines (the bead already projects elsewhere —
+ *  one task, one outward identity). An epic parent materializes as a
+ *  milestone the new issue joins. */
+function publishSync(
+  dir: string,
+  task: TaskRow,
+  opts?: { epic?: TaskRow }
+): PublishResult | undefined {
+  const ref = task.external_ref?.trim() ?? ''
+  if (ref !== '') {
+    try {
+      const n = issueNumber(dir, ref)
+      const cur = queryIssueSync(dir, n)
+      if (cur !== undefined) {
+        return { item: pub(toRow(cur)) }
+      }
+      // the mapped item is gone — fall through to re-publish
+    } catch {
+      return undefined
+    }
+  }
+  const epic = opts?.epic
+  const { milestone, epicRef } = epic === undefined ? {} : epicMilestone(dir, epic)
+  const row = createSync(dir, {
+    title: task.title !== undefined && task.title !== '' ? task.title : task.id,
+    description: task.description,
+    type: task.issue_type,
+    priority: task.priority,
+    labels: [MIRROR_LABEL, ...(task.labels ?? []).filter((l) => l !== MIRROR_LABEL)],
+    metadata: { ...(task.metadata ?? {}), bead: task.id },
+  })
+  if (milestone !== undefined) {
+    // best-effort: the issue already exists, so a failed join must not
+    // throw — publishSync throwing skips the caller's external_ref
+    // write-back, and the next run would create a duplicate
+    const join = ghTry(
+      [
+        'api',
+        '-X',
+        'PATCH',
+        `repos/{owner}/{repo}/issues/${row.id}`,
+        '-F',
+        `milestone=${milestone}`,
+      ],
+      dir
+    )
+    if (join.code !== 0) {
+      console.error(`warning: milestone join on issue ${row.id} failed — ${join.err}`)
+    }
+  }
+  return { item: pub(row), epicRef }
+}
+
 // --- the stores -------------------------------------------------------------------
 
 function rowOrUndef(n: IssueNode | undefined): TaskRow | undefined {
@@ -943,6 +1075,7 @@ export function githubTasks(dir: string): TaskStore {
       resolveRepo([], dir)
       return undefined
     },
+    publish: (task, opts) => publishSync(dir, task, opts),
   }
 }
 
