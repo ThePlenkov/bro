@@ -20,6 +20,77 @@ function memberList(members: BroPlugin[]): string {
     .join(' ')
 }
 
+function memberLabel(p: BroPlugin): string {
+  return p.aliasOf ? `→ ${p.aliasOf}` : p.summary
+}
+
+/** `bro <group>` with no/unknown member — the member table plus the
+ *  flat-spelling reminder. */
+function groupTable(cmd: string, group: BroPlugin[]): string {
+  const blurb = GROUP_META.find(([g]) => g === cmd)?.[1] ?? ''
+  const rows = group
+    .filter((p) => !p.hidden)
+    .map((p) => `  ${p.name.padEnd(12)} ${memberLabel(p)}`)
+    .join('\n')
+  return (
+    `bro ${cmd} — ${blurb}\n\n` +
+    `Members:\n${rows}\n\n` +
+    `Usage: bro ${cmd} <member> [args…]   (flat spellings stay valid: bro <member> …)`
+  )
+}
+
+/** Runs a group member reached via `bro <group> <member>` — the same
+ *  plugin object the flat spelling hits. */
+async function runMember(
+  via: string,
+  member: BroPlugin,
+  args: string[]
+): Promise<void> {
+  if (member.deprecated) {
+    warnDeprecated(`'bro ${via} ${member.name}'`, member.deprecated)
+  }
+  await member.run([...(member.argvPrefix ?? []), ...args])
+}
+
+/** Flat spelling or group host — `bro act …`, `bro mesh peers`. When
+ *  argv[1] names another member of the plugin's own group, the member
+ *  wins (`bro plan run` reaches `run`); every other argv shape falls
+ *  to the plugin exactly as before (`bro plan`, `bro spec check`). */
+async function dispatchPlugin(cmd: string, rest: string[]): Promise<boolean> {
+  const plugin = PLUGINS.find((p) => p.name === cmd)
+  if (!plugin) {
+    return false
+  }
+  if (plugin.deprecated) {
+    warnDeprecated(`'bro ${plugin.name}'`, plugin.deprecated)
+  }
+  const member = pluginGroups()
+    .get(cmd)
+    ?.find((p) => p.name === rest[0] && p.name !== cmd)
+  if (member) {
+    await runMember(cmd, member, rest.slice(1))
+  } else {
+    await plugin.run([...(plugin.argvPrefix ?? []), ...rest])
+  }
+  return true
+}
+
+/** Group dispatch — `bro review act status`. A group with no host
+ *  plugin shows its member table instead of 'unknown command'. */
+async function dispatchGroup(cmd: string, rest: string[]): Promise<boolean> {
+  const group = pluginGroups().get(cmd)
+  if (!group) {
+    return false
+  }
+  const member = group.find((p) => p.name === rest[0])
+  if (member) {
+    await runMember(cmd, member, rest.slice(1))
+    return true
+  }
+  console.error(groupTable(cmd, group))
+  process.exit(rest.length === 0 ? 0 : 1)
+}
+
 function usage(exitCode = 1): never {
   const groups = pluginGroups()
   const groupRows = GROUP_META.filter(([g]) =>
@@ -91,52 +162,11 @@ async function main(): Promise<void> {
     usage()
   }
 
-  const plugin = PLUGINS.find((p) => p.name === cmd)
-  if (plugin) {
-    if (plugin.deprecated) {
-      warnDeprecated(`'bro ${plugin.name}'`, plugin.deprecated)
-    }
-    // `bro <group> <member>` — when argv[1] names a member of the
-    // plugin's own group, the member wins (`bro plan run` reaches the
-    // `run` plugin). Every other argv shape falls to the host plugin
-    // exactly as before (`bro plan`, `bro mesh peers`, `bro spec check`).
-    const member = rest[0]
-      ? pluginGroups()
-          .get(cmd)
-          ?.find((p) => p.name === rest[0] && p.name !== cmd)
-      : undefined
-    if (member) {
-      if (member.deprecated) {
-        warnDeprecated(`'bro ${cmd} ${member.name}'`, member.deprecated)
-      }
-      await member.run([...(member.argvPrefix ?? []), ...rest.slice(1)])
-      return
-    }
-    await plugin.run([...(plugin.argvPrefix ?? []), ...rest])
+  if (await dispatchPlugin(cmd, rest)) {
     return
   }
-
-  // group dispatch — `bro review act status`. A group with no host
-  // plugin shows its member table instead of 'unknown command'.
-  const group = pluginGroups().get(cmd)
-  if (group) {
-    const member = rest[0] ? group.find((p) => p.name === rest[0]) : undefined
-    if (member) {
-      if (member.deprecated) {
-        warnDeprecated(`'bro ${cmd} ${member.name}'`, member.deprecated)
-      }
-      await member.run([...(member.argvPrefix ?? []), ...rest.slice(1)])
-      return
-    }
-    console.error(
-      `bro ${cmd} — ${GROUP_META.find(([g]) => g === cmd)?.[1] ?? ''}\n\n` +
-        `Members:\n${group
-          .filter((p) => !p.hidden)
-          .map((p) => `  ${p.name.padEnd(12)} ${p.aliasOf ? `→ ${p.aliasOf}` : p.summary}`)
-          .join('\n')}\n\n` +
-        `Usage: bro ${cmd} <member> [args…]   (flat spellings stay valid: bro <member> …)`
-    )
-    process.exit(rest.length === 0 ? 0 : 1)
+  if (await dispatchGroup(cmd, rest)) {
+    return
   }
   // verb-first doc dispatch — `bro list`, `bro show <id>`, …
   if (await runDocVerb(cmd, rest)) {
