@@ -10,7 +10,7 @@
  *  This is vendor knowledge living at the plugin layer — core's
  *  session-planes module owns the mutex/reservation/quota mechanics,
  *  this file owns ONLY how devin marks and counts its sessions. */
-import { readdirSync, readFileSync } from 'node:fs'
+import { readdirSync, readFileSync, readlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -60,11 +60,30 @@ function lockPid(dir: string, name: string): number | undefined {
   return /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : undefined
 }
 
-/** Live devin sessions — lock files whose pid is alive, deduplicated.
- *  A missing dir means no devin install → zero sessions; any OTHER
- *  read failure throws SpawnError('unavailable') — an unverifiable
- *  count fails closed, never silently admits. */
-export function countDevinSessions(dirs: string[]): number {
+/** Every dir a count must cover: the spawner's resolved lock dir plus
+ *  the worker's own effective one — spec.env can hand the spawned
+ *  session a different XDG_DATA_HOME/HOME, and its devin lock lands
+ *  THERE, invisible to a scan of only the spawner's dir. */
+function devinSessionDirs(
+  bag: Record<string, unknown>,
+  workerEnv?: Record<string, string>
+): string[] {
+  const dirs = [devinLocksDir(bag)]
+  if (workerEnv !== undefined) {
+    const eff = devinLocksDir(bag, { ...process.env, ...workerEnv })
+    if (eff !== dirs[0]) {
+      dirs.push(eff)
+    }
+  }
+  return dirs
+}
+
+/** Live devin session pids across the dirs — lock files whose pid is
+ *  alive, deduplicated (a resumed session leaves a second lock for the
+ *  same process). A missing dir means no devin install → empty; any
+ *  OTHER read failure throws SpawnError('unavailable') — an
+ *  unverifiable count fails closed, never silently admits. */
+function liveDevinLockPids(dirs: string[]): Set<number> {
   const live = new Set<number>()
   for (const dir of dirs) {
     let names: string[]
@@ -89,7 +108,62 @@ export function countDevinSessions(dirs: string[]): number {
       }
     }
   }
-  return live.size
+  return live
+}
+
+/** Live devin sessions — lock files whose pid is alive, deduplicated.
+ *  A missing dir means no devin install → zero sessions; any OTHER
+ *  read failure throws SpawnError('unavailable') — an unverifiable
+ *  count fails closed, never silently admits. */
+export function countDevinSessions(dirs: string[]): number {
+  return liveDevinLockPids(dirs).size
+}
+
+/** Worker classification for one locked pid — a spawned (never
+ *  interactive) devin session. Two /proc probes, either suffices:
+ *  the BRO_AGENT_ID env badge every bro backend pins into the worker's
+ *  env (inherited by the devin child a wrapper spawns), and a
+ *  non-terminal stdin (`fd/0` outside /dev/pts — headless pipes, null,
+ *  sockets; interactive devin reads a pty).
+ *
+ *  A pid neither probe verifies is NOT a worker: unreadable state only
+ *  undercounts the worker lane, deferring to the maxSessions ceiling —
+ *  while phantom workers would refuse real spawns, re-creating the
+ *  starvation the lane exists to remove. `procDir` injectable for
+ *  tests; absent /proc (macOS) simply yields non-workers. */
+export function devinPidIsWorker(pid: number, procDir = '/proc'): boolean {
+  const dir = join(procDir, String(pid))
+  try {
+    // NUL-anchored: environ entries are NUL-separated and an
+    // unanchored match would take `XBRO_AGENT_ID=` (proc-owner's
+    // AGENT_ENV_RE convention)
+    if (/(?:^|\0)BRO_AGENT_ID=/.test(readFileSync(join(dir, 'environ'), 'utf8'))) {
+      return true
+    }
+  } catch {
+    // unreadable environ — the stdin probe still applies
+  }
+  try {
+    return !readlinkSync(join(dir, 'fd', '0')).startsWith('/dev/pts/')
+  } catch {
+    return false
+  }
+}
+
+/** Live worker sessions — the spawned subset of liveDevinLockPids.
+ *  `isWorker` injectable for tests; the default is the /proc
+ *  classifier. */
+export function countDevinWorkers(
+  dirs: string[],
+  isWorker: (pid: number) => boolean = devinPidIsWorker
+): number {
+  let workers = 0
+  for (const pid of liveDevinLockPids(dirs)) {
+    if (isWorker(pid)) {
+      workers++
+    }
+  }
+  return workers
 }
 
 /** The builtin plane — registers on import. */
@@ -97,18 +171,10 @@ export const devinSessionPlane: SessionPlane = {
   kind: 'devin',
   detectsCli: (cliName) => cliName === 'devin',
   countLive(bag, workerEnv) {
-    // every dir the count must cover: the spawner's resolved lock dir
-    // plus the worker's own effective one — spec.env can hand the
-    // spawned session a different XDG_DATA_HOME/HOME, and its devin
-    // lock lands THERE, invisible to a scan of only the spawner's dir
-    const dirs = [devinLocksDir(bag)]
-    if (workerEnv !== undefined) {
-      const eff = devinLocksDir(bag, { ...process.env, ...workerEnv })
-      if (eff !== dirs[0]) {
-        dirs.push(eff)
-      }
-    }
-    return countDevinSessions(dirs)
+    return countDevinSessions(devinSessionDirs(bag, workerEnv))
+  },
+  countWorkers(bag, workerEnv) {
+    return countDevinWorkers(devinSessionDirs(bag, workerEnv))
   },
 }
 

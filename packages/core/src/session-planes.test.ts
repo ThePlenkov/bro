@@ -79,12 +79,35 @@ describe('sessionQuotaConfig', () => {
     assert.equal(sessionQuotaConfig({}, 'k'), undefined)
     assert.equal(sessionQuotaConfig({ k: {} }, 'k'), undefined)
     assert.equal(sessionQuotaConfig({ k: { maxSessions: 0 } }, 'k'), undefined)
+    assert.equal(sessionQuotaConfig({ k: { maxWorkers: 0 } }, 'k'), undefined)
+    assert.equal(sessionQuotaConfig({ k: { maxSessions: 0, maxWorkers: 0 } }, 'k'), undefined)
   })
 
   test('a present-but-malformed cap flags invalid — a typo must never silently unguard', () => {
     assert.equal(sessionQuotaConfig({ k: { maxSessions: '6' } }, 'k')?.invalid, true)
     assert.equal(sessionQuotaConfig({ k: { maxSessions: 6.5 } }, 'k')?.invalid, true)
     assert.equal(sessionQuotaConfig({ k: { maxSessions: -2 } }, 'k')?.invalid, true)
+    assert.equal(sessionQuotaConfig({ k: { maxWorkers: '2' } }, 'k')?.invalid, true)
+    assert.equal(sessionQuotaConfig({ k: { maxWorkers: -1 } }, 'k')?.invalid, true)
+  })
+
+  test('the malformed knob is named — sessions vs workers', () => {
+    assert.equal(
+      sessionQuotaConfig({ k: { maxSessions: 'x', maxWorkers: 2 } }, 'k')?.invalidKey,
+      'maxSessions'
+    )
+    assert.equal(
+      sessionQuotaConfig({ k: { maxSessions: 6, maxWorkers: 'x' } }, 'k')?.invalidKey,
+      'maxWorkers'
+    )
+  })
+
+  test('maxWorkers alone arms the quota — sessions lane stays uncapped', () => {
+    assert.deepEqual(sessionQuotaConfig({ k: { maxWorkers: 2 } }, 'k'), {
+      maxSessions: 0,
+      maxWorkers: 2,
+      reservationsDir: undefined,
+    })
   })
 
   test('a positive integer cap + the dir override pass through', () => {
@@ -92,6 +115,10 @@ describe('sessionQuotaConfig', () => {
       maxSessions: 6,
       reservationsDir: '/tmp/r',
     })
+    assert.deepEqual(
+      sessionQuotaConfig({ k: { maxSessions: 6, maxWorkers: 2, reservationsDir: '/tmp/r' } }, 'k'),
+      { maxSessions: 6, maxWorkers: 2, reservationsDir: '/tmp/r' }
+    )
   })
 })
 
@@ -204,6 +231,70 @@ describe('admitSessionSlot', () => {
       assert.throws(
         () => admitSessionSlot(plane, agents, { key: 'native-aa', molStep: 'fx-9' }),
         (e: unknown) => e instanceof SpawnError && e.kind === 'config' && /fx-9/.test(e.message)
+      )
+      assert.equal(countSessionReservations(resv), 0)
+    })
+  })
+
+  test('a malformed maxWorkers names the right knob in the refusal', () => {
+    withDir((resv) => {
+      const agents = { testkind: { maxWorkers: 'x', reservationsDir: resv } }
+      assert.throws(
+        () => admitSessionSlot(plane, agents, { key: 'native-aa' }),
+        (e: unknown) =>
+          e instanceof SpawnError && e.kind === 'config' && /maxWorkers/.test(e.message)
+      )
+    })
+  })
+
+  test('interactive sessions never fill the worker lane — the split that fixes starvation', () => {
+    withDir((resv) => {
+      // 4 live sessions, none of them workers — a maxWorkers=1 spawn
+      // must still admit under any maxSessions headroom
+      const interactive: SessionPlane = {
+        kind: 'testkind',
+        detectsCli: () => true,
+        countLive: () => 4,
+        countWorkers: () => 0,
+      }
+      const agents = { testkind: { maxWorkers: 1, reservationsDir: resv } }
+      assert.doesNotThrow(() => admitSessionSlot(interactive, agents, { key: 'native-aa' }))
+      // the held reservation IS a worker — the next spawn hits 1+0=1/1
+      assert.throws(
+        () => admitSessionSlot(interactive, agents, { key: 'native-bb', molStep: 'fx-3' }),
+        (e: unknown) =>
+          e instanceof SpawnError &&
+          e.kind === 'cap' &&
+          /1\/1 live workers.*fx-3/.test(e.message)
+      )
+    })
+  })
+
+  test('both lanes guard — the session ceiling still trips first when full', () => {
+    withDir((resv) => {
+      const p: SessionPlane = {
+        kind: 'testkind',
+        detectsCli: () => true,
+        countLive: () => 6,
+        countWorkers: () => 0,
+      }
+      const agents = { testkind: { maxSessions: 6, maxWorkers: 4, reservationsDir: resv } }
+      assert.throws(
+        () => admitSessionSlot(p, agents, { key: 'native-aa' }),
+        (e: unknown) => e instanceof SpawnError && e.kind === 'cap' && /sessions/.test(e.message)
+      )
+    })
+  })
+
+  test('maxWorkers on a plane that cannot count workers refuses config', () => {
+    withDir((resv) => {
+      const agents = { testkind: { maxWorkers: 2, reservationsDir: resv } }
+      assert.throws(
+        () => admitSessionSlot(plane, agents, { key: 'native-aa', molStep: 'fx-7' }),
+        (e: unknown) =>
+          e instanceof SpawnError &&
+          e.kind === 'config' &&
+          /cannot distinguish worker sessions.*fx-7/.test(e.message)
       )
       assert.equal(countSessionReservations(resv), 0)
     })

@@ -479,6 +479,41 @@ function connectorContract(b: BackendCase): void {
     }
   })
 
+  test('the devin worker quota refuses a second spawn — nothing half-lands', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ])
+    const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
+    const reservationsDir = mkdtempSync(join(tmpdir(), 'bro-devin-resv-'))
+    // maxWorkers=1, no session cap: live interactive locks would not
+    // fill the lane — the held reservation does (every slot is a worker)
+    const env: AgentConnectorEnv = {
+      ...f.env,
+      agents: {
+        ...f.env.agents,
+        native: { ...f.env.agents['native'], sessionKind: 'devin' },
+        tmux: { ...f.env.agents['tmux'], sessionKind: 'devin' },
+        devin: { maxWorkers: 1, lockDir, reservationsDir },
+      },
+    }
+    try {
+      const c = b.make({ dir: f.main }, env)
+      const first = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+      assert.equal(first.state, 'running')
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)')),
+        /devin worker quota reached — 1\/1 live workers.*fx-2/
+      )
+      assert.equal(readAgentRegistry(f.main)['fx-2'], undefined)
+      await c.stop(first.id)
+    } finally {
+      rmSync(lockDir, { recursive: true, force: true })
+      rmSync(reservationsDir, { recursive: true, force: true })
+      cleanup(f)
+    }
+  })
+
   test('a non-devin spawn ignores the session quota entirely', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }])
     const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
@@ -534,6 +569,12 @@ function connectorContract(b: BackendCase): void {
     assert.equal(lane?.agents, capped.agents)
     // a devin kind with a non-devin command → still undefined
     assert.equal(sessionQuotaOf(capped, 'native', spec, 'node {promptFile}'), undefined)
+    // a maxWorkers-only lane arms the quota just the same
+    const workersOnly: AgentConnectorEnv = {
+      agents: { devin: { maxWorkers: 2, lockDir: '/l' } },
+      connectors: {},
+    }
+    assert.equal(sessionQuotaOf(workersOnly, 'native', spec, 'devin -p')?.plane.kind, 'devin')
     // a malformed cap still yields a lane — admission refuses it loudly
     const bad: AgentConnectorEnv = {
       agents: { devin: { maxSessions: 'six' } },

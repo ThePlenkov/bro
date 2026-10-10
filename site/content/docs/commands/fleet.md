@@ -34,10 +34,12 @@ order is flag → profile → `agents.<backend>.provider` config. Provider
 provenance (`BRO_AGENT_PROVIDER` / `BRO_AGENT_MODEL`) is recorded in the
 registry entry and shown by `bro fleet` and `bro agents status`.
 
-Session kinds can carry a host-wide admission quota —
+Session kinds can carry host-wide admission quotas —
 `agents.<kind>.maxSessions` caps live sessions of that kind across every
-repo on the host (the devin plane is the known instance); admission
-claims a slot file under a shared lock, and once the child lands its own
+repo on the host (the devin plane is the known instance), and
+`agents.<kind>.maxWorkers` caps only the *spawned* subset so the user's
+interactive sessions never consume worker budget; admission claims a
+slot file under a shared lock, and once the child lands its own
 session mark takes over — leftover slot files are reaped on a ~120 s
 TTL rather than released by `down`.
 

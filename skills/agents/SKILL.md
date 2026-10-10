@@ -45,9 +45,11 @@ recorded/conventional `<repo>--<step>` lookup), `--prompt-file <file>`
   through a registered session plane — `agents.devin.maxSessions`
   counts live devin CLI sessions (its `session_locks`, deduped by pid),
   interactive sessions included, so a spawn can refuse while the fleet
-  looks empty. A spawn counts into a kind when a registered plane
-  detects the resolved command's CLI or the backend sets
-  `agents.<backend>.sessionKind`; a declared kind with no registered
-  plane refuses loudly. Devin's host-local count misses cloud-side
-  `devin_session_create` sessions — a plane reports only what the host
-  can verify.
+  looks empty. `agents.<kind>.maxWorkers` splits the count: only spawned
+  workers fill it (devin: a `BRO_AGENT_ID` environ badge or a
+  non-terminal stdin), so interactive TTYs stop starving rigs. A spawn
+  counts into a kind when a registered plane detects the resolved
+  command's CLI or the backend sets `agents.<backend>.sessionKind`; a
+  declared kind with no registered plane refuses loudly. Devin's
+  host-local count misses cloud-side `devin_session_create` sessions —
+  a plane reports only what the host can verify.
