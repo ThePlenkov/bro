@@ -346,32 +346,83 @@ function closeFixer(store: TaskStore, id: string, reason: string): void {
 
 // --- fixer worktree + prompt ---------------------------------------------------------
 
+/** <local> vs origin/<branch> is linear — one contains the other, so a
+ *  checkout of it can always reach the remote tip (ahead/equal already
+ *  does, behind fast-forwards). Divergence is refused to every fixer
+ *  path: a rebase replaying a tip that misses remote commits drops them
+ *  when the lease push lands (the lease itself passes — the tracking
+ *  ref was just refreshed by the fetch). Missing refs — no remote, an
+ *  unborn branch — pass: nothing to check against. */
+function remoteLinear(root: string, local: string, branch: string): boolean {
+  const remote = `origin/${branch}`
+  if (
+    gitTry(['-C', root, 'rev-parse', '--verify', remote]).code !== 0 ||
+    gitTry(['-C', root, 'rev-parse', '--verify', local]).code !== 0
+  ) {
+    return true
+  }
+  return (
+    gitTry(['-C', root, 'merge-base', '--is-ancestor', remote, local]).code === 0 ||
+    gitTry(['-C', root, 'merge-base', '--is-ancestor', local, remote]).code === 0
+  )
+}
+
+/** A standing checkout's refresh to origin/<branch>'s tip — the same ff
+ *  the create path runs. Divergence is excluded by remoteLinear before
+ *  the loop, so a ff refusal is a dirty or mid-merge tree — reported,
+ *  never clobbered. No remote ref passes: nothing to be stale against. */
+function ffToRemoteTip(dir: string, branch: string): boolean {
+  const remote = `origin/${branch}`
+  if (gitTry(['-C', dir, 'rev-parse', '--verify', remote]).code !== 0) {
+    return true
+  }
+  return gitTry(['-C', dir, 'merge', '--ff-only', remote, '--quiet']).code === 0
+}
+
 /** The PR's fixer checkout: the branch's existing worktree, else a fresh
  *  `<repo>--<slug>` on it — `created` marks a dir this call added so the
  *  caller can retire it when the work evaporates. A dir standing on
  *  another branch is never clobbered: distinct branches sharing the
  *  final slug (work/x vs loop/x) fall back to the branch-namespaced
- *  `<repo>--work-x` path instead of refusing as foreign. */
+ *  `<repo>--work-x` path instead of refusing as foreign. Either path is
+ *  handed over only once it can reach origin/<branch>'s tip — a fixer
+ *  rebasing a stale tip omits the commits pushed since, and the lease
+ *  push drops them on the PR. */
 export function ensureFixerWorktree(
   mainRoot: string,
   branch: string
 ): { path?: string; created?: boolean; err?: string } {
+  // fetch first — an orphaned PR's remote head may be newer than ours;
+  // a branch diverged from it is refused outright: no checkout of it
+  // can keep both histories
+  gitTry(['-C', mainRoot, 'fetch', 'origin', branch, '--quiet'])
+  if (!remoteLinear(mainRoot, branch, branch)) {
+    return { err: `${branch} diverged from origin/${branch}` }
+  }
   for (const name of new Set([branchSlug(branch), branch.replaceAll('/', '-')])) {
     const dir = worktreePathFor(mainRoot, name)
     if (existsSync(dir)) {
       const on = gitTry(['-C', dir, 'branch', '--show-current']).out.trim()
       if (on === branch) {
+        // a standing checkout can still lag the remote tip — refresh it
+        // like the create path does
+        if (!ffToRemoteTip(dir, branch)) {
+          return { err: `${dir} can't fast-forward to origin/${branch}` }
+        }
         return { path: dir }
       }
       continue
     }
-    // fetch first — an orphaned PR's remote head may be newer than ours
-    gitTry(['-C', mainRoot, 'fetch', 'origin', branch, '--quiet'])
     const add = gitTry(['-C', mainRoot, 'worktree', 'add', dir, branch])
     if (add.code === 0) {
       // the fetch refreshed origin/<branch>, not the local ref the
-      // worktree just checked out — ff or the fixer works a stale tip
-      gitTry(['-C', dir, 'merge', '--ff-only', `origin/${branch}`, '--quiet'])
+      // worktree just checked out — ff or the fixer works a stale tip;
+      // a refusal means the branch moved mid-call — retire the dir we
+      // just made rather than hand over a tip that can't cover it
+      if (!ffToRemoteTip(dir, branch)) {
+        gitTry(['-C', mainRoot, 'worktree', 'remove', dir])
+        return { err: `${branch} moved while its worktree was being added` }
+      }
       return { path: dir, created: true }
     }
     const retry = gitTry(['-C', mainRoot, 'worktree', 'add', '-b', branch, dir, `origin/${branch}`])
@@ -834,7 +885,11 @@ export function buildRebaseFixerPrompt(opts: {
     `This PR has merge conflicts with its base branch \`${opts.base}\`. The rebase`,
     'IS the work — no review-thread fixing is owed on this spawn.',
     '',
-    `- \`git fetch origin ${opts.base}\` then \`git rebase origin/${opts.base}\` —`,
+    `- \`git fetch origin ${opts.branch} ${opts.base}\` — the PR branch too:`,
+    '  commits pushed since this checkout was made are invisible to a stale',
+    `  tip. Fold them in first (\`git rebase origin/${opts.branch}\`) or the`,
+    '  base rebase drops them on the lease push.',
+    `- \`git rebase origin/${opts.base}\` —`,
     '  if a rebase is already in progress here, resolve it instead',
     '  (`git rebase --continue` / `--abort` and restart if the state is too',
     '  tangled).',
