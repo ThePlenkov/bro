@@ -47,7 +47,8 @@ case "$1 $2" in
       *) echo '{}' ;;
     esac; fi ;;
   "api repos/"* ) case "$2" in
-      *check-runs\\?*) echo '{"check_runs":[{"id":1,"name":"build"},{"id":2,"name":"kilo"},{"id":3,"name":"build"},{"id":4,"name":"lint"}]}' ;;
+      *check-runs\\?*) if [ -n "$FAKE_GH_RUNS" ]; then echo "$FAKE_GH_RUNS";
+          else echo '{"check_runs":[{"id":1,"name":"build"},{"id":2,"name":"kilo"},{"id":3,"name":"build"},{"id":4,"name":"lint"}]}'; fi ;;
       *merge-async/*) if [ -n "$FAKE_GH_POLL_ERR" ]; then echo "$FAKE_GH_POLL_ERR" >&2; exit 1; fi
           echo "$FAKE_GH_ASYNC_POLL" ;;
       */pulls/*) if [ -z "$3" ]; then
@@ -60,13 +61,17 @@ case "$1 $2" in
         fi ;;
       *) echo '{}' ;;
     esac ;;
-  "api --paginate") case "$4" in
+  "api --paginate") if [ -n "$FAKE_GH_MARK" ]; then echo "ANN-BEGIN $4" >> "$FAKE_GH_LOG"; fi
+      if [ -n "$FAKE_GH_ANN_SLEEP" ]; then sleep "$FAKE_GH_ANN_SLEEP"; fi
+      case "$4" in
       *check-runs/1/annotations*) echo '[[{"annotation_level":"failure"},{"annotation_level":"warning"}]]' ;;
       *check-runs/2/annotations*) if [ "$FAKE_GH_ANN_FAIL" = "1" ]; then echo 'rate limit' >&2; exit 1; fi
           echo '[[{"annotation_level":"failure"}]]' ;;
       *check-runs/3/annotations*) echo '[[{"annotation_level":"failure"}]]' ;;
       *check-runs/4/annotations*) echo '{"message":"Not Found"}' ;;
-    esac ;;
+      *check-runs/*/annotations*) echo '[[]]' ;;
+    esac
+    if [ -n "$FAKE_GH_MARK" ]; then echo "ANN-END $4" >> "$FAKE_GH_LOG"; fi ;;
   "pr edit"|"label create") : ;;
 esac
 `
@@ -158,6 +163,68 @@ describe('githubReview', { skip: WIN32 }, () => {
       assert.equal(got.get('lint'), null)
       assert.equal(got.size, 3)
     })
+  })
+
+  test('checkAnnotations fetches only the check names the caller reads', () => {
+    withFakeGh({}, (log) => {
+      const got = githubReview().checkAnnotations(
+        'acme/widgets',
+        'abc123',
+        new Set(['build'])
+      )
+      assert.deepEqual(Object.fromEntries(got), { build: 2 })
+      const lines = readFileSync(log, 'utf8')
+      // build's two run ids were fetched; kilo/lint's never left the gate
+      assert.match(lines, /check-runs\/1\/annotations/)
+      assert.match(lines, /check-runs\/3\/annotations/)
+      assert.doesNotMatch(lines, /check-runs\/2\/annotations/)
+      assert.doesNotMatch(lines, /check-runs\/4\/annotations/)
+    })
+  })
+
+  test('checkAnnotationsAsync fetches only the check names the caller reads', async () => {
+    await withFakeGhAsync(async (log) => {
+      const got = await githubReview().checkAnnotationsAsync!(
+        'acme/widgets',
+        'abc123',
+        new Set(['kilo'])
+      )
+      assert.deepEqual(Object.fromEntries(got), { kilo: 1 })
+      const lines = readFileSync(log, 'utf8')
+      assert.match(lines, /check-runs\/2\/annotations/)
+      assert.doesNotMatch(lines, /check-runs\/1\/annotations/)
+      assert.doesNotMatch(lines, /check-runs\/3\/annotations/)
+    })
+  })
+
+  // bro-2l7r9: an unbounded Promise.all spawned one gh child per check-run —
+  // a 40-run CI suite was a ~2GB transient inside the caller's cgroup
+  test('checkAnnotationsAsync bounds its in-flight annotation fetches', async () => {
+    const runs = {
+      check_runs: Array.from({ length: 8 }, (_, i) => ({ id: 10 + i, name: `r${i}` })),
+    }
+    await withFakeGhAsync(
+      async (log) => {
+        await githubReview().checkAnnotationsAsync!('acme/widgets', 'abc123')
+        let inFlight = 0
+        let max = 0
+        for (const l of readFileSync(log, 'utf8').split('\n')) {
+          if (l.startsWith('ANN-BEGIN')) {
+            inFlight += 1
+            max = Math.max(max, inFlight)
+          } else if (l.startsWith('ANN-END')) {
+            inFlight -= 1
+          }
+        }
+        assert.ok(max > 1, `expected overlapped fetches, saw max ${max}`)
+        assert.ok(max <= 4, `expected fan-out ≤4, saw ${max}`)
+      },
+      {
+        FAKE_GH_RUNS: JSON.stringify(runs),
+        FAKE_GH_MARK: '1',
+        FAKE_GH_ANN_SLEEP: '0.2',
+      }
+    )
   })
 
   test('reviewThreads normalizes the graphql shape onto domain types', async () => {
@@ -652,7 +719,10 @@ describe('githubReview', { skip: WIN32 }, () => {
   })
 })
 
-async function withFakeGhAsync(fn: (log: string) => Promise<void>): Promise<void> {
+async function withFakeGhAsync(
+  fn: (log: string) => Promise<void>,
+  env: Record<string, string> = {}
+): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'bro-fake-gh-'))
   const log = join(dir, 'gh.log')
   writeFileSync(log, '')
@@ -660,14 +730,17 @@ async function withFakeGhAsync(fn: (log: string) => Promise<void>): Promise<void
   chmodSync(join(dir, 'gh'), 0o755)
   const prevPath = process.env.PATH
   process.env.PATH = `${dir}:${prevPath}`
-  const prevLog = process.env.FAKE_GH_LOG
-  process.env.FAKE_GH_LOG = log
+  const prevEnv = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]))
+  Object.assign(process.env, { FAKE_GH_LOG: log, ...env })
   try {
     await fn(log)
   } finally {
     process.env.PATH = prevPath
-    if (prevLog === undefined) delete process.env.FAKE_GH_LOG
-    else process.env.FAKE_GH_LOG = prevLog
+    for (const [k, v] of Object.entries(prevEnv)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+    delete process.env.FAKE_GH_LOG
     rmSync(dir, { recursive: true, force: true })
   }
 }
