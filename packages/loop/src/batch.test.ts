@@ -145,4 +145,12 @@ describe('coveredBeadIds', () => {
   test('unreadable log covers nothing — the fail-safe direction', () => {
     assert.deepEqual(coveredBeadIds('', ['bro-x1']), new Set())
   })
+
+  test('a digits-only id needs an explicit reference — bare numbers are noise', () => {
+    // '42 tests', 'v42', 'PR #42' are ordinary text, not a naming
+    const noise = 'test: 42 tests pass\n\nrevert: rolled back PR #42\n\nchore: bump to v42\n'
+    assert.deepEqual(coveredBeadIds(noise, ['42']), new Set())
+    const refs = 'fix: close the loop (#42)\n\nresolves #7\n\ndocs: polish (9)\n'
+    assert.deepEqual(coveredBeadIds(refs, ['7', '9', '42']), new Set(['7', '9', '42']))
+  })
 })

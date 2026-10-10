@@ -212,6 +212,10 @@ describe('prompts', () => {
     ]
     assert.match(buildFixPrompt(clump, 42, 't'), /beads bro-x1, bro-x2/)
     assert.match(buildFixPrompt(bead, 42, 't'), /work on bead bro-x1/)
+    // a fix round that lands uncovered member work must still name the
+    // id in its commit — solo prompts carry no coverage contract
+    assert.match(buildFixPrompt(clump, 42, 't'), /Batch coverage/)
+    assert.doesNotMatch(buildFixPrompt(bead, 42, 't'), /Batch coverage/)
   })
 })
 

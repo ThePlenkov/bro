@@ -161,6 +161,14 @@ export function buildFixPrompt(
   pr: number,
   threads: string
 ): string {
+  const coverageRule =
+    Array.isArray(bead) && bead.length > 1
+      ? `- Batch coverage: a fix that lands a member's outstanding work
+  must commit with its id NAMED (\`(bro-x2)\` trailer or subject) —
+  merge settlement closes only beads the branch's commits name; an
+  unnamed member re-queues.
+`
+      : ''
   return `You are the same autonomous agent continuing work on ${beadRef(bead)}.
 Pull request #${pr} is up — it has unresolved review threads. The worktree
 and branch are unchanged; your earlier commits are here.
@@ -176,7 +184,7 @@ ${threads.trim().replaceAll(/<\/review-threads\s*>/gi, '<\\/review-threads>')}
 
 # Rules
 
-- For each thread: fix the code and push, OR reply with the reason it's
+${coverageRule}- For each thread: fix the code and push, OR reply with the reason it's
   wrong — then resolve it. The merge gate requires zero open threads.
 - Small valid findings (nits, polish) may be deferred: reply noting it
   goes to a follow-up bead, then resolve.

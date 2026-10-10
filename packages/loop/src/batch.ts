@@ -101,11 +101,21 @@ const escRe = (s: string): string => s.replaceAll(/[.*+?^${}()|[\]\\]/g, String.
 /** Which of `ids` the commit log actually names — bead coverage is
  *  evidence (a commit message carrying the id), not a self-reported PR
  *  body. The boundary lookarounds exclude '.', so a commit naming the
- *  child `bro-x1.2` does not cover a clump member `bro-x1`. */
+ *  child `bro-x1.2` does not cover a clump member `bro-x1`.
+ *  A digits-only id (GitHub-style issue numbers) is never self-naming —
+ *  `42 tests`, `v42`, `PR #42` would all collide — so it counts only
+ *  through an explicit reference: a closing keyword (`closes #42`),
+ *  or the trailer shapes the work order prescribes (`(#42)` / `(42)`). */
 export function coveredBeadIds(commitLog: string, ids: Iterable<string>): Set<string> {
   const covered = new Set<string>()
   for (const id of ids) {
-    if (id !== '' && new RegExp(String.raw`(?<![\w.])${escRe(id)}(?![\w.])`).test(commitLog)) {
+    if (id === '') {
+      continue
+    }
+    const named = /^\d+$/.test(id)
+      ? String.raw`(?<![\w.])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*[:(#]?\s*#?${escRe(id)}(?![\w.\d])|(?<![\w.])\(#?${escRe(id)}\)`
+      : String.raw`(?<![\w.])${escRe(id)}(?![\w.])`
+    if (new RegExp(named).test(commitLog)) {
       covered.add(id)
     }
   }
