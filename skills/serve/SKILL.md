@@ -28,10 +28,13 @@ token — see below.
 | Route | What it returns |
 | ----- | --------------- |
 | `GET /` | service index — `{service, routes}` |
-| `GET /fleet` | the fleet webui — an HTML dashboard that polls `/api/v1/snapshot` (read-only; opens in a browser) |
+| `GET /fleet` | the fleet webui — an HTML dashboard that polls every read plane below (read-only; opens in a browser) |
 | `GET /api/v1/health` | `{ok, pid, dir, startedAt}` — liveness |
-| `GET /api/v1/snapshot` | the `bro watch` snapshot — mols × gates × fleet |
-| `GET /api/v1/agents` | per-backend agent plane (`bro agents status --json` shape) |
+| `GET /api/v1/snapshot` | the `bro watch` snapshot — mols × gates × fleet × loop |
+| `GET /api/v1/agents` | the agents board — `bro agents status --json` shape (per-backend agents + occupancy + armed quota lanes) plus `discovered` session-plane rows the registry never spawned (interactive/foreign sessions, acp workers) |
+| `GET /api/v1/queue` | the beads queue — claimed (in-progress) rows + ready depth (`bro status` shape) |
+| `GET /api/v1/ticks` | supervision — the watch heartbeat summary, the drive singleton lock (pid+liveness+age), pending watch markers |
+| `GET /api/v1/mailbox` | `{drops}` — the notify tail, newest first; read-only (consumes nothing) |
 | `GET /api/v1/agents/<ref>` | one agent; ref is agentId or molStep |
 | `POST /api/v1/agents` | spawn — `{molStep, worktree?, prompt?\|promptFile?, connector?, beadsDir?}` → `201 {agent}`; writes MUST send `Authorization: Bearer <token>` (the `token` field in serve.json — `401` without it) and `content-type: application/json` (loopback CSRF guard — a body-bearing write without it is `415`); `409` on a claim conflict (live agent, foreign claim/backend), `400` on bad input (unknown field, missing worktree, unsafe name), `503` when the backend tooling is missing/down, `500` on server misconfiguration (e.g. no agent command configured) |
 | `DELETE /api/v1/agents/<ref>` | stop — `200 {agent, stopped, terminal?}`; `401` without the bearer token, `404` on a clean miss, `503` when a degraded backend makes the miss unverifiable |

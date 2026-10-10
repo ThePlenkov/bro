@@ -18,6 +18,7 @@ import {
   devinLocksDir,
   devinPidIsWorker,
   devinSessionPlane,
+  listDevinSessions,
 } from './devin.ts'
 
 const withLockDir = (fn: (dir: string) => void): void => {
@@ -243,6 +244,70 @@ describe('countDevinWorkers', () => {
       countDevinWorkers([join(tmpdir(), 'bro-devin-locks-absent-')], devinPidIsWorker, undefined, 'nope'),
       0
     )
+  })
+})
+
+describe('listDevinSessions', () => {
+  test('live locks yield rows named for the session — dead, duped, and junk locks collapse', () => {
+    withProc((procDir, mk) => {
+      mk(process.pid, 'PATH=/bin\0', '/dev/pts/1')
+      withLockDir((dir) => {
+        writeFileSync(join(dir, 'sess-a.lock'), String(process.pid))
+        const dead = spawnSync('true', [], { stdio: 'ignore' }).pid
+        writeFileSync(join(dir, 'dead.lock'), String(dead))
+        writeFileSync(join(dir, 'junk.lock'), 'not-a-pid')
+        writeFileSync(join(dir, 'note.txt'), String(process.pid))
+        const rows = listDevinSessions([dir], procDir)
+        assert.equal(rows.length, 1)
+        assert.equal(rows[0]!.name, 'sess-a')
+        assert.equal(rows[0]!.pid, process.pid)
+        // a pty stdin, no badge — the same undercount contract the
+        // worker lane holds: live, but not verifiably a worker
+        assert.equal(rows[0]!.worker, false)
+        assert.equal(rows[0]!.agentId, undefined)
+      })
+    })
+  })
+
+  test('a duped lock for one pid yields one row', () => {
+    withProc((procDir, mk) => {
+      mk(process.pid, null, null)
+      withLockDir((dir) => {
+        writeFileSync(join(dir, 'a.lock'), String(process.pid))
+        writeFileSync(join(dir, 'b.lock'), String(process.pid))
+        const rows = listDevinSessions([dir], procDir)
+        assert.equal(rows.length, 1)
+        assert.equal(rows[0]!.pid, process.pid)
+      })
+    })
+  })
+
+  test('a real spawned worker carries its BRO_AGENT_ID badge into the row', async () => {
+    const child = spawn('sleep', ['30'], {
+      stdio: 'ignore',
+      env: { ...process.env, BRO_AGENT_ID: 'native-xyz' },
+    })
+    if (!child.pid) throw new Error('spawn failed to create child process')
+    try {
+      withLockDir((dir) => {
+        writeFileSync(join(dir, 'w.lock'), String(child.pid))
+        const rows = listDevinSessions([dir])
+        assert.equal(rows.length, 1)
+        assert.equal(rows[0]!.worker, true)
+        assert.equal(rows[0]!.agentId, 'native-xyz')
+      })
+    } finally {
+      child.kill('SIGKILL')
+    }
+  })
+
+  test('the plane wires listLive over the configured lockDir', () => {
+    withLockDir((dir) => {
+      writeFileSync(join(dir, 'x.lock'), String(process.pid))
+      const rows = devinSessionPlane.listLive!({ lockDir: dir })
+      assert.equal(rows.length, 1)
+      assert.equal(rows[0]!.name, 'x')
+    })
   })
 })
 

@@ -25,10 +25,19 @@
  *
  *   GET    /                    service index
  *   GET    /fleet               the fleet webui — an HTML dashboard over
- *                               /api/v1/snapshot (spec bro-1rir)
+ *                               the read planes below (spec bro-w4a45)
  *   GET    /api/v1/health       {ok, pid, dir, startedAt}
- *   GET    /api/v1/snapshot     the watch snapshot — mols × gates × fleet
- *   GET    /api/v1/agents       per-backend agent plane
+ *   GET    /api/v1/snapshot     the watch snapshot — mols × gates × fleet × loop
+ *   GET    /api/v1/agents       the agents board — per-backend registry
+ *                               agents + occupancy + armed quota lanes +
+ *                               session-plane discovery rows
+ *   GET    /api/v1/queue        the beads queue — claimed (in-progress)
+ *                               work + ready depth (`bro status` shape)
+ *   GET    /api/v1/ticks        supervision — the watch heartbeat file,
+ *                               the drive singleton lock, pending watch
+ *                               markers (armed waits: live pid or stale)
+ *   GET    /api/v1/mailbox      {drops} — the notify tail: pending drops,
+ *                               newest first, read-only (consumes nothing)
  *   GET    /api/v1/agents/<ref> one agent — ref is agentId or molStep
  *   POST   /api/v1/agents       spawn {molStep, worktree?, prompt?|promptFile?,
  *                               connector?, beadsDir?, provider?, model?,
@@ -56,6 +65,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import {
   chmodSync,
   closeSync,
+  existsSync,
   linkSync,
   mkdirSync,
   openSync,
@@ -72,7 +82,10 @@ import type { Readable } from 'node:stream'
 import {
   busPublish,
   busSocketPath,
+  gitCommonDir,
   gitTry,
+  lockHolderPid,
+  peekMailbox,
   SpawnError,
   startBusBroker,
   type AgentConnector,
@@ -81,6 +94,7 @@ import {
   type SpawnErrorKind,
 } from '@broject/core'
 import { GITHUB_WEBHOOK_SECRET_ENV, githubWebhookHandler } from '@broject/github'
+import { listWatches, watchMarkerKind } from '@broject/act'
 import {
   agentConnectorNames,
   loadAgentEnv,
@@ -89,16 +103,24 @@ import {
 } from '../agent-connectors.ts'
 import {
   collectAgentBackends,
+  discoverSessions,
   findAgent,
+  occupancyOf,
+  sessionQuotaViewsOf,
   SpawnInputError,
   spawnStepAgent,
   stopAgent,
   type AgentBackendPlane,
+  type DiscoveredAgentSession,
+  type FleetOccupancy,
+  type SessionQuotaView,
   type StepSpawnRequest,
   type StopOutcome,
 } from './agents.ts'
 import { flag, positionals } from './args.ts'
+import { readBeads } from './status.ts'
 import { collectSnapshot } from './watch.ts'
+import { readHeartbeat, type HeartbeatSummary } from './watch-heartbeat.ts'
 import { FLEET_PAGE, WEBUI_CSP } from './webui.ts'
 
 // --- serve state (discovery) ---------------------------------------------------
@@ -379,9 +401,29 @@ export type ServeWebhookHandler = (
   req: ServeWebhookRequest
 ) => Promise<{ status: number; body: unknown }>
 
+/** The /api/v1/agents payload beyond the backend list — `bro agents
+ *  status --json` parity (fleet occupancy + armed session-quota lanes)
+ *  plus session-plane discovery rows the registry never spawned
+ *  (interactive/foreign sessions, acp workers a legacy path skipped
+ *  registering). `degraded` carries discovery-plane failures — backend
+ *  list failures still ride their own per-backend note. */
+export interface AgentsBoard {
+  backends: AgentBackendPlane[]
+  occupancy: FleetOccupancy
+  sessions: SessionQuotaView[]
+  discovered: DiscoveredAgentSession[]
+  degraded: string[]
+}
+
 export interface ServeDeps {
   snapshot(): Promise<unknown>
-  backends(): Promise<AgentBackendPlane[]>
+  agents(): Promise<AgentsBoard>
+  /** The beads queue — claimed (in-progress) + ready depth. */
+  queue(): Promise<unknown>
+  /** Supervision — heartbeat, drive lock, pending watches. */
+  ticks(): Promise<unknown>
+  /** The notify tail — pending drops, newest first. */
+  mailbox(): Promise<unknown>
   find(
     ref: string
   ): Promise<{ hit?: { conn: AgentConnector; agent: AgentInfo }; degraded: string[] }>
@@ -407,6 +449,9 @@ const ROUTES = [
   'GET /api/v1/health',
   'GET /api/v1/snapshot',
   'GET /api/v1/agents',
+  'GET /api/v1/queue',
+  'GET /api/v1/ticks',
+  'GET /api/v1/mailbox',
   'POST /api/v1/agents',
   'GET /api/v1/agents/<ref>',
   'DELETE /api/v1/agents/<ref>',
@@ -526,16 +571,22 @@ export function parseSpawnBody(raw: string | undefined): StepSpawnRequest {
   }
 }
 
-/** Serialize the backend plane exactly like `bro agents status --json`
- *  — conn objects don't cross the wire. */
-function backendJson(backends: AgentBackendPlane[]): unknown {
+/** Serialize the agents board for the wire — `bro agents status
+ *  --json` shape (occupancy, armed quota lanes, per-backend agents)
+ *  plus the discovery rows. Conn objects never cross the wire; their
+ *  capabilities do, so a thin client renders the supervisor column. */
+function agentsJson(board: AgentsBoard): unknown {
   return {
-    backends: backends.map(({ conn, agents, degraded }) => ({
+    occupancy: board.occupancy,
+    sessions: board.sessions,
+    discovered: board.discovered,
+    backends: board.backends.map(({ conn, agents, degraded }) => ({
       name: conn.name,
       capabilities: conn.capabilities(),
       agents,
       ...(degraded !== undefined ? { degraded } : {}),
     })),
+    ...(board.degraded.length > 0 ? { degraded: board.degraded } : {}),
   }
 }
 
@@ -578,11 +629,18 @@ function routeHealth(method: string, meta: ServeMeta): ServeResponse {
   }
 }
 
-async function routeSnapshot(method: string, deps: ServeDeps): Promise<ServeResponse> {
+/** A GET-only read plane — the snapshot/queue/ticks/mailbox shape:
+ *  non-GET 405s, the body is whatever the dep collected. Dep failures
+ *  propagate to the handler's 500 — a plane that can't compose at all
+ *  is an outage, not a degraded payload. */
+async function routePlane(
+  method: string,
+  read: () => Promise<unknown>
+): Promise<ServeResponse> {
   if (method !== 'GET') {
     return NOT_ALLOWED
   }
-  return { status: 200, body: await deps.snapshot() }
+  return { status: 200, body: await read() }
 }
 
 async function routeAgents(
@@ -591,7 +649,7 @@ async function routeAgents(
   deps: ServeDeps
 ): Promise<ServeResponse> {
   if (method === 'GET') {
-    return { status: 200, body: backendJson(await deps.backends()) }
+    return { status: 200, body: agentsJson(await deps.agents()) }
   }
   if (method !== 'POST') {
     return NOT_ALLOWED
@@ -740,7 +798,16 @@ async function route(
     return routeHealth(method, meta)
   }
   if (api[0] === 'snapshot' && api.length === 1) {
-    return routeSnapshot(method, deps)
+    return routePlane(method, () => deps.snapshot())
+  }
+  if (api[0] === 'queue' && api.length === 1) {
+    return routePlane(method, () => deps.queue())
+  }
+  if (api[0] === 'ticks' && api.length === 1) {
+    return routePlane(method, () => deps.ticks())
+  }
+  if (api[0] === 'mailbox' && api.length === 1) {
+    return routePlane(method, () => deps.mailbox())
   }
   if (api[0] === 'agents') {
     return routeAgentsBranch(method, api, rawBody, deps)
@@ -935,11 +1002,115 @@ export function createServeHandler(
   }
 }
 
+/** The mailbox tail cap — a board shows the recent conversation, not
+ *  an unbounded replay of the hour's drops. */
+const MAILBOX_TAIL = 25
+
+/** One armed wait as the ticks board reports it — the marker's own
+ *  fields plus the derived liveness/kind the session-start report
+ *  applies. `ageMs` is the board's staleness read (how long the watch
+ *  has been armed); `alive:false` on an unreported marker is the
+ *  stale-promise signal. */
+export interface TickWatch {
+  pr: number
+  link: string
+  pid: number
+  /** 'wait' for an `act wait` marker, the supervisor's kind word
+   *  ('drive') for a heartbeat marker. */
+  kind: string
+  merge?: boolean
+  cleanup?: boolean
+  workdir?: string
+  bead?: string
+  timeoutMin?: number
+  startedAt?: number
+  alive: boolean
+  /** The marker was claimed by a session-start report — flagged, not
+   *  necessarily delivered. */
+  reported?: boolean
+  /** A settled wait's finding — 'blocked' markers carry `blockers` and
+   *  never read alive. */
+  verdict?: string
+  blockers?: string[]
+  ageMs: number
+}
+
+/** The supervision board the /fleet ticks section renders:
+ *  - `heartbeat` — heartbeat.json's last-tick summary; null = no watch
+ *    has ever ticked here (ordinary state, not an error)
+ *  - `drive` — the drive supervisor's singleton lock: pid + liveness +
+ *    lock age (the hold is heartbeated, so a stale mtime IS a stale
+ *    supervisor); no lock = no supervisor running
+ *  - `watches` — pending watch markers, each with pid liveness and the
+ *    kind the filename records — an unreported dead marker is the
+ *    broken promise the session-start nudge flags */
+export interface TickBoard {
+  heartbeat: HeartbeatSummary | null
+  drive: { pid: number | null; alive: boolean; ageMs?: number }
+  watches: TickWatch[]
+}
+
+export function collectTicks(dir: string, now = Date.now()): TickBoard {
+  const common = gitCommonDir(dir)
+  const lock = common === null ? null : join(common, 'bro', 'drive.lock')
+  const drivePid = lock === null ? null : lockHolderPid(lock)
+  let driveAgeMs: number | undefined
+  if (lock !== null && existsSync(lock)) {
+    try {
+      driveAgeMs = Math.max(0, now - statSync(lock).mtimeMs)
+    } catch {
+      // raced release — the pid/age stay unknown rather than fatal
+    }
+  }
+  return {
+    heartbeat: readHeartbeat(dir, now),
+    drive: {
+      pid: drivePid,
+      alive: drivePid !== null && pidAlive(drivePid),
+      ...(driveAgeMs === undefined ? {} : { ageMs: driveAgeMs }),
+    },
+    watches: listWatches(dir).map((l) => ({
+      pr: l.watch.pr,
+      link: l.watch.link,
+      pid: l.watch.pid,
+      kind: watchMarkerKind(l.file, l.watch),
+      merge: l.watch.merge,
+      cleanup: l.watch.cleanup,
+      workdir: l.watch.workdir,
+      bead: l.watch.bead,
+      timeoutMin: l.watch.timeoutMin,
+      startedAt: l.watch.startedAt,
+      alive: l.alive,
+      reported: l.reported,
+      verdict: l.watch.verdict,
+      blockers: l.watch.blockers,
+      ageMs: Number.isFinite(l.watch.startedAt)
+        ? Math.max(0, now - l.watch.startedAt)
+        : 0,
+    })),
+  }
+}
+
 function realDeps(dir: string, env: AgentConnectorEnv): ServeDeps {
   const socketPath = busSocketPath(dir)
   return {
     snapshot: () => collectSnapshot(dir),
-    backends: async () => (await collectAgentBackends(dir, env)).backends,
+    agents: async () => {
+      const [{ backends }, discovered] = await Promise.all([
+        collectAgentBackends(dir, env),
+        Promise.resolve(discoverSessions(env)),
+      ])
+      return {
+        backends,
+        occupancy: occupancyOf(dir, env),
+        sessions: sessionQuotaViewsOf(env),
+        discovered: discovered.sessions,
+        degraded: discovered.degraded,
+      }
+    },
+    queue: async () => readBeads(dir),
+    ticks: async () => collectTicks(dir),
+    mailbox: async () => ({ drops: peekMailbox(dir, MAILBOX_TAIL) }),
     find: (ref) => findAgent(dir, env, ref),
     spawn: (req) => spawnStepAgent(dir, env, req),
     stop: (ref) => stopAgent(dir, env, ref),

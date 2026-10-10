@@ -18,6 +18,7 @@ import {
   registerSessionPlane,
   sessionSlotsDir,
   SpawnError,
+  type DiscoveredSession,
   type SessionPlane,
 } from '@broject/core'
 
@@ -257,6 +258,62 @@ function devinSlotsDir(bag: Record<string, unknown>): string {
   return sessionSlotsDir('devin', typeof override === 'string' ? override : undefined)
 }
 
+/** The BRO_AGENT_ID env badge on a live pid — the worker's registry
+ *  correlation id. Undefined when the environ is unreadable or carries
+ *  no badge (an interactive session, a foreign spawn). */
+export function devinPidAgentId(pid: number, procDir = '/proc'): string | undefined {
+  try {
+    const m = /(?:^|\0)BRO_AGENT_ID=([^\0]+)/.exec(
+      readFileSync(join(procDir, String(pid), 'environ'), 'utf8')
+    )
+    return m === null ? undefined : m[1]
+  } catch {
+    return undefined
+  }
+}
+
+/** Live devin sessions as rows — the same lock scan liveDevinLockPids
+ *  runs, kept per-lock so each row carries the session's lock-name. A
+ *  resumed session's second lock for one pid dedupes like the count
+ *  does (first name wins); worker/agentId ride the /proc classifier —
+ *  unreadable state means "not verifiably a worker", same undercount
+ *  contract as devinPidIsWorker. `procDir` injectable for tests. */
+export function listDevinSessions(dirs: string[], procDir = '/proc'): DiscoveredSession[] {
+  const seen = new Set<number>()
+  const out: DiscoveredSession[] = []
+  for (const dir of dirs) {
+    let names: string[]
+    try {
+      names = readdirSync(dir)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        continue
+      }
+      throw new SpawnError(
+        `cannot verify devin session list — ${dir}: ${(err as Error).message}`,
+        'unavailable'
+      )
+    }
+    for (const name of names) {
+      if (!name.endsWith('.lock')) {
+        continue
+      }
+      const pid = lockPid(dir, name)
+      if (pid === undefined || !pidAlive(pid) || seen.has(pid)) {
+        continue
+      }
+      seen.add(pid)
+      out.push({
+        pid,
+        name: name.slice(0, -'.lock'.length),
+        worker: devinPidIsWorker(pid, procDir),
+        agentId: devinPidAgentId(pid, procDir),
+      })
+    }
+  }
+  return out
+}
+
 /** The builtin plane — registers on import. */
 export const devinSessionPlane: SessionPlane = {
   kind: 'devin',
@@ -270,6 +327,9 @@ export const devinSessionPlane: SessionPlane = {
       devinPidIsWorker,
       devinSlotsDir(bag)
     )
+  },
+  listLive(bag, workerEnv) {
+    return listDevinSessions(devinSessionDirs(bag, workerEnv))
   },
 }
 

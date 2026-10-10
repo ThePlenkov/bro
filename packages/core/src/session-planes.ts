@@ -41,6 +41,35 @@ export interface SessionPlane {
    *  landed `.slot` reservations inside its count — the admission
    *  tally runs after it, so a landed spawn is not counted twice. */
   countWorkers?(bag: Record<string, unknown>, workerEnv?: Record<string, string>): number
+  /** The live sessions as rows — the same lock/scan semantics countLive
+   *  runs, kept per-session so a board names the session, not just the
+   *  count. Optional: a plane without it contributes counts but no
+   *  rows. Same SpawnError('unavailable') contract as countLive — an
+   *  unverifiable scan throws, never silently reports "no sessions". */
+  listLive?(
+    bag: Record<string, unknown>,
+    workerEnv?: Record<string, string>
+  ): DiscoveredSession[]
+}
+
+/** One live session a session-plane sees — a worker the registry never
+ *  spawned (a foreign or interactive session) or the inner process of
+ *  a registered agent. `agentId` handles the second case: the worker's
+ *  own BRO_AGENT_ID badge, when the plane can read it, so a board
+ *  folds the session into its agent row instead of counting the same
+ *  work twice. */
+export interface DiscoveredSession {
+  pid: number
+  /** The plane's name for the session (a lock-name, a socket id) when
+   *  the state plane carries one. */
+  name?: string
+  /** The plane's own worker classification — the same predicate
+   *  countWorkers applies. False is "live, but not a worker" (an
+   *  interactive session), not "unknown". */
+  worker?: boolean
+  /** The worker's BRO_AGENT_ID env badge when readable — the registry
+   *  correlation id. */
+  agentId?: string
 }
 
 // --- plane registry ------------------------------------------------------------

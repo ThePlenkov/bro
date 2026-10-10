@@ -279,8 +279,10 @@ export {
   mailboxEvent,
   mailboxIdentity,
   type MailboxIdentity,
+  type MailboxPeek,
   notifyConnector,
   notifyDir,
+  peekMailbox,
   renderDrop,
   userMailboxDir,
 } from './notify.ts'
@@ -346,7 +348,7 @@ export {
   sessionQuotaConfig,
   sessionSlotsDir,
 } from './session-planes.ts'
-export type { SessionPlane, SessionQuota } from './session-planes.ts'
+export type { DiscoveredSession, SessionPlane, SessionQuota } from './session-planes.ts'
 export {
   clearPlanes,
   planeNames,

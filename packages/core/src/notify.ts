@@ -17,7 +17,12 @@
  */
 import { randomBytes } from 'node:crypto'
 import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -278,6 +283,9 @@ export function coalesceDrops(
   )) {
     const path = join(dir, f)
     try {
+      if (!lstatSync(path).isFile()) {
+        continue
+      }
       const ev = parseEvent(readFileSync(path, 'utf8'))
       if (
         ev !== undefined &&
@@ -338,9 +346,15 @@ function drainDrop(
 ): void {
   const path = join(mb, f)
   try {
-    if (now - statSync(path).mtimeMs > DROP_TTL_MS) {
+    // lstat, not stat — a `.txt` symlink is debris, not a drop: a
+    // writable mailbox must never be read through to a foreign file
+    const st = lstatSync(path)
+    if (now - st.mtimeMs > DROP_TTL_MS) {
       rmSync(path, { force: true }) // expired — reap, never deliver
       return
+    }
+    if (!st.isFile()) {
+      return // symlink/FIFO — expires on its own lstat mtime, never delivered
     }
     if (seen.has(f)) {
       return
@@ -405,6 +419,67 @@ export function drainMailbox(
 ): string[] {
   const now = Date.now()
   return drainDirs(dir).flatMap((mb) => drainDir(mb, sessionId, now, opts))
+}
+
+/** One pending drop as a read-only tail sees it. `ts` is the drop
+ *  time embedded in the name (mtime fallback for nameless drops) —
+ *  the sort key for newest-first boards. `text` is the rendered line. */
+export interface MailboxPeek {
+  name: string
+  ts: number
+  text: string
+}
+
+/** A read-only tail over the pending drops — the /fleet mailbox board's
+ *  view. Unlike drainMailbox a peek consumes nothing: no seen cursor
+ *  moves, no expiry sweep runs — reads never mutate the plane they
+ *  report. Expired drops are skipped from the output but left in place
+ *  for the next drain to reap; a drop that vanishes mid-read (a real
+ *  drain racing in another process) is skipped, never fatal. Addressed
+ *  drops are included — a tail reports the mailbox's state, not one
+ *  consumer's share. Newest first by drop time, capped at `limit`. */
+export function peekMailbox(dir: string, limit = 25): MailboxPeek[] {
+  const now = Date.now()
+  const out: MailboxPeek[] = []
+  for (const mb of drainDirs(dir)) {
+    let files: string[]
+    try {
+      files = readdirSync(mb)
+    } catch {
+      continue // unreadable mailbox — not this plane's error to raise
+    }
+    for (const f of files.filter((f) => f.endsWith('.txt') && !f.startsWith('.'))) {
+      const path = join(mb, f)
+      try {
+        // O_NOFOLLOW + fstat on the same fd — a swapped-in symlink's
+        // bytes must never cross onto the unauthenticated
+        // /api/v1/mailbox surface (lstat→read races open to the target);
+        // O_NONBLOCK keeps a fifo named *.txt from stalling the tail —
+        // the fstat isFile() check below still skips it unread
+        const fd = openSync(
+          path,
+          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+        )
+        try {
+          const st = fstatSync(fd)
+          if (now - st.mtimeMs > DROP_TTL_MS || !st.isFile()) {
+            continue
+          }
+          const raw = readFileSync(fd, 'utf8')
+          if (raw.trim() === '') {
+            continue
+          }
+          const t = dropTime(f)
+          out.push({ name: f, ts: t > 0 ? t : Math.round(st.mtimeMs), text: renderDrop(raw) })
+        } finally {
+          closeSync(fd)
+        }
+      } catch {
+        // raced removal or a symlink swap mid-read — skip the drop
+      }
+    }
+  }
+  return out.sort((a, b) => b.ts - a.ts).slice(0, Math.max(0, limit))
 }
 
 /** The notify connector — the read side of the mailbox. Its postTool
