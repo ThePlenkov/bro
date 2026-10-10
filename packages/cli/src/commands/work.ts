@@ -1270,23 +1270,7 @@ function recoverGhost(
   try {
     isDir = statSync(dotgit).isDirectory()
   } catch {
-    // no .git at all — the only provably-safe removal is an empty dir
-    let empty = false
-    try {
-      empty = readdirSync(path).length === 0
-    } catch {
-      // unreadable — keep below
-    }
-    if (empty) {
-      if (opts.dryRun !== true) {
-        // rmdirSync, not rmSync: it refuses anything that filled in
-        // between the check and the call — the guard IS the syscall
-        rmdirSync(path)
-      }
-      rep.reaped.push(`${path} (empty ghost dir)`)
-      return
-    }
-    keep('no .git — not provably a worktree')
+    reapEmptyGhost(opts, path, rep)
     return
   }
   if (isDir) {
@@ -1326,6 +1310,27 @@ function recoverGhost(
   }
   gitTry(['-C', path, 'read-tree', 'HEAD'])
   rep.repaired.push(`${path} [${branch}]`)
+}
+
+/** A ghost with no `.git` at all — the only provably-safe removal is an
+ *  empty dir; anything else is kept as unverifiable provenance. */
+function reapEmptyGhost(opts: LitterReapOpts, path: string, rep: LitterReap): void {
+  let empty = false
+  try {
+    empty = readdirSync(path).length === 0
+  } catch {
+    // unreadable — keep below
+  }
+  if (!empty) {
+    rep.kept.push(`${path} (ghost — no .git — not provably a worktree)`)
+    return
+  }
+  if (opts.dryRun !== true) {
+    // rmdirSync, not rmSync: it refuses anything that filled in
+    // between the check and the call — the guard IS the syscall
+    rmdirSync(path)
+  }
+  rep.reaped.push(`${path} (empty ghost dir)`)
 }
 
 /** The branch a recovered ghost binds HEAD to — the naming convention's
@@ -1527,10 +1532,20 @@ function retireLitterBranch(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence):
 
 /** The claim's live owner, or undefined when every plane is dead. */
 function claimOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string | undefined {
-  const { claims } = ctx
-  // loop run records — collectLoopRuns already judged pid+pidStart;
-  // beadIds covers the whole claimed clump, not just the lead
-  for (const v of claims.runs) {
+  // every plane fails closed — first live (or unverifiable) owner wins
+  return (
+    runRecordOwner(ctx, c, bead) ??
+    registryOwner(ctx, c, bead) ??
+    sessionOwner(ctx, c) ??
+    watchOwner(ctx, c, bead) ??
+    treeProcessOwner(c)
+  )
+}
+
+/** loop run records — collectLoopRuns already judged pid+pidStart;
+ *  beadIds covers the whole claimed clump, not just the lead */
+function runRecordOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string | undefined {
+  for (const v of ctx.claims.runs) {
     if (
       v.state === 'running' &&
       (v.beadId === bead.id || v.beadIds?.includes(bead.id) === true || v.slug === c.slug)
@@ -1538,7 +1553,12 @@ function claimOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string |
       return `loop worker pid ${v.pid} live`
     }
   }
-  // agent registry — an unreadable plane is not a dead worker
+  return undefined
+}
+
+/** agent registry — an unreadable plane is not a dead worker */
+function registryOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string | undefined {
+  const { claims } = ctx
   if (claims.registry === undefined) {
     return 'agent registry unreadable'
   }
@@ -1552,16 +1572,21 @@ function claimOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string |
       return `agent ${e.agentId || molStep} live`
     }
   }
-  // session markers — `bd --claim` arms .task, `bro work enter` arms .work
-  const detail = claims.sessionDetails.find((d) =>
+  return undefined
+}
+
+/** session markers — `bd --claim` arms .task, `bro work enter` arms .work */
+function sessionOwner(ctx: LitterCtx, c: LitterCandidate): string | undefined {
+  const detail = ctx.claims.sessionDetails.find((d) =>
     detailMatches(d, { branch: c.branch, slug: c.slug, worktree: c.w?.path })
   )
-  if (detail !== undefined) {
-    return `session armed ${detail}`
-  }
-  // live watch markers — a landed member's claim rides its act wait
-  // (bro-q6ppv): the loop services the gate stack past the worker's exit
-  for (const l of claims.watches) {
+  return detail === undefined ? undefined : `session armed ${detail}`
+}
+
+/** live watch markers — a landed member's claim rides its act wait
+ *  (bro-q6ppv): the loop services the gate stack past the worker's exit */
+function watchOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string | undefined {
+  for (const l of ctx.claims.watches) {
     if (!l.alive) {
       continue
     }
@@ -1575,15 +1600,17 @@ function claimOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string |
       return `watch on PR #${l.watch.pr} live`
     }
   }
-  // a live agent-shaped process inside the tree — covers a worker that
-  // never registered (spawn crashed after fork, record write lost)
-  if (c.w !== undefined) {
-    const hit = agentProcessesIn(c.w.path)[0]
-    if (hit !== undefined) {
-      return `process ${hit.pid} live in tree`
-    }
-  }
   return undefined
+}
+
+/** a live agent-shaped process inside the tree — covers a worker that
+ *  never registered (spawn crashed after fork, record write lost) */
+function treeProcessOwner(c: LitterCandidate): string | undefined {
+  if (c.w === undefined) {
+    return undefined
+  }
+  const hit = agentProcessesIn(c.w.path)[0]
+  return hit === undefined ? undefined : `process ${hit.pid} live in tree`
 }
 
 /** Release an orphaned claim — every plane dead. Runs the final
@@ -1749,7 +1776,7 @@ interface ParkedCand {
  *  consumes a pool slot — it is data, not cache. Evictions keep the
  *  branch (cheap) via the same retire rule done litter uses. */
 function reapParkedPool(parked: ParkedCand[], ctx: LitterCtx): void {
-  const { opts, rep, main } = ctx
+  const { opts } = ctx
   if (parked.length === 0) {
     return
   }
@@ -1761,39 +1788,53 @@ function reapParkedPool(parked: ParkedCand[], ctx: LitterCtx): void {
     .sort((a, b) => a.idle - b.idle)
   let kept = 0
   for (const { c, pr, done, idle } of scored) {
-    const label = c.w!.path
-    let release: () => void
-    try {
-      release = acquireAgentRegistryLock(main.path)
-    } catch {
-      rep.kept.push(`${label} (occupancy lock contended)`)
-      continue
-    }
-    try {
-      const why = litterTreeVerdict(c, ctx)
-      if (why !== undefined) {
-        rep.kept.push(`${label} (${why})`)
-        continue
-      }
-      const overCap = keepN > 0 && kept >= keepN
-      const stale = ttlMs > 0 && idle > ttlMs
-      if (!overCap && !stale) {
-        kept += 1
-        rep.kept.push(`${label} (${done})`)
-        continue
-      }
-      if (opts.dryRun !== true && !removeMergedWorktree(c.w!.path, c.w!, main)) {
-        rep.errors.push(`worktree ${c.w!.path} not removed`)
-        continue
-      }
-      rep.reaped.push(
-        `${c.w!.path} [${c.branch}] — parked pool ${stale ? 'idle past TTL' : `over cap ${keepN}`}`
-      )
-    } finally {
-      release()
-    }
-    retireLitterBranch(c, ctx, pr)
+    kept += reapParkedCand({ c, pr, done, idle }, kept, keepN, ttlMs, ctx)
   }
+}
+
+/** One parked candidate's verdict under the registry lock — returns the
+ *  pool-slot delta: 1 when the tree survives on cache merit (it counts
+ *  against `parkedKeep`), 0 when it was reaped or kept outright. */
+function reapParkedCand(
+  p: ParkedCand & { idle: number },
+  kept: number,
+  keepN: number,
+  ttlMs: number,
+  ctx: LitterCtx
+): number {
+  const { opts, rep, main } = ctx
+  const { c, pr, done, idle } = p
+  const label = c.w!.path
+  let release: () => void
+  try {
+    release = acquireAgentRegistryLock(main.path)
+  } catch {
+    rep.kept.push(`${label} (occupancy lock contended)`)
+    return 0
+  }
+  try {
+    const held = litterTreeVerdict(c, ctx)
+    if (held !== undefined) {
+      rep.kept.push(`${label} (${held})`)
+      return 0
+    }
+    const overCap = keepN > 0 && kept >= keepN
+    const stale = ttlMs > 0 && idle > ttlMs
+    if (!overCap && !stale) {
+      rep.kept.push(`${label} (${done})`)
+      return 1
+    }
+    if (opts.dryRun !== true && !removeMergedWorktree(c.w!.path, c.w!, main)) {
+      rep.errors.push(`worktree ${c.w!.path} not removed`)
+      return 0
+    }
+    const verdict = stale ? 'idle past TTL' : `over cap ${keepN}`
+    rep.reaped.push(`${c.w!.path} [${c.branch}] — parked pool ${verdict}`)
+  } finally {
+    release()
+  }
+  retireLitterBranch(c, ctx, pr)
+  return 0
 }
 
 export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
@@ -1835,10 +1876,15 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
     reapCandidate(c, ctx, parked)
   }
   reapParkedPool(parked, ctx)
-  // dead run records whose beads still read in_progress — litter may
-  // have been hand-cleaned already; the claim is still orphaned. A
-  // record's beadIds covers every clump member, not only the lead.
-  const handled = new Set(found.cands.map((c) => ctx.bySlug.get(c.slug)?.id).filter(Boolean))
+  releaseOrphanedRuns(found.cands, ctx)
+  return rep
+}
+
+/** Dead run records whose beads still read in_progress — litter may
+ *  have been hand-cleaned already; the claim is still orphaned. A
+ *  record's beadIds covers every clump member, not only the lead. */
+function releaseOrphanedRuns(cands: LitterCandidate[], ctx: LitterCtx): void {
+  const handled = new Set(cands.map((c) => ctx.bySlug.get(c.slug)?.id).filter(Boolean))
   for (const v of ctx.claims.runs) {
     if (v.state !== 'dead') {
       continue
@@ -1850,7 +1896,7 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
         bead === undefined ||
         bead.status !== 'in_progress' ||
         handled.has(bead.id) ||
-        opts.keepClaims?.has(bead.id) === true
+        ctx.opts.keepClaims?.has(bead.id) === true
       ) {
         continue
       }
@@ -1871,7 +1917,6 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
       )
     }
   }
-  return rep
 }
 
 export function runWorkCommand(argv: string[]): void {

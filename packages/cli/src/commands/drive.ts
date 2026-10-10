@@ -77,14 +77,13 @@ import { loadBroConfig } from '../plugins.ts'
 import {
   claimLockPath,
   deleteMergedLocalBranch,
-  LIVE_MARKER_MS,
   mainWorktree,
   parseWorktreePorcelain,
   removeMergedWorktree,
   worktreeClaim,
   worktreePathFor,
 } from './work.ts'
-export { LIVE_MARKER_MS, worktreeClaim }
+export { LIVE_MARKER_MS, worktreeClaim } from './work.ts'
 
 function usage(): never {
   console.error(`Usage: bro drive [--once] [--every [SEC]] [--no-merge] [--connector <name>] [--json]`)
