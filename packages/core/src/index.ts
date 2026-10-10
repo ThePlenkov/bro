@@ -364,6 +364,7 @@ export type {
   Finding,
   Gate,
   LessonRow,
+  LifecycleRow,
   PlaneArgSchema,
   PlaneCtx,
   PlaneDescriptor,
