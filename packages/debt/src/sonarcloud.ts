@@ -21,8 +21,9 @@ import type { DebtPriority, DebtRecord } from './types.ts'
 export const SONAR_HOST = 'https://sonarcloud.io'
 const TIMEOUT_MS = 30_000
 const PAGE_SIZE = 500
-/** issues/search refuses offsets past 10_000 — a leak period that deep
- *  is a misconfigured project, not debt to harvest. */
+/** issues/search refuses offsets past 10_000 — past the window the
+ *  fetch throws rather than return a partial list the caller would
+ *  treat as complete (omitted live issues would be swept as resolved). */
 const MAX_PAGES = 20
 
 export interface SonarProject {
@@ -30,6 +31,9 @@ export interface SonarProject {
   host: string
   /** where the key came from — reported by doctor's detail line */
   via: 'config' | 'properties'
+  /** who asserted the host — a properties-file host is ambient repo
+   *  content and never carries the token (see assertSonarHostTrusted). */
+  hostVia: 'config' | 'properties' | 'default'
 }
 
 /** Trailing slashes, no regex — `/\/+$/` on uncontrolled input trips
@@ -100,6 +104,8 @@ export function resolveSonarProject(
     typeof cfg?.project_key === 'string' && cfg.project_key !== ''
       ? cfg.project_key
       : undefined
+  const cfgHost =
+    typeof cfg?.host === 'string' && cfg.host !== '' ? cfg.host : undefined
   const fromConfig = cfgKey !== undefined
   const projectKey = cfgKey ?? propsFile.projectKey
   if (projectKey === undefined || projectKey === '') {
@@ -107,8 +113,48 @@ export function resolveSonarProject(
   }
   return {
     projectKey,
-    host: stripTrailingSlashes(cfg?.host ?? propsFile.host ?? SONAR_HOST),
+    host: stripTrailingSlashes(cfgHost ?? propsFile.host ?? SONAR_HOST),
     via: fromConfig ? 'config' : 'properties',
+    hostVia: cfgHost !== undefined ? 'config' : propsFile.host !== undefined ? 'properties' : 'default',
+  }
+}
+
+/** `SONAR_TOKEN` may only cross the wire to a host the operator opted
+ *  into. `sonar.host.url` in a properties file is ambient repo content —
+ *  a merged PR can point it at any server — so it never carries the
+ *  token unless it names the default host or loopback; any other target
+ *  must come from `debt.sonarcloud.host` in bro config (the same trust
+ *  layer that already drives agent command templates). Plain http is
+ *  refused except loopback — cleartext transit leaks the token to every
+ *  hop. */
+export function assertSonarHostTrusted(project: SonarProject): void {
+  let url: URL
+  try {
+    url = new URL(project.host)
+  } catch {
+    throw new SourceSkipped(`sonar host "${project.host}" is not a valid URL`)
+  }
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+  if (url.protocol === 'http:') {
+    if (!loopback) {
+      throw new SourceSkipped(
+        `sonar host ${project.host} is plain http — SONAR_TOKEN would cross the wire cleartext; use https`
+      )
+    }
+  } else if (url.protocol !== 'https:') {
+    throw new SourceSkipped(
+      `sonar host "${project.host}" — only http(s) URLs can carry SONAR_TOKEN`
+    )
+  }
+  if (
+    project.hostVia === 'properties' &&
+    url.host !== new URL(SONAR_HOST).host &&
+    !loopback
+  ) {
+    throw new SourceSkipped(
+      `sonar.host.url ${url.host} comes from a committed properties file — ` +
+        `set debt.sonarcloud.host in bro.config to send SONAR_TOKEN to a non-default host`
+    )
   }
 }
 
@@ -187,6 +233,7 @@ function sonarGetAll<T extends { key: string }>(
 ): { items: T[]; components: Map<string, string> } {
   const items: T[] = []
   const components = new Map<string, string>()
+  let total = 0
   for (let p = 1; p <= MAX_PAGES; p += 1) {
     const qs = new URLSearchParams({ ...params, ps: String(PAGE_SIZE), p: String(p) })
     const resp = curlGet(`${base}?${qs.toString()}`) as Paged
@@ -197,12 +244,18 @@ function sonarGetAll<T extends { key: string }>(
     }
     const page = pick(resp) ?? []
     items.push(...page)
-    const total = resp.paging?.total ?? page.length
+    total = resp.paging?.total ?? page.length
     if (items.length >= total || page.length === 0) {
-      break
+      return { items, components }
     }
   }
-  return { items, components }
+  // The API window ran out with results still unfetched — returning the
+  // partial list as success would let the upstream-resolve sweep mark
+  // the omitted live issues done. Fail the source; the ledger is untouched.
+  throw new Error(
+    `sonarcloud: ${total} result(s) exceed the API's ${MAX_PAGES * PAGE_SIZE}-row ` +
+      `window at ${base} — refusing a partial fetch`
+  )
 }
 
 interface SonarIssue {
@@ -282,6 +335,7 @@ export function collectSonarcloud(
     )
   }
   sonarToken() // fail-fast before any request — a skipped source sweeps nothing
+  assertSonarHostTrusted(project)
   const base = `${project.host}/api`
   const issues = sonarGetAll<SonarIssue>(
     `${base}/issues/search`,
@@ -339,22 +393,21 @@ export function sonarKeyOf(threadId: string): string {
   return threadId.replace(/^sonarcloud:(hotspot:)?/, '')
 }
 
-/** Whole-token body match. A bare `includes()` lets key `K2` claim a body
- *  carrying `K22`/`XK2`/`K2-9` — a false cover that hides the real finding.
- *  Token chars are the sonar key alphabet plus `-`/`_` so hyphenated and
- *  underscored ids still bound on both sides. */
+/** Key coverage needs an actual link back — the key as a whole token
+ *  after `issues=`/`hotspots=`/`open=` in a `?`/`&` query param. A bare
+ *  token match lets any prose or code mention of the key suppress a live
+ *  finding. Token chars are the sonar key alphabet plus `-`/`_` so `K5`
+ *  can't claim `K55`/`K5-9`. */
 function bodyMentionsKey(body: string, key: string): boolean {
   if (key === '') return false
-  return new RegExp(
-    `(?<![A-Za-z0-9_-])${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_-])`
-  ).test(body)
+  const k = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`[?&](?:issues|hotspots|open)=${k}(?![A-Za-z0-9_-])`).test(body)
 }
 
 /** Review-thread dedupe (spec: specs/bro-huy5o.4.md). A fresh sonarcloud
  *  record is dropped when an OPEN review-thread row — `source` absent —
  *  already carries the finding: same path+line, or the comment body
- *  carries the issue key as a whole token
- *  (`issues=<key>`, `hotspots=<key>`, `open=<key>`). */
+ *  links back with the key in `issues=`/`hotspots=`/`open=`. */
 export function dedupeReviewThreads(
   records: DebtRecord[],
   existing: DebtRecord[]

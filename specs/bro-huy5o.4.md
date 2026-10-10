@@ -56,8 +56,14 @@ line — both needed by dedupe below.
   `sonar.projectKey` / `sonar.host.url` in `sonar-project.properties` or
   `.sonarcloud.properties` (both conventions — scanner config and
   Automatic Analysis; the former wins per key) at the checkout root →
-  host defaults to `https://sonarcloud.io` (the `sonar.host.url`
-  override makes SonarQube Server work too — same API).
+  host defaults to `https://sonarcloud.io`.
+- **Token trust boundary**: every request carries `SONAR_TOKEN`, so the
+  host must be opted in — the default `sonarcloud.io`, loopback, or a
+  host from `debt.sonarcloud.host` in bro config (SonarQube Server works
+  via that one config line — same API). A non-default `sonar.host.url`
+  from a committed properties file is ambient repo content and is
+  skipped, never sent the token; non-loopback `http:` is refused
+  outright (cleartext transit).
 - **Missing prerequisites skip, never fail**: no token or no resolvable
   project key throws `SourceSkipped` — collect prints
   `debt: sonarcloud skipped — <remediation>` and crucially does NOT run
@@ -75,8 +81,9 @@ finding. So before landing, each fresh sonarcloud record is dropped when
 an **open review-thread row** (no `source` tag) covers it:
 
 - same `path` and same `line` (both non-null), or
-- the thread body contains the issue key (Sonar comments link back with
-  `issues=<key>` / `hotspots=<key>` / `open=<key>`).
+- the thread body links back with the issue key as a whole token in a
+  `?`/`&` query param — `issues=<key>` / `hotspots=<key>` / `open=<key>`
+  (a bare token mention in prose or code is not coverage).
 
 Bookkeeping:
 

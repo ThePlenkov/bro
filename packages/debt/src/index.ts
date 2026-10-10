@@ -72,6 +72,7 @@ export {
 } from './collectors.ts'
 export type { CollectCtx, DebtSource, DebtSourceName } from './collectors.ts'
 export {
+  assertSonarHostTrusted,
   collectSonarcloud,
   dedupeReviewThreads,
   parseSonarProperties,
