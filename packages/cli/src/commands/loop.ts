@@ -1587,6 +1587,7 @@ const LOOP_VALUE_FLAGS = new Set([
   '--merge-timeout',
   '--max',
   '--max-open',
+  '--disk-min-slots',
   '--batch',
   '--interval',
   '--label',
