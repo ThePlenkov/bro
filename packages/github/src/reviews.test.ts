@@ -16,7 +16,13 @@ const SCAN_NODE = `{"title":"did the thing","url":"https://github.com/acme/widge
  *  carries `.stack`), FAKE_GH_QUEUE (a non-null GraphQL mergeQueue),
  *  FAKE_GH_ASYNC / FAKE_GH_ASYNC_ERR (the PUT's body / a failing one on
  *  stderr, as gh reports a 4xx), FAKE_GH_ASYNC_POLL / FAKE_GH_POLL_ERR
- *  (the result GET), FAKE_GH_PR_MERGE_ERR, FAKE_GH_PR_STATE. */
+ *  (the result GET), FAKE_GH_PR_MERGE_ERR, FAKE_GH_PR_STATE.
+ *  The linkCloses family is stateful: FAKE_GH_BODY_FILE makes `pr view`
+ *  /`pr edit` a real body store (raw text), FAKE_GH_SWAP_VIEW +
+ *  FAKE_GH_SWAP_BODY rewrite it just before the Nth `pr view` answers
+ *  (an edit landing between our calls), FAKE_GH_EDIT_CLOBBER overwrites
+ *  it once right after our first `pr edit` (a racing write landing
+ *  behind ours), FAKE_GH_CHURN mutates it on every view. */
 const FAKE_GH = `#!/bin/sh
 echo "$@" >> "$FAKE_GH_LOG"
 if [ -z "$FAKE_GH_PULL" ]; then FAKE_GH_PULL='{}'; fi
@@ -26,7 +32,11 @@ case "$1 $2" in
   "pr checks") if [ "$FAKE_GH_NO_CHECKS" = "1" ]; then echo 'no checks reported' >&2; exit 8; fi
       echo '[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"kilo","state":"PENDING","bucket":"pending"}]' ;;
   "repo view") echo '{"owner":{"login":"acme"},"name":"widgets"}' ;;
-  "pr view") if [ -n "$FAKE_GH_PR_BODY" ]; then printf '{"body":%s}\\n' "$FAKE_GH_PR_BODY"; exit 0; fi
+  "pr view") if [ -n "$FAKE_GH_BODY_FILE" ]; then
+      if [ "$FAKE_GH_CHURN" = "1" ]; then printf ' churn' >> "$FAKE_GH_BODY_FILE"; fi
+      if [ "$(grep -c '^pr view' "$FAKE_GH_LOG")" = "$FAKE_GH_SWAP_VIEW" ]; then
+        printf %s "$FAKE_GH_SWAP_BODY" > "$FAKE_GH_BODY_FILE"; fi
+      node -e 'process.stdout.write(JSON.stringify({body:require("fs").readFileSync(process.argv[1],"utf8")})+"\\n")' "$FAKE_GH_BODY_FILE"; exit 0; fi
       if [ -n "$FAKE_GH_PR_STATE" ]; then echo '{"state":"'"$FAKE_GH_PR_STATE"'"}'; exit 0; fi
       if [ -n "$FAKE_GH_PR_VIEW_FAIL" ]; then case ",$FAKE_GH_PR_VIEW_FAIL," in
       *",$3,"*) echo 'gh: authentication required' >&2; exit 1 ;; esac; fi
@@ -73,7 +83,11 @@ case "$1 $2" in
       *check-runs/*/annotations*) echo '[[]]' ;;
     esac
     if [ -n "$FAKE_GH_MARK" ]; then echo "ANN-END $4" >> "$FAKE_GH_LOG"; fi ;;
-  "pr edit"|"label create") : ;;
+  "pr edit"|"label create") if [ "$2" = "edit" ] && [ -n "$FAKE_GH_BODY_FILE" ]; then
+      node -e 'const a=process.argv,i=a.indexOf("--body");if(i>0)require("fs").writeFileSync(a[1],a[i+1])' "$FAKE_GH_BODY_FILE" "$@"
+      if [ -n "$FAKE_GH_EDIT_CLOBBER" ] && [ ! -e "$FAKE_GH_BODY_FILE.clob" ]; then
+        printf %s "$FAKE_GH_EDIT_CLOBBER" > "$FAKE_GH_BODY_FILE"; touch "$FAKE_GH_BODY_FILE.clob"; fi
+      fi ;;
 esac
 `
 
@@ -83,10 +97,15 @@ function withFakeGh(env: Record<string, string>, fn: (log: string) => void): voi
   writeFileSync(log, '')
   writeFileSync(join(dir, 'gh'), FAKE_GH)
   chmodSync(join(dir, 'gh'), 0o755)
+  const { FAKE_GH_BODY, ...vars } = env
+  if (FAKE_GH_BODY !== undefined) {
+    vars.FAKE_GH_BODY_FILE = join(dir, 'pr.body')
+    writeFileSync(vars.FAKE_GH_BODY_FILE, FAKE_GH_BODY)
+  }
   const prevPath = process.env.PATH
   process.env.PATH = `${dir}:${prevPath}`
-  const prevEnv = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]))
-  Object.assign(process.env, { FAKE_GH_LOG: log, ...env })
+  const prevEnv = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]))
+  Object.assign(process.env, { FAKE_GH_LOG: log, ...vars })
   try {
     fn(log)
   } finally {
@@ -756,21 +775,19 @@ describe('githubReview', { skip: WIN32 }, () => {
   // --- the projection's Fixes wiring (spec bro-z2z7f) -------------------------
 
   test('linkCloses stamps Fixes refs ahead of the bro trailer, which stays last', () => {
-    withFakeGh(
-      { FAKE_GH_PR_BODY: '"the work\\n\\n<!-- bro: {\\"type\\":\\"feature\\"} -->"' },
-      (log) => {
-        githubReview().linkCloses!(target, ['7', '9'])
-        const calls = readFileSync(log, 'utf8')
-        assert.match(
-          calls,
-          /pr edit 42 --repo acme\/widgets --body the work\n\nFixes #7\nFixes #9\n\n<!-- bro: \{"type":"feature"\} -->/
-        )
-      }
-    )
+    withFakeGh({ FAKE_GH_BODY: 'the work\n\n<!-- bro: {"type":"feature"} -->' }, (log) => {
+      githubReview().linkCloses!(target, ['7', '9'])
+      const calls = readFileSync(log, 'utf8')
+      assert.match(
+        calls,
+        /pr edit 42 --repo acme\/widgets --body the work\n\nFixes #7\nFixes #9\n\n<!-- bro: \{"type":"feature"\} -->/
+      )
+      assert.equal(calls.split('pr edit').length - 1, 1)
+    })
   })
 
   test('linkCloses is idempotent — an already-wired ref is not re-stamped', () => {
-    withFakeGh({ FAKE_GH_PR_BODY: '"closes #7 — done deal\\n\\nmore prose"' }, (log) => {
+    withFakeGh({ FAKE_GH_BODY: 'closes #7 — done deal\n\nmore prose' }, (log) => {
       githubReview().linkCloses!(target, ['7', '8'])
       const calls = readFileSync(log, 'utf8')
       assert.match(calls, /--body closes #7 — done deal\n\nmore prose\n\nFixes #8/)
@@ -779,7 +796,7 @@ describe('githubReview', { skip: WIN32 }, () => {
   })
 
   test('linkCloses on a fully-wired body edits nothing', () => {
-    withFakeGh({ FAKE_GH_PR_BODY: '"fixes #7 and resolves #8"' }, (log) => {
+    withFakeGh({ FAKE_GH_BODY: 'fixes #7 and resolves #8' }, (log) => {
       githubReview().linkCloses!(target, ['7', '8'])
       const calls = readFileSync(log, 'utf8')
       assert.match(calls, /pr view 42 --repo acme\/widgets --json body/)
@@ -790,7 +807,7 @@ describe('githubReview', { skip: WIN32 }, () => {
   test('a keyword embedded in a longer word does not count as wired', () => {
     // 'unresolved #7' must not satisfy the closer check — without the
     // word boundary 'resolved' inside 'unresolved' would match
-    withFakeGh({ FAKE_GH_PR_BODY: '"unresolved #7 and prefixes #9"' }, (log) => {
+    withFakeGh({ FAKE_GH_BODY: 'unresolved #7 and prefixes #9' }, (log) => {
       githubReview().linkCloses!(target, ['7', '9'])
       assert.match(
         readFileSync(log, 'utf8'),
@@ -799,9 +816,44 @@ describe('githubReview', { skip: WIN32 }, () => {
     })
   })
 
+  test('linkCloses remerges onto a body that moved under the stamp', () => {
+    // the author's edit lands between the merge read and the guard
+    // re-read — the stamp must merge into THEIR body, not overwrite it
+    // with the stale snapshot (bro-g29ww)
+    withFakeGh(
+      { FAKE_GH_BODY: 'v1', FAKE_GH_SWAP_VIEW: '2', FAKE_GH_SWAP_BODY: 'author edit' },
+      (log) => {
+        githubReview().linkCloses!(target, ['7'])
+        const calls = readFileSync(log, 'utf8')
+        assert.equal(calls.split('pr edit').length - 1, 1)
+        assert.match(calls, /--body author edit\n\nFixes #7/)
+        assert.doesNotMatch(calls, /--body v1/)
+      }
+    )
+  })
+
+  test('linkCloses re-stamps a stamp a racing write clobbered', () => {
+    // the concurrent write lands behind our edit on a stale snapshot —
+    // the post-write read sees our refs missing and remerges into the
+    // fresher body, preserving their content (bro-g29ww)
+    withFakeGh({ FAKE_GH_BODY: 'orig', FAKE_GH_EDIT_CLOBBER: 'concurrent rewrite' }, (log) => {
+      githubReview().linkCloses!(target, ['7'])
+      const calls = readFileSync(log, 'utf8')
+      assert.equal(calls.split('pr edit').length - 1, 2)
+      assert.match(calls, /--body orig\n\nFixes #7/)
+      assert.match(calls, /--body concurrent rewrite\n\nFixes #7/)
+    })
+  })
+
+  test('linkCloses gives up bounded when the body churns under it', () => {
+    withFakeGh({ FAKE_GH_BODY: 'x', FAKE_GH_CHURN: '1' }, (log) => {
+      assert.throws(() => githubReview().linkCloses!(target, ['7']), /kept changing/)
+      assert.doesNotMatch(readFileSync(log, 'utf8'), /pr edit/)
+    })
+  })
+
   test('linkCloses on an empty body stamps bare Fixes lines', () => {
-    // the stock pr view answer carries no body — the null-body path
-    withFakeGh({}, (log) => {
+    withFakeGh({ FAKE_GH_BODY: '' }, (log) => {
       githubReview().linkCloses!(target, ['7', '9'])
       assert.match(
         readFileSync(log, 'utf8'),
