@@ -100,6 +100,7 @@ import {
   worktreeClaim,
   worktreePathFor,
 } from './work.ts'
+import { isOrchestratorSession } from './watch-pulse.ts'
 export { LIVE_MARKER_MS, worktreeClaim }
 
 function usage(): never {
@@ -1371,6 +1372,16 @@ export async function runDriveCommand(argv: string[]): Promise<void> {
     args = driveArgs(argv, drive.intervalSec)
   } catch (err) {
     console.error(`error: ${errText(err)}`)
+    process.exit(2)
+  }
+  // GUARD (bro-killn): spawned workers pin BRO_AGENT_ID — they must
+  // never arm a supervisor cadence; the orchestrator session owns it
+  // and runs single passes on its pulse window end.
+  if (args.everySec !== undefined && !isOrchestratorSession()) {
+    console.error(
+      'error: BRO_AGENT_ID is set — spawned workers never arm supervisors; ' +
+        'the orchestrator session owns the cadence'
+    )
     process.exit(2)
   }
   // One drive per repo: a respawn wrapper's duplicate stands by behind
