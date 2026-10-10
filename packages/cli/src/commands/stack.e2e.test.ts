@@ -192,6 +192,19 @@ describe('bro stack e2e', () => {
     })
   })
 
+  test('the push hint comes from the pinned reviews connector when stacks is unpinned', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
+      const two = f.run(['push', 'fx-b', '--name', 's'])
+      assert.equal(two.code, 0, two.stderr)
+      // connectors.reviews=fakehost with no connectors.stacks pin — the
+      // stacks facade resolves to fakehost, so the hint is the forge's
+      // own openHint, not silence from the git dir-match (GHES-shaped)
+      assert.match(two.stdout, /open the PR against the parent member: fake-mr create --base stack\/s\/1-fx-a/)
+    })
+  })
+
   test('re-push of an existing member re-enters — no duplicate position', () => {
     const f = stackFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'first' }])
     inside(f.main, f.root, () => {

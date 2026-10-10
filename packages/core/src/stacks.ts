@@ -129,6 +129,11 @@ export function mergeChainPerLayer(
 ): StackMergeReport {
   const lines: string[] = []
   const merged: string[] = []
+  // the settle exists to wait out the platform's rewrite of a member
+  // whose LOWER member just merged in this call — before the first
+  // landing nothing is pending, and polling there just burns the 30s
+  // deadline on the bottom member
+  let landedBelow = false
   for (const m of members) {
     if (m.pr === undefined) {
       lines.push(`  ${m.branch} has no open review — stopping the merge here`)
@@ -137,7 +142,7 @@ export function mergeChainPerLayer(
     const t = { repo, pr: m.pr }
     const link = rev.prLink(repo, m.pr)
     let meta =
-      cascade(m).rebase && m.headSha !== undefined
+      landedBelow && cascade(m).rebase && m.headSha !== undefined
         ? settleRemoteHead(rev, t, m.headSha)
         : rev.prMeta(t)
     if (meta.state !== 'OPEN') {
@@ -174,6 +179,7 @@ export function mergeChainPerLayer(
     }
     lines.push(`  merged ${link}`)
     merged.push(m.branch)
+    landedBelow = true
   }
   return { lines, merged }
 }
@@ -259,7 +265,9 @@ export function gitStacks(dir: string): StackFacade {
             : ['-C', main.path, 'merge', '--ff', '-m', `merge ${m.branch} into ${trunk}`, m.branch]
         const r = gitTry(args)
         if (r.code !== 0) {
-          gitTry(['-C', main.path, 'merge', '--abort'])
+          // --squash writes no MERGE_HEAD, so `merge --abort` can't clean
+          // a conflicted squash — reset --merge covers both paths
+          gitTry(['-C', main.path, 'reset', '--merge'])
           lines.push(`  ${m.branch} merge into ${trunk} failed — ${r.err.trim() || 'conflict'}; resolve by hand`)
           break
         }

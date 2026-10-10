@@ -19,6 +19,7 @@
 import { basename } from 'node:path'
 import {
   acquireFileLock,
+  facade,
   gitTry,
   LockTimeout,
   MANUAL_CASCADE,
@@ -386,10 +387,22 @@ function resolveReview(root: string): { repo: string; facade: ReviewFacade } | u
 /** The connector's stack semantics for this repo — undefined when no
  *  connector serves `stacks` (no remote match, nothing authed). The
  *  caller's answer to that is the universal one: manual retarget, local
- *  rebase, no forge ops. */
+ *  rebase, no forge ops. A pinned `connectors.reviews` is also the
+ *  stacks default when it serves the facade: self-hosted forges (GHES,
+ *  self-managed GitLab) never matchRemote, so the git dir-match would
+ *  otherwise win and the repo would lose the forge's openHint and
+ *  cascade semantics. An explicit `connectors.stacks` still wins. */
 function resolveStacks(root: string): StackFacade | undefined {
   try {
-    return stackHost(root, loadBroConfig(root).connectors)
+    const connectors = loadBroConfig(root).connectors
+    if (connectors.stacks === undefined && connectors.reviews !== undefined) {
+      try {
+        return facade('stacks', { dir: root }, { connector: connectors.reviews })
+      } catch {
+        // the pinned reviews connector doesn't serve stacks — resolve normally
+      }
+    }
+    return stackHost(root, connectors)
   } catch {
     return undefined
   }

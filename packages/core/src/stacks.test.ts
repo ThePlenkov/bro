@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gitStacks, mergeChainPerLayer } from './stacks.ts'
-import type { StackChainMember } from './stacks.ts'
+import type { StackCascade, StackChainMember } from './stacks.ts'
 import type { PrMeta, PrTarget, ReviewFacade } from './review.ts'
 
 const git = (args: string[], cwd: string): string =>
@@ -130,6 +130,32 @@ describe('mergeChainPerLayer', () => {
     assert.deepEqual(r.merged, [])
     assert.ok(r.lines.some((l) => l.includes('merge queue')))
   })
+
+  test('the remote-head settle only runs once a member below has landed', () => {
+    let reads = 0
+    const { facade } = fakeReviews({ 11: {}, 12: {} })
+    const counting = {
+      ...facade,
+      prMeta: (t: PrTarget) => {
+        reads++
+        return facade.prMeta(t)
+      },
+    } as ReviewFacade
+    const platformCascade = (): StackCascade => ({ retarget: true, rebase: true })
+    const r = mergeChainPerLayer(
+      counting,
+      'o/r',
+      [member('stack/s/1-a', { pr: 11, headSha: 'h1' }), member('stack/s/2-b', { pr: 12, headSha: 'h2' })],
+      OPTS,
+      platformCascade
+    )
+    assert.deepEqual(r.merged, ['stack/s/1-a', 'stack/s/2-b'])
+    // member 1 gets ONE prMeta — nothing below it merged in this call,
+    // so no settle (the old shape would have polled ~30s on 'h1'==='h1').
+    // member 2's settle reads once: the returned head (h1) already moved
+    // past the collected pin (h2)
+    assert.equal(reads, 2)
+  })
 })
 
 // --- gitStacks — the plain-git merge cascade over a real repo -------------------
@@ -222,6 +248,29 @@ describe('gitStacks', () => {
       assert.equal(git(['rev-list', '--count', '--merges', 'main'], dir).trim(), '0')
       // base + c + replayed a + replayed b
       assert.equal(git(['rev-list', '--count', 'main'], dir).trim(), '4')
+    } finally {
+      cleanup()
+    }
+  })
+
+  test('a conflicted --squash merge cleans the worktree — no stale conflict state', () => {
+    const { dir, cleanup } = chainRepo()
+    try {
+      // member 1 and the trunk now disagree on base.txt — squash conflicts
+      git(['checkout', '-q', 'stack/s/1-a'], dir)
+      writeFileSync(join(dir, 'base.txt'), 'member\n')
+      git(['add', 'base.txt'], dir)
+      git(['commit', '-qm', 'member base'], dir)
+      git(['checkout', '-q', 'main'], dir)
+      writeFileSync(join(dir, 'base.txt'), 'trunk\n')
+      git(['add', 'base.txt'], dir)
+      git(['commit', '-qm', 'trunk base'], dir)
+      const r = gitStacks(dir).mergeChain?.(CHAIN, { method: 'squash' })
+      assert.deepEqual(r?.merged, [])
+      assert.ok(r?.lines.some((l) => l.includes('failed')))
+      // --squash writes no MERGE_HEAD, so `merge --abort` could not have
+      // cleaned this — the checkout must come back clean via reset --merge
+      assert.equal(git(['status', '--porcelain'], dir).trim(), '')
     } finally {
       cleanup()
     }
