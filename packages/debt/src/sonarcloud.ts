@@ -32,6 +32,16 @@ export interface SonarProject {
   via: 'config' | 'properties'
 }
 
+/** Trailing slashes, no regex — `/\/+$/` on uncontrolled input trips
+ *  CodeQL's polynomial-regex rule; a backward scan is linear anyway. */
+function stripTrailingSlashes(s: string): string {
+  let end = s.length
+  while (end > 0 && s[end - 1] === '/') {
+    end--
+  }
+  return s.slice(0, end)
+}
+
 /** `sonar-project.properties` — flat `key=value`, `#`/`!` comments.
  *  Only the two keys bro needs are read. */
 export function parseSonarProperties(text: string): {
@@ -53,7 +63,7 @@ export function parseSonarProperties(text: string): {
     if (key === 'sonar.projectKey' && value !== '') {
       out.projectKey = value
     } else if (key === 'sonar.host.url' && value !== '') {
-      out.host = value.replace(/\/+$/, '')
+      out.host = stripTrailingSlashes(value)
     }
   }
   return out
@@ -97,7 +107,7 @@ export function resolveSonarProject(
   }
   return {
     projectKey,
-    host: (cfg?.host ?? propsFile.host ?? SONAR_HOST).replace(/\/+$/, ''),
+    host: stripTrailingSlashes(cfg?.host ?? propsFile.host ?? SONAR_HOST),
     via: fromConfig ? 'config' : 'properties',
   }
 }
