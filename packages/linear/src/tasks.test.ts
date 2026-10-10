@@ -475,7 +475,7 @@ describe('linearTasks', { skip: WIN32 }, () => {
     })
   })
 
-  test('deps maps inverseRelations upward and relations downward', () => {
+  test('deps maps inverseRelations to the down set and relations to up', () => {
     withLinear(
       {
         FAKE_LINEAR_ISSUE_1: issueRead(
@@ -487,6 +487,31 @@ describe('linearTasks', { skip: WIN32 }, () => {
           { issue_id: 'ENG-9', depends_on_id: 'ENG-8', type: 'blocked' },
           { issue_id: 'ENG-10', depends_on_id: 'ENG-9', type: 'blocked' },
         ])
+        // 'down' is what ENG-9 depends on; 'up' is what depends on it —
+        // both later reads fall back to the same stubbed node
+        assert.deepEqual(linearTasks(dir).deps(['ENG-9'], { direction: 'down' }), [
+          { issue_id: 'ENG-9', depends_on_id: 'ENG-8', type: 'blocked' },
+        ])
+        assert.deepEqual(linearTasks(dir).deps(['ENG-9'], { direction: 'up' }), [
+          { issue_id: 'ENG-10', depends_on_id: 'ENG-9', type: 'blocked' },
+        ])
+      }
+    )
+  })
+
+  test('neighbors on a non-canonical id returns the dep, never the issue itself', () => {
+    withLinear(
+      {
+        FAKE_LINEAR_ISSUE_1: issueRead(node({ ident: 'ENG-9', blockedBy: [['ENG-8', 'started']] })),
+        FAKE_LINEAR_ISSUE_2: issueRead(node({ ident: 'ENG-8' })),
+      },
+      (_log, dir) => {
+        // 'eng-9' resolves to ENG-9 — edges carry canonical identifiers,
+        // so a raw-id comparison would return ENG-9 as its own neighbor
+        assert.deepEqual(
+          linearTasks(dir).neighbors('eng-9').map((r) => r.id),
+          ['ENG-8']
+        )
       }
     )
   })

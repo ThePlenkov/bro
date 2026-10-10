@@ -28,6 +28,7 @@ import {
 import { dirname, join } from 'node:path'
 import type { ConfigSection } from './config.ts'
 import { acquireFileLock } from './filelock.ts'
+import { BD_NO_STORE } from './bd.ts'
 import { gitTry } from './git.ts'
 import { taskStoreAt } from './tasks.ts'
 
@@ -573,12 +574,21 @@ export function probeStep(
   }
 }
 
-/** Store failure → 'unavailable' (the store never answered — 503
- *  territory), a real refusal → 'conflict'. `ran` rides on the exec's
- *  thrown error; its absence means the error came from inside the port
- *  (JSON drift), which is still a refusal of a kind, not a dead store. */
+/** Store failure → 'unavailable' (503 territory), a real refusal →
+ *  'conflict'. `ran:false` marks a spawn failure/timeout — the store
+ *  never answered. But bd can also RUN and report its store missing;
+ *  that exit is the same outage, not a claim refusal. `ran`'s absence
+ *  means the error came from inside the port (JSON drift) — still a
+ *  refusal of a kind, not a dead store. */
 function spawnClass(err: unknown): 'conflict' | 'unavailable' {
-  return (err as { ran?: unknown }).ran === false ? 'unavailable' : 'conflict'
+  const e = err as { ran?: unknown; stderr?: unknown; message?: string }
+  if (e.ran === false) {
+    return 'unavailable'
+  }
+  const text = `${typeof e.message === 'string' ? e.message : ''}\n${
+    typeof e.stderr === 'string' ? e.stderr : ''
+  }`
+  return BD_NO_STORE.test(text) ? 'unavailable' : 'conflict'
 }
 
 /** Fresh claim — `claim()` writes the caller's actor as assignee and

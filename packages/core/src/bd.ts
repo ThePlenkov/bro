@@ -193,7 +193,10 @@ export class BdCompatError extends Error {
  *  not API drift. */
 const BD_USAGE_DRIFT =
   /unknown (command|flag|shorthand)|flag provided but not defined|unrecognized command/i
-const BD_NO_STORE = /no beads database|not initialized|no database found/i
+/** "the binary ran but there's no store it routes to" — distinguishes a
+ *  missing/unrouted store (a 503, never a refused op) from a real
+ *  command-level failure. Exported for the sync + claim classifiers. */
+export const BD_NO_STORE = /no beads database|not initialized|no database found/i
 
 function errText(err: unknown): string {
   const e = err as { message?: unknown; stderr?: unknown }

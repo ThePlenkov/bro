@@ -460,7 +460,7 @@ function applyFilter(rows: TaskRow[], f: TaskFilter): TaskRow[] {
   if (f.type !== undefined) {
     q = q.filter((r) => r.issue_type === f.type)
   }
-  if (f.limit !== undefined) {
+  if (f.limit !== undefined && f.limit > 0) {
     q = q.slice(0, f.limit)
   }
   return q
@@ -485,7 +485,9 @@ const needsPostFilter = (f: TaskFilter): boolean =>
   (f.status !== undefined && f.status !== 'closed')
 
 const fetchCap = (f: TaskFilter): number =>
-  needsPostFilter(f) ? QUERY_CAP : Math.min(f.limit ?? QUERY_CAP, QUERY_CAP)
+  needsPostFilter(f)
+    ? QUERY_CAP
+    : Math.min(f.limit !== undefined && f.limit > 0 ? f.limit : QUERY_CAP, QUERY_CAP)
 
 const byPriority = (a: TaskRow, b: TaskRow): number =>
   (a.priority ?? DEFAULT_PRIORITY) - (b.priority ?? DEFAULT_PRIORITY) ||
@@ -496,7 +498,10 @@ const byPriority = (a: TaskRow, b: TaskRow): number =>
 /** ready = open + unblocked + unclaimed — derived status 'open' is
  *  exactly that set, already priority-ordered over created asc. */
 function readyOf(rows: TaskRow[], f: TaskFilter): TaskRow[] {
-  return rows.filter((r) => r.status === 'open').sort(byPriority).slice(0, f.limit ?? QUERY_CAP)
+  return rows
+    .filter((r) => r.status === 'open')
+    .sort(byPriority)
+    .slice(0, f.limit !== undefined && f.limit > 0 ? f.limit : QUERY_CAP)
 }
 
 // --- actor + mutation helpers -----------------------------------------------------
@@ -532,16 +537,17 @@ function ensureLabel(dir: string, name: string): void {
 const wants = (dir: 'up' | 'down', direction?: string): boolean =>
   direction === undefined || direction === dir
 
-/** X depends-on Y — blockedBy reads 'up', blocking reads 'down'. */
+/** X depends-on Y — blockedBy is X's own dep set (a 'down' read);
+ *  blocking is what depends on X ('up'). */
 function blockEdges(n: IssueNode, direction?: string): TaskDepEdge[] {
   const id = String(n.number)
   const out: TaskDepEdge[] = []
-  if (wants('up', direction)) {
+  if (wants('down', direction)) {
     for (const b of n.blockedBy?.nodes ?? []) {
       out.push({ issue_id: id, depends_on_id: String(b.number), type: 'blocked' })
     }
   }
-  if (wants('down', direction)) {
+  if (wants('up', direction)) {
     for (const b of n.blocking?.nodes ?? []) {
       out.push({ issue_id: String(b.number), depends_on_id: id, type: 'blocked' })
     }
@@ -549,14 +555,14 @@ function blockEdges(n: IssueNode, direction?: string): TaskDepEdge[] {
   return out
 }
 
-/** parent reads 'up' (this issue depends on its parent), subIssues 'down'. */
+/** parent is a 'down' edge (this issue depends on it); subIssues read 'up'. */
 function parentEdges(n: IssueNode, direction?: string): TaskDepEdge[] {
   const id = String(n.number)
   const out: TaskDepEdge[] = []
-  if (wants('up', direction) && n.parent) {
+  if (wants('down', direction) && n.parent) {
     out.push({ issue_id: id, depends_on_id: String(n.parent.number), type: 'parent' })
   }
-  if (wants('down', direction)) {
+  if (wants('up', direction)) {
     for (const c of n.subIssues?.nodes ?? []) {
       out.push({ issue_id: String(c.number), depends_on_id: id, type: 'parent' })
     }
@@ -606,10 +612,14 @@ async function neighborsAsync(
   if (n === undefined) {
     return []
   }
+  // edges carry the canonical issue number — a non-canonical input id
+  // ('#42', a URL) compared raw picks the wrong endpoint, returning n
+  // as its own neighbor
+  const self = String(n.number)
   const others = new Set<string>()
   const relOf = new Map<string, string>()
   for (const e of depEdges(n, opts)) {
-    const other = e.issue_id === id ? e.depends_on_id : e.issue_id
+    const other = e.issue_id === self ? e.depends_on_id : e.issue_id
     others.add(other)
     relOf.set(other, e.type)
   }
@@ -633,9 +643,10 @@ function neighborsSync(dir: string, id: string, opts: DepOpts): TaskRow[] {
   if (n === undefined) {
     return []
   }
+  const self = String(n.number)
   const others = new Map<string, string>()
   for (const e of depEdges(n, opts)) {
-    others.set(e.issue_id === id ? e.depends_on_id : e.issue_id, e.type)
+    others.set(e.issue_id === self ? e.depends_on_id : e.issue_id, e.type)
   }
   const rows: TaskRow[] = []
   for (const [o, rel] of others) {

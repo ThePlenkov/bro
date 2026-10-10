@@ -23,9 +23,8 @@
  * mol/wisp (molecules), provenance (evidence), kv/docs, config.
  * Those keep calling bd() until they get doc types.
  */
-import { statSync } from 'node:fs'
 import { join } from 'node:path'
-import { bd, BdCompatError, bdAt, bdJson, bdJsonAsync, bdTry, bdTryAsync, isBdNotFound } from './bd.ts'
+import { bd, BdCompatError, bdAt, BD_NO_STORE, bdJson, bdJsonAsync, bdTry, bdTryAsync, isBdNotFound } from './bd.ts'
 import { gitTry } from './git.ts'
 
 /** Resolved probe results per dir — hook surfaces ask for the actor
@@ -86,21 +85,24 @@ function bdActorAt(beadsDir: string): string {
     return env
   }
   const key = `at:${beadsDir}`
-  let actor = actorCache.get(key)
-  if (actor === undefined) {
-    const cfg = bdAt(beadsDir, ['config', 'get', 'actor'], 3_000)
-    const line = cfg.code === 0 ? (cfg.out.trim().split('\n').pop()?.trim() ?? '') : ''
-    actor = parseActorLine(line)
-    if (actor === '') {
-      const git = gitTry(['config', 'user.name'])
-      actor =
-        git.code === 0 && git.out.trim() !== ''
-          ? git.out.trim()
-          : (process.env.USER?.trim() ?? '')
-    }
-    actorCache.set(key, actor)
+  const cached = actorCache.get(key)
+  if (cached !== undefined) {
+    return cached
   }
-  return actor
+  const cfg = bdAt(beadsDir, ['config', 'get', 'actor'], 3_000)
+  const line = cfg.code === 0 ? (cfg.out.trim().split('\n').pop()?.trim() ?? '') : ''
+  const configActor = parseActorLine(line)
+  if (configActor !== '') {
+    // only the store's own config is beadsDir-keyed — the git/USER
+    // fallback reads the CALLER's cwd, so caching it would lend one
+    // caller's identity to every later caller of the pinned store
+    actorCache.set(key, configActor)
+    return configActor
+  }
+  const git = gitTry(['config', 'user.name'])
+  return git.code === 0 && git.out.trim() !== ''
+    ? git.out.trim()
+    : (process.env.USER?.trim() ?? '')
 }
 
 /** Async bdActor — same resolution chain, but the bd probe doesn't
@@ -160,6 +162,8 @@ export interface TaskFilter {
   excludeLabels?: string[]
   /** include closed/done rows */
   all?: boolean
+  /** row cap — 0 or negative means no cap (bd's own `-n 0` convention);
+   *  remote connectors honor the same reading inside their fetch cap */
   limit?: number
   type?: string
 }
@@ -549,18 +553,18 @@ function makeStore(x: StoreExec): TaskStore {
       return v === '' ? undefined : v
     },
     sync: () => {
-      // only a real local db replicates — a store addressed by env pin
-      // or a checkout without .beads simply has nothing to move
-      if (
-        x.storeDir === undefined ||
-        !statSync(x.storeDir, { throwIfNoEntry: false })?.isDirectory()
-      ) {
+      // replicate whatever store bd itself routes to — bd finds the
+      // project db through the git common dir, so a linked worktree
+      // without its own .beads still shares a store with state to move.
+      // bd's own verdicts ("no database", missing binary) mean nothing
+      // to move; a stat of <cwd>/.beads would guess the routing wrong.
+      if (x.storeDir === undefined) {
         return ''
       }
       const r = x.probe(['sync'], 120_000)
       if (r.code !== 0) {
-        if (/ENOENT/.test(r.err)) {
-          return '' // bd not installed — state simply doesn't move
+        if (/ENOENT/.test(r.err) || BD_NO_STORE.test(r.err)) {
+          return '' // no bd, or no routed store — state simply doesn't move
         }
         throw new Error(`task store sync failed — ${r.err || `bd exited ${r.code}`}`)
       }

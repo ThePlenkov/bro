@@ -88,20 +88,16 @@ function storeName(ref: string | undefined, scope: Scope): Scope | undefined {
 }
 
 /** Report an init failure precisely — a missing binary throws ENOENT,
- *  and "bd init failed" would bury that diagnostic. A freshly-created
- *  dir is removed so a failed init doesn't strand an empty store. */
-function initFailed(err: unknown, dir: string, created: boolean): never {
+ *  and "bd init failed" would bury that diagnostic. `drop` removes
+ *  what this run created so a failed init doesn't strand a store. */
+function initFailed(err: unknown, dir: string, drop: () => void): never {
   const enoent = (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
   console.error(
     enoent
       ? 'error: bd not found — install beads first (https://github.com/gastownhall/beads)'
       : `error: store init failed in ${dir}${err instanceof Error ? ` (${err.message})` : ''}`
   )
-  if (created) {
-    // we made the dir this run — any failure strands an empty store
-    // otherwise, not just a missing-bd ENOENT
-    rmSync(dir, { recursive: true, force: true })
-  }
+  drop()
   process.exit(1)
 }
 
@@ -112,6 +108,17 @@ export function initStore(name: Scope, flags: DocFlags, root: string): void {
   const prefix = flags['prefix'] ?? (name === 'global' ? 'global' : undefined)
   const created = !existsSync(dir)
   mkdirSync(dir, { recursive: true })
+  // only what THIS run made may be removed on failure — the dir itself,
+  // or the .beads init added to an existing one. A store that pre-dates
+  // this run is the user's data: a validation exit must not delete it
+  const freshStore = !existsSync(join(dir, '.beads'))
+  const drop = (): void => {
+    if (created) {
+      rmSync(dir, { recursive: true, force: true })
+    } else if (freshStore) {
+      rmSync(join(dir, '.beads'), { recursive: true, force: true })
+    }
+  }
   const store = taskStore(dir) // a .beads dir is always beads — the connector's init capability
   try {
     const out = store.init?.({ prefix })
@@ -119,7 +126,7 @@ export function initStore(name: Scope, flags: DocFlags, root: string): void {
       process.stdout.write(out.endsWith('\n') ? out : `${out}\n`)
     }
   } catch (err) {
-    initFailed(err, dir, created)
+    initFailed(err, dir, drop)
   }
   // validate: a store that can't answer is broken, not created — and a
   // store that accepts --prefix but doesn't apply it must not report a
@@ -131,12 +138,16 @@ export function initStore(name: Scope, flags: DocFlags, root: string): void {
     console.error(
       `error: store created but unusable — ${err instanceof Error ? err.message : String(err)}`
     )
+    drop()
     process.exit(1)
   }
   if (prefix && reported !== prefix) {
     console.error(
       `error: store in ${dir} recorded prefix "${reported ?? '(not set)'}" — expected "${prefix}"`
     )
+    // a just-created store with the wrong prefix stays broken for every
+    // later init attempt — drop it; a pre-existing store is not ours
+    drop()
     process.exit(1)
   }
   const suffix = prefix ? ` (prefix ${prefix})` : ''

@@ -406,7 +406,7 @@ function applyFilter(rows: TaskRow[], f: TaskFilter): TaskRow[] {
   if (f.type !== undefined) {
     q = q.filter((r) => r.issue_type === f.type)
   }
-  if (f.limit !== undefined) {
+  if (f.limit !== undefined && f.limit > 0) {
     q = q.slice(0, f.limit)
   }
   return q
@@ -422,7 +422,9 @@ const needsPostFilter = (f: TaskFilter): boolean =>
   (f.status !== undefined && f.status !== 'closed')
 
 const fetchCap = (f: TaskFilter): number =>
-  needsPostFilter(f) ? QUERY_CAP : Math.min(f.limit ?? QUERY_CAP, QUERY_CAP)
+  needsPostFilter(f)
+    ? QUERY_CAP
+    : Math.min(f.limit !== undefined && f.limit > 0 ? f.limit : QUERY_CAP, QUERY_CAP)
 
 const byPriority = (a: TaskRow, b: TaskRow): number =>
   (a.priority ?? DEFAULT_PRIORITY) - (b.priority ?? DEFAULT_PRIORITY) ||
@@ -433,7 +435,10 @@ const byPriority = (a: TaskRow, b: TaskRow): number =>
 /** ready = open + unblocked + unclaimed — derived status 'open' is
  *  exactly that set, already priority-ordered over created asc. */
 function readyOf(rows: TaskRow[], f: TaskFilter): TaskRow[] {
-  return rows.filter((r) => r.status === 'open').sort(byPriority).slice(0, f.limit ?? QUERY_CAP)
+  return rows
+    .filter((r) => r.status === 'open')
+    .sort(byPriority)
+    .slice(0, f.limit !== undefined && f.limit > 0 ? f.limit : QUERY_CAP)
 }
 
 // --- actor --------------------------------------------------------------------
@@ -504,20 +509,20 @@ function pickState(teamIdOrKey: string, type: string, fallback?: string): string
 const wants = (dir: 'up' | 'down', direction?: string): boolean =>
   direction === undefined || direction === dir
 
-/** X depends-on Y — X's blockers read inverseRelations('blocks')'s
- *  `issue` (the blocker), X's downstream reads relations('blocks')'s
- *  `relatedIssue` (the blocked). */
+/** X depends-on Y — X's blockers (a 'down' read) live in
+ *  inverseRelations('blocks')'s `issue`; what depends on X ('up')
+ *  lives in relations('blocks')'s `relatedIssue`. */
 function blockEdges(n: IssueNode, direction?: string): TaskDepEdge[] {
   const id = n.identifier
   const out: TaskDepEdge[] = []
-  if (wants('up', direction)) {
+  if (wants('down', direction)) {
     for (const r of n.inverseRelations?.nodes ?? []) {
       if (r.type === 'blocks' && r.issue?.identifier !== undefined) {
         out.push({ issue_id: id, depends_on_id: r.issue.identifier, type: 'blocked' })
       }
     }
   }
-  if (wants('down', direction)) {
+  if (wants('up', direction)) {
     for (const r of n.relations?.nodes ?? []) {
       if (r.type === 'blocks' && r.relatedIssue?.identifier !== undefined) {
         out.push({ issue_id: r.relatedIssue.identifier, depends_on_id: id, type: 'blocked' })
@@ -527,14 +532,14 @@ function blockEdges(n: IssueNode, direction?: string): TaskDepEdge[] {
   return out
 }
 
-/** parent reads 'up' (this issue depends on its parent), children 'down'. */
+/** parent is a 'down' edge (this issue depends on it); children read 'up'. */
 function parentEdges(n: IssueNode, direction?: string): TaskDepEdge[] {
   const id = n.identifier
   const out: TaskDepEdge[] = []
-  if (wants('up', direction) && n.parent?.identifier !== undefined) {
+  if (wants('down', direction) && n.parent?.identifier !== undefined) {
     out.push({ issue_id: id, depends_on_id: n.parent.identifier!, type: 'parent' })
   }
-  if (wants('down', direction)) {
+  if (wants('up', direction)) {
     for (const c of n.children?.nodes ?? []) {
       if (c.identifier !== undefined) {
         out.push({ issue_id: c.identifier, depends_on_id: id, type: 'parent' })
@@ -584,9 +589,12 @@ async function neighborsAsync(
   if (n === undefined) {
     return []
   }
+  // edges carry canonical identifiers — comparing the raw input ('42',
+  // a URL, lowercase) picks the wrong endpoint and returns n itself
+  const self = n.identifier
   const others = new Map<string, string>()
   for (const e of depEdges(n, opts)) {
-    others.set(e.issue_id === id ? e.depends_on_id : e.issue_id, e.type)
+    others.set(e.issue_id === self ? e.depends_on_id : e.issue_id, e.type)
   }
   const rows = await Promise.all(
     [...others].map(async ([o, rel]) => {
@@ -604,9 +612,12 @@ function neighborsSync(id: string, opts: DepOpts): TaskRow[] {
   if (n === undefined) {
     return []
   }
+  // see neighborsAsync — edge endpoints compare against n.identifier,
+  // never the caller's raw id form
+  const self = n.identifier
   const others = new Map<string, string>()
   for (const e of depEdges(n, opts)) {
-    others.set(e.issue_id === id ? e.depends_on_id : e.issue_id, e.type)
+    others.set(e.issue_id === self ? e.depends_on_id : e.issue_id, e.type)
   }
   const rows: TaskRow[] = []
   for (const [o, rel] of others) {

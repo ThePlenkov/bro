@@ -28,26 +28,30 @@ import { join } from 'node:path'
 /** Task-state replication is a connector capability — `store.sync()`
  *  runs whatever cycle that backend owns (beads: the dolt-refs
  *  pull+merge+push; remote backends usually sync on write and omit the
- *  verb). The serving tasks store syncs; so does a local `.beads` doc
- *  db when it isn't the serving one — kv/mol state lives there
- *  regardless of which connector answers `tasks`. Best-effort like
- *  the data-ref push: a sync failure warns but never breaks artifact
- *  sync. */
-function syncStores(root: string, prefer: Record<string, string>): void {
-  let stores: TaskStore[]
+ *  verb). The serving tasks store syncs; so does the local `.beads`
+ *  doc db whenever it isn't that same store — kv/mol state lives there
+ *  regardless of which connector answers `tasks`, and its replication
+ *  doesn't depend on the serving backend being constructible at all.
+ *  Returns the failure count — artifact sync stays best-effort (a warn
+ *  never breaks it), but an explicit --pull reports store failure. */
+function syncStores(root: string, prefer: Record<string, string>): number {
+  let failed = 0
+  const stores: TaskStore[] = []
+  let serving: string | undefined
   try {
-    const serving = facadeName('tasks', { dir: root }, { prefer })
-    stores = [facade('tasks', { dir: root }, { prefer })]
-    // the local beads db is a store too — a non-beads tasks backend
-    // doesn't make the doc store's replication unnecessary
-    if (serving !== 'beads') {
-      stores.push(taskStore(root))
-    }
+    serving = facadeName('tasks', { dir: root }, { prefer })
+    stores.push(facade('tasks', { dir: root }, { prefer }))
   } catch (err) {
+    failed++
     console.error(
       `warning: task store sync skipped — ${err instanceof Error ? err.message : String(err)}`
     )
-    return
+  }
+  // the local beads db is a store too — skipped only when it IS the
+  // serving store already queued; a remote backend's construction
+  // failure must not strand it
+  if (serving !== 'beads' || stores.length === 0) {
+    stores.push(taskStore(root))
   }
   for (const store of stores) {
     if (store.sync === undefined) {
@@ -59,11 +63,13 @@ function syncStores(root: string, prefer: Record<string, string>): void {
         console.log(out.trimEnd())
       }
     } catch (err) {
+      failed++
       console.error(
         `warning: task store sync failed — ${(err as { stderr?: string }).stderr?.trim() || (err instanceof Error ? err.message : String(err))}`
       )
     }
   }
+  return failed
 }
 
 function artifactDirs(root: string): string[] {
@@ -96,8 +102,11 @@ export function runSyncCommand(argv: string[]): void {
       process.exit(1)
     }
     console.log(`bro sync: materialized ${written} file(s) from ${ref}`)
-    if (beads) {
-      syncStores(root, cfg.connectors)
+    if (beads && syncStores(root, cfg.connectors) > 0) {
+      // an explicit pull that couldn't sync the store is a failed
+      // restore — reporting success would lie about the outcome
+      console.error('bro sync: task store replication failed — local state may be stale')
+      process.exit(1)
     }
     return
   }
