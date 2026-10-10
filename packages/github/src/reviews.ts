@@ -112,7 +112,11 @@ function checks(t: PrTarget, requiredOnly = false): CheckInfo[] {
   return []
 }
 
-function checkAnnotations(repo: string, headSha: string): Map<string, number | null> {
+function checkAnnotations(
+  repo: string,
+  headSha: string,
+  names?: ReadonlySet<string>
+): Map<string, number | null> {
   const out = new Map<string, number | null>()
   for (let page = 1; ; page += 1) {
     const res = ghJson<{ check_runs: Array<{ id: number; name: string }> }>([
@@ -122,8 +126,11 @@ function checkAnnotations(repo: string, headSha: string): Map<string, number | n
     for (const run of res.check_runs ?? []) {
       // A re-run check reports one run per attempt — every attempt's
       // annotations count, not just the latest id's. A failed fetch
-      // marks the name null (unknown), never a partial count.
-      if (out.get(run.name) === null) {
+      // marks the name null (unknown), never a partial count. Runs
+      // outside `names` cost one gh call each and are never read —
+      // skip them outright (bro-2l7r9: an unfiltered scan fans a
+      // whole check-suite out into per-run gh spawns).
+      if (out.get(run.name) === null || (names !== undefined && !names.has(run.name))) {
         continue
       }
       try {
@@ -560,7 +567,8 @@ async function checksAsync(t: PrTarget, requiredOnly = false): Promise<CheckInfo
 
 async function checkAnnotationsAsync(
   repo: string,
-  headSha: string
+  headSha: string,
+  names?: ReadonlySet<string>
 ): Promise<Map<string, number | null>> {
   const out = new Map<string, number | null>()
   for (let page = 1; ; page += 1) {
@@ -568,29 +576,35 @@ async function checkAnnotationsAsync(
       'api',
       `repos/${repo}/commits/${headSha}/check-runs?per_page=100&page=${page}`,
     ])
-    // a page's annotation fetches are independent — overlap them; each
-    // run reports to its own slot first so a name shared by concurrent
-    // runs can't let a success overwrite a sibling's failure
-    const results = await Promise.all(
-      (res.check_runs ?? []).map(async (run) => {
-        try {
-          const pages = await ghJsonAsync<Array<Array<{ annotation_level?: string }>>>([
-            'api',
-            '--paginate',
-            '--slurp',
-            `repos/${repo}/check-runs/${run.id}/annotations?per_page=100`,
-          ])
-          return {
-            name: run.name,
-            count: pages.flat().filter((a) => a.annotation_level === 'failure').length as
-              | number
-              | null,
-          }
-        } catch {
-          return { name: run.name, count: null }
-        }
-      })
+    // a page's annotation fetches are independent — overlap them, but
+    // bounded: each fetch is a ~50MB gh child and a CI suite runs tens
+    // of check-runs, so an unbounded Promise.all spikes the whole
+    // service cgroup (bro-2l7r9's OOM). This pool caps one call —
+    // the process-wide child budget in gh.ts is what keeps overlapping
+    // gate probes from multiplying pools. Runs outside `names` are never
+    // read — skip them outright. Each run reports to its own slot
+    // first so a name shared by concurrent runs can't let a success
+    // overwrite a sibling's failure.
+    const runs = (res.check_runs ?? []).filter(
+      (run) => names === undefined || names.has(run.name)
     )
+    const results: Array<{ name: string; count: number | null }> = []
+    await pooled(runs, 4, async (run) => {
+      try {
+        const pages = await ghJsonAsync<Array<Array<{ annotation_level?: string }>>>([
+          'api',
+          '--paginate',
+          '--slurp',
+          `repos/${repo}/check-runs/${run.id}/annotations?per_page=100`,
+        ])
+        results.push({
+          name: run.name,
+          count: pages.flat().filter((a) => a.annotation_level === 'failure').length,
+        })
+      } catch {
+        results.push({ name: run.name, count: null })
+      }
+    })
     for (const r of results) {
       const prev = out.get(r.name)
       if (prev === null) {
