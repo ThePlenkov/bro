@@ -361,6 +361,7 @@ export {
   busStatus,
   busSubscribe,
   busTopicMatches,
+  busWake,
   isBusEventInput,
   startBusBroker,
   startBusBrokerAt,
@@ -378,5 +379,6 @@ export type {
   BusStatus,
   BusSubscription,
   BusSubscriptionHandlers,
+  BusWake,
 } from './bus.ts'
 export { trackChild, unrefPendingChildren } from './live-procs.ts'

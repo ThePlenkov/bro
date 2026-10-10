@@ -24,6 +24,21 @@ export {
   mergifyQueue,
   graphiteQueue,
 }
+export {
+  GITHUB_TOPIC_PREFIX,
+  GITHUB_WEBHOOK_SECRET_ENV,
+  githubEventConcernsPr,
+  githubPrWake,
+  githubWebhookEvent,
+  githubWebhookHandler,
+  parseGithubWebhookBody,
+  verifyGithubWebhook,
+} from './webhooks.ts'
+export type {
+  GithubWebhookDeps,
+  GithubWebhookRequest,
+  GithubWebhookResponse,
+} from './webhooks.ts'
 
 export const githubConnector: Connector = {
   name: 'github',

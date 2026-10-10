@@ -582,3 +582,95 @@ describe('serve handler over a real socket', () => {
     }
   })
 })
+
+describe('serve — webhook routes', () => {
+  const meta = { dir: '/repo', startedAt: 't0' }
+
+  test('POST /api/v1/webhooks/<provider> dispatches headers+body to the handler', async () => {
+    let seen: { headers: Record<string, string | string[] | undefined>; rawBody: string } | undefined
+    const d = deps({
+      webhooks: {
+        github: async (req) => {
+          seen = req
+          return { status: 202, body: { accepted: true } }
+        },
+      },
+    })
+    const headers = { 'x-github-event': 'ping', 'content-type': 'application/json' }
+    const res = await routeRequest('POST', '/api/v1/webhooks/github', '{"zen":1}', d, meta, headers)
+    assert.equal(res.status, 202)
+    assert.equal(seen?.rawBody, '{"zen":1}')
+    assert.equal(seen?.headers['x-github-event'], 'ping')
+  })
+
+  test('a provider with no handler 404s; non-POST is 405', async () => {
+    const res = await routeRequest('POST', '/api/v1/webhooks/gitlab', '{}', deps(), meta, {})
+    assert.equal(res.status, 404)
+    const res2 = await routeRequest(
+      'GET',
+      '/api/v1/webhooks/github',
+      undefined,
+      deps({ webhooks: { github: async () => ({ status: 202, body: {} }) } }),
+      meta,
+      {}
+    )
+    assert.equal(res2.status, 405)
+  })
+
+  test('the webhook path bypasses bearer AND Host guards — the signature is the auth', async () => {
+    const TOKEN = 'test-session-token'
+    let calls = 0
+    const d = deps({
+      webhooks: {
+        github: async () => {
+          calls += 1
+          return { status: 401, body: { error: 'bad signature' } }
+        },
+      },
+    })
+    const server = createServer(createServeHandler(d, { dir: '/repo', startedAt: 't0' }, TOKEN))
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as AddressInfo).port
+    const base = `http://127.0.0.1:${port}`
+    try {
+      // no Authorization header at all — the writeGuard would 401 any
+      // other route; the handler's own 401 proves it was REACHED
+      const r = await fetch(`${base}/api/v1/webhooks/github`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      })
+      assert.equal(r.status, 401)
+      assert.equal(calls, 1)
+
+      // a foreign Host — the DNS-rebinding shape refused everywhere
+      // else — reaches the handler: a hosted tunnel's Host is public
+      const rebound = await new Promise<IncomingMessage>((resolve) => {
+        const req = request(
+          `${base}/api/v1/webhooks/github`,
+          {
+            method: 'POST',
+            headers: { host: 'smee.example.com', 'content-type': 'application/json' },
+          },
+          resolve
+        )
+        req.end('{}')
+      })
+      assert.equal(rebound.statusCode, 401)
+      assert.equal(calls, 2)
+
+      // and the same foreign Host on a normal route still 403s
+      const guarded = await new Promise<IncomingMessage>((resolve) => {
+        const req = request(
+          `${base}/api/v1/health`,
+          { headers: { host: 'smee.example.com' } },
+          resolve
+        )
+        req.end()
+      })
+      assert.equal(guarded.statusCode, 403)
+    } finally {
+      await new Promise((r) => server.close(r))
+    }
+  })
+})
