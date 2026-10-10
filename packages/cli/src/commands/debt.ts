@@ -15,6 +15,7 @@ import {
   dataRefRoot,
   ensureAuth,
   facadeAuth,
+  gitTry,
   isBdCompatError,
   reviewHost,
   type MergedPrScan,
@@ -304,7 +305,9 @@ function collectOneSource(
         repo: args.repo,
         runId: args.runId,
         harvestedAt,
-        dir: process.cwd(),
+        // Properties files resolve at the checkout root — a collect run
+        // from a repo subdirectory must still see them.
+        dir: gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd(),
         sonar: debtCfg.sonarcloud,
       },
       debtCfg.stale_days
@@ -377,9 +380,12 @@ function collectOneSource(
  *  - an open ledger row now covered by a review thread → `duplicate`
  *    (the finding is owned by the thread row, not fixed — fix% must not
  *    count it);
- *  - a stale `duplicate` overlay on a re-emitted finding → `open`
- *    (coverage disappeared — the row is live upstream again). */
-function syncSonarDedupeOverlays(
+ *  - a stale `duplicate` or `done` overlay on a re-emitted finding →
+ *    `open` (coverage disappeared, or the auto "resolved upstream" mark
+ *    proved wrong — the row is live upstream again). `wontfix` stays:
+ *    a live finding IS its steady state, so reopening would churn the
+ *    human verdict every collect. */
+export function syncSonarDedupeOverlays(
   existing: DebtRecord[],
   records: DebtRecord[],
   dupedIds: Set<string>,
@@ -389,7 +395,10 @@ function syncSonarDedupeOverlays(
   const toDup = [...dupedIds].filter((id) => byId.get(id)?.status === 'open')
   const toReopen = records
     .map((r) => r.thread_id)
-    .filter((id) => byId.get(id)?.status === 'duplicate')
+    .filter((id) => {
+      const s = byId.get(id)?.status
+      return s === 'duplicate' || s === 'done'
+    })
   if (toDup.length === 0 && toReopen.length === 0) {
     return
   }
@@ -406,7 +415,10 @@ function syncSonarDedupeOverlays(
       status: 'open' as const,
       fix_pr: null,
       fixed_at: null,
-      notes: 'reopened — no longer covered by a review thread',
+      notes:
+        byId.get(thread_id)?.status === 'duplicate'
+          ? 'reopened — no longer covered by a review thread'
+          : 'reopened — still reported upstream',
     })),
   ])
   if (toDup.length > 0) {

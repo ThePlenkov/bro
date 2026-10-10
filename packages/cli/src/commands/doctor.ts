@@ -31,7 +31,7 @@ import {
 } from '@broject/core'
 import type { BdCompat, ProviderEntry, ProviderSurface } from '@broject/core'
 import { parsePeer, rigFromRemoteUrl } from '@broject/mesh'
-import { resolveSonarProject } from '@broject/debt'
+import { assertSonarHostTrusted, resolveSonarProject, SourceSkipped } from '@broject/debt'
 import { judgeConfig, synthesizedProviders } from '@broject/judge'
 import type { JudgeConfig } from '@broject/judge'
 import { loadBroConfig, pluginConfigSections } from '../plugins.ts'
@@ -809,6 +809,16 @@ function debtSourceChecks(dir: string, debt: { sources: string[]; sonarcloud: { 
         'the sonarcloud transport needs curl on PATH'
       ),
     ]
+  }
+  try {
+    assertSonarHostTrusted(project)
+  } catch (err) {
+    if (err instanceof SourceSkipped) {
+      return [
+        check('debt-sonarcloud', 'warn', `project ${project.projectKey} · ${err.message}`, 'collect skips the source until the host is trusted')
+      ]
+    }
+    throw err
   }
   return [
     check(

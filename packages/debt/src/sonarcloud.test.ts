@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SourceSkipped } from './collectors.ts'
 import {
+  assertSonarHostTrusted,
   collectSonarcloud,
   dedupeReviewThreads,
   parseSonarProperties,
@@ -12,6 +13,7 @@ import {
   sonarKeyOf,
 } from './sonarcloud.ts'
 import type { DebtRecord } from './types.ts'
+import type { SonarProject } from './sonarcloud.ts'
 
 const CTX = { repo: 'acme/widgets', runId: 't', harvestedAt: '2026-01-02T00:00:00Z' }
 
@@ -249,6 +251,73 @@ describe('collectSonarcloud', () => {
         )
       )
     ))
+
+  test('a result set past the API window fails instead of truncating', () =>
+    withTmpDir((dir) =>
+      withToken(() =>
+        withFakeCurl(
+          { 'issues/search': issuesBody([ISSUE], 20_001) },
+          () =>
+            assert.throws(
+              () => collectSonarcloud(CTX, { dir, cfg: { project_key: 'pk' } }),
+              /partial fetch/
+            )
+        )
+      )
+    ))
+
+  test('a properties-file host off sonarcloud.io skips before any request', () =>
+    withTmpDir((dir) => {
+      writeFileSync(
+        join(dir, 'sonar-project.properties'),
+        'sonar.projectKey=pk\nsonar.host.url=https://evil.example\n'
+      )
+      withToken(() =>
+        assert.throws(() => collectSonarcloud(CTX, { dir }), SourceSkipped)
+      )
+    }))
+})
+
+describe('assertSonarHostTrusted', () => {
+  const proj = (
+    host: string,
+    hostVia: 'config' | 'properties' | 'default'
+  ): SonarProject => ({ projectKey: 'pk', host, via: 'properties', hostVia })
+
+  test('a non-default host from a properties file is refused', () => {
+    assert.throws(
+      () => assertSonarHostTrusted(proj('https://sq.internal', 'properties')),
+      SourceSkipped
+    )
+    assert.throws(
+      () => assertSonarHostTrusted(proj('https://sonarcloud.io.evil.com', 'properties')),
+      SourceSkipped
+    )
+  })
+
+  test('the same host asserted in config is trusted', () => {
+    assertSonarHostTrusted(proj('https://sq.internal', 'config'))
+  })
+
+  test('non-loopback http is refused even from config', () => {
+    assert.throws(
+      () => assertSonarHostTrusted(proj('http://sq.internal', 'config')),
+      /cleartext/
+    )
+  })
+
+  test('loopback http and the default host from properties are fine', () => {
+    assertSonarHostTrusted(proj('http://localhost:9000', 'properties'))
+    assertSonarHostTrusted(proj('https://sonarcloud.io', 'properties'))
+    assertSonarHostTrusted(proj('https://sonarcloud.io', 'default'))
+  })
+
+  test('an unparseable host refuses', () => {
+    assert.throws(
+      () => assertSonarHostTrusted(proj('not a url', 'config')),
+      SourceSkipped
+    )
+  })
 })
 
 describe('dedupeReviewThreads', () => {
@@ -303,6 +372,27 @@ describe('dedupeReviewThreads', () => {
     const d = dedupeReviewThreads(
       [sonar('K6', 'src/c.ts', 3)],
       [thread({ path: 'src/c.ts', line: 1, body: '[open](https://sonarcloud.io/project/issues?open=K6)' })]
+    )
+    assert.equal(d.kept.length, 0)
+    assert.equal(d.duped[0]!.coveredBy, 'PRRT_1')
+  })
+
+  test('a bare key mention in prose or code does not cover', () => {
+    const d = dedupeReviewThreads(
+      [sonar('K7', 'src/c.ts', 3), sonar('K9', 'src/c.ts', 3)],
+      [
+        thread({ path: 'src/c.ts', line: 1, body: 'K7 also flagged in docs/K7-notes' }),
+        { ...thread({ body: 'the constant issues=K99 reminded me of K9' }), thread_id: 'PRRT_2' },
+      ]
+    )
+    assert.equal(d.kept.length, 2)
+    assert.equal(d.duped.length, 0)
+  })
+
+  test('key in an issues= link param covers', () => {
+    const d = dedupeReviewThreads(
+      [sonar('K8', 'src/c.ts', 3)],
+      [thread({ path: 'src/c.ts', line: 1, body: 'see https://sq.internal/project/issues?id=p&issues=K8' })]
     )
     assert.equal(d.kept.length, 0)
     assert.equal(d.duped[0]!.coveredBy, 'PRRT_1')
