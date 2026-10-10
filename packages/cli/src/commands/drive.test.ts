@@ -586,6 +586,19 @@ describe('buildRebaseFixerPrompt', () => {
 })
 
 describe('ensureFixerWorktree', () => {
+  /** A remote-backed `work/bro-a` standing at `<root>/main--bro-a` —
+   *  bare origin.git + pushed branch + its worktree. Each remote test
+   *  then stales refs or moves tips to taste. */
+  const remoteBackedCheckout = (root: string, main: string): string => {
+    git(['init', '-q', '--bare', join(root, 'origin.git')], root)
+    git(['remote', 'add', 'origin', join(root, 'origin.git')], main)
+    git(['branch', 'work/bro-a'], main)
+    git(['push', '-qu', 'origin', 'work/bro-a'], main)
+    const dir = join(root, 'main--bro-a')
+    git(['worktree', 'add', '-q', dir, 'work/bro-a'], main)
+    return dir
+  }
+
   test('reuses the conventional dir on the right branch; a foreign one falls back', () => {
     const { root, main } = initRepo('bro-drive-wtx-')
     inside(main, root, () => {
@@ -632,12 +645,7 @@ describe('ensureFixerWorktree', () => {
   test('a reused checkout fast-forwards to the remote tip', () => {
     const { root, main } = initRepo('bro-drive-wtr-')
     inside(main, root, () => {
-      git(['init', '-q', '--bare', join(root, 'origin.git')], root)
-      git(['remote', 'add', 'origin', join(root, 'origin.git')], main)
-      git(['branch', 'work/bro-a'], main)
-      git(['push', '-qu', 'origin', 'work/bro-a'], main)
-      const dir = join(root, 'main--bro-a')
-      git(['worktree', 'add', '-q', dir, 'work/bro-a'], main)
+      const dir = remoteBackedCheckout(root, main)
       // the remote gains a commit the standing checkout hasn't seen —
       // commit on main and push it across as work/bro-a; the tracking
       // ref is staled so the fetch inside ensure is what restores it
@@ -655,12 +663,7 @@ describe('ensureFixerWorktree', () => {
   test('a branch diverged from its remote is refused, never clobbered', () => {
     const { root, main } = initRepo('bro-drive-wtd-')
     inside(main, root, () => {
-      git(['init', '-q', '--bare', join(root, 'origin.git')], root)
-      git(['remote', 'add', 'origin', join(root, 'origin.git')], main)
-      git(['branch', 'work/bro-a'], main)
-      git(['push', '-qu', 'origin', 'work/bro-a'], main)
-      const dir = join(root, 'main--bro-a')
-      git(['worktree', 'add', '-q', dir, 'work/bro-a'], main)
+      const dir = remoteBackedCheckout(root, main)
       // local tip one way, remote the other — the tracking ref is
       // staled so the fetch inside ensure is what proves the divergence
       git(['-C', dir, 'commit', '-qm', 'local', '--allow-empty'], main)
