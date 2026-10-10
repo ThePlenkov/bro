@@ -56,9 +56,10 @@ export interface HeartbeatSummary {
   attention: number
 }
 
-/** The last tick's summary. Absent file, torn JSON, or a missing/odd
- *  `ts` all read as `null` — "never had a heartbeat" is an ordinary
- *  state for a repo, never an error. */
+/** The last tick's summary. Absent file, torn JSON, a missing/odd `ts`,
+ *  or a non-array `attention` all read as `null` — "never had a
+ *  heartbeat" is an ordinary state for a repo, never an error, and a
+ *  half-shaped snapshot must not pass for "quiet". */
 export function readHeartbeat(dir: string, now = Date.now()): HeartbeatSummary | null {
   const file = heartbeatFile(dir)
   if (file === null || !existsSync(file)) {
@@ -70,13 +71,13 @@ export function readHeartbeat(dir: string, now = Date.now()): HeartbeatSummary |
       attention?: unknown
     }
     const ms = typeof raw.ts === 'string' ? Date.parse(raw.ts) : Number.NaN
-    if (!Number.isFinite(ms)) {
+    if (!Number.isFinite(ms) || !Array.isArray(raw.attention)) {
       return null
     }
     return {
       ts: raw.ts as string,
       ageMs: Math.max(0, now - ms),
-      attention: Array.isArray(raw.attention) ? raw.attention.length : 0,
+      attention: raw.attention.length,
     }
   } catch {
     return null

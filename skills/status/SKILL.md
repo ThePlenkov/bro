@@ -54,8 +54,9 @@ now": one call instead of `bd list` + `bro agents status` +
   heartbeat file → `watch: null`.
 - **`watch` is the rig's heartbeat freshness** — read from
   `<git-common>/bro/heartbeat.json` (rewritten by every `bro watch`
-  tick). `ageMs` is the signal: fresh = the timer is alive, stale = it
-  died or was never installed. `attention` is the last snapshot's
+  tick, a manual `--once` included). `ageMs` is the signal: fresh = a
+  watch ran recently, stale = none did — it attests the last tick, not
+  which invocation wrote it. `attention` is the last snapshot's
   open-decision count.
 - **Bead rows are slim.** Only `id`, `title`, `priority`,
   `issue_type`, `assignee` cross the wire — descriptions and

@@ -87,7 +87,7 @@ describe('writeHeartbeat + readHeartbeat', () => {
     }
   })
 
-  test('torn or ts-less files read as null — never an error', () => {
+  test('torn or half-shaped files read as null — never an error', () => {
     const { root, main } = initRepo('bro-hb-')
     inside(main, root, () => {
       const file = join(main, '.git', 'bro', 'heartbeat.json')
@@ -95,6 +95,10 @@ describe('writeHeartbeat + readHeartbeat', () => {
       writeFileSync(file, '{torn')
       assert.equal(readHeartbeat(main), null)
       writeFileSync(file, JSON.stringify({ attention: [] }))
+      assert.equal(readHeartbeat(main), null)
+      writeFileSync(file, JSON.stringify({ ts: snap.ts }))
+      assert.equal(readHeartbeat(main), null)
+      writeFileSync(file, JSON.stringify({ ts: snap.ts, attention: 3 }))
       assert.equal(readHeartbeat(main), null)
     })
   })
