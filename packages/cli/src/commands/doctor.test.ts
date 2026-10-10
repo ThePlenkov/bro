@@ -629,7 +629,7 @@ describe('bro doctor', () => {
   test('debt-sonarcloud: configured but SONAR_TOKEN unset warns with the remediation', () =>
     withEnv(
       {
-        config: { stores: ['jsonl'], debt: { sources: ['review-threads', 'sonarcloud'], sonarcloud: { project_key: 'pk' } } },
+        config: { stores: ['jsonl'], debt: { sources: ['review-threads', 'sonarcloud'], sourceConfig: { sonarcloud: { project_key: 'pk' } } } },
         bins: ['gh'],
       },
       (dir) => {
@@ -654,7 +654,7 @@ describe('bro doctor', () => {
   test('debt-sonarcloud: token + config key + curl → ok naming the project', () =>
     withEnv(
       {
-        config: { debt: { sources: ['sonarcloud'], sonarcloud: { project_key: 'acme_widgets' } } },
+        config: { debt: { sources: ['sonarcloud'], sourceConfig: { sonarcloud: { project_key: 'acme_widgets' } } } },
         bins: ['gh', 'curl'],
         env: { SONAR_TOKEN: 'squ' },
       },
@@ -662,6 +662,23 @@ describe('bro doctor', () => {
         const c = byName(runDoctorChecks(dir), 'debt-sonarcloud')
         assert.equal(c.status, 'ok', JSON.stringify(c))
         assert.match(c.detail, /acme_widgets/)
+      }
+    ))
+
+  test('debt-sonarcloud: run from a nested dir still reads the root properties file', () =>
+    withEnv(
+      {
+        config: { debt: { sources: ['sonarcloud'] } },
+        bins: ['gh', 'curl'],
+        env: { SONAR_TOKEN: 'squ' },
+      },
+      (dir) => {
+        writeFileSync(join(dir, 'sonar-project.properties'), 'sonar.projectKey=rootkey\n')
+        const sub = join(dir, 'packages', 'deep')
+        mkdirSync(sub, { recursive: true })
+        const c = byName(runDoctorChecks(sub), 'debt-sonarcloud')
+        assert.equal(c.status, 'ok', JSON.stringify(c))
+        assert.match(c.detail, /rootkey/)
       }
     ))
 })

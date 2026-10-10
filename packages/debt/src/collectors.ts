@@ -49,9 +49,10 @@ export interface CollectCtx {
   /** Checkout root for source-specific config files
    *  (sonar-project.properties). Defaults to cwd at the use site. */
   dir?: string
-  /** `debt.sonarcloud` config section — consumed by the sonarcloud
-   *  collector, ignored by the rest. */
-  sonar?: { project_key?: string; host?: string }
+  /** `debt.sourceConfig` from bro.config — per-source knob bags a
+   *  collector reads by its own name (`sourceConfig.sonarcloud`),
+   *  ignored by the rest. Field validation is the collector's job. */
+  sourceConfig?: Record<string, Record<string, unknown>>
 }
 
 /** `gh api --paginate --slurp` — all pages of a list endpoint as one flat
@@ -328,7 +329,8 @@ export const COLLECTORS: Record<
   'secret-scanning': (ctx) => collectSecretScanning(ctx),
   'stale-prs': (ctx, staleDays) => collectStalePrs(ctx, staleDays),
   'failed-ci': (ctx) => collectFailedCi(ctx),
-  sonarcloud: (ctx) => collectSonarcloud(ctx, { dir: ctx.dir, cfg: ctx.sonar }),
+  sonarcloud: (ctx) =>
+    collectSonarcloud(ctx, { dir: ctx.dir, cfg: ctx.sourceConfig?.['sonarcloud'] }),
 }
 
 /**

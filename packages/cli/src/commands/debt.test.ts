@@ -95,4 +95,29 @@ describe('syncSonarDedupeOverlays', () => {
       assert.equal(over.get('sonarcloud:DUP')?.status, 'open')
       assert.equal(over.get('sonarcloud:WF')?.status, 'wontfix')
     }))
+
+  test('a covered row transitions open + done → duplicate; wontfix stays', () =>
+    withDebtDir(() => {
+      const existing = [
+        rec('sonarcloud:O1', 'open'),
+        rec('sonarcloud:D1', 'done'),
+        rec('sonarcloud:WF', 'wontfix'),
+        rec('sonarcloud:DUP', 'duplicate'),
+      ]
+      const coveredBy = new Map(existing.map((r) => [r.thread_id, 'thread:T1'] as const))
+      syncSonarDedupeOverlays(
+        existing,
+        [],
+        new Set(existing.map((r) => r.thread_id)),
+        coveredBy
+      )
+      const over = readLedgerOverlays()
+      assert.equal(over.get('sonarcloud:O1')?.status, 'duplicate')
+      assert.match(over.get('sonarcloud:O1')?.notes ?? '', /covered by review thread thread:T1/)
+      // a done row still reported upstream but covered isn't fixed —
+      // the thread row owns it; fix% must not count it
+      assert.equal(over.get('sonarcloud:D1')?.status, 'duplicate')
+      assert.equal(over.get('sonarcloud:WF'), undefined)
+      assert.equal(over.get('sonarcloud:DUP'), undefined)
+    }))
 })
