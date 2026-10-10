@@ -24,7 +24,16 @@
  * discovers `.beads` through the git common dir regardless of how the
  * worktree was created.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  rmdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import {
@@ -1270,7 +1279,9 @@ function recoverGhost(
     }
     if (empty) {
       if (opts.dryRun !== true) {
-        rmSync(path, { recursive: true })
+        // rmdirSync, not rmSync: it refuses anything that filled in
+        // between the check and the call — the guard IS the syscall
+        rmdirSync(path)
       }
       rep.reaped.push(`${path} (empty ghost dir)`)
       return
@@ -1843,7 +1854,21 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
       ) {
         continue
       }
-      releaseDeadClaim(ctx, { branch: '', slug: loopSlug(bead.id) }, bead)
+      // the record's worktree still narrows the owner check — a live
+      // process inside it (or a marker naming it) keeps the claim even
+      // with the tree already hand-cleaned to a bare path
+      releaseDeadClaim(
+        ctx,
+        {
+          branch: '',
+          slug: loopSlug(bead.id),
+          w:
+            v.worktree === undefined
+              ? undefined
+              : { path: v.worktree, head: '', bare: false, detached: false },
+        },
+        bead
+      )
     }
   }
   return rep
