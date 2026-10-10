@@ -22,13 +22,13 @@ export interface BatchableBead {
 /** A bead opted out of clumping by label — the operator escape hatch. */
 export const SOLO_LABEL = 'solo'
 
-const SPEC_REF = /\bspec:\s*([A-Za-z0-9._/-]+)/i
+const SPEC_REF = /\bspec:\s*([A-Z0-9._/-]+)/i
 
 /** A title prefix counts as a path only when it looks like one — a '/'
  *  separator or a file extension. 'loop: batch claims' is prose;
  *  'specs/sessions:' and 'work.ts:' are places. */
 const PATH_PREFIX = /^([^\s:]{1,200})\s*:/
-const PATHISH = /\/|\.[a-z0-9]{1,8}$/i
+const PATHISH = /(?:\/|\.[a-z0-9]{1,8}$)/i
 
 /** A spec mention → its canonical id: `spec: specs/sessions/bro-x.md`
  *  and `spec: bro-x` are the same affinity. */
@@ -96,7 +96,7 @@ export function clumpMembers<T extends BatchableBead>(
     .slice(0, opts.size - 1)
 }
 
-const escRe = (s: string): string => s.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const escRe = (s: string): string => s.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
 
 /** Which of `ids` the commit log actually names — bead coverage is
  *  evidence (a commit message carrying the id), not a self-reported PR
@@ -105,7 +105,7 @@ const escRe = (s: string): string => s.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&')
 export function coveredBeadIds(commitLog: string, ids: Iterable<string>): Set<string> {
   const covered = new Set<string>()
   for (const id of ids) {
-    if (id !== '' && new RegExp(`(?<![\\w.])${escRe(id)}(?![\\w.])`).test(commitLog)) {
+    if (id !== '' && new RegExp(String.raw`(?<![\w.])${escRe(id)}(?![\w.])`).test(commitLog)) {
       covered.add(id)
     }
   }

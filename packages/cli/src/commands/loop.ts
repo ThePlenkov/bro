@@ -44,6 +44,7 @@ import {
   commandCliName,
   ensureTasksBackend,
   facade,
+  gitBranchLog,
   gitTry,
   LockTimeout,
   procStat,
@@ -597,21 +598,7 @@ function clumpCommitLog(ctx: Ctx, item: LoopItem, pr: number): string {
     base = meta.baseRef || base
     headSha = meta.headSha
   } catch { /* fall back to the default branch guess + local tip */ }
-  for (const head of headSha === '' ? ['HEAD'] : [headSha, 'HEAD']) {
-    for (const ref of [`origin/${base}`, base]) {
-      const mb = gitTry(['-C', item.worktreeDir, 'merge-base', head, ref])
-      if (mb.code !== 0 || !mb.out.trim()) {
-        continue
-      }
-      const log = gitTry([
-        '-C', item.worktreeDir, 'log', '--format=%B', `${mb.out.trim()}..${head}`,
-      ])
-      if (log.code === 0) {
-        return log.out
-      }
-    }
-  }
-  return ''
+  return gitBranchLog(headSha, base, item.worktreeDir)
 }
 
 /** Settle the clump after its PR merged — every still-open member named
@@ -996,29 +983,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     return { kind: 'done', result: 'parked' }
   }
   if (pr === null) {
-    const verdict = agentVerdict(ctx, beads, item.worktreeDir)
-    if (verdict !== undefined) {
-      return { kind: 'done', result: verdict }
-    }
-    if (ctx.cfg.crashExitMs > 0 && elapsed < ctx.cfg.crashExitMs) {
-      // gone in seconds, no PR, no verdict — the spawn died on the
-      // environment (broken dist, bad argv), never on the bead. Reopen
-      // and the next claim walks into the same wall: claim → crash →
-      // reopen → reclaim is the respawn-burn from bro-sovl3. Park loud.
-      for (const b of openBeads(ctx, beads)) {
-        noteBead(
-          ctx.tasks,
-          b.id,
-          `loop: agent gone in ${elapsed}ms (exit ${code ?? 'spawn failure'}) — environment crash, not a verdict; parked — worktree kept at ${item.worktreeDir}`
-        )
-      }
-      say(
-        ctx,
-        `loop: ${lead.id} agent exited ${code ?? 'spawn failure'} in ${elapsed}ms — parked (crash, not work)`
-      )
-      return { kind: 'done', result: 'parked' }
-    }
-    return { kind: 'done', result: failNoPr(ctx, beads, item, code) }
+    return { kind: 'done', result: settleNoPr(ctx, beads, item, code, elapsed) }
   }
   // the loop IS the watcher — arm the same marker `act wait` drops
   // (bro-z0k2u) for the member's whole stack tenure, not per poll:
@@ -1045,6 +1010,42 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     fetchErrors: 0,
   }
   return { kind: 'member', member }
+}
+
+/** The agent exited without a PR — the settle order: a self-reported
+ *  verdict (the worker closed its own bead) wins; an instant exit is
+ *  an environment crash to park loud, never a bead failure; anything
+ *  else fails the clump and re-queues the still-open members. */
+function settleNoPr(
+  ctx: Ctx,
+  beads: ReadyBead[],
+  item: LoopItem,
+  code: number | null,
+  elapsed: number
+): ItemResult {
+  const verdict = agentVerdict(ctx, beads, item.worktreeDir)
+  if (verdict !== undefined) {
+    return verdict
+  }
+  if (ctx.cfg.crashExitMs > 0 && elapsed < ctx.cfg.crashExitMs) {
+    // gone in seconds, no PR, no verdict — the spawn died on the
+    // environment (broken dist, bad argv), never on the bead. Reopen
+    // and the next claim walks into the same wall: claim → crash →
+    // reopen → reclaim is the respawn-burn from bro-sovl3. Park loud.
+    for (const b of openBeads(ctx, beads)) {
+      noteBead(
+        ctx.tasks,
+        b.id,
+        `loop: agent gone in ${elapsed}ms (exit ${code ?? 'spawn failure'}) — environment crash, not a verdict; parked — worktree kept at ${item.worktreeDir}`
+      )
+    }
+    say(
+      ctx,
+      `loop: ${beads[0]!.id} agent exited ${code ?? 'spawn failure'} in ${elapsed}ms — parked (crash, not work)`
+    )
+    return 'parked'
+  }
+  return failNoPr(ctx, beads, item, code)
 }
 
 /** One member's settled snapshot → the mapped action. 'kept' parks the

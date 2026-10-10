@@ -13,6 +13,7 @@ import { basename, dirname } from 'node:path'
 import {
   ensureAuth,
   facade,
+  gitBranchLog,
   gitCommonDir,
   gitTry,
   mergeQueueHost,
@@ -636,33 +637,40 @@ function closeLandedBead(rev: ReviewFacade, t: PrTarget, bead: string): void {
   const covered =
     ids.length > 1 ? coveredBeadIds(clumpBranchLog(rev, t), ids) : new Set(ids)
   for (const id of ids) {
-    try {
-      const tasks = claimStore(process.cwd())
-      const row = tasks.get(id)
-      if (row === undefined) {
-        console.error(`act: bead ${id} not in the task store — nothing closed for ${link}`)
-        continue
-      }
-      if (row.status === 'closed') {
-        continue
-      }
-      if (!covered.has(id)) {
-        try {
-          tasks.update(id, {
-            notes: `act: ${link} merged without a commit naming ${id} — re-queued`,
-          })
-        } catch { /* the reopen below is the load-bearing half */ }
-        try {
-          tasks.reopen(id)
-        } catch { /* best-effort unclaim */ }
-        console.error(`act: ${id} re-queued — no covering commit in ${link}`)
-        continue
-      }
-      tasks.close(id, `landed via ${link}`)
-      console.error(`act: ${id} closed — ${link} merged`)
-    } catch (err) {
-      console.error(`act: closing ${id} failed — ${err instanceof Error ? err.message : String(err)}`)
+    dischargeLandedId(id, covered, link)
+  }
+}
+
+/** One marker id's merge discharge — close when a covering commit
+ *  landed, re-queue when it didn't. Best-effort per id: one bead's
+ *  store failure must not skip the rest of the clump. */
+function dischargeLandedId(id: string, covered: Set<string>, link: string): void {
+  try {
+    const tasks = claimStore(process.cwd())
+    const row = tasks.get(id)
+    if (row === undefined) {
+      console.error(`act: bead ${id} not in the task store — nothing closed for ${link}`)
+      return
     }
+    if (row.status === 'closed') {
+      return
+    }
+    if (!covered.has(id)) {
+      try {
+        tasks.update(id, {
+          notes: `act: ${link} merged without a commit naming ${id} — re-queued`,
+        })
+      } catch { /* the reopen below is the load-bearing half */ }
+      try {
+        tasks.reopen(id)
+      } catch { /* best-effort unclaim */ }
+      console.error(`act: ${id} re-queued — no covering commit in ${link}`)
+      return
+    }
+    tasks.close(id, `landed via ${link}`)
+    console.error(`act: ${id} closed — ${link} merged`)
+  } catch (err) {
+    console.error(`act: closing ${id} failed — ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
@@ -680,19 +688,7 @@ function clumpBranchLog(rev: ReviewFacade, t: PrTarget): string {
   } catch {
     return ''
   }
-  for (const head of meta.headSha === '' ? ['HEAD'] : [meta.headSha, 'HEAD']) {
-    for (const ref of [`origin/${meta.baseRef}`, meta.baseRef]) {
-      const mb = gitTry(['merge-base', head, ref])
-      if (mb.code !== 0 || !mb.out.trim()) {
-        continue
-      }
-      const log = gitTry(['log', '--format=%B', `${mb.out.trim()}..${head}`])
-      if (log.code === 0) {
-        return log.out
-      }
-    }
-  }
-  return ''
+  return gitBranchLog(meta.headSha, meta.baseRef)
 }
 
 /** The claim discharge owed even when the merge didn't happen here —

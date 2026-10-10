@@ -106,7 +106,8 @@ function buildBatchPrompt(
   const sections = beads
     .map((b, i) => {
       const desc = b.description?.trim()
-      return `## ${i + 1}. ${b.id} (P${b.priority} ${b.issue_type})\n\n${b.title}\n${desc ? `\n${desc}\n` : ''}`
+      const descBlock = desc ? `\n${desc}\n` : ''
+      return `## ${i + 1}. ${b.id} (P${b.priority} ${b.issue_type})\n\n${b.title}\n${descBlock}`
     })
     .join('\n')
   return `You are an autonomous implementation agent. This worktree is already

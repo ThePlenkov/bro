@@ -605,6 +605,21 @@ const log = (msg) => {
       : 'work'
   fs.appendFileSync(f, kind + ' ' + msg + '\\n')
 }
+// register the "opened" PR — the per-branch map (seeded prs: {}) is
+// authoritative when present; the flat prOpened flag feeds the legacy
+// single-PR probes
+const markPrOpened = (s) => {
+  if (s.prs) {
+    s.prs[branch] = {
+      ...(s.prs[branch] ?? {}),
+      number: s.prs[branch]?.number ?? (s.nextPr = (s.nextPr ?? 10) + 1),
+      state: 'OPEN',
+      headRef: branch,
+      baseRef: 'main',
+    }
+  }
+  s.prOpened = true
+}
 if (prompt.includes('review-threads')) {
   // fix round — resolve the threads and stop
   const s = load()
@@ -630,17 +645,7 @@ switch (scenario) {
     execFileSync('git', ['commit', '-qm', 'feat: the thing'])
     const s = load()
     s.events = (s.events ?? []).concat([{ spawn: process.env.BRO_BEAD_ID || null, branch }])
-    // the per-branch map (seeded prs: {}) is authoritative when present
-    if (s.prs) {
-      s.prs[branch] = {
-        ...(s.prs[branch] ?? {}),
-        number: s.prs[branch]?.number ?? (s.nextPr = (s.nextPr ?? 10) + 1),
-        state: 'OPEN',
-        headRef: branch,
-        baseRef: 'main',
-      }
-    }
-    s.prOpened = true
+    markPrOpened(s)
     save(s)
     log('opened pr')
     break
@@ -662,16 +667,7 @@ switch (scenario) {
     s.events = (s.events ?? []).concat([
       { spawn: process.env.BRO_BEAD_ID || null, ids: ids.join(','), branch },
     ])
-    if (s.prs) {
-      s.prs[branch] = {
-        ...(s.prs[branch] ?? {}),
-        number: s.prs[branch]?.number ?? (s.nextPr = (s.nextPr ?? 10) + 1),
-        state: 'OPEN',
-        headRef: branch,
-        baseRef: 'main',
-      }
-    }
-    s.prOpened = true
+    markPrOpened(s)
     save(s)
     log('opened pr for ' + ids.join(','))
     break
