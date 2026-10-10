@@ -179,6 +179,18 @@ function printStatus(state: PrActState, gate: ExitGate): void {
   }
 }
 
+/** The settled wait's journal `to` — timeout, blocked, externally
+ *  settled (merged/closed mid-poll), or green. */
+function waitVerdict(res: GateWaitResult): string {
+  if (res.timedOut) {
+    return 'timeout'
+  }
+  if (!res.gate.ok) {
+    return 'blocked'
+  }
+  return res.state.state === 'OPEN' ? 'green' : res.state.state.toLowerCase()
+}
+
 /**
  * `bro act wait` — the gate-watcher as a primitive: poll until nothing is
  * pending (gate green, threads/failures to act on, or timeout), print the
@@ -257,13 +269,7 @@ async function cmdWait(argv: string[]): Promise<void> {
     kind: 'gate',
     bead: flag(argv, '--bead'),
     pr: t.pr,
-    to: res.timedOut
-      ? 'timeout'
-      : !res.gate.ok
-        ? 'blocked'
-        : res.state.state !== 'OPEN'
-          ? res.state.state.toLowerCase()
-          : 'green',
+    to: waitVerdict(res),
     detail: {
       via: 'act',
       sha: res.state.headSha,

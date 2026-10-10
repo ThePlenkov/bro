@@ -2356,6 +2356,32 @@ function probeDisk(p: string, warned?: Set<string>): DiskProbe | undefined {
   }
 }
 
+/** A done-path push outcome — tallied, the park journaled (it never
+ *  passed through leave(), so the held claim is the transition the
+ *  journal wants), and echoed under --json. */
+function settleOutcome(
+  ctx: Ctx,
+  q: QueueState,
+  ids: string[],
+  out: Extract<PushOutcome, { kind: 'done' }>
+): void {
+  q.tally[out.result] += 1
+  if (out.result === 'parked') {
+    emitLifecycle(ctx.root, {
+      kind: 'park',
+      bead: ids[0],
+      to: 'parked',
+      detail: {
+        via: 'loop',
+        ...(ids.length > 1 ? { beads: ids.join(',') } : {}),
+      },
+    })
+  }
+  if (ctx.json) {
+    console.log(JSON.stringify({ bead: ids[0], beads: ids, result: out.result }))
+  }
+}
+
 /** The push half of a tick — true when a bead was claimed (drained or
  *  not, the fresh member's first poll wants an immediate pass, not an
  *  idle interval). False when the push was skipped — queue drained,
@@ -2413,23 +2439,7 @@ async function tryClaim(
     // line lands when the worker exits and the gate join happens
     say(ctx, pushLine(ctx, out.member.pr, ids, q.stack.length))
   } else {
-    q.tally[out.result] += 1
-    if (out.result === 'parked') {
-      // done-path parks never passed through leave() — the held claim
-      // is the transition the journal wants
-      emitLifecycle(ctx.root, {
-        kind: 'park',
-        bead: ids[0],
-        to: 'parked',
-        detail: {
-          via: 'loop',
-          ...(ids.length > 1 ? { beads: ids.join(',') } : {}),
-        },
-      })
-    }
-    if (ctx.json) {
-      console.log(JSON.stringify({ bead: ids[0], beads: ids, result: out.result }))
-    }
+    settleOutcome(ctx, q, ids, out)
   }
   return true
 }
