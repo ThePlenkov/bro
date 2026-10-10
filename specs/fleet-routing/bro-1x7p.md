@@ -202,8 +202,10 @@ preserves it through bd `Step.metadata` → the issue's
 `metadata.command`, and `run` joins the `types.custom` registration so
 the kind never flattens to `task`. The spawned unit is a pinned
 detached shell — `pid`/`log`/`exit` in `bro/agents/` through the same
-registry. **The exit is the verdict**: the wrapper's `$?` tail spends
-the code before recording it — `0` runs `bro convoy done
+registry. **The exit is the verdict**: the wrapper runs the payload in
+a subshell — `( command ); s=$?` — so a payload `exit` ends the
+subshell, never the `sh -c` the tail hangs off, and the `$?` tail
+spends the code before recording it — `0` runs `bro convoy done
 "$BRO_BEAD_ID" --mol "$BRO_MOL_ID" --result …` on the pins the unit
 already carries, closing its own step in the same breath that proves
 it (`stepsOf` counts only closed beads; without this edge a finished
