@@ -98,10 +98,12 @@ Developing bro itself: see CONTRIBUTING.md.
   is a marker, not a gate: bd 1.3.1 stores external deps verbatim
   but never resolves them (and mis-parses the `mesh://` URI at `:`),
   so `bd ready` still lists the bead — `bro mesh wait <id>` is the
-  block; point-check the thread between turns. The top-level
+  point check (one read, never blocks) between turns. The top-level
   `bro request` / `bro wait` forms (same-machine delivery, the
   forge-issue plane) are specced in specs/cross-repo/ but not
-  shipped — `bro mesh` is the only live surface.
+  shipped — `bro mesh` is the only live surface; the specced
+  `bro wait` is a blocking watcher (45-min timeout), not a
+  point check.
 
 ## Convoy fan-out — detach + pins
 
