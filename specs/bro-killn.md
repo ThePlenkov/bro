@@ -122,13 +122,49 @@ into `pulse.json` when `--every` isn't passed.
    site fleet.md rows.
 8. `npm run gen:plugins`, `npm run build`, `npm test`.
 
+### The checkpoint probes (slice 2)
+
+Every lifecycle event is one checkpoint — `pulseCheckpoint` behind both
+`watchConnector.sessionStart` (the first event, cold start) and
+`watchConnector.postTool` (the warm path, every tool call):
+
+1. `pulseRearm(dir)` decides, pure: armed marker + dead `pulse.lock`
+   holder + orchestrator + no live recorded spawn → `rearm`.
+2. The probe spawns the bounded window detached + unref'd (zero-cost —
+   shell, no LLM; the hook exits on its own timeout) and records the
+   child in `pulse.spawn.json`.
+3. A live recorded spawn suppresses the next rearm — it is either the
+   pulse itself or a standby waiting behind another contender; without
+   the record every tool call would pile another standby on a dead
+   incumbent. A dead recorded pid does not suppress — the next event
+   retries.
+
+Matcher note: the shipped Devin hook map keeps PostToolUse at `^exec$` —
+every tool call would pay a `bro hooks` process for coverage the pulse
+does not need; exec dominates agent activity, and the next exec call
+checkpoints anything that happened between (bounded staleness, probes
+are idempotent).
+
+Delivery to the session is unchanged: mailbox drops drain on the same
+postTool probe (the notify connector) and on Stop/UserPromptSubmit. A
+fully idle session has no events — the bounded window simply dies and
+the next event rearms it; orchestration never depends on the session
+being awake.
+
+- `BRO_AGENT_ID` guards the rearm on the write side too — a worker's
+  postTool probe returns quiet always.
+- Spawn uses `process.argv[1]` as the CLI entry so dist/npx/source
+  installs all re-spawn themselves; the child takes `pulse.lock` under
+  the same `--every` guard (workers exit 2 even if spawned by hand).
+
 ## Acceptance
 
 - `bro watch install` on a repo with a legacy timer: timer gone,
   `pulse.json` written, nothing under `~/.config/systemd` or crontab.
-- A session start in an armed repo with no pulse shows the rearm line;
-  with a live pulse it is quiet; the same start under `BRO_AGENT_ID`
-  shows nothing either way.
+- An armed repo with a dead pulse gets the bounded window spawned on
+  the first checkpoint (session start or the next tool call) — the hook
+  reports the pid; a live pulse or a live recorded spawn stays quiet;
+  under `BRO_AGENT_ID` every checkpoint is quiet.
 - `BRO_AGENT_ID=x bro watch --every` and `... drive --every` exit 2.
 - Two `bro watch --every` on one repo: the second stands by and takes
   over when the first exits — never concurrent.
