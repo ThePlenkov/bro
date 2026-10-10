@@ -71,7 +71,14 @@ The third is `bro mesh wait`'s existing reduction, reused unchanged: a
 request threads to itself, so the capability *is* the thread id. It is
 the progress line and the one lifecycle fact that is actionable from
 the requester's side — a `reject` means the request must be re-posted.
-It is an annotation, never the verdict.
+It is an annotation, never the verdict. The rejected read is the
+envelope set, not the reduced `stage`: concurrent `accept`/`reject`
+verdicts on the requester's side can both pass the `submitted` check,
+`meshThread` ranks the two terminal stages equally, and record order
+then picks the reported stage — so `stage === 'rejected'` can hide a
+real `reject`. `bro wait` reports the thread rejected iff a `reject`
+envelope is present in the set; a thread carrying both verdicts is an
+anomaly a human must untangle, and `actionable` is the honest answer.
 
 ### Verdicts — the exit code is the answer
 
@@ -199,8 +206,9 @@ AGENTS.md                             session-facing point-check rule
       non-external arg → exit 2 + mesh-wait hint); unbound rig → exit 2;
       unreadable plane → exit 1 with 3-strike tolerance; open at deadline
       → exit 4 carrying the ref; closed without `provides:` → exit 3
-      naming the ask; `reject` envelope → exit 3 as rejected; shipped +
-      closed → exit 0; replica-sourced `free` annotated; e2e two
+      naming the ask; `reject` envelope → exit 3 as rejected; `accept`
+      + `reject` on one thread → exit 3 (envelope-set read, not stage);
+      shipped + closed → exit 0; replica-sourced `free` annotated; e2e two
       checkouts: `bro request --for` → waiter exits 3 closed-unshipped →
       far side `bd ship` → waiter exits 0
 
