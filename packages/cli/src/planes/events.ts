@@ -1,8 +1,10 @@
 /** events plane — the local event broker's ring plus the notify
- *  mailbox, read non-destructively (specs/bro-9rls.1.md). Rows are
+ *  mailbox and the durable lifecycle journal, read non-destructively
+ *  (specs/bro-9rls.1.md + specs/telemetry/bro-ub91h.md). Rows are
  *  EventRow keyed `{gen}:{seq}` for bus records, drop filename for
- *  mailbox rows. `drainMailbox` is deliberately unused — it consumes
- *  drops and rewires cursors, so it cannot back a read. */
+ *  mailbox rows, `life:<n>` (line position) for lifecycle rows.
+ *  `drainMailbox` is deliberately unused — it consumes drops and
+ *  rewires cursors, so it cannot back a read. */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import {
@@ -11,15 +13,18 @@ import {
   busSocketPath,
   busStatus,
   drainDirs,
+  lifecyclePath,
   mailboxEvent,
   mailboxIdentity,
+  readLifecycle,
   verbsNotWired,
   type BusRecord,
   type EventRow,
+  type LifecycleRow,
   type PlaneCtx,
   type PlaneDescriptor,
 } from '@broject/core'
-import { argNumber, bounded, dispatchRead } from './helpers.ts'
+import { argNumber, argString, bounded, dispatchRead } from './helpers.ts'
 
 const VERBS = ['publish']
 
@@ -76,6 +81,22 @@ const busRow = (r: EventRow | BusRecord): EventRow => {
   }
 }
 
+/** Durable transition rows off `<git-common>/bro/events.jsonl` — the
+ *  journal every writer (loop/act/drive/agents/work) appends through
+ *  `emitLifecycle`. `life:<seq>` ids are line positions in the current
+ *  file; compaction shifts them the same way a truncated bus tail
+ *  reports `gapped`. */
+function lifecycleRows(
+  dir: string,
+  opts: { limit?: number; kind?: string; bead?: string; pr?: number; since?: string }
+): LifecycleRow[] {
+  return readLifecycle(dir, opts).map((r) => ({
+    ...r,
+    id: `life:${r.seq}`,
+    origin: 'lifecycle',
+  }))
+}
+
 export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
   const dir = ctx.dir
   const socket = () => busSocketPath(dir)
@@ -97,7 +118,11 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
       reason = 'no broker socket'
     }
     const drops = mailboxRows(dir, limit + 1)
-    const merged = [...rows, ...drops].sort((a, b) => a.ts.localeCompare(b.ts))
+    // the durable journal joins the transient view — its rows sort
+    // beside bus/mailbox by ts; `since` stays a bus-ring cursor and
+    // does NOT filter lifecycle rows
+    const life = lifecycleRows(dir, { limit: limit + 1 })
+    const merged = [...rows, ...drops, ...life].sort((a, b) => a.ts.localeCompare(b.ts))
     // limit-truncation IS a gap — the mailbox facade's probe flags it
     // the same way; a client must never read a partial replay as complete
     const truncated = merged.length > limit
@@ -107,8 +132,29 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
       ...(reason === undefined ? {} : { reason }),
     }
   }
+  /** The durable bead→land timeline alone — the read a metrics view
+   *  (cycle-time, fix-rounds, WIP curve) is built on. `since` is an
+   *  ISO timestamp here (unlike tail's bus-seq cursor). */
+  const lifecycle = (a?: Record<string, unknown>) => {
+    const limit = Math.min(argNumber(a, 'limit') ?? 256, 2_000)
+    const since = argString(a, 'since')
+    const rows = lifecycleRows(dir, {
+      limit: limit + 1,
+      kind: argString(a, 'kind'),
+      bead: argString(a, 'bead'),
+      pr: argNumber(a, 'pr'),
+      ...(since !== undefined ? { since } : {}),
+    })
+    const truncated = rows.length > limit
+    return {
+      events: truncated ? rows.slice(-limit) : rows,
+      gapped: truncated,
+      ...(truncated ? { reason: 'limit-truncated — page with since' } : {}),
+    }
+  }
   const reads: Record<string, (a?: Record<string, unknown>) => unknown> = {
     tail,
+    lifecycle,
   }
   return {
     name: 'events',
@@ -123,10 +169,20 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
           since: { type: 'integer', description: 'ring cursor — events with seq > since' },
         },
       },
+      lifecycle: {
+        type: 'object',
+        properties: {
+          limit: { type: 'integer', description: 'max rows (default 256, cap 2000)' },
+          since: { type: 'string', description: 'ISO timestamp — rows with ts > since' },
+          kind: { type: 'string', description: 'transition kind filter' },
+          bead: { type: 'string', description: 'bead id filter' },
+          pr: { type: 'integer', description: 'PR number filter' },
+        },
+      },
     },
     /** `canStream` = the broker accepts subscribers right now. `read`
-     *  = there is a bus socket path or a mailbox to read — drops land
-     *  even with the broker down (dual-write rule). */
+     *  = a bus socket path, a mailbox, or the durable journal exists —
+     *  drops and lifecycle rows land even with the broker down. */
     capabilities: async () => {
       const sock = socket()
       let stream = false
@@ -138,7 +194,8 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
         )
       }
       const mail = drainDirs(dir).some((d) => existsSync(d))
-      return { read: sock !== null || mail, stream, publish: false }
+      const life = lifecyclePath(dir) !== null && existsSync(lifecyclePath(dir)!)
+      return { read: sock !== null || mail || life, stream, publish: false }
     },
     list: async (f) => {
       const limit = Math.min(typeof f?.limit === 'number' ? f.limit : 64, 512)

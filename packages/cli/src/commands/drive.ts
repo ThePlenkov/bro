@@ -45,6 +45,7 @@ import {
   agentRegistryPath,
   awaitFileLock,
   checkBeads,
+  emitLifecycle,
   ensureAuth,
   facade,
   gitCommonDir,
@@ -345,6 +346,12 @@ function closeFixer(store: TaskStore, id: string, reason: string): void {
   try {
     if (store.get(id)?.status !== 'closed') {
       store.close(id, reason)
+      emitLifecycle(process.cwd(), {
+        kind: 'close',
+        bead: id,
+        to: 'closed',
+        detail: { via: 'drive', reason },
+      })
     }
   } catch (err) {
     console.error(`drive: could not close fixer bead ${id} — ${errText(err)}`)
@@ -419,10 +426,20 @@ function addFixerWorktree(
       gitTry(['-C', mainRoot, 'worktree', 'remove', dir])
       return { err: `${branch} moved while its worktree was being added` }
     }
+    emitLifecycle(mainRoot, {
+      kind: 'worktree',
+      to: 'created',
+      detail: { via: 'drive', worktree: dir, branch },
+    })
     return { path: dir, created: true }
   }
   const retry = gitTry(['-C', mainRoot, 'worktree', 'add', '-b', branch, dir, `origin/${branch}`])
   if (retry.code === 0) {
+    emitLifecycle(mainRoot, {
+      kind: 'worktree',
+      to: 'created',
+      detail: { via: 'drive', worktree: dir, branch },
+    })
     return { path: dir, created: true }
   }
   return { err: retry.err || add.err }
@@ -815,7 +832,14 @@ async function retireIfOrphaned(
     }
     // the work evaporated after we checked out — retire the dir we
     // just added or it lingers as an orphaned fixer worktree
-    gitTry(['-C', ctx.mainRoot, 'worktree', 'remove', wt])
+    const rm = gitTry(['-C', ctx.mainRoot, 'worktree', 'remove', wt])
+    if (rm.code === 0) {
+      emitLifecycle(ctx.mainRoot, {
+        kind: 'worktree',
+        to: 'removed',
+        detail: { via: 'drive', worktree: wt, branch, reason: 'orphaned' },
+      })
+    }
     return undefined
   } finally {
     release()

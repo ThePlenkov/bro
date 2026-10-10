@@ -41,6 +41,7 @@ import {
   commandCliName,
   DEFAULT_CONFIG,
   deriveProviderWalls,
+  emitLifecycle,
   gitTry,
   isAgentCause,
   JudgeUnavailable,
@@ -1441,6 +1442,29 @@ function prepareSpawn(
   if (opts.claimAs !== undefined) {
     rebindStep(spec.beadsDir, spec.molStep, opts.claimAs)
   }
+  // lifecycle — the registry claim + spawn record (specs/telemetry/
+  // bro-ub91h.md); fail-open, so a wedged journal never stalls a spawn
+  emitLifecycle(dir, {
+    kind: 'claim',
+    bead: spec.molStep,
+    from: claimed || opts.claimAs !== undefined ? 'in_progress' : 'open',
+    to: 'in_progress',
+    detail: { via: 'agents', agent: agentId, backend },
+  })
+  emitLifecycle(dir, {
+    kind: 'spawn',
+    bead: spec.molStep,
+    to: 'spawned',
+    detail: {
+      via: 'agents',
+      agent: agentId,
+      backend,
+      worktree: resolve(spec.repoRoot),
+      ...(spec.provider !== undefined ? { provider: spec.provider } : {}),
+      ...(spec.model !== undefined ? { model: spec.model } : {}),
+      ...(spec.class !== undefined ? { class: spec.class } : {}),
+    },
+  })
   return { agentId, promptFile, log, exitFile, reservation }
   } catch (err) {
     // a write/claim failure after the reservation — the caller never saw
@@ -1521,6 +1545,34 @@ function ensureExitCause(
   const c = classifyExitCause(readLogTail(entry.log, entry.logFrom), entry.exitStatus)
   entry.cause = c.cause
   entry.resetAt = c.resetAt
+  // lifecycle — the agent-exit transition, emitted once per run at the
+  // harvest (the early return above skips re-emit on a carried cause).
+  // The .exit file's mtime is the honest wall-clock; the harvest's own
+  // clock can land a poll late (specs/telemetry/bro-ub91h.md)
+  let exitAt: number | undefined
+  if (home !== null) {
+    try {
+      exitAt = statSync(join(home, `${entry.agentId}.exit`)).mtimeMs
+    } catch {
+      // the file rotated between read and stat — fall back to now
+    }
+  }
+  emitLifecycle(dir, {
+    kind: 'agent-exit',
+    bead: molStep,
+    actor: entry.agentId,
+    session: entry.agentId,
+    from: 'running',
+    to: agentEntryBlocked(entry) ? 'blocked' : 'exited',
+    ts: exitAt,
+    detail: {
+      via: 'agents',
+      agent: entry.agentId,
+      backend: entry.backend,
+      code: entry.exitStatus,
+      cause: c.cause,
+    },
+  })
   try {
     // the merge must bind to the SAME generation we classified — a
     // respawn between our snapshot read and this patch owns the entry

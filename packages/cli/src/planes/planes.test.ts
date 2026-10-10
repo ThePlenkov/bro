@@ -231,3 +231,88 @@ describe('events plane adapter', () => {
     )
   })
 })
+
+describe('events plane — durable lifecycle journal', () => {
+  const LIFE_ROWS = [
+    { ts: '2026-01-01T00:00:01Z', kind: 'claim', bead: 'bro-a', actor: 'x', session: 's', from: 'open', to: 'in_progress' },
+    { ts: '2026-01-01T00:00:02Z', kind: 'spawn', bead: 'bro-a', actor: 'x', session: 's', to: 'spawned' },
+    { ts: '2026-01-01T00:00:03Z', kind: 'merge', bead: 'bro-a', pr: 9, actor: 'x', session: 's', to: 'merged' },
+  ]
+
+  /** tmp git repo + journal rows + isolated XDG — the plane under test
+   *  sees exactly these rows and nothing ambient. */
+  const withJournal = async (
+    rows: object[],
+    fn: (events: ReturnType<typeof planes>[number]) => Promise<void>
+  ): Promise<void> => {
+    const { dir, rm } = tmp()
+    const xdg = mkdtempSync(join(tmpdir(), 'bro-planes-xdg-'))
+    const savedXdg = process.env.XDG_STATE_HOME
+    process.env.XDG_STATE_HOME = xdg
+    try {
+      execFileSync('git', ['init', '-q'], { cwd: dir })
+      const bro = join(dir, '.git', 'bro')
+      mkdirSync(bro, { recursive: true })
+      writeFileSync(join(bro, 'events.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+      await fn(planes(dir).find((p) => p.name === 'events')!)
+    } finally {
+      if (savedXdg === undefined) delete process.env.XDG_STATE_HOME
+      else process.env.XDG_STATE_HOME = savedXdg
+      rmSync(xdg, { recursive: true, force: true })
+      rm()
+    }
+  }
+
+  test('lifecycle read returns life:<seq> rows in order, filtered', async () => {
+    await withJournal(LIFE_ROWS, async (events) => {
+      const res = (await events.read('lifecycle', {})) as { events: EventRow[]; gapped: boolean }
+      assert.equal(res.events.length, 3)
+      assert.deepEqual(
+        res.events.map((e) => e.id),
+        ['life:1', 'life:2', 'life:3']
+      )
+      assert.equal(res.events[0]!.origin, 'lifecycle')
+      const filtered = (await events.read('lifecycle', { kind: 'merge', pr: 9 })) as {
+        events: EventRow[]
+      }
+      assert.equal(filtered.events.length, 1)
+      assert.equal(filtered.events[0]!.id, 'life:3')
+      const since = (await events.read('lifecycle', { since: '2026-01-01T00:00:01Z' })) as {
+        events: EventRow[]
+      }
+      assert.equal(since.events.length, 2)
+    })
+  })
+
+  test('lifecycle rows merge into tail beside mailbox drops', async () => {
+    await withJournal(LIFE_ROWS, async (events) => {
+      const res = (await events.read('tail', {})) as { events: EventRow[] }
+      const life = res.events.filter((e) => e.origin === 'lifecycle')
+      assert.equal(life.length, 3)
+      assert.equal(life[0]!.kind, 'claim')
+      assert.equal(res.events.at(-1)!.id, 'life:3')
+    })
+  })
+
+  test('get resolves a life:<seq> id; capabilities.read counts the journal', async () => {
+    await withJournal(LIFE_ROWS, async (events) => {
+      const row = (await events.get('life:2')) as EventRow | undefined
+      assert.equal(row?.kind, 'spawn')
+      const caps = (await events.capabilities()) as { read: boolean }
+      assert.equal(caps.read, true)
+    })
+  })
+
+  test('no journal still serves — empty read, not an error', async () => {
+    const { dir, rm } = tmp()
+    try {
+      execFileSync('git', ['init', '-q'], { cwd: dir })
+      const events = planes(dir).find((p) => p.name === 'events')!
+      const res = (await events.read('lifecycle', {})) as { events: EventRow[]; gapped: boolean }
+      assert.deepEqual(res.events, [])
+      assert.equal(res.gapped, false)
+    } finally {
+      rm()
+    }
+  })
+})
