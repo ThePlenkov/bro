@@ -1222,7 +1222,7 @@ export function sessionQuotaOf(
     // loudly rather than spawn past a quota the operator armed
     throw new SpawnError(
       `agents.${backend}.sessionKind '${kind}' has no registered session plane — ` +
-        `cannot enforce agents.${kind}.maxSessions`,
+        `cannot enforce agents.${kind}.maxSessions/maxWorkers`,
       'config'
     )
   }

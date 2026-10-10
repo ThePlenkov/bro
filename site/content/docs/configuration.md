@@ -115,6 +115,7 @@ backend option set or schema default. Choose the backend under
 | --- | ------- | ---- |
 | `agents.<backend>.provider` | unset | Named [provider](/docs/commands/providers) the backend's spawns run through |
 | `agents.<kind>.maxSessions` | unset | Host-wide live-session quota for that session kind (e.g. `agents.devin.maxSessions`), admitted under a shared slot lock |
+| `agents.<kind>.maxWorkers` | unset | Host-wide quota counting only *spawned* sessions of the kind — interactive sessions never consume this budget. The plane must distinguish workers (devin: `BRO_AGENT_ID` env badge or a non-terminal stdin); arming it on a plane that cannot refuses loudly |
 
 ### `providers`
 
