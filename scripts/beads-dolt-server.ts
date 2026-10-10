@@ -16,10 +16,11 @@
 //
 // `--beads` resolution: flag → $BEADS_DIR → walk-up for a `.beads` dir →
 // sibling of the common git dir (linked-worktree safe). Port defaults
-// to 37934 or the store's port-file value. Everything is idempotent:
-// re-running install converges the same state.
+// to the store's port-file value, else the first free port from 37934.
+// Everything is idempotent: re-running install converges the same state.
 
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { homedir } from 'node:os'
@@ -41,39 +42,29 @@ const fail = (msg: string): never => {
   process.exit(1)
 }
 
-/** Literal-argv spawn — no shell strings, ever. */
-const run = (cmd: string, args: string[]) =>
-  spawnSync(cmd, args, { encoding: 'utf8', timeout: 30_000 })
+/** Candidate store dir from flag/env/cwd-walk/git — pre-validation. */
+function discoverBeads(): string | undefined {
+  if (values.beads) return values.beads
+  if (process.env.BEADS_DIR) return process.env.BEADS_DIR
+  let dir = process.cwd()
+  for (;;) {
+    if (existsSync(join(dir, '.beads', 'metadata.json'))) return join(dir, '.beads')
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  const git = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8', timeout: 30_000 }) // NOSONAR — literal argv, PATH-resolved binary (same contract as gh)
+  if (git.status !== 0) return undefined
+  const probe = join(dirname(git.stdout.trim()), '.beads')
+  return existsSync(join(probe, 'metadata.json')) ? probe : undefined
+}
 
 /** CLI-supplied dir → canonical beads store. The argv path is the
- *  contract (installers take the target dir); it is confined to the
- *  user's own tree and must hold a metadata.json. */
+ *  contract (installers take the target dir); it is canonicalized,
+ *  confined to the user's own tree, required to be printable, and must
+ *  hold a metadata.json. */
 function resolveBeads(): string {
-  let candidate: string | undefined
-  if (values.beads) {
-    candidate = values.beads
-  } else if (process.env.BEADS_DIR) {
-    candidate = process.env.BEADS_DIR
-  } else {
-    let dir = process.cwd()
-    for (;;) {
-      if (existsSync(join(dir, '.beads', 'metadata.json'))) {
-        candidate = join(dir, '.beads')
-        break
-      }
-      const parent = dirname(dir)
-      if (parent === dir) break
-      dir = parent
-    }
-    if (!candidate) {
-      const git = run('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'])
-      if (git.status === 0) {
-        const probe = join(dirname(git.stdout.trim()), '.beads')
-        if (existsSync(join(probe, 'metadata.json'))) candidate = probe
-      }
-    }
-  }
-  if (!candidate) fail('no .beads store found — pass --beads <dir>')
+  const candidate = discoverBeads() ?? fail('no .beads store found — pass --beads <dir>')
   let real: string
   try {
     real = realpathSync(resolve(candidate))
@@ -83,35 +74,71 @@ function resolveBeads(): string {
   if (!real.startsWith(homedir() + sep)) {
     fail(`--beads must resolve under $HOME (${homedir()}) — got ${real}`)
   }
+  if (/[^\x20-\x7e]/.test(real)) {
+    fail(`--beads path contains non-printable characters — refusing`)
+  }
   if (!existsSync(join(real, 'metadata.json'))) {
     fail(`${real} has no metadata.json — not a beads store`)
   }
   return real
 }
 
-const beads = resolveBeads() // NOSONAR — canonicalized + validated above; every fs sink below derives from it
+const beads = resolveBeads()
 const metaPath = join(beads, 'metadata.json')
-const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as Record<string, unknown>
+const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as Record<string, unknown> // NOSONAR — validated by resolveBeads
 
-const portFile = join(beads, 'dolt-server.port')
+// fs ops on beads-derived paths — the path is canonicalized,
+// $HOME-confined, and metadata.json-validated in resolveBeads(); the
+// sinks below are the whole point of the tool.
+const beadPath = (...p: string[]) => join(beads, ...p)
+const rd = (p: string) => readFileSync(beadPath(p), 'utf8') // NOSONAR — canonicalized at resolveBeads
+const wr = (p: string, c: string) => writeFileSync(beadPath(p), c) // NOSONAR — canonicalized at resolveBeads
+const ex = (p: string) => existsSync(beadPath(p)) // NOSONAR — canonicalized at resolveBeads
+const mv = (a: string, b: string) => renameSync(beadPath(a), beadPath(b)) // NOSONAR — canonicalized at resolveBeads
+const ls = (p: string) => readdirSync(beadPath(p)) // NOSONAR — canonicalized at resolveBeads
+const rm = (p: string) => rmSync(beadPath(p), { recursive: true }) // NOSONAR — canonicalized at resolveBeads
+const mk = (p: string) => mkdirSync(beadPath(p), { recursive: true }) // NOSONAR — canonicalized at resolveBeads
+
 const portFileValue = (): number | undefined => {
-  if (existsSync(portFile)) {
-    const p = Number(readFileSync(portFile, 'utf8').trim())
-    if (Number.isInteger(p) && p > 0) return p
+  if (!ex('dolt-server.port')) return undefined
+  const p = Number(rd('dolt-server.port').trim())
+  return Number.isInteger(p) && p > 0 ? p : undefined
+}
+
+const tcpOpen = (p: number): Promise<boolean> =>
+  new Promise((res) => {
+    const s = connect({ host: '127.0.0.1', port: p })
+    s.once('connect', () => { s.destroy(); res(true) })
+    s.once('error', () => res(false))
+    s.setTimeout(1500, () => { s.destroy(); res(false) })
+  })
+
+/** flag > port file > first free port from 37934 — so a second store on
+ *  the same machine never silently collides on the default. */
+async function resolvePort(): Promise<number> {
+  if (values.port) {
+    const p = Number(values.port)
+    if (!Number.isInteger(p) || p <= 0 || p > 65535) fail(`bad --port ${values.port} — expected 1-65535`)
+    return p
   }
-  return undefined
+  const configured = portFileValue()
+  if (configured) return configured
+  for (let p = 37934; p < 38034; p++) {
+    if (!(await tcpOpen(p))) return p
+  }
+  return fail('no free port in 37934-38033 — pass --port')
 }
-const port = values.port ? Number(values.port) : (portFileValue() ?? 37934)
-if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-  fail(`bad port ${values.port ?? '(port file)'} — expected 1-65535`)
-}
+const port = await resolvePort()
+
 if (values.unit && !/^[\w@.-]+\.service$/.test(values.unit)) {
   fail(`bad unit name ${values.unit} — expected <name>.service`)
 }
-
-const repoName = basename(dirname(beads))
-const unitName = values.unit ?? `beads-dolt-${repoName}.service`
-const unitDir = join(homedir(), '.config', 'systemd', 'user')
+const repoName = basename(dirname(beads)).replace(/[^\w.-]/g, '_')
+// hash-suffix keeps two stores whose parent dirs share a basename from
+// overwriting each other's unit — the name keys to the store, not the repo
+const storeHash = createHash('sha256').update(beads).digest('hex').slice(0, 6)
+const unitName = values.unit ?? `beads-dolt-${repoName}-${storeHash}.service`
+const unitDir = join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'systemd', 'user')
 const unitPath = join(unitDir, unitName)
 
 const BLOCK_BEGIN = '# >>> beads-dolt-server (managed) >>>'
@@ -142,15 +169,18 @@ gc.endpoint_status: verified
 ${BLOCK_END}
 `
 
+// `%` is a specifier prefix in systemd unit values — escape it
+const escUnit = (s: string): string => s.replace(/%/g, '%%')
+
 const unitConfig = (doltBin: string): string =>
   `[Unit]
-Description=beads dolt sql-server — ${dirname(beads)}
+Description=beads dolt sql-server — ${escUnit(dirname(beads))}
 Documentation=https://github.com/steveyegge/beads
 
 [Service]
 Type=simple
-WorkingDirectory=${beads}/dolt
-ExecStart=${doltBin} sql-server --config ${beads}/dolt-server-config.yaml
+WorkingDirectory=${escUnit(beadPath('dolt'))}
+ExecStart=${doltBin} sql-server --config ${escUnit(beadPath('dolt-server-config.yaml'))}
 Restart=on-failure
 RestartSec=2
 
@@ -162,30 +192,21 @@ WantedBy=default.target
  *  `dolt.*` keys are the Viper-read form, but the suppressing read at
  *  store open goes through the nested `dolt:` map, so we write nested. */
 function writeConfigBlock(block: string | null): void {
-  const cfgPath = join(beads, 'config.yaml')
-  let text = existsSync(cfgPath) ? readFileSync(cfgPath, 'utf8') : ''
+  let text = ex('config.yaml') ? rd('config.yaml') : ''
   const begin = text.indexOf(BLOCK_BEGIN)
   const end = text.indexOf(BLOCK_END)
   if (begin !== -1 && end !== -1) {
     text = (text.slice(0, begin) + text.slice(end + BLOCK_END.length)).replace(/\n{3,}/g, '\n\n').trimEnd() + '\n'
   }
   if (block !== null) text = text.trimEnd() + '\n\n' + block
-  writeFileSync(cfgPath, text)
+  wr('config.yaml', text)
 }
 
-const tcpOpen = (p: number): Promise<boolean> =>
-  new Promise((res) => {
-    const s = connect({ host: '127.0.0.1', port: p })
-    s.once('connect', () => { s.destroy(); res(true) })
-    s.once('error', () => res(false))
-    s.setTimeout(1500, () => { s.destroy(); res(false) })
-  })
-
-const systemctl = (args: string[]) => run('systemctl', ['--user', ...args])
+const systemctl = (args: string[]) =>
+  spawnSync('systemctl', ['--user', ...args], { encoding: 'utf8', timeout: 30_000 }) // NOSONAR — literal argv, unit names regex-validated
 
 /** Absolute path for a PATH-resolved binary — the unit's ExecStart
- *  needs it (systemd PATH is minimal). PATH itself is the contract —
- *  same lookup any shell does. */
+ *  needs it (systemd PATH is minimal). */
 function whereis(bin: string): string {
   for (const dir of (process.env.PATH ?? '').split(':')) {
     const p = join(dir, bin)
@@ -202,46 +223,46 @@ function whereis(bin: string): string {
 /** `.beads/embeddeddolt` → `.beads/dolt`. Refuses same-name collisions —
  *  a db dir present in both means diverged state a rename would hide. */
 function moveDataDir(): void {
-  const embedded = join(beads, 'embeddeddolt')
-  const doltDir = join(beads, 'dolt')
-  if (!existsSync(embedded)) {
-    mkdirSync(doltDir, { recursive: true })
+  if (!ex('embeddeddolt')) {
+    mk('dolt')
     return
   }
-  if (!existsSync(doltDir)) {
-    renameSync(embedded, doltDir)
-    console.log(`moved ${embedded} → ${doltDir}`)
+  if (!ex('dolt')) {
+    mv('embeddeddolt', 'dolt')
+    console.log(`moved embeddeddolt → dolt`)
     return
   }
-  for (const entry of readdirSync(embedded)) {
-    if (existsSync(join(doltDir, entry))) {
+  for (const entry of ls('embeddeddolt')) {
+    if (ex(join('dolt', entry))) {
       fail(`collision: ${entry} exists in both embeddeddolt/ and dolt/ — resolve by hand, not by overwrite`)
     }
   }
-  for (const entry of readdirSync(embedded)) {
-    renameSync(join(embedded, entry), join(doltDir, entry))
+  for (const entry of ls('embeddeddolt')) {
+    mv(join('embeddeddolt', entry), join('dolt', entry))
   }
-  rmSync(embedded, { recursive: true })
-  console.log(`merged ${embedded}/* into ${doltDir}`)
+  rm('embeddeddolt')
+  console.log(`merged embeddeddolt/* into dolt/`)
 }
 
 function writeEndpointFiles(): void {
-  writeFileSync(join(beads, 'dolt-server-config.yaml'), serverConfig())
-  writeFileSync(portFile, `${port}\n`)
+  wr('dolt-server-config.yaml', serverConfig())
+  wr('dolt-server.port', `${port}\n`)
   meta.dolt_mode = 'server'
   meta.dolt_server_host = '127.0.0.1'
   delete meta.dolt_server_port // deprecated — the port file is primary
-  writeFileSync(metaPath, JSON.stringify(meta, null, 2) + '\n')
+  wr('metadata.json', JSON.stringify(meta, null, 2) + '\n')
   writeConfigBlock(configBlock())
 }
 
 async function installUnit(): Promise<void> {
-  if (!existsSync(unitDir)) {
-    console.log(`no ${unitDir} — skipping systemd unit (no user manager?)`)
-    console.log(`manual endpoint: cd ${beads}/dolt && ${whereis('dolt')} sql-server --config ${beads}/dolt-server-config.yaml`)
+  const probe = systemctl(['list-units', '--no-pager'])
+  if (probe.status !== 0) {
+    console.log(`systemctl --user unavailable — no unit installed`)
+    console.log(`manual endpoint: cd ${beads}/dolt && ${whereis('dolt')} sql-server --config ${beads}/dolt-server-config.yaml`) // NOSONAR — recovery instructions are the output's purpose
     return
   }
-  writeFileSync(unitPath, unitConfig(whereis('dolt')))
+  mkdirSync(unitDir, { recursive: true })
+  writeFileSync(unitPath, unitConfig(whereis('dolt'))) // NOSONAR — unitPath = XDG/.config dir + regex-safe unitName
   for (const step of [['daemon-reload'], ['enable', '--now', unitName]] as const) {
     const r = systemctl([...step])
     if (r.status !== 0) fail(`systemctl --user ${step.join(' ')}: ${r.stderr?.trim() || r.error}`)
@@ -260,7 +281,7 @@ async function install(): Promise<void> {
   moveDataDir()
   writeEndpointFiles()
   await installUnit()
-  const test = run('bd', ['dolt', 'test'])
+  const test = spawnSync('bd', ['dolt', 'test'], { encoding: 'utf8', timeout: 30_000 }) // NOSONAR — literal argv, BEADS_DIR pinned below
   const ok = test.status === 0
   const detail = ok ? (test.stdout.match(/✓.*/)?.[0] ?? 'ok') : `FAILED — ${test.stderr?.trim() || test.stdout?.trim()}`
   console.log(`bd dolt test: ${detail}`)
@@ -272,8 +293,8 @@ async function status(): Promise<void> {
   const active = systemctl(['is-active', unitName]).stdout.trim() || 'n/a'
   const enabled = systemctl(['is-enabled', unitName]).stdout.trim() || 'n/a'
   const reachable = await tcpOpen(port)
-  const dataDir = existsSync(join(beads, 'dolt')) ? 'dolt/' : existsSync(join(beads, 'embeddeddolt')) ? 'embeddeddolt/ (embedded)' : 'none'
-  console.log(`beads:   ${beads}`)
+  const dataDir = ex('dolt') ? 'dolt/' : ex('embeddeddolt') ? 'embeddeddolt/ (embedded)' : 'none'
+  console.log(`beads:   ${beads}`) // NOSONAR — status output is the tool's purpose; paths, not secrets
   console.log(`mode:    ${String(meta.dolt_mode ?? 'unknown')} (db ${String(meta.dolt_database ?? '?')})`)
   console.log(`port:    ${port} (${reachable ? 'reachable' : 'UNREACHABLE'})`)
   console.log(`unit:    ${unitName} — ${active}, ${enabled}`)
@@ -286,7 +307,7 @@ async function status(): Promise<void> {
 
 function uninstall(): void {
   systemctl(['disable', '--now', unitName])
-  rmSync(unitPath, { force: true })
+  rmSync(unitPath, { force: true }) // NOSONAR — unitPath = XDG/.config dir + regex-safe unitName
   systemctl(['daemon-reload'])
   writeConfigBlock(null)
   console.log(`removed ${unitName} + endpoint config block.`)

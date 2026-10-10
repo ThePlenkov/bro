@@ -20,8 +20,9 @@ per-call startup disappears.
 - **Managed lifecycle** — `dolt.auto-start: false` in the `dolt:` config
   block: bd must not spawn an unsupervised twin — endpoint down is a
   fast connection-refused, not a surprise fork. A `systemd --user` unit
-  `beads-dolt-<repo>.service` (`Restart=on-failure`) keeps the server up
-  across reboots (linger required).
+  `beads-dolt-<repo>-<hash6>.service` (`Restart=on-failure`; the hash
+  keys the unit to the store path so same-named repos can't collide)
+  keeps the server up across reboots (linger required).
 - **Same config file, both paths** —
   `.beads/dolt-server-config.yaml` is the unit's `--config` and what
   `bd dolt start` reuses manually — one port, no drift.
@@ -45,13 +46,13 @@ server`, adds the `dolt:` block + `gc.endpoint_*` markers to
 Endpoint down (`bd` fails fast with "auto-start is disabled"):
 
 ```bash
-systemctl --user start beads-dolt-<repo>.service   # managed path
-bd dolt start                                     # manual fallback — same config, same port
+systemctl --user start beads-dolt-<repo>-<hash>.service   # managed path — `status` prints the name
+bd dolt start                                            # manual fallback — same config, same port
 ```
 
 The unit survives reboot only with linger
 (`loginctl enable-linger <user>`). Logs:
-`journalctl --user -u beads-dolt-<repo>.service` (or
+`journalctl --user -u beads-dolt-<repo>-<hash>.service` (or
 `.beads/dolt-server.log` for `bd dolt start`).
 
 ## Revert to embedded

@@ -32,11 +32,14 @@ cross-project leakage).
   `dolt-server-config.yaml` is the server's own YAML (`listener`,
   `cfg_dir`) — the same file `bd dolt start` generates, so the manual
   fallback and the managed unit bind the same port.
-- **Lifecycle** — `systemd --user` unit `beads-dolt-<repo>.service`
-  (`Type=simple`, `Restart=on-failure`, `ExecStart=dolt sql-server
-  --config <beads>/dolt-server-config.yaml`, cwd `.beads/dolt`) — the
-  shape `bd dolt start` uses, but supervised and linger-persistent.
-  `bd dolt start` remains the manual cold-start fallback.
+- **Lifecycle** — `systemd --user` unit
+  `beads-dolt-<repo>-<hash6>.service` (`Type=simple`,
+  `Restart=on-failure`, `ExecStart=dolt sql-server --config
+  <beads>/dolt-server-config.yaml`, cwd `.beads/dolt`; the hash suffix
+  keys the unit to the store path so same-basename repos can't
+  collide) — the shape `bd dolt start` uses, but supervised and
+  linger-persistent. `bd dolt start` remains the manual cold-start
+  fallback.
 - **Markers** — `gc.endpoint_origin` / `gc.endpoint_status` in
   `config.yaml`, same convention as sverka's `managed_city`: declares
   the endpoint externally managed and verified.
