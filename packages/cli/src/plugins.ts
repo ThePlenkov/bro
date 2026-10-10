@@ -57,6 +57,8 @@ import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts'
 import { runLoopCommand } from './commands/loop.ts'
 import { applyNextPlan, runNextCommand } from './commands/next.ts'
 import { runNotifyCommand } from './commands/notify.ts'
+import { rigSection } from './commands/rig-config.ts'
+import { runRigCommand } from './commands/rig.ts'
 import { runQueryCommand } from './commands/query.ts'
 import { parseNextPlan, PLAN_VERSION as NEXT_PLAN_VERSION, type NextPlan } from './commands/next-plan.ts'
 import { resolvePlanDoc, runPlanCommand } from './commands/plan.ts'
@@ -390,6 +392,15 @@ export const PLUGINS: BroPlugin[] = [
     name: 'doctor',
     summary: 'Environment diagnostics: node, git, gh auth, bd, hooks, config, remotes [--json]',
     run: runDoctorCommand,
+  }),
+  definePlugin({
+    name: 'rig',
+    summary:
+      'Rig freshness — main checkout tracks upstream, rebuilt + hotpatched: sync|status|watch|install',
+    run: runRigCommand,
+    skill: 'rig',
+    configKey: 'rig',
+    configSchema: rigSection,
   }),
   definePlugin({
     name: 'sync',
