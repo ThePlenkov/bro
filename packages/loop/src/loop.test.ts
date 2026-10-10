@@ -55,6 +55,8 @@ describe('loopSection', () => {
       fixRounds: 2,
       maxItems: 5,
       maxOpen: 2,
+      batch: 6,
+      batchMinPriority: 2,
     })
     assert.deepEqual(cfg, {
       agent: 'devin -p',
@@ -68,7 +70,15 @@ describe('loopSection', () => {
       fixRounds: 2,
       maxItems: 5,
       maxOpen: 2,
+      batch: 6,
+      batchMinPriority: 2,
     })
+  })
+
+  test('batch floors — 0 would claim solo even when configured on', () => {
+    assert.equal(loopSection({ batch: 0 }).batch, DEFAULT_LOOP_CONFIG.batch)
+    assert.equal(loopSection({ batch: -1 }).batch, DEFAULT_LOOP_CONFIG.batch)
+    assert.equal(loopSection({ batch: 'lots' }).batch, DEFAULT_LOOP_CONFIG.batch)
   })
 
   test('crashExitMs: 0 is valid (legacy reopen), negatives/junk fall back', () => {
@@ -150,6 +160,58 @@ describe('prompts', () => {
     assert.match(p, /#42/)
     assert.match(p, /reviewer says fix foo/)
     assert.match(p, /Do NOT merge/)
+  })
+
+  test('batch work prompt renders every bead + the coverage contract', () => {
+    const clump: LoopBead[] = [
+      bead,
+      { id: 'bro-x2', title: 'fix the lint', priority: 3, issue_type: 'task' },
+      { id: 'bro-x3', title: 'drop the dead code', priority: 4, issue_type: 'task' },
+    ]
+    const p = buildWorkPrompt(clump, 'loop/bro-x1')
+    // every member's id + title is in the order
+    assert.match(p, /bro-x1/)
+    assert.match(p, /bro-x2/)
+    assert.match(p, /bro-x3/)
+    assert.match(p, /fix the lint/)
+    assert.match(p, /drop the dead code/)
+    // the batch frame — one worker, one PR
+    assert.match(p, /# Batch — 3 beads, one worker, one PR/)
+    // the coverage contract: per-bead commits naming the id are the
+    // only evidence the gate counts
+    assert.match(p, /NAMING ITS ID/)
+    assert.match(p, /Closes <id>/)
+    // per-bead verdicts close by id, not the shared env var
+    assert.match(p, /bd close <id>/)
+    assert.match(p, /\$BRO_BEAD_IDS/)
+    // push order still checkpoints first
+    const checkpoint = p.indexOf('Per-bead checkpoints')
+    const verify = p.indexOf('Verify like CI')
+    assert.ok(checkpoint !== -1 && verify !== -1 && checkpoint < verify)
+    assert.match(p, /Do NOT merge/)
+  })
+
+  test('batch prompt uses the backend close verb per id', () => {
+    const clump: LoopBead[] = [
+      bead,
+      { id: 'bro-x2', title: 'fix the lint', priority: 3, issue_type: 'task' },
+    ]
+    const p = buildWorkPrompt(clump, 'loop/bro-x1', undefined, undefined, 'github')
+    assert.match(p, /gh issue close <id>/)
+    assert.doesNotMatch(p, /bd close/)
+  })
+
+  test('a one-element array renders the solo order', () => {
+    assert.equal(buildWorkPrompt([bead], 'loop/bro-x1'), buildWorkPrompt(bead, 'loop/bro-x1'))
+  })
+
+  test('batch fix/rebase prompts name every member', () => {
+    const clump: LoopBead[] = [
+      bead,
+      { id: 'bro-x2', title: 'fix the lint', priority: 3, issue_type: 'task' },
+    ]
+    assert.match(buildFixPrompt(clump, 42, 't'), /beads bro-x1, bro-x2/)
+    assert.match(buildFixPrompt(bead, 42, 't'), /work on bead bro-x1/)
   })
 })
 

@@ -55,6 +55,7 @@ import {
   judgeFacade,
   recordDisposition,
 } from '@broject/judge'
+import { coveredBeadIds } from '@broject/loop'
 
 function usage(): never {
   console.error(`Usage: bro act <command> [args…]
@@ -623,21 +624,75 @@ async function cmdMerge(argv: string[]): Promise<void> {
  *  keeps it out of a --json stdout stream. */
 function closeLandedBead(rev: ReviewFacade, t: PrTarget, bead: string): void {
   const link = rev.prLink(t.repo, t.pr)
-  try {
-    const tasks = claimStore(process.cwd())
-    const row = tasks.get(bead)
-    if (row === undefined) {
-      console.error(`act: bead ${bead} not in the task store — nothing closed for ${link}`)
-      return
+  const ids = bead
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s !== '')
+  // a batch claim's marker carries the whole clump comma-joined
+  // (bro-nspj7) — coverage is evidence: only members a commit on the
+  // merged head names get closed; the unfinished tail re-queues instead
+  // of landing a silent false-close. Unknown coverage reads as empty,
+  // which is the fail-safe direction (re-queue, never false-close).
+  const covered =
+    ids.length > 1 ? coveredBeadIds(clumpBranchLog(rev, t), ids) : new Set(ids)
+  for (const id of ids) {
+    try {
+      const tasks = claimStore(process.cwd())
+      const row = tasks.get(id)
+      if (row === undefined) {
+        console.error(`act: bead ${id} not in the task store — nothing closed for ${link}`)
+        continue
+      }
+      if (row.status === 'closed') {
+        continue
+      }
+      if (!covered.has(id)) {
+        try {
+          tasks.update(id, {
+            notes: `act: ${link} merged without a commit naming ${id} — re-queued`,
+          })
+        } catch { /* the reopen below is the load-bearing half */ }
+        try {
+          tasks.reopen(id)
+        } catch { /* best-effort unclaim */ }
+        console.error(`act: ${id} re-queued — no covering commit in ${link}`)
+        continue
+      }
+      tasks.close(id, `landed via ${link}`)
+      console.error(`act: ${id} closed — ${link} merged`)
+    } catch (err) {
+      console.error(`act: closing ${id} failed — ${err instanceof Error ? err.message : String(err)}`)
     }
-    if (row.status === 'closed') {
-      return
-    }
-    tasks.close(bead, `landed via ${link}`)
-    console.error(`act: ${bead} closed — ${link} merged`)
-  } catch (err) {
-    console.error(`act: closing ${bead} failed — ${err instanceof Error ? err.message : String(err)}`)
   }
+}
+
+/** The merged branch's commit messages — `<base>..<headSha>` so the log
+ *  is exactly what landed, not whatever local tip happens to be. Runs
+ *  in cwd: linked worktrees share the object db, so the clump member's
+ *  worktree (the resurrected wait's cwd) or the main checkout both
+ *  resolve the pushed head. '' when nothing resolves — coverage then
+ *  reads as "none", re-queueing every member rather than closing on a
+ *  guess. */
+function clumpBranchLog(rev: ReviewFacade, t: PrTarget): string {
+  let meta: { baseRef: string; headSha: string }
+  try {
+    meta = rev.prMeta(t)
+  } catch {
+    return ''
+  }
+  for (const head of meta.headSha === '' ? ['HEAD'] : [meta.headSha, 'HEAD']) {
+    for (const ref of [`origin/${meta.baseRef}`, meta.baseRef]) {
+      const mb = gitTry(['merge-base', head, ref])
+      if (mb.code !== 0 || !mb.out.trim()) {
+        continue
+      }
+      const log = gitTry(['log', '--format=%B', `${mb.out.trim()}..${head}`])
+      if (log.code === 0) {
+        return log.out
+      }
+    }
+  }
+  return ''
 }
 
 /** The claim discharge owed even when the merge didn't happen here —

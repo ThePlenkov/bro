@@ -19,6 +19,7 @@ planned group work is [bro convoy](/docs/commands/convoy).
 | `bro loop --profile <name>` | Apply a `fleet.profiles` preset |
 | `bro loop --model <m>` / `--auto-approve` | Model override / acp permission policy for the provider lane |
 | `bro loop --label a,b` | Only claim beads carrying one of these labels |
+| `bro loop --batch N` | Clump up to N same-affinity beads per claim — one worktree, one worker, one PR (per-bead commits name their id; uncovered members re-queue on merge) |
 | `bro loop --stack <name>` | Put each claimed bead on a named [stack](/docs/commands/stack) |
 | `bro loop --json` | Emit the loop event stream as JSON |
 

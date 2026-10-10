@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import {
   CLI_DIST,
   FAKE_BEAD,
+  assertLandedBead,
   bead,
   e2eEnv,
   git,
@@ -367,6 +368,112 @@ describe('bro loop e2e', () => {
       const r = f.run()
       assert.match(r.stdout, /0 landed, 0 closed, 0 parked, 0 failed/)
       assert.match(r.stdout, /clean — no loop tails/)
+    })
+  })
+
+  test('batch: same-affinity beads clump — one worker, one PR closes all', () => {
+    // the motivating shape: a queue of same-area debt — one claim pulls
+    // the compatible tail into a single worktree + worker + PR
+    const f = loopFixture(
+      [
+        { ...FAKE_BEAD, id: 'fx-a', title: 'cli drift 1', priority: 3, labels: ['debt', 'area:cli'] },
+        { ...FAKE_BEAD, id: 'fx-b', title: 'cli drift 2', priority: 3, labels: ['debt', 'area:cli'] },
+        { ...FAKE_BEAD, id: 'fx-c', title: 'ui drift', priority: 3, labels: ['debt', 'area:ui'] },
+      ],
+      { batch: 4 },
+      'batch'
+    )
+    writeHostState(f.hostState, { prs: {} })
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      // fx-a leads; fx-b joins on the shared area key; fx-c is foreign
+      // affinity and must claim on its own
+      assert.match(r.stdout, /loop: batch of 2 — fx-a \+ fx-b/)
+      assert.match(r.stdout, /loop: fx-a, fx-b → PR/)
+      assert.match(r.stdout, /loop: fx-c → PR/)
+      assert.doesNotMatch(r.stdout, /batch of 3/)
+      assert.match(r.stdout, /fx-a, fx-b landed/)
+      assert.match(r.stdout, /3 landed, 0 closed, 0 parked, 0 failed/)
+      // two worker spawns total — the clump's one plus fx-c's solo —
+      // and two PRs, not three
+      const evs = (readHostState(f.hostState).events ?? []) as Array<Record<string, unknown>>
+      const works = evs.filter((e) => e.spawn !== undefined)
+      assert.equal(works.length, 2)
+      assert.equal(works[0]?.spawn, 'fx-a')
+      assert.equal(works[0]?.ids, 'fx-a,fx-b')
+      assert.equal(works[1]?.spawn, 'fx-c')
+      assert.equal(works[1]?.ids, 'fx-c')
+      assert.equal(Object.keys(readHostState(f.hostState).prs as object).length, 2)
+      // coverage close: the commits named both members
+      assertLandedBead(f.db, 'fx-a')
+      assertLandedBead(f.db, 'fx-b')
+      assertLandedBead(f.db, 'fx-c')
+      // the watch marker carried the whole clump — a dead loop's rearm
+      // discharges every member, not just the lead (bro-q6ppv + nspj7)
+      const peeks = (readHostState(f.hostState).watchPeeks ?? []) as Array<{
+        marker: { pr: number; bead?: string }
+      }>
+      assert.ok(
+        peeks.some((p) => p.marker.bead === 'fx-a,fx-b'),
+        'no watch marker carried the clump ids'
+      )
+    })
+  })
+
+  test('batch partial: a member the commits never named re-queues on merge', () => {
+    // fail-safe by construction — the gate closes only what the
+    // branch's commit log proves; the unfinished tail re-queues
+    const f = loopFixture(
+      [
+        { ...FAKE_BEAD, id: 'fx-a', title: 'cli drift 1', priority: 3, labels: ['debt', 'area:cli'] },
+        { ...FAKE_BEAD, id: 'fx-b', title: 'cli drift 2', priority: 3, labels: ['debt', 'area:cli'] },
+      ],
+      { batch: 4 },
+      'batch-partial'
+    )
+    writeHostState(f.hostState, { prs: {} })
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /loop: batch of 2 — fx-a \+ fx-b/)
+      assert.match(r.stdout, /fx-b not covered .* re-queued/)
+      assertLandedBead(f.db, 'fx-a')
+      const tail = bead(f.db, 'fx-b')
+      // open again — claimed by the run, released on merge, never
+      // falsely closed; a later run re-picks it (seen-beads don't
+      // reclaim inside the same run)
+      assert.equal(tail?.status, 'open')
+      assert.match(String(tail?.notes), /merged without a commit naming fx-b/)
+    })
+  })
+
+  test('--batch never clumps a P1 lead or a keyless queue', () => {
+    // the floor is a hard gate: a P1 lead binds nothing even when
+    // same-keyed P3s sit behind it — and keyless beads never match
+    const f = loopFixture(
+      [
+        { ...FAKE_BEAD, id: 'fx-a', title: 'urgent fix', priority: 1, labels: ['area:cli'] },
+        { ...FAKE_BEAD, id: 'fx-b', title: 'cli drift 1', priority: 3, labels: ['area:cli'] },
+        { ...FAKE_BEAD, id: 'fx-c', title: 'cli drift 2', priority: 3, labels: ['area:cli'] },
+        { ...FAKE_BEAD, id: 'fx-d', title: 'misc chore', priority: 3 },
+        { ...FAKE_BEAD, id: 'fx-e', title: 'another chore', priority: 3 },
+      ],
+      {},
+      'batch'
+    )
+    writeHostState(f.hostState, { prs: {} })
+    inside(f.main, f.root, () => {
+      const r = f.run(['--batch', '4'])
+      // P1 lead claims solo even with batch on …
+      assert.match(r.stdout, /loop: fx-a → PR/)
+      assert.doesNotMatch(r.stdout, /batch of \d+ — fx-a/)
+      // … the P3 area pair clumps under its own lead …
+      assert.match(r.stdout, /loop: batch of 2 — fx-b \+ fx-c/)
+      // … and the keyless chores claim one at a time
+      assert.match(r.stdout, /loop: fx-d → PR/)
+      assert.match(r.stdout, /loop: fx-e → PR/)
+      assert.match(r.stdout, /5 landed, 0 closed, 0 parked, 0 failed/)
+      const evs = (readHostState(f.hostState).events ?? []) as Array<Record<string, unknown>>
+      assert.equal(evs.filter((e) => e.spawn !== undefined).length, 4)
     })
   })
 

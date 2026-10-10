@@ -55,8 +55,9 @@ provider flags can't sit beside it.
 
 Other `loop` keys: `bootstrap` (runs once per worktree),
 `stallMin` (advisory output-silence flag at check-in — never a kill),
-`mergeTimeoutMin`, `fixRounds`, `maxItems`, and `maxOpen` — the gate
-stack's open-PR cap (default 3).
+`mergeTimeoutMin`, `fixRounds`, `maxItems`, `maxOpen` — the gate stack's
+open-PR cap (default 3) — and `batch` / `batchMinPriority`, the clump
+knobs below.
 
 ## Commands
 
@@ -69,6 +70,7 @@ stack's open-PR cap (default 3).
 | `bro loop --agent '<tpl>'` | One-off agent override — a provider name resolves through the registry |
 | `bro loop --provider <name>` | Provider pick (`--profile`, `--model`, `--auto-approve` tune it) |
 | `bro loop --label a,b` | Declared scope — only beads carrying one of these labels are claimable; the rest of the shared queue stays untouched. "Loop the debt beads" never bleeds into unrelated work |
+| `bro loop --batch N` | Batch claims — a claim pulls up to N same-affinity beads into one worktree + worker + PR (default 1 = solo). Affinity binds on the lead's spec/epic/`area:`/path-prefix key; `loop.batchMinPriority` (default 3) keeps urgent work solo; a `solo` label opts a bead out |
 | `--merge-timeout MIN`, `--interval SEC` | Gate budget and poll overrides |
 
 ## What happens per bead
@@ -119,6 +121,15 @@ stack's open-PR cap (default 3).
   members chain onto each other and conflicts surface at rebase-time.
 - **Already-attempted beads aren't re-picked** within a run — a reopened
   failure can't spin the loop forever.
+- **Batch claims are fail-safe, never silent** — with `loop.batch`/`--batch
+  N` a claim is a clump: one worker carries N compatible beads through one
+  worktree and one PR. The contract is per-bead commits naming the bead id
+  (`fix(cli): drift (bro-x1)`) — at merge the gate closes exactly the
+  members the branch's commit log names and re-queues the uncovered tail.
+  A mid-flight batch loses only the in-flight bead, never the landed
+  prefix; a member that merged without a covering commit comes back as
+  open work, not a false close. `--max` bounds beads, not items — a clump
+  fills only up to the remaining claim budget.
 - **`--dry-run` first on a new repo** — verify the agent template and
   worktree path before the loop starts claiming.
 - One `bro loop` per repo — two runners would race the same top beads
