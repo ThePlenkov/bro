@@ -27,6 +27,11 @@
  * claim marker, fresh .work markers, and a /proc cwd scan that follows a
  * process's ancestry to an agent-shaped root — occupied is always the
  * safe verdict (a skipped pass, never double-work).
+ *
+ * One drive per repo: `bro/drive.lock` in the git common dir is held
+ * heartbeated for the process lifetime — a second `bro drive` (a
+ * respawn wrapper's duplicate) stands by behind the incumbent and
+ * takes over when it exits, never runs concurrently (spec bro-2duu9).
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -35,9 +40,11 @@ import {
   acquireFileLock,
   agentEntryBlocked,
   agentRegistryPath,
+  awaitFileLock,
   checkBeads,
   ensureAuth,
   facade,
+  gitCommonDir,
   gitTry,
   pidAlive,
   readAgentRegistry,
@@ -1101,6 +1108,14 @@ async function driveOnce(ctx: Ctx): Promise<void> {
   await sweepSettledFixers(ctx, prs)
 }
 
+/** `<git-common>/bro/drive.lock` — the one-supervisor-per-repo hold
+ *  (spec bro-2duu9). Null when git can't name a common dir: the guard
+ *  degrades away rather than blocking a run on a missing state dir. */
+function driveLockPath(root: string): string | null {
+  const common = gitCommonDir(root)
+  return common === null ? null : join(common, 'bro', 'drive.lock')
+}
+
 export async function runDriveCommand(argv: string[]): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
     usage()
@@ -1117,12 +1132,41 @@ export async function runDriveCommand(argv: string[]): Promise<void> {
     console.error(`error: ${errText(err)}`)
     process.exit(2)
   }
+  // One drive per repo: a respawn wrapper's duplicate stands by behind
+  // the incumbent's hold and supervises once it exits — two drives on
+  // the same PRs raced fixer spawns and merge probes overnight
+  // (retro bro-l63ji). Taken before auth/facade planes so a standby
+  // stays a cheap local wait.
+  const driveLock = driveLockPath(main.path)
+  const releaseSupervisor =
+    driveLock === null
+      ? () => {}
+      : await awaitFileLock(driveLock, {
+          label: 'drive supervisor lock',
+          onStandby: (pid) =>
+            console.error(
+              `bro drive: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`
+            ),
+        })
+  try {
+    await runDrive(main.path, broCfg, drive, args)
+  } finally {
+    releaseSupervisor()
+  }
+}
+
+async function runDrive(
+  mainPath: string,
+  broCfg: ReturnType<typeof loadBroConfig>,
+  drive: DriveConfig,
+  args: DriveArgs
+): Promise<void> {
   // same gate as `bro act` — without it an unauthenticated pass catches
   // every lookup's auth error per-branch and reports "no open PRs"
-  ensureAuth('reviews', { dir: main.path }, { prefer: broCfg.connectors })
-  const rev = reviewHost(main.path, broCfg.connectors)
+  ensureAuth('reviews', { dir: mainPath }, { prefer: broCfg.connectors })
+  const rev = reviewHost(mainPath, broCfg.connectors)
   const ctx: Ctx = {
-    mainRoot: main.path,
+    mainRoot: mainPath,
     rev,
     repo: rev.resolveRepo([]),
     act: broCfg.act,
@@ -1130,8 +1174,8 @@ export async function runDriveCommand(argv: string[]): Promise<void> {
     json: args.json,
     connector: args.connector,
     everySec: args.everySec,
-    env: loadAgentEnv(main.path),
-    store: facade('tasks', { dir: main.path }, { prefer: broCfg.connectors }),
+    env: loadAgentEnv(mainPath),
+    store: facade('tasks', { dir: mainPath }, { prefer: broCfg.connectors }),
   }
 
   await driveOnce(ctx)

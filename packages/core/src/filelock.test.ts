@@ -2,13 +2,20 @@
  *  release. The lock file IS the lock; the pid:token content is the
  *  ownership proof steal/release check. */
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, test } from 'node:test'
-import { acquireFileLock, withFileLock } from './filelock.ts'
+import {
+  acquireFileLock,
+  awaitFileLock,
+  holdFileLock,
+  lockHolderPid,
+  staleLock,
+  withFileLock,
+} from './filelock.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -101,6 +108,169 @@ describe('filelock', () => {
       release()
       assert.equal(existsSync(old), false)
       assert.equal(existsSync(fresh), true)
+    } finally {
+      done()
+    }
+  })
+
+  test('lockHolderPid reads the holder from pid:token and bare-pid tokens', () => {
+    const { dir, done } = tmp()
+    try {
+      const lock = join(dir, 'x.lock')
+      writeFileSync(lock, '12345:abc')
+      assert.equal(lockHolderPid(lock), 12345)
+      writeFileSync(lock, '777')
+      assert.equal(lockHolderPid(lock), 777)
+      writeFileSync(lock, 'garbage')
+      assert.equal(lockHolderPid(lock), null)
+      rmSync(lock)
+      assert.equal(lockHolderPid(lock), null)
+    } finally {
+      done()
+    }
+  })
+
+  test('holdFileLock heartbeats the mtime — a live hold never reads stale', async () => {
+    const { dir, done } = tmp()
+    try {
+      const lock = join(dir, 'x.lock')
+      const release = holdFileLock(lock, { heartbeatMs: 25 })
+      try {
+        // age the hold past the abandoned bound — without the beat a
+        // contender (or the janitor) would steal it while we live
+        const past = new Date(Date.now() - 20 * 60_000)
+        utimesSync(lock, past, past)
+        assert.equal(staleLock(lock), true)
+        await new Promise((r) => setTimeout(r, 100))
+        assert.equal(staleLock(lock), false)
+        assert.equal(lockHolderPid(lock), process.pid)
+      } finally {
+        release()
+      }
+      assert.equal(existsSync(lock), false)
+    } finally {
+      done()
+    }
+  })
+
+  test('holdFileLock re-links a vanished lock file with our token', async () => {
+    const { dir, done } = tmp()
+    try {
+      const lock = join(dir, 'x.lock')
+      const release = holdFileLock(lock, { heartbeatMs: 25 })
+      try {
+        rmSync(lock)
+        await new Promise((r) => setTimeout(r, 100))
+        assert.equal(existsSync(lock), true)
+        assert.equal(lockHolderPid(lock), process.pid)
+      } finally {
+        release()
+      }
+    } finally {
+      done()
+    }
+  })
+
+  test('the heartbeat never refreshes a foreign hold; a dead one is reclaimed', async () => {
+    const { dir, done } = tmp()
+    try {
+      const lock = join(dir, 'x.lock')
+      const release = holdFileLock(lock, { heartbeatMs: 25 })
+      try {
+        // a live foreign hold sits at the path — our beat must not
+        // bump its mtime (refreshing it would mask the thief's own
+        // abandonment age)
+        writeFileSync(lock, `${process.pid}:alien`)
+        const written = statSync(lock).mtimeMs
+        await new Promise((r) => setTimeout(r, 100))
+        assert.equal(readFileSync(lock, 'utf8'), `${process.pid}:alien`)
+        assert.equal(statSync(lock).mtimeMs, written)
+        // a dead holder is stealable — the beat reclaims the path
+        writeFileSync(lock, '99999999:alien')
+        await new Promise((r) => setTimeout(r, 150))
+        assert.equal(lockHolderPid(lock), process.pid)
+      } finally {
+        release()
+      }
+    } finally {
+      done()
+    }
+  })
+
+  test('holdFileLock re-acquire in the same process is re-entrant', () => {
+    const { dir, done } = tmp()
+    try {
+      const lock = join(dir, 'x.lock')
+      const release = holdFileLock(lock, { heartbeatMs: 25 })
+      // same-process re-acquire is re-entrant (heldLocks) — contention
+      // is proven cross-process in the awaitFileLock test below
+      const again = acquireFileLock(lock, { waitMs: 0 })
+      again()
+      assert.equal(existsSync(lock), true)
+      assert.equal(lockHolderPid(lock), process.pid)
+      release()
+      assert.equal(existsSync(lock), false)
+    } finally {
+      done()
+    }
+  })
+
+  test('awaitFileLock resolves at once over a dead holder — no standby', async () => {
+    const { dir, done } = tmp()
+    try {
+      const lock = join(dir, 'x.lock')
+      writeFileSync(lock, '99999999:gone')
+      const standby: Array<number | null> = []
+      const release = await awaitFileLock(lock, {
+        waitMs: 500,
+        onStandby: (pid) => standby.push(pid),
+      })
+      release()
+      assert.deepEqual(standby, [])
+      assert.equal(existsSync(lock), false)
+    } finally {
+      done()
+    }
+  })
+
+  test('awaitFileLock stands by behind a live foreign holder, then takes over', async () => {
+    const { dir, done } = tmp()
+    try {
+      const lock = join(dir, 'x.lock')
+      // a foreign process holds the lock ~1.2s, then exits — the
+      // standby must report the incumbent and acquire once it releases
+      const pidFile = join(dir, 'incumbent.pid')
+      const script = join(dir, 'incumbent.ts')
+      writeFileSync(
+        script,
+        `import { writeFileSync } from 'node:fs'\n` +
+          `import { acquireFileLock } from ${JSON.stringify(join(here, 'filelock.ts'))}\n` +
+          `acquireFileLock(${JSON.stringify(lock)})\n` +
+          // the holder's real pid — npx spawns a grandchild, so
+          // child.pid is the wrapper's, not the lock token's
+          `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\n` +
+          `setTimeout(() => {}, 1200)\n`
+      )
+      const child = spawn('npx', ['tsx', script], { stdio: 'ignore' })
+      // the incumbent signals its hold by writing the pid file — npx
+      // startup time varies, so poll rather than sleep a fixed beat
+      for (let i = 0; i < 50 && !existsSync(pidFile); i++) {
+        await new Promise((r) => setTimeout(r, 100))
+      }
+      assert.ok(existsSync(pidFile), 'incumbent never acquired')
+      const standby: Array<number | null> = []
+      const release = await awaitFileLock(lock, {
+        waitMs: 100,
+        heartbeatMs: 25,
+        onStandby: (pid) => standby.push(pid),
+      })
+      release()
+      assert.ok(standby.length >= 1, 'standby never reported')
+      const holderPid = Number(readFileSync(pidFile, 'utf8').trim())
+      assert.equal(standby[0], holderPid)
+      if (child.exitCode === null) {
+        await new Promise((r) => child.once('exit', r))
+      }
     } finally {
       done()
     }

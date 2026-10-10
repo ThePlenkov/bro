@@ -4,7 +4,7 @@
  *  clobbers or double-allocates. Re-entrant per path inside a process so
  *  a locked section can reach for the same lock again. */
 import { randomBytes } from 'node:crypto'
-import { linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { pidAlive } from './proc.ts'
 
@@ -238,6 +238,133 @@ export function withFileLock<T>(lock: string, fn: () => T, opts: FileLockOptions
     return fn()
   } finally {
     release()
+  }
+}
+
+/** Refresh cadence for a long hold — far under the abandoned bound so
+ *  a live hold's mtime never reads as stale to contenders or the
+ *  janitor's `*.lock` sweep; cheap enough to run for a whole process
+ *  lifetime. */
+const LOCK_HEARTBEAT_MS = Math.floor(LOCK_ABANDONED_MS / 5)
+
+/** The holder pid in a lock's `<pid>:<token>` content — for 'already
+ *  supervised by pid N' messages. A pid-only token (serve's lock
+ *  shape) parses the same way. Null when the file is absent or carries
+ *  no parseable pid. */
+export function lockHolderPid(lock: string): number | null {
+  try {
+    const pid = Number(readFileSync(lock, 'utf8').split(':')[0]?.trim())
+    return Number.isInteger(pid) && pid > 0 ? pid : null
+  } catch {
+    return null
+  }
+}
+
+export interface HeldLockOptions extends FileLockOptions {
+  /** Heartbeat period — tests inject a small value; the default sits
+   *  far under the abandoned bound. */
+  heartbeatMs?: number
+}
+
+/** Acquire `lock` and keep it heartbeated for the hold's whole
+ *  lifetime — a supervisor's singleton hold (spec bro-2duu9). A plain
+ *  acquireFileLock held past the abandoned bound is robbed even while
+ *  its holder lives (mtime age is the steal signal), so the beat
+ *  rewrites the mtime on an unref'd interval: a live hold never reads
+ *  stale, and a `--once` process is never kept running by its own
+ *  guard. If the lock file vanished mid-hold the beat re-links our own
+ *  token — a contender who already linked wins (EEXIST), an empty
+ *  path takes the hold back. */
+export function holdFileLock(lock: string, opts: HeldLockOptions = {}): () => void {
+  const { heartbeatMs = LOCK_HEARTBEAT_MS, ...lockOpts } = opts
+  const release = acquireFileLock(lock, lockOpts)
+  // acquireFileLock guarantees our token is registered — re-entrant
+  // holds re-link the outer hold's token, which is the same file
+  const token = heldLocks.get(lock)!
+  const beat = (): void => {
+    let current: string | undefined
+    try {
+      current = readFileSync(lock, 'utf8')
+    } catch {
+      current = undefined
+    }
+    if (current === token) {
+      try {
+        const now = new Date()
+        utimesSync(lock, now, now)
+      } catch {
+        // a stat/write flake — the next beat retries
+      }
+      return
+    }
+    // a foreign token holds the path: refreshing its mtime would mask
+    // a dead thief's abandonment, so the reclaim only runs when the
+    // occupant is gone or stealable (dead or past the bound) — a live
+    // foreign hold is left alone
+    if (current !== undefined && !lockStealable(lock)) {
+      return
+    }
+    try {
+      tryAcquireLockFile(lock, token)
+    } catch {
+      // staged-write/IO failure — the next beat retries
+    }
+  }
+  const timer = setInterval(beat, heartbeatMs)
+  timer.unref()
+  return () => {
+    clearInterval(timer)
+    release()
+  }
+}
+
+/** Standby report cadence — one `onStandby` per live-holder wait. */
+const STANDBY_WAIT_MS = 60_000
+
+/** One acquire attempt's sync budget while standing by —
+ *  acquireFileLock's contention wait is `Atomics.wait` on the calling
+ *  thread, so a long slice would freeze the event loop (signal
+ *  handlers, timers) for a standing-by supervisor. Slice short and
+ *  retry: signal latency stays under a quarter second. */
+const ACQUIRE_SLICE_MS = 250
+
+/** Acquire-and-hold `lock`, waiting through a live hold instead of
+ *  timing out — a duplicate supervisor's standby (spec bro-2duu9): it
+ *  serializes behind the incumbent and takes over when the hold is
+ *  released or its dead owner is stolen, so a respawn wrapper never
+ *  needs its own pacing to stay single-instance. `onStandby` fires on
+ *  entry (when a live holder already sits there) and once per wait
+ *  cycle with the holder's pid, so a blocked second instance stays
+ *  observable instead of hanging silent. */
+export async function awaitFileLock(
+  lock: string,
+  opts: HeldLockOptions & { onStandby?: (holderPid: number | null) => void } = {}
+): Promise<() => void> {
+  const { onStandby, ...lockOpts } = opts
+  // waitMs is the standby-report cadence, not the acquire slice —
+  // each attempt is bounded by ACQUIRE_SLICE_MS so a standby never
+  // stalls the event loop for the whole report window
+  const reportMs = lockOpts.waitMs ?? STANDBY_WAIT_MS
+  const incumbent = lockHolderPid(lock)
+  if (incumbent !== null && pidAlive(incumbent)) {
+    onStandby?.(incumbent)
+  }
+  let lastReport = Date.now()
+  for (;;) {
+    try {
+      return holdFileLock(lock, { ...lockOpts, waitMs: ACQUIRE_SLICE_MS })
+    } catch (err) {
+      if (!(err instanceof LockTimeout)) {
+        throw err
+      }
+      if (Date.now() - lastReport >= reportMs) {
+        lastReport = Date.now()
+        onStandby?.(lockHolderPid(lock))
+      }
+      // the slice already burned inside acquireFileLock — a macrotask
+      // here only keeps signal/'exit' handlers live between attempts
+      await new Promise((r) => setTimeout(r, 0))
+    }
   }
 }
 
