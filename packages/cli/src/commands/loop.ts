@@ -51,7 +51,6 @@ import { basename, dirname, join } from 'node:path'
 import {
   AgentNotFound,
   agentRegistryPath,
-  bdTry,
   commandCliName,
   ensureTasksBackend,
   facade,
@@ -237,26 +236,23 @@ const say = (ctx: Ctx, msg: string): void => {
 
 type ItemResult = 'landed' | 'closed' | 'parked' | 'failed'
 
-/** The beads dir the loop's own taskStore calls resolve to (`bd where`
- *  from the run root). Pinned into spawned envs as BEADS_DIR — a
- *  worktree-local .beads (tracked copy, stale checkout) or a bd too old
- *  for common-dir discovery would otherwise fork bead state: the agent's
- *  close/update lands in a db that dies with the worktree and the bead
- *  re-surfaces phantom-open in main. */
+/** The store dir the loop's own taskStore calls resolve to — the
+ *  backend's `dataDir` (`bd where` for beads). Pinned into spawned envs
+ *  as BEADS_DIR — a worktree-local .beads (tracked copy, stale
+ *  checkout) or a bd too old for common-dir discovery would otherwise
+ *  fork bead state: the agent's close/update lands in a db that dies
+ *  with the worktree and the bead re-surfaces phantom-open in main. */
 export function resolveBeadsDir(root: string, warn?: (msg: string) => void): string | undefined {
   const fail = (why: string): undefined => {
-    warn?.(`loop: 'bd where' ${why} — agents run unpinned, BEADS_DIR not set`)
+    warn?.(`loop: store data-dir ${why} — agents run unpinned, BEADS_DIR not set`)
     return undefined
   }
-  const res = bdTry(['where', '--json'], 15_000, root)
-  if (res.code !== 0) {
-    return fail(`exited ${res.code}${res.err ? `: ${res.err}` : ''}`)
-  }
   try {
-    const path = (JSON.parse(res.out) as { path?: string }).path
-    return path ?? fail('returned no path')
-  } catch {
-    return fail('returned malformed JSON')
+    const store = facade('tasks', { dir: root }, { prefer: loadBroConfig(root).connectors })
+    const dir = store.dataDir?.()
+    return dir ?? fail('returned no path')
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : String(err))
   }
 }
 

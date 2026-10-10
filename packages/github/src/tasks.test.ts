@@ -424,6 +424,38 @@ esac
     )
   })
 
+  test('deps direction — blockedBy reads down, blocking reads up', () => {
+    const n = node({ number: 9, blockedBy: [[8, 'OPEN']], blocking: [[10, 'OPEN']] })
+    withFakeGh({ FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_1: issueRead(n) }, (_log, dir) => {
+      assert.deepEqual(githubTasks(dir).deps(['9'], { direction: 'down' }), [
+        { issue_id: '9', depends_on_id: '8', type: 'blocked' },
+      ])
+    })
+    withFakeGh({ FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_1: issueRead(n) }, (_log, dir) => {
+      assert.deepEqual(githubTasks(dir).deps(['9'], { direction: 'up' }), [
+        { issue_id: '10', depends_on_id: '9', type: 'blocked' },
+      ])
+    })
+  })
+
+  test('neighbors on a non-canonical id returns the dep, never the issue itself', () => {
+    withFakeGh(
+      {
+        FAKE_GH_ACTOR: 'me',
+        FAKE_GH_ISSUE_1: issueRead(node({ number: 9, blockedBy: [[8, 'OPEN']] })),
+        FAKE_GH_ISSUE_2: issueRead(node({ number: 8 })),
+      },
+      (_log, dir) => {
+        // '#9' resolves to issue 9 — edges carry String(n.number), so a
+        // raw-id comparison would return the queried row as a neighbor
+        assert.deepEqual(
+          githubTasks(dir).neighbors('#9').map((r) => r.id),
+          ['8']
+        )
+      }
+    )
+  })
+
   test('sub-issue parent does not reach row.parent — it is not an orchestrated step', () => {
     // classify() gates `row.parent` rows as molecule steps; a github
     // sub-issue is plain decomposed work — its relationship surfaces
@@ -437,8 +469,8 @@ esac
       (_log, dir) => {
         const row = githubTasks(dir).get('5')
         assert.equal(row?.parent, undefined)
-        assert.deepEqual(githubTasks(dir).deps(['5'], { type: 'parent-child' }), [
-          { issue_id: '5', depends_on_id: '3', type: 'parent-child' },
+        assert.deepEqual(githubTasks(dir).deps(['5'], { rel: 'parent' }), [
+          { issue_id: '5', depends_on_id: '3', type: 'parent' },
         ])
       }
     )

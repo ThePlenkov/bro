@@ -42,7 +42,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import {
-  bdAt,
   countSessionReservations,
   readAgentRegistry,
   removeAgentRegistryEntries,
@@ -51,6 +50,7 @@ import {
   sessionQuotaConfig,
   sessionSlotsDir,
   stepClassInfo,
+  taskStoreAt,
   type AgentConnector,
   type AgentInfo,
   type AgentState,
@@ -429,19 +429,14 @@ function resolvePrompt(
   if (stored !== null && existsSync(stored)) {
     return readFileSync(stored, 'utf8')
   }
-  const r = bdAt(beads, ['show', molStep, '--json'])
-  if (r.code !== 0) {
-    throw new SpawnInputError(
-      `cannot render a prompt — bead ${molStep} unreadable (${r.err}); pass --prompt-file`
-    )
-  }
   let row: { title?: string; description?: string } | undefined
   try {
-    row = (JSON.parse(r.out) as { title?: string; description?: string }[])[0]
-  } catch {
-    // exit-0 garbage (non-JSON diagnostics, truncated output) falls
-    // through to the same throw as an empty row
-    row = undefined
+    row = taskStoreAt(beads).get(molStep)
+  } catch (err) {
+    throw new SpawnInputError(
+      `cannot render a prompt — bead ${molStep} unreadable ` +
+        `(${err instanceof Error ? err.message : String(err)}); pass --prompt-file`
+    )
   }
   const prompt = `# ${row?.title ?? molStep}\n\n${row?.description ?? ''}`.trim()
   if (row === undefined || prompt === `# ${molStep}`) {

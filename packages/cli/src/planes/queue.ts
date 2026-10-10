@@ -87,6 +87,8 @@ export function queuePlane(ctx: PlaneCtx): PlaneDescriptor {
       },
     },
     capabilities: async () => ({
+      // molecules are a bd-only subsystem — probe the store this
+      // plane's reads hit, not the configured tasks backend
       read: inRepo(dir) && (await bounded(beadsReachable(dir), 10_000, false)),
       pour: false, // write verbs are declared, not exposed (v1)
       claim: false,

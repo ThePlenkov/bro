@@ -29,7 +29,7 @@ import {
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { bdTry, gitTry, markerLive } from '@broject/core'
+import { facade, gitTry, loadConfig, markerLive } from '@broject/core'
 import { agentOwner } from './proc-owner.ts'
 import {
   REFGUARD_HOOK_MARK,
@@ -225,15 +225,13 @@ export function branchBead(branch: string): string | undefined {
   return BEAD_ID.test(tail) ? tail : undefined
 }
 
-/** The bead's molecule parent — `bd show` reports `parent` on mol
- *  steps. Best-effort: a missing bd or a root bead is "no molecule". */
+/** The bead's molecule parent — `parent` on mol steps. Best-effort:
+ *  a dead store or a root bead is "no molecule". */
 function beadMolecule(bead: string, cwd: string): string | undefined {
-  const r = bdTry(['show', bead, '--json'], 10_000, cwd)
-  if (r.code !== 0) {
-    return undefined
-  }
   try {
-    const parent = (JSON.parse(r.out) as { parent?: unknown }[])[0]?.parent
+    const parent = facade('tasks', { dir: cwd }, { prefer: loadConfig(cwd).connectors }).get(
+      bead
+    )?.parent
     return typeof parent === 'string' && parent !== '' ? parent : undefined
   } catch {
     return undefined

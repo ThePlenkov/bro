@@ -438,8 +438,8 @@ describe('linearTasks', { skip: WIN32 }, () => {
   test('create rejects an unsupported dep type before creating', () => {
     withLinear({}, (log, dir) => {
       assert.throws(
-        () => linearTasks(dir).create({ title: 't', deps: ['discovered-from:ENG-1'] }),
-        /dep type 'discovered-from' unsupported/
+        () => linearTasks(dir).create({ title: 't', deps: ['discovered:ENG-1'] }),
+        /dep rel 'discovered' unsupported/
       )
       assert.equal(callsMatching(log, /BroIssueCreate/).length, 0)
     })
@@ -475,7 +475,7 @@ describe('linearTasks', { skip: WIN32 }, () => {
     })
   })
 
-  test('deps maps inverseRelations upward and relations downward', () => {
+  test('deps maps inverseRelations to the down set and relations to up', () => {
     withLinear(
       {
         FAKE_LINEAR_ISSUE_1: issueRead(
@@ -484,9 +484,34 @@ describe('linearTasks', { skip: WIN32 }, () => {
       },
       (_log, dir) => {
         assert.deepEqual(linearTasks(dir).deps(['ENG-9']), [
-          { issue_id: 'ENG-9', depends_on_id: 'ENG-8', type: 'blocks' },
-          { issue_id: 'ENG-10', depends_on_id: 'ENG-9', type: 'blocks' },
+          { issue_id: 'ENG-9', depends_on_id: 'ENG-8', type: 'blocked' },
+          { issue_id: 'ENG-10', depends_on_id: 'ENG-9', type: 'blocked' },
         ])
+        // 'down' is what ENG-9 depends on; 'up' is what depends on it —
+        // both later reads fall back to the same stubbed node
+        assert.deepEqual(linearTasks(dir).deps(['ENG-9'], { direction: 'down' }), [
+          { issue_id: 'ENG-9', depends_on_id: 'ENG-8', type: 'blocked' },
+        ])
+        assert.deepEqual(linearTasks(dir).deps(['ENG-9'], { direction: 'up' }), [
+          { issue_id: 'ENG-10', depends_on_id: 'ENG-9', type: 'blocked' },
+        ])
+      }
+    )
+  })
+
+  test('neighbors on a non-canonical id returns the dep, never the issue itself', () => {
+    withLinear(
+      {
+        FAKE_LINEAR_ISSUE_1: issueRead(node({ ident: 'ENG-9', blockedBy: [['ENG-8', 'started']] })),
+        FAKE_LINEAR_ISSUE_2: issueRead(node({ ident: 'ENG-8' })),
+      },
+      (_log, dir) => {
+        // 'eng-9' resolves to ENG-9 — edges carry canonical identifiers,
+        // so a raw-id comparison would return ENG-9 as its own neighbor
+        assert.deepEqual(
+          linearTasks(dir).neighbors('eng-9').map((r) => r.id),
+          ['ENG-8']
+        )
       }
     )
   })
@@ -500,8 +525,8 @@ describe('linearTasks', { skip: WIN32 }, () => {
       (_log, dir) => {
         const row = linearTasks(dir).get('ENG-5')
         assert.equal(row?.parent, undefined)
-        assert.deepEqual(linearTasks(dir).deps(['ENG-5'], { type: 'parent-child' }), [
-          { issue_id: 'ENG-5', depends_on_id: 'ENG-3', type: 'parent-child' },
+        assert.deepEqual(linearTasks(dir).deps(['ENG-5'], { rel: 'parent' }), [
+          { issue_id: 'ENG-5', depends_on_id: 'ENG-3', type: 'parent' },
         ])
       }
     )
@@ -790,7 +815,7 @@ describe('linearTasksAsync', () => {
     try {
       const deps = await linearTasksAsync('/tmp', { fetch: fn }).deps(['ENG-9'])
       assert.deepEqual(deps, [
-        { issue_id: 'ENG-9', depends_on_id: 'ENG-8', type: 'blocks' },
+        { issue_id: 'ENG-9', depends_on_id: 'ENG-8', type: 'blocked' },
       ])
     } finally {
       if (prev === undefined) delete process.env.LINEAR_API_KEY

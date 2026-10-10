@@ -60,6 +60,35 @@ export function bdJson<T>(args: string[], cwd?: string): T {
   }
 }
 
+/** bd against a SPECIFIC store — BEADS_DIR pins the shared dolt so a
+ *  connector claims where the spec says, not wherever cwd happens to
+ *  resolve. Same PATH-lookup contract as the rest of this file. The
+ *  `ran` flag lets callers tell a real exit (conflict) from a spawn
+ *  failure/timeout/signal (unavailable). */
+export function bdAt(
+  beadsDir: string,
+  args: string[],
+  timeoutMs = 15_000
+): { code: number; out: string; err: string; ran: boolean } {
+  const proc = spawnSync('bd', args, { // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+    env: { ...process.env, BEADS_DIR: beadsDir },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    maxBuffer: 64 * 1024 * 1024,
+  })
+  return {
+    code: proc.status ?? 1,
+    out: proc.stdout ?? '',
+    err: (
+      proc.stderr ||
+      proc.error?.message ||
+      (proc.signal !== null ? `killed by ${proc.signal}` : '')
+    ).trim(),
+    ran: proc.error === undefined && proc.status !== null,
+  }
+}
+
 // --- async variants ------------------------------------------------------------
 
 /** Async `bd` — the probe-path contract. `spawnSync` inside a hook
@@ -164,7 +193,10 @@ export class BdCompatError extends Error {
  *  not API drift. */
 const BD_USAGE_DRIFT =
   /unknown (command|flag|shorthand)|flag provided but not defined|unrecognized command/i
-const BD_NO_STORE = /no beads database|not initialized|no database found/i
+/** "the binary ran but there's no store it routes to" — distinguishes a
+ *  missing/unrouted store (a 503, never a refused op) from a real
+ *  command-level failure. Exported for the sync + claim classifiers. */
+export const BD_NO_STORE = /no beads database|not initialized|no database found/i
 
 function errText(err: unknown): string {
   const e = err as { message?: unknown; stderr?: unknown }

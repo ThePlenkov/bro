@@ -15,7 +15,6 @@
  *    atomic-write map molStep → {agentId, backend, spawnedAt, …} so an
  *    agent's identity survives its process.
  */
-import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import {
   mkdirSync,
@@ -29,7 +28,9 @@ import {
 import { dirname, join } from 'node:path'
 import type { ConfigSection } from './config.ts'
 import { acquireFileLock } from './filelock.ts'
+import { BD_NO_STORE } from './bd.ts'
 import { gitTry } from './git.ts'
+import { taskStoreAt } from './tasks.ts'
 
 export type AgentState = 'spawned' | 'running' | 'exited' | 'lost' | 'stopped' | 'blocked'
 
@@ -529,33 +530,12 @@ export function mintAgentId(backend: string): string {
 
 // --- shared-store claims -------------------------------------------------------
 
-/** bd against a SPECIFIC store — BEADS_DIR pins the shared dolt so a
- *  connector claims where the spec says, not wherever cwd happens to
- *  resolve. Same PATH-lookup contract as core/bd.ts. */
-export function bdAt(
-  beadsDir: string,
-  args: string[]
-): { code: number; out: string; err: string; ran: boolean } {
-  const proc = spawnSync('bd', args, { // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
-    env: { ...process.env, BEADS_DIR: beadsDir },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    encoding: 'utf8',
-    timeout: 15_000,
-    maxBuffer: 64 * 1024 * 1024,
-  })
-  return {
-    code: proc.status ?? 1,
-    out: proc.stdout ?? '',
-    err: (
-      proc.stderr ||
-      proc.error?.message ||
-      (proc.signal !== null ? `killed by ${proc.signal}` : '')
-    ).trim(),
-    // ran = bd executed to a real exit — ENOENT, a timeout kill, or a
-    // signal means the store never answered, so a non-zero code is
-    // degradation ('unavailable'), not a refusal ('conflict')
-    ran: proc.error === undefined && proc.status !== null,
-  }
+/** The store a shared-store claim addresses — BEADS_DIR-pinned via
+ *  taskStoreAt so a connector claims where the spec says, not wherever
+ *  cwd happens to resolve. The claim plane speaks the port's verbs;
+ *  `bdAt` stays underneath as the env-pinned exec. */
+function claimStore(beadsDir: string): ReturnType<typeof taskStoreAt> {
+  return taskStoreAt(beadsDir)
 }
 
 /** The agent command's cli name — first token, basename'd and
@@ -568,16 +548,12 @@ export function commandCliName(command: string): string {
   return /^[a-zA-Z][\w-]*$/.test(base) ? base : 'agent'
 }
 
-/** The molStep's molecule parent — `bd show`'s `parent` field, the
- *  `Molecule:` commit trailer's source. Best-effort like probeStep: a
- *  root bead or a dead store resolves nothing. */
+/** The molStep's molecule parent — the `parent` field, the `Molecule:`
+ *  commit trailer's source. Best-effort like probeStep: a root bead or
+ *  a dead store resolves nothing. */
 export function stepParent(beadsDir: string, molStep: string): string | undefined {
-  const r = bdAt(beadsDir, ['show', molStep, '--json'])
-  if (r.code !== 0) {
-    return undefined
-  }
   try {
-    const parent = (JSON.parse(r.out) as { parent?: unknown }[])[0]?.parent
+    const parent = claimStore(beadsDir).get(molStep)?.parent
     return typeof parent === 'string' && parent !== '' ? parent : undefined
   } catch {
     return undefined
@@ -590,37 +566,50 @@ export function probeStep(
   beadsDir: string,
   molStep: string
 ): { status?: string; assignee?: string } | undefined {
-  const r = bdAt(beadsDir, ['show', molStep, '--json'])
-  if (r.code !== 0) {
-    return undefined
-  }
   try {
-    const rows = JSON.parse(r.out) as { status?: string; assignee?: string }[]
-    return rows[0]
+    const row = claimStore(beadsDir).get(molStep)
+    return row === undefined ? undefined : { status: row.status, assignee: row.assignee }
   } catch {
     return undefined
   }
 }
 
-/** Fresh claim — `bd update --claim` writes the caller's actor as
- *  assignee and flips to in_progress; refused claims throw SpawnError. */
+/** Store failure → 'unavailable' (503 territory), a real refusal →
+ *  'conflict'. `ran:false` marks a spawn failure/timeout — the store
+ *  never answered. But bd can also RUN and report its store missing;
+ *  that exit is the same outage, not a claim refusal. `ran`'s absence
+ *  means the error came from inside the port (JSON drift) — still a
+ *  refusal of a kind, not a dead store. */
+function spawnClass(err: unknown): 'conflict' | 'unavailable' {
+  const e = err as { ran?: unknown; stderr?: unknown; message?: string }
+  if (e.ran === false) {
+    return 'unavailable'
+  }
+  const text = `${typeof e.message === 'string' ? e.message : ''}\n${
+    typeof e.stderr === 'string' ? e.stderr : ''
+  }`
+  return BD_NO_STORE.test(text) ? 'unavailable' : 'conflict'
+}
+
+/** Fresh claim — `claim()` writes the caller's actor as assignee and
+ *  flips to in_progress; refused claims throw SpawnError. */
 export function claimStep(beadsDir: string, molStep: string): void {
-  const r = bdAt(beadsDir, ['update', molStep, '--claim'])
-  if (r.code !== 0) {
-    const why = r.err !== '' ? r.err : `bd exited ${r.code}`
-    // bd itself missing/hung is the store being down — 503 territory,
-    // not a claim conflict
-    throw new SpawnError(`claim of ${molStep} refused — ${why}`, r.ran ? 'conflict' : 'unavailable')
+  try {
+    claimStore(beadsDir).claim(molStep)
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err)
+    throw new SpawnError(`claim of ${molStep} refused — ${why}`, spawnClass(err))
   }
 }
 
 /** Respawn rebind — the dead worker's claim transfers to the new actor.
  *  Status is already in_progress; only the assignee moves. */
 export function rebindStep(beadsDir: string, molStep: string, actor: string): void {
-  const r = bdAt(beadsDir, ['update', molStep, '--assignee', actor])
-  if (r.code !== 0) {
-    const why = r.err !== '' ? r.err : `bd exited ${r.code}`
-    throw new SpawnError(`rebind of ${molStep} failed — ${why}`, r.ran ? 'conflict' : 'unavailable')
+  try {
+    claimStore(beadsDir).update(molStep, { assignee: actor })
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err)
+    throw new SpawnError(`rebind of ${molStep} failed — ${why}`, spawnClass(err))
   }
 }
 

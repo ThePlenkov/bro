@@ -133,9 +133,7 @@ export function stepInputs(mol: Molecule, stepId: string): StepInput[] {
   return mol.dependencies
     .filter((d) => d.type === 'blocks' && d.issue_id === stepId && closed.has(d.depends_on_id))
     .map((d) => {
-      // bd show --json returns a single-element array
-      const rows = bdJson<{ title: string; close_reason?: string }[]>(['show', d.depends_on_id])
-      const dep = rows[0]
+      const dep = taskStore().get(d.depends_on_id)
       return { id: d.depends_on_id, title: dep?.title ?? '', reason: dep?.close_reason ?? '' }
     })
 }

@@ -15,7 +15,7 @@
  * on the diff — classify OUT: 'replied' vs 'rejected' is unrecoverable
  * from facade state and a silent guess would poison the agreement set.
  */
-import { JudgeUnavailable, taskStore } from '@broject/core'
+import { facade, JudgeUnavailable, loadConfig } from '@broject/core'
 import type {
   Disposition,
   JudgeFacade,
@@ -236,7 +236,11 @@ async function probeThreads(
 function loadDeferRefs(dir: string): Set<string> {
   const out = new Set<string>()
   try {
-    for (const row of taskStore(dir).list({ all: true, labels: ['debt'], limit: 0 })) {
+    for (const row of facade('tasks', { dir }, { prefer: loadConfig(dir).connectors }).list({
+      all: true,
+      labels: ['debt'],
+      limit: 0,
+    })) {
       if (typeof row.external_ref === 'string' && row.external_ref !== '') {
         out.add(row.external_ref)
       }
