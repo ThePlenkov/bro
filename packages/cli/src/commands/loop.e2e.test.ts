@@ -276,6 +276,17 @@ describe('bro loop e2e', () => {
     })
   })
 
+  test('disk floor: an empty queue still drains — the hold is not forever (bro-2spp7)', () => {
+    // the breach return must not starve the drain check — with nothing
+    // claimable behind the floor the run reports done instead of
+    // holding pushes on an empty store until the disk frees
+    const f = loopFixture([], { worktreeMb: 99_000_000 })
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /done — 0 landed, 0 closed, 0 parked, 0 failed/)
+    })
+  })
+
   test('agent exit != 0 without a PR → bead reopened + noted, worktree kept', () => {
     // crashExitMs:0 disables the crash-park guard — this tests the
     // legacy reopen path for a genuine mid-work failure

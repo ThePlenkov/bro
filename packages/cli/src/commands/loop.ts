@@ -2004,6 +2004,48 @@ function endAudit(ctx: Ctx, seen: Set<string>): void {
   }
 }
 
+/** The read side of a pick — classified, ordered, still-unseen
+ *  candidates plus the foreign count a dry pick reports. */
+function clumpCandidates(
+  ctx: Ctx,
+  scope: NonNullable<ReturnType<typeof nextScope>>,
+  seen: Set<string>
+): { candidates: ReadyBead[]; foreign: number } {
+  const ready = readyBeads(ctx.root)
+  const c = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root))
+  return { candidates: c.queue.filter((b) => !seen.has(b.id)), foreign: c.foreign }
+}
+
+/** Read-only drain check for the disk hold — clumpCandidates' pipeline
+ *  minus the claims. A breached floor with nothing behind it must
+ *  still read as a drained queue: returning before claimClump on every
+ *  held tick leaves q.drained unset, and an empty store + low disk
+ *  would idle the run forever instead of reporting done. An
+ *  unreadable store answers not-drained — a blip never masks work. */
+function queueDrained(
+  ctx: Ctx,
+  scope: NonNullable<ReturnType<typeof nextScope>>,
+  seen: Set<string>
+): boolean {
+  let c: { candidates: ReadyBead[]; foreign: number }
+  try {
+    c = clumpCandidates(ctx, scope, seen)
+  } catch {
+    return false
+  }
+  const claimable = c.candidates.some((b) => {
+    const s = beadStatus(ctx, b.id)
+    return s !== 'in_progress' && s !== 'closed'
+  })
+  if (claimable) {
+    return false
+  }
+  if (c.foreign > 0) {
+    say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
+  }
+  return true
+}
+
 /** Claim the next work item — the top ready bead, plus its compatible
  *  tail when `loop.batch` > 1 (spec bro-nspj7: the clump binds on the
  *  lead's affinity key — spec/epic/area/path — and never reaches past
@@ -2016,9 +2058,7 @@ function claimClump(
   seen: Set<string>,
   budget: number
 ): ReadyBead[] | undefined {
-  const ready = readyBeads(ctx.root)
-  const c = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root))
-  const candidates = c.queue.filter((b) => !seen.has(b.id))
+  const { candidates, foreign } = clumpCandidates(ctx, scope, seen)
   // the registry's claimStep owns the lead's claim under the spawn
   // lock (spec bro-zpa93) — a loop-side pre-claim reads as "claimed
   // outside the agent registry" and the spawn refuses it. The pick
@@ -2032,8 +2072,8 @@ function claimClump(
           return s !== 'in_progress' && s !== 'closed'
         })
   if (!lead) {
-    if (c.foreign > 0) {
-      say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
+    if (foreign > 0) {
+      say(ctx, `loop: ${foreign} foreign-scope bead(s) remain — not claimable in this project`)
     }
     return undefined
   }
@@ -2158,28 +2198,37 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
 function diskProbes(ctx: Ctx, warned?: Set<string>): DiskProbe[] {
   const out: DiskProbe[] = []
   for (const p of new Set([dirname(ctx.root), tmpdir()])) {
-    try {
-      // bigint probe — bavail×bsize on a multi-EB fs overflows the
-      // number range mid-multiply; the DiskProbe contract is a number,
-      // so saturate at MAX_SAFE_INTEGER (a free that large admits
-      // every floor anyway)
-      const s = statfsSync(p, { bigint: true })
-      const free = s.bavail * s.bsize
-      out.push({
-        path: p,
-        freeBytes: free > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(free),
-      })
-    } catch (err) {
-      if (warned === undefined || !warned.has(p)) {
-        warned?.add(p)
-        console.error(
-          `loop: disk probe failed for ${p} — ${err instanceof Error ? err.message : String(err)}` +
-            (warned === undefined ? '' : ' — watermark blind there')
-        )
-      }
+    const probe = probeDisk(p, warned)
+    if (probe !== undefined) {
+      out.push(probe)
     }
   }
   return out
+}
+
+/** statfs one path → DiskProbe. bigint probe — bavail×bsize on a
+ *  multi-EB fs overflows the number range mid-multiply; the DiskProbe
+ *  contract is a number, so saturate at MAX_SAFE_INTEGER (a free that
+ *  large admits every floor anyway). A failed path warns once per run
+ *  when `warned` is provided. */
+function probeDisk(p: string, warned?: Set<string>): DiskProbe | undefined {
+  try {
+    const s = statfsSync(p, { bigint: true })
+    const free = s.bavail * s.bsize
+    return {
+      path: p,
+      freeBytes: free > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(free),
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (warned === undefined) {
+      console.error(`loop: disk probe failed for ${p} — ${msg}`)
+    } else if (!warned.has(p)) {
+      warned.add(p)
+      console.error(`loop: disk probe failed for ${p} — ${msg} — watermark blind there`)
+    }
+    return undefined
+  }
 }
 
 /** The push half of a tick — true when a bead was claimed (drained or
@@ -2202,6 +2251,13 @@ async function tryClaim(
   // claimClump's store reads so a held push costs one statfs per tick.
   const breach = diskFloorBreach(diskProbes(ctx, q.diskProbeWarned), ctx.cfg)
   if (breach !== undefined) {
+    // drain beats the hold: an empty queue behind the floor has
+    // nothing to wait for — without this check the return below keeps
+    // q.drained unset and the run idles on disk forever
+    if (queueDrained(ctx, scope, q.seen)) {
+      q.drained = true
+      return false
+    }
     q.pushHoldUntil = Date.now() + ctx.intervalS * 1000
     if (!q.diskHeld) {
       q.diskHeld = true
