@@ -245,9 +245,11 @@ export function claimUpTo(
     }
     try {
       storeFor(dir, opts).claim(b.id)
-      // lifecycle — the claim transition (specs/telemetry/bro-ub91h.md);
-      // a global-scope run outside a repo just doesn't journal
-      emitLifecycle(dir ?? process.cwd(), {
+      // lifecycle — the claim transition (specs/telemetry/bro-ub91h.md).
+      // The journal anchors at the run's repo (cwd), not the store dir:
+      // --global's repo-less store would drop the row even inside a
+      // project; a run outside any repo still journals nowhere
+      emitLifecycle(process.cwd(), {
         kind: 'claim',
         bead: b.id,
         from: 'open',
