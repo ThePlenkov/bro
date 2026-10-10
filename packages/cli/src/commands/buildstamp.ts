@@ -26,7 +26,7 @@
  * record reads as "no stamp", and stamping must never fail a build.
  */
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { gitCommonDir, gitTry, worktreeGitDir } from '@broject/core'
 import { envProvenance, liveSessionIds } from './githooks.ts'
@@ -134,7 +134,9 @@ export function writeStamp(
     via: opts.via,
   }
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, `${JSON.stringify(stamp, null, 2)}\n`, 'utf8')
+  const tmp = `${path}.${process.pid}.tmp`
+  writeFileSync(tmp, `${JSON.stringify(stamp, null, 2)}\n`, 'utf8')
+  renameSync(tmp, path)
   return stamp
 }
 
