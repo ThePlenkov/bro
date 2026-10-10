@@ -230,6 +230,14 @@ export interface ReviewFacade {
   /** Ensure-absent — removing a label the PR doesn't carry is a no-op. */
   removeLabel(t: PrTarget, label: string): void
 
+  /** Wire the PR's auto-close onto tracker items — the host's closing
+   *  keyword joined into the body, idempotent per ref ('Fixes #42' on
+   *  github). refs are tracker-native item ids as the tasks facade
+   *  reports them. Optional — a host without body edits can't wire
+   *  auto-close; callers treat absence as "items stamped, links
+   *  skipped". */
+  linkCloses?(t: PrTarget, refs: string[]): void
+
   /** Retarget the PR's base branch (stack sync's half of a rebase — the
    *  branch moves locally, the PR's declared base moves here). False
    *  when the host refuses. Optional — a host without the capability

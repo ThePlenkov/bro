@@ -4,6 +4,7 @@
  * same semantics, normalized onto the domain types in @broject/core/review.
  */
 import {
+  bodyMeta,
   gh,
   ghAsync,
   ghJson,
@@ -13,6 +14,8 @@ import {
   prLink,
   resolveRepo,
   resolveRepoAsync,
+  stripMeta,
+  withMeta,
 } from '@broject/core'
 import type {
   CheckInfo,
@@ -1154,6 +1157,38 @@ async function labelPrs(
 
 // --- mutations ----------------------------------------------------------------
 
+/** Auto-close keywords GitHub recognizes — a body already carrying one
+ *  for a ref is wired; re-stamping must not duplicate the line. */
+const CLOSER_RE = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)/i
+
+const refEsc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+const isWired = (body: string, ref: string): boolean =>
+  new RegExp(`${CLOSER_RE.source}\\s+#${refEsc(ref)}\\b`, 'i').test(body)
+
+/** The projection's body stamp (spec specs/backends/bro-z2z7f) — one
+ *  `Fixes #N` line per newly-linked ref, inserted before the bro
+ *  trailer so the metadata comment stays last. */
+function linkCloses(dir: string, t: PrTarget, refs: string[]): void {
+  const wanted = [...new Set(refs.map((r) => r.trim()).filter((r) => r !== ''))]
+  if (wanted.length === 0) {
+    return
+  }
+  const body =
+    ghJson<{ body?: string | null }>(
+      ['pr', 'view', String(t.pr), '--repo', t.repo, '--json', 'body'],
+      dir
+    ).body ?? ''
+  const missing = wanted.filter((r) => !isWired(body, r))
+  if (missing.length === 0) {
+    return
+  }
+  const lines = missing.map((r) => `Fixes #${r}`).join('\n')
+  const base = stripMeta(body)
+  const next = withMeta(base === '' ? lines : `${base}\n\n${lines}`, bodyMeta(body))
+  gh(['pr', 'edit', String(t.pr), '--repo', t.repo, '--body', next], dir)
+}
+
 function graphql(query: string, vars: Record<string, string>): void {
   const args = ['api', 'graphql', '-f', `query=${query}`]
   for (const [k, v] of Object.entries(vars)) {
@@ -1244,6 +1279,9 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
         }
         throw err
       }
+    },
+    linkCloses(t, refs) {
+      linkCloses(dir, t, refs)
     },
     resolveThread(id, unresolve = false) {
       const m = unresolve ? 'unresolveReviewThread' : 'resolveReviewThread'

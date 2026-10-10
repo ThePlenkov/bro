@@ -29,6 +29,7 @@
 import {
   bodyMeta,
   gh,
+  ghHost,
   ghJson,
   ghTry,
   ghJsonAsync,
@@ -40,6 +41,7 @@ import {
 } from '@broject/core'
 import type {
   DepOpts,
+  PublishResult,
   TaskDepEdge,
   TaskFilter,
   TaskInput,
@@ -50,6 +52,9 @@ import type {
 
 const CLAIMED_LABEL = 'bro:claimed'
 const BLOCKED_LABEL = 'blocked'
+/** The projection marker — every bead-materialized issue carries it,
+ *  so `gh issue list -l bro:bead` is the board's instant filter. */
+const MIRROR_LABEL = 'bro:bead'
 const DEFAULT_PRIORITY = 2
 const QUERY_CAP = 1000
 
@@ -900,6 +905,116 @@ function removeSync(dir: string, id: string): void {
   )
 }
 
+// --- projection (spec specs/backends/bro-z2z7f) ----------------------------------
+
+/** 'https://…/milestone/N' → N — the epic's external_ref round-trips
+ *  through this exact shape; anything else isn't a container ref. */
+function milestoneRefNumber(ref: string): number | undefined {
+  const m = /\/milestone\/(\d+)\/?$/.exec(ref.trim())
+  return m === null ? undefined : Number(m[1])
+}
+
+interface MilestoneRow {
+  number: number
+  title: string
+  html_url?: string
+}
+
+const milestoneUrl = (repo: string, m: MilestoneRow): string =>
+  m.html_url ?? `https://${ghHost()}/${repo}/milestone/${m.number}`
+
+/** Epic → milestone — title-match is the lost-map fallback; the
+ *  authoritative dedup is the epic row's external_ref, which the
+ *  caller's write-back fills with this milestone's html_url. */
+function ensureMilestone(dir: string, epic: TaskRow): { number: number; url: string } {
+  const repo = repoOf(dir)
+  const title = epic.title !== undefined && epic.title.trim() !== '' ? epic.title : epic.id
+  const open = ghJson<MilestoneRow[]>(
+    ['api', `repos/${repo}/milestones?state=open&per_page=100`],
+    dir
+  )
+  const hit = open.find((m) => m.title === title)
+  if (hit !== undefined) {
+    return { number: hit.number, url: milestoneUrl(repo, hit) }
+  }
+  const made = ghJson<MilestoneRow>(
+    [
+      'api',
+      '-X',
+      'POST',
+      `repos/${repo}/milestones`,
+      '-f',
+      `title=${title}`,
+      '-f',
+      `description=bead ${epic.id} — projected epic`,
+    ],
+    dir
+  )
+  return { number: made.number, url: milestoneUrl(repo, made) }
+}
+
+/** The bead→issue projection. Dedup: an external_ref naming one of
+ *  this repo's issues returns it — the caller's write-back made the
+ *  map; a foreign ref declines (the bead already projects elsewhere —
+ *  one task, one outward identity). An epic parent materializes as a
+ *  milestone the new issue joins. */
+function publishSync(
+  dir: string,
+  task: TaskRow,
+  opts?: { epic?: TaskRow }
+): PublishResult | undefined {
+  const ref = task.external_ref?.trim() ?? ''
+  if (ref !== '') {
+    try {
+      const n = issueNumber(dir, ref)
+      const cur = queryIssueSync(dir, n)
+      if (cur !== undefined) {
+        return { item: pub(toRow(cur)) }
+      }
+      // the mapped item is gone — fall through to re-publish
+    } catch {
+      return undefined
+    }
+  }
+  let milestone: number | undefined
+  let epicRef: string | undefined
+  const epic = opts?.epic
+  if (epic !== undefined) {
+    const eref = epic.external_ref?.trim() ?? ''
+    const known = eref === '' ? undefined : milestoneRefNumber(eref)
+    if (known !== undefined) {
+      milestone = known
+    } else if (eref === '') {
+      const ms = ensureMilestone(dir, epic)
+      milestone = ms.number
+      epicRef = ms.url
+    }
+    // a foreign epic ref — the epic projects elsewhere; no container join
+  }
+  const row = createSync(dir, {
+    title: task.title !== undefined && task.title !== '' ? task.title : task.id,
+    description: task.description,
+    type: task.issue_type,
+    priority: task.priority,
+    labels: [MIRROR_LABEL, ...(task.labels ?? []).filter((l) => l !== MIRROR_LABEL)],
+    metadata: { ...(task.metadata ?? {}), bead: task.id },
+  })
+  if (milestone !== undefined) {
+    gh(
+      [
+        'api',
+        '-X',
+        'PATCH',
+        `repos/{owner}/{repo}/issues/${row.id}`,
+        '-F',
+        `milestone=${milestone}`,
+      ],
+      dir
+    )
+  }
+  return { item: pub(row), epicRef }
+}
+
 // --- the stores -------------------------------------------------------------------
 
 function rowOrUndef(n: IssueNode | undefined): TaskRow | undefined {
@@ -943,6 +1058,7 @@ export function githubTasks(dir: string): TaskStore {
       resolveRepo([], dir)
       return undefined
     },
+    publish: (task, opts) => publishSync(dir, task, opts),
   }
 }
 

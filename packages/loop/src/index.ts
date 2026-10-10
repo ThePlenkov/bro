@@ -9,6 +9,7 @@ export {
 } from './batch.ts'
 export { loopSection } from './config.ts'
 export { loopSlug, planItem, type LoopItem } from './item.ts'
+export { mirrorable, projectBeads, type MirrorDeps } from './mirror.ts'
 export {
   buildFixPrompt,
   buildRebasePrompt,

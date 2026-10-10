@@ -228,6 +228,40 @@ describe('loadConfig root shape', () => {
   })
 })
 
+describe('loadConfig mirror', () => {
+  test('no mirror section → the default projection policy', () => {
+    assert.deepEqual(load().mirror, {
+      labels: [],
+      excludeLabels: [],
+      types: ['feature', 'bug'],
+      specLinked: true,
+    })
+  })
+
+  test('a non-object mirror section falls back to defaults', () => {
+    assert.deepEqual(load({ mirror: 'x' }).mirror, DEFAULT_CONFIG.mirror)
+  })
+
+  test('label lists keep only non-blank strings', () => {
+    const cfg = load({
+      mirror: { labels: ['board', 42, '', '  ', ' rig '], excludeLabels: ['internal', null] },
+    })
+    assert.deepEqual(cfg.mirror.labels, ['board', 'rig'])
+    assert.deepEqual(cfg.mirror.excludeLabels, ['internal'])
+  })
+
+  test('types defaults to feature+bug; an explicit list replaces it', () => {
+    assert.deepEqual(load({ mirror: { types: ['feature'] } }).mirror.types, ['feature'])
+    assert.deepEqual(load({ mirror: { types: 'feature' } }).mirror.types, ['feature', 'bug'])
+    assert.deepEqual(load({ mirror: { types: [] } }).mirror.types, [])
+  })
+
+  test('specLinked is boolean-gated — only false narrows', () => {
+    assert.equal(load({ mirror: { specLinked: false } }).mirror.specLinked, false)
+    assert.equal(load({ mirror: { specLinked: 'no' } }).mirror.specLinked, true)
+  })
+})
+
 describe('loadConfig fleet', () => {
   test('no fleet section → the default cap of 3', () => {
     assert.equal(load().fleet.maxConcurrent, 3)

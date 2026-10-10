@@ -263,6 +263,18 @@ export interface TaskSlot {
   holder(): string | null
 }
 
+/** The bead→native-item projection's outcome (spec
+ *  specs/backends/bro-z2z7f). `item` is the tracker's own row — its
+ *  `id`/`external_ref` are the native ref the caller persists back on
+ *  the source row as the dedup map. */
+export interface PublishResult {
+  item: TaskRow
+  /** The epic's container ref (a milestone URL on github) when the
+   *  projection joined one — the caller persists it on the epic row's
+   *  external_ref. Absent when no container was needed. */
+  epicRef?: string
+}
+
 export interface TaskStore {
   list<T extends TaskRow = TaskRow>(filter?: TaskFilter): T[]
   /** the claimable queue — backend applies its own ordering/filters */
@@ -313,6 +325,16 @@ export interface TaskStore {
   /** Named cross-session slot ('merge') — absent when the backend has
    *  no slot primitive; callers treat that as 'unavailable'. */
   slot?(name: string): TaskSlot | undefined
+  /** The projection port — "materialize this source-store task as a
+   *  native item" (spec specs/backends/bro-z2z7f). `task` is the
+   *  SOURCE row; `epic` its epic parent when the caller resolved one
+   *  (the connector picks the container mapping — github: epic →
+   *  milestone). Returns the published item, or undefined when the
+   *  task already projects elsewhere — a foreign external_ref is
+   *  another system's map, never overwritten. Idempotent: an
+   *  external_ref naming an item this store owns returns that item.
+   *  Absent = no outward read-model; callers skip stamping entirely. */
+  publish?(task: TaskRow, opts?: { epic?: TaskRow }): PublishResult | undefined
 }
 
 /** A parsed `--json` payload must be the shape the contract declares —
