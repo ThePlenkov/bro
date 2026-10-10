@@ -17,6 +17,7 @@
  */
 import { randomBytes } from 'node:crypto'
 import {
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -278,6 +279,9 @@ export function coalesceDrops(
   )) {
     const path = join(dir, f)
     try {
+      if (!lstatSync(path).isFile()) {
+        continue
+      }
       const ev = parseEvent(readFileSync(path, 'utf8'))
       if (
         ev !== undefined &&
@@ -338,9 +342,15 @@ function drainDrop(
 ): void {
   const path = join(mb, f)
   try {
-    if (now - statSync(path).mtimeMs > DROP_TTL_MS) {
+    // lstat, not stat — a `.txt` symlink is debris, not a drop: a
+    // writable mailbox must never be read through to a foreign file
+    const st = lstatSync(path)
+    if (now - st.mtimeMs > DROP_TTL_MS) {
       rmSync(path, { force: true }) // expired — reap, never deliver
       return
+    }
+    if (!st.isFile()) {
+      return // symlink/FIFO — expires on its own lstat mtime, never delivered
     }
     if (seen.has(f)) {
       return
@@ -437,8 +447,10 @@ export function peekMailbox(dir: string, limit = 25): MailboxPeek[] {
     for (const f of files.filter((f) => f.endsWith('.txt') && !f.startsWith('.'))) {
       const path = join(mb, f)
       try {
-        const st = statSync(path)
-        if (now - st.mtimeMs > DROP_TTL_MS) {
+        // lstat — a symlinked drop's bytes must never cross onto the
+        // unauthenticated /api/v1/mailbox surface
+        const st = lstatSync(path)
+        if (now - st.mtimeMs > DROP_TTL_MS || !st.isFile()) {
           continue
         }
         const raw = readFileSync(path, 'utf8')

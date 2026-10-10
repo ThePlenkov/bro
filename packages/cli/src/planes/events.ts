@@ -3,7 +3,7 @@
  *  EventRow keyed `{gen}:{seq}` for bus records, drop filename for
  *  mailbox rows. `drainMailbox` is deliberately unused — it consumes
  *  drops and rewires cursors, so it cannot back a read. */
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   addressedTo,
@@ -45,7 +45,9 @@ function mailboxRows(dir: string, limit: number): EventRow[] {
       let text: string
       let ts: string
       try {
-        const st = statSync(path)
+        // lstat — stat would follow a planted symlink and tail a
+        // foreign file as if it were a drop
+        const st = lstatSync(path)
         if (!st.isFile()) {
           continue
         }
