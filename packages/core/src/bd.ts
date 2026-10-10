@@ -20,7 +20,8 @@ import { join } from 'node:path'
 // fake timeout, env sanitizers) must re-probe, not ride a stale verdict
 let timeoutProbe: { path?: string; bin: string | null } | undefined
 function supervised(args: string[], timeoutMs: number): { cmd: string; argv: string[] } {
-  if (timeoutProbe?.path !== process.env.PATH) {
+  const path = process.env.PATH
+  if (timeoutProbe === undefined || timeoutProbe.path !== path) {
     let bin: string | null = null
     for (const candidate of ['timeout', 'gtimeout']) {
       try {
@@ -29,7 +30,7 @@ function supervised(args: string[], timeoutMs: number): { cmd: string; argv: str
         break
       } catch { /* absent or non-GNU — fall through to bare bd */ }
     }
-    timeoutProbe = { path: process.env.PATH, bin }
+    timeoutProbe = { path, bin }
   }
   if (timeoutProbe.bin === null) {
     return { cmd: 'bd', argv: args }
