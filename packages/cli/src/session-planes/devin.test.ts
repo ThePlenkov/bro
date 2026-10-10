@@ -29,6 +29,27 @@ const withLockDir = (fn: (dir: string) => void): void => {
   }
 }
 
+/** A fake /proc tree — <pid>/environ and <pid>/fd/0 as the test
+ *  scripts them; absent files read as "no data" like on macOS. */
+const withProc = (fn: (procDir: string, mk: (pid: number, environ: string | null, stdinTo: string | null) => void) => void): void => {
+  const procDir = mkdtempSync(join(tmpdir(), 'bro-proc-'))
+  const mk = (pid: number, environ: string | null, stdinTo: string | null): void => {
+    const dir = join(procDir, String(pid))
+    mkdirSync(join(dir, 'fd'), { recursive: true })
+    if (environ !== null) {
+      writeFileSync(join(dir, 'environ'), environ)
+    }
+    if (stdinTo !== null) {
+      symlinkSync(stdinTo, join(dir, 'fd', '0'))
+    }
+  }
+  try {
+    fn(procDir, mk)
+  } finally {
+    rmSync(procDir, { recursive: true, force: true })
+  }
+}
+
 describe('devinSessionPlane', () => {
   test('detects the devin cli and nothing else', () => {
     assert.equal(devinSessionPlane.kind, 'devin')
@@ -95,27 +116,6 @@ describe('countDevinSessions', () => {
 })
 
 describe('devinPidIsWorker', () => {
-  /** A fake /proc tree — <pid>/environ and <pid>/fd/0 as the test
-   *  scripts them; absent files read as "no data" like on macOS. */
-  const withProc = (fn: (procDir: string, mk: (pid: number, environ: string | null, stdinTo: string | null) => void) => void): void => {
-    const procDir = mkdtempSync(join(tmpdir(), 'bro-proc-'))
-    const mk = (pid: number, environ: string | null, stdinTo: string | null): void => {
-      const dir = join(procDir, String(pid))
-      mkdirSync(join(dir, 'fd'), { recursive: true })
-      if (environ !== null) {
-        writeFileSync(join(dir, 'environ'), environ)
-      }
-      if (stdinTo !== null) {
-        symlinkSync(stdinTo, join(dir, 'fd', '0'))
-      }
-    }
-    try {
-      fn(procDir, mk)
-    } finally {
-      rmSync(procDir, { recursive: true, force: true })
-    }
-  }
-
   test('the BRO_AGENT_ID env badge classifies a worker — NUL-anchored', () => {
     withProc((procDir, mk) => {
       mk(101, 'PATH=/bin\0BRO_AGENT_ID=native-abc\0HOME=/h\0', '/dev/pts/3')
@@ -182,6 +182,7 @@ describe('countDevinWorkers', () => {
       stdio: 'ignore',
       env: { ...process.env, BRO_AGENT_ID: 'native-test' },
     })
+    if (!child.pid) throw new Error('spawn failed to create child process')
     try {
       withLockDir((dir) => {
         writeFileSync(join(dir, 'w.lock'), String(child.pid))
@@ -193,27 +194,33 @@ describe('countDevinWorkers', () => {
   })
 
   test('a landed worker retires its own reservation slot — no double count', () => {
-    const child = spawn('sleep', ['30'], {
-      stdio: 'ignore',
-      env: { ...process.env, BRO_AGENT_ID: 'native-landed' },
-    })
+    const child = spawn('sleep', ['30'], { stdio: 'ignore' })
+    if (!child.pid) throw new Error('spawn failed to create child process')
+    const pid = child.pid
     try {
-      withLockDir((dir) => {
-        writeFileSync(join(dir, 'w.lock'), String(child.pid))
-        const resv = mkdtempSync(join(tmpdir(), 'bro-devin-slots-'))
-        try {
-          const landed = join(resv, 'native-landed-a1b2c3d4.slot')
-          const inflight = join(resv, 'native-inflight-e5f6a7b8.slot')
-          writeFileSync(landed, String(Date.now()))
-          writeFileSync(inflight, String(Date.now()))
-          assert.equal(countDevinSessions([dir], resv), 1)
-          // the landed spawn's slot is gone; an unrelated in-flight
-          // claim stays for the tally
-          assert.equal(existsSync(landed), false)
-          assert.equal(existsSync(inflight), true)
-        } finally {
-          rmSync(resv, { recursive: true, force: true })
-        }
+      // scripted /proc, not the real child's environ: spawn() resolves
+      // at fork — until execve lands, /proc/<pid>/environ still reads
+      // the PARENT's env (no badge → the sweep misses the landing),
+      // which is the flake this test carried under full-suite load
+      withProc((procDir, mk) => {
+        mk(pid, 'PATH=/bin\0BRO_AGENT_ID=native-landed\0HOME=/h\0', null)
+        withLockDir((dir) => {
+          writeFileSync(join(dir, 'w.lock'), String(pid))
+          const resv = mkdtempSync(join(tmpdir(), 'bro-devin-slots-'))
+          try {
+            const landed = join(resv, 'native-landed-a1b2c3d4.slot')
+            const inflight = join(resv, 'native-inflight-e5f6a7b8.slot')
+            writeFileSync(landed, String(Date.now()))
+            writeFileSync(inflight, String(Date.now()))
+            assert.equal(countDevinSessions([dir], resv, procDir), 1)
+            // the landed spawn's slot is gone; an unrelated in-flight
+            // claim stays for the tally
+            assert.equal(existsSync(landed), false)
+            assert.equal(existsSync(inflight), true)
+          } finally {
+            rmSync(resv, { recursive: true, force: true })
+          }
+        })
       })
     } finally {
       child.kill('SIGKILL')
