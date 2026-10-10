@@ -1164,7 +1164,7 @@ const CLOSER_RE = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)/i
 const refEsc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 const isWired = (body: string, ref: string): boolean =>
-  new RegExp(`${CLOSER_RE.source}\\s+#${refEsc(ref)}\\b`, 'i').test(body)
+  new RegExp(String.raw`\b${CLOSER_RE.source}\s+#${refEsc(ref)}\b`, 'i').test(body)
 
 /** The projection's body stamp (spec specs/backends/bro-z2z7f) — one
  *  `Fixes #N` line per newly-linked ref, inserted before the bro

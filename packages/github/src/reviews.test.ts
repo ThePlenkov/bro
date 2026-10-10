@@ -686,6 +686,18 @@ describe('githubReview', { skip: WIN32 }, () => {
     })
   })
 
+  test('a keyword embedded in a longer word does not count as wired', () => {
+    // 'unresolved #7' must not satisfy the closer check — without the
+    // word boundary 'resolved' inside 'unresolved' would match
+    withFakeGh({ FAKE_GH_PR_BODY: '"unresolved #7 and prefixes #9"' }, (log) => {
+      githubReview().linkCloses!(target, ['7', '9'])
+      assert.match(
+        readFileSync(log, 'utf8'),
+        /pr edit 42 --repo acme\/widgets --body unresolved #7 and prefixes #9\n\nFixes #7\nFixes #9/
+      )
+    })
+  })
+
   test('linkCloses on an empty body stamps bare Fixes lines', () => {
     // the stock pr view answer carries no body — the null-body path
     withFakeGh({}, (log) => {
