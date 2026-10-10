@@ -173,7 +173,7 @@ dedup, wall check, claim, start stay atomic.
 
 | kind | session? | stopped-without-result → |
 | ---- | -------- | ------------------------ |
-| `acp` | `acpSessionId` pinned on the entry | **ping/resume**: `session/load` on the recorded session id where the agent advertises it; capability absent → fresh `session/new`, noted in provenance |
+| `acp` | `acpSessionId` pinned on the entry | **ping/resume** (same provider only): `session/load` on the recorded session id where the agent advertises it; capability absent or chain-fell → fresh `session/new`, noted in provenance |
 | `cli` | none | **respawn + rehydrate**: new process; the prompt is regenerated from live beads state (`convoy next` inputs, the claim, the prior log tail) — never a replay of the stale prompt file |
 | `api` | no spawn surface | never a chain entry |
 
@@ -183,8 +183,12 @@ the `acpSessionId` it wipes back to the caller, and the resume-capable
 backend carries it to the worker (a `resumeSessionId` on the spawn
 payload). Neither shortcut works — a bare `resume` flag carries no id,
 and any `entry.acpSessionId` read after `prepareSpawn` sees the field
-already cleared. The contract: a session-capable provider gets the
-chance to continue its own session before paying for a new one.
+already cleared. The id is provider-scoped: a chain walk that fell to
+a different provider drops `resumeSessionId` from the spawn payload —
+an ACP session id loads only on the agent that created it, and a
+fallback worker's `session/load` on a foreign id fails the respawn.
+The contract: a session-capable provider gets the chance to continue
+its own session before paying for a new one.
 bro-5hx1.1 deferred `session/load` as "earns a spec when a consumer
 needs it" — this is that consumer.
 
