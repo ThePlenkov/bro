@@ -64,6 +64,7 @@ import { runPluginsCommand } from './commands/plugins.ts'
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
 import { runDoctorCommand } from './commands/doctor.ts'
 import { driveSection } from './commands/drive-config.ts'
+import { runDaemonCommand } from './commands/daemon.ts'
 import { runDriveCommand } from './commands/drive.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runFleetCommand } from './commands/fleet.ts'
@@ -237,6 +238,14 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'drive',
     configKey: 'drive',
     configSchema: driveSection,
+  }),
+  definePlugin({
+    name: 'daemon',
+    group: 'fleet',
+    summary:
+      'Project-scoped supervisor — owns the drive pass long-term [up|status|down|run --every N]',
+    run: runDaemonCommand,
+    skill: 'daemon',
   }),
   definePlugin({
     name: 'serve',

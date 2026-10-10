@@ -1353,7 +1353,7 @@ async function driveOnce(ctx: Ctx): Promise<void> {
 /** `<git-common>/bro/drive.lock` — the one-supervisor-per-repo hold
  *  (spec bro-2duu9). Null when git can't name a common dir: the guard
  *  degrades away rather than blocking a run on a missing state dir. */
-function driveLockPath(root: string): string | null {
+export function driveLockPath(root: string): string | null {
   const common = gitCommonDir(root)
   return common === null ? null : join(common, 'bro', 'drive.lock')
 }

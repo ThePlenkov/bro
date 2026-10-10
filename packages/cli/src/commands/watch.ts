@@ -69,6 +69,7 @@ import { providerWallsFor } from '../agent-connectors.ts'
 import { parseWorktreePorcelain, type WorktreeInfo } from './work.ts'
 import { installWatch, uninstallWatch } from './watch-install.ts'
 import { isOrchestratorSession, pulseLockPath } from './watch-pulse.ts'
+import { daemonProbe } from './daemon.ts'
 import { writeHeartbeat } from './watch-heartbeat.ts'
 import { watchSection, type WatchConfig } from './watch-config.ts'
 
@@ -151,6 +152,20 @@ export interface WatchSnapshot {
   /** In-flight `bro loop` workers + their output-silence read. Advisory
    *  data only — a stale log is reported, never killed (bro-9lpn3). */
   loop: WatchLoop
+  /** The project supervisor (`bro daemon` / raw `bro drive --every`) —
+   *  the watchdog's subject: a recorded-but-dead daemon is attention,
+   *  absent is just quiet. */
+  daemon: WatchDaemon
+}
+
+export interface WatchDaemon {
+  live: boolean
+  pid?: number
+  /** an armer record exists (`daemon.json`) — dead+recorded is the
+   *  "restart me" signal; live+unrecorded is a manual `bro drive` */
+  recorded: boolean
+  /** the probe itself threw — renders `unavailable` */
+  error?: string
 }
 
 /** The heartbeat's answer: ready human gates, lost agents, walled
@@ -446,6 +461,18 @@ async function gatesPlane(
   }
 }
 
+/** daemon — `drive.lock` holder + `daemon.json` armer record. Pure fs +
+ *  pid reads; a throwing plane degrades its section, never the
+ *  heartbeat. */
+function daemonPlane(dir: string): WatchDaemon {
+  try {
+    const probe = daemonProbe(dir)
+    return { live: probe.live, pid: probe.pid, recorded: probe.recorded !== null }
+  } catch (err) {
+    return { live: false, recorded: false, error: errText(err) }
+  }
+}
+
 /** loop — run records under <git-common>/bro/loop/. Pure fs + pid
  *  reads; a throwing plane degrades its section, never the heartbeat. */
 function loopPlane(dir: string): WatchLoop {
@@ -466,6 +493,7 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
   const fleet = await fleetPlane(dir, host)
   const gates = await gatesPlane(dir, host, fleet.rows, fleet.prErrors ?? [])
   const loop = loopPlane(dir)
+  const daemon = daemonPlane(dir)
 
   const attention = attentionOf(
     molsPlane_.mols,
@@ -489,6 +517,11 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
   if (loop.error !== undefined) {
     attention.push(`loop plane failed — ${loop.error}`)
   }
+  if (daemon.error !== undefined) {
+    attention.push(`daemon plane failed — ${daemon.error}`)
+  } else if (daemon.recorded && !daemon.live) {
+    attention.push(`daemon recorded but dead — 'bro daemon up' restarts`)
+  }
 
   return {
     ts: new Date().toISOString(),
@@ -498,6 +531,7 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
     gates,
     fleet,
     loop,
+    daemon,
   }
 }
 
@@ -598,6 +632,16 @@ function loopLines(loop: WatchLoop): string[] {
   return [line(head), ...rows.map(line)]
 }
 
+function daemonLines(daemon: WatchDaemon): string[] {
+  if (daemon.error !== undefined) {
+    return [`  unavailable — ${daemon.error}`]
+  }
+  if (daemon.live) {
+    return [`  up — pid ${daemon.pid}${daemon.recorded ? '' : ' (unrecorded holder)'}`]
+  }
+  return [daemon.recorded ? '  dead — recorded supervisor is gone' : '  down']
+}
+
 /** Text render — attention first; an empty list is the "fleet is quiet"
  *  answer, printed as such rather than omitted. */
 export function renderSnapshot(s: WatchSnapshot): string {
@@ -618,6 +662,9 @@ export function renderSnapshot(s: WatchSnapshot): string {
     '',
     'loop',
     ...loopLines(s.loop),
+    '',
+    'daemon',
+    ...daemonLines(s.daemon),
   ].join('\n')
 }
 
