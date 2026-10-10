@@ -34,6 +34,7 @@ import {
   stackHost,
   type PrMeta,
   type ReviewFacade,
+  type StackCascade,
   type StackChainMember,
   type StackFacade,
   type StackMergeOpts,
@@ -730,6 +731,67 @@ function cmdPublish(argv: string[]): void {
   }
 }
 
+/** Per-member cascade context — the inputs every sync step reads. */
+interface SyncCtx {
+  root: string
+  rev: { repo: string; facade: ReviewFacade } | undefined
+  stacks: StackFacade | undefined
+  defaultBase: string
+  lines: string[]
+}
+
+/** The rebase half of a member's cascade step — a platform-rewritten
+ *  remote gets a fetch+rebase follow, everything else a local rebase
+ *  onto the new base. No rebase owed is a pass. */
+function rebaseStep(
+  item: SyncPlanItem<MemberView>,
+  cascade: StackCascade,
+  lines: string[]
+): boolean {
+  if (!item.rebase) {
+    return true
+  }
+  if (cascade.rebase) {
+    return followRemote(item.member, lines)
+  }
+  return rebaseMember(item, lines)
+}
+
+/** One member's cascade step. False when the chain's base==prev-head
+ *  invariant broke (a dirty member, a failed move) — the caller drops
+ *  the publish tail instead of feeding the host's stack tool a
+ *  reject. */
+function syncMember(item: SyncPlanItem<MemberView>, ctx: SyncCtx): boolean {
+  const m = item.member
+  if (m.prState === 'MERGED') {
+    retireMerged(m, ctx.root, ctx.lines)
+    return true
+  }
+  if (item.skip) {
+    ctx.lines.push(`  ${m.branch} skipped — ${item.skip}`)
+    return false
+  }
+  if (!item.rebase && !item.retarget) {
+    return true // in sync — don't even touch the edge file
+  }
+  const cascade = ctx.stacks?.cascade?.(m) ?? MANUAL_CASCADE
+  // The edge is the fork truth planSync reads — it moves only after
+  // the member's local work landed. Recording it before a rebase or
+  // remote-follow would read a failed rewrite as synced and never
+  // reschedule it.
+  if (!rebaseStep(item, cascade, ctx.lines)) {
+    return false
+  }
+  updateEdge(m, item.desiredBase, ctx.defaultBase)
+  if (!cascade.retarget) {
+    return retargetMember(item, ctx.rev, ctx.lines)
+  }
+  if (item.retarget && m.pr !== undefined) {
+    ctx.lines.push(`  ${m.branch} PR retarget → ${item.desiredBase} (platform)`)
+  }
+  return true
+}
+
 /** The sync cascade — shared by `stack sync` and `loop --stack`'s
  *  post-merge step. Per-member cascade ownership comes from the
  *  connector's stacks facade: when the platform already retargeted the
@@ -748,63 +810,32 @@ export function syncStack(
   status?: { publishFailed: boolean }
 ): string[] {
   const main = mainWorktree()
-  const defaultBase = defaultBranchName() ?? main.branch ?? 'main'
-  const rev = resolveReview(root)
-  const stacks = resolveStacks(root)
-  const members = collectMembers(name, root, rev)
-  const lines: string[] = []
+  const ctx: SyncCtx = {
+    root,
+    rev: resolveReview(root),
+    stacks: resolveStacks(root),
+    defaultBase: defaultBranchName() ?? main.branch ?? 'main',
+    lines: [],
+  }
+  const members = collectMembers(name, root, ctx.rev)
   // A clean cascade — nothing skipped, nothing refused — leaves the
   // chain's base==prev-head invariant proven, which is exactly what the
   // host's stack registration demands. A dirty member or a failed move
   // breaks it: defer publish instead of feeding the tool a reject.
   let intact = true
-  for (const item of planSync(members, defaultBase)) {
-    const m = item.member
-    if (m.prState === 'MERGED') {
-      retireMerged(m, root, lines)
-      continue
-    }
-    if (item.skip) {
-      lines.push(`  ${m.branch} skipped — ${item.skip}`)
+  for (const item of planSync(members, ctx.defaultBase)) {
+    if (!syncMember(item, ctx)) {
       intact = false
-      continue
-    }
-    if (!item.rebase && !item.retarget) {
-      continue // in sync — don't even touch the edge file
-    }
-    const cascade = stacks?.cascade?.(m) ?? MANUAL_CASCADE
-    // The edge is the fork truth planSync reads — it moves only after
-    // the member's local work landed. Recording it before a rebase or
-    // remote-follow would read a failed rewrite as synced and never
-    // reschedule it.
-    if (item.rebase) {
-      if (cascade.rebase) {
-        if (!followRemote(m, lines)) {
-          intact = false
-          continue
-        }
-      } else if (!rebaseMember(item, lines)) {
-        intact = false
-        continue
-      }
-    }
-    updateEdge(m, item.desiredBase, defaultBase)
-    if (!cascade.retarget) {
-      if (!retargetMember(item, rev, lines)) {
-        intact = false
-      }
-    } else if (item.retarget && m.pr !== undefined) {
-      lines.push(`  ${m.branch} PR retarget → ${item.desiredBase} (platform)`)
     }
   }
+  const stacks = ctx.stacks
   if (intact && stacks?.publish !== undefined) {
-    if (publishStack(name, members, stacks, defaultBase, lines, true) === 'failed') {
-      if (status !== undefined) {
-        status.publishFailed = true
-      }
+    const outcome = publishStack(name, members, stacks, ctx.defaultBase, ctx.lines, true)
+    if (outcome === 'failed' && status !== undefined) {
+      status.publishFailed = true
     }
   }
-  return lines
+  return ctx.lines
 }
 
 function cmdSync(argv: string[]): void {
