@@ -613,7 +613,12 @@ export function tasksAsync(
     get: (id) => Promise.resolve(s.get(id)),
     children: (id) => Promise.resolve(s.children(id)),
     deps: (ids, opts) => Promise.resolve(s.deps(ids, opts)),
+    neighbors: (id, opts) => Promise.resolve(s.neighbors(id, opts)),
     actor: () => Promise.resolve(s.actor?.() ?? ''),
+    slotHolder:
+      s.slot === undefined
+        ? undefined
+        : async (name) => s.slot!(name)?.holder() ?? null,
   }
 }
 

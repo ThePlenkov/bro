@@ -437,8 +437,8 @@ esac
       (_log, dir) => {
         const row = githubTasks(dir).get('5')
         assert.equal(row?.parent, undefined)
-        assert.deepEqual(githubTasks(dir).deps(['5'], { type: 'parent-child' }), [
-          { issue_id: '5', depends_on_id: '3', type: 'parent-child' },
+        assert.deepEqual(githubTasks(dir).deps(['5'], { rel: 'parent' }), [
+          { issue_id: '5', depends_on_id: '3', type: 'parent' },
         ])
       }
     )

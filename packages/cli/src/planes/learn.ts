@@ -12,7 +12,7 @@ import {
   type PlaneDescriptor,
 } from '@broject/core'
 import { getLesson, listLessons, probeQuestion, type Lesson } from '@broject/learn'
-import { argNumber, argString, beadsReachable, bounded, dispatchRead, inRepo } from './helpers.ts'
+import { argNumber, argString, bounded, dispatchRead, inRepo, tasksReachable } from './helpers.ts'
 
 const VERBS = ['capture', 'promote']
 
@@ -55,7 +55,7 @@ export function learnPlane(ctx: PlaneCtx): PlaneDescriptor {
       },
     },
     capabilities: async () => ({
-      read: inRepo(dir) && (await bounded(beadsReachable(dir), 10_000, false)),
+      read: inRepo(dir) && (await bounded(tasksReachable(dir), 10_000, false)),
       capture: false,
       promote: false,
     }),

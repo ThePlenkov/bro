@@ -14,8 +14,7 @@
  */
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
-import { spawnSync } from 'node:child_process'
-import { bdTry, DEFAULT_GLOBAL_BEADS_DIR, gitTry } from '@broject/core'
+import { DEFAULT_GLOBAL_BEADS_DIR, gitTry, taskStore } from '@broject/core'
 import type { DocAdapter, DocCtx, DocFlags, DocType, Scope } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 
@@ -52,12 +51,18 @@ export function requireGlobalStore(cwd: string = process.cwd()): string {
 }
 
 function storeInfo(name: Scope, path: string): StoreInfo {
-  // usable = answers bd — a linked worktree can lack .beads yet share
-  // the project store (bd routes by repo), so probe rather than stat
-  const probe = bdTry(['config', 'get', 'issue_prefix'], 15_000, path)
-  const raw = probe.code === 0 ? probe.out.trim() : ''
-  const prefix = raw && raw !== '(not set)' ? raw : undefined
-  return { name, path, initialized: probe.code === 0, prefix }
+  // usable = answers the store — a linked worktree can lack .beads yet
+  // share the project store (bd routes by repo), so probe rather than
+  // stat. prefix() throws on an unreachable store — that's the health
+  // probe. This doctype addresses the store by cwd, so the beads-side
+  // taskStore() is the port handle (connectors.tasks selects *which*
+  // backend; a .beads dir is always beads).
+  try {
+    const prefix = taskStore(path).prefix()
+    return { name, path, initialized: true, prefix }
+  } catch {
+    return { name, path, initialized: false }
+  }
 }
 
 /** Project store root — the repo top-level when inside one. */
@@ -82,16 +87,15 @@ function storeName(ref: string | undefined, scope: Scope): Scope | undefined {
   return scope
 }
 
-/** Report an init failure precisely — spawnSync reports a missing
- *  binary as status null + error ENOENT, and "bd init failed" would bury
- *  that diagnostic. A freshly-created dir is removed so a failed init
- *  doesn't strand an empty store. */
-function initFailed(res: ReturnType<typeof spawnSync>, dir: string, created: boolean): never {
-  const enoent = (res.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
+/** Report an init failure precisely — a missing binary throws ENOENT,
+ *  and "bd init failed" would bury that diagnostic. A freshly-created
+ *  dir is removed so a failed init doesn't strand an empty store. */
+function initFailed(err: unknown, dir: string, created: boolean): never {
+  const enoent = (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
   console.error(
     enoent
       ? 'error: bd not found — install beads first (https://github.com/gastownhall/beads)'
-      : `error: bd init failed in ${dir}${res.error ? ` (${res.error.message})` : ''}`
+      : `error: store init failed in ${dir}${err instanceof Error ? ` (${err.message})` : ''}`
   )
   if (created) {
     // we made the dir this run — any failure strands an empty store
@@ -101,19 +105,6 @@ function initFailed(res: ReturnType<typeof spawnSync>, dir: string, created: boo
   process.exit(1)
 }
 
-/** What the store actually recorded — a bd that accepts --prefix but
- *  doesn't apply it must not report a prefix it never set. Handles
- *  `key=value` and bare-value output, quoted or not. */
-function verifyPrefix(dir: string, prefix: string, configOut: string): void {
-  const line = configOut.trim().split('\n').pop()?.trim() ?? ''
-  const eq = line.indexOf('=')
-  const reported = (eq >= 0 ? line.slice(eq + 1) : line).trim().replace(/^['"]|['"]$/g, '')
-  if (reported !== prefix) {
-    console.error(`error: store in ${dir} recorded prefix "${reported || '(not set)'}" — expected "${prefix}"`)
-    process.exit(1)
-  }
-}
-
 /** Exported for tests — the ENOENT/prefix paths are the contract a
  *  missing or mismatched bd installation must surface, not swallow. */
 export function initStore(name: Scope, flags: DocFlags, root: string): void {
@@ -121,28 +112,32 @@ export function initStore(name: Scope, flags: DocFlags, root: string): void {
   const prefix = flags['prefix'] ?? (name === 'global' ? 'global' : undefined)
   const created = !existsSync(dir)
   mkdirSync(dir, { recursive: true })
-  const args = ['init', '--non-interactive', '--init-if-missing']
-  if (prefix) {
-    args.push('--prefix', prefix)
+  const store = taskStore(dir) // a .beads dir is always beads — the connector's init capability
+  try {
+    const out = store.init?.({ prefix })
+    if (out) {
+      process.stdout.write(out.endsWith('\n') ? out : `${out}\n`)
+    }
+  } catch (err) {
+    initFailed(err, dir, created)
   }
-  const res = spawnSync(
-    'bd', // NOSONAR — PATH lookup is the contract (same as the bd wrapper)
-    args,
-    { cwd: dir, stdio: 'inherit' }
-  )
-  if (res.status !== 0) {
-    initFailed(res, dir, created)
-  }
-  // validate: a store that can't answer config is broken, not created
-  const check = bdTry(['config', 'get', 'issue_prefix'], 15_000, dir)
-  if (check.code !== 0) {
-    console.error(`error: store created but unusable — ${check.err || 'bd config failed'}`)
+  // validate: a store that can't answer is broken, not created — and a
+  // store that accepts --prefix but doesn't apply it must not report a
+  // prefix it never set, so verify what it actually recorded
+  let reported: string | undefined
+  try {
+    reported = store.prefix()
+  } catch (err) {
+    console.error(
+      `error: store created but unusable — ${err instanceof Error ? err.message : String(err)}`
+    )
     process.exit(1)
   }
-  // a bd that accepts --prefix but doesn't apply it must not report a
-  // prefix it never set — verify what the store actually recorded
-  if (prefix) {
-    verifyPrefix(dir, prefix, check.out)
+  if (prefix && reported !== prefix) {
+    console.error(
+      `error: store in ${dir} recorded prefix "${reported ?? '(not set)'}" — expected "${prefix}"`
+    )
+    process.exit(1)
   }
   const suffix = prefix ? ` (prefix ${prefix})` : ''
   console.log(`${name} store ready: ${dir}${suffix}`)

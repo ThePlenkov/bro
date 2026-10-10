@@ -500,8 +500,8 @@ describe('linearTasks', { skip: WIN32 }, () => {
       (_log, dir) => {
         const row = linearTasks(dir).get('ENG-5')
         assert.equal(row?.parent, undefined)
-        assert.deepEqual(linearTasks(dir).deps(['ENG-5'], { type: 'parent-child' }), [
-          { issue_id: 'ENG-5', depends_on_id: 'ENG-3', type: 'parent-child' },
+        assert.deepEqual(linearTasks(dir).deps(['ENG-5'], { rel: 'parent' }), [
+          { issue_id: 'ENG-5', depends_on_id: 'ENG-3', type: 'parent' },
         ])
       }
     )

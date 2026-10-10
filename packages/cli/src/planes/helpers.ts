@@ -1,6 +1,6 @@
 /** Shared probes + row plumbing for the plane adapters
  *  (specs/bro-9rls.1.md — `cli/src/planes/*` over existing machinery). */
-import { bdTryAsync, gitTry, PlaneVerbError } from '@broject/core'
+import { gitTry, loadConfig, PlaneVerbError, tasksAsync } from '@broject/core'
 
 /** "Inside a repo" — every plane's floor: `bro mcp` in a non-repo dir
  *  exposes nothing rather than answering with a wrong-repo read. */
@@ -8,10 +8,16 @@ export function inRepo(dir: string): boolean {
   return gitTry(['-C', dir, 'rev-parse', '--git-common-dir']).code === 0
 }
 
-/** The beads store is reachable — one bounded probe, never a stall. */
-export async function beadsReachable(dir: string): Promise<boolean> {
-  const r = await bdTryAsync(['list', '--json', '-n', '1'], 8_000, dir)
-  return r.code === 0
+/** The serving task store is reachable — one bounded probe, never a
+ *  stall. */
+export async function tasksReachable(dir: string): Promise<boolean> {
+  try {
+    const store = await tasksAsync(dir, loadConfig(dir).connectors)
+    await store.list({ status: 'open' })
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** Bound a probe — a wedged backend must not stall tools/list. */

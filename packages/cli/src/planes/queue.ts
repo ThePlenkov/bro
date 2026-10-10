@@ -18,7 +18,7 @@ import {
   stepsOf,
 } from '@broject/convoy'
 import type { ConvoyStep, Molecule } from '@broject/convoy'
-import { argString, beadsReachable, bounded, dispatchRead, inRepo } from './helpers.ts'
+import { argString, bounded, dispatchRead, inRepo, tasksReachable } from './helpers.ts'
 
 /** A mol whose own read fails is a row in error — never a fake
  *  'blocked' the whole list would have to carry, and never a thrown
@@ -87,7 +87,7 @@ export function queuePlane(ctx: PlaneCtx): PlaneDescriptor {
       },
     },
     capabilities: async () => ({
-      read: inRepo(dir) && (await bounded(beadsReachable(dir), 10_000, false)),
+      read: inRepo(dir) && (await bounded(tasksReachable(dir), 10_000, false)),
       pour: false, // write verbs are declared, not exposed (v1)
       claim: false,
       done: false,

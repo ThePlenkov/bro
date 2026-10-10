@@ -1012,7 +1012,7 @@ function deferThread(
   if (!v.title) {
     throw new Error(`defer verdict for ${v.thread_id} has no title`)
   }
-  const bead = taskStore().create({
+  const bead = claimStore(process.cwd()).create({
     title: v.title,
     labels: ['debt'],
     description: desc,

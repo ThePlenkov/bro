@@ -37,12 +37,12 @@ import {
   agentRegistryPath,
   checkBeads,
   ensureAuth,
+  facade,
   gitTry,
   pidAlive,
   readAgentRegistry,
   reviewHost,
   SpawnError,
-  taskStore,
   type AgentInfo,
   type AgentRegistryEntry,
   type AgentState,
@@ -1131,7 +1131,7 @@ export async function runDriveCommand(argv: string[]): Promise<void> {
     connector: args.connector,
     everySec: args.everySec,
     env: loadAgentEnv(main.path),
-    store: taskStore(main.path),
+    store: facade('tasks', { dir: main.path }, { prefer: broCfg.connectors }),
   }
 
   await driveOnce(ctx)

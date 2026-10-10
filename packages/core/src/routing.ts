@@ -6,7 +6,8 @@
  * `bro fleet`/`bro watch`. The re-dispatch chain walk is M3 — an M2
  * spawn always lands on chain[0].
  */
-import { bdAt, SpawnError, type AgentRegistryEntry } from './agents.ts'
+import { SpawnError, type AgentRegistryEntry } from './agents.ts'
+import { taskStoreAt } from './tasks.ts'
 import {
   ProviderSurfaceError,
   requireProviderSurface,
@@ -172,19 +173,8 @@ export function stepClassInfo(
   beadsDir: string,
   molStep: string
 ): { label?: string; priority?: number; title?: string; description?: string } {
-  const r = bdAt(beadsDir, ['show', molStep, '--json'])
-  if (r.code !== 0) {
-    return {}
-  }
   try {
-    const row = (
-      JSON.parse(r.out) as {
-        labels?: unknown
-        priority?: unknown
-        title?: unknown
-        description?: unknown
-      }[]
-    )[0]
+    const row = taskStoreAt(beadsDir).get(molStep)
     const labels = Array.isArray(row?.labels) ? row.labels : []
     const hit = labels.find(
       (l): l is string => typeof l === 'string' && l.startsWith(CLASS_LABEL_PREFIX)

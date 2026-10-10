@@ -286,10 +286,10 @@ interface Harvest {
   skipped: CaptureSkip[]
 }
 
-/** `bd dep list` neighbors — hydrated rows both directions; rows without
- *  an id aren't issues (edge objects from a drifted bd) and drop out. */
+/** Neighbor rows of the `discovered` edges — hydrated rows; a response
+ *  without a string id isn't a task row and drops out. */
 function depRows(id: string, dir?: string): TaskRow[] {
-  const rows = taskStore(dir).deps<TaskRow>([id], { type: 'discovered-from' })
+  const rows = taskStore(dir).neighbors<TaskRow>(id, { rel: 'discovered' })
   return rows.filter((r) => typeof r?.id === 'string')
 }
 

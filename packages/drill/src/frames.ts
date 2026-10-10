@@ -15,6 +15,7 @@ import {
   taskStore,
   taskStoreAsync,
 } from '@broject/core'
+import type { TaskDepEdge } from '@broject/core'
 import { writeReport } from './report.ts'
 import type { DrillReportInput } from './report.ts'
 import type { DownOptions, DrillFrame, DrillRow, UpOptions, UpResult } from './types.ts'
@@ -102,11 +103,7 @@ export function drillChain(id: string): string[] {
   return chain
 }
 
-interface DepEdge {
-  issue_id: string
-  depends_on_id: string
-  type: string
-}
+type DepEdge = TaskDepEdge
 
 /** One `bd dep list` sweep: parent→kids and kid→parent in a single call
  * (was N+1 `bd children`). kids holds DRILL children only — every
@@ -124,7 +121,7 @@ function drillRelations(rows: DrillRow[]): {
   const byId = new Map(rows.map((r) => [r.id, r]))
   const edges = taskStore().deps<DepEdge>(
     rows.map((r) => r.id),
-    { type: 'parent-child' }
+    { rel: 'parent' }
   )
   return foldDepEdges(rows, byId, edges)
 }
@@ -139,7 +136,7 @@ function foldDepEdges(
   for (const e of edges) {
     const kid = byId.get(e.issue_id)
     const parent = byId.get(e.depends_on_id)
-    if (e.type !== 'parent-child' || !kid || !parent) {
+    if (e.type !== 'parent' || !kid || !parent) {
       continue // only drill↔drill edges — same as the old per-row sweep
     }
     kids.set(parent.id, [...(kids.get(parent.id) ?? []), kid])
@@ -158,7 +155,7 @@ async function drillRelationsAsync(
   const byId = new Map(rows.map((r) => [r.id, r]))
   const edges = await taskStoreAsync(dir).deps<DepEdge>(
     rows.map((r) => r.id),
-    { type: 'parent-child' }
+    { rel: 'parent' }
   )
   return foldDepEdges(rows, byId, edges)
 }
@@ -291,11 +288,11 @@ export { refKind }
  * of hydrated issues): a wrong shape would mask as "no priors" and
  * silently resurrect the duplicate-on-retry bug this query prevents. */
 function priorPreventionRows(frameId: string): DrillRow[] {
-  const rows = taskStore().deps<DrillRow>([frameId], {
+  const rows = taskStore().neighbors<DrillRow>(frameId, {
     direction: 'up',
-    type: 'discovered-from',
+    rel: 'discovered',
   })
-  assertHydratedRows(rows, `bd dep list for ${frameId}`)
+  assertHydratedRows(rows, `store neighbors for ${frameId}`)
   return rows
 }
 
@@ -373,7 +370,7 @@ function createPreventions(
       title: item,
       labels: [PREVENTION_LABEL],
       noInheritLabels: true,
-      deps: [`discovered-from:${frameId}`],
+      deps: [`discovered:${frameId}`],
     })
     created.push(row.id)
     newIds.set(titleKey(item), row.id)

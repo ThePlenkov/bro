@@ -32,12 +32,21 @@ import {
   ghJson,
   ghTry,
   ghJsonAsync,
+  nativeTaskRel,
   resolveRepo,
   resolveRepoAsync,
   stripMeta,
   withMeta,
 } from '@broject/core'
-import type { TaskFilter, TaskInput, TaskRow, TaskStore, TaskStoreAsync } from '@broject/core'
+import type {
+  DepOpts,
+  TaskDepEdge,
+  TaskFilter,
+  TaskInput,
+  TaskRow,
+  TaskStore,
+  TaskStoreAsync,
+} from '@broject/core'
 
 const CLAIMED_LABEL = 'bro:claimed'
 const BLOCKED_LABEL = 'blocked'
@@ -520,58 +529,53 @@ function ensureLabel(dir: string, name: string): void {
 
 // --- deps ---------------------------------------------------------------------------
 
-interface DepEdge {
-  issue_id: string
-  depends_on_id: string
-  type: string
-}
-
 const wants = (dir: 'up' | 'down', direction?: string): boolean =>
   direction === undefined || direction === dir
 
 /** X depends-on Y — blockedBy reads 'up', blocking reads 'down'. */
-function blockEdges(n: IssueNode, direction?: string): DepEdge[] {
+function blockEdges(n: IssueNode, direction?: string): TaskDepEdge[] {
   const id = String(n.number)
-  const out: DepEdge[] = []
+  const out: TaskDepEdge[] = []
   if (wants('up', direction)) {
     for (const b of n.blockedBy?.nodes ?? []) {
-      out.push({ issue_id: id, depends_on_id: String(b.number), type: 'blocks' })
+      out.push({ issue_id: id, depends_on_id: String(b.number), type: 'blocked' })
     }
   }
   if (wants('down', direction)) {
     for (const b of n.blocking?.nodes ?? []) {
-      out.push({ issue_id: String(b.number), depends_on_id: id, type: 'blocks' })
+      out.push({ issue_id: String(b.number), depends_on_id: id, type: 'blocked' })
     }
   }
   return out
 }
 
 /** parent reads 'up' (this issue depends on its parent), subIssues 'down'. */
-function parentEdges(n: IssueNode, direction?: string): DepEdge[] {
+function parentEdges(n: IssueNode, direction?: string): TaskDepEdge[] {
   const id = String(n.number)
-  const out: DepEdge[] = []
+  const out: TaskDepEdge[] = []
   if (wants('up', direction) && n.parent) {
-    out.push({ issue_id: id, depends_on_id: String(n.parent.number), type: 'parent-child' })
+    out.push({ issue_id: id, depends_on_id: String(n.parent.number), type: 'parent' })
   }
   if (wants('down', direction)) {
     for (const c of n.subIssues?.nodes ?? []) {
-      out.push({ issue_id: String(c.number), depends_on_id: id, type: 'parent-child' })
+      out.push({ issue_id: String(c.number), depends_on_id: id, type: 'parent' })
     }
   }
   return out
 }
 
-/** blockedBy → `type: 'blocks'` edges (X depends-on Y); parent/subIssue
- *  → `parent-child`. bd's dep-list shape is the contract. */
-function depEdges(n: IssueNode, opts: { type?: string; direction?: string }): DepEdge[] {
+/** blockedBy → `type: 'blocked'` edges (X depends-on Y); parent/subIssue
+ *  → `parent`. Edges always leave in the generic rel vocabulary. */
+function depEdges(n: IssueNode, opts: DepOpts): TaskDepEdge[] {
+  const rel = opts.rel === undefined ? undefined : nativeTaskRel(opts.rel)
   return [
-    ...(opts.type === undefined || opts.type === 'blocks' ? blockEdges(n, opts.direction) : []),
-    ...(opts.type === undefined || opts.type === 'parent-child' ? parentEdges(n, opts.direction) : []),
+    ...(rel === undefined || rel === 'blocks' ? blockEdges(n, opts.direction) : []),
+    ...(rel === undefined || rel === 'parent-child' ? parentEdges(n, opts.direction) : []),
   ]
 }
 
-function depsSync(dir: string, ids: string[], opts: { type?: string; direction?: string }): DepEdge[] {
-  const out: DepEdge[] = []
+function depsSync(dir: string, ids: string[], opts: DepOpts): TaskDepEdge[] {
+  const out: TaskDepEdge[] = []
   for (const id of ids) {
     const n = queryIssueSync(dir, issueNumber(dir, id))
     if (n) {
@@ -584,19 +588,74 @@ function depsSync(dir: string, ids: string[], opts: { type?: string; direction?:
 async function depsAsync(
   dir: string,
   ids: string[],
-  opts: { type?: string; direction?: string }
-): Promise<DepEdge[]> {
+  opts: DepOpts
+): Promise<TaskDepEdge[]> {
   const nodes = await Promise.all(ids.map((id) => queryIssueAsync(dir, issueNumber(dir, id))))
   return nodes.flatMap((n) => (n === undefined ? [] : depEdges(n, opts)))
 }
 
+/** Hydrated rows on the far side of `id`'s edges — the row-plane twin
+ *  of deps(). `dependency_type` rides along normalized, matching the
+ *  beads store's neighbors() shape. */
+async function neighborsAsync(
+  dir: string,
+  id: string,
+  opts: DepOpts
+): Promise<TaskRow[]> {
+  const n = await queryIssueAsync(dir, issueNumber(dir, id))
+  if (n === undefined) {
+    return []
+  }
+  const others = new Set<string>()
+  const relOf = new Map<string, string>()
+  for (const e of depEdges(n, opts)) {
+    const other = e.issue_id === id ? e.depends_on_id : e.issue_id
+    others.add(other)
+    relOf.set(other, e.type)
+  }
+  const rows = await Promise.all(
+    [...others].map(async (o) => {
+      const node = await queryIssueAsync(dir, Number(o))
+      if (node === undefined) {
+        return undefined
+      }
+      const rel = relOf.get(o)
+      return rel === undefined
+        ? (pub(toRow(node)) as TaskRow)
+        : ({ ...pub(toRow(node)), dependency_type: rel } as TaskRow)
+    })
+  )
+  return rows.filter((r): r is TaskRow => r !== undefined)
+}
+
+function neighborsSync(dir: string, id: string, opts: DepOpts): TaskRow[] {
+  const n = queryIssueSync(dir, issueNumber(dir, id))
+  if (n === undefined) {
+    return []
+  }
+  const others = new Map<string, string>()
+  for (const e of depEdges(n, opts)) {
+    others.set(e.issue_id === id ? e.depends_on_id : e.issue_id, e.type)
+  }
+  const rows: TaskRow[] = []
+  for (const [o, rel] of others) {
+    const node = queryIssueSync(dir, Number(o))
+    if (node !== undefined) {
+      rows.push({ ...pub(toRow(node)), dependency_type: rel } as TaskRow)
+    }
+  }
+  return rows
+}
+
 // --- sync mutations -----------------------------------------------------------------
 
-/** link(from, to, 'blocks') — "from is blocked by to", bd dep
- *  semantics. 'parent-child' makes `from` a sub-issue of `to`. Other
- *  types have no GitHub analogue — thrown, never faked as comments. */
-function linkSync(dir: string, from: string, to: string, type: string): void {
-  if (type === 'blocks' || type === 'blocked-by') {
+/** link(from, to, 'blocked') — "from is blocked by to". 'parent'
+ *  makes `from` a sub-issue of `to`. Generic rels map to GitHub's
+ *  dependency/sub-issue primitives; other rels have no GitHub analogue
+ *  — thrown, never faked as comments. */
+function linkSync(dir: string, from: string, to: string, rel: string): void {
+  const type = nativeTaskRel(rel)
+  if (type === 'blocks') {
     const blocker = queryIssueSync(dir, issueNumber(dir, to))
     if (blocker?.databaseId === undefined) {
       throw new Error(`github tasks: cannot resolve ${to} to an issue id`)
@@ -618,7 +677,7 @@ function linkSync(dir: string, from: string, to: string, type: string): void {
     )
     return
   }
-  throw new Error(`github tasks: link type '${type}' has no GitHub analogue (blocks | blocked-by | parent-child)`)
+  throw new Error(`github tasks: link rel '${rel}' has no GitHub analogue (blocked | parent)`)
 }
 
 /** claim = addAssignees(me) → verify → bro:claimed label. The label is
@@ -712,21 +771,21 @@ function depRef(d: string): { kind: string; ref: string } {
  *  createSync so an unsupported kind can't leave a half-created issue. */
 function applyDeps(dir: string, id: string, i: TaskInput): void {
   if (i.parent !== undefined) {
-    linkSync(dir, id, i.parent, 'parent-child')
+    linkSync(dir, id, i.parent, 'parent')
   }
   for (const d of i.deps ?? []) {
     const { kind, ref } = depRef(d)
-    linkSync(dir, id, ref, kind === 'blocked-by' ? 'blocks' : kind)
+    linkSync(dir, id, ref, kind)
   }
 }
 
 function createSync(dir: string, i: TaskInput): TaskRow {
-  // pre-validate deps before the issue exists — an unsupported dep type
+  // pre-validate deps before the issue exists — an unsupported dep rel
   // must not leave a half-created issue
   for (const d of i.deps ?? []) {
     const { kind } = depRef(d)
-    if (!/^(blocks|blocked-by|parent-child)$/.test(kind)) {
-      throw new Error(`github tasks: dep type '${kind}' unsupported (blocks | blocked-by | parent-child)`)
+    if (!/^(blocks|blocked|blocked-by|parent|parent-child)$/.test(kind)) {
+      throw new Error(`github tasks: dep rel '${kind}' unsupported (blocked | parent)`)
     }
   }
   const args = ['issue', 'create', '--title', i.title]
@@ -865,7 +924,8 @@ export function githubTasks(dir: string): TaskStore {
     },
     children: (id) => querySubIssuesSync(dir, issueNumber(dir, id)).map(toRow).map(pub) as never,
     deps: (ids, opts = {}) => depsSync(dir, ids, opts) as never,
-    link: (from, to, type = 'related') => linkSync(dir, from, to, type),
+    neighbors: (id, opts = {}) => neighborsSync(dir, id, opts) as never,
+    link: (from, to, rel = 'related') => linkSync(dir, from, to, rel),
     prefix: () => {
       // the repo IS the scope — no prefix. The probe still runs: an
       // unresolvable remote fails closed, same contract as beads.
@@ -891,6 +951,7 @@ export function githubTasksAsync(dir: string): TaskStoreAsync {
     get: async (id) => rowOrUndef(await queryIssueAsync(dir, issueNumber(dir, id))) as never,
     children: async (id) => (await querySubIssuesAsync(dir, issueNumber(dir, id))).map(toRow).map(pub) as never,
     deps: async (ids, opts = {}) => (await depsAsync(dir, ids, opts)) as never,
+    neighbors: async (id, opts = {}) => (await neighborsAsync(dir, id, opts)) as never,
     actor: () => ghActorAsync(dir),
   }
 }

@@ -8,7 +8,7 @@
  *   posted → claimed → submitted ─┬─ accepted
  *                                 └─ rejected
  */
-import { spawnSync } from 'node:child_process'
+import { taskStore } from '@broject/core'
 import { envelopeFromBead, type BeadLike, type MeshEnvelope, type MeshKind } from './envelope.ts'
 import type { MeshPeer } from './peers.ts'
 import { meshScan, type PeerRecord } from './inbox.ts'
@@ -48,19 +48,15 @@ const STAGE_RANK: Record<ThreadStage, number> = {
 }
 
 function ownBeads(dir: string): { rows: BeadLike[]; error?: string } {
-  const p = spawnSync('bd', ['-C', dir, 'list', '--label', 'mesh:v:1', '--json', '--all'], {  // NOSONAR — PATH lookup is the contract (same as core/git.ts)
-    stdio: ['ignore', 'pipe', 'pipe'],
-    encoding: 'utf8',
-    timeout: 30_000,
-    maxBuffer: 32 * 1024 * 1024,
-  })
-  if (p.status !== 0) {
-    return { rows: [], error: `bd list failed — ${(p.stderr ?? '').trim() || 'exit ' + p.status}` }
-  }
   try {
-    return { rows: JSON.parse(p.stdout ?? '[]') as BeadLike[] }
-  } catch {
-    return { rows: [], error: 'bd list returned unparseable json' }
+    return {
+      rows: taskStore(dir).list<BeadLike>({ labels: ['mesh:v:1'], all: true }),
+    }
+  } catch (err) {
+    return {
+      rows: [],
+      error: `store list failed — ${err instanceof Error ? err.message : String(err)}`,
+    }
   }
 }
 

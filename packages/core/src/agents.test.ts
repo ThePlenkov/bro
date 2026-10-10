@@ -17,7 +17,6 @@ import {
   agentEntryBlocked,
   agentRegistryPath,
   agentsSection,
-  bdAt,
   claimStep,
   classifyExitCause,
   mintAgentId,
@@ -30,6 +29,7 @@ import {
   withAgentRegistryLock,
   writeAgentRegistry,
 } from './agents.ts'
+import { bdAt } from './bd.ts'
 
 const withRepo = (fn: (dir: string) => void): void => {
   const dir = mkdtempSync(join(tmpdir(), 'bro-agents-'))

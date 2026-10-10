@@ -15,40 +15,54 @@ import {
   dataRefPull,
   dataRefPush,
   dataRefRoot,
+  facade,
+  facadeName,
   gitTry,
+  taskStore,
+  type TaskStore,
 } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
-import { execFileSync } from 'node:child_process'
-import { existsSync, statSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
-/** Beads state (drill frames, wtfs, retros, the ready queue) is not a bro
- *  artifact — it lives in the local Dolt DB with its own transport.
- *  `bd sync` is beads' own pull+merge+push cycle; bro orchestrates it so
- *  one command moves everything an agent needs on another machine.
- *  Best-effort like the data-ref push: no bd, no .beads, or a sync
- *  failure warns but never breaks artifact sync. */
-function syncBeads(root: string): void {
-  // same contract as core's beadsDirExists — only a real directory counts
-  if (!statSync(join(root, '.beads'), { throwIfNoEntry: false })?.isDirectory()) {
-    return
-  }
+/** Task-state replication is a connector capability — `store.sync()`
+ *  runs whatever cycle that backend owns (beads: the dolt-refs
+ *  pull+merge+push; remote backends usually sync on write and omit the
+ *  verb). The serving tasks store syncs; so does a local `.beads` doc
+ *  db when it isn't the serving one — kv/mol state lives there
+ *  regardless of which connector answers `tasks`. Best-effort like
+ *  the data-ref push: a sync failure warns but never breaks artifact
+ *  sync. */
+function syncStores(root: string, prefer: Record<string, string>): void {
+  let stores: TaskStore[]
   try {
-    // own exec: bd() caps at 15s — a network pull/push needs more room.
-    // stdout goes through console.log, not stdio:'inherit' — a --json
-    // caller (loop's endAudit) redirects console.* to stderr, and a
-    // child's inherited stdout would write past it into the event stream
-    const out = execFileSync('bd', ['sync'], { cwd: root, encoding: 'utf8', timeout: 120_000 }) // NOSONAR — PATH lookup is the contract (same as the bd wrapper)
-    if (out.trim() !== '') {
-      console.log(out.trimEnd())
+    const serving = facadeName('tasks', { dir: root }, { prefer })
+    stores = [facade('tasks', { dir: root }, { prefer })]
+    // the local beads db is a store too — a non-beads tasks backend
+    // doesn't make the doc store's replication unnecessary
+    if (serving !== 'beads') {
+      stores.push(taskStore(root))
     }
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return // bd not installed — beads state simply doesn't move
-    }
     console.error(
-      `warning: bd sync failed — ${(err as { stderr?: string }).stderr?.trim() || (err instanceof Error ? err.message : String(err))}`
+      `warning: task store sync skipped — ${err instanceof Error ? err.message : String(err)}`
     )
+    return
+  }
+  for (const store of stores) {
+    if (store.sync === undefined) {
+      continue // the backend syncs on write — nothing to replicate
+    }
+    try {
+      const out = store.sync()
+      if (out.trim() !== '') {
+        console.log(out.trimEnd())
+      }
+    } catch (err) {
+      console.error(
+        `warning: task store sync failed — ${(err as { stderr?: string }).stderr?.trim() || (err instanceof Error ? err.message : String(err))}`
+      )
+    }
   }
 }
 
@@ -72,7 +86,8 @@ export function runSyncCommand(argv: string[]): void {
     console.error('bro sync: not inside a git worktree')
     process.exit(1)
   }
-  const { ref, remote, beads } = loadBroConfig(root).sync
+  const cfg = loadBroConfig(root)
+  const { ref, remote, beads } = cfg.sync
 
   if (pull) {
     const written = dataRefPull(root, remote, ref)
@@ -82,7 +97,7 @@ export function runSyncCommand(argv: string[]): void {
     }
     console.log(`bro sync: materialized ${written} file(s) from ${ref}`)
     if (beads) {
-      syncBeads(root)
+      syncStores(root, cfg.connectors)
     }
     return
   }
@@ -109,8 +124,8 @@ export function runSyncCommand(argv: string[]): void {
   } else if (hasRef) {
     console.log(`bro sync: ${ref} pushed to ${remote}`)
   }
-  // beads has its own transport — independent of artifact outcome
+  // the store has its own transport — independent of artifact outcome
   if (beads) {
-    syncBeads(root)
+    syncStores(root, cfg.connectors)
   }
 }

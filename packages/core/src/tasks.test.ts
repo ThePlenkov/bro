@@ -147,7 +147,7 @@ describe('taskStore', { skip: WIN32 }, () => {
 
   test('deps narrows by type and direction', () => {
     withFakeBd({}, (log) => {
-      taskStore().deps(['t1', 't2'], { type: 'parent-child', direction: 'up' })
+      taskStore().deps(['t1', 't2'], { rel: 'parent', direction: 'up' })
       const call = logLines(log)[0] ?? ''
       assert.ok(call.includes('dep list t1 t2'), call)
       assert.ok(call.includes('-t parent-child'), call)

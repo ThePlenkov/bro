@@ -25,6 +25,7 @@ export {
   bd,
   BdCompatError,
   bdAsync,
+  bdAt,
   bdJson,
   bdJsonAsync,
   bdTry,
@@ -130,8 +131,29 @@ export { definePlugin } from './plugin.ts'
 export type { BroPlugin } from './plugin.ts'
 export { docTypeNamed, docVerbs, STANDARD_VERBS, verbMethod } from './docs.ts'
 export type { DocAdapter, DocCtx, DocFlags, DocType, DocVerb, Scope } from './docs.ts'
-export { bdActor, bdActorAsync, taskStore, taskStoreAsync } from './tasks.ts'
-export type { TaskFilter, TaskInput, TaskRow, TaskStore, TaskStoreAsync } from './tasks.ts'
+export {
+  bdActor,
+  bdActorAsync,
+  canonicalTaskRel,
+  nativeTaskRel,
+  parseSlotAcquire,
+  parseSlotCheck,
+  taskStore,
+  taskStoreAsync,
+  taskStoreAt,
+} from './tasks.ts'
+export type {
+  DepOpts,
+  SlotAcquire,
+  TaskDepEdge,
+  TaskFilter,
+  TaskInput,
+  TaskRel,
+  TaskRow,
+  TaskSlot,
+  TaskStore,
+  TaskStoreAsync,
+} from './tasks.ts'
 export { bodyMeta, broTrailer, stripMeta, withMeta } from './taskmeta.ts'
 export { JudgeUnavailable } from './judge.ts'
 export type {
@@ -263,7 +285,6 @@ export {
   agentEntryBlocked,
   agentRegistryPath,
   agentsSection,
-  bdAt,
   claimStep,
   classifyExitCause,
   commandCliName,

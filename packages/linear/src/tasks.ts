@@ -26,8 +26,16 @@
  * `issue`), what it blocks lives in `relations` (counterpart
  * `relatedIssue`).
  */
-import type { TaskFilter, TaskInput, TaskRow, TaskStore, TaskStoreAsync } from '@broject/core'
-import { bodyMeta, stripMeta, withMeta } from '@broject/core'
+import type {
+  DepOpts,
+  TaskDepEdge,
+  TaskFilter,
+  TaskInput,
+  TaskRow,
+  TaskStore,
+  TaskStoreAsync,
+} from '@broject/core'
+import { bodyMeta, nativeTaskRel, stripMeta, withMeta } from '@broject/core'
 import type { FetchFn } from './api.ts'
 import {
   gql,
@@ -493,32 +501,26 @@ function pickState(teamIdOrKey: string, type: string, fallback?: string): string
 
 // --- deps ---------------------------------------------------------------------------
 
-interface DepEdge {
-  issue_id: string
-  depends_on_id: string
-  type: string
-}
-
 const wants = (dir: 'up' | 'down', direction?: string): boolean =>
   direction === undefined || direction === dir
 
 /** X depends-on Y — X's blockers read inverseRelations('blocks')'s
  *  `issue` (the blocker), X's downstream reads relations('blocks')'s
  *  `relatedIssue` (the blocked). */
-function blockEdges(n: IssueNode, direction?: string): DepEdge[] {
+function blockEdges(n: IssueNode, direction?: string): TaskDepEdge[] {
   const id = n.identifier
-  const out: DepEdge[] = []
+  const out: TaskDepEdge[] = []
   if (wants('up', direction)) {
     for (const r of n.inverseRelations?.nodes ?? []) {
       if (r.type === 'blocks' && r.issue?.identifier !== undefined) {
-        out.push({ issue_id: id, depends_on_id: r.issue.identifier, type: 'blocks' })
+        out.push({ issue_id: id, depends_on_id: r.issue.identifier, type: 'blocked' })
       }
     }
   }
   if (wants('down', direction)) {
     for (const r of n.relations?.nodes ?? []) {
       if (r.type === 'blocks' && r.relatedIssue?.identifier !== undefined) {
-        out.push({ issue_id: r.relatedIssue.identifier, depends_on_id: id, type: 'blocks' })
+        out.push({ issue_id: r.relatedIssue.identifier, depends_on_id: id, type: 'blocked' })
       }
     }
   }
@@ -526,31 +528,32 @@ function blockEdges(n: IssueNode, direction?: string): DepEdge[] {
 }
 
 /** parent reads 'up' (this issue depends on its parent), children 'down'. */
-function parentEdges(n: IssueNode, direction?: string): DepEdge[] {
+function parentEdges(n: IssueNode, direction?: string): TaskDepEdge[] {
   const id = n.identifier
-  const out: DepEdge[] = []
+  const out: TaskDepEdge[] = []
   if (wants('up', direction) && n.parent?.identifier !== undefined) {
-    out.push({ issue_id: id, depends_on_id: n.parent.identifier!, type: 'parent-child' })
+    out.push({ issue_id: id, depends_on_id: n.parent.identifier!, type: 'parent' })
   }
   if (wants('down', direction)) {
     for (const c of n.children?.nodes ?? []) {
       if (c.identifier !== undefined) {
-        out.push({ issue_id: c.identifier, depends_on_id: id, type: 'parent-child' })
+        out.push({ issue_id: c.identifier, depends_on_id: id, type: 'parent' })
       }
     }
   }
   return out
 }
 
-function depEdges(n: IssueNode, opts: { type?: string; direction?: string }): DepEdge[] {
+function depEdges(n: IssueNode, opts: DepOpts): TaskDepEdge[] {
+  const rel = opts.rel === undefined ? undefined : nativeTaskRel(opts.rel)
   return [
-    ...(opts.type === undefined || opts.type === 'blocks' ? blockEdges(n, opts.direction) : []),
-    ...(opts.type === undefined || opts.type === 'parent-child' ? parentEdges(n, opts.direction) : []),
+    ...(rel === undefined || rel === 'blocks' ? blockEdges(n, opts.direction) : []),
+    ...(rel === undefined || rel === 'parent-child' ? parentEdges(n, opts.direction) : []),
   ]
 }
 
-function depsSync(ids: string[], opts: { type?: string; direction?: string }): DepEdge[] {
-  const out: DepEdge[] = []
+function depsSync(ids: string[], opts: DepOpts): TaskDepEdge[] {
+  const out: TaskDepEdge[] = []
   for (const id of ids) {
     const n = queryIssueSync(issueRef(id))
     if (n) {
@@ -562,21 +565,68 @@ function depsSync(ids: string[], opts: { type?: string; direction?: string }): D
 
 async function depsAsync(
   ids: string[],
-  opts: { type?: string; direction?: string },
+  opts: DepOpts,
   fetchImpl?: FetchFn
-): Promise<DepEdge[]> {
+): Promise<TaskDepEdge[]> {
   const nodes = await Promise.all(ids.map(async (id) => queryIssueAsync(await refAsync(id, fetchImpl), fetchImpl)))
   return nodes.flatMap((n) => (n === undefined ? [] : depEdges(n, opts)))
 }
 
+/** Hydrated rows on the far side of `id`'s edges — the row-plane twin
+ *  of deps(). `dependency_type` rides along normalized, matching the
+ *  beads store's neighbors() shape. */
+async function neighborsAsync(
+  id: string,
+  opts: DepOpts,
+  fetchImpl?: FetchFn
+): Promise<TaskRow[]> {
+  const n = await queryIssueAsync(await refAsync(id, fetchImpl), fetchImpl)
+  if (n === undefined) {
+    return []
+  }
+  const others = new Map<string, string>()
+  for (const e of depEdges(n, opts)) {
+    others.set(e.issue_id === id ? e.depends_on_id : e.issue_id, e.type)
+  }
+  const rows = await Promise.all(
+    [...others].map(async ([o, rel]) => {
+      const node = await queryIssueAsync(await refAsync(o, fetchImpl), fetchImpl)
+      return node === undefined
+        ? undefined
+        : ({ ...pub(toRow(node)), dependency_type: rel } as TaskRow)
+    })
+  )
+  return rows.filter((r): r is TaskRow => r !== undefined)
+}
+
+function neighborsSync(id: string, opts: DepOpts): TaskRow[] {
+  const n = queryIssueSync(issueRef(id))
+  if (n === undefined) {
+    return []
+  }
+  const others = new Map<string, string>()
+  for (const e of depEdges(n, opts)) {
+    others.set(e.issue_id === id ? e.depends_on_id : e.issue_id, e.type)
+  }
+  const rows: TaskRow[] = []
+  for (const [o, rel] of others) {
+    const node = queryIssueSync(issueRef(o))
+    if (node !== undefined) {
+      rows.push({ ...pub(toRow(node)), dependency_type: rel } as TaskRow)
+    }
+  }
+  return rows
+}
+
 // --- sync mutations -----------------------------------------------------------------
 
-/** link(from, to, 'blocks') — "from is blocked by to", bd dep
- *  semantics → Linear: issue=to blocks relatedIssue=from.
- *  'parent-child' makes `from` a sub-issue of `to`. Other types have no
- *  Linear analogue — thrown, never faked as comments. */
-function linkSync(from: string, to: string, type: string): void {
-  if (type === 'blocks' || type === 'blocked-by') {
+/** link(from, to, 'blocked') — "from is blocked by to" → Linear:
+ *  issue=to blocks relatedIssue=from. 'parent' makes `from` a sub-issue
+ *  of `to`. Other rels have no Linear analogue — thrown, never faked
+ *  as comments. */
+function linkSync(from: string, to: string, rel: string): void {
+  const type = nativeTaskRel(rel)
+  if (type === 'blocks') {
     mutOk(
       gql(RELATION_M, {
         input: { issueId: issueRef(to), relatedIssueId: issueRef(from), type: 'blocks' },
@@ -594,7 +644,7 @@ function linkSync(from: string, to: string, type: string): void {
     return
   }
   throw new Error(
-    `linear tasks: link type '${type}' has no Linear analogue (blocks | blocked-by | parent-child)`
+    `linear tasks: link rel '${rel}' has no Linear analogue (blocked | parent)`
   )
 }
 
@@ -709,17 +759,17 @@ function depRef(d: string): { kind: string; ref: string } {
 function applyDeps(id: string, i: TaskInput): void {
   for (const d of i.deps ?? []) {
     const { kind, ref } = depRef(d)
-    linkSync(id, ref, kind === 'blocked-by' ? 'blocks' : kind)
+    linkSync(id, ref, kind)
   }
 }
 
 function createSync(i: TaskInput): TaskRow {
-  // pre-validate deps before the issue exists — an unsupported dep type
+  // pre-validate deps before the issue exists — an unsupported dep rel
   // must not leave a half-created issue
   for (const d of i.deps ?? []) {
     const { kind } = depRef(d)
-    if (!/^(blocks|blocked-by|parent-child)$/.test(kind)) {
-      throw new Error(`linear tasks: dep type '${kind}' unsupported (blocks | blocked-by | parent-child)`)
+    if (!/^(blocks|blocked|blocked-by|parent|parent-child)$/.test(kind)) {
+      throw new Error(`linear tasks: dep rel '${kind}' unsupported (blocked | parent)`)
     }
   }
   const t = team()
@@ -933,7 +983,8 @@ export function linearTasks(_dir: string): TaskStore {
     },
     children: (id) => queryChildrenSync(issueRef(id)).map(toRow).map(pub) as never,
     deps: (ids, opts = {}) => depsSync(ids, opts) as never,
-    link: (from, to, type = 'related') => linkSync(from, to, type),
+    neighbors: (id, opts = {}) => neighborsSync(id, opts) as never,
+    link: (from, to, rel = 'related') => linkSync(from, to, rel),
     prefix: () => team().key,
   }
 }
@@ -968,6 +1019,7 @@ export function linearTasksAsync(_dir: string, opts?: { fetch?: FetchFn }): Task
     children: async (id) =>
       (await queryChildrenAsync(await refAsync(id, fetchImpl), fetchImpl)).map(toRow).map(pub) as never,
     deps: async (ids, opts = {}) => (await depsAsync(ids, opts, fetchImpl)) as never,
+    neighbors: async (id, opts = {}) => (await neighborsAsync(id, opts, fetchImpl)) as never,
     actor: () => actorAsync(fetchImpl),
   }
 }
