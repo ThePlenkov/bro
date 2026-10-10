@@ -21,7 +21,11 @@ bro.config.json). ESM only.
 ## Surface
 
 - `planItem` / `LoopItem` — the work-order payload per claimed bead
-- `buildWorkPrompt` / `buildFixPrompt` / `expandAgentCmd` — agent spawn
+- `buildWorkPrompt` / `buildFixPrompt` / `expandAgentCmd` — agent spawn;
+  work/fix/rebase prompts take a bead or a clump (`LoopBead[]`)
+- `clumpMembers` / `coveredBeadIds` / `affinityKeys` / `batchable` /
+  `SOLO_LABEL` — the pure batch halves: claim-time clump picking and
+  commit-log coverage (spec bro-nspj7)
 - `DEFAULT_LOOP_CONFIG` / `LoopConfig` / `LoopBead` — config + types
 - `loopSection` — the `loop` section of bro.config.json
 

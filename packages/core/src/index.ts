@@ -16,6 +16,7 @@ export {
   gitLogPathRecords,
   gitDriftRef,
   gitLogStamp,
+  gitBranchLog,
   gitIsAncestor,
   gitIsShallow,
 } from './git.ts'

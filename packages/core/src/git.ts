@@ -164,6 +164,32 @@ export function gitLogStamp(
   return { state: 'commit', stamp: { sha, iso, ts: epoch } }
 }
 
+/** The commit messages `head` carries since it forked from `baseRef` —
+ *  `git log --format=%B <merge-base>..<head>` tried against
+ *  `origin/<base>` first, then the local ref (a PR's base may exist
+ *  only remote-side). `headSha === ''` means the local tip; a pushed
+ *  head that isn't fetched (a remote-only update-branch commit) falls
+ *  back to `HEAD`. `dir` scopes the calls — linked worktrees share the
+ *  object db, so any checkout of the repo resolves the same objects;
+ *  undefined runs in cwd. '' when no merge-base or log resolves —
+ *  callers read that as "the log is unknown", never as a clean answer. */
+export function gitBranchLog(headSha: string, baseRef: string, dir?: string): string {
+  const scoped = dir === undefined ? [] : ['-C', dir]
+  for (const head of headSha === '' ? ['HEAD'] : [headSha, 'HEAD']) {
+    for (const ref of [`origin/${baseRef}`, baseRef]) {
+      const mb = gitTry([...scoped, 'merge-base', head, ref])
+      if (mb.code !== 0 || !mb.out.trim()) {
+        continue
+      }
+      const log = gitTry([...scoped, 'log', '--format=%B', `${mb.out.trim()}..${head}`])
+      if (log.code === 0) {
+        return log.out
+      }
+    }
+  }
+  return ''
+}
+
 /** `git merge-base --is-ancestor` — the drift tie-break: equal
  *  committer timestamps on different SHAs resolve by ancestry (scope
  *  commit predating the spec commit is fresh). null when git can't

@@ -13,7 +13,15 @@ export const loopSection: ConfigSection<LoopConfig> = (raw) => {
       ? (obj[k] as string).trim()
       : DEFAULT_LOOP_CONFIG[k]
   const num = (
-    k: 'stallMin' | 'crashExitMs' | 'mergeTimeoutMin' | 'fixRounds' | 'maxItems' | 'maxOpen',
+    k:
+      | 'stallMin'
+      | 'crashExitMs'
+      | 'mergeTimeoutMin'
+      | 'fixRounds'
+      | 'maxItems'
+      | 'maxOpen'
+      | 'batch'
+      | 'batchMinPriority',
     min = 0
   ) =>
     typeof obj[k] === 'number' && Number.isFinite(obj[k]) && (obj[k] as number) >= min
@@ -31,5 +39,7 @@ export const loopSection: ConfigSection<LoopConfig> = (raw) => {
     fixRounds: num('fixRounds'),
     maxItems: num('maxItems'),
     maxOpen: num('maxOpen', 1),
+    batch: num('batch', 1),
+    batchMinPriority: num('batchMinPriority'),
   }
 }

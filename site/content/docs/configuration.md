@@ -88,6 +88,8 @@ a `BroPlugin`. See [Plugins](/docs/plugins).
 | `mergeTimeoutMin` | `45` | Review-gate budget in minutes |
 | `fixRounds` | `3` | Maximum review-fix respawns per bead |
 | `maxItems` | `0` | Maximum beads per run; `0` means until idle or gated |
+| `batch` | `1` | Max beads one claim may clump into a single work item — one worktree, one worker, one PR closing them all. `1` = solo claims only |
+| `batchMinPriority` | `3` | Lowest urgency allowed into a clump — a bead batches only when `priority >= batchMinPriority`, so urgent work always claims solo |
 
 ### `drive`
 

@@ -51,6 +51,16 @@ export interface LoopConfig {
    *  and only gate service runs until a merge frees a slot. 1 is the
    *  near-serial shape (spec bro-zsmwq). */
   maxOpen: number
+  /** Max beads one claim may clump into a single work item — one
+   *  worktree, one worker, one PR closing them all (spec bro-nspj7).
+   *  1 = solo claims only (legacy). Clumping binds on the lead's
+   *  affinity key (spec/epic/area/path) and never reaches past
+   *  batchMinPriority. */
+  batch: number
+  /** The lowest urgency allowed into a clump — a bead batches only
+   *  when `priority >= batchMinPriority` (bd numbering: 3 = P3 nits,
+   *  4 = P4 noise). Urgent work always claims solo. */
+  batchMinPriority: number
 }
 
 export const DEFAULT_LOOP_CONFIG: LoopConfig = {
@@ -65,4 +75,6 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   fixRounds: 3,
   maxItems: 0,
   maxOpen: 3,
+  batch: 1,
+  batchMinPriority: 3,
 }

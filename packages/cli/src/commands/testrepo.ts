@@ -605,6 +605,21 @@ const log = (msg) => {
       : 'work'
   fs.appendFileSync(f, kind + ' ' + msg + '\\n')
 }
+// register the "opened" PR — the per-branch map (seeded prs: {}) is
+// authoritative when present; the flat prOpened flag feeds the legacy
+// single-PR probes
+const markPrOpened = (s) => {
+  if (s.prs) {
+    s.prs[branch] = {
+      ...(s.prs[branch] ?? {}),
+      number: s.prs[branch]?.number ?? (s.nextPr = (s.nextPr ?? 10) + 1),
+      state: 'OPEN',
+      headRef: branch,
+      baseRef: 'main',
+    }
+  }
+  s.prOpened = true
+}
 if (prompt.includes('review-threads')) {
   // fix round — resolve the threads and stop
   const s = load()
@@ -630,19 +645,31 @@ switch (scenario) {
     execFileSync('git', ['commit', '-qm', 'feat: the thing'])
     const s = load()
     s.events = (s.events ?? []).concat([{ spawn: process.env.BRO_BEAD_ID || null, branch }])
-    // the per-branch map (seeded prs: {}) is authoritative when present
-    if (s.prs) {
-      s.prs[branch] = {
-        ...(s.prs[branch] ?? {}),
-        number: s.prs[branch]?.number ?? (s.nextPr = (s.nextPr ?? 10) + 1),
-        state: 'OPEN',
-        headRef: branch,
-        baseRef: 'main',
-      }
-    }
-    s.prOpened = true
+    markPrOpened(s)
     save(s)
     log('opened pr')
+    break
+  }
+  case 'batch': case 'batch-partial': {
+    // one worker carrying the whole clump — per-bead commits NAMING the
+    // id are the coverage contract (bro-nspj7). 'batch-partial' covers
+    // only the lead: the tail is the unfinished-requeue case.
+    const ids = String(process.env.BRO_BEAD_IDS || process.env.BRO_BEAD_ID || '')
+      .split(',')
+      .filter(Boolean)
+    const cover = scenario === 'batch-partial' ? ids.slice(0, 1) : ids
+    for (const id of cover) {
+      fs.writeFileSync('work-' + id + '.txt', 'did ' + id + '\\n')
+      execFileSync('git', ['add', '-A'])
+      execFileSync('git', ['commit', '-qm', 'fix: ' + id + ' work (' + id + ')'])
+    }
+    const s = load()
+    s.events = (s.events ?? []).concat([
+      { spawn: process.env.BRO_BEAD_ID || null, ids: ids.join(','), branch },
+    ])
+    markPrOpened(s)
+    save(s)
+    log('opened pr for ' + ids.join(','))
     break
   }
   case 'verdict':

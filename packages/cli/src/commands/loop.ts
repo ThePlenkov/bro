@@ -8,6 +8,8 @@
  *
  *   bro loop                    run until idle/gated
  *   bro loop --max 3            at most 3 beads
+ *   bro loop --batch 8          clump up to 8 same-affinity beads per
+ *                               work item — one worker, one PR
  *   bro loop --dry-run          print the first item's plan, change nothing
  *   bro loop --agent 'claude -p "$(cat {promptFile})"'
  *   bro loop --agent kilo-cli   spawn through providers.kilo-cli (acp/cli)
@@ -24,7 +26,11 @@
  * open PR — merging stays with the gate here.
  *
  * Human gates, epics, and molecule steps are never claimed (next's
- * rules). A bead whose agent fails without a PR is reopened with a
+ * rules). With `loop.batch`/`--batch` a claim is a CLUMP: the top bead
+ * pulls same-affinity neighbors (spec/epic/area/path key) into one
+ * worktree + one PR, per-bead commits as checkpoints, uncovered
+ * members re-queue on merge (spec bro-nspj7). A bead whose agent fails
+ * without a PR is reopened with a
  * note — unless the spawn died inside loop.crashExitMs (default 10s):
  * gone that fast it crashed on the environment, not the bead, and
  * reopening is a respawn-burn, so it parks loud instead (bro-sovl3). A
@@ -38,6 +44,7 @@ import {
   commandCliName,
   ensureTasksBackend,
   facade,
+  gitBranchLog,
   gitTry,
   LockTimeout,
   procStat,
@@ -61,6 +68,8 @@ import {
   buildFixPrompt,
   buildRebasePrompt,
   buildWorkPrompt,
+  clumpMembers,
+  coveredBeadIds,
   expandAgentCmd,
   memberAction,
   planItem,
@@ -166,6 +175,10 @@ function usage(): never {
   --stack NAME                   chain claimed beads onto stack NAME —
                                 each PR targets the member below
   --max-open N                   cap the gate stack's open PRs (loop.maxOpen, 3)
+  --batch N                      max beads per claim — a clump shares the
+                                lead's affinity key (spec/epic/area/path),
+                                one worktree, one worker, one PR
+                                (loop.batch, 1 = solo)
   --interval SEC                 gate poll interval (60)`)
   process.exit(2)
 }
@@ -421,6 +434,10 @@ function ensureWorktree(root: string, branch: string, dir: string, base?: string
  *  group-signal a mid-write worker — interrupting the loop is an
  *  accident, not an orchestration decision.
  *
+ *  `beadIds` is the whole claimed clump — a solo claim is a
+ *  one-element list (spec bro-nspj7); the run record, log slug, and
+ *  provenance pins key off the lead (`beadIds[0]`).
+ *
  *  stdout/stderr go straight to `<git-common>/bro/loop/<slug>.log`
  *  (append — fix rounds continue the same trail), and the spawn leaves a
  *  `<slug>.json` record beside it: pid/pidStart for liveness, the log's
@@ -432,19 +449,23 @@ function ensureWorktree(root: string, branch: string, dir: string, base?: string
  *  stream stays parseable) — a record-less spawn still works. */
 function spawnAgent(
   ctx: Ctx,
-  beadId: string,
+  beadIds: string[],
   title: string,
   promptFile: string,
   dir: string
 ): Promise<number | null> {
   return new Promise((resolve) => {
+    const leadId = beadIds[0]!
     const env = agentEnv(ctx, {
-      BRO_BEAD_ID: beadId,
+      // BRO_BEAD_ID stays the lead for compatibility — batch work orders
+      // read the whole clump off BRO_BEAD_IDS
+      BRO_BEAD_ID: leadId,
+      BRO_BEAD_IDS: beadIds.join(','),
       BRO_BEAD_TITLE: title,
       BRO_PROMPT_FILE: promptFile,
-      ...provenancePins(ctx, beadId),
+      ...provenancePins(ctx, leadId),
     })
-    const slug = loopSlug(beadId)
+    const slug = loopSlug(leadId)
     const log = loopRunLog(ctx.root, slug)
     let logFd: number | null = null
     if (log !== null) {
@@ -478,7 +499,7 @@ function spawnAgent(
     }
     if (child.pid !== undefined) {
       beginLoopRun(ctx.root, {
-        beadId,
+        beadId: leadId,
         slug,
         pid: child.pid,
         pidStart: procStat(child.pid)?.start,
@@ -486,7 +507,8 @@ function spawnAgent(
         worktree: dir,
         log: log ?? '',
       })
-      say(ctx, `loop: agent ${beadId} on pid ${child.pid}${log === null ? '' : ` — log ${log}`}`)
+      const logNote = log === null ? '' : ` — log ${log}`
+      say(ctx, `loop: agent ${beadIds.join(', ')} on pid ${child.pid}${logNote}`)
     }
     ctx.stage = `worker pid=${child.pid ?? '?'}`
     const settle = (code: number | null): void => {
@@ -534,13 +556,98 @@ function reopenBead(tasks: TaskStore, id: string): void {
   } catch { /* best-effort unclaim */ }
 }
 
-/** Merge the PR, close the bead, drop the worktree. 'landed' only when
- *  the PR reports MERGED — a closed or still-open PR parks the bead.
- *  `alreadyMerged` skips the merge call for PRs that landed externally
- *  while the gate was polling. */
+/** A bead's store status, or 'unknown' when the probe fails — callers
+ *  treat 'unknown' as still-open so a blip never masks work. */
+function beadStatus(ctx: Ctx, id: string): string {
+  try {
+    return ctx.tasks.get(id)?.status ?? 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
+/** The members of a clump still open in the store — verdict closes the
+ *  agent already landed stay closed. */
+function openBeads(ctx: Ctx, beads: ReadyBead[]): ReadyBead[] {
+  return beads.filter((b) => beadStatus(ctx, b.id) !== 'closed')
+}
+
+/** A note fanned out over the clump's still-open members — verdict
+ *  closes the agent already landed don't get gate-failure notes. */
+function noteOpen(ctx: Ctx, beads: ReadyBead[], msg: string): void {
+  for (const b of openBeads(ctx, beads)) {
+    noteBead(ctx.tasks, b.id, msg)
+  }
+}
+
+/** The clump's own commit log — messages on the member branch since it
+ *  forked from its PR base. Coverage is evidence: only beads a commit
+ *  names count as resolved (spec bro-nspj7). Preferred head is the PR's
+ *  pushed headSha — exactly what merged, so local-only commits can't
+ *  over-cover; a remote-only head (update-branch merge) falls back to
+ *  the worktree tip. Empty string when the log is unreadable — callers
+ *  treat unknown coverage as "nothing covered", the fail-safe direction
+ *  (a re-queue, never a false close). */
+function clumpCommitLog(ctx: Ctx, item: LoopItem, pr: number): string {
+  let base = defaultBranchName() ?? 'main'
+  let headSha = ''
+  try {
+    const meta = ctx.rev.prMeta({ repo: ctx.repo, pr })
+    base = meta.baseRef || base
+    headSha = meta.headSha
+  } catch { /* fall back to the default branch guess + local tip */ }
+  return gitBranchLog(headSha, base, item.worktreeDir)
+}
+
+/** Settle the clump after its PR merged — every still-open member named
+ *  in the branch's commits closes 'landed'; the rest reopen into the
+ *  queue (the unfinished tail re-queues, never silently closes). A solo
+ *  item keeps the unconditional close — its prompt never owed a naming
+ *  contract. */
+function settleClump(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number): void {
+  const link = prRef(ctx, pr)
+  if (beads.length === 1) {
+    try {
+      // the agent may have closed it already — a verdict plus a PR both
+      // reaching the store is fine; a second close is a noisy error
+      if (beadStatus(ctx, beads[0]!.id) !== 'closed') {
+        ctx.tasks.close(beads[0]!.id, `landed via PR ${link}`)
+      }
+    } catch (err) {
+      console.error(`loop: ${ctx.backend} close ${beads[0]!.id} failed — ${String(err)}`)
+    }
+    return
+  }
+  const covered = coveredBeadIds(
+    clumpCommitLog(ctx, item, pr),
+    beads.map((b) => b.id)
+  )
+  for (const b of beads) {
+    if (beadStatus(ctx, b.id) === 'closed') {
+      continue // the agent's own verdict stands
+    }
+    if (covered.has(b.id)) {
+      try {
+        ctx.tasks.close(b.id, `landed via PR ${link}`)
+      } catch (err) {
+        console.error(`loop: ${ctx.backend} close ${b.id} failed — ${String(err)}`)
+      }
+    } else {
+      // merged without a commit naming it — unfinished tail re-queues
+      noteBead(ctx.tasks, b.id, `loop: ${link} landed without a commit naming ${b.id} — re-queued`)
+      reopenBead(ctx.tasks, b.id)
+      say(ctx, `loop: ${b.id} not covered by ${link} — re-queued`)
+    }
+  }
+}
+
+/** Merge the PR, close the bead(s), drop the worktree. 'landed' only
+ *  when the PR reports MERGED — a closed or still-open PR parks the
+ *  bead. `alreadyMerged` skips the merge call for PRs that landed
+ *  externally while the gate was polling. */
 async function finalizeMerge(
   ctx: Ctx,
-  bead: ReadyBead,
+  beads: ReadyBead[],
   item: LoopItem,
   pr: number,
   alreadyMerged = false
@@ -552,32 +659,28 @@ async function finalizeMerge(
     }
     const state = ctx.rev.prMeta({ repo: ctx.repo, pr }).state
     if (state !== 'MERGED') {
-      noteBead(
-        ctx.tasks,
-        bead.id,
-        `loop: merge of ${prRef(ctx, pr)} did not land (state=${state}) — worktree ${item.worktreeDir}`
-      )
+      for (const b of openBeads(ctx, beads)) {
+        noteBead(
+          ctx.tasks,
+          b.id,
+          `loop: merge of ${prRef(ctx, pr)} did not land (state=${state}) — worktree ${item.worktreeDir}`
+        )
+      }
       return 'parked'
     }
   } catch (err) {
     // a merge/fetch failure must not abort the loop leaving the bead
     // claimed forever — note it and park
-    noteBead(
-      ctx.tasks,
-      bead.id,
-      `loop: finalizing ${prRef(ctx, pr)} failed — ${err instanceof Error ? err.message : String(err)} — worktree ${item.worktreeDir}`
-    )
+    for (const b of openBeads(ctx, beads)) {
+      noteBead(
+        ctx.tasks,
+        b.id,
+        `loop: finalizing ${prRef(ctx, pr)} failed — ${err instanceof Error ? err.message : String(err)} — worktree ${item.worktreeDir}`
+      )
+    }
     return 'parked'
   }
-  try {
-    // the agent may have closed it already — a verdict plus a PR both
-    // reaching the store is fine; a second close is a noisy error
-    if (ctx.tasks.get(bead.id)?.status !== 'closed') {
-      ctx.tasks.close(bead.id, `landed via PR ${prRef(ctx, pr)}`)
-    }
-  } catch (err) {
-    console.error(`loop: ${ctx.backend} close ${bead.id} failed — ${String(err)}`)
-  }
+  settleClump(ctx, beads, item, pr)
   // an agent-initialized submodule inside the worktree blocks removal —
   // deinit first; either way a failed cleanup is loud, never silent
   gitTry(['-C', item.worktreeDir, 'submodule', 'deinit', '-f', '--all'])
@@ -591,7 +694,7 @@ async function finalizeMerge(
     ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`)
     console.error(`loop: ${ctx.tails.at(-1)}`)
   }
-  say(ctx, `loop: ${bead.id} landed via ${prRef(ctx, pr)}`)
+  say(ctx, `loop: ${beads.map((b) => b.id).join(', ')} landed via ${prRef(ctx, pr)}`)
   return 'landed'
 }
 
@@ -600,7 +703,7 @@ async function finalizeMerge(
  *  decides whether anything landed on the branch. */
 async function runFixRound(
   ctx: Ctx,
-  bead: ReadyBead,
+  beads: ReadyBead[],
   item: LoopItem,
   pr: number,
   round: number
@@ -619,50 +722,63 @@ async function runFixRound(
     say(ctx, `loop: ${prRef(ctx, pr)} threads resolved since the gate snapshot — skipping fix round`)
     return
   }
-  writePrompt(item, buildFixPrompt(bead, pr, threads))
+  writePrompt(item, buildFixPrompt(beads, pr, threads))
   say(ctx, `loop: ${prRef(ctx, pr)} has open threads — fix round ${round}`)
-  const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
+  const code = await spawnAgent(ctx, beads.map((b) => b.id), clumpTitle(beads), item.promptFile, item.worktreeDir)
   if (code !== 0) {
     console.error(`loop: fix agent exited ${code ?? 'abnormal'} — the next gate poll decides`)
   }
 }
 
-/** An agent that exits without a PR may still have left a verdict — its
+/** The spawned worker's env title — a clump names the lead plus its
+ *  tail size so provenance still reads as one line. */
+function clumpTitle(beads: ReadyBead[]): string {
+  return beads.length > 1
+    ? `${beads[0]!.title} (+${beads.length - 1} more)`
+    : beads[0]!.title
+}
+
+/** An agent that exits without a PR may still have left verdicts — each
  *  `bd close` lands in the shared store (BEADS_DIR pin). Closed means
  *  "nothing to ship"; reopening it would resurrect the phantom. A failed
  *  status probe falls through to the failure path rather than masking
- *  it. */
-function agentVerdict(ctx: Ctx, bead: ReadyBead, worktreeDir: string): ItemResult | undefined {
-  try {
-    if (ctx.tasks.get(bead.id)?.status === 'closed') {
-      say(ctx, `loop: ${bead.id} closed by the agent — verdict, not a failure`)
-      noteBead(ctx.tasks, bead.id, `loop: closed by agent verdict — worktree ${worktreeDir} kept for audit`)
-      return 'closed'
-    }
-  } catch { /* store unreachable → normal failure accounting decides */ }
-  return undefined
+ *  it. ALL members closed → the whole clump is a verdict; a partial
+ *  close still counts — the unclosed tail falls through to requeue. */
+function agentVerdict(ctx: Ctx, beads: ReadyBead[], worktreeDir: string): ItemResult | undefined {
+  const closed = beads.filter((b) => beadStatus(ctx, b.id) === 'closed')
+  if (closed.length === 0) {
+    return undefined
+  }
+  for (const b of closed) {
+    say(ctx, `loop: ${b.id} closed by the agent — verdict, not a failure`)
+    noteBead(ctx.tasks, b.id, `loop: closed by agent verdict — worktree ${worktreeDir} kept for audit`)
+  }
+  return closed.length === beads.length ? 'closed' : undefined
 }
 
-/** Agent exited without a PR — note + reopen, 'failed'. */
+/** Agent exited without a PR — note + reopen every member still open,
+ *  'failed'. A batch member's own `bd close` verdict stands. */
 function failNoPr(
   ctx: Ctx,
-  bead: ReadyBead,
+  beads: ReadyBead[],
   item: LoopItem,
   code: number | null
 ): ItemResult {
-  noteBead(
-    ctx.tasks,
-    bead.id,
-    `loop: agent exited ${code ?? 'abnormal'} without a PR — worktree kept at ${item.worktreeDir}`
-  )
-  reopenBead(ctx.tasks, bead.id)
+  for (const b of openBeads(ctx, beads)) {
+    noteBead(
+      ctx.tasks,
+      b.id,
+      `loop: agent exited ${code ?? 'abnormal'} without a PR — worktree kept at ${item.worktreeDir}`
+    )
+    reopenBead(ctx.tasks, b.id)
+  }
   return 'failed'
 }
 
-/** Optional bootstrap command — false (with the bead noted + reopened)
+/** Optional bootstrap command — false (with the beads noted + reopened)
  *  when it fails; spawning the agent on a half-set-up worktree is worse
  *  than failing fast. */
-function runBootstrap(ctx: Ctx, bead: ReadyBead, item: LoopItem): boolean {
+function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
   if (!ctx.cfg.bootstrap) {
     return true
   }
@@ -674,12 +790,14 @@ function runBootstrap(ctx: Ctx, bead: ReadyBead, item: LoopItem): boolean {
   if (b.status === 0) {
     return true
   }
-  noteBead(
-    ctx.tasks,
-    bead.id,
-    `loop: bootstrap failed (${b.status ?? b.signal ?? 'spawn error'}) — worktree kept at ${item.worktreeDir}`
-  )
-  reopenBead(ctx.tasks, bead.id)
+  for (const bead of openBeads(ctx, beads)) {
+    noteBead(
+      ctx.tasks,
+      bead.id,
+      `loop: bootstrap failed (${b.status ?? b.signal ?? 'spawn error'}) — worktree kept at ${item.worktreeDir}`
+    )
+    reopenBead(ctx.tasks, bead.id)
+  }
   return false
 }
 
@@ -794,11 +912,12 @@ function planItemAndWorktree(
 
 // --- the gate stack: task-stack round-robin (spec bro-zsmwq) -----------------
 
-/** A PR on the run's gate stack — bead + worktree + the per-member
- *  clock and its armed watch marker. Entry order is service priority:
- *  the oldest member gets serviced first. */
+/** A PR on the run's gate stack — claimed bead(s) + worktree + the
+ *  per-member clock and its armed watch marker. `beads[0]` is the lead;
+ *  a batch carries the whole clump (spec bro-nspj7). Entry order is
+ *  service priority: the oldest member gets serviced first. */
 interface GateMember {
-  bead: ReadyBead
+  beads: ReadyBead[]
   item: LoopItem
   pr: number
   /** watchBegin marker path — armed for the member's whole stack
@@ -817,76 +936,62 @@ interface GateMember {
 }
 
 /** The push half of the alternation: claim → worktree → agent → PR.
+ *  `beads` is the claimed clump — a solo claim is a one-element array.
  *  The PR found joins the gate stack as the newest member; every
  *  no-PR outcome settles inline exactly as the serial loop did. */
 type PushOutcome =
   | { kind: 'member'; member: GateMember }
   | { kind: 'done'; result: ItemResult }
 
-async function pushItem(ctx: Ctx, bead: ReadyBead): Promise<PushOutcome> {
+async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
+  const lead = beads[0]!
   // resolved here, not earlier — a member that landed since the last
   // push correctly yields the default branch as the next base.
   let slot: StackSlot | undefined
   let item!: LoopItem
   try {
     ctx.stage = 'worktree'
-    const planned = planItemAndWorktree(ctx, bead)
+    const planned = planItemAndWorktree(ctx, lead)
     slot = planned.slot
     item = planned.item
   } catch (err) {
-    noteBead(ctx.tasks, bead.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
-    reopenBead(ctx.tasks, bead.id)
+    for (const b of openBeads(ctx, beads)) {
+      noteBead(ctx.tasks, b.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
+      reopenBead(ctx.tasks, b.id)
+    }
     return { kind: 'done', result: 'failed' }
   }
   ctx.stage = 'bootstrap'
-  if (!runBootstrap(ctx, bead, item)) {
+  if (!runBootstrap(ctx, beads, item)) {
     return { kind: 'done', result: 'failed' }
   }
-  writePrompt(item, buildWorkPrompt(bead, item.branch, slot?.base, slot?.bottom, ctx.backend))
+  writePrompt(item, buildWorkPrompt(beads, item.branch, slot?.base, slot?.bottom, ctx.backend))
   ctx.stage = 'agent spawn'
   const spawnAt = Date.now()
-  const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
+  const code = await spawnAgent(ctx, beads.map((b) => b.id), clumpTitle(beads), item.promptFile, item.worktreeDir)
   // agent wall-time — measured before findPr's gh call; a slow lookup
   // must not inflate an instant crash past the crashExitMs threshold
   const elapsed = Date.now() - spawnAt
   ctx.stage = 'pr lookup'
   const pr = findPr(ctx, item.branch)
   if (pr === 'lookup-error') {
-    noteBead(ctx.tasks, bead.id, `loop: PR lookup failed for ${item.branch} — worktree ${item.worktreeDir}`)
+    for (const b of openBeads(ctx, beads)) {
+      noteBead(ctx.tasks, b.id, `loop: PR lookup failed for ${item.branch} — worktree ${item.worktreeDir}`)
+    }
     return { kind: 'done', result: 'parked' }
   }
   if (pr === null) {
-    const verdict = agentVerdict(ctx, bead, item.worktreeDir)
-    if (verdict !== undefined) {
-      return { kind: 'done', result: verdict }
-    }
-    if (ctx.cfg.crashExitMs > 0 && elapsed < ctx.cfg.crashExitMs) {
-      // gone in seconds, no PR, no verdict — the spawn died on the
-      // environment (broken dist, bad argv), never on the bead. Reopen
-      // and the next claim walks into the same wall: claim → crash →
-      // reopen → reclaim is the respawn-burn from bro-sovl3. Park loud.
-      noteBead(
-        ctx.tasks,
-        bead.id,
-        `loop: agent gone in ${elapsed}ms (exit ${code ?? 'spawn failure'}) — environment crash, not a verdict; parked — worktree kept at ${item.worktreeDir}`
-      )
-      say(
-        ctx,
-        `loop: ${bead.id} agent exited ${code ?? 'spawn failure'} in ${elapsed}ms — parked (crash, not work)`
-      )
-      return { kind: 'done', result: 'parked' }
-    }
-    return { kind: 'done', result: failNoPr(ctx, bead, item, code) }
+    return { kind: 'done', result: settleNoPr(ctx, beads, item, code, elapsed) }
   }
   // the loop IS the watcher — arm the same marker `act wait` drops
   // (bro-z0k2u) for the member's whole stack tenure, not per poll:
   // a reboot-killed loop leaves a dead marker `bro act rearm`
   // resurrects instead of the PR sitting silently unwatched. `bead`
   // rides the marker so the resurrected wait can run the finalizeMerge
-  // half the dead loop never reached — merge lands, claim closes
-  // (bro-q6ppv).
+  // half the dead loop never reached — merge lands, claims close
+  // (bro-q6ppv); a clump's whole id list rides comma-joined.
   const member: GateMember = {
-    bead,
+    beads,
     item,
     pr,
     marker: watchBegin(ctx.root, {
@@ -895,7 +1000,7 @@ async function pushItem(ctx: Ctx, bead: ReadyBead): Promise<PushOutcome> {
       merge: true,
       cleanup: true,
       workdir: item.worktreeDir,
-      bead: bead.id,
+      bead: beads.map((b) => b.id).join(','),
       timeoutMin: ctx.cfg.mergeTimeoutMin,
     }),
     since: Date.now(),
@@ -903,6 +1008,42 @@ async function pushItem(ctx: Ctx, bead: ReadyBead): Promise<PushOutcome> {
     fetchErrors: 0,
   }
   return { kind: 'member', member }
+}
+
+/** The agent exited without a PR — the settle order: a self-reported
+ *  verdict (the worker closed its own bead) wins; an instant exit is
+ *  an environment crash to park loud, never a bead failure; anything
+ *  else fails the clump and re-queues the still-open members. */
+function settleNoPr(
+  ctx: Ctx,
+  beads: ReadyBead[],
+  item: LoopItem,
+  code: number | null,
+  elapsed: number
+): ItemResult {
+  const verdict = agentVerdict(ctx, beads, item.worktreeDir)
+  if (verdict !== undefined) {
+    return verdict
+  }
+  if (ctx.cfg.crashExitMs > 0 && elapsed < ctx.cfg.crashExitMs) {
+    // gone in seconds, no PR, no verdict — the spawn died on the
+    // environment (broken dist, bad argv), never on the bead. Reopen
+    // and the next claim walks into the same wall: claim → crash →
+    // reopen → reclaim is the respawn-burn from bro-sovl3. Park loud.
+    for (const b of openBeads(ctx, beads)) {
+      noteBead(
+        ctx.tasks,
+        b.id,
+        `loop: agent gone in ${elapsed}ms (exit ${code ?? 'spawn failure'}) — environment crash, not a verdict; parked — worktree kept at ${item.worktreeDir}`
+      )
+    }
+    say(
+      ctx,
+      `loop: ${beads[0]!.id} agent exited ${code ?? 'spawn failure'} in ${elapsed}ms — parked (crash, not work)`
+    )
+    return 'parked'
+  }
+  return failNoPr(ctx, beads, item, code)
 }
 
 /** One member's settled snapshot → the mapped action. 'kept' parks the
@@ -915,7 +1056,7 @@ async function serviceMember(
   m: GateMember
 ): Promise<'kept' | 'active' | 'landed' | 'parked'> {
   ctx.stage = `gate pr=${m.pr}`
-  ctx.bead = m.bead.id
+  ctx.bead = m.beads[0]!.id
   let snap: GateSnapshot
   try {
     const state = await fetchPrActState(
@@ -955,9 +1096,9 @@ async function serviceMember(
     if (m.fetchErrors < 3 && Date.now() - m.since < ctx.cfg.mergeTimeoutMin * 60_000) {
       return 'kept'
     }
-    noteBead(
-      ctx.tasks,
-      m.bead.id,
+    noteOpen(
+      ctx,
+      m.beads,
       `loop: gate fetch kept failing for PR ${prRef(ctx, m.pr)} — ${String(err)} — worktree ${m.item.worktreeDir}`
     )
     return leave(m, 'parked')
@@ -970,16 +1111,16 @@ async function serviceMember(
   switch (act.kind) {
     case 'land':
       // landed externally while the member sat — close out, no merge call
-      return leave(m, await finalizeMerge(ctx, m.bead, m.item, m.pr, true))
+      return leave(m, await finalizeMerge(ctx, m.beads, m.item, m.pr, true))
     case 'merge':
-      return leave(m, await finalizeMerge(ctx, m.bead, m.item, m.pr))
+      return leave(m, await finalizeMerge(ctx, m.beads, m.item, m.pr))
     case 'closed':
-      noteBead(ctx.tasks, m.bead.id, `loop: PR ${prRef(ctx, m.pr)} was closed unmerged — worktree ${m.item.worktreeDir}`)
+      noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, m.pr)} was closed unmerged — worktree ${m.item.worktreeDir}`)
       return leave(m, 'parked')
     case 'fix':
-      return respawnRound(ctx, m, () => runFixRound(ctx, m.bead, m.item, m.pr, m.rounds))
+      return respawnRound(ctx, m, () => runFixRound(ctx, m.beads, m.item, m.pr, m.rounds))
     case 'rebase':
-      return respawnRound(ctx, m, () => runRebaseRound(ctx, m.bead, m.item, m.pr, m.rounds))
+      return respawnRound(ctx, m, () => runRebaseRound(ctx, m.beads, m.item, m.pr, m.rounds))
     case 'update': {
       let ok: boolean
       try {
@@ -993,7 +1134,7 @@ async function serviceMember(
       console.error(`loop ${prRef(ctx, m.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`)
       if (!ok) {
         // an update refusal IS the settle — same park the wait produced
-        noteBead(ctx.tasks, m.bead.id, `loop: PR ${prRef(ctx, m.pr)} blocked: ${snap.blockers.join('; ')} — worktree ${m.item.worktreeDir}`)
+        noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, m.pr)} blocked: ${snap.blockers.join('; ')} — worktree ${m.item.worktreeDir}`)
         return leave(m, 'parked')
       }
       m.updatedSha = snap.headSha
@@ -1002,7 +1143,7 @@ async function serviceMember(
     case 'wait':
       return 'kept'
     case 'park':
-      noteBead(ctx.tasks, m.bead.id, `loop: PR ${prRef(ctx, m.pr)} ${act.why} — worktree ${m.item.worktreeDir}`)
+      noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, m.pr)} ${act.why} — worktree ${m.item.worktreeDir}`)
       return leave(m, 'parked')
   }
 }
@@ -1040,7 +1181,7 @@ async function respawnRound(
  *  a blind rebase order would be worse). */
 async function runRebaseRound(
   ctx: Ctx,
-  bead: ReadyBead,
+  beads: ReadyBead[],
   item: LoopItem,
   pr: number,
   round: number
@@ -1052,9 +1193,9 @@ async function runRebaseRound(
     console.error(`loop ${prRef(ctx, pr)}: base lookup for the rebase round failed — ${String(err)}`)
     return
   }
-  writePrompt(item, buildRebasePrompt(bead, pr, base))
+  writePrompt(item, buildRebasePrompt(beads, pr, base))
   say(ctx, `loop: ${prRef(ctx, pr)} conflicts — rebase round ${round} onto ${base}`)
-  const code = await spawnAgent(ctx, bead.id, bead.title, item.promptFile, item.worktreeDir)
+  const code = await spawnAgent(ctx, beads.map((b) => b.id), clumpTitle(beads), item.promptFile, item.worktreeDir)
   if (code !== 0) {
     console.error(`loop: rebase agent exited ${code ?? 'abnormal'} — the next gate poll decides`)
   }
@@ -1095,6 +1236,7 @@ const LOOP_VALUE_FLAGS = new Set([
   '--merge-timeout',
   '--max',
   '--max-open',
+  '--batch',
   '--interval',
   '--label',
   '--stack',
@@ -1230,6 +1372,7 @@ function buildCtx(
       mergeTimeoutMin: num(flag(argv, '--merge-timeout'), cfg.mergeTimeoutMin),
       maxItems: num(flag(argv, '--max'), cfg.maxItems, 0),
       maxOpen: num(flag(argv, '--max-open'), cfg.maxOpen, 1),
+      batch: num(flag(argv, '--batch'), cfg.batch, 1),
     },
     act: broCfg.act,
     agent,
@@ -1266,13 +1409,33 @@ function dryRunPlan(ctx: Ctx): void {
     return
   }
   const ready = readyBeads(ctx.root)
-  const top = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root)).queue[0]
+  const queue = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root)).queue
+  const top = queue[0]
   if (!top) {
     console.log('loop --dry-run: nothing claimable')
     return
   }
+  // dry-run renders the clump the claim would pick — no claims made;
+  // --max bounds it exactly as tryClaim's budget does
+  const clump =
+    ctx.cfg.batch > 1
+      ? [
+          top,
+          ...clumpMembers(top, queue.slice(1), {
+            size:
+              ctx.cfg.maxItems > 0 ? Math.min(ctx.cfg.batch, ctx.cfg.maxItems) : ctx.cfg.batch,
+            minPriority: ctx.cfg.batchMinPriority,
+          }),
+        ]
+      : [top]
+  console.log(`would claim ${clump.map((b) => b.id).join(', ')} — ${top.title}`)
+  if (clump.length > 1) {
+    for (const b of clump.slice(1)) {
+      console.log(`  + ${b.id} — ${b.title}`)
+    }
+    console.log(`  batch: ${clump.length} beads, one worktree, one PR`)
+  }
   const { slot, item } = stackPlan(ctx, top)
-  console.log(`would claim ${top.id} — ${top.title}`)
   console.log(`  worktree ${item.worktreeDir} on ${item.branch}`)
   if (slot !== undefined) {
     console.log(`  stack ${ctx.stack} member ${slot.n} — PR base ${slot.base}`)
@@ -1462,21 +1625,64 @@ function endAudit(ctx: Ctx, seen: Set<string>): void {
   }
 }
 
-/** Claim the next ready bead — undefined when the queue drains. A
- *  foreign-only remainder must not look like a drained queue: 'done'
- *  would hide work a shared db still advertises. */
-function claimNext(
+/** Claim the next work item — the top ready bead, plus its compatible
+ *  tail when `loop.batch` > 1 (spec bro-nspj7: the clump binds on the
+ *  lead's affinity key — spec/epic/area/path — and never reaches past
+ *  the priority floor or the --max budget). Undefined when the queue
+ *  drains. A foreign-only remainder must not look like a drained
+ *  queue: 'done' would hide work a shared db still advertises. */
+function claimClump(
   ctx: Ctx,
   scope: NonNullable<ReturnType<typeof nextScope>>,
-  seen: Set<string>
-): ReadyBead | undefined {
+  seen: Set<string>,
+  budget: number
+): ReadyBead[] | undefined {
   const ready = readyBeads(ctx.root)
   const c = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root))
-  const bead = claimUpTo(c.queue.filter((b) => !seen.has(b.id)), 1, ctx.root)[0]
-  if (!bead && c.foreign > 0) {
-    say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
+  const candidates = c.queue.filter((b) => !seen.has(b.id))
+  const lead = claimUpTo(candidates, 1, ctx.root)[0]
+  if (!lead) {
+    if (c.foreign > 0) {
+      say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
+    }
+    return undefined
   }
-  return bead
+  // solo fast path — batch off, no budget for a second member, or a
+  // lead that can't clump (urgent, keyless, or `solo`-labelled)
+  if (ctx.cfg.batch < 2 || budget < 2) {
+    return [lead]
+  }
+  const want = clumpMembers(
+    lead,
+    candidates.filter((b) => b.id !== lead.id),
+    { size: Math.min(ctx.cfg.batch, budget), minPriority: ctx.cfg.batchMinPriority }
+  )
+  if (want.length === 0) {
+    return [lead]
+  }
+  // members claim one at a time — a raced-away member skips, and a
+  // mid-fill store failure must not sink the run with half the clump
+  // claimed: the lead proceeds with whatever members did claim
+  const members: ReadyBead[] = []
+  for (const m of want) {
+    try {
+      const got = claimUpTo([m], 1, ctx.root)[0]
+      if (got === undefined) {
+        continue // raced away
+      }
+      members.push(got)
+    } catch (err) {
+      console.error(`loop: clump member claim failed — ${String(err)} — proceeding with a partial clump`)
+      break
+    }
+  }
+  if (members.length > 0) {
+    say(
+      ctx,
+      `loop: batch of ${members.length + 1} — ${lead.id} + ${members.map((b) => b.id).join(', ')}`
+    )
+  }
+  return [lead, ...members]
 }
 
 /** Post-merge cascade after a landed stack member — retarget + rebase
@@ -1507,7 +1713,7 @@ interface QueueState {
   /** Claims spent — --max bounds claims, not outcomes: a claimed bead's
    *  verdict arrives whenever its gate settles. */
   claimed: number
-  /** claimNext returned nothing — no more pushes, only gate service. */
+  /** claimClump returned nothing — no more pushes, only gate service. */
   drained: boolean
 }
 
@@ -1532,7 +1738,9 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
       syncAfterLand(ctx)
     }
     if (ctx.json) {
-      console.log(JSON.stringify({ bead: m.bead.id, result: verdict }))
+      console.log(
+        JSON.stringify({ bead: m.beads[0]!.id, beads: m.beads.map((b) => b.id), result: verdict })
+      )
     }
   }
   return busy
@@ -1553,25 +1761,32 @@ async function tryClaim(
   }
   ctx.stage = 'claim'
   ctx.bead = undefined
-  const bead = claimNext(ctx, scope, q.seen)
-  if (bead === undefined) {
+  // --max bounds BEADS, not items — a clump may only fill up to the
+  // run's remaining claim budget
+  const budget =
+    ctx.cfg.maxItems > 0 ? ctx.cfg.maxItems - q.claimed : Number.MAX_SAFE_INTEGER
+  const clump = claimClump(ctx, scope, q.seen, budget)
+  if (clump === undefined) {
     q.drained = true
     return false
   }
-  q.seen.add(bead.id)
-  q.claimed += 1
-  ctx.bead = bead.id
-  const out = await pushItem(ctx, bead)
+  const ids = clump.map((b) => b.id)
+  for (const b of clump) {
+    q.seen.add(b.id)
+  }
+  q.claimed += clump.length
+  ctx.bead = clump[0]!.id
+  const out = await pushItem(ctx, clump)
   if (out.kind === 'member') {
     q.stack.push(out.member)
     say(
       ctx,
-      `loop: ${bead.id} → PR ${prRef(ctx, out.member.pr)} (gate ${q.stack.length}/${ctx.cfg.maxOpen})`
+      `loop: ${ids.join(', ')} → PR ${prRef(ctx, out.member.pr)} (gate ${q.stack.length}/${ctx.cfg.maxOpen})`
     )
   } else {
     q.tally[out.result] += 1
     if (ctx.json) {
-      console.log(JSON.stringify({ bead: bead.id, result: out.result }))
+      console.log(JSON.stringify({ bead: ids[0], beads: ids, result: out.result }))
     }
   }
   return true
