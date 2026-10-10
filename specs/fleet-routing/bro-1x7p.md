@@ -253,8 +253,9 @@ for explicit parallel fan-out:
 
 1. `bro convoy done` (and bead close on a mol step) emits a mailbox
    drop — `bro notify --to <agentId|sessionId|orchestrator> --kind
-   result` — when the DAG advances: a new ready step, a gate now
-   waiting, or `complete`. The claiming session's id does not ride
+   result -- "<mol> advanced: <step|gate|complete>"` — when the DAG
+   advances: a new ready step, a gate now waiting, or `complete`.
+   The claiming session's id does not ride
    the beads claim — `--claim` writes the bd actor as assignee, an
    actor-space identity that is never a notify address. The
    recipient resolves from the session carriers instead: the step's
