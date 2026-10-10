@@ -49,6 +49,19 @@ describe('loop run records', () => {
     })
   })
 
+  test('a future-stamped record clamps to zero silence — sub-ms mtime vs floored Date.now() can read negative (bro-zigwt)', () => {
+    const { root, main } = initRepo('bro-loopstate-')
+    inside(main, root, () => {
+      beginLoopRun(main, rec(main))
+      const recPath = join(loopRunsDir(main)!, 'bro-x1.json')
+      const future = new Date(Date.now() + 60_000)
+      utimesSync(recPath, future, future)
+      const [r] = collectLoopRuns(main)
+      assert.equal(r?.state, 'running')
+      assert.equal(r?.silentMs, 0)
+    })
+  })
+
   test('silence counts from the later of the log and record stamps', () => {
     const { root, main } = initRepo('bro-loopstate-')
     inside(main, root, () => {
