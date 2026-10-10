@@ -964,6 +964,19 @@ function ensureMilestone(dir: string, epic: TaskRow): { number: number; url: str
   return { number: made.number, url: milestoneUrl(repo, made) }
 }
 
+/** The epic's container: a known milestone ref joins it; an absent
+ *  ref creates the milestone and lends the bead its URL. A foreign
+ *  ref declines — the epic projects elsewhere, no join. */
+function epicMilestone(dir: string, epic: TaskRow): { milestone?: number; epicRef?: string } {
+  const eref = epic.external_ref?.trim() ?? ''
+  if (eref !== '') {
+    const known = milestoneRefNumber(dir, eref)
+    return known === undefined ? {} : { milestone: known }
+  }
+  const ms = ensureMilestone(dir, epic)
+  return { milestone: ms.number, epicRef: ms.url }
+}
+
 /** The bead→issue projection. Dedup: an external_ref naming one of
  *  this repo's issues returns it — the caller's write-back made the
  *  map; a foreign ref declines (the bead already projects elsewhere —
@@ -987,21 +1000,8 @@ function publishSync(
       return undefined
     }
   }
-  let milestone: number | undefined
-  let epicRef: string | undefined
   const epic = opts?.epic
-  if (epic !== undefined) {
-    const eref = epic.external_ref?.trim() ?? ''
-    const known = eref === '' ? undefined : milestoneRefNumber(dir, eref)
-    if (known !== undefined) {
-      milestone = known
-    } else if (eref === '') {
-      const ms = ensureMilestone(dir, epic)
-      milestone = ms.number
-      epicRef = ms.url
-    }
-    // a foreign epic ref — the epic projects elsewhere; no container join
-  }
+  const { milestone, epicRef } = epic === undefined ? {} : epicMilestone(dir, epic)
   const row = createSync(dir, {
     title: task.title !== undefined && task.title !== '' ? task.title : task.id,
     description: task.description,
