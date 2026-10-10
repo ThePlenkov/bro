@@ -10,6 +10,7 @@
     "plans",
     "integrations",
     "skills",
+    "dolt-server",
     "---Extend---",
     "plugins",
     "packages"
