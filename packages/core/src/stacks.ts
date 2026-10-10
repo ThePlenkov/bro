@@ -67,6 +67,16 @@ export interface StackMergeReport {
   merged: string[]
 }
 
+/** A member's registration in the host's server-side stack object.
+ *  `id` is the number the host's tooling and UI use (GitHub's stack
+ *  number — the `gh stack link <id>` grow arg); `position`/`size`
+ *  locate the member in the chain when the host reports them. */
+export interface StackMembership {
+  id: number
+  position?: number
+  size?: number
+}
+
 export interface StackFacade {
   /** The host's "open a review for this member" command — push's hint
    *  line. Undefined → no review surface (plain git): push prints
@@ -84,6 +94,19 @@ export interface StackFacade {
     members: StackChainMember[],
     opts: StackMergeOpts
   ): StackMergeReport | undefined
+  /** The host stack object this member sits in — null when unstacked,
+   *  unreadable, or the member carries no PR. Optional — hosts without
+   *  stack objects (GitLab's platform-detected chains, plain git)
+   *  leave it absent; a probe is advisory, never a gate input. */
+  membership?(member: { branch: string; pr?: number }): StackMembership | null
+  /** Register members as the host's stack object, ordered bottom→top —
+   *  the connector's native stack tool (`gh stack link`) creates or
+   *  grows it and keeps members already inside. Absent → the host has
+   *  no stack registry to write (GitLab's platform-detected chains,
+   *  plain git). Throws on refusal — a broken chain or rejected member
+   *  is a real error; returns the bottom member's post-publish
+   *  membership when the host reports one. */
+  publish?(members: StackChainMember[]): StackMembership | null
 }
 
 /** Sync nap — merge paths are commands, not hook probes; same primitive

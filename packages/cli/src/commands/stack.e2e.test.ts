@@ -552,4 +552,124 @@ describe('bro stack e2e', () => {
       assert.match(r2.stdout, /stack\/s\/2-fx-b remote gone/)
     })
   })
+
+  test('publish registers the open member PRs as the host stack', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      pushPair(f)
+      openPrs(f)
+      const r = f.run(['publish', 's'])
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /stack s published — stack #901/)
+      const stacks = readHostState(f.hostState).stacks as Record<string, number> | undefined
+      assert.equal(stacks?.['stack/s/1-fx-a'], 901)
+      assert.equal(stacks?.['stack/s/2-fx-b'], 901)
+    })
+  })
+
+  test('a re-publish reads back as already published — no churn', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      pushPair(f)
+      openPrs(f)
+      assert.equal(f.run(['publish', 's']).code, 0)
+      const again = f.run(['publish', 's'])
+      assert.equal(again.code, 0, again.stderr)
+      assert.match(again.stdout, /stack s already published — stack #901/)
+    })
+  })
+
+  test('publish refuses a chain with fewer than two open member PRs', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      pushPair(f)
+      // only the bottom member's PR exists — publish is post-hoc work,
+      // nothing to register until both members are up
+      writeHostState(f.hostState, {
+        prs: { 'stack/s/1-fx-a': { number: 11, state: 'OPEN', baseRef: 'main' } },
+      })
+      const r = f.run(['publish', 's'])
+      assert.equal(r.code, 1)
+      assert.match(r.stdout, /fewer than two open member PRs/)
+      assert.equal(readHostState(f.hostState).stacks, undefined)
+    })
+  })
+
+  test('publish refuses members already split across two host stacks', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      pushPair(f)
+      openPrs(f, {
+        stacks: { 'stack/s/1-fx-a': 7, 'stack/s/2-fx-b': 9 },
+      })
+      const r = f.run(['publish', 's'])
+      assert.equal(r.code, 1)
+      assert.match(r.stdout, /different host stacks \(#7, #9\)/)
+    })
+  })
+
+  test('list hints when open member PRs are not registered on the host', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      pushPair(f)
+      openPrs(f)
+      const r = f.run(['list', 's'])
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /2 of 2 open member PRs not in a stack on the host — `bro stack publish s`/)
+      // the hint goes once the chain is registered
+      assert.equal(f.run(['publish', 's']).code, 0)
+      const after = f.run(['list', 's'])
+      assert.doesNotMatch(after.stdout, /not in a stack on the host/)
+    })
+  })
+
+  test('a clean sync auto-publishes the chain', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      pushPair(f)
+      openPrs(f)
+      const r = f.run(['sync', 's'])
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /stack s published — stack #901/)
+      const stacks = readHostState(f.hostState).stacks as Record<string, number> | undefined
+      assert.equal(stacks?.['stack/s/1-fx-a'], 901)
+      assert.equal(stacks?.['stack/s/2-fx-b'], 901)
+    })
+  })
+
+  test('a skipped member defers the sync-tail publish', () => {
+    const f = stackFixture([{ ...FAKE_BEAD, id: 'fx-c', title: 'third' }])
+    inside(f.main, f.root, () => {
+      const { wb } = pushPair(f)
+      commitIn(wb, 'b.txt')
+      git(['push', '-q', 'origin', 'stack/s/2-fx-b'], wb)
+      assert.equal(f.run(['push', 'fx-c', '--name', 's']).code, 0)
+      // bottom merged → member 2 owes a rebase+retarget, but its worktree
+      // is dirty; member 3 stays based on it and keeps its OPEN PR — the
+      // chain would be publishable count-wise, yet the cascade broke
+      writeFileSync(join(wb, 'dirty.txt'), 'uncommitted\n')
+      writeHostState(f.hostState, {
+        prs: {
+          'stack/s/1-fx-a': { number: 11, state: 'MERGED', baseRef: 'main' },
+          'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
+          'stack/s/3-fx-c': { number: 13, state: 'OPEN', baseRef: 'stack/s/2-fx-b' },
+        },
+      })
+      const r = f.run(['sync', 's'])
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /stack\/s\/2-fx-b skipped — dirty worktree/)
+      assert.doesNotMatch(r.stdout, /published/)
+      assert.equal(readHostState(f.hostState).stacks, undefined)
+    })
+  })
+
+  test('publish on a forge-less host declines with the reason', () => {
+    const f = gitStackFixture()
+    inside(f.main, f.root, () => {
+      pushPair(f)
+      const r = f.run(['publish', 's'])
+      assert.equal(r.code, 1)
+      assert.match(r.stderr, /no connector serves stack publish/)
+    })
+  })
 })

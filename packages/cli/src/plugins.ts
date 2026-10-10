@@ -349,7 +349,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'stack',
-    summary: 'Stacked bead→worktree→PR chains: push|list|sync|merge',
+    summary: 'Stacked bead→worktree→PR chains: push|list|sync|publish|merge',
     run: runStackCommand,
     skill: 'stack',
     // the 'stack' config section (stack.mode) stays owned by `work`

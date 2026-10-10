@@ -27,6 +27,7 @@ import type {
   ReviewFacade,
   ReviewThread,
   ScanOpts,
+  StackMembership,
 } from '@broject/core'
 
 // graphql/REST paths need owner+repo separately — split the facade's
@@ -694,6 +695,28 @@ export interface StackProbe {
   base?: string
 }
 
+/** The `stack` object `GET /pulls/{n}` carries for members —
+ *  `{number, position, size}` while stacked, absent/null otherwise.
+ *  Shared by the cascade probe and the publish pre-flight; every read
+ *  failure (older API version, auth, network) surfaces as undefined —
+ *  a probe never blocks the caller's fallback. */
+function readPrStack(
+  t: PrTarget
+): { stack?: { number?: number; position?: number; size?: number } | null; base?: { ref?: string } } {
+  const res = ghTry(['api', `repos/${t.repo}/pulls/${t.pr}`])
+  if (res.code !== 0) {
+    return {}
+  }
+  try {
+    return JSON.parse(res.out) as {
+      stack?: { number?: number; position?: number; size?: number } | null
+      base?: { ref?: string }
+    }
+  } catch {
+    return {}
+  }
+}
+
 /** Does this PR sit in a stack, and onto what? `GET /pulls/{n}` carries
  *  the `stack` object for members (base, size, position, number).
  *  Every failure — no field on an older API version, an auth or network
@@ -702,19 +725,22 @@ export interface StackProbe {
  *  stack the probe missed. Exported for the stacks facade — cascade
  *  ownership is the same probe. */
 export function stackProbe(t: PrTarget): StackProbe {
-  const res = ghTry(['api', `repos/${t.repo}/pulls/${t.pr}`])
-  if (res.code !== 0) {
-    return { stacked: false }
+  const body = readPrStack(t)
+  return {
+    stacked: body.stack !== undefined && body.stack !== null,
+    base: body.base?.ref,
   }
-  try {
-    const body = JSON.parse(res.out) as { stack?: unknown; base?: { ref?: string } }
-    return {
-      stacked: body.stack !== undefined && body.stack !== null,
-      base: body.base?.ref,
-    }
-  } catch {
-    return { stacked: false }
-  }
+}
+
+/** Which stack this PR sits in — the same `.stack` read as stackProbe,
+ *  surfaced as the membership the stacks facade publishes. Null when
+ *  unstacked or unreadable; `number` is the host's stack id (the
+ *  `gh stack link <id>` grow arg). */
+export function stackMembership(t: PrTarget): StackMembership | null {
+  const stack = readPrStack(t).stack
+  return stack?.number === undefined
+    ? null
+    : { id: stack.number, position: stack.position, size: stack.size }
 }
 
 /** Does the base branch require a merge queue? GraphQL is the only

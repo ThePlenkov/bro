@@ -18,6 +18,9 @@ case "$1 $2" in
   "stack merge") if [ -n "$FAKE_GH_STACK_MERGE_ERR" ]; then echo "$FAKE_GH_STACK_MERGE_ERR" >&2; fi
       if [ -n "$FAKE_GH_STACK_MERGE_CODE" ]; then exit "$FAKE_GH_STACK_MERGE_CODE"; fi
       exit 0 ;;
+  "stack link") if [ -n "$FAKE_GH_STACK_LINK_ERR" ]; then echo "$FAKE_GH_STACK_LINK_ERR" >&2; fi
+      if [ -n "$FAKE_GH_STACK_LINK_CODE" ]; then exit "$FAKE_GH_STACK_LINK_CODE"; fi
+      exit 0 ;;
   "repo view") if [ -n "$FAKE_GH_REPO_VIEW_ERR" ]; then echo 'gh: boom' >&2; exit 1; fi
       echo '{"owner":{"login":"acme"},"name":"widgets"}' ;;
   "api repos/"*) if [ -n "$FAKE_GH_PULL_ERR" ]; then echo 'gh: API rate limit exceeded' >&2; exit 1; fi
@@ -168,6 +171,84 @@ describe('github stacks openHint', () => {
         githubStacks(dir).openHint?.({ branch: 'stack/s/2-b', base: 'stack/s/1-a' }),
         'gh pr create --base stack/s/1-a'
       )
+    })
+  })
+})
+
+describe('github stacks membership', () => {
+  test('a `.stack` read surfaces as the member\'s host stack id', () => {
+    withFakeGh(
+      { FAKE_GH_PULL: '{"stack":{"number":7,"position":2,"size":3},"base":{"ref":"main"}}' },
+      (dir) => {
+        const m = githubStacks(dir).membership?.({ branch: 'stack/s/2-b', pr: 42 })
+        assert.deepEqual(m, { id: 7, position: 2, size: 3 })
+      }
+    )
+  })
+
+  test('an unstacked or un-PR\'d member reads null', () => {
+    withFakeGh({ FAKE_GH_PULL: '{"base":{"ref":"main"}}' }, (dir) => {
+      const stacks = githubStacks(dir)
+      assert.equal(stacks.membership?.({ branch: 'stack/s/2-b', pr: 42 }), null)
+      assert.equal(stacks.membership?.({ branch: 'stack/s/2-b' }), null)
+    })
+  })
+
+  test('a failed probe reads null — advisory, never a gate input', () => {
+    withFakeGh({ FAKE_GH_PULL: '', FAKE_GH_PULL_ERR: '1' }, (dir) => {
+      assert.equal(githubStacks(dir).membership?.({ branch: 'stack/s/2-b', pr: 42 }), null)
+    })
+  })
+})
+
+describe('github stacks publish', () => {
+  const STACKED_PULL = {
+    FAKE_GH_PULL: '{"stack":{"number":7,"position":1,"size":2},"base":{"ref":"main"}}',
+  }
+
+  test('runs `gh stack link` bottom→top and reads back the bottom\'s stack', () => {
+    withFakeGh({ ...EXT_INSTALLED, ...STACKED_PULL }, (dir, log) => {
+      const m = githubStacks(dir).publish?.(CHAIN)
+      assert.deepEqual(m, { id: 7, position: 1, size: 2 })
+      assert.match(readFileSync(log, 'utf8'), /stack link 41 42/)
+    })
+  })
+
+  test('a missing extension throws the install hint before any link call', () => {
+    withFakeGh({ FAKE_GH_EXTENSIONS: '', ...STACKED_PULL }, (dir, log) => {
+      assert.throws(() => githubStacks(dir).publish?.(CHAIN), /gh extension install github\/gh-stack/)
+      assert.doesNotMatch(readFileSync(log, 'utf8'), /stack link/)
+    })
+  })
+
+  test('a refused link throws with the tool\'s stderr', () => {
+    withFakeGh(
+      {
+        ...EXT_INSTALLED,
+        FAKE_GH_STACK_LINK_CODE: '1',
+        FAKE_GH_STACK_LINK_ERR: 'pull request 41 is already in another stack',
+      },
+      (dir) => {
+        assert.throws(
+          () => githubStacks(dir).publish?.(CHAIN),
+          /gh stack link 41 42 failed \(1\): pull request 41 is already in another stack/
+        )
+      }
+    )
+  })
+
+  test('a members list with no PRs is a no-op — no link call', () => {
+    withFakeGh(EXT_INSTALLED, (dir, log) => {
+      const m = githubStacks(dir).publish?.([member('stack/s/1-a', { pr: undefined })])
+      assert.equal(m, null)
+      assert.doesNotMatch(readFileSync(log, 'utf8'), /stack link/)
+    })
+  })
+
+  test('a failing repo view throws before the link call — nothing registered', () => {
+    withFakeGh({ ...EXT_INSTALLED, FAKE_GH_REPO_VIEW_ERR: '1' }, (dir, log) => {
+      assert.throws(() => githubStacks(dir).publish?.(CHAIN))
+      assert.doesNotMatch(readFileSync(log, 'utf8'), /stack link/)
     })
   })
 })

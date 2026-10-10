@@ -172,6 +172,7 @@ export type {
   StackCascade,
   StackChainMember,
   StackFacade,
+  StackMembership,
   StackMergeOpts,
   StackMergeReport,
 } from './stacks.ts'
