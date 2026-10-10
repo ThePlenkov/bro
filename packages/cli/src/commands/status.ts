@@ -323,6 +323,17 @@ function actLine(act: NonNullable<BroStatus['act']> | null): string {
   return `act: [#${act.pr}](${act.url}) ${act.gate}${blockers}`
 }
 
+function buildLine(build: NonNullable<BroStatus['build']>): string {
+  const flags = [
+    build.behind ? 'behind HEAD' : '',
+    build.mine === false ? 'another session wrote it' : '',
+  ].filter((f) => f !== '')
+  return (
+    `build: ${build.via} by ${build.session} ${stampAgo(build.ts, Date.now())}` +
+    (flags.length > 0 ? ` — ${flags.join(', ')}` : '')
+  )
+}
+
 function render(s: BroStatus): string[] {
   const lines: string[] = []
   lines.push(`board: ${basename(s.dir)} · ${s.branch}${s.dirty > 0 ? ` · dirty ${s.dirty}` : ''}`)
@@ -334,14 +345,7 @@ function render(s: BroStatus): string[] {
     lines.push(`drill: ${s.drill.frame.id} — ${s.drill.frame.title} (depth ${s.drill.frame.depth})`)
   }
   if (s.build !== null) {
-    const flags = [
-      s.build.behind ? 'behind HEAD' : '',
-      s.build.mine === false ? 'another session wrote it' : '',
-    ].filter((f) => f !== '')
-    lines.push(
-      `build: ${s.build.via} by ${s.build.session} ${stampAgo(s.build.ts, Date.now())}` +
-        (flags.length > 0 ? ` — ${flags.join(', ')}` : '')
-    )
+    lines.push(buildLine(s.build))
   }
   const beads = s.beads.inProgress
   if (beads.length > 0) {
