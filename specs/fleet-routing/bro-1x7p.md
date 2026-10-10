@@ -61,7 +61,8 @@ the next work order in.
 - **shell unit** — a convoy step materialized as a pinned detached
   shell (`sh -c` spawn, own process group, `pid`/`log`/`exit` under
   `<git-common>/bro/agents/`) — the native backend's existing shape,
-  now the formula's explicit contract.
+  now the formula's explicit contract. Its exit is the verdict: `0`
+  closes the step, anything else is a recorded death.
 - **continuation event** — a mailbox drop telling a live session its
   queue advanced; the wake feed the stop-gate never had.
 
@@ -205,7 +206,19 @@ preserves it through bd `Step.metadata` → the issue's
 `metadata.command`, and `run` joins the `types.custom` registration so
 the kind never flattens to `task`. The spawned unit is a pinned
 detached shell — `pid`/`log`/`exit` in `bro/agents/` through the same
-registry. The orchestrator point-checks both through
+registry. **The exit is the verdict**: the wrapper runs the payload in
+a subshell — `( command ); s=$?` — so a payload `exit` ends the
+subshell, never the `sh -c` the tail hangs off, and the `$?` tail
+spends the code before recording it — `0` runs `bro convoy done
+"$BRO_BEAD_ID" --mol "$BRO_MOL_ID" --result …` on the pins the unit
+already carries, closing its own step in the same breath that proves
+it (`stepsOf` counts only closed beads; without this edge a finished
+shell would park the convoy on a stale `in_progress` claim forever). A
+command that knows its handoff may `convoy done` itself — the tail's
+close then no-ops on the already-done step — while a bare `exit 0`
+closes with the log tail as the recorded result; non-zero never
+closes, `.exit` plus the classified cause stays the death record
+re-dispatch owns. The orchestrator point-checks both through
 `bro agents status`/`bro fleet` — a `run` step is a first-class
 watchable unit, not an invisible nested session. **No opaque subagent
 sessions unless a step explicitly requests one**: the molecule that
@@ -321,7 +334,9 @@ packages/core/src/config.ts           fleet.routing + fleet.router sections
 packages/cli/src/agent-connectors.ts  provider-scoped respawn block; chain
                                       walk in prepareSpawn/spawnStepAgent;
                                       prepareSpawn hands the cleared
-                                      acpSessionId back for resume
+                                      acpSessionId back for resume; a
+                                      run-step spawn's wrapper tail turns
+                                      exit 0 into the step's `convoy done`
 packages/cli/src/commands/agents.ts   --class flag; StepSpawnRequest.class
 packages/cli/src/commands/fleet.ts    provider wall rendering
 packages/providers/src/acp-worker.ts  session/load resume path
@@ -345,7 +360,8 @@ skills/{convoy,next}/                 continuation + finite-watcher text
    policy.
 4. Resume — `acp` `session/load` on `acpSessionId`, `cli` rehydrated
    respawn.
-5. Shell-unit step kind (`run`) in the convoy formula; watcher-rule
+5. Shell-unit step kind (`run`) in the convoy formula — `command` on
+   the decl, the exit-0 → `convoy done` tail on the spawn; watcher-rule
    audit across `convoy run`/`drive`/`watch` — `drive` gains the
    `--for` bound and the drain exit.
 6. Continuation — `convoy done` mailbox emission + skill text; the
