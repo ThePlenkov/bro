@@ -23,7 +23,7 @@
  * queue is scoped to this checkout's issue_prefix — foreign-prefix
  * beads are reported, never claimed. scope = "all" opts out in plans.
  */
-import { ensureTasksBackend, facade, gitTry, type FacadeOpts, type TaskStore } from '@broject/core'
+import { emitLifecycle, ensureTasksBackend, facade, gitTry, type FacadeOpts, type TaskStore } from '@broject/core'
 import { flag } from './args.ts'
 import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts'
 import { requireGlobalStore } from '../doctypes/store.ts'
@@ -245,6 +245,17 @@ export function claimUpTo(
     }
     try {
       storeFor(dir, opts).claim(b.id)
+      // lifecycle — the claim transition (specs/telemetry/bro-ub91h.md).
+      // The journal anchors at the run's repo (cwd), not the store dir:
+      // --global's repo-less store would drop the row even inside a
+      // project; a run outside any repo still journals nowhere
+      emitLifecycle(process.cwd(), {
+        kind: 'claim',
+        bead: b.id,
+        from: 'open',
+        to: 'in_progress',
+        detail: { via: 'next' },
+      })
       picked.push(b)
     } catch (err) {
       if (racedAway(b, dir, opts)) {

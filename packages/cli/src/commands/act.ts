@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
 import {
+  emitLifecycle,
   ensureAuth,
   facade,
   gitBranchLog,
@@ -178,6 +179,18 @@ function printStatus(state: PrActState, gate: ExitGate): void {
   }
 }
 
+/** The settled wait's journal `to` — timeout, blocked, externally
+ *  settled (merged/closed mid-poll), or green. */
+function waitVerdict(res: GateWaitResult): string {
+  if (res.timedOut) {
+    return 'timeout'
+  }
+  if (!res.gate.ok) {
+    return 'blocked'
+  }
+  return res.state.state === 'OPEN' ? 'green' : res.state.state.toLowerCase()
+}
+
 /**
  * `bro act wait` — the gate-watcher as a primitive: poll until nothing is
  * pending (gate green, threads/failures to act on, or timeout), print the
@@ -239,10 +252,32 @@ async function cmdWait(argv: string[]): Promise<void> {
         console.error(
           `act wait ${rev.prLink(t.repo, t.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
         )
+        emitLifecycle(process.cwd(), {
+          kind: 'gate',
+          pr: t.pr,
+          to: ok ? 'updated' : 'blocked',
+          detail: { via: 'act', action: 'update', sha: s.headSha },
+        })
         return ok
       },
     }
   )
+  // the settled wait is one gate verdict — timeout, blocked, externally
+  // settled, or green. Poll snapshots inside waitForGate are noise;
+  // only the decision journals here.
+  emitLifecycle(process.cwd(), {
+    kind: 'gate',
+    bead: flag(argv, '--bead'),
+    pr: t.pr,
+    to: waitVerdict(res),
+    detail: {
+      via: 'act',
+      sha: res.state.headSha,
+      open_threads: res.gate.open_threads,
+      fix_rounds: res.gate.fix_rounds,
+      ...(res.gate.blockers.length > 0 ? { blockers: res.gate.blockers } : {}),
+    },
+  })
   if (argv.includes('--json')) {
     console.log(
       JSON.stringify({ pr: res.state, exit_gate: res.gate, timed_out: res.timedOut }, null, 2)
@@ -497,12 +532,24 @@ function landPr(
       })
       if (r === 'merged') {
         console.log(`act: merged ${rev.prLink(t.repo, t.pr)}`)
+        emitLifecycle(process.cwd(), {
+          kind: 'merge',
+          pr: t.pr,
+          to: 'merged',
+          detail: { via: 'act', sha: head.sha, queue: true },
+        })
         return head
       }
       console.log(
         `act: ${rev.prLink(t.repo, t.pr)} enqueued — an external merge queue owns it; ` +
           'local cleanup deferred'
       )
+      emitLifecycle(process.cwd(), {
+        kind: 'merge',
+        pr: t.pr,
+        to: 'enqueued',
+        detail: { via: 'act', sha: head.sha },
+      })
       return undefined
     }
     // expectedHeadSha pins the merge to the sha the gate evaluated —
@@ -516,12 +563,24 @@ function landPr(
     })
     if (after === 'MERGED') {
       console.log(`act: merged ${rev.prLink(t.repo, t.pr)}`)
+      emitLifecycle(process.cwd(), {
+        kind: 'merge',
+        pr: t.pr,
+        to: 'merged',
+        detail: { via: 'act', sha: head.sha, method: opts.method },
+      })
       return head
     }
     console.log(
       `act: ${rev.prLink(t.repo, t.pr)} accepted but state=${after} — a merge queue still owns it; ` +
         'local cleanup deferred'
     )
+    emitLifecycle(process.cwd(), {
+      kind: 'merge',
+      pr: t.pr,
+      to: 'enqueued',
+      detail: { via: 'act', sha: head.sha, method: opts.method, state: after },
+    })
     return undefined
   } catch (err) {
     console.error(`error: merge failed — ${err instanceof Error ? err.message : String(err)}`)
@@ -641,14 +700,14 @@ function closeLandedBead(rev: ReviewFacade, t: PrTarget, bead: string): void {
   const covered =
     ids.length > 1 ? coveredBeadIds(clumpBranchLog(rev, t), ids) : new Set(ids)
   for (const id of ids) {
-    dischargeLandedId(id, covered, link)
+    dischargeLandedId(id, covered, link, t.pr)
   }
 }
 
 /** One marker id's merge discharge — close when a covering commit
  *  landed, re-queue when it didn't. Best-effort per id: one bead's
  *  store failure must not skip the rest of the clump. */
-function dischargeLandedId(id: string, covered: Set<string>, link: string): void {
+function dischargeLandedId(id: string, covered: Set<string>, link: string, pr: number): void {
   try {
     const tasks = claimStore(process.cwd())
     const row = tasks.get(id)
@@ -665,13 +724,31 @@ function dischargeLandedId(id: string, covered: Set<string>, link: string): void
           notes: `act: ${link} merged without a commit naming ${id} — re-queued`,
         })
       } catch { /* the reopen below is the load-bearing half */ }
+      let released = false
       try {
         tasks.reopen(id)
+        released = true
       } catch { /* best-effort unclaim */ }
+      if (released) {
+        emitLifecycle(process.cwd(), {
+          kind: 'release',
+          bead: id,
+          from: 'in_progress',
+          to: 'open',
+          detail: { via: 'act', pr, reason: 'uncovered' },
+        })
+      }
       console.error(`act: ${id} re-queued — no covering commit in ${link}`)
       return
     }
     tasks.close(id, `landed via ${link}`)
+    emitLifecycle(process.cwd(), {
+      kind: 'close',
+      bead: id,
+      pr,
+      to: 'closed',
+      detail: { via: 'act' },
+    })
     console.error(`act: ${id} closed — ${link} merged`)
   } catch (err) {
     console.error(`act: closing ${id} failed — ${err instanceof Error ? err.message : String(err)}`)
@@ -872,11 +949,19 @@ async function shadowNotes(
 }
 
 /** The observed outcome for a thread — journaled beside its shadow
- *  verdict so stats can score judge-vs-outcome agreement. Runs only
- *  in shadow mode (off writes no judge artifacts); a failed journal
- *  write never fails the mutation that produced the outcome. */
+ *  verdict so stats can score judge-vs-outcome agreement. The lifecycle
+ *  journal records the verdict unconditionally (it is THE thread
+ *  transition); the shadow journal runs only in shadow mode (off
+ *  writes no judge artifacts). A failed journal write never fails the
+ *  mutation that produced the outcome. */
 function disposition(threadId: string, outcome: string, pr?: number): void {
   const dir = process.cwd()
+  emitLifecycle(dir, {
+    kind: 'verdict',
+    ...(pr !== undefined ? { pr } : {}),
+    to: outcome,
+    detail: { via: 'act', thread: threadId },
+  })
   if (judgeConfig(dir).judge.mode !== 'shadow') {
     return
   }
@@ -922,6 +1007,11 @@ function cmdResolve(argv: string[]): void {
   if (unresolve) {
     rev.resolveThread(id, true)
     console.error(`act: unresolved ${id}`)
+    emitLifecycle(process.cwd(), {
+      kind: 'verdict',
+      to: 'unresolved',
+      detail: { via: 'act', thread: id },
+    })
   } else {
     rev.resolveThread(id)
     console.error(`act: resolved ${id}`)

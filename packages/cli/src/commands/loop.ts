@@ -58,6 +58,7 @@ import {
   agentRegistryPath,
   awaitFileLock,
   commandCliName,
+  emitLifecycle,
   ensureTasksBackend,
   facade,
   gitBranchLog,
@@ -654,14 +655,14 @@ function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome 
   const msg = err instanceof Error ? err.message : String(err)
   if (err instanceof SpawnError && err.kind === 'cap') {
     for (const b of openBeads(ctx, m.beads)) {
-      reopenBead(ctx.tasks, b.id)
+      reopenBead(ctx, b.id)
     }
     say(ctx, `loop: fleet full — ${msg}; pushes hold for the next pass`)
     return { kind: 'hold', why: msg }
   }
   const foreign = err instanceof SpawnError && err.kind === 'conflict'
   for (const b of openBeads(ctx, foreign ? m.beads.slice(1) : m.beads)) {
-    reopenBead(ctx.tasks, b.id)
+    reopenBead(ctx, b.id)
   }
   if (!foreign) {
     for (const b of openBeads(ctx, m.beads)) {
@@ -691,10 +692,18 @@ function noteBead(tasks: TaskStore, id: string, note: string): void {
   }
 }
 
-/** Best-effort return of a bead to the open queue. */
-function reopenBead(tasks: TaskStore, id: string): void {
+/** Best-effort return of a bead to the open queue — the claim's
+ *  release transition lands in the lifecycle journal beside it. */
+function reopenBead(ctx: Ctx, id: string): void {
   try {
-    tasks.reopen(id)
+    ctx.tasks.reopen(id)
+    emitLifecycle(ctx.root, {
+      kind: 'release',
+      bead: id,
+      from: 'in_progress',
+      to: 'open',
+      detail: { via: 'loop' },
+    })
   } catch { /* best-effort unclaim */ }
 }
 
@@ -741,6 +750,24 @@ function clumpCommitLog(ctx: Ctx, item: LoopItem, pr: number): string {
   return gitBranchLog(headSha, base, item.worktreeDir)
 }
 
+/** The landed close — a `close` row in the lifecycle journal beside
+ *  the store transition. */
+function closeLanded(ctx: Ctx, id: string, pr: number, link: string): void {
+  try {
+    ctx.tasks.close(id, `landed via PR ${link}`)
+    emitLifecycle(ctx.root, {
+      kind: 'close',
+      bead: id,
+      pr,
+      from: 'in_progress',
+      to: 'closed',
+      detail: { via: 'loop' },
+    })
+  } catch (err) {
+    console.error(`loop: ${ctx.backend} close ${id} failed — ${String(err)}`)
+  }
+}
+
 /** Settle the clump after its PR merged — every still-open member named
  *  in the branch's commits closes 'landed'; the rest reopen into the
  *  queue (the unfinished tail re-queues, never silently closes). A solo
@@ -749,14 +776,10 @@ function clumpCommitLog(ctx: Ctx, item: LoopItem, pr: number): string {
 function settleClump(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number): void {
   const link = prRef(ctx, pr)
   if (beads.length === 1) {
-    try {
-      // the agent may have closed it already — a verdict plus a PR both
-      // reaching the store is fine; a second close is a noisy error
-      if (beadStatus(ctx, beads[0]!.id) !== 'closed') {
-        ctx.tasks.close(beads[0]!.id, `landed via PR ${link}`)
-      }
-    } catch (err) {
-      console.error(`loop: ${ctx.backend} close ${beads[0]!.id} failed — ${String(err)}`)
+    // the agent may have closed it already — a verdict plus a PR both
+    // reaching the store is fine; a second close is a noisy error
+    if (beadStatus(ctx, beads[0]!.id) !== 'closed') {
+      closeLanded(ctx, beads[0]!.id, pr, link)
     }
     return
   }
@@ -769,15 +792,11 @@ function settleClump(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number): 
       continue // the agent's own verdict stands
     }
     if (covered.has(b.id)) {
-      try {
-        ctx.tasks.close(b.id, `landed via PR ${link}`)
-      } catch (err) {
-        console.error(`loop: ${ctx.backend} close ${b.id} failed — ${String(err)}`)
-      }
+      closeLanded(ctx, b.id, pr, link)
     } else {
       // merged without a commit naming it — unfinished tail re-queues
       noteBead(ctx.tasks, b.id, `loop: ${link} landed without a commit naming ${b.id} — re-queued`)
-      reopenBead(ctx.tasks, b.id)
+      reopenBead(ctx, b.id)
       say(ctx, `loop: ${b.id} not covered by ${link} — re-queued`)
     }
   }
@@ -799,16 +818,27 @@ async function finalizeMerge(
     if (!alreadyMerged) {
       await runActCommand(['merge', String(pr)])
     }
-    const state = ctx.rev.prMeta({ repo: ctx.repo, pr }).state
-    if (state !== 'MERGED') {
+    const meta = ctx.rev.prMeta({ repo: ctx.repo, pr })
+    if (meta.state !== 'MERGED') {
       for (const b of openBeads(ctx, beads)) {
         noteBead(
           ctx.tasks,
           b.id,
-          `loop: merge of ${prRef(ctx, pr)} did not land (state=${state}) — worktree ${item.worktreeDir}`
+          `loop: merge of ${prRef(ctx, pr)} did not land (state=${meta.state}) — worktree ${item.worktreeDir}`
         )
       }
       return 'parked'
+    }
+    if (alreadyMerged) {
+      // a bro-driven merge journals through act's landPr — an external
+      // landing skips the call, so this arm carries its own row
+      emitLifecycle(ctx.root, {
+        kind: 'merge',
+        bead: beads[0]!.id,
+        pr,
+        to: 'merged',
+        detail: { via: 'loop', external: true, sha: meta.headSha },
+      })
     }
   } catch (err) {
     // a merge/fetch failure must not abort the loop leaving the bead
@@ -898,6 +928,12 @@ function agentVerdict(ctx: Ctx, beads: ReadyBead[], worktreeDir: string): ItemRe
   for (const b of closed) {
     say(ctx, `loop: ${b.id} closed by the agent — verdict, not a failure`)
     noteBead(ctx.tasks, b.id, `loop: closed by agent verdict — worktree ${worktreeDir} kept for audit`)
+    emitLifecycle(ctx.root, {
+      kind: 'close',
+      bead: b.id,
+      to: 'closed',
+      detail: { via: 'loop', verdict: 'agent' },
+    })
   }
   return closed.length === beads.length ? 'closed' : undefined
 }
@@ -916,7 +952,7 @@ function failNoPr(
       b.id,
       `loop: agent exited ${code ?? 'abnormal'} without a PR — worktree kept at ${item.worktreeDir}`
     )
-    reopenBead(ctx.tasks, b.id)
+    reopenBead(ctx, b.id)
   }
   return 'failed'
 }
@@ -942,7 +978,7 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
       bead.id,
       `loop: bootstrap failed (${b.status ?? b.signal ?? 'spawn error'}) — worktree kept at ${item.worktreeDir}`
     )
-    reopenBead(ctx.tasks, bead.id)
+    reopenBead(ctx, bead.id)
   }
   return false
 }
@@ -1030,6 +1066,20 @@ function planItemAndWorktree(
     // original base, so the stack edge only records on fresh creation
     const fresh = !existsSync(item.worktreeDir)
     ensureWorktree(ctx.root, item.branch, item.worktreeDir, slot?.base)
+    if (fresh) {
+      emitLifecycle(ctx.root, {
+        kind: 'worktree',
+        bead: bead.id,
+        to: 'created',
+        detail: {
+          via: 'loop',
+          worktree: item.worktreeDir,
+          branch: item.branch,
+          ...(slot?.base !== undefined ? { base: slot.base } : {}),
+          ...(ctx.stack !== undefined ? { stack: ctx.stack } : {}),
+        },
+      })
+    }
     if (fresh && slot?.edge !== undefined) {
       // same edge `work enter --stack` records — merge order travels
       recordStackEdge(item.branch, slot.edge)
@@ -1130,7 +1180,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   } catch (err) {
     for (const b of openBeads(ctx, ours)) {
       noteBead(ctx.tasks, b.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
-      reopenBead(ctx.tasks, b.id)
+      reopenBead(ctx, b.id)
     }
     return { kind: 'done', result: 'failed' }
   }
@@ -1147,7 +1197,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     // settle as the worktree failure above
     for (const b of openBeads(ctx, ours)) {
       noteBead(ctx.tasks, b.id, `loop: prompt write failed — ${err instanceof Error ? err.message : String(err)}`)
-      reopenBead(ctx.tasks, b.id)
+      reopenBead(ctx, b.id)
     }
     return { kind: 'done', result: 'failed' }
   }
@@ -1196,6 +1246,13 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   // rides the marker so the resurrected wait can run the finalizeMerge
   // half the dead loop never reached — merge lands, claims close
   // (bro-q6ppv); a clump's whole id list rides comma-joined.
+  emitLifecycle(ctx.root, {
+    kind: 'pr-open',
+    bead: beads[0]?.id,
+    pr,
+    to: 'open',
+    detail: { via: 'loop', branch: item.branch },
+  })
   const member: GateMember = {
     beads,
     item,
@@ -1352,6 +1409,13 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   // resurrect (bro-q6ppv), and `bead` rides comma-joined for the
   // finalizeMerge half the dead loop never reached
   m.pr = pr
+  emitLifecycle(ctx.root, {
+    kind: 'pr-open',
+    bead: m.beads[0]?.id,
+    pr,
+    to: 'open',
+    detail: { via: 'loop', branch: m.item.branch, ...(w.agentId !== undefined ? { agent: w.agentId } : {}) },
+  })
   m.marker = watchBegin(ctx.root, {
     pr,
     link: prRef(ctx, pr),
@@ -1446,18 +1510,41 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     timeoutMs: ctx.cfg.mergeTimeoutMin * 60_000,
     now: Date.now(),
   })
+  // lifecycle — one `gate` row per settled gate decision (specs/
+  // telemetry/bro-ub91h.md). 'wait' is a poll, not a verdict; every
+  // other action is the round's record — fix/rebase carry the round
+  // they are about to consume.
+  const gateRow = (to: string, detail: Record<string, unknown>): void => {
+    emitLifecycle(ctx.root, {
+      kind: 'gate',
+      bead: m.beads[0]!.id,
+      pr,
+      to,
+      detail: {
+        via: 'loop',
+        sha: snap.headSha,
+        threads: snap.openThreads,
+        ...detail,
+      },
+    })
+  }
   switch (act.kind) {
     case 'land':
       // landed externally while the member sat — close out, no merge call
+      gateRow('green', { action: 'land' })
       return leave(m, await finalizeMerge(ctx, m.beads, m.item, pr, true))
     case 'merge':
+      gateRow('green', { action: 'merge' })
       return leave(m, await finalizeMerge(ctx, m.beads, m.item, pr))
     case 'closed':
+      gateRow('closed', { action: 'closed' })
       noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} was closed unmerged — worktree ${m.item.worktreeDir}`)
       return leave(m, 'parked')
     case 'fix':
+      gateRow('blocked', { action: 'fix', round: m.rounds + 1, blockers: snap.blockers })
       return respawnRound(ctx, m, () => runFixRound(ctx, m, pr, m.rounds))
     case 'rebase':
+      gateRow('blocked', { action: 'rebase', round: m.rounds + 1 })
       return respawnRound(ctx, m, () => runRebaseRound(ctx, m, pr, m.rounds))
     case 'update': {
       let ok: boolean
@@ -1472,22 +1559,40 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       console.error(`loop ${prRef(ctx, pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`)
       if (!ok) {
         // an update refusal IS the settle — same park the wait produced
+        gateRow('blocked', { action: 'update', updated: false, blockers: snap.blockers })
         noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} blocked: ${snap.blockers.join('; ')} — worktree ${m.item.worktreeDir}`)
         return leave(m, 'parked')
       }
+      gateRow('behind', { action: 'update', updated: true })
       m.updatedSha = snap.headSha
       return 'active'
     }
     case 'wait':
       return 'kept'
     case 'park':
+      gateRow('parked', { action: 'park', why: act.why })
       noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} ${act.why} — worktree ${m.item.worktreeDir}`)
       return leave(m, 'parked')
   }
 }
 
-/** A member leaving the stack ends its watch — the promise is kept. */
+/** A member leaving the stack ends its watch — the promise is kept.
+ *  A 'parked' verdict also lands in the lifecycle journal: the claim
+ *  stays held, the worktree stays for audit — that hold IS the
+ *  transition. */
 function leave(m: GateMember, verdict: ItemResult): ItemResult {
+  if (verdict === 'parked') {
+    emitLifecycle(m.item.worktreeDir, {
+      kind: 'park',
+      bead: m.beads[0]!.id,
+      ...(m.pr !== undefined ? { pr: m.pr } : {}),
+      to: 'parked',
+      detail: {
+        via: 'loop',
+        ...(m.beads.length > 1 ? { beads: m.beads.map((b) => b.id).join(',') } : {}),
+      },
+    })
+  }
   watchEnd(m.marker)
   return verdict
 }
@@ -2251,6 +2356,32 @@ function probeDisk(p: string, warned?: Set<string>): DiskProbe | undefined {
   }
 }
 
+/** A done-path push outcome — tallied, the park journaled (it never
+ *  passed through leave(), so the held claim is the transition the
+ *  journal wants), and echoed under --json. */
+function settleOutcome(
+  ctx: Ctx,
+  q: QueueState,
+  ids: string[],
+  out: Extract<PushOutcome, { kind: 'done' }>
+): void {
+  q.tally[out.result] += 1
+  if (out.result === 'parked') {
+    emitLifecycle(ctx.root, {
+      kind: 'park',
+      bead: ids[0],
+      to: 'parked',
+      detail: {
+        via: 'loop',
+        ...(ids.length > 1 ? { beads: ids.join(',') } : {}),
+      },
+    })
+  }
+  if (ctx.json) {
+    console.log(JSON.stringify({ bead: ids[0], beads: ids, result: out.result }))
+  }
+}
+
 /** The push half of a tick — true when a bead was claimed (drained or
  *  not, the fresh member's first poll wants an immediate pass, not an
  *  idle interval). False when the push was skipped — queue drained,
@@ -2308,10 +2439,7 @@ async function tryClaim(
     // line lands when the worker exits and the gate join happens
     say(ctx, pushLine(ctx, out.member.pr, ids, q.stack.length))
   } else {
-    q.tally[out.result] += 1
-    if (ctx.json) {
-      console.log(JSON.stringify({ bead: ids[0], beads: ids, result: out.result }))
-    }
+    settleOutcome(ctx, q, ids, out)
   }
   return true
 }
