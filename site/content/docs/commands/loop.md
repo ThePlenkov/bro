@@ -21,6 +21,7 @@ planned group work is [bro convoy](/docs/commands/convoy).
 | `bro loop --label a,b` | Only claim beads carrying one of these labels |
 | `bro loop --batch N` | Clump up to N same-affinity beads per claim — one worktree, one worker, one PR (per-bead commits name their id; uncovered members re-queue on merge) |
 | `bro loop --stack <name>` | Put each claimed bead on a named [stack](/docs/commands/stack) |
+| `bro loop --max-open N` / `--disk-min-slots N` | Gate-stack cap / disk floor override (`0` disables the floor — pushes hold while free disk can't cover N×`loop.worktreeMb`) |
 | `bro loop --json` | Emit the loop event stream as JSON |
 
 The agent resolves like `bro agents up`: a named provider runs its
