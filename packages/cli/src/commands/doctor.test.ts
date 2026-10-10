@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -129,6 +130,36 @@ function withEnv(opts: EnvOpts, fn: (dir: string) => void): Promise<void> {
 
 const byName = (checks: DoctorCheck[], name: string): DoctorCheck =>
   checks.find((c) => c.name === name)!
+
+/** A fake bro dev checkout — packages/cli/dist + the @broject/bro
+ *  package.json inside its own git repo (nested under the env dir's repo;
+ *  --show-toplevel still resolves to the nested root). */
+function fakeCheckout(base: string): { checkout: string; entry: string } {
+  const checkout = join(base, 'bro-checkout')
+  const distDir = join(checkout, 'packages', 'cli', 'dist')
+  mkdirSync(distDir, { recursive: true })
+  writeFileSync(join(checkout, 'packages', 'cli', 'package.json'), '{"name":"@broject/bro"}')
+  const entry = join(distDir, 'index.js')
+  writeFileSync(entry, '// dist\n')
+  execFileSync('git', ['init', '-q', checkout])
+  return { checkout, entry }
+}
+
+const GIT_ID = ['-c', 'user.email=t@t', '-c', 'user.name=t']
+
+/** Empty commit; an ISO date pins author+committer time so the test
+ *  controls the commit↔dist ordering instead of racing wall clock. */
+function commitAt(checkout: string, isoDate?: string): void {
+  const env =
+    isoDate === undefined
+      ? process.env
+      : { ...process.env, GIT_AUTHOR_DATE: isoDate, GIT_COMMITTER_DATE: isoDate }
+  execFileSync(
+    'git',
+    ['-C', checkout, ...GIT_ID, 'commit', '-q', '--allow-empty', '-m', 'x'],
+    { env }
+  )
+}
 
 describe('bro doctor', () => {
   test('healthy env — every probe ok, exit 0', () =>
@@ -368,6 +399,51 @@ describe('bro doctor', () => {
         assert.match(c.detail, /PATH/)
       })
     ))
+
+  test('bro-dist: PATH-bro into a dev checkout warns when dist predates HEAD', () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      const { checkout, entry } = fakeCheckout(dir)
+      commitAt(checkout) // HEAD committer time = now
+      const stale = new Date(Date.now() - 3_600_000)
+      utimesSync(entry, stale, stale)
+      symlinkSync(entry, join(dir, 'bin', 'bro'))
+      const c = byName(runDoctorChecks(dir), 'bro-dist')
+      assert.equal(c.status, 'warn')
+      assert.match(c.detail, /predates HEAD/)
+      assert.match(c.hint ?? '', /npm run build/)
+    }))
+
+  test('bro-dist: fresh dist over an old HEAD is ok', () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      const { checkout, entry } = fakeCheckout(dir)
+      commitAt(checkout, '2000-01-01T00:00:00Z')
+      symlinkSync(entry, join(dir, 'bin', 'bro'))
+      const c = byName(runDoctorChecks(dir), 'bro-dist')
+      assert.equal(c.status, 'ok')
+      assert.match(c.detail, /covers HEAD/)
+    }))
+
+  test('bro-dist: an upstream ahead of a covered HEAD still warns — the merge landed after the build', () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      const { checkout, entry } = fakeCheckout(dir)
+      const bare = join(dir, 'origin.git')
+      execFileSync('git', ['init', '-q', '--bare', bare])
+      execFileSync('git', ['-C', checkout, 'remote', 'add', 'origin', bare])
+      commitAt(checkout, '2000-01-01T00:00:00Z')
+      commitAt(checkout, '2001-01-01T00:00:00Z')
+      const branch = execFileSync('git', ['-C', checkout, 'branch', '--show-current'], {
+        encoding: 'utf8',
+      }).trim()
+      execFileSync('git', ['-C', checkout, 'push', '-qu', 'origin', `HEAD:${branch}`])
+      execFileSync('git', ['-C', checkout, 'reset', '-q', '--hard', 'HEAD~1'])
+      // dist built after local HEAD (2000) but before the upstream move (2001)
+      utimesSync(entry, new Date(Date.UTC(2000, 5, 1)), new Date(Date.UTC(2000, 5, 1)))
+      symlinkSync(entry, join(dir, 'bin', 'bro'))
+      const c = byName(runDoctorChecks(dir), 'bro-dist')
+      assert.equal(c.status, 'warn')
+      assert.match(c.detail, /predates @\{u\}/)
+      assert.match(c.hint ?? '', /npm run build/)
+    }))
 
   test('providers: configured entries are listed as name (kind, model)', () =>
     withEnv(
