@@ -48,14 +48,14 @@ run on a missing state dir.
 
 ## Plan
 
-- [ ] `packages/core/src/filelock.ts`: `holdFileLock`, `awaitFileLock`,
+- [x] `packages/core/src/filelock.ts`: `holdFileLock`, `awaitFileLock`,
       `lockHolderPid`; export from `index.ts`
-- [ ] `bro drive`: acquire `bro/drive.lock` in `runDriveCommand` right
+- [x] `bro drive`: acquire `bro/drive.lock` in `runDriveCommand` right
       after `mainWorktree()` — before auth/facade planes, so a standby
       is cheap; hold across `--once` and `--every`
-- [ ] `bro loop`: acquire `bro/loop.lock` around `guardedRun` in
+- [x] `bro loop`: acquire `bro/loop.lock` around `guardedRun` in
       `runLoopCommand`, after the `--dry-run` return
-- [ ] tests: heartbeat keeps a live hold unstealable past the abandoned
+- [x] tests: heartbeat keeps a live hold unstealable past the abandoned
       bound; standby resolves when the incumbent releases; dead holder
       is taken over without a wait
 
