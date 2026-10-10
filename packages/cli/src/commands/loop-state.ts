@@ -1,14 +1,17 @@
 /**
  * Loop-agent run records — `<git-common>/bro/loop/<slug>.{json,log}`
- * (spec specs/bro-9lpn3.md). `bro loop`'s worker spawn is synchronous
- * — no registry row, no fleet slot — so the run record plus the tee'd
- * output log are the only artifacts a check-in (`bro watch`,
- * `bro status`) can judge liveness and silence from. The `.json`
- * exists while the agent runs: `{beadId, slug, pid, startedAt,
- * worktree, log}`; the `.log` persists as the audit trail across
- * fix-round respawns (append, like the agents-plane convention). Its
- * mtime IS the last-output signal — readers report silence, never
- * kill.
+ * (spec specs/bro-9lpn3.md). They describe the LEGACY spawn only: a
+ * beads-backed loop spawns through the agents registry (spec
+ * bro-zpa93) — detached, claimed, `.exit`-recorded — and its worker is
+ * read through `bro agents`/`bro fleet` instead. The synchronous
+ * fallback (no shared store to pin against) still keeps the run
+ * record plus the tee'd output log — the only artifacts a check-in
+ * (`bro watch`, `bro status`) can judge liveness and silence from.
+ * The `.json` exists while the agent runs: `{beadId, slug, pid,
+ * startedAt, worktree, log}`; the `.log` persists as the audit trail
+ * across fix-round respawns (append, like the agents-plane
+ * convention). Its mtime IS the last-output signal — readers report
+ * silence, never kill.
  *
  * `bro/loop/` and not `bro/agents/`: a record there would pose as a
  * backend-owned agent home, and the janitor's orphan sweep reaps

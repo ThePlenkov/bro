@@ -620,6 +620,11 @@ const markPrOpened = (s) => {
   }
   s.prOpened = true
 }
+// a per-bead wall-clock delay — the fairness test's long worker: the
+// detached spawn means the loop must service other members while this
+// one sleeps (bro-zpa93)
+const delayMs = Number((load().delays ?? {})[process.env.BRO_BEAD_ID] ?? 0)
+if (delayMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs)
 if (prompt.includes('review-threads')) {
   // fix round — resolve the threads and stop
   const s = load()

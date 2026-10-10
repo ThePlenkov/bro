@@ -1766,8 +1766,19 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             { // NOSONAR — operator-configured agent command (same contract as loop)
               cwd: spec.repoRoot,
               env: {
-                ...process.env,
-                ...spec.env,
+                // ambient env minus the connector-owned pins — every
+                // other backend filters AGENT_PIN_KEYS out of
+                // ambient/spec env already (tmux's 0600 env file,
+                // gascity's args); without it a worker-spawned `bro
+                // agents up`/`bro loop` would bleed the parent's
+                // BRO_AGENT_*/BRO_MOL_ID provenance into the child's
+                // commit trailers (bro-fzot's exact bug shape)
+                ...Object.fromEntries(
+                  Object.entries({ ...process.env, ...spec.env }).filter(
+                    (e): e is [string, string] =>
+                      e[1] !== undefined && !AGENT_PIN_KEYS.has(e[0])
+                  )
+                ),
                 // identity pins last — spec.env must never redirect the
                 // claim store or re-badge the worker as another bead/agent
                 ...Object.fromEntries(
