@@ -252,16 +252,24 @@ The default loop is in-session continuation; `bro convoy run` stays
 for explicit parallel fan-out:
 
 1. `bro convoy done` (and bead close on a mol step) emits a mailbox
-   drop — `bro notify --to <sessionId|orchestrator> --kind result` —
-   when the DAG advances: a new ready step, a gate now waiting, or
-   `complete`. The claiming session's id does not ride the beads
-   claim — `--claim` writes the bd actor as assignee, an actor-space
-   identity that is never a notify address. The recipient resolves
-   from the session carriers instead: the step's `agents.json` entry
-   for a spawned claim (its `agentId` is the worker's
-   `BRO_SESSION_ID` pin), else the live `.task` marker naming the
-   step (`liveSessionClaims`), else `orchestrator` — the role every
-   agent-less session answers to.
+   drop — `bro notify --to <agentId|sessionId|orchestrator> --kind
+   result -- "<mol> advanced: <step|gate|complete>"` — when the DAG
+   advances: a new ready step, a gate now waiting, or `complete`.
+   The claiming session's id does not ride
+   the beads claim — `--claim` writes the bd actor as assignee, an
+   actor-space identity that is never a notify address. The
+   recipient resolves from the session carriers instead: the step's
+   `agents.json` entry for a spawned claim (its `agentId` is the
+   worker's `BRO_SESSION_ID` pin), else the live `.task` marker
+   naming the step (`liveSessionClaims`), else the emitter's own
+   session env (`BRO_SESSION_ID` — an interactive `convoy done`
+   feeds the session that ran it), else `orchestrator` — gated on
+   uniqueness. The role matches EVERY agent-less session and an
+   addressed drop is single-consumer, so with several live
+   (`liveSessionIds` minus `agents.json` worker ids) the address
+   degrades to broadcast: every candidate sees the queue-advanced
+   note and the claim-holder acts — never a first-drain coin flip
+   that wakes the wrong session.
 2. The drop lands mid-turn via the existing postTool probe — the
    session learns "your queue moved" without a poll loop.
 3. Skill text (convoy/next) closes the loop: on completing a unit the
