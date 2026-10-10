@@ -1,27 +1,26 @@
-/** `bro watch install|uninstall` unit tests — scheduler text is
- *  generated, never executed: the runner is injected and HOME/XDG
- *  point at tmpdirs, so no real systemctl or crontab is touched. */
+/** `bro watch install|uninstall` unit tests — install arms the
+ *  session-pulse marker; both verbs strip legacy scheduler entries.
+ *  Scheduler interaction is generated, never executed: the runner is
+ *  injected and HOME/XDG point at tmpdirs, so no real systemctl or
+ *  crontab is touched. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { initRepo } from './testrepo.ts'
 import {
-  cronLine,
-  cronTag,
   detectBackend,
   installWatch,
-  printArtifacts,
-  systemdService,
-  systemdTimer,
   uninstallWatch,
   unitName,
   watchCommonDir,
   watchUnitHash,
+  cronTag,
   type SchedRun,
   type SchedRunner,
 } from './watch-install.ts'
+import { pulseLockPath, pulseMarkerPath } from './watch-pulse.ts'
 
 const ok = (out = ''): SchedRun => ({ code: 0, out, err: '' })
 const dead = (): SchedRun => ({ code: 127, out: '', err: 'missing' })
@@ -53,10 +52,14 @@ function fakeRun(
 /** systemctl --user answers, crontab is irrelevant — systemd wins. */
 const systemdRun = () =>
   fakeRun({ 'systemctl --user': ok('running\n'), 'systemctl --version': ok('s\n') })
-/** Neither scheduler — nothing to install onto. */
+/** Neither scheduler — nothing to strip from. */
 const noneRun = () => fakeRun({ systemctl: dead(), crontab: dead() })
 
 const tmp = (): string => mkdtempSync(join(tmpdir(), 'bro-watch-sched-'))
+
+/** A legacy managed crontab line — only the tag is the identity. */
+const legacyCronLine = (common: string): string =>
+  `*/2 * * * * cd '/repo' && sh -c 'bro watch --once --notify' >/dev/null 2>&1 ${cronTag(common)}`
 
 describe('naming', () => {
   test('unit name + cron tag hash the common dir, 8 hex', () => {
@@ -65,84 +68,6 @@ describe('naming', () => {
     assert.equal(unitName('/repo/.git'), `bro-watch-${h}`)
     assert.equal(cronTag('/repo/.git'), `# bro-watch-${h}`)
     assert.notEqual(unitName('/repo/.git'), unitName('/other/.git'))
-  })
-})
-
-describe('systemd text', () => {
-  test('service pins cwd, PATH, and the bro→npx invocation', () => {
-    const s = systemdService('/repo', '1.2.3', '/p/bin:/usr/bin')
-    assert.match(s, /WorkingDirectory=\/repo/)
-    assert.match(s, /Environment="PATH=\/p\/bin:\/usr\/bin"/)
-    assert.match(
-      s,
-      /ExecStart=\/bin\/sh -c 'bro watch --once --notify \|\| npx -y --prefer-offline "@broject\/bro@1\.2\.3" watch --once --notify'/
-    )
-    assert.match(s, /Type=oneshot/)
-  })
-
-  test('% is specifier-escaped in paths', () => {
-    const s = systemdService('/r%po', '1', '/p%q/bin')
-    assert.match(s, /WorkingDirectory=\/r%%po/)
-    assert.match(s, /Description=bro watch heartbeat — \/r%%po/)
-    assert.match(s, /Environment="PATH=\/p%%q\/bin"/)
-  })
-
-  test('a newline in the checkout path refuses — it would inject a directive', () => {
-    assert.throws(() => systemdService('/r\nExecStart=/bin/evil', '1', '/p'), /newline/)
-  })
-
-  test('timer fires on boot and on a cadence', () => {
-    const t = systemdTimer('bro-watch-deadbeef', 90)
-    assert.match(t, /OnBootSec=90s/)
-    assert.match(t, /OnUnitActiveSec=90s/)
-    assert.match(t, /Unit=bro-watch-deadbeef\.service/)
-    assert.match(t, /WantedBy=timers\.target/)
-  })
-})
-
-describe('cron line', () => {
-  test('minute granularity rounds up, tag is the identity', () => {
-    assert.match(cronLine('/repo', 60, '/p/bin', '/repo/.git', '1.2.3'), /^\* \* \* \* \* /)
-    const l5 = cronLine('/repo', 300, '/p/bin', '/repo/.git', '1.2.3')
-    assert.ok(l5.startsWith('*/5 * * * * '))
-    assert.ok(l5.endsWith(cronTag('/repo/.git')))
-    assert.match(
-      l5,
-      /cd '\/repo' && PATH='\/p\/bin' sh -c 'bro watch --once --notify \|\| npx -y --prefer-offline "@broject\/bro@1\.2\.3" watch --once --notify' >\/dev\/null 2>&1 /
-    )
-  })
-
-  test('sub-minute cadences still schedule every minute', () => {
-    assert.match(cronLine('/r', 30, '/p', '/r/.git', '1'), /^\* \* \* \* \* /)
-  })
-
-  test('intervals ≥60min move to the hour field — never faster than configured', () => {
-    // 90min → every 2h on the hour (rounds up), not a bogus */90
-    assert.match(cronLine('/r', 5400, '/p', '/r/.git', '1'), /^0 \*\/2 \* \* \* /)
-    assert.match(cronLine('/r', 3600, '/p', '/r/.git', '1'), /^0 \*\/1 \* \* \* /)
-    // a day or more moves to the day field — a 2-day step ranges from
-    // day 2, since `*/2` would fire on the 31st and the 1st (a 1-day gap)
-    assert.match(cronLine('/r', 86400, '/p', '/r/.git', '1'), /^0 0 \*\/1 \* \* /)
-    assert.match(cronLine('/r', 172800, '/p', '/r/.git', '1'), /^0 0 2-31\/2 \* \* /)
-  })
-
-  test('non-divisor steps range from the step value — a field reset cannot fire early', () => {
-    // */7 would fire :56 then :00 — a 4-minute gap on a 7-minute cadence
-    assert.match(cronLine('/r', 420, '/p', '/r/.git', '1'), /^7-59\/7 \* \* \* \* /)
-    // */5 hours would fire 20:00 then 00:00 — a 4-hour gap on a 5-hour cadence
-    assert.match(cronLine('/r', 18000, '/p', '/r/.git', '1'), /^0 5-23\/5 \* \* \* /)
-    // divisor steps keep the `*/N` form — they wrap evenly
-    assert.match(cronLine('/r', 900, '/p', '/r/.git', '1'), /^\*\/15 \* \* \* \* /)
-    assert.match(cronLine('/r', 21600, '/p', '/r/.git', '1'), /^0 \*\/6 \* \* \* /)
-  })
-
-  test('a newline in the checkout path refuses — cron cannot quote it', () => {
-    assert.throws(() => cronLine('/r\n* * * * * /bin/evil', 60, '/p', '/r/.git', '1'), /newline/)
-  })
-
-  test('% in a path is escaped — a bare % ends the cron command field', () => {
-    const l = cronLine('/r%po', 60, '/p', '/r/.git', '1')
-    assert.match(l, /cd '\/r\\%po'/)
   })
 })
 
@@ -165,10 +90,10 @@ describe('detectBackend', () => {
 })
 
 describe('installWatch', () => {
-  test('a non-repo refuses — no mailbox for --notify', () => {
+  test('a non-repo refuses — the marker has no common dir', () => {
     const dir = tmp()
     try {
-      const r = installWatch(dir, { everySec: 60 }, systemdRun())
+      const r = installWatch(dir, { everySec: 60, pulseSec: 900 }, systemdRun())
       assert.equal(r.state, 'error')
       assert.match(r.detail, /not a git repository/)
     } finally {
@@ -176,153 +101,50 @@ describe('installWatch', () => {
     }
   })
 
-  test('systemd install writes both units and enables the timer', () => {
+  test('install writes the pulse marker — no scheduler artifacts', () => {
     const { root, main } = initRepo('bro-watch-inst-')
     const home = tmp()
     const { calls, run } = systemdRun()
     try {
-      const common = watchCommonDir(main)!
-      const unit = unitName(common)
-      const r = installWatch(main, { everySec: 120 }, { run, home, env: { PATH: '/p/bin' } })
+      const r = installWatch(main, { everySec: 120, pulseSec: 900 }, { run, home, env: { PATH: '/p/bin' } })
       assert.equal(r.state, 'installed')
-      assert.equal(r.backend, 'systemd')
-      const unitDir = join(home, '.config', 'systemd', 'user')
-      assert.match(
-        readFileSync(join(unitDir, `${unit}.service`), 'utf8'),
-        /bro watch --once --notify/
-      )
-      assert.match(readFileSync(join(unitDir, `${unit}.timer`), 'utf8'), /OnUnitActiveSec=120s/)
-      assert.ok(
-        calls.some((c) => c.cmd === 'systemctl' && c.args.join(' ').includes('daemon-reload'))
-      )
-      assert.ok(calls.some((c) => c.args.join(' ').includes('enable --now')))
-      // idempotent — same artifacts report already
-      const again = installWatch(main, { everySec: 120 }, { run, home, env: { PATH: '/p/bin' } })
+      assert.match(r.detail, /bro watch --every 120 --for 900 --notify/)
+      const marker = JSON.parse(readFileSync(pulseMarkerPath(main)!, 'utf8'))
+      assert.equal(marker.everySec, 120)
+      // nothing written to any scheduler — no units, no crontab writes
+      assert.ok(!existsSync(join(home, '.config')))
+      assert.ok(!calls.some((c) => c.args.join(' ').includes('enable --now')))
+      assert.ok(!calls.some((c) => c.cmd === 'crontab' && c.args[0] === '-'))
+      // idempotent — same cadence reports already
+      const again = installWatch(main, { everySec: 120, pulseSec: 900 }, { run, home, env: {} })
       assert.equal(again.state, 'already')
       // a cadence change rewrites — updated, not already
-      const faster = installWatch(main, { everySec: 30 }, { run, home, env: { PATH: '/p/bin' } })
+      const faster = installWatch(main, { everySec: 30, pulseSec: 900 }, { run, home, env: {} })
       assert.equal(faster.state, 'updated')
-      assert.match(readFileSync(join(unitDir, `${unit}.timer`), 'utf8'), /OnUnitActiveSec=30s/)
+      assert.equal(JSON.parse(readFileSync(pulseMarkerPath(main)!, 'utf8')).everySec, 30)
     } finally {
       rmSync(home, { recursive: true, force: true })
       rmSync(root, { recursive: true, force: true })
     }
   })
 
-  test('cron install appends one tagged line, keeps foreign lines', () => {
-    const { root, main } = initRepo('bro-watch-cron-')
-    const home = tmp()
-    const crontabs: string[] = []
-    const { run } = fakeRun({
-      systemctl: dead(),
-      crontab: (args, stdin) => {
-        if (args[0] === '-l') {
-          return { code: 0, out: '0 0 * * * /usr/bin/foreign\n', err: '' }
-        }
-        if (args[0] === '-') {
-          crontabs.push(stdin ?? '')
-          return ok()
-        }
-        return ok()
-      },
-    })
-    try {
-      const r = installWatch(main, { everySec: 60 }, { run, home, env: { PATH: '/p/bin' } })
-      assert.equal(r.state, 'installed')
-      assert.equal(r.backend, 'cron')
-      assert.equal(crontabs.length, 1)
-      assert.match(crontabs[0]!, /foreign/)
-      assert.match(crontabs[0]!, /# bro-watch-[0-9a-f]{8}/)
-
-      // identical line → already, no rewrite
-      const { run: run2, calls: calls2 } = fakeRun({
-        systemctl: dead(),
-        crontab: (args) => (args[0] === '-l' ? { code: 0, out: crontabs[0]!, err: '' } : ok()),
-      })
-      const again = installWatch(main, { everySec: 60 }, { run: run2, home, env: { PATH: '/p/bin' } })
-      assert.equal(again.state, 'already')
-      assert.ok(!calls2.some((c) => c.args[0] === '-'))
-    } finally {
-      rmSync(home, { recursive: true, force: true })
-      rmSync(root, { recursive: true, force: true })
-    }
-  })
-
-  test('a failed crontab read is an error — never a blind write over existing jobs', () => {
-    const { root, main } = initRepo('bro-watch-cr-')
-    const home = tmp()
-    const writes: string[] = []
-    const { run } = fakeRun({
-      systemctl: dead(),
-      crontab: (args, stdin) => {
-        if (args[0] === '-l') {
-          return { code: 1, out: '', err: 'crontab: permission denied' }
-        }
-        if (args[0] === '-') {
-          writes.push(stdin ?? '')
-          return ok()
-        }
-        return ok()
-      },
-    })
-    try {
-      const r = installWatch(main, { everySec: 60 }, { run, home, env: { PATH: '/p' } })
-      assert.equal(r.state, 'error')
-      assert.match(r.detail, /permission denied/)
-      assert.equal(writes.length, 0) // nothing written over the user's table
-    } finally {
-      rmSync(home, { recursive: true, force: true })
-      rmSync(root, { recursive: true, force: true })
-    }
-  })
-
-  test('a failed crontab strip blocks the systemd install — no double tick', () => {
-    const { root, main } = initRepo('bro-watch-dbl-')
-    const home = tmp()
-    const common = watchCommonDir(main)!
-    const table = `0 0 * * * /usr/bin/foreign\n${cronLine(main, 60, '/p', common, '1')}\n`
-    const { calls, run } = fakeRun({
-      'systemctl --user is-system-running': ok('running\n'),
-      crontab: (args) =>
-        args[0] === '-l'
-          ? { code: 0, out: table, err: '' }
-          : { code: 1, out: '', err: 'read-only crontab' },
-    })
-    try {
-      const r = installWatch(main, { everySec: 60 }, { run, home, env: { PATH: '/p' } })
-      assert.equal(r.state, 'error')
-      assert.match(r.detail, /double-schedule/)
-      assert.ok(!calls.some((c) => c.args.join(' ').includes('enable --now')))
-    } finally {
-      rmSync(home, { recursive: true, force: true })
-      rmSync(root, { recursive: true, force: true })
-    }
-  })
-
-  test('cron install reloads systemd after removing stale units, warns on disable failure', () => {
+  test('install strips legacy systemd units — the migration path', () => {
     const { root, main } = initRepo('bro-watch-mig-')
     const home = tmp()
+    const { calls, run } = systemdRun()
     try {
-      // pre-seed stale units for this repo
       const common = watchCommonDir(main)!
       const unit = unitName(common)
       const unitDir = join(home, '.config', 'systemd', 'user')
-      const { calls, run } = fakeRun({
-        systemctl: (args) =>
-          args.includes('is-system-running')
-            ? dead()
-            : args.includes('disable')
-              ? { code: 1, out: '', err: 'bus not found' }
-              : ok(),
-        crontab: (args) => (args[0] === '-l' ? { code: 0, out: '', err: '' } : ok()),
-      })
-      // systemd present enough to probe, user bus dead → cron backend
       mkdirSync(unitDir, { recursive: true })
       writeFileSync(join(unitDir, `${unit}.service`), 'x')
       writeFileSync(join(unitDir, `${unit}.timer`), 'x')
-      const r = installWatch(main, { everySec: 60 }, { run, home, env: { PATH: '/p' } })
+      const r = installWatch(main, { everySec: 60, pulseSec: 900 }, { run, home, env: {} })
       assert.equal(r.state, 'installed')
-      assert.match(r.detail, /stale systemd timer may still fire/)
+      assert.match(r.detail, /legacy scheduler entry removed/)
+      assert.ok(!existsSync(join(unitDir, `${unit}.service`)))
+      assert.ok(!existsSync(join(unitDir, `${unit}.timer`)))
+      assert.ok(existsSync(pulseMarkerPath(main)!))
       assert.ok(
         calls.some((c) => c.cmd === 'systemctl' && c.args.join(' ').includes('daemon-reload'))
       )
@@ -332,32 +154,69 @@ describe('installWatch', () => {
     }
   })
 
-  test('--print is pure — artifacts out, nothing installed', () => {
+  test('install strips a legacy cron line, keeps foreign lines', () => {
+    const { root, main } = initRepo('bro-watch-migc-')
+    const home = tmp()
+    try {
+      const common = watchCommonDir(main)!
+      const table = `0 0 * * * /usr/bin/foreign\n${legacyCronLine(common)}\n`
+      const writes: string[] = []
+      const { run } = fakeRun({
+        systemctl: dead(),
+        crontab: (args, stdin) => {
+          if (args[0] === '-l') {
+            return { code: 0, out: table, err: '' }
+          }
+          if (args[0] === '-') {
+            writes.push(stdin ?? '')
+            return ok()
+          }
+          return ok()
+        },
+      })
+      const r = installWatch(main, { everySec: 60, pulseSec: 900 }, { run, home, env: {} })
+      assert.equal(r.state, 'installed')
+      assert.equal(writes.length, 1)
+      assert.match(writes[0]!, /foreign/)
+      assert.ok(!writes[0]!.includes('# bro-watch-'))
+      assert.ok(existsSync(pulseMarkerPath(main)!))
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a failed crontab read refuses the arm — a surviving line would double-tick', () => {
+    const { root, main } = initRepo('bro-watch-dbl-')
+    const home = tmp()
+    try {
+      const { run } = fakeRun({
+        systemctl: dead(),
+        crontab: (args) =>
+          args[0] === '-l' ? { code: 1, out: '', err: 'permission denied' } : ok(),
+      })
+      const r = installWatch(main, { everySec: 60, pulseSec: 900 }, { run, home, env: {} })
+      assert.equal(r.state, 'error')
+      assert.match(r.detail, /line may remain/)
+      assert.ok(!existsSync(pulseMarkerPath(main)!))
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('--print is pure — marker payload + rearm command, nothing written', () => {
     const { root, main } = initRepo('bro-watch-print-')
     const home = tmp()
     const { calls, run } = systemdRun()
     try {
-      const r = installWatch(main, { everySec: 60, print: true }, { run, home, env: { PATH: '/p' } })
+      const r = installWatch(main, { everySec: 60, pulseSec: 900, print: true }, { run, home, env: {} })
       assert.equal(r.state, 'printed')
-      assert.match(r.detail, /\[Timer\]/)
-      assert.match(r.detail, /bro-watch-[0-9a-f]{8}\.service/)
-      assert.match(r.detail, /# bro-watch-[0-9a-f]{8}/)
+      assert.match(r.detail, /pulse\.json/)
+      assert.match(r.detail, /bro watch --every 60 --for 900 --notify/)
+      assert.ok(!existsSync(pulseMarkerPath(main)!))
       assert.ok(!existsSync(join(home, '.config')))
-      assert.ok(!calls.some((c) => c.args.includes('enable')))
-    } finally {
-      rmSync(home, { recursive: true, force: true })
-      rmSync(root, { recursive: true, force: true })
-    }
-  })
-
-  test('no scheduler → error that carries the manual artifacts', () => {
-    const { root, main } = initRepo('bro-watch-none-')
-    const home = tmp()
-    try {
-      const r = installWatch(main, { everySec: 60 }, { ...noneRun(), home, env: {} })
-      assert.equal(r.state, 'error')
-      assert.match(r.detail, /no scheduler found/)
-      assert.match(r.detail, /\[Timer\]/)
+      assert.equal(calls.length, 0)
     } finally {
       rmSync(home, { recursive: true, force: true })
       rmSync(root, { recursive: true, force: true })
@@ -366,19 +225,22 @@ describe('installWatch', () => {
 })
 
 describe('uninstallWatch', () => {
-  test('removes the systemd units, reports removed', () => {
+  test('removes marker + systemd units, reports removed', () => {
     const { root, main } = initRepo('bro-watch-un-')
     const home = tmp()
     const { run } = systemdRun()
     try {
       const common = watchCommonDir(main)!
       const unit = unitName(common)
-      installWatch(main, { everySec: 60 }, { run, home, env: { PATH: '/p' } })
+      const unitDir = join(home, '.config', 'systemd', 'user')
+      mkdirSync(unitDir, { recursive: true })
+      writeFileSync(join(unitDir, `${unit}.service`), 'x')
+      installWatch(main, { everySec: 60, pulseSec: 900 }, { run, home, env: {} })
       const r = uninstallWatch(main, { run, home, env: {} })
       assert.equal(r.state, 'removed')
-      const unitDir = join(home, '.config', 'systemd', 'user')
+      assert.match(r.detail, /pulse disarmed/)
       assert.ok(!existsSync(join(unitDir, `${unit}.service`)))
-      assert.ok(!existsSync(join(unitDir, `${unit}.timer`)))
+      assert.ok(!existsSync(pulseMarkerPath(main)!))
     } finally {
       rmSync(home, { recursive: true, force: true })
       rmSync(root, { recursive: true, force: true })
@@ -390,7 +252,7 @@ describe('uninstallWatch', () => {
     const home = tmp()
     try {
       const common = watchCommonDir(main)!
-      const table = `0 0 * * * /usr/bin/foreign\n${cronLine(main, 60, '/p', common, '1')}\n`
+      const table = `0 0 * * * /usr/bin/foreign\n${legacyCronLine(common)}\n`
       const writes: string[] = []
       const { run } = fakeRun({
         systemctl: dead(),
@@ -428,12 +290,30 @@ describe('uninstallWatch', () => {
     }
   })
 
+  test('a live pulse is reported — disarm does not stop a running process', () => {
+    const { root, main } = initRepo('bro-watch-ulp-')
+    const home = tmp()
+    const { run } = systemdRun()
+    try {
+      installWatch(main, { everySec: 60, pulseSec: 900 }, { run, home, env: {} })
+      const lock = pulseLockPath(main)!
+      mkdirSync(dirname(lock), { recursive: true })
+      writeFileSync(lock, `${process.pid}:tok`)
+      const r = uninstallWatch(main, { run, home, env: {} })
+      assert.equal(r.state, 'removed')
+      assert.match(r.detail, /live pulse still running/)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   test('a failed crontab write reports error — never absent while the line remains', () => {
     const { root, main } = initRepo('bro-watch-uwf-')
     const home = tmp()
     try {
       const common = watchCommonDir(main)!
-      const table = `${cronLine(main, 60, '/p', common, '1')}\n`
+      const table = `${legacyCronLine(common)}\n`
       const { run } = fakeRun({
         systemctl: dead(),
         crontab: (args) =>
@@ -474,23 +354,6 @@ describe('uninstallWatch', () => {
       assert.match(r.detail, /live timer may linger/)
     } finally {
       rmSync(home, { recursive: true, force: true })
-      rmSync(root, { recursive: true, force: true })
-    }
-  })
-})
-
-describe('printArtifacts', () => {
-  test('emits systemd units and the cron line, labeled', () => {
-    const { root, main } = initRepo('bro-watch-pa-')
-    try {
-      const out = printArtifacts(main, 60, '9.9.9', { home: tmp(), env: { PATH: '/p' } })
-      assert.equal(typeof out, 'string')
-      if (typeof out === 'string') {
-        assert.match(out, /bro-watch-[0-9a-f]{8}\.service/)
-        assert.match(out, /@broject\/bro@9\.9\.9/)
-        assert.match(out, /# or a crontab line/)
-      }
-    } finally {
       rmSync(root, { recursive: true, force: true })
     }
   })

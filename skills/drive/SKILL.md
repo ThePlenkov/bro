@@ -53,9 +53,13 @@ The fixer agent's command resolves exactly like `bro agents up` —
 
 ## Policy
 
-- **Run it detached for a fleet.** `nohup bro drive --every 300 >> log &`
-  or `systemd-run` — a driver in an exec-background shell dies with the
-  turn. `--once` is for cron-style re-invocation.
+- **The orchestrator's pulse runs single passes.** The session-pulse
+  model (bro-killn): a bounded `bro watch --every --for` window ends →
+  `bro drive` once → digest → re-arm. `bro drive --every` stays the
+  long-lived detached supervisor when one is wanted — both `--every`
+  forms refuse under `BRO_AGENT_ID` (spawned workers never arm
+  cadences). No systemd/crontab installs exist — a session start rearms
+  a dead pulse from `bro/pulse.json`.
 - **Occupied is not an error.** A skipped PR means a live session owns
   it — report and move on; never force-spawn into someone's worktree.
 - **The fixer bead is the handle.** `bro agents status <bead>` shows

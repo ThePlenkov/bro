@@ -1,31 +1,27 @@
 /**
- * `bro watch install|uninstall` — the heartbeat on a non-agent timer
- * (bro-7xgk.5). A session holder's only job is keeping the turn-loop
- * alive; polling belongs to a scheduler with zero inference per tick —
- * a systemd user timer when `systemctl --user` answers, a managed
- * crontab line otherwise. Entries are per-repo, named
- * `bro-watch-<h8>` where `<h8>` is the git-common-dir's sha256 prefix:
- * each repo's `--once --notify` drops into its own mailbox.
+ * `bro watch install|uninstall` — the session-pulse arm/disarm
+ * (bro-killn). The systemd/crontab *writers* are retired: OS service
+ * management is outside the agent-plugin horizon — durable state
+ * already survives reboots; only the cadence needed a home, and the
+ * orchestrator session is it (spec: specs/bro-killn.md).
  *
- *   bro watch install [--every N] [--print]   install the poll for this repo
- *   bro watch uninstall                       remove it
+ *   bro watch install [--every N] [--print]   arm the pulse for this repo
+ *   bro watch uninstall                       disarm + strip any legacy entry
  *
- * `--print` emits the artifacts the resolved backend would install
- * (both when no scheduler is detectable) without touching anything.
+ * `install` writes `<git-common>/bro/pulse.json` — the want-marker the
+ * session-start hook rearms from when no live `bro watch --every` holds
+ * `bro/pulse.lock`. Both verbs still strip legacy `bro-watch-<h8>`
+ * systemd units and managed crontab lines: timers already installed on
+ * machines must not double-tick beside the pulse. `--print` emits the
+ * marker payload and the rearm command without touching anything.
  */
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { gitTry } from '@broject/core'
-import { cliVersion } from './githooks.ts'
+import { armPulse, disarmPulse, pulseLive, pulseMarkerPath } from './watch-pulse.ts'
 
 export interface SchedRun {
   code: number
@@ -73,122 +69,11 @@ export function watchUnitHash(commonDir: string): string {
 export const unitName = (commonDir: string): string => `bro-watch-${watchUnitHash(commonDir)}`
 export const cronTag = (commonDir: string): string => `# bro-watch-${watchUnitHash(commonDir)}`
 
-/** Single-quote for sh — the only quoting that survives both systemd's
- *  ExecStart parse and cron's `sh -c` line. */
-const shq = (s: string): string => `'${s.replaceAll("'", `'"'"'`)}'`
-
-/** The watch invocation — `bro` on PATH first, the version-pinned npx
- *  fallback second (same contract the git-hook shim bakes). */
-function watchInvocation(version: string): string {
-  return `bro watch --once --notify || npx -y --prefer-offline "@broject/bro@${version}" watch --once --notify`
-}
-
-/** % is systemd's specifier escape — a path containing one would
- *  silently expand; %% is the literal. A newline can't be expressed at
- *  all — it would start a new directive, so the caller's `[Section]`
- *  boundary dissolves: refuse. */
-const unitEsc = (s: string): string => {
-  if (/[\n\r]/.test(s)) {
-    throw new Error(`path contains a newline — a unit file cannot express it: ${JSON.stringify(s)}`)
-  }
-  return s.replaceAll('%', '%%')
-}
-
-/** Type=oneshot service — the scheduler owns the cadence; watch exits
- *  after one snapshot+drop. PATH is captured at install time because a
- *  user manager doesn't inherit nvm/~/.local shims. Every interpolated
- *  path goes through unitEsc — a newline in a checkout name would
- *  otherwise inject a new directive (a8fh). */
-export function systemdService(dir: string, version: string, envPath: string): string {
-  return `[Unit]
-Description=bro watch heartbeat — ${unitEsc(dir)}
-Documentation=https://github.com/theplenkov/bro
-
-[Service]
-Type=oneshot
-WorkingDirectory=${unitEsc(dir)}
-Environment="PATH=${unitEsc(envPath).replaceAll('"', '\\"')}"
-ExecStart=/bin/sh -c ${shq(watchInvocation(version))}
-`
-}
-
-export function systemdTimer(unit: string, everySec: number): string {
-  return `[Unit]
-Description=bro watch heartbeat timer — ${unit}
-
-[Timer]
-OnBootSec=${everySec}s
-OnUnitActiveSec=${everySec}s
-Unit=${unit}.service
-
-[Install]
-WantedBy=timers.target
-`
-}
-
-/** The 5-field schedule for a seconds cadence. The minute field tops
- *  at 59 — a 90-minute step is not "every 90 minutes", it fires once
- *  an hour (or is rejected). Larger intervals move up a field,
- *  rounding UP so the effective cadence is never faster than
- *  configured. A whole-field step resets at the boundary — a 7-minute
- *  step fires at :56 and again at :00 — so non-divisor steps instead
- *  range from the step value (`7-59/7`), keeping every gap ≥ the
- *  cadence. */
-export function cronSchedule(everySec: number): string {
-  const mins = Math.ceil(everySec / 60)
-  if (mins <= 1) {
-    return '* * * * *'
-  }
-  if (mins < 60) {
-    const minuteField = 60 % mins === 0 ? `*/${mins}` : `${mins}-59/${mins}`
-    return `${minuteField} * * * *`
-  }
-  const hours = Math.ceil(mins / 60)
-  if (hours < 24) {
-    const hourField = 24 % hours === 0 ? `*/${hours}` : `${hours}-23/${hours}`
-    return `0 ${hourField} * * *`
-  }
-  const days = Math.ceil(hours / 24)
-  const dayField = days === 1 ? '*/1' : `${days}-31/${days}`
-  return `0 0 ${dayField} * *`
-}
-
-/** A managed line is a crontab TEXT FIELD: a newline starts a new job
- *  before any shell quoting applies, and a bare `%` ends the command
- *  (the rest becomes stdin). Newlines can't be expressed — refuse;
- *  `%` escapes as `\%`. */
-const cronEsc = (s: string): string => {
-  if (/[\n\r]/.test(s)) {
-    throw new Error(
-      `path contains a newline — cron cannot express it safely (use systemd or rename): ${JSON.stringify(s)}`
-    )
-  }
-  return s.replaceAll('%', '\\%')
-}
-
-/** One managed crontab line — the tag is the identity; reinstall
- *  replaces by tag, uninstall strips by tag, foreign lines untouched.
- *  Cron's granularity is minutes; intervalSec rounds up into the
- *  minute/hour/day field that can express it. env-prefix on
- *  `sh -c` lands PATH in the child's environment. */
-export function cronLine(
-  dir: string,
-  everySec: number,
-  envPath: string,
-  commonDir: string,
-  version: string
-): string {
-  const sched = cronSchedule(everySec)
-  const d = cronEsc(dir)
-  const p = cronEsc(envPath)
-  return `${sched} cd ${shq(d)} && PATH=${shq(p)} sh -c ${shq(watchInvocation(version))} >/dev/null 2>&1 ${cronTag(commonDir)}`
-}
-
 export type SchedBackend = 'systemd' | 'cron'
 
-/** systemd user first — a timer survives and needs no babysitting;
- *  crontab is the portable floor; null when neither answers. A dead
- *  systemctl binary (127) is not a user-bus problem — it's absence. */
+/** systemd user first — crontab is the portable floor; null when
+ *  neither answers. A dead systemctl binary (127) is not a user-bus
+ *  problem — it's absence. */
 export function detectBackend(run: SchedRunner): SchedBackend | null {
   const s = run('systemctl', ['--user', 'is-system-running'])
   if (s.code === 0 || ['degraded', 'starting', 'initializing'].includes(s.out.trim())) {
@@ -201,14 +86,13 @@ interface Resolved {
   common: string
   unit: string
   unitDir: string
-  envPath: string
   run: SchedRunner
 }
 
 function resolveSched(dir: string, deps: WatchSchedDeps): Resolved | { error: string } {
   const common = watchCommonDir(dir)
   if (common === null) {
-    return { error: 'not a git repository — --notify would have no mailbox to drop into' }
+    return { error: 'not a git repository — the pulse marker has no common dir to live in' }
   }
   const env = deps.env ?? process.env
   const home = deps.home ?? homedir()
@@ -216,79 +100,7 @@ function resolveSched(dir: string, deps: WatchSchedDeps): Resolved | { error: st
     common,
     unit: unitName(common),
     unitDir: join(env.XDG_CONFIG_HOME || join(home, '.config'), 'systemd', 'user'),
-    envPath: env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
     run: deps.run ?? realRun,
-  }
-}
-
-/** Artifacts for --print (and the install-nowhere guidance). */
-export function printArtifacts(
-  dir: string,
-  everySec: number,
-  version: string,
-  deps: WatchSchedDeps
-): string | { error: string } {
-  const r = resolveSched(dir, deps)
-  if ('error' in r) {
-    return r
-  }
-  const service = `${r.unit}.service`
-  const timer = `${r.unit}.timer`
-  let cron: string
-  try {
-    cron = cronLine(dir, everySec, r.envPath, r.common, version)
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : String(err) }
-  }
-  return [
-    `# ${service} — install under ${r.unitDir}`,
-    systemdService(dir, version, r.envPath),
-    `# ${timer} — then: systemctl --user daemon-reload && systemctl --user enable --now ${timer}`,
-    systemdTimer(r.unit, everySec),
-    `# or a crontab line`,
-    cron,
-  ].join('\n')
-}
-
-/** systemd install: write both units, daemon-reload, enable --now.
- *  Identical files still re-enable (a disabled timer is not
- *  "already"); changed files rewrite in place. */
-function installSystemd(
-  r: Resolved,
-  dir: string,
-  everySec: number,
-  version: string
-): { state: 'installed' | 'updated' | 'already' | 'error'; detail: string } {
-  const service = systemdService(dir, version, r.envPath)
-  const timer = systemdTimer(r.unit, everySec)
-  const servicePath = join(r.unitDir, `${r.unit}.service`)
-  const timerPath = join(r.unitDir, `${r.unit}.timer`)
-  try {
-    const had = existsSync(servicePath) || existsSync(timerPath)
-    const same =
-      existsSync(servicePath) &&
-      existsSync(timerPath) &&
-      readFileSync(servicePath, 'utf8') === service &&
-      readFileSync(timerPath, 'utf8') === timer
-    if (!same) {
-      mkdirSync(r.unitDir, { recursive: true })
-      writeFileSync(servicePath, service)
-      writeFileSync(timerPath, timer)
-    }
-    const reload = r.run('systemctl', ['--user', 'daemon-reload'])
-    if (reload.code !== 0) {
-      return { state: 'error', detail: `systemctl daemon-reload: ${reload.err.trim()}` }
-    }
-    const enable = r.run('systemctl', ['--user', 'enable', '--now', `${r.unit}.timer`])
-    if (enable.code !== 0) {
-      return { state: 'error', detail: `systemctl enable: ${enable.err.trim()}` }
-    }
-    return {
-      state: same ? 'already' : had ? 'updated' : 'installed',
-      detail: `${r.unit}.timer every ${everySec}s (systemd --user)`,
-    }
-  } catch (err) {
-    return { state: 'error', detail: err instanceof Error ? err.message : String(err) }
   }
 }
 
@@ -337,135 +149,10 @@ function stripCronTag(
   return w.code === 0 ? { removed } : { failed: w.err.trim() || `crontab - exited ${w.code}` }
 }
 
-function installCron(
-  r: Resolved,
-  dir: string,
-  everySec: number,
-  version: string
-): { state: 'installed' | 'updated' | 'already' | 'error'; detail: string } {
-  const tag = cronTag(r.common)
-  let line: string
-  try {
-    line = cronLine(dir, everySec, r.envPath, r.common, version)
-  } catch (err) {
-    return { state: 'error', detail: err instanceof Error ? err.message : String(err) }
-  }
-  const table = readCrontab(r.run)
-  if ('missing' in table) {
-    return { state: 'error', detail: 'crontab not found on PATH' }
-  }
-  if ('failed' in table) {
-    return { state: 'error', detail: `crontab -l: ${table.failed}` }
-  }
-  const lines = table.lines
-  const kept = lines.filter((l) => !l.includes(tag))
-  // exactly one tagged line and it IS the current one — nothing to do
-  if (kept.length === lines.length - 1 && lines.some((l) => l === line)) {
-    return { state: 'already', detail: `crontab ${tag}` }
-  }
-  const w = r.run('crontab', ['-'], [...kept, line].join('\n') + '\n')
-  if (w.code !== 0) {
-    return { state: 'error', detail: `crontab -: ${w.err.trim()}` }
-  }
-  return {
-    state: kept.length === lines.length ? 'installed' : 'updated',
-    detail: `crontab "${cronSchedule(everySec)}" (${tag})`,
-  }
-}
-
-export interface WatchInstallResult {
-  state: 'installed' | 'updated' | 'already' | 'removed' | 'absent' | 'printed' | 'error'
-  backend?: SchedBackend
-  detail: string
-}
-
-export function installWatch(
-  dir: string,
-  opts: { everySec: number; print?: boolean },
-  deps: WatchSchedDeps = {}
-): WatchInstallResult {
-  const r = resolveSched(dir, deps)
-  if ('error' in r) {
-    return { state: 'error', detail: r.error }
-  }
-  const version = cliVersion()
-  const backend = detectBackend(r.run)
-  if (opts.print === true) {
-    const out = printArtifacts(dir, opts.everySec, version, deps)
-    return typeof out === 'string'
-      ? { state: 'printed', backend: backend ?? undefined, detail: out }
-      : { state: 'error', detail: out.error }
-  }
-  if (backend === null) {
-    const out = printArtifacts(dir, opts.everySec, version, deps)
-    return {
-      state: 'error',
-      detail:
-        'no scheduler found — neither `systemctl --user` nor `crontab` answers. ' +
-        'Install the entry by hand (`bro watch install --print`):\n' +
-        (typeof out === 'string' ? out : ''),
-    }
-  }
-  // one entry per repo, one backend — a surviving foreign-backend entry
-  // would double the cadence
-  if (backend === 'systemd') {
-    const strip = stripCronTag(r.run, cronTag(r.common))
-    if ('failed' in strip) {
-      // can't prove the crontab lost our line — enabling systemd anyway
-      // risks both schedulers ticking
-      return {
-        state: 'error',
-        backend,
-        detail: `cannot strip the crontab entry (${strip.failed}) — refusing to double-schedule`,
-      }
-    }
-    const res = installSystemd(r, dir, opts.everySec, version)
-    return { ...res, backend }
-  }
-  // cron install — a stale systemd unit for this repo goes best-effort
-  return installCronPath(r, dir, opts.everySec, version, backend)
-}
-
-/** Cron backend: a stale systemd unit for this repo is retired
- *  best-effort — files are deleted either way; a disable that fails on
- *  a still-loaded timer earns a warning on the result, never a
- *  rollback (the cron entry is already live, and a lingering timer
- *  would double-tick). */
-function installCronPath(
-  r: Resolved,
-  dir: string,
-  everySec: number,
-  version: string,
-  backend: SchedBackend
-): WatchInstallResult {
-  const svc = join(r.unitDir, `${r.unit}.service`)
-  const tmr = join(r.unitDir, `${r.unit}.timer`)
-  const hadUnits = existsSync(svc) || existsSync(tmr)
-  const disable = r.run('systemctl', ['--user', 'disable', '--now', `${r.unit}.timer`])
-  rmSync(svc, { force: true })
-  rmSync(tmr, { force: true })
-  if (hadUnits) {
-    // a deleted unit lingers in `systemctl --user list-timers` until
-    // the manager re-reads its unit dir
-    r.run('systemctl', ['--user', 'daemon-reload'])
-  }
-  const res = installCron(r, dir, everySec, version)
-  if (hadUnits && disable.code !== 0 && res.state !== 'error') {
-    // files are gone but the live manager may still fire the timer —
-    // cron is in, so the survivor would double-tick
-    return {
-      ...res,
-      backend,
-      detail: `${res.detail} — warning: stale systemd timer may still fire (disable: ${disable.err.trim() || `exited ${disable.code}`})`,
-    }
-  }
-  return { ...res, backend }
-}
-
-/** systemd side of uninstall: disable the timer, delete both unit
- *  files, reload so the manager re-reads the dir. A disable that fails
- *  while units existed warns — files are gone but the loaded timer may
- *  linger, and a clean 'removed' would lie. */
+/** systemd side of the legacy strip: disable the timer, delete both
+ *  unit files, reload so the manager re-reads the dir. A disable that
+ *  fails while units existed warns — files are gone but the loaded
+ *  timer may linger, and a clean 'removed' would lie. */
 function retireSystemdUnits(r: Resolved): { removed: boolean; warn: string } {
   const hadUnits =
     existsSync(join(r.unitDir, `${r.unit}.service`)) ||
@@ -491,11 +178,12 @@ function retireSystemdUnits(r: Resolved): { removed: boolean; warn: string } {
   }
 }
 
-export function uninstallWatch(dir: string, deps: WatchSchedDeps = {}): WatchInstallResult {
-  const r = resolveSched(dir, deps)
-  if ('error' in r) {
-    return { state: 'error', detail: r.error }
-  }
+/** The legacy strip both verbs share — a pre-retirement `bro-watch-<h8>`
+ *  entry still ticking beside the session pulse would double the
+ *  cadence. Removal only; nothing here writes a scheduler entry. */
+function stripLegacy(
+  r: Resolved
+): { removed: boolean; warn: string } | { failed: string } {
   const tag = cronTag(r.common)
   const backend = detectBackend(r.run)
   const retired =
@@ -505,17 +193,99 @@ export function uninstallWatch(dir: string, deps: WatchSchedDeps = {}): WatchIns
   const stripped = stripCronTag(r.run, tag)
   if ('failed' in stripped) {
     // the managed line may still be in the table — 'absent' would lie
+    return { failed: `crontab strip failed — the managed line may remain: ${stripped.failed}` }
+  }
+  return {
+    removed: retired.removed || ('removed' in stripped && stripped.removed > 0),
+    warn: retired.warn,
+  }
+}
+
+export interface WatchInstallResult {
+  state: 'installed' | 'updated' | 'already' | 'removed' | 'absent' | 'printed' | 'error'
+  backend?: SchedBackend
+  detail: string
+}
+
+/** The rearm command --print and the install detail both show. */
+function rearmCommand(everySec: number, pulseSec: number): string {
+  return `bro watch --every ${everySec} --for ${Math.max(pulseSec, everySec)} --notify`
+}
+
+export function installWatch(
+  dir: string,
+  opts: { everySec: number; pulseSec: number; print?: boolean },
+  deps: WatchSchedDeps = {}
+): WatchInstallResult {
+  const r = resolveSched(dir, deps)
+  if ('error' in r) {
+    return { state: 'error', detail: r.error }
+  }
+  if (opts.print === true) {
     return {
-      state: 'error',
-      backend: backend ?? undefined,
-      detail: `crontab strip failed — the managed line may remain: ${stripped.failed}`,
+      state: 'printed',
+      detail: [
+        `# ${pulseMarkerPath(dir)} — the want-marker; session-start rearms a dead pulse from it`,
+        JSON.stringify({ everySec: opts.everySec, armedAt: '<install time>' }, null, 2),
+        '# the session owns the cadence — no OS timer is installed:',
+        `${rearmCommand(opts.everySec, opts.pulseSec)}   # bounded window; on end: bro drive → digest → re-arm`,
+      ].join('\n'),
     }
   }
-  const removed = retired.removed || ('removed' in stripped && stripped.removed > 0)
+  const strip = stripLegacy(r)
+  if ('failed' in strip) {
+    return { state: 'error', detail: strip.failed }
+  }
+  let arm: ReturnType<typeof armPulse>
+  try {
+    arm = armPulse(dir, opts.everySec)
+  } catch (err) {
+    return { state: 'error', detail: err instanceof Error ? err.message : String(err) }
+  }
+  const suffix = [
+    strip.removed ? 'legacy scheduler entry removed' : '',
+    strip.warn,
+  ]
+    .filter((s) => s !== '')
+    .join(' — ')
+  const verb =
+    arm.state === 'already' ? 'already armed' : arm.state === 'updated' ? 're-armed' : 'armed'
+  return {
+    state: arm.state === 'armed' ? 'installed' : arm.state === 'updated' ? 'updated' : 'already',
+    detail:
+      `watch pulse ${verb} — ${rearmCommand(opts.everySec, opts.pulseSec)} ` +
+      '(the session owns the cadence; no OS timer installed)' +
+      (suffix === '' ? '' : ` — ${suffix}`),
+  }
+}
+
+export function uninstallWatch(dir: string, deps: WatchSchedDeps = {}): WatchInstallResult {
+  const r = resolveSched(dir, deps)
+  if ('error' in r) {
+    return { state: 'error', detail: r.error }
+  }
+  const marker = disarmPulse(dir)
+  const strip = stripLegacy(r)
+  if ('failed' in strip) {
+    return {
+      state: 'error',
+      detail: `${marker === 'disarmed' ? 'pulse disarmed — ' : ''}${strip.failed}`,
+    }
+  }
+  const removed = marker === 'disarmed' || strip.removed
+  // a running `bro watch --every` keeps its lock until it exits —
+  // disarm drops the rearm intent, not the live process
+  const live = pulseLive(dir)
+  const liveNote = live.live ? `live pulse still running (pid ${live.pid}) — exits on its own` : ''
   return {
     state: removed ? 'removed' : 'absent',
-    backend: backend ?? undefined,
-    detail: [removed ? `${r.unit} removed` : `no entry for ${r.unit}`, retired.warn]
+    detail: [
+      removed
+        ? `${marker === 'disarmed' ? 'pulse disarmed' : 'no pulse marker'}${strip.removed ? ' — legacy entry removed' : ''}`
+        : `no pulse marker or legacy entry for ${r.unit}`,
+      strip.warn,
+      liveNote,
+    ]
       .filter((s) => s !== '')
       .join(' — '),
   }

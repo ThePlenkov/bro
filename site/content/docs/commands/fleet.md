@@ -51,11 +51,11 @@ non-interactive ticker, use `bro watch --every N`.
 | Command | What it does |
 | ------- | ------------ |
 | `bro watch [--once]` | One read-only heartbeat with attention, molecules, gates, and fleet rows |
-| `bro watch --every N` | Repeat the heartbeat on a cadence |
 | `bro watch --notify` | Drop the initial snapshot and transitions into the mailbox |
 | `bro watch --json` | Emit `{ts, attention, mols, gates, fleet}` |
-| `bro watch install [--every N] [--print]` | Install the heartbeat on a non-agent timer — a systemd user unit per repo (crontab fallback), cadence `watch.intervalSec` (default 60) |
-| `bro watch uninstall` | Remove the installed timer/cron entry for this repo |
+| `bro watch --every N [--for S]` | Repeat the heartbeat on a cadence — the session pulse: holds `bro/pulse.lock` (one per repo, a duplicate stands by) and refuses under `BRO_AGENT_ID` |
+| `bro watch install [--every N] [--print]` | Arm the session pulse — writes `bro/pulse.json` (the want-marker session-start rearms from), strips any legacy systemd/cron entry; cadence `--every N` or `watch.intervalSec` (default 60) |
+| `bro watch uninstall` | Disarm the marker + strip any legacy timer/cron entry; a live pulse exits on its own |
 | `bro notify <text>` | Write one mailbox event for live sessions — addressed drops, kinds, and the bus are in [Events](/docs/commands/events) |
 
 Each tick also rewrites `<git-common>/bro/heartbeat.json` — the durable
@@ -73,10 +73,13 @@ Detach the watcher, don't block on it: `bro watch --every N --notify` in a
 background shell keeps a heartbeat running while the agent works — the
 `--notify` drops surface in the parent session mid-turn, on its next tool
 call (the mailbox is pull-based: a drop lands when the session next acts,
-it never wakes a sleeping one). The same caveat as `act wait` applies — a
-session-bound watcher dies with the session. When the heartbeat must
-outlive it, `bro watch install` puts `--once --notify` on a non-agent
-timer instead; `bro drive --every` is the durable write-side form.
+it never wakes a sleeping one). The session-pulse model is the durable
+form: `bro watch install` arms `bro/pulse.json`, and a session start with
+no live pulse (lock holder dead) gets the rearm nudge — the orchestrator
+session then runs `bro watch --every N --for S --notify` in a background
+shell; the window's end is the wake event, followed by one `bro drive`
+pass, a digest, and the next window. OS timers are retired — the session
+owns the cadence, and spawned workers (`BRO_AGENT_ID`) never arm it.
 
 ## Drive
 
