@@ -599,14 +599,54 @@ function followRemote(m: MemberView, lines: string[]): boolean {
   return true
 }
 
+/** What publish settled into — 'skipped' is the benign quiet path
+ *  (fewer than two open PRs, nothing attempted): the sync caller must
+ *  not read it as a failure. Only 'failed' propagates — a split
+ *  refusal, a thrown link, or an unproven membership readback. */
+type PublishOutcome = 'registered' | 'skipped' | 'failed'
+
+/** Membership probe ahead of publish — 'registered' when every open
+ *  member already sits in one host stack (a re-run is a no-op),
+ *  'refused' when the chain is split across two stacks (the tool would
+ *  reject; say so first), 'unproven' when publish still has to run. */
+function membershipPreflight(
+  name: string,
+  open: MemberView[],
+  membership: NonNullable<StackFacade['membership']>,
+  lines: string[],
+  quiet: boolean
+): 'registered' | 'refused' | 'unproven' {
+  const ids = new Set<number>()
+  let unstacked = 0
+  for (const m of open) {
+    const hit = membership(m)
+    if (hit === null) {
+      unstacked++
+    } else {
+      ids.add(hit.id)
+    }
+  }
+  if (ids.size > 1) {
+    const list = [...ids].map((i) => `#${i}`).join(', ')
+    lines.push(`  stack ${name}: members sit in different host stacks (${list}) — split by hand`)
+    return 'refused'
+  }
+  if (ids.size === 1 && unstacked === 0) {
+    if (!quiet) {
+      lines.push(`  stack ${name} already published — stack #${[...ids][0]!}`)
+    }
+    return 'registered'
+  }
+  return 'unproven'
+}
+
 /** Register the chain's open member PRs as the host's stack object —
  *  `gh stack link` on GitHub, absent everywhere chains are detected
- *  from the base links themselves. Pre-flight probes membership so a
- *  re-run is a no-op and a chain split across two stacks refuses before
- *  the tool can. `quiet` is the cascade caller: benign no-ops (<2 open
- *  PRs, already registered) print nothing — a refusal still does, it's
- *  real signal about the chain. Returns true when the members end up
- *  registered (published or always were). */
+ *  from the base links themselves. `quiet` is the cascade caller:
+ *  benign no-ops (<2 open PRs, already registered) print nothing — a
+ *  refusal still does, it's real signal about the chain. 'registered'
+ *  means the members ended up in a stack — the post-publish membership
+ *  readback is the success proof, so an empty one fails, not passes. */
 function publishStack(
   name: string,
   members: MemberView[],
@@ -614,36 +654,21 @@ function publishStack(
   defaultBase: string,
   lines: string[],
   quiet: boolean
-): boolean {
+): PublishOutcome {
   const open = members.filter((m) => m.pr !== undefined && m.prState === 'OPEN')
   if (open.length < 2) {
     if (!quiet) {
       lines.push(`  stack ${name}: fewer than two open member PRs — nothing to publish`)
     }
-    return false
+    return 'skipped'
   }
   if (stacks.membership !== undefined) {
-    const ids = new Set<number>()
-    let unstacked = 0
-    for (const m of open) {
-      const hit = stacks.membership(m)
-      if (hit === null) {
-        unstacked++
-      } else {
-        ids.add(hit.id)
-      }
+    const pre = membershipPreflight(name, open, stacks.membership, lines, quiet)
+    if (pre === 'refused') {
+      return 'failed'
     }
-    if (ids.size > 1) {
-      lines.push(
-        `  stack ${name}: members sit in different host stacks (${[...ids].map((i) => `#${i}`).join(', ')}) — split by hand`
-      )
-      return false
-    }
-    if (ids.size === 1 && unstacked === 0) {
-      if (!quiet) {
-        lines.push(`  stack ${name} already published — stack #${[...ids][0]!}`)
-      }
-      return true
+    if (pre === 'registered') {
+      return 'registered'
     }
   }
   const chain: StackChainMember[] = open.map((m) => ({
@@ -654,15 +679,15 @@ function publishStack(
   }))
   try {
     const hit = stacks.publish?.(chain)
-    lines.push(
-      hit === null || hit === undefined
-        ? `  stack ${name} published — host reported no membership (probe gap)`
-        : `  stack ${name} published — stack #${hit.id}`
-    )
-    return true
+    if (hit === null || hit === undefined) {
+      lines.push(`  stack ${name} publish failed — host reported no membership`)
+      return 'failed'
+    }
+    lines.push(`  stack ${name} published — stack #${hit.id}`)
+    return 'registered'
   } catch (err) {
     lines.push(`  stack ${name} publish failed — ${(err as Error).message}`)
-    return false
+    return 'failed'
   }
 }
 
@@ -697,7 +722,7 @@ function cmdPublish(argv: string[]): void {
     return
   }
   const lines: string[] = []
-  if (!publishStack(name, members, stacks, defaultBase, lines, false)) {
+  if (publishStack(name, members, stacks, defaultBase, lines, false) !== 'registered') {
     process.exitCode = 1
   }
   for (const l of lines) {
@@ -712,8 +737,16 @@ function cmdPublish(argv: string[]): void {
  *  skipped, and when it also rewrote the remote branch (GitHub) the
  *  local worktree fast-follows instead of rebasing. Returns the
  *  per-member report lines; never throws on a single member's failure
- *  (a conflict stops that member, not the run). */
-export function syncStack(root: string, name: string): string[] {
+ *  (a conflict stops that member, not the run). `status` is the
+ *  optional out-channel: a failed auto-publish (the chain was
+ *  publishable but the host refused or couldn't prove membership)
+ *  flags `publishFailed` so `stack sync` can exit nonzero — a benign
+ *  skip (<2 open PRs, deferred on a broken cascade) never does. */
+export function syncStack(
+  root: string,
+  name: string,
+  status?: { publishFailed: boolean }
+): string[] {
   const main = mainWorktree()
   const defaultBase = defaultBranchName() ?? main.branch ?? 'main'
   const rev = resolveReview(root)
@@ -765,7 +798,11 @@ export function syncStack(root: string, name: string): string[] {
     }
   }
   if (intact && stacks?.publish !== undefined) {
-    publishStack(name, members, stacks, defaultBase, lines, true)
+    if (publishStack(name, members, stacks, defaultBase, lines, true) === 'failed') {
+      if (status !== undefined) {
+        status.publishFailed = true
+      }
+    }
   }
   return lines
 }
@@ -780,13 +817,17 @@ function cmdSync(argv: string[]): void {
   }
   for (const name of names) {
     console.log(`stack ${name}:`)
-    const lines = syncStack(main.path, name)
+    const status = { publishFailed: false }
+    const lines = syncStack(main.path, name, status)
     if (lines.length === 0) {
       console.log('  in sync')
     } else {
       for (const l of lines) {
         console.log(l)
       }
+    }
+    if (status.publishFailed) {
+      process.exitCode = 1
     }
   }
 }

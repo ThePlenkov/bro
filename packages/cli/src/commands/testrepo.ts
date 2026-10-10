@@ -590,6 +590,12 @@ const stacksFacade = {
   },
   publish: (members) => {
     const s = load()
+    // publishGap scripts the unproven-publish shape — link "ran" but
+    // the membership readback reports nothing, so the stack registry
+    // stays empty and the verb returns null
+    if (s.publishGap) {
+      return null
+    }
     s.stacks = s.stacks ?? {}
     const existing = members.map((m) => s.stacks[m.branch]).find((i) => i !== undefined)
     const id = existing ?? (s.nextStackId = (s.nextStackId ?? 900) + 1)

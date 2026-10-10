@@ -620,6 +620,31 @@ describe('bro stack e2e', () => {
     })
   })
 
+  test('publish fails when the host cannot prove membership', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      openPair(f)
+      // link "ran" but the readback reports no membership — the success
+      // proof is absent, so the verb fails instead of claiming published
+      writeHostState(f.hostState, { publishGap: true })
+      const r = f.run(['publish', 's'])
+      assert.equal(r.code, 1)
+      assert.match(r.stdout, /stack s publish failed — host reported no membership/)
+      assert.equal(readHostState(f.hostState).stacks, undefined)
+    })
+  })
+
+  test('a failed auto-publish fails stack sync', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      openPair(f)
+      writeHostState(f.hostState, { publishGap: true })
+      const r = f.run(['sync', 's'])
+      assert.equal(r.code, 1)
+      assert.match(r.stdout, /stack s publish failed — host reported no membership/)
+    })
+  })
+
   test('list hints when open member PRs are not registered on the host', () => {
     const f = stackFixture()
     inside(f.main, f.root, () => {
