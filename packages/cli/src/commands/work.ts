@@ -1081,6 +1081,11 @@ export interface LitterReapOpts {
   /** parked trees idle past this many days reap regardless of the cap;
    *  0/undefined = no age bound */
   parkedTtlDays?: number
+  /** bead ids the caller vouches for — `bro loop` passes the claims it
+   *  deliberately parked THIS run (a park is intent, not an orphan):
+   *  they skip claim release but their trees still pool. A later sweep
+   *  judges them fresh — the loop that parked them is gone by then. */
+  keepClaims?: ReadonlySet<string>
   dryRun?: boolean
   now?: number
 }
@@ -1672,7 +1677,7 @@ function reapCandidate(c: LitterCandidate, ctx: LitterCtx, parked: ParkedCand[])
   const pr = litterPrEvidence(opts, c.branch)
   const label = c.w?.path ?? c.branch
   const bead = ctx.bySlug.get(c.slug)
-  if (bead?.status === 'in_progress') {
+  if (bead?.status === 'in_progress' && opts.keepClaims?.has(bead.id) !== true) {
     const owner = releaseDeadClaim(ctx, c, bead)
     if (owner !== undefined) {
       rep.kept.push(`${label} (bead in_progress — ${owner})`)
@@ -1830,7 +1835,12 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
     const ids = [...new Set([v.beadId, ...(v.beadIds ?? [])])]
     for (const id of ids) {
       const bead = ctx.bySlug.get(loopSlug(id)) ?? ctx.bySlug.get(v.slug)
-      if (bead === undefined || bead.status !== 'in_progress' || handled.has(bead.id)) {
+      if (
+        bead === undefined ||
+        bead.status !== 'in_progress' ||
+        handled.has(bead.id) ||
+        opts.keepClaims?.has(bead.id) === true
+      ) {
         continue
       }
       releaseDeadClaim(ctx, { branch: '', slug: loopSlug(bead.id) }, bead)

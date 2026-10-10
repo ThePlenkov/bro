@@ -1557,7 +1557,7 @@ function claimedTails(tasks: TaskStore, seen: Set<string>): { own: string[]; oth
 /** The close-out litter sweep — reap the provably-done leftovers before
  *  the audit names what survived. A sweep failure is a warning line,
  *  never a crash. */
-function sweepLoopLitter(ctx: Ctx): LitterReap | undefined {
+function sweepLoopLitter(ctx: Ctx, parkedClaims: ReadonlySet<string>): LitterReap | undefined {
   try {
     return reapLoopLitter({
       root: ctx.root,
@@ -1566,6 +1566,7 @@ function sweepLoopLitter(ctx: Ctx): LitterReap | undefined {
       stackPrefix: ctx.stack === undefined ? undefined : `stack/${ctx.stack}/`,
       parkedKeep: ctx.cfg.parkedKeep,
       parkedTtlDays: ctx.cfg.parkedTtlDays,
+      keepClaims: parkedClaims,
     })
   } catch (err) {
     say(ctx, `  warning: litter sweep failed — ${err instanceof Error ? err.message : String(err)}`)
@@ -1610,7 +1611,7 @@ function sayLoopAudit(ctx: Ctx, reap: LitterReap | undefined, sections: [string,
  *  worktrees/branches, claimed beads, and cleanup failures collected
  *  during the run. Finished with `bro sync` so artifacts and bead state
  *  travel. Never throws — an audit failure is reported, not raised. */
-function endAudit(ctx: Ctx, seen: Set<string>): void {
+function endAudit(ctx: Ctx, seen: Set<string>, parkedClaims: ReadonlySet<string>): void {
   ctx.stage = 'audit'
   // the sweep's git helpers and runSyncCommand narrate via console.log —
   // under --json that corrupts the event stream, so route the whole
@@ -1622,7 +1623,7 @@ function endAudit(ctx: Ctx, seen: Set<string>): void {
   try {
     // reap before the report — a landed bead's leftover tree is not a
     // tail; the audit describes what survived the sweep
-    const reap = sweepLoopLitter(ctx)
+    const reap = sweepLoopLitter(ctx, parkedClaims)
     const { worktrees, worktreeBranches, branches, errors } = loopRefTails(
       ctx.root,
       ctx.stack === undefined ? ['loop/'] : ['loop/', `stack/${ctx.stack}/`]
@@ -1771,6 +1772,10 @@ interface QueueState {
   claimed: number
   /** claimClump returned nothing — no more pushes, only gate service. */
   drained: boolean
+  /** Beads this run deliberately parked — a park is intent, not an
+   *  orphan, so the end-of-run litter sweep must not release their
+   *  claims (bro-ho09d). A later sweep judges them fresh. */
+  parkedClaims: Set<string>
 }
 
 /** One service pass over the stack, oldest-first — a snapshot copy
@@ -1790,6 +1795,11 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
     }
     q.stack.splice(q.stack.indexOf(m), 1)
     q.tally[verdict] += 1
+    if (verdict === 'parked') {
+      for (const b of m.beads) {
+        q.parkedClaims.add(b.id)
+      }
+    }
     if (verdict === 'landed') {
       syncAfterLand(ctx)
     }
@@ -1841,6 +1851,11 @@ async function tryClaim(
     )
   } else {
     q.tally[out.result] += 1
+    if (out.result === 'parked') {
+      for (const id of ids) {
+        q.parkedClaims.add(id)
+      }
+    }
     if (ctx.json) {
       console.log(JSON.stringify({ bead: ids[0], beads: ids, result: out.result }))
     }
@@ -1859,6 +1874,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
     tally: { landed: 0, closed: 0, parked: 0, failed: 0 },
     claimed: 0,
     drained: false,
+    parkedClaims: new Set(),
   }
   try {
     // sweep a crashed run's records before the first claim — a dead-pid
@@ -1904,7 +1920,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
   } finally {
     // idle, gated, or error — the audit always runs; a tail the loop
     // left must surface in the summary, not be discovered later
-    endAudit(ctx, q.seen)
+    endAudit(ctx, q.seen, q.parkedClaims)
   }
 }
 
