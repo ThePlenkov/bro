@@ -296,7 +296,7 @@ describe('assertSonarHostTrusted', () => {
   })
 
   test('the same host asserted in config is trusted', () => {
-    assertSonarHostTrusted(proj('https://sq.internal', 'config'))
+    assert.doesNotThrow(() => assertSonarHostTrusted(proj('https://sq.internal', 'config')))
   })
 
   test('non-loopback http is refused even from config', () => {
@@ -307,9 +307,9 @@ describe('assertSonarHostTrusted', () => {
   })
 
   test('loopback http and the default host from properties are fine', () => {
-    assertSonarHostTrusted(proj('http://localhost:9000', 'properties'))
-    assertSonarHostTrusted(proj('https://sonarcloud.io', 'properties'))
-    assertSonarHostTrusted(proj('https://sonarcloud.io', 'default'))
+    assert.doesNotThrow(() => assertSonarHostTrusted(proj('http://localhost:9000', 'properties')))
+    assert.doesNotThrow(() => assertSonarHostTrusted(proj('https://sonarcloud.io', 'properties')))
+    assert.doesNotThrow(() => assertSonarHostTrusted(proj('https://sonarcloud.io', 'default')))
   })
 
   test('an unparseable host refuses', () => {
