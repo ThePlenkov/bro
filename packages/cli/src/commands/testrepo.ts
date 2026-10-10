@@ -205,14 +205,18 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
   }
   case 'create': {
     const id = 'fx-' + Math.random().toString(36).slice(2, 8)
+    // real bd emits short flags (-d/-t/-p/-l) as often as long ones —
+    // read both spellings or the row silently loses them
+    const short = (k) => flags[k] ?? flags[k[0]]
     db.rows.push({
       id,
       title: flags.title || '',
-      description: flags.description || '',
+      description: short('description') || '',
       status: 'open',
-      priority: Number(flags.priority ?? 2),
-      issue_type: flags.type || 'task',
-      labels: flags.labels !== undefined ? String(flags.labels).split(',') : [],
+      priority: Number(short('priority') ?? 2),
+      issue_type: short('type') || 'task',
+      labels: short('labels') !== undefined ? String(short('labels')).split(',') : [],
+      external_ref: flags['external-ref'],
       created_at: new Date().toISOString(),
     })
     save(db)

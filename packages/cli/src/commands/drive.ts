@@ -16,6 +16,9 @@
  *   threads>0, occupied    → skip — a live session owns the worktree
  *   threads>0, orphaned    → spawn/respawn the PR's fixer agent on its
  *                            fixer bead (facade dedup + respawn semantics)
+ *   CONFLICTING, orphaned  → the same fixer spawn with a rebase work
+ *                            order — an orphaned conflicted PR stalls
+ *                            forever without one (bro-glkes)
  *   green, occupied        → report; the owner's merge step lands it
  *   green, orphaned        → bro act merge (unless --no-merge /
  *                            drive.merge:'never'), then retire the
@@ -47,6 +50,7 @@ import {
   type AgentRegistryEntry,
   type AgentState,
   type IgnoreCheckRule,
+  type PrMeta,
   type ReviewFacade,
   type ReviewThread,
   type TaskRow,
@@ -319,8 +323,9 @@ function ensureFixerBead(store: TaskStore, pr: number, link: string, branch: str
     store.create({
       title: `review fixer — PR #${pr}`,
       description:
-        `Spawned by \`bro drive\` — resolve review threads on ${link} ` +
-        `(branch \`${branch}\`), push, never merge.`,
+        `Spawned by \`bro drive\` — work the gate state on ${link} ` +
+        `(branch \`${branch}\`): review threads or a conflict rebase, ` +
+        `whichever the spawn prompt orders. Push, never merge.`,
       type: 'task',
       labels: [FIXER_LABEL],
       externalRef: fixerRef(pr),
@@ -786,13 +791,89 @@ async function spawnFixer(
   // re-read under the locks immediately before the spawn, so a claim
   // landing during annotation is caught the same way.
   const notes = await driveShadowNotes(ctx.mainRoot, pr, state.headSha, open, judgeBudget)
-  // a last occupancy read right before the spawn — the gap since the
-  // pass-level check covered the worktree create + thread refetch,
-  // long enough for another owner to arm this branch. Both occupancy
-  // locks are held across refresh→probe→spawn (see acquireOccupancyLocks)
-  // so a `bro work enter` or a competing spawn can't land a claim
-  // between — the refresh itself must come after the acquire, or the
-  // lock wait is one more stale-input window
+  return spawnFixerAgent(
+    ctx,
+    pr,
+    state,
+    wt,
+    fixer,
+    known,
+    buildFixerPrompt({
+      pr,
+      link,
+      branch: state.headRef,
+      worktree: wt,
+      threads: open.map((t) => ({
+        path: t.comment?.path,
+        line: t.comment?.line,
+        author: t.comment?.author,
+        body: t.comment?.body,
+        judge: notes?.get(t.id),
+      })),
+    })
+  )
+}
+
+/** The rebase fixer's work order — the drive twin of the loop's
+ *  conflict round (`buildRebasePrompt` in @broject/loop): the gate
+ *  reports CONFLICTING, the fixer rebases the PR's branch onto its
+ *  declared base and force-pushes. The rebase IS the fix: no thread
+ *  work is owed on this spawn. */
+export function buildRebaseFixerPrompt(opts: {
+  pr: number
+  link: string
+  branch: string
+  base: string
+  worktree: string
+}): string {
+  return [
+    `# Rebase fixer — ${opts.link}`,
+    '',
+    `Worktree: ${opts.worktree} (branch \`${opts.branch}\`) — work here, nowhere`,
+    'else. If `node_modules` is missing, run the repo install step first.',
+    '',
+    `This PR has merge conflicts with its base branch \`${opts.base}\`. The rebase`,
+    'IS the work — no review-thread fixing is owed on this spawn.',
+    '',
+    `- \`git fetch origin ${opts.base}\` then \`git rebase origin/${opts.base}\` —`,
+    '  if a rebase is already in progress here, resolve it instead',
+    '  (`git rebase --continue` / `--abort` and restart if the state is too',
+    '  tangled).',
+    "- Keep this PR's own changes — conflicts are with base-branch work that",
+    "  landed since, not with the task. When in doubt, preserve the PR's",
+    "  intent over the incoming edit's shape.",
+    "- Re-verify after the rebase (build/test as the repo's contract asks),",
+    '  then `git push --force-with-lease` — the push is the verdict.',
+    '',
+    'Rules:',
+    '- NEVER merge — `bro drive` owns the merge on green.',
+    "- If the conflicts genuinely can't be resolved without redesign, say so",
+    '  as your final message — do not leave the rebase half-done.',
+    '',
+  ].join('\n')
+}
+
+/** The locked spawn ceremony both fixer kinds share — a last occupancy
+ *  read right before the spawn (the gap since the pass-level check
+ *  covered the worktree create + state refetch, long enough for another
+ *  owner to arm this branch), the fixer bead, then the facade spawn.
+ *  Both occupancy locks are held across refresh→probe→spawn (see
+ *  acquireOccupancyLocks) so a `bro work enter` or a competing spawn
+ *  can't land a claim between — the refresh itself must come after the
+ *  acquire, or the lock wait is one more stale-input window. `tag`
+ *  prefixes the spawned detail so a rebase round reads differently in
+ *  the pass log. */
+async function spawnFixerAgent(
+  ctx: Ctx,
+  pr: number,
+  state: PrActState,
+  wt: string,
+  fixer: TaskRow | undefined,
+  known: AgentInfo[],
+  prompt: string,
+  tag = ''
+): Promise<PrVerdict> {
+  const link = ctx.rev.prLink(ctx.repo, pr)
   let release: () => void
   try {
     release = acquireOccupancyLocks(ctx.mainRoot, wt)
@@ -818,19 +899,6 @@ async function spawnFixer(
       return { pr, link, verdict: 'occupied', detail: occ }
     }
     const bead = fixer ?? ensureFixerBead(ctx.store, pr, link, state.headRef)
-    const prompt = buildFixerPrompt({
-      pr,
-      link,
-      branch: state.headRef,
-      worktree: wt,
-      threads: open.map((t) => ({
-        path: t.comment?.path,
-        line: t.comment?.line,
-        author: t.comment?.author,
-        body: t.comment?.body,
-        judge: notes?.get(t.id),
-      })),
-    })
     try {
       const info = await spawnStepAgent(ctx.mainRoot, ctx.env, {
         molStep: bead.id,
@@ -840,7 +908,7 @@ async function spawnFixer(
         env: { BRO_PR: String(pr), BRO_PR_URL: link },
       })
       const pid = info.pid === undefined ? '' : ` pid ${info.pid}`
-      return { pr, link, verdict: 'spawned', detail: `${bead.id} → ${info.id}${pid}` }
+      return { pr, link, verdict: 'spawned', detail: `${tag}${bead.id} → ${info.id}${pid}` }
     } catch (err) {
       return {
         pr,
@@ -852,6 +920,64 @@ async function spawnFixer(
   } finally {
     release()
   }
+}
+
+/** The conflict fixer — mergeable=CONFLICTING on an orphaned PR gets
+ *  the same fixer spawn with a rebase work order (bro-glkes). The
+ *  prMeta probe doubles as the still-conflicted re-check: a conflict
+ *  that evaporated between the gate fetch and now must not burn a
+ *  spawn, and a settled PR never gets a worker. UNKNOWN still counts
+ *  as conflicted — the host is recomputing the same state, not
+ *  cleared. Runs BEFORE the worktree checkout: a settled conflict
+ *  never pays create+retire. */
+async function spawnRebaseFixer(
+  ctx: Ctx,
+  pr: number,
+  state: PrActState,
+  worktree: string | undefined,
+  fixer: TaskRow | undefined,
+  known: AgentInfo[]
+): Promise<PrVerdict> {
+  const link = ctx.rev.prLink(ctx.repo, pr)
+  let meta: PrMeta
+  try {
+    meta =
+      ctx.rev.prMetaAsync === undefined
+        ? ctx.rev.prMeta({ repo: ctx.repo, pr })
+        : await ctx.rev.prMetaAsync({ repo: ctx.repo, pr })
+  } catch (err) {
+    return { pr, link, verdict: 'probe-failed', detail: errText(err) }
+  }
+  if (meta.state !== 'OPEN') {
+    return { pr, link, verdict: 'settled', detail: meta.state.toLowerCase() }
+  }
+  if (meta.mergeable === 'MERGEABLE') {
+    return { pr, link, verdict: 'conflict-resolved' }
+  }
+  let wt = worktree
+  if (wt === undefined) {
+    const ensured = ensureFixerWorktree(ctx.mainRoot, state.headRef)
+    if (ensured.path === undefined) {
+      return { pr, link, verdict: 'no-worktree', detail: ensured.err }
+    }
+    wt = ensured.path
+  }
+  return spawnFixerAgent(
+    ctx,
+    pr,
+    state,
+    wt,
+    fixer,
+    known,
+    buildRebaseFixerPrompt({
+      pr,
+      link,
+      branch: state.headRef,
+      base: meta.baseRef,
+      worktree: wt,
+    }),
+    'rebase '
+  )
 }
 
 /** The merge side of a green gate: `act merge`, then prove the merge
@@ -950,6 +1076,21 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
       return { pr, link, verdict: 'occupied', detail: occ }
     }
     return spawnFixer(ctx, pr, state, worktree, fixer, work.agents, work.judgeBudget)
+  }
+  // a conflicted orphan stalls exactly like an open-thread one did
+  // before the fixer existed — 'blocked — merge conflicts' used to be
+  // logged and skipped forever (bro-glkes). Threads preempt (same
+  // order as the loop's memberAction); the rebase order is for the
+  // thread-less stall. The bound is the act gate's own round cap —
+  // reviewed pushes past maxRounds read as plain 'blocked', not
+  // another rebase round.
+  if (state.mergeable === 'CONFLICTING') {
+    if (occ !== undefined) {
+      return { pr, link, verdict: 'occupied', detail: occ }
+    }
+    if (!(state.maxRounds > 0 && state.fixRounds > state.maxRounds)) {
+      return spawnRebaseFixer(ctx, pr, state, worktree, fixer, work.agents)
+    }
   }
   return { pr, link, verdict: 'blocked', detail: gate.blockers.join('; ') }
 }

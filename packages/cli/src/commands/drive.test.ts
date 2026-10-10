@@ -8,6 +8,7 @@ import {
   agentProcessesIn,
   branchSlug,
   buildFixerPrompt,
+  buildRebaseFixerPrompt,
   candidateBranches,
   detailMatches,
   driveArgs,
@@ -557,6 +558,25 @@ describe('buildFixerPrompt', () => {
     assert.match(p, /work\/bro-a/)
     assert.match(p, /bro--bro-a/)
     assert.match(p, /src\/x\.ts:10 \[greptile\] unchecked null/)
+    assert.match(p, /NEVER merge/)
+  })
+})
+
+describe('buildRebaseFixerPrompt', () => {
+  test('carries the PR link, branch, base, worktree, and the no-merge rule', () => {
+    const p = buildRebaseFixerPrompt({
+      pr: 42,
+      link: '[#42](https://github.com/o/r/pull/42)',
+      branch: 'work/bro-a',
+      base: 'main',
+      worktree: '/repos/bro--bro-a',
+    })
+    assert.match(p, /#42.*pull\/42/)
+    assert.match(p, /work\/bro-a/)
+    assert.match(p, /bro--bro-a/)
+    assert.match(p, /merge conflicts with its base branch `main`/)
+    assert.match(p, /git rebase origin\/main/)
+    assert.match(p, /--force-with-lease/)
     assert.match(p, /NEVER merge/)
   })
 })
