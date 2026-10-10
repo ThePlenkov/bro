@@ -6,8 +6,10 @@
  *  in-process — spawning is the only honest coverage. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { basename, join } from 'node:path'
+import { procStat } from '@broject/core'
 import {
   FAKE_BEAD,
   bead,
@@ -347,6 +349,387 @@ describe('bro work e2e — prune --loop', () => {
       assert.equal(r.code, 0, r.stderr)
       assert.match(r.stdout, /kept .*fx-r \(agent registry unreadable\)/)
       assert.equal(existsSync(wt), true)
+    })
+  })
+})
+
+describe('bro work e2e — prune --loop dead-worker claims (bro-ho09d)', () => {
+  const litter = (root: string, main: string, slug: string): string => {
+    const wt = join(root, `main--${slug}`)
+    git(['worktree', 'add', '-b', `loop/${slug}`, wt], main)
+    return wt
+  }
+  const envOf = (binDir: string, db: string) => ({
+    PATH: `${binDir}:${process.env.PATH ?? ''}`,
+    FAKE_BD_DB: db,
+  })
+  /** a pid that was real and is now gone — a worker's corpse. */
+  const deadPid = (): number => spawnSync('sh', ['-c', 'exit 0']).pid ?? 0
+  const writeRun = (main: string, slug: string, rec: Record<string, unknown>): void => {
+    const dir = join(main, '.git', 'bro', 'loop')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, `${slug}.json`), `${JSON.stringify(rec)}\n`)
+  }
+  const writeRegistry = (main: string, entries: Record<string, unknown>): void => {
+    mkdirSync(join(main, '.git', 'bro'), { recursive: true })
+    writeFileSync(join(main, '.git', 'bro', 'agents.json'), JSON.stringify(entries))
+  }
+
+  test('in_progress under a dead worker releases the claim and parks the tree', () => {
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [
+      { ...FAKE_BEAD, id: 'fx-dead', status: 'in_progress', assignee: 'gone' },
+    ])
+    inside(main, root, () => {
+      const wt = litter(root, main, 'fx-dead')
+      writeRun(main, 'fx-dead', {
+        beadId: 'fx-dead',
+        slug: 'fx-dead',
+        pid: deadPid(),
+        startedAt: new Date().toISOString(),
+        worktree: wt,
+        log: '',
+      })
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /released claim fx-dead/)
+      assert.match(r.stdout, /kept .*fx-dead \(bead open\)/)
+      assert.equal(bead(db, 'fx-dead')?.status, 'open')
+      assert.match(String(bead(db, 'fx-dead')?.notes), /released orphaned claim/)
+      // the released bead's tree is resume cache — kept under the cap,
+      // branch survives either way
+      assert.equal(existsSync(wt), true)
+    })
+  })
+
+  test('in_progress with a live loop worker keeps the claim and tree', () => {
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [
+      { ...FAKE_BEAD, id: 'fx-live', status: 'in_progress', assignee: 'me' },
+    ])
+    inside(main, root, () => {
+      const wt = litter(root, main, 'fx-live')
+      writeRun(main, 'fx-live', {
+        beadId: 'fx-live',
+        slug: 'fx-live',
+        // this very test process is a live pid for the spawned CLI's
+        // whole lifetime — the record reads 'running'
+        pid: process.pid,
+        startedAt: new Date().toISOString(),
+        worktree: wt,
+        log: '',
+      })
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /kept .*fx-live \(bead in_progress — loop worker pid \d+ live\)/)
+      assert.equal(bead(db, 'fx-live')?.status, 'in_progress')
+      assert.equal(existsSync(wt), true)
+    })
+  })
+
+  test('a live registry agent keeps the claim — the respawn case', () => {
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [
+      { ...FAKE_BEAD, id: 'fx-reg', status: 'in_progress', assignee: 'drive' },
+    ])
+    inside(main, root, () => {
+      litter(root, main, 'fx-reg')
+      writeRegistry(main, {
+        'fx-reg': {
+          agentId: 'a-live',
+          backend: 'native',
+          pid: process.pid,
+          spawnedAt: new Date().toISOString(),
+        },
+      })
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /kept .*fx-reg \(bead in_progress — agent a-live live\)/)
+      assert.equal(bead(db, 'fx-reg')?.status, 'in_progress')
+    })
+  })
+
+  test('a reused pid with a foreign start time still releases', () => {
+    // pidAlive's pid+start identity — the pid is alive (this test
+    // process) but the recorded starttime is not ours: it proves the
+    // recorded worker is gone and the pid was recycled
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [
+      { ...FAKE_BEAD, id: 'fx-reuse', status: 'in_progress', assignee: 'gone' },
+    ])
+    inside(main, root, () => {
+      litter(root, main, 'fx-reuse')
+      writeRun(main, 'fx-reuse', {
+        beadId: 'fx-reuse',
+        slug: 'fx-reuse',
+        pid: process.pid,
+        pidStart: '1',
+        startedAt: new Date().toISOString(),
+        worktree: join(root, 'main--fx-reuse'),
+        log: '',
+      })
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /released claim fx-reuse/)
+      assert.equal(bead(db, 'fx-reuse')?.status, 'open')
+    })
+  })
+
+  test('a live session marker keeps the claim', () => {
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [
+      { ...FAKE_BEAD, id: 'fx-sess', status: 'in_progress', assignee: 'me' },
+    ])
+    inside(main, root, () => {
+      litter(root, main, 'fx-sess')
+      const hooks = join(main, '.git', 'bro', 'hooks')
+      mkdirSync(hooks, { recursive: true })
+      // `<millis> <owner-pid> <start>` + detail lines — the owner pair
+      // makes the marker live while this test process lives
+      const start = procStat(process.pid)?.start ?? ''
+      writeFileSync(join(hooks, 's-1.task'), `${Date.now()} ${process.pid} ${start}\nfx-sess\n`)
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /kept .*fx-sess \(bead in_progress — session armed fx-sess\)/)
+      assert.equal(bead(db, 'fx-sess')?.status, 'in_progress')
+    })
+  })
+
+  test('dead run record with no litter still releases the claim', () => {
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [
+      { ...FAKE_BEAD, id: 'fx-gone', status: 'in_progress', assignee: 'gone' },
+    ])
+    inside(main, root, () => {
+      writeRun(main, 'fx-gone', {
+        beadId: 'fx-gone',
+        slug: 'fx-gone',
+        pid: deadPid(),
+        startedAt: new Date().toISOString(),
+        worktree: join(root, 'main--fx-gone'),
+        log: '',
+      })
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /released claim fx-gone/)
+      assert.equal(bead(db, 'fx-gone')?.status, 'open')
+    })
+  })
+
+  test('dry-run reports the release without touching the claim', () => {
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [
+      { ...FAKE_BEAD, id: 'fx-dry', status: 'in_progress', assignee: 'gone' },
+    ])
+    inside(main, root, () => {
+      litter(root, main, 'fx-dry')
+      writeRun(main, 'fx-dry', {
+        beadId: 'fx-dry',
+        slug: 'fx-dry',
+        pid: deadPid(),
+        startedAt: new Date().toISOString(),
+        worktree: join(root, 'main--fx-dry'),
+        log: '',
+      })
+      const r = runCli(['work', 'prune', '--loop', '--dry-run'], {
+        cwd: main,
+        env: envOf(binDir, db),
+      })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /would release claim fx-dry/)
+      assert.equal(bead(db, 'fx-dry')?.status, 'in_progress')
+      assert.equal(existsSync(join(root, 'main--fx-dry')), true)
+    })
+  })
+})
+
+describe('bro work e2e — prune --loop parked pool (bro-ho09d)', () => {
+  const litter = (root: string, main: string, slug: string): string => {
+    const wt = join(root, `main--${slug}`)
+    git(['worktree', 'add', '-b', `loop/${slug}`, wt], main)
+    return wt
+  }
+  const envOf = (binDir: string, db: string) => ({
+    PATH: `${binDir}:${process.env.PATH ?? ''}`,
+    FAKE_BD_DB: db,
+  })
+  /** Back-date a parked tree — dir mtime plus the gitdir activity files
+   *  the idle clock reads. */
+  const ageTree = (main: string, wt: string, days: number): void => {
+    const t = new Date(Date.now() - days * 86_400_000)
+    const gd = join(main, '.git', 'worktrees', basename(wt))
+    for (const p of [wt, gd, join(gd, 'index'), join(gd, 'HEAD'), join(gd, 'logs', 'HEAD')]) {
+      try {
+        utimesSync(p, t, t)
+      } catch {
+        // a file that doesn't exist (e.g. no index) doesn't age
+      }
+    }
+  }
+
+  test('parkedKeep caps the resume cache — newest survive, extras reap', () => {
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [
+      { ...FAKE_BEAD, id: 'fx-a' },
+      { ...FAKE_BEAD, id: 'fx-b' },
+      { ...FAKE_BEAD, id: 'fx-c' },
+    ])
+    inside(main, root, () => {
+      // TTL off — the cap alone must order this test's verdicts
+      writeFileSync(join(main, 'bro.config.json'), JSON.stringify({ loop: { parkedKeep: 1, parkedTtlDays: 0 } }))
+      const old = litter(root, main, 'fx-a')
+      const mid = litter(root, main, 'fx-b')
+      const fresh = litter(root, main, 'fx-c')
+      ageTree(main, old, 30)
+      ageTree(main, mid, 10)
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /kept .*fx-c \(bead open\)/)
+      assert.match(r.stdout, /reaped .*fx-a .*over cap 1/)
+      assert.match(r.stdout, /reaped .*fx-b .*over cap 1/)
+      assert.equal(existsSync(old), false)
+      assert.equal(existsSync(mid), false)
+      assert.equal(existsSync(fresh), true)
+    })
+  })
+
+  test('parkedTtlDays reaps stale trees regardless of the cap', () => {
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [{ ...FAKE_BEAD, id: 'fx-old' }, { ...FAKE_BEAD, id: 'fx-new' }])
+    inside(main, root, () => {
+      writeFileSync(join(main, 'bro.config.json'), JSON.stringify({ loop: { parkedTtlDays: 7 } }))
+      const old = litter(root, main, 'fx-old')
+      const fresh = litter(root, main, 'fx-new')
+      ageTree(main, old, 30)
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /reaped .*fx-old .*idle past TTL/)
+      assert.match(r.stdout, /kept .*fx-new \(bead open\)/)
+      assert.equal(existsSync(old), false)
+      assert.equal(existsSync(fresh), true)
+    })
+  })
+
+  test('a dirty parked tree keeps its data and spends no pool slot', () => {
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [
+      { ...FAKE_BEAD, id: 'fx-dirty' },
+      { ...FAKE_BEAD, id: 'fx-p1' },
+      { ...FAKE_BEAD, id: 'fx-p2' },
+    ])
+    inside(main, root, () => {
+      writeFileSync(join(main, 'bro.config.json'), JSON.stringify({ loop: { parkedKeep: 1, parkedTtlDays: 0 } }))
+      const dirty = litter(root, main, 'fx-dirty')
+      writeFileSync(join(dirty, 'wip.txt'), 'uncommitted\n')
+      const p1 = litter(root, main, 'fx-p1')
+      const p2 = litter(root, main, 'fx-p2')
+      // the dirty tree is the OLDEST — it must not consume the one
+      // pool slot, only the two clean parked trees compete for it
+      ageTree(main, dirty, 30)
+      ageTree(main, p1, 20)
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /kept .*fx-dirty \(dirty\)/)
+      assert.match(r.stdout, /kept .*fx-p2 \(bead open\)/)
+      assert.match(r.stdout, /reaped .*fx-p1 .*over cap 1/)
+      assert.equal(existsSync(dirty), true)
+      assert.equal(existsSync(p1), false)
+      assert.equal(existsSync(p2), true)
+    })
+  })
+})
+
+describe('bro work e2e — prune --loop ghost dirs (bro-ho09d)', () => {
+  const envOf = (binDir: string, db: string) => ({
+    PATH: `${binDir}:${process.env.PATH ?? ''}`,
+    FAKE_BD_DB: db,
+  })
+  /** Delete the worktree's admin entry, leaving the dir + .git file —
+   *  the registered-dir-gone ghost shape (bro-oam4). */
+  const unRegister = (main: string, wt: string): void => {
+    rmSync(join(main, '.git', 'worktrees', basename(wt)), { recursive: true, force: true })
+  }
+
+  test('a ghost with a live branch re-registers and joins the verdicts', () => {
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [{ ...FAKE_BEAD, id: 'fx-g', status: 'closed' }])
+    inside(main, root, () => {
+      const wt = join(root, 'main--fx-g')
+      git(['worktree', 'add', '-b', 'loop/fx-g', wt], main)
+      unRegister(main, wt)
+      const listed = git(['worktree', 'list', '--porcelain'], main)
+      assert.equal(listed.includes('main--fx-g'), false)
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /re-registered .*main--fx-g \[loop\/fx-g\]/)
+      // closed bead + clean → the recovered ghost reaps through the
+      // normal verdicts
+      assert.match(r.stdout, /reaped .*main--fx-g \[loop\/fx-g\]/)
+      assert.equal(existsSync(wt), false)
+    })
+  })
+
+  test('an open-bead ghost re-registers and parks — nothing is lost', () => {
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [{ ...FAKE_BEAD, id: 'fx-go' }])
+    inside(main, root, () => {
+      const wt = join(root, 'main--fx-go')
+      git(['worktree', 'add', '-b', 'loop/fx-go', wt], main)
+      git(['commit', '-q', '--allow-empty', '-m', 'wip'], wt)
+      unRegister(main, wt)
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /re-registered .*main--fx-go \[loop\/fx-go\]/)
+      assert.match(r.stdout, /kept .*fx-go \(bead open\)/)
+      assert.equal(existsSync(wt), true)
+      assert.equal(git(['worktree', 'list', '--porcelain'], main).includes('main--fx-go'), true)
+    })
+  })
+
+  test('a ghost with no matching branch is kept and reported', () => {
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [])
+    inside(main, root, () => {
+      const wt = join(root, 'main--fx-nobranch')
+      git(['worktree', 'add', '-b', 'loop/fx-nobranch', wt], main)
+      unRegister(main, wt)
+      git(['branch', '-D', 'loop/fx-nobranch'], main)
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /kept .*main--fx-nobranch \(ghost — no branch to bind\)/)
+      assert.equal(existsSync(wt), true)
+    })
+  })
+
+  test('a dir with no .git keeps; an empty one reaps', () => {
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [])
+    inside(main, root, () => {
+      const stray = join(root, 'main--stray')
+      mkdirSync(join(stray, 'src'), { recursive: true })
+      writeFileSync(join(stray, 'src', 'x.ts'), 'x\n')
+      const empty = join(root, 'main--empty')
+      mkdirSync(empty)
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /kept .*main--stray \(ghost — no \.git/)
+      assert.match(r.stdout, /reaped .*main--empty \(empty ghost dir\)/)
+      assert.equal(existsSync(stray), true)
+      assert.equal(existsSync(empty), false)
+    })
+  })
+
+  test('a foreign clone sibling is never touched', () => {
+    const { root, main } = workFixture()
+    const { binDir, db } = installFakeBd(root, [])
+    inside(main, root, () => {
+      const clone = join(root, 'main--foreign')
+      mkdirSync(join(clone, '.git'), { recursive: true })
+      writeFileSync(join(clone, 'README'), 'x\n')
+      const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /kept .*main--foreign \(ghost — separate clone\)/)
+      assert.equal(existsSync(join(clone, '.git')), true)
     })
   })
 })

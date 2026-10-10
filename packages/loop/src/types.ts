@@ -61,6 +61,13 @@ export interface LoopConfig {
    *  when `priority >= batchMinPriority` (bd numbering: 3 = P3 nits,
    *  4 = P4 noise). Urgent work always claims solo. */
   batchMinPriority: number
+  /** Parked-worktree resume cache cap — the litter sweep keeps at most
+   *  this many clean open-bead trees (newest first); extras reap.
+   *  0 = uncapped (spec bro-ho09d). */
+  parkedKeep: number
+  /** Parked trees idle past this many days reap regardless of the cap —
+   *  a stale cache is not a resume aid. 0 = no age bound. */
+  parkedTtlDays: number
 }
 
 export const DEFAULT_LOOP_CONFIG: LoopConfig = {
@@ -77,4 +84,6 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   maxOpen: 3,
   batch: 1,
   batchMinPriority: 3,
+  parkedKeep: 3,
+  parkedTtlDays: 14,
 }

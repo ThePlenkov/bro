@@ -13,8 +13,10 @@
  *   bro work list       worktrees with branch, dirty state, disk usage
  *   bro work prune      drop admin entries for worktrees already gone;
  *                       --loop also reaps loop/* (+stack/*) litter whose
- *                       bead closed or PR merged, keeping dirty/claimed/
- *                       open-PR tails — --dry-run reports the verdicts
+ *                       bead closed or PR merged, releases in_progress
+ *                       claims whose worker is dead, re-registers ghost
+ *                       sibling dirs, and caps the parked resume cache —
+ *                       --dry-run reports the verdicts
  *
  * Layout: worktrees are SIBLINGS of the main checkout (`<repo>--<slug>`),
  * never nested inside it — nothing to gitignore, and a wiped parent
@@ -28,6 +30,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import {
   acquireAgentRegistryLock,
   acquireFileLock,
+  agentRegistryPath,
   facade,
   git,
   gitTry,
@@ -37,15 +40,28 @@ import {
   readAgentRegistry,
   reviewHost,
   stackSection,
+  type AgentRegistryEntry,
   type Connector,
   type ReviewFacade,
   type TaskRow,
   type TaskStore,
 } from '@broject/core'
-import { loopSlug } from '@broject/loop'
+import { loopSection, loopSlug, type LoopConfig } from '@broject/loop'
+import { listWatches, type ListedWatch } from '@broject/act'
 import { parseStackBranch } from '@broject/stack'
 import { flag, positionals } from './args.ts'
-import { markerLive, ownerTag } from './proc-owner.ts'
+import {
+  agentProcessesIn,
+  detailMatches,
+  hooksDirOf,
+  LIVE_MARKER_MS,
+  liveWorkDetails,
+  markerLive,
+  ownerTag,
+  registryEntryHoldsClaim,
+} from './proc-owner.ts'
+import { collectLoopRuns, type LoopRunView } from './loop-state.ts'
+export { LIVE_MARKER_MS }
 
 export interface WorktreeInfo {
   path: string
@@ -147,10 +163,6 @@ export function claimLockPath(path: string): string | null {
   const gd = worktreeGitDir(path)
   return gd === null ? null : join(gd, 'bro', 'claim.lock')
 }
-
-/** The freshness horizon for `.work` markers — same as hooks.ts's
- *  LIVE_SESSION_MS: a marker younger than this names a live session. */
-export const LIVE_MARKER_MS = 24 * 60 * 60 * 1000
 
 /** The worktree's own claim marker — `<gitdir>/bro/work`, stamped by
  *  `bro work enter` (bro-pywx). Unlike .work marker details it needs no
@@ -873,9 +885,15 @@ function litterFacades(root: string): {
   return { tasks, rev }
 }
 
-/** The sweep's human report — reaped/deleted/kept lines, errors to
- *  stderr, and the count summary. */
+/** The sweep's human report — released/repaired/reaped/deleted/kept
+ *  lines, errors to stderr, and the count summary. */
 function printLitterReport(rep: LitterReap, dry: boolean): void {
+  for (const r of rep.released) {
+    console.log(`  ${dry ? 'would release' : 'released'} claim ${r}`)
+  }
+  for (const g of rep.repaired) {
+    console.log(`  ${dry ? 'would re-register' : 're-registered'} ${g}`)
+  }
   for (const r of rep.reaped) {
     console.log(`  ${dry ? 'would reap' : 'reaped'} ${r}`)
   }
@@ -911,7 +929,21 @@ function cmdPrune(argv: string[]): void {
   if (tasks === undefined) {
     return
   }
-  printLitterReport(reapLoopLitter({ root: main.path, tasks, rev, stackPrefix: 'stack/', dryRun: dry }), dry)
+  // core loadConfig (see litterFacades) — the parked-cache knobs ride
+  // the loop section
+  const loop = loadConfig(main.path, { loop: loopSection }).loop as LoopConfig | undefined
+  printLitterReport(
+    reapLoopLitter({
+      root: main.path,
+      tasks,
+      rev,
+      stackPrefix: 'stack/',
+      dryRun: dry,
+      parkedKeep: loop?.parkedKeep,
+      parkedTtlDays: loop?.parkedTtlDays,
+    }),
+    dry
+  )
 }
 
 // --- merged-work retirement ---------------------------------------------------
@@ -1020,6 +1052,10 @@ export interface LitterReap {
   reaped: string[]
   /** branches deleted ('would' list under dryRun) */
   branches: string[]
+  /** bead claims released — '<id> (<why>)' ('would' list under dryRun) */
+  released: string[]
+  /** ghost dirs re-registered as worktrees ('would' list under dryRun) */
+  repaired: string[]
   /** candidates kept — '<path|branch> (<why>)' */
   kept: string[]
   errors: string[]
@@ -1039,6 +1075,12 @@ export interface LitterReapOpts {
    *  stack's members, 'stack/<name>/' scopes to one run's chain;
    *  undefined = loop/* only */
   stackPrefix?: string
+  /** parked resume-cache cap — newest N clean open-bead trees survive,
+   *  extras reap; 0/undefined = uncapped (spec bro-ho09d) */
+  parkedKeep?: number
+  /** parked trees idle past this many days reap regardless of the cap;
+   *  0/undefined = no age bound */
+  parkedTtlDays?: number
   dryRun?: boolean
   now?: number
 }
@@ -1070,6 +1112,26 @@ interface LitterCtx {
   rep: LitterReap
   main: WorktreeInfo
   bySlug: Map<string, TaskRow>
+  /** claim-liveness planes — who owns an in_progress bead's claim
+   *  (spec bro-ho09d). Snapshotted once; the release re-reads the
+   *  registry inside the lock so a respawn landing during the wait
+   *  still wins. */
+  claims: {
+    /** loop run records — state already liveness-judged by
+     *  collectLoopRuns (pid + pidStart) */
+    runs: LoopRunView[]
+    /** agents.json snapshot — undefined when unreadable, which fails
+     *  CLOSED: an unknowable ownership plane answers "live" */
+    registry: Record<string, AgentRegistryEntry> | undefined
+    /** `<common>/bro/agents` — .exit death-proof files live here */
+    agentsHome: string | null
+    /** live .work/.task marker details — a session claiming the bead */
+    sessionDetails: string[]
+    /** live act-wait markers — a gate-stack member's claim survives its
+     *  worker's exit: the loop (or a rearmed wait) still services it.
+     *  `bead`/`workdir` are the match keys (bro-ho09d) */
+    watches: ListedWatch[]
+  }
 }
 
 interface PrEvidence {
@@ -1084,7 +1146,9 @@ interface PrEvidence {
 
 /** Admin debris + the worktree scan → worktree'd candidates. A failed
  *  list kills the sweep (the candidate set would be fiction); a failed
- *  prune only reports — the sweep still applies. */
+ *  prune only reports — the sweep still applies. Ghost dirs — siblings
+ *  with no registration at all — are recovered BEFORE the candidate
+ *  list so they re-enter through the normal verdicts. */
 function litterCandidates(
   opts: LitterReapOpts,
   rep: LitterReap
@@ -1093,17 +1157,24 @@ function litterCandidates(
   if (pr.code !== 0) {
     rep.errors.push(`worktree prune failed — ${pr.err || 'git error'}`)
   }
+  const first = gitTry(['-C', opts.root, 'worktree', 'list', '--porcelain'])
+  if (first.code !== 0) {
+    rep.errors.push(`worktree list failed — ${first.err || 'git error'}`)
+    return undefined
+  }
+  const main = parseWorktreePorcelain(first.out)[0]
+  if (main === undefined) {
+    rep.errors.push('worktree list returned no main entry')
+    return undefined
+  }
+  recoverGhosts(opts, main, rep)
+  // a recovered ghost is only visible to a fresh listing — re-read
   const wt = gitTry(['-C', opts.root, 'worktree', 'list', '--porcelain'])
   if (wt.code !== 0) {
     rep.errors.push(`worktree list failed — ${wt.err || 'git error'}`)
     return undefined
   }
   const all = parseWorktreePorcelain(wt.out)
-  const main = all[0]
-  if (main === undefined) {
-    rep.errors.push('worktree list returned no main entry')
-    return undefined
-  }
   const cands: LitterCandidate[] = []
   const onTree = new Set<string>()
   for (const w of all.slice(1)) {
@@ -1119,6 +1190,148 @@ function litterCandidates(
   }
   litterBranches(opts, rep, onTree, cands)
   return { main, cands }
+}
+
+/** Ghost sibling dirs — `<main>--*` on disk but absent from `worktree
+ *  list`, invisible to git's own prune (bro-ho09d). The sweep never
+ *  guesses deletion: a `.git` file pointing into THIS repo's
+ *  `worktrees/<name>` admin space is proof of origin — the admin dir is
+ *  recreated (gitdir/commondir/HEAD bound to the branch the name
+ *  implies) so the dir re-enters the sweep as a normal candidate.
+ *  Everything else is kept and reported: a `.git` directory is a
+ *  foreign clone, a pointer outside our admin space is foreign, a
+ *  missing `.git` is only removal-safe when the dir is empty, and a
+ *  ghost with no matching branch is human triage. */
+function recoverGhosts(opts: LitterReapOpts, main: WorktreeInfo, rep: LitterReap): void {
+  const reg = agentRegistryPath(opts.root)
+  const common = reg === null ? null : dirname(dirname(reg))
+  if (common === null) {
+    return
+  }
+  const adminBase = join(common, 'worktrees')
+  const parent = dirname(main.path)
+  const prefix = `${basename(main.path)}--`
+  const listed = new Set(
+    parseWorktreePorcelain(
+      gitTry(['-C', opts.root, 'worktree', 'list', '--porcelain']).out
+    ).map((w) => resolve(w.path))
+  )
+  let sibs: string[]
+  try {
+    sibs = readdirSync(parent)
+  } catch {
+    return
+  }
+  for (const name of sibs) {
+    if (!name.startsWith(prefix)) {
+      continue
+    }
+    const path = join(parent, name)
+    if (listed.has(resolve(path))) {
+      continue
+    }
+    try {
+      if (!statSync(path).isDirectory()) {
+        continue
+      }
+    } catch {
+      continue
+    }
+    recoverGhost(opts, path, name.slice(prefix.length), adminBase, rep)
+  }
+}
+
+function recoverGhost(
+  opts: LitterReapOpts,
+  path: string,
+  slug: string,
+  adminBase: string,
+  rep: LitterReap
+): void {
+  const keep = (why: string): void => {
+    rep.kept.push(`${path} (ghost — ${why})`)
+  }
+  const dotgit = join(path, '.git')
+  let isDir: boolean | undefined
+  try {
+    isDir = statSync(dotgit).isDirectory()
+  } catch {
+    // no .git at all — the only provably-safe removal is an empty dir
+    let empty = false
+    try {
+      empty = readdirSync(path).length === 0
+    } catch {
+      // unreadable — keep below
+    }
+    if (empty) {
+      if (opts.dryRun !== true) {
+        rmSync(path, { recursive: true })
+      }
+      rep.reaped.push(`${path} (empty ghost dir)`)
+      return
+    }
+    keep('no .git — not provably a worktree')
+    return
+  }
+  if (isDir) {
+    keep('separate clone')
+    return
+  }
+  const admin = worktreeGitDir(path)
+  if (admin === null || dirname(admin) !== adminBase) {
+    keep('foreign .git pointer')
+    return
+  }
+  if (existsSync(admin)) {
+    return // registered but unlisted — worktree prune/list's business
+  }
+  const branch = ghostBranch(opts.root, slug)
+  if (branch === undefined) {
+    keep('no branch to bind')
+    return
+  }
+  if (opts.dryRun === true) {
+    rep.repaired.push(`${path} [${branch}]`)
+    return
+  }
+  // rebuild the admin entry the way `worktree add` would have written
+  // it — gitdir ↔ the worktree's own .git pointer, commondir back to
+  // the shared dir, HEAD pinned to the branch. `read-tree HEAD` then
+  // repopulates the index so status reads honestly (a ghost whose tip
+  // moved off its checkout reads dirty — kept, not silently reaped).
+  try {
+    mkdirSync(admin, { recursive: true })
+    writeFileSync(join(admin, 'gitdir'), `${dotgit}\n`)
+    writeFileSync(join(admin, 'commondir'), '../..\n')
+    writeFileSync(join(admin, 'HEAD'), `ref: refs/heads/${branch}\n`)
+  } catch (err) {
+    keep(`admin recreate failed — ${err instanceof Error ? err.message : err}`)
+    return
+  }
+  gitTry(['-C', path, 'read-tree', 'HEAD'])
+  rep.repaired.push(`${path} [${branch}]`)
+}
+
+/** The branch a recovered ghost binds HEAD to — the naming convention's
+ *  own mapping: loop/<slug> first, work/<slug> (a `bro work enter`
+ *  tail), else the stack member carrying <slug>. */
+function ghostBranch(root: string, slug: string): string | undefined {
+  const has = (b: string): boolean =>
+    gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', `refs/heads/${b}`]).code === 0
+  for (const b of [`loop/${slug}`, `work/${slug}`]) {
+    if (has(b)) {
+      return b
+    }
+  }
+  const st = gitTry(['-C', root, 'branch', '--list', 'stack/*', '--format=%(refname:short)'])
+  if (st.code === 0) {
+    for (const b of st.out.split('\n').filter((s) => s !== '')) {
+      if (parseStackBranch(b)?.slug === slug) {
+        return b
+      }
+    }
+  }
+  return undefined
 }
 
 /** Bare litter branches — a worktree-less loop/* is the same tail class. */
@@ -1287,21 +1500,195 @@ function retireLitterBranch(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence):
   }
 }
 
-/** One candidate: evidence verdict first, then — for a worktree'd
- *  branch — the tree guards and the removal as ONE locked section. The
- *  shared registry lock is the same one claimWorktree and
- *  finishWorktreeEnter hold across their claim→stamp / check→remove
- *  spans: without it a claimant or respawned fixer can pin the path
- *  after the check and lose its live tree to the removal (bro-qry9,
- *  bro-0fiq). A lock contended past the bound is itself a claimant
- *  mid-act → keep. A failed removal keeps the branch too — it is still
- *  checked out there. */
-function reapCandidate(c: LitterCandidate, ctx: LitterCtx): void {
+// --- claim liveness + release (spec bro-ho09d) ----------------------------------
+//
+// A claim is only as real as its worker: `in_progress` with every
+// ownership plane dead is an orphan — release the claim so the bead
+// re-queues, then the tree flows through the same verdicts as any
+// open-bead litter. Every plane fails CLOSED (unverifiable = live):
+// releasing a live worker's claim is the worst outcome this code can
+// produce.
+
+/** The claim's live owner, or undefined when every plane is dead. */
+function claimOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string | undefined {
+  const { claims } = ctx
+  // loop run records — collectLoopRuns already judged pid+pidStart;
+  // beadIds covers the whole claimed clump, not just the lead
+  for (const v of claims.runs) {
+    if (
+      v.state === 'running' &&
+      (v.beadId === bead.id || v.beadIds?.includes(bead.id) === true || v.slug === c.slug)
+    ) {
+      return `loop worker pid ${v.pid} live`
+    }
+  }
+  // agent registry — an unreadable plane is not a dead worker
+  if (claims.registry === undefined) {
+    return 'agent registry unreadable'
+  }
+  for (const [molStep, e] of Object.entries(claims.registry)) {
+    const hitsBead = molStep === bead.id
+    const hitsTree =
+      c.w !== undefined &&
+      typeof e.worktree === 'string' &&
+      resolve(e.worktree) === resolve(c.w.path)
+    if ((hitsBead || hitsTree) && registryEntryHoldsClaim(claims.agentsHome, e)) {
+      return `agent ${e.agentId || molStep} live`
+    }
+  }
+  // session markers — `bd --claim` arms .task, `bro work enter` arms .work
+  const detail = claims.sessionDetails.find((d) =>
+    detailMatches(d, { branch: c.branch, slug: c.slug, worktree: c.w?.path })
+  )
+  if (detail !== undefined) {
+    return `session armed ${detail}`
+  }
+  // live watch markers — a landed member's claim rides its act wait
+  // (bro-q6ppv): the loop services the gate stack past the worker's exit
+  for (const l of claims.watches) {
+    if (!l.alive) {
+      continue
+    }
+    // a clump's whole id list rides the marker comma-joined (bro-q6ppv)
+    const hitsBead = l.watch.bead?.split(',').includes(bead.id) === true
+    const hitsTree =
+      c.w !== undefined &&
+      typeof l.watch.workdir === 'string' &&
+      resolve(l.watch.workdir) === resolve(c.w.path)
+    if (hitsBead || hitsTree) {
+      return `watch on PR #${l.watch.pr} live`
+    }
+  }
+  // a live agent-shaped process inside the tree — covers a worker that
+  // never registered (spawn crashed after fork, record write lost)
+  if (c.w !== undefined) {
+    const hit = agentProcessesIn(c.w.path)[0]
+    if (hit !== undefined) {
+      return `process ${hit.pid} live in tree`
+    }
+  }
+  return undefined
+}
+
+/** Release an orphaned claim — every plane dead. Runs the final
+ *  liveness re-check and the note+reopen inside the shared registry
+ *  lock: a respawn's claim→register writes under the same lock, so a
+ *  worker landing during our wait either shows up in the re-read or
+ *  claims after we've released (the reopened bead is then its target —
+ *  correct). Returns the keep reason when the claim survives,
+ *  undefined when it was released (or would be, under dry-run). */
+function releaseDeadClaim(
+  ctx: LitterCtx,
+  c: LitterCandidate,
+  bead: TaskRow
+): string | undefined {
+  const { opts, rep } = ctx
+  const pre = claimOwner(ctx, c, bead)
+  if (pre !== undefined) {
+    return pre
+  }
+  let release: () => void
+  try {
+    release = acquireAgentRegistryLock(ctx.main.path)
+  } catch {
+    return 'occupancy lock contended'
+  }
+  try {
+    // re-read under the lock — the snapshot predates the wait, and a
+    // respawn's registry write lands inside this same section
+    let registry: Record<string, AgentRegistryEntry> | undefined
+    try {
+      registry = readAgentRegistry(opts.root)
+    } catch {
+      registry = undefined
+    }
+    const owner = claimOwner(
+      { ...ctx, claims: { ...ctx.claims, registry } },
+      c,
+      bead
+    )
+    if (owner !== undefined) {
+      return owner
+    }
+    if (opts.dryRun !== true) {
+      try {
+        opts.tasks.note(
+          bead.id,
+          'bro work prune --loop: released orphaned claim — every worker-liveness plane is dead (bro-ho09d)'
+        )
+        opts.tasks.reopen(bead.id)
+      } catch (err) {
+        rep.errors.push(
+          `claim release for ${bead.id} failed — ${err instanceof Error ? err.message : err}`
+        )
+        return 'claim release failed'
+      }
+    }
+    // the snapshot row drives the rest of the sweep's verdicts
+    bead.status = 'open'
+    rep.released.push(`${bead.id} (no live worker)`)
+    return undefined
+  } finally {
+    release()
+  }
+}
+
+/** Milliseconds since the worktree's last visible activity — the dir
+ *  entry itself (checkout/bootstrap churn) or its gitdir's
+ *  index/HEAD-reflog (commits, checkouts). A dead tree's clock froze
+ *  with it; unreadable stat fields just don't move the max. */
+export function worktreeIdleMs(path: string, now: number = Date.now()): number {
+  let t = 0
+  try {
+    t = statSync(path).mtimeMs
+  } catch {
+    // gone mid-sweep — the verdict pass reports it separately
+  }
+  const gd = worktreeGitDir(path)
+  if (gd !== null) {
+    for (const f of ['index', 'logs/HEAD', 'HEAD', '.']) {
+      try {
+        t = Math.max(t, statSync(join(gd, f)).mtimeMs)
+      } catch {
+        // partial admin — skip
+      }
+    }
+  }
+  return t === 0 ? Number.POSITIVE_INFINITY : now - t
+}
+
+/** One candidate: claim liveness first (an in_progress bead with a dead
+ *  worker is an orphan — released, then judged as open-bead litter),
+ *  then the evidence verdict, then — for a worktree'd branch — the
+ *  tree guards and the removal as ONE locked section. The shared
+ *  registry lock is the same one claimWorktree and finishWorktreeEnter
+ *  hold across their claim→stamp / check→remove spans: without it a
+ *  claimant or respawned fixer can pin the path after the check and
+ *  lose its live tree to the removal (bro-qry9, bro-0fiq). A lock
+ *  contended past the bound is itself a claimant mid-act → keep. A
+ *  failed removal keeps the branch too — it is still checked out there. */
+function reapCandidate(c: LitterCandidate, ctx: LitterCtx, parked: ParkedCand[]): void {
   const { opts, rep, main } = ctx
   const pr = litterPrEvidence(opts, c.branch)
   const label = c.w?.path ?? c.branch
+  const bead = ctx.bySlug.get(c.slug)
+  if (bead?.status === 'in_progress') {
+    const owner = releaseDeadClaim(ctx, c, bead)
+    if (owner !== undefined) {
+      rep.kept.push(`${label} (bead in_progress — ${owner})`)
+      return
+    }
+    // released — the bead reads open for the verdicts below
+  }
   const done = litterDoneVerdict(c, ctx, pr)
   if (done !== undefined) {
+    // open/non-terminal beads keep their tree only as resume cache —
+    // they pool; every other keep reason is unconditional. A PR veto
+    // (open or unreadable) never pools — the work is visibly in flight
+    if (c.w !== undefined && bead !== undefined && bead.status !== 'closed' && pr.known && !pr.open) {
+      parked.push({ c, pr, done })
+      return
+    }
     rep.kept.push(`${label} (${done})`)
     return
   }
@@ -1333,19 +1720,121 @@ function reapCandidate(c: LitterCandidate, ctx: LitterCtx): void {
   retireLitterBranch(c, ctx, pr)
 }
 
+interface ParkedCand {
+  c: LitterCandidate
+  pr: PrEvidence
+  /** the keep reason the candidate earned — reported for survivors */
+  done: string
+}
+
+/** The parked pool pass — open-bead trees kept only as a resume cache,
+ *  bounded by `parkedKeep`/`parkedTtlDays` (spec bro-ho09d). Newest
+ *  first; a dirty/locked/claimed/occupied tree keeps outright and never
+ *  consumes a pool slot — it is data, not cache. Evictions keep the
+ *  branch (cheap) via the same retire rule done litter uses. */
+function reapParkedPool(parked: ParkedCand[], ctx: LitterCtx): void {
+  const { opts, rep, main } = ctx
+  if (parked.length === 0) {
+    return
+  }
+  const now = opts.now ?? Date.now()
+  const keepN = opts.parkedKeep ?? 0
+  const ttlMs = (opts.parkedTtlDays ?? 0) * 24 * 60 * 60 * 1000
+  const scored = parked
+    .map((p) => ({ ...p, idle: worktreeIdleMs(p.c.w!.path, now) }))
+    .sort((a, b) => a.idle - b.idle)
+  let kept = 0
+  for (const { c, pr, done, idle } of scored) {
+    const label = c.w!.path
+    let release: () => void
+    try {
+      release = acquireAgentRegistryLock(main.path)
+    } catch {
+      rep.kept.push(`${label} (occupancy lock contended)`)
+      continue
+    }
+    try {
+      const why = litterTreeVerdict(c, ctx)
+      if (why !== undefined) {
+        rep.kept.push(`${label} (${why})`)
+        continue
+      }
+      const overCap = keepN > 0 && kept >= keepN
+      const stale = ttlMs > 0 && idle > ttlMs
+      if (!overCap && !stale) {
+        kept += 1
+        rep.kept.push(`${label} (${done})`)
+        continue
+      }
+      if (opts.dryRun !== true && !removeMergedWorktree(c.w!.path, c.w!, main)) {
+        rep.errors.push(`worktree ${c.w!.path} not removed`)
+        continue
+      }
+      rep.reaped.push(
+        `${c.w!.path} [${c.branch}] — parked pool ${stale ? 'idle past TTL' : `over cap ${keepN}`}`
+      )
+    } finally {
+      release()
+    }
+    retireLitterBranch(c, ctx, pr)
+  }
+}
+
 export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
-  const rep: LitterReap = { reaped: [], branches: [], kept: [], errors: [] }
+  const rep: LitterReap = { reaped: [], branches: [], released: [], repaired: [], kept: [], errors: [] }
   const found = litterCandidates(opts, rep)
-  if (found === undefined || found.cands.length === 0) {
+  if (found === undefined) {
     return rep
   }
   const bySlug = litterBeads(opts, rep)
   if (bySlug === undefined) {
     return rep
   }
-  const ctx: LitterCtx = { opts, rep, main: found.main, bySlug }
+  // claim-liveness planes — snapshotted once for the sweep; the release
+  // re-reads the registry inside the lock before writing
+  const regPath = agentRegistryPath(opts.root)
+  const hooks = hooksDirOf(opts.root)
+  let registry: Record<string, AgentRegistryEntry> | undefined
+  try {
+    registry = readAgentRegistry(opts.root)
+  } catch {
+    registry = undefined
+  }
+  const ctx: LitterCtx = {
+    opts,
+    rep,
+    main: found.main,
+    bySlug,
+    claims: {
+      runs: collectLoopRuns(opts.root, opts.now ?? Date.now()),
+      registry,
+      agentsHome: regPath === null ? null : join(dirname(regPath), 'agents'),
+      sessionDetails:
+        hooks === null ? [] : liveWorkDetails(hooks, ['.work', '.task'], opts.now ?? Date.now()),
+      watches: listWatches(opts.root),
+    },
+  }
+  const parked: ParkedCand[] = []
   for (const c of found.cands) {
-    reapCandidate(c, ctx)
+    reapCandidate(c, ctx, parked)
+  }
+  reapParkedPool(parked, ctx)
+  // dead run records whose beads still read in_progress — litter may
+  // have been hand-cleaned already; the claim is still orphaned. A
+  // record's beadIds covers every clump member, not only the lead.
+  const handled = new Set(found.cands.map((c) => ctx.bySlug.get(c.slug)?.id).filter(Boolean))
+  for (const v of ctx.claims.runs) {
+    if (v.state !== 'dead') {
+      continue
+    }
+    const ids = [...new Set([v.beadId, ...(v.beadIds ?? [])])]
+    for (const id of ids) {
+      const bead = ctx.bySlug.get(loopSlug(id)) ?? ctx.bySlug.get(v.slug)
+      if (bead === undefined || bead.status !== 'in_progress' || handled.has(bead.id)) {
+        continue
+      }
+      releaseDeadClaim(ctx, { branch: '', slug: loopSlug(bead.id) }, bead)
+    }
   }
   return rep
 }

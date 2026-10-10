@@ -28,24 +28,20 @@
  * process's ancestry to an agent-shaped root — occupied is always the
  * safe verdict (a skipped pass, never double-work).
  */
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
   acquireAgentRegistryLock,
   acquireFileLock,
-  agentEntryBlocked,
   agentRegistryPath,
   checkBeads,
   ensureAuth,
   gitTry,
-  pidAlive,
   readAgentRegistry,
   reviewHost,
   SpawnError,
   taskStore,
   type AgentInfo,
-  type AgentRegistryEntry,
-  type AgentState,
   type IgnoreCheckRule,
   type ReviewFacade,
   type ReviewThread,
@@ -184,63 +180,25 @@ export function branchSlug(branch: string): string {
 
 // --- occupancy --------------------------------------------------------------------
 
-/** A `.work` marker's detail may be a bead id, a slug, a worktree path
- *  or basename. Match conservatively — an over-match costs a skipped
- *  pass; an under-match costs a raced owner. */
-export function detailMatches(
-  detail: string,
-  ctx: { branch: string; slug: string; worktree?: string }
-): boolean {
-  if (detail === ctx.branch || detail === ctx.slug) {
-    return true
-  }
-  if (ctx.worktree === undefined) {
-    return false
-  }
-  const base = basename(ctx.worktree)
-  return (
-    detail === base || base.endsWith(`--${detail}`) || detail.endsWith(`/${base}`)
-  )
+// The marker/registry occupancy plane (detailMatches, liveWorkDetails,
+// hooksDirOf, registryEntryState) lives in proc-owner.ts — work.ts's
+// litter sweep needs the same verdicts and can't reach drive.ts
+// (drive imports work). Re-exported here so existing importers keep
+// working.
+import {
+  agentProcessesIn,
+  detailMatches,
+  hooksDirOf,
+  liveWorkDetails,
+  registryEntryState,
+  type ProcHit,
+} from './proc-owner.ts'
+export {
+  agentProcessesIn,
+  detailMatches,
+  liveWorkDetails,
+  registryEntryState,
 }
-
-/** Every detail line of every live `.work` marker — a session claiming
- *  two beads keeps both, so occupancy reads them all (otherLiveWork's
- *  first-line peek would miss the second). Liveness is owner-pid first
- *  (bro-b87b: a dead session's marker is residue even when fresh),
- *  mtime-window fallback for ownerless markers. */
-export function liveWorkDetails(dir: string, now: number = Date.now()): string[] {
-  const details: string[] = []
-  let files: string[]
-  try {
-    files = readdirSync(dir)
-  } catch {
-    return details
-  }
-  for (const f of files) {
-    if (!f.endsWith('.work')) {
-      continue
-    }
-    try {
-      const path = join(dir, f)
-      const lines = readFileSync(path, 'utf8').split('\n')
-      if (!markerLive(lines[0], statSync(path).mtimeMs, LIVE_MARKER_MS, now)) {
-        continue
-      }
-      for (const line of lines.slice(1)) {
-        const d = line.trim()
-        if (d !== '') {
-          details.push(d)
-        }
-      }
-    } catch {
-      // unreadable marker — skip
-    }
-  }
-  return details
-}
-
-import { agentProcessesIn, markerLive, type ProcHit } from './proc-owner.ts'
-export { agentProcessesIn }
 export type { ProcHit }
 
 export interface OccupancyCtx {
@@ -550,53 +508,6 @@ function retireLanding(ctx: Ctx, state: PrActState, worktree: string | undefined
     deleteMergedLocalBranch(state.headRef, state.headSha)
   } catch (err) {
     say(ctx, `drive: post-merge cleanup failed — ${errText(err)}`)
-  }
-}
-
-/** Agent liveness derived from the registry entry alone — no backend
- *  list() probes. A live pid is running; a recorded or on-disk death is
- *  terminal; anything unproven counts as live ('spawned') — occupied is
- *  always the safe verdict, and a false-occupied only costs a skipped
- *  pass. */
-export function registryEntryState(
-  home: string | null,
-  e: AgentRegistryEntry
-): AgentState {
-  const pid = typeof e.pid === 'number' ? e.pid : undefined
-  // '' pidStart is unverified identity, not reuse proof — pidAlive('')
-  // can never match a real starttime and would read a live agent dead
-  const start = typeof e.pidStart === 'string' && e.pidStart !== '' ? e.pidStart : undefined
-  if (pid !== undefined && pidAlive(pid, start)) {
-    return 'running'
-  }
-  if (e.stopped === true) {
-    return 'stopped'
-  }
-  if (e.exitStatus !== undefined) {
-    // recorded cause decides — a budget-walled entry reads 'blocked'
-    // here the same as in the connector ladder (bro-7xgk.2)
-    return agentEntryBlocked(e) ? 'blocked' : 'exited'
-  }
-  if (exitFileProves(home, e)) {
-    return 'exited'
-  }
-  // a dead pid is proven — 'lost' keeps the fixer respawn-able; a
-  // pid-less entry (remote backend) is unproven → conservative live
-  return pid !== undefined ? 'lost' : 'spawned'
-}
-
-/** An .exit file not yet harvested into the registry is death proof too
- *  — basename-only ids: '../' must never escape the agents home. */
-function exitFileProves(home: string | null, e: AgentRegistryEntry): boolean {
-  if (home === null || typeof e.agentId !== 'string' || basename(e.agentId) !== e.agentId) {
-    return false
-  }
-  try {
-    const v = readFileSync(join(home, `${e.agentId}.exit`), 'utf8').trim()
-    return v !== '' && Number.isInteger(Number(v))
-  } catch {
-    // no exit file — not proof
-    return false
   }
 }
 
@@ -952,13 +863,6 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     return spawnFixer(ctx, pr, state, worktree, fixer, work.agents, work.judgeBudget)
   }
   return { pr, link, verdict: 'blocked', detail: gate.blockers.join('; ') }
-}
-
-/** `<git-common-dir>/bro/hooks` — the .work marker dir. */
-function hooksDirOf(root: string): string | null {
-  const r = gitTry(['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
-  const common = r.code === 0 ? r.out.trim() : ''
-  return common === '' ? null : join(common, 'bro', 'hooks')
 }
 
 /** branch → worktree path across every checkout. */

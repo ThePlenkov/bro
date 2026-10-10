@@ -99,6 +99,7 @@ import {
   readStackEdges,
   recordStackEdge,
   stackPushLockPath,
+  worktreePathFor,
   type LitterReap,
 } from './work.ts'
 import {
@@ -500,6 +501,7 @@ function spawnAgent(
     if (child.pid !== undefined) {
       beginLoopRun(ctx.root, {
         beadId: leadId,
+        beadIds,
         slug,
         pid: child.pid,
         pidStart: procStat(child.pid)?.start,
@@ -959,10 +961,26 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       noteBead(ctx.tasks, b.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
       reopenBead(ctx.tasks, b.id)
     }
+    // the claim-time custody record (claimClump) dies with the claim
+    endLoopRun(ctx.root, loopSlug(lead.id))
     return { kind: 'done', result: 'failed' }
   }
+  // re-stamp claim custody (bro-ho09d) — the claimClump record already
+  // proves a live owner; this refresh names the verified worktree dir
+  // and log for the check-in readers
+  beginLoopRun(ctx.root, {
+    beadId: lead.id,
+    beadIds: beads.map((b) => b.id),
+    slug: loopSlug(lead.id),
+    pid: process.pid,
+    pidStart: procStat(process.pid)?.start,
+    startedAt: new Date().toISOString(),
+    worktree: item.worktreeDir,
+    log: loopRunLog(ctx.root, loopSlug(lead.id)) ?? '',
+  })
   ctx.stage = 'bootstrap'
   if (!runBootstrap(ctx, beads, item)) {
+    endLoopRun(ctx.root, loopSlug(lead.id))
     return { kind: 'done', result: 'failed' }
   }
   writePrompt(item, buildWorkPrompt(beads, item.branch, slot?.base, slot?.bottom, ctx.backend))
@@ -1546,6 +1564,8 @@ function sweepLoopLitter(ctx: Ctx): LitterReap | undefined {
       tasks: ctx.tasks,
       rev: { repo: ctx.repo, facade: ctx.rev },
       stackPrefix: ctx.stack === undefined ? undefined : `stack/${ctx.stack}/`,
+      parkedKeep: ctx.cfg.parkedKeep,
+      parkedTtlDays: ctx.cfg.parkedTtlDays,
     })
   } catch (err) {
     say(ctx, `  warning: litter sweep failed — ${err instanceof Error ? err.message : String(err)}`)
@@ -1557,6 +1577,12 @@ function sweepLoopLitter(ctx: Ctx): LitterReap | undefined {
  *  that survived it — 'clean' only when no section has anything left. */
 function sayLoopAudit(ctx: Ctx, reap: LitterReap | undefined, sections: [string, string[]][]): void {
   say(ctx, 'loop audit:')
+  for (const r of reap?.released ?? []) {
+    say(ctx, `  released claim: ${r}`)
+  }
+  for (const g of reap?.repaired ?? []) {
+    say(ctx, `  re-registered: ${g}`)
+  }
   for (const r of reap?.reaped ?? []) {
     say(ctx, `  reaped: ${r}`)
   }
@@ -1647,6 +1673,15 @@ function claimClump(
     }
     return undefined
   }
+  // claim custody — the litter sweep treats in_progress with no live
+  // owner as an orphan (bro-ho09d). The worker's pid only exists after
+  // pushItem's spawn; until then the loop process itself is the live
+  // owner, so the claim → worktree → bootstrap → spawn chain can't
+  // read as abandonment to a racing sweep. The worktree path is the
+  // deterministic planItem naming — planItemAndWorktree reuses it
+  // verbatim. pushItem re-stamps the record; spawnAgent retires it
+  // under the worker's pid.
+  claimCustody(ctx, lead, [lead.id])
   // solo fast path — batch off, no budget for a second member, or a
   // lead that can't clump (urgent, keyless, or `solo`-labelled)
   if (ctx.cfg.batch < 2 || budget < 2) {
@@ -1681,8 +1716,29 @@ function claimClump(
       ctx,
       `loop: batch of ${members.length + 1} — ${lead.id} + ${members.map((b) => b.id).join(', ')}`
     )
+    // members claimed after the lead — widen custody so their
+    // in_progress also traces to this run's owner pid
+    claimCustody(ctx, lead, [lead.id, ...members.map((b) => b.id)])
   }
   return [lead, ...members]
+}
+
+/** The run record as a claim-custody marker: loop-pid owned until
+ *  spawnAgent re-stamps it with the worker's. Without it an
+ *  in_progress bead between `bd --claim` and the worker fork reads as
+ *  an orphan to `bro work prune --loop` and gets released mid-setup. */
+function claimCustody(ctx: Ctx, lead: ReadyBead, beadIds: string[]): void {
+  const slug = loopSlug(lead.id)
+  beginLoopRun(ctx.root, {
+    beadId: lead.id,
+    beadIds,
+    slug,
+    pid: process.pid,
+    pidStart: procStat(process.pid)?.start,
+    startedAt: new Date().toISOString(),
+    worktree: worktreePathFor(ctx.root, slug),
+    log: loopRunLog(ctx.root, slug) ?? '',
+  })
 }
 
 /** Post-merge cascade after a landed stack member — retarget + rebase
