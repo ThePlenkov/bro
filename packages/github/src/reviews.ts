@@ -1168,25 +1168,51 @@ const isWired = (body: string, ref: string): boolean =>
 
 /** The projection's body stamp (spec specs/backends/bro-z2z7f) — one
  *  `Fixes #N` line per newly-linked ref, inserted before the bro
- *  trailer so the metadata comment stays last. */
+ *  trailer so the metadata comment stays last.
+ *
+ *  Race discipline (bro-g29ww): the stamp is a read-modify-write on
+ *  the PR body and no transport here exposes a conditional write —
+ *  `gh pr edit`, REST PATCH, and `updatePullRequest` all lack an
+ *  If-Match/ETag — so the race narrows, never closes. A guard re-read
+ *  just before the edit drops a pass whose snapshot already moved
+ *  (the next pass remerges onto the fresh body instead of clobbering
+ *  the intervening edit), and the post-edit read doubles as the next
+ *  pass's merge source — a stamp a racing write clobbered is re-merged
+ *  into that fresher body. Bounded: a body churning under every pass
+ *  throws into the caller's best-effort warning. An edit landing
+ *  inside the last guard→edit gap is still lost — revisit if a
+ *  CAS-capable transport lands. */
 function linkCloses(dir: string, t: PrTarget, refs: string[]): void {
   const wanted = [...new Set(refs.map((r) => r.trim()).filter((r) => r !== ''))]
   if (wanted.length === 0) {
     return
   }
-  const body =
+  const view = () =>
     ghJson<{ body?: string | null }>(
       ['pr', 'view', String(t.pr), '--repo', t.repo, '--json', 'body'],
       dir
     ).body ?? ''
-  const missing = wanted.filter((r) => !isWired(body, r))
-  if (missing.length === 0) {
+  let body = view()
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const missing = wanted.filter((r) => !isWired(body, r))
+    if (missing.length === 0) {
+      return
+    }
+    const lines = missing.map((r) => `Fixes #${r}`).join('\n')
+    const base = stripMeta(body)
+    const next = withMeta(base === '' ? lines : `${base}\n\n${lines}`, bodyMeta(body))
+    const fresh = view()
+    if (fresh === body) {
+      gh(['pr', 'edit', String(t.pr), '--repo', t.repo, '--body', next], dir)
+      body = view()
+    } else {
+      body = fresh
+    }
+  }
+  if (wanted.every((r) => isWired(body, r))) {
     return
   }
-  const lines = missing.map((r) => `Fixes #${r}`).join('\n')
-  const base = stripMeta(body)
-  const next = withMeta(base === '' ? lines : `${base}\n\n${lines}`, bodyMeta(body))
-  gh(['pr', 'edit', String(t.pr), '--repo', t.repo, '--body', next], dir)
+  throw new Error(`linkCloses: ${prLink(t.repo, t.pr)} body kept changing under the stamp`)
 }
 
 function graphql(query: string, vars: Record<string, string>): void {
