@@ -85,6 +85,5 @@ describe('collectStatus', () => {
         else process.env[k] = v
       }
     }
->>>>>>> b527719 (feat(build): session-attributed build stamp — who last wrote dist is now recorded (bro-fatja))
   })
 })

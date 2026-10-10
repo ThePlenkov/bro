@@ -384,6 +384,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'stamp',
+    group: 'work',
     summary: 'Attribute shared-output writes — record/read the last build stamp',
     run: runStampCommand,
   }),
