@@ -63,7 +63,14 @@ function loopFixture(
       plugins: ['./fakehost.ts'],
       connectors: { reviews: 'fakehost' },
       ...extra(host),
-      loop: { agent: `node ${host.agent}`, ...loopCfg },
+      loop: {
+        agent: `node ${host.agent}`,
+        // e2e must be environment-deterministic: a host /tmp under the
+        // default floor (2×400M) would hold every push in EVERY
+        // scenario — disk coverage opts back in explicitly
+        diskMinSlots: 0,
+        ...loopCfg,
+      },
     })
   )
   const env = {
@@ -231,7 +238,7 @@ describe('bro loop e2e', () => {
     // is pushable
     const f = loopFixture(
       [{ ...FAKE_BEAD, id: 'fx-a', title: 'disk hog' }],
-      { worktreeMb: 99_000_000 }
+      { worktreeMb: 99_000_000, diskMinSlots: 2 }
     )
     inside(f.main, f.root, () => {
       const r = f.run(['--dry-run'])
@@ -249,7 +256,7 @@ describe('bro loop e2e', () => {
     // pushes (never claim, never park) the way it does on a full fleet
     const f = loopFixture(
       [{ ...FAKE_BEAD, id: 'fx-a', title: 'disk hog' }],
-      { worktreeMb: 99_000_000 }
+      { worktreeMb: 99_000_000, diskMinSlots: 2 }
     )
     inside(f.main, f.root, () => {
       // a holding run is correct-by-design non-terminating — the test's
@@ -280,7 +287,7 @@ describe('bro loop e2e', () => {
     // the breach return must not starve the drain check — with nothing
     // claimable behind the floor the run reports done instead of
     // holding pushes on an empty store until the disk frees
-    const f = loopFixture([], { worktreeMb: 99_000_000 })
+    const f = loopFixture([], { worktreeMb: 99_000_000, diskMinSlots: 2 })
     inside(f.main, f.root, () => {
       const r = f.run()
       assert.match(r.stdout, /done — 0 landed, 0 closed, 0 parked, 0 failed/)
