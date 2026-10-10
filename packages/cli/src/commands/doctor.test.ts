@@ -44,6 +44,7 @@ esac
 `
 const FAIL_SHIM = '#!/bin/sh\nexit 1\n'
 const BRO_SHIM = '#!/bin/sh\n[ "$1" = "--version" ] && { echo "0.2.3"; exit 0; }\nexit 0\n'
+const CURL_SHIM = '#!/bin/sh\necho "curl 8.5.0 (fake)"\n'
 
 interface EnvOpts {
   /** object → JSON.stringify'd; string → written verbatim (invalid JSON tests) */
@@ -58,7 +59,7 @@ interface EnvOpts {
   /** true → a placeholder origin; a string → used verbatim as the origin url */
   remote?: boolean | string
   /** shims to drop into bin/ — absent name = binary missing from PATH */
-  bins?: Array<'bd' | 'gh' | 'bro' | 'npx'>
+  bins?: Array<'bd' | 'gh' | 'bro' | 'npx' | 'curl'>
   env?: Record<string, string>
 }
 
@@ -68,7 +69,7 @@ function withEnv(opts: EnvOpts, fn: (dir: string) => void): Promise<void> {
   mkdirSync(bin)
   const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
   symlinkSync(realGit, join(bin, 'git'))
-  const shims: Record<string, string> = { bd: BD_SHIM, gh: GH_SHIM, bro: BRO_SHIM, npx: FAIL_SHIM }
+  const shims: Record<string, string> = { bd: BD_SHIM, gh: GH_SHIM, bro: BRO_SHIM, npx: FAIL_SHIM, curl: CURL_SHIM }
   for (const name of opts.bins ?? []) {
     const path = join(bin, name)
     writeFileSync(path, shims[name]!)
@@ -109,7 +110,11 @@ function withEnv(opts: EnvOpts, fn: (dir: string) => void): Promise<void> {
   // not leak the dev machine's real user config into probes
   saved.XDG_CONFIG_HOME = process.env.XDG_CONFIG_HOME
   process.env.XDG_CONFIG_HOME = join(dir, 'xdg')
-  for (const k of ['DEVIN_PLUGIN_ROOT', 'CLAUDE_PLUGIN_ROOT', 'PLUGIN_ROOT', 'BEADS_DIR']) {
+  // ambient credentials must not leak into probes — unless the test
+  // itself provides the var via opts.env
+  for (const k of ['DEVIN_PLUGIN_ROOT', 'CLAUDE_PLUGIN_ROOT', 'PLUGIN_ROOT', 'BEADS_DIR', 'SONAR_TOKEN'].filter(
+    (k) => opts.env === undefined || !(k in opts.env)
+  )) {
     saved[k] = process.env[k]
     delete process.env[k]
   }
@@ -565,4 +570,65 @@ describe('bro doctor', () => {
       }
     )
   })
+
+  test('debt-sonarcloud: absent when the source is unconfigured', () =>
+    withEnv({ config: { debt: { sources: ['review-threads'] } }, bins: ['gh'] }, (dir) => {
+      assert.equal(runDoctorChecks(dir).find((c) => c.name === 'debt-sonarcloud'), undefined)
+    }))
+
+  test('debt-sonarcloud: configured but SONAR_TOKEN unset warns with the remediation', () =>
+    withEnv(
+      {
+        config: { stores: ['jsonl'], debt: { sources: ['review-threads', 'sonarcloud'], sourceConfig: { sonarcloud: { project_key: 'pk' } } } },
+        bins: ['gh'],
+      },
+      (dir) => {
+        const c = byName(runDoctorChecks(dir), 'debt-sonarcloud')
+        assert.equal(c.status, 'warn')
+        assert.match(c.detail, /SONAR_TOKEN/)
+        assert.match(c.hint ?? '', /Generate Tokens/)
+        assert.equal(doctorExitCode(runDoctorChecks(dir)), 0)
+      }
+    ))
+
+  test('debt-sonarcloud: token set but no project key warns', () =>
+    withEnv(
+      { config: { debt: { sources: ['sonarcloud'] } }, bins: ['gh', 'curl'], env: { SONAR_TOKEN: 'squ' } },
+      (dir) => {
+        const c = byName(runDoctorChecks(dir), 'debt-sonarcloud')
+        assert.equal(c.status, 'warn')
+        assert.match(c.detail, /project key/)
+      }
+    ))
+
+  test('debt-sonarcloud: token + config key + curl → ok naming the project', () =>
+    withEnv(
+      {
+        config: { debt: { sources: ['sonarcloud'], sourceConfig: { sonarcloud: { project_key: 'acme_widgets' } } } },
+        bins: ['gh', 'curl'],
+        env: { SONAR_TOKEN: 'squ' },
+      },
+      (dir) => {
+        const c = byName(runDoctorChecks(dir), 'debt-sonarcloud')
+        assert.equal(c.status, 'ok', JSON.stringify(c))
+        assert.match(c.detail, /acme_widgets/)
+      }
+    ))
+
+  test('debt-sonarcloud: run from a nested dir still reads the root properties file', () =>
+    withEnv(
+      {
+        config: { debt: { sources: ['sonarcloud'] } },
+        bins: ['gh', 'curl'],
+        env: { SONAR_TOKEN: 'squ' },
+      },
+      (dir) => {
+        writeFileSync(join(dir, 'sonar-project.properties'), 'sonar.projectKey=rootkey\n')
+        const sub = join(dir, 'packages', 'deep')
+        mkdirSync(sub, { recursive: true })
+        const c = byName(runDoctorChecks(sub), 'debt-sonarcloud')
+        assert.equal(c.status, 'ok', JSON.stringify(c))
+        assert.match(c.detail, /rootkey/)
+      }
+    ))
 })

@@ -202,6 +202,7 @@ describe('parseSources', () => {
   })
   test('unknown sources drop out', () => {
     assert.deepEqual(parseSources(['dependabot', 'bogus']), ['dependabot'])
+    assert.deepEqual(parseSources(['sonarcloud']), ['sonarcloud'])
   })
 })
 

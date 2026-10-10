@@ -52,8 +52,20 @@ export const debtSection: ConfigSection<{
   dir: string
   sources: string[]
   stale_days: number
+  sourceConfig: Record<string, Record<string, unknown>>
 }> = (raw) => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
+  // Per-source knob bags pass through verbatim — core stays
+  // vendor-neutral; each collector validates its own fields (see the
+  // sources note below). Only plain-object entries survive.
+  const sourceConfig: Record<string, Record<string, unknown>> = {}
+  if (isPlainObject(obj.sourceConfig)) {
+    for (const [name, bag] of Object.entries(obj.sourceConfig)) {
+      if (name !== '__proto__' && isPlainObject(bag)) {
+        sourceConfig[name] = bag
+      }
+    }
+  }
   return {
     // dir feeds path.join — a non-string or empty value must fall back to
     // the default, not throw mid-command
@@ -76,6 +88,7 @@ export const debtSection: ConfigSection<{
       obj.stale_days > 0
         ? obj.stale_days
         : DEFAULT_CONFIG.debt.stale_days,
+    sourceConfig,
   }
 }
 
@@ -586,10 +599,16 @@ export interface BroConfig {
     dir: string
     /** Collectors `bro debt collect` runs. Default: review-threads only —
      *  the pre-multi-source contract. Others opt in: dependabot,
-     *  code-scanning, secret-scanning, stale-prs, failed-ci. */
+     *  code-scanning, secret-scanning, stale-prs, failed-ci, sonarcloud. */
     sources: string[]
     /** Idle days before an open PR counts as stale (stale-prs collector). */
     stale_days: number
+    /** Per-source knob bags, keyed by collector name
+     *  (`debt.sourceConfig.sonarcloud.project_key` overrides
+     *  `sonar-project.properties`). Core carries the bags verbatim —
+     *  field validation is the collector's job, keeping core
+     *  vendor-neutral. */
+    sourceConfig: Record<string, Record<string, unknown>>
   }
   sync: {
     /** Data ref holding synced artifacts — outside refs/heads so it
@@ -686,7 +705,12 @@ export interface BroConfig {
 export const DEFAULT_CONFIG: BroConfig = {
   stores: ['jsonl', 'beads'],
   personality: 'terse',
-  debt: { dir: '.agents/review-debt', sources: ['review-threads'], stale_days: 14 },
+  debt: {
+    dir: '.agents/review-debt',
+    sources: ['review-threads'],
+    stale_days: 14,
+    sourceConfig: {},
+  },
   sync: { ref: 'refs/bro/data', remote: 'origin', beads: true },
   sweep: { olderThanDays: 30, dir: '.agents/sweep', flatten: true },
   act: {

@@ -17,7 +17,7 @@ requirement.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro debt collect [filters]` | Scan merged PRs **without** a `debt:*` label → collect unresolved threads → write `harvests/*.jsonl` → label `debt:collected` / `debt:clean`. With `debt.sources` in bro.config.json it also runs opt-in collectors (`dependabot`, `code-scanning`, `secret-scanning`, `stale-prs`, `failed-ci`) — same ledger, `debt:<source>` labels on beads, `debt.stale_days` tunes stale-prs |
+| `bro debt collect [filters]` | Scan merged PRs **without** a `debt:*` label → collect unresolved threads → write `harvests/*.jsonl` → label `debt:collected` / `debt:clean`. With `debt.sources` in bro.config.json it also runs opt-in collectors (`dependabot`, `code-scanning`, `secret-scanning`, `stale-prs`, `failed-ci`, `sonarcloud`) — same ledger, `debt:<source>` labels on beads, `debt.stale_days` tunes stale-prs; `sonarcloud` needs `SONAR_TOKEN` + a project key (`debt.sourceConfig.sonarcloud.project_key` or `sonar-project.properties`) |
 | `bro debt status` | Ledger summary + unprocessed merged-PR count |
 | `bro debt stats [--by author\|source\|area]` | Signal per reviewer/source/area — fix% is the done share of decided rows |
 | `bro debt trend [--by author\|source\|area] [--bucket week\|day]` | Burn-down — open debt per time bucket (`--json` for chart data) |
