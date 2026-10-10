@@ -24,6 +24,7 @@ import {
   MANUAL_CASCADE,
   mergeChainPerLayer,
   reviewHost,
+  shQuote,
   stackHost,
   type PrMeta,
   type ReviewFacade,
@@ -288,7 +289,9 @@ function reportPush(
     // text: still the most likely intent in that failure mode.
     const hint =
       stacks?.openHint?.({ branch: r.branch, base: r.base ?? '' }) ??
-      (stacks === undefined && r.base !== undefined ? `gh pr create --base ${r.base}` : undefined)
+      (stacks === undefined && r.base !== undefined
+        ? `gh pr create --base ${shQuote(r.base)}`
+        : undefined)
     if (hint !== undefined) {
       console.log(`open the PR against the parent member: ${hint}`)
     }
@@ -530,13 +533,15 @@ function retargetMember(
  *  the branch's own commits server-side, so patch-equivalence drops
  *  them from the replay and only work never pushed lands on top —
  *  never a reset that would silently discard it. A failed fetch means
- *  the remote branch is gone (or unreachable): keep the worktree. */
-function followRemote(m: MemberView, lines: string[]): void {
+ *  the remote branch is gone (or unreachable): keep the worktree.
+ *  Returns false when the follow didn't complete — the caller leaves
+ *  the edge stale so the next sync reschedules the work. */
+function followRemote(m: MemberView, lines: string[]): boolean {
   const wt = m.worktree!
   const probe = gitTry(['-C', wt.path, 'fetch', 'origin', m.branch])
   if (probe.code !== 0) {
     lines.push(`  ${m.branch} remote gone — worktree left as-is`)
-    return
+    return false
   }
   const before = gitTry(['-C', wt.path, 'rev-parse', 'HEAD']).out.trim()
   const rb = gitTry(['-C', wt.path, 'rebase', 'FETCH_HEAD'])
@@ -545,7 +550,7 @@ function followRemote(m: MemberView, lines: string[]): void {
     lines.push(
       `  ${m.branch} rebase onto the rewritten remote failed — aborted; owner resolves on enter`
     )
-    return
+    return false
   }
   const after = gitTry(['-C', wt.path, 'rev-parse', 'HEAD']).out.trim()
   lines.push(
@@ -553,6 +558,7 @@ function followRemote(m: MemberView, lines: string[]): void {
       ? `  ${m.branch} already on the rewritten remote`
       : `  ${m.branch} moved to origin/${m.branch} (platform rewrote the remote)`
   )
+  return true
 }
 
 /** The sync cascade — shared by `stack sync` and `loop --stack`'s
@@ -584,15 +590,15 @@ export function syncStack(root: string, name: string): string[] {
       continue // in sync — don't even touch the edge file
     }
     const cascade = stacks?.cascade?.(m) ?? MANUAL_CASCADE
-    // A retarget the platform owns means the parent MERGED — the edge
-    // moves to the new base even though nobody called the API. The
-    // local rewrite the platform can't do stays ours.
-    if (cascade.retarget) {
-      updateEdge(m, item.desiredBase, defaultBase)
-    }
+    // The edge is the fork truth planSync reads — it moves only after
+    // the member's local work landed. Recording it before a rebase or
+    // remote-follow would read a failed rewrite as synced and never
+    // reschedule it.
     if (item.rebase) {
       if (cascade.rebase) {
-        followRemote(m, lines)
+        if (!followRemote(m, lines)) {
+          continue
+        }
       } else if (!rebaseMember(item, lines)) {
         continue
       }
@@ -647,8 +653,13 @@ async function cmdMerge(argv: string[]): Promise<void> {
     console.error('error: no stack context — pass a name or run inside a member worktree')
     usage()
   }
+  const picked = (['--squash', '--merge', '--rebase'] as const).filter((f) => argv.includes(f))
+  if (picked.length > 1) {
+    console.error(`error: ${picked.join(' ')} — merge strategy flags are exclusive`)
+    usage()
+  }
   const opts: StackMergeOpts = {
-    method: argv.includes('--merge') ? 'merge' : argv.includes('--rebase') ? 'rebase' : 'squash',
+    method: (picked[0]?.slice(2) ?? 'squash') as StackMergeOpts['method'],
     admin: argv.includes('--admin'),
   }
   const main = mainWorktree()
@@ -683,44 +694,15 @@ async function cmdMerge(argv: string[]): Promise<void> {
     if (mergeable.length < live.length) {
       console.log(`  ${live[mergeable.length]!.branch} has no OPEN PR — merge stops below it`)
     }
-    // gate every mergeable layer before the first merge — an unresolved
-    // thread three layers up must not leave the bottom two landed
-    const act = loadBroConfig(main.path).act
-    for (const m of mergeable) {
-      const pr = m.pr
-      if (pr === undefined) {
-        continue // unreachable — the prefix guarantees an OPEN PR
-      }
-      const state = await fetchPrActState(
-        rev.facade,
-        { repo: rev.repo, pr },
-        {
-          ignoreChecks: act.ignoreChecks,
-          checkHistory: checkHistory(main.path),
-          maxRounds: act.maxRounds,
-          docsPaths: act.docsPaths,
-          docsMaxRounds: act.docsMaxRounds,
-        }
-      )
-      const gate = evaluateExitGate(state)
-      if (!gate.ok) {
-        console.error(
-          `exit_gate=BLOCKED — refusing to merge; ${rev.facade.prLink(rev.repo, pr)} (${m.branch}) is not ready:`
-        )
-        for (const b of gate.blockers) {
-          console.error(`  blocker: ${b}`)
-        }
-        process.exitCode = 1
-        return
-      }
-    }
   } else if (stacks?.mergeChain === undefined) {
     console.error('error: no merge path — no review host and no stacks connector serve this repo')
     process.exitCode = 1
     return
   }
 
-  // gate evaluation → merge is one critical section, same as act merge
+  // gate evaluation → merge is one critical section, same as act merge —
+  // the slot wraps the checks themselves: taken after them, another merge
+  // could move a PR between its gate read and its landing
   const slot = acquireMergeSlot()
   if (slot.kind === 'held') {
     console.error(
@@ -731,6 +713,39 @@ async function cmdMerge(argv: string[]): Promise<void> {
     return
   }
   try {
+    // gate every mergeable layer before the first merge — an unresolved
+    // thread three layers up must not leave the bottom two landed
+    if (rev !== undefined) {
+      const act = loadBroConfig(main.path).act
+      for (const m of mergeable) {
+        const pr = m.pr
+        if (pr === undefined) {
+          continue // unreachable — the prefix guarantees an OPEN PR
+        }
+        const state = await fetchPrActState(
+          rev.facade,
+          { repo: rev.repo, pr },
+          {
+            ignoreChecks: act.ignoreChecks,
+            checkHistory: checkHistory(main.path),
+            maxRounds: act.maxRounds,
+            docsPaths: act.docsPaths,
+            docsMaxRounds: act.docsMaxRounds,
+          }
+        )
+        const gate = evaluateExitGate(state)
+        if (!gate.ok) {
+          console.error(
+            `exit_gate=BLOCKED — refusing to merge; ${rev.facade.prLink(rev.repo, pr)} (${m.branch}) is not ready:`
+          )
+          for (const b of gate.blockers) {
+            console.error(`  blocker: ${b}`)
+          }
+          process.exitCode = 1
+          return
+        }
+      }
+    }
     const chain: StackChainMember[] = mergeable.map((m) => ({
       branch: m.branch,
       base: trunk,

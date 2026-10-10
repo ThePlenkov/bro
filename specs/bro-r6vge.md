@@ -60,8 +60,10 @@ Connectors:
   is installed, `undefined` otherwise → per-layer `mergePr`
   (merge-async handles stack members — bro-h07vx).
 - **gitlab** — `openHint` is `glab mr create --target-branch`;
-  `cascade` reports platform-owned retarget; no `mergeChain` → the
-  per-layer fallback is the platform flow (bottom-up `PUT …/merge`,
+  `cascade` reports platform-owned retarget only on ≥19.1 hosts (probed
+  via `glab api version`, cached per facade — older hosts and failed
+  probes answer manual and sync drives `retargetPr`); no `mergeChain` →
+  the per-layer fallback is the platform flow (bottom-up `PUT …/merge`,
   `should_remove_source_branch` triggers the auto-retarget).
 
 Consumers in `packages/cli/src/commands/stack.ts`:

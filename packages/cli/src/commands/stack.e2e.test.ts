@@ -394,6 +394,15 @@ describe('bro stack e2e', () => {
     })
   })
 
+  test('merge rejects conflicting strategy flags instead of picking one', () => {
+    const f = stackFixture()
+    inside(f.main, f.root, () => {
+      const r = f.run(['merge', 's', '--merge', '--rebase'])
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /exclusive/)
+    })
+  })
+
   test('merge refuses while any member gate is BLOCKED — nothing lands', () => {
     const f = stackFixture()
     inside(f.main, f.root, () => {
@@ -538,6 +547,39 @@ describe('bro stack e2e', () => {
         git(['merge-base', 'main', 'stack/s/2-fx-b'], f.main).trim(),
         git(['rev-parse', 'main'], f.main).trim()
       )
+    })
+  })
+
+  test('a failed platform follow keeps the edge stale — the next sync retries it', () => {
+    const f = stackFixture([], { connectors: { stacks: 'fakehost' } })
+    inside(f.main, f.root, () => {
+      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
+      const wa = join(f.root, 'main--fx-a')
+      commitIn(wa, 'a.txt')
+      git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa)
+      assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
+      const wb = join(f.root, 'main--fx-b')
+      commitIn(wb, 'b.txt')
+      git(['push', '-q', 'origin', 'stack/s/2-fx-b'], wb)
+      commitIn(f.main, 'a.txt')
+      git(['push', '-q', 'origin', 'main'], f.main)
+      writeHostState(f.hostState, {
+        prs: {
+          'stack/s/1-fx-a': { number: 11, state: 'MERGED', baseRef: 'main' },
+          'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
+        },
+        // the platform claims the rewrite — but the remote branch is gone
+        cascade: { retarget: true, rebase: true },
+      })
+      git(['push', '-q', 'origin', '--delete', 'stack/s/2-fx-b'], f.main)
+      const r1 = f.run(['sync', 's'])
+      assert.equal(r1.code, 0, r1.stderr)
+      assert.match(r1.stdout, /stack\/s\/2-fx-b remote gone/)
+      // the edge must not have moved — the next sync retries the follow
+      // instead of reading the member as synced
+      const r2 = f.run(['sync', 's'])
+      assert.equal(r2.code, 0, r2.stderr)
+      assert.match(r2.stdout, /stack\/s\/2-fx-b remote gone/)
     })
   })
 })

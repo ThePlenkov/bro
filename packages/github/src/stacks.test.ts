@@ -18,7 +18,8 @@ case "$1 $2" in
   "stack merge") if [ -n "$FAKE_GH_STACK_MERGE_ERR" ]; then echo "$FAKE_GH_STACK_MERGE_ERR" >&2; fi
       if [ -n "$FAKE_GH_STACK_MERGE_CODE" ]; then exit "$FAKE_GH_STACK_MERGE_CODE"; fi
       exit 0 ;;
-  "repo view") echo '{"owner":{"login":"acme"},"name":"widgets"}' ;;
+  "repo view") if [ -n "$FAKE_GH_REPO_VIEW_ERR" ]; then echo 'gh: boom' >&2; exit 1; fi
+      echo '{"owner":{"login":"acme"},"name":"widgets"}' ;;
   "api repos/"*) if [ -n "$FAKE_GH_PULL_ERR" ]; then echo 'gh: API rate limit exceeded' >&2; exit 1; fi
       printf '%s\\n' "$FAKE_GH_PULL" ;;
 esac
@@ -108,6 +109,13 @@ describe('github stacks mergeChain', () => {
         )
       }
     )
+  })
+
+  test('a failing repo view throws before the merge call — nothing lands', () => {
+    withFakeGh({ ...EXT_INSTALLED, FAKE_GH_REPO_VIEW_ERR: '1' }, (dir, log) => {
+      assert.throws(() => githubStacks(dir).mergeChain?.(CHAIN, { method: 'squash' }))
+      assert.doesNotMatch(readFileSync(log, 'utf8'), /stack merge/)
+    })
   })
 
   test('declines a chain with no PRs at all', () => {

@@ -190,6 +190,43 @@ describe('gitStacks', () => {
     }
   })
 
+  test('mergeChain --rebase replays member commits — no merge commits, members unmoved', () => {
+    const { dir, cleanup } = chainRepo()
+    try {
+      const memberTip = git(['rev-parse', 'stack/s/2-b'], dir).trim()
+      const r = gitStacks(dir).mergeChain?.(CHAIN, { method: 'rebase' })
+      assert.deepEqual(r?.merged, ['stack/s/1-a', 'stack/s/2-b'])
+      assert.equal(git(['show', 'main:a.txt'], dir).trim(), 'a.txt')
+      assert.equal(git(['show', 'main:b.txt'], dir).trim(), 'b.txt')
+      // a clean linear chain replays bit-identical commits — the member
+      // branch was never rewritten (a worktree may be holding it)
+      assert.equal(git(['rev-parse', 'stack/s/2-b'], dir).trim(), memberTip)
+      assert.equal(git(['rev-list', '--count', '--merges', 'main'], dir).trim(), '0')
+      assert.equal(git(['rev-list', '--count', 'main'], dir).trim(), '3')
+    } finally {
+      cleanup()
+    }
+  })
+
+  test('mergeChain --rebase onto a moved trunk stays linear — no merge commit', () => {
+    const { dir, cleanup } = chainRepo()
+    try {
+      // the trunk moved after the members forked — merge --ff would have
+      // to commit a merge here; rebase replays instead
+      writeFileSync(join(dir, 'c.txt'), 'c.txt\n')
+      git(['add', 'c.txt'], dir)
+      git(['commit', '-qm', 'add c.txt'], dir)
+      const r = gitStacks(dir).mergeChain?.(CHAIN, { method: 'rebase' })
+      assert.deepEqual(r?.merged, ['stack/s/1-a', 'stack/s/2-b'])
+      assert.equal(git(['show', 'main:b.txt'], dir).trim(), 'b.txt')
+      assert.equal(git(['rev-list', '--count', '--merges', 'main'], dir).trim(), '0')
+      // base + c + replayed a + replayed b
+      assert.equal(git(['rev-list', '--count', 'main'], dir).trim(), '4')
+    } finally {
+      cleanup()
+    }
+  })
+
   test('mergeChain refuses over a dirty primary worktree', () => {
     const { dir, cleanup } = chainRepo()
     try {

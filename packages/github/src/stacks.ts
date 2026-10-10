@@ -18,6 +18,7 @@ import {
   MANUAL_CASCADE,
   prLink,
   resolveRepo,
+  shQuote,
   type StackCascade,
   type StackChainMember,
   type StackFacade,
@@ -55,6 +56,10 @@ function ghStackMerge(
   if (top?.pr === undefined) {
     return undefined
   }
+  // resolve the repo before the merge call — a `gh repo view` failure
+  // after `gh stack merge` landed would throw with the chain already
+  // merged, and the caller would skip retirement and the sync cascade
+  const repo = resolveRepo([], dir)
   const r = ghTry(['stack', 'merge', String(top.pr), '--yes', `--${opts.method}`], dir)
   if (r.code === 2 || r.code === 9) {
     return undefined
@@ -65,7 +70,7 @@ function ghStackMerge(
   const merged = members.filter((m) => m.pr !== undefined).map((m) => m.branch)
   return {
     lines: [
-      `  ${prLink(resolveRepo([], dir), top.pr)} — stack merged atomically via \`gh stack merge\` (${merged.length} layer${merged.length === 1 ? '' : 's'})`,
+      `  ${prLink(repo, top.pr)} — stack merged atomically via \`gh stack merge\` (${merged.length} layer${merged.length === 1 ? '' : 's'})`,
     ],
     merged,
   }
@@ -73,7 +78,7 @@ function ghStackMerge(
 
 export function githubStacks(dir: string): StackFacade {
   return {
-    openHint: (m) => `gh pr create --base ${m.base}`,
+    openHint: (m) => `gh pr create --base ${shQuote(m.base)}`,
     cascade(m) {
       const pr = m.pr
       if (pr === undefined) {

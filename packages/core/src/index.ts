@@ -165,6 +165,7 @@ export {
   gitStacks,
   MANUAL_CASCADE,
   mergeChainPerLayer,
+  shQuote,
 } from './stacks.ts'
 export type {
   StackCascade,

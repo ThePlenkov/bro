@@ -20,6 +20,14 @@
 import { gitTry } from './git.ts'
 import type { MergeOpts, ReviewFacade } from './review.ts'
 
+/** A value rendered into a copy-paste shell hint (`openHint`). Safe ref
+ *  characters pass bare — `stack/s/1-a` stays readable; anything else is
+ *  single-quoted so a branch name can't smuggle `$(…)` or `;` into the
+ *  command the human runs. */
+export function shQuote(s: string): string {
+  return /^[\w./-]+$/.test(s) ? s : `'${s.replaceAll("'", String.raw`'\''`)}'`
+}
+
 /** One link in the chain as a merge/sync op needs it — ordered
  *  bottom→top. `pr` absent means the member carries no open review
  *  (forge-less repo, or the member never opened one). */
@@ -222,8 +230,29 @@ export function gitStacks(dir: string): StackFacade {
         return { lines, merged }
       }
       for (const m of members) {
-        // squash lands the member as one commit; merge|rebase let git
-        // pick ff-vs-merge-commit per layer — a linear chain fast-forwards
+        if (opts.method === 'rebase') {
+          // rebase-merge replays the member's commits onto the trunk tip —
+          // cherry-pick is the local equivalent: `git rebase` would move
+          // the member's ref, and a worktree may be holding it. --empty=drop
+          // skips commits the trunk already carries patch-for-patch.
+          const fork = gitTry(['-C', main.path, 'merge-base', trunk, m.branch]).out.trim()
+          const r =
+            fork === ''
+              ? { code: 1, out: '', err: `no merge-base with ${trunk}` }
+              : gitTry(['-C', main.path, 'cherry-pick', '--empty=drop', `${fork}..${m.branch}`])
+          if (r.code !== 0) {
+            gitTry(['-C', main.path, 'cherry-pick', '--abort'])
+            lines.push(
+              `  ${m.branch} rebase onto ${trunk} failed — ${r.err.trim() || 'conflict'}; resolve by hand`
+            )
+            break
+          }
+          lines.push(`  merged ${m.branch} into ${trunk}`)
+          merged.push(m.branch)
+          continue
+        }
+        // squash lands the member as one commit; merge lets git pick
+        // ff-vs-merge-commit per layer — a linear chain fast-forwards
         const args =
           opts.method === 'squash'
             ? ['-C', main.path, 'merge', '--squash', m.branch]
