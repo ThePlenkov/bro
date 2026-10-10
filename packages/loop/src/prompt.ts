@@ -210,7 +210,11 @@ The worktree and branch are unchanged; your earlier commits are here.
 The PR's base is \`${base}\`. Rebase this branch onto the fresh base,
 resolve the conflicts, and push:
 
-- \`git fetch origin ${base}\` then \`git rebase origin/${base}\` —
+- \`git fetch origin\` — every tracking ref, not just the base. If this
+  branch's remote tip moved since the checkout was made, fold it in
+  first (\`git rebase\` onto it) — a stale tip would drop those commits
+  on the lease push.
+- \`git rebase origin/${base}\` —
   if a rebase is already in progress here, resolve it instead
   (\`git rebase --continue\` / \`--abort\` and restart if the state is
   too tangled).

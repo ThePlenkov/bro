@@ -8,6 +8,7 @@ import {
   agentProcessesIn,
   branchSlug,
   buildFixerPrompt,
+  buildRebaseFixerPrompt,
   candidateBranches,
   detailMatches,
   driveArgs,
@@ -561,7 +562,43 @@ describe('buildFixerPrompt', () => {
   })
 })
 
+describe('buildRebaseFixerPrompt', () => {
+  test('carries the PR link, branch, base, worktree, and the no-merge rule', () => {
+    const p = buildRebaseFixerPrompt({
+      pr: 42,
+      link: '[#42](https://github.com/o/r/pull/42)',
+      branch: 'work/bro-a',
+      base: 'main',
+      worktree: '/repos/bro--bro-a',
+    })
+    assert.match(p, /#42.*pull\/42/)
+    assert.match(p, /work\/bro-a/)
+    assert.match(p, /bro--bro-a/)
+    assert.match(p, /merge conflicts with its base branch `main`/)
+    // the work order fetches the PR branch too — a stale local tip would
+    // rebase without the remote's newer commits and drop them on push
+    assert.match(p, /fetch origin work\/bro-a main/)
+    assert.match(p, /rebase origin\/work\/bro-a/)
+    assert.match(p, /git rebase origin\/main/)
+    assert.match(p, /--force-with-lease/)
+    assert.match(p, /NEVER merge/)
+  })
+})
+
 describe('ensureFixerWorktree', () => {
+  /** A remote-backed `work/bro-a` standing at `<root>/main--bro-a` —
+   *  bare origin.git + pushed branch + its worktree. Each remote test
+   *  then stales refs or moves tips to taste. */
+  const remoteBackedCheckout = (root: string, main: string): string => {
+    git(['init', '-q', '--bare', join(root, 'origin.git')], root)
+    git(['remote', 'add', 'origin', join(root, 'origin.git')], main)
+    git(['branch', 'work/bro-a'], main)
+    git(['push', '-qu', 'origin', 'work/bro-a'], main)
+    const dir = join(root, 'main--bro-a')
+    git(['worktree', 'add', '-q', dir, 'work/bro-a'], main)
+    return dir
+  }
+
   test('reuses the conventional dir on the right branch; a foreign one falls back', () => {
     const { root, main } = initRepo('bro-drive-wtx-')
     inside(main, root, () => {
@@ -602,6 +639,42 @@ describe('ensureFixerWorktree', () => {
       assert.equal(r.err, undefined)
       assert.equal(r.created, true)
       assert.equal(git(['-C', r.path!, 'branch', '--show-current'], main).trim(), 'work/bro-a')
+    })
+  })
+
+  test('a reused checkout fast-forwards to the remote tip', () => {
+    const { root, main } = initRepo('bro-drive-wtr-')
+    inside(main, root, () => {
+      const dir = remoteBackedCheckout(root, main)
+      // the remote gains a commit the standing checkout hasn't seen —
+      // commit on main and push it across as work/bro-a; the tracking
+      // ref is staled so the fetch inside ensure is what restores it
+      git(['commit', '-qm', 'remote', '--allow-empty'], main)
+      git(['push', '-q', 'origin', 'main:work/bro-a'], main)
+      git(['update-ref', '-d', 'refs/remotes/origin/work/bro-a'], main)
+      const stale = git(['-C', dir, 'rev-parse', 'HEAD'], main).trim()
+      assert.equal(ensureFixerWorktree(main, 'work/bro-a').path, dir)
+      const tip = git(['-C', dir, 'rev-parse', 'HEAD'], main).trim()
+      assert.notEqual(tip, stale)
+      assert.equal(tip, git(['-C', dir, 'rev-parse', 'origin/work/bro-a'], main).trim())
+    })
+  })
+
+  test('a branch diverged from its remote is refused, never clobbered', () => {
+    const { root, main } = initRepo('bro-drive-wtd-')
+    inside(main, root, () => {
+      const dir = remoteBackedCheckout(root, main)
+      // local tip one way, remote the other — the tracking ref is
+      // staled so the fetch inside ensure is what proves the divergence
+      git(['-C', dir, 'commit', '-qm', 'local', '--allow-empty'], main)
+      git(['commit', '-qm', 'remote', '--allow-empty'], main)
+      git(['push', '-q', 'origin', 'main:work/bro-a'], main)
+      git(['update-ref', '-d', 'refs/remotes/origin/work/bro-a'], main)
+      const tip = git(['-C', dir, 'rev-parse', 'HEAD'], main).trim()
+      const r = ensureFixerWorktree(main, 'work/bro-a')
+      assert.equal(r.path, undefined)
+      assert.match(r.err ?? '', /diverged/)
+      assert.equal(git(['-C', dir, 'rev-parse', 'HEAD'], main).trim(), tip)
     })
   })
 })

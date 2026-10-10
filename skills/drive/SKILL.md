@@ -23,6 +23,8 @@ For every open PR on a fleet branch (worktree branches + local
 | --------- | --------- | ------ |
 | `open_threads > 0` | yes | skip — the live owner works its own threads |
 | `open_threads > 0` | no | spawn/respawn the PR's **fixer agent** on its fixer bead (`-l fixer`, `external_ref drive:pr:<N>`) in the PR's worktree |
+| `mergeable = CONFLICTING` | yes | skip — the live owner works its own conflicts |
+| `mergeable = CONFLICTING` | no | spawn the same fixer agent with a **rebase work order** — fetch + rebase onto the PR's base, resolve, `--force-with-lease` push — bounded by the `fixRounds > maxRounds` cap |
 | `gate.ok` | yes | report — the owner's merge step lands it |
 | `gate.ok` | no | `bro act merge`, retire the worktree when clean, close the fixer bead |
 | PR merged/closed | — | close a dangling fixer bead |
