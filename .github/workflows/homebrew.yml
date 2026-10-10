@@ -90,7 +90,9 @@ jobs:
           # refuse a downgrade: a delayed run for an older tag must not revert
           # a formula that already moved to a newer release. Version parses
           # from either url shape — npm pack (.../-/bro-<v>.tgz) or the old
-          # codeload source (.../tags/v<v>.tar.gz).
+          # codeload source (.../tags/v<v>.tar.gz). sort -V doesn't know
+          # semver's prerelease rule — the first '-' is rewritten to '~'
+          # (impossible in git tags) so X.Y.Z~beta < X.Y.Z like semver.
           new="${TAG#v}"
           cur_url=$(sed -nE 's|^  url "([^"]+)".*|\1|p' "$f" | head -1)
           cur=""
@@ -99,7 +101,7 @@ jobs:
             */v*.tar.gz)   cur=${cur_url##*/v};    cur=${cur%.tar.gz} ;;
           esac
           if [ -n "$cur" ] && [ "$cur" != "$new" ] &&
-             [ "$(printf '%s\n%s\n' "$cur" "$new" | sort -V | head -1)" = "$new" ]; then
+             [ "$(printf '%s\n%s\n' "${cur/-/\~}" "${new/-/\~}" | sort -V | head -1)" = "${new/-/\~}" ]; then
             echo "::error::$f already at $cur, newer than $new — refusing downgrade"
             exit 1
           fi
