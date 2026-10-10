@@ -15,11 +15,15 @@ export interface DiskProbe {
   freeBytes: number
 }
 
-/** The floor in bytes — N slots priced at worktreeMb each. */
+/** The floor in bytes — N slots priced at worktreeMb each, saturated:
+ *  config numbers are only finite-bounded, so an absurd product must
+ *  not slide past MAX_SAFE_INTEGER into garbage math — a floor at the
+ *  cap still reads "everything below it breaches", the honest
+ *  direction for an absurd config. */
 export function diskFloorBytes(
   cfg: Pick<LoopConfig, 'worktreeMb' | 'diskMinSlots'>
 ): number {
-  return cfg.diskMinSlots * cfg.worktreeMb * MB
+  return Math.min(cfg.diskMinSlots * cfg.worktreeMb * MB, Number.MAX_SAFE_INTEGER)
 }
 
 /** The first probe below the floor — the push must hold. Undefined

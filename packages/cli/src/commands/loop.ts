@@ -2159,8 +2159,16 @@ function diskProbes(ctx: Ctx, warned?: Set<string>): DiskProbe[] {
   const out: DiskProbe[] = []
   for (const p of new Set([dirname(ctx.root), tmpdir()])) {
     try {
-      const s = statfsSync(p)
-      out.push({ path: p, freeBytes: s.bavail * s.bsize })
+      // bigint probe — bavail×bsize on a multi-EB fs overflows the
+      // number range mid-multiply; the DiskProbe contract is a number,
+      // so saturate at MAX_SAFE_INTEGER (a free that large admits
+      // every floor anyway)
+      const s = statfsSync(p, { bigint: true })
+      const free = s.bavail * s.bsize
+      out.push({
+        path: p,
+        freeBytes: free > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(free),
+      })
     } catch (err) {
       if (warned === undefined || !warned.has(p)) {
         warned?.add(p)

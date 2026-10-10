@@ -10,6 +10,21 @@ describe('diskFloorBytes', () => {
     assert.equal(diskFloorBytes(cfg), 800 * MB)
     assert.equal(diskFloorBytes({ worktreeMb: 350, diskMinSlots: 1 }), 350 * MB)
   })
+
+  test('an absurd product saturates at MAX_SAFE_INTEGER — no garbage math', () => {
+    assert.equal(
+      diskFloorBytes({ worktreeMb: 1e20, diskMinSlots: 1e20 }),
+      Number.MAX_SAFE_INTEGER
+    )
+    // and a saturated floor still breaches everything real
+    assert.equal(
+      diskFloorBreach([probe('/wt', 9_000_000)], {
+        worktreeMb: 1e20,
+        diskMinSlots: 1e20,
+      })?.path,
+      '/wt'
+    )
+  })
 })
 
 describe('diskFloorBreach', () => {
