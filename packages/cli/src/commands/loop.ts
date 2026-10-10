@@ -2251,24 +2251,7 @@ async function tryClaim(
   // claimClump's store reads so a held push costs one statfs per tick.
   const breach = diskFloorBreach(diskProbes(ctx, q.diskProbeWarned), ctx.cfg)
   if (breach !== undefined) {
-    // drain beats the hold: an empty queue behind the floor has
-    // nothing to wait for — without this check the return below keeps
-    // q.drained unset and the run idles on disk forever
-    if (queueDrained(ctx, scope, q.seen)) {
-      q.drained = true
-      return false
-    }
-    q.pushHoldUntil = Date.now() + ctx.intervalS * 1000
-    if (!q.diskHeld) {
-      q.diskHeld = true
-      say(
-        ctx,
-        `loop: disk below floor on ${breach.path} — ` +
-          `${Math.floor(breach.freeBytes / MB)}M free < ` +
-          `${ctx.cfg.diskMinSlots}×${ctx.cfg.worktreeMb}M — pushes held`
-      )
-    }
-    return false
+    return holdForDisk(ctx, scope, q, breach)
   }
   if (q.diskHeld) {
     q.diskHeld = false
@@ -2296,23 +2279,14 @@ async function tryClaim(
     // fleet cap refused the spawn — un-see the clump and hold pushes
     // for a beat so the next pick doesn't burn the tick re-probing the
     // same wall; the claims pushItem released are re-pickable
-    for (const b of clump) {
-      q.seen.delete(b.id)
-    }
-    q.claimed -= clump.length
-    q.pushHoldUntil = Date.now() + ctx.intervalS * 1000
+    unseeClump(ctx, q, clump)
     return false
   }
   if (out.kind === 'member') {
     q.stack.push(out.member)
     // a worker-pending member reports its pending phase — its `→ PR`
     // line lands when the worker exits and the gate join happens
-    say(
-      ctx,
-      out.member.pr === undefined
-        ? `loop: ${ids.join(', ')} pushed — worker pending (gate ${q.stack.length}/${ctx.cfg.maxOpen})`
-        : `loop: ${ids.join(', ')} → PR ${prRef(ctx, out.member.pr)} (gate ${q.stack.length}/${ctx.cfg.maxOpen})`
-    )
+    say(ctx, pushLine(ctx, out.member.pr, ids, q.stack.length))
   } else {
     q.tally[out.result] += 1
     if (ctx.json) {
@@ -2320,6 +2294,53 @@ async function tryClaim(
     }
   }
   return true
+}
+
+/** The held-push branch of a tick — park the next probe for an
+ *  interval, announce the hold once. The drain verdict is still owed:
+ *  claimClump is unreachable under a breach, so without a read-only
+ *  check an empty queue behind the floor would retry the floor
+ *  forever instead of reporting done. */
+function holdForDisk(
+  ctx: Ctx,
+  scope: NonNullable<ReturnType<typeof nextScope>>,
+  q: QueueState,
+  breach: DiskProbe
+): false {
+  // drain beats the hold: an empty queue behind the floor has nothing
+  // to wait for — without this check the return below keeps q.drained
+  // unset and the run idles on disk forever
+  if (queueDrained(ctx, scope, q.seen)) {
+    q.drained = true
+    return false
+  }
+  q.pushHoldUntil = Date.now() + ctx.intervalS * 1000
+  if (!q.diskHeld) {
+    q.diskHeld = true
+    say(
+      ctx,
+      `loop: disk below floor on ${breach.path} — ` +
+        `${Math.floor(breach.freeBytes / MB)}M free < ` +
+        `${ctx.cfg.diskMinSlots}×${ctx.cfg.worktreeMb}M — pushes held`
+    )
+  }
+  return false
+}
+
+/** Undo a claim attempt the fleet cap refused — the clump goes back to
+ *  pickable and pushes hold for a beat. */
+function unseeClump(ctx: Ctx, q: QueueState, clump: ReadyBead[]): void {
+  for (const b of clump) {
+    q.seen.delete(b.id)
+  }
+  q.claimed -= clump.length
+  q.pushHoldUntil = Date.now() + ctx.intervalS * 1000
+}
+
+function pushLine(ctx: Ctx, pr: number | undefined, ids: string[], gate: number): string {
+  return pr === undefined
+    ? `loop: ${ids.join(', ')} pushed — worker pending (gate ${gate}/${ctx.cfg.maxOpen})`
+    : `loop: ${ids.join(', ')} → PR ${prRef(ctx, pr)} (gate ${gate}/${ctx.cfg.maxOpen})`
 }
 
 /** The round-robin: each tick services the gate stack oldest-first,
@@ -2357,11 +2378,10 @@ async function runQueue(ctx: Ctx): Promise<void> {
       }
       if (!busy) {
         const pending = q.stack.find((m) => m.worker !== undefined)
+        const idle = q.diskHeld ? 'idle (disk floor)' : 'idle'
         ctx.stage =
           pending === undefined
-            ? q.diskHeld
-              ? 'idle (disk floor)'
-              : 'idle'
+            ? idle
             : `worker ${pending.worker!.agentId} pid=${pending.worker!.pid ?? '?'}`
         ctx.bead = pending === undefined ? undefined : pending.beads[0]!.id
         // the wake is the earliest member's own cadence — a worker's
