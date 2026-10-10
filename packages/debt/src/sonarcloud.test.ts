@@ -288,6 +288,26 @@ describe('dedupeReviewThreads', () => {
     assert.equal(d.kept.length, 0)
   })
 
+  test('key embedded in a longer token does not cover the sonar row', () => {
+    const rows = [sonar('K5', 'src/c.ts', 3)]
+    const d = dedupeReviewThreads(rows, [
+      thread({ path: 'src/c.ts', line: 1, body: 'see ?open=K55&id=p' }),
+      { ...thread({ body: 'XK5 flagged elsewhere' }), thread_id: 'PRRT_2' },
+      { ...thread({ body: 'dup of K5-9' }), thread_id: 'PRRT_3' },
+    ])
+    assert.equal(d.kept.length, 1)
+    assert.equal(d.duped.length, 0)
+  })
+
+  test('whole-token key at a markdown-link boundary still covers', () => {
+    const d = dedupeReviewThreads(
+      [sonar('K6', 'src/c.ts', 3)],
+      [thread({ path: 'src/c.ts', line: 1, body: '[open](https://sonarcloud.io/project/issues?open=K6)' })]
+    )
+    assert.equal(d.kept.length, 0)
+    assert.equal(d.duped[0]!.coveredBy, 'PRRT_1')
+  })
+
   test('non-matching rows keep; done/other-source rows do not dedupe', () => {
     const rows = [sonar('K3'), sonar('K4', 'src/b.ts', 8)]
     const d = dedupeReviewThreads(rows, [

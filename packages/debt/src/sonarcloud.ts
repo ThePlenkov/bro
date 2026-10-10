@@ -329,10 +329,22 @@ export function sonarKeyOf(threadId: string): string {
   return threadId.replace(/^sonarcloud:(hotspot:)?/, '')
 }
 
+/** Whole-token body match. A bare `includes()` lets key `K2` claim a body
+ *  carrying `K22`/`XK2`/`K2-9` — a false cover that hides the real finding.
+ *  Token chars are the sonar key alphabet plus `-`/`_` so hyphenated and
+ *  underscored ids still bound on both sides. */
+function bodyMentionsKey(body: string, key: string): boolean {
+  if (key === '') return false
+  return new RegExp(
+    `(?<![A-Za-z0-9_-])${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_-])`
+  ).test(body)
+}
+
 /** Review-thread dedupe (spec: specs/bro-huy5o.4.md). A fresh sonarcloud
  *  record is dropped when an OPEN review-thread row — `source` absent —
  *  already carries the finding: same path+line, or the comment body
- *  links the issue key (`issues=<key>`, `hotspots=<key>`, `open=<key>`). */
+ *  carries the issue key as a whole token
+ *  (`issues=<key>`, `hotspots=<key>`, `open=<key>`). */
 export function dedupeReviewThreads(
   records: DebtRecord[],
   existing: DebtRecord[]
@@ -347,7 +359,7 @@ export function dedupeReviewThreads(
     const cover = threads.find(
       (t) =>
         (rec.path !== '' && t.path === rec.path && t.line !== null && t.line === rec.line) ||
-        t.body.includes(key)
+        bodyMentionsKey(t.body, key)
     )
     if (cover !== undefined) {
       duped.push({ record: rec, coveredBy: cover.thread_id })
