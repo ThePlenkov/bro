@@ -26,7 +26,9 @@ import {
 } from '@broject/core'
 import type { AgentRegistryEntry } from '@broject/core'
 import { currentFrame } from '@broject/drill'
+import { loopSection } from '@broject/loop'
 import { loadBroConfig } from '../plugins.ts'
+import { collectLoopRuns, type LoopRunView } from './loop-state.ts'
 
 interface BeadRow {
   id: string
@@ -61,6 +63,10 @@ interface BroStatus {
     readyTotal: number
   }
   fleet: { maxConcurrent: number; agents: StatusAgent[] }
+  /** In-flight `bro loop` workers — records under <git-common>/bro/loop/.
+   *  stallMin is the advisory silence threshold, never a kill budget
+   *  (bro-9lpn3). */
+  loop: { stallMin: number; runs: LoopRunView[] }
   drill: { frame: { id: string; title: string; depth: number } | null }
   /** --deep only: the act gate for the current branch's open PR. */
   act?: {
@@ -176,6 +182,17 @@ function readFleet(dir: string): BroStatus['fleet'] {
   }
 }
 
+/** Loop-agent run records — same contract as the board's other sections:
+ *  a failed or empty read is an empty array, never an error. */
+function readLoop(dir: string): BroStatus['loop'] {
+  try {
+    const cfg = loadBroConfig(dir) as Record<string, unknown>
+    return { stallMin: loopSection(cfg.loop).stallMin, runs: collectLoopRuns(dir) }
+  } catch {
+    return { stallMin: 0, runs: [] }
+  }
+}
+
 /** The act gate for the current branch's PR — null when no open PR
  *  resolves or gh can't answer; the board must not die on a network
  *  tick. */
@@ -231,6 +248,7 @@ export function collectStatus(dir: string): BroStatus {
     dirty,
     beads: readBeads(dir),
     fleet: readFleet(dir),
+    loop: readLoop(dir),
     drill: {
       frame: frame === undefined ? null : { id: frame.id, title: frame.title, depth: frame.depth },
     },
@@ -242,6 +260,18 @@ function agentLine(a: StatusAgent): string {
   const glyph = a.state === 'running' ? '▶' : '·'
   const suffix = extra === '' ? '' : `  ${extra}`
   return `  ${glyph} ${a.id}  ${a.backend}  ${a.state}${suffix}`
+}
+
+/** One loop run record — silence past loop.stallMin is flagged as an
+ *  inspect hint for the orchestrator, never a verdict bro acts on. */
+function loopLine(r: LoopRunView, stallMin: number): string {
+  if (r.state === 'dead') {
+    return `  · loop ${r.beadId}  pid ${r.pid ?? '?'} gone — crashed run's record`
+  }
+  const silentMin = r.silentMs === null ? null : Math.max(0, Math.floor(r.silentMs / 60_000))
+  const stale =
+    silentMin !== null && stallMin > 0 && silentMin >= stallMin ? ' — silent, inspect?' : ''
+  return `  ▶ loop ${r.beadId}  pid ${r.pid ?? '?'}  silent ${silentMin ?? '?'}m${stale}`
 }
 
 function actLine(act: NonNullable<BroStatus['act']> | null): string {
@@ -271,6 +301,9 @@ function render(s: BroStatus): string[] {
   lines.push(`fleet: ${live.length}${cap} running`)
   for (const a of s.fleet.agents) {
     lines.push(agentLine(a))
+  }
+  for (const r of s.loop.runs) {
+    lines.push(loopLine(r, s.loop.stallMin))
   }
   if (s.act !== undefined) {
     lines.push(actLine(s.act))

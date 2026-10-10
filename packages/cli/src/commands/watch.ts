@@ -1,8 +1,9 @@
 /**
  * `bro watch` — the deterministic orchestrator heartbeat: one snapshot of
  * every read plane a supervisor glues together by hand today — open
- * molecules (nextStep), act exit gates for fleet PRs, and the fleet
- * itself. Spec: specs/sessions/bro-f4ot/bro-vf1j.md.
+ * molecules (nextStep), act exit gates for fleet PRs, the fleet itself,
+ * and in-flight loop agents (spec bro-9lpn3 — silence is advisory, never
+ * a kill). Spec: specs/sessions/bro-f4ot/bro-vf1j.md.
  *
  *   bro watch [--once]      one snapshot (default — the heartbeat call)
  *   bro watch --every N [--for S]   tick the snapshot every N seconds;
@@ -41,6 +42,7 @@ import {
 } from '@broject/core'
 import { checkHistory, evaluateExitGate, fetchPrActState } from '@broject/act'
 import { listMolecules, loadMolecule, nextStep } from '@broject/convoy'
+import { loopSection } from '@broject/loop'
 import { loadBroConfig } from '../plugins.ts'
 import { flag } from './args.ts'
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
@@ -50,6 +52,7 @@ import {
   fleetTableLines,
   type FleetRow,
 } from './fleet.ts'
+import { collectLoopRuns, type LoopRunView } from './loop-state.ts'
 import { providerWallsFor } from '../agent-connectors.ts'
 import { parseWorktreePorcelain, type WorktreeInfo } from './work.ts'
 import { installWatch, uninstallWatch } from './watch-install.ts'
@@ -90,6 +93,17 @@ export interface WatchGates {
   prs: WatchPrGate[]
 }
 
+/** The loop plane — in-flight `bro loop` worker records. `stallMin` is
+ *  the advisory threshold attention judged against (loop.stallMin), so
+ *  a consumer reads the verdict with the bound that produced it. */
+export interface WatchLoop {
+  stallMin: number
+  runs: LoopRunView[]
+  /** set when the loop plane itself threw — renders `unavailable`,
+   *  never a false "no loop runs" */
+  error?: string
+}
+
 export interface WatchSnapshot {
   ts: string
   attention: string[]
@@ -120,6 +134,9 @@ export interface WatchSnapshot {
   /** This tick's janitor report — set only when it reaped or capped
    *  something; the attention line carries the same news in text. */
   janitor?: JanitorReport
+  /** In-flight `bro loop` workers + their output-silence read. Advisory
+   *  data only — a stale log is reported, never killed (bro-9lpn3). */
+  loop: WatchLoop
 }
 
 /** The heartbeat's answer: ready human gates, lost agents, walled
@@ -129,11 +146,13 @@ export function attentionOf(
   mols: WatchMol[],
   rows: FleetRow[],
   prs: WatchPrGate[],
-  walls: ProviderWall[] = []
+  walls: ProviderWall[] = [],
+  loop: WatchLoop = { stallMin: 0, runs: [] }
 ): string[] {
   return [
     ...molAttention(mols),
     ...agentAttention(rows),
+    ...loopAttention(loop),
     ...walls.map((w) => `provider ${wallText(w)}`),
     ...prAttention(prs),
   ]
@@ -163,6 +182,29 @@ function agentAttention(rows: FleetRow[]): string[] {
     }
     if (r.agent.startsWith('blocked — ')) {
       out.push(`agent ${r.agent} — ${r.step} (${r.title})`)
+    }
+  }
+  return out
+}
+
+/** Loop-worker advisories — a live spawn silent past loop.stallMin, or a
+ *  record whose pid is gone (a crashed loop's residue). Reported for the
+ *  orchestrator's judgment; watch never stops or respawns anything. */
+function loopAttention(loop: WatchLoop): string[] {
+  const out: string[] = []
+  for (const r of loop.runs) {
+    if (r.state === 'dead') {
+      out.push(`loop agent ${r.beadId} — pid ${r.pid ?? '?'} gone — crashed run's record`)
+      continue
+    }
+    if (
+      loop.stallMin > 0 &&
+      r.silentMs !== null &&
+      r.silentMs >= loop.stallMin * 60_000
+    ) {
+      out.push(
+        `loop agent ${r.beadId} — output silent ${Math.floor(r.silentMs / 60_000)}m — inspect?`
+      )
     }
   }
   return out
@@ -367,7 +409,18 @@ async function gatesPlane(
   }
 }
 
-/** The snapshot — pure reads across all three planes. Every plane is
+/** loop — run records under <git-common>/bro/loop/. Pure fs + pid
+ *  reads; a throwing plane degrades its section, never the heartbeat. */
+function loopPlane(dir: string): WatchLoop {
+  try {
+    const cfg = loadBroConfig(dir) as Record<string, unknown>
+    return { runs: collectLoopRuns(dir), stallMin: loopSection(cfg.loop).stallMin }
+  } catch (err) {
+    return { runs: [], stallMin: 0, error: errText(err) }
+  }
+}
+
+/** The snapshot — pure reads across all planes. Every plane is
  *  best-effort on its own: a throwing plane degrades its section, never
  *  kills the heartbeat. */
 export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
@@ -375,8 +428,15 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
   const host = hostPlane(dir)
   const fleet = await fleetPlane(dir, host)
   const gates = await gatesPlane(dir, host, fleet.rows, fleet.prErrors ?? [])
+  const loop = loopPlane(dir)
 
-  const attention = attentionOf(molsPlane_.mols, fleet.rows, gates.prs, fleet.walls ?? [])
+  const attention = attentionOf(
+    molsPlane_.mols,
+    fleet.rows,
+    gates.prs,
+    fleet.walls ?? [],
+    loop
+  )
   for (const e of fleet.prErrors ?? []) {
     attention.push(`PR lookup failed — ${e}`)
   }
@@ -389,6 +449,9 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
   if (molsPlane_.error !== undefined) {
     attention.push(`mols plane failed — ${molsPlane_.error}`)
   }
+  if (loop.error !== undefined) {
+    attention.push(`loop plane failed — ${loop.error}`)
+  }
 
   return {
     ts: new Date().toISOString(),
@@ -397,6 +460,7 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
     molsError: molsPlane_.error,
     gates,
     fleet,
+    loop,
   }
 }
 
@@ -476,6 +540,27 @@ function fleetLines(fleet: WatchSnapshot['fleet']): string[] {
   return out
 }
 
+function loopLines(loop: WatchLoop): string[] {
+  if (loop.error !== undefined) {
+    return [`  unavailable — ${loop.error}`]
+  }
+  if (loop.runs.length === 0) {
+    return ['  no loop agents on record']
+  }
+  const head = ['run', 'state', 'pid', 'silent', 'log']
+  const rows = loop.runs.map((r) => [
+    r.beadId,
+    r.state,
+    String(r.pid ?? '—'),
+    r.silentMs === null ? '—' : `${Math.floor(r.silentMs / 60_000)}m`,
+    r.log ?? '—',
+  ])
+  const w = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)))
+  const line = (vals: string[]) =>
+    '  ' + vals.map((v, i) => v.padEnd(w[i]!)).join('  ').trimEnd()
+  return [line(head), ...rows.map(line)]
+}
+
 /** Text render — attention first; an empty list is the "fleet is quiet"
  *  answer, printed as such rather than omitted. */
 export function renderSnapshot(s: WatchSnapshot): string {
@@ -493,6 +578,9 @@ export function renderSnapshot(s: WatchSnapshot): string {
     '',
     'fleet',
     ...fleetLines(s.fleet),
+    '',
+    'loop',
+    ...loopLines(s.loop),
   ].join('\n')
 }
 

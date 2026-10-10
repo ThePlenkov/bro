@@ -33,10 +33,10 @@ export interface LoopConfig {
   /** Optional shell command run once in the fresh worktree before the
    *  agent spawns (e.g. `npm install`). */
   bootstrap: string
-  /** Minutes a single agent spawn may run before it's killed.
-   *  0 = no wall-clock limit — a working session is not decapitated;
-   *  supervision is the orchestrator's check-in cadence, not a lifetime. */
-  agentTimeoutMin: number
+  /** Minutes of output silence before a live loop agent surfaces as a
+   *  check-in advisory (`bro watch`/`bro status`). Advisory only — the
+   *  orchestrator decides; there is no agent wall-clock kill. */
+  stallMin: number
   /** A spawn gone in under this never ran — broken dist/agent/env, not
    *  a bead outcome: park instead of reopening into a crash-burn
    *  (bro-sovl3). 0 = reopen on every no-PR exit (legacy). */
@@ -59,7 +59,7 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   profile: '',
   model: '',
   bootstrap: '',
-  agentTimeoutMin: 0,
+  stallMin: 45,
   crashExitMs: 10_000,
   mergeTimeoutMin: 45,
   fixRounds: 3,

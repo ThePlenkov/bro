@@ -593,6 +593,9 @@ const load = () => JSON.parse(fs.readFileSync(STATE, 'utf8'))
 const save = (s) => fs.writeFileSync(STATE, JSON.stringify(s))
 const prompt = fs.readFileSync(promptFile, 'utf8')
 const branch = execFileSync('git', ['branch', '--show-current'], { encoding: 'utf8' }).trim()
+// stdout line — proves the loop's spawn tee lands agent output in the
+// run record's <slug>.log, not the loop's own stream (bro-9lpn3)
+console.log('agent ' + scenario + ' on ' + (process.env.BRO_BEAD_ID || '?'))
 const log = (msg) => {
   const f = path.join(path.dirname(STATE), 'spawns.log')
   const kind = prompt.includes('review-threads')

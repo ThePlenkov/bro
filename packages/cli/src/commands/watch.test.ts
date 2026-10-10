@@ -4,6 +4,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { FleetRow } from './fleet.ts'
+import type { LoopRunView } from './loop-state.ts'
 import { initRepo, inside } from './testrepo.ts'
 import {
   attentionOf,
@@ -147,6 +148,39 @@ describe('attentionOf', () => {
   test('ok gates and live agents are not attention', () => {
     assert.deepEqual(attentionOf([mol()], [row()], [prGate()]), [])
   })
+
+  test('a loop agent silent past stallMin is an inspect advisory', () => {
+    const loop = { stallMin: 45, runs: [loopRun({ silentMs: 50 * 60_000 })] }
+    assert.deepEqual(attentionOf([], [], [], [], loop), [
+      'loop agent bro-x1 — output silent 50m — inspect?',
+    ])
+  })
+
+  test('silence under stallMin is not attention — quiet is not a stall', () => {
+    const loop = { stallMin: 45, runs: [loopRun({ silentMs: 10 * 60_000 })] }
+    assert.deepEqual(attentionOf([], [], [], [], loop), [])
+    // an unverifiable record (no log, no startedAt) is reported, never judged
+    assert.deepEqual(
+      attentionOf([], [], [], [], { stallMin: 45, runs: [loopRun({ silentMs: null })] }),
+      []
+    )
+  })
+
+  test('a dead-pid record is attention — a crashed loop leaves residue', () => {
+    const loop = { stallMin: 45, runs: [loopRun({ state: 'dead', silentMs: null })] }
+    assert.deepEqual(attentionOf([], [], [], [], loop), [
+      "loop agent bro-x1 — pid 123 gone — crashed run's record",
+    ])
+  })
+})
+
+const loopRun = (over: Partial<LoopRunView> = {}): LoopRunView => ({
+  beadId: 'bro-x1',
+  slug: 'bro-x1',
+  pid: 123,
+  state: 'running',
+  silentMs: 60_000,
+  ...over,
 })
 
 const snap = (over: Partial<WatchSnapshot> = {}): WatchSnapshot => ({
@@ -155,6 +189,7 @@ const snap = (over: Partial<WatchSnapshot> = {}): WatchSnapshot => ({
   mols: [],
   gates: { available: true, prs: [] },
   fleet: { rows: [], degraded: [], conflicts: [] },
+  loop: { stallMin: 45, runs: [] },
   ...over,
 })
 
@@ -180,6 +215,24 @@ describe('renderSnapshot', () => {
     assert.match(text, /mols\n  no open molecules/)
     assert.match(text, /gates\n  no PRs in the fleet/)
     assert.match(text, /fleet\n  no open molecules — nothing in the fleet/)
+    assert.match(text, /loop\n  no loop agents on record/)
+  })
+
+  test('the loop section renders run records — silence readable per row', () => {
+    const text = renderSnapshot(
+      snap({
+        loop: {
+          stallMin: 45,
+          runs: [
+            loopRun({ silentMs: 50 * 60_000, log: '/x/.git/bro/loop/bro-x1.log' }),
+            loopRun({ beadId: 'bro-y2', slug: 'bro-y2', state: 'dead', silentMs: null }),
+          ],
+        },
+      })
+    )
+    assert.match(text, /loop\n  run\s+state\s+pid\s+silent\s+log/)
+    assert.match(text, /bro-x1\s+running\s+123\s+50m\s+\/x\/.git\/bro\/loop\/bro-x1\.log/)
+    assert.match(text, /bro-y2\s+dead\s+123/)
   })
 
   test('an unavailable gates section says so with the reason', () => {

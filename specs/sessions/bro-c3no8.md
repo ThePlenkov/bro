@@ -74,8 +74,10 @@ one stderr line notes the bypass.
 ### Spawn shape
 
 `spawnAgent` keeps its contract — synchronous, detached process group,
-`agentTimeoutMin` group-kill, exit code to the caller. The lane picks
-the child:
+exit code to the caller. The `agentTimeoutMin` group-kill was removed
+in bro-9lpn3 — a worker's lifetime is the orchestrator's call, made at
+check-in, never a wall clock inside the spawn. The lane picks the
+child:
 
 - argv worker → `spawn('sh', ['-c', 'exec "$@"', 'loop-agent', …argv,
   promptFile])` — the same `"$@"` positional exec the native backend

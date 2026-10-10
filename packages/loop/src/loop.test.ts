@@ -23,15 +23,15 @@ describe('loopSection', () => {
   })
 
   test('blank strings and bad numbers fall back', () => {
-    const cfg = loopSection({ agent: '  ', agentTimeoutMin: -5, maxItems: 'two' })
+    const cfg = loopSection({ agent: '  ', stallMin: -5, maxItems: 'two' })
     assert.equal(cfg.agent, '')
-    assert.equal(cfg.agentTimeoutMin, DEFAULT_LOOP_CONFIG.agentTimeoutMin)
+    assert.equal(cfg.stallMin, DEFAULT_LOOP_CONFIG.stallMin)
     assert.equal(cfg.maxItems, 0)
   })
 
   test('zero timeouts fall back — 0 would park every gate instantly', () => {
-    const cfg = loopSection({ agentTimeoutMin: 0, mergeTimeoutMin: 0, maxItems: 0 })
-    assert.equal(cfg.agentTimeoutMin, DEFAULT_LOOP_CONFIG.agentTimeoutMin)
+    const cfg = loopSection({ stallMin: 0, mergeTimeoutMin: 0, maxItems: 0 })
+    assert.equal(cfg.stallMin, DEFAULT_LOOP_CONFIG.stallMin)
     assert.equal(cfg.mergeTimeoutMin, DEFAULT_LOOP_CONFIG.mergeTimeoutMin)
     assert.equal(cfg.maxItems, 0) // 0 is valid for maxItems — means unlimited
   })
@@ -49,7 +49,7 @@ describe('loopSection', () => {
       profile: 'cheap',
       model: 'm-1',
       bootstrap: 'npm ci',
-      agentTimeoutMin: 30,
+      stallMin: 30,
       crashExitMs: 5_000,
       mergeTimeoutMin: 60,
       fixRounds: 2,
@@ -62,7 +62,7 @@ describe('loopSection', () => {
       profile: 'cheap',
       model: 'm-1',
       bootstrap: 'npm ci',
-      agentTimeoutMin: 30,
+      stallMin: 30,
       crashExitMs: 5_000,
       mergeTimeoutMin: 60,
       fixRounds: 2,
