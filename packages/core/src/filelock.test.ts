@@ -3,7 +3,7 @@
  *  ownership proof steal/release check. */
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -162,6 +162,32 @@ describe('filelock', () => {
         rmSync(lock)
         await new Promise((r) => setTimeout(r, 100))
         assert.equal(existsSync(lock), true)
+        assert.equal(lockHolderPid(lock), process.pid)
+      } finally {
+        release()
+      }
+    } finally {
+      done()
+    }
+  })
+
+  test('the heartbeat never refreshes a foreign hold; a dead one is reclaimed', async () => {
+    const { dir, done } = tmp()
+    try {
+      const lock = join(dir, 'x.lock')
+      const release = holdFileLock(lock, { heartbeatMs: 25 })
+      try {
+        // a live foreign hold sits at the path — our beat must not
+        // bump its mtime (refreshing it would mask the thief's own
+        // abandonment age)
+        writeFileSync(lock, `${process.pid}:alien`)
+        const written = statSync(lock).mtimeMs
+        await new Promise((r) => setTimeout(r, 100))
+        assert.equal(readFileSync(lock, 'utf8'), `${process.pid}:alien`)
+        assert.equal(statSync(lock).mtimeMs, written)
+        // a dead holder is stealable — the beat reclaims the path
+        writeFileSync(lock, '99999999:alien')
+        await new Promise((r) => setTimeout(r, 150))
         assert.equal(lockHolderPid(lock), process.pid)
       } finally {
         release()

@@ -282,12 +282,27 @@ export function holdFileLock(lock: string, opts: HeldLockOptions = {}): () => vo
   // holds re-link the outer hold's token, which is the same file
   const token = heldLocks.get(lock)!
   const beat = (): void => {
+    let current: string | undefined
     try {
-      const now = new Date()
-      utimesSync(lock, now, now)
-      return
+      current = readFileSync(lock, 'utf8')
     } catch {
-      // vanished mid-hold — try to take the path back below
+      current = undefined
+    }
+    if (current === token) {
+      try {
+        const now = new Date()
+        utimesSync(lock, now, now)
+      } catch {
+        // a stat/write flake — the next beat retries
+      }
+      return
+    }
+    // a foreign token holds the path: refreshing its mtime would mask
+    // a dead thief's abandonment, so the reclaim only runs when the
+    // occupant is gone or stealable (dead or past the bound) — a live
+    // foreign hold is left alone
+    if (current !== undefined && !lockStealable(lock)) {
+      return
     }
     try {
       tryAcquireLockFile(lock, token)
@@ -303,8 +318,15 @@ export function holdFileLock(lock: string, opts: HeldLockOptions = {}): () => vo
   }
 }
 
-/** Standby cycle budget — one `onStandby` report per live-holder wait. */
+/** Standby report cadence — one `onStandby` per live-holder wait. */
 const STANDBY_WAIT_MS = 60_000
+
+/** One acquire attempt's sync budget while standing by —
+ *  acquireFileLock's contention wait is `Atomics.wait` on the calling
+ *  thread, so a long slice would freeze the event loop (signal
+ *  handlers, timers) for a standing-by supervisor. Slice short and
+ *  retry: signal latency stays under a quarter second. */
+const ACQUIRE_SLICE_MS = 250
 
 /** Acquire-and-hold `lock`, waiting through a live hold instead of
  *  timing out — a duplicate supervisor's standby (spec bro-2duu9): it
@@ -319,21 +341,28 @@ export async function awaitFileLock(
   opts: HeldLockOptions & { onStandby?: (holderPid: number | null) => void } = {}
 ): Promise<() => void> {
   const { onStandby, ...lockOpts } = opts
-  const waitMs = lockOpts.waitMs ?? STANDBY_WAIT_MS
+  // waitMs is the standby-report cadence, not the acquire slice —
+  // each attempt is bounded by ACQUIRE_SLICE_MS so a standby never
+  // stalls the event loop for the whole report window
+  const reportMs = lockOpts.waitMs ?? STANDBY_WAIT_MS
   const incumbent = lockHolderPid(lock)
   if (incumbent !== null && pidAlive(incumbent)) {
     onStandby?.(incumbent)
   }
+  let lastReport = Date.now()
   for (;;) {
     try {
-      return holdFileLock(lock, { ...lockOpts, waitMs })
+      return holdFileLock(lock, { ...lockOpts, waitMs: ACQUIRE_SLICE_MS })
     } catch (err) {
       if (!(err instanceof LockTimeout)) {
         throw err
       }
-      onStandby?.(lockHolderPid(lock))
-      // the wait budget already burned inside acquireFileLock — a
-      // macrotask here only keeps signal/'exit' handlers live
+      if (Date.now() - lastReport >= reportMs) {
+        lastReport = Date.now()
+        onStandby?.(lockHolderPid(lock))
+      }
+      // the slice already burned inside acquireFileLock — a macrotask
+      // here only keeps signal/'exit' handlers live between attempts
       await new Promise((r) => setTimeout(r, 0))
     }
   }
