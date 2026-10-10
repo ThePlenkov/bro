@@ -204,6 +204,38 @@ function isLifecycleRow(v: unknown): v is LifecycleEvent {
   )
 }
 
+/** One journal line read — the row with its 1-based `seq`, or
+ *  undefined when the line is torn, malformed, not a lifecycle row,
+ *  or filtered out. */
+function readLifecycleRow(
+  line: string,
+  seq: number,
+  opts: { kind?: string; bead?: string; pr?: number; since?: string }
+): LifecycleRead | undefined {
+  if (line === '') {
+    return undefined
+  }
+  let row: unknown
+  try {
+    row = JSON.parse(line)
+  } catch {
+    return undefined
+  }
+  if (!isLifecycleRow(row)) {
+    return undefined
+  }
+  const ev: LifecycleRead = { ...row, seq }
+  if (
+    (opts.kind !== undefined && ev.kind !== opts.kind) ||
+    (opts.bead !== undefined && ev.bead !== opts.bead) ||
+    (opts.pr !== undefined && ev.pr !== opts.pr) ||
+    (opts.since !== undefined && ev.ts <= opts.since)
+  ) {
+    return undefined
+  }
+  return ev
+}
+
 /** Ordered read of the journal — file order, torn/malformed lines
  *  skipped not fatal (a crash mid-append is a torn tail). `limit`
  *  returns the NEWEST rows; `since` keeps rows with ts > since
@@ -225,33 +257,10 @@ export function readLifecycle(
   const out: LifecycleRead[] = []
   const lines = raw.split('\n')
   for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i]!
-    if (line === '') {
-      continue
+    const ev = readLifecycleRow(lines[i]!, i + 1, opts)
+    if (ev !== undefined) {
+      out.push(ev)
     }
-    let row: unknown
-    try {
-      row = JSON.parse(line)
-    } catch {
-      continue
-    }
-    if (!isLifecycleRow(row)) {
-      continue
-    }
-    const ev = { ...row, seq: i + 1 }
-    if (opts.kind !== undefined && ev.kind !== opts.kind) {
-      continue
-    }
-    if (opts.bead !== undefined && ev.bead !== opts.bead) {
-      continue
-    }
-    if (opts.pr !== undefined && ev.pr !== opts.pr) {
-      continue
-    }
-    if (opts.since !== undefined && ev.ts <= opts.since) {
-      continue
-    }
-    out.push(ev)
   }
   return opts.limit !== undefined && out.length > opts.limit ? out.slice(-opts.limit) : out
 }
