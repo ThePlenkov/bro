@@ -55,6 +55,8 @@ describe('loopSection', () => {
       fixRounds: 2,
       maxItems: 5,
       maxOpen: 2,
+      worktreeMb: 350,
+      diskMinSlots: 3,
       batch: 6,
       batchMinPriority: 2,
     })
@@ -70,9 +72,22 @@ describe('loopSection', () => {
       fixRounds: 2,
       maxItems: 5,
       maxOpen: 2,
+      worktreeMb: 350,
+      diskMinSlots: 3,
       batch: 6,
       batchMinPriority: 2,
     })
+  })
+
+  test('disk floor keys — worktreeMb floors at 1, diskMinSlots 0 is the valid disable', () => {
+    // a 0-priced slot would silently turn the watermark off — refuse
+    assert.equal(loopSection({ worktreeMb: 0 }).worktreeMb, DEFAULT_LOOP_CONFIG.worktreeMb)
+    assert.equal(loopSection({ worktreeMb: -1 }).worktreeMb, DEFAULT_LOOP_CONFIG.worktreeMb)
+    assert.equal(loopSection({ diskMinSlots: 0 }).diskMinSlots, 0)
+    assert.equal(
+      loopSection({ diskMinSlots: -1 }).diskMinSlots,
+      DEFAULT_LOOP_CONFIG.diskMinSlots
+    )
   })
 
   test('batch floors — 0 would claim solo even when configured on', () => {

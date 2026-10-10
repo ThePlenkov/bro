@@ -46,10 +46,12 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  statfsSync,
   statSync,
   writeFileSync,
   writeSync,
 } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import {
   AgentNotFound,
@@ -88,9 +90,13 @@ import {
   buildWorkPrompt,
   clumpMembers,
   coveredBeadIds,
+  diskFloorBreach,
+  diskFloorBytes,
   expandAgentCmd,
+  MB,
   memberAction,
   planItem,
+  type DiskProbe,
   type GateSnapshot,
   type LoopConfig,
   type LoopItem,
@@ -201,6 +207,9 @@ function usage(): never {
   --stack NAME                   chain claimed beads onto stack NAME —
                                 each PR targets the member below
   --max-open N                   cap the gate stack's open PRs (loop.maxOpen, 3)
+  --disk-min-slots N             disk floor in slot units — pushes hold while
+                                free disk < N×loop.worktreeMb on any fs the
+                                run writes to (loop.diskMinSlots, 2; 0 = off)
   --batch N                      max beads per claim — a clump shares the
                                 lead's affinity key (spec/epic/area/path),
                                 one worktree, one worker, one PR
@@ -1579,6 +1588,7 @@ const LOOP_VALUE_FLAGS = new Set([
   '--merge-timeout',
   '--max',
   '--max-open',
+  '--disk-min-slots',
   '--batch',
   '--interval',
   '--label',
@@ -1734,6 +1744,7 @@ function buildCtx(
       mergeTimeoutMin: num(flag(argv, '--merge-timeout'), cfg.mergeTimeoutMin),
       maxItems: num(flag(argv, '--max'), cfg.maxItems, 0),
       maxOpen: num(flag(argv, '--max-open'), cfg.maxOpen, 1),
+      diskMinSlots: num(flag(argv, '--disk-min-slots'), cfg.diskMinSlots, 0),
       batch: num(flag(argv, '--batch'), cfg.batch, 1),
     },
     act: broCfg.act,
@@ -1812,6 +1823,19 @@ function dryRunPlan(ctx: Ctx): void {
   }
   const { slot, item } = stackPlan(ctx, top)
   console.log(`  worktree ${item.worktreeDir} on ${item.branch}`)
+  // the same floor tryClaim enforces — a dry run is exactly where an
+  // operator sizes maxOpen against real headroom
+  const probes = diskProbes(ctx)
+  const breach = diskFloorBreach(probes, ctx.cfg)
+  for (const p of probes) {
+    console.log(`  disk: ${Math.floor(p.freeBytes / MB)}M free on ${p.path}`)
+  }
+  if (breach !== undefined) {
+    console.log(
+      `  disk: HOLD — below floor ${Math.floor(diskFloorBytes(ctx.cfg) / MB)}M ` +
+        `(${ctx.cfg.diskMinSlots}×${ctx.cfg.worktreeMb}M)`
+    )
+  }
   if (slot !== undefined) {
     console.log(`  stack ${ctx.stack} member ${slot.n} — PR base ${slot.base}`)
   }
@@ -2000,6 +2024,48 @@ function endAudit(ctx: Ctx, seen: Set<string>): void {
   }
 }
 
+/** The read side of a pick — classified, ordered, still-unseen
+ *  candidates plus the foreign count a dry pick reports. */
+function clumpCandidates(
+  ctx: Ctx,
+  scope: NonNullable<ReturnType<typeof nextScope>>,
+  seen: Set<string>
+): { candidates: ReadyBead[]; foreign: number } {
+  const ready = readyBeads(ctx.root)
+  const c = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root))
+  return { candidates: c.queue.filter((b) => !seen.has(b.id)), foreign: c.foreign }
+}
+
+/** Read-only drain check for the disk hold — clumpCandidates' pipeline
+ *  minus the claims. A breached floor with nothing behind it must
+ *  still read as a drained queue: returning before claimClump on every
+ *  held tick leaves q.drained unset, and an empty store + low disk
+ *  would idle the run forever instead of reporting done. An
+ *  unreadable store answers not-drained — a blip never masks work. */
+function queueDrained(
+  ctx: Ctx,
+  scope: NonNullable<ReturnType<typeof nextScope>>,
+  seen: Set<string>
+): boolean {
+  let c: { candidates: ReadyBead[]; foreign: number }
+  try {
+    c = clumpCandidates(ctx, scope, seen)
+  } catch {
+    return false
+  }
+  const claimable = c.candidates.some((b) => {
+    const s = beadStatus(ctx, b.id)
+    return s !== 'in_progress' && s !== 'closed'
+  })
+  if (claimable) {
+    return false
+  }
+  if (c.foreign > 0) {
+    say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
+  }
+  return true
+}
+
 /** Claim the next work item — the top ready bead, plus its compatible
  *  tail when `loop.batch` > 1 (spec bro-nspj7: the clump binds on the
  *  lead's affinity key — spec/epic/area/path — and never reaches past
@@ -2012,9 +2078,7 @@ function claimClump(
   seen: Set<string>,
   budget: number
 ): ReadyBead[] | undefined {
-  const ready = readyBeads(ctx.root)
-  const c = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root))
-  const candidates = c.queue.filter((b) => !seen.has(b.id))
+  const { candidates, foreign } = clumpCandidates(ctx, scope, seen)
   // the registry's claimStep owns the lead's claim under the spawn
   // lock (spec bro-zpa93) — a loop-side pre-claim reads as "claimed
   // outside the agent registry" and the spawn refuses it. The pick
@@ -2028,8 +2092,8 @@ function claimClump(
           return s !== 'in_progress' && s !== 'closed'
         })
   if (!lead) {
-    if (c.foreign > 0) {
-      say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
+    if (foreign > 0) {
+      say(ctx, `loop: ${foreign} foreign-scope bead(s) remain — not claimable in this project`)
     }
     return undefined
   }
@@ -2105,6 +2169,12 @@ interface QueueState {
    *  hot-loop through pick+probe+spawn would burn the tick against
    *  the same wall (spec bro-zpa93). */
   pushHoldUntil: number
+  /** The disk floor's transition edge — the held/resumed lines say
+   *  once per episode, not once per tick (spec bro-2spp7). */
+  diskHeld: boolean
+  /** statfs paths that already reported a probe failure — one warning
+   *  per path per run, then the watermark goes blind-quiet. */
+  diskProbeWarned: Set<string>
 }
 
 /** One service pass over the stack, oldest-first — a snapshot copy
@@ -2136,6 +2206,51 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
   return busy
 }
 
+/** The filesystems a claim writes to — the worktree parent (sibling
+ *  `<repo>--<id>` dirs hold the checkout plus bootstrap/agent litter,
+ *  ~350M a slot) and the tmpdir (prompt files, agent scratch — /tmp
+ *  filled mid-run in one of the recorded incidents). `bavail`, not
+ *  `bfree`: the run is unprivileged, root-reserved blocks are not
+ *  headroom. Cheap enough to re-probe every push — a merge's worktree
+ *  removal re-admits the queue with no accounting of our own. An
+ *  un-probeable path is skipped and named once per run: a watermark
+ *  that cannot see reports, never gates (spec bro-2spp7). */
+function diskProbes(ctx: Ctx, warned?: Set<string>): DiskProbe[] {
+  const out: DiskProbe[] = []
+  for (const p of new Set([dirname(ctx.root), tmpdir()])) {
+    const probe = probeDisk(p, warned)
+    if (probe !== undefined) {
+      out.push(probe)
+    }
+  }
+  return out
+}
+
+/** statfs one path → DiskProbe. bigint probe — bavail×bsize on a
+ *  multi-EB fs overflows the number range mid-multiply; the DiskProbe
+ *  contract is a number, so saturate at MAX_SAFE_INTEGER (a free that
+ *  large admits every floor anyway). A failed path warns once per run
+ *  when `warned` is provided. */
+function probeDisk(p: string, warned?: Set<string>): DiskProbe | undefined {
+  try {
+    const s = statfsSync(p, { bigint: true })
+    const free = s.bavail * s.bsize
+    return {
+      path: p,
+      freeBytes: free > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(free),
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (warned === undefined) {
+      console.error(`loop: disk probe failed for ${p} — ${msg}`)
+    } else if (!warned.has(p)) {
+      warned.add(p)
+      console.error(`loop: disk probe failed for ${p} — ${msg} — watermark blind there`)
+    }
+    return undefined
+  }
+}
+
 /** The push half of a tick — true when a bead was claimed (drained or
  *  not, the fresh member's first poll wants an immediate pass, not an
  *  idle interval). False when the push was skipped — queue drained,
@@ -2148,6 +2263,19 @@ async function tryClaim(
   const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems
   if (q.drained || maxed || q.stack.length >= ctx.cfg.maxOpen || Date.now() < q.pushHoldUntil) {
     return false
+  }
+  // the disk floor — admission, not eviction. A breached floor holds
+  // pushes exactly like a full fleet does: nothing claimed, nothing
+  // parked, gate service continues while merges free the disk (spec
+  // bro-2spp7). The check sits between the cheap counters and
+  // claimClump's store reads so a held push costs one statfs per tick.
+  const breach = diskFloorBreach(diskProbes(ctx, q.diskProbeWarned), ctx.cfg)
+  if (breach !== undefined) {
+    return holdForDisk(ctx, scope, q, breach)
+  }
+  if (q.diskHeld) {
+    q.diskHeld = false
+    say(ctx, 'loop: disk back above floor — pushes resume')
   }
   ctx.stage = 'claim'
   ctx.bead = undefined
@@ -2171,23 +2299,14 @@ async function tryClaim(
     // fleet cap refused the spawn — un-see the clump and hold pushes
     // for a beat so the next pick doesn't burn the tick re-probing the
     // same wall; the claims pushItem released are re-pickable
-    for (const b of clump) {
-      q.seen.delete(b.id)
-    }
-    q.claimed -= clump.length
-    q.pushHoldUntil = Date.now() + ctx.intervalS * 1000
+    unseeClump(ctx, q, clump)
     return false
   }
   if (out.kind === 'member') {
     q.stack.push(out.member)
     // a worker-pending member reports its pending phase — its `→ PR`
     // line lands when the worker exits and the gate join happens
-    say(
-      ctx,
-      out.member.pr === undefined
-        ? `loop: ${ids.join(', ')} pushed — worker pending (gate ${q.stack.length}/${ctx.cfg.maxOpen})`
-        : `loop: ${ids.join(', ')} → PR ${prRef(ctx, out.member.pr)} (gate ${q.stack.length}/${ctx.cfg.maxOpen})`
-    )
+    say(ctx, pushLine(ctx, out.member.pr, ids, q.stack.length))
   } else {
     q.tally[out.result] += 1
     if (ctx.json) {
@@ -2195,6 +2314,53 @@ async function tryClaim(
     }
   }
   return true
+}
+
+/** The held-push branch of a tick — park the next probe for an
+ *  interval, announce the hold once. The drain verdict is still owed:
+ *  claimClump is unreachable under a breach, so without a read-only
+ *  check an empty queue behind the floor would retry the floor
+ *  forever instead of reporting done. */
+function holdForDisk(
+  ctx: Ctx,
+  scope: NonNullable<ReturnType<typeof nextScope>>,
+  q: QueueState,
+  breach: DiskProbe
+): false {
+  // drain beats the hold: an empty queue behind the floor has nothing
+  // to wait for — without this check the return below keeps q.drained
+  // unset and the run idles on disk forever
+  if (queueDrained(ctx, scope, q.seen)) {
+    q.drained = true
+    return false
+  }
+  q.pushHoldUntil = Date.now() + ctx.intervalS * 1000
+  if (!q.diskHeld) {
+    q.diskHeld = true
+    say(
+      ctx,
+      `loop: disk below floor on ${breach.path} — ` +
+        `${Math.floor(breach.freeBytes / MB)}M free < ` +
+        `${ctx.cfg.diskMinSlots}×${ctx.cfg.worktreeMb}M — pushes held`
+    )
+  }
+  return false
+}
+
+/** Undo a claim attempt the fleet cap refused — the clump goes back to
+ *  pickable and pushes hold for a beat. */
+function unseeClump(ctx: Ctx, q: QueueState, clump: ReadyBead[]): void {
+  for (const b of clump) {
+    q.seen.delete(b.id)
+  }
+  q.claimed -= clump.length
+  q.pushHoldUntil = Date.now() + ctx.intervalS * 1000
+}
+
+function pushLine(ctx: Ctx, pr: number | undefined, ids: string[], gate: number): string {
+  return pr === undefined
+    ? `loop: ${ids.join(', ')} pushed — worker pending (gate ${gate}/${ctx.cfg.maxOpen})`
+    : `loop: ${ids.join(', ')} → PR ${prRef(ctx, pr)} (gate ${gate}/${ctx.cfg.maxOpen})`
 }
 
 /** The round-robin: each tick services the gate stack oldest-first,
@@ -2209,6 +2375,8 @@ async function runQueue(ctx: Ctx): Promise<void> {
     claimed: 0,
     drained: false,
     pushHoldUntil: 0,
+    diskHeld: false,
+    diskProbeWarned: new Set(),
   }
   try {
     // sweep a crashed run's records before the first claim — a dead-pid
@@ -2230,9 +2398,10 @@ async function runQueue(ctx: Ctx): Promise<void> {
       }
       if (!busy) {
         const pending = q.stack.find((m) => m.worker !== undefined)
+        const idle = q.diskHeld ? 'idle (disk floor)' : 'idle'
         ctx.stage =
           pending === undefined
-            ? 'idle'
+            ? idle
             : `worker ${pending.worker!.agentId} pid=${pending.worker!.pid ?? '?'}`
         ctx.bead = pending === undefined ? undefined : pending.beads[0]!.id
         // the wake is the earliest member's own cadence — a worker's

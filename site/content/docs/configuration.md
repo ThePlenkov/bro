@@ -85,9 +85,13 @@ a `BroPlugin`. See [Plugins](/docs/plugins).
 | `model` | `""` | Model override for the provider lane |
 | `bootstrap` | `""` | Optional command run in each fresh worktree before the agent |
 | `stallMin` | `45` | Output-silence advisory in minutes — a live loop agent quiet this long surfaces in `bro watch`/`bro status`. Advisory only; nothing is killed |
+| `crashExitMs` | `10000` | An agent exit faster than this is an environment crash — the bead parks loud instead of reopening into a respawn-burn. `0` restores legacy reopen-on-every-exit |
 | `mergeTimeoutMin` | `45` | Review-gate budget in minutes |
 | `fixRounds` | `3` | Maximum review-fix respawns per bead |
 | `maxItems` | `0` | Maximum beads per run; `0` means until idle or gated |
+| `maxOpen` | `3` | Maximum open PRs on the run's gate stack — a full stack only services gates until a merge frees a slot |
+| `worktreeMb` | `400` | Estimated disk footprint of one open slot in MB — the disk floor prices every slot at this cost |
+| `diskMinSlots` | `2` | Disk floor in slot units — pushes hold while free disk on the worktree parent or tmpdir drops below `diskMinSlots × worktreeMb`. `0` disables the watermark |
 | `batch` | `1` | Max beads one claim may clump into a single work item — one worktree, one worker, one PR closing them all. `1` = solo claims only |
 | `batchMinPriority` | `3` | Lowest urgency allowed into a clump — a bead batches only when `priority >= batchMinPriority`, so urgent work always claims solo |
 

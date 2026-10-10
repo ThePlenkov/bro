@@ -7,7 +7,7 @@
  *  check store state, refs, and the worktree, not just output. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
@@ -35,6 +35,10 @@ interface Fixture {
   /** The fake agent script's path — provider commands reference it. */
   agent: string
   worktree: string
+  /** The raw env `run` passes to runCli — exposed so a test can spawn
+   *  the CLI directly (a run that must NOT exit gets a shorter
+   *  timeout than runCli's 60s). */
+  env: Record<string, string>
   run: (extra?: string[]) => CliResult
 }
 
@@ -59,7 +63,14 @@ function loopFixture(
       plugins: ['./fakehost.ts'],
       connectors: { reviews: 'fakehost' },
       ...extra(host),
-      loop: { agent: `node ${host.agent}`, ...loopCfg },
+      loop: {
+        agent: `node ${host.agent}`,
+        // e2e must be environment-deterministic: a host /tmp under the
+        // default floor (2×400M) would hold every push in EVERY
+        // scenario — disk coverage opts back in explicitly
+        diskMinSlots: 0,
+        ...loopCfg,
+      },
     })
   )
   const env = {
@@ -76,6 +87,7 @@ function loopFixture(
     hostState: host.state,
     agent: host.agent,
     worktree: join(root, 'main--fx-a'),
+    env,
     run: (extra = []) => runCli(['loop', ...extra], { cwd: main, env }),
   }
 }
@@ -217,6 +229,68 @@ describe('bro loop e2e', () => {
       assert.match(r.stdout, /loop\/fx-a/)
       assert.equal(bead(f.db, 'fx-a')?.status, 'open')
       assert.equal(existsSync(f.worktree), false)
+    })
+  })
+
+  test('dry-run reports the disk verdict — HOLD below floor, free space otherwise (bro-2spp7)', () => {
+    // a worktreeMb bigger than the real disk trips the floor on every
+    // probe — the dry run must say HOLD instead of pretending the plan
+    // is pushable
+    const f = loopFixture(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'disk hog' }],
+      { worktreeMb: 99_000_000, diskMinSlots: 2 }
+    )
+    inside(f.main, f.root, () => {
+      const r = f.run(['--dry-run'])
+      assert.match(r.stdout, /disk: \d+M free on/)
+      assert.match(r.stdout, /disk: HOLD — below floor \d+M \(2×99000000M\)/)
+      // --disk-min-slots 0 is the escape hatch — same price, floor off
+      const off = f.run(['--dry-run', '--disk-min-slots', '0'])
+      assert.match(off.stdout, /disk: \d+M free on/)
+      assert.doesNotMatch(off.stdout, /disk: HOLD/)
+    })
+  })
+
+  test('disk floor: pushes hold instead of claiming into ENOSPC (bro-2spp7)', () => {
+    // every probe is below a ~99TB-priced floor — the run must hold
+    // pushes (never claim, never park) the way it does on a full fleet
+    const f = loopFixture(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'disk hog' }],
+      { worktreeMb: 99_000_000, diskMinSlots: 2 }
+    )
+    inside(f.main, f.root, () => {
+      // a holding run is correct-by-design non-terminating — the test's
+      // own timeout (not runCli's 60s) bounds it and the captured
+      // output is the evidence
+      const proc = spawnSync(process.execPath, [CLI_DIST, 'loop', '--interval', '1'], {
+        cwd: f.main,
+        env: e2eEnv(f.env),
+        encoding: 'utf8',
+        timeout: 8_000,
+      })
+      assert.equal(proc.status, null, 'run should have held until the test timeout')
+      const stdout = proc.stdout ?? ''
+      const stderr = proc.stderr ?? ''
+      // exactly one hold line per episode — a re-breach does not re-log
+      assert.equal(stdout.match(/disk below floor/g)?.length, 1)
+      assert.match(stdout, /disk below floor .* pushes held/)
+      // the heartbeat names the wait — a disk-stuck run is a named
+      // stall, never a silent one
+      assert.match(stderr, /loop: alive — idle \(disk floor\)/)
+      // nothing claimed, nothing parked, nothing minted
+      assert.equal(bead(f.db, 'fx-a')?.status, 'open')
+      assert.equal(existsSync(f.worktree), false)
+    })
+  })
+
+  test('disk floor: an empty queue still drains — the hold is not forever (bro-2spp7)', () => {
+    // the breach return must not starve the drain check — with nothing
+    // claimable behind the floor the run reports done instead of
+    // holding pushes on an empty store until the disk frees
+    const f = loopFixture([], { worktreeMb: 99_000_000, diskMinSlots: 2 })
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /done — 0 landed, 0 closed, 0 parked, 0 failed/)
     })
   })
 

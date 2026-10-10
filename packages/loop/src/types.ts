@@ -51,6 +51,16 @@ export interface LoopConfig {
    *  and only gate service runs until a merge frees a slot. 1 is the
    *  near-serial shape (spec bro-zsmwq). */
   maxOpen: number
+  /** Estimated disk footprint of one open slot in MB — the worktree
+   *  checkout plus bootstrap/agent litter (~350M observed for this
+   *  repo's npm install). The disk floor prices every slot at this
+   *  cost (spec bro-2spp7). */
+  worktreeMb: number
+  /** Disk floor in slot units — a push is admitted only while free
+   *  disk covers `diskMinSlots × worktreeMb` on every filesystem the
+   *  run writes to (worktree parent, tmpdir). 0 disables the
+   *  watermark. */
+  diskMinSlots: number
   /** Max beads one claim may clump into a single work item — one
    *  worktree, one worker, one PR closing them all (spec bro-nspj7).
    *  1 = solo claims only (legacy). Clumping binds on the lead's
@@ -75,6 +85,8 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   fixRounds: 3,
   maxItems: 0,
   maxOpen: 3,
+  worktreeMb: 400,
+  diskMinSlots: 2,
   batch: 1,
   batchMinPriority: 3,
 }

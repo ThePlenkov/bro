@@ -7,6 +7,7 @@ export {
   SOLO_LABEL,
   type BatchableBead,
 } from './batch.ts'
+export { diskFloorBreach, diskFloorBytes, MB, type DiskProbe } from './capacity.ts'
 export { loopSection } from './config.ts'
 export { loopSlug, planItem, type LoopItem } from './item.ts'
 export {
