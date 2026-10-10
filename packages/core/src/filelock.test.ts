@@ -180,7 +180,10 @@ describe('filelock', () => {
       // is proven cross-process in the awaitFileLock test below
       const again = acquireFileLock(lock, { waitMs: 0 })
       again()
+      assert.equal(existsSync(lock), true)
+      assert.equal(lockHolderPid(lock), process.pid)
       release()
+      assert.equal(existsSync(lock), false)
     } finally {
       done()
     }
