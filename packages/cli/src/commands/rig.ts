@@ -52,6 +52,7 @@ import { rigSection, type RigConfig } from './rig-config.ts'
 import {
   installSched,
   schedState,
+  shq,
   uninstallSched,
   type SchedSpec,
 } from './sched.ts'
@@ -69,6 +70,24 @@ export const RIG_SPEC: SchedSpec = {
   hint: 'bro rig install',
   invocation: (version: string) =>
     `bro rig sync || npx -y --prefer-offline "@broject/bro@${version}" rig sync`,
+}
+
+/** The unit's ExecStart re-resolves the repo at tick time — a bare
+ *  `rig sync` in the WorkingDirectory lands on the repo's MAIN
+ *  worktree, silently dropping an explicit --repo/rig.repo target
+ *  (an operator naming a linked worktree means that worktree). The
+ *  override is baked into the invocation; an auto-resolved install
+ *  stays bare so the unit follows the worktree layout. */
+function rigSpec(resolved: RigRepo): SchedSpec {
+  if (resolved.via === 'worktree') {
+    return RIG_SPEC
+  }
+  const sync = `rig sync --repo ${shq(resolved.repo)}`
+  return {
+    ...RIG_SPEC,
+    invocation: (version: string) =>
+      `bro ${sync} || npx -y --prefer-offline "@broject/bro@${version}" ${sync}`,
+  }
 }
 
 /** `~` expands; a relative path resolves against cwd — operator
@@ -456,10 +475,20 @@ export async function runRigCommand(argv: string[]): Promise<void> {
       )
       process.exit(2)
     }
+    const forSec = forRaw === undefined ? undefined : Number(forRaw)
+    // NaN or an overflowing --for is no bound at all — deadline stays
+    // unreachable and the loop ticks forever at --every's cadence
+    if (
+      forSec !== undefined &&
+      (!Number.isFinite(forSec) || forSec <= 0 || !Number.isFinite(forSec * 1000))
+    ) {
+      console.error(`error: --for needs a finite seconds value >0, got "${forRaw}"`)
+      process.exit(2)
+    }
     // the bound starts before the first tick — a slow pull already
     // spends --for budget (watch's contract)
     const deadline =
-      forRaw === undefined ? Number.POSITIVE_INFINITY : performance.now() + Number(forRaw) * 1000
+      forSec === undefined ? Number.POSITIVE_INFINITY : performance.now() + forSec * 1000
     const repo = resolved.repo
     for (;;) {
       const r = rigSync(repo)
@@ -485,7 +514,7 @@ export async function runRigCommand(argv: string[]): Promise<void> {
       )
       process.exit(2)
     }
-    const r = installSched(RIG_SPEC, resolved.repo, cliVersion(), {
+    const r = installSched(rigSpec(resolved), resolved.repo, cliVersion(), {
       everySec,
       print: argv.includes('--print'),
     })

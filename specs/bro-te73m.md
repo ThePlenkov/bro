@@ -65,7 +65,7 @@ The mechanic is upstream-tracking, not a hardcoded repo or branch:
 
 ## Config — `rig` section (operator layer)
 
-```json
+```jsonc
 "rig": {
   "repo": "/abs/path/to/main-checkout",   // default: current repo's main worktree
   "intervalSec": 600                       // watch tick + installed cadence

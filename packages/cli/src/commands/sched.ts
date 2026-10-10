@@ -91,7 +91,7 @@ export const cronTag = (spec: SchedSpec, commonDir: string): string =>
 
 /** Single-quote for sh — the only quoting that survives both systemd's
  *  ExecStart parse and cron's `sh -c` line. */
-const shq = (s: string): string => `'${s.replaceAll("'", `'"'"'`)}'`
+export const shq = (s: string): string => `'${s.replaceAll("'", `'"'"'`)}'`
 
 /** % is systemd's specifier escape — a path containing one would
  *  silently expand; %% is the literal. A newline can't be expressed at
@@ -351,7 +351,7 @@ function stripCronTag(
   if (removed === 0) {
     return { removed: 0 }
   }
-  const w = run('crontab', ['-'], kept.join('\n'))
+  const w = run('crontab', ['-'], kept.join('\n') + '\n')
   return w.code === 0 ? { removed } : { failed: w.err.trim() || `crontab - exited ${w.code}` }
 }
 
