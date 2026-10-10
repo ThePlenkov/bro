@@ -27,6 +27,10 @@ answer — the index every capability spec links back to.
 | `specs/mesh/` | inter-rig wire contract: envelope, lifecycle, transports (`bro mesh`) |
 | `specs/cross-repo/` | bro-side request protocol phases: LOCAL `bro request`, WAIT watcher, REMOTE transports |
 | `specs/fleet-routing/` | context/quota-aware dispatch: class→chain routing, provider walls, resume, continuation |
+| `specs/comms/` | agent event bus + mailbox: envelope contract, publish/subscribe, notify (`bro bus`, `bro notify`) |
+| `specs/goal/` | session-scoped completion goals, stop-hook evaluation (`bro goal`) |
+| `specs/telemetry/` | hook + command perf journal, latency rollup (`bro telemetry`) |
+| `specs/cli/` | command-surface structure: groups, aliases, naming contract, dispatch |
 
 ## Filetree (capability → code)
 
@@ -48,7 +52,7 @@ packages/
   providers/  provider wire clients (systemone/acp/openai/cli) → judgments
   core/src/{judge,providers}.ts                            → judgments
   mesh/       envelope, peers, thread, local delivery      → mesh + cross-repo
-  cli/        bro: plugin registry + command dispatch      → all
+  cli/        bro: plugin registry + command dispatch      → cli + all
     src/commands/spec.ts, spec-connectors.ts               → sdd
     src/commands/{hooks,work,drill,loop,next}.ts           → sessions
     src/commands/{agents,fleet,serve}.ts, agent-connectors.ts → sessions
