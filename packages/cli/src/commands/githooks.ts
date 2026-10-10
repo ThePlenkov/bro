@@ -216,6 +216,27 @@ export function liveSessionClaims(
   return out
 }
 
+/** Every session with at least one live marker — the any-aspect
+ *  sibling of liveSessionClaims: attribution callers (the build stamp)
+ *  want "who is here", not "who claimed what". Same markerInfo scan,
+ *  same live bar. */
+export function liveSessionIds(hooksDir: string, now: number = Date.now()): Set<string> {
+  const live = new Set<string>()
+  let files: string[]
+  try {
+    files = readdirSync(hooksDir)
+  } catch {
+    return live
+  }
+  for (const f of files) {
+    const info = markerInfo(join(hooksDir, f), f, now)
+    if (info !== null) {
+      live.add(info.session)
+    }
+  }
+  return live
+}
+
 /** `work/bro-fzot` / `loop/fx-9` → the bead — bro's own worktree
  *  namespaces name their task even when the env pins never reached this
  *  shell. Only those two prefixes count: `feature/user-login` is prose,

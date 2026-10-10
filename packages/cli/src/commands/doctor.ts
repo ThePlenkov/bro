@@ -35,6 +35,7 @@ import { judgeConfig, synthesizedProviders } from '@broject/judge'
 import type { JudgeConfig } from '@broject/judge'
 import { loadBroConfig, pluginConfigSections } from '../plugins.ts'
 import { pluginRows } from './plugins.ts'
+import { readStamp, stampAgo, stampSession } from './buildstamp.ts'
 import {
   budgetLines,
   budgetSnapshotFor,
@@ -635,6 +636,45 @@ function providerChecks(dir: string): DoctorCheck[] {
   ]
 }
 
+/** Build-stamp row (bro-fatja) — who last wrote this worktree's shared
+ *  mutable outputs (dist/, node_modules/). The record itself is the
+ *  attribution; the warns are a stamp behind HEAD and a resolvable
+ *  foreign session's write. An unresolvable current session never
+ *  guesses "not yours" — the detail still carries the attribution. */
+function buildStampChecks(dir: string, root: string | null): DoctorCheck[] {
+  if (root === null) {
+    return []
+  }
+  const stamp = readStamp(dir)
+  if (stamp === null) {
+    return [check('build', 'ok', 'no stamped build')]
+  }
+  const who = `last write by ${stamp.session} (${stamp.via}) ${stampAgo(stamp.ts, Date.now())}`
+  const head = gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', 'HEAD^{commit}'])
+  if (stamp.head !== '' && head.code === 0 && stamp.head !== head.out.trim()) {
+    return [
+      check(
+        'build',
+        'warn',
+        `${who} — behind HEAD`,
+        'the recorded write predates this checkout — a stale build may have reverted newer work'
+      ),
+    ]
+  }
+  const me = stampSession(dir, process.env)
+  if (me !== undefined && me !== stamp.session) {
+    return [
+      check(
+        'build',
+        'warn',
+        `${who} — another session rebuilt since your write`,
+        'verify your changes to the output tree still stand — rebuild or reapply your hotpatch'
+      ),
+    ]
+  }
+  return [check('build', 'ok', who)]
+}
+
 /** Janitor probe — a dry run over `<git-common>/bro/` reporting the
  *  retention debris the next `bro watch` tick would reap. Probes stay
  *  read-only: this counts, it never unlinks (bro-f6zp). */
@@ -820,6 +860,7 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
     ...queryCliChecks(dir, cfg.connectors),
     ...meshChecks(dir, cfg.mesh),
     checkClientPlugins(dir),
+    ...buildStampChecks(dir, root),
     ...(janitor === null ? [] : [janitor]),
     ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found)
   )

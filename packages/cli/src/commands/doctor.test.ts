@@ -109,7 +109,20 @@ function withEnv(opts: EnvOpts, fn: (dir: string) => void): Promise<void> {
   // not leak the dev machine's real user config into probes
   saved.XDG_CONFIG_HOME = process.env.XDG_CONFIG_HOME
   process.env.XDG_CONFIG_HOME = join(dir, 'xdg')
-  for (const k of ['DEVIN_PLUGIN_ROOT', 'CLAUDE_PLUGIN_ROOT', 'PLUGIN_ROOT', 'BEADS_DIR']) {
+  for (const k of [
+    'DEVIN_PLUGIN_ROOT',
+    'CLAUDE_PLUGIN_ROOT',
+    'PLUGIN_ROOT',
+    'BEADS_DIR',
+    // session pins — a leaked BRO_/DEVIN_SESSION_ID would let the
+    // ambient session claim the fixture's build stamp
+    'BRO_SESSION_ID',
+    'BRO_AGENT_ID',
+    'DEVIN_SESSION_ID',
+    'CLAUDE_SESSION_ID',
+    'CODEX_SESSION_ID',
+    'OPENCODE_SESSION_ID',
+  ]) {
     saved[k] = process.env[k]
     delete process.env[k]
   }
@@ -491,6 +504,43 @@ describe('bro doctor', () => {
     withEnv({ config: { judge: { provider: 'systemone' } }, bins: ['gh'] }, (dir) => {
       const rows = runDoctorChecks(dir).filter((c) => c.name === 'providers')
       assert.ok(!rows.some((c) => c.status === 'warn'), JSON.stringify(rows))
+    }))
+
+  test('build row: absent stamp is ok; a foreign session or a stamp behind HEAD warns (bro-fatja)', () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      // git init ran with no commit — a stamp needs HEAD, make one
+      execFileSync('git', ['-C', dir, 'config', 'user.email', 't@t'])
+      execFileSync('git', ['-C', dir, 'config', 'user.name', 't'])
+      execFileSync('git', ['-C', dir, 'commit', '-qm', 'init', '--allow-empty'])
+      const head = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+      assert.match(byName(runDoctorChecks(dir), 'build').detail, /no stamped build/)
+
+      const stampFile = join(dir, '.git', 'bro', 'last-build.json')
+      mkdirSync(join(dir, '.git', 'bro'), { recursive: true })
+      const write = (s: object) => writeFileSync(stampFile, JSON.stringify(s))
+
+      // unresolvable current session: a foreign-named stamp still
+      // reports attribution without claiming "not yours"
+      write({ session: 'other-sess', ts: Date.now(), head, inputs: 'x'.repeat(64), via: 'post-merge' })
+      let c = byName(runDoctorChecks(dir), 'build')
+      assert.equal(c.status, 'ok', JSON.stringify(c))
+      assert.match(c.detail, /other-sess.*post-merge/)
+
+      // resolved session + foreign stamp → the bead's headline warn
+      process.env.BRO_SESSION_ID = 'me'
+      c = byName(runDoctorChecks(dir), 'build')
+      assert.equal(c.status, 'warn')
+      assert.match(c.detail, /another session rebuilt since your write/)
+
+      // own stamp → ok
+      write({ session: 'me', ts: Date.now(), head, inputs: 'x'.repeat(64), via: 'build' })
+      assert.equal(byName(runDoctorChecks(dir), 'build').status, 'ok')
+
+      // stamp behind HEAD warns — even when it was mine
+      write({ session: 'me', ts: Date.now(), head: 'deadbeef', inputs: 'x'.repeat(64), via: 'build' })
+      c = byName(runDoctorChecks(dir), 'build')
+      assert.equal(c.status, 'warn')
+      assert.match(c.detail, /behind HEAD/)
     }))
 
   test('not a git repo — repo warns, remote probes are skipped', () =>

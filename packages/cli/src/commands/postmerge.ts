@@ -33,14 +33,16 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import {
   gitTry,
   loadConfig,
   LockTimeout,
   withFileLock,
+  worktreeGitDir,
   type ConfigSection,
 } from '@broject/core'
+import { writeStamp } from './buildstamp.ts'
 
 /** `freshness` config section — the post-merge refresh's command slots.
  *  Absent = auto (lockfile-detected install, `scripts.build`, the
@@ -76,18 +78,9 @@ export const freshnessSection: ConfigSection<FreshnessConfig> = (raw) => {
 export const DEP_MANIFEST =
   /(?:^|\/)(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|\.yarnrc\.yml|bun\.lock|bun\.lockb)$/
 
-/** This worktree's own git dir, absolute — `<repo>/.git` on the main
- *  checkout, `<common>/worktrees/<name>` on a linked one, so refresh
- *  state is per-worktree and dies with `git worktree remove`. */
-export function worktreeGitDir(cwd: string): string | null {
-  const r = gitTry(['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-dir'])
-  if (r.code === 0 && r.out.trim() !== '') {
-    return r.out.trim()
-  }
-  const f = gitTry(['-C', cwd, 'rev-parse', '--git-dir'])
-  const p = f.code === 0 ? f.out.trim() : ''
-  return p === '' ? null : resolve(cwd, p)
-}
+/** Refresh state lives in the worktree's own git dir — `worktreeGitDir`
+ *  from core (`--git-dir`, not `--git-common-dir`): per-worktree
+ *  done-sha/log/stamp, reaped with `git worktree remove`. */
 
 const revParse = (cwd: string, ref: string): string | null => {
   const r = gitTry(['-C', cwd, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`])
@@ -311,6 +304,15 @@ function refreshPass(
     }
   }
   writeFileSync(doneFile, `${head}\n`)
+  if (steps.length > 0) {
+    // attribute the write — the rebuild's dist rewrite is exactly the
+    // unattributed "user action" a watcher can't explain (bro-fatja)
+    try {
+      writeStamp(cwd, { via: 'post-merge' })
+    } catch {
+      // stamping is advisory — it must never fail the refresh
+    }
+  }
   return true
 }
 

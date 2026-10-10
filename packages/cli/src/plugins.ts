@@ -85,6 +85,7 @@ import { runSetupCommand } from './commands/setup.ts'
 import { runMeshCommand } from './commands/mesh.ts'
 import { runSpecCommand, sddConnector } from './commands/spec.ts'
 import { runStackCommand } from './commands/stack.ts'
+import { runStampCommand } from './commands/buildstamp.ts'
 import { SPEC_CONNECTORS } from './spec-connectors.ts'
 import { runSweepCommand } from './commands/sweep.ts'
 import { runSyncCommand } from './commands/sync.ts'
@@ -380,6 +381,12 @@ export const PLUGINS: BroPlugin[] = [
     run: runStackCommand,
     skill: 'stack',
     // the 'stack' config section (stack.mode) stays owned by `work`
+  }),
+  definePlugin({
+    name: 'stamp',
+    group: 'work',
+    summary: 'Attribute shared-output writes — record/read the last build stamp',
+    run: runStampCommand,
   }),
   definePlugin({
     name: 'spec',

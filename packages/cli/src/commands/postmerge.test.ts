@@ -15,6 +15,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { worktreeGitDir } from '@broject/core'
 import {
   DEP_MANIFEST,
   depsChanged,
@@ -22,7 +23,6 @@ import {
   freshnessSection,
   resolveSteps,
   runPostMergeRefresh,
-  worktreeGitDir,
 } from './postmerge.ts'
 import { git, initRepo, inside } from './testrepo.ts'
 
@@ -255,6 +255,37 @@ describe('runPostMergeRefresh', () => {
         runPostMergeRefresh(main, run)
         assert.deepEqual(ran, ['npm run build'])
         assert.equal(doneSha(main), head(main))
+      })
+    )
+  })
+
+  test('a refresh that ran steps stamps the build record; a no-step pass does not (bro-fatja)', () => {
+    const { root, main } = nodeRepo('bro-pm-run-', false) // no build script
+    inside(main, root, () =>
+      isolatedConfig(() => {
+        runPostMergeRefresh(main, () => 0)
+        const stamp = () =>
+          JSON.parse(readFileSync(join(main, '.git', 'bro', 'last-build.json'), 'utf8')) as {
+            via: string
+            head: string
+            inputs: string
+            session: string
+            ts: number
+          }
+        const first = stamp()
+        assert.equal(first.via, 'post-merge')
+        assert.equal(first.head, head(main))
+        assert.match(first.inputs, /^[0-9a-f]{64}$/)
+        assert.notEqual(first.session, '')
+        // a pass whose resolveSteps is empty (no manifest move, no
+        // build script, no patch) wrote nothing — the record must keep
+        // naming the last REAL write, not the no-op
+        writeFileSync(join(main, 'src.ts'), 'x')
+        git(['add', '-A'], main)
+        git(['commit', '-qm', 'src'], main)
+        runPostMergeRefresh(main, () => 0)
+        assert.equal(doneSha(main), head(main)) // done-sha still advanced
+        assert.equal(stamp().head, first.head) // but the stamp did not
       })
     )
   })
