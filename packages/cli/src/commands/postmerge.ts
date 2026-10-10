@@ -277,6 +277,18 @@ const readDoneSha = (doneFile: string): string => {
   }
 }
 
+/** The sha the last completed refresh recorded —
+ *  `<worktree-gitdir>/bro/post-merge.done`, '' when a refresh never
+ *  completed, null outside a worktree. `bro rig` asserts its refresh
+ *  verdict from this, never from a worker's log. */
+export function postMergeDoneSha(cwd: string): string | null {
+  const gitdir = worktreeGitDir(cwd)
+  if (gitdir === null) {
+    return null
+  }
+  return readDoneSha(join(gitdir, 'bro', DONE_FILE))
+}
+
 /** One refresh pass — false stops the loop: HEAD done or unresolvable,
  *  or a step failed (done-sha stays frozen so the next merge retries
  *  the whole range). */
