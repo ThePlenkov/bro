@@ -162,7 +162,11 @@ function silenceMs(rec: LoopRunRecord | null, recordMtime: number, now: number):
       : Number.isFinite(recordMtime)
         ? Math.max(logMtime, recordMtime)
         : logMtime
-  return Number.isFinite(base) ? now - base : null
+  // mtimes carry sub-ms precision that an integer Date.now() lacks —
+  // a read inside the write's own millisecond (or a foreign-fs stamp
+  // skewed into the future) subtracts to a negative, and silence is a
+  // duration: it bottoms out at 0
+  return Number.isFinite(base) ? Math.max(0, now - base) : null
 }
 
 function fileView(home: string, f: string, now: number): LoopRunView {
