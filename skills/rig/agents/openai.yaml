@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Rig"
+  short_description: "Rig freshness via the bro CLI — the main checkout tracks upstream, rebuilt + hotpatched"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $rig to get started."
+policy:
+  allow_implicit_invocation: true
