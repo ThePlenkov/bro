@@ -113,7 +113,7 @@ Full reference: [broject.dev/docs](https://broject.dev/docs).
 | ------- | ------------- |
 | `bro next [--list] [--json] [--global]` | Claim the top ready bead and print the work order |
 | `bro spec check\|drift\|new\|tree\|init` | Check spec coverage and drift, scaffold specs, and inspect their tree |
-| `bro stack push\|list\|sync` | Build and retarget stacked bead→worktree→PR chains |
+| `bro stack push\|list\|sync\|publish\|merge` | Build, register, retarget, and land stacked bead→worktree→PR chains |
 | `bro query <plan.toml>` | Run a cross-provider GraphQL fan-out plan — one merged JSON answer |
 | `bro work enter\|leave\|list\|prune` | Manage sibling worktrees and their recorded stack membership |
 

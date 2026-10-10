@@ -14,6 +14,7 @@ parent lands.
 | `bro stack push <bead> [--name <stack>]` | Claim a bead and create or re-enter its stack member |
 | `bro stack list [<name>]` | Show positions, bases, worktrees, and PR state |
 | `bro stack sync [<name>]` | Retarget and rebase child members after a merge — skipped where the platform already did it |
+| `bro stack publish [<name>]` | Register the chain's open member PRs as the host's stack object (GitHub: `gh stack link`) |
 | `bro stack merge [<name>] [--squash\|--merge\|--rebase] [--admin]` | Land the chain bottom→top, gated member by member |
 
 `--name` is required from the main checkout and inferred inside a stack
@@ -25,7 +26,12 @@ member. Sync skips dirty or locked worktrees instead of touching them.
 per-layer fallback) and skips the retarget/rebase the platform already
 did on `.stack` PRs; GitLab relies on native stacked-MR retargeting and
 merges bottom-up per layer; a repo with no forge merges the chain
-locally in the primary worktree.
+locally in the primary worktree. `stack publish` exists only where the
+host keeps a stack registry — GitHub's `gh stack link` creates or grows
+it (needs ≥2 open member PRs, idempotent on re-run); GitLab and plain
+git detect chains from the PR base links themselves, so the command
+declines there. A clean `stack sync` publishes automatically, and
+`stack list` hints while open member PRs are unregistered.
 
 ## `bro work`
 

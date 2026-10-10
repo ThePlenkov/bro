@@ -571,8 +571,11 @@ const facade = {
 }
 // the stacks facade — host.json cascade: {retarget, rebase} scripts
 // platform ownership for every PR-carrying member (GitLab-style
-// retarget-only, GitHub-style retarget+remote-rebase). Only claimed via
-// connectors.stacks — the git connector's dir match wins unnamed.
+// retarget-only, GitHub-style retarget+remote-rebase). The stacks map
+// is the host's stack registry: publish writes branch → stack id for
+// every member, growing a shared id when some already belong;
+// membership reads it back. Only claimed via connectors.stacks — the
+// git connector's dir match wins unnamed.
 const stacksFacade = {
   openHint: (m) => 'fake-mr create --base ' + m.base,
   cascade: (m) => {
@@ -580,6 +583,27 @@ const stacksFacade = {
     return s.cascade !== undefined && m.pr !== undefined
       ? s.cascade
       : { retarget: false, rebase: false }
+  },
+  membership: (m) => {
+    const id = load().stacks?.[m.branch]
+    return id === undefined ? null : { id }
+  },
+  publish: (members) => {
+    const s = load()
+    // publishGap scripts the unproven-publish shape — link "ran" but
+    // the membership readback reports nothing, so the stack registry
+    // stays empty and the verb returns null
+    if (s.publishGap) {
+      return null
+    }
+    s.stacks = s.stacks ?? {}
+    const existing = members.map((m) => s.stacks[m.branch]).find((i) => i !== undefined)
+    const id = existing ?? (s.nextStackId = (s.nextStackId ?? 900) + 1)
+    for (const m of members) {
+      s.stacks[m.branch] = id
+    }
+    save(s)
+    return { id, size: members.length }
   },
 }
 export default {

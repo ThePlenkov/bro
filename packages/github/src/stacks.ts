@@ -22,10 +22,11 @@ import {
   type StackCascade,
   type StackChainMember,
   type StackFacade,
+  type StackMembership,
   type StackMergeOpts,
   type StackMergeReport,
 } from '@broject/core'
-import { stackProbe } from './reviews.ts'
+import { stackMembership, stackProbe } from './reviews.ts'
 
 const PLATFORM_CASCADE: StackCascade = { retarget: true, rebase: true }
 
@@ -76,6 +77,32 @@ function ghStackMerge(
   }
 }
 
+/** `gh stack link <prs…>` — the extension's external-manager verb:
+ *  members already inside a stack are skipped, the rest create or grow
+ *  it in bottom→top order. bro owns the branches, so link is the only
+ *  write path — `gh stack` state/refresh/push would fight it. The repo
+ *  resolves before the call (same rationale as ghStackMerge): a
+ *  repo-view failure after link registered the chain would throw with
+ *  the work already done. The bottom member's `.stack` re-read is the
+ *  success proof — the tool's exit, not its stdout, is authoritative. */
+function ghStackLink(dir: string, members: StackChainMember[]): StackMembership | null {
+  if (!ghStackInstalled(dir)) {
+    throw new Error(
+      'gh-stack extension not installed — `gh extension install github/gh-stack` adds `gh stack link`'
+    )
+  }
+  const prs = members.filter((m) => m.pr !== undefined).map((m) => m.pr!)
+  if (prs.length === 0) {
+    return null
+  }
+  const repo = resolveRepo([], dir)
+  const r = ghTry(['stack', 'link', ...prs.map(String)], dir)
+  if (r.code !== 0) {
+    throw new Error(`gh stack link ${prs.join(' ')} failed (${r.code}): ${r.err || r.out.trim()}`)
+  }
+  return stackMembership({ repo, pr: prs[0]! })
+}
+
 export function githubStacks(dir: string): StackFacade {
   return {
     openHint: (m) => `gh pr create --base ${shQuote(m.base)}`,
@@ -95,5 +122,16 @@ export function githubStacks(dir: string): StackFacade {
       }
     },
     mergeChain: (members, opts) => ghStackMerge(dir, members, opts),
+    membership(m) {
+      if (m.pr === undefined) {
+        return null
+      }
+      try {
+        return stackMembership({ repo: resolveRepo([], dir), pr: m.pr })
+      } catch {
+        return null
+      }
+    },
+    publish: (members) => ghStackLink(dir, members),
   }
 }

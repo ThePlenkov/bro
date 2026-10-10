@@ -1,6 +1,6 @@
 ---
 name: stack
-description: "Use when work should land as a stacked bead→worktree→PR chain (gh-stack analogue) — `bro stack push` a bead onto a named stack, `bro stack list` the chain, `bro stack sync` after a member merges, `bro stack merge` to land it, `bro loop --stack` to drive it. Thin wrapper over the bro CLI — mechanics live in the CLI."
+description: "Use when work should land as a stacked bead→worktree→PR chain (gh-stack analogue) — `bro stack push` a bead onto a named stack, `bro stack list` the chain, `bro stack publish` registers the PRs as the host's stack, `bro stack sync` after a member merges, `bro stack merge` to land it, `bro loop --stack` to drive it. Thin wrapper over the bro CLI — mechanics live in the CLI."
 ---
 
 # /stack (bro)
@@ -19,7 +19,8 @@ reviews while the parent is still in flight. The stack is a *view* over
 | ------- | ------------ |
 | `bro stack push <bead> [--name <stack>]` | Sibling worktree `<repo>--<bead>` on branch `stack/<name>/<n>-<bead>`, based on the stack tip (first member bases on the default branch). `--name` is required from the main checkout; inside a `stack/<name>/…` member worktree the name is inferred. Re-pushing a bead that is already a member re-enters its worktree — no duplicate position. Claims the bead, like `work enter` |
 | `bro stack list [<name>]` | The chain: position, bead, branch, recorded base, worktree state, PR state + declared base |
-| `bro stack sync [<name>]` | Post-merge cascade: retarget open child PRs to the new base and rebase child branches — skipped where the platform already did it; a dirty or locked worktree is skipped and reported — its owner rebases on enter |
+| `bro stack sync [<name>]` | Post-merge cascade: retarget open child PRs to the new base and rebase child branches — skipped where the platform already did it; a dirty or locked worktree is skipped and reported — its owner rebases on enter. A clean cascade also publishes the chain (below) |
+| `bro stack publish [<name>]` | Register the chain's open member PRs as the host's server-side stack — `gh stack link` on GitHub. Idempotent: members already inside are kept, a re-run is a no-op. Needs ≥2 open member PRs; declines where the host detects chains itself (GitLab, plain git) |
 | `bro stack merge [<name>] [--squash\|--merge\|--rebase] [--admin]` | Land the chain bottom→top through the connector's own mechanism after gating every mergeable member's act gate; post-merge sync runs automatically |
 | `bro loop --stack <name>` | The autonomous runner chains every claimed bead onto the named stack and syncs after each landed merge |
 
@@ -34,6 +35,9 @@ do" — `bro stack` never hand-rolls a step the host owns:
   on top — never a force-push over the platform's rewrite). With the
   `gh stack` extension installed, `stack merge` is one atomic
   `gh stack merge <top-pr> --yes`; without it, per-layer merge-async.
+  `stack publish` is the same extension's `gh stack link` — the
+  write path that creates or grows the server-side stack object the
+  `.stack` reads reflect.
 - **GitLab** (19.1+) — the platform detects the chain from target
   branches and retargets the next MR on each merge; bro never calls the
   retarget API there. Merge is bottom-up `PUT …/merge` per layer —
@@ -50,6 +54,12 @@ do" — `bro stack` never hand-rolls a step the host owns:
   connector's (`gh pr create --base`, `glab mr create
   --target-branch`); the bottom member targets the default branch. A
   forge-less repo prints no hint — there is nothing to open.
+- **Publish is post-hoc, not part of push.** No PR exists at `stack
+  push` time — registration can only run once ≥2 member PRs exist. Call
+  `bro stack publish` after the second member's PR is open, or let a
+  clean `stack sync` do it; `stack list` hints while open PRs are
+  unregistered. Registration is what unlocks the platform cascade and
+  `gh stack merge` — publish before depending on either.
 - **Merge via `stack merge`, then it syncs itself.** The merge set is
   the contiguous prefix of live members with an OPEN PR — a PR-less
   member breaks the chain and merge stops below it. Every member's act
