@@ -773,7 +773,7 @@ function meshDoltCheck(): DoctorCheck {
 /** Debt-source prerequisites (spec: specs/bro-huy5o.4.md) — a configured
  *  source whose setup is incomplete reports here instead of being a
  *  surprise `skipped` line at collect. Unconfigured sources emit no row. */
-function debtSourceChecks(dir: string, debt: { sources: string[]; sonarcloud: { project_key?: string; host?: string } }): DoctorCheck[] {
+function debtSourceChecks(dir: string, debt: { sources: string[]; sourceConfig: Record<string, Record<string, unknown>> }): DoctorCheck[] {
   if (!debt.sources.includes('sonarcloud')) {
     return []
   }
@@ -788,14 +788,14 @@ function debtSourceChecks(dir: string, debt: { sources: string[]; sonarcloud: { 
       ),
     ]
   }
-  const project = resolveSonarProject(dir, debt.sonarcloud)
+  const project = resolveSonarProject(dir, debt.sourceConfig['sonarcloud'])
   if (project === null) {
     return [
       check(
         'debt-sonarcloud',
         'warn',
         'SONAR_TOKEN set but no project key resolves',
-        'set debt.sonarcloud.project_key or sonar.projectKey in sonar-project.properties / .sonarcloud.properties'
+        'set debt.sourceConfig.sonarcloud.project_key or sonar.projectKey in sonar-project.properties / .sonarcloud.properties'
       ),
     ]
   }
@@ -878,7 +878,9 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
     ...checkConfig(dir),
     ...providerChecks(dir),
     ...queryCliChecks(dir, cfg.connectors),
-    ...debtSourceChecks(dir, cfg.debt),
+    // properties files live at the checkout root — doctor must resolve
+    // them there even when run from a subdirectory (collect does the same)
+    ...debtSourceChecks(root ?? dir, cfg.debt),
     ...meshChecks(dir, cfg.mesh),
     checkClientPlugins(dir),
     ...(janitor === null ? [] : [janitor]),

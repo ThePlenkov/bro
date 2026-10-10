@@ -52,12 +52,20 @@ export const debtSection: ConfigSection<{
   dir: string
   sources: string[]
   stale_days: number
-  sonarcloud: { project_key?: string; host?: string }
+  sourceConfig: Record<string, Record<string, unknown>>
 }> = (raw) => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
-  const sonar = (typeof obj.sonarcloud === 'object' && obj.sonarcloud !== null
-    ? obj.sonarcloud
-    : {}) as Record<string, unknown>
+  // Per-source knob bags pass through verbatim — core stays
+  // vendor-neutral; each collector validates its own fields (see the
+  // sources note below). Only plain-object entries survive.
+  const sourceConfig: Record<string, Record<string, unknown>> = {}
+  if (isPlainObject(obj.sourceConfig)) {
+    for (const [name, bag] of Object.entries(obj.sourceConfig)) {
+      if (name !== '__proto__' && isPlainObject(bag)) {
+        sourceConfig[name] = bag
+      }
+    }
+  }
   return {
     // dir feeds path.join — a non-string or empty value must fall back to
     // the default, not throw mid-command
@@ -80,14 +88,7 @@ export const debtSection: ConfigSection<{
       obj.stale_days > 0
         ? obj.stale_days
         : DEFAULT_CONFIG.debt.stale_days,
-    // sonarcloud collector params — a non-string entry falls back to
-    // sonar-project.properties, then to the collector's own default.
-    sonarcloud: {
-      ...(typeof sonar.project_key === 'string' && sonar.project_key !== ''
-        ? { project_key: sonar.project_key }
-        : {}),
-      ...(typeof sonar.host === 'string' && sonar.host !== '' ? { host: sonar.host } : {}),
-    },
+    sourceConfig,
   }
 }
 
@@ -567,9 +568,12 @@ export interface BroConfig {
     sources: string[]
     /** Idle days before an open PR counts as stale (stale-prs collector). */
     stale_days: number
-    /** sonarcloud collector params — `project_key`/`host` override
-     *  `sonar-project.properties`; auth is `SONAR_TOKEN`. */
-    sonarcloud: { project_key?: string; host?: string }
+    /** Per-source knob bags, keyed by collector name
+     *  (`debt.sourceConfig.sonarcloud.project_key` overrides
+     *  `sonar-project.properties`). Core carries the bags verbatim —
+     *  field validation is the collector's job, keeping core
+     *  vendor-neutral. */
+    sourceConfig: Record<string, Record<string, unknown>>
   }
   sync: {
     /** Data ref holding synced artifacts — outside refs/heads so it
@@ -660,7 +664,7 @@ export const DEFAULT_CONFIG: BroConfig = {
     dir: '.agents/review-debt',
     sources: ['review-threads'],
     stale_days: 14,
-    sonarcloud: {},
+    sourceConfig: {},
   },
   sync: { ref: 'refs/bro/data', remote: 'origin', beads: true },
   sweep: { olderThanDays: 30, dir: '.agents/sweep', flatten: true },

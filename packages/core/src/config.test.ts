@@ -450,13 +450,19 @@ describe('loadConfig plugin sections', () => {
     assert.equal(load({ debt: { dir: 'custom/dir' } }).debt.dir, 'custom/dir')
   })
 
-  test('debt.sonarcloud keeps only its string fields', () => {
-    assert.deepEqual(load({}).debt.sonarcloud, {})
-    assert.deepEqual(load({ debt: { sonarcloud: 'junk' } }).debt.sonarcloud, {})
-    assert.deepEqual(load({ debt: { sonarcloud: { project_key: 42 } } }).debt.sonarcloud, {})
+  test('debt.sourceConfig keeps only plain-object source bags, verbatim', () => {
+    assert.deepEqual(load({}).debt.sourceConfig, {})
+    assert.deepEqual(load({ debt: { sourceConfig: 'junk' } }).debt.sourceConfig, {})
+    // non-object bags drop; field validation is the collector's job, so
+    // a bag's contents — including non-string fields — pass through
     assert.deepEqual(
-      load({ debt: { sonarcloud: { project_key: 'pk', host: 'https://sq', extra: 1 } } }).debt.sonarcloud,
-      { project_key: 'pk', host: 'https://sq' }
+      load({ debt: { sourceConfig: { sonarcloud: 'junk', other: { any: 1 } } } }).debt.sourceConfig,
+      { other: { any: 1 } }
+    )
+    assert.deepEqual(
+      load({ debt: { sourceConfig: { sonarcloud: { project_key: 'pk', host: 'https://sq', extra: 1 } } } })
+        .debt.sourceConfig,
+      { sonarcloud: { project_key: 'pk', host: 'https://sq', extra: 1 } }
     )
   })
 

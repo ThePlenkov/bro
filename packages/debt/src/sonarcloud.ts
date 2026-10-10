@@ -78,14 +78,15 @@ export function parseSonarProperties(text: string): {
  *  former wins when a repo carries both. */
 const PROPERTIES_FILES = ['sonar-project.properties', '.sonarcloud.properties']
 
-/** Project key + host — `debt.sonarcloud.{project_key,host}` in config
- *  wins, then the properties file at the checkout root; host falls back
- *  to sonarcloud.io so SonarQube Server works via `sonar.host.url`
- *  (same API). Null when no key resolves — callers decide between skip
- *  (collect) and warn (doctor). */
+/** Project key + host — `debt.sourceConfig.sonarcloud.{project_key,host}`
+ *  in config wins, then the properties file at the checkout root; host
+ *  falls back to sonarcloud.io so SonarQube Server works via
+ *  `sonar.host.url` (same API). Null when no key resolves — callers
+ *  decide between skip (collect) and warn (doctor). The cfg bag arrives
+ *  untyped from `debt.sourceConfig` — field checks happen here. */
 export function resolveSonarProject(
   dir: string,
-  cfg?: { project_key?: string; host?: string }
+  cfg?: Record<string, unknown>
 ): SonarProject | null {
   let propsFile: { projectKey?: string; host?: string } = {}
   for (const name of PROPERTIES_FILES) {
@@ -123,7 +124,7 @@ export function resolveSonarProject(
  *  into. `sonar.host.url` in a properties file is ambient repo content —
  *  a merged PR can point it at any server — so it never carries the
  *  token unless it names the default host or loopback; any other target
- *  must come from `debt.sonarcloud.host` in bro config (the same trust
+ *  must come from `debt.sourceConfig.sonarcloud.host` in bro config (the same trust
  *  layer that already drives agent command templates). Plain http is
  *  refused except loopback — cleartext transit leaks the token to every
  *  hop. */
@@ -153,7 +154,7 @@ export function assertSonarHostTrusted(project: SonarProject): void {
   ) {
     throw new SourceSkipped(
       `sonar.host.url ${url.host} comes from a committed properties file — ` +
-        `set debt.sonarcloud.host in bro.config to send SONAR_TOKEN to a non-default host`
+        `set debt.sourceConfig.sonarcloud.host in bro.config to send SONAR_TOKEN to a non-default host`
     )
   }
 }
@@ -322,16 +323,17 @@ function hotspotPriority(probability: string | undefined): DebtPriority {
 /** The serving project's open findings on new code — issues plus
  *  TO_REVIEW security hotspots, both `sinceLeakPeriod=true` so the
  *  ledger tracks what merged work introduced, not the project's whole
- *  backlog. `opts.cfg` is `debt.sonarcloud` from bro.config; `opts.dir`
- *  is the checkout root for `sonar-project.properties`. */
+ *  backlog. `opts.cfg` is `debt.sourceConfig.sonarcloud` from
+ *  bro.config; `opts.dir` is the checkout root for
+ *  `sonar-project.properties`. */
 export function collectSonarcloud(
   ctx: CollectCtx,
-  opts: { dir?: string; cfg?: { project_key?: string; host?: string } } = {}
+  opts: { dir?: string; cfg?: Record<string, unknown> } = {}
 ): DebtRecord[] {
   const project = resolveSonarProject(opts.dir ?? process.cwd(), opts.cfg)
   if (project === null) {
     throw new SourceSkipped(
-      'no project key — set debt.sonarcloud.project_key in bro.config or sonar.projectKey in sonar-project.properties / .sonarcloud.properties'
+      'no project key — set debt.sourceConfig.sonarcloud.project_key in bro.config or sonar.projectKey in sonar-project.properties / .sonarcloud.properties'
     )
   }
   sonarToken() // fail-fast before any request — a skipped source sweeps nothing

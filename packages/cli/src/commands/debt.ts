@@ -283,7 +283,7 @@ function warnUnknownSources(configured: string[]): void {
 function collectDebtSources(
   args: CollectArgs,
   sources: Set<string>,
-  debtCfg: { stale_days: number; sonarcloud: { project_key?: string; host?: string } }
+  debtCfg: { stale_days: number; sourceConfig: Record<string, Record<string, unknown>> }
 ): void {
   for (const source of DEBT_SOURCES) {
     if (sources.has(source)) {
@@ -295,7 +295,7 @@ function collectDebtSources(
 function collectOneSource(
   source: DebtSource,
   args: CollectArgs,
-  debtCfg: { stale_days: number; sonarcloud: { project_key?: string; host?: string } }
+  debtCfg: { stale_days: number; sourceConfig: Record<string, Record<string, unknown>> }
 ): void {
   const harvestedAt = new Date().toISOString()
   let records: DebtRecord[] = []
@@ -308,7 +308,7 @@ function collectOneSource(
         // Properties files resolve at the checkout root — a collect run
         // from a repo subdirectory must still see them.
         dir: gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd(),
-        sonar: debtCfg.sonarcloud,
+        sourceConfig: debtCfg.sourceConfig,
       },
       debtCfg.stale_days
     )
@@ -377,9 +377,11 @@ function collectOneSource(
 }
 
 /** sonarcloud dedupe bookkeeping (spec: specs/bro-huy5o.4.md) —
- *  - an open ledger row now covered by a review thread → `duplicate`
- *    (the finding is owned by the thread row, not fixed — fix% must not
- *    count it);
+ *  - an open or done ledger row now covered by a review thread →
+ *    `duplicate` (the finding is owned by the thread row, not fixed —
+ *    fix% must not count it. `done` was either a wrong "resolved
+ *    upstream" mark — the fresh fetch just re-reported it — or a stale
+ *    fix verdict the live finding disproves);
  *  - a stale `duplicate` or `done` overlay on a re-emitted finding →
  *    `open` (coverage disappeared, or the auto "resolved upstream" mark
  *    proved wrong — the row is live upstream again). `wontfix` stays:
@@ -392,7 +394,10 @@ export function syncSonarDedupeOverlays(
   coveredBy: Map<string, string>
 ): void {
   const byId = new Map(existing.map((r) => [r.thread_id, r]))
-  const toDup = [...dupedIds].filter((id) => byId.get(id)?.status === 'open')
+  const toDup = [...dupedIds].filter((id) => {
+    const s = byId.get(id)?.status
+    return s === 'open' || s === 'done'
+  })
   const toReopen = records
     .map((r) => r.thread_id)
     .filter((id) => {

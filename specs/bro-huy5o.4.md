@@ -52,14 +52,17 @@ line — both needed by dedupe below.
   Authorization header rides a 0600 file (`-H @file`) in a private
   tmpdir — never argv, every local user can `ps`.
 - **Host + project key**, first match wins:
-  `debt.sonarcloud.project_key` / `debt.sonarcloud.host` in bro.config →
+  `debt.sourceConfig.sonarcloud.project_key` /
+  `debt.sourceConfig.sonarcloud.host` in bro.config (core carries
+  `debt.sourceConfig` as a verbatim per-source bag — field validation
+  is the collector's job) →
   `sonar.projectKey` / `sonar.host.url` in `sonar-project.properties` or
   `.sonarcloud.properties` (both conventions — scanner config and
   Automatic Analysis; the former wins per key) at the checkout root →
   host defaults to `https://sonarcloud.io`.
 - **Token trust boundary**: every request carries `SONAR_TOKEN`, so the
   host must be opted in — the default `sonarcloud.io`, loopback, or a
-  host from `debt.sonarcloud.host` in bro config (SonarQube Server works
+  host from `debt.sourceConfig.sonarcloud.host` in bro config (SonarQube Server works
   via that one config line — same API). A non-default `sonar.host.url`
   from a committed properties file is ambient repo content and is
   skipped, never sent the token; non-loopback `http:` is refused
