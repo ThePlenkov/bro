@@ -38,7 +38,7 @@ if (!['install', 'status', 'uninstall'].includes(command ?? '')) {
 }
 
 const fail = (msg: string): never => {
-  console.error(`beads-dolt-server: ${msg}`)
+  console.error(`beads-dolt-server: ${msg}`) // NOSONAR — error text is the tool's output; paths, not secrets
   process.exit(1)
 }
 
@@ -267,7 +267,7 @@ async function installUnit(): Promise<void> {
     const r = systemctl([...step])
     if (r.status !== 0) fail(`systemctl --user ${step.join(' ')}: ${r.stderr?.trim() || r.error}`)
   }
-  console.log(`systemd --user: ${unitName} enabled + started`)
+  console.log(`systemd --user: ${unitName} enabled + started`) // NOSONAR — progress output; names, not secrets
   // `enable --now` returns before the listener binds — wait for it
   const deadline = Date.now() + 15_000
   let up = false
@@ -285,7 +285,7 @@ async function install(): Promise<void> {
   const ok = test.status === 0
   const detail = ok ? (test.stdout.match(/✓.*/)?.[0] ?? 'ok') : `FAILED — ${test.stderr?.trim() || test.stdout?.trim()}`
   console.log(`bd dolt test: ${detail}`)
-  console.log(`done. endpoint 127.0.0.1:${port} — cold start: systemctl --user start ${unitName} (or \`bd dolt start\`)`)
+  console.log(`done. endpoint 127.0.0.1:${port} — cold start: systemctl --user start ${unitName} (or \`bd dolt start\`)`) // NOSONAR — ditto
   if (!ok) process.exit(1)
 }
 
@@ -295,12 +295,12 @@ async function status(): Promise<void> {
   const reachable = await tcpOpen(port)
   const dataDir = ex('dolt') ? 'dolt/' : ex('embeddeddolt') ? 'embeddeddolt/ (embedded)' : 'none'
   console.log(`beads:   ${beads}`) // NOSONAR — status output is the tool's purpose; paths, not secrets
-  console.log(`mode:    ${String(meta.dolt_mode ?? 'unknown')} (db ${String(meta.dolt_database ?? '?')})`)
-  console.log(`port:    ${port} (${reachable ? 'reachable' : 'UNREACHABLE'})`)
-  console.log(`unit:    ${unitName} — ${active}, ${enabled}`)
-  console.log(`data:    ${dataDir}`)
+  console.log(`mode:    ${String(meta.dolt_mode ?? 'unknown')} (db ${String(meta.dolt_database ?? '?')})`) // NOSONAR — ditto
+  console.log(`port:    ${port} (${reachable ? 'reachable' : 'UNREACHABLE'})`) // NOSONAR — ditto
+  console.log(`unit:    ${unitName} — ${active}, ${enabled}`) // NOSONAR — ditto
+  console.log(`data:    ${dataDir}`) // NOSONAR — ditto
   if (meta.dolt_mode === 'server' && !reachable) {
-    console.log(`cold start: systemctl --user start ${unitName} || bd dolt start`)
+    console.log(`cold start: systemctl --user start ${unitName} || bd dolt start`) // NOSONAR — ditto
     process.exit(1)
   }
 }
@@ -310,7 +310,7 @@ function uninstall(): void {
   rmSync(unitPath, { force: true }) // NOSONAR — unitPath = XDG/.config dir + regex-safe unitName
   systemctl(['daemon-reload'])
   writeConfigBlock(null)
-  console.log(`removed ${unitName} + endpoint config block.`)
+  console.log(`removed ${unitName} + endpoint config block.`) // NOSONAR — ditto
   console.log(`store stays server-mode: run \`bd dolt start\` for an on-demand server, or re-run install.`)
 }
 
