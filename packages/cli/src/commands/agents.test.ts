@@ -1,7 +1,8 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   agentPromptPath,
@@ -13,7 +14,12 @@ import { readAgentRegistry, writeAgentRegistry, type Verdict } from '@broject/co
 import { readJournal, ROUTE_CLASS_KIND } from '@broject/judge'
 import { fakeFetch } from '@broject/providers'
 import { initRepo, installFakeBd, readBeads } from './testrepo.ts'
-import { runAgentsCommand, SpawnInputError, spawnStepAgent } from './agents.ts'
+import {
+  discoverSessions,
+  runAgentsCommand,
+  SpawnInputError,
+  spawnStepAgent,
+} from './agents.ts'
 
 class Exit extends Error {
   constructor(public code: number) {
@@ -980,8 +986,44 @@ describe('bro agents down <target>', () => {
   })
 })
 
-// registers LAST — the connector registry is module-global, so the
-// throwing factory must not exist while earlier tests resolve connectors
+describe('discoverSessions', () => {
+  const envFor = (lockDir: string): AgentConnectorEnv => ({
+    agents: { devin: { lockDir } },
+    connectors: {},
+  })
+
+  test('session-plane rows arrive tagged with the kind that saw them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-disc-'))
+    try {
+      writeFileSync(join(dir, 'sess.lock'), String(process.pid))
+      const { sessions, degraded } = discoverSessions(envFor(dir))
+      assert.equal(sessions.length, 1)
+      assert.equal(sessions[0]!.kind, 'devin')
+      assert.equal(sessions[0]!.name, 'sess')
+      assert.equal(sessions[0]!.pid, process.pid)
+      assert.deepEqual(degraded, [])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a plane whose scan throws degrades to a note — the read stays up', () => {
+    // a lockDir that is a FILE — readdirSync fails ENOTDIR, the plane's
+    // fail-closed contract throws 'unavailable'
+    const root = mkdtempSync(join(tmpdir(), 'bro-disc-bad-'))
+    const file = join(root, 'notdir')
+    try {
+      writeFileSync(file, 'x')
+      const { sessions, degraded } = discoverSessions(envFor(file))
+      assert.deepEqual(sessions, [])
+      assert.equal(degraded.length, 1)
+      assert.match(degraded[0]!, /^devin: /)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('bro agents — degraded backends', () => {
   test('a degraded backend cannot confirm gone — down fails loudly', async () => {
     const { registerAgentConnector } = await import('../agent-connectors.ts')

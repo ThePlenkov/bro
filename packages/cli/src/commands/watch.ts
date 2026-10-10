@@ -82,6 +82,16 @@ export interface WatchPrGate {
   /** advisory-check alerts (silent reviewers) — never blockers */
   alerts?: string[]
   error?: string
+  /** Structured gate detail for board renders (the /fleet PR board
+   *  shows mergeable/threads/CI columns); the text heartbeat stays on
+   *  the blockers prose. Populated only on a successful probe. */
+  mergeable?: string
+  mergeState?: string
+  openThreads?: number
+  ciPending?: number
+  ciFailing?: number
+  reviewersPending?: number
+  sastPending?: number
 }
 
 export interface WatchGates {
@@ -346,7 +356,20 @@ async function gateFleetPrs(
           docsMaxRounds: act.docsMaxRounds,
         })
         const gate = evaluateExitGate(state)
-        return { pr, link, ok: gate.ok, blockers: gate.blockers, alerts: gate.alerts }
+        return {
+          pr,
+          link,
+          ok: gate.ok,
+          blockers: gate.blockers,
+          alerts: gate.alerts,
+          mergeable: state.mergeable,
+          mergeState: state.mergeState,
+          openThreads: state.openThreads,
+          ciPending: state.ciPending,
+          ciFailing: state.ciFailing,
+          reviewersPending: state.reviewersPending,
+          sastPending: state.sastPending,
+        }
       } catch (err) {
         return { pr, link, error: err instanceof Error ? err.message : String(err) }
       }

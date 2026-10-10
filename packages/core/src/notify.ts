@@ -407,6 +407,54 @@ export function drainMailbox(
   return drainDirs(dir).flatMap((mb) => drainDir(mb, sessionId, now, opts))
 }
 
+/** One pending drop as a read-only tail sees it. `ts` is the drop
+ *  time embedded in the name (mtime fallback for nameless drops) —
+ *  the sort key for newest-first boards. `text` is the rendered line. */
+export interface MailboxPeek {
+  name: string
+  ts: number
+  text: string
+}
+
+/** A read-only tail over the pending drops — the /fleet mailbox board's
+ *  view. Unlike drainMailbox a peek consumes nothing: no seen cursor
+ *  moves, no expiry sweep runs — reads never mutate the plane they
+ *  report. Expired drops are skipped from the output but left in place
+ *  for the next drain to reap; a drop that vanishes mid-read (a real
+ *  drain racing in another process) is skipped, never fatal. Addressed
+ *  drops are included — a tail reports the mailbox's state, not one
+ *  consumer's share. Newest first by drop time, capped at `limit`. */
+export function peekMailbox(dir: string, limit = 25): MailboxPeek[] {
+  const now = Date.now()
+  const out: MailboxPeek[] = []
+  for (const mb of drainDirs(dir)) {
+    let files: string[]
+    try {
+      files = readdirSync(mb)
+    } catch {
+      continue // unreadable mailbox — not this plane's error to raise
+    }
+    for (const f of files.filter((f) => f.endsWith('.txt') && !f.startsWith('.'))) {
+      const path = join(mb, f)
+      try {
+        const st = statSync(path)
+        if (now - st.mtimeMs > DROP_TTL_MS) {
+          continue
+        }
+        const raw = readFileSync(path, 'utf8')
+        if (raw.trim() === '') {
+          continue
+        }
+        const t = dropTime(f)
+        out.push({ name: f, ts: t > 0 ? t : Math.round(st.mtimeMs), text: renderDrop(raw) })
+      } catch {
+        // raced removal mid-read — the drop is gone, skip it
+      }
+    }
+  }
+  return out.sort((a, b) => b.ts - a.ts).slice(0, Math.max(0, limit))
+}
+
 /** The notify connector — the read side of the mailbox. Its postTool
  *  probe delivers unseen drops into session context, so a child event
  *  reaches the session mid-turn instead of waiting for a session-end
