@@ -33,6 +33,7 @@ now": one call instead of `bd list` + `bro agents status` +
                           "cause": null, "pid": 123, "worktree": "bro",
                           "provider": "orcarouter", "model": "jev" }] },
   "drill": { "frame": { "id": "bro-x.1", "title": "…", "depth": 2 } },
+  "watch": { "ts": "…", "ageMs": 240000, "attention": 0 },
   "act": { "pr": 282, "url": "https://…/pull/282", "gate": "BLOCKED",
            "openThreads": 2, "ciPending": 3,                        // --deep
            "blockers": ["3 pending check(s)"] }
@@ -49,7 +50,14 @@ now": one call instead of `bd list` + `bro agents status` +
   (threads, checks, blockers). This is the network part; poll it on a
   slower cadence than the local board.
 - **Absent state is empty, not an error.** Bead-less checkout → empty
-  arrays; no registry → `agents: []`; no open PR → `act: null`.
+  arrays; no registry → `agents: []`; no open PR → `act: null`; no
+  heartbeat file → `watch: null`.
+- **`watch` is the rig's heartbeat freshness** — read from
+  `<git-common>/bro/heartbeat.json` (rewritten by every `bro watch`
+  tick, a manual `--once` included). `ageMs` is the signal: fresh = a
+  watch ran recently, stale = none did — it attests the last tick, not
+  which invocation wrote it. `attention` is the last snapshot's
+  open-decision count.
 - **Bead rows are slim.** Only `id`, `title`, `priority`,
   `issue_type`, `assignee` cross the wire — descriptions and
   dependency graphs stay in `bd show`. `beads.ready` is capped at 10;

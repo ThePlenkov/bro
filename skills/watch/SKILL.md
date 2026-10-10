@@ -22,6 +22,11 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd` initialized.
 | `bro watch install [--every N] [--print]` | Install the heartbeat on a non-agent timer — a systemd user unit running `--once --notify` per repo (crontab fallback); cadence is `--every N` or `watch.intervalSec` (default 60) |
 | `bro watch uninstall` | Remove the installed timer/cron entry for this repo |
 
+Every tick also rewrites `<git-common>/bro/heartbeat.json` — the durable
+last-known-state file. Mailbox drops expire after ~1h; this file does
+not, so overnight state is a read (`bro status` row, session-start
+context), never an inference from whether a session was polled.
+
 ## Policy
 
 - **Read the attention list, not the table.** The snapshot leads with
@@ -56,7 +61,8 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd` initialized.
 - **Watch never touches your work.** It never claims steps, never
   mutates beads, never respawns agents — a `lost — respawn?` row is the
   decision surface; respawning is a manual act (`bro agents up <step>`).
-  The one write besides `--notify` drops is the janitor: each tick
+  The writes besides `--notify` drops are the heartbeat file (each
+  tick's snapshot, atomically replaced) and the janitor: each tick
   reaps dead session/agent state under `<git-common>/bro/` (retention,
   not workflow) and reports it in the attention list.
 - **Degraded is not dead.** A backend whose `list()` failed renders its

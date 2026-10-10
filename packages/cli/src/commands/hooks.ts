@@ -103,6 +103,7 @@ import {
 import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts'
 import { emitRefGuard } from './refguard.ts'
 import { goalContextLines, goalStopLines } from './goal.ts'
+import { heartbeatLine } from './watch-heartbeat.ts'
 import {
   CURSOR_HYDRATED_SKILL,
   cursorStopIgnored,
@@ -1140,6 +1141,13 @@ async function emitSessionContext(
   // the session's active goal rehydrates like every other durable state —
   // resume/compaction restores it (spec: specs/goal/bro-6vcll.md)
   parts.push(...goalContextLines(process.cwd(), sessionId))
+  // rig liveness comes from the durable heartbeat file, not from whether
+  // a session happened to poll — mailbox drops expire in an hour
+  // (bro-dxoa5); absent file contributes nothing
+  const hb = heartbeatLine(process.cwd())
+  if (hb !== null) {
+    parts.push(`watch heartbeat: ${hb}`)
+  }
   // 'session-start' covers all three rehydrate events; the match
   // haystack is the same session-context text + previous-session trace
   // tail the learn connector assembles
@@ -1197,6 +1205,10 @@ async function emitPromptContext(input: HookInput): Promise<void> {
     // Cursor's session-start runs here (cloud agents never fire
     // SessionStart) — the goal line must hydrate on this path too
     parts.push(...goalContextLines(process.cwd(), sessionId))
+    const hb = heartbeatLine(process.cwd())
+    if (hb !== null) {
+      parts.push(`watch heartbeat: ${hb}`)
+    }
     settled = start.settled && par.settled
   }
   const sessionCount = parts.length

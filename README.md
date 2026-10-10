@@ -125,7 +125,7 @@ Full reference: [broject.dev/docs](https://broject.dev/docs).
 | `bro convoy pour\|status\|next\|claim\|done\|list\|run` | Run a beads formula as a claimable molecule — `run` is the molecule queue |
 | `bro fleet [--json\|--live]` | View molecules, steps, agents, worktrees, and PRs |
 | `bro agents status\|up\|down\|prune` | Inspect, spawn, respawn, stop, or reap detached agents |
-| `bro watch [--once\|--every N\|--notify]`, `watch install\|uninstall` | Read-only heartbeat, optionally on a non-agent timer |
+| `bro watch [--once\|--every N\|--notify]`, `watch install\|uninstall` | Read-only heartbeat, optionally on a non-agent timer; each tick rewrites `.git/bro/heartbeat.json` |
 | `bro notify <text>` | Drop an event into the session mailbox — addressed, typed, coalesced |
 | `bro bus serve\|publish\|subscribe\|status` | The local event broker behind the events facade |
 | `bro drive [--once\|--every N\|--no-merge]` | Apply the act gate to fleet PRs; merge only on green |

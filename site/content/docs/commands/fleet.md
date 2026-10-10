@@ -58,6 +58,11 @@ non-interactive ticker, use `bro watch --every N`.
 | `bro watch uninstall` | Remove the installed timer/cron entry for this repo |
 | `bro notify <text>` | Write one mailbox event for live sessions — addressed drops, kinds, and the bus are in [Events](/docs/commands/events) |
 
+Each tick also rewrites `<git-common>/bro/heartbeat.json` — the durable
+last-known-state file (mailbox drops expire after ~1h; this file does
+not), surfaced as the `watch:` row in `bro status` and a session-start
+context line.
+
 Watch never claims steps, mutates beads, or respawns workers. Its attention
 list is the decision surface; a `lost — respawn?` row is not permission to
 spawn blindly, especially when a backend is degraded. The notify connector

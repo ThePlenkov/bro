@@ -30,6 +30,11 @@ import { currentFrame } from '@broject/drill'
 import { loopSection } from '@broject/loop'
 import { loadBroConfig } from '../plugins.ts'
 import { collectLoopRuns, type LoopRunView } from './loop-state.ts'
+import {
+  heartbeatAge,
+  readHeartbeat,
+  type HeartbeatSummary,
+} from './watch-heartbeat.ts'
 
 interface BeadRow {
   id: string
@@ -69,6 +74,10 @@ interface BroStatus {
    *  (bro-9lpn3). */
   loop: { stallMin: number; runs: LoopRunView[] }
   drill: { frame: { id: string; title: string; depth: number } | null }
+  /** The durable heartbeat file's summary (bro-dxoa5) — last tick's
+   *  age + open-attention count. null = never had a heartbeat (or the
+   *  file is unreadable) — an ordinary state, not an error. */
+  watch: HeartbeatSummary | null
   /** --deep only: the act gate for the current branch's open PR. */
   act?: {
     pr: number
@@ -250,6 +259,7 @@ export function collectStatus(dir: string): BroStatus {
     drill: {
       frame: frame === undefined ? null : { id: frame.id, title: frame.title, depth: frame.depth },
     },
+    watch: readHeartbeat(dir),
   }
 }
 
@@ -283,6 +293,10 @@ function actLine(act: NonNullable<BroStatus['act']> | null): string {
 function render(s: BroStatus): string[] {
   const lines: string[] = []
   lines.push(`board: ${basename(s.dir)} · ${s.branch}${s.dirty > 0 ? ` · dirty ${s.dirty}` : ''}`)
+  if (s.watch !== null) {
+    const tail = s.watch.attention === 0 ? 'quiet' : `${s.watch.attention} attention`
+    lines.push(`watch: heartbeat ${heartbeatAge(s.watch.ageMs)} ago — ${tail}`)
+  }
   if (s.drill.frame) {
     lines.push(`drill: ${s.drill.frame.id} — ${s.drill.frame.title} (depth ${s.drill.frame.depth})`)
   }
