@@ -92,13 +92,20 @@ describe('candidateBranches', () => {
       git(['branch', 'stack/s/1-bro-c'], main)
       git(['branch', 'random/topic'], main)
       git(['worktree', 'add', '-q', join(root, 'side'), 'work/bro-a'], main)
-      const branches = candidateBranches(main)
+      const { branches, complete } = candidateBranches(main)
+      assert.equal(complete, true)
       assert.ok(branches.includes('work/bro-a'))
       assert.ok(branches.includes('loop/bro-b'))
       assert.ok(branches.includes('stack/s/1-bro-c'))
       assert.ok(!branches.includes('random/topic'))
       assert.equal(branches.filter((b) => b === 'work/bro-a').length, 1)
     })
+  })
+
+  test('a failed git listing is incomplete, never a drained set', () => {
+    const { branches, complete } = candidateBranches('/no/such/dir')
+    assert.deepEqual(branches, [])
+    assert.equal(complete, false)
   })
 })
 

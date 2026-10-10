@@ -245,7 +245,8 @@ shapes or orphaned PRs lose their only owner:
   and finds zero open PRs exits 0: the until-condition, convoy
   drain's own verdict — coverage then has nothing left to cover (a
   PR opened later is the pusher's own gate's job). An incomplete
-  enumeration never exits: a failed lookup is not a drained fleet.
+  enumeration never exits: a failed branch listing or PR lookup is not
+  a drained fleet.
 
 `drive --once` stays a report — passes still fix and merge, but
 heartbeats remain a loop-mode emission, keyed to the live
