@@ -8,6 +8,7 @@ description: setup, diagnostics, checks, plans, sync, cleanup, and stores.
 | `bro setup [--beads] [--skills] [--pack [NAME]]` | Wire bro into the repo and optionally initialize beads, skill wrappers, and a capability pack; also installs the commit-provenance, ref-guard, and post-merge git hooks |
 | `bro hooks install` / `bro hooks uninstall` | Install/remove the `prepare-commit-msg` hook that appends `Agent`/`Agent-Model`/`Session`/`Bead`/`Molecule` trailers to machine-made commits, the `reference-transaction` guard that vetoes non-fast-forward moves of shared branch refs, and the `post-merge` freshness hook that runs install → build → patch after a merge (pre-existing hooks are chained, never clobbered) |
 | `bro doctor [--json]` | Inspect the local bro setup and report diagnostics |
+| `bro stamp [<via>] [--session <id>] [--json]` | Record this session's write to the worktree's shared outputs (`.git/bro/last-build.json`), or read the last stamp back — who rebuilt dist, when, and at which HEAD |
 | `bro run <plan.toml>` | Execute a validated [plan](/docs/plans) |
 | `bro plan` / `bro plan validate <file>` | List plan kinds or validate a plan without executing it |
 | `bro sync [--pull]` | Push or restore bro artifacts on `refs/bro/data` |

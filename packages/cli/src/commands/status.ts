@@ -29,6 +29,7 @@ import type { AgentRegistryEntry, TaskRow, TaskStore } from '@broject/core'
 import { currentFrame } from '@broject/drill'
 import { loopSection } from '@broject/loop'
 import { loadBroConfig } from '../plugins.ts'
+import { readStamp, stampAgo, stampSession } from './buildstamp.ts'
 import { collectLoopRuns, type LoopRunView } from './loop-state.ts'
 import {
   heartbeatAge,
@@ -78,6 +79,18 @@ interface BroStatus {
    *  age + open-attention count. null = never had a heartbeat (or the
    *  file is unreadable) — an ordinary state, not an error. */
   watch: HeartbeatSummary | null
+  /** Last stamped write to this worktree's shared outputs (bro-fatja)
+   *  — null until a build/patch stamps one. `mine` is null when the
+   *  current session can't resolve (a bare `bro status` has no env
+   *  pin and the marker scan wasn't unambiguous). */
+  build: {
+    session: string
+    via: string
+    ts: number
+    /** stamp.head ≠ HEAD — the recorded write predates the checkout. */
+    behind: boolean
+    mine: boolean | null
+  } | null
   /** --deep only: the act gate for the current branch's open PR. */
   act?: {
     pr: number
@@ -200,6 +213,25 @@ function readLoop(dir: string): BroStatus['loop'] {
   }
 }
 
+/** The worktree's build stamp — attribution for shared mutable
+ *  outputs. One file read, no network, fail-open like every board
+ *  section. */
+function readBuild(dir: string): BroStatus['build'] {
+  const stamp = readStamp(dir)
+  if (stamp === null) {
+    return null
+  }
+  const head = gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', 'HEAD^{commit}'])
+  const me = stampSession(dir, process.env)
+  return {
+    session: stamp.session,
+    via: stamp.via,
+    ts: stamp.ts,
+    behind: stamp.head !== '' && head.code === 0 && stamp.head !== head.out.trim(),
+    mine: me === undefined ? null : me === stamp.session,
+  }
+}
+
 /** The act gate for the current branch's PR — null when no open PR
  *  resolves or gh can't answer; the board must not die on a network
  *  tick. */
@@ -260,6 +292,7 @@ export function collectStatus(dir: string): BroStatus {
       frame: frame === undefined ? null : { id: frame.id, title: frame.title, depth: frame.depth },
     },
     watch: readHeartbeat(dir),
+    build: readBuild(dir),
   }
 }
 
@@ -299,6 +332,16 @@ function render(s: BroStatus): string[] {
   }
   if (s.drill.frame) {
     lines.push(`drill: ${s.drill.frame.id} — ${s.drill.frame.title} (depth ${s.drill.frame.depth})`)
+  }
+  if (s.build !== null) {
+    const flags = [
+      s.build.behind ? 'behind HEAD' : '',
+      s.build.mine === false ? 'another session wrote it' : '',
+    ].filter((f) => f !== '')
+    lines.push(
+      `build: ${s.build.via} by ${s.build.session} ${stampAgo(s.build.ts, Date.now())}` +
+        (flags.length > 0 ? ` — ${flags.join(', ')}` : '')
+    )
   }
   const beads = s.beads.inProgress
   if (beads.length > 0) {
