@@ -26,10 +26,13 @@
  *   PR settled             → close a dangling fixer bead
  *
  * Occupancy is the guard bro-pywx hardens: never spawn into a worktree
- * a live session works in. Planes: the agents facade, the worktree's own
- * claim marker, fresh .work markers, and a /proc cwd scan that follows a
- * process's ancestry to an agent-shaped root — occupied is always the
- * safe verdict (a skipped pass, never double-work).
+ * a live session works in. Planes: the agents facade, a live foreign
+ * watch marker on the PR (a `bro loop` heartbeat, `act wait`, convoy —
+ * bro-0aa87's mutual exclusion: the gate already has a supervisor),
+ * the worktree's own claim marker, fresh .work markers, and a /proc cwd
+ * scan that follows a process's ancestry to an agent-shaped root —
+ * occupied is always the safe verdict (a skipped pass, never
+ * double-work).
  *
  * One drive per repo: `bro/drive.lock` in the git common dir is held
  * heartbeated for the process lifetime — a second `bro drive` (a
@@ -70,7 +73,9 @@ import {
   listWatches,
   watchEnd,
   watchHeartbeat,
+  watchMarkerKind,
   type ExitGate,
+  type ListedWatch,
   type PrActState,
 } from '@broject/act'
 import {
@@ -269,6 +274,48 @@ export interface OccupancyCtx {
   scanProc?: (worktree: string) => ProcHit[]
   /** Injectable worktree-claim probe — tests pass a stub. */
   scanClaim?: (worktree: string) => string | undefined
+  /** The PR being judged — the supervision plane keys on it. */
+  pr?: number
+  /** Watch-marker snapshot — a live foreign marker is a supervisor
+   *  already owning this PR's gate (bro-0aa87). */
+  watches?: ListedWatch[]
+}
+
+/** A live watch marker from a non-drive watcher (a `loop` heartbeat, an
+ *  `act wait`, a convoy supervisor) means the PR's gate already has an
+ *  owner — drive exists for UNSUPERVISED PRs, so these are occupants.
+ *  Drive-kind markers self-exclude: a second `bro drive` shares the
+ *  fixer bead / merge slot machinery instead of starving this pass by
+ *  mutual exclusion. */
+export function supervisedBy(
+  watches: ListedWatch[] | undefined,
+  pr: number | undefined
+): ListedWatch | undefined {
+  if (watches === undefined || pr === undefined) {
+    return undefined
+  }
+  return watches.find(
+    (l) => l.alive && l.watch.pr === pr && watchMarkerKind(l.file, l.watch) !== 'drive'
+  )
+}
+
+/** Worktree-local occupancy proofs — a live agent process inside the
+ *  worktree, or a fresh claim marker on it. */
+function worktreeOccupant(opts: OccupancyCtx, live: AgentInfo[]): string | undefined {
+  if (opts.worktree === undefined) {
+    return undefined
+  }
+  const wt = resolve(opts.worktree)
+  const agent = live.find(
+    (a) => typeof a.worktree === 'string' && resolve(a.worktree) === wt
+  )
+  if (agent) {
+    return `agent ${agent.id} live in ${basename(opts.worktree)}`
+  }
+  const claim = (opts.scanClaim ?? worktreeClaim)(opts.worktree)
+  return claim === undefined
+    ? undefined
+    : `worktree ${basename(opts.worktree)} claimed${claim === '' ? '' : ` by ${claim}`}`
 }
 
 /** Why a PR's worktree is owned right now — undefined = orphaned, the
@@ -281,18 +328,13 @@ export function occupied(opts: OccupancyCtx): string | undefined {
   if (opts.fixerBead !== undefined && live.some((a) => a.molStep === opts.fixerBead)) {
     return `fixer agent live on ${opts.fixerBead}`
   }
-  if (opts.worktree !== undefined) {
-    const wt = resolve(opts.worktree)
-    const agent = live.find(
-      (a) => typeof a.worktree === 'string' && resolve(a.worktree) === wt
-    )
-    if (agent) {
-      return `agent ${agent.id} live in ${basename(opts.worktree)}`
-    }
-    const claim = (opts.scanClaim ?? worktreeClaim)(opts.worktree)
-    if (claim !== undefined) {
-      return `worktree ${basename(opts.worktree)} claimed${claim === '' ? '' : ` by ${claim}`}`
-    }
+  const sup = supervisedBy(opts.watches, opts.pr)
+  if (sup !== undefined) {
+    return `supervised by ${watchMarkerKind(sup.file, sup.watch)} pid ${sup.watch.pid}`
+  }
+  const wt = worktreeOccupant(opts, live)
+  if (wt !== undefined) {
+    return wt
   }
   const slug = branchSlug(opts.branch)
   const detail = opts.workDetails.find((d) =>
@@ -571,6 +613,10 @@ interface PassWork {
   worktreeByBranch: Map<string, string>
   agents: AgentInfo[]
   workDetails: string[]
+  /** Watch-marker snapshot for the supervision plane — a `loop`
+   *  heartbeat or `act wait` landing mid-pass is re-read under the
+   *  occupancy locks (freshOccupancy), never trusted stale. */
+  watches: ListedWatch[]
   /** Fresh decide() calls the pass may still pay for — the shadow
    *  judge's `maxDecisionsPerRun` bound is per run, not per PR. */
   judgeBudget: { remaining: number }
@@ -724,7 +770,7 @@ export function registryAgents(dir: string): AgentInfo[] {
 export function freshOccupancy(
   dir: string,
   known: AgentInfo[]
-): Pick<PassWork, 'agents' | 'workDetails'> {
+): Pick<PassWork, 'agents' | 'workDetails' | 'watches'> {
   const byStep = new Map(known.map((a) => [a.molStep, a]))
   let fresh: AgentInfo[]
   try {
@@ -746,6 +792,9 @@ export function freshOccupancy(
   return {
     agents,
     workDetails: hooks === null ? [] : liveWorkDetails(hooks),
+    // listWatches is a cheap local read — a supervisor that stamped its
+    // heartbeat while the lock was being waited on is caught here
+    watches: listWatches(dir),
   }
 }
 
@@ -787,6 +836,7 @@ function acquireOccupancyLocks(dir: string, wt: string | undefined): () => void 
  *  taken, undefined when retired. */
 async function retireIfOrphaned(
   ctx: Ctx,
+  pr: number,
   wt: string,
   branch: string,
   fixer: TaskRow | undefined,
@@ -809,6 +859,8 @@ async function retireIfOrphaned(
       worktree: wt,
       workDetails: fresh.workDetails,
       scanProc: agentProcessesIn,
+      pr,
+      watches: fresh.watches,
     })
     if (occ !== undefined) {
       return occ
@@ -856,7 +908,7 @@ async function spawnFixer(
       // both occupancy locks: a claimant writes its registry entry +
       // .work marker under the same locks, so a claim lands before the
       // check or after the remove — never between
-      const retire = await retireIfOrphaned(ctx, wt, state.headRef, fixer, known)
+      const retire = await retireIfOrphaned(ctx, pr, wt, state.headRef, fixer, known)
       if (retire !== undefined) {
         return { pr, link, verdict: 'occupied', detail: retire }
       }
@@ -982,6 +1034,8 @@ async function spawnFixerAgent(
       worktree: s.wt,
       workDetails: fresh.workDetails,
       scanProc: agentProcessesIn,
+      pr,
+      watches: fresh.watches,
     })
     if (occ !== undefined) {
       return { pr, link, verdict: 'occupied', detail: occ }
@@ -1189,6 +1243,8 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     worktree,
     workDetails: work.workDetails,
     scanProc: agentProcessesIn,
+    pr,
+    watches: work.watches,
   })
   if (gate.ok) {
     if (occ !== undefined) {
@@ -1282,9 +1338,21 @@ async function sweepSettledFixers(ctx: Ctx, prs: Set<number>): Promise<void> {
  *  between passes. Also retires this drive's markers for PRs that left
  *  the open set — a live marker on a merged PR would keep reporting
  *  "watch active". Skipped on an incomplete enumeration: a failed
- *  lookup must not delete the marker of a PR that is still open. */
-function emitWatchHeartbeats(ctx: Ctx, prs: Set<number>, complete: boolean): void {
+ *  lookup must not delete the marker of a PR that is still open.
+ *  PRs a live foreign marker already supervises (a `loop` heartbeat,
+ *  `act wait`, convoy) are excluded both ways — claiming "watch active"
+ *  for a PR this drive will skip is a lie, and a stale own-marker on
+ *  one would keep saying it. */
+function emitWatchHeartbeats(
+  ctx: Ctx,
+  prs: Set<number>,
+  supervised: Set<number>,
+  complete: boolean
+): void {
   for (const pr of prs) {
+    if (supervised.has(pr)) {
+      continue
+    }
     watchHeartbeat(
       ctx.mainRoot,
       {
@@ -1304,7 +1372,7 @@ function emitWatchHeartbeats(ctx: Ctx, prs: Set<number>, complete: boolean): voi
       l.alive &&
       l.watch.pid === process.pid &&
       basename(l.file).endsWith(`-drive-${process.pid}.json`) &&
-      !prs.has(l.watch.pr)
+      (!prs.has(l.watch.pr) || supervised.has(l.watch.pr))
     ) {
       watchEnd(l.file)
     }
@@ -1322,11 +1390,15 @@ async function driveOnce(ctx: Ctx): Promise<void> {
     worktreeByBranch: worktreeMap(ctx.mainRoot),
     agents: [...byStep.values()],
     workDetails: hooks === null ? [] : liveWorkDetails(hooks),
+    watches: listWatches(ctx.mainRoot),
     judgeBudget: { remaining: judgeConfig(ctx.mainRoot).judge.maxDecisionsPerRun },
   }
   const { prs, complete } = openFleetPrs(ctx)
   if (ctx.everySec !== undefined) {
-    emitWatchHeartbeats(ctx, prs, complete)
+    const supervised = new Set(
+      [...prs].filter((pr) => supervisedBy(work.watches, pr) !== undefined)
+    )
+    emitWatchHeartbeats(ctx, prs, supervised, complete)
   }
   for (const pr of prs) {
     // a throwing probe on one PR must not kill the pass — in --every

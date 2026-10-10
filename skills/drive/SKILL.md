@@ -29,13 +29,15 @@ For every open PR on a fleet branch (worktree branches + local
 | `gate.ok` | no | `bro act merge`, retire the worktree when clean, close the fixer bead |
 | PR merged/closed | — | close a dangling fixer bead |
 
-Occupancy = the agents facade + the worktree's own fresh claim marker
-(`<gitdir>/bro/work`, stamped by `bro work enter`) + fresh `.work`
-markers + a `/proc` cwd scan that follows a process's ancestry to an
-agent-shaped root — agent CLIs sit at their launch dir while their tool
-shells hold the worktree cwd — or matches a `BRO_AGENT_ID`/`AI_AGENT`
-env badge, which detached descendants keep. Occupied is always the safe
-verdict.
+Occupancy = the agents facade + a live foreign watch marker on the PR
+(a `bro loop` heartbeat, `act wait`, convoy — drive only owns
+*unsupervised* PRs, so a live supervisor is an occupant) + the
+worktree's own fresh claim marker (`<gitdir>/bro/work`, stamped by
+`bro work enter`) + fresh `.work` markers + a `/proc` cwd scan that
+follows a process's ancestry to an agent-shaped root — agent CLIs sit
+at their launch dir while their tool shells hold the worktree cwd — or
+matches a `BRO_AGENT_ID`/`AI_AGENT` env badge, which detached
+descendants keep. Occupied is always the safe verdict.
 
 ## Commands
 
