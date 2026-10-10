@@ -246,6 +246,29 @@ export function emitMailbox(dir: string, text: string): boolean {
   return true
 }
 
+/** --notify's transition drop: a changed snapshot mails once. Marked
+ *  notified only on a successful emit — a transient failure retries on
+ *  the next tick, and a throw warns without killing the heartbeat. */
+function dropTransition(
+  dir: string,
+  snap: WatchSnapshot,
+  text: string,
+  lastNotified: string
+): string {
+  const key = snapshotKey(snap)
+  if (key === lastNotified) {
+    return lastNotified
+  }
+  try {
+    return emitMailbox(dir, text) ? key : lastNotified
+  } catch (err) {
+    console.error(
+      `warning: mailbox drop failed — ${err instanceof Error ? err.message : String(err)}`
+    )
+    return lastNotified
+  }
+}
+
 /** mols section — every open molecule through nextStep; pure beads
  *  reads, no backend, no network. A molecule whose load/nextStep
  *  throws degrades to an `error` row — one bad mol must not blank
@@ -716,22 +739,7 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
       )
     }
     if (notify) {
-      const key = snapshotKey(snap)
-      if (key !== lastNotified) {
-        try {
-          // mark notified only on a successful drop — a transient
-          // failure retries on the next tick, never silently lost
-          if (emitMailbox(dir, text)) {
-            lastNotified = key
-          }
-        } catch (err) {
-          // mailbox write failures (permissions, disk, races) warn —
-          // the heartbeat is best-effort and must not die on a drop
-          console.error(
-            `warning: mailbox drop failed — ${err instanceof Error ? err.message : String(err)}`
-          )
-        }
-      }
+      lastNotified = dropTransition(dir, snap, text, lastNotified)
     }
   }
 
