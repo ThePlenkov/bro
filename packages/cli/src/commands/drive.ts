@@ -379,6 +379,48 @@ function ffToRemoteTip(dir: string, branch: string): boolean {
   return gitTry(['-C', dir, 'merge', '--ff-only', remote, '--quiet']).code === 0
 }
 
+/** A standing checkout of <branch> at <dir> — handed over once it can
+ *  reach the remote tip: a standing checkout can still lag commits
+ *  pushed since it was made, so it fast-forwards like the create path.
+ *  undefined when the dir stands on another branch (foreign — never
+ *  clobbered). */
+function reuseFixerWorktree(dir: string, branch: string): { path?: string; err?: string } | undefined {
+  const on = gitTry(['-C', dir, 'branch', '--show-current']).out.trim()
+  if (on !== branch) {
+    return undefined
+  }
+  if (!ffToRemoteTip(dir, branch)) {
+    return { err: `${dir} can't fast-forward to origin/${branch}` }
+  }
+  return { path: dir }
+}
+
+/** The fresh `<repo>--<slug>` checkout: the existing local branch, else
+ *  a new one at origin/<branch>'s tip — the orphan-PR shape. */
+function addFixerWorktree(
+  mainRoot: string,
+  dir: string,
+  branch: string
+): { path?: string; created?: boolean; err?: string } {
+  const add = gitTry(['-C', mainRoot, 'worktree', 'add', dir, branch])
+  if (add.code === 0) {
+    // the fetch refreshed origin/<branch>, not the local ref the
+    // worktree just checked out — ff or the fixer works a stale tip;
+    // a refusal means the branch moved mid-call — retire the dir we
+    // just made rather than hand over a tip that can't cover it
+    if (!ffToRemoteTip(dir, branch)) {
+      gitTry(['-C', mainRoot, 'worktree', 'remove', dir])
+      return { err: `${branch} moved while its worktree was being added` }
+    }
+    return { path: dir, created: true }
+  }
+  const retry = gitTry(['-C', mainRoot, 'worktree', 'add', '-b', branch, dir, `origin/${branch}`])
+  if (retry.code === 0) {
+    return { path: dir, created: true }
+  }
+  return { err: retry.err || add.err }
+}
+
 /** The PR's fixer checkout: the branch's existing worktree, else a fresh
  *  `<repo>--<slug>` on it — `created` marks a dir this call added so the
  *  caller can retire it when the work evaporates. A dir standing on
@@ -402,34 +444,13 @@ export function ensureFixerWorktree(
   for (const name of new Set([branchSlug(branch), branch.replaceAll('/', '-')])) {
     const dir = worktreePathFor(mainRoot, name)
     if (existsSync(dir)) {
-      const on = gitTry(['-C', dir, 'branch', '--show-current']).out.trim()
-      if (on === branch) {
-        // a standing checkout can still lag the remote tip — refresh it
-        // like the create path does
-        if (!ffToRemoteTip(dir, branch)) {
-          return { err: `${dir} can't fast-forward to origin/${branch}` }
-        }
-        return { path: dir }
+      const r = reuseFixerWorktree(dir, branch)
+      if (r !== undefined) {
+        return r
       }
       continue
     }
-    const add = gitTry(['-C', mainRoot, 'worktree', 'add', dir, branch])
-    if (add.code === 0) {
-      // the fetch refreshed origin/<branch>, not the local ref the
-      // worktree just checked out — ff or the fixer works a stale tip;
-      // a refusal means the branch moved mid-call — retire the dir we
-      // just made rather than hand over a tip that can't cover it
-      if (!ffToRemoteTip(dir, branch)) {
-        gitTry(['-C', mainRoot, 'worktree', 'remove', dir])
-        return { err: `${branch} moved while its worktree was being added` }
-      }
-      return { path: dir, created: true }
-    }
-    const retry = gitTry(['-C', mainRoot, 'worktree', 'add', '-b', branch, dir, `origin/${branch}`])
-    if (retry.code === 0) {
-      return { path: dir, created: true }
-    }
-    return { err: retry.err || add.err }
+    return addFixerWorktree(mainRoot, dir, branch)
   }
   return {
     err: `every worktree path for ${branch} is held by a foreign branch`,
