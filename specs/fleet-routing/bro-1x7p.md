@@ -236,9 +236,11 @@ shapes or orphaned PRs lose their only owner:
   is untouched: markers stay pid-keyed, expiry leaves the dead-marker
   stale-supervision flag the session-start hook already reports — the
   re-arm signal, not a silent gap. A deployment wanting durable
-  coverage re-arms the bounded loop on a non-agent timer
-  (`watch install`'s systemd/cron shape); a `drive install`
-  generalization earns a spec when the timer machinery does.
+  coverage arms the want-marker instead — `watch install` writes
+  `bro/pulse.json` and the session-start hook re-arms the bounded
+  loop when no live pulse holds `pulse.lock` (the OS-timer writers
+  are retired, bro-killn); a `drive install` generalization earns a
+  spec when the marker machinery does.
 - **Drain exit** — an `--every` pass that fully enumerates the fleet
   and finds zero open PRs exits 0: the until-condition, convoy
   drain's own verdict — coverage then has nothing left to cover (a
