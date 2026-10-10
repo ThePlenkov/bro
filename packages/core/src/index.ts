@@ -1,6 +1,7 @@
 export {
   gh,
   ghAsync,
+  ghHost,
   ghJson,
   ghJsonAsync,
   ghTry,
@@ -58,6 +59,7 @@ export {
   loadConfigLayers,
   mcpSection,
   meshSection,
+  mirrorSection,
   PERSONALITIES,
   probeConfigFile,
   providersSection,
@@ -125,7 +127,7 @@ export {
   dataRefPush,
   dataRefRoot,
 } from './dataref.ts'
-export type { BroConfig, ConfigLayerHit, ConfigLayerName, ConfigLayersResult, ConfigSection, Personality, SddMode, StoreBackend } from './config.ts'
+export type { BroConfig, ConfigLayerHit, ConfigLayerName, ConfigLayersResult, ConfigSection, MirrorPolicy, Personality, SddMode, StoreBackend } from './config.ts'
 export type { QueryFacade, QueryOpts, QueryResult } from './queries.ts'
 export { definePlugin } from './plugin.ts'
 export type { BroPlugin } from './plugin.ts'
@@ -144,6 +146,7 @@ export {
 } from './tasks.ts'
 export type {
   DepOpts,
+  PublishResult,
   SlotAcquire,
   TaskDepEdge,
   TaskFilter,

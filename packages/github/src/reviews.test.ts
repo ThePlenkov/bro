@@ -26,7 +26,8 @@ case "$1 $2" in
   "pr checks") if [ "$FAKE_GH_NO_CHECKS" = "1" ]; then echo 'no checks reported' >&2; exit 8; fi
       echo '[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"kilo","state":"PENDING","bucket":"pending"}]' ;;
   "repo view") echo '{"owner":{"login":"acme"},"name":"widgets"}' ;;
-  "pr view") if [ -n "$FAKE_GH_PR_STATE" ]; then echo '{"state":"'"$FAKE_GH_PR_STATE"'"}'; exit 0; fi
+  "pr view") if [ -n "$FAKE_GH_PR_BODY" ]; then printf '{"body":%s}\\n' "$FAKE_GH_PR_BODY"; exit 0; fi
+      if [ -n "$FAKE_GH_PR_STATE" ]; then echo '{"state":"'"$FAKE_GH_PR_STATE"'"}'; exit 0; fi
       if [ -n "$FAKE_GH_PR_VIEW_FAIL" ]; then case ",$FAKE_GH_PR_VIEW_FAIL," in
       *",$3,"*) echo 'gh: authentication required' >&2; exit 1 ;; esac; fi
       if [ "$FAKE_GH_NO_MERGED_AT" = "1" ]; then echo '{"state":"MERGED"}';
@@ -750,6 +751,58 @@ describe('githubReview', { skip: WIN32 }, () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  // --- the projection's Fixes wiring (spec bro-z2z7f) -------------------------
+
+  test('linkCloses stamps Fixes refs ahead of the bro trailer, which stays last', () => {
+    withFakeGh(
+      { FAKE_GH_PR_BODY: '"the work\\n\\n<!-- bro: {\\"type\\":\\"feature\\"} -->"' },
+      (log) => {
+        githubReview().linkCloses!(target, ['7', '9'])
+        const calls = readFileSync(log, 'utf8')
+        assert.match(
+          calls,
+          /pr edit 42 --repo acme\/widgets --body the work\n\nFixes #7\nFixes #9\n\n<!-- bro: \{"type":"feature"\} -->/
+        )
+      }
+    )
+  })
+
+  test('linkCloses is idempotent — an already-wired ref is not re-stamped', () => {
+    withFakeGh({ FAKE_GH_PR_BODY: '"closes #7 — done deal\\n\\nmore prose"' }, (log) => {
+      githubReview().linkCloses!(target, ['7', '8'])
+      const calls = readFileSync(log, 'utf8')
+      assert.match(calls, /--body closes #7 — done deal\n\nmore prose\n\nFixes #8/)
+      assert.equal(calls.split('Fixes #7').length - 1, 0)
+    })
+  })
+
+  test('linkCloses on a fully-wired body edits nothing', () => {
+    withFakeGh({ FAKE_GH_PR_BODY: '"fixes #7 and resolves #8"' }, (log) => {
+      githubReview().linkCloses!(target, ['7', '8'])
+      const calls = readFileSync(log, 'utf8')
+      assert.match(calls, /pr view 42 --repo acme\/widgets --json body/)
+      assert.doesNotMatch(calls, /pr edit/)
+    })
+  })
+
+  test('linkCloses on an empty body stamps bare Fixes lines', () => {
+    // the stock pr view answer carries no body — the null-body path
+    withFakeGh({}, (log) => {
+      githubReview().linkCloses!(target, ['7', '9'])
+      assert.match(
+        readFileSync(log, 'utf8'),
+        /pr edit 42 --repo acme\/widgets --body Fixes #7\nFixes #9/
+      )
+    })
+  })
+
+  test('linkCloses with no refs never touches the host', () => {
+    withFakeGh({}, (log) => {
+      githubReview().linkCloses!(target, [])
+      assert.equal(readFileSync(log, 'utf8').trim(), '')
+    })
   })
 })
 
