@@ -297,6 +297,29 @@ function distStampMs(distDir: string): number {
   return newest
 }
 
+/** When this clone last moved a ref — the mtime of its reflog file.
+ *  The commit's %ct is committer-declared: a backdated upstream commit
+ *  looks older than the dist built before it landed, and a future-dated
+ *  one looks newer — the reflog append is the local, honest "checkout
+ *  changed" signal (the entry timestamp itself is second-granularity,
+ *  the file mtime is not). HEAD's log lives in the per-worktree git
+ *  dir, ref logs in the common dir. 0 when the ref has no reflog. */
+function refMovedMs(checkout: string, ref: string): number {
+  const gd = gitTry(['-C', checkout, 'rev-parse', ref === 'HEAD' ? '--git-dir' : '--git-common-dir'])
+  if (gd.code !== 0) {
+    return 0
+  }
+  const name =
+    ref === 'HEAD'
+      ? 'HEAD'
+      : gitTry(['-C', checkout, 'rev-parse', '--symbolic-full-name', ref]).out.trim()
+  if (name === '') {
+    return 0
+  }
+  return statSync(join(resolve(checkout, gd.out.trim()), 'logs', name), { throwIfNoEntry: false })
+    ?.mtimeMs ?? 0
+}
+
 function devDistCheck({ checkout, distDir, entry }: DevDist): DoctorCheck {
   const stamp = distStampMs(distDir)
   if (stamp === 0) {
@@ -308,22 +331,27 @@ function devDistCheck({ checkout, distDir, entry }: DevDist): DoctorCheck {
   if (gitTry(['-C', checkout, 'rev-parse', '--verify', '--quiet', '@{u}']).code === 0) {
     refs.push('@{u}')
   }
-  let newest: { ref: string; sha: string; ct: number } | null = null
+  let newest: { ref: string; sha: string; ms: number } | null = null
   for (const ref of refs) {
     const r = gitTry(['-C', checkout, 'show', '-s', '--format=%ct %h', ref])
     if (r.code !== 0) {
       continue
     }
     const [ct, sha] = r.out.trim().split(' ')
-    const t = Number(ct)
-    if (newest === null || t > newest.ct) {
-      newest = { ref, sha: sha ?? ref, ct: t }
+    const commitMs = Number(ct) * 1000
+    if (!Number.isFinite(commitMs) || commitMs <= 0) {
+      continue
+    }
+    // ref-move time is the signal; %ct is the fallback for ref-less moves
+    const ms = refMovedMs(checkout, ref) || commitMs
+    if (newest === null || ms > newest.ms) {
+      newest = { ref, sha: sha ?? ref, ms }
     }
   }
   if (newest === null) {
     return check('bro-dist', 'ok', `${checkout} — no resolvable commit, drift unproven`)
   }
-  if (newest.ct * 1000 > stamp) {
+  if (newest.ms > stamp) {
     return check(
       'bro-dist',
       'warn',

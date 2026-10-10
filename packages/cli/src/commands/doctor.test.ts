@@ -417,10 +417,25 @@ describe('bro doctor', () => {
     withEnv({ bins: ['gh'] }, (dir) => {
       const { checkout, entry } = fakeCheckout(dir)
       commitAt(checkout, '2000-01-01T00:00:00Z')
+      // dist rebuilt after the ref moved — the backdated commit's %ct is
+      // old, but the reflog move already happened before the build
+      utimesSync(entry, new Date(), new Date())
       symlinkSync(entry, join(dir, 'bin', 'bro'))
       const c = byName(runDoctorChecks(dir), 'bro-dist')
       assert.equal(c.status, 'ok')
       assert.match(c.detail, /covers HEAD/)
+    }))
+
+  test('bro-dist: a backdated commit still warns — ref-move time is the signal, not %ct', () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      const { checkout, entry } = fakeCheckout(dir)
+      // commit dated 2000 but created now — after the dist write. Commit
+      // time says "covered"; the ref actually moved after the build
+      commitAt(checkout, '2000-01-01T00:00:00Z')
+      symlinkSync(entry, join(dir, 'bin', 'bro'))
+      const c = byName(runDoctorChecks(dir), 'bro-dist')
+      assert.equal(c.status, 'warn')
+      assert.match(c.detail, /predates HEAD/)
     }))
 
   test('bro-dist: an upstream ahead of a covered HEAD still warns — the merge landed after the build', () =>
@@ -430,14 +445,18 @@ describe('bro doctor', () => {
       execFileSync('git', ['init', '-q', '--bare', bare])
       execFileSync('git', ['-C', checkout, 'remote', 'add', 'origin', bare])
       commitAt(checkout, '2000-01-01T00:00:00Z')
-      commitAt(checkout, '2001-01-01T00:00:00Z')
       const branch = execFileSync('git', ['-C', checkout, 'branch', '--show-current'], {
         encoding: 'utf8',
       }).trim()
       execFileSync('git', ['-C', checkout, 'push', '-qu', 'origin', `HEAD:${branch}`])
-      execFileSync('git', ['-C', checkout, 'reset', '-q', '--hard', 'HEAD~1'])
-      // dist built after local HEAD (2000) but before the upstream move (2001)
-      utimesSync(entry, new Date(Date.UTC(2000, 5, 1)), new Date(Date.UTC(2000, 5, 1)))
+      // a second clone lands a backdated commit on origin — commit time
+      // (2001) predates the dist build, but the fetch moves @{u} after it
+      const other = join(dir, 'other')
+      execFileSync('git', ['clone', '-q', bare, other])
+      commitAt(other, '2001-01-01T00:00:00Z')
+      execFileSync('git', ['-C', other, 'push', '-q', 'origin', `HEAD:${branch}`])
+      utimesSync(entry, new Date(), new Date()) // dist built before the fetch
+      execFileSync('git', ['-C', checkout, 'fetch', '-q', 'origin'])
       symlinkSync(entry, join(dir, 'bin', 'bro'))
       const c = byName(runDoctorChecks(dir), 'bro-dist')
       assert.equal(c.status, 'warn')
