@@ -63,6 +63,7 @@ import {
   listWatches,
   watchEnd,
   watchHeartbeat,
+  type ExitGate,
   type PrActState,
 } from '@broject/act'
 import {
@@ -791,14 +792,12 @@ async function spawnFixer(
   // re-read under the locks immediately before the spawn, so a claim
   // landing during annotation is caught the same way.
   const notes = await driveShadowNotes(ctx.mainRoot, pr, state.headSha, open, judgeBudget)
-  return spawnFixerAgent(
-    ctx,
-    pr,
-    state,
+  return spawnFixerAgent(ctx, pr, {
+    branch: state.headRef,
     wt,
     fixer,
     known,
-    buildFixerPrompt({
+    prompt: buildFixerPrompt({
       pr,
       link,
       branch: state.headRef,
@@ -810,8 +809,8 @@ async function spawnFixer(
         body: t.comment?.body,
         judge: notes?.get(t.id),
       })),
-    })
-  )
+    }),
+  })
 }
 
 /** The rebase fixer's work order — the drive twin of the loop's
@@ -853,6 +852,19 @@ export function buildRebaseFixerPrompt(opts: {
   ].join('\n')
 }
 
+/** Everything the locked spawn ceremony needs — an options bag so the
+ *  helper stays under the parameter cap. */
+interface FixerSpawn {
+  branch: string
+  wt: string
+  fixer: TaskRow | undefined
+  known: AgentInfo[]
+  prompt: string
+  /** prefixes the spawned detail so a rebase round reads differently
+   *  in the pass log. */
+  tag?: string
+}
+
 /** The locked spawn ceremony both fixer kinds share — a last occupancy
  *  read right before the spawn (the gap since the pass-level check
  *  covered the worktree create + state refetch, long enough for another
@@ -860,23 +872,16 @@ export function buildRebaseFixerPrompt(opts: {
  *  Both occupancy locks are held across refresh→probe→spawn (see
  *  acquireOccupancyLocks) so a `bro work enter` or a competing spawn
  *  can't land a claim between — the refresh itself must come after the
- *  acquire, or the lock wait is one more stale-input window. `tag`
- *  prefixes the spawned detail so a rebase round reads differently in
- *  the pass log. */
+ *  acquire, or the lock wait is one more stale-input window. */
 async function spawnFixerAgent(
   ctx: Ctx,
   pr: number,
-  state: PrActState,
-  wt: string,
-  fixer: TaskRow | undefined,
-  known: AgentInfo[],
-  prompt: string,
-  tag = ''
+  s: FixerSpawn
 ): Promise<PrVerdict> {
   const link = ctx.rev.prLink(ctx.repo, pr)
   let release: () => void
   try {
-    release = acquireOccupancyLocks(ctx.mainRoot, wt)
+    release = acquireOccupancyLocks(ctx.mainRoot, s.wt)
   } catch (err) {
     return {
       pr,
@@ -886,28 +891,29 @@ async function spawnFixerAgent(
     }
   }
   try {
-    const fresh = freshOccupancy(ctx.mainRoot, known)
+    const fresh = freshOccupancy(ctx.mainRoot, s.known)
     const occ = occupied({
       agents: fresh.agents,
-      fixerBead: fixer?.id,
-      branch: state.headRef,
-      worktree: wt,
+      fixerBead: s.fixer?.id,
+      branch: s.branch,
+      worktree: s.wt,
       workDetails: fresh.workDetails,
       scanProc: agentProcessesIn,
     })
     if (occ !== undefined) {
       return { pr, link, verdict: 'occupied', detail: occ }
     }
-    const bead = fixer ?? ensureFixerBead(ctx.store, pr, link, state.headRef)
+    const bead = s.fixer ?? ensureFixerBead(ctx.store, pr, link, s.branch)
     try {
       const info = await spawnStepAgent(ctx.mainRoot, ctx.env, {
         molStep: bead.id,
-        worktree: wt,
-        prompt,
+        worktree: s.wt,
+        prompt: s.prompt,
         connector: ctx.connector,
         env: { BRO_PR: String(pr), BRO_PR_URL: link },
       })
       const pid = info.pid === undefined ? '' : ` pid ${info.pid}`
+      const tag = s.tag ?? ''
       return { pr, link, verdict: 'spawned', detail: `${tag}${bead.id} → ${info.id}${pid}` }
     } catch (err) {
       return {
@@ -962,22 +968,20 @@ async function spawnRebaseFixer(
     }
     wt = ensured.path
   }
-  return spawnFixerAgent(
-    ctx,
-    pr,
-    state,
+  return spawnFixerAgent(ctx, pr, {
+    branch: state.headRef,
     wt,
     fixer,
     known,
-    buildRebaseFixerPrompt({
+    prompt: buildRebaseFixerPrompt({
       pr,
       link,
       branch: state.headRef,
       base: meta.baseRef,
       worktree: wt,
     }),
-    'rebase '
-  )
+    tag: 'rebase ',
+  })
 }
 
 /** The merge side of a green gate: `act merge`, then prove the merge
@@ -1027,6 +1031,47 @@ async function mergeAndRetire(
   return { pr, link, verdict: 'merged' }
 }
 
+/** The post-green verdict ladder — everything the non-green branches
+ *  need, bundled so the helpers stay under the parameter cap. */
+interface BlockedWork {
+  pr: number
+  link: string
+  state: PrActState
+  gate: ExitGate
+  occ: string | undefined
+  worktree: string | undefined
+  fixer: TaskRow | undefined
+  work: PassWork
+}
+
+/** Non-green verdicts: threads preempt (same order as the loop's
+ *  memberAction), a conflicted orphan earns the rebase fixer while the
+ *  fixRounds cap lasts, everything else is plain 'blocked'. Extracted
+ *  so drivePr stays under the cognitive-complexity cap. */
+async function blockedVerdict(ctx: Ctx, b: BlockedWork): Promise<PrVerdict> {
+  const { pr, link, state, gate, occ, worktree, fixer, work } = b
+  if (gate.open_threads > 0) {
+    if (occ !== undefined) {
+      return { pr, link, verdict: 'occupied', detail: occ }
+    }
+    return spawnFixer(ctx, pr, state, worktree, fixer, work.agents, work.judgeBudget)
+  }
+  // a conflicted orphan stalls exactly like an open-thread one did
+  // before the fixer existed — 'blocked — merge conflicts' used to be
+  // logged and skipped forever (bro-glkes). The bound is the act gate's
+  // own round cap — reviewed pushes past maxRounds read as plain
+  // 'blocked', not another rebase round.
+  if (state.mergeable === 'CONFLICTING') {
+    if (occ !== undefined) {
+      return { pr, link, verdict: 'occupied', detail: occ }
+    }
+    if (!(state.maxRounds > 0 && state.fixRounds > state.maxRounds)) {
+      return spawnRebaseFixer(ctx, pr, state, worktree, fixer, work.agents)
+    }
+  }
+  return { pr, link, verdict: 'blocked', detail: gate.blockers.join('; ') }
+}
+
 async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict> {
   const link = ctx.rev.prLink(ctx.repo, pr)
   let state: PrActState
@@ -1071,28 +1116,7 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     }
     return mergeAndRetire(ctx, pr, link, worktree, fixer)
   }
-  if (gate.open_threads > 0) {
-    if (occ !== undefined) {
-      return { pr, link, verdict: 'occupied', detail: occ }
-    }
-    return spawnFixer(ctx, pr, state, worktree, fixer, work.agents, work.judgeBudget)
-  }
-  // a conflicted orphan stalls exactly like an open-thread one did
-  // before the fixer existed — 'blocked — merge conflicts' used to be
-  // logged and skipped forever (bro-glkes). Threads preempt (same
-  // order as the loop's memberAction); the rebase order is for the
-  // thread-less stall. The bound is the act gate's own round cap —
-  // reviewed pushes past maxRounds read as plain 'blocked', not
-  // another rebase round.
-  if (state.mergeable === 'CONFLICTING') {
-    if (occ !== undefined) {
-      return { pr, link, verdict: 'occupied', detail: occ }
-    }
-    if (!(state.maxRounds > 0 && state.fixRounds > state.maxRounds)) {
-      return spawnRebaseFixer(ctx, pr, state, worktree, fixer, work.agents)
-    }
-  }
-  return { pr, link, verdict: 'blocked', detail: gate.blockers.join('; ') }
+  return blockedVerdict(ctx, { pr, link, state, gate, occ, worktree, fixer, work })
 }
 
 /** `<git-common-dir>/bro/hooks` — the .work marker dir. */
