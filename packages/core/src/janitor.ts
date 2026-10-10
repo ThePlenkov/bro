@@ -553,9 +553,10 @@ function capFile(ctx: Ctx, path: string, size: number): void {
 }
 
 /** Uncapped append-only files bro owns: trace journals, agent logs, the
- *  judge verdict journal. act-checks.jsonl is absent — it self-caps.
- *  Agent logs cap only while their entry lives — an orphan's .log is
- *  debris to unlink, not a file to trim. */
+ *  judge verdict journal. act-checks.jsonl and events.jsonl are absent
+ *  — they self-cap inside their append lock, at bounds this pass would
+ *  fight. Agent logs cap only while their entry lives — an orphan's
+ *  .log is debris to unlink, not a file to trim. */
 function capLogs(ctx: Ctx): void {
   for (const f of listDir(join(ctx.bro, 'hooks', 'trace'))) {
     capIfLarge(ctx, join(ctx.bro, 'hooks', 'trace', f), f.endsWith('.jsonl'))
