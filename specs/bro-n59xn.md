@@ -52,12 +52,13 @@ cross-project leakage).
 ## Plan
 
 - [x] spec (this file)
-- [ ] `packages/learn/src/connector.ts` `storeStamp`: recognize
+- [x] `packages/learn/src/connector.ts` `storeStamp`: recognize
       `embeddeddolt/` and `dolt/` roots (+test)
-- [ ] `scripts/beads-dolt-server.ts` — install/status/uninstall
-- [ ] `site/content/docs/dolt-server.md` — cold-start runbook (+meta.json)
-- [ ] migrate the live `~/projects/bro/.beads` via the installer
-      (dogfood), verify `bd` under concurrent load
+- [x] `scripts/beads-dolt-server.ts` — install/status/uninstall
+- [x] `site/content/docs/dolt-server.md` — cold-start runbook (+meta.json)
+- [x] migrate the live `~/projects/bro/.beads` via the installer
+      (dogfood), verify `bd` under concurrent load — 8 parallel
+      `bd show` ≈1.5s total, `bro watch` planes all resolve
 
 ## Out of scope / approximations
 
