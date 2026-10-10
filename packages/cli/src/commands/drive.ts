@@ -168,9 +168,11 @@ export function driveArgs(argv: string[], defaultEverySec = 300): DriveArgs {
 export const FLEET_BRANCH_PREFIXES = ['work/', 'loop/', 'stack/']
 
 /** Every branch that can hold an orphaned PR: each worktree's branch
- *  plus local fleet-prefixed branches. */
-export function candidateBranches(root: string): string[] {
+ *  plus local fleet-prefixed branches. `complete` is false when any
+ *  git listing failed — a partial set is under-counted, not drained. */
+export function candidateBranches(root: string): { branches: string[]; complete: boolean } {
   const branches = new Set<string>()
+  let complete = true
   const wt = gitTry(['-C', root, 'worktree', 'list', '--porcelain'])
   if (wt.code === 0) {
     for (const w of parseWorktreePorcelain(wt.out)) {
@@ -178,6 +180,8 @@ export function candidateBranches(root: string): string[] {
         branches.add(w.branch)
       }
     }
+  } else {
+    complete = false
   }
   for (const prefix of FLEET_BRANCH_PREFIXES) {
     const res = gitTry(['-C', root, 'branch', '--list', `${prefix}*`, '--format=%(refname:short)'])
@@ -185,9 +189,11 @@ export function candidateBranches(root: string): string[] {
       for (const b of res.out.split('\n').filter((s) => s !== '')) {
         branches.add(b)
       }
+    } else {
+      complete = false
     }
   }
-  return [...branches]
+  return { branches: [...branches], complete }
 }
 
 /** work/bro-x → bro-x; stack/name/3-bro-x → 3-bro-x. */
@@ -1224,14 +1230,19 @@ function worktreeMap(root: string): Map<string, string> {
   return map
 }
 
-/** Open PR numbers across every candidate branch — a failed lookup on
- *  one branch is a warning, never a dead pass. `complete` is false when
- *  any lookup failed: the set then under-counts open PRs, so consumers
- *  must not use it to conclude a PR is gone. */
+/** Open PR numbers across every candidate branch — a failed listing or
+ *  lookup on one source is a warning, never a dead pass. `complete` is
+ *  false when the branch listing or any lookup failed: the set then
+ *  under-counts open PRs, so consumers must not use it to conclude a
+ *  PR is gone. */
 function openFleetPrs(ctx: Ctx): { prs: Set<number>; complete: boolean } {
   const prs = new Set<number>()
-  let complete = true
-  for (const branch of candidateBranches(ctx.mainRoot)) {
+  const candidates = candidateBranches(ctx.mainRoot)
+  let complete = candidates.complete
+  if (!complete) {
+    say(ctx, 'warning: branch enumeration failed — the open-PR set may under-count')
+  }
+  for (const branch of candidates.branches) {
     try {
       for (const pr of ctx.rev.prsForBranch(branch)) {
         prs.add(pr)
