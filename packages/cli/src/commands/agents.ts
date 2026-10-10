@@ -206,6 +206,23 @@ export interface SessionQuotaView {
   invalidKey?: string
 }
 
+/** One armed lane's status row — an unverifiable count reads -1
+ *  (rendered `?`) rather than taking the status view down. */
+function laneView(
+  kind: string,
+  lane: 'sessions' | 'workers',
+  max: number,
+  count: () => number
+): SessionQuotaView {
+  let live = -1
+  try {
+    live = count()
+  } catch {
+    // unverifiable — a scan failure must not take down the status view
+  }
+  return { kind, lane, live, max }
+}
+
 function sessionQuotaViewsOf(env: AgentConnectorEnv): SessionQuotaView[] {
   const out: SessionQuotaView[] = []
   for (const plane of sessionPlanes()) {
@@ -221,29 +238,19 @@ function sessionQuotaViewsOf(env: AgentConnectorEnv): SessionQuotaView[] {
     const reservations = () =>
       countSessionReservations(sessionSlotsDir(plane.kind, q.reservationsDir))
     if (q.maxSessions > 0) {
-      let live = -1
-      try {
-        live = plane.countLive(bag) + reservations()
-      } catch {
-        // unverifiable — the -1 renders as `?`, a scan failure must not
-        // take down the status view
-      }
-      out.push({ kind: plane.kind, lane: 'sessions', live, max: q.maxSessions })
+      out.push(
+        laneView(plane.kind, 'sessions', q.maxSessions, () => plane.countLive(bag) + reservations())
+      )
     }
+    const countWorkers = plane.countWorkers
     if (q.maxWorkers !== undefined && q.maxWorkers > 0) {
-      if (plane.countWorkers === undefined) {
-        // an armed worker cap the plane cannot count is a config bug —
-        // surface it like a malformed value
-        out.push({ kind: plane.kind, lane: 'workers', live: -1, max: 0, invalid: true, invalidKey: 'maxWorkers' })
-        continue
-      }
-      let live = -1
-      try {
-        live = plane.countWorkers(bag) + reservations()
-      } catch {
-        // unverifiable — same `?` render as the sessions row
-      }
-      out.push({ kind: plane.kind, lane: 'workers', live, max: q.maxWorkers })
+      out.push(
+        countWorkers === undefined
+          ? // an armed worker cap the plane cannot count is a config
+            // bug — surface it like a malformed value
+            { kind: plane.kind, lane: 'workers', live: -1, max: 0, invalid: true, invalidKey: 'maxWorkers' }
+          : laneView(plane.kind, 'workers', q.maxWorkers, () => countWorkers(bag) + reservations())
+      )
     }
   }
   return out

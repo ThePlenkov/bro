@@ -19,7 +19,9 @@ host-wide mutex (`admitSessionSlot`):
   host-safety net (a runaway fleet can never flood the host past it).
 - **`maxWorkers`** (new) — only *spawned* sessions count: the plane's
   `countWorkers` plus held `.slot` reservations (every admitted spawn
-  is a worker by construction). Interactive sessions never consume
+  is a worker by construction). A slot retires as soon as the plane
+  can see the spawn's own session mark — a landed worker counts once,
+  not live+reservation twice. Interactive sessions never consume
   this budget, so `maxWorkers: 2` lets two rigs run one worker each no
   matter how many `devin` TTYs the user has open.
 
@@ -47,16 +49,22 @@ A live-pid lock classifies as a worker when either /proc probe holds:
    (`agentEnvPins`); inherited by the devin child a wrapper spawns, so
    `bro acp-worker → devin acp` and `sh -c 'devin -p …'` both carry it.
 2. **stdin is not a terminal** — `/proc/<pid>/fd/0` resolves outside
-   `/dev/pts/*`. Interactive `devin` reads a pty; headless workers
-   (pipes, `/dev/null`) do not. This also catches non-bro headless
-   sessions like an editor's `devin acp`.
+   the terminal devices (`/dev/pts/*`, `/dev/tty`, `/dev/console`,
+   `/dev/tty*` — pty slaves, the controlling-terminal alias, and
+   virtual/serial consoles). Interactive `devin` reads a terminal;
+   headless workers (pipes, files, `/dev/null`) do not. This also
+   catches non-bro headless sessions like an editor's `devin acp`.
 
-A pid that verifies neither probe is NOT a worker — missing /proc or
-unreadable environ/fd undercounts the worker lane, which only degrades
-to pre-split behavior (workers then share the `maxSessions` ceiling,
-which still guards). The alternative — treating the unverifiable as
-workers — would let phantom workers refuse real ones, re-creating the
-starvation this split removes.
+A pid that verifies neither probe is NOT a worker — unreadable
+environ/fd undercounts the worker lane, degrading toward pre-split
+behavior (workers share the `maxSessions` ceiling when it is armed).
+The alternative — treating the unverifiable as workers — would let
+phantom workers refuse real ones, re-creating the starvation this
+split removes. A host with NO `/proc` at all (macOS) cannot classify
+a single session: the plane then reads as "cannot tell workers" and
+an armed `maxWorkers` refuses `'unavailable'` at admission rather
+than silently unguard — pair the lane with `maxSessions`, the
+platform-independent ceiling, for a guaranteed guard there.
 
 A manual `devin -p` typed at a TTY keeps its pty stdin and reads as
 interactive — an accepted edge: it still counts under `maxSessions`,
@@ -86,7 +94,10 @@ and the worker lane exists to protect rigs, not to police the user.
   the quota, bad key named.
 - `admitSessionSlot`: worker cap refuses at ceiling, interactive-only
   sessions never fill it, reservations feed the worker count, missing
-  `countWorkers` + armed `maxWorkers` → `'config'`.
-- devin plane: badge → worker, non-pty stdin → worker, pty stdin →
-  not, dead pid → not, unverifiable → not.
+  `countWorkers` + armed `maxWorkers` → `'config'`, a slot the plane
+  retired inside its count is not double-counted.
+- devin plane: badge → worker, non-tty stdin → worker, pty/tty/
+  console stdin → not, dead pid → not, unverifiable → not; a landed
+  worker's slot is swept out of the reservation tally; `/proc` absent
+  + live sessions → `'unavailable'`.
 - `bro agents status` renders the workers row.

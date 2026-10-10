@@ -225,6 +225,27 @@ describe('admitSessionSlot', () => {
     })
   })
 
+  test('a slot the plane retires inside its count is not double-counted', () => {
+    withDir((resv) => {
+      // a landed spawn: its session is live AND its still-fresh slot
+      // sits in the reservations dir. The plane retires it inside its
+      // own count, so the tally must run AFTER the plane — counted
+      // before, it would read 2/2 and refuse a rightful admit
+      const landed = reserveSessionSlot(resv, 'native-aa')
+      const sweeping: SessionPlane = {
+        kind: 'testkind',
+        detectsCli: () => true,
+        countLive: () => 1,
+        countWorkers: () => {
+          rmSync(landed, { force: true })
+          return 1
+        },
+      }
+      const agents = { testkind: { maxWorkers: 2, reservationsDir: resv } }
+      assert.doesNotThrow(() => admitSessionSlot(sweeping, agents, { key: 'native-bb' }))
+    })
+  })
+
   test('a malformed cap refuses config, never a silent admit', () => {
     withDir((resv) => {
       const agents = { testkind: { maxSessions: 'x', reservationsDir: resv } }
