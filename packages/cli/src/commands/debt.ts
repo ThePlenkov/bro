@@ -56,8 +56,10 @@ import {
   ALL_SOURCES,
   COLLECTORS,
   DEBT_SOURCES,
+  dedupeReviewThreads,
   parseSources,
   resolvedThreadIds,
+  SourceSkipped,
   type DebtPrState,
   type DebtRecord,
   type DebtSource,
@@ -87,6 +89,7 @@ Commands:
                                   Sources: debt.sources config — default review-threads;
                                   opt in: ${DEBT_SOURCES.join(', ')}
                                   debt.stale_days tunes stale-prs (default 14)
+                                  --source a,b overrides debt.sources for one run
   status                          Ledger summary + unprocessed merged PR count
   stats [--by author|source|area] Signal per reviewer/source/area — fix% is
         [--json]                  done share of decided rows (default: author)
@@ -118,6 +121,8 @@ interface CollectArgs {
   listOnly: boolean
   reharvest: boolean
   noLabel: boolean
+  /** --source override — replaces debt.sources for this run. */
+  sources: string[] | null
 }
 
 function parsePositiveInt(flag: string, value: string): number {
@@ -141,6 +146,7 @@ function parseCollectArgs(rev: ReviewFacade, argv: string[]): CollectArgs {
   }
   let threadAuthor: string | null = null
   let runId = 'local'
+  let sources: string[] | null = null
   const bools = { dryRun: false, listOnly: false, reharvest: false, noLabel: false }
   const boolFlags: Record<string, keyof typeof bools> = {
     '--dry-run': 'dryRun',
@@ -166,6 +172,18 @@ function parseCollectArgs(rev: ReviewFacade, argv: string[]): CollectArgs {
     '--labels': (v) => (filters.labels = parseCsvStrings(v)),
     '--thread-author': (v) => (threadAuthor = v),
     '--run-id': (v) => (runId = v),
+    // An all-invalid --source parses to [] — which reads as "no explicit
+    // selection" and silently falls back to configured sources.
+    '--source': (v) => {
+      const picked = parseCsvStrings(v).filter((s) =>
+        (ALL_SOURCES as readonly string[]).includes(s)
+      )
+      if (picked.length === 0) {
+        console.error(`error: --source has no valid sources in "${v}" (known: ${ALL_SOURCES.join(', ')})`)
+        process.exit(2)
+      }
+      sources = picked
+    },
   }
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -203,6 +221,7 @@ function parseCollectArgs(rev: ReviewFacade, argv: string[]): CollectArgs {
     filters,
     threadAuthor,
     runId,
+    sources,
     ...bools,
   }
 }
@@ -227,8 +246,9 @@ async function cmdCollect(
   const args = parseCollectArgs(rev, argv)
 
   const debtCfg = loadBroConfig().debt
-  const sources = new Set(parseSources(debtCfg.sources))
-  warnUnknownSources(debtCfg.sources)
+  const configured = args.sources ?? debtCfg.sources
+  const sources = new Set(parseSources(configured))
+  warnUnknownSources(configured)
 
   if (sources.has('review-threads')) {
     await collectReviewThreads(rev, args)
@@ -236,7 +256,7 @@ async function cmdCollect(
   // --list-only is a read-only inspection — it must not write harvest
   // files, overlays, or the summary either.
   if (!args.listOnly) {
-    collectDebtSources(args, sources, debtCfg.stale_days)
+    collectDebtSources(args, sources, debtCfg)
   }
 
   if (args.dryRun || args.listOnly) {
@@ -262,11 +282,11 @@ function warnUnknownSources(configured: string[]): void {
 function collectDebtSources(
   args: CollectArgs,
   sources: Set<string>,
-  staleDays: number
+  debtCfg: { stale_days: number; sonarcloud: { project_key?: string; host?: string } }
 ): void {
   for (const source of DEBT_SOURCES) {
     if (sources.has(source)) {
-      collectOneSource(source, args, staleDays)
+      collectOneSource(source, args, debtCfg)
     }
   }
 }
@@ -274,20 +294,45 @@ function collectDebtSources(
 function collectOneSource(
   source: DebtSource,
   args: CollectArgs,
-  staleDays: number
+  debtCfg: { stale_days: number; sonarcloud: { project_key?: string; host?: string } }
 ): void {
   const harvestedAt = new Date().toISOString()
   let records: DebtRecord[] = []
   try {
     records = COLLECTORS[source](
-      { repo: args.repo, runId: args.runId, harvestedAt },
-      staleDays
+      {
+        repo: args.repo,
+        runId: args.runId,
+        harvestedAt,
+        dir: process.cwd(),
+        sonar: debtCfg.sonarcloud,
+      },
+      debtCfg.stale_days
     )
   } catch (err) {
+    // A skipped source is a setup gap, not a fetch failure — the ledger
+    // is untouched so live rows are never swept on an empty fetch.
     console.error(
-      `debt: source ${source} failed — ${err instanceof Error ? err.message : err}`
+      err instanceof SourceSkipped
+        ? `debt: ${source} skipped — ${err.message}`
+        : `debt: source ${source} failed — ${err instanceof Error ? err.message : err}`
     )
     return
+  }
+  // sonarcloud dedupes against open review-thread rows — Sonar's PR
+  // decoration already landed those findings via the merged-PR sweep.
+  let existing: DebtRecord[] = []
+  let dupedIds = new Set<string>()
+  let coveredBy = new Map<string, string>()
+  if (source === 'sonarcloud') {
+    existing = readDebtRecords()
+    const d = dedupeReviewThreads(records, existing)
+    records = d.kept
+    dupedIds = new Set(d.duped.map((x) => x.record.thread_id))
+    coveredBy = new Map(d.duped.map((x) => [x.record.thread_id, x.coveredBy]))
+    if (d.duped.length > 0) {
+      console.error(`debt: ${source} — ${d.duped.length} finding(s) covered by review threads`)
+    }
   }
   console.error(`debt: ${source} — ${records.length} finding(s)`)
   if (args.dryRun) {
@@ -295,6 +340,9 @@ function collectOneSource(
       console.log(JSON.stringify(row))
     }
     return
+  }
+  if (source === 'sonarcloud') {
+    syncSonarDedupeOverlays(existing, records, dupedIds, coveredBy)
   }
   if (records.length > 0) {
     writeHarvestFile({
@@ -307,7 +355,10 @@ function collectOneSource(
   }
   // Alerts/CI are server-side truth: a finding absent from the fresh
   // fetch resolved upstream — close its ledger row so the queue shrinks.
-  const gone = resolvedThreadIds(readDebtRecords(), source, records)
+  // Deduped ids are covered, not resolved — they transition above.
+  const gone = resolvedThreadIds(readDebtRecords(), source, records).filter(
+    (id) => !dupedIds.has(id)
+  )
   if (gone.length > 0) {
     upsertLedgerOverlays(
       gone.map((thread_id) => ({
@@ -319,6 +370,50 @@ function collectOneSource(
       }))
     )
     console.error(`debt: ${source} — resolved ${gone.length} row(s) no longer reported`)
+  }
+}
+
+/** sonarcloud dedupe bookkeeping (spec: specs/bro-huy5o.4.md) —
+ *  - an open ledger row now covered by a review thread → `duplicate`
+ *    (the finding is owned by the thread row, not fixed — fix% must not
+ *    count it);
+ *  - a stale `duplicate` overlay on a re-emitted finding → `open`
+ *    (coverage disappeared — the row is live upstream again). */
+function syncSonarDedupeOverlays(
+  existing: DebtRecord[],
+  records: DebtRecord[],
+  dupedIds: Set<string>,
+  coveredBy: Map<string, string>
+): void {
+  const byId = new Map(existing.map((r) => [r.thread_id, r]))
+  const toDup = [...dupedIds].filter((id) => byId.get(id)?.status === 'open')
+  const toReopen = records
+    .map((r) => r.thread_id)
+    .filter((id) => byId.get(id)?.status === 'duplicate')
+  if (toDup.length === 0 && toReopen.length === 0) {
+    return
+  }
+  upsertLedgerOverlays([
+    ...toDup.map((thread_id) => ({
+      thread_id,
+      status: 'duplicate' as const,
+      fix_pr: null,
+      fixed_at: null,
+      notes: `covered by review thread ${coveredBy.get(thread_id) ?? ''}`.trim(),
+    })),
+    ...toReopen.map((thread_id) => ({
+      thread_id,
+      status: 'open' as const,
+      fix_pr: null,
+      fixed_at: null,
+      notes: 'reopened — no longer covered by a review thread',
+    })),
+  ])
+  if (toDup.length > 0) {
+    console.error(`debt: sonarcloud — ${toDup.length} row(s) now covered → duplicate`)
+  }
+  if (toReopen.length > 0) {
+    console.error(`debt: sonarcloud — reopened ${toReopen.length} row(s) no longer covered`)
   }
 }
 

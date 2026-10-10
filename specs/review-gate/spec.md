@@ -16,6 +16,7 @@ PR, and CI sources into the ledger and beads.
 ```text
 packages/act/     exit-gate, state, connector, plan
 packages/debt/    collectors (review-threads, dependabot, code-scanning,
-                  secret-scanning, stale-prs, failed-ci), ledger, store
+                  secret-scanning, stale-prs, failed-ci, sonarcloud),
+                  ledger, store
 skills/act/ skills/debt/
 ```
