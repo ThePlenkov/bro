@@ -30,6 +30,7 @@
 import {
   dropMailbox,
   git,
+  gitTry,
   janitorDidWork,
   janitorLine,
   mailboxDir,
@@ -628,12 +629,15 @@ export function watchArgs(argv: string[]): {
 function tickJanitor(dir: string): { janitor?: JanitorReport; note: string } {
   // Orphaned bd procs ride the same tick: a supervisor dying mid-call
   // leaves them holding the embedded noms LOCK forever (bro-8845g).
+  // Scope by repo root — a watch launched from a subdirectory would
+  // never see the root's orphans otherwise.
+  const repoRoot = gitTry(['-C', dir, 'rev-parse', '--show-toplevel']).out.trim() || dir
   let orphanNote = ''
   try {
-    const o = sweepOrphanProcs('bd', dir)
-    if (o.killed.length > 0 || o.failed.length > 0) {
+    const o = sweepOrphanProcs('bd', repoRoot)
+    if (o.signaled.length > 0 || o.failed.length > 0) {
       const failed = o.failed.length > 0 ? ` (${o.failed.length} resisted SIGTERM)` : ''
-      orphanNote = `bd-orphans: reaped ${o.killed.length}${failed}`
+      orphanNote = `bd-orphans: signaled ${o.signaled.length}${failed}`
     }
   } catch (err) {
     orphanNote = `bd-orphan sweep failed — ${err instanceof Error ? err.message : String(err)}`

@@ -170,12 +170,15 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
 
 export interface OrphanSweepReport {
   scanned: number
-  killed: { pid: number; cwd: string }[]
-  /** pids that matched but didn't die on the injected signal. */
+  /** pids the signal was DELIVERED to — delivery, not exit: a bd
+   *  parked in an uninterruptible flock wait may outlive the SIGTERM
+   *  and needs the supervisor's -k backstop or a later sweep to die. */
+  signaled: { pid: number; cwd: string }[]
+  /** pids that matched but the injected signal never reached. */
   failed: number[]
 }
 
-/** Kill `comm` processes reparented to init whose cwd sits under
+/** SIGTERM `comm` processes reparented to init whose cwd sits under
  *  `repoRoot` — the debris a dead supervisor leaves behind. A bd
  *  orphan holds the embedded noms LOCK forever (its caller's timeout
  *  died with the caller) and wedges the whole store; the watch tick
@@ -194,11 +197,11 @@ export function sweepOrphanProcs(
   const pids = pickOrphanProcs(rows, comm, repoRoot, opts.now)
   const byPid = new Map(rows.map((r) => [r.pid, r]))
   const kill = opts.kill ?? ((pid: number) => process.kill(pid, 'SIGTERM'))
-  const report: OrphanSweepReport = { scanned: rows.length, killed: [], failed: [] }
+  const report: OrphanSweepReport = { scanned: rows.length, signaled: [], failed: [] }
   for (const pid of pids) {
     try {
       kill(pid)
-      report.killed.push({ pid, cwd: byPid.get(pid)?.cwd ?? '' })
+      report.signaled.push({ pid, cwd: byPid.get(pid)?.cwd ?? '' })
     } catch {
       report.failed.push(pid)
     }

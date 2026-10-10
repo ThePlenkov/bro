@@ -16,26 +16,29 @@ import { join } from 'node:path'
  *  process group so a group kill — ours or an external supervisor's —
  *  reaches both. No GNU timeout → bare bd: same contract, the orphan
  *  risk comes back but nothing else changes. */
-let timeoutBin: string | null | undefined
+// PATH-keyed: a process that swaps PATH mid-life (tests injecting a
+// fake timeout, env sanitizers) must re-probe, not ride a stale verdict
+let timeoutProbe: { path?: string; bin: string | null } | undefined
 function supervised(args: string[], timeoutMs: number): { cmd: string; argv: string[] } {
-  if (timeoutBin === undefined) {
-    timeoutBin = null
-    for (const bin of ['timeout', 'gtimeout']) {
+  if (timeoutProbe?.path !== process.env.PATH) {
+    let bin: string | null = null
+    for (const candidate of ['timeout', 'gtimeout']) {
       try {
-        execFileSync(bin, ['--version'], { stdio: 'ignore' })
-        timeoutBin = bin
+        execFileSync(candidate, ['--version'], { stdio: 'ignore' })
+        bin = candidate
         break
       } catch { /* absent or non-GNU — fall through to bare bd */ }
     }
+    timeoutProbe = { path: process.env.PATH, bin }
   }
-  if (timeoutBin === null) {
+  if (timeoutProbe.bin === null) {
     return { cmd: 'bd', argv: args }
   }
   // caller budget + margin — the backstop only matters when the caller
   // died before its own timeout could kill the child
   const backstopSec = Math.ceil((timeoutMs + 30_000) / 1000)
   return {
-    cmd: timeoutBin,
+    cmd: timeoutProbe.bin,
     argv: ['--foreground', '-k', '5s', `${backstopSec}s`, 'bd', ...args],
   }
 }

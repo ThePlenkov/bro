@@ -85,7 +85,7 @@ describe('sweepOrphanProcs', () => {
     })
     assert.deepEqual(killed, [7])
     assert.equal(r.scanned, 2)
-    assert.deepEqual(r.killed, [{ pid: 7, cwd: '/repo/sub' }])
+    assert.deepEqual(r.signaled, [{ pid: 7, cwd: '/repo/sub' }])
     assert.deepEqual(r.failed, [])
   })
 
@@ -97,7 +97,7 @@ describe('sweepOrphanProcs', () => {
         throw new Error('EPERM')
       },
     })
-    assert.deepEqual(r.killed, [])
+    assert.deepEqual(r.signaled, [])
     assert.deepEqual(r.failed, [7])
   })
 })
