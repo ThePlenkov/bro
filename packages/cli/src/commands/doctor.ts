@@ -11,8 +11,8 @@
  * a failing check, never as a crash.
  */
 import { spawnSync } from 'node:child_process'
-import { readFileSync, statSync } from 'node:fs'
-import { basename, dirname, join, resolve } from 'node:path'
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import {
   bdTry,
   CONFIG_SECTION_LAYERS,
@@ -187,6 +187,200 @@ function checkHooks(dir: string): DoctorCheck {
     'no resolution — lifecycle hooks silently no-op',
     'install @broject/bro or the agent plugin to get session-start context and the stop gate'
   )
+}
+
+// --- self-build staleness (bro-s7vgd) --------------------------------------
+// PATH-bro is commonly a symlink into a dev checkout's packages/cli/dist —
+// merges move the checkout's HEAD but nothing rebuilds dist, so spawned
+// agents and hooks silently run stale code (a convoy spawn skipped
+// fleet.routing because dist predated #333). When the resolved `bro` — or
+// the running entrypoint — lands in <checkout>/packages/cli/dist, compare
+// the build stamp (freshest dist mtime) to the newest commit the checkout
+// or its upstream knows.
+
+interface DevDist {
+  checkout: string
+  distDir: string
+  entry: string
+}
+
+/** `bro` as PATH resolves it — the binary spawns/hooks actually exec —
+ *  plus the running entrypoint (doctor may run via npx while PATH-bro is
+ *  the dev symlink). Realpath'd so the symlink into the checkout exposes
+ *  itself; deduped since the two usually converge on one file. */
+function broEntrypoints(): string[] {
+  const raw: string[] = []
+  const names = process.platform === 'win32' ? ['bro.cmd', 'bro.exe', 'bro'] : ['bro']
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (dir === '') {
+      continue
+    }
+    for (const name of names) {
+      const p = join(dir, name)
+      if (existsSync(p)) {
+        raw.push(p)
+        break
+      }
+    }
+    if (raw.length > 0) {
+      break // first PATH hit is the one spawns exec
+    }
+  }
+  const self = process.argv[1]
+  if (typeof self === 'string' && self !== '') {
+    raw.push(self)
+  }
+  const out: string[] = []
+  for (const p of raw) {
+    try {
+      const r = realpathSync(p)
+      if (!out.includes(r)) {
+        out.push(r)
+      }
+    } catch {
+      // dangling symlink — nothing resolvable to inspect
+    }
+  }
+  return out
+}
+
+/** A file inside a bro dev checkout's packages/cli/dist, or null. The
+ *  package.json name check keeps any other repo's same-shaped layout
+ *  from posing as bro, and the repo-root check keeps a vendored copy
+ *  inside another repo from being compared against that repo's HEAD. */
+function devDistEntry(realPath: string): DevDist | null {
+  const distDir = dirname(realPath)
+  const cliDir = dirname(distDir)
+  const packagesDir = dirname(cliDir)
+  if (
+    basename(distDir) !== 'dist' ||
+    basename(cliDir) !== 'cli' ||
+    basename(packagesDir) !== 'packages'
+  ) {
+    return null
+  }
+  try {
+    const pkg = JSON.parse(readFileSync(join(cliDir, 'package.json'), 'utf8')) as {
+      name?: string
+    }
+    if (pkg.name !== '@broject/bro') {
+      return null
+    }
+  } catch {
+    return null
+  }
+  const checkout = dirname(packagesDir)
+  const root = repoRoot(checkout)
+  try {
+    if (root === null || realpathSync(root) !== realpathSync(checkout)) {
+      return null
+    }
+  } catch {
+    return null
+  }
+  return { checkout, distDir, entry: realPath }
+}
+
+/** Freshest mtime across dist's top level — the moment the last build
+ *  finished. 0 when nothing readable: a dist that can't be stat'd can't
+ *  be trusted either. */
+function distStampMs(distDir: string): number {
+  let newest = 0
+  for (const f of readdirSync(distDir, { withFileTypes: true })) {
+    if (!f.isFile()) {
+      continue
+    }
+    const m = statSync(join(distDir, f.name), { throwIfNoEntry: false })?.mtimeMs ?? 0
+    if (m > newest) {
+      newest = m
+    }
+  }
+  return newest
+}
+
+/** When this clone last moved a ref — the mtime of its reflog file.
+ *  The commit's %ct is committer-declared: a backdated upstream commit
+ *  looks older than the dist built before it landed, and a future-dated
+ *  one looks newer — the reflog append is the local, honest "checkout
+ *  changed" signal (the entry timestamp itself is second-granularity,
+ *  the file mtime is not). HEAD's log lives in the per-worktree git
+ *  dir, ref logs in the common dir. 0 when the ref has no reflog. */
+function refMovedMs(checkout: string, ref: string): number {
+  const gd = gitTry(['-C', checkout, 'rev-parse', ref === 'HEAD' ? '--git-dir' : '--git-common-dir'])
+  if (gd.code !== 0) {
+    return 0
+  }
+  const name =
+    ref === 'HEAD'
+      ? 'HEAD'
+      : gitTry(['-C', checkout, 'rev-parse', '--symbolic-full-name', ref]).out.trim()
+  if (name === '') {
+    return 0
+  }
+  return statSync(join(resolve(checkout, gd.out.trim()), 'logs', name), { throwIfNoEntry: false })
+    ?.mtimeMs ?? 0
+}
+
+function devDistCheck({ checkout, distDir, entry }: DevDist): DoctorCheck {
+  const stamp = distStampMs(distDir)
+  if (stamp === 0) {
+    return check('bro-dist', 'warn', `${entry} — dist unreadable`, `rebuild: npm run build — ${checkout}`)
+  }
+  // HEAD covers a pulled checkout; @{u} catches "dist built before the
+  // merge landed" even when a fetch moved the tracking ref ahead
+  const refs = ['HEAD']
+  if (gitTry(['-C', checkout, 'rev-parse', '--verify', '--quiet', '@{u}']).code === 0) {
+    refs.push('@{u}')
+  }
+  let newest: { ref: string; sha: string; ms: number } | null = null
+  for (const ref of refs) {
+    const r = gitTry(['-C', checkout, 'show', '-s', '--format=%ct %h', ref])
+    if (r.code !== 0) {
+      continue
+    }
+    const [ct, sha] = r.out.trim().split(' ')
+    const commitMs = Number(ct) * 1000
+    if (!Number.isFinite(commitMs) || commitMs <= 0) {
+      continue
+    }
+    // ref-move time is the signal; %ct is the fallback for ref-less moves
+    const ms = refMovedMs(checkout, ref) || commitMs
+    if (newest === null || ms > newest.ms) {
+      newest = { ref, sha: sha ?? ref, ms }
+    }
+  }
+  if (newest === null) {
+    return check('bro-dist', 'ok', `${checkout} — no resolvable commit, drift unproven`)
+  }
+  if (newest.ms > stamp) {
+    return check(
+      'bro-dist',
+      'warn',
+      `${entry} predates ${newest.ref} ${newest.sha} — spawned agents/hooks run stale code`,
+      `rebuild: npm run build — ${checkout}`
+    )
+  }
+  return check('bro-dist', 'ok', `${entry} covers ${newest.ref} ${newest.sha}`)
+}
+
+/** One row per dev checkout found — PATH-bro and a self-run dist can be
+ *  different checkouts. None at all → a single ok row: an installed
+ *  package has no HEAD to drift from. */
+function selfDistChecks(): DoctorCheck[] {
+  const seen = new Set<string>()
+  const out: DoctorCheck[] = []
+  for (const real of broEntrypoints()) {
+    const entry = devDistEntry(real)
+    if (entry === null || seen.has(entry.checkout)) {
+      continue
+    }
+    seen.add(entry.checkout)
+    out.push(devDistCheck(entry))
+  }
+  if (out.length === 0) {
+    out.push(check('bro-dist', 'ok', 'no dev-checkout bro — nothing to rebuild'))
+  }
+  return out
 }
 
 /** Top-level keys bro knows — anything else in bro.config.json is almost
@@ -855,6 +1049,7 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
     tasksBackendCheck(dir, cfg.connectors, bd, cfg.stores.includes('beads'), compat),
     ...bdChecks(dir, bd, beadsDir, cfg.stores.includes('beads'), compat),
     checkHooks(dir),
+    ...selfDistChecks(),
     ...checkConfig(dir),
     ...providerChecks(dir),
     ...queryCliChecks(dir, cfg.connectors),
