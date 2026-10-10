@@ -37,7 +37,7 @@ import {
   type HeartbeatSummary,
 } from './watch-heartbeat.ts'
 
-interface BeadRow {
+export interface BeadRow {
   id: string
   title: string
   priority?: number
@@ -127,7 +127,18 @@ function agentState(e: AgentRegistryEntry): string {
  *  Exported for the work plane's status read, which caps identically. */
 export const READY_CAP = 10
 
-function readBeads(dir: string): BroStatus['beads'] {
+/** The queue board's bead sections — claimed (in-progress) work plus
+ *  the ready depth. Exported so the serve facade's queue plane reads
+ *  the same shape `bro status` renders. */
+export interface StatusBeads {
+  inProgress: BeadRow[]
+  /** First READY_CAP ready beads — the board shows the top, not all. */
+  ready: BeadRow[]
+  /** Total ready count — usually larger than ready.length (capped). */
+  readyTotal: number
+}
+
+export function readBeads(dir: string): StatusBeads {
   const empty = { inProgress: [], ready: [], readyTotal: 0 }
   let store: TaskStore
   try {

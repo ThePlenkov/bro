@@ -11,6 +11,7 @@ import { SpawnInputError } from './agents.ts'
 import {
   acquireServeLock,
   clearServeState,
+  collectTicks,
   createServeHandler,
   HttpError,
   liveServeState,
@@ -20,6 +21,7 @@ import {
   routeRequest,
   serveStatePath,
   writeServeState,
+  type AgentsBoard,
   type ServeDeps,
 } from './serve.ts'
 import { WEBUI_CSP } from './webui.ts'
@@ -37,9 +39,20 @@ const fakeAgent: AgentInfo = {
   pid: 4242,
 }
 
+const fakeBoard = (): AgentsBoard => ({
+  backends: [{ conn: fakeConn, agents: [fakeAgent] }],
+  occupancy: { occupied: 1, maxConcurrent: 3 },
+  sessions: [{ kind: 'devin', lane: 'sessions', live: 4, max: 6 }],
+  discovered: [{ kind: 'devin', pid: 777, name: 'sess-1', worker: true, agentId: 'native-aa11' }],
+  degraded: [],
+})
+
 const deps = (over: Partial<ServeDeps> = {}): ServeDeps => ({
   snapshot: async () => ({ snap: true }),
-  backends: async () => [{ conn: fakeConn, agents: [fakeAgent] }],
+  agents: async () => fakeBoard(),
+  queue: async () => ({ inProgress: [], ready: [], readyTotal: 0 }),
+  ticks: async () => ({ heartbeat: null, drive: { pid: null, alive: false }, watches: [] }),
+  mailbox: async () => ({ drops: [] }),
   find: async (ref) =>
     ref === fakeAgent.id || ref === fakeAgent.molStep
       ? { hit: { conn: fakeConn, agent: fakeAgent }, degraded: [] }
@@ -81,7 +94,10 @@ describe('serve — routes', () => {
     assert.equal(r.headers?.['content-security-policy'], WEBUI_CSP)
     const html = String(r.body)
     assert.match(html, /<!doctype html>/)
-    assert.match(html, /\/api\/v1\/snapshot/)
+    // the dashboard polls every read plane
+    for (const p of ['snapshot', 'agents', 'queue', 'ticks', 'mailbox']) {
+      assert.match(html, new RegExp(`/api/v1/${p}`), p)
+    }
 
     const post = await route('POST', '/fleet', '{}')
     assert.equal(post.status, 405)
@@ -102,16 +118,47 @@ describe('serve — routes', () => {
     assert.deepEqual(r.body, { snap: true })
   })
 
-  test('GET /api/v1/agents serializes the backend plane without conn objects', async () => {
+  test('GET /api/v1/agents serializes the full board — backends, occupancy, lanes, discoveries', async () => {
     const r = await route('GET', '/api/v1/agents')
     assert.equal(r.status, 200)
-    const body = r.body as {
+    const body = r.body as AgentsBoard & {
       backends: { name: string; capabilities: { supervisor: string }; agents: AgentInfo[] }[]
     }
     assert.equal(body.backends[0]!.name, 'native')
     assert.equal(body.backends[0]!.capabilities.supervisor, 'none')
     assert.equal(body.backends[0]!.agents[0]!.id, 'native-aa11')
     assert.equal('conn' in body.backends[0]!, false)
+    assert.deepEqual(body.occupancy, { occupied: 1, maxConcurrent: 3 })
+    assert.equal(body.sessions[0]!.kind, 'devin')
+    assert.equal(body.discovered[0]!.name, 'sess-1')
+    // a clean board carries no degraded key at all
+    assert.equal('degraded' in body, false)
+  })
+
+  test('GET /api/v1/agents surfaces discovery-plane failures as degraded notes', async () => {
+    const r = await route(
+      'GET',
+      '/api/v1/agents',
+      undefined,
+      deps({ agents: async () => ({ ...fakeBoard(), degraded: ['devin: cannot verify sessions'] }) })
+    )
+    assert.equal(r.status, 200)
+    assert.deepEqual((r.body as { degraded: string[] }).degraded, ['devin: cannot verify sessions'])
+  })
+
+  test('GET /api/v1/{queue,ticks,mailbox} relay their read planes; non-GET is 405', async () => {
+    for (const p of ['queue', 'ticks', 'mailbox'] as const) {
+      const r = await route('GET', `/api/v1/${p}`)
+      assert.equal(r.status, 200, p)
+      assert.equal(await route('POST', `/api/v1/${p}`, '{}').then((x) => x.status), 405, p)
+    }
+    const queue = (await route('GET', '/api/v1/queue')).body as { inProgress: unknown[] }
+    assert.deepEqual(queue.inProgress, [])
+    const ticks = (await route('GET', '/api/v1/ticks')).body as { heartbeat: unknown; watches: unknown[] }
+    assert.equal(ticks.heartbeat, null)
+    assert.deepEqual(ticks.watches, [])
+    const mb = (await route('GET', '/api/v1/mailbox')).body as { drops: unknown[] }
+    assert.deepEqual(mb.drops, [])
   })
 
   test('GET /api/v1/agents/<ref> — hit returns the agent, miss 404s with degraded notes', async () => {
@@ -326,6 +373,52 @@ describe('parseSpawnBody', () => {
         f
       )
     }
+  })
+})
+
+describe('collectTicks', () => {
+  test('empty repo — null heartbeat, no drive lock, no watches', () => {
+    const { root, main } = initRepo('bro-ticks-')
+    inside(main, root, () => {
+      const t = collectTicks(main)
+      assert.equal(t.heartbeat, null)
+      assert.deepEqual(t.drive, { pid: null, alive: false })
+      assert.deepEqual(t.watches, [])
+    })
+  })
+
+  test('heartbeat + drive lock + watch markers all surface with liveness', () => {
+    const { root, main } = initRepo('bro-ticks-')
+    inside(main, root, () => {
+      const bro = join(main, '.git', 'bro')
+      mkdirSync(bro, { recursive: true })
+      writeFileSync(join(bro, 'heartbeat.json'), JSON.stringify({ ts: new Date().toISOString(), attention: ['x', 'y'] }))
+      writeFileSync(join(bro, 'drive.lock'), `${process.pid}:tok`)
+      const wd = join(bro, 'watches')
+      mkdirSync(wd, { recursive: true })
+      // a live wait marker (<pr>-<pid>.json names the watcher's pid)
+      writeFileSync(
+        join(wd, `7-${process.pid}-abcd1234.json`),
+        JSON.stringify({ pr: 7, link: '[#7](https://x/y/7)', pid: process.pid, merge: true, startedAt: Date.now() - 60_000, timeoutMin: 30 })
+      )
+      // a dead supervisor heartbeat — kind word where the pid sits
+      writeFileSync(
+        join(wd, '9-drive-2000000000.json'),
+        JSON.stringify({ pr: 9, link: '[#9](https://x/y/9)', pid: 2_000_000_000, merge: false, startedAt: Date.now() - 120_000, timeoutMin: 5 })
+      )
+      const t = collectTicks(main)
+      assert.equal(t.heartbeat?.attention, 2)
+      assert.equal(t.drive.pid, process.pid)
+      assert.equal(t.drive.alive, true)
+      assert.equal(t.watches.length, 2)
+      const live = t.watches.find((w) => w.pr === 7)!
+      assert.equal(live.alive, true)
+      assert.equal(live.kind, 'wait')
+      assert.equal(live.merge, true)
+      const dead = t.watches.find((w) => w.pr === 9)!
+      assert.equal(dead.alive, false)
+      assert.equal(dead.kind, 'drive')
+    })
   })
 })
 
