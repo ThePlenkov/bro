@@ -453,8 +453,13 @@ export function peekMailbox(dir: string, limit = 25): MailboxPeek[] {
       try {
         // O_NOFOLLOW + fstat on the same fd — a swapped-in symlink's
         // bytes must never cross onto the unauthenticated
-        // /api/v1/mailbox surface (lstat→read races open to the target)
-        const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+        // /api/v1/mailbox surface (lstat→read races open to the target);
+        // O_NONBLOCK keeps a fifo named *.txt from stalling the tail —
+        // the fstat isFile() check below still skips it unread
+        const fd = openSync(
+          path,
+          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+        )
         try {
           const st = fstatSync(fd)
           if (now - st.mtimeMs > DROP_TTL_MS || !st.isFile()) {
