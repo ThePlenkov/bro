@@ -149,14 +149,26 @@ describe('bro loop e2e', () => {
       assert.equal(existsSync(f.worktree), false)
       assert.match(r.stdout, /clean — no loop tails/)
       assert.match(spawns(f), /work opened pr/)
-      // the run record retired with the agent; its output log survives
-      // under <git-common>/bro/loop/ as the audit trail (bro-9lpn3)
-      const loopDir = join(f.main, '.git', 'bro', 'loop')
-      assert.equal(existsSync(join(loopDir, 'fx-a.json')), false)
-      assert.match(
-        readFileSync(join(loopDir, 'fx-a.log'), 'utf8'),
-        /agent land on fx-a/
+      // the worker spawned through the agents registry (bro-zpa93) —
+      // its prompt/log/.exit land under <git-common>/bro/agents/ and
+      // the entry survives the loop: a detached worker's exit stays
+      // decidable after the spawner dies (bro-snga4)
+      const registry = JSON.parse(
+        readFileSync(join(f.main, '.git', 'bro', 'agents.json'), 'utf8')
+      ) as Record<string, { agentId: string; log?: string; exitStatus?: number }>
+      const entry = registry['fx-a']
+      assert.ok(entry, 'no agents-registry entry for fx-a')
+      assert.ok(entry.log !== undefined && existsSync(entry.log), 'worker log missing')
+      assert.match(readFileSync(entry.log!, 'utf8'), /agent land on fx-a/)
+      assert.equal(
+        readFileSync(
+          join(f.main, '.git', 'bro', 'agents', `${entry.agentId}.exit`),
+          'utf8'
+        ).trim(),
+        '0'
       )
+      // the harvest landed the exit classification on the entry too
+      assert.equal(entry.exitStatus, 0)
       // the liveness guard stays quiet on a clean run — no phantom
       // heartbeats, no mid-run audit on a normal exit
       assert.doesNotMatch(r.stderr, /loop: alive —/)
@@ -323,9 +335,13 @@ describe('bro loop e2e', () => {
       const log = spawns(f)
       assert.match(log, /work opened pr/)
       assert.match(log, /fix resolved threads/)
-      // the run log appends across respawns — the fix round continues
-      // the same bead's trail
-      const runLog = readFileSync(join(f.main, '.git', 'bro', 'loop', 'fx-a.log'), 'utf8')
+      // the registry log appends across respawns — the fix round's
+      // worker REUSES the agent id, so the same file continues the
+      // bead's trail (spec bro-zpa93)
+      const registry = JSON.parse(
+        readFileSync(join(f.main, '.git', 'bro', 'agents.json'), 'utf8')
+      ) as Record<string, { log?: string }>
+      const runLog = readFileSync(String(registry['fx-a']?.log), 'utf8')
       assert.equal(runLog.trim().split('\n').length, 2)
       assert.equal(bead(f.db, 'fx-a')?.status, 'closed')
     })
@@ -548,13 +564,14 @@ describe('bro loop liveness', () => {
     try {
       // the heartbeat holds the event loop open — a drain-shaped death
       // would have ended the process before any `alive` line; the line
-      // names the suspension point the silent deaths hid
+      // names the suspension point the silent deaths hid (now the
+      // registry agent id + pid — bro-zpa93)
       await until(
-        () => /loop: alive — worker pid=\d+ on fx-a/.test(stderr),
+        () => /loop: alive — worker \S+ pid=\d+ on fx-a/.test(stderr),
         'a worker-stage heartbeat'
       )
       assert.equal(proc.exitCode, null, 'the loop died awaiting the hung agent')
-      workerPid = Number(/worker pid=(\d+)/.exec(stderr)![1])
+      workerPid = Number(/worker \S+ pid=(\d+)/.exec(stderr)![1])
       proc.kill('SIGTERM')
       // the audit re-raises — the parent still sees a real signal
       // death, not a clean exit code
@@ -565,14 +582,14 @@ describe('bro loop liveness', () => {
       assert.equal(code, null)
       // the signal handler audits before re-raising — stage + bead
       // named, the note landed, exactly what the silent deaths denied
-      assert.match(stderr, /exiting mid-run — worker pid=\d+ on fx-a/)
+      assert.match(stderr, /exiting mid-run — worker \S+ pid=\d+ on fx-a/)
       assert.match(String(bead(f.db, 'fx-a')?.notes), /process exited mid-run/)
     } finally {
       // a failed wait must not leave the loop or the detached agent
       // group running — reap both before the fixture goes, or the
       // child's open pipes hang the test run
       proc.kill('SIGKILL')
-      const pid = workerPid || Number(/worker pid=(\d+)/.exec(stderr)?.[1] ?? 0)
+      const pid = workerPid || Number(/worker \S+ pid=(\d+)/.exec(stderr)?.[1] ?? 0)
       if (pid !== 0) {
         try {
           process.kill(-pid, 'SIGKILL')
@@ -841,6 +858,38 @@ const events = (f: Fixture): Array<Record<string, unknown>> =>
   (readHostState(f.hostState).events ?? []) as Array<Record<string, unknown>>
 
 describe('bro loop gate-stack round-robin', () => {
+  test('a long first worker does not starve the stack — B lands inside A\u2019s worker window', () => {
+    // the starvation shape bro-zpa93 fixes: pushItem used to await the
+    // whole worker run inside the tick — B could not even claim while
+    // A ran. Now A's worker rides a pending member and the tick keeps
+    // servicing the rest: B's spawn AND merge land while A's agent is
+    // still inside its deliberate delay — an ordering the awaited-spawn
+    // shape made impossible.
+    const f = loopFixture([
+      { ...FAKE_BEAD, id: 'fx-a', title: 'slow worker' },
+      { ...FAKE_BEAD, id: 'fx-b', title: 'fast worker' },
+    ])
+    writeHostState(f.hostState, { prs: {}, delays: { 'fx-a': 5000 } })
+    inside(f.main, f.root, () => {
+      const r = f.run(['--interval', '1'])
+      assert.match(r.stdout, /2 landed/, r.stderr)
+      const prs = readHostState(f.hostState).prs as Record<string, { number: number }>
+      const a = prs['loop/fx-a']!.number
+      const b = prs['loop/fx-b']!.number
+      assert.deepEqual(events(f), [
+        { spawn: 'fx-b', branch: 'loop/fx-b' },
+        // B's whole pipeline — spawn, PR, merge — settled inside A's
+        // worker window: the `spawn` event is stamped by the agent at
+        // run time, so A's entry only lands once its delay ends
+        { merge: b },
+        { spawn: 'fx-a', branch: 'loop/fx-a' },
+        { merge: a },
+      ])
+      assert.equal(bead(f.db, 'fx-a')?.status, 'closed')
+      assert.equal(bead(f.db, 'fx-b')?.status, 'closed')
+    })
+  })
+
   test('a pending gate does not block the next claim — B lands while A waits', () => {
     const f = loopFixture([
       { ...FAKE_BEAD, id: 'fx-a', title: 'slow gate' },

@@ -37,9 +37,20 @@
  * bead whose PR stalls keeps its worktree for inspection.
  */
 import { spawnSync, spawn } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, writeFileSync, writeSync } from 'node:fs'
-import { dirname } from 'node:path'
 import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs'
+import { basename, dirname, join } from 'node:path'
+import {
+  AgentNotFound,
+  agentRegistryPath,
   bdTry,
   commandCliName,
   ensureTasksBackend,
@@ -52,6 +63,9 @@ import {
   SpawnError,
   stepParent,
   withFileLock,
+  type AgentConnector,
+  type AgentInfo,
+  type AgentState,
   type ReviewFacade,
   type SpawnWorker,
   type TaskStore,
@@ -81,6 +95,7 @@ import { loadBroConfig } from '../plugins.ts'
 import {
   fleetProfileOf,
   loadAgentEnv,
+  resolveAgentConnector,
   resolveSpawnProvider,
   type AgentConnectorEnv,
   type SpawnProviderPick,
@@ -141,6 +156,13 @@ interface Ctx {
    *  agent and bootstrap env as BEADS_DIR so worktree `bd` writes reach
    *  it. Undefined on a non-beads backend: nothing to pin. */
   beadsDir?: string
+  /** The agents facade connector workers spawn through (spec
+   *  bro-zpa93) — the `bro agents up` path: detached sh -c, claim under
+   *  the registry lock, .exit record in <git-common>/bro/agents/.
+   *  Undefined only when beadsDir is — the registry's claim plane needs
+   *  a real store to pin against, so the legacy awaited spawn keeps the
+   *  serial semantics there. */
+  agents?: AgentConnector
   /** `bro loop --stack <name>` — each claimed bead becomes a member of
    *  the named stack: branch stack/<name>/<n>-<slug> based on the tip,
    *  PR targeting the member below. */
@@ -530,6 +552,116 @@ function spawnAgent(
   })
 }
 
+/** spec.env for the registry spawn — the loop's ambient pins minus
+ *  the keys the connector owns (it re-pins BEADS_DIR/BRO_BEAD_ID/
+ *  provenance itself; the backend filters them out of caller env
+ *  anyway). Only the clump extras are loop-private. */
+function specEnv(ctx: Ctx, extra: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(agentEnv(ctx, extra)).filter(
+      (e): e is [string, string] => e[1] !== undefined
+    )
+  )
+}
+
+/** The registry spawn (spec bro-zpa93) — `bro agents up` semantics on
+ *  the loop's own work item: the lead bead's claim lands through the
+ *  connector's claimStep under the agents-registry lock (a loop-side
+ *  pre-claim would read as "claimed outside the registry" and refuse),
+ *  the worker detaches `sh -c` in its own process group, and its exit
+ *  lands in `<git-common>/bro/agents/<id>.exit` for serviceWorker to
+ *  poll — the tick never awaits the run. Sets `m.worker`; a SpawnError
+ *  is the caller's settle decision (cap → hold, conflict → park). */
+async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string): Promise<void> {
+  const lead = m.beads[0]!
+  const info = await ctx.agents!.spawn({
+    molStep: lead.id,
+    repoRoot: m.item.worktreeDir,
+    beadsDir: ctx.beadsDir!,
+    prompt,
+    env: specEnv(ctx, {
+      BRO_BEAD_IDS: m.beads.map((b) => b.id).join(','),
+      BRO_BEAD_TITLE: clumpTitle(m.beads),
+    }),
+    provider: ctx.lane.provider,
+    model: ctx.lane.model,
+    // an explicit worker keeps the backend's own command fallback from
+    // re-reading loop.agent config — a --agent flag override would
+    // otherwise be silently ignored
+    worker: ctx.lane.worker ?? { kind: 'template', command: ctx.agent },
+  })
+  m.worker = {
+    agentId: info.id,
+    spawnedAt: info.spawnedAt,
+    spawnedMs: Date.now(),
+    pid: info.pid,
+  }
+  say(
+    ctx,
+    `loop: agent ${m.beads.map((b) => b.id).join(', ')} → ${info.id} pid ${info.pid ?? '?'}`
+  )
+  ctx.stage = `worker ${info.id} pid=${info.pid ?? '?'}`
+}
+
+/** The pending worker's settled exit — the .exit record a detached
+ *  `sh -c` leaves in `<git-common>/bro/agents/`. The file's mtime is the
+ *  honest wall-clock for the crash window: a poll that lands an
+ *  interval late must not inflate an instant crash past crashExitMs.
+ *  A worker dead without a record (SIGKILL, spawn failure) falls back
+ *  to the log's last write, then now. */
+function workerExit(ctx: Ctx, w: WorkerRef): { code: number | null; at: number } {
+  const reg = agentRegistryPath(ctx.root)
+  const home =
+    reg === null || basename(w.agentId) !== w.agentId
+      ? null
+      : join(dirname(reg), 'agents')
+  if (home !== null) {
+    try {
+      const f = join(home, `${w.agentId}.exit`)
+      const n = Number(readFileSync(f, 'utf8').trim())
+      return { code: Number.isInteger(n) ? n : null, at: statSync(f).mtimeMs }
+    } catch {
+      // no exit record — the log clock is the next-best death stamp
+    }
+    try {
+      return { code: null, at: statSync(join(home, `${w.agentId}.log`)).mtimeMs }
+    } catch {
+      // no log either — detection time is all that remains
+    }
+  }
+  return { code: null, at: Date.now() }
+}
+
+/** A refused registry spawn settles the push without a worker. A full
+ *  fleet ('cap') holds the claim for the next tick — fleet pressure is
+ *  transient, and a hot re-pick would burn the interval against the
+ *  same wall. A 'conflict' (live agent, foreign claim, respawn block)
+ *  parks WITHOUT a note — the bead's owner is not this run. Anything
+ *  else parks with the error named. Member claims release either way;
+ *  on a conflict the LEAD's claim plane is contested, so only the
+ *  clump members this run claimed are reopened. */
+function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome {
+  const msg = err instanceof Error ? err.message : String(err)
+  if (err instanceof SpawnError && err.kind === 'cap') {
+    for (const b of openBeads(ctx, m.beads)) {
+      reopenBead(ctx.tasks, b.id)
+    }
+    say(ctx, `loop: fleet full — ${msg}; pushes hold for the next pass`)
+    return { kind: 'hold', why: msg }
+  }
+  const foreign = err instanceof SpawnError && err.kind === 'conflict'
+  for (const b of openBeads(ctx, foreign ? m.beads.slice(1) : m.beads)) {
+    reopenBead(ctx.tasks, b.id)
+  }
+  if (!foreign) {
+    for (const b of openBeads(ctx, m.beads)) {
+      noteBead(ctx.tasks, b.id, `loop: agent spawn refused — ${msg} — worktree ${m.item.worktreeDir}`)
+    }
+  }
+  say(ctx, `loop: ${m.beads[0]!.id} spawn refused — ${msg}`)
+  return { kind: 'done', result: 'parked' }
+}
+
 /** PR number opened from this worktree's branch — null when none,
  *  'lookup-error' when gh itself failed (not the same thing: a failed
  *  lookup must not reopen a bead whose PR may still exist). */
@@ -703,8 +835,7 @@ async function finalizeMerge(
  *  decides whether anything landed on the branch. */
 async function runFixRound(
   ctx: Ctx,
-  beads: ReadyBead[],
-  item: LoopItem,
+  m: GateMember,
   pr: number,
   round: number
 ): Promise<void> {
@@ -722,9 +853,14 @@ async function runFixRound(
     say(ctx, `loop: ${prRef(ctx, pr)} threads resolved since the gate snapshot — skipping fix round`)
     return
   }
-  writePrompt(item, buildFixPrompt(beads, pr, threads))
+  const prompt = buildFixPrompt(m.beads, pr, threads)
+  writePrompt(m.item, prompt)
   say(ctx, `loop: ${prRef(ctx, pr)} has open threads — fix round ${round}`)
-  const code = await spawnAgent(ctx, beads.map((b) => b.id), clumpTitle(beads), item.promptFile, item.worktreeDir)
+  if (ctx.agents !== undefined) {
+    await spawnWorker(ctx, m, prompt)
+    return
+  }
+  const code = await spawnAgent(ctx, m.beads.map((b) => b.id), clumpTitle(m.beads), m.item.promptFile, m.item.worktreeDir)
   if (code !== 0) {
     console.error(`loop: fix agent exited ${code ?? 'abnormal'} — the next gate poll decides`)
   }
@@ -919,13 +1055,23 @@ function planItemAndWorktree(
 interface GateMember {
   beads: ReadyBead[]
   item: LoopItem
-  pr: number
+  /** The PR this member gates on — undefined while its FIRST worker is
+   *  still running (spec bro-zpa93): the member is pushed the moment
+   *  the spawn registers and joins the gate when the .exit lands. */
+  pr?: number
+  /** The in-flight registry worker — set at push and again on every
+   *  fix/rebase respawn; cleared when its exit record lands. */
+  worker?: WorkerRef
   /** watchBegin marker path — armed for the member's whole stack
    *  tenure: a dead loop leaves a dead marker `act rearm` resurrects
    *  as `act wait --merge --cleanup` in the member's worktree. */
   marker: string | null
   /** Gate (re-)entry ms — a fix/rebase round resets the budget. */
   since: number
+  /** When this member may be polled again — a 'kept' verdict stamps
+   *  its stage's own cadence (worker: WORKER_POLL_MS; gate: intervalS),
+   *  so a fast worker wake can't drag a PR gate into hot host polls. */
+  nextPollAt?: number
   /** Agent respawns consumed — fix and rebase rounds share the
    *  loop.fixRounds bound. */
   rounds: number
@@ -935,6 +1081,17 @@ interface GateMember {
   fetchErrors: number
 }
 
+/** The registry handle a pending member polls — `spawnedAt` is the
+ *  generation stamp: a respawned same-id entry is a NEW worker, not the
+ *  one the member is waiting on, and must not inherit this clock. */
+interface WorkerRef {
+  agentId: string
+  spawnedAt?: string
+  /** ms stamp at our spawn call — the crash window's start. */
+  spawnedMs: number
+  pid?: number
+}
+
 /** The push half of the alternation: claim → worktree → agent → PR.
  *  `beads` is the claimed clump — a solo claim is a one-element array.
  *  The PR found joins the gate stack as the newest member; every
@@ -942,6 +1099,7 @@ interface GateMember {
 type PushOutcome =
   | { kind: 'member'; member: GateMember }
   | { kind: 'done'; result: ItemResult }
+  | { kind: 'hold'; why: string }
 
 async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   const lead = beads[0]!
@@ -965,8 +1123,30 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   if (!runBootstrap(ctx, beads, item)) {
     return { kind: 'done', result: 'failed' }
   }
-  writePrompt(item, buildWorkPrompt(beads, item.branch, slot?.base, slot?.bottom, ctx.backend))
+  const prompt = buildWorkPrompt(beads, item.branch, slot?.base, slot?.bottom, ctx.backend)
+  writePrompt(item, prompt)
   ctx.stage = 'agent spawn'
+  if (ctx.agents !== undefined) {
+    // the registry path — the member comes back worker-pending and its
+    // .exit poll rides the SAME service pass as every PR gate
+    // (spec bro-zpa93): a worker that runs for hours starves nothing
+    const member: GateMember = {
+      beads,
+      item,
+      marker: null,
+      since: Date.now(),
+      rounds: 0,
+      fetchErrors: 0,
+    }
+    try {
+      await spawnWorker(ctx, member, prompt)
+    } catch (err) {
+      return settleSpawnRefusal(ctx, member, err)
+    }
+    return { kind: 'member', member }
+  }
+  // no shared store to pin a claim/exit record against — the awaited
+  // spawn keeps the serial semantics (documented fallback)
   const spawnAt = Date.now()
   const code = await spawnAgent(ctx, beads.map((b) => b.id), clumpTitle(beads), item.promptFile, item.worktreeDir)
   // agent wall-time — measured before findPr's gh call; a slow lookup
@@ -1046,22 +1226,152 @@ function settleNoPr(
   return failNoPr(ctx, beads, item, code)
 }
 
+/** A service verdict — 'kept' parks the member until its nextPollAt
+ *  (a quiet wait, or a worker still running); 'active' keeps it too
+ *  but asks the scheduler for an immediate re-poll — a fix/rebase/
+ *  update just moved the gate, or a worker's exit record just landed.
+ *  The rest are ItemResult settles that splice it out. */
+type ServiceVerdict = 'kept' | 'active' | ItemResult
+
+/** A pending worker's poll cadence — the registry/.exit probe is a
+ *  LOCAL read, not a review-host fetch, so it polls far faster than
+ *  the gate interval and a long worker still settles within a second
+ *  of its exit landing (spec bro-zpa93). */
+const WORKER_POLL_MS = 1_000
+
+/** The worker stage — a spawned member's FIRST gate, before its PR
+ *  gate is even meaningful (spec bro-zpa93). It polls the agents
+ *  registry, never the review host: 'running'/'spawned' keeps the
+ *  member pending and the tick moves on — the whole fairness fix. A
+ *  terminal read clears `m.worker` and settles the way the old awaited
+ *  spawn did: a PR joins the gate (same member lifecycle), no PR runs
+ *  verdict → crash-window → reopen, and a blocked/stopped worker parks
+ *  with its cause named. A respawned same-id entry (spawnedAt moved)
+ *  is NOT this worker — 'lost' rather than inherit a foreign
+ *  generation's clock. For a fix/rebase worker (`m.pr` already set)
+ *  the terminal read is simply 'active': the gate re-polls. */
+async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
+  const w = m.worker!
+  ctx.stage = `worker ${w.agentId} pid=${w.pid ?? '?'}`
+  ctx.bead = m.beads[0]!.id
+  let info: AgentInfo | undefined
+  try {
+    info = await ctx.agents!.status(w.agentId)
+    m.fetchErrors = 0
+  } catch (err) {
+    if (!(err instanceof AgentNotFound)) {
+      m.fetchErrors += 1
+      console.error(`loop: worker ${w.agentId} status failed (${m.fetchErrors}) — ${String(err)}`)
+      if (m.fetchErrors < 3) {
+        return 'kept'
+      }
+      noteOpen(
+        ctx,
+        m.beads,
+        `loop: worker status kept failing for ${w.agentId} — ${String(err)} — worktree ${m.item.worktreeDir}`
+      )
+      return leave(m, 'parked')
+    }
+    // a reaped entry can't prove its death — 'lost' settles it below
+  }
+  const superseded =
+    info?.spawnedAt !== undefined && w.spawnedAt !== undefined && info.spawnedAt !== w.spawnedAt
+  const state: AgentState = superseded || info === undefined ? 'lost' : info.state
+  if (state === 'running' || state === 'spawned') {
+    return 'kept'
+  }
+  const exit = workerExit(ctx, w)
+  say(
+    ctx,
+    `loop: worker ${w.agentId} ${exit.code === null ? `${state} — no exit record` : `exited ${exit.code}`}`
+  )
+  m.worker = undefined
+  if (m.pr !== undefined) {
+    // a fix/rebase worker's exit IS the gate re-entry — same contract
+    // the awaited spawn's return had
+    m.since = Date.now()
+    return 'active'
+  }
+  ctx.stage = 'pr lookup'
+  const pr = findPr(ctx, m.item.branch)
+  if (pr === 'lookup-error') {
+    noteOpen(
+      ctx,
+      m.beads,
+      `loop: PR lookup failed for ${m.item.branch} — worktree ${m.item.worktreeDir}`
+    )
+    return leave(m, 'parked')
+  }
+  if (pr === null) {
+    if (state === 'blocked' || state === 'stopped') {
+      // the wall/stop is the verdict — reopening respawns into it
+      const why =
+        state === 'blocked'
+          ? `blocked${info?.cause !== undefined ? ` (${info.cause})` : ''}`
+          : 'stopped'
+      noteOpen(
+        ctx,
+        m.beads,
+        `loop: worker ${w.agentId} ${why} without a PR — worktree ${m.item.worktreeDir}`
+      )
+      return leave(m, 'parked')
+    }
+    return leave(m, settleNoPr(ctx, m.beads, m.item, exit.code, Math.max(0, exit.at - w.spawnedMs)))
+  }
+  // the worker opened a PR — the member joins its own gate: the loop IS
+  // the watcher (bro-z0k2u), the marker arms for the member's whole
+  // stack tenure so a dead loop leaves a resurface `act rearm` can
+  // resurrect (bro-q6ppv), and `bead` rides comma-joined for the
+  // finalizeMerge half the dead loop never reached
+  m.pr = pr
+  m.marker = watchBegin(ctx.root, {
+    pr,
+    link: prRef(ctx, pr),
+    merge: true,
+    cleanup: true,
+    workdir: m.item.worktreeDir,
+    bead: m.beads.map((b) => b.id).join(','),
+    timeoutMin: ctx.cfg.mergeTimeoutMin,
+  })
+  m.since = Date.now()
+  say(ctx, `loop: ${m.beads.map((b) => b.id).join(', ')} → PR ${prRef(ctx, pr)}`)
+  return 'active'
+}
+
+/** One member's service tick — the per-member cadence gate. A 'kept'
+ *  verdict stamps the stage's own poll interval (a pending worker's
+ *  local .exit probe is cheap — WORKER_POLL_MS; a PR gate's fetch is
+ *  the shared review host — intervalS), so the stack's wake set stays
+ *  honest: worker exits land fast without dragging every gate into
+ *  hot host polls, and a long worker never starves the stack. */
+async function serviceMember(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
+  if (m.nextPollAt !== undefined && Date.now() < m.nextPollAt) {
+    return 'kept'
+  }
+  m.nextPollAt = undefined
+  const verdict =
+    m.worker !== undefined ? await serviceWorker(ctx, m) : await serviceGate(ctx, m)
+  if (verdict === 'kept') {
+    m.nextPollAt =
+      Date.now() + (m.worker !== undefined ? WORKER_POLL_MS : ctx.intervalS * 1000)
+  }
+  return verdict
+}
+
 /** One member's settled snapshot → the mapped action. 'kept' parks the
  *  member until the next interval tick (a quiet wait); 'active' keeps
  *  it too but asks the scheduler for an immediate re-poll — a fix/
  *  rebase/update just moved the gate, exactly like the old serial
  *  waitForGate re-entry did. 'landed'/'parked' remove it. */
-async function serviceMember(
-  ctx: Ctx,
-  m: GateMember
-): Promise<'kept' | 'active' | 'landed' | 'parked'> {
-  ctx.stage = `gate pr=${m.pr}`
+async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
+  const pr = m.pr!
+  ctx.stage = `gate pr=${pr}`
   ctx.bead = m.beads[0]!.id
   let snap: GateSnapshot
   try {
     const state = await fetchPrActState(
       ctx.rev,
-      { repo: ctx.repo, pr: m.pr },
+      { repo: ctx.repo, pr },
       {
         ignoreChecks: ctx.act.ignoreChecks,
         checkHistory: checkHistory(ctx.root),
@@ -1072,7 +1382,7 @@ async function serviceMember(
     )
     const gate = evaluateExitGate(state)
     console.error(
-      `loop ${prRef(ctx, m.pr)}: threads=${gate.open_threads} ci=${gate.ci_pending}+${gate.ci_failing}f rev=${gate.reviewers_pending} sast=${gate.sast_pending}`
+      `loop ${prRef(ctx, pr)}: threads=${gate.open_threads} ci=${gate.ci_pending}+${gate.ci_failing}f rev=${gate.reviewers_pending} sast=${gate.sast_pending}`
     )
     snap = {
       state: state.state,
@@ -1089,7 +1399,7 @@ async function serviceMember(
     m.fetchErrors = 0
   } catch (err) {
     m.fetchErrors += 1
-    console.error(`loop ${prRef(ctx, m.pr)}: fetch failed (${m.fetchErrors}) — ${String(err)}`)
+    console.error(`loop ${prRef(ctx, pr)}: fetch failed (${m.fetchErrors}) — ${String(err)}`)
     // the old wait gave up on 3 consecutive failures OR its deadline —
     // a member whose fetch plane is down past mergeTimeoutMin settles
     // the same way rather than keeping a slot forever
@@ -1099,7 +1409,7 @@ async function serviceMember(
     noteOpen(
       ctx,
       m.beads,
-      `loop: gate fetch kept failing for PR ${prRef(ctx, m.pr)} — ${String(err)} — worktree ${m.item.worktreeDir}`
+      `loop: gate fetch kept failing for PR ${prRef(ctx, pr)} — ${String(err)} — worktree ${m.item.worktreeDir}`
     )
     return leave(m, 'parked')
   }
@@ -1111,30 +1421,30 @@ async function serviceMember(
   switch (act.kind) {
     case 'land':
       // landed externally while the member sat — close out, no merge call
-      return leave(m, await finalizeMerge(ctx, m.beads, m.item, m.pr, true))
+      return leave(m, await finalizeMerge(ctx, m.beads, m.item, pr, true))
     case 'merge':
-      return leave(m, await finalizeMerge(ctx, m.beads, m.item, m.pr))
+      return leave(m, await finalizeMerge(ctx, m.beads, m.item, pr))
     case 'closed':
-      noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, m.pr)} was closed unmerged — worktree ${m.item.worktreeDir}`)
+      noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} was closed unmerged — worktree ${m.item.worktreeDir}`)
       return leave(m, 'parked')
     case 'fix':
-      return respawnRound(ctx, m, () => runFixRound(ctx, m.beads, m.item, m.pr, m.rounds))
+      return respawnRound(ctx, m, () => runFixRound(ctx, m, pr, m.rounds))
     case 'rebase':
-      return respawnRound(ctx, m, () => runRebaseRound(ctx, m.beads, m.item, m.pr, m.rounds))
+      return respawnRound(ctx, m, () => runRebaseRound(ctx, m, pr, m.rounds))
     case 'update': {
       let ok: boolean
       try {
-        ok = ctx.rev.updateBranch({ repo: ctx.repo, pr: m.pr }, snap.headSha)
+        ok = ctx.rev.updateBranch({ repo: ctx.repo, pr }, snap.headSha)
       } catch (err) {
         // a throw must not take the stack down — quiet keep; the
         // member's own deadline still bounds the retries
-        console.error(`loop ${prRef(ctx, m.pr)}: update-branch threw — ${String(err)}`)
+        console.error(`loop ${prRef(ctx, pr)}: update-branch threw — ${String(err)}`)
         return 'kept'
       }
-      console.error(`loop ${prRef(ctx, m.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`)
+      console.error(`loop ${prRef(ctx, pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`)
       if (!ok) {
         // an update refusal IS the settle — same park the wait produced
-        noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, m.pr)} blocked: ${snap.blockers.join('; ')} — worktree ${m.item.worktreeDir}`)
+        noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} blocked: ${snap.blockers.join('; ')} — worktree ${m.item.worktreeDir}`)
         return leave(m, 'parked')
       }
       m.updatedSha = snap.headSha
@@ -1143,13 +1453,13 @@ async function serviceMember(
     case 'wait':
       return 'kept'
     case 'park':
-      noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, m.pr)} ${act.why} — worktree ${m.item.worktreeDir}`)
+      noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} ${act.why} — worktree ${m.item.worktreeDir}`)
       return leave(m, 'parked')
   }
 }
 
 /** A member leaving the stack ends its watch — the promise is kept. */
-function leave(m: GateMember, verdict: 'landed' | 'parked'): 'landed' | 'parked' {
+function leave(m: GateMember, verdict: ItemResult): ItemResult {
   watchEnd(m.marker)
   return verdict
 }
@@ -1168,7 +1478,12 @@ async function respawnRound(
   try {
     await run()
   } catch (err) {
-    console.error(`loop ${prRef(ctx, m.pr)}: respawn round ${m.rounds} failed — ${String(err)}`)
+    console.error(`loop ${prRef(ctx, m.pr!)}: respawn round ${m.rounds} failed — ${String(err)}`)
+    return 'kept'
+  }
+  if (m.worker !== undefined) {
+    // the respawn joined the worker lifecycle — its .exit landing IS
+    // the gate re-entry now, not this return (spec bro-zpa93)
     return 'kept'
   }
   m.since = Date.now()
@@ -1181,8 +1496,7 @@ async function respawnRound(
  *  a blind rebase order would be worse). */
 async function runRebaseRound(
   ctx: Ctx,
-  beads: ReadyBead[],
-  item: LoopItem,
+  m: GateMember,
   pr: number,
   round: number
 ): Promise<void> {
@@ -1193,9 +1507,14 @@ async function runRebaseRound(
     console.error(`loop ${prRef(ctx, pr)}: base lookup for the rebase round failed — ${String(err)}`)
     return
   }
-  writePrompt(item, buildRebasePrompt(beads, pr, base))
+  const prompt = buildRebasePrompt(m.beads, pr, base)
+  writePrompt(m.item, prompt)
   say(ctx, `loop: ${prRef(ctx, pr)} conflicts — rebase round ${round} onto ${base}`)
-  const code = await spawnAgent(ctx, beads.map((b) => b.id), clumpTitle(beads), item.promptFile, item.worktreeDir)
+  if (ctx.agents !== undefined) {
+    await spawnWorker(ctx, m, prompt)
+    return
+  }
+  const code = await spawnAgent(ctx, m.beads.map((b) => b.id), clumpTitle(m.beads), m.item.promptFile, m.item.worktreeDir)
   if (code !== 0) {
     console.error(`loop: rebase agent exited ${code ?? 'abnormal'} — the next gate poll decides`)
   }
@@ -1390,6 +1709,19 @@ function buildCtx(
     stack: stackNameFlag(argv),
     tails: [],
     stage: 'startup',
+  }
+  // the registry spawn engages when there's a shared store to pin the
+  // claim/exit record against — without one the legacy awaited spawn
+  // keeps the serial semantics (spec bro-zpa93). A connector that
+  // can't even resolve degrades to that same fallback, not a dead loop.
+  if (ctx.beadsDir !== undefined) {
+    try {
+      ctx.agents = resolveAgentConnector({ dir: root }, {}, loadAgentEnv(root))
+    } catch (err) {
+      console.error(
+        `loop: agent connector failed to resolve — ${err instanceof Error ? err.message : String(err)} — falling back to the awaited spawn`
+      )
+    }
   }
   // announce the resolved lane once — agents.native.provider picking up
   // the run must not be a silent behavior change for template users
@@ -1640,7 +1972,18 @@ function claimClump(
   const ready = readyBeads(ctx.root)
   const c = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root))
   const candidates = c.queue.filter((b) => !seen.has(b.id))
-  const lead = claimUpTo(candidates, 1, ctx.root)[0]
+  // the registry's claimStep owns the lead's claim under the spawn
+  // lock (spec bro-zpa93) — a loop-side pre-claim reads as "claimed
+  // outside the agent registry" and the spawn refuses it. The pick
+  // only re-probes the store so a raced-away bead still skips down the
+  // candidate chain exactly as claimUpTo's claim loop did.
+  const lead =
+    ctx.agents === undefined
+      ? claimUpTo(candidates, 1, ctx.root)[0]
+      : candidates.find((b) => {
+          const s = beadStatus(ctx, b.id)
+          return s !== 'in_progress' && s !== 'closed'
+        })
   if (!lead) {
     if (c.foreign > 0) {
       say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
@@ -1715,6 +2058,10 @@ interface QueueState {
   claimed: number
   /** claimClump returned nothing — no more pushes, only gate service. */
   drained: boolean
+  /** A spawn refused on a full fleet holds pushes until now — a
+   *  hot-loop through pick+probe+spawn would burn the tick against
+   *  the same wall (spec bro-zpa93). */
+  pushHoldUntil: number
 }
 
 /** One service pass over the stack, oldest-first — a snapshot copy
@@ -1756,7 +2103,7 @@ async function tryClaim(
   q: QueueState
 ): Promise<boolean> {
   const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems
-  if (q.drained || maxed || q.stack.length >= ctx.cfg.maxOpen) {
+  if (q.drained || maxed || q.stack.length >= ctx.cfg.maxOpen || Date.now() < q.pushHoldUntil) {
     return false
   }
   ctx.stage = 'claim'
@@ -1777,11 +2124,26 @@ async function tryClaim(
   q.claimed += clump.length
   ctx.bead = clump[0]!.id
   const out = await pushItem(ctx, clump)
+  if (out.kind === 'hold') {
+    // fleet cap refused the spawn — un-see the clump and hold pushes
+    // for a beat so the next pick doesn't burn the tick re-probing the
+    // same wall; the claims pushItem released are re-pickable
+    for (const b of clump) {
+      q.seen.delete(b.id)
+    }
+    q.claimed -= clump.length
+    q.pushHoldUntil = Date.now() + ctx.intervalS * 1000
+    return false
+  }
   if (out.kind === 'member') {
     q.stack.push(out.member)
+    // a worker-pending member reports its pending phase — its `→ PR`
+    // line lands when the worker exits and the gate join happens
     say(
       ctx,
-      `loop: ${ids.join(', ')} → PR ${prRef(ctx, out.member.pr)} (gate ${q.stack.length}/${ctx.cfg.maxOpen})`
+      out.member.pr === undefined
+        ? `loop: ${ids.join(', ')} pushed — worker pending (gate ${q.stack.length}/${ctx.cfg.maxOpen})`
+        : `loop: ${ids.join(', ')} → PR ${prRef(ctx, out.member.pr)} (gate ${q.stack.length}/${ctx.cfg.maxOpen})`
     )
   } else {
     q.tally[out.result] += 1
@@ -1803,6 +2165,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
     tally: { landed: 0, closed: 0, parked: 0, failed: 0 },
     claimed: 0,
     drained: false,
+    pushHoldUntil: 0,
   }
   try {
     // sweep a crashed run's records before the first claim — a dead-pid
@@ -1823,16 +2186,25 @@ async function runQueue(ctx: Ctx): Promise<void> {
         break
       }
       if (!busy) {
-        // cap the nap at the earliest member deadline — waitForGate's
-        // own sleep was deadline-capped; a member at mergeTimeoutMin
-        // must park on the next tick, not an interval late
-        ctx.stage = 'idle'
-        ctx.bead = undefined
-        const deadline = Math.min(
-          ...q.stack.map((m) => m.since + ctx.cfg.mergeTimeoutMin * 60_000)
+        const pending = q.stack.find((m) => m.worker !== undefined)
+        ctx.stage =
+          pending === undefined
+            ? 'idle'
+            : `worker ${pending.worker!.agentId} pid=${pending.worker!.pid ?? '?'}`
+        ctx.bead = pending === undefined ? undefined : pending.beads[0]!.id
+        // the wake is the earliest member's own cadence — a worker's
+        // WORKER_POLL_MS .exit probe, a gate's interval — still capped
+        // by the merge deadline: a member at mergeTimeoutMin must park
+        // on the next tick, not an interval late (waitForGate's own
+        // sleep was deadline-capped). A worker-pending member has NO
+        // merge deadline — its lifetime is unbounded (bro-9lpn3).
+        const gated = q.stack.filter((m) => m.worker === undefined)
+        const wake = Math.min(
+          ...q.stack.map((m) => m.nextPollAt ?? Number.POSITIVE_INFINITY),
+          ...gated.map((m) => m.since + ctx.cfg.mergeTimeoutMin * 60_000)
         )
         await sleep(
-          Math.min(ctx.intervalS * 1000, Math.max(0, deadline - Date.now()))
+          Math.min(ctx.intervalS * 1000, Math.max(0, wake - Date.now()))
         )
       }
     }
