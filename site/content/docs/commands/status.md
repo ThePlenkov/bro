@@ -19,7 +19,9 @@ answer, with the absent sections empty or null.
 
 Sources: `bd` (in-progress + ready, capped), the shared agent registry
 (`<git-common>/bro/agents.json` — shared across linked worktrees), the
-drill stack, git porcelain.
+drill stack, git porcelain, and the heartbeat file
+(`<git-common>/bro/heartbeat.json` — rewritten by every `bro watch`
+tick; the `watch:` row is the rig's liveness read).
 
 ## `bro serve`
 

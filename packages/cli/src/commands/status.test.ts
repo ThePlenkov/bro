@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
@@ -41,5 +41,21 @@ describe('collectStatus', () => {
     assert.equal(collectStatus(dir).dirty, 1)
     execFileSync('git', ['commit', '-m', 'x'], { cwd: dir })
     assert.equal(collectStatus(dir).dirty, 0)
+  })
+
+  test('the heartbeat file surfaces as the watch row; absent is null', () => {
+    const dir = gitRepo()
+    assert.equal(collectStatus(dir).watch, null)
+    const bro = join(dir, '.git', 'bro')
+    mkdirSync(bro, { recursive: true })
+    const ts = new Date(Date.now() - 4 * 60_000).toISOString()
+    writeFileSync(
+      join(bro, 'heartbeat.json'),
+      JSON.stringify({ ts, attention: ['x', 'y'] })
+    )
+    const w = collectStatus(dir).watch
+    assert.equal(w?.ts, ts)
+    assert.equal(w?.attention, 2)
+    assert.ok(w !== null && w.ageMs >= 4 * 60_000)
   })
 })

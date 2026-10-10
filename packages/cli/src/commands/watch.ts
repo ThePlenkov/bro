@@ -16,10 +16,12 @@
  *
  * `--every` exists so watch *can* loop, but the cadence owner is the
  * deployment — a supervisor that wants ticks on a schedule re-invokes
- * `--once`. Never claims, never mutates beads; the two writes are
- * `--notify`'s mailbox drop and the janitor — `runJanitor` (bro-f6zp)
- * reaps dead session/agent state under `<git-common>/bro/` on each
- * tick, because watch is the cadence a reaper survives on.
+ * `--once`. Never claims, never mutates beads; the three writes are
+ * `--notify`'s mailbox drop, the heartbeat file (`<git-common>/bro/
+ * heartbeat.json` — the durable last-known-state read by `bro status`
+ * and session-start context; bro-dxoa5), and the janitor — `runJanitor`
+ * (bro-f6zp) reaps dead session/agent state under `<git-common>/bro/`
+ * on each tick, because watch is the cadence a reaper survives on.
  *
  * Mailbox — `<git-common-dir>/bro/notify/`, the contract the notify
  * connector (bro-d8zo) drains. One atomic file per emission
@@ -56,6 +58,7 @@ import { collectLoopRuns, type LoopRunView } from './loop-state.ts'
 import { providerWallsFor } from '../agent-connectors.ts'
 import { parseWorktreePorcelain, type WorktreeInfo } from './work.ts'
 import { installWatch, uninstallWatch } from './watch-install.ts'
+import { writeHeartbeat } from './watch-heartbeat.ts'
 import { watchSection, type WatchConfig } from './watch-config.ts'
 
 export interface WatchMol {
@@ -703,6 +706,15 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
     }
     const text = renderSnapshot(snap)
     console.log(json ? JSON.stringify(snap, null, 2) : text)
+    try {
+      // the durable heartbeat file — mailbox drops expire in an hour,
+      // this is what overnight state reads from (bro-dxoa5)
+      writeHeartbeat(dir, snap)
+    } catch (err) {
+      console.error(
+        `warning: heartbeat file write failed — ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
     if (notify) {
       const key = snapshotKey(snap)
       if (key !== lastNotified) {
