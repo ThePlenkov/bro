@@ -149,6 +149,22 @@ function mergedBottomPrs(f: Fixture, extra: Record<string, unknown> = {}): void 
   })
 }
 
+/** pushPair + openPrs — the two-member chain with both PRs open, the
+ *  minimum publishable shape. */
+function openPair(f: Fixture): { wa: string; wb: string } {
+  const { wa, wb } = pushPair(f)
+  openPrs(f)
+  return { wa, wb }
+}
+
+/** Both members registered under one host stack id — the publish
+ *  post-state the fake host records in its `stacks` map. */
+function assertBothInStack(f: Fixture, id: number): void {
+  const stacks = readHostState(f.hostState).stacks as Record<string, number> | undefined
+  assert.equal(stacks?.['stack/s/1-fx-a'], id)
+  assert.equal(stacks?.['stack/s/2-fx-b'], id)
+}
+
 describe('bro stack e2e', () => {
   test('push creates stack/<name>/<n>-<slug> worktrees off the tip and claims beads', () => {
     const f = stackFixture([
@@ -556,22 +572,18 @@ describe('bro stack e2e', () => {
   test('publish registers the open member PRs as the host stack', () => {
     const f = stackFixture()
     inside(f.main, f.root, () => {
-      pushPair(f)
-      openPrs(f)
+      openPair(f)
       const r = f.run(['publish', 's'])
       assert.equal(r.code, 0, r.stderr)
       assert.match(r.stdout, /stack s published — stack #901/)
-      const stacks = readHostState(f.hostState).stacks as Record<string, number> | undefined
-      assert.equal(stacks?.['stack/s/1-fx-a'], 901)
-      assert.equal(stacks?.['stack/s/2-fx-b'], 901)
+      assertBothInStack(f, 901)
     })
   })
 
   test('a re-publish reads back as already published — no churn', () => {
     const f = stackFixture()
     inside(f.main, f.root, () => {
-      pushPair(f)
-      openPrs(f)
+      openPair(f)
       assert.equal(f.run(['publish', 's']).code, 0)
       const again = f.run(['publish', 's'])
       assert.equal(again.code, 0, again.stderr)
@@ -598,8 +610,8 @@ describe('bro stack e2e', () => {
   test('publish refuses members already split across two host stacks', () => {
     const f = stackFixture()
     inside(f.main, f.root, () => {
-      pushPair(f)
-      openPrs(f, {
+      openPair(f)
+      writeHostState(f.hostState, {
         stacks: { 'stack/s/1-fx-a': 7, 'stack/s/2-fx-b': 9 },
       })
       const r = f.run(['publish', 's'])
@@ -611,8 +623,7 @@ describe('bro stack e2e', () => {
   test('list hints when open member PRs are not registered on the host', () => {
     const f = stackFixture()
     inside(f.main, f.root, () => {
-      pushPair(f)
-      openPrs(f)
+      openPair(f)
       const r = f.run(['list', 's'])
       assert.equal(r.code, 0, r.stderr)
       assert.match(r.stdout, /2 of 2 open member PRs not in a stack on the host — `bro stack publish s`/)
@@ -626,14 +637,11 @@ describe('bro stack e2e', () => {
   test('a clean sync auto-publishes the chain', () => {
     const f = stackFixture()
     inside(f.main, f.root, () => {
-      pushPair(f)
-      openPrs(f)
+      openPair(f)
       const r = f.run(['sync', 's'])
       assert.equal(r.code, 0, r.stderr)
       assert.match(r.stdout, /stack s published — stack #901/)
-      const stacks = readHostState(f.hostState).stacks as Record<string, number> | undefined
-      assert.equal(stacks?.['stack/s/1-fx-a'], 901)
-      assert.equal(stacks?.['stack/s/2-fx-b'], 901)
+      assertBothInStack(f, 901)
     })
   })
 
