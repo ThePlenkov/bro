@@ -13,7 +13,11 @@ import {
   pulseLockPath,
   pulseMarkerPath,
   pulseNudge,
+  pulseRearm,
+  pulseSpawnPath,
   readPulseMarker,
+  readPulseSpawn,
+  writePulseSpawn,
 } from './watch-pulse.ts'
 
 const DEAD = 1 << 30
@@ -165,6 +169,101 @@ describe('pulseNudge', () => {
       const file = pulseMarkerPath(main)!
       assert.ok(existsSync(file))
       assert.equal(JSON.parse(readFileSync(file, 'utf8')).everySec, 60)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('pulseSpawn record', () => {
+  test('round-trip; absent and malformed read as null', () => {
+    const { root, main } = initRepo('bro-pulse-sp-')
+    try {
+      assert.equal(readPulseSpawn(main), null)
+      writePulseSpawn(main, { pid: 4242, spawnedAt: '2026-10-10T00:00:00Z' })
+      assert.deepEqual(readPulseSpawn(main), { pid: 4242, spawnedAt: '2026-10-10T00:00:00Z' })
+      writeFileSync(pulseSpawnPath(main)!, 'not json')
+      assert.equal(readPulseSpawn(main), null)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('pulseRearm', () => {
+  test('unarmed repo stays quiet', () => {
+    const { root, main } = initRepo('bro-pulse-r0-')
+    try {
+      assert.deepEqual(pulseRearm(main, 900, {}), { kind: 'quiet' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('armed + live lock holder stays quiet', () => {
+    const { root, main } = initRepo('bro-pulse-r1-')
+    try {
+      armPulse(main, 120)
+      lock(main, `${process.pid}:tok`)
+      assert.deepEqual(pulseRearm(main, 900, {}), { kind: 'quiet' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a spawned worker never rearms — the GUARD on the write side', () => {
+    const { root, main } = initRepo('bro-pulse-r2-')
+    try {
+      armPulse(main, 120)
+      assert.deepEqual(pulseRearm(main, 900, { BRO_AGENT_ID: 'native-x' }), {
+        kind: 'quiet',
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('armed + dead pulse + no spawned child → rearm, --for floors at --every', () => {
+    const { root, main } = initRepo('bro-pulse-r3-')
+    try {
+      armPulse(main, 120)
+      assert.deepEqual(pulseRearm(main, 900, {}), {
+        kind: 'rearm',
+        everySec: 120,
+        forSec: 900,
+      })
+      armPulse(main, 1200)
+      assert.deepEqual(pulseRearm(main, 900, {}), {
+        kind: 'rearm',
+        everySec: 1200,
+        forSec: 1200,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a live recorded spawn suppresses rearm — the standby hold', () => {
+    const { root, main } = initRepo('bro-pulse-r4-')
+    try {
+      armPulse(main, 120)
+      writePulseSpawn(main, { pid: process.pid, spawnedAt: 'x' })
+      assert.deepEqual(pulseRearm(main, 900, {}), { kind: 'quiet' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a dead recorded spawn does not suppress — the next event retries', () => {
+    const { root, main } = initRepo('bro-pulse-r5-')
+    try {
+      armPulse(main, 120)
+      writePulseSpawn(main, { pid: DEAD, spawnedAt: 'x' })
+      assert.deepEqual(pulseRearm(main, 900, {}), {
+        kind: 'rearm',
+        everySec: 120,
+        forSec: 900,
+      })
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

@@ -13,6 +13,7 @@
  * `orchestrator` address: `BRO_AGENT_ID` unset means the session is an
  * orchestrator — spawned workers pin it and must never arm the cadence.
  */
+import { spawn } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
@@ -126,6 +127,98 @@ export function isOrchestratorSession(env: NodeJS.ProcessEnv = process.env): boo
   return id === undefined || id === ''
 }
 
+export interface PulseSpawn {
+  pid: number
+  spawnedAt: string
+}
+
+/** `<git-common>/bro/pulse.spawn.json` — the last rearm's child. A live
+ *  recorded pid suppresses the next rearm whether it already holds the
+ *  lock (the pulse) or still waits behind another contender (a standby)
+ *  — without it every postTool would pile another standby on a dead
+ *  incumbent. */
+export function pulseSpawnPath(dir: string): string | null {
+  const common = gitCommonDir(dir)
+  return common === null ? null : join(common, 'bro', 'pulse.spawn.json')
+}
+
+export function readPulseSpawn(dir: string): PulseSpawn | null {
+  const file = pulseSpawnPath(dir)
+  if (file === null || !existsSync(file)) {
+    return null
+  }
+  try {
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as {
+      pid?: unknown
+      spawnedAt?: unknown
+    }
+    return typeof raw.pid === 'number' && Number.isInteger(raw.pid) && raw.pid > 0 &&
+      typeof raw.spawnedAt === 'string'
+      ? { pid: raw.pid, spawnedAt: raw.spawnedAt }
+      : null
+  } catch {
+    return null
+  }
+}
+
+export function writePulseSpawn(dir: string, record: PulseSpawn): void {
+  const file = pulseSpawnPath(dir)
+  if (file === null) {
+    return
+  }
+  mkdirSync(dirname(file), { recursive: true })
+  const tmp = `${file}.${process.pid}.tmp`
+  writeFileSync(tmp, JSON.stringify(record, null, 2))
+  renameSync(tmp, file)
+}
+
+export type PulseRearm = { kind: 'quiet' } | { kind: 'rearm'; everySec: number; forSec: number }
+
+/** The postTool checkpoint decision — armed marker + dead pulse +
+ *  orchestrator + no live spawned child → rearm the bounded window.
+ *  Pure: the probe spawns on 'rearm', everything else stays quiet. */
+export function pulseRearm(
+  dir: string,
+  pulseSec: number,
+  env: NodeJS.ProcessEnv = process.env
+): PulseRearm {
+  if (!isOrchestratorSession(env)) {
+    return { kind: 'quiet' }
+  }
+  const marker = readPulseMarker(dir)
+  if (marker === null || pulseLive(dir).live) {
+    return { kind: 'quiet' }
+  }
+  const spawned = readPulseSpawn(dir)
+  if (spawned !== null && pidAlive(spawned.pid)) {
+    return { kind: 'quiet' }
+  }
+  return { kind: 'rearm', everySec: marker.everySec, forSec: Math.max(pulseSec, marker.everySec) }
+}
+
+/** Fire-and-forget the bounded window — detached, unref'd, stdio
+ *  ignored: the hook exits on its timeout budget while the child takes
+ *  pulse.lock (or stands by behind a contender and inherits later).
+ *  `process.argv[1]` re-runs this CLI entry so npx/dist/source installs
+ *  all re-spawn themselves. */
+export function spawnPulse(dir: string, everySec: number, forSec: number): number | null {
+  const entry = process.argv[1]
+  if (entry === undefined) {
+    return null
+  }
+  try {
+    const child = spawn(
+      process.execPath,
+      [entry, 'watch', '--every', String(everySec), '--for', String(forSec), '--notify'],
+      { cwd: dir, detached: true, stdio: 'ignore' }
+    )
+    child.unref()
+    return child.pid ?? null
+  } catch {
+    return null
+  }
+}
+
 /** The session-start rearm nudge — armed marker + no live pulse +
  *  orchestrator session → the rearm command; everything else is quiet.
  *  `--for` floors at the cadence so a weird config can't suggest an
@@ -160,17 +253,48 @@ export function pulseNudge(
 export const watchConnector: Connector = {
   name: 'watch',
   hooks: () => ({
+    // session start is the first checkpoint — same rearm path as
+    // postTool: armed + dead → spawn the bounded window, don't ask
     sessionStart(ctx) {
-      try {
-        const cfg =
-          (loadConfig(ctx.dir, { watch: watchSection }).watch as WatchConfig | undefined) ??
-          watchSection(undefined)
-        const line = pulseNudge(ctx.dir, cfg.pulseSec)
-        return line === null ? [] : [line]
-      } catch {
-        // a probe failure must never break rehydrate
-        return []
-      }
+      return pulseCheckpoint(ctx.dir, 'session start')
+    },
+    // every tool call is a checkpoint: an armed marker with a dead
+    // pulse gets a fresh bounded window spawned right here — the
+    // zero-cost rearm (shell, no LLM) that makes the cadence
+    // self-perpetuating while the orchestrator works. A standby child
+    // or a live pulse is quiet (bro-killn)
+    postTool(ctx) {
+      return pulseCheckpoint(ctx.dir, 'tool call')
     },
   }),
+}
+
+/** One checkpoint for every lifecycle event: decide, spawn, record,
+ *  report. A failure anywhere stays silent — a probe must never break
+ *  the hook event it rode in on. */
+function pulseCheckpoint(dir: string, where: string): string[] {
+  try {
+    const r = pulseRearm(dir, pulseCfg(dir).pulseSec)
+    if (r.kind !== 'rearm') {
+      return []
+    }
+    const pid = spawnPulse(dir, r.everySec, r.forSec)
+    if (pid === null) {
+      return []
+    }
+    writePulseSpawn(dir, { pid, spawnedAt: new Date().toISOString() })
+    return [
+      `watch pulse rearmed on ${where} — spawned ` +
+        `\`bro watch --every ${r.everySec} --for ${r.forSec} --notify\` (pid ${pid})`,
+    ]
+  } catch {
+    return []
+  }
+}
+
+function pulseCfg(dir: string): WatchConfig {
+  return (
+    (loadConfig(dir, { watch: watchSection }).watch as WatchConfig | undefined) ??
+    watchSection(undefined)
+  )
 }
