@@ -393,7 +393,8 @@ describe('bro loop e2e', () => {
       assert.match(r.stdout, /loop: fx-c → PR/)
       assert.doesNotMatch(r.stdout, /batch of 3/)
       assert.match(r.stdout, /fx-a, fx-b landed/)
-      assert.match(r.stdout, /3 landed, 0 closed, 0 parked, 0 failed/)
+      // the tally counts work ITEMS (gate members) — the clump is one
+      assert.match(r.stdout, /2 landed, 0 closed, 0 parked, 0 failed/)
       // two worker spawns total — the clump's one plus fx-c's solo —
       // and two PRs, not three
       const evs = (readHostState(f.hostState).events ?? []) as Array<Record<string, unknown>>
@@ -442,7 +443,7 @@ describe('bro loop e2e', () => {
       // falsely closed; a later run re-picks it (seen-beads don't
       // reclaim inside the same run)
       assert.equal(tail?.status, 'open')
-      assert.match(String(tail?.notes), /merged without a commit naming fx-b/)
+      assert.match(String(tail?.notes), /landed without a commit naming fx-b/)
     })
   })
 
@@ -471,7 +472,8 @@ describe('bro loop e2e', () => {
       // … and the keyless chores claim one at a time
       assert.match(r.stdout, /loop: fx-d → PR/)
       assert.match(r.stdout, /loop: fx-e → PR/)
-      assert.match(r.stdout, /5 landed, 0 closed, 0 parked, 0 failed/)
+      // 5 beads in 4 work items — the clump is one landed item
+      assert.match(r.stdout, /4 landed, 0 closed, 0 parked, 0 failed/)
       const evs = (readHostState(f.hostState).events ?? []) as Array<Record<string, unknown>>
       assert.equal(evs.filter((e) => e.spawn !== undefined).length, 4)
     })
