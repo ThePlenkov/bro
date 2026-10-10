@@ -31,8 +31,8 @@ say so.
 
 One command, one question, a bounded poll over foreign state. It is
 read-only by construction: no claim, no close, no `bd ship`, no dep
-writes — and the store it reads is a *foreign* store, so a write here
-would be a sovereignty violation on top of the read contract.
+writes — and the state it polls is foreign, so a write here would be a
+sovereignty violation on top of the read contract.
 
 **Ref parsing.** The argument is an external dep ref,
 `external:<project>:<capability>`, where `<project>` is a rig URI
@@ -45,20 +45,35 @@ argument that isn't an external ref at all — exits 2 with a message
 naming the fix (`bro mesh wait <thread>` for the thread-plane read).
 
 **Plane resolution.** `<project>` resolves through `mesh.peers`: the
-binding whose `rig` matches picks the read plane. A `local` binding
-reads the peer's live store directly (`bd -C <checkout>`); a
+binding whose `rig` matches picks the foreign read plane. A `local`
+binding reads the peer's live store directly (`bd -C <checkout>`); a
 `beads-remote` binding syncs and reads the replica. No binding for the
 rig is a config error, not a wait: exit 2 naming the rig, because
 polling a plane that cannot exist reports "still waiting" forever.
+
+The foreign plane is not where the request bead lives — where `<id>`
+lands is the transport's (specs/mesh Lifecycle): `local` delivers the
+post into the peer's checkout, so the peer's store holds it;
+`beads-remote` keeps the post on the requester's own store for the
+peer to pull, so the replica never carries it. The request bead is
+read on the **posting store** — the peer plane for `local`, `dir`
+itself for `beads-remote`. An `<id>` absent there is a bad ref (exit
+2), not a transient failure: the transport says where it must land,
+and it is not there.
 
 **The read.** Two targeted `bd` calls carry the dep verdict; a third,
 reused, carries the thread's progress. All are status-bearing:
 
 ```text
-bd -C <store> show <id> --json                          # request bead: status, labels
-bd -C <store> list --label provides:<id> --json --all   # bd's ship rule, restated
-meshThread(<dir>, peers, <id>, common, {pull: false})    # stage/turn annotation
+bd -C <post-store> show <id> --json                        # request bead: status, labels
+bd -C <peer-store> list --label provides:<id> --json --all # bd's ship rule, restated
+meshThread(<dir>, peers, <id>, common, {pull: false})      # stage/turn annotation
 ```
+
+`<post-store>` is the posting store above; `<peer-store>` is always
+the foreign plane — the worker ships `provides:` into its own store,
+which is exactly the project the dep names. For `local` both calls hit
+the same checkout; for `beads-remote` they deliberately split.
 
 The second call is bd's own resolution rule, restated: the capability is
 released when the target project holds a closed issue labelled
@@ -91,15 +106,18 @@ is a *different answer* from a read that found nothing.
 |------|-----------|---------|
 | 0    | `free`    | the capability is shipped in the target project; bd releases the dep |
 | 1    | `unreadable` | the foreign plane could not be read (checkout gone, `bd` failed, replica sync failed) — transient; retry, never a verdict |
-| 2    | `unresolved` | bad ref, or no peer binding for the rig — loud, immediate, fix the config |
+| 2    | `unresolved` | bad ref (including `<id>` absent on its posting store), or no peer binding for the rig — loud, immediate, fix the config |
 | 3    | `actionable` | the dep will not clear on its own: the request bead is closed without `provides:` (**closed-unshipped**), or the thread was **rejected** |
 | 4    | `timeout`  | still open at the deadline; the ref rides out in the summary for re-arming |
 
 Two properties are load-bearing. First, `closed-unshipped` is its own
-verdict rather than a flavour of "waiting": the worker finished, the
-dep will never release, and the session's next move is a decision it can
-take inside its own store (`bd dep remove <bead> external:<…>`) or a
-nudge to the far side. Surfacing that is the watcher's whole payoff.
+verdict rather than a flavour of "waiting": on a delivered thread the
+far side closed the request bead without shipping it, so the dep will
+never release; on an own-posted thread the closed bead is ours — a
+withdrawn or reaped record the dep still names. Either way the
+session's next move is a decision it can take inside its own store
+(`bd dep remove <bead> external:<…>`) or a nudge to the far side.
+Surfacing that is the watcher's whole payoff.
 Second, a replica-sourced `free` is annotated with the source and the
 replica's age — a stale copy saying "free" is a claim the wait cannot
 support. `local` bindings are authoritative; replicas are best-effort
@@ -192,10 +210,11 @@ AGENTS.md                             session-facing point-check rule
 - [ ] `packages/mesh/src/wait.ts` — `parseExternalRef` (last-colon split
       after `external:`, project must `parseRigUri`),
       `resolveWaitPlane` (peer binding by rig → local checkout | replica,
-      unbound is an error), `readForeignState` (`show <id> --json` for
-      status/labels; `list --label provides:<id> --json --all` + closed
-      for the ship predicate; `meshThread` reduced to stage/turn),
-      replica source/age annotation
+      unbound is an error), `readForeignState` (`show <id> --json` on the
+      posting store — peer plane for `local`, `dir` for `beads-remote` —
+      for status/labels; `list --label provides:<id> --json --all` on the
+      peer plane + closed for the ship predicate; `meshThread` reduced to
+      stage/turn), replica source/age annotation
 - [ ] `packages/cli/src/commands/wait.ts` — `bro wait external:<ref>…
       [--every SEC] [--timeout SEC] [--json]`; verdict → exit-code
       table above; stderr progress line, stdout one line or one JSON
@@ -204,11 +223,14 @@ AGENTS.md                             session-facing point-check rule
       the truth clause
 - [ ] tests: ref parse matrix (mesh:// rig, last-colon split, malformed,
       non-external arg → exit 2 + mesh-wait hint); unbound rig → exit 2;
-      unreadable plane → exit 1 with 3-strike tolerance; open at deadline
+      `<id>` absent on the posting store → exit 2; unreadable plane →
+      exit 1 with 3-strike tolerance; open at deadline
       → exit 4 carrying the ref; closed without `provides:` → exit 3
       naming the ask; `reject` envelope → exit 3 as rejected; `accept`
       + `reject` on one thread → exit 3 (envelope-set read, not stage);
-      shipped + closed → exit 0; replica-sourced `free` annotated; e2e two
+      shipped + closed → exit 0; replica-sourced `free` annotated;
+      posting-store split (own-posted thread: `show` reads `dir`,
+      `provides:` reads the replica); e2e two
       checkouts: `bro request --for` → waiter exits 3 closed-unshipped →
       far side `bd ship` → waiter exits 0
 
