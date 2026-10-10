@@ -228,14 +228,19 @@ shapes or orphaned PRs lose their only owner:
 
 - **`--for` bound** — `drive --every N --for S` rides the bound
   `bro watch` already ships (same flag, same monotonic deadline, same
-  `≥ --every` parse rule). The heartbeat contract is untouched:
-  markers stay pid-keyed, coverage lasts exactly the bound, and
-  expiry leaves the dead-marker stale-supervision flag the
-  session-start hook already reports — the re-arm signal, not a
-  silent gap. A deployment wanting durable coverage re-arms the
-  bounded loop on a non-agent timer (`watch install`'s systemd/cron
-  shape); a `drive install` generalization earns a spec when the
-  timer machinery does.
+  `≥ --every` parse rule). The deadline gates what *starts*: the
+  inter-tick sleep is capped at the remaining budget and no new tick
+  begins past it, but the check sits between awaited ticks — a tick
+  in flight at expiry runs to completion, so coverage outlives the
+  bound by at most that tick's remainder. The heartbeat contract
+  is untouched: markers stay pid-keyed, expiry leaves the dead-marker
+  stale-supervision flag the session-start hook already reports — the
+  re-arm signal, not a silent gap. A deployment wanting durable
+  coverage arms the want-marker instead — `watch install` writes
+  `bro/pulse.json` and the session-start hook re-arms the bounded
+  loop when no live pulse holds `pulse.lock` (the OS-timer writers
+  are retired, bro-killn); a `drive install` generalization earns a
+  spec when the marker machinery does.
 - **Drain exit** — an `--every` pass that fully enumerates the fleet
   and finds zero open PRs exits 0: the until-condition, convoy
   drain's own verdict — coverage then has nothing left to cover (a
