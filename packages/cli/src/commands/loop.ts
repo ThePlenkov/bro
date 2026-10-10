@@ -1416,13 +1416,15 @@ function dryRunPlan(ctx: Ctx): void {
     console.log('loop --dry-run: nothing claimable')
     return
   }
-  // dry-run renders the clump the claim would pick — no claims made
+  // dry-run renders the clump the claim would pick — no claims made;
+  // --max bounds it exactly as tryClaim's budget does
   const clump =
     ctx.cfg.batch > 1
       ? [
           top,
           ...clumpMembers(top, queue.slice(1), {
-            size: ctx.cfg.batch,
+            size:
+              ctx.cfg.maxItems > 0 ? Math.min(ctx.cfg.batch, ctx.cfg.maxItems) : ctx.cfg.batch,
             minPriority: ctx.cfg.batchMinPriority,
           }),
         ]
@@ -1659,9 +1661,22 @@ function claimClump(
   if (want.length === 0) {
     return [lead]
   }
-  // members claim best-effort — a raced-away or mid-fill store failure
-  // must not strand the lead's claim; the clump proceeds with what it got
-  const members = claimUpTo(want, want.length, ctx.root)
+  // members claim one at a time — a raced-away member skips, and a
+  // mid-fill store failure must not sink the run with half the clump
+  // claimed: the lead proceeds with whatever members did claim
+  const members: ReadyBead[] = []
+  for (const m of want) {
+    try {
+      const got = claimUpTo([m], 1, ctx.root)[0]
+      if (got === undefined) {
+        continue // raced away
+      }
+      members.push(got)
+    } catch (err) {
+      console.error(`loop: clump member claim failed — ${String(err)} — proceeding with a partial clump`)
+      break
+    }
+  }
   if (members.length > 0) {
     say(
       ctx,
