@@ -1,5 +1,7 @@
 {"thread_id":"code-scanning:1","status":"done","fix_pr":null,"fixed_at":"2026-09-30T19:35:19.942Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"code-scanning:2","status":"done","fix_pr":null,"fixed_at":"2026-09-30T19:29:53.340Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"code-scanning:20","status":"done","fix_pr":null,"fixed_at":"2026-10-08T07:28:32.675Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"code-scanning:21","status":"done","fix_pr":null,"fixed_at":"2026-10-08T07:28:32.675Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"code-scanning:3","status":"done","fix_pr":null,"fixed_at":"2026-09-30T19:29:53.340Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"code-scanning:4","status":"done","fix_pr":null,"fixed_at":"2026-09-30T19:29:53.340Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"code-scanning:5","status":"done","fix_pr":null,"fixed_at":"2026-09-30T19:29:53.340Z","notes":"resolved upstream — no longer reported"}
