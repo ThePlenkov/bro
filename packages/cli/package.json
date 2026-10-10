@@ -58,6 +58,7 @@
   },
   "dependencies": {
     "@broject/bro-pack": "^0.2.0",
+    "@broject/mcp": "^0.2.5",
     "@modelcontextprotocol/sdk": "^1.31.0",
     "sverka": "^0.2.10",
     "smol-toml": "^1.9.0"
