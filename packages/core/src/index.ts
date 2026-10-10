@@ -395,4 +395,11 @@ export type {
   BusSubscriptionHandlers,
   BusWake,
 } from './bus.ts'
-export { trackChild, unrefPendingChildren } from './live-procs.ts'
+export {
+  pickOrphanProcs,
+  readProcRows,
+  sweepOrphanProcs,
+  trackChild,
+  unrefPendingChildren,
+} from './live-procs.ts'
+export type { OrphanSweepReport, ProcRow } from './live-procs.ts'

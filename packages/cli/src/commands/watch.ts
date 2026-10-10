@@ -35,6 +35,7 @@ import {
   mailboxDir,
   reviewHost,
   runJanitor,
+  sweepOrphanProcs,
   wallText,
   type JanitorReport,
   type ProviderWall,
@@ -625,14 +626,24 @@ export function watchArgs(argv: string[]): {
  *  throwing janitor surfaces as an attention line, not a dead watch
  *  (bro-f6zp — a silent janitor is indistinguishable from a broken one). */
 function tickJanitor(dir: string): { janitor?: JanitorReport; note: string } {
+  // Orphaned bd procs ride the same tick: a supervisor dying mid-call
+  // leaves them holding the embedded noms LOCK forever (bro-8845g).
+  let orphanNote = ''
+  try {
+    const o = sweepOrphanProcs('bd', dir)
+    if (o.killed.length > 0 || o.failed.length > 0) {
+      const failed = o.failed.length > 0 ? ` (${o.failed.length} resisted SIGTERM)` : ''
+      orphanNote = `bd-orphans: reaped ${o.killed.length}${failed}`
+    }
+  } catch (err) {
+    orphanNote = `bd-orphan sweep failed — ${err instanceof Error ? err.message : String(err)}`
+  }
   try {
     const j = runJanitor(dir)
-    if (j !== null && janitorDidWork(j)) {
-      return { janitor: j, note: janitorLine(j) }
-    }
-    return { note: '' }
+    const note = j !== null && janitorDidWork(j) ? janitorLine(j) : ''
+    return { janitor: j ?? undefined, note: [note, orphanNote].filter((s) => s !== '').join(' · ') }
   } catch (err) {
-    return { note: `janitor failed — ${err instanceof Error ? err.message : String(err)}` }
+    return { note: [orphanNote, `janitor failed — ${err instanceof Error ? err.message : String(err)}`].filter((s) => s !== '').join(' · ') }
   }
 }
 
