@@ -90,9 +90,11 @@ jobs:
           # refuse a downgrade: a delayed run for an older tag must not revert
           # a formula that already moved to a newer release. Version parses
           # from either url shape — npm pack (.../-/bro-<v>.tgz) or the old
-          # codeload source (.../tags/v<v>.tar.gz). sort -V doesn't know
-          # semver's prerelease rule — the first '-' is rewritten to '~'
-          # (impossible in git tags) so X.Y.Z~beta < X.Y.Z like semver.
+          # codeload source (.../tags/v<v>.tar.gz). sort -V only
+          # approximates semver: inside an alphanumeric prerelease
+          # identifier it compares digit runs numerically (beta10 > beta2)
+          # where semver compares the identifier lexically (beta10 < beta2),
+          # so prerelease fields walk per semver §11.4.4 instead.
           new="${TAG#v}"
           cur_url=$(sed -nE 's|^  url "([^"]+)".*|\1|p' "$f" | head -1)
           cur=""
@@ -100,8 +102,36 @@ jobs:
             */-/bro-*.tgz) cur=${cur_url##*/bro-}; cur=${cur%.tgz} ;;
             */v*.tar.gz)   cur=${cur_url##*/v};    cur=${cur%.tar.gz} ;;
           esac
-          if [ -n "$cur" ] && [ "$cur" != "$new" ] &&
-             [ "$(printf '%s\n%s\n' "${cur/-/\~}" "${new/-/\~}" | sort -V | head -1)" = "${new/-/\~}" ]; then
+          # semver_lt A B → exit 0 iff A is a lower version than B
+          semver_lt() {
+            local a=$1 b=$2 apre= bpre= x y i LC_ALL=C
+            [[ $a == *-* ]] && { apre=${a#*-}; a=${a%%-*}; }
+            [[ $b == *-* ]] && { bpre=${b#*-}; b=${b%%-*}; }
+            if [ "$a" != "$b" ]; then
+              # cores are digits-and-dots only — sort -V is exact there
+              [ "$(printf '%s\n' "$a" "$b" | sort -V | head -1)" = "$a" ]
+              return
+            fi
+            [ -z "$apre" ] && return 1   # final sorts above any prerelease
+            [ -z "$bpre" ] && return 0
+            local -a ai bi
+            IFS=. read -ra ai <<<"$apre"; IFS=. read -ra bi <<<"$bpre"
+            for ((i = 0; i < ${#ai[@]} || i < ${#bi[@]}; i++)); do
+              x=${ai[i]-} y=${bi[i]-}
+              [ -z "$x" ] && return 0    # fewer fields → lower precedence
+              [ -z "$y" ] && return 1
+              [ "$x" = "$y" ] && continue
+              if [[ $x =~ ^[0-9]+$ && $y =~ ^[0-9]+$ ]]; then
+                ((10#$x == 10#$y)) && continue
+                ((10#$x < 10#$y)); return
+              elif [[ $x =~ ^[0-9]+$ ]]; then return 0   # numeric < alphanumeric
+              elif [[ $y =~ ^[0-9]+$ ]]; then return 1
+              else [[ $x < $y ]]; return                 # ASCII lexical
+              fi
+            done
+            return 1
+          }
+          if [ -n "$cur" ] && semver_lt "$new" "$cur"; then
             echo "::error::$f already at $cur, newer than $new — refusing downgrade"
             exit 1
           fi
