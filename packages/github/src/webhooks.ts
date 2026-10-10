@@ -49,7 +49,7 @@ export function verifyGithubWebhook(
   rawBody: string,
   signature: string | undefined
 ): boolean {
-  if (signature === undefined || !signature.startsWith('sha256=')) {
+  if (!signature?.startsWith('sha256=')) {
     return false
   }
   const expected = createHmac('sha256', secret).update(rawBody, 'utf8').digest('hex')
@@ -163,14 +163,16 @@ export function githubWebhookEvent(
       ? { conclusion: str(checkRun?.['conclusion']) ?? str(checkSuite?.['conclusion']) }
       : {}),
   }
+  let key: string | undefined
+  if (prs.length > 0) {
+    key = `pr-${String(prs[0])}`
+  } else if (sha !== undefined) {
+    key = `sha-${sha.slice(0, 12)}`
+  }
   return {
     topic: `${GITHUB_TOPIC_PREFIX}${event}`,
     kind: str(p['action']) ?? event,
-    ...(prs.length > 0
-      ? { key: `pr-${String(prs[0])}` }
-      : sha !== undefined
-        ? { key: `sha-${sha.slice(0, 12)}` }
-        : {}),
+    ...(key !== undefined ? { key } : {}),
     ...(ref !== undefined ? { ref } : {}),
     source: 'github',
     payload: projection,
@@ -202,10 +204,10 @@ export function githubEventConcernsPr(
 /** Arm the PR's wake-up: a `github:*` bus subscription distilled by
  *  `busWake` to `next()/close()`. Null outside a repo or with the
  *  broker down — the caller's timer stays the only poller. */
-export async function githubPrWake(dir: string, pr: number): Promise<BusWake | null> {
+export function githubPrWake(dir: string, pr: number): Promise<BusWake | null> {
   const socketPath = busSocketPath(dir)
   if (socketPath === null) {
-    return null
+    return Promise.resolve(null)
   }
   return busWake(socketPath, { topics: [`${GITHUB_TOPIC_PREFIX}*`] }, (e) =>
     githubEventConcernsPr(e, pr)
