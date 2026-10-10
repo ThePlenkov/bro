@@ -354,27 +354,33 @@ function foldDepRows<T>(v: unknown, ids: string[], opts: DepOpts): T[] {
   }
   const edges: TaskDepEdge[] = []
   for (const r of v) {
-    if (typeof r !== 'object' || r === null) {
-      continue
-    }
-    const e = r as Record<string, unknown>
-    if (typeof e.issue_id === 'string' && typeof e.depends_on_id === 'string') {
-      edges.push({
-        issue_id: e.issue_id,
-        depends_on_id: e.depends_on_id,
-        type: canonicalTaskRel(typeof e.type === 'string' ? e.type : ''),
-      })
-    } else if (ids.length === 1 && typeof e.id === 'string') {
-      const rel =
-        typeof e.dependency_type === 'string' ? canonicalTaskRel(e.dependency_type) : ''
-      edges.push(
-        opts.direction === 'up'
-          ? { issue_id: e.id, depends_on_id: ids[0]!, type: rel }
-          : { issue_id: ids[0]!, depends_on_id: e.id, type: rel }
-      )
+    const e = depRowToEdge(r, ids, opts)
+    if (e !== undefined) {
+      edges.push(e)
     }
   }
   return edges as T[]
+}
+
+function depRowToEdge(r: unknown, ids: string[], opts: DepOpts): TaskDepEdge | undefined {
+  if (typeof r !== 'object' || r === null) {
+    return undefined
+  }
+  const e = r as Record<string, unknown>
+  if (typeof e.issue_id === 'string' && typeof e.depends_on_id === 'string') {
+    return {
+      issue_id: e.issue_id,
+      depends_on_id: e.depends_on_id,
+      type: canonicalTaskRel(typeof e.type === 'string' ? e.type : ''),
+    }
+  }
+  if (ids.length !== 1 || typeof e.id !== 'string') {
+    return undefined
+  }
+  const rel = typeof e.dependency_type === 'string' ? canonicalTaskRel(e.dependency_type) : ''
+  return opts.direction === 'up'
+    ? { issue_id: e.id, depends_on_id: ids[0]!, type: rel }
+    : { issue_id: ids[0]!, depends_on_id: e.id, type: rel }
 }
 
 /** `bd dep list <id>` rows are hydrated neighbors — `dependency_type`

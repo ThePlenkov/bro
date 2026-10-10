@@ -85,6 +85,23 @@ function artifactDirs(root: string): string[] {
   return [...dirs]
 }
 
+/** `--pull`: materialize the data ref, then replicate stores — a store
+ *  failure makes the whole restore exit nonzero (reporting success
+ *  would lie about the outcome). */
+function syncPull(root: string, cfg: ReturnType<typeof loadBroConfig>): void {
+  const { ref, remote, beads } = cfg.sync
+  const written = dataRefPull(root, remote, ref)
+  if (written < 0) {
+    console.error(`bro sync: remote ${remote} has no ${ref}`)
+    process.exit(1)
+  }
+  console.log(`bro sync: materialized ${written} file(s) from ${ref}`)
+  if (beads && syncStores(root, cfg.connectors) > 0) {
+    console.error('bro sync: task store replication failed — local state may be stale')
+    process.exit(1)
+  }
+}
+
 export function runSyncCommand(argv: string[]): void {
   const pull = argv.includes('--pull')
   const root = dataRefRoot()
@@ -96,18 +113,7 @@ export function runSyncCommand(argv: string[]): void {
   const { ref, remote, beads } = cfg.sync
 
   if (pull) {
-    const written = dataRefPull(root, remote, ref)
-    if (written < 0) {
-      console.error(`bro sync: remote ${remote} has no ${ref}`)
-      process.exit(1)
-    }
-    console.log(`bro sync: materialized ${written} file(s) from ${ref}`)
-    if (beads && syncStores(root, cfg.connectors) > 0) {
-      // an explicit pull that couldn't sync the store is a failed
-      // restore — reporting success would lie about the outcome
-      console.error('bro sync: task store replication failed — local state may be stale')
-      process.exit(1)
-    }
+    syncPull(root, cfg)
     return
   }
 
