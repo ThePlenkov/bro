@@ -7,8 +7,9 @@ import type { Connector } from '@broject/core'
 import { glabTry } from './glab.ts'
 import { gitlabReview, hostFor } from './reviews.ts'
 import { gitlabQueries } from './queries.ts'
+import { gitlabStacks } from './stacks.ts'
 
-export { gitlabReview, gitlabQueries }
+export { gitlabReview, gitlabQueries, gitlabStacks }
 
 export const gitlabConnector: Connector = {
   name: 'gitlab',
@@ -35,4 +36,5 @@ export const gitlabConnector: Connector = {
   },
   reviews: (ctx) => gitlabReview(ctx.dir),
   queries: (ctx) => gitlabQueries(ctx.dir),
+  stacks: (ctx) => gitlabStacks(ctx.dir),
 }

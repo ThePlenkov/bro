@@ -552,6 +552,8 @@ const facade = {
     const s = load()
     s.merges = (s.merges ?? 0) + 1
     s.events = (s.events ?? []).concat([{ merge: t.pr }])
+    // merge order is asserted in stack e2e — per-layer must go bottom→top
+    s.mergeLog = (s.mergeLog ?? []).concat([t.pr])
     // a merge lands on the per-branch entry too — otherwise a mapped
     // stack member keeps reporting OPEN after its merge
     if (s.prs) {
@@ -567,11 +569,24 @@ const facade = {
     return s.prState
   },
 }
+// the stacks facade — host.json cascade: {retarget, rebase} scripts
+// platform ownership for every PR-carrying member (GitLab-style
+// retarget-only, GitHub-style retarget+remote-rebase). Only claimed via
+// connectors.stacks — the git connector's dir match wins unnamed.
+const stacksFacade = {
+  openHint: (m) => 'fake-mr create --base ' + m.base,
+  cascade: (m) => {
+    const s = load()
+    return s.cascade !== undefined && m.pr !== undefined
+      ? s.cascade
+      : { retarget: false, rebase: false }
+  },
+}
 export default {
   name: 'fakehost-cmd',
   summary: 'e2e fixture',
   run: () => {},
-  connectors: [{ name: 'fakehost', matchRemote: () => false, reviews: () => facade }],
+  connectors: [{ name: 'fakehost', matchRemote: () => false, reviews: () => facade, stacks: () => stacksFacade }],
 }
 `
 

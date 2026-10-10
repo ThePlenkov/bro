@@ -163,6 +163,19 @@ export type {
   ScanOpts,
 } from './review.ts'
 export {
+  gitStacks,
+  MANUAL_CASCADE,
+  mergeChainPerLayer,
+  shQuote,
+} from './stacks.ts'
+export type {
+  StackCascade,
+  StackChainMember,
+  StackFacade,
+  StackMergeOpts,
+  StackMergeReport,
+} from './stacks.ts'
+export {
   collectGuards,
   connectorHooks,
   connectors,
@@ -184,6 +197,7 @@ export {
   sessionStartLines,
   sessionStartProbe,
   sessionTaskClaims,
+  stackHost,
   stopGateContributions,
   tasksAsync,
 } from './connectors.ts'
