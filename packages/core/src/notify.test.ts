@@ -8,6 +8,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs'
@@ -544,6 +545,24 @@ describe('peekMailbox', () => {
         assert.equal(out.length, 1)
         assert.match(out[0]!.text, /pick A/)
         assert.match(out[0]!.text, /fixer-1/)
+      })
+    })
+  })
+
+  test('a symlinked .txt is debris, not a drop — peek and drain never read through', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        mkdirSync(mb, { recursive: true })
+        const secret = join(dir, 'secret-outside-mailbox.txt')
+        writeFileSync(secret, 's3cret-bytes')
+        const name = `note-${Date.now()}-ab12.txt`
+        symlinkSync(secret, join(mb, name))
+        assert.deepEqual(peekMailbox(dir), [])
+        assert.deepEqual(drainMailbox(dir, 's1'), [])
+        // the drain did not consume it either — it lingers until its own
+        // mtime expires, but its bytes never left the mailbox
+        assert.ok(readdirSync(mb).includes(name))
       })
     })
   })
