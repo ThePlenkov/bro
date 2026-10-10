@@ -507,10 +507,8 @@ function spawnAgent(
         worktree: dir,
         log: log ?? '',
       })
-      say(
-        ctx,
-        `loop: agent ${beadIds.join(', ')} on pid ${child.pid}${log === null ? '' : ` — log ${log}`}`
-      )
+      const logNote = log === null ? '' : ` — log ${log}`
+      say(ctx, `loop: agent ${beadIds.join(', ')} on pid ${child.pid}${logNote}`)
     }
     ctx.stage = `worker pid=${child.pid ?? '?'}`
     const settle = (code: number | null): void => {

@@ -129,6 +129,13 @@ const spawns = (f: Fixture): string =>
     ? readFileSync(join(f.main, 'spawns.log'), 'utf8')
     : ''
 
+/** The same-area P3 debt pair the clump tests bind on `area:cli` —
+ *  fx-a leads and fx-b rides as the compatible member. */
+const cliDebtPair = (): Array<Record<string, unknown>> => [
+  { ...FAKE_BEAD, id: 'fx-a', title: 'cli drift 1', priority: 3, labels: ['debt', 'area:cli'] },
+  { ...FAKE_BEAD, id: 'fx-b', title: 'cli drift 2', priority: 3, labels: ['debt', 'area:cli'] },
+]
+
 describe('bro loop e2e', () => {
   test('land: claim → agent → green gate → merge → close → cleanup', () => {
     const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }])
@@ -376,8 +383,7 @@ describe('bro loop e2e', () => {
     // the compatible tail into a single worktree + worker + PR
     const f = loopFixture(
       [
-        { ...FAKE_BEAD, id: 'fx-a', title: 'cli drift 1', priority: 3, labels: ['debt', 'area:cli'] },
-        { ...FAKE_BEAD, id: 'fx-b', title: 'cli drift 2', priority: 3, labels: ['debt', 'area:cli'] },
+        ...cliDebtPair(),
         { ...FAKE_BEAD, id: 'fx-c', title: 'ui drift', priority: 3, labels: ['debt', 'area:ui'] },
       ],
       { batch: 4 },
@@ -424,14 +430,7 @@ describe('bro loop e2e', () => {
   test('batch partial: a member the commits never named re-queues on merge', () => {
     // fail-safe by construction — the gate closes only what the
     // branch's commit log proves; the unfinished tail re-queues
-    const f = loopFixture(
-      [
-        { ...FAKE_BEAD, id: 'fx-a', title: 'cli drift 1', priority: 3, labels: ['debt', 'area:cli'] },
-        { ...FAKE_BEAD, id: 'fx-b', title: 'cli drift 2', priority: 3, labels: ['debt', 'area:cli'] },
-      ],
-      { batch: 4 },
-      'batch-partial'
-    )
+    const f = loopFixture(cliDebtPair(), { batch: 4 }, 'batch-partial')
     writeHostState(f.hostState, { prs: {} })
     inside(f.main, f.root, () => {
       const r = f.run()
