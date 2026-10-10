@@ -46,9 +46,15 @@ function supervised(args: string[], timeoutMs: number): { cmd: string; argv: str
  *  (probeVersion, the store doctype's install-beads diagnostic, …)
  *  classifies the setup gap identically either way. */
 function normalizeSpawnErr(err: string): string {
-  // GNU timeout: "failed to run command 'bd': No such file or directory";
-  // uutils timeout: "failed to execute process: No such file or directory"
-  return /failed to (run command 'bd'|execute process)/i.test(err) ? `ENOENT ${err}` : err
+  // GNU timeout: "failed to run command 'bd': No such file or directory"
+  // — under a UTF-8 locale gnulib quote() emits U+2018/U+2019 around the
+  // name ('bd'), so the match must not pin the quote marks; uutils:
+  // "failed to execute process: No such file or directory (os error 2)".
+  // The errno text is required — an EACCES miss prints "Permission
+  // denied" and must stay unnormalized (broken, not missing).
+  return /failed to (run command|execute process)[^\n]*no such file or directory/i.test(err)
+    ? `ENOENT ${err}`
+    : err
 }
 
 /** Kill the whole supervised group — the async spawns run `detached`

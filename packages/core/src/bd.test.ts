@@ -54,6 +54,36 @@ function withFakeBd(env: Record<string, string>, fn: () => void): void {
   }
 }
 
+/** Scripted GNU timeout — answers --version so `supervised()` adopts it,
+ *  then plays exec-miss shapes. CI runs LANG=C.UTF-8, where gnulib
+ *  quote() renders the command name with U+2018/U+2019 — this stub emits
+ *  exactly that so the normalizer is pinned on every host. */
+const FAKE_TIMEOUT = `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "timeout (GNU coreutils) 9.4"; exit 0; fi
+printf "%s\\n" "$FAKE_TIMEOUT_MISS" >&2
+exit "$FAKE_TIMEOUT_CODE"
+`
+
+function withFakeTimeout(env: Record<string, string>, fn: () => void): void {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-bd-gnu-timeout-'))
+  writeFileSync(join(dir, 'timeout'), FAKE_TIMEOUT)
+  chmodSync(join(dir, 'timeout'), 0o755)
+  const prevPath = process.env.PATH
+  const prevEnv = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]))
+  process.env.PATH = dir
+  Object.assign(process.env, env)
+  try {
+    fn()
+  } finally {
+    process.env.PATH = prevPath
+    for (const [k, v] of Object.entries(prevEnv)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 /** PATH with no bd at all — only the real git must stay reachable. */
 function withoutBd(fn: () => void): void {
   const dir = mkdtempSync(join(tmpdir(), 'bro-bd-absent-'))
@@ -110,6 +140,29 @@ describe('probeBdCompat', { skip: WIN32 }, () => {
       process.env.PATH = prevPath
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  test('a UTF-8-quoted GNU supervisor miss still classifies as missing', () => {
+    // Under a UTF-8 locale gnulib quote() emits U+2018/U+2019 around the
+    // command name — the normalizer must not pin ASCII quotes or the
+    // miss lands as broken, not missing (CI: ubuntu-latest, LANG=C.UTF-8).
+    const miss = `timeout: failed to run command ${String.fromCodePoint(0x2018)}bd${String.fromCodePoint(0x2019)}: No such file or directory`
+    withFakeTimeout({ FAKE_TIMEOUT_MISS: miss, FAKE_TIMEOUT_CODE: '127' }, () => {
+      const c = probeBdCompat()
+      assert.equal(c.missing, true)
+      assert.equal(c.broken, false)
+    })
+  })
+
+  test('an EACCES supervisor miss is broken, not missing', () => {
+    // "failed to run command 'bd': Permission denied" — the errno text
+    // is not ENOENT, so normalizing to missing would lie about the gap.
+    const denied = `timeout: failed to run command 'bd': Permission denied`
+    withFakeTimeout({ FAKE_TIMEOUT_MISS: denied, FAKE_TIMEOUT_CODE: '126' }, () => {
+      const c = probeBdCompat()
+      assert.equal(c.missing, false)
+      assert.equal(c.broken, true)
+    })
   })
 
   test('non-array --json payload is drift', () => {
