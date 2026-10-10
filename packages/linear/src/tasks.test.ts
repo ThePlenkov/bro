@@ -438,8 +438,8 @@ describe('linearTasks', { skip: WIN32 }, () => {
   test('create rejects an unsupported dep type before creating', () => {
     withLinear({}, (log, dir) => {
       assert.throws(
-        () => linearTasks(dir).create({ title: 't', deps: ['discovered-from:ENG-1'] }),
-        /dep type 'discovered-from' unsupported/
+        () => linearTasks(dir).create({ title: 't', deps: ['discovered:ENG-1'] }),
+        /dep rel 'discovered' unsupported/
       )
       assert.equal(callsMatching(log, /BroIssueCreate/).length, 0)
     })
@@ -484,8 +484,8 @@ describe('linearTasks', { skip: WIN32 }, () => {
       },
       (_log, dir) => {
         assert.deepEqual(linearTasks(dir).deps(['ENG-9']), [
-          { issue_id: 'ENG-9', depends_on_id: 'ENG-8', type: 'blocks' },
-          { issue_id: 'ENG-10', depends_on_id: 'ENG-9', type: 'blocks' },
+          { issue_id: 'ENG-9', depends_on_id: 'ENG-8', type: 'blocked' },
+          { issue_id: 'ENG-10', depends_on_id: 'ENG-9', type: 'blocked' },
         ])
       }
     )
@@ -790,7 +790,7 @@ describe('linearTasksAsync', () => {
     try {
       const deps = await linearTasksAsync('/tmp', { fetch: fn }).deps(['ENG-9'])
       assert.deepEqual(deps, [
-        { issue_id: 'ENG-9', depends_on_id: 'ENG-8', type: 'blocks' },
+        { issue_id: 'ENG-9', depends_on_id: 'ENG-8', type: 'blocked' },
       ])
     } finally {
       if (prev === undefined) delete process.env.LINEAR_API_KEY
