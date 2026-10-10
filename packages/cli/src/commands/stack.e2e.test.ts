@@ -101,6 +101,54 @@ function commitIn(dir: string, file: string): void {
   git(['commit', '-qm', `add ${file}`], dir)
 }
 
+/** fx-a + fx-b pushed under stack `s` — the bare 2-member chain. */
+function pushPair(f: Fixture): { wa: string; wb: string } {
+  assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
+  assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
+  return { wa: join(f.root, 'main--fx-a'), wb: join(f.root, 'main--fx-b') }
+}
+
+/** The pushed chain with one commit per member, both branches on origin,
+ *  then member 1's file landing on main — the scripted squash merge the
+ *  post-merge cascade tests start from. */
+function pushedMergedStack(f: Fixture): { wa: string; wb: string } {
+  assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
+  const wa = join(f.root, 'main--fx-a')
+  commitIn(wa, 'a.txt')
+  git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa)
+  assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
+  const wb = join(f.root, 'main--fx-b')
+  commitIn(wb, 'b.txt')
+  git(['push', '-q', 'origin', 'stack/s/2-fx-b'], wb)
+  // the squash merge: member 1's change lands on main as a new commit
+  commitIn(f.main, 'a.txt')
+  git(['push', '-q', 'origin', 'main'], f.main)
+  return { wa, wb }
+}
+
+/** Both members OPEN on the host — the child targets the bottom member. */
+function openPrs(f: Fixture, extra: Record<string, unknown> = {}): void {
+  writeHostState(f.hostState, {
+    prs: {
+      'stack/s/1-fx-a': { number: 11, state: 'OPEN', baseRef: 'main' },
+      'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
+    },
+    ...extra,
+  })
+}
+
+/** The post-merge read — bottom MERGED, child still OPEN on the merged
+ *  member (the platform's retarget hasn't landed in this read yet). */
+function mergedBottomPrs(f: Fixture, extra: Record<string, unknown> = {}): void {
+  writeHostState(f.hostState, {
+    prs: {
+      'stack/s/1-fx-a': { number: 11, state: 'MERGED', baseRef: 'main' },
+      'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
+    },
+    ...extra,
+  })
+}
+
 describe('bro stack e2e', () => {
   test('push creates stack/<name>/<n>-<slug> worktrees off the tip and claims beads', () => {
     const f = stackFixture([
@@ -262,14 +310,8 @@ describe('bro stack e2e', () => {
   test('list renders members with base, worktree state, and PR', () => {
     const f = stackFixture()
     inside(f.main, f.root, () => {
-      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
-      assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
-      writeHostState(f.hostState, {
-        prs: {
-          'stack/s/1-fx-a': { number: 11, state: 'OPEN', baseRef: 'main' },
-          'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
-        },
-      })
+      pushPair(f)
+      openPrs(f)
       const r = f.run(['list', 's'])
       assert.equal(r.code, 0, r.stderr)
       assert.match(r.stdout, /stack s {2}\(2 members\)/)
@@ -281,23 +323,8 @@ describe('bro stack e2e', () => {
   test('sync after a bottom merge retargets and rebases the child', () => {
     const f = stackFixture()
     inside(f.main, f.root, () => {
-      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
-      const wa = join(f.root, 'main--fx-a')
-      commitIn(wa, 'a.txt')
-      git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa)
-      assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
-      const wb = join(f.root, 'main--fx-b')
-      commitIn(wb, 'b.txt')
-      git(['push', '-q', 'origin', 'stack/s/2-fx-b'], wb)
-      // the squash merge: member 1's change lands on main as a new commit
-      commitIn(f.main, 'a.txt')
-      git(['push', '-q', 'origin', 'main'], f.main)
-      writeHostState(f.hostState, {
-        prs: {
-          'stack/s/1-fx-a': { number: 11, state: 'MERGED', baseRef: 'main' },
-          'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
-        },
-      })
+      pushedMergedStack(f)
+      mergedBottomPrs(f)
       const r = f.run(['sync', 's'])
       assert.equal(r.code, 0, r.stderr)
       assert.match(r.stdout, /stack\/s\/1-fx-a merged/)
@@ -322,12 +349,7 @@ describe('bro stack e2e', () => {
       assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
       // member 1's worktree is gone — nothing anchors the branch
       git(['worktree', 'remove', '--force', join(f.root, 'main--fx-a')], f.main)
-      writeHostState(f.hostState, {
-        prs: {
-          'stack/s/1-fx-a': { number: 11, state: 'MERGED', baseRef: 'main' },
-          'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
-        },
-      })
+      mergedBottomPrs(f)
       const r = f.run(['sync', 's'])
       assert.equal(r.code, 0, r.stderr)
       assert.match(r.stdout, /stack\/s\/1-fx-a merged — edge \+ branch removed/)
@@ -347,12 +369,7 @@ describe('bro stack e2e', () => {
       const wb = join(f.root, 'main--fx-b')
       commitIn(wb, 'b.txt')
       writeFileSync(join(wb, 'dirty.txt'), 'uncommitted\n')
-      writeHostState(f.hostState, {
-        prs: {
-          'stack/s/1-fx-a': { number: 11, state: 'MERGED', baseRef: 'main' },
-          'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
-        },
-      })
+      mergedBottomPrs(f)
       const r = f.run(['sync', 's'])
       assert.equal(r.code, 0, r.stderr)
       assert.match(r.stdout, /stack\/s\/2-fx-b skipped — dirty worktree/)
@@ -372,14 +389,8 @@ describe('bro stack e2e', () => {
   test('merge lands the OPEN-PR prefix bottom→top through the reviews facade', () => {
     const f = stackFixture()
     inside(f.main, f.root, () => {
-      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
-      assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
-      writeHostState(f.hostState, {
-        prs: {
-          'stack/s/1-fx-a': { number: 11, state: 'OPEN', baseRef: 'main' },
-          'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
-        },
-      })
+      pushPair(f)
+      openPrs(f)
       const r = f.run(['merge', 's'])
       assert.equal(r.code, 0, r.stderr)
       const s = readHostState(f.hostState)
@@ -406,13 +417,8 @@ describe('bro stack e2e', () => {
   test('merge refuses while any member gate is BLOCKED — nothing lands', () => {
     const f = stackFixture()
     inside(f.main, f.root, () => {
-      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
-      assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
-      writeHostState(f.hostState, {
-        prs: {
-          'stack/s/1-fx-a': { number: 11, state: 'OPEN', baseRef: 'main' },
-          'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
-        },
+      pushPair(f)
+      openPrs(f, {
         threads: [
           {
             id: 't1',
@@ -433,8 +439,7 @@ describe('bro stack e2e', () => {
   test('merge stops below a member with no OPEN PR — the prefix still lands', () => {
     const f = stackFixture()
     inside(f.main, f.root, () => {
-      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
-      assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
+      pushPair(f)
       writeHostState(f.hostState, {
         prs: {
           'stack/s/1-fx-a': { number: 11, state: 'OPEN', baseRef: 'main' },
@@ -473,21 +478,11 @@ describe('bro stack e2e', () => {
   test('sync follows a platform-rewritten remote — local-only commits replayed', () => {
     const f = stackFixture([], { connectors: { stacks: 'fakehost' } })
     inside(f.main, f.root, () => {
-      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
-      const wa = join(f.root, 'main--fx-a')
-      commitIn(wa, 'a.txt')
-      git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa)
-      assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
-      const wb = join(f.root, 'main--fx-b')
-      commitIn(wb, 'b.txt')
-      git(['push', '-q', 'origin', 'stack/s/2-fx-b'], wb)
+      const { wb } = pushedMergedStack(f)
       // local-only work on top — the platform can't have replayed it
       commitIn(wb, 'local.txt')
-      // the platform "merged" member 1: a.txt lands on main...
-      commitIn(f.main, 'a.txt')
-      git(['push', '-q', 'origin', 'main'], f.main)
-      // ...and rewrote member 2's remote — a rebase of its pushed
-      // commits onto the new trunk, from a second clone
+      // ...and the platform rewrote member 2's remote — a rebase of its
+      // pushed commits onto the new trunk, from a second clone
       const clone = join(f.root, 'clone')
       git(['clone', '-q', join(f.root, 'origin.git'), clone], f.root)
       git(['config', 'user.email', 't@t'], clone)
@@ -495,15 +490,7 @@ describe('bro stack e2e', () => {
       git(['checkout', '-q', 'stack/s/2-fx-b'], clone)
       git(['rebase', '-q', '--onto', 'origin/main', 'origin/stack/s/1-fx-a'], clone)
       git(['push', '-q', '--force', 'origin', 'stack/s/2-fx-b'], clone)
-      writeHostState(f.hostState, {
-        prs: {
-          'stack/s/1-fx-a': { number: 11, state: 'MERGED', baseRef: 'main' },
-          // the platform's retarget hadn't landed in this read yet —
-          // prBase still names the merged member
-          'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
-        },
-        cascade: { retarget: true, rebase: true },
-      })
+      mergedBottomPrs(f, { cascade: { retarget: true, rebase: true } })
       const r = f.run(['sync', 's'])
       assert.equal(r.code, 0, r.stderr)
       // the retarget is the platform's — no API call was made
@@ -520,24 +507,9 @@ describe('bro stack e2e', () => {
   test('retarget-only platform cascade still rebases the branch locally', () => {
     const f = stackFixture([], { connectors: { stacks: 'fakehost' } })
     inside(f.main, f.root, () => {
-      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
-      const wa = join(f.root, 'main--fx-a')
-      commitIn(wa, 'a.txt')
-      git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa)
-      assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
-      const wb = join(f.root, 'main--fx-b')
-      commitIn(wb, 'b.txt')
-      git(['push', '-q', 'origin', 'stack/s/2-fx-b'], wb)
-      commitIn(f.main, 'a.txt')
-      git(['push', '-q', 'origin', 'main'], f.main)
-      writeHostState(f.hostState, {
-        prs: {
-          'stack/s/1-fx-a': { number: 11, state: 'MERGED', baseRef: 'main' },
-          'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
-        },
-        // GitLab shape — the platform retargets, local rebase stays ours
-        cascade: { retarget: true, rebase: false },
-      })
+      pushedMergedStack(f)
+      // GitLab shape — the platform retargets, local rebase stays ours
+      mergedBottomPrs(f, { cascade: { retarget: true, rebase: false } })
       const r = f.run(['sync', 's'])
       assert.equal(r.code, 0, r.stderr)
       assert.equal(readHostState(f.hostState).retargets, undefined)
@@ -553,24 +525,9 @@ describe('bro stack e2e', () => {
   test('a failed platform follow keeps the edge stale — the next sync retries it', () => {
     const f = stackFixture([], { connectors: { stacks: 'fakehost' } })
     inside(f.main, f.root, () => {
-      assert.equal(f.run(['push', 'fx-a', '--name', 's']).code, 0)
-      const wa = join(f.root, 'main--fx-a')
-      commitIn(wa, 'a.txt')
-      git(['push', '-q', 'origin', 'stack/s/1-fx-a'], wa)
-      assert.equal(f.run(['push', 'fx-b', '--name', 's']).code, 0)
-      const wb = join(f.root, 'main--fx-b')
-      commitIn(wb, 'b.txt')
-      git(['push', '-q', 'origin', 'stack/s/2-fx-b'], wb)
-      commitIn(f.main, 'a.txt')
-      git(['push', '-q', 'origin', 'main'], f.main)
-      writeHostState(f.hostState, {
-        prs: {
-          'stack/s/1-fx-a': { number: 11, state: 'MERGED', baseRef: 'main' },
-          'stack/s/2-fx-b': { number: 12, state: 'OPEN', baseRef: 'stack/s/1-fx-a' },
-        },
-        // the platform claims the rewrite — but the remote branch is gone
-        cascade: { retarget: true, rebase: true },
-      })
+      pushedMergedStack(f)
+      // the platform claims the rewrite — but the remote branch is gone
+      mergedBottomPrs(f, { cascade: { retarget: true, rebase: true } })
       git(['push', '-q', 'origin', '--delete', 'stack/s/2-fx-b'], f.main)
       const r1 = f.run(['sync', 's'])
       assert.equal(r1.code, 0, r1.stderr)
