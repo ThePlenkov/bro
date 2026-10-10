@@ -227,6 +227,40 @@ describe('githubReview', { skip: WIN32 }, () => {
     )
   })
 
+  // the per-call pool alone lets N overlapping probes fan 4N gh children
+  // into one cgroup — the global budget in gh.ts caps the real total
+  test('concurrent checkAnnotationsAsync calls share one gh child budget', async () => {
+    const runs = {
+      check_runs: Array.from({ length: 8 }, (_, i) => ({ id: 10 + i, name: `r${i}` })),
+    }
+    await withFakeGhAsync(
+      async (log) => {
+        await Promise.all([
+          githubReview().checkAnnotationsAsync!('acme/widgets', 'aaa111'),
+          githubReview().checkAnnotationsAsync!('acme/widgets', 'bbb222'),
+          githubReview().checkAnnotationsAsync!('acme/widgets', 'ccc333'),
+        ])
+        let inFlight = 0
+        let max = 0
+        for (const l of readFileSync(log, 'utf8').split('\n')) {
+          if (l.startsWith('ANN-BEGIN')) {
+            inFlight += 1
+            max = Math.max(max, inFlight)
+          } else if (l.startsWith('ANN-END')) {
+            inFlight -= 1
+          }
+        }
+        assert.ok(max > 4, `expected overlap across calls, saw max ${max}`)
+        assert.ok(max <= 8, `expected shared fan-out ≤8, saw ${max}`)
+      },
+      {
+        FAKE_GH_RUNS: JSON.stringify(runs),
+        FAKE_GH_MARK: '1',
+        FAKE_GH_ANN_SLEEP: '0.2',
+      }
+    )
+  })
+
   test('reviewThreads normalizes the graphql shape onto domain types', async () => {
     await withFakeGhAsync(async () => {
       const threads = await githubReview().reviewThreads(target)

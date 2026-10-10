@@ -579,7 +579,9 @@ async function checkAnnotationsAsync(
     // a page's annotation fetches are independent — overlap them, but
     // bounded: each fetch is a ~50MB gh child and a CI suite runs tens
     // of check-runs, so an unbounded Promise.all spikes the whole
-    // service cgroup (bro-2l7r9's OOM). Runs outside `names` are never
+    // service cgroup (bro-2l7r9's OOM). This pool caps one call —
+    // the process-wide child budget in gh.ts is what keeps overlapping
+    // gate probes from multiplying pools. Runs outside `names` are never
     // read — skip them outright. Each run reports to its own slot
     // first so a name shared by concurrent runs can't let a success
     // overwrite a sibling's failure.
