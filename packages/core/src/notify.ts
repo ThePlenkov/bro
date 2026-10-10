@@ -17,8 +17,12 @@
  */
 import { randomBytes } from 'node:crypto'
 import {
+  closeSync,
+  constants,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -447,20 +451,26 @@ export function peekMailbox(dir: string, limit = 25): MailboxPeek[] {
     for (const f of files.filter((f) => f.endsWith('.txt') && !f.startsWith('.'))) {
       const path = join(mb, f)
       try {
-        // lstat — a symlinked drop's bytes must never cross onto the
-        // unauthenticated /api/v1/mailbox surface
-        const st = lstatSync(path)
-        if (now - st.mtimeMs > DROP_TTL_MS || !st.isFile()) {
-          continue
+        // O_NOFOLLOW + fstat on the same fd — a swapped-in symlink's
+        // bytes must never cross onto the unauthenticated
+        // /api/v1/mailbox surface (lstat→read races open to the target)
+        const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+        try {
+          const st = fstatSync(fd)
+          if (now - st.mtimeMs > DROP_TTL_MS || !st.isFile()) {
+            continue
+          }
+          const raw = readFileSync(fd, 'utf8')
+          if (raw.trim() === '') {
+            continue
+          }
+          const t = dropTime(f)
+          out.push({ name: f, ts: t > 0 ? t : Math.round(st.mtimeMs), text: renderDrop(raw) })
+        } finally {
+          closeSync(fd)
         }
-        const raw = readFileSync(path, 'utf8')
-        if (raw.trim() === '') {
-          continue
-        }
-        const t = dropTime(f)
-        out.push({ name: f, ts: t > 0 ? t : Math.round(st.mtimeMs), text: renderDrop(raw) })
       } catch {
-        // raced removal mid-read — the drop is gone, skip it
+        // raced removal or a symlink swap mid-read — skip the drop
       }
     }
   }

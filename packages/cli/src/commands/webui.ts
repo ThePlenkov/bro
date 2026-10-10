@@ -117,7 +117,7 @@ function renderAgents(board, snap) {
   var byId = {};
   board = board || {};
   (board.backends || []).forEach(function (b) {
-    (b.degraded || []).forEach(function (d) { warns.push(b.name + ': ' + d); });
+    if (b.degraded) warns.push(b.name + ': ' + b.degraded);
     (b.agents || []).forEach(function (a) {
       var r = {
         id: a.id, backend: b.name, step: a.molStep || '—',
