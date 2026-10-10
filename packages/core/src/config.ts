@@ -52,8 +52,12 @@ export const debtSection: ConfigSection<{
   dir: string
   sources: string[]
   stale_days: number
+  sonarcloud: { project_key?: string; host?: string }
 }> = (raw) => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
+  const sonar = (typeof obj.sonarcloud === 'object' && obj.sonarcloud !== null
+    ? obj.sonarcloud
+    : {}) as Record<string, unknown>
   return {
     // dir feeds path.join — a non-string or empty value must fall back to
     // the default, not throw mid-command
@@ -76,6 +80,14 @@ export const debtSection: ConfigSection<{
       obj.stale_days > 0
         ? obj.stale_days
         : DEFAULT_CONFIG.debt.stale_days,
+    // sonarcloud collector params — a non-string entry falls back to
+    // sonar-project.properties, then to the collector's own default.
+    sonarcloud: {
+      ...(typeof sonar.project_key === 'string' && sonar.project_key !== ''
+        ? { project_key: sonar.project_key }
+        : {}),
+      ...(typeof sonar.host === 'string' && sonar.host !== '' ? { host: sonar.host } : {}),
+    },
   }
 }
 
@@ -551,10 +563,13 @@ export interface BroConfig {
     dir: string
     /** Collectors `bro debt collect` runs. Default: review-threads only —
      *  the pre-multi-source contract. Others opt in: dependabot,
-     *  code-scanning, secret-scanning, stale-prs, failed-ci. */
+     *  code-scanning, secret-scanning, stale-prs, failed-ci, sonarcloud. */
     sources: string[]
     /** Idle days before an open PR counts as stale (stale-prs collector). */
     stale_days: number
+    /** sonarcloud collector params — `project_key`/`host` override
+     *  `sonar-project.properties`; auth is `SONAR_TOKEN`. */
+    sonarcloud: { project_key?: string; host?: string }
   }
   sync: {
     /** Data ref holding synced artifacts — outside refs/heads so it
@@ -641,7 +656,12 @@ export interface BroConfig {
 export const DEFAULT_CONFIG: BroConfig = {
   stores: ['jsonl', 'beads'],
   personality: 'terse',
-  debt: { dir: '.agents/review-debt', sources: ['review-threads'], stale_days: 14 },
+  debt: {
+    dir: '.agents/review-debt',
+    sources: ['review-threads'],
+    stale_days: 14,
+    sonarcloud: {},
+  },
   sync: { ref: 'refs/bro/data', remote: 'origin', beads: true },
   sweep: { olderThanDays: 30, dir: '.agents/sweep', flatten: true },
   act: {

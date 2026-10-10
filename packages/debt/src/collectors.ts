@@ -8,6 +8,7 @@
 import { ghJson } from '@broject/core'
 import type { DebtPriority, DebtRecord } from './types.ts'
 import { bodyPreview, deriveArea, fingerprint } from './text.ts'
+import { collectSonarcloud } from './sonarcloud.ts'
 
 export const DEBT_SOURCES = [
   'dependabot',
@@ -15,8 +16,19 @@ export const DEBT_SOURCES = [
   'secret-scanning',
   'stale-prs',
   'failed-ci',
+  'sonarcloud',
 ] as const
 export type DebtSource = (typeof DEBT_SOURCES)[number]
+
+/** A configured source whose prerequisites are missing (token, project
+ *  key) — collect skips it with a remediation line, never "failed", and
+ *  never runs the upstream-resolve pass on an empty fetch. */
+export class SourceSkipped extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SourceSkipped'
+  }
+}
 
 export const ALL_SOURCES = ['review-threads', ...DEBT_SOURCES] as const
 export type DebtSourceName = (typeof ALL_SOURCES)[number]
@@ -30,10 +42,16 @@ export function parseSources(raw: unknown): DebtSourceName[] {
   return out.length > 0 ? out : ['review-threads']
 }
 
-interface CollectCtx {
+export interface CollectCtx {
   repo: string
   runId: string
   harvestedAt: string
+  /** Checkout root for source-specific config files
+   *  (sonar-project.properties). Defaults to cwd at the use site. */
+  dir?: string
+  /** `debt.sonarcloud` config section — consumed by the sonarcloud
+   *  collector, ignored by the rest. */
+  sonar?: { project_key?: string; host?: string }
 }
 
 /** `gh api --paginate --slurp` — all pages of a list endpoint as one flat
@@ -43,13 +61,14 @@ function ghJsonAll<T>(endpoint: string): T[] {
   return ghJson<T[][]>(['api', '--paginate', '--slurp', endpoint]).flat()
 }
 
-function baseRecord(
+export function baseRecord(
   ctx: CollectCtx,
   opts: {
     threadId: string
     url: string
     priority: DebtPriority
     path: string
+    line?: number | null
     author: string
     body: string
     createdAt: string
@@ -68,7 +87,7 @@ function baseRecord(
     merged_at: opts.createdAt,
     merged_sha: '',
     path: opts.path,
-    line: null,
+    line: opts.line ?? null,
     author: opts.author,
     body: opts.body,
     body_preview: bodyPreview(opts.body),
@@ -309,6 +328,7 @@ export const COLLECTORS: Record<
   'secret-scanning': (ctx) => collectSecretScanning(ctx),
   'stale-prs': (ctx, staleDays) => collectStalePrs(ctx, staleDays),
   'failed-ci': (ctx) => collectFailedCi(ctx),
+  sonarcloud: (ctx) => collectSonarcloud(ctx, { dir: ctx.dir, cfg: ctx.sonar }),
 }
 
 /**

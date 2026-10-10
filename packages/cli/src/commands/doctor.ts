@@ -31,6 +31,7 @@ import {
 } from '@broject/core'
 import type { BdCompat, ProviderEntry, ProviderSurface } from '@broject/core'
 import { parsePeer, rigFromRemoteUrl } from '@broject/mesh'
+import { resolveSonarProject } from '@broject/debt'
 import { judgeConfig, synthesizedProviders } from '@broject/judge'
 import type { JudgeConfig } from '@broject/judge'
 import { loadBroConfig, pluginConfigSections } from '../plugins.ts'
@@ -769,6 +770,55 @@ function meshDoltCheck(): DoctorCheck {
       )
 }
 
+/** Debt-source prerequisites (spec: specs/bro-huy5o.4.md) — a configured
+ *  source whose setup is incomplete reports here instead of being a
+ *  surprise `skipped` line at collect. Unconfigured sources emit no row. */
+function debtSourceChecks(dir: string, debt: { sources: string[]; sonarcloud: { project_key?: string; host?: string } }): DoctorCheck[] {
+  if (!debt.sources.includes('sonarcloud')) {
+    return []
+  }
+  const token = process.env['SONAR_TOKEN']?.trim()
+  if (token === undefined || token === '') {
+    return [
+      check(
+        'debt-sonarcloud',
+        'warn',
+        'sonarcloud debt source configured but SONAR_TOKEN is not set',
+        'export SONAR_TOKEN — sonarcloud.io → My Account → Security → Generate Tokens'
+      ),
+    ]
+  }
+  const project = resolveSonarProject(dir, debt.sonarcloud)
+  if (project === null) {
+    return [
+      check(
+        'debt-sonarcloud',
+        'warn',
+        'SONAR_TOKEN set but no project key resolves',
+        'set debt.sonarcloud.project_key or sonar.projectKey in sonar-project.properties / .sonarcloud.properties'
+      ),
+    ]
+  }
+  const curl = probeBin('curl')
+  if (!curl.found) {
+    return [
+      check(
+        'debt-sonarcloud',
+        'warn',
+        `project ${project.projectKey} · curl ${binProblem(curl)}`,
+        'the sonarcloud transport needs curl on PATH'
+      ),
+    ]
+  }
+  return [
+    check(
+      'debt-sonarcloud',
+      'ok',
+      `SONAR_TOKEN set · project ${project.projectKey} (${project.via})`
+    ),
+  ]
+}
+
 function meshChecks(dir: string, mesh: { rig?: string; peers: Record<string, { rig: string; remote: string }> }): DoctorCheck[] {
   const aliases = Object.keys(mesh.peers)
   if (mesh.rig === undefined && aliases.length === 0) {
@@ -818,6 +868,7 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
     ...checkConfig(dir),
     ...providerChecks(dir),
     ...queryCliChecks(dir, cfg.connectors),
+    ...debtSourceChecks(dir, cfg.debt),
     ...meshChecks(dir, cfg.mesh),
     checkClientPlugins(dir),
     ...(janitor === null ? [] : [janitor]),

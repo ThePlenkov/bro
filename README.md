@@ -243,6 +243,7 @@ labels, `thread_id` is the source's stable key):
 | `secret-scanning` | Open secret-scanning alerts — always blocking priority |
 | `stale-prs` | Open PRs idle > `debt.stale_days` days or failing checks (WIP drafts don't count) |
 | `failed-ci` | Latest default-branch workflow run, if it failed |
+| `sonarcloud` | Open SonarCloud issues + TO_REVIEW hotspots on new code (`SONAR_TOKEN`; project key from `debt.sonarcloud.project_key` or `sonar-project.properties`). Skips findings a Sonar PR comment already covered |
 
 Alert sources reconcile both ways: a finding that disappears upstream is
 marked `done` in the ledger on the next collect.

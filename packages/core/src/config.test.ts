@@ -450,6 +450,16 @@ describe('loadConfig plugin sections', () => {
     assert.equal(load({ debt: { dir: 'custom/dir' } }).debt.dir, 'custom/dir')
   })
 
+  test('debt.sonarcloud keeps only its string fields', () => {
+    assert.deepEqual(load({}).debt.sonarcloud, {})
+    assert.deepEqual(load({ debt: { sonarcloud: 'junk' } }).debt.sonarcloud, {})
+    assert.deepEqual(load({ debt: { sonarcloud: { project_key: 42 } } }).debt.sonarcloud, {})
+    assert.deepEqual(
+      load({ debt: { sonarcloud: { project_key: 'pk', host: 'https://sq', extra: 1 } } }).debt.sonarcloud,
+      { project_key: 'pk', host: 'https://sq' }
+    )
+  })
+
   test('sweep section normalizes fields, falls back on bad values', () => {
     assert.deepEqual(load({}).sweep, DEFAULT_CONFIG.sweep)
     assert.deepEqual(load({ sweep: 'junk' }).sweep, DEFAULT_CONFIG.sweep)
