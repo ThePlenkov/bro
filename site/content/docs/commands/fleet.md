@@ -53,7 +53,7 @@ non-interactive ticker, use `bro watch --every N`.
 | `bro watch [--once]` | One read-only heartbeat with attention, molecules, gates, and fleet rows |
 | `bro watch --notify` | Drop the initial snapshot and transitions into the mailbox |
 | `bro watch --json` | Emit `{ts, attention, mols, gates, fleet}` |
-| `bro watch --every N [--for S]` | Repeat the heartbeat on a cadence — the session pulse: holds `bro/pulse.lock` (one per repo, a duplicate stands by) and refuses under `BRO_AGENT_ID` |
+| `bro watch --every N --for S` | Repeat the heartbeat on a cadence — the session pulse: holds `bro/pulse.lock` (one per repo, a duplicate stands by) and refuses under `BRO_AGENT_ID`; `--for` is required so the window's exit exists as the session's wake event |
 | `bro watch install [--every N] [--print]` | Arm the session pulse — writes `bro/pulse.json` (the want-marker session-start rearms from), strips any legacy systemd/cron entry; cadence `--every N` or `watch.intervalSec` (default 60) |
 | `bro watch uninstall` | Disarm the marker + strip any legacy timer/cron entry; a live pulse exits on its own |
 | `bro notify <text>` | Write one mailbox event for live sessions — addressed drops, kinds, and the bus are in [Events](/docs/commands/events) |

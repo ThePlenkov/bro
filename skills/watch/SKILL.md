@@ -16,7 +16,7 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd` initialized.
 | Command | What it does |
 | ------- | ------------ |
 | `bro watch [--once]` | One snapshot — the heartbeat call: attention list + open molecules + act gates per fleet PR + fleet rows |
-| `bro watch --every N [--for S]` | Tick the snapshot every N seconds — the session pulse: holds `<git-common>/bro/pulse.lock` (one per repo, a duplicate stands by), refuses under `BRO_AGENT_ID`; `--for` bounds the window, the exit is the session's wake event |
+| `bro watch --every N --for S` | The session pulse — tick the snapshot every N seconds: holds `<git-common>/bro/pulse.lock` (one per repo, a duplicate stands by), refuses under `BRO_AGENT_ID`; `--for` is required for a session-owned pulse — the window's exit is the session's wake event; omitting it leaves an unbounded watcher only an external supervisor may own |
 | `bro watch --notify` | Drop the initial snapshot plus each transition into the mailbox (`<git-common>/bro/notify/`) — a notify connector drains it into the parent session |
 | `bro watch --json` | Machine-readable `{ts, attention, mols, gates, fleet, janitor?}` |
 | `bro watch install [--every N] [--print]` | Arm the session pulse — writes `<git-common>/bro/pulse.json` (the want-marker session-start rearms from) and strips any legacy systemd/cron entry; cadence is `--every N` or `watch.intervalSec` (default 60). No OS timer is installed |

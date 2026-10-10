@@ -6,8 +6,10 @@
  * a kill). Spec: specs/sessions/bro-f4ot/bro-vf1j.md.
  *
  *   bro watch [--once]      one snapshot (default — the heartbeat call)
- *   bro watch --every N [--for S]   tick the snapshot every N seconds;
- *         --for bounds the loop — the exit is the event a session waits on.
+ *   bro watch --every N --for S   tick the snapshot every N seconds;
+ *         --for bounds the loop — required for the session pulse, the
+ *         exit is the event a session waits on (omitted = unbounded,
+ *         only an external supervisor may own that lifecycle).
  *         The session pulse (bro-killn): holds <git-common>/bro/pulse.lock
  *         for its lifetime — one pulse per repo, a duplicate stands by —
  *         and refuses to run under BRO_AGENT_ID (workers never arm the
@@ -775,6 +777,19 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
     await tick()
     return
   }
+  await runWatchPulse(dir, everySec, forSec, tick, expired)
+}
+
+/** The session pulse (bro-killn): orchestrator-only, one per repo via
+ *  `bro/pulse.lock`, bounded by --for measured from entry so a standby
+ *  behind the incumbent spends the same budget as ticking. */
+async function runWatchPulse(
+  dir: string,
+  everySec: number,
+  forSec: number | undefined,
+  tick: () => Promise<void>,
+  expired: () => void
+): Promise<void> {
   // GUARD (bro-killn): spawned workers pin BRO_AGENT_ID at spawn — they
   // must never arm the cadence; the orchestrator session owns it. The
   // connector's nudge applies the same predicate on the read side.
@@ -785,6 +800,13 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
     )
     process.exit(2)
   }
+  // The bound starts here, before the lock wait: a standby behind the
+  // incumbent spends the same --for budget as ticking — a wait that eats
+  // the whole window exits without a tick (the incumbent covered it).
+  // Monotonic clock: a wall-clock step backward must not stretch the
+  // bound past its elapsed budget.
+  const deadline =
+    forSec === undefined ? Number.POSITIVE_INFINITY : performance.now() + forSec * 1000
   // One pulse per repo: `bro/pulse.lock` is held heartbeated for the
   // process lifetime — a duplicate stands by behind the incumbent and
   // takes over when it exits, never ticks concurrently (spec bro-2duu9).
@@ -801,12 +823,10 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
             ),
         })
   try {
-    // the bound starts at acquisition — a slow snapshot (or a standby
-    // wait) already spends --for budget, and expiry must not wait one
-    // more interval. Monotonic clock for the deadline: a wall-clock
-    // step backward must not stretch the bound past its elapsed budget.
-    const deadline =
-      forSec === undefined ? Number.POSITIVE_INFINITY : performance.now() + forSec * 1000
+    if (performance.now() >= deadline) {
+      expired()
+      return
+    }
     await tick()
     // --every: tick on a cadence until killed — or until --for expires.
     // An unbounded watch is only legal while a supervisor owns the
