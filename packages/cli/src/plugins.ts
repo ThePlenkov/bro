@@ -243,6 +243,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'mcp',
+    group: 'fleet',
     summary: 'Stdio MCP server over the read planes — bro_<plane>_<read> tools',
     run: runMcpCommand,
     skill: 'mcp',
