@@ -45,16 +45,39 @@ resolves in order:
 For a target resolved to a same-machine checkout, the request is
 delivered, not published: `bd -C <checkout> create` writes the task
 bead **into the target's store**, then the mesh/1 label set +
-`external_ref` are pinned exactly as `postEnvelope` does. The bead id
-IS the thread. The target's `bd ready` shows it as ordinary work —
-no mesh-aware session required — and `bro mesh inbox` surfaces it
-(own-store scan below).
+`external_ref` are pinned exactly as `postEnvelope` does — plus
+`export:<id>`, bd's capability marker for the ship step below (the
+capability name IS the request id, the same `<id>` the requester's
+`external:<rig>:<id>` dep waits on; the id exists once `create`
+returns, so it rides the same follow-up update as the labels). The
+bead id IS the thread. The target's `bd ready` shows it as ordinary
+work — no mesh-aware session required — and `bro mesh inbox`
+surfaces it (own-store scan below).
 
 **The thread's home is the anchor store.** Every lifecycle message
 on a locally-anchored thread — the worker's `claim`/`done`, the
 requester's `accept`/`reject` — is written to that same store
 (`bd -C <anchor>`), resolved through the peer binding. Readers point-
 check with `bro mesh wait <thread>`; nothing sleeps.
+
+**`done` ships the capability.** The `external:` dep releases only
+when the target store holds a closed `provides:<id>` issue, and
+`provides:` lands only through `bd ship` — which finds its issue by
+`export:<id>` and refuses an open one. So when `bro mesh done` posts
+the result into the anchor store it follows with `bd -C <anchor>
+ship <thread>`: the worker's `bd close` of the request bead is the
+ship's precondition, a still-open bead fails the ship and the output
+names the remedy (`bd close`, then `bd -C <anchor> ship <thread>` —
+the result is already posted, `done` will not re-run), and `--force`
+is never passed — releasing the dep on open work is the lie the dep
+exists to prevent. The requester never ships: its verdict is
+`accept`/`reject`, and a self-pinned `provides:` is self-declared
+completion (mesh Trust). Own-store posts are different — the request
+bead stays on the requester's side, where an `export:` pin would arm
+self-ship, so the pin rides delivery, not posting; the pull
+topology's ship carrier is the mesh epic's slice, not this phase's
+(bd 1.3.1 cannot resolve the `external:` URI form anyway —
+bro-kim1e).
 
 **Reading the anchor back rewrites one `meshThread` rule.**
 `admitPeerRecord` assumes a store's records are authored by its owner
@@ -123,11 +146,13 @@ session-facing rule lands in AGENTS.md (Conventions), verbatim:
 
 ```text
 packages/cli/src/commands/request.ts    bro request
-packages/mesh/src/request.ts            resolve + deliver + ensure-binding
+packages/mesh/src/request.ts            resolve + deliver + ensure-binding,
+                                        export:<id> pin on delivery
 packages/mesh/src/identity.ts           selfRig hoisted in — shared rig resolver
 packages/mesh/src/inbox.ts              own-store scan (unbound flag)
 packages/mesh/src/thread.ts             local-anchor admit rule
-packages/cli/src/commands/mesh.ts       lifecycle writes → anchor store
+packages/cli/src/commands/mesh.ts       lifecycle writes → anchor store;
+                                        done ships `bd ship <thread>`
 AGENTS.md                               policy bullet
 ```
 
@@ -145,18 +170,25 @@ AGENTS.md                               policy bullet
 - [ ] anchor-store writes for `claim`/`done`/`accept`/`reject` —
       resolve the thread's anchor (own store today; a `local` peer's
       checkout when the thread lives there) instead of always `dir`
+- [ ] `export:`/`provides:` ship wiring — `deliverRequest` pins
+      `export:<id>` in the delivered bead's label set; `bro mesh done`
+      runs `bd -C <anchor> ship <thread>` after the result lands
+      (open request bead → named remedy, never `--force`)
 - [ ] `packages/mesh/src/thread.ts` — `admitPeerRecord` widened for
       `local` peers: `from` ∈ {binding rig, selfRig} admits with
       provenance = `from`; any other `from` still drops and flags
 - [ ] `bro mesh inbox` own-store scan + `unbound` provenance flag
 - [ ] AGENTS.md Conventions bullet (verbatim text above)
 - [ ] tests: resolution matrix (alias / uri / path / basename /
-      ambiguous / unresolvable), drop shape (labels, thread, dep),
-      inbox own-scan + unbound flag, anchor-write for each verb,
-      requester-side `mesh wait` on an anchored thread (request +
-      own verdicts visible, foreign `from` dropped), e2e
-      two-checkouts: request → `bd ready` in target → claim →
-      done → `bro mesh wait` → accept
+      ambiguous / unresolvable), drop shape (labels, thread, dep,
+      `export:<id>` pin), inbox own-scan + unbound flag, anchor-write
+      for each verb, requester-side `mesh wait` on an anchored thread
+      (request + own verdicts visible, foreign `from` dropped), e2e
+      two-checkouts: request → `bd ready` in target → claim → `bd
+      close` → done → `provides:<id>` on the closed bead →
+      requester's `external:` dep releases → `bro mesh wait` →
+      accept; `done` on an unclosed request bead warns and ships
+      nothing
 
 ## Alternatives
 
