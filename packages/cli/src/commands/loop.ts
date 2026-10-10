@@ -1107,24 +1107,40 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   // push correctly yields the default branch as the next base.
   let slot: StackSlot | undefined
   let item!: LoopItem
+  // the claims this run actually holds — claimUpTo owns the lead only
+  // outside the registry path; there the lead is a PROBE until
+  // claimStep lands it under the spawn lock, so a pre-spawn settle
+  // that reopened it could steal a foreign loop's fresh claim
+  const ours = ctx.agents === undefined ? beads : beads.slice(1)
   try {
     ctx.stage = 'worktree'
     const planned = planItemAndWorktree(ctx, lead)
     slot = planned.slot
     item = planned.item
   } catch (err) {
-    for (const b of openBeads(ctx, beads)) {
+    for (const b of openBeads(ctx, ours)) {
       noteBead(ctx.tasks, b.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
       reopenBead(ctx.tasks, b.id)
     }
     return { kind: 'done', result: 'failed' }
   }
   ctx.stage = 'bootstrap'
-  if (!runBootstrap(ctx, beads, item)) {
+  if (!runBootstrap(ctx, ours, item)) {
     return { kind: 'done', result: 'failed' }
   }
   const prompt = buildWorkPrompt(beads, item.branch, slot?.base, slot?.bottom, ctx.backend)
-  writePrompt(item, prompt)
+  ctx.stage = 'prompt write'
+  try {
+    writePrompt(item, prompt)
+  } catch (err) {
+    // a dead fs must not strand this run's claims in_progress — same
+    // settle as the worktree failure above
+    for (const b of openBeads(ctx, ours)) {
+      noteBead(ctx.tasks, b.id, `loop: prompt write failed — ${err instanceof Error ? err.message : String(err)}`)
+      reopenBead(ctx.tasks, b.id)
+    }
+    return { kind: 'done', result: 'failed' }
+  }
   ctx.stage = 'agent spawn'
   if (ctx.agents !== undefined) {
     // the registry path — the member comes back worker-pending and its
@@ -1280,7 +1296,9 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   if (state === 'running' || state === 'spawned') {
     return 'kept'
   }
-  const exit = workerExit(ctx, w)
+  // a superseded entry's .exit belongs to the NEW generation — its
+  // code/mtime would feed a foreign clock into the crash window
+  const exit = superseded ? { code: null, at: Date.now() } : workerExit(ctx, w)
   say(
     ctx,
     `loop: worker ${w.agentId} ${exit.code === null ? `${state} — no exit record` : `exited ${exit.code}`}`
@@ -1478,6 +1496,11 @@ async function respawnRound(
   try {
     await run()
   } catch (err) {
+    // a fleet-cap refusal is transient pressure, not a repair attempt —
+    // repeated refusals must not burn fixRounds into a park
+    if (err instanceof SpawnError && err.kind === 'cap') {
+      m.rounds -= 1
+    }
     console.error(`loop ${prRef(ctx, m.pr!)}: respawn round ${m.rounds} failed — ${String(err)}`)
     return 'kept'
   }
