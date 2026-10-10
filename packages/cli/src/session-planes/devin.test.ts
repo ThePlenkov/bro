@@ -182,6 +182,7 @@ describe('countDevinWorkers', () => {
       stdio: 'ignore',
       env: { ...process.env, BRO_AGENT_ID: 'native-test' },
     })
+    if (!child.pid) throw new Error('spawn failed to create child process')
     try {
       withLockDir((dir) => {
         writeFileSync(join(dir, 'w.lock'), String(child.pid))
@@ -194,15 +195,17 @@ describe('countDevinWorkers', () => {
 
   test('a landed worker retires its own reservation slot — no double count', () => {
     const child = spawn('sleep', ['30'], { stdio: 'ignore' })
+    if (!child.pid) throw new Error('spawn failed to create child process')
+    const pid = child.pid
     try {
       // scripted /proc, not the real child's environ: spawn() resolves
       // at fork — until execve lands, /proc/<pid>/environ still reads
       // the PARENT's env (no badge → the sweep misses the landing),
       // which is the flake this test carried under full-suite load
       withProc((procDir, mk) => {
-        mk(child.pid!, 'PATH=/bin\0BRO_AGENT_ID=native-landed\0HOME=/h\0', null)
+        mk(pid, 'PATH=/bin\0BRO_AGENT_ID=native-landed\0HOME=/h\0', null)
         withLockDir((dir) => {
-          writeFileSync(join(dir, 'w.lock'), String(child.pid))
+          writeFileSync(join(dir, 'w.lock'), String(pid))
           const resv = mkdtempSync(join(tmpdir(), 'bro-devin-slots-'))
           try {
             const landed = join(resv, 'native-landed-a1b2c3d4.slot')
