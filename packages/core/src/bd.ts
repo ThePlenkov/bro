@@ -3,13 +3,83 @@
  * package. PATH lookup is the contract (same as gh); a generous maxBuffer
  * keeps large `bd list --json` payloads from hitting Node's 1 MiB default.
  */
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync, type ChildProcess } from 'node:child_process'
 import { spawnCollect } from './live-procs.ts'
 import { statSync } from 'node:fs'
 import { join } from 'node:path'
 
+/** `timeout` supervises every bd call — the caller's own deadline dies
+ *  with the caller, and an orphaned bd waits on the embedded noms LOCK
+ *  forever, wedging the store for every later invocation (bro-8845g,
+ *  drill bro-wisp-fk8). The supervisor reparents with its child and
+ *  still fires at the backstop. `--foreground` keeps bd in timeout's
+ *  process group so a group kill — ours or an external supervisor's —
+ *  reaches both. No GNU timeout → bare bd: same contract, the orphan
+ *  risk comes back but nothing else changes. */
+// PATH-keyed: a process that swaps PATH mid-life (tests injecting a
+// fake timeout, env sanitizers) must re-probe, not ride a stale verdict
+let timeoutProbe: { path?: string; bin: string | null } | undefined
+function supervised(args: string[], timeoutMs: number): { cmd: string; argv: string[] } {
+  const path = process.env.PATH
+  if (timeoutProbe === undefined || timeoutProbe.path !== path) {
+    let bin: string | null = null
+    for (const candidate of ['timeout', 'gtimeout']) {
+      try {
+        execFileSync(candidate, ['--version'], { stdio: 'ignore' })
+        bin = candidate
+        break
+      } catch { /* absent or non-GNU — fall through to bare bd */ }
+    }
+    timeoutProbe = { path, bin }
+  }
+  if (timeoutProbe.bin === null) {
+    return { cmd: 'bd', argv: args }
+  }
+  // caller budget + margin — the backstop only matters when the caller
+  // died before its own timeout could kill the child
+  const backstopSec = Math.ceil((timeoutMs + 30_000) / 1000)
+  return {
+    cmd: timeoutProbe.bin,
+    argv: ['--foreground', '-k', '5s', `${backstopSec}s`, 'bd', ...args],
+  }
+}
+
+/** A missing `bd` reads "ENOENT" on a bare spawn but
+ *  "failed to run command 'bd': No such file or directory" under the
+ *  timeout supervisor — normalize so every consumer's ENOENT check
+ *  (probeVersion, the store doctype's install-beads diagnostic, …)
+ *  classifies the setup gap identically either way. */
+function normalizeSpawnErr(err: string): string {
+  // GNU timeout: "failed to run command 'bd': No such file or directory"
+  // — under a UTF-8 locale gnulib quote() emits U+2018/U+2019 around the
+  // name ('bd'), so the match must not pin the quote marks; uutils:
+  // "failed to execute process: No such file or directory (os error 2)".
+  // The errno text is required — an EACCES miss prints "Permission
+  // denied" and must stay unnormalized (broken, not missing).
+  return /failed to (run command|execute process)[^\n]*no such file or directory/i.test(err)
+    ? `ENOENT ${err}`
+    : err
+}
+
+/** Kill the whole supervised group — the async spawns run `detached`
+ *  so -pid reaches `timeout` and `bd` together; a bare-bd spawn still
+ *  leads its own one-member group. Direct-child kill is the fallback. */
+function killGroup(proc: ChildProcess): void {
+  const pid = proc.pid
+  if (pid !== undefined) {
+    try {
+      process.kill(-pid, 'SIGKILL')
+      return
+    } catch { /* group already gone */ }
+  }
+  try {
+    proc.kill('SIGKILL')
+  } catch { /* already dead */ }
+}
+
 export function bd(args: string[], cwd?: string): string {
-  return execFileSync('bd', args, { // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
+  const s = supervised(args, 15_000)
+  return execFileSync(s.cmd, s.argv, { // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
     encoding: 'utf8',
     cwd,
     maxBuffer: 64 * 1024 * 1024,
@@ -33,7 +103,8 @@ export function bdTry(
    *  the project checkout, so callers pass it explicitly. */
   cwd?: string
 ): { code: number; out: string; err: string } {
-  const proc = spawnSync('bd', args, { // NOSONAR — PATH lookup is the contract (same as gh/git)
+  const s = supervised(args, timeoutMs)
+  const proc = spawnSync(s.cmd, s.argv, { // NOSONAR — PATH lookup is the contract (same as gh/git)
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
@@ -45,7 +116,7 @@ export function bdTry(
   return {
     code: proc.status ?? 1,
     out: proc.stdout ?? '',
-    err: (proc.stderr ?? proc.error?.message ?? '').trim(),
+    err: normalizeSpawnErr((proc.stderr ?? proc.error?.message ?? '').trim()),
   }
 }
 
@@ -99,12 +170,13 @@ export function bdAt(
  *  execFileSync-style shape (`.code/.stdout/.stderr`) so isBdNotFound
  *  and friends classify async failures exactly like sync ones. */
 export function bdAsync(args: string[], cwd?: string): Promise<string> {
-  const { proc, done } = spawnCollect('bd', args, cwd)
+  const s = supervised(args, 15_000)
+  const { proc, done } = spawnCollect(s.cmd, s.argv, cwd, undefined, { detached: true })
   return new Promise((resolve, reject) => {
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true
-      proc.kill('SIGKILL')
+      killGroup(proc)
     }, 15_000)
     timer.unref?.()
     void done.then(({ code, out, err, error }) => {
@@ -121,18 +193,19 @@ export function bdAsync(args: string[], cwd?: string): Promise<string> {
         return
       }
       if (error !== undefined) {
-        reject(Object.assign(error, { stdout: out, stderr: err }))
+        reject(Object.assign(error, { stdout: out, stderr: normalizeSpawnErr(err) }))
         return
       }
       if (code === 0) {
         resolve(out)
         return
       }
+      const errMsg = normalizeSpawnErr(err)
       reject(
-        Object.assign(new Error(`bd ${args.join(' ')} failed (${code ?? 1}): ${err}`), {
+        Object.assign(new Error(`bd ${args.join(' ')} failed (${code ?? 1}): ${errMsg}`), {
           code: code ?? 1,
           stdout: out,
-          stderr: err,
+          stderr: errMsg,
         })
       )
     })
@@ -146,12 +219,13 @@ export function bdTryAsync(
   timeoutMs = 15_000,
   cwd?: string
 ): Promise<{ code: number; out: string; err: string }> {
-  const { proc, done } = spawnCollect('bd', args, cwd)
+  const s = supervised(args, timeoutMs)
+  const { proc, done } = spawnCollect(s.cmd, s.argv, cwd, undefined, { detached: true })
   return new Promise((resolve) => {
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true
-      proc.kill('SIGKILL')
+      killGroup(proc)
     }, timeoutMs)
     timer.unref?.()
     void done.then((r) => {
@@ -159,7 +233,7 @@ export function bdTryAsync(
       resolve(
         timedOut
           ? { code: 124, out: r.out, err: `timed out after ${timeoutMs}ms` }
-          : { code: r.code ?? 1, out: r.out, err: r.err }
+          : { code: r.code ?? 1, out: r.out, err: normalizeSpawnErr(r.err) }
       )
     })
   })
@@ -278,6 +352,8 @@ function firstErrLine(err: string, code: number): string {
 function probeVersion(res: BdCompat, dir?: string): boolean {
   const ver = bdTry(['--version'], 10_000, dir)
   if (ver.code !== 0) {
+    // bare spawn reports ENOENT; under `timeout` the same miss is
+    // normalized by bdTry to ENOENT too — one check covers both
     res.missing = /ENOENT/.test(ver.err)
     res.broken = !res.missing
     res.problems.push(
