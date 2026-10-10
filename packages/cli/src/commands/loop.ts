@@ -514,7 +514,21 @@ function spawnAgent(
     }
     ctx.stage = `worker pid=${child.pid ?? '?'}`
     const settle = (code: number | null): void => {
-      endLoopRun(ctx.root, slug)
+      // custody returns to the loop process — the worker is gone but the
+      // claim isn't: findPr and the member's watchBegin still stand
+      // between here and a verdict (bro-ho09d: endLoopRun here left a
+      // window where a racing sweep saw a dead owner and released a
+      // still-settling claim)
+      beginLoopRun(ctx.root, {
+        beadId: leadId,
+        beadIds,
+        slug,
+        pid: process.pid,
+        pidStart: procStat(process.pid)?.start,
+        startedAt: new Date().toISOString(),
+        worktree: dir,
+        log: log ?? '',
+      })
       resolve(code)
     }
     child.on('error', (err) => {
@@ -1025,6 +1039,8 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     rounds: 0,
     fetchErrors: 0,
   }
+  // custody transfers to the armed watch — the run record's job is done
+  endLoopRun(ctx.root, loopSlug(lead.id))
   return { kind: 'member', member }
 }
 
