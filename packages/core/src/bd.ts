@@ -40,6 +40,17 @@ function supervised(args: string[], timeoutMs: number): { cmd: string; argv: str
   }
 }
 
+/** A missing `bd` reads "ENOENT" on a bare spawn but
+ *  "failed to run command 'bd': No such file or directory" under the
+ *  timeout supervisor — normalize so every consumer's ENOENT check
+ *  (probeVersion, the store doctype's install-beads diagnostic, …)
+ *  classifies the setup gap identically either way. */
+function normalizeSpawnErr(err: string): string {
+  // GNU timeout: "failed to run command 'bd': No such file or directory";
+  // uutils timeout: "failed to execute process: No such file or directory"
+  return /failed to (run command 'bd'|execute process)/i.test(err) ? `ENOENT ${err}` : err
+}
+
 /** Kill the whole supervised group — the async spawns run `detached`
  *  so -pid reaches `timeout` and `bd` together; a bare-bd spawn still
  *  leads its own one-member group. Direct-child kill is the fallback. */
@@ -95,7 +106,7 @@ export function bdTry(
   return {
     code: proc.status ?? 1,
     out: proc.stdout ?? '',
-    err: (proc.stderr ?? proc.error?.message ?? '').trim(),
+    err: normalizeSpawnErr((proc.stderr ?? proc.error?.message ?? '').trim()),
   }
 }
 
@@ -143,18 +154,19 @@ export function bdAsync(args: string[], cwd?: string): Promise<string> {
         return
       }
       if (error !== undefined) {
-        reject(Object.assign(error, { stdout: out, stderr: err }))
+        reject(Object.assign(error, { stdout: out, stderr: normalizeSpawnErr(err) }))
         return
       }
       if (code === 0) {
         resolve(out)
         return
       }
+      const errMsg = normalizeSpawnErr(err)
       reject(
-        Object.assign(new Error(`bd ${args.join(' ')} failed (${code ?? 1}): ${err}`), {
+        Object.assign(new Error(`bd ${args.join(' ')} failed (${code ?? 1}): ${errMsg}`), {
           code: code ?? 1,
           stdout: out,
-          stderr: err,
+          stderr: errMsg,
         })
       )
     })
@@ -182,7 +194,7 @@ export function bdTryAsync(
       resolve(
         timedOut
           ? { code: 124, out: r.out, err: `timed out after ${timeoutMs}ms` }
-          : { code: r.code ?? 1, out: r.out, err: r.err }
+          : { code: r.code ?? 1, out: r.out, err: normalizeSpawnErr(r.err) }
       )
     })
   })
@@ -298,9 +310,9 @@ function firstErrLine(err: string, code: number): string {
 function probeVersion(res: BdCompat, dir?: string): boolean {
   const ver = bdTry(['--version'], 10_000, dir)
   if (ver.code !== 0) {
-    // bare spawn reports ENOENT; under `timeout` the same miss reads
-    // "failed to run command 'bd': No such file or directory"
-    res.missing = /ENOENT|failed to run command 'bd'/i.test(ver.err)
+    // bare spawn reports ENOENT; under `timeout` the same miss is
+    // normalized by bdTry to ENOENT too — one check covers both
+    res.missing = /ENOENT/.test(ver.err)
     res.broken = !res.missing
     res.problems.push(
       res.missing ? 'bd not found on PATH' : `\`bd --version\` failed — ${ver.err || 'spawn error'}`

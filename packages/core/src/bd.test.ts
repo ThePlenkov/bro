@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -85,6 +85,31 @@ describe('probeBdCompat', { skip: WIN32 }, () => {
       assert.equal(c.ok, false)
       assert.equal(c.missing, true)
     })
+  })
+
+  test('missing bd under the timeout supervisor still classifies as missing', () => {
+    // PATH carries only a symlink to the real GNU timeout — bd absent.
+    // The supervisor reports "failed to run command 'bd': No such file
+    // or directory"; bdTry must normalize that to ENOENT so consumers
+    // classify the setup gap exactly like a bare spawn.
+    const timeoutPath = ['/usr/bin/timeout', '/bin/timeout', '/usr/local/bin/timeout'].find(
+      existsSync
+    )
+    if (timeoutPath === undefined) {
+      return // no GNU timeout on this host — bare spawn already yields ENOENT
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'bro-bd-supervised-miss-'))
+    symlinkSync(timeoutPath, join(dir, 'timeout'))
+    const prevPath = process.env.PATH
+    process.env.PATH = dir
+    try {
+      const c = probeBdCompat()
+      assert.equal(c.missing, true)
+      assert.equal(c.broken, false)
+    } finally {
+      process.env.PATH = prevPath
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   test('non-array --json payload is drift', () => {
