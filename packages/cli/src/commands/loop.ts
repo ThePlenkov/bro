@@ -1231,27 +1231,30 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   if (pr === null) {
     return { kind: 'done', result: settleNoPr(ctx, beads, item, code, elapsed) }
   }
-  stampProjection(ctx, beads, pr)
   // the loop IS the watcher — arm the same marker `act wait` drops
   // (bro-z0k2u) for the member's whole stack tenure, not per poll:
   // a reboot-killed loop leaves a dead marker `bro act rearm`
   // resurrects instead of the PR sitting silently unwatched. `bead`
   // rides the marker so the resurrected wait can run the finalizeMerge
   // half the dead loop never reached — merge lands, claims close
-  // (bro-q6ppv); a clump's whole id list rides comma-joined.
+  // (bro-q6ppv); a clump's whole id list rides comma-joined. The marker
+  // lands BEFORE the stamp — a stall or death inside stampProjection's
+  // tracker calls must not strand the open PR markerless.
+  const marker = watchBegin(ctx.root, {
+    pr,
+    link: prRef(ctx, pr),
+    merge: true,
+    cleanup: true,
+    workdir: item.worktreeDir,
+    bead: beads.map((b) => b.id).join(','),
+    timeoutMin: ctx.cfg.mergeTimeoutMin,
+  })
+  stampProjection(ctx, beads, pr)
   const member: GateMember = {
     beads,
     item,
     pr,
-    marker: watchBegin(ctx.root, {
-      pr,
-      link: prRef(ctx, pr),
-      merge: true,
-      cleanup: true,
-      workdir: item.worktreeDir,
-      bead: beads.map((b) => b.id).join(','),
-      timeoutMin: ctx.cfg.mergeTimeoutMin,
-    }),
+    marker,
     since: Date.now(),
     rounds: 0,
     fetchErrors: 0,
@@ -1395,7 +1398,8 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   // resurrect (bro-q6ppv), and `bead` rides comma-joined for the
   // finalizeMerge half the dead loop never reached
   m.pr = pr
-  stampProjection(ctx, m.beads, pr)
+  // marker before the stamp — stampProjection's tracker calls can
+  // stall or die, and a markerless open PR resurrects nothing
   m.marker = watchBegin(ctx.root, {
     pr,
     link: prRef(ctx, pr),
@@ -1405,6 +1409,7 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     bead: m.beads.map((b) => b.id).join(','),
     timeoutMin: ctx.cfg.mergeTimeoutMin,
   })
+  stampProjection(ctx, m.beads, pr)
   m.since = Date.now()
   say(ctx, `loop: ${m.beads.map((b) => b.id).join(', ')} → PR ${prRef(ctx, pr)}`)
   return 'active'

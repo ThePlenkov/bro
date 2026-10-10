@@ -214,14 +214,16 @@ const pub = (r: TaskRow & { __node?: IssueNode }): TaskRow => {
  *  this one. */
 function issueNumber(dir: string, id: string): number {
   const t = id.trim()
-  const url = /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/issues\/(\d+)\/?$/.exec(t)
+  const url = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/issues\/(\d+)\/?$/.exec(t)
   if (url) {
-    const slug = `${url[1]}/${url[2]}`.toLowerCase()
+    const slug = `${url[2]}/${url[3]}`.toLowerCase()
     const mine = repoOf(dir).toLowerCase()
-    if (slug !== mine) {
-      throw new Error(`github tasks: "${id}" is a ${slug} issue — this store serves ${mine}`)
+    if (url[1]!.toLowerCase() !== ghHost().toLowerCase() || slug !== mine) {
+      throw new Error(
+        `github tasks: "${id}" is a ${url[1]}/${slug} issue — this store serves ${ghHost()}/${mine}`
+      )
     }
-    return Number(url[3])
+    return Number(url[4])
   }
   if (!/^(#\d+|\d+)$/.test(t)) {
     throw new Error(`github tasks: "${id}" is not an issue reference (want 42, #42, or an issue URL)`)
@@ -907,11 +909,20 @@ function removeSync(dir: string, id: string): void {
 
 // --- projection (spec specs/backends/bro-z2z7f) ----------------------------------
 
-/** 'https://…/milestone/N' → N — the epic's external_ref round-trips
- *  through this exact shape; anything else isn't a container ref. */
-function milestoneRefNumber(ref: string): number | undefined {
-  const m = /\/milestone\/(\d+)\/?$/.exec(ref.trim())
-  return m === null ? undefined : Number(m[1])
+/** 'https://<this host>/<this repo>/milestone/N' → N — the epic's
+ *  external_ref round-trips through this exact shape; a milestone in
+ *  another repo or on another host is a foreign ref, not a container
+ *  here (its NUMBER would silently target this repo's milestones). */
+function milestoneRefNumber(dir: string, ref: string): number | undefined {
+  const m = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/milestone\/(\d+)\/?$/.exec(ref.trim())
+  if (
+    m === null ||
+    m[1]!.toLowerCase() !== ghHost().toLowerCase() ||
+    `${m[2]}/${m[3]}`.toLowerCase() !== repoOf(dir).toLowerCase()
+  ) {
+    return undefined
+  }
+  return Number(m[4])
 }
 
 interface MilestoneRow {
@@ -929,11 +940,11 @@ const milestoneUrl = (repo: string, m: MilestoneRow): string =>
 function ensureMilestone(dir: string, epic: TaskRow): { number: number; url: string } {
   const repo = repoOf(dir)
   const title = epic.title !== undefined && epic.title.trim() !== '' ? epic.title : epic.id
-  const open = ghJson<MilestoneRow[]>(
-    ['api', `repos/${repo}/milestones?state=open&per_page=100`],
+  const all = ghJson<MilestoneRow[]>(
+    ['api', '--paginate', `repos/${repo}/milestones?state=all&per_page=100`],
     dir
   )
-  const hit = open.find((m) => m.title === title)
+  const hit = all.find((m) => m.title === title)
   if (hit !== undefined) {
     return { number: hit.number, url: milestoneUrl(repo, hit) }
   }
@@ -981,7 +992,7 @@ function publishSync(
   const epic = opts?.epic
   if (epic !== undefined) {
     const eref = epic.external_ref?.trim() ?? ''
-    const known = eref === '' ? undefined : milestoneRefNumber(eref)
+    const known = eref === '' ? undefined : milestoneRefNumber(dir, eref)
     if (known !== undefined) {
       milestone = known
     } else if (eref === '') {
@@ -1000,7 +1011,10 @@ function publishSync(
     metadata: { ...(task.metadata ?? {}), bead: task.id },
   })
   if (milestone !== undefined) {
-    gh(
+    // best-effort: the issue already exists, so a failed join must not
+    // throw — publishSync throwing skips the caller's external_ref
+    // write-back, and the next run would create a duplicate
+    const join = ghTry(
       [
         'api',
         '-X',
@@ -1011,6 +1025,9 @@ function publishSync(
       ],
       dir
     )
+    if (join.code !== 0) {
+      console.error(`warning: milestone join on issue ${row.id} failed — ${join.err}`)
+    }
   }
   return { item: pub(row), epicRef }
 }

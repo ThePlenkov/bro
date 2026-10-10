@@ -51,6 +51,14 @@ case "$1" in
       -X)
         case "$*" in
           *"POST"*milestones*) echo "$FAKE_GH_MILESTONE_MADE" ;;
+          *"PATCH"*)
+            if [ -n "$FAKE_GH_PATCH_FAIL" ]; then echo 'patch failed' >&2; exit 1; fi
+            echo '{}' ;;
+          *) echo '{}' ;;
+        esac ;;
+      --paginate)
+        case "$*" in
+          *milestones*) echo "$FAKE_GH_MILESTONES" ;;
           *) echo '{}' ;;
         esac ;;
       *milestones*) echo "$FAKE_GH_MILESTONES" ;;
@@ -512,6 +520,7 @@ esac
       for (const external_ref of [
         'jira:ACME-7',
         'https://github.com/other/repo/issues/7',
+        'https://ghe.corp/acme/widgets/issues/7',
         'debt://thread-9',
       ]) {
         assert.equal(
@@ -564,7 +573,7 @@ esac
         )
         assert.equal(res?.epicRef, 'https://github.com/acme/widgets/milestone/3')
         const lines = calls(log).join('\n')
-        assert.match(lines, /api repos\/acme\/widgets\/milestones\?state=open/)
+        assert.match(lines, /api --paginate repos\/acme\/widgets\/milestones\?state=all/)
         assert.match(lines, /api -X POST repos\/acme\/widgets\/milestones -f title=the epic/)
         assert.match(lines, /api -X PATCH repos\/\{owner\}\/\{repo\}\/issues\/42 -F milestone=3/)
       }
@@ -608,7 +617,7 @@ esac
         )
         assert.equal(res?.epicRef, undefined)
         const lines = calls(log).join('\n')
-        assert.doesNotMatch(lines, /milestones\?state=open/)
+        assert.doesNotMatch(lines, /milestones\?state=all/)
         assert.doesNotMatch(lines, /POST repos\/acme\/widgets\/milestones/)
         assert.match(lines, /-F milestone=7/)
       }
@@ -616,17 +625,50 @@ esac
   })
 
   test('a foreign epic ref joins no container — the issue still projects', () => {
+    const read42 = issueRead(node({ number: 42 }))
     withFakeGh(
-      { FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_1: issueRead(node({ number: 42 })) },
+      { FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_1: read42, FAKE_GH_ISSUE_2: read42 },
+      (log, dir) => {
+        for (const external_ref of [
+          'jira:EPIC-1',
+          'https://github.com/other/repo/milestone/7',
+          'https://ghe.corp/acme/widgets/milestone/7',
+        ]) {
+          const res = githubTasks(dir).publish!(
+            { id: 'bro-c1', title: 'child', issue_type: 'feature' },
+            { epic: { id: 'bro-e1', title: 'the epic', issue_type: 'epic', external_ref } }
+          )
+          assert.equal(res?.item.id, '42', external_ref)
+          assert.equal(res?.epicRef, undefined, external_ref)
+        }
+        const lines = calls(log).join('\n')
+        assert.doesNotMatch(lines, /milestone/)
+      }
+    )
+  })
+
+  test('a failed milestone join does not lose the created issue', () => {
+    withFakeGh(
+      {
+        FAKE_GH_ACTOR: 'me',
+        FAKE_GH_ISSUE_1: issueRead(node({ number: 42 })),
+        FAKE_GH_PATCH_FAIL: '1',
+      },
       (log, dir) => {
         const res = githubTasks(dir).publish!(
           { id: 'bro-c1', title: 'child', issue_type: 'feature' },
-          { epic: { id: 'bro-e1', title: 'the epic', issue_type: 'epic', external_ref: 'jira:EPIC-1' } }
+          {
+            epic: {
+              id: 'bro-e1',
+              title: 'the epic',
+              issue_type: 'epic',
+              external_ref: 'https://github.com/acme/widgets/milestone/7',
+            },
+          }
         )
+        // the created issue still returns — the epic join is best-effort,
+        // so publishSync's external_ref write-back survives a PATCH miss
         assert.equal(res?.item.id, '42')
-        assert.equal(res?.epicRef, undefined)
-        const lines = calls(log).join('\n')
-        assert.doesNotMatch(lines, /milestone/)
       }
     )
   })
