@@ -8,6 +8,9 @@
  *
  *   bro loop                    run until idle/gated
  *   bro loop --max 3            at most 3 beads
+ *   (one loop supervisor per repo — a second `bro loop` stands by
+ *   behind the incumbent's `bro/loop.lock` hold and resumes when it
+ *   exits; never two concurrent loops, spec bro-2duu9)
  *   bro loop --batch 8          clump up to 8 same-affinity beads per
  *                               work item — one worker, one PR
  *   bro loop --dry-run          print the first item's plan, change nothing
@@ -51,10 +54,12 @@ import { basename, dirname, join } from 'node:path'
 import {
   AgentNotFound,
   agentRegistryPath,
+  awaitFileLock,
   commandCliName,
   ensureTasksBackend,
   facade,
   gitBranchLog,
+  gitCommonDir,
   gitTry,
   LockTimeout,
   procStat,
@@ -1603,7 +1608,26 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     dryRunPlan(ctx)
     return
   }
-  await guardedRun(ctx)
+  // One loop supervisor per repo: a respawn wrapper's duplicate stands
+  // by behind the incumbent's hold and resumes once it exits — the
+  // same single-instance contract `bro drive` takes (spec bro-2duu9).
+  const loopLock = gitCommonDir(root)
+  const releaseSupervisor =
+    loopLock === null
+      ? () => {}
+      : await awaitFileLock(join(loopLock, 'bro', 'loop.lock'), {
+          label: 'loop supervisor lock',
+          onStandby: (pid) =>
+            say(
+              ctx,
+              `loop: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`
+            ),
+        })
+  try {
+    await guardedRun(ctx)
+  } finally {
+    releaseSupervisor()
+  }
 }
 
 /** Strict flag parse — an unquoted `--agent devin -p --prompt-file

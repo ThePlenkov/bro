@@ -368,8 +368,16 @@ export type {
   Worker,
   WorkItem,
 } from './planes.ts'
-export { acquireFileLock, LockTimeout, withFileLock } from './filelock.ts'
-export type { FileLockOptions } from './filelock.ts'
+export {
+  acquireFileLock,
+  awaitFileLock,
+  holdFileLock,
+  lockHolderPid,
+  LockTimeout,
+  withFileLock,
+  type FileLockOptions,
+  type HeldLockOptions,
+} from './filelock.ts'
 export {
   fileBackedJanitorDeps,
   janitorBroDir,
