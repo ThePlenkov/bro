@@ -20,6 +20,7 @@ import { acquireFileLock, gitCommonDir, lockHolderPid, pidAlive, procStat } from
 import { flag } from './args.ts'
 import { driveLockPath, runDriveCommand } from './drive.ts'
 import { driveSection, MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
+import { SELF_ENTRY } from './self-entry.ts'
 import { isOrchestratorSession } from './watch-pulse.ts'
 import { mainWorktree } from './work.ts'
 import { loadBroConfig } from '../plugins.ts'
@@ -162,8 +163,8 @@ function daemonUpLockPath(dir: string): string | null {
 }
 
 /** Spawn the supervisor loop detached — same fire-and-forget shape as
- *  the pulse rearm: own process group, parent-unref'd, argv[1] so dist
- *  and source installs both re-spawn themselves. Unlike the pulse the
+ *  the pulse rearm: own process group, parent-unref'd, SELF_ENTRY so
+ *  dist and source installs both re-spawn themselves. Unlike the pulse the
  *  daemon gets a real log — an owner must be debuggable. The record is
  *  best-effort: `drive.lock` is the liveness truth, `daemon.json` only
  *  says who armed it — a failed write warns, never orphans the report. */
@@ -176,7 +177,7 @@ export function spawnDaemon(dir: string, everySec: number): { pid: number; log: 
   const out = log === null ? 'ignore' : openSync(log, 'a')
   const child = spawn(
     process.execPath,
-    [process.argv[1]!, 'daemon', 'run', '--every', String(everySec)],
+    [SELF_ENTRY!, 'daemon', 'run', '--every', String(everySec)],
     { cwd: dir, detached: true, stdio: ['ignore', out, out] }
   )
   child.unref()
