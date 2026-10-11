@@ -209,6 +209,9 @@ function supervisionProcs(): number[] {
     const out = execFileSync('pgrep', ['-f', '(daemon run|drive) --every'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      // fixed, unwriteable PATH for the binary lookup — the default
+      // inherited PATH can contain user-writable dirs (sonar S4036)
+      env: { PATH: '/usr/bin:/bin' },
     })
     return out
       .split('\n')
@@ -234,6 +237,85 @@ function everyArg(argv: string[], fallback: number): number {
   return everySec
 }
 
+function daemonUp(main: string, interval: number): void {
+  const decision = daemonUpDecision(main)
+  if (decision.kind === 'refuse-worker') {
+    console.error(
+      'error: BRO_AGENT_ID is set — spawned workers never arm the daemon; ' +
+        'the orchestrator session owns it'
+    )
+    process.exit(2)
+  }
+  const upLock = daemonUpLockPath(main)
+  const release =
+    upLock === null ? () => {} : acquireFileLock(upLock, { label: 'daemon up lock' })
+  try {
+    // re-decide inside the mutex — a concurrent `up` that won the
+    // lock may already hold a live holder by now
+    const inner = daemonUpDecision(main)
+    if (inner.kind === 'already') {
+      console.log(`daemon up — already supervising (pid ${inner.pid})`)
+      return
+    }
+    const spawned = spawnDaemon(main, interval)
+    console.log(
+      `daemon up — pid ${spawned.pid} every ${interval}s` +
+        (spawned.log === null ? '' : ` — log ${spawned.log}`)
+    )
+  } finally {
+    release()
+  }
+}
+
+function daemonStatus(main: string): void {
+  const probe = daemonProbe(main)
+  const log = daemonLogPath(main)
+  if (!probe.live) {
+    console.log(
+      probe.recorded === null
+        ? `daemon down — no supervisor; 'bro daemon up' to start`
+        : `daemon down — recorded pid ${probe.recorded.pid} is dead`
+    )
+    return
+  }
+  console.log(
+    `daemon up — pid ${probe.pid} supervising` +
+      (probe.recorded === null ? ' (unrecorded holder)' : `, armed ${probe.recorded.spawnedAt}`) +
+      (log === null ? '' : ` — log ${log}`)
+  )
+}
+
+function daemonDown(main: string): void {
+  const probe = daemonProbe(main)
+  const state = daemonStatePath(main)
+  // standby children waiting on drive.lock survive a holder kill
+  // and take the lock over — `down` must reach every supervision
+  // loop, not only the current holder
+  const victims = new Set<number>([
+    ...(probe.live ? [probe.pid!] : []),
+    ...(probe.recorded !== null && pidAlive(probe.recorded.pid, probe.recorded.pidStart)
+      ? [probe.recorded.pid]
+      : []),
+    ...supervisionProcs(),
+  ])
+  victims.delete(process.pid)
+  for (const pid of victims) {
+    try {
+      process.kill(pid, 'SIGTERM')
+    } catch {
+      // already gone — SIGTERM is advisory, absence is not a failure
+    }
+  }
+  if (state !== null) {
+    rmSync(state, { force: true })
+  }
+  console.log(
+    victims.size === 0
+      ? 'daemon down — no live supervisor'
+      : `daemon down — signalled ${[...victims].join(', ')}`
+  )
+}
+
 export async function runDaemonCommand(argv: string[]): Promise<void> {
   const verb = argv[0]
   if (verb === undefined || argv.includes('--help') || argv.includes('-h')) {
@@ -244,91 +326,20 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
   const interval = everyArg(argv, driveSection(broCfg.drive).intervalSec)
 
   switch (verb) {
-    case 'up': {
-      const decision = daemonUpDecision(main)
-      if (decision.kind === 'refuse-worker') {
-        console.error(
-          'error: BRO_AGENT_ID is set — spawned workers never arm the daemon; ' +
-            'the orchestrator session owns it'
-        )
-        process.exit(2)
-      }
-      const upLock = daemonUpLockPath(main)
-      const release =
-        upLock === null ? () => {} : acquireFileLock(upLock, { label: 'daemon up lock' })
-      try {
-        // re-decide inside the mutex — a concurrent `up` that won the
-        // lock may already hold a live holder by now
-        const inner = daemonUpDecision(main)
-        if (inner.kind === 'already') {
-          console.log(`daemon up — already supervising (pid ${inner.pid})`)
-          return
-        }
-        const spawned = spawnDaemon(main, interval)
-        console.log(
-          `daemon up — pid ${spawned.pid} every ${interval}s` +
-            (spawned.log === null ? '' : ` — log ${spawned.log}`)
-        )
-        return
-      } finally {
-        release()
-      }
-    }
-    case 'run': {
+    case 'up':
+      daemonUp(main, interval)
+      return
+    case 'run':
       // the supervised loop — drive's own guard, lock and cadence apply;
       // reached directly only via `up`'s detached spawn
       await runDriveCommand(['--every', String(interval)])
       return
-    }
-    case 'status': {
-      const probe = daemonProbe(main)
-      const log = daemonLogPath(main)
-      if (!probe.live) {
-        console.log(
-          probe.recorded === null
-            ? `daemon down — no supervisor; 'bro daemon up' to start`
-            : `daemon down — recorded pid ${probe.recorded.pid} is dead`
-        )
-        return
-      }
-      console.log(
-        `daemon up — pid ${probe.pid} supervising` +
-          (probe.recorded === null ? ' (unrecorded holder)' : `, armed ${probe.recorded.spawnedAt}`) +
-          (log === null ? '' : ` — log ${log}`)
-      )
+    case 'status':
+      daemonStatus(main)
       return
-    }
-    case 'down': {
-      const probe = daemonProbe(main)
-      const state = daemonStatePath(main)
-      // standby children waiting on drive.lock survive a holder kill
-      // and take the lock over — `down` must reach every supervision
-      // loop, not only the current holder
-      const victims = new Set<number>([
-        ...(probe.live ? [probe.pid!] : []),
-        ...(probe.recorded !== null && pidAlive(probe.recorded.pid, probe.recorded.pidStart)
-          ? [probe.recorded.pid]
-          : []),
-        ...supervisionProcs(),
-      ])
-      victims.delete(process.pid)
-      for (const pid of victims) {
-        try {
-          process.kill(pid, 'SIGTERM')
-        } catch {
-          // already gone — SIGTERM is advisory, absence is not a failure
-        }
-      }
-      if (state !== null) {
-        rmSync(state, { force: true })
-      }
-      console.log(
-        victims.size === 0
-          ? 'daemon down — no live supervisor'
-          : `daemon down — signalled ${[...victims].join(', ')}`
-      )
+    case 'down':
+      daemonDown(main)
       return
-    }
     default:
       usage()
   }
