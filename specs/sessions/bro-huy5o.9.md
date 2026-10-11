@@ -13,7 +13,7 @@ Parent: `sessions` capability. See `spec.md` and `bro-f4ot/spec.md`.
 Verdict: **GREEN — ship the GitHub Copilot coding agent (`gh agent-task`)
 as the first cloud agent connector.** It is the only candidate that is
 both genuinely remote and unblocked end-to-end, its artifact is a PR —
-which the existing act/drive gates already supervise — and it adds zero
+which the existing act gate already supervises — and it adds zero
 binary prerequisites (`gh` is already the review-host dependency).
 Claude Code headless is already served by the `cli`/`acp` provider kinds
 — a connector buys it nothing; file a session-plane/preset bead instead.
@@ -61,8 +61,12 @@ Contract members from `bro-f4ot/spec.md` (`spawn`, `list`, `status`,
   `capabilities` = `{attach: 'gh agent-task view --log --follow',
   respawn: create-new-task, supervisor: 'none'}` (GitHub hosts the
   runtime). `repoRoot` reads as `owner/repo` from the origin remote —
-  no local worktree; the output lands as a branch+PR inside the repo,
-  so `bro drive`/`bro act` supervise it with zero new machinery.
+  no local worktree; the artifact is a remote-only `copilot/*` branch
+  +PR, so `bro act` supervises it by number (`bro act wait <pr>
+  --merge` armed at spawn off the registry entry's pinned `pr`).
+  `bro drive` never sees it: its candidate set is local-only (worktree
+  branches + `work/`/`loop/`/`stack/` local branches). A
+  registry-sourced PR feed for drive is implementation-bead scope.
 
 ## Caveats carried into the implementation bead
 
@@ -81,11 +85,16 @@ Contract members from `bro-f4ot/spec.md` (`spawn`, `list`, `status`,
   (gh ≥2.80.0); pin REST endpoints as the primary plane where the CLI
   shape is thin (list/view already exist) and treat flag drift as a
   probe-failure, not a crash.
-- **Quota plane is remote.** Unlike devin's local lock files, the live
-  count comes from `GET /agents/tasks` filtered to in-progress —
-  implement as a `copilot` `SessionPlane` whose `countLive` calls the
-  API; an unreachable API fails closed (`unavailable`), same contract
-  as the devin plane.
+- **Quota plane is remote — and `countLive` is sync.** The live count
+  comes from `GET /agents/tasks` filtered to in-progress, but
+  `SessionPlane.countLive` is synchronous and runs inside the
+  host-wide admission mutex: an awaited `fetch` cannot run there, and
+  a blocking subprocess call stalls every plane's admissions behind
+  one HTTP roundtrip. Implement it as a cached-count plane —
+  `list`/`status`/`spawn` refresh a count file (the plane's own local
+  state plane) and `countLive` reads it synchronously; an absent or
+  stale cache fails closed (`unavailable`), same contract as the
+  devin plane.
 
 ## Recommendation
 
