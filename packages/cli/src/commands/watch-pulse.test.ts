@@ -181,7 +181,21 @@ describe('pulseSpawn record', () => {
     try {
       assert.equal(readPulseSpawn(main), null)
       writePulseSpawn(main, { pid: 4242, spawnedAt: '2026-10-10T00:00:00Z' })
-      assert.deepEqual(readPulseSpawn(main), { pid: 4242, spawnedAt: '2026-10-10T00:00:00Z' })
+      assert.deepEqual(readPulseSpawn(main), {
+        pid: 4242,
+        spawnedAt: '2026-10-10T00:00:00Z',
+        pidStart: undefined,
+      })
+      writePulseSpawn(main, {
+        pid: 4242,
+        spawnedAt: '2026-10-10T00:00:00Z',
+        pidStart: '1234',
+      })
+      assert.deepEqual(readPulseSpawn(main), {
+        pid: 4242,
+        spawnedAt: '2026-10-10T00:00:00Z',
+        pidStart: '1234',
+      })
       writeFileSync(pulseSpawnPath(main)!, 'not json')
       assert.equal(readPulseSpawn(main), null)
     } finally {
@@ -247,8 +261,52 @@ describe('pulseRearm', () => {
     const { root, main } = initRepo('bro-pulse-r4-')
     try {
       armPulse(main, 120)
-      writePulseSpawn(main, { pid: process.pid, spawnedAt: 'x' })
+      // a legacy record without pidStart is trusted inside the
+      // post-spawn window — the child's pre-lock window
+      writePulseSpawn(main, { pid: process.pid, spawnedAt: new Date().toISOString() })
       assert.deepEqual(pulseRearm(main, 900, {}), { kind: 'quiet' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a pidStart-pinned record checks identity — a reused pid does not suppress', () => {
+    const { root, main } = initRepo('bro-pulse-r4b-')
+    try {
+      armPulse(main, 120)
+      // the recorded child is gone and its pid was recycled onto a
+      // different live process: a matching pid with a different start
+      // is not the recorded spawn, so the rearm must not stay quiet
+      writePulseSpawn(main, {
+        pid: process.pid,
+        spawnedAt: new Date().toISOString(),
+        pidStart: 'bogus-start',
+      })
+      assert.deepEqual(pulseRearm(main, 900, {}), {
+        kind: 'rearm',
+        everySec: 120,
+        forSec: 900,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a stale legacy record does not suppress — the trust window is bounded', () => {
+    const { root, main } = initRepo('bro-pulse-r4c-')
+    try {
+      armPulse(main, 120)
+      // a record that predates pidStart only covers the pre-lock
+      // window — a live pid ten minutes on is reuse, not the child
+      writePulseSpawn(main, {
+        pid: process.pid,
+        spawnedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+      })
+      assert.deepEqual(pulseRearm(main, 900, {}), {
+        kind: 'rearm',
+        everySec: 120,
+        forSec: 900,
+      })
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

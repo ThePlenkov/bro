@@ -28,6 +28,7 @@ import {
   loadConfig,
   lockHolderPid,
   pidAlive,
+  procStat,
   type Connector,
 } from '@broject/core'
 import { watchSection, type WatchConfig } from './watch-config.ts'
@@ -130,6 +131,10 @@ export function isOrchestratorSession(env: NodeJS.ProcessEnv = process.env): boo
 export interface PulseSpawn {
   pid: number
   spawnedAt: string
+  /** the child's /proc start time — pins the pid against reuse; absent
+   *  on older records, which the rearm decision trusts only briefly
+   *  after `spawnedAt` (the pre-lock window is seconds anyway) */
+  pidStart?: string
 }
 
 /** `<git-common>/bro/pulse.spawn.json` — the last rearm's child. A live
@@ -151,10 +156,15 @@ export function readPulseSpawn(dir: string): PulseSpawn | null {
     const raw = JSON.parse(readFileSync(file, 'utf8')) as {
       pid?: unknown
       spawnedAt?: unknown
+      pidStart?: unknown
     }
     return typeof raw.pid === 'number' && Number.isInteger(raw.pid) && raw.pid > 0 &&
       typeof raw.spawnedAt === 'string'
-      ? { pid: raw.pid, spawnedAt: raw.spawnedAt }
+      ? {
+          pid: raw.pid,
+          spawnedAt: raw.spawnedAt,
+          pidStart: typeof raw.pidStart === 'string' ? raw.pidStart : undefined,
+        }
       : null
   } catch {
     return null
@@ -170,6 +180,25 @@ export function writePulseSpawn(dir: string, record: PulseSpawn): void {
   const tmp = `${file}.${process.pid}.tmp`
   writeFileSync(tmp, JSON.stringify(record, null, 2))
   renameSync(tmp, file)
+}
+
+/** Records without a `pidStart` are trusted this long after `spawnedAt`
+ *  — long enough to cover the pre-lock window, short enough that a
+ *  reused pid can't impersonate the child forever. */
+const SPAWN_TRUST_MS = 120_000
+
+/** A recorded pid is trusted with its stored start time; records that
+ *  predate the field get the bounded post-spawn window only — a reused
+ *  pid must not suppress the rearm forever. */
+function spawnedAlive(spawned: PulseSpawn, now: number = Date.now()): boolean {
+  if (spawned.pidStart !== undefined) {
+    return pidAlive(spawned.pid, spawned.pidStart)
+  }
+  const spawnedAt = Date.parse(spawned.spawnedAt)
+  if (!Number.isFinite(spawnedAt) || now - spawnedAt > SPAWN_TRUST_MS) {
+    return false
+  }
+  return pidAlive(spawned.pid)
 }
 
 export type PulseRearm = { kind: 'quiet' } | { kind: 'rearm'; everySec: number; forSec: number }
@@ -190,7 +219,7 @@ export function pulseRearm(
     return { kind: 'quiet' }
   }
   const spawned = readPulseSpawn(dir)
-  if (spawned !== null && pidAlive(spawned.pid)) {
+  if (spawned !== null && spawnedAlive(spawned)) {
     return { kind: 'quiet' }
   }
   return { kind: 'rearm', everySec: marker.everySec, forSec: Math.max(pulseSec, marker.everySec) }
@@ -282,7 +311,11 @@ function pulseCheckpoint(dir: string, where: string): string[] {
     if (pid === null) {
       return []
     }
-    writePulseSpawn(dir, { pid, spawnedAt: new Date().toISOString() })
+    writePulseSpawn(dir, {
+      pid,
+      spawnedAt: new Date().toISOString(),
+      pidStart: procStat(pid)?.start,
+    })
     return [
       `watch pulse rearmed on ${where} — spawned ` +
         `\`bro watch --every ${r.everySec} --for ${r.forSec} --notify\` (pid ${pid})`,
