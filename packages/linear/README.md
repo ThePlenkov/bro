@@ -58,7 +58,7 @@ query { team(id: "ENG") { issues(first: 5, filter: { state: { type: { nin: ["com
 | `deps`         | `blocks` relations — `inverseRelations` up, `relations` down    |
 | `children`     | sub-issues                                                    |
 | `priority`     | native priority name-mapped (urgent→0 … none→4)                 |
-| metadata       | `<!-- bro: {...} -->` trailer in the description                |
+| metadata       | `<!-- bro: {...} -->` trailer — last element of the description   |
 
 ## Links
 

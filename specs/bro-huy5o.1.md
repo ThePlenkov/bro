@@ -60,8 +60,10 @@ bro rig with zero installs beyond `gh`.
 - **type / priority** — GitHub has no fields: `issueType` (native issue
   types) wins when set, then a `type:<t>`/`kind:<t>`/`epic` label, then
   a `<!-- bro: {...} -->` metadata trailer in the body (written by
-  create/update). Priority reads `p<N>`/`priority:<N>` labels then the
-  trailer; default 2 (bd's default).
+  create/update — the trailer is the body's last element, so a `bro:`
+  comment inside the prose is an example, not metadata). Priority reads
+  `p<N>`/`priority:<N>` labels then the trailer; default 2 (bd's
+  default).
 - **children/deps** — `subIssues` and `blockedBy`/`blocking` edges;
   `link` supports `blocks`/`blocked-by` and `parent-child` (sub-issue),
   other types throw — never faked as comments. The sub-issue parent is

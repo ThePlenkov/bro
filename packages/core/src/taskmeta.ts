@@ -14,26 +14,30 @@ const META_INNER = /^\s*bro:\s*(\{[\s\S]*\})\s*$/
  *  re-scans the body at every `<!--` start position, which is quadratic
  *  on hostile bodies (CodeQL polynomial-regex). indexOf + an anchored
  *  inner check keeps each comment span parsed once — linear total.
- *  The LAST match wins: the trailer is appended, so an earlier
- *  `bro:` comment inside the prose is an example, not metadata. */
+ *  Position is part of the contract: the trailer is the body's last
+ *  element — own line, whitespace only after it (the shape withMeta
+ *  writes). A `bro:` comment mid-prose or mid-line is an example, not
+ *  metadata — bodyMeta ignores it and stripMeta keeps it in the
+ *  description. */
 export function broTrailer(body: string): { json: string; start: number; end: number } | null {
   let i = 0
   let last: { json: string; start: number; end: number } | null = null
   for (;;) {
     const s = body.indexOf('<!--', i)
     if (s === -1) {
-      return last
+      break
     }
     const e = body.indexOf('-->', s + 4)
     if (e === -1) {
-      return last
+      break
     }
     const m = META_INNER.exec(body.slice(s + 4, e))
-    if (m) {
+    if (m && (s === 0 || body[s - 1] === '\n')) {
       last = { json: m[1]!, start: s, end: e + 3 }
     }
     i = e + 3
   }
+  return last !== null && body.slice(last.end).trim() === '' ? last : null
 }
 
 /** The `<!-- bro: {...} -->` body trailer — type/priority/external_ref
