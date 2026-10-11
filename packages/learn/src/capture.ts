@@ -27,7 +27,7 @@
  * would-be plan — capture is a proposal surface.
  */
 import { bdJson, taskStore } from '@broject/core'
-import type { TaskRow } from '@broject/core'
+import type { TaskDepEdge, TaskRow } from '@broject/core'
 import {
   deriveConfidence,
   lessonId,
@@ -286,26 +286,46 @@ interface Harvest {
   skipped: CaptureSkip[]
 }
 
-/** Neighbor rows of the `discovered` edges — hydrated rows; a response
- *  without a string id isn't a task row and drops out. */
-function depRows(id: string, dir?: string): TaskRow[] {
-  const rows = taskStore(dir).neighbors<TaskRow>(id, { rel: 'discovered' })
-  return rows.filter((r) => typeof r?.id === 'string')
+/** `discovered` edges for every row a harvest cites — ONE `bd dep list`
+ *  batch call, hydrated against `pool` (the label lists already in hand:
+ *  a dep target absent from them fails the label check anyway). A failed
+ *  batch degrades to self-evidence for all rows — the contract the old
+ *  per-row catch carried, without a per-row shell-out (a serial
+ *  dep-list storm was the >25s capture hang, bro-rcs07). */
+function depsAmong(ids: string[], pool: Map<string, TaskRow>, dir?: string): Map<string, TaskRow[]> {
+  const out = new Map<string, TaskRow[]>()
+  if (ids.length === 0) {
+    return out
+  }
+  let edges: TaskDepEdge[]
+  try {
+    edges = taskStore(dir).deps<TaskDepEdge>(ids, { rel: 'discovered' })
+  } catch {
+    return out
+  }
+  for (const e of edges) {
+    const row = pool.get(e.depends_on_id)
+    if (row === undefined) {
+      continue
+    }
+    const list = out.get(e.issue_id)
+    if (list === undefined) {
+      out.set(e.issue_id, [row])
+    } else {
+      list.push(row)
+    }
+  }
+  return out
 }
 
 /** Evidence beads for a harvested row: itself plus discovered-from
  *  neighbors wearing one of `labels` (wtf/drill/retro/prevention). */
-function beadPlusDeps(row: TaskRow, labels: string[]): Evidence[] {
+function beadPlusDeps(row: TaskRow, labels: string[], depMap: Map<string, TaskRow[]>): Evidence[] {
   const ev: Evidence[] = [beadEvidence(row.id)]
-  try {
-    for (const dep of depRows(row.id)) {
-      if (labels.some((l) => hasLabel(dep, l)) && dep.id !== row.id) {
-        ev.push(beadEvidence(dep.id))
-      }
+  for (const dep of depMap.get(row.id) ?? []) {
+    if (labels.some((l) => hasLabel(dep, l)) && dep.id !== row.id) {
+      ev.push(beadEvidence(dep.id))
     }
-  } catch {
-    // a dep-list failure keeps the artifact's own id — evidence degrades,
-    // never blocks the harvest
   }
   return ev
 }
@@ -404,12 +424,36 @@ function drillMemo(notes: string | undefined): { result: string; prevents: strin
 
 function harvestDrill(dir?: string): Harvest {
   const out: Harvest = { candidates: [], skipped: [] }
-  for (const frame of listLabeled('drill', dir).filter(isClosed)) {
-    // bd list omits notes — the memo needs a show per closed frame
-    const row = taskStore(dir).get<TaskRow>(frame.id) ?? frame
+  const drillRows = listLabeled('drill', dir)
+  const preventionRows = listLabeled('prevention', dir)
+  const closedDrill = drillRows.filter(isClosed)
+  // a closed prevention bead with a `sink:` route is captured without a
+  // flag — routed means it already went through its gate
+  const sinkRouted = preventionRows.filter(
+    (r) => isClosed(r) && r.labels?.some((l) => l.startsWith('sink:'))
+  )
+  // the dep-evidence pool is the label lists already fetched; retro
+  // joins only when sink-routed rows exist — it is their corroborating
+  // evidence pool, not drill's
+  const pool = new Map<string, TaskRow>()
+  for (const r of [...drillRows, ...preventionRows]) {
+    pool.set(r.id, r)
+  }
+  if (sinkRouted.length > 0) {
+    for (const r of listLabeled('retro', dir)) {
+      pool.set(r.id, r)
+    }
+  }
+  const deps = depsAmong(
+    [...closedDrill, ...sinkRouted].map((r) => r.id),
+    pool,
+    dir
+  )
+  for (const row of closedDrill) {
+    // bd list already carries notes/description — no per-frame show
     const memo = drillMemo(row.notes)
     if (memo === null) {
-      out.skipped.push({ origin: frame.id, reason: 'closed drill frame has no result memo' })
+      out.skipped.push({ origin: row.id, reason: 'closed drill frame has no result memo' })
       continue
     }
     const lesson =
@@ -421,24 +465,19 @@ function harvestDrill(dir?: string): Harvest {
       `${row.description ?? ''}\n${row.notes ?? ''}`
     )
     if (trigger === undefined) {
-      out.skipped.push({ origin: frame.id, reason: 'no trigger scope (paths/commands/terms)' })
+      out.skipped.push({ origin: row.id, reason: 'no trigger scope (paths/commands/terms)' })
       continue
     }
     out.candidates.push({
       lesson,
       trigger,
       // the frame's own prevention beads corroborate the memo
-      evidence: beadPlusDeps(row, ['prevention']),
+      evidence: beadPlusDeps(row, ['prevention'], deps),
       source: 'capture:drill',
-      origin: frame.id,
+      origin: row.id,
     })
   }
-  // a closed prevention bead with a `sink:` route is captured without a
-  // flag — routed means it already went through its gate
-  for (const row of listLabeled('prevention', dir).filter(isClosed)) {
-    if (!row.labels?.some((l) => l.startsWith('sink:'))) {
-      continue
-    }
+  for (const row of sinkRouted) {
     const lesson = oneLine((row.title ?? '').replace(/^(?:prevention|retro):\s*/i, ''))
     if (lesson === '') {
       out.skipped.push({ origin: row.id, reason: 'prevention bead has no lesson text' })
@@ -453,7 +492,7 @@ function harvestDrill(dir?: string): Harvest {
       lesson,
       trigger,
       // the frame/retro it was discovered-from corroborates the item
-      evidence: beadPlusDeps(row, ['drill', 'retro']),
+      evidence: beadPlusDeps(row, ['drill', 'retro'], deps),
       source: 'capture:drill',
       origin: row.id,
       heldUnderGate: true,
@@ -487,11 +526,20 @@ function retroLesson(description: string): string {
 
 function harvestRetro(dir?: string): Harvest {
   const out: Harvest = { candidates: [], skipped: [] }
-  for (const row of listLabeled('retro', dir).filter(isClosed)) {
-    // prevention beads can also wear `retro` — the drill pass owns them
-    if (hasLabel(row, 'prevention')) {
-      continue
+  // prevention beads can also wear `retro` — the drill pass owns them
+  const closed = listLabeled('retro', dir).filter(
+    (r) => isClosed(r) && !hasLabel(r, 'prevention')
+  )
+  // wtf rows are the dep-evidence pool — fetched once, then one batched
+  // dep list, not a per-row shell-out
+  const pool = new Map<string, TaskRow>()
+  if (closed.length > 0) {
+    for (const r of listLabeled('wtf', dir)) {
+      pool.set(r.id, r)
     }
+  }
+  const deps = depsAmong(closed.map((r) => r.id), pool, dir)
+  for (const row of closed) {
     const lesson = retroLesson(row.description ?? row.title ?? '')
     if (lesson === '') {
       out.skipped.push({ origin: row.id, reason: 'retro bead has no lesson text' })
@@ -506,7 +554,7 @@ function harvestRetro(dir?: string): Harvest {
       lesson,
       trigger,
       // the originating wtf is the second evidence the spec names
-      evidence: beadPlusDeps(row, ['wtf']),
+      evidence: beadPlusDeps(row, ['wtf'], deps),
       source: 'capture:retro',
       origin: row.id,
     })
@@ -602,7 +650,7 @@ const LEARN_FLAG = /^learn(?:ing)?:\s+(.+)$/i
 
 interface MolShow {
   root: { id: string; status: string }
-  issues: { id: string; title?: string; status: string }[]
+  issues: { id: string; title?: string; status: string; close_reason?: string }[]
 }
 
 function harvestMol(molId: string, dir?: string): Harvest {
@@ -615,13 +663,19 @@ function harvestMol(molId: string, dir?: string): Harvest {
     throw new Error(`molecule ${molId} is ${mol.root.status} — capture harvests closed molecules`)
   }
   for (const step of mol.issues.filter((i) => i.id !== mol.root.id && CLOSED.has(i.status))) {
-    const reason = taskStore(dir).get<TaskRow>(step.id)?.close_reason ?? ''
+    // bd mol show's issue rows carry close_reason — no per-step show
+    const reason = step.close_reason ?? ''
     const flagged = reason
       .split('\n')
       .map((l) => LEARN_FLAG.exec(l.trim())?.[1]?.trim())
       .filter((l): l is string => l !== undefined && l !== '')
     if (flagged.length === 0) {
-      continue // an unflagged result is a handoff, not a lesson
+      // an unflagged result is a handoff, not a lesson — but a step
+      // without a close_reason can't be audited at all, so it's logged
+      if (!step.close_reason) {
+        out.skipped.push({ origin: step.id, reason: 'closed step has no close_reason' })
+      }
+      continue
     }
     for (const text of flagged) {
       const lesson = oneLine(text)
