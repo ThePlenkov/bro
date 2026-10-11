@@ -38,6 +38,7 @@ import { loopSection } from '@broject/loop'
 import { githubConnector, graphiteConnector, mergifyConnector } from '@broject/github'
 import { gitlabConnector } from '@broject/gitlab'
 import { linearConnector } from '@broject/linear'
+import { jiraConnector } from '@broject/jira'
 import {
   applyQueryPlan,
   atlassianConnector,
@@ -108,6 +109,9 @@ registerConnector(atlassianConnector)
 // Linear — tasks + tasksAsync + queries, all name-only pins
 // (connectors.tasks=linear); a repo's remote can't name a Linear team
 registerConnector(linearConnector)
+// Jira — tasks + tasksAsync over the atlassian CLI's REST surface,
+// name-only pins (connectors.tasks=jira); a remote can't name a project
+registerConnector(jiraConnector)
 registerConnector(drillConnector)
 registerConnector(workConnector)
 registerConnector(actConnector)
