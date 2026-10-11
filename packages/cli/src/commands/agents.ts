@@ -429,6 +429,12 @@ function resolveWorktree(
   if (existsSync(conventional)) {
     return conventional
   }
+  // a remote-only backend needs no local checkout — the copilot
+  // connector reads repoRoot only for the origin remote it dispatches
+  // against, and the caller's repo IS that remote's checkout
+  if (backend === 'copilot') {
+    return dir
+  }
   throw new SpawnInputError(
     `no worktree for ${molStep} — run \`bro work enter ${molStep}\` first ` +
       `(or pass --worktree <path>)`

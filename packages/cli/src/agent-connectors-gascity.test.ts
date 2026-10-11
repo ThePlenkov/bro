@@ -203,7 +203,7 @@ const SPEC = (main: string, beadsDir: string, molStep: string) => ({
 
 describe('gascity connector', () => {
   test('registry order: native first, gascity before docker', () => {
-    assert.deepEqual(agentConnectorNames(), ['native', 'tmux', 'gascity', 'docker'])
+    assert.deepEqual(agentConnectorNames(), ['native', 'tmux', 'gascity', 'docker', 'copilot'])
   })
 
   test('spawn inits the city, adopts the rig, claims, sessions+slings', async () => {
