@@ -39,7 +39,12 @@ the same pass as `bro-c650l` (bro-managed label). One stamp does all:
 1. `publish` the bead → issue number (idempotent via `external-ref`
    stored back on the bead — a second PR for the same bead references
    the same issue, no dupes)
-2. Edit PR body: `Fixes #N` (GitHub auto-close on merge)
+2. Edit PR body: `Fixes #N` — auto-close fires only when the PR's
+   base is the default branch at merge time. Stack members still
+   close under bro-driven merges — the cascade retargets each layer
+   onto the trunk before it lands (`mergeChainPerLayer`, `gh stack
+   merge`); a member merged while still targeting a non-default base
+   leaves the item open (known gap — close it via the connector)
 3. Apply `bro-managed` label
 4. Project/milestone assignment per policy
 
