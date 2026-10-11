@@ -24,6 +24,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  realpathSync,
   rmSync,
   statSync,
   utimesSync,
@@ -3090,8 +3091,6 @@ function dockerInspect(name: string): DockerInspect {
   }
 }
 
-const dockerProbe = (name: string): DockerInspect => dockerInspect(name)
-
 /** devcontainer.json is commented JSON — // and /* … *\/ comments plus
  *  trailing commas are legal there and illegal to JSON.parse. The
  *  scanner copies significant chars only, tracking string state so a
@@ -3168,16 +3167,27 @@ function dockerRunArgs(v: unknown): string[] {
 function dockerMounts(spec: SpawnSpec): string[] {
   const mounts: string[] = []
   const add = (p: string): void => {
-    if (p !== '' && !mounts.some((m) => p === m || p.startsWith(`${m}/`))) {
-      mounts.push(p)
+    // canonicalize — resolve() folds `..`; realpath additionally folds
+    // a symlinked component, which would otherwise mount a path that
+    // resolves to a different inode (or nothing) inside the container.
+    // Unresolvable sources keep resolve()'s form — docker creates a
+    // missing source root-owned, which is the operator's path to give.
+    let c = resolve(p)
+    try {
+      c = realpathSync(c)
+    } catch {
+      // not created yet — docker will create it
+    }
+    if (c !== '' && !mounts.some((m) => c === m || c.startsWith(`${m}/`))) {
+      mounts.push(c)
     }
   }
-  add(resolve(spec.repoRoot))
+  add(spec.repoRoot)
   const r = gitTry(['-C', spec.repoRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
   if (r.code === 0) {
     add(r.out.trim())
   }
-  add(resolve(spec.beadsDir))
+  add(spec.beadsDir)
   return mounts
 }
 
@@ -3361,7 +3371,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
               if (n === undefined) {
                 return false
               }
-              const p = dockerProbe(n)
+              const p = dockerInspect(n)
               if (p.live === 'unknown') {
                 // an unverifiable liveness probe must not let a duplicate
                 // spawn run beside a worker that may still be alive
@@ -3388,19 +3398,34 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         // ambient env rides an --env-file like tmux's 0600 file — argv
         // is visible to every local user (`ps`, docker inspect), so the
         // ambient bag (secrets included) never goes on -e. Values with
-        // newlines can't survive docker's line-based format and drop.
+        // newlines can't survive docker's line-based format — dropped
+        // with a warning naming the keys.
         const envFile = join(home, `${agentId}.env`)
+        const dropped: string[] = []
         const ambient = Object.entries({ ...process.env, ...spec.env })
-          .filter(
-            (e): e is [string, string] =>
-              e[1] !== undefined &&
-              /^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) &&
-              !AGENT_PIN_KEYS.has(e[0]) &&
-              !e[1].includes('\n') &&
-              !e[1].includes('\r')
-          )
+          .filter((e): e is [string, string] => {
+            if (
+              e[1] === undefined ||
+              !/^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) ||
+              AGENT_PIN_KEYS.has(e[0])
+            ) {
+              return false
+            }
+            if (e[1].includes('\n') || e[1].includes('\r')) {
+              dropped.push(e[0])
+              return false
+            }
+            return true
+          })
           .map(([k, v]) => `${k}=${v}`)
           .join('\n')
+        if (dropped.length > 0) {
+          // a multi-line value can't survive docker's line-based env
+          // file — say which keys the container will NOT see
+          console.error(
+            `warning: docker env-file drops ${dropped.length} var(s) with newline values: ${dropped.join(', ')}`
+          )
+        }
         writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
         const worker = spec.worker
         warnNoPromptFile(worker, command)
@@ -3525,7 +3550,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         // let the rm land before recording the stop — 'stopped' on a
         // still-live container would let a respawn run beside it
         const deadline = Date.now() + 2_000
-        while (dockerProbe(name).live === 'running' && Date.now() < deadline) {
+        while (dockerInspect(name).live === 'running' && Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 25)) // NOSONAR — bounded kill-wait poll
         }
       }
@@ -3542,7 +3567,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           return // respawned — the live run owns the entry
         }
         if (name !== undefined) {
-          const p = dockerProbe(name)
+          const p = dockerInspect(name)
           if (p.live === 'running') {
             return // still alive — the live run owns the entry
           }
