@@ -3135,9 +3135,28 @@ export function jsoncToJson(text: string): string {
       continue
     }
     if (c === ',') {
+      // lookahead must skip comments too — `{a:1, /* c */ }` is legal
+      // JSONC and drops to `{a:1}` only if the comma comes out
       let k = i + 1
-      while (k < text.length && /\s/.test(text[k]!)) {
-        k++
+      for (;;) {
+        while (k < text.length && /\s/.test(text[k]!)) {
+          k++
+        }
+        if (text[k] === '/' && text[k + 1] === '/') {
+          while (k < text.length && text[k] !== '\n') {
+            k++
+          }
+          continue
+        }
+        if (text[k] === '/' && text[k + 1] === '*') {
+          k += 2
+          while (k < text.length && !(text[k] === '*' && text[k + 1] === '/')) {
+            k++
+          }
+          k = Math.min(k + 2, text.length)
+          continue
+        }
+        break
       }
       if (text[k] === '}' || text[k] === ']') {
         i++
@@ -3256,16 +3275,16 @@ export function dockerImageFor(spec: SpawnSpec, knobs: Record<string, unknown>):
     typeof dc.build?.args === 'object' && dc.build.args !== null ? dc.build.args : {}
   ).flatMap(([k, v]) => ['--build-arg', `${k}=${String(v)}`])
   // content-keyed tag — the same devcontainer build reuses one image
-  // across spawns; a changed devcontainer/dockerfile mints a new tag
+  // across spawns; a changed devcontainer/dockerfile mints a new tag.
+  // Always build: the tag can't see the build CONTEXT's files, but
+  // docker's own layer cache can — a no-op build is seconds, a stale
+  // image is a wrong worker.
   const tag = `bro-dev-${createHash('sha256')
     .update(readFileSync(dcPath, 'utf8'))
     .update('\n')
     .update(readFileSync(dockerfile, 'utf8'))
     .digest('hex')
     .slice(0, 12)}`
-  if (dockerRun(['image', 'inspect', tag]).code === 0) {
-    return tag
-  }
   const b = dockerRun(['build', '-t', tag, '-f', dockerfile, ...buildArgs, context], 600_000)
   if (b.code !== 0) {
     throw new SpawnError(
@@ -3392,109 +3411,129 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           }
         )
         const name = `bro-${agentId}`
-        // a corpse with our name (crash between entry and rm, a respawn
-        // over a stopped container) collides docker run — clear it
-        dockerRun(['rm', '-f', name])
-        // ambient env rides an --env-file like tmux's 0600 file — argv
-        // is visible to every local user (`ps`, docker inspect), so the
-        // ambient bag (secrets included) never goes on -e. Values with
-        // newlines can't survive docker's line-based format — dropped
-        // with a warning naming the keys.
         const envFile = join(home, `${agentId}.env`)
-        const dropped: string[] = []
-        const ambient = Object.entries({ ...process.env, ...spec.env })
-          .filter((e): e is [string, string] => {
-            if (
-              e[1] === undefined ||
-              !/^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) ||
-              AGENT_PIN_KEYS.has(e[0])
-            ) {
-              return false
-            }
-            if (e[1].includes('\n') || e[1].includes('\r')) {
-              dropped.push(e[0])
-              return false
-            }
-            return true
-          })
-          .map(([k, v]) => `${k}=${v}`)
-          .join('\n')
-        if (dropped.length > 0) {
-          // a multi-line value can't survive docker's line-based env
-          // file — say which keys the container will NOT see
-          console.error(
-            `warning: docker env-file drops ${dropped.length} var(s) with newline values: ${dropped.join(', ')}`
-          )
-        }
-        writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
-        const worker = spec.worker
-        warnNoPromptFile(worker, command)
-        const cliBadge =
-          worker === undefined
-            ? commandCliName(command)
-            : worker.kind === 'argv'
-              ? worker.cliName
-              : commandCliName(worker.command)
-        const runLine =
-          worker === undefined
-            ? expandAgentCmd(command, promptFile)
-            : worker.kind === 'argv'
-              ? [...worker.argv, promptFile].map(shQuote).join(' ')
-              : expandAgentCmd(worker.command, promptFile)
-        // the native wrapper, verbatim — the mounted paths make .exit/
-        // log land where the host ladder reads them. --init gives the
-        // worker a reaper so grandchildren can't zombie inside; --rm
-        // removes the corpse on exit so `docker ps -a` doesn't fill
-        // with bro litter and the name frees for a respawn.
-        const wrapper = `{ ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } >> ${shQuote(log)} 2>&1`
-        const mounts = dockerMounts(spec)
-        const res = dockerRun([
-          'run',
-          '-d',
-          '--init',
-          '--rm',
-          '--name',
-          name,
-          '--workdir',
-          mounts[0] ?? resolve(spec.repoRoot),
-          '--label',
-          'bro.managed=1',
-          '--label',
-          `bro.step=${spec.molStep}`,
-          ...mounts.flatMap((m) => ['-v', `${m}:${m}`]),
-          '--env-file',
-          envFile,
-          ...agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(([k, v]) => [
-            '-e',
-            `${k}=${v}`,
-          ]),
-          ...runArgs,
-          image,
-          'sh',
-          '-c',
-          wrapper,
-        ])
-        rmSync(envFile, { force: true }) // the env is baked into container config — the file has done its job
-        if (res.code !== 0) {
+        let containerId = ''
+        try {
+          // a corpse with our name (crash between entry and rm, a
+          // respawn over a stopped container) collides docker run —
+          // clear it
           dockerRun(['rm', '-f', name])
+          // ambient env rides an --env-file like tmux's 0600 file —
+          // argv is visible to every local user (`ps`, docker
+          // inspect), so the ambient bag (secrets included) never goes
+          // on -e. Values with newlines can't survive docker's
+          // line-based format — dropped with a warning naming the keys.
+          const dropped: string[] = []
+          const ambient = Object.entries({ ...process.env, ...spec.env })
+            .filter((e): e is [string, string] => {
+              if (
+                e[1] === undefined ||
+                !/^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) ||
+                AGENT_PIN_KEYS.has(e[0])
+              ) {
+                return false
+              }
+              if (e[1].includes('\n') || e[1].includes('\r')) {
+                dropped.push(e[0])
+                return false
+              }
+              return true
+            })
+            .map(([k, v]) => `${k}=${v}`)
+            .join('\n')
+          if (dropped.length > 0) {
+            // a multi-line value can't survive docker's line-based env
+            // file — say which keys the container will NOT see
+            console.error(
+              `warning: docker env-file drops ${dropped.length} var(s) with newline values: ${dropped.join(', ')}`
+            )
+          }
+          writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
+          const worker = spec.worker
+          warnNoPromptFile(worker, command)
+          const cliBadge =
+            worker === undefined
+              ? commandCliName(command)
+              : worker.kind === 'argv'
+                ? worker.cliName
+                : commandCliName(worker.command)
+          const runLine =
+            worker === undefined
+              ? expandAgentCmd(command, promptFile)
+              : worker.kind === 'argv'
+                ? [...worker.argv, promptFile].map(shQuote).join(' ')
+                : expandAgentCmd(worker.command, promptFile)
+          // the native wrapper, verbatim — the mounted paths make .exit/
+          // log land where the host ladder reads them. --init gives the
+          // worker a reaper so grandchildren can't zombie inside; --rm
+          // removes the corpse on exit so `docker ps -a` doesn't fill
+          // with bro litter and the name frees for a respawn.
+          const wrapper = `{ ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } >> ${shQuote(log)} 2>&1`
+          const mounts = dockerMounts(spec)
+          const res = dockerRun([
+            'run',
+            '-d',
+            '--init',
+            '--rm',
+            // operator args FIRST — last-wins semantics would otherwise
+            // let a stray `--name`/`--workdir` shadow the contract the
+            // registry, liveness and stop all key off
+            ...runArgs,
+            '--name',
+            name,
+            '--workdir',
+            mounts[0] ?? resolve(spec.repoRoot),
+            '--label',
+            'bro.managed=1',
+            '--label',
+            `bro.step=${spec.molStep}`,
+            ...mounts.flatMap((m) => ['-v', `${m}:${m}`]),
+            '--env-file',
+            envFile,
+            ...agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(([k, v]) => [
+              '-e',
+              `${k}=${v}`,
+            ]),
+            image,
+            'sh',
+            '-c',
+            wrapper,
+          ])
+          rmSync(envFile, { force: true }) // the env is baked into container config — the file has done its job
+          if (res.code !== 0) {
+            throw new SpawnError(
+              `docker run failed — ${res.err !== '' ? res.err : `exited ${res.code}`}`,
+              'unavailable'
+            )
+          }
+          containerId = res.out.trim().split('\n')[0] ?? ''
+        } catch (err) {
+          // ANY setup failure after the reservation releases it — a
+          // leaked slot starves the quota until its TTL lapses. The
+          // registry entry already landed; the spawnError fields it,
+          // and the env file (ambient secrets included) goes too.
+          dockerRun(['rm', '-f', name])
+          rmSync(envFile, { force: true })
           if (reservation !== undefined) {
             releaseSessionSlot(reservation)
           }
           try {
-            patchAgentRegistry(dir, spec.molStep, { spawnError: res.err })
+            patchAgentRegistry(dir, spec.molStep, {
+              spawnError: err instanceof Error ? err.message : String(err),
+            })
           } catch {
             // the entry landed already — the SpawnError still reports
           }
-          throw new SpawnError(
-            `docker run failed — ${res.err !== '' ? res.err : `exited ${res.code}`}`,
-            'unavailable'
-          )
+          throw err
         }
         const insp = dockerInspect(name)
         const spawned = patchAgentRegistry(dir, spec.molStep, {
-          containerId: res.out.trim().split('\n')[0],
+          containerId,
           ...(insp.pid !== undefined
-            ? { pid: insp.pid, pidStart: procStat(insp.pid)?.start ?? null }
+            ? // State.Pid is a display handle only — a remote/VM daemon
+              // reports ITS host's pid, meaningless to local /proc and
+              // pidAlive; pidStart stays null so nothing correlates it
+              { pid: insp.pid, pidStart: null }
             : {}),
         })
         writeWorkMarker(dir, agentId, spec.molStep, insp.pid)
@@ -3546,7 +3585,14 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       const [molStep, entry] = hit
       const name = dockerContainerName(entry)
       if (name !== undefined && entry.stopped !== true) {
-        dockerRun(['rm', '-f', name])
+        // rm by the immutable container ID when recorded — respawns
+        // reuse agentId (and thus the name), so a name-targeted rm
+        // landing after a respawn's run would kill the NEW worker
+        const target =
+          typeof entry.containerId === 'string' && entry.containerId !== ''
+            ? entry.containerId
+            : name
+        dockerRun(['rm', '-f', target])
         // let the rm land before recording the stop — 'stopped' on a
         // still-live container would let a respawn run beside it
         const deadline = Date.now() + 2_000

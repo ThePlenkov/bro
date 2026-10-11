@@ -34,7 +34,9 @@ one registry entry per molStep, `pid`→container's host pid,
 ### Isolation model — same paths inside and out
 
 `docker run` mounts every path the worker needs at its **identical
-absolute host path**:
+absolute host path**, canonicalized through `resolve()` + `realpath()`
+— a symlinked component would otherwise mount a path that resolves to
+a different inode (or nothing) inside the container:
 
 - the worktree (`--workdir` too) — `spec.repoRoot`
 - the git common dir — covers `.git/worktrees/<n>` (the worktree's
@@ -54,10 +56,11 @@ worker payloads ride verbatim: `template` expands `{promptFile}`,
 
 Ambient env (`process.env` + `spec.env` minus the connector-owned pins)
 rides `--env-file <agentId>.env` — a 0600 file in the mounted agents
-home, deleted after the `docker run` call the way tmux's env file is
-deleted after the pane sources it. Values containing newlines are
-dropped (docker's env-file is line-based and takes quotes literally).
-The identity pins go on `-e` flags — non-secret, same as tmux.
+home, deleted after the `docker run` call (and on any spawn failure)
+the way tmux's env file is deleted after the pane sources it. Values
+containing newlines are dropped (docker's env-file is line-based and
+takes quotes literally) with a warning naming the keys. The identity
+pins go on `-e` flags — non-secret, same as tmux.
 
 ### Image resolution
 
@@ -68,9 +71,11 @@ The identity pins go on `-e` flags — non-secret, same as tmux.
    files are commented JSON, not strict JSON).
    - `"image": "<ref>"` — used verbatim.
    - `"build": {"dockerfile"|"dockerFile": <f>, "context": <c>}` —
-     built once per content as `bro-dev-<sha256(dc+df)[:12]>`;
-     `docker image inspect` skips the rebuild. Context defaults to the
-     devcontainer's directory. `build.args` ride as `--build-arg`.
+     tagged `bro-dev-<sha256(dc+df)[:12]>` and built on EVERY resolve:
+     the tag can't see the build context's files, but docker's own
+     layer cache can — a no-op build is seconds, a stale image is a
+     wrong worker. Context defaults to the devcontainer's directory.
+     `build.args` ride as `--build-arg`.
    - `dockerComposeFile` without image/build → a named config gap
      (compose lifecycle is out of scope), never a silent fallback.
 3. Neither → `SpawnError 'config'` naming `agents.docker.image`.
@@ -94,8 +99,14 @@ orchestration model; the docker-CLI path is the contract here.
   doesn't corpse the fleet.
 - Recorded death: the mounted `.exit` file is the only record — native
   semantics verbatim, the shared ladder harvests it unchanged.
-- `stop`: `docker rm -f` (SIGKILL semantics, like `kill-session`), then
-  the same locked revalidation + `stopped` patch + marker drop.
+- `stop`: `docker rm -f` by the recorded `containerId` (immutable —
+  respawns reuse `agentId` and thus the name, so a name-targeted rm
+  landing after a respawn's run would kill the new worker), name as
+  fallback; then the same locked revalidation + `stopped` patch +
+  marker drop.
+- `runArgs` sits before the fixed contract args — docker's last-wins
+  flag semantics then keep `--name`/`--workdir`/labels/mounts under
+  bro's control no matter what an operator passes.
 
 ### Selection + capabilities
 

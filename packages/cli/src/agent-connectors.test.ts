@@ -166,13 +166,25 @@ if (args[0] === 'inspect') {
 }
 if (args[0] === 'rm') {
   const db = load(DB, {})
-  const name = args[args.length - 1]
+  const target = args[args.length - 1]
+  // docker rm takes a name OR an id — resolve either to the record
+  const name = Object.keys(db).find(
+    (n) => n === target || db[n].id === target || 'fakeid-' + n === target
+  )
+  if (name === undefined) { console.error('Error response from daemon: No such container: ' + target); process.exit(1) }
   const c = db[name]
-  if (c && alive(c.pid)) { try { process.kill(-c.pid, 'SIGKILL') } catch {} }
+  if (alive(c.pid)) { try { process.kill(-c.pid, 'SIGKILL') } catch {} }
   delete db[name]; save(DB, db)
   out(name + '\\n'); process.exit(0)
 }
 if (args[0] === 'run') {
+  // $DOCKER_FAKE_HOME/fail-next-run — a one-shot daemon error for
+  // spawn-failure paths
+  if (fs.existsSync(HOME + '/fail-next-run')) {
+    fs.rmSync(HOME + '/fail-next-run')
+    console.error('Error response from daemon: run refused')
+    process.exit(1)
+  }
   // [image 'sh' '-c' wrapper] is the emitted tail — flags end before it
   const VALUE_FLAGS = new Set(['--name', '--workdir', '-w', '--env-file', '-e', '-v', '--label', '--network', '-p', '--memory', '--cpus', '--user', '-u', '--restart', '--entrypoint', '--add-host'])
   let name, cwd = process.cwd(), env = {}
@@ -199,7 +211,7 @@ if (args[0] === 'run') {
     cwd, env: { ...process.env, ...env }, detached: true, stdio: 'ignore',
   })
   child.unref()
-  db[name] = { pid: child.pid, image, argv: args }
+  db[name] = { pid: child.pid, image, argv: args, id: 'fakeid-' + name }
   save(DB, db)
   out('fakeid-' + name + '\\n')
   process.exit(0)
@@ -1177,6 +1189,72 @@ describe('docker connector', () => {
     }
   })
 
+  test('operator runArgs cannot shadow the contract name/workdir', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { docker: true })
+    try {
+      const env: AgentConnectorEnv = {
+        ...f.env,
+        agents: {
+          docker: {
+            ...f.env.agents['docker'],
+            runArgs: ['--name', 'evil', '--workdir', '/tmp'],
+          },
+        },
+      }
+      const c = makeDockerConnector({ dir: f.main }, env)
+      const info = await c.spawn(
+        SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+      )
+      const db = JSON.parse(
+        readFileSync(join(process.env.DOCKER_FAKE_HOME!, 'containers.json'), 'utf8')
+      ) as Record<string, { argv: string[] }>
+      // last-wins puts OUR --name/--workdir last — the contract holds
+      assert.ok(db[`bro-${info.id}`], 'container must be named by the contract')
+      assert.equal(db['evil'], undefined)
+      await c.stop(info.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('a docker run failure releases the session reservation — the next spawn fits', async () => {
+    const f = fixture(
+      [
+        { id: 'fx-1', status: 'open' },
+        { id: 'fx-2', status: 'open' },
+      ],
+      undefined,
+      { docker: true }
+    )
+    const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
+    const reservationsDir = mkdtempSync(join(tmpdir(), 'bro-devin-resv-'))
+    // no live sessions; cap 1 — a leaked reservation would fill it
+    const env: AgentConnectorEnv = {
+      ...f.env,
+      agents: {
+        docker: { ...f.env.agents['docker'], sessionKind: 'devin' },
+        devin: { maxSessions: 1, lockDir, reservationsDir },
+      },
+    }
+    try {
+      const c = makeDockerConnector({ dir: f.main }, env)
+      writeFileSync(join(process.env.DOCKER_FAKE_HOME!, 'fail-next-run'), 'x')
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'true')),
+        /docker run failed/
+      )
+      // had the reservation leaked, this spawn would hit the quota
+      const info = await c.spawn(
+        SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)')
+      )
+      await c.stop(info.id)
+    } finally {
+      rmSync(lockDir, { recursive: true, force: true })
+      rmSync(reservationsDir, { recursive: true, force: true })
+      cleanup(f)
+    }
+  })
+
   test('dockerImageFor — image knob > devcontainer image > content-hash build', () => {
     const f = fixture([], undefined, { docker: true })
     try {
@@ -1201,7 +1279,9 @@ describe('docker connector', () => {
       writeFileSync(join(dcDir, 'Dockerfile'), 'FROM scratch\n')
       const tag = dockerImageFor(spec, {})
       assert.match(tag, /^bro-dev-[0-9a-f]{12}$/)
-      assert.equal(dockerImageFor(spec, {}), tag) // cache hit — no second build
+      // every resolve builds — the tag namespaces content, docker's own
+      // layer cache picks up build.context changes a hash can't see
+      assert.equal(dockerImageFor(spec, {}), tag)
       const imgs = JSON.parse(
         readFileSync(join(process.env.DOCKER_FAKE_HOME!, 'images.json'), 'utf8')
       ) as string[]
@@ -1235,6 +1315,10 @@ describe('docker connector', () => {
       a: ['x'],
       s: 'not a comment // nor /* this */',
     })
+    // a trailing comma whose `}` hides behind a comment still drops —
+    // the lookahead walks comments, not just whitespace
+    assert.deepEqual(JSON.parse(jsoncToJson('{ "a": 1, /* trailing */ }')), { a: 1 })
+    assert.deepEqual(JSON.parse(jsoncToJson('{ "b": 2, // trailing\n}')), { b: 2 })
   })
 })
 
