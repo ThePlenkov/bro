@@ -12,9 +12,16 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0` (major-pinned), plus
 store.
 
 `bro agents` is the supervisor surface over the orchestrator connectors
-(native detached processes, gascity, tmux, …). The agentId registry in
-the git common dir makes an agent's identity survive its process — a
+(native detached processes, gascity, tmux, docker, …). The agentId
+registry in the git common dir makes an agent's identity survive its process — a
 respawn reuses the dead agent's id, worktree, and stored prompt.
+
+The `docker` connector runs each worker in a container — the image comes
+from `agents.docker.image` or the repo's devcontainer (see
+`agents.docker.*` in configuration docs). Worktree, git common dir and
+beads store mount at their host paths, so the same registry/claims/exit
+contract holds; an unreachable docker daemon degrades the view, never
+a stale 'lost' verdict.
 
 ## Commands
 

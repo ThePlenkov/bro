@@ -121,6 +121,17 @@ backend option set or schema default. Choose the backend under
 | `agents.<kind>.maxSessions` | unset | Host-wide live-session quota for that session kind (e.g. `agents.devin.maxSessions`), admitted under a shared slot lock |
 | `agents.<kind>.maxWorkers` | unset | Host-wide quota counting only *spawned* sessions of the kind — interactive sessions never consume this budget. The plane must distinguish workers (devin: `BRO_AGENT_ID` env badge or a non-terminal stdin); arming it on a plane that cannot refuses loudly |
 
+The `docker` backend (`connectors.agents: "docker"` or `--connector docker`)
+runs each worker in a container with the worktree, git common dir and
+beads store mounted at their host paths:
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `agents.docker.command` | `loop.agent` | Command run inside the container |
+| `agents.docker.image` | unset | Image to run; wins over the devcontainer when set |
+| `agents.docker.devcontainer` | `.devcontainer/devcontainer.json` | JSONC devcontainer file, repo-relative or absolute. Its `image` is used directly (pulled before spawning when absent); `build.dockerfile` is rebuilt on every spawn — docker's layer cache makes a no-op build fast — under a content-hash tag (`bro-dev-<sha256/12>`). `dockerComposeFile` configs are unsupported — set `agents.docker.image` for those |
+| `agents.docker.runArgs` | unset | Extra `docker run` arguments — array or whitespace-split string (e.g. `["--network", "host"]`). Containers default to the host `--user uid:gid` so bind-mounted files stay host-owned; set `-u`/`--user` here to override |
+
 ### `providers`
 
 The named provider registry — `{ "<name>": { "type": "api"\|"acp"\|"cli",
