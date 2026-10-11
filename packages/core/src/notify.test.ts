@@ -8,6 +8,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs'
@@ -22,6 +23,7 @@ import {
   mailboxDir,
   notifyConnector,
   notifyDir,
+  peekMailbox,
   renderDrop,
   userMailboxDir,
 } from './notify.ts'
@@ -488,6 +490,102 @@ describe('renderDrop', () => {
       renderDrop(JSON.stringify({ topic: 'notify', kind: 'note', payload: 'plain json note' })),
       'plain json note'
     )
+  })
+})
+
+describe('peekMailbox', () => {
+  test('tails pending drops newest-first without consuming — files stay put', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        dropMailbox(mb, 'older note', 'note')
+        writeFileSync(join(mb, 'note-9999999999999-z.txt'), 'newest note')
+        const first = peekMailbox(dir)
+        assert.equal(first.length, 2)
+        assert.match(first[0]!.text, /newest note/)
+        assert.match(first[1]!.text, /older note/)
+        // nothing consumed: a second peek returns the same tail, and a
+        // real drain still delivers both drops afterwards
+        assert.equal(peekMailbox(dir).length, 2)
+        assert.equal(drainMailbox(dir, 's1').length, 2)
+      })
+    })
+  })
+
+  test('expired and empty drops skip the tail but are not reaped', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        mkdirSync(mb, { recursive: true })
+        const stale = join(mb, 'note-100-a.txt')
+        writeFileSync(stale, 'ancient')
+        const old = new Date(Date.now() - DROP_TTL_MS - 1000)
+        utimesSync(stale, old, old)
+        writeFileSync(join(mb, 'note-200-b.txt'), '   ')
+        dropMailbox(mb, 'live note', 'note')
+        const out = peekMailbox(dir)
+        assert.equal(out.length, 1)
+        assert.match(out[0]!.text, /live note/)
+        // read-only contract: the expired drop stays for the drain to reap
+        assert.equal(existsSync(stale), true)
+      })
+    })
+  })
+
+  test('addressed drops appear in the tail — it reports mailbox state, not one consumer', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        dropMailbox(
+          mb,
+          JSON.stringify({ topic: 'notify', kind: 'ask', payload: 'pick A', to: 'fixer-1', source: 'sdd' }),
+          'note'
+        )
+        const out = peekMailbox(dir)
+        assert.equal(out.length, 1)
+        assert.match(out[0]!.text, /pick A/)
+        assert.match(out[0]!.text, /fixer-1/)
+      })
+    })
+  })
+
+  test('a symlinked .txt is debris, not a drop — peek and drain never read through', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        mkdirSync(mb, { recursive: true })
+        const secret = join(dir, 'secret-outside-mailbox.txt')
+        writeFileSync(secret, 's3cret-bytes')
+        const name = `note-${Date.now()}-ab12.txt`
+        symlinkSync(secret, join(mb, name))
+        assert.deepEqual(peekMailbox(dir), [])
+        assert.deepEqual(drainMailbox(dir, 's1'), [])
+        // the drain did not consume it either — it lingers until its own
+        // mtime expires, but its bytes never left the mailbox
+        assert.ok(readdirSync(mb).includes(name))
+      })
+    })
+  })
+
+  test('the limit caps the tail; no mailboxes anywhere is an empty tail', () => {
+    withRepo((dir) => {
+      withXdg(() => {
+        const mb = mailboxDir(dir)!
+        mkdirSync(mb, { recursive: true })
+        for (let i = 0; i < 5; i++) {
+          writeFileSync(join(mb, `note-${1000 + i}-x${i}.txt`), `note ${i}`)
+        }
+        assert.equal(peekMailbox(dir, 3).length, 3)
+      })
+    })
+    const bare = tmp('bro-peek-none-')
+    try {
+      withXdg(() => {
+        assert.deepEqual(peekMailbox(bare), [])
+      })
+    } finally {
+      rmSync(bare, { recursive: true, force: true })
+    }
   })
 })
 

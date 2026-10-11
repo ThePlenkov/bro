@@ -54,6 +54,7 @@ import {
   type AgentConnector,
   type AgentInfo,
   type AgentState,
+  type DiscoveredSession,
 } from '@broject/core'
 import type { AcpSeam, FetchFn } from '@broject/providers'
 import { beadsDir } from '@broject/convoy'
@@ -182,7 +183,7 @@ export interface FleetOccupancy {
   maxConcurrent: number
 }
 
-function occupancyOf(dir: string, env: AgentConnectorEnv): FleetOccupancy {
+export function occupancyOf(dir: string, env: AgentConnectorEnv): FleetOccupancy {
   return {
     occupied: fleetOccupancyFor(dir, env),
     maxConcurrent: fleetCapOf(env),
@@ -223,7 +224,7 @@ function laneView(
   return { kind, lane, live, max }
 }
 
-function sessionQuotaViewsOf(env: AgentConnectorEnv): SessionQuotaView[] {
+export function sessionQuotaViewsOf(env: AgentConnectorEnv): SessionQuotaView[] {
   const out: SessionQuotaView[] = []
   for (const plane of sessionPlanes()) {
     const q = sessionQuotaConfig(env.agents, plane.kind)
@@ -254,6 +255,38 @@ function sessionQuotaViewsOf(env: AgentConnectorEnv): SessionQuotaView[] {
     }
   }
   return out
+}
+
+/** A session-plane discovery row tagged with the plane that saw it. */
+export interface DiscoveredAgentSession extends DiscoveredSession {
+  kind: string
+}
+
+/** Sessions the planes see live that never passed through the agents
+ *  registry — interactive sessions, foreign spawns, acp workers a
+ *  legacy spawn path skipped registering (the /fleet board's union
+ *  rows). A plane without listLive contributes nothing; a plane whose
+ *  scan throws degrades to a note — one broken state dir must not take
+ *  the whole board's agent list down with it. */
+export function discoverSessions(env: AgentConnectorEnv): {
+  sessions: DiscoveredAgentSession[]
+  degraded: string[]
+} {
+  const sessions: DiscoveredAgentSession[] = []
+  const degraded: string[] = []
+  for (const plane of sessionPlanes()) {
+    if (plane.listLive === undefined) {
+      continue
+    }
+    try {
+      for (const s of plane.listLive(env.agents[plane.kind] ?? {})) {
+        sessions.push({ kind: plane.kind, ...s })
+      }
+    } catch (err) {
+      degraded.push(`${plane.kind}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  return { sessions, degraded }
 }
 
 /** `fleet: 2/3 slots occupied` — `uncapped` instead of the ceiling when
