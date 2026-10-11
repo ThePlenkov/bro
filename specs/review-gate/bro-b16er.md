@@ -50,7 +50,11 @@ owned by a process no session teardown can reach.
   child's live marker was seen; a child that exited before arming
   reports failure (exit 1, log path named); a child still alive at
   the 10s deadline reports `marker pending` — honest, since its
-  marker may land late and the pid is real either way.
+  marker may land late and the pid is real either way. A child that
+  exits 0 during arming is neither: an already-set gate finishes the
+  wait (and its `--merge`) inside the spawn, so the parent reports
+  `settled` instead of claiming a dead pid is watching — the marker
+  window on an instant settle is a race the parent can lose.
 - **Parent does less, not more** — `resolvePr` + flag validation
   stay up front so a typo'd PR or bad flag fails where the user
   reads stderr; auth still gates inside the child (the marker
@@ -65,15 +69,15 @@ owned by a process no session teardown can reach.
 
 ## Plan
 
-- [ ] `cli/commands/act.ts`: `--detach` on `wait`; shared
+- [x] `cli/commands/act.ts`: `--detach` on `wait`; shared
       detached-spawn + marker-confirm helper; `respawnWatcher`
       delegates to it and gains the log; per-PR log under
       `<git-common>/bro/`
-- [ ] `act/connector.ts`: stop-gate nudge names `--detach` instead
+- [x] `act/connector.ts`: stop-gate nudge names `--detach` instead
       of hand-rolled setsid
-- [ ] `skills/act/SKILL.md`, `site/content/docs/commands/act.md`:
+- [x] `skills/act/SKILL.md`, `site/content/docs/commands/act.md`:
       `--detach` in the wait row and the watcher-survival policy
-- [ ] `act-wait.e2e.test.ts`: detach arms a confirmed live marker,
+- [x] `act-wait.e2e.test.ts`: detach arms a confirmed live marker,
       detached `--merge` lands the PR after the parent exits,
       `--cleanup` without `--merge` refuses, `--json` shape
 - [ ] `npm test` + typecheck, PR

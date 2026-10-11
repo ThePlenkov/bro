@@ -401,11 +401,13 @@ function waitLogFd(dir: string, pr: number): number | undefined {
 
 interface DetachedWait {
   pid: number
-  /** The child's own live watch marker was seen — the wait is armed.
-   *  false means the deadline hit with the child still alive (late
-   *  arming — a slow auth probe); the pid is real, the marker may
-   *  still land. */
-  confirmed: boolean
+  /** 'armed' — the child's own live watch marker was seen: the wait is
+   *  running detached. 'settled' — the child already exited 0: an
+   *  already-set gate finishes the wait inside the spawn (a merge armed
+   *  with --merge already ran). 'pending' — alive at the deadline
+   *  without a marker yet (late arming — a slow auth probe); the pid is
+   *  real, the marker may still land. */
+  state: 'armed' | 'settled' | 'pending'
 }
 
 /** Spawn `act wait <args>` detached + unref'd — the nohup-equivalent a
@@ -413,10 +415,12 @@ interface DetachedWait {
  *  stdio on the per-PR log under <git-common>/bro/. `SELF_ENTRY` is
  *  the running cli entry, so the child re-runs this same binary.
  *
- *  `confirmed` is the marker contract — resolves true only once the
+ *  The marker is the arm contract — 'armed' resolves only once the
  *  child's own live marker shows in listWatches, so a spawn that exits
- *  early (auth gate, config error) is undefined or unconfirmed, never a
- *  false "watching". */
+ *  early never reports "watching". An exit during arming is read off
+ *  the 'exit' event (signal-killed children leave exitCode null): a
+ *  clean 0 means the gate was already settled — the wait did its whole
+ *  job inline; anything else is a failed spawn and resolves undefined. */
 async function spawnDetachedWait(opts: {
   dir: string
   pr: number
@@ -446,8 +450,12 @@ async function spawnDetachedWait(opts: {
     }
   }
   // an unhandled 'error' event (ENOENT on cwd, EACCES on the entry)
-  // would crash the caller mid-loop — swallow it; confirmed stays false
+  // would crash the caller mid-loop — swallow it; state stays the verdict
   child.on('error', () => {})
+  let exited: number | null | undefined // undefined = still running; null = signaled
+  child.once('exit', (code) => {
+    exited = code
+  })
   child.unref()
   const pid = child.pid
   if (pid === undefined) {
@@ -457,14 +465,14 @@ async function spawnDetachedWait(opts: {
   while (Date.now() < deadline) {
     const live = listWatches(opts.dir).find((l) => l.alive && l.watch.pid === pid)
     if (live !== undefined) {
-      return { pid, confirmed: true }
+      return { pid, state: 'armed' }
     }
-    if (child.exitCode !== null) {
-      return undefined // exited before ever publishing its marker
+    if (exited !== undefined) {
+      return exited === 0 ? { pid, state: 'settled' } : undefined
     }
     await new Promise((r) => setTimeout(r, 100))
   }
-  return { pid, confirmed: false }
+  return { pid, state: 'pending' }
 }
 
 /** `bro act wait --detach` — arm the wait as a detached child and
@@ -516,14 +524,23 @@ async function cmdWaitDetach(argv: string[]): Promise<void> {
     return
   }
   if (argv.includes('--json')) {
-    console.log(JSON.stringify({ pr: t.pr, pid: r.pid, armed: r.confirmed, log }, null, 2))
+    console.log(JSON.stringify({ pr: t.pr, pid: r.pid, state: r.state, log }, null, 2))
+    return
+  }
+  if (r.state === 'settled') {
+    // the gate was already settled — the wait ran to its verdict inside
+    // the spawn (a --merge already landed), no watcher is needed at all
+    console.log(
+      `act wait ${link} — gate already settled; the wait ran to completion ` +
+        `in the child (exit 0)${log === null ? '' : ` — log: ${log}`}`
+    )
     return
   }
   console.log(
     `act wait ${link} detached — pid ${r.pid} polling every ${interval}s, timeout ${timeout}m`
   )
   console.log(`  inspect: \`bro act status --pr ${t.pr}\`${log === null ? '' : ` · log: ${log}`}`)
-  if (!r.confirmed) {
+  if (r.state === 'pending') {
     console.error('warning: marker not confirmed within 10s — the child may still be arming')
   }
 }
@@ -537,7 +554,8 @@ async function cmdWaitDetach(argv: string[]): Promise<void> {
  *  stay on disk as the still-unkept promise. A child alive but unmarked
  *  at the deadline also resolves undefined: keeping the dead markers
  *  flags the promise again rather than trusting a pid that may yet die
- *  pre-arm. */
+ *  pre-arm. A child that settled 0 during arming did the wait's whole
+ *  job — its pid discharges the dead markers too. */
 export async function respawnWatcher(dir: string, plan: RearmPlan): Promise<number | undefined> {
   // --cleanup retires the worktree containing the watcher's cwd — it is
   // replayed only when the recorded workdir still exists. Replaying it
@@ -562,7 +580,7 @@ export async function respawnWatcher(dir: string, plan: RearmPlan): Promise<numb
   }
   const cwd = workdirOk ? plan.workdir! : dir
   const r = await spawnDetachedWait({ dir, pr: plan.pr, args, cwd })
-  return r !== undefined && r.confirmed ? r.pid : undefined
+  return r !== undefined && r.state !== 'pending' ? r.pid : undefined
 }
 
 /** `<git-common>/bro/act-rearm.lock` — serializes the plan→respawn

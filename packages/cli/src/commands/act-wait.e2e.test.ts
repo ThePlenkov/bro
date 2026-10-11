@@ -227,6 +227,8 @@ describe('act wait --detach (bro-b16er)', () => {
       ['act', 'wait', '7', '--interval', '1', '--timeout', '1', '--merge', '--detach'],
       { cwd: main }
     )
+    // the gate is already green — the child may finish the whole wait
+    // inside the spawn ('settled', no watcher needed) or arm then merge
     assert.equal(r.code, 0, r.stderr)
     const m = /pid (\d+)/.exec(r.stdout)
     if (m !== null) {
@@ -273,9 +275,9 @@ describe('act wait --detach (bro-b16er)', () => {
       { cwd: main }
     )
     assert.equal(r.code, 0, r.stderr)
-    const out = JSON.parse(r.stdout) as { pr: number; pid: number; armed: boolean }
+    const out = JSON.parse(r.stdout) as { pr: number; pid: number; state: string }
     assert.equal(out.pr, 7)
-    assert.equal(out.armed, true)
+    assert.equal(out.state, 'armed')
     pid.n = out.pid
   })
 })
