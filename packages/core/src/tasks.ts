@@ -273,6 +273,11 @@ export interface PublishResult {
    *  projection joined one — the caller persists it on the epic row's
    *  external_ref. Absent when no container was needed. */
   epicRef?: string
+  /** Set when the task's nonempty external_ref mapped to a MISSING item
+   *  on this store — the connector re-published and the caller must
+   *  overwrite the stale ref, or the next pass duplicates again.
+   *  Foreign refs never carry it: they decline (undefined) instead. */
+  replaceExternalRef?: boolean
 }
 
 export interface TaskStore {

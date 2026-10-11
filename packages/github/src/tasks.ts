@@ -988,6 +988,7 @@ function publishSync(
   opts?: { epic?: TaskRow }
 ): PublishResult | undefined {
   const ref = task.external_ref?.trim() ?? ''
+  let replaceExternalRef: true | undefined
   if (ref !== '') {
     try {
       const n = issueNumber(dir, ref)
@@ -995,20 +996,31 @@ function publishSync(
       if (cur !== undefined) {
         return { item: pub(toRow(cur)) }
       }
-      // the mapped item is gone — fall through to re-publish
+      // the mapped item is gone — fall through to re-publish, and flag
+      // the stale map so the caller's write-back replaces it instead of
+      // preserving it (the next pass would duplicate again)
+      replaceExternalRef = true
     } catch {
       return undefined
     }
   }
   const epic = opts?.epic
   const { milestone, epicRef } = epic === undefined ? {} : epicMilestone(dir, epic)
+  // the source row's metadata bag is provenance, never identity — an
+  // `external_ref` inside it (a stale or foreign map value) must not
+  // reach the item's trailer: toRow reads trailer external_ref as the
+  // item's own ref, so the caller's write-back would re-stamp the bogus
+  // value and dedup stays broken. The item's own url is its canonical
+  // ref here; a deliberate trailer ref rides TaskInput.externalRef,
+  // which publish never sets.
+  const { external_ref: _eref, ...restMeta } = task.metadata ?? {}
   const row = createSync(dir, {
     title: task.title !== undefined && task.title !== '' ? task.title : task.id,
     description: task.description,
     type: task.issue_type,
     priority: task.priority,
     labels: [MIRROR_LABEL, ...(task.labels ?? []).filter((l) => l !== MIRROR_LABEL)],
-    metadata: { ...(task.metadata ?? {}), bead: task.id },
+    metadata: { ...restMeta, bead: task.id },
   })
   if (milestone !== undefined) {
     // best-effort: the issue already exists, so a failed join must not
@@ -1029,7 +1041,7 @@ function publishSync(
       console.error(`warning: milestone join on issue ${row.id} failed — ${join.err}`)
     }
   }
-  return { item: pub(row), epicRef }
+  return { item: pub(row), epicRef, replaceExternalRef }
 }
 
 // --- the stores -------------------------------------------------------------------

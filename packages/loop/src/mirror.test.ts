@@ -164,6 +164,21 @@ describe('projectBeads', () => {
     assert.equal((tasks as { updates: unknown[] }).updates.length, 0)
   })
 
+  test('a connector-flagged stale ref is replaced — the dedup map heals', () => {
+    // publish marks the re-publish when the old external_ref mapped to a
+    // missing item on that store; persistRef honors ONLY that flag —
+    // without it the next pass re-publishes another duplicate (bro-4upn5)
+    const tasks = fakeStore(
+      [row({ issue_type: 'feature', external_ref: 'https://github.com/acme/widgets/issues/7' })],
+      () => ({ ...published('42'), replaceExternalRef: true })
+    )
+    assert.deepEqual(projectBeads(deps(tasks), ['bro-x1']), ['42'])
+    assert.deepEqual(
+      (tasks as { updates: [string, Record<string, string | number>][] }).updates,
+      [['bro-x1', { 'external-ref': 'https://github.com/acme/widgets/issues/42' }]]
+    )
+  })
+
   test('an epic parent passes through and its ref writes back on the epic row', () => {
     const epic = row({ id: 'bro-e1', issue_type: 'epic', title: 'the epic' })
     const child = row({ id: 'bro-c1', issue_type: 'feature', parent: 'bro-e1' })
