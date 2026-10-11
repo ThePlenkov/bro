@@ -1,12 +1,12 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request, type IncomingMessage } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
-import { SpawnError, type AgentConnector, type AgentInfo } from '@broject/core'
-import { initRepo, inside } from './testrepo.ts'
+import { lockHolderPid, SpawnError, type AgentConnector, type AgentInfo } from '@broject/core'
+import { initRepo, inside, insideAsync } from './testrepo.ts'
 import { SpawnInputError } from './agents.ts'
 import {
   acquireServeLock,
@@ -399,44 +399,77 @@ describe('serve state discovery', () => {
     assert.equal(serveStatePath('/tmp'), null)
   })
 
-  test('the serve lock is exclusive and breaks on a dead holder', () => {
+  test('the serve lock refuses a live foreign holder and steals a dead one', () => {
     const { root, main } = initRepo('bro-serve-lock-')
     inside(main, root, () => {
+      const lock = `${serveStatePath(main)}.lock`
       const release = acquireServeLock(main)
       assert.notEqual(release, undefined)
-      // the same process re-entering is refused — the lock is held, and
-      // our own pid is alive
-      assert.equal(acquireServeLock(main), undefined)
+      // the hold carries the shared filelock's pid:token shape
+      assert.equal(lockHolderPid(lock), process.pid)
+      // same-process re-acquire is re-entrant under filelock — a no-op
+      // release, not a refusal (contention is judged cross-process)
+      const again = acquireServeLock(main)
+      assert.notEqual(again, undefined)
+      again!()
+      assert.equal(existsSync(lock), true, 're-entrant release must not drop the outer hold')
       release!()
-      assert.equal(existsSync(`${serveStatePath(main)}.lock`), false)
+      assert.equal(existsSync(lock), false)
 
-      // a leftover lock naming a dead pid is broken, not honored
-      writeFileSync(`${serveStatePath(main)}.lock`, `${1 << 30}`)
+      // a live foreign holder's lock refuses a second server — a
+      // `pid:token` file naming a live pid that is not ours
+      writeFileSync(lock, `${process.ppid}:alien`)
+      assert.equal(acquireServeLock(main), undefined)
+      rmSync(lock)
+
+      // a leftover lock naming a dead pid is stolen, not honored
+      writeFileSync(lock, `${1 << 30}`)
       const retaken = acquireServeLock(main)
       assert.notEqual(retaken, undefined)
-      assert.equal(readFileSync(`${serveStatePath(main)}.lock`, 'utf8'), `${process.pid}`)
+      assert.equal(lockHolderPid(lock), process.pid)
       retaken!()
+      assert.equal(existsSync(lock), false)
     })
   })
 
-  test('an empty lock is in-flight while fresh, stealable when aged (wx fallback)', () => {
-    const { root, main } = initRepo('bro-serve-lock-wx-')
+  test('a tokenless or garbage lock is a dead leftover — stolen on sight', () => {
+    const { root, main } = initRepo('bro-serve-lock-gone-')
     inside(main, root, () => {
       const lock = `${serveStatePath(main)}.lock`
-      // the wx fallback's create-then-write window: a FRESH empty lock
-      // is a live writer mid-write — a starter must refuse, not break
+      // filelock's stage→link publish is atomic and never leaves an
+      // empty lock — a contentless or unparsable file has no pid to
+      // prove life, so it is stolen without a grace window
       mkdirSync(dirname(lock), { recursive: true })
-      writeFileSync(lock, '')
-      assert.equal(acquireServeLock(main), undefined)
-      assert.equal(existsSync(lock), true, 'fresh empty lock must survive a refused acquire')
-      // an empty lock older than the grace is a crashed writer's
-      // leftover — the next starter breaks it and takes over
-      const old = (Date.now() - 60_000) / 1000
-      utimesSync(lock, old, old)
-      const acquired = acquireServeLock(main)
-      assert.notEqual(acquired, undefined)
-      assert.equal(readFileSync(lock, 'utf8'), `${process.pid}`)
-      acquired!()
+      for (const leftover of ['', 'garbage']) {
+        writeFileSync(lock, leftover)
+        const acquired = acquireServeLock(main)
+        assert.notEqual(acquired, undefined, `leftover ${JSON.stringify(leftover)}`)
+        assert.equal(lockHolderPid(lock), process.pid)
+        acquired!()
+      }
+    })
+  })
+
+  test('a live serve hold is heartbeated — its lock never reads stale', async () => {
+    const { root, main } = initRepo('bro-serve-lock-hold-')
+    await insideAsync(main, root, async () => {
+      const release = acquireServeLock(main, { heartbeatMs: 25 })
+      assert.notEqual(release, undefined)
+      try {
+        const lock = `${serveStatePath(main)}.lock`
+        // age the file the way a >15min untouched hold would look to
+        // the janitor's sweep and contender steals — the beat must
+        // re-stamp it before either judges it
+        const past = new Date(Date.now() - 20 * 60_000)
+        utimesSync(lock, past, past)
+        const aged = statSync(lock).mtimeMs
+        await new Promise((r) => setTimeout(r, 100))
+        assert.ok(statSync(lock).mtimeMs > aged, 'the heartbeat must refresh the lock mtime')
+        assert.equal(lockHolderPid(lock), process.pid)
+      } finally {
+        release!()
+      }
+      assert.equal(existsSync(`${serveStatePath(main)}.lock`), false)
     })
   })
 })
