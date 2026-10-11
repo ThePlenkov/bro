@@ -30,6 +30,46 @@ pid marker, the session-start hook flags a dead marker, `bro act rearm`
 resurrects it. The watch cadence deserves the same marker + rearm
 mechanics, not an OS scheduler.
 
+## Observed kill boundary (retro bro-7qwgu)
+
+Measured on the night run of 2026-10-10→11: ~9h of session idle, user
+found the machine dead at 07:43 — no pulse, loop idle, fleet empty,
+16 PRs unprocessed, #424 blocked on 2 fixable threads all night.
+
+| process | spawn shape | after 9h idle |
+| --- | --- | --- |
+| `bro act wait --merge --cleanup` (#424) | exec-background shell | dead — merge never fired |
+| `bro serve` (pid 94696) | setsid | alive |
+| loop wrapper `while true; do bro drive; done` (pid 421707) | setsid | alive |
+
+The boundary is the session's lifetime scope, not backgroundness: the
+host's session-idle teardown kills the whole exec-shell tree —
+"background" exec shells are only turn-detached, never OS-detached. A
+process in its own session/process group — `setsid`,
+`spawn(..., { detached: true })` + `unref()`, systemd-run, tmux — sits
+outside the teardown's reach and survives the same window indefinitely.
+
+Design input this pins down:
+
+- **Durability is a spawn property.** A process that must outlive its
+  arming session has to be detached at creation — re-polling a dead
+  watcher is already too late (the merge watcher died silently and
+  nothing re-entered the loop).
+- **Rearm beats survive.** Between sessions nothing is alive anyway —
+  disk state (claims, worktrees, registry, mailbox, `pulse.json`)
+  carries across reboots; the checkpoint probes exist because a
+  detached process still dies with its machine. Idle survival wants
+  detachment; reboot survival wants marker + rearm; the pulse needs
+  both.
+- **`spawnPulse` is already inside the boundary** — `detached: true`,
+  `stdio: 'ignore'`, `unref()`: the hook exits on its timeout budget
+  while the child takes `pulse.lock` on its own lifetime.
+- **Mechanical, not prose.** The AGENTS.md "visible shell + setsid
+  twin" rule was known and still armed only the shell half — the same
+  boundary gates `bro daemon` (bro-h9ivr, the detached cadence owner)
+  and `bro act wait` self-detach (bro-b16er), so the durable shape
+  ships in the command, not in operator memory.
+
 ## Design
 
 The **orchestrator session** owns the cadence:
