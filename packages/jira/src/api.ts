@@ -113,6 +113,11 @@ interface AtlResult {
   err: string
 }
 
+const cliFail = (what: string, code: number, err: string): Error => {
+  const why = err !== '' ? err : `exit ${code}`
+  return new Error(`jira: ${what} failed — ${why}`)
+}
+
 export function atlTry(args: string[], timeoutMs = TIMEOUT_MS): AtlResult {
   const proc = spawnSync('atlassian', args, { // NOSONAR — PATH lookup is the contract (same as gh/glab)
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -129,7 +134,7 @@ export function atlTry(args: string[], timeoutMs = TIMEOUT_MS): AtlResult {
 export function atl(args: string[]): string {
   const { code, out, err } = atlTry(args)
   if (code !== 0) {
-    throw new Error(`jira: atlassian ${args[0]} ${args[1] ?? ''} failed — ${err || `exit ${code}`}`)
+    throw cliFail(`atlassian ${args[0]} ${args[1] ?? ''}`, code, err)
   }
   return out
 }
@@ -157,21 +162,17 @@ function atlAsyncRaw(args: string[]): Promise<AtlResult> {
     proc.stdout.setEncoding('utf8').on('data', (d: string) => (out += d))
     proc.stderr.setEncoding('utf8').on('data', (d: string) => (err += d))
     proc.on('error', (error) => resolve({ code: 1, out, err: error.message }))
-    proc.on('close', (code, signal) =>
-      resolve({
-        code: code ?? 1,
-        out,
-        err:
-          `${err.trim()}${signal === 'SIGKILL' ? ` jira: timed out after ${TIMEOUT_MS}ms` : ''}`.trim(),
-      })
-    )
+    proc.on('close', (code, signal) => {
+      const timedOut = signal === 'SIGKILL' ? ` jira: timed out after ${TIMEOUT_MS}ms` : ''
+      resolve({ code: code ?? 1, out, err: `${err.trim()}${timedOut}`.trim() })
+    })
   })
 }
 
 async function atlAsync(args: string[]): Promise<string> {
   const { code, out, err } = await atlAsyncRaw(args)
   if (code !== 0) {
-    throw new Error(`jira: atlassian ${args[0]} ${args[1] ?? ''} failed — ${err || `exit ${code}`}`)
+    throw cliFail(`atlassian ${args[0]} ${args[1] ?? ''}`, code, err)
   }
   return out
 }
@@ -195,7 +196,7 @@ const notFound = (err: string): boolean => /\b404\b|Not Found/i.test(err)
 export function api(method: string, path: string, body?: unknown): void {
   const { code, err } = atlTry(apiArgs(method, path, body))
   if (code !== 0) {
-    throw new Error(`jira: ${method} ${path} failed — ${err || `exit ${code}`}`)
+    throw cliFail(`${method} ${path}`, code, err)
   }
 }
 
@@ -212,7 +213,7 @@ export function apiGet<T>(path: string): T | undefined {
     if (notFound(err)) {
       return undefined
     }
-    throw new Error(`jira: GET ${path} failed — ${err || `exit ${code}`}`)
+    throw cliFail(`GET ${path}`, code, err)
   }
   try {
     return JSON.parse(out) as T
@@ -231,7 +232,7 @@ export async function apiGetAsync<T>(path: string): Promise<T | undefined> {
     if (notFound(err)) {
       return undefined
     }
-    throw new Error(`jira: GET ${path} failed — ${err || `exit ${code}`}`)
+    throw cliFail(`GET ${path}`, code, err)
   }
   try {
     return JSON.parse(out) as T

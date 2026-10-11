@@ -131,14 +131,16 @@ const assigneeName = (n: JiraIssue): string => {
 /** Jira link-type name → generic rel: 'Blocks'→'blocked',
  *  'Relates'→'related', site customs pass through lowercased —
  *  canonicalTaskRel keeps 'blocks'/'blocked-by' inputs honest. */
-const linkRel = (name: string | undefined): string =>
-  canonicalTaskRel(
-    /block/i.test(name ?? '')
-      ? 'blocked'
-      : /relat/i.test(name ?? '')
-        ? 'related'
-        : (name ?? '').toLowerCase()
-  )
+function linkRel(name: string | undefined): string {
+  const n = name ?? ''
+  let generic = n.toLowerCase()
+  if (/block/i.test(n)) {
+    generic = 'blocked'
+  } else if (/relat/i.test(n)) {
+    generic = 'related'
+  }
+  return canonicalTaskRel(generic)
+}
 
 /** An open issue is blocked by an unresolved 'Blocks' link landing on
  *  its inward side, an open sub-task, or the manual label — the
@@ -279,7 +281,7 @@ function browseUrl(n: JiraIssue): string | undefined {
   }
   const self = n.self ?? ''
   const m = /^(https?:\/\/[^/]+)\//.exec(self)
-  if (m === null || /api\.atlassian\.com$/.test(m[1]!)) {
+  if (m === null || m[1]!.endsWith('api.atlassian.com')) {
     return self !== '' ? self : undefined
   }
   return `${m[1]}/browse/${key}`
@@ -335,7 +337,7 @@ const pub = (r: TaskRow & { __node?: JiraIssue }): TaskRow => {
  *  threw in project(). */
 function issueRef(id: string): string {
   const t = id.trim()
-  const browse = /^https?:\/\/[^/]+\/browse\/([A-Za-z][\w]*-\d+)/.exec(t)
+  const browse = /^https?:\/\/[^/]+\/browse\/([A-Za-z]\w*-\d+)/.exec(t)
   if (browse) {
     return browse[1]!.toUpperCase()
   }
@@ -343,7 +345,7 @@ function issueRef(id: string): string {
   if (rest) {
     return rest[1]!
   }
-  if (/^[A-Za-z][\w]*-\d+$/.test(t)) {
+  if (/^[A-Za-z]\w*-\d+$/.test(t)) {
     return t.toUpperCase()
   }
   if (/^\d+$/.test(t)) {
@@ -506,10 +508,10 @@ const needsPostFilter = (f: TaskFilter): boolean =>
   f.type !== undefined ||
   (f.status !== undefined && f.status !== 'closed')
 
-const fetchCap = (f: TaskFilter): number =>
-  needsPostFilter(f)
-    ? QUERY_CAP
-    : Math.min(f.limit !== undefined && f.limit > 0 ? f.limit : QUERY_CAP, QUERY_CAP)
+const fetchCap = (f: TaskFilter): number => {
+  const limit = f.limit !== undefined && f.limit > 0 ? f.limit : QUERY_CAP
+  return needsPostFilter(f) ? QUERY_CAP : Math.min(limit, QUERY_CAP)
+}
 
 const byPriority = (a: TaskRow, b: TaskRow): number =>
   (a.priority ?? DEFAULT_PRIORITY) - (b.priority ?? DEFAULT_PRIORITY) ||
@@ -564,41 +566,58 @@ const wants = (dir: 'up' | 'down', direction?: string): boolean =>
  *  'parent', customs pass through. */
 const relKey = (rel: string): string => canonicalTaskRel(nativeTaskRel(rel))
 
-function depEdges(n: JiraIssue, opts: DepOpts): TaskDepEdge[] {
+/** issuelinks → edges. outwardIssue = the counterpart on the outward
+ *  side — this issue is the inward one ('is blocked by'): a 'down'
+ *  edge — this issue depends on the counterpart. inwardIssue = the
+ *  counterpart on the inward side — this issue is outward ('blocks'):
+ *  an 'up' edge — the counterpart depends on this issue. */
+function linkEdges(
+  n: JiraIssue,
+  rel: string | undefined,
+  direction: string | undefined
+): TaskDepEdge[] {
   const key = n.key ?? ''
-  const rel = opts.rel === undefined ? undefined : relKey(opts.rel)
   const out: TaskDepEdge[] = []
-  if (rel === undefined || rel !== 'parent') {
-    for (const l of n.fields?.issuelinks ?? []) {
-      const type = linkRel(l.type?.name)
-      if (rel !== undefined && type !== rel) {
-        continue
-      }
-      // outwardIssue = the counterpart on the outward side — this
-      // issue is the inward one ('is blocked by'): a 'down' edge —
-      // this issue depends on the counterpart
-      if (wants('down', opts.direction) && l.outwardIssue?.key !== undefined) {
-        out.push({ issue_id: key, depends_on_id: l.outwardIssue.key, type })
-      }
-      // inwardIssue = counterpart on the inward side — this issue is
-      // outward ('blocks'): an 'up' edge — the counterpart depends on
-      // this issue
-      if (wants('up', opts.direction) && l.inwardIssue?.key !== undefined) {
-        out.push({ issue_id: l.inwardIssue.key, depends_on_id: key, type })
+  for (const l of n.fields?.issuelinks ?? []) {
+    const type = linkRel(l.type?.name)
+    if (rel !== undefined && type !== rel) {
+      continue
+    }
+    if (wants('down', direction) && l.outwardIssue?.key !== undefined) {
+      out.push({ issue_id: key, depends_on_id: l.outwardIssue.key, type })
+    }
+    if (wants('up', direction) && l.inwardIssue?.key !== undefined) {
+      out.push({ issue_id: l.inwardIssue.key, depends_on_id: key, type })
+    }
+  }
+  return out
+}
+
+/** parent + subtasks → 'parent' edges in both directions. */
+function parentEdges(n: JiraIssue, direction: string | undefined): TaskDepEdge[] {
+  const key = n.key ?? ''
+  const out: TaskDepEdge[] = []
+  if (wants('down', direction) && n.fields?.parent?.key !== undefined) {
+    out.push({ issue_id: key, depends_on_id: n.fields.parent.key, type: 'parent' })
+  }
+  if (wants('up', direction)) {
+    for (const s of n.fields?.subtasks ?? []) {
+      if (s.key !== undefined) {
+        out.push({ issue_id: s.key, depends_on_id: key, type: 'parent' })
       }
     }
   }
+  return out
+}
+
+function depEdges(n: JiraIssue, opts: DepOpts): TaskDepEdge[] {
+  const rel = opts.rel === undefined ? undefined : relKey(opts.rel)
+  const out: TaskDepEdge[] = []
+  if (rel !== 'parent') {
+    out.push(...linkEdges(n, rel, opts.direction))
+  }
   if (rel === undefined || rel === 'parent') {
-    if (wants('down', opts.direction) && n.fields?.parent?.key !== undefined) {
-      out.push({ issue_id: key, depends_on_id: n.fields.parent.key, type: 'parent' })
-    }
-    if (wants('up', opts.direction)) {
-      for (const s of n.fields?.subtasks ?? []) {
-        if (s.key !== undefined) {
-          out.push({ issue_id: s.key, depends_on_id: key, type: 'parent' })
-        }
-      }
-    }
+    out.push(...parentEdges(n, opts.direction))
   }
   return out
 }
