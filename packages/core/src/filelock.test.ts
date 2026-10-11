@@ -113,6 +113,85 @@ describe('filelock', () => {
     }
   })
 
+  test('an empty lock is in-flight while fresh, stealable when aged (wx fallback)', () => {
+    const { dir, done } = tmp()
+    try {
+      const lock = join(dir, 'x.lock')
+      // the wx fallback's create-then-write window: a FRESH empty lock
+      // is a writer mid-publish — not stealable, so a contender waits
+      // out its deadline rather than breaking the lock
+      writeFileSync(lock, '')
+      assert.equal(staleLock(lock), false)
+      assert.throws(() => acquireFileLock(lock, { waitMs: 200 }), /held over/)
+      assert.equal(existsSync(lock), true)
+      // aged past the grace it's a crashed writer's leftover — stolen
+      // on sight, and the wait bound proves no grace was waited out
+      const past = new Date(Date.now() - 60_000)
+      utimesSync(lock, past, past)
+      assert.equal(staleLock(lock), true)
+      const release = acquireFileLock(lock, { waitMs: 500 })
+      release()
+      assert.equal(existsSync(lock), false)
+    } finally {
+      done()
+    }
+  })
+
+  test('acquire falls back to wx where link(2) is not implemented', () => {
+    const { dir, done } = tmp()
+    try {
+      const lock = join(dir, 'x.lock')
+      // fs.linkSync is mutable on the CJS exports object; assigning it
+      // BEFORE the filelock import makes the module's own named binding
+      // capture the patch — a real no-hardlink fs, simulated
+      const script = join(dir, 'wx.ts')
+      writeFileSync(
+        script,
+        `import fs from 'node:fs'\n` +
+          `fs.linkSync = () => { throw Object.assign(new Error('link unsupported'), { code: 'EPERM' }) }\n` +
+          `import(${JSON.stringify(join(here, 'filelock.ts'))}).then((m) => {\n` +
+          `  const release = m.acquireFileLock(${JSON.stringify(lock)}, { waitMs: 500 })\n` +
+          `  console.log('held:' + fs.readFileSync(${JSON.stringify(lock)}, 'utf8'))\n` +
+          `  release()\n` +
+          `  console.log('released')\n` +
+          `})\n`
+      )
+      const child = spawnSync('npx', ['tsx', script], { encoding: 'utf8', timeout: 30_000 })
+      assert.equal(child.status, 0, child.stderr)
+      // the fallback writes the shared pid:token shape and releases clean
+      assert.match(child.stdout, /held:\d+:[0-9a-f]{16}/)
+      assert.match(child.stdout, /released/)
+      assert.equal(existsSync(lock), false)
+    } finally {
+      done()
+    }
+  })
+
+  test('the wx fallback still refuses a live foreign hold', () => {
+    const { dir, done } = tmp()
+    try {
+      const lock = join(dir, 'x.lock')
+      writeFileSync(lock, `${process.pid}:alien`) // alive, foreign token
+      const script = join(dir, 'wx-held.ts')
+      writeFileSync(
+        script,
+        `import fs from 'node:fs'\n` +
+          `fs.linkSync = () => { throw Object.assign(new Error('link unsupported'), { code: 'ENOSYS' }) }\n` +
+          `import(${JSON.stringify(join(here, 'filelock.ts'))}).then((m) => {\n` +
+          `  try { m.acquireFileLock(${JSON.stringify(lock)}, { waitMs: 300 }); console.log('ACQUIRED') }\n` +
+          `  catch (e) { console.log('ERR:' + e.name) }\n` +
+          `})\n`
+      )
+      const child = spawnSync('npx', ['tsx', script], { encoding: 'utf8', timeout: 30_000 })
+      assert.equal(child.status, 0, child.stderr)
+      assert.match(child.stdout, /ERR:LockTimeout/)
+      // and the hold it refused was never clobbered
+      assert.equal(readFileSync(lock, 'utf8'), `${process.pid}:alien`)
+    } finally {
+      done()
+    }
+  })
+
   test('lockHolderPid reads the holder from pid:token and bare-pid tokens', () => {
     const { dir, done } = tmp()
     try {
