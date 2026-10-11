@@ -16,7 +16,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { gitCommonDir, lockHolderPid, pidAlive } from '@broject/core'
+import { acquireFileLock, gitCommonDir, lockHolderPid, pidAlive } from '@broject/core'
 import { flag } from './args.ts'
 import { driveLockPath, runDriveCommand } from './drive.ts'
 import { driveSection, MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
@@ -122,10 +122,22 @@ export function daemonUpDecision(
   return probe.live ? { kind: 'already', pid: probe.pid! } : { kind: 'spawn' }
 }
 
+/** `<git-common>/bro/daemon.up.lock` — serializes the up path's
+ *  decide→spawn→record sequence; concurrent `up` calls otherwise both
+ *  see no live holder and both spawn (the child's own drive.lock makes
+ *  the second a standby, but two spawns is still a lie about "never
+ *  doubles"). */
+function daemonUpLockPath(dir: string): string | null {
+  const common = gitCommonDir(dir)
+  return common === null ? null : join(common, 'bro', 'daemon.up.lock')
+}
+
 /** Spawn the supervisor loop detached — same fire-and-forget shape as
  *  the pulse rearm: own process group, parent-unref'd, argv[1] so dist
  *  and source installs both re-spawn themselves. Unlike the pulse the
- *  daemon gets a real log — an owner must be debuggable. */
+ *  daemon gets a real log — an owner must be debuggable. The record is
+ *  best-effort: `drive.lock` is the liveness truth, `daemon.json` only
+ *  says who armed it — a failed write warns, never orphans the report. */
 export function spawnDaemon(dir: string, everySec: number): { pid: number; log: string | null } {
   const log = daemonLogPath(dir)
   const broDir = daemonStatePath(dir)
@@ -139,12 +151,16 @@ export function spawnDaemon(dir: string, everySec: number): { pid: number; log: 
     { cwd: dir, detached: true, stdio: ['ignore', out, out] }
   )
   child.unref()
-  writeDaemonRecord(dir, {
-    pid: child.pid!,
-    everySec,
-    spawnedAt: new Date().toISOString(),
-    cmd: `bro daemon run --every ${everySec}`,
-  })
+  try {
+    writeDaemonRecord(dir, {
+      pid: child.pid!,
+      everySec,
+      spawnedAt: new Date().toISOString(),
+      cmd: `bro daemon run --every ${everySec}`,
+    })
+  } catch (err) {
+    console.error(`warning: daemon armer record failed (pid ${child.pid} is live) — ${errText(err)}`)
+  }
   return { pid: child.pid!, log }
 }
 
@@ -182,16 +198,26 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
         )
         process.exit(2)
       }
-      if (decision.kind === 'already') {
-        console.log(`daemon up — already supervising (pid ${decision.pid})`)
+      const upLock = daemonUpLockPath(main)
+      const release =
+        upLock === null ? () => {} : acquireFileLock(upLock, { label: 'daemon up lock' })
+      try {
+        // re-decide inside the mutex — a concurrent `up` that won the
+        // lock may already hold a live holder by now
+        const inner = daemonUpDecision(main)
+        if (inner.kind === 'already') {
+          console.log(`daemon up — already supervising (pid ${inner.pid})`)
+          return
+        }
+        const spawned = spawnDaemon(main, interval)
+        console.log(
+          `daemon up — pid ${spawned.pid} every ${interval}s` +
+            (spawned.log === null ? '' : ` — log ${spawned.log}`)
+        )
         return
+      } finally {
+        release()
       }
-      const spawned = spawnDaemon(main, interval)
-      console.log(
-        `daemon up — pid ${spawned.pid} every ${interval}s` +
-          (spawned.log === null ? '' : ` — log ${spawned.log}`)
-      )
-      return
     }
     case 'run': {
       // the supervised loop — drive's own guard, lock and cadence apply;
