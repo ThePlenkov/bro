@@ -2,7 +2,6 @@
 scope:
   - packages/jira/
   - packages/cli/src/plugins.ts
-  - package-lock.json
 ---
 
 # bro-b8eom — jira connector: Jira Data Center/Server (v2 REST surface)

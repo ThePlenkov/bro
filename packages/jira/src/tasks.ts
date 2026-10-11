@@ -71,7 +71,7 @@ const refLive = (r: JiraIssueRef | null | undefined): boolean =>
 const labelsOf = (n: JiraIssue): string[] => n.fields?.labels ?? []
 const assigneeName = (n: JiraIssue): string => {
   const a = n.fields?.assignee
-  return a?.displayName ?? a?.emailAddress ?? a?.name ?? a?.key ?? a?.accountId ?? ''
+  return a?.displayName || a?.emailAddress || a?.name || a?.key || a?.accountId || ''
 }
 
 /** Jira link-type name → generic rel: 'Blocks'→'blocked',

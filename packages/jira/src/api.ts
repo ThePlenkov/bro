@@ -174,12 +174,17 @@ export function adfDoc(text: string): Record<string, unknown> {
  *  surface reads JIRA_DC_BASE_URL first so a rig carrying both
  *  connectors can pin two sites; JIRA_BASE_URL stays the shared pin. */
 function jiraBaseUrl(s: Surface): string | undefined {
-  const v = (
-    (s === 'dc' ? process.env['JIRA_DC_BASE_URL'] : undefined) ??
-    process.env['JIRA_BASE_URL'] ??
-    process.env['ATLASSIAN_BASE_URL']
-  )?.trim()
-  return v === '' ? undefined : v
+  const pins =
+    s === 'dc'
+      ? [
+          process.env['JIRA_DC_BASE_URL'],
+          process.env['JIRA_BASE_URL'],
+          process.env['ATLASSIAN_BASE_URL'],
+        ]
+      : [process.env['JIRA_BASE_URL'], process.env['ATLASSIAN_BASE_URL']]
+  // an empty pin is a disabled pin — it yields to the next candidate,
+  // it never resolves to a base
+  return pins.map((p) => p?.trim()).find((p) => p !== undefined && p !== '')
 }
 
 function assertHttps(url: string): void {
@@ -499,7 +504,8 @@ function v2SearchPage(jql: string, cursor: string | undefined): SearchResult {
     maxResults: PAGE,
     startAt: cursor === undefined ? 0 : Number(cursor),
   })
-  return { issues: p.issues, ...(v2Next(p) !== undefined ? { next: v2Next(p) } : {}) }
+  const next = v2Next(p)
+  return { issues: p.issues, ...(next !== undefined ? { next } : {}) }
 }
 
 async function v2SearchPageAsync(jql: string, cursor: string | undefined): Promise<SearchResult> {
@@ -509,7 +515,8 @@ async function v2SearchPageAsync(jql: string, cursor: string | undefined): Promi
     maxResults: PAGE,
     startAt: cursor === undefined ? 0 : Number(cursor),
   })
-  return { issues: p.issues, ...(v2Next(p) !== undefined ? { next: v2Next(p) } : {}) }
+  const next = v2Next(p)
+  return { issues: p.issues, ...(next !== undefined ? { next } : {}) }
 }
 
 // --- cached probes --------------------------------------------------------------
@@ -545,7 +552,9 @@ const userKeyOf = (s: Surface, u: JiraViewer | null | undefined): string | undef
   if (u == null) {
     return undefined
   }
-  const id = s === 'dc' ? (u.name ?? u.key) : u.accountId
+  // || over ??: an empty-string name yields to the key fallback —
+  // an identity is only absent when nothing non-empty answered
+  const id = s === 'dc' ? u.name || u.key : u.accountId
   return id === '' ? undefined : id
 }
 

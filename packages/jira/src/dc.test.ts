@@ -367,7 +367,7 @@ describe('jiraDcTasks', { skip: WIN32 }, () => {
   test('actor answers the name-keyed viewer', () => {
     withDc({}, () => {
       const store = jiraDcTasks('/tmp/x')
-      assert.equal(store.actor(), 'Me')
+      assert.equal(store.actor?.(), 'Me')
     })
   })
 
