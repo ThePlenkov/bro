@@ -29,12 +29,13 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import {
   gitCommonDir,
   loadConfig,
   lockHolderPid,
   pidAlive,
+  worktreeGitDir,
   type Connector,
 } from '@broject/core'
 import { isOrchestratorSession } from './watch-pulse.ts'
@@ -221,12 +222,25 @@ export function rigPulseRearm(
  *  installs all re-spawn themselves. The marker's repo rides `--repo`
  *  explicitly — the child never re-derives the target from cwd. */
 export function spawnRigPulse(
+  dir: string,
   repo: string,
   everySec: number,
   forSec: number
 ): number | null {
   const entry = process.argv[1]
-  if (entry === undefined || !existsSync(repo)) {
+  // the marker is repo-local writable state — before its `repo` can
+  // steer the child it must name a worktree of THIS repo: an absolute
+  // path whose common dir is the marker's own. A foreign checkout's
+  // refresh commands would otherwise run under our cadence (CWE-73).
+  const common = gitCommonDir(dir)
+  if (
+    entry === undefined ||
+    common === null ||
+    !isAbsolute(repo) ||
+    !existsSync(repo) ||
+    worktreeGitDir(repo) === null ||
+    gitCommonDir(repo) !== common
+  ) {
     return null
   }
   try {
@@ -267,7 +281,7 @@ function rigPulseCheckpoint(dir: string, where: string): string[] {
     if (r.kind !== 'rearm') {
       return []
     }
-    const pid = spawnRigPulse(r.repo, r.everySec, r.forSec)
+    const pid = spawnRigPulse(dir, r.repo, r.everySec, r.forSec)
     if (pid === null) {
       return []
     }

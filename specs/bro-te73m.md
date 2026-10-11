@@ -48,7 +48,7 @@ The mechanic is upstream-tracking, not a hardcoded repo or branch:
 - **`bro rig status [--repo <dir>] [--json]`** — the read plane, no
   network: resolved repo, branch → upstream, ahead/behind vs the stored
   remote-tracking ref, dirty count, done-sha vs HEAD (`fresh`/`stale`),
-  resolved patch slot, and scheduler state (`schedState`).
+  resolved refresh steps (`steps`), and pulse state (`pulse`).
 
 - **`bro rig watch [--every N] [--for S]`** — the foreground supervisor
   (the setsid script's shape, registered): `rig sync` per tick, errors

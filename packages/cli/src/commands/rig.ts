@@ -38,6 +38,7 @@ import {
   loadConfig,
   LockTimeout,
   mailboxDir,
+  shQuote,
   withFileLock,
   worktreeGitDir,
 } from '@broject/core'
@@ -545,7 +546,7 @@ export async function runRigCommand(argv: string[]): Promise<void> {
       process.exit(2)
     }
     const win = Math.max(cfg.pulseSec, everySec)
-    const rearm = `bro rig watch --repo ${resolved.repo} --every ${everySec} --for ${win}`
+    const rearm = `bro rig watch --repo ${shQuote(resolved.repo)} --every ${everySec} --for ${win}`
     if (argv.includes('--print')) {
       console.log(
         [
