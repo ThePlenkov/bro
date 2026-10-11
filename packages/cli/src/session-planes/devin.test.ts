@@ -12,6 +12,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SpawnError } from '@broject/core'
+import { tmpDir } from '../commands/testrepo.ts'
 import {
   countDevinSessions,
   countDevinWorkers,
@@ -109,7 +110,7 @@ describe('countDevinSessions', () => {
 
   test('an unreadable lock dir fails closed — refuse, never pretend zero', () => {
     // a path where readdirSync fails non-ENOENT: a file posing as the dir
-    const file = join(mkdtempSync(join(tmpdir(), 'bro-devin-nodir-')), 'notdir')
+    const file = join(tmpDir('bro-devin-nodir-'), 'notdir')
     writeFileSync(file, 'x')
     assert.throws(() => countDevinSessions([file]), /not a directory|ENOTDIR/)
   })

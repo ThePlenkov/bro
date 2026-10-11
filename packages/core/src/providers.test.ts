@@ -1,8 +1,8 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { tmpDir } from './testtmp.ts'
 import { loadConfig } from './config.ts'
 import {
   getProvider,
@@ -19,7 +19,7 @@ import {
 } from './providers.ts'
 
 function load(raw?: unknown): ReturnType<typeof loadConfig> {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-providers-'))
+  const dir = tmpDir('bro-providers-')
   if (raw !== undefined) {
     writeFileSync(join(dir, 'bro.config.json'), JSON.stringify(raw))
   }

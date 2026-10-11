@@ -2,16 +2,15 @@ import assert from 'node:assert/strict'
 import {
   chmodSync,
   existsSync,
-  mkdtempSync,
   mkdirSync,
   readFileSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
 import { pathToFileURL } from 'node:url'
+import { tmpDir } from './testrepo.ts'
 import {
   installClient,
   isBroAdapter,
@@ -30,8 +29,8 @@ function fixture(): {
   globalCliPath: string
   localCliPath: string
 } {
-  const cwd = mkdtempSync(join(tmpdir(), 'bro-plugins-cwd-'))
-  const xdg = mkdtempSync(join(tmpdir(), 'bro-plugins-xdg-'))
+  const cwd = tmpDir('bro-plugins-cwd-')
+  const xdg = tmpDir('bro-plugins-xdg-')
   const opts: MutateOpts = {
     dryRun: false,
     force: false,
@@ -302,8 +301,8 @@ function kiloFixture(): {
   manifest(): Record<string, unknown>
   entry: string
 } {
-  const cwd = mkdtempSync(join(tmpdir(), 'bro-plugins-kilo-cwd-'))
-  const xdg = mkdtempSync(join(tmpdir(), 'bro-plugins-kilo-xdg-'))
+  const cwd = tmpDir('bro-plugins-kilo-cwd-')
+  const xdg = tmpDir('bro-plugins-kilo-xdg-')
   const opts: MutateOpts = {
     dryRun: false,
     force: false,

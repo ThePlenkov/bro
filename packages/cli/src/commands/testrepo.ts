@@ -47,6 +47,25 @@ export function initRepo(prefix: string, seed?: (main: string) => void): { root:
   return { root, main }
 }
 
+/** mkdtemp under a per-process sweep: dirs made here are deleted when
+ *  the test process exits, pass or fail — the 'one root with a sweep'
+ *  half of the fixture-leak contract (initRepo callers get the same
+ *  guarantee through inside()/insideAsync). Use this for fixture dirs
+ *  that are NOT wrapped in a try/finally rmSync of their own. */
+const tmpDirs: string[] = []
+let tmpSweepArmed = false
+export function tmpDir(prefix: string): string {
+  if (!tmpSweepArmed) {
+    tmpSweepArmed = true
+    process.once('exit', () => {
+      for (const d of tmpDirs) rmSync(d, { recursive: true, force: true })
+    })
+  }
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  tmpDirs.push(dir)
+  return dir
+}
+
 /** Run fn in dir, then always restore cwd and delete the repo. */
 export function inside<T>(dir: string, root: string, fn: () => T): T {
   const prev = process.cwd()

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
+import { tmpDir } from './testrepo.ts'
 import type { BroPlugin } from '@broject/core'
 import { resolvePlanDoc, runPlanCommand } from './plan.ts'
 
@@ -26,7 +26,7 @@ function planPlugin(over: Partial<BroPlugin> = {}): BroPlugin {
 }
 
 function planFile(body: string): string {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-plan-cmd-'))
+  const dir = tmpDir('bro-plan-cmd-')
   const file = join(dir, 'plan.toml')
   writeFileSync(file, body)
   return file

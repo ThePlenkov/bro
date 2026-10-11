@@ -4,12 +4,11 @@ import { execFileSync } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { tmpDir } from './testtmp.ts'
 import {
   DATA_REF,
   dataRefCommit,
@@ -26,7 +25,7 @@ function git(cwd: string, args: string[], opts?: { input?: string }): string {
 }
 
 function makeRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-dataref-'))
+  const dir = tmpDir('bro-dataref-')
   git(dir, ['init', '-b', 'main'])
   git(dir, ['config', 'user.email', 't@t'])
   git(dir, ['config', 'user.name', 't'])
@@ -39,7 +38,7 @@ function makeRepo(): string {
 }
 
 function makeBare(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-dataref-remote-'))
+  const dir = tmpDir('bro-dataref-remote-')
   git(dir, ['init', '--bare', '-b', 'main'])
   return dir
 }
@@ -99,7 +98,7 @@ describe('dataRefPush / dataRefPull', () => {
     assert.equal(dataRefPush(root), true)
     git(remote, ['rev-parse', '--verify', DATA_REF])
 
-    const clone = mkdtempSync(join(tmpdir(), 'bro-dataref-clone-'))
+    const clone = tmpDir('bro-dataref-clone-')
     git(clone, ['init', '-b', 'main'])
     git(clone, ['config', 'user.email', 't@t'])
     git(clone, ['config', 'user.name', 't'])
@@ -123,7 +122,7 @@ describe('dataRefPush / dataRefPull', () => {
     git(root, ['update-ref', DATA_REF, commit])
     git(root, ['push', 'origin', `${DATA_REF}:${DATA_REF}`])
 
-    const clone = mkdtempSync(join(tmpdir(), 'bro-dataref-clone2-'))
+    const clone = tmpDir('bro-dataref-clone2-')
     git(clone, ['init', '-b', 'main'])
     git(clone, ['config', 'user.email', 't@t'])
     git(clone, ['config', 'user.name', 't'])
@@ -150,7 +149,7 @@ describe('dataRefPush / dataRefPull', () => {
     assert.equal(dataRefPush(r1), true)
 
     // replica 2: pull, append b, push
-    const r2 = mkdtempSync(join(tmpdir(), 'bro-dataref-r2-'))
+    const r2 = tmpDir('bro-dataref-r2-')
     git(r2, ['init', '-b', 'main'])
     git(r2, ['config', 'user.email', 't@t'])
     git(r2, ['config', 'user.name', 't'])
@@ -181,7 +180,7 @@ describe('dataRefPush / dataRefPull', () => {
 
 describe('dataRefRoot', () => {
   test('null outside a worktree', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-dataref-nowt-'))
+    const dir = tmpDir('bro-dataref-nowt-')
     assert.equal(dataRefRoot(dir), null)
   })
 

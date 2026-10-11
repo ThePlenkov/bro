@@ -1,9 +1,9 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { tmpDir } from './testtmp.ts'
 import {
   applyDebtVerdicts,
   buildSummary,
@@ -20,7 +20,7 @@ import type { DebtRecord } from './types.ts'
 delete process.env.BRO_DEBT_DIR
 
 function tmpRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-debt-'))
+  const dir = tmpDir('bro-debt-')
   execFileSync('git', ['init', '-q', dir])
   // A global excludesFile covering the ledger dir would make check-ignore
   // short-circuit and the exclude assertions flaky — neutralize it.
@@ -59,7 +59,7 @@ describe('ensureDebtDirExcluded (via writeSummary)', () => {
   })
 
   test('outside a git worktree → writes proceed, nothing excluded', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-debt-nogit-'))
+    const dir = tmpDir('bro-debt-nogit-')
     writeSummary(buildSummary([]), dir)
     assert.ok(existsSync(join(dir, '.agents/review-debt/debt-summary.json')))
   })
@@ -97,7 +97,7 @@ function rec(over: Partial<DebtRecord> & { thread_id: string }): DebtRecord {
 
 describe('readThreadBounds', () => {
   test('first/last sighting per thread across harvest files + legacy debt.jsonl', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-debt-bounds-'))
+    const dir = tmpDir('bro-debt-bounds-')
     writeHarvestFile({
       pr: 1,
       runId: 'r1',
@@ -131,7 +131,7 @@ describe('readThreadBounds', () => {
   })
 
   test('skips rows with missing or unparseable harvested_at', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-debt-bounds-'))
+    const dir = tmpDir('bro-debt-bounds-')
     const debtDir = join(dir, '.agents', 'review-debt')
     mkdirSync(debtDir, { recursive: true })
     writeFileSync(
@@ -152,7 +152,7 @@ describe('readThreadBounds', () => {
 
 describe('open intervals (store side)', () => {
   test('applyDebtVerdicts stamps fixed_at on duplicate — it leaves the open pool', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-debt-verdict-'))
+    const dir = tmpDir('bro-debt-verdict-')
     writeHarvestFile({
       pr: 1,
       runId: 'r',
