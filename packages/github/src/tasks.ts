@@ -988,6 +988,7 @@ function publishSync(
   opts?: { epic?: TaskRow }
 ): PublishResult | undefined {
   const ref = task.external_ref?.trim() ?? ''
+  let replaceExternalRef: true | undefined
   if (ref !== '') {
     try {
       const n = issueNumber(dir, ref)
@@ -995,7 +996,10 @@ function publishSync(
       if (cur !== undefined) {
         return { item: pub(toRow(cur)) }
       }
-      // the mapped item is gone — fall through to re-publish
+      // the mapped item is gone — fall through to re-publish, and flag
+      // the stale map so the caller's write-back replaces it instead of
+      // preserving it (the next pass would duplicate again)
+      replaceExternalRef = true
     } catch {
       return undefined
     }
@@ -1029,7 +1033,7 @@ function publishSync(
       console.error(`warning: milestone join on issue ${row.id} failed — ${join.err}`)
     }
   }
-  return { item: pub(row), epicRef }
+  return { item: pub(row), epicRef, replaceExternalRef }
 }
 
 // --- the stores -------------------------------------------------------------------

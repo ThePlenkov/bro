@@ -87,9 +87,12 @@ function epicOf(tasks: TaskStore, task: TaskRow): TaskRow | undefined {
 
 /** The dedup map lands on the source row — ONLY into an empty slot:
  *  a foreign external_ref is another system's projection key (debt
- *  thread, mesh envelope, fixer ref), never ours to clobber. */
-function persistRef(tasks: TaskStore, row: TaskRow, ref: string): void {
-  if ((row.external_ref ?? '').trim() !== '') {
+ *  thread, mesh envelope, fixer ref), never ours to clobber. The
+ *  `replace` escape is the publish port's verdict alone: it fires only
+ *  when the old ref mapped to a missing item on that same store —
+ *  overwriting the stale map stops the duplicate-every-pass loop. */
+function persistRef(tasks: TaskStore, row: TaskRow, ref: string, replace = false): void {
+  if (!replace && (row.external_ref ?? '').trim() !== '') {
     return
   }
   try {
@@ -119,7 +122,7 @@ export function projectBeads(deps: MirrorDeps, beadIds: string[]): string[] {
         deps.say?.(`${id} projection declined — external_ref maps elsewhere`)
         continue
       }
-      persistRef(deps.tasks, task, res.item.external_ref ?? res.item.id)
+      persistRef(deps.tasks, task, res.item.external_ref ?? res.item.id, res.replaceExternalRef === true)
       if (epic !== undefined && res.epicRef !== undefined) {
         persistRef(deps.tasks, epic, res.epicRef)
       }

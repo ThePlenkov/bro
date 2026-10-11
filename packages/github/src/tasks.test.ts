@@ -510,7 +510,35 @@ esac
           {}
         )
         assert.equal(res?.item.id, '42')
+        assert.equal(res?.replaceExternalRef, undefined)
         assert.equal(callsMatching(log, /issue create/).length, 0)
+      }
+    )
+  })
+
+  test('publish on a stale own-repo ref re-creates and flags the map for replacement', () => {
+    // the mapped issue is gone (deleted) — the first read answers null,
+    // so publishSync falls through to create and authorizes the caller
+    // to overwrite the stale external_ref; without the flag the next
+    // discovery pass creates another duplicate (bro-4upn5)
+    withFakeGh(
+      {
+        FAKE_GH_ACTOR: 'me',
+        FAKE_GH_ISSUE_1: issueRead(null),
+        FAKE_GH_ISSUE_2: issueRead(node({ number: 42 })),
+      },
+      (log, dir) => {
+        const res = githubTasks(dir).publish!(
+          {
+            id: 'bro-t1',
+            title: 'the bead',
+            external_ref: 'https://github.com/acme/widgets/issues/41',
+          },
+          {}
+        )
+        assert.equal(res?.item.id, '42')
+        assert.equal(res?.replaceExternalRef, true)
+        assert.equal(callsMatching(log, /issue create/).length, 1)
       }
     )
   })
