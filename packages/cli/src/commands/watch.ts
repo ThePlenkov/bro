@@ -6,20 +6,29 @@
  * a kill). Spec: specs/sessions/bro-f4ot/bro-vf1j.md.
  *
  *   bro watch [--once]      one snapshot (default — the heartbeat call)
- *   bro watch --every N [--for S]   tick the snapshot every N seconds;
- *         --for bounds the loop — the exit is the event a session waits on
+ *   bro watch --every N --for S   tick the snapshot every N seconds;
+ *         --for bounds the loop — required for the session pulse, the
+ *         exit is the event a session waits on (omitted = unbounded,
+ *         only an external supervisor may own that lifecycle).
+ *         The session pulse (bro-killn): holds <git-common>/bro/pulse.lock
+ *         for its lifetime — one pulse per repo, a duplicate stands by —
+ *         and refuses to run under BRO_AGENT_ID (workers never arm the
+ *         cadence; the orchestrator session owns it)
  *   bro watch --notify      drop each tick's snapshot into the mailbox
  *   bro watch --json        machine-readable {ts, attention, mols, gates, fleet}
- *   bro watch install [--every N] [--print]   the heartbeat on a
- *         non-agent timer — systemd user unit, crontab fallback
- *   bro watch uninstall     remove the installed entry
+ *   bro watch install [--every N] [--print]   arm the session pulse —
+ *         writes <git-common>/bro/pulse.json and strips any legacy
+ *         systemd/crontab entry (OS timers are retired, bro-killn)
+ *   bro watch uninstall     disarm the marker + strip any legacy entry
  *
- * `--every` exists so watch *can* loop, but the cadence owner is the
- * deployment — a supervisor that wants ticks on a schedule re-invokes
- * `--once`. Never claims, never mutates beads; the two writes are
- * `--notify`'s mailbox drop and the janitor — `runJanitor` (bro-f6zp)
- * reaps dead session/agent state under `<git-common>/bro/` on each
- * tick, because watch is the cadence a reaper survives on.
+ * `--every` is the pulse — the orchestrator session's bounded watcher
+ * window; on its end the session runs one `bro drive` pass, digests,
+ * and re-arms. Never claims, never mutates beads; the three writes are
+ * `--notify`'s mailbox drop, the heartbeat file (`<git-common>/bro/
+ * heartbeat.json` — the durable last-known-state read by `bro status`
+ * and session-start context; bro-dxoa5), and the janitor — `runJanitor`
+ * (bro-f6zp) reaps dead session/agent state under `<git-common>/bro/`
+ * on each tick, because watch is the cadence a reaper survives on.
  *
  * Mailbox — `<git-common-dir>/bro/notify/`, the contract the notify
  * connector (bro-d8zo) drains. One atomic file per emission
@@ -28,13 +37,16 @@
  * transitions, not noise.
  */
 import {
+  awaitFileLock,
   dropMailbox,
   git,
+  gitTry,
   janitorDidWork,
   janitorLine,
   mailboxDir,
   reviewHost,
   runJanitor,
+  sweepOrphanProcs,
   wallText,
   type JanitorReport,
   type ProviderWall,
@@ -56,6 +68,9 @@ import { collectLoopRuns, type LoopRunView } from './loop-state.ts'
 import { providerWallsFor } from '../agent-connectors.ts'
 import { parseWorktreePorcelain, type WorktreeInfo } from './work.ts'
 import { installWatch, uninstallWatch } from './watch-install.ts'
+import { isOrchestratorSession, pulseLockPath } from './watch-pulse.ts'
+import { daemonProbe } from './daemon.ts'
+import { writeHeartbeat } from './watch-heartbeat.ts'
 import { watchSection, type WatchConfig } from './watch-config.ts'
 
 export interface WatchMol {
@@ -137,6 +152,20 @@ export interface WatchSnapshot {
   /** In-flight `bro loop` workers + their output-silence read. Advisory
    *  data only — a stale log is reported, never killed (bro-9lpn3). */
   loop: WatchLoop
+  /** The project supervisor (`bro daemon` / raw `bro drive --every`) —
+   *  the watchdog's subject: a recorded-but-dead daemon is attention,
+   *  absent is just quiet. */
+  daemon: WatchDaemon
+}
+
+export interface WatchDaemon {
+  live: boolean
+  pid?: number
+  /** an armer record exists (`daemon.json`) — dead+recorded is the
+   *  "restart me" signal; live+unrecorded is a manual `bro drive` */
+  recorded: boolean
+  /** the probe itself threw — renders `unavailable` */
+  error?: string
 }
 
 /** The heartbeat's answer: ready human gates, lost agents, walled
@@ -241,6 +270,29 @@ export function emitMailbox(dir: string, text: string): boolean {
   }
   dropMailbox(mb, text, 'watch')
   return true
+}
+
+/** --notify's transition drop: a changed snapshot mails once. Marked
+ *  notified only on a successful emit — a transient failure retries on
+ *  the next tick, and a throw warns without killing the heartbeat. */
+function dropTransition(
+  dir: string,
+  snap: WatchSnapshot,
+  text: string,
+  lastNotified: string
+): string {
+  const key = snapshotKey(snap)
+  if (key === lastNotified) {
+    return lastNotified
+  }
+  try {
+    return emitMailbox(dir, text) ? key : lastNotified
+  } catch (err) {
+    console.error(
+      `warning: mailbox drop failed — ${err instanceof Error ? err.message : String(err)}`
+    )
+    return lastNotified
+  }
 }
 
 /** mols section — every open molecule through nextStep; pure beads
@@ -409,6 +461,18 @@ async function gatesPlane(
   }
 }
 
+/** daemon — `drive.lock` holder + `daemon.json` armer record. Pure fs +
+ *  pid reads; a throwing plane degrades its section, never the
+ *  heartbeat. */
+function daemonPlane(dir: string): WatchDaemon {
+  try {
+    const probe = daemonProbe(dir)
+    return { live: probe.live, pid: probe.pid, recorded: probe.recorded !== null }
+  } catch (err) {
+    return { live: false, recorded: false, error: errText(err) }
+  }
+}
+
 /** loop — run records under <git-common>/bro/loop/. Pure fs + pid
  *  reads; a throwing plane degrades its section, never the heartbeat. */
 function loopPlane(dir: string): WatchLoop {
@@ -429,6 +493,7 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
   const fleet = await fleetPlane(dir, host)
   const gates = await gatesPlane(dir, host, fleet.rows, fleet.prErrors ?? [])
   const loop = loopPlane(dir)
+  const daemon = daemonPlane(dir)
 
   const attention = attentionOf(
     molsPlane_.mols,
@@ -452,6 +517,11 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
   if (loop.error !== undefined) {
     attention.push(`loop plane failed — ${loop.error}`)
   }
+  if (daemon.error !== undefined) {
+    attention.push(`daemon plane failed — ${daemon.error}`)
+  } else if (daemon.recorded && !daemon.live) {
+    attention.push(`daemon recorded but dead — 'bro daemon up' restarts`)
+  }
 
   return {
     ts: new Date().toISOString(),
@@ -461,6 +531,7 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
     gates,
     fleet,
     loop,
+    daemon,
   }
 }
 
@@ -561,6 +632,16 @@ function loopLines(loop: WatchLoop): string[] {
   return [line(head), ...rows.map(line)]
 }
 
+function daemonLines(daemon: WatchDaemon): string[] {
+  if (daemon.error !== undefined) {
+    return [`  unavailable — ${daemon.error}`]
+  }
+  if (daemon.live) {
+    return [`  up — pid ${daemon.pid}${daemon.recorded ? '' : ' (unrecorded holder)'}`]
+  }
+  return [daemon.recorded ? '  dead — recorded supervisor is gone' : '  down']
+}
+
 /** Text render — attention first; an empty list is the "fleet is quiet"
  *  answer, printed as such rather than omitted. */
 export function renderSnapshot(s: WatchSnapshot): string {
@@ -581,6 +662,9 @@ export function renderSnapshot(s: WatchSnapshot): string {
     '',
     'loop',
     ...loopLines(s.loop),
+    '',
+    'daemon',
+    ...daemonLines(s.daemon),
   ].join('\n')
 }
 
@@ -625,20 +709,33 @@ export function watchArgs(argv: string[]): {
  *  throwing janitor surfaces as an attention line, not a dead watch
  *  (bro-f6zp — a silent janitor is indistinguishable from a broken one). */
 function tickJanitor(dir: string): { janitor?: JanitorReport; note: string } {
+  // Orphaned bd procs ride the same tick: a supervisor dying mid-call
+  // leaves them holding the embedded noms LOCK forever (bro-8845g).
+  // Scope by repo root — a watch launched from a subdirectory would
+  // never see the root's orphans otherwise.
+  const repoRoot = gitTry(['-C', dir, 'rev-parse', '--show-toplevel']).out.trim() || dir
+  let orphanNote = ''
+  try {
+    const o = sweepOrphanProcs('bd', repoRoot)
+    if (o.signaled.length > 0 || o.failed.length > 0) {
+      const failed = o.failed.length > 0 ? ` (${o.failed.length} resisted SIGTERM)` : ''
+      orphanNote = `bd-orphans: signaled ${o.signaled.length}${failed}`
+    }
+  } catch (err) {
+    orphanNote = `bd-orphan sweep failed — ${err instanceof Error ? err.message : String(err)}`
+  }
   try {
     const j = runJanitor(dir)
-    if (j !== null && janitorDidWork(j)) {
-      return { janitor: j, note: janitorLine(j) }
-    }
-    return { note: '' }
+    const note = j !== null && janitorDidWork(j) ? janitorLine(j) : ''
+    return { janitor: j ?? undefined, note: [note, orphanNote].filter((s) => s !== '').join(' · ') }
   } catch (err) {
-    return { note: `janitor failed — ${err instanceof Error ? err.message : String(err)}` }
+    return { note: [orphanNote, `janitor failed — ${err instanceof Error ? err.message : String(err)}`].filter((s) => s !== '').join(' · ') }
   }
 }
 
-/** `install|uninstall` — the heartbeat on a real scheduler so polling
- *  costs zero inference (bro-7xgk.5); the session's holder keeps the
- *  turn alive, this owns the cadence. */
+/** `install|uninstall` — arm/disarm the session pulse (bro-killn):
+ *  install writes the want-marker session-start rearms from and strips
+ *  any legacy systemd/crontab entry; uninstall removes both. */
 function runWatchSched(argv: string[]): void {
   const dir = process.cwd()
   const cfg =
@@ -654,16 +751,15 @@ function runWatchSched(argv: string[]): void {
   }
   const everyRaw = flag(argv, '--every')
   const everySec = everyRaw === undefined ? cfg.intervalSec : Number(everyRaw)
-  // the shared floor matters most here: a systemd timer or cron line
-  // carries the cadence verbatim — a 0.05s timer is a busy loop that
-  // survives the CLI and keeps ticking after the session is gone
+  // the shared floor still matters: the armed cadence lands verbatim in
+  // the marker and the rearm command — a 0.05s pulse is a busy loop
   if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
     console.error(
       `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw ?? everySec}"`
     )
     process.exit(2)
   }
-  const r = installWatch(dir, { everySec, print: argv.includes('--print') })
+  const r = installWatch(dir, { everySec, pulseSec: cfg.pulseSec, print: argv.includes('--print') })
   console.log(r.detail)
   if (r.state === 'error') {
     process.exit(1)
@@ -703,32 +799,20 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
     }
     const text = renderSnapshot(snap)
     console.log(json ? JSON.stringify(snap, null, 2) : text)
+    try {
+      // the durable heartbeat file — mailbox drops expire in an hour,
+      // this is what overnight state reads from (bro-dxoa5)
+      writeHeartbeat(dir, snap)
+    } catch (err) {
+      console.error(
+        `warning: heartbeat file write failed — ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
     if (notify) {
-      const key = snapshotKey(snap)
-      if (key !== lastNotified) {
-        try {
-          // mark notified only on a successful drop — a transient
-          // failure retries on the next tick, never silently lost
-          if (emitMailbox(dir, text)) {
-            lastNotified = key
-          }
-        } catch (err) {
-          // mailbox write failures (permissions, disk, races) warn —
-          // the heartbeat is best-effort and must not die on a drop
-          console.error(
-            `warning: mailbox drop failed — ${err instanceof Error ? err.message : String(err)}`
-          )
-        }
-      }
+      lastNotified = dropTransition(dir, snap, text, lastNotified)
     }
   }
 
-  // the bound starts before the first tick — a slow snapshot already
-  // spends --for budget, and expiry must not wait one more interval.
-  // Monotonic clock for the deadline: a wall-clock step backward must
-  // not stretch the bound past its elapsed budget.
-  const deadline =
-    forSec === undefined ? Number.POSITIVE_INFINITY : performance.now() + forSec * 1000
   const expired = () => {
     console.log(
       json
@@ -736,28 +820,82 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
         : 'watch: --for expired'
     )
   }
-  await tick()
   if (everySec === undefined) {
+    await tick()
     return
   }
-  // --every: tick on a cadence until killed — or until --for expires.
-  // An unbounded watch is only legal while a supervisor owns the
-  // lifecycle; session-side watchers must pass --for so their exit
-  // exists as an event.
-  for (;;) {
-    if (performance.now() >= deadline) {
-      expired()
-      return
-    }
-    // cap the sleep at the remaining budget so expiry lands on its
-    // boundary, not one full --every late
-    await new Promise((r) =>
-      setTimeout(r, Math.min(everySec * 1000, deadline - performance.now()))
+  await runWatchPulse(dir, everySec, forSec, tick, expired)
+}
+
+/** The session pulse (bro-killn): orchestrator-only, one per repo via
+ *  `bro/pulse.lock`, bounded by --for measured from entry so a standby
+ *  behind the incumbent spends the same budget as ticking. */
+async function runWatchPulse(
+  dir: string,
+  everySec: number,
+  forSec: number | undefined,
+  tick: () => Promise<void>,
+  expired: () => void
+): Promise<void> {
+  // GUARD (bro-killn): spawned workers pin BRO_AGENT_ID at spawn — they
+  // must never arm the cadence; the orchestrator session owns it. The
+  // connector's nudge applies the same predicate on the read side.
+  if (!isOrchestratorSession()) {
+    console.error(
+      'error: BRO_AGENT_ID is set — spawned workers never arm the watch pulse; ' +
+        'the orchestrator session owns the cadence'
     )
+    process.exit(2)
+  }
+  // The bound starts here, before the lock wait: a standby behind the
+  // incumbent spends the same --for budget as ticking — a wait that eats
+  // the whole window exits without a tick (the incumbent covered it).
+  // Monotonic clock: a wall-clock step backward must not stretch the
+  // bound past its elapsed budget.
+  const deadline =
+    forSec === undefined ? Number.POSITIVE_INFINITY : performance.now() + forSec * 1000
+  // One pulse per repo: `bro/pulse.lock` is held heartbeated for the
+  // process lifetime — a duplicate stands by behind the incumbent and
+  // takes over when it exits, never ticks concurrently (spec bro-2duu9).
+  // The lock's holder pid is also the session-start liveness read.
+  const lock = pulseLockPath(dir)
+  const releasePulse =
+    lock === null
+      ? () => {}
+      : await awaitFileLock(lock, {
+          label: 'watch pulse lock',
+          onStandby: (pid) =>
+            console.error(
+              `bro watch: pulse already held${pid === null ? '' : ` by pid ${pid}`} — standing by`
+            ),
+        })
+  try {
     if (performance.now() >= deadline) {
       expired()
       return
     }
     await tick()
+    // --every: tick on a cadence until killed — or until --for expires.
+    // An unbounded watch is only legal while a supervisor owns the
+    // lifecycle; session-side watchers must pass --for so their exit
+    // exists as an event.
+    for (;;) {
+      if (performance.now() >= deadline) {
+        expired()
+        return
+      }
+      // cap the sleep at the remaining budget so expiry lands on its
+      // boundary, not one full --every late
+      await new Promise((r) =>
+        setTimeout(r, Math.min(everySec * 1000, deadline - performance.now()))
+      )
+      if (performance.now() >= deadline) {
+        expired()
+        return
+      }
+      await tick()
+    }
+  } finally {
+    releasePulse()
   }
 }

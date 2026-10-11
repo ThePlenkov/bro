@@ -12,9 +12,24 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0` (major-pinned), plus
 store.
 
 `bro agents` is the supervisor surface over the orchestrator connectors
-(native detached processes, gascity, tmux, …). The agentId registry in
-the git common dir makes an agent's identity survive its process — a
+(native detached processes, gascity, tmux, docker, …). The agentId
+registry in the git common dir makes an agent's identity survive its process — a
 respawn reuses the dead agent's id, worktree, and stored prompt.
+
+The `docker` connector runs each worker in a container — the image comes
+from `agents.docker.image` or the repo's devcontainer (see
+`agents.docker.*` in configuration docs). Worktree, git common dir and
+beads store mount at their host paths, so the same registry/claims/exit
+contract holds; an unreachable docker daemon degrades the view, never
+a stale 'lost' verdict.
+
+The `copilot` connector dispatches GitHub Copilot coding-agent tasks —
+hosted remote workers that open pull requests. The step is claimed into
+the shared beads store *before* dispatch (the remote runner can't reach
+it), the registry pins `{taskId, pr}`, and `down` best-effort cancels
+the backing Actions run — a surviving session is reported, never hidden.
+`agents.copilot.maxSessions`/`maxWorkers` count remote live tasks via a
+cached count that fails closed when stale.
 
 ## Commands
 
@@ -45,9 +60,11 @@ recorded/conventional `<repo>--<step>` lookup), `--prompt-file <file>`
   through a registered session plane — `agents.devin.maxSessions`
   counts live devin CLI sessions (its `session_locks`, deduped by pid),
   interactive sessions included, so a spawn can refuse while the fleet
-  looks empty. A spawn counts into a kind when a registered plane
-  detects the resolved command's CLI or the backend sets
-  `agents.<backend>.sessionKind`; a declared kind with no registered
-  plane refuses loudly. Devin's host-local count misses cloud-side
-  `devin_session_create` sessions — a plane reports only what the host
-  can verify.
+  looks empty. `agents.<kind>.maxWorkers` splits the count: only spawned
+  workers fill it (devin: a `BRO_AGENT_ID` environ badge or a
+  non-terminal stdin), so interactive TTYs stop starving rigs. A spawn
+  counts into a kind when a registered plane detects the resolved
+  command's CLI or the backend sets `agents.<backend>.sessionKind`; a
+  declared kind with no registered plane refuses loudly. Devin's
+  host-local count misses cloud-side `devin_session_create` sessions —
+  a plane reports only what the host can verify.

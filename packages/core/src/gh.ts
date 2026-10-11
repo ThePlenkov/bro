@@ -24,19 +24,46 @@ export interface GhOpts {
   env?: Record<string, string>
 }
 
+// Per-call pools bound one call site each — `pooled(…, 4)` in the
+// annotation probe, the bulk-scan chunking — but overlapping gate
+// probes still multiply children into the same cgroup (one watch
+// heartbeat probes every fleet PR in parallel, each child ~50MB —
+// bro-2l7r9's OOM). One process-wide budget caps the real fan-out.
+// The spawnSync twins need none — a blocked event loop is already
+// serial — and bdAsync stays uncapped: its overlap is the probe-
+// latency contract, not a memory risk at bd's footprint.
+const GH_CHILD_CAP = 8
+let ghInFlight = 0
+const ghWaiters: Array<() => void> = []
+
+async function ghChild<T>(fn: () => Promise<T>): Promise<T> {
+  while (ghInFlight >= GH_CHILD_CAP) {
+    await new Promise<void>((resolve) => ghWaiters.push(resolve))
+  }
+  ghInFlight += 1
+  try {
+    return await fn()
+  } finally {
+    ghInFlight -= 1
+    ghWaiters.shift()?.()
+  }
+}
+
 /** Async `gh` — the spawnSync variant blocks the event loop, so bulk
  *  probes that run host calls under a concurrency cap need this to
  *  actually overlap. Same contract: resolve stdout, throw on non-zero. */
 export function ghAsync(args: string[], cwd?: string, opts?: GhOpts): Promise<string> {
-  const { done } = spawnCollect('gh', args, cwd, opts?.env)
-  return done.then(({ code, out, err, error }) => {
-    if (error !== undefined) {
-      throw error
-    }
-    if (code === 0) {
-      return out
-    }
-    throw new Error(`gh ${args[0]} failed: ${err}`)
+  return ghChild(() => {
+    const { done } = spawnCollect('gh', args, cwd, opts?.env)
+    return done.then(({ code, out, err, error }) => {
+      if (error !== undefined) {
+        throw error
+      }
+      if (code === 0) {
+        return out
+      }
+      throw new Error(`gh ${args[0]} failed: ${err}`)
+    })
   })
 }
 
@@ -68,8 +95,10 @@ export function ghTryAsync(
   args: string[],
   cwd?: string
 ): Promise<{ code: number; out: string; err: string }> {
-  const { done } = spawnCollect('gh', args, cwd)
-  return done.then((r) => ({ code: r.code ?? 1, out: r.out, err: r.err }))
+  return ghChild(() => {
+    const { done } = spawnCollect('gh', args, cwd)
+    return done.then((r) => ({ code: r.code ?? 1, out: r.out, err: r.err }))
+  })
 }
 
 /** `OWNER/REPO` from args, or `gh repo view` in the current clone. Any

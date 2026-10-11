@@ -1,14 +1,17 @@
 /**
  * Loop-agent run records — `<git-common>/bro/loop/<slug>.{json,log}`
- * (spec specs/bro-9lpn3.md). `bro loop`'s worker spawn is synchronous
- * — no registry row, no fleet slot — so the run record plus the tee'd
- * output log are the only artifacts a check-in (`bro watch`,
- * `bro status`) can judge liveness and silence from. The `.json`
- * exists while the agent runs: `{beadId, slug, pid, startedAt,
- * worktree, log}`; the `.log` persists as the audit trail across
- * fix-round respawns (append, like the agents-plane convention). Its
- * mtime IS the last-output signal — readers report silence, never
- * kill.
+ * (spec specs/bro-9lpn3.md). They describe the LEGACY spawn only: a
+ * beads-backed loop spawns through the agents registry (spec
+ * bro-zpa93) — detached, claimed, `.exit`-recorded — and its worker is
+ * read through `bro agents`/`bro fleet` instead. The synchronous
+ * fallback (no shared store to pin against) still keeps the run
+ * record plus the tee'd output log — the only artifacts a check-in
+ * (`bro watch`, `bro status`) can judge liveness and silence from.
+ * The `.json` exists while the agent runs: `{beadId, slug, pid,
+ * startedAt, worktree, log}`; the `.log` persists as the audit trail
+ * across fix-round respawns (append, like the agents-plane
+ * convention). Its mtime IS the last-output signal — readers report
+ * silence, never kill.
  *
  * `bro/loop/` and not `bro/agents/`: a record there would pose as a
  * backend-owned agent home, and the janitor's orphan sweep reaps
@@ -168,7 +171,11 @@ function silenceMs(rec: LoopRunRecord | null, recordMtime: number, now: number):
       : Number.isFinite(recordMtime)
         ? Math.max(logMtime, recordMtime)
         : logMtime
-  return Number.isFinite(base) ? now - base : null
+  // mtimes carry sub-ms precision that an integer Date.now() lacks —
+  // a read inside the write's own millisecond (or a foreign-fs stamp
+  // skewed into the future) subtracts to a negative, and silence is a
+  // duration: it bottoms out at 0
+  return Number.isFinite(base) ? Math.max(0, now - base) : null
 }
 
 function fileView(home: string, f: string, now: number): LoopRunView {

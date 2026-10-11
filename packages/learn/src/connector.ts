@@ -354,14 +354,15 @@ function inject(
 // probeCtx runs `listLessons` — a full `bd kv list` subprocess — on
 // every hook landing, and hook events are fresh processes so an
 // in-process cache can't help. The snapshot is a file under the hooks
-// dir keyed on the store's write barometer: every bd mutation bumps an
-// embedded-dolt noms manifest, reads don't. A store without that
-// layout (server-mode bd, a scripted fake, no .beads at all) yields no
+// dir keyed on the store's write barometer: every bd mutation bumps a
+// dolt noms manifest, reads don't — embedded stores keep it under
+// `embeddeddolt/<db>/`, server-mode stores under `dolt/<db>/`. A store
+// without either layout (a scripted fake, no .beads at all) yields no
 // stamp and every probe reads live — the cache only ever skips a
 // subprocess, it never invents an answer.
 
 interface LessonSnapshot {
-  /** resolved `.beads` dir + each embeddeddolt manifest's mtime:size */
+  /** resolved `.beads` dir + each store manifest's mtime:size */
   stamp: string
   lessons: Lesson[]
 }
@@ -381,29 +382,33 @@ function beadsDir(dir: string): string | null {
   return join(dirname(r.out.trim()), '.beads')
 }
 
-/** `<beads>/embeddeddolt/<db>/.dolt/noms/manifest` mtime+size for every
- *  db dir — bumped on any bd write, so a snapshot keyed on it cannot
- *  be stale (issue writes over-invalidate, which is safe). null means
- *  "no recognizable embeddeddolt store" → read live every probe. */
+/** `<beads>/{embeddeddolt,dolt}/<db>/.dolt/noms/manifest` mtime+size for
+ *  every db dir — bumped on any bd write, so a snapshot keyed on it
+ *  cannot be stale (issue writes over-invalidate, which is safe).
+ *  `embeddeddolt` is the embedded layout, `dolt` the server-mode one —
+ *  the server mutates the same manifest on commit. null means "no
+ *  recognizable dolt store" → read live every probe. */
 function storeStamp(dir: string): string | null {
   const beads = beadsDir(dir)
   if (beads === null) {
     return null
   }
   const parts: string[] = []
-  try {
-    for (const db of readdirSync(join(beads, 'embeddeddolt'))) {
-      try {
-        const st = statSync(join(beads, 'embeddeddolt', db, '.dolt', 'noms', 'manifest'))
-        if (st.isFile()) {
-          parts.push(`${db}:${st.mtimeMs}:${st.size}`)
+  for (const root of ['embeddeddolt', 'dolt']) {
+    try {
+      for (const db of readdirSync(join(beads, root))) {
+        try {
+          const st = statSync(join(beads, root, db, '.dolt', 'noms', 'manifest'))
+          if (st.isFile()) {
+            parts.push(`${root}/${db}:${st.mtimeMs}:${st.size}`)
+          }
+        } catch {
+          // not a db dir / unreadable entry — try the next
         }
-      } catch {
-        // not a db dir / unreadable entry — try the next
       }
+    } catch {
+      // root absent — the other layout may still exist
     }
-  } catch {
-    return null // no embeddeddolt dir — not a cacheable layout
   }
   if (parts.length === 0) {
     return null

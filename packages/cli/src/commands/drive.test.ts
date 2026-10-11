@@ -4,10 +4,12 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { procStat, type AgentInfo, type TaskRow, type TaskStore } from '@broject/core'
+import type { ListedWatch } from '@broject/act'
 import {
   agentProcessesIn,
   branchSlug,
   buildFixerPrompt,
+  buildRebaseFixerPrompt,
   candidateBranches,
   detailMatches,
   driveArgs,
@@ -19,6 +21,7 @@ import {
   occupied,
   registryAgents,
   registryEntryState,
+  supervisedBy,
   worktreeClaim,
 } from './drive.ts'
 import { driveSection } from './drive-config.ts'
@@ -91,13 +94,20 @@ describe('candidateBranches', () => {
       git(['branch', 'stack/s/1-bro-c'], main)
       git(['branch', 'random/topic'], main)
       git(['worktree', 'add', '-q', join(root, 'side'), 'work/bro-a'], main)
-      const branches = candidateBranches(main)
+      const { branches, complete } = candidateBranches(main)
+      assert.equal(complete, true)
       assert.ok(branches.includes('work/bro-a'))
       assert.ok(branches.includes('loop/bro-b'))
       assert.ok(branches.includes('stack/s/1-bro-c'))
       assert.ok(!branches.includes('random/topic'))
       assert.equal(branches.filter((b) => b === 'work/bro-a').length, 1)
     })
+  })
+
+  test('a failed git listing is incomplete, never a drained set', () => {
+    const { branches, complete } = candidateBranches('/no/such/dir')
+    assert.deepEqual(branches, [])
+    assert.equal(complete, false)
   })
 })
 
@@ -367,6 +377,92 @@ describe('occupied', () => {
   })
 })
 
+describe('supervisedBy — the watch-marker plane (bro-0aa87)', () => {
+  const occBase = {
+    agents: [] as AgentInfo[],
+    branch: 'work/bro-a',
+    worktree: '/repos/bro--bro-a',
+    workDetails: [] as string[],
+  }
+  /** Marker names carry the kind: `<pr>-loop-<pid>.json` or
+   *  `<pr>-<pid>-<nonce>.json` (kind 'wait'). */
+  const watch = (
+    pr: number,
+    kind: string,
+    over: Partial<ListedWatch> = {}
+  ): ListedWatch => ({
+    watch: {
+      pr,
+      link: `[#${pr}](https://x/pull/${pr})`,
+      pid: 4242,
+      merge: true,
+      startedAt: Date.now(),
+      timeoutMin: 60,
+    },
+    file: `/watches/${pr}-${kind === 'wait' ? '4242-f00bad' : `${kind}-4242`}.json`,
+    alive: true,
+    ...over,
+  })
+
+  test('a live foreign marker supervises — loop heartbeat, wait, convoy', () => {
+    for (const kind of ['loop', 'wait', 'convoy']) {
+      const sup = supervisedBy([watch(7, kind)], 7)
+      assert.equal(sup?.watch.pr, 7, `${kind} marker must supervise`)
+    }
+  })
+
+  test('a live drive marker does not — drive-vs-drive is dedup elsewhere', () => {
+    assert.equal(supervisedBy([watch(7, 'drive')], 7), undefined)
+    // a second live drive beside a loop marker still reads supervised
+    const sup = supervisedBy([watch(7, 'drive'), watch(7, 'loop')], 7)
+    assert.equal(sup?.file, '/watches/7-loop-4242.json')
+  })
+
+  test('dead or unrelated markers do not supervise', () => {
+    assert.equal(supervisedBy([watch(7, 'loop', { alive: false })], 7), undefined)
+    assert.equal(supervisedBy([watch(8, 'loop')], 7), undefined)
+    assert.equal(supervisedBy([], 7), undefined)
+    assert.equal(supervisedBy(undefined, 7), undefined)
+    assert.equal(supervisedBy([watch(7, 'loop')], undefined), undefined)
+  })
+
+  test('occupied reports the supervisor, verdicts skip the PR', () => {
+    const why = occupied({
+      ...occBase,
+      pr: 7,
+      watches: [watch(7, 'loop')],
+    })
+    assert.match(why ?? '', /supervised by loop pid 4242/)
+  })
+
+  test('a dead supervisor marker frees the PR — coverage self-restores', () => {
+    const why = occupied({
+      ...occBase,
+      pr: 7,
+      watches: [watch(7, 'loop', { alive: false })],
+    })
+    assert.equal(why, undefined)
+  })
+
+  test('supervision wins over the weaker planes but not over our own fixer', () => {
+    const why = occupied({
+      ...occBase,
+      pr: 7,
+      watches: [watch(7, 'loop')],
+      workDetails: ['bro-a'],
+    })
+    assert.match(why ?? '', /supervised by loop/)
+    const fixer = occupied({
+      ...occBase,
+      pr: 7,
+      watches: [watch(7, 'loop')],
+      fixerBead: 'bro-fix1',
+      agents: [agent({ molStep: 'bro-fix1' })],
+    })
+    assert.match(fixer ?? '', /fixer agent live/)
+  })
+})
+
 describe('worktreeClaim', () => {
   /** A worktree whose .git is the pointer file a linked tree gets. */
   function fakeWorktree(): { wt: string; gitdir: string; rm: () => void } {
@@ -561,7 +657,43 @@ describe('buildFixerPrompt', () => {
   })
 })
 
+describe('buildRebaseFixerPrompt', () => {
+  test('carries the PR link, branch, base, worktree, and the no-merge rule', () => {
+    const p = buildRebaseFixerPrompt({
+      pr: 42,
+      link: '[#42](https://github.com/o/r/pull/42)',
+      branch: 'work/bro-a',
+      base: 'main',
+      worktree: '/repos/bro--bro-a',
+    })
+    assert.match(p, /#42.*pull\/42/)
+    assert.match(p, /work\/bro-a/)
+    assert.match(p, /bro--bro-a/)
+    assert.match(p, /merge conflicts with its base branch `main`/)
+    // the work order fetches the PR branch too — a stale local tip would
+    // rebase without the remote's newer commits and drop them on push
+    assert.match(p, /fetch origin work\/bro-a main/)
+    assert.match(p, /rebase origin\/work\/bro-a/)
+    assert.match(p, /git rebase origin\/main/)
+    assert.match(p, /--force-with-lease/)
+    assert.match(p, /NEVER merge/)
+  })
+})
+
 describe('ensureFixerWorktree', () => {
+  /** A remote-backed `work/bro-a` standing at `<root>/main--bro-a` —
+   *  bare origin.git + pushed branch + its worktree. Each remote test
+   *  then stales refs or moves tips to taste. */
+  const remoteBackedCheckout = (root: string, main: string): string => {
+    git(['init', '-q', '--bare', join(root, 'origin.git')], root)
+    git(['remote', 'add', 'origin', join(root, 'origin.git')], main)
+    git(['branch', 'work/bro-a'], main)
+    git(['push', '-qu', 'origin', 'work/bro-a'], main)
+    const dir = join(root, 'main--bro-a')
+    git(['worktree', 'add', '-q', dir, 'work/bro-a'], main)
+    return dir
+  }
+
   test('reuses the conventional dir on the right branch; a foreign one falls back', () => {
     const { root, main } = initRepo('bro-drive-wtx-')
     inside(main, root, () => {
@@ -602,6 +734,42 @@ describe('ensureFixerWorktree', () => {
       assert.equal(r.err, undefined)
       assert.equal(r.created, true)
       assert.equal(git(['-C', r.path!, 'branch', '--show-current'], main).trim(), 'work/bro-a')
+    })
+  })
+
+  test('a reused checkout fast-forwards to the remote tip', () => {
+    const { root, main } = initRepo('bro-drive-wtr-')
+    inside(main, root, () => {
+      const dir = remoteBackedCheckout(root, main)
+      // the remote gains a commit the standing checkout hasn't seen —
+      // commit on main and push it across as work/bro-a; the tracking
+      // ref is staled so the fetch inside ensure is what restores it
+      git(['commit', '-qm', 'remote', '--allow-empty'], main)
+      git(['push', '-q', 'origin', 'main:work/bro-a'], main)
+      git(['update-ref', '-d', 'refs/remotes/origin/work/bro-a'], main)
+      const stale = git(['-C', dir, 'rev-parse', 'HEAD'], main).trim()
+      assert.equal(ensureFixerWorktree(main, 'work/bro-a').path, dir)
+      const tip = git(['-C', dir, 'rev-parse', 'HEAD'], main).trim()
+      assert.notEqual(tip, stale)
+      assert.equal(tip, git(['-C', dir, 'rev-parse', 'origin/work/bro-a'], main).trim())
+    })
+  })
+
+  test('a branch diverged from its remote is refused, never clobbered', () => {
+    const { root, main } = initRepo('bro-drive-wtd-')
+    inside(main, root, () => {
+      const dir = remoteBackedCheckout(root, main)
+      // local tip one way, remote the other — the tracking ref is
+      // staled so the fetch inside ensure is what proves the divergence
+      git(['-C', dir, 'commit', '-qm', 'local', '--allow-empty'], main)
+      git(['commit', '-qm', 'remote', '--allow-empty'], main)
+      git(['push', '-q', 'origin', 'main:work/bro-a'], main)
+      git(['update-ref', '-d', 'refs/remotes/origin/work/bro-a'], main)
+      const tip = git(['-C', dir, 'rev-parse', 'HEAD'], main).trim()
+      const r = ensureFixerWorktree(main, 'work/bro-a')
+      assert.equal(r.path, undefined)
+      assert.match(r.err ?? '', /diverged/)
+      assert.equal(git(['-C', dir, 'rev-parse', 'HEAD'], main).trim(), tip)
     })
   })
 })

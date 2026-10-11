@@ -190,6 +190,7 @@ const snap = (over: Partial<WatchSnapshot> = {}): WatchSnapshot => ({
   gates: { available: true, prs: [] },
   fleet: { rows: [], degraded: [], conflicts: [] },
   loop: { stallMin: 45, runs: [] },
+  daemon: { live: false, recorded: false },
   ...over,
 })
 
@@ -216,6 +217,14 @@ describe('renderSnapshot', () => {
     assert.match(text, /gates\n  no PRs in the fleet/)
     assert.match(text, /fleet\n  no open molecules — nothing in the fleet/)
     assert.match(text, /loop\n  no loop agents on record/)
+    assert.match(text, /daemon\n  down/)
+  })
+
+  test('a live supervisor renders its pid; a dead recorded one is attention', () => {
+    const up = renderSnapshot(snap({ daemon: { live: true, pid: 4242, recorded: true } }))
+    assert.match(up, /daemon\n  up — pid 4242/)
+    const dead = renderSnapshot(snap({ daemon: { live: false, recorded: true } }))
+    assert.match(dead, /daemon\n  dead — recorded supervisor is gone/)
   })
 
   test('the loop section renders run records — silence readable per row', () => {

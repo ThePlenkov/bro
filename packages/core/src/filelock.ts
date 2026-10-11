@@ -1,10 +1,10 @@
-/** Advisory inter-process file locks (O_EXCL create — existence IS the
+/** Advisory inter-process file locks (atomic create — existence IS the
  *  lock). Serializes read-modify-write windows across bro processes:
  *  without one, two actors both read the pre-write state and the loser
  *  clobbers or double-allocates. Re-entrant per path inside a process so
  *  a locked section can reach for the same lock again. */
 import { randomBytes } from 'node:crypto'
-import { linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { pidAlive } from './proc.ts'
 
@@ -26,6 +26,16 @@ const LOCK_WAIT_MS = 20_000
  *  could belong to an in-flight acquirer; an old one can't. */
 const LOCK_STALE_MS = 60_000
 
+/** Filesystems where link(2) is not implemented (some fuse/9p/drvfs
+ *  mounts) — the acquire falls back to a single O_CREAT|O_EXCL write,
+ *  the same atomic-create contract (tryAcquireLockFileWx). */
+const NO_HARDLINK_CODES = new Set(['EPERM', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP'])
+
+/** A lock that reads EMPTY is a wx writer mid-publish (the fallback's
+ *  create-then-write window). Fresh = in-flight — never stealable; an
+ *  empty file older than the grace is a crashed writer's leftover. */
+const EMPTY_LOCK_GRACE_MS = 5_000
+
 const syncSleep = (ms: number): void => {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
@@ -45,6 +55,9 @@ const lockStealable = (path: string): boolean => {
     age = Date.now() - statSync(path).mtimeMs
   } catch {
     return false // vanished or unreadable — can't prove dead, don't steal
+  }
+  if (token.trim() === '' && age < EMPTY_LOCK_GRACE_MS) {
+    return false // in-flight wx writer — retry, never break it
   }
   return !pidAlive(Number(token.split(':')[0])) || age > LOCK_ABANDONED_MS
 }
@@ -128,7 +141,9 @@ const sweepStaged = (lock: string): void => {
  *  is staged and link(2)'d into place atomically: an O_EXCL create would
  *  publish an EMPTY lock whose pid-less token reads as a dead owner — a
  *  concurrent acquirer could steal it before the first write landed.
- *  On EEXIST a provably stale hold is stolen so the next retry wins. */
+ *  Filesystems without link(2) take the wx fallback, which covers that
+ *  window with the fresh-empty grace instead. On EEXIST a provably stale
+ *  hold is stolen so the next retry wins. */
 const tryAcquireLockFile = (lock: string, token: string): boolean => {
   const staged = `${lock}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
   writeFileSync(staged, token)
@@ -136,18 +151,63 @@ const tryAcquireLockFile = (lock: string, token: string): boolean => {
     linkSync(staged, lock)
     return true
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === 'EEXIST') {
+      try {
+        stealLock(lock)
+      } catch {
+        // raced removal or a stat flake — the retry decides
+      }
+      return false
+    }
+    if (!NO_HARDLINK_CODES.has(code ?? '')) {
       throw err
     }
+    // no link(2) on this fs — fall through to the wx path
   } finally {
     rmSync(staged, { force: true })
   }
+  return tryAcquireLockFileWx(lock, token)
+}
+
+/** The wx acquisition attempt — for filesystems where link(2) is not
+ *  implemented (some fuse/9p/drvfs mounts). O_CREAT|O_EXCL gives the
+ *  same atomic-create contract, but the file publishes EMPTY: a
+ *  contender sees an in-flight writer (fresh-empty grace in
+ *  lockStealable) rather than a dead owner to break. The post-write
+ *  re-read closes the remaining window — a thief that stole the empty
+ *  file and took the path leaves its own token there (or the capture
+ *  is mid-flight), so the hold only counts while the lock still names
+ *  ours. */
+const tryAcquireLockFileWx = (lock: string, token: string): boolean => {
+  let fd: number
   try {
-    stealLock(lock)
-  } catch {
-    // raced removal or a stat flake — the retry decides
+    fd = openSync(lock, 'wx')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      try {
+        stealLock(lock)
+      } catch {
+        // raced removal or a stat flake — the retry decides
+      }
+      return false
+    }
+    throw err
   }
-  return false
+  try {
+    writeFileSync(fd, token)
+  } finally {
+    try {
+      closeSync(fd)
+    } catch {
+      // a close failure can't unwrite the token — the re-read decides
+    }
+  }
+  try {
+    return readFileSync(lock, 'utf8') === token
+  } catch {
+    return false // vanished mid-window — a contender owns the path now
+  }
 }
 
 /** Drop `lock` only while it still carries `token` — the same
@@ -196,7 +256,7 @@ export interface FileLockOptions {
   label?: string
 }
 
-/** Advisory inter-process lock on `lock` (O_EXCL create — existence IS
+/** Advisory inter-process lock on `lock` (atomic create — existence IS
  *  the lock). Returns the release; throws when a live holder outlasts
  *  waitMs. Re-entrant per path — a second acquire while held is a no-op
  *  release. Held locks are also dropped by an 'exit' hook, so a
@@ -238,6 +298,133 @@ export function withFileLock<T>(lock: string, fn: () => T, opts: FileLockOptions
     return fn()
   } finally {
     release()
+  }
+}
+
+/** Refresh cadence for a long hold — far under the abandoned bound so
+ *  a live hold's mtime never reads as stale to contenders or the
+ *  janitor's `*.lock` sweep; cheap enough to run for a whole process
+ *  lifetime. */
+const LOCK_HEARTBEAT_MS = Math.floor(LOCK_ABANDONED_MS / 5)
+
+/** The holder pid in a lock's `<pid>:<token>` content — for 'already
+ *  supervised by pid N' messages. A pid-only token (serve's lock
+ *  shape) parses the same way. Null when the file is absent or carries
+ *  no parseable pid. */
+export function lockHolderPid(lock: string): number | null {
+  try {
+    const pid = Number(readFileSync(lock, 'utf8').split(':')[0]?.trim())
+    return Number.isInteger(pid) && pid > 0 ? pid : null
+  } catch {
+    return null
+  }
+}
+
+export interface HeldLockOptions extends FileLockOptions {
+  /** Heartbeat period — tests inject a small value; the default sits
+   *  far under the abandoned bound. */
+  heartbeatMs?: number
+}
+
+/** Acquire `lock` and keep it heartbeated for the hold's whole
+ *  lifetime — a supervisor's singleton hold (spec bro-2duu9). A plain
+ *  acquireFileLock held past the abandoned bound is robbed even while
+ *  its holder lives (mtime age is the steal signal), so the beat
+ *  rewrites the mtime on an unref'd interval: a live hold never reads
+ *  stale, and a `--once` process is never kept running by its own
+ *  guard. If the lock file vanished mid-hold the beat re-links our own
+ *  token — a contender who already linked wins (EEXIST), an empty
+ *  path takes the hold back. */
+export function holdFileLock(lock: string, opts: HeldLockOptions = {}): () => void {
+  const { heartbeatMs = LOCK_HEARTBEAT_MS, ...lockOpts } = opts
+  const release = acquireFileLock(lock, lockOpts)
+  // acquireFileLock guarantees our token is registered — re-entrant
+  // holds re-link the outer hold's token, which is the same file
+  const token = heldLocks.get(lock)!
+  const beat = (): void => {
+    let current: string | undefined
+    try {
+      current = readFileSync(lock, 'utf8')
+    } catch {
+      current = undefined
+    }
+    if (current === token) {
+      try {
+        const now = new Date()
+        utimesSync(lock, now, now)
+      } catch {
+        // a stat/write flake — the next beat retries
+      }
+      return
+    }
+    // a foreign token holds the path: refreshing its mtime would mask
+    // a dead thief's abandonment, so the reclaim only runs when the
+    // occupant is gone or stealable (dead or past the bound) — a live
+    // foreign hold is left alone
+    if (current !== undefined && !lockStealable(lock)) {
+      return
+    }
+    try {
+      tryAcquireLockFile(lock, token)
+    } catch {
+      // staged-write/IO failure — the next beat retries
+    }
+  }
+  const timer = setInterval(beat, heartbeatMs)
+  timer.unref()
+  return () => {
+    clearInterval(timer)
+    release()
+  }
+}
+
+/** Standby report cadence — one `onStandby` per live-holder wait. */
+const STANDBY_WAIT_MS = 60_000
+
+/** One acquire attempt's sync budget while standing by —
+ *  acquireFileLock's contention wait is `Atomics.wait` on the calling
+ *  thread, so a long slice would freeze the event loop (signal
+ *  handlers, timers) for a standing-by supervisor. Slice short and
+ *  retry: signal latency stays under a quarter second. */
+const ACQUIRE_SLICE_MS = 250
+
+/** Acquire-and-hold `lock`, waiting through a live hold instead of
+ *  timing out — a duplicate supervisor's standby (spec bro-2duu9): it
+ *  serializes behind the incumbent and takes over when the hold is
+ *  released or its dead owner is stolen, so a respawn wrapper never
+ *  needs its own pacing to stay single-instance. `onStandby` fires on
+ *  entry (when a live holder already sits there) and once per wait
+ *  cycle with the holder's pid, so a blocked second instance stays
+ *  observable instead of hanging silent. */
+export async function awaitFileLock(
+  lock: string,
+  opts: HeldLockOptions & { onStandby?: (holderPid: number | null) => void } = {}
+): Promise<() => void> {
+  const { onStandby, ...lockOpts } = opts
+  // waitMs is the standby-report cadence, not the acquire slice —
+  // each attempt is bounded by ACQUIRE_SLICE_MS so a standby never
+  // stalls the event loop for the whole report window
+  const reportMs = lockOpts.waitMs ?? STANDBY_WAIT_MS
+  const incumbent = lockHolderPid(lock)
+  if (incumbent !== null && pidAlive(incumbent)) {
+    onStandby?.(incumbent)
+  }
+  let lastReport = Date.now()
+  for (;;) {
+    try {
+      return holdFileLock(lock, { ...lockOpts, waitMs: ACQUIRE_SLICE_MS })
+    } catch (err) {
+      if (!(err instanceof LockTimeout)) {
+        throw err
+      }
+      if (Date.now() - lastReport >= reportMs) {
+        lastReport = Date.now()
+        onStandby?.(lockHolderPid(lock))
+      }
+      // the slice already burned inside acquireFileLock — a macrotask
+      // here only keeps signal/'exit' handlers live between attempts
+      await new Promise((r) => setTimeout(r, 0))
+    }
   }
 }
 

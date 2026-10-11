@@ -7,7 +7,7 @@
  *  check store state, refs, and the worktree, not just output. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
@@ -35,6 +35,10 @@ interface Fixture {
   /** The fake agent script's path — provider commands reference it. */
   agent: string
   worktree: string
+  /** The raw env `run` passes to runCli — exposed so a test can spawn
+   *  the CLI directly (a run that must NOT exit gets a shorter
+   *  timeout than runCli's 60s). */
+  env: Record<string, string>
   run: (extra?: string[]) => CliResult
 }
 
@@ -59,7 +63,14 @@ function loopFixture(
       plugins: ['./fakehost.ts'],
       connectors: { reviews: 'fakehost' },
       ...extra(host),
-      loop: { agent: `node ${host.agent}`, ...loopCfg },
+      loop: {
+        agent: `node ${host.agent}`,
+        // e2e must be environment-deterministic: a host /tmp under the
+        // default floor (2×400M) would hold every push in EVERY
+        // scenario — disk coverage opts back in explicitly
+        diskMinSlots: 0,
+        ...loopCfg,
+      },
     })
   )
   const env = {
@@ -76,6 +87,7 @@ function loopFixture(
     hostState: host.state,
     agent: host.agent,
     worktree: join(root, 'main--fx-a'),
+    env,
     run: (extra = []) => runCli(['loop', ...extra], { cwd: main, env }),
   }
 }
@@ -149,14 +161,26 @@ describe('bro loop e2e', () => {
       assert.equal(existsSync(f.worktree), false)
       assert.match(r.stdout, /clean — no loop tails/)
       assert.match(spawns(f), /work opened pr/)
-      // the run record retired with the agent; its output log survives
-      // under <git-common>/bro/loop/ as the audit trail (bro-9lpn3)
-      const loopDir = join(f.main, '.git', 'bro', 'loop')
-      assert.equal(existsSync(join(loopDir, 'fx-a.json')), false)
-      assert.match(
-        readFileSync(join(loopDir, 'fx-a.log'), 'utf8'),
-        /agent land on fx-a/
+      // the worker spawned through the agents registry (bro-zpa93) —
+      // its prompt/log/.exit land under <git-common>/bro/agents/ and
+      // the entry survives the loop: a detached worker's exit stays
+      // decidable after the spawner dies (bro-snga4)
+      const registry = JSON.parse(
+        readFileSync(join(f.main, '.git', 'bro', 'agents.json'), 'utf8')
+      ) as Record<string, { agentId: string; log?: string; exitStatus?: number }>
+      const entry = registry['fx-a']
+      assert.ok(entry, 'no agents-registry entry for fx-a')
+      assert.ok(entry.log !== undefined && existsSync(entry.log), 'worker log missing')
+      assert.match(readFileSync(entry.log!, 'utf8'), /agent land on fx-a/)
+      assert.equal(
+        readFileSync(
+          join(f.main, '.git', 'bro', 'agents', `${entry.agentId}.exit`),
+          'utf8'
+        ).trim(),
+        '0'
       )
+      // the harvest landed the exit classification on the entry too
+      assert.equal(entry.exitStatus, 0)
       // the liveness guard stays quiet on a clean run — no phantom
       // heartbeats, no mid-run audit on a normal exit
       assert.doesNotMatch(r.stderr, /loop: alive —/)
@@ -205,6 +229,68 @@ describe('bro loop e2e', () => {
       assert.match(r.stdout, /loop\/fx-a/)
       assert.equal(bead(f.db, 'fx-a')?.status, 'open')
       assert.equal(existsSync(f.worktree), false)
+    })
+  })
+
+  test('dry-run reports the disk verdict — HOLD below floor, free space otherwise (bro-2spp7)', () => {
+    // a worktreeMb bigger than the real disk trips the floor on every
+    // probe — the dry run must say HOLD instead of pretending the plan
+    // is pushable
+    const f = loopFixture(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'disk hog' }],
+      { worktreeMb: 99_000_000, diskMinSlots: 2 }
+    )
+    inside(f.main, f.root, () => {
+      const r = f.run(['--dry-run'])
+      assert.match(r.stdout, /disk: \d+M free on/)
+      assert.match(r.stdout, /disk: HOLD — below floor \d+M \(2×99000000M\)/)
+      // --disk-min-slots 0 is the escape hatch — same price, floor off
+      const off = f.run(['--dry-run', '--disk-min-slots', '0'])
+      assert.match(off.stdout, /disk: \d+M free on/)
+      assert.doesNotMatch(off.stdout, /disk: HOLD/)
+    })
+  })
+
+  test('disk floor: pushes hold instead of claiming into ENOSPC (bro-2spp7)', () => {
+    // every probe is below a ~99TB-priced floor — the run must hold
+    // pushes (never claim, never park) the way it does on a full fleet
+    const f = loopFixture(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'disk hog' }],
+      { worktreeMb: 99_000_000, diskMinSlots: 2 }
+    )
+    inside(f.main, f.root, () => {
+      // a holding run is correct-by-design non-terminating — the test's
+      // own timeout (not runCli's 60s) bounds it and the captured
+      // output is the evidence
+      const proc = spawnSync(process.execPath, [CLI_DIST, 'loop', '--interval', '1'], {
+        cwd: f.main,
+        env: e2eEnv(f.env),
+        encoding: 'utf8',
+        timeout: 8_000,
+      })
+      assert.equal(proc.status, null, 'run should have held until the test timeout')
+      const stdout = proc.stdout ?? ''
+      const stderr = proc.stderr ?? ''
+      // exactly one hold line per episode — a re-breach does not re-log
+      assert.equal(stdout.match(/disk below floor/g)?.length, 1)
+      assert.match(stdout, /disk below floor .* pushes held/)
+      // the heartbeat names the wait — a disk-stuck run is a named
+      // stall, never a silent one
+      assert.match(stderr, /loop: alive — idle \(disk floor\)/)
+      // nothing claimed, nothing parked, nothing minted
+      assert.equal(bead(f.db, 'fx-a')?.status, 'open')
+      assert.equal(existsSync(f.worktree), false)
+    })
+  })
+
+  test('disk floor: an empty queue still drains — the hold is not forever (bro-2spp7)', () => {
+    // the breach return must not starve the drain check — with nothing
+    // claimable behind the floor the run reports done instead of
+    // holding pushes on an empty store until the disk frees
+    const f = loopFixture([], { worktreeMb: 99_000_000, diskMinSlots: 2 })
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /done — 0 landed, 0 closed, 0 parked, 0 failed/)
     })
   })
 
@@ -323,9 +409,13 @@ describe('bro loop e2e', () => {
       const log = spawns(f)
       assert.match(log, /work opened pr/)
       assert.match(log, /fix resolved threads/)
-      // the run log appends across respawns — the fix round continues
-      // the same bead's trail
-      const runLog = readFileSync(join(f.main, '.git', 'bro', 'loop', 'fx-a.log'), 'utf8')
+      // the registry log appends across respawns — the fix round's
+      // worker REUSES the agent id, so the same file continues the
+      // bead's trail (spec bro-zpa93)
+      const registry = JSON.parse(
+        readFileSync(join(f.main, '.git', 'bro', 'agents.json'), 'utf8')
+      ) as Record<string, { log?: string }>
+      const runLog = readFileSync(String(registry['fx-a']?.log), 'utf8')
       assert.equal(runLog.trim().split('\n').length, 2)
       assert.equal(bead(f.db, 'fx-a')?.status, 'closed')
     })
@@ -548,13 +638,14 @@ describe('bro loop liveness', () => {
     try {
       // the heartbeat holds the event loop open — a drain-shaped death
       // would have ended the process before any `alive` line; the line
-      // names the suspension point the silent deaths hid
+      // names the suspension point the silent deaths hid (now the
+      // registry agent id + pid — bro-zpa93)
       await until(
-        () => /loop: alive — worker pid=\d+ on fx-a/.test(stderr),
+        () => /loop: alive — worker \S+ pid=\d+ on fx-a/.test(stderr),
         'a worker-stage heartbeat'
       )
       assert.equal(proc.exitCode, null, 'the loop died awaiting the hung agent')
-      workerPid = Number(/worker pid=(\d+)/.exec(stderr)![1])
+      workerPid = Number(/worker \S+ pid=(\d+)/.exec(stderr)![1])
       proc.kill('SIGTERM')
       // the audit re-raises — the parent still sees a real signal
       // death, not a clean exit code
@@ -565,14 +656,14 @@ describe('bro loop liveness', () => {
       assert.equal(code, null)
       // the signal handler audits before re-raising — stage + bead
       // named, the note landed, exactly what the silent deaths denied
-      assert.match(stderr, /exiting mid-run — worker pid=\d+ on fx-a/)
+      assert.match(stderr, /exiting mid-run — worker \S+ pid=\d+ on fx-a/)
       assert.match(String(bead(f.db, 'fx-a')?.notes), /process exited mid-run/)
     } finally {
       // a failed wait must not leave the loop or the detached agent
       // group running — reap both before the fixture goes, or the
       // child's open pipes hang the test run
       proc.kill('SIGKILL')
-      const pid = workerPid || Number(/worker pid=(\d+)/.exec(stderr)?.[1] ?? 0)
+      const pid = workerPid || Number(/worker \S+ pid=(\d+)/.exec(stderr)?.[1] ?? 0)
       if (pid !== 0) {
         try {
           process.kill(-pid, 'SIGKILL')
@@ -841,6 +932,38 @@ const events = (f: Fixture): Array<Record<string, unknown>> =>
   (readHostState(f.hostState).events ?? []) as Array<Record<string, unknown>>
 
 describe('bro loop gate-stack round-robin', () => {
+  test('a long first worker does not starve the stack — B lands inside A\u2019s worker window', () => {
+    // the starvation shape bro-zpa93 fixes: pushItem used to await the
+    // whole worker run inside the tick — B could not even claim while
+    // A ran. Now A's worker rides a pending member and the tick keeps
+    // servicing the rest: B's spawn AND merge land while A's agent is
+    // still inside its deliberate delay — an ordering the awaited-spawn
+    // shape made impossible.
+    const f = loopFixture([
+      { ...FAKE_BEAD, id: 'fx-a', title: 'slow worker' },
+      { ...FAKE_BEAD, id: 'fx-b', title: 'fast worker' },
+    ])
+    writeHostState(f.hostState, { prs: {}, delays: { 'fx-a': 5000 } })
+    inside(f.main, f.root, () => {
+      const r = f.run(['--interval', '1'])
+      assert.match(r.stdout, /2 landed/, r.stderr)
+      const prs = readHostState(f.hostState).prs as Record<string, { number: number }>
+      const a = prs['loop/fx-a']!.number
+      const b = prs['loop/fx-b']!.number
+      assert.deepEqual(events(f), [
+        { spawn: 'fx-b', branch: 'loop/fx-b' },
+        // B's whole pipeline — spawn, PR, merge — settled inside A's
+        // worker window: the `spawn` event is stamped by the agent at
+        // run time, so A's entry only lands once its delay ends
+        { merge: b },
+        { spawn: 'fx-a', branch: 'loop/fx-a' },
+        { merge: a },
+      ])
+      assert.equal(bead(f.db, 'fx-a')?.status, 'closed')
+      assert.equal(bead(f.db, 'fx-b')?.status, 'closed')
+    })
+  })
+
   test('a pending gate does not block the next claim — B lands while A waits', () => {
     const f = loopFixture([
       { ...FAKE_BEAD, id: 'fx-a', title: 'slow gate' },

@@ -401,6 +401,16 @@ describe('learnConnector', { skip: WIN32 }, () => {
       utimesSync(manifest, later, later)
       await probe.postTool(fx.dir, 's1')
       assert.equal(kvLists(), 2)
+      // server-mode stores keep the same barometer under `dolt/` —
+      // the manifest move must not silently disable caching
+      rmSync(join(fx.dir, '.beads', 'embeddeddolt'), { recursive: true })
+      const srvManifest = join(fx.dir, '.beads', 'dolt', 'x', '.dolt', 'noms', 'manifest')
+      mkdirSync(dirname(srvManifest), { recursive: true })
+      writeFileSync(srvManifest, 'm2')
+      await probe.postTool(fx.dir, 's1')
+      assert.equal(kvLists(), 3)
+      await probe.postTool(fx.dir, 's1')
+      assert.equal(kvLists(), 3)
     } finally {
       if (prevLog === undefined) delete process.env.FAKE_BD_LOG
       else process.env.FAKE_BD_LOG = prevLog

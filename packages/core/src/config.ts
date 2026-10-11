@@ -346,6 +346,42 @@ export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = (raw) =
   }
 }
 
+/** bro.config.json `mirror` section — the bead→tracker projection
+ *  policy (spec specs/backends/bro-z2z7f): which beads materialize as
+ *  native tracker items at PR time. Beads stays the source of truth;
+ *  this only picks what's board-worthy. */
+export interface MirrorPolicy {
+  /** Labels that force projection regardless of type/spec. */
+  labels: string[]
+  /** Extra labels vetoing projection — layered over the built-in sink
+   *  set (debt/fixer/wtf/retro/drill beads and every mesh:* label). */
+  excludeLabels: string[]
+  /** issue_types that project without a spec link — default
+   *  ['feature','bug']; 'task' stays opt-in: unspecced tasks are the
+   *  internal churn the projection exists to hide. */
+  types: string[]
+  /** A spec-linked bead projects whatever its type — the `specs`
+   *  facade's hasSpec or a `spec:` link in the description. Default
+   *  true; false narrows projection to types/labels only. */
+  specLinked: boolean
+}
+
+export const mirrorSection: ConfigSection<MirrorPolicy> = (raw) => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
+  const list = (k: string, dflt: string[] = []): string[] =>
+    Array.isArray(obj[k])
+      ? (obj[k] as unknown[])
+          .filter((v): v is string => typeof v === 'string' && v.trim() !== '')
+          .map((v) => v.trim())
+      : dflt
+  return {
+    labels: list('labels'),
+    excludeLabels: list('excludeLabels'),
+    types: list('types', ['feature', 'bug']),
+    specLinked: obj.specLinked !== false,
+  }
+}
+
 const strField = (v: unknown): string | undefined =>
   typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined
 
@@ -566,6 +602,7 @@ const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   query: querySection as ConfigSection<unknown>,
   mesh: meshSection as ConfigSection<unknown>,
   mcp: mcpSection as ConfigSection<unknown>,
+  mirror: mirrorSection as ConfigSection<unknown>,
 }
 
 /** Every config key core normalizes itself — the authoritative "known
@@ -673,6 +710,9 @@ export interface BroConfig {
    *  (the default — spawning the server IS the consent), `[]` = none,
    *  a list = allowlist. Backend selection stays on connectors.*. */
   mcp: { planes?: string[] }
+  /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
+   *  which beads materialize as native tracker items at PR time. */
+  mirror: MirrorPolicy
   /** External plugin specifiers — relative paths or package names the CLI
    *  resolves from the repo and imports at startup. Each module's default
    *  export must be a BroPlugin (or an array of them). */
@@ -704,6 +744,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   query: { concurrency: 4, env: {} },
   mesh: { peers: {} },
   mcp: {},
+  mirror: { labels: [], excludeLabels: [], types: ['feature', 'bug'], specLinked: true },
   plugins: [],
 }
 
@@ -964,6 +1005,7 @@ export const CONFIG_SECTION_LAYERS: Record<string, 'operator' | 'policy'> = {
   check: 'policy',
   loop: 'policy',
   drive: 'policy',
+  mirror: 'policy',
   sync: 'policy',
   mesh: 'policy',
   plugins: 'policy',

@@ -14,6 +14,7 @@ import {
   busStatus,
   busSubscribe,
   busTopicMatches,
+  busWake,
   BUS_PROBE_WINDOW_MS,
   isBusEventInput,
   startBusBrokerAt,
@@ -813,5 +814,81 @@ describe('bus: a cursor past the head is a gap', () => {
     // Above it, nothing in this run ever issued that seq — a restart
     // collision or a bogus cursor. `[]` would read as "caught up".
     assert.equal(ring.since(9, Date.parse(ts)), null)
+  })
+})
+
+describe('busWake', () => {
+  test('a matching event resolves next(); a filtered one does not', async () => {
+    await withBroker(async (_broker, socketPath) => {
+      const wake = await busWake(socketPath, { topics: ['github:*'] }, (e: BusEnvelope) => e.key === 'pr-1')
+      assert.ok(wake !== null)
+
+      // a non-matching event must NOT resolve an armed next()
+      let fired = false
+      const pending = wake.next().then(() => {
+        fired = true
+      })
+      await busPublish(socketPath, { topic: 'github:pull_request', kind: 'x', key: 'pr-2' })
+      await settle()
+      assert.equal(fired, false)
+
+      // wrong topic is filtered broker-side — still armed
+      await busPublish(socketPath, { topic: 'act', kind: 'x', key: 'pr-1' })
+      await settle()
+      assert.equal(fired, false)
+
+      // the matching one lands
+      await busPublish(socketPath, { topic: 'github:check_run', kind: 'x', key: 'pr-1' })
+      await pending
+      assert.equal(fired, true)
+      wake.close()
+    })
+  })
+
+  test('broker down resolves null — the caller falls back to timer polling', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-bus-'))
+    try {
+      assert.equal(await busWake(join(dir, 'absent.sock'), {}), null)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a broker shutdown leaves next() pending — the race loser', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-bus-'))
+    const socketPath = join(dir, 'bus.sock')
+    const broker = await startBusBrokerAt(socketPath)
+    try {
+      const wake = await busWake(socketPath, {})
+      assert.ok(wake !== null)
+      let fired = false
+      void wake.next().then(() => {
+        fired = true
+      })
+      await broker.close()
+      await settle()
+      // never resolves — a dead source degrades to timer polling
+      assert.equal(fired, false)
+      wake.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a throwing match is a no-match, not a crash', async () => {
+    await withBroker(async (_broker, socketPath) => {
+      const wake = await busWake(socketPath, {}, () => {
+        throw new Error('bad matcher')
+      })
+      assert.ok(wake !== null)
+      let fired = false
+      void wake.next().then(() => {
+        fired = true
+      })
+      await busPublish(socketPath, { topic: 't', kind: 'k' })
+      await settle()
+      assert.equal(fired, false)
+      wake.close()
+    })
   })
 })

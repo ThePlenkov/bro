@@ -21,6 +21,7 @@ import {
   watchEnd,
   watchHeartbeat,
   watchMarkerKind,
+  watchRefresh,
   watchRetire,
   watchVerdict,
   type PendingWatch,
@@ -513,6 +514,43 @@ describe('watchHeartbeat', () => {
     const listed = listWatches(dir)
     assert.equal(listed.length, 1)
     assert.equal(listed[0]!.alive, false)
+  })
+})
+
+describe('watchRefresh', () => {
+  test('re-stamps the clock in place — same file, same kind, same payload', () => {
+    const dir = repo()
+    const path = watchBegin(dir, base)
+    assert.ok(path)
+    // age the marker toward the 24h floor — without a re-stamp the next
+    // listWatches past expiry would prune a still-live supervisor
+    const w = JSON.parse(readFileSync(path!, 'utf8')) as PendingWatch
+    w.startedAt = Date.now() - 23 * 60 * 60 * 1000
+    writeFileSync(path!, JSON.stringify(w))
+    watchRefresh(path)
+    const after = JSON.parse(readFileSync(path!, 'utf8')) as PendingWatch
+    assert.ok(Date.now() - after.startedAt < 60_000)
+    assert.equal(after.pr, 42)
+    assert.equal(after.merge, true)
+    assert.equal(after.pid, process.pid)
+    const listed = listWatches(dir)
+    assert.equal(listed.length, 1)
+    assert.equal(listed[0]!.file, path)
+    assert.equal(listed[0]!.alive, true)
+    assert.equal(watchMarkerKind(listed[0]!.file, listed[0]!.watch), 'wait')
+    // watchEnd still owns the cleanup — same path it armed
+    watchEnd(path)
+    assert.equal(listWatches(dir).length, 0)
+  })
+
+  test('a missing, malformed, or null marker is a no-op', () => {
+    const dir = repo()
+    watchRefresh(null)
+    watchRefresh(join(dir, '.git', 'bro', 'watches', 'nope.json'))
+    const gone = watchBegin(dir, base)
+    watchEnd(gone)
+    watchRefresh(gone) // removed — nothing to re-stamp
+    assert.equal(listWatches(dir).length, 0)
   })
 })
 

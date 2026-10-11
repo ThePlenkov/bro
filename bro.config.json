@@ -120,7 +120,8 @@
       "command": "devin -p --permission-mode dangerous --prompt-file {promptFile}"
     },
     "devin": {
-      "maxSessions": 6
+      "maxSessions": 6,
+      "maxWorkers": 4
     }
   },
   "fleet": {

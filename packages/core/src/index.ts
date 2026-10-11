@@ -1,6 +1,7 @@
 export {
   gh,
   ghAsync,
+  ghHost,
   ghJson,
   ghJsonAsync,
   ghTry,
@@ -19,12 +20,14 @@ export {
   gitBranchLog,
   gitIsAncestor,
   gitIsShallow,
+  worktreeGitDir,
 } from './git.ts'
 export type { GitLogPathRecord, GitStamp, GitLogStamp } from './git.ts'
 export {
   bd,
   BdCompatError,
   bdAsync,
+  bdAt,
   bdJson,
   bdJsonAsync,
   bdTry,
@@ -57,6 +60,7 @@ export {
   loadConfigLayers,
   mcpSection,
   meshSection,
+  mirrorSection,
   PERSONALITIES,
   probeConfigFile,
   providersSection,
@@ -124,14 +128,36 @@ export {
   dataRefPush,
   dataRefRoot,
 } from './dataref.ts'
-export type { BroConfig, ConfigLayerHit, ConfigLayerName, ConfigLayersResult, ConfigSection, Personality, SddMode, StoreBackend } from './config.ts'
+export type { BroConfig, ConfigLayerHit, ConfigLayerName, ConfigLayersResult, ConfigSection, MirrorPolicy, Personality, SddMode, StoreBackend } from './config.ts'
 export type { QueryFacade, QueryOpts, QueryResult } from './queries.ts'
 export { definePlugin } from './plugin.ts'
 export type { BroPlugin } from './plugin.ts'
 export { docTypeNamed, docVerbs, STANDARD_VERBS, verbMethod } from './docs.ts'
 export type { DocAdapter, DocCtx, DocFlags, DocType, DocVerb, Scope } from './docs.ts'
-export { bdActor, bdActorAsync, taskStore, taskStoreAsync } from './tasks.ts'
-export type { TaskFilter, TaskInput, TaskRow, TaskStore, TaskStoreAsync } from './tasks.ts'
+export {
+  bdActor,
+  bdActorAsync,
+  canonicalTaskRel,
+  nativeTaskRel,
+  parseSlotAcquire,
+  parseSlotCheck,
+  taskStore,
+  taskStoreAsync,
+  taskStoreAt,
+} from './tasks.ts'
+export type {
+  DepOpts,
+  PublishResult,
+  SlotAcquire,
+  TaskDepEdge,
+  TaskFilter,
+  TaskInput,
+  TaskRel,
+  TaskRow,
+  TaskSlot,
+  TaskStore,
+  TaskStoreAsync,
+} from './tasks.ts'
 export { bodyMeta, broTrailer, stripMeta, withMeta } from './taskmeta.ts'
 export { JudgeUnavailable } from './judge.ts'
 export type {
@@ -163,6 +189,20 @@ export type {
   ScanOpts,
 } from './review.ts'
 export {
+  gitStacks,
+  MANUAL_CASCADE,
+  mergeChainPerLayer,
+  shQuote,
+} from './stacks.ts'
+export type {
+  StackCascade,
+  StackChainMember,
+  StackFacade,
+  StackMembership,
+  StackMergeOpts,
+  StackMergeReport,
+} from './stacks.ts'
+export {
   collectGuards,
   connectorHooks,
   connectors,
@@ -184,6 +224,7 @@ export {
   sessionStartLines,
   sessionStartProbe,
   sessionTaskClaims,
+  stackHost,
   stopGateContributions,
   tasksAsync,
 } from './connectors.ts'
@@ -263,7 +304,6 @@ export {
   agentEntryBlocked,
   agentRegistryPath,
   agentsSection,
-  bdAt,
   claimStep,
   classifyExitCause,
   commandCliName,
@@ -332,8 +372,16 @@ export type {
   Worker,
   WorkItem,
 } from './planes.ts'
-export { acquireFileLock, LockTimeout, withFileLock } from './filelock.ts'
-export type { FileLockOptions } from './filelock.ts'
+export {
+  acquireFileLock,
+  awaitFileLock,
+  holdFileLock,
+  lockHolderPid,
+  LockTimeout,
+  withFileLock,
+  type FileLockOptions,
+  type HeldLockOptions,
+} from './filelock.ts'
 export {
   fileBackedJanitorDeps,
   janitorBroDir,
@@ -361,6 +409,7 @@ export {
   busStatus,
   busSubscribe,
   busTopicMatches,
+  busWake,
   isBusEventInput,
   startBusBroker,
   startBusBrokerAt,
@@ -378,5 +427,13 @@ export type {
   BusStatus,
   BusSubscription,
   BusSubscriptionHandlers,
+  BusWake,
 } from './bus.ts'
-export { trackChild, unrefPendingChildren } from './live-procs.ts'
+export {
+  pickOrphanProcs,
+  readProcRows,
+  sweepOrphanProcs,
+  trackChild,
+  unrefPendingChildren,
+} from './live-procs.ts'
+export type { OrphanSweepReport, ProcRow } from './live-procs.ts'

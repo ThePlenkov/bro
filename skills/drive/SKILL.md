@@ -23,17 +23,21 @@ For every open PR on a fleet branch (worktree branches + local
 | --------- | --------- | ------ |
 | `open_threads > 0` | yes | skip — the live owner works its own threads |
 | `open_threads > 0` | no | spawn/respawn the PR's **fixer agent** on its fixer bead (`-l fixer`, `external_ref drive:pr:<N>`) in the PR's worktree |
+| `mergeable = CONFLICTING` | yes | skip — the live owner works its own conflicts |
+| `mergeable = CONFLICTING` | no | spawn the same fixer agent with a **rebase work order** — fetch + rebase onto the PR's base, resolve, `--force-with-lease` push — bounded by the `fixRounds > maxRounds` cap |
 | `gate.ok` | yes | report — the owner's merge step lands it |
 | `gate.ok` | no | `bro act merge`, retire the worktree when clean, close the fixer bead |
 | PR merged/closed | — | close a dangling fixer bead |
 
-Occupancy = the agents facade + the worktree's own fresh claim marker
-(`<gitdir>/bro/work`, stamped by `bro work enter`) + fresh `.work`
-markers + a `/proc` cwd scan that follows a process's ancestry to an
-agent-shaped root — agent CLIs sit at their launch dir while their tool
-shells hold the worktree cwd — or matches a `BRO_AGENT_ID`/`AI_AGENT`
-env badge, which detached descendants keep. Occupied is always the safe
-verdict.
+Occupancy = the agents facade + a live foreign watch marker on the PR
+(a `bro loop` heartbeat, `act wait`, convoy — drive only owns
+*unsupervised* PRs, so a live supervisor is an occupant) + the
+worktree's own fresh claim marker (`<gitdir>/bro/work`, stamped by
+`bro work enter`) + fresh `.work` markers + a `/proc` cwd scan that
+follows a process's ancestry to an agent-shaped root — agent CLIs sit
+at their launch dir while their tool shells hold the worktree cwd — or
+matches a `BRO_AGENT_ID`/`AI_AGENT` env badge, which detached
+descendants keep. Occupied is always the safe verdict.
 
 ## Commands
 
@@ -51,9 +55,13 @@ The fixer agent's command resolves exactly like `bro agents up` —
 
 ## Policy
 
-- **Run it detached for a fleet.** `nohup bro drive --every 300 >> log &`
-  or `systemd-run` — a driver in an exec-background shell dies with the
-  turn. `--once` is for cron-style re-invocation.
+- **The orchestrator's pulse runs single passes.** The session-pulse
+  model (bro-killn): a bounded `bro watch --every --for` window ends →
+  `bro drive` once → digest → re-arm. `bro drive --every` stays the
+  long-lived detached supervisor when one is wanted — both `--every`
+  forms refuse under `BRO_AGENT_ID` (spawned workers never arm
+  cadences). No systemd/crontab installs exist — a session start rearms
+  a dead pulse from `bro/pulse.json`.
 - **Occupied is not an error.** A skipped PR means a live session owns
   it — report and move on; never force-spawn into someone's worktree.
 - **The fixer bead is the handle.** `bro agents status <bead>` shows

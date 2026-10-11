@@ -9,7 +9,8 @@
  *   bro status --deep     + act exit gate for the current branch's PR
  *                         (network — the fast path stays local-only)
  *
- * All state is read, never mutated. Sources: bd (in-progress + ready),
+ * All state is read, never mutated. Sources: the tasks facade
+ * (in-progress + ready — the serving backend, not a hardcoded bd),
  * the agent registry (<git-common>/bro/agents.json — shared across
  * linked worktrees), the drill stack, git porcelain. Bead-less or
  * registry-less checkouts still answer — the absent sections are empty
@@ -18,17 +19,23 @@
 import { basename } from 'node:path'
 import { evaluateExitGate, fetchPrActState } from '@broject/act'
 import {
-  bdTry,
+  facade,
   gitTry,
   pidAlive,
   readAgentRegistry,
   reviewHost,
 } from '@broject/core'
-import type { AgentRegistryEntry } from '@broject/core'
+import type { AgentRegistryEntry, TaskRow, TaskStore } from '@broject/core'
 import { currentFrame } from '@broject/drill'
 import { loopSection } from '@broject/loop'
 import { loadBroConfig } from '../plugins.ts'
+import { readStamp, stampAgo, stampSession } from './buildstamp.ts'
 import { collectLoopRuns, type LoopRunView } from './loop-state.ts'
+import {
+  heartbeatAge,
+  readHeartbeat,
+  type HeartbeatSummary,
+} from './watch-heartbeat.ts'
 
 interface BeadRow {
   id: string
@@ -68,6 +75,22 @@ interface BroStatus {
    *  (bro-9lpn3). */
   loop: { stallMin: number; runs: LoopRunView[] }
   drill: { frame: { id: string; title: string; depth: number } | null }
+  /** The durable heartbeat file's summary (bro-dxoa5) — last tick's
+   *  age + open-attention count. null = never had a heartbeat (or the
+   *  file is unreadable) — an ordinary state, not an error. */
+  watch: HeartbeatSummary | null
+  /** Last stamped write to this worktree's shared outputs (bro-fatja)
+   *  — null until a build/patch stamps one. `mine` is null when the
+   *  current session can't resolve (a bare `bro status` has no env
+   *  pin and the marker scan wasn't unambiguous). */
+  build: {
+    session: string
+    via: string
+    ts: number
+    /** stamp.head ≠ HEAD — the recorded write predates the checkout. */
+    behind: boolean
+    mine: boolean | null
+  } | null
   /** --deep only: the act gate for the current branch's open PR. */
   act?: {
     pr: number
@@ -106,42 +129,39 @@ export const READY_CAP = 10
 
 function readBeads(dir: string): BroStatus['beads'] {
   const empty = { inProgress: [], ready: [], readyTotal: 0 }
-  const run = bdTry(['list', '--status', 'in_progress', '--json'], 15_000, dir)
-  const ready = bdTry(['ready', '--json'], 15_000, dir)
-  if (run.code !== 0 && ready.code !== 0) {
-    return empty
+  let store: TaskStore
+  try {
+    store = facade('tasks', { dir }, { prefer: loadBroConfig(dir).connectors })
+  } catch {
+    return empty // no serving backend — an empty board, not an error
   }
-  // bd rows carry description/deps/metadata a widget never renders —
-  // pick the board fields so one call stays a few KB, not a megabyte.
-  const rows = (out: string): BeadRow[] => {
+  // backend rows carry description/deps/metadata a widget never
+  // renders — pick the board fields so one call stays a few KB
+  const pick = (r: TaskRow): BeadRow => {
+    const row: BeadRow = { id: r.id, title: r.title ?? '' }
+    if (typeof r.priority === 'number') {
+      row.priority = r.priority
+    }
+    if (typeof r.issue_type === 'string') {
+      row.issue_type = r.issue_type
+    }
+    if (typeof r.assignee === 'string') {
+      row.assignee = r.assignee
+    }
+    return row
+  }
+  // each leg degrades on its own — a dead backend or a failed read is
+  // an empty section, never a broken board
+  const read = (fn: () => TaskRow[]): BeadRow[] => {
     try {
-      const v = JSON.parse(out) as unknown
-      if (!Array.isArray(v)) {
-        return []
-      }
-      return v.map((r): BeadRow => {
-        const src = r as Record<string, unknown>
-        const text = (value: unknown): string =>
-          typeof value === 'string' || typeof value === 'number' ? String(value) : ''
-        const row: BeadRow = { id: text(src.id), title: text(src.title) }
-        if (typeof src.priority === 'number') {
-          row.priority = src.priority
-        }
-        if (typeof src.issue_type === 'string') {
-          row.issue_type = src.issue_type
-        }
-        if (typeof src.assignee === 'string') {
-          row.assignee = src.assignee
-        }
-        return row
-      })
+      return fn().map(pick)
     } catch {
       return []
     }
   }
-  const readyRows = ready.code === 0 ? rows(ready.out) : []
+  const readyRows = read(() => store.ready())
   return {
-    inProgress: run.code === 0 ? rows(run.out) : [],
+    inProgress: read(() => store.list({ status: 'in_progress' })),
     ready: readyRows.slice(0, READY_CAP),
     readyTotal: readyRows.length,
   }
@@ -190,6 +210,25 @@ function readLoop(dir: string): BroStatus['loop'] {
     return { stallMin: loopSection(cfg.loop).stallMin, runs: collectLoopRuns(dir) }
   } catch {
     return { stallMin: 0, runs: [] }
+  }
+}
+
+/** The worktree's build stamp — attribution for shared mutable
+ *  outputs. One file read, no network, fail-open like every board
+ *  section. */
+function readBuild(dir: string): BroStatus['build'] {
+  const stamp = readStamp(dir)
+  if (stamp === null) {
+    return null
+  }
+  const head = gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', 'HEAD^{commit}'])
+  const me = stampSession(dir, process.env)
+  return {
+    session: stamp.session,
+    via: stamp.via,
+    ts: stamp.ts,
+    behind: stamp.head !== '' && head.code === 0 && stamp.head !== head.out.trim(),
+    mine: me === undefined ? null : me === stamp.session,
   }
 }
 
@@ -252,6 +291,8 @@ export function collectStatus(dir: string): BroStatus {
     drill: {
       frame: frame === undefined ? null : { id: frame.id, title: frame.title, depth: frame.depth },
     },
+    watch: readHeartbeat(dir),
+    build: readBuild(dir),
   }
 }
 
@@ -282,11 +323,29 @@ function actLine(act: NonNullable<BroStatus['act']> | null): string {
   return `act: [#${act.pr}](${act.url}) ${act.gate}${blockers}`
 }
 
+function buildLine(build: NonNullable<BroStatus['build']>): string {
+  const flags = [
+    build.behind ? 'behind HEAD' : '',
+    build.mine === false ? 'another session wrote it' : '',
+  ].filter((f) => f !== '')
+  return (
+    `build: ${build.via} by ${build.session} ${stampAgo(build.ts, Date.now())}` +
+    (flags.length > 0 ? ` — ${flags.join(', ')}` : '')
+  )
+}
+
 function render(s: BroStatus): string[] {
   const lines: string[] = []
   lines.push(`board: ${basename(s.dir)} · ${s.branch}${s.dirty > 0 ? ` · dirty ${s.dirty}` : ''}`)
+  if (s.watch !== null) {
+    const tail = s.watch.attention === 0 ? 'quiet' : `${s.watch.attention} attention`
+    lines.push(`watch: heartbeat ${heartbeatAge(s.watch.ageMs)} ago — ${tail}`)
+  }
   if (s.drill.frame) {
     lines.push(`drill: ${s.drill.frame.id} — ${s.drill.frame.title} (depth ${s.drill.frame.depth})`)
+  }
+  if (s.build !== null) {
+    lines.push(buildLine(s.build))
   }
   const beads = s.beads.inProgress
   if (beads.length > 0) {

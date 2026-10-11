@@ -34,10 +34,12 @@ order is flag → profile → `agents.<backend>.provider` config. Provider
 provenance (`BRO_AGENT_PROVIDER` / `BRO_AGENT_MODEL`) is recorded in the
 registry entry and shown by `bro fleet` and `bro agents status`.
 
-Session kinds can carry a host-wide admission quota —
+Session kinds can carry host-wide admission quotas —
 `agents.<kind>.maxSessions` caps live sessions of that kind across every
-repo on the host (the devin plane is the known instance); admission
-claims a slot file under a shared lock, and once the child lands its own
+repo on the host (the devin plane is the known instance), and
+`agents.<kind>.maxWorkers` caps only the *spawned* subset so the user's
+interactive sessions never consume worker budget; admission claims a
+slot file under a shared lock, and once the child lands its own
 session mark takes over — leftover slot files are reaped on a ~120 s
 TTL rather than released by `down`.
 
@@ -49,12 +51,17 @@ non-interactive ticker, use `bro watch --every N`.
 | Command | What it does |
 | ------- | ------------ |
 | `bro watch [--once]` | One read-only heartbeat with attention, molecules, gates, and fleet rows |
-| `bro watch --every N` | Repeat the heartbeat on a cadence |
 | `bro watch --notify` | Drop the initial snapshot and transitions into the mailbox |
 | `bro watch --json` | Emit `{ts, attention, mols, gates, fleet}` |
-| `bro watch install [--every N] [--print]` | Install the heartbeat on a non-agent timer — a systemd user unit per repo (crontab fallback), cadence `watch.intervalSec` (default 60) |
-| `bro watch uninstall` | Remove the installed timer/cron entry for this repo |
+| `bro watch --every N --for S` | Repeat the heartbeat on a cadence — the session pulse: holds `bro/pulse.lock` (one per repo, a duplicate stands by) and refuses under `BRO_AGENT_ID`; `--for` is required so the window's exit exists as the session's wake event |
+| `bro watch install [--every N] [--print]` | Arm the session pulse — writes `bro/pulse.json` (the want-marker session-start rearms from), strips any legacy systemd/cron entry; cadence `--every N` or `watch.intervalSec` (default 60) |
+| `bro watch uninstall` | Disarm the marker + strip any legacy timer/cron entry; a live pulse exits on its own |
 | `bro notify <text>` | Write one mailbox event for live sessions — addressed drops, kinds, and the bus are in [Events](/docs/commands/events) |
+
+Each tick also rewrites `<git-common>/bro/heartbeat.json` — the durable
+last-known-state file (mailbox drops expire after ~1h; this file does
+not), surfaced as the `watch:` row in `bro status` and a session-start
+context line.
 
 Watch never claims steps, mutates beads, or respawns workers. Its attention
 list is the decision surface; a `lost — respawn?` row is not permission to
@@ -66,10 +73,13 @@ Detach the watcher, don't block on it: `bro watch --every N --notify` in a
 background shell keeps a heartbeat running while the agent works — the
 `--notify` drops surface in the parent session mid-turn, on its next tool
 call (the mailbox is pull-based: a drop lands when the session next acts,
-it never wakes a sleeping one). The same caveat as `act wait` applies — a
-session-bound watcher dies with the session. When the heartbeat must
-outlive it, `bro watch install` puts `--once --notify` on a non-agent
-timer instead; `bro drive --every` is the durable write-side form.
+it never wakes a sleeping one). The session-pulse model is the durable
+form: `bro watch install` arms `bro/pulse.json`, and a session start with
+no live pulse (lock holder dead) gets the rearm nudge — the orchestrator
+session then runs `bro watch --every N --for S --notify` in a background
+shell; the window's end is the wake event, followed by one `bro drive`
+pass, a digest, and the next window. OS timers are retired — the session
+owns the cadence, and spawned workers (`BRO_AGENT_ID`) never arm it.
 
 ## Drive
 

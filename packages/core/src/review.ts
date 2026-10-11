@@ -209,9 +209,20 @@ export interface ReviewFacade {
   /** Check name → failure-annotation count at a head sha. `null` means
    *  the run exists but its annotations could not be fetched — a caller
    *  that gates on findings must count it as unknown, not zero. An
-   *  absent key means the check has no annotations endpoint at all. */
-  checkAnnotations(repo: string, headSha: string): Map<string, number | null>
-  checkAnnotationsAsync?(repo: string, headSha: string): Promise<Map<string, number | null>>
+   *  absent key means the check has no annotations endpoint at all.
+   *  `names`, when given, is the set of check names the caller will read —
+   *  a connector may skip fetching the rest (per-run fetches are a
+   *  subprocess each, so an unfiltered scan fans out badly). */
+  checkAnnotations(
+    repo: string,
+    headSha: string,
+    names?: ReadonlySet<string>
+  ): Map<string, number | null>
+  checkAnnotationsAsync?(
+    repo: string,
+    headSha: string,
+    names?: ReadonlySet<string>
+  ): Promise<Map<string, number | null>>
   /** Distinct reviewed head SHAs — pushes that entered the review loop. */
   reviewedShas(t: PrTarget): string[]
   reviewedShasAsync?(t: PrTarget): Promise<string[]>
@@ -229,6 +240,14 @@ export interface ReviewFacade {
   addLabel(t: PrTarget, label: string): void
   /** Ensure-absent — removing a label the PR doesn't carry is a no-op. */
   removeLabel(t: PrTarget, label: string): void
+
+  /** Wire the PR's auto-close onto tracker items — the host's closing
+   *  keyword joined into the body, idempotent per ref ('Fixes #42' on
+   *  github). refs are tracker-native item ids as the tasks facade
+   *  reports them. Optional — a host without body edits can't wire
+   *  auto-close; callers treat absence as "items stamped, links
+   *  skipped". */
+  linkCloses?(t: PrTarget, refs: string[]): void
 
   /** Retarget the PR's base branch (stack sync's half of a rebase — the
    *  branch moves locally, the PR's declared base moves here). False

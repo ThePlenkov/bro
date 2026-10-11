@@ -19,6 +19,8 @@ const WIN32 = process.platform === 'win32'
  *    FAKE_GH_ACTOR    — `api user` login */
 const FAKE_GH = `#!/bin/sh
 echo "$@" >> "$FAKE_GH_LOG"
+if [ -z "$FAKE_GH_MILESTONES" ]; then FAKE_GH_MILESTONES='[]'; fi
+if [ -z "$FAKE_GH_MILESTONE_MADE" ]; then FAKE_GH_MILESTONE_MADE='{}'; fi
 case "$1" in
   --version) echo 'gh version 2.80.0 (fake)' ;;
   repo) echo '{"owner":{"login":"acme"},"name":"widgets"}' ;;
@@ -46,7 +48,20 @@ case "$1" in
             fi ;;
           *) echo '{}' ;;
         esac ;;
-      -X) echo '{}' ;;
+      -X)
+        case "$*" in
+          *"POST"*milestones*) echo "$FAKE_GH_MILESTONE_MADE" ;;
+          *"PATCH"*)
+            if [ -n "$FAKE_GH_PATCH_FAIL" ]; then echo 'patch failed' >&2; exit 1; fi
+            echo '{}' ;;
+          *) echo '{}' ;;
+        esac ;;
+      --paginate)
+        case "$*" in
+          *milestones*) echo "$FAKE_GH_MILESTONES" ;;
+          *) echo '{}' ;;
+        esac ;;
+      *milestones*) echo "$FAKE_GH_MILESTONES" ;;
       *) echo '{}' ;;
     esac ;;
   issue)
@@ -424,6 +439,38 @@ esac
     )
   })
 
+  test('deps direction — blockedBy reads down, blocking reads up', () => {
+    const n = node({ number: 9, blockedBy: [[8, 'OPEN']], blocking: [[10, 'OPEN']] })
+    withFakeGh({ FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_1: issueRead(n) }, (_log, dir) => {
+      assert.deepEqual(githubTasks(dir).deps(['9'], { direction: 'down' }), [
+        { issue_id: '9', depends_on_id: '8', type: 'blocked' },
+      ])
+    })
+    withFakeGh({ FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_1: issueRead(n) }, (_log, dir) => {
+      assert.deepEqual(githubTasks(dir).deps(['9'], { direction: 'up' }), [
+        { issue_id: '10', depends_on_id: '9', type: 'blocked' },
+      ])
+    })
+  })
+
+  test('neighbors on a non-canonical id returns the dep, never the issue itself', () => {
+    withFakeGh(
+      {
+        FAKE_GH_ACTOR: 'me',
+        FAKE_GH_ISSUE_1: issueRead(node({ number: 9, blockedBy: [[8, 'OPEN']] })),
+        FAKE_GH_ISSUE_2: issueRead(node({ number: 8 })),
+      },
+      (_log, dir) => {
+        // '#9' resolves to issue 9 — edges carry String(n.number), so a
+        // raw-id comparison would return the queried row as a neighbor
+        assert.deepEqual(
+          githubTasks(dir).neighbors('#9').map((r) => r.id),
+          ['8']
+        )
+      }
+    )
+  })
+
   test('sub-issue parent does not reach row.parent — it is not an orchestrated step', () => {
     // classify() gates `row.parent` rows as molecule steps; a github
     // sub-issue is plain decomposed work — its relationship surfaces
@@ -437,8 +484,8 @@ esac
       (_log, dir) => {
         const row = githubTasks(dir).get('5')
         assert.equal(row?.parent, undefined)
-        assert.deepEqual(githubTasks(dir).deps(['5'], { type: 'parent-child' }), [
-          { issue_id: '5', depends_on_id: '3', type: 'parent-child' },
+        assert.deepEqual(githubTasks(dir).deps(['5'], { rel: 'parent' }), [
+          { issue_id: '5', depends_on_id: '3', type: 'parent' },
         ])
       }
     )
@@ -448,6 +495,246 @@ esac
     withFakeGh({ FAKE_GH_ACTOR: 'me' }, (_log, dir) => {
       assert.equal(githubTasks(dir).prefix(), undefined)
     })
+  })
+
+  test('publish dedups on an own-repo issue external_ref — no second create', () => {
+    withFakeGh(
+      { FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_1: issueRead(node({ number: 42, title: 'the bead' })) },
+      (log, dir) => {
+        const res = githubTasks(dir).publish!(
+          {
+            id: 'bro-t1',
+            title: 'the bead',
+            external_ref: 'https://github.com/acme/widgets/issues/42',
+          },
+          {}
+        )
+        assert.equal(res?.item.id, '42')
+        assert.equal(res?.replaceExternalRef, undefined)
+        assert.equal(callsMatching(log, /issue create/).length, 0)
+      }
+    )
+  })
+
+  test('publish on a stale own-repo ref re-creates and flags the map for replacement', () => {
+    // the mapped issue is gone (deleted) — the first read answers null,
+    // so publishSync falls through to create and authorizes the caller
+    // to overwrite the stale external_ref; without the flag the next
+    // discovery pass creates another duplicate (bro-4upn5)
+    withFakeGh(
+      {
+        FAKE_GH_ACTOR: 'me',
+        FAKE_GH_ISSUE_1: issueRead(null),
+        FAKE_GH_ISSUE_2: issueRead(node({ number: 42 })),
+      },
+      (log, dir) => {
+        const res = githubTasks(dir).publish!(
+          {
+            id: 'bro-t1',
+            title: 'the bead',
+            external_ref: 'https://github.com/acme/widgets/issues/41',
+          },
+          {}
+        )
+        assert.equal(res?.item.id, '42')
+        assert.equal(res?.replaceExternalRef, true)
+        assert.equal(callsMatching(log, /issue create/).length, 1)
+      }
+    )
+  })
+
+  test('publish on a stale ref must not leak the source metadata external_ref into the new item', () => {
+    // a source row whose metadata bag carries the dead ref would copy
+    // it into the created issue's trailer — toRow reads trailer
+    // external_ref as the item's own ref, so the caller's write-back
+    // re-stamps the stale value and the duplicate loop continues
+    // (codeant on bro-4upn5)
+    withFakeGh(
+      {
+        FAKE_GH_ACTOR: 'me',
+        FAKE_GH_ISSUE_1: issueRead(null),
+        FAKE_GH_ISSUE_2: issueRead(node({ number: 42 })),
+      },
+      (log, dir) => {
+        const res = githubTasks(dir).publish!(
+          {
+            id: 'bro-t1',
+            title: 'the bead',
+            external_ref: 'https://github.com/acme/widgets/issues/41',
+            metadata: {
+              external_ref: 'https://github.com/acme/widgets/issues/41',
+              bead_src: 'x',
+            },
+          },
+          {}
+        )
+        assert.equal(res?.item.id, '42')
+        assert.equal(res?.item.external_ref, 'https://github.com/acme/widgets/issues/42')
+        assert.equal(res?.replaceExternalRef, true)
+        const created = callsMatching(log, /issue create/).join('\n')
+        // provenance keys pass through; external_ref never does
+        assert.match(created, /"bead_src":"x"/)
+        assert.doesNotMatch(created, /external_ref/)
+      }
+    )
+  })
+
+  test('publish declines a foreign external_ref — another system owns that map', () => {
+    withFakeGh({ FAKE_GH_ACTOR: 'me' }, (log, dir) => {
+      for (const external_ref of [
+        'jira:ACME-7',
+        'https://github.com/other/repo/issues/7',
+        'https://ghe.corp/acme/widgets/issues/7',
+        'debt://thread-9',
+      ]) {
+        assert.equal(
+          githubTasks(dir).publish!({ id: 'bro-t1', title: 'x', external_ref }, {}),
+          undefined,
+          external_ref
+        )
+      }
+      assert.equal(callsMatching(log, /issue create/).length, 0)
+    })
+  })
+
+  test('publish creates a bro:bead issue carrying the bead provenance', () => {
+    withFakeGh(
+      { FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_1: issueRead(node({ number: 42, labels: ['bro:bead'] })) },
+      (log, dir) => {
+        const res = githubTasks(dir).publish!(
+          {
+            id: 'bro-t9',
+            title: 'mirror me',
+            issue_type: 'feature',
+            labels: ['area:cli'],
+            description: 'the work',
+          },
+          {}
+        )
+        assert.equal(res?.item.id, '42')
+        // the --body arg carries newlines — the create entry spans
+        // physical lines, so match the raw log, not per-line hits
+        const created = readFileSync(log, 'utf8')
+        assert.match(created, /--label bro:bead --label area:cli/)
+        assert.match(created, /"bead":"bro-t9"/)
+        assert.match(created, /"type":"feature"/)
+      }
+    )
+  })
+
+  test('publish with an epic parent materializes a milestone and joins it', () => {
+    withFakeGh(
+      {
+        FAKE_GH_ACTOR: 'me',
+        FAKE_GH_MILESTONE_MADE:
+          '{"number":3,"title":"the epic","html_url":"https://github.com/acme/widgets/milestone/3"}',
+        FAKE_GH_ISSUE_1: issueRead(node({ number: 42 })),
+      },
+      (log, dir) => {
+        const res = githubTasks(dir).publish!(
+          { id: 'bro-c1', title: 'child', issue_type: 'feature' },
+          { epic: { id: 'bro-e1', title: 'the epic', issue_type: 'epic' } }
+        )
+        assert.equal(res?.epicRef, 'https://github.com/acme/widgets/milestone/3')
+        const lines = calls(log).join('\n')
+        assert.match(lines, /api --paginate repos\/acme\/widgets\/milestones\?state=all/)
+        assert.match(lines, /api -X POST repos\/acme\/widgets\/milestones -f title=the epic/)
+        assert.match(lines, /api -X PATCH repos\/\{owner\}\/\{repo\}\/issues\/42 -F milestone=3/)
+      }
+    )
+  })
+
+  test('a same-title milestone is reused — dedup survives a lost external_ref map', () => {
+    withFakeGh(
+      {
+        FAKE_GH_ACTOR: 'me',
+        FAKE_GH_MILESTONES:
+          '[{"number":5,"title":"the epic","html_url":"https://github.com/acme/widgets/milestone/5"}]',
+        FAKE_GH_ISSUE_1: issueRead(node({ number: 42 })),
+      },
+      (log, dir) => {
+        const res = githubTasks(dir).publish!(
+          { id: 'bro-c1', title: 'child', issue_type: 'feature' },
+          { epic: { id: 'bro-e1', title: 'the epic', issue_type: 'epic' } }
+        )
+        assert.equal(res?.epicRef, 'https://github.com/acme/widgets/milestone/5')
+        assert.equal(callsMatching(log, /POST repos\/acme\/widgets\/milestones/).length, 0)
+        assert.match(calls(log).join('\n'), /-F milestone=5/)
+      }
+    )
+  })
+
+  test('an epic already carrying a milestone ref joins it — no list or create', () => {
+    withFakeGh(
+      { FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_1: issueRead(node({ number: 42 })) },
+      (log, dir) => {
+        const res = githubTasks(dir).publish!(
+          { id: 'bro-c1', title: 'child', issue_type: 'feature' },
+          {
+            epic: {
+              id: 'bro-e1',
+              title: 'the epic',
+              issue_type: 'epic',
+              external_ref: 'https://github.com/acme/widgets/milestone/7',
+            },
+          }
+        )
+        assert.equal(res?.epicRef, undefined)
+        const lines = calls(log).join('\n')
+        assert.doesNotMatch(lines, /milestones\?state=all/)
+        assert.doesNotMatch(lines, /POST repos\/acme\/widgets\/milestones/)
+        assert.match(lines, /-F milestone=7/)
+      }
+    )
+  })
+
+  test('a foreign epic ref joins no container — the issue still projects', () => {
+    const read42 = issueRead(node({ number: 42 }))
+    withFakeGh(
+      { FAKE_GH_ACTOR: 'me', FAKE_GH_ISSUE_1: read42, FAKE_GH_ISSUE_2: read42 },
+      (log, dir) => {
+        for (const external_ref of [
+          'jira:EPIC-1',
+          'https://github.com/other/repo/milestone/7',
+          'https://ghe.corp/acme/widgets/milestone/7',
+        ]) {
+          const res = githubTasks(dir).publish!(
+            { id: 'bro-c1', title: 'child', issue_type: 'feature' },
+            { epic: { id: 'bro-e1', title: 'the epic', issue_type: 'epic', external_ref } }
+          )
+          assert.equal(res?.item.id, '42', external_ref)
+          assert.equal(res?.epicRef, undefined, external_ref)
+        }
+        const lines = calls(log).join('\n')
+        assert.doesNotMatch(lines, /milestone/)
+      }
+    )
+  })
+
+  test('a failed milestone join does not lose the created issue', () => {
+    withFakeGh(
+      {
+        FAKE_GH_ACTOR: 'me',
+        FAKE_GH_ISSUE_1: issueRead(node({ number: 42 })),
+        FAKE_GH_PATCH_FAIL: '1',
+      },
+      (log, dir) => {
+        const res = githubTasks(dir).publish!(
+          { id: 'bro-c1', title: 'child', issue_type: 'feature' },
+          {
+            epic: {
+              id: 'bro-e1',
+              title: 'the epic',
+              issue_type: 'epic',
+              external_ref: 'https://github.com/acme/widgets/milestone/7',
+            },
+          }
+        )
+        // the created issue still returns — the epic join is best-effort,
+        // so publishSync's external_ref write-back survives a PATCH miss
+        assert.equal(res?.item.id, '42')
+      }
+    )
   })
 })
 

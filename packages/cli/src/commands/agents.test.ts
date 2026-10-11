@@ -64,7 +64,11 @@ interface Fixture {
  *  fake beads store; `--beads-dir` args point at beads/ (the fake bd
  *  keys off FAKE_BD_DB, but the dir must exist — bdActor shells out
  *  with it as cwd). BEADS_ACTOR is pinned so the rebind-actor check
- *  matches the fake's `tester` regardless of session env. */
+ *  matches the fake's `tester` regardless of session env. installFakeBd
+ *  also plants a healthy-empty docker stub — docker is a registered
+ *  backend, and `down`/`status` claim 'gone' only on a healthy
+ *  multi-backend read; an absent daemon would degrade the plane and
+ *  flip every gone-verdict to 'unverified'. */
 function fixture(rows: Array<Record<string, unknown>> = []): Fixture {
   const { root, main } = initRepo('bro-agents-')
   const { binDir, db } = installFakeBd(root, rows)

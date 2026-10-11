@@ -13,6 +13,7 @@
  * agent, and molStep claims pinned into the shared beads store.
  */
 import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   accessSync,
   closeSync,
@@ -21,8 +22,10 @@ import {
   fstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
+  realpathSync,
   rmSync,
   statSync,
   utimesSync,
@@ -41,6 +44,7 @@ import {
   commandCliName,
   DEFAULT_CONFIG,
   deriveProviderWalls,
+  ghHost,
   gitTry,
   isAgentCause,
   JudgeUnavailable,
@@ -58,6 +62,7 @@ import {
   sessionPlane,
   sessionPlaneForCli,
   sessionQuotaConfig,
+  sessionSlotsDir,
   SpawnError,
   stepParent,
   ProviderSurfaceError,
@@ -88,6 +93,8 @@ import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop'
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
 import './session-planes/devin.ts'
+import './session-planes/copilot.ts'
+import { writeCopilotCount } from './session-planes/copilot.ts'
 
 /** Everything a factory needs: the repo ctx + the resolved config
  *  (agents.<backend> knobs, connectors.agents pick, loop.agent fallback). */
@@ -160,7 +167,7 @@ export function registerAgentConnector(
  *  these (a misnamed cleanup, or a name whose register was skipped as a
  *  duplicate) would silently change which factory the name resolves to
  *  for the rest of the process. */
-const BUILTIN_AGENT_BACKENDS = new Set(['native', 'tmux', 'gascity'])
+const BUILTIN_AGENT_BACKENDS = new Set(['native', 'tmux', 'gascity', 'docker', 'copilot'])
 
 /** Deliberate name-based removal — fixtures prefer the disposer
  *  registerAgentConnector returns, which can only drop the entry it
@@ -846,6 +853,20 @@ function gcOccupies(
   return gcState(s) === 'running' || gcState(s) === 'spawned'
 }
 
+/** docker occupancy — a recorded death frees the slot regardless of
+ *  the probe (a stopped entry was rm'd; an exitStatus means --rm
+ *  already cleaned — neither can hold a live container). A name absent
+ *  from the daemon's live list also frees; an inconclusive probe
+ *  occupies (the daemon may hold a running worker we can't see — same
+ *  honesty rule as tmux). */
+function dockerOccupies(entry: AgentRegistryEntry, live: Set<string> | undefined): boolean {
+  if (entry.stopped === true || entry.exitStatus !== undefined) {
+    return false
+  }
+  const name = dockerContainerName(entry)
+  return name !== undefined && (live === undefined || live.has(name))
+}
+
 /** One registry entry's occupancy verdict — an entry occupies until it
  *  is proven dead; every unverifiable probe keeps the slot — a
  *  maybe-live agent is a maybe-burning worker, and the cap exists to
@@ -859,6 +880,8 @@ function entryOccupies(
     tmuxLive: () => Set<string> | undefined
     gcSessions: () => GcSession[] | undefined
     gcSupervisor: () => boolean | undefined
+    dockerLive: () => Set<string> | undefined
+    copilotLive: () => Set<string> | undefined
   }
 ): boolean {
   switch (entry.backend) {
@@ -870,6 +893,15 @@ function entryOccupies(
       return tmuxOccupies(entry, probes.tmuxLive())
     case 'gascity':
       return gcOccupies(molStep, entry, probes.gcSessions(), probes.gcSupervisor)
+    case 'docker':
+      // the .exit harvest first — a container that exited between the
+      // ps snapshot and this read still lands its recorded cause; the
+      // verdict itself only needs the live-name probe (a dead
+      // container holds no slot either way)
+      ensureExitCause(dir, home, molStep, entry)
+      return dockerOccupies(entry, probes.dockerLive())
+    case 'copilot':
+      return copilotOccupies(entry, probes.copilotLive())
     default:
       // a backend this build doesn't know — no probe exists, so the
       // .exit file is the only death record readable. Harvest before
@@ -887,6 +919,8 @@ interface OccupancyProbes {
   tmuxLive: () => Set<string> | undefined
   gcSessions: () => GcSession[] | undefined
   gcSupervisor: () => boolean | undefined
+  dockerLive: () => Set<string> | undefined
+  copilotLive: () => Set<string> | undefined
 }
 
 function occupancyProbes(dir: string, env: AgentConnectorEnv): OccupancyProbes {
@@ -897,6 +931,8 @@ function occupancyProbes(dir: string, env: AgentConnectorEnv): OccupancyProbes {
       return city === null ? undefined : listGcSessions(city).sessions
     }),
     gcSupervisor: memo(() => gcSupervisorRunning()),
+    dockerLive: memo(() => dockerLiveContainers()),
+    copilotLive: memo(() => copilotLiveTaskIds()),
   }
 }
 
@@ -1222,7 +1258,7 @@ export function sessionQuotaOf(
     // loudly rather than spawn past a quota the operator armed
     throw new SpawnError(
       `agents.${backend}.sessionKind '${kind}' has no registered session plane — ` +
-        `cannot enforce agents.${kind}.maxSessions`,
+        `cannot enforce agents.${kind}.maxSessions/maxWorkers`,
       'config'
     )
   }
@@ -1687,6 +1723,31 @@ function warnNoPromptFile(worker: SpawnWorker | undefined, command: string): voi
   }
 }
 
+/** The cli a worker carries for provenance — the configured command's
+ *  name, an argv worker's own cliName, or a template worker's. */
+function workerCliBadge(worker: SpawnWorker | undefined, command: string): string | undefined {
+  if (worker === undefined) {
+    return commandCliName(command)
+  }
+  return worker.kind === 'argv' ? worker.cliName : commandCliName(worker.command)
+}
+
+/** The shell line a worker runs — a template expansion, an argv worker
+ *  single-quoted slot by slot (the provider argv never re-parses into
+ *  a different program), or the configured command's expansion. */
+function workerRunLine(
+  worker: SpawnWorker | undefined,
+  command: string,
+  promptFile: string
+): string {
+  if (worker === undefined) {
+    return expandAgentCmd(command, promptFile)
+  }
+  return worker.kind === 'argv'
+    ? [...worker.argv, promptFile].map(shQuote).join(' ')
+    : expandAgentCmd(worker.command, promptFile)
+}
+
 /** The native backend — detached process, self-sufficient
  *  (supervisor:'none'). Agent command template resolves as
  *  agents.native.command → loop.agent; `{promptFile}` expands like the
@@ -1754,20 +1815,26 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                   'bro-agent',
                   exitFile,
                 ]
-          const cliBadge =
-            worker === undefined
-              ? commandCliName(command)
-              : worker.kind === 'argv'
-                ? worker.cliName
-                : commandCliName(worker.command)
+          const cliBadge = workerCliBadge(worker, command)
           const child = spawn(
             'sh', // NOSONAR — PATH lookup is the contract (same as git/bd everywhere)
             args,
             { // NOSONAR — operator-configured agent command (same contract as loop)
               cwd: spec.repoRoot,
               env: {
-                ...process.env,
-                ...spec.env,
+                // ambient env minus the connector-owned pins — every
+                // other backend filters AGENT_PIN_KEYS out of
+                // ambient/spec env already (tmux's 0600 env file,
+                // gascity's args); without it a worker-spawned `bro
+                // agents up`/`bro loop` would bleed the parent's
+                // BRO_AGENT_*/BRO_MOL_ID provenance into the child's
+                // commit trailers (bro-fzot's exact bug shape)
+                ...Object.fromEntries(
+                  Object.entries({ ...process.env, ...spec.env }).filter(
+                    (e): e is [string, string] =>
+                      e[1] !== undefined && !AGENT_PIN_KEYS.has(e[0])
+                  )
+                ),
                 // identity pins last — spec.env must never redirect the
                 // claim store or re-badge the worker as another bead/agent
                 ...Object.fromEntries(
@@ -1968,13 +2035,13 @@ function tmuxProbe(socket: string, name: string): { live: TmuxLiveness; err: str
   }
 }
 
-/** Live state for a tmux entry: `probe` is the session liveness verdict
- *  (tmuxProbe for one entry, list()'s batched list-sessions for the
- *  fleet — the pane dying takes the session with it), then the shared
+/** Live state for a probed entry (tmux session, docker container):
+ *  `probe` is the backend's liveness verdict — a single probe for one
+ *  entry or the batched list for a fleet walk — then the shared
  *  recorded-death ladder. An 'unknown' probe still honors recorded
  *  death but never reports 'lost' — a failed probe didn't find a
  *  corpse, so 'spawned' (registered, unverified) is the honest read. */
-function tmuxState(
+function probeState(
   dir: string,
   home: string | null,
   molStep: string,
@@ -2023,7 +2090,7 @@ function toTmuxInfo(
     pid: typeof entry.pid === 'number' ? entry.pid : undefined,
     molStep,
     backend: entry.backend,
-    state: tmuxState(dir, home, molStep, entry, probe),
+    state: probeState(dir, home, molStep, entry, probe),
     ...infoCause(entry),
     ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
@@ -2120,12 +2187,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           .join('\n')
         writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
         const worker = spec.worker
-        const cliBadge =
-          worker === undefined
-            ? commandCliName(command)
-            : worker.kind === 'argv'
-              ? worker.cliName
-              : commandCliName(worker.command)
+        const cliBadge = workerCliBadge(worker, command)
         const envArgs = agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(
           ([k, v]) => ['-e', `${k}=${v}`]
         )
@@ -2141,12 +2203,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // with every element single-quoted — the provider argv never
         // re-parses into a different program.
         warnNoPromptFile(worker, command)
-        const runLine =
-          worker === undefined
-            ? expandAgentCmd(command, promptFile)
-            : worker.kind === 'argv'
-              ? [...worker.argv, promptFile].map(shQuote).join(' ')
-              : expandAgentCmd(worker.command, promptFile)
+        const runLine = workerRunLine(worker, command, promptFile)
         const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>&1 | tee -a ${shQuote(log)}`
         const paneCmd = `sh -c ${shQuote(paneScript)}` // NOSONAR — operator-configured agent command (same contract as native/loop)
         const res = tmuxRun(socket, [
@@ -2939,3 +2996,1596 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
 
 registerAgentConnector('tmux', makeTmuxConnector)
 registerAgentConnector('gascity', makeGascityConnector, { matchDir: gcMatchDir })
+
+// --- docker --------------------------------------------------------------------
+
+/** The docker backend — `docker run` as code. Spec: specs/bro-huy5o.10.md.
+ *
+ *  Isolation model: every path the worker touches mounts at its
+ *  IDENTICAL absolute host path — the worktree (-w too), the git
+ *  common dir (.git/worktrees/<n>, bro/agents, bro/hooks), and the
+ *  shared beads store — so the in-container wrapper is the native
+ *  one's shape: the appended log and the .exit record land on the
+ *  mounted host paths, and the recorded-death ladder reads them
+ *  unchanged. pid→container's host Pid is a display handle like
+ *  tmux's pane pid (VM-hosted daemons report VM pids — liveness
+ *  never reads it); `containerId` is the durable handle.
+ *
+ *  Knobs: `agents.docker.image` (wins over the devcontainer lookup,
+ *  pulled when absent), `agents.docker.devcontainer` (default
+ *  <repoRoot>/.devcontainer/devcontainer.json — "image" runs verbatim,
+ *  "build.dockerfile" rebuilds every spawn under a content-hash tag —
+ *  docker's layer cache prices the no-op), `agents.docker.runArgs`
+ *  (escape hatch: --network, -p, credential mounts), `agents.docker.command`
+ *  (→ loop.agent, same {promptFile} template). No matchDir — a repo's
+ *  devcontainer.json is the project's file, never a claim on backend
+ *  resolution; `connectors.agents: "docker"` or --connector picks it. */
+
+/** One docker call — PATH lookup is the same contract as git/gh/bd. */
+function dockerRun(
+  args: string[],
+  timeoutMs = 30_000
+): { code: number; out: string; err: string; missing: boolean } {
+  const proc = spawnSync('docker', args, { // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    maxBuffer: 16 * 1024 * 1024,
+  })
+  return {
+    code: proc.status ?? 1,
+    out: proc.stdout ?? '',
+    err: (proc.stderr ?? proc.error?.message ?? '').trim(),
+    missing: (proc.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
+  }
+}
+
+/** Daemon reachability — `docker version` contacts the SERVER (a bare
+ *  `docker --version` is client-only and would pass beside a dead
+ *  daemon). */
+function dockerDaemonUp(): { up: boolean; err: string } {
+  const v = dockerRun(['version', '--format', '{{.Server.Version}}'])
+  if (v.missing) {
+    return { up: false, err: 'docker not on PATH' }
+  }
+  if (v.code !== 0) {
+    return { up: false, err: v.err !== '' ? v.err : 'daemon unreachable' }
+  }
+  return { up: true, err: '' }
+}
+
+/** Running container names — one daemon round-trip batched across a
+ *  registry walk. `undefined` = inconclusive (daemon down/refused);
+ *  callers treat it as "may occupy" the same way tmux treats a failed
+ *  list-sessions. bro's own label narrows the listing. */
+function dockerLiveContainers(): Set<string> | undefined {
+  const ps = dockerRun(['ps', '--filter', 'label=bro.managed=1', '--format', '{{.Names}}'])
+  return ps.code === 0
+    ? new Set(ps.out.split('\n').filter((s) => s !== ''))
+    : undefined
+}
+
+/** docker-name charset — `bro-<agentId>` always passes; a tampered
+ *  registry `container` must still prove safe before it becomes an
+ *  inspect/rm operand. */
+const DOCKER_CONTAINER_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/
+
+/** The registry entry's container name — the recorded one, or derived
+ *  from a safe agentId for entries written before `container` existed. */
+function dockerContainerName(entry: AgentRegistryEntry): string | undefined {
+  if (typeof entry.container === 'string' && DOCKER_CONTAINER_NAME.test(entry.container)) {
+    return entry.container
+  }
+  const derived = `bro-${entry.agentId}`
+  return DOCKER_CONTAINER_NAME.test(derived) ? derived : undefined
+}
+
+/** `Error response from daemon: No such container`/`No such object` —
+ *  proof of a corpse (or a removed one), not an unreachable daemon. */
+const DOCKER_NO_SUCH = /no such (?:object|container)/i
+
+/** Tri-state liveness — 'running' proves life, 'dead' proves a corpse
+ *  (`--rm` containers self-remove on exit, so dead IS absent; a
+ *  present-but-stopped one reads the same either way). 'unknown' is a
+ *  failed probe that must never read as dead. */
+type DockerLiveness = 'running' | 'dead' | 'unknown'
+
+interface DockerInspect {
+  live: DockerLiveness
+  pid?: number
+  err?: string
+}
+
+function dockerInspect(name: string): DockerInspect {
+  const r = dockerRun([
+    'inspect',
+    '--type',
+    'container',
+    '--format',
+    '{{json .State}}',
+    name,
+  ])
+  if (r.code !== 0) {
+    return {
+      live: DOCKER_NO_SUCH.test(r.err) ? 'dead' : 'unknown',
+      err: r.err !== '' ? r.err : `docker inspect exited ${r.code}`,
+    }
+  }
+  try {
+    const s = JSON.parse(r.out) as { Running?: unknown; Pid?: unknown }
+    return {
+      live: s.Running === true ? 'running' : 'dead',
+      pid: typeof s.Pid === 'number' && s.Pid > 0 ? s.Pid : undefined,
+    }
+  } catch {
+    return { live: 'unknown', err: 'docker inspect returned unparseable JSON' }
+  }
+}
+
+/** Index after the `// …` comment starting at i (no newline consumed). */
+function jsoncSkipLineComment(text: string, i: number): number {
+  let k = i
+  while (k < text.length && text[k] !== '\n') {
+    k++
+  }
+  return k
+}
+
+/** Index after the `/* … *\/` comment starting at i. */
+function jsoncSkipBlockComment(text: string, i: number): number {
+  let k = i + 2
+  while (k < text.length && !(text[k] === '*' && text[k + 1] === '/')) {
+    k++
+  }
+  return Math.min(k + 2, text.length)
+}
+
+/** Whitespace AND comments — the trivia a trailing-comma lookahead
+ *  skips: `{a:1, /* c *\/ }` is legal JSONC, so a `}` may hide behind
+ *  a comment, not just whitespace. */
+function jsoncSkipTrivia(text: string, i: number): number {
+  let k = i
+  for (;;) {
+    while (k < text.length && /\s/.test(text[k]!)) {
+      k++
+    }
+    if (text[k] === '/' && text[k + 1] === '/') {
+      k = jsoncSkipLineComment(text, k)
+    } else if (text[k] === '/' && text[k + 1] === '*') {
+      k = jsoncSkipBlockComment(text, k)
+    } else {
+      return k
+    }
+  }
+}
+
+/** Copy the string literal starting at i verbatim — escapes included —
+ *  into out; returns the index after its closing quote. A `//` or a
+ *  `,]` inside a string is content, never comment or comma. */
+function jsoncCopyString(text: string, i: number, out: string[]): number {
+  out.push('"') // the opening quote — closing-quote detection starts one char in
+  let k = i + 1
+  while (k < text.length) {
+    const c = text[k]!
+    out.push(c)
+    k++
+    if (c === '\\' && k < text.length) {
+      out.push(text[k]!)
+      k++
+    } else if (c === '"') {
+      return k
+    }
+  }
+  return k
+}
+
+/** devcontainer.json is commented JSON — // and /* … *\/ comments plus
+ *  trailing commas are legal there and illegal to JSON.parse. The
+ *  scanner copies significant chars only, tracking string state so a
+ *  `//` inside a URL or a `,]` inside a string survives verbatim. */
+export function jsoncToJson(text: string): string {
+  const out: string[] = []
+  let i = 0
+  while (i < text.length) {
+    const c = text[i]!
+    if (c === '"') {
+      i = jsoncCopyString(text, i, out)
+    } else if (c === '/' && text[i + 1] === '/') {
+      i = jsoncSkipLineComment(text, i)
+    } else if (c === '/' && text[i + 1] === '*') {
+      i = jsoncSkipBlockComment(text, i)
+    } else if (c === ',' && ['}', ']'].includes(text[jsoncSkipTrivia(text, i + 1)] ?? '')) {
+      i++
+    } else {
+      out.push(c)
+      i++
+    }
+  }
+  return out.join('')
+}
+
+/** `agents.docker.runArgs` — array preferred; a string splits on
+ *  whitespace (operator config, never user input). */
+function dockerRunArgs(v: unknown): string[] {
+  if (Array.isArray(v)) {
+    return v.filter((x): x is string => typeof x === 'string' && x !== '')
+  }
+  return typeof v === 'string' ? v.split(/\s+/).filter((s) => s !== '') : []
+}
+
+/** A bind pair — the SOURCE is canonicalized (resolve() folds `..`,
+ *  realpath additionally folds a symlinked component, which would
+ *  otherwise bind a path resolving to a different inode); the TARGET
+ *  stays resolve()'s form because it is the path the worker reads —
+ *  BEADS_DIR and prompt/log/.exit paths carry spec values verbatim,
+ *  so the container must see them exactly as the env pins spell them. */
+interface DockerMount {
+  source: string
+  target: string
+}
+
+/** The paths a container needs — the worktree, the git common dir
+ *  (worktree .git file → .git/worktrees/<n>, plus bro/agents artifacts
+ *  and bro/hooks markers), and the shared beads store. A target already
+ *  inside an earlier target is skipped — the parent bind covers it. */
+function dockerMounts(spec: SpawnSpec): DockerMount[] {
+  const mounts: DockerMount[] = []
+  const add = (p: string): void => {
+    const target = resolve(p)
+    let source = target
+    try {
+      source = realpathSync(target)
+    } catch {
+      // not created yet — docker will create the source root-owned,
+      // which is the operator's path to give
+    }
+    if (target !== '' && !mounts.some((m) => target === m.target || target.startsWith(`${m.target}/`))) {
+      mounts.push({ source, target })
+    }
+  }
+  add(spec.repoRoot)
+  const r = gitTry(['-C', spec.repoRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  if (r.code === 0) {
+    add(r.out.trim())
+  }
+  add(spec.beadsDir)
+  return mounts
+}
+
+interface Devcontainer {
+  image?: unknown
+  build?: { dockerfile?: unknown; dockerFile?: unknown; context?: unknown; args?: unknown }
+  dockerComposeFile?: unknown
+}
+
+/** The devcontainer path — `agents.docker.devcontainer` if set (repo-
+ *  relative or absolute), else the conventional location. */
+function devcontainerPath(spec: SpawnSpec, knobs: Record<string, unknown>): string {
+  const kDc = knobs.devcontainer
+  if (typeof kDc !== 'string' || kDc.trim() === '') {
+    return join(spec.repoRoot, '.devcontainer', 'devcontainer.json')
+  }
+  return isAbsolute(kDc) ? kDc : join(spec.repoRoot, kDc)
+}
+
+/** The parsed devcontainer — JSONC first (comments/trailing commas are
+ *  legal there), a parse failure names the file as a 'config' error. */
+function readDevcontainer(dcPath: string): Devcontainer {
+  if (!existsSync(dcPath)) {
+    throw new SpawnError(
+      `no image configured — set agents.docker.image or provide ${dcPath} with an "image" or "build.dockerfile"`,
+      'config'
+    )
+  }
+  try {
+    const v = JSON.parse(jsoncToJson(readFileSync(dcPath, 'utf8'))) as unknown
+    return typeof v === 'object' && v !== null ? (v as Devcontainer) : {}
+  } catch (err) {
+    throw new SpawnError(
+      `${dcPath} is not parseable devcontainer JSON — ${err instanceof Error ? err.message : String(err)}`,
+      'config'
+    )
+  }
+}
+
+/** `build.dockerfile`/`dockerFile`, resolved against the devcontainer's
+ *  directory — a compose-only or absent-build config is a named gap,
+ *  never a silent fallback. */
+function devcontainerDockerfile(dcPath: string, dc: Devcontainer): string {
+  const b = dc.build
+  let df: string | undefined
+  if (typeof b?.dockerfile === 'string' && b.dockerfile !== '') {
+    df = b.dockerfile
+  } else if (typeof b?.dockerFile === 'string' && b.dockerFile !== '') {
+    df = b.dockerFile
+  }
+  if (df === undefined) {
+    const hint =
+      dc.dockerComposeFile !== undefined
+        ? 'dockerComposeFile devcontainers are not supported — set agents.docker.image'
+        : 'set agents.docker.image or give the devcontainer an "image" or "build.dockerfile"'
+    throw new SpawnError(`no usable image in ${dcPath} — ${hint}`, 'config')
+  }
+  const dockerfile = isAbsolute(df) ? df : join(dirname(dcPath), df)
+  if (!existsSync(dockerfile)) {
+    throw new SpawnError(`devcontainer dockerfile ${dockerfile} does not exist`, 'config')
+  }
+  return dockerfile
+}
+
+/** Build the devcontainer's dockerfile under a content-keyed tag. The
+ *  tag can't see the build CONTEXT's files — but docker's own layer
+ *  cache can, so EVERY resolve builds: a no-op build is seconds, a
+ *  stale image is a wrong worker. */
+function buildDevcontainerImage(dcPath: string, dockerfile: string, dc: Devcontainer): string {
+  const dcDir = dirname(dcPath)
+  const ctxRaw = typeof dc.build?.context === 'string' ? dc.build.context : '.'
+  const context = isAbsolute(ctxRaw) ? ctxRaw : join(dcDir, ctxRaw)
+  const buildArgs = Object.entries(
+    typeof dc.build?.args === 'object' && dc.build.args !== null ? dc.build.args : {}
+  ).flatMap(([k, v]) => ['--build-arg', `${k}=${String(v)}`])
+  const tag = `bro-dev-${createHash('sha256')
+    .update(readFileSync(dcPath, 'utf8'))
+    .update('\n')
+    .update(readFileSync(dockerfile, 'utf8'))
+    .digest('hex')
+    .slice(0, 12)}`
+  const b = dockerRun(['build', '-t', tag, '-f', dockerfile, ...buildArgs, context], 600_000)
+  if (b.code !== 0) {
+    const why = b.err !== '' ? b.err : `exited ${b.code}`
+    throw new SpawnError(`docker build ${dockerfile} failed — ${why}`, 'unavailable')
+  }
+  return tag
+}
+
+/** Resolved image for a spawn — `agents.docker.image` wins; else the
+ *  devcontainer's `image`, else a build of its `build.dockerfile`.
+ *  Errors are 'config' (the operator's file/knob is wrong); a failed
+ *  BUILD is 'unavailable' (the daemon's). Runs outside the registry
+ *  lock — a first-build pays minutes that must not serialize other
+ *  spawns. */
+export function dockerImageFor(spec: SpawnSpec, knobs: Record<string, unknown>): string {
+  const kImage = knobs.image
+  if (typeof kImage === 'string' && kImage.trim() !== '') {
+    return ensureDockerImage(kImage.trim())
+  }
+  const dcPath = devcontainerPath(spec, knobs)
+  const dc = readDevcontainer(dcPath)
+  if (typeof dc.image === 'string' && dc.image.trim() !== '') {
+    return ensureDockerImage(dc.image.trim())
+  }
+  return buildDevcontainerImage(dcPath, devcontainerDockerfile(dcPath, dc), dc)
+}
+
+/** A verbatim image (knob or devcontainer `image:`) must exist BEFORE
+ *  `docker run` — an implicit pull inside the registry lock would pay
+ *  hundreds of MB behind the 30s run timeout and stall every other
+ *  spawn. Inspect is cheap; pull gets the build's 10-minute budget. */
+function ensureDockerImage(image: string): string {
+  if (dockerRun(['image', 'inspect', image]).code === 0) {
+    return image
+  }
+  const p = dockerRun(['pull', image], 600_000)
+  if (p.code !== 0) {
+    const why = p.err !== '' ? p.err : `exited ${p.code}`
+    throw new SpawnError(`docker pull ${image} failed — ${why}`, 'unavailable')
+  }
+  return image
+}
+
+/** The liveness verdict for one docker entry — the batched `live` set
+ *  when the caller already paid the round-trip (a name absent from a
+ *  successful listing is provably dead), a fresh inspect otherwise. */
+function dockerProbeVerdict(entry: AgentRegistryEntry, live?: Set<string>): DockerLiveness {
+  const name = dockerContainerName(entry)
+  if (live !== undefined) {
+    return name !== undefined && live.has(name) ? 'running' : 'dead'
+  }
+  return name === undefined ? 'dead' : dockerInspect(name).live
+}
+
+function toDockerInfo(
+  dir: string,
+  home: string | null,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  live?: Set<string>
+): AgentInfo {
+  return {
+    id: entry.agentId,
+    spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
+    pid: typeof entry.pid === 'number' ? entry.pid : undefined,
+    molStep,
+    backend: entry.backend,
+    // Running wins (a 'stopped' flag on a still-running container means
+    // rm hasn't landed); `--rm` removes the corpse on exit, so the
+    // mounted .exit file is the only death record, exactly like native
+    state: probeState(dir, home, molStep, entry, dockerProbeVerdict(entry, live)),
+    ...infoCause(entry),
+    ...infoProvenance(entry),
+    worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
+    log: typeof entry.log === 'string' ? entry.log : undefined,
+  }
+}
+
+/** Host-bound vars — `--env-file` OVERRIDES the image's own ENV, so a
+ *  forwarded PATH/HOME/TMPDIR would shadow the toolchain paths the
+ *  image set up (a macOS /opt/homebrew PATH finds nothing inside a
+ *  Linux image; HOME=/Users/x breaks npm's cache and the agent CLI's
+ *  config/credentials). spec.env is NOT filtered — an explicit knob
+ *  is the operator's choice. */
+const DOCKER_HOST_ENV = new Set([
+  'PATH',
+  'HOME',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  'PWD',
+  'OLDPWD',
+  'SHELL',
+  'USER',
+  'LOGNAME',
+  'HOSTNAME',
+  'SHLVL',
+  '_',
+])
+
+/** The ambient env file — a 0600 file like tmux's, deleted by the
+ *  caller after `docker run` (and on any failure). argv is visible to
+ *  every local user (`ps`, `docker inspect`), so the ambient bag
+ *  (secrets included) never goes on -e. Values with newlines can't
+ *  survive docker's line-based format — dropped with a warning naming
+ *  the keys. */
+function writeDockerEnvFile(envFile: string, spec: SpawnSpec): void {
+  const dropped: string[] = []
+  const ambient = Object.entries({
+    ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !DOCKER_HOST_ENV.has(k))),
+    ...spec.env,
+  })
+    .filter((e): e is [string, string] => {
+      if (e[1] === undefined || !/^[A-Za-z_]\w*$/.test(e[0]) || AGENT_PIN_KEYS.has(e[0])) {
+        return false
+      }
+      if (e[1].includes('\n') || e[1].includes('\r')) {
+        dropped.push(e[0])
+        return false
+      }
+      return true
+    })
+    .map(([k, v]) => `${k}=${v}`)
+    .join('\n')
+  if (dropped.length > 0) {
+    console.error(
+      `warning: docker env-file drops ${dropped.length} var(s) with newline values: ${dropped.join(', ')}`
+    )
+  }
+  writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
+}
+
+/** The `docker run` argv — operator `runArgs` sit FIRST so docker's
+ *  last-wins flag semantics keep `--name`/`--workdir`/labels/mounts
+ *  under bro's control no matter what an operator passes. `--user`
+ *  defaults to the host uid:gid — without it a rootful worker leaves
+ *  root-owned files in the mounted worktree/git dir/beads store, and
+ *  every later host-side git/rm hits EACCES; an operator `-u`/`--user`
+ *  in runArgs still wins because the default is skipped, not shadowed. */
+function dockerRunArgv(
+  name: string,
+  spec: SpawnSpec,
+  mounts: DockerMount[],
+  envFile: string,
+  agentId: string,
+  promptFile: string,
+  cliBadge: string | undefined,
+  mol: string | undefined,
+  runArgs: string[],
+  image: string,
+  wrapper: string
+): string[] {
+  const userArgs =
+    typeof process.getuid === 'function' &&
+    !runArgs.some((a) => a === '--user' || a === '-u' || a.startsWith('--user='))
+      ? ['--user', `${process.getuid()}:${process.getgid!()}`]
+      : []
+  return [
+    'run',
+    '-d',
+    '--init',
+    '--rm',
+    ...userArgs,
+    ...runArgs,
+    '--name',
+    name,
+    '--workdir',
+    mounts[0]?.target ?? resolve(spec.repoRoot),
+    '--label',
+    'bro.managed=1',
+    '--label',
+    `bro.step=${spec.molStep}`,
+    ...mounts.flatMap((m) => ['-v', `${m.source}:${m.target}`]),
+    '--env-file',
+    envFile,
+    ...agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(([k, v]) => [
+      '-e',
+      `${k}=${v}`,
+    ]),
+    image,
+    'sh',
+    '-c',
+    wrapper,
+  ]
+}
+
+export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
+  const dir = ctx.dir
+  const knobs = env.agents['docker'] ?? {}
+  const command =
+    (typeof knobs.command === 'string' && knobs.command.trim() !== ''
+      ? knobs.command
+      : undefined) ?? env.loop?.agent ?? ''
+  const runArgs = dockerRunArgs(knobs.runArgs)
+
+  const findEntry = (id: string) => findAgentEntry(dir, 'docker', id)
+
+  return {
+    name: 'docker',
+
+    async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is one sync critical section
+      const home = spawnHome(dir, 'docker', command, spec)
+      const daemon = dockerDaemonUp()
+      if (!daemon.up) {
+        throw new SpawnError(`docker unavailable — ${daemon.err}`, 'unavailable')
+      }
+      // image resolution outside the lock: a first devcontainer build
+      // pays minutes — holding the registry lock through it would
+      // serialize every concurrent spawn behind one `docker build`
+      const image = dockerImageFor(spec, knobs)
+      const mol = stepParent(spec.beadsDir, spec.molStep)
+      return withAgentRegistryLock(dir, () => {
+        const { agentId, promptFile, log, exitFile, reservation } = prepareSpawn(
+          dir,
+          home,
+          'docker',
+          spec,
+          {
+            isLive: (e) => {
+              const n = dockerContainerName(e)
+              if (n === undefined) {
+                return false
+              }
+              const p = dockerInspect(n)
+              if (p.live === 'unknown') {
+                // an unverifiable liveness probe must not let a duplicate
+                // spawn run beside a worker that may still be alive
+                throw new SpawnError(
+                  `cannot verify ${spec.molStep}'s container — ${p.err}`,
+                  'unavailable'
+                )
+              }
+              if (p.live === 'running') {
+                touchWorkMarker(dir, e.agentId)
+              }
+              return p.live === 'running'
+            },
+            liveDetail: (e) => `container ${dockerContainerName(e) ?? '?'}`,
+            entry: (id) => ({ container: `bro-${id}`, containerId: undefined }),
+            cap: { max: fleetCapOf(env), env },
+            sessionQuota: sessionQuotaOf(env, 'docker', spec, command),
+          }
+        )
+        const name = `bro-${agentId}`
+        const envFile = join(home, `${agentId}.env`)
+        let containerId = ''
+        try {
+          // a corpse with our name (crash between entry and rm, a
+          // respawn over a stopped container) collides docker run —
+          // clear it
+          dockerRun(['rm', '-f', name])
+          writeDockerEnvFile(envFile, spec)
+          const worker = spec.worker
+          warnNoPromptFile(worker, command)
+          const cliBadge = workerCliBadge(worker, command)
+          const runLine = workerRunLine(worker, command, promptFile)
+          // the native wrapper, verbatim — the mounted paths make .exit/
+          // log land where the host ladder reads them. --init gives the
+          // worker a reaper so grandchildren can't zombie inside; --rm
+          // removes the corpse on exit so `docker ps -a` doesn't fill
+          // with bro litter and the name frees for a respawn.
+          const wrapper = `{ ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } >> ${shQuote(log)} 2>&1`
+          const res = dockerRun(
+            dockerRunArgv(name, spec, dockerMounts(spec), envFile, agentId, promptFile, cliBadge, mol, runArgs, image, wrapper)
+          )
+          rmSync(envFile, { force: true }) // the env is baked into container config — the file has done its job
+          if (res.code !== 0) {
+            const why = res.err !== '' ? res.err : `exited ${res.code}`
+            throw new SpawnError(`docker run failed — ${why}`, 'unavailable')
+          }
+          containerId = res.out.trim().split('\n')[0] ?? ''
+        } catch (err) {
+          // ANY setup failure after the reservation releases it — a
+          // leaked slot starves the quota until its TTL lapses. The
+          // registry entry already landed; the spawnError fields it,
+          // and the env file (ambient secrets included) goes too.
+          dockerRun(['rm', '-f', name])
+          rmSync(envFile, { force: true })
+          if (reservation !== undefined) {
+            releaseSessionSlot(reservation)
+          }
+          try {
+            patchAgentRegistry(dir, spec.molStep, {
+              spawnError: err instanceof Error ? err.message : String(err),
+            })
+          } catch {
+            // the entry landed already — the SpawnError still reports
+          }
+          throw err
+        }
+        const insp = dockerInspect(name)
+        const spawned = patchAgentRegistry(dir, spec.molStep, {
+          containerId,
+          ...(insp.pid !== undefined
+            ? // State.Pid is a display handle only — a remote/VM daemon
+              // reports ITS host's pid, meaningless to local /proc and
+              // pidAlive; pidStart stays null so nothing correlates it
+              { pid: insp.pid, pidStart: null }
+            : {}),
+        })
+        writeWorkMarker(dir, agentId, spec.molStep, insp.pid)
+        return toDockerInfo(dir, home, spec.molStep, spawned)
+      })
+    },
+
+    async list(): Promise<ListResult> { // NOSONAR — connector contract is async; the work is sync
+      try {
+        const daemon = dockerDaemonUp()
+        if (!daemon.up) {
+          return { agents: [], degraded: daemon.err }
+        }
+        const home = agentsHome(dir)
+        const entries = Object.entries(readAgentRegistry(dir)).filter(
+          ([, e]) => e.backend === 'docker'
+        )
+        // one daemon round-trip for the whole fleet — a name absent
+        // from a successful listing is provably not running; a failed
+        // one degrades the list rather than reporting corpses
+        const live = dockerLiveContainers()
+        if (live === undefined && entries.length > 0) {
+          return { agents: [], degraded: 'docker ps failed — daemon unreachable' }
+        }
+        return {
+          agents: entries.map(([molStep, e]) => toDockerInfo(dir, home, molStep, e, live)),
+        }
+      } catch (err) {
+        return {
+          agents: [],
+          degraded: err instanceof Error ? err.message : String(err),
+        }
+      }
+    },
+
+    async status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is sync
+      const hit = findEntry(id)
+      if (!hit) {
+        throw new AgentNotFound(`no docker agent ${id}`)
+      }
+      return toDockerInfo(dir, agentsHome(dir), hit[0], hit[1])
+    },
+
+    async stop(id: string): Promise<void> {
+      const hit = findEntry(id)
+      if (!hit) {
+        return // idempotent — gone is the desired end state
+      }
+      const [molStep, entry] = hit
+      const name = dockerContainerName(entry)
+      if (name !== undefined && entry.stopped !== true) {
+        // rm by the immutable container ID when recorded — respawns
+        // reuse agentId (and thus the name), so a name-targeted rm
+        // landing after a respawn's run would kill the NEW worker
+        const target =
+          typeof entry.containerId === 'string' && entry.containerId !== ''
+            ? entry.containerId
+            : name
+        dockerRun(['rm', '-f', target])
+        // let the rm land before recording the stop — 'stopped' on a
+        // still-live container would let a respawn run beside it
+        const deadline = Date.now() + 2_000
+        while (dockerInspect(name).live === 'running' && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 25)) // NOSONAR — bounded kill-wait poll
+        }
+      }
+      // a respawn during the rm re-probes and re-pins the entry under
+      // the registry lock — re-verify under the SAME lock or 'stopped'
+      // lands on a live, respawned entry
+      withAgentRegistryLock(dir, () => {
+        const cur = readAgentRegistry(dir)[molStep]
+        if (
+          cur === undefined ||
+          cur.agentId !== entry.agentId ||
+          cur.spawnedAt !== entry.spawnedAt
+        ) {
+          return // respawned — the live run owns the entry
+        }
+        if (name !== undefined) {
+          const p = dockerInspect(name)
+          if (p.live === 'running') {
+            return // still alive — the live run owns the entry
+          }
+          if (p.live === 'unknown') {
+            // an unverifiable probe must not record 'stopped' on a
+            // container that may still be live — fail loudly instead
+            throw new Error(`cannot verify ${id}'s container stopped — ${p.err}`)
+          }
+        }
+        try {
+          patchAgentRegistry(dir, molStep, { stopped: true })
+        } catch {
+          // the marker removal below still records intent
+        }
+        dropWorkMarker(dir, molStep, entry)
+      })
+    },
+
+    capabilities: () => ({ attach: false, respawn: true, supervisor: 'none' }),
+  }
+}
+
+registerAgentConnector('docker', makeDockerConnector)
+
+// --- copilot -------------------------------------------------------------------
+
+/** The copilot backend — GitHub's hosted coding agent ("agent tasks")
+ *  as code. Spike verdict: specs/sessions/bro-huy5o.9.md — the first
+ *  cloud connector: genuinely remote (no local worktree, supervisor or
+ *  process), produces a pull request artifact, and needs no binary
+ *  beyond the already-required `gh`.
+ *
+ *  The remote worker can never reach the shared dolt, so the spawn
+ *  claims the molStep ON THE TASK'S BEHALF inside prepareSpawn — before
+ *  dispatch — then creates the task via the documented REST plane
+ *  `POST /agents/repos/{o}/{r}/tasks` through `gh api`: the response
+ *  pins the exact task id into agents.json. `gh agent-task create`
+ *  itself prints only a human URL (or an unparsed job id), so the
+ *  typed REST surface is the primary protocol everywhere except the
+ *  attach hint (`gh agent-task view --log --follow`, a human surface).
+ *  Preview drift on either surface is a probe failure (degraded /
+ *  'unavailable'), never a process crash.
+ *
+ *  Remote state → AgentInfo.state: queued→spawned,
+ *  in_progress/idle/waiting_for_user→running, completed→exited,
+ *  failed/timed_out→exited (cause classified off the session error),
+ *  cancelled→stopped, an unrecognised or unreachable read→degraded/
+ *  'spawned' — API failures degrade, they never report 'lost'.
+ *
+ *  Stop: best-effort `POST /repos/{o}/{r}/actions/runs/{id}/cancel` on
+ *  the backing Actions run (`workflow_run_id` off the task's latest
+ *  session) — cancel is the documented gap (no CLI/REST task cancel;
+ *  web 'Stop session' only) — then the registry records stopped. A
+ *  still-live or unverifiable session is reported on stderr with its
+ *  session URL, never hidden.
+ *
+ *  Quota: the copilot session plane (session-planes/copilot.ts) counts
+ *  remote live tasks — countLive is synchronous, so connector reads
+ *  refresh a count cache the plane serves; a stale/absent cache fails
+ *  closed 'unavailable'. Knobs: agents.copilot.repo (dispatch target —
+ *  default the checkout's origin remote), agents.copilot.base
+ *  (base_ref — the API's repo default when unset), agents.copilot.
+ *  model/customAgent (REST passthrough), agents.copilot.maxSessions/
+ *  maxWorkers (remote-count lanes), agents.copilot.sessionKind. */
+
+interface GhResult {
+  code: number
+  out: string
+  err: string
+  missing: boolean
+}
+
+/** `gh` on PATH is the same contract git/bd/docker run under —
+ *  spawnSync (the connector's other shell-outs are all synchronous,
+ *  and admission runs inside the registry lock). */
+function ghRun(args: string[], timeoutMs = 30_000): GhResult {
+  const proc = spawnSync('gh', args, { // NOSONAR — PATH lookup is the contract (same as docker/git/bd)
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    maxBuffer: 16 * 1024 * 1024,
+  })
+  return {
+    code: proc.status ?? 1,
+    out: proc.stdout ?? '',
+    err: (proc.stderr ?? proc.error?.message ?? '').trim(),
+    missing: (proc.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
+  }
+}
+
+/** REST task states that still burn budget — everything a live task
+ *  can read as on the documented surface (queued → in_progress →
+ *  terminal; idle and waiting_for_user are suspended-but-alive). */
+const COPILOT_LIVE_STATES = new Set(['queued', 'in_progress', 'idle', 'waiting_for_user'])
+
+/** Task ids are server-minted UUIDs; the registry pin is trusted only
+ *  when it can't smuggle a path/query segment into the REST URL. */
+const COPILOT_SAFE_TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/** The loosely-typed REST task — fields narrow at use, so a preview
+ *  schema drift degrades a read instead of crashing it. */
+interface CopilotTask {
+  id?: unknown
+  state?: unknown
+  artifacts?: unknown
+  sessions?: unknown
+}
+
+interface CopilotSession {
+  id?: unknown
+  state?: unknown
+  workflow_run_id?: unknown
+  error?: unknown
+  head_ref?: unknown
+  created_at?: unknown
+  updated_at?: unknown
+}
+
+function copilotTaskIdOf(entry: AgentRegistryEntry): string | undefined {
+  const id = entry.taskId
+  return typeof id === 'string' && COPILOT_SAFE_TASK_ID.test(id) ? id : undefined
+}
+
+function copilotTaskState(task: CopilotTask): string {
+  return typeof task.state === 'string' ? task.state : ''
+}
+
+function copilotTaskSessions(task: CopilotTask): CopilotSession[] {
+  return Array.isArray(task.sessions)
+    ? task.sessions.filter((s): s is CopilotSession => typeof s === 'object' && s !== null)
+    : []
+}
+
+/** The latest session a task reports — sessions accumulate across
+ *  retries/steers; the newest carries the live state, the workflow run
+ *  and the error the terminal verdict classifies. */
+function copilotLatestSession(task: CopilotTask): CopilotSession | undefined {
+  const sessions = copilotTaskSessions(task)
+  let latest: CopilotSession | undefined
+  let stamp = ''
+  for (const s of sessions) {
+    const at =
+      typeof s.updated_at === 'string'
+        ? s.updated_at
+        : typeof s.created_at === 'string'
+          ? s.created_at
+          : ''
+    if (latest === undefined || at >= stamp) {
+      latest = s
+      stamp = at
+    }
+  }
+  return latest
+}
+
+/** The remote branch the session pushes — `branch` artifacts carry
+ *  `base_ref`/`head_ref` at creation; session objects repeat them. */
+function copilotHeadRef(task: CopilotTask): string | undefined {
+  if (Array.isArray(task.artifacts)) {
+    for (const a of task.artifacts) {
+      const ref = (a as { type?: unknown; data?: { head_ref?: unknown } })
+      if (ref?.type === 'branch' && typeof ref.data?.head_ref === 'string') {
+        return ref.data.head_ref
+      }
+    }
+  }
+  for (const s of copilotTaskSessions(task)) {
+    if (typeof s.head_ref === 'string' && s.head_ref !== '') {
+      return s.head_ref
+    }
+  }
+  return undefined
+}
+
+function copilotHasPullArtifact(task: CopilotTask): boolean {
+  return (
+    Array.isArray(task.artifacts) &&
+    task.artifacts.some((a) => (a as { type?: unknown })?.type === 'pull')
+  )
+}
+
+/** Error text a failed session left behind — the terminal verdict's
+ *  classifyExitCause input (a rate-limit wall reads 'rate_limited',
+ *  not 'crash'). */
+function copilotSessionError(task: CopilotTask): string {
+  const err = copilotLatestSession(task)?.error
+  const msg = (err as { message?: unknown })?.message
+  return typeof msg === 'string' ? msg : ''
+}
+
+/** The 'owner/repo' a registry entry's task lives on — pinned at
+ *  spawn; the worktree's origin is the fallback for entries predating
+ *  the pin. */
+function copilotEntryRepo(entry: AgentRegistryEntry): string | undefined {
+  if (typeof entry.taskRepo === 'string' && /^[\w.-]+\/[\w.-]+$/.test(entry.taskRepo)) {
+    return entry.taskRepo
+  }
+  return typeof entry.worktree === 'string'
+    ? copilotRemoteRepo(entry.worktree)
+    : undefined
+}
+
+/** `git@host:o/r(.git)`, `https://host/o/r(.git)`, `ssh://…/o/r` →
+ *  `o/r` — the last two path segments of any origin form GitHub
+ *  accepts. */
+function copilotParseRemote(url: string): string | undefined {
+  const m = /([A-Za-z0-9][A-Za-z0-9_.-]*)\/([A-Za-z0-9][A-Za-z0-9_.-]*?)(?:\.git)?\/?$/.exec(
+    url.trim()
+  )
+  return m === null ? undefined : `${m[1]}/${m[2]}`
+}
+
+function copilotRemoteRepo(dir: string): string | undefined {
+  const url = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
+  return url.code === 0 ? copilotParseRemote(url.out) : undefined
+}
+
+/** The PR the task opened — resolved via the pushes' head_ref, the
+ *  same join `gh agent-task view` hydrates internally. Absent until a
+ *  pull artifact exists; a failed read stays unpinned rather than
+ *  blocking the state read it rode in on. */
+function copilotResolvePr(
+  repo: string,
+  headRef: string
+): { pr?: number; prUrl?: string } {
+  const owner = repo.split('/')[0]
+  const r = ghRun([
+    'api',
+    `repos/${repo}/pulls?head=${owner}:${encodeURIComponent(headRef)}&state=all&per_page=1`,
+  ])
+  if (r.code !== 0) {
+    return {}
+  }
+  try {
+    const v = JSON.parse(r.out) as unknown
+    const first = Array.isArray(v) ? (v[0] as { number?: unknown; html_url?: unknown }) : undefined
+    return {
+      pr: typeof first?.number === 'number' ? first.number : undefined,
+      prUrl: typeof first?.html_url === 'string' ? first.html_url : undefined,
+    }
+  } catch {
+    return {}
+  }
+}
+
+/** The agents-web session URL — the attach/log target. Requires the
+ *  pinned PR; a task that never opened one has no per-session page. */
+function copilotSessionUrl(repo: string | undefined, pr: unknown, sessionId: unknown): string | undefined {
+  return repo !== undefined && typeof pr === 'number' && typeof sessionId === 'string'
+    ? `https://${ghHost()}/${repo}/pull/${pr}/agent-sessions/${sessionId}`
+    : undefined
+}
+
+/** One task's REST read — `{ok:false}` is "the API couldn't say"
+ *  (down, unauthorized, preview drift), never a fabricated corpse. */
+function copilotFetchTask(taskId: string): { ok: boolean; task?: CopilotTask; err?: string } {
+  const r = ghRun(['api', `agents/tasks/${taskId}`])
+  if (r.missing) {
+    return { ok: false, err: 'gh not on PATH' }
+  }
+  if (r.code !== 0) {
+    return { ok: false, err: r.err !== '' ? r.err : `gh api exited ${r.code}` }
+  }
+  try {
+    const task = JSON.parse(r.out) as CopilotTask
+    return typeof task === 'object' && task !== null
+      ? { ok: true, task }
+      : { ok: false, err: 'unparseable task JSON' }
+  } catch {
+    return { ok: false, err: 'gh api returned unparseable JSON' }
+  }
+}
+
+/** The account's live task id set — filtered, paginated listings for
+ *  the fleet walk and the session-plane count refresh. `undefined` =
+ *  the API couldn't answer (fail closed — an unverifiable count
+ *  occupies, never frees). A short page ends the walk; the page bound
+ *  keeps a pathological account from stalling the spawn lock. */
+function copilotLiveTaskIds(): Set<string> | undefined {
+  const ids = new Set<string>()
+  for (let page = 1; page <= 10; page++) {
+    const r = ghRun([
+      'api',
+      `agents/tasks?state=${[...COPILOT_LIVE_STATES].join(',')}&per_page=100&page=${page}`,
+    ])
+    if (r.code !== 0) {
+      return undefined
+    }
+    try {
+      const v = JSON.parse(r.out) as { tasks?: unknown }
+      const batch = Array.isArray(v.tasks)
+        ? v.tasks
+            .map((t) => (t as { id?: unknown })?.id)
+            .filter((x): x is string => typeof x === 'string')
+        : []
+      for (const id of batch) {
+        ids.add(id)
+      }
+      if (batch.length < 100) {
+        return ids
+      }
+    } catch {
+      return undefined
+    }
+  }
+  return ids
+}
+
+/** copilot occupancy — the remote probe is the same honesty rule as
+ *  docker's: recorded death frees the slot regardless (a stopped/exit
+ *  entry holds no live task), a task proven absent from the live set
+ *  frees, and an unverifiable read OCCUPIES — a maybe-running remote
+ *  worker is a maybe-burning one. An entry with no taskId was never
+ *  dispatched; nothing remote can hold its slot. */
+function copilotOccupies(entry: AgentRegistryEntry, live: Set<string> | undefined): boolean {
+  if (entry.stopped === true || entry.exitStatus !== undefined) {
+    return false
+  }
+  const taskId = copilotTaskIdOf(entry)
+  return taskId !== undefined && (live === undefined || live.has(taskId))
+}
+
+/** Generation-safe merge of remote-learned facts into the registry —
+ *  the same bind-to-identity rule ensureExitCause's advisory write
+ *  uses: a respawn between our read and this patch owns the entry now,
+ *  and the old task's drift must not mislabel it. The entry object is
+ *  updated either way so THIS read's verdict is authoritative. */
+function copilotPatch(
+  dir: string,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  patch: Record<string, unknown>
+): void {
+  Object.assign(entry, patch)
+  try {
+    withAgentRegistryLock(dir, () => {
+      const reg = readAgentRegistry(dir)
+      const cur = reg[molStep]
+      if (
+        cur === undefined ||
+        cur.agentId !== entry.agentId ||
+        cur.spawnedAt !== entry.spawnedAt
+      ) {
+        return
+      }
+      reg[molStep] = { ...cur, ...patch }
+      writeAgentRegistry(dir, reg)
+    })
+  } catch {
+    // advisory — the in-memory entry already carries the verdict
+  }
+}
+
+/** What one task read teaches the registry — session/pr/run handles
+ *  pin as they appear, taskState tracks drift, and a terminal state
+ *  harvests the exit record (exitStatus+cause+resetAt, or stopped on
+ *  cancelled) so the recorded-death ladder reports it like a local
+ *  death. The terminal half lives in copilotTerminalPatch. */
+/** The terminal-state half of the absorb patch — cancelled reads
+ *  stopped, completed the ok exit record, failed/timed_out the
+ *  classified one. */
+function copilotTerminalPatch(state: string, task: CopilotTask): Record<string, unknown> {
+  if (state === 'cancelled') {
+    return { stopped: true }
+  }
+  if (state === 'completed') {
+    return { exitStatus: 0, cause: 'ok' }
+  }
+  if (state !== 'failed' && state !== 'timed_out') {
+    return {}
+  }
+  const c =
+    state === 'timed_out'
+      ? { cause: 'crash' as AgentCause, resetAt: undefined }
+      : classifyExitCause(copilotSessionError(task), 1)
+  return { exitStatus: 1, cause: c.cause, resetAt: c.resetAt }
+}
+
+function copilotAbsorb(
+  dir: string,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  task: CopilotTask
+): void {
+  const patch: Record<string, unknown> = {}
+  const state = copilotTaskState(task)
+  if (state !== '' && entry.taskState !== state) {
+    patch.taskState = state
+  }
+  const session = copilotLatestSession(task)
+  if (typeof session?.id === 'string' && session.id !== entry.sessionId) {
+    patch.sessionId = session.id
+    patch.attach = `gh agent-task view ${session.id} --log --follow`
+  }
+  const runId = session?.workflow_run_id
+  if (typeof runId === 'number' && runId !== entry.workflowRun) {
+    patch.workflowRun = runId
+  }
+  const headRef = copilotHeadRef(task)
+  if (headRef !== undefined && headRef !== entry.branch) {
+    patch.branch = headRef
+  }
+  const repo = copilotEntryRepo(entry)
+  if (entry.pr === undefined && copilotHasPullArtifact(task) && repo !== undefined && headRef !== undefined) {
+    const { pr, prUrl } = copilotResolvePr(repo, headRef)
+    if (pr !== undefined) {
+      patch.pr = pr
+      patch.prUrl = prUrl ?? `https://${ghHost()}/${repo}/pull/${pr}`
+    }
+  }
+  const sessionUrl = copilotSessionUrl(repo, patch.pr ?? entry.pr, patch.sessionId ?? entry.sessionId)
+  if (sessionUrl !== undefined && sessionUrl !== entry.sessionUrl) {
+    patch.sessionUrl = sessionUrl
+  }
+  Object.assign(patch, copilotTerminalPatch(state, task))
+  if (Object.keys(patch).length > 0) {
+    copilotPatch(dir, molStep, entry, patch)
+  }
+}
+
+/** Liveness verdict for one registry entry — the tri-state probeState
+ *  consumes, plus the raw remote state: 'queued' is live but not yet
+ *  running, and the reported AgentInfo.state should say so. 'unknown'
+ *  is every unreadable read (gh missing, auth, 404 on a task the API
+ *  rotated out, preview drift) — degraded, never a corpse. An entry
+ *  without a taskId was never dispatched: 'dead' is the honest read. */
+function copilotTaskProbe(
+  dir: string,
+  molStep: string,
+  entry: AgentRegistryEntry
+): { live: TmuxLiveness; err?: string; state?: string } {
+  const taskId = copilotTaskIdOf(entry)
+  if (taskId === undefined) {
+    return { live: 'dead' }
+  }
+  const f = copilotFetchTask(taskId)
+  if (!f.ok) {
+    return { live: 'unknown', err: f.err }
+  }
+  copilotAbsorb(dir, molStep, entry, f.task!)
+  const state = copilotTaskState(f.task!)
+  if (COPILOT_LIVE_STATES.has(state)) {
+    return { live: 'running', state }
+  }
+  if (state === 'completed' || state === 'failed' || state === 'timed_out' || state === 'cancelled') {
+    return { live: 'dead', state }
+  }
+  // a state this build doesn't know — preview drift reads 'unknown',
+  // not 'lost'
+  return { live: 'unknown', err: `unrecognised task state '${state}'`, state }
+}
+
+/** One registry entry → AgentInfo — the shared shape toCopilotInfo and
+ *  list() build. 'queued' reports 'spawned' rather than 'running': the
+ *  task exists remotely but no session burns yet. */
+function copilotInfoFor(
+  dir: string,
+  home: string | null,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  probe: { live: TmuxLiveness; state?: string }
+): AgentInfo {
+  const st = probeState(dir, home, molStep, entry, probe.live)
+  return {
+    id: entry.agentId,
+    spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
+    molStep,
+    backend: entry.backend,
+    state: st === 'running' && probe.state === 'queued' ? 'spawned' : st,
+    ...infoCause(entry),
+    ...infoProvenance(entry),
+    worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
+    // no local log exists — the session URL is the attach/log pointer
+    log: typeof entry.sessionUrl === 'string' ? entry.sessionUrl : undefined,
+  }
+}
+
+function toCopilotInfo(
+  dir: string,
+  home: string | null,
+  molStep: string,
+  entry: AgentRegistryEntry
+): AgentInfo {
+  return copilotInfoFor(dir, home, molStep, entry, copilotTaskProbe(dir, molStep, entry))
+}
+
+/** The session quota a copilot spawn rides — a remote kind needs no
+ *  cli detection: the plane is 'copilot' unless agents.copilot.
+ *  sessionKind names another registered one (the only sensible reroute
+ *  is another remote-count plane sharing the cache contract). */
+function copilotSessionQuota(env: AgentConnectorEnv): SessionQuotaLane | undefined {
+  const declared = env.agents['copilot']?.['sessionKind']
+  const kind = typeof declared === 'string' && declared !== '' ? declared : 'copilot'
+  const quota = sessionQuotaConfig(env.agents, kind)
+  if (quota === undefined) {
+    return undefined
+  }
+  const plane = sessionPlane(kind)
+  if (plane === undefined) {
+    // a capped kind with no registered plane is a config bug — refuse
+    // loudly rather than spawn past a quota the operator armed
+    throw new SpawnError(
+      `agents.copilot.sessionKind '${kind}' has no registered session plane — ` +
+        `cannot enforce agents.${kind}.maxSessions/maxWorkers`,
+      'config'
+    )
+  }
+  return { plane, agents: env.agents }
+}
+
+/** Retire `.slot` reservations whose remote task already landed in the
+ *  refreshed live set — the admission contract a landed spawn must not
+ *  double-count (live + reservation) under. The correlation needs the
+ *  repo's registry (agentId → taskId), so the sweep rides connector
+ *  reads rather than the host-wide plane: each repo sweeps its own
+ *  slots, and a cross-repo spawn's reservation gets retired by that
+ *  repo's next refresh — the TTL bounds whatever remains. */
+function copilotSweepLandedSlots(dir: string, slotsDir: string, live: Set<string>): void {
+  let names: string[]
+  try {
+    names = readdirSync(slotsDir)
+  } catch {
+    return // no/unreadable dir — the tally reports its own verdict
+  }
+  for (const e of Object.values(readAgentRegistry(dir))) {
+    if (e.backend !== 'copilot' || typeof e.taskId !== 'string' || !live.has(e.taskId)) {
+      continue
+    }
+    for (const name of names) {
+      if (name.startsWith(`${e.agentId}-`) && name.endsWith('.slot')) {
+        try {
+          rmSync(join(slotsDir, name), { force: true })
+        } catch {
+          // a racing reaper already got it
+        }
+      }
+    }
+  }
+}
+
+/** Refresh the count cache the copilot plane serves — best-effort and
+ *  only while a copilot lane is armed (an unarmed plane has no reader;
+ *  the extra gh call is pure waste). A failed refresh just leaves the
+ *  cache stale, which countLive already fails closed on. The landed
+ *  sweep retires this repo's reservations the remote count now sees. */
+function copilotRefreshCount(dir: string, env: AgentConnectorEnv): void {
+  if (sessionQuotaConfig(env.agents, 'copilot') === undefined) {
+    return
+  }
+  const resDir = env.agents['copilot']?.['reservationsDir']
+  const observedAt = Date.now()
+  const ids = copilotLiveTaskIds()
+  if (ids !== undefined) {
+    const slots = sessionSlotsDir('copilot', typeof resDir === 'string' ? resDir : undefined)
+    writeCopilotCount(typeof resDir === 'string' ? resDir : undefined, [...ids], observedAt)
+    copilotSweepLandedSlots(dir, slots, ids)
+  }
+}
+
+export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
+  const dir = ctx.dir
+  const knobs = env.agents['copilot'] ?? {}
+  const knobString = (k: string): string | undefined =>
+    typeof knobs[k] === 'string' && knobs[k] !== '' ? (knobs[k] as string) : undefined
+
+  const findEntry = (id: string) => findAgentEntry(dir, 'copilot', id)
+
+  /** 'owner/repo' the dispatch targets — agents.copilot.repo wins over
+   *  the checkout's origin remote; neither resolvable is a config gap
+   *  the error names. */
+  const targetRepo = (spec: SpawnSpec): { owner: string; repo: string; slug: string } => {
+    const slug = knobString('repo') ?? copilotRemoteRepo(spec.repoRoot)
+    const m = slug === undefined ? null : /^([\w.-]+)\/([\w.-]+)$/.exec(slug)
+    if (m === null || m[1] === undefined || m[2] === undefined || slug === undefined) {
+      throw new SpawnError(
+        `no repository to dispatch the copilot task against — set agents.copilot.repo ` +
+          `('owner/repo') or an origin remote on ${spec.repoRoot}`,
+        'config'
+      )
+    }
+    return { owner: m[1], repo: m[2], slug }
+  }
+
+  /** The REST POST — `gh agent-task create` prints only a human URL;
+   *  the task object's `id` has to come back typed or the registry
+   *  couldn't pin the remote handle. base_ref absent = the API's repo
+   *  default (documented). The body rides a file in the agents home
+   *  like the prompt — never argv. */
+  const dispatchTask = (
+    home: string,
+    agentId: string,
+    spec: SpawnSpec,
+    target: { owner: string; repo: string; slug: string }
+  ): { task: CopilotTask; taskId: string } => {
+    const bodyFile = join(home, `${agentId}.task.json`)
+    writeFileSync(bodyFile, JSON.stringify({
+      prompt: spec.prompt,
+      create_pull_request: true,
+      ...(knobString('base') !== undefined ? { base_ref: knobString('base') } : {}),
+      ...((spec.model ?? knobString('model')) !== undefined
+        ? { model: spec.model ?? knobString('model') }
+        : {}),
+      ...(knobString('customAgent') !== undefined
+        ? { custom_agent: knobString('customAgent') }
+        : {}),
+    }))
+    const res = ghRun(
+      ['api', '-X', 'POST', `agents/repos/${target.owner}/${target.repo}/tasks`, '--input', bodyFile],
+      60_000
+    )
+    if (res.missing) {
+      throw new SpawnError('gh not on PATH', 'unavailable')
+    }
+    if (res.code !== 0) {
+      throw dispatchFailure(target.slug, res.err !== '' ? res.err : `gh api exited ${res.code}`)
+    }
+    const orphan = `the task may still have been created; check \`gh agent-task list\` on ${target.slug}`
+    let task: CopilotTask
+    try {
+      task = JSON.parse(res.out) as CopilotTask
+    } catch {
+      throw new SpawnError(`copilot task dispatch returned unparseable JSON — ${orphan}`, 'unavailable')
+    }
+    const taskId = typeof task.id === 'string' ? task.id : undefined
+    if (taskId === undefined) {
+      throw new SpawnError(`copilot task dispatch returned no task id — ${orphan}`, 'unavailable')
+    }
+    return { task, taskId }
+  }
+
+  /** Why a dispatch failed — a transport/body-shape error is quoted
+   *  raw; anything else is almost always the coding agent not being
+   *  enabled on the repo, so the error names the prerequisites. */
+  const dispatchFailure = (slug: string, err: string): SpawnError =>
+    new SpawnError(
+      /unable to|could not resolve|connection|timed out|ECONN|ENOTFOUND|EAI_AGAIN|HTTP 5/i.test(err)
+        ? `copilot task dispatch failed — ${err}`
+        : `copilot task dispatch failed on ${slug} — prerequisites: the Copilot coding ` +
+          `agent enabled for the repository (a Copilot plan seat, the org policy, and ` +
+          `Actions on): ${err}`,
+      'unavailable'
+    )
+
+  /** Best-effort remote cancel — the documented gap: no CLI/REST task
+   *  cancel exists, the backing Actions run is the only handle. A live
+   *  task with a workflow run gets POST cancel; the re-read then
+   *  reports a survivor or an unverifiable read (cancel is async
+   *  server-side) — silence would hide it. */
+  const copilotCancelRemote = (molStep: string, entry: AgentRegistryEntry, taskId: string): void => {
+    const f = copilotFetchTask(taskId)
+    if (!f.ok) {
+      console.error(
+        `warning: cannot verify copilot task ${taskId} — ${f.err ?? 'gh api failed'}; ` +
+          `the registry still records stopped; if the session survives, stop it in ` +
+          `the web UI (https://${ghHost()}/copilot/agents)`
+      )
+      return
+    }
+    if (!COPILOT_LIVE_STATES.has(copilotTaskState(f.task!))) {
+      return
+    }
+    const repo = copilotEntryRepo(entry)
+    const runId = copilotLatestSession(f.task!)?.workflow_run_id
+    if (repo !== undefined && typeof runId === 'number') {
+      ghRun(['api', '-X', 'POST', `repos/${repo}/actions/runs/${runId}/cancel`])
+    }
+    const after = copilotFetchTask(taskId)
+    if (!after.ok || COPILOT_LIVE_STATES.has(copilotTaskState(after.task!))) {
+      const url =
+        copilotSessionUrl(repo, entry.pr, entry.sessionId) ??
+        `https://${ghHost()}/copilot/agents`
+      console.error(
+        after.ok
+          ? `warning: copilot session for ${molStep} is still live — there is no ` +
+            `CLI/REST cancel; stop it in the web UI (${url})`
+          : `warning: cannot re-check copilot task ${taskId} after cancel — ` +
+            `${after.err ?? 'gh api failed'}; the session may still be live — ` +
+            `stop it in the web UI (${url})`
+      )
+    }
+  }
+
+  return {
+    name: 'copilot',
+
+    async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the critical section is sync
+      // no local command runs — a provider-resolved worker/template has
+      // no remote surface to ride, and agents.copilot.command is
+      // meaningless by the same logic; refuse before anything lands
+      if (spec.worker !== undefined) {
+        throw new SpawnError(
+          `copilot spawns run GitHub-hosted sessions — a provider-resolved ${spec.worker.kind} ` +
+            `worker cannot dispatch remotely; drop --provider/--profile or pick a local backend`,
+          'config'
+        )
+      }
+      if (!existsSync(spec.repoRoot)) {
+        throw new SpawnError(`worktree ${spec.repoRoot} does not exist`, 'input')
+      }
+      const home = agentsHome(dir)
+      if (home === null) {
+        throw new SpawnError(`no git common dir for ${spec.repoRoot}`, 'config')
+      }
+      const target = targetRepo(spec)
+      // refresh the remote count BEFORE admission — a first-ever spawn
+      // on a reachable API must not fail closed on an absent cache;
+      // unreachable stays fail-closed by the same path. Outside the
+      // lock: the fetch must not stall the registry critical section
+      copilotRefreshCount(dir, env)
+      return withAgentRegistryLock(dir, () => {
+        // claim-on-behalf is prepareSpawn's claimStep inside this lock —
+        // the remote runner can never reach the shared store, so the
+        // orchestrator pins the claim BEFORE the task exists
+        const { agentId, promptFile: _promptFile, reservation } = prepareSpawn(
+          dir,
+          home,
+          'copilot',
+          spec,
+          {
+            isLive: (existing) => {
+              const p = copilotTaskProbe(dir, spec.molStep, existing)
+              if (p.live === 'unknown') {
+                // an unverifiable probe must not let a duplicate spawn
+                // burn beside a remote task that may still be alive
+                throw new SpawnError(
+                  `cannot verify ${spec.molStep}'s copilot task — ${p.err ?? 'gh api failed'}`,
+                  'unavailable'
+                )
+              }
+              return p.live === 'running'
+            },
+            liveDetail: (e) => `task ${copilotTaskIdOf(e) ?? '?'}`,
+            entry: () => ({
+              // respawn clears the previous run's remote handles — a new
+              // task mints fresh ones; stale pins must not alias it
+              taskId: undefined,
+              taskRepo: undefined,
+              taskState: undefined,
+              branch: undefined,
+              sessionId: undefined,
+              sessionUrl: undefined,
+              workflowRun: undefined,
+              pr: undefined,
+              prUrl: undefined,
+              attach: undefined,
+              log: undefined,
+            }),
+            cap: { max: fleetCapOf(env), env },
+            sessionQuota: copilotSessionQuota(env),
+          }
+        )
+        try {
+          const { task, taskId } = dispatchTask(home, agentId, spec, target)
+          const state = copilotTaskState(task)
+          const spawned = patchAgentRegistry(dir, spec.molStep, {
+            taskId,
+            taskRepo: target.slug,
+            taskState: state !== '' ? state : undefined,
+            branch: copilotHeadRef(task),
+          })
+          writeWorkMarker(dir, agentId, spec.molStep)
+          copilotRefreshCount(dir, env)
+          return {
+            id: agentId,
+            spawnedAt: typeof spawned.spawnedAt === 'string' ? spawned.spawnedAt : undefined,
+            molStep: spec.molStep,
+            backend: 'copilot',
+            // queued is still 'spawned'; the create response is fresh
+            // enough to report 'running' on an in-progress read
+            state: state === 'in_progress' || state === 'idle' || state === 'waiting_for_user'
+              ? 'running'
+              : 'spawned',
+            ...infoProvenance(spawned),
+            worktree: resolve(spec.repoRoot),
+            log: copilotSessionUrl(target.slug, spawned.pr, spawned.sessionId),
+          }
+        } catch (err) {
+          // the create may still have landed server-side (a timeout or
+          // a lost response can't prove the task doesn't exist) —
+          // refresh the remote count so the NEXT admission sees the
+          // orphan's share instead of only the released reservation
+          copilotRefreshCount(dir, env)
+          if (reservation !== undefined) {
+            releaseSessionSlot(reservation)
+          }
+          try {
+            patchAgentRegistry(dir, spec.molStep, {
+              spawnError: err instanceof Error ? err.message : String(err),
+            })
+          } catch {
+            // the entry landed already — the SpawnError still reports
+          }
+          throw err
+        }
+      })
+    },
+
+    async list(): Promise<ListResult> { // NOSONAR — connector contract is async; the work is sync
+      try {
+        const home = agentsHome(dir)
+        const entries = Object.entries(readAgentRegistry(dir)).filter(
+          ([, e]) => e.backend === 'copilot'
+        )
+        // the remote count refresh rides every read — the plane counts
+        // REMOTE tasks whether or not this repo's registry spawned them;
+        // armed-quota gate inside keeps an unarmed config gh-free
+        copilotRefreshCount(dir, env)
+        if (entries.length === 0) {
+          // no copilot agents registered — the fleet view must not pay
+          // a gh call (or a degradation) for a backend it never used
+          return { agents: [] }
+        }
+        // per-entry reads — each task's state + harvest is one GET; a
+        // failed one degrades the row's verdict to 'spawned' rather
+        // than reporting a corpse, and marks the whole list degraded
+        const agents: AgentInfo[] = []
+        let degraded: string | undefined
+        for (const [molStep, e] of entries) {
+          const p = copilotTaskProbe(dir, molStep, e)
+          if (p.err !== undefined) {
+            degraded = degraded === undefined ? p.err : degraded
+          }
+          agents.push(copilotInfoFor(dir, home, molStep, e, p))
+        }
+        return degraded === undefined ? { agents } : { agents, degraded }
+      } catch (err) {
+        return {
+          agents: [],
+          degraded: err instanceof Error ? err.message : String(err),
+        }
+      }
+    },
+
+    async status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is sync
+      const hit = findEntry(id)
+      if (!hit) {
+        throw new AgentNotFound(`no copilot agent ${id}`)
+      }
+      copilotRefreshCount(dir, env)
+      return toCopilotInfo(dir, agentsHome(dir), hit[0], hit[1])
+    },
+
+    async stop(id: string): Promise<void> {
+      const hit = findEntry(id)
+      if (!hit) {
+        return // idempotent — gone is the desired end state
+      }
+      const [molStep, entry] = hit
+      const taskId = copilotTaskIdOf(entry)
+      if (entry.stopped !== true && taskId !== undefined) {
+        copilotCancelRemote(molStep, entry, taskId)
+      }
+      // a respawn during the cancel re-probes and re-pins the entry
+      // under the registry lock — re-verify under the SAME lock or
+      // 'stopped' lands on a live, respawned entry. Remote-liveness
+      // can't gate the stamp the way docker's container probe does —
+      // cancel is best-effort by contract, so the stamp records intent
+      // and the warn above reports the survivor
+      withAgentRegistryLock(dir, () => {
+        const cur = readAgentRegistry(dir)[molStep]
+        if (
+          cur === undefined ||
+          cur.agentId !== entry.agentId ||
+          cur.spawnedAt !== entry.spawnedAt
+        ) {
+          return // respawned — the live run owns the entry
+        }
+        try {
+          patchAgentRegistry(dir, molStep, { stopped: true })
+        } catch {
+          // the marker removal below still records intent
+        }
+        dropWorkMarker(dir, molStep, entry)
+      })
+    },
+
+    capabilities: () => ({ attach: true, respawn: true, supervisor: 'none' }),
+  }
+}
+
+registerAgentConnector('copilot', makeCopilotConnector)

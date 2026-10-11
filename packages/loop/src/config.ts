@@ -20,6 +20,8 @@ export const loopSection: ConfigSection<LoopConfig> = (raw) => {
       | 'fixRounds'
       | 'maxItems'
       | 'maxOpen'
+      | 'worktreeMb'
+      | 'diskMinSlots'
       | 'batch'
       | 'batchMinPriority'
       | 'parkedKeep'
@@ -41,6 +43,10 @@ export const loopSection: ConfigSection<LoopConfig> = (raw) => {
     fixRounds: num('fixRounds'),
     maxItems: num('maxItems'),
     maxOpen: num('maxOpen', 1),
+    // a 0 price would silence the floor entirely — the honest
+    // "disable" is diskMinSlots: 0, not worktreeMb: 0
+    worktreeMb: num('worktreeMb', 1),
+    diskMinSlots: num('diskMinSlots'),
     batch: num('batch', 1),
     batchMinPriority: num('batchMinPriority'),
     parkedKeep: num('parkedKeep'),

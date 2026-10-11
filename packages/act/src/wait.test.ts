@@ -184,3 +184,60 @@ test('BEHIND settles when updateBranch refuses or conflicts exist', async () => 
   assert.equal(called, false)
   assert.equal(conflicted.gate.ok, false)
 })
+
+test('a wake event polls early instead of sleeping the interval out', async () => {
+  let pokes = 0
+  const waker = {
+    closed: false,
+    next() {
+      return new Promise<void>((r) => {
+        setTimeout(r, 20) // an event lands 20ms into a 10s sleep
+      })
+    },
+    close() {
+      this.closed = true
+    },
+  }
+  const started = Date.now()
+  const res = await waitForGate(fetcher([open({ ciPending: 1 }), open()]), {
+    intervalMs: 10_000,
+    wake: async () => (pokes++, waker),
+  })
+  const elapsed = Date.now() - started
+  assert.equal(res.gate.ok, true)
+  assert.equal(res.polls, 2)
+  assert.equal(pokes, 1) // armed once, not per-poll
+  assert.equal(waker.closed, true)
+  assert.ok(elapsed < 5_000, `woke early — took ${String(elapsed)}ms`)
+})
+
+test('a wake win clears the losing sleep timer — no lingering ref', async () => {
+  const waker = {
+    next: () => Promise.resolve(), // always wins instantly
+    close: () => {},
+  }
+  const before = process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length
+  const res = await waitForGate(fetcher([open({ ciPending: 1 }), open()]), {
+    intervalMs: 60_000,
+    wake: async () => waker,
+  })
+  const after = process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length
+  assert.equal(res.polls, 2)
+  assert.equal(after, before)
+})
+
+test('a waker that cannot arm leaves pure timer polling — fail-open', async () => {
+  const res = await waitForGate(fetcher([open({ ciPending: 1 }), open()]), {
+    intervalMs: 0,
+    wake: async () => null,
+  })
+  assert.equal(res.polls, 2)
+
+  const thrown = await waitForGate(fetcher([open({ ciPending: 1 }), open()]), {
+    intervalMs: 0,
+    wake: async () => {
+      throw new Error('broker wedged')
+    },
+  })
+  assert.equal(thrown.polls, 2)
+})

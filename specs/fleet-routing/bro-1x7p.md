@@ -61,7 +61,8 @@ the next work order in.
 - **shell unit** — a convoy step materialized as a pinned detached
   shell (`sh -c` spawn, own process group, `pid`/`log`/`exit` under
   `<git-common>/bro/agents/`) — the native backend's existing shape,
-  now the formula's explicit contract.
+  now the formula's explicit contract. Its exit is the verdict: `0`
+  closes the step, anything else is a recorded death.
 - **continuation event** — a mailbox drop telling a live session its
   queue advanced; the wake feed the stop-gate never had.
 
@@ -173,7 +174,7 @@ dedup, wall check, claim, start stay atomic.
 
 | kind | session? | stopped-without-result → |
 | ---- | -------- | ------------------------ |
-| `acp` | `acpSessionId` pinned on the entry | **ping/resume**: `session/load` on the recorded session id where the agent advertises it; capability absent → fresh `session/new`, noted in provenance |
+| `acp` | `acpSessionId` pinned on the entry | **ping/resume** (same provider only): `session/load` on the recorded session id where the agent advertises it; capability absent or chain-fell → fresh `session/new`, noted in provenance |
 | `cli` | none | **respawn + rehydrate**: new process; the prompt is regenerated from live beads state (`convoy next` inputs, the claim, the prior log tail) — never a replay of the stale prompt file |
 | `api` | no spawn surface | never a chain entry |
 
@@ -183,8 +184,12 @@ the `acpSessionId` it wipes back to the caller, and the resume-capable
 backend carries it to the worker (a `resumeSessionId` on the spawn
 payload). Neither shortcut works — a bare `resume` flag carries no id,
 and any `entry.acpSessionId` read after `prepareSpawn` sees the field
-already cleared. The contract: a session-capable provider gets the
-chance to continue its own session before paying for a new one.
+already cleared. The id is provider-scoped: a chain walk that fell to
+a different provider drops `resumeSessionId` from the spawn payload —
+an ACP session id loads only on the agent that created it, and a
+fallback worker's `session/load` on a foreign id fails the respawn.
+The contract: a session-capable provider gets the chance to continue
+its own session before paying for a new one.
 bro-5hx1.1 deferred `session/load` as "earns a spec when a consumer
 needs it" — this is that consumer.
 
@@ -201,7 +206,19 @@ preserves it through bd `Step.metadata` → the issue's
 `metadata.command`, and `run` joins the `types.custom` registration so
 the kind never flattens to `task`. The spawned unit is a pinned
 detached shell — `pid`/`log`/`exit` in `bro/agents/` through the same
-registry. The orchestrator point-checks both through
+registry. **The exit is the verdict**: the wrapper runs the payload in
+a subshell — `( command ); s=$?` — so a payload `exit` ends the
+subshell, never the `sh -c` the tail hangs off, and the `$?` tail
+spends the code before recording it — `0` runs `bro convoy done
+"$BRO_BEAD_ID" --mol "$BRO_MOL_ID" --result …` on the pins the unit
+already carries, closing its own step in the same breath that proves
+it (`stepsOf` counts only closed beads; without this edge a finished
+shell would park the convoy on a stale `in_progress` claim forever). A
+command that knows its handoff may `convoy done` itself — the tail's
+close then no-ops on the already-done step — while a bare `exit 0`
+closes with the log tail as the recorded result; non-zero never
+closes, `.exit` plus the classified cause stays the death record
+re-dispatch owns. The orchestrator point-checks both through
 `bro agents status`/`bro fleet` — a `run` step is a first-class
 watchable unit, not an invisible nested session. **No opaque subagent
 sessions unless a step explicitly requests one**: the molecule that
@@ -228,19 +245,25 @@ shapes or orphaned PRs lose their only owner:
 
 - **`--for` bound** — `drive --every N --for S` rides the bound
   `bro watch` already ships (same flag, same monotonic deadline, same
-  `≥ --every` parse rule). The heartbeat contract is untouched:
-  markers stay pid-keyed, coverage lasts exactly the bound, and
-  expiry leaves the dead-marker stale-supervision flag the
-  session-start hook already reports — the re-arm signal, not a
-  silent gap. A deployment wanting durable coverage re-arms the
-  bounded loop on a non-agent timer (`watch install`'s systemd/cron
-  shape); a `drive install` generalization earns a spec when the
-  timer machinery does.
+  `≥ --every` parse rule). The deadline gates what *starts*: the
+  inter-tick sleep is capped at the remaining budget and no new tick
+  begins past it, but the check sits between awaited ticks — a tick
+  in flight at expiry runs to completion, so coverage outlives the
+  bound by at most that tick's remainder. The heartbeat contract
+  is untouched: markers stay pid-keyed, expiry leaves the dead-marker
+  stale-supervision flag the session-start hook already reports — the
+  re-arm signal, not a silent gap. A deployment wanting durable
+  coverage arms the want-marker instead — `watch install` writes
+  `bro/pulse.json` and the session-start hook re-arms the bounded
+  loop when no live pulse holds `pulse.lock` (the OS-timer writers
+  are retired, bro-killn); a `drive install` generalization earns a
+  spec when the marker machinery does.
 - **Drain exit** — an `--every` pass that fully enumerates the fleet
   and finds zero open PRs exits 0: the until-condition, convoy
   drain's own verdict — coverage then has nothing left to cover (a
   PR opened later is the pusher's own gate's job). An incomplete
-  enumeration never exits: a failed lookup is not a drained fleet.
+  enumeration never exits: a failed branch listing or PR lookup is not
+  a drained fleet.
 
 `drive --once` stays a report — passes still fix and merge, but
 heartbeats remain a loop-mode emission, keyed to the live
@@ -252,16 +275,24 @@ The default loop is in-session continuation; `bro convoy run` stays
 for explicit parallel fan-out:
 
 1. `bro convoy done` (and bead close on a mol step) emits a mailbox
-   drop — `bro notify --to <sessionId|orchestrator> --kind result` —
-   when the DAG advances: a new ready step, a gate now waiting, or
-   `complete`. The claiming session's id does not ride the beads
-   claim — `--claim` writes the bd actor as assignee, an actor-space
-   identity that is never a notify address. The recipient resolves
-   from the session carriers instead: the step's `agents.json` entry
-   for a spawned claim (its `agentId` is the worker's
-   `BRO_SESSION_ID` pin), else the live `.task` marker naming the
-   step (`liveSessionClaims`), else `orchestrator` — the role every
-   agent-less session answers to.
+   drop — `bro notify --to <agentId|sessionId|orchestrator> --kind
+   result -- "<mol> advanced: <step|gate|complete>"` — when the DAG
+   advances: a new ready step, a gate now waiting, or `complete`.
+   The claiming session's id does not ride
+   the beads claim — `--claim` writes the bd actor as assignee, an
+   actor-space identity that is never a notify address. The
+   recipient resolves from the session carriers instead: the step's
+   `agents.json` entry for a spawned claim (its `agentId` is the
+   worker's `BRO_SESSION_ID` pin), else the live `.task` marker
+   naming the step (`liveSessionClaims`), else the emitter's own
+   session env (`BRO_SESSION_ID` — an interactive `convoy done`
+   feeds the session that ran it), else `orchestrator` — gated on
+   uniqueness. The role matches EVERY agent-less session and an
+   addressed drop is single-consumer, so with several live
+   (`liveSessionIds` minus `agents.json` worker ids) the address
+   degrades to broadcast: every candidate sees the queue-advanced
+   note and the claim-holder acts — never a first-drain coin flip
+   that wakes the wrong session.
 2. The drop lands mid-turn via the existing postTool probe — the
    session learns "your queue moved" without a poll loop.
 3. Skill text (convoy/next) closes the loop: on completing a unit the
@@ -303,7 +334,9 @@ packages/core/src/config.ts           fleet.routing + fleet.router sections
 packages/cli/src/agent-connectors.ts  provider-scoped respawn block; chain
                                       walk in prepareSpawn/spawnStepAgent;
                                       prepareSpawn hands the cleared
-                                      acpSessionId back for resume
+                                      acpSessionId back for resume; a
+                                      run-step spawn's wrapper tail turns
+                                      exit 0 into the step's `convoy done`
 packages/cli/src/commands/agents.ts   --class flag; StepSpawnRequest.class
 packages/cli/src/commands/fleet.ts    provider wall rendering
 packages/providers/src/acp-worker.ts  session/load resume path
@@ -327,7 +360,8 @@ skills/{convoy,next}/                 continuation + finite-watcher text
    policy.
 4. Resume — `acp` `session/load` on `acpSessionId`, `cli` rehydrated
    respawn.
-5. Shell-unit step kind (`run`) in the convoy formula; watcher-rule
+5. Shell-unit step kind (`run`) in the convoy formula — `command` on
+   the decl, the exit-0 → `convoy done` tail on the spawn; watcher-rule
    audit across `convoy run`/`drive`/`watch` — `drive` gains the
    `--for` bound and the drain exit.
 6. Continuation — `convoy done` mailbox emission + skill text; the

@@ -17,7 +17,8 @@ emit a work order. `bro agents` + `bro fleet` — orchestrator facade
 (backend connectors: native/gascity/tmux/paseo/cao) and the read-only
 fleet view; `bro serve` — facade host for thin clients.
 Session planes — host-wide admission quotas per session kind
-(`agents.<kind>.maxSessions`): core owns the abstract registry, the
+(`agents.<kind>.maxSessions` for all sessions, `agents.<kind>.maxWorkers`
+for the spawned subset): core owns the abstract registry, the
 TTL reservation lifecycle, and the serialized admit under one host
 mutex; each vendor plane (`packages/cli/src/session-planes/`)
 registers itself and owns only how its live sessions are detected and

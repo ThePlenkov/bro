@@ -29,18 +29,32 @@
 import {
   bodyMeta,
   gh,
+  ghHost,
   ghJson,
   ghTry,
   ghJsonAsync,
+  nativeTaskRel,
   resolveRepo,
   resolveRepoAsync,
   stripMeta,
   withMeta,
 } from '@broject/core'
-import type { TaskFilter, TaskInput, TaskRow, TaskStore, TaskStoreAsync } from '@broject/core'
+import type {
+  DepOpts,
+  PublishResult,
+  TaskDepEdge,
+  TaskFilter,
+  TaskInput,
+  TaskRow,
+  TaskStore,
+  TaskStoreAsync,
+} from '@broject/core'
 
 const CLAIMED_LABEL = 'bro:claimed'
 const BLOCKED_LABEL = 'blocked'
+/** The projection marker — every bead-materialized issue carries it,
+ *  so `gh issue list -l bro:bead` is the board's instant filter. */
+const MIRROR_LABEL = 'bro:bead'
 const DEFAULT_PRIORITY = 2
 const QUERY_CAP = 1000
 
@@ -200,14 +214,16 @@ const pub = (r: TaskRow & { __node?: IssueNode }): TaskRow => {
  *  this one. */
 function issueNumber(dir: string, id: string): number {
   const t = id.trim()
-  const url = /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/issues\/(\d+)\/?$/.exec(t)
+  const url = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/issues\/(\d+)\/?$/.exec(t)
   if (url) {
-    const slug = `${url[1]}/${url[2]}`.toLowerCase()
+    const slug = `${url[2]}/${url[3]}`.toLowerCase()
     const mine = repoOf(dir).toLowerCase()
-    if (slug !== mine) {
-      throw new Error(`github tasks: "${id}" is a ${slug} issue — this store serves ${mine}`)
+    if (url[1]!.toLowerCase() !== ghHost().toLowerCase() || slug !== mine) {
+      throw new Error(
+        `github tasks: "${id}" is a ${url[1]}/${slug} issue — this store serves ${ghHost()}/${mine}`
+      )
     }
-    return Number(url[3])
+    return Number(url[4])
   }
   if (!/^(#\d+|\d+)$/.test(t)) {
     throw new Error(`github tasks: "${id}" is not an issue reference (want 42, #42, or an issue URL)`)
@@ -451,7 +467,7 @@ function applyFilter(rows: TaskRow[], f: TaskFilter): TaskRow[] {
   if (f.type !== undefined) {
     q = q.filter((r) => r.issue_type === f.type)
   }
-  if (f.limit !== undefined) {
+  if (f.limit !== undefined && f.limit > 0) {
     q = q.slice(0, f.limit)
   }
   return q
@@ -476,7 +492,9 @@ const needsPostFilter = (f: TaskFilter): boolean =>
   (f.status !== undefined && f.status !== 'closed')
 
 const fetchCap = (f: TaskFilter): number =>
-  needsPostFilter(f) ? QUERY_CAP : Math.min(f.limit ?? QUERY_CAP, QUERY_CAP)
+  needsPostFilter(f)
+    ? QUERY_CAP
+    : Math.min(f.limit !== undefined && f.limit > 0 ? f.limit : QUERY_CAP, QUERY_CAP)
 
 const byPriority = (a: TaskRow, b: TaskRow): number =>
   (a.priority ?? DEFAULT_PRIORITY) - (b.priority ?? DEFAULT_PRIORITY) ||
@@ -487,7 +505,10 @@ const byPriority = (a: TaskRow, b: TaskRow): number =>
 /** ready = open + unblocked + unclaimed — derived status 'open' is
  *  exactly that set, already priority-ordered over created asc. */
 function readyOf(rows: TaskRow[], f: TaskFilter): TaskRow[] {
-  return rows.filter((r) => r.status === 'open').sort(byPriority).slice(0, f.limit ?? QUERY_CAP)
+  return rows
+    .filter((r) => r.status === 'open')
+    .sort(byPriority)
+    .slice(0, f.limit !== undefined && f.limit > 0 ? f.limit : QUERY_CAP)
 }
 
 // --- actor + mutation helpers -----------------------------------------------------
@@ -520,58 +541,54 @@ function ensureLabel(dir: string, name: string): void {
 
 // --- deps ---------------------------------------------------------------------------
 
-interface DepEdge {
-  issue_id: string
-  depends_on_id: string
-  type: string
-}
-
 const wants = (dir: 'up' | 'down', direction?: string): boolean =>
   direction === undefined || direction === dir
 
-/** X depends-on Y — blockedBy reads 'up', blocking reads 'down'. */
-function blockEdges(n: IssueNode, direction?: string): DepEdge[] {
+/** X depends-on Y — blockedBy is X's own dep set (a 'down' read);
+ *  blocking is what depends on X ('up'). */
+function blockEdges(n: IssueNode, direction?: string): TaskDepEdge[] {
   const id = String(n.number)
-  const out: DepEdge[] = []
-  if (wants('up', direction)) {
+  const out: TaskDepEdge[] = []
+  if (wants('down', direction)) {
     for (const b of n.blockedBy?.nodes ?? []) {
-      out.push({ issue_id: id, depends_on_id: String(b.number), type: 'blocks' })
+      out.push({ issue_id: id, depends_on_id: String(b.number), type: 'blocked' })
     }
   }
-  if (wants('down', direction)) {
+  if (wants('up', direction)) {
     for (const b of n.blocking?.nodes ?? []) {
-      out.push({ issue_id: String(b.number), depends_on_id: id, type: 'blocks' })
+      out.push({ issue_id: String(b.number), depends_on_id: id, type: 'blocked' })
     }
   }
   return out
 }
 
-/** parent reads 'up' (this issue depends on its parent), subIssues 'down'. */
-function parentEdges(n: IssueNode, direction?: string): DepEdge[] {
+/** parent is a 'down' edge (this issue depends on it); subIssues read 'up'. */
+function parentEdges(n: IssueNode, direction?: string): TaskDepEdge[] {
   const id = String(n.number)
-  const out: DepEdge[] = []
-  if (wants('up', direction) && n.parent) {
-    out.push({ issue_id: id, depends_on_id: String(n.parent.number), type: 'parent-child' })
+  const out: TaskDepEdge[] = []
+  if (wants('down', direction) && n.parent) {
+    out.push({ issue_id: id, depends_on_id: String(n.parent.number), type: 'parent' })
   }
-  if (wants('down', direction)) {
+  if (wants('up', direction)) {
     for (const c of n.subIssues?.nodes ?? []) {
-      out.push({ issue_id: String(c.number), depends_on_id: id, type: 'parent-child' })
+      out.push({ issue_id: String(c.number), depends_on_id: id, type: 'parent' })
     }
   }
   return out
 }
 
-/** blockedBy → `type: 'blocks'` edges (X depends-on Y); parent/subIssue
- *  → `parent-child`. bd's dep-list shape is the contract. */
-function depEdges(n: IssueNode, opts: { type?: string; direction?: string }): DepEdge[] {
+/** blockedBy → `type: 'blocked'` edges (X depends-on Y); parent/subIssue
+ *  → `parent`. Edges always leave in the generic rel vocabulary. */
+function depEdges(n: IssueNode, opts: DepOpts): TaskDepEdge[] {
+  const rel = opts.rel === undefined ? undefined : nativeTaskRel(opts.rel)
   return [
-    ...(opts.type === undefined || opts.type === 'blocks' ? blockEdges(n, opts.direction) : []),
-    ...(opts.type === undefined || opts.type === 'parent-child' ? parentEdges(n, opts.direction) : []),
+    ...(rel === undefined || rel === 'blocks' ? blockEdges(n, opts.direction) : []),
+    ...(rel === undefined || rel === 'parent-child' ? parentEdges(n, opts.direction) : []),
   ]
 }
 
-function depsSync(dir: string, ids: string[], opts: { type?: string; direction?: string }): DepEdge[] {
-  const out: DepEdge[] = []
+function depsSync(dir: string, ids: string[], opts: DepOpts): TaskDepEdge[] {
+  const out: TaskDepEdge[] = []
   for (const id of ids) {
     const n = queryIssueSync(dir, issueNumber(dir, id))
     if (n) {
@@ -584,19 +601,79 @@ function depsSync(dir: string, ids: string[], opts: { type?: string; direction?:
 async function depsAsync(
   dir: string,
   ids: string[],
-  opts: { type?: string; direction?: string }
-): Promise<DepEdge[]> {
+  opts: DepOpts
+): Promise<TaskDepEdge[]> {
   const nodes = await Promise.all(ids.map((id) => queryIssueAsync(dir, issueNumber(dir, id))))
   return nodes.flatMap((n) => (n === undefined ? [] : depEdges(n, opts)))
 }
 
+/** Hydrated rows on the far side of `id`'s edges — the row-plane twin
+ *  of deps(). `dependency_type` rides along normalized, matching the
+ *  beads store's neighbors() shape. */
+async function neighborsAsync(
+  dir: string,
+  id: string,
+  opts: DepOpts
+): Promise<TaskRow[]> {
+  const n = await queryIssueAsync(dir, issueNumber(dir, id))
+  if (n === undefined) {
+    return []
+  }
+  // edges carry the canonical issue number — a non-canonical input id
+  // ('#42', a URL) compared raw picks the wrong endpoint, returning n
+  // as its own neighbor
+  const self = String(n.number)
+  const others = new Set<string>()
+  const relOf = new Map<string, string>()
+  for (const e of depEdges(n, opts)) {
+    const other = e.issue_id === self ? e.depends_on_id : e.issue_id
+    others.add(other)
+    relOf.set(other, e.type)
+  }
+  const rows = await Promise.all(
+    [...others].map(async (o) => {
+      const node = await queryIssueAsync(dir, Number(o))
+      if (node === undefined) {
+        return undefined
+      }
+      const rel = relOf.get(o)
+      return rel === undefined
+        ? (pub(toRow(node)) as TaskRow)
+        : ({ ...pub(toRow(node)), dependency_type: rel } as TaskRow)
+    })
+  )
+  return rows.filter((r): r is TaskRow => r !== undefined)
+}
+
+function neighborsSync(dir: string, id: string, opts: DepOpts): TaskRow[] {
+  const n = queryIssueSync(dir, issueNumber(dir, id))
+  if (n === undefined) {
+    return []
+  }
+  const self = String(n.number)
+  const others = new Map<string, string>()
+  for (const e of depEdges(n, opts)) {
+    others.set(e.issue_id === self ? e.depends_on_id : e.issue_id, e.type)
+  }
+  const rows: TaskRow[] = []
+  for (const [o, rel] of others) {
+    const node = queryIssueSync(dir, Number(o))
+    if (node !== undefined) {
+      rows.push({ ...pub(toRow(node)), dependency_type: rel } as TaskRow)
+    }
+  }
+  return rows
+}
+
 // --- sync mutations -----------------------------------------------------------------
 
-/** link(from, to, 'blocks') — "from is blocked by to", bd dep
- *  semantics. 'parent-child' makes `from` a sub-issue of `to`. Other
- *  types have no GitHub analogue — thrown, never faked as comments. */
-function linkSync(dir: string, from: string, to: string, type: string): void {
-  if (type === 'blocks' || type === 'blocked-by') {
+/** link(from, to, 'blocked') — "from is blocked by to". 'parent'
+ *  makes `from` a sub-issue of `to`. Generic rels map to GitHub's
+ *  dependency/sub-issue primitives; other rels have no GitHub analogue
+ *  — thrown, never faked as comments. */
+function linkSync(dir: string, from: string, to: string, rel: string): void {
+  const type = nativeTaskRel(rel)
+  if (type === 'blocks') {
     const blocker = queryIssueSync(dir, issueNumber(dir, to))
     if (blocker?.databaseId === undefined) {
       throw new Error(`github tasks: cannot resolve ${to} to an issue id`)
@@ -618,7 +695,7 @@ function linkSync(dir: string, from: string, to: string, type: string): void {
     )
     return
   }
-  throw new Error(`github tasks: link type '${type}' has no GitHub analogue (blocks | blocked-by | parent-child)`)
+  throw new Error(`github tasks: link rel '${rel}' has no GitHub analogue (blocked | parent)`)
 }
 
 /** claim = addAssignees(me) → verify → bro:claimed label. The label is
@@ -712,21 +789,21 @@ function depRef(d: string): { kind: string; ref: string } {
  *  createSync so an unsupported kind can't leave a half-created issue. */
 function applyDeps(dir: string, id: string, i: TaskInput): void {
   if (i.parent !== undefined) {
-    linkSync(dir, id, i.parent, 'parent-child')
+    linkSync(dir, id, i.parent, 'parent')
   }
   for (const d of i.deps ?? []) {
     const { kind, ref } = depRef(d)
-    linkSync(dir, id, ref, kind === 'blocked-by' ? 'blocks' : kind)
+    linkSync(dir, id, ref, kind)
   }
 }
 
 function createSync(dir: string, i: TaskInput): TaskRow {
-  // pre-validate deps before the issue exists — an unsupported dep type
+  // pre-validate deps before the issue exists — an unsupported dep rel
   // must not leave a half-created issue
   for (const d of i.deps ?? []) {
     const { kind } = depRef(d)
-    if (!/^(blocks|blocked-by|parent-child)$/.test(kind)) {
-      throw new Error(`github tasks: dep type '${kind}' unsupported (blocks | blocked-by | parent-child)`)
+    if (!/^(blocks|blocked|blocked-by|parent|parent-child)$/.test(kind)) {
+      throw new Error(`github tasks: dep rel '${kind}' unsupported (blocked | parent)`)
     }
   }
   const args = ['issue', 'create', '--title', i.title]
@@ -830,6 +907,143 @@ function removeSync(dir: string, id: string): void {
   )
 }
 
+// --- projection (spec specs/backends/bro-z2z7f) ----------------------------------
+
+/** 'https://<this host>/<this repo>/milestone/N' → N — the epic's
+ *  external_ref round-trips through this exact shape; a milestone in
+ *  another repo or on another host is a foreign ref, not a container
+ *  here (its NUMBER would silently target this repo's milestones). */
+function milestoneRefNumber(dir: string, ref: string): number | undefined {
+  const m = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/milestone\/(\d+)\/?$/.exec(ref.trim())
+  if (
+    m === null ||
+    m[1]!.toLowerCase() !== ghHost().toLowerCase() ||
+    `${m[2]}/${m[3]}`.toLowerCase() !== repoOf(dir).toLowerCase()
+  ) {
+    return undefined
+  }
+  return Number(m[4])
+}
+
+interface MilestoneRow {
+  number: number
+  title: string
+  html_url?: string
+}
+
+const milestoneUrl = (repo: string, m: MilestoneRow): string =>
+  m.html_url ?? `https://${ghHost()}/${repo}/milestone/${m.number}`
+
+/** Epic → milestone — title-match is the lost-map fallback; the
+ *  authoritative dedup is the epic row's external_ref, which the
+ *  caller's write-back fills with this milestone's html_url. */
+function ensureMilestone(dir: string, epic: TaskRow): { number: number; url: string } {
+  const repo = repoOf(dir)
+  const title = epic.title !== undefined && epic.title.trim() !== '' ? epic.title : epic.id
+  const all = ghJson<MilestoneRow[]>(
+    ['api', '--paginate', `repos/${repo}/milestones?state=all&per_page=100`],
+    dir
+  )
+  const hit = all.find((m) => m.title === title)
+  if (hit !== undefined) {
+    return { number: hit.number, url: milestoneUrl(repo, hit) }
+  }
+  const made = ghJson<MilestoneRow>(
+    [
+      'api',
+      '-X',
+      'POST',
+      `repos/${repo}/milestones`,
+      '-f',
+      `title=${title}`,
+      '-f',
+      `description=bead ${epic.id} — projected epic`,
+    ],
+    dir
+  )
+  return { number: made.number, url: milestoneUrl(repo, made) }
+}
+
+/** The epic's container: a known milestone ref joins it; an absent
+ *  ref creates the milestone and lends the bead its URL. A foreign
+ *  ref declines — the epic projects elsewhere, no join. */
+function epicMilestone(dir: string, epic: TaskRow): { milestone?: number; epicRef?: string } {
+  const eref = epic.external_ref?.trim() ?? ''
+  if (eref !== '') {
+    const known = milestoneRefNumber(dir, eref)
+    return known === undefined ? {} : { milestone: known }
+  }
+  const ms = ensureMilestone(dir, epic)
+  return { milestone: ms.number, epicRef: ms.url }
+}
+
+/** The bead→issue projection. Dedup: an external_ref naming one of
+ *  this repo's issues returns it — the caller's write-back made the
+ *  map; a foreign ref declines (the bead already projects elsewhere —
+ *  one task, one outward identity). An epic parent materializes as a
+ *  milestone the new issue joins. */
+function publishSync(
+  dir: string,
+  task: TaskRow,
+  opts?: { epic?: TaskRow }
+): PublishResult | undefined {
+  const ref = task.external_ref?.trim() ?? ''
+  let replaceExternalRef: true | undefined
+  if (ref !== '') {
+    try {
+      const n = issueNumber(dir, ref)
+      const cur = queryIssueSync(dir, n)
+      if (cur !== undefined) {
+        return { item: pub(toRow(cur)) }
+      }
+      // the mapped item is gone — fall through to re-publish, and flag
+      // the stale map so the caller's write-back replaces it instead of
+      // preserving it (the next pass would duplicate again)
+      replaceExternalRef = true
+    } catch {
+      return undefined
+    }
+  }
+  const epic = opts?.epic
+  const { milestone, epicRef } = epic === undefined ? {} : epicMilestone(dir, epic)
+  // the source row's metadata bag is provenance, never identity — an
+  // `external_ref` inside it (a stale or foreign map value) must not
+  // reach the item's trailer: toRow reads trailer external_ref as the
+  // item's own ref, so the caller's write-back would re-stamp the bogus
+  // value and dedup stays broken. The item's own url is its canonical
+  // ref here; a deliberate trailer ref rides TaskInput.externalRef,
+  // which publish never sets.
+  const { external_ref: _eref, ...restMeta } = task.metadata ?? {}
+  const row = createSync(dir, {
+    title: task.title !== undefined && task.title !== '' ? task.title : task.id,
+    description: task.description,
+    type: task.issue_type,
+    priority: task.priority,
+    labels: [MIRROR_LABEL, ...(task.labels ?? []).filter((l) => l !== MIRROR_LABEL)],
+    metadata: { ...restMeta, bead: task.id },
+  })
+  if (milestone !== undefined) {
+    // best-effort: the issue already exists, so a failed join must not
+    // throw — publishSync throwing skips the caller's external_ref
+    // write-back, and the next run would create a duplicate
+    const join = ghTry(
+      [
+        'api',
+        '-X',
+        'PATCH',
+        `repos/{owner}/{repo}/issues/${row.id}`,
+        '-F',
+        `milestone=${milestone}`,
+      ],
+      dir
+    )
+    if (join.code !== 0) {
+      console.error(`warning: milestone join on issue ${row.id} failed — ${join.err}`)
+    }
+  }
+  return { item: pub(row), epicRef, replaceExternalRef }
+}
+
 // --- the stores -------------------------------------------------------------------
 
 function rowOrUndef(n: IssueNode | undefined): TaskRow | undefined {
@@ -865,13 +1079,15 @@ export function githubTasks(dir: string): TaskStore {
     },
     children: (id) => querySubIssuesSync(dir, issueNumber(dir, id)).map(toRow).map(pub) as never,
     deps: (ids, opts = {}) => depsSync(dir, ids, opts) as never,
-    link: (from, to, type = 'related') => linkSync(dir, from, to, type),
+    neighbors: (id, opts = {}) => neighborsSync(dir, id, opts) as never,
+    link: (from, to, rel = 'related') => linkSync(dir, from, to, rel),
     prefix: () => {
       // the repo IS the scope — no prefix. The probe still runs: an
       // unresolvable remote fails closed, same contract as beads.
       resolveRepo([], dir)
       return undefined
     },
+    publish: (task, opts) => publishSync(dir, task, opts),
   }
 }
 
@@ -891,6 +1107,7 @@ export function githubTasksAsync(dir: string): TaskStoreAsync {
     get: async (id) => rowOrUndef(await queryIssueAsync(dir, issueNumber(dir, id))) as never,
     children: async (id) => (await querySubIssuesAsync(dir, issueNumber(dir, id))).map(toRow).map(pub) as never,
     deps: async (ids, opts = {}) => (await depsAsync(dir, ids, opts)) as never,
+    neighbors: async (id, opts = {}) => (await neighborsAsync(dir, id, opts)) as never,
     actor: () => ghActorAsync(dir),
   }
 }

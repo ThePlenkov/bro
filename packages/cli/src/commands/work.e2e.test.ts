@@ -28,6 +28,23 @@ function workFixture(): { root: string; main: string } {
 
 const worktreeOf = (root: string, slug: string): string => join(root, `main--${slug}`)
 
+/** loop/* litter made by hand — the sweep treats a closed bead as the
+ *  verdict record: clean trees whose bead is done get reaped, anything
+ *  else keeps. */
+const litter = (root: string, main: string, slug: string, commit = false): string => {
+  const wt = join(root, `main--${slug}`)
+  git(['worktree', 'add', '-b', `loop/${slug}`, wt], main)
+  if (commit) {
+    git(['commit', '-q', '--allow-empty', '-m', 'wip'], wt)
+  }
+  return wt
+}
+
+const envOf = (binDir: string, db: string) => ({
+  PATH: `${binDir}:${process.env.PATH ?? ''}`,
+  FAKE_BD_DB: db,
+})
+
 describe('bro work e2e — enter', () => {
   test('enter creates a sibling worktree on work/<slug>; re-enter fails', () => {
     const { root, main } = workFixture()
@@ -174,21 +191,6 @@ describe('bro work e2e — list + prune', () => {
 })
 
 describe('bro work e2e — prune --loop', () => {
-  /** loop/* litter made by hand — the sweep treats a closed bead as the
-   *  verdict record: clean trees whose bead is done get reaped, anything
-   *  else keeps. */
-  const litter = (root: string, main: string, slug: string, commit = false): string => {
-    const wt = join(root, `main--${slug}`)
-    git(['worktree', 'add', '-b', `loop/${slug}`, wt], main)
-    if (commit) {
-      git(['commit', '-q', '--allow-empty', '-m', 'wip'], wt)
-    }
-    return wt
-  }
-  const envOf = (binDir: string, db: string) => ({
-    PATH: `${binDir}:${process.env.PATH ?? ''}`,
-    FAKE_BD_DB: db,
-  })
   /** fake review host wired via bro.config.json — the PR-veto/land
    *  evidence plane the sweep consults. */
   const hostFixture = (main: string) => {
@@ -354,15 +356,6 @@ describe('bro work e2e — prune --loop', () => {
 })
 
 describe('bro work e2e — prune --loop dead-worker claims (bro-ho09d)', () => {
-  const litter = (root: string, main: string, slug: string): string => {
-    const wt = join(root, `main--${slug}`)
-    git(['worktree', 'add', '-b', `loop/${slug}`, wt], main)
-    return wt
-  }
-  const envOf = (binDir: string, db: string) => ({
-    PATH: `${binDir}:${process.env.PATH ?? ''}`,
-    FAKE_BD_DB: db,
-  })
   /** a pid that was real and is now gone — a worker's corpse. */
   const deadPid = (): number => spawnSync('sh', ['-c', 'exit 0']).pid ?? 0
   const writeRun = (main: string, slug: string, rec: Record<string, unknown>): void => {
@@ -370,6 +363,21 @@ describe('bro work e2e — prune --loop dead-worker claims (bro-ho09d)', () => {
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, `${slug}.json`), `${JSON.stringify(rec)}\n`)
   }
+  /** The run record a worker leaves — `over` carries the one varying
+   *  leg (a live pid, a recycled pidStart). */
+  const runRec = (
+    slug: string,
+    wt: string,
+    over: Record<string, unknown> = {}
+  ): Record<string, unknown> => ({
+    beadId: slug,
+    slug,
+    pid: deadPid(),
+    startedAt: new Date().toISOString(),
+    worktree: wt,
+    log: '',
+    ...over,
+  })
   const writeRegistry = (main: string, entries: Record<string, unknown>): void => {
     mkdirSync(join(main, '.git', 'bro'), { recursive: true })
     writeFileSync(join(main, '.git', 'bro', 'agents.json'), JSON.stringify(entries))
@@ -382,14 +390,7 @@ describe('bro work e2e — prune --loop dead-worker claims (bro-ho09d)', () => {
     ])
     inside(main, root, () => {
       const wt = litter(root, main, 'fx-dead')
-      writeRun(main, 'fx-dead', {
-        beadId: 'fx-dead',
-        slug: 'fx-dead',
-        pid: deadPid(),
-        startedAt: new Date().toISOString(),
-        worktree: wt,
-        log: '',
-      })
+      writeRun(main, 'fx-dead', runRec('fx-dead', wt))
       const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
       assert.equal(r.code, 0, r.stderr)
       assert.match(r.stdout, /released claim fx-dead/)
@@ -409,16 +410,13 @@ describe('bro work e2e — prune --loop dead-worker claims (bro-ho09d)', () => {
     ])
     inside(main, root, () => {
       const wt = litter(root, main, 'fx-live')
-      writeRun(main, 'fx-live', {
-        beadId: 'fx-live',
-        slug: 'fx-live',
+      writeRun(
+        main,
+        'fx-live',
         // this very test process is a live pid for the spawned CLI's
         // whole lifetime — the record reads 'running'
-        pid: process.pid,
-        startedAt: new Date().toISOString(),
-        worktree: wt,
-        log: '',
-      })
+        runRec('fx-live', wt, { pid: process.pid })
+      )
       const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
       assert.equal(r.code, 0, r.stderr)
       assert.match(r.stdout, /kept .*fx-live \(bead in_progress — loop worker pid \d+ live\)/)
@@ -458,16 +456,8 @@ describe('bro work e2e — prune --loop dead-worker claims (bro-ho09d)', () => {
       { ...FAKE_BEAD, id: 'fx-reuse', status: 'in_progress', assignee: 'gone' },
     ])
     inside(main, root, () => {
-      litter(root, main, 'fx-reuse')
-      writeRun(main, 'fx-reuse', {
-        beadId: 'fx-reuse',
-        slug: 'fx-reuse',
-        pid: process.pid,
-        pidStart: '1',
-        startedAt: new Date().toISOString(),
-        worktree: join(root, 'main--fx-reuse'),
-        log: '',
-      })
+      const wt = litter(root, main, 'fx-reuse')
+      writeRun(main, 'fx-reuse', runRec('fx-reuse', wt, { pid: process.pid, pidStart: '1' }))
       const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
       assert.equal(r.code, 0, r.stderr)
       assert.match(r.stdout, /released claim fx-reuse/)
@@ -501,14 +491,7 @@ describe('bro work e2e — prune --loop dead-worker claims (bro-ho09d)', () => {
       { ...FAKE_BEAD, id: 'fx-gone', status: 'in_progress', assignee: 'gone' },
     ])
     inside(main, root, () => {
-      writeRun(main, 'fx-gone', {
-        beadId: 'fx-gone',
-        slug: 'fx-gone',
-        pid: deadPid(),
-        startedAt: new Date().toISOString(),
-        worktree: join(root, 'main--fx-gone'),
-        log: '',
-      })
+      writeRun(main, 'fx-gone', runRec('fx-gone', join(root, 'main--fx-gone')))
       const r = runCli(['work', 'prune', '--loop'], { cwd: main, env: envOf(binDir, db) })
       assert.equal(r.code, 0, r.stderr)
       assert.match(r.stdout, /released claim fx-gone/)
@@ -523,14 +506,7 @@ describe('bro work e2e — prune --loop dead-worker claims (bro-ho09d)', () => {
     ])
     inside(main, root, () => {
       litter(root, main, 'fx-dry')
-      writeRun(main, 'fx-dry', {
-        beadId: 'fx-dry',
-        slug: 'fx-dry',
-        pid: deadPid(),
-        startedAt: new Date().toISOString(),
-        worktree: join(root, 'main--fx-dry'),
-        log: '',
-      })
+      writeRun(main, 'fx-dry', runRec('fx-dry', join(root, 'main--fx-dry')))
       const r = runCli(['work', 'prune', '--loop', '--dry-run'], {
         cwd: main,
         env: envOf(binDir, db),
@@ -544,15 +520,6 @@ describe('bro work e2e — prune --loop dead-worker claims (bro-ho09d)', () => {
 })
 
 describe('bro work e2e — prune --loop parked pool (bro-ho09d)', () => {
-  const litter = (root: string, main: string, slug: string): string => {
-    const wt = join(root, `main--${slug}`)
-    git(['worktree', 'add', '-b', `loop/${slug}`, wt], main)
-    return wt
-  }
-  const envOf = (binDir: string, db: string) => ({
-    PATH: `${binDir}:${process.env.PATH ?? ''}`,
-    FAKE_BD_DB: db,
-  })
   /** Back-date a parked tree — dir mtime plus the gitdir activity files
    *  the idle clock reads. */
   const ageTree = (main: string, wt: string, days: number): void => {
@@ -640,10 +607,6 @@ describe('bro work e2e — prune --loop parked pool (bro-ho09d)', () => {
 })
 
 describe('bro work e2e — prune --loop ghost dirs (bro-ho09d)', () => {
-  const envOf = (binDir: string, db: string) => ({
-    PATH: `${binDir}:${process.env.PATH ?? ''}`,
-    FAKE_BD_DB: db,
-  })
   /** Delete the worktree's admin entry, leaving the dir + .git file —
    *  the registered-dir-gone ghost shape (bro-oam4). */
   const unRegister = (main: string, wt: string): void => {

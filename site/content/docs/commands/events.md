@@ -49,6 +49,35 @@ one is a normal state, not a fault.
 | `bro bus subscribe [--topic T]… [--kind K]… [--to ADDR] [--since N] [--json]` | Stream matching events until interrupted; `--since N` replays from a seq cursor — a cursor outside the window reports a gap |
 | `bro bus status [--json]` | Liveness and counters |
 
+## GitHub webhooks — `github:*`
+
+`bro serve` ingests GitHub webhook deliveries and publishes them as bus
+topics: `POST /api/v1/webhooks/github` maps each verified delivery to
+`github:<event>` (`github:pull_request`, `github:check_run`, …) with the
+payload `action` as kind and `pr-<n>`/`sha-<head>` as key. The
+`X-Hub-Signature-256` HMAC is the auth — no session token — and the
+route is armed only while `BRO_GITHUB_WEBHOOK_SECRET` is set; unset it
+answers 503, a bad signature 401. When the secret IS set, `bro serve`
+also starts the repo's broker in-process — the two commands below are
+the whole local-dev receiver:
+
+```sh
+gh extension install cli/gh-webhook   # once
+BRO_GITHUB_WEBHOOK_SECRET=dev bro serve --port 8791
+gh webhook forward --repo=org/repo \
+  --events=pull_request,pull_request_review,check_run,check_suite,issue_comment \
+  --url=http://127.0.0.1:8791/api/v1/webhooks/github --secret=dev
+```
+
+Hosted mode is the same route behind a tunnel or reverse proxy pointed
+at a repo webhook or GitHub App — the signature check survives the
+public Host a tunnel forwards with.
+
+`bro act wait` subscribes to `github:*` and polls early when a matching
+event lands — a check completing wakes the wait instead of sitting out
+the interval. Broker down means plain timer polling: the webhook path
+is an accelerator over the default, never a requirement.
+
 ## Policy
 
 - **Write, don't wait.** A finished worker, a watcher that saw a

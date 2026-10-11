@@ -16,7 +16,13 @@ const SCAN_NODE = `{"title":"did the thing","url":"https://github.com/acme/widge
  *  carries `.stack`), FAKE_GH_QUEUE (a non-null GraphQL mergeQueue),
  *  FAKE_GH_ASYNC / FAKE_GH_ASYNC_ERR (the PUT's body / a failing one on
  *  stderr, as gh reports a 4xx), FAKE_GH_ASYNC_POLL / FAKE_GH_POLL_ERR
- *  (the result GET), FAKE_GH_PR_MERGE_ERR, FAKE_GH_PR_STATE. */
+ *  (the result GET), FAKE_GH_PR_MERGE_ERR, FAKE_GH_PR_STATE.
+ *  The linkCloses family is stateful: FAKE_GH_BODY_FILE makes `pr view`
+ *  /`pr edit` a real body store (raw text), FAKE_GH_SWAP_VIEW +
+ *  FAKE_GH_SWAP_BODY rewrite it just before the Nth `pr view` answers
+ *  (an edit landing between our calls), FAKE_GH_EDIT_CLOBBER overwrites
+ *  it once right after our first `pr edit` (a racing write landing
+ *  behind ours), FAKE_GH_CHURN mutates it on every view. */
 const FAKE_GH = `#!/bin/sh
 echo "$@" >> "$FAKE_GH_LOG"
 if [ -z "$FAKE_GH_PULL" ]; then FAKE_GH_PULL='{}'; fi
@@ -26,7 +32,12 @@ case "$1 $2" in
   "pr checks") if [ "$FAKE_GH_NO_CHECKS" = "1" ]; then echo 'no checks reported' >&2; exit 8; fi
       echo '[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"kilo","state":"PENDING","bucket":"pending"}]' ;;
   "repo view") echo '{"owner":{"login":"acme"},"name":"widgets"}' ;;
-  "pr view") if [ -n "$FAKE_GH_PR_STATE" ]; then echo '{"state":"'"$FAKE_GH_PR_STATE"'"}'; exit 0; fi
+  "pr view") if [ -n "$FAKE_GH_BODY_FILE" ]; then
+      if [ "$FAKE_GH_CHURN" = "1" ]; then printf ' churn' >> "$FAKE_GH_BODY_FILE"; fi
+      if [ "$(grep -c '^pr view' "$FAKE_GH_LOG")" = "$FAKE_GH_SWAP_VIEW" ]; then
+        printf %s "$FAKE_GH_SWAP_BODY" > "$FAKE_GH_BODY_FILE"; fi
+      node -e 'process.stdout.write(JSON.stringify({body:require("fs").readFileSync(process.argv[1],"utf8")})+"\\n")' "$FAKE_GH_BODY_FILE"; exit 0; fi
+      if [ -n "$FAKE_GH_PR_STATE" ]; then echo '{"state":"'"$FAKE_GH_PR_STATE"'"}'; exit 0; fi
       if [ -n "$FAKE_GH_PR_VIEW_FAIL" ]; then case ",$FAKE_GH_PR_VIEW_FAIL," in
       *",$3,"*) echo 'gh: authentication required' >&2; exit 1 ;; esac; fi
       if [ "$FAKE_GH_NO_MERGED_AT" = "1" ]; then echo '{"state":"MERGED"}';
@@ -47,7 +58,8 @@ case "$1 $2" in
       *) echo '{}' ;;
     esac; fi ;;
   "api repos/"* ) case "$2" in
-      *check-runs\\?*) echo '{"check_runs":[{"id":1,"name":"build"},{"id":2,"name":"kilo"},{"id":3,"name":"build"},{"id":4,"name":"lint"}]}' ;;
+      *check-runs\\?*) if [ -n "$FAKE_GH_RUNS" ]; then echo "$FAKE_GH_RUNS";
+          else echo '{"check_runs":[{"id":1,"name":"build"},{"id":2,"name":"kilo"},{"id":3,"name":"build"},{"id":4,"name":"lint"}]}'; fi ;;
       *merge-async/*) if [ -n "$FAKE_GH_POLL_ERR" ]; then echo "$FAKE_GH_POLL_ERR" >&2; exit 1; fi
           echo "$FAKE_GH_ASYNC_POLL" ;;
       */pulls/*) if [ -z "$3" ]; then
@@ -60,14 +72,22 @@ case "$1 $2" in
         fi ;;
       *) echo '{}' ;;
     esac ;;
-  "api --paginate") case "$4" in
+  "api --paginate") if [ -n "$FAKE_GH_MARK" ]; then echo "ANN-BEGIN $4" >> "$FAKE_GH_LOG"; fi
+      if [ -n "$FAKE_GH_ANN_SLEEP" ]; then sleep "$FAKE_GH_ANN_SLEEP"; fi
+      case "$4" in
       *check-runs/1/annotations*) echo '[[{"annotation_level":"failure"},{"annotation_level":"warning"}]]' ;;
       *check-runs/2/annotations*) if [ "$FAKE_GH_ANN_FAIL" = "1" ]; then echo 'rate limit' >&2; exit 1; fi
           echo '[[{"annotation_level":"failure"}]]' ;;
       *check-runs/3/annotations*) echo '[[{"annotation_level":"failure"}]]' ;;
       *check-runs/4/annotations*) echo '{"message":"Not Found"}' ;;
-    esac ;;
-  "pr edit"|"label create") : ;;
+      *check-runs/*/annotations*) echo '[[]]' ;;
+    esac
+    if [ -n "$FAKE_GH_MARK" ]; then echo "ANN-END $4" >> "$FAKE_GH_LOG"; fi ;;
+  "pr edit"|"label create") if [ "$2" = "edit" ] && [ -n "$FAKE_GH_BODY_FILE" ]; then
+      node -e 'const a=process.argv,i=a.indexOf("--body");if(i>0)require("fs").writeFileSync(a[1],a[i+1])' "$FAKE_GH_BODY_FILE" "$@"
+      if [ -n "$FAKE_GH_EDIT_CLOBBER" ] && [ ! -e "$FAKE_GH_BODY_FILE.clob" ]; then
+        printf %s "$FAKE_GH_EDIT_CLOBBER" > "$FAKE_GH_BODY_FILE"; touch "$FAKE_GH_BODY_FILE.clob"; fi
+      fi ;;
 esac
 `
 
@@ -77,10 +97,15 @@ function withFakeGh(env: Record<string, string>, fn: (log: string) => void): voi
   writeFileSync(log, '')
   writeFileSync(join(dir, 'gh'), FAKE_GH)
   chmodSync(join(dir, 'gh'), 0o755)
+  const { FAKE_GH_BODY, ...vars } = env
+  if (FAKE_GH_BODY !== undefined) {
+    vars.FAKE_GH_BODY_FILE = join(dir, 'pr.body')
+    writeFileSync(vars.FAKE_GH_BODY_FILE, FAKE_GH_BODY)
+  }
   const prevPath = process.env.PATH
   process.env.PATH = `${dir}:${prevPath}`
-  const prevEnv = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]))
-  Object.assign(process.env, { FAKE_GH_LOG: log, ...env })
+  const prevEnv = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]))
+  Object.assign(process.env, { FAKE_GH_LOG: log, ...vars })
   try {
     fn(log)
   } finally {
@@ -158,6 +183,102 @@ describe('githubReview', { skip: WIN32 }, () => {
       assert.equal(got.get('lint'), null)
       assert.equal(got.size, 3)
     })
+  })
+
+  test('checkAnnotations fetches only the check names the caller reads', () => {
+    withFakeGh({}, (log) => {
+      const got = githubReview().checkAnnotations(
+        'acme/widgets',
+        'abc123',
+        new Set(['build'])
+      )
+      assert.deepEqual(Object.fromEntries(got), { build: 2 })
+      const lines = readFileSync(log, 'utf8')
+      // build's two run ids were fetched; kilo/lint's never left the gate
+      assert.match(lines, /check-runs\/1\/annotations/)
+      assert.match(lines, /check-runs\/3\/annotations/)
+      assert.doesNotMatch(lines, /check-runs\/2\/annotations/)
+      assert.doesNotMatch(lines, /check-runs\/4\/annotations/)
+    })
+  })
+
+  test('checkAnnotationsAsync fetches only the check names the caller reads', async () => {
+    await withFakeGhAsync(async (log) => {
+      const got = await githubReview().checkAnnotationsAsync!(
+        'acme/widgets',
+        'abc123',
+        new Set(['kilo'])
+      )
+      assert.deepEqual(Object.fromEntries(got), { kilo: 1 })
+      const lines = readFileSync(log, 'utf8')
+      assert.match(lines, /check-runs\/2\/annotations/)
+      assert.doesNotMatch(lines, /check-runs\/1\/annotations/)
+      assert.doesNotMatch(lines, /check-runs\/3\/annotations/)
+    })
+  })
+
+  // bro-2l7r9: an unbounded Promise.all spawned one gh child per check-run —
+  // a 40-run CI suite was a ~2GB transient inside the caller's cgroup
+  test('checkAnnotationsAsync bounds its in-flight annotation fetches', async () => {
+    const runs = {
+      check_runs: Array.from({ length: 8 }, (_, i) => ({ id: 10 + i, name: `r${i}` })),
+    }
+    await withFakeGhAsync(
+      async (log) => {
+        await githubReview().checkAnnotationsAsync!('acme/widgets', 'abc123')
+        let inFlight = 0
+        let max = 0
+        for (const l of readFileSync(log, 'utf8').split('\n')) {
+          if (l.startsWith('ANN-BEGIN')) {
+            inFlight += 1
+            max = Math.max(max, inFlight)
+          } else if (l.startsWith('ANN-END')) {
+            inFlight -= 1
+          }
+        }
+        assert.ok(max > 1, `expected overlapped fetches, saw max ${max}`)
+        assert.ok(max <= 4, `expected fan-out ≤4, saw ${max}`)
+      },
+      {
+        FAKE_GH_RUNS: JSON.stringify(runs),
+        FAKE_GH_MARK: '1',
+        FAKE_GH_ANN_SLEEP: '0.2',
+      }
+    )
+  })
+
+  // the per-call pool alone lets N overlapping probes fan 4N gh children
+  // into one cgroup — the global budget in gh.ts caps the real total
+  test('concurrent checkAnnotationsAsync calls share one gh child budget', async () => {
+    const runs = {
+      check_runs: Array.from({ length: 8 }, (_, i) => ({ id: 10 + i, name: `r${i}` })),
+    }
+    await withFakeGhAsync(
+      async (log) => {
+        await Promise.all([
+          githubReview().checkAnnotationsAsync!('acme/widgets', 'aaa111'),
+          githubReview().checkAnnotationsAsync!('acme/widgets', 'bbb222'),
+          githubReview().checkAnnotationsAsync!('acme/widgets', 'ccc333'),
+        ])
+        let inFlight = 0
+        let max = 0
+        for (const l of readFileSync(log, 'utf8').split('\n')) {
+          if (l.startsWith('ANN-BEGIN')) {
+            inFlight += 1
+            max = Math.max(max, inFlight)
+          } else if (l.startsWith('ANN-END')) {
+            inFlight -= 1
+          }
+        }
+        assert.ok(max > 4, `expected overlap across calls, saw max ${max}`)
+        assert.ok(max <= 8, `expected shared fan-out ≤8, saw ${max}`)
+      },
+      {
+        FAKE_GH_RUNS: JSON.stringify(runs),
+        FAKE_GH_MARK: '1',
+        FAKE_GH_ANN_SLEEP: '0.2',
+      }
+    )
   })
 
   test('reviewThreads normalizes the graphql shape onto domain types', async () => {
@@ -650,9 +771,109 @@ describe('githubReview', { skip: WIN32 }, () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  // --- the projection's Fixes wiring (spec bro-z2z7f) -------------------------
+
+  test('linkCloses stamps Fixes refs ahead of the bro trailer, which stays last', () => {
+    withFakeGh({ FAKE_GH_BODY: 'the work\n\n<!-- bro: {"type":"feature"} -->' }, (log) => {
+      githubReview().linkCloses!(target, ['7', '9'])
+      const calls = readFileSync(log, 'utf8')
+      assert.match(
+        calls,
+        /pr edit 42 --repo acme\/widgets --body the work\n\nFixes #7\nFixes #9\n\n<!-- bro: \{"type":"feature"\} -->/
+      )
+      assert.equal(calls.split('pr edit').length - 1, 1)
+    })
+  })
+
+  test('linkCloses is idempotent — an already-wired ref is not re-stamped', () => {
+    withFakeGh({ FAKE_GH_BODY: 'closes #7 — done deal\n\nmore prose' }, (log) => {
+      githubReview().linkCloses!(target, ['7', '8'])
+      const calls = readFileSync(log, 'utf8')
+      assert.match(calls, /--body closes #7 — done deal\n\nmore prose\n\nFixes #8/)
+      assert.equal(calls.split('Fixes #7').length - 1, 0)
+    })
+  })
+
+  test('linkCloses on a fully-wired body edits nothing', () => {
+    withFakeGh({ FAKE_GH_BODY: 'fixes #7 and resolves #8' }, (log) => {
+      githubReview().linkCloses!(target, ['7', '8'])
+      const calls = readFileSync(log, 'utf8')
+      assert.match(calls, /pr view 42 --repo acme\/widgets --json body/)
+      assert.doesNotMatch(calls, /pr edit/)
+    })
+  })
+
+  test('a keyword embedded in a longer word does not count as wired', () => {
+    // 'unresolved #7' must not satisfy the closer check — without the
+    // word boundary 'resolved' inside 'unresolved' would match
+    withFakeGh({ FAKE_GH_BODY: 'unresolved #7 and prefixes #9' }, (log) => {
+      githubReview().linkCloses!(target, ['7', '9'])
+      assert.match(
+        readFileSync(log, 'utf8'),
+        /pr edit 42 --repo acme\/widgets --body unresolved #7 and prefixes #9\n\nFixes #7\nFixes #9/
+      )
+    })
+  })
+
+  test('linkCloses remerges onto a body that moved under the stamp', () => {
+    // the author's edit lands between the merge read and the guard
+    // re-read — the stamp must merge into THEIR body, not overwrite it
+    // with the stale snapshot (bro-g29ww)
+    withFakeGh(
+      { FAKE_GH_BODY: 'v1', FAKE_GH_SWAP_VIEW: '2', FAKE_GH_SWAP_BODY: 'author edit' },
+      (log) => {
+        githubReview().linkCloses!(target, ['7'])
+        const calls = readFileSync(log, 'utf8')
+        assert.equal(calls.split('pr edit').length - 1, 1)
+        assert.match(calls, /--body author edit\n\nFixes #7/)
+        assert.doesNotMatch(calls, /--body v1/)
+      }
+    )
+  })
+
+  test('linkCloses re-stamps a stamp a racing write clobbered', () => {
+    // the concurrent write lands behind our edit on a stale snapshot —
+    // the post-write read sees our refs missing and remerges into the
+    // fresher body, preserving their content (bro-g29ww)
+    withFakeGh({ FAKE_GH_BODY: 'orig', FAKE_GH_EDIT_CLOBBER: 'concurrent rewrite' }, (log) => {
+      githubReview().linkCloses!(target, ['7'])
+      const calls = readFileSync(log, 'utf8')
+      assert.equal(calls.split('pr edit').length - 1, 2)
+      assert.match(calls, /--body orig\n\nFixes #7/)
+      assert.match(calls, /--body concurrent rewrite\n\nFixes #7/)
+    })
+  })
+
+  test('linkCloses gives up bounded when the body churns under it', () => {
+    withFakeGh({ FAKE_GH_BODY: 'x', FAKE_GH_CHURN: '1' }, (log) => {
+      assert.throws(() => githubReview().linkCloses!(target, ['7']), /kept changing/)
+      assert.doesNotMatch(readFileSync(log, 'utf8'), /pr edit/)
+    })
+  })
+
+  test('linkCloses on an empty body stamps bare Fixes lines', () => {
+    withFakeGh({ FAKE_GH_BODY: '' }, (log) => {
+      githubReview().linkCloses!(target, ['7', '9'])
+      assert.match(
+        readFileSync(log, 'utf8'),
+        /pr edit 42 --repo acme\/widgets --body Fixes #7\nFixes #9/
+      )
+    })
+  })
+
+  test('linkCloses with no refs never touches the host', () => {
+    withFakeGh({}, (log) => {
+      githubReview().linkCloses!(target, [])
+      assert.equal(readFileSync(log, 'utf8').trim(), '')
+    })
+  })
 })
 
-async function withFakeGhAsync(fn: (log: string) => Promise<void>): Promise<void> {
+async function withFakeGhAsync(
+  fn: (log: string) => Promise<void>,
+  env: Record<string, string> = {}
+): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'bro-fake-gh-'))
   const log = join(dir, 'gh.log')
   writeFileSync(log, '')
@@ -660,14 +881,17 @@ async function withFakeGhAsync(fn: (log: string) => Promise<void>): Promise<void
   chmodSync(join(dir, 'gh'), 0o755)
   const prevPath = process.env.PATH
   process.env.PATH = `${dir}:${prevPath}`
-  const prevLog = process.env.FAKE_GH_LOG
-  process.env.FAKE_GH_LOG = log
+  const prevEnv = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]))
+  Object.assign(process.env, { FAKE_GH_LOG: log, ...env })
   try {
     await fn(log)
   } finally {
     process.env.PATH = prevPath
-    if (prevLog === undefined) delete process.env.FAKE_GH_LOG
-    else process.env.FAKE_GH_LOG = prevLog
+    for (const [k, v] of Object.entries(prevEnv)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+    delete process.env.FAKE_GH_LOG
     rmSync(dir, { recursive: true, force: true })
   }
 }

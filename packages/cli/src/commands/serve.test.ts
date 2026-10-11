@@ -1,12 +1,12 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request, type IncomingMessage } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
-import { SpawnError, type AgentConnector, type AgentInfo } from '@broject/core'
-import { initRepo, inside } from './testrepo.ts'
+import { lockHolderPid, SpawnError, type AgentConnector, type AgentInfo } from '@broject/core'
+import { initRepo, inside, insideAsync } from './testrepo.ts'
 import { SpawnInputError } from './agents.ts'
 import {
   acquireServeLock,
@@ -399,44 +399,86 @@ describe('serve state discovery', () => {
     assert.equal(serveStatePath('/tmp'), null)
   })
 
-  test('the serve lock is exclusive and breaks on a dead holder', () => {
+  test('the serve lock refuses a live foreign holder and steals a dead one', () => {
     const { root, main } = initRepo('bro-serve-lock-')
     inside(main, root, () => {
+      const lock = `${serveStatePath(main)}.lock`
       const release = acquireServeLock(main)
       assert.notEqual(release, undefined)
-      // the same process re-entering is refused — the lock is held, and
-      // our own pid is alive
-      assert.equal(acquireServeLock(main), undefined)
+      // the hold carries the shared filelock's pid:token shape
+      assert.equal(lockHolderPid(lock), process.pid)
+      // same-process re-acquire is re-entrant under filelock — a no-op
+      // release, not a refusal (contention is judged cross-process)
+      const again = acquireServeLock(main)
+      assert.notEqual(again, undefined)
+      again!()
+      assert.equal(existsSync(lock), true, 're-entrant release must not drop the outer hold')
       release!()
-      assert.equal(existsSync(`${serveStatePath(main)}.lock`), false)
+      assert.equal(existsSync(lock), false)
 
-      // a leftover lock naming a dead pid is broken, not honored
-      writeFileSync(`${serveStatePath(main)}.lock`, `${1 << 30}`)
+      // a live foreign holder's lock refuses a second server — a
+      // `pid:token` file naming a live pid that is not ours
+      writeFileSync(lock, `${process.ppid}:alien`)
+      assert.equal(acquireServeLock(main), undefined)
+      rmSync(lock)
+
+      // a leftover lock naming a dead pid is stolen, not honored
+      writeFileSync(lock, `${1 << 30}`)
       const retaken = acquireServeLock(main)
       assert.notEqual(retaken, undefined)
-      assert.equal(readFileSync(`${serveStatePath(main)}.lock`, 'utf8'), `${process.pid}`)
+      assert.equal(lockHolderPid(lock), process.pid)
       retaken!()
+      assert.equal(existsSync(lock), false)
     })
   })
 
-  test('an empty lock is in-flight while fresh, stealable when aged (wx fallback)', () => {
-    const { root, main } = initRepo('bro-serve-lock-wx-')
+  test('a garbage or aged-empty lock is a dead leftover — stolen on sight', () => {
+    const { root, main } = initRepo('bro-serve-lock-gone-')
     inside(main, root, () => {
       const lock = `${serveStatePath(main)}.lock`
-      // the wx fallback's create-then-write window: a FRESH empty lock
-      // is a live writer mid-write — a starter must refuse, not break
       mkdirSync(dirname(lock), { recursive: true })
+      // an unparsable token can't prove its holder lives — dead on
+      // sight, stolen without a wait
+      writeFileSync(lock, 'garbage')
+      const stolen = acquireServeLock(main)
+      assert.notEqual(stolen, undefined)
+      assert.equal(lockHolderPid(lock), process.pid)
+      stolen!()
+      // an EMPTY lock is the wx fallback's mid-publish file: fresh, it
+      // reads as a live writer and the 250ms bound refuses it; aged past
+      // filelock's fresh-empty grace it's a crashed publish — stolen
+      // like any other dead leftover
       writeFileSync(lock, '')
       assert.equal(acquireServeLock(main), undefined)
-      assert.equal(existsSync(lock), true, 'fresh empty lock must survive a refused acquire')
-      // an empty lock older than the grace is a crashed writer's
-      // leftover — the next starter breaks it and takes over
-      const old = (Date.now() - 60_000) / 1000
-      utimesSync(lock, old, old)
+      const past = new Date(Date.now() - 60_000)
+      utimesSync(lock, past, past)
       const acquired = acquireServeLock(main)
       assert.notEqual(acquired, undefined)
-      assert.equal(readFileSync(lock, 'utf8'), `${process.pid}`)
+      assert.equal(lockHolderPid(lock), process.pid)
       acquired!()
+    })
+  })
+
+  test('a live serve hold is heartbeated — its lock never reads stale', async () => {
+    const { root, main } = initRepo('bro-serve-lock-hold-')
+    await insideAsync(main, root, async () => {
+      const release = acquireServeLock(main, { heartbeatMs: 25 })
+      assert.notEqual(release, undefined)
+      try {
+        const lock = `${serveStatePath(main)}.lock`
+        // age the file the way a >15min untouched hold would look to
+        // the janitor's sweep and contender steals — the beat must
+        // re-stamp it before either judges it
+        const past = new Date(Date.now() - 20 * 60_000)
+        utimesSync(lock, past, past)
+        const aged = statSync(lock).mtimeMs
+        await new Promise((r) => setTimeout(r, 100))
+        assert.ok(statSync(lock).mtimeMs > aged, 'the heartbeat must refresh the lock mtime')
+        assert.equal(lockHolderPid(lock), process.pid)
+      } finally {
+        release!()
+      }
+      assert.equal(existsSync(`${serveStatePath(main)}.lock`), false)
     })
   })
 })
@@ -577,6 +619,98 @@ describe('serve handler over a real socket', () => {
       assert.match(page.headers.get('content-type') ?? '', /text\/html/)
       assert.equal(page.headers.get('content-security-policy'), WEBUI_CSP)
       assert.match(await page.text(), /<!doctype html>/)
+    } finally {
+      await new Promise((r) => server.close(r))
+    }
+  })
+})
+
+describe('serve — webhook routes', () => {
+  const meta = { dir: '/repo', startedAt: 't0' }
+
+  test('POST /api/v1/webhooks/<provider> dispatches headers+body to the handler', async () => {
+    let seen: { headers: Record<string, string | string[] | undefined>; rawBody: string } | undefined
+    const d = deps({
+      webhooks: {
+        github: async (req) => {
+          seen = req
+          return { status: 202, body: { accepted: true } }
+        },
+      },
+    })
+    const headers = { 'x-github-event': 'ping', 'content-type': 'application/json' }
+    const res = await routeRequest('POST', '/api/v1/webhooks/github', '{"zen":1}', d, meta, headers)
+    assert.equal(res.status, 202)
+    assert.equal(seen?.rawBody, '{"zen":1}')
+    assert.equal(seen?.headers['x-github-event'], 'ping')
+  })
+
+  test('a provider with no handler 404s; non-POST is 405', async () => {
+    const res = await routeRequest('POST', '/api/v1/webhooks/gitlab', '{}', deps(), meta, {})
+    assert.equal(res.status, 404)
+    const res2 = await routeRequest(
+      'GET',
+      '/api/v1/webhooks/github',
+      undefined,
+      deps({ webhooks: { github: async () => ({ status: 202, body: {} }) } }),
+      meta,
+      {}
+    )
+    assert.equal(res2.status, 405)
+  })
+
+  test('the webhook path bypasses bearer AND Host guards — the signature is the auth', async () => {
+    const TOKEN = 'test-session-token'
+    let calls = 0
+    const d = deps({
+      webhooks: {
+        github: async () => {
+          calls += 1
+          return { status: 401, body: { error: 'bad signature' } }
+        },
+      },
+    })
+    const server = createServer(createServeHandler(d, { dir: '/repo', startedAt: 't0' }, TOKEN))
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as AddressInfo).port
+    const base = `http://127.0.0.1:${port}`
+    try {
+      // no Authorization header at all — the writeGuard would 401 any
+      // other route; the handler's own 401 proves it was REACHED
+      const r = await fetch(`${base}/api/v1/webhooks/github`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      })
+      assert.equal(r.status, 401)
+      assert.equal(calls, 1)
+
+      // a foreign Host — the DNS-rebinding shape refused everywhere
+      // else — reaches the handler: a hosted tunnel's Host is public
+      const rebound = await new Promise<IncomingMessage>((resolve) => {
+        const req = request(
+          `${base}/api/v1/webhooks/github`,
+          {
+            method: 'POST',
+            headers: { host: 'smee.example.com', 'content-type': 'application/json' },
+          },
+          resolve
+        )
+        req.end('{}')
+      })
+      assert.equal(rebound.statusCode, 401)
+      assert.equal(calls, 2)
+
+      // and the same foreign Host on a normal route still 403s
+      const guarded = await new Promise<IncomingMessage>((resolve) => {
+        const req = request(
+          `${base}/api/v1/health`,
+          { headers: { host: 'smee.example.com' } },
+          resolve
+        )
+        req.end()
+      })
+      assert.equal(guarded.statusCode, 403)
     } finally {
       await new Promise((r) => server.close(r))
     }

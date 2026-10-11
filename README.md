@@ -113,7 +113,7 @@ Full reference: [broject.dev/docs](https://broject.dev/docs).
 | ------- | ------------- |
 | `bro next [--list] [--json] [--global]` | Claim the top ready bead and print the work order |
 | `bro spec check\|drift\|new\|tree\|init` | Check spec coverage and drift, scaffold specs, and inspect their tree |
-| `bro stack push\|list\|sync` | Build and retarget stacked bead→worktree→PR chains |
+| `bro stack push\|list\|sync\|publish\|merge` | Build, register, retarget, and land stacked bead→worktree→PR chains |
 | `bro query <plan.toml>` | Run a cross-provider GraphQL fan-out plan — one merged JSON answer |
 | `bro work enter\|leave\|list\|prune` | Manage sibling worktrees and their recorded stack membership |
 
@@ -125,7 +125,7 @@ Full reference: [broject.dev/docs](https://broject.dev/docs).
 | `bro convoy pour\|status\|next\|claim\|done\|list\|run` | Run a beads formula as a claimable molecule — `run` is the molecule queue |
 | `bro fleet [--json\|--live]` | View molecules, steps, agents, worktrees, and PRs |
 | `bro agents status\|up\|down\|prune` | Inspect, spawn, respawn, stop, or reap detached agents |
-| `bro watch [--once\|--every N\|--notify]`, `watch install\|uninstall` | Read-only heartbeat, optionally on a non-agent timer |
+| `bro watch [--once\|--every N\|--notify]`, `watch install\|uninstall` | Read-only heartbeat; `--every` is the session pulse (`bro/pulse.lock`, one per repo); `install` arms the want-marker (`bro/pulse.json`) — OS timers retired |
 | `bro notify <text>` | Drop an event into the session mailbox — addressed, typed, coalesced |
 | `bro bus serve\|publish\|subscribe\|status` | The local event broker behind the events facade |
 | `bro drive [--once\|--every N\|--no-merge]` | Apply the act gate to fleet PRs; merge only on green |

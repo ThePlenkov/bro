@@ -4,6 +4,7 @@
  * same semantics, normalized onto the domain types in @broject/core/review.
  */
 import {
+  bodyMeta,
   gh,
   ghAsync,
   ghJson,
@@ -13,6 +14,8 @@ import {
   prLink,
   resolveRepo,
   resolveRepoAsync,
+  stripMeta,
+  withMeta,
 } from '@broject/core'
 import type {
   CheckInfo,
@@ -27,6 +30,7 @@ import type {
   ReviewFacade,
   ReviewThread,
   ScanOpts,
+  StackMembership,
 } from '@broject/core'
 
 // graphql/REST paths need owner+repo separately — split the facade's
@@ -111,7 +115,11 @@ function checks(t: PrTarget, requiredOnly = false): CheckInfo[] {
   return []
 }
 
-function checkAnnotations(repo: string, headSha: string): Map<string, number | null> {
+function checkAnnotations(
+  repo: string,
+  headSha: string,
+  names?: ReadonlySet<string>
+): Map<string, number | null> {
   const out = new Map<string, number | null>()
   for (let page = 1; ; page += 1) {
     const res = ghJson<{ check_runs: Array<{ id: number; name: string }> }>([
@@ -121,8 +129,11 @@ function checkAnnotations(repo: string, headSha: string): Map<string, number | n
     for (const run of res.check_runs ?? []) {
       // A re-run check reports one run per attempt — every attempt's
       // annotations count, not just the latest id's. A failed fetch
-      // marks the name null (unknown), never a partial count.
-      if (out.get(run.name) === null) {
+      // marks the name null (unknown), never a partial count. Runs
+      // outside `names` cost one gh call each and are never read —
+      // skip them outright (bro-2l7r9: an unfiltered scan fans a
+      // whole check-suite out into per-run gh spawns).
+      if (out.get(run.name) === null || (names !== undefined && !names.has(run.name))) {
         continue
       }
       try {
@@ -559,7 +570,8 @@ async function checksAsync(t: PrTarget, requiredOnly = false): Promise<CheckInfo
 
 async function checkAnnotationsAsync(
   repo: string,
-  headSha: string
+  headSha: string,
+  names?: ReadonlySet<string>
 ): Promise<Map<string, number | null>> {
   const out = new Map<string, number | null>()
   for (let page = 1; ; page += 1) {
@@ -567,29 +579,35 @@ async function checkAnnotationsAsync(
       'api',
       `repos/${repo}/commits/${headSha}/check-runs?per_page=100&page=${page}`,
     ])
-    // a page's annotation fetches are independent — overlap them; each
-    // run reports to its own slot first so a name shared by concurrent
-    // runs can't let a success overwrite a sibling's failure
-    const results = await Promise.all(
-      (res.check_runs ?? []).map(async (run) => {
-        try {
-          const pages = await ghJsonAsync<Array<Array<{ annotation_level?: string }>>>([
-            'api',
-            '--paginate',
-            '--slurp',
-            `repos/${repo}/check-runs/${run.id}/annotations?per_page=100`,
-          ])
-          return {
-            name: run.name,
-            count: pages.flat().filter((a) => a.annotation_level === 'failure').length as
-              | number
-              | null,
-          }
-        } catch {
-          return { name: run.name, count: null }
-        }
-      })
+    // a page's annotation fetches are independent — overlap them, but
+    // bounded: each fetch is a ~50MB gh child and a CI suite runs tens
+    // of check-runs, so an unbounded Promise.all spikes the whole
+    // service cgroup (bro-2l7r9's OOM). This pool caps one call —
+    // the process-wide child budget in gh.ts is what keeps overlapping
+    // gate probes from multiplying pools. Runs outside `names` are never
+    // read — skip them outright. Each run reports to its own slot
+    // first so a name shared by concurrent runs can't let a success
+    // overwrite a sibling's failure.
+    const runs = (res.check_runs ?? []).filter(
+      (run) => names === undefined || names.has(run.name)
     )
+    const results: Array<{ name: string; count: number | null }> = []
+    await pooled(runs, 4, async (run) => {
+      try {
+        const pages = await ghJsonAsync<Array<Array<{ annotation_level?: string }>>>([
+          'api',
+          '--paginate',
+          '--slurp',
+          `repos/${repo}/check-runs/${run.id}/annotations?per_page=100`,
+        ])
+        results.push({
+          name: run.name,
+          count: pages.flat().filter((a) => a.annotation_level === 'failure').length,
+        })
+      } catch {
+        results.push({ name: run.name, count: null })
+      }
+    })
     for (const r of results) {
       const prev = out.get(r.name)
       if (prev === null) {
@@ -686,7 +704,7 @@ function chunks<T>(items: T[], size: number): T[][] {
 // asynchronous merge REST API". The async endpoint is the only way in:
 // PUT answers a uuid, GET reports the result until it settles.
 
-interface StackProbe {
+export interface StackProbe {
   /** Stack membership — absent on a PR that isn't in one. */
   stacked: boolean
   /** Base branch — undefined when the read failed; the merge action's
@@ -694,26 +712,52 @@ interface StackProbe {
   base?: string
 }
 
+/** The `stack` object `GET /pulls/{n}` carries for members —
+ *  `{number, position, size}` while stacked, absent/null otherwise.
+ *  Shared by the cascade probe and the publish pre-flight; every read
+ *  failure (older API version, auth, network) surfaces as undefined —
+ *  a probe never blocks the caller's fallback. */
+function readPrStack(
+  t: PrTarget
+): { stack?: { number?: number; position?: number; size?: number } | null; base?: { ref?: string } } {
+  const res = ghTry(['api', `repos/${t.repo}/pulls/${t.pr}`])
+  if (res.code !== 0) {
+    return {}
+  }
+  try {
+    return JSON.parse(res.out) as {
+      stack?: { number?: number; position?: number; size?: number } | null
+      base?: { ref?: string }
+    }
+  } catch {
+    return {}
+  }
+}
+
 /** Does this PR sit in a stack, and onto what? `GET /pulls/{n}` carries
  *  the `stack` object for members (base, size, position, number).
  *  Every failure — no field on an older API version, an auth or network
  *  error — reads as "not a stack": a probe must never block a merge the
  *  sync path can still do, and the reactive net in `mergePr` catches a
- *  stack the probe missed. */
-function stackProbe(t: PrTarget): StackProbe {
-  const res = ghTry(['api', `repos/${t.repo}/pulls/${t.pr}`])
-  if (res.code !== 0) {
-    return { stacked: false }
+ *  stack the probe missed. Exported for the stacks facade — cascade
+ *  ownership is the same probe. */
+export function stackProbe(t: PrTarget): StackProbe {
+  const body = readPrStack(t)
+  return {
+    stacked: body.stack !== undefined && body.stack !== null,
+    base: body.base?.ref,
   }
-  try {
-    const body = JSON.parse(res.out) as { stack?: unknown; base?: { ref?: string } }
-    return {
-      stacked: body.stack !== undefined && body.stack !== null,
-      base: body.base?.ref,
-    }
-  } catch {
-    return { stacked: false }
-  }
+}
+
+/** Which stack this PR sits in — the same `.stack` read as stackProbe,
+ *  surfaced as the membership the stacks facade publishes. Null when
+ *  unstacked or unreadable; `number` is the host's stack id (the
+ *  `gh stack link <id>` grow arg). */
+export function stackMembership(t: PrTarget): StackMembership | null {
+  const stack = readPrStack(t).stack
+  return stack?.number === undefined
+    ? null
+    : { id: stack.number, position: stack.position, size: stack.size }
 }
 
 /** Does the base branch require a merge queue? GraphQL is the only
@@ -1127,6 +1171,64 @@ async function labelPrs(
 
 // --- mutations ----------------------------------------------------------------
 
+/** Auto-close keywords GitHub recognizes — a body already carrying one
+ *  for a ref is wired; re-stamping must not duplicate the line. */
+const CLOSER_RE = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)/i
+
+const refEsc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+const isWired = (body: string, ref: string): boolean =>
+  new RegExp(String.raw`\b${CLOSER_RE.source}\s+#${refEsc(ref)}\b`, 'i').test(body)
+
+/** The projection's body stamp (spec specs/backends/bro-z2z7f) — one
+ *  `Fixes #N` line per newly-linked ref, inserted before the bro
+ *  trailer so the metadata comment stays last.
+ *
+ *  Race discipline (bro-g29ww): the stamp is a read-modify-write on
+ *  the PR body and no transport here exposes a conditional write —
+ *  `gh pr edit`, REST PATCH, and `updatePullRequest` all lack an
+ *  If-Match/ETag — so the race narrows, never closes. A guard re-read
+ *  just before the edit drops a pass whose snapshot already moved
+ *  (the next pass remerges onto the fresh body instead of clobbering
+ *  the intervening edit), and the post-edit read doubles as the next
+ *  pass's merge source — a stamp a racing write clobbered is re-merged
+ *  into that fresher body. Bounded: a body churning under every pass
+ *  throws into the caller's best-effort warning. An edit landing
+ *  inside the last guard→edit gap is still lost — revisit if a
+ *  CAS-capable transport lands. */
+function linkCloses(dir: string, t: PrTarget, refs: string[]): void {
+  const wanted = [...new Set(refs.map((r) => r.trim()).filter((r) => r !== ''))]
+  if (wanted.length === 0) {
+    return
+  }
+  const view = () =>
+    ghJson<{ body?: string | null }>(
+      ['pr', 'view', String(t.pr), '--repo', t.repo, '--json', 'body'],
+      dir
+    ).body ?? ''
+  let body = view()
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const missing = wanted.filter((r) => !isWired(body, r))
+    if (missing.length === 0) {
+      return
+    }
+    const lines = missing.map((r) => `Fixes #${r}`).join('\n')
+    const base = stripMeta(body)
+    const next = withMeta(base === '' ? lines : `${base}\n\n${lines}`, bodyMeta(body))
+    const fresh = view()
+    if (fresh === body) {
+      gh(['pr', 'edit', String(t.pr), '--repo', t.repo, '--body', next], dir)
+      body = view()
+    } else {
+      body = fresh
+    }
+  }
+  if (wanted.every((r) => isWired(body, r))) {
+    return
+  }
+  throw new Error(`linkCloses: ${prLink(t.repo, t.pr)} body kept changing under the stamp`)
+}
+
 function graphql(query: string, vars: Record<string, string>): void {
   const args = ['api', 'graphql', '-f', `query=${query}`]
   for (const [k, v] of Object.entries(vars)) {
@@ -1217,6 +1319,9 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
         }
         throw err
       }
+    },
+    linkCloses(t, refs) {
+      linkCloses(dir, t, refs)
     },
     resolveThread(id, unresolve = false) {
       const m = unresolve ? 'unresolveReviewThread' : 'resolveReviewThread'

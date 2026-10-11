@@ -7,7 +7,6 @@ import assert from 'node:assert/strict'
 import {
   chmodSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   statSync,
   utimesSync,
@@ -30,7 +29,7 @@ import {
   uninstallCommitHook,
   uninstallPostMergeHook,
 } from './githooks.ts'
-import { git, initRepo, inside } from './testrepo.ts'
+import { git, initRepo, inside, tmpDir } from './testrepo.ts'
 
 describe('envProvenance', () => {
   test('BRO_* pins map straight to trailers', () => {
@@ -92,7 +91,7 @@ describe('branchBead', () => {
 })
 
 describe('liveSessionClaims', () => {
-  const mkDir = (): string => mkdtempSync(join(tmpdir(), 'bro-githooks-'))
+  const mkDir = (): string => tmpDir('bro-githooks-')
   const arm = (dir: string, name: string, lines: string[]): void => {
     writeFileSync(join(dir, name), lines.join('\n'))
   }
@@ -152,7 +151,7 @@ describe('commitTrailers', () => {
   })
 
   test('agent-process verdict fills Session/Bead from the single live session', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-githooks-'))
+    const dir = tmpDir('bro-githooks-')
     writeFileSync(join(dir, 'ses-9.task'), `${Date.now()}\nbro-fzot\n`)
     const trailers = commitTrailers({
       cwd: '/tmp',
@@ -170,7 +169,7 @@ describe('commitTrailers', () => {
   })
 
   test('two live sessions → no marker-derived fields (never a coin flip)', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-githooks-'))
+    const dir = tmpDir('bro-githooks-')
     writeFileSync(join(dir, 's1.task'), `${Date.now()}\nbro-a\n`)
     writeFileSync(join(dir, 's2.task'), `${Date.now()}\nbro-b\n`)
     const trailers = commitTrailers({
@@ -197,7 +196,7 @@ describe('commitTrailers', () => {
   })
 
   test('multi-bead .task marker resolves no Bead', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-githooks-'))
+    const dir = tmpDir('bro-githooks-')
     writeFileSync(join(dir, 's1.task'), `${Date.now()}\nbro-a\nbro-b\n`)
     const trailers = commitTrailers({
       cwd: '/tmp',
@@ -283,7 +282,7 @@ describe('install/uninstall', () => {
   })
 
   test('non-git dir → error, nothing written', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-githooks-'))
+    const dir = tmpDir('bro-githooks-')
     assert.equal(installCommitHook(dir, '9.9.9').state, 'error')
   })
 

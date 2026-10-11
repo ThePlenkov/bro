@@ -56,7 +56,8 @@ provider flags can't sit beside it.
 Other `loop` keys: `bootstrap` (runs once per worktree),
 `stallMin` (advisory output-silence flag at check-in — never a kill),
 `mergeTimeoutMin`, `fixRounds`, `maxItems`, `maxOpen` — the gate stack's
-open-PR cap (default 3) — and `batch` / `batchMinPriority`, the clump
+open-PR cap (default 3) — `worktreeMb` / `diskMinSlots`, the disk
+floor below — and `batch` / `batchMinPriority`, the clump
 knobs below.
 
 ## Commands
@@ -66,6 +67,7 @@ knobs below.
 | `bro loop` | Run the queue until idle or gated |
 | `bro loop --max N` | At most N beads this run |
 | `bro loop --max-open N` | Cap the gate stack's open PRs — a full stack only services gates until a merge frees a slot |
+| `bro loop --disk-min-slots N` | Disk floor in slot units — pushes hold while free disk < N×`loop.worktreeMb` on any filesystem the run writes to (default 2; 0 disables) |
 | `bro loop --dry-run` | Print the top item's plan (claim, worktree, agent cmd) — changes nothing |
 | `bro loop --agent '<tpl>'` | One-off agent override — a provider name resolves through the registry |
 | `bro loop --provider <name>` | Provider pick (`--profile`, `--model`, `--auto-approve` tune it) |
@@ -119,6 +121,12 @@ knobs below.
   merge frees a slot. Independent branches drift against shared files
   fast — keep the cap tight rather than wide, or run `--stack` so
   members chain onto each other and conflicts surface at rebase-time.
+- **Pushes also hold on the disk floor** — a slot is priced at
+  `loop.worktreeMb` (default 400 MB: worktree + bootstrap/agent
+  litter); while free disk on the worktree parent or tmpdir drops
+  below `loop.diskMinSlots`× that price (default 2), pushes hold like a
+  full fleet — nothing claimed, nothing parked — until merges free the
+  space. `--disk-min-slots 0` is the emergency escape.
 - **Already-attempted beads aren't re-picked** within a run — a reopened
   failure can't spin the loop forever.
 - **Batch claims are fail-safe, never silent** — with `loop.batch`/`--batch

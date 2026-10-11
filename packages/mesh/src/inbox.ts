@@ -9,7 +9,7 @@
  * store holds, with provenance. `meshInbox` is the request filter on
  * top; thread tracking (thread.ts) consumes the scan directly.
  */
-import { spawnSync } from 'node:child_process'
+import { taskStore } from '@broject/core'
 import { envelopeFromBead, type BeadLike, type MeshEnvelope } from './envelope.ts'
 import { existsSync } from 'node:fs'
 import { localCheckout, type MeshPeer } from './peers.ts'
@@ -97,21 +97,13 @@ function scanLocal(peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
     errors.push(`${peer.alias}: local checkout ${peer.remote} does not resolve`)
     return
   }
-  const p = spawnSync('bd', ['-C', dir, 'list', '--json'], {  // NOSONAR — PATH lookup is the contract (same as core/git.ts)
-    stdio: ['ignore', 'pipe', 'pipe'],
-    encoding: 'utf8',
-    timeout: 30_000,
-    maxBuffer: 32 * 1024 * 1024,
-  })
-  if (p.status !== 0) {
-    errors.push(`${peer.alias}: bd list failed — ${(p.stderr ?? '').trim() || 'exit ' + p.status}`)
-    return
-  }
   let rows: (BeadLike & { status?: string })[]
   try {
-    rows = JSON.parse(p.stdout ?? '[]') as typeof rows
-  } catch {
-    errors.push(`${peer.alias}: bd list returned unparseable json`)
+    rows = taskStore(dir).list<BeadLike & { status?: string }>()
+  } catch (err) {
+    errors.push(
+      `${peer.alias}: store list failed — ${err instanceof Error ? err.message : String(err)}`
+    )
     return
   }
   for (const row of rows) {

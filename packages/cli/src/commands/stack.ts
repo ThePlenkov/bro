@@ -15,16 +15,37 @@
  *                             PRs and rebase child branches onto the new
  *                             base; dirty or locked worktrees are skipped
  *                             and reported — the owner rebases on enter
+ *   bro stack publish [<name>]
+ *                       register the chain's open member PRs as the
+ *                       host's server-side stack (GitHub's Stack object
+ *                       via `gh stack link`); hosts that detect chains
+ *                       themselves (GitLab, plain git) decline the call
  */
 import { basename } from 'node:path'
 import {
   acquireFileLock,
+  facade,
   gitTry,
   LockTimeout,
+  MANUAL_CASCADE,
+  mergeChainPerLayer,
   reviewHost,
+  shQuote,
+  stackHost,
   type PrMeta,
   type ReviewFacade,
+  type StackCascade,
+  type StackChainMember,
+  type StackFacade,
+  type StackMergeOpts,
 } from '@broject/core'
+import {
+  acquireMergeSlot,
+  checkHistory,
+  evaluateExitGate,
+  fetchPrActState,
+  releaseMergeSlot,
+} from '@broject/act'
 import {
   displayBase,
   formatStackBranch,
@@ -63,7 +84,9 @@ function usage(): never {
   console.error(`usage:
   bro stack push <bead> [--name <stack>]
   bro stack list [<name>]
-  bro stack sync [<name>]`)
+  bro stack sync [<name>]
+  bro stack publish [<name>]
+  bro stack merge [<name>] [--squash|--merge|--rebase] [--admin]`)
   process.exit(2)
 }
 
@@ -239,7 +262,7 @@ function cmdPush(argv: string[]): void {
     },
     created
   )
-  reportPush(r, name, n, base, slug)
+  reportPush(r, name, n, base, slug, resolveStacks(main.path))
 }
 
 /** Push result reporting — a `gone` worktree was retired by a driver
@@ -250,7 +273,8 @@ function reportPush(
   name: string,
   n: number,
   base: string | undefined,
-  slug: string
+  slug: string,
+  stacks: StackFacade | undefined
 ): void {
   if (r.claimLockTimedOut) {
     console.error(
@@ -268,7 +292,17 @@ function reportPush(
   console.log(`worktree ready: ${r.path}  (branch ${r.branch})`)
   console.log(`stack ${name} member ${n} — based on ${r.base ?? base ?? 'HEAD'}`)
   if (r.stacked) {
-    console.log(`open the PR against the parent member: gh pr create --base ${r.base}`)
+    // the hint is the connector's — `gh pr create`, `glab mr create`, or
+    // nothing on a forge-less host. An unresolved facade keeps the gh
+    // text: still the most likely intent in that failure mode.
+    const hint =
+      stacks?.openHint?.({ branch: r.branch, base: r.base ?? '' }) ??
+      (stacks === undefined && r.base !== undefined
+        ? `gh pr create --base ${shQuote(r.base)}`
+        : undefined)
+    if (hint !== undefined) {
+      console.log(`open the PR against the parent member: ${hint}`)
+    }
   }
   if (r.claim.claimed) {
     console.log(`claimed bead ${r.claim.claimed} for this session`)
@@ -279,6 +313,7 @@ function reportPush(
 
 interface MemberView extends SyncMemberInput {
   pr?: number
+  headSha?: string
   worktree?: WorktreeInfo
 }
 
@@ -312,6 +347,7 @@ function attachPr(
       m.pr = hit.pr
       m.prState = hit.meta.state
       m.prBase = hit.meta.baseRef
+      m.headSha = hit.meta.headSha
     }
   } catch {
     // host unreachable — member reads as unmerged/untargeted
@@ -355,6 +391,30 @@ function resolveReview(root: string): { repo: string; facade: ReviewFacade } | u
   }
 }
 
+/** The connector's stack semantics for this repo — undefined when no
+ *  connector serves `stacks` (no remote match, nothing authed). The
+ *  caller's answer to that is the universal one: manual retarget, local
+ *  rebase, no forge ops. A pinned `connectors.reviews` is also the
+ *  stacks default when it serves the facade: self-hosted forges (GHES,
+ *  self-managed GitLab) never matchRemote, so the git dir-match would
+ *  otherwise win and the repo would lose the forge's openHint and
+ *  cascade semantics. An explicit `connectors.stacks` still wins. */
+function resolveStacks(root: string): StackFacade | undefined {
+  try {
+    const connectors = loadBroConfig(root).connectors
+    if (connectors.stacks === undefined && connectors.reviews !== undefined) {
+      try {
+        return facade('stacks', { dir: root }, { connector: connectors.reviews })
+      } catch {
+        // the pinned reviews connector doesn't serve stacks — resolve normally
+      }
+    }
+    return stackHost(root, connectors)
+  } catch {
+    return undefined
+  }
+}
+
 /** One member row in `stack list` — position, slug, branch, effective
  *  base, worktree state, PR state + target. */
 function memberLine(
@@ -388,11 +448,24 @@ function cmdList(argv: string[]): void {
     return
   }
   const rev = resolveReview(main.path)
+  const stacks = resolveStacks(main.path)
   for (const name of names) {
     const members = collectMembers(name, main.path, rev)
     console.log(`stack ${name}  (${members.length} member${members.length === 1 ? '' : 's'})`)
     for (const m of members) {
       console.log(memberLine(m, defaultBase, rev, main.path))
+    }
+    // the publish hint needs both caps: membership detects the gap,
+    // publish is the fix it names. Neither present → the host has no
+    // stack registry and there is nothing to hint at.
+    if (stacks?.publish !== undefined && stacks.membership !== undefined) {
+      const open = members.filter((m) => m.pr !== undefined && m.prState === 'OPEN')
+      const unstacked = open.filter((m) => stacks.membership!(m) === null)
+      if (open.length >= 2 && unstacked.length > 0) {
+        console.log(
+          `  ${unstacked.length} of ${open.length} open member PRs not in a stack on the host — \`bro stack publish ${name}\``
+        )
+      }
     }
   }
 }
@@ -466,18 +539,23 @@ function updateEdge(m: MemberView, desiredBase: string, defaultBase: string): vo
   }
 }
 
+/** Retarget the member's PR to its new base. False when the move was
+ *  owed and didn't land — a refused retarget or a host without
+ *  retargetPr leaves the chain's base==prev-head invariant broken, and
+ *  the caller defers the publish tail rather than feeding it to the
+ *  host's stack tool. */
 function retargetMember(
   item: SyncPlanItem<MemberView>,
   rev: { repo: string; facade: ReviewFacade } | undefined,
   lines: string[]
-): void {
+): boolean {
   const m = item.member
   if (!item.retarget || m.pr === undefined) {
-    return
+    return true
   }
   if (rev?.facade.retargetPr === undefined) {
     lines.push(`  ${m.branch} — review host cannot retarget PRs; set --base by hand`)
-    return
+    return false
   }
   const ok = rev.facade.retargetPr({ repo: rev.repo, pr: m.pr }, item.desiredBase)
   lines.push(
@@ -485,39 +563,279 @@ function retargetMember(
       ? `  ${rev.facade.prLink(rev.repo, m.pr)} retargeted → ${item.desiredBase}`
       : `  ${rev.facade.prLink(rev.repo, m.pr)} retarget refused`
   )
+  return ok
+}
+
+/** A merge the platform performed moved the remote branch and
+ *  retargeted the PR, but this member's worktree still sits on the old
+ *  commits — fetch and rebase onto FETCH_HEAD. The platform replayed
+ *  the branch's own commits server-side, so patch-equivalence drops
+ *  them from the replay and only work never pushed lands on top —
+ *  never a reset that would silently discard it. A failed fetch means
+ *  the remote branch is gone (or unreachable): keep the worktree.
+ *  Returns false when the follow didn't complete — the caller leaves
+ *  the edge stale so the next sync reschedules the work. */
+function followRemote(m: MemberView, lines: string[]): boolean {
+  const wt = m.worktree!
+  const probe = gitTry(['-C', wt.path, 'fetch', 'origin', m.branch])
+  if (probe.code !== 0) {
+    lines.push(`  ${m.branch} remote gone — worktree left as-is`)
+    return false
+  }
+  const before = gitTry(['-C', wt.path, 'rev-parse', 'HEAD']).out.trim()
+  const rb = gitTry(['-C', wt.path, 'rebase', 'FETCH_HEAD'])
+  if (rb.code !== 0) {
+    gitTry(['-C', wt.path, 'rebase', '--abort'])
+    lines.push(
+      `  ${m.branch} rebase onto the rewritten remote failed — aborted; owner resolves on enter`
+    )
+    return false
+  }
+  const after = gitTry(['-C', wt.path, 'rev-parse', 'HEAD']).out.trim()
+  lines.push(
+    before === after
+      ? `  ${m.branch} already on the rewritten remote`
+      : `  ${m.branch} moved to origin/${m.branch} (platform rewrote the remote)`
+  )
+  return true
+}
+
+/** What publish settled into — 'skipped' is the benign quiet path
+ *  (fewer than two open PRs, nothing attempted): the sync caller must
+ *  not read it as a failure. Only 'failed' propagates — a split
+ *  refusal, a thrown link, or an unproven membership readback. */
+type PublishOutcome = 'registered' | 'skipped' | 'failed'
+
+/** Membership probe ahead of publish — 'registered' when every open
+ *  member already sits in one host stack (a re-run is a no-op),
+ *  'refused' when the chain is split across two stacks (the tool would
+ *  reject; say so first), 'unproven' when publish still has to run. */
+function membershipPreflight(
+  name: string,
+  open: MemberView[],
+  membership: NonNullable<StackFacade['membership']>,
+  lines: string[],
+  quiet: boolean
+): 'registered' | 'refused' | 'unproven' {
+  const ids = new Set<number>()
+  let unstacked = 0
+  for (const m of open) {
+    const hit = membership(m)
+    if (hit === null) {
+      unstacked++
+    } else {
+      ids.add(hit.id)
+    }
+  }
+  if (ids.size > 1) {
+    const list = [...ids].map((i) => `#${i}`).join(', ')
+    lines.push(`  stack ${name}: members sit in different host stacks (${list}) — split by hand`)
+    return 'refused'
+  }
+  if (ids.size === 1 && unstacked === 0) {
+    if (!quiet) {
+      lines.push(`  stack ${name} already published — stack #${[...ids][0]!}`)
+    }
+    return 'registered'
+  }
+  return 'unproven'
+}
+
+/** Register the chain's open member PRs as the host's stack object —
+ *  `gh stack link` on GitHub, absent everywhere chains are detected
+ *  from the base links themselves. `quiet` is the cascade caller:
+ *  benign no-ops (<2 open PRs, already registered) print nothing — a
+ *  refusal still does, it's real signal about the chain. 'registered'
+ *  means the members ended up in a stack — the post-publish membership
+ *  readback is the success proof, so an empty one fails, not passes. */
+function publishStack(
+  name: string,
+  members: MemberView[],
+  stacks: StackFacade,
+  defaultBase: string,
+  lines: string[],
+  quiet: boolean
+): PublishOutcome {
+  const open = members.filter((m) => m.pr !== undefined && m.prState === 'OPEN')
+  if (open.length < 2) {
+    if (!quiet) {
+      lines.push(`  stack ${name}: fewer than two open member PRs — nothing to publish`)
+    }
+    return 'skipped'
+  }
+  if (stacks.membership !== undefined) {
+    const pre = membershipPreflight(name, open, stacks.membership, lines, quiet)
+    if (pre === 'refused') {
+      return 'failed'
+    }
+    if (pre === 'registered') {
+      return 'registered'
+    }
+  }
+  const chain: StackChainMember[] = open.map((m) => ({
+    branch: m.branch,
+    base: displayBase(m, defaultBase),
+    pr: m.pr,
+    headSha: m.headSha,
+  }))
+  try {
+    const hit = stacks.publish?.(chain)
+    if (hit === null || hit === undefined) {
+      lines.push(`  stack ${name} publish failed — host reported no membership`)
+      return 'failed'
+    }
+    lines.push(`  stack ${name} published — stack #${hit.id}`)
+    return 'registered'
+  } catch (err) {
+    lines.push(`  stack ${name} publish failed — ${(err as Error).message}`)
+    return 'failed'
+  }
+}
+
+/** `bro stack publish [<name>]` — the post-hoc verb: member PRs are
+ *  opened by workers after `stack push`, so registering the chain can
+ *  only run once ≥2 exist. Resolves the chain's name like merge does
+ *  (positional, --name, or the member worktree's own branch). */
+function cmdPublish(argv: string[]): void {
+  const pos = positionals(argv, NAME_FLAGS)
+  const name =
+    flag(argv, '--name') ??
+    pos[0] ??
+    parseStackBranch(gitTry(['branch', '--show-current']).out.trim())?.name
+  if (name === undefined || !isStackName(name)) {
+    console.error('error: no stack context — pass a name or run inside a member worktree')
+    usage()
+  }
+  const main = mainWorktree()
+  const stacks = resolveStacks(main.path)
+  if (stacks?.publish === undefined) {
+    console.error(
+      'error: no connector serves stack publish — GitLab detects chains from base branches itself, plain git has no host'
+    )
+    process.exitCode = 1
+    return
+  }
+  const rev = resolveReview(main.path)
+  const defaultBase = defaultBranchName() ?? main.branch ?? 'main'
+  const members = collectMembers(name, main.path, rev)
+  if (members.length === 0) {
+    console.log(`stack ${name} has no members — nothing to publish`)
+    return
+  }
+  const lines: string[] = []
+  if (publishStack(name, members, stacks, defaultBase, lines, false) !== 'registered') {
+    process.exitCode = 1
+  }
+  for (const l of lines) {
+    console.log(l)
+  }
+}
+
+/** Per-member cascade context — the inputs every sync step reads. */
+interface SyncCtx {
+  root: string
+  rev: { repo: string; facade: ReviewFacade } | undefined
+  stacks: StackFacade | undefined
+  defaultBase: string
+  lines: string[]
+}
+
+/** The rebase half of a member's cascade step — a platform-rewritten
+ *  remote gets a fetch+rebase follow, everything else a local rebase
+ *  onto the new base. No rebase owed is a pass. */
+function rebaseStep(
+  item: SyncPlanItem<MemberView>,
+  cascade: StackCascade,
+  lines: string[]
+): boolean {
+  if (!item.rebase) {
+    return true
+  }
+  if (cascade.rebase) {
+    return followRemote(item.member, lines)
+  }
+  return rebaseMember(item, lines)
+}
+
+/** One member's cascade step. False when the chain's base==prev-head
+ *  invariant broke (a dirty member, a failed move) — the caller drops
+ *  the publish tail instead of feeding the host's stack tool a
+ *  reject. */
+function syncMember(item: SyncPlanItem<MemberView>, ctx: SyncCtx): boolean {
+  const m = item.member
+  if (m.prState === 'MERGED') {
+    retireMerged(m, ctx.root, ctx.lines)
+    return true
+  }
+  if (item.skip) {
+    ctx.lines.push(`  ${m.branch} skipped — ${item.skip}`)
+    return false
+  }
+  if (!item.rebase && !item.retarget) {
+    return true // in sync — don't even touch the edge file
+  }
+  const cascade = ctx.stacks?.cascade?.(m) ?? MANUAL_CASCADE
+  // The edge is the fork truth planSync reads — it moves only after
+  // the member's local work landed. Recording it before a rebase or
+  // remote-follow would read a failed rewrite as synced and never
+  // reschedule it.
+  if (!rebaseStep(item, cascade, ctx.lines)) {
+    return false
+  }
+  updateEdge(m, item.desiredBase, ctx.defaultBase)
+  if (!cascade.retarget) {
+    return retargetMember(item, ctx.rev, ctx.lines)
+  }
+  if (item.retarget && m.pr !== undefined) {
+    ctx.lines.push(`  ${m.branch} PR retarget → ${item.desiredBase} (platform)`)
+  }
+  return true
 }
 
 /** The sync cascade — shared by `stack sync` and `loop --stack`'s
- *  post-merge step. Returns the per-member report lines; never throws on
- *  a single member's failure (a conflict stops that member, not the run). */
-export function syncStack(root: string, name: string): string[] {
+ *  post-merge step. Per-member cascade ownership comes from the
+ *  connector's stacks facade: when the platform already retargeted the
+ *  PR (GitLab stacked MRs, GitHub .stack members) the API call is
+ *  skipped, and when it also rewrote the remote branch (GitHub) the
+ *  local worktree fast-follows instead of rebasing. Returns the
+ *  per-member report lines; never throws on a single member's failure
+ *  (a conflict stops that member, not the run). `status` is the
+ *  optional out-channel: a failed auto-publish (the chain was
+ *  publishable but the host refused or couldn't prove membership)
+ *  flags `publishFailed` so `stack sync` can exit nonzero — a benign
+ *  skip (<2 open PRs, deferred on a broken cascade) never does. */
+export function syncStack(
+  root: string,
+  name: string,
+  status?: { publishFailed: boolean }
+): string[] {
   const main = mainWorktree()
-  const defaultBase = defaultBranchName() ?? main.branch ?? 'main'
-  const rev = resolveReview(root)
-  const members = collectMembers(name, root, rev)
-  const lines: string[] = []
-  for (const item of planSync(members, defaultBase)) {
-    const m = item.member
-    if (m.prState === 'MERGED') {
-      retireMerged(m, root, lines)
-      continue
-    }
-    if (item.skip) {
-      lines.push(`  ${m.branch} skipped — ${item.skip}`)
-      continue
-    }
-    if (!item.rebase && !item.retarget) {
-      continue // in sync — don't even touch the edge file
-    }
-    if (item.rebase && !rebaseMember(item, lines)) {
-      continue
-    }
-    // edge moves with the branch regardless of the retarget's verdict —
-    // a refused retarget must not leave the fork truth stale
-    updateEdge(m, item.desiredBase, defaultBase)
-    retargetMember(item, rev, lines)
+  const ctx: SyncCtx = {
+    root,
+    rev: resolveReview(root),
+    stacks: resolveStacks(root),
+    defaultBase: defaultBranchName() ?? main.branch ?? 'main',
+    lines: [],
   }
-  return lines
+  const members = collectMembers(name, root, ctx.rev)
+  // A clean cascade — nothing skipped, nothing refused — leaves the
+  // chain's base==prev-head invariant proven, which is exactly what the
+  // host's stack registration demands. A dirty member or a failed move
+  // breaks it: defer publish instead of feeding the tool a reject.
+  let intact = true
+  for (const item of planSync(members, ctx.defaultBase)) {
+    if (!syncMember(item, ctx)) {
+      intact = false
+    }
+  }
+  const stacks = ctx.stacks
+  if (intact && stacks?.publish !== undefined) {
+    const outcome = publishStack(name, members, stacks, ctx.defaultBase, ctx.lines, true)
+    if (outcome === 'failed' && status !== undefined) {
+      status.publishFailed = true
+    }
+  }
+  return ctx.lines
 }
 
 function cmdSync(argv: string[]): void {
@@ -530,7 +848,8 @@ function cmdSync(argv: string[]): void {
   }
   for (const name of names) {
     console.log(`stack ${name}:`)
-    const lines = syncStack(main.path, name)
+    const status = { publishFailed: false }
+    const lines = syncStack(main.path, name, status)
     if (lines.length === 0) {
       console.log('  in sync')
     } else {
@@ -538,10 +857,174 @@ function cmdSync(argv: string[]): void {
         console.log(l)
       }
     }
+    if (status.publishFailed) {
+      process.exitCode = 1
+    }
   }
 }
 
-export function runStackCommand(argv: string[]): void {
+const MERGE_BOOL_FLAGS = new Set(['--squash', '--merge', '--rebase', '--admin'])
+
+/** `bro stack merge` — land the chain bottom→top through the
+ *  connector's own mechanism: `gh stack merge` where the extension
+ *  answers, bottom-up `PUT …/merge` on GitLab (the platform retargets
+ *  between layers), the same per-layer drive on a bare GitHub remote,
+ *  plain `git merge` forge-less. Every OPEN member's review gate is
+ *  evaluated BEFORE the first merge call — refusing early keeps even
+ *  the per-layer fallback effectively all-or-nothing on the gate axis. */
+async function cmdMerge(argv: string[]): Promise<void> {
+  const pos = positionals(argv, NAME_FLAGS, { boolFlags: MERGE_BOOL_FLAGS, strict: true })
+  const name =
+    flag(argv, '--name') ??
+    pos[0] ??
+    parseStackBranch(gitTry(['branch', '--show-current']).out.trim())?.name
+  if (name === undefined || !isStackName(name)) {
+    console.error('error: no stack context — pass a name or run inside a member worktree')
+    usage()
+  }
+  const picked = (['--squash', '--merge', '--rebase'] as const).filter((f) => argv.includes(f))
+  if (picked.length > 1) {
+    console.error(`error: ${picked.join(' ')} — merge strategy flags are exclusive`)
+    usage()
+  }
+  const opts: StackMergeOpts = {
+    method: (picked[0]?.slice(2) ?? 'squash') as StackMergeOpts['method'],
+    admin: argv.includes('--admin'),
+  }
+  const main = mainWorktree()
+  const trunk = defaultBranchName() ?? main.branch ?? 'main'
+  const rev = resolveReview(main.path)
+  const stacks = resolveStacks(main.path)
+  const members = collectMembers(name, main.path, rev)
+  if (members.length === 0) {
+    console.log(`stack ${name} has no members — nothing to merge`)
+    return
+  }
+  const live = members.filter((m) => m.prState !== 'MERGED')
+  if (live.length === 0) {
+    console.log('nothing to merge — every member already landed')
+    return
+  }
+  // The merge set is the contiguous prefix that CAN land — on a review
+  // host that means an OPEN PR per member, so a PR-less or closed member
+  // breaks the chain (nothing merges past it). Forge-less, every member
+  // is mergeable: git lands the whole chain.
+  let mergeable = live
+  if (rev !== undefined) {
+    const cut = live.findIndex((m) => m.pr === undefined || m.prState !== 'OPEN')
+    mergeable = cut === -1 ? live : live.slice(0, cut)
+    if (mergeable.length === 0) {
+      console.error(
+        `error: bottom member ${live[0]!.branch} has no OPEN PR — nothing can merge past it`
+      )
+      process.exitCode = 1
+      return
+    }
+    if (mergeable.length < live.length) {
+      console.log(`  ${live[mergeable.length]!.branch} has no OPEN PR — merge stops below it`)
+    }
+  } else if (stacks?.mergeChain === undefined) {
+    console.error('error: no merge path — no review host and no stacks connector serve this repo')
+    process.exitCode = 1
+    return
+  }
+
+  // gate evaluation → merge is one critical section, same as act merge —
+  // the slot wraps the checks themselves: taken after them, another merge
+  // could move a PR between its gate read and its landing
+  const slot = acquireMergeSlot()
+  if (slot.kind === 'held') {
+    console.error(
+      `merge slot held by ${slot.holder} — another session is merging; ` +
+        'wait for `bd merge-slot check` to report available'
+    )
+    process.exitCode = 1
+    return
+  }
+  try {
+    // gate every mergeable layer before the first merge — an unresolved
+    // thread three layers up must not leave the bottom two landed
+    if (rev !== undefined) {
+      const act = loadBroConfig(main.path).act
+      for (const m of mergeable) {
+        const pr = m.pr
+        if (pr === undefined) {
+          continue // unreachable — the prefix guarantees an OPEN PR
+        }
+        const state = await fetchPrActState(
+          rev.facade,
+          { repo: rev.repo, pr },
+          {
+            ignoreChecks: act.ignoreChecks,
+            checkHistory: checkHistory(main.path),
+            maxRounds: act.maxRounds,
+            docsPaths: act.docsPaths,
+            docsMaxRounds: act.docsMaxRounds,
+          }
+        )
+        const gate = evaluateExitGate(state)
+        if (!gate.ok) {
+          console.error(
+            `exit_gate=BLOCKED — refusing to merge; ${rev.facade.prLink(rev.repo, pr)} (${m.branch}) is not ready:`
+          )
+          for (const b of gate.blockers) {
+            console.error(`  blocker: ${b}`)
+          }
+          process.exitCode = 1
+          return
+        }
+      }
+    }
+    const chain: StackChainMember[] = mergeable.map((m) => ({
+      branch: m.branch,
+      base: trunk,
+      pr: m.pr,
+      headSha: m.headSha,
+    }))
+    const report =
+      stacks?.mergeChain?.(chain, opts) ??
+      (rev !== undefined
+        ? mergeChainPerLayer(rev.facade, rev.repo, chain, opts, (m) =>
+            stacks?.cascade?.(m) ?? MANUAL_CASCADE
+          )
+        : undefined)
+    if (report === undefined) {
+      // a stacks facade that declined and no reviews facade to fall
+      // back on — git-only connectors always carry mergeChain, so this
+      // is the no-connector corner
+      console.error('error: stack merge declined — no connector can merge this chain')
+      process.exitCode = 1
+      return
+    }
+    for (const l of report.lines) {
+      console.log(l)
+    }
+    // a PR-less member that landed is invisible to sync's MERGED
+    // detection — retire it here; members with reviews retire inside
+    // the sync pass their host reports
+    const mergedSet = new Set(report.merged)
+    for (const m of mergeable) {
+      if (mergedSet.has(m.branch) && m.pr === undefined) {
+        const retireLines: string[] = []
+        retireMerged(m, main.path, retireLines)
+        for (const l of retireLines) {
+          console.log(l)
+        }
+      }
+    }
+    // the post-merge cascade: forge-merged retirement, retargets,
+    // rebases — same pass `bro stack sync` runs
+    for (const l of syncStack(main.path, name)) {
+      console.log(l)
+    }
+  } finally {
+    if (slot.kind === 'acquired') {
+      releaseMergeSlot()
+    }
+  }
+}
+
+export async function runStackCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
   switch (sub) {
     case 'push':
@@ -550,6 +1033,10 @@ export function runStackCommand(argv: string[]): void {
       return cmdList(rest)
     case 'sync':
       return cmdSync(rest)
+    case 'publish':
+      return cmdPublish(rest)
+    case 'merge':
+      return cmdMerge(rest)
     default:
       usage()
   }
