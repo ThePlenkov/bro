@@ -1707,6 +1707,31 @@ function warnNoPromptFile(worker: SpawnWorker | undefined, command: string): voi
   }
 }
 
+/** The cli a worker carries for provenance — the configured command's
+ *  name, an argv worker's own cliName, or a template worker's. */
+function workerCliBadge(worker: SpawnWorker | undefined, command: string): string | undefined {
+  if (worker === undefined) {
+    return commandCliName(command)
+  }
+  return worker.kind === 'argv' ? worker.cliName : commandCliName(worker.command)
+}
+
+/** The shell line a worker runs — a template expansion, an argv worker
+ *  single-quoted slot by slot (the provider argv never re-parses into
+ *  a different program), or the configured command's expansion. */
+function workerRunLine(
+  worker: SpawnWorker | undefined,
+  command: string,
+  promptFile: string
+): string {
+  if (worker === undefined) {
+    return expandAgentCmd(command, promptFile)
+  }
+  return worker.kind === 'argv'
+    ? [...worker.argv, promptFile].map(shQuote).join(' ')
+    : expandAgentCmd(worker.command, promptFile)
+}
+
 /** The native backend — detached process, self-sufficient
  *  (supervisor:'none'). Agent command template resolves as
  *  agents.native.command → loop.agent; `{promptFile}` expands like the
@@ -1774,12 +1799,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                   'bro-agent',
                   exitFile,
                 ]
-          const cliBadge =
-            worker === undefined
-              ? commandCliName(command)
-              : worker.kind === 'argv'
-                ? worker.cliName
-                : commandCliName(worker.command)
+          const cliBadge = workerCliBadge(worker, command)
           const child = spawn(
             'sh', // NOSONAR — PATH lookup is the contract (same as git/bd everywhere)
             args,
@@ -1999,13 +2019,13 @@ function tmuxProbe(socket: string, name: string): { live: TmuxLiveness; err: str
   }
 }
 
-/** Live state for a tmux entry: `probe` is the session liveness verdict
- *  (tmuxProbe for one entry, list()'s batched list-sessions for the
- *  fleet — the pane dying takes the session with it), then the shared
+/** Live state for a probed entry (tmux session, docker container):
+ *  `probe` is the backend's liveness verdict — a single probe for one
+ *  entry or the batched list for a fleet walk — then the shared
  *  recorded-death ladder. An 'unknown' probe still honors recorded
  *  death but never reports 'lost' — a failed probe didn't find a
  *  corpse, so 'spawned' (registered, unverified) is the honest read. */
-function tmuxState(
+function probeState(
   dir: string,
   home: string | null,
   molStep: string,
@@ -2054,7 +2074,7 @@ function toTmuxInfo(
     pid: typeof entry.pid === 'number' ? entry.pid : undefined,
     molStep,
     backend: entry.backend,
-    state: tmuxState(dir, home, molStep, entry, probe),
+    state: probeState(dir, home, molStep, entry, probe),
     ...infoCause(entry),
     ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
@@ -2151,12 +2171,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           .join('\n')
         writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
         const worker = spec.worker
-        const cliBadge =
-          worker === undefined
-            ? commandCliName(command)
-            : worker.kind === 'argv'
-              ? worker.cliName
-              : commandCliName(worker.command)
+        const cliBadge = workerCliBadge(worker, command)
         const envArgs = agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(
           ([k, v]) => ['-e', `${k}=${v}`]
         )
@@ -2172,12 +2187,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // with every element single-quoted — the provider argv never
         // re-parses into a different program.
         warnNoPromptFile(worker, command)
-        const runLine =
-          worker === undefined
-            ? expandAgentCmd(command, promptFile)
-            : worker.kind === 'argv'
-              ? [...worker.argv, promptFile].map(shQuote).join(' ')
-              : expandAgentCmd(worker.command, promptFile)
+        const runLine = workerRunLine(worker, command, promptFile)
         const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>&1 | tee -a ${shQuote(log)}`
         const paneCmd = `sh -c ${shQuote(paneScript)}` // NOSONAR — operator-configured agent command (same contract as native/loop)
         const res = tmuxRun(socket, [
@@ -3018,9 +3028,13 @@ function dockerRun(
  *  daemon). */
 function dockerDaemonUp(): { up: boolean; err: string } {
   const v = dockerRun(['version', '--format', '{{.Server.Version}}'])
-  return v.missing || v.code !== 0
-    ? { up: false, err: v.missing ? 'docker not on PATH' : (v.err !== '' ? v.err : 'daemon unreachable') }
-    : { up: true, err: '' }
+  if (v.missing) {
+    return { up: false, err: 'docker not on PATH' }
+  }
+  if (v.code !== 0) {
+    return { up: false, err: v.err !== '' ? v.err : 'daemon unreachable' }
+  }
+  return { up: true, err: '' }
 }
 
 /** Running container names — one daemon round-trip batched across a
@@ -3091,6 +3105,63 @@ function dockerInspect(name: string): DockerInspect {
   }
 }
 
+/** Index after the `// …` comment starting at i (no newline consumed). */
+function jsoncSkipLineComment(text: string, i: number): number {
+  let k = i
+  while (k < text.length && text[k] !== '\n') {
+    k++
+  }
+  return k
+}
+
+/** Index after the `/* … *\/` comment starting at i. */
+function jsoncSkipBlockComment(text: string, i: number): number {
+  let k = i + 2
+  while (k < text.length && !(text[k] === '*' && text[k + 1] === '/')) {
+    k++
+  }
+  return Math.min(k + 2, text.length)
+}
+
+/** Whitespace AND comments — the trivia a trailing-comma lookahead
+ *  skips: `{a:1, /* c *\/ }` is legal JSONC, so a `}` may hide behind
+ *  a comment, not just whitespace. */
+function jsoncSkipTrivia(text: string, i: number): number {
+  let k = i
+  for (;;) {
+    while (k < text.length && /\s/.test(text[k]!)) {
+      k++
+    }
+    if (text[k] === '/' && text[k + 1] === '/') {
+      k = jsoncSkipLineComment(text, k)
+    } else if (text[k] === '/' && text[k + 1] === '*') {
+      k = jsoncSkipBlockComment(text, k)
+    } else {
+      return k
+    }
+  }
+}
+
+/** Copy the string literal starting at i verbatim — escapes included —
+ *  into out; returns the index after its closing quote. A `//` or a
+ *  `,]` inside a string is content, never comment or comma. */
+function jsoncCopyString(text: string, i: number, out: string[]): number {
+  out.push('"') // the opening quote — closing-quote detection starts one char in
+  let k = i + 1
+  while (k < text.length) {
+    const c = text[k]!
+    out.push(c)
+    k++
+    if (c === '\\' && k < text.length) {
+      out.push(text[k]!)
+      k++
+    } else if (c === '"') {
+      return k
+    }
+  }
+  return k
+}
+
 /** devcontainer.json is commented JSON — // and /* … *\/ comments plus
  *  trailing commas are legal there and illegal to JSON.parse. The
  *  scanner copies significant chars only, tracking string state so a
@@ -3098,73 +3169,20 @@ function dockerInspect(name: string): DockerInspect {
 export function jsoncToJson(text: string): string {
   const out: string[] = []
   let i = 0
-  let str = false
   while (i < text.length) {
     const c = text[i]!
-    if (str) {
-      out.push(c)
-      if (c === '\\') {
-        i++
-        if (i < text.length) {
-          out.push(text[i]!)
-        }
-      } else if (c === '"') {
-        str = false
-      }
-      i++
-      continue
-    }
     if (c === '"') {
-      str = true
+      i = jsoncCopyString(text, i, out)
+    } else if (c === '/' && text[i + 1] === '/') {
+      i = jsoncSkipLineComment(text, i)
+    } else if (c === '/' && text[i + 1] === '*') {
+      i = jsoncSkipBlockComment(text, i)
+    } else if (c === ',' && ['}', ']'].includes(text[jsoncSkipTrivia(text, i + 1)] ?? '')) {
+      i++
+    } else {
       out.push(c)
       i++
-      continue
     }
-    if (c === '/' && text[i + 1] === '/') {
-      while (i < text.length && text[i] !== '\n') {
-        i++
-      }
-      continue
-    }
-    if (c === '/' && text[i + 1] === '*') {
-      i += 2
-      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) {
-        i++
-      }
-      i = Math.min(i + 2, text.length)
-      continue
-    }
-    if (c === ',') {
-      // lookahead must skip comments too — `{a:1, /* c */ }` is legal
-      // JSONC and drops to `{a:1}` only if the comma comes out
-      let k = i + 1
-      for (;;) {
-        while (k < text.length && /\s/.test(text[k]!)) {
-          k++
-        }
-        if (text[k] === '/' && text[k + 1] === '/') {
-          while (k < text.length && text[k] !== '\n') {
-            k++
-          }
-          continue
-        }
-        if (text[k] === '/' && text[k + 1] === '*') {
-          k += 2
-          while (k < text.length && !(text[k] === '*' && text[k + 1] === '/')) {
-            k++
-          }
-          k = Math.min(k + 2, text.length)
-          continue
-        }
-        break
-      }
-      if (text[k] === '}' || text[k] === ']') {
-        i++
-        continue
-      }
-    }
-    out.push(c)
-    i++
   }
   return out.join('')
 }
@@ -3210,75 +3228,78 @@ function dockerMounts(spec: SpawnSpec): string[] {
   return mounts
 }
 
-/** Resolved image for a spawn — `agents.docker.image` wins; else the
- *  devcontainer's `image`, else a once-per-content build of its
- *  `build.dockerfile`. Errors are 'config' (the operator's file/knob
- *  is wrong); a failed BUILD is 'unavailable' (the daemon's). Runs
- *  outside the registry lock — a first-build pays minutes that must
- *  not serialize other spawns. */
-export function dockerImageFor(spec: SpawnSpec, knobs: Record<string, unknown>): string {
-  const kImage = knobs.image
-  if (typeof kImage === 'string' && kImage.trim() !== '') {
-    return kImage.trim()
-  }
+interface Devcontainer {
+  image?: unknown
+  build?: { dockerfile?: unknown; dockerFile?: unknown; context?: unknown; args?: unknown }
+  dockerComposeFile?: unknown
+}
+
+/** The devcontainer path — `agents.docker.devcontainer` if set (repo-
+ *  relative or absolute), else the conventional location. */
+function devcontainerPath(spec: SpawnSpec, knobs: Record<string, unknown>): string {
   const kDc = knobs.devcontainer
-  const dcPath =
-    typeof kDc === 'string' && kDc.trim() !== ''
-      ? isAbsolute(kDc)
-        ? kDc
-        : join(spec.repoRoot, kDc)
-      : join(spec.repoRoot, '.devcontainer', 'devcontainer.json')
+  if (typeof kDc !== 'string' || kDc.trim() === '') {
+    return join(spec.repoRoot, '.devcontainer', 'devcontainer.json')
+  }
+  return isAbsolute(kDc) ? kDc : join(spec.repoRoot, kDc)
+}
+
+/** The parsed devcontainer — JSONC first (comments/trailing commas are
+ *  legal there), a parse failure names the file as a 'config' error. */
+function readDevcontainer(dcPath: string): Devcontainer {
   if (!existsSync(dcPath)) {
     throw new SpawnError(
       `no image configured — set agents.docker.image or provide ${dcPath} with an "image" or "build.dockerfile"`,
       'config'
     )
   }
-  let dc: {
-    image?: unknown
-    build?: { dockerfile?: unknown; dockerFile?: unknown; context?: unknown; args?: unknown }
-    dockerComposeFile?: unknown
-  }
   try {
     const v = JSON.parse(jsoncToJson(readFileSync(dcPath, 'utf8'))) as unknown
-    dc = typeof v === 'object' && v !== null ? (v as typeof dc) : {}
+    return typeof v === 'object' && v !== null ? (v as Devcontainer) : {}
   } catch (err) {
     throw new SpawnError(
       `${dcPath} is not parseable devcontainer JSON — ${err instanceof Error ? err.message : String(err)}`,
       'config'
     )
   }
-  if (typeof dc.image === 'string' && dc.image.trim() !== '') {
-    return dc.image.trim()
+}
+
+/** `build.dockerfile`/`dockerFile`, resolved against the devcontainer's
+ *  directory — a compose-only or absent-build config is a named gap,
+ *  never a silent fallback. */
+function devcontainerDockerfile(dcPath: string, dc: Devcontainer): string {
+  const b = dc.build
+  let df: string | undefined
+  if (typeof b?.dockerfile === 'string' && b.dockerfile !== '') {
+    df = b.dockerfile
+  } else if (typeof b?.dockerFile === 'string' && b.dockerFile !== '') {
+    df = b.dockerFile
   }
-  const df =
-    typeof dc.build?.dockerfile === 'string'
-      ? dc.build.dockerfile
-      : typeof dc.build?.dockerFile === 'string'
-        ? dc.build.dockerFile
-        : undefined
-  if (df === undefined || df === '') {
+  if (df === undefined) {
     const hint =
       dc.dockerComposeFile !== undefined
         ? 'dockerComposeFile devcontainers are not supported — set agents.docker.image'
         : 'set agents.docker.image or give the devcontainer an "image" or "build.dockerfile"'
     throw new SpawnError(`no usable image in ${dcPath} — ${hint}`, 'config')
   }
-  const dcDir = dirname(dcPath)
-  const dockerfile = isAbsolute(df) ? df : join(dcDir, df)
+  const dockerfile = isAbsolute(df) ? df : join(dirname(dcPath), df)
   if (!existsSync(dockerfile)) {
     throw new SpawnError(`devcontainer dockerfile ${dockerfile} does not exist`, 'config')
   }
+  return dockerfile
+}
+
+/** Build the devcontainer's dockerfile under a content-keyed tag. The
+ *  tag can't see the build CONTEXT's files — but docker's own layer
+ *  cache can, so EVERY resolve builds: a no-op build is seconds, a
+ *  stale image is a wrong worker. */
+function buildDevcontainerImage(dcPath: string, dockerfile: string, dc: Devcontainer): string {
+  const dcDir = dirname(dcPath)
   const ctxRaw = typeof dc.build?.context === 'string' ? dc.build.context : '.'
   const context = isAbsolute(ctxRaw) ? ctxRaw : join(dcDir, ctxRaw)
   const buildArgs = Object.entries(
     typeof dc.build?.args === 'object' && dc.build.args !== null ? dc.build.args : {}
   ).flatMap(([k, v]) => ['--build-arg', `${k}=${String(v)}`])
-  // content-keyed tag — the same devcontainer build reuses one image
-  // across spawns; a changed devcontainer/dockerfile mints a new tag.
-  // Always build: the tag can't see the build CONTEXT's files, but
-  // docker's own layer cache can — a no-op build is seconds, a stale
-  // image is a wrong worker.
   const tag = `bro-dev-${createHash('sha256')
     .update(readFileSync(dcPath, 'utf8'))
     .update('\n')
@@ -3287,40 +3308,40 @@ export function dockerImageFor(spec: SpawnSpec, knobs: Record<string, unknown>):
     .slice(0, 12)}`
   const b = dockerRun(['build', '-t', tag, '-f', dockerfile, ...buildArgs, context], 600_000)
   if (b.code !== 0) {
-    throw new SpawnError(
-      `docker build ${dockerfile} failed — ${b.err !== '' ? b.err : `exited ${b.code}`}`,
-      'unavailable'
-    )
+    const why = b.err !== '' ? b.err : `exited ${b.code}`
+    throw new SpawnError(`docker build ${dockerfile} failed — ${why}`, 'unavailable')
   }
   return tag
 }
 
-/** Live state for a docker entry. Running wins (a 'stopped' flag on a
- *  still-running container means rm hasn't landed). Then the shared
- *  recorded-death ladder — `--rm` removes the corpse on exit, so the
- *  mounted .exit file is the only death record, exactly like native.
- *  'unknown' probe → 'spawned', never 'lost'. */
-function dockerState(
-  dir: string,
-  home: string | null,
-  molStep: string,
-  entry: AgentRegistryEntry,
-  probe: DockerLiveness
-): AgentState {
-  if (probe === 'running') {
-    touchWorkMarker(dir, entry.agentId)
-    return 'running'
+/** Resolved image for a spawn — `agents.docker.image` wins; else the
+ *  devcontainer's `image`, else a build of its `build.dockerfile`.
+ *  Errors are 'config' (the operator's file/knob is wrong); a failed
+ *  BUILD is 'unavailable' (the daemon's). Runs outside the registry
+ *  lock — a first-build pays minutes that must not serialize other
+ *  spawns. */
+export function dockerImageFor(spec: SpawnSpec, knobs: Record<string, unknown>): string {
+  const kImage = knobs.image
+  if (typeof kImage === 'string' && kImage.trim() !== '') {
+    return kImage.trim()
   }
-  const dead = recordedDeath(dir, home, molStep, entry)
-  if (dead !== undefined) {
-    return dead
+  const dcPath = devcontainerPath(spec, knobs)
+  const dc = readDevcontainer(dcPath)
+  if (typeof dc.image === 'string' && dc.image.trim() !== '') {
+    return dc.image.trim()
   }
-  if (probe === 'unknown') {
-    // an unverifiable agent may still be live work — keep the marker
-    return 'spawned'
+  return buildDevcontainerImage(dcPath, devcontainerDockerfile(dcPath, dc), dc)
+}
+
+/** The liveness verdict for one docker entry — the batched `live` set
+ *  when the caller already paid the round-trip (a name absent from a
+ *  successful listing is provably dead), a fresh inspect otherwise. */
+function dockerProbeVerdict(entry: AgentRegistryEntry, live?: Set<string>): DockerLiveness {
+  const name = dockerContainerName(entry)
+  if (live !== undefined) {
+    return name !== undefined && live.has(name) ? 'running' : 'dead'
   }
-  dropWorkMarker(dir, molStep, entry)
-  return 'lost'
+  return name === undefined ? 'dead' : dockerInspect(name).live
 }
 
 function toDockerInfo(
@@ -3330,27 +3351,94 @@ function toDockerInfo(
   entry: AgentRegistryEntry,
   live?: Set<string>
 ): AgentInfo {
-  const name = dockerContainerName(entry)
-  const probe: DockerLiveness =
-    live !== undefined
-      ? name !== undefined && live.has(name)
-        ? 'running'
-        : 'dead'
-      : name === undefined
-        ? 'dead'
-        : dockerInspect(name).live
   return {
     id: entry.agentId,
     spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
     pid: typeof entry.pid === 'number' ? entry.pid : undefined,
     molStep,
     backend: entry.backend,
-    state: dockerState(dir, home, molStep, entry, probe),
+    // Running wins (a 'stopped' flag on a still-running container means
+    // rm hasn't landed); `--rm` removes the corpse on exit, so the
+    // mounted .exit file is the only death record, exactly like native
+    state: probeState(dir, home, molStep, entry, dockerProbeVerdict(entry, live)),
     ...infoCause(entry),
     ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     log: typeof entry.log === 'string' ? entry.log : undefined,
   }
+}
+
+/** The ambient env file — a 0600 file like tmux's, deleted by the
+ *  caller after `docker run` (and on any failure). argv is visible to
+ *  every local user (`ps`, `docker inspect`), so the ambient bag
+ *  (secrets included) never goes on -e. Values with newlines can't
+ *  survive docker's line-based format — dropped with a warning naming
+ *  the keys. */
+function writeDockerEnvFile(envFile: string, spec: SpawnSpec): void {
+  const dropped: string[] = []
+  const ambient = Object.entries({ ...process.env, ...spec.env })
+    .filter((e): e is [string, string] => {
+      if (e[1] === undefined || !/^[A-Za-z_]\w*$/.test(e[0]) || AGENT_PIN_KEYS.has(e[0])) {
+        return false
+      }
+      if (e[1].includes('\n') || e[1].includes('\r')) {
+        dropped.push(e[0])
+        return false
+      }
+      return true
+    })
+    .map(([k, v]) => `${k}=${v}`)
+    .join('\n')
+  if (dropped.length > 0) {
+    console.error(
+      `warning: docker env-file drops ${dropped.length} var(s) with newline values: ${dropped.join(', ')}`
+    )
+  }
+  writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
+}
+
+/** The `docker run` argv — operator `runArgs` sit FIRST so docker's
+ *  last-wins flag semantics keep `--name`/`--workdir`/labels/mounts
+ *  under bro's control no matter what an operator passes. */
+function dockerRunArgv(
+  name: string,
+  spec: SpawnSpec,
+  mounts: string[],
+  envFile: string,
+  agentId: string,
+  promptFile: string,
+  cliBadge: string | undefined,
+  mol: string | undefined,
+  runArgs: string[],
+  image: string,
+  wrapper: string
+): string[] {
+  return [
+    'run',
+    '-d',
+    '--init',
+    '--rm',
+    ...runArgs,
+    '--name',
+    name,
+    '--workdir',
+    mounts[0] ?? resolve(spec.repoRoot),
+    '--label',
+    'bro.managed=1',
+    '--label',
+    `bro.step=${spec.molStep}`,
+    ...mounts.flatMap((m) => ['-v', `${m}:${m}`]),
+    '--env-file',
+    envFile,
+    ...agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(([k, v]) => [
+      '-e',
+      `${k}=${v}`,
+    ]),
+    image,
+    'sh',
+    '-c',
+    wrapper,
+  ]
 }
 
 export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
@@ -3367,7 +3455,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
   return {
     name: 'docker',
 
-    async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+    async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is one sync critical section
       const home = spawnHome(dir, 'docker', command, spec)
       const daemon = dockerDaemonUp()
       if (!daemon.up) {
@@ -3418,93 +3506,24 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // respawn over a stopped container) collides docker run —
           // clear it
           dockerRun(['rm', '-f', name])
-          // ambient env rides an --env-file like tmux's 0600 file —
-          // argv is visible to every local user (`ps`, docker
-          // inspect), so the ambient bag (secrets included) never goes
-          // on -e. Values with newlines can't survive docker's
-          // line-based format — dropped with a warning naming the keys.
-          const dropped: string[] = []
-          const ambient = Object.entries({ ...process.env, ...spec.env })
-            .filter((e): e is [string, string] => {
-              if (
-                e[1] === undefined ||
-                !/^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) ||
-                AGENT_PIN_KEYS.has(e[0])
-              ) {
-                return false
-              }
-              if (e[1].includes('\n') || e[1].includes('\r')) {
-                dropped.push(e[0])
-                return false
-              }
-              return true
-            })
-            .map(([k, v]) => `${k}=${v}`)
-            .join('\n')
-          if (dropped.length > 0) {
-            // a multi-line value can't survive docker's line-based env
-            // file — say which keys the container will NOT see
-            console.error(
-              `warning: docker env-file drops ${dropped.length} var(s) with newline values: ${dropped.join(', ')}`
-            )
-          }
-          writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
+          writeDockerEnvFile(envFile, spec)
           const worker = spec.worker
           warnNoPromptFile(worker, command)
-          const cliBadge =
-            worker === undefined
-              ? commandCliName(command)
-              : worker.kind === 'argv'
-                ? worker.cliName
-                : commandCliName(worker.command)
-          const runLine =
-            worker === undefined
-              ? expandAgentCmd(command, promptFile)
-              : worker.kind === 'argv'
-                ? [...worker.argv, promptFile].map(shQuote).join(' ')
-                : expandAgentCmd(worker.command, promptFile)
+          const cliBadge = workerCliBadge(worker, command)
+          const runLine = workerRunLine(worker, command, promptFile)
           // the native wrapper, verbatim — the mounted paths make .exit/
           // log land where the host ladder reads them. --init gives the
           // worker a reaper so grandchildren can't zombie inside; --rm
           // removes the corpse on exit so `docker ps -a` doesn't fill
           // with bro litter and the name frees for a respawn.
           const wrapper = `{ ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } >> ${shQuote(log)} 2>&1`
-          const mounts = dockerMounts(spec)
-          const res = dockerRun([
-            'run',
-            '-d',
-            '--init',
-            '--rm',
-            // operator args FIRST — last-wins semantics would otherwise
-            // let a stray `--name`/`--workdir` shadow the contract the
-            // registry, liveness and stop all key off
-            ...runArgs,
-            '--name',
-            name,
-            '--workdir',
-            mounts[0] ?? resolve(spec.repoRoot),
-            '--label',
-            'bro.managed=1',
-            '--label',
-            `bro.step=${spec.molStep}`,
-            ...mounts.flatMap((m) => ['-v', `${m}:${m}`]),
-            '--env-file',
-            envFile,
-            ...agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(([k, v]) => [
-              '-e',
-              `${k}=${v}`,
-            ]),
-            image,
-            'sh',
-            '-c',
-            wrapper,
-          ])
+          const res = dockerRun(
+            dockerRunArgv(name, spec, dockerMounts(spec), envFile, agentId, promptFile, cliBadge, mol, runArgs, image, wrapper)
+          )
           rmSync(envFile, { force: true }) // the env is baked into container config — the file has done its job
           if (res.code !== 0) {
-            throw new SpawnError(
-              `docker run failed — ${res.err !== '' ? res.err : `exited ${res.code}`}`,
-              'unavailable'
-            )
+            const why = res.err !== '' ? res.err : `exited ${res.code}`
+            throw new SpawnError(`docker run failed — ${why}`, 'unavailable')
           }
           containerId = res.out.trim().split('\n')[0] ?? ''
         } catch (err) {
@@ -3541,7 +3560,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       })
     },
 
-    async list(): Promise<ListResult> {
+    async list(): Promise<ListResult> { // NOSONAR — connector contract is async; the work is sync
       try {
         const daemon = dockerDaemonUp()
         if (!daemon.up) {
@@ -3569,7 +3588,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       }
     },
 
-    async status(id: string): Promise<AgentInfo> {
+    async status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is sync
       const hit = findEntry(id)
       if (!hit) {
         throw new AgentNotFound(`no docker agent ${id}`)
