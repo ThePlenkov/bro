@@ -251,6 +251,22 @@ describe('act wait --detach (bro-b16er)', () => {
     assert.deepEqual(left, [])
   })
 
+  test('conflicting merge strategies refuse before the wait starts', () => {
+    const { root, main } = fixture()
+    inside(main, root, () => {
+      writeHostState(join(main, 'host.json'), { prState: 'OPEN' })
+      for (const extra of [[], ['--detach']]) {
+        const r = runCli(
+          ['act', 'wait', '7', '--merge', '--squash', '--rebase', ...extra],
+          { cwd: main }
+        )
+        assert.equal(r.code, 2)
+        assert.match(r.stderr, /conflicting merge strategies/)
+      }
+      assert.equal(existsSync(watchesDir(main)), false)
+    })
+  })
+
   test('--cleanup without --merge refuses before spawning', () => {
     const { root, main } = fixture()
     inside(main, root, () => {

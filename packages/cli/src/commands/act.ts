@@ -216,6 +216,13 @@ function waitVerdict(res: GateWaitResult): string {
  * "watcher + merge on green" loop in one backgroundable command.
  */
 async function cmdWait(argv: string[]): Promise<void> {
+  // a strategy conflict dooms the post-wait merge — refuse up front so
+  // the error reads on this stderr, not in a detached child's log after
+  // the whole wait already ran
+  if (argv.includes('--squash') && argv.includes('--rebase')) {
+    console.error('error: conflicting merge strategies: --squash --rebase')
+    process.exit(2)
+  }
   if (argv.includes('--detach')) {
     return cmdWaitDetach(argv)
   }
@@ -461,8 +468,11 @@ async function spawnDetachedWait(opts: {
   if (pid === undefined) {
     return undefined
   }
+  // the deadline ends the loop, not the read — the last sleep can cross
+  // it, so take one final read: a child that armed or died inside that
+  // sleep must not be misreported 'pending'
   const deadline = Date.now() + 10_000
-  while (Date.now() < deadline) {
+  for (;;) {
     const live = listWatches(opts.dir).find((l) => l.alive && l.watch.pid === pid)
     if (live !== undefined) {
       return { pid, state: 'armed' }
@@ -470,9 +480,11 @@ async function spawnDetachedWait(opts: {
     if (exited !== undefined) {
       return exited === 0 ? { pid, state: 'settled' } : undefined
     }
+    if (Date.now() >= deadline) {
+      return { pid, state: 'pending' }
+    }
     await new Promise((r) => setTimeout(r, 100))
   }
-  return { pid, state: 'pending' }
 }
 
 /** `bro act wait --detach` — arm the wait as a detached child and
