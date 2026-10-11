@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Daemon"
+  short_description: "Project-scoped supervisor — the long-lived owner of drive passes (up|status|down)"
+  brand_color: "#C43D16"
+  default_prompt: "Use $daemon to run the project's supervisor."
+policy:
+  allow_implicit_invocation: true
