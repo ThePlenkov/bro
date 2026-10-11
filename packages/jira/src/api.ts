@@ -9,9 +9,11 @@
  * Endpoint families cover both site shapes: a configured site `baseUrl`
  * takes plain `/rest/api/3/…` paths; the default api.atlassian.com
  * gateway wants `/ex/jira/<cloudId>/rest/api/3/…`. `JIRA_BASE_URL` pins
- * a site explicitly (self-hosted / Data Center too) — it is asserted
- * https: before it can ride `--url`, same rule as the queries facade's
- * ATLASSIAN_API_URL guard.
+ * a Cloud site's base explicitly (custom domains, proxies) — it is
+ * asserted https: before it can ride `--url`, same rule as the queries
+ * facade's ATLASSIAN_API_URL guard. Jira Data Center/Server expose the
+ * v2 surface — name-keyed users, string bodies, /search — a different
+ * connector's job, not a path swap.
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
@@ -111,11 +113,14 @@ interface AtlResult {
   err: string
 }
 
-export function atlTry(args: string[], timeoutMs?: number): AtlResult {
+export function atlTry(args: string[], timeoutMs = TIMEOUT_MS): AtlResult {
   const proc = spawnSync('atlassian', args, { // NOSONAR — PATH lookup is the contract (same as gh/glab)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
-    ...(timeoutMs !== undefined ? { timeout: timeoutMs } : {}),
+    // the 1 MiB default kills whole JQL pages; a stalled CLI must die
+    // with the caller, not hang it — same contract as core/bd.ts
+    timeout: timeoutMs,
+    maxBuffer: 64 * 1024 * 1024,
   })
   const err = `${(proc.stderr ?? '').trim()} ${proc.error?.message ?? ''}`.trim()
   return { code: proc.status ?? 1, out: proc.stdout ?? '', err }
@@ -143,13 +148,23 @@ function atlAsyncRaw(args: string[]): Promise<AtlResult> {
   return new Promise((resolve) => {
     const proc = spawn('atlassian', args, { // NOSONAR — PATH lookup is the contract (same as gh/glab)
       stdio: ['ignore', 'pipe', 'pipe'],
+      // no deadline → a stalled CLI keeps async reads pending forever
+      timeout: TIMEOUT_MS,
+      killSignal: 'SIGKILL',
     })
     let out = ''
     let err = ''
     proc.stdout.setEncoding('utf8').on('data', (d: string) => (out += d))
     proc.stderr.setEncoding('utf8').on('data', (d: string) => (err += d))
     proc.on('error', (error) => resolve({ code: 1, out, err: error.message }))
-    proc.on('close', (code) => resolve({ code: code ?? 1, out, err: err.trim() }))
+    proc.on('close', (code, signal) =>
+      resolve({
+        code: code ?? 1,
+        out,
+        err:
+          `${err.trim()}${signal === 'SIGKILL' ? ` jira: timed out after ${TIMEOUT_MS}ms` : ''}`.trim(),
+      })
+    )
   })
 }
 
@@ -315,14 +330,26 @@ function resolveProject(projects: JiraProject[]): JiraProject {
   )
 }
 
-/** The serving project — `JIRA_PROJECT`/`ATLASSIAN_PROJECT`, else the
- *  site's single visible project (the LINEAR_TEAM rule). */
+/** The serving project — `JIRA_PROJECT`/`ATLASSIAN_PROJECT` resolves by
+ *  direct key read: paging /project/search for a configured key reports
+ *  page-2+ projects as missing. Unset → the site's single visible
+ *  project (the LINEAR_TEAM rule); a key miss still rides the listing
+ *  for the "visible: …" error. */
 export function project(): JiraProject {
   const ck = `${wantProject()}${jiraBaseUrl() ?? ''}`
   let p = projectCache.get(ck)
   if (p === undefined) {
-    const res = apiJson<ProjectSearch>('GET', '/project/search?maxResults=100')
-    p = resolveProject(res.values ?? [])
+    const want = wantProject()
+    const hit =
+      want === ''
+        ? undefined
+        : apiGet<JiraProject>(`/project/${encodeURIComponent(want)}`)
+    if (hit?.key !== undefined) {
+      p = hit
+    } else {
+      const res = apiJson<ProjectSearch>('GET', '/project/search?maxResults=100')
+      p = resolveProject(res.values ?? [])
+    }
     projectCache.set(ck, p)
   }
   return p
@@ -332,11 +359,20 @@ export async function projectAsync(): Promise<JiraProject> {
   const ck = `${wantProject()}${jiraBaseUrl() ?? ''}`
   let p = projectCache.get(ck)
   if (p === undefined) {
-    const res = await apiJsonAsync<ProjectSearch>(
-      'GET',
-      '/project/search?maxResults=100'
-    )
-    p = resolveProject(res.values ?? [])
+    const want = wantProject()
+    const hit =
+      want === ''
+        ? undefined
+        : await apiGetAsync<JiraProject>(`/project/${encodeURIComponent(want)}`)
+    if (hit?.key !== undefined) {
+      p = hit
+    } else {
+      const res = await apiJsonAsync<ProjectSearch>(
+        'GET',
+        '/project/search?maxResults=100'
+      )
+      p = resolveProject(res.values ?? [])
+    }
     projectCache.set(ck, p)
   }
   return p
@@ -369,6 +405,39 @@ export async function prioritiesAsync(): Promise<string[]> {
     prioritiesCache.set(ck, ps)
   }
   return ps
+}
+
+// A dead /priority endpoint degrades the read plane to [] — and must
+// stay degraded: an uncached failure re-spawns the failing CLI once
+// per mapped row. Keyed on the site base like the success cache.
+const prioritiesDownCache = new Set<string>()
+
+/** priorities() that converts a dead endpoint into "no names known" —
+ *  the read-plane variant; write paths keep the honest throw. */
+export function prioritiesOrEmpty(): string[] {
+  const ck = jiraBaseUrl() ?? ''
+  if (prioritiesDownCache.has(ck)) {
+    return []
+  }
+  try {
+    return priorities()
+  } catch {
+    prioritiesDownCache.add(ck)
+    return []
+  }
+}
+
+export async function prioritiesOrEmptyAsync(): Promise<string[]> {
+  const ck = jiraBaseUrl() ?? ''
+  if (prioritiesDownCache.has(ck)) {
+    return []
+  }
+  try {
+    return await prioritiesAsync()
+  } catch {
+    prioritiesDownCache.add(ck)
+    return []
+  }
 }
 
 interface IssueTypeRow {

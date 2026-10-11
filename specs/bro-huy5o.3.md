@@ -44,7 +44,10 @@ families cover both site shapes:
 
 - `JIRA_BASE_URL` (env) → passed as `--url` (must be `https:` — the CLI
   sends Authorization to whatever it names) + plain `/rest/api/3/…`
-  paths. Also the self-hosted / Data Center escape hatch.
+  paths. Also the escape hatch for Cloud sites on custom
+  domains/proxies. Jira Data Center/Server expose the v2 surface —
+  name-keyed users, string bodies, `/search` — a different connector,
+  not a path swap.
 - No env → read `~/.atlassian-tools/config.json` (the CLI's own config,
   read-only — endpoint resolution only, never credentials):
   `baseUrl` set → plain `/rest/api/3/…`; else `cloudId` (or
@@ -55,9 +58,11 @@ families cover both site shapes:
 ## Scope: the project
 
 A Jira task store is one project's queue — `JIRA_PROJECT` (or the CLI's
-own `ATLASSIAN_PROJECT`) names it. Unset + exactly one visible project
-(`GET /rest/api/3/project/search`) → that project; several → error
-listing keys (the LINEAR_TEAM rule). `prefix()` returns the project key
+own `ATLASSIAN_PROJECT`) names it — a direct `GET /project/<key>` read
+(paging `/project/search` would misreport keys past the first page);
+unset + exactly one visible project (`GET /rest/api/3/project/search`)
+→ that project; several → error listing keys (the LINEAR_TEAM rule).
+`prefix()` returns the project key
 — Jira keys are literally `<KEY>-<n>`, the `issue_prefix` slot-in.
 
 ## Mapping (Issues → TaskStore, same contract as github-issues)

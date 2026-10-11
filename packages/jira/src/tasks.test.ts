@@ -14,6 +14,7 @@ const WIN32 = process.platform === 'win32'
  *  by endpoint shape. Payloads are env-driven:
  *    FAKE_JIRA_VIEWER     — /myself body
  *    FAKE_JIRA_PROJECTS   — /project/search body
+ *    FAKE_JIRA_PROJECT_ONE — /project/<key> body (direct key read)
  *    FAKE_JIRA_PRIORITIES — /priority body
  *    FAKE_JIRA_TYPES      — /issuetype body
  *    FAKE_JIRA_LINKTYPES  — /issueLinkType body
@@ -52,6 +53,11 @@ fi
 case "$ep" in
   */myself) printf '%s\\n' "$FAKE_JIRA_VIEWER" ;;
   */project/search*) printf '%s\\n' "$FAKE_JIRA_PROJECTS" ;;
+  */project/*)
+    if [ -z "$FAKE_JIRA_PROJECT_ONE" ]; then
+      echo "HTTP 404 Not Found" >&2; exit 4
+    fi
+    printf '%s\\n' "$FAKE_JIRA_PROJECT_ONE" ;;
   */priority) printf '%s\\n' "$FAKE_JIRA_PRIORITIES" ;;
   */issuetype) printf '%s\\n' "$FAKE_JIRA_TYPES" ;;
   */issueLinkType) printf '%s\\n' "$FAKE_JIRA_LINKTYPES" ;;
@@ -519,6 +525,25 @@ describe('jiraTasks', { skip: WIN32 }, () => {
     )
   })
 
+  test('reopen on an in-progress issue moves the column back too', () => {
+    // unassign alone leaves statusCategory 'indeterminate' → the row
+    // would keep reading in_progress; the 'new' transition must fire
+    withJira(
+      {
+        FAKE_JIRA_ISSUE_1: JSON.stringify(
+          issue({ key: 'PROJ-5', category: 'indeterminate', assignee: 'me' })
+        ),
+      },
+      (logs, dir) => {
+        jiraTasks(dir).reopen('PROJ-5')
+        const tr = bodiesMatching(logs.body, /"transition"/)
+        assert.deepEqual(tr[0]!.transition, { id: '31' })
+        const unassign = bodiesMatching(logs.body, /"accountId":"-1"/)
+        assert.equal(unassign.length, 1)
+      }
+    )
+  })
+
   test('deps maps issuelinks + parent/subtasks into canonical edges', () => {
     withJira(
       {
@@ -620,6 +645,59 @@ describe('jiraTasks', { skip: WIN32 }, () => {
         assert.equal(parentPut.length, 1)
       }
     )
+  })
+
+  test('create without a type still sends the required issuetype', () => {
+    withJira(
+      {
+        FAKE_JIRA_CREATE: JSON.stringify({ key: 'PROJ-9' }),
+        FAKE_JIRA_ISSUE_1: JSON.stringify(issue({ key: 'PROJ-9' })),
+      },
+      (logs, dir) => {
+        jiraTasks(dir).create({ title: 'plain' })
+        const fields = bodiesMatching(logs.body, /"summary":"plain"/)[0]!
+          .fields as Record<string, unknown>
+        assert.deepEqual(fields.issuetype, { name: 'Task' })
+      }
+    )
+  })
+
+  test('a dead /priority endpoint costs one spawn, not one per row', () => {
+    withJira(
+      {
+        FAKE_JIRA_PRIORITIES: '',
+        FAKE_JIRA_ISSUES: issuesPage([
+          issue({ key: 'PROJ-1' }),
+          issue({ key: 'PROJ-2' }),
+          issue({ key: 'PROJ-3' }),
+        ]),
+      },
+      (logs, dir) => {
+        const s = jiraTasks(dir)
+        assert.equal(s.list({ all: true }).length, 3)
+        s.list({ all: true })
+        assert.equal(callsMatching(logs.argv, /\/rest\/api\/3\/priority/).length, 1)
+      }
+    )
+  })
+
+  test('a configured project resolves by direct key read, not search', () => {
+    withJira(
+      {
+        JIRA_PROJECT: 'PROJ',
+        FAKE_JIRA_PROJECT_ONE: JSON.stringify({ id: 'p1', key: 'PROJ', name: 'Project' }),
+        FAKE_JIRA_ISSUES: issuesPage([issue({ key: 'PROJ-1' })]),
+      },
+      (logs, dir) => {
+        assert.equal(jiraTasks(dir).prefix(), 'PROJ')
+        assert.equal(callsMatching(logs.argv, /\/rest\/api\/3\/project\/PROJ/).length, 1)
+        assert.equal(callsMatching(logs.argv, /project\/search/).length, 0)
+      }
+    )
+    // a key miss 404s → the listing path still produces the error
+    withJira({ JIRA_PROJECT: 'MISSING' }, (_logs, dir) => {
+      assert.throws(() => jiraTasks(dir).prefix(), /JIRA_PROJECT "MISSING" matches no project/)
+    })
   })
 
   test('update dispatches title/labels/priority/note/status patches', () => {

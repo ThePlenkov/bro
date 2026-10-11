@@ -5,8 +5,9 @@
  *
  * Scope: `JIRA_PROJECT`/`ATLASSIAN_PROJECT` names the serving project —
  * unset, the site's single visible project serves; zero/ambiguous
- * projects throw with the list. `JIRA_BASE_URL` pins a site (self-
- * hosted / Data Center too); unset, the CLI's own config answers.
+ * projects throw with the list. `JIRA_BASE_URL` pins a Cloud site's
+ * base (custom domains, proxies — Jira Data Center/Server speak the
+ * v2 surface, not this connector); unset, the CLI's own config answers.
  * Credentials stay the CLI's (`atlassian auth login`, ATLASSIAN_TOKEN).
  *
  * Every facade is name-only (`optIn`): nothing about a repo's remote

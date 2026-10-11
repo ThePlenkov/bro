@@ -52,6 +52,8 @@ import {
   linkTypeName,
   priorities,
   prioritiesAsync,
+  prioritiesOrEmpty,
+  prioritiesOrEmptyAsync,
   project,
   projectAsync,
   viewer,
@@ -525,23 +527,12 @@ function readyOf(rows: TaskRow[], f: TaskFilter): TaskRow[] {
 }
 
 /** A dead /priority endpoint must not kill the read plane — rows fall
- *  back to trailer/default priorities. The probe itself throws on
- *  transport failure; this only converts that into "no names known". */
-const tryPriorities = (): string[] => {
-  try {
-    return priorities()
-  } catch {
-    return []
-  }
-}
+ *  back to trailer/default priorities. The OrEmpty twins cache the
+ *  failure per site, so a dead endpoint costs one spawn, not one per
+ *  row; the probe itself keeps throwing for write paths. */
+const tryPriorities = (): string[] => prioritiesOrEmpty()
 
-const tryPrioritiesAsync = async (): Promise<string[]> => {
-  try {
-    return await prioritiesAsync()
-  } catch {
-    return []
-  }
-}
+const tryPrioritiesAsync = async (): Promise<string[]> => prioritiesOrEmptyAsync()
 
 // --- actor -------------------------------------------------------------------------
 
@@ -786,11 +777,14 @@ function linkSync(from: string, to: string, rel: string): void {
   })
 }
 
-/** claim = assign viewer → verify re-read. Single-assignee writes are
- *  last-writer-wins, so the verify settles races deterministically:
- *  whoever the read shows holds it — a loser sees the winner and
- *  throws. An 'indeterminate' transition rides best-effort so the
- *  board column follows the claim. */
+/** claim = assign viewer → verify re-read. The assignee write has no
+ *  compare-and-set — last writer wins — so the verify is the strongest
+ *  settlement the API allows: a loser whose re-read lands after the
+ *  winner's write sees the winner and throws. A loser's re-read can
+ *  still land BEFORE the winner's write — that residual window is
+ *  inherent to the API, no client-side ordering closes it. An
+ *  'indeterminate' transition rides best-effort so the board column
+ *  follows the claim. */
 function claimSync(ref: string): void {
   const n = mustIssue(ref)
   const key = n.key ?? ref
@@ -813,10 +807,15 @@ function claimSync(ref: string): void {
 function reopenSync(ref: string): void {
   const n = mustIssue(ref)
   const key = n.key ?? ref
-  // only a terminal state needs the verb — an un-claim on a claimed
-  // issue is already open; the marker release runs either way
+  // a terminal state needs the verb; 'indeterminate' needs it too —
+  // unassigning alone leaves statusCategory untouched, so the row
+  // keeps reading in_progress. Best-effort below 'new': custom
+  // workflows may lack a backward edge — the unassign is the real
+  // un-claim and runs either way
   if (isDone(n)) {
     transitionTo(key, 'new', 'indeterminate')
+  } else if (category(n) === 'indeterminate') {
+    transitionMaybe(key, 'new')
   }
   // release every claim marker — a claim held by a crashed worker or a
   // rival would otherwise keep the issue in_progress forever
@@ -893,9 +892,9 @@ function createSync(i: TaskInput): TaskRow {
   const fields: Record<string, unknown> = {
     project: { key: project().key },
     summary: i.title,
-  }
-  if (i.type !== undefined) {
-    fields.issuetype = { name: resolveTypeName(i.type) }
+    // issuetype is REQUIRED on create — an absent type resolves to the
+    // site's 'Task', never an omitted field
+    issuetype: { name: resolveTypeName(i.type ?? 'task') },
   }
   const meta = createMeta(i)
   if (i.description !== undefined || Object.keys(meta).length > 0) {
