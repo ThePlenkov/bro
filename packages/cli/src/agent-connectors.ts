@@ -4065,7 +4065,27 @@ function copilotPatch(
  *  pin as they appear, taskState tracks drift, and a terminal state
  *  harvests the exit record (exitStatus+cause+resetAt, or stopped on
  *  cancelled) so the recorded-death ladder reports it like a local
- *  death. */
+ *  death. The terminal half lives in copilotTerminalPatch. */
+/** The terminal-state half of the absorb patch — cancelled reads
+ *  stopped, completed the ok exit record, failed/timed_out the
+ *  classified one. */
+function copilotTerminalPatch(state: string, task: CopilotTask): Record<string, unknown> {
+  if (state === 'cancelled') {
+    return { stopped: true }
+  }
+  if (state === 'completed') {
+    return { exitStatus: 0, cause: 'ok' }
+  }
+  if (state !== 'failed' && state !== 'timed_out') {
+    return {}
+  }
+  const c =
+    state === 'timed_out'
+      ? { cause: 'crash' as AgentCause, resetAt: undefined }
+      : classifyExitCause(copilotSessionError(task), 1)
+  return { exitStatus: 1, cause: c.cause, resetAt: c.resetAt }
+}
+
 function copilotAbsorb(
   dir: string,
   molStep: string,
@@ -4102,22 +4122,7 @@ function copilotAbsorb(
   if (sessionUrl !== undefined && sessionUrl !== entry.sessionUrl) {
     patch.sessionUrl = sessionUrl
   }
-  // terminal states land the exit record — the recorded-death ladder
-  // turns it into exited/stopped/blocked on this same read
-  if (state === 'cancelled') {
-    patch.stopped = true
-  } else if (state === 'completed') {
-    patch.exitStatus = 0
-    patch.cause = 'ok'
-  } else if (state === 'failed' || state === 'timed_out') {
-    const c =
-      state === 'timed_out'
-        ? { cause: 'crash' as AgentCause, resetAt: undefined }
-        : classifyExitCause(copilotSessionError(task), 1)
-    patch.exitStatus = 1
-    patch.cause = c.cause
-    patch.resetAt = c.resetAt
-  }
+  Object.assign(patch, copilotTerminalPatch(state, task))
   if (Object.keys(patch).length > 0) {
     copilotPatch(dir, molStep, entry, patch)
   }
@@ -4286,6 +4291,53 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     return { owner: m[1], repo: m[2], slug }
   }
 
+  /** The REST POST — `gh agent-task create` prints only a human URL;
+   *  the task object's `id` has to come back typed or the registry
+   *  couldn't pin the remote handle. base_ref absent = the API's repo
+   *  default (documented). The body rides a file in the agents home
+   *  like the prompt — never argv. */
+  const dispatchTask = (
+    home: string,
+    agentId: string,
+    spec: SpawnSpec,
+    target: { owner: string; repo: string; slug: string }
+  ): { task: CopilotTask; taskId: string } => {
+    const bodyFile = join(home, `${agentId}.task.json`)
+    writeFileSync(bodyFile, JSON.stringify({
+      prompt: spec.prompt,
+      create_pull_request: true,
+      ...(knobString('base') !== undefined ? { base_ref: knobString('base') } : {}),
+      ...((spec.model ?? knobString('model')) !== undefined
+        ? { model: spec.model ?? knobString('model') }
+        : {}),
+      ...(knobString('customAgent') !== undefined
+        ? { custom_agent: knobString('customAgent') }
+        : {}),
+    }))
+    const res = ghRun(
+      ['api', '-X', 'POST', `agents/repos/${target.owner}/${target.repo}/tasks`, '--input', bodyFile],
+      60_000
+    )
+    if (res.missing) {
+      throw new SpawnError('gh not on PATH', 'unavailable')
+    }
+    if (res.code !== 0) {
+      throw dispatchFailure(target.slug, res.err !== '' ? res.err : `gh api exited ${res.code}`)
+    }
+    const orphan = `the task may still have been created; check \`gh agent-task list\` on ${target.slug}`
+    let task: CopilotTask
+    try {
+      task = JSON.parse(res.out) as CopilotTask
+    } catch {
+      throw new SpawnError(`copilot task dispatch returned unparseable JSON — ${orphan}`, 'unavailable')
+    }
+    const taskId = typeof task.id === 'string' ? task.id : undefined
+    if (taskId === undefined) {
+      throw new SpawnError(`copilot task dispatch returned no task id — ${orphan}`, 'unavailable')
+    }
+    return { task, taskId }
+  }
+
   /** Why a dispatch failed — a transport/body-shape error is quoted
    *  raw; anything else is almost always the coding agent not being
    *  enabled on the repo, so the error names the prerequisites. */
@@ -4298,6 +4350,45 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           `Actions on): ${err}`,
       'unavailable'
     )
+
+  /** Best-effort remote cancel — the documented gap: no CLI/REST task
+   *  cancel exists, the backing Actions run is the only handle. A live
+   *  task with a workflow run gets POST cancel; the re-read then
+   *  reports a survivor or an unverifiable read (cancel is async
+   *  server-side) — silence would hide it. */
+  const copilotCancelRemote = (molStep: string, entry: AgentRegistryEntry, taskId: string): void => {
+    const f = copilotFetchTask(taskId)
+    if (!f.ok) {
+      console.error(
+        `warning: cannot verify copilot task ${taskId} — ${f.err ?? 'gh api failed'}; ` +
+          `the registry still records stopped; if the session survives, stop it in ` +
+          `the web UI (https://${ghHost()}/copilot/agents)`
+      )
+      return
+    }
+    if (!COPILOT_LIVE_STATES.has(copilotTaskState(f.task!))) {
+      return
+    }
+    const repo = copilotEntryRepo(entry)
+    const runId = copilotLatestSession(f.task!)?.workflow_run_id
+    if (repo !== undefined && typeof runId === 'number') {
+      ghRun(['api', '-X', 'POST', `repos/${repo}/actions/runs/${runId}/cancel`])
+    }
+    const after = copilotFetchTask(taskId)
+    if (!after.ok || COPILOT_LIVE_STATES.has(copilotTaskState(after.task!))) {
+      const url =
+        copilotSessionUrl(repo, entry.pr, entry.sessionId) ??
+        `https://${ghHost()}/copilot/agents`
+      console.error(
+        after.ok
+          ? `warning: copilot session for ${molStep} is still live — there is no ` +
+            `CLI/REST cancel; stop it in the web UI (${url})`
+          : `warning: cannot re-check copilot task ${taskId} after cancel — ` +
+            `${after.err ?? 'gh api failed'}; the session may still be live — ` +
+            `stop it in the web UI (${url})`
+      )
+    }
+  }
 
   return {
     name: 'copilot',
@@ -4369,51 +4460,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           }
         )
         try {
-          // the REST POST — `gh agent-task create` prints only a human
-          // URL; the task object's `id` has to come back typed or the
-          // registry couldn't pin the remote handle. base_ref absent =
-          // the API's repo default (documented). The body rides a file
-          // in the agents home like the prompt — never argv
-          const bodyFile = join(home, `${agentId}.task.json`)
-          writeFileSync(bodyFile, JSON.stringify({
-            prompt: spec.prompt,
-            create_pull_request: true,
-            ...(knobString('base') !== undefined ? { base_ref: knobString('base') } : {}),
-            ...((spec.model ?? knobString('model')) !== undefined
-              ? { model: spec.model ?? knobString('model') }
-              : {}),
-            ...(knobString('customAgent') !== undefined
-              ? { custom_agent: knobString('customAgent') }
-              : {}),
-          }))
-          const res = ghRun(
-            ['api', '-X', 'POST', `agents/repos/${target.owner}/${target.repo}/tasks`, '--input', bodyFile],
-            60_000
-          )
-          if (res.missing) {
-            throw new SpawnError('gh not on PATH', 'unavailable')
-          }
-          if (res.code !== 0) {
-            throw dispatchFailure(target.slug, res.err !== '' ? res.err : `gh api exited ${res.code}`)
-          }
-          let task: CopilotTask
-          try {
-            task = JSON.parse(res.out) as CopilotTask
-          } catch {
-            throw new SpawnError(
-              `copilot task dispatch returned unparseable JSON — the task may still ` +
-                `have been created; check \`gh agent-task list\` on ${target.slug}`,
-              'unavailable'
-            )
-          }
-          const taskId = typeof task.id === 'string' ? task.id : undefined
-          if (taskId === undefined) {
-            throw new SpawnError(
-              `copilot task dispatch returned no task id — the task may still have ` +
-                `been created; check \`gh agent-task list\` on ${target.slug}`,
-              'unavailable'
-            )
-          }
+          const { task, taskId } = dispatchTask(home, agentId, spec, target)
           const state = copilotTaskState(task)
           const spawned = patchAgentRegistry(dir, spec.molStep, {
             taskId,
@@ -4511,38 +4558,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       const [molStep, entry] = hit
       const taskId = copilotTaskIdOf(entry)
       if (entry.stopped !== true && taskId !== undefined) {
-        // best-effort cancel — the documented gap: no CLI/REST task
-        // cancel exists, the backing Actions run is the only handle.
-        // A live task with a workflow run gets POST cancel; the
-        // re-read then reports a survivor (cancel is async server-side)
-        const f = copilotFetchTask(taskId)
-        if (!f.ok) {
-          console.error(
-            `warning: cannot verify copilot task ${taskId} — ${f.err ?? 'gh api failed'}; ` +
-              `the registry still records stopped; if the session survives, stop it in ` +
-              `the web UI (https://${ghHost()}/copilot/agents)`
-          )
-        } else if (COPILOT_LIVE_STATES.has(copilotTaskState(f.task!))) {
-          const repo = copilotEntryRepo(entry)
-          const runId = copilotLatestSession(f.task!)?.workflow_run_id
-          if (repo !== undefined && typeof runId === 'number') {
-            ghRun(['api', '-X', 'POST', `repos/${repo}/actions/runs/${runId}/cancel`])
-          }
-          const after = copilotFetchTask(taskId)
-          if (!after.ok || COPILOT_LIVE_STATES.has(copilotTaskState(after.task!))) {
-            const url =
-              copilotSessionUrl(repo, entry.pr, entry.sessionId) ??
-              `https://${ghHost()}/copilot/agents`
-            console.error(
-              after.ok
-                ? `warning: copilot session for ${molStep} is still live — there is no ` +
-                  `CLI/REST cancel; stop it in the web UI (${url})`
-                : `warning: cannot re-check copilot task ${taskId} after cancel — ` +
-                  `${after.err ?? 'gh api failed'}; the session may still be live — ` +
-                  `stop it in the web UI (${url})`
-            )
-          }
-        }
+        copilotCancelRemote(molStep, entry, taskId)
       }
       // a respawn during the cancel re-probes and re-pins the entry
       // under the registry lock — re-verify under the SAME lock or
