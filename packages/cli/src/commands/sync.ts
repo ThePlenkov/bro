@@ -87,27 +87,31 @@ function artifactDirs(root: string): string[] {
 
 /** `--pull`: materialize the data ref, then replicate stores — a store
  *  failure makes the whole restore exit nonzero (reporting success
- *  would lie about the outcome). */
+ *  would lie about the outcome). Failures throw — the CLI's main catch
+ *  prints the message and exits 1, exactly what process.exit did. */
 function syncPull(root: string, cfg: ReturnType<typeof loadBroConfig>): void {
   const { ref, remote, beads } = cfg.sync
   const written = dataRefPull(root, remote, ref)
   if (written < 0) {
-    console.error(`bro sync: remote ${remote} has no ${ref}`)
-    process.exit(1)
+    throw new Error(`bro sync: remote ${remote} has no ${ref}`)
   }
   console.log(`bro sync: materialized ${written} file(s) from ${ref}`)
   if (beads && syncStores(root, cfg.connectors) > 0) {
-    console.error('bro sync: task store replication failed — local state may be stale')
-    process.exit(1)
+    throw new Error('bro sync: task store replication failed — local state may be stale')
   }
 }
 
+/** The `bro sync` verb — also called in-process by the loop's exit
+ *  audit, so fatal failure paths THROW and never exit: an exit would
+ *  kill the calling runner mid-write and discard its still-buffered
+ *  audit output (bro-qjbwq). Warn-only failures keep their contract —
+ *  a failed data-ref push or store sync is best-effort (offline must
+ *  not block local work), not a throw. */
 export function runSyncCommand(argv: string[]): void {
   const pull = argv.includes('--pull')
   const root = dataRefRoot()
   if (root === null) {
-    console.error('bro sync: not inside a git worktree')
-    process.exit(1)
+    throw new Error('bro sync: not inside a git worktree')
   }
   const cfg = loadBroConfig(root)
   const { ref, remote, beads } = cfg.sync
