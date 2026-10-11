@@ -284,7 +284,7 @@ function errText(err: unknown): string {
  *  `no issues found matching the provided IDs` error payload on
  *  stdout. Only these mark a miss — anything else containing "not
  *  found" (a malformed payload, a dead store) must stay thrown. */
-const BD_NOT_FOUND = /Issue .+ not found|no issues found matching the provided IDs/i
+const BD_NOT_FOUND = /Issue \S+ not found|no issues found matching the provided IDs/i
 
 /** Classifier for a thrown bd error: true when the backend reported the
  *  requested id absent. Scans stderr *and* stdout — bd writes the
