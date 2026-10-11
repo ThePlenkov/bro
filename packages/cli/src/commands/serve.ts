@@ -72,6 +72,7 @@ import type { Readable } from 'node:stream'
 import {
   busPublish,
   busSocketPath,
+  deliverSinks,
   gitTry,
   SpawnError,
   startBusBroker,
@@ -947,10 +948,14 @@ function realDeps(dir: string, env: AgentConnectorEnv): ServeDeps {
     webhooks: {
       github: githubWebhookHandler({
         secret: () => process.env[GITHUB_WEBHOOK_SECRET_ENV],
-        publish: (event) =>
-          socketPath === null
+        publish: (event) => {
+          // this ingest bypasses the events facade — sinks fan out in
+          // this process too or a routed webhook never reaches a person
+          void deliverSinks(dir, event)
+          return socketPath === null
             ? Promise.resolve({ published: false, reason: 'not a repository' })
-            : busPublish(socketPath, event),
+            : busPublish(socketPath, event)
+        },
       }),
     },
   }

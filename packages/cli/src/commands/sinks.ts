@@ -7,13 +7,12 @@
  * at the next HUMAN GATE.
  *
  *   list [--json]   resolved sinks — type, route patterns, secret state
- *   test            deliver a probe event, print per-sink results
+ *   test [--json]   probe every sink's endpoint, print per-sink results
  */
 import { randomBytes } from 'node:crypto'
 import {
   deliverSinks,
   loadConfig,
-  sinkMatches,
   sinkSecrets,
   type SinkDef,
 } from '@broject/core'
@@ -23,7 +22,7 @@ function usage(exitCode = 1): never {
 
 Commands:
   list [--json]   Resolved sinks — type, route patterns, secret env state
-  test            Deliver a probe event; report per-sink ok/err`)
+  test [--json]   Deliver a probe event to every sink; report per-sink ok/err`)
   process.exit(exitCode)
 }
 
@@ -89,7 +88,7 @@ function cmdList(json: boolean): void {
   }
 }
 
-async function cmdTest(): Promise<void> {
+async function cmdTest(json: boolean): Promise<void> {
   const dir = process.cwd()
   const { sinks } = loadConfig(dir).notify
   if (sinks.length === 0) {
@@ -107,23 +106,22 @@ async function cmdTest(): Promise<void> {
     source: 'sinks',
     payload: `bro sinks test — probe ${nonce}`,
   }
-  const results = await deliverSinks(dir, probe)
-  const sent = new Set(results.map((r) => r.sink))
-  for (const [i, s] of sinks.entries()) {
-    const id = s.name ?? `${s.type}#${i}`
-    if (!sent.has(id) && !sinkMatches(s, probe)) {
-      console.log(`${id}  ${s.type}  skipped — no route match for sinks:test`)
+  // `all` — the test proves the endpoint itself; a sink routed only
+  // `convoy:gate` must still get its probe, not a silent skip
+  const results = await deliverSinks(dir, probe, { all: true })
+  if (json) {
+    console.log(JSON.stringify(results, null, 2))
+  } else {
+    for (const r of results) {
+      const line = r.delivered
+        ? `ok${r.status === undefined ? '' : ` (${r.status})`}`
+        : r.reason === 'deduped'
+          ? 'skipped — deduped'
+          : `FAILED — ${r.reason ?? 'unknown'}`
+      console.log(`${r.sink}  ${r.type}  ${line}`)
     }
   }
-  for (const r of results) {
-    const line = r.delivered
-      ? `ok${r.status === undefined ? '' : ` (${r.status})`}`
-      : r.reason === 'deduped'
-        ? 'skipped — deduped'
-        : `FAILED — ${r.reason ?? 'unknown'}`
-    console.log(`${r.sink}  ${r.type}  ${line}`)
-  }
-  // a failed delivery fails the probe; a skip is a report, not a fault
+  // a failed delivery fails the probe; a dedup skip is a report, not a fault
   if (results.some((r) => !r.delivered && r.reason !== 'deduped')) {
     process.exitCode = 1
   }
@@ -139,7 +137,7 @@ export async function runSinksCommand(argv: string[]): Promise<void> {
       cmdList(rest.includes('--json'))
       return
     case 'test':
-      await cmdTest()
+      await cmdTest(rest.includes('--json'))
       return
     default:
       console.error(`error: unknown subcommand "${sub}"`)

@@ -112,7 +112,11 @@ export function requestFor(
     if (chatId === undefined || chatId === '') {
       return { missing: sink.chatIdEnv ?? 'chatId' }
     }
-    const base = (sink.apiBase ?? TELEGRAM_API).replace(/\/+$/, '')
+    // linear trim — a `/+$/` regex on operator input is a ReDoS shape
+    let base = sink.apiBase ?? TELEGRAM_API
+    while (base.endsWith('/')) {
+      base = base.slice(0, -1)
+    }
     return {
       url: `${base}/bot${token}/sendMessage`,
       body: {
@@ -122,8 +126,10 @@ export function requestFor(
       },
     }
   }
-  const url =
-    (sink.urlEnv !== undefined ? env[sink.urlEnv]?.trim() : undefined) || sink.url
+  // `urlEnv` when named is the whole channel — falling back to a
+  // literal `url` would post events to a stale endpoint the operator
+  // declared env-indirected; an unset var reports missing, not a swap
+  const url = sink.urlEnv !== undefined ? env[sink.urlEnv]?.trim() : sink.url
   if (url === undefined || url === '') {
     return { missing: sink.urlEnv ?? 'url' }
   }
@@ -200,6 +206,10 @@ export interface DeliverOpts {
   now?: number
   /** Explicit sink list — bypasses config (tests, `bro sinks test`). */
   sinks?: SinkDef[]
+  /** Deliver to every sink regardless of route patterns — explicit
+   *  test delivery (`bro sinks test` proves the endpoint, not the
+   *  routing table). Normal publishes leave it unset. */
+  all?: boolean
   env?: NodeJS.ProcessEnv
 }
 
@@ -223,7 +233,7 @@ export async function deliverSinks(
   }
   const matched = sinks
     .map((sink, i) => ({ sink, id: sink.name ?? `${sink.type}#${i}` }))
-    .filter(({ sink }) => sinkMatches(sink, event))
+    .filter(({ sink }) => opts.all === true || sinkMatches(sink, event))
   if (matched.length === 0) {
     return []
   }
@@ -248,9 +258,12 @@ export async function deliverSinks(
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(req.body),
+          // the URL is the secret (telegram token in path, webhook
+          // endpoint) — never let a redirect carry the POST elsewhere
+          redirect: 'manual',
           signal: AbortSignal.timeout(sink.timeoutMs ?? DEFAULT_TIMEOUT_MS),
         })
-        if (res.status >= 400) {
+        if (res.status >= 300 || res.type === 'opaqueredirect' || res.status === 0) {
           return {
             sink: id,
             type: sink.type,
@@ -263,12 +276,16 @@ export async function deliverSinks(
         return { sink: id, type: sink.type, delivered: true, status: res.status }
       } catch (err) {
         const name = (err as { name?: string })?.name
-        const reason =
-          name === 'TimeoutError' || name === 'AbortError'
-            ? `timeout after ${sink.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`
-            : err instanceof Error
-              ? err.message
-              : String(err)
+        let reason: string
+        if (name === 'TimeoutError' || name === 'AbortError') {
+          reason = `timeout after ${sink.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`
+        } else {
+          // fetch errors can embed the request URL ("Failed to parse
+          // URL from …") — the endpoint is a secret, scrub it before
+          // the reason reaches a report or a log
+          const msg = err instanceof Error ? err.message : String(err)
+          reason = msg.replaceAll(req.url, '<endpoint>')
+        }
         return { sink: id, type: sink.type, delivered: false, reason }
       }
     })

@@ -50,9 +50,16 @@ Commands:
  *  failure must never turn a capture into a command failure. */
 function publishRetroEvent(topic: string, kind: string, key: string, text: string): void {
   const dir = process.cwd()
-  void facade('events', { dir }, { prefer: loadConfig(dir).connectors })
-    .publish({ topic, kind, key, source: 'retrospect', payload: text })
-    .catch(() => {})
+  // try/catch on the sync half too — `facade` throws on a misconfigured
+  // connector name before `.catch` can exist, and the record is already
+  // persisted; event delivery stays fail-open after persistence
+  try {
+    void facade('events', { dir }, { prefer: loadConfig(dir).connectors })
+      .publish({ topic, kind, key, source: 'retrospect', payload: text })
+      .catch(() => {})
+  } catch {
+    // fail-open — a bad events config must not fail the capture
+  }
 }
 
 function cmdCapture(rest: string[]): void {

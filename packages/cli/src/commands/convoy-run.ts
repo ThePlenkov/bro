@@ -158,6 +158,10 @@ export interface RunDeps {
   sleepSec: (sec: number) => Promise<void>
   now: () => number
   say: (msg: string) => void
+  /** Fires the moment a mol settles 'gated' — the human alert is the
+   *  gate's whole point; it cannot wait for the rest of the sequential
+   *  queue to drain. */
+  onGated?: (r: MolResult) => Promise<void>
 }
 
 const TERMINAL: ReadonlySet<AgentState> = new Set(['exited', 'lost', 'stopped', 'blocked'])
@@ -506,7 +510,11 @@ export async function runQueue(
   }
   const results: MolResult[] = []
   for (const molId of ids) {
-    results.push(await runMol(deps, cfg, molId))
+    const r = await runMol(deps, cfg, molId)
+    if (r.verdict === 'gated') {
+      await deps.onGated?.(r)
+    }
+    results.push(r)
   }
   return results
 }
@@ -565,14 +573,12 @@ export async function runConvoyRun(argv: string[]): Promise<void> {
     sleepSec: sleepWall,
     now: () => Date.now(),
     say,
+    onGated: (r) => publishGate(dir, r.mol, r.detail ?? ''),
   }
 
   const results = await runQueue(deps, cfg)
   let failed = 0
   for (const r of results) {
-    if (r.verdict === 'gated') {
-      await publishGate(dir, r.mol, r.detail ?? '')
-    }
     if (cfg.json) {
       console.log(JSON.stringify(r))
     } else {

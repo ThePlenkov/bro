@@ -354,10 +354,24 @@ function parseSinkDef(raw: unknown, i: number): SinkDef | null {
   const str = (k: string): string | undefined => (nonEmptyStr(o[k]) ? o[k].trim() : undefined)
   const num = (k: string): number | undefined =>
     typeof o[k] === 'number' && Number.isFinite(o[k]) && o[k] >= 0 ? o[k] : undefined
-  const events =
-    Array.isArray(o.events) && o.events.length > 0
-      ? o.events.filter((e): e is string => nonEmptyStr(e)).map((e) => e.trim())
-      : undefined
+  const routes = Array.isArray(o.events)
+    ? o.events.filter((e): e is string => nonEmptyStr(e)).map((e) => e.trim())
+    : undefined
+  // A supplied `events` says "restrict me" — when nothing in it parses
+  // (non-array, or every entry unusable) honoring the field as written
+  // is impossible, and omitting it would silently widen the sink to
+  // every event. Fail closed: drop the sink, say why. `events: []`
+  // stays legal — an explicitly empty list is the no-narrowing rule.
+  if (
+    o.events !== undefined &&
+    (routes === undefined || routes.length === 0) &&
+    !(Array.isArray(o.events) && o.events.length === 0)
+  ) {
+    console.error(
+      `bro.config: notify.sinks[${i}].events has no usable route — dropped (a restrictive intent must not widen to all events)`
+    )
+    return null
+  }
   const sink: SinkDef = { type }
   if (str('name') !== undefined) sink.name = str('name')
   if (str('url') !== undefined) sink.url = str('url')
@@ -366,7 +380,7 @@ function parseSinkDef(raw: unknown, i: number): SinkDef | null {
   if (str('chatId') !== undefined) sink.chatId = str('chatId')
   if (str('chatIdEnv') !== undefined) sink.chatIdEnv = str('chatIdEnv')
   if (str('apiBase') !== undefined) sink.apiBase = str('apiBase')
-  if (events !== undefined && events.length > 0) sink.events = events
+  if (routes !== undefined && routes.length > 0) sink.events = routes
   if (num('timeoutMs') !== undefined) sink.timeoutMs = num('timeoutMs')
   if (num('minIntervalMs') !== undefined) sink.minIntervalMs = num('minIntervalMs')
   const dead =

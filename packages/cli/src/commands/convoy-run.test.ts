@@ -447,6 +447,22 @@ describe('runQueue', () => {
     assert.deepEqual(rs.map((r) => r.verdict), ['done', 'failed', 'done'])
   })
 
+  test('a gated verdict fires onGated at settle — before the next mol runs', async () => {
+    const w = world()
+    const seq: string[] = []
+    w.nexts.set('m-gate', [next('gate', ['g-1'])])
+    w.nexts.set('m-done', [next('complete')])
+    w.deps.onGated = async (r) => void seq.push(`gated:${r.mol}`)
+    const origNext = w.deps.next
+    w.deps.next = (m) => {
+      seq.push(`next:${m.root.id}`)
+      return origNext(m)
+    }
+    const rs = await runQueue(w.deps, { ...CFG, mols: ['m-gate', 'm-done'] })
+    assert.equal(rs[0].verdict, 'gated')
+    assert.deepEqual(seq, ['next:m-gate', 'gated:m-gate', 'next:m-done'])
+  })
+
   test('--open merges the open set without duplicating named mols', async () => {
     const w = world()
     w.nexts.set('m-1', [next('complete')])
