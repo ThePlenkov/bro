@@ -551,11 +551,66 @@ const facade = {
   reviewThreads: async () => load().threads ?? [],
   resolveThread: () => {},
   replyThread: () => {},
-  labels: () => [],
+  // per-PR labels/body — the prs map's entries carry them; the flat
+  // single-PR path uses s.labels/s.prBody (spec bro-c650l ownership)
+  labels: (t) => {
+    const s = load()
+    if (s.labelsThrow) throw new Error('labels endpoint down')
+    if (s.prs) {
+      const p = Object.values(s.prs).find((p) => p.number === t.pr)
+      if (p) return p.labels ?? []
+    }
+    return s.labels ?? []
+  },
   prUpdatedAt: () => null,
+  prBody: (t) => {
+    const s = load()
+    if (s.prs) {
+      const p = Object.values(s.prs).find((p) => p.number === t.pr)
+      if (p) return p.body ?? ''
+    }
+    return s.prBody ?? ''
+  },
+  updatePrBody: (t, body) => {
+    const s = load()
+    if (s.prs) {
+      const p = Object.values(s.prs).find((p) => p.number === t.pr)
+      if (p) {
+        p.body = body
+        save(s)
+        return
+      }
+    }
+    s.prBody = body
+    save(s)
+  },
   createLabel: () => {},
-  addLabel: () => {},
-  removeLabel: () => {},
+  addLabel: (t, label) => {
+    const s = load()
+    if (s.prs) {
+      const p = Object.values(s.prs).find((p) => p.number === t.pr)
+      if (p) {
+        p.labels = (p.labels ?? []).concat(label)
+        save(s)
+        return
+      }
+    }
+    s.labels = (s.labels ?? []).concat(label)
+    save(s)
+  },
+  removeLabel: (t, label) => {
+    const s = load()
+    if (s.prs) {
+      const p = Object.values(s.prs).find((p) => p.number === t.pr)
+      if (p) {
+        p.labels = (p.labels ?? []).filter((l) => l !== label)
+        save(s)
+        return
+      }
+    }
+    s.labels = (s.labels ?? []).filter((l) => l !== label)
+    save(s)
+  },
   retargetPr: (t, base) => {
     const s = load()
     s.retargets = (s.retargets ?? []).concat([{ pr: t.pr, base }])

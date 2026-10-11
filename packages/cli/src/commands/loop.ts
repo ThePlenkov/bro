@@ -70,6 +70,7 @@ import {
   reviewHost,
   SpawnError,
   specStore,
+  stampPrOwnership,
   stepParent,
   withFileLock,
   type AgentConnector,
@@ -754,6 +755,38 @@ function stampProjection(ctx: Ctx, beads: ReadyBead[], pr: number): void {
   }
 }
 
+/** PR ownership marking (spec bro-c650l) — stamped at DISCOVERY, the
+ *  one chokepoint every loop PR crosses, never trusted to the worker's
+ *  pr-create flags. A draft is the merge=human contract — bro opened
+ *  it, the human merges — so it stamps 'bro-review'; everything else
+ *  is 'bro-managed'. Best-effort by contract: a host without labels
+ *  skips the label half, a failed write warns, and the gate stack arms
+ *  either way. */
+function stampLoopPr(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number): void {
+  let draft = false
+  try {
+    draft = ctx.rev.prMeta({ repo: ctx.repo, pr }).isDraft
+  } catch {
+    // a failed probe stamps managed — the loop's honest claim for the
+    // PR it just pushed (the gate still blocks a draft below)
+  }
+  stampPrOwnership(
+    ctx.rev,
+    { repo: ctx.repo, pr },
+    {
+      ownership: draft ? 'review' : 'managed',
+      meta: {
+        managed: !draft,
+        bead: beads.map((b) => b.id).join(','),
+        mode: 'loop',
+        run: item.branch,
+      },
+    },
+    (msg) => console.error(`loop: ${msg}`)
+  )
+}
+
+
 /** Best-effort return of a bead to the open queue — the claim's
  *  release transition lands in the lifecycle journal beside it. */
 function reopenBead(ctx: Ctx, id: string): void {
@@ -1344,6 +1377,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   if (pr === null) {
     return { kind: 'done', result: settleNoPr(ctx, beads, item, code, elapsed) }
   }
+  stampLoopPr(ctx, beads, item, pr)
   // the loop IS the watcher — arm the same marker `act wait` drops
   // (bro-z0k2u) for the member's whole stack tenure, not per poll:
   // a reboot-killed loop leaves a dead marker `bro act rearm`

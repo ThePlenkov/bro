@@ -22,6 +22,7 @@ import {
   facade,
   gitTry,
   pidAlive,
+  prOwnership,
   readAgentRegistry,
   reviewHost,
 } from '@broject/core'
@@ -102,6 +103,9 @@ interface BroStatus {
     reviewersPending: number
     sastPending: number
     blockers: string[]
+    /** who lands the PR (spec bro-c650l) — absent when the label read
+     *  itself failed; 'human' means no bro marker */
+    ownership?: 'managed' | 'review' | 'human'
   } | null
 }
 
@@ -262,6 +266,12 @@ async function readAct(dir: string): Promise<BroStatus['act']> {
       docsMaxRounds: act.docsMaxRounds,
     })
     const gate = evaluateExitGate(state)
+    // ownership marker — advisory read, a failure degrades the marker,
+    // never the section
+    let ownership: 'managed' | 'review' | 'human' | undefined
+    try {
+      ownership = prOwnership(rev.labels({ repo, pr: pr.pr }))
+    } catch { /* unprobed — the row renders without it */ }
     return {
       pr: state.pr,
       url: state.url,
@@ -272,6 +282,7 @@ async function readAct(dir: string): Promise<BroStatus['act']> {
       reviewersPending: state.reviewersPending,
       sastPending: state.sastPending,
       blockers: gate.blockers,
+      ownership,
     }
   } catch {
     return null
@@ -331,7 +342,16 @@ function actLine(act: NonNullable<BroStatus['act']> | null): string {
     return 'act: no open PR for this branch'
   }
   const blockers = act.blockers.length > 0 ? ` — ${act.blockers.join('; ')}` : ''
-  return `act: [#${act.pr}](${act.url}) ${act.gate}${blockers}`
+  // the marker names the label (`gh pr list -l bro-managed`), 'human'
+  // for the unmarked third state
+  const own =
+    act.ownership === 'managed'
+      ? 'bro-managed'
+      : act.ownership === 'review'
+        ? 'bro-review'
+        : act.ownership
+  const suffix = own === undefined ? '' : ` · ${own}`
+  return `act: [#${act.pr}](${act.url}) ${act.gate}${blockers}${suffix}`
 }
 
 function buildLine(build: NonNullable<BroStatus['build']>): string {

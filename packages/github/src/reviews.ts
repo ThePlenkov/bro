@@ -1301,6 +1301,22 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
     reviewThreads,
     labels,
     prUpdatedAt,
+    prBody(t) {
+      return (
+        ghJson<{ body?: string }>([
+          'pr',
+          'view',
+          String(t.pr),
+          '--repo',
+          t.repo,
+          '--json',
+          'body',
+        ]).body ?? ''
+      )
+    },
+    updatePrBody(t, body) {
+      gh(['pr', 'edit', String(t.pr), '--repo', t.repo, '--body', body])
+    },
     createLabel(repo, name, color) {
       gh(['label', 'create', name, '--repo', repo, '--color', color, '--force'])
     },

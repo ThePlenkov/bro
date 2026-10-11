@@ -235,6 +235,12 @@ export interface ReviewFacade {
 
   labels(t: PrTarget): string[]
   prUpdatedAt(t: PrTarget): string | null
+  /** The PR body — the `<!-- bro: {...} -->` provenance trailer rides
+   *  it (spec specs/bro-c650l.md). Optional pair: a host without body
+   *  access leaves the trailer unstamped — labels alone still mark
+   *  ownership. */
+  prBody?(t: PrTarget): string
+  updatePrBody?(t: PrTarget, body: string): void
   /** Idempotent — creates or updates the label in place. */
   createLabel(repo: string, name: string, color: string): void
   addLabel(t: PrTarget, label: string): void

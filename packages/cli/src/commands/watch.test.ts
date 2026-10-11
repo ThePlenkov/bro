@@ -272,6 +272,27 @@ describe('renderSnapshot', () => {
     assert.doesNotMatch(text, /fleet\n  unavailable/)
   })
 
+  test('gate rows carry the ownership marker — label names, human when unmarked (bro-c650l)', () => {
+    const text = renderSnapshot(
+      snap({
+        gates: {
+          available: true,
+          prs: [
+            prGate({ pr: 12, ownership: 'managed' }),
+            prGate({ pr: 13, link: '[#13](x)', ownership: 'review' }),
+            prGate({ pr: 14, link: '[#14](x)', ownership: 'human' }),
+            prGate({ pr: 15, link: '[#15](x)' }),
+          ],
+        },
+      })
+    )
+    assert.match(text, /\[#12\]\(https:\/\/github\.com\/o\/r\/pull\/12\)\s+ok\s+· bro-managed/)
+    assert.match(text, /\[#13\]\(x\)\s+ok\s+· bro-review/)
+    assert.match(text, /\[#14\]\(x\)\s+ok\s+· human/)
+    // an unprobed marker renders nothing — never a false 'human'
+    assert.match(text, /\[#15\]\(x\)\s+ok\n/)
+  })
+
   test('attention and sections render their contents', () => {
     const text = renderSnapshot(
       snap({

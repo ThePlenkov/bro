@@ -221,6 +221,25 @@ describe('bro loop e2e', () => {
     })
   })
 
+  test('discovery stamps bro-managed + the provenance trailer (bro-c650l)', () => {
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }])
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /loop: fx-a landed/)
+      // the stamp lands at findPr — every loop PR crosses it, no
+      // worker pr-create flag needed
+      const host = readHostState(f.hostState)
+      assert.deepEqual(host.labels, ['bro-managed'])
+      assert.equal(
+        host.prBody,
+        '<!-- bro: {"managed":true,"bead":"fx-a","mode":"loop","run":"loop/fx-a"} -->'
+      )
+      // the marker IS the merge-mode contract — a stamped PR lands
+      // without the act-merge human-owned warning
+      assert.doesNotMatch(r.stderr, /carries no bro-managed/)
+    })
+  })
+
   test('dry-run prints the plan and claims nothing', () => {
     const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }])
     inside(f.main, f.root, () => {
