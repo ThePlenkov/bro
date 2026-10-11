@@ -102,9 +102,11 @@ function syncPull(root: string, cfg: ReturnType<typeof loadBroConfig>): void {
 }
 
 /** The `bro sync` verb — also called in-process by the loop's exit
- *  audit, so every failure path THROWS and never exits: an exit would
+ *  audit, so fatal failure paths THROW and never exit: an exit would
  *  kill the calling runner mid-write and discard its still-buffered
- *  audit output (bro-qjbwq). */
+ *  audit output (bro-qjbwq). Warn-only failures keep their contract —
+ *  a failed data-ref push or store sync is best-effort (offline must
+ *  not block local work), not a throw. */
 export function runSyncCommand(argv: string[]): void {
   const pull = argv.includes('--pull')
   const root = dataRefRoot()
