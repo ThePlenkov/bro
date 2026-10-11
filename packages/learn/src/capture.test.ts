@@ -357,6 +357,9 @@ describe('capture', { skip: WIN32 }, () => {
                 close_reason: 'PR open [#7](https://x/7)\nlearn: bro act merge refuses on a red gate',
               },
               { id: 'fx-s2', status: 'closed', title: 'Verify', close_reason: 'gate green' },
+              // a closed step with no close_reason can't be audited —
+              // it's logged, not skipped silently
+              { id: 'fx-s3', status: 'closed', title: 'Cleanup' },
             ],
             dependencies: [],
           },
@@ -372,6 +375,11 @@ describe('capture', { skip: WIN32 }, () => {
           { kind: 'bead', ref: 'fx-m1' },
         ])
         assert.equal(l.source, 'capture:mol')
+        assert.ok(
+          plan.skipped.some(
+            (s) => s.origin === 'fx-s3' && s.reason === 'closed step has no close_reason'
+          )
+        )
       }
     )
   })

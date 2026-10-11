@@ -670,7 +670,12 @@ function harvestMol(molId: string, dir?: string): Harvest {
       .map((l) => LEARN_FLAG.exec(l.trim())?.[1]?.trim())
       .filter((l): l is string => l !== undefined && l !== '')
     if (flagged.length === 0) {
-      continue // an unflagged result is a handoff, not a lesson
+      // an unflagged result is a handoff, not a lesson — but a step
+      // without a close_reason can't be audited at all, so it's logged
+      if (!step.close_reason) {
+        out.skipped.push({ origin: step.id, reason: 'closed step has no close_reason' })
+      }
+      continue
     }
     for (const text of flagged) {
       const lesson = oneLine(text)
