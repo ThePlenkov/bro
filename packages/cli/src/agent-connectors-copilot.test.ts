@@ -1,7 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { readAgentRegistry, sessionPlane, SpawnError, AgentNotFound } from '@broject/core'
 import {
@@ -11,44 +11,7 @@ import {
   type AgentConnectorEnv,
 } from './agent-connectors.ts'
 import { copilotCountFile } from './session-planes/copilot.ts'
-import { initRepo } from './commands/testrepo.ts'
-
-/** bd shim — JSON store at $BEADS_DIR/store.json; same coverage as the
- *  gascity/native connector tests (show, update --claim/--assignee,
- *  actor). */
-const FAKE_BD = `#!/usr/bin/env node
-const fs = require('node:fs')
-const DB = process.env.BEADS_DIR + '/store.json'
-const load = () => { try { return JSON.parse(fs.readFileSync(DB, 'utf8')) } catch { return { rows: [] } } }
-const save = (db) => fs.writeFileSync(DB, JSON.stringify(db))
-const args = process.argv.slice(2).filter((a) => a !== '--json')
-if (args[0] === 'config' && args[1] === 'get' && args[2] === 'actor') {
-  console.log('actor = tester'); process.exit(0)
-}
-const row = (id) => load().rows.find((r) => r.id === id)
-if (args[0] === 'show') {
-  const r = row(args[1])
-  if (!r) { console.error('not found: ' + args[1]); process.exit(1) }
-  process.stdout.write(JSON.stringify([r]) + '\\n')
-} else if (args[0] === 'update') {
-  const db = load()
-  const r = db.rows.find((x) => x.id === args[1])
-  if (!r) { console.error('not found: ' + args[1]); process.exit(1) }
-  for (let i = 2; i < args.length; i++) {
-    const k = args[i].slice(2)
-    if (k === 'claim') {
-      if (r.status !== 'open') { console.error('already claimed'); process.exit(1) }
-      r.status = 'in_progress'
-      r.assignee = 'tester'
-    } else {
-      r[k] = args[++i]
-    }
-  }
-  save(db)
-} else {
-  console.error('unhandled: ' + args.join(' ')); process.exit(1)
-}
-`
+import { initRepo, installFakeBd, readBeads } from './commands/testrepo.ts'
 
 /** gh shim — the REST agent-task surface the connector speaks, backed
  *  by a JSON store at $FAKE_GH_DB ({tasks, prs, cancelledRuns, seq}).
@@ -164,21 +127,18 @@ function fixture(
   ghSeed: Partial<GhDb> = {}
 ): Fixture {
   const { root, main } = initRepo('bro-cpconn-')
-  const beadsDir = join(root, 'beads')
-  mkdirSync(beadsDir, { recursive: true })
-  const db = join(beadsDir, 'store.json')
-  writeFileSync(db, JSON.stringify({ rows }))
-  const binDir = join(root, 'bin')
-  mkdirSync(binDir)
-  writeFileSync(join(binDir, 'bd'), FAKE_BD)
+  // the shared fake bd — the claim store lives at <root>/beads.json
+  // under FAKE_BD_DB; spec.beadsDir is the same dir the connector pins
+  const { binDir, db } = installFakeBd(root, rows)
+  const beadsDir = root
   writeFileSync(join(binDir, 'gh'), FAKE_GH)
-  chmodSync(join(binDir, 'bd'), 0o755)
   chmodSync(join(binDir, 'gh'), 0o755)
   const ghDb = join(root, 'gh.json')
   writeFileSync(ghDb, JSON.stringify({ tasks: [], prs: [], cancelledRuns: [], seq: 1, ...ghSeed }))
   const prevPath = process.env.PATH ?? ''
   process.env.PATH = `${binDir}:${prevPath}`
   process.env.FAKE_GH_DB = ghDb
+  process.env.FAKE_BD_DB = db
   return {
     root,
     main,
@@ -186,7 +146,7 @@ function fixture(
     ghDb,
     env: { agents: { copilot: { ...knobs } }, connectors: {} },
     prevPath,
-    rows: () => JSON.parse(readFileSync(db, 'utf8')).rows,
+    rows: () => readBeads(db),
     gh: () => JSON.parse(readFileSync(ghDb, 'utf8')),
     saveGh: (d) => writeFileSync(ghDb, JSON.stringify(d)),
   }
@@ -198,6 +158,7 @@ function cleanup(fx: Fixture): void {
   delete process.env.FAKE_GH_FAIL
   delete process.env.FAKE_GH_NOCANCEL
   delete process.env.FAKE_GH_STATE
+  delete process.env.FAKE_BD_DB
   rmSync(fx.root, { recursive: true, force: true })
 }
 

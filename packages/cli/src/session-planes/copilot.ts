@@ -104,7 +104,10 @@ function cachedCount(file: string, label: string, now = Date.now()): number {
       'unavailable'
     )
   }
-  if (now - cache.at >= COPILOT_COUNT_TTL_MS) {
+  const age = now - cache.at
+  // negative age — a clock that moved backwards or a cache stamped in
+  // the future — is as unverifiable as a stale one: fail closed
+  if (age >= COPILOT_COUNT_TTL_MS || age < 0) {
     throw new SpawnError(
       `cannot verify copilot ${label} count — ${file} is stale ` +
         `(>${Math.round(COPILOT_COUNT_TTL_MS / 1000)}s old); ` +

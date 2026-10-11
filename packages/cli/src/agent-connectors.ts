@@ -4437,6 +4437,11 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
             log: copilotSessionUrl(target.slug, spawned.pr, spawned.sessionId),
           }
         } catch (err) {
+          // the create may still have landed server-side (a timeout or
+          // a lost response can't prove the task doesn't exist) —
+          // refresh the remote count so the NEXT admission sees the
+          // orphan's share instead of only the released reservation
+          copilotRefreshCount(dir, env)
           if (reservation !== undefined) {
             releaseSessionSlot(reservation)
           }
@@ -4523,13 +4528,17 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
             ghRun(['api', '-X', 'POST', `repos/${repo}/actions/runs/${runId}/cancel`])
           }
           const after = copilotFetchTask(taskId)
-          if (after.ok && COPILOT_LIVE_STATES.has(copilotTaskState(after.task!))) {
+          if (!after.ok || COPILOT_LIVE_STATES.has(copilotTaskState(after.task!))) {
             const url =
               copilotSessionUrl(repo, entry.pr, entry.sessionId) ??
               `https://${ghHost()}/copilot/agents`
             console.error(
-              `warning: copilot session for ${molStep} is still live — there is no ` +
-                `CLI/REST cancel; stop it in the web UI (${url})`
+              after.ok
+                ? `warning: copilot session for ${molStep} is still live — there is no ` +
+                  `CLI/REST cancel; stop it in the web UI (${url})`
+                : `warning: cannot re-check copilot task ${taskId} after cancel — ` +
+                  `${after.err ?? 'gh api failed'}; the session may still be live — ` +
+                  `stop it in the web UI (${url})`
             )
           }
         }
