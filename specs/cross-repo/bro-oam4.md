@@ -60,8 +60,13 @@ requester's `accept`/`reject` — is written to that same store
 (`bd -C <anchor>`), resolved through the peer binding. Readers point-
 check with `bro mesh wait <thread>`; nothing sleeps.
 
-**`done` ships the capability.** The `external:` dep releases only
-when the target store holds a closed `provides:<id>` issue, and
+**`done` ships the capability.** The dep's release condition is a
+closed `provides:<id>` issue in the target store — what a
+dep-resolving bd would check before unblocking the waiter. bd 1.3.1
+stores `external:` deps verbatim and never resolves them
+(bro-kim1e), so `bd ready` lists the waiter regardless; `bro mesh
+wait` is the point check that reads the `provides:` landing, and
+the ship wiring is what gives that landing one unambiguous shape.
 `provides:` lands only through `bd ship` — which finds its issue by
 `export:<id>` and refuses an open one. So when `bro mesh done` posts
 the result into the anchor store it follows with `bd -C <anchor>
@@ -75,9 +80,7 @@ exists to prevent. The requester never ships: its verdict is
 completion (mesh Trust). Own-store posts are different — the request
 bead stays on the requester's side, where an `export:` pin would arm
 self-ship, so the pin rides delivery, not posting; the pull
-topology's ship carrier is the mesh epic's slice, not this phase's
-(bd 1.3.1 cannot resolve the `external:` URI form anyway —
-bro-kim1e).
+topology's ship carrier is the mesh epic's slice, not this phase's.
 
 **Reading the anchor back rewrites one `meshThread` rule.**
 `admitPeerRecord` assumes a store's records are authored by its owner
@@ -92,6 +95,14 @@ record in a bound local store is the delivery working, not
 impersonation — while any other `from` still drops and flags. Pull
 transports keep the strict check: a foreign-authored record inside a
 replica cannot be legitimate.
+
+The `local` scan feeding `meshThread` also admits closed rows: the
+request anchor's `bd close` is `done`'s own ship precondition, so a
+closed `kind=request` bead is a healthy thread's terminal state, not
+absence — an open-only scan loses the anchor the moment `done` lands,
+and `bro mesh wait` plus both verdict verbs (which resolve the same
+anchor) report no request. Inbox keeps the open-only filter — a
+closed request is claimed work, never pending.
 
 Sovereignty: same-machine checkouts are a shared trust domain — the
 writer provably has filesystem access already. The drop writes
@@ -121,15 +132,19 @@ transport — so a `from` matching no peer binding is surfaced flagged
 ### Waiter wiring and policy text
 
 `--for <bead>` (same flag as `bro mesh request`) runs
-`bd dep add <bead> external:<rig>:<id>` — bd's external dep blocks
-the waiter until the capability closes in the named store. The
+`bd dep add <bead> external:<rig>:<id>` — a marker, not a gate: bd
+1.3.1 never resolves external deps, so `bd ready` lists the waiter
+anyway; the wait is session discipline through `bro mesh wait`
+point checks, and the `provides:` landing above is the release
+condition a dep-resolving bd would honor. The
 session-facing rule lands in AGENTS.md (Conventions), verbatim:
 
 > **Foreign findings become requests, never patches** — work that
 > belongs to another repo is posted to that rig's inbox, never
 > edited in place: `bro request <repo> <title> --for <bead>` drops
-> the request bead and blocks mine on `external:<rig>:<id>`;
-> `bro mesh wait <id>` point-checks the answer.
+> the request bead and pins an `external:<rig>:<id>` edge on mine —
+> a marker, not a gate; `bro mesh wait <id>` point-checks the
+> answer.
 
 ## Non-goals (this phase)
 
@@ -150,7 +165,8 @@ packages/mesh/src/request.ts            resolve + deliver + ensure-binding,
                                         export:<id> pin on delivery
 packages/mesh/src/identity.ts           selfRig hoisted in — shared rig resolver
 packages/mesh/src/inbox.ts              own-store scan (unbound flag)
-packages/mesh/src/thread.ts             local-anchor admit rule
+packages/mesh/src/thread.ts             local-anchor admit rule +
+                                        closed-row scan
 packages/cli/src/commands/mesh.ts       lifecycle writes → anchor store;
                                         done ships `bd ship <thread>`
 AGENTS.md                               policy bullet
@@ -176,7 +192,10 @@ AGENTS.md                               policy bullet
       (open request bead → named remedy, never `--force`)
 - [ ] `packages/mesh/src/thread.ts` — `admitPeerRecord` widened for
       `local` peers: `from` ∈ {binding rig, selfRig} admits with
-      provenance = `from`; any other `from` still drops and flags
+      provenance = `from`; any other `from` still drops and flags;
+      the `local` scan feeding `meshThread` includes closed rows so
+      the anchor survives `done`'s `bd close` (inbox stays
+      open-only)
 - [ ] `bro mesh inbox` own-store scan + `unbound` provenance flag
 - [ ] AGENTS.md Conventions bullet (verbatim text above)
 - [ ] tests: resolution matrix (alias / uri / path / basename /
@@ -186,9 +205,9 @@ AGENTS.md                               policy bullet
       (request + own verdicts visible, foreign `from` dropped), e2e
       two-checkouts: request → `bd ready` in target → claim → `bd
       close` → done → `provides:<id>` on the closed bead →
-      requester's `external:` dep releases → `bro mesh wait` →
-      accept; `done` on an unclosed request bead warns and ships
-      nothing
+      requester's `bro mesh wait` still resolves the closed anchor
+      (the dep stays a marker on bd 1.3.1) → accept; `done` on an
+      unclosed request bead warns and ships nothing
 
 ## Alternatives
 
