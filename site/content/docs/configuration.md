@@ -129,8 +129,8 @@ beads store mounted at their host paths:
 | --- | ------- | ---- |
 | `agents.docker.command` | `loop.agent` | Command run inside the container |
 | `agents.docker.image` | unset | Image to run; wins over the devcontainer when set |
-| `agents.docker.devcontainer` | `.devcontainer/devcontainer.json` | JSONC devcontainer file, repo-relative. Its `image` is used directly; `build.dockerfile` is built once per content-hash tag (`bro-dev-<sha256/12>`). `dockerComposeFile` configs are unsupported — set `agents.docker.image` for those |
-| `agents.docker.runArgs` | unset | Extra `docker run` arguments — array or whitespace-split string (e.g. `["--network", "host"]`) |
+| `agents.docker.devcontainer` | `.devcontainer/devcontainer.json` | JSONC devcontainer file, repo-relative or absolute. Its `image` is used directly (pulled before spawning when absent); `build.dockerfile` is rebuilt on every spawn — docker's layer cache makes a no-op build fast — under a content-hash tag (`bro-dev-<sha256/12>`). `dockerComposeFile` configs are unsupported — set `agents.docker.image` for those |
+| `agents.docker.runArgs` | unset | Extra `docker run` arguments — array or whitespace-split string (e.g. `["--network", "host"]`). Containers default to the host `--user uid:gid` so bind-mounted files stay host-owned; set `-u`/`--user` here to override |
 
 ### `providers`
 

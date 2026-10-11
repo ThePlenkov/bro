@@ -848,10 +848,16 @@ function gcOccupies(
   return gcState(s) === 'running' || gcState(s) === 'spawned'
 }
 
-/** docker occupancy — a name absent from the daemon's live list frees
- *  the slot; an inconclusive probe occupies (the daemon may hold a
- *  running worker we can't see — same honesty rule as tmux). */
+/** docker occupancy — a recorded death frees the slot regardless of
+ *  the probe (a stopped entry was rm'd; an exitStatus means --rm
+ *  already cleaned — neither can hold a live container). A name absent
+ *  from the daemon's live list also frees; an inconclusive probe
+ *  occupies (the daemon may hold a running worker we can't see — same
+ *  honesty rule as tmux). */
 function dockerOccupies(entry: AgentRegistryEntry, live: Set<string> | undefined): boolean {
+  if (entry.stopped === true || entry.exitStatus !== undefined) {
+    return false
+  }
   const name = dockerContainerName(entry)
   return name !== undefined && (live === undefined || live.has(name))
 }
@@ -2995,11 +3001,12 @@ registerAgentConnector('gascity', makeGascityConnector, { matchDir: gcMatchDir }
  *  tmux's pane pid (VM-hosted daemons report VM pids — liveness
  *  never reads it); `containerId` is the durable handle.
  *
- *  Knobs: `agents.docker.image` (wins over the devcontainer lookup),
- *  `agents.docker.devcontainer` (default <repoRoot>/.devcontainer/
- *  devcontainer.json — "image" runs verbatim, "build.dockerfile"
- *  builds once per content hash), `agents.docker.runArgs` (escape
- *  hatch: --network, -p, credential mounts), `agents.docker.command`
+ *  Knobs: `agents.docker.image` (wins over the devcontainer lookup,
+ *  pulled when absent), `agents.docker.devcontainer` (default
+ *  <repoRoot>/.devcontainer/devcontainer.json — "image" runs verbatim,
+ *  "build.dockerfile" rebuilds every spawn under a content-hash tag —
+ *  docker's layer cache prices the no-op), `agents.docker.runArgs`
+ *  (escape hatch: --network, -p, credential mounts), `agents.docker.command`
  *  (→ loop.agent, same {promptFile} template). No matchDir — a repo's
  *  devcontainer.json is the project's file, never a claim on backend
  *  resolution; `connectors.agents: "docker"` or --connector picks it. */
@@ -3196,27 +3203,34 @@ function dockerRunArgs(v: unknown): string[] {
   return typeof v === 'string' ? v.split(/\s+/).filter((s) => s !== '') : []
 }
 
-/** The paths a container needs at their identical host locations —
- *  the worktree, the git common dir (worktree .git file → .git/
- *  worktrees/<n>, plus bro/agents artifacts and bro/hooks markers),
- *  and the shared beads store. A path already inside an earlier mount
- *  is skipped. */
-function dockerMounts(spec: SpawnSpec): string[] {
-  const mounts: string[] = []
+/** A bind pair — the SOURCE is canonicalized (resolve() folds `..`,
+ *  realpath additionally folds a symlinked component, which would
+ *  otherwise bind a path resolving to a different inode); the TARGET
+ *  stays resolve()'s form because it is the path the worker reads —
+ *  BEADS_DIR and prompt/log/.exit paths carry spec values verbatim,
+ *  so the container must see them exactly as the env pins spell them. */
+interface DockerMount {
+  source: string
+  target: string
+}
+
+/** The paths a container needs — the worktree, the git common dir
+ *  (worktree .git file → .git/worktrees/<n>, plus bro/agents artifacts
+ *  and bro/hooks markers), and the shared beads store. A target already
+ *  inside an earlier target is skipped — the parent bind covers it. */
+function dockerMounts(spec: SpawnSpec): DockerMount[] {
+  const mounts: DockerMount[] = []
   const add = (p: string): void => {
-    // canonicalize — resolve() folds `..`; realpath additionally folds
-    // a symlinked component, which would otherwise mount a path that
-    // resolves to a different inode (or nothing) inside the container.
-    // Unresolvable sources keep resolve()'s form — docker creates a
-    // missing source root-owned, which is the operator's path to give.
-    let c = resolve(p)
+    const target = resolve(p)
+    let source = target
     try {
-      c = realpathSync(c)
+      source = realpathSync(target)
     } catch {
-      // not created yet — docker will create it
+      // not created yet — docker will create the source root-owned,
+      // which is the operator's path to give
     }
-    if (c !== '' && !mounts.some((m) => c === m || c.startsWith(`${m}/`))) {
-      mounts.push(c)
+    if (target !== '' && !mounts.some((m) => target === m.target || target.startsWith(`${m.target}/`))) {
+      mounts.push({ source, target })
     }
   }
   add(spec.repoRoot)
@@ -3323,14 +3337,30 @@ function buildDevcontainerImage(dcPath: string, dockerfile: string, dc: Devconta
 export function dockerImageFor(spec: SpawnSpec, knobs: Record<string, unknown>): string {
   const kImage = knobs.image
   if (typeof kImage === 'string' && kImage.trim() !== '') {
-    return kImage.trim()
+    return ensureDockerImage(kImage.trim())
   }
   const dcPath = devcontainerPath(spec, knobs)
   const dc = readDevcontainer(dcPath)
   if (typeof dc.image === 'string' && dc.image.trim() !== '') {
-    return dc.image.trim()
+    return ensureDockerImage(dc.image.trim())
   }
   return buildDevcontainerImage(dcPath, devcontainerDockerfile(dcPath, dc), dc)
+}
+
+/** A verbatim image (knob or devcontainer `image:`) must exist BEFORE
+ *  `docker run` — an implicit pull inside the registry lock would pay
+ *  hundreds of MB behind the 30s run timeout and stall every other
+ *  spawn. Inspect is cheap; pull gets the build's 10-minute budget. */
+function ensureDockerImage(image: string): string {
+  if (dockerRun(['image', 'inspect', image]).code === 0) {
+    return image
+  }
+  const p = dockerRun(['pull', image], 600_000)
+  if (p.code !== 0) {
+    const why = p.err !== '' ? p.err : `exited ${p.code}`
+    throw new SpawnError(`docker pull ${image} failed — ${why}`, 'unavailable')
+  }
+  return image
 }
 
 /** The liveness verdict for one docker entry — the batched `live` set
@@ -3368,6 +3398,28 @@ function toDockerInfo(
   }
 }
 
+/** Host-bound vars — `--env-file` OVERRIDES the image's own ENV, so a
+ *  forwarded PATH/HOME/TMPDIR would shadow the toolchain paths the
+ *  image set up (a macOS /opt/homebrew PATH finds nothing inside a
+ *  Linux image; HOME=/Users/x breaks npm's cache and the agent CLI's
+ *  config/credentials). spec.env is NOT filtered — an explicit knob
+ *  is the operator's choice. */
+const DOCKER_HOST_ENV = new Set([
+  'PATH',
+  'HOME',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  'PWD',
+  'OLDPWD',
+  'SHELL',
+  'USER',
+  'LOGNAME',
+  'HOSTNAME',
+  'SHLVL',
+  '_',
+])
+
 /** The ambient env file — a 0600 file like tmux's, deleted by the
  *  caller after `docker run` (and on any failure). argv is visible to
  *  every local user (`ps`, `docker inspect`), so the ambient bag
@@ -3376,7 +3428,10 @@ function toDockerInfo(
  *  the keys. */
 function writeDockerEnvFile(envFile: string, spec: SpawnSpec): void {
   const dropped: string[] = []
-  const ambient = Object.entries({ ...process.env, ...spec.env })
+  const ambient = Object.entries({
+    ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !DOCKER_HOST_ENV.has(k))),
+    ...spec.env,
+  })
     .filter((e): e is [string, string] => {
       if (e[1] === undefined || !/^[A-Za-z_]\w*$/.test(e[0]) || AGENT_PIN_KEYS.has(e[0])) {
         return false
@@ -3399,11 +3454,15 @@ function writeDockerEnvFile(envFile: string, spec: SpawnSpec): void {
 
 /** The `docker run` argv — operator `runArgs` sit FIRST so docker's
  *  last-wins flag semantics keep `--name`/`--workdir`/labels/mounts
- *  under bro's control no matter what an operator passes. */
+ *  under bro's control no matter what an operator passes. `--user`
+ *  defaults to the host uid:gid — without it a rootful worker leaves
+ *  root-owned files in the mounted worktree/git dir/beads store, and
+ *  every later host-side git/rm hits EACCES; an operator `-u`/`--user`
+ *  in runArgs still wins because the default is skipped, not shadowed. */
 function dockerRunArgv(
   name: string,
   spec: SpawnSpec,
-  mounts: string[],
+  mounts: DockerMount[],
   envFile: string,
   agentId: string,
   promptFile: string,
@@ -3413,21 +3472,27 @@ function dockerRunArgv(
   image: string,
   wrapper: string
 ): string[] {
+  const userArgs =
+    typeof process.getuid === 'function' &&
+    !runArgs.some((a) => a === '--user' || a === '-u' || a.startsWith('--user='))
+      ? ['--user', `${process.getuid()}:${process.getgid!()}`]
+      : []
   return [
     'run',
     '-d',
     '--init',
     '--rm',
+    ...userArgs,
     ...runArgs,
     '--name',
     name,
     '--workdir',
-    mounts[0] ?? resolve(spec.repoRoot),
+    mounts[0]?.target ?? resolve(spec.repoRoot),
     '--label',
     'bro.managed=1',
     '--label',
     `bro.step=${spec.molStep}`,
-    ...mounts.flatMap((m) => ['-v', `${m}:${m}`]),
+    ...mounts.flatMap((m) => ['-v', `${m.source}:${m.target}`]),
     '--env-file',
     envFile,
     ...agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(([k, v]) => [

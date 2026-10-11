@@ -33,10 +33,13 @@ one registry entry per molStep, `pid`→container's host pid,
 
 ### Isolation model — same paths inside and out
 
-`docker run` mounts every path the worker needs at its **identical
-absolute host path**, canonicalized through `resolve()` + `realpath()`
-— a symlinked component would otherwise mount a path that resolves to
-a different inode (or nothing) inside the container:
+`docker run` mounts every path the worker needs as a
+`realpath(source):resolve(target)` bind — the source is canonicalized
+through `resolve()` + `realpath()` (a symlinked component would
+otherwise mount a path resolving to a different inode or nothing), the
+target stays `resolve()`'s form because it is the path the worker
+reads — env pins carry spec values verbatim, so the container must see
+them exactly as `BEADS_DIR` and the prompt/log/.exit paths spell them:
 
 - the worktree (`--workdir` too) — `spec.repoRoot`
 - the git common dir — covers `.git/worktrees/<n>` (the worktree's
@@ -54,17 +57,23 @@ worker payloads ride verbatim: `template` expands `{promptFile}`,
 
 ### Env
 
-Ambient env (`process.env` + `spec.env` minus the connector-owned pins)
-rides `--env-file <agentId>.env` — a 0600 file in the mounted agents
-home, deleted after the `docker run` call (and on any spawn failure)
-the way tmux's env file is deleted after the pane sources it. Values
-containing newlines are dropped (docker's env-file is line-based and
-takes quotes literally) with a warning naming the keys. The identity
-pins go on `-e` flags — non-secret, same as tmux.
+Ambient env rides `--env-file <agentId>.env` — a 0600 file in the
+mounted agents home, deleted after the `docker run` call (and on any
+spawn failure) the way tmux's env file is deleted after the pane
+sources it. Two filters: host-bound keys (PATH, HOME, TMPDIR, SHELL,
+USER…) are excluded from `process.env` because `--env-file` overrides
+the image's own ENV and a host PATH finds nothing inside the image —
+`spec.env` is NOT filtered, an explicit knob is the operator's choice;
+values containing newlines are dropped (docker's env-file is
+line-based) with a warning naming the keys. The identity pins go on
+`-e` flags — non-secret, same as tmux.
 
 ### Image resolution
 
-1. `agents.docker.image` — used verbatim (`docker run` pulls if absent).
+1. `agents.docker.image` — used verbatim; `image inspect` + `docker
+   pull` (10-minute budget) runs before the registry lock so an absent
+   image never pays a pull inside `docker run`'s short timeout while
+   holding every other spawn.
 2. Else the repo's devcontainer: `agents.docker.devcontainer` path,
    default `<repoRoot>/.devcontainer/devcontainer.json`. Parsed as
    JSONC (string-aware comment/trailing-comma stripping — devcontainer
@@ -93,7 +102,9 @@ orchestration model; the docker-CLI path is the contract here.
   Pid. `No such object/container` → dead (with `--rm`, absent IS dead —
   a present-but-stopped container reads the same either way); any other
   failure (daemon down, timeout) → `unknown`, which never reports
-  `lost` and never frees the occupancy slot.
+  `lost` and never frees the occupancy slot — but a recorded death
+  (`stopped` or a harvested `exitStatus`) frees it regardless of the
+  probe, since neither shape can hold a live container.
 - Batch: `docker ps --filter label=bro.managed=1 --format '{{.Names}}'`
   — one call liveness for list()/occupancy; a failed call degrades, it
   doesn't corpse the fleet.
@@ -107,6 +118,10 @@ orchestration model; the docker-CLI path is the contract here.
 - `runArgs` sits before the fixed contract args — docker's last-wins
   flag semantics then keep `--name`/`--workdir`/labels/mounts under
   bro's control no matter what an operator passes.
+- `--user <host uid>:<gid>` is the default (skipped when runArgs sets
+  `-u`/`--user` or getuid is unavailable) — a rootful worker would
+  otherwise leave root-owned objects in the mounted worktree/git
+  dir/beads store and every later host-side git/rm hits EACCES.
 
 ### Selection + capabilities
 

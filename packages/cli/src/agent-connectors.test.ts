@@ -127,8 +127,8 @@ console.error('unhandled tmux args: ' + args.join(' ')); process.exit(1)
  *  knows. `run` spawns the wrapper (`sh -c`, detached) like a real
  *  daemon would — container death = process death — and merges
  *  --env-file + -e into the child env (-e wins, like docker). Covers
- *  version, build (-t), image inspect, ps, inspect ({{json .State}}),
- *  rm -f. */
+ *  version, build (-t), pull, image inspect, ps, inspect
+ *  ({{json .State}}), rm -f. */
 const FAKE_DOCKER = `#!/usr/bin/env node
 const fs = require('node:fs')
 const cp = require('node:child_process')
@@ -151,6 +151,12 @@ if (args[0] === 'build') {
   const tag = args[args.indexOf('-t') + 1]
   if (!imgs.includes(tag)) { imgs.push(tag); save(IMGS, imgs) }
   out('fake-built ' + tag + '\\n'); process.exit(0)
+}
+if (args[0] === 'pull') {
+  const imgs = load(IMGS, [])
+  const tag = args[args.length - 1]
+  if (!imgs.includes(tag)) { imgs.push(tag); save(IMGS, imgs) }
+  out('fake-pulled ' + tag + '\\n'); process.exit(0)
 }
 if (args[0] === 'ps') {
   const db = load(DB, {})
@@ -1170,8 +1176,14 @@ describe('docker connector', () => {
       ) as Record<string, { argv: string[]; image: string }>
       const argv = db[`bro-${info.id}`]!.argv
       const mounts = argv.flatMap((a, i) => (a === '-v' ? [argv[i + 1]!] : []))
+      // mounts emit source:target — the TARGET is the path the worker
+      // reads (env pins carry spec values); the source may realpath
+      // away on symlinked tmpdirs (macOS /var → /private/var)
       for (const m of [wt, join(f.main, '.git'), f.beadsDir]) {
-        assert.ok(mounts.includes(`${m}:${m}`), `missing mount ${m} in ${mounts.join(',')}`)
+        assert.ok(
+          mounts.some((v) => v.endsWith(`:${m}`)),
+          `missing mount target ${m} in ${mounts.join(',')}`
+        )
       }
       // identity pins are -e args; the ambient env file is consumed and gone
       assert.ok(argv.includes(`BRO_BEAD_ID=fx-1`), argv.join(' '))
@@ -1183,6 +1195,13 @@ describe('docker connector', () => {
       const net = argv.indexOf('--network')
       assert.notEqual(net, -1)
       assert.equal(argv[net + 1], 'host')
+      // host uid:gid is the default container user — bind-mounted
+      // writes stay host-owned
+      if (typeof process.getuid === 'function') {
+        const u = argv.indexOf('--user')
+        assert.notEqual(u, -1)
+        assert.equal(argv[u + 1], `${process.getuid()}:${process.getgid!()}`)
+      }
       await c.stop(info.id)
     } finally {
       cleanup(f)
