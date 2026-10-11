@@ -11,6 +11,7 @@
  *   schema                       print the commented plan template
  */
 import { readFileSync } from 'node:fs'
+import { facade, loadConfig } from '@broject/core'
 import {
   captureWtf,
   checkBeads,
@@ -42,6 +43,25 @@ Commands:
   process.exit(exitCode)
 }
 
+/** A captured complaint or a recorded retro is a human moment —
+ *  publish through the events facade so `notify.sinks` hear it (spec:
+ *  specs/bro-huy5o.8.md). Fire-and-forget like `bro notify`: the
+ *  pending delivery holds the event loop until it settles; a sink
+ *  failure must never turn a capture into a command failure. */
+function publishRetroEvent(topic: string, kind: string, key: string, text: string): void {
+  const dir = process.cwd()
+  // try/catch on the sync half too — `facade` throws on a misconfigured
+  // connector name before `.catch` can exist, and the record is already
+  // persisted; event delivery stays fail-open after persistence
+  try {
+    void facade('events', { dir }, { prefer: loadConfig(dir).connectors })
+      .publish({ topic, kind, key, source: 'retrospect', payload: text })
+      .catch(() => {})
+  } catch {
+    // fail-open — a bad events config must not fail the capture
+  }
+}
+
 function cmdCapture(rest: string[]): void {
   // the complaint is verbatim user text — every arg is literal, including
   // `--`-prefixed tokens; only a leading -h/--help asks for usage
@@ -54,6 +74,7 @@ function cmdCapture(rest: string[]): void {
     process.exit(2)
   }
   const row = captureWtf(complaint)
+  publishRetroEvent('wtf', 'note', `wtf-${row.id}`, `wtf ${row.id} captured — ${row.title}`)
   console.log(`wtf ${row.id} captured — now analyze, plan, and \`bro retrospect record\``)
 }
 
@@ -97,6 +118,7 @@ export function cmdRecord(plan: RetroPlan): void {
     )
   }
   const res = recordRetro(plan)
+  publishRetroEvent('retro', 'result', `retro-${res.retroId}`, `retro ${res.retroId} recorded`)
   console.log(`retro ${res.retroId} recorded`)
   for (const id of res.actionIds) {
     console.log(`  prevention → ${id}`)

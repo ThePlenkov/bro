@@ -296,6 +296,124 @@ export const beadsSection: ConfigSection<{ global: string }> = (raw) => {
   return { global: dir }
 }
 
+export const SINK_TYPES = ['slack', 'telegram', 'webhook'] as const
+export type SinkType = (typeof SINK_TYPES)[number]
+
+/** One outbound notify sink (spec: specs/bro-huy5o.8.md) — a webhook
+ *  endpoint events matching `events` are POSTed to. Secrets are never
+ *  literal: `urlEnv`/`tokenEnv`/`chatIdEnv` NAME the env var holding
+ *  the value — the value itself never enters config, argv, or logs.
+ *  `url`/`chatId` literals exist for non-secret endpoints. */
+export interface SinkDef {
+  /** Label for `bro sinks` output and dedup identity — defaults to the
+   *  type when absent. */
+  name?: string
+  type: SinkType
+  /** slack/webhook: literal endpoint for non-secret hooks. `urlEnv` wins. */
+  url?: string
+  /** slack/webhook: env var holding the endpoint URL. */
+  urlEnv?: string
+  /** telegram: env var holding the bot token. */
+  tokenEnv?: string
+  /** telegram: literal chat id. */
+  chatId?: string
+  /** telegram: env var holding the chat id. `chatId` wins. */
+  chatIdEnv?: string
+  /** telegram: bot-API host override (default https://api.telegram.org). */
+  apiBase?: string
+  /** Routing patterns — `topic` or `topic:kind`, `*` and trailing-`*`
+   *  globs. Omitted/empty = every event (the EventFilter no-narrowing
+   *  rule). */
+  events?: string[]
+  /** Per-request timeout, default 5000. */
+  timeoutMs?: number
+  /** Identical-event resend floor, default 4h — `0` sends every time. */
+  minIntervalMs?: number
+}
+
+const nonEmptyStr = (v: unknown): v is string =>
+  typeof v === 'string' && v.trim() !== ''
+
+/** One raw sinks entry → a SinkDef, or null when the entry is
+ *  structurally dead (bad type, or no endpoint could ever resolve).
+ *  An unset env VAR is a delivery-time state, not a parse failure —
+ *  `bro sinks list` reports it, the entry survives. */
+function parseSinkDef(raw: unknown, i: number): SinkDef | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    console.error(`bro.config: notify.sinks[${i}] must be an object — dropped`)
+    return null
+  }
+  const o = raw as Record<string, unknown>
+  if (!nonEmptyStr(o.type) || !(SINK_TYPES as readonly string[]).includes(o.type)) {
+    console.error(
+      `bro.config: notify.sinks[${i}].type must be one of ${SINK_TYPES.join('|')} — dropped`
+    )
+    return null
+  }
+  const type = o.type as SinkType
+  const str = (k: string): string | undefined => (nonEmptyStr(o[k]) ? o[k].trim() : undefined)
+  const num = (k: string): number | undefined =>
+    typeof o[k] === 'number' && Number.isFinite(o[k]) && o[k] >= 0 ? o[k] : undefined
+  const routes = Array.isArray(o.events)
+    ? o.events.filter((e): e is string => nonEmptyStr(e)).map((e) => e.trim())
+    : undefined
+  // A supplied `events` says "restrict me" — when nothing in it parses
+  // (non-array, or every entry unusable) honoring the field as written
+  // is impossible, and omitting it would silently widen the sink to
+  // every event. Fail closed: drop the sink, say why. `events: []`
+  // stays legal — an explicitly empty list is the no-narrowing rule.
+  if (
+    o.events !== undefined &&
+    (routes === undefined || routes.length === 0) &&
+    !(Array.isArray(o.events) && o.events.length === 0)
+  ) {
+    console.error(
+      `bro.config: notify.sinks[${i}].events has no usable route — dropped (a restrictive intent must not widen to all events)`
+    )
+    return null
+  }
+  const sink: SinkDef = { type }
+  if (str('name') !== undefined) sink.name = str('name')
+  if (str('url') !== undefined) sink.url = str('url')
+  if (str('urlEnv') !== undefined) sink.urlEnv = str('urlEnv')
+  if (str('tokenEnv') !== undefined) sink.tokenEnv = str('tokenEnv')
+  if (str('chatId') !== undefined) sink.chatId = str('chatId')
+  if (str('chatIdEnv') !== undefined) sink.chatIdEnv = str('chatIdEnv')
+  if (str('apiBase') !== undefined) sink.apiBase = str('apiBase')
+  if (routes !== undefined && routes.length > 0) sink.events = routes
+  if (num('timeoutMs') !== undefined) sink.timeoutMs = num('timeoutMs')
+  if (num('minIntervalMs') !== undefined) sink.minIntervalMs = num('minIntervalMs')
+  const dead =
+    type === 'telegram'
+      ? sink.tokenEnv === undefined || (sink.chatId === undefined && sink.chatIdEnv === undefined)
+      : sink.url === undefined && sink.urlEnv === undefined
+  if (dead) {
+    console.error(
+      `bro.config: notify.sinks[${i}] (${type}) has no endpoint it could ever resolve — dropped`
+    )
+    return null
+  }
+  return sink
+}
+
+/** `notify` config section — outbound event sinks (spec:
+ *  specs/bro-huy5o.8.md). Operator-class: endpoints and chat ids are
+ *  per-machine, so it belongs in the global or local layer. */
+export const notifySection: ConfigSection<{ sinks: SinkDef[] }> = (raw) => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as { sinks?: unknown }
+  if (!Array.isArray(obj.sinks)) {
+    return { sinks: [] }
+  }
+  const sinks: SinkDef[] = []
+  for (const [i, entry] of obj.sinks.entries()) {
+    const s = parseSinkDef(entry, i)
+    if (s !== null) {
+      sinks.push(s)
+    }
+  }
+  return { sinks }
+}
+
 /** bro.config.json `stack` section — how `bro work enter` picks the base
  *  for a new worktree when a session already produced a PR branch.
  *  'manual' (default): stack only on explicit --stack/--base.
@@ -603,6 +721,7 @@ const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   mesh: meshSection as ConfigSection<unknown>,
   mcp: mcpSection as ConfigSection<unknown>,
   mirror: mirrorSection as ConfigSection<unknown>,
+  notify: notifySection as ConfigSection<unknown>,
 }
 
 /** Every config key core normalizes itself — the authoritative "known
@@ -713,6 +832,10 @@ export interface BroConfig {
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */
   mirror: MirrorPolicy
+  /** Outbound event sinks (spec: specs/bro-huy5o.8.md) — matching
+   *  events published through the `events` facade are POSTed to
+   *  operator-configured webhooks (slack/telegram/generic). */
+  notify: { sinks: SinkDef[] }
   /** External plugin specifiers — relative paths or package names the CLI
    *  resolves from the repo and imports at startup. Each module's default
    *  export must be a BroPlugin (or an array of them). */
@@ -745,6 +868,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   mesh: { peers: {} },
   mcp: {},
   mirror: { labels: [], excludeLabels: [], types: ['feature', 'bug'], specLinked: true },
+  notify: { sinks: [] },
   plugins: [],
 }
 
@@ -990,6 +1114,7 @@ export const CONFIG_SECTION_LAYERS: Record<string, 'operator' | 'policy'> = {
   agents: 'operator',
   fleet: 'operator',
   beads: 'operator',
+  notify: 'operator',
   // policy — identical-for-everyone project rules
   act: 'policy',
   debt: 'policy',

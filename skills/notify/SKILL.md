@@ -42,3 +42,22 @@ real-time child→parent events with no tokens spent in a wait loop.
   lost message.
 - **Fire-and-forget is honest.** If the event needs an answer, say
   what you need in the drop — the mailbox has no reply channel.
+
+## Sinks — the human edge
+
+The mailbox reaches agents; `notify.sinks` webhooks reach PEOPLE.
+Config routes by event type (`topic` or `topic:kind`, `*` globs),
+secrets come from env (`urlEnv`/`tokenEnv`/`chatIdEnv` name the
+variable — values never enter config), delivery never blocks the
+agent (bounded timeout, failures are silent rows). Slack posts
+`{text}`, telegram `sendMessage`, webhook the raw event JSON.
+
+Emissions built in: convoy HUMAN GATE (`convoy:gate`), drive stuck-PR
+and silent-reviewer alerts (`drive:alert`), `act wait` settles
+(`act:block` / `act:result`), wtf/retro captures (`wtf:note` /
+`retro:result`).
+
+| Command | What it does |
+| ------- | ------------ |
+| `bro sinks list` | Resolved sinks — type, route patterns, secret env set/unset (never values) |
+| `bro sinks test` | Deliver a probe event, report per-sink ok/err — verify a webhook before a real event needs it |

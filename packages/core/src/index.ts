@@ -61,6 +61,7 @@ export {
   mcpSection,
   meshSection,
   mirrorSection,
+  notifySection,
   PERSONALITIES,
   probeConfigFile,
   providersSection,
@@ -68,12 +69,13 @@ export {
   repoOptedIn,
   sddSection,
   SDD_MODES,
+  SINK_TYPES,
   stackSection,
   STORE_BACKENDS,
   sweepSection,
   syncSection,
 } from './config.ts'
-export type { IgnoreCheckEntry, IgnoreCheckRule } from './config.ts'
+export type { IgnoreCheckEntry, IgnoreCheckRule, SinkDef, SinkType } from './config.ts'
 export {
   API_WIRES,
   cliCommandModel,
@@ -268,6 +270,18 @@ export {
   mailboxConnector,
   mailboxEvents,
 } from './events-connectors.ts'
+export {
+  deliverSinks,
+  renderEventText,
+  requestFor,
+  sinkMatches,
+  sinkSecrets,
+  sinkStatePath,
+  withSinks,
+  type DeliverOpts,
+  type FetchFn as SinkFetchFn,
+  type SinkDelivery,
+} from './sinks.ts'
 export {
   addressedTo,
   coalesceDrops,

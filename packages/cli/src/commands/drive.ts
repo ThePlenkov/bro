@@ -588,6 +588,52 @@ export interface PrVerdict {
   link: string
   verdict: string
   detail?: string
+  /** Advisory-check alerts from the act gate (silent reviewers) —
+   *  carried on the verdict so the pass loop can surface them without
+   *  re-probing the gate. */
+  alerts?: string[]
+}
+
+/** Verdicts the driver cannot move itself — the "stuck PR" half of the
+ *  bead's drive-alert moment ('reviewer down' rides `alerts` instead).
+ *  Transients (occupied/enqueued/spawned/settled/green) never alert:
+ *  they resolve on their own cadence. */
+const ALERT_VERDICTS = new Set([
+  'blocked',
+  'spawn-refused',
+  'spawn-failed',
+  'merge-refused',
+  'merge-unverified',
+  'probe-failed',
+  'no-worktree',
+  'error',
+])
+
+/** The drive-alert moment — a stuck PR or a silent reviewer reaches
+ *  the human through `notify.sinks` (spec: specs/bro-huy5o.8.md).
+ *  Keyed per PR+cause: mailbox coalesces repeats, sink dedup re-alerts
+ *  on the interval rather than every `--every` pass. Fail-open — a
+ *  delivery problem never becomes a pass failure. */
+async function publishDriveAlert(
+  dir: string,
+  pr: number,
+  link: string,
+  cause: string,
+  detail?: string
+): Promise<void> {
+  try {
+    await facade('events', { dir }, { prefer: loadBroConfig(dir).connectors }).publish({
+      topic: 'drive',
+      kind: 'alert',
+      key: `drive-${cause}-${pr}`,
+      source: 'drive',
+      ref: link,
+      payload:
+        `drive ${link} ${cause}` + (detail === undefined || detail === '' ? '' : ` — ${detail}`),
+    })
+  } catch {
+    // fail-open
+  }
 }
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
@@ -1197,16 +1243,24 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     workDetails: work.workDetails,
     scanProc: agentProcessesIn,
   })
+  const withAlerts = (v: PrVerdict): PrVerdict => {
+    if (gate.alerts.length > 0) {
+      v.alerts = gate.alerts
+    }
+    return v
+  }
   if (gate.ok) {
     if (occ !== undefined) {
-      return { pr, link, verdict: 'green-occupied', detail: occ }
+      return withAlerts({ pr, link, verdict: 'green-occupied', detail: occ })
     }
     if (!ctx.merge) {
-      return { pr, link, verdict: 'green' }
+      return withAlerts({ pr, link, verdict: 'green' })
     }
-    return mergeAndRetire(ctx, pr, link, worktree, fixer)
+    return withAlerts(await mergeAndRetire(ctx, pr, link, worktree, fixer))
   }
-  return blockedVerdict(ctx, { pr, link, state, gate, occ, worktree, fixer, work })
+  return withAlerts(
+    await blockedVerdict(ctx, { pr, link, state, gate, occ, worktree, fixer, work })
+  )
 }
 
 /** `<git-common-dir>/bro/hooks` — the .work marker dir. */
@@ -1343,12 +1397,20 @@ async function driveOnce(ctx: Ctx): Promise<void> {
   for (const pr of prs) {
     // a throwing probe on one PR must not kill the pass — in --every
     // mode an unhandled throw would end the driver entirely
-    const v = await drivePr(ctx, pr, work).catch((err) => ({
+    const v: PrVerdict = await drivePr(ctx, pr, work).catch((err) => ({
       pr,
       link: ctx.rev.prLink(ctx.repo, pr),
       verdict: 'error',
       detail: errText(err),
     }))
+    // the human edge: unmovable verdicts and silent-reviewer alerts —
+    // dedup keys make a repeated pass quiet, not absent
+    if (ALERT_VERDICTS.has(v.verdict)) {
+      await publishDriveAlert(ctx.mainRoot, v.pr, v.link, v.verdict, v.detail)
+    }
+    if ((v.alerts?.length ?? 0) > 0) {
+      await publishDriveAlert(ctx.mainRoot, v.pr, v.link, 'reviewer-alert', v.alerts!.join('; '))
+    }
     if (ctx.json) {
       console.log(JSON.stringify(v))
     } else {
