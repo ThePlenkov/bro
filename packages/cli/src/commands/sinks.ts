@@ -15,6 +15,7 @@ import {
   loadConfig,
   sinkSecrets,
   type SinkDef,
+  type SinkDelivery,
 } from '@broject/core'
 
 function usage(exitCode = 1): never {
@@ -88,6 +89,15 @@ function cmdList(json: boolean): void {
   }
 }
 
+/** One delivery row → its `test` output line. A dedup skip is a
+ *  report, not a fault. */
+function testResultLine(r: SinkDelivery): string {
+  if (r.delivered) {
+    return r.status === undefined ? 'ok' : `ok (${r.status})`
+  }
+  return r.reason === 'deduped' ? 'skipped — deduped' : `FAILED — ${r.reason ?? 'unknown'}`
+}
+
 async function cmdTest(json: boolean): Promise<void> {
   const dir = process.cwd()
   const { sinks } = loadConfig(dir).notify
@@ -113,12 +123,7 @@ async function cmdTest(json: boolean): Promise<void> {
     console.log(JSON.stringify(results, null, 2))
   } else {
     for (const r of results) {
-      const line = r.delivered
-        ? `ok${r.status === undefined ? '' : ` (${r.status})`}`
-        : r.reason === 'deduped'
-          ? 'skipped — deduped'
-          : `FAILED — ${r.reason ?? 'unknown'}`
-      console.log(`${r.sink}  ${r.type}  ${line}`)
+      console.log(`${r.sink}  ${r.type}  ${testResultLine(r)}`)
     }
   }
   // a failed delivery fails the probe; a dedup skip is a report, not a fault

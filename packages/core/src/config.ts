@@ -347,6 +347,43 @@ export interface SinkDef {
 const nonEmptyStr = (v: unknown): v is string =>
   typeof v === 'string' && v.trim() !== ''
 
+const SINK_STR_KEYS = [
+  'name',
+  'url',
+  'urlEnv',
+  'tokenEnv',
+  'chatId',
+  'chatIdEnv',
+  'apiBase',
+] as const
+const SINK_NUM_KEYS = ['timeoutMs', 'minIntervalMs'] as const
+
+/** `events` routes → the trimmed list, 'drop' when a restrictive intent
+ *  can't be honored as written, undefined when the field was absent.
+ *  `events: []` stays legal — an explicitly empty list is the
+ *  no-narrowing rule. */
+function parseSinkRoutes(raw: unknown): string[] | 'drop' | undefined {
+  if (raw === undefined) {
+    return undefined
+  }
+  if (Array.isArray(raw) && raw.length === 0) {
+    return []
+  }
+  const routes = Array.isArray(raw) ? raw.filter(nonEmptyStr).map((e) => e.trim()) : []
+  return routes.length === 0 ? 'drop' : routes
+}
+
+/** Structurally dead = no endpoint could ever resolve. An unset env
+ *  VAR is a delivery-time state, not a parse failure. */
+function sinkEndpointMissing(sink: SinkDef): boolean {
+  if (sink.type === 'telegram') {
+    return (
+      sink.tokenEnv === undefined || (sink.chatId === undefined && sink.chatIdEnv === undefined)
+    )
+  }
+  return sink.url === undefined && sink.urlEnv === undefined
+}
+
 /** One raw sinks entry → a SinkDef, or null when the entry is
  *  structurally dead (bad type, or no endpoint could ever resolve).
  *  An unset env VAR is a delivery-time state, not a parse failure —
@@ -363,46 +400,36 @@ function parseSinkDef(raw: unknown, i: number): SinkDef | null {
     )
     return null
   }
-  const type = o.type as SinkType
-  const str = (k: string): string | undefined => (nonEmptyStr(o[k]) ? o[k].trim() : undefined)
-  const num = (k: string): number | undefined =>
-    typeof o[k] === 'number' && Number.isFinite(o[k]) && o[k] >= 0 ? o[k] : undefined
-  const routes = Array.isArray(o.events)
-    ? o.events.filter((e): e is string => nonEmptyStr(e)).map((e) => e.trim())
-    : undefined
+  const routes = parseSinkRoutes(o.events)
   // A supplied `events` says "restrict me" — when nothing in it parses
   // (non-array, or every entry unusable) honoring the field as written
   // is impossible, and omitting it would silently widen the sink to
-  // every event. Fail closed: drop the sink, say why. `events: []`
-  // stays legal — an explicitly empty list is the no-narrowing rule.
-  if (
-    o.events !== undefined &&
-    (routes === undefined || routes.length === 0) &&
-    !(Array.isArray(o.events) && o.events.length === 0)
-  ) {
+  // every event. Fail closed: drop the sink, say why.
+  if (routes === 'drop') {
     console.error(
       `bro.config: notify.sinks[${i}].events has no usable route — dropped (a restrictive intent must not widen to all events)`
     )
     return null
   }
-  const sink: SinkDef = { type }
-  if (str('name') !== undefined) sink.name = str('name')
-  if (str('url') !== undefined) sink.url = str('url')
-  if (str('urlEnv') !== undefined) sink.urlEnv = str('urlEnv')
-  if (str('tokenEnv') !== undefined) sink.tokenEnv = str('tokenEnv')
-  if (str('chatId') !== undefined) sink.chatId = str('chatId')
-  if (str('chatIdEnv') !== undefined) sink.chatIdEnv = str('chatIdEnv')
-  if (str('apiBase') !== undefined) sink.apiBase = str('apiBase')
-  if (routes !== undefined && routes.length > 0) sink.events = routes
-  if (num('timeoutMs') !== undefined) sink.timeoutMs = num('timeoutMs')
-  if (num('minIntervalMs') !== undefined) sink.minIntervalMs = num('minIntervalMs')
-  const dead =
-    type === 'telegram'
-      ? sink.tokenEnv === undefined || (sink.chatId === undefined && sink.chatIdEnv === undefined)
-      : sink.url === undefined && sink.urlEnv === undefined
-  if (dead) {
+  const sink: SinkDef = { type: o.type as SinkType }
+  for (const k of SINK_STR_KEYS) {
+    const v = o[k]
+    if (nonEmptyStr(v)) {
+      sink[k] = v.trim()
+    }
+  }
+  for (const k of SINK_NUM_KEYS) {
+    const v = o[k]
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) {
+      sink[k] = v
+    }
+  }
+  if (routes !== undefined && routes.length > 0) {
+    sink.events = routes
+  }
+  if (sinkEndpointMissing(sink)) {
     console.error(
-      `bro.config: notify.sinks[${i}] (${type}) has no endpoint it could ever resolve — dropped`
+      `bro.config: notify.sinks[${i}] (${sink.type}) has no endpoint it could ever resolve — dropped`
     )
     return null
   }
