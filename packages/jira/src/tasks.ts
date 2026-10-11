@@ -1,8 +1,11 @@
 /**
- * The jira connector's `tasks` facade — the TaskStore contract over
- * Jira Cloud REST, reached through `atlassian api` (spec
- * specs/bro-huy5o.3.md). Same mapping contract as github-issues
- * (bro-huy5o.1) and linear (bro-huy5o.2):
+ * The jira connectors' `tasks` facade — the TaskStore contract over
+ * Jira REST, reached through `atlassian api` (cloud: spec
+ * specs/bro-huy5o.3.md; Data Center/Server: specs/bro-b8eom.md). The
+ * mapping is deployment-blind — `buildTasks` binds a `JiraApi`
+ * surface (v3 Cloud or v2 DC) and every transport-bound verb closes
+ * over it. Same mapping contract as github-issues (bro-huy5o.1) and
+ * linear (bro-huy5o.2):
  *
  *   id        — the issue key ('PROJ-123'); bare numbers resolve inside
  *               the serving project, /browse/ URLs and internal ids
@@ -43,80 +46,23 @@ import type {
   TaskStoreAsync,
 } from '@broject/core'
 import {
-  api,
-  apiGet,
-  apiGetAsync,
-  apiJson,
-  apiJsonAsync,
-  issueTypes,
-  linkTypeName,
-  priorities,
-  prioritiesAsync,
-  prioritiesOrEmpty,
-  prioritiesOrEmptyAsync,
-  project,
-  projectAsync,
-  viewer,
-  viewerAsync,
+  adfText,
+  cloudApi,
+  dcApi,
+  FIELDS,
+  type JiraApi,
+  type JiraIssue,
+  type JiraIssueRef,
   type JiraViewer,
 } from './api.ts'
+
+export { adfDoc, adfText } from './api.ts'
 
 const BLOCKED_LABEL = 'blocked'
 const DEFAULT_PRIORITY = 2
 const QUERY_CAP = 1000
-const PAGE = 100
 
-// --- issue shape ---------------------------------------------------------------
-
-interface JiraStatus {
-  name?: string
-  statusCategory?: { key?: string; name?: string }
-}
-
-interface JiraIssueRef {
-  id?: string
-  key?: string
-  fields?: { status?: JiraStatus; summary?: string }
-}
-
-/** An issuelinks entry names the COUNTERPART by its own side in the
- *  link: `inwardIssue` present means this issue is the outward side
- *  ("this issue blocks inwardIssue" for Blocks) — the counterpart
- *  depends on this one. `outwardIssue` present means this issue is the
- *  inward side ("is blocked by") — this one depends on it. */
-interface JiraLink {
-  id?: string
-  type?: { name?: string; inward?: string; outward?: string }
-  inwardIssue?: JiraIssueRef
-  outwardIssue?: JiraIssueRef
-}
-
-interface JiraFields {
-  summary?: string
-  description?: unknown
-  status?: JiraStatus
-  issuetype?: { name?: string }
-  priority?: { name?: string } | null
-  assignee?: { accountId?: string; displayName?: string; emailAddress?: string } | null
-  labels?: string[]
-  issuelinks?: JiraLink[]
-  subtasks?: JiraIssueRef[]
-  parent?: JiraIssueRef
-  resolution?: { name?: string } | null
-  created?: string
-  resolutiondate?: string | null
-}
-
-interface JiraIssue {
-  id?: string
-  key?: string
-  self?: string
-  fields?: JiraFields
-}
-
-const FIELDS =
-  'summary,description,status,issuetype,priority,assignee,labels,' +
-  'issuelinks,subtasks,parent,resolution,created,resolutiondate'
+// --- row mapping — deployment-blind ------------------------------------------------
 
 const category = (n: JiraIssue): string => n.fields?.status?.statusCategory?.key ?? ''
 const isDone = (n: JiraIssue): boolean => category(n) === 'done'
@@ -125,7 +71,7 @@ const refLive = (r: JiraIssueRef | null | undefined): boolean =>
 const labelsOf = (n: JiraIssue): string[] => n.fields?.labels ?? []
 const assigneeName = (n: JiraIssue): string => {
   const a = n.fields?.assignee
-  return a?.displayName ?? a?.emailAddress ?? a?.accountId ?? ''
+  return a?.displayName ?? a?.emailAddress ?? a?.name ?? a?.key ?? a?.accountId ?? ''
 }
 
 /** Jira link-type name → generic rel: 'Blocks'→'blocked',
@@ -213,63 +159,6 @@ function priorityOf(n: JiraIssue, meta: Record<string, unknown>, ps: string[]): 
   return typeof p === 'number' ? p : DEFAULT_PRIORITY
 }
 
-// --- ADF ↔ text -------------------------------------------------------------------
-
-interface AdfNode {
-  type?: string
-  text?: string
-  content?: AdfNode[]
-}
-
-/** Plain text out of an ADF description — text nodes verbatim,
- *  hardBreaks → \n, a paragraph gap between block children. The bro
- *  trailer rides a plain paragraph, so it survives verbatim. A
- *  v2-era string description passes through as-is. */
-export function adfText(doc: unknown): string {
-  if (typeof doc === 'string') {
-    return doc
-  }
-  if (typeof doc !== 'object' || doc === null) {
-    return ''
-  }
-  const out: string[] = []
-  const walk = (n: AdfNode): void => {
-    if (n.type === 'text' && typeof n.text === 'string') {
-      out.push(n.text)
-      return
-    }
-    if (n.type === 'hardBreak') {
-      out.push('\n')
-      return
-    }
-    for (const c of n.content ?? []) {
-      walk(c)
-    }
-    if (n.type !== undefined && n.type !== 'doc' && n.type !== 'text') {
-      out.push('\n')
-    }
-  }
-  walk(doc as AdfNode)
-  return out.join('').replace(/\n{3,}/g, '\n\n').trim()
-}
-
-/** Text → a minimal ADF doc — paragraphs split on blank lines, single
- *  newlines become hardBreaks. */
-export function adfDoc(text: string): Record<string, unknown> {
-  const paragraphs = text.split(/\n{2,}/).filter((p) => p.trim() !== '')
-  return {
-    type: 'doc',
-    version: 1,
-    content: paragraphs.map((p) => ({
-      type: 'paragraph',
-      content: p.split('\n').flatMap((line, i): AdfNode[] => [
-        ...(i > 0 ? [{ type: 'hardBreak' }] : []),
-        { type: 'text', text: line },
-      ]),
-    })),
-  }
-}
-
 // --- row ------------------------------------------------------------------------
 
 /** `self` (https://site/…/issue/<id>) → the human browse URL; gateway
@@ -329,139 +218,11 @@ const pub = (r: TaskRow & { __node?: JiraIssue }): TaskRow => {
   return rest
 }
 
-// --- id resolution --------------------------------------------------------------
-
-/** 'PROJ-123' | 'proj-123' | '123' | /browse/PROJ-123 URL | internal
- *  numeric id → the key/id REST accepts as issueIdOrKey. A bare number
- *  borrows the serving project's key — ambiguous-project sites already
- *  threw in project(). */
-function issueRef(id: string): string {
-  const t = id.trim()
-  const browse = /^https?:\/\/[^/]+\/browse\/([A-Za-z]\w*-\d+)/.exec(t)
-  if (browse) {
-    return browse[1]!.toUpperCase()
-  }
-  const rest = /\/rest\/api\/\d+\/issue\/(\d+)/.exec(t)
-  if (rest) {
-    return rest[1]!
-  }
-  if (/^[A-Za-z]\w*-\d+$/.test(t)) {
-    return t.toUpperCase()
-  }
-  if (/^\d+$/.test(t)) {
-    return `${project().key}-${t}`
-  }
-  throw new Error(
-    `jira tasks: "${id}" is not an issue reference (want PROJ-123, a bare number, or a /browse/ URL)`
-  )
-}
-
-/** Async id resolution — a bare number resolves through the project
- *  cache; warming it via projectAsync keeps issueRef's sync project()
- *  call a cache hit instead of a blocking spawn inside the probe. */
-async function refAsync(id: string): Promise<string> {
-  if (/^\d+$/.test(id.trim())) {
-    await projectAsync()
-  }
-  return issueRef(id)
-}
-
-// --- reads ----------------------------------------------------------------------
-
-interface SearchPage {
-  issues?: JiraIssue[]
-  nextPageToken?: string
-  isLast?: boolean
-}
-
-const pageHasMore = (p: SearchPage): boolean =>
-  p.nextPageToken !== undefined && p.nextPageToken !== '' && p.isLast !== true
-
-const searchBody = (jql: string, token: string | undefined): Record<string, unknown> => ({
-  jql,
-  fields: FIELDS.split(','),
-  maxResults: PAGE,
-  ...(token !== undefined ? { nextPageToken: token } : {}),
-})
-
-const searchGetPath = (jql: string, token: string | undefined): string =>
-  `/search/jql?jql=${encodeURIComponent(jql)}&fields=${encodeURIComponent(FIELDS)}` +
-  `&maxResults=${PAGE}` +
-  (token !== undefined ? `&nextPageToken=${encodeURIComponent(token)}` : '')
-
-const endpointGone = (err: unknown): boolean => /\b(404|405)\b/.test(String(err))
-
-/** POST /search/jql — the current JQL endpoint. A 404/405-class answer
- *  (a site that only kept GET) retries the GET form once — endpoint
- *  drift is absorbed here, never silently. */
-function searchPage(jql: string, token: string | undefined): SearchPage {
-  try {
-    return apiJson<SearchPage>('POST', '/search/jql', searchBody(jql, token))
-  } catch (err) {
-    if (!endpointGone(err)) {
-      throw err
-    }
-    const page = apiGet<SearchPage>(searchGetPath(jql, token))
-    if (page === undefined) {
-      throw err
-    }
-    return page
-  }
-}
-
-async function searchPageAsync(jql: string, token: string | undefined): Promise<SearchPage> {
-  try {
-    return await apiJsonAsync<SearchPage>('POST', '/search/jql', searchBody(jql, token))
-  } catch (err) {
-    if (!endpointGone(err)) {
-      throw err
-    }
-    const page = await apiGetAsync<SearchPage>(searchGetPath(jql, token))
-    if (page === undefined) {
-      throw err
-    }
-    return page
-  }
-}
-
-function queryIssuesSync(jql: string, limit: number): JiraIssue[] {
-  const out: JiraIssue[] = []
-  let token: string | undefined
-  for (;;) {
-    const page = searchPage(jql, token)
-    out.push(...(page.issues ?? []))
-    if (out.length >= limit || !pageHasMore(page)) {
-      break
-    }
-    token = page.nextPageToken
-  }
-  return out.slice(0, limit)
-}
-
-async function queryIssuesAsync(jql: string, limit: number): Promise<JiraIssue[]> {
-  const out: JiraIssue[] = []
-  let token: string | undefined
-  for (;;) {
-    const page = await searchPageAsync(jql, token)
-    out.push(...(page.issues ?? []))
-    if (out.length >= limit || !pageHasMore(page)) {
-      break
-    }
-    token = page.nextPageToken
-  }
-  return out.slice(0, limit)
-}
-
-const issuePath = (ref: string): string =>
-  `/issue/${encodeURIComponent(ref)}?fields=${FIELDS}`
-
-const queryIssueSync = (ref: string): JiraIssue | undefined => apiGet<JiraIssue>(issuePath(ref))
-const queryIssueAsync = (ref: string): Promise<JiraIssue | undefined> =>
-  apiGetAsync<JiraIssue>(issuePath(ref))
+// --- the JQL the filter implies ------------------------------------------------------
 
 /** The JQL the filter implies — project-scoped always; only 'closed'
  *  and `all` push status down (everything else is a derived status the
- *  post-filter owns). */
+ *  post-filter owns). Identical JQL on both surfaces. */
 function jqlFor(f: TaskFilter, key: string): string {
   const base = `project = "${key}"`
   if (f.all === true) {
@@ -528,35 +289,7 @@ function readyOf(rows: TaskRow[], f: TaskFilter): TaskRow[] {
     .slice(0, f.limit !== undefined && f.limit > 0 ? f.limit : QUERY_CAP)
 }
 
-/** A dead /priority endpoint must not kill the read plane — rows fall
- *  back to trailer/default priorities. The OrEmpty twins cache the
- *  failure per site, so a dead endpoint costs one spawn, not one per
- *  row; the probe itself keeps throwing for write paths. */
-const tryPriorities = (): string[] => prioritiesOrEmpty()
-
-const tryPrioritiesAsync = async (): Promise<string[]> => prioritiesOrEmptyAsync()
-
-// --- actor -------------------------------------------------------------------------
-
-const display = (v: JiraViewer): string => v.displayName ?? v.emailAddress ?? v.accountId
-
-const viewerName = (): string => {
-  try {
-    return display(viewer())
-  } catch {
-    return ''
-  }
-}
-
-const actorAsync = async (): Promise<string> => {
-  try {
-    return display(await viewerAsync())
-  } catch {
-    return ''
-  }
-}
-
-// --- deps ---------------------------------------------------------------------------
+// --- deps — edge mapping is deployment-blind -----------------------------------------
 
 const wants = (dir: 'up' | 'down', direction?: string): boolean =>
   direction === undefined || direction === dir
@@ -622,245 +355,7 @@ function depEdges(n: JiraIssue, opts: DepOpts): TaskDepEdge[] {
   return out
 }
 
-function depsSync(ids: string[], opts: DepOpts): TaskDepEdge[] {
-  const out: TaskDepEdge[] = []
-  for (const id of ids) {
-    const n = queryIssueSync(issueRef(id))
-    if (n) {
-      out.push(...depEdges(n, opts))
-    }
-  }
-  return out
-}
-
-async function depsAsync(ids: string[], opts: DepOpts): Promise<TaskDepEdge[]> {
-  const nodes = await Promise.all(ids.map(async (id) => queryIssueAsync(await refAsync(id))))
-  return nodes.flatMap((n) => (n === undefined ? [] : depEdges(n, opts)))
-}
-
-/** Hydrated rows on the far side of `id`'s edges — the row-plane twin
- *  of deps(). `dependency_type` rides along normalized. */
-function neighborsSync(id: string, opts: DepOpts): TaskRow[] {
-  const n = queryIssueSync(issueRef(id))
-  if (n === undefined) {
-    return []
-  }
-  const self = n.key ?? ''
-  const others = new Map<string, string>()
-  for (const e of depEdges(n, opts)) {
-    others.set(e.issue_id === self ? e.depends_on_id : e.issue_id, e.type)
-  }
-  const ps = tryPriorities()
-  const rows: TaskRow[] = []
-  for (const [o, rel] of others) {
-    const node = queryIssueSync(o)
-    if (node !== undefined) {
-      rows.push({ ...pub(toRow(node, ps)), dependency_type: rel } as TaskRow)
-    }
-  }
-  return rows
-}
-
-async function neighborsAsync(id: string, opts: DepOpts): Promise<TaskRow[]> {
-  const n = await queryIssueAsync(await refAsync(id))
-  if (n === undefined) {
-    return []
-  }
-  const self = n.key ?? ''
-  const others = new Map<string, string>()
-  for (const e of depEdges(n, opts)) {
-    others.set(e.issue_id === self ? e.depends_on_id : e.issue_id, e.type)
-  }
-  const ps = await tryPrioritiesAsync()
-  const rows = await Promise.all(
-    [...others].map(async ([o, rel]) => {
-      const node = await queryIssueAsync(o)
-      return node === undefined
-        ? undefined
-        : ({ ...pub(toRow(node, ps)), dependency_type: rel } as TaskRow)
-    })
-  )
-  return rows.filter((r): r is TaskRow => r !== undefined)
-}
-
-function childrenSync(ref: string): TaskRow[] {
-  const n = queryIssueSync(ref)
-  if (n === undefined) {
-    return []
-  }
-  const ps = tryPriorities()
-  const rows: TaskRow[] = []
-  for (const s of n.fields?.subtasks ?? []) {
-    if (s.key !== undefined) {
-      const node = queryIssueSync(s.key)
-      if (node !== undefined) {
-        rows.push(pub(toRow(node, ps)))
-      }
-    }
-  }
-  return rows
-}
-
-async function childrenAsync(ref: string): Promise<TaskRow[]> {
-  const n = await queryIssueAsync(ref)
-  if (n === undefined) {
-    return []
-  }
-  const ps = await tryPrioritiesAsync()
-  const rows = await Promise.all(
-    (n.fields?.subtasks ?? []).map(async (s) => {
-      if (s.key === undefined) {
-        return undefined
-      }
-      const node = await queryIssueAsync(s.key)
-      return node === undefined ? undefined : pub(toRow(node, ps))
-    })
-  )
-  return rows.filter((r): r is TaskRow => r !== undefined)
-}
-
-// --- mutations ----------------------------------------------------------------------
-
-const mustIssue = (ref: string): JiraIssue => {
-  const n = queryIssueSync(ref)
-  if (n === undefined) {
-    throw new Error(`jira tasks: issue ${ref} not found`)
-  }
-  return n
-}
-
-interface Transition {
-  id?: string
-  name?: string
-  to?: { name?: string; statusCategory?: { key?: string; name?: string } }
-}
-
-/** Perform the first transition whose target lands in `category`
- *  (fallback category allowed) — workflow names are custom, categories
- *  are canonical. No candidate → throw; the caller's contract names
- *  the failure. */
-function transitionTo(key: string, category: string, fallback?: string): void {
-  const res = apiJson<{ transitions?: Transition[] }>(
-    'GET',
-    `/issue/${encodeURIComponent(key)}/transitions`
-  )
-  const ts = res.transitions ?? []
-  const pick =
-    ts.find((t) => t.to?.statusCategory?.key === category) ??
-    (fallback !== undefined
-      ? ts.find((t) => t.to?.statusCategory?.key === fallback)
-      : undefined)
-  if (pick?.id === undefined) {
-    throw new Error(`jira tasks: ${key} has no transition to '${category}'`)
-  }
-  api('POST', `/issue/${encodeURIComponent(key)}/transitions`, { transition: { id: pick.id } })
-}
-
-/** Best-effort status move — the assignee write is already the claim
- *  verdict, so a workflow without a start-transition must not throw
- *  over a succeeded claim. */
-const transitionMaybe = (key: string, category: string): void => {
-  try {
-    transitionTo(key, category)
-  } catch {
-    // workflow has no such edge — the claim marker still holds
-  }
-}
-
-const comment = (key: string, text: string): void =>
-  api('POST', `/issue/${encodeURIComponent(key)}/comment`, { body: adfDoc(text) })
-
-/** Jira Cloud's documented unassign sentinel. */
-const UNASSIGNED = '-1'
-
-/** link(from, to, 'blocked') — "from is blocked by to" → Jira Blocks:
- *  outwardIssue blocks inwardIssue, so `to` rides outward. 'related'
- *  resolves the site's relates-type; 'parent' makes `from` a sub-task
- *  of `to`. Other rels resolve against the site's link-type table —
- *  an unmatched name throws, never faked. */
-function linkSync(from: string, to: string, rel: string): void {
-  const type = nativeTaskRel(rel)
-  if (type === 'parent-child') {
-    api('PUT', `/issue/${encodeURIComponent(issueRef(from))}`, {
-      fields: { parent: { key: issueRef(to) } },
-    })
-    return
-  }
-  const name = linkTypeName(type)
-  const [outward, inward] =
-    type === 'blocks' ? [issueRef(to), issueRef(from)] : [issueRef(from), issueRef(to)]
-  api('POST', '/issueLink', {
-    type: { name },
-    outwardIssue: { key: outward },
-    inwardIssue: { key: inward },
-  })
-}
-
-/** claim = assign viewer → verify re-read. The assignee write has no
- *  compare-and-set — last writer wins — so the verify is the strongest
- *  settlement the API allows: a loser whose re-read lands after the
- *  winner's write sees the winner and throws. A loser's re-read can
- *  still land BEFORE the winner's write — that residual window is
- *  inherent to the API, no client-side ordering closes it. An
- *  'indeterminate' transition rides best-effort so the board column
- *  follows the claim. */
-function claimSync(ref: string): void {
-  const n = mustIssue(ref)
-  const key = n.key ?? ref
-  if (isDone(n)) {
-    throw new Error(`jira tasks: ${key} is done — only open issues are claimable`)
-  }
-  if (n.fields?.assignee != null) {
-    throw new Error(`jira tasks: ${key} already claimed by ${assigneeName(n)}`)
-  }
-  const me = viewer()
-  api('PUT', `/issue/${encodeURIComponent(key)}/assignee`, { accountId: me.accountId })
-  const check = queryIssueSync(ref)
-  if (check?.fields?.assignee?.accountId !== me.accountId) {
-    const holder = check?.fields?.assignee != null ? assigneeName(check) : 'another actor'
-    throw new Error(`jira tasks: ${key} claim contested — ${holder} holds it`)
-  }
-  transitionMaybe(key, 'indeterminate')
-}
-
-function reopenSync(ref: string): void {
-  const n = mustIssue(ref)
-  const key = n.key ?? ref
-  // a terminal state needs the verb; 'indeterminate' needs it too —
-  // unassigning alone leaves statusCategory untouched, so the row
-  // keeps reading in_progress. Best-effort below 'new': custom
-  // workflows may lack a backward edge — the unassign is the real
-  // un-claim and runs either way
-  if (isDone(n)) {
-    transitionTo(key, 'new', 'indeterminate')
-  } else if (category(n) === 'indeterminate') {
-    transitionMaybe(key, 'new')
-  }
-  // release every claim marker — a claim held by a crashed worker or a
-  // rival would otherwise keep the issue in_progress forever
-  if (n.fields?.assignee != null) {
-    api('PUT', `/issue/${encodeURIComponent(key)}/assignee`, { accountId: UNASSIGNED })
-  }
-  const labels = labelsOf(n)
-  if (labels.includes(BLOCKED_LABEL)) {
-    api('PUT', `/issue/${encodeURIComponent(key)}`, {
-      fields: { labels: labels.filter((l) => l !== BLOCKED_LABEL) },
-    })
-  }
-}
-
-function closeSync(ref: string, reason?: string): void {
-  const n = mustIssue(ref)
-  const key = n.key ?? ref
-  // the reason lands first — a failed comment leaves the issue open,
-  // same ordering guarantee as `gh issue close --comment`
-  if (reason !== undefined && reason !== '') {
-    comment(key, reason)
-  }
-  if (!isDone(n)) {
-    transitionTo(key, 'done')
-  }
-}
+// --- create-time helpers — deployment-blind -------------------------------------------
 
 function createMeta(i: TaskInput): Record<string, unknown> {
   const meta: Record<string, unknown> = { ...i.metadata }
@@ -885,269 +380,672 @@ function depRef(d: string): { kind: string; ref: string } {
 
 const PARENT_KINDS = /^(parent|parent-child)$/
 
-/** Resolve a requested type name against the site's issuetypes
- *  (case-insensitive) — an unmapped bd name falls back to 'Task'. */
-function resolveTypeName(type: string): string {
-  const ts = issueTypes()
-  return ts.find((t) => t.toLowerCase() === type.toLowerCase()) ?? 'Task'
-}
-
-function applyDeps(id: string, i: TaskInput): void {
-  for (const d of i.deps ?? []) {
-    const { kind, ref } = depRef(d)
-    linkSync(id, ref, kind)
-  }
-}
-
-function createSync(i: TaskInput): TaskRow {
-  // pre-validate dep rels before the issue exists — an unresolvable
-  // link kind must not leave a half-created issue
-  for (const d of i.deps ?? []) {
-    const { kind } = depRef(d)
-    if (!PARENT_KINDS.test(kind)) {
-      linkTypeName(nativeTaskRel(kind))
-    }
-  }
-  const fields: Record<string, unknown> = {
-    project: { key: project().key },
-    summary: i.title,
-    // issuetype is REQUIRED on create — an absent type resolves to the
-    // site's 'Task', never an omitted field
-    issuetype: { name: resolveTypeName(i.type ?? 'task') },
-  }
-  const meta = createMeta(i)
-  if (i.description !== undefined || Object.keys(meta).length > 0) {
-    fields.description = adfDoc(withMeta(i.description, meta))
-  }
-  if (i.priority !== undefined) {
-    const name = toJiraPriority(i.priority, priorities())
-    if (name !== undefined) {
-      fields.priority = { name }
-    }
-  }
-  if ((i.labels ?? []).length > 0) {
-    fields.labels = i.labels
-  }
-  if (i.parent !== undefined) {
-    fields.parent = { key: issueRef(i.parent) }
-  }
-  const created = apiJson<{ key?: string }>('POST', '/issue', { fields })
-  if (typeof created.key !== 'string' || created.key === '') {
-    throw new Error('jira tasks: issue create returned no key')
-  }
-  applyDeps(created.key, i)
-  const row = queryIssueSync(created.key)
-  if (row === undefined) {
-    throw new Error(`jira tasks: created ${created.key} but could not read it back`)
-  }
-  return toRow(row, tryPriorities())
-}
-
-function updateStatus(n: JiraIssue, ref: string, val: string): void {
-  const key = n.key ?? ref
-  if (val === 'open') {
-    reopenSync(ref)
-  } else if (val === 'closed') {
-    closeSync(ref)
-  } else if (val === 'in_progress') {
-    claimSync(ref)
-  } else if (val === 'blocked') {
-    const labels = new Set(labelsOf(n))
-    labels.add(BLOCKED_LABEL)
-    api('PUT', `/issue/${encodeURIComponent(key)}`, { fields: { labels: [...labels] } })
-  } else {
-    throw new Error(`jira tasks: unknown status '${val}'`)
-  }
-}
-
-const editFields = (key: string, fields: Record<string, unknown>): void =>
-  api('PUT', `/issue/${encodeURIComponent(key)}`, { fields })
-
-function patchBody(n: JiraIssue, val: string): void {
-  const meta = bodyMeta(adfText(n.fields?.description))
-  editFields(n.key ?? '', { description: adfDoc(withMeta(val, meta)) })
-}
-
-const patchMetaField =
-  (k: string) =>
-  (n: JiraIssue, val: string): void => {
-    const meta = bodyMeta(adfText(n.fields?.description))
-    meta[k] = val
-    editFields(n.key ?? '', {
-      description: adfDoc(withMeta(adfText(n.fields?.description), meta)),
-    })
-  }
-
-function addLabels(n: JiraIssue, val: string): void {
-  const labels = new Set(labelsOf(n))
-  for (const l of val
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s !== '')) {
-    labels.add(l)
-  }
-  editFields(n.key ?? '', { labels: [...labels] })
-}
-
-interface AssignableUser {
-  accountId?: string
-  displayName?: string
-  emailAddress?: string
-}
-
-/** assignee:<name> resolves an assignable user by displayName/email/
- *  accountId (case-insensitive); '' unassigns. Ambiguity throws —
- *  picking one silently would hand the claim to the wrong person. */
-function resolveAssignee(key: string, val: string): string {
-  if (val === '') {
-    return UNASSIGNED
-  }
-  const users = apiJson<AssignableUser[]>(
-    'GET',
-    `/user/assignable/search?issueKey=${encodeURIComponent(key)}&query=${encodeURIComponent(val)}`
-  )
-  const want = val.toLowerCase()
-  const hits = users.filter(
-    (u) =>
-      u.accountId?.toLowerCase() === want ||
-      u.displayName?.toLowerCase() === want ||
-      u.emailAddress?.toLowerCase() === want
-  )
-  if (hits.length === 0) {
-    throw new Error(`jira tasks: no assignable user '${val}' on ${key}`)
-  }
-  if (hits.length > 1) {
-    throw new Error(
-      `jira tasks: '${val}' is ambiguous — ${hits
-        .map((u) => u.emailAddress ?? u.accountId ?? '?')
-        .join(', ')}`
-    )
-  }
-  return hits[0]!.accountId ?? UNASSIGNED
-}
-
-const PATCH: Record<string, (n: JiraIssue, ref: string, val: string) => void> = {
-  title: (n, _r, v) => editFields(n.key ?? '', { summary: v }),
-  body: (n, _r, v) => patchBody(n, v),
-  description: (n, _r, v) => patchBody(n, v),
-  status: (n, r, v) => updateStatus(n, r, v),
-  claim: (_n, r, v) => {
-    if (v === 'true') {
-      claimSync(r)
-    }
-  },
-  labels: (n, _r, v) => addLabels(n, v),
-  label: (n, _r, v) => addLabels(n, v),
-  assignee: (n, r, v) =>
-    api('PUT', `/issue/${encodeURIComponent(n.key ?? r)}/assignee`, {
-      accountId: resolveAssignee(n.key ?? r, v),
-    }),
-  notes: (n, _r, v) => comment(n.key ?? '', v),
-  note: (n, _r, v) => comment(n.key ?? '', v),
-  priority: (n, _r, v) => {
-    const p = Number(v)
-    if (!Number.isFinite(p)) {
-      throw new TypeError(`jira tasks: priority '${v}' is not a number`)
-    }
-    const name = toJiraPriority(p, priorities())
-    if (name === undefined) {
-      throw new Error('jira tasks: the site reports no priorities to write')
-    }
-    editFields(n.key ?? '', { priority: { name } })
-  },
-  type: (n, _r, v) => editFields(n.key ?? '', { issuetype: { name: resolveTypeName(v) } }),
-  issue_type: (n, _r, v) => editFields(n.key ?? '', { issuetype: { name: resolveTypeName(v) } }),
-  external_ref: patchMetaField('external_ref'),
-  externalRef: patchMetaField('external_ref'),
-}
-
-function updateSync(id: string, patch: Record<string, string | number>): void {
-  const ref = issueRef(id)
-  for (const [k, v] of Object.entries(patch)) {
-    const h = PATCH[k]
-    if (h === undefined) {
-      throw new Error(`jira tasks: unsupported update key '${k}'`)
-    }
-    h(mustIssue(ref), ref, String(v))
-  }
-}
-
-// --- the stores -------------------------------------------------------------------
-
 function rowOrUndef(n: JiraIssue | undefined, ps: string[]): TaskRow | undefined {
   return n === undefined ? undefined : pub(toRow(n, ps))
 }
 
-export function jiraTasks(_dir: string): TaskStore {
-  return {
-    list: (f = {}) =>
-      applyFilter(
-        queryIssuesSync(jqlFor(f, project().key), fetchCap(f)).map((n) =>
-          pub(toRow(n, tryPriorities()))
-        ),
-        f
-      ) as never,
-    // applyFilter must not slice here — the limit lands AFTER the
-    // priority sort in readyOf, or high-priority issues late in the
-    // created-ordered page get truncated away
-    ready: (f = {}) =>
-      readyOf(
+// --- the bound store --------------------------------------------------------------
+
+/** Bind a deployment surface — the returned tasks/tasksAsync are the
+ *  same TaskStore contract the `jira` and `jira-dc` connectors serve;
+ *  every REST verb below closes over S, so Cloud (v3) and Data Center
+ *  (v2) share the whole mapping layer. */
+export function buildTasks(S: JiraApi): {
+  tasks: (dir: string) => TaskStore
+  tasksAsync: (dir: string) => TaskStoreAsync
+} {
+  const {
+    api,
+    apiGet,
+    apiJson,
+    apiGetAsync,
+    issueTypes,
+    linkTypeName,
+    priorities,
+    prioritiesOrEmpty,
+    prioritiesOrEmptyAsync,
+    project,
+    projectAsync,
+    viewer,
+    viewerAsync,
+  } = S
+  const T = S.tag
+
+  /** A dead /priority endpoint must not kill the read plane — rows
+   *  fall back to trailer/default priorities. The OrEmpty twins cache
+   *  the failure per site, so a dead endpoint costs one spawn, not
+   *  one per row; the probe itself keeps throwing for write paths. */
+  const tryPriorities = (): string[] => prioritiesOrEmpty()
+
+  const tryPrioritiesAsync = async (): Promise<string[]> => prioritiesOrEmptyAsync()
+
+  // --- actor -------------------------------------------------------------------------
+
+  const display = (v: JiraViewer): string =>
+    v.displayName ?? v.emailAddress ?? v.name ?? v.accountId ?? ''
+
+  const viewerName = (): string => {
+    try {
+      return display(viewer())
+    } catch {
+      return ''
+    }
+  }
+
+  const actorAsync = async (): Promise<string> => {
+    try {
+      return display(await viewerAsync())
+    } catch {
+      return ''
+    }
+  }
+
+  // --- id resolution --------------------------------------------------------------
+
+  /** 'PROJ-123' | 'proj-123' | '123' | /browse/PROJ-123 URL | internal
+   *  numeric id → the key/id REST accepts as issueIdOrKey. A bare
+   *  number borrows the serving project's key — ambiguous-project
+   *  sites already threw in project(). */
+  function issueRef(id: string): string {
+    const t = id.trim()
+    const browse = /^https?:\/\/[^/]+\/browse\/([A-Za-z]\w*-\d+)/.exec(t)
+    if (browse) {
+      return browse[1]!.toUpperCase()
+    }
+    const rest = /\/rest\/api\/\d+\/issue\/(\d+)/.exec(t)
+    if (rest) {
+      return rest[1]!
+    }
+    if (/^[A-Za-z]\w*-\d+$/.test(t)) {
+      return t.toUpperCase()
+    }
+    if (/^\d+$/.test(t)) {
+      return `${project().key}-${t}`
+    }
+    throw new Error(
+      `${T} tasks: "${id}" is not an issue reference (want PROJ-123, a bare number, or a /browse/ URL)`
+    )
+  }
+
+  /** Async id resolution — a bare number resolves through the project
+   *  cache; warming it via projectAsync keeps issueRef's sync
+   *  project() call a cache hit instead of a blocking spawn inside
+   *  the probe. */
+  async function refAsync(id: string): Promise<string> {
+    if (/^\d+$/.test(id.trim())) {
+      await projectAsync()
+    }
+    return issueRef(id)
+  }
+
+  // --- reads ----------------------------------------------------------------------
+
+  function queryIssuesSync(jql: string, limit: number): JiraIssue[] {
+    const out: JiraIssue[] = []
+    let cursor: string | undefined
+    for (;;) {
+      const page = S.searchPage(jql, cursor)
+      out.push(...(page.issues ?? []))
+      if (out.length >= limit || page.next === undefined) {
+        break
+      }
+      cursor = page.next
+    }
+    return out.slice(0, limit)
+  }
+
+  async function queryIssuesAsync(jql: string, limit: number): Promise<JiraIssue[]> {
+    const out: JiraIssue[] = []
+    let cursor: string | undefined
+    for (;;) {
+      const page = await S.searchPageAsync(jql, cursor)
+      out.push(...(page.issues ?? []))
+      if (out.length >= limit || page.next === undefined) {
+        break
+      }
+      cursor = page.next
+    }
+    return out.slice(0, limit)
+  }
+
+  const issuePath = (ref: string): string =>
+    `/issue/${encodeURIComponent(ref)}?fields=${FIELDS}`
+
+  const queryIssueSync = (ref: string): JiraIssue | undefined =>
+    apiGet<JiraIssue>(issuePath(ref))
+  const queryIssueAsync = (ref: string): Promise<JiraIssue | undefined> =>
+    apiGetAsync<JiraIssue>(issuePath(ref))
+
+  // --- deps fetch ------------------------------------------------------------------
+
+  function depsSync(ids: string[], opts: DepOpts): TaskDepEdge[] {
+    const out: TaskDepEdge[] = []
+    for (const id of ids) {
+      const n = queryIssueSync(issueRef(id))
+      if (n) {
+        out.push(...depEdges(n, opts))
+      }
+    }
+    return out
+  }
+
+  async function depsAsync(ids: string[], opts: DepOpts): Promise<TaskDepEdge[]> {
+    const nodes = await Promise.all(
+      ids.map(async (id) => queryIssueAsync(await refAsync(id)))
+    )
+    return nodes.flatMap((n) => (n === undefined ? [] : depEdges(n, opts)))
+  }
+
+  /** Hydrated rows on the far side of `id`'s edges — the row-plane
+   *  twin of deps(). `dependency_type` rides along normalized. */
+  function neighborsSync(id: string, opts: DepOpts): TaskRow[] {
+    const n = queryIssueSync(issueRef(id))
+    if (n === undefined) {
+      return []
+    }
+    const self = n.key ?? ''
+    const others = new Map<string, string>()
+    for (const e of depEdges(n, opts)) {
+      others.set(e.issue_id === self ? e.depends_on_id : e.issue_id, e.type)
+    }
+    const ps = tryPriorities()
+    const rows: TaskRow[] = []
+    for (const [o, rel] of others) {
+      const node = queryIssueSync(o)
+      if (node !== undefined) {
+        rows.push({ ...pub(toRow(node, ps)), dependency_type: rel } as TaskRow)
+      }
+    }
+    return rows
+  }
+
+  async function neighborsAsync(id: string, opts: DepOpts): Promise<TaskRow[]> {
+    const n = await queryIssueAsync(await refAsync(id))
+    if (n === undefined) {
+      return []
+    }
+    const self = n.key ?? ''
+    const others = new Map<string, string>()
+    for (const e of depEdges(n, opts)) {
+      others.set(e.issue_id === self ? e.depends_on_id : e.issue_id, e.type)
+    }
+    const ps = await tryPrioritiesAsync()
+    const rows = await Promise.all(
+      [...others].map(async ([o, rel]) => {
+        const node = await queryIssueAsync(o)
+        return node === undefined
+          ? undefined
+          : ({ ...pub(toRow(node, ps)), dependency_type: rel } as TaskRow)
+      })
+    )
+    return rows.filter((r): r is TaskRow => r !== undefined)
+  }
+
+  function childrenSync(ref: string): TaskRow[] {
+    const n = queryIssueSync(ref)
+    if (n === undefined) {
+      return []
+    }
+    const ps = tryPriorities()
+    const rows: TaskRow[] = []
+    for (const s of n.fields?.subtasks ?? []) {
+      if (s.key !== undefined) {
+        const node = queryIssueSync(s.key)
+        if (node !== undefined) {
+          rows.push(pub(toRow(node, ps)))
+        }
+      }
+    }
+    return rows
+  }
+
+  async function childrenAsync(ref: string): Promise<TaskRow[]> {
+    const n = await queryIssueAsync(ref)
+    if (n === undefined) {
+      return []
+    }
+    const ps = await tryPrioritiesAsync()
+    const rows = await Promise.all(
+      (n.fields?.subtasks ?? []).map(async (s) => {
+        if (s.key === undefined) {
+          return undefined
+        }
+        const node = await queryIssueAsync(s.key)
+        return node === undefined ? undefined : pub(toRow(node, ps))
+      })
+    )
+    return rows.filter((r): r is TaskRow => r !== undefined)
+  }
+
+  // --- mutations ----------------------------------------------------------------------
+
+  const mustIssue = (ref: string): JiraIssue => {
+    const n = queryIssueSync(ref)
+    if (n === undefined) {
+      throw new Error(`${T} tasks: issue ${ref} not found`)
+    }
+    return n
+  }
+
+  interface Transition {
+    id?: string
+    name?: string
+    to?: { name?: string; statusCategory?: { key?: string; name?: string } }
+  }
+
+  /** Perform the first transition whose target lands in `category`
+   *  (fallback category allowed) — workflow names are custom,
+   *  categories are canonical. No candidate → throw; the caller's
+   *  contract names the failure. */
+  function transitionTo(key: string, category: string, fallback?: string): void {
+    const res = apiJson<{ transitions?: Transition[] }>(
+      'GET',
+      `/issue/${encodeURIComponent(key)}/transitions`
+    )
+    const ts = res.transitions ?? []
+    const pick =
+      ts.find((t) => t.to?.statusCategory?.key === category) ??
+      (fallback !== undefined
+        ? ts.find((t) => t.to?.statusCategory?.key === fallback)
+        : undefined)
+    if (pick?.id === undefined) {
+      throw new Error(`${T} tasks: ${key} has no transition to '${category}'`)
+    }
+    api('POST', `/issue/${encodeURIComponent(key)}/transitions`, {
+      transition: { id: pick.id },
+    })
+  }
+
+  /** Best-effort status move — the assignee write is already the
+   *  claim verdict, so a workflow without a start-transition must
+   *  not throw over a succeeded claim. */
+  const transitionMaybe = (key: string, category: string): void => {
+    try {
+      transitionTo(key, category)
+    } catch {
+      // workflow has no such edge — the claim marker still holds
+    }
+  }
+
+  const comment = (key: string, text: string): void =>
+    api('POST', `/issue/${encodeURIComponent(key)}/comment`, { body: S.doc(text) })
+
+  /** Jira's documented unassign sentinel — `accountId: '-1'` on
+   *  Cloud, `name: '-1'` on Data Center; assigneeBody carries the
+   *  surface's key name. */
+  const UNASSIGNED = '-1'
+
+  /** link(from, to, 'blocked') — "from is blocked by to" → Jira
+   *  Blocks: outwardIssue blocks inwardIssue, so `to` rides outward.
+   *  'related' resolves the site's relates-type; 'parent' makes `from`
+   *  a sub-task of `to`. Other rels resolve against the site's
+   *  link-type table — an unmatched name throws, never faked. */
+  function linkSync(from: string, to: string, rel: string): void {
+    const type = nativeTaskRel(rel)
+    if (type === 'parent-child') {
+      api('PUT', `/issue/${encodeURIComponent(issueRef(from))}`, {
+        fields: { parent: { key: issueRef(to) } },
+      })
+      return
+    }
+    const name = linkTypeName(type)
+    const [outward, inward] =
+      type === 'blocks' ? [issueRef(to), issueRef(from)] : [issueRef(from), issueRef(to)]
+    api('POST', '/issueLink', {
+      type: { name },
+      outwardIssue: { key: outward },
+      inwardIssue: { key: inward },
+    })
+  }
+
+  /** claim = assign viewer → verify re-read. The assignee write has
+   *  no compare-and-set — last writer wins — so the verify is the
+   *  strongest settlement the API allows: a loser whose re-read lands
+   *  after the winner's write sees the winner and throws. A loser's
+   *  re-read can still land BEFORE the winner's write — that residual
+   *  window is inherent to the API, no client-side ordering closes
+   *  it. An 'indeterminate' transition rides best-effort so the board
+   *  column follows the claim. */
+  function claimSync(ref: string): void {
+    const n = mustIssue(ref)
+    const key = n.key ?? ref
+    if (isDone(n)) {
+      throw new Error(`${T} tasks: ${key} is done — only open issues are claimable`)
+    }
+    if (n.fields?.assignee != null) {
+      throw new Error(`${T} tasks: ${key} already claimed by ${assigneeName(n)}`)
+    }
+    const me = viewer()
+    // viewer() already threw when the surface identity was absent —
+    // a missing key never reaches the write as an empty name
+    const mine = S.userKey(me)!
+    api('PUT', `/issue/${encodeURIComponent(key)}/assignee`, S.assigneeBody(mine))
+    const check = queryIssueSync(ref)
+    if (S.userKey(check?.fields?.assignee) !== mine) {
+      const holder = check?.fields?.assignee != null ? assigneeName(check) : 'another actor'
+      throw new Error(`${T} tasks: ${key} claim contested — ${holder} holds it`)
+    }
+    transitionMaybe(key, 'indeterminate')
+  }
+
+  function reopenSync(ref: string): void {
+    const n = mustIssue(ref)
+    const key = n.key ?? ref
+    // a terminal state needs the verb; 'indeterminate' needs it too —
+    // unassigning alone leaves statusCategory untouched, so the row
+    // keeps reading in_progress. Best-effort below 'new': custom
+    // workflows may lack a backward edge — the unassign is the real
+    // un-claim and runs either way
+    if (isDone(n)) {
+      transitionTo(key, 'new', 'indeterminate')
+    } else if (category(n) === 'indeterminate') {
+      transitionMaybe(key, 'new')
+    }
+    // release every claim marker — a claim held by a crashed worker or
+    // a rival would otherwise keep the issue in_progress forever
+    if (n.fields?.assignee != null) {
+      api('PUT', `/issue/${encodeURIComponent(key)}/assignee`, S.assigneeBody(UNASSIGNED))
+    }
+    const labels = labelsOf(n)
+    if (labels.includes(BLOCKED_LABEL)) {
+      api('PUT', `/issue/${encodeURIComponent(key)}`, {
+        fields: { labels: labels.filter((l) => l !== BLOCKED_LABEL) },
+      })
+    }
+  }
+
+  function closeSync(ref: string, reason?: string): void {
+    const n = mustIssue(ref)
+    const key = n.key ?? ref
+    // the reason lands first — a failed comment leaves the issue open,
+    // same ordering guarantee as `gh issue close --comment`
+    if (reason !== undefined && reason !== '') {
+      comment(key, reason)
+    }
+    if (!isDone(n)) {
+      transitionTo(key, 'done')
+    }
+  }
+
+  /** Resolve a requested type name against the site's issuetypes
+   *  (case-insensitive) — an unmapped bd name falls back to 'Task'. */
+  function resolveTypeName(type: string): string {
+    const ts = issueTypes()
+    return ts.find((t) => t.toLowerCase() === type.toLowerCase()) ?? 'Task'
+  }
+
+  function applyDeps(id: string, i: TaskInput): void {
+    for (const d of i.deps ?? []) {
+      const { kind, ref } = depRef(d)
+      linkSync(id, ref, kind)
+    }
+  }
+
+  function createSync(i: TaskInput): TaskRow {
+    // pre-validate dep rels before the issue exists — an unresolvable
+    // link kind must not leave a half-created issue
+    for (const d of i.deps ?? []) {
+      const { kind } = depRef(d)
+      if (!PARENT_KINDS.test(kind)) {
+        linkTypeName(nativeTaskRel(kind))
+      }
+    }
+    const fields: Record<string, unknown> = {
+      project: { key: project().key },
+      summary: i.title,
+      // issuetype is REQUIRED on create — an absent type resolves to
+      // the site's 'Task', never an omitted field
+      issuetype: { name: resolveTypeName(i.type ?? 'task') },
+    }
+    const meta = createMeta(i)
+    if (i.description !== undefined || Object.keys(meta).length > 0) {
+      fields.description = S.doc(withMeta(i.description, meta))
+    }
+    if (i.priority !== undefined) {
+      const name = toJiraPriority(i.priority, priorities())
+      if (name !== undefined) {
+        fields.priority = { name }
+      }
+    }
+    if ((i.labels ?? []).length > 0) {
+      fields.labels = i.labels
+    }
+    if (i.parent !== undefined) {
+      fields.parent = { key: issueRef(i.parent) }
+    }
+    const created = apiJson<{ key?: string }>('POST', '/issue', { fields })
+    if (typeof created.key !== 'string' || created.key === '') {
+      throw new Error(`${T} tasks: issue create returned no key`)
+    }
+    applyDeps(created.key, i)
+    const row = queryIssueSync(created.key)
+    if (row === undefined) {
+      throw new Error(`${T} tasks: created ${created.key} but could not read it back`)
+    }
+    return toRow(row, tryPriorities())
+  }
+
+  function updateStatus(n: JiraIssue, ref: string, val: string): void {
+    const key = n.key ?? ref
+    if (val === 'open') {
+      reopenSync(ref)
+    } else if (val === 'closed') {
+      closeSync(ref)
+    } else if (val === 'in_progress') {
+      claimSync(ref)
+    } else if (val === 'blocked') {
+      const labels = new Set(labelsOf(n))
+      labels.add(BLOCKED_LABEL)
+      api('PUT', `/issue/${encodeURIComponent(key)}`, { fields: { labels: [...labels] } })
+    } else {
+      throw new Error(`${T} tasks: unknown status '${val}'`)
+    }
+  }
+
+  const editFields = (key: string, fields: Record<string, unknown>): void =>
+    api('PUT', `/issue/${encodeURIComponent(key)}`, { fields })
+
+  function patchBody(n: JiraIssue, val: string): void {
+    const meta = bodyMeta(adfText(n.fields?.description))
+    editFields(n.key ?? '', { description: S.doc(withMeta(val, meta)) })
+  }
+
+  const patchMetaField =
+    (k: string) =>
+    (n: JiraIssue, val: string): void => {
+      const meta = bodyMeta(adfText(n.fields?.description))
+      meta[k] = val
+      editFields(n.key ?? '', {
+        description: S.doc(withMeta(adfText(n.fields?.description), meta)),
+      })
+    }
+
+  function addLabels(n: JiraIssue, val: string): void {
+    const labels = new Set(labelsOf(n))
+    for (const l of val
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s !== '')) {
+      labels.add(l)
+    }
+    editFields(n.key ?? '', { labels: [...labels] })
+  }
+
+  /** assignee:<name> resolves an assignable user by the surface's
+   *  identity fields (displayName/email + accountId on Cloud, name/key
+   *  on DC; case-insensitive); '' unassigns. Ambiguity throws —
+   *  picking one silently would hand the claim to the wrong person. */
+  function resolveAssignee(key: string, val: string): string {
+    if (val === '') {
+      return UNASSIGNED
+    }
+    const users = apiJson<JiraViewer[]>(
+      'GET',
+      `/user/assignable/search?issueKey=${encodeURIComponent(key)}` +
+        `&${S.userQueryParam}=${encodeURIComponent(val)}`
+    )
+    const want = val.toLowerCase()
+    const hits = users.filter(
+      (u) =>
+        u.accountId?.toLowerCase() === want ||
+        u.name?.toLowerCase() === want ||
+        u.key?.toLowerCase() === want ||
+        u.displayName?.toLowerCase() === want ||
+        u.emailAddress?.toLowerCase() === want
+    )
+    if (hits.length === 0) {
+      throw new Error(`${T} tasks: no assignable user '${val}' on ${key}`)
+    }
+    if (hits.length > 1) {
+      throw new Error(
+        `${T} tasks: '${val}' is ambiguous — ${hits
+          .map((u) => u.emailAddress ?? u.name ?? u.accountId ?? '?')
+          .join(', ')}`
+      )
+    }
+    return S.userKey(hits[0]) ?? UNASSIGNED
+  }
+
+  const PATCH: Record<string, (n: JiraIssue, ref: string, val: string) => void> = {
+    title: (n, _r, v) => editFields(n.key ?? '', { summary: v }),
+    body: (n, _r, v) => patchBody(n, v),
+    description: (n, _r, v) => patchBody(n, v),
+    status: (n, r, v) => updateStatus(n, r, v),
+    claim: (_n, r, v) => {
+      if (v === 'true') {
+        claimSync(r)
+      }
+    },
+    labels: (n, _r, v) => addLabels(n, v),
+    label: (n, _r, v) => addLabels(n, v),
+    assignee: (n, r, v) =>
+      api(
+        'PUT',
+        `/issue/${encodeURIComponent(n.key ?? r)}/assignee`,
+        S.assigneeBody(resolveAssignee(n.key ?? r, v))
+      ),
+    notes: (n, _r, v) => comment(n.key ?? '', v),
+    note: (n, _r, v) => comment(n.key ?? '', v),
+    priority: (n, _r, v) => {
+      const p = Number(v)
+      if (!Number.isFinite(p)) {
+        throw new TypeError(`${T} tasks: priority '${v}' is not a number`)
+      }
+      const name = toJiraPriority(p, priorities())
+      if (name === undefined) {
+        throw new Error(`${T} tasks: the site reports no priorities to write`)
+      }
+      editFields(n.key ?? '', { priority: { name } })
+    },
+    type: (n, _r, v) => editFields(n.key ?? '', { issuetype: { name: resolveTypeName(v) } }),
+    issue_type: (n, _r, v) =>
+      editFields(n.key ?? '', { issuetype: { name: resolveTypeName(v) } }),
+    external_ref: patchMetaField('external_ref'),
+    externalRef: patchMetaField('external_ref'),
+  }
+
+  function updateSync(id: string, patch: Record<string, string | number>): void {
+    const ref = issueRef(id)
+    for (const [k, v] of Object.entries(patch)) {
+      const h = PATCH[k]
+      if (h === undefined) {
+        throw new Error(`${T} tasks: unsupported update key '${k}'`)
+      }
+      h(mustIssue(ref), ref, String(v))
+    }
+  }
+
+  // --- the stores -------------------------------------------------------------------
+
+  function jiraTasks(_dir: string): TaskStore {
+    return {
+      list: (f = {}) =>
         applyFilter(
-          queryIssuesSync(READY_JQL(project().key), Number.POSITIVE_INFINITY).map((n) =>
+          queryIssuesSync(jqlFor(f, project().key), fetchCap(f)).map((n) =>
             pub(toRow(n, tryPriorities()))
           ),
-          { ...f, status: 'open', limit: undefined }
-        ),
-        f
-      ) as never,
-    get: (id) => rowOrUndef(queryIssueSync(issueRef(id)), tryPriorities()) as never,
-    create: (i) => pub(createSync(i)) as never,
-    update: (id, patch) => updateSync(id, patch),
-    claim: (id) => claimSync(issueRef(id)),
-    actor: () => viewerName(),
-    reopen: (id) => reopenSync(issueRef(id)),
-    close: (id, reason) => closeSync(issueRef(id), reason),
-    remove: (id) => api('DELETE', `/issue/${encodeURIComponent(issueRef(id))}`),
-    note: (id, text) => comment(issueRef(id), text),
-    children: (id) => childrenSync(issueRef(id)) as never,
-    deps: (ids, opts = {}) => depsSync(ids, opts) as never,
-    neighbors: (id, opts = {}) => neighborsSync(id, opts) as never,
-    link: (from, to, rel = 'related') => linkSync(from, to, rel),
-    prefix: () => project().key,
+          f
+        ) as never,
+      // applyFilter must not slice here — the limit lands AFTER the
+      // priority sort in readyOf, or high-priority issues late in the
+      // created-ordered page get truncated away
+      ready: (f = {}) =>
+        readyOf(
+          applyFilter(
+            queryIssuesSync(READY_JQL(project().key), Number.POSITIVE_INFINITY).map((n) =>
+              pub(toRow(n, tryPriorities()))
+            ),
+            { ...f, status: 'open', limit: undefined }
+          ),
+          f
+        ) as never,
+      get: (id) => rowOrUndef(queryIssueSync(issueRef(id)), tryPriorities()) as never,
+      create: (i) => pub(createSync(i)) as never,
+      update: (id, patch) => updateSync(id, patch),
+      claim: (id) => claimSync(issueRef(id)),
+      actor: () => viewerName(),
+      reopen: (id) => reopenSync(issueRef(id)),
+      close: (id, reason) => closeSync(issueRef(id), reason),
+      remove: (id) => api('DELETE', `/issue/${encodeURIComponent(issueRef(id))}`),
+      note: (id, text) => comment(issueRef(id), text),
+      children: (id) => childrenSync(issueRef(id)) as never,
+      deps: (ids, opts = {}) => depsSync(ids, opts) as never,
+      neighbors: (id, opts = {}) => neighborsSync(id, opts) as never,
+      link: (from, to, rel = 'related') => linkSync(from, to, rel),
+      prefix: () => project().key,
+    }
   }
+
+  function jiraTasksAsync(_dir: string): TaskStoreAsync {
+    return {
+      list: async (f = {}) => {
+        const ps = await tryPrioritiesAsync()
+        return applyFilter(
+          (await queryIssuesAsync(jqlFor(f, (await projectAsync()).key), fetchCap(f))).map(
+            (n) => pub(toRow(n, ps))
+          ),
+          f
+        )
+      },
+      ready: async (f = {}) => {
+        const ps = await tryPrioritiesAsync()
+        return readyOf(
+          applyFilter(
+            (
+              await queryIssuesAsync(
+                READY_JQL((await projectAsync()).key),
+                Number.POSITIVE_INFINITY
+              )
+            ).map((n) => pub(toRow(n, ps))),
+            { ...f, status: 'open', limit: undefined }
+          ),
+          f
+        )
+      },
+      get: async (id) =>
+        rowOrUndef(
+          await queryIssueAsync(await refAsync(id)),
+          await tryPrioritiesAsync()
+        ) as never,
+      children: async (id) => (await childrenAsync(await refAsync(id))) as never,
+      deps: async (ids, opts = {}) => (await depsAsync(ids, opts)) as never,
+      neighbors: async (id, opts = {}) => (await neighborsAsync(id, opts)) as never,
+      actor: () => actorAsync(),
+    }
+  }
+
+  return { tasks: jiraTasks, tasksAsync: jiraTasksAsync }
 }
 
-export function jiraTasksAsync(_dir: string): TaskStoreAsync {
-  return {
-    list: async (f = {}) => {
-      const ps = await tryPrioritiesAsync()
-      return applyFilter(
-        (await queryIssuesAsync(jqlFor(f, (await projectAsync()).key), fetchCap(f))).map((n) =>
-          pub(toRow(n, ps))
-        ),
-        f
-      )
-    },
-    ready: async (f = {}) => {
-      const ps = await tryPrioritiesAsync()
-      return readyOf(
-        applyFilter(
-          (
-            await queryIssuesAsync(
-              READY_JQL((await projectAsync()).key),
-              Number.POSITIVE_INFINITY
-            )
-          ).map((n) => pub(toRow(n, ps))),
-          { ...f, status: 'open', limit: undefined }
-        ),
-        f
-      )
-    },
-    get: async (id) =>
-      rowOrUndef(await queryIssueAsync(await refAsync(id)), await tryPrioritiesAsync()) as never,
-    children: async (id) => (await childrenAsync(await refAsync(id))) as never,
-    deps: async (ids, opts = {}) => (await depsAsync(ids, opts)) as never,
-    neighbors: async (id, opts = {}) => (await neighborsAsync(id, opts)) as never,
-    actor: () => actorAsync(),
-  }
-}
+// --- the two bound surfaces ----------------------------------------------------------
+
+const cloud = buildTasks(cloudApi())
+const dc = buildTasks(dcApi())
+
+/** `jira` — the Jira Cloud v3 tasks store. */
+export const jiraTasks = cloud.tasks
+export const jiraTasksAsync = cloud.tasksAsync
+
+/** `jira-dc` — the Jira Data Center/Server v2 tasks store. */
+export const jiraDcTasks = dc.tasks
+export const jiraDcTasksAsync = dc.tasksAsync
