@@ -55,16 +55,12 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import {
   chmodSync,
-  closeSync,
-  linkSync,
   mkdirSync,
-  openSync,
   readFileSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
-  writeSync,
 } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { dirname, join } from 'node:path'
@@ -73,11 +69,14 @@ import {
   busPublish,
   busSocketPath,
   gitTry,
+  holdFileLock,
+  LockTimeout,
   SpawnError,
   startBusBroker,
   type AgentConnector,
   type AgentInfo,
   type BusBroker,
+  type HeldLockOptions,
   type SpawnErrorKind,
 } from '@broject/core'
 import { GITHUB_WEBHOOK_SECRET_ENV, githubWebhookHandler } from '@broject/github'
@@ -194,136 +193,35 @@ export function liveServeState(dir: string): ServeState | undefined {
   return state !== undefined && pidAlive(state.pid) ? state : undefined
 }
 
-/** Drop our lock file — only while it still carries OUR pid, so a
- *  broken-stale-then-retaken lock stays with its new holder. */
-function releaseServeLock(lock: string): void {
-  try {
-    if (readFileSync(lock, 'utf8') === `${process.pid}`) {
-      rmSync(lock, { force: true })
-    }
-  } catch {
-    // raced removal is already the desired end state
-  }
-}
-
-/** A lock file read that came back empty — the wx fallback below has a
- *  create-then-write window where a racer sees zero bytes. A fresh
- *  empty lock is in-flight (retry, never break it); one older than the
- *  grace is a crashed writer's leftover. */
-const EMPTY_LOCK_GRACE_MS = 5_000
-
-/** Filesystems where link(2) is not implemented (some fuse/9p/drvfs
- *  mounts) — the serve lock falls back to a single O_CREAT|O_EXCL
- *  write, which is the same atomic-create contract. */
-const NO_HARDLINK_CODES = new Set(['EPERM', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP'])
-
-/** The lock exists — decide held vs stealable. A live pid refuses; a
- *  dead/unparseable one is broken so the next attempt wins; a fresh
- *  empty file is an in-flight wx writer (retry, don't break). */
-function heldOrRetry(lock: string): 'held' | 'retry' {
-  let raw: string
-  let age = 0
-  try {
-    raw = readFileSync(lock, 'utf8')
-    age = Date.now() - statSync(lock).mtimeMs
-  } catch {
-    // raced removal — the retry decides
-    return 'retry'
-  }
-  if (raw.trim() === '' && age < EMPTY_LOCK_GRACE_MS) {
-    return 'retry'
-  }
-  if (Number.isInteger(Number(raw.trim())) && raw.trim() !== '' && pidAlive(Number(raw.trim()))) {
-    return 'held'
-  }
-  try {
-    rmSync(lock, { force: true })
-  } catch {
-    // another starter broke it first — the retry decides
-  }
-  return 'retry'
-}
-
-/** One acquisition attempt — link the staged pid file over `lock`, or
- *  wx-write it on filesystems without hard links. A held lock reports
- *  'held' (live holder) or 'retry' (dead holder broken, try again). */
-function tryLockOnce(staged: string, lock: string): 'acquired' | 'held' | 'retry' {
-  try {
-    linkSync(staged, lock)
-    return 'acquired'
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code
-    if (code === 'EEXIST') {
-      return heldOrRetry(lock)
-    }
-    if (!NO_HARDLINK_CODES.has(code ?? '')) {
-      throw err
-    }
-  }
-  // wx = create-then-write — a writer paused past EMPTY_LOCK_GRACE_MS
-  // mid-call can have its still-empty lock broken and the path stolen;
-  // the re-read proves the lock still names us before the acquisition
-  // counts (a stolen path holds the thief's pid, or nothing at all)
-  let fd: number
-  try {
-    fd = openSync(lock, 'wx')
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-      return heldOrRetry(lock)
-    }
-    throw err
-  }
-  try {
-    const pid = `${process.pid}`
-    for (let off = 0; off < pid.length; ) {
-      off += writeSync(fd, pid.slice(off))
-    }
-  } finally {
-    closeSync(fd)
-  }
-  try {
-    return readFileSync(lock, 'utf8') === `${process.pid}` ? 'acquired' : 'retry'
-  } catch {
-    // the path no longer names our file — broken mid-write, retry
-    return 'retry'
-  }
-}
-
-/** `<serve.json>.lock` — atomic create is the singleton gate, so two
- *  starters can't both pass the live-state check and both write
- *  serve.json (the lock is held for the server's whole lifetime, not a
- *  critical section). The file carries the holder pid: a live holder
- *  refuses, a dead holder's leftover is broken. Returns the release, or
+/** `<serve.json>.lock` — the singleton gate, so two starters can't
+ *  both pass the live-state check and both write serve.json. The hold
+ *  rides `holdFileLock` (spec bro-2duu9): heartbeated for the server's
+ *  whole lifetime so a >15min serve never reads abandoned to the
+ *  janitor's `*.lock` sweep or to filelock contenders — the file
+ *  carries the shared `pid:token` shape. A live foreign holder refuses,
+ *  a dead/tokenless leftover is stolen. Returns the release, or
  *  undefined when another server holds it. */
-export function acquireServeLock(dir: string): (() => void) | undefined {
+export function acquireServeLock(
+  dir: string,
+  opts: HeldLockOptions = {}
+): (() => void) | undefined {
   const statePath = serveStatePath(dir)
   if (statePath === null) {
     return undefined
   }
-  const lock = `${statePath}.lock`
-  mkdirSync(dirname(lock), { recursive: true })
-  // link(2) publishes the populated file atomically — open('wx')+write
-  // would leave a window where the lock exists but reads empty, and a
-  // racing starter could break it as "stale"
-  const staged = `${lock}.${process.pid}.tmp`
-  writeFileSync(staged, `${process.pid}`)
   try {
-    // extra attempts with a beat between them cover the wx fallback's
-    // create-then-write window — a live writer fills the lock in
-    // microseconds, so a fresh-empty verdict resolves on retry 2+
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      const verdict = tryLockOnce(staged, lock)
-      if (verdict === 'acquired') {
-        return () => releaseServeLock(lock)
-      }
-      if (verdict === 'held') {
-        return undefined
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25)
+    // a held lock refuses the start, not waits — the small bound only
+    // covers stealing a dead holder's leftover and the re-link after
+    return holdFileLock(`${statePath}.lock`, {
+      waitMs: 250,
+      label: 'serve lock',
+      ...opts,
+    })
+  } catch (err) {
+    if (err instanceof LockTimeout) {
+      return undefined
     }
-    return undefined
-  } finally {
-    rmSync(staged, { force: true })
+    throw err
   }
 }
 

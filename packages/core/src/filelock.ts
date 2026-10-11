@@ -1,10 +1,10 @@
-/** Advisory inter-process file locks (O_EXCL create — existence IS the
+/** Advisory inter-process file locks (atomic create — existence IS the
  *  lock). Serializes read-modify-write windows across bro processes:
  *  without one, two actors both read the pre-write state and the loser
  *  clobbers or double-allocates. Re-entrant per path inside a process so
  *  a locked section can reach for the same lock again. */
 import { randomBytes } from 'node:crypto'
-import { linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { closeSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { pidAlive } from './proc.ts'
 
@@ -26,6 +26,16 @@ const LOCK_WAIT_MS = 20_000
  *  could belong to an in-flight acquirer; an old one can't. */
 const LOCK_STALE_MS = 60_000
 
+/** Filesystems where link(2) is not implemented (some fuse/9p/drvfs
+ *  mounts) — the acquire falls back to a single O_CREAT|O_EXCL write,
+ *  the same atomic-create contract (tryAcquireLockFileWx). */
+const NO_HARDLINK_CODES = new Set(['EPERM', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP'])
+
+/** A lock that reads EMPTY is a wx writer mid-publish (the fallback's
+ *  create-then-write window). Fresh = in-flight — never stealable; an
+ *  empty file older than the grace is a crashed writer's leftover. */
+const EMPTY_LOCK_GRACE_MS = 5_000
+
 const syncSleep = (ms: number): void => {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
@@ -45,6 +55,9 @@ const lockStealable = (path: string): boolean => {
     age = Date.now() - statSync(path).mtimeMs
   } catch {
     return false // vanished or unreadable — can't prove dead, don't steal
+  }
+  if (token.trim() === '' && age < EMPTY_LOCK_GRACE_MS) {
+    return false // in-flight wx writer — retry, never break it
   }
   return !pidAlive(Number(token.split(':')[0])) || age > LOCK_ABANDONED_MS
 }
@@ -128,7 +141,9 @@ const sweepStaged = (lock: string): void => {
  *  is staged and link(2)'d into place atomically: an O_EXCL create would
  *  publish an EMPTY lock whose pid-less token reads as a dead owner — a
  *  concurrent acquirer could steal it before the first write landed.
- *  On EEXIST a provably stale hold is stolen so the next retry wins. */
+ *  Filesystems without link(2) take the wx fallback, which covers that
+ *  window with the fresh-empty grace instead. On EEXIST a provably stale
+ *  hold is stolen so the next retry wins. */
 const tryAcquireLockFile = (lock: string, token: string): boolean => {
   const staged = `${lock}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
   writeFileSync(staged, token)
@@ -136,18 +151,63 @@ const tryAcquireLockFile = (lock: string, token: string): boolean => {
     linkSync(staged, lock)
     return true
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === 'EEXIST') {
+      try {
+        stealLock(lock)
+      } catch {
+        // raced removal or a stat flake — the retry decides
+      }
+      return false
+    }
+    if (!NO_HARDLINK_CODES.has(code ?? '')) {
       throw err
     }
+    // no link(2) on this fs — fall through to the wx path
   } finally {
     rmSync(staged, { force: true })
   }
+  return tryAcquireLockFileWx(lock, token)
+}
+
+/** The wx acquisition attempt — for filesystems where link(2) is not
+ *  implemented (some fuse/9p/drvfs mounts). O_CREAT|O_EXCL gives the
+ *  same atomic-create contract, but the file publishes EMPTY: a
+ *  contender sees an in-flight writer (fresh-empty grace in
+ *  lockStealable) rather than a dead owner to break. The post-write
+ *  re-read closes the remaining window — a thief that stole the empty
+ *  file and took the path leaves its own token there (or the capture
+ *  is mid-flight), so the hold only counts while the lock still names
+ *  ours. */
+const tryAcquireLockFileWx = (lock: string, token: string): boolean => {
+  let fd: number
   try {
-    stealLock(lock)
-  } catch {
-    // raced removal or a stat flake — the retry decides
+    fd = openSync(lock, 'wx')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      try {
+        stealLock(lock)
+      } catch {
+        // raced removal or a stat flake — the retry decides
+      }
+      return false
+    }
+    throw err
   }
-  return false
+  try {
+    writeFileSync(fd, token)
+  } finally {
+    try {
+      closeSync(fd)
+    } catch {
+      // a close failure can't unwrite the token — the re-read decides
+    }
+  }
+  try {
+    return readFileSync(lock, 'utf8') === token
+  } catch {
+    return false // vanished mid-window — a contender owns the path now
+  }
 }
 
 /** Drop `lock` only while it still carries `token` — the same
@@ -196,7 +256,7 @@ export interface FileLockOptions {
   label?: string
 }
 
-/** Advisory inter-process lock on `lock` (O_EXCL create — existence IS
+/** Advisory inter-process lock on `lock` (atomic create — existence IS
  *  the lock). Returns the release; throws when a live holder outlasts
  *  waitMs. Re-entrant per path — a second acquire while held is a no-op
  *  release. Held locks are also dropped by an 'exit' hook, so a
