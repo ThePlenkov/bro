@@ -251,7 +251,7 @@ const TIMER_MAX_MS = 2 ** 31 - 1
 
 /** Progress lines — stderr under --json so stdout stays a clean
  *  event stream. */
-const say = (ctx: Ctx, msg: string): void => {
+const say = (ctx: Pick<Ctx, 'json'>, msg: string): void => {
   if (ctx.json) {
     console.error(msg)
   } else {
@@ -2050,6 +2050,28 @@ function sayLoopAudit(ctx: Ctx, reap: LitterReap | undefined, sections: [string,
   }
 }
 
+/** The audit's exit-path `bro sync` — fail-open by contract. Sync code
+ *  throws its failures (the CLI keeps the same verdict via main's
+ *  catch), but a stray process.exit anywhere in the subtree must still
+ *  degrade to a warning: an exit here kills the runner mid-write and
+ *  drops the audit lines still buffered on stdout (bro-qjbwq). */
+export function syncAfterAudit(
+  ctx: { json: boolean },
+  sync: () => void = () => runSyncCommand([])
+): void {
+  const realExit = process.exit
+  process.exit = ((code?: number) => {
+    throw new Error(`bro sync called process.exit(${code ?? 0})`)
+  }) as typeof process.exit
+  try {
+    sync()
+  } catch (err) {
+    say(ctx, `  warning: bro sync failed — ${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    process.exit = realExit
+  }
+}
+
 /** End-of-run sweep: first reap the provably-done litter (closed-bead or
  *  merged-PR worktrees that are still clean, plus their bare branches —
  *  `bro work prune --loop` runs the same sweep by hand), then name every
@@ -2086,11 +2108,7 @@ function endAudit(ctx: Ctx, seen: Set<string>): void {
       ['audit errors', errors],
       ['cleanup errors', ctx.tails],
     ])
-    try {
-      runSyncCommand([])
-    } catch (err) {
-      say(ctx, `  warning: bro sync failed — ${err instanceof Error ? err.message : String(err)}`)
-    }
+    syncAfterAudit(ctx)
   } catch (err) {
     say(ctx, `  warning: audit failed — ${err instanceof Error ? err.message : String(err)}`)
   } finally {
