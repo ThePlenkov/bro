@@ -22,10 +22,19 @@ const writeLock = (main: string, content: string): void => {
   writeFileSync(p, content)
 }
 
-const writeRecord = (main: string, pid: number): void => {
+const writeRecord = (main: string, pid: number, extra: object = {}): void => {
   const p = daemonStatePath(main)!
   mkdirSync(dirname(p), { recursive: true })
-  writeFileSync(p, JSON.stringify({ pid, everySec: 300, spawnedAt: 'x', cmd: 'y' }))
+  writeFileSync(
+    p,
+    JSON.stringify({
+      pid,
+      everySec: 300,
+      spawnedAt: new Date().toISOString(),
+      cmd: 'y',
+      ...extra,
+    })
+  )
 }
 
 describe('daemon state', () => {
@@ -49,7 +58,13 @@ describe('daemon state', () => {
       writeFileSync(file, JSON.stringify({ pid: 'abc' }))
       assert.equal(readDaemonRecord(main), null)
       writeFileSync(file, JSON.stringify({ pid: 42, everySec: 300, spawnedAt: 't', cmd: 'c' }))
-      assert.deepEqual(readDaemonRecord(main), { pid: 42, everySec: 300, spawnedAt: 't', cmd: 'c' })
+      assert.deepEqual(readDaemonRecord(main), {
+        pid: 42,
+        everySec: 300,
+        spawnedAt: 't',
+        cmd: 'c',
+        pidStart: undefined,
+      })
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -100,6 +115,31 @@ describe('daemonProbe', () => {
       assert.equal(probe.live, true)
       assert.equal(probe.pid, process.pid)
       assert.equal(probe.recorded?.pid, process.pid)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a pidStart-pinned record is checked, not just the pid — a reused pid never passes', () => {
+    const { root, main } = initRepo('bro-daemon-pstart-')
+    try {
+      // a record carrying a start time that does NOT match the live
+      // pid's real start must not read as the daemon — pid reuse guard
+      writeRecord(main, process.pid, { pidStart: 'bogus-start' })
+      assert.equal(daemonProbe(main).live, false)
+      // and a stale no-pidStart record (spawnedAt beyond the trust
+      // window) stays dead even when the pid is alive
+      const p = daemonStatePath(main)!
+      writeFileSync(
+        p,
+        JSON.stringify({
+          pid: process.pid,
+          everySec: 300,
+          spawnedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+          cmd: 'y',
+        })
+      )
+      assert.equal(daemonProbe(main).live, false)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

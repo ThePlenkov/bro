@@ -13,10 +13,10 @@
  * read the lock. Agents stay detached registry peers — the daemon
  * owns their scheduling, never their parentage.
  */
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { acquireFileLock, gitCommonDir, lockHolderPid, pidAlive } from '@broject/core'
+import { acquireFileLock, gitCommonDir, lockHolderPid, pidAlive, procStat } from '@broject/core'
 import { flag } from './args.ts'
 import { driveLockPath, runDriveCommand } from './drive.ts'
 import { driveSection, MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
@@ -42,7 +42,16 @@ export interface DaemonRecord {
   everySec: number
   spawnedAt: string
   cmd: string
+  /** the child's /proc start time — pins the pid against reuse; absent
+   *  on older records, which the probe trusts only briefly after
+   *  `spawnedAt` (the pre-lock window is seconds anyway) */
+  pidStart?: string
 }
+
+/** Records without a `pidStart` are trusted this long after `spawnedAt`
+ *  — long enough to cover the pre-lock window, short enough that a
+ *  reused pid can't impersonate the daemon forever. */
+const RECORD_TRUST_MS = 120_000
 
 /** `<git-common>/bro/daemon.json` — who armed the daemon. Written by
  *  `up`, removed by `down`; distinct from `drive.lock`, which is the
@@ -66,7 +75,13 @@ export function readDaemonRecord(dir: string): DaemonRecord | null {
   try {
     const rec = JSON.parse(readFileSync(file, 'utf8')) as Partial<DaemonRecord>
     return typeof rec.pid === 'number' && typeof rec.everySec === 'number'
-      ? { pid: rec.pid, everySec: rec.everySec, spawnedAt: rec.spawnedAt ?? '', cmd: rec.cmd ?? '' }
+      ? {
+          pid: rec.pid,
+          everySec: rec.everySec,
+          spawnedAt: rec.spawnedAt ?? '',
+          cmd: rec.cmd ?? '',
+          pidStart: typeof rec.pidStart === 'string' ? rec.pidStart : undefined,
+        }
       : null
   } catch {
     return null
@@ -97,10 +112,24 @@ export function daemonProbe(dir: string): {
   if (lockPid !== null && pidAlive(lockPid)) {
     return { live: true, pid: lockPid, recorded }
   }
-  if (recorded !== null && pidAlive(recorded.pid)) {
+  if (recorded !== null && recordedPidAlive(recorded)) {
     return { live: true, pid: recorded.pid, recorded }
   }
   return { live: false, recorded }
+}
+
+/** A recorded pid is trusted with its stored start time; records that
+ *  predate the field get the bounded post-spawn window only — a reused
+ *  pid must not impersonate the daemon forever. */
+function recordedPidAlive(rec: DaemonRecord, now: number = Date.now()): boolean {
+  if (rec.pidStart !== undefined) {
+    return pidAlive(rec.pid, rec.pidStart)
+  }
+  const spawnedAt = Date.parse(rec.spawnedAt)
+  if (!Number.isFinite(spawnedAt) || now - spawnedAt > RECORD_TRUST_MS) {
+    return false
+  }
+  return pidAlive(rec.pid)
 }
 
 export type DaemonUpDecision =
@@ -157,11 +186,37 @@ export function spawnDaemon(dir: string, everySec: number): { pid: number; log: 
       everySec,
       spawnedAt: new Date().toISOString(),
       cmd: `bro daemon run --every ${everySec}`,
+      pidStart: procStat(child.pid!)?.start,
     })
   } catch (err) {
-    console.error(`warning: daemon armer record failed (pid ${child.pid} is live) — ${errText(err)}`)
+    // an unrecorded child is an unsupervised supervisor — kill it and
+    // fail, never leave a daemon nobody can see
+    try {
+      child.kill('SIGTERM')
+    } catch {
+      // exited before the write failed — nothing to clean
+    }
+    throw err
   }
   return { pid: child.pid!, log }
+}
+
+/** Every supervision-loop process — `daemon run --every` children plus
+ *  raw `bro drive --every` runs (they hold the same lock, so `down`
+ *  owes them the same SIGTERM or a standby quietly inherits it). */
+function supervisionProcs(): number[] {
+  try {
+    const out = execFileSync('pgrep', ['-f', '(daemon run|drive) --every'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    return out
+      .split('\n')
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isInteger(n) && n > 0)
+  } catch {
+    return []
+  }
 }
 
 function everyArg(argv: string[], fallback: number): number {
@@ -246,23 +301,32 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
     case 'down': {
       const probe = daemonProbe(main)
       const state = daemonStatePath(main)
-      if (!probe.live) {
-        if (state !== null) {
-          rmSync(state, { force: true })
+      // standby children waiting on drive.lock survive a holder kill
+      // and take the lock over — `down` must reach every supervision
+      // loop, not only the current holder
+      const victims = new Set<number>([
+        ...(probe.live ? [probe.pid!] : []),
+        ...(probe.recorded !== null && pidAlive(probe.recorded.pid, probe.recorded.pidStart)
+          ? [probe.recorded.pid]
+          : []),
+        ...supervisionProcs(),
+      ])
+      victims.delete(process.pid)
+      for (const pid of victims) {
+        try {
+          process.kill(pid, 'SIGTERM')
+        } catch {
+          // already gone — SIGTERM is advisory, absence is not a failure
         }
-        console.log('daemon down — no live supervisor')
-        return
-      }
-      try {
-        process.kill(probe.pid!, 'SIGTERM')
-      } catch (err) {
-        console.error(`error: SIGTERM to ${probe.pid} failed — ${errText(err)}`)
-        process.exit(1)
       }
       if (state !== null) {
         rmSync(state, { force: true })
       }
-      console.log(`daemon down — pid ${probe.pid} signalled`)
+      console.log(
+        victims.size === 0
+          ? 'daemon down — no live supervisor'
+          : `daemon down — signalled ${[...victims].join(', ')}`
+      )
       return
     }
     default:
