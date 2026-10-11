@@ -380,6 +380,18 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
 }
 `
 
+/** A healthy-empty docker for fixtures on docker-less hosts — `version`
+ *  answers, `ps` lists nothing, anything else is a 'No such object'
+ *  failure. docker is a registered agents backend: fixtures that assert
+ *  a 'gone' verdict need every backend healthy, or the plane degrades
+ *  and the verdict flips to 'unverified'. Tests that exercise a broken
+ *  daemon overwrite this stub in their own binDir. */
+const FAKE_DOCKER = `#!/bin/sh
+if [ "$1" = version ]; then echo "25.0.0-fake"; exit 0; fi
+if [ "$1" = ps ]; then exit 0; fi
+echo "Error: No such object" >&2; exit 1
+`
+
 /** Install the fake bd into <dir>/bin and seed its store. Rows take the
  *  `fx-` prefix — the store's configured issue_prefix. */
 export function installFakeBd(
@@ -391,6 +403,8 @@ export function installFakeBd(
   mkdirSync(binDir, { recursive: true })
   writeFileSync(join(binDir, 'bd'), FAKE_BD)
   chmodSync(join(binDir, 'bd'), 0o755)
+  writeFileSync(join(binDir, 'docker'), FAKE_DOCKER)
+  chmodSync(join(binDir, 'docker'), 0o755)
   writeBeads(db, rows)
   return { binDir, db }
 }
