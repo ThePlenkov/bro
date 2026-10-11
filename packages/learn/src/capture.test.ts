@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { describe, it } from 'node:test'
 import { captureLessons, planCapture, type CaptureCandidate } from './capture.ts'
 import { getLesson, lessonIds } from './store.ts'
@@ -40,6 +40,11 @@ for (let i = 0; i < args.length; i++) {
 const db = load()
 const row = (id) => db.rows.find((r) => r.id === id)
 const jsonOut = (v) => process.stdout.write(JSON.stringify(v) + '\\n')
+// FAKE_BD_LOG records every invocation (one argv per line) so tests can
+// assert the bd call budget instead of re-measuring wall time
+if (process.env.FAKE_BD_LOG) {
+  fs.appendFileSync(process.env.FAKE_BD_LOG, args.join(' ') + '\\n')
+}
 switch (pos[0]) {
   case 'list': {
     let rows = db.rows
@@ -58,15 +63,22 @@ switch (pos[0]) {
   }
   case 'dep': {
     if (pos[1] !== 'list') fail('dep ' + pos[1])
-    const id = pos[2]
+    const ids = pos.slice(2)
     const type = flags.t
     const out = []
     for (const e of db.deps) {
       if (type && e.type !== type) continue
-      const other = e.issue_id === id ? e.depends_on_id : e.depends_on_id === id ? e.issue_id : null
-      if (other === null) continue
-      const r = row(other)
-      if (r) out.push({ ...r, dependency_type: e.type })
+      // direction 'down' — the queried id is the dependent; its
+      // neighbors are what it depends on (real bd's reading)
+      if (!ids.includes(e.issue_id)) continue
+      if (ids.length === 1) {
+        // single-id dep list hydrates neighbor rows
+        const r = row(e.depends_on_id)
+        if (r) out.push({ ...r, dependency_type: e.type })
+      } else {
+        // multi-id dep list returns flat edge records
+        out.push({ issue_id: e.issue_id, depends_on_id: e.depends_on_id, type: e.type })
+      }
     }
     jsonOut(out)
     break
@@ -110,21 +122,33 @@ interface Seed {
 
 function withFakeBd(seed: Seed, fn: (db: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), 'bro-learn-capture-'))
-  const prev = { PATH: process.env.PATH, FAKE_BD_DB: process.env.FAKE_BD_DB }
+  const prev = {
+    PATH: process.env.PATH,
+    FAKE_BD_DB: process.env.FAKE_BD_DB,
+    FAKE_BD_LOG: process.env.FAKE_BD_LOG,
+  }
   writeFileSync(join(dir, 'bd'), FAKE_BD)
   chmodSync(join(dir, 'bd'), 0o755)
   process.env.PATH = `${dir}:${prev.PATH}`
   process.env.FAKE_BD_DB = join(dir, 'beads.json')
+  process.env.FAKE_BD_LOG = join(dir, 'bd.log')
   writeFileSync(process.env.FAKE_BD_DB, JSON.stringify(seed))
+  writeFileSync(process.env.FAKE_BD_LOG, '')
   try {
     fn(process.env.FAKE_BD_DB)
   } finally {
     process.env.PATH = prev.PATH
     if (prev.FAKE_BD_DB === undefined) delete process.env.FAKE_BD_DB
     else process.env.FAKE_BD_DB = prev.FAKE_BD_DB
+    if (prev.FAKE_BD_LOG === undefined) delete process.env.FAKE_BD_LOG
+    else process.env.FAKE_BD_LOG = prev.FAKE_BD_LOG
     rmSync(dir, { recursive: true, force: true })
   }
 }
+
+/** bd argv lines the fake recorded this fixture — the call budget. */
+const callLog = (db: string): string[] =>
+  readFileSync(join(dirname(db), 'bd.log'), 'utf8').trim().split('\n').filter(Boolean)
 
 const readKv = (db: string): Record<string, string> =>
   JSON.parse(readFileSync(db, 'utf8')).kv ?? {}
@@ -319,21 +343,20 @@ describe('capture', { skip: WIN32 }, () => {
   it('mol: flagged learn: lines in step results distill; unflagged do not', () => {
     withFakeBd(
       {
-        rows: [
-          row('fx-s1', {
-            status: 'closed',
-            title: 'Implement the thing',
-            close_reason: 'PR open [#7](https://x/7)\nlearn: bro act merge refuses on a red gate',
-          }),
-          row('fx-s2', { status: 'closed', title: 'Verify', close_reason: 'gate green' }),
-        ],
+        // bd mol show's issue rows carry title + close_reason — no
+        // per-step show follows the harvest
         mols: {
           'fx-m1': {
             root: { id: 'fx-m1', status: 'closed' },
             issues: [
               { id: 'fx-m1', status: 'closed' },
-              { id: 'fx-s1', status: 'closed' },
-              { id: 'fx-s2', status: 'closed' },
+              {
+                id: 'fx-s1',
+                status: 'closed',
+                title: 'Implement the thing',
+                close_reason: 'PR open [#7](https://x/7)\nlearn: bro act merge refuses on a red gate',
+              },
+              { id: 'fx-s2', status: 'closed', title: 'Verify', close_reason: 'gate green' },
             ],
             dependencies: [],
           },
@@ -418,6 +441,52 @@ describe('capture', { skip: WIN32 }, () => {
         assert.deepEqual(readKv(db), {})
       }
     )
+  })
+
+  it('harvest is O(1) bd calls — no per-row show/dep storm (bro-rcs07)', () => {
+    const rows: Array<Record<string, unknown>> = []
+    const deps: Array<Record<string, unknown>> = []
+    for (let i = 0; i < 30; i++) {
+      rows.push(
+        row(`fx-d${i}`, {
+          status: 'closed',
+          labels: ['drill'],
+          title: `investigate bro convoy next ${i}`,
+          description: 'look at packages/convoy/**',
+          notes: DRILL_MEMO,
+        }),
+        row(`fx-p${i}`, {
+          status: 'closed',
+          labels: ['prevention', 'sink:docs'],
+          title: `prevention: rule ${i}`,
+          description: 'update packages/convoy/**',
+        }),
+        row(`fx-r${i}`, {
+          status: 'closed',
+          labels: ['retro'],
+          title: `retro: chose wrong ${i}`,
+          description: '## Why\n\nchose wrong\n\nscope: agent',
+        }),
+        row(`fx-w${i}`, { status: 'closed', labels: ['wtf'], title: `wtf ${i}` })
+      )
+      deps.push(
+        { issue_id: `fx-p${i}`, depends_on_id: `fx-r${i}`, type: 'discovered-from' },
+        { issue_id: `fx-r${i}`, depends_on_id: `fx-w${i}`, type: 'discovered-from' }
+      )
+    }
+    withFakeBd({ rows, deps }, (db) => {
+      // dry-run: the reported repro — reads must not scale with row count
+      const { plan } = captureLessons({ dryRun: true })
+      assert.ok(plan.write.length > 0)
+      const calls = callLog(db)
+      // the old path cost one show per closed drill frame plus one
+      // dep list per evidence row — 60+ serial shell-outs on this seed
+      assert.equal(calls.filter((c) => c.startsWith('show ')).length, 0)
+      const depLists = calls.filter((c) => c.startsWith('dep list '))
+      assert.ok(depLists.length <= 3, `dep list calls: ${depLists.length}`)
+      // label pools + dep batches + kv list — bounded, not per-row
+      assert.ok(calls.length <= 10, `total bd calls: ${calls.length}`)
+    })
   })
 
   it('skips artifacts with no extractable trigger scope', () => {
