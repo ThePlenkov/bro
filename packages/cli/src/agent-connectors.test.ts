@@ -34,10 +34,13 @@ import {
   budgetLines,
   budgetSnapshot,
   BUDGET_LIMITS,
+  dockerImageFor,
   eachAgentConnector,
   fleetOccupancy,
   fleetProfileOf,
+  jsoncToJson,
   loadAgentEnv,
+  makeDockerConnector,
   makeGascityConnector,
   makeNativeConnector,
   makeTmuxConnector,
@@ -119,6 +122,91 @@ if (args[0] === 'list-panes') {
 console.error('unhandled tmux args: ' + args.join(' ')); process.exit(1)
 `
 
+/** docker shim — $DOCKER_FAKE_HOME/containers.json maps name →
+ *  {pid, image, argv}; images.json lists the tags `image inspect`
+ *  knows. `run` spawns the wrapper (`sh -c`, detached) like a real
+ *  daemon would — container death = process death — and merges
+ *  --env-file + -e into the child env (-e wins, like docker). Covers
+ *  version, build (-t), image inspect, ps, inspect ({{json .State}}),
+ *  rm -f. */
+const FAKE_DOCKER = `#!/usr/bin/env node
+const fs = require('node:fs')
+const cp = require('node:child_process')
+const args = process.argv.slice(2)
+const HOME = process.env.DOCKER_FAKE_HOME
+const DB = HOME + '/containers.json'
+const IMGS = HOME + '/images.json'
+const load = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')) } catch { return d } }
+const save = (f, v) => fs.writeFileSync(f, JSON.stringify(v))
+const alive = (pid) => { try { process.kill(pid, 0); return true } catch (e) { return e.code === 'EPERM' } }
+// writeSync — console.log is pipe-buffered and process.exit truncates it
+const out = (s) => fs.writeSync(1, s)
+
+if (args[0] === 'version') { out('25.0.0-fake\\n'); process.exit(0) }
+if (args[0] === 'image' && args[1] === 'inspect') {
+  process.exit(load(IMGS, []).includes(args[2]) ? 0 : 1)
+}
+if (args[0] === 'build') {
+  const imgs = load(IMGS, [])
+  const tag = args[args.indexOf('-t') + 1]
+  if (!imgs.includes(tag)) { imgs.push(tag); save(IMGS, imgs) }
+  out('fake-built ' + tag + '\\n'); process.exit(0)
+}
+if (args[0] === 'ps') {
+  const db = load(DB, {})
+  const live = Object.keys(db).filter((n) => alive(db[n].pid))
+  out(live.length ? live.join('\\n') + '\\n' : ''); process.exit(0)
+}
+if (args[0] === 'inspect') {
+  const name = args[args.length - 1]
+  const c = load(DB, {})[name]
+  if (!c) { console.error('Error response from daemon: No such container: ' + name); process.exit(1) }
+  const running = alive(c.pid)
+  out(JSON.stringify({ Running: running, Pid: running ? c.pid : 0 }) + '\\n'); process.exit(0)
+}
+if (args[0] === 'rm') {
+  const db = load(DB, {})
+  const name = args[args.length - 1]
+  const c = db[name]
+  if (c && alive(c.pid)) { try { process.kill(-c.pid, 'SIGKILL') } catch {} }
+  delete db[name]; save(DB, db)
+  out(name + '\\n'); process.exit(0)
+}
+if (args[0] === 'run') {
+  // [image 'sh' '-c' wrapper] is the emitted tail — flags end before it
+  const VALUE_FLAGS = new Set(['--name', '--workdir', '-w', '--env-file', '-e', '-v', '--label', '--network', '-p', '--memory', '--cpus', '--user', '-u', '--restart', '--entrypoint', '--add-host'])
+  let name, cwd = process.cwd(), env = {}
+  const image = args[args.length - 4]
+  const cmd = args[args.length - 1]
+  const end = args.length - 4
+  for (let i = 1; i < end; i++) {
+    const a = args[i]
+    if (a === '-e') { const kv = args[++i]; const eq = kv.indexOf('='); env[kv.slice(0, eq)] = kv.slice(eq + 1); continue }
+    if (a === '--env-file') {
+      for (const line of fs.readFileSync(args[++i], 'utf8').split('\\n')) {
+        if (line === '' || line.startsWith('#')) continue
+        const eq = line.indexOf('=')
+        if (eq > 0) env[line.slice(0, eq)] = line.slice(eq + 1)
+      }
+      continue
+    }
+    if (a === '--name') { name = args[++i]; continue }
+    if (a === '--workdir' || a === '-w') { cwd = args[++i]; continue }
+    if (VALUE_FLAGS.has(a)) { i++; continue }
+  }
+  const db = load(DB, {})
+  const child = cp.spawn('sh', ['-c', cmd], {
+    cwd, env: { ...process.env, ...env }, detached: true, stdio: 'ignore',
+  })
+  child.unref()
+  db[name] = { pid: child.pid, image, argv: args }
+  save(DB, db)
+  out('fakeid-' + name + '\\n')
+  process.exit(0)
+}
+console.error('unhandled docker args: ' + args.join(' ')); process.exit(1)
+`
+
 interface Fixture {
   root: string
   main: string
@@ -130,6 +218,7 @@ interface Fixture {
   /** TMUX_FAKE_HOME before the fixture overwrote it — restored, never
    *  deleted, so a pre-set runner env survives the test. */
   prevTmuxFakeHome?: string
+  prevDockerFakeHome?: string
   prevFakeBdDb?: string
   prevBeadsActor?: string
   /** Ambient GIT_/BEADS_/BRO_ pins scrubbed for the test's duration. */
@@ -142,11 +231,11 @@ interface Fixture {
  *  store itself keys off FAKE_BD_DB — same wiring as agents.test.ts).
  *  The agent command is `node {promptFile}` — the prompt IS the
  *  program. `tmux: true` adds the tmux shim and a tmux knob mirroring
- *  native's. */
+ *  native's; `docker: true` does the same for the docker shim. */
 function fixture(
   rows: Array<Record<string, unknown>>,
   command = 'node {promptFile}',
-  opts: { tmux?: boolean } = {}
+  opts: { tmux?: boolean; docker?: boolean } = {}
 ): Fixture {
   const { root, main } = initRepo('bro-agconn-')
   const { binDir, db } = installFakeBd(root, rows)
@@ -160,6 +249,16 @@ function fixture(
     mkdirSync(join(root, 'tmux-state'), { recursive: true })
     process.env.TMUX_FAKE_HOME = join(root, 'tmux-state')
     agents['tmux'] = { command, socket: 'test' }
+  }
+  const prevDockerFakeHome = process.env.DOCKER_FAKE_HOME
+  if (opts.docker === true) {
+    writeFileSync(join(binDir, 'docker'), FAKE_DOCKER)
+    chmodSync(join(binDir, 'docker'), 0o755)
+    const dhome = join(root, 'docker-state')
+    mkdirSync(dhome, { recursive: true })
+    writeFileSync(join(dhome, 'images.json'), JSON.stringify(['img:test']))
+    process.env.DOCKER_FAKE_HOME = dhome
+    agents['docker'] = { command, image: 'img:test' }
   }
   const prevPath = process.env.PATH ?? ''
   const prevFakeBdDb = process.env.FAKE_BD_DB
@@ -187,6 +286,7 @@ function fixture(
     env: { agents, connectors: {} },
     prevPath,
     prevTmuxFakeHome,
+    prevDockerFakeHome,
     prevFakeBdDb,
     prevBeadsActor,
     scrubbed,
@@ -228,6 +328,11 @@ function cleanup(fx: Fixture): void {
     delete process.env.TMUX_FAKE_HOME
   } else {
     process.env.TMUX_FAKE_HOME = fx.prevTmuxFakeHome
+  }
+  if (fx.prevDockerFakeHome === undefined) {
+    delete process.env.DOCKER_FAKE_HOME
+  } else {
+    process.env.DOCKER_FAKE_HOME = fx.prevDockerFakeHome
   }
   for (const [k, v] of [
     ['FAKE_BD_DB', fx.prevFakeBdDb],
@@ -288,7 +393,7 @@ describe('resolveAgentConnector', () => {
       )
       // registry order — native is the designed default
       assert.equal(resolveAgentConnector({ dir: main }, {}, env).name, 'native')
-      assert.deepEqual(agentConnectorNames(), ['native', 'tmux', 'gascity'])
+      assert.deepEqual(agentConnectorNames(), ['native', 'tmux', 'gascity', 'docker'])
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -304,6 +409,7 @@ interface BackendCase {
   name: string
   make: (ctx: ConnectorCtx, env: AgentConnectorEnv) => AgentConnector
   tmux?: boolean
+  docker?: boolean
   foreign: string
   idRe: RegExp
   capabilities: AgentCapabilities
@@ -313,7 +419,7 @@ interface BackendCase {
 
 function connectorContract(b: BackendCase): void {
   const fx = (rows: Array<Record<string, unknown>>) =>
-    fixture(rows, undefined, { tmux: b.tmux === true })
+    fixture(rows, undefined, { tmux: b.tmux === true, docker: b.docker === true })
   const conn = (f: Fixture) => b.make({ dir: f.main }, f.env)
   const kill = (info: AgentInfo) => process.kill(-info.pid!, 'SIGKILL')
 
@@ -420,6 +526,7 @@ function connectorContract(b: BackendCase): void {
         // devin session, so the quota applies
         native: { ...f.env.agents['native'], sessionKind: 'devin' },
         tmux: { ...f.env.agents['tmux'], sessionKind: 'devin' },
+        docker: { ...f.env.agents['docker'], sessionKind: 'devin' },
         devin: { maxSessions: 1, lockDir, reservationsDir },
       },
     }
@@ -455,6 +562,7 @@ function connectorContract(b: BackendCase): void {
         ...f.env.agents,
         native: { ...f.env.agents['native'], sessionKind: 'devin' },
         tmux: { ...f.env.agents['tmux'], sessionKind: 'devin' },
+        docker: { ...f.env.agents['docker'], sessionKind: 'devin' },
         devin: { maxSessions: 2, lockDir, reservationsDir },
       },
     }
@@ -494,6 +602,7 @@ function connectorContract(b: BackendCase): void {
         ...f.env.agents,
         native: { ...f.env.agents['native'], sessionKind: 'devin' },
         tmux: { ...f.env.agents['tmux'], sessionKind: 'devin' },
+        docker: { ...f.env.agents['docker'], sessionKind: 'devin' },
         devin: { maxWorkers: 1, lockDir, reservationsDir },
       },
     }
@@ -968,6 +1077,167 @@ describe('tmux connector', () => {
   })
 })
 
+describe('docker connector', () => {
+  connectorContract({
+    name: 'docker',
+    make: makeDockerConnector,
+    docker: true,
+    foreign: 'native',
+    idRe: /^docker-[0-9a-f]{8}$/,
+    capabilities: { attach: false, respawn: true, supervisor: 'none' },
+    entryChecks: (entry, info) => {
+      assert.equal(entry.container, `bro-${info.id}`)
+      assert.match(String(entry.containerId), /^fakeid-/)
+      assert.equal(typeof entry.pid, 'number')
+    },
+  })
+
+  test('a live native agent counts against docker spawns — the cap is fleet-wide', async () => {
+    const f = fixture(
+      [
+        { id: 'fx-1', status: 'open' },
+        { id: 'fx-2', status: 'open' },
+      ],
+      undefined,
+      { docker: true }
+    )
+    try {
+      const env = { ...f.env, fleet: { maxConcurrent: 1 } }
+      const n = makeNativeConnector({ dir: f.main }, env)
+      const first = await n.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+      const d = makeDockerConnector({ dir: f.main }, env)
+      await assert.rejects(
+        d.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)')),
+        /fleet cap reached — 1\/1 agent slots occupied/
+      )
+      await n.stop(first.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('a failing docker binary degrades list() and refuses spawn', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { docker: true })
+    try {
+      // docker that can't even report a version — the daemon is down
+      writeFileSync(
+        join(f.root, 'bin', 'docker'),
+        '#!/bin/sh\necho "docker exploded" >&2\nexit 1\n'
+      )
+      const c = makeDockerConnector({ dir: f.main }, f.env)
+      const l = await c.list()
+      assert.deepEqual(l.agents, [])
+      assert.match(l.degraded ?? '', /docker exploded/)
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'true')),
+        /docker unavailable/
+      )
+      assert.equal(f.dbRows()[0]!.status, 'open')
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('the worktree, git dir and store mount at their host paths; pins ride -e', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { docker: true })
+    try {
+      // a linked worktree — the real spawn shape — puts .git OUTSIDE
+      // the worktree, so the common dir needs its own mount
+      const wt = join(f.root, 'wt-1')
+      spawnSync('git', ['-C', f.main, 'worktree', 'add', wt, '-b', 'wt-1'], {
+        stdio: 'pipe',
+      })
+      const env: AgentConnectorEnv = {
+        ...f.env,
+        agents: { docker: { ...f.env.agents['docker'], runArgs: ['--network', 'host'] } },
+      }
+      const c = makeDockerConnector({ dir: wt }, env)
+      const info = await c.spawn(SPEC(wt, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+      const db = JSON.parse(
+        readFileSync(join(process.env.DOCKER_FAKE_HOME!, 'containers.json'), 'utf8')
+      ) as Record<string, { argv: string[]; image: string }>
+      const argv = db[`bro-${info.id}`]!.argv
+      const mounts = argv.flatMap((a, i) => (a === '-v' ? [argv[i + 1]!] : []))
+      for (const m of [wt, join(f.main, '.git'), f.beadsDir]) {
+        assert.ok(mounts.includes(`${m}:${m}`), `missing mount ${m} in ${mounts.join(',')}`)
+      }
+      // identity pins are -e args; the ambient env file is consumed and gone
+      assert.ok(argv.includes(`BRO_BEAD_ID=fx-1`), argv.join(' '))
+      assert.ok(argv.includes(`BRO_AGENT_ID=${info.id}`), argv.join(' '))
+      assert.ok(argv.includes('--env-file'), argv.join(' '))
+      assert.ok(!existsSync(join(f.main, '.git', 'bro', 'agents', `${info.id}.env`)))
+      // the configured image and the operator runArgs rode the same run
+      assert.equal(db[`bro-${info.id}`]!.image, 'img:test')
+      const net = argv.indexOf('--network')
+      assert.notEqual(net, -1)
+      assert.equal(argv[net + 1], 'host')
+      await c.stop(info.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('dockerImageFor — image knob > devcontainer image > content-hash build', () => {
+    const f = fixture([], undefined, { docker: true })
+    try {
+      const spec = SPEC(f.main, f.beadsDir, 'fx-1', 'x')
+      // configured image wins over everything — no devcontainer needed
+      assert.equal(dockerImageFor(spec, { image: 'img:mine' }), 'img:mine')
+      // no image anywhere → config error naming the knob
+      assert.throws(() => dockerImageFor(spec, {}), /agents\.docker\.image/)
+      // devcontainer image — comments + trailing commas are legal JSONC
+      const dcDir = join(f.main, '.devcontainer')
+      mkdirSync(dcDir, { recursive: true })
+      writeFileSync(
+        join(dcDir, 'devcontainer.json'),
+        '{ // comment\n"image": "img:dc", }\n'
+      )
+      assert.equal(dockerImageFor(spec, {}), 'img:dc')
+      // build.dockerfile — content-hash tag, built once via the fake
+      writeFileSync(
+        join(dcDir, 'devcontainer.json'),
+        JSON.stringify({ build: { dockerfile: 'Dockerfile' } })
+      )
+      writeFileSync(join(dcDir, 'Dockerfile'), 'FROM scratch\n')
+      const tag = dockerImageFor(spec, {})
+      assert.match(tag, /^bro-dev-[0-9a-f]{12}$/)
+      assert.equal(dockerImageFor(spec, {}), tag) // cache hit — no second build
+      const imgs = JSON.parse(
+        readFileSync(join(process.env.DOCKER_FAKE_HOME!, 'images.json'), 'utf8')
+      ) as string[]
+      assert.deepEqual(imgs.filter((i) => i === tag), [tag])
+      // compose-only is a named gap, never a silent fallback
+      writeFileSync(
+        join(dcDir, 'devcontainer.json'),
+        JSON.stringify({ dockerComposeFile: 'compose.yml' })
+      )
+      assert.throws(() => dockerImageFor(spec, {}), /dockerComposeFile/)
+      // a missing dockerfile names the file, not the image knob
+      writeFileSync(
+        join(dcDir, 'devcontainer.json'),
+        JSON.stringify({ build: { dockerfile: 'gone.Dockerfile' } })
+      )
+      assert.throws(() => dockerImageFor(spec, {}), /gone\.Dockerfile does not exist/)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('jsoncToJson — comments and trailing commas out, string literals untouched', () => {
+    const src = `{
+      // line comment with "quotes"
+      "image": "img://weird/x", /* block ; " */
+      "a": ["x",],
+      "s": "not a comment // nor /* this */",
+    }`
+    assert.deepEqual(JSON.parse(jsoncToJson(src)), {
+      image: 'img://weird/x',
+      a: ['x'],
+      s: 'not a comment // nor /* this */',
+    })
+  })
+})
+
 describe('eachAgentConnector', () => {
   // registers LAST — the registry is module-global, so a throwing factory
   // would break connector-resolution probes in earlier tests
@@ -981,7 +1251,7 @@ describe('eachAgentConnector', () => {
       { agents: {}, connectors: {} },
       (name, err) => notes.push(`${name}: ${err instanceof Error ? err.message : String(err)}`)
     )
-    assert.deepEqual(conns.map((c) => c.name), ['native', 'tmux', 'gascity'])
+    assert.deepEqual(conns.map((c) => c.name), ['native', 'tmux', 'gascity', 'docker'])
     assert.deepEqual(notes, ['explody: backend exploded'])
     assert.throws(
       () => eachAgentConnector({ dir: '/x' }, { agents: {}, connectors: {} }),

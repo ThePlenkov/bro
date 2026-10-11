@@ -13,6 +13,7 @@
  * agent, and molStep claims pinned into the shared beads store.
  */
 import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   accessSync,
   closeSync,
@@ -160,7 +161,7 @@ export function registerAgentConnector(
  *  these (a misnamed cleanup, or a name whose register was skipped as a
  *  duplicate) would silently change which factory the name resolves to
  *  for the rest of the process. */
-const BUILTIN_AGENT_BACKENDS = new Set(['native', 'tmux', 'gascity'])
+const BUILTIN_AGENT_BACKENDS = new Set(['native', 'tmux', 'gascity', 'docker'])
 
 /** Deliberate name-based removal — fixtures prefer the disposer
  *  registerAgentConnector returns, which can only drop the entry it
@@ -846,6 +847,14 @@ function gcOccupies(
   return gcState(s) === 'running' || gcState(s) === 'spawned'
 }
 
+/** docker occupancy — a name absent from the daemon's live list frees
+ *  the slot; an inconclusive probe occupies (the daemon may hold a
+ *  running worker we can't see — same honesty rule as tmux). */
+function dockerOccupies(entry: AgentRegistryEntry, live: Set<string> | undefined): boolean {
+  const name = dockerContainerName(entry)
+  return name !== undefined && (live === undefined || live.has(name))
+}
+
 /** One registry entry's occupancy verdict — an entry occupies until it
  *  is proven dead; every unverifiable probe keeps the slot — a
  *  maybe-live agent is a maybe-burning worker, and the cap exists to
@@ -859,6 +868,7 @@ function entryOccupies(
     tmuxLive: () => Set<string> | undefined
     gcSessions: () => GcSession[] | undefined
     gcSupervisor: () => boolean | undefined
+    dockerLive: () => Set<string> | undefined
   }
 ): boolean {
   switch (entry.backend) {
@@ -870,6 +880,13 @@ function entryOccupies(
       return tmuxOccupies(entry, probes.tmuxLive())
     case 'gascity':
       return gcOccupies(molStep, entry, probes.gcSessions(), probes.gcSupervisor)
+    case 'docker':
+      // the .exit harvest first — a container that exited between the
+      // ps snapshot and this read still lands its recorded cause; the
+      // verdict itself only needs the live-name probe (a dead
+      // container holds no slot either way)
+      ensureExitCause(dir, home, molStep, entry)
+      return dockerOccupies(entry, probes.dockerLive())
     default:
       // a backend this build doesn't know — no probe exists, so the
       // .exit file is the only death record readable. Harvest before
@@ -887,6 +904,7 @@ interface OccupancyProbes {
   tmuxLive: () => Set<string> | undefined
   gcSessions: () => GcSession[] | undefined
   gcSupervisor: () => boolean | undefined
+  dockerLive: () => Set<string> | undefined
 }
 
 function occupancyProbes(dir: string, env: AgentConnectorEnv): OccupancyProbes {
@@ -897,6 +915,7 @@ function occupancyProbes(dir: string, env: AgentConnectorEnv): OccupancyProbes {
       return city === null ? undefined : listGcSessions(city).sessions
     }),
     gcSupervisor: memo(() => gcSupervisorRunning()),
+    dockerLive: memo(() => dockerLiveContainers()),
   }
 }
 
@@ -2950,3 +2969,600 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
 
 registerAgentConnector('tmux', makeTmuxConnector)
 registerAgentConnector('gascity', makeGascityConnector, { matchDir: gcMatchDir })
+
+// --- docker --------------------------------------------------------------------
+
+/** The docker backend — `docker run` as code. Spec: specs/bro-huy5o.10.md.
+ *
+ *  Isolation model: every path the worker touches mounts at its
+ *  IDENTICAL absolute host path — the worktree (-w too), the git
+ *  common dir (.git/worktrees/<n>, bro/agents, bro/hooks), and the
+ *  shared beads store — so the in-container wrapper is the native
+ *  one's shape: the appended log and the .exit record land on the
+ *  mounted host paths, and the recorded-death ladder reads them
+ *  unchanged. pid→container's host Pid is a display handle like
+ *  tmux's pane pid (VM-hosted daemons report VM pids — liveness
+ *  never reads it); `containerId` is the durable handle.
+ *
+ *  Knobs: `agents.docker.image` (wins over the devcontainer lookup),
+ *  `agents.docker.devcontainer` (default <repoRoot>/.devcontainer/
+ *  devcontainer.json — "image" runs verbatim, "build.dockerfile"
+ *  builds once per content hash), `agents.docker.runArgs` (escape
+ *  hatch: --network, -p, credential mounts), `agents.docker.command`
+ *  (→ loop.agent, same {promptFile} template). No matchDir — a repo's
+ *  devcontainer.json is the project's file, never a claim on backend
+ *  resolution; `connectors.agents: "docker"` or --connector picks it. */
+
+/** One docker call — PATH lookup is the same contract as git/gh/bd. */
+function dockerRun(
+  args: string[],
+  timeoutMs = 30_000
+): { code: number; out: string; err: string; missing: boolean } {
+  const proc = spawnSync('docker', args, { // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    maxBuffer: 16 * 1024 * 1024,
+  })
+  return {
+    code: proc.status ?? 1,
+    out: proc.stdout ?? '',
+    err: (proc.stderr ?? proc.error?.message ?? '').trim(),
+    missing: (proc.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
+  }
+}
+
+/** Daemon reachability — `docker version` contacts the SERVER (a bare
+ *  `docker --version` is client-only and would pass beside a dead
+ *  daemon). */
+function dockerDaemonUp(): { up: boolean; err: string } {
+  const v = dockerRun(['version', '--format', '{{.Server.Version}}'])
+  return v.missing || v.code !== 0
+    ? { up: false, err: v.missing ? 'docker not on PATH' : (v.err !== '' ? v.err : 'daemon unreachable') }
+    : { up: true, err: '' }
+}
+
+/** Running container names — one daemon round-trip batched across a
+ *  registry walk. `undefined` = inconclusive (daemon down/refused);
+ *  callers treat it as "may occupy" the same way tmux treats a failed
+ *  list-sessions. bro's own label narrows the listing. */
+function dockerLiveContainers(): Set<string> | undefined {
+  const ps = dockerRun(['ps', '--filter', 'label=bro.managed=1', '--format', '{{.Names}}'])
+  return ps.code === 0
+    ? new Set(ps.out.split('\n').filter((s) => s !== ''))
+    : undefined
+}
+
+/** docker-name charset — `bro-<agentId>` always passes; a tampered
+ *  registry `container` must still prove safe before it becomes an
+ *  inspect/rm operand. */
+const DOCKER_CONTAINER_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/
+
+/** The registry entry's container name — the recorded one, or derived
+ *  from a safe agentId for entries written before `container` existed. */
+function dockerContainerName(entry: AgentRegistryEntry): string | undefined {
+  if (typeof entry.container === 'string' && DOCKER_CONTAINER_NAME.test(entry.container)) {
+    return entry.container
+  }
+  const derived = `bro-${entry.agentId}`
+  return DOCKER_CONTAINER_NAME.test(derived) ? derived : undefined
+}
+
+/** `Error response from daemon: No such container`/`No such object` —
+ *  proof of a corpse (or a removed one), not an unreachable daemon. */
+const DOCKER_NO_SUCH = /no such (?:object|container)/i
+
+/** Tri-state liveness — 'running' proves life, 'dead' proves a corpse
+ *  (`--rm` containers self-remove on exit, so dead IS absent; a
+ *  present-but-stopped one reads the same either way). 'unknown' is a
+ *  failed probe that must never read as dead. */
+type DockerLiveness = 'running' | 'dead' | 'unknown'
+
+interface DockerInspect {
+  live: DockerLiveness
+  pid?: number
+  err?: string
+}
+
+function dockerInspect(name: string): DockerInspect {
+  const r = dockerRun([
+    'inspect',
+    '--type',
+    'container',
+    '--format',
+    '{{json .State}}',
+    name,
+  ])
+  if (r.code !== 0) {
+    return {
+      live: DOCKER_NO_SUCH.test(r.err) ? 'dead' : 'unknown',
+      err: r.err !== '' ? r.err : `docker inspect exited ${r.code}`,
+    }
+  }
+  try {
+    const s = JSON.parse(r.out) as { Running?: unknown; Pid?: unknown }
+    return {
+      live: s.Running === true ? 'running' : 'dead',
+      pid: typeof s.Pid === 'number' && s.Pid > 0 ? s.Pid : undefined,
+    }
+  } catch {
+    return { live: 'unknown', err: 'docker inspect returned unparseable JSON' }
+  }
+}
+
+const dockerProbe = (name: string): DockerInspect => dockerInspect(name)
+
+/** devcontainer.json is commented JSON — // and /* … *\/ comments plus
+ *  trailing commas are legal there and illegal to JSON.parse. The
+ *  scanner copies significant chars only, tracking string state so a
+ *  `//` inside a URL or a `,]` inside a string survives verbatim. */
+export function jsoncToJson(text: string): string {
+  const out: string[] = []
+  let i = 0
+  let str = false
+  while (i < text.length) {
+    const c = text[i]!
+    if (str) {
+      out.push(c)
+      if (c === '\\') {
+        i++
+        if (i < text.length) {
+          out.push(text[i]!)
+        }
+      } else if (c === '"') {
+        str = false
+      }
+      i++
+      continue
+    }
+    if (c === '"') {
+      str = true
+      out.push(c)
+      i++
+      continue
+    }
+    if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') {
+        i++
+      }
+      continue
+    }
+    if (c === '/' && text[i + 1] === '*') {
+      i += 2
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) {
+        i++
+      }
+      i = Math.min(i + 2, text.length)
+      continue
+    }
+    if (c === ',') {
+      let k = i + 1
+      while (k < text.length && /\s/.test(text[k]!)) {
+        k++
+      }
+      if (text[k] === '}' || text[k] === ']') {
+        i++
+        continue
+      }
+    }
+    out.push(c)
+    i++
+  }
+  return out.join('')
+}
+
+/** `agents.docker.runArgs` — array preferred; a string splits on
+ *  whitespace (operator config, never user input). */
+function dockerRunArgs(v: unknown): string[] {
+  if (Array.isArray(v)) {
+    return v.filter((x): x is string => typeof x === 'string' && x !== '')
+  }
+  return typeof v === 'string' ? v.split(/\s+/).filter((s) => s !== '') : []
+}
+
+/** The paths a container needs at their identical host locations —
+ *  the worktree, the git common dir (worktree .git file → .git/
+ *  worktrees/<n>, plus bro/agents artifacts and bro/hooks markers),
+ *  and the shared beads store. A path already inside an earlier mount
+ *  is skipped. */
+function dockerMounts(spec: SpawnSpec): string[] {
+  const mounts: string[] = []
+  const add = (p: string): void => {
+    if (p !== '' && !mounts.some((m) => p === m || p.startsWith(`${m}/`))) {
+      mounts.push(p)
+    }
+  }
+  add(resolve(spec.repoRoot))
+  const r = gitTry(['-C', spec.repoRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  if (r.code === 0) {
+    add(r.out.trim())
+  }
+  add(resolve(spec.beadsDir))
+  return mounts
+}
+
+/** Resolved image for a spawn — `agents.docker.image` wins; else the
+ *  devcontainer's `image`, else a once-per-content build of its
+ *  `build.dockerfile`. Errors are 'config' (the operator's file/knob
+ *  is wrong); a failed BUILD is 'unavailable' (the daemon's). Runs
+ *  outside the registry lock — a first-build pays minutes that must
+ *  not serialize other spawns. */
+export function dockerImageFor(spec: SpawnSpec, knobs: Record<string, unknown>): string {
+  const kImage = knobs.image
+  if (typeof kImage === 'string' && kImage.trim() !== '') {
+    return kImage.trim()
+  }
+  const kDc = knobs.devcontainer
+  const dcPath =
+    typeof kDc === 'string' && kDc.trim() !== ''
+      ? isAbsolute(kDc)
+        ? kDc
+        : join(spec.repoRoot, kDc)
+      : join(spec.repoRoot, '.devcontainer', 'devcontainer.json')
+  if (!existsSync(dcPath)) {
+    throw new SpawnError(
+      `no image configured — set agents.docker.image or provide ${dcPath} with an "image" or "build.dockerfile"`,
+      'config'
+    )
+  }
+  let dc: {
+    image?: unknown
+    build?: { dockerfile?: unknown; dockerFile?: unknown; context?: unknown; args?: unknown }
+    dockerComposeFile?: unknown
+  }
+  try {
+    const v = JSON.parse(jsoncToJson(readFileSync(dcPath, 'utf8'))) as unknown
+    dc = typeof v === 'object' && v !== null ? (v as typeof dc) : {}
+  } catch (err) {
+    throw new SpawnError(
+      `${dcPath} is not parseable devcontainer JSON — ${err instanceof Error ? err.message : String(err)}`,
+      'config'
+    )
+  }
+  if (typeof dc.image === 'string' && dc.image.trim() !== '') {
+    return dc.image.trim()
+  }
+  const df =
+    typeof dc.build?.dockerfile === 'string'
+      ? dc.build.dockerfile
+      : typeof dc.build?.dockerFile === 'string'
+        ? dc.build.dockerFile
+        : undefined
+  if (df === undefined || df === '') {
+    const hint =
+      dc.dockerComposeFile !== undefined
+        ? 'dockerComposeFile devcontainers are not supported — set agents.docker.image'
+        : 'set agents.docker.image or give the devcontainer an "image" or "build.dockerfile"'
+    throw new SpawnError(`no usable image in ${dcPath} — ${hint}`, 'config')
+  }
+  const dcDir = dirname(dcPath)
+  const dockerfile = isAbsolute(df) ? df : join(dcDir, df)
+  if (!existsSync(dockerfile)) {
+    throw new SpawnError(`devcontainer dockerfile ${dockerfile} does not exist`, 'config')
+  }
+  const ctxRaw = typeof dc.build?.context === 'string' ? dc.build.context : '.'
+  const context = isAbsolute(ctxRaw) ? ctxRaw : join(dcDir, ctxRaw)
+  const buildArgs = Object.entries(
+    typeof dc.build?.args === 'object' && dc.build.args !== null ? dc.build.args : {}
+  ).flatMap(([k, v]) => ['--build-arg', `${k}=${String(v)}`])
+  // content-keyed tag — the same devcontainer build reuses one image
+  // across spawns; a changed devcontainer/dockerfile mints a new tag
+  const tag = `bro-dev-${createHash('sha256')
+    .update(readFileSync(dcPath, 'utf8'))
+    .update('\n')
+    .update(readFileSync(dockerfile, 'utf8'))
+    .digest('hex')
+    .slice(0, 12)}`
+  if (dockerRun(['image', 'inspect', tag]).code === 0) {
+    return tag
+  }
+  const b = dockerRun(['build', '-t', tag, '-f', dockerfile, ...buildArgs, context], 600_000)
+  if (b.code !== 0) {
+    throw new SpawnError(
+      `docker build ${dockerfile} failed — ${b.err !== '' ? b.err : `exited ${b.code}`}`,
+      'unavailable'
+    )
+  }
+  return tag
+}
+
+/** Live state for a docker entry. Running wins (a 'stopped' flag on a
+ *  still-running container means rm hasn't landed). Then the shared
+ *  recorded-death ladder — `--rm` removes the corpse on exit, so the
+ *  mounted .exit file is the only death record, exactly like native.
+ *  'unknown' probe → 'spawned', never 'lost'. */
+function dockerState(
+  dir: string,
+  home: string | null,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  probe: DockerLiveness
+): AgentState {
+  if (probe === 'running') {
+    touchWorkMarker(dir, entry.agentId)
+    return 'running'
+  }
+  const dead = recordedDeath(dir, home, molStep, entry)
+  if (dead !== undefined) {
+    return dead
+  }
+  if (probe === 'unknown') {
+    // an unverifiable agent may still be live work — keep the marker
+    return 'spawned'
+  }
+  dropWorkMarker(dir, molStep, entry)
+  return 'lost'
+}
+
+function toDockerInfo(
+  dir: string,
+  home: string | null,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  live?: Set<string>
+): AgentInfo {
+  const name = dockerContainerName(entry)
+  const probe: DockerLiveness =
+    live !== undefined
+      ? name !== undefined && live.has(name)
+        ? 'running'
+        : 'dead'
+      : name === undefined
+        ? 'dead'
+        : dockerInspect(name).live
+  return {
+    id: entry.agentId,
+    spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
+    pid: typeof entry.pid === 'number' ? entry.pid : undefined,
+    molStep,
+    backend: entry.backend,
+    state: dockerState(dir, home, molStep, entry, probe),
+    ...infoCause(entry),
+    ...infoProvenance(entry),
+    worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
+    log: typeof entry.log === 'string' ? entry.log : undefined,
+  }
+}
+
+export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
+  const dir = ctx.dir
+  const knobs = env.agents['docker'] ?? {}
+  const command =
+    (typeof knobs.command === 'string' && knobs.command.trim() !== ''
+      ? knobs.command
+      : undefined) ?? env.loop?.agent ?? ''
+  const runArgs = dockerRunArgs(knobs.runArgs)
+
+  const findEntry = (id: string) => findAgentEntry(dir, 'docker', id)
+
+  return {
+    name: 'docker',
+
+    async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+      const home = spawnHome(dir, 'docker', command, spec)
+      const daemon = dockerDaemonUp()
+      if (!daemon.up) {
+        throw new SpawnError(`docker unavailable — ${daemon.err}`, 'unavailable')
+      }
+      // image resolution outside the lock: a first devcontainer build
+      // pays minutes — holding the registry lock through it would
+      // serialize every concurrent spawn behind one `docker build`
+      const image = dockerImageFor(spec, knobs)
+      const mol = stepParent(spec.beadsDir, spec.molStep)
+      return withAgentRegistryLock(dir, () => {
+        const { agentId, promptFile, log, exitFile, reservation } = prepareSpawn(
+          dir,
+          home,
+          'docker',
+          spec,
+          {
+            isLive: (e) => {
+              const n = dockerContainerName(e)
+              if (n === undefined) {
+                return false
+              }
+              const p = dockerProbe(n)
+              if (p.live === 'unknown') {
+                // an unverifiable liveness probe must not let a duplicate
+                // spawn run beside a worker that may still be alive
+                throw new SpawnError(
+                  `cannot verify ${spec.molStep}'s container — ${p.err}`,
+                  'unavailable'
+                )
+              }
+              if (p.live === 'running') {
+                touchWorkMarker(dir, e.agentId)
+              }
+              return p.live === 'running'
+            },
+            liveDetail: (e) => `container ${dockerContainerName(e) ?? '?'}`,
+            entry: (id) => ({ container: `bro-${id}`, containerId: undefined }),
+            cap: { max: fleetCapOf(env), env },
+            sessionQuota: sessionQuotaOf(env, 'docker', spec, command),
+          }
+        )
+        const name = `bro-${agentId}`
+        // a corpse with our name (crash between entry and rm, a respawn
+        // over a stopped container) collides docker run — clear it
+        dockerRun(['rm', '-f', name])
+        // ambient env rides an --env-file like tmux's 0600 file — argv
+        // is visible to every local user (`ps`, docker inspect), so the
+        // ambient bag (secrets included) never goes on -e. Values with
+        // newlines can't survive docker's line-based format and drop.
+        const envFile = join(home, `${agentId}.env`)
+        const ambient = Object.entries({ ...process.env, ...spec.env })
+          .filter(
+            (e): e is [string, string] =>
+              e[1] !== undefined &&
+              /^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) &&
+              !AGENT_PIN_KEYS.has(e[0]) &&
+              !e[1].includes('\n') &&
+              !e[1].includes('\r')
+          )
+          .map(([k, v]) => `${k}=${v}`)
+          .join('\n')
+        writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
+        const worker = spec.worker
+        warnNoPromptFile(worker, command)
+        const cliBadge =
+          worker === undefined
+            ? commandCliName(command)
+            : worker.kind === 'argv'
+              ? worker.cliName
+              : commandCliName(worker.command)
+        const runLine =
+          worker === undefined
+            ? expandAgentCmd(command, promptFile)
+            : worker.kind === 'argv'
+              ? [...worker.argv, promptFile].map(shQuote).join(' ')
+              : expandAgentCmd(worker.command, promptFile)
+        // the native wrapper, verbatim — the mounted paths make .exit/
+        // log land where the host ladder reads them. --init gives the
+        // worker a reaper so grandchildren can't zombie inside; --rm
+        // removes the corpse on exit so `docker ps -a` doesn't fill
+        // with bro litter and the name frees for a respawn.
+        const wrapper = `{ ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } >> ${shQuote(log)} 2>&1`
+        const mounts = dockerMounts(spec)
+        const res = dockerRun([
+          'run',
+          '-d',
+          '--init',
+          '--rm',
+          '--name',
+          name,
+          '--workdir',
+          mounts[0] ?? resolve(spec.repoRoot),
+          '--label',
+          'bro.managed=1',
+          '--label',
+          `bro.step=${spec.molStep}`,
+          ...mounts.flatMap((m) => ['-v', `${m}:${m}`]),
+          '--env-file',
+          envFile,
+          ...agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(([k, v]) => [
+            '-e',
+            `${k}=${v}`,
+          ]),
+          ...runArgs,
+          image,
+          'sh',
+          '-c',
+          wrapper,
+        ])
+        rmSync(envFile, { force: true }) // the env is baked into container config — the file has done its job
+        if (res.code !== 0) {
+          dockerRun(['rm', '-f', name])
+          if (reservation !== undefined) {
+            releaseSessionSlot(reservation)
+          }
+          try {
+            patchAgentRegistry(dir, spec.molStep, { spawnError: res.err })
+          } catch {
+            // the entry landed already — the SpawnError still reports
+          }
+          throw new SpawnError(
+            `docker run failed — ${res.err !== '' ? res.err : `exited ${res.code}`}`,
+            'unavailable'
+          )
+        }
+        const insp = dockerInspect(name)
+        const spawned = patchAgentRegistry(dir, spec.molStep, {
+          containerId: res.out.trim().split('\n')[0],
+          ...(insp.pid !== undefined
+            ? { pid: insp.pid, pidStart: procStat(insp.pid)?.start ?? null }
+            : {}),
+        })
+        writeWorkMarker(dir, agentId, spec.molStep, insp.pid)
+        return toDockerInfo(dir, home, spec.molStep, spawned)
+      })
+    },
+
+    async list(): Promise<ListResult> {
+      try {
+        const daemon = dockerDaemonUp()
+        if (!daemon.up) {
+          return { agents: [], degraded: daemon.err }
+        }
+        const home = agentsHome(dir)
+        const entries = Object.entries(readAgentRegistry(dir)).filter(
+          ([, e]) => e.backend === 'docker'
+        )
+        // one daemon round-trip for the whole fleet — a name absent
+        // from a successful listing is provably not running; a failed
+        // one degrades the list rather than reporting corpses
+        const live = dockerLiveContainers()
+        if (live === undefined && entries.length > 0) {
+          return { agents: [], degraded: 'docker ps failed — daemon unreachable' }
+        }
+        return {
+          agents: entries.map(([molStep, e]) => toDockerInfo(dir, home, molStep, e, live)),
+        }
+      } catch (err) {
+        return {
+          agents: [],
+          degraded: err instanceof Error ? err.message : String(err),
+        }
+      }
+    },
+
+    async status(id: string): Promise<AgentInfo> {
+      const hit = findEntry(id)
+      if (!hit) {
+        throw new AgentNotFound(`no docker agent ${id}`)
+      }
+      return toDockerInfo(dir, agentsHome(dir), hit[0], hit[1])
+    },
+
+    async stop(id: string): Promise<void> {
+      const hit = findEntry(id)
+      if (!hit) {
+        return // idempotent — gone is the desired end state
+      }
+      const [molStep, entry] = hit
+      const name = dockerContainerName(entry)
+      if (name !== undefined && entry.stopped !== true) {
+        dockerRun(['rm', '-f', name])
+        // let the rm land before recording the stop — 'stopped' on a
+        // still-live container would let a respawn run beside it
+        const deadline = Date.now() + 2_000
+        while (dockerProbe(name).live === 'running' && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 25)) // NOSONAR — bounded kill-wait poll
+        }
+      }
+      // a respawn during the rm re-probes and re-pins the entry under
+      // the registry lock — re-verify under the SAME lock or 'stopped'
+      // lands on a live, respawned entry
+      withAgentRegistryLock(dir, () => {
+        const cur = readAgentRegistry(dir)[molStep]
+        if (
+          cur === undefined ||
+          cur.agentId !== entry.agentId ||
+          cur.spawnedAt !== entry.spawnedAt
+        ) {
+          return // respawned — the live run owns the entry
+        }
+        if (name !== undefined) {
+          const p = dockerProbe(name)
+          if (p.live === 'running') {
+            return // still alive — the live run owns the entry
+          }
+          if (p.live === 'unknown') {
+            // an unverifiable probe must not record 'stopped' on a
+            // container that may still be live — fail loudly instead
+            throw new Error(`cannot verify ${id}'s container stopped — ${p.err}`)
+          }
+        }
+        try {
+          patchAgentRegistry(dir, molStep, { stopped: true })
+        } catch {
+          // the marker removal below still records intent
+        }
+        dropWorkMarker(dir, molStep, entry)
+      })
+    },
+
+    capabilities: () => ({ attach: false, respawn: true, supervisor: 'none' }),
+  }
+}
+
+registerAgentConnector('docker', makeDockerConnector)
