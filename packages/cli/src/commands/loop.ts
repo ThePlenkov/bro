@@ -62,6 +62,7 @@ import {
   ensureTasksBackend,
   facade,
   facadeName,
+  getTasks,
   gitBranchLog,
   gitCommonDir,
   gitTry,
@@ -780,9 +781,23 @@ function beadStatus(ctx: Ctx, id: string): string {
 }
 
 /** The members of a clump still open in the store — verdict closes the
- *  agent already landed stay closed. */
+ *  agent already landed stay closed. One bulk read per clump; only a
+ *  positively-closed row filters a member out, so a missing row or a
+ *  thrown read keeps the 'unknown' = still-open contract. */
 function openBeads(ctx: Ctx, beads: ReadyBead[]): ReadyBead[] {
-  return beads.filter((b) => beadStatus(ctx, b.id) !== 'closed')
+  try {
+    const closed = new Set(
+      getTasks(
+        ctx.tasks,
+        beads.map((b) => b.id)
+      )
+        .filter((r) => r.status === 'closed')
+        .map((r) => r.id)
+    )
+    return beads.filter((b) => !closed.has(b.id))
+  } catch {
+    return beads // a store blip must not mask work
+  }
 }
 
 /** A note fanned out over the clump's still-open members — verdict

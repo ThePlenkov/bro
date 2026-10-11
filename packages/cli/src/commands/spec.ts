@@ -34,6 +34,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, sep } from 'node:path'
 import {
   facade,
+  getTasks,
   isOwnClaim,
   loadConfig,
   sessionTaskClaims,
@@ -81,6 +82,24 @@ export function specState(row: TaskRow, spec: SpecStore): SpecState {
 
 function tasks(dir: string): TaskStore {
   return facade('tasks', { dir }, { prefer: loadConfig(dir).connectors })
+}
+
+/** Positional ids → rows in request order — one bulk read where the
+ *  backend batches (a serial `bd show` per id stacks the ~0.65s spawn
+ *  floor). Unknown ids name the miss for the usage error. */
+function resolveIds(store: TaskStore, ids: string[]): { rows: TaskRow[]; unknown: string[] } {
+  const byId = new Map(getTasks(store, ids).map((r) => [r.id, r]))
+  const rows: TaskRow[] = []
+  const unknown: string[] = []
+  for (const id of ids) {
+    const r = byId.get(id)
+    if (r === undefined) {
+      unknown.push(id)
+    } else {
+      rows.push(r)
+    }
+  }
+  return { rows, unknown }
 }
 
 /** The project's spec facade — a bad `connectors.specs` name (typo'd or
@@ -246,19 +265,13 @@ function cmdNew(dir: string, id: string | undefined, parent: string | undefined)
 function cmdCheck(dir: string, ids: string[], all: boolean): void {
   const store = tasks(dir)
   const spec = specs(dir)
-  const unknown: string[] = []
+  const resolved = ids.length > 0 ? resolveIds(store, ids) : undefined
+  const unknown = resolved?.unknown ?? []
   const rows =
-    ids.length > 0
-      ? ids.flatMap((id) => {
-          const r = store.get(id)
-          if (!r) {
-            unknown.push(id)
-          }
-          return r ? [r] : []
-        })
-      // limit 0 — a backend default cap must not silently drop rows
-      // from a coverage audit
-      : store.list({ status: 'in_progress', limit: 0 }).concat(all ? store.list({ status: 'open', limit: 0 }) : [])
+    resolved?.rows ??
+    // limit 0 — a backend default cap must not silently drop rows
+    // from a coverage audit
+    store.list({ status: 'in_progress', limit: 0 }).concat(all ? store.list({ status: 'open', limit: 0 }) : [])
   // an explicit id that doesn't resolve is a usage failure — partial
   // results would report silent success for a bead that doesn't exist
   if (unknown.length > 0) {
@@ -287,20 +300,14 @@ function cmdCheck(dir: string, ids: string[], all: boolean): void {
 function cmdDrift(dir: string, ids: string[], opts: { all: boolean; json: boolean; ref?: string }): void {
   const store = tasks(dir)
   const spec = specs(dir)
-  const unknown: string[] = []
+  const resolved = ids.length > 0 ? resolveIds(store, ids) : undefined
+  const unknown = resolved?.unknown ?? []
   const rows =
-    ids.length > 0
-      ? ids.flatMap((id) => {
-          const r = store.get(id)
-          if (!r) {
-            unknown.push(id)
-          }
-          return r ? [r] : []
-        })
-      // closed beads need `all` — the filter's documented switch for
-      // including them; a backend may drop closed rows without it.
-      // limit 0 — a backend default cap must not silently drop rows
-      : store.list(opts.all ? { all: true, limit: 0 } : { status: 'closed', all: true, limit: 0 })
+    resolved?.rows ??
+    // closed beads need `all` — the filter's documented switch for
+    // including them; a backend may drop closed rows without it.
+    // limit 0 — a backend default cap must not silently drop rows
+    store.list(opts.all ? { all: true, limit: 0 } : { status: 'closed', all: true, limit: 0 })
   // an explicit id that doesn't resolve is a usage failure — partial
   // results would report silent success for a bead that doesn't exist
   if (unknown.length > 0) {

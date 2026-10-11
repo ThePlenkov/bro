@@ -285,6 +285,13 @@ export interface TaskStore {
   /** the claimable queue — backend applies its own ordering/filters */
   ready<T extends TaskRow = TaskRow>(filter?: TaskFilter): T[]
   get<T extends TaskRow = TaskRow>(id: string): T | undefined
+  /** rows for `ids` — one backend call where the backend batches
+   *  (beads: `bd show id…`). Missing ids are absent from the result —
+   *  the same miss semantics as `get`, per id; ordering is the
+   *  backend's, so callers that need request order re-key by `id`.
+   *  Optional capability — a backend that can't batch omits it and
+   *  callers degrade to serial `get` via getTasks. */
+  getMany?<T extends TaskRow = TaskRow>(ids: string[]): T[]
   create<T extends TaskRow = TaskRow>(input: TaskInput): T
   /** field patch — keys map to `--<key> <value>` on the backend */
   update(id: string, patch: Record<string, string | number>): void
@@ -357,6 +364,26 @@ function taskRows<T extends TaskRow>(v: unknown, cmd: string): T[] {
     }
   }
   return v as T[]
+}
+
+/** `bd show id…` answers the found rows — a partial miss omits the
+ *  misses and still exits 0; a TOTAL miss answers an
+ *  `{error: "no issues found matching the provided IDs"}` object
+ *  instead of an array, also exit 0. Both are the port's miss
+ *  semantics — absent rows, not a thrown error. Any other non-array
+ *  shape is drift. */
+function showRows<T extends TaskRow>(v: unknown): T[] {
+  if (!Array.isArray(v)) {
+    if (
+      typeof v === 'object' &&
+      v !== null &&
+      typeof (v as { error?: unknown }).error === 'string'
+    ) {
+      return []
+    }
+    throw new BdCompatError('bd show --json returned a non-array shape — output drifted')
+  }
+  return taskRows<T>(v, 'show')
 }
 
 function taskRow(v: unknown, cmd: string): TaskRow | undefined {
@@ -533,6 +560,22 @@ function makeStore(x: StoreExec): TaskStore {
       }
       // bd show answers an array; empty/undefined = no such task
       return taskRow(Array.isArray(r) ? r[0] : r, 'show') as never
+    },
+    getMany: (ids) => {
+      // bare `bd show` answers a usage-error envelope, not rows — an
+      // empty request is a spawn saved, not a query
+      if (ids.length === 0) {
+        return [] as never
+      }
+      try {
+        return showRows(x.json(['show', ...ids])) as never
+      } catch (err) {
+        // a single-id miss exits nonzero — same miss contract as get
+        if (isBdNotFound(err)) {
+          return [] as never
+        }
+        throw err
+      }
     },
     create: (i) => {
       const r = x.json<TaskRow | TaskRow[]>(createArgs(i))
@@ -723,6 +766,9 @@ export interface TaskStoreAsync {
   list(f?: TaskFilter): Promise<TaskRow[]>
   ready(f?: TaskFilter): Promise<TaskRow[]>
   get<T extends TaskRow = TaskRow>(id: string): Promise<T | undefined>
+  /** async twin of `getMany` — same optional capability, same miss
+   *  semantics; degrade with getTasksAsync. */
+  getMany?<T extends TaskRow = TaskRow>(ids: string[]): Promise<T[]>
   children<T extends TaskRow = TaskRow>(id: string): Promise<T[]>
   deps<T = TaskDepEdge>(ids: string[], opts?: DepOpts): Promise<T[]>
   neighbors<T extends TaskRow = TaskRow>(id: string, opts?: DepOpts): Promise<T[]>
@@ -751,6 +797,19 @@ export function taskStoreAsync(dir?: string): TaskStoreAsync {
       }
       return taskRow(Array.isArray(r) ? r[0] : r, 'show') as never
     },
+    getMany: async (ids) => {
+      if (ids.length === 0) {
+        return [] as never
+      }
+      try {
+        return showRows(await bdJsonAsync(['show', ...ids], dir)) as never
+      } catch (err) {
+        if (isBdNotFound(err)) {
+          return [] as never
+        }
+        throw err
+      }
+    },
     children: async (id) => taskRows(await bdJsonAsync(['children', id], dir), 'children'),
     deps: async (ids, opts = {}) =>
       foldDepRows(await bdJsonAsync(depArgs(ids, opts), dir), ids, opts),
@@ -765,4 +824,36 @@ export function taskStoreAsync(dir?: string): TaskStoreAsync {
       return res.code === 0 ? parseSlotCheck(res.out) : null
     },
   }
+}
+
+/** The bulk-read degrade path — `getMany` where the store batches,
+ *  serial `get` where it can't. Kept in the port so a caller never
+ *  hand-rolls the fallback (nor pays one `bd show` per id by
+ *  accident). Backend failures propagate — miss semantics cover
+ *  absent ids, not a dead store. */
+export function getTasks<T extends TaskRow = TaskRow>(store: TaskStore, ids: string[]): T[] {
+  if (store.getMany !== undefined) {
+    return store.getMany<T>(ids)
+  }
+  const out: T[] = []
+  for (const id of ids) {
+    const r = store.get<T>(id)
+    if (r !== undefined) {
+      out.push(r)
+    }
+  }
+  return out
+}
+
+/** Async twin of getTasks — the degrade overlaps `get`s rather than
+ *  serializing them: same N backend calls, one latency. */
+export async function getTasksAsync<T extends TaskRow = TaskRow>(
+  store: TaskStoreAsync,
+  ids: string[]
+): Promise<T[]> {
+  if (store.getMany !== undefined) {
+    return store.getMany<T>(ids)
+  }
+  const rows = await Promise.all(ids.map((id) => store.get<T>(id)))
+  return rows.filter((r): r is T => r !== undefined)
 }

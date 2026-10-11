@@ -23,7 +23,7 @@
  * queue is scoped to this checkout's issue_prefix — foreign-prefix
  * beads are reported, never claimed. scope = "all" opts out in plans.
  */
-import { emitLifecycle, ensureTasksBackend, facade, gitTry, type FacadeOpts, type TaskStore } from '@broject/core'
+import { emitLifecycle, ensureTasksBackend, facade, getTasks, gitTry, type FacadeOpts, type TaskStore } from '@broject/core'
 import { flag } from './args.ts'
 import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts'
 import { requireGlobalStore } from '../doctypes/store.ts'
@@ -126,25 +126,33 @@ const parentEpicCache = new Map<string, boolean>()
  *  a parent that IS an epic makes the child regular work. Looked up
  *  once per unique parent id; an unreadable parent stays a mol step. */
 export function epicParentIds(ready: ReadyBead[], dir?: string, opts?: FacadeOpts): Set<string> {
+  const cwd = process.cwd()
   const ids = [
     ...new Set(ready.map((b) => b.parent).filter((p): p is string => !!p)),
   ]
   const epic = new Set<string>()
+  const missed: string[] = []
   for (const id of ids) {
     // cwd namespaces callers that share the same dir arg — without it a
     // project caller inherits another project's classification
-    const key = `${process.cwd()}:${dir ?? ''}:${id}`
-    const cached = parentEpicCache.get(key)
-    if (cached === true) {
+    const key = `${cwd}:${dir ?? ''}:${id}`
+    if (parentEpicCache.get(key) === true) {
       epic.add(id)
-      continue
+    } else {
+      missed.push(id)
     }
+  }
+  if (missed.length > 0) {
     try {
-      if (storeFor(dir, opts).get(id)?.issue_type === 'epic') {
-        parentEpicCache.set(key, true)
-        epic.add(id)
+      // one bulk read for the whole uncached set — the ~0.65s bd spawn
+      // floor is per-call, so serial `get`s here stack latencies
+      for (const r of getTasks(storeFor(dir, opts), missed)) {
+        if (r.issue_type === 'epic') {
+          parentEpicCache.set(`${cwd}:${dir ?? ''}:${r.id}`, true)
+          epic.add(r.id)
+        }
       }
-    } catch { /* a parent we can't inspect stays a molecule step — never cached */ }
+    } catch { /* parents we can't inspect stay molecule steps — never cached */ }
   }
   return epic
 }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { taskStore } from './tasks.ts'
+import { getTasks, taskStore, type TaskStore } from './tasks.ts'
 
 const WIN32 = process.platform === 'win32'
 
@@ -15,6 +15,8 @@ case "$1" in
   ready) echo '[{"id":"t1"}]' ;;
   show) if [ "$FAKE_BD_SHOW" = "missing" ]; then echo 'Issue t1 not found' >&2; exit 1;
         elif [ "$FAKE_BD_SHOW" = "broken" ]; then echo 'database is locked' >&2; exit 1;
+        elif [ "$FAKE_BD_SHOW" = "allmiss" ]; then echo '{"error":"no issues found matching the provided IDs","schema_version":1}';
+        elif [ "$FAKE_BD_SHOW" = "partial" ]; then echo '[{"id":"t2","status":"open"}]';
         elif [ "$FAKE_BD_DRIFT" = "norow" ]; then echo '[{"name":"t1"}]'; else echo '[{"id":"t1","status":"in_progress"}]'; fi ;;
   create) if [ "$FAKE_BD_CREATE_EMPTY" = "1" ]; then echo '[]'; else echo '{"id":"t9","status":"open"}'; fi ;;
   dep) echo '[{"issue_id":"t2","depends_on_id":"t1","type":"parent-child"}]' ;;
@@ -98,6 +100,61 @@ describe('taskStore', { skip: WIN32 }, () => {
     withFakeBd({ FAKE_BD_SHOW: 'broken' }, () => {
       assert.throws(() => taskStore().get('t1'), /locked|Command failed/)
     })
+  })
+
+  test('getMany answers the found rows in ONE bd show', () => {
+    withFakeBd({ FAKE_BD_SHOW: 'partial' }, (log) => {
+      const rows = taskStore().getMany?.(['t1', 't2']) ?? []
+      assert.deepEqual(rows.map((r) => r.id), ['t2'])
+      const calls = logLines(log).filter((l) => l.startsWith('show '))
+      assert.equal(calls.length, 1)
+      assert.ok(calls[0]!.includes('t1') && calls[0]!.includes('t2'), calls[0])
+    })
+  })
+
+  test('getMany folds a total miss to [] — the error envelope is not drift', () => {
+    withFakeBd({ FAKE_BD_SHOW: 'allmiss' }, () => {
+      assert.deepEqual(taskStore().getMany?.(['t9', 't8']), [])
+    })
+  })
+
+  test('getMany folds a single-id miss to [] — same contract as get', () => {
+    withFakeBd({ FAKE_BD_SHOW: 'missing' }, () => {
+      assert.deepEqual(taskStore().getMany?.(['t1']), [])
+    })
+  })
+
+  test('getMany propagates a backend failure like get does', () => {
+    withFakeBd({ FAKE_BD_SHOW: 'broken' }, () => {
+      assert.throws(() => taskStore().getMany?.(['t1', 't2']), /locked|Command failed/)
+    })
+  })
+
+  test('getMany on empty ids never spawns', () => {
+    withFakeBd({}, (log) => {
+      assert.deepEqual(taskStore().getMany?.([]), [])
+      assert.equal(logLines(log).filter((l) => l.startsWith('show')).length, 0)
+    })
+  })
+
+  test('getTasks degrades to serial get without the capability', () => {
+    const calls: string[] = []
+    const serial = {
+      get: (id: string) => {
+        calls.push(id)
+        return id === 'gone' ? undefined : { id }
+      },
+    } as unknown as TaskStore
+    assert.deepEqual(getTasks(serial, ['a', 'gone', 'b']).map((r) => r.id), ['a', 'b'])
+    assert.deepEqual(calls, ['a', 'gone', 'b'])
+    // and a store WITH the verb never falls back to get
+    const batched = {
+      getMany: (ids: string[]) => ids.map((id) => ({ id })),
+      get: () => {
+        throw new Error('get must not run when getMany exists')
+      },
+    } as unknown as TaskStore
+    assert.deepEqual(getTasks(batched, ['x', 'y']).map((r) => r.id), ['x', 'y'])
   })
 
   test('create maps the typed input onto bd create args', () => {

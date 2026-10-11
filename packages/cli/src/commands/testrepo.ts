@@ -217,9 +217,23 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     break
   }
   case 'show': {
-    const r = row(pos[1])
-    if (!r) fail('not found: ' + pos[1])
-    jsonOut([r])
+    // real bd answers found rows for every id — a partial miss omits
+    // the miss (stderr warn, exit 0); a TOTAL multi-id miss exits 0
+    // with an {error} envelope while a single miss exits 1
+    const ids = pos.slice(1)
+    const found = ids.map((id) => row(id)).filter(Boolean)
+    if (found.length === 0) {
+      if (ids.length > 1) {
+        jsonOut({ error: 'no issues found matching the provided IDs', schema_version: 1 })
+      } else {
+        fail('not found: ' + ids[0])
+      }
+      break
+    }
+    for (const id of ids) {
+      if (!row(id)) console.error('Issue ' + id + ' not found')
+    }
+    jsonOut(found)
     break
   }
   case 'create': {
