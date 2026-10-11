@@ -1,10 +1,10 @@
 /** `bro goal` + hook-side evaluation (spec: specs/goal/bro-6vcll.md). */
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
+import { tmpDir } from './testrepo.ts'
 import {
   goalContextLines,
   goalStatusLine,
@@ -17,7 +17,7 @@ import {
 
 /** A bare `git init` worktree — goal state lands in its .git dir. */
 function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-goal-'))
+  const dir = tmpDir('bro-goal-')
   execFileSync('git', ['init', '-q'], { cwd: dir })
   return dir
 }

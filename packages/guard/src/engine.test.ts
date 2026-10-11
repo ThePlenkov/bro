@@ -1,8 +1,8 @@
 /** Engine + probes — real git repos in tmp; the fired set lands in
  *  `<git-common>/bro/hooks/fired/<session>` exactly like learn's. */
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
+import { tmpDir } from './testtmp.ts'
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { gitTry, JudgeUnavailable, type Guard, type Verdict } from '@broject/core'
@@ -10,7 +10,7 @@ import type { MatchContext } from '@broject/learn'
 import { EVAL_FANOUT, runGuards, type GuardEvalOpts } from './engine.ts'
 
 function repo(branch = 'main'): string {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-guard-'))
+  const dir = tmpDir('bro-guard-')
   assert.equal(gitTry(['-C', dir, 'init', '-b', branch]).code, 0)
   // pin the commit identity — CI runners have no global git user
   assert.equal(gitTry(['-C', dir, 'config', 'user.email', 't@t']).code, 0)

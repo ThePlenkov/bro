@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
+import { tmpDir } from './commands/testrepo.ts'
 import { loadExternalPlugins, PLUGINS, pluginConfigSections, pluginGroups, runPlanFile } from './plugins.ts'
 
 describe('plugin registry', () => {
@@ -113,7 +113,7 @@ describe('plugin registry', () => {
 
 describe('loadExternalPlugins', () => {
   function repoWith(pluginSource: string | null, plugins: unknown): string {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-ext-'))
+    const dir = tmpDir('bro-ext-')
     writeFileSync(
       join(dir, 'bro.config.json'),
       JSON.stringify({ plugins })
@@ -268,7 +268,7 @@ describe('loadExternalPlugins', () => {
 
 describe('bro run — plan routing', () => {
   function planFile(body: string): string {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-plan-'))
+    const dir = tmpDir('bro-plan-')
     const file = join(dir, 'plan.toml')
     writeFileSync(file, body)
     return file

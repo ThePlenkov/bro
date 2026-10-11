@@ -1,19 +1,19 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
 import { writeStamp } from './buildstamp.ts'
 import { collectStatus } from './status.ts'
+import { tmpDir } from './testrepo.ts'
 
 // bd resolves BEADS_DIR before any .beads discovery — a session that
 // pinned it (agent env) would leak the real store into the bare-repo
 // fixture. Point it at a guaranteed-empty dir for this file.
-process.env.BEADS_DIR = mkdtempSync(join(tmpdir(), 'bro-status-beads-'))
+process.env.BEADS_DIR = tmpDir('bro-status-beads-')
 
 function gitRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-status-'))
+  const dir = tmpDir('bro-status-')
   execFileSync('git', ['init', '-b', 'main'], { cwd: dir })
   execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir })
   execFileSync('git', ['config', 'user.name', 't'], { cwd: dir })
