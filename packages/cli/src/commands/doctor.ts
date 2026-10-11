@@ -30,7 +30,7 @@ import {
   runJanitor,
 } from '@broject/core'
 import type { BdCompat, ProviderEntry, ProviderSurface } from '@broject/core'
-import { parsePeer, rigFromRemoteUrl } from '@broject/mesh'
+import { formatRigUri, parsePeer, rigFromRemoteUrl } from '@broject/mesh'
 import { judgeConfig, synthesizedProviders } from '@broject/judge'
 import type { JudgeConfig } from '@broject/judge'
 import { loadBroConfig, pluginConfigSections } from '../plugins.ts'
@@ -762,7 +762,7 @@ function queryCliChecks(dir: string, cfgPins: Record<string, string>): DoctorChe
 function meshRigCheck(dir: string, pinned: string | undefined): DoctorCheck {
   const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
   const derived = origin.code === 0 ? rigFromRemoteUrl(origin.out.trim()) : null
-  const rig = pinned ?? derived
+  const rig = pinned ?? (derived === null ? null : formatRigUri(derived))
   return rig !== null && rig !== undefined
     ? check('mesh', 'ok', `rig ${rig}${pinned !== undefined ? ' (pinned)' : ''}`)
     : check(

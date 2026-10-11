@@ -580,6 +580,7 @@ describe('bro doctor', () => {
       (dir) => {
         const checks = runDoctorChecks(dir)
         assert.equal(byName(checks, 'mesh').status, 'ok')
+        assert.match(byName(checks, 'mesh').detail, /rig mesh:\/\/acme\/widgets/)
         assert.match(byName(checks, 'mesh-peers').detail ?? '', /2 peer\(s\), 2 beads-remote/)
         assert.equal(byName(checks, 'mesh-dolt').status, 'warn')
       }
