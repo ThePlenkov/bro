@@ -24,6 +24,8 @@ import {
   agentEntryBlocked,
   agentRegistryPath,
   AgentNotFound,
+  facade,
+  loadConfig,
   readAgentRegistry,
   SpawnError,
   type AgentConnector,
@@ -466,6 +468,28 @@ export async function runMol(
   }
 }
 
+/** The HUMAN GATE moment — a mol that reached a human step exists
+ *  precisely so a person hears about it. Publishes through the events
+ *  facade so `notify.sinks` webhooks see it (spec: specs/bro-huy5o.8.md);
+ *  the keyed event also coalesces repeat sightings on the mailbox.
+ *  Fail-open like every emit — a gate report never stalls the runner. */
+export async function publishGate(dir: string, molId: string, detail: string): Promise<void> {
+  try {
+    await facade('events', { dir }, { prefer: loadConfig(dir).connectors }).publish({
+      topic: 'convoy',
+      kind: 'gate',
+      key: `convoy-gate-${molId}`,
+      source: 'convoy',
+      payload:
+        `convoy ${molId}: HUMAN GATE ready` +
+        (detail === '' ? '' : ` — ${detail}`) +
+        ' — human input needed',
+    })
+  } catch {
+    // fail-open — sinks/mailbox are advisory edges, never a runner failure
+  }
+}
+
 /** The queue: each mol in order, sequential like the script it
  *  replaces. Returns the per-mol verdicts; the caller renders. */
 export async function runQueue(
@@ -546,6 +570,9 @@ export async function runConvoyRun(argv: string[]): Promise<void> {
   const results = await runQueue(deps, cfg)
   let failed = 0
   for (const r of results) {
+    if (r.verdict === 'gated') {
+      await publishGate(dir, r.mol, r.detail ?? '')
+    }
     if (cfg.json) {
       console.log(JSON.stringify(r))
     } else {

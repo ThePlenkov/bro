@@ -30,6 +30,7 @@ import {
   busSocketPath,
   busSubscribe,
 } from './bus.ts'
+import { withSinks } from './sinks.ts'
 import {
   eventMatches,
   isEventInput,
@@ -178,10 +179,12 @@ export function busEvents(dir: string): EventsFacade {
 }
 
 /** The default `events` connector — a mailbox. Registered first so it
- *  wins the fallback precedence and `notify` keeps working untouched. */
+ *  wins the fallback precedence and `notify` keeps working untouched.
+ *  `withSinks` adds the human edge: `notify.sinks` webhooks fan out
+ *  from the same publish call (spec: specs/bro-huy5o.8.md). */
 export const mailboxConnector: Connector = {
   name: 'mailbox',
-  events: (ctx: ConnectorCtx) => mailboxEvents(ctx.dir, ctx.sessionId),
+  events: (ctx: ConnectorCtx) => withSinks(ctx.dir, mailboxEvents(ctx.dir, ctx.sessionId)),
 }
 
 /** The bus as a connector — opt-in, because a bus that is not running is
@@ -191,5 +194,5 @@ export const busConnector: Connector = {
   // Requires a running broker and moves events off the mailbox, so it
   // is named in config or not used at all.
   optIn: true,
-  events: (ctx: ConnectorCtx) => busEvents(ctx.dir),
+  events: (ctx: ConnectorCtx) => withSinks(ctx.dir, busEvents(ctx.dir)),
 }

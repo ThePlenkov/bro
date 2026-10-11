@@ -1,6 +1,6 @@
 ---
-title: Events — notify, mailbox, bus
-description: The events facade — a session mailbox by default, a local event broker behind it.
+title: Events — notify, mailbox, bus, sinks
+description: The events facade — a session mailbox by default, a local event broker behind it, webhook sinks for humans.
 ---
 
 `bro notify` writes through one `events` facade — mailbox by default,
@@ -77,6 +77,61 @@ public Host a tunnel forwards with.
 event lands — a check completing wakes the wait instead of sitting out
 the interval. Broker down means plain timer polling: the webhook path
 is an accelerator over the default, never a requirement.
+
+## Webhook sinks — `notify.sinks`
+
+The mailbox reaches agents; sinks reach PEOPLE. A `sinks` array in the
+operator-local `notify` section fans every publish out to configured
+webhooks — Slack incoming webhooks, telegram `sendMessage`, or a
+generic JSON endpoint. Delivery wraps the facade `publish`, so every
+producer — `bro notify`, `bro bus publish`, the webhook ingest,
+convoy, drive, act, retrospect — reaches the sinks through the same
+door.
+
+| Command | What it does |
+| ------- | ------------ |
+| `bro sinks list [--json]` | Resolved sinks — type, route patterns, and each secret env var's set/unset status (never the value) |
+| `bro sinks test [--json]` | Deliver a probe event, report per-sink delivered/skipped/error — verify a webhook before a real event needs it |
+
+```json
+{
+  "notify": {
+    "sinks": [
+      { "type": "slack", "urlEnv": "SLACK_HOOK", "events": ["convoy:gate", "drive:alert"] },
+      { "type": "telegram", "tokenEnv": "TG_TOKEN", "chatIdEnv": "TG_CHAT", "events": ["*"] },
+      { "type": "webhook", "urlEnv": "WH_URL", "events": ["act:*", "retro:*"] },
+      { "type": "webhook", "url": "http://ci.internal/bro-events" }
+    ]
+  }
+}
+```
+
+Each entry is `{ type, ... }`:
+
+- `events` — the route. `[]`/absent means every event; entries are
+  `topic` (any kind), `topic:kind` (exact), or `*`-globs (`dr*`,
+  `drive:*`). A sink posts only when some pattern matches.
+- Secrets name env vars — `urlEnv`, `tokenEnv`, `chatIdEnv` — never
+  literal values in config; a missing var skips the sink. `url` and
+  `chatId` accept literals for non-secret endpoints.
+- `timeoutMs` bounds one delivery (default 5s — a wedged endpoint
+  doesn't hold the caller); `minIntervalMs` deduplicates an identical
+  repeat (same sink, key, and rendered text) so an every-N-minutes
+  alert source doesn't re-page each tick (default 4h; `0` disables).
+  A changed payload is a new event and sends immediately.
+- Bodies: slack posts `{ text: "[topic/kind] message" }`, telegram
+  `{ chat_id, text }` to `bot<token>/sendMessage` (`apiBase`
+  overrides the API host), generic webhook posts the event fields
+  plus a rendered `text` — all `application/json`.
+
+Delivery NEVER blocks or fails the agent: a missing env var, an HTTP
+error, a dead endpoint returns a result row, not an exception. Built-in
+emissions — convoy HUMAN GATE (`convoy:gate`), drive stuck-PR and
+silent-reviewer alerts (`drive:alert`), `act wait` settles
+(`act:block`/`act:result`), wtf captures (`wtf:note`) and retro records
+(`retro:result`) — all arrive through the same publish path. The
+`notify` section is operator-scoped — commit the file without secrets
+anyway; values stay in env.
 
 ## Policy
 

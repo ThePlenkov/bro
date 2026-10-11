@@ -256,6 +256,10 @@ async function cmdWait(argv: string[]): Promise<void> {
   if (res.timedOut || !res.gate.ok || res.state.state !== 'OPEN') {
     if (!res.timedOut && !res.gate.ok) {
       await recordBlockedVerdict(rev, t, res, timeout)
+    } else if (!res.timedOut && res.state.state !== 'OPEN') {
+      // externally settled (merged/closed between polls) — the "wait
+      // finished" moment a sink is for (spec: specs/bro-huy5o.8.md)
+      await recordSettledVerdict(rev, t, res.state.url, res.state.state.toLowerCase())
     }
     // an external merge settles the wait before mergeIfAsked ever runs —
     // watchEnd already swept the marker, so nothing is left for `act
@@ -266,6 +270,11 @@ async function cmdWait(argv: string[]): Promise<void> {
     return
   }
   await mergeIfAsked(argv, t.pr)
+  // mergeIfAsked reports merge failures on exitCode — a clean return
+  // means the wait ended at a green gate (and --merge landed or queued)
+  if (process.exitCode === undefined || process.exitCode === 0) {
+    await recordSettledVerdict(rev, t, res.state.url, 'green')
+  }
 }
 
 /** A settled blocked verdict is a finding, not just an exit code — a
@@ -294,6 +303,32 @@ async function recordBlockedVerdict(
   } catch {
     // fail-open — the verdict record must never turn the exit-code
     // contract into a failure
+  }
+}
+
+/** The green twin of recordBlockedVerdict — "act wait finished" is a
+ *  human moment even when nothing went wrong: a settled watcher is the
+ *  one that stopped needing eyes (spec: specs/bro-huy5o.8.md). Same
+ *  event key as the block verdict — a wait that settled after earlier
+ *  BLOCKED news supersedes it. */
+async function recordSettledVerdict(
+  rev: ReviewFacade,
+  t: PrTarget,
+  url: string,
+  outcome: string
+): Promise<void> {
+  const link = rev.prLink(t.repo, t.pr)
+  try {
+    await facade('events', { dir: process.cwd() }, { prefer: loadBroConfig().connectors }).publish({
+      topic: 'act',
+      kind: 'result',
+      key: `act-wait-${t.pr}`,
+      source: 'act-wait',
+      ref: url,
+      payload: `act wait on ${link} settled ${outcome.toUpperCase()}`,
+    })
+  } catch {
+    // fail-open — same rule as the blocked verdict
   }
 }
 

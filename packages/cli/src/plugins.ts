@@ -57,6 +57,7 @@ import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts'
 import { runLoopCommand } from './commands/loop.ts'
 import { applyNextPlan, runNextCommand } from './commands/next.ts'
 import { runNotifyCommand } from './commands/notify.ts'
+import { runSinksCommand } from './commands/sinks.ts'
 import { runQueryCommand } from './commands/query.ts'
 import { parseNextPlan, PLAN_VERSION as NEXT_PLAN_VERSION, type NextPlan } from './commands/next-plan.ts'
 import { resolvePlanDoc, runPlanCommand } from './commands/plan.ts'
@@ -217,6 +218,14 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Drop an event into the session mailbox — drained into context by the next postTool probe',
     run: runNotifyCommand,
     skill: 'notify',
+  }),
+  definePlugin({
+    // sinks documents itself in the notify skill — the human edge of
+    // the same event plane, not a separate capability surface.
+    name: 'sinks',
+    group: 'comms',
+    summary: 'Outbound event sinks — list configured webhooks, send a probe [list|test]',
+    run: runSinksCommand,
   }),
   definePlugin({
     name: 'watch',
