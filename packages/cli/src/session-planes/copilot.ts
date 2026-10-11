@@ -14,9 +14,9 @@
  *  `countWorkers` is the same count: there is no interactive copilot
  *  task kind — every agent task is a spawned worker, so maxWorkers and
  *  maxSessions read the same evidence. Landed `.slot` reservations are
- *  never swept: task ids can't be correlated to slot keys without the
- *  repo registry (the plane is host-wide, cross-repo), so a landed
- *  spawn double-counts until its TTL lapses — bounded, never wedged.
+ *  swept by the connector's refresh — it alone can correlate a slot
+ *  key (the agentId) to a remote taskId through the repo registry;
+ *  the TTL still bounds whatever the sweep misses.
  *
  *  Vendor knowledge at the plugin layer like devin.ts — core owns the
  *  mutex/reservation mechanics, this file owns the cache shape; the gh

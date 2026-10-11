@@ -1,7 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { readAgentRegistry, sessionPlane, SpawnError, AgentNotFound } from '@broject/core'
 import {
@@ -95,11 +95,13 @@ if (method === 'POST' && segs[0] === 'agents' && segs[1] === 'repos' && segs[4] 
   db.tasks.push(t); save(db)
   console.log(JSON.stringify(t)); process.exit(0)
 }
-// GET /agents/tasks?state=a,b — the filtered live listing
+// GET /agents/tasks?state=a,b — the filtered live listing (paginated)
 if (segs[0] === 'agents' && segs[1] === 'tasks' && segs.length === 2) {
   const states = (params.get('state') ?? '').split(',').filter(Boolean)
   const tasks = states.length > 0 ? db.tasks.filter((t) => states.includes(t.state)) : db.tasks
-  console.log(JSON.stringify({ tasks })); process.exit(0)
+  const per = Number(params.get('per_page') ?? '30')
+  const page = Number(params.get('page') ?? '1')
+  console.log(JSON.stringify({ tasks: tasks.slice((page - 1) * per, page * per) })); process.exit(0)
 }
 // GET /agents/tasks/{id}
 if (segs[0] === 'agents' && segs[1] === 'tasks' && segs.length === 3) {
@@ -539,7 +541,9 @@ describe('copilot session plane', () => {
       // no cache at all — the remote count is unverifiable, not zero
       assert.throws(() => plane.countLive({ reservationsDir: resDir }), /absent or corrupt/)
       assert.throws(() => plane.countWorkers!({ reservationsDir: resDir }), /absent or corrupt/)
-      // the same failure reaches spawn admission — a quota never spawns blind
+      // and with the API unreachable the spawn's own refresh can't
+      // produce one either — a quota never spawns blind
+      process.env.FAKE_GH_FAIL = 'agents/tasks'
       const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
       const err = await conn
         .spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
@@ -547,6 +551,76 @@ describe('copilot session plane', () => {
         .catch((e) => e)
       assert.ok(err instanceof SpawnError, `expected SpawnError, got ${err}`)
       assert.equal(err.kind, 'unavailable')
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('a first spawn on a reachable API refreshes the count itself', async () => {
+    const fx = fixture(
+      [{ id: 'fx-1', status: 'open' }],
+      { repo: 'octo/repo', maxSessions: 2, reservationsDir: '' }
+    )
+    try {
+      const resDir = join(fx.root, 'slots')
+      fx.env.agents['copilot']!['reservationsDir'] = resDir
+      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
+      // no status/list ran — spawn's own pre-admission refresh lands
+      // the cache (here: zero remote tasks) instead of failing closed
+      await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
+      const cache = JSON.parse(readFileSync(copilotCountFile(resDir), 'utf8'))
+      assert.equal(cache.count, 1)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('a landed spawn retires its slot reservation on the next refresh', async () => {
+    const fx = fixture(
+      [
+        { id: 'fx-1', status: 'open' },
+        { id: 'fx-2', status: 'open' },
+      ],
+      { repo: 'octo/repo', maxSessions: 2, reservationsDir: '' }
+    )
+    try {
+      const resDir = join(fx.root, 'slots')
+      fx.env.agents['copilot']!['reservationsDir'] = resDir
+      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
+      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
+      // the spawn's post-dispatch refresh already swept the slot —
+      // live remote count (1) + reservation (0), not 2
+      const remaining = readdirSync(resDir).filter((n) => n.endsWith('.slot'))
+      assert.deepEqual(remaining, [])
+      // the second spawn therefore fits under maxSessions: 2 —
+      // before the sweep it would refuse on the phantom double count
+      const info2 = await conn.spawn({ ...SPEC(fx.main, fx.beadsDir, 'fx-2') })
+      assert.equal(info2.backend, 'copilot')
+      assert.ok(info.id !== info2.id)
+    } finally {
+      cleanup(fx)
+    }
+  })
+
+  test('the remote count paginates past one page', async () => {
+    const tasks = Array.from({ length: 150 }, (_, i) => ({
+      id: `task-x${i}`,
+      state: 'in_progress',
+      repo: 'octo/repo',
+      sessions: [{ id: `sess-x${i}`, state: 'in_progress' }],
+    }))
+    const fx = fixture(
+      [],
+      { repo: 'octo/repo', maxSessions: 200, reservationsDir: '' },
+      { tasks, seq: 200 }
+    )
+    try {
+      const resDir = join(fx.root, 'slots')
+      fx.env.agents['copilot']!['reservationsDir'] = resDir
+      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
+      await conn.list()
+      const cache = JSON.parse(readFileSync(copilotCountFile(resDir), 'utf8'))
+      assert.equal(cache.count, 150)
     } finally {
       cleanup(fx)
     }

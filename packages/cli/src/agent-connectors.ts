@@ -22,6 +22,7 @@ import {
   fstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
   realpathSync,
@@ -61,6 +62,7 @@ import {
   sessionPlane,
   sessionPlaneForCli,
   sessionQuotaConfig,
+  sessionSlotsDir,
   SpawnError,
   stepParent,
   ProviderSurfaceError,
@@ -3979,31 +3981,39 @@ function copilotFetchTask(taskId: string): { ok: boolean; task?: CopilotTask; er
   }
 }
 
-/** The account's live task id set — one filtered listing for the whole
- *  fleet walk and the session-plane count refresh. `undefined` = the
- *  API couldn't answer (fail closed — an unverifiable count occupies,
- *  never frees). Bounded at one page: beyond ~100 live remote tasks a
- *  quota is moot anyway. */
+/** The account's live task id set — filtered, paginated listings for
+ *  the fleet walk and the session-plane count refresh. `undefined` =
+ *  the API couldn't answer (fail closed — an unverifiable count
+ *  occupies, never frees). A short page ends the walk; the page bound
+ *  keeps a pathological account from stalling the spawn lock. */
 function copilotLiveTaskIds(): Set<string> | undefined {
-  const r = ghRun([
-    'api',
-    `agents/tasks?state=${[...COPILOT_LIVE_STATES].join(',')}&per_page=100`,
-  ])
-  if (r.code !== 0) {
-    return undefined
-  }
-  try {
-    const v = JSON.parse(r.out) as { tasks?: unknown }
-    return new Set(
-      Array.isArray(v.tasks)
+  const ids = new Set<string>()
+  for (let page = 1; page <= 10; page++) {
+    const r = ghRun([
+      'api',
+      `agents/tasks?state=${[...COPILOT_LIVE_STATES].join(',')}&per_page=100&page=${page}`,
+    ])
+    if (r.code !== 0) {
+      return undefined
+    }
+    try {
+      const v = JSON.parse(r.out) as { tasks?: unknown }
+      const batch = Array.isArray(v.tasks)
         ? v.tasks
             .map((t) => (t as { id?: unknown })?.id)
             .filter((x): x is string => typeof x === 'string')
         : []
-    )
-  } catch {
-    return undefined
+      for (const id of batch) {
+        ids.add(id)
+      }
+      if (batch.length < 100) {
+        return ids
+      }
+    } catch {
+      return undefined
+    }
   }
+  return ids
 }
 
 /** copilot occupancy — the remote probe is the same honesty rule as
@@ -4203,18 +4213,51 @@ function copilotSessionQuota(env: AgentConnectorEnv): SessionQuotaLane | undefin
   return { plane, agents: env.agents }
 }
 
+/** Retire `.slot` reservations whose remote task already landed in the
+ *  refreshed live set — the admission contract a landed spawn must not
+ *  double-count (live + reservation) under. The correlation needs the
+ *  repo's registry (agentId → taskId), so the sweep rides connector
+ *  reads rather than the host-wide plane: each repo sweeps its own
+ *  slots, and a cross-repo spawn's reservation gets retired by that
+ *  repo's next refresh — the TTL bounds whatever remains. */
+function copilotSweepLandedSlots(dir: string, slotsDir: string, live: Set<string>): void {
+  let names: string[]
+  try {
+    names = readdirSync(slotsDir)
+  } catch {
+    return // no/unreadable dir — the tally reports its own verdict
+  }
+  for (const e of Object.values(readAgentRegistry(dir))) {
+    if (e.backend !== 'copilot' || typeof e.taskId !== 'string' || !live.has(e.taskId)) {
+      continue
+    }
+    for (const name of names) {
+      if (name.startsWith(`${e.agentId}-`) && name.endsWith('.slot')) {
+        try {
+          rmSync(join(slotsDir, name), { force: true })
+        } catch {
+          // a racing reaper already got it
+        }
+      }
+    }
+  }
+}
+
 /** Refresh the count cache the copilot plane serves — best-effort and
  *  only while a copilot lane is armed (an unarmed plane has no reader;
  *  the extra gh call is pure waste). A failed refresh just leaves the
- *  cache stale, which countLive already fails closed on. */
-function copilotRefreshCount(env: AgentConnectorEnv): void {
+ *  cache stale, which countLive already fails closed on. The landed
+ *  sweep retires this repo's reservations the remote count now sees. */
+function copilotRefreshCount(dir: string, env: AgentConnectorEnv): void {
   if (sessionQuotaConfig(env.agents, 'copilot') === undefined) {
     return
   }
   const resDir = env.agents['copilot']?.['reservationsDir']
   const ids = copilotLiveTaskIds()
   if (ids !== undefined) {
+    const slots = sessionSlotsDir('copilot', typeof resDir === 'string' ? resDir : undefined)
     writeCopilotCount(typeof resDir === 'string' ? resDir : undefined, [...ids])
+    copilotSweepLandedSlots(dir, slots, ids)
   }
 }
 
@@ -4277,6 +4320,11 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         throw new SpawnError(`no git common dir for ${spec.repoRoot}`, 'config')
       }
       const target = targetRepo(spec)
+      // refresh the remote count BEFORE admission — a first-ever spawn
+      // on a reachable API must not fail closed on an absent cache;
+      // unreachable stays fail-closed by the same path. Outside the
+      // lock: the fetch must not stall the registry critical section
+      copilotRefreshCount(dir, env)
       return withAgentRegistryLock(dir, () => {
         // claim-on-behalf is prepareSpawn's claimStep inside this lock —
         // the remote runner can never reach the shared store, so the
@@ -4373,7 +4421,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
             branch: copilotHeadRef(task),
           })
           writeWorkMarker(dir, agentId, spec.molStep)
-          copilotRefreshCount(env)
+          copilotRefreshCount(dir, env)
           return {
             id: agentId,
             spawnedAt: typeof spawned.spawnedAt === 'string' ? spawned.spawnedAt : undefined,
@@ -4413,7 +4461,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         // the remote count refresh rides every read — the plane counts
         // REMOTE tasks whether or not this repo's registry spawned them;
         // armed-quota gate inside keeps an unarmed config gh-free
-        copilotRefreshCount(env)
+        copilotRefreshCount(dir, env)
         if (entries.length === 0) {
           // no copilot agents registered — the fleet view must not pay
           // a gh call (or a degradation) for a backend it never used
@@ -4445,7 +4493,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       if (!hit) {
         throw new AgentNotFound(`no copilot agent ${id}`)
       }
-      copilotRefreshCount(env)
+      copilotRefreshCount(dir, env)
       return toCopilotInfo(dir, agentsHome(dir), hit[0], hit[1])
     },
 
