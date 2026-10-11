@@ -26,6 +26,7 @@ import {
 } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import { flag } from './args.ts'
+import { SELF_ENTRY } from './self-entry.ts'
 import {
   deleteMergedLocalBranch,
   gitDirOf,
@@ -299,16 +300,16 @@ async function recordBlockedVerdict(
 
 /** Detached `act wait` resurrection — own process group, parent's
  *  stdio ignored, unref'd: the same nohup-equivalent the watcher needs
- *  to survive the session that re-armed it (bro-tafj). `argv[1]` is the
- *  running cli entry, so the child re-runs this same binary.
+ *  to survive the session that re-armed it (bro-tafj). `SELF_ENTRY` is
+ *  the running cli entry, so the child re-runs this same binary.
  *
  *  The returned pid is CONFIRMED — this resolves only once the child's
  *  own live marker shows up in listWatches, so a spawn that exits early
  *  (auth gate, config error) resolves undefined and the dead markers
  *  stay on disk as the still-unkept promise. */
 export async function respawnWatcher(dir: string, plan: RearmPlan): Promise<number | undefined> {
-  const entry = process.argv[1]
-  if (entry === undefined) {
+  const entry = SELF_ENTRY
+  if (entry === null) {
     return undefined
   }
   // --cleanup retires the worktree containing the watcher's cwd — it is

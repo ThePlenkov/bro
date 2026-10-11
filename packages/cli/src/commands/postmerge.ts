@@ -43,6 +43,7 @@ import {
   type ConfigSection,
 } from '@broject/core'
 import { writeStamp } from './buildstamp.ts'
+import { SELF_ENTRY } from './self-entry.ts'
 
 /** `freshness` config section — the post-merge refresh's command slots.
  *  Absent = auto (lockfile-detected install, `scripts.build`, the
@@ -242,8 +243,7 @@ function spawnDetached(cwd: string, logFd: number): void {
  *  index.js` on installs, `src/index.ts` in dev (node ≥22.18 strips
  *  types). Null when argv is not bro-shaped (tests import directly). */
 function entrypoint(): string | null {
-  const entry = process.argv[1]
-  return entry !== undefined && existsSync(entry) ? entry : null
+  return SELF_ENTRY !== null && existsSync(SELF_ENTRY) ? SELF_ENTRY : null
 }
 
 // --- worker ---------------------------------------------------------------------

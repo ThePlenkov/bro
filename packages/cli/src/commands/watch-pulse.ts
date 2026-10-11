@@ -30,6 +30,7 @@ import {
   pidAlive,
   type Connector,
 } from '@broject/core'
+import { SELF_ENTRY } from './self-entry.ts'
 import { watchSection, type WatchConfig } from './watch-config.ts'
 
 export interface PulseMarker {
@@ -199,17 +200,16 @@ export function pulseRearm(
 /** Fire-and-forget the bounded window — detached, unref'd, stdio
  *  ignored: the hook exits on its timeout budget while the child takes
  *  pulse.lock (or stands by behind a contender and inherits later).
- *  `process.argv[1]` re-runs this CLI entry so npx/dist/source installs
+ *  `SELF_ENTRY` re-runs this CLI entry so npx/dist/source installs
  *  all re-spawn themselves. */
 export function spawnPulse(dir: string, everySec: number, forSec: number): number | null {
-  const entry = process.argv[1]
-  if (entry === undefined) {
+  if (SELF_ENTRY === null) {
     return null
   }
   try {
     const child = spawn(
       process.execPath,
-      [entry, 'watch', '--every', String(everySec), '--for', String(forSec), '--notify'],
+      [SELF_ENTRY, 'watch', '--every', String(everySec), '--for', String(forSec), '--notify'],
       { cwd: dir, detached: true, stdio: 'ignore' }
     )
     child.unref()
