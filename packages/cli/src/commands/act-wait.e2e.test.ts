@@ -111,14 +111,23 @@ describe('act wait — a blocked settle is a finding (bro-q4iq0)', () => {
     })
   })
 
-  test('a green settle drops nothing', () => {
+  test('a green settle drops the act:result event — the wait-finished moment', () => {
     const { root, main } = fixture()
     inside(main, root, () => {
       writeHostState(join(main, 'host.json'), { prState: 'OPEN' })
       const r = runCli(['act', 'wait', '7', '--interval', '1', '--timeout', '1'], { cwd: main })
       assert.equal(r.code, 0, r.stderr)
       assert.match(r.stdout, /exit_gate=OK/)
-      assert.deepEqual(drops(main), [])
+      // "wait finished" is a human moment even when nothing went wrong —
+      // notify.sinks hear it (spec: specs/bro-huy5o.8.md); same key as
+      // the blocked verdict so a late green supersedes earlier BLOCKED news
+      const [ev] = drops(main)
+      assert.ok(ev)
+      assert.equal(ev.topic, 'act')
+      assert.equal(ev.kind, 'result')
+      assert.equal(ev.key, 'act-wait-7')
+      assert.equal(ev.source, 'act-wait')
+      assert.match(String(ev.payload), /settled GREEN/)
       assert.deepEqual(verdicts(main), [])
     })
   })
