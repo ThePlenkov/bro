@@ -3,6 +3,9 @@ parent: bro-huy5o
 scope:
   - packages/cli/src/agent-connectors.ts
   - packages/cli/src/agent-connectors.test.ts
+  - packages/cli/src/agent-connectors-gascity.test.ts
+  - packages/cli/src/commands/agents.test.ts
+  - packages/cli/src/commands/testrepo.ts
   - skills/agents/SKILL.md
   - site/content/docs/configuration.md
 ---
@@ -78,14 +81,19 @@ orchestration model; the docker-CLI path is the contract here.
 
 ### Liveness + death
 
+- `docker run -d --init --rm`: `--init` reaps grandchildren, `--rm`
+  removes the corpse on exit — `docker ps -a` collects no bro litter
+  and the name frees for a respawn.
 - Probe: `docker inspect <name> --format '{{json .State}}'` → Running /
-  Pid / ExitCode. `No such object` → dead; any other failure (daemon
-  down, timeout) → `unknown`, which never reports `lost`.
-- Batch: `docker ps --format '{{.Names}}'` — one call liveness for
-  list()/occupancy; a failed call degrades, it doesn't corpse the fleet.
-- Recorded death: the mounted `.exit` file first (the shared ladder),
-  then `docker inspect .State.ExitCode` when the wrapper never wrote
-  (OOM, daemon kill) — the daemon still recorded a corpse.
+  Pid. `No such object/container` → dead (with `--rm`, absent IS dead —
+  a present-but-stopped container reads the same either way); any other
+  failure (daemon down, timeout) → `unknown`, which never reports
+  `lost` and never frees the occupancy slot.
+- Batch: `docker ps --filter label=bro.managed=1 --format '{{.Names}}'`
+  — one call liveness for list()/occupancy; a failed call degrades, it
+  doesn't corpse the fleet.
+- Recorded death: the mounted `.exit` file is the only record — native
+  semantics verbatim, the shared ladder harvests it unchanged.
 - `stop`: `docker rm -f` (SIGKILL semantics, like `kill-session`), then
   the same locked revalidation + `stopped` patch + marker drop.
 
@@ -117,15 +125,15 @@ does.
 
 ## Plan
 
-- [ ] `specs/bro-huy5o.10.md` — this spec
-- [ ] `agent-connectors.ts` — `docker` connector: `dockerRun`, JSONC
+- [x] `specs/bro-huy5o.10.md` — this spec
+- [x] `agent-connectors.ts` — `docker` connector: `dockerRun`, JSONC
       devcontainer parse, image resolution + content-hash build,
-      spawn (env file + mounts + `docker run -d`), inspect/ps liveness,
-      ExitCode harvest, `docker rm -f` stop, `dockerLive` occupancy
+      spawn (env file + mounts + `docker run -d --init --rm`),
+      inspect/ps liveness, `docker rm -f` stop, `dockerLive` occupancy
       probe, registration
-- [ ] `agent-connectors.test.ts` — `FAKE_DOCKER` shim (state-file
+- [x] `agent-connectors.test.ts` — `FAKE_DOCKER` shim (state-file
       containers, detached `sh -c` spawn) + the shared connector
       contract suite + docker-specific cases (image resolution,
       devcontainer parse, daemon-down degradation)
-- [ ] docs — `skills/agents/SKILL.md` backend mention,
+- [x] docs — `skills/agents/SKILL.md` backend mention,
       `configuration.md` `agents.docker` rows
