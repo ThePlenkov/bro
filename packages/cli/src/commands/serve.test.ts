@@ -432,21 +432,30 @@ describe('serve state discovery', () => {
     })
   })
 
-  test('a tokenless or garbage lock is a dead leftover — stolen on sight', () => {
+  test('a garbage or aged-empty lock is a dead leftover — stolen on sight', () => {
     const { root, main } = initRepo('bro-serve-lock-gone-')
     inside(main, root, () => {
       const lock = `${serveStatePath(main)}.lock`
-      // filelock's stage→link publish is atomic and never leaves an
-      // empty lock — a contentless or unparsable file has no pid to
-      // prove life, so it is stolen without a grace window
       mkdirSync(dirname(lock), { recursive: true })
-      for (const leftover of ['', 'garbage']) {
-        writeFileSync(lock, leftover)
-        const acquired = acquireServeLock(main)
-        assert.notEqual(acquired, undefined, `leftover ${JSON.stringify(leftover)}`)
-        assert.equal(lockHolderPid(lock), process.pid)
-        acquired!()
-      }
+      // an unparsable token can't prove its holder lives — dead on
+      // sight, stolen without a wait
+      writeFileSync(lock, 'garbage')
+      const stolen = acquireServeLock(main)
+      assert.notEqual(stolen, undefined)
+      assert.equal(lockHolderPid(lock), process.pid)
+      stolen!()
+      // an EMPTY lock is the wx fallback's mid-publish file: fresh, it
+      // reads as a live writer and the 250ms bound refuses it; aged past
+      // filelock's fresh-empty grace it's a crashed publish — stolen
+      // like any other dead leftover
+      writeFileSync(lock, '')
+      assert.equal(acquireServeLock(main), undefined)
+      const past = new Date(Date.now() - 60_000)
+      utimesSync(lock, past, past)
+      const acquired = acquireServeLock(main)
+      assert.notEqual(acquired, undefined)
+      assert.equal(lockHolderPid(lock), process.pid)
+      acquired!()
     })
   })
 
