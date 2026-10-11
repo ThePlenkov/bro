@@ -46,7 +46,7 @@ import type {
   StepState,
 } from '@broject/convoy'
 import { flag, flagAll, positionals } from './args.ts'
-import { runConvoyRun, RUN_KNOWN_FLAGS } from './convoy-run.ts'
+import { publishGate, runConvoyRun, RUN_KNOWN_FLAGS } from './convoy-run.ts'
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
 
 function usage(exitCode = 1): never {
@@ -394,6 +394,12 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
         // now — the caller re-arms the wait on the unsettled ids carried
         // in the summary
         if (gated.length > 0) {
+          // the HUMAN GATE moment — sinks reach the person the gate is
+          // for even when no session is live to drain the mailbox
+          // (spec: specs/bro-huy5o.8.md)
+          for (const id of gated) {
+            await publishGate(process.cwd(), id, '')
+          }
           emit(`gated: ${gated.join(' ')}`, 3)
           return
         }
