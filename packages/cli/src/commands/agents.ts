@@ -42,7 +42,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import {
-  bdAt,
   countSessionReservations,
   readAgentRegistry,
   removeAgentRegistryEntries,
@@ -51,6 +50,7 @@ import {
   sessionQuotaConfig,
   sessionSlotsDir,
   stepClassInfo,
+  taskStoreAt,
   type AgentConnector,
   type AgentInfo,
   type AgentState,
@@ -197,9 +197,30 @@ function occupancyOf(dir: string, env: AgentConnectorEnv): FleetOccupancy {
  *  unverifiable count shows `live: -1` rather than pretending zero. */
 export interface SessionQuotaView {
   kind: string
+  /** 'sessions' is the maxSessions lane, 'workers' the maxWorkers one. */
+  lane: 'sessions' | 'workers'
   live: number
   max: number
   invalid?: boolean
+  /** The malformed knob — the invalid row names it. */
+  invalidKey?: string
+}
+
+/** One armed lane's status row — an unverifiable count reads -1
+ *  (rendered `?`) rather than taking the status view down. */
+function laneView(
+  kind: string,
+  lane: 'sessions' | 'workers',
+  max: number,
+  count: () => number
+): SessionQuotaView {
+  let live = -1
+  try {
+    live = count()
+  } catch {
+    // unverifiable — a scan failure must not take down the status view
+  }
+  return { kind, lane, live, max }
 }
 
 function sessionQuotaViewsOf(env: AgentConnectorEnv): SessionQuotaView[] {
@@ -210,19 +231,27 @@ function sessionQuotaViewsOf(env: AgentConnectorEnv): SessionQuotaView[] {
       continue
     }
     if (q.invalid === true) {
-      out.push({ kind: plane.kind, live: -1, max: 0, invalid: true })
+      out.push({ kind: plane.kind, lane: 'sessions', live: -1, max: 0, invalid: true, invalidKey: q.invalidKey })
       continue
     }
-    let live = -1
-    try {
-      live =
-        plane.countLive(env.agents[plane.kind] ?? {}) +
-        countSessionReservations(sessionSlotsDir(plane.kind, q.reservationsDir))
-    } catch {
-      // unverifiable — the -1 renders as `?`, a scan failure must not
-      // take down the status view
+    const bag = env.agents[plane.kind] ?? {}
+    const reservations = () =>
+      countSessionReservations(sessionSlotsDir(plane.kind, q.reservationsDir))
+    if (q.maxSessions > 0) {
+      out.push(
+        laneView(plane.kind, 'sessions', q.maxSessions, () => plane.countLive(bag) + reservations())
+      )
     }
-    out.push({ kind: plane.kind, live, max: q.maxSessions })
+    const countWorkers = plane.countWorkers
+    if (q.maxWorkers !== undefined && q.maxWorkers > 0) {
+      out.push(
+        countWorkers === undefined
+          ? // an armed worker cap the plane cannot count is a config
+            // bug — surface it like a malformed value
+            { kind: plane.kind, lane: 'workers', live: -1, max: 0, invalid: true, invalidKey: 'maxWorkers' }
+          : laneView(plane.kind, 'workers', q.maxWorkers, () => countWorkers(bag) + reservations())
+      )
+    }
   }
   return out
 }
@@ -241,10 +270,11 @@ function printStatusTable(
 ): void {
   console.log(occupancyLine(occupancy))
   for (const s of sessions) {
+    const label = s.lane === 'workers' ? 'workers' : 'sessions'
     if (s.invalid === true) {
-      console.log(`${s.kind} sessions: invalid agents.${s.kind}.maxSessions — must be a positive integer`)
+      console.log(`${s.kind} ${label}: invalid agents.${s.kind}.${s.invalidKey ?? 'maxSessions'} — must be a positive integer`)
     } else {
-      console.log(`${s.kind} sessions: ${s.live >= 0 ? `${s.live}/${s.max}` : `?/${s.max}`} live`)
+      console.log(`${s.kind} ${label}: ${s.live >= 0 ? `${s.live}/${s.max}` : `?/${s.max}`} live`)
     }
   }
   const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'cause', 'pid', 'worktree']
@@ -399,6 +429,12 @@ function resolveWorktree(
   if (existsSync(conventional)) {
     return conventional
   }
+  // a remote-only backend needs no local checkout — the copilot
+  // connector reads repoRoot only for the origin remote it dispatches
+  // against, and the caller's repo IS that remote's checkout
+  if (backend === 'copilot') {
+    return dir
+  }
   throw new SpawnInputError(
     `no worktree for ${molStep} — run \`bro work enter ${molStep}\` first ` +
       `(or pass --worktree <path>)`
@@ -429,19 +465,14 @@ function resolvePrompt(
   if (stored !== null && existsSync(stored)) {
     return readFileSync(stored, 'utf8')
   }
-  const r = bdAt(beads, ['show', molStep, '--json'])
-  if (r.code !== 0) {
-    throw new SpawnInputError(
-      `cannot render a prompt — bead ${molStep} unreadable (${r.err}); pass --prompt-file`
-    )
-  }
   let row: { title?: string; description?: string } | undefined
   try {
-    row = (JSON.parse(r.out) as { title?: string; description?: string }[])[0]
-  } catch {
-    // exit-0 garbage (non-JSON diagnostics, truncated output) falls
-    // through to the same throw as an empty row
-    row = undefined
+    row = taskStoreAt(beads).get(molStep)
+  } catch (err) {
+    throw new SpawnInputError(
+      `cannot render a prompt — bead ${molStep} unreadable ` +
+        `(${err instanceof Error ? err.message : String(err)}); pass --prompt-file`
+    )
   }
   const prompt = `# ${row?.title ?? molStep}\n\n${row?.description ?? ''}`.trim()
   if (row === undefined || prompt === `# ${molStep}`) {

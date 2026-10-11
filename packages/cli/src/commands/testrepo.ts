@@ -47,6 +47,25 @@ export function initRepo(prefix: string, seed?: (main: string) => void): { root:
   return { root, main }
 }
 
+/** mkdtemp under a per-process sweep: dirs made here are deleted when
+ *  the test process exits, pass or fail — the 'one root with a sweep'
+ *  half of the fixture-leak contract (initRepo callers get the same
+ *  guarantee through inside()/insideAsync). Use this for fixture dirs
+ *  that are NOT wrapped in a try/finally rmSync of their own. */
+const tmpDirs: string[] = []
+let tmpSweepArmed = false
+export function tmpDir(prefix: string): string {
+  if (!tmpSweepArmed) {
+    tmpSweepArmed = true
+    process.once('exit', () => {
+      for (const d of tmpDirs) rmSync(d, { recursive: true, force: true })
+    })
+  }
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  tmpDirs.push(dir)
+  return dir
+}
+
 /** Run fn in dir, then always restore cwd and delete the repo. */
 export function inside<T>(dir: string, root: string, fn: () => T): T {
   const prev = process.cwd()
@@ -205,14 +224,18 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
   }
   case 'create': {
     const id = 'fx-' + Math.random().toString(36).slice(2, 8)
+    // real bd emits short flags (-d/-t/-p/-l) as often as long ones —
+    // read both spellings or the row silently loses them
+    const short = (k) => flags[k] ?? flags[k[0]]
     db.rows.push({
       id,
       title: flags.title || '',
-      description: flags.description || '',
+      description: short('description') || '',
       status: 'open',
-      priority: Number(flags.priority ?? 2),
-      issue_type: flags.type || 'task',
-      labels: flags.labels !== undefined ? String(flags.labels).split(',') : [],
+      priority: Number(short('priority') ?? 2),
+      issue_type: short('type') || 'task',
+      labels: short('labels') !== undefined ? String(short('labels')).split(',') : [],
+      external_ref: flags['external-ref'],
       created_at: new Date().toISOString(),
     })
     save(db)
@@ -376,6 +399,18 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
 }
 `
 
+/** A healthy-empty docker for fixtures on docker-less hosts — `version`
+ *  answers, `ps` lists nothing, anything else is a 'No such object'
+ *  failure. docker is a registered agents backend: fixtures that assert
+ *  a 'gone' verdict need every backend healthy, or the plane degrades
+ *  and the verdict flips to 'unverified'. Tests that exercise a broken
+ *  daemon overwrite this stub in their own binDir. */
+const FAKE_DOCKER = `#!/bin/sh
+if [ "$1" = version ]; then echo "25.0.0-fake"; exit 0; fi
+if [ "$1" = ps ]; then exit 0; fi
+echo "Error: No such object" >&2; exit 1
+`
+
 /** Install the fake bd into <dir>/bin and seed its store. Rows take the
  *  `fx-` prefix — the store's configured issue_prefix. */
 export function installFakeBd(
@@ -387,6 +422,8 @@ export function installFakeBd(
   mkdirSync(binDir, { recursive: true })
   writeFileSync(join(binDir, 'bd'), FAKE_BD)
   chmodSync(join(binDir, 'bd'), 0o755)
+  writeFileSync(join(binDir, 'docker'), FAKE_DOCKER)
+  chmodSync(join(binDir, 'docker'), 0o755)
   writeBeads(db, rows)
   return { binDir, db }
 }
@@ -552,6 +589,8 @@ const facade = {
     const s = load()
     s.merges = (s.merges ?? 0) + 1
     s.events = (s.events ?? []).concat([{ merge: t.pr }])
+    // merge order is asserted in stack e2e — per-layer must go bottom→top
+    s.mergeLog = (s.mergeLog ?? []).concat([t.pr])
     // a merge lands on the per-branch entry too — otherwise a mapped
     // stack member keeps reporting OPEN after its merge
     if (s.prs) {
@@ -567,11 +606,48 @@ const facade = {
     return s.prState
   },
 }
+// the stacks facade — host.json cascade: {retarget, rebase} scripts
+// platform ownership for every PR-carrying member (GitLab-style
+// retarget-only, GitHub-style retarget+remote-rebase). The stacks map
+// is the host's stack registry: publish writes branch → stack id for
+// every member, growing a shared id when some already belong;
+// membership reads it back. Only claimed via connectors.stacks — the
+// git connector's dir match wins unnamed.
+const stacksFacade = {
+  openHint: (m) => 'fake-mr create --base ' + m.base,
+  cascade: (m) => {
+    const s = load()
+    return s.cascade !== undefined && m.pr !== undefined
+      ? s.cascade
+      : { retarget: false, rebase: false }
+  },
+  membership: (m) => {
+    const id = load().stacks?.[m.branch]
+    return id === undefined ? null : { id }
+  },
+  publish: (members) => {
+    const s = load()
+    // publishGap scripts the unproven-publish shape — link "ran" but
+    // the membership readback reports nothing, so the stack registry
+    // stays empty and the verb returns null
+    if (s.publishGap) {
+      return null
+    }
+    s.stacks = s.stacks ?? {}
+    const existing = members.map((m) => s.stacks[m.branch]).find((i) => i !== undefined)
+    const id = existing ?? (s.nextStackId = (s.nextStackId ?? 900) + 1)
+    for (const m of members) {
+      s.stacks[m.branch] = id
+    }
+    save(s)
+    return { id, size: members.length }
+  },
+}
 export default {
   name: 'fakehost-cmd',
   summary: 'e2e fixture',
   run: () => {},
-  connectors: [{ name: 'fakehost', matchRemote: () => false, reviews: () => facade }],
+  connectors: [{ name: 'fakehost', matchRemote: () => false, reviews: () => facade, stacks: () => stacksFacade }],
 }
 `
 

@@ -95,10 +95,15 @@ async function sastCounts(
   }
   let annotations: Map<string, number | null>
   try {
+    // only these names are ever read below — the unfiltered scan fetches
+    // annotations for every check-run on the commit, one host call each
+    // (a 40-run suite fanned a gh child per run into one cgroup, the
+    // bro-2l7r9 OOM)
+    const wanted = new Set([...sastChecks, ...ignoredSast].map((c) => c.name))
     annotations =
       rev.checkAnnotationsAsync === undefined
-        ? rev.checkAnnotations(target.repo, headSha)
-        : await rev.checkAnnotationsAsync(target.repo, headSha)
+        ? rev.checkAnnotations(target.repo, headSha, wanted)
+        : await rev.checkAnnotationsAsync(target.repo, headSha, wanted)
   } catch {
     // a transient check-runs failure must not sink the whole gate
     // state — every gated SAST check reads as "unknown" (required

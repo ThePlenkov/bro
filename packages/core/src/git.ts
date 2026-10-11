@@ -83,6 +83,21 @@ export function gitCommonDir(dir: string): string | null {
   }
 }
 
+/** This worktree's own git dir, absolute — `<repo>/.git` on the main
+ *  checkout, `<common>/worktrees/<name>` on a linked one, so
+ *  per-worktree state dies with `git worktree remove`. The `--git-dir`
+ *  sibling of gitCommonDir (`--git-common-dir` is the SHARED dir).
+ *  null outside a repository or on git failure. */
+export function worktreeGitDir(dir: string): string | null {
+  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-dir'])
+  if (r.code === 0 && r.out.trim() !== '') {
+    return r.out.trim()
+  }
+  const f = gitTry(['-C', dir, 'rev-parse', '--git-dir'])
+  const p = f.code === 0 ? f.out.trim() : ''
+  return p === '' ? null : resolve(dir, p)
+}
+
 /** The drift comparison ref — landed spec vs landed code, so a feature
  *  branch's own commits can't flag the spec it's about to update.
  *  Chain: `origin/HEAD` → local `main`/`master` → remote-tracking

@@ -13,6 +13,10 @@ export interface RigConfig {
    *  writes when `--every` isn't passed. Default 10min — the cadence
    *  the ad-hoc supervisor ran. */
   intervalSec: number
+  /** The `--for` bound a checkpoint-rearmed `rig watch` window gets —
+   *  floors at the marker cadence (same rule as watch.pulseSec).
+   *  Default 900 (15min). */
+  pulseSec: number
 }
 
 /** bro.config.* `rig` section — operator-layer (machine paths and
@@ -29,5 +33,12 @@ export const rigSection: ConfigSection<RigConfig> = (raw) => {
       obj.intervalSec <= MAX_INTERVAL_SEC
         ? obj.intervalSec
         : 600,
+    pulseSec:
+      typeof obj.pulseSec === 'number' &&
+      Number.isFinite(obj.pulseSec) &&
+      obj.pulseSec >= MIN_INTERVAL_SEC &&
+      obj.pulseSec <= MAX_INTERVAL_SEC
+        ? obj.pulseSec
+        : 900,
   }
 }

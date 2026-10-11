@@ -63,6 +63,13 @@ exists because of). Layers, cheap to strong:
 
 - **agent plane** — a facade agent (any backend) live against the
   fixer bead, or recorded with this worktree.
+- **supervision plane** (bro-0aa87) — a live *foreign* watch marker on
+  the PR: a `bro loop` heartbeat (`<pr>-loop-<pid>.json`, written from
+  PR discovery until the item settles), an `act wait` marker, a convoy
+  heartbeat. Drive exists for *unsupervised* PRs — a live supervisor
+  is an occupant. Drive-kind markers self-exclude so two `bro drive`
+  processes stay dedup'd by the fixer bead + merge slot rather than
+  starving each other.
 - **`.work` markers** — a fresh `<common>/bro/hooks/*.work` marker
   whose detail names the branch/slug/worktree (the same signal
   session-start parallel detection reads).

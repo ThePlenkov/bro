@@ -58,6 +58,7 @@ import { runLoopCommand } from './commands/loop.ts'
 import { applyNextPlan, runNextCommand } from './commands/next.ts'
 import { runNotifyCommand } from './commands/notify.ts'
 import { rigSection } from './commands/rig-config.ts'
+import { rigConnector } from './commands/rig-pulse.ts'
 import { runRigCommand } from './commands/rig.ts'
 import { runQueryCommand } from './commands/query.ts'
 import { parseNextPlan, PLAN_VERSION as NEXT_PLAN_VERSION, type NextPlan } from './commands/next-plan.ts'
@@ -66,6 +67,7 @@ import { runPluginsCommand } from './commands/plugins.ts'
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
 import { runDoctorCommand } from './commands/doctor.ts'
 import { driveSection } from './commands/drive-config.ts'
+import { runDaemonCommand } from './commands/daemon.ts'
 import { runDriveCommand } from './commands/drive.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runFleetCommand } from './commands/fleet.ts'
@@ -78,6 +80,7 @@ import { runJudgeCommand } from './commands/judge.ts'
 import { runLearnCommand } from './commands/learn.ts'
 import { runMcpCommand } from './commands/mcp.ts'
 import { runWatchCommand } from './commands/watch.ts'
+import { watchConnector } from './commands/watch-pulse.ts'
 import { watchSection } from './commands/watch-config.ts'
 import { runAgentsCommand } from './commands/agents.ts'
 import { runStatusCommand } from './commands/status.ts'
@@ -87,6 +90,7 @@ import { runSetupCommand } from './commands/setup.ts'
 import { runMeshCommand } from './commands/mesh.ts'
 import { runSpecCommand, sddConnector } from './commands/spec.ts'
 import { runStackCommand } from './commands/stack.ts'
+import { runStampCommand } from './commands/buildstamp.ts'
 import { SPEC_CONNECTORS } from './spec-connectors.ts'
 import { runSweepCommand } from './commands/sweep.ts'
 import { runSyncCommand } from './commands/sync.ts'
@@ -111,6 +115,9 @@ registerConnector(linearConnector)
 registerConnector(drillConnector)
 registerConnector(workConnector)
 registerConnector(actConnector)
+// the pulse's rearm nudge — same family as act's dead-watch flags
+registerConnector(watchConnector)
+registerConnector(rigConnector)
 registerConnector(debtConnector)
 registerConnector(sddConnector)
 registerConnector(notifyConnector)
@@ -135,6 +142,7 @@ for (const c of SPEC_CONNECTORS) {
 export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'debt',
+    group: 'review',
     summary: 'Review-debt pipeline: collect|status|prs|list|mark|sync|set',
     run: runDebtCommand,
     skill: 'debt',
@@ -146,6 +154,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'act',
+    group: 'review',
     summary: 'Open-PR loop: status|threads|resolve|reply|merge',
     run: runActCommand,
     skill: 'act',
@@ -157,6 +166,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'convoy',
+    group: 'flow',
     summary: 'Convoy execution over beads molecules: status|next|done|pour|list|run',
     run: runConvoyCommand,
     skill: 'convoy',
@@ -166,6 +176,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'next',
+    group: 'flow',
     summary: 'Claim + emit the top ready bead — the autonomous backlog loop',
     run: runNextCommand,
     skill: 'next',
@@ -175,6 +186,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'loop',
+    group: 'flow',
     summary: 'Autonomous backlog runner — claim → agent → gate → close → repeat',
     run: runLoopCommand,
     skill: 'loop',
@@ -183,12 +195,14 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'fleet',
+    group: 'fleet',
     summary:
       'Fleet view — mols × steps × agents × worktrees × PRs [--json|--live|--every N]',
     run: runFleetCommand,
   }),
   definePlugin({
     name: 'agents',
+    group: 'fleet',
     summary: 'Agent supervisor — status|up|down over the orchestrator connectors',
     run: runAgentsCommand,
     skill: 'agents',
@@ -197,18 +211,21 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'status',
+    group: 'fleet',
     summary: 'The compact live board — beads + fleet + drill + git [--json|--deep]',
     run: runStatusCommand,
     skill: 'status',
   }),
   definePlugin({
     name: 'notify',
+    group: 'comms',
     summary: 'Drop an event into the session mailbox — drained into context by the next postTool probe',
     run: runNotifyCommand,
     skill: 'notify',
   }),
   definePlugin({
     name: 'watch',
+    group: 'review',
     summary:
       'Orchestrator heartbeat — mols × act gates × fleet snapshot [--once|--every N|--notify|--json|install|uninstall]',
     run: runWatchCommand,
@@ -218,6 +235,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'drive',
+    group: 'review',
     summary:
       'Post-PR review driver — poll act gates, spawn fixer agents, merge on green [--once|--every N|--no-merge]',
     run: runDriveCommand,
@@ -226,13 +244,23 @@ export const PLUGINS: BroPlugin[] = [
     configSchema: driveSection,
   }),
   definePlugin({
+    name: 'daemon',
+    group: 'fleet',
+    summary:
+      'Project-scoped supervisor — owns the drive pass long-term [up|status|down|run --every N]',
+    run: runDaemonCommand,
+    skill: 'daemon',
+  }),
+  definePlugin({
     name: 'serve',
+    group: 'fleet',
     summary: 'Facade host for thin clients — HTTP/JSON on 127.0.0.1 [--port N]',
     run: runServeCommand,
     skill: 'serve',
   }),
   definePlugin({
     name: 'mcp',
+    group: 'fleet',
     summary: 'Stdio MCP server over the read planes — bro_<plane>_<read> tools',
     run: runMcpCommand,
     skill: 'mcp',
@@ -242,6 +270,7 @@ export const PLUGINS: BroPlugin[] = [
     // the follow-up PR — shipping a stub skill now would document a
     // capability that does not exist.
     name: 'bus',
+    group: 'comms',
     summary: 'Local event bus — serve/publish/subscribe agent events by topic',
     run: runBusCommand,
   }),
@@ -255,11 +284,13 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'cleanup',
+    group: 'review',
     summary: 'Delete local branches whose PR merged [--remote] [--dry-run]',
     run: runCleanupCommand,
   }),
   definePlugin({
     name: 'drill',
+    group: 'work',
     summary: 'Scoped descent over beads: down|up|current|tree|list|report|distill',
     run: runDrillCommand,
     skill: 'drill',
@@ -271,12 +302,15 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'unwind',
+    group: 'work',
+    aliasOf: 'drill up',
     summary: 'Alias for `drill up`',
     run: runDrillCommand,
     argvPrefix: ['up'],
   }),
   definePlugin({
     name: 'retrospect',
+    group: 'self',
     summary: 'Self-correction: capture|record|status|list|schema',
     run: runRetrospectCommand,
     skill: 'wtf',
@@ -289,6 +323,8 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'wtf',
+    group: 'self',
+    aliasOf: 'retrospect capture',
     summary: 'Alias for `retrospect capture` — vent, verbatim',
     // bare `bro wtf` has nothing to capture — report open wtfs instead
     run: (argv) =>
@@ -296,6 +332,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'learn',
+    group: 'self',
     // lesson store + capture/probe + the connector that injects them;
     // promote is still pending (spec: bro-f4ot.1-learn.md)
     summary: 'Self-improvement loop — lessons: add|list|show|forget|capture|probe',
@@ -306,6 +343,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'goal',
+    group: 'work',
     summary: 'Session-scoped completion goal — set|status|pause|resume|clear; hooks remind + judge-verdict',
     run: runGoalCommand,
     skill: 'goal',
@@ -314,6 +352,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'judge',
+    group: 'self',
     summary: 'Calibrated decision judge — decide smoke test over systemone + llm-judge',
     run: runJudgeCommand,
     skill: 'judge',
@@ -325,6 +364,7 @@ export const PLUGINS: BroPlugin[] = [
     // which lands with the engine (bro-nkn6.3) — same stub-skill
     // reasoning as `bus` above.
     name: 'guard',
+    group: 'self',
     summary: 'Declarative prompt guards — list resolved declarations [--json]',
     run: runGuardCommand,
     configKey: 'guard',
@@ -343,6 +383,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'work',
+    group: 'work',
     summary: 'Parallel-friendly worktrees: enter|leave|list|prune',
     run: runWorkCommand,
     skill: 'work',
@@ -351,13 +392,21 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'stack',
-    summary: 'Stacked bead→worktree→PR chains: push|list|sync',
+    group: 'flow',
+    summary: 'Stacked bead→worktree→PR chains: push|list|sync|publish|merge',
     run: runStackCommand,
     skill: 'stack',
     // the 'stack' config section (stack.mode) stays owned by `work`
   }),
   definePlugin({
+    name: 'stamp',
+    group: 'work',
+    summary: 'Attribute shared-output writes — record/read the last build stamp',
+    run: runStampCommand,
+  }),
+  definePlugin({
     name: 'spec',
+    group: 'spec',
     summary: 'Spec-driven development policy: check|new (sdd.mode gates hooks)',
     run: runSpecCommand,
     skill: 'sdd',
@@ -374,6 +423,8 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'telemetry',
+    group: 'fleet',
+    aliasOf: 'hooks perf',
     summary: 'Hook + command latency report — perf journal rollup [--session <id>] [--json]',
     run: (argv) => runHooksCommand(['perf', ...argv]),
   }),
@@ -395,6 +446,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'rig',
+    group: 'fleet',
     summary:
       'Rig freshness — main checkout tracks upstream, rebuilt + hotpatched: sync|status|watch|install',
     run: runRigCommand,
@@ -404,6 +456,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'sync',
+    group: 'work',
     summary: 'Push/pull artifact dirs on refs/bro/data [--pull]',
     run: runSyncCommand,
     skill: 'sync',
@@ -412,6 +465,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'sweep',
+    group: 'work',
     summary: 'Gated disposal for closed beads: status|distill|run — gate → archive → prune',
     run: runSweepCommand,
     skill: 'sweep',
@@ -420,6 +474,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'query',
+    group: 'plan',
     summary: 'Cross-provider GraphQL plan — `bro query <plan.toml>` or `kind = "query"` via `bro run`',
     run: (argv) => runQueryCommand(argv, PLUGINS),
     skill: 'query',
@@ -436,6 +491,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'mesh',
+    group: 'mesh',
     summary: 'Inter-rig work federation: me|peers|pull|inbox|request|claim|done|accept|reject|wait (specs/mesh)',
     run: runMeshCommand,
     configKey: 'mesh',
@@ -443,11 +499,13 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'run',
+    group: 'plan',
     summary: 'Execute a plan file — `kind` routes to the owning plugin',
     run: (argv) => runPlanFile(argv),
   }),
   definePlugin({
     name: 'plan',
+    group: 'plan',
     summary: 'Plan contract: list kinds + schema versions, validate a file',
     run: (argv) => runPlanCommand(argv, PLUGINS),
   }),
@@ -457,6 +515,36 @@ export const PLUGINS: BroPlugin[] = [
     run: (argv) => runPluginsCommand(argv, PLUGINS),
   }),
 ]
+
+/** Group one-liners for `bro --help` — order is the render order.
+ *  A plugin whose name equals the group name is the group's host:
+ *  unmatched argv falls through to it (specs/cli — dispatch model). */
+export const GROUP_META: ReadonlyArray<readonly [string, string]> = [
+  ['review', 'PR review loop — gates, threads, debt'],
+  ['flow', 'scheduling & work chains — claims, loops, stacks'],
+  ['fleet', 'agent plane — workers, serve, the board'],
+  ['work', 'worktree & session mechanics'],
+  ['self', 'self-correction — retro, lessons, judgment, guards'],
+  ['comms', 'events & session mailbox'],
+  ['plan', 'versioned plans'],
+  ['mesh', 'inter-rig federation'],
+  ['spec', 'spec-driven development'],
+]
+
+/** name → members, derived over the live registry each call so
+ *  external plugins loaded from config can join a group too. Groups
+ *  holding a same-named plugin (mesh/spec/plan) are HOSTED — the host
+ *  plugin receives argv the group itself does not claim. */
+export function pluginGroups(): Map<string, BroPlugin[]> {
+  const groups = new Map<string, BroPlugin[]>()
+  for (const p of PLUGINS) {
+    if (!p.group) continue
+    const list = groups.get(p.group) ?? []
+    list.push(p)
+    groups.set(p.group, list)
+  }
+  return groups
+}
 
 /** `bro run <plan.toml>` — parse the file, route on `kind`, gate on the
  *  envelope `version`, validate with the owning plugin's planSchema,

@@ -8,6 +8,9 @@
  *
  *   bro loop                    run until idle/gated
  *   bro loop --max 3            at most 3 beads
+ *   (one loop supervisor per repo — a second `bro loop` stands by
+ *   behind the incumbent's `bro/loop.lock` hold and resumes when it
+ *   exits; never two concurrent loops, spec bro-2duu9)
  *   bro loop --batch 8          clump up to 8 same-affinity beads per
  *                               work item — one worker, one PR
  *   bro loop --dry-run          print the first item's plan, change nothing
@@ -43,29 +46,35 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  statfsSync,
   statSync,
   writeFileSync,
   writeSync,
 } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import {
   AgentNotFound,
   agentRegistryPath,
-  bdTry,
+  awaitFileLock,
   commandCliName,
   ensureTasksBackend,
   facade,
+  facadeName,
   gitBranchLog,
+  gitCommonDir,
   gitTry,
   LockTimeout,
   procStat,
   reviewHost,
   SpawnError,
+  specStore,
   stepParent,
   withFileLock,
   type AgentConnector,
   type AgentInfo,
   type AgentState,
+  type MirrorPolicy,
   type ReviewFacade,
   type SpawnWorker,
   type TaskStore,
@@ -77,6 +86,7 @@ import {
   gatePending,
   watchBegin,
   watchEnd,
+  watchRefresh,
 } from '@broject/act'
 import {
   buildFixPrompt,
@@ -84,9 +94,14 @@ import {
   buildWorkPrompt,
   clumpMembers,
   coveredBeadIds,
+  diskFloorBreach,
+  diskFloorBytes,
   expandAgentCmd,
+  MB,
   memberAction,
   planItem,
+  projectBeads,
+  type DiskProbe,
   type GateSnapshot,
   type LoopConfig,
   type LoopItem,
@@ -177,6 +192,17 @@ interface Ctx {
   /** The bead currently in play — undefined between items so a death
    *  outside an item notes nothing stale. */
   bead?: string
+  /** The tracker projection target — the review-host connector's task
+   *  surface when it offers `publish` and isn't the serving store
+   *  itself (a github-backend rig's tasks already ARE issues).
+   *  Undefined = no projection (spec bro-z2z7f). */
+  mirror?: TaskStore
+  /** The projection policy — bro.config `mirror`, defaults applied. */
+  mirrorPolicy: MirrorPolicy
+  /** Spec probe for the policy's specLinked rule — the `specs` facade;
+   *  a connector-less rig answers false (description links still
+   *  count inside mirrorable). */
+  specHas: (id: string) => boolean
 }
 
 /** Clickable PR ref for this repo — user-facing lines never print bare #N. */
@@ -197,6 +223,9 @@ function usage(): never {
   --stack NAME                   chain claimed beads onto stack NAME —
                                 each PR targets the member below
   --max-open N                   cap the gate stack's open PRs (loop.maxOpen, 3)
+  --disk-min-slots N             disk floor in slot units — pushes hold while
+                                free disk < N×loop.worktreeMb on any fs the
+                                run writes to (loop.diskMinSlots, 2; 0 = off)
   --batch N                      max beads per claim — a clump shares the
                                 lead's affinity key (spec/epic/area/path),
                                 one worktree, one worker, one PR
@@ -223,7 +252,7 @@ const TIMER_MAX_MS = 2 ** 31 - 1
 
 /** Progress lines — stderr under --json so stdout stays a clean
  *  event stream. */
-const say = (ctx: Ctx, msg: string): void => {
+const say = (ctx: Pick<Ctx, 'json'>, msg: string): void => {
   if (ctx.json) {
     console.error(msg)
   } else {
@@ -237,26 +266,23 @@ const say = (ctx: Ctx, msg: string): void => {
 
 type ItemResult = 'landed' | 'closed' | 'parked' | 'failed'
 
-/** The beads dir the loop's own taskStore calls resolve to (`bd where`
- *  from the run root). Pinned into spawned envs as BEADS_DIR — a
- *  worktree-local .beads (tracked copy, stale checkout) or a bd too old
- *  for common-dir discovery would otherwise fork bead state: the agent's
- *  close/update lands in a db that dies with the worktree and the bead
- *  re-surfaces phantom-open in main. */
+/** The store dir the loop's own taskStore calls resolve to — the
+ *  backend's `dataDir` (`bd where` for beads). Pinned into spawned envs
+ *  as BEADS_DIR — a worktree-local .beads (tracked copy, stale
+ *  checkout) or a bd too old for common-dir discovery would otherwise
+ *  fork bead state: the agent's close/update lands in a db that dies
+ *  with the worktree and the bead re-surfaces phantom-open in main. */
 export function resolveBeadsDir(root: string, warn?: (msg: string) => void): string | undefined {
   const fail = (why: string): undefined => {
-    warn?.(`loop: 'bd where' ${why} — agents run unpinned, BEADS_DIR not set`)
+    warn?.(`loop: store data-dir ${why} — agents run unpinned, BEADS_DIR not set`)
     return undefined
   }
-  const res = bdTry(['where', '--json'], 15_000, root)
-  if (res.code !== 0) {
-    return fail(`exited ${res.code}${res.err ? `: ${res.err}` : ''}`)
-  }
   try {
-    const path = (JSON.parse(res.out) as { path?: string }).path
-    return path ?? fail('returned no path')
-  } catch {
-    return fail('returned malformed JSON')
+    const store = facade('tasks', { dir: root }, { prefer: loadBroConfig(root).connectors })
+    const dir = store.dataDir?.()
+    return dir ?? fail('returned no path')
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : String(err))
   }
 }
 
@@ -681,6 +707,33 @@ function noteBead(tasks: TaskStore, id: string, note: string): void {
   }
 }
 
+/** The projection stamp (spec specs/backends/bro-z2z7f) — at the
+ *  PR-armed moment each bead mirrors to a tracker item and the PR
+ *  body wires the auto-close. Every leg is best-effort: the PR is the
+ *  artifact; the board is a read-model — a tracker miss never blocks
+ *  the member. */
+function stampProjection(ctx: Ctx, beads: ReadyBead[], pr: number): void {
+  const refs = projectBeads(
+    {
+      tasks: ctx.tasks,
+      mirror: ctx.mirror,
+      hasSpec: ctx.specHas,
+      policy: ctx.mirrorPolicy,
+      say: (m) => say(ctx, `loop: ${m}`),
+    },
+    beads.map((b) => b.id)
+  )
+  if (refs.length === 0 || ctx.rev.linkCloses === undefined) {
+    return
+  }
+  try {
+    ctx.rev.linkCloses({ repo: ctx.repo, pr }, refs)
+    say(ctx, `loop: ${prRef(ctx, pr)} wired Fixes ${refs.map((r) => `#${r}`).join(', ')}`)
+  } catch (err) {
+    console.error(`loop: ${prRef(ctx, pr)} Fixes wiring failed — ${String(err)}`)
+  }
+}
+
 /** Best-effort return of a bead to the open queue. */
 function reopenBead(tasks: TaskStore, id: string): void {
   try {
@@ -1101,6 +1154,29 @@ type PushOutcome =
   | { kind: 'done'; result: ItemResult }
   | { kind: 'hold'; why: string }
 
+/** The loop's watch payload for one member PR — `merge` + `cleanup`
+ *  record the promise the loop is keeping (its own merge, its own
+ *  worktree retire); `timeoutMin` bounds the marker's TTL to the item's
+ *  worst case — every fix round paying both budgets (the agent leg
+ *  prices at stallMin, the only agent-minutes knob left since the
+ *  wall-clock kill went advisory in bro-9lpn3) — so a marathon member
+ *  can't TTL-prune its own supervision marker mid-tenure. */
+export function loopWatch(
+  pr: number,
+  link: string,
+  workdir: string,
+  cfg: Pick<LoopConfig, 'stallMin' | 'mergeTimeoutMin' | 'fixRounds'>
+) {
+  return {
+    pr,
+    link,
+    merge: true,
+    cleanup: true,
+    workdir,
+    timeoutMin: (cfg.stallMin + cfg.mergeTimeoutMin) * (cfg.fixRounds + 1),
+  }
+}
+
 async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   const lead = beads[0]!
   // resolved here, not earlier — a member that landed since the last
@@ -1185,20 +1261,19 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   // resurrects instead of the PR sitting silently unwatched. `bead`
   // rides the marker so the resurrected wait can run the finalizeMerge
   // half the dead loop never reached — merge lands, claims close
-  // (bro-q6ppv); a clump's whole id list rides comma-joined.
+  // (bro-q6ppv); a clump's whole id list rides comma-joined. The marker
+  // lands BEFORE the stamp — a stall or death inside stampProjection's
+  // tracker calls must not strand the open PR markerless.
+  const marker = watchBegin(ctx.root, {
+    ...loopWatch(pr, prRef(ctx, pr), item.worktreeDir, ctx.cfg),
+    bead: beads.map((b) => b.id).join(','),
+  })
+  stampProjection(ctx, beads, pr)
   const member: GateMember = {
     beads,
     item,
     pr,
-    marker: watchBegin(ctx.root, {
-      pr,
-      link: prRef(ctx, pr),
-      merge: true,
-      cleanup: true,
-      workdir: item.worktreeDir,
-      bead: beads.map((b) => b.id).join(','),
-      timeoutMin: ctx.cfg.mergeTimeoutMin,
-    }),
+    marker,
     since: Date.now(),
     rounds: 0,
     fetchErrors: 0,
@@ -1342,15 +1417,13 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   // resurrect (bro-q6ppv), and `bead` rides comma-joined for the
   // finalizeMerge half the dead loop never reached
   m.pr = pr
+  // marker before the stamp — stampProjection's tracker calls can
+  // stall or die, and a markerless open PR resurrects nothing
   m.marker = watchBegin(ctx.root, {
-    pr,
-    link: prRef(ctx, pr),
-    merge: true,
-    cleanup: true,
-    workdir: m.item.worktreeDir,
+    ...loopWatch(pr, prRef(ctx, pr), m.item.worktreeDir, ctx.cfg),
     bead: m.beads.map((b) => b.id).join(','),
-    timeoutMin: ctx.cfg.mergeTimeoutMin,
   })
+  stampProjection(ctx, m.beads, pr)
   m.since = Date.now()
   say(ctx, `loop: ${m.beads.map((b) => b.id).join(', ')} → PR ${prRef(ctx, pr)}`)
   return 'active'
@@ -1367,6 +1440,11 @@ async function serviceMember(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     return 'kept'
   }
   m.nextPollAt = undefined
+  // re-stamp the member's marker on every real service tick — stallMin
+  // is advisory, so a running member outlives the marker's priced TTL
+  // (the 24h floor included) and a pruned marker reads as an orphaned
+  // PR to drive. Same file, same 'wait' kind; watchEnd still owns it.
+  watchRefresh(m.marker)
   const verdict =
     m.worker !== undefined ? await serviceWorker(ctx, m) : await serviceGate(ctx, m)
   if (verdict === 'kept') {
@@ -1578,6 +1656,7 @@ const LOOP_VALUE_FLAGS = new Set([
   '--merge-timeout',
   '--max',
   '--max-open',
+  '--disk-min-slots',
   '--batch',
   '--interval',
   '--label',
@@ -1607,7 +1686,26 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
     dryRunPlan(ctx)
     return
   }
-  await guardedRun(ctx)
+  // One loop supervisor per repo: a respawn wrapper's duplicate stands
+  // by behind the incumbent's hold and resumes once it exits — the
+  // same single-instance contract `bro drive` takes (spec bro-2duu9).
+  const loopLock = gitCommonDir(root)
+  const releaseSupervisor =
+    loopLock === null
+      ? () => {}
+      : await awaitFileLock(join(loopLock, 'bro', 'loop.lock'), {
+          label: 'loop supervisor lock',
+          onStandby: (pid) =>
+            say(
+              ctx,
+              `loop: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`
+            ),
+        })
+  try {
+    await guardedRun(ctx)
+  } finally {
+    releaseSupervisor()
+  }
 }
 
 /** Strict flag parse — an unquoted `--agent devin -p --prompt-file
@@ -1714,6 +1812,7 @@ function buildCtx(
       mergeTimeoutMin: num(flag(argv, '--merge-timeout'), cfg.mergeTimeoutMin),
       maxItems: num(flag(argv, '--max'), cfg.maxItems, 0),
       maxOpen: num(flag(argv, '--max-open'), cfg.maxOpen, 1),
+      diskMinSlots: num(flag(argv, '--disk-min-slots'), cfg.diskMinSlots, 0),
       batch: num(flag(argv, '--batch'), cfg.batch, 1),
     },
     act: broCfg.act,
@@ -1732,6 +1831,31 @@ function buildCtx(
     stack: stackNameFlag(argv),
     tails: [],
     stage: 'startup',
+    // the projection target rides the REVIEW host's tasks — a named
+    // pick, so github's optInFacades doesn't apply (the operator asked
+    // for this connector's reviews already). A rig whose tasks backend
+    // IS the review host has nothing to project.
+    mirror: (() => {
+      try {
+        const name = facadeName('reviews', { dir: root }, { prefer: broCfg.connectors })
+        if (name === backend) {
+          return undefined
+        }
+        const s = facade('tasks', { dir: root }, { connector: name })
+        return s.publish === undefined ? undefined : s
+      } catch {
+        return undefined
+      }
+    })(),
+    mirrorPolicy: broCfg.mirror,
+    specHas: (() => {
+      try {
+        const specs = specStore(root, broCfg.connectors)
+        return (id: string) => specs.hasSpec(id)
+      } catch {
+        return () => false
+      }
+    })(),
   }
   // the registry spawn engages when there's a shared store to pin the
   // claim/exit record against — without one the legacy awaited spawn
@@ -1792,6 +1916,19 @@ function dryRunPlan(ctx: Ctx): void {
   }
   const { slot, item } = stackPlan(ctx, top)
   console.log(`  worktree ${item.worktreeDir} on ${item.branch}`)
+  // the same floor tryClaim enforces — a dry run is exactly where an
+  // operator sizes maxOpen against real headroom
+  const probes = diskProbes(ctx)
+  const breach = diskFloorBreach(probes, ctx.cfg)
+  for (const p of probes) {
+    console.log(`  disk: ${Math.floor(p.freeBytes / MB)}M free on ${p.path}`)
+  }
+  if (breach !== undefined) {
+    console.log(
+      `  disk: HOLD — below floor ${Math.floor(diskFloorBytes(ctx.cfg) / MB)}M ` +
+        `(${ctx.cfg.diskMinSlots}×${ctx.cfg.worktreeMb}M)`
+    )
+  }
   if (slot !== undefined) {
     console.log(`  stack ${ctx.stack} member ${slot.n} — PR base ${slot.base}`)
   }
@@ -1932,6 +2069,28 @@ function sayLoopAudit(ctx: Ctx, reap: LitterReap | undefined, sections: [string,
   }
 }
 
+/** The audit's exit-path `bro sync` — fail-open by contract. Sync code
+ *  throws its failures (the CLI keeps the same verdict via main's
+ *  catch), but a stray process.exit anywhere in the subtree must still
+ *  degrade to a warning: an exit here kills the runner mid-write and
+ *  drops the audit lines still buffered on stdout (bro-qjbwq). */
+export function syncAfterAudit(
+  ctx: { json: boolean },
+  sync: () => void = () => runSyncCommand([])
+): void {
+  const realExit = process.exit
+  process.exit = ((code?: number) => {
+    throw new Error(`bro sync called process.exit(${code ?? 0})`)
+  }) as typeof process.exit
+  try {
+    sync()
+  } catch (err) {
+    say(ctx, `  warning: bro sync failed — ${err instanceof Error ? err.message : String(err)}`)
+  } finally {
+    process.exit = realExit
+  }
+}
+
 /** End-of-run sweep: first reap the provably-done litter (closed-bead or
  *  merged-PR worktrees that are still clean, plus their bare branches —
  *  `bro work prune --loop` runs the same sweep by hand), then name every
@@ -1968,16 +2127,54 @@ function endAudit(ctx: Ctx, seen: Set<string>): void {
       ['audit errors', errors],
       ['cleanup errors', ctx.tails],
     ])
-    try {
-      runSyncCommand([])
-    } catch (err) {
-      say(ctx, `  warning: bro sync failed — ${err instanceof Error ? err.message : String(err)}`)
-    }
+    syncAfterAudit(ctx)
   } catch (err) {
     say(ctx, `  warning: audit failed — ${err instanceof Error ? err.message : String(err)}`)
   } finally {
     console.log = log
   }
+}
+
+/** The read side of a pick — classified, ordered, still-unseen
+ *  candidates plus the foreign count a dry pick reports. */
+function clumpCandidates(
+  ctx: Ctx,
+  scope: NonNullable<ReturnType<typeof nextScope>>,
+  seen: Set<string>
+): { candidates: ReadyBead[]; foreign: number } {
+  const ready = readyBeads(ctx.root)
+  const c = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root))
+  return { candidates: c.queue.filter((b) => !seen.has(b.id)), foreign: c.foreign }
+}
+
+/** Read-only drain check for the disk hold — clumpCandidates' pipeline
+ *  minus the claims. A breached floor with nothing behind it must
+ *  still read as a drained queue: returning before claimClump on every
+ *  held tick leaves q.drained unset, and an empty store + low disk
+ *  would idle the run forever instead of reporting done. An
+ *  unreadable store answers not-drained — a blip never masks work. */
+function queueDrained(
+  ctx: Ctx,
+  scope: NonNullable<ReturnType<typeof nextScope>>,
+  seen: Set<string>
+): boolean {
+  let c: { candidates: ReadyBead[]; foreign: number }
+  try {
+    c = clumpCandidates(ctx, scope, seen)
+  } catch {
+    return false
+  }
+  const claimable = c.candidates.some((b) => {
+    const s = beadStatus(ctx, b.id)
+    return s !== 'in_progress' && s !== 'closed'
+  })
+  if (claimable) {
+    return false
+  }
+  if (c.foreign > 0) {
+    say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
+  }
+  return true
 }
 
 /** Claim the next work item — the top ready bead, plus its compatible
@@ -1992,9 +2189,7 @@ function claimClump(
   seen: Set<string>,
   budget: number
 ): ReadyBead[] | undefined {
-  const ready = readyBeads(ctx.root)
-  const c = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root))
-  const candidates = c.queue.filter((b) => !seen.has(b.id))
+  const { candidates, foreign } = clumpCandidates(ctx, scope, seen)
   // the registry's claimStep owns the lead's claim under the spawn
   // lock (spec bro-zpa93) — a loop-side pre-claim reads as "claimed
   // outside the agent registry" and the spawn refuses it. The pick
@@ -2008,8 +2203,8 @@ function claimClump(
           return s !== 'in_progress' && s !== 'closed'
         })
   if (!lead) {
-    if (c.foreign > 0) {
-      say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
+    if (foreign > 0) {
+      say(ctx, `loop: ${foreign} foreign-scope bead(s) remain — not claimable in this project`)
     }
     return undefined
   }
@@ -2085,6 +2280,12 @@ interface QueueState {
    *  hot-loop through pick+probe+spawn would burn the tick against
    *  the same wall (spec bro-zpa93). */
   pushHoldUntil: number
+  /** The disk floor's transition edge — the held/resumed lines say
+   *  once per episode, not once per tick (spec bro-2spp7). */
+  diskHeld: boolean
+  /** statfs paths that already reported a probe failure — one warning
+   *  per path per run, then the watermark goes blind-quiet. */
+  diskProbeWarned: Set<string>
 }
 
 /** One service pass over the stack, oldest-first — a snapshot copy
@@ -2116,6 +2317,51 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
   return busy
 }
 
+/** The filesystems a claim writes to — the worktree parent (sibling
+ *  `<repo>--<id>` dirs hold the checkout plus bootstrap/agent litter,
+ *  ~350M a slot) and the tmpdir (prompt files, agent scratch — /tmp
+ *  filled mid-run in one of the recorded incidents). `bavail`, not
+ *  `bfree`: the run is unprivileged, root-reserved blocks are not
+ *  headroom. Cheap enough to re-probe every push — a merge's worktree
+ *  removal re-admits the queue with no accounting of our own. An
+ *  un-probeable path is skipped and named once per run: a watermark
+ *  that cannot see reports, never gates (spec bro-2spp7). */
+function diskProbes(ctx: Ctx, warned?: Set<string>): DiskProbe[] {
+  const out: DiskProbe[] = []
+  for (const p of new Set([dirname(ctx.root), tmpdir()])) {
+    const probe = probeDisk(p, warned)
+    if (probe !== undefined) {
+      out.push(probe)
+    }
+  }
+  return out
+}
+
+/** statfs one path → DiskProbe. bigint probe — bavail×bsize on a
+ *  multi-EB fs overflows the number range mid-multiply; the DiskProbe
+ *  contract is a number, so saturate at MAX_SAFE_INTEGER (a free that
+ *  large admits every floor anyway). A failed path warns once per run
+ *  when `warned` is provided. */
+function probeDisk(p: string, warned?: Set<string>): DiskProbe | undefined {
+  try {
+    const s = statfsSync(p, { bigint: true })
+    const free = s.bavail * s.bsize
+    return {
+      path: p,
+      freeBytes: free > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(free),
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (warned === undefined) {
+      console.error(`loop: disk probe failed for ${p} — ${msg}`)
+    } else if (!warned.has(p)) {
+      warned.add(p)
+      console.error(`loop: disk probe failed for ${p} — ${msg} — watermark blind there`)
+    }
+    return undefined
+  }
+}
+
 /** The push half of a tick — true when a bead was claimed (drained or
  *  not, the fresh member's first poll wants an immediate pass, not an
  *  idle interval). False when the push was skipped — queue drained,
@@ -2128,6 +2374,19 @@ async function tryClaim(
   const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems
   if (q.drained || maxed || q.stack.length >= ctx.cfg.maxOpen || Date.now() < q.pushHoldUntil) {
     return false
+  }
+  // the disk floor — admission, not eviction. A breached floor holds
+  // pushes exactly like a full fleet does: nothing claimed, nothing
+  // parked, gate service continues while merges free the disk (spec
+  // bro-2spp7). The check sits between the cheap counters and
+  // claimClump's store reads so a held push costs one statfs per tick.
+  const breach = diskFloorBreach(diskProbes(ctx, q.diskProbeWarned), ctx.cfg)
+  if (breach !== undefined) {
+    return holdForDisk(ctx, scope, q, breach)
+  }
+  if (q.diskHeld) {
+    q.diskHeld = false
+    say(ctx, 'loop: disk back above floor — pushes resume')
   }
   ctx.stage = 'claim'
   ctx.bead = undefined
@@ -2151,23 +2410,14 @@ async function tryClaim(
     // fleet cap refused the spawn — un-see the clump and hold pushes
     // for a beat so the next pick doesn't burn the tick re-probing the
     // same wall; the claims pushItem released are re-pickable
-    for (const b of clump) {
-      q.seen.delete(b.id)
-    }
-    q.claimed -= clump.length
-    q.pushHoldUntil = Date.now() + ctx.intervalS * 1000
+    unseeClump(ctx, q, clump)
     return false
   }
   if (out.kind === 'member') {
     q.stack.push(out.member)
     // a worker-pending member reports its pending phase — its `→ PR`
     // line lands when the worker exits and the gate join happens
-    say(
-      ctx,
-      out.member.pr === undefined
-        ? `loop: ${ids.join(', ')} pushed — worker pending (gate ${q.stack.length}/${ctx.cfg.maxOpen})`
-        : `loop: ${ids.join(', ')} → PR ${prRef(ctx, out.member.pr)} (gate ${q.stack.length}/${ctx.cfg.maxOpen})`
-    )
+    say(ctx, pushLine(ctx, out.member.pr, ids, q.stack.length))
   } else {
     q.tally[out.result] += 1
     if (ctx.json) {
@@ -2175,6 +2425,53 @@ async function tryClaim(
     }
   }
   return true
+}
+
+/** The held-push branch of a tick — park the next probe for an
+ *  interval, announce the hold once. The drain verdict is still owed:
+ *  claimClump is unreachable under a breach, so without a read-only
+ *  check an empty queue behind the floor would retry the floor
+ *  forever instead of reporting done. */
+function holdForDisk(
+  ctx: Ctx,
+  scope: NonNullable<ReturnType<typeof nextScope>>,
+  q: QueueState,
+  breach: DiskProbe
+): false {
+  // drain beats the hold: an empty queue behind the floor has nothing
+  // to wait for — without this check the return below keeps q.drained
+  // unset and the run idles on disk forever
+  if (queueDrained(ctx, scope, q.seen)) {
+    q.drained = true
+    return false
+  }
+  q.pushHoldUntil = Date.now() + ctx.intervalS * 1000
+  if (!q.diskHeld) {
+    q.diskHeld = true
+    say(
+      ctx,
+      `loop: disk below floor on ${breach.path} — ` +
+        `${Math.floor(breach.freeBytes / MB)}M free < ` +
+        `${ctx.cfg.diskMinSlots}×${ctx.cfg.worktreeMb}M — pushes held`
+    )
+  }
+  return false
+}
+
+/** Undo a claim attempt the fleet cap refused — the clump goes back to
+ *  pickable and pushes hold for a beat. */
+function unseeClump(ctx: Ctx, q: QueueState, clump: ReadyBead[]): void {
+  for (const b of clump) {
+    q.seen.delete(b.id)
+  }
+  q.claimed -= clump.length
+  q.pushHoldUntil = Date.now() + ctx.intervalS * 1000
+}
+
+function pushLine(ctx: Ctx, pr: number | undefined, ids: string[], gate: number): string {
+  return pr === undefined
+    ? `loop: ${ids.join(', ')} pushed — worker pending (gate ${gate}/${ctx.cfg.maxOpen})`
+    : `loop: ${ids.join(', ')} → PR ${prRef(ctx, pr)} (gate ${gate}/${ctx.cfg.maxOpen})`
 }
 
 /** The round-robin: each tick services the gate stack oldest-first,
@@ -2189,6 +2486,8 @@ async function runQueue(ctx: Ctx): Promise<void> {
     claimed: 0,
     drained: false,
     pushHoldUntil: 0,
+    diskHeld: false,
+    diskProbeWarned: new Set(),
   }
   try {
     // sweep a crashed run's records before the first claim — a dead-pid
@@ -2210,9 +2509,10 @@ async function runQueue(ctx: Ctx): Promise<void> {
       }
       if (!busy) {
         const pending = q.stack.find((m) => m.worker !== undefined)
+        const idle = q.diskHeld ? 'idle (disk floor)' : 'idle'
         ctx.stage =
           pending === undefined
-            ? 'idle'
+            ? idle
             : `worker ${pending.worker!.agentId} pid=${pending.worker!.pid ?? '?'}`
         ctx.bead = pending === undefined ? undefined : pending.beads[0]!.id
         // the wake is the earliest member's own cadence — a worker's

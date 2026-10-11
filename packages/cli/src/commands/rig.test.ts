@@ -12,16 +12,26 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { git, initRepo } from './testrepo.ts'
 import {
   resolveRigRepo,
   rigStatus,
   rigSync,
-  RIG_SPEC,
 } from './rig.ts'
 import { rigSection, type RigConfig } from './rig-config.ts'
-import { cronTag, schedState, unitName } from './sched.ts'
+import {
+  armRigPulse,
+  disarmRigPulse,
+  readRigPulseMarker,
+  rigPulseLive,
+  rigPulseLockPath,
+  rigPulseMarkerPath,
+  rigPulseRearm,
+  rigPulseState,
+  readRigPulseSpawn,
+  writeRigPulseSpawn,
+} from './rig-pulse.ts'
 
 const tmp = (p = 'bro-rig-'): string => mkdtempSync(join(tmpdir(), p))
 
@@ -85,7 +95,7 @@ const okDeps = () => {
 }
 
 describe('resolveRigRepo', () => {
-  const cfg: RigConfig = { intervalSec: 600 }
+  const cfg: RigConfig = { intervalSec: 600, pulseSec: 900 }
 
   test('flag > config > main worktree; ~ and relative expand', () => {
     const { root, main } = initRepo('bro-rig-res-')
@@ -289,7 +299,7 @@ describe('rigStatus', () => {
         assert.ok(s.steps!.some((x) => x.includes('install')))
         assert.ok(s.steps!.some((x) => x.includes('build')))
         assert.ok(s.steps!.some((x) => x.includes('hotpatch.sh')))
-        assert.match(s.scheduler!, /none|unknown|systemd|cron|both/)
+        assert.match(s.pulse!, /absent|armed/)
       } finally {
         if (prev === undefined) {
           delete process.env.XDG_DATA_HOME
@@ -315,65 +325,129 @@ describe('rigStatus', () => {
 })
 
 describe('rig config section', () => {
-  test('defaults — repo unset, 600s cadence', () => {
-    assert.deepEqual(rigSection(undefined), { repo: undefined, intervalSec: 600 })
-    assert.deepEqual(rigSection({}), { repo: undefined, intervalSec: 600 })
+  test('defaults — repo unset, 600s cadence, 900s window', () => {
+    const d = { repo: undefined, intervalSec: 600, pulseSec: 900 }
+    assert.deepEqual(rigSection(undefined), d)
+    assert.deepEqual(rigSection({}), d)
   })
 
-  test('repo string keeps, bad intervalSec falls back to 600', () => {
-    assert.deepEqual(rigSection({ repo: ' /x ', intervalSec: 42 }), {
+  test('repo string keeps, bad intervalSec/pulseSec fall back', () => {
+    assert.deepEqual(rigSection({ repo: ' /x ', intervalSec: 42, pulseSec: 1200 }), {
       repo: '/x',
       intervalSec: 42,
+      pulseSec: 1200,
     })
     assert.equal(rigSection({ intervalSec: 0 }).intervalSec, 600)
     assert.equal(rigSection({ intervalSec: 'x' as unknown as number }).intervalSec, 600)
+    assert.equal(rigSection({ pulseSec: 0 }).pulseSec, 900)
+    assert.equal(rigSection({ pulseSec: 'x' as unknown as number }).pulseSec, 900)
   })
 })
 
-describe('rig scheduler spec', () => {
-  test('units/tag hash the repo common dir under bro-rig-*', () => {
-    const { root, main } = initRepo('bro-rig-sched-')
+const rigLock = (main: string, content: string): void => {
+  const p = rigPulseLockPath(main)!
+  mkdirSync(dirname(p), { recursive: true })
+  writeFileSync(p, content)
+}
+
+describe('rig pulse (session-pulse model, bro-killn)', () => {
+  test('marker + lock resolve under <git-common>/bro', () => {
+    const { root, main } = initRepo('bro-rig-ppath-')
     try {
-      const common = join(main, '.git')
-      assert.match(unitName(RIG_SPEC, common), /^bro-rig-[0-9a-f]{8}$/)
-      assert.match(cronTag(RIG_SPEC, common), /^# bro-rig-[0-9a-f]{8}$/)
+      assert.equal(rigPulseMarkerPath(main), join(main, '.git', 'bro', 'rig-pulse.json'))
+      assert.equal(rigPulseLockPath(main), join(main, '.git', 'bro', 'rig-pulse.lock'))
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
   })
 
-  test('schedState — none without units/cron, cron when tag present', () => {
-    const { root, main } = initRepo('bro-rig-schedst-')
-    const home = tmp('bro-rig-home-')
+  test('arm → already → updated; disarm → disarmed → absent; repo is required', () => {
+    const { root, main } = initRepo('bro-rig-parm-')
     try {
-      const common = join(main, '.git')
-      const tag = cronTag(RIG_SPEC, common)
-      // no crontab binary → 'none'
-      const missing = schedState(RIG_SPEC, main, {
-        run: () => ({ code: 127, out: '', err: 'missing' }),
-        home,
-      })
-      assert.equal(missing.state, 'none')
-      // tagged line in the table → 'cron'
-      const cron = schedState(RIG_SPEC, main, {
-        run: (cmd, args) =>
-          args[0] === '-l' ? { code: 0, out: `* * * * * x ${tag}\n`, err: '' } : { code: 127, out: '', err: '' },
-        home,
-      })
-      assert.equal(cron.state, 'cron')
-      assert.match(cron.unit, /^bro-rig-/)
-      // unit files under the injected HOME → 'systemd'
-      const unitDir = join(home, '.config', 'systemd', 'user')
-      mkdirSync(unitDir, { recursive: true })
-      writeFileSync(join(unitDir, `${cron.unit}.timer`), 'x')
-      const systemd = schedState(RIG_SPEC, main, {
-        run: () => ({ code: 127, out: '', err: 'missing' }),
-        home,
-      })
-      assert.equal(systemd.state, 'systemd')
+      const a = armRigPulse(main, main, 120)
+      assert.equal(a.state, 'armed')
+      assert.deepEqual(readRigPulseMarker(main)?.repo, main)
+      assert.equal(armRigPulse(main, main, 120).state, 'already')
+      assert.equal(armRigPulse(main, main, 60).state, 'updated')
+      assert.equal(readRigPulseMarker(main)?.everySec, 60)
+      assert.equal(disarmRigPulse(main), 'disarmed')
+      assert.equal(readRigPulseMarker(main), null)
+      assert.equal(disarmRigPulse(main), 'absent')
+      // a torn marker (no repo) reads as absent — never a half-shape rearm
+      const file = rigPulseMarkerPath(main)!
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, JSON.stringify({ everySec: 60, armedAt: 'x' }))
+      assert.equal(readRigPulseMarker(main), null)
     } finally {
       rmSync(root, { recursive: true, force: true })
-      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test('pulseLive — dead holder and garbage are not live; live pid is', () => {
+    const { root, main } = initRepo('bro-rig-plive-')
+    try {
+      assert.deepEqual(rigPulseLive(main), { live: false })
+      rigLock(main, `${1 << 30}:tok`)
+      assert.deepEqual(rigPulseLive(main), { live: false })
+      rigLock(main, 'garbage')
+      assert.deepEqual(rigPulseLive(main), { live: false })
+      rigLock(main, `${process.pid}:tok`)
+      assert.deepEqual(rigPulseLive(main), { live: true, pid: process.pid })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('rigPulseState reports absent / armed-dead / armed-live', () => {
+    const { root, main } = initRepo('bro-rig-pstate-')
+    try {
+      assert.match(rigPulseState(main), /absent/)
+      armRigPulse(main, main, 600)
+      assert.match(rigPulseState(main), /armed every 600s — dead/)
+      rigLock(main, `${process.pid}:tok`)
+      assert.match(rigPulseState(main), new RegExp(`armed every 600s — live \\(pid ${process.pid}\\)`))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('rearm — armed + dead + orchestrator → rearm with --for floored at --every', () => {
+    const { root, main } = initRepo('bro-rig-prm-')
+    try {
+      assert.deepEqual(rigPulseRearm(main, 900, {}), { kind: 'quiet' }) // unarmed
+      armRigPulse(main, main, 120)
+      assert.deepEqual(rigPulseRearm(main, 900, {}), {
+        kind: 'rearm',
+        repo: main,
+        everySec: 120,
+        forSec: 900,
+      })
+      armRigPulse(main, main, 1200)
+      assert.deepEqual(rigPulseRearm(main, 900, {}), {
+        kind: 'rearm',
+        repo: main,
+        everySec: 1200,
+        forSec: 1200,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('rearm — live lock, live recorded spawn, and BRO_AGENT_ID all stay quiet', () => {
+    const { root, main } = initRepo('bro-rig-prq-')
+    try {
+      armRigPulse(main, main, 120)
+      rigLock(main, `${process.pid}:tok`)
+      assert.deepEqual(rigPulseRearm(main, 900, {}), { kind: 'quiet' })
+      rmSync(rigPulseLockPath(main)!)
+      writeRigPulseSpawn(main, { pid: process.pid, spawnedAt: 'x' })
+      assert.deepEqual(rigPulseRearm(main, 900, {}), { kind: 'quiet' })
+      writeRigPulseSpawn(main, { pid: 1 << 30, spawnedAt: 'x' })
+      assert.deepEqual(rigPulseRearm(main, 900, { BRO_AGENT_ID: 'native-x' }), { kind: 'quiet' })
+      assert.equal(readRigPulseSpawn(main)?.pid, 1 << 30)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
     }
   })
 })

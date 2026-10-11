@@ -38,6 +38,13 @@
  *                               `terminal:true` + a note. A miss beside a
  *                               degraded backend is 503 (unverifiable),
  *                               a clean miss 404
+ *   POST   /api/v1/webhooks/github  GitHub webhook ingest → `github:*`
+ *                               bus topics (spec specs/bro-huy5o.7.md).
+ *                               Armed by BRO_GITHUB_WEBHOOK_SECRET; the
+ *                               X-Hub-Signature-256 HMAC is the auth —
+ *                               this route bypasses the bearer AND Host
+ *                               guards so a hosted tunnel whose Host is
+ *                               not loopback still reaches it
  *
  * Discovery + credentials: `<git-common-dir>/bro/serve.json` {pid,
  * url, dir, startedAt, token} written on listen (tmp+rename, mode
@@ -63,12 +70,17 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { dirname, join } from 'node:path'
 import type { Readable } from 'node:stream'
 import {
+  busPublish,
+  busSocketPath,
   gitTry,
   SpawnError,
+  startBusBroker,
   type AgentConnector,
   type AgentInfo,
+  type BusBroker,
   type SpawnErrorKind,
 } from '@broject/core'
+import { GITHUB_WEBHOOK_SECRET_ENV, githubWebhookHandler } from '@broject/github'
 import {
   agentConnectorNames,
   loadAgentEnv,
@@ -354,6 +366,19 @@ export async function readBody(stream: Readable, limit = MAX_BODY_BYTES): Promis
 
 /** The seam between transport and facade — tests inject fakes; the real
  *  command wires it to the same machinery `bro agents`/`bro watch` use. */
+/** A webhook ingest endpoint — verify, map, publish. The handler owns
+ *  provider semantics (signature, body encodings, event mapping); serve
+ *  owns transport only. Absent from deps means no ingest is wired —
+ *  the route 404s like any unknown path. */
+export type ServeWebhookRequest = {
+  headers: Record<string, string | string[] | undefined>
+  rawBody: string
+}
+
+export type ServeWebhookHandler = (
+  req: ServeWebhookRequest
+) => Promise<{ status: number; body: unknown }>
+
 export interface ServeDeps {
   snapshot(): Promise<unknown>
   backends(): Promise<AgentBackendPlane[]>
@@ -363,6 +388,8 @@ export interface ServeDeps {
   spawn(req: StepSpawnRequest): Promise<AgentInfo>
   stop(ref: string): Promise<StopOutcome>
   connectors(): string[]
+  /** `/api/v1/webhooks/<provider>` handlers keyed by provider slug. */
+  webhooks?: Record<string, ServeWebhookHandler>
 }
 
 export interface ServeResponse {
@@ -383,6 +410,7 @@ const ROUTES = [
   'POST /api/v1/agents',
   'GET /api/v1/agents/<ref>',
   'DELETE /api/v1/agents/<ref>',
+  'POST /api/v1/webhooks/github',
 ]
 
 /** Per-server context — startedAt is captured at LISTEN time, not module
@@ -523,10 +551,11 @@ export async function routeRequest(
   pathname: string,
   rawBody: string | undefined,
   deps: ServeDeps,
-  meta: ServeMeta
+  meta: ServeMeta,
+  headers: Record<string, string | string[] | undefined> = {}
 ): Promise<ServeResponse> {
   try {
-    return await route(method, pathname, rawBody, deps, meta)
+    return await route(method, pathname, rawBody, deps, meta, headers)
   } catch (err) {
     // HttpError is fail-closed input validation — a response, not a crash
     if (err instanceof HttpError) {
@@ -687,7 +716,8 @@ async function route(
   pathname: string,
   rawBody: string | undefined,
   deps: ServeDeps,
-  meta: ServeMeta
+  meta: ServeMeta,
+  headers: Record<string, string | string[] | undefined>
 ): Promise<ServeResponse> {
   const seg = pathname.split('/').filter((s) => s !== '')
 
@@ -713,14 +743,49 @@ async function route(
     return routeSnapshot(method, deps)
   }
   if (api[0] === 'agents') {
-    if (api.length === 1) {
-      return routeAgents(method, rawBody, deps)
-    }
-    if (api.length === 2) {
-      return routeAgentRef(method, api[1]!, deps)
-    }
+    return routeAgentsBranch(method, api, rawBody, deps)
+  }
+  if (api[0] === 'webhooks') {
+    return routeWebhook(method, api, rawBody, deps, headers)
   }
   return NOT_FOUND
+}
+
+/** The `/agents` subtree — list+spawn at the collection, ref ops one
+ *  level deeper. Kept out of `route` so the top dispatch stays flat
+ *  enough for the SonarCloud cognitive ceiling. */
+function routeAgentsBranch(
+  method: string,
+  api: string[],
+  rawBody: string | undefined,
+  deps: ServeDeps
+): ServeResponse | Promise<ServeResponse> {
+  if (api.length === 1) {
+    return routeAgents(method, rawBody, deps)
+  }
+  if (api.length === 2) {
+    return routeAgentRef(method, api[1]!, deps)
+  }
+  return NOT_FOUND
+}
+
+/** The `/webhooks/<provider>` ingest — POST only, handler lookup by
+ *  provider slug. An unwired provider 404s like any unknown path. */
+function routeWebhook(
+  method: string,
+  api: string[],
+  rawBody: string | undefined,
+  deps: ServeDeps,
+  headers: Record<string, string | string[] | undefined>
+): ServeResponse | Promise<ServeResponse> {
+  const handler = api.length === 2 ? deps.webhooks?.[api[1]!] : undefined
+  if (handler === undefined) {
+    return NOT_FOUND
+  }
+  if (method !== 'POST') {
+    return NOT_ALLOWED
+  }
+  return handler({ headers, rawBody: rawBody ?? '' })
 }
 
 // --- server ----------------------------------------------------------------------------
@@ -791,6 +856,70 @@ function writeGuard(
   return undefined
 }
 
+/** DNS-rebinding guard: a rebound browser request still carries the
+ *  attacker's Host — only loopback names are real clients. Covers
+ *  reads too: CSRF only blinds the response, rebinding would expose
+ *  the snapshot/agents planes to the page. */
+function isLoopbackHostHeader(hostHeader: string | undefined): boolean {
+  const rawHost = (hostHeader ?? '').toLowerCase()
+  const host = rawHost.startsWith('[')
+    ? rawHost.slice(0, rawHost.indexOf(']') + 1)
+    : rawHost.split(':')[0]
+  return host === '127.0.0.1' || host === 'localhost' || host === '[::1]'
+}
+
+/** One request's guard → route → send pipeline, lifted out of the
+ *  handler closure so each level stays under the SonarCloud
+ *  cognitive-complexity ceiling. */
+async function handleRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: ServeDeps,
+  meta: ServeMeta,
+  token: string,
+  statePathHint: string
+): Promise<void> {
+  try {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    // Webhook routes carry their own auth — the delivery's HMAC
+    // signature — so they bypass BOTH guards below: the loopback
+    // Host check (a hosted tunnel forwards with a public Host, and
+    // rejecting it would defeat hosted mode) and the bearer write
+    // guard (the producer can't read serve.json). Nothing else is
+    // special: a mis-signed POST is a 401 inside the handler and
+    // the 202 body leaks nothing (spec specs/bro-huy5o.7.md).
+    const webhookRoute = url.pathname.startsWith('/api/v1/webhooks/')
+    if (!webhookRoute && !isLoopbackHostHeader(req.headers.host)) {
+      send(res, 403, { error: 'loopback host only' })
+      return
+    }
+    const wantsBody =
+      req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
+    if (!webhookRoute && WRITE_METHODS.has(req.method ?? 'GET')) {
+      const refusal = writeGuard(req, token, wantsBody, statePathHint)
+      if (refusal !== undefined) {
+        send(res, refusal.status, refusal.body, refusal)
+        return
+      }
+    }
+    const rawBody = wantsBody ? await readBody(req) : undefined
+    const r = await routeRequest(
+      req.method ?? 'GET',
+      url.pathname,
+      rawBody,
+      deps,
+      meta,
+      req.headers
+    )
+    send(res, r.status, r.body, r)
+  } catch (err) {
+    const status = err instanceof HttpError ? err.status : 500
+    send(res, status, {
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
 export function createServeHandler(
   deps: ServeDeps,
   meta: ServeMeta,
@@ -802,44 +931,12 @@ export function createServeHandler(
   const statePathHint =
     serveStatePath(meta.dir) ?? '<git-common-dir>/bro/serve.json'
   return (req, res) => {
-    void (async () => {
-      try {
-        // DNS-rebinding guard: a rebound browser request still carries
-        // the attacker's Host — only loopback names are real clients.
-        // Covers reads too: CSRF only blinds the response, rebinding
-        // would expose the snapshot/agents planes to the page.
-        const rawHost = (req.headers.host ?? '').toLowerCase()
-        const host = rawHost.startsWith('[')
-          ? rawHost.slice(0, rawHost.indexOf(']') + 1)
-          : rawHost.split(':')[0]
-        if (host !== '127.0.0.1' && host !== 'localhost' && host !== '[::1]') {
-          send(res, 403, { error: 'loopback host only' })
-          return
-        }
-        const wantsBody =
-          req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
-        if (WRITE_METHODS.has(req.method ?? 'GET')) {
-          const refusal = writeGuard(req, token, wantsBody, statePathHint)
-          if (refusal !== undefined) {
-            send(res, refusal.status, refusal.body, refusal)
-            return
-          }
-        }
-        const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-        const rawBody = wantsBody ? await readBody(req) : undefined
-        const r = await routeRequest(req.method ?? 'GET', url.pathname, rawBody, deps, meta)
-        send(res, r.status, r.body, r)
-      } catch (err) {
-        const status = err instanceof HttpError ? err.status : 500
-        send(res, status, {
-          error: err instanceof Error ? err.message : String(err),
-        })
-      }
-    })()
+    void handleRequest(req, res, deps, meta, token, statePathHint)
   }
 }
 
 function realDeps(dir: string, env: AgentConnectorEnv): ServeDeps {
+  const socketPath = busSocketPath(dir)
   return {
     snapshot: () => collectSnapshot(dir),
     backends: async () => (await collectAgentBackends(dir, env)).backends,
@@ -847,6 +944,15 @@ function realDeps(dir: string, env: AgentConnectorEnv): ServeDeps {
     spawn: (req) => spawnStepAgent(dir, env, req),
     stop: (ref) => stopAgent(dir, env, ref),
     connectors: () => agentConnectorNames(),
+    webhooks: {
+      github: githubWebhookHandler({
+        secret: () => process.env[GITHUB_WEBHOOK_SECRET_ENV],
+        publish: (event) =>
+          socketPath === null
+            ? Promise.resolve({ published: false, reason: 'not a repository' })
+            : busPublish(socketPath, event),
+      }),
+    },
   }
 }
 
@@ -861,7 +967,10 @@ Routes: ${ROUTES.join(', ')}`)
   process.exit(2)
 }
 
-export async function runServeCommand(argv: string[]): Promise<void> {
+/** Argument validation → the bound port (0 = ephemeral). Exits via
+ *  `usage()` on any malformed input — a mistyped flag must never
+ *  silently serve. */
+function parseServePort(argv: string[]): number {
   if (argv.includes('--help') || argv.includes('-h')) {
     usage()
   }
@@ -878,14 +987,46 @@ export async function runServeCommand(argv: string[]): Promise<void> {
     }
   }
   const portRaw = flag(argv, '--port')
-  let port = 0
-  if (portRaw !== undefined) {
-    port = Number(portRaw)
-    if (!Number.isInteger(port) || port < 0 || port > 65535) {
-      console.error(`error: --port needs an integer 0–65535, got "${portRaw}"`)
-      process.exit(2)
-    }
+  if (portRaw === undefined) {
+    return 0
   }
+  const port = Number(portRaw)
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    console.error(`error: --port needs an integer 0–65535, got "${portRaw}"`)
+    process.exit(2)
+  }
+  return port
+}
+
+/** Webhook ingest armed → this serve is the bus host too: the
+ *  endpoint publishes through the repo socket, so the broker must
+ *  live somewhere. An already-running `bro bus serve` wins (same
+ *  socket either way); any other failure degrades the route to
+ *  published:false — fail-open, serve still answers. */
+async function armWebhookBroker(
+  dir: string,
+  url: string
+): Promise<BusBroker | undefined> {
+  if ((process.env[GITHUB_WEBHOOK_SECRET_ENV] ?? '') === '') {
+    return undefined
+  }
+  try {
+    const broker = await startBusBroker(dir)
+    console.log(`webhooks: POST ${url}/api/v1/webhooks/github → bus ${broker.socketPath}`)
+    return broker
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/already running/.test(msg)) {
+      console.log(`webhooks: POST ${url}/api/v1/webhooks/github → existing bus broker`)
+    } else {
+      console.error(`warning: webhooks armed but broker did not start — ${msg}`)
+    }
+    return undefined
+  }
+}
+
+export async function runServeCommand(argv: string[]): Promise<void> {
+  const port = parseServePort(argv)
 
   const dir = process.cwd()
   if (serveStatePath(dir) === null) {
@@ -941,6 +1082,8 @@ export async function runServeCommand(argv: string[]): Promise<void> {
     console.log(`bro serve — ${url}`)
     console.log('discovery: <git-common-dir>/bro/serve.json · ctrl-c to stop')
 
+    const broker = await armWebhookBroker(dir, url)
+
     await new Promise<void>((resolve) => {
       const shutdown = (): void => {
         // close() waits on keep-alive sockets — cap the grace so a
@@ -957,6 +1100,7 @@ export async function runServeCommand(argv: string[]): Promise<void> {
       process.once('SIGINT', shutdown)
       process.once('SIGTERM', shutdown)
     })
+    await broker?.close()
     clearServeState(dir)
   } finally {
     releaseLock()

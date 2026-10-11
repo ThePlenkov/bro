@@ -56,19 +56,26 @@ The mechanic is upstream-tracking, not a hardcoded repo or branch:
   cadence `rig.intervalSec` (600s), `--for` bounds a session-side run.
 
 - **`bro rig install [--every N] [--print]` / `bro rig uninstall`** —
-  the cadence on a real scheduler so it survives reboot: the same
-  systemd-user-timer-or-managed-crontab backend `bro watch install`
-  uses, extracted into a shared engine (`sched.ts`). Units are
-  `bro-rig-<h8>` keyed on the rig repo's git-common-dir — one entry per
-  repo, `WorkingDirectory=` the resolved repo, `ExecStart=bro rig sync`
-  with the version-pinned npx fallback.
+  arm/disarm the cadence under the session-pulse model (bro-killn —
+  OS service management is outside the agent-plugin horizon, so no
+  systemd unit or crontab line is ever written). `install` writes
+  `<git-common>/bro/rig-pulse.json` (`{repo, everySec, armedAt}`) on
+  the rig repo's common dir — the want-marker every session checkpoint
+  in that repo rearms a bounded `bro rig watch --repo <r> --every N
+  --for S` window from (window bound `rig.pulseSec`, floored at the
+  cadence). `rig watch` holds `bro/rig-pulse.lock` for its lifetime —
+  a rearmed window stands by behind the incumbent, never ticks
+  concurrently — and refuses under `BRO_AGENT_ID` (the orchestrator
+  owns the cadence, same guard as `bro watch --every`). `uninstall`
+  removes the marker and reports a still-live pulse honestly.
 
 ## Config — `rig` section (operator layer)
 
 ```jsonc
 "rig": {
   "repo": "/abs/path/to/main-checkout",   // default: current repo's main worktree
-  "intervalSec": 600                       // watch tick + installed cadence
+  "intervalSec": 600,                      // watch tick + installed cadence
+  "pulseSec": 900                          // rearmed window bound (--for)
 }
 ```
 
@@ -78,14 +85,18 @@ Machine-local by nature (repo paths, cadence) → `operator` in
 `freshness` section — `rig` names *what and when*, `freshness` names
 *how*.
 
-## The scheduler engine extraction
+## The pulse model (revised during merge — bro-killn landed first)
 
-`watch-install.ts` is re-expressed as thin wrappers over
-`commands/sched.ts`, parameterized by a `SchedSpec`
-(`prefix`/`label`/`hint`/`invocation`). Every exported watch signature
-and emitted byte (unit text, cron line, tags) is preserved — the
-existing suite pins it. `rig` gets `bro-rig-<h8>` units and a
-`bro rig sync` invocation for free, plus `schedState` for `status`.
+The branch originally extracted `watch-install.ts`'s
+systemd/crontab writers into a shared `sched.ts` engine so
+`bro rig install` could ride the same backends. Main then retired
+those writers project-wide (spec bro-killn): the merge drops
+`sched.ts` entirely and puts `rig` on the same want-marker + rearm
+mechanics the watch pulse uses — `rig-pulse.ts` mirrors
+`watch-pulse.ts` with the rig's own marker/lock/spawn-record trio and
+a `rig watch` spawn argv. A `rigConnector` registered beside
+`watchConnector` runs the same checkpoint probes (sessionStart +
+postTool) against the rig marker.
 
 ## Out of scope
 
@@ -102,8 +113,11 @@ existing suite pins it. `rig` gets `bro-rig-<h8>` units and a
   fast-forwards it and runs install→build→patch (observable on the
   refresh's own output); a clean current checkout reports `current`.
 - A dirty target is skipped, never pulled over; a diverged one errors.
-- `bro rig install` produces `bro-rig-<h8>` artifacts identical in
-  shape to `bro-watch-<h8>`; `--print` emits them without touching the
-  system; `uninstall` strips by tag only.
-- The `bro-watch` suite passes unchanged over the extracted engine.
+- `bro rig install` writes `rig-pulse.json` and nothing outside the
+  git dir; `--print` emits the marker payload + rearm command without
+  touching anything; `uninstall` removes the marker and reports a
+  live pulse rather than claiming the cadence stopped.
+- An armed repo with a dead rig pulse gets a bounded `bro rig watch`
+  spawned on the next session checkpoint; a live pulse, a live
+  recorded spawn, or `BRO_AGENT_ID` set all stay quiet.
 - A successful pull drops one `rig:` mailbox event.

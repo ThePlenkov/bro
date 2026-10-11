@@ -115,6 +115,8 @@ native field; Linear-native fields win where they exist:
   `<!-- bro: {...} -->` description trailer (the helpers are extracted
   from `packages/github/src/tasks.ts` into `packages/core/src/taskmeta.ts`
   — the trailer format is a cross-backend contract, one implementation).
+  The trailer is the description's last element — a `bro:` comment
+  inside the prose is an example, not metadata.
   `external_ref` reads the trailer first, then the issue URL.
 - **priority** — native `priority` field, name-mapped onto bd's 0–4
   lower-is-urgent scale: urgent(1)→0, high(2)→1, medium(3)→2, low(4)→3,

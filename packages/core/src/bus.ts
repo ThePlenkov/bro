@@ -973,3 +973,72 @@ export async function busProbe(
   }
   return { events, gapped }
 }
+
+export interface BusWake {
+  /** Resolves on the next matching event — a `gap` resolves too, because
+   *  a hole in the stream means re-derive, which is what a wake is for.
+   *  After close() (or a broker-side drop) it never resolves: the
+   *  caller's own timer is the fallback, so a dead subscription degrades
+   *  to polling instead of hanging the loop. */
+  next(): Promise<void>
+  close(): void
+}
+
+/** A subscription distilled to a wake-up signal for poll loops —
+ *  `Promise.race([sleep(interval), wake.next()])` lets a matching event
+ *  poll early. Only events arriving WHILE next() is armed fire it: one
+ *  that lands mid-poll is already covered by that poll, so nothing is
+ *  buffered. `match` runs inside the socket callback — a throw reads as
+ *  no-match rather than an uncaught exception killing the subscriber.
+ *  A subscribe failure resolves null instead of throwing: broker down
+ *  means business-as-usual polling, never an error (spec
+ *  specs/bro-huy5o.7.md). */
+export async function busWake(
+  socketPath: string,
+  filter: EventFilter,
+  match: (event: EventEnvelope) => boolean = () => true
+): Promise<BusWake | null> {
+  let open = true
+  let waiter: (() => void) | null = null
+  const poke = (): void => {
+    const w = waiter
+    waiter = null
+    w?.()
+  }
+  let sub: BusSubscription
+  try {
+    sub = await busSubscribe(socketPath, filter, {
+      onEvent: (e) => {
+        let hit = false
+        try {
+          hit = match(e)
+        } catch {
+          hit = false
+        }
+        if (hit) {
+          poke()
+        }
+      },
+      onGap: poke,
+      onClose: () => {
+        open = false
+      },
+    })
+  } catch {
+    return null
+  }
+  return {
+    next: () => {
+      if (!open) {
+        return new Promise<void>(() => {})
+      }
+      return new Promise<void>((resolve) => {
+        waiter = resolve
+      })
+    },
+    close: () => {
+      open = false
+      sub.close()
+    },
+  }
+}

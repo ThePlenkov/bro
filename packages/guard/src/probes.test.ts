@@ -1,16 +1,16 @@
 /** Per-probe fixtures for evalState/liveState — one clause shape per
  *  state key (spec bro-nkn6.6), including the failure modes a
  *  `bro guard test` row must make diagnosable. */
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { tmpDir } from './testtmp.ts'
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { gitTry } from '@broject/core'
 import { evalState, liveState, PROBE_FANOUT } from './probes.ts'
 
 function repo(branch = 'main'): string {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-probes-'))
+  const dir = tmpDir('bro-probes-')
   assert.equal(gitTry(['-C', dir, 'init', '-b', branch]).code, 0)
   assert.equal(gitTry(['-C', dir, 'config', 'user.email', 't@t']).code, 0)
   assert.equal(gitTry(['-C', dir, 'config', 'user.name', 't']).code, 0)
@@ -59,7 +59,7 @@ describe('state probes', () => {
   })
 
   test('git status failing fails every declared diff clause', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-probes-norepo-'))
+    const dir = tmpDir('bro-probes-norepo-')
     const vs = await verdict(dir, { diff: { changed: ['src/**'], without: ['**/*.test.*'] } })
     assert.equal(vs.length, 2)
     for (const v of vs) {

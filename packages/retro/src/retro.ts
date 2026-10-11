@@ -124,7 +124,7 @@ export function recordRetro(plan: RetroPlan): RecordResult {
     description: memo,
     // discovered-from, not --parent: the wtf is the trigger evidence,
     // and a child would block its close.
-    ...(wtf ? { deps: [`discovered-from:${wtf.id}`], noInheritLabels: true } : {}),
+    ...(wtf ? { deps: [`discovered:${wtf.id}`], noInheritLabels: true } : {}),
   })
 
   // bd has no transactions — if anything after the create fails, delete
@@ -146,7 +146,7 @@ export function recordRetro(plan: RetroPlan): RecordResult {
         title: action.title,
         labels: [PREVENTION_LABEL, `sink:${action.sink}`],
         noInheritLabels: true,
-        deps: [`discovered-from:${retro.id}`],
+        deps: [`discovered:${retro.id}`],
         description: detail,
       })
       actionIds.push(row.id)

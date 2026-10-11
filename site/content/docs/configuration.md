@@ -85,9 +85,13 @@ a `BroPlugin`. See [Plugins](/docs/plugins).
 | `model` | `""` | Model override for the provider lane |
 | `bootstrap` | `""` | Optional command run in each fresh worktree before the agent |
 | `stallMin` | `45` | Output-silence advisory in minutes — a live loop agent quiet this long surfaces in `bro watch`/`bro status`. Advisory only; nothing is killed |
+| `crashExitMs` | `10000` | An agent exit faster than this is an environment crash — the bead parks loud instead of reopening into a respawn-burn. `0` restores legacy reopen-on-every-exit |
 | `mergeTimeoutMin` | `45` | Review-gate budget in minutes |
 | `fixRounds` | `3` | Maximum review-fix respawns per bead |
 | `maxItems` | `0` | Maximum beads per run; `0` means until idle or gated |
+| `maxOpen` | `3` | Maximum open PRs on the run's gate stack — a full stack only services gates until a merge frees a slot |
+| `worktreeMb` | `400` | Estimated disk footprint of one open slot in MB — the disk floor prices every slot at this cost |
+| `diskMinSlots` | `2` | Disk floor in slot units — pushes hold while free disk on the worktree parent or tmpdir drops below `diskMinSlots × worktreeMb`. `0` disables the watermark |
 | `batch` | `1` | Max beads one claim may clump into a single work item — one worktree, one worker, one PR closing them all. `1` = solo claims only |
 | `batchMinPriority` | `3` | Lowest urgency allowed into a clump — a bead batches only when `priority >= batchMinPriority`, so urgent work always claims solo |
 
@@ -115,6 +119,36 @@ backend option set or schema default. Choose the backend under
 | --- | ------- | ---- |
 | `agents.<backend>.provider` | unset | Named [provider](/docs/commands/providers) the backend's spawns run through |
 | `agents.<kind>.maxSessions` | unset | Host-wide live-session quota for that session kind (e.g. `agents.devin.maxSessions`), admitted under a shared slot lock |
+| `agents.<kind>.maxWorkers` | unset | Host-wide quota counting only *spawned* sessions of the kind — interactive sessions never consume this budget. The plane must distinguish workers (devin: `BRO_AGENT_ID` env badge or a non-terminal stdin); arming it on a plane that cannot refuses loudly |
+
+The `docker` backend (`connectors.agents: "docker"` or `--connector docker`)
+runs each worker in a container with the worktree, git common dir and
+beads store mounted at their host paths:
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `agents.docker.command` | `loop.agent` | Command run inside the container |
+| `agents.docker.image` | unset | Image to run; wins over the devcontainer when set |
+| `agents.docker.devcontainer` | `.devcontainer/devcontainer.json` | JSONC devcontainer file, repo-relative or absolute. Its `image` is used directly (pulled before spawning when absent); `build.dockerfile` is rebuilt on every spawn — docker's layer cache makes a no-op build fast — under a content-hash tag (`bro-dev-<sha256/12>`). `dockerComposeFile` configs are unsupported — set `agents.docker.image` for those |
+| `agents.docker.runArgs` | unset | Extra `docker run` arguments — array or whitespace-split string (e.g. `["--network", "host"]`). Containers default to the host `--user uid:gid` so bind-mounted files stay host-owned; set `-u`/`--user` here to override |
+
+The `copilot` backend (`connectors.agents: "copilot"` or `--connector
+copilot`) dispatches GitHub Copilot coding-agent tasks — hosted remote
+workers that push a branch and open a pull request. It needs no local
+worktree or agent command (a provider-resolved worker is refused); `gh`
+on PATH is the only prerequisite:
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `agents.copilot.repo` | the worktree's `origin` remote | `owner/repo` the task is dispatched against |
+| `agents.copilot.base` | the repo's default branch | `base_ref` the task's pull request targets |
+| `agents.copilot.model` | unset | Model id passed through to the task create call |
+| `agents.copilot.customAgent` | unset | Custom-agent name passed through to the task create call |
+
+`agents.copilot.maxSessions`/`maxWorkers` cap the account's *remote*
+live tasks through a cached-count session plane — connector reads
+refresh the cache and a stale/absent one fails closed (`unavailable`),
+so an unreachable GitHub API refuses rather than overspends.
 
 ### `providers`
 

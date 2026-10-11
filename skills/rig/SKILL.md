@@ -1,6 +1,6 @@
 ---
 name: rig
-description: "Use when the rig's own bro install must stay current — 'keep the checkout fresh', a staleness check, the fetch→ff-pull→rebuild poll. Thin wrapper over the bro CLI: `bro rig sync` is the pass, `bro rig install` puts it on a scheduler. Requires `bro` (npx -y @broject/bro@0)."
+description: "Use when the rig's own bro install must stay current — 'keep the checkout fresh', a staleness check, the fetch→ff-pull→rebuild poll. Thin wrapper over the bro CLI: `bro rig sync` is the pass, `bro rig install` arms the session pulse. Requires `bro` (npx -y @broject/bro@0)."
 ---
 
 # /rig (bro)
@@ -21,10 +21,10 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`.
 | Command | What it does |
 | ------- | ------------ |
 | `bro rig sync [--repo <dir>]` | One freshness pass on the resolved checkout: guards (dirty → skip, no upstream/diverged → error) → fetch → ff-only merge → install→build→patch refresh. Exit 1 on error or an incomplete refresh (done-sha ≠ HEAD). |
-| `bro rig status [--repo] [--json]` | Read plane, no network — branch → upstream, ahead/behind vs the stored ref, dirty count, done-sha freshness, resolved refresh steps, scheduler state |
-| `bro rig watch [--every N] [--for S]` | Foreground supervisor — `rig sync` per tick, cadence `rig.intervalSec` (default 600s); `--for` bounds a session-side run |
-| `bro rig install [--every N] [--print]` | The poll on a real scheduler — a `bro-rig-<h8>` systemd user timer (crontab fallback) running `rig sync`, survives reboot |
-| `bro rig uninstall` | Strip the scheduled entry for the resolved repo |
+| `bro rig status [--repo] [--json]` | Read plane, no network — branch → upstream, ahead/behind vs the stored ref, dirty count, done-sha freshness, resolved refresh steps, rig-pulse state |
+| `bro rig watch [--every N] [--for S]` | Foreground supervisor — `rig sync` per tick under `bro/rig-pulse.lock` (one per repo, standby on contention); cadence `rig.intervalSec` (default 600s); `--for` bounds a session-side run. Orchestrator-only — refuses under `BRO_AGENT_ID` |
+| `bro rig install [--every N] [--print]` | Arm the session pulse — writes `bro/rig-pulse.json`; the session's checkpoints rearm a bounded `bro rig watch` window from it (bro-killn: no OS timer is written) |
+| `bro rig uninstall` | Disarm the marker — a live `rig watch` keeps its lock until it exits |
 
 ## Policy
 
@@ -40,10 +40,12 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`.
   (install/build/patch incl. the `~/.local/share/bro-hotpatch.sh` slot)
   stay owned by the `freshness` config section — hotpatches re-apply
   after every build until their upstream lands.
-- **Install, don't babysit.** `rig watch` is the setsid/debug shape —
-  for a durable poll use `bro rig install` so a reboot can't orphan it
-  (the lesson the ad-hoc supervisor kept re-teaching). Point-check
-  `bro rig status` between turns; never sit in a foreground wait.
+- **Arm, don't babysit.** `rig watch` is the debug/foreground shape —
+  for a durable poll use `bro rig install`: the want-marker survives
+  reboots and session deaths, the orchestrator session's checkpoints
+  rearm a bounded window whenever the pulse is dead (bro-killn — the
+  same model `bro watch install` rides). Point-check `bro rig status`
+  between turns; never sit in a foreground wait.
 - **A pull drops one `rig:` mailbox event** so live sessions learn the
   binary under them changed — a session seeing that drop should expect
   dist to be rebuilt mid-flight.

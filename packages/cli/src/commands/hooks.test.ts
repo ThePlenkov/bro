@@ -1,13 +1,13 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { classifyArmCommand, classifyArmCommands, classifyExecCommand, classifySkillMutation, isSelfToolCommand, readArmed, readCodexInstructions, armDetail, otherLiveWork, traceEntry } from './hooks.ts'
+import { tmpDir } from './testrepo.ts'
 
 describe('readCodexInstructions', () => {
   test('reads the plugin file and ignores a missing or relative root', () => {
-    const root = mkdtempSync(join(tmpdir(), 'bro-codex-instr-'))
+    const root = tmpDir('bro-codex-instr-')
     assert.equal(readCodexInstructions(undefined), undefined)
     assert.equal(readCodexInstructions('relative/root'), undefined)
     assert.equal(readCodexInstructions(root), undefined)
@@ -282,7 +282,7 @@ describe('traceEntry', () => {
 describe('otherLiveWork', () => {
   /** Seed marker files; ageHours backdates mtime past the live window. */
   function markerDir(entries: Array<[name: string, content: string, ageHours?: number]>): string {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-hooks-'))
+    const dir = tmpDir('bro-hooks-')
     for (const [name, content, ageHours] of entries) {
       const p = join(dir, name)
       writeFileSync(p, content)

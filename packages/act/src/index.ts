@@ -3,7 +3,7 @@ export { fetchPrActState } from './state.ts'
 export { evaluateExitGate } from './exit-gate.ts'
 export { docsOnly, effectiveMaxRounds, isDocsPath } from './docs.ts'
 export { gatePending, waitForGate } from './wait.ts'
-export type { GateWaitResult, WaitOptions } from './wait.ts'
+export type { GateWaitResult, GateWake, WaitOptions } from './wait.ts'
 export {
   ACT_ACTIONS,
   parseActPlan,
@@ -29,6 +29,7 @@ export {
   watchEnd,
   watchHeartbeat,
   watchMarkerKind,
+  watchRefresh,
   watchRetire,
   watchVerdict,
 } from './pending-watch.ts'

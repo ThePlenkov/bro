@@ -30,6 +30,17 @@ export interface SessionPlane {
    *  actually write to. Throws SpawnError('unavailable') when the
    *  count can't be established — admission fails closed. */
   countLive(bag: Record<string, unknown>, workerEnv?: Record<string, string>): number
+  /** The spawned-worker subset of countLive — the sessions
+   *  `agents.<kind>.maxWorkers` gates. Planes that cannot tell a
+   *  spawned worker from an interactive session leave this
+   *  unimplemented; arming maxWorkers on such a plane refuses 'config'
+   *  at admission, never a silent unguard. Same fail-closed contract
+   *  as countLive — a host where the worker split cannot be verified
+   *  at all throws SpawnError('unavailable'). A plane that can see
+   *  which of its sessions' pids are already counted may also retire
+   *  landed `.slot` reservations inside its count — the admission
+   *  tally runs after it, so a landed spawn is not counted twice. */
+  countWorkers?(bag: Record<string, unknown>, workerEnv?: Record<string, string>): number
 }
 
 // --- plane registry ------------------------------------------------------------
@@ -69,16 +80,20 @@ export function clearSessionPlanes(): void {
 
 // --- quota config ----------------------------------------------------------------
 
-/** `agents.<kind>` → the admission lane. `maxSessions` absent or an
- *  explicit 0 means uncapped (same convention as fleet.maxConcurrent);
- *  a present-but-malformed value flags `invalid` — a typo must refuse
- *  loudly at admission, never silently unguard. `reservationsDir` is a
- *  generic override (reservations are bro's own files); every other
- *  key in the bag is the plane's private config, handed to countLive. */
+/** `agents.<kind>` → the admission lanes. `maxSessions`/`maxWorkers`
+ *  absent or an explicit 0 mean uncapped (same convention as
+ *  fleet.maxConcurrent); a quota exists when EITHER lane is armed. A
+ *  present-but-malformed value flags `invalid` with `invalidKey`
+ *  naming the bad knob — a typo must refuse loudly at admission, never
+ *  silently unguard. `reservationsDir` is a generic override
+ *  (reservations are bro's own files); every other key in the bag is
+ *  the plane's private config, handed to countLive/countWorkers. */
 export interface SessionQuota {
   maxSessions: number
+  maxWorkers?: number
   reservationsDir?: string
   invalid?: boolean
+  invalidKey?: string
 }
 
 export function sessionQuotaConfig(
@@ -89,16 +104,41 @@ export function sessionQuotaConfig(
   if (bag === undefined) {
     return undefined
   }
-  const max = bag['maxSessions']
   const reservationsDir =
     typeof bag['reservationsDir'] === 'string' ? bag['reservationsDir'] : undefined
-  if (max === undefined || max === 0) {
+  const lane = (
+    key: 'maxSessions' | 'maxWorkers'
+  ): { n: number } | { invalid: true } | undefined => {
+    const v = bag[key]
+    if (v === undefined || v === 0) {
+      return undefined
+    }
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) {
+      return { invalid: true }
+    }
+    return { n: v }
+  }
+  const sessions = lane('maxSessions')
+  const workers = lane('maxWorkers')
+  if (sessions === undefined && workers === undefined) {
     return undefined
   }
-  if (typeof max !== 'number' || !Number.isInteger(max) || max < 0) {
-    return { maxSessions: 0, reservationsDir, invalid: true }
+  const bad = sessions !== undefined && 'invalid' in sessions
+    ? 'maxSessions'
+    : workers !== undefined && 'invalid' in workers
+      ? 'maxWorkers'
+      : undefined
+  if (bad !== undefined) {
+    return { maxSessions: 0, reservationsDir, invalid: true, invalidKey: bad }
   }
-  return { maxSessions: max, reservationsDir }
+  const quota: SessionQuota = {
+    maxSessions: sessions !== undefined && 'n' in sessions ? sessions.n : 0,
+    reservationsDir,
+  }
+  if (workers !== undefined && 'n' in workers) {
+    quota.maxWorkers = workers.n
+  }
+  return quota
 }
 
 // --- slot reservations -----------------------------------------------------------
@@ -176,6 +216,62 @@ export function releaseSessionSlot(path: string): void {
   rmSync(path, { force: true })
 }
 
+/** The lane checks inside the admission mutex. The plane counts run
+ *  BEFORE the reservation tally: a plane that can see its own session
+ *  marks retires a landed spawn's still-fresh `.slot` inside its own
+ *  count, and the tally must see that sweep — otherwise a landed
+ *  worker counts twice (live + reservation) and the cap refuses
+ *  before reaching its configured capacity. Every remaining
+ *  reservation is an in-flight spawn — the slot feed is worker-only
+ *  by construction. Throws SpawnError — 'config' when a knob is
+ *  unusable, 'cap' when a lane is full, 'unavailable' when a count
+ *  can't be established. */
+function checkSessionLanes(
+  plane: SessionPlane,
+  bag: Record<string, unknown>,
+  quota: SessionQuota,
+  resDir: string,
+  opts: { molStep?: string; workerEnv?: Record<string, string> }
+): void {
+  const refused = opts.molStep !== undefined ? ` — spawn of ${opts.molStep} refused` : ''
+  const maxWorkers = quota.maxWorkers ?? 0
+  const sessions = quota.maxSessions > 0 ? plane.countLive(bag, opts.workerEnv) : 0
+  const workers =
+    maxWorkers > 0 && plane.countWorkers !== undefined
+      ? plane.countWorkers(bag, opts.workerEnv)
+      : 0
+  const reservations = countSessionReservations(resDir)
+  if (quota.maxSessions > 0 && sessions + reservations >= quota.maxSessions) {
+    throw new SpawnError(
+      `${plane.kind} session quota reached — ${sessions + reservations}/${quota.maxSessions} live sessions ` +
+        `(agents.${plane.kind}.maxSessions in bro.config)` +
+        refused,
+      'cap'
+    )
+  }
+  if (maxWorkers > 0) {
+    if (plane.countWorkers === undefined) {
+      // arming a worker cap on a plane that cannot tell workers
+      // from interactive sessions is a config bug — refuse
+      // loudly rather than spawn past it
+      throw new SpawnError(
+        `agents.${plane.kind}.maxWorkers is set but the '${plane.kind}' session plane ` +
+          `cannot distinguish worker sessions` +
+          refused,
+        'config'
+      )
+    }
+    if (workers + reservations >= maxWorkers) {
+      throw new SpawnError(
+        `${plane.kind} worker quota reached — ${workers + reservations}/${maxWorkers} live workers ` +
+          `(agents.${plane.kind}.maxWorkers in bro.config)` +
+          refused,
+        'cap'
+      )
+    }
+  }
+}
+
 /** Atomic host-wide admission: the plane's live count + held
  *  reservations and the slot claim run under ONE mutex shared by every
  *  repo — a per-repo registry lock cannot serialize this, so without
@@ -183,10 +279,12 @@ export function releaseSessionSlot(path: string): void {
  *  sits inside the slots dir under a non-`.slot` name so the counter
  *  never reads it as a reservation. Returns the reservation path —
  *  released by the caller when the spawn fails before a session
- *  exists; a landed session needs no release (its own mark is the
- *  count, the file ages out). Throws SpawnError — 'config' when the
- *  cap is misconfigured, 'cap' when full, 'unavailable' when the count
- *  can't be established or the mutex outlives its wait. */
+ *  exists; a landed session needs no release — its own mark is the
+ *  count, and a plane that can see its marks retires the slot inside
+ *  its next count (the TTL still bounds what's left). Throws
+ *  SpawnError — 'config' when the cap is misconfigured, 'cap' when
+ *  full, 'unavailable' when the count can't be established or the
+ *  mutex outlives its wait. */
 export function admitSessionSlot(
   plane: SessionPlane,
   agents: Record<string, Record<string, unknown>> | undefined,
@@ -206,21 +304,12 @@ export function admitSessionSlot(
           // a present-but-unparsable cap is a config bug — refuse
           // loudly rather than spawn past a quota the operator armed
           throw new SpawnError(
-            `agents.${plane.kind}.maxSessions must be a positive integer` +
+            `agents.${plane.kind}.${quota.invalidKey ?? 'maxSessions'} must be a positive integer` +
               (opts.molStep !== undefined ? ` — spawn of ${opts.molStep} refused` : ''),
             'config'
           )
         }
-        const live =
-          plane.countLive(bag, opts.workerEnv) + countSessionReservations(resDir)
-        if (live >= quota.maxSessions) {
-          throw new SpawnError(
-            `${plane.kind} session quota reached — ${live}/${quota.maxSessions} live sessions ` +
-              `(agents.${plane.kind}.maxSessions in bro.config)` +
-              (opts.molStep !== undefined ? ` — spawn of ${opts.molStep} refused` : ''),
-            'cap'
-          )
-        }
+        checkSessionLanes(plane, bag, quota, resDir, opts)
         return reserveSessionSlot(resDir, opts.key)
       },
       { label: `${plane.kind} session quota admission` }

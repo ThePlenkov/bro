@@ -10,10 +10,12 @@
  *   bro rig status [--repo] [--json] the read plane — no network
  *   bro rig watch [--every N]        the supervisor loop (setsid shape)
  *      [--for S]
- *   bro rig install [--every N]      the cadence on a real scheduler —
- *      [--print]                        systemd user timer or managed
- *                                    crontab line, survives reboot
- *   bro rig uninstall                strip the scheduled entry
+ *   bro rig install [--every N]      arm the cadence — a rig-pulse.json
+ *      [--print]                        want-marker the session's
+ *                                    checkpoints rearm a bounded watch
+ *                                    window from (bro-killn: no OS
+ *                                    scheduler, the session owns it)
+ *   bro rig uninstall                disarm the marker
  *
  * The target is "the local main checkout": `--repo` > `rig.repo` >
  * the main worktree of the repo containing cwd — a scratch `loop/*`
@@ -30,32 +32,34 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import {
+  awaitFileLock,
   dropMailbox,
   gitTry,
   loadConfig,
   LockTimeout,
   mailboxDir,
   withFileLock,
+  worktreeGitDir,
 } from '@broject/core'
 import { flag, positionals } from './args.ts'
 import { MIN_INTERVAL_SEC, MAX_INTERVAL_SEC } from './drive-config.ts'
-import { cliVersion } from './githooks.ts'
 import {
   freshnessSection,
   postMergeDoneSha,
   resolveSteps,
   runPostMergeRefresh,
-  worktreeGitDir,
   type FreshnessConfig,
 } from './postmerge.ts'
 import { rigSection, type RigConfig } from './rig-config.ts'
 import {
-  installSched,
-  schedState,
-  shq,
-  uninstallSched,
-  type SchedSpec,
-} from './sched.ts'
+  armRigPulse,
+  disarmRigPulse,
+  rigPulseLive,
+  rigPulseLockPath,
+  rigPulseMarkerPath,
+  rigPulseState,
+} from './rig-pulse.ts'
+import { isOrchestratorSession } from './watch-pulse.ts'
 import { parseWorktreePorcelain } from './work.ts'
 
 /** Two concurrent syncs on one checkout race `git merge` against
@@ -63,32 +67,6 @@ import { parseWorktreePorcelain } from './work.ts'
  *  turns the second caller into a clean 'skipped'. Held through the
  *  refresh so a poller can't observe the pulled-but-unbuilt gap. */
 const LOCK_WAIT_MS = 60_000
-
-export const RIG_SPEC: SchedSpec = {
-  prefix: 'bro-rig',
-  label: 'bro rig freshness',
-  hint: 'bro rig install',
-  invocation: (version: string) =>
-    `bro rig sync || npx -y --prefer-offline "@broject/bro@${version}" rig sync`,
-}
-
-/** The unit's ExecStart re-resolves the repo at tick time — a bare
- *  `rig sync` in the WorkingDirectory lands on the repo's MAIN
- *  worktree, silently dropping an explicit --repo/rig.repo target
- *  (an operator naming a linked worktree means that worktree). The
- *  override is baked into the invocation; an auto-resolved install
- *  stays bare so the unit follows the worktree layout. */
-function rigSpec(resolved: RigRepo): SchedSpec {
-  if (resolved.via === 'worktree') {
-    return RIG_SPEC
-  }
-  const sync = `rig sync --repo ${shq(resolved.repo)}`
-  return {
-    ...RIG_SPEC,
-    invocation: (version: string) =>
-      `bro ${sync} || npx -y --prefer-offline "@broject/bro@${version}" ${sync}`,
-  }
-}
 
 /** `~` expands; a relative path resolves against cwd — operator
  *  configs should write absolute paths, but a relative one must not
@@ -231,33 +209,11 @@ function syncOnce(repo: string, deps: RigSyncDeps): RigSyncResult {
     }
   }
 
-  let pulled: { from: string; to: string } | undefined
-  if (behind > 0) {
-    if (ahead > 0) {
-      return {
-        ...base,
-        state: 'error',
-        branch,
-        upstream,
-        detail: `diverged from ${upstream} (${ahead} ahead, ${behind} behind) — needs a manual rebase`,
-      }
-    }
-    const from = gitIn(repo, ['rev-parse', 'HEAD']).out.trim()
-    const merge = gitIn(repo, ['merge', '--ff-only', '@{upstream}'])
-    if (merge.code !== 0) {
-      return {
-        ...base,
-        state: 'error',
-        branch,
-        upstream,
-        detail: `merge --ff-only ${upstream}: ${merge.err || merge.out.trim()}`,
-      }
-    }
-    pulled = { from, to: gitIn(repo, ['rev-parse', 'HEAD']).out.trim() }
-    ;(deps.notify ?? ((t) => notifyDrop(repo, t)))(
-      `rig: pulled ${pulled.from.slice(0, 12)}..${pulled.to.slice(0, 12)} into ${repo} — refresh queued`
-    )
+  const pull = pullPhase(repo, branch, upstream, ahead, behind, deps)
+  if ('error' in pull) {
+    return pull.error
   }
+  const pulled = pull.pulled
 
   const head = gitIn(repo, ['rev-parse', 'HEAD']).out.trim()
   const span = pulled === undefined ? '' : `${pulled.from.slice(0, 12)}..${pulled.to.slice(0, 12)}`
@@ -316,6 +272,49 @@ function syncOnce(repo: string, deps: RigSyncDeps): RigSyncResult {
   }
 }
 
+/** The ff-only catch-up — diverged checkouts and failed merges are
+ *  errors the caller reports; a successful pull drops the mailbox
+ *  transition. Extracted so `syncOnce` reads guard → fetch → pull →
+ *  refresh in one straight line. */
+function pullPhase(
+  repo: string,
+  branch: string,
+  upstream: string,
+  ahead: number,
+  behind: number,
+  deps: RigSyncDeps
+): { pulled?: { from: string; to: string } } | { error: RigSyncResult } {
+  const base = { repo, branch, upstream }
+  if (behind === 0) {
+    return {}
+  }
+  if (ahead > 0) {
+    return {
+      error: {
+        ...base,
+        state: 'error',
+        detail: `diverged from ${upstream} (${ahead} ahead, ${behind} behind) — needs a manual rebase`,
+      },
+    }
+  }
+  const from = gitIn(repo, ['rev-parse', 'HEAD']).out.trim()
+  const merge = gitIn(repo, ['merge', '--ff-only', '@{upstream}'])
+  if (merge.code !== 0) {
+    return {
+      error: {
+        ...base,
+        state: 'error',
+        detail: `merge --ff-only ${upstream}: ${merge.err || merge.out.trim()}`,
+      },
+    }
+  }
+  const to = gitIn(repo, ['rev-parse', 'HEAD']).out.trim()
+  ;(deps.notify ?? ((t) => notifyDrop(repo, t)))(
+    `rig: pulled ${from.slice(0, 12)}..${to.slice(0, 12)} into ${repo} — refresh queued`
+  )
+  return { pulled: { from, to } }
+}
+
 // --- status -------------------------------------------------------------------
 
 export interface RigStatus {
@@ -332,7 +331,7 @@ export interface RigStatus {
   doneSha?: string
   fresh?: boolean
   steps?: string[]
-  scheduler?: string
+  pulse?: string
 }
 
 /** The read plane — stored refs only, no fetch: `behind` is what the
@@ -377,8 +376,19 @@ export function rigStatus(repo: string, via: string): RigStatus {
     // pull can queue, which is what an operator audits
     out.steps = resolveSteps(repo, freshness, true)
   }
-  out.scheduler = schedState(RIG_SPEC, repo).state
+  out.pulse = rigPulseState(repo)
   return out
+}
+
+function refreshLine(s: RigStatus): string {
+  if (s.bootstrapped === false) {
+    return 'n/a — not bootstrapped (needs package.json + node_modules)'
+  }
+  if (s.fresh === true) {
+    return `fresh @ ${(s.head ?? '').slice(0, 12)}`
+  }
+  const done = (s.doneSha ?? '') === '' ? '(none)' : (s.doneSha ?? '').slice(0, 12)
+  return `stale — done ${done} ≠ HEAD ${(s.head ?? '').slice(0, 12)}`
 }
 
 function printStatus(s: RigStatus): void {
@@ -387,27 +397,18 @@ function printStatus(s: RigStatus): void {
     console.log(`error:    ${s.error}`)
     return
   }
-  const track =
-    s.upstream === undefined
-      ? '(no upstream)'
-      : `${s.upstream}${s.ahead !== undefined ? ` — ahead ${s.ahead}, behind ${s.behind}` : ''}`
+  const drift = s.ahead !== undefined ? ` — ahead ${s.ahead}, behind ${s.behind}` : ''
+  const track = s.upstream === undefined ? '(no upstream)' : `${s.upstream}${drift}`
+  const dirty =
+    s.dirty === undefined ? 'unknown' : s.dirty === 0 ? 'clean' : `dirty (${s.dirty})`
   console.log(`branch:   ${s.branch} → ${track}`)
-  console.log(
-    `worktree: ${s.dirty === undefined ? 'unknown' : s.dirty === 0 ? 'clean' : `dirty (${s.dirty})`}`
-  )
-  console.log(
-    `refresh:  ${
-      s.bootstrapped === false
-        ? 'n/a — not bootstrapped (needs package.json + node_modules)'
-        : s.fresh === true
-          ? `fresh @ ${(s.head ?? '').slice(0, 12)}`
-          : `stale — done ${(s.doneSha ?? '') === '' ? '(none)' : (s.doneSha ?? '').slice(0, 12)} ≠ HEAD ${(s.head ?? '').slice(0, 12)}`
-    }`
-  )
+  console.log(`worktree: ${dirty}`)
+  console.log(`refresh:  ${refreshLine(s)}`)
   if (s.bootstrapped === true) {
-    console.log(`steps:    ${s.steps !== undefined && s.steps.length > 0 ? s.steps.join(' && ') : '(none resolved)'}`)
+    const steps = s.steps !== undefined && s.steps.length > 0 ? s.steps.join(' && ') : '(none resolved)'
+    console.log(`steps:    ${steps}`)
   }
-  console.log(`sched:    ${s.scheduler}`)
+  console.log(`pulse:    ${s.pulse}`)
 }
 
 // --- dispatch -----------------------------------------------------------------
@@ -418,7 +419,8 @@ function usage(): never {
   bro rig status [--repo <dir>] [--json]
   bro rig watch [--repo <dir>] [--every SEC] [--for SEC]
   bro rig install [--repo <dir>] [--every SEC] [--print]
-  bro rig uninstall [--repo <dir>]`)
+  bro rig uninstall [--repo <dir>]
+  install arms the session pulse — no OS timer is written`)
   process.exit(2)
 }
 
@@ -432,9 +434,8 @@ export async function runRigCommand(argv: string[]): Promise<void> {
   // flags read from the full argv — `--repo` is legal before the
   // subcommand too, and must not silently drop
   const cwd = process.cwd()
-  const cfg = (loadConfig(cwd, { rig: rigSection }) as { rig?: RigConfig }).rig ?? {
-    intervalSec: 600,
-  }
+  const cfg =
+    (loadConfig(cwd, { rig: rigSection }) as { rig?: RigConfig }).rig ?? rigSection(undefined)
   const resolved = resolveRigRepo(cwd, cfg, flag(argv, '--repo'))
 
   if (sub === 'sync') {
@@ -485,19 +486,48 @@ export async function runRigCommand(argv: string[]): Promise<void> {
       console.error(`error: --for needs a finite seconds value >0, got "${forRaw}"`)
       process.exit(2)
     }
+    // GUARD (bro-killn): spawned workers pin BRO_AGENT_ID at spawn —
+    // they never own a cadence; the orchestrator session does. Same
+    // predicate and refusal shape as `bro watch --every`.
+    if (!isOrchestratorSession()) {
+      console.error(
+        'error: BRO_AGENT_ID is set — spawned workers never run the rig cadence; ' +
+          'the orchestrator session owns it'
+      )
+      process.exit(2)
+    }
     // the bound starts before the first tick — a slow pull already
     // spends --for budget (watch's contract)
     const deadline =
       forSec === undefined ? Number.POSITIVE_INFINITY : performance.now() + forSec * 1000
     const repo = resolved.repo
-    for (;;) {
-      const r = rigSync(repo)
-      console.log(`[${new Date().toISOString()}] rig ${r.state}: ${r.detail}`)
-      if (performance.now() >= deadline) {
-        console.log('rig watch: --for expired')
-        return
+    // One rig pulse per repo: `bro/rig-pulse.lock` is held for the
+    // process lifetime — a rearmed window stands by behind the
+    // incumbent and takes over when it exits, never ticks concurrently
+    // (same contract as the watch pulse, spec bro-2duu9).
+    const lock = rigPulseLockPath(repo)
+    const releasePulse =
+      lock === null
+        ? () => {}
+        : await awaitFileLock(lock, {
+            label: 'rig pulse lock',
+            onStandby: (pid) =>
+              console.error(
+                `bro rig watch: pulse already held${pid === null ? '' : ` by pid ${pid}`} — standing by`
+              ),
+          })
+    try {
+      for (;;) {
+        const r = rigSync(repo)
+        console.log(`[${new Date().toISOString()}] rig ${r.state}: ${r.detail}`)
+        if (performance.now() >= deadline) {
+          console.log('rig watch: --for expired')
+          return
+        }
+        await sleep(Math.min(everySec * 1000, deadline - performance.now()))
       }
-      await sleep(Math.min(everySec * 1000, deadline - performance.now()))
+    } finally {
+      releasePulse()
     }
   }
 
@@ -514,12 +544,32 @@ export async function runRigCommand(argv: string[]): Promise<void> {
       )
       process.exit(2)
     }
-    const r = installSched(rigSpec(resolved), resolved.repo, cliVersion(), {
-      everySec,
-      print: argv.includes('--print'),
-    })
-    console.log(r.detail)
-    process.exit(r.state === 'error' ? 1 : 0)
+    const win = Math.max(cfg.pulseSec, everySec)
+    const rearm = `bro rig watch --repo ${resolved.repo} --every ${everySec} --for ${win}`
+    if (argv.includes('--print')) {
+      console.log(
+        [
+          `# ${rigPulseMarkerPath(resolved.repo)} — the want-marker; session checkpoints rearm a dead pulse from it`,
+          JSON.stringify({ repo: resolved.repo, everySec, armedAt: '<install time>' }, null, 2),
+          '# the session owns the cadence — no OS timer is installed:',
+          `${rearm}   # bounded window; a dead pulse rearms on the next checkpoint`,
+        ].join('\n')
+      )
+      process.exit(0)
+    }
+    try {
+      const arm = armRigPulse(resolved.repo, resolved.repo, everySec)
+      const verb =
+        arm.state === 'already' ? 'already armed' : arm.state === 'updated' ? 're-armed' : 'armed'
+      console.log(
+        `rig pulse ${verb} — ${rearm} ` +
+          '(the session owns the cadence; no OS timer installed)'
+      )
+      process.exit(0)
+    } catch (err) {
+      console.error(`bro rig: ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(1)
+    }
   }
 
   if (sub === 'uninstall') {
@@ -527,9 +577,20 @@ export async function runRigCommand(argv: string[]): Promise<void> {
       console.error(`bro rig: ${resolved.error}`)
       process.exit(1)
     }
-    const r = uninstallSched(RIG_SPEC, resolved.repo)
-    console.log(r.detail)
-    process.exit(r.state === 'error' ? 1 : 0)
+    const marker = disarmRigPulse(resolved.repo)
+    // a running `bro rig watch` keeps its lock until it exits —
+    // disarm drops the rearm intent, not the live process
+    const live = rigPulseLive(resolved.repo)
+    const liveNote = live.live ? `live rig pulse still running (pid ${live.pid}) — exits on its own` : ''
+    console.log(
+      [
+        marker === 'disarmed' ? 'rig pulse disarmed' : 'no rig pulse marker',
+        liveNote,
+      ]
+        .filter((s) => s !== '')
+        .join(' — ')
+    )
+    process.exit(0)
   }
 
   usage()

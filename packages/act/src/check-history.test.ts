@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { tmpDir } from './testtmp.ts'
 import { describe, test } from 'node:test'
 import { fileCheckHistory } from './check-history.ts'
 
 function tmp(): string {
-  return join(mkdtempSync(join(tmpdir(), 'bro-checkhist-')), 'act-checks.jsonl')
+  return join(tmpDir('bro-checkhist-'), 'act-checks.jsonl')
 }
 
 const obs = (name: string, sha: string, bucket: string) => ({
@@ -99,7 +99,7 @@ describe('fileCheckHistory', () => {
   test('record is a no-op on an unwritable path', () => {
     // a path inside a regular file: mkdir fails ENOTDIR — record must
     // swallow it, not throw
-    const blocker = join(mkdtempSync(join(tmpdir(), 'bro-checkhist-')), 'file')
+    const blocker = join(tmpDir('bro-checkhist-'), 'file')
     writeFileSync(blocker, 'x')
     const h = fileCheckHistory(join(blocker, 'ledger.jsonl'))
     h.record(obs('kilo', 'a'.repeat(40), 'fail'))
