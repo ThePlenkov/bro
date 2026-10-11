@@ -206,7 +206,7 @@ export function spawnDaemon(dir: string, everySec: number): { pid: number; log: 
  *  owes them the same SIGTERM or a standby quietly inherits it). */
 function supervisionProcs(): number[] {
   try {
-    const out = execFileSync('pgrep', ['-f', '(daemon run|drive) --every'], {
+    const out = execFileSync('pgrep', ['-f', '(daemon run|drive) --every'], { // NOSONAR — pgrep is a required runtime dep; env below pins PATH to fixed unwriteable dirs
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       // fixed, unwriteable PATH for the binary lookup — the default
