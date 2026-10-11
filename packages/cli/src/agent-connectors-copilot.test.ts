@@ -3,7 +3,13 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { readAgentRegistry, sessionPlane, SpawnError, AgentNotFound } from '@broject/core'
+import {
+  readAgentRegistry,
+  sessionPlane,
+  SpawnError,
+  AgentNotFound,
+  type AgentConnector,
+} from '@broject/core'
 import {
   agentConnectorNames,
   fleetOccupancyFor,
@@ -169,6 +175,39 @@ const SPEC = (main: string, beadsDir: string, molStep: string) => ({
   prompt: 'do the work',
 })
 
+type SpawnArg = Parameters<AgentConnector['spawn']>[0]
+
+/** conn + one dispatched task + a mutator for the fake store's task
+ *  state — the prelude nearly every live-task test shares. */
+const spawnedTask = async (fx: Fixture) => {
+  const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
+  const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
+  const setState = (state: string) => {
+    const db = fx.gh()
+    db.tasks[0]!.state = state
+    fx.saveGh(db)
+  }
+  return { conn, info, setState }
+}
+
+/** A spawn that must throw — returns the SpawnError it threw. */
+const spawnErr = async (conn: AgentConnector, spec: SpawnArg): Promise<SpawnError> => {
+  const err = await conn.spawn(spec).then(() => null).catch((e) => e)
+  assert.ok(err instanceof SpawnError, `expected SpawnError, got ${err}`)
+  return err
+}
+
+/** The armed-quota prelude every plane test shares — returns the
+ *  reservations dir the knobs now point at. */
+const planeSlots = (fx: Fixture): string => {
+  const resDir = join(fx.root, 'slots')
+  fx.env.agents['copilot']!['reservationsDir'] = resDir
+  return resDir
+}
+
+const readCount = (resDir: string): { at: number; count: number; ids: string[] } =>
+  JSON.parse(readFileSync(copilotCountFile(resDir), 'utf8'))
+
 describe('copilot connector', () => {
   test("spawn claims the bead on the task's behalf, then dispatches and pins taskId", async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
@@ -201,12 +240,10 @@ describe('copilot connector', () => {
   test('no repo target is a config error naming agents.copilot.repo', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }], {})
     try {
-      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
-      const err = await conn
-        .spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-        .then(() => null)
-        .catch((e) => e)
-      assert.ok(err instanceof SpawnError, `expected SpawnError, got ${err}`)
+      const err = await spawnErr(
+        makeCopilotConnector({ dir: fx.main }, fx.env),
+        SPEC(fx.main, fx.beadsDir, 'fx-1')
+      )
       assert.equal(err.kind, 'config')
       assert.match(String(err), /agents\.copilot\.repo/)
       // refused before the claim — the bead is still open
@@ -232,12 +269,10 @@ describe('copilot connector', () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
       process.env.FAKE_GH_FAIL = 'agents/repos'
-      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
-      const err = await conn
-        .spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-        .then(() => null)
-        .catch((e) => e)
-      assert.ok(err instanceof SpawnError, `expected SpawnError, got ${err}`)
+      const err = await spawnErr(
+        makeCopilotConnector({ dir: fx.main }, fx.env),
+        SPEC(fx.main, fx.beadsDir, 'fx-1')
+      )
       assert.equal(err.kind, 'unavailable')
       assert.match(String(err), /Copilot coding agent enabled/)
       // the claim+entry stand (respawn-able) with the failure recorded
@@ -263,12 +298,9 @@ describe('copilot connector', () => {
   test('queued reads spawned; in_progress reads running', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
-      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
-      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
+      const { conn, info, setState } = await spawnedTask(fx)
       assert.equal((await conn.status(info.id)).state, 'spawned')
-      const db = fx.gh()
-      db.tasks[0]!.state = 'in_progress'
-      fx.saveGh(db)
+      setState('in_progress')
       assert.equal((await conn.status(info.id)).state, 'running')
     } finally {
       cleanup(fx)
@@ -278,17 +310,13 @@ describe('copilot connector', () => {
   test('terminal states harvest the exit record: completed → exited/ok, cancelled → stopped', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
-      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
-      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-      const db = fx.gh()
-      db.tasks[0]!.state = 'completed'
-      fx.saveGh(db)
+      const { conn, info, setState } = await spawnedTask(fx)
+      setState('completed')
       assert.equal((await conn.status(info.id)).state, 'exited')
       let entry = readAgentRegistry(fx.main)['fx-1']!
       assert.equal(entry.exitStatus, 0)
       assert.equal(entry.cause, 'ok')
-      db.tasks[0]!.state = 'cancelled'
-      fx.saveGh(db)
+      setState('cancelled')
       assert.equal((await conn.status(info.id)).state, 'stopped')
       entry = readAgentRegistry(fx.main)['fx-1']!
       assert.equal(entry.stopped, true)
@@ -304,10 +332,9 @@ describe('copilot connector', () => {
       { prs: [{ number: 42, head_ref: 'copilot/fx-1' }] }
     )
     try {
-      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
-      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
+      const { conn, info, setState } = await spawnedTask(fx)
+      setState('failed')
       const db = fx.gh()
-      db.tasks[0]!.state = 'failed'
       db.tasks[0]!.sessions![0]!.state = 'failed'
       ;(db.tasks[0]!.sessions![0] as { error?: { message: string } }).error = {
         message: 'rate limit exceeded — wait for reset',
@@ -334,8 +361,7 @@ describe('copilot connector', () => {
   test('an API failure degrades the list — agents read spawned, never lost', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
-      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
-      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
+      const { conn, info } = await spawnedTask(fx)
       process.env.FAKE_GH_FAIL = 'agents/tasks'
       const l = await conn.list()
       assert.ok(l.degraded !== undefined)
@@ -349,11 +375,8 @@ describe('copilot connector', () => {
   test('an unrecognised remote state degrades — preview drift is not a corpse', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
-      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
-      await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-      const db = fx.gh()
-      db.tasks[0]!.state = 'paused' // a state this build predates
-      fx.saveGh(db)
+      const { conn, setState } = await spawnedTask(fx)
+      setState('paused') // a state this build predates
       const l = await conn.list()
       assert.match(String(l.degraded), /unrecognised task state/)
       assert.equal(l.agents[0]!.state, 'spawned')
@@ -365,11 +388,8 @@ describe('copilot connector', () => {
   test('stop cancels the backing Actions run, then records stopped', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
-      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
-      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-      const db = fx.gh()
-      db.tasks[0]!.state = 'in_progress'
-      fx.saveGh(db)
+      const { conn, info, setState } = await spawnedTask(fx)
+      setState('in_progress')
       await conn.stop(info.id)
       assert.deepEqual(fx.gh().cancelledRuns, [701])
       assert.equal(readAgentRegistry(fx.main)['fx-1']!.stopped, true)
@@ -386,11 +406,8 @@ describe('copilot connector', () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
       process.env.FAKE_GH_NOCANCEL = '1'
-      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
-      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-      const db = fx.gh()
-      db.tasks[0]!.state = 'in_progress'
-      fx.saveGh(db)
+      const { conn, info, setState } = await spawnedTask(fx)
+      setState('in_progress')
       const warns: string[] = []
       const orig = console.error
       console.error = (m: unknown) => warns.push(String(m))
@@ -409,11 +426,8 @@ describe('copilot connector', () => {
   test('respawn after a terminal task mints a new remote task on the same agentId', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
-      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
-      const first = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-      const db = fx.gh()
-      db.tasks[0]!.state = 'completed'
-      fx.saveGh(db)
+      const { conn, info: first, setState } = await spawnedTask(fx)
+      setState('completed')
       await conn.list() // harvest the death so the respawn is legal
       const second = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
       assert.equal(second.id, first.id)
@@ -432,15 +446,10 @@ describe('copilot connector', () => {
   test('a provider-resolved worker refuses — remote sessions take no local command', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
-      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
-      const err = await conn
-        .spawn({
-          ...SPEC(fx.main, fx.beadsDir, 'fx-1'),
-          worker: { kind: 'argv', argv: ['x'], cliName: 'x' },
-        })
-        .then(() => null)
-        .catch((e) => e)
-      assert.ok(err instanceof SpawnError, `expected SpawnError, got ${err}`)
+      const err = await spawnErr(makeCopilotConnector({ dir: fx.main }, fx.env), {
+        ...SPEC(fx.main, fx.beadsDir, 'fx-1'),
+        worker: { kind: 'argv', argv: ['x'], cliName: 'x' },
+      })
       assert.equal(err.kind, 'config')
       assert.equal(fx.rows()[0]!.status, 'open')
     } finally {
@@ -451,12 +460,9 @@ describe('copilot connector', () => {
   test('fleet occupancy counts a live remote task and frees a dead one', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
-      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
-      await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
+      const { setState } = await spawnedTask(fx)
       assert.equal(fleetOccupancyFor(fx.main, fx.env), 1)
-      const db = fx.gh()
-      db.tasks[0]!.state = 'completed'
-      fx.saveGh(db)
+      setState('completed')
       assert.equal(fleetOccupancyFor(fx.main, fx.env), 0)
     } finally {
       cleanup(fx)
@@ -496,8 +502,7 @@ describe('copilot session plane', () => {
       { repo: 'octo/repo', maxSessions: 1, reservationsDir: '' }
     )
     try {
-      const resDir = join(fx.root, 'slots')
-      fx.env.agents['copilot']!['reservationsDir'] = resDir
+      const resDir = planeSlots(fx)
       const plane = sessionPlane('copilot')!
       // no cache at all — the remote count is unverifiable, not zero
       assert.throws(() => plane.countLive({ reservationsDir: resDir }), /absent or corrupt/)
@@ -505,12 +510,10 @@ describe('copilot session plane', () => {
       // and with the API unreachable the spawn's own refresh can't
       // produce one either — a quota never spawns blind
       process.env.FAKE_GH_FAIL = 'agents/tasks'
-      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
-      const err = await conn
-        .spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-        .then(() => null)
-        .catch((e) => e)
-      assert.ok(err instanceof SpawnError, `expected SpawnError, got ${err}`)
+      const err = await spawnErr(
+        makeCopilotConnector({ dir: fx.main }, fx.env),
+        SPEC(fx.main, fx.beadsDir, 'fx-1')
+      )
       assert.equal(err.kind, 'unavailable')
     } finally {
       cleanup(fx)
@@ -523,14 +526,12 @@ describe('copilot session plane', () => {
       { repo: 'octo/repo', maxSessions: 2, reservationsDir: '' }
     )
     try {
-      const resDir = join(fx.root, 'slots')
-      fx.env.agents['copilot']!['reservationsDir'] = resDir
+      const resDir = planeSlots(fx)
       const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
       // no status/list ran — spawn's own pre-admission refresh lands
       // the cache (here: zero remote tasks) instead of failing closed
       await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-      const cache = JSON.parse(readFileSync(copilotCountFile(resDir), 'utf8'))
-      assert.equal(cache.count, 1)
+      assert.equal(readCount(resDir).count, 1)
     } finally {
       cleanup(fx)
     }
@@ -545,8 +546,7 @@ describe('copilot session plane', () => {
       { repo: 'octo/repo', maxSessions: 2, reservationsDir: '' }
     )
     try {
-      const resDir = join(fx.root, 'slots')
-      fx.env.agents['copilot']!['reservationsDir'] = resDir
+      const resDir = planeSlots(fx)
       const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
       const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
       // the spawn's post-dispatch refresh already swept the slot —
@@ -576,12 +576,9 @@ describe('copilot session plane', () => {
       { tasks, seq: 200 }
     )
     try {
-      const resDir = join(fx.root, 'slots')
-      fx.env.agents['copilot']!['reservationsDir'] = resDir
-      const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
-      await conn.list()
-      const cache = JSON.parse(readFileSync(copilotCountFile(resDir), 'utf8'))
-      assert.equal(cache.count, 150)
+      const resDir = planeSlots(fx)
+      await makeCopilotConnector({ dir: fx.main }, fx.env).list()
+      assert.equal(readCount(resDir).count, 150)
     } finally {
       cleanup(fx)
     }
@@ -604,22 +601,16 @@ describe('copilot session plane', () => {
       }
     )
     try {
-      const resDir = join(fx.root, 'slots')
-      fx.env.agents['copilot']!['reservationsDir'] = resDir
+      const resDir = planeSlots(fx)
       const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
       // the refresh rides a connector read — one external live task lands in the cache
       await conn.list()
-      const cache = JSON.parse(readFileSync(copilotCountFile(resDir), 'utf8'))
+      const cache = readCount(resDir)
       assert.equal(cache.count, 1)
       assert.deepEqual(cache.ids, ['task-ext'])
-      const plane = sessionPlane('copilot')!
-      assert.equal(plane.countLive({ reservationsDir: resDir }), 1)
+      assert.equal(sessionPlane('copilot')!.countLive({ reservationsDir: resDir }), 1)
       // and admission honors it — the spawn refuses under the mutex
-      const err = await conn
-        .spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-        .then(() => null)
-        .catch((e) => e)
-      assert.ok(err instanceof SpawnError, `expected SpawnError, got ${err}`)
+      const err = await spawnErr(conn, SPEC(fx.main, fx.beadsDir, 'fx-1'))
       assert.equal(err.kind, 'cap')
     } finally {
       cleanup(fx)
@@ -632,8 +623,7 @@ describe('copilot session plane', () => {
       { repo: 'octo/repo', maxSessions: 2, reservationsDir: '' }
     )
     try {
-      const resDir = join(fx.root, 'slots')
-      fx.env.agents['copilot']!['reservationsDir'] = resDir
+      planeSlots(fx)
       const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
       await conn.list() // refresh the (empty) count cache
       const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
