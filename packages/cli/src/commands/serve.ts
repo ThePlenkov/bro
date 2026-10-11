@@ -90,6 +90,7 @@ import type { Readable } from 'node:stream'
 import {
   busPublish,
   busSocketPath,
+  deliverSinks,
   gitCommonDir,
   gitTry,
   holdFileLock,
@@ -1188,6 +1189,9 @@ function realDeps(
           // event out to subscribers ahead of the publisher's ack, so
           // a poll woken by the event must already miss the feed entry
           dropActStateForEvent(dir, event)
+          // this ingest bypasses the events facade — sinks fan out in
+          // this process too or a routed webhook never reaches a person
+          void deliverSinks(dir, event)
           return socketPath === null
             ? { published: false as const, reason: 'not a repository' }
             : busPublish(socketPath, event)

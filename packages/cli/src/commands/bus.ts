@@ -17,6 +17,7 @@ import {
   busSocketPath,
   busStatus,
   busSubscribe,
+  deliverSinks,
   startBusBroker,
   type BusEnvelope,
   type BusFilter,
@@ -190,7 +191,11 @@ function publishEventInput(rest: string[]): EventInput {
 }
 
 async function cmdPublish(rest: string[]): Promise<void> {
-  const result = await busPublish(socketOrDie(), publishEventInput(rest))
+  const event = publishEventInput(rest)
+  const result = await busPublish(socketOrDie(), event)
+  // this edge bypasses the events facade — sinks fan out here too or a
+  // hand-published human-moment event would never reach a person
+  void deliverSinks(process.cwd(), event)
   const json = rest.includes('--json')
   if (!result.published) {
     // Not a failure: the broker being down is a routine state, and a

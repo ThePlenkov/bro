@@ -91,7 +91,7 @@ door.
 | Command | What it does |
 | ------- | ------------ |
 | `bro sinks list [--json]` | Resolved sinks — type, route patterns, and each secret env var's set/unset status (never the value) |
-| `bro sinks test [--json]` | Deliver a probe event, report per-sink delivered/skipped/error — verify a webhook before a real event needs it |
+| `bro sinks test [--json]` | Probe every configured sink's endpoint (routes bypassed), report per-sink delivered/deduped/error — verify a webhook before a real event needs it |
 
 ```json
 {

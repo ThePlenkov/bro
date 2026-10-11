@@ -153,6 +153,15 @@ describe('requestFor', () => {
     assert.equal('url' in r && r.url, 'https://hooks.slack.test/x')
   })
 
+  test('a named urlEnv is authoritative — unset env reports missing, no literal fallback', () => {
+    const r = requestFor(
+      { type: 'webhook', url: 'https://literal.test', urlEnv: 'NOPE_VAR' },
+      EVENT,
+      env
+    )
+    assert.deepEqual(r, { missing: 'NOPE_VAR' })
+  })
+
   test('telegram builds the bot-api sendMessage request', () => {
     const r = requestFor(
       { type: 'telegram', tokenEnv: 'TG_TOKEN', chatIdEnv: 'TG_CHAT' },
@@ -193,6 +202,22 @@ describe('requestFor', () => {
 })
 
 describe('deliverSinks', () => {
+  test('all:true delivers past route patterns — the explicit test probe', async () => {
+    await withRepoAsync(async (dir) => {
+      const { fetch, calls } = fakeFetch()
+      const env = { H: 'https://h.test/a' } as unknown as NodeJS.ProcessEnv
+      const results = await deliverSinks(dir, EVENT, {
+        fetch,
+        env,
+        all: true,
+        sinks: [{ type: 'webhook', urlEnv: 'H', events: ['act:*'] }],
+      })
+      assert.equal(results.length, 1)
+      assert.equal(results[0].delivered, true)
+      assert.equal(calls.length, 1)
+    })
+  })
+
   test('delivers to matched sinks, skips unmatched', async () => {
     await withRepoAsync(async (dir) => {
       const { fetch, calls } = fakeFetch()
@@ -252,6 +277,51 @@ describe('deliverSinks', () => {
       })
       assert.equal(results[0].delivered, false)
       assert.equal(results[0].reason, 'conn refused')
+    })
+  })
+
+  test('delivery requests redirect:manual — the secret URL never re-POSTs elsewhere', async () => {
+    await withRepoAsync(async (dir) => {
+      let redirectSeen: string | undefined
+      const fetch = (async (_url: unknown, init: unknown) => {
+        redirectSeen = (init as { redirect?: string }).redirect
+        return { status: 200, text: async () => '' } as Response
+      }) as FetchFn
+      await deliverSinks(dir, EVENT, {
+        fetch,
+        env: { H: 'https://h.test' } as unknown as NodeJS.ProcessEnv,
+        sinks: [{ type: 'webhook', urlEnv: 'H' }],
+      })
+      assert.equal(redirectSeen, 'manual')
+    })
+  })
+
+  test('a 3xx is a failed delivery, not a follow', async () => {
+    await withRepoAsync(async (dir) => {
+      const { fetch, calls } = fakeFetch(() => ({ status: 302 }))
+      const results = await deliverSinks(dir, EVENT, {
+        fetch,
+        env: { H: 'https://h.test' } as unknown as NodeJS.ProcessEnv,
+        sinks: [{ type: 'webhook', urlEnv: 'H' }],
+      })
+      assert.equal(results[0].delivered, false)
+      assert.equal(results[0].reason, 'HTTP 302')
+      assert.equal(calls.length, 1)
+    })
+  })
+
+  test('a fetch error scrubs the endpoint from the reason', async () => {
+    await withRepoAsync(async (dir) => {
+      const boom = (() => {
+        throw new TypeError('fetch failed: https://secret.test/hook refused')
+      }) as unknown as FetchFn
+      const results = await deliverSinks(dir, EVENT, {
+        fetch: boom,
+        env: { H: 'https://secret.test/hook' } as unknown as NodeJS.ProcessEnv,
+        sinks: [{ type: 'webhook', urlEnv: 'H' }],
+      })
+      assert.equal(results[0].delivered, false)
+      assert.equal(results[0].reason, 'fetch failed: <endpoint> refused')
     })
   })
 
@@ -456,6 +526,20 @@ describe('notifySection', () => {
       sinks: [{ type: 'webhook', url: 'https://h.test', events: ['act', 7, null, ''] }],
     })
     assert.deepEqual(sinks[0].events, ['act'])
+  })
+
+  test('a route list that parses to nothing fails closed — the sink drops', () => {
+    const { sinks } = notifySection({
+      sinks: [
+        { type: 'webhook', url: 'https://h.test', events: [7, null, ''] },
+        { type: 'webhook', url: 'https://h.test', events: 'convoy' },
+        { type: 'webhook', url: 'https://h.test', events: [] },
+        { type: 'webhook', url: 'https://h.test' },
+      ],
+    })
+    assert.equal(sinks.length, 2)
+    assert.equal(sinks[0].events, undefined)
+    assert.equal(sinks[1].events, undefined)
   })
 })
 
