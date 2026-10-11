@@ -90,6 +90,8 @@ import { runStampCommand } from './commands/buildstamp.ts'
 import { SPEC_CONNECTORS } from './spec-connectors.ts'
 import { runSweepCommand } from './commands/sweep.ts'
 import { runSyncCommand } from './commands/sync.ts'
+import { runTraceCommand } from './commands/trace.ts'
+import { telemetrySection } from './commands/trace-config.ts'
 import { runWorkCommand, workConnector } from './commands/work.ts'
 
 // Built-in connectors register at module load, ahead of external
@@ -414,6 +416,15 @@ export const PLUGINS: BroPlugin[] = [
     aliasOf: 'hooks perf',
     summary: 'Hook + command latency report — perf journal rollup [--session <id>] [--json]',
     run: (argv) => runHooksCommand(['perf', ...argv]),
+  }),
+  definePlugin({
+    name: 'trace',
+    group: 'fleet',
+    summary: 'OTLP export of the session trace journals — export [--session|--dry-run|--json]',
+    run: runTraceCommand,
+    skill: 'trace',
+    configKey: 'telemetry',
+    configSchema: telemetrySection,
   }),
   definePlugin({
     name: 'acp-worker',
