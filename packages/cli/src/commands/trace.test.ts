@@ -77,6 +77,18 @@ describe('telemetry section + otlp resolution', () => {
     assert.equal(r.serviceName, 'svc')
   })
 
+  test('a blank env value falls through to config, not to empty', () => {
+    const cfg = telemetrySection({ otlp: { endpoint: 'http://conf:4318' } }).otlp
+    assert.equal(resolveOtlp(cfg, { OTEL_EXPORTER_OTLP_ENDPOINT: '  ' }).endpoint, 'http://conf:4318')
+    assert.equal(
+      resolveOtlp(cfg, {
+        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: '',
+        OTEL_EXPORTER_OTLP_ENDPOINT: 'http://generic:4318',
+      }).endpoint,
+      'http://generic:4318'
+    )
+  })
+
   test('BRO_TELEMETRY=0 blanks the endpoint entirely', () => {
     const cfg = telemetrySection({ otlp: { endpoint: 'http://c:4318' } }).otlp
     assert.equal(resolveOtlp(cfg, { BRO_TELEMETRY: '0' }).endpoint, '')

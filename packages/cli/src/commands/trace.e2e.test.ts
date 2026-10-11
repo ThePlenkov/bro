@@ -124,168 +124,132 @@ const postedSpans = (c: Collector): OtlpBody['resourceSpans'][number]['scopeSpan
       (JSON.parse(b) as OtlpBody).resourceSpans.flatMap((r) => r.scopeSpans.flatMap((s) => s.spans))
   )
 
+/** Collector + fixture wired for one test — the try/finally is owned
+ *  here so each test body stays inside `insideAsync`. */
+async function withCollector(fn: (c: Collector, f: Fixture) => Promise<void>): Promise<void> {
+  const c = await collector()
+  try {
+    const f = fixture()
+    await insideAsync(f.main, f.root, () => fn(c, f))
+  } finally {
+    await c.close()
+  }
+}
+
+/** One post-tool hook invocation with the collector pointed by env. */
+const postTool = (f: Fixture, env: Record<string, string>): Promise<CliResult> =>
+  runCliAsync(['hooks', 'post-tool'], {
+    cwd: f.main,
+    input: JSON.stringify({
+      tool_name: 'exec',
+      tool_input: { command: 'true' },
+      tool_response: { success: true },
+      session_id: 's1',
+    }),
+    env: { XDG_STATE_HOME: join(f.root, 'xdg-state'), ...env },
+  })
+
+const otlpEnv = (c: Collector): { OTEL_EXPORTER_OTLP_ENDPOINT: string } => ({
+  OTEL_EXPORTER_OTLP_ENDPOINT: c.url,
+})
+
 describe('bro trace export', () => {
   test('no endpoint configured exits 1 with the opt-in hint', async () => {
-    const c = await collector()
-    try {
-      const f = fixture()
-      await insideAsync(f.main, f.root, async () => {
-        journal(f, 's1', [{ ts: 1, tool: 'exec', command: 'ls' }])
-        const r = await runCliAsync(['trace', 'export'], { cwd: f.main })
-        assert.equal(r.code, 1)
-        assert.match(r.stderr, /no OTLP endpoint/)
-        assert.equal(c.bodies.length, 0)
-      })
-    } finally {
-      await c.close()
-    }
+    await withCollector(async (c, f) => {
+      journal(f, 's1', [{ ts: 1, tool: 'exec', command: 'ls' }])
+      const r = await runCliAsync(['trace', 'export'], { cwd: f.main })
+      assert.equal(r.code, 1)
+      assert.match(r.stderr, /no OTLP endpoint/)
+      assert.equal(c.bodies.length, 0)
+    })
   })
 
   test('env endpoint: new lines post as spans, cursor blocks resend', async () => {
-    const c = await collector()
-    try {
-      const f = fixture()
-      await insideAsync(f.main, f.root, async () => {
-        journal(f, 's1', [
-          { ts: 1000, tool: 'exec', command: 'ls', ok: true },
-          { ts: 1200, tool: 'edit', paths: ['a.ts'], ok: false },
-        ])
-        const env = { OTEL_EXPORTER_OTLP_ENDPOINT: c.url }
-        const r = await runCliAsync(['trace', 'export'], { cwd: f.main, env })
-        assert.equal(r.code, 0, r.stderr)
-        assert.match(r.stdout, /exported 2 span/)
-        assert.deepEqual(c.paths, ['POST /v1/traces'])
-        const spans = postedSpans(c)
-        assert.equal(spans.length, 2)
-        assert.equal(spans[0]!.name, 'bro.exec')
-        assert.equal(spans[1]!.name, 'bro.edit')
+    await withCollector(async (c, f) => {
+      journal(f, 's1', [
+        { ts: 1000, tool: 'exec', command: 'ls', ok: true },
+        { ts: 1200, tool: 'edit', paths: ['a.ts'], ok: false },
+      ])
+      const env = otlpEnv(c)
+      const r = await runCliAsync(['trace', 'export'], { cwd: f.main, env })
+      assert.equal(r.code, 0, r.stderr)
+      assert.match(r.stdout, /exported 2 span/)
+      assert.deepEqual(c.paths, ['POST /v1/traces'])
+      const spans = postedSpans(c)
+      assert.equal(spans.length, 2)
+      assert.equal(spans[0]!.name, 'bro.exec')
+      assert.equal(spans[1]!.name, 'bro.edit')
 
-        const again = await runCliAsync(['trace', 'export'], { cwd: f.main, env })
-        assert.equal(again.code, 0)
-        assert.match(again.stdout, /nothing to export/)
-        assert.equal(c.bodies.length, 1)
-        // the cursor recorded the advance
-        const cur = cursor(f) as { sessions: Record<string, { line: number }> }
-        assert.equal(cur.sessions['s1.jsonl']?.line, 2)
-      })
-    } finally {
-      await c.close()
-    }
+      const again = await runCliAsync(['trace', 'export'], { cwd: f.main, env })
+      assert.equal(again.code, 0)
+      assert.match(again.stdout, /nothing to export/)
+      assert.equal(c.bodies.length, 1)
+      // the cursor recorded the advance
+      const cur = cursor(f) as { sessions: Record<string, { line: number }> }
+      assert.equal(cur.sessions['s1.jsonl']?.line, 2)
+    })
   })
 
   test('--dry-run prints the payload and never posts', async () => {
-    const c = await collector()
-    try {
-      const f = fixture()
-      await insideAsync(f.main, f.root, async () => {
-        journal(f, 's1', [{ ts: 1, tool: 'exec', command: 'ls' }])
-        const r = await runCliAsync(['trace', 'export', '--dry-run'], {
-          cwd: f.main,
-          env: { OTEL_EXPORTER_OTLP_ENDPOINT: c.url },
-        })
-        assert.equal(r.code, 0, r.stderr)
-        const payload = JSON.parse(r.stdout) as OtlpBody
-        assert.equal(payload.resourceSpans.length, 1)
-        assert.equal(c.bodies.length, 0)
-        // dry-run must not consume the lines — a real export still sends
-        const r2 = await runCliAsync(['trace', 'export'], {
-          cwd: f.main,
-          env: { OTEL_EXPORTER_OTLP_ENDPOINT: c.url },
-        })
-        assert.equal(r2.code, 0)
-        assert.equal(c.bodies.length, 1)
+    await withCollector(async (c, f) => {
+      journal(f, 's1', [{ ts: 1, tool: 'exec', command: 'ls' }])
+      const r = await runCliAsync(['trace', 'export', '--dry-run'], {
+        cwd: f.main,
+        env: otlpEnv(c),
       })
-    } finally {
-      await c.close()
-    }
+      assert.equal(r.code, 0, r.stderr)
+      const payload = JSON.parse(r.stdout) as OtlpBody
+      assert.equal(payload.resourceSpans.length, 1)
+      assert.equal(c.bodies.length, 0)
+      // dry-run must not consume the lines — a real export still sends
+      const r2 = await runCliAsync(['trace', 'export'], { cwd: f.main, env: otlpEnv(c) })
+      assert.equal(r2.code, 0)
+      assert.equal(c.bodies.length, 1)
+    })
   })
 
   test('post-tool hook flushes detached — bead pin lands as a span attr', async () => {
-    const c = await collector()
-    try {
-      const f = fixture()
-      await insideAsync(f.main, f.root, async () => {
-        const r = await runCliAsync(['hooks', 'post-tool'], {
-          cwd: f.main,
-          input: JSON.stringify({
-            tool_name: 'exec',
-            tool_input: { command: 'true' },
-            tool_response: { success: true },
-            session_id: 's1',
-          }),
-          env: {
-            OTEL_EXPORTER_OTLP_ENDPOINT: c.url,
-            BRO_BEAD_ID: 'bro-x1',
-            XDG_STATE_HOME: join(f.root, 'xdg-state'),
-          },
-        })
-        // the hook itself is untouched by the exporter — exit 0, no stall
-        assert.equal(r.code, 0, r.stderr)
-        // the journal line carries the spawn pin
-        const line = readFileSync(join(f.markerDir, 'trace', 's1.jsonl'), 'utf8').trim()
-        assert.equal((JSON.parse(line) as { bead?: string }).bead, 'bro-x1')
-        // the detached export lands shortly after — poll, never block
-        const arrived = await until(() => c.bodies.length > 0)
-        assert.equal(arrived, true, 'detached flush never reached the collector')
-        const span = postedSpans(c)[0]!
-        assert.equal(span.name, 'bro.exec')
-        const keys = (span.attributes ?? []).map((a) => a.key)
-        assert.ok(keys.includes('bro.bead'))
-        assert.ok(keys.includes('bro.session'))
-      })
-    } finally {
-      await c.close()
-    }
+    await withCollector(async (c, f) => {
+      const r = await postTool(f, { ...otlpEnv(c), BRO_BEAD_ID: 'bro-x1' })
+      // the hook itself is untouched by the exporter — exit 0, no stall
+      assert.equal(r.code, 0, r.stderr)
+      // the journal line carries the spawn pin
+      const line = readFileSync(join(f.markerDir, 'trace', 's1.jsonl'), 'utf8').trim()
+      assert.equal((JSON.parse(line) as { bead?: string }).bead, 'bro-x1')
+      // the detached export lands shortly after — poll, never block
+      const arrived = await until(() => c.bodies.length > 0)
+      assert.equal(arrived, true, 'detached flush never reached the collector')
+      const span = postedSpans(c)[0]!
+      assert.equal(span.name, 'bro.exec')
+      const keys = (span.attributes ?? []).map((a) => a.key)
+      assert.ok(keys.includes('bro.bead'))
+      assert.ok(keys.includes('bro.session'))
+    })
   })
 
   test('BRO_TELEMETRY=0 suppresses the hook flush entirely', async () => {
-    const c = await collector()
-    try {
-      const f = fixture()
-      await insideAsync(f.main, f.root, async () => {
-        const r = await runCliAsync(['hooks', 'post-tool'], {
-          cwd: f.main,
-          input: JSON.stringify({
-            tool_name: 'exec',
-            tool_input: { command: 'true' },
-            tool_response: { success: true },
-            session_id: 's1',
-          }),
-          env: {
-            OTEL_EXPORTER_OTLP_ENDPOINT: c.url,
-            BRO_TELEMETRY: '0',
-            XDG_STATE_HOME: join(f.root, 'xdg-state'),
-          },
-        })
-        assert.equal(r.code, 0)
-        await new Promise((res) => setTimeout(res, 500))
-        assert.equal(c.bodies.length, 0)
-        // and no throttle stamp was written either
-        assert.equal(existsSync(join(f.markerDir, 'trace', '.export.json')), false)
-      })
-    } finally {
-      await c.close()
-    }
+    await withCollector(async (c, f) => {
+      const r = await postTool(f, { ...otlpEnv(c), BRO_TELEMETRY: '0' })
+      assert.equal(r.code, 0)
+      await new Promise((res) => setTimeout(res, 500))
+      assert.equal(c.bodies.length, 0)
+      // and no throttle stamp was written either
+      assert.equal(existsSync(join(f.markerDir, 'trace', '.export.json')), false)
+    })
   })
 
   test('--json reports the export without the payload', async () => {
-    const c = await collector()
-    try {
-      const f = fixture()
-      await insideAsync(f.main, f.root, async () => {
-        journal(f, 's1', [{ ts: 1, tool: 'exec', command: 'ls' }])
-        const r = await runCliAsync(['trace', 'export', '--json'], {
-          cwd: f.main,
-          env: { OTEL_EXPORTER_OTLP_ENDPOINT: c.url },
-        })
-        assert.equal(r.code, 0, r.stderr)
-        const out = JSON.parse(r.stdout) as { spans: number; posted: boolean; payload?: unknown }
-        assert.equal(out.spans, 1)
-        assert.equal(out.posted, true)
-        assert.equal(out.payload, undefined)
+    await withCollector(async (c, f) => {
+      journal(f, 's1', [{ ts: 1, tool: 'exec', command: 'ls' }])
+      const r = await runCliAsync(['trace', 'export', '--json'], {
+        cwd: f.main,
+        env: otlpEnv(c),
       })
-    } finally {
-      await c.close()
-    }
+      assert.equal(r.code, 0, r.stderr)
+      const out = JSON.parse(r.stdout) as { spans: number; posted: boolean; payload?: unknown }
+      assert.equal(out.spans, 1)
+      assert.equal(out.posted, true)
+      assert.equal(out.payload, undefined)
+    })
   })
 })

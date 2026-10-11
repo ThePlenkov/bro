@@ -78,7 +78,7 @@ function fieldAttr(key: string, v: unknown): OtlpKeyValue | null {
   return null
 }
 
-const md5hex = (s: string): string => createHash('md5').update(s).digest('hex')
+const sha256hex = (s: string): string => createHash('sha256').update(s).digest('hex')
 
 const nano = (ms: number): string => `${BigInt(Math.max(0, Math.round(ms))) * 1_000_000n}`
 
@@ -94,8 +94,8 @@ export function lineToSpan(
   if (typeof raw.ts !== 'number' || !Number.isFinite(raw.ts)) {
     return null
   }
-  const traceId = md5hex(`bro:${session}`)
-  const spanId = md5hex(`${traceId}|${JSON.stringify(raw)}`).slice(0, 16)
+  const traceId = sha256hex(`bro:${session}`).slice(0, 32)
+  const spanId = sha256hex(`${traceId}|${JSON.stringify(raw)}`).slice(0, 16)
   const tool = typeof raw.tool === 'string' && raw.tool !== '' ? raw.tool : 'event'
   const end = nextTs !== undefined && nextTs > raw.ts ? nextTs : raw.ts
   const attributes: OtlpKeyValue[] = [{ key: 'bro.session', value: { stringValue: session } }]

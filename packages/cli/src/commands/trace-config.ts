@@ -93,10 +93,13 @@ export function resolveOtlp(
   if (env.BRO_TELEMETRY === '0') {
     return { ...cfg, endpoint: '' }
   }
+  const envSet = (v: string | undefined): v is string => v !== undefined && v.trim() !== ''
   const endpoint = (
-    env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ??
-    env.OTEL_EXPORTER_OTLP_ENDPOINT ??
-    cfg.endpoint
+    envSet(env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT)
+      ? env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+      : envSet(env.OTEL_EXPORTER_OTLP_ENDPOINT)
+        ? env.OTEL_EXPORTER_OTLP_ENDPOINT
+        : cfg.endpoint
   ).trim()
   return {
     endpoint,
