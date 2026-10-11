@@ -108,6 +108,7 @@ interface IssueOpts {
   resolution?: string | null
   resolutiondate?: string | null
   created?: string
+  self?: string
 }
 
 const ref = ([k, cat]: [string, string]): Record<string, unknown> => ({
@@ -133,7 +134,7 @@ function issue(o: IssueOpts): Record<string, unknown> {
   return {
     id: `10${num}`,
     key: o.key,
-    self: `https://acme.atlassian.net/rest/api/3/issue/10${num}`,
+    self: o.self ?? `https://acme.atlassian.net/rest/api/3/issue/10${num}`,
     fields: {
       summary: o.title ?? `issue ${o.key}`,
       description: o.description ?? null,
@@ -413,6 +414,25 @@ describe('jiraTasks', { skip: WIN32 }, () => {
           (r as { created_at?: string }).created_at,
           '2026-01-04T00:00:00.000+0000'
         )
+      }
+    )
+  })
+
+  test('external_ref: gateway selfs pass through, lookalike hosts get a browse URL', () => {
+    const gw =
+      'https://api.atlassian.com/ex/jira/cloud-1/rest/api/3/issue/10001'
+    withJira(
+      {
+        FAKE_JIRA_ISSUES: issuesPage([
+          issue({ key: 'PROJ-1', self: gw }),
+          issue({ key: 'PROJ-2', self: 'https://notapi.atlassian.com/rest/api/3/issue/10002' }),
+        ]),
+      },
+      (_logs, dir) => {
+        const rows = jiraTasks(dir).list({ all: true })
+        const refs = new Map(rows.map((r) => [r.id, r.external_ref]))
+        assert.equal(refs.get('PROJ-1'), gw)
+        assert.equal(refs.get('PROJ-2'), 'https://notapi.atlassian.com/browse/PROJ-2')
       }
     )
   })

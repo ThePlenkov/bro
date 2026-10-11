@@ -272,6 +272,16 @@ export function adfDoc(text: string): Record<string, unknown> {
 
 // --- row ------------------------------------------------------------------------
 
+/** url base → hostname or '' — a base that won't parse lands on the
+ *  browse path, same as a site. */
+const hostOf = (u: string): string => {
+  try {
+    return new URL(u).hostname
+  } catch {
+    return ''
+  }
+}
+
 /** `self` (https://site/…/issue/<id>) → the human browse URL; gateway
  *  selfs keep no site name, so they pass through verbatim. */
 function browseUrl(n: JiraIssue): string | undefined {
@@ -281,7 +291,7 @@ function browseUrl(n: JiraIssue): string | undefined {
   }
   const self = n.self ?? ''
   const m = /^(https?:\/\/[^/]+)\//.exec(self)
-  if (m === null || m[1]!.endsWith('api.atlassian.com')) {
+  if (m === null || hostOf(m[1]!) === 'api.atlassian.com') {
     return self !== '' ? self : undefined
   }
   return `${m[1]}/browse/${key}`
