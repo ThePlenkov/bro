@@ -4253,10 +4253,11 @@ function copilotRefreshCount(dir: string, env: AgentConnectorEnv): void {
     return
   }
   const resDir = env.agents['copilot']?.['reservationsDir']
+  const observedAt = Date.now()
   const ids = copilotLiveTaskIds()
   if (ids !== undefined) {
     const slots = sessionSlotsDir('copilot', typeof resDir === 'string' ? resDir : undefined)
-    writeCopilotCount(typeof resDir === 'string' ? resDir : undefined, [...ids])
+    writeCopilotCount(typeof resDir === 'string' ? resDir : undefined, [...ids], observedAt)
     copilotSweepLandedSlots(dir, slots, ids)
   }
 }

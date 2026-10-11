@@ -73,7 +73,9 @@ export function readCopilotCount(file: string): CopilotCountCache | undefined {
 
 /** The connector's refresh — the remote live-task id set observed by a
  *  `GET /agents/tasks?state=<live>` listing lands here for the next
- *  synchronous count. `at` injectable for tests. */
+ *  synchronous count. `at` is the observation time the caller stamps
+ *  (the fetch's START): a concurrent refresh that observed earlier must
+ *  never overwrite this one — an on-disk `at` newer than ours wins. */
 export function writeCopilotCount(
   resDir: string | undefined,
   ids: string[],
@@ -81,6 +83,10 @@ export function writeCopilotCount(
 ): CopilotCountCache {
   const file = copilotCountFile(resDir)
   const cache = { at, count: ids.length, ids }
+  const existing = readCopilotCount(file)
+  if (existing !== undefined && existing.at > cache.at) {
+    return existing
+  }
   try {
     mkdirSync(dirname(file), { recursive: true })
     writeFileSync(file, `${JSON.stringify(cache)}\n`)
