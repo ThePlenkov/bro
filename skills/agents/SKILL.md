@@ -23,6 +23,14 @@ beads store mount at their host paths, so the same registry/claims/exit
 contract holds; an unreachable docker daemon degrades the view, never
 a stale 'lost' verdict.
 
+The `copilot` connector dispatches GitHub Copilot coding-agent tasks —
+hosted remote workers that open pull requests. The step is claimed into
+the shared beads store *before* dispatch (the remote runner can't reach
+it), the registry pins `{taskId, pr}`, and `down` best-effort cancels
+the backing Actions run — a surviving session is reported, never hidden.
+`agents.copilot.maxSessions`/`maxWorkers` count remote live tasks via a
+cached count that fails closed when stale.
+
 ## Commands
 
 | Command | What it does |

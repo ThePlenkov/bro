@@ -132,6 +132,24 @@ beads store mounted at their host paths:
 | `agents.docker.devcontainer` | `.devcontainer/devcontainer.json` | JSONC devcontainer file, repo-relative or absolute. Its `image` is used directly (pulled before spawning when absent); `build.dockerfile` is rebuilt on every spawn — docker's layer cache makes a no-op build fast — under a content-hash tag (`bro-dev-<sha256/12>`). `dockerComposeFile` configs are unsupported — set `agents.docker.image` for those |
 | `agents.docker.runArgs` | unset | Extra `docker run` arguments — array or whitespace-split string (e.g. `["--network", "host"]`). Containers default to the host `--user uid:gid` so bind-mounted files stay host-owned; set `-u`/`--user` here to override |
 
+The `copilot` backend (`connectors.agents: "copilot"` or `--connector
+copilot`) dispatches GitHub Copilot coding-agent tasks — hosted remote
+workers that push a branch and open a pull request. It needs no local
+worktree or agent command (a provider-resolved worker is refused); `gh`
+on PATH is the only prerequisite:
+
+| Key | Default | What |
+| --- | ------- | ---- |
+| `agents.copilot.repo` | the worktree's `origin` remote | `owner/repo` the task is dispatched against |
+| `agents.copilot.base` | the repo's default branch | `base_ref` the task's pull request targets |
+| `agents.copilot.model` | unset | Model id passed through to the task create call |
+| `agents.copilot.customAgent` | unset | Custom-agent name passed through to the task create call |
+
+`agents.copilot.maxSessions`/`maxWorkers` cap the account's *remote*
+live tasks through a cached-count session plane — connector reads
+refresh the cache and a stale/absent one fails closed (`unavailable`),
+so an unreachable GitHub API refuses rather than overspends.
+
 ### `providers`
 
 The named provider registry — `{ "<name>": { "type": "api"\|"acp"\|"cli",

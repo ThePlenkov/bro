@@ -43,6 +43,7 @@ import {
   commandCliName,
   DEFAULT_CONFIG,
   deriveProviderWalls,
+  ghHost,
   gitTry,
   isAgentCause,
   JudgeUnavailable,
@@ -90,6 +91,8 @@ import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop'
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
 import './session-planes/devin.ts'
+import './session-planes/copilot.ts'
+import { writeCopilotCount } from './session-planes/copilot.ts'
 
 /** Everything a factory needs: the repo ctx + the resolved config
  *  (agents.<backend> knobs, connectors.agents pick, loop.agent fallback). */
@@ -162,7 +165,7 @@ export function registerAgentConnector(
  *  these (a misnamed cleanup, or a name whose register was skipped as a
  *  duplicate) would silently change which factory the name resolves to
  *  for the rest of the process. */
-const BUILTIN_AGENT_BACKENDS = new Set(['native', 'tmux', 'gascity', 'docker'])
+const BUILTIN_AGENT_BACKENDS = new Set(['native', 'tmux', 'gascity', 'docker', 'copilot'])
 
 /** Deliberate name-based removal — fixtures prefer the disposer
  *  registerAgentConnector returns, which can only drop the entry it
@@ -876,6 +879,7 @@ function entryOccupies(
     gcSessions: () => GcSession[] | undefined
     gcSupervisor: () => boolean | undefined
     dockerLive: () => Set<string> | undefined
+    copilotLive: () => Set<string> | undefined
   }
 ): boolean {
   switch (entry.backend) {
@@ -894,6 +898,8 @@ function entryOccupies(
       // container holds no slot either way)
       ensureExitCause(dir, home, molStep, entry)
       return dockerOccupies(entry, probes.dockerLive())
+    case 'copilot':
+      return copilotOccupies(entry, probes.copilotLive())
     default:
       // a backend this build doesn't know — no probe exists, so the
       // .exit file is the only death record readable. Harvest before
@@ -912,6 +918,7 @@ interface OccupancyProbes {
   gcSessions: () => GcSession[] | undefined
   gcSupervisor: () => boolean | undefined
   dockerLive: () => Set<string> | undefined
+  copilotLive: () => Set<string> | undefined
 }
 
 function occupancyProbes(dir: string, env: AgentConnectorEnv): OccupancyProbes {
@@ -923,6 +930,7 @@ function occupancyProbes(dir: string, env: AgentConnectorEnv): OccupancyProbes {
     }),
     gcSupervisor: memo(() => gcSupervisorRunning()),
     dockerLive: memo(() => dockerLiveContainers()),
+    copilotLive: memo(() => copilotLiveTaskIds()),
   }
 }
 
@@ -3721,3 +3729,789 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
 }
 
 registerAgentConnector('docker', makeDockerConnector)
+
+// --- copilot -------------------------------------------------------------------
+
+/** The copilot backend — GitHub's hosted coding agent ("agent tasks")
+ *  as code. Spike verdict: specs/sessions/bro-huy5o.9.md — the first
+ *  cloud connector: genuinely remote (no local worktree, supervisor or
+ *  process), produces a pull request artifact, and needs no binary
+ *  beyond the already-required `gh`.
+ *
+ *  The remote worker can never reach the shared dolt, so the spawn
+ *  claims the molStep ON THE TASK'S BEHALF inside prepareSpawn — before
+ *  dispatch — then creates the task via the documented REST plane
+ *  `POST /agents/repos/{o}/{r}/tasks` through `gh api`: the response
+ *  pins the exact task id into agents.json. `gh agent-task create`
+ *  itself prints only a human URL (or an unparsed job id), so the
+ *  typed REST surface is the primary protocol everywhere except the
+ *  attach hint (`gh agent-task view --log --follow`, a human surface).
+ *  Preview drift on either surface is a probe failure (degraded /
+ *  'unavailable'), never a process crash.
+ *
+ *  Remote state → AgentInfo.state: queued→spawned,
+ *  in_progress/idle/waiting_for_user→running, completed→exited,
+ *  failed/timed_out→exited (cause classified off the session error),
+ *  cancelled→stopped, an unrecognised or unreachable read→degraded/
+ *  'spawned' — API failures degrade, they never report 'lost'.
+ *
+ *  Stop: best-effort `POST /repos/{o}/{r}/actions/runs/{id}/cancel` on
+ *  the backing Actions run (`workflow_run_id` off the task's latest
+ *  session) — cancel is the documented gap (no CLI/REST task cancel;
+ *  web 'Stop session' only) — then the registry records stopped. A
+ *  still-live or unverifiable session is reported on stderr with its
+ *  session URL, never hidden.
+ *
+ *  Quota: the copilot session plane (session-planes/copilot.ts) counts
+ *  remote live tasks — countLive is synchronous, so connector reads
+ *  refresh a count cache the plane serves; a stale/absent cache fails
+ *  closed 'unavailable'. Knobs: agents.copilot.repo (dispatch target —
+ *  default the checkout's origin remote), agents.copilot.base
+ *  (base_ref — the API's repo default when unset), agents.copilot.
+ *  model/customAgent (REST passthrough), agents.copilot.maxSessions/
+ *  maxWorkers (remote-count lanes), agents.copilot.sessionKind. */
+
+interface GhResult {
+  code: number
+  out: string
+  err: string
+  missing: boolean
+}
+
+/** `gh` on PATH is the same contract git/bd/docker run under —
+ *  spawnSync (the connector's other shell-outs are all synchronous,
+ *  and admission runs inside the registry lock). */
+function ghRun(args: string[], timeoutMs = 30_000): GhResult {
+  const proc = spawnSync('gh', args, { // NOSONAR — PATH lookup is the contract (same as docker/git/bd)
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    maxBuffer: 16 * 1024 * 1024,
+  })
+  return {
+    code: proc.status ?? 1,
+    out: proc.stdout ?? '',
+    err: (proc.stderr ?? proc.error?.message ?? '').trim(),
+    missing: (proc.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
+  }
+}
+
+/** REST task states that still burn budget — everything a live task
+ *  can read as on the documented surface (queued → in_progress →
+ *  terminal; idle and waiting_for_user are suspended-but-alive). */
+const COPILOT_LIVE_STATES = new Set(['queued', 'in_progress', 'idle', 'waiting_for_user'])
+
+/** Task ids are server-minted UUIDs; the registry pin is trusted only
+ *  when it can't smuggle a path/query segment into the REST URL. */
+const COPILOT_SAFE_TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/** The loosely-typed REST task — fields narrow at use, so a preview
+ *  schema drift degrades a read instead of crashing it. */
+interface CopilotTask {
+  id?: unknown
+  state?: unknown
+  artifacts?: unknown
+  sessions?: unknown
+}
+
+interface CopilotSession {
+  id?: unknown
+  state?: unknown
+  workflow_run_id?: unknown
+  error?: unknown
+  head_ref?: unknown
+  created_at?: unknown
+  updated_at?: unknown
+}
+
+function copilotTaskIdOf(entry: AgentRegistryEntry): string | undefined {
+  const id = entry.taskId
+  return typeof id === 'string' && COPILOT_SAFE_TASK_ID.test(id) ? id : undefined
+}
+
+function copilotTaskState(task: CopilotTask): string {
+  return typeof task.state === 'string' ? task.state : ''
+}
+
+function copilotTaskSessions(task: CopilotTask): CopilotSession[] {
+  return Array.isArray(task.sessions)
+    ? task.sessions.filter((s): s is CopilotSession => typeof s === 'object' && s !== null)
+    : []
+}
+
+/** The latest session a task reports — sessions accumulate across
+ *  retries/steers; the newest carries the live state, the workflow run
+ *  and the error the terminal verdict classifies. */
+function copilotLatestSession(task: CopilotTask): CopilotSession | undefined {
+  const sessions = copilotTaskSessions(task)
+  let latest: CopilotSession | undefined
+  let stamp = ''
+  for (const s of sessions) {
+    const at =
+      typeof s.updated_at === 'string'
+        ? s.updated_at
+        : typeof s.created_at === 'string'
+          ? s.created_at
+          : ''
+    if (latest === undefined || at >= stamp) {
+      latest = s
+      stamp = at
+    }
+  }
+  return latest
+}
+
+/** The remote branch the session pushes — `branch` artifacts carry
+ *  `base_ref`/`head_ref` at creation; session objects repeat them. */
+function copilotHeadRef(task: CopilotTask): string | undefined {
+  if (Array.isArray(task.artifacts)) {
+    for (const a of task.artifacts) {
+      const ref = (a as { type?: unknown; data?: { head_ref?: unknown } })
+      if (ref?.type === 'branch' && typeof ref.data?.head_ref === 'string') {
+        return ref.data.head_ref
+      }
+    }
+  }
+  for (const s of copilotTaskSessions(task)) {
+    if (typeof s.head_ref === 'string' && s.head_ref !== '') {
+      return s.head_ref
+    }
+  }
+  return undefined
+}
+
+function copilotHasPullArtifact(task: CopilotTask): boolean {
+  return (
+    Array.isArray(task.artifacts) &&
+    task.artifacts.some((a) => (a as { type?: unknown })?.type === 'pull')
+  )
+}
+
+/** Error text a failed session left behind — the terminal verdict's
+ *  classifyExitCause input (a rate-limit wall reads 'rate_limited',
+ *  not 'crash'). */
+function copilotSessionError(task: CopilotTask): string {
+  const err = copilotLatestSession(task)?.error
+  const msg = (err as { message?: unknown })?.message
+  return typeof msg === 'string' ? msg : ''
+}
+
+/** The 'owner/repo' a registry entry's task lives on — pinned at
+ *  spawn; the worktree's origin is the fallback for entries predating
+ *  the pin. */
+function copilotEntryRepo(entry: AgentRegistryEntry): string | undefined {
+  if (typeof entry.taskRepo === 'string' && /^[\w.-]+\/[\w.-]+$/.test(entry.taskRepo)) {
+    return entry.taskRepo
+  }
+  return typeof entry.worktree === 'string'
+    ? copilotRemoteRepo(entry.worktree)
+    : undefined
+}
+
+/** `git@host:o/r(.git)`, `https://host/o/r(.git)`, `ssh://…/o/r` →
+ *  `o/r` — the last two path segments of any origin form GitHub
+ *  accepts. */
+function copilotParseRemote(url: string): string | undefined {
+  const m = /([A-Za-z0-9][A-Za-z0-9_.-]*)\/([A-Za-z0-9][A-Za-z0-9_.-]*?)(?:\.git)?\/?$/.exec(
+    url.trim()
+  )
+  return m === null ? undefined : `${m[1]}/${m[2]}`
+}
+
+function copilotRemoteRepo(dir: string): string | undefined {
+  const url = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
+  return url.code === 0 ? copilotParseRemote(url.out) : undefined
+}
+
+/** The PR the task opened — resolved via the pushes' head_ref, the
+ *  same join `gh agent-task view` hydrates internally. Absent until a
+ *  pull artifact exists; a failed read stays unpinned rather than
+ *  blocking the state read it rode in on. */
+function copilotResolvePr(
+  repo: string,
+  headRef: string
+): { pr?: number; prUrl?: string } {
+  const owner = repo.split('/')[0]
+  const r = ghRun([
+    'api',
+    `repos/${repo}/pulls?head=${owner}:${encodeURIComponent(headRef)}&state=all&per_page=1`,
+  ])
+  if (r.code !== 0) {
+    return {}
+  }
+  try {
+    const v = JSON.parse(r.out) as unknown
+    const first = Array.isArray(v) ? (v[0] as { number?: unknown; html_url?: unknown }) : undefined
+    return {
+      pr: typeof first?.number === 'number' ? first.number : undefined,
+      prUrl: typeof first?.html_url === 'string' ? first.html_url : undefined,
+    }
+  } catch {
+    return {}
+  }
+}
+
+/** The agents-web session URL — the attach/log target. Requires the
+ *  pinned PR; a task that never opened one has no per-session page. */
+function copilotSessionUrl(repo: string | undefined, pr: unknown, sessionId: unknown): string | undefined {
+  return repo !== undefined && typeof pr === 'number' && typeof sessionId === 'string'
+    ? `https://${ghHost()}/${repo}/pull/${pr}/agent-sessions/${sessionId}`
+    : undefined
+}
+
+/** One task's REST read — `{ok:false}` is "the API couldn't say"
+ *  (down, unauthorized, preview drift), never a fabricated corpse. */
+function copilotFetchTask(taskId: string): { ok: boolean; task?: CopilotTask; err?: string } {
+  const r = ghRun(['api', `agents/tasks/${taskId}`])
+  if (r.missing) {
+    return { ok: false, err: 'gh not on PATH' }
+  }
+  if (r.code !== 0) {
+    return { ok: false, err: r.err !== '' ? r.err : `gh api exited ${r.code}` }
+  }
+  try {
+    const task = JSON.parse(r.out) as CopilotTask
+    return typeof task === 'object' && task !== null
+      ? { ok: true, task }
+      : { ok: false, err: 'unparseable task JSON' }
+  } catch {
+    return { ok: false, err: 'gh api returned unparseable JSON' }
+  }
+}
+
+/** The account's live task id set — one filtered listing for the whole
+ *  fleet walk and the session-plane count refresh. `undefined` = the
+ *  API couldn't answer (fail closed — an unverifiable count occupies,
+ *  never frees). Bounded at one page: beyond ~100 live remote tasks a
+ *  quota is moot anyway. */
+function copilotLiveTaskIds(): Set<string> | undefined {
+  const r = ghRun([
+    'api',
+    `agents/tasks?state=${[...COPILOT_LIVE_STATES].join(',')}&per_page=100`,
+  ])
+  if (r.code !== 0) {
+    return undefined
+  }
+  try {
+    const v = JSON.parse(r.out) as { tasks?: unknown }
+    return new Set(
+      Array.isArray(v.tasks)
+        ? v.tasks
+            .map((t) => (t as { id?: unknown })?.id)
+            .filter((x): x is string => typeof x === 'string')
+        : []
+    )
+  } catch {
+    return undefined
+  }
+}
+
+/** copilot occupancy — the remote probe is the same honesty rule as
+ *  docker's: recorded death frees the slot regardless (a stopped/exit
+ *  entry holds no live task), a task proven absent from the live set
+ *  frees, and an unverifiable read OCCUPIES — a maybe-running remote
+ *  worker is a maybe-burning one. An entry with no taskId was never
+ *  dispatched; nothing remote can hold its slot. */
+function copilotOccupies(entry: AgentRegistryEntry, live: Set<string> | undefined): boolean {
+  if (entry.stopped === true || entry.exitStatus !== undefined) {
+    return false
+  }
+  const taskId = copilotTaskIdOf(entry)
+  return taskId !== undefined && (live === undefined || live.has(taskId))
+}
+
+/** Generation-safe merge of remote-learned facts into the registry —
+ *  the same bind-to-identity rule ensureExitCause's advisory write
+ *  uses: a respawn between our read and this patch owns the entry now,
+ *  and the old task's drift must not mislabel it. The entry object is
+ *  updated either way so THIS read's verdict is authoritative. */
+function copilotPatch(
+  dir: string,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  patch: Record<string, unknown>
+): void {
+  Object.assign(entry, patch)
+  try {
+    withAgentRegistryLock(dir, () => {
+      const reg = readAgentRegistry(dir)
+      const cur = reg[molStep]
+      if (
+        cur === undefined ||
+        cur.agentId !== entry.agentId ||
+        cur.spawnedAt !== entry.spawnedAt
+      ) {
+        return
+      }
+      reg[molStep] = { ...cur, ...patch }
+      writeAgentRegistry(dir, reg)
+    })
+  } catch {
+    // advisory — the in-memory entry already carries the verdict
+  }
+}
+
+/** What one task read teaches the registry — session/pr/run handles
+ *  pin as they appear, taskState tracks drift, and a terminal state
+ *  harvests the exit record (exitStatus+cause+resetAt, or stopped on
+ *  cancelled) so the recorded-death ladder reports it like a local
+ *  death. */
+function copilotAbsorb(
+  dir: string,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  task: CopilotTask
+): void {
+  const patch: Record<string, unknown> = {}
+  const state = copilotTaskState(task)
+  if (state !== '' && entry.taskState !== state) {
+    patch.taskState = state
+  }
+  const session = copilotLatestSession(task)
+  if (typeof session?.id === 'string' && session.id !== entry.sessionId) {
+    patch.sessionId = session.id
+    patch.attach = `gh agent-task view ${session.id} --log --follow`
+  }
+  const runId = session?.workflow_run_id
+  if (typeof runId === 'number' && runId !== entry.workflowRun) {
+    patch.workflowRun = runId
+  }
+  const headRef = copilotHeadRef(task)
+  if (headRef !== undefined && headRef !== entry.branch) {
+    patch.branch = headRef
+  }
+  const repo = copilotEntryRepo(entry)
+  if (entry.pr === undefined && copilotHasPullArtifact(task) && repo !== undefined && headRef !== undefined) {
+    const { pr, prUrl } = copilotResolvePr(repo, headRef)
+    if (pr !== undefined) {
+      patch.pr = pr
+      patch.prUrl = prUrl ?? `https://${ghHost()}/${repo}/pull/${pr}`
+    }
+  }
+  const sessionUrl = copilotSessionUrl(repo, patch.pr ?? entry.pr, patch.sessionId ?? entry.sessionId)
+  if (sessionUrl !== undefined && sessionUrl !== entry.sessionUrl) {
+    patch.sessionUrl = sessionUrl
+  }
+  // terminal states land the exit record — the recorded-death ladder
+  // turns it into exited/stopped/blocked on this same read
+  if (state === 'cancelled') {
+    patch.stopped = true
+  } else if (state === 'completed') {
+    patch.exitStatus = 0
+    patch.cause = 'ok'
+  } else if (state === 'failed' || state === 'timed_out') {
+    const c =
+      state === 'timed_out'
+        ? { cause: 'crash' as AgentCause, resetAt: undefined }
+        : classifyExitCause(copilotSessionError(task), 1)
+    patch.exitStatus = 1
+    patch.cause = c.cause
+    patch.resetAt = c.resetAt
+  }
+  if (Object.keys(patch).length > 0) {
+    copilotPatch(dir, molStep, entry, patch)
+  }
+}
+
+/** Liveness verdict for one registry entry — the tri-state probeState
+ *  consumes, plus the raw remote state: 'queued' is live but not yet
+ *  running, and the reported AgentInfo.state should say so. 'unknown'
+ *  is every unreadable read (gh missing, auth, 404 on a task the API
+ *  rotated out, preview drift) — degraded, never a corpse. An entry
+ *  without a taskId was never dispatched: 'dead' is the honest read. */
+function copilotTaskProbe(
+  dir: string,
+  molStep: string,
+  entry: AgentRegistryEntry
+): { live: TmuxLiveness; err?: string; state?: string } {
+  const taskId = copilotTaskIdOf(entry)
+  if (taskId === undefined) {
+    return { live: 'dead' }
+  }
+  const f = copilotFetchTask(taskId)
+  if (!f.ok) {
+    return { live: 'unknown', err: f.err }
+  }
+  copilotAbsorb(dir, molStep, entry, f.task!)
+  const state = copilotTaskState(f.task!)
+  if (COPILOT_LIVE_STATES.has(state)) {
+    return { live: 'running', state }
+  }
+  if (state === 'completed' || state === 'failed' || state === 'timed_out' || state === 'cancelled') {
+    return { live: 'dead', state }
+  }
+  // a state this build doesn't know — preview drift reads 'unknown',
+  // not 'lost'
+  return { live: 'unknown', err: `unrecognised task state '${state}'`, state }
+}
+
+/** One registry entry → AgentInfo — the shared shape toCopilotInfo and
+ *  list() build. 'queued' reports 'spawned' rather than 'running': the
+ *  task exists remotely but no session burns yet. */
+function copilotInfoFor(
+  dir: string,
+  home: string | null,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  probe: { live: TmuxLiveness; state?: string }
+): AgentInfo {
+  const st = probeState(dir, home, molStep, entry, probe.live)
+  return {
+    id: entry.agentId,
+    spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
+    molStep,
+    backend: entry.backend,
+    state: st === 'running' && probe.state === 'queued' ? 'spawned' : st,
+    ...infoCause(entry),
+    ...infoProvenance(entry),
+    worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
+    // no local log exists — the session URL is the attach/log pointer
+    log: typeof entry.sessionUrl === 'string' ? entry.sessionUrl : undefined,
+  }
+}
+
+function toCopilotInfo(
+  dir: string,
+  home: string | null,
+  molStep: string,
+  entry: AgentRegistryEntry
+): AgentInfo {
+  return copilotInfoFor(dir, home, molStep, entry, copilotTaskProbe(dir, molStep, entry))
+}
+
+/** The session quota a copilot spawn rides — a remote kind needs no
+ *  cli detection: the plane is 'copilot' unless agents.copilot.
+ *  sessionKind names another registered one (the only sensible reroute
+ *  is another remote-count plane sharing the cache contract). */
+function copilotSessionQuota(env: AgentConnectorEnv): SessionQuotaLane | undefined {
+  const declared = env.agents['copilot']?.['sessionKind']
+  const kind = typeof declared === 'string' && declared !== '' ? declared : 'copilot'
+  const quota = sessionQuotaConfig(env.agents, kind)
+  if (quota === undefined) {
+    return undefined
+  }
+  const plane = sessionPlane(kind)
+  if (plane === undefined) {
+    // a capped kind with no registered plane is a config bug — refuse
+    // loudly rather than spawn past a quota the operator armed
+    throw new SpawnError(
+      `agents.copilot.sessionKind '${kind}' has no registered session plane — ` +
+        `cannot enforce agents.${kind}.maxSessions/maxWorkers`,
+      'config'
+    )
+  }
+  return { plane, agents: env.agents }
+}
+
+/** Refresh the count cache the copilot plane serves — best-effort and
+ *  only while a copilot lane is armed (an unarmed plane has no reader;
+ *  the extra gh call is pure waste). A failed refresh just leaves the
+ *  cache stale, which countLive already fails closed on. */
+function copilotRefreshCount(env: AgentConnectorEnv): void {
+  if (sessionQuotaConfig(env.agents, 'copilot') === undefined) {
+    return
+  }
+  const resDir = env.agents['copilot']?.['reservationsDir']
+  const ids = copilotLiveTaskIds()
+  if (ids !== undefined) {
+    writeCopilotCount(typeof resDir === 'string' ? resDir : undefined, [...ids])
+  }
+}
+
+export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
+  const dir = ctx.dir
+  const knobs = env.agents['copilot'] ?? {}
+  const knobString = (k: string): string | undefined =>
+    typeof knobs[k] === 'string' && knobs[k] !== '' ? (knobs[k] as string) : undefined
+
+  const findEntry = (id: string) => findAgentEntry(dir, 'copilot', id)
+
+  /** 'owner/repo' the dispatch targets — agents.copilot.repo wins over
+   *  the checkout's origin remote; neither resolvable is a config gap
+   *  the error names. */
+  const targetRepo = (spec: SpawnSpec): { owner: string; repo: string; slug: string } => {
+    const slug = knobString('repo') ?? copilotRemoteRepo(spec.repoRoot)
+    const m = slug === undefined ? null : /^([\w.-]+)\/([\w.-]+)$/.exec(slug)
+    if (m === null || m[1] === undefined || m[2] === undefined || slug === undefined) {
+      throw new SpawnError(
+        `no repository to dispatch the copilot task against — set agents.copilot.repo ` +
+          `('owner/repo') or an origin remote on ${spec.repoRoot}`,
+        'config'
+      )
+    }
+    return { owner: m[1], repo: m[2], slug }
+  }
+
+  /** Why a dispatch failed — a transport/body-shape error is quoted
+   *  raw; anything else is almost always the coding agent not being
+   *  enabled on the repo, so the error names the prerequisites. */
+  const dispatchFailure = (slug: string, err: string): SpawnError =>
+    new SpawnError(
+      /unable to|could not resolve|connection|timed out|ECONN|ENOTFOUND|EAI_AGAIN|HTTP 5/i.test(err)
+        ? `copilot task dispatch failed — ${err}`
+        : `copilot task dispatch failed on ${slug} — prerequisites: the Copilot coding ` +
+          `agent enabled for the repository (a Copilot plan seat, the org policy, and ` +
+          `Actions on): ${err}`,
+      'unavailable'
+    )
+
+  return {
+    name: 'copilot',
+
+    async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the critical section is sync
+      // no local command runs — a provider-resolved worker/template has
+      // no remote surface to ride, and agents.copilot.command is
+      // meaningless by the same logic; refuse before anything lands
+      if (spec.worker !== undefined) {
+        throw new SpawnError(
+          `copilot spawns run GitHub-hosted sessions — a provider-resolved ${spec.worker.kind} ` +
+            `worker cannot dispatch remotely; drop --provider/--profile or pick a local backend`,
+          'config'
+        )
+      }
+      if (!existsSync(spec.repoRoot)) {
+        throw new SpawnError(`worktree ${spec.repoRoot} does not exist`, 'input')
+      }
+      const home = agentsHome(dir)
+      if (home === null) {
+        throw new SpawnError(`no git common dir for ${spec.repoRoot}`, 'config')
+      }
+      const target = targetRepo(spec)
+      return withAgentRegistryLock(dir, () => {
+        // claim-on-behalf is prepareSpawn's claimStep inside this lock —
+        // the remote runner can never reach the shared store, so the
+        // orchestrator pins the claim BEFORE the task exists
+        const { agentId, promptFile: _promptFile, reservation } = prepareSpawn(
+          dir,
+          home,
+          'copilot',
+          spec,
+          {
+            isLive: (existing) => {
+              const p = copilotTaskProbe(dir, spec.molStep, existing)
+              if (p.live === 'unknown') {
+                // an unverifiable probe must not let a duplicate spawn
+                // burn beside a remote task that may still be alive
+                throw new SpawnError(
+                  `cannot verify ${spec.molStep}'s copilot task — ${p.err ?? 'gh api failed'}`,
+                  'unavailable'
+                )
+              }
+              return p.live === 'running'
+            },
+            liveDetail: (e) => `task ${copilotTaskIdOf(e) ?? '?'}`,
+            entry: () => ({
+              // respawn clears the previous run's remote handles — a new
+              // task mints fresh ones; stale pins must not alias it
+              taskId: undefined,
+              taskRepo: undefined,
+              taskState: undefined,
+              branch: undefined,
+              sessionId: undefined,
+              sessionUrl: undefined,
+              workflowRun: undefined,
+              pr: undefined,
+              prUrl: undefined,
+              attach: undefined,
+              log: undefined,
+            }),
+            cap: { max: fleetCapOf(env), env },
+            sessionQuota: copilotSessionQuota(env),
+          }
+        )
+        try {
+          // the REST POST — `gh agent-task create` prints only a human
+          // URL; the task object's `id` has to come back typed or the
+          // registry couldn't pin the remote handle. base_ref absent =
+          // the API's repo default (documented). The body rides a file
+          // in the agents home like the prompt — never argv
+          const bodyFile = join(home, `${agentId}.task.json`)
+          writeFileSync(bodyFile, JSON.stringify({
+            prompt: spec.prompt,
+            create_pull_request: true,
+            ...(knobString('base') !== undefined ? { base_ref: knobString('base') } : {}),
+            ...((spec.model ?? knobString('model')) !== undefined
+              ? { model: spec.model ?? knobString('model') }
+              : {}),
+            ...(knobString('customAgent') !== undefined
+              ? { custom_agent: knobString('customAgent') }
+              : {}),
+          }))
+          const res = ghRun(
+            ['api', '-X', 'POST', `agents/repos/${target.owner}/${target.repo}/tasks`, '--input', bodyFile],
+            60_000
+          )
+          if (res.missing) {
+            throw new SpawnError('gh not on PATH', 'unavailable')
+          }
+          if (res.code !== 0) {
+            throw dispatchFailure(target.slug, res.err !== '' ? res.err : `gh api exited ${res.code}`)
+          }
+          let task: CopilotTask
+          try {
+            task = JSON.parse(res.out) as CopilotTask
+          } catch {
+            throw new SpawnError(
+              `copilot task dispatch returned unparseable JSON — the task may still ` +
+                `have been created; check \`gh agent-task list\` on ${target.slug}`,
+              'unavailable'
+            )
+          }
+          const taskId = typeof task.id === 'string' ? task.id : undefined
+          if (taskId === undefined) {
+            throw new SpawnError(
+              `copilot task dispatch returned no task id — the task may still have ` +
+                `been created; check \`gh agent-task list\` on ${target.slug}`,
+              'unavailable'
+            )
+          }
+          const state = copilotTaskState(task)
+          const spawned = patchAgentRegistry(dir, spec.molStep, {
+            taskId,
+            taskRepo: target.slug,
+            taskState: state !== '' ? state : undefined,
+            branch: copilotHeadRef(task),
+          })
+          writeWorkMarker(dir, agentId, spec.molStep)
+          copilotRefreshCount(env)
+          return {
+            id: agentId,
+            spawnedAt: typeof spawned.spawnedAt === 'string' ? spawned.spawnedAt : undefined,
+            molStep: spec.molStep,
+            backend: 'copilot',
+            // queued is still 'spawned'; the create response is fresh
+            // enough to report 'running' on an in-progress read
+            state: state === 'in_progress' || state === 'idle' || state === 'waiting_for_user'
+              ? 'running'
+              : 'spawned',
+            ...infoProvenance(spawned),
+            worktree: resolve(spec.repoRoot),
+            log: copilotSessionUrl(target.slug, spawned.pr, spawned.sessionId),
+          }
+        } catch (err) {
+          if (reservation !== undefined) {
+            releaseSessionSlot(reservation)
+          }
+          try {
+            patchAgentRegistry(dir, spec.molStep, {
+              spawnError: err instanceof Error ? err.message : String(err),
+            })
+          } catch {
+            // the entry landed already — the SpawnError still reports
+          }
+          throw err
+        }
+      })
+    },
+
+    async list(): Promise<ListResult> { // NOSONAR — connector contract is async; the work is sync
+      try {
+        const home = agentsHome(dir)
+        const entries = Object.entries(readAgentRegistry(dir)).filter(
+          ([, e]) => e.backend === 'copilot'
+        )
+        // the remote count refresh rides every read — the plane counts
+        // REMOTE tasks whether or not this repo's registry spawned them;
+        // armed-quota gate inside keeps an unarmed config gh-free
+        copilotRefreshCount(env)
+        if (entries.length === 0) {
+          // no copilot agents registered — the fleet view must not pay
+          // a gh call (or a degradation) for a backend it never used
+          return { agents: [] }
+        }
+        // per-entry reads — each task's state + harvest is one GET; a
+        // failed one degrades the row's verdict to 'spawned' rather
+        // than reporting a corpse, and marks the whole list degraded
+        const agents: AgentInfo[] = []
+        let degraded: string | undefined
+        for (const [molStep, e] of entries) {
+          const p = copilotTaskProbe(dir, molStep, e)
+          if (p.err !== undefined) {
+            degraded = degraded === undefined ? p.err : degraded
+          }
+          agents.push(copilotInfoFor(dir, home, molStep, e, p))
+        }
+        return degraded === undefined ? { agents } : { agents, degraded }
+      } catch (err) {
+        return {
+          agents: [],
+          degraded: err instanceof Error ? err.message : String(err),
+        }
+      }
+    },
+
+    async status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is sync
+      const hit = findEntry(id)
+      if (!hit) {
+        throw new AgentNotFound(`no copilot agent ${id}`)
+      }
+      copilotRefreshCount(env)
+      return toCopilotInfo(dir, agentsHome(dir), hit[0], hit[1])
+    },
+
+    async stop(id: string): Promise<void> {
+      const hit = findEntry(id)
+      if (!hit) {
+        return // idempotent — gone is the desired end state
+      }
+      const [molStep, entry] = hit
+      const taskId = copilotTaskIdOf(entry)
+      if (entry.stopped !== true && taskId !== undefined) {
+        // best-effort cancel — the documented gap: no CLI/REST task
+        // cancel exists, the backing Actions run is the only handle.
+        // A live task with a workflow run gets POST cancel; the
+        // re-read then reports a survivor (cancel is async server-side)
+        const f = copilotFetchTask(taskId)
+        if (!f.ok) {
+          console.error(
+            `warning: cannot verify copilot task ${taskId} — ${f.err ?? 'gh api failed'}; ` +
+              `the registry still records stopped; if the session survives, stop it in ` +
+              `the web UI (https://${ghHost()}/copilot/agents)`
+          )
+        } else if (COPILOT_LIVE_STATES.has(copilotTaskState(f.task!))) {
+          const repo = copilotEntryRepo(entry)
+          const runId = copilotLatestSession(f.task!)?.workflow_run_id
+          if (repo !== undefined && typeof runId === 'number') {
+            ghRun(['api', '-X', 'POST', `repos/${repo}/actions/runs/${runId}/cancel`])
+          }
+          const after = copilotFetchTask(taskId)
+          if (after.ok && COPILOT_LIVE_STATES.has(copilotTaskState(after.task!))) {
+            const url =
+              copilotSessionUrl(repo, entry.pr, entry.sessionId) ??
+              `https://${ghHost()}/copilot/agents`
+            console.error(
+              `warning: copilot session for ${molStep} is still live — there is no ` +
+                `CLI/REST cancel; stop it in the web UI (${url})`
+            )
+          }
+        }
+      }
+      // a respawn during the cancel re-probes and re-pins the entry
+      // under the registry lock — re-verify under the SAME lock or
+      // 'stopped' lands on a live, respawned entry. Remote-liveness
+      // can't gate the stamp the way docker's container probe does —
+      // cancel is best-effort by contract, so the stamp records intent
+      // and the warn above reports the survivor
+      withAgentRegistryLock(dir, () => {
+        const cur = readAgentRegistry(dir)[molStep]
+        if (
+          cur === undefined ||
+          cur.agentId !== entry.agentId ||
+          cur.spawnedAt !== entry.spawnedAt
+        ) {
+          return // respawned — the live run owns the entry
+        }
+        try {
+          patchAgentRegistry(dir, molStep, { stopped: true })
+        } catch {
+          // the marker removal below still records intent
+        }
+        dropWorkMarker(dir, molStep, entry)
+      })
+    },
+
+    capabilities: () => ({ attach: true, respawn: true, supervisor: 'none' }),
+  }
+}
+
+registerAgentConnector('copilot', makeCopilotConnector)
