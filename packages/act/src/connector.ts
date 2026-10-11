@@ -239,16 +239,16 @@ export const actConnector: Connector = {
       }
       // green gate is not "done" — a pushed PR ends the turn only while
       // somebody keeps polling it. A turn-bound `act wait` dies with the
-      // turn (bro-97lk): the block points at the detached form.
+      // turn (bro-97lk): the block points at the self-detaching form
+      // (bro-b16er).
       const line = `${head}: gate OK but no live act watch`
       return [
         {
           aspect: 'act',
           block:
-            `${line} — arm one: \`bro act wait ${p.pr} --merge --cleanup\` ` +
-            'detached (setsid/systemd-run/tmux — a watcher in a turn-bound ' +
-            'shell dies with the turn); or state the exact open state and ' +
-            'stop again',
+            `${line} — arm one: \`bro act wait ${p.pr} --merge --cleanup --detach\` ` +
+            '(a watcher in a turn-bound shell dies with the turn); or state ' +
+            'the exact open state and stop again',
           passive: `${line} (current branch — this session did not touch it)`,
         },
       ]

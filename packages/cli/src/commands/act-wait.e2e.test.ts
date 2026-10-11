@@ -1,11 +1,18 @@
-import { describe, test } from 'node:test'
+import { describe, test, type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import {
   initRepo,
   installFakeHost,
   inside,
+  readHostState,
   runCli,
   writeHostState,
 } from './testrepo.ts'
@@ -143,5 +150,132 @@ describe('act wait — a blocked settle is a finding (bro-q4iq0)', () => {
       assert.match(r.stdout, /1 unresolved review thread/)
       assert.match(r.stdout, /bro notify — 1 mailbox message/)
     })
+  })
+})
+
+describe('act wait --detach (bro-b16er)', () => {
+  /** SIGKILL the detached child at teardown — the test leaks nothing. */
+  const reaper = (t: TestContext, root: string, pid: { n: number }): void => {
+    t.after(() => {
+      if (pid.n > 0) {
+        try {
+          process.kill(pid.n, 'SIGKILL')
+        } catch {
+          /* already gone */
+        }
+      }
+      rmSync(root, { recursive: true, force: true })
+    })
+  }
+
+  const markerFor = (main: string, pid: number): Record<string, unknown> | null => {
+    const wd = watchesDir(main)
+    if (!existsSync(wd)) {
+      return null
+    }
+    for (const f of readdirSync(wd)) {
+      if (!f.endsWith('.json')) {
+        continue
+      }
+      const w = JSON.parse(readFileSync(join(wd, f), 'utf8')) as Record<string, unknown>
+      if (w.pid === pid) {
+        return w
+      }
+    }
+    return null
+  }
+
+  test('arms a watcher in its own process group — marker + log record it', async (t) => {
+    const { root, main } = fixture()
+    const pid = { n: 0 }
+    reaper(t, root, pid)
+    // a pending check keeps the detached child polling
+    writeHostState(join(main, 'host.json'), {
+      prState: 'OPEN',
+      checks: [{ name: 'ci', state: 'PENDING', bucket: 'pending' }],
+    })
+    const r = runCli(
+      ['act', 'wait', '7', '--interval', '1', '--timeout', '1', '--detach'],
+      { cwd: main }
+    )
+    assert.equal(r.code, 0, r.stderr)
+    const m = /pid (\d+)/.exec(r.stdout)
+    assert.ok(m !== null, r.stdout)
+    pid.n = Number(m[1])
+    // the child's own marker is the durable record — session-start flags
+    // it dead, `act status` shows it live
+    const w = markerFor(main, pid.n)
+    assert.ok(w !== null, 'detached wait never wrote its marker')
+    assert.equal(w.pr, 7)
+    assert.equal(w.merge, false)
+    assert.equal(w.workdir, main)
+    // the child's output rides the per-PR log under <git-common>/bro/
+    const log = join(main, '.git', 'bro', 'act-wait-7.log')
+    assert.ok(existsSync(log))
+    assert.match(readFileSync(log, 'utf8'), /act wait 7/)
+    // the arming process is gone; the watcher keeps polling — the point
+    await new Promise((res) => setTimeout(res, 1500))
+    assert.doesNotThrow(() => process.kill(pid.n, 0))
+  })
+
+  test('a detached --merge lands the PR after the arming process exits', async (t) => {
+    const { root, main } = fixture()
+    const pid = { n: 0 }
+    reaper(t, root, pid)
+    writeHostState(join(main, 'host.json'), { prState: 'OPEN' })
+    const r = runCli(
+      ['act', 'wait', '7', '--interval', '1', '--timeout', '1', '--merge', '--detach'],
+      { cwd: main }
+    )
+    assert.equal(r.code, 0, r.stderr)
+    const m = /pid (\d+)/.exec(r.stdout)
+    if (m !== null) {
+      pid.n = Number(m[1])
+    }
+    // the parent is done — the detached child polls green and merges
+    const deadline = Date.now() + 15_000
+    let merges = 0
+    while (Date.now() < deadline) {
+      merges = Number(readHostState(join(main, 'host.json')).merges ?? 0)
+      if (merges > 0) {
+        break
+      }
+      await new Promise((res) => setTimeout(res, 100))
+    }
+    assert.equal(merges, 1)
+    // a kept promise sweeps its marker — nothing stale left behind
+    const wd = watchesDir(main)
+    const left = existsSync(wd) ? readdirSync(wd).filter((f) => f.endsWith('.json')) : []
+    assert.deepEqual(left, [])
+  })
+
+  test('--cleanup without --merge refuses before spawning', () => {
+    const { root, main } = fixture()
+    inside(main, root, () => {
+      writeHostState(join(main, 'host.json'), { prState: 'OPEN' })
+      const r = runCli(['act', 'wait', '7', '--cleanup', '--detach'], { cwd: main })
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /--cleanup requires --merge/)
+      assert.equal(existsSync(watchesDir(main)), false)
+    })
+  })
+
+  test('--json reports the armed pid', async (t) => {
+    const { root, main } = fixture()
+    const pid = { n: 0 }
+    reaper(t, root, pid)
+    writeHostState(join(main, 'host.json'), {
+      prState: 'OPEN',
+      checks: [{ name: 'ci', state: 'PENDING', bucket: 'pending' }],
+    })
+    const r = runCli(
+      ['act', 'wait', '7', '--interval', '1', '--timeout', '1', '--detach', '--json'],
+      { cwd: main }
+    )
+    assert.equal(r.code, 0, r.stderr)
+    const out = JSON.parse(r.stdout) as { pr: number; pid: number; armed: boolean }
+    assert.equal(out.pr, 7)
+    assert.equal(out.armed, true)
+    pid.n = out.pid
   })
 })

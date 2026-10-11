@@ -7,8 +7,17 @@
  *   resolve --thread ID [--comment TEXT] [--unresolve]
  *   reply   --thread ID --comment TEXT | --file TSV
  */
-import { spawn } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { spawn, type ChildProcess } from 'node:child_process'
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import {
   acquireFileLock,
@@ -71,10 +80,12 @@ function usage(): never {
 
 Commands:
   status [PR] [--json]              PR state + exit gate JSON
-  wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID] [--json]
+  wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID] [--detach] [--json]
                                     Poll the gate until it settles; --merge lands on green,
                                     --cleanup retires the worktree + local branch after it;
-                                    --bead closes the loop-claimed bead once the merge lands
+                                    --bead closes the loop-claimed bead once the merge lands;
+                                    --detach re-spawns the wait as its own process group —
+                                    the watch survives the arming session
   threads [PR]                      Unresolved review threads (TSV)
   merge [PR] [--squash|--merge|--rebase] [--admin] [--cleanup] [--bead ID]
                                     Merge only if the exit gate is green;
@@ -205,6 +216,9 @@ function waitVerdict(res: GateWaitResult): string {
  * "watcher + merge on green" loop in one backgroundable command.
  */
 async function cmdWait(argv: string[]): Promise<void> {
+  if (argv.includes('--detach')) {
+    return cmdWaitDetach(argv)
+  }
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   const rev = reviewHost(undefined, loadBroConfig().connectors)
   const t = resolvePr(rev, argv)
@@ -349,26 +363,188 @@ async function recordBlockedVerdict(
   }
 }
 
-/** Detached `act wait` resurrection — own process group, parent's
- *  stdio ignored, unref'd: the same nohup-equivalent the watcher needs
- *  to survive the session that re-armed it (bro-tafj). `SELF_ENTRY` is
+// --- detached wait -------------------------------------------------------------
+
+/** Cap the per-PR wait log — append-only state in a .git dir still
+ *  shouldn't grow without bound; keep the tail where fresh entries are. */
+const WAIT_LOG_CAP = 512 * 1024
+
+/** `<git-common>/bro/act-wait-<pr>.log` — the detached waiter's
+ *  stdout/stderr. The watch marker under bro/watches/ records the pid
+ *  and the promise; this keeps the words. */
+function waitLogPath(dir: string, pr: number): string | null {
+  const common = gitCommonDir(dir)
+  return common === null ? null : join(common, 'bro', `act-wait-${pr}.log`)
+}
+
+/** Append fd for the wait log, or undefined — the spawn then falls back
+ *  to `stdio: 'ignore'`, never to a broken fd. */
+function waitLogFd(dir: string, pr: number): number | undefined {
+  const p = waitLogPath(dir, pr)
+  if (p === null) {
+    return undefined
+  }
+  try {
+    mkdirSync(dirname(p), { recursive: true })
+    if (statSync(p).size > WAIT_LOG_CAP) {
+      writeFileSync(p, readFileSync(p, 'utf8').slice(-WAIT_LOG_CAP / 2))
+    }
+  } catch {
+    // no log yet or unreadable — the append below creates/keeps it
+  }
+  try {
+    return openSync(p, 'a')
+  } catch {
+    return undefined
+  }
+}
+
+interface DetachedWait {
+  pid: number
+  /** The child's own live watch marker was seen — the wait is armed.
+   *  false means the deadline hit with the child still alive (late
+   *  arming — a slow auth probe); the pid is real, the marker may
+   *  still land. */
+  confirmed: boolean
+}
+
+/** Spawn `act wait <args>` detached + unref'd — the nohup-equivalent a
+ *  session-bound exec shell can't give (bro-b16er): own process group,
+ *  stdio on the per-PR log under <git-common>/bro/. `SELF_ENTRY` is
  *  the running cli entry, so the child re-runs this same binary.
  *
- *  The returned pid is CONFIRMED — this resolves only once the child's
- *  own live marker shows up in listWatches, so a spawn that exits early
- *  (auth gate, config error) resolves undefined and the dead markers
- *  stay on disk as the still-unkept promise. */
-export async function respawnWatcher(dir: string, plan: RearmPlan): Promise<number | undefined> {
+ *  `confirmed` is the marker contract — resolves true only once the
+ *  child's own live marker shows in listWatches, so a spawn that exits
+ *  early (auth gate, config error) is undefined or unconfirmed, never a
+ *  false "watching". */
+async function spawnDetachedWait(opts: {
+  dir: string
+  pr: number
+  args: string[]
+  cwd: string
+}): Promise<DetachedWait | undefined> {
   const entry = SELF_ENTRY
   if (entry === null) {
     return undefined
   }
+  const fd = waitLogFd(opts.dir, opts.pr)
+  let child: ChildProcess
+  try {
+    if (fd !== undefined) {
+      appendFileSync(fd, `\n--- bro ${opts.args.join(' ')} — ${new Date().toISOString()}\n`)
+    }
+    child = spawn(process.execPath, [entry, ...opts.args], {
+      cwd: opts.cwd,
+      detached: true,
+      stdio: fd === undefined ? 'ignore' : ['ignore', fd, fd],
+    })
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) {
+      closeSync(fd)
+    }
+  }
+  // an unhandled 'error' event (ENOENT on cwd, EACCES on the entry)
+  // would crash the caller mid-loop — swallow it; confirmed stays false
+  child.on('error', () => {})
+  child.unref()
+  const pid = child.pid
+  if (pid === undefined) {
+    return undefined
+  }
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline) {
+    const live = listWatches(opts.dir).find((l) => l.alive && l.watch.pid === pid)
+    if (live !== undefined) {
+      return { pid, confirmed: true }
+    }
+    if (child.exitCode !== null) {
+      return undefined // exited before ever publishing its marker
+    }
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  return { pid, confirmed: false }
+}
+
+/** `bro act wait --detach` — arm the wait as a detached child and
+ *  return: the poll, the --merge/--cleanup finalize, and the watch
+ *  marker all outlive the arming session (bro-b16er). Target and flag
+ *  validation stay in the parent so a typo'd PR or bad flag fails where
+ *  stderr is read; the child re-runs the same wait argv minus --detach. */
+async function cmdWaitDetach(argv: string[]): Promise<void> {
+  const interval = Number(flag(argv, '--interval') ?? '60')
+  const timeout = Number(flag(argv, '--timeout') ?? '45')
+  if (!Number.isFinite(interval) || interval <= 0 || !Number.isFinite(timeout) || timeout <= 0) {
+    console.error('error: --interval/--timeout must be positive numbers (seconds/minutes)')
+    process.exit(2)
+  }
+  // a detached child hitting this post-settle reports into a log nobody
+  // reads — refuse in the parent where the error is seen
+  if (argv.includes('--cleanup') && !argv.includes('--merge')) {
+    console.error('error: --cleanup requires --merge — nothing to clean without it')
+    process.exit(2)
+  }
+  ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
+  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  const t = resolvePr(rev, argv)
+  const args = [
+    'act', 'wait', String(t.pr),
+    '--interval', String(interval),
+    '--timeout', String(timeout),
+  ]
+  // the wait's whole flag surface replays — merge mode + strategy the
+  // child's mergeIfAsked dispatches on, the bead its marker re-records
+  for (const f of ['--merge', '--cleanup', '--squash', '--rebase', '--admin']) {
+    if (argv.includes(f)) {
+      args.push(f)
+    }
+  }
+  const bead = flag(argv, '--bead')
+  if (bead !== undefined) {
+    args.push('--bead', bead)
+  }
+  const r = await spawnDetachedWait({ dir: process.cwd(), pr: t.pr, args, cwd: process.cwd() })
+  const link = rev.prLink(t.repo, t.pr)
+  const log = waitLogPath(process.cwd(), t.pr)
+  if (r === undefined) {
+    console.error(
+      `error: detached act wait on ${link} never armed — the child exited ` +
+        `before its marker landed${log === null ? '' : `; log: ${log}`}`
+    )
+    process.exitCode = 1
+    return
+  }
+  if (argv.includes('--json')) {
+    console.log(JSON.stringify({ pr: t.pr, pid: r.pid, armed: r.confirmed, log }, null, 2))
+    return
+  }
+  console.log(
+    `act wait ${link} detached — pid ${r.pid} polling every ${interval}s, timeout ${timeout}m`
+  )
+  console.log(`  inspect: \`bro act status --pr ${t.pr}\`${log === null ? '' : ` · log: ${log}`}`)
+  if (!r.confirmed) {
+    console.error('warning: marker not confirmed within 10s — the child may still be arming')
+  }
+}
+
+/** Detached `act wait` resurrection — the same spawnDetachedWait shape
+ *  `--detach` arms directly (bro-tafj, bro-b16er).
+ *
+ *  The returned pid is CONFIRMED — this resolves only once the child's
+ *  own live marker shows up in listWatches, so a spawn that exits early
+ *  (auth gate, config error) resolves undefined and the dead markers
+ *  stay on disk as the still-unkept promise. A child alive but unmarked
+ *  at the deadline also resolves undefined: keeping the dead markers
+ *  flags the promise again rather than trusting a pid that may yet die
+ *  pre-arm. */
+export async function respawnWatcher(dir: string, plan: RearmPlan): Promise<number | undefined> {
   // --cleanup retires the worktree containing the watcher's cwd — it is
   // replayed only when the recorded workdir still exists. Replaying it
   // from the rearm cwd (or a marker old enough to lack workdir) could
   // tear down the wrong checkout.
   const workdirOk = plan.workdir !== undefined && existsSync(plan.workdir)
-  const args = [entry, 'act', 'wait', String(plan.pr), '--timeout', String(plan.timeoutMin)]
+  const args = ['act', 'wait', String(plan.pr), '--timeout', String(plan.timeoutMin)]
   if (plan.merge) {
     args.push('--merge')
     // --cleanup only has meaning behind --merge — a wait armed with
@@ -385,32 +561,8 @@ export async function respawnWatcher(dir: string, plan: RearmPlan): Promise<numb
     args.push('--bead', plan.bead)
   }
   const cwd = workdirOk ? plan.workdir! : dir
-  const child = spawn(process.execPath, args, {
-    cwd,
-    detached: true,
-    stdio: 'ignore',
-  })
-  // an unhandled 'error' event (ENOENT on cwd, EACCES on the entry)
-  // would crash rearm mid-loop — swallow it; pid stays undefined and
-  // the marker is kept
-  child.on('error', () => {})
-  child.unref()
-  const pid = child.pid
-  if (pid === undefined) {
-    return undefined
-  }
-  const deadline = Date.now() + 10_000
-  while (Date.now() < deadline) {
-    const live = listWatches(dir).find((l) => l.alive && l.watch.pid === pid)
-    if (live !== undefined) {
-      return pid
-    }
-    if (child.exitCode !== null) {
-      return undefined // exited before ever publishing its marker
-    }
-    await new Promise((r) => setTimeout(r, 100))
-  }
-  return undefined
+  const r = await spawnDetachedWait({ dir, pr: plan.pr, args, cwd })
+  return r !== undefined && r.confirmed ? r.pid : undefined
 }
 
 /** `<git-common>/bro/act-rearm.lock` — serializes the plan→respawn
