@@ -669,6 +669,15 @@ function routeFleet(method: string): ServeResponse {
   }
 }
 
+/** The GET-only read planes all share the routePlane shape — a table
+ *  keeps route()'s dispatch flat enough for the SonarCloud ceiling. */
+const READ_PLANES: Record<string, (deps: ServeDeps) => Promise<unknown>> = {
+  snapshot: (deps) => deps.snapshot(),
+  queue: (deps) => deps.queue(),
+  ticks: (deps) => deps.ticks(),
+  mailbox: (deps) => deps.mailbox(),
+}
+
 async function route(
   method: string,
   pathname: string,
@@ -697,17 +706,9 @@ async function route(
   if (api[0] === 'health' && api.length === 1) {
     return routeHealth(method, meta)
   }
-  if (api[0] === 'snapshot' && api.length === 1) {
-    return routePlane(method, () => deps.snapshot())
-  }
-  if (api[0] === 'queue' && api.length === 1) {
-    return routePlane(method, () => deps.queue())
-  }
-  if (api[0] === 'ticks' && api.length === 1) {
-    return routePlane(method, () => deps.ticks())
-  }
-  if (api[0] === 'mailbox' && api.length === 1) {
-    return routePlane(method, () => deps.mailbox())
+  const plane = api.length === 1 ? READ_PLANES[api[0]!] : undefined
+  if (plane !== undefined) {
+    return routePlane(method, () => plane(deps))
   }
   if (api[0] === 'agents') {
     return routeAgentsBranch(method, api, rawBody, deps)

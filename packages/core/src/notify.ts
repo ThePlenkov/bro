@@ -430,6 +430,41 @@ export interface MailboxPeek {
   text: string
 }
 
+/** One drop read for the tail — null for expired, non-file, empty, or
+ *  raced-away drops; a peek skips anything it cannot trust rather than
+ *  surfacing it on the read-only board. */
+function peekDrop(mb: string, f: string, now: number): MailboxPeek | null {
+  const path = join(mb, f)
+  try {
+    // O_NOFOLLOW + fstat on the same fd — a swapped-in symlink's
+    // bytes must never cross onto the unauthenticated
+    // /api/v1/mailbox surface (lstat→read races open to the target);
+    // O_NONBLOCK keeps a fifo named *.txt from stalling the tail —
+    // the fstat isFile() check below still skips it unread
+    const fd = openSync(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    )
+    try {
+      const st = fstatSync(fd)
+      if (now - st.mtimeMs > DROP_TTL_MS || !st.isFile()) {
+        return null
+      }
+      const raw = readFileSync(fd, 'utf8')
+      if (raw.trim() === '') {
+        return null
+      }
+      const t = dropTime(f)
+      return { name: f, ts: t > 0 ? t : Math.round(st.mtimeMs), text: renderDrop(raw) }
+    } finally {
+      closeSync(fd)
+    }
+  } catch {
+    // raced removal or a symlink swap mid-read — skip the drop
+    return null
+  }
+}
+
 /** A read-only tail over the pending drops — the /fleet mailbox board's
  *  view. Unlike drainMailbox a peek consumes nothing: no seen cursor
  *  moves, no expiry sweep runs — reads never mutate the plane they
@@ -449,37 +484,14 @@ export function peekMailbox(dir: string, limit = 25): MailboxPeek[] {
       continue // unreadable mailbox — not this plane's error to raise
     }
     for (const f of files.filter((f) => f.endsWith('.txt') && !f.startsWith('.'))) {
-      const path = join(mb, f)
-      try {
-        // O_NOFOLLOW + fstat on the same fd — a swapped-in symlink's
-        // bytes must never cross onto the unauthenticated
-        // /api/v1/mailbox surface (lstat→read races open to the target);
-        // O_NONBLOCK keeps a fifo named *.txt from stalling the tail —
-        // the fstat isFile() check below still skips it unread
-        const fd = openSync(
-          path,
-          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-        )
-        try {
-          const st = fstatSync(fd)
-          if (now - st.mtimeMs > DROP_TTL_MS || !st.isFile()) {
-            continue
-          }
-          const raw = readFileSync(fd, 'utf8')
-          if (raw.trim() === '') {
-            continue
-          }
-          const t = dropTime(f)
-          out.push({ name: f, ts: t > 0 ? t : Math.round(st.mtimeMs), text: renderDrop(raw) })
-        } finally {
-          closeSync(fd)
-        }
-      } catch {
-        // raced removal or a symlink swap mid-read — skip the drop
+      const drop = peekDrop(mb, f, now)
+      if (drop !== null) {
+        out.push(drop)
       }
     }
   }
-  return out.sort((a, b) => b.ts - a.ts).slice(0, Math.max(0, limit))
+  out.sort((a, b) => b.ts - a.ts)
+  return out.slice(0, Math.max(0, limit))
 }
 
 /** The notify connector — the read side of the mailbox. Its postTool
