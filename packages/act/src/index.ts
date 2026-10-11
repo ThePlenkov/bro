@@ -29,6 +29,7 @@ export {
   watchEnd,
   watchHeartbeat,
   watchMarkerKind,
+  watchRefresh,
   watchRetire,
   watchVerdict,
 } from './pending-watch.ts'

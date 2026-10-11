@@ -1260,6 +1260,20 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     if (!ctx.merge) {
       return { pr, link, verdict: 'green' }
     }
+    // the pass's watch snapshot predates the gate fetch — a supervisor
+    // marker published mid-pass (a loop arming its member) must still
+    // veto the merge, so supervision is re-read as mergeGreen's last
+    // input. The marker plane isn't lock-serialized; a fresh read is
+    // the tightest sync point there is.
+    const sup = supervisedBy(listWatches(ctx.mainRoot), pr)
+    if (sup !== undefined) {
+      return {
+        pr,
+        link,
+        verdict: 'green-occupied',
+        detail: `supervised by ${watchMarkerKind(sup.file, sup.watch)} pid ${sup.watch.pid}`,
+      }
+    }
     return mergeAndRetire(ctx, pr, link, worktree, fixer)
   }
   return blockedVerdict(ctx, { pr, link, state, gate, occ, worktree, fixer, work })

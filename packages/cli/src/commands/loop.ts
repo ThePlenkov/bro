@@ -86,6 +86,7 @@ import {
   gatePending,
   watchBegin,
   watchEnd,
+  watchRefresh,
 } from '@broject/act'
 import {
   buildFixPrompt,
@@ -1439,6 +1440,11 @@ async function serviceMember(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     return 'kept'
   }
   m.nextPollAt = undefined
+  // re-stamp the member's marker on every real service tick — stallMin
+  // is advisory, so a running member outlives the marker's priced TTL
+  // (the 24h floor included) and a pruned marker reads as an orphaned
+  // PR to drive. Same file, same 'wait' kind; watchEnd still owns it.
+  watchRefresh(m.marker)
   const verdict =
     m.worker !== undefined ? await serviceWorker(ctx, m) : await serviceGate(ctx, m)
   if (verdict === 'kept') {

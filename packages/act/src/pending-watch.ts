@@ -234,6 +234,31 @@ export function watchHeartbeat(
   }
 }
 
+/** Re-stamp an existing marker's clock in place — same file, same
+ *  kind, same payload; only `startedAt` moves to now. For a supervisor
+ *  whose tenure can outrun the marker's recorded TTL (a loop member
+ *  whose worker keeps the gate indefinitely, past even the 24h floor):
+ *  the prune keys on `startedAt`, so periodic re-stamping is what keeps
+ *  a live owner listed instead of reading as an orphaned PR. A missing
+ *  or unreadable marker is left alone — the caller's watchBegin owns
+ *  (re)creation; this only services the living. */
+export function watchRefresh(path: string | null): void {
+  if (path === null) {
+    return
+  }
+  const w = readMarker(path)
+  if (w === null) {
+    return
+  }
+  const tmp = `${path}.tmp`
+  try {
+    writeFileSync(tmp, JSON.stringify({ ...w, startedAt: Date.now() }, null, 2))
+    renameSync(tmp, path)
+  } catch {
+    // best-effort — a failed re-stamp leaves the old marker to its TTL
+  }
+}
+
 /** Drop the settled wait's verdict as a marker — the finding half of a
  *  blocked settle (bro-q4iq0). The filename's `blocked` kind segment
  *  keeps it out of deadWatchPlan (a settled wait is not a promise to
