@@ -543,6 +543,42 @@ esac
     )
   })
 
+  test('publish on a stale ref must not leak the source metadata external_ref into the new item', () => {
+    // a source row whose metadata bag carries the dead ref would copy
+    // it into the created issue's trailer — toRow reads trailer
+    // external_ref as the item's own ref, so the caller's write-back
+    // re-stamps the stale value and the duplicate loop continues
+    // (codeant on bro-4upn5)
+    withFakeGh(
+      {
+        FAKE_GH_ACTOR: 'me',
+        FAKE_GH_ISSUE_1: issueRead(null),
+        FAKE_GH_ISSUE_2: issueRead(node({ number: 42 })),
+      },
+      (log, dir) => {
+        const res = githubTasks(dir).publish!(
+          {
+            id: 'bro-t1',
+            title: 'the bead',
+            external_ref: 'https://github.com/acme/widgets/issues/41',
+            metadata: {
+              external_ref: 'https://github.com/acme/widgets/issues/41',
+              bead_src: 'x',
+            },
+          },
+          {}
+        )
+        assert.equal(res?.item.id, '42')
+        assert.equal(res?.item.external_ref, 'https://github.com/acme/widgets/issues/42')
+        assert.equal(res?.replaceExternalRef, true)
+        const created = callsMatching(log, /issue create/).join('\n')
+        // provenance keys pass through; external_ref never does
+        assert.match(created, /"bead_src":"x"/)
+        assert.doesNotMatch(created, /external_ref/)
+      }
+    )
+  })
+
   test('publish declines a foreign external_ref — another system owns that map', () => {
     withFakeGh({ FAKE_GH_ACTOR: 'me' }, (log, dir) => {
       for (const external_ref of [
