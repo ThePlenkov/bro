@@ -171,9 +171,11 @@ export function rigSync(repo: string, deps: RigSyncDeps = {}): RigSyncResult {
   }
 }
 
-function syncOnce(repo: string, deps: RigSyncDeps): RigSyncResult {
+/** The pre-pull guards — cheapest first, a human mid-edit outranks a
+ *  stale checkout. A guard trip is the result; a clean pass hands back
+ *  the tracking context the pull/refresh half works from. */
+function syncGuards(repo: string): RigSyncResult | SyncTrack {
   const base = { repo }
-  // cheapest guards first — a human mid-edit outranks a stale checkout
   const dirty = gitIn(repo, ['status', '--porcelain'])
   if (dirty.code !== 0) {
     return { ...base, state: 'error', detail: `git status: ${dirty.err}` }
@@ -209,6 +211,23 @@ function syncOnce(repo: string, deps: RigSyncDeps): RigSyncResult {
       detail: `rev-list HEAD...@{upstream}: ${counts.err || counts.out.trim()}`,
     }
   }
+  return { branch, upstream, ahead, behind }
+}
+
+interface SyncTrack {
+  branch: string
+  upstream: string
+  ahead: number
+  behind: number
+}
+
+function syncOnce(repo: string, deps: RigSyncDeps): RigSyncResult {
+  const base = { repo }
+  const g = syncGuards(repo)
+  if ('state' in g) {
+    return g
+  }
+  const { branch, upstream, ahead, behind } = g
 
   const pull = pullPhase(repo, branch, upstream, ahead, behind, deps)
   if ('error' in pull) {
@@ -427,6 +446,161 @@ function usage(): never {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
+/** Every subcommand needs a repo — an unresolvable one is the same
+ *  error everywhere, so the gate lives here once. */
+function needRepo(resolved: RigRepo | { error: string }): RigRepo {
+  if ('error' in resolved) {
+    console.error(`bro rig: ${resolved.error}`)
+    process.exit(1)
+  }
+  return resolved
+}
+
+/** `--every` parsing shared by watch and install — the cadence bound
+ *  is the same contract in both. */
+function everyArg(argv: string[], cfg: RigConfig): number {
+  const everyRaw = flag(argv, '--every')
+  const everySec = everyRaw === undefined ? cfg.intervalSec : Number(everyRaw)
+  if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
+    console.error(
+      `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw ?? everySec}"`
+    )
+    process.exit(2)
+  }
+  return everySec
+}
+
+function cmdSync(resolved: RigRepo | { error: string }): never {
+  const { repo } = needRepo(resolved)
+  const r = rigSync(repo)
+  console.log(`rig ${r.state}: ${r.detail}`)
+  process.exit(r.state === 'error' || r.state === 'incomplete' ? 1 : 0)
+}
+
+function cmdStatus(resolved: RigRepo | { error: string }, argv: string[]): never {
+  const { repo, via } = needRepo(resolved)
+  const s = rigStatus(repo, via)
+  if (argv.includes('--json')) {
+    console.log(JSON.stringify(s, null, 2))
+  } else {
+    printStatus(s)
+  }
+  process.exit(s.error === undefined ? 0 : 1)
+}
+
+async function cmdWatch(
+  argv: string[],
+  cfg: RigConfig,
+  resolved: RigRepo | { error: string }
+): Promise<void> {
+  const { repo } = needRepo(resolved)
+  const everySec = everyArg(argv, cfg)
+  const forRaw = flag(argv, '--for')
+  const forSec = forRaw === undefined ? undefined : Number(forRaw)
+  // NaN or an overflowing --for is no bound at all — deadline stays
+  // unreachable and the loop ticks forever at --every's cadence
+  if (
+    forSec !== undefined &&
+    (!Number.isFinite(forSec) || forSec <= 0 || !Number.isFinite(forSec * 1000))
+  ) {
+    console.error(`error: --for needs a finite seconds value >0, got "${forRaw}"`)
+    process.exit(2)
+  }
+  // GUARD (bro-killn): spawned workers pin BRO_AGENT_ID at spawn —
+  // they never own a cadence; the orchestrator session does. Same
+  // predicate and refusal shape as `bro watch --every`.
+  if (!isOrchestratorSession()) {
+    console.error(
+      'error: BRO_AGENT_ID is set — spawned workers never run the rig cadence; ' +
+        'the orchestrator session owns it'
+    )
+    process.exit(2)
+  }
+  // the bound starts before the first tick — a slow pull already
+  // spends --for budget (watch's contract)
+  const deadline =
+    forSec === undefined ? Number.POSITIVE_INFINITY : performance.now() + forSec * 1000
+  // One rig pulse per repo: `bro/rig-pulse.lock` is held for the
+  // process lifetime — a rearmed window stands by behind the
+  // incumbent and takes over when it exits, never ticks concurrently
+  // (same contract as the watch pulse, spec bro-2duu9).
+  const lock = rigPulseLockPath(repo)
+  const releasePulse =
+    lock === null
+      ? () => {}
+      : await awaitFileLock(lock, {
+          label: 'rig pulse lock',
+          onStandby: (pid) =>
+            console.error(
+              `bro rig watch: pulse already held${pid === null ? '' : ` by pid ${pid}`} — standing by`
+            ),
+        })
+  try {
+    for (;;) {
+      const r = rigSync(repo)
+      console.log(`[${new Date().toISOString()}] rig ${r.state}: ${r.detail}`)
+      if (performance.now() >= deadline) {
+        console.log('rig watch: --for expired')
+        return
+      }
+      await sleep(Math.min(everySec * 1000, deadline - performance.now()))
+    }
+  } finally {
+    releasePulse()
+  }
+}
+
+function cmdInstall(
+  argv: string[],
+  cfg: RigConfig,
+  resolved: RigRepo | { error: string }
+): never {
+  const { repo } = needRepo(resolved)
+  const everySec = everyArg(argv, cfg)
+  const win = Math.max(cfg.pulseSec, everySec)
+  const rearm = `bro rig watch --repo ${shQuote(repo)} --every ${everySec} --for ${win}`
+  if (argv.includes('--print')) {
+    console.log(
+      [
+        `# ${rigPulseMarkerPath(repo)} — the want-marker; session checkpoints rearm a dead pulse from it`,
+        JSON.stringify({ repo, everySec, armedAt: '<install time>' }, null, 2),
+        '# the session owns the cadence — no OS timer is installed:',
+        `${rearm}   # bounded window; a dead pulse rearms on the next checkpoint`,
+      ].join('\n')
+    )
+    process.exit(0)
+  }
+  try {
+    const arm = armRigPulse(repo, repo, everySec)
+    const verb =
+      arm.state === 'already' ? 'already armed' : arm.state === 'updated' ? 're-armed' : 'armed'
+    console.log(
+      `rig pulse ${verb} — ${rearm} ` + '(the session owns the cadence; no OS timer installed)'
+    )
+    process.exit(0)
+  } catch (err) {
+    console.error(`bro rig: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+}
+
+function cmdUninstall(resolved: RigRepo | { error: string }): never {
+  const { repo } = needRepo(resolved)
+  const marker = disarmRigPulse(repo)
+  // a running `bro rig watch` keeps its lock until it exits —
+  // disarm drops the rearm intent, not the live process
+  const live = rigPulseLive(repo)
+  const liveNote = live.live
+    ? `live rig pulse still running (pid ${live.pid}) — exits on its own`
+    : ''
+  console.log(
+    [marker === 'disarmed' ? 'rig pulse disarmed' : 'no rig pulse marker', liveNote]
+      .filter((s) => s !== '')
+      .join(' — ')
+  )
+  process.exit(0)
+}
+
 export async function runRigCommand(argv: string[]): Promise<void> {
   const pos = positionals(argv, new Set(['--repo', '--every', '--for']), {
     boolFlags: new Set(['--json', '--print']),
@@ -440,159 +614,19 @@ export async function runRigCommand(argv: string[]): Promise<void> {
   const resolved = resolveRigRepo(cwd, cfg, flag(argv, '--repo'))
 
   if (sub === 'sync') {
-    if ('error' in resolved) {
-      console.error(`bro rig: ${resolved.error}`)
-      process.exit(1)
-    }
-    const r = rigSync(resolved.repo)
-    console.log(`rig ${r.state}: ${r.detail}`)
-    process.exit(r.state === 'error' || r.state === 'incomplete' ? 1 : 0)
+    cmdSync(resolved)
   }
-
   if (sub === 'status') {
-    if ('error' in resolved) {
-      console.error(`bro rig: ${resolved.error}`)
-      process.exit(1)
-    }
-    const s = rigStatus(resolved.repo, resolved.via)
-    if (argv.includes('--json')) {
-      console.log(JSON.stringify(s, null, 2))
-    } else {
-      printStatus(s)
-    }
-    process.exit(s.error === undefined ? 0 : 1)
+    cmdStatus(resolved, argv)
   }
-
   if (sub === 'watch') {
-    if ('error' in resolved) {
-      console.error(`bro rig: ${resolved.error}`)
-      process.exit(1)
-    }
-    const everyRaw = flag(argv, '--every')
-    const forRaw = flag(argv, '--for')
-    const everySec = everyRaw === undefined ? cfg.intervalSec : Number(everyRaw)
-    if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
-      console.error(
-        `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw ?? everySec}"`
-      )
-      process.exit(2)
-    }
-    const forSec = forRaw === undefined ? undefined : Number(forRaw)
-    // NaN or an overflowing --for is no bound at all — deadline stays
-    // unreachable and the loop ticks forever at --every's cadence
-    if (
-      forSec !== undefined &&
-      (!Number.isFinite(forSec) || forSec <= 0 || !Number.isFinite(forSec * 1000))
-    ) {
-      console.error(`error: --for needs a finite seconds value >0, got "${forRaw}"`)
-      process.exit(2)
-    }
-    // GUARD (bro-killn): spawned workers pin BRO_AGENT_ID at spawn —
-    // they never own a cadence; the orchestrator session does. Same
-    // predicate and refusal shape as `bro watch --every`.
-    if (!isOrchestratorSession()) {
-      console.error(
-        'error: BRO_AGENT_ID is set — spawned workers never run the rig cadence; ' +
-          'the orchestrator session owns it'
-      )
-      process.exit(2)
-    }
-    // the bound starts before the first tick — a slow pull already
-    // spends --for budget (watch's contract)
-    const deadline =
-      forSec === undefined ? Number.POSITIVE_INFINITY : performance.now() + forSec * 1000
-    const repo = resolved.repo
-    // One rig pulse per repo: `bro/rig-pulse.lock` is held for the
-    // process lifetime — a rearmed window stands by behind the
-    // incumbent and takes over when it exits, never ticks concurrently
-    // (same contract as the watch pulse, spec bro-2duu9).
-    const lock = rigPulseLockPath(repo)
-    const releasePulse =
-      lock === null
-        ? () => {}
-        : await awaitFileLock(lock, {
-            label: 'rig pulse lock',
-            onStandby: (pid) =>
-              console.error(
-                `bro rig watch: pulse already held${pid === null ? '' : ` by pid ${pid}`} — standing by`
-              ),
-          })
-    try {
-      for (;;) {
-        const r = rigSync(repo)
-        console.log(`[${new Date().toISOString()}] rig ${r.state}: ${r.detail}`)
-        if (performance.now() >= deadline) {
-          console.log('rig watch: --for expired')
-          return
-        }
-        await sleep(Math.min(everySec * 1000, deadline - performance.now()))
-      }
-    } finally {
-      releasePulse()
-    }
+    await cmdWatch(argv, cfg, resolved)
   }
-
   if (sub === 'install') {
-    if ('error' in resolved) {
-      console.error(`bro rig: ${resolved.error}`)
-      process.exit(1)
-    }
-    const everyRaw = flag(argv, '--every')
-    const everySec = everyRaw === undefined ? cfg.intervalSec : Number(everyRaw)
-    if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
-      console.error(
-        `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw ?? everySec}"`
-      )
-      process.exit(2)
-    }
-    const win = Math.max(cfg.pulseSec, everySec)
-    const rearm = `bro rig watch --repo ${shQuote(resolved.repo)} --every ${everySec} --for ${win}`
-    if (argv.includes('--print')) {
-      console.log(
-        [
-          `# ${rigPulseMarkerPath(resolved.repo)} — the want-marker; session checkpoints rearm a dead pulse from it`,
-          JSON.stringify({ repo: resolved.repo, everySec, armedAt: '<install time>' }, null, 2),
-          '# the session owns the cadence — no OS timer is installed:',
-          `${rearm}   # bounded window; a dead pulse rearms on the next checkpoint`,
-        ].join('\n')
-      )
-      process.exit(0)
-    }
-    try {
-      const arm = armRigPulse(resolved.repo, resolved.repo, everySec)
-      const verb =
-        arm.state === 'already' ? 'already armed' : arm.state === 'updated' ? 're-armed' : 'armed'
-      console.log(
-        `rig pulse ${verb} — ${rearm} ` +
-          '(the session owns the cadence; no OS timer installed)'
-      )
-      process.exit(0)
-    } catch (err) {
-      console.error(`bro rig: ${err instanceof Error ? err.message : String(err)}`)
-      process.exit(1)
-    }
+    cmdInstall(argv, cfg, resolved)
   }
-
   if (sub === 'uninstall') {
-    if ('error' in resolved) {
-      console.error(`bro rig: ${resolved.error}`)
-      process.exit(1)
-    }
-    const marker = disarmRigPulse(resolved.repo)
-    // a running `bro rig watch` keeps its lock until it exits —
-    // disarm drops the rearm intent, not the live process
-    const live = rigPulseLive(resolved.repo)
-    const liveNote = live.live ? `live rig pulse still running (pid ${live.pid}) — exits on its own` : ''
-    console.log(
-      [
-        marker === 'disarmed' ? 'rig pulse disarmed' : 'no rig pulse marker',
-        liveNote,
-      ]
-        .filter((s) => s !== '')
-        .join(' — ')
-    )
-    process.exit(0)
+    cmdUninstall(resolved)
   }
-
   usage()
 }
