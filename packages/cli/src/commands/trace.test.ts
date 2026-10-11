@@ -73,8 +73,15 @@ describe('telemetry section + otlp resolution', () => {
       OTEL_EXPORTER_OTLP_HEADERS: 'b=2, bad, =x, c=3',
     })
     assert.equal(r.endpoint, 'http://traces:4318/v1/traces')
+    assert.equal(r.signalUrl, true)
     assert.deepEqual(r.headers, { a: '1', b: '2', c: '3' })
     assert.equal(r.serviceName, 'svc')
+    // base sources stay appendable — only the per-signal env pins verbatim
+    assert.equal(
+      resolveOtlp(cfg, { OTEL_EXPORTER_OTLP_ENDPOINT: 'http://generic:4318' }).signalUrl,
+      false
+    )
+    assert.equal(resolveOtlp(cfg, {}).signalUrl, false)
   })
 
   test('a blank env value falls through to config, not to empty', () => {
@@ -103,6 +110,8 @@ describe('telemetry section + otlp resolution', () => {
     assert.equal(tracesUrl('http://h:4318'), 'http://h:4318/v1/traces')
     assert.equal(tracesUrl('http://h:4318/'), 'http://h:4318/v1/traces')
     assert.equal(tracesUrl('https://langfuse/api/public/otel/v1/traces'), 'https://langfuse/api/public/otel/v1/traces')
+    // a per-signal env endpoint is complete — verbatim, no append
+    assert.equal(tracesUrl('http://gw/custom/traces', true), 'http://gw/custom/traces')
   })
 })
 
@@ -276,6 +285,70 @@ describe('exportTraces', () => {
         // s2's journal is untouched — its cursor never advanced
         const r2 = await exportTraces({ dir: main, otlp })
         assert.equal(r2?.spans, 2)
+      } finally {
+        stub.restore()
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a front-trimmed journal resyncs when the cursor pin no longer matches', async () => {
+    const { root, main } = initRepo('bro-trace-')
+    try {
+      const lines = [
+        { ts: 1, tool: 'a' },
+        { ts: 2, tool: 'b' },
+        { ts: 3, tool: 'c' },
+        { ts: 4, tool: 'd' },
+      ]
+      journal(main, 's1', lines)
+      const dir = traceDir(main)
+      // cursor says lines 0..1 went out; the janitor then caps the
+      // journal to its last 3 lines — off=2 stays inside the retained
+      // count, only the pin can tell the file shifted
+      writeFileSync(
+        join(dir, '.export.json'),
+        JSON.stringify({
+          v: 1,
+          sessions: { 's1.jsonl': { line: 2, at: 1, tail: JSON.stringify(lines[1]) } },
+        })
+      )
+      journal(main, 's1', lines.slice(1))
+      const stub = stubFetch(() => ({ ok: true }))
+      try {
+        const r = await exportTraces({ dir: main, otlp })
+        // all 3 retained lines ship — the unsent c/d must not be skipped
+        assert.equal(r?.spans, 3)
+      } finally {
+        stub.restore()
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a matching pin keeps the delta — only fresh lines ship', async () => {
+    const { root, main } = initRepo('bro-trace-')
+    try {
+      const lines = [
+        { ts: 1, tool: 'a' },
+        { ts: 2, tool: 'b' },
+        { ts: 3, tool: 'c' },
+      ]
+      journal(main, 's1', lines)
+      const dir = traceDir(main)
+      writeFileSync(
+        join(dir, '.export.json'),
+        JSON.stringify({
+          v: 1,
+          sessions: { 's1.jsonl': { line: 2, at: 1, tail: JSON.stringify(lines[1]) } },
+        })
+      )
+      const stub = stubFetch(() => ({ ok: true }))
+      try {
+        const r = await exportTraces({ dir: main, otlp })
+        assert.equal(r?.spans, 1)
       } finally {
         stub.restore()
       }

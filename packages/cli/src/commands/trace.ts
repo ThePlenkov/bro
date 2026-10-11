@@ -216,8 +216,11 @@ interface ExportCursor {
   /** Last POST failure — the only record a dead collector leaves. */
   lastError?: string
   lastErrorAt?: number
-  /** journal file basename → lines already sent + when. */
-  sessions: Record<string, { line: number; at: number }>
+  /** journal file basename → lines already sent + when. `tail` pins
+   *  the last sent line verbatim — a front-trimmed journal (the
+   *  janitor's cap keeps the tail) can leave `line` inside the
+   *  retained count, and only the pin detects the shift. */
+  sessions: Record<string, { line: number; at: number; tail?: string }>
 }
 
 const CURSOR_NAME = '.export.json'
@@ -307,7 +310,7 @@ export async function exportTraces(opts: {
       (loadBroConfig(opts.dir) as Record<string, unknown>).telemetry
     ).otlp)
   const result: ExportResult = {
-    endpoint: cfg.endpoint === '' ? '' : tracesUrl(cfg.endpoint),
+    endpoint: cfg.endpoint === '' ? '' : tracesUrl(cfg.endpoint, cfg.signalUrl === true),
     sessions: 0,
     spans: 0,
     dryRun: opts.dryRun === true,
@@ -321,7 +324,7 @@ export async function exportTraces(opts: {
   const cPath = cursorPath(traceDir)
   const cursor = readCursor(cPath)
   const spans: OtlpSpan[] = []
-  const advance = new Map<string, number>()
+  const advance = new Map<string, { line: number; tail: string }>()
   for (const j of journalFiles(traceDir, opts.session)) {
     let lines: string[]
     try {
@@ -332,8 +335,12 @@ export async function exportTraces(opts: {
       // a racing reap can unlink mid-scan — that journal just sits out
       continue
     }
-    let off = cursor.sessions[basename(j.path)]?.line ?? 0
-    if (off > lines.length) {
+    const cur = cursor.sessions[basename(j.path)]
+    let off = cur?.line ?? 0
+    if (
+      off > lines.length ||
+      (off > 0 && cur?.tail !== undefined && lines[off - 1] !== cur.tail)
+    ) {
       // the journal trimmed or was recreated past the cursor — resync
       // to the live tail (a resend dedups by span id)
       off = 0
@@ -343,7 +350,7 @@ export async function exportTraces(opts: {
       continue
     }
     spans.push(...journalSpans(j.session, fresh))
-    advance.set(basename(j.path), lines.length)
+    advance.set(basename(j.path), { line: lines.length, tail: lines[lines.length - 1]! })
   }
   result.sessions = advance.size
   result.spans = spans.length
@@ -366,8 +373,8 @@ export async function exportTraces(opts: {
     if (!res.ok) {
       throw new Error(`OTLP endpoint ${result.endpoint} answered ${res.status}`)
     }
-    for (const [file, line] of advance) {
-      cursor.sessions[file] = { line, at: Date.now() }
+    for (const [file, s] of advance) {
+      cursor.sessions[file] = { line: s.line, tail: s.tail, at: Date.now() }
     }
     delete cursor.lastError
     delete cursor.lastErrorAt
@@ -452,6 +459,11 @@ export async function runTraceCommand(argv: string[]): Promise<void> {
   }
   const si = args.indexOf('--session')
   const session = si >= 0 ? args[si + 1] : undefined
+  if (si >= 0 && (session === undefined || session.startsWith('--'))) {
+    // a dangling --session must not widen the filter to every journal
+    console.error('usage: bro trace export [--session <id>] [--dry-run] [--json]')
+    process.exit(2)
+  }
   const dryRun = args.includes('--dry-run')
   const json = args.includes('--json')
   const r = await exportTraces({ dir: process.cwd(), session, dryRun })

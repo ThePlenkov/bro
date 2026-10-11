@@ -238,6 +238,19 @@ describe('bro trace export', () => {
     })
   })
 
+  test('a dangling --session is a usage error, not an unfiltered export', async () => {
+    await withCollector(async (c, f) => {
+      journal(f, 's1', [{ ts: 1, tool: 'exec', command: 'ls' }])
+      const r = await runCliAsync(['trace', 'export', '--session'], {
+        cwd: f.main,
+        env: otlpEnv(c),
+      })
+      assert.equal(r.code, 2)
+      assert.match(r.stderr, /usage:/)
+      assert.equal(c.bodies.length, 0)
+    })
+  })
+
   test('--json reports the export without the payload', async () => {
     await withCollector(async (c, f) => {
       journal(f, 's1', [{ ts: 1, tool: 'exec', command: 'ls' }])

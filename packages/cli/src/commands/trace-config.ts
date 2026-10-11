@@ -8,6 +8,9 @@ export interface OtlpConfig {
   /** Collector base URL — `http://host:4318` or a full `/v1/traces`
    *  path. Empty means off (the default). */
   endpoint: string
+  /** True when `endpoint` is already the complete signal URL —
+   *  `tracesUrl` must not append `/v1/traces` to it. */
+  signalUrl?: boolean
   /** Extra request headers (auth tokens live here — config, never argv). */
   headers: Record<string, string>
   /** service.name on exported spans. */
@@ -94,15 +97,20 @@ export function resolveOtlp(
     return { ...cfg, endpoint: '' }
   }
   const envSet = (v: string | undefined): v is string => v !== undefined && v.trim() !== ''
+  // TRACES_ENDPOINT is the per-signal env var — a complete URL used
+  // verbatim; the generic endpoint and config are base URLs.
+  const perSignal = env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+  const signalUrl = envSet(perSignal)
   const endpoint = (
-    envSet(env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT)
-      ? env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+    signalUrl
+      ? perSignal
       : envSet(env.OTEL_EXPORTER_OTLP_ENDPOINT)
         ? env.OTEL_EXPORTER_OTLP_ENDPOINT
         : cfg.endpoint
   ).trim()
   return {
     endpoint,
+    signalUrl: signalUrl || cfg.signalUrl === true,
     headers: { ...cfg.headers, ...parseOtlpHeaders(env.OTEL_EXPORTER_OTLP_HEADERS) },
     serviceName:
       env.OTEL_SERVICE_NAME !== undefined && env.OTEL_SERVICE_NAME.trim() !== ''
@@ -115,8 +123,10 @@ export function resolveOtlp(
 
 /** POST URL for the traces signal — a configured `/v1/traces` tail is
  *  used verbatim (Langfuse's `/api/public/otel` prefix needs the base
- *  form, a bare collector port needs the append). */
-export function tracesUrl(endpoint: string): string {
+ *  form, a bare collector port needs the append). `verbatim` marks a
+ *  complete signal URL — the per-signal env var's contract is
+ *  used-as-is. */
+export function tracesUrl(endpoint: string, verbatim = false): string {
   const base = endpoint.replace(/\/+$/, '')
-  return base.endsWith('/v1/traces') ? base : `${base}/v1/traces`
+  return verbatim || base.endsWith('/v1/traces') ? base : `${base}/v1/traces`
 }
