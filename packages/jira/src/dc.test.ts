@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { facadeName, registerConnector } from '@broject/core'
@@ -364,6 +364,26 @@ describe('jiraDcTasks', { skip: WIN32 }, () => {
     })
   })
 
+  test('an http baseUrl in the CLI config refuses — never plaintext auth', () => {
+    // env pins cleared so the CLI's own config is the effective base;
+    // HOME carries a config.json the assert must reject pre-spawn
+    const home = mkdtempSync(join(tmpdir(), 'bro-jira-dc-home-'))
+    mkdirSync(join(home, '.atlassian-tools'), { recursive: true })
+    writeFileSync(
+      join(home, '.atlassian-tools', 'config.json'),
+      JSON.stringify({ baseUrl: 'http://jira.dc.example.com' })
+    )
+    try {
+      withDc({ JIRA_BASE_URL: '', JIRA_DC_BASE_URL: '', HOME: home }, ({ argv }) => {
+        const store = jiraDcTasks('/tmp/x')
+        assert.throws(() => store.get('PROJ-1'), /https:/)
+        assert.equal(calls(argv).length, 0)
+      })
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   test('actor answers the name-keyed viewer', () => {
     withDc({}, () => {
       const store = jiraDcTasks('/tmp/x')
@@ -376,7 +396,7 @@ describe('jiraDcTasks', { skip: WIN32 }, () => {
       const line = jiraDcConnector.auth?.({ dir: '' } as never)
       assert.match(String(line), /jira-dc: atlassian CLI not ready/)
       assert.match(String(line), /unauthorized/)
-      assert.match(String(line), /JIRA_BASE_URL|PAT/)
+      assert.match(String(line), /JIRA_DC_BASE_URL/)
     })
   })
 })

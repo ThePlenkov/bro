@@ -68,7 +68,7 @@ export const jiraDcConnector: Connector = {
       dcApi().viewer(5_000)
       return null
     } catch (err) {
-      return `jira-dc: atlassian CLI not ready — ${err instanceof Error ? err.message : String(err)} (pin JIRA_BASE_URL to the DC site; ATLASSIAN_TOKEN carries the PAT as Bearer)`
+      return `jira-dc: atlassian CLI not ready — ${err instanceof Error ? err.message : String(err)} (pin JIRA_DC_BASE_URL to the DC site — JIRA_BASE_URL is shared and would redirect the cloud surface; ATLASSIAN_TOKEN carries the PAT as Bearer)`
     }
   },
   tasks: (ctx) => jiraDcTasks(ctx.dir),

@@ -55,7 +55,7 @@ Same mapping contract as `github-issues` (bro-huy5o.1) and `linear`
 Name-only (`optIn`) — nothing about a repo's remote or layout identifies a
 Jira site:
 
-```json
+```jsonc
 { "connectors": { "tasks": "jira" } }       // Jira Cloud
 { "connectors": { "tasks": "jira-dc" } }    // Jira Data Center/Server
 ```

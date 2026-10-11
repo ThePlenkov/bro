@@ -207,26 +207,28 @@ interface CliConfig {
   cloudId?: string
 }
 
-let cliConfigCache: CliConfig | undefined
+let cliConfigCache: { home: string; cfg: CliConfig } | undefined
 
 /** The CLI's own ~/.atlassian-tools/config.json — endpoint resolution
  *  only (baseUrl/cloudId); credentials are never read. A missing or
  *  malformed file degrades to {} — the CLI's own errors stay the
- *  honest surface. */
+ *  honest surface. Keyed on homedir so a swapped HOME re-reads. */
 function cliConfig(): CliConfig {
-  if (cliConfigCache === undefined) {
-    cliConfigCache = {}
+  const home = homedir()
+  if (cliConfigCache?.home !== home) {
+    const cfg: CliConfig = {}
     try {
       const raw = JSON.parse(
-        readFileSync(join(homedir(), '.atlassian-tools', 'config.json'), 'utf8')
+        readFileSync(join(home, '.atlassian-tools', 'config.json'), 'utf8')
       ) as CliConfig
-      if (typeof raw.baseUrl === 'string') cliConfigCache.baseUrl = raw.baseUrl
-      if (typeof raw.cloudId === 'string') cliConfigCache.cloudId = raw.cloudId
+      if (typeof raw.baseUrl === 'string') cfg.baseUrl = raw.baseUrl
+      if (typeof raw.cloudId === 'string') cfg.cloudId = raw.cloudId
     } catch {
       // no config file — the CLI's defaults apply
     }
+    cliConfigCache = { home, cfg }
   }
-  return cliConfigCache
+  return cliConfigCache.cfg
 }
 
 /** REST path → the endpoint the CLI should prefix. Site bases (env
@@ -259,8 +261,14 @@ function endpoint(s: Surface, path: string): string {
 function apiArgs(s: Surface, method: string, path: string, body?: unknown): string[] {
   const args = ['api', method]
   const base = jiraBaseUrl(s)
+  // the assert covers the EFFECTIVE base: an env pin rides --url, an
+  // unset pin falls through to the CLI's own config baseUrl — either
+  // way the Authorization header must never fly plaintext
+  const effective = base ?? cliConfig().baseUrl
+  if (effective !== undefined) {
+    assertHttps(effective)
+  }
   if (base !== undefined) {
-    assertHttps(base)
     args.push('--url', base)
   }
   args.push(endpoint(s, path))
