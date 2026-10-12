@@ -1056,12 +1056,13 @@ function realDeps(dir: string, env: AgentConnectorEnv): ServeDeps {
       github: githubWebhookHandler({
         secret: () => process.env[GITHUB_WEBHOOK_SECRET_ENV],
         publish: async (event) => {
-          const r =
-            socketPath === null
-              ? { published: false as const, reason: 'not a repository' }
-              : await busPublish(socketPath, event)
+          // drop BEFORE the publish reaches the broker: it fans the
+          // event out to subscribers ahead of the publisher's ack, so
+          // a poll woken by the event must already miss the feed entry
           dropActStateForEvent(dir, event)
-          return r
+          return socketPath === null
+            ? { published: false as const, reason: 'not a repository' }
+            : busPublish(socketPath, event)
         },
       }),
     },

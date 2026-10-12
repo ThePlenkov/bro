@@ -56,7 +56,7 @@ describe('prStateCache', () => {
   test('an expired entry reads as a miss and is dropped', () => {
     const dir = repo()
     const cache = prStateCache(dir)!
-    const file = join(dir, '.git', 'bro', 'act-state', 'o-r-7.json')
+    const file = join(dir, '.git', 'bro', 'act-state', 'o%2Fr-7.json')
     mkdirSync(join(dir, '.git', 'bro', 'act-state'), { recursive: true })
     writeFileSync(file, JSON.stringify({ fetchedAt: Date.now() - 60_000, state: stateFor(7) }))
     assert.equal(cache.read(target), null)
@@ -66,8 +66,15 @@ describe('prStateCache', () => {
     const dir = repo()
     const cache = prStateCache(dir)!
     mkdirSync(join(dir, '.git', 'bro', 'act-state'), { recursive: true })
-    writeFileSync(join(dir, '.git', 'bro', 'act-state', 'o-r-7.json'), '{oops')
+    writeFileSync(join(dir, '.git', 'bro', 'act-state', 'o%2Fr-7.json'), '{oops')
     assert.equal(cache.read(target), null)
+  })
+
+  test('distinct repo names that sanitize to the same slug do not collide', () => {
+    const cache = prStateCache(repo())!
+    cache.write({ repo: 'a-b/c', pr: 1 }, stateFor(1))
+    assert.equal(cache.read({ repo: 'a/b-c', pr: 1 }), null)
+    assert.deepEqual(cache.read({ repo: 'a-b/c', pr: 1 }), stateFor(1))
   })
 
   test('an entry for another pr is a miss', () => {
@@ -223,7 +230,7 @@ describe('fetchPrActState — shared feed', () => {
     // the contender gives up at lockWaitMs and fetches itself
     const lockDir = join(dir, '.git', 'bro', 'act-state')
     mkdirSync(lockDir, { recursive: true })
-    writeFileSync(join(lockDir, 'o-r-7.json.lock'), `${process.pid}:foreign`)
+    writeFileSync(join(lockDir, 'o%2Fr-7.json.lock'), `${process.pid}:foreign`)
     const s = await fetchPrActState(rev, target, { stateCache: cache })
     assert.equal(calls(), 1)
     assert.equal(s.headSha, SHA)

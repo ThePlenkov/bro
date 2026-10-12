@@ -28,7 +28,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
-import { acquireFileLock, gitCommonDir, type PrTarget } from '@broject/core'
+import { acquireFileLock, gitCommonDir, LockTimeout, type PrTarget } from '@broject/core'
 import type { PrActState } from './types.ts'
 
 /** Under every poll interval (act wait/watch ~60s, drive ~300s): a
@@ -41,6 +41,11 @@ export const ACT_STATE_LOCK_WAIT_MS = 15_000
 /** Entries past this are reaped on write — a settled PR's last state
  *  would otherwise sit in the dir forever. */
 const STALE_MS = 6 * 3600_000
+/** One contention slice of acquireAsync — the file lock's wait is
+ *  Atomics.wait on the calling thread, so a full waitMs block would
+ *  freeze the event loop (timers, polls, signal handlers) for the
+ *  whole contention window; slices keep any single stall this short. */
+const ACQUIRE_SLICE_MS = 250
 
 export interface PrStateCache {
   /** A fresh cached state — null on miss, expiry, corruption, or a
@@ -58,8 +63,14 @@ export interface PrStateCache {
   invalidateAll(): void
   /** The read→fetch→write critical section for `target` — contenders
    *  that can't take it inside `waitMs` get null and proceed uncached:
-   *  the lock is fetch dedup, never a gate of its own. */
+   *  the lock is fetch dedup, never a gate of its own. Synchronous —
+   *  the wait is Atomics.wait on the calling thread, so async callers
+   *  take `acquireAsync` instead. */
   acquire(target: PrTarget, waitMs?: number): (() => void) | null
+  /** The async form of acquire — same contract, but contention is
+   *  retried in ACQUIRE_SLICE_MS slices with an event-loop yield
+   *  between them instead of one blocking wait. */
+  acquireAsync(target: PrTarget, waitMs?: number): Promise<(() => void) | null>
 }
 
 interface CacheRecord {
@@ -68,7 +79,10 @@ interface CacheRecord {
 }
 
 function fileFor(root: string, t: PrTarget): string {
-  const slug = t.repo.replace(/[^A-Za-z0-9._-]+/g, '-')
+  // injective on purpose — a sanitizing slug maps distinct valid
+  // names together ('a-b/c' and 'a/b-c' both → 'a-b-c'), handing one
+  // repo's gate state to the other at the same PR number
+  const slug = encodeURIComponent(t.repo)
   return join(root, `${slug}-${t.pr}.json`)
 }
 
@@ -120,15 +134,21 @@ export function prStateCache(
   const root = join(common, 'bro', 'act-state')
   const ttl = opts?.ttlMs ?? ACT_STATE_TTL_MS
   const lockWait = opts?.lockWaitMs ?? ACT_STATE_LOCK_WAIT_MS
-  const acquire = (t: PrTarget, waitMs: number): (() => void) | null => {
+  // 'timeout' keeps contention retryable for the sliced async wait —
+  // a real fs failure means "proceed uncached", never a retry loop
+  const tryAcquire = (t: PrTarget, waitMs: number): (() => void) | null | 'timeout' => {
     try {
       return acquireFileLock(`${fileFor(root, t)}.lock`, {
         waitMs,
         label: 'act-state fetch',
       })
-    } catch {
-      return null
+    } catch (err) {
+      return err instanceof LockTimeout ? 'timeout' : null
     }
+  }
+  const acquire = (t: PrTarget, waitMs: number): (() => void) | null => {
+    const r = tryAcquire(t, waitMs)
+    return r === 'timeout' ? null : r
   }
   return {
     read(t) {
@@ -189,6 +209,19 @@ export function prStateCache(
     },
     acquire(t, waitMs = lockWait) {
       return acquire(t, waitMs)
+    },
+    async acquireAsync(t, waitMs = lockWait) {
+      const deadline = Date.now() + waitMs
+      for (;;) {
+        const r = tryAcquire(t, Math.min(ACQUIRE_SLICE_MS, Math.max(0, deadline - Date.now())))
+        if (r !== 'timeout') {
+          return r
+        }
+        if (Date.now() >= deadline) {
+          return null
+        }
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      }
     },
   }
 }

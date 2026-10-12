@@ -310,7 +310,7 @@ async function fetchShared(
   opts: FetchPrActStateOpts | undefined,
   cache: PrStateCache | null
 ): Promise<PrActState> {
-  const release = cache?.acquire(target) ?? null
+  const release = (await cache?.acquireAsync(target)) ?? null
   try {
     if (release !== null && cache !== null) {
       const hit = cache.read(target)
