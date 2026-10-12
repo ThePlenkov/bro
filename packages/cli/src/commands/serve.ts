@@ -54,6 +54,16 @@
  *                               this route bypasses the bearer AND Host
  *                               guards so a hosted tunnel whose Host is
  *                               not loopback still reaches it
+ *   ALL    /v1/*                the Messages-API provider plane
+ *                               (bro-om6m8): a byte-proxy to the env-
+ *                               configured upstream — claude-code
+ *                               pointed at ANTHROPIC_BASE_URL=<serve>
+ *                               talks to Anthropic THROUGH bro. Streams
+ *                               below the JSON envelope; wired only when
+ *                               BRO_PROVIDER_API_KEY (or ANTHROPIC_*)
+ *                               is set in the server env — the session
+ *                               token is still required, it is the
+ *                               client-side credential
  *
  * Discovery + credentials: `<git-common-dir>/bro/serve.json` {pid,
  * url, dir, startedAt, token} written on listen (tmp+rename, mode
@@ -119,6 +129,7 @@ import {
   type StopOutcome,
 } from './agents.ts'
 import { flag, positionals } from './args.ts'
+import { providerConfig, providerProxy } from './serve-provider.ts'
 import { readBeads } from './status.ts'
 import { collectSnapshot } from './watch.ts'
 import { readHeartbeat, type HeartbeatSummary } from './watch-heartbeat.ts'
@@ -332,6 +343,11 @@ export interface ServeDeps {
   connectors(): string[]
   /** `/api/v1/webhooks/<provider>` handlers keyed by provider slug. */
   webhooks?: Record<string, ServeWebhookHandler>
+  /** `/v1/*` Messages-API provider proxy (bro-om6m8) — raw-stream,
+   *  below the ServeResponse envelope: real request bodies exceed the
+   *  256KB read cap and SSE answers must pipe. Absent means no
+   *  upstream credential — the route 404s like any unknown path. */
+  provider?: (req: IncomingMessage, res: ServerResponse) => Promise<void>
 }
 
 export interface ServeResponse {
@@ -356,6 +372,7 @@ const ROUTES = [
   'GET /api/v1/agents/<ref>',
   'DELETE /api/v1/agents/<ref>',
   'POST /api/v1/webhooks/github',
+  'ALL /v1/*',
 ]
 
 /** Per-server context — startedAt is captured at LISTEN time, not module
@@ -861,6 +878,30 @@ async function handleRequest(
       send(res, 403, { error: 'loopback host only' })
       return
     }
+    // The provider plane owns its own stream — a Messages request can
+    // carry a whole session context (megabytes) and an SSE answer
+    // pipes for minutes; neither fits the readBody cap nor the
+    // ServeResponse envelope. The credential check is the same one
+    // writes pay — the session token IS the provider credential — but
+    // it applies to every method, GETs included: an unauthenticated
+    // /v1/* could spend the upstream key even blinded to the answer.
+    if (url.pathname.startsWith('/v1/')) {
+      const wantsBody = WRITE_METHODS.has(req.method ?? 'GET')
+      const refusal = writeGuard(req, token, wantsBody, statePathHint)
+      if (refusal !== undefined) {
+        send(res, refusal.status, refusal.body, refusal)
+        return
+      }
+      if (deps.provider === undefined) {
+        send(res, 404, {
+          error:
+            'provider not wired — set BRO_PROVIDER_API_KEY (or ANTHROPIC_API_KEY) in the server env',
+        })
+        return
+      }
+      await deps.provider(req, res)
+      return
+    }
     const wantsBody =
       req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
     if (!webhookRoute && WRITE_METHODS.has(req.method ?? 'GET')) {
@@ -994,6 +1035,10 @@ export function collectTicks(dir: string, now = Date.now()): TickBoard {
 
 function realDeps(dir: string, env: AgentConnectorEnv): ServeDeps {
   const socketPath = busSocketPath(dir)
+  const providerCfg = providerConfig(process.env)
+  if (providerCfg !== undefined) {
+    console.log(`provider: /v1/* → ${providerCfg.upstream}`)
+  }
   return {
     snapshot: () => collectSnapshot(dir),
     agents: async () => {
@@ -1025,6 +1070,7 @@ function realDeps(dir: string, env: AgentConnectorEnv): ServeDeps {
             : busPublish(socketPath, event),
       }),
     },
+    ...(providerCfg !== undefined ? { provider: providerProxy(providerCfg) } : {}),
   }
 }
 
