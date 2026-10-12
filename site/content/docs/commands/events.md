@@ -83,10 +83,12 @@ is an accelerator over the default, never a requirement.
 The mailbox reaches agents; sinks reach PEOPLE. A `sinks` array in the
 operator-local `notify` section fans every publish out to configured
 webhooks — Slack incoming webhooks, telegram `sendMessage`, or a
-generic JSON endpoint. Delivery wraps the facade `publish`, so every
-producer — `bro notify`, `bro bus publish`, the webhook ingest,
-convoy, drive, act, retrospect — reaches the sinks through the same
-door.
+generic JSON endpoint. Two paths deliver. Facade `publish` — `bro
+notify`, convoy, drive, act, retrospect — awaits the sink fan-out
+before resolving, so a slow sink holds the call until it answers or
+hits `timeoutMs`. `bro bus publish` and the GitHub webhook ingest call
+`deliverSinks` without awaiting — delivery completes in the
+background and the caller never sees the per-sink result rows.
 
 | Command | What it does |
 | ------- | ------------ |
@@ -113,19 +115,29 @@ Each entry is `{ type, ... }`:
   `drive:*`). A sink posts only when some pattern matches.
 - Secrets name env vars — `urlEnv`, `tokenEnv`, `chatIdEnv` — never
   literal values in config; a missing var skips the sink. `url` and
-  `chatId` accept literals for non-secret endpoints.
+  `chatId` accept literals for non-secret endpoints. Credential-bearing
+  endpoints must be `https://` — a `urlEnv`-resolved URL and telegram
+  `apiBase` answering `http://` are refused, not sent: the token or
+  secret URL never leaves over cleartext. Literal `url` stays
+  unrestricted for internal non-secret receivers.
 - `timeoutMs` bounds one delivery (default 5s — a wedged endpoint
   doesn't hold the caller); `minIntervalMs` deduplicates an identical
-  repeat (same sink, key, and rendered text) so an every-N-minutes
-  alert source doesn't re-page each tick (default 4h; `0` disables).
-  A changed payload is a new event and sends immediately.
+  repeat (same sink, key, rendered text, and raw payload) so an
+  every-N-minutes alert source doesn't re-page each tick (default 4h;
+  `0` disables). A changed payload is a new event and sends
+  immediately — payloads that merely render alike (whitespace-collapsed
+  strings) still count as changed.
 - Bodies: slack posts `{ text: "[topic/kind] message" }`, telegram
   `{ chat_id, text }` to `bot<token>/sendMessage` (`apiBase`
   overrides the API host), generic webhook posts the event fields
   plus a rendered `text` — all `application/json`.
 
-Delivery NEVER blocks or fails the agent: a missing env var, an HTTP
-error, a dead endpoint returns a result row, not an exception. Built-in
+Delivery never FAILS the agent: a missing env var, an HTTP error, a
+dead endpoint returns a result row, not an exception. Blocking depends
+on the path — facade publish waits on the fan-out (`timeoutMs`, default
+5s per request with all sinks in parallel, is the bound; it does not
+make publish nonblocking) while the `bro bus publish` and
+webhook-ingest paths don't wait at all. Built-in
 emissions — convoy HUMAN GATE (`convoy:gate`), drive stuck-PR and
 silent-reviewer alerts (`drive:alert`), `act wait` settles
 (`act:block`/`act:result`), wtf captures (`wtf:note`) and retro records

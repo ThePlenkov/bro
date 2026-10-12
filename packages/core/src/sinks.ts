@@ -94,14 +94,18 @@ export function sinkSecrets(sink: SinkDef): string[] {
 /** The wire shape per sink type. Resolution happens per delivery: env
  *  is process state, and a worker spawned before the var existed
  *  should fail then, not at parse time. Returns `{missing: <env name>}`
- *  when a required secret is unset — `requestFor` never reveals the
- *  secret itself (the URL contains the telegram token, but it goes to
- *  the wire, never to a log). */
+ *  when a required secret is unset and `{refused: <reason>}` when the
+ *  endpoint itself is unacceptable — a credential-bearing URL (the
+ *  telegram token rides the request path; a `urlEnv` indirection marks
+ *  the endpoint as a secret) must be `https://`, since an `http://`
+ *  first hop hands the secret to any on-path observer. `requestFor`
+ *  never reveals the secret itself: the URL goes to the wire, never to
+ *  a log, and `refused` names the field, not the value. */
 export function requestFor(
   sink: SinkDef,
   event: EventInput,
   env: NodeJS.ProcessEnv = process.env
-): { url: string; body: unknown } | { missing: string } {
+): { url: string; body: unknown } | { missing: string } | { refused: string } {
   if (sink.type === 'telegram') {
     const token = sink.tokenEnv !== undefined ? env[sink.tokenEnv]?.trim() : undefined
     if (token === undefined || token === '') {
@@ -116,6 +120,9 @@ export function requestFor(
     let base = sink.apiBase ?? TELEGRAM_API
     while (base.endsWith('/')) {
       base = base.slice(0, -1)
+    }
+    if (!base.toLowerCase().startsWith('https://')) {
+      return { refused: 'apiBase must be https:// — the bot token rides the request URL' }
     }
     return {
       url: `${base}/bot${token}/sendMessage`,
@@ -132,6 +139,12 @@ export function requestFor(
   const url = sink.urlEnv !== undefined ? env[sink.urlEnv]?.trim() : sink.url
   if (url === undefined || url === '') {
     return { missing: sink.urlEnv ?? 'url' }
+  }
+  // A `urlEnv`-resolved endpoint is a declared secret — cleartext http
+  // would hand it to the wire. Literal `url` is the documented
+  // non-secret path and stays unrestricted (internal http receivers).
+  if (sink.urlEnv !== undefined && !url.toLowerCase().startsWith('https://')) {
+    return { refused: `env ${sink.urlEnv} must resolve to an https:// endpoint` }
   }
   const body =
     sink.type === 'slack'
@@ -158,13 +171,18 @@ export function sinkStatePath(dir: string): string {
 }
 
 /** What makes a send "the same event at the same sink" — the sink's
- *  slot (name or position), the routing identity, and the rendered
- *  text. `key` coalescing stays a mailbox rule; sinks dedupe on the
- *  whole message so two different keyed events never suppress each
- *  other just for sharing a key. */
+ *  slot (name or position), the routing identity, the rendered text,
+ *  and the raw payload. `key` coalescing stays a mailbox rule; sinks
+ *  dedupe on the whole message so two different keyed events never
+ *  suppress each other just for sharing a key. The raw payload rides
+ *  alongside the text because render collapses — 'a\tb' and 'a b' are
+ *  one message on screen but two distinct webhook bodies. */
 function dedupHash(sinkId: string, event: EventInput, text: string): string {
+  const raw = event.payload === undefined ? '' : (JSON.stringify(event.payload) ?? '')
   return createHash('sha256')
-    .update(`${sinkId}\0${event.topic}\0${event.kind}\0${event.key ?? ''}\0${text}`)
+    .update(
+      `${sinkId}\0${event.topic}\0${event.kind}\0${event.key ?? ''}\0${text}\0${raw}`
+    )
     .digest('hex')
     .slice(0, 24)
 }
@@ -182,14 +200,26 @@ function readState(path: string): Record<string, string> {
 }
 
 /** Persist the updated ledger — tmp+rename like mailbox drops, and
- *  prune entries past STATE_TTL_MS on every write so the file stays a
- *  cache. A failed write just means a re-send next event: fail-open. */
-function writeState(path: string, state: Record<string, string>, now: number): void {
+ *  prune entries past `retentionMs` on every write so the file stays a
+ *  cache. The retention floor is STATE_TTL_MS but extends to the
+ *  longest configured resend interval — pruning inside that floor
+ *  would let an active dedup record die early and re-page a human
+ *  before its `minIntervalMs` is up. A failed write just means a
+ *  re-send next event: fail-open. */
+function writeState(
+  path: string,
+  state: Record<string, string>,
+  now: number,
+  retentionMs: number
+): void {
   try {
     mkdirSync(dirname(path), { recursive: true })
-    const cutoff = new Date(now - STATE_TTL_MS).toISOString()
+    const cutoff = now - retentionMs
     const pruned = Object.fromEntries(
-      Object.entries(state).filter(([, ts]) => typeof ts === 'string' && ts > cutoff)
+      Object.entries(state).filter(([, ts]) => {
+        const t = Date.parse(ts)
+        return Number.isFinite(t) && t > cutoff
+      })
     )
     const tmp = `${path}.tmp-${process.pid}`
     writeFileSync(tmp, JSON.stringify(pruned))
@@ -237,6 +267,10 @@ export async function deliverSinks(
   if (matched.length === 0) {
     return []
   }
+  const retentionMs = sinks.reduce(
+    (max, sink) => Math.max(max, sink.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS),
+    STATE_TTL_MS
+  )
   const text = renderEventText(event)
   const statePath = sinkStatePath(dir)
   const state = readState(statePath)
@@ -252,6 +286,9 @@ export async function deliverSinks(
       const req = requestFor(sink, event, env)
       if ('missing' in req) {
         return { sink: id, type: sink.type, delivered: false, reason: `env ${req.missing} not set` }
+      }
+      if ('refused' in req) {
+        return { sink: id, type: sink.type, delivered: false, reason: req.refused }
       }
       try {
         const res = await fetchImpl(req.url, {
@@ -291,7 +328,7 @@ export async function deliverSinks(
     })
   )
   if (results.some((r) => r.delivered)) {
-    writeState(statePath, state, now)
+    writeState(statePath, state, now, retentionMs)
   }
   return results
 }

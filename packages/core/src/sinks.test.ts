@@ -189,6 +189,37 @@ describe('requestFor', () => {
     assert.equal('body' in r && (r.body as Record<string, unknown>).chat_id, '7')
   })
 
+  test('a cleartext apiBase is refused — the token rides the request URL', () => {
+    const r = requestFor(
+      {
+        type: 'telegram',
+        tokenEnv: 'TG_TOKEN',
+        chatId: '7',
+        apiBase: 'http://tg.internal.test',
+      },
+      EVENT,
+      env
+    )
+    assert.deepEqual(r, {
+      refused: 'apiBase must be https:// — the bot token rides the request URL',
+    })
+  })
+
+  test('an env-resolved http endpoint is refused — the URL is a declared secret', () => {
+    const e = { HOOK: 'http://insecure.internal/hook' } as unknown as NodeJS.ProcessEnv
+    assert.deepEqual(requestFor({ type: 'slack', urlEnv: 'HOOK' }, EVENT, e), {
+      refused: 'env HOOK must resolve to an https:// endpoint',
+    })
+    assert.deepEqual(requestFor({ type: 'webhook', urlEnv: 'HOOK' }, EVENT, e), {
+      refused: 'env HOOK must resolve to an https:// endpoint',
+    })
+  })
+
+  test('a literal http url still resolves — the documented non-secret path', () => {
+    const r = requestFor({ type: 'webhook', url: 'http://ci.internal/x' }, EVENT, env)
+    assert.equal('url' in r && r.url, 'http://ci.internal/x')
+  })
+
   test('telegram missing token or chat env reports the var', () => {
     assert.deepEqual(
       requestFor({ type: 'telegram', tokenEnv: 'NOPE', chatId: '1' }, EVENT, env),
@@ -356,6 +387,65 @@ describe('deliverSinks', () => {
       const res = await deliverSinks(dir, changed, { fetch, env, sinks, now: t0 + 1 })
       assert.equal(res[0].delivered, true)
       assert.equal(calls.length, 2)
+    })
+  })
+
+  test('payloads that render identically are still different events', async () => {
+    await withRepoAsync(async (dir) => {
+      const { fetch, calls } = fakeFetch()
+      const env = { H: 'https://h.test' } as unknown as NodeJS.ProcessEnv
+      const sinks = [{ type: 'webhook' as const, urlEnv: 'H' }]
+      const t0 = 1_700_000_000_000
+      await deliverSinks(dir, { ...EVENT, payload: 'a b' }, { fetch, env, sinks, now: t0 })
+      // 'a\tb' renders to the same '[convoy/gate] a b' — but the webhook
+      // body carries the raw payload, so suppression would drop an event
+      const res = await deliverSinks(
+        dir,
+        { ...EVENT, payload: 'a\tb' },
+        { fetch, env, sinks, now: t0 + 1 }
+      )
+      assert.equal(res[0].delivered, true)
+      assert.equal(calls.length, 2)
+    })
+  })
+
+  test('a dedup record outlives the 7d sweep when minIntervalMs is longer', async () => {
+    await withRepoAsync(async (dir) => {
+      const { fetch, calls } = fakeFetch()
+      const env = { H: 'https://h.test' } as unknown as NodeJS.ProcessEnv
+      const sinks = [
+        { type: 'webhook' as const, urlEnv: 'H', minIntervalMs: 30 * 24 * 60 * 60 * 1000 },
+      ]
+      const t0 = 1_700_000_000_000
+      const day8 = 8 * 24 * 60 * 60 * 1000
+      await deliverSinks(dir, EVENT, { fetch, env, sinks, now: t0 })
+      // an unrelated successful send past the TTL must not prune the
+      // first record — its 30d resend floor is still running
+      await deliverSinks(dir, { ...EVENT, payload: 'unrelated' }, {
+        fetch,
+        env,
+        sinks,
+        now: t0 + day8,
+      })
+      const res = await deliverSinks(dir, EVENT, { fetch, env, sinks, now: t0 + day8 + 1 })
+      assert.equal(res[0].delivered, false)
+      assert.equal(res[0].reason, 'deduped')
+      assert.equal(calls.length, 2)
+    })
+  })
+
+  test('a refused endpoint is a result row and posts nothing', async () => {
+    await withRepoAsync(async (dir) => {
+      const { fetch, calls } = fakeFetch()
+      const env = { H: 'http://cleartext.internal/hook' } as unknown as NodeJS.ProcessEnv
+      const results = await deliverSinks(dir, EVENT, {
+        fetch,
+        env,
+        sinks: [{ type: 'webhook', urlEnv: 'H' }],
+      })
+      assert.equal(results[0].delivered, false)
+      assert.equal(results[0].reason, 'env H must resolve to an https:// endpoint')
+      assert.equal(calls.length, 0)
     })
   })
 
