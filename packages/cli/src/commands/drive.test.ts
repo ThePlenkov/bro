@@ -8,12 +8,15 @@ import type { ListedWatch } from '@broject/act'
 import {
   agentProcessesIn,
   branchSlug,
+  buildCiFixerPrompt,
   buildFixerPrompt,
   buildRebaseFixerPrompt,
+  buildSastFixerPrompt,
   candidateBranches,
   detailMatches,
   driveArgs,
   ensureFixerWorktree,
+  fixerAttemptSpent,
   fixerBeadFor,
   fixerRef,
   freshOccupancy,
@@ -771,5 +774,126 @@ describe('ensureFixerWorktree', () => {
       assert.match(r.err ?? '', /diverged/)
       assert.equal(git(['-C', dir, 'rev-parse', 'HEAD'], main).trim(), tip)
     })
+  })
+})
+
+describe('buildCiFixerPrompt', () => {
+  test('names the failing checks, the log/annotation reads, and the verdict contract', () => {
+    const p = buildCiFixerPrompt({
+      pr: 42,
+      link: '[#42](https://github.com/o/r/pull/42)',
+      branch: 'work/bro-a',
+      worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      failing: [
+        { name: 'build-test', state: 'FAILURE', bucket: 'fail' },
+        { name: 'sonarcloud', state: 'FAILURE', bucket: 'fail' },
+      ],
+    })
+    assert.match(p, /#42.*pull\/42/)
+    assert.match(p, /work\/bro-a/)
+    assert.match(p, /bro--bro-a/)
+    assert.match(p, /2 failing check\(s\)/)
+    assert.match(p, /- build-test/)
+    // a SAST-named run is told apart — its findings are annotations
+    assert.match(p, /- sonarcloud — a SAST check.*annotations, not log lines/)
+    assert.match(p, /gh run view --log-failed/)
+    assert.match(p, /gh api repos\/o\/r\/check-runs\/<run-id>\/annotations/)
+    assert.match(p, /NEVER merge/)
+    // the no-push exit contract — a clean exit is terminal for the head
+    assert.match(p, /clean exit without a push marks this head as attempted/)
+    // the other classes' markers must not collide with this work order
+    assert.doesNotMatch(p, /unresolved review thread/)
+    assert.doesNotMatch(p, /merge conflicts with its base branch/)
+  })
+
+  test('a cancelled run is flagged', () => {
+    const p = buildCiFixerPrompt({
+      pr: 1,
+      link: 'x',
+      branch: 'b',
+      worktree: 'w',
+      repo: 'o/r',
+      failing: [{ name: 'lint', state: 'CANCELLED', bucket: 'cancel' }],
+    })
+    assert.match(p, /- lint \(cancelled\)/)
+  })
+})
+
+describe('buildSastFixerPrompt', () => {
+  test('names checks + counts, points at the annotations API, and keeps the contract', () => {
+    const p = buildSastFixerPrompt({
+      pr: 42,
+      link: '[#42](https://github.com/o/r/pull/42)',
+      branch: 'work/bro-a',
+      worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      headSha: 'abc123',
+      findings: [
+        { name: 'sonarcloud', count: 4 },
+        { name: 'codacy', count: null },
+      ],
+    })
+    assert.match(p, /#42.*pull\/42/)
+    assert.match(p, /- sonarcloud: 4 finding\(s\)/)
+    assert.match(p, /- codacy: annotations unreadable/)
+    // the gate counts annotations, not conclusions — the prompt teaches it
+    assert.match(p, /GREEN check can/)
+    assert.match(p, /gh api repos\/o\/r\/commits\/abc123\/check-runs/)
+    assert.match(p, /gh api repos\/o\/r\/check-runs\/<run-id>\/annotations/)
+    assert.match(p, /NEVER merge/)
+    assert.match(p, /clean exit without a push marks this head as attempted/)
+  })
+})
+
+describe('fixerAttemptSpent — same-head dedup (bro-atb2g)', () => {
+  const entry = (over: Record<string, unknown> = {}) => ({
+    agentId: 'native-aaa',
+    backend: 'native',
+    spawnedAt: '2026-01-01',
+    ...over,
+  })
+
+  test('only a clean-exit attempt on the same head+class spends', () => {
+    const e = entry({ cause: 'ok', fixerAttempt: { head: 'abc', classes: ['ci'] } })
+    assert.equal(fixerAttemptSpent(e, 'abc', 'ci'), true)
+    // a moved head earns a fresh round
+    assert.equal(fixerAttemptSpent(e, 'def', 'ci'), false)
+    // a different class on the same head still spawns
+    assert.equal(fixerAttemptSpent(e, 'abc', 'sast'), false)
+    // no attempt record — nothing to dedup
+    assert.equal(fixerAttemptSpent(entry({ cause: 'ok' }), 'abc', 'ci'), false)
+    assert.equal(fixerAttemptSpent(undefined, 'abc', 'ci'), false)
+  })
+
+  test('non-ok causes stay respawn-able; stopped lifts the dedup', () => {
+    const att = { head: 'abc', classes: ['ci'] }
+    for (const cause of ['crash', 'rate_limited', 'quota', 'auth']) {
+      assert.equal(
+        fixerAttemptSpent(entry({ cause, fixerAttempt: att }), 'abc', 'ci'),
+        false,
+        `cause ${cause} must not dedup`
+      )
+    }
+    // an unharvested exit (status recorded, cause not yet classified)
+    assert.equal(
+      fixerAttemptSpent(entry({ exitStatus: 0, fixerAttempt: att }), 'abc', 'ci'),
+      false
+    )
+    // `bro agents down` is the operator's manual clear — same as it
+    // lifting a rate_limited wall
+    assert.equal(
+      fixerAttemptSpent(entry({ cause: 'ok', stopped: true, fixerAttempt: att }), 'abc', 'ci'),
+      false
+    )
+  })
+
+  test('a torn record fails open', () => {
+    for (const fixerAttempt of ['x', 7, null, { head: 1 }, { head: 'a', classes: 'ci' }]) {
+      assert.equal(
+        fixerAttemptSpent(entry({ cause: 'ok', fixerAttempt }), 'a', 'ci'),
+        false
+      )
+    }
   })
 })

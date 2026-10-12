@@ -528,6 +528,15 @@ const facade = {
       )
       save(s)
     } catch {}
+    // a readQueues.checks list overrides everything — each call shifts
+    // one entry, so a test can script 'red at the gate snapshot, green
+    // at the fixer re-probe' (the mid-flight resolution race, bro-atb2g)
+    const cq = s.readQueues?.checks
+    if (Array.isArray(cq) && cq.length > 0) {
+      s.readQueues.checks = cq.slice(1)
+      save(s)
+      return cq[0]
+    }
     // per-PR checks — a mapped entry carries its own check list (with a
     // clearAfterMerge trigger: once that PR lands in events, this one's
     // checks go green — the round-robin "A pending while B merges" cue)
@@ -547,11 +556,22 @@ const facade = {
     return s.checks ?? []
   },
   checkAnnotations: (_repo, _sha, names) => {
-    const all = load().annotations ?? {}
+    const s = load()
+    // readQueues.annotations — each call shifts one map (the same
+    // mid-flight race scripting as readQueues.checks)
+    const aq = s.readQueues?.annotations
+    let all = s.annotations ?? {}
+    if (Array.isArray(aq) && aq.length > 0) {
+      s.readQueues.annotations = aq.slice(1)
+      save(s)
+      all = aq[0] ?? {}
+    }
     // names-given callers read exactly that set — an unrequested check
-    // never appears (absent key = no annotations endpoint, like gh)
+    // never appears (absent key = no annotations endpoint, like gh).
+    // An explicit null is the fake's 'fetch failed' — it passes through
+    // as sast_unknown; an absent name is a clean read
     const keys = names ? [...names] : Object.keys(all)
-    return new Map(keys.map((k) => [k, all[k] ?? 0]))
+    return new Map(keys.map((k) => [k, Object.hasOwn(all, k) ? all[k]! : 0]))
   },
   reviewedShas: () => load().reviewedShas ?? ['abc123'],
   reviewThreads: async () => load().threads ?? [],
