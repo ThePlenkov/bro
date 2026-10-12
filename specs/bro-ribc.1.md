@@ -175,12 +175,15 @@ An Agent Client Protocol endpoint — a CLI that serves ACP over stdio
   sub-modes, distinguished by the session's model: (a) the model IS a
   systemone-family model (`typesafe/jev-*`) — the prompt carries the
   typed contract and the reply content is validated against it: a
-  payload that verifies keeps typed fidelity, an unparseable one fails
-  open and is never counted as typed (an ACP prompt result is content,
-  not a schema response — the model id selects the contract, not the
-  wire format); (b) a general LLM — prompt-and-parse, flagged
-  uncalibrated so `judge stats` never mixes it into the typed
-  agreement matrix (bro-4goa's caveat, preserved).
+  verifying payload earns the typed grade as *content-validated*,
+  never wire-native — an unparseable one fails open and is never
+  counted as typed. The model id selects the contract to check, not
+  a response schema (an ACP prompt result is content), and
+  `decidedBy` (`provider:<name>`) keeps the route on its own stats
+  record, distinct from `systemone`-wire answers; (b) a general
+  LLM — prompt-and-parse, flagged uncalibrated so `judge stats`
+  never mixes it into the typed agreement matrix (bro-4goa's
+  caveat, preserved).
 - *Spawn*: a fleet worker IS an ACP session — the persistent form of
   the same connection, driven by the agent's own turn loop rather than
   a prompt file.
@@ -205,9 +208,10 @@ backend, calibrated no better than llm-judge and marked accordingly.
 | ------ | ---------------------------------------- | ------------- |
 | `api`  | by model wire — `systemone` → typed,     | —             |
 |        | `openai-compat` → prose                  |               |
-| `acp`  | typed only when the resolved model       | yes           |
-|        | (pin, else `entry.model`) is jev-family  |               |
-|        | — no pin binds prose even if the session |               |
+| `acp`  | typed (content-validated) only when      | yes           |
+|        | the resolved model (pin, else            |               |
+|        | `entry.model`) is jev-family — no pin    |               |
+|        | binds prose even if the session          |               |
 |        | reports one — and the reply validates    |               |
 |        | against the typed contract; an           |               |
 |        | unparseable one fails open, never        |               |
