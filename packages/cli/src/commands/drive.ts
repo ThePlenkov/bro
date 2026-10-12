@@ -1574,6 +1574,33 @@ interface BlockedWork {
   work: PassWork
 }
 
+/** One settled-blocker class's remediation attempt — occupied wins
+ *  over every spawn and the round cap bounds it. A verdict in
+ *  `declines` (dedup-spent or raced-resolved at the re-probe) owes
+ *  nothing more on this head — it declines rather than preempt the
+ *  next independent class. `undefined` means the class never ran. */
+async function classSpawn(
+  b: BlockedWork,
+  s: {
+    capHit: boolean
+    blocked: boolean
+    declines: ReadonlySet<string>
+    spawn: () => Promise<PrVerdict>
+  }
+): Promise<{ v: PrVerdict; declined: boolean } | undefined> {
+  if (!s.blocked || s.capHit) {
+    return undefined
+  }
+  if (b.occ !== undefined) {
+    return {
+      v: { pr: b.pr, link: b.link, verdict: 'occupied', detail: b.occ },
+      declined: false,
+    }
+  }
+  const v = await s.spawn()
+  return { v, declined: s.declines.has(v.verdict) }
+}
+
 /** Non-green verdicts: threads preempt (same order as the loop's
  *  memberAction), then each settled blocker class earns its fixer —
  *  conflicted → rebase, ci-fail → run-log fixer, sast → annotations
@@ -1607,33 +1634,33 @@ async function blockedVerdict(ctx: Ctx, b: BlockedWork): Promise<PrVerdict> {
   }
   // settled-red checks on an orphaned PR used to be terminal 'blocked'
   // — the classes below each get a remediation start instead
-  // (bro-atb2g). Occupied still wins over every spawn. A class that
-  // owes no spawn on this head (dedup-spent or resolved at the
-  // re-probe) doesn't preempt the next one — the classes are
-  // independent, so a spent ci attempt on a head that also carries
-  // SAST findings must not starve the sast fixer forever.
-  let declined: PrVerdict | undefined
-  if (gate.ci_failing > 0) {
-    if (occ !== undefined) {
-      return { pr, link, verdict: 'occupied', detail: occ }
-    }
-    if (!capHit) {
-      const v = await spawnCiFixer(ctx, pr, state, worktree, fixer, work.agents)
-      if (v.verdict !== 'fixer-spent' && v.verdict !== 'ci-resolved') {
-        return v
-      }
-      declined = v
-    }
+  // (bro-atb2g). classSpawn owns the shared contract: occupied wins
+  // over every spawn, the round cap bounds it, and a class that owes
+  // nothing on this head (dedup-spent or resolved at the re-probe)
+  // declines so the NEXT independent class still earns its attempt —
+  // a spent ci attempt on a head carrying SAST findings must not
+  // starve the sast fixer forever.
+  const ci = await classSpawn(b, {
+    capHit,
+    blocked: gate.ci_failing > 0,
+    declines: new Set(['fixer-spent', 'ci-resolved']),
+    spawn: () => spawnCiFixer(ctx, pr, state, worktree, fixer, work.agents),
+  })
+  if (ci !== undefined && !ci.declined) {
+    return ci.v
   }
-  if (gate.sast_pending > 0) {
-    if (occ !== undefined) {
-      return { pr, link, verdict: 'occupied', detail: occ }
-    }
-    if (!capHit) {
-      return spawnSastFixer(ctx, pr, state, worktree, fixer, work.agents)
-    }
+  const sast = await classSpawn(b, {
+    capHit,
+    blocked: gate.sast_pending > 0,
+    declines: new Set(['fixer-spent', 'sast-resolved']),
+    spawn: () => spawnSastFixer(ctx, pr, state, worktree, fixer, work.agents),
+  })
+  if (sast !== undefined && !sast.declined) {
+    return sast.v
   }
-  return declined ?? { pr, link, verdict: 'blocked', detail: gate.blockers.join('; ') }
+  // every class declined or was capped — the first decline is the more
+  // informative report than a bare 'blocked'
+  return ci?.v ?? sast?.v ?? { pr, link, verdict: 'blocked', detail: gate.blockers.join('; ') }
 }
 
 async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict> {
