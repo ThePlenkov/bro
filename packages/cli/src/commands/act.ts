@@ -785,13 +785,20 @@ function dischargeLandedId(
 ): void {
   try {
     const tasks = claimStore(process.cwd())
-    const row = rows === undefined ? tasks.get(id) : rows.get(id)
+    let row = rows === undefined ? tasks.get(id) : rows.get(id)
     if (row === undefined) {
       console.error(`act: bead ${id} not in the task store — nothing closed for ${link}`)
       return
     }
     if (row.status === 'closed') {
-      return
+      // the bulk row is a pre-loop snapshot — `closed` is the verdict a
+      // mid-clump reopen falsifies, and skipping on it drops the close
+      // the landing still owes (bro-cmr5h). Re-read this one path live;
+      // non-closed members keep the prefetch's one-spawn cost.
+      row = tasks.get(id) ?? row
+      if (row.status === 'closed') {
+        return
+      }
     }
     if (!covered.has(id)) {
       try {
