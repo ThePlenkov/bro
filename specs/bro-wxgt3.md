@@ -51,12 +51,13 @@ git fetch/push leg around `bd sync`.
   `remote.origin` URL is treated as bridged in place (the evac-style
   workaround becomes the managed shape); a `file:` remote whose target
   is not a git remote of anything stays a plain local remote.
-- **The cycle** — `git -C <mirror> fetch --force origin
-  '+refs/dolt/*:refs/dolt/*'
-  '+refs/heads/__dolt_remote_info__:refs/heads/__dolt_remote_info__'`,
-  then `bd sync --remote <name>`, then `git -C <mirror> push origin
-  'refs/dolt/*:refs/dolt/*'
-  'refs/heads/__dolt_remote_info__:refs/heads/__dolt_remote_info__'`.
+- **The cycle** — enumerate the upstream's dolt refs (`git ls-remote
+  origin 'refs/dolt/*' refs/heads/__dolt_remote_info__`), `git -C
+  <mirror> fetch --force --no-tags origin +<ref>:<ref> …` for exactly
+  the refs that exist (an explicit refspec for a missing ref fails the
+  whole fetch), then `bd sync --remote <name>`, then enumerate the
+  mirror's own refs (`git for-each-ref`) and `git -C <mirror> push
+  origin <ref>:<ref> …` for those that exist.
   Force-fetch is required: the mirror's `refs/dolt/data` is a
   rendezvous pointer, and after a local publish it holds a head the
   upstream never saw — non-force fetch would refuse the overwrite.
@@ -81,14 +82,14 @@ git fetch/push leg around `bd sync`.
 ## Plan
 
 - [x] spec (this file)
-- [ ] `packages/core/src/dolt-bridge.ts` — remote parse/classify,
+- [x] `packages/core/src/dolt-bridge.ts` — remote parse/classify,
       mirror provisioning, fetch/publish legs
-- [ ] `packages/core/src/git.ts` — `gitTry` gains an optional timeout
+- [x] `packages/core/src/git.ts` — `gitTry` gains an optional timeout
       (network legs must be bounded)
-- [ ] `packages/core/src/tasks.ts` — `sync()` resolves the route,
+- [x] `packages/core/src/tasks.ts` — `sync()` resolves the route,
       wraps `bd sync` with the bridge legs
-- [ ] `dolt-bridge.test.ts` + `tasks.test.ts` coverage
-- [ ] live dogfood: `bro sync` on this rig publishes through the
+- [x] `dolt-bridge.test.ts` + `tasks.test.ts` coverage
+- [x] live dogfood: `bro sync` on this rig publishes through the
       bridge
 
 ## Out of scope / approximations
