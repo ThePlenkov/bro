@@ -1548,7 +1548,11 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   m.worker = undefined
   if (m.pr !== undefined) {
     // a fix/rebase worker's exit IS the gate re-entry — same contract
-    // the awaited spawn's return had
+    // the awaited spawn's return had. The worker may have moved the
+    // PR (pushes, resolves, replies), so the feed entry that spawned
+    // its round is obsolete — the re-poll must fetch post-worker
+    // truth, not re-serve the ≤ttl-old snapshot and burn rounds
+    ctx.stateCache?.invalidate({ repo: ctx.repo, pr: m.pr })
     m.since = Date.now()
     return 'active'
   }
@@ -1723,12 +1727,22 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       gateRow('closed', { action: 'closed' })
       noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} was closed unmerged — worktree ${m.item.worktreeDir}`)
       return leave(m, 'parked')
-    case 'fix':
+    case 'fix': {
       gateRow('blocked', { action: 'fix', round: m.rounds + 1, blockers: snap.blockers })
-      return respawnRound(ctx, m, () => runFixRound(ctx, m, pr, m.rounds))
-    case 'rebase':
+      const verdict = await respawnRound(ctx, m, () => runFixRound(ctx, m, pr, m.rounds))
+      // the snapshot that spawned the round must not be re-served —
+      // a synchronous round (or a skipped spawn on already-resolved
+      // threads) re-polls immediately and would re-trigger 'fix' on
+      // the stale entry until the ttl lapses
+      ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
+      return verdict
+    }
+    case 'rebase': {
       gateRow('blocked', { action: 'rebase', round: m.rounds + 1 })
-      return respawnRound(ctx, m, () => runRebaseRound(ctx, m, pr, m.rounds))
+      const verdict = await respawnRound(ctx, m, () => runRebaseRound(ctx, m, pr, m.rounds))
+      ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
+      return verdict
+    }
     case 'update': {
       let ok: boolean
       try {
