@@ -19,6 +19,10 @@
  *   CONFLICTING, orphaned  → the same fixer spawn with a rebase work
  *                            order — an orphaned conflicted PR stalls
  *                            forever without one (bro-glkes)
+ *   ci-fail/SAST, orphaned → the same fixer spawn with a class work
+ *                            order (run log / annotations) — a settled
+ *                            blocker is a remediation start, not a
+ *                            terminal 'blocked' (bro-atb2g)
  *   green, occupied        → report; the owner's merge step lands it
  *   green, orphaned        → bro act merge (unless --no-merge /
  *                            drive.merge:'never'), then retire the
@@ -52,10 +56,13 @@ import {
   facade,
   gitCommonDir,
   gitTry,
+  patchAgentRegistry,
   readAgentRegistry,
   reviewHost,
   SpawnError,
   type AgentInfo,
+  type AgentRegistryEntry,
+  type CheckInfo,
   type IgnoreCheckRule,
   type PrMeta,
   type ReviewFacade,
@@ -66,8 +73,11 @@ import {
 import {
   checkHistory,
   evaluateExitGate,
+  failingCiChecks,
   fetchPrActState,
+  isSast,
   listWatches,
+  liveSastChecks,
   watchEnd,
   watchHeartbeat,
   watchMarkerKind,
@@ -340,8 +350,9 @@ function ensureFixerBead(store: TaskStore, pr: number, link: string, branch: str
       title: `review fixer — PR #${pr}`,
       description:
         `Spawned by \`bro drive\` — work the gate state on ${link} ` +
-        `(branch \`${branch}\`): review threads or a conflict rebase, ` +
-        `whichever the spawn prompt orders. Push, never merge.`,
+        `(branch \`${branch}\`): review threads, a conflict rebase, ` +
+        `failing checks, or SAST findings — whichever the spawn prompt ` +
+        `orders. Push, never merge.`,
       type: 'task',
       labels: [FIXER_LABEL],
       externalRef: fixerRef(pr),
@@ -940,6 +951,91 @@ interface FixerSpawn {
   /** prefixes the spawned detail so a rebase round reads differently
    *  in the pass log. */
   tag?: string
+  /** Same-head dedup (bro-atb2g) — the head this work order targets and
+   *  its blocker class. Recorded on the fixer bead's registry entry at
+   *  spawn; a clean-exit attempt on the same (head, class) never gets
+   *  an identical replay. Thread fixers stay undeduped: new threads
+   *  land on an unmoved head, so replay there is real work. */
+  attempt?: { head: string; cls: string }
+}
+
+/** The attempt record on the fixer bead's registry entry — one head
+ *  plus the blocker classes already tried on it. A head move resets
+ *  the record (a pushed head earns a fresh round); a `down`/reap of
+ *  the entry clears it (operator semantics). */
+interface FixerAttempt {
+  head: string
+  classes: string[]
+}
+
+function fixerAttemptOf(entry: AgentRegistryEntry | undefined): FixerAttempt | undefined {
+  const v = entry?.fixerAttempt
+  if (typeof v !== 'object' || v === null) {
+    return undefined
+  }
+  const a = v as Partial<FixerAttempt>
+  return typeof a.head === 'string' && Array.isArray(a.classes)
+    ? { head: a.head, classes: a.classes.filter((c): c is string => typeof c === 'string') }
+    : undefined
+}
+
+/** The dedup verdict: this (head, class) already ran a fixer that
+ *  exited clean — the same prompt on the same head is deterministic
+ *  replay. `cause` is read off the entry (the connector harvests it
+ *  into the registry at .exit time): only 'ok' is a deliberated
+ *  verdict — crash/lost/unclassified exits keep respawn semantics,
+ *  and rate_limited/quota are refused downstream by the spawn guard.
+ *  `stopped` lifts the dedup like it lifts a budget wall — `bro agents
+ *  down` is the operator's manual clear. */
+export function fixerAttemptSpent(
+  entry: AgentRegistryEntry | undefined,
+  head: string,
+  cls: string
+): boolean {
+  if (entry?.cause !== 'ok' || entry.stopped === true) {
+    return false
+  }
+  const a = fixerAttemptOf(entry)
+  return a?.head === head && a.classes.includes(cls)
+}
+
+/** Stamp the attempt on the fixer bead's entry — runs inside the
+ *  spawn's locked section right after the spawn write (the lock is
+ *  re-entrant; the patch merges so connector fields survive). */
+function recordFixerAttempt(dir: string, molStep: string, head: string, cls: string): void {
+  const prev = fixerAttemptOf(readAgentRegistry(dir)[molStep])
+  const classes = prev?.head === head ? prev.classes : []
+  patchAgentRegistry(dir, molStep, {
+    fixerAttempt: { head, classes: classes.includes(cls) ? classes : [...classes, cls] },
+  })
+}
+
+/** Cheap pre-check for the locked dedup inside spawnFixerAgent — a
+ *  spent verdict decided up front never pays the worktree checkout.
+ *  The authoritative re-check still runs under the spawn locks: only
+ *  this drive writes the record (one drive per repo, drive.lock), so
+ *  no third party can flip spent → unspent between here and there. */
+function fixerSpent(
+  ctx: Ctx,
+  pr: number,
+  state: PrActState,
+  fixer: TaskRow | undefined,
+  cls: string
+): PrVerdict | undefined {
+  if (fixer === undefined) {
+    return undefined
+  }
+  const entry = readAgentRegistry(ctx.mainRoot)[fixer.id]
+  return fixerAttemptSpent(entry, state.headSha, cls)
+    ? {
+        pr,
+        link: ctx.rev.prLink(ctx.repo, pr),
+        verdict: 'fixer-spent',
+        detail:
+          `${cls} fixer already exited clean on this head — ` +
+          'a pushed head earns a fresh round',
+      }
+    : undefined
 }
 
 /** The locked spawn ceremony both fixer kinds share — a last occupancy
@@ -982,6 +1078,25 @@ async function spawnFixerAgent(
     if (occ !== undefined) {
       return { pr, link, verdict: 'occupied', detail: occ }
     }
+    // same-head dedup: a clean-exit fixer already ran this class's work
+    // order on this head — replaying it is deterministic burn. Read
+    // inside the lock so a respawn that landed during the wait can't
+    // be mislabeled (the spawn write below clears `cause`, so this
+    // read must precede it). The caller may have pre-checked with
+    // fixerSpent — same verdict either way.
+    if (s.attempt !== undefined && s.fixer !== undefined) {
+      const entry = readAgentRegistry(ctx.mainRoot)[s.fixer.id]
+      if (fixerAttemptSpent(entry, s.attempt.head, s.attempt.cls)) {
+        return {
+          pr,
+          link,
+          verdict: 'fixer-spent',
+          detail:
+            `${s.attempt.cls} fixer already exited clean on this head — ` +
+            'a pushed head earns a fresh round',
+        }
+      }
+    }
     const bead = s.fixer ?? ensureFixerBead(ctx.store, pr, link, s.branch)
     try {
       const info = await spawnStepAgent(ctx.mainRoot, ctx.env, {
@@ -991,6 +1106,9 @@ async function spawnFixerAgent(
         connector: ctx.connector,
         env: { BRO_PR: String(pr), BRO_PR_URL: link },
       })
+      if (s.attempt !== undefined) {
+        recordFixerAttempt(ctx.mainRoot, bead.id, s.attempt.head, s.attempt.cls)
+      }
       const pid = info.pid === undefined ? '' : ` pid ${info.pid}`
       const tag = s.tag ?? ''
       return { pr, link, verdict: 'spawned', detail: `${tag}${bead.id} → ${info.id}${pid}` }
@@ -1039,6 +1157,10 @@ async function spawnRebaseFixer(
   if (meta.mergeable === 'MERGEABLE') {
     return { pr, link, verdict: 'conflict-resolved' }
   }
+  const spent = fixerSpent(ctx, pr, state, fixer, 'rebase')
+  if (spent !== undefined) {
+    return spent
+  }
   let wt = worktree
   if (wt === undefined) {
     const ensured = ensureFixerWorktree(ctx.mainRoot, state.headRef)
@@ -1060,6 +1182,273 @@ async function spawnRebaseFixer(
       worktree: wt,
     }),
     tag: 'rebase ',
+    attempt: { head: state.headSha, cls: 'rebase' },
+  })
+}
+
+// --- ci-fail / sast fixers (bro-atb2g) -----------------------------------------
+
+/** Facade reads that may be sync-only — the same orSync discipline
+ *  fetchPrActState uses: defer the sync call through .then so a throw
+ *  becomes a rejection the caller's .catch sees. */
+function checksOf(ctx: Ctx, pr: number): Promise<CheckInfo[]> {
+  const t = { repo: ctx.repo, pr }
+  return ctx.rev.checksAsync === undefined
+    ? Promise.resolve().then(() => ctx.rev.checks(t))
+    : ctx.rev.checksAsync(t)
+}
+
+function annotationsOf(
+  ctx: Ctx,
+  headSha: string,
+  names: ReadonlySet<string>
+): Promise<Map<string, number | null>> {
+  return ctx.rev.checkAnnotationsAsync === undefined
+    ? Promise.resolve().then(() => ctx.rev.checkAnnotations(ctx.repo, headSha, names))
+    : ctx.rev.checkAnnotationsAsync(ctx.repo, headSha, names)
+}
+
+/** The gate's effective check set — advisory-ignored names dropped the
+ *  same way advisoryFilter removes them, so a work order never names a
+ *  check the gate didn't count. */
+function gatedChecks(ctx: Ctx, checks: CheckInfo[]): CheckInfo[] {
+  const rules = ctx.act.ignoreChecks
+  if (rules.length === 0) {
+    return checks
+  }
+  return checks.filter(
+    (c) => !rules.some((r) => c.name.toLowerCase().includes(r.name.toLowerCase()))
+  )
+}
+
+/** The ci-fail fixer's work order — the failing check list at spawn
+ *  (the prompt tells it to re-read the live list). A SAST-named run is
+ *  flagged: its blocking findings are annotations, not log lines. */
+export function buildCiFixerPrompt(opts: {
+  pr: number
+  link: string
+  branch: string
+  worktree: string
+  repo: string
+  failing: CheckInfo[]
+}): string {
+  const list = opts.failing
+    .map(
+      (c) =>
+        `- ${c.name}${c.bucket === 'cancel' ? ' (cancelled)' : ''}` +
+        (isSast(c.name)
+          ? ' — a SAST check: its blocking findings are check-run annotations, not log lines'
+          : '')
+    )
+    .join('\n')
+  return [
+    `# CI fixer — ${opts.link}`,
+    '',
+    `Worktree: ${opts.worktree} (branch \`${opts.branch}\`) — work here, nowhere`,
+    'else. If `node_modules` is missing, run the repo install step first.',
+    '',
+    `This PR has ${opts.failing.length} failing check(s) on its head. The live`,
+    `list is \`gh pr checks ${opts.pr}\` — more may settle or appear while you`,
+    'work. Failing at spawn:',
+    '',
+    list,
+    '',
+    'Investigate before editing:',
+    `- \`gh pr checks ${opts.pr}\` names the failing runs and their links.`,
+    "- `gh run view --log-failed <run-id>` is a run's own failure record —",
+    "  read the failing job's log before touching code.",
+    `- For a SAST-named run the findings are annotations:`,
+    `  \`gh api repos/${opts.repo}/check-runs/<run-id>/annotations\`.`,
+    "- Reproduce the failure in this worktree (the repo's build/test",
+    '  contract), fix, commit, push — the push is the verdict.',
+    '',
+    'Rules:',
+    '- NEVER merge — `bro drive` owns the merge on green.',
+    '- A failure no code change remediates (infra outage, quota, a check a',
+    '  human owns) is still a verdict: say so as your final message and stop',
+    '  — a clean exit without a push marks this head as attempted, not',
+    '  retried.',
+    '',
+  ].join('\n')
+}
+
+/** The sast fixer's work order — failure-level annotation counts per
+ *  check at spawn. `count` null means the run's annotations couldn't be
+ *  fetched — reported as unreadable, not as zero findings. */
+export function buildSastFixerPrompt(opts: {
+  pr: number
+  link: string
+  branch: string
+  worktree: string
+  repo: string
+  headSha: string
+  findings: { name: string; count: number | null }[]
+}): string {
+  const list = opts.findings
+    .map(
+      (f) =>
+        `- ${f.name}: ` +
+        (f.count === null ? 'annotations unreadable — re-probe or use the dashboard link' : `${f.count} finding(s)`)
+    )
+    .join('\n')
+  return [
+    `# SAST fixer — ${opts.link}`,
+    '',
+    `Worktree: ${opts.worktree} (branch \`${opts.branch}\`) — work here, nowhere`,
+    'else. If `node_modules` is missing, run the repo install step first.',
+    '',
+    "This PR's SAST checks carry failure-level annotation(s) on its head —",
+    'the gate counts annotations, not conclusions, so a GREEN check can',
+    'still block. At spawn:',
+    '',
+    list,
+    '',
+    'Read the findings before editing — they are check-run annotations:',
+    `- \`gh api repos/${opts.repo}/commits/${opts.headSha}/check-runs\` names`,
+    "  each run's id;",
+    `- \`gh api repos/${opts.repo}/check-runs/<run-id>/annotations\` lists`,
+    '  path, line, message, level — the failure-level rows are the blockers.',
+    "- The scanner's own dashboard (the check's details link) carries the",
+    '  same findings.',
+    '',
+    'Rules:',
+    '- Fix valid findings on this branch; a false positive goes through the',
+    "  scanner's own suppression path the repo already uses — never a",
+    '  silent ignore.',
+    "- Re-verify per the repo's contract, commit, push — the push is the",
+    '  verdict.',
+    '- Findings no code change remediates (scanner config a human owns, a',
+    '  disputed severity gate) — say so as your final message and stop; a',
+    '  clean exit without a push marks this head as attempted, not retried.',
+    '- NEVER merge — `bro drive` owns the merge on green.',
+    '',
+  ].join('\n')
+}
+
+/** The ci-fail fixer — settled-red non-reviewer checks on an orphaned
+ *  PR (bro-atb2g). The `checks` re-probe doubles as the still-failing
+ *  re-check: a run that went green between the gate fetch and now must
+ *  not burn a spawn, and the same read names the failing set for the
+ *  work order. Runs BEFORE the worktree checkout for the same reason
+ *  the conflict probe does. */
+async function spawnCiFixer(
+  ctx: Ctx,
+  pr: number,
+  state: PrActState,
+  worktree: string | undefined,
+  fixer: TaskRow | undefined,
+  known: AgentInfo[]
+): Promise<PrVerdict> {
+  const link = ctx.rev.prLink(ctx.repo, pr)
+  let checks: CheckInfo[]
+  try {
+    checks = await checksOf(ctx, pr)
+  } catch (err) {
+    return { pr, link, verdict: 'probe-failed', detail: errText(err) }
+  }
+  const failing = failingCiChecks(gatedChecks(ctx, checks))
+  if (failing.length === 0) {
+    return { pr, link, verdict: 'ci-resolved' }
+  }
+  const spent = fixerSpent(ctx, pr, state, fixer, 'ci')
+  if (spent !== undefined) {
+    return spent
+  }
+  let wt = worktree
+  if (wt === undefined) {
+    const ensured = ensureFixerWorktree(ctx.mainRoot, state.headRef)
+    if (ensured.path === undefined) {
+      return { pr, link, verdict: 'no-worktree', detail: ensured.err }
+    }
+    wt = ensured.path
+  }
+  return spawnFixerAgent(ctx, pr, {
+    branch: state.headRef,
+    wt,
+    fixer,
+    known,
+    prompt: buildCiFixerPrompt({
+      pr,
+      link,
+      branch: state.headRef,
+      worktree: wt,
+      repo: ctx.repo,
+      failing,
+    }),
+    tag: 'ci ',
+    attempt: { head: state.headSha, cls: 'ci' },
+  })
+}
+
+/** The sast fixer — failure-level annotations on a live SAST check's
+ *  head run (bro-atb2g). A green run can carry them: the gate counts
+ *  annotations, not conclusions. The annotations re-probe is the
+ *  still-present re-check — findings fixed between the gate fetch and
+ *  now read 'sast-resolved' instead of burning a spawn. */
+async function spawnSastFixer(
+  ctx: Ctx,
+  pr: number,
+  state: PrActState,
+  worktree: string | undefined,
+  fixer: TaskRow | undefined,
+  known: AgentInfo[]
+): Promise<PrVerdict> {
+  const link = ctx.rev.prLink(ctx.repo, pr)
+  let checks: CheckInfo[]
+  try {
+    checks = await checksOf(ctx, pr)
+  } catch (err) {
+    return { pr, link, verdict: 'probe-failed', detail: errText(err) }
+  }
+  const names = liveSastChecks(gatedChecks(ctx, checks)).map((c) => c.name)
+  if (names.length === 0) {
+    return { pr, link, verdict: 'sast-resolved' }
+  }
+  let annotations: Map<string, number | null>
+  try {
+    annotations = await annotationsOf(ctx, state.headSha, new Set(names))
+  } catch (err) {
+    return { pr, link, verdict: 'probe-failed', detail: errText(err) }
+  }
+  const findings = names
+    .map((name) => ({ name, count: annotations.get(name) }))
+    .filter((f): f is { name: string; count: number | null } => f.count !== undefined)
+  // only positive counts spawn — a null (unreadable annotations) is the
+  // gate's sast_unknown shape: infra, retried by the next pass's own
+  // probe, never an agent's work order
+  if (!findings.some((f) => f.count !== null && f.count > 0)) {
+    return { pr, link, verdict: 'sast-resolved' }
+  }
+  const spent = fixerSpent(ctx, pr, state, fixer, 'sast')
+  if (spent !== undefined) {
+    return spent
+  }
+  let wt = worktree
+  if (wt === undefined) {
+    const ensured = ensureFixerWorktree(ctx.mainRoot, state.headRef)
+    if (ensured.path === undefined) {
+      return { pr, link, verdict: 'no-worktree', detail: ensured.err }
+    }
+    wt = ensured.path
+  }
+  return spawnFixerAgent(ctx, pr, {
+    branch: state.headRef,
+    wt,
+    fixer,
+    known,
+    prompt: buildSastFixerPrompt({
+      pr,
+      link,
+      branch: state.headRef,
+      worktree: wt,
+      repo: ctx.repo,
+      headSha: state.headSha,
+      // the work order lists the runs that carry (or might carry)
+      // findings — clean runs are noise on it
+      findings: findings.filter((f) => f.count === null || f.count > 0),
+    }),
+    tag: 'sast ',
+    attempt: { head: state.headSha, cls: 'sast' },
   })
 }
 
@@ -1124,9 +1513,12 @@ interface BlockedWork {
 }
 
 /** Non-green verdicts: threads preempt (same order as the loop's
- *  memberAction), a conflicted orphan earns the rebase fixer while the
- *  fixRounds cap lasts, everything else is plain 'blocked'. Extracted
- *  so drivePr stays under the cognitive-complexity cap. */
+ *  memberAction), then each settled blocker class earns its fixer —
+ *  conflicted → rebase, ci-fail → run-log fixer, sast → annotations
+ *  fixer (bro-atb2g) — all bounded by the fixRounds cap. Whatever no
+ *  class covers (pending checks, draft, UNKNOWN, BEHIND, sast_unknown)
+ *  is plain 'blocked'. Extracted so drivePr stays under the
+ *  cognitive-complexity cap. */
 async function blockedVerdict(ctx: Ctx, b: BlockedWork): Promise<PrVerdict> {
   const { pr, link, state, gate, occ, worktree, fixer, work } = b
   if (gate.open_threads > 0) {
@@ -1139,13 +1531,35 @@ async function blockedVerdict(ctx: Ctx, b: BlockedWork): Promise<PrVerdict> {
   // before the fixer existed — 'blocked — merge conflicts' used to be
   // logged and skipped forever (bro-glkes). The bound is the act gate's
   // own round cap — reviewed pushes past maxRounds read as plain
-  // 'blocked', not another rebase round.
+  // 'blocked', not another rebase round. The same cap bounds the
+  // ci/sast rounds below: every fixer push that gets reviewed spends
+  // from it.
+  const capHit = state.maxRounds > 0 && state.fixRounds > state.maxRounds
   if (state.mergeable === 'CONFLICTING') {
     if (occ !== undefined) {
       return { pr, link, verdict: 'occupied', detail: occ }
     }
-    if (!(state.maxRounds > 0 && state.fixRounds > state.maxRounds)) {
+    if (!capHit) {
       return spawnRebaseFixer(ctx, pr, state, worktree, fixer, work.agents)
+    }
+  }
+  // settled-red checks on an orphaned PR used to be terminal 'blocked'
+  // — the classes below each get a remediation start instead
+  // (bro-atb2g). Occupied still wins over every spawn.
+  if (gate.ci_failing > 0) {
+    if (occ !== undefined) {
+      return { pr, link, verdict: 'occupied', detail: occ }
+    }
+    if (!capHit) {
+      return spawnCiFixer(ctx, pr, state, worktree, fixer, work.agents)
+    }
+  }
+  if (gate.sast_pending > 0) {
+    if (occ !== undefined) {
+      return { pr, link, verdict: 'occupied', detail: occ }
+    }
+    if (!capHit) {
+      return spawnSastFixer(ctx, pr, state, worktree, fixer, work.agents)
     }
   }
   return { pr, link, verdict: 'blocked', detail: gate.blockers.join('; ') }

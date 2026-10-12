@@ -1,5 +1,6 @@
 export type { ExitGate, PrActState, PrCheck } from './types.ts'
 export { fetchPrActState } from './state.ts'
+export { failingCiChecks, gatedCiChecks, isSast, liveSastChecks } from './state.ts'
 export { evaluateExitGate } from './exit-gate.ts'
 export { docsOnly, effectiveMaxRounds, isDocsPath } from './docs.ts'
 export { gatePending, waitForGate } from './wait.ts'

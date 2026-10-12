@@ -546,7 +546,13 @@ const facade = {
     }
     return s.checks ?? []
   },
-  checkAnnotations: () => new Map(),
+  checkAnnotations: (_repo, _sha, names) => {
+    const all = load().annotations ?? {}
+    // names-given callers read exactly that set — an unrequested check
+    // never appears (absent key = no annotations endpoint, like gh)
+    const keys = names ? [...names] : Object.keys(all)
+    return new Map(keys.map((k) => [k, all[k] ?? 0]))
+  },
   reviewedShas: () => load().reviewedShas ?? ['abc123'],
   reviewThreads: async () => load().threads ?? [],
   resolveThread: () => {},
@@ -678,7 +684,11 @@ const log = (msg) => {
     ? 'fix'
     : prompt.includes('merge conflicts')
       ? 'rebase'
-      : 'work'
+      : prompt.includes('CI fixer')
+        ? 'ci'
+        : prompt.includes('SAST fixer')
+          ? 'sast'
+          : 'work'
   fs.appendFileSync(f, kind + ' ' + msg + '\\n')
 }
 // register the "opened" PR — the per-branch map (seeded prs: {}) is
@@ -717,6 +727,32 @@ if (prompt.includes('merge conflicts')) {
   s.events = (s.events ?? []).concat([{ rebase: process.env.BRO_BEAD_ID || null, branch }])
   save(s)
   log('rebased onto base')
+  process.exit(0)
+}
+if (prompt.includes('CI fixer')) {
+  // ci-fail round — clear the failing checks and stop. fixerNoop leaves
+  // them red: the drive dedup test needs an ok-exit with nothing fixed.
+  const s = load()
+  if (s.fixerNoop === true) {
+    log('left failing (noop)')
+  } else {
+    s.checks = []
+    if (s.prs?.[branch]) s.prs[branch].checks = []
+    save(s)
+    log('cleared checks')
+  }
+  process.exit(0)
+}
+if (prompt.includes('SAST fixer')) {
+  // sast round — clear the annotation counts and stop
+  const s = load()
+  if (s.fixerNoop === true) {
+    log('left findings (noop)')
+  } else {
+    s.annotations = {}
+    save(s)
+    log('cleared annotations')
+  }
   process.exit(0)
 }
 switch (scenario) {

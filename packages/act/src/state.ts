@@ -42,13 +42,39 @@ const SAST_NAMES = [
   'gitleaks',
 ]
 
-function isSast(name: string): boolean {
+export function isSast(name: string): boolean {
   const lower = name.toLowerCase()
   return SAST_NAMES.some((s) => lower.includes(s))
 }
 
 const isLiveSast = (c: CheckInfo): boolean =>
   isSast(c.name) && c.state !== 'SKIPPED' && c.state !== 'NEUTRAL'
+
+/** The gate's ci set — non-reviewer checks that aren't pass/skipped/
+ *  neutral. Exported so drive's CI-fail fixer names exactly the checks
+ *  the gate counted (a second classifier would rot). Feed it the
+ *  post-ignore list — advisory checks never gate. */
+export function gatedCiChecks(checks: CheckInfo[]): CheckInfo[] {
+  return checks.filter(
+    (c) =>
+      c.bucket !== 'pass' &&
+      c.state !== 'SKIPPED' &&
+      c.state !== 'NEUTRAL' &&
+      !AI_REVIEWER_RE.test(c.name)
+  )
+}
+
+/** The ci_failing set — gatedCi that settled red. */
+export function failingCiChecks(checks: CheckInfo[]): CheckInfo[] {
+  return gatedCiChecks(checks).filter((c) => c.bucket === 'fail')
+}
+
+/** Non-skipped SAST checks — the annotation-inspection set the gate
+ *  reads, green runs included (a SUCCESS conclusion can still carry
+ *  failure-level annotations). */
+export function liveSastChecks(checks: CheckInfo[]): CheckInfo[] {
+  return checks.filter(isLiveSast)
+}
 
 function countFindings(
   checks: CheckInfo[],
@@ -88,8 +114,8 @@ async function sastCounts(
   alerts: string[]
 ): Promise<{ pending: number; unknown: number }> {
   const out = { pending: 0, unknown: 0 }
-  const sastChecks = checks.filter(isLiveSast)
-  const ignoredSast = ignored.filter(isLiveSast)
+  const sastChecks = liveSastChecks(checks)
+  const ignoredSast = liveSastChecks(ignored)
   if (sastChecks.length === 0 && ignoredSast.length === 0) {
     return out
   }
@@ -276,15 +302,9 @@ export async function fetchPrActState(
   const requiredNames = new Set(required.map((c) => c.name))
   // Pending and failing split here: pending is worth
   // waiting out (act wait), failing is a settled verdict to act on.
-  const ciChecks = checks.filter(
-    (c) =>
-      c.bucket !== 'pass' &&
-      c.state !== 'SKIPPED' &&
-      c.state !== 'NEUTRAL' &&
-      !AI_REVIEWER_RE.test(c.name)
-  )
+  const ciChecks = gatedCiChecks(checks)
   const ciPending = ciChecks.filter((c) => c.bucket === 'pending').length
-  const ciFailing = ciChecks.filter((c) => c.bucket === 'fail').length
+  const ciFailing = failingCiChecks(checks).length
 
   // A pending AI reviewer can still open threads — declaring the gate OK
   // while one is running invites exactly the "threads after OK" surprise.
