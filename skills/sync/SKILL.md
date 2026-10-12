@@ -31,8 +31,9 @@ the user's index are never touched.
   other conflict resolves to the local copy (regenerated artifacts are
   safe to clobber; the JSONL holds real history).
 - Push is best-effort: failures warn, never fail the command — offline
-  must not block local work. `--pull` exits nonzero when the remote ref
-  doesn't exist: there is nothing to restore from.
+  must not block local work. `--pull` treats an absent remote ref as
+  "nothing to pull" and still runs `bd sync`; it exits nonzero only when
+  the remote can't be reached or store replication fails.
 - The ref is NOT a branch: `git branch` stays clean, and nobody can
   accidentally check it out or merge it into code.
 - **Beads state rides its own transport.** Drill frames, wtfs, retros and

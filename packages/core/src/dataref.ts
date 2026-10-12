@@ -245,15 +245,25 @@ export function dataRefPush(
  * Pull the remote data ref and write its files under the worktree —
  * restores artifacts on a fresh clone. Local-only files are left alone;
  * the ref is the truth for everything it contains. Returns the number of
- * files written, or -1 when no remote ref exists.
+ * files written, -1 when the remote answers but has no such ref (the
+ * empty-restore case — nothing to pull), or -2 when the remote can't be
+ * reached at all. A bare fetch conflates the two into one error, so the
+ * ls-remote probe asks the question first.
  */
 export function dataRefPull(
   root: string,
   remote: string = 'origin',
   ref: string = DATA_REF
 ): number {
-  if (gitTry(['-C', root, 'fetch', remote, ref]).code !== 0) {
+  const probe = gitTry(['-C', root, 'ls-remote', remote, ref])
+  if (probe.code !== 0) {
+    return -2
+  }
+  if (probe.out.trim() === '') {
     return -1
+  }
+  if (gitTry(['-C', root, 'fetch', remote, ref]).code !== 0) {
+    return -2
   }
   const theirs = g(root, ['rev-parse', 'FETCH_HEAD'])
   const ours = refSha(root, ref)
