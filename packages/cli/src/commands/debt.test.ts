@@ -8,7 +8,7 @@ import {
   upsertLedgerOverlays,
   type DebtRecord,
 } from '@broject/debt'
-import { commandMutatedLedger, syncSonarDedupeOverlays } from './debt.ts'
+import { commandMutatedLedger, syncDedupeOverlays } from './debt.ts'
 
 /** BRO_DEBT_DIR redirects ledger writes into a throwaway dir. */
 function withDebtDir(fn: () => void): void {
@@ -53,7 +53,7 @@ describe('commandMutatedLedger', () => {
   })
 })
 
-describe('syncSonarDedupeOverlays', () => {
+describe('syncDedupeOverlays', () => {
   const rec = (thread_id: string, status: string = 'open'): DebtRecord =>
     ({ thread_id, status, path: '', line: null, body: '' }) as DebtRecord
 
@@ -88,7 +88,7 @@ describe('syncSonarDedupeOverlays', () => {
         rec('sonarcloud:WF', 'wontfix'),
       ]
       const records = [rec('sonarcloud:D1'), rec('sonarcloud:DUP'), rec('sonarcloud:WF')]
-      syncSonarDedupeOverlays(existing, records, new Set(), new Map())
+      syncDedupeOverlays('sonarcloud', existing, records, new Set(), new Map())
       const over = readLedgerOverlays()
       assert.equal(over.get('sonarcloud:D1')?.status, 'open')
       assert.match(over.get('sonarcloud:D1')?.notes ?? '', /still reported upstream/)
@@ -105,7 +105,8 @@ describe('syncSonarDedupeOverlays', () => {
         rec('sonarcloud:DUP', 'duplicate'),
       ]
       const coveredBy = new Map(existing.map((r) => [r.thread_id, 'thread:T1'] as const))
-      syncSonarDedupeOverlays(
+      syncDedupeOverlays(
+        'sonarcloud',
         existing,
         [],
         new Set(existing.map((r) => r.thread_id)),

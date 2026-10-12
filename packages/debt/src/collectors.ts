@@ -5,10 +5,16 @@
  * collects dedup via the ledger's thread_id upsert. `source` tags the row
  * so `bro debt sync` labels beads `debt:<source>`.
  */
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { ghJson } from '@broject/core'
 import type { DebtPriority, DebtRecord } from './types.ts'
 import { bodyPreview, deriveArea, fingerprint } from './text.ts'
-import { collectSonarcloud } from './sonarcloud.ts'
+import { collectCodacy, dedupeCodacyThreads } from './codacy.ts'
+import { collectCodescene, dedupeCodesceneThreads } from './codescene.ts'
+import { collectSonarcloud, dedupeReviewThreads } from './sonarcloud.ts'
 
 export const DEBT_SOURCES = [
   'dependabot',
@@ -17,6 +23,8 @@ export const DEBT_SOURCES = [
   'stale-prs',
   'failed-ci',
   'sonarcloud',
+  'codacy',
+  'codescene',
 ] as const
 export type DebtSource = (typeof DEBT_SOURCES)[number]
 
@@ -60,6 +68,148 @@ export interface CollectCtx {
  *  resolve ledger rows that still exist upstream. */
 function ghJsonAll<T>(endpoint: string): T[] {
   return ghJson<T[][]>(['api', '--paginate', '--slurp', endpoint]).flat()
+}
+
+// --- shared HTTP-source helpers (sonarcloud, codacy, codescene) ---------------
+
+const CURL_TIMEOUT_MS = 30_000
+
+/** Trailing slashes, no regex — `/\/+$/` on uncontrolled input trips
+ *  CodeQL's polynomial-regex rule; a backward scan is linear anyway. */
+export function stripSlashes(s: string): string {
+  let end = s.length
+  while (end > 0 && s[end - 1] === '/') {
+    end--
+  }
+  return s.slice(0, end)
+}
+
+/** A token may only cross the wire over https — or cleartext to loopback
+ *  (self-hosted dev rigs). Any other scheme/host refuses the request. */
+export function assertTokenSafeHost(host: string, source: string): URL {
+  let url: URL
+  try {
+    url = new URL(host)
+  } catch {
+    throw new SourceSkipped(`${source} host "${host}" is not a valid URL`)
+  }
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+  if (url.protocol === 'http:') {
+    if (!loopback) {
+      throw new SourceSkipped(
+        `${source} host ${host} is plain http — the token would cross the wire cleartext; use https`
+      )
+    }
+  } else if (url.protocol !== 'https:') {
+    throw new SourceSkipped(
+      `${source} host "${host}" — only http(s) URLs can carry a token`
+    )
+  }
+  return url
+}
+
+/** curl transport shared by the HTTP API sources — the collectors are
+ *  synchronous and no official CLIs exist. Credential headers ride a
+ *  0600 file (`-H @file`) in a private tmpdir that lives only for the
+ *  spawn — never argv, every local user can `ps`. `body` is sent via
+ *  `-d` (filter JSON carries no secrets, argv is fine). */
+export function curlJson(
+  url: string,
+  headers: string[],
+  opts: { label: string; method?: 'POST'; body?: string }
+): unknown {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-curl-hdr-'))
+  try {
+    const hdr = join(dir, 'headers')
+    writeFileSync(hdr, headers.map((h) => `${h}\n`).join(''), { mode: 0o600 })
+    const args = [
+      '-sS',
+      '--fail-with-body',
+      '--max-time',
+      String(Math.ceil(CURL_TIMEOUT_MS / 1000)),
+      '-H',
+      `@${hdr}`,
+    ]
+    if (opts.method === 'POST') {
+      args.push('-X', 'POST')
+    }
+    if (opts.body !== undefined) {
+      args.push('-d', opts.body)
+    }
+    args.push(url)
+    const res = spawnSync(
+      'curl', // NOSONAR — PATH lookup is the contract (curl like gh/glab/bd)
+      args,
+      { encoding: 'utf8', timeout: CURL_TIMEOUT_MS + 15_000, maxBuffer: 64 * 1024 * 1024 }
+    )
+    if (res.error) {
+      const code = (res.error as NodeJS.ErrnoException).code
+      throw new Error(
+        code === 'ENOENT'
+          ? `${opts.label}: curl not found — the sync transport needs curl on PATH`
+          : `${opts.label}: curl failed — ${res.error.message}`
+      )
+    }
+    if (res.status !== 0) {
+      const detail = res.stderr.trim() !== '' ? res.stderr.trim() : res.stdout.trim().slice(0, 300)
+      const reason = detail !== '' ? detail : `curl exited ${res.status}`
+      throw new Error(`${opts.label}: request failed — ${reason}`)
+    }
+    try {
+      return JSON.parse(res.stdout)
+    } catch {
+      throw new Error(`${opts.label}: non-JSON response — ${res.stdout.slice(0, 200)}`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+/** One record a PR-decorating source dropped plus the open row that
+ *  covers it. */
+export interface DedupeDupe {
+  record: DebtRecord
+  coveredBy: string
+}
+
+/** Review-thread dedupe shared by the sources whose services decorate
+ *  PRs (specs: bro-huy5o.4 sonarcloud, bro-huy5o.5 codacy + codescene).
+ *  A fresh record is dropped when an OPEN review-thread row — `source`
+ *  absent or the PR sweep — covers it per the source's `covers`
+ *  predicate. */
+export function dedupeByThreads(
+  records: DebtRecord[],
+  existing: DebtRecord[],
+  covers: (rec: DebtRecord, thread: DebtRecord) => boolean
+): { kept: DebtRecord[]; duped: DedupeDupe[] } {
+  const threads = existing.filter(
+    (r) => r.status === 'open' && (r.source === undefined || r.source === 'review-threads')
+  )
+  const kept: DebtRecord[] = []
+  const duped: DedupeDupe[] = []
+  for (const rec of records) {
+    const cover = threads.find((t) => covers(rec, t))
+    if (cover !== undefined) {
+      duped.push({ record: rec, coveredBy: cover.thread_id })
+    } else {
+      kept.push(rec)
+    }
+  }
+  return { kept, duped }
+}
+
+/** Sources whose findings a PR-decorating bot may have already landed
+ *  via the review-threads sweep — dedupe before landing, then ride the
+ *  shared duplicate/reopen overlay bookkeeping in the CLI. */
+export const SOURCE_DEDUPES: Partial<
+  Record<
+    DebtSource,
+    (records: DebtRecord[], existing: DebtRecord[]) => { kept: DebtRecord[]; duped: DedupeDupe[] }
+  >
+> = {
+  sonarcloud: dedupeReviewThreads,
+  codacy: dedupeCodacyThreads,
+  codescene: dedupeCodesceneThreads,
 }
 
 export function baseRecord(
@@ -331,6 +481,8 @@ export const COLLECTORS: Record<
   'failed-ci': (ctx) => collectFailedCi(ctx),
   sonarcloud: (ctx) =>
     collectSonarcloud(ctx, { dir: ctx.dir, cfg: ctx.sourceConfig?.['sonarcloud'] }),
+  codacy: (ctx) => collectCodacy(ctx, { cfg: ctx.sourceConfig?.['codacy'] }),
+  codescene: (ctx) => collectCodescene(ctx, { cfg: ctx.sourceConfig?.['codescene'] }),
 }
 
 /**

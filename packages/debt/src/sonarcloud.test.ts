@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SourceSkipped } from './collectors.ts'
@@ -12,61 +12,17 @@ import {
   resolveSonarProject,
   sonarKeyOf,
 } from './sonarcloud.ts'
+import { openThread, withEnv, withFakeCurl } from './testhttp.ts'
 import type { DebtRecord } from './types.ts'
 import type { SonarProject } from './sonarcloud.ts'
 
 const CTX = { repo: 'acme/widgets', runId: 't', harvestedAt: '2026-01-02T00:00:00Z' }
-
-/** Scripted curl on PATH — answers by URL substring via a JSON map file.
- *  Absent key → `{"paging":{"total":0}}` so paging loops terminate. */
-function withFakeCurl(cases: Record<string, string>, fn: () => void): void {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-fake-curl-'))
-  const mapPath = join(dir, 'map.json')
-  writeFileSync(mapPath, JSON.stringify(cases))
-  writeFileSync(
-    join(dir, 'curl'),
-    [
-      '#!/usr/bin/env node',
-      'const map = JSON.parse(require("fs").readFileSync(process.env.FAKE_CURL_MAP, "utf8"))',
-      'const args = process.argv.slice(2).join(" ")',
-      'for (const [k, v] of Object.entries(map)) {',
-      '  if (args.includes(k)) { console.log(v); process.exit(0) }',
-      '}',
-      'console.log("{\\"paging\\":{\\"total\\":0}}")',
-    ].join('\n')
-  )
-  chmodSync(join(dir, 'curl'), 0o755)
-  const prevPath = process.env.PATH
-  const prevMap = process.env.FAKE_CURL_MAP
-  process.env.PATH = `${dir}:${prevPath}`
-  process.env.FAKE_CURL_MAP = mapPath
-  try {
-    fn()
-  } finally {
-    process.env.PATH = prevPath
-    if (prevMap === undefined) {
-      delete process.env.FAKE_CURL_MAP
-    } else {
-      process.env.FAKE_CURL_MAP = prevMap
-    }
-    rmSync(dir, { recursive: true, force: true })
-  }
-}
+const EMPTY_PAGE = '{"paging":{"total":0}}'
 
 /** SONAR_TOKEN set for fn, restored after — the skip path is tested by
  *  deleting it explicitly. */
 function withToken(fn: () => void): void {
-  const prev = process.env.SONAR_TOKEN
-  process.env.SONAR_TOKEN = 'squ_test'
-  try {
-    fn()
-  } finally {
-    if (prev === undefined) {
-      delete process.env.SONAR_TOKEN
-    } else {
-      process.env.SONAR_TOKEN = prev
-    }
-  }
+  withEnv({ SONAR_TOKEN: 'squ_test' }, fn)
 }
 
 function withTmpDir(fn: (dir: string) => void): void {
@@ -171,6 +127,7 @@ describe('collectSonarcloud', () => {
               { key: 'acme_widgets:src/auth.ts', path: 'src/auth.ts' },
             ]),
           },
+          EMPTY_PAGE,
           () => {
             const rows = collectSonarcloud(CTX, { dir, cfg: { project_key: 'pk' } })
             assert.equal(rows.length, 2)
@@ -203,6 +160,7 @@ describe('collectSonarcloud', () => {
               { ...HOTSPOT, key: 'H2', vulnerabilityProbability: 'MEDIUM' },
             ]),
           },
+          EMPTY_PAGE,
           () => {
             const rows = collectSonarcloud(CTX, { dir, cfg: { project_key: 'pk' } })
             const pri = new Map(rows.map((r) => [r.thread_id, r.priority]))
@@ -224,6 +182,7 @@ describe('collectSonarcloud', () => {
             '&p=1': issuesBody([{ ...ISSUE, key: 'P1' }], 2),
             '&p=2': issuesBody([{ ...ISSUE, key: 'P2' }], 2),
           },
+          EMPTY_PAGE,
           () => {
             const ids = collectSonarcloud(CTX, { dir, cfg: { project_key: 'pk' } })
               .map((r) => r.thread_id)
@@ -243,6 +202,7 @@ describe('collectSonarcloud', () => {
               { ...ISSUE, component: 'pk:lib/x.ts', line: undefined },
             ]),
           },
+          EMPTY_PAGE,
           () => {
             const r = collectSonarcloud(CTX, { dir, cfg: { project_key: 'pk' } })[0]!
             assert.equal(r.path, 'lib/x.ts')
@@ -257,6 +217,7 @@ describe('collectSonarcloud', () => {
       withToken(() =>
         withFakeCurl(
           { 'issues/search': issuesBody([ISSUE], 20_001) },
+          EMPTY_PAGE,
           () =>
             assert.throws(
               () => collectSonarcloud(CTX, { dir, cfg: { project_key: 'pk' } }),
@@ -330,15 +291,7 @@ describe('dedupeReviewThreads', () => {
       source: 'sonarcloud',
       body: 'b',
     }) as DebtRecord
-  const thread = (over: Partial<DebtRecord>): DebtRecord =>
-    ({
-      thread_id: 'PRRT_1',
-      status: 'open',
-      path: '',
-      line: null,
-      body: '',
-      ...over,
-    }) as DebtRecord
+  const thread = openThread
 
   test('same path+line on an open review thread drops the sonar row', () => {
     const d = dedupeReviewThreads(

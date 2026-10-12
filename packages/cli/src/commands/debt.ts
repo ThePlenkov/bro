@@ -57,9 +57,9 @@ import {
   ALL_SOURCES,
   COLLECTORS,
   DEBT_SOURCES,
-  dedupeReviewThreads,
   parseSources,
   resolvedThreadIds,
+  SOURCE_DEDUPES,
   SourceSkipped,
   type DebtPrState,
   type DebtRecord,
@@ -322,14 +322,16 @@ function collectOneSource(
     )
     return
   }
-  // sonarcloud dedupes against open review-thread rows — Sonar's PR
-  // decoration already landed those findings via the merged-PR sweep.
+  // PR-decorating sources dedupe against open review-thread rows — the
+  // service's PR comments already landed those findings via the merged-PR
+  // sweep.
+  const dedupe = SOURCE_DEDUPES[source]
   let existing: DebtRecord[] = []
   let dupedIds = new Set<string>()
   let coveredBy = new Map<string, string>()
-  if (source === 'sonarcloud') {
+  if (dedupe !== undefined) {
     existing = readDebtRecords()
-    const d = dedupeReviewThreads(records, existing)
+    const d = dedupe(records, existing)
     records = d.kept
     dupedIds = new Set(d.duped.map((x) => x.record.thread_id))
     coveredBy = new Map(d.duped.map((x) => [x.record.thread_id, x.coveredBy]))
@@ -344,8 +346,8 @@ function collectOneSource(
     }
     return
   }
-  if (source === 'sonarcloud') {
-    syncSonarDedupeOverlays(existing, records, dupedIds, coveredBy)
+  if (dedupe !== undefined) {
+    syncDedupeOverlays(source, existing, records, dupedIds, coveredBy)
   }
   if (records.length > 0) {
     writeHarvestFile({
@@ -376,7 +378,7 @@ function collectOneSource(
   }
 }
 
-/** sonarcloud dedupe bookkeeping (spec: specs/bro-huy5o.4.md) —
+/** PR-decorator dedupe bookkeeping (specs: bro-huy5o.4, bro-huy5o.5) —
  *  - an open or done ledger row now covered by a review thread →
  *    `duplicate` (the finding is owned by the thread row, not fixed —
  *    fix% must not count it. `done` was either a wrong "resolved
@@ -387,7 +389,8 @@ function collectOneSource(
  *    proved wrong — the row is live upstream again). `wontfix` stays:
  *    a live finding IS its steady state, so reopening would churn the
  *    human verdict every collect. */
-export function syncSonarDedupeOverlays(
+export function syncDedupeOverlays(
+  source: DebtSource,
   existing: DebtRecord[],
   records: DebtRecord[],
   dupedIds: Set<string>,
@@ -427,10 +430,10 @@ export function syncSonarDedupeOverlays(
     })),
   ])
   if (toDup.length > 0) {
-    console.error(`debt: sonarcloud — ${toDup.length} row(s) now covered → duplicate`)
+    console.error(`debt: ${source} — ${toDup.length} row(s) now covered → duplicate`)
   }
   if (toReopen.length > 0) {
-    console.error(`debt: sonarcloud — reopened ${toReopen.length} row(s) no longer covered`)
+    console.error(`debt: ${source} — reopened ${toReopen.length} row(s) no longer covered`)
   }
 }
 

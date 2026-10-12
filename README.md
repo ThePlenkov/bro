@@ -244,6 +244,8 @@ labels, `thread_id` is the source's stable key):
 | `stale-prs` | Open PRs idle > `debt.stale_days` days or failing checks (WIP drafts don't count) |
 | `failed-ci` | Latest default-branch workflow run, if it failed |
 | `sonarcloud` | Open SonarCloud issues + TO_REVIEW hotspots on new code (`SONAR_TOKEN`; project key from `debt.sourceConfig.sonarcloud.project_key` or `sonar-project.properties`). Skips findings a Sonar PR comment already covered |
+| `codacy` | Current repo issues from Codacy API v3 (`CODACY_API_TOKEN` or repo-scoped `CODACY_PROJECT_TOKEN`; `debt.sourceConfig.codacy.{host,provider}` for self-hosted/non-GitHub). Skips findings a Codacy PR comment already covered |
+| `codescene` | Failed quality gates + per-file code-health declines from stored delta analyses (`CODESCENE_TOKEN`; project id from `debt.sourceConfig.codescene.project_id` or `CODESCENE_PROJECT_ID`). Skips findings a CodeScene PR comment already covered |
 
 Alert sources reconcile both ways: a finding that disappears upstream is
 marked `done` in the ledger on the next collect.

@@ -64,13 +64,37 @@ export { buildTrend } from './trend.ts'
 export type { ThreadBounds, TrendGranularity, TrendOptions, TrendPoint } from './trend.ts'
 export {
   ALL_SOURCES,
+  assertTokenSafeHost,
   COLLECTORS,
   DEBT_SOURCES,
+  dedupeByThreads,
   parseSources,
   resolvedThreadIds,
+  SOURCE_DEDUPES,
   SourceSkipped,
+  stripSlashes,
 } from './collectors.ts'
-export type { CollectCtx, DebtSource, DebtSourceName } from './collectors.ts'
+export type { CollectCtx, DebtSource, DebtSourceName, DedupeDupe } from './collectors.ts'
+export {
+  CODACY_HOST,
+  CODACY_UI_HOST,
+  codacyKeyOf,
+  collectCodacy,
+  dedupeCodacyThreads,
+  resolveCodacyRepo,
+} from './codacy.ts'
+export type { CodacyRepo } from './codacy.ts'
+export {
+  CODESCENE_HOST,
+  CODESCENE_UI_HOST,
+  codesceneDeltaIdOf,
+  collectCodescene,
+  dedupeCodesceneThreads,
+  failedGates,
+  parseAnalysisTime,
+  resolveCodesceneProject,
+} from './codescene.ts'
+export type { CodesceneProject } from './codescene.ts'
 export {
   assertSonarHostTrusted,
   collectSonarcloud,
