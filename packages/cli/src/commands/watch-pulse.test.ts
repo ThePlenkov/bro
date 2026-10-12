@@ -2,7 +2,7 @@
  *  liveness, the orchestrator predicate, and the session-start nudge. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { initRepo } from './testrepo.ts'
 import {
@@ -22,10 +22,14 @@ import {
 
 const DEAD = 1 << 30
 
-const lock = (main: string, content: string): void => {
+const lock = (main: string, content: string, mtimeAgoMs = 0): void => {
   const p = pulseLockPath(main)!
   mkdirSync(dirname(p), { recursive: true })
   writeFileSync(p, content)
+  if (mtimeAgoMs > 0) {
+    const t = new Date(Date.now() - mtimeAgoMs)
+    utimesSync(p, t, t)
+  }
 }
 
 describe('paths', () => {
@@ -94,6 +98,19 @@ describe('pulseLive', () => {
     try {
       lock(main, `${process.pid}:tok`)
       assert.deepEqual(pulseLive(main), { live: true, pid: process.pid })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a live pid on a heartbeat-dead lock is not live — pid reuse masks one window at most', () => {
+    const { root, main } = initRepo('bro-pulse-reuse-')
+    try {
+      // the token's pid is alive (this process — a recycled pid's
+      // stand-in) but the hold is older than LOCK_ABANDONED_MS (15m):
+      // the contender's steal rule calls it stale, so liveness must too
+      lock(main, `${process.pid}:tok`, 20 * 60_000)
+      assert.deepEqual(pulseLive(main), { live: false })
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -220,6 +237,21 @@ describe('pulseRearm', () => {
       armPulse(main, 120)
       lock(main, `${process.pid}:tok`)
       assert.deepEqual(pulseRearm(main, 900, {}), { kind: 'quiet' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('armed + a live pid on an aged lock rearms — reuse cannot suppress forever', () => {
+    const { root, main } = initRepo('bro-pulse-r1b-')
+    try {
+      armPulse(main, 120)
+      lock(main, `${process.pid}:tok`, 20 * 60_000)
+      assert.deepEqual(pulseRearm(main, 900, {}), {
+        kind: 'rearm',
+        everySec: 120,
+        forSec: 900,
+      })
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

@@ -5,7 +5,7 @@
  *  rearm decision, and install/uninstall with injected up/down. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { initRepo } from './testrepo.ts'
 import { lockHolderPid } from '@broject/core'
@@ -30,10 +30,14 @@ import { driveLockPath } from './drive.ts'
 
 const DEAD = 1 << 30
 
-const writeLock = (main: string, content: string): void => {
+const writeLock = (main: string, content: string, mtimeAgoMs = 0): void => {
   const p = driveLockPath(main)!
   mkdirSync(dirname(p), { recursive: true })
   writeFileSync(p, content)
+  if (mtimeAgoMs > 0) {
+    const t = new Date(Date.now() - mtimeAgoMs)
+    utimesSync(p, t, t)
+  }
 }
 
 const writeRecord = (main: string, pid: number, extra: object = {}): void => {
@@ -105,6 +109,20 @@ describe('daemonProbe', () => {
       assert.equal(probe.live, true)
       assert.equal(probe.pid, process.pid)
       assert.equal(probe.recorded, null)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a live pid on a heartbeat-dead lock is not live — pid reuse masks one window at most', () => {
+    const { root, main } = initRepo('bro-daemon-reuse-')
+    try {
+      // alive pid (this process — a recycled pid's stand-in) but the
+      // hold is older than LOCK_ABANDONED_MS (15m): the contender's
+      // steal rule calls it stale, so the probe must too — otherwise
+      // the dead daemon is masked forever
+      writeLock(main, `${process.pid}:nonce`, 20 * 60_000)
+      assert.equal(daemonProbe(main).live, false)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -206,6 +224,16 @@ describe('daemonUpDecision', () => {
     }
   })
 
+  test('an aged live-pid lock does not count — spawn again, reuse cannot suppress', () => {
+    const { root, main } = initRepo('bro-daemon-aged-')
+    try {
+      writeLock(main, `${process.pid}:nonce`, 20 * 60_000)
+      assert.equal(daemonUpDecision(main, ORCH).kind, 'spawn')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   test('dead holder + dead record → spawn again — staleness never blocks', () => {
     const { root, main } = initRepo('bro-daemon-respawn-')
     try {
@@ -293,6 +321,17 @@ describe('driveRearm', () => {
       armDrive(main, 120)
       writeLock(main, `${process.pid}:nonce`)
       assert.deepEqual(driveRearm(main, ORCH), { kind: 'quiet' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('armed + an aged live-pid lock rearms — reuse is bounded by the steal rule', () => {
+    const { root, main } = initRepo('bro-drearm-2b-')
+    try {
+      armDrive(main, 120)
+      writeLock(main, `${process.pid}:nonce`, 20 * 60_000)
+      assert.deepEqual(driveRearm(main, ORCH), { kind: 'rearm', everySec: 120 })
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

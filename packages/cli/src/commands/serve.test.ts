@@ -420,6 +420,23 @@ describe('collectTicks', () => {
       assert.equal(dead.kind, 'drive')
     })
   })
+
+  test('a live pid on a heartbeat-dead drive.lock reads not alive — pid reuse is bounded', () => {
+    const { root, main } = initRepo('bro-ticks-')
+    inside(main, root, () => {
+      const bro = join(main, '.git', 'bro')
+      mkdirSync(bro, { recursive: true })
+      const lock = join(bro, 'drive.lock')
+      writeFileSync(lock, `${process.pid}:tok`)
+      // older than LOCK_ABANDONED_MS (15m): the contender's steal rule
+      // calls this hold stale, so the board must not report it live
+      const t0 = new Date(Date.now() - 20 * 60_000)
+      utimesSync(lock, t0, t0)
+      const t = collectTicks(main)
+      assert.equal(t.drive.pid, process.pid)
+      assert.equal(t.drive.alive, false)
+    })
+  })
 })
 
 describe('readBody', () => {

@@ -87,6 +87,7 @@ import {
   lockHolderPid,
   peekMailbox,
   SpawnError,
+  staleLock,
   startBusBroker,
   type AgentConnector,
   type AgentInfo,
@@ -968,7 +969,9 @@ export function collectTicks(dir: string, now = Date.now()): TickBoard {
     heartbeat: readHeartbeat(dir, now),
     drive: {
       pid: drivePid,
-      alive: drivePid !== null && pidAlive(drivePid),
+      // the contender's steal rule bounds liveness — a recycled pid on
+      // an un-heartbeated lock is a dead supervisor, not a live one
+      alive: drivePid !== null && pidAlive(drivePid) && lock !== null && !staleLock(lock),
       ...(driveAgeMs === undefined ? {} : { ageMs: driveAgeMs }),
     },
     watches: listWatches(dir).map((l) => ({
