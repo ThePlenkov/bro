@@ -40,7 +40,9 @@ git fetch/push leg around `bd sync`.
   linked-worktree callers route through it, never through a guessed
   `.beads` path.
 - **Repointing** — `bd dolt remote remove <name>` + `add <name>
-  git+file://<mirror>` once; the name is kept (`origin` stays the
+  git+file://<mirror>` once; a failed add after a successful remove
+  re-adds the original URL so provisioning failure leaves the remote
+  as found; the name is kept (`origin` stays the
   default-remote name), so `bd sync`, `bd dolt push`, and bd's own
   auto-push all ride the working transport with no flag plumbing.
   Provenance survives twice: the mirror's `remote.origin.url` is the

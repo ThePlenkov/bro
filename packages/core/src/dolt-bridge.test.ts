@@ -143,6 +143,31 @@ describe('doltSyncPlan', { skip: WIN32 }, () => {
     assert.ok(plan.notes.some((n) => n.startsWith('bridge: repointed origin')))
   })
 
+  test('a failed repoint re-adds the original remote URL', () => {
+    const beads = tmp()
+    const { probe, calls } = fakeProbe({
+      'dolt remote list --json': {
+        out: JSON.stringify([{ name: 'origin', url: 'git+https://u:p@github.com/o/r.git' }]),
+      },
+      'dolt remote remove origin': {},
+      ['dolt remote add origin git+file://' + join(beads, 'dolt-mirror-origin.git')]: {
+        code: 1,
+        err: 'remote add blew up on git+https://u:p@github.com/o/r.git',
+      },
+      'dolt remote add origin git+https://u:p@github.com/o/r.git': {},
+    })
+    const plan = doltSyncPlan(probe, beads)
+    assert.deepEqual(plan.bridges, [])
+    assert.ok(
+      calls.some((c) => c.join(' ') === 'dolt remote add origin git+https://u:p@github.com/o/r.git'),
+      'original remote restored'
+    )
+    const warn = plan.notes.find((n) => n.startsWith('warning: cannot bridge origin'))
+    assert.ok(warn !== undefined)
+    assert.ok(warn.includes('***@'), warn)
+    assert.ok(!warn.includes('u:p@'), warn)
+  })
+
   test('a remote already at a bridged file mirror is used in place — no repoint', () => {
     const beads = tmp()
     const mirror = join(beads, 'hand-mirror.git')

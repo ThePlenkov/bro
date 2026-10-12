@@ -145,8 +145,9 @@ function mirrorUpstream(mirror: string): string | null {
 const safeName = (name: string): string => name.replace(/[^\w.-]/g, '_')
 
 /** Redact embedded userinfo before a URL lands in sync output — the
- *  remote needs the raw URL, notes and warnings do not. */
-const displayUrl = (u: string): string => u.replace(/^([\w+.-]+:\/\/)[^@/\s]+@/, '$1***@')
+ *  remote needs the raw URL, notes and warnings do not. Global because
+ *  git/bd stderr embeds the failing URL mid-line, not at offset 0. */
+const displayUrl = (u: string): string => u.replace(/([\w+.-]+:\/\/)[^@/\s]+@/g, '$1***@')
 
 export function mirrorPathFor(beadsDir: string, remoteName: string): string {
   return join(beadsDir, `dolt-mirror-${safeName(remoteName)}.git`)
@@ -178,11 +179,28 @@ function ensureMirror(mirror: string, upstream: string): string | null {
  *  (bd offers no set-url). The remote name is preserved: it is the
  *  default-remote name every other consumer already uses. A failed
  *  remove is not fatal — the adoption path adds a remote that was never
- *  there, and a stale entry surfaces on the add anyway. */
-function repointRemote(probe: BdProbe, name: string, url: string): string | null {
-  probe(['dolt', 'remote', 'remove', name], PROBE_MS)
+ *  there, and a stale entry surfaces on the add anyway. A failed add
+ *  after a successful remove re-adds `original` — provisioning failure
+ *  leaves the remote as found, not deleted. */
+function repointRemote(
+  probe: BdProbe,
+  name: string,
+  url: string,
+  original?: string
+): string | null {
+  const rm = probe(['dolt', 'remote', 'remove', name], PROBE_MS)
   const add = probe(['dolt', 'remote', 'add', name, url], PROBE_MS)
-  return add.code === 0 ? null : `dolt remote add ${name}: ${add.err || add.out || `exit ${add.code}`}`
+  if (add.code === 0) {
+    return null
+  }
+  const err = `dolt remote add ${name}: ${displayUrl(add.err || add.out || `exit ${add.code}`)}`
+  if (rm.code === 0 && original !== undefined) {
+    const back = probe(['dolt', 'remote', 'add', name, original], PROBE_MS)
+    if (back.code !== 0) {
+      return `${err}; restore of the original remote failed too — ${name} is left removed`
+    }
+  }
+  return err
 }
 
 /** The store's real `.beads` dir — `bd where` answers it regardless of
@@ -220,9 +238,11 @@ function bridgeFor(
       return null
     }
     const mirror = mirrorPathFor(beadsDir, remote.name)
-    const err = ensureMirror(mirror, upstream) ?? repointRemote(probe, remote.name, fileUrl(mirror))
+    const err =
+      ensureMirror(mirror, upstream) ??
+      repointRemote(probe, remote.name, fileUrl(mirror), remote.url)
     if (err !== null) {
-      notes.push(`warning: cannot bridge ${remote.name} — ${err}`)
+      notes.push(`warning: cannot bridge ${remote.name} — ${displayUrl(err)}`)
       return null
     }
     notes.push(`bridge: repointed ${remote.name} → ${fileUrl(mirror)} (upstream ${displayUrl(upstream)})`)
@@ -302,7 +322,7 @@ export function bridgeFetch(bridge: DoltBridge): string | null {
     GIT_NET_MS
   )
   if (refs.code !== 0) {
-    return firstLine(refs.err || `exit ${refs.code}`)
+    return displayUrl(firstLine(refs.err || `exit ${refs.code}`))
   }
   const names = refs.out
     .split('\n')
@@ -315,7 +335,7 @@ export function bridgeFetch(bridge: DoltBridge): string | null {
     ['-C', bridge.mirror, 'fetch', '--force', '--no-tags', 'origin', ...names.map((n) => `+${n}:${n}`)],
     GIT_NET_MS
   )
-  return r.code === 0 ? null : firstLine(r.err || `exit ${r.code}`)
+  return r.code === 0 ? null : displayUrl(firstLine(r.err || `exit ${r.code}`))
 }
 
 /** Publish the mirror's dolt refs upstream — never forced (a non-ff
@@ -328,12 +348,12 @@ export function bridgePublish(bridge: DoltBridge): string | null {
     PROBE_MS
   )
   if (refs.code !== 0) {
-    return firstLine(refs.err || `exit ${refs.code}`)
+    return displayUrl(firstLine(refs.err || `exit ${refs.code}`))
   }
   const names = refs.out.split('\n').map((l) => l.trim()).filter((l) => l !== '')
   if (names.length === 0) {
     return null
   }
   const r = gitTry(['-C', bridge.mirror, 'push', 'origin', ...names.map((n) => `${n}:${n}`)], GIT_NET_MS)
-  return r.code === 0 ? null : firstLine(r.err || `exit ${r.code}`)
+  return r.code === 0 ? null : displayUrl(firstLine(r.err || `exit ${r.code}`))
 }
