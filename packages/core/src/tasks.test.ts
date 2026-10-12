@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { taskStore } from './tasks.ts'
@@ -20,6 +21,10 @@ case "$1" in
   dep) echo '[{"issue_id":"t2","depends_on_id":"t1","type":"parent-child"}]' ;;
   config) if [ "$FAKE_BD_CONFIG_FAIL" = "1" ]; then echo 'db gone' >&2; exit 1; fi
           echo "issue_prefix = $FAKE_BD_PREFIX" ;;
+  dolt) if [ "$FAKE_BD_NO_DOLT" = "1" ]; then exit 1; fi
+        if [ "$3" = "list" ]; then printf '%s\n' "\${FAKE_BD_REMOTES:-[]}"; fi ;;
+  where) printf '{"path":"%s"}\n' "$FAKE_BD_BEADS" ;;
+  sync) printf '%s\n' "$FAKE_BD_SYNC_OUT" ;;
   update|close|reopen|note|link) : ;;
   delete) : ;;
 esac
@@ -202,5 +207,70 @@ describe('taskStore', { skip: WIN32 }, () => {
     withFakeBd({ FAKE_BD_CONFIG_FAIL: '1' }, () => {
       assert.throws(() => taskStore().prefix(), /task store unreachable/)
     })
+  })
+
+  test('sync runs bare bd sync when remotes cannot be listed', () => {
+    withFakeBd({ FAKE_BD_NO_DOLT: '1', FAKE_BD_SYNC_OUT: 'synced' }, (log) => {
+      const out = taskStore().sync?.() ?? ''
+      const call = logLines(log).find((l) => l.startsWith('sync')) ?? ''
+      assert.equal(call, 'sync')
+      assert.match(out, /synced/)
+    })
+  })
+
+  test('sync targets a bridged file-mirror remote with --remote', () => {
+    // a real bare upstream + mirror on local paths — no network needed
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sync-bridge-'))
+    try {
+      const upstream = join(dir, 'upstream.git')
+      const mirror = join(dir, 'mirror.git')
+      const git = (...a: string[]) => execFileSync('git', a, { encoding: 'utf8' })
+      git('init', '--bare', '-q', upstream)
+      const tree = execFileSync('git', ['-C', upstream, 'mktree', '--missing', '-z'], { encoding: 'utf8', input: '' }).trim()
+      const head = git('-C', upstream, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit-tree', tree, '-m', 'x').trim()
+      git('-C', upstream, 'update-ref', 'refs/dolt/data', head)
+      git('init', '--bare', '-q', mirror)
+      git('-C', mirror, 'remote', 'add', 'origin', upstream)
+      const remotes = JSON.stringify([{ name: 'origin', url: `git+file://${mirror}` }])
+      withFakeBd({ FAKE_BD_REMOTES: remotes, FAKE_BD_SYNC_OUT: 'synced', FAKE_BD_BEADS: dir }, (log) => {
+        const out = taskStore().sync?.() ?? ''
+        const call = logLines(log).find((l) => l.startsWith('sync')) ?? ''
+        assert.equal(call, 'sync --remote origin')
+        assert.match(out, /synced/)
+        // the bridge's fetch leg landed the upstream dolt ref in the mirror
+        assert.equal(git('-C', mirror, 'rev-parse', 'refs/dolt/data').trim(), head)
+        // and no repoint — an already-file remote is honored in place
+        assert.ok(
+          !logLines(log).some((l) => /remote (add|remove)/.test(l)),
+          logLines(log).join('\n')
+        )
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('sync repoints a git+https remote at a managed mirror', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sync-repoint-'))
+    try {
+      // a guaranteed-unresolvable host — the fetch leg fails on DNS in
+      // ms, not on a connect timeout (filtered ports stall for minutes)
+      const remotes = JSON.stringify([{ name: 'origin', url: 'git+https://nonexistent.invalid/x.git' }])
+      withFakeBd({ FAKE_BD_REMOTES: remotes, FAKE_BD_SYNC_OUT: 'synced', FAKE_BD_BEADS: dir }, (log) => {
+        const out = taskStore().sync?.() ?? ''
+        const lines = logLines(log)
+        assert.ok(lines.some((l) => l === 'dolt remote remove origin'), lines.join('\n'))
+        const add = lines.find((l) => l.startsWith('dolt remote add origin ')) ?? ''
+        const mirror = join(dir, 'dolt-mirror-origin.git')
+        assert.equal(add, `dolt remote add origin git+file://${mirror}`)
+        assert.ok(readFileSync(join(mirror, 'config'), 'utf8').includes('nonexistent.invalid/x.git'))
+        const call = lines.find((l) => l.startsWith('sync')) ?? ''
+        assert.equal(call, 'sync --remote origin')
+        // the dead upstream's fetch leg warns without breaking the sync
+        assert.match(out, /bridge fetch .* failed|repointed origin/)
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

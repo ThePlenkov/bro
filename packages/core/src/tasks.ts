@@ -25,6 +25,7 @@
  */
 import { join } from 'node:path'
 import { bd, BdCompatError, bdAt, BD_NO_STORE, bdJson, bdJsonAsync, bdTry, bdTryAsync, isBdNotFound } from './bd.ts'
+import { bridgeFetch, bridgePublish, doltSyncPlan } from './dolt-bridge.ts'
 import { gitTry } from './git.ts'
 
 /** Resolved probe results per dir — hook surfaces ask for the actor
@@ -594,14 +595,32 @@ function makeStore(x: StoreExec): TaskStore {
       if (x.storeDir === undefined) {
         return ''
       }
-      const r = x.probe(['sync'], 120_000)
+      // git-scheme dolt remotes can't authenticate under go-git — the
+      // bridge repoints them at a local mirror real git relays
+      // (spec specs/bro-wxgt3.md). Provisioning/leg failures degrade
+      // to the plain call + a warning line, never a worse outcome.
+      const plan = doltSyncPlan(x.probe, x.storeDir)
+      const notes = [...plan.notes]
+      for (const b of plan.bridges) {
+        const err = bridgeFetch(b)
+        if (err !== null) {
+          notes.push(`warning: bridge fetch ${b.mirror} failed — ${err}`)
+        }
+      }
+      const r = x.probe(['sync', ...plan.args], 120_000)
       if (r.code !== 0) {
         if (/ENOENT/.test(r.err) || BD_NO_STORE.test(r.err)) {
           return '' // no bd, or no routed store — state simply doesn't move
         }
         throw new Error(`task store sync failed — ${r.err || `bd exited ${r.code}`}`)
       }
-      return r.out
+      for (const b of plan.bridges) {
+        const err = bridgePublish(b)
+        if (err !== null) {
+          notes.push(`warning: bridge publish ${b.mirror} failed — ${err}`)
+        }
+      }
+      return [r.out, ...notes].filter((s) => s.trim() !== '').join('\n')
     },
     dataDir: () => {
       const r = x.probe(['where', '--json'], 15_000)

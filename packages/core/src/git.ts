@@ -36,11 +36,12 @@ export function git(args: string[]): string {
   return proc.stdout ?? ''
 }
 
-export function gitTry(args: string[]): { code: number; out: string; err: string } {
+export function gitTry(args: string[], timeoutMs?: number): { code: number; out: string; err: string } {
   const proc = spawnSync('git', args, { // NOSONAR — PATH lookup is the contract
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     env: repoEnv(args),
+    timeout: timeoutMs,
   })
   // status null = spawn failure or signal, not a real verdict —
   // callers read exit 1 as one, so surface git's own fatal code

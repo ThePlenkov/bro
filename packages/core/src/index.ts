@@ -158,6 +158,16 @@ export type {
   TaskStore,
   TaskStoreAsync,
 } from './tasks.ts'
+export {
+  bridgeFetch,
+  bridgePublish,
+  doltSyncPlan,
+  fileTargetPath,
+  gitUpstream,
+  listDoltRemotes,
+  mirrorPathFor,
+} from './dolt-bridge.ts'
+export type { BdProbe, DoltBridge, DoltRemote, DoltSyncPlan } from './dolt-bridge.ts'
 export { emitLifecycle, LIFECYCLE_KINDS, lifecyclePath, readLifecycle } from './lifecycle.ts'
 export type {
   LifecycleEvent,
