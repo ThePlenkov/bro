@@ -22,11 +22,12 @@ owns bro's concrete phases on top of the vendor-neutral wire contract
   carve-out — a shared filesystem trust domain), and `bd dep add
   <bead> external:<rig>:<id>` wires the waiter; `bro mesh wait` is
   the point-check. Spec: specs/cross-repo/bro-oam4.md.
-- **WAIT** — dedicated `bro wait external:<ref>` point-check watcher
-  (act wait pattern) over foreign bead state: read the target store for
-  the closed request bead and bd's `provides:` ship label, verdict in the
-  exit code. The dep-marked block is the truth; the watcher is a
-  convenience. Spec: specs/cross-repo/bro-y5zcw.md.
+- **WAIT** — dedicated `bro wait external:<ref>` watcher (act wait
+  pattern: a bounded poll up to `--timeout`, never a between-turn point
+  check — that stays `bro mesh wait`) over foreign bead state: read the
+  target store for the closed request bead and bd's `provides:` ship
+  label, verdict in the exit code. The dep-marked block is the truth;
+  the watcher is a convenience. Spec: specs/cross-repo/bro-y5zcw.md.
 - **REMOTE** — GitHub-issue transport for repos with no local
   checkout (the issue body is prose, a comment carries the record, and
   labels are a query index only — GitHub caps label names at 50 chars);
