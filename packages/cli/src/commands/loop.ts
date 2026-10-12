@@ -2502,23 +2502,34 @@ async function tryClaim(
     unseeClump(ctx, q, clump)
     return false
   }
+  recordClaimOutcome(ctx, q, ids, out)
+  return true
+}
+
+/** The post-push bookkeeping half of tryClaim — stack the fresh member
+ *  or tally the non-member result (parked ids stay drain-visible). */
+function recordClaimOutcome(
+  ctx: Ctx,
+  q: QueueState,
+  ids: string[],
+  out: Exclude<PushOutcome, { kind: 'hold' }>
+): void {
   if (out.kind === 'member') {
     q.stack.push(out.member)
     // a worker-pending member reports its pending phase — its `→ PR`
     // line lands when the worker exits and the gate join happens
     say(ctx, pushLine(ctx, out.member.pr, ids, q.stack.length))
-  } else {
-    q.tally[out.result] += 1
-    if (out.result === 'parked') {
-      for (const id of ids) {
-        q.parkedClaims.add(id)
-      }
-    }
-    if (ctx.json) {
-      console.log(JSON.stringify({ bead: ids[0], beads: ids, result: out.result }))
+    return
+  }
+  q.tally[out.result] += 1
+  if (out.result === 'parked') {
+    for (const id of ids) {
+      q.parkedClaims.add(id)
     }
   }
-  return true
+  if (ctx.json) {
+    console.log(JSON.stringify({ bead: ids[0], beads: ids, result: out.result }))
+  }
 }
 
 /** The held-push branch of a tick — park the next probe for an
