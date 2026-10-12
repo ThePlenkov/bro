@@ -117,14 +117,14 @@ posted → claimed → submitted ─┬─ accepted
 | `wasteland`    | adapter over `wl-commons` wanted board | public rigs, reputation |
 | `github`       | issue transport, a comment carries the record | repos without federation access |
 
-**Sovereignty rule:** no transport ever writes a foreign store
-*across a trust boundary*. `beads-remote` requests sit on the
-requester's remote and are *pulled* — the same fork-and-propose model
-wasteland proves, minus the mandatory commons hub. `local` is the
-carve-out: same-machine checkouts share a filesystem trust domain —
-the writer provably has access already — so the drop delivers
-straight into the target's store, writing envelope beads only, never
-code, branches, or config (specs/cross-repo/bro-oam4.md).
+**Sovereignty rule:** a transport writes a foreign store only inside
+a shared trust domain — across one, never. `local` is the carve-out:
+same-machine checkouts share a filesystem trust domain — the writer
+provably has access already — so the drop delivers straight into the
+target's store, writing envelope beads only, never code, branches, or
+config (specs/cross-repo/bro-oam4.md). `beads-remote` requests sit on
+the requester's remote and are *pulled* — the same fork-and-propose
+model wasteland proves, minus the mandatory commons hub.
 
 ### Discovery
 
