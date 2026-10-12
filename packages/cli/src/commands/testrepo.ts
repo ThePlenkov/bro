@@ -841,6 +841,27 @@ export function readHostState(state: string): Record<string, unknown> {
   return JSON.parse(readFileSync(state, 'utf8')) as Record<string, unknown>
 }
 
+export interface HostFixture {
+  root: string
+  main: string
+  hostState: string
+  run: (args: string[]) => CliResult
+}
+
+/** Repo + fake bd + fake review host + connector wiring in one — the
+ *  shared scaffold every review-host e2e (drive/act merges) builds on. */
+export function hostFixture(prefix: string): HostFixture {
+  const { root, main } = initRepo(prefix)
+  const { binDir, db } = installFakeBd(root)
+  const host = installFakeHost(main)
+  writeFileSync(
+    join(main, 'bro.config.json'),
+    JSON.stringify({ plugins: ['./fakehost.ts'], connectors: { reviews: 'fakehost' } })
+  )
+  const env = { PATH: `${binDir}:${process.env.PATH ?? ''}`, HOME: root, FAKE_BD_DB: db }
+  return { root, main, hostState: host.state, run: (args) => runCli(args, { cwd: main, env }) }
+}
+
 /** A `tasks` connector over tasks.json beside the plugin — the
  *  configured-backend fixture half: `connectors.tasks` pins it and the
  *  facade's TaskStore ops land on this file instead of `bd`. Only the

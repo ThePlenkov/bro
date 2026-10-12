@@ -7,50 +7,15 @@
  *  matrix. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import {
   git,
-  initRepo,
+  hostFixture,
   inside,
-  installFakeBd,
-  installFakeHost,
   readHostState,
-  runCli,
   writeHostState,
   type CliResult,
+  type HostFixture,
 } from './testrepo.ts'
-
-interface Fixture {
-  root: string
-  main: string
-  hostState: string
-  run: (args: string[]) => CliResult
-}
-
-function fixture(): Fixture {
-  const { root, main } = initRepo('bro-own-e2e-')
-  const { binDir, db } = installFakeBd(root)
-  const host = installFakeHost(main)
-  writeFileSync(
-    join(main, 'bro.config.json'),
-    JSON.stringify({
-      plugins: ['./fakehost.ts'],
-      connectors: { reviews: 'fakehost' },
-    })
-  )
-  const env = {
-    PATH: `${binDir}:${process.env.PATH ?? ''}`,
-    HOME: root,
-    FAKE_BD_DB: db,
-  }
-  return {
-    root,
-    main,
-    hostState: host.state,
-    run: (args) => runCli(args, { cwd: main, env }),
-  }
-}
 
 interface PrRow {
   labels?: string[]
@@ -60,107 +25,88 @@ interface PrRow {
 const prRow = (hostState: string, branch: string): PrRow =>
   ((readHostState(hostState).prs ?? {}) as Record<string, PrRow>)[branch] ?? {}
 
+/** One supervised-PR drive pass: the work/fx-a branch + its prs row
+ *  scripted (`pr` patches the row, `top` patches top-level state),
+ *  then `drive --once --json` — the PR's post-pass row + the run. */
+function driveOnce(
+  f: HostFixture,
+  pr: Record<string, unknown> = {},
+  extra: { args?: string[]; top?: Record<string, unknown> } = {}
+): { r: CliResult; row: PrRow } {
+  git(['branch', 'work/fx-a'], f.main)
+  writeHostState(f.hostState, {
+    prs: {
+      'work/fx-a': { number: 7, state: 'OPEN', headRef: 'work/fx-a', baseRef: 'main', ...pr },
+    },
+    ...extra.top,
+  })
+  const r = f.run(['drive', '--once', ...(extra.args ?? []), '--json'])
+  assert.equal(r.code, 0, r.stderr)
+  return { r, row: prRow(f.hostState, 'work/fx-a') }
+}
+
+/** `act merge 7` against the flat single-PR state — loop/fx-a is the
+ *  head branch, `state` patches onto the shared OPEN row. */
+function actMerge(f: HostFixture, state: Record<string, unknown> = {}): CliResult {
+  git(['branch', 'loop/fx-a'], f.main)
+  writeHostState(f.hostState, { prOpened: true, prState: 'OPEN', ...state })
+  const r = f.run(['act', 'merge', '7'])
+  assert.equal(r.code, 0, r.stderr)
+  return r
+}
+
 describe('PR ownership marking — drive + act merge (bro-c650l)', () => {
   test('drive stamps bro-review on a draft — the merge=human contract', () => {
-    const { root, main, hostState, run } = fixture()
-    inside(main, root, () => {
-      git(['branch', 'work/fx-a'], main)
-      writeHostState(hostState, {
-        prs: {
-          'work/fx-a': { number: 7, state: 'OPEN', headRef: 'work/fx-a', baseRef: 'main', isDraft: true },
-        },
-      })
-      const r = run(['drive', '--once', '--json'])
-      assert.equal(r.code, 0, r.stderr)
-      const row = prRow(hostState, 'work/fx-a')
+    const f = hostFixture('bro-own-e2e-')
+    inside(f.main, f.root, () => {
+      const { row } = driveOnce(f, { isDraft: true })
       assert.deepEqual(row.labels, ['bro-review'])
-      assert.equal(
-        row.body,
-        '<!-- bro: {"managed":false,"mode":"drive","run":"work/fx-a"} -->'
-      )
+      assert.equal(row.body, '<!-- bro: {"managed":false,"mode":"drive","run":"work/fx-a"} -->')
     })
   })
 
   test('drive stamps bro-managed on an orphaned supervised PR before merging it', () => {
-    const { root, main, hostState, run } = fixture()
-    inside(main, root, () => {
-      git(['branch', 'work/fx-a'], main)
-      writeHostState(hostState, {
-        prs: {
-          'work/fx-a': { number: 7, state: 'OPEN', headRef: 'work/fx-a', baseRef: 'main' },
-        },
-      })
-      const r = run(['drive', '--once', '--json'])
-      assert.equal(r.code, 0, r.stderr)
-      const row = prRow(hostState, 'work/fx-a')
+    const f = hostFixture('bro-own-e2e-')
+    inside(f.main, f.root, () => {
+      const { row } = driveOnce(f)
       assert.deepEqual(row.labels, ['bro-managed'])
-      assert.equal(
-        row.body,
-        '<!-- bro: {"managed":true,"mode":"drive","run":"work/fx-a"} -->'
-      )
+      assert.equal(row.body, '<!-- bro: {"managed":true,"mode":"drive","run":"work/fx-a"} -->')
     })
   })
 
   test('drive --no-merge supervises without claiming the merge', () => {
-    const { root, main, hostState, run } = fixture()
-    inside(main, root, () => {
-      git(['branch', 'work/fx-a'], main)
-      writeHostState(hostState, {
-        prs: {
-          'work/fx-a': { number: 7, state: 'OPEN', headRef: 'work/fx-a', baseRef: 'main' },
-        },
-      })
-      const r = run(['drive', '--once', '--no-merge', '--json'])
-      assert.equal(r.code, 0, r.stderr)
-      const row = prRow(hostState, 'work/fx-a')
-      assert.deepEqual(row.labels ?? [], [])
+    const f = hostFixture('bro-own-e2e-')
+    inside(f.main, f.root, () => {
+      assert.deepEqual(driveOnce(f, {}, { args: ['--no-merge'] }).row.labels ?? [], [])
     })
   })
 
   test('act merge warns on an unlabeled (human-owned) PR — and still lands', () => {
-    const { root, main, hostState, run } = fixture()
-    inside(main, root, () => {
-      git(['branch', 'loop/fx-a'], main)
-      writeHostState(hostState, { prOpened: true, prState: 'OPEN' })
-      const r = run(['act', 'merge', '7'])
-      assert.equal(r.code, 0, r.stderr)
+    const f = hostFixture('bro-own-e2e-')
+    inside(f.main, f.root, () => {
+      const r = actMerge(f)
       assert.match(r.stderr, /carries no bro-managed\/bro-review label — human-owned/)
       assert.match(r.stdout, /act: merged/)
     })
   })
 
   test('act merge stays quiet on a stamped PR', () => {
-    const { root, main, hostState, run } = fixture()
-    inside(main, root, () => {
-      git(['branch', 'loop/fx-a'], main)
-      writeHostState(hostState, {
-        prOpened: true,
-        prState: 'OPEN',
-        labels: ['bro-managed'],
-      })
-      const r = run(['act', 'merge', '7'])
-      assert.equal(r.code, 0, r.stderr)
+    const f = hostFixture('bro-own-e2e-')
+    inside(f.main, f.root, () => {
+      const r = actMerge(f, { labels: ['bro-managed'] })
       assert.doesNotMatch(r.stderr, /carries no bro-managed/)
       assert.match(r.stdout, /act: merged/)
     })
   })
 
   test('a stamping failure never fails the pass — labels are best-effort', () => {
-    const { root, main, hostState, run } = fixture()
-    inside(main, root, () => {
-      git(['branch', 'work/fx-a'], main)
-      writeHostState(hostState, {
-        prs: {
-          'work/fx-a': { number: 7, state: 'OPEN', headRef: 'work/fx-a', baseRef: 'main' },
-        },
-        // label reads throw — the pass still reports + merges
-        labelsThrow: true,
-      })
-      const r = run(['drive', '--once', '--json'])
-      assert.equal(r.code, 0, r.stderr)
+    const f = hostFixture('bro-own-e2e-')
+    inside(f.main, f.root, () => {
+      // label reads throw — the pass still reports + merges
+      const { r, row } = driveOnce(f, {}, { top: { labelsThrow: true } })
       assert.match(r.stdout, /"verdict":"merged"/)
       // the halves are independent — the trailer still landed
-      assert.match(String(prRow(hostState, 'work/fx-a').body), /"managed":true/)
+      assert.match(String(row.body), /"managed":true/)
     })
   })
 })
