@@ -879,6 +879,9 @@ async function spawnFixer(
         return { pr, link, verdict: 'occupied', detail: retire }
       }
     }
+    // the fresh probe just proved the gate's feed entry stale — drop
+    // it so the next pass reads the resolved gate, not the cached one
+    ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
     return { pr, link, verdict: 'threads-resolved' }
   }
   // shadow-mode judge verdicts annotate the prompt's thread list —
@@ -1160,6 +1163,10 @@ async function spawnFixerAgent(
       }
       const pid = info.pid === undefined ? '' : ` pid ${info.pid}`
       const tag = s.tag ?? ''
+      // the dispatched fixer is about to move this PR (rebase push,
+      // resolves, replies) — the feed entry that gated the spawn is
+      // obsolete, or the next pass re-triggers off a ≤ttl-old snapshot
+      ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
       return { pr, link, verdict: 'spawned', detail: `${tag}${bead.id} → ${info.id}${pid}` }
     } catch (err) {
       return {
@@ -1198,9 +1205,11 @@ async function spawnRebaseFixer(
     return { pr, link, verdict: 'probe-failed', detail: errText(err) }
   }
   if (meta.state !== 'OPEN') {
+    ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
     return { pr, link, verdict: 'settled', detail: meta.state.toLowerCase() }
   }
   if (meta.mergeable === 'MERGEABLE') {
+    ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
     return { pr, link, verdict: 'conflict-resolved' }
   }
   const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'rebase')

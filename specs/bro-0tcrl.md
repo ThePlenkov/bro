@@ -99,6 +99,14 @@ already funnels through `cmdMerge`'s own fetch — `landPr`'s
 - `act resolve`/`reply`/plan verdicts → `invalidateAll` (thread ids
   carry no PR).
 - `landPr` landed/enqueued, `updateBranch` accepted → `invalidate(t)`.
+- Loop gate re-entry after a mutation round → `invalidate(t)`: a
+  fix/rebase worker's exit and the post-respawn re-poll must read
+  post-round truth, not the ≤ttl-old snapshot that spawned the round
+  (else the immediate 'active' re-poll re-triggers the same action and
+  burns every round inside one window).
+- Drive fixer dispatch → `invalidate(t)`, and the fresh-probe early
+  returns (`threads-resolved`, `conflict-resolved`, `settled`) that
+  prove the snapshot stale.
 - Webhook publish (`serve` `github:*` route) → `invalidate` per
   `payload.prs`, all entries when the delivery names none — mirroring
   `githubEventConcernsPr`, so a woken `act wait` never polls a cache
