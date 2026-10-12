@@ -20,7 +20,7 @@ state ride `refs/bro/data`.
 | bro artifacts — review-debt ledger, drill evidence, `.agents/` state | `refs/bro/data` | `bro work sync --pull` |
 | Beads store — issues, claims, drill frames, molecules | `refs/dolt/data` via a dolt remote (`bd dolt remote list`) | `bd sync` |
 | Operator config — providers, agent templates, global skills | outside the repo (`~/.config/bro`, `~/.agents`) | the operator's own backup — restore this first |
-| Running processes + machine-local state — daemon, watchers, shells, the `bro/drive.json` install marker, act watch markers (`<git-common>/bro/watches/`), agent logs, the agent registry (`<git-common>/bro/agents.json`), git worktree registrations, loop run records (`<git-common>/bro/loop/`) | nowhere | restarted below |
+| Running processes + machine-local state — daemon, watchers, shells, the `bro/drive.json` install marker, act watch markers (`<git-common>/bro/watches/`), agent logs, the agent registry (`<git-common>/bro/agents.json`), git worktree registrations, loop run records (`<git-common>/bro/loop/`), stack edges (`<git-common>/bro/stack/`) | nowhere | restarted below |
 
 ## Sequence
 
@@ -46,6 +46,14 @@ markers — hence the fetch step. A watch armed on a branch outside
 `work/`/`loop/`/`stack/` has no such enumeration: that promise died with
 the machine — arm a fresh `bro review act wait <PR> --merge` if the PR
 still needs one.
+
+Stack edges ride the same loss: `<git-common>/bro/stack/` maps each
+`stack/<name>/<n>-<slug>` branch to the base it forked from, and a
+clone carries none of it. `bro flow stack list`/`sync` falls back to an
+open member PR's declared base, so members with a PR recover their
+place in the chain — a member with no PR yet has no recorded base, so
+sync reads it as already on the right base; rebase it by hand if its
+parent merged in the meantime.
 
 Then verify from the authoritative reads, not from process exits:
 
