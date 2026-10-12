@@ -55,7 +55,7 @@ import {
   type ProviderWall,
   type ReviewFacade,
 } from '@broject/core'
-import { checkHistory, evaluateExitGate, fetchPrActState } from '@broject/act'
+import { checkHistory, evaluateExitGate, fetchPrActState, prStateCache } from '@broject/act'
 import { listMolecules, loadMolecule, nextStep } from '@broject/convoy'
 import { loopSection } from '@broject/loop'
 import { loadBroConfig } from '../plugins.ts'
@@ -363,6 +363,9 @@ async function gateFleetPrs(
   dir: string
 ): Promise<WatchPrGate[]> {
   const act = loadBroConfig(dir).act
+  // the shared feed — a heartbeat overlapping loop/drive/act-wait
+  // passes serves the one in-flight fetch instead of duplicating it
+  const cache = prStateCache(dir)
   const seen = new Set<number>()
   const targets: { pr: number; link: string }[] = []
   for (const row of rows) {
@@ -385,6 +388,7 @@ async function gateFleetPrs(
           maxRounds: act.maxRounds,
           docsPaths: act.docsPaths,
           docsMaxRounds: act.docsMaxRounds,
+          stateCache: cache,
         })
         const gate = evaluateExitGate(state)
         // ownership marker — one extra labels read per PR; a failure

@@ -91,11 +91,12 @@ import {
   type AgentConnector,
   type AgentInfo,
   type BusBroker,
+  type EventInput,
   type HeldLockOptions,
   type SpawnErrorKind,
 } from '@broject/core'
 import { GITHUB_WEBHOOK_SECRET_ENV, githubWebhookHandler } from '@broject/github'
-import { listWatches, watchMarkerKind } from '@broject/act'
+import { listWatches, prStateCache, watchMarkerKind } from '@broject/act'
 import {
   agentConnectorNames,
   loadAgentEnv,
@@ -992,6 +993,41 @@ export function collectTicks(dir: string, now = Date.now()): TickBoard {
   }
 }
 
+/** A verified github delivery moved the gate's inputs — the shared
+ *  feed's next read must fetch, not serve pre-event state to the
+ *  `act wait` the event just woke (bro-0tcrl). Mirror of
+ *  `githubEventConcernsPr`: a delivery naming PRs drops those entries;
+ *  one naming none (a base-branch check_suite, a hand-published
+ *  event) concerns every waiter, so it drops the whole feed. */
+function dropActStateForEvent(dir: string, event: EventInput): void {
+  try {
+    const cache = prStateCache(dir)
+    if (cache === null) {
+      return
+    }
+    const payload =
+      typeof event.payload === 'object' && event.payload !== null
+        ? (event.payload as Record<string, unknown>)
+        : {}
+    const prs = payload['prs']
+    const repo = payload['repo']
+    if (
+      Array.isArray(prs) &&
+      prs.length > 0 &&
+      prs.every((n): n is number => typeof n === 'number') &&
+      typeof repo === 'string'
+    ) {
+      for (const pr of prs) {
+        cache.invalidate({ repo, pr })
+      }
+      return
+    }
+    cache.invalidateAll()
+  } catch {
+    // freshness polish — a missed drop is bounded by the feed's ttl
+  }
+}
+
 function realDeps(dir: string, env: AgentConnectorEnv): ServeDeps {
   const socketPath = busSocketPath(dir)
   return {
@@ -1019,10 +1055,14 @@ function realDeps(dir: string, env: AgentConnectorEnv): ServeDeps {
     webhooks: {
       github: githubWebhookHandler({
         secret: () => process.env[GITHUB_WEBHOOK_SECRET_ENV],
-        publish: (event) =>
-          socketPath === null
-            ? Promise.resolve({ published: false, reason: 'not a repository' })
-            : busPublish(socketPath, event),
+        publish: async (event) => {
+          const r =
+            socketPath === null
+              ? { published: false as const, reason: 'not a repository' }
+              : await busPublish(socketPath, event)
+          dropActStateForEvent(dir, event)
+          return r
+        },
       }),
     },
   }

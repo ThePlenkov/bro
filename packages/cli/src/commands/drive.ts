@@ -80,12 +80,14 @@ import {
   isSast,
   listWatches,
   liveSastChecks,
+  prStateCache,
   watchEnd,
   watchHeartbeat,
   watchMarkerKind,
   type ExitGate,
   type ListedWatch,
   type PrActState,
+  type PrStateCache,
 } from '@broject/act'
 import {
   annotateThreads,
@@ -591,6 +593,11 @@ interface Ctx {
    *  this repo (gh on github, glab api on gitlab). */
   host: string
   repo: string
+  /** The shared gate-state feed — every pass reads it so drive's polls
+   *  share fetches with loop/watch/act-wait (bro-0tcrl). The post-merge
+   *  re-probe stays uncached: a landed verdict must be this fetch's
+   *  own. */
+  stateCache: PrStateCache | null
   act: {
     ignoreChecks: IgnoreCheckRule[]
     maxRounds: number
@@ -1729,6 +1736,7 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
         maxRounds: ctx.act.maxRounds,
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
+        stateCache: ctx.stateCache,
       }
     )
   } catch (err) {
@@ -1866,6 +1874,7 @@ async function sweepSettledFixers(ctx: Ctx, prs: Set<number>): Promise<void> {
         maxRounds: ctx.act.maxRounds,
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
+        stateCache: ctx.stateCache,
       }
       )
       if (st.state !== 'OPEN') {
@@ -2042,6 +2051,7 @@ async function runDrive(
     // which CLI syntax the fixer prompts write
     host: facadeName('reviews', { dir: mainPath }, { prefer: broCfg.connectors }),
     repo: rev.resolveRepo([]),
+    stateCache: prStateCache(mainPath),
     act: broCfg.act,
     merge: args.merge && drive.merge === 'auto',
     json: args.json,

@@ -87,9 +87,11 @@ import {
   evaluateExitGate,
   fetchPrActState,
   gatePending,
+  prStateCache,
   watchBegin,
   watchEnd,
   watchRefresh,
+  type PrStateCache,
 } from '@broject/act'
 import {
   buildFixPrompt,
@@ -160,6 +162,10 @@ interface Ctx {
   cfg: LoopConfig
   /** The act gate's own section — service passes share the one read. */
   act: ReturnType<typeof loadBroConfig>['act']
+  /** The shared gate-state feed — every member's service tick reads it,
+   *  so loop's own polls plus watch/drive/act-wait passes share one
+   *  fetch per PR per TTL window (bro-0tcrl). Null outside a repo. */
+  stateCache: PrStateCache | null
   /** The template `expandAgentCmd` runs — `loop.agent`/`--agent`, or a
    *  cli provider's `command` when the provider lane resolved one. For an
    *  acp (argv) worker this field is inert — the spawn never expands it. */
@@ -1646,6 +1652,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
         maxRounds: ctx.act.maxRounds,
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
+        stateCache: ctx.stateCache,
       }
     )
     const gate = evaluateExitGate(state)
@@ -1740,6 +1747,9 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
         return leave(m, 'parked')
       }
       gateRow('behind', { action: 'update', updated: true })
+      // the pushed head obsoletes the feed entry this snap rode on —
+      // the next poll fetches the new sha, not the stale BEHIND state
+      ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
       m.updatedSha = snap.headSha
       return 'active'
     }
@@ -2029,6 +2039,7 @@ function buildCtx(
       batch: num(flag(argv, '--batch'), cfg.batch, 1),
     },
     act: broCfg.act,
+    stateCache: prStateCache(root),
     agent,
     lane,
     intervalS: num(flag(argv, '--interval'), 60, 1, Math.floor(TIMER_MAX_MS / 1000)),

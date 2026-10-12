@@ -18,6 +18,7 @@ import type {
 } from '@broject/core'
 import type { CheckHistory } from './check-history.ts'
 import { docsOnlyPr, effectiveMaxRounds } from './docs.ts'
+import type { PrStateCache } from './state-cache.ts'
 import type { PrActState } from './types.ts'
 
 // Word boundaries: a check merely *containing* "kilo"/"gemini" (e.g.
@@ -253,17 +254,82 @@ const orSync = <T, A extends unknown[]>(
 ): Promise<T> =>
   asyncFn === undefined ? Promise.resolve().then(() => syncFn(...args)) : asyncFn(...args)
 
+export interface FetchPrActStateOpts {
+  ignoreChecks?: IgnoreCheckEntry[]
+  checkHistory?: CheckHistory | null
+  maxRounds?: number
+  docsPaths?: string[]
+  docsMaxRounds?: number
+  /** The shared gate-state feed (bro-0tcrl): observe-path callers pass
+   *  `prStateCache(dir)` so concurrent pollers share one fetch per
+   *  target per TTL window instead of each paying the full 5-7 host
+   *  calls. Decision points (merge gates, post-merge re-probes) omit
+   *  it — they act on the state, so it must be this fetch's own. */
+  stateCache?: PrStateCache | null
+}
+
+/** In-flight fetches by `repo#pr` — same-process concurrency (a
+ *  Promise.all sweep, overlapping hook probes) shares the one running
+ *  fetch rather than duplicating it. Keyed on the target only: two
+ *  callers asking for the same PR at the same instant want the same
+ *  state — an opts delta between them is config-level, which is
+ *  repo-shared anyway. */
+const inflight = new Map<string, Promise<PrActState>>()
+
 /** Full open-PR state for the act loop — threads + checks + mergeability. */
 export async function fetchPrActState(
   rev: ReviewFacade,
   target: PrTarget,
-  opts?: {
-    ignoreChecks?: IgnoreCheckEntry[]
-    checkHistory?: CheckHistory | null
-    maxRounds?: number
-    docsPaths?: string[]
-    docsMaxRounds?: number
+  opts?: FetchPrActStateOpts
+): Promise<PrActState> {
+  const cache = opts?.stateCache ?? null
+  const hit = cache?.read(target)
+  if (hit != null) {
+    return hit
   }
+  const key = `${target.repo}#${target.pr}`
+  const flying = inflight.get(key)
+  if (flying !== undefined) {
+    return flying
+  }
+  const p = fetchShared(rev, target, opts, cache).finally(() => {
+    inflight.delete(key)
+  })
+  inflight.set(key, p)
+  return p
+}
+
+/** The fetch side of the feed — one process's fetch publishes for
+ *  every poller. The per-target lock serializes read→fetch→write so a
+ *  contender that arrived mid-fetch waits for the winner's write
+ *  instead of duplicating its host calls; a failed acquire just means
+ *  fetching uncached-for-this-window. */
+async function fetchShared(
+  rev: ReviewFacade,
+  target: PrTarget,
+  opts: FetchPrActStateOpts | undefined,
+  cache: PrStateCache | null
+): Promise<PrActState> {
+  const release = cache?.acquire(target) ?? null
+  try {
+    if (release !== null && cache !== null) {
+      const hit = cache.read(target)
+      if (hit != null) {
+        return hit
+      }
+    }
+    const state = await fetchState(rev, target, opts)
+    cache?.write(target, state)
+    return state
+  } finally {
+    release?.()
+  }
+}
+
+async function fetchState(
+  rev: ReviewFacade,
+  target: PrTarget,
+  opts?: FetchPrActStateOpts
 ): Promise<PrActState> {
   // The reads are independent — overlap them. Inside a hook sweep each
   // sync variant would serialize AND block the probe-timeout timers.
