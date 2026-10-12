@@ -377,7 +377,8 @@ function showRows<T extends TaskRow>(v: unknown): T[] {
     if (
       typeof v === 'object' &&
       v !== null &&
-      typeof (v as { error?: unknown }).error === 'string'
+      typeof (v as { error?: unknown }).error === 'string' &&
+      /no issues found matching the provided IDs/i.test((v as { error: string }).error)
     ) {
       return []
     }
@@ -855,5 +856,5 @@ export async function getTasksAsync<T extends TaskRow = TaskRow>(
     return store.getMany<T>(ids)
   }
   const rows = await Promise.all(ids.map((id) => store.get<T>(id)))
-  return rows.filter((r): r is T => r !== undefined)
+  return rows.filter((r) => r !== undefined) as T[]
 }

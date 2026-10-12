@@ -226,7 +226,7 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       if (ids.length > 1) {
         jsonOut({ error: 'no issues found matching the provided IDs', schema_version: 1 })
       } else {
-        fail('not found: ' + ids[0])
+        fail('Issue ' + ids[0] + ' not found')
       }
       break
     }

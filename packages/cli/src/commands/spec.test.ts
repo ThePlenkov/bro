@@ -55,10 +55,15 @@ case "$1" in
   show)
     node -e '
       const rows = JSON.parse(require("fs").readFileSync(process.env.FAKE_BD_LIST_FILE, "utf8"))
-      const r = rows.find((x) => x.id === process.argv[1])
-      if (r === undefined) { console.error("Issue " + process.argv[1] + " not found"); process.exit(1) }
-      console.log(JSON.stringify([r]))
-    ' -- "$2"
+      const ids = process.argv.slice(1).filter((a) => !a.startsWith("-"))
+      const found = ids.map((id) => rows.find((x) => x.id === id)).filter(Boolean)
+      if (found.length === 0) {
+        if (ids.length > 1) { console.log(JSON.stringify({ error: "no issues found matching the provided IDs", schema_version: 1 })); process.exit(0) }
+        console.error("Issue " + ids[0] + " not found"); process.exit(1)
+      }
+      for (const id of ids) if (!rows.find((x) => x.id === id)) console.error("Issue " + id + " not found")
+      console.log(JSON.stringify(found))
+    ' -- "$@"
     ;;
   config) echo 'issue_prefix = bro' ;;
   *) : ;;

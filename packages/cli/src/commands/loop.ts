@@ -770,14 +770,26 @@ function reopenBead(ctx: Ctx, id: string): void {
   } catch { /* best-effort unclaim */ }
 }
 
-/** A bead's store status, or 'unknown' when the probe fails — callers
- *  treat 'unknown' as still-open so a blip never masks work. */
-function beadStatus(ctx: Ctx, id: string): string {
+/** One `bd show` batch answers the whole clump's statuses — a store
+ *  blip or a missing row answers 'unknown' for that member, so callers
+ *  keep the still-open contract and a blip never masks work. */
+function beadStatuses(ctx: Ctx, beads: ReadyBead[]): Map<string, string> {
+  const out = new Map<string, string>()
+  let found: Map<string, string>
   try {
-    return ctx.tasks.get(id)?.status ?? 'unknown'
+    found = new Map(
+      getTasks(
+        ctx.tasks,
+        beads.map((b) => b.id)
+      ).map((r) => [r.id, r.status ?? 'unknown'])
+    )
   } catch {
-    return 'unknown'
+    found = new Map()
   }
+  for (const b of beads) {
+    out.set(b.id, found.get(b.id) ?? 'unknown')
+  }
+  return out
 }
 
 /** The members of a clump still open in the store — verdict closes the
@@ -852,10 +864,11 @@ function closeLanded(ctx: Ctx, id: string, pr: number, link: string): void {
  *  contract. */
 function settleClump(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number): void {
   const link = prRef(ctx, pr)
+  const statuses = beadStatuses(ctx, beads)
   if (beads.length === 1) {
     // the agent may have closed it already — a verdict plus a PR both
     // reaching the store is fine; a second close is a noisy error
-    if (beadStatus(ctx, beads[0]!.id) !== 'closed') {
+    if (statuses.get(beads[0]!.id) !== 'closed') {
       closeLanded(ctx, beads[0]!.id, pr, link)
     }
     return
@@ -865,7 +878,7 @@ function settleClump(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number): 
     beads.map((b) => b.id)
   )
   for (const b of beads) {
-    if (beadStatus(ctx, b.id) === 'closed') {
+    if (statuses.get(b.id) === 'closed') {
       continue // the agent's own verdict stands
     }
     if (covered.has(b.id)) {
@@ -998,7 +1011,8 @@ function clumpTitle(beads: ReadyBead[]): string {
  *  it. ALL members closed → the whole clump is a verdict; a partial
  *  close still counts — the unclosed tail falls through to requeue. */
 function agentVerdict(ctx: Ctx, beads: ReadyBead[], worktreeDir: string): ItemResult | undefined {
-  const closed = beads.filter((b) => beadStatus(ctx, b.id) === 'closed')
+  const statuses = beadStatuses(ctx, beads)
+  const closed = beads.filter((b) => statuses.get(b.id) === 'closed')
   if (closed.length === 0) {
     return undefined
   }
@@ -2334,8 +2348,9 @@ function queueDrained(
   } catch {
     return false
   }
+  const statuses = beadStatuses(ctx, c.candidates)
   const claimable = c.candidates.some((b) => {
-    const s = beadStatus(ctx, b.id)
+    const s = statuses.get(b.id)
     return s !== 'in_progress' && s !== 'closed'
   })
   if (claimable) {
@@ -2365,11 +2380,12 @@ function claimClump(
   // outside the agent registry" and the spawn refuses it. The pick
   // only re-probes the store so a raced-away bead still skips down the
   // candidate chain exactly as claimUpTo's claim loop did.
+  const statuses = beadStatuses(ctx, candidates)
   const lead =
     ctx.agents === undefined
       ? claimUpTo(candidates, 1, ctx.root)[0]
       : candidates.find((b) => {
-          const s = beadStatus(ctx, b.id)
+          const s = statuses.get(b.id)
           return s !== 'in_progress' && s !== 'closed'
         })
   if (!lead) {
