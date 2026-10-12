@@ -803,6 +803,52 @@ function bearerMatch(header: string | undefined, token: string): boolean {
   return a.length === b.length && a.length > 0 && timingSafeEqual(a, b)
 }
 
+/** The provider credential check — the session token presented as
+ *  EITHER `Authorization: Bearer` or `x-api-key`. Claude Code puts
+ *  apiKeyHelper/ANTHROPIC_API_KEY output in `x-api-key`; accepting
+ *  only the Bearer header would 401 a client that authenticates
+ *  correctly. Same constant-time compare. */
+function apiKeyMatch(header: string | string[] | undefined, token: string): boolean {
+  const presented = Array.isArray(header) ? header[0] : header
+  if (presented === undefined || presented === '') {
+    return false
+  }
+  const a = Buffer.from(presented, 'utf8')
+  const b = Buffer.from(token, 'utf8')
+  return a.length === b.length && timingSafeEqual(a, b)
+}
+
+/** `/v1/*` write guard — writeGuard's shape (bearer → Origin →
+ *  content-type) but the credential accepts x-api-key too: the
+ *  provider contract is "the session token IS the API key". */
+function providerGuard(
+  req: IncomingMessage,
+  token: string,
+  wantsBody: boolean,
+  statePathHint: string
+): ServeResponse | undefined {
+  const credentialed =
+    bearerMatch(req.headers.authorization, token) ||
+    apiKeyMatch(req.headers['x-api-key'], token)
+  if (!credentialed) {
+    return {
+      status: 401,
+      body: {
+        error: `session token required — read it from ${statePathHint}`,
+      },
+      headers: { 'www-authenticate': 'Bearer' },
+    }
+  }
+  const origin = req.headers.origin
+  if (origin !== undefined && !isLoopbackOrigin(origin)) {
+    return { status: 403, body: { error: 'loopback origin only' } }
+  }
+  if (wantsBody && !(req.headers['content-type'] ?? '').startsWith('application/json')) {
+    return { status: 415, body: { error: 'writes need content-type: application/json' } }
+  }
+  return undefined
+}
+
 /** The guards on state-changing requests — returns the refusal to
  *  send, or undefined when the write may proceed. Order: bearer token
  *  first (the "local session context" check — spawn/stop mutate agents
@@ -886,8 +932,9 @@ async function handleRequest(
     // it applies to every method, GETs included: an unauthenticated
     // /v1/* could spend the upstream key even blinded to the answer.
     if (url.pathname.startsWith('/v1/')) {
-      const wantsBody = WRITE_METHODS.has(req.method ?? 'GET')
-      const refusal = writeGuard(req, token, wantsBody, statePathHint)
+      const wantsBody =
+        req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
+      const refusal = providerGuard(req, token, wantsBody, statePathHint)
       if (refusal !== undefined) {
         send(res, refusal.status, refusal.body, refusal)
         return

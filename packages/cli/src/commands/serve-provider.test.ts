@@ -57,6 +57,11 @@ describe('providerConfig', () => {
     })
     assert.equal(providerConfig({ ANTHROPIC_API_KEY: 'sk-op' })?.apiKey, 'sk-op')
     assert.equal(providerConfig({ ANTHROPIC_AUTH_TOKEN: 'tok-op' })?.apiKey, 'tok-op')
+    // a set-but-blank override starves nothing — the fallback still resolves
+    assert.equal(
+      providerConfig({ BRO_PROVIDER_API_KEY: '  ', ANTHROPIC_API_KEY: 'sk-fb' })?.apiKey,
+      'sk-fb'
+    )
     const cfg = providerConfig({
       BRO_PROVIDER_API_KEY: 'k',
       BRO_PROVIDER_UPSTREAM: 'http://127.0.0.1:9000/',
@@ -87,6 +92,34 @@ describe('serve /v1/* provider plane — guards and wiring', () => {
         })
         assert.equal(r.status, 401, `${m} ${p}`)
       }
+    } finally {
+      await close()
+    }
+  })
+
+  test('x-api-key carries the credential too — bodiless DELETE is not 415', async () => {
+    let reached = 0
+    const { url, close } = await listen(
+      deps({
+        provider: async (_req, res) => {
+          reached++
+          res.end('ok')
+        },
+      })
+    )
+    try {
+      const viaXApiKey = await fetch(`${url}/v1/models`, {
+        headers: { 'x-api-key': TOKEN },
+      })
+      assert.equal(viaXApiKey.status, 200)
+      // a DELETE with no body owes no content-type — the guard must not
+      // demand application/json on a bodiless request
+      const viaDelete = await fetch(`${url}/v1/messages/msg_1`, {
+        method: 'DELETE',
+        headers: auth,
+      })
+      assert.equal(viaDelete.status, 200)
+      assert.equal(reached, 2)
     } finally {
       await close()
     }
@@ -220,6 +253,64 @@ describe('providerProxy — byte proxy to the upstream', () => {
       assert.equal(r.status, 200)
       assert.equal(r.headers.get('content-type'), 'text/event-stream')
       assert.equal(await r.text(), events.join(''))
+    } finally {
+      await serve.close()
+      await up.close()
+    }
+  })
+
+  test('redirect is not followed — the swapped key never crosses origins', async () => {
+    const up = await fakeUpstream((_req, res) => {
+      res.writeHead(302, { location: 'http://127.0.0.1:1/evil' })
+      res.end()
+    })
+    const serve = await listen(
+      deps({ provider: providerProxy({ upstream: up.url, apiKey: 'k' }) })
+    )
+    try {
+      const r = await fetch(`${serve.url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: '{}',
+        redirect: 'manual',
+      })
+      assert.equal(r.status, 302)
+      assert.equal(r.headers.get('location'), 'http://127.0.0.1:1/evil')
+    } finally {
+      await serve.close()
+      await up.close()
+    }
+  })
+
+  test('a client disconnect aborts the upstream request', async () => {
+    let upstreamClosed = false
+    const up = await fakeUpstream((req, res) => {
+      req.on('close', () => {
+        upstreamClosed = true
+      })
+      // never answers — the only way out is the client's abort
+      res.on('close', () => {
+        upstreamClosed = true
+      })
+      void res
+    })
+    const serve = await listen(
+      deps({ provider: providerProxy({ upstream: up.url, apiKey: 'k' }) })
+    )
+    try {
+      const controller = new AbortController()
+      const pending = fetch(`${serve.url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: '{}',
+        signal: controller.signal,
+      }).catch(() => 'aborted')
+      // let the request land upstream, then cut the client
+      await new Promise((r) => setTimeout(r, 60))
+      controller.abort()
+      assert.equal(await pending, 'aborted')
+      await new Promise((r) => setTimeout(r, 100))
+      assert.equal(upstreamClosed, true, 'client close must propagate upstream')
     } finally {
       await serve.close()
       await up.close()

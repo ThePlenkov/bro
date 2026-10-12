@@ -37,9 +37,12 @@ const DEFAULT_UPSTREAM = 'https://api.anthropic.com'
  *  the dep stays unwired and `/v1/*` 404s like any unknown path:
  *  a half-configured provider is a miss, not a degraded proxy. */
 export function providerConfig(env: NodeJS.ProcessEnv): ProviderConfig | undefined {
-  const apiKey =
-    env.BRO_PROVIDER_API_KEY ?? env.ANTHROPIC_API_KEY ?? env.ANTHROPIC_AUTH_TOKEN
-  if (apiKey === undefined || apiKey.trim() === '') {
+  // a set-but-blank override must not starve the fallbacks — scan in
+  // precedence order and take the first non-blank
+  const apiKey = [env.BRO_PROVIDER_API_KEY, env.ANTHROPIC_API_KEY, env.ANTHROPIC_AUTH_TOKEN].find(
+    (v) => v !== undefined && v.trim() !== ''
+  )
+  if (apiKey === undefined) {
     return undefined
   }
   const upstream = (env.BRO_PROVIDER_UPSTREAM ?? DEFAULT_UPSTREAM).replace(/\/+$/, '')
@@ -115,11 +118,20 @@ export function providerProxy(
   return async (req, res) => {
     const method = req.method ?? 'GET'
     const target = `${cfg.upstream}${req.url ?? '/'}`
+    // the client going away must stop the upstream work — an SSE
+    // generation otherwise runs to completion billing tokens against
+    // nobody's session
+    const abort = new AbortController()
+    res.on('close', () => abort.abort())
     let upstream: Response
     try {
       upstream = await fetch(target, {
         method,
         headers: forwardHeaders(req, cfg.apiKey),
+        signal: abort.signal,
+        // never auto-follow — a cross-origin redirect would carry the
+        // swapped x-api-key to a host it was never minted for
+        redirect: 'manual',
         ...(HAS_BODY.has(method)
           ? { body: Readable.toWeb(req) as ReadableStream, duplex: 'half' as const }
           : {}),
