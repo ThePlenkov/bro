@@ -78,6 +78,11 @@ export interface LoopConfig {
   /** Parked trees idle past this many days reap regardless of the cap —
    *  a stale cache is not a resume aid. 0 = no age bound. */
   parkedTtlDays: number
+  /** Minutes a parked bead stays deferred before it wakes to `open` —
+   *  the claim-side park TTL (spec bro-hl22w): the snooze that replaces
+   *  the old held-forever claim. 0 = indefinite icebox, `bd undefer`
+   *  is the only way back. */
+  parkedWakeMin: number
 }
 
 export const DEFAULT_LOOP_CONFIG: LoopConfig = {
@@ -98,4 +103,5 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   batchMinPriority: 3,
   parkedKeep: 3,
   parkedTtlDays: 14,
+  parkedWakeMin: 120,
 }

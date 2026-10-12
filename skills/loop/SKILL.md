@@ -115,7 +115,10 @@ knobs below.
   steps remain. Report which and stop.
 - **Failures are visible, never silent** — an agent that exits without a
   PR gets the bead reopened with a `loop:` note; a stalled PR parks the
-  bead with a note naming the blocker and the kept worktree path.
+  bead: a `loop:` note names the blocker, the claim releases into a
+  deferred snooze for `loop.parkedWakeMin` (default 2h — then it wakes
+  to `open` on the next ready read; `0` ices it until `bd undefer`),
+  and the worktree stays as the resume cache.
 - **The open-PR set is bounded** — `loop.maxOpen` (default 3) caps how
   many gates sit on the stack; a full stack services gates only until a
   merge frees a slot. Independent branches drift against shared files
@@ -149,7 +152,8 @@ knobs below.
 A loop iteration is done only when the bead reached a terminal,
 authoritatively verified state — PR `MERGED` per `gh pr view` and the
 bead closed per `bd show`, or parked with a `loop:` note naming the
-blocker. A process exiting is not a verdict.
+blocker and the claim snoozed `deferred`. A process exiting is not a
+verdict.
 
 The loop runs this audit itself at every exit — idle, gated, or error
 (`try/finally` around the claim cycle). It first reaps provably-done

@@ -37,7 +37,10 @@
  * note — unless the spawn died inside loop.crashExitMs (default 10s):
  * gone that fast it crashed on the environment, not the bead, and
  * reopening is a respawn-burn, so it parks loud instead (bro-sovl3). A
- * bead whose PR stalls keeps its worktree for inspection.
+ * park releases the claim into a deferred snooze —
+ * `loop.parkedWakeMin` (default 2h) later the next ready read wakes it
+ * to open; the worktree stays as the resume cache the woken claim
+ * reuses (bro-hl22w).
  */
 import { spawnSync, spawn } from 'node:child_process'
 import {
@@ -222,6 +225,9 @@ function usage(): never {
   --model M                      model override for the provider lane
   --auto-approve                 acp permission policy: allow, not deny
   --merge-timeout MIN            gate budget per round (loop.mergeTimeoutMin, 45)
+  --parked-wake MIN              parked bead's snooze before it wakes to
+                                open (loop.parkedWakeMin, 120; 0 = iced
+                                until bd undefer)
   --label a,b                    declared scope — only beads carrying one
                                 of these labels are claimable
   --stack NAME                   chain claimed beads onto stack NAME —
@@ -682,9 +688,11 @@ function workerExit(ctx: Ctx, w: WorkerRef): { code: number | null; at: number }
  *  transient, and a hot re-pick would burn the interval against the
  *  same wall. A 'conflict' (live agent, foreign claim, respawn block)
  *  parks WITHOUT a note — the bead's owner is not this run. Anything
- *  else parks with the error named. Member claims release either way;
- *  on a conflict the LEAD's claim plane is contested, so only the
- *  clump members this run claimed are reopened. */
+ *  else parks with the error named: the claim releases into the snooze
+ *  rather than an instant re-queue into the same refusal. Member claims
+ *  release either way; on a conflict the LEAD's claim plane is
+ *  contested, so only the clump members this run claimed are
+ *  reopened. */
 function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome {
   const msg = err instanceof Error ? err.message : String(err)
   // every refusal path releases this run's claims — the claim-time
@@ -697,14 +705,12 @@ function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome 
     say(ctx, `loop: fleet full — ${msg}; pushes hold for the next pass`)
     return { kind: 'hold', why: msg }
   }
-  const foreign = err instanceof SpawnError && err.kind === 'conflict'
-  for (const b of openBeads(ctx, foreign ? m.beads.slice(1) : m.beads)) {
-    reopenBead(ctx, b.id)
-  }
-  if (!foreign) {
-    for (const b of openBeads(ctx, m.beads)) {
-      noteBead(ctx.tasks, b.id, `loop: agent spawn refused — ${msg} — worktree ${m.item.worktreeDir}`)
+  if (err instanceof SpawnError && err.kind === 'conflict') {
+    for (const b of openBeads(ctx, m.beads.slice(1))) {
+      reopenBead(ctx, b.id)
     }
+  } else {
+    parkBeads(ctx, m.beads, `loop: agent spawn refused — ${msg} — worktree ${m.item.worktreeDir}`)
   }
   say(ctx, `loop: ${m.beads[0]!.id} spawn refused — ${msg}`)
   return { kind: 'done', result: 'parked' }
@@ -803,6 +809,35 @@ function reopenBead(ctx: Ctx, id: string): void {
   } catch { /* best-effort unclaim */ }
 }
 
+/** The park settle (spec bro-hl22w): the site note names the wall, then
+ *  each still-open bead is deferred — bd's snooze — with
+ *  `parkedWakeMin`'s cooldown and its assignee cleared. A park that only
+ *  notes leaves the bead in_progress under a dead owner: invisible to
+ *  ready/next/loop forever, a silent backlog stall (the bug this
+ *  closes). Deferred rows hide from ready — the park's whole point: the
+ *  next claim must not re-claim straight into the same wall — and wake
+ *  to open on the first ready read past the horizon (the TaskStore
+ *  port performs that lazy wake; `bd undefer` releases one early).
+ *  `parkedWakeMin` 0 = the indefinite icebox. The worktree stays: the
+ *  woken claim's planItemAndWorktree reuses it. A store that rejects
+ *  the write (down, or a backend with no defer concept) keeps the old
+ *  claim-hold — best-effort, never a crash. */
+function parkBeads(ctx: Ctx, beads: ReadyBead[], msg: string): void {
+  const min = ctx.cfg.parkedWakeMin
+  const patch: Record<string, string | number> =
+    min > 0
+      ? { defer: new Date(Date.now() + min * 60_000).toISOString(), assignee: '' }
+      : { status: 'deferred', assignee: '' }
+  for (const b of openBeads(ctx, beads)) {
+    noteBead(ctx.tasks, b.id, msg)
+    try {
+      ctx.tasks.update(b.id, patch)
+    } catch (err) {
+      console.error(`loop: could not defer ${b.id} — ${String(err)}`)
+    }
+  }
+}
+
 /** One `bd show` batch answers the whole clump's statuses — a store
  *  blip or a missing row answers 'unknown' for that member, so callers
  *  keep the still-open contract and a blip never masks work. */
@@ -842,14 +877,6 @@ function openBeads(ctx: Ctx, beads: ReadyBead[]): ReadyBead[] {
     return beads.filter((b) => !closed.has(b.id))
   } catch {
     return beads // a store blip must not mask work
-  }
-}
-
-/** A note fanned out over the clump's still-open members — verdict
- *  closes the agent already landed don't get gate-failure notes. */
-function noteOpen(ctx: Ctx, beads: ReadyBead[], msg: string): void {
-  for (const b of openBeads(ctx, beads)) {
-    noteBead(ctx.tasks, b.id, msg)
   }
 }
 
@@ -943,13 +970,11 @@ async function finalizeMerge(
     }
     const meta = ctx.rev.prMeta({ repo: ctx.repo, pr })
     if (meta.state !== 'MERGED') {
-      for (const b of openBeads(ctx, beads)) {
-        noteBead(
-          ctx.tasks,
-          b.id,
-          `loop: merge of ${prRef(ctx, pr)} did not land (state=${meta.state}) — worktree ${item.worktreeDir}`
-        )
-      }
+      parkBeads(
+        ctx,
+        beads,
+        `loop: merge of ${prRef(ctx, pr)} did not land (state=${meta.state}) — worktree ${item.worktreeDir}`
+      )
       return 'parked'
     }
     if (alreadyMerged) {
@@ -966,13 +991,11 @@ async function finalizeMerge(
   } catch (err) {
     // a merge/fetch failure must not abort the loop leaving the bead
     // claimed forever — note it and park
-    for (const b of openBeads(ctx, beads)) {
-      noteBead(
-        ctx.tasks,
-        b.id,
-        `loop: finalizing ${prRef(ctx, pr)} failed — ${err instanceof Error ? err.message : String(err)} — worktree ${item.worktreeDir}`
-      )
-    }
+    parkBeads(
+      ctx,
+      beads,
+      `loop: finalizing ${prRef(ctx, pr)} failed — ${err instanceof Error ? err.message : String(err)} — worktree ${item.worktreeDir}`
+    )
     return 'parked'
   }
   settleClump(ctx, beads, item, pr)
@@ -1398,9 +1421,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   ctx.stage = 'pr lookup'
   const pr = findPr(ctx, item.branch)
   if (pr === 'lookup-error') {
-    for (const b of openBeads(ctx, beads)) {
-      noteBead(ctx.tasks, b.id, `loop: PR lookup failed for ${item.branch} — worktree ${item.worktreeDir}`)
-    }
+    parkBeads(ctx, beads, `loop: PR lookup failed for ${item.branch} — worktree ${item.worktreeDir}`)
     return { kind: 'done', result: 'parked' }
   }
   if (pr === null) {
@@ -1461,14 +1482,13 @@ function settleNoPr(
     // gone in seconds, no PR, no verdict — the spawn died on the
     // environment (broken dist, bad argv), never on the bead. Reopen
     // and the next claim walks into the same wall: claim → crash →
-    // reopen → reclaim is the respawn-burn from bro-sovl3. Park loud.
-    for (const b of openBeads(ctx, beads)) {
-      noteBead(
-        ctx.tasks,
-        b.id,
-        `loop: agent gone in ${elapsed}ms (exit ${code ?? 'spawn failure'}) — environment crash, not a verdict; parked — worktree kept at ${item.worktreeDir}`
-      )
-    }
+    // reopen → reclaim is the respawn-burn from bro-sovl3. Park loud —
+    // the snooze hides it for the cooldown, not the queue forever.
+    parkBeads(
+      ctx,
+      beads,
+      `loop: agent gone in ${elapsed}ms (exit ${code ?? 'spawn failure'}) — environment crash, not a verdict; parked — worktree kept at ${item.worktreeDir}`
+    )
     say(
       ctx,
       `loop: ${beads[0]!.id} agent exited ${code ?? 'spawn failure'} in ${elapsed}ms — parked (crash, not work)`
@@ -1517,7 +1537,7 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       if (m.fetchErrors < 3) {
         return 'kept'
       }
-      noteOpen(
+      parkBeads(
         ctx,
         m.beads,
         `loop: worker status kept failing for ${w.agentId} — ${String(err)} — worktree ${m.item.worktreeDir}`
@@ -1549,7 +1569,7 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   ctx.stage = 'pr lookup'
   const pr = findPr(ctx, m.item.branch)
   if (pr === 'lookup-error') {
-    noteOpen(
+    parkBeads(
       ctx,
       m.beads,
       `loop: PR lookup failed for ${m.item.branch} — worktree ${m.item.worktreeDir}`
@@ -1563,7 +1583,7 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
         state === 'blocked'
           ? `blocked${info?.cause !== undefined ? ` (${info.cause})` : ''}`
           : 'stopped'
-      noteOpen(
+      parkBeads(
         ctx,
         m.beads,
         `loop: worker ${w.agentId} ${why} without a PR — worktree ${m.item.worktreeDir}`
@@ -1674,7 +1694,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     if (m.fetchErrors < 3 && Date.now() - m.since < ctx.cfg.mergeTimeoutMin * 60_000) {
       return 'kept'
     }
-    noteOpen(
+    parkBeads(
       ctx,
       m.beads,
       `loop: gate fetch kept failing for PR ${prRef(ctx, pr)} — ${String(err)} — worktree ${m.item.worktreeDir}`
@@ -1714,7 +1734,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       return leave(m, await finalizeMerge(ctx, m.beads, m.item, pr))
     case 'closed':
       gateRow('closed', { action: 'closed' })
-      noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} was closed unmerged — worktree ${m.item.worktreeDir}`)
+      parkBeads(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} was closed unmerged — worktree ${m.item.worktreeDir}`)
       return leave(m, 'parked')
     case 'fix':
       gateRow('blocked', { action: 'fix', round: m.rounds + 1, blockers: snap.blockers })
@@ -1736,7 +1756,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       if (!ok) {
         // an update refusal IS the settle — same park the wait produced
         gateRow('blocked', { action: 'update', updated: false, blockers: snap.blockers })
-        noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} blocked: ${snap.blockers.join('; ')} — worktree ${m.item.worktreeDir}`)
+        parkBeads(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} blocked: ${snap.blockers.join('; ')} — worktree ${m.item.worktreeDir}`)
         return leave(m, 'parked')
       }
       gateRow('behind', { action: 'update', updated: true })
@@ -1747,15 +1767,15 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       return 'kept'
     case 'park':
       gateRow('parked', { action: 'park', why: act.why })
-      noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} ${act.why} — worktree ${m.item.worktreeDir}`)
+      parkBeads(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} ${act.why} — worktree ${m.item.worktreeDir}`)
       return leave(m, 'parked')
   }
 }
 
 /** A member leaving the stack ends its watch — the promise is kept.
- *  A 'parked' verdict also lands in the lifecycle journal: the claim
- *  stays held, the worktree stays for audit — that hold IS the
- *  transition. */
+ *  A 'parked' verdict also lands in the lifecycle journal: the claim's
+ *  snooze is already written (parkBeads deferred it), the worktree
+ *  stays for audit/resume — the row IS the transition. */
 function leave(m: GateMember, verdict: ItemResult): ItemResult {
   if (verdict === 'parked') {
     emitLifecycle(m.item.worktreeDir, {
@@ -1867,6 +1887,7 @@ function stackNameFlag(argv: string[]): string | undefined {
 const LOOP_VALUE_FLAGS = new Set([
   '--agent',
   '--merge-timeout',
+  '--parked-wake',
   '--max',
   '--max-open',
   '--disk-min-slots',
@@ -2023,6 +2044,7 @@ function buildCtx(
     cfg: {
       ...cfg,
       mergeTimeoutMin: num(flag(argv, '--merge-timeout'), cfg.mergeTimeoutMin),
+      parkedWakeMin: num(flag(argv, '--parked-wake'), cfg.parkedWakeMin, 0),
       maxItems: num(flag(argv, '--max'), cfg.maxItems, 0),
       maxOpen: num(flag(argv, '--max-open'), cfg.maxOpen, 1),
       diskMinSlots: num(flag(argv, '--disk-min-slots'), cfg.diskMinSlots, 0),
@@ -2534,7 +2556,10 @@ interface QueueState {
   drained: boolean
   /** Beads this run deliberately parked — a park is intent, not an
    *  orphan, so the end-of-run litter sweep must not release their
-   *  claims (bro-ho09d). A later sweep judges them fresh. */
+   *  claims (bro-ho09d). The claim is now a deferred snooze
+   *  (bro-hl22w), so the guard's real job is the park whose defer write
+   *  failed and still holds in_progress. A later sweep judges them
+   *  fresh. */
   parkedClaims: Set<string>
   /** A spawn refused on a full fleet holds pushes until now — a
    *  hot-loop through pick+probe+spawn would burn the tick against
