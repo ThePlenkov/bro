@@ -785,6 +785,7 @@ describe('buildCiFixerPrompt', () => {
       branch: 'work/bro-a',
       worktree: '/repos/bro--bro-a',
       repo: 'o/r',
+      host: 'github',
       failing: [
         { name: 'build-test', state: 'FAILURE', bucket: 'fail' },
         { name: 'sonarcloud', state: 'FAILURE', bucket: 'fail' },
@@ -814,9 +815,31 @@ describe('buildCiFixerPrompt', () => {
       branch: 'b',
       worktree: 'w',
       repo: 'o/r',
+      host: 'github',
       failing: [{ name: 'lint', state: 'CANCELLED', bucket: 'cancel' }],
     })
     assert.match(p, /- lint \(cancelled\)/)
+  })
+
+  test('a gitlab reviews connector gets glab api commands — never gh', () => {
+    const p = buildCiFixerPrompt({
+      pr: 42,
+      link: '[!42](https://gitlab.example/o/r/-/merge_requests/42)',
+      branch: 'work/bro-a',
+      worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'gitlab',
+      failing: [
+        { name: 'build-test', state: 'failed', bucket: 'fail' },
+        { name: 'sonarcloud', state: 'failed', bucket: 'fail' },
+      ],
+    })
+    assert.match(p, /glab api projects\/o%2Fr\/merge_requests\/42\/pipelines/)
+    assert.match(p, /glab api projects\/o%2Fr\/pipelines\/<pipeline-id>\/jobs/)
+    assert.match(p, /glab api projects\/o%2Fr\/jobs\/<job-id>\/trace/)
+    // no annotations endpoint on gitlab — a SAST job's findings are its report
+    assert.match(p, /- sonarcloud — a SAST check.*scanner's report/)
+    assert.doesNotMatch(p, /gh pr checks|gh run view|check-runs/)
   })
 })
 
@@ -828,6 +851,7 @@ describe('buildSastFixerPrompt', () => {
       branch: 'work/bro-a',
       worktree: '/repos/bro--bro-a',
       repo: 'o/r',
+      host: 'github',
       headSha: 'abc123',
       findings: [
         { name: 'sonarcloud', count: 4 },
@@ -843,6 +867,22 @@ describe('buildSastFixerPrompt', () => {
     assert.match(p, /gh api repos\/o\/r\/check-runs\/<run-id>\/annotations/)
     assert.match(p, /NEVER merge/)
     assert.match(p, /clean exit without a push marks this head as attempted/)
+  })
+
+  test('a gitlab reviews connector points at the scanner report — no gh api', () => {
+    const p = buildSastFixerPrompt({
+      pr: 42,
+      link: '[!42](https://gitlab.example/o/r/-/merge_requests/42)',
+      branch: 'work/bro-a',
+      worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'gitlab',
+      headSha: 'abc123',
+      findings: [{ name: 'sonarcloud', count: 2 }],
+    })
+    assert.match(p, /glab api projects\/o%2Fr/)
+    assert.match(p, /no check-run/)
+    assert.doesNotMatch(p, /gh api|check-runs\//)
   })
 })
 

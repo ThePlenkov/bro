@@ -498,6 +498,17 @@ const facade = {
   parsePrRef: () => null,
   prMeta: (t) => {
     const s = load()
+    // readQueues.meta — the same mid-flight race scripting as
+    // readQueues.checks: each call shifts one partial-meta overlay, so a
+    // test can script 'OPEN + head aaa at the gate, MERGED (or a moved
+    // head) at the fixer's own re-probe'
+    let over = {}
+    const mq = s.readQueues?.meta
+    if (Array.isArray(mq) && mq.length > 0) {
+      s.readQueues.meta = mq.slice(1)
+      save(s)
+      over = mq[0] ?? {}
+    }
     const per = s.prs
       ? Object.values(s.prs).find((p) => p.number === t.pr) ?? {}
       : {}
@@ -510,6 +521,7 @@ const facade = {
       baseRef: per.baseRef ?? s.baseRef ?? 'main',
       mergeable: per.mergeable ?? s.mergeable ?? 'MERGEABLE',
       mergeState: per.mergeState ?? s.mergeState ?? 'CLEAN',
+      ...over,
     }
   },
   mergedPrInfo: () => { throw new Error('not merged') },
@@ -555,17 +567,20 @@ const facade = {
     }
     return s.checks ?? []
   },
-  checkAnnotations: (_repo, _sha, names) => {
+  checkAnnotations: (_repo, sha, names) => {
     const s = load()
+    // record the sha each probe targeted — a fixer re-probe on a moved
+    // head must read the LIVE sha, never the gate's stale one
+    s.annotationReads = (s.annotationReads ?? []).concat([sha])
     // readQueues.annotations — each call shifts one map (the same
     // mid-flight race scripting as readQueues.checks)
     const aq = s.readQueues?.annotations
     let all = s.annotations ?? {}
     if (Array.isArray(aq) && aq.length > 0) {
       s.readQueues.annotations = aq.slice(1)
-      save(s)
       all = aq[0] ?? {}
     }
+    save(s)
     // names-given callers read exactly that set — an unrequested check
     // never appears (absent key = no annotations endpoint, like gh).
     // An explicit null is the fake's 'fetch failed' — it passes through

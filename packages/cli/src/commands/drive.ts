@@ -54,6 +54,7 @@ import {
   emitLifecycle,
   ensureAuth,
   facade,
+  facadeName,
   gitCommonDir,
   gitTry,
   patchAgentRegistry,
@@ -584,6 +585,10 @@ async function driveShadowNotes(
 interface Ctx {
   mainRoot: string
   rev: ReviewFacade
+  /** The reviews connector's name — fixer work orders name host-CLI
+   *  commands, so the prompt must match the backend actually serving
+   *  this repo (gh on github, glab api on gitlab). */
+  host: string
   repo: string
   act: {
     ignoreChecks: IgnoreCheckRule[]
@@ -1018,7 +1023,7 @@ function recordFixerAttempt(dir: string, molStep: string, head: string, cls: str
 function fixerSpent(
   ctx: Ctx,
   pr: number,
-  state: PrActState,
+  headSha: string,
   fixer: TaskRow | undefined,
   cls: string
 ): PrVerdict | undefined {
@@ -1026,7 +1031,7 @@ function fixerSpent(
     return undefined
   }
   const entry = readAgentRegistry(ctx.mainRoot)[fixer.id]
-  return fixerAttemptSpent(entry, state.headSha, cls)
+  return fixerAttemptSpent(entry, headSha, cls)
     ? {
         pr,
         link: ctx.rev.prLink(ctx.repo, pr),
@@ -1144,10 +1149,7 @@ async function spawnRebaseFixer(
   const link = ctx.rev.prLink(ctx.repo, pr)
   let meta: PrMeta
   try {
-    meta =
-      ctx.rev.prMetaAsync === undefined
-        ? ctx.rev.prMeta({ repo: ctx.repo, pr })
-        : await ctx.rev.prMetaAsync({ repo: ctx.repo, pr })
+    meta = await metaOf(ctx, pr)
   } catch (err) {
     return { pr, link, verdict: 'probe-failed', detail: errText(err) }
   }
@@ -1157,7 +1159,7 @@ async function spawnRebaseFixer(
   if (meta.mergeable === 'MERGEABLE') {
     return { pr, link, verdict: 'conflict-resolved' }
   }
-  const spent = fixerSpent(ctx, pr, state, fixer, 'rebase')
+  const spent = fixerSpent(ctx, pr, meta.headSha, fixer, 'rebase')
   if (spent !== undefined) {
     return spent
   }
@@ -1182,8 +1184,18 @@ async function spawnRebaseFixer(
       worktree: wt,
     }),
     tag: 'rebase ',
-    attempt: { head: state.headSha, cls: 'rebase' },
+    attempt: { head: meta.headSha, cls: 'rebase' },
   })
+}
+
+/** Fresh prMeta for the spawn-path re-probes — the gate's state snapshot
+ *  is stale by the time a fixer spawns, so a settle or a moved head
+ *  between the two reads is caught here, never assumed away. */
+function metaOf(ctx: Ctx, pr: number): Promise<PrMeta> {
+  const t = { repo: ctx.repo, pr }
+  return ctx.rev.prMetaAsync === undefined
+    ? Promise.resolve().then(() => ctx.rev.prMeta(t))
+    : ctx.rev.prMetaAsync(t)
 }
 
 // --- ci-fail / sast fixers (bro-atb2g) -----------------------------------------
@@ -1223,24 +1235,50 @@ function gatedChecks(ctx: Ctx, checks: CheckInfo[]): CheckInfo[] {
 
 /** The ci-fail fixer's work order — the failing check list at spawn
  *  (the prompt tells it to re-read the live list). A SAST-named run is
- *  flagged: its blocking findings are annotations, not log lines. */
+ *  flagged: its blocking findings are annotations, not log lines. The
+ *  inspect commands name the review host's own CLI — `host` is the
+ *  reviews connector's name, so a GitLab-backed repo gets `glab api`
+ *  lines a fixer can actually run. */
 export function buildCiFixerPrompt(opts: {
   pr: number
   link: string
   branch: string
   worktree: string
   repo: string
+  host: string
   failing: CheckInfo[]
 }): string {
+  const gitlab = opts.host === 'gitlab'
+  const encRepo = encodeURIComponent(opts.repo)
+  const checksCmd = gitlab
+    ? `glab api projects/${encRepo}/merge_requests/${opts.pr}/pipelines`
+    : `gh pr checks ${opts.pr}`
+  const sastNote = gitlab
+    ? " — a SAST check: its findings live in the scanner's report (the job's links), not log lines"
+    : ' — a SAST check: its blocking findings are check-run annotations, not log lines'
   const list = opts.failing
     .map(
       (c) =>
         `- ${c.name}${c.bucket === 'cancel' ? ' (cancelled)' : ''}` +
-        (isSast(c.name)
-          ? ' — a SAST check: its blocking findings are check-run annotations, not log lines'
-          : '')
+        (isSast(c.name) ? sastNote : '')
     )
     .join('\n')
+  const inspect = gitlab
+    ? [
+        `- \`glab api projects/${encRepo}/merge_requests/${opts.pr}/pipelines\` —`,
+        "  the MR's pipelines; the head pipeline is the live check list.",
+        `- \`glab api projects/${encRepo}/pipelines/<pipeline-id>/jobs\` names`,
+        '  the failing jobs and their links.',
+        `- \`glab api projects/${encRepo}/jobs/<job-id>/trace\` is a job's own`,
+        "  failure record — read the failing job's log before touching code.",
+      ]
+    : [
+        `- \`gh pr checks ${opts.pr}\` names the failing runs and their links.`,
+        "- `gh run view --log-failed <run-id>` is a run's own failure record —",
+        "  read the failing job's log before touching code.",
+        `- For a SAST-named run the findings are annotations:`,
+        `  \`gh api repos/${opts.repo}/check-runs/<run-id>/annotations\`.`,
+      ]
   return [
     `# CI fixer — ${opts.link}`,
     '',
@@ -1248,17 +1286,13 @@ export function buildCiFixerPrompt(opts: {
     'else. If `node_modules` is missing, run the repo install step first.',
     '',
     `This PR has ${opts.failing.length} failing check(s) on its head. The live`,
-    `list is \`gh pr checks ${opts.pr}\` — more may settle or appear while you`,
+    `list is \`${checksCmd}\` — more may settle or appear while you`,
     'work. Failing at spawn:',
     '',
     list,
     '',
     'Investigate before editing:',
-    `- \`gh pr checks ${opts.pr}\` names the failing runs and their links.`,
-    "- `gh run view --log-failed <run-id>` is a run's own failure record —",
-    "  read the failing job's log before touching code.",
-    `- For a SAST-named run the findings are annotations:`,
-    `  \`gh api repos/${opts.repo}/check-runs/<run-id>/annotations\`.`,
+    ...inspect,
     "- Reproduce the failure in this worktree (the repo's build/test",
     '  contract), fix, commit, push — the push is the verdict.',
     '',
@@ -1281,9 +1315,12 @@ export function buildSastFixerPrompt(opts: {
   branch: string
   worktree: string
   repo: string
+  host: string
   headSha: string
   findings: { name: string; count: number | null }[]
 }): string {
+  const gitlab = opts.host === 'gitlab'
+  const encRepo = encodeURIComponent(opts.repo)
   const list = opts.findings
     .map(
       (f) =>
@@ -1291,6 +1328,24 @@ export function buildSastFixerPrompt(opts: {
         (f.count === null ? 'annotations unreadable — re-probe or use the dashboard link' : `${f.count} finding(s)`)
     )
     .join('\n')
+  const inspect = gitlab
+    ? [
+        'Read the findings before editing — this host has no check-run',
+        "  annotations endpoint; the findings are the scanner's report:",
+        `- \`glab api projects/${encRepo}/merge_requests/${opts.pr}/pipelines\` —`,
+        "  the MR's pipelines; the head pipeline's jobs name the SAST run.",
+        `- \`glab api projects/${encRepo}/jobs/<job-id>/trace\` is the job's`,
+        "  record; the scanner dashboard the job links to carries findings.",
+      ]
+    : [
+        'Read the findings before editing — they are check-run annotations:',
+        `- \`gh api repos/${opts.repo}/commits/${opts.headSha}/check-runs\` names`,
+        "  each run's id;",
+        `- \`gh api repos/${opts.repo}/check-runs/<run-id>/annotations\` lists`,
+        '  path, line, message, level — the failure-level rows are the blockers.',
+        "- The scanner's own dashboard (the check's details link) carries the",
+        '  same findings.',
+      ]
   return [
     `# SAST fixer — ${opts.link}`,
     '',
@@ -1303,13 +1358,7 @@ export function buildSastFixerPrompt(opts: {
     '',
     list,
     '',
-    'Read the findings before editing — they are check-run annotations:',
-    `- \`gh api repos/${opts.repo}/commits/${opts.headSha}/check-runs\` names`,
-    "  each run's id;",
-    `- \`gh api repos/${opts.repo}/check-runs/<run-id>/annotations\` lists`,
-    '  path, line, message, level — the failure-level rows are the blockers.',
-    "- The scanner's own dashboard (the check's details link) carries the",
-    '  same findings.',
+    ...inspect,
     '',
     'Rules:',
     '- Fix valid findings on this branch; a false positive goes through the',
@@ -1326,11 +1375,12 @@ export function buildSastFixerPrompt(opts: {
 }
 
 /** The ci-fail fixer — settled-red non-reviewer checks on an orphaned
- *  PR (bro-atb2g). The `checks` re-probe doubles as the still-failing
- *  re-check: a run that went green between the gate fetch and now must
- *  not burn a spawn, and the same read names the failing set for the
- *  work order. Runs BEFORE the worktree checkout for the same reason
- *  the conflict probe does. */
+ *  PR (bro-atb2g). The meta+checks re-probe doubles as the still-open /
+ *  still-failing re-check: a PR that settled or a run that went green
+ *  between the gate fetch and now must not burn a spawn, and the same
+ *  reads name the failing set + live head for the work order. Runs
+ *  BEFORE the worktree checkout for the same reason the conflict probe
+ *  does. */
 async function spawnCiFixer(
   ctx: Ctx,
   pr: number,
@@ -1340,17 +1390,21 @@ async function spawnCiFixer(
   known: AgentInfo[]
 ): Promise<PrVerdict> {
   const link = ctx.rev.prLink(ctx.repo, pr)
+  let meta: PrMeta
   let checks: CheckInfo[]
   try {
-    checks = await checksOf(ctx, pr)
+    ;[meta, checks] = await Promise.all([metaOf(ctx, pr), checksOf(ctx, pr)])
   } catch (err) {
     return { pr, link, verdict: 'probe-failed', detail: errText(err) }
+  }
+  if (meta.state !== 'OPEN') {
+    return { pr, link, verdict: 'settled', detail: meta.state.toLowerCase() }
   }
   const failing = failingCiChecks(gatedChecks(ctx, checks))
   if (failing.length === 0) {
     return { pr, link, verdict: 'ci-resolved' }
   }
-  const spent = fixerSpent(ctx, pr, state, fixer, 'ci')
+  const spent = fixerSpent(ctx, pr, meta.headSha, fixer, 'ci')
   if (spent !== undefined) {
     return spent
   }
@@ -1373,18 +1427,21 @@ async function spawnCiFixer(
       branch: state.headRef,
       worktree: wt,
       repo: ctx.repo,
+      host: ctx.host,
       failing,
     }),
     tag: 'ci ',
-    attempt: { head: state.headSha, cls: 'ci' },
+    attempt: { head: meta.headSha, cls: 'ci' },
   })
 }
 
 /** The sast fixer — failure-level annotations on a live SAST check's
  *  head run (bro-atb2g). A green run can carry them: the gate counts
- *  annotations, not conclusions. The annotations re-probe is the
- *  still-present re-check — findings fixed between the gate fetch and
- *  now read 'sast-resolved' instead of burning a spawn. */
+ *  annotations, not conclusions. The meta+checks+annotations re-probe
+ *  is the still-open / still-present re-check — a settled PR, a moved
+ *  head, or findings fixed between the gate fetch and now must not
+ *  burn a spawn (and a moved head's annotations are fetched at the
+ *  live sha, never the gate's stale one). */
 async function spawnSastFixer(
   ctx: Ctx,
   pr: number,
@@ -1394,11 +1451,15 @@ async function spawnSastFixer(
   known: AgentInfo[]
 ): Promise<PrVerdict> {
   const link = ctx.rev.prLink(ctx.repo, pr)
+  let meta: PrMeta
   let checks: CheckInfo[]
   try {
-    checks = await checksOf(ctx, pr)
+    ;[meta, checks] = await Promise.all([metaOf(ctx, pr), checksOf(ctx, pr)])
   } catch (err) {
     return { pr, link, verdict: 'probe-failed', detail: errText(err) }
+  }
+  if (meta.state !== 'OPEN') {
+    return { pr, link, verdict: 'settled', detail: meta.state.toLowerCase() }
   }
   const names = liveSastChecks(gatedChecks(ctx, checks)).map((c) => c.name)
   if (names.length === 0) {
@@ -1406,7 +1467,7 @@ async function spawnSastFixer(
   }
   let annotations: Map<string, number | null>
   try {
-    annotations = await annotationsOf(ctx, state.headSha, new Set(names))
+    annotations = await annotationsOf(ctx, meta.headSha, new Set(names))
   } catch (err) {
     return { pr, link, verdict: 'probe-failed', detail: errText(err) }
   }
@@ -1419,7 +1480,7 @@ async function spawnSastFixer(
   if (!findings.some((f) => f.count !== null && f.count > 0)) {
     return { pr, link, verdict: 'sast-resolved' }
   }
-  const spent = fixerSpent(ctx, pr, state, fixer, 'sast')
+  const spent = fixerSpent(ctx, pr, meta.headSha, fixer, 'sast')
   if (spent !== undefined) {
     return spent
   }
@@ -1442,13 +1503,14 @@ async function spawnSastFixer(
       branch: state.headRef,
       worktree: wt,
       repo: ctx.repo,
-      headSha: state.headSha,
+      host: ctx.host,
+      headSha: meta.headSha,
       // the work order lists the runs that carry (or might carry)
       // findings — clean runs are noise on it
       findings: findings.filter((f) => f.count === null || f.count > 0),
     }),
     tag: 'sast ',
-    attempt: { head: state.headSha, cls: 'sast' },
+    attempt: { head: meta.headSha, cls: 'sast' },
   })
 }
 
@@ -1545,13 +1607,22 @@ async function blockedVerdict(ctx: Ctx, b: BlockedWork): Promise<PrVerdict> {
   }
   // settled-red checks on an orphaned PR used to be terminal 'blocked'
   // — the classes below each get a remediation start instead
-  // (bro-atb2g). Occupied still wins over every spawn.
+  // (bro-atb2g). Occupied still wins over every spawn. A class that
+  // owes no spawn on this head (dedup-spent or resolved at the
+  // re-probe) doesn't preempt the next one — the classes are
+  // independent, so a spent ci attempt on a head that also carries
+  // SAST findings must not starve the sast fixer forever.
+  let declined: PrVerdict | undefined
   if (gate.ci_failing > 0) {
     if (occ !== undefined) {
       return { pr, link, verdict: 'occupied', detail: occ }
     }
     if (!capHit) {
-      return spawnCiFixer(ctx, pr, state, worktree, fixer, work.agents)
+      const v = await spawnCiFixer(ctx, pr, state, worktree, fixer, work.agents)
+      if (v.verdict !== 'fixer-spent' && v.verdict !== 'ci-resolved') {
+        return v
+      }
+      declined = v
     }
   }
   if (gate.sast_pending > 0) {
@@ -1562,7 +1633,7 @@ async function blockedVerdict(ctx: Ctx, b: BlockedWork): Promise<PrVerdict> {
       return spawnSastFixer(ctx, pr, state, worktree, fixer, work.agents)
     }
   }
-  return { pr, link, verdict: 'blocked', detail: gate.blockers.join('; ') }
+  return declined ?? { pr, link, verdict: 'blocked', detail: gate.blockers.join('; ') }
 }
 
 async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict> {
@@ -1859,6 +1930,9 @@ async function runDrive(
   const ctx: Ctx = {
     mainRoot: mainPath,
     rev,
+    // same pick reviewHost already memoized — the name only decides
+    // which CLI syntax the fixer prompts write
+    host: facadeName('reviews', { dir: mainPath }, { prefer: broCfg.connectors }),
     repo: rev.resolveRepo([]),
     act: broCfg.act,
     merge: args.merge && drive.merge === 'auto',

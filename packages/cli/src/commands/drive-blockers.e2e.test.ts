@@ -281,6 +281,78 @@ describe('bro drive — ci/sast blockers on orphaned PRs (bro-atb2g)', () => {
     })
   })
 
+  test('a PR settled between the gate and the spawn re-probe gets no fixer', async () => {
+    const f = fixture()
+    await insideAsync(f.main, f.root, async () => {
+      git(['branch', 'work/fx-a'], f.main)
+      // readQueues.meta scripts the mid-flight settle: the gate's meta
+      // read is OPEN, the fixer re-probe sees MERGED — a still-visible
+      // failed run must not spawn a worker for a dead PR
+      writeHostState(f.hostState, {
+        prs: ciFailing,
+        readQueues: { meta: [{}, { state: 'MERGED' }] },
+      })
+      const v = verdict(f.run(['--once', '--json']))
+      assert.equal(v.verdict, 'settled', v.detail)
+      assert.equal(fixerRows(f.db).length, 0)
+      assert.equal(spawnLog(f.main), '')
+    })
+  })
+
+  test('a moved head is re-probed at the LIVE sha — stale annotations never gate', async () => {
+    const f = fixture()
+    await insideAsync(f.main, f.root, async () => {
+      git(['branch', 'work/fx-a'], f.main)
+      // the gate snapshot reads head 'abc123'; by the fixer's re-probe
+      // the head moved to 'bbb' — its annotation fetch must target bbb,
+      // not the stale gate sha (the fake records every probe's sha)
+      writeHostState(f.hostState, {
+        prs: sastFindings,
+        annotations: { sonarcloud: 3 },
+        readQueues: { meta: [{}, { headSha: 'bbb' }] },
+      })
+      const v = verdict(f.run(['--once', '--json']))
+      assert.equal(v.verdict, 'spawned', v.detail)
+      const reads = (readHostState(f.hostState).annotationReads ?? []) as string[]
+      assert.equal(reads[0], 'abc123') // the gate's own probe
+      assert.equal(reads.at(-1), 'bbb') // the fixer's re-probe
+    })
+  })
+
+  test('a spent ci class falls through — the sast fixer still gets its attempt', async () => {
+    const f = fixture()
+    await insideAsync(f.main, f.root, async () => {
+      git(['branch', 'work/fx-a'], f.main)
+      // both classes block the same head; the noop fixer exits clean
+      // without clearing either, so the ci attempt is spent — the sast
+      // class must still earn its own spawn, not stall behind 'fixer-spent'
+      writeHostState(f.hostState, {
+        prs: {
+          'work/fx-a': {
+            ...ciFailing['work/fx-a'],
+            checks: [
+              { name: 'build-test', state: 'FAILURE', bucket: 'fail' },
+              { name: 'sonarcloud', state: 'SUCCESS', bucket: 'pass' },
+            ],
+          },
+        },
+        annotations: { sonarcloud: 3 },
+        fixerNoop: true,
+      })
+
+      const first = verdict(f.run(['--once', '--json']))
+      assert.equal(first.verdict, 'spawned', first.detail)
+      assert.match(first.detail ?? '', /ci fx-/)
+      assert.equal(await waitFor(() => exitRecorded(f.main)), true)
+
+      const second = verdict(f.run(['--once', '--json']))
+      assert.equal(second.verdict, 'spawned', second.detail)
+      assert.match(second.detail ?? '', /sast fx-/)
+      assert.equal(await waitFor(() => spawnLog(f.main).includes('sast')), true)
+      assert.match(spawnLog(f.main), /sast left findings \(noop\)/)
+    })
+  })
+
   test('open threads preempt a red check — the thread fixer gets the spawn', async () => {
     const f = fixture()
     await insideAsync(f.main, f.root, async () => {
