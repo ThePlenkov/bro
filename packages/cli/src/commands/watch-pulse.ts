@@ -183,20 +183,22 @@ export function writePulseSpawn(dir: string, record: PulseSpawn): void {
   renameSync(tmp, file)
 }
 
-/** Records without a `pidStart` are trusted this long after `spawnedAt`
- *  — long enough to cover the pre-lock window, short enough that a
- *  reused pid can't impersonate the child forever. */
+/** Records without a `pidStart` are trusted only within this window of
+ *  `spawnedAt` — long enough to cover the pre-lock window, short enough
+ *  that a reused pid can't impersonate the child forever. Either side:
+ *  a future-dated record (a stepped clock, a foreign write) must not
+ *  turn a negative age into unlimited trust. */
 const SPAWN_TRUST_MS = 120_000
 
 /** A recorded pid is trusted with its stored start time; records that
- *  predate the field get the bounded post-spawn window only — a reused
- *  pid must not suppress the rearm forever. */
+ *  predate the field get the bounded window around `spawnedAt` only —
+ *  a reused pid must not suppress the rearm forever. */
 function spawnedAlive(spawned: PulseSpawn, now: number = Date.now()): boolean {
   if (spawned.pidStart !== undefined) {
     return pidAlive(spawned.pid, spawned.pidStart)
   }
   const spawnedAt = Date.parse(spawned.spawnedAt)
-  if (!Number.isFinite(spawnedAt) || now - spawnedAt > SPAWN_TRUST_MS) {
+  if (!Number.isFinite(spawnedAt) || Math.abs(now - spawnedAt) > SPAWN_TRUST_MS) {
     return false
   }
   return pidAlive(spawned.pid)
