@@ -846,6 +846,23 @@ export function taskStoreAsync(dir?: string): TaskStoreAsync {
   }
 }
 
+/** Ids per `getMany` call — a batching backend turns the list into one
+ *  argv (`bd show id…`), and argv is bounded: win32's ~32K-char
+ *  command line caps out in the low thousands of bead ids, well under
+ *  Linux's MiB-scale ARG_MAX. An unbounded queue would E2BIG the spawn
+ *  and, at callers that degrade on failure, read as "no rows at all".
+ *  500 keeps a chunk far under every platform limit while a huge id
+ *  set still pays only ceil(N/500) backend calls. */
+const GET_MANY_CHUNK = 500
+
+function chunks<T>(items: T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size))
+  }
+  return out
+}
+
 /** The bulk-read degrade path — `getMany` where the store batches,
  *  serial `get` where it can't. Kept in the port so a caller never
  *  hand-rolls the fallback (nor pays one `bd show` per id by
@@ -853,7 +870,11 @@ export function taskStoreAsync(dir?: string): TaskStoreAsync {
  *  absent ids, not a dead store. */
 export function getTasks<T extends TaskRow = TaskRow>(store: TaskStore, ids: string[]): T[] {
   if (store.getMany !== undefined) {
-    return store.getMany<T>(ids)
+    const out: T[] = []
+    for (const chunk of chunks(ids, GET_MANY_CHUNK)) {
+      out.push(...store.getMany<T>(chunk))
+    }
+    return out
   }
   const out: T[] = []
   for (const id of ids) {
@@ -866,13 +887,15 @@ export function getTasks<T extends TaskRow = TaskRow>(store: TaskStore, ids: str
 }
 
 /** Async twin of getTasks — the degrade overlaps `get`s rather than
- *  serializing them: same N backend calls, one latency. */
+ *  serializing them: same N backend calls, one latency. Batched
+ *  chunks overlap too. */
 export async function getTasksAsync<T extends TaskRow = TaskRow>(
   store: TaskStoreAsync,
   ids: string[]
 ): Promise<T[]> {
   if (store.getMany !== undefined) {
-    return store.getMany<T>(ids)
+    const parts = await Promise.all(chunks(ids, GET_MANY_CHUNK).map((c) => store.getMany!<T>(c)))
+    return parts.flat()
   }
   const rows = await Promise.all(ids.map((id) => store.get<T>(id)))
   return rows.filter((r) => r !== undefined) as T[]

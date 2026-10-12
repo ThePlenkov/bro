@@ -162,6 +162,24 @@ describe('taskStore', { skip: WIN32 }, () => {
     assert.deepEqual(getTasks(batched, ['x', 'y']).map((r) => r.id), ['x', 'y'])
   })
 
+  test('getTasks bounds the ids per getMany call — argv has an OS cap', () => {
+    const calls: string[][] = []
+    const batched = {
+      getMany: (ids: string[]) => {
+        calls.push(ids)
+        return ids.map((id) => ({ id }))
+      },
+      get: () => {
+        throw new Error('get must not run when getMany exists')
+      },
+    } as unknown as TaskStore
+    const ids = Array.from({ length: 1201 }, (_, i) => `t${i}`)
+    assert.equal(getTasks(batched, ids).length, 1201)
+    assert.deepEqual(calls.map((c) => c.length), [500, 500, 201])
+    // every id reached the backend exactly once, in request order
+    assert.deepEqual(calls.flat(), ids)
+  })
+
   test('getTasksAsync degrades to overlapping get without the capability', async () => {
     const calls: string[] = []
     const serial = {
@@ -181,6 +199,20 @@ describe('taskStore', { skip: WIN32 }, () => {
       get: () => Promise.reject(new Error('get must not run when getMany exists')),
     } as unknown as TaskStoreAsync
     assert.deepEqual((await getTasksAsync(batched, ['x', 'y'])).map((r) => r.id), ['x', 'y'])
+  })
+
+  test('getTasksAsync bounds and overlaps a batched read', async () => {
+    const calls: string[][] = []
+    const batched = {
+      getMany: (ids: string[]) => {
+        calls.push(ids)
+        return Promise.resolve(ids.map((id) => ({ id })))
+      },
+      get: () => Promise.reject(new Error('get must not run when getMany exists')),
+    } as unknown as TaskStoreAsync
+    const ids = Array.from({ length: 1201 }, (_, i) => `t${i}`)
+    assert.deepEqual((await getTasksAsync(batched, ids)).map((r) => r.id), ids)
+    assert.deepEqual(calls.map((c) => c.length), [500, 500, 201])
   })
 
   test('create maps the typed input onto bd create args', () => {
