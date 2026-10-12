@@ -14,6 +14,7 @@ import {
   emitLifecycle,
   ensureAuth,
   facade,
+  getTasks,
   gitBranchLog,
   gitCommonDir,
   gitTry,
@@ -24,6 +25,7 @@ import {
   type PrTarget,
   type ReviewFacade,
   type ReviewThread,
+  type TaskRow,
 } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import { flag } from './args.ts'
@@ -700,18 +702,35 @@ function closeLandedBead(rev: ReviewFacade, t: PrTarget, bead: string): void {
   // which is the fail-safe direction (re-queue, never false-close).
   const covered =
     ids.length > 1 ? coveredBeadIds(clumpBranchLog(rev, t), ids) : new Set(ids)
+  // one bulk read for the whole clump — a `bd show` per member stacks
+  // the ~0.65s spawn floor on every merge. A failed batch leaves rows
+  // undefined and each member's own probe reports the dead store.
+  let rows: Map<string, TaskRow> | undefined
+  try {
+    rows = new Map(
+      getTasks(claimStore(process.cwd()), ids).map((r) => [r.id, r])
+    )
+  } catch { /* per-member probes below carry the failure report */ }
   for (const id of ids) {
-    dischargeLandedId(id, covered, link, t.pr)
+    dischargeLandedId(id, covered, link, t.pr, rows)
   }
 }
 
 /** One marker id's merge discharge — close when a covering commit
  *  landed, re-queue when it didn't. Best-effort per id: one bead's
- *  store failure must not skip the rest of the clump. */
-function dischargeLandedId(id: string, covered: Set<string>, link: string, pr: number): void {
+ *  store failure must not skip the rest of the clump. `rows` is the
+ *  caller's bulk prefetch — undefined falls back to this id's own
+ *  read so a dead store still surfaces per member. */
+function dischargeLandedId(
+  id: string,
+  covered: Set<string>,
+  link: string,
+  pr: number,
+  rows?: Map<string, TaskRow>
+): void {
   try {
     const tasks = claimStore(process.cwd())
-    const row = tasks.get(id)
+    const row = rows === undefined ? tasks.get(id) : rows.get(id)
     if (row === undefined) {
       console.error(`act: bead ${id} not in the task store — nothing closed for ${link}`)
       return

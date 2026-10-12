@@ -31,6 +31,7 @@ import {
 } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import {
+  getTasksAsync,
   gitTry,
   loadConfig,
   markerLive,
@@ -242,10 +243,11 @@ export async function sessionContextText(ctx: ConnectorCtx): Promise<string> {
   try {
     const store = taskStoreAsync(ctx.dir)
     // claim rows, the mol-id set, and the in-progress list overlap —
-    // N claimed beads are N bd show spawns that only cost one latency
+    // N claimed beads are ONE bulk show where the store batches
+    // (per-spawn binary init is the floor — count is the lever)
     const claims = [...sessionTaskClaims(ctx)]
     const [rows, molRows, inProgress] = await Promise.all([
-      Promise.all(claims.map((id) => store.get(id).catch(() => undefined))),
+      getTasksAsync(store, claims).catch((): TaskRow[] => []),
       store.list({ type: 'molecule', all: true }).catch((): TaskRow[] | null => null),
       store.list({ status: 'in_progress' }),
     ])

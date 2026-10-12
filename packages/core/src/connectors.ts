@@ -643,6 +643,11 @@ export function tasksAsync(
     list: (f) => Promise.resolve(s.list(f)),
     ready: (f) => Promise.resolve(s.ready(f)),
     get: (id) => Promise.resolve(s.get(id)),
+    // exposed only when the sync store really batches — a faked serial
+    // getMany would hide the capability from the degrade decision
+    ...(s.getMany === undefined
+      ? {}
+      : { getMany: (ids: string[]) => Promise.resolve(s.getMany!(ids)) }),
     children: (id) => Promise.resolve(s.children(id)),
     deps: (ids, opts) => Promise.resolve(s.deps(ids, opts)),
     neighbors: (id, opts) => Promise.resolve(s.neighbors(id, opts)),

@@ -138,6 +138,8 @@ export {
   bdActor,
   bdActorAsync,
   canonicalTaskRel,
+  getTasks,
+  getTasksAsync,
   nativeTaskRel,
   parseSlotAcquire,
   parseSlotCheck,

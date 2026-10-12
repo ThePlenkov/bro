@@ -15,6 +15,7 @@ import {
   registerConnector,
   sessionStartLines,
   stopGateContributions,
+  tasksAsync,
 } from './connectors.ts'
 import type { Connector } from './connectors.ts'
 import { bdActor } from './tasks.ts'
@@ -115,6 +116,23 @@ describe('connectors', () => {
       { prefer: { tasks: 'acme-tasks' } }
     ) as unknown as { tag: string }
     assert.equal(store.tag, 'acme')
+  })
+
+  test('tasksAsync exposes getMany only when the sync store really batches', async () => {
+    registerConnector({ name: 'acme-serial', tasks: fakeTasks('serial') })
+    const serial = tasksAsync(process.cwd(), { tasks: 'acme-serial' })
+    assert.equal(serial.getMany, undefined)
+    registerConnector({
+      name: 'acme-batched',
+      tasks: () =>
+        ({
+          tag: 'batched',
+          getMany: (ids: string[]) => ids.map((id) => ({ id })),
+        }) as unknown as TaskStore,
+    })
+    const batched = tasksAsync(process.cwd(), { tasks: 'acme-batched' })
+    assert.equal(typeof batched.getMany, 'function')
+    assert.deepEqual((await batched.getMany!(['x', 'y'])).map((r) => r.id), ['x', 'y'])
   })
 
   test('named connector lacking the facade throws', () => {

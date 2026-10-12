@@ -1,5 +1,5 @@
 import { dirname } from 'node:path'
-import { bd, bdJson, taskStore } from '@broject/core'
+import { bd, bdJson, getTasks, taskStore } from '@broject/core'
 import type { ConvoyNext, ConvoyStep, Molecule, MolIssue, StepInput, StepKind, StepState } from './types.ts'
 
 /** `bd mol show <id> --json` — the whole DAG in one call. */
@@ -126,16 +126,25 @@ export function nextStep(mol: Molecule): ConvoyNext {
 /**
  * The handoff into a step: its closed direct dependencies, with the
  * `--result` each was closed with (bd stores it as close_reason). One
- * `bd show` per closed blocker — bounded by in-degree, usually 1–2.
+ * bulk read for the whole set — a `bd show` per blocker would stack
+ * the ~0.65s spawn floor even at in-degree 1–2.
  */
 export function stepInputs(mol: Molecule, stepId: string): StepInput[] {
   const closed = new Set(mol.issues.filter((i) => CLOSED.has(i.status)).map((i) => i.id))
-  return mol.dependencies
-    .filter((d) => d.type === 'blocks' && d.issue_id === stepId && closed.has(d.depends_on_id))
-    .map((d) => {
-      const dep = taskStore().get(d.depends_on_id)
-      return { id: d.depends_on_id, title: dep?.title ?? '', reason: dep?.close_reason ?? '' }
-    })
+  const edges = mol.dependencies.filter(
+    (d) => d.type === 'blocks' && d.issue_id === stepId && closed.has(d.depends_on_id)
+  )
+  const byId = new Map(
+    getTasks(
+      taskStore(),
+      edges.map((d) => d.depends_on_id)
+    ).map((r) => [r.id, r])
+  )
+  return edges.map((d) => ({
+    id: d.depends_on_id,
+    title: byId.get(d.depends_on_id)?.title ?? '',
+    reason: byId.get(d.depends_on_id)?.close_reason ?? '',
+  }))
 }
 
 /**
