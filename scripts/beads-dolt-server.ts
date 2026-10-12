@@ -206,12 +206,16 @@ const systemctl = (args: string[]) =>
   spawnSync('systemctl', ['--user', ...args], { encoding: 'utf8', timeout: 30_000 }) // NOSONAR — literal argv, unit names regex-validated
 
 /** Absolute path for a PATH-resolved binary — the unit's ExecStart
- *  needs it (systemd PATH is minimal). */
+ *  needs it (systemd PATH is minimal). A non-printable PATH dir would
+ *  inject a unit directive — same refusal as resolveBeads(). */
 function whereis(bin: string): string {
   for (const dir of (process.env.PATH ?? '').split(':')) {
     const p = join(dir, bin)
     try {
       accessSync(p, constants.X_OK)
+      if (/[^\x20-\x7e]/.test(p)) {
+        return fail(`PATH-resolved ${bin} path contains non-printable characters — refusing`)
+      }
       return p // NOSONAR — PATH lookup is the contract (same as bd/gh resolution)
     } catch {
       // not here — next dir
