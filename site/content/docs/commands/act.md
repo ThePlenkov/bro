@@ -83,7 +83,7 @@ wait.
 The caveat: a session-bound background task dies when the session ends.
 For a watch that must outlive the session, spawn it detached or let
 `bro review act rearm` resurrect the dead marker on the next session's nudge —
-`bro review drive --every` and `bro review watch install` are the durable forms.
+`bro review drive install` and `bro review watch install` are the durable forms.
 
 ## Stacked PRs and merge queues
 

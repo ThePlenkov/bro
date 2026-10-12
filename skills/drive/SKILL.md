@@ -48,6 +48,8 @@ descendants keep. Occupied is always the safe verdict.
 | `bro review drive --no-merge` | supervise only — never merge (config: `drive.merge: "never"`) |
 | `bro review drive --connector <name>` | spawn fixers on one backend |
 | `bro review drive --json` | one JSON line per PR verdict |
+| `bro review drive install [--every N] [--print]` | arm the merge path — writes `bro/drive.json` (the want-marker session checkpoints rearm a dead supervisor from) and brings `bro fleet daemon` up; cadence `--every N` or `drive.intervalSec` |
+| `bro review drive uninstall` | disarm the marker + stop the supervisor |
 
 Config: `drive.intervalSec` (300), `drive.merge` (`auto`|`never`).
 The fixer agent's command resolves exactly like `bro fleet agents up` —
@@ -62,6 +64,12 @@ The fixer agent's command resolves exactly like `bro fleet agents up` —
   forms refuse under `BRO_AGENT_ID` (spawned workers never arm
   cadences). No systemd/crontab installs exist — a session start rearms
   a dead pulse from `bro/pulse.json`.
+- **`bro review drive install` is the always-on merge path.** Arming
+  `bro/drive.json` makes supervision infrastructure, not an opt-in:
+  session checkpoints rearm a dead supervisor on every lifecycle event
+  (sessionStart + postTool, orchestrator-only). `bro fleet daemon down`
+  under an install is a transient stop — the next checkpoint brings it
+  back; `uninstall` is the disarm.
 - **Occupied is not an error.** A skipped PR means a live session owns
   it — report and move on; never force-spawn into someone's worktree.
 - **The fixer bead is the handle.** `bro fleet agents status <bead>` shows

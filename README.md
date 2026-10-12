@@ -128,7 +128,7 @@ Full reference: [broject.dev/docs](https://broject.dev/docs).
 | `bro review watch [--once\|--every N\|--notify]`, `watch install\|uninstall` | Read-only heartbeat; `--every` is the session pulse (`bro/pulse.lock`, one per repo); `install` arms the want-marker (`bro/pulse.json`) — OS timers retired |
 | `bro comms notify <text>` | Drop an event into the session mailbox — addressed, typed, coalesced |
 | `bro comms bus serve\|publish\|subscribe\|status` | The local event broker behind the events facade |
-| `bro review drive [--once\|--every N\|--no-merge]` | Apply the act gate to fleet PRs; merge only on green |
+| `bro review drive [--once\|--every N\|--no-merge]`, `drive install\|uninstall` | Apply the act gate to fleet PRs; merge only on green. `install` arms the merge path (`bro/drive.json`) — session checkpoints rearm a dead supervisor |
 
 ### Review
 

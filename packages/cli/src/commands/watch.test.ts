@@ -190,7 +190,7 @@ const snap = (over: Partial<WatchSnapshot> = {}): WatchSnapshot => ({
   gates: { available: true, prs: [] },
   fleet: { rows: [], degraded: [], conflicts: [] },
   loop: { stallMin: 45, runs: [] },
-  daemon: { live: false, recorded: false },
+  daemon: { live: false, recorded: false, installed: false },
   ...over,
 })
 
@@ -221,10 +221,23 @@ describe('renderSnapshot', () => {
   })
 
   test('a live supervisor renders its pid; a dead recorded one is attention', () => {
-    const up = renderSnapshot(snap({ daemon: { live: true, pid: 4242, recorded: true } }))
+    const up = renderSnapshot(
+      snap({ daemon: { live: true, pid: 4242, recorded: true, installed: false } })
+    )
     assert.match(up, /daemon\n  up — pid 4242/)
-    const dead = renderSnapshot(snap({ daemon: { live: false, recorded: true } }))
+    const dead = renderSnapshot(snap({ daemon: { live: false, recorded: true, installed: false } }))
     assert.match(dead, /daemon\n  dead — recorded supervisor is gone/)
+  })
+
+  test('an installed-but-dead supervisor is a rearm gap, not a hand-restart ask', () => {
+    const dead = renderSnapshot(
+      snap({ daemon: { live: false, recorded: true, installed: true } })
+    )
+    assert.match(dead, /daemon\n  installed but dead — the next session checkpoint rearms it/)
+    const up = renderSnapshot(
+      snap({ daemon: { live: true, pid: 4242, recorded: true, installed: true } })
+    )
+    assert.match(up, /daemon\n  up — pid 4242 · installed/)
   })
 
   test('the loop section renders run records — silence readable per row', () => {

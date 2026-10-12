@@ -28,6 +28,7 @@ git clone https://github.com/<org>/<repo>.git && cd <repo>
 # repo bootstrap — for bro itself: npm ci && npm run build
 bro work sync --pull        # materializes refs/bro/data into the worktree, then runs bd sync
 bro fleet daemon up         # the supervisor is a process — it does not come back by itself
+                            # (`bro drive install` armed? the first session checkpoint rearms it)
 bro review act rearm        # resurrect dead PR watch markers (re-arms, never duplicates)
 ```
 

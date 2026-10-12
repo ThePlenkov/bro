@@ -27,9 +27,14 @@ in-flight agents, and killing a watch window never touches either.
   `<git-common>/bro/daemon.json`, logs to `<git-common>/bro/daemon.log`.
   Idempotent: a live holder (even a raw `bro review drive --every`) reports
   `already`, never doubles.
-- `bro fleet daemon status` — lock holder + armer record + log path.
+- `bro fleet daemon status` — lock holder + armer record + log path;
+  an armed `bro/drive.json` shows `· installed`.
 - `bro fleet daemon down` — SIGTERM the holder, clear the record.
-- `bro fleet daemon run` — the loop itself; spawned by `up`, not for direct
+  **Transient under an install**: `bro review drive install` armed
+  `bro/drive.json`, so the next session checkpoint rearms the
+  supervisor; `bro review drive uninstall` is the disarm.
+- `bro fleet daemon run` — the loop itself; spawned by `up` (or by a
+  session checkpoint rearming an installed supervisor), not for direct
   use.
 
 ## Guards

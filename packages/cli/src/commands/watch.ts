@@ -72,7 +72,7 @@ import { providerWallsFor } from '../agent-connectors.ts'
 import { parseWorktreePorcelain, type WorktreeInfo } from './work.ts'
 import { installWatch, uninstallWatch } from './watch-install.ts'
 import { isOrchestratorSession, pulseLockPath } from './watch-pulse.ts'
-import { daemonProbe } from './daemon.ts'
+import { daemonProbe, readDriveMarker } from './daemon.ts'
 import { writeHeartbeat } from './watch-heartbeat.ts'
 import { watchSection, type WatchConfig } from './watch-config.ts'
 
@@ -181,6 +181,9 @@ export interface WatchDaemon {
   /** an armer record exists (`daemon.json`) — dead+recorded is the
    *  "restart me" signal; live+unrecorded is a manual `bro drive` */
   recorded: boolean
+  /** `bro drive install` armed `bro/drive.json` — a dead daemon under
+   *  it is a checkpoint-rearm gap, not a hand-restart ask (bro-y5zon) */
+  installed: boolean
   /** the probe itself threw — renders `unavailable` */
   error?: string
 }
@@ -504,9 +507,14 @@ async function gatesPlane(
 function daemonPlane(dir: string): WatchDaemon {
   try {
     const probe = daemonProbe(dir)
-    return { live: probe.live, pid: probe.pid, recorded: probe.recorded !== null }
+    return {
+      live: probe.live,
+      pid: probe.pid,
+      recorded: probe.recorded !== null,
+      installed: readDriveMarker(dir) !== null,
+    }
   } catch (err) {
-    return { live: false, recorded: false, error: errText(err) }
+    return { live: false, recorded: false, installed: false, error: errText(err) }
   }
 }
 
@@ -556,8 +564,12 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
   }
   if (daemon.error !== undefined) {
     attention.push(`daemon plane failed — ${daemon.error}`)
-  } else if (daemon.recorded && !daemon.live) {
-    attention.push(`daemon recorded but dead — 'bro daemon up' restarts`)
+  } else if (!daemon.live && (daemon.recorded || daemon.installed)) {
+    attention.push(
+      daemon.installed
+        ? `drive supervisor installed but dead — the next session checkpoint rearms it`
+        : `daemon recorded but dead — 'bro daemon up' restarts`
+    )
   }
 
   return {
@@ -681,7 +693,12 @@ function daemonLines(daemon: WatchDaemon): string[] {
     return [`  unavailable — ${daemon.error}`]
   }
   if (daemon.live) {
-    return [`  up — pid ${daemon.pid}${daemon.recorded ? '' : ' (unrecorded holder)'}`]
+    return [
+      `  up — pid ${daemon.pid}${daemon.recorded ? '' : ' (unrecorded holder)'}${daemon.installed ? ' · installed' : ''}`,
+    ]
+  }
+  if (daemon.installed) {
+    return ['  installed but dead — the next session checkpoint rearms it']
   }
   return [daemon.recorded ? '  dead — recorded supervisor is gone' : '  down']
 }

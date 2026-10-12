@@ -102,11 +102,16 @@ bro review drive [--once] [--every [N]] [--no-merge] [--connector <name>] [--jso
 PR. The config section is `drive.intervalSec` (default `300`) and
 `drive.merge` (`auto`, the default, or `never`).
 
-Run a fleet driver detached, for example:
-
-```bash
-nohup bro review drive --every 300 >> drive.log &
-```
+The durable form is `bro review drive install [--every N] [--print]`: it
+arms `<git-common>/bro/drive.json` — the want-marker — and brings the
+supervisor up (`bro fleet daemon` owns the process). Session
+checkpoints then rearm a dead supervisor on every lifecycle event, so
+the merge path is always-on infrastructure, not an opt-in.
+`bro review drive uninstall` disarms the marker and stops the
+supervisor; `bro fleet daemon down` under an install is only a
+transient stop — the next checkpoint brings it back. For a one-off
+detached supervisor without the install, `bro fleet daemon up` spawns
+the same loop by hand.
 
 ## Local service
 
