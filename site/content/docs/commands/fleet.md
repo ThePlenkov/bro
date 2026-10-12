@@ -53,7 +53,8 @@ non-interactive ticker, use `bro review watch --every N`.
 | `bro review watch [--once]` | One read-only heartbeat with attention, molecules, gates, and fleet rows |
 | `bro review watch --notify` | Drop the initial snapshot and transitions into the mailbox |
 | `bro review watch --json` | Emit `{ts, attention, mols, gates, fleet}` |
-| `bro review watch --every N --for S` | Repeat the heartbeat on a cadence — the session pulse: holds `bro/pulse.lock` (one per repo, a duplicate stands by) and refuses under `BRO_AGENT_ID`; `--for` is required so the window's exit exists as the session's wake event |
+| `bro review watch --every N --for S` | Repeat the heartbeat on a cadence — the unattended pulse leg: holds `bro/pulse.lock` (one per repo, a duplicate stands by) and refuses under `BRO_AGENT_ID`; `--for` bounds the window |
+| `bro fleet pulse [S] [--no-notify\|--json] [-- <cmd>…]` | The session-owned metronome — a long-lived child that beats every S seconds (default `watch.intervalSec`): prints each tick and, as the `pulse.lock` holder, drops it into the mailbox — the mail IS the wake. A non-holder keeps ticking on stdout without mailing; refuses under `BRO_AGENT_ID`; `-- <cmd>…` ticks a probe command instead of the snapshot; works outside a repo as a pure timer |
 | `bro review watch install [--every N] [--print]` | Arm the session pulse — writes `bro/pulse.json` (the want-marker session-start rearms from), strips any legacy systemd/cron entry; cadence `--every N` or `watch.intervalSec` (default 60) |
 | `bro review watch uninstall` | Disarm the marker + strip any legacy timer/cron entry; a live pulse exits on its own |
 | `bro comms notify <text>` | Write one mailbox event for live sessions — addressed drops, kinds, and the bus are in [Events](/docs/commands/events) |
@@ -69,20 +70,21 @@ spawn blindly, especially when a backend is degraded. The notify connector
 drains unseen drops during the next post-tool probe, so a watcher can reach
 the parent session without a wait loop.
 
-Detach the watcher, don't block on it: `bro review watch --every N --for S
---notify` in a background shell keeps a bounded heartbeat running while the
-agent works — `--for` caps the watcher window; it does not tie the
-watcher to session exit (an unbounded `--every` is for an external
-supervisor that owns its lifecycle), and the `--notify` drops surface in the parent
-session mid-turn, on its next tool call (the mailbox is pull-based: a drop
-lands when the session next acts, it never wakes a sleeping one). The
-session-pulse model is the durable form: `bro review watch install` arms
-`bro/pulse.json`, and a session start with no live pulse (lock holder dead)
-gets the rearm nudge — the orchestrator session then runs
-`bro review watch --every N --for S --notify` in a background
-shell; the window's end is the wake event, followed by one `bro review drive`
-pass, a digest, and the next window. OS timers are retired — the session
-owns the cadence, and spawned workers (`BRO_AGENT_ID`) never arm it.
+Detach the watcher, don't block on it: `bro fleet pulse <S>` in a
+background shell keeps a heartbeat running while the agent works — every
+tick lands in the mailbox and surfaces in the session mid-turn, on its
+next tool call (the mailbox is pull-based: a drop lands when the session
+next acts, it never wakes a sleeping one — silence between beats is the
+alarm). The session-pulse model is the durable form: `bro pulse` (or
+`bro review watch install`) arms `bro/pulse.json`, and a session start
+with no live pulse (lock holder dead) gets the rearm nudge — the
+orchestrator re-arms `bro pulse`, and the unattended fallback is the
+bounded `bro review watch --every N --for S --notify` the checkpoint
+spawns (`--for` caps the window without tying the watcher to session
+exit; the window's end is the wake event, followed by one
+`bro review drive` pass, a digest, and the next window). OS timers are
+retired — the session owns the cadence, and spawned workers
+(`BRO_AGENT_ID`) never arm it.
 
 ## Drive
 

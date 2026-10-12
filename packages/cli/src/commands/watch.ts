@@ -831,6 +831,22 @@ function runWatchSched(argv: string[]): void {
   }
 }
 
+/** One heartbeat tick, collected: the janitor's reap (the cadence a
+ *  reaper survives on — one reap per tick, before the snapshot so the
+ *  planes read post-reap state, bro-f6zp), the snapshot, the rendered
+ *  text. Printing, the heartbeat file, and the notify drop stay with
+ *  the caller — `watch --notify` dedups transitions in-process, `bro
+ *  pulse` mails every beat (silence must mean dead, not unchanged). */
+export async function tickOnce(dir: string): Promise<{ snap: WatchSnapshot; text: string }> {
+  const { janitor, note } = tickJanitor(dir)
+  const snap = await collectSnapshot(dir)
+  snap.janitor = janitor
+  if (note !== '') {
+    snap.attention.push(note)
+  }
+  return { snap, text: renderSnapshot(snap) }
+}
+
 export async function runWatchCommand(argv: string[]): Promise<void> {
   if (argv[0] === 'install' || argv[0] === 'uninstall') {
     runWatchSched(argv.slice(1))
@@ -854,15 +870,7 @@ export async function runWatchCommand(argv: string[]): Promise<void> {
   // only on transitions, a heartbeat reports change not noise.
   let lastNotified = ''
   const tick = async (): Promise<void> => {
-    // the janitor rides the heartbeat — one reap per tick, before the
-    // snapshot so the planes read post-reap state (bro-f6zp)
-    const { janitor, note } = tickJanitor(dir)
-    const snap = await collectSnapshot(dir)
-    snap.janitor = janitor
-    if (note !== '') {
-      snap.attention.push(note)
-    }
-    const text = renderSnapshot(snap)
+    const { snap, text } = await tickOnce(dir)
     console.log(json ? JSON.stringify(snap, null, 2) : text)
     try {
       // the durable heartbeat file — mailbox drops expire in an hour,
