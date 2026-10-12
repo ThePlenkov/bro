@@ -1469,15 +1469,22 @@ export async function runDriveCommand(argv: string[]): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
     usage()
   }
-  checkBeads()
   const main = mainWorktree()
   const broCfg = loadBroConfig(main.path)
   const drive = ((broCfg as Record<string, unknown>).drive as DriveConfig | undefined) ??
     driveSection(undefined)
   if (argv[0] === 'install' || argv[0] === 'uninstall') {
+    // uninstall and `install --print` never touch the store — uninstall
+    // is the cleanup path a broken beads setup still needs, --print a
+    // pure preview. The real install spawns the supervisor, which needs
+    // the store itself, so only that path keeps the gate.
+    if (argv[0] === 'install' && !argv.includes('--print')) {
+      checkBeads()
+    }
     runDriveSched(argv, main.path, drive)
     return
   }
+  checkBeads()
   let args: DriveArgs
   try {
     args = driveArgs(argv, drive.intervalSec)
