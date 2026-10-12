@@ -1,7 +1,0 @@
-interface:
-  display_name: "Bro Drive"
-  short_description: "Post-PR review driver via the bro CLI — poll act gates, spawn fixer agents, merge on green"
-  brand_color: "#C43D16"
-  default_prompt: "Use $drive to supervise open PRs."
-policy:
-  allow_implicit_invocation: false
