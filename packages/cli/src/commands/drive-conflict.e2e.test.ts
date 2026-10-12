@@ -8,58 +8,24 @@
  *  matrix. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  bead,
+  assertNoSpawn,
+  assertOrphanMerged,
+  driveFixture,
+  driveVerdict as verdict,
+  exitRecorded,
+  fixerRows,
   git,
-  initRepo,
   insideAsync,
-  installFakeBd,
-  installFakeHost,
-  readBeads,
+  occupyBranch,
   readHostState,
-  runCli,
+  waitFor,
   writeHostState,
-  type CliResult,
 } from './testrepo.ts'
 
-interface Fixture {
-  root: string
-  main: string
-  db: string
-  hostState: string
-  run: (args: string[]) => CliResult
-}
-
-/** Repo + fake bd + fake host + bro.config wiring — `loop.agent` is the
- *  fixer spawn's command fallback (agents.native.command unset). */
-function fixture(): Fixture {
-  const { root, main } = initRepo('bro-drive-conflict-')
-  const { binDir, db } = installFakeBd(root)
-  const host = installFakeHost(main)
-  writeFileSync(
-    join(main, 'bro.config.json'),
-    JSON.stringify({
-      plugins: ['./fakehost.ts'],
-      connectors: { reviews: 'fakehost' },
-      loop: { agent: `node ${host.agent}` },
-    })
-  )
-  const env = {
-    PATH: `${binDir}:${process.env.PATH ?? ''}`,
-    HOME: root,
-    FAKE_BD_DB: db,
-    FAKE_HOST_STATE: host.state,
-  }
-  return {
-    root,
-    main,
-    db,
-    hostState: host.state,
-    run: (args) => runCli(['drive', ...args], { cwd: main, env }),
-  }
-}
+const fixture = () => driveFixture('bro-drive-conflict-')
 
 /** One orphaned CONFLICTING PR on a fleet branch. */
 const conflicting = {
@@ -72,28 +38,8 @@ const conflicting = {
   },
 }
 
-const verdict = (r: CliResult): { verdict?: string; detail?: string } =>
-  (JSON.parse(r.stdout.trim().split('\n').find((l) => l.includes('"verdict"')) ?? '{}') ?? {}) as {
-    verdict?: string
-    detail?: string
-  }
-
-async function waitFor(cond: () => boolean, ms = 15_000): Promise<boolean> {
-  const deadline = Date.now() + ms
-  while (Date.now() < deadline) {
-    if (cond()) {
-      return true
-    }
-    await new Promise((r) => setTimeout(r, 25))
-  }
-  return false
-}
-
 const events = (state: string): Array<Record<string, unknown>> =>
   (readHostState(state).events ?? []) as Array<Record<string, unknown>>
-
-const fixerRows = (db: string): Array<Record<string, unknown>> =>
-  readBeads(db).filter((r) => ((r.labels as string[] | undefined) ?? []).includes('fixer'))
 
 describe('bro drive — conflicted orphan PRs (bro-glkes)', () => {
   test('CONFLICTING spawns the rebase fixer; the next pass merges and closes its bead', async () => {
@@ -113,13 +59,7 @@ describe('bro drive — conflicted orphan PRs (bro-glkes)', () => {
         true,
         'the spawned fixer never ran its rebase order'
       )
-      const agentsDir = join(f.main, '.git', 'bro', 'agents')
-      assert.equal(
-        await waitFor(
-          () => existsSync(agentsDir) && readdirSync(agentsDir).some((n) => n.endsWith('.exit'))
-        ),
-        true
-      )
+      assert.equal(await waitFor(() => exitRecorded(f.main)), true)
       assert.match(
         readFileSync(join(f.main, 'spawns.log'), 'utf8'),
         /rebase rebased onto base/
@@ -130,10 +70,7 @@ describe('bro drive — conflicted orphan PRs (bro-glkes)', () => {
       assert.equal(fixer?.external_ref, 'drive:pr:7')
 
       // conflict cleared by the agent → gate green → orphan merge
-      const second = verdict(f.run(['--once', '--json']))
-      assert.equal(second.verdict, 'merged', second.detail)
-      assert.equal(bead(f.db, String(fixer?.id))?.status, 'closed')
-      assert.match(String(bead(f.db, String(fixer?.id))?.close_reason), /merged via/)
+      assertOrphanMerged(f, f.run(['--once', '--json']), fixer?.id)
     })
   })
 
@@ -144,12 +81,8 @@ describe('bro drive — conflicted orphan PRs (bro-glkes)', () => {
       writeHostState(f.hostState, { prs: conflicting })
       // a live session marker naming the branch — the occupancy guard
       // must win over the fixer trigger
-      const hooks = join(f.main, '.git', 'bro', 'hooks')
-      mkdirSync(hooks, { recursive: true })
-      writeFileSync(join(hooks, 's1.work'), `${Date.now()}\nwork/fx-a\n`)
-      const v = verdict(f.run(['--once', '--json']))
-      assert.equal(v.verdict, 'occupied', v.detail)
-      assert.equal(fixerRows(f.db).length, 0)
+      occupyBranch(f.main, 'work/fx-a')
+      assertNoSpawn(f, f.run(['--once', '--json']), 'occupied')
     })
   })
 
@@ -163,10 +96,9 @@ describe('bro drive — conflicted orphan PRs (bro-glkes)', () => {
         prs: conflicting,
         reviewedShas: ['a', 'b', 'c', 'd', 'e'],
       })
-      const v = verdict(f.run(['--once', '--json']))
-      assert.equal(v.verdict, 'blocked')
-      assert.match(v.detail ?? '', /merge conflicts/)
-      assert.equal(fixerRows(f.db).length, 0)
+      const r = f.run(['--once', '--json'])
+      assert.match(verdict(r).detail ?? '', /merge conflicts/)
+      assertNoSpawn(f, r, 'blocked')
     })
   })
 

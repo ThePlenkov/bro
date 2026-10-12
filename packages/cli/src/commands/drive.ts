@@ -19,6 +19,10 @@
  *   CONFLICTING, orphaned  → the same fixer spawn with a rebase work
  *                            order — an orphaned conflicted PR stalls
  *                            forever without one (bro-glkes)
+ *   ci-fail/SAST, orphaned → the same fixer spawn with a class work
+ *                            order (run log / annotations) — a settled
+ *                            blocker is a remediation start, not a
+ *                            terminal 'blocked' (bro-atb2g)
  *   green, occupied        → report; the owner's merge step lands it
  *   green, stale-occupied  → the owner's occupancy shows no proven
  *                            activity inside drive.occupancyTtlSec
@@ -57,13 +61,17 @@ import {
   emitLifecycle,
   ensureAuth,
   facade,
+  facadeName,
   gitCommonDir,
   gitTry,
+  patchAgentRegistry,
   readAgentRegistry,
   reviewHost,
   SpawnError,
   stampPrOwnership,
   type AgentInfo,
+  type AgentRegistryEntry,
+  type CheckInfo,
   type IgnoreCheckRule,
   type PrMeta,
   type ReviewFacade,
@@ -74,8 +82,11 @@ import {
 import {
   checkHistory,
   evaluateExitGate,
+  failingCiChecks,
   fetchPrActState,
+  isSast,
   listWatches,
+  liveSastChecks,
   watchEnd,
   watchHeartbeat,
   watchMarkerKind,
@@ -516,8 +527,9 @@ function ensureFixerBead(store: TaskStore, pr: number, link: string, branch: str
       title: `review fixer — PR #${pr}`,
       description:
         `Spawned by \`bro drive\` — work the gate state on ${link} ` +
-        `(branch \`${branch}\`): review threads or a conflict rebase, ` +
-        `whichever the spawn prompt orders. Push, never merge.`,
+        `(branch \`${branch}\`): review threads, a conflict rebase, ` +
+        `failing checks, or SAST findings — whichever the spawn prompt ` +
+        `orders. Push, never merge.`,
       type: 'task',
       labels: [FIXER_LABEL],
       externalRef: fixerRef(pr),
@@ -749,6 +761,10 @@ async function driveShadowNotes(
 interface Ctx {
   mainRoot: string
   rev: ReviewFacade
+  /** The reviews connector's name — fixer work orders name host-CLI
+   *  commands, so the prompt must match the backend actually serving
+   *  this repo (gh on github, glab api on gitlab). */
+  host: string
   repo: string
   act: {
     ignoreChecks: IgnoreCheckRule[]
@@ -1125,6 +1141,129 @@ interface FixerSpawn {
   /** prefixes the spawned detail so a rebase round reads differently
    *  in the pass log. */
   tag?: string
+  /** Same-head dedup (bro-atb2g) — the head this work order targets and
+   *  its blocker class. Recorded on the fixer bead's registry entry at
+   *  spawn; a clean-exit attempt on the same (head, class) never gets
+   *  an identical replay. Thread fixers stay undeduped: new threads
+   *  land on an unmoved head, so replay there is real work. */
+  attempt?: { head: string; cls: string }
+}
+
+/** The attempt record on the fixer bead's registry entry — one head,
+ *  the blocker classes whose OWN run exited ok on it (`spent`), and
+ *  the class the entry's `cause` currently describes (`current`).
+ *  Per-class, never shared: a later ok run must not spend a class
+ *  whose own run crashed, and a crash must not un-spend a class that
+ *  earned its ok. A head move resets the record (a pushed head earns
+ *  a fresh round); a `down`/reap of the entry clears it (operator
+ *  semantics). */
+interface FixerAttempt {
+  head: string
+  spent: string[]
+  current: string
+}
+
+function fixerAttemptOf(entry: AgentRegistryEntry | undefined): FixerAttempt | undefined {
+  const v = entry?.fixerAttempt
+  if (typeof v !== 'object' || v === null) {
+    return undefined
+  }
+  const a = v as Partial<FixerAttempt> & { classes?: unknown }
+  const strings = (xs: unknown): string[] =>
+    Array.isArray(xs) ? xs.filter((c): c is string => typeof c === 'string') : []
+  if (typeof a.head !== 'string') {
+    return undefined
+  }
+  if (Array.isArray(a.spent) && typeof a.current === 'string') {
+    return { head: a.head, spent: strings(a.spent), current: a.current }
+  }
+  // pre-split shape {head, classes} — every class shared the entry's
+  // one cause; its best reading is 'all spent iff the cause was ok'
+  if (Array.isArray(a.classes)) {
+    return { head: a.head, spent: entry?.cause === 'ok' ? strings(a.classes) : [], current: '' }
+  }
+  return undefined
+}
+
+/** The dedup verdict: this (head, class) already ran a fixer that
+ *  exited clean — the same prompt on the same head is deterministic
+ *  replay. A class is spent when its own ok exit promoted it into
+ *  `spent`, or it's the entry's `current` class and `cause` reads
+ *  'ok' (the connector harvests cause at .exit time): only 'ok' is a
+ *  deliberated verdict — crash/lost/unclassified exits keep respawn
+ *  semantics, and rate_limited/quota are refused downstream by the
+ *  spawn guard. `stopped` lifts the dedup like it lifts a budget
+ *  wall — `bro agents down` is the operator's manual clear. */
+export function fixerAttemptSpent(
+  entry: AgentRegistryEntry | undefined,
+  head: string,
+  cls: string
+): boolean {
+  if (entry === undefined || entry.stopped === true) {
+    return false
+  }
+  const a = fixerAttemptOf(entry)
+  if (a?.head !== head) {
+    return false
+  }
+  return a.spent.includes(cls) || (a.current === cls && entry.cause === 'ok')
+}
+
+/** Stamp the attempt on the fixer bead's entry — runs inside the
+ *  spawn's locked section right after the spawn write (the lock is
+ *  re-entrant; the patch merges so connector fields survive).
+ *  `prevEntry` is the entry read BEFORE `spawnStepAgent` reset
+ *  `cause` — the run that just finished promotes its `current` class
+ *  into `spent` iff that cause was 'ok'; a crashed class stays
+ *  respawn-able, which is the whole point of tracking per class. */
+export function recordFixerAttempt(
+  dir: string,
+  molStep: string,
+  prevEntry: AgentRegistryEntry | undefined,
+  head: string,
+  cls: string
+): void {
+  const prev = fixerAttemptOf(prevEntry)
+  const sameHead = prev?.head === head && prevEntry?.stopped !== true
+  const spent = sameHead ? [...(prev?.spent ?? [])] : []
+  if (
+    sameHead &&
+    prevEntry?.cause === 'ok' &&
+    prev !== undefined &&
+    prev.current !== '' &&
+    !spent.includes(prev.current)
+  ) {
+    spent.push(prev.current)
+  }
+  patchAgentRegistry(dir, molStep, { fixerAttempt: { head, spent, current: cls } })
+}
+
+/** Cheap pre-check for the locked dedup inside spawnFixerAgent — a
+ *  spent verdict decided up front never pays the worktree checkout.
+ *  The authoritative re-check still runs under the spawn locks: only
+ *  this drive writes the record (one drive per repo, drive.lock), so
+ *  no third party can flip spent → unspent between here and there. */
+function fixerSpent(
+  ctx: Ctx,
+  pr: number,
+  headSha: string,
+  fixer: TaskRow | undefined,
+  cls: string
+): PrVerdict | undefined {
+  if (fixer === undefined) {
+    return undefined
+  }
+  const entry = readAgentRegistry(ctx.mainRoot)[fixer.id]
+  return fixerAttemptSpent(entry, headSha, cls)
+    ? {
+        pr,
+        link: ctx.rev.prLink(ctx.repo, pr),
+        verdict: 'fixer-spent',
+        detail:
+          `${cls} fixer already exited clean on this head — ` +
+          'a pushed head earns a fresh round',
+      }
+    : undefined
 }
 
 /** The locked spawn ceremony both fixer kinds share — a last occupancy
@@ -1168,6 +1307,23 @@ async function spawnFixerAgent(
       return { pr, link, verdict: 'occupied', detail: occ }
     }
     const bead = s.fixer ?? ensureFixerBead(ctx.store, pr, link, s.branch)
+    // the pre-spawn entry — dedup verdict AND the prev run's cause:
+    // the spawn write below resets `cause`, and recordFixerAttempt
+    // must promote the run that just finished by what it was BEFORE
+    // this spawn, not after. Read inside the lock so a respawn that
+    // landed during the wait can't be mislabeled. The caller may have
+    // pre-checked with fixerSpent — same verdict either way.
+    const prevEntry = readAgentRegistry(ctx.mainRoot)[bead.id]
+    if (s.attempt !== undefined && fixerAttemptSpent(prevEntry, s.attempt.head, s.attempt.cls)) {
+      return {
+        pr,
+        link,
+        verdict: 'fixer-spent',
+        detail:
+          `${s.attempt.cls} fixer already exited clean on this head — ` +
+          'a pushed head earns a fresh round',
+      }
+    }
     try {
       const info = await spawnStepAgent(ctx.mainRoot, ctx.env, {
         molStep: bead.id,
@@ -1176,6 +1332,9 @@ async function spawnFixerAgent(
         connector: ctx.connector,
         env: { BRO_PR: String(pr), BRO_PR_URL: link },
       })
+      if (s.attempt !== undefined) {
+        recordFixerAttempt(ctx.mainRoot, bead.id, prevEntry, s.attempt.head, s.attempt.cls)
+      }
       const pid = info.pid === undefined ? '' : ` pid ${info.pid}`
       const tag = s.tag ?? ''
       return { pr, link, verdict: 'spawned', detail: `${tag}${bead.id} → ${info.id}${pid}` }
@@ -1211,10 +1370,7 @@ async function spawnRebaseFixer(
   const link = ctx.rev.prLink(ctx.repo, pr)
   let meta: PrMeta
   try {
-    meta =
-      ctx.rev.prMetaAsync === undefined
-        ? ctx.rev.prMeta({ repo: ctx.repo, pr })
-        : await ctx.rev.prMetaAsync({ repo: ctx.repo, pr })
+    meta = await metaOf(ctx, pr)
   } catch (err) {
     return { pr, link, verdict: 'probe-failed', detail: errText(err) }
   }
@@ -1224,14 +1380,11 @@ async function spawnRebaseFixer(
   if (meta.mergeable === 'MERGEABLE') {
     return { pr, link, verdict: 'conflict-resolved' }
   }
-  let wt = worktree
-  if (wt === undefined) {
-    const ensured = ensureFixerWorktree(ctx.mainRoot, state.headRef)
-    if (ensured.path === undefined) {
-      return { pr, link, verdict: 'no-worktree', detail: ensured.err }
-    }
-    wt = ensured.path
+  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'rebase')
+  if ('verdict' in lane) {
+    return lane
   }
+  const wt = lane.wt
   return spawnFixerAgent(ctx, pr, {
     branch: state.headRef,
     wt,
@@ -1245,6 +1398,356 @@ async function spawnRebaseFixer(
       worktree: wt,
     }),
     tag: 'rebase ',
+    attempt: { head: meta.headSha, cls: 'rebase' },
+  })
+}
+
+/** Fresh prMeta for the spawn-path re-probes — the gate's state snapshot
+ *  is stale by the time a fixer spawns, so a settle or a moved head
+ *  between the two reads is caught here, never assumed away. */
+function metaOf(ctx: Ctx, pr: number): Promise<PrMeta> {
+  const t = { repo: ctx.repo, pr }
+  return ctx.rev.prMetaAsync === undefined
+    ? Promise.resolve().then(() => ctx.rev.prMeta(t))
+    : ctx.rev.prMetaAsync(t)
+}
+
+/** The spawn-path re-probe every blocking-class fixer shares: fresh
+ *  prMeta + live checks read AFTER the gate snapshot — a settle or a
+ *  moved head between the two reads is caught here, never assumed
+ *  away (meta.headSha is what dedup + annotation lookups must use). */
+async function freshOpen(
+  ctx: Ctx,
+  pr: number
+): Promise<{ link: string; meta: PrMeta; checks: CheckInfo[] } | PrVerdict> {
+  const link = ctx.rev.prLink(ctx.repo, pr)
+  let meta: PrMeta
+  let checks: CheckInfo[]
+  try {
+    ;[meta, checks] = await Promise.all([metaOf(ctx, pr), checksOf(ctx, pr)])
+  } catch (err) {
+    return { pr, link, verdict: 'probe-failed', detail: errText(err) }
+  }
+  if (meta.state !== 'OPEN') {
+    return { pr, link, verdict: 'settled', detail: meta.state.toLowerCase() }
+  }
+  return { link, meta, checks }
+}
+
+/** The shared tail of every fixer spawn — the class attempt spent on
+ *  this head → its verdict; no caller-held worktree → the branch
+ *  checkout is ensured here (or no-worktree). */
+function fixerLane(
+  ctx: Ctx,
+  pr: number,
+  link: string,
+  branch: string,
+  worktree: string | undefined,
+  fixer: TaskRow | undefined,
+  headSha: string,
+  cls: string
+): { wt: string } | PrVerdict {
+  const spent = fixerSpent(ctx, pr, headSha, fixer, cls)
+  if (spent !== undefined) {
+    return spent
+  }
+  if (worktree !== undefined) {
+    return { wt: worktree }
+  }
+  const ensured = ensureFixerWorktree(ctx.mainRoot, branch)
+  if (ensured.path === undefined) {
+    return { pr, link, verdict: 'no-worktree', detail: ensured.err }
+  }
+  return { wt: ensured.path }
+}
+
+// --- ci-fail / sast fixers (bro-atb2g) -----------------------------------------
+
+/** Facade reads that may be sync-only — the same orSync discipline
+ *  fetchPrActState uses: defer the sync call through .then so a throw
+ *  becomes a rejection the caller's .catch sees. */
+function checksOf(ctx: Ctx, pr: number): Promise<CheckInfo[]> {
+  const t = { repo: ctx.repo, pr }
+  return ctx.rev.checksAsync === undefined
+    ? Promise.resolve().then(() => ctx.rev.checks(t))
+    : ctx.rev.checksAsync(t)
+}
+
+function annotationsOf(
+  ctx: Ctx,
+  headSha: string,
+  names: ReadonlySet<string>
+): Promise<Map<string, number | null>> {
+  return ctx.rev.checkAnnotationsAsync === undefined
+    ? Promise.resolve().then(() => ctx.rev.checkAnnotations(ctx.repo, headSha, names))
+    : ctx.rev.checkAnnotationsAsync(ctx.repo, headSha, names)
+}
+
+/** The gate's effective check set — advisory-ignored names dropped the
+ *  same way advisoryFilter removes them, so a work order never names a
+ *  check the gate didn't count. */
+function gatedChecks(ctx: Ctx, checks: CheckInfo[]): CheckInfo[] {
+  const rules = ctx.act.ignoreChecks
+  if (rules.length === 0) {
+    return checks
+  }
+  return checks.filter(
+    (c) => !rules.some((r) => c.name.toLowerCase().includes(r.name.toLowerCase()))
+  )
+}
+
+/** The ci-fail fixer's work order — the failing check list at spawn
+ *  (the prompt tells it to re-read the live list). A SAST-named run is
+ *  flagged: its blocking findings are annotations, not log lines. The
+ *  inspect commands name the review host's own CLI — `host` is the
+ *  reviews connector's name, so a GitLab-backed repo gets `glab api`
+ *  lines a fixer can actually run. */
+export function buildCiFixerPrompt(opts: {
+  pr: number
+  link: string
+  branch: string
+  worktree: string
+  repo: string
+  host: string
+  failing: CheckInfo[]
+}): string {
+  const gitlab = opts.host === 'gitlab'
+  const encRepo = encodeURIComponent(opts.repo)
+  const checksCmd = gitlab
+    ? `glab api projects/${encRepo}/merge_requests/${opts.pr}/pipelines`
+    : `gh pr checks ${opts.pr}`
+  const sastNote = gitlab
+    ? " — a SAST check: its findings live in the scanner's report (the job's links), not log lines"
+    : ' — a SAST check: its blocking findings are check-run annotations, not log lines'
+  const list = opts.failing
+    .map(
+      (c) =>
+        `- ${c.name}${c.bucket === 'cancel' ? ' (cancelled)' : ''}` +
+        (isSast(c.name) ? sastNote : '')
+    )
+    .join('\n')
+  const inspect = gitlab
+    ? [
+        `- \`glab api projects/${encRepo}/merge_requests/${opts.pr}/pipelines\` —`,
+        "  the MR's pipelines; the head pipeline is the live check list.",
+        `- \`glab api projects/${encRepo}/pipelines/<pipeline-id>/jobs\` names`,
+        '  the failing jobs and their links.',
+        `- \`glab api projects/${encRepo}/jobs/<job-id>/trace\` is a job's own`,
+        "  failure record — read the failing job's log before touching code.",
+      ]
+    : [
+        `- \`gh pr checks ${opts.pr}\` names the failing runs and their links.`,
+        "- `gh run view --log-failed <run-id>` is a run's own failure record —",
+        "  read the failing job's log before touching code.",
+        `- For a SAST-named run the findings are annotations:`,
+        `  \`gh api repos/${opts.repo}/check-runs/<run-id>/annotations\`.`,
+      ]
+  return [
+    `# CI fixer — ${opts.link}`,
+    '',
+    `Worktree: ${opts.worktree} (branch \`${opts.branch}\`) — work here, nowhere`,
+    'else. If `node_modules` is missing, run the repo install step first.',
+    '',
+    `This PR has ${opts.failing.length} failing check(s) on its head. The live`,
+    `list is \`${checksCmd}\` — more may settle or appear while you`,
+    'work. Failing at spawn:',
+    '',
+    list,
+    '',
+    'Investigate before editing:',
+    ...inspect,
+    "- Reproduce the failure in this worktree (the repo's build/test",
+    '  contract), fix, commit, push — the push is the verdict.',
+    '',
+    'Rules:',
+    '- NEVER merge — `bro drive` owns the merge on green.',
+    '- A failure no code change remediates (infra outage, quota, a check a',
+    '  human owns) is still a verdict: say so as your final message and stop',
+    '  — a clean exit without a push marks this head as attempted, not',
+    '  retried.',
+    '',
+  ].join('\n')
+}
+
+/** The sast fixer's work order — failure-level annotation counts per
+ *  check at spawn. `count` null means the run's annotations couldn't be
+ *  fetched — reported as unreadable, not as zero findings. */
+export function buildSastFixerPrompt(opts: {
+  pr: number
+  link: string
+  branch: string
+  worktree: string
+  repo: string
+  host: string
+  headSha: string
+  findings: { name: string; count: number | null }[]
+}): string {
+  const gitlab = opts.host === 'gitlab'
+  const encRepo = encodeURIComponent(opts.repo)
+  const list = opts.findings
+    .map(
+      (f) =>
+        `- ${f.name}: ` +
+        (f.count === null ? 'annotations unreadable — re-probe or use the dashboard link' : `${f.count} finding(s)`)
+    )
+    .join('\n')
+  const inspect = gitlab
+    ? [
+        'Read the findings before editing — this host has no check-run',
+        "  annotations endpoint; the findings are the scanner's report:",
+        `- \`glab api projects/${encRepo}/merge_requests/${opts.pr}/pipelines\` —`,
+        "  the MR's pipelines; the head pipeline's jobs name the SAST run.",
+        `- \`glab api projects/${encRepo}/jobs/<job-id>/trace\` is the job's`,
+        "  record; the scanner dashboard the job links to carries findings.",
+      ]
+    : [
+        'Read the findings before editing — they are check-run annotations:',
+        `- \`gh api repos/${opts.repo}/commits/${opts.headSha}/check-runs\` names`,
+        "  each run's id;",
+        `- \`gh api repos/${opts.repo}/check-runs/<run-id>/annotations\` lists`,
+        '  path, line, message, level — the failure-level rows are the blockers.',
+        "- The scanner's own dashboard (the check's details link) carries the",
+        '  same findings.',
+      ]
+  return [
+    `# SAST fixer — ${opts.link}`,
+    '',
+    `Worktree: ${opts.worktree} (branch \`${opts.branch}\`) — work here, nowhere`,
+    'else. If `node_modules` is missing, run the repo install step first.',
+    '',
+    "This PR's SAST checks carry failure-level annotation(s) on its head —",
+    'the gate counts annotations, not conclusions, so a GREEN check can',
+    'still block. At spawn:',
+    '',
+    list,
+    '',
+    ...inspect,
+    '',
+    'Rules:',
+    '- Fix valid findings on this branch; a false positive goes through the',
+    "  scanner's own suppression path the repo already uses — never a",
+    '  silent ignore.',
+    "- Re-verify per the repo's contract, commit, push — the push is the",
+    '  verdict.',
+    '- Findings no code change remediates (scanner config a human owns, a',
+    '  disputed severity gate) — say so as your final message and stop; a',
+    '  clean exit without a push marks this head as attempted, not retried.',
+    '- NEVER merge — `bro drive` owns the merge on green.',
+    '',
+  ].join('\n')
+}
+
+/** The ci-fail fixer — settled-red non-reviewer checks on an orphaned
+ *  PR (bro-atb2g). The meta+checks re-probe doubles as the still-open /
+ *  still-failing re-check: a PR that settled or a run that went green
+ *  between the gate fetch and now must not burn a spawn, and the same
+ *  reads name the failing set + live head for the work order. Runs
+ *  BEFORE the worktree checkout for the same reason the conflict probe
+ *  does. */
+async function spawnCiFixer(
+  ctx: Ctx,
+  pr: number,
+  state: PrActState,
+  worktree: string | undefined,
+  fixer: TaskRow | undefined,
+  known: AgentInfo[]
+): Promise<PrVerdict> {
+  const fresh = await freshOpen(ctx, pr)
+  if ('verdict' in fresh) {
+    return fresh
+  }
+  const { link, meta, checks } = fresh
+  const failing = failingCiChecks(gatedChecks(ctx, checks))
+  if (failing.length === 0) {
+    return { pr, link, verdict: 'ci-resolved' }
+  }
+  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'ci')
+  if ('verdict' in lane) {
+    return lane
+  }
+  const wt = lane.wt
+  return spawnFixerAgent(ctx, pr, {
+    branch: state.headRef,
+    wt,
+    fixer,
+    known,
+    prompt: buildCiFixerPrompt({
+      pr,
+      link,
+      branch: state.headRef,
+      worktree: wt,
+      repo: ctx.repo,
+      host: ctx.host,
+      failing,
+    }),
+    tag: 'ci ',
+    attempt: { head: meta.headSha, cls: 'ci' },
+  })
+}
+
+/** The sast fixer — failure-level annotations on a live SAST check's
+ *  head run (bro-atb2g). A green run can carry them: the gate counts
+ *  annotations, not conclusions. The meta+checks+annotations re-probe
+ *  is the still-open / still-present re-check — a settled PR, a moved
+ *  head, or findings fixed between the gate fetch and now must not
+ *  burn a spawn (and a moved head's annotations are fetched at the
+ *  live sha, never the gate's stale one). */
+async function spawnSastFixer(
+  ctx: Ctx,
+  pr: number,
+  state: PrActState,
+  worktree: string | undefined,
+  fixer: TaskRow | undefined,
+  known: AgentInfo[]
+): Promise<PrVerdict> {
+  const fresh = await freshOpen(ctx, pr)
+  if ('verdict' in fresh) {
+    return fresh
+  }
+  const { link, meta, checks } = fresh
+  const names = liveSastChecks(gatedChecks(ctx, checks)).map((c) => c.name)
+  if (names.length === 0) {
+    return { pr, link, verdict: 'sast-resolved' }
+  }
+  let annotations: Map<string, number | null>
+  try {
+    annotations = await annotationsOf(ctx, meta.headSha, new Set(names))
+  } catch (err) {
+    return { pr, link, verdict: 'probe-failed', detail: errText(err) }
+  }
+  const findings = names
+    .map((name) => ({ name, count: annotations.get(name) }))
+    .filter((f): f is { name: string; count: number | null } => f.count !== undefined)
+  // only positive counts spawn — a null (unreadable annotations) is the
+  // gate's sast_unknown shape: infra, retried by the next pass's own
+  // probe, never an agent's work order
+  if (!findings.some((f) => f.count !== null && f.count > 0)) {
+    return { pr, link, verdict: 'sast-resolved' }
+  }
+  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'sast')
+  if ('verdict' in lane) {
+    return lane
+  }
+  const wt = lane.wt
+  return spawnFixerAgent(ctx, pr, {
+    branch: state.headRef,
+    wt,
+    fixer,
+    known,
+    prompt: buildSastFixerPrompt({
+      pr,
+      link,
+      branch: state.headRef,
+      worktree: wt,
+      repo: ctx.repo,
+      host: ctx.host,
+      headSha: meta.headSha,
+      // the work order lists the runs that carry (or might carry)
+      // findings — clean runs are noise on it
+      findings: findings.filter((f) => f.count === null || f.count > 0),
+    }),
+    tag: 'sast ',
+    attempt: { head: meta.headSha, cls: 'sast' },
   })
 }
 
@@ -1318,10 +1821,40 @@ interface BlockedWork {
   work: PassWork
 }
 
+/** One settled-blocker class's remediation attempt — occupied wins
+ *  over every spawn and the round cap bounds it. A verdict in
+ *  `declines` (dedup-spent or raced-resolved at the re-probe) owes
+ *  nothing more on this head — it declines rather than preempt the
+ *  next independent class. `undefined` means the class never ran. */
+async function classSpawn(
+  b: BlockedWork,
+  s: {
+    capHit: boolean
+    blocked: boolean
+    declines: ReadonlySet<string>
+    spawn: () => Promise<PrVerdict>
+  }
+): Promise<{ v: PrVerdict; declined: boolean } | undefined> {
+  if (!s.blocked || s.capHit) {
+    return undefined
+  }
+  if (b.occ !== undefined) {
+    return {
+      v: { pr: b.pr, link: b.link, verdict: 'occupied', detail: b.occ },
+      declined: false,
+    }
+  }
+  const v = await s.spawn()
+  return { v, declined: s.declines.has(v.verdict) }
+}
+
 /** Non-green verdicts: threads preempt (same order as the loop's
- *  memberAction), a conflicted orphan earns the rebase fixer while the
- *  fixRounds cap lasts, everything else is plain 'blocked'. Extracted
- *  so drivePr stays under the cognitive-complexity cap. */
+ *  memberAction), then each settled blocker class earns its fixer —
+ *  conflicted → rebase, ci-fail → run-log fixer, sast → annotations
+ *  fixer (bro-atb2g) — all bounded by the fixRounds cap. Whatever no
+ *  class covers (pending checks, draft, UNKNOWN, BEHIND, sast_unknown)
+ *  is plain 'blocked'. Extracted so drivePr stays under the
+ *  cognitive-complexity cap. */
 async function blockedVerdict(ctx: Ctx, b: BlockedWork): Promise<PrVerdict> {
   const { pr, link, state, gate, occ, worktree, fixer, work } = b
   if (gate.open_threads > 0) {
@@ -1334,16 +1867,47 @@ async function blockedVerdict(ctx: Ctx, b: BlockedWork): Promise<PrVerdict> {
   // before the fixer existed — 'blocked — merge conflicts' used to be
   // logged and skipped forever (bro-glkes). The bound is the act gate's
   // own round cap — reviewed pushes past maxRounds read as plain
-  // 'blocked', not another rebase round.
+  // 'blocked', not another rebase round. The same cap bounds the
+  // ci/sast rounds below: every fixer push that gets reviewed spends
+  // from it.
+  const capHit = state.maxRounds > 0 && state.fixRounds > state.maxRounds
   if (state.mergeable === 'CONFLICTING') {
     if (occ !== undefined) {
       return { pr, link, verdict: 'occupied', detail: occ }
     }
-    if (!(state.maxRounds > 0 && state.fixRounds > state.maxRounds)) {
+    if (!capHit) {
       return spawnRebaseFixer(ctx, pr, state, worktree, fixer, work.agents)
     }
   }
-  return { pr, link, verdict: 'blocked', detail: gate.blockers.join('; ') }
+  // settled-red checks on an orphaned PR used to be terminal 'blocked'
+  // — the classes below each get a remediation start instead
+  // (bro-atb2g). classSpawn owns the shared contract: occupied wins
+  // over every spawn, the round cap bounds it, and a class that owes
+  // nothing on this head (dedup-spent or resolved at the re-probe)
+  // declines so the NEXT independent class still earns its attempt —
+  // a spent ci attempt on a head carrying SAST findings must not
+  // starve the sast fixer forever.
+  const ci = await classSpawn(b, {
+    capHit,
+    blocked: gate.ci_failing > 0,
+    declines: new Set(['fixer-spent', 'ci-resolved']),
+    spawn: () => spawnCiFixer(ctx, pr, state, worktree, fixer, work.agents),
+  })
+  if (ci !== undefined && !ci.declined) {
+    return ci.v
+  }
+  const sast = await classSpawn(b, {
+    capHit,
+    blocked: gate.sast_pending > 0,
+    declines: new Set(['fixer-spent', 'sast-resolved']),
+    spawn: () => spawnSastFixer(ctx, pr, state, worktree, fixer, work.agents),
+  })
+  if (sast !== undefined && !sast.declined) {
+    return sast.v
+  }
+  // every class declined or was capped — the first decline is the more
+  // informative report than a bare 'blocked'
+  return ci?.v ?? sast?.v ?? { pr, link, verdict: 'blocked', detail: gate.blockers.join('; ') }
 }
 
 /** Ownership marking (spec bro-c650l) — drive stamps what a loop's
@@ -1726,6 +2290,9 @@ async function runDrive(
   const ctx: Ctx = {
     mainRoot: mainPath,
     rev,
+    // same pick reviewHost already memoized — the name only decides
+    // which CLI syntax the fixer prompts write
+    host: facadeName('reviews', { dir: mainPath }, { prefer: broCfg.connectors }),
     repo: rev.resolveRepo([]),
     act: broCfg.act,
     merge: args.merge && drive.merge === 'auto',

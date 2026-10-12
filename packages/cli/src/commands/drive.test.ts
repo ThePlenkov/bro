@@ -3,17 +3,27 @@ import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { procStat, type AgentInfo, type TaskRow, type TaskStore } from '@broject/core'
+import {
+  patchAgentRegistry,
+  procStat,
+  readAgentRegistry,
+  type AgentInfo,
+  type TaskRow,
+  type TaskStore,
+} from '@broject/core'
 import type { ListedWatch } from '@broject/act'
 import {
   agentProcessesIn,
   branchSlug,
+  buildCiFixerPrompt,
   buildFixerPrompt,
   buildRebaseFixerPrompt,
+  buildSastFixerPrompt,
   candidateBranches,
   detailMatches,
   driveArgs,
   ensureFixerWorktree,
+  fixerAttemptSpent,
   fixerBeadFor,
   fixerRef,
   freshOccupancy,
@@ -22,6 +32,7 @@ import {
   liveWorkEntries,
   occupied,
   occupancyProofs,
+  recordFixerAttempt,
   registryAgents,
   registryEntryState,
   supervisedBy,
@@ -988,6 +999,235 @@ describe('ensureFixerWorktree', () => {
       assert.equal(r.path, undefined)
       assert.match(r.err ?? '', /diverged/)
       assert.equal(git(['-C', dir, 'rev-parse', 'HEAD'], main).trim(), tip)
+    })
+  })
+})
+
+describe('buildCiFixerPrompt', () => {
+  test('names the failing checks, the log/annotation reads, and the verdict contract', () => {
+    const p = buildCiFixerPrompt({
+      pr: 42,
+      link: '[#42](https://github.com/o/r/pull/42)',
+      branch: 'work/bro-a',
+      worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'github',
+      failing: [
+        { name: 'build-test', state: 'FAILURE', bucket: 'fail' },
+        { name: 'sonarcloud', state: 'FAILURE', bucket: 'fail' },
+      ],
+    })
+    assert.match(p, /#42.*pull\/42/)
+    assert.match(p, /work\/bro-a/)
+    assert.match(p, /bro--bro-a/)
+    assert.match(p, /2 failing check\(s\)/)
+    assert.match(p, /- build-test/)
+    // a SAST-named run is told apart — its findings are annotations
+    assert.match(p, /- sonarcloud — a SAST check.*annotations, not log lines/)
+    assert.match(p, /gh run view --log-failed/)
+    assert.match(p, /gh api repos\/o\/r\/check-runs\/<run-id>\/annotations/)
+    assert.match(p, /NEVER merge/)
+    // the no-push exit contract — a clean exit is terminal for the head
+    assert.match(p, /clean exit without a push marks this head as attempted/)
+    // the other classes' markers must not collide with this work order
+    assert.doesNotMatch(p, /unresolved review thread/)
+    assert.doesNotMatch(p, /merge conflicts with its base branch/)
+  })
+
+  test('a cancelled run is flagged', () => {
+    const p = buildCiFixerPrompt({
+      pr: 1,
+      link: 'x',
+      branch: 'b',
+      worktree: 'w',
+      repo: 'o/r',
+      host: 'github',
+      failing: [{ name: 'lint', state: 'CANCELLED', bucket: 'cancel' }],
+    })
+    assert.match(p, /- lint \(cancelled\)/)
+  })
+
+  test('a gitlab reviews connector gets glab api commands — never gh', () => {
+    const p = buildCiFixerPrompt({
+      pr: 42,
+      link: '[!42](https://gitlab.example/o/r/-/merge_requests/42)',
+      branch: 'work/bro-a',
+      worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'gitlab',
+      failing: [
+        { name: 'build-test', state: 'failed', bucket: 'fail' },
+        { name: 'sonarcloud', state: 'failed', bucket: 'fail' },
+      ],
+    })
+    assert.match(p, /glab api projects\/o%2Fr\/merge_requests\/42\/pipelines/)
+    assert.match(p, /glab api projects\/o%2Fr\/pipelines\/<pipeline-id>\/jobs/)
+    assert.match(p, /glab api projects\/o%2Fr\/jobs\/<job-id>\/trace/)
+    // no annotations endpoint on gitlab — a SAST job's findings are its report
+    assert.match(p, /- sonarcloud — a SAST check.*scanner's report/)
+    assert.doesNotMatch(p, /gh pr checks|gh run view|check-runs/)
+  })
+})
+
+describe('buildSastFixerPrompt', () => {
+  test('names checks + counts, points at the annotations API, and keeps the contract', () => {
+    const p = buildSastFixerPrompt({
+      pr: 42,
+      link: '[#42](https://github.com/o/r/pull/42)',
+      branch: 'work/bro-a',
+      worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'github',
+      headSha: 'abc123',
+      findings: [
+        { name: 'sonarcloud', count: 4 },
+        { name: 'codacy', count: null },
+      ],
+    })
+    assert.match(p, /#42.*pull\/42/)
+    assert.match(p, /- sonarcloud: 4 finding\(s\)/)
+    assert.match(p, /- codacy: annotations unreadable/)
+    // the gate counts annotations, not conclusions — the prompt teaches it
+    assert.match(p, /GREEN check can/)
+    assert.match(p, /gh api repos\/o\/r\/commits\/abc123\/check-runs/)
+    assert.match(p, /gh api repos\/o\/r\/check-runs\/<run-id>\/annotations/)
+    assert.match(p, /NEVER merge/)
+    assert.match(p, /clean exit without a push marks this head as attempted/)
+  })
+
+  test('a gitlab reviews connector points at the scanner report — no gh api', () => {
+    const p = buildSastFixerPrompt({
+      pr: 42,
+      link: '[!42](https://gitlab.example/o/r/-/merge_requests/42)',
+      branch: 'work/bro-a',
+      worktree: '/repos/bro--bro-a',
+      repo: 'o/r',
+      host: 'gitlab',
+      headSha: 'abc123',
+      findings: [{ name: 'sonarcloud', count: 2 }],
+    })
+    assert.match(p, /glab api projects\/o%2Fr/)
+    assert.match(p, /no check-run/)
+    assert.doesNotMatch(p, /gh api|check-runs\//)
+  })
+})
+
+describe('fixerAttemptSpent — same-head dedup (bro-atb2g)', () => {
+  const entry = (over: Record<string, unknown> = {}) => ({
+    agentId: 'native-aaa',
+    backend: 'native',
+    spawnedAt: '2026-01-01',
+    ...over,
+  })
+
+  test('only a clean-exit attempt on the same head+class spends', () => {
+    const e = entry({ cause: 'ok', fixerAttempt: { head: 'abc', spent: [], current: 'ci' } })
+    assert.equal(fixerAttemptSpent(e, 'abc', 'ci'), true)
+    // a moved head earns a fresh round
+    assert.equal(fixerAttemptSpent(e, 'def', 'ci'), false)
+    // a different class on the same head still spawns
+    assert.equal(fixerAttemptSpent(e, 'abc', 'sast'), false)
+    // no attempt record — nothing to dedup
+    assert.equal(fixerAttemptSpent(entry({ cause: 'ok' }), 'abc', 'ci'), false)
+    assert.equal(fixerAttemptSpent(undefined, 'abc', 'ci'), false)
+  })
+
+  test('a promoted class stays spent through a later crash — per-class, not per-entry', () => {
+    // ci ran ok then sast ran and crashed: cause describes sast's run —
+    // ci keeps its own ok (spent), sast stays respawn-able
+    const e = entry({ cause: 'crash', fixerAttempt: { head: 'abc', spent: ['ci'], current: 'sast' } })
+    assert.equal(fixerAttemptSpent(e, 'abc', 'ci'), true)
+    assert.equal(fixerAttemptSpent(e, 'abc', 'sast'), false)
+  })
+
+  test('a later ok run does not spend a class whose own run crashed', () => {
+    // sast crashed; a following ci run exited ok — the entry's cause is
+    // 'ok' but sast never earned its own ok → still respawn-able
+    const e = entry({ cause: 'ok', fixerAttempt: { head: 'abc', spent: ['ci'], current: 'ci' } })
+    assert.equal(fixerAttemptSpent(e, 'abc', 'sast'), false)
+    assert.equal(fixerAttemptSpent(e, 'abc', 'ci'), true)
+  })
+
+  test('non-ok causes stay respawn-able; stopped lifts the dedup', () => {
+    const att = { head: 'abc', spent: [], current: 'ci' }
+    for (const cause of ['crash', 'rate_limited', 'quota', 'auth']) {
+      assert.equal(
+        fixerAttemptSpent(entry({ cause, fixerAttempt: att }), 'abc', 'ci'),
+        false,
+        `cause ${cause} must not dedup`
+      )
+    }
+    // an unharvested exit (status recorded, cause not yet classified)
+    assert.equal(
+      fixerAttemptSpent(entry({ exitStatus: 0, fixerAttempt: att }), 'abc', 'ci'),
+      false
+    )
+    // `bro agents down` is the operator's manual clear — same as it
+    // lifting a rate_limited wall
+    assert.equal(
+      fixerAttemptSpent(entry({ cause: 'ok', stopped: true, fixerAttempt: att }), 'abc', 'ci'),
+      false
+    )
+  })
+
+  test('the pre-split {head, classes} record still reads — legacy compat', () => {
+    // every listed class shared the one cause: all spent iff ok
+    const ok = entry({ cause: 'ok', fixerAttempt: { head: 'abc', classes: ['ci'] } })
+    assert.equal(fixerAttemptSpent(ok, 'abc', 'ci'), true)
+    const crash = entry({ cause: 'crash', fixerAttempt: { head: 'abc', classes: ['ci'] } })
+    assert.equal(fixerAttemptSpent(crash, 'abc', 'ci'), false)
+  })
+
+  test('a torn record fails open', () => {
+    for (const fixerAttempt of [
+      'x',
+      7,
+      null,
+      { head: 1 },
+      { head: 'a', classes: 'ci' },
+      { head: 'a', spent: 'ci', current: 'ci' },
+    ]) {
+      assert.equal(
+        fixerAttemptSpent(entry({ cause: 'ok', fixerAttempt }), 'a', 'ci'),
+        false
+      )
+    }
+  })
+
+  test('recordFixerAttempt promotes only the class whose own cause was ok', () => {
+    const { root, main } = initRepo('bro-drive-attempt-')
+    inside(main, root, () => {
+      // the entry the spawn wrote — patchAgentRegistry merges onto it
+      // (an agentId-less write reads back as torn and drops)
+      patchAgentRegistry(main, 'fx-1', { agentId: 'native-x', backend: 'native' })
+      // ci exited ok → the sast spawn promotes 'ci' into spent
+      recordFixerAttempt(
+        main,
+        'fx-1',
+        entry({ cause: 'ok', fixerAttempt: { head: 'h', spent: [], current: 'ci' } }),
+        'h',
+        'sast'
+      )
+      let att = readAgentRegistry(main)['fx-1']?.fixerAttempt as {
+        head: string
+        spent: string[]
+        current: string
+      }
+      assert.deepEqual(att, { head: 'h', spent: ['ci'], current: 'sast' })
+      // sast crashed → the ci replay must NOT promote sast
+      recordFixerAttempt(
+        main,
+        'fx-1',
+        entry({ cause: 'crash', fixerAttempt: { head: 'h', spent: ['ci'], current: 'sast' } }),
+        'h',
+        'ci'
+      )
+      att = readAgentRegistry(main)['fx-1']?.fixerAttempt as typeof att
+      assert.deepEqual(att, { head: 'h', spent: ['ci'], current: 'ci' })
+      // a moved head resets the record
+      recordFixerAttempt(main, 'fx-1', entry({ cause: 'ok', fixerAttempt: att }), 'h2', 'sast')
+      att = readAgentRegistry(main)['fx-1']?.fixerAttempt as typeof att
+      assert.deepEqual(att, { head: 'h2', spent: [], current: 'sast' })
     })
   })
 })
