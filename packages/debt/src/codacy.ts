@@ -208,7 +208,7 @@ export function codacyKeyOf(threadId: string): string {
  *  finding. */
 function bodyMentionsKey(body: string, key: string): boolean {
   if (key === '') return false
-  const k = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const k = key.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
   return new RegExp(`[?&](?:issueId|issues)=${k}(?![A-Za-z0-9_-])`).test(body)
 }
 

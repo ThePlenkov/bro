@@ -205,61 +205,71 @@ export function collectCodescene(
     )
   }
   assertTokenSafeHost(project.host, 'codescene')
-  const analyses = codesceneDeltaAll(project)
+  return codesceneDeltaAll(project).flatMap((a) => analysisRecords(ctx, project, a))
+}
+
+/** Rows for one stored analysis. Unkeyed or clean analyses emit
+ *  nothing; interesting ones get the detail fetch that carries
+ *  `file_results`. */
+function analysisRecords(
+  ctx: CollectCtx,
+  project: CodesceneProject,
+  a: CsDelta
+): DebtRecord[] {
+  const id = a.id
+  if (id === undefined || id === null || id === '') {
+    return [] // an unkeyed analysis can't dedup across collects
+  }
+  const gates = failedGates(a.failed_gates)
+  if (gates.length === 0 && !healthDeclined(a)) {
+    return []
+  }
+  const detail = curlGet(
+    `${project.host}/v2/projects/${encodeURIComponent(project.projectId)}` +
+      `/delta-analyses/${encodeURIComponent(String(id))}`
+  ) as CsDelta
+  const merged: CsDelta = { ...a, ...detail }
+  const createdAt = parseAnalysisTime(merged.analysistime, ctx.harvestedAt)
+  const author = merged.authors?.[0] ?? 'codescene'
+  const url =
+    `${project.uiHost}/projects/${encodeURIComponent(project.projectId)}` +
+    `/delta-analysis/${encodeURIComponent(String(id))}`
+  const delta =
+    merged.code_health !== undefined || merged.old_code_health !== undefined
+      ? ` — code health ${merged.old_code_health ?? '?'} → ${merged.code_health ?? '?'}`
+      : ''
+  const onRepo = merged.repository ? ` on ${merged.repository}` : ''
   const out: DebtRecord[] = []
-  for (const a of analyses) {
-    const id = a.id
-    if (id === undefined || id === null || id === '') {
-      continue // an unkeyed analysis can't dedup across collects
-    }
-    const gates = failedGates(a.failed_gates)
-    if (gates.length === 0 && !healthDeclined(a)) {
+  for (const gate of gates) {
+    out.push(
+      baseRecord(ctx, {
+        threadId: `codescene:${id}:gate:${gate}`,
+        url,
+        priority: 'blocking',
+        path: '',
+        author,
+        body: `failed gate ${gate}${delta}${onRepo}`,
+        createdAt,
+        source: 'codescene',
+      })
+    )
+  }
+  for (const f of merged.file_results ?? []) {
+    if (!healthDeclined(f) || f.file === undefined || f.file === '') {
       continue
     }
-    const detail = curlGet(
-      `${project.host}/v2/projects/${encodeURIComponent(project.projectId)}` +
-        `/delta-analyses/${encodeURIComponent(String(id))}`
-    ) as CsDelta
-    const merged: CsDelta = { ...a, ...detail }
-    const createdAt = parseAnalysisTime(merged.analysistime, ctx.harvestedAt)
-    const author = merged.authors?.[0] ?? 'codescene'
-    const url = `${project.uiHost}/projects/${encodeURIComponent(project.projectId)}` +
-      `/delta-analysis/${encodeURIComponent(String(id))}`
-    const delta =
-      merged.code_health !== undefined || merged.old_code_health !== undefined
-        ? ` — code health ${merged.old_code_health ?? '?'} → ${merged.code_health ?? '?'}`
-        : ''
-    for (const gate of gates) {
-      out.push(
-        baseRecord(ctx, {
-          threadId: `codescene:${id}:gate:${gate}`,
-          url,
-          priority: 'blocking',
-          path: '',
-          author,
-          body: `failed gate ${gate}${delta}${merged.repository ? ` on ${merged.repository}` : ''}`,
-          createdAt,
-          source: 'codescene',
-        })
-      )
-    }
-    for (const f of merged.file_results ?? []) {
-      if (!healthDeclined(f) || f.file === undefined || f.file === '') {
-        continue
-      }
-      out.push(
-        baseRecord(ctx, {
-          threadId: `codescene:${id}:file:${f.file}`,
-          url,
-          priority: 'scan',
-          path: f.file,
-          author,
-          body: `code health declined ${f.old_code_health} → ${f.code_health}`,
-          createdAt,
-          source: 'codescene',
-        })
-      )
-    }
+    out.push(
+      baseRecord(ctx, {
+        threadId: `codescene:${id}:file:${f.file}`,
+        url,
+        priority: 'scan',
+        path: f.file,
+        author,
+        body: `code health declined ${f.old_code_health} → ${f.code_health}`,
+        createdAt,
+        source: 'codescene',
+      })
+    )
   }
   return out
 }
@@ -277,7 +287,7 @@ export function codesceneDeltaIdOf(threadId: string): string {
  *  finding. */
 function bodyMentionsDelta(body: string, id: string): boolean {
   if (id === '') return false
-  const k = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const k = id.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
   return new RegExp(`delta-analys(?:is|es)/${k}(?![0-9A-Za-z_-])`).test(body)
 }
 

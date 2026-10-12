@@ -892,7 +892,12 @@ function debtCodacyCheck(debt: { sources: string[]; sourceConfig: Record<string,
   }
   const api = process.env['CODACY_API_TOKEN']?.trim()
   const project = process.env['CODACY_PROJECT_TOKEN']?.trim()
-  const env = api !== undefined && api !== '' ? 'CODACY_API_TOKEN' : project !== undefined && project !== '' ? 'CODACY_PROJECT_TOKEN' : null
+  let env: string | null = null
+  if (api !== undefined && api !== '') {
+    env = 'CODACY_API_TOKEN'
+  } else if (project !== undefined && project !== '') {
+    env = 'CODACY_PROJECT_TOKEN'
+  }
   if (env === null) {
     return [
       check(

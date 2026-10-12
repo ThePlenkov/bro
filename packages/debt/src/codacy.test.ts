@@ -1,8 +1,5 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { SourceSkipped } from './collectors.ts'
 import {
   codacyKeyOf,
@@ -10,66 +7,11 @@ import {
   dedupeCodacyThreads,
   resolveCodacyRepo,
 } from './codacy.ts'
+import { openThread, withEnv, withFakeCurl } from './testhttp.ts'
 import type { DebtRecord } from './types.ts'
 
 const CTX = { repo: 'acme/widgets', runId: 't', harvestedAt: '2026-01-02T00:00:00Z' }
-
-/** Scripted curl on PATH — answers by URL substring via a JSON map file.
- *  Absent key → `{"data":[]}` so paging loops terminate. */
-function withFakeCurl(cases: Record<string, string>, fn: () => void): void {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-fake-curl-'))
-  const mapPath = join(dir, 'map.json')
-  writeFileSync(mapPath, JSON.stringify(cases))
-  writeFileSync(
-    join(dir, 'curl'),
-    [
-      '#!/usr/bin/env node',
-      'const map = JSON.parse(require("fs").readFileSync(process.env.FAKE_CURL_MAP, "utf8"))',
-      'const args = process.argv.slice(2).join(" ")',
-      'for (const [k, v] of Object.entries(map)) {',
-      '  if (args.includes(k)) { console.log(v); process.exit(0) }',
-      '}',
-      'console.log("{\\"data\\":[]}")',
-    ].join('\n')
-  )
-  chmodSync(join(dir, 'curl'), 0o755)
-  const prevPath = process.env.PATH
-  const prevMap = process.env.FAKE_CURL_MAP
-  process.env.PATH = `${dir}:${prevPath}`
-  process.env.FAKE_CURL_MAP = mapPath
-  try {
-    fn()
-  } finally {
-    process.env.PATH = prevPath
-    if (prevMap === undefined) {
-      delete process.env.FAKE_CURL_MAP
-    } else {
-      process.env.FAKE_CURL_MAP = prevMap
-    }
-    rmSync(dir, { recursive: true, force: true })
-  }
-}
-
-/** Env vars set for fn, restored after — the skip path is tested by
- *  deleting them explicitly. */
-function withEnv(vars: Record<string, string>, fn: () => void): void {
-  const saved: Record<string, string | undefined> = {}
-  for (const [k, v] of Object.entries(vars)) {
-    saved[k] = process.env[k]
-    process.env[k] = v
-  }
-  try {
-    fn()
-  } finally {
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) {
-        delete process.env[k]
-      } else {
-        process.env[k] = v
-      }
-    }
-  }
-}
+const EMPTY_PAGE = '{"data":[]}'
 
 const ISSUE = {
   issueId: 'issue_123',
@@ -135,6 +77,7 @@ describe('collectCodacy', () => {
             },
           ]),
         },
+        EMPTY_PAGE,
         () => {
           const rows = collectCodacy(CTX)
           assert.equal(rows.length, 3)
@@ -155,7 +98,7 @@ describe('collectCodacy', () => {
   test('a repo-scoped token alone also authorizes', () =>
     withEnv({ CODACY_PROJECT_TOKEN: 'cpt_test' }, () => {
       delete process.env.CODACY_API_TOKEN
-      withFakeCurl({ 'issues/search': body([ISSUE]) }, () => {
+      withFakeCurl({ 'issues/search': body([ISSUE]) }, EMPTY_PAGE, () => {
         const rows = collectCodacy(CTX)
         assert.equal(rows.length, 1)
       })
@@ -170,6 +113,7 @@ describe('collectCodacy', () => {
           'cursor=c2': body([{ ...ISSUE, issueId: 'P2' }]),
           'issues/search': body([{ ...ISSUE, issueId: 'P1' }], 'c2'),
         },
+        EMPTY_PAGE,
         () => {
           const ids = collectCodacy(CTX)
             .map((r) => r.thread_id)
@@ -186,6 +130,7 @@ describe('collectCodacy', () => {
           'cursor=cX': body([{ ...ISSUE, issueId: 'P2' }], 'cX'),
           'issues/search': body([{ ...ISSUE, issueId: 'P1' }], 'cX'),
         },
+        EMPTY_PAGE,
         () => {
           const ids = collectCodacy(CTX)
             .map((r) => r.thread_id)
@@ -199,6 +144,7 @@ describe('collectCodacy', () => {
     withEnv({ CODACY_API_TOKEN: 't' }, () =>
       withFakeCurl(
         { 'issues/search': body([{ commitIssue: ISSUE.commitIssue }, ISSUE]) },
+        EMPTY_PAGE,
         () => {
           const rows = collectCodacy(CTX)
           assert.equal(rows.length, 1)
@@ -226,15 +172,7 @@ describe('dedupeCodacyThreads', () => {
       source: 'codacy',
       body: 'b',
     }) as DebtRecord
-  const thread = (over: Partial<DebtRecord>): DebtRecord =>
-    ({
-      thread_id: 'PRRT_1',
-      status: 'open',
-      path: '',
-      line: null,
-      body: '',
-      ...over,
-    }) as DebtRecord
+  const thread = openThread
 
   test('same path+line on an open review thread drops the codacy row', () => {
     const d = dedupeCodacyThreads([codacy('I1')], [thread({ path: 'src/a.ts', line: 5 })])

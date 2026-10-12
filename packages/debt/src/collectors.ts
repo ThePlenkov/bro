@@ -152,9 +152,8 @@ export function curlJson(
     }
     if (res.status !== 0) {
       const detail = res.stderr.trim() !== '' ? res.stderr.trim() : res.stdout.trim().slice(0, 300)
-      throw new Error(
-        `${opts.label}: request failed — ${detail !== '' ? detail : `curl exited ${res.status}`}`
-      )
+      const reason = detail !== '' ? detail : `curl exited ${res.status}`
+      throw new Error(`${opts.label}: request failed — ${reason}`)
     }
     try {
       return JSON.parse(res.stdout)

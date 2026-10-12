@@ -1,8 +1,5 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { SourceSkipped } from './collectors.ts'
 import {
   codesceneDeltaIdOf,
@@ -12,66 +9,11 @@ import {
   parseAnalysisTime,
   resolveCodesceneProject,
 } from './codescene.ts'
+import { openThread, withEnv, withFakeCurl } from './testhttp.ts'
 import type { DebtRecord } from './types.ts'
 
 const CTX = { repo: 'acme/widgets', runId: 't', harvestedAt: '2026-01-02T00:00:00Z' }
-
-/** Scripted curl on PATH — answers by URL substring via a JSON map file.
- *  Absent key → an empty page so list loops terminate. */
-function withFakeCurl(cases: Record<string, string>, fn: () => void): void {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-fake-curl-'))
-  const mapPath = join(dir, 'map.json')
-  writeFileSync(mapPath, JSON.stringify(cases))
-  writeFileSync(
-    join(dir, 'curl'),
-    [
-      '#!/usr/bin/env node',
-      'const map = JSON.parse(require("fs").readFileSync(process.env.FAKE_CURL_MAP, "utf8"))',
-      'const args = process.argv.slice(2).join(" ")',
-      'for (const [k, v] of Object.entries(map)) {',
-      '  if (args.includes(k)) { console.log(v); process.exit(0) }',
-      '}',
-      'console.log("{\\"page\\":1,\\"max_pages\\":1,\\"delta_analyses\\":[]}")',
-    ].join('\n')
-  )
-  chmodSync(join(dir, 'curl'), 0o755)
-  const prevPath = process.env.PATH
-  const prevMap = process.env.FAKE_CURL_MAP
-  process.env.PATH = `${dir}:${prevPath}`
-  process.env.FAKE_CURL_MAP = mapPath
-  try {
-    fn()
-  } finally {
-    process.env.PATH = prevPath
-    if (prevMap === undefined) {
-      delete process.env.FAKE_CURL_MAP
-    } else {
-      process.env.FAKE_CURL_MAP = prevMap
-    }
-    rmSync(dir, { recursive: true, force: true })
-  }
-}
-
-/** Env vars set for fn, restored after — the skip paths delete them
- *  explicitly so ambient vars can't leak in. */
-function withEnv(vars: Record<string, string>, fn: () => void): void {
-  const saved: Record<string, string | undefined> = {}
-  for (const [k, v] of Object.entries(vars)) {
-    saved[k] = process.env[k]
-    process.env[k] = v
-  }
-  try {
-    fn()
-  } finally {
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) {
-        delete process.env[k]
-      } else {
-        process.env[k] = v
-      }
-    }
-  }
-}
+const EMPTY_PAGE = '{"page":1,"max_pages":1,"delta_analyses":[]}'
 
 const ANALYSIS = {
   id: 101,
@@ -174,6 +116,7 @@ describe('collectCodescene', () => {
           'delta-analyses/101': JSON.stringify(DETAIL),
           'delta-analyses?page=1': listBody([ANALYSIS]),
         },
+        EMPTY_PAGE,
         () => {
           const rows = collectCodescene(CTX, { cfg: { project_id: 9 } })
           const gate = rows.find((r) => r.thread_id === 'codescene:101:gate:degrades_in_code_health')!
@@ -202,6 +145,7 @@ describe('collectCodescene', () => {
             { ...ANALYSIS, id: 55, failed_gates: {}, code_health: 8.0, old_code_health: 7.0 },
           ]),
         },
+        EMPTY_PAGE,
         () => {
           assert.equal(collectCodescene(CTX, { cfg: { project_id: 9 } }).length, 0)
         }
@@ -217,6 +161,7 @@ describe('collectCodescene', () => {
           'delta-analyses?page=2': listBody([{ ...ANALYSIS, id: 2 }], 2, 2),
           'delta-analyses/2': JSON.stringify({ ...ANALYSIS, id: 2 }),
         },
+        EMPTY_PAGE,
         () => {
           const ids = collectCodescene(CTX, { cfg: { project_id: 9 } })
             .map((r) => r.thread_id)
@@ -235,6 +180,7 @@ describe('collectCodescene', () => {
         {
           'delta-analyses?page=': listBody([{ ...ANALYSIS, id: 1 }], 1, 21),
         },
+        EMPTY_PAGE,
         () =>
           assert.throws(
             () => collectCodescene(CTX, { cfg: { project_id: 9 } }),
@@ -254,15 +200,7 @@ describe('dedupeCodesceneThreads', () => {
       source: 'codescene',
       body: 'b',
     }) as DebtRecord
-  const thread = (over: Partial<DebtRecord>): DebtRecord =>
-    ({
-      thread_id: 'PRRT_1',
-      status: 'open',
-      path: '',
-      line: null,
-      body: '',
-      ...over,
-    }) as DebtRecord
+  const thread = openThread
 
   test('a delta-analysis link in the thread body covers', () => {
     const d = dedupeCodesceneThreads(
