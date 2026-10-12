@@ -166,8 +166,8 @@ probe — a wedged store yields zero lines, never a stalled hook.
   file-size cap: entries carry no size limit, so the kept tail can
   still sit above it. The learn probe reads the trace tail, matches,
   and renders at most `budget` fires per lesson per session — the fired
-  set lives in `fired/<session>` under the same `<git-common>/bro/hooks/`
-  dir (subdir for the same reason) so restarts don't re-fire.
+  set lives in `<git-common>/bro/hooks/fired/<session>` (subdir for the
+  same reason) so restarts don't re-fire.
 
   The journal records what the hook payload actually carries —
   `HookInput` widens to read `tool_name` and the path-bearing
