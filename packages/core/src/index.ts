@@ -158,6 +158,13 @@ export type {
   TaskStore,
   TaskStoreAsync,
 } from './tasks.ts'
+export { emitLifecycle, LIFECYCLE_KINDS, lifecyclePath, readLifecycle } from './lifecycle.ts'
+export type {
+  LifecycleEvent,
+  LifecycleInput,
+  LifecycleKind,
+  LifecycleRead,
+} from './lifecycle.ts'
 export { bodyMeta, broTrailer, stripMeta, withMeta } from './taskmeta.ts'
 export { JudgeUnavailable } from './judge.ts'
 export type {
@@ -363,6 +370,7 @@ export type {
   Finding,
   Gate,
   LessonRow,
+  LifecycleRow,
   PlaneArgSchema,
   PlaneCtx,
   PlaneDescriptor,

@@ -40,6 +40,7 @@ import {
   acquireAgentRegistryLock,
   acquireFileLock,
   agentRegistryPath,
+  emitLifecycle,
   facade,
   git,
   gitTry,
@@ -338,10 +339,17 @@ export function claimBead(slug: string): { claimed?: string; refused?: boolean }
   }
   try {
     store.claim(slug)
-    return { claimed: slug }
   } catch {
     return { refused: true }
   }
+  emitLifecycle(root, {
+    kind: 'claim',
+    bead: slug,
+    from: 'open',
+    to: 'in_progress',
+    detail: { via: 'work' },
+  })
+  return { claimed: slug }
 }
 
 /** Base ref for a new worktree's branch. `git worktree add` alone would
@@ -668,9 +676,32 @@ export function finishWorktreeEnter(
   }
   if (created.reused) {
     const edgeBase = readStackEdges().get(branch)
+    emitLifecycle(opts.main.path, {
+      kind: 'worktree',
+      bead: slug,
+      to: 'reused',
+      detail: {
+        via: 'work',
+        worktree: path,
+        branch,
+        ...(edgeBase !== undefined ? { base: edgeBase, stacked: true } : {}),
+      },
+    })
     return { path, branch, base: edgeBase, stacked: edgeBase !== undefined, claim: claimBead(slug) }
   }
   initSubmodules(path)
+  emitLifecycle(opts.main.path, {
+    kind: 'worktree',
+    bead: slug,
+    to: 'created',
+    detail: {
+      via: 'work',
+      worktree: path,
+      branch,
+      ...(base !== undefined ? { base } : {}),
+      ...(created.stacked ? { stacked: true } : {}),
+    },
+  })
   return { path, branch, base, stacked: created.stacked, claim: claimBead(slug) }
 }
 
@@ -794,6 +825,16 @@ function cmdLeave(argv: string[]): void {
     console.error(`error: git worktree remove failed — ${res.err} (use --force to override)`)
     process.exit(1)
   }
+  emitLifecycle(main.path, {
+    kind: 'worktree',
+    to: 'removed',
+    detail: {
+      via: 'work',
+      worktree: target.path,
+      ...(target.branch !== undefined ? { branch: target.branch } : {}),
+      ...(force ? { force: true } : {}),
+    },
+  })
   const gone = wasCurrent ? ` — this directory is gone; cd ${main.path}` : ''
   console.log(`removed worktree ${target.path}${gone}`)
   if (deleteBranch && target.branch) {
@@ -1005,6 +1046,16 @@ export function removeMergedWorktree(root: string, here: WorktreeInfo, main: Wor
     return false
   }
   process.chdir(main.path) // cwd is gone — git ops below need a live dir
+  emitLifecycle(main.path, {
+    kind: 'worktree',
+    to: 'removed',
+    detail: {
+      via: 'cleanup',
+      worktree: root,
+      ...(here.branch !== undefined ? { branch: here.branch } : {}),
+      reason: 'merged',
+    },
+  })
   console.log(`cleanup: removed worktree ${root}`)
   console.log(`cleanup: cd ${main.path}`)
   return true

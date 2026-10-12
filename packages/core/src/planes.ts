@@ -168,6 +168,28 @@ export interface EventRow extends PlaneRow {
   origin: string
 }
 
+/** lifecycle — one durable journal row off `<git-common>/bro/
+ *  events.jsonl` (specs/telemetry/bro-ub91h.md). `id` is `life:<n>` —
+ *  the line position in the current file; compaction shifts ids the
+ *  same way a truncated tail reports `gapped`. `origin` is always
+ *  'lifecycle'. */
+export interface LifecycleRow extends PlaneRow {
+  ts: string
+  /** the transition verb — open string on the read side so a journal
+   *  carrying newer kinds still parses */
+  kind: string
+  bead?: string
+  pr?: number
+  actor: string
+  session: string
+  from?: string
+  to?: string
+  detail?: Record<string, unknown>
+  /** 1-based line position in the current file — the append order */
+  seq: number
+  origin: string
+}
+
 /** judge — one journal row (verdict or observed disposition). */
 export interface VerdictRow extends PlaneRow {
   ts: string
