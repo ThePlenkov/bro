@@ -1563,6 +1563,10 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     bead: m.beads.map((b) => b.id).join(','),
   })
   stampProjection(ctx, m.beads, pr)
+  // ownership marking (spec bro-c650l) — the registry-spawn path's
+  // discovery is HERE, not pushItem: a detached worker's PR only
+  // exists once this settle pass finds it
+  stampLoopPr(ctx, m.beads, m.item, pr)
   m.since = Date.now()
   say(ctx, `loop: ${m.beads.map((b) => b.id).join(', ')} → PR ${prRef(ctx, pr)}`)
   return 'active'
