@@ -23,7 +23,9 @@ export const loopSection: ConfigSection<LoopConfig> = (raw) => {
       | 'worktreeMb'
       | 'diskMinSlots'
       | 'batch'
-      | 'batchMinPriority',
+      | 'batchMinPriority'
+      | 'parkedKeep'
+      | 'parkedTtlDays',
     min = 0
   ) =>
     typeof obj[k] === 'number' && Number.isFinite(obj[k]) && (obj[k] as number) >= min
@@ -47,5 +49,7 @@ export const loopSection: ConfigSection<LoopConfig> = (raw) => {
     diskMinSlots: num('diskMinSlots'),
     batch: num('batch', 1),
     batchMinPriority: num('batchMinPriority'),
+    parkedKeep: num('parkedKeep'),
+    parkedTtlDays: num('parkedTtlDays'),
   }
 }

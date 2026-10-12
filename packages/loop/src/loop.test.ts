@@ -59,6 +59,8 @@ describe('loopSection', () => {
       diskMinSlots: 3,
       batch: 6,
       batchMinPriority: 2,
+      parkedKeep: 5,
+      parkedTtlDays: 30,
     })
     assert.deepEqual(cfg, {
       agent: 'devin -p',
@@ -76,7 +78,19 @@ describe('loopSection', () => {
       diskMinSlots: 3,
       batch: 6,
       batchMinPriority: 2,
+      parkedKeep: 5,
+      parkedTtlDays: 30,
     })
+  })
+
+  test('parked pool knobs — 0 means off/uncapped, negatives and junk fall back', () => {
+    assert.equal(loopSection({ parkedKeep: 0 }).parkedKeep, 0)
+    assert.equal(loopSection({ parkedTtlDays: 0 }).parkedTtlDays, 0)
+    assert.equal(loopSection({ parkedKeep: -1 }).parkedKeep, DEFAULT_LOOP_CONFIG.parkedKeep)
+    assert.equal(
+      loopSection({ parkedTtlDays: 'week' }).parkedTtlDays,
+      DEFAULT_LOOP_CONFIG.parkedTtlDays
+    )
   })
 
   test('disk floor keys — worktreeMb floors at 1, diskMinSlots 0 is the valid disable', () => {

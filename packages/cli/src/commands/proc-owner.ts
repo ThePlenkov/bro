@@ -18,7 +18,15 @@ import {
   statSync,
 } from 'node:fs'
 import { basename, dirname, join, resolve, sep } from 'node:path'
-import { pidAlive, procStat } from '@broject/core'
+import {
+  agentEntryBlocked,
+  gitTry,
+  markerLive,
+  pidAlive,
+  procStat,
+  type AgentRegistryEntry,
+  type AgentState,
+} from '@broject/core'
 
 export interface ProcHit {
   pid: number
@@ -191,3 +199,138 @@ export function ownerTag(): string {
 // read is shared with connectors (learn's previous-trace exclusion
 // needs the same verdict) and can't import from the cli layer.
 export { markerLive, markerOwner } from '@broject/core'
+
+// --- marker-dir occupancy plane ---------------------------------------------------
+//
+// The pieces below judge "is a session/agent still alive behind this
+// claim?" — shared by drive's occupancy pass, the loop litter sweep's
+// dead-claim release, and watch/status check-ins. They live here
+// because drive.ts and work.ts import each other transitively and
+// proc-owner is the leaf both can reach.
+
+/** The freshness horizon for `.work` markers — same as hooks.ts's
+ *  LIVE_SESSION_MS: a marker younger than this names a live session. */
+export const LIVE_MARKER_MS = 24 * 60 * 60 * 1000
+
+/** `<git-common-dir>/bro/hooks` — the session marker dir shared across
+ *  every linked worktree. Null when git can't name the common dir. */
+export function hooksDirOf(root: string): string | null {
+  const r = gitTry(['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  const common = r.code === 0 ? r.out.trim() : ''
+  return common === '' ? null : join(common, 'bro', 'hooks')
+}
+
+/** A `.work`/`.task` marker's detail may be a bead id, a slug, a
+ *  worktree path or basename. Match conservatively — an over-match
+ *  costs a skipped pass; an under-match costs a raced owner. */
+export function detailMatches(
+  detail: string,
+  ctx: { branch: string; slug: string; worktree?: string }
+): boolean {
+  if (detail === ctx.branch || detail === ctx.slug) {
+    return true
+  }
+  if (ctx.worktree === undefined) {
+    return false
+  }
+  const base = basename(ctx.worktree)
+  return detail === base || base.endsWith(`--${detail}`) || detail.endsWith(`/${base}`)
+}
+
+/** Every detail line of every live session marker — a session claiming
+ *  two beads keeps both, so occupancy reads them all (a first-line peek
+ *  would miss the second). Liveness is owner-pid first (bro-b87b: a
+ *  dead session's marker is residue even when fresh), mtime-window
+ *  fallback for ownerless markers. `suffixes` widens the scan past
+ *  `.work` — the litter sweep also reads `.task` (the `bd --claim`
+ *  arm). */
+export function liveWorkDetails(
+  dir: string,
+  suffixes: readonly string[] = ['.work'],
+  now: number = Date.now()
+): string[] {
+  const details: string[] = []
+  let files: string[]
+  try {
+    files = readdirSync(dir)
+  } catch {
+    return details
+  }
+  for (const f of files) {
+    if (!suffixes.some((s) => f.endsWith(s))) {
+      continue
+    }
+    try {
+      const path = join(dir, f)
+      const lines = readFileSync(path, 'utf8').split('\n')
+      if (!markerLive(lines[0], statSync(path).mtimeMs, LIVE_MARKER_MS, now)) {
+        continue
+      }
+      for (const line of lines.slice(1)) {
+        const d = line.trim()
+        if (d !== '') {
+          details.push(d)
+        }
+      }
+    } catch {
+      // unreadable marker — skip
+    }
+  }
+  return details
+}
+
+/** An .exit file not yet harvested into the registry is death proof too
+ *  — basename-only ids: '../' must never escape the agents home. */
+function exitFileProves(home: string | null, e: AgentRegistryEntry): boolean {
+  if (home === null || typeof e.agentId !== 'string' || basename(e.agentId) !== e.agentId) {
+    return false
+  }
+  try {
+    const v = readFileSync(join(home, `${e.agentId}.exit`), 'utf8').trim()
+    return v !== '' && Number.isInteger(Number(v))
+  } catch {
+    // no exit file — not proof
+    return false
+  }
+}
+
+/** Agent liveness derived from the registry entry alone — no backend
+ *  list() probes. A live pid is running; a recorded or on-disk death is
+ *  terminal; anything unproven counts as live ('spawned') — occupied is
+ *  always the safe verdict, and a false-occupied only costs a skipped
+ *  pass. */
+export function registryEntryState(
+  home: string | null,
+  e: AgentRegistryEntry
+): AgentState {
+  const pid = typeof e.pid === 'number' ? e.pid : undefined
+  // '' pidStart is unverified identity, not reuse proof — pidAlive('')
+  // can never match a real starttime and would read a live agent dead
+  const start = typeof e.pidStart === 'string' && e.pidStart !== '' ? e.pidStart : undefined
+  if (pid !== undefined && pidAlive(pid, start)) {
+    return 'running'
+  }
+  if (e.stopped === true) {
+    return 'stopped'
+  }
+  if (e.exitStatus !== undefined) {
+    // recorded cause decides — a budget-walled entry reads 'blocked'
+    // here the same as in the connector ladder (bro-7xgk.2)
+    return agentEntryBlocked(e) ? 'blocked' : 'exited'
+  }
+  if (exitFileProves(home, e)) {
+    return 'exited'
+  }
+  // a dead pid is proven — 'lost' keeps the fixer respawn-able; a
+  // pid-less entry (remote backend) is unproven → conservative live
+  return pid !== undefined ? 'lost' : 'spawned'
+}
+
+/** Claim-liveness verdict on a registry entry — the litter sweep's
+ *  reading: running/spawned/blocked all mean the claim has a live
+ *  owner (a blocked agent's claim is real — its resetAt will lift and
+ *  it continues the same work); only exited/stopped/lost release. */
+export function registryEntryHoldsClaim(home: string | null, e: AgentRegistryEntry): boolean {
+  const s = registryEntryState(home, e)
+  return s === 'running' || s === 'spawned' || s === 'blocked'
+}

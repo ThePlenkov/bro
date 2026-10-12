@@ -129,6 +129,7 @@ import {
   readStackEdges,
   recordStackEdge,
   stackPushLockPath,
+  worktreePathFor,
   type LitterReap,
 } from './work.ts'
 import {
@@ -548,6 +549,7 @@ function spawnAgent(
     if (child.pid !== undefined) {
       beginLoopRun(ctx.root, {
         beadId: leadId,
+        beadIds,
         slug,
         pid: child.pid,
         pidStart: procStat(child.pid)?.start,
@@ -560,7 +562,21 @@ function spawnAgent(
     }
     ctx.stage = `worker pid=${child.pid ?? '?'}`
     const settle = (code: number | null): void => {
-      endLoopRun(ctx.root, slug)
+      // custody returns to the loop process — the worker is gone but the
+      // claim isn't: findPr and the member's watchBegin still stand
+      // between here and a verdict (bro-ho09d: endLoopRun here left a
+      // window where a racing sweep saw a dead owner and released a
+      // still-settling claim)
+      beginLoopRun(ctx.root, {
+        beadId: leadId,
+        beadIds,
+        slug,
+        pid: process.pid,
+        pidStart: procStat(process.pid)?.start,
+        startedAt: new Date().toISOString(),
+        worktree: dir,
+        log: log ?? '',
+      })
       resolve(code)
     }
     child.on('error', (err) => {
@@ -668,6 +684,9 @@ function workerExit(ctx: Ctx, w: WorkerRef): { code: number | null; at: number }
  *  clump members this run claimed are reopened. */
 function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome {
   const msg = err instanceof Error ? err.message : String(err)
+  // every refusal path releases this run's claims — the claim-time
+  // custody record dies with them (bro-ho09d)
+  endLoopRun(ctx.root, loopSlug(m.beads[0]!.id))
   if (err instanceof SpawnError && err.kind === 'cap') {
     for (const b of openBeads(ctx, m.beads)) {
       reopenBead(ctx.tasks, b.id)
@@ -1198,10 +1217,26 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       noteBead(ctx.tasks, b.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
       reopenBead(ctx.tasks, b.id)
     }
+    // the claim-time custody record (claimClump) dies with the claim
+    endLoopRun(ctx.root, loopSlug(lead.id))
     return { kind: 'done', result: 'failed' }
   }
+  // re-stamp claim custody (bro-ho09d) — the claimClump record already
+  // proves a live owner; this refresh names the verified worktree dir
+  // and log for the check-in readers
+  beginLoopRun(ctx.root, {
+    beadId: lead.id,
+    beadIds: beads.map((b) => b.id),
+    slug: loopSlug(lead.id),
+    pid: process.pid,
+    pidStart: procStat(process.pid)?.start,
+    startedAt: new Date().toISOString(),
+    worktree: item.worktreeDir,
+    log: loopRunLog(ctx.root, loopSlug(lead.id)) ?? '',
+  })
   ctx.stage = 'bootstrap'
   if (!runBootstrap(ctx, ours, item)) {
+    endLoopRun(ctx.root, loopSlug(lead.id))
     return { kind: 'done', result: 'failed' }
   }
   const prompt = buildWorkPrompt(beads, item.branch, slot?.base, slot?.bottom, ctx.backend)
@@ -1215,6 +1250,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       noteBead(ctx.tasks, b.id, `loop: prompt write failed — ${err instanceof Error ? err.message : String(err)}`)
       reopenBead(ctx.tasks, b.id)
     }
+    endLoopRun(ctx.root, loopSlug(lead.id))
     return { kind: 'done', result: 'failed' }
   }
   ctx.stage = 'agent spawn'
@@ -1235,6 +1271,9 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     } catch (err) {
       return settleSpawnRefusal(ctx, member, err)
     }
+    // custody transfers to the agent registry entry — claimStep landed
+    // the lead's claim under the spawn lock (bro-ho09d)
+    endLoopRun(ctx.root, loopSlug(lead.id))
     return { kind: 'member', member }
   }
   // no shared store to pin a claim/exit record against — the awaited
@@ -1278,6 +1317,8 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     rounds: 0,
     fetchErrors: 0,
   }
+  // custody transfers to the armed watch — the run record's job is done
+  endLoopRun(ctx.root, loopSlug(lead.id))
   return { kind: 'member', member }
 }
 
@@ -2031,13 +2072,16 @@ function claimedTails(tasks: TaskStore, seen: Set<string>): { own: string[]; oth
 /** The close-out litter sweep — reap the provably-done leftovers before
  *  the audit names what survived. A sweep failure is a warning line,
  *  never a crash. */
-function sweepLoopLitter(ctx: Ctx): LitterReap | undefined {
+function sweepLoopLitter(ctx: Ctx, parkedClaims: ReadonlySet<string>): LitterReap | undefined {
   try {
     return reapLoopLitter({
       root: ctx.root,
       tasks: ctx.tasks,
       rev: { repo: ctx.repo, facade: ctx.rev },
       stackPrefix: ctx.stack === undefined ? undefined : `stack/${ctx.stack}/`,
+      parkedKeep: ctx.cfg.parkedKeep,
+      parkedTtlDays: ctx.cfg.parkedTtlDays,
+      keepClaims: parkedClaims,
     })
   } catch (err) {
     say(ctx, `  warning: litter sweep failed — ${err instanceof Error ? err.message : String(err)}`)
@@ -2049,6 +2093,12 @@ function sweepLoopLitter(ctx: Ctx): LitterReap | undefined {
  *  that survived it — 'clean' only when no section has anything left. */
 function sayLoopAudit(ctx: Ctx, reap: LitterReap | undefined, sections: [string, string[]][]): void {
   say(ctx, 'loop audit:')
+  for (const r of reap?.released ?? []) {
+    say(ctx, `  released claim: ${r}`)
+  }
+  for (const g of reap?.repaired ?? []) {
+    say(ctx, `  re-registered: ${g}`)
+  }
   for (const r of reap?.reaped ?? []) {
     say(ctx, `  reaped: ${r}`)
   }
@@ -2098,7 +2148,7 @@ export function syncAfterAudit(
  *  worktrees/branches, claimed beads, and cleanup failures collected
  *  during the run. Finished with `bro sync` so artifacts and bead state
  *  travel. Never throws — an audit failure is reported, not raised. */
-function endAudit(ctx: Ctx, seen: Set<string>): void {
+function endAudit(ctx: Ctx, seen: Set<string>, parkedClaims: ReadonlySet<string>): void {
   ctx.stage = 'audit'
   // the sweep's git helpers and runSyncCommand narrate via console.log —
   // under --json that corrupts the event stream, so route the whole
@@ -2110,7 +2160,7 @@ function endAudit(ctx: Ctx, seen: Set<string>): void {
   try {
     // reap before the report — a landed bead's leftover tree is not a
     // tail; the audit describes what survived the sweep
-    const reap = sweepLoopLitter(ctx)
+    const reap = sweepLoopLitter(ctx, parkedClaims)
     const { worktrees, worktreeBranches, branches, errors } = loopRefTails(
       ctx.root,
       ctx.stack === undefined ? ['loop/'] : ['loop/', `stack/${ctx.stack}/`]
@@ -2208,6 +2258,15 @@ function claimClump(
     }
     return undefined
   }
+  // claim custody — the litter sweep treats in_progress with no live
+  // owner as an orphan (bro-ho09d). The worker's pid only exists after
+  // pushItem's spawn; until then the loop process itself is the live
+  // owner, so the claim → worktree → bootstrap → spawn chain can't
+  // read as abandonment to a racing sweep. The worktree path is the
+  // deterministic planItem naming — planItemAndWorktree reuses it
+  // verbatim. pushItem re-stamps the record; spawnAgent retires it
+  // under the worker's pid.
+  claimCustody(ctx, lead, [lead.id])
   // solo fast path — batch off, no budget for a second member, or a
   // lead that can't clump (urgent, keyless, or `solo`-labelled)
   if (ctx.cfg.batch < 2 || budget < 2) {
@@ -2242,8 +2301,29 @@ function claimClump(
       ctx,
       `loop: batch of ${members.length + 1} — ${lead.id} + ${members.map((b) => b.id).join(', ')}`
     )
+    // members claimed after the lead — widen custody so their
+    // in_progress also traces to this run's owner pid
+    claimCustody(ctx, lead, [lead.id, ...members.map((b) => b.id)])
   }
   return [lead, ...members]
+}
+
+/** The run record as a claim-custody marker: loop-pid owned until
+ *  spawnAgent re-stamps it with the worker's. Without it an
+ *  in_progress bead between `bd --claim` and the worker fork reads as
+ *  an orphan to `bro work prune --loop` and gets released mid-setup. */
+function claimCustody(ctx: Ctx, lead: ReadyBead, beadIds: string[]): void {
+  const slug = loopSlug(lead.id)
+  beginLoopRun(ctx.root, {
+    beadId: lead.id,
+    beadIds,
+    slug,
+    pid: process.pid,
+    pidStart: procStat(process.pid)?.start,
+    startedAt: new Date().toISOString(),
+    worktree: worktreePathFor(ctx.root, slug),
+    log: loopRunLog(ctx.root, slug) ?? '',
+  })
 }
 
 /** Post-merge cascade after a landed stack member — retarget + rebase
@@ -2276,6 +2356,10 @@ interface QueueState {
   claimed: number
   /** claimClump returned nothing — no more pushes, only gate service. */
   drained: boolean
+  /** Beads this run deliberately parked — a park is intent, not an
+   *  orphan, so the end-of-run litter sweep must not release their
+   *  claims (bro-ho09d). A later sweep judges them fresh. */
+  parkedClaims: Set<string>
   /** A spawn refused on a full fleet holds pushes until now — a
    *  hot-loop through pick+probe+spawn would burn the tick against
    *  the same wall (spec bro-zpa93). */
@@ -2305,6 +2389,11 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
     }
     q.stack.splice(q.stack.indexOf(m), 1)
     q.tally[verdict] += 1
+    if (verdict === 'parked') {
+      for (const b of m.beads) {
+        q.parkedClaims.add(b.id)
+      }
+    }
     if (verdict === 'landed') {
       syncAfterLand(ctx)
     }
@@ -2413,18 +2502,34 @@ async function tryClaim(
     unseeClump(ctx, q, clump)
     return false
   }
+  recordClaimOutcome(ctx, q, ids, out)
+  return true
+}
+
+/** The post-push bookkeeping half of tryClaim — stack the fresh member
+ *  or tally the non-member result (parked ids stay drain-visible). */
+function recordClaimOutcome(
+  ctx: Ctx,
+  q: QueueState,
+  ids: string[],
+  out: Exclude<PushOutcome, { kind: 'hold' }>
+): void {
   if (out.kind === 'member') {
     q.stack.push(out.member)
     // a worker-pending member reports its pending phase — its `→ PR`
     // line lands when the worker exits and the gate join happens
     say(ctx, pushLine(ctx, out.member.pr, ids, q.stack.length))
-  } else {
-    q.tally[out.result] += 1
-    if (ctx.json) {
-      console.log(JSON.stringify({ bead: ids[0], beads: ids, result: out.result }))
+    return
+  }
+  q.tally[out.result] += 1
+  if (out.result === 'parked') {
+    for (const id of ids) {
+      q.parkedClaims.add(id)
     }
   }
-  return true
+  if (ctx.json) {
+    console.log(JSON.stringify({ bead: ids[0], beads: ids, result: out.result }))
+  }
 }
 
 /** The held-push branch of a tick — park the next probe for an
@@ -2485,6 +2590,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
     tally: { landed: 0, closed: 0, parked: 0, failed: 0 },
     claimed: 0,
     drained: false,
+    parkedClaims: new Set(),
     pushHoldUntil: 0,
     diskHeld: false,
     diskProbeWarned: new Set(),
@@ -2543,7 +2649,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
   } finally {
     // idle, gated, or error — the audit always runs; a tail the loop
     // left must surface in the summary, not be discovered later
-    endAudit(ctx, q.seen)
+    endAudit(ctx, q.seen, q.parkedClaims)
   }
 }
 

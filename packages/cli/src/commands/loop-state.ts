@@ -35,6 +35,10 @@ import { gitTry, pidAlive } from '@broject/core'
  *  last-progress signal. */
 export interface LoopRunRecord {
   beadId: string
+  /** the whole claimed clump — a batch's members share the lead's
+   *  worker and record, so their claims trace to this pid too
+   *  (bro-ho09d) */
+  beadIds?: string[]
   slug: string
   pid: number
   /** /proc starttime at spawn — survives pid-reuse checks. */
@@ -51,6 +55,8 @@ export interface LoopRunRecord {
  *  guessed. */
 export interface LoopRunView {
   beadId: string
+  /** the claimed clump when the record carries it (see LoopRunRecord) */
+  beadIds?: string[]
   slug: string
   pid: number | null
   state: 'running' | 'dead'
@@ -127,6 +133,9 @@ function readRecord(path: string, slug: string): LoopRunRecord | null {
     }
     return {
       beadId: typeof r.beadId === 'string' && r.beadId !== '' ? r.beadId : slug,
+      beadIds: Array.isArray(r.beadIds)
+        ? r.beadIds.filter((b): b is string => typeof b === 'string' && b !== '')
+        : undefined,
       slug,
       pid: r.pid,
       pidStart: typeof r.pidStart === 'string' && r.pidStart !== '' ? r.pidStart : undefined,
@@ -183,6 +192,7 @@ function fileView(home: string, f: string, now: number): LoopRunView {
   const live = pid !== null && pidAlive(pid, rec?.pidStart)
   return {
     beadId: rec?.beadId ?? slug,
+    beadIds: rec?.beadIds,
     slug,
     pid,
     state: live ? 'running' : 'dead',
