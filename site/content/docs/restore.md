@@ -6,7 +6,7 @@ description: A rig's durable state lives on git refs and branches — clone, bro
 A bro rig is designed so the machine is disposable. What dies with it is
 **processes** — the daemon, act watchers, exec shells, dolt servers —
 plus anything never pushed. Everything else already lives on the remote:
-claims, worktree records, the agent registry, molecules, and the ready
+claims, worktree records, molecules, and the ready
 queue are bead state synced to `refs/dolt/data`; `loop/*` and snapshot
 branches are ordinary git refs; the review-debt ledger and `.agents/`
 state ride `refs/bro/data`.
@@ -17,9 +17,9 @@ state ride `refs/bro/data`.
 | ----- | -------- | ----------- |
 | Code, `loop/*` and `fix/*` branches, dirty-tree snapshot branches | `refs/heads/*` | `git clone` / `git fetch` |
 | bro artifacts — review-debt ledger, drill evidence, `.agents/` state | `refs/bro/data` | `bro work sync --pull` |
-| Beads store — issues, claims, agent registry, drill frames, molecules | `refs/dolt/data` via a dolt remote (`bd dolt remote list`) | `bd sync` |
+| Beads store — issues, claims, drill frames, molecules | `refs/dolt/data` via a dolt remote (`bd dolt remote list`) | `bd sync` |
 | Operator config — providers, agent templates, global skills | outside the repo (`~/.config/bro`, `~/.agents`) | the operator's own backup — restore this first |
-| Running processes + machine-local state — daemon, watchers, shells, the `bro/drive.json` install marker, agent logs | nowhere | restarted below |
+| Running processes + machine-local state — daemon, watchers, shells, the `bro/drive.json` install marker, agent logs, the agent registry (`<git-common>/bro/agents.json`) | nowhere | restarted below |
 
 ## Sequence
 
@@ -38,7 +38,7 @@ Then verify from the authoritative reads, not from process exits:
 bd ready                  # the queue survived
 bro fleet status          # board, drill frame, fleet
 git worktree list         # worktree records survived — check each for uncommitted work
-bro fleet agents status   # registry entries show dead pids — `bro fleet agents up <step>` respawns
+bro fleet agents status   # starts empty — agents.json is machine-local; `bd list --status in_progress` is the respawn worklist (`bro work enter <step>` + `bro fleet agents up <step>`)
 ```
 
 ### When `bd sync` cannot authenticate
