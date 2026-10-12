@@ -45,6 +45,7 @@ import {
   janitorLine,
   mailboxDir,
   prOwnership,
+  prOwnershipMark,
   reviewHost,
   runJanitor,
   sweepOrphanProcs,
@@ -623,17 +624,10 @@ function gateLines(gates: WatchGates): string[] {
     ...gates.prs.map(
       (g) =>
         `  ${g.link}  ${gateVerdict(g)}` +
-        (g.ownership === undefined ? '' : `  · ${ownershipMark(g.ownership)}`)
+        (g.ownership === undefined ? '' : `  · ${prOwnershipMark(g.ownership)}`)
     ),
     ...lookupWarn,
   ]
-}
-
-/** The ownership marker a row renders — the label names (`gh pr list
- *  -l bro-managed` is the operator's own filter), 'human' for the
- *  unmarked third state. */
-function ownershipMark(o: PrOwnership): string {
-  return o === 'managed' ? 'bro-managed' : o === 'review' ? 'bro-review' : 'human'
 }
 
 function fleetLines(fleet: WatchSnapshot['fleet']): string[] {

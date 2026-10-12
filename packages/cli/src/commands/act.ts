@@ -591,6 +591,22 @@ function landPr(
   }
 }
 
+/** Ownership marking (spec bro-c650l): neither label means the PR is
+ *  human-owned — landing it is the operator's override, so it warns
+ *  rather than blocks. A failed labels read skips the warning:
+ *  unknown is not absence, and a best-effort stamp that never landed
+ *  must not make bro's own PR cry wolf on every merge. */
+function warnHumanOwned(rev: ReviewFacade, t: PrTarget): void {
+  try {
+    if (prOwnership(rev.labels(t)) === 'human') {
+      console.error(
+        `warning: ${rev.prLink(t.repo, t.pr)} carries no bro-managed/bro-review label — ` +
+          'human-owned; landing anyway'
+      )
+    }
+  } catch { /* advisory only */ }
+}
+
 async function cmdMerge(argv: string[]): Promise<void> {
   const cfg = loadBroConfig()
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: cfg.connectors })
@@ -657,19 +673,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
       return
     }
 
-    // Ownership marking (spec bro-c650l): neither label means the PR is
-    // human-owned — landing it is the operator's override, so it warns
-    // rather than blocks. A failed labels read skips the warning:
-    // unknown is not absence, and a best-effort stamp that never landed
-    // must not make bro's own PR cry wolf on every merge.
-    try {
-      if (prOwnership(rev.labels(t)) === 'human') {
-        console.error(
-          `warning: ${rev.prLink(t.repo, t.pr)} carries no bro-managed/bro-review label — ` +
-            'human-owned; landing anyway'
-        )
-      }
-    } catch { /* advisory only */ }
+    warnHumanOwned(rev, t)
 
     mergedHead = landPr(rev, t, { method, admin: argv.includes('--admin') }, {
       ref: state.headRef,

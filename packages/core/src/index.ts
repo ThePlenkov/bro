@@ -170,6 +170,7 @@ export {
   PR_MANAGED_LABEL,
   PR_REVIEW_LABEL,
   prOwnership,
+  prOwnershipMark,
   stampPrOwnership,
 } from './ownership.ts'
 export type { PrOwnership, PrStamp } from './ownership.ts'

@@ -48,6 +48,13 @@ export interface PrStamp {
   meta: Record<string, unknown>
 }
 
+/** The marker a watch/status row renders — the label names the
+ *  operator's own `gh pr list -l bro-managed` filter uses, 'human'
+ *  for the unmarked third state. */
+export function prOwnershipMark(o: PrOwnership): string {
+  return { managed: PR_MANAGED_LABEL, review: PR_REVIEW_LABEL, human: 'human' }[o]
+}
+
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
 /** Stamp the ownership label + provenance trailer on a PR — best-effort

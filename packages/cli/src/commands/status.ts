@@ -23,6 +23,7 @@ import {
   gitTry,
   pidAlive,
   prOwnership,
+  prOwnershipMark,
   readAgentRegistry,
   reviewHost,
 } from '@broject/core'
@@ -342,15 +343,7 @@ function actLine(act: NonNullable<BroStatus['act']> | null): string {
     return 'act: no open PR for this branch'
   }
   const blockers = act.blockers.length > 0 ? ` — ${act.blockers.join('; ')}` : ''
-  // the marker names the label (`gh pr list -l bro-managed`), 'human'
-  // for the unmarked third state
-  const own =
-    act.ownership === 'managed'
-      ? 'bro-managed'
-      : act.ownership === 'review'
-        ? 'bro-review'
-        : act.ownership
-  const suffix = own === undefined ? '' : ` · ${own}`
+  const suffix = act.ownership === undefined ? '' : ` · ${prOwnershipMark(act.ownership)}`
   return `act: [#${act.pr}](${act.url}) ${act.gate}${blockers}${suffix}`
 }
 

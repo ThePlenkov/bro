@@ -56,7 +56,6 @@ import {
   reviewHost,
   SpawnError,
   stampPrOwnership,
-  taskStore,
   type AgentInfo,
   type IgnoreCheckRule,
   type PrMeta,
