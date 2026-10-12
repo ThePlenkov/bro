@@ -1261,6 +1261,9 @@ async function freshOpen(
     return { pr, link, verdict: 'probe-failed', detail: errText(err) }
   }
   if (meta.state !== 'OPEN') {
+    // the fresh probe just proved the gate's feed entry stale — drop
+    // it so the next pass reads the settled gate, not the cached one
+    ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
     return { pr, link, verdict: 'settled', detail: meta.state.toLowerCase() }
   }
   return { link, meta, checks }
@@ -1491,6 +1494,9 @@ async function spawnCiFixer(
   const { link, meta, checks } = fresh
   const failing = failingCiChecks(gatedChecks(ctx, checks))
   if (failing.length === 0) {
+    // fresh checks cleared what the cached gate called ci-fail — the
+    // feed entry that classified this PR is stale
+    ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
     return { pr, link, verdict: 'ci-resolved' }
   }
   const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'ci')
@@ -1539,6 +1545,7 @@ async function spawnSastFixer(
   const { link, meta, checks } = fresh
   const names = liveSastChecks(gatedChecks(ctx, checks)).map((c) => c.name)
   if (names.length === 0) {
+    ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
     return { pr, link, verdict: 'sast-resolved' }
   }
   let annotations: Map<string, number | null>
@@ -1554,6 +1561,7 @@ async function spawnSastFixer(
   // gate's sast_unknown shape: infra, retried by the next pass's own
   // probe, never an agent's work order
   if (!findings.some((f) => f.count !== null && f.count > 0)) {
+    ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
     return { pr, link, verdict: 'sast-resolved' }
   }
   const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'sast')
