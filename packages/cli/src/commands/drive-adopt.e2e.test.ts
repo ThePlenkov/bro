@@ -11,47 +11,16 @@ import { mkdirSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   git,
-  initRepo,
+  hostFixture,
   insideAsync,
-  installFakeBd,
-  installFakeHost,
   readHostState,
-  runCli,
   writeHostState,
   type CliResult,
 } from './testrepo.ts'
 
-interface Fixture {
-  root: string
-  main: string
-  hostState: string
-  run: (args: string[]) => CliResult
-}
-
-function fixture(): Fixture {
-  const { root, main } = initRepo('bro-drive-adopt-')
-  const { binDir, db } = installFakeBd(root)
-  const host = installFakeHost(main)
-  writeFileSync(
-    join(main, 'bro.config.json'),
-    JSON.stringify({
-      plugins: ['./fakehost.ts'],
-      connectors: { reviews: 'fakehost' },
-      loop: { agent: `node ${host.agent}` },
-    })
-  )
-  const env = {
-    PATH: `${binDir}:${process.env.PATH ?? ''}`,
-    HOME: root,
-    FAKE_BD_DB: db,
-    FAKE_HOST_STATE: host.state,
-  }
-  return {
-    root,
-    main,
-    hostState: host.state,
-    run: (args) => runCli(['drive', ...args], { cwd: main, env }),
-  }
+const fixture = () => {
+  const f = hostFixture('bro-drive-adopt-', { loopAgent: true })
+  return { ...f, run: (args: string[]) => f.run(['drive', ...args]) }
 }
 
 /** One green PR on a fleet branch. */
