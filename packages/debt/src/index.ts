@@ -68,5 +68,16 @@ export {
   DEBT_SOURCES,
   parseSources,
   resolvedThreadIds,
+  SourceSkipped,
 } from './collectors.ts'
-export type { DebtSource, DebtSourceName } from './collectors.ts'
+export type { CollectCtx, DebtSource, DebtSourceName } from './collectors.ts'
+export {
+  assertSonarHostTrusted,
+  collectSonarcloud,
+  dedupeReviewThreads,
+  parseSonarProperties,
+  resolveSonarProject,
+  SONAR_HOST,
+  sonarKeyOf,
+} from './sonarcloud.ts'
+export type { SonarDupe, SonarProject } from './sonarcloud.ts'
