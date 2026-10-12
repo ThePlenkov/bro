@@ -118,6 +118,10 @@ function withEnv(opts: EnvOpts, fn: (dir: string) => void): Promise<void> {
     'PLUGIN_ROOT',
     'BEADS_DIR',
     'SONAR_TOKEN',
+    'CODACY_API_TOKEN',
+    'CODACY_PROJECT_TOKEN',
+    'CODESCENE_TOKEN',
+    'CODESCENE_PROJECT_ID',
     // session pins — a leaked BRO_/DEVIN_SESSION_ID would let the
     // ambient session claim the fixture's build stamp
     'BRO_SESSION_ID',
@@ -680,5 +684,65 @@ describe('bro doctor', () => {
         assert.equal(c.status, 'ok', JSON.stringify(c))
         assert.match(c.detail, /rootkey/)
       }
+    ))
+
+  test('debt-codacy: absent when unconfigured; no token warns with remediation', () =>
+    withEnv({ config: { debt: { sources: ['review-threads'] } }, bins: ['gh'] }, (dir) => {
+      assert.equal(runDoctorChecks(dir).find((c) => c.name === 'debt-codacy'), undefined)
+    }).then(() =>
+      withEnv(
+        { config: { debt: { sources: ['codacy'] } }, bins: ['gh'] },
+        (dir) => {
+          const c = byName(runDoctorChecks(dir), 'debt-codacy')
+          assert.equal(c.status, 'warn')
+          assert.match(c.detail, /CODACY_API_TOKEN/)
+        }
+      )
+    ))
+
+  test('debt-codacy: token + curl → ok; a cleartext host warns', () =>
+    withEnv(
+      { config: { debt: { sources: ['codacy'] } }, bins: ['gh', 'curl'], env: { CODACY_API_TOKEN: 'ct' } },
+      (dir) => {
+        const c = byName(runDoctorChecks(dir), 'debt-codacy')
+        assert.equal(c.status, 'ok', JSON.stringify(c))
+        assert.match(c.detail, /CODACY_API_TOKEN set/)
+      }
+    ).then(() =>
+      withEnv(
+        {
+          config: { debt: { sources: ['codacy'], sourceConfig: { codacy: { host: 'http://codacy.internal' } } } },
+          bins: ['gh', 'curl'],
+          env: { CODACY_PROJECT_TOKEN: 'cpt' },
+        },
+        (dir) => {
+          const c = byName(runDoctorChecks(dir), 'debt-codacy')
+          assert.equal(c.status, 'warn')
+          assert.match(c.detail, /cleartext/)
+        }
+      )
+    ))
+
+  test('debt-codescene: token without a project id warns; config id → ok', () =>
+    withEnv(
+      { config: { debt: { sources: ['codescene'] } }, bins: ['gh', 'curl'], env: { CODESCENE_TOKEN: 'cs' } },
+      (dir) => {
+        const c = byName(runDoctorChecks(dir), 'debt-codescene')
+        assert.equal(c.status, 'warn')
+        assert.match(c.detail, /project id/)
+      }
+    ).then(() =>
+      withEnv(
+        {
+          config: { debt: { sources: ['codescene'], sourceConfig: { codescene: { project_id: 42 } } } },
+          bins: ['gh', 'curl'],
+          env: { CODESCENE_TOKEN: 'cs' },
+        },
+        (dir) => {
+          const c = byName(runDoctorChecks(dir), 'debt-codescene')
+          assert.equal(c.status, 'ok', JSON.stringify(c))
+          assert.match(c.detail, /project 42/)
+        }
+      )
     ))
 })

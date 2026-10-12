@@ -31,7 +31,14 @@ import {
 } from '@broject/core'
 import type { BdCompat, ProviderEntry, ProviderSurface } from '@broject/core'
 import { formatRigUri, parsePeer, rigFromRemoteUrl } from '@broject/mesh'
-import { assertSonarHostTrusted, resolveSonarProject, SourceSkipped } from '@broject/debt'
+import {
+  assertSonarHostTrusted,
+  assertTokenSafeHost,
+  CODACY_HOST,
+  resolveCodesceneProject,
+  resolveSonarProject,
+  SourceSkipped,
+} from '@broject/debt'
 import { judgeConfig, synthesizedProviders } from '@broject/judge'
 import type { JudgeConfig } from '@broject/judge'
 import { loadBroConfig, pluginConfigSections } from '../plugins.ts'
@@ -810,10 +817,27 @@ function meshDoltCheck(): DoctorCheck {
       )
 }
 
-/** Debt-source prerequisites (spec: specs/bro-huy5o.4.md) — a configured
- *  source whose setup is incomplete reports here instead of being a
- *  surprise `skipped` line at collect. Unconfigured sources emit no row. */
+/** Debt-source prerequisites (specs: bro-huy5o.4, bro-huy5o.5) — a
+ *  configured source whose setup is incomplete reports here instead of
+ *  being a surprise `skipped` line at collect. Unconfigured sources emit
+ *  no row. */
 function debtSourceChecks(dir: string, debt: { sources: string[]; sourceConfig: Record<string, Record<string, unknown>> }): DoctorCheck[] {
+  return [
+    ...debtSonarcloudCheck(dir, debt),
+    ...debtCodacyCheck(debt),
+    ...debtCodesceneCheck(debt),
+  ]
+}
+
+/** Missing `curl` is a shared transport failure for the HTTP sources. */
+function curlCheck(name: string, detail: string): DoctorCheck | null {
+  const curl = probeBin('curl')
+  return curl.found
+    ? null
+    : check(name, 'warn', `${detail} · curl ${binProblem(curl)}`, 'the debt-source transport needs curl on PATH')
+}
+
+function debtSonarcloudCheck(dir: string, debt: { sources: string[]; sourceConfig: Record<string, Record<string, unknown>> }): DoctorCheck[] {
   if (!debt.sources.includes('sonarcloud')) {
     return []
   }
@@ -839,16 +863,9 @@ function debtSourceChecks(dir: string, debt: { sources: string[]; sourceConfig: 
       ),
     ]
   }
-  const curl = probeBin('curl')
-  if (!curl.found) {
-    return [
-      check(
-        'debt-sonarcloud',
-        'warn',
-        `project ${project.projectKey} · curl ${binProblem(curl)}`,
-        'the sonarcloud transport needs curl on PATH'
-      ),
-    ]
+  const noCurl = curlCheck('debt-sonarcloud', `project ${project.projectKey}`)
+  if (noCurl !== null) {
+    return [noCurl]
   }
   try {
     assertSonarHostTrusted(project)
@@ -865,6 +882,91 @@ function debtSourceChecks(dir: string, debt: { sources: string[]; sourceConfig: 
       'debt-sonarcloud',
       'ok',
       `SONAR_TOKEN set · project ${project.projectKey} (${project.via})`
+    ),
+  ]
+}
+
+function debtCodacyCheck(debt: { sources: string[]; sourceConfig: Record<string, Record<string, unknown>> }): DoctorCheck[] {
+  if (!debt.sources.includes('codacy')) {
+    return []
+  }
+  const api = process.env['CODACY_API_TOKEN']?.trim()
+  const project = process.env['CODACY_PROJECT_TOKEN']?.trim()
+  const env = api !== undefined && api !== '' ? 'CODACY_API_TOKEN' : project !== undefined && project !== '' ? 'CODACY_PROJECT_TOKEN' : null
+  if (env === null) {
+    return [
+      check(
+        'debt-codacy',
+        'warn',
+        'codacy debt source configured but neither CODACY_API_TOKEN nor CODACY_PROJECT_TOKEN is set',
+        'export CODACY_API_TOKEN — app.codacy.com → account → API tokens (or a repo-scoped Project API token)'
+      ),
+    ]
+  }
+  const cfg = debt.sourceConfig['codacy']
+  const host = typeof cfg?.host === 'string' && cfg.host !== '' ? cfg.host : CODACY_HOST
+  try {
+    assertTokenSafeHost(host, 'codacy')
+  } catch (err) {
+    if (err instanceof SourceSkipped) {
+      return [
+        check('debt-codacy', 'warn', err.message, 'collect skips the source until the host is trusted')
+      ]
+    }
+    throw err
+  }
+  const noCurl = curlCheck('debt-codacy', `${env} set`)
+  if (noCurl !== null) {
+    return [noCurl]
+  }
+  return [check('debt-codacy', 'ok', `${env} set · ${new URL(host).host}`)]
+}
+
+function debtCodesceneCheck(debt: { sources: string[]; sourceConfig: Record<string, Record<string, unknown>> }): DoctorCheck[] {
+  if (!debt.sources.includes('codescene')) {
+    return []
+  }
+  const token = process.env['CODESCENE_TOKEN']?.trim()
+  if (token === undefined || token === '') {
+    return [
+      check(
+        'debt-codescene',
+        'warn',
+        'codescene debt source configured but CODESCENE_TOKEN is not set',
+        'export CODESCENE_TOKEN — codescene.io → Account → API tokens'
+      ),
+    ]
+  }
+  const project = resolveCodesceneProject(debt.sourceConfig['codescene'])
+  if (project === null) {
+    return [
+      check(
+        'debt-codescene',
+        'warn',
+        'CODESCENE_TOKEN set but no project id resolves',
+        'set debt.sourceConfig.codescene.project_id or CODESCENE_PROJECT_ID — the number in codescene.io/projects/<id>'
+      ),
+    ]
+  }
+  try {
+    assertTokenSafeHost(project.host, 'codescene')
+  } catch (err) {
+    if (err instanceof SourceSkipped) {
+      return [
+        check('debt-codescene', 'warn', `project ${project.projectId} · ${err.message}`, 'collect skips the source until the host is trusted')
+      ]
+    }
+    throw err
+  }
+  const noCurl = curlCheck('debt-codescene', `project ${project.projectId}`)
+  if (noCurl !== null) {
+    return [noCurl]
+  }
+  return [
+    check(
+      'debt-codescene',
+      'ok',
+      `CODESCENE_TOKEN set · project ${project.projectId} (${project.via})`
     ),
   ]
 }

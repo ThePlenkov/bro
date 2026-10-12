@@ -17,7 +17,7 @@ requirement.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro review debt collect [filters]` | Scan merged PRs **without** a `debt:*` label → collect unresolved threads → write `harvests/*.jsonl` → label `debt:collected` / `debt:clean`. With `debt.sources` in bro.config.json it also runs opt-in collectors (`dependabot`, `code-scanning`, `secret-scanning`, `stale-prs`, `failed-ci`, `sonarcloud`) — same ledger, `debt:<source>` labels on beads, `debt.stale_days` tunes stale-prs; `sonarcloud` needs `SONAR_TOKEN` + a project key (`debt.sourceConfig.sonarcloud.project_key` or `sonar-project.properties`) |
+| `bro review debt collect [filters]` | Scan merged PRs **without** a `debt:*` label → collect unresolved threads → write `harvests/*.jsonl` → label `debt:collected` / `debt:clean`. With `debt.sources` in bro.config.json it also runs opt-in collectors (`dependabot`, `code-scanning`, `secret-scanning`, `stale-prs`, `failed-ci`, `sonarcloud`, `codacy`, `codescene`) — same ledger, `debt:<source>` labels on beads, `debt.stale_days` tunes stale-prs; `sonarcloud` needs `SONAR_TOKEN` + a project key (`debt.sourceConfig.sonarcloud.project_key` or `sonar-project.properties`); `codacy` needs `CODACY_API_TOKEN` or `CODACY_PROJECT_TOKEN`; `codescene` needs `CODESCENE_TOKEN` + `debt.sourceConfig.codescene.project_id` (or `CODESCENE_PROJECT_ID`) |
 | `bro review debt status` | Ledger summary + unprocessed merged-PR count |
 | `bro review debt stats [--by author\|source\|area]` | Signal per reviewer/source/area — fix% is the done share of decided rows |
 | `bro review debt trend [--by author\|source\|area] [--bucket week\|day]` | Burn-down — open debt per time bucket (`--json` for chart data) |

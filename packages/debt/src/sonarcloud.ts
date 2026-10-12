@@ -11,15 +11,21 @@
  * `thread_id` is `sonarcloud:<issueKey>` / `sonarcloud:hotspot:<key>` —
  * stable across runs, so the ledger's thread_id upsert dedups re-collects.
  */
-import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { baseRecord, SourceSkipped, type CollectCtx } from './collectors.ts'
+import {
+  assertTokenSafeHost,
+  baseRecord,
+  curlJson,
+  dedupeByThreads,
+  SourceSkipped,
+  stripSlashes,
+  type CollectCtx,
+  type DedupeDupe,
+} from './collectors.ts'
 import type { DebtPriority, DebtRecord } from './types.ts'
 
 export const SONAR_HOST = 'https://sonarcloud.io'
-const TIMEOUT_MS = 30_000
 const PAGE_SIZE = 500
 /** issues/search refuses offsets past 10_000 — past the window the
  *  fetch throws rather than return a partial list the caller would
@@ -34,16 +40,6 @@ export interface SonarProject {
   /** who asserted the host — a properties-file host is ambient repo
    *  content and never carries the token (see assertSonarHostTrusted). */
   hostVia: 'config' | 'properties' | 'default'
-}
-
-/** Trailing slashes, no regex — `/\/+$/` on uncontrolled input trips
- *  CodeQL's polynomial-regex rule; a backward scan is linear anyway. */
-function stripTrailingSlashes(s: string): string {
-  let end = s.length
-  while (end > 0 && s[end - 1] === '/') {
-    end--
-  }
-  return s.slice(0, end)
 }
 
 /** `sonar-project.properties` — flat `key=value`, `#`/`!` comments.
@@ -67,7 +63,7 @@ export function parseSonarProperties(text: string): {
     if (key === 'sonar.projectKey' && value !== '') {
       out.projectKey = value
     } else if (key === 'sonar.host.url' && value !== '') {
-      out.host = stripTrailingSlashes(value)
+      out.host = stripSlashes(value)
     }
   }
   return out
@@ -114,7 +110,7 @@ export function resolveSonarProject(
   }
   return {
     projectKey,
-    host: stripTrailingSlashes(cfgHost ?? propsFile.host ?? SONAR_HOST),
+    host: stripSlashes(cfgHost ?? propsFile.host ?? SONAR_HOST),
     via: fromConfig ? 'config' : 'properties',
     hostVia: cfgHost !== undefined ? 'config' : propsFile.host !== undefined ? 'properties' : 'default',
   }
@@ -129,24 +125,8 @@ export function resolveSonarProject(
  *  refused except loopback — cleartext transit leaks the token to every
  *  hop. */
 export function assertSonarHostTrusted(project: SonarProject): void {
-  let url: URL
-  try {
-    url = new URL(project.host)
-  } catch {
-    throw new SourceSkipped(`sonar host "${project.host}" is not a valid URL`)
-  }
+  const url = assertTokenSafeHost(project.host, 'sonar')
   const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
-  if (url.protocol === 'http:') {
-    if (!loopback) {
-      throw new SourceSkipped(
-        `sonar host ${project.host} is plain http — SONAR_TOKEN would cross the wire cleartext; use https`
-      )
-    }
-  } else if (url.protocol !== 'https:') {
-    throw new SourceSkipped(
-      `sonar host "${project.host}" — only http(s) URLs can carry SONAR_TOKEN`
-    )
-  }
   if (
     project.hostVia === 'properties' &&
     url.host !== new URL(SONAR_HOST).host &&
@@ -170,48 +150,10 @@ export function sonarToken(): string {
 }
 
 function curlGet(url: string): unknown {
-  // Token never rides argv — every local user can `ps`: the header is a
-  // 0600 file in a private tmpdir that lives only for the spawn.
-  const dir = mkdtempSync(join(tmpdir(), 'bro-sonar-hdr-'))
-  try {
-    const hdr = join(dir, 'auth')
-    const basic = Buffer.from(`${sonarToken()}:`).toString('base64')
-    writeFileSync(hdr, `Authorization: Basic ${basic}\n`, { mode: 0o600 })
-    const res = spawnSync(
-      'curl', // NOSONAR — PATH lookup is the contract (curl like gh/glab/bd)
-      [
-        '-sS',
-        '--fail-with-body',
-        '--max-time',
-        String(Math.ceil(TIMEOUT_MS / 1000)),
-        '-H',
-        `@${hdr}`,
-        url,
-      ],
-      { encoding: 'utf8', timeout: TIMEOUT_MS + 15_000, maxBuffer: 64 * 1024 * 1024 }
-    )
-    if (res.error) {
-      const code = (res.error as NodeJS.ErrnoException).code
-      throw new Error(
-        code === 'ENOENT'
-          ? 'sonarcloud: curl not found — the sync transport needs curl on PATH'
-          : `sonarcloud: curl failed — ${res.error.message}`
-      )
-    }
-    if (res.status !== 0) {
-      const detail = res.stderr.trim() !== '' ? res.stderr.trim() : res.stdout.trim().slice(0, 300)
-      throw new Error(
-        `sonarcloud: request failed — ${detail !== '' ? detail : `curl exited ${res.status}`}`
-      )
-    }
-    try {
-      return JSON.parse(res.stdout)
-    } catch {
-      throw new Error(`sonarcloud: non-JSON response — ${res.stdout.slice(0, 200)}`)
-    }
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+  // Token never rides argv — every local user can `ps`: the header file
+  // in curlJson is 0600 for the spawn's lifetime only.
+  const basic = Buffer.from(`${sonarToken()}:`).toString('base64')
+  return curlJson(url, [`Authorization: Basic ${basic}`], { label: 'sonarcloud' })
 }
 
 interface SonarComponent {
@@ -384,10 +326,7 @@ export function collectSonarcloud(
 }
 
 /** One dropped sonarcloud record plus the open row that covers it. */
-export interface SonarDupe {
-  record: DebtRecord
-  coveredBy: string
-}
+export type SonarDupe = DedupeDupe
 
 /** The issue key a sonarcloud thread_id carries —
  *  `sonarcloud:KEY` / `sonarcloud:hotspot:KEY`. */
@@ -414,23 +353,11 @@ export function dedupeReviewThreads(
   records: DebtRecord[],
   existing: DebtRecord[]
 ): { kept: DebtRecord[]; duped: SonarDupe[] } {
-  const threads = existing.filter(
-    (r) => r.status === 'open' && (r.source === undefined || r.source === 'review-threads')
-  )
-  const kept: DebtRecord[] = []
-  const duped: SonarDupe[] = []
-  for (const rec of records) {
+  return dedupeByThreads(records, existing, (rec, t) => {
     const key = sonarKeyOf(rec.thread_id)
-    const cover = threads.find(
-      (t) =>
-        (rec.path !== '' && t.path === rec.path && t.line !== null && t.line === rec.line) ||
-        bodyMentionsKey(t.body, key)
+    return (
+      (rec.path !== '' && t.path === rec.path && t.line !== null && t.line === rec.line) ||
+      bodyMentionsKey(t.body, key)
     )
-    if (cover !== undefined) {
-      duped.push({ record: rec, coveredBy: cover.thread_id })
-    } else {
-      kept.push(rec)
-    }
-  }
-  return { kept, duped }
+  })
 }

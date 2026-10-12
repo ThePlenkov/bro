@@ -636,7 +636,8 @@ export interface BroConfig {
     dir: string
     /** Collectors `bro debt collect` runs. Default: review-threads only —
      *  the pre-multi-source contract. Others opt in: dependabot,
-     *  code-scanning, secret-scanning, stale-prs, failed-ci, sonarcloud. */
+     *  code-scanning, secret-scanning, stale-prs, failed-ci, sonarcloud,
+     *  codacy, codescene. */
     sources: string[]
     /** Idle days before an open PR counts as stale (stale-prs collector). */
     stale_days: number
