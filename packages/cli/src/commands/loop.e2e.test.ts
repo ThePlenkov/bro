@@ -217,15 +217,23 @@ describe('bro loop e2e', () => {
           { beadId?: string; beadIds?: string[]; pid?: number; worktree?: string; log?: string }
         >
       }>
-      // while the worker ran, the record carried its own pid and the
-      // agents-plane log — the row `bro watch`/`bro status` renders
-      const workerPeek = peeks.find((p) => p.at === 'worker')
-      assert.ok(workerPeek, 'worker-phase loop peek missing')
-      const rec = workerPeek.records['fx-a']
-      assert.ok(rec, 'no loop run record while the registry worker ran')
-      assert.equal(rec.beadId, 'fx-a')
+      // the record exists from the worker's first instruction — an
+      // early peek may still read the claim-custody stamp (spawn()
+      // resolves after the fork races it), so only identity is
+      // asserted here; the custody fields land by worker-done
+      const startPeek = peeks.find((p) => p.at === 'worker-start')
+      assert.ok(startPeek, 'worker-phase loop peek missing')
+      const startRec = startPeek.records['fx-a']
+      assert.ok(startRec, 'no loop run record while the registry worker ran')
+      assert.equal(startRec.beadId, 'fx-a')
+      assert.equal(startRec.worktree, f.worktree)
+      // by the worker's end the record carries its pid + agents-plane
+      // log — the row `bro watch`/`bro status` renders
+      const donePeek = peeks.find((p) => p.at === 'worker-done')
+      assert.ok(donePeek, 'worker-done loop peek missing')
+      const rec = donePeek.records['fx-a']
+      assert.ok(rec, 'loop run record gone before the worker even exited')
       assert.ok(typeof rec.pid === 'number' && rec.pid > 0)
-      assert.equal(rec.worktree, f.worktree)
       assert.match(rec.log ?? '', /bro[/\\]agents[/\\].+\.log$/)
       // the settle window (worker exited, PR lookup in flight) keeps
       // the record — custody back with the loop process

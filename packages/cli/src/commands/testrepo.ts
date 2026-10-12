@@ -832,21 +832,26 @@ const log = (msg) => {
 // the loop mid-tick, so it snapshots bro/loop/ itself — the cwd is
 // the worktree, whose .git is a file, so the common dir resolves via
 // git. A registry-path spawn must leave a live record while it runs.
-try {
-  const common = execFileSync(
-    'git',
-    ['rev-parse', '--path-format=absolute', '--git-common-dir'],
-    { encoding: 'utf8' }
-  ).trim()
-  const ld = path.join(common, 'bro', 'loop')
-  const recs = {}
-  for (const f of fs.readdirSync(ld).filter((f) => f.endsWith('.json'))) {
-    recs[f.slice(0, -'.json'.length)] = JSON.parse(fs.readFileSync(path.join(ld, f), 'utf8'))
-  }
-  const s = load()
-  s.loopPeeks = (s.loopPeeks ?? []).concat([{ at: 'worker', records: recs }])
-  save(s)
-} catch {}
+const peekLoop = (at) => {
+  try {
+    const common = execFileSync(
+      'git',
+      ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+      { encoding: 'utf8' }
+    ).trim()
+    const ld = path.join(common, 'bro', 'loop')
+    const recs = {}
+    for (const f of fs.readdirSync(ld).filter((f) => f.endsWith('.json'))) {
+      recs[f.slice(0, -'.json'.length)] = JSON.parse(fs.readFileSync(path.join(ld, f), 'utf8'))
+    }
+    const s = load()
+    s.loopPeeks = (s.loopPeeks ?? []).concat([{ at, records: recs }])
+    save(s)
+  } catch {}
+}
+// spawn resolves after the fork — the first peek may still see the
+// claim-custody stamp; the scenario-end peek reads the worker stamp
+peekLoop('worker-start')
 // register the "opened" PR — the per-branch map (seeded prs: {}) is
 // authoritative when present; the flat prOpened flag feeds the legacy
 // single-PR probes
@@ -915,6 +920,7 @@ switch (scenario) {
       markPrOpened(s)
     })
     log('opened pr')
+    peekLoop('worker-done')
     break
   }
   case 'batch': case 'batch-partial': {
@@ -937,6 +943,7 @@ switch (scenario) {
       markPrOpened(s)
     })
     log('opened pr for ' + ids.join(','))
+    peekLoop('worker-done')
     break
   }
   case 'verdict':
