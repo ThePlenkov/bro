@@ -44,6 +44,7 @@ import {
   evaluateExitGate,
   fetchPrActState,
   listWatches,
+  prStateCache,
   rearmWatches,
   releaseMergeSlot,
   waitForGate,
@@ -142,6 +143,7 @@ async function cmdStatus(argv: string[]): Promise<void> {
     maxRounds: act.maxRounds,
     docsPaths: act.docsPaths,
     docsMaxRounds: act.docsMaxRounds,
+    stateCache: prStateCache(process.cwd()),
   })
   const gate = evaluateExitGate(state)
 
@@ -212,6 +214,10 @@ async function cmdWait(argv: string[]): Promise<void> {
     console.error('error: --interval/--timeout must be positive numbers (seconds/minutes)')
     process.exit(2)
   }
+  // the wait's polls ride the shared feed — loop/watch/drive passes
+  // share the same entries; the settle→merge dispatch re-gates
+  // uncached inside cmdMerge, so a cached green never lands a PR
+  const cache = prStateCache(process.cwd())
   const res = await waitForGate(
     async () => {
       const state = await fetchPrActState(rev, t, {
@@ -220,6 +226,7 @@ async function cmdWait(argv: string[]): Promise<void> {
         maxRounds: act.maxRounds,
         docsPaths: act.docsPaths,
         docsMaxRounds: act.docsMaxRounds,
+        stateCache: cache,
       })
       return { state, gate: evaluateExitGate(state) }
     },
@@ -256,6 +263,11 @@ async function cmdWait(argv: string[]): Promise<void> {
         console.error(
           `act wait ${rev.prLink(t.repo, t.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
         )
+        // the pushed head obsoletes this PR's feed entry — the next
+        // poll must fetch it, not re-serve the pre-update state
+        if (ok) {
+          cache?.invalidate(t)
+        }
         emitLifecycle(process.cwd(), {
           kind: 'gate',
           pr: t.pr,
@@ -506,6 +518,24 @@ function mergeMethod(argv: string[]): 'squash' | 'merge' | 'rebase' | null {
   return (strategies[0]?.slice(2) ?? 'squash') as 'squash' | 'merge' | 'rebase'
 }
 
+/** A mutation just landed — the shared feed's next read must fetch,
+ *  not serve the pre-mutation snapshot for up to a TTL (bro-0tcrl).
+ *  `t` narrows the drop to one PR; thread mutations arrive by thread
+ *  id with no PR attached, so they drop the whole feed. Best-effort —
+ *  a repo without a feed has nothing to drop. */
+function dropActState(t?: PrTarget): void {
+  try {
+    const cache = prStateCache(process.cwd())
+    if (t === undefined) {
+      cache?.invalidateAll()
+    } else {
+      cache?.invalidate(t)
+    }
+  } catch {
+    // invalidation is freshness polish — the TTL bounds a missed drop
+  }
+}
+
 /** mergePr + the landed-head handoff — a merge queue accepts a PR
  *  without landing it, so only a MERGED state returns the head.
  *  An external queue (connectors.mergeQueue) owns the merge when
@@ -542,6 +572,7 @@ function landPr(
           to: 'merged',
           detail: { via: 'act', sha: head.sha, queue: true },
         })
+        dropActState(t)
         return head
       }
       console.log(
@@ -554,6 +585,7 @@ function landPr(
         to: 'enqueued',
         detail: { via: 'act', sha: head.sha },
       })
+      dropActState(t)
       return undefined
     }
     // expectedHeadSha pins the merge to the sha the gate evaluated —
@@ -573,6 +605,7 @@ function landPr(
         to: 'merged',
         detail: { via: 'act', sha: head.sha, method: opts.method },
       })
+      dropActState(t)
       return head
     }
     console.log(
@@ -585,6 +618,7 @@ function landPr(
       to: 'enqueued',
       detail: { via: 'act', sha: head.sha, method: opts.method, state: after },
     })
+    dropActState(t)
     return undefined
   } catch (err) {
     console.error(`error: merge failed — ${err instanceof Error ? err.message : String(err)}`)
@@ -644,6 +678,8 @@ async function cmdMerge(argv: string[]): Promise<void> {
   let mergedHead: { ref: string; sha: string } | undefined
   try {
     const act = loadBroConfig().act
+    // deliberately OFF the shared feed: this fetch IS the merge
+    // decision — a ≤ttl-old "green" must never land a PR (bro-0tcrl)
     const state = await fetchPrActState(rev, t, {
       ignoreChecks: act.ignoreChecks,
       checkHistory: checkHistory(process.cwd()),
@@ -1060,6 +1096,7 @@ function cmdResolve(argv: string[]): void {
     // bare resolve can see
     disposition(id, comment ? (/deferred to \S+/i.test(comment) ? 'deferred' : 'rejected') : 'fixed')
   }
+  dropActState()
 }
 
 function cmdReply(argv: string[]): void {
@@ -1100,6 +1137,7 @@ function cmdReply(argv: string[]): void {
       console.error(`warning: ${skipped} line(s) had no <thread_id><TAB><body> shape — skipped`)
       process.exitCode = 1
     }
+    dropActState()
     return
   }
   const id = threadArg(argv)
@@ -1114,6 +1152,7 @@ function cmdReply(argv: string[]): void {
   // resolves silently — journaled as deferred here (stats join
   // first-hit wins) so the silent resolve's 'fixed' can't mask it
   disposition(id, /deferred to \S+/i.test(comment!) ? 'deferred' : 'replied')
+  dropActState()
 }
 
 const COMMANDS: Record<string, (argv: string[]) => void | Promise<void>> = {
@@ -1217,6 +1256,9 @@ export function applyActPlan(plan: ActPlan): void {
         `act: ${v.thread_id} failed — ${err instanceof Error ? err.message : String(err)}`
       )
     }
+  }
+  if (plan.threads.length > 0) {
+    dropActState()
   }
   if (failed.length > 0) {
     console.error(`act plan: ${failed.length} verdict(s) failed: ${failed.join(', ')}`)

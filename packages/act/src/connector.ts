@@ -16,6 +16,7 @@ import {
   watchRetire,
 } from './pending-watch.ts'
 import { fetchPrActState } from './state.ts'
+import { prStateCache } from './state-cache.ts'
 
 /** The bound-dir PR — async when the host has the twin, else a resolved
  *  sync call (a facade without currentPrAsync still answers, just not
@@ -49,6 +50,9 @@ async function gateLine(dir: string, target?: PrTarget): Promise<string | null> 
       maxRounds: cfg.act.maxRounds,
       docsPaths: cfg.act.docsPaths,
       docsMaxRounds: cfg.act.docsMaxRounds,
+      // the feed serves most probes; lockWaitMs 0 keeps a budgeted hook
+      // from ever queuing behind a peer's in-flight fetch
+      stateCache: prStateCache(dir, { lockWaitMs: 0 }),
     })
     const gate = evaluateExitGate(state)
     const link = rev.prLink(t.repo, state.pr)
@@ -98,6 +102,7 @@ async function prProbe(dir: string): Promise<PrProbe | null> {
         maxRounds: cfg.act.maxRounds,
         docsPaths: cfg.act.docsPaths,
         docsMaxRounds: cfg.act.docsMaxRounds,
+        stateCache: prStateCache(dir, { lockWaitMs: 0 }),
       }
     )
     // The same gate `bro act status` enforces: open threads, pending/failed

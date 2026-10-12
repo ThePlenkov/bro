@@ -17,7 +17,7 @@
  * arrays/null, never errors.
  */
 import { basename } from 'node:path'
-import { evaluateExitGate, fetchPrActState } from '@broject/act'
+import { evaluateExitGate, fetchPrActState, prStateCache } from '@broject/act'
 import {
   facade,
   gitTry,
@@ -265,6 +265,7 @@ async function readAct(dir: string): Promise<BroStatus['act']> {
       maxRounds: act.maxRounds,
       docsPaths: act.docsPaths,
       docsMaxRounds: act.docsMaxRounds,
+      stateCache: prStateCache(dir),
     })
     const gate = evaluateExitGate(state)
     // ownership marker — advisory read, a failure degrades the marker,

@@ -20,6 +20,7 @@ Requires Node ≥ 22 and an authenticated `gh`. ESM only.
 ## Surface
 
 - `fetchPrActState` — one call: threads, checks, reviewers, mergeability
+- `prStateCache` — shared gate-state feed under `<git-common>/bro/act-state/`; pollers pass `stateCache` so loop/watch/drive share one fetch per PR per TTL. Decision points (merge) omit it
 - `evaluateExitGate` / `ExitGate` — the gate as data: OK or a blocker list
 - `waitForGate` / `gatePending` — poll until the gate settles
 - `parseActPlan` / `ACT_PLAN_KIND` — the unified act plan payload

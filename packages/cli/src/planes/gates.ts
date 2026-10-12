@@ -14,7 +14,7 @@ import {
   type PrTarget,
   type ReviewFacade,
 } from '@broject/core'
-import { checkHistory, evaluateExitGate, fetchPrActState, type ExitGate, type PrActState } from '@broject/act'
+import { checkHistory, evaluateExitGate, fetchPrActState, prStateCache, type ExitGate, type PrActState, type PrStateCache } from '@broject/act'
 import { argBool, argNumber, dispatchRead, inRepo } from './helpers.ts'
 
 const VERBS = ['resolve', 'reply', 'merge']
@@ -36,7 +36,12 @@ function resolveTarget(rev: ReviewFacade, args?: Record<string, unknown>): PrTar
   return { repo, pr }
 }
 
-async function stateOf(ctx: PlaneCtx, rev: ReviewFacade, t: PrTarget): Promise<{
+async function stateOf(
+  ctx: PlaneCtx,
+  rev: ReviewFacade,
+  t: PrTarget,
+  cache: PrStateCache | null
+): Promise<{
   state: PrActState
   gate: ExitGate
 }> {
@@ -47,6 +52,7 @@ async function stateOf(ctx: PlaneCtx, rev: ReviewFacade, t: PrTarget): Promise<{
     maxRounds: act.maxRounds,
     docsPaths: act.docsPaths,
     docsMaxRounds: act.docsMaxRounds,
+    stateCache: cache,
   })
   return { state, gate: evaluateExitGate(state) }
 }
@@ -68,6 +74,8 @@ const gateRow = (state: PrActState, gate: ExitGate): Gate => ({
 
 export function gatesPlane(ctx: PlaneCtx): PlaneDescriptor {
   const dir = ctx.dir
+  // the shared feed — every plane read is observe-only (bro-0tcrl)
+  const cache = prStateCache(dir)
   /** null = no review host serves this repo — honest absence */
   const host = (): ReviewFacade | null => {
     try {
@@ -88,7 +96,7 @@ export function gatesPlane(ctx: PlaneCtx): PlaneDescriptor {
       if (t === null) {
         return null
       }
-      const { state, gate } = await stateOf(ctx, rev, t)
+      const { state, gate } = await stateOf(ctx, rev, t, cache)
       return { pr: state, gate }
     },
     /** `bro act threads` — unresolved threads by default; `all: true`
@@ -141,7 +149,7 @@ export function gatesPlane(ctx: PlaneCtx): PlaneDescriptor {
       if (t === null) {
         return []
       }
-      const { state, gate } = await stateOf(ctx, rev, t)
+      const { state, gate } = await stateOf(ctx, rev, t, cache)
       return [gateRow(state, gate)]
     },
     get: async (ref) => {
@@ -153,7 +161,7 @@ export function gatesPlane(ctx: PlaneCtx): PlaneDescriptor {
       if (t === null) {
         return undefined
       }
-      const { state, gate } = await stateOf(ctx, rev, t)
+      const { state, gate } = await stateOf(ctx, rev, t, cache)
       return gateRow(state, gate)
     },
     read: (name, args) => dispatchRead('gates', reads, name, args),

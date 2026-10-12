@@ -87,9 +87,11 @@ import {
   evaluateExitGate,
   fetchPrActState,
   gatePending,
+  prStateCache,
   watchBegin,
   watchEnd,
   watchRefresh,
+  type PrStateCache,
 } from '@broject/act'
 import {
   buildFixPrompt,
@@ -160,6 +162,10 @@ interface Ctx {
   cfg: LoopConfig
   /** The act gate's own section — service passes share the one read. */
   act: ReturnType<typeof loadBroConfig>['act']
+  /** The shared gate-state feed — every member's service tick reads it,
+   *  so loop's own polls plus watch/drive/act-wait passes share one
+   *  fetch per PR per TTL window (bro-0tcrl). Null outside a repo. */
+  stateCache: PrStateCache | null
   /** The template `expandAgentCmd` runs — `loop.agent`/`--agent`, or a
    *  cli provider's `command` when the provider lane resolved one. For an
    *  acp (argv) worker this field is inert — the spawn never expands it. */
@@ -1542,7 +1548,11 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   m.worker = undefined
   if (m.pr !== undefined) {
     // a fix/rebase worker's exit IS the gate re-entry — same contract
-    // the awaited spawn's return had
+    // the awaited spawn's return had. The worker may have moved the
+    // PR (pushes, resolves, replies), so the feed entry that spawned
+    // its round is obsolete — the re-poll must fetch post-worker
+    // truth, not re-serve the ≤ttl-old snapshot and burn rounds
+    ctx.stateCache?.invalidate({ repo: ctx.repo, pr: m.pr })
     m.since = Date.now()
     return 'active'
   }
@@ -1646,6 +1656,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
         maxRounds: ctx.act.maxRounds,
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
+        stateCache: ctx.stateCache,
       }
     )
     const gate = evaluateExitGate(state)
@@ -1716,12 +1727,22 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       gateRow('closed', { action: 'closed' })
       noteOpen(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} was closed unmerged — worktree ${m.item.worktreeDir}`)
       return leave(m, 'parked')
-    case 'fix':
+    case 'fix': {
       gateRow('blocked', { action: 'fix', round: m.rounds + 1, blockers: snap.blockers })
-      return respawnRound(ctx, m, () => runFixRound(ctx, m, pr, m.rounds))
-    case 'rebase':
+      const verdict = await respawnRound(ctx, m, () => runFixRound(ctx, m, pr, m.rounds))
+      // the snapshot that spawned the round must not be re-served —
+      // a synchronous round (or a skipped spawn on already-resolved
+      // threads) re-polls immediately and would re-trigger 'fix' on
+      // the stale entry until the ttl lapses
+      ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
+      return verdict
+    }
+    case 'rebase': {
       gateRow('blocked', { action: 'rebase', round: m.rounds + 1 })
-      return respawnRound(ctx, m, () => runRebaseRound(ctx, m, pr, m.rounds))
+      const verdict = await respawnRound(ctx, m, () => runRebaseRound(ctx, m, pr, m.rounds))
+      ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
+      return verdict
+    }
     case 'update': {
       let ok: boolean
       try {
@@ -1740,6 +1761,9 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
         return leave(m, 'parked')
       }
       gateRow('behind', { action: 'update', updated: true })
+      // the pushed head obsoletes the feed entry this snap rode on —
+      // the next poll fetches the new sha, not the stale BEHIND state
+      ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
       m.updatedSha = snap.headSha
       return 'active'
     }
@@ -2029,6 +2053,7 @@ function buildCtx(
       batch: num(flag(argv, '--batch'), cfg.batch, 1),
     },
     act: broCfg.act,
+    stateCache: prStateCache(root),
     agent,
     lane,
     intervalS: num(flag(argv, '--interval'), 60, 1, Math.floor(TIMER_MAX_MS / 1000)),
