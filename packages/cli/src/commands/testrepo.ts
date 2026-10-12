@@ -11,6 +11,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
@@ -512,6 +513,17 @@ const facade = {
   parsePrRef: () => null,
   prMeta: (t) => {
     const s = load()
+    // readQueues.meta — the same mid-flight race scripting as
+    // readQueues.checks: each call shifts one partial-meta overlay, so a
+    // test can script 'OPEN + head aaa at the gate, MERGED (or a moved
+    // head) at the fixer's own re-probe'
+    let over = {}
+    const mq = s.readQueues?.meta
+    if (Array.isArray(mq) && mq.length > 0) {
+      s.readQueues.meta = mq.slice(1)
+      save(s)
+      over = mq[0] ?? {}
+    }
     const per = s.prs
       ? Object.values(s.prs).find((p) => p.number === t.pr) ?? {}
       : {}
@@ -524,6 +536,7 @@ const facade = {
       baseRef: per.baseRef ?? s.baseRef ?? 'main',
       mergeable: per.mergeable ?? s.mergeable ?? 'MERGEABLE',
       mergeState: per.mergeState ?? s.mergeState ?? 'CLEAN',
+      ...over,
     }
   },
   mergedPrInfo: () => { throw new Error('not merged') },
@@ -542,6 +555,15 @@ const facade = {
       )
       save(s)
     } catch {}
+    // a readQueues.checks list overrides everything — each call shifts
+    // one entry, so a test can script 'red at the gate snapshot, green
+    // at the fixer re-probe' (the mid-flight resolution race, bro-atb2g)
+    const cq = s.readQueues?.checks
+    if (Array.isArray(cq) && cq.length > 0) {
+      s.readQueues.checks = cq.slice(1)
+      save(s)
+      return cq[0]
+    }
     // per-PR checks — a mapped entry carries its own check list (with a
     // clearAfterMerge trigger: once that PR lands in events, this one's
     // checks go green — the round-robin "A pending while B merges" cue)
@@ -560,7 +582,27 @@ const facade = {
     }
     return s.checks ?? []
   },
-  checkAnnotations: () => new Map(),
+  checkAnnotations: (_repo, sha, names) => {
+    const s = load()
+    // record the sha each probe targeted — a fixer re-probe on a moved
+    // head must read the LIVE sha, never the gate's stale one
+    s.annotationReads = (s.annotationReads ?? []).concat([sha])
+    // readQueues.annotations — each call shifts one map (the same
+    // mid-flight race scripting as readQueues.checks)
+    const aq = s.readQueues?.annotations
+    let all = s.annotations ?? {}
+    if (Array.isArray(aq) && aq.length > 0) {
+      s.readQueues.annotations = aq.slice(1)
+      all = aq[0] ?? {}
+    }
+    save(s)
+    // names-given callers read exactly that set — an unrequested check
+    // never appears (absent key = no annotations endpoint, like gh).
+    // An explicit null is the fake's 'fetch failed' — it passes through
+    // as sast_unknown; an absent name is a clean read
+    const keys = names ? [...names] : Object.keys(all)
+    return new Map(keys.map((k) => [k, Object.hasOwn(all, k) ? all[k]! : 0]))
+  },
   reviewedShas: () => load().reviewedShas ?? ['abc123'],
   reviewThreads: async () => load().threads ?? [],
   resolveThread: () => {},
@@ -747,7 +789,11 @@ const log = (msg) => {
     ? 'fix'
     : prompt.includes('merge conflicts')
       ? 'rebase'
-      : 'work'
+      : prompt.includes('CI fixer')
+        ? 'ci'
+        : prompt.includes('SAST fixer')
+          ? 'sast'
+          : 'work'
   fs.appendFileSync(f, kind + ' ' + msg + '\\n')
 }
 // register the "opened" PR — the per-branch map (seeded prs: {}) is
@@ -786,6 +832,32 @@ if (prompt.includes('merge conflicts')) {
   s.events = (s.events ?? []).concat([{ rebase: process.env.BRO_BEAD_ID || null, branch }])
   save(s)
   log('rebased onto base')
+  process.exit(0)
+}
+if (prompt.includes('CI fixer')) {
+  // ci-fail round — clear the failing checks and stop. fixerNoop leaves
+  // them red: the drive dedup test needs an ok-exit with nothing fixed.
+  const s = load()
+  if (s.fixerNoop === true) {
+    log('left failing (noop)')
+  } else {
+    s.checks = []
+    if (s.prs?.[branch]) s.prs[branch].checks = []
+    save(s)
+    log('cleared checks')
+  }
+  process.exit(0)
+}
+if (prompt.includes('SAST fixer')) {
+  // sast round — clear the annotation counts and stop
+  const s = load()
+  if (s.fixerNoop === true) {
+    log('left findings (noop)')
+  } else {
+    s.annotations = {}
+    save(s)
+    log('cleared annotations')
+  }
   process.exit(0)
 }
 switch (scenario) {
@@ -1008,4 +1080,106 @@ export function writeHostState(state: string, patch: Record<string, unknown>): v
     ? (JSON.parse(readFileSync(state, 'utf8')) as Record<string, unknown>)
     : {}
   writeFileSync(state, JSON.stringify({ ...cur, ...patch }))
+}
+
+// --- drive e2e scaffolding ------------------------------------------------
+// The `bro drive` suites share the repo + fake bd + fake host wiring and
+// the verdict/spawn assertions — declared once here, per the fixture-clone
+// rule at the top of this file.
+
+export interface DriveFixture {
+  root: string
+  main: string
+  db: string
+  hostState: string
+  run: (args: string[]) => CliResult
+}
+
+/** Repo + fake bd + fake host + bro.config wiring — `loop.agent` is the
+ *  fixer spawn's command fallback (agents.native.command unset). */
+export function driveFixture(prefix: string): DriveFixture {
+  const { root, main } = initRepo(prefix)
+  const { binDir, db } = installFakeBd(root)
+  const host = installFakeHost(main)
+  writeFileSync(
+    join(main, 'bro.config.json'),
+    JSON.stringify({
+      plugins: ['./fakehost.ts'],
+      connectors: { reviews: 'fakehost' },
+      loop: { agent: `node ${host.agent}` },
+    })
+  )
+  const env = {
+    PATH: `${binDir}:${process.env.PATH ?? ''}`,
+    HOME: root,
+    FAKE_BD_DB: db,
+    FAKE_HOST_STATE: host.state,
+  }
+  return {
+    root,
+    main,
+    db,
+    hostState: host.state,
+    run: (args) => runCli(['drive', ...args], { cwd: main, env }),
+  }
+}
+
+/** The one `{"verdict": …}` row on `drive --json` stdout. */
+export function driveVerdict(r: CliResult): { verdict?: string; detail?: string } {
+  return (JSON.parse(r.stdout.trim().split('\n').find((l) => l.includes('"verdict"')) ?? '{}') ??
+    {}) as { verdict?: string; detail?: string }
+}
+
+export async function waitFor(cond: () => boolean, ms = 15_000): Promise<boolean> {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) {
+    if (cond()) {
+      return true
+    }
+    await new Promise((r) => setTimeout(r, 25))
+  }
+  return false
+}
+
+/** Bead rows labelled 'fixer' — the drive sweep's work-order ledger. */
+export function fixerRows(db: string): Array<Record<string, unknown>> {
+  return readBeads(db).filter((r) => ((r.labels as string[] | undefined) ?? []).includes('fixer'))
+}
+
+/** A spawned fixer is detached — completion is its .exit record on the
+ *  registry, never a process wait. */
+export function exitRecorded(main: string): boolean {
+  const agentsDir = join(main, '.git', 'bro', 'agents')
+  return existsSync(agentsDir) && readdirSync(agentsDir).some((n) => n.endsWith('.exit'))
+}
+
+export function spawnLog(main: string): string {
+  const log = join(main, 'spawns.log')
+  return existsSync(log) ? readFileSync(log, 'utf8') : ''
+}
+
+/** A live session marker naming the branch — the occupancy guard's
+ *  signal that a worker already owns it. */
+export function occupyBranch(main: string, branch: string): void {
+  const hooks = join(main, '.git', 'bro', 'hooks')
+  mkdirSync(hooks, { recursive: true })
+  writeFileSync(join(hooks, 's1.work'), `${Date.now()}\n${branch}\n`)
+}
+
+/** The verdict line plus the no-spawn ledger every declined/capped
+ *  drive pass owes: no fixer bead, no spawn-log entry. */
+export function assertNoSpawn(f: DriveFixture, r: CliResult, want: string): void {
+  const v = driveVerdict(r)
+  assert.equal(v.verdict, want, v.detail)
+  assert.equal(fixerRows(f.db).length, 0)
+  assert.equal(spawnLog(f.main), '')
+}
+
+/** The post-fixer pass: gate green → the orphan merged and its fixer
+ *  bead closed 'merged via …'. */
+export function assertOrphanMerged(f: DriveFixture, r: CliResult, fixerId: unknown): void {
+  const v = driveVerdict(r)
+  assert.equal(v.verdict, 'merged', v.detail)
+  assert.equal(bead(f.db, String(fixerId))?.status, 'closed')
+  assert.match(String(bead(f.db, String(fixerId))?.close_reason), /merged via/)
 }
