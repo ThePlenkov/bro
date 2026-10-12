@@ -147,7 +147,7 @@ const safeName = (name: string): string => name.replace(/[^\w.-]/g, '_')
 /** Redact embedded userinfo before a URL lands in sync output — the
  *  remote needs the raw URL, notes and warnings do not. Global because
  *  git/bd stderr embeds the failing URL mid-line, not at offset 0. */
-const displayUrl = (u: string): string => u.replace(/([\w+.-]+:\/\/)[^@/\s]+@/g, '$1***@')
+const displayUrl = (u: string): string => u.replace(/(:\/\/)[^@/\s]+@/g, '$1***@')
 
 export function mirrorPathFor(beadsDir: string, remoteName: string): string {
   return join(beadsDir, `dolt-mirror-${safeName(remoteName)}.git`)
@@ -193,7 +193,8 @@ function repointRemote(
   if (add.code === 0) {
     return null
   }
-  const err = `dolt remote add ${name}: ${displayUrl(add.err || add.out || `exit ${add.code}`)}`
+  const why = add.err || add.out || `exit ${add.code}`
+  const err = `dolt remote add ${name}: ${displayUrl(why)}`
   if (rm.code === 0 && original !== undefined) {
     const back = probe(['dolt', 'remote', 'add', name, original], PROBE_MS)
     if (back.code !== 0) {
@@ -258,6 +259,25 @@ function bridgeFor(
   return null
 }
 
+/** Zero-remote adoption: bd's own adoption would clone git `origin`
+ *  into a dead git+https remote — provision a mirror and an `origin`
+ *  dolt remote through the bridge instead, so first sync works. */
+function adoptOrigin(
+  probe: BdProbe,
+  beadsDir: string | undefined,
+  notes: string[]
+): DoltBridge | null {
+  if (beadsDir === undefined) {
+    return null
+  }
+  const origin = gitTry(['-C', dirname(beadsDir), 'remote', 'get-url', 'origin'], PROBE_MS)
+  const upstream = origin.code === 0 ? gitUpstream(origin.out.trim()) : null
+  if (upstream === null) {
+    return null
+  }
+  return bridgeFor(probe, { name: 'origin', url: `git+${upstream}` }, beadsDir, notes)
+}
+
 /** Resolve what `bd sync` should run this cycle. Remote inspection or
  *  store-dir resolution failure degrades to the bare invocation — the
  *  pre-bridge behavior, never worse. */
@@ -276,18 +296,10 @@ export function doltSyncPlan(probe: BdProbe, beadsDirHint?: string): DoltSyncPla
     }
   }
   if (remotes.length === 0) {
-    // bd's adoption would clone git origin into a dead git+https remote —
-    // adopt through the bridge instead so first sync works
-    if (beadsDir !== undefined) {
-      const origin = gitTry(['-C', dirname(beadsDir), 'remote', 'get-url', 'origin'], PROBE_MS)
-      const upstream = origin.code === 0 ? gitUpstream(origin.out.trim()) : null
-      if (upstream !== null) {
-        const adopted = bridgeFor(probe, { name: 'origin', url: `git+${upstream}` }, beadsDir, plan.notes)
-        if (adopted !== null) {
-          plan.args = ['--remote', 'origin']
-          plan.bridges.push(adopted)
-        }
-      }
+    const adopted = adoptOrigin(probe, beadsDir, plan.notes)
+    if (adopted !== null) {
+      plan.args = ['--remote', 'origin']
+      plan.bridges.push(adopted)
     }
     return plan
   }
@@ -301,7 +313,7 @@ export function doltSyncPlan(probe: BdProbe, beadsDirHint?: string): DoltSyncPla
   }
   plan.args = ['--remote', def.name]
   const b = bridges.get(def.name)
-  if (b !== null && b !== undefined) {
+  if (b !== undefined) {
     plan.bridges.push(b)
   }
   return plan
