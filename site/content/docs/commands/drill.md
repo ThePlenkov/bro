@@ -1,9 +1,9 @@
 ---
-title: bro drill
+title: bro work drill
 description: Scoped descent — narrower investigation frames with mandatory results.
 ---
 
-When a task needs focused investigation, `bro drill` creates a frame: a
+When a task needs focused investigation, `bro work drill` creates a frame: a
 `drill`-labeled bead nested under the current one. A frame can only close
 with a result — and if it found a lesson, a prevention plan. **beads is
 the memory system**; there is no `.drills/` directory.
@@ -12,12 +12,12 @@ the memory system**; there is no `.drills/` directory.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro drill down <title> [--under ID] [--ephemeral]` | New child frame under the current leaf (or a root). `--ephemeral` = wisp, no audit trail |
-| `bro drill up --result T [--prevent T]… [--evidence R]… [--report]` | Close the frame. `--result` is mandatory (CLI-enforced); each `--prevent` spawns a `prevention` task linked `discovered-from`; `--evidence` lands in `bd provenance`; `--report` writes a durable report |
+| `bro work drill down <title> [--under ID] [--ephemeral]` | New child frame under the current leaf (or a root). `--ephemeral` = wisp, no audit trail |
+| `bro work drill up --result T [--prevent T]… [--evidence R]… [--report]` | Close the frame. `--result` is mandatory (CLI-enforced); each `--prevent` spawns a `prevention` task linked `discovered-from`; `--evidence` lands in `bd provenance`; `--report` writes a durable report |
 | `bro unwind …` | Alias for `drill up` |
-| `bro drill current` / `tree` / `list` | Active leaf · all hierarchies · open frames |
-| `bro drill report` | List published drill reports |
-| `bro drill distill <id>` | `bd mol distill` — a good drill tree becomes a reusable proto |
+| `bro work drill current` / `tree` / `list` | Active leaf · all hierarchies · open frames |
+| `bro work drill report` | List published drill reports |
+| `bro work drill distill <id>` | `bd mol distill` — a good drill tree becomes a reusable proto |
 
 ## Policy
 

@@ -82,7 +82,7 @@ Connectors contribute fail-open probes at lifecycle boundaries:
 - **Parallel work** contributes a nudge when another live session owns work
   in the same repository.
 - **Prompt submit** adds contextual policy and matched lessons.
-- **Post-tool** drains the mailbox with `bro notify` and injects lessons
+- **Post-tool** drains the mailbox with `bro comms notify` and injects lessons
   matched by the tool trace.
 - **Stop** contributes gate findings from the active connectors.
 
@@ -93,6 +93,6 @@ does not wedge the agent.
 
 ## The data ref
 
-`bro sync` keeps runtime artifacts outside the review surface on
+`bro work sync` keeps runtime artifacts outside the review surface on
 `refs/bro/data`. Tracked source stays in branches; the data ref is for
 untracked runtime state.

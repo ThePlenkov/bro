@@ -1,9 +1,9 @@
 ---
-title: bro learn
+title: bro self learn
 description: Triggered lessons with evidence, confidence, and a memory that knows when to speak.
 ---
 
-`bro learn` stores durable lessons for the moments they matter. A lesson
+`bro self learn` stores durable lessons for the moments they matter. A lesson
 is a rule plus a trigger: hook events and optional terms, commands, paths,
 tools, or failed-tool evidence decide when it surfaces.
 
@@ -11,14 +11,14 @@ tools, or failed-tool evidence decide when it surfaces.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro learn add --lesson "…" --on E… --evidence K:R…` | Store a manual lesson. `--on` and at least one `--evidence` are required; both are repeatable |
-| `bro learn list [--json] [--source X] [--confidence X]` | List lessons, optionally filtered |
-| `bro learn show <id>` | Print one lesson as JSON |
-| `bro learn forget <id>` | Remove a lesson |
-| `bro learn capture [--source drill\|retro\|act\|mol\|all] [--mol ID] [--dry-run] [--json]` | Distill finished artifacts into lessons |
-| `bro learn probe <question>` | Ask the store first; a hit prints ranked lessons and a miss records the gap |
+| `bro self learn add --lesson "…" --on E… --evidence K:R…` | Store a manual lesson. `--on` and at least one `--evidence` are required; both are repeatable |
+| `bro self learn list [--json] [--source X] [--confidence X]` | List lessons, optionally filtered |
+| `bro self learn show <id>` | Print one lesson as JSON |
+| `bro self learn forget <id>` | Remove a lesson |
+| `bro self learn capture [--source drill\|retro\|act\|mol\|all] [--mol ID] [--dry-run] [--json]` | Distill finished artifacts into lessons |
+| `bro self learn probe <question>` | Ask the store first; a hit prints ranked lessons and a miss records the gap |
 
-`bro learn probe` can also store an answer in its second phase with
+`bro self learn probe` can also store an answer in its second phase with
 `--lesson`, `--on`, `--match-terms`, `--match-commands`,
 `--match-paths`, `--match-tools`, `--match-errors`, `--budget`, and
 optional `--evidence`.
@@ -82,5 +82,5 @@ Use `bd remember` for context-free memory:
 
 Memories are always-on context. Lessons wait for their trigger, so a
 mistake does not become another permanent prompt paragraph. Run
-`bro learn capture --dry-run` before turning a finished artifact into a
+`bro self learn capture --dry-run` before turning a finished artifact into a
 lesson; it renders the proposal without writing it.

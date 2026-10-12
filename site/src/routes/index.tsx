@@ -24,7 +24,7 @@ const pieces = [
   },
 ]
 
-const selfLoop = ['bd ready', 'bro next', 'PR', 'bro act', 'merge', 'bro debt', 'bro retro', 'bro learn']
+const selfLoop = ['bd ready', 'bro flow next', 'PR', 'bro review act', 'merge', 'bro review debt', 'bro self retrospect', 'bro self learn']
 
 const vocab: Record<string, string> = {
   planning: `
@@ -55,7 +55,7 @@ drill | go deeper. you must come back with a result.
 learn | fool me once. the lesson fires next time, at the trigger.
 `,
   plumbing: `
-status | the whole board in one read. bro serve puts it on HTTP.
+status | the whole board in one read. bro fleet serve puts it on HTTP.
 work | one worktree per agent. no checkout fights.
 plugins | wire bro into OpenCode, Kilo, pi.
 doctor | what's broken in your setup, before an agent finds out.
@@ -144,8 +144,8 @@ function Home() {
             Fine, it orchestrates now. Still no swarm by default, no token bonfire. Your agent keeps its own session —
             bro hooks into its lifecycle and keeps it honest. When you do want many agents, one facade spawns them —
             native processes, tmux panes, Gas City, ACP providers — under a fleet cap, and they reach you through a
-            mailbox, not a wait loop. Long waits go to a background shell — <code>bro act wait</code>,{' '}
-            <code>bro watch</code> — not even a subagent: zero tokens while the gate settles, and your agent keeps
+            mailbox, not a wait loop. Long waits go to a background shell — <code>bro review act wait</code>,{' '}
+            <code>bro review watch</code> — not even a subagent: zero tokens while the gate settles, and your agent keeps
             working. <strong>Gates, not loops.</strong>
           </p>
         </section>

@@ -47,7 +47,7 @@ export default definePlugin({
     dir: typeof raw?.dir === 'string' ? raw.dir : '.agents/memory',
   }),
   planSchema: validateMemoryPlan,    // validates `kind = "memory"` plans
-  runPlan: runMemoryPlan,            // executes them via `bro run`
+  runPlan: runMemoryPlan,            // executes them via `bro plan run`
   run: (argv) => { /* ... */ },
 })
 ```
@@ -93,7 +93,7 @@ export default {
 ```
 
 Artifacts that shouldn't touch the review surface go on the data ref —
-`bro sync` carries them. Stores, commands, config, plans: if your
+`bro work sync` carries them. Stores, commands, config, plans: if your
 component fits the contract, bro hosts it.
 
 ## Guardrails

@@ -1,5 +1,5 @@
 ---
-title: bro guard
+title: bro self guard
 description: Declarative prompt contributions — nudges conditioned on worktree state, session markers, or a judge veto.
 ---
 
@@ -17,8 +17,8 @@ the lines one event emits; `when.budget` caps how often one guard fires.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro guard list [--json]` | Every collected guard: name, source, events, budget, validation state |
-| `bro guard test <name> [--event E] [--prompt T] [--session ID]` | Dry-run one guard against live state — per-clause verdicts, then FIRE/SKIP and the rendered line. Read-only: the fired set and verdict journal are untouched |
+| `bro self guard list [--json]` | Every collected guard: name, source, events, budget, validation state |
+| `bro self guard test <name> [--event E] [--prompt T] [--session ID]` | Dry-run one guard against live state — per-clause verdicts, then FIRE/SKIP and the rendered line. Read-only: the fired set and verdict journal are untouched |
 
 ## The `when` clause
 

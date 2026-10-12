@@ -1,9 +1,9 @@
 ---
-title: bro act
+title: bro review act
 description: The open-PR review loop — exit gate as code, merge only when green.
 ---
 
-`bro act` answers the question an agent can't: *"can I stop now?"* The
+`bro review act` answers the question an agent can't: *"can I stop now?"* The
 gate is code, not a prompt instruction — it counts open threads, pending
 checks, SAST annotations, mergeability, and fix rounds.
 
@@ -11,17 +11,17 @@ checks, SAST annotations, mergeability, and fix rounds.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro act status [PR] [--json]` | PR state + exit gate. Non-zero while blocked |
-| `bro act threads [PR]` | Unresolved review threads, TSV |
-| `bro act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; `--cleanup` requires `--merge` and retires the merged worktree and local branch; `--bead` closes the loop-claimed bead once the merge lands |
-| `bro act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup] [--bead ID]` | Merge **only if the gate is green** — refuses and names blockers; `--cleanup` retires the checkout the command runs in when safe, and keeps the local branch if another worktree still checks it out; `--bead` closes the loop-claimed bead on land |
-| `bro act resolve --thread ID [--comment T]` | Resolve (reply first if comment given); `--unresolve` reopens |
-| `bro act reply --thread ID --comment T` | Reply without resolving; `--file TSV` for batch |
-| `bro act rearm [--dry-run] [--json]` | Resurrect dead PR watchers — respawn `act wait` for open PRs whose watch marker outlived its process (bead identity included); settled markers are swept — a merged one closes the bead it carried — live ones kept |
+| `bro review act status [PR] [--json]` | PR state + exit gate. Non-zero while blocked |
+| `bro review act threads [PR]` | Unresolved review threads, TSV |
+| `bro review act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; `--cleanup` requires `--merge` and retires the merged worktree and local branch; `--bead` closes the loop-claimed bead once the merge lands |
+| `bro review act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup] [--bead ID]` | Merge **only if the gate is green** — refuses and names blockers; `--cleanup` retires the checkout the command runs in when safe, and keeps the local branch if another worktree still checks it out; `--bead` closes the loop-claimed bead on land |
+| `bro review act resolve --thread ID [--comment T]` | Resolve (reply first if comment given); `--unresolve` reopens |
+| `bro review act reply --thread ID --comment T` | Reply without resolving; `--file TSV` for batch |
+| `bro review act rearm [--dry-run] [--json]` | Resurrect dead PR watchers — respawn `act wait` for open PRs whose watch marker outlived its process (bead identity included); settled markers are swept — a merged one closes the bead it carried — live ones kept |
 
 ## The gate
 
-`bro act status` exits non-zero with named blockers:
+`bro review act status` exits non-zero with named blockers:
 
 - `open_threads` — unresolved review threads
 - `ci_pending` — every non-AI check must be green; a failing *optional*
@@ -63,18 +63,18 @@ flip-flop commit just buys a fresh round. Pick the right reading, reply
 with the reasoning, resolve; a real concern on the losing side becomes a
 debt bead.
 
-With [`judge.mode: "shadow"`](/docs/configuration#judge), `bro act
+With [`judge.mode: "shadow"`](/docs/configuration#judge), `bro review act
 threads` annotates each unresolved row with a `judge: …` line — the
-verdict is journaled so `bro judge stats` can score judge-vs-outcome
+verdict is journaled so `bro self judge stats` can score judge-vs-outcome
 agreement.
 
 ## Don't wait — background it
 
-`bro act wait` does the waiting so your turn doesn't. The pattern: push,
-then `bro act wait <PR> --merge` in a background shell — not even a
+`bro review act wait` does the waiting so your turn doesn't. The pattern: push,
+then `bro review act wait <PR> --merge` in a background shell — not even a
 subagent, so the wait costs zero tokens — and take the next bead. When
 the shell finishes it carries the verdict: exit 0 and the merge landed,
-or non-zero and `bro act threads <PR>` (a separate call — a failing exit
+or non-zero and `bro review act threads <PR>` (a separate call — a failing exit
 must not hide the threads) names what settled BLOCKED. From a `bro work
 enter` worktree, `--merge --cleanup` also retires the worktree and
 branch itself — no `;`-sequenced cleanup that could run on a failed
@@ -82,25 +82,25 @@ wait.
 
 The caveat: a session-bound background task dies when the session ends.
 For a watch that must outlive the session, spawn it detached or let
-`bro act rearm` resurrect the dead marker on the next session's nudge —
-`bro drive --every` and `bro watch install` are the durable forms.
+`bro review act rearm` resurrect the dead marker on the next session's nudge —
+`bro review drive --every` and `bro review watch install` are the durable forms.
 
 ## Stacked PRs and merge queues
 
 GitHub refuses to merge a PR that belongs to a **stack** through either
 `gh pr merge` (GraphQL) or the synchronous merge endpoint — *"must be
-merged using the asynchronous merge REST API"*. `bro act merge` detects
+merged using the asynchronous merge REST API"*. `bro review act merge` detects
 the stack (the `.stack` field on the PR, or the refusal itself) and merges
 through the async endpoint instead, polling the request's uuid until it
-settles. `bro act wait --merge` is the same merge step, so a watcher on a
+settles. `bro review act wait --merge` is the same merge step, so a watcher on a
 stack layer lands it too.
 
 The same is true — and the same seam — when the base branch requires a
-**merge queue**, stack or not: `bro act merge` probes the PR's base for
+**merge queue**, stack or not: `bro review act merge` probes the PR's base for
 one and enqueues through the async endpoint rather than attempting the
 doomed `gh pr merge`. An accepted enqueue is **parked, not failed** — the
 command reports `accepted but state=OPEN` and exits 0; the queue merges
-later. `bro drive` reads the same shape as an `enqueued` verdict — it
+later. `bro review drive` reads the same shape as an `enqueued` verdict — it
 retires nothing and re-checks on the next pass.
 
 Two details worth knowing:
@@ -127,7 +127,7 @@ opt-in only, by name:
   `@mergifyio queue`). Your `.mergify.yml` rules decide what the signal
   means; bro never authors them.
 - **`graphite`** — runs `gt merge` in the PR's checkout (from `bro work
-  enter` or the worktree `bro drive` hands it). The checkout must sit on
+  enter` or the worktree `bro review drive` hands it). The checkout must sit on
   the PR's head branch — `gt merge` queues the whole stack it sees, so a
   wrong checkout is refused, not queued.
 
@@ -141,18 +141,18 @@ merge slot — the connector only replaces the final `mergePr` call. An
 ## Never unwatched
 
 A pushed PR is merged, watched, or handed off — never unwatched. `bro
-act wait <PR> --merge` in the background is the default end-state; the
+review act wait <PR> --merge` in the background is the default end-state; the
 stop gate enforces it — an armed session ending with an open, unwatched
 current-branch PR is blocked once and pointed at the detached `act wait`
-form (a running `bro drive --every` counts as coverage via its per-PR
+form (a running `bro review drive --every` counts as coverage via its per-PR
 heartbeat markers). A `timed_out` watcher retires its marker on the way
 out — start a fresh `act wait`; a watcher that *died* leaves a dead
-marker, the session-start nudge names it, and `bro act rearm` puts the
+marker, the session-start nudge names it, and `bro review act rearm` puts the
 watch back up. A watcher that *settled BLOCKED* leaves a verdict marker
 too — session-start flags the named blockers — and drops a keyed
 mailbox event, so the finding reaches a session that never saw the
-exit. `bro act status` prints `watch=` so coverage is visible
+exit. `bro review act status` prints `watch=` so coverage is visible
 before you stop.
 
-**Merge through `bro act merge`, never `gh pr merge`** — the gate is
+**Merge through `bro review act merge`, never `gh pr merge`** — the gate is
 enforced there.

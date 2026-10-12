@@ -8,24 +8,24 @@ description: setup, diagnostics, checks, plans, sync, cleanup, and stores.
 | `bro setup [--beads] [--skills] [--pack [NAME]]` | Wire bro into the repo and optionally initialize beads, skill wrappers, and a capability pack; also installs the commit-provenance, ref-guard, and post-merge git hooks |
 | `bro hooks install` / `bro hooks uninstall` | Install/remove the `prepare-commit-msg` hook that appends `Agent`/`Agent-Model`/`Session`/`Bead`/`Molecule` trailers to machine-made commits, the `reference-transaction` guard that vetoes non-fast-forward moves of shared branch refs, and the `post-merge` freshness hook that runs install → build → patch after a merge (pre-existing hooks are chained, never clobbered) |
 | `bro doctor [--json]` | Inspect the local bro setup and report diagnostics |
-| `bro stamp [<via>] [--session <id>] [--json]` | Record this session's write to the worktree's shared outputs (`.git/bro/last-build.json`), or read the last stamp back — who rebuilt dist, when, and at which HEAD |
-| `bro run <plan.toml>` | Execute a validated [plan](/docs/plans) |
+| `bro work stamp [<via>] [--session <id>] [--json]` | Record this session's write to the worktree's shared outputs (`.git/bro/last-build.json`), or read the last stamp back — who rebuilt dist, when, and at which HEAD |
+| `bro plan run <plan.toml>` | Execute a validated [plan](/docs/plans) |
 | `bro plan` / `bro plan validate <file>` | List plan kinds or validate a plan without executing it |
-| `bro sync [--pull]` | Push or restore bro artifacts on `refs/bro/data` |
-| `bro cleanup [--remote] [--dry-run]` | Delete local branches whose PR merged |
+| `bro work sync [--pull]` | Push or restore bro artifacts on `refs/bro/data` |
+| `bro review cleanup [--remote] [--dry-run]` | Delete local branches whose PR merged |
 | `bro plugins` | Print the live plugin registry |
 | `bro plugins list [--json]` | Client × scope install matrix |
 | `bro plugins install <client> [--global\|--local] [--dry-run]` | Install a client adapter — see [Plugins](/docs/plugins) |
 | `bro plugins uninstall <client> [--global\|--local] [--dry-run] [--force]` | Remove a client adapter |
 | `bro wtf <complaint>` | Capture a complaint verbatim; see [retrospect](/docs/commands/retrospect) |
 
-`bro next`, `bro loop`, `bro stack`, and `bro work` live in
-[bro next](/docs/commands/next), [bro loop](/docs/commands/loop), and
-[bro stack + work](/docs/commands/stack). Fleet supervision lives in
+`bro flow next`, `bro flow loop`, `bro flow stack`, and `bro work` live in
+[bro flow next](/docs/commands/next), [bro flow loop](/docs/commands/loop), and
+[bro flow stack + work](/docs/commands/stack). Fleet supervision lives in
 [Fleet & supervision](/docs/commands/fleet); the board and the loopback
 facade in [status + serve](/docs/commands/status); the mailbox and the
 broker in [Events](/docs/commands/events); the bead outflow in
-[bro sweep](/docs/commands/sweep).
+[bro work sweep](/docs/commands/sweep).
 
 ## `bro check`
 
