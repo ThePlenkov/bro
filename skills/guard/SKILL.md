@@ -1,6 +1,6 @@
 ---
 name: guard
-description: "Use when a declarative prompt contribution should fire on a hook event — a nudge conditioned on worktree state, session markers, or a judge verdict. Thin wrapper over the bro CLI: `bro guard list` inspects what's armed, `bro guard test` dry-runs a def against live state. Requires `bro` (npx -y @broject/bro@0)."
+description: "Use when a declarative prompt contribution should fire on a hook event — a nudge conditioned on worktree state, session markers, or a judge verdict. Thin wrapper over the bro CLI: `bro self guard list` inspects what's armed, `bro self guard test` dry-runs a def against live state. Requires `bro` (npx -y @broject/bro@0)."
 ---
 
 # /guard (bro)
@@ -28,8 +28,8 @@ name). `guard.enabled: false` silences the whole mechanism;
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro guard list [--json]` | Every collected guard: name, source (config/connector/skipped), events, budget, validation state |
-| `bro guard test <name> [--event <e>]` | Evaluates one guard against live state — prints FIRE/SKIP plus a per-clause verdict row (match, state probe, judge, budget). Writes nothing: the fired set is untouched |
+| `bro self guard list [--json]` | Every collected guard: name, source (config/connector/skipped), events, budget, validation state |
+| `bro self guard test <name> [--event <e>]` | Evaluates one guard against live state — prints FIRE/SKIP plus a per-clause verdict row (match, state probe, judge, budget). Writes nothing: the fired set is untouched |
 
 `when.state` keys: `diff.changed`/`diff.without` globs over
 `git status` (porcelain `-z -uall`, rename counts both paths),
@@ -55,7 +55,7 @@ doesn't.
   — it cannot make a guard fire that its deterministic clauses failed.
   Abstention is `ok:true` because an unverifiable condition must not
   silently suppress a nudge either.
-- **Test before you ship.** `bro guard test <name>` shows every
+- **Test before you ship.** `bro self guard test <name>` shows every
   clause's verdict against real state — a guard whose clause can never
   hold is dead weight with a maintenance cost.
 - **Renames are loud, not silent.** Two defs sharing a name warn at

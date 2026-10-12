@@ -1,6 +1,6 @@
 ---
 name: drill
-description: "Use when the user invokes /drill or /unwind, or when a task needs scoped descent — narrower investigation frames with mandatory result+prevention memos. Thin wrapper over the bro CLI: drill frames are beads; bd owns storage, `bro drill` owns the invariants. Requires `bro` (npx -y @broject/bro@0) and bd."
+description: "Use when the user invokes /drill or /unwind, or when a task needs scoped descent — narrower investigation frames with mandatory result+prevention memos. Thin wrapper over the bro CLI: drill frames are beads; bd owns storage, `bro work drill` owns the invariants. Requires `bro` (npx -y @broject/bro@0) and bd."
 ---
 
 # /drill (bro)
@@ -16,14 +16,14 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd init` done.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro drill down <title> [--under ID] [--ephemeral]` | New child frame under the current leaf (or a root). `--ephemeral` = wisp, no audit trail |
-| `bro drill up --result T [--prevent T]… [--evidence R]… [--report]` | Close the current frame. `--result` is **mandatory** (CLI-enforced). `--prevent` is policy-mandatory when the drill found an error, gap, or reusable lesson — each item spawns a `prevention`-labeled task linked `discovered-from` the frame. `--evidence` records a provenance ref (sha/PR). `--report` also writes `<drill.report.dir>/<id>.md` (`drills/` by default) — the durable md artifact (frontmatter + result/prevention/trail) for drills done on purpose |
+| `bro work drill down <title> [--under ID] [--ephemeral]` | New child frame under the current leaf (or a root). `--ephemeral` = wisp, no audit trail |
+| `bro work drill up --result T [--prevent T]… [--evidence R]… [--report]` | Close the current frame. `--result` is **mandatory** (CLI-enforced). `--prevent` is policy-mandatory when the drill found an error, gap, or reusable lesson — each item spawns a `prevention`-labeled task linked `discovered-from` the frame. `--evidence` records a provenance ref (sha/PR). `--report` also writes `<drill.report.dir>/<id>.md` (`drills/` by default) — the durable md artifact (frontmatter + result/prevention/trail) for drills done on purpose |
 | `bro unwind …` | Alias for `drill up` — collapse a solved frame into its parent |
-| `bro drill current` | The active leaf frame (deepest open path) |
-| `bro drill tree` | All drill hierarchies (● open / ○ closed) |
-| `bro drill list` | Open frames |
-| `bro drill report` | Published reports under `drill.report.dir` (`drills/`) |
-| `bro drill distill ID` | `bd mol distill` — turn a successful drill tree into a reusable proto/formula |
+| `bro work drill current` | The active leaf frame (deepest open path) |
+| `bro work drill tree` | All drill hierarchies (● open / ○ closed) |
+| `bro work drill list` | Open frames |
+| `bro work drill report` | Published reports under `drill.report.dir` (`drills/`) |
+| `bro work drill distill ID` | `bd mol distill` — turn a successful drill tree into a reusable proto/formula |
 
 ## Policy
 

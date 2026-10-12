@@ -118,10 +118,10 @@ Options:
   --help       This text
 
 Examples:
-  bro debt collect                    # last 50 merged PRs, skip processed
-  bro debt prs                        # merged PRs still unprocessed
-  bro debt sync                       # project the ledger into beads
-  bro act status --json               # exit gate for the current PR
+  bro review debt collect             # harvest merged-PR findings → ledger + labels
+  bro review debt prs                 # merged PRs still unprocessed
+  bro review debt sync                # project the ledger into beads
+  bro review act status --json        # exit gate for the current PR
   bro plugins                         # the registry — subcommand+skill+config
   bro setup`)
   process.exit(exitCode)

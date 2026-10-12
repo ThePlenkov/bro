@@ -1,6 +1,6 @@
 ---
 name: learn
-description: "Use when a lesson should outlive the session — 'remember this for next time', capturing a drill/retro/review finding, or asking whether the store already knows the answer. Thin wrapper over the bro CLI: `bro learn` is the lesson store; the learn connector injects matched lessons at session-start, prompt-submit, and post-tool. Requires `bro` (npx -y @broject/bro@0) and bd."
+description: "Use when a lesson should outlive the session — 'remember this for next time', capturing a drill/retro/review finding, or asking whether the store already knows the answer. Thin wrapper over the bro CLI: `bro self learn` is the lesson store; the learn connector injects matched lessons at session-start, prompt-submit, and post-tool. Requires `bro` (npx -y @broject/bro@0) and bd."
 ---
 
 # /learn (bro)
@@ -24,12 +24,12 @@ capped by `budget` per session and `learn.maxInject` per probe.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro learn add --lesson "…" --on E… --evidence K:R…` | Store a manual lesson — `--on` and ≥1 `--evidence` required, both repeatable (kinds: bead, pr, session, command, text) |
-| `bro learn list [--json] [--source X] [--confidence X]` | List lessons |
-| `bro learn show <id>` | One lesson as JSON |
-| `bro learn forget <id>` | Delete a lesson |
-| `bro learn capture [--source drill\|retro\|act\|mol\|all] [--mol ID] [--dry-run]` | Distill finished artifacts (drill memos, retro beads, review findings, mol results) into trigger-shaped lessons |
-| `bro learn probe <question>` | Store-first query — a hit prints ranked lessons; a miss prints candidates and logs the gap. `--lesson "…"` stores the distilled answer (phase 2 — needs a trigger: `--on`/`--match-*` or a question with usable terms) |
+| `bro self learn add --lesson "…" --on E… --evidence K:R…` | Store a manual lesson — `--on` and ≥1 `--evidence` required, both repeatable (kinds: bead, pr, session, command, text) |
+| `bro self learn list [--json] [--source X] [--confidence X]` | List lessons |
+| `bro self learn show <id>` | One lesson as JSON |
+| `bro self learn forget <id>` | Delete a lesson |
+| `bro self learn capture [--source drill\|retro\|act\|mol\|all] [--mol ID] [--dry-run]` | Distill finished artifacts (drill memos, retro beads, review findings, mol results) into trigger-shaped lessons |
+| `bro self learn probe <question>` | Store-first query — a hit prints ranked lessons; a miss prints candidates and logs the gap. `--lesson "…"` stores the distilled answer (phase 2 — needs a trigger: `--on`/`--match-*` or a question with usable terms) |
 
 ## Policy
 

@@ -1,16 +1,16 @@
 ---
 name: query
-description: "Use when writing or running a `kind = \"query\"` plan — cross-provider GraphQL fan-out over bro connectors (github/gitlab/atlassian), one merged JSON answer. Thin wrapper over `bro query` — mechanics live in the CLI (spec: specs/bro-14h8.1.md)."
+description: "Use when writing or running a `kind = \"query\"` plan — cross-provider GraphQL fan-out over bro connectors (github/gitlab/atlassian), one merged JSON answer. Thin wrapper over `bro plan query` — mechanics live in the CLI (spec: specs/bro-14h8.1.md)."
 ---
 
 # /query (bro)
 
 **All mechanics live in the `bro` CLI.** This skill is policy only.
 
-A `query` plan is a TOML list of independent GraphQL steps. `bro run`
+A `query` plan is a TOML list of independent GraphQL steps. `bro plan run`
 fans them out over connectors under a concurrency cap and prints one
 merged JSON document keyed by step `id` — declaration order, never
-completion order. `bro query <file>` is the same pipeline in one step;
+completion order. `bro plan query <file>` is the same pipeline in one step;
 `bro plan validate <file>` checks without executing.
 
 ## The contract
@@ -66,8 +66,8 @@ name = "bro"
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro query <plan.toml>` | validate + run; merged JSON on stdout, exit 1 on any step failure |
-| `bro run <plan.toml>` | same execution via the `kind` router |
+| `bro plan query <plan.toml>` | validate + run; merged JSON on stdout, exit 1 on any step failure |
+| `bro plan run <plan.toml>` | same execution via the `kind` router |
 | `bro plan validate <plan.toml>` | schema + read-only gate only |
 
 ## Config

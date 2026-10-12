@@ -20,18 +20,18 @@ deliverable didn't capture: tool gaps, repeated mechanics, ignored debt.
    `bd` gap bead (title says the missing command, body quotes the
    one-liner that had to be invented) — or implement it if the surface
    already exists. Example that made this real: a hand-written
-   `agents.json` prune script → `bro-k7a1` (`bro agents prune` missing).
+   `agents.json` prune script → `bro-k7a1` (`bro fleet agents prune` missing).
 3. **Call economy.** Count the calls that repeated one pattern —
    N `bd close`s, N `gh api` fetches, N status polls. If one `bro`
    command could batch them, that is the same kind of gap bead.
 4. **Lessons.** Persist what this session learned — a dry-run alone
-   stores nothing. `bro learn capture --dry-run` previews what finished
+   stores nothing. `bro self learn capture --dry-run` previews what finished
    artifacts would distill — capture has no session filter, so a plan
    that is all this session's gets stored by rerunning bare `capture`;
    otherwise store just this session's insight with
-   `bro learn add --lesson "…" --on … --evidence …`, so the next
+   `bro self learn add --lesson "…" --on … --evidence …`, so the next
    session starts smarter, not just the next human.
-5. **Debt sweep.** PRs merged this session → `bro debt collect` picks up
+5. **Debt sweep.** PRs merged this session → `bro review debt collect` picks up
    reviewer findings left unresolved. Never leave them to rot.
 6. **State assertions.** Verify from authoritative checks, not memory:
    `gh pr view` for merges, `git worktree list` for cleanup,

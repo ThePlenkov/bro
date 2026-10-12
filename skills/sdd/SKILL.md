@@ -87,7 +87,7 @@ beads are never your blocker.
 - Small enough to not need design mass? Label the bead `trivial`
   instead of writing an empty spec file — a stub defeats the audit.
 - `bro spec check` is the self-audit; wire it into CI the same way
-  `bro act status` gates PRs.
+  `bro review act status` gates PRs.
 - `bro spec drift` audits **shipped** specs — a spec the code moved
   past is debt to reschedule, not a gate. `unverifiable`/`no-scope`
   rows report coverage gaps and never fail the run.

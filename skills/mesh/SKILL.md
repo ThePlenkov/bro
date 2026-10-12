@@ -63,4 +63,4 @@ resubmission queue. A revised result is a new `request` thread.
 - A peer that fails to sync is an **error line**, never a silent
   empty — treat `! alias: …` output as signal, not noise.
 - `bro mesh wait` is a point check. For supervision loops use the
-  `bro act wait` pattern (armed watcher), not a shell `while` spin.
+  `bro review act wait` pattern (armed watcher), not a shell `while` spin.

@@ -1,13 +1,13 @@
 ---
 name: sweep
-description: "Use when the user invokes /sweep or asks to prune/dispose of closed beads, archive bead history, or run the harvest pipeline. Thin wrapper over `bro sweep` — mechanics live in the CLI (spec: specs/bro-pj2g.1.md)."
+description: "Use when the user invokes /sweep or asks to prune/dispose of closed beads, archive bead history, or run the harvest pipeline. Thin wrapper over `bro work sweep` — mechanics live in the CLI (spec: specs/bro-pj2g.1.md)."
 ---
 
 # /sweep (bro)
 
 **All mechanics live in the `bro` CLI.** This skill is policy only.
 
-`bro sweep` is the bead lifecycle's outflow stage: closed beads
+`bro work sweep` is the bead lifecycle's outflow stage: closed beads
 accumulate forever, and `bd prune` alone would burn lessons nobody
 harvested. Sweep gates the burn on a harvest marker.
 
@@ -16,11 +16,11 @@ harvested. Sweep gates the burn on a harvest marker.
 - A closed bead is **harvested** when it carries the `sweep:distilled`
   state label (`bd set-state <id> sweep=distilled`). The marker is the
   gate's only input — no heuristics, no second channel.
-- `bro sweep distill` materializes the work instead of judging it:
+- `bro work sweep distill` materializes the work instead of judging it:
   beads already cited as learn evidence auto-mark; the rest pour as an
-  agent molecule (one step per bead — `bro convoy run` / `bro agents
+  agent molecule (one step per bead — `bro flow convoy run` / `bro fleet agents
   up` executes them).
-- `bro sweep run` refuses while unharvested closed beads are older than
+- `bro work sweep run` refuses while unharvested closed beads are older than
   `sweep.olderThanDays` (default 30). `--force` is the explicit
   override — the refusal is the feature, so use it only when the burn
   is intended. A closed bead with no `closed_at` also blocks: a row
@@ -30,9 +30,9 @@ harvested. Sweep gates the burn on a harvest marker.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro sweep status` | Read-only: harvested/unharvested counts, age vs `olderThanDays`, the would-burn set |
-| `bro sweep distill [--dry-run]` | Auto-mark learn-cited beads; pour an agent molecule for the rest |
-| `bro sweep run [--dry-run] [--force] [--no-flatten]` | Gate → archive → sync-verify → `bd prune --older-than` → `bd flatten` |
+| `bro work sweep status` | Read-only: harvested/unharvested counts, age vs `olderThanDays`, the would-burn set |
+| `bro work sweep distill [--dry-run]` | Auto-mark learn-cited beads; pour an agent molecule for the rest |
+| `bro work sweep run [--dry-run] [--force] [--no-flatten]` | Gate → archive → sync-verify → `bd prune --older-than` → `bd flatten` |
 
 ## Pipeline stages (run)
 
@@ -52,7 +52,7 @@ harvested. Sweep gates the burn on a harvest marker.
 
 ## Policy
 
-- Wire `bro sweep run` into loop end-of-queue or scheduled flows — the
+- Wire `bro work sweep run` into loop end-of-queue or scheduled flows — the
   gate makes unconditional invocation safe.
 - `BRO_SWEEP_DIR` overrides `sweep.dir`; keep it inside `.agents/` or
   archives stop syncing and `run` refuses.

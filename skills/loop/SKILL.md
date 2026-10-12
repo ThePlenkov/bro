@@ -1,19 +1,19 @@
 ---
 name: loop
-description: "Use when the user wants the backlog worked autonomously end-to-end — 'run the backlog', 'bro loop', a hands-off /goal over open beads. Unlike /next (one scheduling step), `bro loop` IS the loop: bro claims each ready bead, spawns the configured agent in a fresh worktree, drives the act gate, closes the bead, repeats. Requires `bro` and `bd`; the agent is a providers.<name> entry (loop.provider/--provider, acp = headless) or a raw loop.agent template."
+description: "Use when the user wants the backlog worked autonomously end-to-end — 'run the backlog', 'bro flow loop', a hands-off /goal over open beads. Unlike /next (one scheduling step), `bro flow loop` IS the loop: bro claims each ready bead, spawns the configured agent in a fresh worktree, drives the act gate, closes the bead, repeats. Requires `bro` and `bd`; the agent is a providers.<name> entry (loop.provider/--provider, acp = headless) or a raw loop.agent template."
 ---
 
 # /loop (bro)
 
 **All mechanics live in the `bro` CLI.** This skill is policy only.
-`bro next` schedules one bead; `bro loop` runs the queue to exhaustion —
+`bro flow next` schedules one bead; `bro flow loop` runs the queue to exhaustion —
 claim → worktree → agent → push onto the gate stack → repeat — with no
 per-item "should I continue?" The backlog's existence is the approval.
 
 ## Configure the agent once
 
 **Prefer the provider lane** — a `providers.<name>` registry entry
-resolves the spawn exactly like `bro agents up`:
+resolves the spawn exactly like `bro fleet agents up`:
 
 ```json
 {
@@ -30,7 +30,7 @@ A `cli` entry substitutes its `command` for the template. The picks:
 `--provider`/`--agent <name>` flags → `fleet.profiles` preset
 (`--profile`, `loop.profile`) → `loop.provider` →
 `agents.native.provider`. `--model` and `--auto-approve` tune the lane.
-`bro loop --agent kilo-cli` works too — a bare `--agent` value that
+`bro flow loop --agent kilo-cli` works too — a bare `--agent` value that
 exactly names a configured provider IS a provider pick.
 
 **Raw template** — `loop.agent` (or an `--agent` value that names no
@@ -64,20 +64,20 @@ knobs below.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro loop` | Run the queue until idle or gated |
-| `bro loop --max N` | At most N beads this run |
-| `bro loop --max-open N` | Cap the gate stack's open PRs — a full stack only services gates until a merge frees a slot |
-| `bro loop --disk-min-slots N` | Disk floor in slot units — pushes hold while free disk < N×`loop.worktreeMb` on any filesystem the run writes to (default 2; 0 disables) |
-| `bro loop --dry-run` | Print the top item's plan (claim, worktree, agent cmd) — changes nothing |
-| `bro loop --agent '<tpl>'` | One-off agent override — a provider name resolves through the registry |
-| `bro loop --provider <name>` | Provider pick (`--profile`, `--model`, `--auto-approve` tune it) |
-| `bro loop --label a,b` | Declared scope — only beads carrying one of these labels are claimable; the rest of the shared queue stays untouched. "Loop the debt beads" never bleeds into unrelated work |
-| `bro loop --batch N` | Batch claims — a claim pulls up to N same-affinity beads into one worktree + worker + PR (default 1 = solo). Affinity binds on the lead's spec/epic/`area:`/path-prefix key; `loop.batchMinPriority` (default 3) keeps urgent work solo; a `solo` label opts a bead out |
+| `bro flow loop` | Run the queue until idle or gated |
+| `bro flow loop --max N` | At most N beads this run |
+| `bro flow loop --max-open N` | Cap the gate stack's open PRs — a full stack only services gates until a merge frees a slot |
+| `bro flow loop --disk-min-slots N` | Disk floor in slot units — pushes hold while free disk < N×`loop.worktreeMb` on any filesystem the run writes to (default 2; 0 disables) |
+| `bro flow loop --dry-run` | Print the top item's plan (claim, worktree, agent cmd) — changes nothing |
+| `bro flow loop --agent '<tpl>'` | One-off agent override — a provider name resolves through the registry |
+| `bro flow loop --provider <name>` | Provider pick (`--profile`, `--model`, `--auto-approve` tune it) |
+| `bro flow loop --label a,b` | Declared scope — only beads carrying one of these labels are claimable; the rest of the shared queue stays untouched. "Loop the debt beads" never bleeds into unrelated work |
+| `bro flow loop --batch N` | Batch claims — a claim pulls up to N same-affinity beads into one worktree + worker + PR (default 1 = solo). Affinity binds on the lead's spec/epic/`area:`/path-prefix key; `loop.batchMinPriority` (default 3) keeps urgent work solo; a `solo` label opts a bead out |
 | `--merge-timeout MIN`, `--interval SEC` | Gate budget and poll overrides |
 
 ## What happens per bead
 
-1. **Claim** — top `bd ready` item, `bro next`'s rules: HUMAN GATE beads,
+1. **Claim** — top `bd ready` item, `bro flow next`'s rules: HUMAN GATE beads,
    epics, and molecule steps (convoy-owned) are never auto-claimed.
 2. **Worktree** — sibling `<repo>--<bead-id>` on branch `loop/<id>` off
    `origin/main`; `loop.bootstrap` runs once per bead, before the agent.
@@ -86,7 +86,7 @@ knobs below.
    working session is an anti-pattern; the run record is how a check-in
    judges it instead). stdout/stderr append to
    `<git-common>/bro/loop/<slug>.log` and a `<slug>.json` record pins
-   the pid — `bro watch`/`bro status` report output silence past
+   the pid — `bro review watch`/`bro fleet status` report output silence past
    `loop.stallMin` (45) as an *advisory*; the orchestrator decides, bro
    never kills. Its env
    pins `BEADS_DIR` to the runner's store (`bd where`), so `bd` writes
@@ -98,14 +98,14 @@ knobs below.
    services the stack oldest-first, then pushes the next bead while a
    `loop.maxOpen` slot is free — a pending gate is claimed work, never
    orchestrator idle. A gate event is the preemption point: green →
-   `bro act merge` (merge slot + `--match-head-commit` apply); threads
+   `bro review act merge` (merge slot + `--match-head-commit` apply); threads
    → the agent is respawned with the thread list; `CONFLICTING` → a
    rebase order onto the PR's base; `BEHIND` as the sole blocker →
    update-branch. Fix and rebase rounds share `loop.fixRounds`; each
    member waits out its own `mergeTimeoutMin`.
 5. **Close** — `bd close <id> --reason "landed via PR #N"`, worktree and
    branch removed; the freed slot claims the next bead. A member's own
-   loop IS the supervisor — `bro drive` never needs to spawn fixers
+   loop IS the supervisor — `bro review drive` never needs to spawn fixers
    against loop-owned worktrees.
 
 ## Policy
@@ -140,7 +140,7 @@ knobs below.
   fills only up to the remaining claim budget.
 - **`--dry-run` first on a new repo** — verify the agent template and
   worktree path before the loop starts claiming.
-- One `bro loop` per repo — two runners would race the same top beads
+- One `bro flow loop` per repo — two runners would race the same top beads
   (claim is atomic, so the loser just takes the next one — wasteful,
   not corrupting).
 
@@ -157,7 +157,7 @@ litter — clean `loop/*` worktrees and branches whose bead is closed or
 whose PR merged (`bro work prune --loop` runs the same sweep by hand) —
 then names every surviving tail in the run summary: open `loop/*` PRs,
 kept worktrees and branches, beads still `in_progress`, and cleanup
-failures collected during the run, then `bro sync` pushes artifacts and
+failures collected during the run, then `bro work sync` pushes artifacts and
 bead state. A clean run prints `clean — no loop tails`. Tails that
 survive the sweep — dirty trees, open PRs, live claimants — still need
 a human or a follow-up session to clear.

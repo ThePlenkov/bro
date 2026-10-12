@@ -1,6 +1,6 @@
 ---
 name: status
-description: "Use when a thin client (pi extension, TUI, dashboard) needs bro's live project board in one read — active beads, fleet workers, drill frame, PR gate. `bro status --json` is the contract; `--deep` adds the act gate (network). Requires `bro` (npx -y @broject/bro@0)."
+description: "Use when a thin client (pi extension, TUI, dashboard) needs bro's live project board in one read — active beads, fleet workers, drill frame, PR gate. `bro fleet status --json` is the contract; `--deep` adds the act gate (network). Requires `bro` (npx -y @broject/bro@0)."
 ---
 
 # /status (bro)
@@ -11,14 +11,14 @@ reference for thin clients rendering the board.
 ## The read
 
 ```bash
-bro status            # compact human board
-bro status --json     # machine form — the thin-client contract
-bro status --deep     # + act exit gate (gh calls — slower cadence)
+bro fleet status            # compact human board
+bro fleet status --json     # machine form — the thin-client contract
+bro fleet status --deep     # + act exit gate (gh calls — slower cadence)
 ```
 
-`bro status` is the answer to "what is alive in this project right
-now": one call instead of `bd list` + `bro agents status` +
-`bro act status` per refresh tick.
+`bro fleet status` is the answer to "what is alive in this project right
+now": one call instead of `bd list` + `bro fleet agents status` +
+`bro review act status` per refresh tick.
 
 ```jsonc
 {
@@ -53,7 +53,7 @@ now": one call instead of `bd list` + `bro agents status` +
   arrays; no registry → `agents: []`; no open PR → `act: null`; no
   heartbeat file → `watch: null`.
 - **`watch` is the rig's heartbeat freshness** — read from
-  `<git-common>/bro/heartbeat.json` (rewritten by every `bro watch`
+  `<git-common>/bro/heartbeat.json` (rewritten by every `bro review watch`
   tick, a manual `--once` included). `ageMs` is the signal: fresh = a
   watch ran recently, stale = none did — it attests the last tick, not
   which invocation wrote it. `attention` is the last snapshot's
@@ -64,4 +64,4 @@ now": one call instead of `bd list` + `bro agents status` +
   `readyTotal` carries the real count.
 - **fleet.agents[].state** — `running | exited | stopped | unknown`,
   derived cheaply (pidAlive + recorded exitStatus), not the full
-  connector probe `bro agents status` does.
+  connector probe `bro fleet agents status` does.
