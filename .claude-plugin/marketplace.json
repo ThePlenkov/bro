@@ -1,12 +1,13 @@
 {
   "name": "bro",
+  "description": "Agent's sidekick: review-debt pipeline, PR review loop, scoped drill frames, and wtf→retrospect self-correction — mechanics in the bro CLI",
   "owner": {
     "name": "Petr Plenkov"
   },
   "plugins": [
     {
       "name": "bro",
-      "source": "./plugins/claude/bro",
+      "source": "./",
       "description": "Agent's sidekick: review-debt pipeline, PR review loop, and scoped drill frames — all mechanics in the bro CLI over gh + beads",
       "version": "0.2.5",
       "license": "MIT",

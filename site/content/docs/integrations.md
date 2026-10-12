@@ -32,7 +32,7 @@ evidence record even when the beads projection is disabled.
 | Client | Adapter |
 | ------ | ------- |
 | Devin | `plugins/devin/bro` |
-| Claude Code | `plugins/claude/bro` |
+| Claude Code | repo root (`.claude-plugin/plugin.json` + `skills/`); hooks in `plugins/claude/bro/hooks/` |
 | Codex | repo root (`plugin.json` + `skills/`); hooks in `plugins/codex/bro/hooks/` |
 | Cursor | `plugins/cursor/bro` |
 | OpenCode | `bro plugins install opencode` — native plugin + TUI module |
