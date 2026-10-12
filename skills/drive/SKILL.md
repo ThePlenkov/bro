@@ -44,7 +44,7 @@ descendants keep. Occupied is always the safe verdict.
 | Command | What it does |
 | ------- | ------------ |
 | `bro review drive [--once]` | one supervision pass (default) |
-| `bro review drive --every [N]` | a pass every N seconds — the detached supervisor; a bare `--every` uses `drive.intervalSec` |
+| `bro review drive --every [N]` | a pass every N seconds — runs in-process, spawn it detached (nohup/tmux/daemon); a bare `--every` uses `drive.intervalSec` |
 | `bro review drive --no-merge` | supervise only — never merge (config: `drive.merge: "never"`) |
 | `bro review drive --connector <name>` | spawn fixers on one backend |
 | `bro review drive --json` | one JSON line per PR verdict |

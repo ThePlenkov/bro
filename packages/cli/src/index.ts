@@ -118,7 +118,7 @@ Options:
   --help       This text
 
 Examples:
-  bro review debt collect             # last 50 merged PRs, skip processed
+  bro review debt collect             # harvest merged-PR findings → ledger + labels
   bro review debt prs                 # merged PRs still unprocessed
   bro review debt sync                # project the ledger into beads
   bro review act status --json        # exit gate for the current PR

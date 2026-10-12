@@ -65,7 +65,7 @@ a command belongs to exactly one group, claimed by that capability's
 
 1. `PLUGINS[name === argv[0]]` → run (flat spelling — compat path)
 2. `GROUPS[argv[0]]` → member dispatch:
-   `members[argv[1]] ? member.run(argv[1:]) : groupHelp(argv[0])`
+   `members[argv[1]] ? member.run(argv[2:]) : groupHelp(argv[0])`
 3. `runDocVerb` → verb-noun docs
 4. unknown → usage
 
