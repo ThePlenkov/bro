@@ -229,44 +229,66 @@ function analysisRecords(
       `/delta-analyses/${encodeURIComponent(String(id))}`
   ) as CsDelta
   const merged: CsDelta = { ...a, ...detail }
-  const createdAt = parseAnalysisTime(merged.analysistime, ctx.harvestedAt)
-  const author = merged.authors?.[0] ?? 'codescene'
-  const url =
-    `${project.uiHost}/projects/${encodeURIComponent(project.projectId)}` +
-    `/delta-analysis/${encodeURIComponent(String(id))}`
+  const base = {
+    url:
+      `${project.uiHost}/projects/${encodeURIComponent(project.projectId)}` +
+      `/delta-analysis/${encodeURIComponent(String(id))}`,
+    author: merged.authors?.[0] ?? 'codescene',
+    createdAt: parseAnalysisTime(merged.analysistime, ctx.harvestedAt),
+  }
+  return [...gateRows(ctx, id, gates, merged, base), ...fileRows(ctx, id, merged, base)]
+}
+
+interface RowBase {
+  url: string
+  author: string
+  createdAt: string
+}
+
+/** One blocking row per failed gate. */
+function gateRows(
+  ctx: CollectCtx,
+  id: string | number,
+  gates: string[],
+  merged: CsDelta,
+  base: RowBase
+): DebtRecord[] {
   const delta =
     merged.code_health !== undefined || merged.old_code_health !== undefined
       ? ` — code health ${merged.old_code_health ?? '?'} → ${merged.code_health ?? '?'}`
       : ''
   const onRepo = merged.repository ? ` on ${merged.repository}` : ''
+  return gates.map((gate) =>
+    baseRecord(ctx, {
+      ...base,
+      threadId: `codescene:${id}:gate:${gate}`,
+      priority: 'blocking',
+      path: '',
+      body: `failed gate ${gate}${delta}${onRepo}`,
+      source: 'codescene',
+    })
+  )
+}
+
+/** One scan row per file whose health declined. */
+function fileRows(
+  ctx: CollectCtx,
+  id: string | number,
+  merged: CsDelta,
+  base: RowBase
+): DebtRecord[] {
   const out: DebtRecord[] = []
-  for (const gate of gates) {
-    out.push(
-      baseRecord(ctx, {
-        threadId: `codescene:${id}:gate:${gate}`,
-        url,
-        priority: 'blocking',
-        path: '',
-        author,
-        body: `failed gate ${gate}${delta}${onRepo}`,
-        createdAt,
-        source: 'codescene',
-      })
-    )
-  }
   for (const f of merged.file_results ?? []) {
-    if (!healthDeclined(f) || f.file === undefined || f.file === '') {
+    if (!f.file || !healthDeclined(f)) {
       continue
     }
     out.push(
       baseRecord(ctx, {
+        ...base,
         threadId: `codescene:${id}:file:${f.file}`,
-        url,
         priority: 'scan',
         path: f.file,
-        author,
         body: `code health declined ${f.old_code_health} → ${f.code_health}`,
-        createdAt,
         source: 'codescene',
       })
     )
