@@ -1,17 +1,20 @@
 /**
  * Loop-agent run records — `<git-common>/bro/loop/<slug>.{json,log}`
- * (spec specs/bro-9lpn3.md). They describe the LEGACY spawn only: a
- * beads-backed loop spawns through the agents registry (spec
- * bro-zpa93) — detached, claimed, `.exit`-recorded — and its worker is
- * read through `bro agents`/`bro fleet` instead. The synchronous
- * fallback (no shared store to pin against) still keeps the run
- * record plus the tee'd output log — the only artifacts a check-in
- * (`bro watch`, `bro status`) can judge liveness and silence from.
- * The `.json` exists while the agent runs: `{beadId, slug, pid,
- * startedAt, worktree, log}`; the `.log` persists as the audit trail
- * across fix-round respawns (append, like the agents-plane
- * convention). Its mtime IS the last-output signal — readers report
- * silence, never kill.
+ * (spec specs/bro-9lpn3.md). A record rides the member's in-flight
+ * window on BOTH spawn paths — claim → worktree → worker → settle —
+ * retiring when the armed watch marker takes custody (and on early
+ * settles): the synchronous fallback re-stamps it at spawn/settle
+ * around the awaited child, and the registry path (spec bro-zpa93)
+ * re-stamps it to the detached worker's pid + agents-plane log so
+ * `bro watch`/`bro status` read the live run while the member's
+ * .exit is still pending (bro-wg896). The registry entry remains the
+ * claim's custody plane; the record is the check-in plane — the only
+ * artifact a check-in (`bro watch`, `bro status`) judges liveness and
+ * silence from. The `.json` exists while work is in flight:
+ * `{beadId, slug, pid, startedAt, worktree, log}`; the `.log`
+ * persists as the audit trail across fix-round respawns (append,
+ * like the agents-plane convention). Its mtime IS the last-output
+ * signal — readers report silence, never kill.
  *
  * `bro/loop/` and not `bro/agents/`: a record there would pose as a
  * backend-owned agent home, and the janitor's orphan sweep reaps

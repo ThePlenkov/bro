@@ -647,11 +647,40 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string): Promise<voi
     spawnedMs: Date.now(),
     pid: info.pid,
   }
+  // the run record stays and rides the worker (bro-wg896): custody of
+  // the CLAIM transfers to the registry entry at spawn, but retiring
+  // the record here left `bro watch`/`bro status` blind for the
+  // worker's whole run — re-stamped to the worker's pid + agent log so
+  // check-ins read the live run (and silence keeps meaning silence).
+  // A pid-less remote worker keeps the loop as the owner on record —
+  // the supervisor is the live party polling its .exit.
+  const workerPid = info.pid ?? process.pid
+  beginLoopRun(ctx.root, {
+    beadId: lead.id,
+    beadIds: m.beads.map((b) => b.id),
+    slug: loopSlug(lead.id),
+    pid: workerPid,
+    pidStart: procStat(workerPid)?.start,
+    startedAt: new Date().toISOString(),
+    worktree: m.item.worktreeDir,
+    log: info.log ?? '',
+  })
   say(
     ctx,
     `loop: agent ${m.beads.map((b) => b.id).join(', ')} → ${info.id} pid ${info.pid ?? '?'}`
   )
   ctx.stage = `worker ${info.id} pid=${info.pid ?? '?'}`
+}
+
+/** `<git-common>/bro/agents/<id>.log` for a registry worker — the run
+ *  record's silence signal on the detached path. '' when the registry
+ *  home can't be named (the record falls back to its own stamp). */
+function workerLogPath(ctx: Ctx, agentId: string): string {
+  const reg = agentRegistryPath(ctx.root)
+  if (reg === null || basename(agentId) !== agentId) {
+    return ''
+  }
+  return join(dirname(reg), 'agents', `${agentId}.log`)
 }
 
 /** The pending worker's settled exit — the .exit record a detached
@@ -661,12 +690,9 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string): Promise<voi
  *  A worker dead without a record (SIGKILL, spawn failure) falls back
  *  to the log's last write, then now. */
 function workerExit(ctx: Ctx, w: WorkerRef): { code: number | null; at: number } {
-  const reg = agentRegistryPath(ctx.root)
-  const home =
-    reg === null || basename(w.agentId) !== w.agentId
-      ? null
-      : join(dirname(reg), 'agents')
-  if (home !== null) {
+  const log = workerLogPath(ctx, w.agentId)
+  if (log !== '') {
+    const home = dirname(log)
     try {
       const f = join(home, `${w.agentId}.exit`)
       const n = Number(readFileSync(f, 'utf8').trim())
@@ -675,7 +701,7 @@ function workerExit(ctx: Ctx, w: WorkerRef): { code: number | null; at: number }
       // no exit record — the log clock is the next-best death stamp
     }
     try {
-      return { code: null, at: statSync(join(home, `${w.agentId}.log`)).mtimeMs }
+      return { code: null, at: statSync(log).mtimeMs }
     } catch {
       // no log either — detection time is all that remains
     }
@@ -1390,8 +1416,10 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       return settleSpawnRefusal(ctx, member, err)
     }
     // custody transfers to the agent registry entry — claimStep landed
-    // the lead's claim under the spawn lock (bro-ho09d)
-    endLoopRun(ctx.root, loopSlug(lead.id))
+    // the lead's claim under the spawn lock (bro-ho09d). The run
+    // record does NOT retire here (bro-wg896): re-stamped to the
+    // worker inside spawnWorker, it stays the check-in plane until the
+    // armed watch marker takes custody at the settle.
     return { kind: 'member', member }
   }
   // no shared store to pin a claim/exit record against — the awaited
@@ -1554,8 +1582,28 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     // truth, not re-serve the ≤ttl-old snapshot and burn rounds
     ctx.stateCache?.invalidate({ repo: ctx.repo, pr: m.pr })
     m.since = Date.now()
+    // custody stays with the armed watch marker — the worker's run
+    // record retires with the round (bro-wg896)
+    endLoopRun(ctx.root, loopSlug(m.beads[0]!.id))
     return 'active'
   }
+  // custody returns to the supervisor for the findPr/arm window —
+  // re-stamp the run record with this process's pid so the just-dead
+  // worker's id never reads as a crashed run between here and the
+  // verdict (the awaited spawn's settle stamps the same, bro-ho09d).
+  // The log stays the worker's agents-plane log — the connector's own
+  // recorded path first, the conventional <id>.log when the entry is
+  // already gone
+  beginLoopRun(ctx.root, {
+    beadId: m.beads[0]!.id,
+    beadIds: m.beads.map((b) => b.id),
+    slug: loopSlug(m.beads[0]!.id),
+    pid: process.pid,
+    pidStart: procStat(process.pid)?.start,
+    startedAt: new Date().toISOString(),
+    worktree: m.item.worktreeDir,
+    log: info?.log ?? workerLogPath(ctx, w.agentId),
+  })
   ctx.stage = 'pr lookup'
   const pr = findPr(ctx, m.item.branch)
   if (pr === 'lookup-error') {
@@ -1601,6 +1649,9 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     ...loopWatch(pr, prRef(ctx, pr), m.item.worktreeDir, ctx.cfg),
     bead: m.beads.map((b) => b.id).join(','),
   })
+  // custody transfers to the armed watch — the run record's job is
+  // done (the same handoff the awaited path runs at pushItem)
+  endLoopRun(ctx.root, loopSlug(m.beads[0]!.id))
   stampProjection(ctx, m.beads, pr)
   // ownership marking (spec bro-c650l) — the registry-spawn path's
   // discovery is HERE, not pushItem: a detached worker's PR only
@@ -2465,8 +2516,9 @@ function claimClump(
   // owner, so the claim → worktree → bootstrap → spawn chain can't
   // read as abandonment to a racing sweep. The worktree path is the
   // deterministic planItem naming — planItemAndWorktree reuses it
-  // verbatim. pushItem re-stamps the record; spawnAgent retires it
-  // under the worker's pid.
+  // verbatim. pushItem re-stamps the record; the spawn re-stamps it
+  // under the worker's pid (spawnAgent's beginLoopRun, or spawnWorker's
+  // on the registry path — bro-wg896).
   claimCustody(ctx, lead, [lead.id])
   // solo fast path — batch off, no budget for a second member, or a
   // lead that can't clump (urgent, keyless, or `solo`-labelled)

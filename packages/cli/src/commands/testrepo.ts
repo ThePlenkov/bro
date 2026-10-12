@@ -514,13 +514,28 @@ const withState = (fn) => {
   try { const s = load(); const r = fn(s); save(s); return r }
   finally { rmSync(LOCK, { recursive: true }) }
 }
+// the loop run-record plane, snapshotted in-band (bro-wg896): the
+// registry path must leave bro/loop/<slug>.json live while a worker
+// runs and through the findPr settle window, retiring it once the
+// armed watch marker owns custody — prsForBranch catches the settle
+// read, checks the post-arm gate polls
+const peekLoop = (s, at) => {
+  const recs = {}
+  try {
+    const ld = join(process.cwd(), '.git', 'bro', 'loop')
+    for (const f of readdirSync(ld).filter((f) => f.endsWith('.json'))) {
+      recs[f.slice(0, -'.json'.length)] = JSON.parse(readFileSync(join(ld, f), 'utf8'))
+    }
+  } catch { /* no loop dir = an empty plane — still a real peek */ }
+  s.loopPeeks = (s.loopPeeks ?? []).concat([{ at, records: recs }])
+}
 const facade = {
   resolveRepo: () => 'o/r',
   prLink: (_repo, pr) => '[#' + pr + '](https://example.test/o/r/pull/' + pr + ')',
   currentPr: () => null,
-  prsForBranch: (branch, state) => {
-    const s = load()
+  prsForBranch: (branch, state) => withState((s) => {
     if (s.prLookupFails) throw new Error('host unreachable')
+    peekLoop(s, 'pr-lookup')
     // per-branch PRs (stack e2e) — {prs: {'stack/s/1-x': {number, state, baseRef}}}
     // the map is authoritative: an unmapped branch has NO PR — falling
     // through to the global prOpened would lend an unrelated PR to a
@@ -532,7 +547,7 @@ const facade = {
       return p.state === 'OPEN' ? [p.number] : []
     }
     return s.prOpened ? [s.pr ?? 7] : []
-  },
+  }),
   parsePrRef: () => null,
   prMeta: (t) => withState((s) => {
     // readQueues.meta — the same mid-flight race scripting as
@@ -573,6 +588,7 @@ const facade = {
           .filter((f) => f.endsWith('.json'))
           .map((f) => ({ file: f, marker: JSON.parse(readFileSync(join(wd, f), 'utf8')) }))
       )
+      peekLoop(s, 'gate')
     } catch {}
     // a readQueues.checks list overrides everything — each call shifts
     // one entry, so a test can script 'red at the gate snapshot, green
@@ -812,6 +828,25 @@ const log = (msg) => {
           : 'work'
   fs.appendFileSync(f, kind + ' ' + msg + '\\n')
 }
+// in-band run-record peek (bro-wg896): the detached worker can't ask
+// the loop mid-tick, so it snapshots bro/loop/ itself — the cwd is
+// the worktree, whose .git is a file, so the common dir resolves via
+// git. A registry-path spawn must leave a live record while it runs.
+try {
+  const common = execFileSync(
+    'git',
+    ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+    { encoding: 'utf8' }
+  ).trim()
+  const ld = path.join(common, 'bro', 'loop')
+  const recs = {}
+  for (const f of fs.readdirSync(ld).filter((f) => f.endsWith('.json'))) {
+    recs[f.slice(0, -'.json'.length)] = JSON.parse(fs.readFileSync(path.join(ld, f), 'utf8'))
+  }
+  const s = load()
+  s.loopPeeks = (s.loopPeeks ?? []).concat([{ at: 'worker', records: recs }])
+  save(s)
+} catch {}
 // register the "opened" PR — the per-branch map (seeded prs: {}) is
 // authoritative when present; the flat prOpened flag feeds the legacy
 // single-PR probes
