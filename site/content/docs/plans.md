@@ -22,7 +22,7 @@ title = "pin the Node version in CI"
 sink = "workaround"          # backlog | memory | agentic-documents | …
 ```
 
-## `bro run <plan.toml>`
+## `bro plan run <plan.toml>`
 
 1. Parses the TOML document
 2. Reads `kind` → finds the plugin by name
@@ -35,7 +35,7 @@ Unknown kinds are rejected with the list of known ones; a plugin without
 aggregate — every problem in the file is reported at once, not one error
 per run.
 
-`bro retrospect schema` prints the commented template for its kind.
+`bro self retrospect schema` prints the commented template for its kind.
 
 ## `version` — the schema pin
 
@@ -61,10 +61,10 @@ survives a schema advance is the schema's contract, not the gate's.
 
 ## `bro plan validate <plan.toml>`
 
-Runs the full `bro run` pipeline — TOML parse, `kind` routing, the
+Runs the full `bro plan run` pipeline — TOML parse, `kind` routing, the
 `version` gate, `planSchema` — and stops before `runPlan`. Valid files
 print `ok — <kind> plan, schema v<N>`; invalid ones exit 1 with the same
-aggregate error `bro run` would report. Validate before pushing a plan
+aggregate error `bro plan run` would report. Validate before pushing a plan
 into a queue: the executor and the checker share one resolve step, so
 they can't disagree.
 
@@ -101,7 +101,7 @@ A failed verdict doesn't abort the rest; failures are listed at the end.
 
 ### `next`
 
-The backlog-loop selection as a plan — `bro run next.toml` computes the
+The backlog-loop selection as a plan — `bro plan run next.toml` computes the
 queue under the plan's filters and ordering, claims up to `limit` beads,
 and emits one work order per pick:
 
@@ -148,7 +148,7 @@ Steps also take `description`, `priority`, `type`, `ephemeral`.
 ### `debt`
 
 Batch triage verdicts for the review-debt ledger — replaces N
-interactive `bro debt set` calls:
+interactive `bro review debt set` calls:
 
 ```toml
 kind = "debt"
@@ -167,7 +167,7 @@ fix_pr = 58                  # the PR that landed the fix
 ### `convoy`
 
 A pour plan — which molecules to bring into existence and under what
-gate policy. `bro run` materializes each entry; execution then proceeds
+gate policy. `bro plan run` materializes each entry; execution then proceeds
 through `convoy next`/`done` as usual.
 
 ```toml

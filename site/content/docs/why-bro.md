@@ -33,9 +33,9 @@ Each feature ships the same four parts:
 
 ## Why beads is a default store
 
-`bro debt collect` creates `.beads/` in a repo that doesn't have one —
+`bro review debt collect` creates `.beads/` in a repo that doesn't have one —
 on purpose. The jsonl ledger is evidence; beads is the work queue
-(`bd ready -l debt`, drill frames, `bro next`). An opt-in default would
+(`bd ready -l debt`, drill frames, `bro flow next`). An opt-in default would
 fill the ledger and starve the queue until the user found a config key —
 and `bd` is required by the task commands anyway, so opting out only
 defers the dependency to a later, less predictable failure.

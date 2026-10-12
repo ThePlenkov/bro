@@ -84,7 +84,7 @@ a `BroPlugin`. See [Plugins](/docs/plugins).
 | `profile` | `""` | `fleet.profiles.<name>` preset — fills provider/model/autoApprove piecewise |
 | `model` | `""` | Model override for the provider lane |
 | `bootstrap` | `""` | Optional command run in each fresh worktree before the agent |
-| `stallMin` | `45` | Output-silence advisory in minutes — a live loop agent quiet this long surfaces in `bro watch`/`bro status`. Advisory only; nothing is killed |
+| `stallMin` | `45` | Output-silence advisory in minutes — a live loop agent quiet this long surfaces in `bro review watch`/`bro fleet status`. Advisory only; nothing is killed |
 | `crashExitMs` | `10000` | An agent exit faster than this is an environment crash — the bead parks loud instead of reopening into a respawn-burn. `0` restores legacy reopen-on-every-exit |
 | `mergeTimeoutMin` | `45` | Review-gate budget in minutes |
 | `fixRounds` | `3` | Maximum review-fix respawns per bead |
@@ -178,7 +178,7 @@ connection shape (`api`: `baseUrl` + `apiKeyEnv`/`apiKeyCommand` +
 | `defs` | `[]` | Project-owned guard declarations — `{ name, when, say }`; shadow a builtin by reusing its name |
 | `maxPerEvent` | — | Cap on guard lines one hook event emits |
 
-See [bro guard](/docs/commands/guard) for the `when` clause vocabulary.
+See [bro self guard](/docs/commands/guard) for the `when` clause vocabulary.
 
 ### `query`
 
@@ -192,7 +192,7 @@ See [bro guard](/docs/commands/guard) for the `when` clause vocabulary.
 | Key | Default | What |
 | --- | ------- | ---- |
 | `olderThanDays` | `30` | Age line for both the gate and `bd prune --older-than` |
-| `dir` | `.agents/sweep` | Archive directory — must live inside the synced set so `bro sync` carries it |
+| `dir` | `.agents/sweep` | Archive directory — must live inside the synced set so `bro work sync` carries it |
 | `flatten` | `true` | Run `bd flatten` as the pipeline's last stage |
 
 ### `learn`
@@ -214,7 +214,7 @@ See [bro guard](/docs/commands/guard) for the `when` clause vocabulary.
 
 | Key | Default | What |
 | --- | ------- | ---- |
-| `intervalSec` | `60` | Heartbeat cadence for `bro watch install` |
+| `intervalSec` | `60` | Heartbeat cadence for `bro review watch install` |
 
 ### `check`
 

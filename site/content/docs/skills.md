@@ -10,7 +10,7 @@ and why to use the command. The CLI owns how.
 
 | Skill | Trigger | Policy it carries |
 | ----- | ------- | ----------------- |
-| `act` | `/act` or a `bro: PR #N …` status ping | Run the review gate until green; fix or defer findings; merge through `bro act merge` |
+| `act` | `/act` or a `bro: PR #N …` status ping | Run the review gate until green; fix or defer findings; merge through `bro review act merge` |
 | `agents` | Supervise bro-managed agents: respawn a lost worker, stop one, or inspect the agent plane | Preserve the agent's identity and handles |
 | `check` | A repo with a Sverka workflow, or a request to run checks/scans through bro | Run the repository's checks through the Sverka facade |
 | `convoy` | `/convoy` or a request to run a beads workflow | Claim molecule steps atomically and respect human gates |
@@ -18,7 +18,7 @@ and why to use the command. The CLI owns how.
 | `docs` | Read or mutate task documents and stores, including the user-level store | Keep task and store verbs predictable; `--global` selects the user store |
 | `drill` | `/drill`, `/unwind`, or a task needing scoped descent | Narrow the investigation, return a result, and prevent recurrence |
 | `drive` | Orphaned PRs need an owner, or a request to drive the review loop | Poll gates, spawn unowned fixers, and merge only on green |
-| `guard` | A declarative nudge should fire on a hook event | Guards are context, never a gate — dry-run defs with `bro guard test` |
+| `guard` | A declarative nudge should fire on a hook event | Guards are context, never a gate — dry-run defs with `bro self guard test` |
 | `judge` | Calibrated decisions for agent loops — act triage annotation, fallback escalation | Typed questions in, typed answers out; `judge.mode` governs consumers |
 | `learn` | Lessons should outlive the session, an artifact needs capture, or the store may know the answer | Store trigger-gated lessons with evidence instead of unconditional memory |
 | `loop` | Work the backlog autonomously end-to-end | Claim → worktree → agent → gate → close → repeat |
@@ -30,7 +30,7 @@ and why to use the command. The CLI owns how.
 | `sdd` | The repo enables spec-driven development or asks about missing-spec nudges | Put a written spec before code for claimed work |
 | `serve` | A thin client needs the bro facade over HTTP | Expose local agents and fleet snapshots over loopback JSON |
 | `stack` | Work should land as a stacked bead → worktree → PR chain | Push beads onto ordered stacks, then sync after merges |
-| `status` | A thin client needs the live board in one read | `bro status --json` is the contract; `--deep` adds the act gate |
+| `status` | A thin client needs the live board in one read | `bro fleet status --json` is the contract; `--deep` adds the act gate |
 | `sweep` | `/sweep`, or prune/dispose of closed beads | The burn is gated on harvest — the refusal is the feature |
 | `typesafe-ai` | Building features on TypeSafe's System One typed-judgment models | Programmable AI primitives — the same models the judge consumes |
 | `sync` | `/sync` or a request to publish/restore bro artifacts | Publish and restore runtime artifacts on the data ref |

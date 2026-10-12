@@ -1,9 +1,9 @@
 ---
-title: bro status + bro serve
+title: bro fleet status + bro fleet serve
 description: The compact live board in one read, and the loopback HTTP facade for thin clients.
 ---
 
-## `bro status`
+## `bro fleet status`
 
 One read returns everything a thin client (pi extension, TUI, dashboard)
 needs per refresh tick — active beads, fleet workers, the drill frame,
@@ -13,19 +13,19 @@ answer, with the absent sections empty or null.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro status` | Compact human board — beads, fleet, drill, git |
-| `bro status --json` | The same board, machine-readable — the thin-client contract |
-| `bro status --deep` | Plus the act exit gate for the current branch's PR (network — the fast path stays local-only) |
+| `bro fleet status` | Compact human board — beads, fleet, drill, git |
+| `bro fleet status --json` | The same board, machine-readable — the thin-client contract |
+| `bro fleet status --deep` | Plus the act exit gate for the current branch's PR (network — the fast path stays local-only) |
 
 Sources: `bd` (in-progress + ready, capped), the shared agent registry
 (`<git-common>/bro/agents.json` — shared across linked worktrees), the
 drill stack, git porcelain, and the heartbeat file
-(`<git-common>/bro/heartbeat.json` — rewritten by every `bro watch`
+(`<git-common>/bro/heartbeat.json` — rewritten by every `bro review watch`
 tick; the `watch:` row is the rig's liveness read).
 
-## `bro serve`
+## `bro fleet serve`
 
-`bro serve [--port N]` is the write-capable counterpart: a foreground,
+`bro fleet serve [--port N]` is the write-capable counterpart: a foreground,
 loopback-only HTTP/JSON facade so thin clients never shell out to
 `bd`/`gh` themselves. The 127.0.0.1 bind is the trust boundary — no
 `--host` flag. The bound URL and session token are printed and written

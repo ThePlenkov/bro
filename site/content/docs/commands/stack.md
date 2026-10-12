@@ -1,9 +1,9 @@
 ---
-title: bro stack + bro work
+title: bro flow stack + bro work
 description: Stacked bead→worktree→PR chains, and the sibling worktrees they ride on.
 ---
 
-## `bro stack`
+## `bro flow stack`
 
 A named stack is an ordered bead → worktree → PR chain. Each member starts
 from the previous member's branch, so dependent work can review before the
@@ -11,15 +11,15 @@ parent lands.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro stack push <bead> [--name <stack>]` | Claim a bead and create or re-enter its stack member |
-| `bro stack list [<name>]` | Show positions, bases, worktrees, and PR state |
-| `bro stack sync [<name>]` | Retarget and rebase child members after a merge — skipped where the platform already did it |
-| `bro stack publish [<name>]` | Register the chain's open member PRs as the host's stack object (GitHub: `gh stack link`) |
-| `bro stack merge [<name>] [--squash\|--merge\|--rebase] [--admin]` | Land the chain bottom→top, gated member by member |
+| `bro flow stack push <bead> [--name <stack>]` | Claim a bead and create or re-enter its stack member |
+| `bro flow stack list [<name>]` | Show positions, bases, worktrees, and PR state |
+| `bro flow stack sync [<name>]` | Retarget and rebase child members after a merge — skipped where the platform already did it |
+| `bro flow stack publish [<name>]` | Register the chain's open member PRs as the host's stack object (GitHub: `gh stack link`) |
+| `bro flow stack merge [<name>] [--squash\|--merge\|--rebase] [--admin]` | Land the chain bottom→top, gated member by member |
 
 `--name` is required from the main checkout and inferred inside a stack
 member. Sync skips dirty or locked worktrees instead of touching them.
-`bro loop --stack <name>` drives the same chain automatically.
+`bro flow loop --stack <name>` drives the same chain automatically.
 
 `stack merge` and `stack sync` dispatch per connector: GitHub uses the
 `gh stack` extension's atomic `gh stack merge` when installed (else a

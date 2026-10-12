@@ -33,10 +33,10 @@ machine-local. Fresh checkouts run on defaults until set up.
 ## First sweep
 
 ```bash
-bro debt prs        # merged PRs nobody processed yet
-bro debt collect    # harvest threads → .agents/review-debt/ + labels
-bro debt status     # the damage report
-bro debt next       # the top open finding — claim, fix, set done
+bro review debt prs        # merged PRs nobody processed yet
+bro review debt collect    # harvest threads → .agents/review-debt/ + labels
+bro review debt status     # the damage report
+bro review debt next       # the top open finding — claim, fix, set done
 ```
 
 ## As an agent plugin

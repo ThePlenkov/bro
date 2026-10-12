@@ -1,6 +1,6 @@
 ---
 title: Restoring a rig on a fresh machine
-description: A rig's durable state lives on git refs and branches — clone, bro sync --pull, bd sync through a dolt remote, bro daemon up, bro act rearm.
+description: A rig's durable state lives on git refs and branches — clone, bro work sync --pull, bd sync through a dolt remote, bro fleet daemon up, bro review act rearm.
 ---
 
 A bro rig is designed so the machine is disposable. What dies with it is
@@ -16,7 +16,7 @@ state ride `refs/bro/data`.
 | State | Location | Restored by |
 | ----- | -------- | ----------- |
 | Code, `loop/*` and `fix/*` branches, dirty-tree snapshot branches | `refs/heads/*` | `git clone` / `git fetch` |
-| bro artifacts — review-debt ledger, drill evidence, `.agents/` state | `refs/bro/data` | `bro sync --pull` |
+| bro artifacts — review-debt ledger, drill evidence, `.agents/` state | `refs/bro/data` | `bro work sync --pull` |
 | Beads store — issues, claims, agent registry, drill frames, molecules | `refs/dolt/data` via a dolt remote (`bd dolt remote list`) | `bd sync` |
 | Operator config — providers, agent templates, global skills | outside the repo (`~/.config/bro`, `~/.agents`) | the operator's own backup — restore this first |
 | Running processes — daemon, watchers, shells | nowhere | restarted below |
@@ -26,18 +26,18 @@ state ride `refs/bro/data`.
 ```bash
 git clone https://github.com/<org>/<repo>.git && cd <repo>
 # repo bootstrap — for bro itself: npm ci && npm run build
-bro sync --pull     # materializes refs/bro/data into the worktree, then runs bd sync
-bro daemon up       # the supervisor is a process — it does not come back by itself
-bro act rearm       # resurrect dead PR watch markers (re-arms, never duplicates)
+bro work sync --pull        # materializes refs/bro/data into the worktree, then runs bd sync
+bro fleet daemon up         # the supervisor is a process — it does not come back by itself
+bro review act rearm        # resurrect dead PR watch markers (re-arms, never duplicates)
 ```
 
 Then verify from the authoritative reads, not from process exits:
 
 ```bash
-bd ready            # the queue survived
-bro status          # board, drill frame, fleet
-git worktree list   # worktree records survived — check each for uncommitted work
-bro agents status   # registry entries show dead pids — `bro agents up <step>` respawns
+bd ready                  # the queue survived
+bro fleet status          # board, drill frame, fleet
+git worktree list         # worktree records survived — check each for uncommitted work
+bro fleet agents status   # registry entries show dead pids — `bro fleet agents up <step>` respawns
 ```
 
 ### When `bd sync` cannot authenticate

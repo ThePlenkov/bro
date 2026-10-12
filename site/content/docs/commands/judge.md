@@ -1,5 +1,5 @@
 ---
-title: bro judge
+title: bro self judge
 description: A calibrated decision judge for agent loops — typed questions in, typed answers with confidence out.
 ---
 
@@ -15,12 +15,12 @@ warning).
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro judge decide --state <file\|-> --questions <file> [--connector N] [--json]` | One `decide()` over the resolved chain — answers, `decidedBy`, model, latency, usage. The smoke path: exercises the connector regardless of `judge.mode` |
-| `bro judge stats [--since ISO] [--json] [--replay]` | The verdict-journal report: agreement matrix (judge action vs recorded outcome), calibration buckets, p50/p95 latency, cost per provider+model |
-| `bro judge replay [--pr N…] [--merged-since ISO] [--limit N] [--connector N] [--json]` | Re-judge archived review threads from merged PRs on the live chain, journal replay verdicts with inferred outcomes, print the replay-scoped stats. Idempotent — a replayed subject is never re-judged |
+| `bro self judge decide --state <file\|-> --questions <file> [--connector N] [--json]` | One `decide()` over the resolved chain — answers, `decidedBy`, model, latency, usage. The smoke path: exercises the connector regardless of `judge.mode` |
+| `bro self judge stats [--since ISO] [--json] [--replay]` | The verdict-journal report: agreement matrix (judge action vs recorded outcome), calibration buckets, p50/p95 latency, cost per provider+model |
+| `bro self judge replay [--pr N…] [--merged-since ISO] [--limit N] [--connector N] [--json]` | Re-judge archived review threads from merged PRs on the live chain, journal replay verdicts with inferred outcomes, print the replay-scoped stats. Idempotent — a replayed subject is never re-judged |
 
 `judge.mode` governs consumers, not explicit invocation: `shadow`
-annotates `bro act threads` with a `judge: …` line under each unresolved
+annotates `bro review act threads` with a `judge: …` line under each unresolved
 row (journaled so `stats` can score judge-vs-outcome agreement);
 `off` (default) decides nothing on its own. See
 [`judge` config](/docs/configuration#judge).
