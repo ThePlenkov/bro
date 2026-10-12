@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Pulse"
+  short_description: "Session-owned watchdog cadence via the bro CLI — a metronome whose mailbox ticks are the wakes"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $pulse to arm the session watchdog."
+policy:
+  allow_implicit_invocation: true
