@@ -5,8 +5,9 @@ description: A rig's durable state lives on git refs and branches — clone, bro
 
 A bro rig is designed so the machine is disposable. What dies with it is
 **processes** — the daemon, act watchers, exec shells, dolt servers —
-plus anything never pushed. Everything else already lives on the remote:
-claims, worktree records, molecules, and the ready
+plus **registrations** — git worktree entries, the agent registry, loop
+run records — and anything never pushed. Everything else already lives
+on the remote: claims, molecules, and the ready
 queue are bead state synced to `refs/dolt/data`; `loop/*` and snapshot
 branches are ordinary git refs; the review-debt ledger and `.agents/`
 state ride `refs/bro/data`.
@@ -19,7 +20,7 @@ state ride `refs/bro/data`.
 | bro artifacts — review-debt ledger, drill evidence, `.agents/` state | `refs/bro/data` | `bro work sync --pull` |
 | Beads store — issues, claims, drill frames, molecules | `refs/dolt/data` via a dolt remote (`bd dolt remote list`) | `bd sync` |
 | Operator config — providers, agent templates, global skills | outside the repo (`~/.config/bro`, `~/.agents`) | the operator's own backup — restore this first |
-| Running processes + machine-local state — daemon, watchers, shells, the `bro/drive.json` install marker, agent logs, the agent registry (`<git-common>/bro/agents.json`) | nowhere | restarted below |
+| Running processes + machine-local state — daemon, watchers, shells, the `bro/drive.json` install marker, agent logs, the agent registry (`<git-common>/bro/agents.json`), git worktree registrations, loop run records (`<git-common>/bro/loop/`) | nowhere | restarted below |
 
 ## Sequence
 
@@ -37,9 +38,31 @@ Then verify from the authoritative reads, not from process exits:
 ```bash
 bd ready                  # the queue survived
 bro fleet status          # board, drill frame, fleet
-git worktree list         # worktree records survived — check each for uncommitted work
-bro fleet agents status   # starts empty — agents.json is machine-local; `bd list --status in_progress` is the respawn worklist (`bro work enter <step>` + `bro fleet agents up <step>`)
+git branch -r             # in-flight work survives as branches (loop/*, work/*, fix/*) —
+                          # `git worktree list` shows only this clone; registrations
+                          # were machine-local state
+bro fleet agents status   # starts empty — agents.json is machine-local
 ```
+
+### Orphaned claims
+
+Beads restored as `in_progress` still carry the dead machine's assignee,
+and every plane that could vouch for a worker — agent registry, run
+records, session markers — was machine-local, so the claim reads as
+foreign: `bro work enter` reports it refused and `bro fleet agents up`
+rejects the step as claimed outside the registry. Release the claim,
+materialize the surviving branch locally, then retake:
+
+```bash
+bd list --status in_progress                     # the orphaned worklist
+bd reopen <id>                                   # release the dead machine's claim
+git fetch origin 'loop/*:loop/*' 'work/*:work/*' # local refs for pushed in-flight work
+bro work enter <id> --branch loop/<id>           # resume a loop run's tree (work/<id> likewise)
+bro fleet agents up <id>                         # respawn a registry worker — claims fresh
+```
+
+Or just reopen — an open bead is claimable again, so `bro flow loop`
+retakes it on its own.
 
 ### When `bd sync` cannot authenticate
 
