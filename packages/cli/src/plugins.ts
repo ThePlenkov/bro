@@ -68,6 +68,7 @@ import { runPluginsCommand } from './commands/plugins.ts'
 import { applyVerdicts, runDebtCommand } from './commands/debt.ts'
 import { runDoctorCommand } from './commands/doctor.ts'
 import { driveSection } from './commands/drive-config.ts'
+import { driveConnector } from './commands/drive-pulse.ts'
 import { runDaemonCommand } from './commands/daemon.ts'
 import { runDriveCommand } from './commands/drive.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
@@ -124,6 +125,8 @@ registerConnector(workConnector)
 registerConnector(actConnector)
 // the pulse's rearm nudge — same family as act's dead-watch flags
 registerConnector(watchConnector)
+// the installed merge path's rearm checkpoint — drive.json's owner
+registerConnector(driveConnector)
 registerConnector(rigConnector)
 registerConnector(debtConnector)
 registerConnector(sddConnector)

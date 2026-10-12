@@ -8,6 +8,10 @@
  *   bro drive --no-merge      supervise only — never merge
  *   bro drive --connector <name>  spawn fixers on one backend
  *   bro drive --json          one JSON line per PR verdict
+ *   bro drive install [--every N] [--print]   arm the merge path —
+ *        writes <git-common>/bro/drive.json and brings the supervisor
+ *        up now; session checkpoints rearm it when it dies (bro-y5zon)
+ *   bro drive uninstall       disarm the marker + stop the supervisor
  *
  * Each pass enumerates open PRs on fleet branches (every worktree's
  * branch + local work/,loop/,stack/ branches — a `bro work leave`
@@ -114,11 +118,16 @@ import {
   worktreeClaim,
   worktreePathFor,
 } from './work.ts'
+import { installDrive, uninstallDrive } from './daemon.ts'
 import { isOrchestratorSession } from './watch-pulse.ts'
 export { LIVE_MARKER_MS, worktreeClaim }
 
 function usage(): never {
-  console.error(`Usage: bro drive [--once] [--every [SEC]] [--no-merge] [--connector <name>] [--json]`)
+  console.error(
+    'Usage: bro drive [--once] [--every [SEC]] [--no-merge] [--connector <name>] [--json]\n' +
+      '       bro drive install [--every N] [--print]\n' +
+      '       bro drive uninstall'
+  )
   process.exit(2)
 }
 
@@ -1976,15 +1985,70 @@ export function driveLockPath(root: string): string | null {
   return common === null ? null : join(common, 'bro', 'drive.lock')
 }
 
+/** `install|uninstall` — arm/disarm the merge path (bro-y5zon): install
+ *  writes the want-marker the session checkpoints rearm a dead
+ *  supervisor from and brings the daemon up; uninstall disarms then
+ *  downs. The mechanics live in daemon.ts — the supervisor's lifecycle
+ *  module. */
+function runDriveSched(argv: string[], dir: string, drive: DriveConfig): void {
+  if (argv[0] === 'uninstall') {
+    const r = uninstallDrive(dir)
+    console.log(r.detail)
+    if (r.state === 'error') {
+      process.exit(1)
+    }
+    return
+  }
+  // install spawns a supervisor — same arming guard as --every and
+  // `daemon up`: spawned workers never own the cadence
+  if (!isOrchestratorSession()) {
+    console.error(
+      'error: BRO_AGENT_ID is set — spawned workers never arm the supervisor; ' +
+        'the orchestrator session owns it'
+    )
+    process.exit(2)
+  }
+  const everyRaw = flag(argv, '--every')
+  const everySec = everyRaw === undefined ? drive.intervalSec : Number(everyRaw)
+  // the shared floor still matters: the armed cadence lands verbatim in
+  // the marker and every rearmed spawn — a 0.05s drive is a busy loop
+  if (
+    !Number.isFinite(everySec) ||
+    everySec < MIN_INTERVAL_SEC ||
+    everySec > MAX_INTERVAL_SEC
+  ) {
+    console.error(
+      `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw ?? everySec}"`
+    )
+    process.exit(2)
+  }
+  const r = installDrive(dir, { everySec, print: argv.includes('--print') })
+  console.log(r.detail)
+  if (r.state === 'error') {
+    process.exit(1)
+  }
+}
+
 export async function runDriveCommand(argv: string[]): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
     usage()
   }
-  checkBeads()
   const main = mainWorktree()
   const broCfg = loadBroConfig(main.path)
   const drive = ((broCfg as Record<string, unknown>).drive as DriveConfig | undefined) ??
     driveSection(undefined)
+  if (argv[0] === 'install' || argv[0] === 'uninstall') {
+    // uninstall and `install --print` never touch the store — uninstall
+    // is the cleanup path a broken beads setup still needs, --print a
+    // pure preview. The real install spawns the supervisor, which needs
+    // the store itself, so only that path keeps the gate.
+    if (argv[0] === 'install' && !argv.includes('--print')) {
+      checkBeads()
+    }
+    runDriveSched(argv, main.path, drive)
+    return
+  }
+  checkBeads()
   let args: DriveArgs
   try {
     args = driveArgs(argv, drive.intervalSec)

@@ -19,7 +19,7 @@ state ride `refs/bro/data`.
 | bro artifacts — review-debt ledger, drill evidence, `.agents/` state | `refs/bro/data` | `bro work sync --pull` |
 | Beads store — issues, claims, agent registry, drill frames, molecules | `refs/dolt/data` via a dolt remote (`bd dolt remote list`) | `bd sync` |
 | Operator config — providers, agent templates, global skills | outside the repo (`~/.config/bro`, `~/.agents`) | the operator's own backup — restore this first |
-| Running processes — daemon, watchers, shells | nowhere | restarted below |
+| Running processes + machine-local state — daemon, watchers, shells, the `bro/drive.json` install marker, agent logs | nowhere | restarted below |
 
 ## Sequence
 
@@ -27,7 +27,8 @@ state ride `refs/bro/data`.
 git clone https://github.com/<org>/<repo>.git && cd <repo>
 # repo bootstrap — for bro itself: npm ci && npm run build
 bro work sync --pull        # materializes refs/bro/data into the worktree, then runs bd sync
-bro fleet daemon up         # the supervisor is a process — it does not come back by itself
+bro review drive install    # re-arms the merge path and brings the supervisor up — the
+                            # want-marker is machine-local, so a clone starts with none
 bro review act rearm        # resurrect dead PR watch markers (re-arms, never duplicates)
 ```
 

@@ -12,11 +12,25 @@
  * detached and records the armer in `daemon.json`; `status`/`down`
  * read the lock. Agents stay detached registry peers — the daemon
  * owns their scheduling, never their parentage.
+ *
+ * The persistent form (bro-y5zon, spec specs/bro-y5zon.md):
+ * `bro drive install` writes `<git-common>/bro/drive.json` — the
+ * want-marker, `pulse.json`'s merge-path analogue — and brings the
+ * supervisor up; the `driveConnector` checkpoint (sessionStart +
+ * postTool, orchestrator-only) rearms a dead supervisor from it.
+ * `daemon down` under an install is a transient stop — the next
+ * checkpoint brings it back; `bro drive uninstall` is the disarm.
  */
 import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { acquireFileLock, gitCommonDir, lockHolderPid, pidAlive, procStat } from '@broject/core'
+import { basename, dirname, join } from 'node:path'
+import {
+  acquireFileLock,
+  gitCommonDir,
+  lockHolderPid,
+  pidAlive,
+  procStat,
+} from '@broject/core'
 import { flag } from './args.ts'
 import { driveLockPath, runDriveCommand } from './drive.ts'
 import { driveSection, MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
@@ -157,7 +171,7 @@ export function daemonUpDecision(
  *  see no live holder and both spawn (the child's own drive.lock makes
  *  the second a standby, but two spawns is still a lie about "never
  *  doubles"). */
-function daemonUpLockPath(dir: string): string | null {
+export function daemonUpLockPath(dir: string): string | null {
   const common = gitCommonDir(dir)
   return common === null ? null : join(common, 'bro', 'daemon.up.lock')
 }
@@ -238,60 +252,60 @@ function everyArg(argv: string[], fallback: number): number {
   return everySec
 }
 
-function daemonUp(main: string, interval: number): void {
-  const decision = daemonUpDecision(main)
-  if (decision.kind === 'refuse-worker') {
-    console.error(
-      'error: BRO_AGENT_ID is set — spawned workers never arm the daemon; ' +
-        'the orchestrator session owns it'
-    )
-    process.exit(2)
-  }
-  const upLock = daemonUpLockPath(main)
+export type SupervisorUp =
+  | { kind: 'spawned'; pid: number; log: string | null }
+  | { kind: 'already'; pid: number }
+  | { kind: 'disarmed' }
+  | { kind: 'refuse-worker' }
+
+/** The up path's decide→spawn→record sequence — `daemon up`'s core,
+ *  extracted so `drive install` and the rearm checkpoint run the same
+ *  steps under the same `daemon.up.lock`: a concurrent armer collapses
+ *  to 'already' instead of doubling. `requireMarker` is the rearm-side
+ *  race fix: the checkpoint read the marker BEFORE this lock, so the
+ *  want is re-checked inside it — an uninstall that disarmed while the
+ *  spawn waited must not resurrect a supervisor. */
+export function supervisorUp(
+  dir: string,
+  everySec: number,
+  env: NodeJS.ProcessEnv = process.env,
+  opts: { requireMarker?: boolean } = {}
+): SupervisorUp {
+  const upLock = daemonUpLockPath(dir)
   const release =
     upLock === null ? () => {} : acquireFileLock(upLock, { label: 'daemon up lock' })
   try {
-    // re-decide inside the mutex — a concurrent `up` that won the
-    // lock may already hold a live holder by now
-    const inner = daemonUpDecision(main)
-    if (inner.kind === 'already') {
-      console.log(`daemon up — already supervising (pid ${inner.pid})`)
-      return
+    const decision = daemonUpDecision(dir, env)
+    if (decision.kind === 'refuse-worker') {
+      return { kind: 'refuse-worker' }
     }
-    const spawned = spawnDaemon(main, interval)
-    console.log(
-      `daemon up — pid ${spawned.pid} every ${interval}s` +
-        (spawned.log === null ? '' : ` — log ${spawned.log}`)
-    )
+    if (decision.kind === 'already') {
+      return { kind: 'already', pid: decision.pid }
+    }
+    if (opts.requireMarker === true && readDriveMarker(dir) === null) {
+      return { kind: 'disarmed' }
+    }
+    const spawned = spawnDaemon(dir, everySec)
+    return { kind: 'spawned', pid: spawned.pid, log: spawned.log }
   } finally {
     release()
   }
 }
 
-function daemonStatus(main: string): void {
-  const probe = daemonProbe(main)
-  const log = daemonLogPath(main)
-  if (!probe.live) {
-    console.log(
-      probe.recorded === null
-        ? `daemon down — no supervisor; 'bro daemon up' to start`
-        : `daemon down — recorded pid ${probe.recorded.pid} is dead`
-    )
-    return
-  }
-  console.log(
-    `daemon up — pid ${probe.pid} supervising` +
-      (probe.recorded === null ? ' (unrecorded holder)' : `, armed ${probe.recorded.spawnedAt}`) +
-      (log === null ? '' : ` — log ${log}`)
-  )
+export interface SupervisorDown {
+  /** pids SIGTERM was sent to — holder, live record, every standby. */
+  pids: number[]
+  /** daemon.json existed and was removed. */
+  hadRecord: boolean
 }
 
-function daemonDown(main: string): void {
-  const probe = daemonProbe(main)
-  const state = daemonStatePath(main)
-  // standby children waiting on drive.lock survive a holder kill
-  // and take the lock over — `down` must reach every supervision
-  // loop, not only the current holder
+/** The down path — SIGTERM the holder plus every supervision loop that
+ *  could inherit its lock (standbys wait on drive.lock), then clear the
+ *  armer record. `daemon down`'s core; `drive uninstall` runs the same
+ *  sweep after disarming the marker. */
+export function supervisorDown(dir: string): SupervisorDown {
+  const probe = daemonProbe(dir)
+  const state = daemonStatePath(dir)
   const victims = new Set<number>([
     ...(probe.live ? [probe.pid!] : []),
     ...(probe.recorded !== null && pidAlive(probe.recorded.pid, probe.recorded.pidStart)
@@ -307,14 +321,259 @@ function daemonDown(main: string): void {
       // already gone — SIGTERM is advisory, absence is not a failure
     }
   }
+  const hadRecord = state !== null && existsSync(state)
   if (state !== null) {
     rmSync(state, { force: true })
   }
+  return { pids: [...victims], hadRecord }
+}
+
+function daemonUp(main: string, interval: number): void {
+  const up = supervisorUp(main, interval)
+  switch (up.kind) {
+    case 'refuse-worker':
+      console.error(
+        'error: BRO_AGENT_ID is set — spawned workers never arm the daemon; ' +
+          'the orchestrator session owns it'
+      )
+      process.exit(2)
+    case 'already':
+      console.log(`daemon up — already supervising (pid ${up.pid})`)
+      return
+    case 'spawned':
+      console.log(
+        `daemon up — pid ${up.pid} every ${interval}s` +
+          (up.log === null ? '' : ` — log ${up.log}`)
+      )
+      return
+  }
+}
+
+function daemonStatus(main: string): void {
+  const probe = daemonProbe(main)
+  const log = daemonLogPath(main)
+  const marker = readDriveMarker(main)
+  const installed = marker === null ? '' : ` · installed (every ${marker.everySec}s)`
+  if (!probe.live) {
+    console.log(
+      (probe.recorded === null
+        ? `daemon down — no supervisor; 'bro daemon up' to start`
+        : `daemon down — recorded pid ${probe.recorded.pid} is dead`) + installed
+    )
+    return
+  }
   console.log(
-    victims.size === 0
-      ? 'daemon down — no live supervisor'
-      : `daemon down — signalled ${[...victims].join(', ')}`
+    `daemon up — pid ${probe.pid} supervising` +
+      (probe.recorded === null ? ' (unrecorded holder)' : `, armed ${probe.recorded.spawnedAt}`) +
+      installed +
+      (log === null ? '' : ` — log ${log}`)
   )
+}
+
+function daemonDown(main: string): void {
+  const { pids } = supervisorDown(main)
+  console.log(
+    [
+      pids.length === 0 ? 'daemon down — no live supervisor' : `daemon down — signalled ${pids.join(', ')}`,
+      // under an install, down is a transient stop — the next session
+      // checkpoint rearms from the marker; uninstall is the disarm
+      readDriveMarker(main) !== null
+        ? `installed — the next session checkpoint rearms it; 'bro drive uninstall' disarms`
+        : '',
+    ]
+      .filter((s) => s !== '')
+      .join('\n  ')
+  )
+}
+
+// --- the install want-marker (bro-y5zon) --------------------------------------
+
+export interface DriveMarker {
+  /** pass cadence the rearmed supervisor runs `--every` at */
+  everySec: number
+  armedAt: string
+}
+
+/** `<git-common>/bro/drive.json` — the merge-path want-marker,
+ *  `pulse.json`'s analogue: durable intent that survives sessions and
+ *  reboots; the connector's checkpoints rearm a dead supervisor from
+ *  it. `daemon.json` stays the transient spawn record; `drive.lock`
+ *  the liveness hold. */
+export function driveMarkerPath(dir: string): string | null {
+  const common = gitCommonDir(dir)
+  return common === null ? null : join(common, 'bro', 'drive.json')
+}
+
+/** The want-record — null when absent, malformed, or the repo has no
+ *  common dir. A torn marker is the same answer as none: the checkpoint
+ *  stays quiet rather than rearming from a half-shape. */
+export function readDriveMarker(dir: string): DriveMarker | null {
+  const file = driveMarkerPath(dir)
+  if (file === null || !existsSync(file)) {
+    return null
+  }
+  try {
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as {
+      everySec?: unknown
+      armedAt?: unknown
+    }
+    return typeof raw.everySec === 'number' &&
+      Number.isFinite(raw.everySec) &&
+      raw.everySec > 0 &&
+      typeof raw.armedAt === 'string'
+      ? { everySec: raw.everySec, armedAt: raw.armedAt }
+      : null
+  } catch {
+    return null
+  }
+}
+
+/** Write the want-marker (tmp+rename — the mailbox drop rule). Same
+ *  cadence is `already` and leaves the file alone; a changed one is
+ *  `updated`. */
+export function armDrive(
+  dir: string,
+  everySec: number
+): { state: 'armed' | 'updated' | 'already'; marker: DriveMarker } {
+  const file = driveMarkerPath(dir)
+  if (file === null) {
+    throw new Error('not a git repository — the install marker has no common dir to live in')
+  }
+  const cur = readDriveMarker(dir)
+  if (cur !== null && cur.everySec === everySec) {
+    return { state: 'already', marker: cur }
+  }
+  const marker: DriveMarker = { everySec, armedAt: new Date().toISOString() }
+  mkdirSync(dirname(file), { recursive: true })
+  const tmp = `${file}.${process.pid}.tmp`
+  writeFileSync(tmp, JSON.stringify(marker, null, 2))
+  renameSync(tmp, file)
+  return { state: cur === null ? 'armed' : 'updated', marker }
+}
+
+/** Remove the want-marker. A live supervisor keeps running — disarm
+ *  drops the rearm intent; `uninstallDrive` sends the SIGTERM. */
+export function disarmDrive(dir: string): 'disarmed' | 'absent' {
+  const file = driveMarkerPath(dir)
+  if (file === null || !existsSync(file)) {
+    return 'absent'
+  }
+  rmSync(file)
+  return 'disarmed'
+}
+
+export type DriveRearm = { kind: 'quiet' } | { kind: 'rearm'; everySec: number }
+
+/** The checkpoint decision — armed marker + dead supervisor +
+ *  orchestrator → rearm the daemon. Pure: the probe spawns on 'rearm',
+ *  everything else stays quiet. `daemonProbe` doubles as the
+ *  spawn-record check: `daemon.json` is the pulse.spawn.json analogue —
+ *  a live recorded child (pre-lock window, or a standby behind another
+ *  contender) suppresses the next rearm; a dead recorded pid does not. */
+export function driveRearm(dir: string, env: NodeJS.ProcessEnv = process.env): DriveRearm {
+  if (!isOrchestratorSession(env)) {
+    return { kind: 'quiet' }
+  }
+  const marker = readDriveMarker(dir)
+  if (marker === null || daemonProbe(dir).live) {
+    return { kind: 'quiet' }
+  }
+  return { kind: 'rearm', everySec: marker.everySec }
+}
+
+export interface DriveInstallResult {
+  state: 'installed' | 'updated' | 'already' | 'removed' | 'absent' | 'printed' | 'error'
+  detail: string
+}
+
+/** Injectable seams for tests — the real verbs spawn and SIGTERM. */
+export interface DriveSchedDeps {
+  up?: (
+    dir: string,
+    everySec: number,
+    env?: NodeJS.ProcessEnv,
+    opts?: { requireMarker?: boolean }
+  ) => SupervisorUp
+  down?: (dir: string) => SupervisorDown
+}
+
+/** `bro drive install` — arm the want-marker, then bring the supervisor
+ *  up (enable --now): the merge path is on from this call, not the next
+ *  checkpoint. A failed spawn doesn't roll the marker back — the next
+ *  checkpoint retries; that IS the point of an install. The spawn side
+ *  re-checks the marker under `daemon.up.lock` so a racing uninstall
+ *  between arm and spawn doesn't leave a markerless supervisor. */
+export function installDrive(
+  dir: string,
+  opts: { everySec: number; print?: boolean },
+  deps: DriveSchedDeps = {}
+): DriveInstallResult {
+  if (driveMarkerPath(dir) === null) {
+    return { state: 'error', detail: 'not a git repository — the install marker has no common dir to live in' }
+  }
+  if (opts.print === true) {
+    return {
+      state: 'printed',
+      detail: [
+        `# ${driveMarkerPath(dir)} — the want-marker; session checkpoints rearm a dead supervisor from it`,
+        JSON.stringify({ everySec: opts.everySec, armedAt: '<install time>' }, null, 2),
+        '# the supervisor itself:',
+        `bro daemon run --every ${opts.everySec}   # detached; drive.lock one-per-repo`,
+      ].join('\n'),
+    }
+  }
+  const arm = armDrive(dir, opts.everySec)
+  let sup: string
+  try {
+    const up = (deps.up ?? supervisorUp)(dir, opts.everySec, process.env, {
+      requireMarker: true,
+    })
+    sup =
+      up.kind === 'spawned'
+        ? `supervisor up — pid ${up.pid} every ${opts.everySec}s`
+        : up.kind === 'already'
+          ? `already supervising (pid ${up.pid})`
+          : up.kind === 'disarmed'
+            ? 'supervisor not spawned — a racing uninstall disarmed it'
+            : 'supervisor spawn refused — workers never arm it'
+  } catch (err) {
+    sup = `supervisor spawn failed (${errText(err)}) — the session checkpoint retries`
+  }
+  const verb = arm.state === 'already' ? 'already armed' : arm.state === 'updated' ? 're-armed' : 'armed'
+  return {
+    state: arm.state === 'armed' ? 'installed' : arm.state,
+    detail: `drive install ${verb} (every ${opts.everySec}s) — ${sup}; session checkpoints rearm a dead supervisor`,
+  }
+}
+
+/** `bro drive uninstall` — disarm FIRST (a racing checkpoint must never
+ *  rearm a dying want), then the `daemon down` sweep: SIGTERM the
+ *  holder and every standby, clear the armer record. Both steps run
+ *  under `daemon.up.lock`: a rearm that read the marker just before
+ *  disarm waits here, then finds it gone on its locked re-check — the
+ *  spawn can't land after the sweep. */
+export function uninstallDrive(dir: string, deps: DriveSchedDeps = {}): DriveInstallResult {
+  const upLock = daemonUpLockPath(dir)
+  const release =
+    upLock === null ? () => {} : acquireFileLock(upLock, { label: 'daemon up lock' })
+  try {
+    const marker = disarmDrive(dir)
+    const down = (deps.down ?? supervisorDown)(dir)
+    const removed = marker === 'disarmed' || down.hadRecord || down.pids.length > 0
+    return {
+      state: removed ? 'removed' : 'absent',
+      detail: [
+        marker === 'disarmed' ? 'install marker removed' : 'no install marker',
+        down.pids.length > 0 ? `supervisor signalled (${down.pids.join(', ')})` : '',
+        down.hadRecord ? 'armer record cleared' : '',
+        removed ? '' : `nothing installed for ${basename(dir)}`,
+      ]
+        .filter((s) => s !== '')
+        .join(' — '),
+    }
+  } finally {
+    release()
+  }
 }
 
 export async function runDaemonCommand(argv: string[]): Promise<void> {

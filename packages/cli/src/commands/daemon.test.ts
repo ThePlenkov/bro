@@ -1,16 +1,30 @@
 /** `bro daemon` (bro-ybrja) — armer record round-trips, probe liveness,
  *  and the up/down decision matrix. The supervised loop itself is
- *  drive's own (`daemon run` delegates), tested there. */
+ *  drive's own (`daemon run` delegates), tested there. The install
+ *  want-marker (bro-y5zon) lives here too: marker round-trips, the
+ *  rearm decision, and install/uninstall with injected up/down. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { initRepo } from './testrepo.ts'
+import { lockHolderPid } from '@broject/core'
 import {
+  armDrive,
   daemonProbe,
   daemonStatePath,
   daemonUpDecision,
+  daemonUpLockPath,
+  disarmDrive,
+  driveMarkerPath,
+  driveRearm,
+  installDrive,
   readDaemonRecord,
+  readDriveMarker,
+  supervisorUp,
+  uninstallDrive,
+  type SupervisorDown,
+  type SupervisorUp,
 } from './daemon.ts'
 import { driveLockPath } from './drive.ts'
 
@@ -198,6 +212,306 @@ describe('daemonUpDecision', () => {
       writeLock(main, `${DEAD}:nonce`)
       writeRecord(main, DEAD)
       assert.equal(daemonUpDecision(main, ORCH).kind, 'spawn')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+// --- the install want-marker (bro-y5zon) ---------------------------------------
+
+describe('drive marker', () => {
+  test('drive.json resolves under <git-common>/bro', () => {
+    const { root, main } = initRepo('bro-dmarker-path-')
+    try {
+      assert.equal(driveMarkerPath(main), join(main, '.git', 'bro', 'drive.json'))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('absent and malformed read as null — never a half-shape rearm', () => {
+    const { root, main } = initRepo('bro-dmarker-mal-')
+    try {
+      assert.equal(readDriveMarker(main), null)
+      const file = driveMarkerPath(main)!
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, 'not json')
+      assert.equal(readDriveMarker(main), null)
+      writeFileSync(file, JSON.stringify({ everySec: '300' }))
+      assert.equal(readDriveMarker(main), null)
+      writeFileSync(file, JSON.stringify({ everySec: 0, armedAt: 't' }))
+      assert.equal(readDriveMarker(main), null)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('arm → already → updated; disarm → disarmed → absent', () => {
+    const { root, main } = initRepo('bro-dmarker-arm-')
+    try {
+      const a = armDrive(main, 300)
+      assert.equal(a.state, 'armed')
+      assert.equal(readDriveMarker(main)?.everySec, 300)
+      assert.equal(armDrive(main, 300).state, 'already')
+      assert.equal(armDrive(main, 120).state, 'updated')
+      assert.equal(readDriveMarker(main)?.everySec, 120)
+      assert.equal(disarmDrive(main), 'disarmed')
+      assert.equal(readDriveMarker(main), null)
+      assert.equal(disarmDrive(main), 'absent')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('driveRearm', () => {
+  const ORCH = {} as NodeJS.ProcessEnv
+
+  test('unarmed repo stays quiet', () => {
+    const { root, main } = initRepo('bro-drearm-0-')
+    try {
+      assert.deepEqual(driveRearm(main, ORCH), { kind: 'quiet' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('armed + dead supervisor → rearm at the marker cadence', () => {
+    const { root, main } = initRepo('bro-drearm-1-')
+    try {
+      armDrive(main, 120)
+      assert.deepEqual(driveRearm(main, ORCH), { kind: 'rearm', everySec: 120 })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('armed + a live lock holder stays quiet — raw drive counts', () => {
+    const { root, main } = initRepo('bro-drearm-2-')
+    try {
+      armDrive(main, 120)
+      writeLock(main, `${process.pid}:nonce`)
+      assert.deepEqual(driveRearm(main, ORCH), { kind: 'quiet' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('armed + a live recorded child stays quiet — the standby hold', () => {
+    const { root, main } = initRepo('bro-drearm-3-')
+    try {
+      armDrive(main, 120)
+      writeRecord(main, process.pid)
+      assert.deepEqual(driveRearm(main, ORCH), { kind: 'quiet' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a dead recorded pid does not suppress — the next event retries', () => {
+    const { root, main } = initRepo('bro-drearm-4-')
+    try {
+      armDrive(main, 120)
+      writeRecord(main, DEAD)
+      assert.deepEqual(driveRearm(main, ORCH), { kind: 'rearm', everySec: 120 })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a spawned worker never rearms — the GUARD on the write side', () => {
+    const { root, main } = initRepo('bro-drearm-5-')
+    try {
+      armDrive(main, 120)
+      assert.deepEqual(driveRearm(main, { BRO_AGENT_ID: 'native-x' }), { kind: 'quiet' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('installDrive', () => {
+  const spawned = (pid: number): SupervisorUp => ({ kind: 'spawned', pid, log: '/x/log' })
+  const downed: SupervisorDown = { pids: [], hadRecord: false }
+
+  test('--print is pure — no marker, no spawn', () => {
+    const { root, main } = initRepo('bro-dinst-print-')
+    try {
+      let ups = 0
+      const r = installDrive(main, { everySec: 300, print: true }, {
+        up: () => {
+          ups += 1
+          return spawned(1)
+        },
+      })
+      assert.equal(r.state, 'printed')
+      assert.match(r.detail, /drive\.json/)
+      assert.equal(ups, 0)
+      assert.equal(readDriveMarker(main), null)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('install arms the marker and brings the supervisor up', () => {
+    const { root, main } = initRepo('bro-dinst-up-')
+    try {
+      const ups: number[] = []
+      const r = installDrive(main, { everySec: 240 }, {
+        up: (_dir, every) => {
+          ups.push(every)
+          return spawned(4242)
+        },
+      })
+      assert.equal(r.state, 'installed')
+      assert.match(r.detail, /armed \(every 240s\) — supervisor up — pid 4242/)
+      assert.deepEqual(ups, [240])
+      assert.equal(JSON.parse(readFileSync(driveMarkerPath(main)!, 'utf8')).everySec, 240)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a live supervisor reports already — never doubles', () => {
+    const { root, main } = initRepo('bro-dinst-already-')
+    try {
+      const r = installDrive(main, { everySec: 300 }, {
+        up: () => ({ kind: 'already', pid: 777 }),
+      })
+      assert.equal(r.state, 'installed')
+      assert.match(r.detail, /already supervising \(pid 777\)/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a second install with a new cadence updates the marker', () => {
+    const { root, main } = initRepo('bro-dinst-upd-')
+    try {
+      installDrive(main, { everySec: 300 }, { up: () => spawned(1) })
+      const r = installDrive(main, { everySec: 60 }, { up: () => ({ kind: 'already', pid: 2 }) })
+      assert.equal(r.state, 'updated')
+      assert.equal(readDriveMarker(main)?.everySec, 60)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a throwing spawn stays installed — the checkpoint retries', () => {
+    const { root, main } = initRepo('bro-dinst-throw-')
+    try {
+      const r = installDrive(main, { everySec: 300 }, {
+        up: () => {
+          throw new Error('spawn broke')
+        },
+      })
+      assert.equal(r.state, 'installed')
+      assert.match(r.detail, /spawn failed \(spawn broke\) — the session checkpoint retries/)
+      assert.equal(readDriveMarker(main)?.everySec, 300)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('uninstall disarms the marker and sweeps the supervisor', () => {
+    const { root, main } = initRepo('bro-dinst-down-')
+    try {
+      armDrive(main, 300)
+      let downs = 0
+      const r = uninstallDrive(main, {
+        down: () => {
+          downs += 1
+          return { pids: [111, 222], hadRecord: true }
+        },
+      })
+      assert.equal(r.state, 'removed')
+      assert.match(r.detail, /install marker removed — supervisor signalled \(111, 222\) — armer record cleared/)
+      assert.equal(downs, 1)
+      assert.equal(readDriveMarker(main), null)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('uninstall on a bare repo reports absent', () => {
+    const { root, main } = initRepo('bro-dinst-none-')
+    try {
+      const r = uninstallDrive(main, { down: () => downed })
+      assert.equal(r.state, 'absent')
+      assert.match(r.detail, /nothing installed/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('uninstall disarms + sweeps inside daemon.up.lock — the rearm race', () => {
+    const { root, main } = initRepo('bro-dinst-lock-')
+    try {
+      armDrive(main, 300)
+      let heldByUs = false
+      let markerInside: unknown = 'unread'
+      uninstallDrive(main, {
+        down: (d) => {
+          const lock = daemonUpLockPath(d)
+          heldByUs = lock !== null && lockHolderPid(lock) === process.pid
+          markerInside = readDriveMarker(d)
+          return { pids: [1], hadRecord: true }
+        },
+      })
+      assert.equal(heldByUs, true, 'down sweep ran outside the up lock')
+      assert.equal(markerInside, null, 'marker still armed inside the locked sweep')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a racing uninstall reports disarmed — never a markerless supervisor', () => {
+    const { root, main } = initRepo('bro-dinst-disarm-')
+    try {
+      const r = installDrive(main, { everySec: 300 }, {
+        up: () => ({ kind: 'disarmed' }),
+      })
+      assert.match(r.detail, /racing uninstall disarmed/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('supervisorUp requireMarker', () => {
+  const ORCH = {} as NodeJS.ProcessEnv
+
+  test('no marker inside the lock → disarmed, never a spawn', () => {
+    const { root, main } = initRepo('bro-dsup-disarm-')
+    try {
+      assert.deepEqual(supervisorUp(main, 120, ORCH, { requireMarker: true }), {
+        kind: 'disarmed',
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a live supervisor still reports already — the recheck is spawn-only', () => {
+    const { root, main } = initRepo('bro-dsup-already-')
+    try {
+      writeLock(main, `${process.pid}:nonce`)
+      // no marker — requireMarker must not fire on the already path
+      assert.deepEqual(supervisorUp(main, 120, ORCH, { requireMarker: true }), {
+        kind: 'already',
+        pid: process.pid,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a worker never reaches the marker — the spawn guard wins', () => {
+    const { root, main } = initRepo('bro-dsup-worker-')
+    try {
+      armDrive(main, 120)
+      assert.equal(supervisorUp(main, 120, { BRO_AGENT_ID: 'w-1' }).kind, 'refuse-worker')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
