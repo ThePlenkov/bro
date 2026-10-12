@@ -1377,7 +1377,6 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   if (pr === null) {
     return { kind: 'done', result: settleNoPr(ctx, beads, item, code, elapsed) }
   }
-  stampLoopPr(ctx, beads, item, pr)
   // the loop IS the watcher — arm the same marker `act wait` drops
   // (bro-z0k2u) for the member's whole stack tenure, not per poll:
   // a reboot-killed loop leaves a dead marker `bro act rearm`
@@ -1399,6 +1398,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     bead: beads.map((b) => b.id).join(','),
   })
   stampProjection(ctx, beads, pr)
+  stampLoopPr(ctx, beads, item, pr)
   const member: GateMember = {
     beads,
     item,
