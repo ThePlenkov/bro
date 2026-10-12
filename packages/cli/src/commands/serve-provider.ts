@@ -45,7 +45,10 @@ export function providerConfig(env: NodeJS.ProcessEnv): ProviderConfig | undefin
   if (apiKey === undefined) {
     return undefined
   }
-  const upstream = (env.BRO_PROVIDER_UPSTREAM ?? DEFAULT_UPSTREAM).replace(/\/+$/, '')
+  let upstream = env.BRO_PROVIDER_UPSTREAM ?? DEFAULT_UPSTREAM
+  while (upstream.endsWith('/')) {
+    upstream = upstream.slice(0, -1)
+  }
   return { upstream, apiKey }
 }
 

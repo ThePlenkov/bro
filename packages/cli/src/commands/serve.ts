@@ -924,29 +924,7 @@ async function handleRequest(
       send(res, 403, { error: 'loopback host only' })
       return
     }
-    // The provider plane owns its own stream — a Messages request can
-    // carry a whole session context (megabytes) and an SSE answer
-    // pipes for minutes; neither fits the readBody cap nor the
-    // ServeResponse envelope. The credential check is the same one
-    // writes pay — the session token IS the provider credential — but
-    // it applies to every method, GETs included: an unauthenticated
-    // /v1/* could spend the upstream key even blinded to the answer.
-    if (url.pathname.startsWith('/v1/')) {
-      const wantsBody =
-        req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
-      const refusal = providerGuard(req, token, wantsBody, statePathHint)
-      if (refusal !== undefined) {
-        send(res, refusal.status, refusal.body, refusal)
-        return
-      }
-      if (deps.provider === undefined) {
-        send(res, 404, {
-          error:
-            'provider not wired — set BRO_PROVIDER_API_KEY (or ANTHROPIC_API_KEY) in the server env',
-        })
-        return
-      }
-      await deps.provider(req, res)
+    if (await routeProvider(req, res, url.pathname, deps, token, statePathHint)) {
       return
     }
     const wantsBody =
@@ -974,6 +952,45 @@ async function handleRequest(
       error: err instanceof Error ? err.message : String(err),
     })
   }
+}
+
+/** The provider plane owns its own stream — a Messages request can
+ *  carry a whole session context (megabytes) and an SSE answer
+ *  pipes for minutes; neither fits the readBody cap nor the
+ *  ServeResponse envelope. The credential check is the same one
+ *  writes pay — the session token IS the provider credential — but
+ *  it applies to every method, GETs included: an unauthenticated
+ *  /v1/* could spend the upstream key even blinded to the answer.
+ *  True once the /v1/* path is answered (guarded refusal, unwired
+ *  404, or proxied); any other path falls through to the JSON
+ *  routes. */
+async function routeProvider(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  deps: ServeDeps,
+  token: string,
+  statePathHint: string
+): Promise<boolean> {
+  if (!pathname.startsWith('/v1/')) {
+    return false
+  }
+  const wantsBody =
+    req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
+  const refusal = providerGuard(req, token, wantsBody, statePathHint)
+  if (refusal !== undefined) {
+    send(res, refusal.status, refusal.body, refusal)
+    return true
+  }
+  if (deps.provider === undefined) {
+    send(res, 404, {
+      error:
+        'provider not wired — set BRO_PROVIDER_API_KEY (or ANTHROPIC_API_KEY) in the server env',
+    })
+    return true
+  }
+  await deps.provider(req, res)
+  return true
 }
 
 export function createServeHandler(
