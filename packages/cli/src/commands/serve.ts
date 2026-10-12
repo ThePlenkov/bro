@@ -54,6 +54,16 @@
  *                               this route bypasses the bearer AND Host
  *                               guards so a hosted tunnel whose Host is
  *                               not loopback still reaches it
+ *   ALL    /v1/*                the Messages-API provider plane
+ *                               (bro-om6m8): a byte-proxy to the env-
+ *                               configured upstream — claude-code
+ *                               pointed at ANTHROPIC_BASE_URL=<serve>
+ *                               talks to Anthropic THROUGH bro. Streams
+ *                               below the JSON envelope; wired only when
+ *                               BRO_PROVIDER_API_KEY (or ANTHROPIC_*)
+ *                               is set in the server env — the session
+ *                               token is still required, it is the
+ *                               client-side credential
  *
  * Discovery + credentials: `<git-common-dir>/bro/serve.json` {pid,
  * url, dir, startedAt, token} written on listen (tmp+rename, mode
@@ -121,6 +131,7 @@ import {
   type StopOutcome,
 } from './agents.ts'
 import { flag, positionals } from './args.ts'
+import { providerConfig, providerProxy } from './serve-provider.ts'
 import { readBeads } from './status.ts'
 import { collectSnapshot } from './watch.ts'
 import { readHeartbeat, type HeartbeatSummary } from './watch-heartbeat.ts'
@@ -334,6 +345,11 @@ export interface ServeDeps {
   connectors(): string[]
   /** `/api/v1/webhooks/<provider>` handlers keyed by provider slug. */
   webhooks?: Record<string, ServeWebhookHandler>
+  /** `/v1/*` Messages-API provider proxy (bro-om6m8) — raw-stream,
+   *  below the ServeResponse envelope: real request bodies exceed the
+   *  256KB read cap and SSE answers must pipe. Absent means no
+   *  upstream credential — the route 404s like any unknown path. */
+  provider?: (req: IncomingMessage, res: ServerResponse) => Promise<void>
 }
 
 export interface ServeResponse {
@@ -358,6 +374,7 @@ const ROUTES = [
   'GET /api/v1/agents/<ref>',
   'DELETE /api/v1/agents/<ref>',
   'POST /api/v1/webhooks/github',
+  'ALL /v1/*',
 ]
 
 /** Per-server context — startedAt is captured at LISTEN time, not module
@@ -788,6 +805,52 @@ function bearerMatch(header: string | undefined, token: string): boolean {
   return a.length === b.length && a.length > 0 && timingSafeEqual(a, b)
 }
 
+/** The provider credential check — the session token presented as
+ *  EITHER `Authorization: Bearer` or `x-api-key`. Claude Code puts
+ *  apiKeyHelper/ANTHROPIC_API_KEY output in `x-api-key`; accepting
+ *  only the Bearer header would 401 a client that authenticates
+ *  correctly. Same constant-time compare. */
+function apiKeyMatch(header: string | string[] | undefined, token: string): boolean {
+  const presented = Array.isArray(header) ? header[0] : header
+  if (presented === undefined || presented === '') {
+    return false
+  }
+  const a = Buffer.from(presented, 'utf8')
+  const b = Buffer.from(token, 'utf8')
+  return a.length === b.length && timingSafeEqual(a, b)
+}
+
+/** `/v1/*` write guard — writeGuard's shape (bearer → Origin →
+ *  content-type) but the credential accepts x-api-key too: the
+ *  provider contract is "the session token IS the API key". */
+function providerGuard(
+  req: IncomingMessage,
+  token: string,
+  wantsBody: boolean,
+  statePathHint: string
+): ServeResponse | undefined {
+  const credentialed =
+    bearerMatch(req.headers.authorization, token) ||
+    apiKeyMatch(req.headers['x-api-key'], token)
+  if (!credentialed) {
+    return {
+      status: 401,
+      body: {
+        error: `session token required — read it from ${statePathHint}`,
+      },
+      headers: { 'www-authenticate': 'Bearer' },
+    }
+  }
+  const origin = req.headers.origin
+  if (origin !== undefined && !isLoopbackOrigin(origin)) {
+    return { status: 403, body: { error: 'loopback origin only' } }
+  }
+  if (wantsBody && !(req.headers['content-type'] ?? '').startsWith('application/json')) {
+    return { status: 415, body: { error: 'writes need content-type: application/json' } }
+  }
+  return undefined
+}
+
 /** The guards on state-changing requests — returns the refusal to
  *  send, or undefined when the write may proceed. Order: bearer token
  *  first (the "local session context" check — spawn/stop mutate agents
@@ -863,6 +926,9 @@ async function handleRequest(
       send(res, 403, { error: 'loopback host only' })
       return
     }
+    if (await routeProvider(req, res, url.pathname, deps, token, statePathHint)) {
+      return
+    }
     const wantsBody =
       req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
     if (!webhookRoute && WRITE_METHODS.has(req.method ?? 'GET')) {
@@ -888,6 +954,45 @@ async function handleRequest(
       error: err instanceof Error ? err.message : String(err),
     })
   }
+}
+
+/** The provider plane owns its own stream — a Messages request can
+ *  carry a whole session context (megabytes) and an SSE answer
+ *  pipes for minutes; neither fits the readBody cap nor the
+ *  ServeResponse envelope. The credential check is the same one
+ *  writes pay — the session token IS the provider credential — but
+ *  it applies to every method, GETs included: an unauthenticated
+ *  /v1/* could spend the upstream key even blinded to the answer.
+ *  True once the /v1/* path is answered (guarded refusal, unwired
+ *  404, or proxied); any other path falls through to the JSON
+ *  routes. */
+async function routeProvider(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  deps: ServeDeps,
+  token: string,
+  statePathHint: string
+): Promise<boolean> {
+  if (!pathname.startsWith('/v1/')) {
+    return false
+  }
+  const wantsBody =
+    req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
+  const refusal = providerGuard(req, token, wantsBody, statePathHint)
+  if (refusal !== undefined) {
+    send(res, refusal.status, refusal.body, refusal)
+    return true
+  }
+  if (deps.provider === undefined) {
+    send(res, 404, {
+      error:
+        'provider not wired — set BRO_PROVIDER_API_KEY (or ANTHROPIC_API_KEY) in the server env',
+    })
+    return true
+  }
+  await deps.provider(req, res)
+  return true
 }
 
 export function createServeHandler(
@@ -1033,6 +1138,10 @@ function dropActStateForEvent(dir: string, event: EventInput): void {
 
 function realDeps(dir: string, env: AgentConnectorEnv): ServeDeps {
   const socketPath = busSocketPath(dir)
+  const providerCfg = providerConfig(process.env)
+  if (providerCfg !== undefined) {
+    console.log(`provider: /v1/* → ${providerCfg.upstream}`)
+  }
   return {
     snapshot: () => collectSnapshot(dir),
     agents: async () => {
@@ -1069,6 +1178,7 @@ function realDeps(dir: string, env: AgentConnectorEnv): ServeDeps {
         },
       }),
     },
+    ...(providerCfg !== undefined ? { provider: providerProxy(providerCfg) } : {}),
   }
 }
 

@@ -39,6 +39,7 @@ token — see below.
 | `POST /api/v1/agents` | spawn — `{molStep, worktree?, prompt?\|promptFile?, connector?, beadsDir?}` → `201 {agent}`; writes MUST send `Authorization: Bearer <token>` (the `token` field in serve.json — `401` without it) and `content-type: application/json` (loopback CSRF guard — a body-bearing write without it is `415`); `409` on a claim conflict (live agent, foreign claim/backend), `400` on bad input (unknown field, missing worktree, unsafe name), `503` when the backend tooling is missing/down, `500` on server misconfiguration (e.g. no agent command configured) |
 | `DELETE /api/v1/agents/<ref>` | stop — `200 {agent, stopped, terminal?}`; `401` without the bearer token, `404` on a clean miss, `503` when a degraded backend makes the miss unverifiable |
 | `POST /api/v1/webhooks/github` | GitHub webhook ingest → `github:*` bus topics (spec `specs/bro-huy5o.7.md`). The `X-Hub-Signature-256` HMAC is the auth — NOT the session token, and the loopback-Host guard is bypassed so a hosted tunnel's public Host still reaches it. Armed only while `BRO_GITHUB_WEBHOOK_SECRET` is set (unset → `503`, bad/missing signature → `401`, verified → `202 {accepted, published}`); when armed, `bro fleet serve` also hosts the repo broker in-process |
+| `ALL /v1/*` | the Messages-API provider plane (bead `bro-om6m8`) — a byte-proxy to the env-configured upstream. Point a Claude Code session at `bro fleet serve` (`ANTHROPIC_BASE_URL=<serve url>`) and it talks to Anthropic THROUGH bro: SSE frames, tool_use blocks, and beta surface all pass untouched — bro owns the credential boundary, not the protocol. Wired only when `BRO_PROVIDER_API_KEY` (fallback `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`) is set in the server env — unset → `404`. `BRO_PROVIDER_UPSTREAM` overrides the upstream (default `https://api.anthropic.com`) for Z.AI/DashScope/local gateways |
 
 ## Policy
 
@@ -58,6 +59,16 @@ token — see below.
   is `/api/v1/webhooks/*` — ingest routes authenticate on the delivery's
   HMAC signature instead and deliberately skip the Host guard so a
   public tunnel can forward into them.
+- **The provider plane authenticates on the token too — on every
+  method.** `/v1/*` requests carry the session token as the API
+  credential (`Authorization: Bearer` and `x-api-key`), GETs included:
+  an unauthenticated call would spend the upstream key even blinded
+  to the answer. Client-side wiring for a Claude Code session:
+  `env.ANTHROPIC_BASE_URL=<serve url>` plus
+  `ANTHROPIC_AUTH_TOKEN=<serve.json token>` — or
+  `"apiKeyHelper": "jq -r .token <git-common-dir>/bro/serve.json"`.
+  The proxy swaps that token for the real key upstream — the client's
+  apiKeyHelper output never crosses the boundary.
 - **Writes exist because the host is local.** spawn/stop ride the same
   claim/registry machinery as `bro fleet agents up|down` — dedup, respawn, and
   beads-claim semantics are identical. Remote orchestration is a
