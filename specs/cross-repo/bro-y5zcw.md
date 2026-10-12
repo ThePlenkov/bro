@@ -27,7 +27,7 @@ say so.
 
 ## Design
 
-### `bro wait external:<ref>` — the dep-plane point-check
+### `bro wait external:<ref>` — the dep-plane watcher
 
 One command, one question, a bounded poll over the dep's two stores —
 the posting store and the foreign peer plane. It is read-only by
@@ -165,7 +165,8 @@ the unbounded case is opt-in (`--timeout 0`) — the named pattern is
 
 **Never a sleeping session.** The loop exists so a caller can wait
 without hand-rolling `while … sleep`, which is the ad-hoc orchestration
-bro exists to absorb. A session point-checks this *between turns*: the
+bro exists to absorb. It is armed like `act wait`, never run as a
+foreground between-turn point check — that stays `bro mesh wait`. The
 command returns a verdict and the dep in bd is what frees the work.
 Progress goes to stderr (`wait external:<rig>:<id>: stage=claimed
 shipped=no`), the verdict to stdout (one line, or one JSON object with
@@ -232,8 +233,8 @@ AGENTS.md                             session-facing point-check rule
       [--every SEC] [--timeout SEC] [--json]`; verdict → exit-code
       table above; stderr progress line, stdout one line or one JSON
       object; `maxFetchErrors` tolerance
-- [ ] AGENTS.md Conventions bullet tail — the dep-plane point-check and
-      the truth clause
+- [ ] AGENTS.md Conventions bullet tail — the dep-plane point check
+      (`bro mesh wait`) vs this watcher, and the truth clause
 - [ ] tests: ref parse matrix (mesh:// rig, last-colon split, malformed,
       non-external arg → exit 2 + mesh-wait hint); unbound rig → exit 2;
       `<id>` absent on the posting store → exit 2; unreadable plane →
