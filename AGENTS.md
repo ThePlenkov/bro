@@ -4,22 +4,22 @@
 review debt on merged PRs, the open-PR review loop, and scoped drill frames
 over beads. In a repo with `bro.config.json` or `.beads/`:
 
-- `bro act status` is the PR review gate — check it before declaring done;
-  `bro act threads` lists unresolved threads, `bro act resolve`/`reply` mutate.
-- `bro debt collect` sweeps review debt on merged PRs; `bro debt next`
+- `bro review act status` is the PR review gate — check it before declaring done;
+  `bro review act threads` lists unresolved threads, `bro review act resolve`/`reply` mutate.
+- `bro review debt collect` sweeps review debt on merged PRs; `bro review debt next`
   picks the top open finding.
-- `bro drill down`/`up` creates scoped descent frames; an open frame must be
+- `bro work drill down`/`up` creates scoped descent frames; an open frame must be
   closed with `--result` before stopping.
-- `bro learn` is the lesson store — `bro learn probe <question>` checks
+- `bro self learn` is the lesson store — `bro self learn probe <question>` checks
   whether the store already knows the answer before re-investigating,
-  `bro learn capture` distills finished drill/retro/act/mol artifacts into
+  `bro self learn capture` distills finished drill/retro/act/mol artifacts into
   trigger-gated lessons.
 - Plugin hooks rehydrate state at session start/post-compaction and block
   Stop once while a drill frame, unresolved review threads, a dirty
   worktree, or this session's open bead claims remain — a repeated stop
   is let through (gates, not loops). The stop gate only hard-blocks
-  sessions that touched the thing (`bro act`/`gh pr`/`git push` arm `act`,
-  `bro drill`/`wtf` arm `drill`, worktree mutations arm `work`,
+  sessions that touched the thing (`bro review act`/`gh pr`/`git push` arm `act`,
+  `bro work drill`/`wtf` arm `drill`, worktree mutations arm `work`,
   `bd --claim`/`bro work enter` arm `task` — per-session markers in the
   common git dir); ambient repo state is passive context for everyone
   else. Each contribution is a connector's `stopGate` probe — the hook
@@ -62,8 +62,8 @@ Developing bro itself: see CONTRIBUTING.md.
 - **Verify like CI** — before claiming "tests pass", run the exact
   command CI runs (`npm test` → `tsx --test`), not a hand-picked
   runner; harness differences are real bugs' favorite hiding place.
-  Local green ≠ PR green — after every push, `bro act status` +
-  `bro act threads` are the only verdict.
+  Local green ≠ PR green — after every push, `bro review act status` +
+  `bro review act threads` are the only verdict.
 - **Infra failures don't block** — the gate rule: project-caused
   failures (code, config, real findings) block; infrastructure failures
   (quota, outage, runner flakes) never do. A *failed* AI-reviewer check
@@ -109,35 +109,35 @@ Developing bro itself: see CONTRIBUTING.md.
 
 Running several molecules at once means spawning detached workers, never
 serializing them inside one session. The spawn path is the facade —
-`bro agents`, `bro convoy run`, `bro drive` — never a hand-rolled
+`bro fleet agents`, `bro flow convoy run`, `bro review drive` — never a hand-rolled
 nohup: an unregistered worker has no claim, no `.exit` record, no
-`bro agents status`/`down` reach, and it burns budget outside
+`bro fleet agents status`/`down` reach, and it burns budget outside
 `fleet.maxConcurrent` and the exit-cause taxonomy.
 
-- **Spawn through the registry.** `bro agents up <mol-step>` spawns one
+- **Spawn through the registry.** `bro fleet agents up <mol-step>` spawns one
   step's worker — the native backend is a `sh -c` spawn in its own
   process group, parent-unref'd (nohup-equivalent), wired through
   connector resolution, the `agents.<backend>.command` template, and
-  the shared beads environment. A molecule **queue** is `bro convoy run
+  the shared beads environment. A molecule **queue** is `bro flow convoy run
   <mol>…` (or `--open`) — sequential runner agents on the mol roots,
   crash/exit classification and the fleet cap included. Post-PR
-  supervision is `bro drive` — orphaned threads get a fixer agent,
+  supervision is `bro review drive` — orphaned threads get a fixer agent,
   orphaned green PRs merge. Prompts and logs land in
   `<git-common>/bro/agents/` — never argv (every local user reads `ps`),
   never world-readable `/tmp`.
 - **Pin the handles at spawn.** pid, log path, claimed step. The
   registry writes them to `<git-common>/bro/agents.json` plus
   `<git-common>/bro/agents/<agentId>.{prompt.md,log,exit}` and pins the
-  claim into the shared beads store — `bro agents status`, `down`, and
+  claim into the shared beads store — `bro fleet agents status`, `down`, and
   respawn all key off that entry.
-- **Monitor by point checks, never by waiting.** `bro agents status`,
-  `bro fleet`, `bro watch`, a fresh `bro convoy next` — between turns,
+- **Monitor by point checks, never by waiting.** `bro fleet agents status`,
+  `bro fleet`, `bro review watch`, a fresh `bro flow convoy next` — between turns,
   not in a blocking loop. A synchronous `get_output` or `sleep` wait on
   detached work blocks the conversation and buys nothing (retro
   bro-lmdj).
-- **Completion is detected, not awaited.** `bro agents status` →
+- **Completion is detected, not awaited.** `bro fleet agents status` →
   `exited`/`blocked`, then read the exit record — `<agentId>.exit`
-  holds the code, the entry's `cause`/`resetAt` the why. `bro convoy
+  holds the code, the entry's `cause`/`resetAt` the why. `bro flow convoy
   run` already supervises its own spawns to a verdict — hand a mol list
   to it instead of babysitting. Never promise "I'll report when it
   lands" from a foreground wait.

@@ -1,6 +1,6 @@
 ---
 name: sync
-description: "Use when the user invokes /sync or asks to publish/restore bro artifacts (review-debt ledger, evidence packs) across machines or agents. Thin wrapper over `bro sync` — mechanics live in the CLI."
+description: "Use when the user invokes /sync or asks to publish/restore bro artifacts (review-debt ledger, evidence packs) across machines or agents. Thin wrapper over `bro work sync` — mechanics live in the CLI."
 ---
 
 # /sync (bro)
@@ -17,13 +17,13 @@ the user's index are never touched.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro sync` | Commit untracked+ignored files under `.agents/` + the debt dir to the data ref, push to `sync.remote` — then run `bd sync` for beads state |
-| `bro sync --pull` | Fetch the data ref and materialize its files into the worktree — the fresh-clone restore path; also runs `bd sync` |
+| `bro work sync` | Commit untracked+ignored files under `.agents/` + the debt dir to the data ref, push to `sync.remote` — then run `bd sync` for beads state |
+| `bro work sync --pull` | Fetch the data ref and materialize its files into the worktree — the fresh-clone restore path; also runs `bd sync` |
 
 ## Policy
 
 - **Opt-in**: add `"gitref"` to `stores` in `bro.config.json` — then every
-  `bro debt` mutation auto-syncs. `sync.ref` / `sync.remote` override the
+  `bro review debt` mutation auto-syncs. `sync.ref` / `sync.remote` override the
   ref and remote names.
 - Tracked content can never leak: the synced set is `ls-files -o -i
   --exclude-standard` — ignored-and-untracked files only.
@@ -36,7 +36,7 @@ the user's index are never touched.
 - The ref is NOT a branch: `git branch` stays clean, and nobody can
   accidentally check it out or merge it into code.
 - **Beads state rides its own transport.** Drill frames, wtfs, retros and
-  the ready queue live in the local Dolt DB — `bro sync` orchestrates
+  the ready queue live in the local Dolt DB — `bro work sync` orchestrates
   `bd sync` (beads' pull+merge+push cycle) so one command moves
   everything. `sync.beads: false` opts out; a missing `bd` or `.beads` is
   skipped silently, a `bd sync` failure warns without breaking artifact

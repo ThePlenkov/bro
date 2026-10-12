@@ -38,14 +38,14 @@ shipping its own connector via `BroPlugin.connectors`) retargets them.
 | `bro store show --global` | Details of the resolved global dir |
 | `bro store init --global [--prefix=P]` | Create + validate the global store |
 | `bro store path --global` | Print the resolved global store dir |
-| `bro next --global` | Schedule from the global queue — same pipeline, cwd = the store |
+| `bro flow next --global` | Schedule from the global queue — same pipeline, cwd = the store |
 
 ## Scopes
 
 `--global` is a scope flag, not a command: the same verbs hit the
 user-level store (`~/.local/share/bro/beads` by default — `beads.global`
 in `bro.config.json` or `$BRO_GLOBAL_BEADS` relocate it, env wins).
-Stores never mix: `bro list`, `bro next`, `bro loop`, and hooks read the
+Stores never mix: `bro list`, `bro flow next`, `bro flow loop`, and hooks read the
 checkout's `.beads` only; global work is opt-in at every call.
 
 The global store is local-only by default — no sync remote. For a
@@ -55,7 +55,7 @@ cross-machine queue set the store's own Dolt remote inside it
 ## Policy
 
 - **Project work goes to project beads.** Global beads are claimed only
-  through `bro next --global` or `--global` doc verbs.
+  through `bro flow next --global` or `--global` doc verbs.
 - **Global is for user-level work** — cross-repo tasks, personal backlog,
   anything that must not ride the project's issue tracker or land in its
   PRs. If in doubt, file in the project.

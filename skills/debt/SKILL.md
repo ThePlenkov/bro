@@ -1,12 +1,12 @@
 ---
 name: debt
-description: "Use when the user invokes /debt or asks about review debt on merged PRs. Thin wrapper over the bro CLI — all mechanics live in `bro debt *` commands; this skill carries policy only. Requires `bro` (npx -y @broject/bro@0) and gh."
+description: "Use when the user invokes /debt or asks about review debt on merged PRs. Thin wrapper over the bro CLI — all mechanics live in `bro review debt *` commands; this skill carries policy only. Requires `bro` (npx -y @broject/bro@0) and gh."
 ---
 
 # /debt (bro)
 
 **All mechanics live in the `bro` CLI.** This skill is policy only — do not
-reimplement what `bro debt` already does.
+reimplement what `bro review debt` already does.
 
 Prereq: `bro` on PATH or `npx -y @broject/bro@0` (major-pinned). Requires
 `gh` auth; `bd` is required only with beads enabled (the default) —
@@ -17,15 +17,15 @@ requirement.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro debt collect [filters]` | Scan merged PRs **without** a `debt:*` label → collect unresolved threads → write `harvests/*.jsonl` → label `debt:collected` / `debt:clean`. With `debt.sources` in bro.config.json it also runs opt-in collectors (`dependabot`, `code-scanning`, `secret-scanning`, `stale-prs`, `failed-ci`, `sonarcloud`) — same ledger, `debt:<source>` labels on beads, `debt.stale_days` tunes stale-prs; `sonarcloud` needs `SONAR_TOKEN` + a project key (`debt.sourceConfig.sonarcloud.project_key` or `sonar-project.properties`) |
-| `bro debt status` | Ledger summary + unprocessed merged-PR count |
-| `bro debt stats [--by author\|source\|area]` | Signal per reviewer/source/area — fix% is the done share of decided rows |
-| `bro debt trend [--by author\|source\|area] [--bucket week\|day]` | Burn-down — open debt per time bucket (`--json` for chart data) |
-| `bro debt prs` | Merged PRs still unprocessed — the work queue (`--all`: full matrix) |
-| `bro debt list` | Ledger rows (`--status`, `--area`, `--author`, `--priority`, `--pr`) |
-| `bro debt mark <pr> <state>` | `collected` / `clean` / `skipped` / `none` — manual override |
-| `bro debt set <status> --thread-id ID` | Ledger status: `claimed` / `done --fix-pr N` / `wontfix` / `duplicate` — feeds `bro debt sync` |
-| `bro debt sync` | Project the ledger into beads — `bd ready -l debt` becomes the work queue |
+| `bro review debt collect [filters]` | Scan merged PRs **without** a `debt:*` label → collect unresolved threads → write `harvests/*.jsonl` → label `debt:collected` / `debt:clean`. With `debt.sources` in bro.config.json it also runs opt-in collectors (`dependabot`, `code-scanning`, `secret-scanning`, `stale-prs`, `failed-ci`, `sonarcloud`) — same ledger, `debt:<source>` labels on beads, `debt.stale_days` tunes stale-prs; `sonarcloud` needs `SONAR_TOKEN` + a project key (`debt.sourceConfig.sonarcloud.project_key` or `sonar-project.properties`) |
+| `bro review debt status` | Ledger summary + unprocessed merged-PR count |
+| `bro review debt stats [--by author\|source\|area]` | Signal per reviewer/source/area — fix% is the done share of decided rows |
+| `bro review debt trend [--by author\|source\|area] [--bucket week\|day]` | Burn-down — open debt per time bucket (`--json` for chart data) |
+| `bro review debt prs` | Merged PRs still unprocessed — the work queue (`--all`: full matrix) |
+| `bro review debt list` | Ledger rows (`--status`, `--area`, `--author`, `--priority`, `--pr`) |
+| `bro review debt mark <pr> <state>` | `collected` / `clean` / `skipped` / `none` — manual override |
+| `bro review debt set <status> --thread-id ID` | Ledger status: `claimed` / `done --fix-pr N` / `wontfix` / `duplicate` — feeds `bro review debt sync` |
+| `bro review debt sync` | Project the ledger into beads — `bd ready -l debt` becomes the work queue |
 
 ## Policy
 
@@ -39,6 +39,6 @@ requirement.
   `"stores": ["jsonl"]` in bro.config.json is the opt-out.
 - **Label after the file lands.** In CI pipelines run
   `collect --no-label`, land `harvests/*.jsonl` (`git add -f` — the ledger
-  dir is locally excluded), then `bro debt mark`.
-- **Collect, don't fix.** Triage → backlog, fixes → the fix loop. `bro debt` never edits product code or resolves threads on source PRs.
+  dir is locally excluded), then `bro review debt mark`.
+- **Collect, don't fix.** Triage → backlog, fixes → the fix loop. `bro review debt` never edits product code or resolves threads on source PRs.
 - `--reharvest` bypasses the label skip for one run.

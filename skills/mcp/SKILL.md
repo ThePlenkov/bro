@@ -1,13 +1,13 @@
 ---
 name: mcp
-description: "Use when an MCP-capable client (Windsurf, Zed, Goose, Gemini CLI, Copilot, Claude Desktop) should read bro orchestration state as tools instead of shelling `bro` and parsing text — `bro mcp` is the stdio server over the read planes. Thin wrapper over the bro CLI — mechanics live in the CLI."
+description: "Use when an MCP-capable client (Windsurf, Zed, Goose, Gemini CLI, Copilot, Claude Desktop) should read bro orchestration state as tools instead of shelling `bro` and parsing text — `bro fleet mcp` is the stdio server over the read planes. Thin wrapper over the bro CLI — mechanics live in the CLI."
 ---
 
 # /mcp (bro)
 
 **All mechanics live in the `bro` CLI.** This skill is policy only.
 
-`bro mcp` serves the plane catalog (`specs/bro-9rls.1.md`) over stdio MCP.
+`bro fleet mcp` serves the plane catalog (`specs/bro-9rls.1.md`) over stdio MCP.
 One server reaches every MCP-capable client — no per-client adapter.
 Tools are generated from the plane descriptors, never hand-maintained:
 `bro_<plane>_list` and `bro_<plane>_get` on every plane, plus one tool
@@ -23,7 +23,7 @@ the only path.
 
 ## Registering
 
-`bro mcp` runs in the repo it should serve (the catalog is per-dir).
+`bro fleet mcp` runs in the repo it should serve (the catalog is per-dir).
 Point the client's MCP config at it like any stdio server:
 
 ```jsonc
@@ -48,4 +48,4 @@ Point the client's MCP config at it like any stdio server:
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro mcp --tools` | prints the generated `tools/list` payload for this repo (same capability gating a client sees) and exits |
+| `bro fleet mcp --tools` | prints the generated `tools/list` payload for this repo (same capability gating a client sees) and exits |

@@ -1,12 +1,12 @@
 ---
 name: convoy
-description: "Use when the user invokes /convoy or asks to run a beads workflow — a molecule's DAG of steps executed inside the agent. Thin wrapper over the bro CLI: `bro convoy next` is the scheduler as code; `bro convoy done` advances it. Requires `bro` (npx -y @broject/bro@0) and bd."
+description: "Use when the user invokes /convoy or asks to run a beads workflow — a molecule's DAG of steps executed inside the agent. Thin wrapper over the bro CLI: `bro flow convoy next` is the scheduler as code; `bro flow convoy done` advances it. Requires `bro` (npx -y @broject/bro@0) and bd."
 ---
 
 # /convoy (bro)
 
 **All mechanics live in the `bro` CLI.** This skill is policy only — do not
-reimplement scheduling; `bro convoy next` computes it from beads state.
+reimplement scheduling; `bro flow convoy next` computes it from beads state.
 
 Prereq: `bro` on PATH or `npx -y @broject/bro@0` (major-pinned). Requires
 `bd` and an initialized `.beads/`.
@@ -21,14 +21,14 @@ and parallel agents. Gas City is **not** required — bro is the executor.
 ## The loop
 
 ```text
-bro convoy pour <formula> [--var K=V]…   → prints the molecule root id (once per run)
-bro convoy status [mol]       → DAG: ✓ done / ▸ ready / · blocked
-bro convoy next   [mol]       → JSON: what to do now
-bro convoy claim <step-id>            → atomic claim — do this before starting
-bro convoy done <step-id> --result "…"   → closes the step, emits the new next
-bro convoy run <mol>… [--open]        → the queue — a convoy-runner agent per
+bro flow convoy pour <formula> [--var K=V]…   → prints the molecule root id (once per run)
+bro flow convoy status [mol]       → DAG: ✓ done / ▸ ready / · blocked
+bro flow convoy next   [mol]       → JSON: what to do now
+bro flow convoy claim <step-id>            → atomic claim — do this before starting
+bro flow convoy done <step-id> --result "…"   → closes the step, emits the new next
+bro flow convoy run <mol>… [--open]        → the queue — a convoy-runner agent per
                                       mol through the facade, to 'complete'
-bro convoy wait <mol>… [--every SEC] [--timeout SEC]
+bro flow convoy wait <mol>… [--every SEC] [--timeout SEC]
                                     → finite watcher — exits when every mol
                                       settles (0=complete, 2=stuck, 3=gated,
                                       4=timeout). The exit IS the wake event —
@@ -44,13 +44,13 @@ resolution only works with exactly one.
 `next` states:
 
 - `step` — execute `step` (id, title, description = the work instructions),
-  then `bro convoy done <step.id> --result "<what you did>"`.
+  then `bro flow convoy done <step.id> --result "<what you did>"`.
 - `gate` — a human step is next. **Ask the user** — do not execute it
   yourself and do not mark it done on their behalf without their answer.
   Their approval is the result; then `done` it with their decision.
 - `blocked` — open steps exist but none are ready (a dependency cycle,
   or remaining steps all waiting on other open work). Run
-  `bro convoy status` and report.
+  `bro flow convoy status` and report.
 - `complete` — every step done. Close the molecule root:
   `bd close <mol-id> --reason "convoy complete"`.
 
@@ -65,12 +65,12 @@ starting the step.
 With several open molecules, pass `--mol <id>` explicitly — no-arg
 resolution errors on ambiguity rather than guessing.
 
-## The queue — `bro convoy run`
+## The queue — `bro flow convoy run`
 
 `run` is the in-session loop above as a **detached worker**: one
 convoy-runner agent per molecule, spawned through the agents facade
 (registry entry, pinned prompt/log/exit, shared-beads claim on the mol
-root — `bro agents status`/`bro fleet`/`bro watch` see it). Sequential
+root — `bro fleet agents status`/`bro fleet`/`bro review watch` see it). Sequential
 like the mol-queue script it replaced; `fleet.maxConcurrent` still
 applies at spawn.
 
@@ -83,7 +83,7 @@ applies at spawn.
 - A mol already claimed by a live worker reads `occupied` — skipped,
   never double-run. A mol that ends on a human gate reads `gated`.
 - Run it detached for real queues (`nohup`/`systemd-run`/tmux) — it is
-  a supervisor loop like `bro drive --every`, and exit 1 means some mol
+  a supervisor loop like `bro review drive --every`, and exit 1 means some mol
   exhausted attempts.
 
 ## Policy
@@ -96,10 +96,10 @@ applies at spawn.
   next step needs (paths, PR urls, verdicts), not a diary entry.
 - **Gates are not optional.** A `human` step exists to stop the machine;
   treating it as an agent step defeats the formula.
-- **Claim before you start.** `bro convoy claim <step>` is an atomic
+- **Claim before you start.** `bro flow convoy claim <step>` is an atomic
   lease (assignee + in_progress, refused if another agent holds it). With
   parallel agents in the same repo, an unclaimed step is shared work.
-- **Resume is free.** After compaction or a fresh session, `bro convoy
+- **Resume is free.** After compaction or a fresh session, `bro flow convoy
   status` reconstructs everything — there is no in-memory state to lose.
 - **Failures stay visible.** If a step cannot be completed, leave it open
   and tell the user — do not force-close a step you didn't do.

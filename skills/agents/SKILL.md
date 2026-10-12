@@ -1,6 +1,6 @@
 ---
 name: agents
-description: "Use when supervising bro-managed agents — respawn a lost worker, stop one, or check the agent plane across orchestrator connectors. Thin wrapper over `bro agents` — mechanics live in the CLI."
+description: "Use when supervising bro-managed agents — respawn a lost worker, stop one, or check the agent plane across orchestrator connectors. Thin wrapper over `bro fleet agents` — mechanics live in the CLI."
 ---
 
 # /agents (bro)
@@ -11,7 +11,7 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0` (major-pinned), plus
 `bd` — `up <step>` claims and renders prompts through the shared beads
 store.
 
-`bro agents` is the supervisor surface over the orchestrator connectors
+`bro fleet agents` is the supervisor surface over the orchestrator connectors
 (native detached processes, gascity, tmux, docker, …). The agentId
 registry in the git common dir makes an agent's identity survive its process — a
 respawn reuses the dead agent's id, worktree, and stored prompt.
@@ -35,9 +35,9 @@ cached count that fails closed when stale.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro agents status [<id\|step>] [--json] [--connector <name>]` | The agent plane across every backend; an arg prints one agent's detail. Degraded backends warn — never a hard failure of the view, but a targeted miss exits non-zero when a backend is degraded ('gone' is only claimed on a healthy read) |
-| `bro agents up [<step>] [--connector <name>]` | No arg: the backend's supervisor up (a `supervisor:'none'` backend like native is a reported no-op). With `<step>`: spawn the step's agent — a `lost`/`exited` agent is respawned on the same agentId (the beads claim rebinds), a live one is a SpawnError |
-| `bro agents down [<id\|step>] [--connector <name>]` | No arg: supervisor down. With a target: stop that one agent — a gone agent exits 0 on a healthy read; a miss beside a degraded backend reports unverified (exit 1), not 'gone' |
+| `bro fleet agents status [<id\|step>] [--json] [--connector <name>]` | The agent plane across every backend; an arg prints one agent's detail. Degraded backends warn — never a hard failure of the view, but a targeted miss exits non-zero when a backend is degraded ('gone' is only claimed on a healthy read) |
+| `bro fleet agents up [<step>] [--connector <name>]` | No arg: the backend's supervisor up (a `supervisor:'none'` backend like native is a reported no-op). With `<step>`: spawn the step's agent — a `lost`/`exited` agent is respawned on the same agentId (the beads claim rebinds), a live one is a SpawnError |
+| `bro fleet agents down [<id\|step>] [--connector <name>]` | No arg: supervisor down. With a target: stop that one agent — a gone agent exits 0 on a healthy read; a miss beside a degraded backend reports unverified (exit 1), not 'gone' |
 
 `--connector <name>` scopes all three subcommands to one backend. Useful
 flags on `up`: `--worktree <path>` (overrides the
@@ -47,7 +47,7 @@ recorded/conventional `<repo>--<step>` lookup), `--prompt-file <file>`
 ## Policy
 
 - **Fleet first, agents second.** `bro fleet` is the read-only view —
-  `lost — respawn?` rows are the decision surface; `bro agents up <step>`
+  `lost — respawn?` rows are the decision surface; `bro fleet agents up <step>`
   is the action behind it.
 - **Respawn preserves identity.** Same agentId, same worktree, same
   stored prompt — a respawned fixer keeps its custom instructions. The

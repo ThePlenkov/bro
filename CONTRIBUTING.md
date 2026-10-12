@@ -109,7 +109,7 @@ interface Connector {
   name: string                      // 'beads' | 'github' | …
   matchRemote?(url): boolean        // claims hosts it can serve (auto-detect)
   tasks?(ctx): TaskStore            // work items — `bro task` doc surface + `bro spec` reads
-  reviews?(ctx): ReviewFacade       // PR review loop — `bro act`, `debt`
+  reviews?(ctx): ReviewFacade       // PR review loop — `bro review act`, `debt`
   hooks?(ctx): ConnectorHooks       // lifecycle probes — see below
 }
 ```
@@ -129,7 +129,7 @@ async-capable and fail-open with a per-probe timeout:
   here so child events arrive mid-turn.
 - `stopGate` → `GateContribution { aspect, block, armedHint, passive }`.
   The hook owns arming policy: `block` fires only when the session armed
-  that aspect (`bro act`/`gh pr`/`git push` → `act`, `bro drill`/`wtf` →
+  that aspect (`bro review act`/`gh pr`/`git push` → `act`, `bro work drill`/`wtf` →
   `drill`, worktree mutations → `work`, `bd --claim`/`bro work enter` →
   `task`); `passive` is ambient context for everyone else.
 

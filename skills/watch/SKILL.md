@@ -1,13 +1,13 @@
 ---
 name: watch
-description: "Use when supervising parallel convoys/agents — 'watch the fleet', 'what needs attention', a monitor loop over mols/PRs. Thin wrapper over the bro CLI: `bro watch` is the deterministic heartbeat — one snapshot of molecules, PR exit gates, and the fleet. Requires `bro` (npx -y @broject/bro@0) and bd."
+description: "Use when supervising parallel convoys/agents — 'watch the fleet', 'what needs attention', a monitor loop over mols/PRs. Thin wrapper over the bro CLI: `bro review watch` is the deterministic heartbeat — one snapshot of molecules, PR exit gates, and the fleet. Requires `bro` (npx -y @broject/bro@0) and bd."
 ---
 
 # /watch (bro)
 
 **All mechanics live in the `bro` CLI.** This skill is policy only — the
 arming decision (when a session should run a watcher) lives here, the
-snapshot mechanics live in `bro watch`.
+snapshot mechanics live in `bro review watch`.
 
 Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd` initialized.
 
@@ -15,16 +15,16 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd` initialized.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro watch [--once]` | One snapshot — the heartbeat call: attention list + open molecules + act gates per fleet PR + fleet rows |
-| `bro watch --every N --for S` | The session pulse — tick the snapshot every N seconds: holds `<git-common>/bro/pulse.lock` (one per repo, a duplicate stands by), refuses under `BRO_AGENT_ID`; `--for` is required for a session-owned pulse — the window's exit is the session's wake event; omitting it leaves an unbounded watcher only an external supervisor may own |
-| `bro watch --notify` | Drop the initial snapshot plus each transition into the mailbox (`<git-common>/bro/notify/`) — a notify connector drains it into the parent session |
-| `bro watch --json` | Machine-readable `{ts, attention, mols, gates, fleet, janitor?}` |
-| `bro watch install [--every N] [--print]` | Arm the session pulse — writes `<git-common>/bro/pulse.json` (the want-marker session-start rearms from) and strips any legacy systemd/cron entry; cadence is `--every N` or `watch.intervalSec` (default 60). No OS timer is installed |
-| `bro watch uninstall` | Disarm the marker + strip any legacy timer/cron entry; a live pulse exits on its own |
+| `bro review watch [--once]` | One snapshot — the heartbeat call: attention list + open molecules + act gates per fleet PR + fleet rows |
+| `bro review watch --every N --for S` | The session pulse — tick the snapshot every N seconds: holds `<git-common>/bro/pulse.lock` (one per repo, a duplicate stands by), refuses under `BRO_AGENT_ID`; `--for` is required for a session-owned pulse — the window's exit is the session's wake event; omitting it leaves an unbounded watcher only an external supervisor may own |
+| `bro review watch --notify` | Drop the initial snapshot plus each transition into the mailbox (`<git-common>/bro/notify/`) — a notify connector drains it into the parent session |
+| `bro review watch --json` | Machine-readable `{ts, attention, mols, gates, fleet, janitor?}` |
+| `bro review watch install [--every N] [--print]` | Arm the session pulse — writes `<git-common>/bro/pulse.json` (the want-marker session-start rearms from) and strips any legacy systemd/cron entry; cadence is `--every N` or `watch.intervalSec` (default 60). No OS timer is installed |
+| `bro review watch uninstall` | Disarm the marker + strip any legacy timer/cron entry; a live pulse exits on its own |
 
 Every tick also rewrites `<git-common>/bro/heartbeat.json` — the durable
 last-known-state file. Mailbox drops expire after ~1h; this file does
-not, so overnight state is a read (`bro status` row, session-start
+not, so overnight state is a read (`bro fleet status` row, session-start
 context), never an inference from whether a session was polled.
 
 ## Policy
@@ -37,12 +37,12 @@ context), never an inference from whether a session was polled.
   snapshot as healthy, and don't go hunting for work the heartbeat
   didn't raise.
 - **The session owns the cadence — the pulse is bounded, never
-  infinite.** The orchestrator arms `bro watch --every N --for S
+  infinite.** The orchestrator arms `bro review watch --every N --for S
   --notify` in a visible background shell (`watch.pulseSec` suggests the
   window, default 900s). The window's exit IS the wake event: run one
-  `bro drive` pass, digest, re-arm the next window. Never sit in a
+  `bro review drive` pass, digest, re-arm the next window. Never sit in a
   foreground poll, never nohup an unbounded `--every`.
-- **Armed-but-dead rearms itself.** `bro watch install` writes
+- **Armed-but-dead rearms itself.** `bro review watch install` writes
   `bro/pulse.json` — the durable want-record. A session start (or
   post-compaction) that finds the marker armed but no live pulse lock
   gets the rearm nudge; the orchestrator re-arms the window. OS timers
@@ -50,7 +50,7 @@ context), never an inference from whether a session was polled.
   strips the legacy entries they left.
 - **Only orchestrators pulse.** Sessions with `BRO_AGENT_ID` set —
   spawned workers — never see the nudge and get refused by
-  `bro watch --every` / `bro drive --every`: recursion is how the
+  `bro review watch --every` / `bro review drive --every`: recursion is how the
   watcher tree multiplies.
 - **`--notify` is how a watcher reaches its parent.** With a notify
   connector installed, mailbox drops surface mid-turn in the parent
@@ -62,7 +62,7 @@ context), never an inference from whether a session was polled.
   between ticks, delivery follows the session's own tool cadence.
 - **Watch never touches your work.** It never claims steps, never
   mutates beads, never respawns agents — a `lost — respawn?` row is the
-  decision surface; respawning is a manual act (`bro agents up <step>`).
+  decision surface; respawning is a manual act (`bro fleet agents up <step>`).
   The writes besides `--notify` drops are the heartbeat file (each
   tick's snapshot, atomically replaced) and the janitor: each tick
   reaps dead session/agent state under `<git-common>/bro/` (retention,
@@ -71,7 +71,7 @@ context), never an inference from whether a session was polled.
   rows `unknown`, never `lost` — don't respawn on a failed read.
 - **Report progress in words, not IDs.** When relaying snapshot state
   to the user, translate every code: `bro-mol-3n2` → "the notify
-  connector molecule", `bro-mol-0io` → "the `bro watch` molecule".
+  connector molecule", `bro-mol-0io` → "the `bro review watch` molecule".
   A status line must say what the agent is *doing* and what just
   *landed* ("PR for X merged, session moved to Y") — bare mol/bead/PR
   IDs alone are not a report. IDs may appear in parentheses.

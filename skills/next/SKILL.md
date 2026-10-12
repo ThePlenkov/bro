@@ -1,12 +1,12 @@
 ---
 name: next
-description: "Use when the user says 'work the backlog', 'clean the queue', invokes /next, or sets a /goal over open beads — the autonomous backlog loop. Thin wrapper over the bro CLI: `bro next` is the scheduler as code — it claims the top ready bead and emits the work order. Requires `bro` (npx -y @broject/bro@0) and bd."
+description: "Use when the user says 'work the backlog', 'clean the queue', invokes /next, or sets a /goal over open beads — the autonomous backlog loop. Thin wrapper over the bro CLI: `bro flow next` is the scheduler as code — it claims the top ready bead and emits the work order. Requires `bro` (npx -y @broject/bro@0) and bd."
 ---
 
 # /next (bro)
 
 **All mechanics live in the `bro` CLI.** This skill is policy only.
-`bro next` computes the queue from `bd ready`, claims the top item
+`bro flow next` computes the queue from `bd ready`, claims the top item
 atomically, and surfaces what it deliberately skipped.
 
 Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd init` done.
@@ -14,11 +14,11 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd init` done.
 ## The loop
 
 ```text
-bro next          → claims the top ready bead, prints the work order
+bro flow next          → claims the top ready bead, prints the work order
    implement      → branch, code, tests — verify like CI
-   PR             → gh pr create (ready — /next owns the merge; drafts are for merge=human flows) → bro act status → bro act merge
+   PR             → gh pr create (ready — /next owns the merge; drafts are for merge=human flows) → bro review act status → bro review act merge
    bd close <id>  → reason = the PR that landed it
-   bro next       → repeat until "backlog empty"
+   bro flow next       → repeat until "backlog empty"
 ```
 
 If the backlog exists, it was already confirmed — **never ask "should I
@@ -32,15 +32,15 @@ continue?" between items.** The queue is the approval.
 - **Epics** — surface as `epic:` lines. Decompose into beads first
   (`bd create` children), don't implement an epic directly.
 - **Molecule steps** — beads whose `parent` is a molecule belong to
-  `bro convoy`; the flat queue doesn't steal them. Epic children carry
-  a `parent` too but stay claimable — `bro next` checks the parent's
+  `bro flow convoy`; the flat queue doesn't steal them. Epic children carry
+  a `parent` too but stay claimable — `bro flow next` checks the parent's
   type, not just the field.
 - **Foreign-scope beads** — ids outside this checkout's `issue_prefix`
   are never claimed; they surface as `foreign: N` when the shared db
   carries other projects' work. `scope = "all"` in a plan opts out.
 - **Global beads** — user-level beads live in a separate store
   (`bro store init --global`, `bro task list --global`).
-  `bro next --global` runs the same pipeline against that store
+  `bro flow next --global` runs the same pipeline against that store
   explicitly; project output never mixes them in.
 - **Coordination primitives** — `gt:slot`-labeled beads (merge-queue
   semaphores) are excluded inside `bd ready` itself; a semaphore is
@@ -48,14 +48,14 @@ continue?" between items.** The queue is the approval.
 
 ## Plans
 
-`bro run next.toml` drives the same selection from a validated plan —
+`bro plan run next.toml` drives the same selection from a validated plan —
 `limit` (batch size), `order` (priority|oldest|newest), `[filters]`
 (types, max_priority, title match, `labels` — the declared scope: only
 beads carrying one of those labels are claimable, unlabeled and
 other-labeled work stays untouched), `claim = false` for a dry run,
 `gates = "allow"` to pre-authorize claiming HUMAN GATE beads,
 `scope = "all"` to lift project scoping, and `scope = "global"` (or
-`bro next --global`) to schedule from the user-level store. Batching
+`bro flow next --global`) to schedule from the user-level store. Batching
 is for parallel execution (one claimed bead per worktree/agent); a
 claimed gate still means a human decides — the plan was the go-ahead,
 not the verdict.
@@ -64,8 +64,8 @@ not the verdict.
 
 - **One bead, one PR** — unless several items are trivially the same
   change. Debt batches are the exception, not the rule.
-- **The gate decides done** — `bro act status` green before merge,
-  `bro act merge` to land it, branches deleted after.
+- **The gate decides done** — `bro review act status` green before merge,
+  `bro review act merge` to land it, branches deleted after.
 - **Stuck ≠ skipped** — if an item can't proceed, say why (blocker,
   missing access, ambiguity), leave it open, and move to the next bead.
   Never silently drop it: `bd update <id> --notes "<why>"` records it.
