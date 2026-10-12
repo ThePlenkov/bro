@@ -55,6 +55,7 @@ import {
   readAgentRegistry,
   reviewHost,
   SpawnError,
+  stampPrOwnership,
   type AgentInfo,
   type IgnoreCheckRule,
   type PrMeta,
@@ -1188,6 +1189,34 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     pr,
     watches: work.watches,
   })
+  // Ownership marking (spec bro-c650l) — drive stamps what a loop's
+  // discovery can't reach. A draft is the merge=human contract (the
+  // exit gate never lands one) → 'bro-review'. An orphaned, non-draft
+  // PR under a merging drive is 'bro-managed'. Occupied PRs keep their
+  // own plane's claim — a live loop/worker stamps at its discovery —
+  // and a --no-merge drive supervises without claiming the merge.
+  const t = { repo: ctx.repo, pr }
+  if (state.isDraft) {
+    stampPrOwnership(
+      ctx.rev,
+      t,
+      {
+        ownership: 'review',
+        meta: { managed: false, mode: 'drive', run: state.headRef },
+      },
+      (msg) => say(ctx, `drive: ${msg}`)
+    )
+  } else if (occ === undefined && ctx.merge) {
+    stampPrOwnership(
+      ctx.rev,
+      t,
+      {
+        ownership: 'managed',
+        meta: { managed: true, mode: 'drive', run: state.headRef },
+      },
+      (msg) => say(ctx, `drive: ${msg}`)
+    )
+  }
   if (gate.ok) {
     if (occ !== undefined) {
       return { pr, link, verdict: 'green-occupied', detail: occ }

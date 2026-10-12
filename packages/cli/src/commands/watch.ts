@@ -44,11 +44,14 @@ import {
   janitorDidWork,
   janitorLine,
   mailboxDir,
+  prOwnership,
+  prOwnershipMark,
   reviewHost,
   runJanitor,
   sweepOrphanProcs,
   wallText,
   type JanitorReport,
+  type PrOwnership,
   type ProviderWall,
   type ReviewFacade,
 } from '@broject/core'
@@ -102,6 +105,10 @@ export interface WatchPrGate {
   ciFailing?: number
   reviewersPending?: number
   sastPending?: number
+
+  /** who lands the PR (spec bro-c650l) — absent when the label read
+   *  itself failed; 'human' means no bro marker */
+  ownership?: PrOwnership
 }
 
 export interface WatchGates {
@@ -380,6 +387,12 @@ async function gateFleetPrs(
           docsMaxRounds: act.docsMaxRounds,
         })
         const gate = evaluateExitGate(state)
+        // ownership marker — one extra labels read per PR; a failure
+        // degrades the marker, never the gate row it rides on
+        let ownership: PrOwnership | undefined
+        try {
+          ownership = prOwnership(rev.labels({ repo, pr }))
+        } catch { /* unprobed — the row renders without it */ }
         return {
           pr,
           link,
@@ -393,6 +406,7 @@ async function gateFleetPrs(
           ciFailing: state.ciFailing,
           reviewersPending: state.reviewersPending,
           sastPending: state.sastPending,
+          ownership,
         }
       } catch (err) {
         return { pr, link, error: err instanceof Error ? err.message : String(err) }
@@ -606,7 +620,14 @@ function gateLines(gates: WatchGates): string[] {
       ? ['  no PRs in the fleet']
       : ['  no PRs resolved', ...lookupWarn]
   }
-  return [...gates.prs.map((g) => `  ${g.link}  ${gateVerdict(g)}`), ...lookupWarn]
+  return [
+    ...gates.prs.map(
+      (g) =>
+        `  ${g.link}  ${gateVerdict(g)}` +
+        (g.ownership === undefined ? '' : `  · ${prOwnershipMark(g.ownership)}`)
+    ),
+    ...lookupWarn,
+  ]
 }
 
 function fleetLines(fleet: WatchSnapshot['fleet']): string[] {

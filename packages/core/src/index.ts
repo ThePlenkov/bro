@@ -168,6 +168,14 @@ export type {
   LifecycleRead,
 } from './lifecycle.ts'
 export { bodyMeta, broTrailer, stripMeta, withMeta } from './taskmeta.ts'
+export {
+  PR_MANAGED_LABEL,
+  PR_REVIEW_LABEL,
+  prOwnership,
+  prOwnershipMark,
+  stampPrOwnership,
+} from './ownership.ts'
+export type { PrOwnership, PrStamp } from './ownership.ts'
 export { JudgeUnavailable } from './judge.ts'
 export type {
   DecideResult,

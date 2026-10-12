@@ -71,6 +71,8 @@ interface MrRow {
   merge_status?: string // pre-15.6 compute flag
   detailed_merge_status?: string // 15.6+ verdict
   labels?: string[]
+  /** MR description — the bro trailer's carrier (spec bro-c650l). */
+  description?: string
   updated_at?: string | null
   merged_at?: string | null
   merge_commit_sha?: string | null
@@ -596,6 +598,15 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     },
     prUpdatedAt(t) {
       return getMr(t).updated_at ?? null
+    },
+    prBody(t) {
+      return getMr(t).description ?? ''
+    },
+    updatePrBody(t, body) {
+      glab(
+        ['api', '-X', 'PUT', api(t.repo, `merge_requests/${t.pr}`), '-f', `description=${body}`],
+        gopts()
+      )
     },
     createLabel(repo, name, color) {
       const res = glabTry(

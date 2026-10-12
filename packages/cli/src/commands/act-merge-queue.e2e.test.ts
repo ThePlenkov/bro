@@ -7,49 +7,14 @@
  *  host + fake bd like the loop e2e matrix. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import {
   git,
-  initRepo,
+  hostFixture,
   inside,
-  installFakeBd,
-  installFakeHost,
-  runCli,
   writeHostState,
-  type CliResult,
 } from './testrepo.ts'
 
-interface Fixture {
-  root: string
-  main: string
-  hostState: string
-  run: (args: string[]) => CliResult
-}
-
-function fixture(): Fixture {
-  const { root, main } = initRepo('bro-mq-e2e-')
-  const { binDir, db } = installFakeBd(root)
-  const host = installFakeHost(main)
-  writeFileSync(
-    join(main, 'bro.config.json'),
-    JSON.stringify({
-      plugins: ['./fakehost.ts'],
-      connectors: { reviews: 'fakehost' },
-    })
-  )
-  const env = {
-    PATH: `${binDir}:${process.env.PATH ?? ''}`,
-    HOME: root,
-    FAKE_BD_DB: db,
-  }
-  return {
-    root,
-    main,
-    hostState: host.state,
-    run: (args) => runCli(args, { cwd: main, env }),
-  }
-}
+const fixture = () => hostFixture('bro-mq-e2e-')
 
 describe('merge queue hold — every merge path parks the PR (bro-huy5o.6)', () => {
   test('act merge accepts the queue hold: exit 0, no branch cleanup', () => {

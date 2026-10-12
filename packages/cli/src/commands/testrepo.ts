@@ -565,11 +565,66 @@ const facade = {
   reviewThreads: async () => load().threads ?? [],
   resolveThread: () => {},
   replyThread: () => {},
-  labels: () => [],
+  // per-PR labels/body — the prs map's entries carry them; the flat
+  // single-PR path uses s.labels/s.prBody (spec bro-c650l ownership)
+  labels: (t) => {
+    const s = load()
+    if (s.labelsThrow) throw new Error('labels endpoint down')
+    if (s.prs) {
+      const p = Object.values(s.prs).find((p) => p.number === t.pr)
+      if (p) return p.labels ?? []
+    }
+    return s.labels ?? []
+  },
   prUpdatedAt: () => null,
+  prBody: (t) => {
+    const s = load()
+    if (s.prs) {
+      const p = Object.values(s.prs).find((p) => p.number === t.pr)
+      if (p) return p.body ?? ''
+    }
+    return s.prBody ?? ''
+  },
+  updatePrBody: (t, body) => {
+    const s = load()
+    if (s.prs) {
+      const p = Object.values(s.prs).find((p) => p.number === t.pr)
+      if (p) {
+        p.body = body
+        save(s)
+        return
+      }
+    }
+    s.prBody = body
+    save(s)
+  },
   createLabel: () => {},
-  addLabel: () => {},
-  removeLabel: () => {},
+  addLabel: (t, label) => {
+    const s = load()
+    if (s.prs) {
+      const p = Object.values(s.prs).find((p) => p.number === t.pr)
+      if (p) {
+        p.labels = (p.labels ?? []).concat(label)
+        save(s)
+        return
+      }
+    }
+    s.labels = (s.labels ?? []).concat(label)
+    save(s)
+  },
+  removeLabel: (t, label) => {
+    const s = load()
+    if (s.prs) {
+      const p = Object.values(s.prs).find((p) => p.number === t.pr)
+      if (p) {
+        p.labels = (p.labels ?? []).filter((l) => l !== label)
+        save(s)
+        return
+      }
+    }
+    s.labels = (s.labels ?? []).filter((l) => l !== label)
+    save(s)
+  },
   retargetPr: (t, base) => {
     const s = load()
     s.retargets = (s.retargets ?? []).concat([{ pr: t.pr, base }])
@@ -798,6 +853,27 @@ export function installFakeHost(root: string): { state: string; agent: string } 
 
 export function readHostState(state: string): Record<string, unknown> {
   return JSON.parse(readFileSync(state, 'utf8')) as Record<string, unknown>
+}
+
+export interface HostFixture {
+  root: string
+  main: string
+  hostState: string
+  run: (args: string[]) => CliResult
+}
+
+/** Repo + fake bd + fake review host + connector wiring in one — the
+ *  shared scaffold every review-host e2e (drive/act merges) builds on. */
+export function hostFixture(prefix: string): HostFixture {
+  const { root, main } = initRepo(prefix)
+  const { binDir, db } = installFakeBd(root)
+  const host = installFakeHost(main)
+  writeFileSync(
+    join(main, 'bro.config.json'),
+    JSON.stringify({ plugins: ['./fakehost.ts'], connectors: { reviews: 'fakehost' } })
+  )
+  const env = { PATH: `${binDir}:${process.env.PATH ?? ''}`, HOME: root, FAKE_BD_DB: db }
+  return { root, main, hostState: host.state, run: (args) => runCli(args, { cwd: main, env }) }
 }
 
 /** A `tasks` connector over tasks.json beside the plugin — the
