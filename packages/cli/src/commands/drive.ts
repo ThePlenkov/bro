@@ -2036,17 +2036,14 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     watches: work.watches,
   }
   const occ = occupied(occCtx)
-  stampDriveOwnership(ctx, pr, state, occ)
   if (gate.ok) {
-    return greenVerdict(
-      ctx,
-      pr,
-      link,
-      greenOccupancy(occCtx, ctx.occTtlMs),
-      worktree,
-      fixer
-    )
+    const g = greenOccupancy(occCtx, ctx.occTtlMs)
+    // an adopted PR is an orphan — the TTL'd verdict, not the raw
+    // occupancy read, decides who keeps their claim (bro-ihnlv)
+    stampDriveOwnership(ctx, pr, state, g.fresh)
+    return greenVerdict(ctx, pr, link, g, worktree, fixer)
   }
+  stampDriveOwnership(ctx, pr, state, occ)
   return blockedVerdict(ctx, {
     pr,
     link,

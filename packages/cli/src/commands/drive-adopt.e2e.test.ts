@@ -65,6 +65,10 @@ describe('bro drive — green-occupied TTL (bro-ihnlv)', () => {
       assert.match(v.detail ?? '', /adopted — session armed work/)
       assert.match(v.detail ?? '', /silent 3h/)
       assert.equal(merges(f.hostState), 1)
+      // an adopted PR is an orphan — drive stamps bro-managed on it
+      // before the merge (spec bro-c650l via the TTL'd verdict)
+      const prs = readHostState(f.hostState).prs as Record<string, { labels?: string[] }>
+      assert.deepEqual(prs['work/fx-a'].labels, ['bro-managed'])
     })
   })
 
