@@ -20,6 +20,11 @@
  *                            order — an orphaned conflicted PR stalls
  *                            forever without one (bro-glkes)
  *   green, occupied        → report; the owner's merge step lands it
+ *   green, stale-occupied  → the owner's occupancy shows no proven
+ *                            activity inside drive.occupancyTtlSec
+ *                            (2h) — adopted as an orphan and merged
+ *                            (bro-ihnlv); occupancy may hold a green
+ *                            PR back, never forever
  *   green, orphaned        → bro act merge (unless --no-merge /
  *                            drive.merge:'never'), then retire the
  *                            worktree and close the fixer bead
@@ -32,14 +37,16 @@
  * the worktree's own claim marker, fresh .work markers, and a /proc cwd
  * scan that follows a process's ancestry to an agent-shaped root —
  * occupied is always the safe verdict (a skipped pass, never
- * double-work).
+ * double-work). Every proof carries an activity stamp (log mtime,
+ * heartbeat, marker stamp, worktree churn); the merge path is the only
+ * one that ages them — a stale occupant is adopted, not obeyed.
  *
  * One drive per repo: `bro/drive.lock` in the git common dir is held
  * heartbeated for the process lifetime — a second `bro drive` (a
  * respawn wrapper's duplicate) stands by behind the incumbent and
  * takes over when it exits, never runs concurrently (spec bro-2duu9).
  */
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
   acquireAgentRegistryLock,
@@ -100,10 +107,13 @@ import {
   parseWorktreePorcelain,
   removeMergedWorktree,
   worktreeClaim,
+  worktreeClaimInfo,
+  worktreeIdleMs,
   worktreePathFor,
+  type WorktreeClaimInfo,
 } from './work.ts'
 import { isOrchestratorSession } from './watch-pulse.ts'
-export { LIVE_MARKER_MS, worktreeClaim }
+export { LIVE_MARKER_MS, worktreeClaim, worktreeClaimInfo, worktreeIdleMs }
 
 function usage(): never {
   console.error(`Usage: bro drive [--once] [--every [SEC]] [--no-merge] [--connector <name>] [--json]`)
@@ -215,16 +225,19 @@ import {
   detailMatches,
   hooksDirOf,
   liveWorkDetails,
+  liveWorkEntries,
   registryEntryState,
   type ProcHit,
+  type WorkEntry,
 } from './proc-owner.ts'
 export {
   agentProcessesIn,
   detailMatches,
   liveWorkDetails,
+  liveWorkEntries,
   registryEntryState,
 }
-export type { ProcHit }
+export type { ProcHit, WorkEntry }
 
 export interface OccupancyCtx {
   /** All backends' agents for the pass. */
@@ -234,12 +247,15 @@ export interface OccupancyCtx {
   fixerBead?: string
   branch: string
   worktree?: string
-  /** Fresh .work marker details. */
-  workDetails: string[]
+  /** Live session-marker detail lines with their activity stamps. */
+  workDetails: WorkEntry[]
   /** Injectable /proc scan — tests pass a stub. */
   scanProc?: (worktree: string) => ProcHit[]
   /** Injectable worktree-claim probe — tests pass a stub. */
-  scanClaim?: (worktree: string) => string | undefined
+  scanClaim?: (worktree: string) => WorktreeClaimInfo | undefined
+  /** Injectable worktree-activity probe — the /proc-hit plane's TTL
+   *  input (spec bro-ihnlv). Defaults to worktreeIdleMs. */
+  treeIdleMs?: (worktree: string) => number
   /** The PR being judged — the supervision plane keys on it. */
   pr?: number
   /** Watch-marker snapshot — a live foreign marker is a supervisor
@@ -265,57 +281,181 @@ export function supervisedBy(
   )
 }
 
-/** Worktree-local occupancy proofs — a live agent process inside the
- *  worktree, or a fresh claim marker on it. */
-function worktreeOccupant(opts: OccupancyCtx, live: AgentInfo[]): string | undefined {
-  if (opts.worktree === undefined) {
+/** One occupancy proof — the live-owner detail occupied() reports plus
+ *  the last proven activity stamp (bro-ihnlv). `activeAtMs` is the
+ *  freshest timestamp the plane can prove: an agent's log or spawn
+ *  record, a marker's mtime, the worktree's own churn. Undefined means
+ *  the plane shows a live claim but no activity — unverifiable, which
+ *  the merge path may never trust forever. */
+export interface OccProof {
+  detail: string
+  activeAtMs?: number
+}
+
+/** An agent's last proven activity — its output log's mtime or the
+ *  spawn record's stamp, whichever is fresher. Both ride the registry:
+ *  a backend that never names a log still bounds by spawnedAt, and an
+ *  append-mode log must not predate a respawn (same pair loop-state's
+ *  silentMs reads). */
+function agentActivityMs(a: AgentInfo): number | undefined {
+  let at: number | undefined
+  if (a.log !== undefined) {
+    try {
+      at = statSync(a.log).mtimeMs
+    } catch {
+      // no log yet — the spawn stamp still applies
+    }
+  }
+  const spawned = a.spawnedAt === undefined ? Number.NaN : Date.parse(a.spawnedAt)
+  if (!Number.isNaN(spawned)) {
+    at = at === undefined ? spawned : Math.max(at, spawned)
+  }
+  return at
+}
+
+function fileMtimeMs(path: string): number | undefined {
+  try {
+    return statSync(path).mtimeMs
+  } catch {
     return undefined
   }
-  const wt = resolve(opts.worktree)
-  const agent = live.find(
-    (a) => typeof a.worktree === 'string' && resolve(a.worktree) === wt
-  )
-  if (agent) {
-    return `agent ${agent.id} live in ${basename(opts.worktree)}`
+}
+
+/** The occupancy ladder as lazy proofs — one source for occupied()'s
+ *  first-match verdict and the merge path's freshness check. Yields in
+ *  the established order (fixer → supervisor → worktree → markers →
+ *  /proc); a proof's stat costs only once its plane matches, so a
+ *  first-proof read keeps occupied()'s short-circuit. */
+export function* occupancyProofs(
+  opts: OccupancyCtx,
+  now: number = Date.now()
+): Generator<OccProof> {
+  const live = opts.agents.filter((a) => a.state === 'running' || a.state === 'spawned')
+  // fixer agents spawn with molStep = the fixer bead's id, so this match
+  // names our own worker — reported as the fixer, not a foreign occupant
+  if (opts.fixerBead !== undefined) {
+    const fixer = live.find((a) => a.molStep === opts.fixerBead)
+    if (fixer !== undefined) {
+      yield { detail: `fixer agent live on ${opts.fixerBead}`, activeAtMs: agentActivityMs(fixer) }
+    }
   }
-  const claim = (opts.scanClaim ?? worktreeClaim)(opts.worktree)
-  return claim === undefined
-    ? undefined
-    : `worktree ${basename(opts.worktree)} claimed${claim === '' ? '' : ` by ${claim}`}`
+  const sup = supervisedBy(opts.watches, opts.pr)
+  if (sup !== undefined) {
+    yield {
+      detail: `supervised by ${watchMarkerKind(sup.file, sup.watch)} pid ${sup.watch.pid}`,
+      activeAtMs: fileMtimeMs(sup.file),
+    }
+  }
+  if (opts.worktree !== undefined) {
+    const wt = resolve(opts.worktree)
+    const agent = live.find(
+      (a) => typeof a.worktree === 'string' && resolve(a.worktree) === wt
+    )
+    if (agent !== undefined) {
+      yield {
+        detail: `agent ${agent.id} live in ${basename(opts.worktree)}`,
+        activeAtMs: agentActivityMs(agent),
+      }
+    }
+    const claim = (opts.scanClaim ?? worktreeClaimInfo)(opts.worktree)
+    if (claim !== undefined) {
+      yield {
+        detail:
+          `worktree ${basename(opts.worktree)} claimed` +
+          (claim.detail === '' ? '' : ` by ${claim.detail}`),
+        activeAtMs: claim.mtimeMs,
+      }
+    }
+  }
+  const slug = branchSlug(opts.branch)
+  // several markers can name the same work — the freshest stamp is the
+  // honest activity bound (a stale marker beside a fresh one is a live
+  // session, not residue)
+  const detail = opts.workDetails
+    .filter((e) =>
+      detailMatches(e.detail, { branch: opts.branch, slug, worktree: opts.worktree })
+    )
+    .reduce<WorkEntry | undefined>(
+      (best, e) =>
+        best === undefined ||
+        (e.mtimeMs ?? Number.NEGATIVE_INFINITY) > (best.mtimeMs ?? Number.NEGATIVE_INFINITY)
+          ? e
+          : best,
+      undefined
+    )
+  if (detail !== undefined) {
+    yield { detail: `session armed work on ${detail.detail}`, activeAtMs: detail.mtimeMs }
+  }
+  if (opts.worktree !== undefined && opts.scanProc !== undefined) {
+    const hit = opts.scanProc(opts.worktree)[0]
+    if (hit) {
+      // a live process is proof of life at scan time, not of work — the
+      // worktree's own churn (index/HEAD/dir mtimes) is the silence
+      // bound: a process parked in an untouched tree is a stale owner
+      const idle = (opts.treeIdleMs ?? worktreeIdleMs)(opts.worktree)
+      yield {
+        detail: `process ${hit.pid} live in ${basename(opts.worktree)}`,
+        activeAtMs: Number.isFinite(idle) ? now - idle : undefined,
+      }
+    }
+  }
 }
 
 /** Why a PR's worktree is owned right now — undefined = orphaned, the
  *  driver's whole reason to exist. A live agent or session ALWAYS wins
  *  the argument: skipped pass, never double-work on one branch. */
 export function occupied(opts: OccupancyCtx): string | undefined {
-  const live = opts.agents.filter((a) => a.state === 'running' || a.state === 'spawned')
-  // fixer agents spawn with molStep = the fixer bead's id, so this match
-  // names our own worker — reported as the fixer, not a foreign occupant
-  if (opts.fixerBead !== undefined && live.some((a) => a.molStep === opts.fixerBead)) {
-    return `fixer agent live on ${opts.fixerBead}`
-  }
-  const sup = supervisedBy(opts.watches, opts.pr)
-  if (sup !== undefined) {
-    return `supervised by ${watchMarkerKind(sup.file, sup.watch)} pid ${sup.watch.pid}`
-  }
-  const wt = worktreeOccupant(opts, live)
-  if (wt !== undefined) {
-    return wt
-  }
-  const slug = branchSlug(opts.branch)
-  const detail = opts.workDetails.find((d) =>
-    detailMatches(d, { branch: opts.branch, slug, worktree: opts.worktree })
-  )
-  if (detail !== undefined) {
-    return `session armed work on ${detail}`
-  }
-  if (opts.worktree !== undefined && opts.scanProc !== undefined) {
-    const hit = opts.scanProc(opts.worktree)[0]
-    if (hit) {
-      return `process ${hit.pid} live in ${basename(opts.worktree)}`
-    }
+  for (const p of occupancyProofs(opts)) {
+    return p.detail
   }
   return undefined
+}
+
+/** The merge-path occupancy verdict (bro-ihnlv): the freshest proof
+ *  inside `ttlMs` keeps the PR 'green-occupied' — a live owner lands
+ *  its own merge. Every proof stale or unverifiable means the owner is
+ *  silent: the PR counts as orphaned (same class as a branch-less one)
+ *  and drive adopts it. `stale` reports occupied()'s own verdict so the
+ *  adopt detail names who went quiet; `silentMs` is the freshest
+ *  provable silence — undefined when nothing could be stamped at all. */
+export function greenOccupancy(
+  opts: OccupancyCtx,
+  ttlMs: number,
+  now: number = Date.now()
+): { fresh?: string; stale?: string; silentMs?: number } {
+  const proofs = [...occupancyProofs(opts, now)]
+  if (proofs.length === 0) {
+    return {}
+  }
+  const best = proofs.reduce<OccProof | undefined>(
+    (acc, p) =>
+      acc === undefined ||
+      (p.activeAtMs ?? Number.NEGATIVE_INFINITY) > (acc.activeAtMs ?? Number.NEGATIVE_INFINITY)
+        ? p
+        : acc,
+    undefined
+  )
+  if (best !== undefined && best.activeAtMs !== undefined && now - best.activeAtMs <= ttlMs) {
+    return { fresh: best.detail }
+  }
+  return {
+    stale: proofs[0]?.detail,
+    silentMs: best?.activeAtMs === undefined ? undefined : Math.max(0, now - best.activeAtMs),
+  }
+}
+
+/** A supervisor marker still vetoing a merge must be fresh — a stale
+ *  one is the very silence the TTL adopts against, and letting it veto
+ *  would resurrect the forever-wait this bound exists to kill
+ *  (bro-ihnlv). An unreadable stamp stays conservative: veto once more,
+ *  adoption re-judges next pass. */
+export function supervisorFresh(
+  sup: ListedWatch,
+  ttlMs: number,
+  now: number = Date.now()
+): boolean {
+  const at = fileMtimeMs(sup.file)
+  return at === undefined || now - at <= ttlMs
 }
 
 // --- fixer bead ---------------------------------------------------------------------
@@ -583,6 +723,10 @@ interface Ctx {
   merge: boolean
   json: boolean
   connector?: string
+  /** Merge-path occupancy TTL in ms (drive.occupancyTtlSec) — the
+   *  silence bound that turns a green-occupied PR into an adopted
+   *  orphan (bro-ihnlv). */
+  occTtlMs: number
   /** --every interval in seconds — defined only in loop mode, which is
    *  also what turns on watch heartbeats; a --once pass is a report,
    *  not supervision. */
@@ -594,7 +738,7 @@ interface Ctx {
 interface PassWork {
   worktreeByBranch: Map<string, string>
   agents: AgentInfo[]
-  workDetails: string[]
+  workDetails: WorkEntry[]
   /** Watch-marker snapshot for the supervision plane — a `loop`
    *  heartbeat or `act wait` landing mid-pass is re-read under the
    *  occupancy locks (freshOccupancy), never trusted stale. */
@@ -612,6 +756,10 @@ export interface PrVerdict {
 }
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
+
+/** Silence duration in a verdict detail — minutes under an hour. */
+const silentFor = (ms: number): string =>
+  ms >= 3_600_000 ? `${Math.round(ms / 3_600_000)}h` : `${Math.round(ms / 60_000)}m`
 
 const say = (ctx: Ctx, msg: string): void => {
   if (ctx.json) {
@@ -683,6 +831,7 @@ export function registryAgents(dir: string): AgentInfo[] {
     pid: typeof e.pid === 'number' ? e.pid : undefined,
     state: registryEntryState(home, e),
     worktree: typeof e.worktree === 'string' ? e.worktree : undefined,
+    log: typeof e.log === 'string' ? e.log : undefined,
   }))
 }
 
@@ -726,7 +875,7 @@ export function freshOccupancy(
   const hooks = hooksDirOf(dir)
   return {
     agents,
-    workDetails: hooks === null ? [] : liveWorkDetails(hooks),
+    workDetails: hooks === null ? [] : liveWorkEntries(hooks),
     // listWatches is a cheap local read — a supervisor that stamped its
     // heartbeat while the lock was being waited on is caught here
     watches: listWatches(dir),
@@ -1072,10 +1221,13 @@ async function mergeAndRetire(
   pr: number,
   link: string,
   worktree: string | undefined,
-  fixer: TaskRow | undefined
+  fixer: TaskRow | undefined,
+  note?: string
 ): Promise<PrVerdict> {
+  const d = (base?: string): string | undefined =>
+    note === undefined ? base : base === undefined ? note : `${note}; ${base}`
   if (!(await mergeGreen(ctx, pr))) {
-    return { pr, link, verdict: 'merge-refused' }
+    return { pr, link, verdict: 'merge-refused', detail: d() }
   }
   const after = await fetchPrActState(
     ctx.rev,
@@ -1093,21 +1245,21 @@ async function mergeAndRetire(
   // Parked, never a failure: no retirement, no fixer close; the next
   // pass re-attempts and merge-async resumes the same uuid.
   if (after?.state === 'OPEN') {
-    return { pr, link, verdict: 'enqueued', detail: 'a merge queue owns it' }
+    return { pr, link, verdict: 'enqueued', detail: d('a merge queue owns it') }
   }
   if (after?.state !== 'MERGED') {
     return {
       pr,
       link,
       verdict: 'merge-unverified',
-      detail: after === undefined ? 'state re-probe failed' : `state ${after.state.toLowerCase()}`,
+      detail: d(after === undefined ? 'state re-probe failed' : `state ${after.state.toLowerCase()}`),
     }
   }
   retireLanding(ctx, after, worktree)
   if (fixer) {
     closeFixer(ctx.store, fixer.id, `merged via ${link}`)
   }
-  return { pr, link, verdict: 'merged' }
+  return { pr, link, verdict: 'merged', detail: d() }
 }
 
 /** The post-green verdict ladder — everything the non-green branches
@@ -1178,7 +1330,7 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
   }
   const gate = evaluateExitGate(state)
   const worktree = work.worktreeByBranch.get(state.headRef)
-  const occ = occupied({
+  const occCtx: OccupancyCtx = {
     agents: work.agents,
     fixerBead: fixer?.id,
     branch: state.headRef,
@@ -1187,21 +1339,37 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     scanProc: agentProcessesIn,
     pr,
     watches: work.watches,
-  })
+  }
   if (gate.ok) {
-    if (occ !== undefined) {
-      return { pr, link, verdict: 'green-occupied', detail: occ }
+    // the merge-path TTL (bro-ihnlv): a green PR waits on a live owner
+    // only while it proves activity inside the window — silence past it
+    // is the same orphan class a branch-less PR is, so drive adopts
+    // and merges rather than reporting 'green-occupied' forever.
+    const g = greenOccupancy(occCtx, ctx.occTtlMs)
+    if (g.fresh !== undefined) {
+      return { pr, link, verdict: 'green-occupied', detail: g.fresh }
     }
+    const adopted =
+      g.stale === undefined
+        ? undefined
+        : `adopted — ${g.stale}` +
+          (g.silentMs === undefined
+            ? ' (no proven activity)'
+            : ` (silent ${silentFor(g.silentMs)})`)
     if (!ctx.merge) {
-      return { pr, link, verdict: 'green' }
+      return { pr, link, verdict: 'green', detail: adopted }
     }
     // the pass's watch snapshot predates the gate fetch — a supervisor
     // marker published mid-pass (a loop arming its member) must still
     // veto the merge, so supervision is re-read as mergeGreen's last
     // input. The marker plane isn't lock-serialized; a fresh read is
-    // the tightest sync point there is.
+    // the tightest sync point there is. On the adopt path only a FRESH
+    // marker vetoes — a stale one is the silence being adopted against.
     const sup = supervisedBy(listWatches(ctx.mainRoot), pr)
-    if (sup !== undefined) {
+    if (
+      sup !== undefined &&
+      (adopted === undefined || supervisorFresh(sup, ctx.occTtlMs))
+    ) {
       return {
         pr,
         link,
@@ -1209,9 +1377,18 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
         detail: `supervised by ${watchMarkerKind(sup.file, sup.watch)} pid ${sup.watch.pid}`,
       }
     }
-    return mergeAndRetire(ctx, pr, link, worktree, fixer)
+    return mergeAndRetire(ctx, pr, link, worktree, fixer, adopted)
   }
-  return blockedVerdict(ctx, { pr, link, state, gate, occ, worktree, fixer, work })
+  return blockedVerdict(ctx, {
+    pr,
+    link,
+    state,
+    gate,
+    occ: occupied(occCtx),
+    worktree,
+    fixer,
+    work,
+  })
 }
 
 /** branch → worktree path across every checkout. */
@@ -1343,7 +1520,7 @@ async function driveOnce(ctx: Ctx): Promise<void> {
   const work: PassWork = {
     worktreeByBranch: worktreeMap(ctx.mainRoot),
     agents: [...byStep.values()],
-    workDetails: hooks === null ? [] : liveWorkDetails(hooks),
+    workDetails: hooks === null ? [] : liveWorkEntries(hooks),
     watches: listWatches(ctx.mainRoot),
     judgeBudget: { remaining: judgeConfig(ctx.mainRoot).judge.maxDecisionsPerRun },
   }
@@ -1450,6 +1627,7 @@ async function runDrive(
     merge: args.merge && drive.merge === 'auto',
     json: args.json,
     connector: args.connector,
+    occTtlMs: drive.occupancyTtlSec * 1000,
     everySec: args.everySec,
     env: loadAgentEnv(mainPath),
     store: facade('tasks', { dir: mainPath }, { prefer: broCfg.connectors }),
