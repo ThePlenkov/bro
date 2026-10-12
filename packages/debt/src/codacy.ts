@@ -128,8 +128,14 @@ function codacySearchAll(url: string, body: string): CodacyIssue[] {
     const batch = resp.data ?? []
     items.push(...batch)
     const next = resp.pagination?.cursor
-    if (next === undefined || next === '' || batch.length === 0 || seen.has(next)) {
+    if (batch.length === 0 || next === undefined || next === '') {
       return items
+    }
+    if (seen.has(next)) {
+      // A repeated cursor is not completion — the tail is unfetched, and
+      // a partial list would let the upstream-resolve sweep mark live
+      // issues done. Fail like the page window does.
+      throw new Error(`codacy: pagination cursor repeated at ${url} — refusing a partial fetch`)
     }
     seen.add(next)
     cursor = next

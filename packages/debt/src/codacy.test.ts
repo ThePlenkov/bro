@@ -123,7 +123,7 @@ describe('collectCodacy', () => {
       )
     ))
 
-  test('a repeating cursor terminates instead of looping', () =>
+  test('a repeating cursor fails instead of returning a partial list', () =>
     withEnv({ CODACY_API_TOKEN: 't' }, () =>
       withFakeCurl(
         {
@@ -131,12 +131,7 @@ describe('collectCodacy', () => {
           'issues/search': body([{ ...ISSUE, issueId: 'P1' }], 'cX'),
         },
         EMPTY_PAGE,
-        () => {
-          const ids = collectCodacy(CTX)
-            .map((r) => r.thread_id)
-            .sort()
-          assert.deepEqual(ids, ['codacy:P1', 'codacy:P2'])
-        }
+        () => assert.throws(() => collectCodacy(CTX), /cursor repeated|partial fetch/)
       )
     ))
 
