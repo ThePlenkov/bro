@@ -71,9 +71,9 @@ the parent session without a wait loop.
 
 Detach the watcher, don't block on it: `bro review watch --every N --for S
 --notify` in a background shell keeps a bounded heartbeat running while the
-agent works — `--for` ends the window instead of letting the watcher
-outlive the session (an unbounded `--every` is for an external supervisor
-that owns its lifecycle), and the `--notify` drops surface in the parent
+agent works — `--for` caps the watcher window; it does not tie the
+watcher to session exit (an unbounded `--every` is for an external
+supervisor that owns its lifecycle), and the `--notify` drops surface in the parent
 session mid-turn, on its next tool call (the mailbox is pull-based: a drop
 lands when the session next acts, it never wakes a sleeping one). The
 session-pulse model is the durable form: `bro review watch install` arms
