@@ -8,17 +8,20 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { initRepo } from './testrepo.ts'
+import { lockHolderPid } from '@broject/core'
 import {
   armDrive,
   daemonProbe,
   daemonStatePath,
   daemonUpDecision,
+  daemonUpLockPath,
   disarmDrive,
   driveMarkerPath,
   driveRearm,
   installDrive,
   readDaemonRecord,
   readDriveMarker,
+  supervisorUp,
   uninstallDrive,
   type SupervisorDown,
   type SupervisorUp,
@@ -437,6 +440,78 @@ describe('installDrive', () => {
       const r = uninstallDrive(main, { down: () => downed })
       assert.equal(r.state, 'absent')
       assert.match(r.detail, /nothing installed/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('uninstall disarms + sweeps inside daemon.up.lock — the rearm race', () => {
+    const { root, main } = initRepo('bro-dinst-lock-')
+    try {
+      armDrive(main, 300)
+      let heldByUs = false
+      let markerInside: unknown = 'unread'
+      uninstallDrive(main, {
+        down: (d) => {
+          const lock = daemonUpLockPath(d)
+          heldByUs = lock !== null && lockHolderPid(lock) === process.pid
+          markerInside = readDriveMarker(d)
+          return { pids: [1], hadRecord: true }
+        },
+      })
+      assert.equal(heldByUs, true, 'down sweep ran outside the up lock')
+      assert.equal(markerInside, null, 'marker still armed inside the locked sweep')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a racing uninstall reports disarmed — never a markerless supervisor', () => {
+    const { root, main } = initRepo('bro-dinst-disarm-')
+    try {
+      const r = installDrive(main, { everySec: 300 }, {
+        up: () => ({ kind: 'disarmed' }),
+      })
+      assert.match(r.detail, /racing uninstall disarmed/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('supervisorUp requireMarker', () => {
+  const ORCH = {} as NodeJS.ProcessEnv
+
+  test('no marker inside the lock → disarmed, never a spawn', () => {
+    const { root, main } = initRepo('bro-dsup-disarm-')
+    try {
+      assert.deepEqual(supervisorUp(main, 120, ORCH, { requireMarker: true }), {
+        kind: 'disarmed',
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a live supervisor still reports already — the recheck is spawn-only', () => {
+    const { root, main } = initRepo('bro-dsup-already-')
+    try {
+      writeLock(main, `${process.pid}:nonce`)
+      // no marker — requireMarker must not fire on the already path
+      assert.deepEqual(supervisorUp(main, 120, ORCH, { requireMarker: true }), {
+        kind: 'already',
+        pid: process.pid,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a worker never reaches the marker — the spawn guard wins', () => {
+    const { root, main } = initRepo('bro-dsup-worker-')
+    try {
+      armDrive(main, 120)
+      assert.equal(supervisorUp(main, 120, { BRO_AGENT_ID: 'w-1' }).kind, 'refuse-worker')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

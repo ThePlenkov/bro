@@ -255,16 +255,21 @@ function everyArg(argv: string[], fallback: number): number {
 export type SupervisorUp =
   | { kind: 'spawned'; pid: number; log: string | null }
   | { kind: 'already'; pid: number }
+  | { kind: 'disarmed' }
   | { kind: 'refuse-worker' }
 
 /** The up path's decide→spawn→record sequence — `daemon up`'s core,
  *  extracted so `drive install` and the rearm checkpoint run the same
  *  steps under the same `daemon.up.lock`: a concurrent armer collapses
- *  to 'already' instead of doubling. */
+ *  to 'already' instead of doubling. `requireMarker` is the rearm-side
+ *  race fix: the checkpoint read the marker BEFORE this lock, so the
+ *  want is re-checked inside it — an uninstall that disarmed while the
+ *  spawn waited must not resurrect a supervisor. */
 export function supervisorUp(
   dir: string,
   everySec: number,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  opts: { requireMarker?: boolean } = {}
 ): SupervisorUp {
   const upLock = daemonUpLockPath(dir)
   const release =
@@ -276,6 +281,9 @@ export function supervisorUp(
     }
     if (decision.kind === 'already') {
       return { kind: 'already', pid: decision.pid }
+    }
+    if (opts.requireMarker === true && readDriveMarker(dir) === null) {
+      return { kind: 'disarmed' }
     }
     const spawned = spawnDaemon(dir, everySec)
     return { kind: 'spawned', pid: spawned.pid, log: spawned.log }
@@ -480,14 +488,21 @@ export interface DriveInstallResult {
 
 /** Injectable seams for tests — the real verbs spawn and SIGTERM. */
 export interface DriveSchedDeps {
-  up?: (dir: string, everySec: number) => SupervisorUp
+  up?: (
+    dir: string,
+    everySec: number,
+    env?: NodeJS.ProcessEnv,
+    opts?: { requireMarker?: boolean }
+  ) => SupervisorUp
   down?: (dir: string) => SupervisorDown
 }
 
 /** `bro drive install` — arm the want-marker, then bring the supervisor
  *  up (enable --now): the merge path is on from this call, not the next
  *  checkpoint. A failed spawn doesn't roll the marker back — the next
- *  checkpoint retries; that IS the point of an install. */
+ *  checkpoint retries; that IS the point of an install. The spawn side
+ *  re-checks the marker under `daemon.up.lock` so a racing uninstall
+ *  between arm and spawn doesn't leave a markerless supervisor. */
 export function installDrive(
   dir: string,
   opts: { everySec: number; print?: boolean },
@@ -510,13 +525,17 @@ export function installDrive(
   const arm = armDrive(dir, opts.everySec)
   let sup: string
   try {
-    const up = (deps.up ?? supervisorUp)(dir, opts.everySec)
+    const up = (deps.up ?? supervisorUp)(dir, opts.everySec, process.env, {
+      requireMarker: true,
+    })
     sup =
       up.kind === 'spawned'
         ? `supervisor up — pid ${up.pid} every ${opts.everySec}s`
         : up.kind === 'already'
           ? `already supervising (pid ${up.pid})`
-          : 'supervisor spawn refused — workers never arm it'
+          : up.kind === 'disarmed'
+            ? 'supervisor not spawned — a racing uninstall disarmed it'
+            : 'supervisor spawn refused — workers never arm it'
   } catch (err) {
     sup = `supervisor spawn failed (${errText(err)}) — the session checkpoint retries`
   }
@@ -529,21 +548,31 @@ export function installDrive(
 
 /** `bro drive uninstall` — disarm FIRST (a racing checkpoint must never
  *  rearm a dying want), then the `daemon down` sweep: SIGTERM the
- *  holder and every standby, clear the armer record. */
+ *  holder and every standby, clear the armer record. Both steps run
+ *  under `daemon.up.lock`: a rearm that read the marker just before
+ *  disarm waits here, then finds it gone on its locked re-check — the
+ *  spawn can't land after the sweep. */
 export function uninstallDrive(dir: string, deps: DriveSchedDeps = {}): DriveInstallResult {
-  const marker = disarmDrive(dir)
-  const down = (deps.down ?? supervisorDown)(dir)
-  const removed = marker === 'disarmed' || down.hadRecord || down.pids.length > 0
-  return {
-    state: removed ? 'removed' : 'absent',
-    detail: [
-      marker === 'disarmed' ? 'install marker removed' : 'no install marker',
-      down.pids.length > 0 ? `supervisor signalled (${down.pids.join(', ')})` : '',
-      down.hadRecord ? 'armer record cleared' : '',
-      removed ? '' : `nothing installed for ${basename(dir)}`,
-    ]
-      .filter((s) => s !== '')
-      .join(' — '),
+  const upLock = daemonUpLockPath(dir)
+  const release =
+    upLock === null ? () => {} : acquireFileLock(upLock, { label: 'daemon up lock' })
+  try {
+    const marker = disarmDrive(dir)
+    const down = (deps.down ?? supervisorDown)(dir)
+    const removed = marker === 'disarmed' || down.hadRecord || down.pids.length > 0
+    return {
+      state: removed ? 'removed' : 'absent',
+      detail: [
+        marker === 'disarmed' ? 'install marker removed' : 'no install marker',
+        down.pids.length > 0 ? `supervisor signalled (${down.pids.join(', ')})` : '',
+        down.hadRecord ? 'armer record cleared' : '',
+        removed ? '' : `nothing installed for ${basename(dir)}`,
+      ]
+        .filter((s) => s !== '')
+        .join(' — '),
+    }
+  } finally {
+    release()
   }
 }
 

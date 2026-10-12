@@ -23,9 +23,11 @@ import type { Connector, ConnectorCtx } from '@broject/core'
 /** One checkpoint for every lifecycle event: decide, bring up, report.
  *  `supervisorUp` re-decides under `daemon.up.lock`, so a racing
  *  `daemon up` or a second session's checkpoint collapses to 'already'
- *  — the spawn-side dedup is the lock, not the decision. A failure
- *  anywhere stays silent: a probe must never break the hook event it
- *  rode in on. */
+ *  — the spawn-side dedup is the lock, not the decision. `requireMarker`
+ *  re-reads the want inside the same lock: the marker this decision saw
+ *  could be uninstalled while the spawn queued — 'disarmed' instead of
+ *  a supervisor nobody asked for. A failure anywhere stays silent: a
+ *  probe must never break the hook event it rode in on. */
 async function supervisorCheckpoint(dir: string, where: string): Promise<string[]> {
   try {
     const { driveRearm, supervisorUp } = await import('./daemon.ts')
@@ -33,7 +35,7 @@ async function supervisorCheckpoint(dir: string, where: string): Promise<string[
     if (r.kind !== 'rearm') {
       return []
     }
-    const up = supervisorUp(dir, r.everySec)
+    const up = supervisorUp(dir, r.everySec, process.env, { requireMarker: true })
     return up.kind === 'spawned'
       ? [
           `drive supervisor rearmed on ${where} — spawned ` +
