@@ -237,6 +237,54 @@ export function detailMatches(
   return detail === base || base.endsWith(`--${detail}`) || detail.endsWith(`/${base}`)
 }
 
+/** A live session marker's detail line with the marker's activity
+ *  stamp — mtimeMs is the file's own mtime, which the arm rewrites on
+ *  every arm-worthy command, so it reads as "last proven activity" for
+ *  the merge-path TTL (bro-ihnlv). Undefined only when the stat that
+ *  just proved the marker live raced it away. */
+export interface WorkEntry {
+  detail: string
+  mtimeMs?: number
+}
+
+/** Every detail line of every live session marker WITH its stamp —
+ *  liveWorkEntries is the mtime-carrying twin of liveWorkDetails. */
+export function liveWorkEntries(
+  dir: string,
+  suffixes: readonly string[] = ['.work'],
+  now: number = Date.now()
+): WorkEntry[] {
+  const entries: WorkEntry[] = []
+  let files: string[]
+  try {
+    files = readdirSync(dir)
+  } catch {
+    return entries
+  }
+  for (const f of files) {
+    if (!suffixes.some((s) => f.endsWith(s))) {
+      continue
+    }
+    try {
+      const path = join(dir, f)
+      const mtimeMs = statSync(path).mtimeMs
+      const lines = readFileSync(path, 'utf8').split('\n')
+      if (!markerLive(lines[0], mtimeMs, LIVE_MARKER_MS, now)) {
+        continue
+      }
+      for (const line of lines.slice(1)) {
+        const d = line.trim()
+        if (d !== '') {
+          entries.push({ detail: d, mtimeMs })
+        }
+      }
+    } catch {
+      // unreadable marker — skip
+    }
+  }
+  return entries
+}
+
 /** Every detail line of every live session marker — a session claiming
  *  two beads keeps both, so occupancy reads them all (a first-line peek
  *  would miss the second). Liveness is owner-pid first (bro-b87b: a
@@ -249,34 +297,7 @@ export function liveWorkDetails(
   suffixes: readonly string[] = ['.work'],
   now: number = Date.now()
 ): string[] {
-  const details: string[] = []
-  let files: string[]
-  try {
-    files = readdirSync(dir)
-  } catch {
-    return details
-  }
-  for (const f of files) {
-    if (!suffixes.some((s) => f.endsWith(s))) {
-      continue
-    }
-    try {
-      const path = join(dir, f)
-      const lines = readFileSync(path, 'utf8').split('\n')
-      if (!markerLive(lines[0], statSync(path).mtimeMs, LIVE_MARKER_MS, now)) {
-        continue
-      }
-      for (const line of lines.slice(1)) {
-        const d = line.trim()
-        if (d !== '') {
-          details.push(d)
-        }
-      }
-    } catch {
-      // unreadable marker — skip
-    }
-  }
-  return details
+  return liveWorkEntries(dir, suffixes, now).map((e) => e.detail)
 }
 
 /** An .exit file not yet harvested into the registry is death proof too
