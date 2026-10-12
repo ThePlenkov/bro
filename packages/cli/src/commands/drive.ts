@@ -964,13 +964,18 @@ interface FixerSpawn {
   attempt?: { head: string; cls: string }
 }
 
-/** The attempt record on the fixer bead's registry entry — one head
- *  plus the blocker classes already tried on it. A head move resets
- *  the record (a pushed head earns a fresh round); a `down`/reap of
- *  the entry clears it (operator semantics). */
+/** The attempt record on the fixer bead's registry entry — one head,
+ *  the blocker classes whose OWN run exited ok on it (`spent`), and
+ *  the class the entry's `cause` currently describes (`current`).
+ *  Per-class, never shared: a later ok run must not spend a class
+ *  whose own run crashed, and a crash must not un-spend a class that
+ *  earned its ok. A head move resets the record (a pushed head earns
+ *  a fresh round); a `down`/reap of the entry clears it (operator
+ *  semantics). */
 interface FixerAttempt {
   head: string
-  classes: string[]
+  spent: string[]
+  current: string
 }
 
 function fixerAttemptOf(entry: AgentRegistryEntry | undefined): FixerAttempt | undefined {
@@ -978,41 +983,74 @@ function fixerAttemptOf(entry: AgentRegistryEntry | undefined): FixerAttempt | u
   if (typeof v !== 'object' || v === null) {
     return undefined
   }
-  const a = v as Partial<FixerAttempt>
-  return typeof a.head === 'string' && Array.isArray(a.classes)
-    ? { head: a.head, classes: a.classes.filter((c): c is string => typeof c === 'string') }
-    : undefined
+  const a = v as Partial<FixerAttempt> & { classes?: unknown }
+  const strings = (xs: unknown): string[] =>
+    Array.isArray(xs) ? xs.filter((c): c is string => typeof c === 'string') : []
+  if (typeof a.head !== 'string') {
+    return undefined
+  }
+  if (Array.isArray(a.spent) && typeof a.current === 'string') {
+    return { head: a.head, spent: strings(a.spent), current: a.current }
+  }
+  // pre-split shape {head, classes} — every class shared the entry's
+  // one cause; its best reading is 'all spent iff the cause was ok'
+  if (Array.isArray(a.classes)) {
+    return { head: a.head, spent: entry?.cause === 'ok' ? strings(a.classes) : [], current: '' }
+  }
+  return undefined
 }
 
 /** The dedup verdict: this (head, class) already ran a fixer that
  *  exited clean — the same prompt on the same head is deterministic
- *  replay. `cause` is read off the entry (the connector harvests it
- *  into the registry at .exit time): only 'ok' is a deliberated
- *  verdict — crash/lost/unclassified exits keep respawn semantics,
- *  and rate_limited/quota are refused downstream by the spawn guard.
- *  `stopped` lifts the dedup like it lifts a budget wall — `bro agents
- *  down` is the operator's manual clear. */
+ *  replay. A class is spent when its own ok exit promoted it into
+ *  `spent`, or it's the entry's `current` class and `cause` reads
+ *  'ok' (the connector harvests cause at .exit time): only 'ok' is a
+ *  deliberated verdict — crash/lost/unclassified exits keep respawn
+ *  semantics, and rate_limited/quota are refused downstream by the
+ *  spawn guard. `stopped` lifts the dedup like it lifts a budget
+ *  wall — `bro agents down` is the operator's manual clear. */
 export function fixerAttemptSpent(
   entry: AgentRegistryEntry | undefined,
   head: string,
   cls: string
 ): boolean {
-  if (entry?.cause !== 'ok' || entry.stopped === true) {
+  if (entry === undefined || entry.stopped === true) {
     return false
   }
   const a = fixerAttemptOf(entry)
-  return a?.head === head && a.classes.includes(cls)
+  if (a?.head !== head) {
+    return false
+  }
+  return a.spent.includes(cls) || (a.current === cls && entry.cause === 'ok')
 }
 
 /** Stamp the attempt on the fixer bead's entry — runs inside the
  *  spawn's locked section right after the spawn write (the lock is
- *  re-entrant; the patch merges so connector fields survive). */
-function recordFixerAttempt(dir: string, molStep: string, head: string, cls: string): void {
-  const prev = fixerAttemptOf(readAgentRegistry(dir)[molStep])
-  const classes = prev?.head === head ? prev.classes : []
-  patchAgentRegistry(dir, molStep, {
-    fixerAttempt: { head, classes: classes.includes(cls) ? classes : [...classes, cls] },
-  })
+ *  re-entrant; the patch merges so connector fields survive).
+ *  `prevEntry` is the entry read BEFORE `spawnStepAgent` reset
+ *  `cause` — the run that just finished promotes its `current` class
+ *  into `spent` iff that cause was 'ok'; a crashed class stays
+ *  respawn-able, which is the whole point of tracking per class. */
+export function recordFixerAttempt(
+  dir: string,
+  molStep: string,
+  prevEntry: AgentRegistryEntry | undefined,
+  head: string,
+  cls: string
+): void {
+  const prev = fixerAttemptOf(prevEntry)
+  const sameHead = prev?.head === head && prevEntry?.stopped !== true
+  const spent = sameHead ? [...(prev?.spent ?? [])] : []
+  if (
+    sameHead &&
+    prevEntry?.cause === 'ok' &&
+    prev !== undefined &&
+    prev.current !== '' &&
+    !spent.includes(prev.current)
+  ) {
+    spent.push(prev.current)
+  }
+  patchAgentRegistry(dir, molStep, { fixerAttempt: { head, spent, current: cls } })
 }
 
 /** Cheap pre-check for the locked dedup inside spawnFixerAgent — a
@@ -1083,26 +1121,24 @@ async function spawnFixerAgent(
     if (occ !== undefined) {
       return { pr, link, verdict: 'occupied', detail: occ }
     }
-    // same-head dedup: a clean-exit fixer already ran this class's work
-    // order on this head — replaying it is deterministic burn. Read
-    // inside the lock so a respawn that landed during the wait can't
-    // be mislabeled (the spawn write below clears `cause`, so this
-    // read must precede it). The caller may have pre-checked with
-    // fixerSpent — same verdict either way.
-    if (s.attempt !== undefined && s.fixer !== undefined) {
-      const entry = readAgentRegistry(ctx.mainRoot)[s.fixer.id]
-      if (fixerAttemptSpent(entry, s.attempt.head, s.attempt.cls)) {
-        return {
-          pr,
-          link,
-          verdict: 'fixer-spent',
-          detail:
-            `${s.attempt.cls} fixer already exited clean on this head — ` +
-            'a pushed head earns a fresh round',
-        }
+    const bead = s.fixer ?? ensureFixerBead(ctx.store, pr, link, s.branch)
+    // the pre-spawn entry — dedup verdict AND the prev run's cause:
+    // the spawn write below resets `cause`, and recordFixerAttempt
+    // must promote the run that just finished by what it was BEFORE
+    // this spawn, not after. Read inside the lock so a respawn that
+    // landed during the wait can't be mislabeled. The caller may have
+    // pre-checked with fixerSpent — same verdict either way.
+    const prevEntry = readAgentRegistry(ctx.mainRoot)[bead.id]
+    if (s.attempt !== undefined && fixerAttemptSpent(prevEntry, s.attempt.head, s.attempt.cls)) {
+      return {
+        pr,
+        link,
+        verdict: 'fixer-spent',
+        detail:
+          `${s.attempt.cls} fixer already exited clean on this head — ` +
+          'a pushed head earns a fresh round',
       }
     }
-    const bead = s.fixer ?? ensureFixerBead(ctx.store, pr, link, s.branch)
     try {
       const info = await spawnStepAgent(ctx.mainRoot, ctx.env, {
         molStep: bead.id,
@@ -1112,7 +1148,7 @@ async function spawnFixerAgent(
         env: { BRO_PR: String(pr), BRO_PR_URL: link },
       })
       if (s.attempt !== undefined) {
-        recordFixerAttempt(ctx.mainRoot, bead.id, s.attempt.head, s.attempt.cls)
+        recordFixerAttempt(ctx.mainRoot, bead.id, prevEntry, s.attempt.head, s.attempt.cls)
       }
       const pid = info.pid === undefined ? '' : ` pid ${info.pid}`
       const tag = s.tag ?? ''

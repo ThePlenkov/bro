@@ -3,7 +3,14 @@ import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { procStat, type AgentInfo, type TaskRow, type TaskStore } from '@broject/core'
+import {
+  patchAgentRegistry,
+  procStat,
+  readAgentRegistry,
+  type AgentInfo,
+  type TaskRow,
+  type TaskStore,
+} from '@broject/core'
 import type { ListedWatch } from '@broject/act'
 import {
   agentProcessesIn,
@@ -22,6 +29,7 @@ import {
   freshOccupancy,
   liveWorkDetails,
   occupied,
+  recordFixerAttempt,
   registryAgents,
   registryEntryState,
   supervisedBy,
@@ -895,7 +903,7 @@ describe('fixerAttemptSpent — same-head dedup (bro-atb2g)', () => {
   })
 
   test('only a clean-exit attempt on the same head+class spends', () => {
-    const e = entry({ cause: 'ok', fixerAttempt: { head: 'abc', classes: ['ci'] } })
+    const e = entry({ cause: 'ok', fixerAttempt: { head: 'abc', spent: [], current: 'ci' } })
     assert.equal(fixerAttemptSpent(e, 'abc', 'ci'), true)
     // a moved head earns a fresh round
     assert.equal(fixerAttemptSpent(e, 'def', 'ci'), false)
@@ -906,8 +914,24 @@ describe('fixerAttemptSpent — same-head dedup (bro-atb2g)', () => {
     assert.equal(fixerAttemptSpent(undefined, 'abc', 'ci'), false)
   })
 
+  test('a promoted class stays spent through a later crash — per-class, not per-entry', () => {
+    // ci ran ok then sast ran and crashed: cause describes sast's run —
+    // ci keeps its own ok (spent), sast stays respawn-able
+    const e = entry({ cause: 'crash', fixerAttempt: { head: 'abc', spent: ['ci'], current: 'sast' } })
+    assert.equal(fixerAttemptSpent(e, 'abc', 'ci'), true)
+    assert.equal(fixerAttemptSpent(e, 'abc', 'sast'), false)
+  })
+
+  test('a later ok run does not spend a class whose own run crashed', () => {
+    // sast crashed; a following ci run exited ok — the entry's cause is
+    // 'ok' but sast never earned its own ok → still respawn-able
+    const e = entry({ cause: 'ok', fixerAttempt: { head: 'abc', spent: ['ci'], current: 'ci' } })
+    assert.equal(fixerAttemptSpent(e, 'abc', 'sast'), false)
+    assert.equal(fixerAttemptSpent(e, 'abc', 'ci'), true)
+  })
+
   test('non-ok causes stay respawn-able; stopped lifts the dedup', () => {
-    const att = { head: 'abc', classes: ['ci'] }
+    const att = { head: 'abc', spent: [], current: 'ci' }
     for (const cause of ['crash', 'rate_limited', 'quota', 'auth']) {
       assert.equal(
         fixerAttemptSpent(entry({ cause, fixerAttempt: att }), 'abc', 'ci'),
@@ -928,12 +952,64 @@ describe('fixerAttemptSpent — same-head dedup (bro-atb2g)', () => {
     )
   })
 
+  test('the pre-split {head, classes} record still reads — legacy compat', () => {
+    // every listed class shared the one cause: all spent iff ok
+    const ok = entry({ cause: 'ok', fixerAttempt: { head: 'abc', classes: ['ci'] } })
+    assert.equal(fixerAttemptSpent(ok, 'abc', 'ci'), true)
+    const crash = entry({ cause: 'crash', fixerAttempt: { head: 'abc', classes: ['ci'] } })
+    assert.equal(fixerAttemptSpent(crash, 'abc', 'ci'), false)
+  })
+
   test('a torn record fails open', () => {
-    for (const fixerAttempt of ['x', 7, null, { head: 1 }, { head: 'a', classes: 'ci' }]) {
+    for (const fixerAttempt of [
+      'x',
+      7,
+      null,
+      { head: 1 },
+      { head: 'a', classes: 'ci' },
+      { head: 'a', spent: 'ci', current: 'ci' },
+    ]) {
       assert.equal(
         fixerAttemptSpent(entry({ cause: 'ok', fixerAttempt }), 'a', 'ci'),
         false
       )
     }
+  })
+
+  test('recordFixerAttempt promotes only the class whose own cause was ok', () => {
+    const { root, main } = initRepo('bro-drive-attempt-')
+    inside(main, root, () => {
+      // the entry the spawn wrote — patchAgentRegistry merges onto it
+      // (an agentId-less write reads back as torn and drops)
+      patchAgentRegistry(main, 'fx-1', { agentId: 'native-x', backend: 'native' })
+      // ci exited ok → the sast spawn promotes 'ci' into spent
+      recordFixerAttempt(
+        main,
+        'fx-1',
+        entry({ cause: 'ok', fixerAttempt: { head: 'h', spent: [], current: 'ci' } }),
+        'h',
+        'sast'
+      )
+      let att = readAgentRegistry(main)['fx-1']?.fixerAttempt as {
+        head: string
+        spent: string[]
+        current: string
+      }
+      assert.deepEqual(att, { head: 'h', spent: ['ci'], current: 'sast' })
+      // sast crashed → the ci replay must NOT promote sast
+      recordFixerAttempt(
+        main,
+        'fx-1',
+        entry({ cause: 'crash', fixerAttempt: { head: 'h', spent: ['ci'], current: 'sast' } }),
+        'h',
+        'ci'
+      )
+      att = readAgentRegistry(main)['fx-1']?.fixerAttempt as typeof att
+      assert.deepEqual(att, { head: 'h', spent: ['ci'], current: 'ci' })
+      // a moved head resets the record
+      recordFixerAttempt(main, 'fx-1', entry({ cause: 'ok', fixerAttempt: att }), 'h2', 'sast')
+      att = readAgentRegistry(main)['fx-1']?.fixerAttempt as typeof att
+      assert.deepEqual(att, { head: 'h2', spent: [], current: 'sast' })
+    })
   })
 })
