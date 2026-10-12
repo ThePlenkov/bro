@@ -85,17 +85,23 @@ function artifactDirs(root: string): string[] {
   return [...dirs]
 }
 
-/** `--pull`: materialize the data ref, then replicate stores — a store
- *  failure makes the whole restore exit nonzero (reporting success
- *  would lie about the outcome). Failures throw — the CLI's main catch
- *  prints the message and exits 1, exactly what process.exit did. */
+/** `--pull`: materialize the data ref, then replicate stores. An absent
+ *  remote ref is the empty-restore case — nothing to pull, and the
+ *  store sync must still run (a rig can carry beads without ever
+ *  pushing artifacts). A failed pull or a store failure exits nonzero —
+ *  reporting success would lie about the outcome. Failures throw — the
+ *  CLI's main catch prints the message and exits 1, exactly what
+ *  process.exit did. */
 function syncPull(root: string, cfg: ReturnType<typeof loadBroConfig>): void {
   const { ref, remote, beads } = cfg.sync
   const written = dataRefPull(root, remote, ref)
-  if (written < 0) {
-    throw new Error(`bro sync: remote ${remote} has no ${ref}`)
+  if (written === -1) {
+    console.log(`bro sync: remote ${remote} has no ${ref} — nothing to pull`)
+  } else if (written < 0) {
+    throw new Error(`bro sync: could not fetch ${ref} from ${remote}`)
+  } else {
+    console.log(`bro sync: materialized ${written} file(s) from ${ref}`)
   }
-  console.log(`bro sync: materialized ${written} file(s) from ${ref}`)
   if (beads && syncStores(root, cfg.connectors) > 0) {
     throw new Error('bro sync: task store replication failed — local state may be stale')
   }

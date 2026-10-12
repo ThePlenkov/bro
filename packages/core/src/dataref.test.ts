@@ -141,6 +141,12 @@ describe('dataRefPush / dataRefPull', () => {
     assert.equal(dataRefPull(root), -1)
   })
 
+  test('pull with an unreachable remote reports -2', () => {
+    const root = makeRepo()
+    git(root, ['remote', 'add', 'origin', join(tmpDir('bro-dataref-gone-'), 'gone.git')])
+    assert.equal(dataRefPull(root), -2)
+  })
+
   test('diverged replicas merge .jsonl by line union', () => {
     const remote = makeBare()
     const r1 = makeRepo()

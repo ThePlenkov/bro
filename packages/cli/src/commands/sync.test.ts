@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { syncAfterAudit } from './loop.ts'
 import { runSyncCommand } from './sync.ts'
-import { initRepo, inside, tmpDir } from './testrepo.ts'
+import { git, initRepo, inside, tmpDir } from './testrepo.ts'
 
 /** process.exit stubbed into a throw — `runSyncCommand` runs in-process
  *  inside the loop's exit audit, so a hard exit anywhere on its path
@@ -91,6 +91,31 @@ describe('runSyncCommand', () => {
       assert.ok(
         out.some((l) => /bro sync: \.agents → refs\/bro\/data/.test(l)),
         out.join('\n')
+      )
+    })
+  })
+
+  test('--pull with no remote data ref is a no-op — the restore still runs', () => {
+    const { root, main } = initRepo('bro-sync-pull-none-')
+    const remote = join(root, 'remote.git')
+    git(['init', '--bare', '-q', '-b', 'main', remote], root)
+    git(['remote', 'add', 'origin', remote], main)
+    inside(main, root, () => {
+      const { out } = capture(() => runSyncCommand(['--pull']))
+      assert.ok(
+        out.some((l) => /has no refs\/bro\/data — nothing to pull/.test(l)),
+        out.join('\n')
+      )
+    })
+  })
+
+  test('--pull with an unreachable remote throws — a failed restore is not success', () => {
+    const { root, main } = initRepo('bro-sync-pull-dead-')
+    git(['remote', 'add', 'origin', join(root, 'gone.git')], main)
+    inside(main, root, () => {
+      assert.throws(
+        () => capture(() => runSyncCommand(['--pull'])),
+        threwNotExited(/could not fetch refs\/bro\/data/)
       )
     })
   })

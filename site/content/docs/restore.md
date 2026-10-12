@@ -26,7 +26,8 @@ state ride `refs/bro/data`.
 ```bash
 git clone https://github.com/<org>/<repo>.git && cd <repo>
 # repo bootstrap — for bro itself: npm ci && npm run build
-bro work sync --pull        # materializes refs/bro/data into the worktree, then runs bd sync
+bro work sync --pull        # materializes refs/bro/data into the worktree, then runs bd sync;
+                            # a remote with no data ref just prints "nothing to pull"
 bro review drive install    # re-arms the merge path and brings the supervisor up — the
                             # want-marker is machine-local, so a clone starts with none
 bro review act rearm        # resurrect dead PR watch markers (re-arms, never duplicates)
