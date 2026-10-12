@@ -1014,6 +1014,7 @@ export const CONFIG_SECTION_LAYERS: Record<string, 'operator' | 'policy'> = {
   agents: 'operator',
   fleet: 'operator',
   beads: 'operator',
+  rig: 'operator',
   // policy — identical-for-everyone project rules
   act: 'policy',
   debt: 'policy',
