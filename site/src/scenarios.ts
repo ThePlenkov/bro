@@ -113,7 +113,7 @@ export const groups: Group[] = [
           user('push it, then take the docs bead.'),
           bash('git push'),
           bg('bro review act wait 42 --merge'),
-          bg('bro review watch --every 120 --notify'),
+          bg('bro review watch --every 120 --for 900 --notify'),
           agent('Two watchers in background shells. Not subagents — zero tokens while they wait.'),
           bash('bd ready'),
           out('bro-7k2  docs: events page'),

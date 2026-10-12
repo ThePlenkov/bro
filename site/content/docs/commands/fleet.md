@@ -69,14 +69,17 @@ spawn blindly, especially when a backend is degraded. The notify connector
 drains unseen drops during the next post-tool probe, so a watcher can reach
 the parent session without a wait loop.
 
-Detach the watcher, don't block on it: `bro review watch --every N --notify` in a
-background shell keeps a heartbeat running while the agent works — the
-`--notify` drops surface in the parent session mid-turn, on its next tool
-call (the mailbox is pull-based: a drop lands when the session next acts,
-it never wakes a sleeping one). The session-pulse model is the durable
-form: `bro review watch install` arms `bro/pulse.json`, and a session start with
-no live pulse (lock holder dead) gets the rearm nudge — the orchestrator
-session then runs `bro review watch --every N --for S --notify` in a background
+Detach the watcher, don't block on it: `bro review watch --every N --for S
+--notify` in a background shell keeps a bounded heartbeat running while the
+agent works — `--for` caps the watcher window; it does not tie the
+watcher to session exit (an unbounded `--every` is for an external
+supervisor that owns its lifecycle), and the `--notify` drops surface in the parent
+session mid-turn, on its next tool call (the mailbox is pull-based: a drop
+lands when the session next acts, it never wakes a sleeping one). The
+session-pulse model is the durable form: `bro review watch install` arms
+`bro/pulse.json`, and a session start with no live pulse (lock holder dead)
+gets the rearm nudge — the orchestrator session then runs
+`bro review watch --every N --for S --notify` in a background
 shell; the window's end is the wake event, followed by one `bro review drive`
 pass, a digest, and the next window. OS timers are retired — the session
 owns the cadence, and spawned workers (`BRO_AGENT_ID`) never arm it.
