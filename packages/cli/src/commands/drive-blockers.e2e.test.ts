@@ -10,56 +10,25 @@
  *  a moved head earns a fresh round. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  bead,
+  assertNoSpawn,
+  assertOrphanMerged,
+  driveFixture,
+  driveVerdict as verdict,
+  exitRecorded,
+  fixerRows,
   git,
-  initRepo,
   insideAsync,
-  installFakeBd,
-  installFakeHost,
-  readBeads,
+  occupyBranch,
   readHostState,
-  runCli,
+  spawnLog,
+  waitFor,
   writeHostState,
-  type CliResult,
 } from './testrepo.ts'
 
-interface Fixture {
-  root: string
-  main: string
-  db: string
-  hostState: string
-  run: (args: string[]) => CliResult
-}
-
-function fixture(): Fixture {
-  const { root, main } = initRepo('bro-drive-blockers-')
-  const { binDir, db } = installFakeBd(root)
-  const host = installFakeHost(main)
-  writeFileSync(
-    join(main, 'bro.config.json'),
-    JSON.stringify({
-      plugins: ['./fakehost.ts'],
-      connectors: { reviews: 'fakehost' },
-      loop: { agent: `node ${host.agent}` },
-    })
-  )
-  const env = {
-    PATH: `${binDir}:${process.env.PATH ?? ''}`,
-    HOME: root,
-    FAKE_BD_DB: db,
-    FAKE_HOST_STATE: host.state,
-  }
-  return {
-    root,
-    main,
-    db,
-    hostState: host.state,
-    run: (args) => runCli(['drive', ...args], { cwd: main, env }),
-  }
-}
+const fixture = () => driveFixture('bro-drive-blockers-')
 
 /** One orphaned PR whose only blocker is a settled-red check. */
 const ciFailing = {
@@ -88,34 +57,6 @@ const sastFindings = {
   },
 }
 
-const verdict = (r: CliResult): { verdict?: string; detail?: string } =>
-  (JSON.parse(r.stdout.trim().split('\n').find((l) => l.includes('"verdict"')) ?? '{}') ?? {}) as {
-    verdict?: string
-    detail?: string
-  }
-
-async function waitFor(cond: () => boolean, ms = 15_000): Promise<boolean> {
-  const deadline = Date.now() + ms
-  while (Date.now() < deadline) {
-    if (cond()) {
-      return true
-    }
-    await new Promise((r) => setTimeout(r, 25))
-  }
-  return false
-}
-
-const fixerRows = (db: string): Array<Record<string, unknown>> =>
-  readBeads(db).filter((r) => ((r.labels as string[] | undefined) ?? []).includes('fixer'))
-
-const exitRecorded = (main: string): boolean => {
-  const agentsDir = join(main, '.git', 'bro', 'agents')
-  return existsSync(agentsDir) && readdirSync(agentsDir).some((n) => n.endsWith('.exit'))
-}
-
-const spawnLog = (main: string): string =>
-  existsSync(join(main, 'spawns.log')) ? readFileSync(join(main, 'spawns.log'), 'utf8') : ''
-
 describe('bro drive — ci/sast blockers on orphaned PRs (bro-atb2g)', () => {
   test('ci_failing spawns the CI fixer; the next pass merges and closes its bead', async () => {
     const f = fixture()
@@ -136,10 +77,7 @@ describe('bro drive — ci/sast blockers on orphaned PRs (bro-atb2g)', () => {
       assert.equal(fixer?.external_ref, 'drive:pr:7')
 
       // checks cleared by the agent → gate green → orphan merge
-      const second = verdict(f.run(['--once', '--json']))
-      assert.equal(second.verdict, 'merged', second.detail)
-      assert.equal(bead(f.db, String(fixer?.id))?.status, 'closed')
-      assert.match(String(bead(f.db, String(fixer?.id))?.close_reason), /merged via/)
+      assertOrphanMerged(f, f.run(['--once', '--json']), fixer?.id)
     })
   })
 
@@ -159,10 +97,7 @@ describe('bro drive — ci/sast blockers on orphaned PRs (bro-atb2g)', () => {
       assert.equal(await waitFor(() => exitRecorded(f.main)), true)
       assert.match(spawnLog(f.main), /sast cleared annotations/)
 
-      const fixer = fixerRows(f.db)[0]
-      const second = verdict(f.run(['--once', '--json']))
-      assert.equal(second.verdict, 'merged', second.detail)
-      assert.equal(bead(f.db, String(fixer?.id))?.status, 'closed')
+      assertOrphanMerged(f, f.run(['--once', '--json']), fixerRows(f.db)[0]?.id)
     })
   })
 
@@ -195,11 +130,9 @@ describe('bro drive — ci/sast blockers on orphaned PRs (bro-atb2g)', () => {
       // explicit null = the annotations fetch failed — infrastructure
       // uncertainty, not a finding a fixer could clear
       writeHostState(f.hostState, { prs: sastFindings, annotations: { sonarcloud: null } })
-      const v = verdict(f.run(['--once', '--json']))
-      assert.equal(v.verdict, 'blocked')
-      assert.match(v.detail ?? '', /SAST check\(s\) with unknown annotation status/)
-      assert.equal(fixerRows(f.db).length, 0)
-      assert.equal(spawnLog(f.main), '')
+      const r = f.run(['--once', '--json'])
+      assert.match(verdict(r).detail ?? '', /SAST check\(s\) with unknown annotation status/)
+      assertNoSpawn(f, r, 'blocked')
     })
   })
 
@@ -220,10 +153,7 @@ describe('bro drive — ci/sast blockers on orphaned PRs (bro-atb2g)', () => {
           ],
         },
       })
-      const v = verdict(f.run(['--once', '--json']))
-      assert.equal(v.verdict, 'ci-resolved', v.detail)
-      assert.equal(fixerRows(f.db).length, 0)
-      assert.equal(spawnLog(f.main), '')
+      assertNoSpawn(f, f.run(['--once', '--json']), 'ci-resolved')
       // no fixer worktree was paid for the resolved race either
       assert.equal(existsSync(join(f.root, 'main--fx-a')), false)
     })
@@ -243,10 +173,7 @@ describe('bro drive — ci/sast blockers on orphaned PRs (bro-atb2g)', () => {
           annotations: [{ sonarcloud: 3 }, {}],
         },
       })
-      const v = verdict(f.run(['--once', '--json']))
-      assert.equal(v.verdict, 'sast-resolved', v.detail)
-      assert.equal(fixerRows(f.db).length, 0)
-      assert.equal(spawnLog(f.main), '')
+      assertNoSpawn(f, f.run(['--once', '--json']), 'sast-resolved')
     })
   })
 
@@ -255,13 +182,8 @@ describe('bro drive — ci/sast blockers on orphaned PRs (bro-atb2g)', () => {
     await insideAsync(f.main, f.root, async () => {
       git(['branch', 'work/fx-a'], f.main)
       writeHostState(f.hostState, { prs: ciFailing })
-      const hooks = join(f.main, '.git', 'bro', 'hooks')
-      mkdirSync(hooks, { recursive: true })
-      writeFileSync(join(hooks, 's1.work'), `${Date.now()}\nwork/fx-a\n`)
-      const v = verdict(f.run(['--once', '--json']))
-      assert.equal(v.verdict, 'occupied', v.detail)
-      assert.equal(fixerRows(f.db).length, 0)
-      assert.equal(spawnLog(f.main), '')
+      occupyBranch(f.main, 'work/fx-a')
+      assertNoSpawn(f, f.run(['--once', '--json']), 'occupied')
     })
   })
 
@@ -274,10 +196,7 @@ describe('bro drive — ci/sast blockers on orphaned PRs (bro-atb2g)', () => {
         annotations: { sonarcloud: 2 },
         reviewedShas: ['a', 'b', 'c', 'd', 'e'],
       })
-      const v = verdict(f.run(['--once', '--json']))
-      assert.equal(v.verdict, 'blocked')
-      assert.equal(fixerRows(f.db).length, 0)
-      assert.equal(spawnLog(f.main), '')
+      assertNoSpawn(f, f.run(['--once', '--json']), 'blocked')
     })
   })
 
@@ -292,10 +211,7 @@ describe('bro drive — ci/sast blockers on orphaned PRs (bro-atb2g)', () => {
         prs: ciFailing,
         readQueues: { meta: [{}, { state: 'MERGED' }] },
       })
-      const v = verdict(f.run(['--once', '--json']))
-      assert.equal(v.verdict, 'settled', v.detail)
-      assert.equal(fixerRows(f.db).length, 0)
-      assert.equal(spawnLog(f.main), '')
+      assertNoSpawn(f, f.run(['--once', '--json']), 'settled')
     })
   })
 

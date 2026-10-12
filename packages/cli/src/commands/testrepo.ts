@@ -11,6 +11,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
@@ -989,4 +990,106 @@ export function writeHostState(state: string, patch: Record<string, unknown>): v
     ? (JSON.parse(readFileSync(state, 'utf8')) as Record<string, unknown>)
     : {}
   writeFileSync(state, JSON.stringify({ ...cur, ...patch }))
+}
+
+// --- drive e2e scaffolding ------------------------------------------------
+// The `bro drive` suites share the repo + fake bd + fake host wiring and
+// the verdict/spawn assertions — declared once here, per the fixture-clone
+// rule at the top of this file.
+
+export interface DriveFixture {
+  root: string
+  main: string
+  db: string
+  hostState: string
+  run: (args: string[]) => CliResult
+}
+
+/** Repo + fake bd + fake host + bro.config wiring — `loop.agent` is the
+ *  fixer spawn's command fallback (agents.native.command unset). */
+export function driveFixture(prefix: string): DriveFixture {
+  const { root, main } = initRepo(prefix)
+  const { binDir, db } = installFakeBd(root)
+  const host = installFakeHost(main)
+  writeFileSync(
+    join(main, 'bro.config.json'),
+    JSON.stringify({
+      plugins: ['./fakehost.ts'],
+      connectors: { reviews: 'fakehost' },
+      loop: { agent: `node ${host.agent}` },
+    })
+  )
+  const env = {
+    PATH: `${binDir}:${process.env.PATH ?? ''}`,
+    HOME: root,
+    FAKE_BD_DB: db,
+    FAKE_HOST_STATE: host.state,
+  }
+  return {
+    root,
+    main,
+    db,
+    hostState: host.state,
+    run: (args) => runCli(['drive', ...args], { cwd: main, env }),
+  }
+}
+
+/** The one `{"verdict": …}` row on `drive --json` stdout. */
+export function driveVerdict(r: CliResult): { verdict?: string; detail?: string } {
+  return (JSON.parse(r.stdout.trim().split('\n').find((l) => l.includes('"verdict"')) ?? '{}') ??
+    {}) as { verdict?: string; detail?: string }
+}
+
+export async function waitFor(cond: () => boolean, ms = 15_000): Promise<boolean> {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) {
+    if (cond()) {
+      return true
+    }
+    await new Promise((r) => setTimeout(r, 25))
+  }
+  return false
+}
+
+/** Bead rows labelled 'fixer' — the drive sweep's work-order ledger. */
+export function fixerRows(db: string): Array<Record<string, unknown>> {
+  return readBeads(db).filter((r) => ((r.labels as string[] | undefined) ?? []).includes('fixer'))
+}
+
+/** A spawned fixer is detached — completion is its .exit record on the
+ *  registry, never a process wait. */
+export function exitRecorded(main: string): boolean {
+  const agentsDir = join(main, '.git', 'bro', 'agents')
+  return existsSync(agentsDir) && readdirSync(agentsDir).some((n) => n.endsWith('.exit'))
+}
+
+export function spawnLog(main: string): string {
+  const log = join(main, 'spawns.log')
+  return existsSync(log) ? readFileSync(log, 'utf8') : ''
+}
+
+/** A live session marker naming the branch — the occupancy guard's
+ *  signal that a worker already owns it. */
+export function occupyBranch(main: string, branch: string): void {
+  const hooks = join(main, '.git', 'bro', 'hooks')
+  mkdirSync(hooks, { recursive: true })
+  writeFileSync(join(hooks, 's1.work'), `${Date.now()}\n${branch}\n`)
+}
+
+/** The verdict line plus the no-spawn ledger every declined/capped
+ *  drive pass owes: no fixer bead, no spawn-log entry. */
+export function assertNoSpawn(f: DriveFixture, r: CliResult, want: string): void {
+  const v = driveVerdict(r)
+  assert.equal(v.verdict, want, v.detail)
+  assert.equal(fixerRows(f.db).length, 0)
+  assert.equal(spawnLog(f.main), '')
+}
+
+/** The post-fixer pass: gate green → the orphan merged and its fixer
+ *  bead closed 'merged via …'. */
+export function assertOrphanMerged(f: DriveFixture, r: CliResult, fixerId: unknown): void {
+  const v = driveVerdict(r)
+  assert.equal(v.verdict, 'merged', v.detail)
+  assert.equal(bead(f.db, String(fixerId))?.status, 'closed')
+  assert.match(String(bead(f.db, String(fixerId))?.close_reason), /merged via/)
 }

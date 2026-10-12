@@ -1159,18 +1159,11 @@ async function spawnRebaseFixer(
   if (meta.mergeable === 'MERGEABLE') {
     return { pr, link, verdict: 'conflict-resolved' }
   }
-  const spent = fixerSpent(ctx, pr, meta.headSha, fixer, 'rebase')
-  if (spent !== undefined) {
-    return spent
+  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'rebase')
+  if ('verdict' in lane) {
+    return lane
   }
-  let wt = worktree
-  if (wt === undefined) {
-    const ensured = ensureFixerWorktree(ctx.mainRoot, state.headRef)
-    if (ensured.path === undefined) {
-      return { pr, link, verdict: 'no-worktree', detail: ensured.err }
-    }
-    wt = ensured.path
-  }
+  const wt = lane.wt
   return spawnFixerAgent(ctx, pr, {
     branch: state.headRef,
     wt,
@@ -1196,6 +1189,55 @@ function metaOf(ctx: Ctx, pr: number): Promise<PrMeta> {
   return ctx.rev.prMetaAsync === undefined
     ? Promise.resolve().then(() => ctx.rev.prMeta(t))
     : ctx.rev.prMetaAsync(t)
+}
+
+/** The spawn-path re-probe every blocking-class fixer shares: fresh
+ *  prMeta + live checks read AFTER the gate snapshot — a settle or a
+ *  moved head between the two reads is caught here, never assumed
+ *  away (meta.headSha is what dedup + annotation lookups must use). */
+async function freshOpen(
+  ctx: Ctx,
+  pr: number
+): Promise<{ link: string; meta: PrMeta; checks: CheckInfo[] } | PrVerdict> {
+  const link = ctx.rev.prLink(ctx.repo, pr)
+  let meta: PrMeta
+  let checks: CheckInfo[]
+  try {
+    ;[meta, checks] = await Promise.all([metaOf(ctx, pr), checksOf(ctx, pr)])
+  } catch (err) {
+    return { pr, link, verdict: 'probe-failed', detail: errText(err) }
+  }
+  if (meta.state !== 'OPEN') {
+    return { pr, link, verdict: 'settled', detail: meta.state.toLowerCase() }
+  }
+  return { link, meta, checks }
+}
+
+/** The shared tail of every fixer spawn — the class attempt spent on
+ *  this head → its verdict; no caller-held worktree → the branch
+ *  checkout is ensured here (or no-worktree). */
+function fixerLane(
+  ctx: Ctx,
+  pr: number,
+  link: string,
+  branch: string,
+  worktree: string | undefined,
+  fixer: TaskRow | undefined,
+  headSha: string,
+  cls: string
+): { wt: string } | PrVerdict {
+  const spent = fixerSpent(ctx, pr, headSha, fixer, cls)
+  if (spent !== undefined) {
+    return spent
+  }
+  if (worktree !== undefined) {
+    return { wt: worktree }
+  }
+  const ensured = ensureFixerWorktree(ctx.mainRoot, branch)
+  if (ensured.path === undefined) {
+    return { pr, link, verdict: 'no-worktree', detail: ensured.err }
+  }
+  return { wt: ensured.path }
 }
 
 // --- ci-fail / sast fixers (bro-atb2g) -----------------------------------------
@@ -1389,33 +1431,20 @@ async function spawnCiFixer(
   fixer: TaskRow | undefined,
   known: AgentInfo[]
 ): Promise<PrVerdict> {
-  const link = ctx.rev.prLink(ctx.repo, pr)
-  let meta: PrMeta
-  let checks: CheckInfo[]
-  try {
-    ;[meta, checks] = await Promise.all([metaOf(ctx, pr), checksOf(ctx, pr)])
-  } catch (err) {
-    return { pr, link, verdict: 'probe-failed', detail: errText(err) }
+  const fresh = await freshOpen(ctx, pr)
+  if ('verdict' in fresh) {
+    return fresh
   }
-  if (meta.state !== 'OPEN') {
-    return { pr, link, verdict: 'settled', detail: meta.state.toLowerCase() }
-  }
+  const { link, meta, checks } = fresh
   const failing = failingCiChecks(gatedChecks(ctx, checks))
   if (failing.length === 0) {
     return { pr, link, verdict: 'ci-resolved' }
   }
-  const spent = fixerSpent(ctx, pr, meta.headSha, fixer, 'ci')
-  if (spent !== undefined) {
-    return spent
+  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'ci')
+  if ('verdict' in lane) {
+    return lane
   }
-  let wt = worktree
-  if (wt === undefined) {
-    const ensured = ensureFixerWorktree(ctx.mainRoot, state.headRef)
-    if (ensured.path === undefined) {
-      return { pr, link, verdict: 'no-worktree', detail: ensured.err }
-    }
-    wt = ensured.path
-  }
+  const wt = lane.wt
   return spawnFixerAgent(ctx, pr, {
     branch: state.headRef,
     wt,
@@ -1450,17 +1479,11 @@ async function spawnSastFixer(
   fixer: TaskRow | undefined,
   known: AgentInfo[]
 ): Promise<PrVerdict> {
-  const link = ctx.rev.prLink(ctx.repo, pr)
-  let meta: PrMeta
-  let checks: CheckInfo[]
-  try {
-    ;[meta, checks] = await Promise.all([metaOf(ctx, pr), checksOf(ctx, pr)])
-  } catch (err) {
-    return { pr, link, verdict: 'probe-failed', detail: errText(err) }
+  const fresh = await freshOpen(ctx, pr)
+  if ('verdict' in fresh) {
+    return fresh
   }
-  if (meta.state !== 'OPEN') {
-    return { pr, link, verdict: 'settled', detail: meta.state.toLowerCase() }
-  }
+  const { link, meta, checks } = fresh
   const names = liveSastChecks(gatedChecks(ctx, checks)).map((c) => c.name)
   if (names.length === 0) {
     return { pr, link, verdict: 'sast-resolved' }
@@ -1480,18 +1503,11 @@ async function spawnSastFixer(
   if (!findings.some((f) => f.count !== null && f.count > 0)) {
     return { pr, link, verdict: 'sast-resolved' }
   }
-  const spent = fixerSpent(ctx, pr, meta.headSha, fixer, 'sast')
-  if (spent !== undefined) {
-    return spent
+  const lane = fixerLane(ctx, pr, link, state.headRef, worktree, fixer, meta.headSha, 'sast')
+  if ('verdict' in lane) {
+    return lane
   }
-  let wt = worktree
-  if (wt === undefined) {
-    const ensured = ensureFixerWorktree(ctx.mainRoot, state.headRef)
-    if (ensured.path === undefined) {
-      return { pr, link, verdict: 'no-worktree', detail: ensured.err }
-    }
-    wt = ensured.path
-  }
+  const wt = lane.wt
   return spawnFixerAgent(ctx, pr, {
     branch: state.headRef,
     wt,
