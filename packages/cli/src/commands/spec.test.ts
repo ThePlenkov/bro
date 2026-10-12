@@ -53,6 +53,7 @@ case "$1" in
     ' -- "$@"
     ;;
   show)
+    shift
     node -e '
       const rows = JSON.parse(require("fs").readFileSync(process.env.FAKE_BD_LIST_FILE, "utf8"))
       const ids = process.argv.slice(1).filter((a) => !a.startsWith("-"))

@@ -2380,12 +2380,14 @@ function claimClump(
   // outside the agent registry" and the spawn refuses it. The pick
   // only re-probes the store so a raced-away bead still skips down the
   // candidate chain exactly as claimUpTo's claim loop did.
-  const statuses = beadStatuses(ctx, candidates)
+  let statuses: Map<string, string> | undefined
   const lead =
     ctx.agents === undefined
       ? claimUpTo(candidates, 1, ctx.root)[0]
       : candidates.find((b) => {
-          const s = statuses.get(b.id)
+          // lazily fetched — the claimUpTo path probes on its own and
+          // must not pay an extra batch read it never reads
+          const s = (statuses ??= beadStatuses(ctx, candidates)).get(b.id)
           return s !== 'in_progress' && s !== 'closed'
         })
   if (!lead) {

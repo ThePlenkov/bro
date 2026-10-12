@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { getTasks, taskStore, type TaskStore } from './tasks.ts'
+import { getTasks, getTasksAsync, taskStore, type TaskStore, type TaskStoreAsync } from './tasks.ts'
 
 const WIN32 = process.platform === 'win32'
 
@@ -155,6 +155,27 @@ describe('taskStore', { skip: WIN32 }, () => {
       },
     } as unknown as TaskStore
     assert.deepEqual(getTasks(batched, ['x', 'y']).map((r) => r.id), ['x', 'y'])
+  })
+
+  test('getTasksAsync degrades to overlapping get without the capability', async () => {
+    const calls: string[] = []
+    const serial = {
+      get: (id: string) => {
+        calls.push(id)
+        return Promise.resolve(id === 'gone' ? undefined : { id })
+      },
+    } as unknown as TaskStoreAsync
+    assert.deepEqual((await getTasksAsync(serial, ['a', 'gone', 'b'])).map((r) => r.id), [
+      'a',
+      'b',
+    ])
+    assert.deepEqual(calls, ['a', 'gone', 'b'])
+    // and a store WITH the verb never falls back to get
+    const batched = {
+      getMany: (ids: string[]) => Promise.resolve(ids.map((id) => ({ id }))),
+      get: () => Promise.reject(new Error('get must not run when getMany exists')),
+    } as unknown as TaskStoreAsync
+    assert.deepEqual((await getTasksAsync(batched, ['x', 'y'])).map((r) => r.id), ['x', 'y'])
   })
 
   test('create maps the typed input onto bd create args', () => {
