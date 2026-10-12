@@ -30,6 +30,7 @@ import {
   lockHolderPid,
   pidAlive,
   procStat,
+  staleLock,
 } from '@broject/core'
 import { flag } from './args.ts'
 import { driveLockPath, runDriveCommand } from './drive.ts'
@@ -115,14 +116,20 @@ function writeDaemonRecord(dir: string, rec: DaemonRecord): void {
 }
 
 /** Who is supervising right now — the `drive.lock` holder when alive,
- *  else a still-alive recorded armer (child spawned, not yet holding). */
+ *  else a still-alive recorded armer (child spawned, not yet holding).
+ *  `staleLock` bounds the holder check the way a contender's steal
+ *  does: `pidAlive` alone is reuse-blind (the token is `pid:hex`, no
+ *  start time), so a hold whose heartbeat aged past the abandoned
+ *  bound doesn't count even while its pid lives — a recycled pid
+ *  masks a dead supervisor for one window at most, never forever. */
 export function daemonProbe(dir: string): {
   live: boolean
   pid?: number
   recorded: DaemonRecord | null
 } {
   const lock = driveLockPath(dir)
-  const lockPid = lock !== null && existsSync(lock) ? lockHolderPid(lock) : null
+  const lockLive = lock !== null && existsSync(lock) && !staleLock(lock)
+  const lockPid = lockLive ? lockHolderPid(lock) : null
   const recorded = readDaemonRecord(dir)
   if (lockPid !== null && pidAlive(lockPid)) {
     return { live: true, pid: lockPid, recorded }

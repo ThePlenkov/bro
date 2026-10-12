@@ -29,6 +29,7 @@ import {
   lockHolderPid,
   pidAlive,
   procStat,
+  staleLock,
   type Connector,
 } from '@broject/core'
 import { SELF_ENTRY } from './self-entry.ts'
@@ -110,11 +111,14 @@ export function disarmPulse(dir: string): DisarmState {
 }
 
 /** Is a `bro watch --every` alive on this repo? The lock's holder pid
- *  is the whole answer — a dead holder's leftover is a stale file
- *  contenders steal, not a pulse. */
+ *  bounded by the contender's steal rule is the answer: `pidAlive`
+ *  alone is reuse-blind (the token is `pid:hex`, no start time — a
+ *  recycled pid would mask a dead pulse forever), so a hold whose
+ *  heartbeat aged past the abandoned bound doesn't count even while
+ *  its pid lives. A real holder heartbeats far under the bound. */
 export function pulseLive(dir: string): { live: boolean; pid?: number } {
   const lock = pulseLockPath(dir)
-  if (lock === null || !existsSync(lock)) {
+  if (lock === null || !existsSync(lock) || staleLock(lock)) {
     return { live: false }
   }
   const pid = lockHolderPid(lock)

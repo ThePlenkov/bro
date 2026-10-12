@@ -408,6 +408,7 @@ export {
   holdFileLock,
   lockHolderPid,
   LockTimeout,
+  staleLock,
   withFileLock,
   type FileLockOptions,
   type HeldLockOptions,

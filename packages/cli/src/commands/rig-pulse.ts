@@ -35,6 +35,7 @@ import {
   loadConfig,
   lockHolderPid,
   pidAlive,
+  staleLock,
   worktreeGitDir,
   type Connector,
 } from '@broject/core'
@@ -122,12 +123,15 @@ export function disarmRigPulse(dir: string): 'disarmed' | 'absent' {
   return 'disarmed'
 }
 
-/** Is a `bro rig watch` alive on this repo? The lock's holder pid is
- *  the whole answer — a dead holder's leftover is a stale file
- *  contenders steal, not a pulse. */
+/** Is a `bro rig watch` alive on this repo? The lock's holder pid
+ *  bounded by the contender's steal rule is the answer: `pidAlive`
+ *  alone is reuse-blind (the token is `pid:hex`, no start time — a
+ *  recycled pid would mask a dead pulse forever), so a hold whose
+ *  heartbeat aged past the abandoned bound doesn't count even while
+ *  its pid lives. A real holder heartbeats far under the bound. */
 export function rigPulseLive(dir: string): { live: boolean; pid?: number } {
   const lock = rigPulseLockPath(dir)
-  if (lock === null || !existsSync(lock)) {
+  if (lock === null || !existsSync(lock) || staleLock(lock)) {
     return { live: false }
   }
   const pid = lockHolderPid(lock)

@@ -9,6 +9,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -344,10 +345,14 @@ describe('rig config section', () => {
   })
 })
 
-const rigLock = (main: string, content: string): void => {
+const rigLock = (main: string, content: string, mtimeAgoMs = 0): void => {
   const p = rigPulseLockPath(main)!
   mkdirSync(dirname(p), { recursive: true })
   writeFileSync(p, content)
+  if (mtimeAgoMs > 0) {
+    const t = new Date(Date.now() - mtimeAgoMs)
+    utimesSync(p, t, t)
+  }
 }
 
 describe('rig pulse (session-pulse model, bro-killn)', () => {
@@ -393,6 +398,10 @@ describe('rig pulse (session-pulse model, bro-killn)', () => {
       assert.deepEqual(rigPulseLive(main), { live: false })
       rigLock(main, `${process.pid}:tok`)
       assert.deepEqual(rigPulseLive(main), { live: true, pid: process.pid })
+      // a live pid on a heartbeat-dead lock is reuse, not a pulse —
+      // older than LOCK_ABANDONED_MS (15m) the steal rule calls it stale
+      rigLock(main, `${process.pid}:tok`, 20 * 60_000)
+      assert.deepEqual(rigPulseLive(main), { live: false })
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
