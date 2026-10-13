@@ -1183,3 +1183,69 @@ export function assertOrphanMerged(f: DriveFixture, r: CliResult, fixerId: unkno
   assert.equal(bead(f.db, String(fixerId))?.status, 'closed')
   assert.match(String(bead(f.db, String(fixerId))?.close_reason), /merged via/)
 }
+
+// --- shared in-process test helpers --------------------------------------
+// Command tests that drive a runXCommand() in-process need the same
+// console/exit capture and ambient-env scrub — declare them ONCE here;
+// testrepo's own header rule applies (clones count as duplication).
+
+/** process.exit interceptor — die()/usage() becomes a value, not a kill. */
+export class Exit extends Error {
+  constructor(public code: number) {
+    super(`exit ${code}`)
+  }
+}
+
+/** Capture console + intercept process.exit — die()/usage() exit 1/2. */
+export async function capture(
+  fn: () => Promise<unknown>
+): Promise<{ code: number; out: string[]; err: string[] }> {
+  const origExit = process.exit
+  const origLog = console.log
+  const origErr = console.error
+  const out: string[] = []
+  const err: string[] = []
+  console.log = (...a: unknown[]) => out.push(a.join(' '))
+  console.error = (...a: unknown[]) => err.push(a.join(' '))
+  process.exit = ((code?: number) => {
+    throw new Exit(code ?? 0)
+  }) as typeof process.exit
+  try {
+    await fn()
+    return { code: 0, out, err }
+  } catch (e) {
+    if (e instanceof Exit) {
+      return { code: e.code, out, err }
+    }
+    throw e
+  } finally {
+    process.exit = origExit
+    console.log = origLog
+    console.error = origErr
+  }
+}
+
+/** Delete ambient repo/agent pins from process.env (GIT_*, BEADS_DIR,
+ *  BRO_*, plus caller-named extras) and return a restore(). An in-process
+ *  command test run inside a real work item inherits pins that redirect
+ *  the fixture's git/beads lookups into the OUTER repo — same reason
+ *  testrepo's git() strips them from the child's env. */
+export function scrubEnv(extra: string[] = []): () => void {
+  const ambient = /^(GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_COMMON_DIR|BEADS_DIR|BRO_)/
+  const saved: Record<string, string | undefined> = {}
+  for (const k of Object.keys(process.env)) {
+    if (ambient.test(k) || extra.includes(k)) {
+      saved[k] = process.env[k]
+      delete process.env[k]
+    }
+  }
+  return () => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) {
+        delete process.env[k]
+      } else {
+        process.env[k] = v
+      }
+    }
+  }
+}

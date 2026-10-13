@@ -19,42 +19,7 @@ import { AgentNotFound } from '@broject/core'
 import type { AgentInfo, SpawnSpec } from '@broject/core'
 import { registerAgentConnector } from '../agent-connectors.ts'
 import { listScenarios, runDogfoodCommand } from './dogfood.ts'
-import { initRepo, installFakeBd } from './testrepo.ts'
-
-class Exit extends Error {
-  constructor(public code: number) {
-    super(`exit ${code}`)
-  }
-}
-
-/** Capture console + intercept process.exit — die()/usage() exit 1/2. */
-async function capture(
-  fn: () => Promise<unknown>
-): Promise<{ code: number; out: string[]; err: string[] }> {
-  const origExit = process.exit
-  const origLog = console.log
-  const origErr = console.error
-  const out: string[] = []
-  const err: string[] = []
-  console.log = (...a: unknown[]) => out.push(a.join(' '))
-  console.error = (...a: unknown[]) => err.push(a.join(' '))
-  process.exit = ((code?: number) => {
-    throw new Exit(code ?? 0)
-  }) as typeof process.exit
-  try {
-    await fn()
-    return { code: 0, out, err }
-  } catch (e) {
-    if (e instanceof Exit) {
-      return { code: e.code, out, err }
-    }
-    throw e
-  } finally {
-    process.exit = origExit
-    console.log = origLog
-    console.error = origErr
-  }
-}
+import { capture, initRepo, installFakeBd, scrubEnv } from './testrepo.ts'
 
 const dogfood = (argv: string[]) => capture(() => runDogfoodCommand(argv))
 
@@ -118,14 +83,8 @@ function fixture() {
     PATH: process.env.PATH ?? '',
     FAKE_BD_DB: process.env.FAKE_BD_DB,
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
-    scrubbed: {} as Record<string, string | undefined>,
   }
-  for (const k of Object.keys(process.env)) {
-    if (/^(GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_COMMON_DIR|BEADS_DIR|BRO_)/.test(k)) {
-      prev.scrubbed[k] = process.env[k]
-      delete process.env[k]
-    }
-  }
+  const unscrub = scrubEnv()
   process.env.PATH = `${binDir}:${prev.PATH}`
   process.env.FAKE_BD_DB = db
   // scratch repos land under $XDG_DATA_HOME/bro/dogfood — point XDG at
@@ -157,13 +116,7 @@ function fixture() {
       } else {
         process.env.XDG_DATA_HOME = prev.XDG_DATA_HOME
       }
-      for (const [k, v] of Object.entries(prev.scrubbed)) {
-        if (v === undefined) {
-          delete process.env[k]
-        } else {
-          process.env[k] = v
-        }
-      }
+      unscrub()
       rmSync(root, { recursive: true, force: true })
     },
   }
