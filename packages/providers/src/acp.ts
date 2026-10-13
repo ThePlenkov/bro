@@ -419,7 +419,8 @@ export async function acpConverse(
   opts: ProviderWireOpts,
   promptText: string,
   onUpdate: (update: SessionUpdate) => void,
-  deadline = Date.now() + 120_000
+  deadline = Date.now() + 120_000,
+  signal?: AbortSignal
 ): Promise<{ stopReason: StopReason; text: string; model: string }> {
   return withAcp(by, entry, opts, deadline, async (ctx) => {
     const { session, asAuthError, req } = await acpSession(ctx, opts, by, deadline)
@@ -440,11 +441,20 @@ export async function acpConverse(
         stopReason: response.stopReason,
         response,
       }))
+      // a gone caller cancels the turn: the dispose below ends the
+      // session and withAcp's finally kills the child — no orphan work
+      const aborted = new Promise<never>((_, reject) => {
+        const drop = () =>
+          reject(new JudgeUnavailable(`${by}: caller aborted the turn`))
+        if (signal?.aborted === true) drop()
+        signal?.addEventListener('abort', drop, { once: true })
+      })
       let text = ''
       for (;;) {
         const msg: ActiveSessionMessage = await Promise.race([
           session.nextUpdate(),
           stopP,
+          aborted,
         ])
         if (msg.kind === 'stop') {
           return { stopReason: msg.stopReason, text, model }

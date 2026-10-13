@@ -57,12 +57,13 @@ export function conductorConfig(
     )
   }
   const model = env.BRO_PROVIDER_MODEL?.trim()
+  const t = Number(env.BRO_PROVIDER_TIMEOUT_MS)
   return {
     backend,
     entry,
     model: model === undefined || model === '' ? entry.model : model,
     cwd: dir,
-    timeoutMs: Number(env.BRO_PROVIDER_TIMEOUT_MS) || 120_000,
+    timeoutMs: Number.isFinite(t) && t > 0 ? t : 120_000,
   }
 }
 
@@ -178,11 +179,17 @@ export function parseReply(text: string): OutBlock[] {
     if (parsed === undefined || typeof parsed.name !== 'string') continue
     const lead = text.slice(at, m.index)
     if (lead.trim() !== '') out.push({ type: 'text', text: lead })
+    const input =
+      typeof parsed.input === 'object' && parsed.input !== null && !Array.isArray(parsed.input)
+        ? (parsed.input as Record<string, unknown>)
+        : parsed.input === undefined
+          ? {}
+          : { value: parsed.input }
     out.push({
       type: 'tool_use',
       id: `toolu_${randomBytes(8).toString('hex')}`,
       name: parsed.name,
-      input: parsed.input ?? {},
+      input,
     })
     n += 1
     at = (m.index ?? 0) + m[0].length
@@ -196,6 +203,25 @@ export function parseReply(text: string): OutBlock[] {
 
 // --- response emission -------------------------------------------------
 
+/** Anthropic stop_reasons only — acp reasons outside the enum map to the
+ *  nearest honest one, never forwarded raw. */
+const STOP_REASON: Record<string, string> = {
+  end_turn: 'end_turn',
+  max_tokens: 'max_tokens',
+  max_turn_requests: 'pause_turn',
+  refusal: 'refusal',
+  cancelled: 'end_turn',
+}
+
+/** chars/4 underestimates CJK several-fold — count wide codepoints
+ *  (~1 token each) against the ascii quarter-rate. Estimate only —
+ *  never billing, never compaction. */
+function estTokens(s: string): number {
+  let units = 0
+  for (const ch of s) units += (ch.codePointAt(0) ?? 0) > 0x2e7f ? 4 : 1
+  return Math.max(1, Math.ceil(units / 4))
+}
+
 function sse(res: ServerResponse, event: string, data: unknown): void {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
 }
@@ -208,7 +234,7 @@ function emitBlocks(
   inputTokens: number
 ): void {
   const msgId = `msg_${randomBytes(12).toString('hex')}`
-  const outTokens = Math.ceil(JSON.stringify(blocks).length / 4)
+  const outTokens = estTokens(JSON.stringify(blocks))
   sse(res, 'message_start', {
     type: 'message_start',
     message: {
@@ -287,7 +313,10 @@ async function messages(
     return
   }
   const prompt = serializeRequest(body)
-  const inputTokens = Math.max(1, Math.ceil(prompt.length / 4))
+  const inputTokens = estTokens(prompt)
+  // a dropped client cancels the acp turn — no orphan devin session
+  const ac = new AbortController()
+  res.once('close', () => ac.abort())
   let reply: Awaited<ReturnType<typeof acpConverse>>
   try {
     reply = await acpConverse(
@@ -296,7 +325,8 @@ async function messages(
       opts,
       prompt,
       () => {},
-      Date.now() + cfg.timeoutMs
+      Date.now() + cfg.timeoutMs,
+      ac.signal
     )
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -311,9 +341,7 @@ async function messages(
   const blocks = parseReply(reply.text)
   const stopReason = blocks.some((b) => b.type === 'tool_use')
     ? 'tool_use'
-    : reply.stopReason === 'end_turn'
-      ? 'end_turn'
-      : reply.stopReason
+    : (STOP_REASON[reply.stopReason] ?? 'end_turn')
   if (body.stream === false) {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(
@@ -325,7 +353,7 @@ async function messages(
         model: reply.model,
         stop_reason: stopReason,
         stop_sequence: null,
-        usage: { input_tokens: inputTokens, output_tokens: Math.ceil(reply.text.length / 4) },
+        usage: { input_tokens: inputTokens, output_tokens: estTokens(reply.text) },
       })
     )
     return
@@ -409,5 +437,5 @@ export function conductorProxy(
 
 function apiErrorCountTokens(res: ServerResponse, raw: string): void {
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ input_tokens: Math.max(1, Math.ceil(raw.length / 4)) }))
+  res.end(JSON.stringify({ input_tokens: estTokens(raw) }))
 }
