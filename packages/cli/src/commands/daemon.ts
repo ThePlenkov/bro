@@ -378,7 +378,19 @@ function daemonStatus(main: string): void {
 }
 
 function daemonDown(main: string): void {
-  const { pids } = supervisorDown(main)
+  // serialized with supervisorUp/uninstallDrive on daemon.up.lock: an
+  // in-flight spawn must land BEFORE the victim sweep is computed, or
+  // down could miss a child not yet visible to probe/supervisionProcs
+  const upLock = daemonUpLockPath(main)
+  const release =
+    upLock === null ? () => {} : acquireFileLock(upLock, { label: 'daemon up lock' })
+  let down: SupervisorDown
+  try {
+    down = supervisorDown(main)
+  } finally {
+    release()
+  }
+  const { pids } = down
   console.log(
     [
       pids.length === 0 ? 'daemon down — no live supervisor' : `daemon down — signalled ${pids.join(', ')}`,
