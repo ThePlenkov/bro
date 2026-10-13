@@ -25,7 +25,8 @@ For every open PR on a fleet branch (worktree branches + local
 | `open_threads > 0` | no | spawn/respawn the PR's **fixer agent** on its fixer bead (`-l fixer`, `external_ref drive:pr:<N>`) in the PR's worktree |
 | `mergeable = CONFLICTING` | yes | skip — the live owner works its own conflicts |
 | `mergeable = CONFLICTING` | no | spawn the same fixer agent with a **rebase work order** — fetch + rebase onto the PR's base, resolve, `--force-with-lease` push — bounded by the `fixRounds > maxRounds` cap |
-| `gate.ok` | yes | report — the owner's merge step lands it |
+| `gate.ok` | yes, fresh | report — the owner's merge step lands it |
+| `gate.ok` | yes, silent past the TTL | adopt as an orphan → `bro review act merge` |
 | `gate.ok` | no | `bro review act merge`, retire the worktree when clean, close the fixer bead |
 | PR merged/closed | — | close a dangling fixer bead |
 
@@ -39,6 +40,15 @@ at their launch dir while their tool shells hold the worktree cwd — or
 matches a `BRO_AGENT_ID`/`AI_AGENT` env badge, which detached
 descendants keep. Occupied is always the safe verdict.
 
+The merge path is the one place occupancy ages out (bro-ihnlv): every
+occupancy proof carries a last-proven-activity stamp — agent log mtime
+or spawn record, marker mtime, the worktree's own churn — and a green
+PR under an owner silent for `drive.occupancyTtlSec` (2h, floor 60s)
+counts as orphaned: drive adopts it and merges rather than reporting
+`green-occupied` forever. Freshness is judged on the freshest proof —
+a stale fixer beside a live session still vetoes. Non-green verdicts
+never age: an occupied thread/conflict PR stays occupied.
+
 ## Commands
 
 | Command | What it does |
@@ -51,7 +61,8 @@ descendants keep. Occupied is always the safe verdict.
 | `bro review drive install [--every N] [--print]` | arm the merge path — writes `bro/drive.json` (the want-marker session checkpoints rearm a dead supervisor from) and brings `bro fleet daemon` up; cadence `--every N` or `drive.intervalSec` |
 | `bro review drive uninstall` | disarm the marker + stop the supervisor |
 
-Config: `drive.intervalSec` (300), `drive.merge` (`auto`|`never`).
+Config: `drive.intervalSec` (300), `drive.merge` (`auto`|`never`),
+`drive.occupancyTtlSec` (7200 — the merge-path activity bound).
 The fixer agent's command resolves exactly like `bro fleet agents up` —
 `agents.<backend>.command` → `loop.agent`.
 

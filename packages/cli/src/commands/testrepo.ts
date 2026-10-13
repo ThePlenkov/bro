@@ -930,22 +930,40 @@ export function readHostState(state: string): Record<string, unknown> {
 export interface HostFixture {
   root: string
   main: string
+  db: string
   hostState: string
   run: (args: string[]) => CliResult
 }
 
 /** Repo + fake bd + fake review host + connector wiring in one — the
- *  shared scaffold every review-host e2e (drive/act merges) builds on. */
-export function hostFixture(prefix: string): HostFixture {
+ *  shared scaffold every review-host e2e (drive/act merges) builds on.
+ *  `loopAgent` wires `loop.agent` to the fake agent — the fixer spawn's
+ *  command fallback (agents.native.command unset). */
+export function hostFixture(prefix: string, opts: { loopAgent?: boolean } = {}): HostFixture {
   const { root, main } = initRepo(prefix)
   const { binDir, db } = installFakeBd(root)
   const host = installFakeHost(main)
   writeFileSync(
     join(main, 'bro.config.json'),
-    JSON.stringify({ plugins: ['./fakehost.ts'], connectors: { reviews: 'fakehost' } })
+    JSON.stringify({
+      plugins: ['./fakehost.ts'],
+      connectors: { reviews: 'fakehost' },
+      ...(opts.loopAgent === true ? { loop: { agent: `node ${host.agent}` } } : {}),
+    })
   )
-  const env = { PATH: `${binDir}:${process.env.PATH ?? ''}`, HOME: root, FAKE_BD_DB: db }
-  return { root, main, hostState: host.state, run: (args) => runCli(args, { cwd: main, env }) }
+  const env = {
+    PATH: `${binDir}:${process.env.PATH ?? ''}`,
+    HOME: root,
+    FAKE_BD_DB: db,
+    FAKE_HOST_STATE: host.state,
+  }
+  return {
+    root,
+    main,
+    db,
+    hostState: host.state,
+    run: (args) => runCli(args, { cwd: main, env }),
+  }
 }
 
 /** A `tasks` connector over tasks.json beside the plugin — the
