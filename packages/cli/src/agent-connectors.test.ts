@@ -213,8 +213,14 @@ if (args[0] === 'run') {
     if (VALUE_FLAGS.has(a)) { i++; continue }
   }
   const db = load(DB, {})
+  // a real container does NOT inherit the host env — only the image's
+  // own plus --env-file/-e. Keep the shim faithful: a minimal base env
+  // so ambient pins (GIT_DIR/…) genuinely can't reach the worker
   const child = cp.spawn('sh', ['-c', cmd], {
-    cwd, env: { ...process.env, ...env }, detached: true, stdio: 'ignore',
+    cwd,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, ...env },
+    detached: true,
+    stdio: 'ignore',
   })
   child.unref()
   db[name] = { pid: child.pid, image, argv: args, id: 'fakeid-' + name }
@@ -818,6 +824,41 @@ function connectorContract(b: BackendCase): void {
       assert.equal(f.dbRows()[0]!.status, 'in_progress')
       await c.stop(info.id)
     } finally {
+      cleanup(f)
+    }
+  })
+
+  test('ambient + spec.env repo pins never reach the worker — spawn targets its own worktree', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    const saved = {
+      GIT_DIR: process.env.GIT_DIR,
+      GIT_WORK_TREE: process.env.GIT_WORK_TREE,
+      GIT_COMMON_DIR: process.env.GIT_COMMON_DIR,
+    }
+    // the caller sits inside a different repo — its pins must not leak
+    process.env.GIT_DIR = '/other/.git'
+    process.env.GIT_WORK_TREE = '/other'
+    process.env.GIT_COMMON_DIR = '/other/.git'
+    try {
+      const c = conn(f)
+      const spec = {
+        ...SPEC(
+          f.main,
+          f.beadsDir,
+          'fx-1',
+          "require('fs').writeFileSync('env.out', [process.env.GIT_DIR, process.env.GIT_WORK_TREE, process.env.GIT_COMMON_DIR].join('|'))"
+        ),
+        env: { GIT_DIR: '/spec/.git' },
+      }
+      const info = await c.spawn(spec)
+      await until(() => existsSync(join(f.main, 'env.out')))
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), '||')
+      await c.stop(info.id)
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
       cleanup(f)
     }
   })
