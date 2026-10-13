@@ -8,41 +8,7 @@ import { registerConnector } from '@broject/core'
 import type { DecideResult, JudgeFacade } from '@broject/core'
 import { appendRow } from '@broject/judge'
 import { loadQuestions, loadState, runJudgeCommand } from './judge.ts'
-
-class Exit extends Error {
-  constructor(public code: number) {
-    super(`exit ${code}`)
-  }
-}
-
-/** Capture console + intercept process.exit — usage()/error paths exit 1/2. */
-async function capture(
-  fn: () => Promise<unknown>
-): Promise<{ code: number; out: string[]; err: string[] }> {
-  const origExit = process.exit
-  const origLog = console.log
-  const origErr = console.error
-  const out: string[] = []
-  const err: string[] = []
-  console.log = (...a: unknown[]) => out.push(a.join(' '))
-  console.error = (...a: unknown[]) => err.push(a.join(' '))
-  process.exit = ((code?: number) => {
-    throw new Exit(code ?? 0)
-  }) as typeof process.exit
-  try {
-    await fn()
-    return { code: 0, out, err }
-  } catch (e) {
-    if (e instanceof Exit) {
-      return { code: e.code, out, err }
-    }
-    throw e
-  } finally {
-    process.exit = origExit
-    console.log = origLog
-    console.error = origErr
-  }
-}
+import { capture, Exit } from './testrepo.ts'
 
 function tmpdirWith(prefix: string): { dir: string; done: () => void } {
   const dir = mkdtempSync(join(tmpdir(), prefix))

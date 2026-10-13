@@ -75,6 +75,7 @@ import { runDriveCommand } from './commands/drive.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runFleetCommand } from './commands/fleet.ts'
 import { runGoalCommand } from './commands/goal.ts'
+import { runDogfoodCommand } from './commands/dogfood.ts'
 import { goalSection } from './commands/goal-config.ts'
 import { runGuardCommand } from './commands/guard.ts'
 import { runHooksCommand } from './commands/hooks.ts'
@@ -377,6 +378,14 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'judge',
     configKey: 'judge',
     configSchema: judgeSection,
+  }),
+  definePlugin({
+    name: 'dogfood',
+    group: 'self',
+    summary:
+      'Scenario-driven e2e self-test — markdown runbook, fresh-agent runner, analyst verdict',
+    run: runDogfoodCommand,
+    skill: 'dogfood',
   }),
   definePlugin({
     // No `skill` yet: the skill documents the hook-side evaluation,

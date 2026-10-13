@@ -756,6 +756,14 @@ const AGENT_PIN_KEYS = new Set([
   'BRO_AGENT_CLASS',
 ])
 
+/** Repo-retarget env keys — same triple core's git.ts strips for
+ *  `git -C`. A spawn targets spec.worktree on argv alone; an inherited
+ *  GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR silently points the agent's git
+ *  calls at whatever checkout spawned bro (dogfood's scratch repo is
+ *  exactly this failure shape). GIT_INDEX_FILE stays: data-ref writes
+ *  use it as a private index. */
+const GIT_REPOSITORY_ENV_KEYS = new Set(['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR'])
+
 /** The real pin values a backend injects over/around caller env —
  *  BEADS_DIR/BRO_BEAD_ID bind the shared store + claim; BRO_AGENT_ID is
  *  the environ badge proc-owner reads to tell a bro-spawned worker from
@@ -1884,7 +1892,9 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 ...Object.fromEntries(
                   Object.entries({ ...process.env, ...spec.env }).filter(
                     (e): e is [string, string] =>
-                      e[1] !== undefined && !AGENT_PIN_KEYS.has(e[0])
+                      e[1] !== undefined &&
+                      !AGENT_PIN_KEYS.has(e[0]) &&
+                      !GIT_REPOSITORY_ENV_KEYS.has(e[0])
                   )
                 ),
                 // identity pins last — spec.env must never redirect the
@@ -2042,10 +2052,18 @@ interface TmuxResult {
 /** One tmux call on a socket. `socket === ''` targets the user's default
  *  server (no -L); the default 'bro' socket keeps the fleet off it. */
 function tmuxRun(socket: string, args: string[]): TmuxResult {
+  // new-session copies the CLIENT env into the session — ambient repo
+  // pins on this process would reach the worker even with a filtered
+  // env file, so the client spawns scrubbed of them
+  const env = { ...process.env }
+  for (const k of GIT_REPOSITORY_ENV_KEYS) {
+    delete env[k]
+  }
   const proc = spawnSync('tmux', socket === '' ? args : ['-L', socket, ...args], { // NOSONAR — PATH lookup is the contract (same as git/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 10_000,
+    env,
   })
   return {
     code: proc.status ?? 1,
@@ -2233,7 +2251,10 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         const ambient = Object.entries({ ...process.env, ...spec.env })
           .filter(
             (e): e is [string, string] =>
-              e[1] !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) && !AGENT_PIN_KEYS.has(e[0])
+              e[1] !== undefined &&
+              /^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) &&
+              !AGENT_PIN_KEYS.has(e[0]) &&
+              !GIT_REPOSITORY_ENV_KEYS.has(e[0])
           )
           .map(([k, v]) => `export ${k}=${shQuote(v)}`)
           .join('\n')
@@ -2683,7 +2704,10 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       // BEADS_DIR/BRO_BEAD_ID/... would redirect bead ops or re-badge
       // the worker, so the env table filters them out and re-injects
       // the connector's own below
-      ([k]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && !AGENT_PIN_KEYS.has(k)
+      ([k]) =>
+        /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) &&
+        !AGENT_PIN_KEYS.has(k) &&
+        !GIT_REPOSITORY_ENV_KEYS.has(k)
     )
     // caller env plus the connector-owned identity pins — pins always
     // render so the table exists even when spec.env is empty
@@ -3495,7 +3519,12 @@ function writeDockerEnvFile(envFile: string, spec: SpawnSpec): void {
     ...spec.env,
   })
     .filter((e): e is [string, string] => {
-      if (e[1] === undefined || !/^[A-Za-z_]\w*$/.test(e[0]) || AGENT_PIN_KEYS.has(e[0])) {
+      if (
+        e[1] === undefined ||
+        !/^[A-Za-z_]\w*$/.test(e[0]) ||
+        AGENT_PIN_KEYS.has(e[0]) ||
+        GIT_REPOSITORY_ENV_KEYS.has(e[0])
+      ) {
         return false
       }
       if (e[1].includes('\n') || e[1].includes('\r')) {
