@@ -70,6 +70,7 @@ import { runDoctorCommand } from './commands/doctor.ts'
 import { driveSection } from './commands/drive-config.ts'
 import { driveConnector } from './commands/drive-pulse.ts'
 import { runDaemonCommand } from './commands/daemon.ts'
+import { runResumeCommand } from './commands/resume.ts'
 import { runDriveCommand } from './commands/drive.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runFleetCommand } from './commands/fleet.ts'
@@ -260,6 +261,14 @@ export const PLUGINS: BroPlugin[] = [
       'Project-scoped supervisor — owns the drive pass long-term [up|status|down|run --every N]',
     run: runDaemonCommand,
     skill: 'daemon',
+  }),
+  definePlugin({
+    name: 'resume',
+    group: 'fleet',
+    summary:
+      'Post-restart recovery — rearm dead watches, revive the daemon, audit survivors [--dry-run|--json]',
+    run: runResumeCommand,
+    skill: 'resume',
   }),
   definePlugin({
     name: 'serve',
