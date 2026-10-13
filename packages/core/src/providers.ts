@@ -77,7 +77,16 @@ export type ProviderEntry =
        *  cleanup is logged, never fails the worker. */
       sessionRm?: string
     }
-  | { type: 'cli'; command: string; model?: string }
+  | {
+      type: 'cli'
+      command: string
+      model?: string
+      /** Shell template emitting one model id per line — the catalog
+       *  surface `bro providers models` renders as `<name>/<id>`.
+       *  Absent = the entry has no enumerable catalog (a pinned
+       *  `model` still renders). */
+      models?: string
+    }
 
 /** A `fleet.profiles.<name>` spawn preset (spec bro-5hx1.1) — the
  *  convoy vocabulary for "sweeps go here, features go there". Lives
@@ -131,7 +140,7 @@ export const PROVIDER_REGISTRY: Record<ProviderKind, ProviderKindSpec> = {
     optional: ['profile', 'model', 'apiKeyEnv', 'sessionRm'],
     optionalBool: ['autoApprove'],
   },
-  cli: { call: 'prose', spawn: true, required: ['command'], optional: ['model'] },
+  cli: { call: 'prose', spawn: true, required: ['command'], optional: ['model', 'models'] },
 }
 
 /** A consumer named a provider no entry resolves to — startup error,
