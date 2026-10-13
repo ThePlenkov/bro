@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Resume"
+  short_description: "Post-restart recovery — rearm dead watches, revive the daemon, audit survivors"
+  brand_color: "#C43D16"
+  default_prompt: "Use $resume to recover the rig after a restart."
+policy:
+  allow_implicit_invocation: true

@@ -412,13 +412,21 @@ export async function respawnWatcher(dir: string, plan: RearmPlan): Promise<numb
   return undefined
 }
 
-/** `bro act rearm` — dead watch markers mean their watcher died with
- *  the promise unkept (bro-tafj). Per still-open PR a detached wait
- *  goes back up with the recorded mode; settled PRs' markers sweep.
- *  --dry-run prints the plan without spawning or touching markers. */
-async function cmdRearm(argv: string[]): Promise<void> {
-  const dry = argv.includes('--dry-run')
-  const dir = process.cwd()
+/** The rearm pass without its rendering — shared by `act rearm` and
+ *  `fleet resume`: resolve the review host, probe each dead marker's
+ *  PR, respawn a detached wait on every still-open one, sweep +
+ *  reconcile the settled (a MERGED verdict discharges a loop-claimed
+ *  bead exactly like finalizeMerge — bro-q6ppv). `dry` plans only:
+ *  nothing spawns, no marker moves, open PRs report pid 0. */
+export async function rearmPass(
+  dir: string,
+  dry: boolean
+): Promise<{
+  rearmed: Array<{ pr: number; pid: number }>
+  settled: Array<{ pr: number; bead?: string }>
+  kept: Array<{ pr: number; reason: string }>
+  link: (pr: number) => string
+}> {
   const rev = reviewHost(undefined, loadBroConfig().connectors)
   const repo = await (rev.resolveRepoAsync === undefined
     ? Promise.resolve(rev.resolveRepo([]))
@@ -439,21 +447,27 @@ async function cmdRearm(argv: string[]): Promise<void> {
     isOpen,
     respawn: dry ? undefined : (plan) => respawnWatcher(dir, plan),
   })
-  if (argv.includes('--json')) {
-    console.log(JSON.stringify({ dryRun: dry, ...res }, null, 2))
-  } else {
-    reportRearm(res, dry, (pr) => rev.prLink(repo, pr))
-  }
-  // the reconcile half of a dead loop's watch (bro-q6ppv): a settled
-  // marker carrying a bead means the PR resolved while nobody watched —
-  // MERGED discharges the loop's claim exactly as finalizeMerge did;
-  // CLOSED-unmerged keeps it (the work never landed)
   if (!dry) {
     for (const s of res.settled) {
       if (s.bead !== undefined && metas.get(s.pr)?.state === 'MERGED') {
         closeLandedBead(rev, { repo, pr: s.pr }, s.bead)
       }
     }
+  }
+  return { ...res, link: (pr) => rev.prLink(repo, pr) }
+}
+
+/** `bro act rearm` — dead watch markers mean their watcher died with
+ *  the promise unkept (bro-tafj). Per still-open PR a detached wait
+ *  goes back up with the recorded mode; settled PRs' markers sweep.
+ *  --dry-run prints the plan without spawning or touching markers. */
+async function cmdRearm(argv: string[]): Promise<void> {
+  const dry = argv.includes('--dry-run')
+  const { link, ...res } = await rearmPass(process.cwd(), dry)
+  if (argv.includes('--json')) {
+    console.log(JSON.stringify({ dryRun: dry, ...res }, null, 2))
+  } else {
+    reportRearm(res, dry, link)
   }
 }
 
