@@ -201,6 +201,7 @@ describe('specState', () => {
       mkdirSync(join(dir, 'specs'))
       writeFileSync(join(dir, 'specs', 'b1.md'), '  \n')
       assert.equal(specState(row(), nativeAt(dir, 'specs')), 'missing')
+      // coverage reads the working tree — an uncommitted spec file counts
       writeFileSync(join(dir, 'specs', 'b1.md'), '# spec\n')
       assert.equal(specState(row(), nativeAt(dir, 'specs')), 'spec')
       // path-traversal ids never count as having a spec file
@@ -209,6 +210,27 @@ describe('specState', () => {
       // an escaping sdd.dir fails open to 'missing' too
       assert.equal(specState(row(), nativeAt(dir, '../outside')), 'missing')
       assert.equal(specState(row(), nativeAt(dir, '/tmp')), 'missing')
+    })
+  })
+
+  test('a declared spec: link outranks a discovered spec file', async () => {
+    await withRepo({ config: {} }, (dir) => {
+      mkdirSync(join(dir, 'specs'))
+      writeFileSync(join(dir, 'specs', 'b1.md'), '# spec\n')
+      // both evidences present → the declaration wins
+      assert.equal(
+        specState(row({ description: 'design: spec: specs/b1.md' }), nativeAt(dir, 'specs')),
+        'link'
+      )
+      // …even a link that resolves to no local file — check counts the
+      // declaration; resolution is drift's audit, not coverage's
+      assert.equal(
+        specState(
+          row({ description: 'see spec: https://docs.example/x' }),
+          nativeAt(dir, 'specs')
+        ),
+        'link'
+      )
     })
   })
 })

@@ -25,6 +25,13 @@ while a session's own claim lacks a spec.
   spec).
 - or a `spec:` link in the bead description (external doc).
 
+When both a `spec:` link and a discovered spec file exist, the declared
+link wins — `check` reports `link`, and `drift` audits the linked file
+(the bead's own statement outranks convention-based discovery). `check`
+counts the declaration itself; it does not resolve the target.
+Coverage reads the working tree: an uncommitted spec file already
+counts — `drift` freshness still needs the spec's commit on the ref.
+
 Exempt: `issue_type: chore` or `molecule` (ship-beads are convoy
 scaffolding, not design work) and beads labeled `trivial` or `debt` —
 SDD measures design mass, not bookkeeping, and a harvested review
