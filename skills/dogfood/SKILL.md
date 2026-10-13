@@ -52,6 +52,8 @@ fail lines + findings).
   blocking wait. The analyst's verdict file is the artifact; a
   `verdict.md` present closes the run even before the analyst process
   exits.
-- **Runs are records** — `state.json` + prompts + verdict live in the
-  git-common dir and survive restarts; reap a run dir only when the
-  verdict's been consumed.
+- **Runs are records** — `state.json` + prompts + the verdict live
+  under `<git-common>/bro/dogfood/<run-id>/` and survive restarts;
+  reap a run dir only when the verdict's been consumed. Run records
+  are the only host-side writes — claims and watch markers stay on
+  their own planes.
