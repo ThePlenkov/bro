@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Provider"
+  short_description: "Run Claude Code on bro — host listener + one-time wiring helpers"
+  brand_color: "#D97706"
+  default_prompt: "Use $provider to wire claude's ANTHROPIC_BASE_URL + apiKeyHelper through bro once."
+policy:
+  allow_implicit_invocation: true
