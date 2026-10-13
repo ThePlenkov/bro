@@ -67,6 +67,7 @@ import {
   fleetTableLines,
   type FleetRow,
 } from './fleet.ts'
+import { candidateBranches } from './drive.ts'
 import { collectLoopRuns, type LoopRunView } from './loop-state.ts'
 import { providerWallsFor } from '../agent-connectors.ts'
 import { parseWorktreePorcelain, type WorktreeInfo } from './work.ts'
@@ -355,6 +356,45 @@ function worktreeList(errors?: string[]): WorktreeInfo[] {
   }
 }
 
+/** Open-PR discovery for the gates plane — the fleet rows' resolved
+ *  PRs unioned with every candidate fleet branch's open PRs. The
+ *  registry is not the PR plane (bro-hn7kx): rows only exist for steps
+ *  of OPEN molecules, so a landed mol or a finished step leaves its
+ *  open PR invisible — 'no PRs' while the repo's fleet branches carry
+ *  live ones. `branches` is the same set drive supervises (worktree
+ *  branches + local work//loop//stack/); a failed branch lookup lands
+ *  in `lookupErrors` — a partial set must not read as "no PRs". */
+export function openPrTargets(
+  rev: ReviewFacade,
+  repo: string,
+  rows: FleetRow[],
+  branches: string[],
+  lookupErrors: string[]
+): { pr: number; link: string }[] {
+  const seen = new Map<number, string>()
+  const add = (pr: number, link?: string): void => {
+    if (!seen.has(pr)) {
+      seen.set(pr, link ?? rev.prLink(repo, pr))
+    }
+  }
+  for (const row of rows) {
+    // every PR on the branch is gated — prNum is only the display pick
+    for (const pr of row.prNums ?? (row.prNum === undefined ? [] : [row.prNum])) {
+      add(pr, pr === row.prNum ? row.pr : undefined)
+    }
+  }
+  for (const branch of branches) {
+    try {
+      for (const pr of rev.prsForBranch(branch)) {
+        add(pr)
+      }
+    } catch (err) {
+      lookupErrors.push(`${branch}: ${errText(err)}`)
+    }
+  }
+  return [...seen.entries()].map(([pr, link]) => ({ pr, link }))
+}
+
 /** The act exit gate per distinct fleet PR — probed in parallel so a
  *  large fleet doesn't serialize one heartbeat into a long blocking
  *  sequence. A failed probe is recorded per-PR (`error`), not folded
@@ -363,25 +403,18 @@ async function gateFleetPrs(
   rev: ReviewFacade,
   repo: string,
   rows: FleetRow[],
-  dir: string
+  dir: string,
+  lookupErrors: string[]
 ): Promise<WatchPrGate[]> {
   const act = loadBroConfig(dir).act
   // the shared feed — a heartbeat overlapping loop/drive/act-wait
   // passes serves the one in-flight fetch instead of duplicating it
   const cache = prStateCache(dir)
-  const seen = new Set<number>()
-  const targets: { pr: number; link: string }[] = []
-  for (const row of rows) {
-    // every PR on the branch is gated — prNum is only the display pick
-    const prs = row.prNums ?? (row.prNum === undefined ? [] : [row.prNum])
-    for (const pr of prs) {
-      if (seen.has(pr)) {
-        continue
-      }
-      seen.add(pr)
-      targets.push({ pr, link: pr === row.prNum && row.pr !== undefined ? row.pr : rev.prLink(repo, pr) })
-    }
+  const candidates = candidateBranches(dir)
+  if (!candidates.complete) {
+    lookupErrors.push('branch enumeration failed — the open-PR set may under-count')
   }
+  const targets = openPrTargets(rev, repo, rows, candidates.branches, lookupErrors)
   return Promise.all(
     targets.map(async ({ pr, link }) => {
       try {
@@ -483,7 +516,9 @@ async function fleetPlane(
 }
 
 /** gates — no review host renders the section unavailable; a throwing
- *  probe renders `error`, distinct from a host failure. */
+ *  probe renders `error`, distinct from a host failure. Discovery is
+ *  the branch plane (bro-hn7kx), so branch→PR failures from both the
+ *  fleet rows and the candidate-branch scan collect in lookupErrors. */
 async function gatesPlane(
   dir: string,
   host: ResolvedHost,
@@ -493,15 +528,21 @@ async function gatesPlane(
   if (host.rev === undefined) {
     return { available: false, reason: host.reason, prs: [] }
   }
-  const lookupErrors = prErrors.length > 0 ? prErrors : undefined
+  const lookupErrors = [...prErrors]
   try {
+    const prs = await gateFleetPrs(host.rev, host.repo, rows, dir, lookupErrors)
     return {
       available: true,
-      prs: await gateFleetPrs(host.rev, host.repo, rows, dir),
-      lookupErrors,
+      prs,
+      lookupErrors: lookupErrors.length > 0 ? lookupErrors : undefined,
     }
   } catch (err) {
-    return { available: true, error: errText(err), prs: [], lookupErrors }
+    return {
+      available: true,
+      error: errText(err),
+      prs: [],
+      lookupErrors: lookupErrors.length > 0 ? lookupErrors : undefined,
+    }
   }
 }
 
@@ -633,7 +674,7 @@ function gateLines(gates: WatchGates): string[] {
       : [`  warning: ${gates.lookupErrors.length} branch→PR lookup(s) failed — see fleet`]
   if (gates.prs.length === 0) {
     return gates.lookupErrors === undefined
-      ? ['  no PRs in the fleet']
+      ? ['  no open PRs on fleet branches']
       : ['  no PRs resolved', ...lookupWarn]
   }
   return [
