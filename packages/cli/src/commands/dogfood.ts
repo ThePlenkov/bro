@@ -24,6 +24,7 @@
  *   bro self dogfood report <run-id>
  */
 import { execFileSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import {
   copyFileSync,
   existsSync,
@@ -208,21 +209,36 @@ The verdict file is the artifact — keep it tight.`
  *  beads remote instead of starting empty. Isolation requires being
  *  outside the tree. The step bead lives in the scratch store for the
  *  same reason (state.json is the host-side record). */
-function provisionRepo(): { repo: string; beads: string } {
+function provisionRepo(): { repo: string; beads: string; initErr: string | null } {
   const repo = mkdtempSync(join(tmpdir(), 'bro-dogfood-'))
   const beads = join(repo, '.beads')
   execFileSync('git', ['init', '-q', '-b', 'main', repo])
-  execFileSync('git', ['-C', repo, 'commit', '-q', '--allow-empty', '-m', 'dogfood scratch'])
+  execFileSync('git', [
+    '-C',
+    repo,
+    // identity pinned — a scratch must never depend on ambient
+    // user.name/user.email living in global config (or a host-only one)
+    '-c',
+    'user.name=bro-dogfood',
+    '-c',
+    'user.email=dogfood@localhost',
+    'commit',
+    '-q',
+    '--allow-empty',
+    '-m',
+    'dogfood scratch',
+  ])
   // the store must be a real bd database, not just a dir — best-effort:
-  // a scripted bd (tests) may not implement init; the step-bead create
-  // below is the real gate and names the failure when init can't help
+  // a scripted bd (tests) may not implement init; initErr rides into
+  // the step-bead create's failure so the real cause is never buried
+  let initErr: string | null = null
   try {
     execFileSync('bd', ['init', '--stealth'], { cwd: repo, stdio: 'pipe' })
-  } catch {
-    // a scripted bd may not implement init — create the dir anyway
+  } catch (err) {
+    initErr = err instanceof Error ? (err.message.split('\n')[0] ?? err.message) : String(err)
   }
   mkdirSync(beads, { recursive: true })
-  return { repo, beads }
+  return { repo, beads, initErr }
 }
 
 /** Resolve a live/terminal view of one agent id across backends. */
@@ -263,6 +279,11 @@ async function advanceRun(
   if (state.analyst === 'none') {
     state.phase = 'done'
     writeRun(rdir, state)
+    return state
+  }
+  // a WORKER session calling status must not arm the analyst spawn —
+  // same guard as `run`: workers never arm workers
+  if (!isOrchestratorSession()) {
     return state
   }
   const scenarioFile = join(rdir, 'scenario.md')
@@ -329,20 +350,31 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
   if (home === null) {
     die('not inside a git worktree')
   }
-  const runId = `df-${name.replace(/\.md$/, '')}-${Date.now().toString(36)}`
+  // millisecond ts alone collides for same-name runs in one tick —
+  // a random suffix keeps every run dir distinct
+  const runId = `df-${name.replace(/\.md$/, '')}-${Date.now().toString(36)}-${randomBytes(2).toString('hex')}`
   const rdir = join(home, runId)
   mkdirSync(rdir, { recursive: true })
   copyFileSync(src, join(rdir, 'scenario.md'))
-  const { repo, beads } = provisionRepo()
+  const { repo, beads, initErr } = provisionRepo()
 
   // the step bead lives in the scratch store — the runner's claims
   // stay inside the disposable repo
-  const bead = taskStoreAt(beads).create({
-    title: `dogfood ${name} ${runId}`,
-    description: `Dogfood run ${runId} of scenario ${name} — runner claim.`,
-    type: 'task',
-    priority: 2,
-  })
+  let bead: { id: string }
+  try {
+    bead = taskStoreAt(beads).create({
+      title: `dogfood ${name} ${runId}`,
+      description: `Dogfood run ${runId} of scenario ${name} — runner claim.`,
+      type: 'task',
+      priority: 2,
+    })
+  } catch (err) {
+    die(
+      `step bead create failed` +
+        (initErr === null ? '' : ` (bd init also failed: ${initErr})`) +
+        `: ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
 
   const prompt = runnerPrompt(repo, readFileSync(src, 'utf8'))
   const promptFile = join(rdir, 'runner.prompt.md')
@@ -426,6 +458,17 @@ async function statusRow(
       ? Promise.resolve(null)
       : agentView(dir, env, state.analystAgent),
   ])
+  // a terminal analyst that left no verdict failed the run — 'analyzing'
+  // must not sit forever waiting for a file that will never land
+  if (
+    state.phase === 'analyzing' &&
+    !hasVerdict &&
+    analyst !== null &&
+    TERMINAL.has(analyst.state)
+  ) {
+    state.phase = 'failed'
+    writeRun(run.dir, state)
+  }
   return {
     run: run.id,
     scenario: state.scenario,

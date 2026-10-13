@@ -16,7 +16,8 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { AgentInfo } from '@broject/core'
+import { AgentNotFound } from '@broject/core'
+import type { AgentInfo, SpawnSpec } from '@broject/core'
 import { registerAgentConnector } from '../agent-connectors.ts'
 import { listScenarios, runDogfoodCommand } from './dogfood.ts'
 import { initRepo, installFakeBd } from './testrepo.ts'
@@ -58,18 +59,10 @@ async function capture(
 
 const dogfood = (argv: string[]) => capture(() => runDogfoodCommand(argv))
 
-/** The conn.spawn request shape — what spawnStepAgent hands the
- *  connector (prompt is resolved TEXT, not a file). */
-interface SpawnSpec {
-  molStep: string
-  repoRoot: string
-  beadsDir: string
-  prompt: string
-}
-
-/** Scripted backend: records spawn specs, reports a controllable agent
- *  state per id, and — when the prompt is the analyst's — writes the
- *  verdict file the prompt names. */
+/** Scripted backend: records spawn specs (the shape spawnStepAgent
+ *  hands the connector — prompt is resolved TEXT, not a file),
+ *  reports a controllable agent state per id, and — when the prompt
+ *  is the analyst's — writes the verdict file the prompt names. */
 function dogfoodConnector() {
   const spawned: SpawnSpec[] = []
   const states = new Map<string, AgentInfo>()
@@ -77,8 +70,7 @@ function dogfoodConnector() {
   const name = 'dogfood-test'
   const conn = {
     name,
-    spawn: (raw: Record<string, unknown>) => {
-      const spec = raw as unknown as SpawnSpec
+    spawn: (spec: SpawnSpec) => {
       spawned.push(spec)
       seq += 1
       const isAnalyst = spec.prompt.includes('ANALYST of a bro dogfood run')
@@ -100,7 +92,13 @@ function dogfoodConnector() {
       return Promise.resolve(info)
     },
     list: () => Promise.resolve({ agents: [...states.values()] }),
-    status: (id: string) => Promise.resolve(states.get(id)),
+    status: (id: string) => {
+      const info = states.get(id)
+      if (info === undefined) {
+        return Promise.reject(new AgentNotFound(id))
+      }
+      return Promise.resolve(info)
+    },
     stop: (id: string) => {
       const info = states.get(id)
       if (info !== undefined) {
