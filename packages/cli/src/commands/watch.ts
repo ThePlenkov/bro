@@ -67,7 +67,7 @@ import {
   fleetTableLines,
   type FleetRow,
 } from './fleet.ts'
-import { candidateBranches } from './drive.ts'
+import { candidateBranches, FLEET_BRANCH_PREFIXES } from './drive.ts'
 import { collectLoopRuns, type LoopRunView } from './loop-state.ts'
 import { providerWallsFor } from '../agent-connectors.ts'
 import { parseWorktreePorcelain, type WorktreeInfo } from './work.ts'
@@ -357,13 +357,16 @@ function worktreeList(errors?: string[]): WorktreeInfo[] {
 }
 
 /** Open-PR discovery for the gates plane — the fleet rows' resolved
- *  PRs unioned with every candidate fleet branch's open PRs. The
- *  registry is not the PR plane (bro-hn7kx): rows only exist for steps
- *  of OPEN molecules, so a landed mol or a finished step leaves its
- *  open PR invisible — 'no PRs' while the repo's fleet branches carry
- *  live ones. `branches` is the same set drive supervises (worktree
- *  branches + local work//loop//stack/); a failed branch lookup lands
- *  in `lookupErrors` — a partial set must not read as "no PRs". */
+ *  PRs unioned with every open PR on a fleet branch. The registry is
+ *  not the PR plane (bro-hn7kx): rows only exist for steps of OPEN
+ *  molecules, so a landed mol or a finished step leaves its open PR
+ *  invisible — 'no PRs' while the repo's fleet branches carry live
+ *  ones. `branches` is the same candidate set drive enumerates
+ *  (worktree branches + local work//loop//stack/). A host with
+ *  `openPrs` lists once — also covering fleet-prefixed heads whose
+ *  local branch is gone; without it, per-branch `prsForBranch` is the
+ *  fallback. Failures land in `lookupErrors` — a partial set must not
+ *  read as "no PRs". */
 export function openPrTargets(
   rev: ReviewFacade,
   repo: string,
@@ -383,13 +386,28 @@ export function openPrTargets(
       add(pr, pr === row.prNum ? row.pr : undefined)
     }
   }
-  for (const branch of branches) {
+  if (rev.openPrs !== undefined) {
     try {
-      for (const pr of rev.prsForBranch(branch)) {
-        add(pr)
+      const branchSet = new Set(branches)
+      for (const { pr, headRef } of rev.openPrs(repo)) {
+        // exact match covers worktree branches; the prefix match is
+        // fleet scope — a remote-only loop//work//stack/ head counts too
+        if (branchSet.has(headRef) || FLEET_BRANCH_PREFIXES.some((p) => headRef.startsWith(p))) {
+          add(pr)
+        }
       }
     } catch (err) {
-      lookupErrors.push(`${branch}: ${errText(err)}`)
+      lookupErrors.push(`open-PR listing: ${errText(err)}`)
+    }
+  } else {
+    for (const branch of branches) {
+      try {
+        for (const pr of rev.prsForBranch(branch)) {
+          add(pr)
+        }
+      } catch (err) {
+        lookupErrors.push(`${branch}: ${errText(err)}`)
+      }
     }
   }
   return [...seen.entries()].map(([pr, link]) => ({ pr, link }))

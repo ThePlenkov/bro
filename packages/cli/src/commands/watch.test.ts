@@ -211,8 +211,13 @@ describe('snapshotKey', () => {
 })
 
 describe('openPrTargets', () => {
-  /** A facade stub — openPrTargets only reads prsForBranch + prLink. */
-  const stubRev = (byBranch: Record<string, number[]>, seen: string[]): ReviewFacade =>
+  /** A facade stub — openPrTargets only reads prsForBranch + prLink
+   *  (+ openPrs when given, the bulk path). */
+  const stubRev = (
+    byBranch: Record<string, number[]>,
+    seen: string[],
+    open?: { pr: number; headRef: string }[] | Error
+  ): ReviewFacade =>
     ({
       prsForBranch: (branch: string) => {
         seen.push(branch)
@@ -222,6 +227,15 @@ describe('openPrTargets', () => {
         }
         return prs
       },
+      openPrs:
+        open === undefined
+          ? undefined
+          : () => {
+              if (open instanceof Error) {
+                throw open
+              }
+              return open
+            },
       prLink: (repo: string, pr: number) => `[#${pr}](https://example.test/${repo}/pull/${pr})`,
     }) as unknown as ReviewFacade
 
@@ -265,6 +279,42 @@ describe('openPrTargets', () => {
     )
     assert.equal(errors.length, 1)
     assert.match(errors[0]!, /loop\/gone: lookup failed/)
+  })
+
+  test('the bulk listing is one call — fleet-prefixed heads match, foreign ones don\'t', () => {
+    const seen: string[] = []
+    const rev = stubRev({}, seen, [
+      { pr: 11, headRef: 'loop/bro-a' },
+      { pr: 12, headRef: 'work/bro-b' },
+      // a remote-only fleet branch counts — its local branch may be gone
+      { pr: 13, headRef: 'stack/s/1-bro-c' },
+      { pr: 99, headRef: 'feature/not-fleet' },
+      { pr: 98, headRef: 'main' },
+    ])
+    const errors: string[] = []
+    const targets = openPrTargets(rev, 'o/r', [], ['loop/bro-a', 'main'], errors)
+    assert.deepEqual(
+      targets.map((t) => t.pr).sort((a, b) => a - b),
+      [11, 12, 13, 98]
+    )
+    assert.deepEqual(errors, [])
+    // bulk path never fans out to per-branch lookups
+    assert.deepEqual(seen, [])
+  })
+
+  test('a failed bulk listing is a lookupError — row PRs still gate', () => {
+    const seen: string[] = []
+    const rev = stubRev({}, seen, new Error('gh down'))
+    const errors: string[] = []
+    const rows = [row({ prNum: 11, pr: '[#11](https://row.link/11)' })]
+    const targets = openPrTargets(rev, 'o/r', rows, ['loop/bro-a'], errors)
+    assert.deepEqual(
+      targets.map((t) => t.pr),
+      [11]
+    )
+    assert.equal(errors.length, 1)
+    assert.match(errors[0]!, /open-PR listing: gh down/)
+    assert.deepEqual(seen, [])
   })
 })
 

@@ -14,32 +14,45 @@ plane, not the set of open PRs.
 
 Gates discovers PRs the way `bro drive` supervises them —
 `candidateBranches(root)`: every worktree's branch plus local
-`work/`/`loop/`/`stack/` branches (a PR can outlive its worktree), each
-resolved through `rev.prsForBranch`. The fleet rows' already-resolved
-PRs union in so a non-standard worktree branch still gates.
+`work/`/`loop/`/`stack/` branches (a PR can outlive its worktree). The
+fleet rows' already-resolved PRs union in so a non-standard worktree
+branch still gates.
+
+Discovery prefers the new optional `ReviewFacade.openPrs(repo)` — one
+`gh pr list --state open`/`glab merge_requests?state=opened` call
+returning `{pr, headRef}` rows — filtered to the fleet: headRef ∈
+candidate branches (worktree branches) OR matching the fleet prefixes
+(so a remote-only `loop/x` head counts — its local branch may be
+gone). A host without `openPrs` falls back to the per-branch
+`prsForBranch` scan. The bulk path exists because the heartbeat pays
+one spawn per candidate branch otherwise — on a repo carrying ~90
+fleet branches that serializes minutes of `gh` calls into every tick.
 
 `openPrTargets(rev, repo, rows, branches, lookupErrors)` is the pure
 discovery step — dedup by PR number, keep the row's rendered link when
-present. Honesty rules unchanged: an incomplete branch listing or a
-failed `prsForBranch` lands in `lookupErrors` (renders `no PRs
-resolved` + warning, never a false quiet); the empty case now reads
-`no open PRs on fleet branches`, matching drive's vocabulary.
+present. Honesty rules unchanged: an incomplete branch listing, a
+failed `openPrs`, or a failed `prsForBranch` lands in `lookupErrors`
+(renders `no PRs resolved` + warning, never a false quiet); the empty
+case reads `no open PRs on fleet branches`, matching drive's
+vocabulary.
 
-Rejected alternative: a repo-wide `openPrs` facade method — one host
-call instead of N, and it would catch remote-only branches, but it
-gates foreign/human PRs too, which is outside the section's fleet
-scope (spec bro-vf1j: "PR discovered through the fleet"), and it costs
-a new ReviewFacade capability across connectors. Revisit if the
-branch-plane gap (PR on a deleted local branch) ever matters in
-practice — drive has the same blind spot, so the fix would be shared.
+Rejected alternative: gate every open PR unfiltered — foreign/human
+PRs are outside the section's fleet scope (spec bro-vf1j: "PR
+discovered through the fleet") and would bill act-gate probes nobody
+asked for. Drive keeps its own `candidateBranches` enumeration (a PR
+on a deleted local branch stays its blind spot) — adopting `openPrs`
+there changes supervision semantics, not just reads; out of scope.
 
 ## Plan
 
+- [ ] `packages/core/src/review.ts` — optional `openPrs(repo)` on
+      ReviewFacade; github + gitlab connectors implement it
 - [ ] `packages/cli/src/commands/watch.ts` — `openPrTargets` discovery
-      (rows ∪ `candidateBranches` → `prsForBranch`), `gatesPlane`
-      threads `lookupErrors` through, empty-state copy
+      (rows ∪ bulk/fallback branch scan), `gatesPlane` threads
+      `lookupErrors` through, empty-state copy
 - [ ] `watch.test.ts` — discovery unit tests (row-less discovery,
-      union/dedup, per-branch lookup failure) + updated render copy
+      union/dedup, per-branch failure, bulk filter + failure) +
+      updated render copy
 
 ## Acceptance
 
