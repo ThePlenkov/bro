@@ -196,17 +196,16 @@ interface AcpReply {
   usage?: DecideResult['usage']
 }
 
-/** initialize → session/new → model → prompt → collect chunks — the
- *  v1 flow over a connected context, shared by the typed and prose
- *  surfaces. */
-async function acpOp(
+/** initialize → session/new — the session-opening half every acp
+ *  operation shares (prompt, model listing). Carries the negotiated
+ *  version check and the auth-failure mapper; callers get the live
+ *  session object and dispose it themselves. */
+async function acpSession(
   ctx: ClientContext,
-  entry: AcpEntry,
   opts: ProviderWireOpts,
   by: string,
-  promptText: string,
   deadline: number
-): Promise<AcpReply> {
+) {
   const req = (): SendRequestOptions => ({
     cancellationSignal: AbortSignal.timeout(Math.max(1, remaining(deadline))),
   })
@@ -255,6 +254,21 @@ async function acpOp(
     .buildSession({ cwd: opts.acp?.cwd ?? process.cwd(), mcpServers: [] })
     .start(req())
     .catch(asAuthError)
+  return { session, asAuthError, req }
+}
+
+/** initialize → session/new → model → prompt → collect chunks — the
+ *  v1 flow over a connected context, shared by the typed and prose
+ *  surfaces. */
+async function acpOp(
+  ctx: ClientContext,
+  entry: AcpEntry,
+  opts: ProviderWireOpts,
+  by: string,
+  promptText: string,
+  deadline: number
+): Promise<AcpReply> {
+  const { session, asAuthError, req } = await acpSession(ctx, opts, by, deadline)
   try {
     const model = await applyModel(
       ctx,
@@ -285,28 +299,26 @@ async function acpOp(
   }
 }
 
-/** One minimal ACP session for the prompt — `opts.acp.peer` is the
- *  in-process test seam; production execs the tokenized `entry.command`
- *  argv (profile as a separate arg — no shell) and kills the child when
- *  the call settles. */
-async function acpRoundTrip(
+/** One connected ACP operation — `opts.acp.peer` is the in-process
+ *  test seam; production execs the tokenized `entry.command` argv
+ *  (profile as a separate arg — no shell) and kills the child when
+ *  the op settles. `op` gets the connected context. */
+async function withAcp<T>(
   by: string,
   entry: AcpEntry,
   opts: ProviderWireOpts,
-  promptText: string,
-  deadline: number
-): Promise<AcpReply> {
+  deadline: number,
+  op: (ctx: ClientContext) => Promise<T>
+): Promise<T> {
   const app = client({ name: 'bro' }).onRequest(
     'session/request_permission',
     denyPermission
   )
-  const op = (ctx: ClientContext): Promise<AcpReply> =>
-    acpOp(ctx, entry, opts, by, promptText, deadline)
   const peer = opts.acp?.peer
   let child: ChildProcess | undefined
   let tail = (): string => ''
   let spawnError: string | undefined
-  const run = (): Promise<AcpReply> => {
+  const run = (): Promise<T> => {
     if (peer !== undefined) {
       return app.connectWith(peer, op)
     }
@@ -348,6 +360,48 @@ async function acpRoundTrip(
   } finally {
     child?.kill('SIGKILL')
   }
+}
+
+/** One minimal ACP session for the prompt — the round-trip shape the
+ *  call surfaces share. */
+async function acpRoundTrip(
+  by: string,
+  entry: AcpEntry,
+  opts: ProviderWireOpts,
+  promptText: string,
+  deadline: number
+): Promise<AcpReply> {
+  return withAcp(by, entry, opts, deadline, (ctx) =>
+    acpOp(ctx, entry, opts, by, promptText, deadline)
+  )
+}
+
+/** The catalog surface — session/new's configOptions carries the
+ *  agent's own model option; its `options` list IS the model picker
+ *  `devin acp`/`kilo acp`/… would render. An agent advertising no
+ *  model option returns an empty list (not an error — an agent may
+ *  simply not expose model selection). */
+export async function acpModels(
+  by: string,
+  entry: AcpEntry,
+  opts: ProviderWireOpts = {},
+  deadline = Date.now() + 30_000
+): Promise<{ value: string; name?: string }[]> {
+  return withAcp(by, entry, opts, deadline, async (ctx) => {
+    const { session } = await acpSession(ctx, opts, by, deadline)
+    try {
+      const opt = (session.newSessionResponse.configOptions ?? []).find(
+        (o) => o.category === 'model'
+      )
+      return (opt?.options ?? []).flatMap((o) =>
+        typeof o.value === 'string'
+          ? [{ value: o.value, ...(typeof o.name === 'string' ? { name: o.name } : {}) }]
+          : []
+      )
+    } finally {
+      session.dispose()
+    }
+  })
 }
 
 /** The typed reply contract — the agent's message text IS the

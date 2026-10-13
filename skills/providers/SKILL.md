@@ -59,6 +59,26 @@ can serve.
 - An `acp` entry's call grade is decided by the served model —
   `typesafe/jev-*` (or bare `jev-*`) is typed transport; anything else
   is prose and stamps `provider:<name>:prose` in `decidedBy`.
+- A `cli` entry's optional `models` is a shell template emitting one
+  model id per line — the catalog surface, e.g.
+  `"models": "opencode models"`. Absent = no enumerable catalog; a
+  pinned `model` still renders.
+
+## `bro providers models [name…]` — the catalog
+
+Renders every provider's model list as `<name>/<model-id>` — the
+uniform `provider/model` vocabulary hosts' pickers share (claude's
+`/bro:models` command wraps exactly this call). Source per kind:
+
+- `api` — the `models` allowlist keys (config-declared, offline).
+- `acp` — `session/new`'s model `configOptions`, enumerated live over
+  the protocol: the same list the agent's own model picker serves.
+- `cli` — the `models` template's stdout lines, plus the pinned
+  `model` deduped (a pinned model always renders — a provider never
+  prints silently empty).
+
+Named providers error loudly (`providers.<name> is not configured`);
+a failed provider warns and never stops the rest.
 
 ## Consumer wiring
 

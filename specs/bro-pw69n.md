@@ -24,6 +24,20 @@ A provider is not a backend: `--backend` still picks the transport
 connector (native/tmux/docker), the provider supplies the argv worker
 inside it (`bro acp-worker --command "devin acp" <promptFile>`).
 
+## `bro providers models` — the provider/model catalog
+
+Every host's model picker needs one answer: which models exist, named
+as `<provider>/<model-id>`. `bro providers models [name…]` renders the
+union across the registry — `api` entries enumerate their `models`
+allowlist, `acp` entries enumerate `session/new` model `configOptions`
+live over the protocol (devin acp's picker list == bro's list), `cli`
+entries run a configured `models` template (`"models": "opencode
+models"`) plus their pinned `model` deduped.
+
+Claude reaches the same surface natively: `commands/models.md` ships
+`/bro:models` — no host-specific wiring, the command shells out to
+`bro providers models`.
+
 ## e2e evidence
 
 A live `bro self dogfood run core-workflow --provider devin-acp` must
