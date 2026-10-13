@@ -370,7 +370,9 @@ async function advanceRun(
       const analystBead = taskStoreAt(beads).create({
         title: `dogfood analyst ${fresh.scenario} ${basename(rdir)}`,
         description: `Analyst pass of ${basename(rdir)} — verdict writer.`,
-        type: 'task',
+        // chore = harness bookkeeping — `bro spec check` exempts it;
+        // task-type scaffolding beads turn every verdict ISSUES
+        type: 'chore',
         priority: 2,
       })
       const info = await spawnStepAgent(dir, env, {
@@ -456,7 +458,7 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
     const bead = taskStoreAt(prov.beads).create({
       title: `dogfood ${name} ${runId}`,
       description: `Dogfood run ${runId} of scenario ${name} — runner claim.`,
-      type: 'task',
+      type: 'chore',
       priority: 2,
     })
     state.bead = bead.id
