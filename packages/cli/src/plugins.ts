@@ -485,6 +485,7 @@ export const PLUGINS: BroPlugin[] = [
   }),
   definePlugin({
     name: 'providers',
+    group: 'self',
     summary: 'Provider registry — models catalog as <provider>/<model> [name…]',
     run: runProvidersCommand,
     skill: 'providers',
