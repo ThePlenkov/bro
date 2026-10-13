@@ -212,8 +212,8 @@ The verdict file is the artifact — keep it tight.`
 function provisionRepo(): { repo: string; beads: string; initErr: string | null } {
   const repo = mkdtempSync(join(tmpdir(), 'bro-dogfood-'))
   const beads = join(repo, '.beads')
-  execFileSync('git', ['init', '-q', '-b', 'main', repo])
-  execFileSync('git', [
+  execFileSync('git', ['init', '-q', '-b', 'main', repo]) // NOSONAR — PATH lookup is the contract
+  execFileSync('git', [ // NOSONAR — PATH lookup is the contract
     '-C',
     repo,
     // identity pinned — a scratch must never depend on ambient
@@ -233,7 +233,7 @@ function provisionRepo(): { repo: string; beads: string; initErr: string | null 
   // the step-bead create's failure so the real cause is never buried
   let initErr: string | null = null
   try {
-    execFileSync('bd', ['init', '--stealth'], { cwd: repo, stdio: 'pipe' })
+    execFileSync('bd', ['init', '--stealth'], { cwd: repo, stdio: 'pipe' }) // NOSONAR — PATH lookup is the contract
   } catch (err) {
     initErr = err instanceof Error ? (err.message.split('\n')[0] ?? err.message) : String(err)
   }
