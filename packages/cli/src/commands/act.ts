@@ -9,8 +9,9 @@
  */
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { basename, dirname } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import {
+  acquireFileLock,
   emitLifecycle,
   ensureAuth,
   facade,
@@ -412,6 +413,27 @@ export async function respawnWatcher(dir: string, plan: RearmPlan): Promise<numb
   return undefined
 }
 
+/** `<git-common>/bro/act-rearm.lock` — serializes the plan→respawn
+ *  critical section across `act rearm` and `fleet resume` callers:
+ *  two concurrent passes both seeing a dead marker would otherwise
+ *  each spawn a wait on the same PR. rearmWatches re-plans inside the
+ *  hold, so the second pass sees the first's swept files and does
+ *  nothing. A wedged lock degrades to no lock — an advisory pass must
+ *  not brick on residue. */
+function rearmLock(dir: string): () => void {
+  const common = gitCommonDir(dir)
+  if (common === null) {
+    return () => {}
+  }
+  try {
+    return acquireFileLock(join(common, 'bro', 'act-rearm.lock'), {
+      label: 'act rearm lock',
+    })
+  } catch {
+    return () => {}
+  }
+}
+
 /** The rearm pass without its rendering — shared by `act rearm` and
  *  `fleet resume`: resolve the review host, probe each dead marker's
  *  PR, respawn a detached wait on every still-open one, sweep +
@@ -427,7 +449,9 @@ export async function rearmPass(
   kept: Array<{ pr: number; reason: string }>
   link: (pr: number) => string
 }> {
-  const rev = reviewHost(undefined, loadBroConfig().connectors)
+  // dir-scoped config — a linked worktree may carry a different
+  // committed bro.config than the checkout the watches live under
+  const rev = reviewHost(undefined, loadBroConfig(dir).connectors)
   const repo = await (rev.resolveRepoAsync === undefined
     ? Promise.resolve(rev.resolveRepo([]))
     : rev.resolveRepoAsync([]))
@@ -442,11 +466,17 @@ export async function rearmPass(
     metas.set(pr, meta)
     return meta.state === 'OPEN'
   }
-  const res = await rearmWatches({
-    dir,
-    isOpen,
-    respawn: dry ? undefined : (plan) => respawnWatcher(dir, plan),
-  })
+  const release = rearmLock(dir)
+  let res: Awaited<ReturnType<typeof rearmWatches>>
+  try {
+    res = await rearmWatches({
+      dir,
+      isOpen,
+      respawn: dry ? undefined : (plan) => respawnWatcher(dir, plan),
+    })
+  } finally {
+    release()
+  }
   if (!dry) {
     for (const s of res.settled) {
       if (s.bead !== undefined && metas.get(s.pr)?.state === 'MERGED') {
