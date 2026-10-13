@@ -29,6 +29,9 @@ import type {
   RequestPermissionResponse,
   SendRequestOptions,
   SessionConfigOption,
+  SessionUpdate,
+  StopReason,
+  ActiveSessionMessage,
 } from '@agentclientprotocol/sdk'
 import { isSystemoneFamily, JudgeUnavailable } from '@broject/core'
 import type {
@@ -411,6 +414,60 @@ export async function acpModels(
       return options
         .flatMap((o) => ('options' in o ? o.options : [o]))
         .map((o) => ({ value: String(o.value), name: o.name }))
+    } finally {
+      session.dispose()
+    }
+  })
+}
+
+/** One conversational turn — the conductor's primitive (bro-xeozo).
+ *  initialize → session/new → apply model → prompt → pump nextUpdate()
+ *  until `stop`. `onUpdate` gets every session/update AS IT ARRIVES —
+ *  the caller re-emits anthropic SSE per chunk; the final
+ *  PromptResponse comes back in the return. Session is disposed, the
+ *  spawned child killed, on settle — same lifecycle as every acp op. */
+export async function acpConverse(
+  by: string,
+  entry: AcpEntry,
+  opts: ProviderWireOpts,
+  promptText: string,
+  onUpdate: (update: SessionUpdate) => void,
+  deadline = Date.now() + 120_000
+): Promise<{ stopReason: StopReason; text: string; model: string }> {
+  return withAcp(by, entry, opts, deadline, async (ctx) => {
+    const { session, asAuthError, req } = await acpSession(ctx, opts, by, deadline)
+    try {
+      const model = await applyModel(
+        ctx,
+        session.sessionId,
+        session.newSessionResponse.configOptions ?? [],
+        by,
+        opts.model ?? entry.model,
+        req
+      )
+      const turn = session.prompt(promptText, req()).catch(asAuthError)
+      // the turn's completion also queues as a `stop` for nextUpdate —
+      // racing keeps a prompt-level failure from hanging the pump
+      const stopP = turn.then((response) => ({
+        kind: 'stop' as const,
+        stopReason: response.stopReason,
+        response,
+      }))
+      let text = ''
+      for (;;) {
+        const msg: ActiveSessionMessage = await Promise.race([
+          session.nextUpdate(),
+          stopP,
+        ])
+        if (msg.kind === 'stop') {
+          return { stopReason: msg.stopReason, text, model }
+        }
+        onUpdate(msg.update)
+        if (msg.update.sessionUpdate === 'agent_message_chunk') {
+          const c = msg.update.content
+          if (c.type === 'text') text += c.text
+        }
+      }
     } finally {
       session.dispose()
     }
