@@ -130,31 +130,8 @@ async function resumePass(main: string, dry: boolean): Promise<ResumeReport> {
     ? { rearmed: [], settled: [], kept: [], link: (pr) => `#${pr}` }
     : await rearmPass(main, dry)
 
-  // 3 — daemon: the session-checkpoint decision. `drive.json` is the
-  // durable want-marker (armed by `drive install`; `daemon.json` is
-  // only the transient spawn record) — a dead supervisor with a marker
-  // respawns via `supervisorUp` under `daemon.up.lock` with the marker
-  // re-checked inside. Live holder and never-armed repo are reports:
-  // resume restores recorded intent, it does not invent it.
-  const probe = daemonProbe(main)
-  const rearm = probe.live ? ({ kind: 'quiet' } as const) : driveRearm(main)
-  const up =
-    probe.live || rearm.kind === 'quiet' || dry
-      ? null
-      : supervisorUp(main, rearm.everySec, process.env, { requireMarker: true })
-  const daemon: ResumeReport['daemon'] = probe.live
-    ? { kind: 'live', pid: probe.pid! }
-    : rearm.kind === 'quiet' || up === null
-      ? rearm.kind === 'quiet'
-        ? { kind: 'unarmed' }
-        : { kind: 'would-respawn', everySec: rearm.everySec }
-      : up.kind === 'spawned'
-        ? { kind: 'respawned', pid: up.pid, everySec: rearm.everySec }
-        : up.kind === 'already'
-          ? { kind: 'live', pid: up.pid }
-          : // disarmed mid-pass (racing uninstall) or a worker-env leak
-            // past the guard — a report, not a failure
-            { kind: 'unarmed' }
+  // 3 — daemon: the session-checkpoint decision, extracted
+  const daemon = daemonLeg(main, dry)
 
   // 4 — loop: dead supervisor + dead run records are a report, not a
   // respawn — claiming the backlog is the operator's call
@@ -163,10 +140,51 @@ async function resumePass(main: string, dry: boolean): Promise<ResumeReport> {
     reapLoopRuns(main)
   }
 
-  // 5 — agents: dead pids read as lost/exited; degraded backends are
-  // reports too, never counted. A degraded backend with NO registry
-  // entries names state that probably never existed — suppressing it
-  // keeps the report honest instead of ambient-noise
+  // 5 — agents + 6 — worktrees
+  const agents = await agentsLeg(main)
+  const worktrees = dirtyWorktrees(main)
+
+  return { dryRun: dry, sweep, watch, daemon, loop: { holder, deadRuns }, agents, worktrees }
+}
+
+/** The daemon leg — the same decision a session checkpoint runs:
+ *  `drive.json` is the durable want-marker (armed by `drive install`;
+ *  `daemon.json` is only the transient spawn record), a dead
+ *  supervisor with a marker respawns via `supervisorUp` under
+ *  `daemon.up.lock` with the marker re-checked inside. A live holder
+ *  and a never-armed repo are reports — resume restores recorded
+ *  intent, it does not invent it. */
+function daemonLeg(main: string, dry: boolean): ResumeReport['daemon'] {
+  const probe = daemonProbe(main)
+  if (probe.live) {
+    return { kind: 'live', pid: probe.pid! }
+  }
+  // orchestrator-only already enforced by the command; 'quiet' here
+  // means no drive.json marker — the recorded intent does not exist
+  const rearm = driveRearm(main)
+  if (rearm.kind === 'quiet') {
+    return { kind: 'unarmed' }
+  }
+  if (dry) {
+    return { kind: 'would-respawn', everySec: rearm.everySec }
+  }
+  const up = supervisorUp(main, rearm.everySec, process.env, { requireMarker: true })
+  if (up.kind === 'spawned') {
+    return { kind: 'respawned', pid: up.pid, everySec: rearm.everySec }
+  }
+  if (up.kind === 'already') {
+    return { kind: 'live', pid: up.pid }
+  }
+  // disarmed mid-pass (a racing uninstall revoked the intent) or a
+  // worker-env leak past the guard — a report, not a failure
+  return { kind: 'unarmed' }
+}
+
+/** The agents leg — dead pids read as lost/exited; degraded backends
+ *  are reports too, never counted. A degraded backend with NO registry
+ *  entries names state that probably never existed — suppressing it
+ *  keeps the report honest instead of ambient-noise. */
+async function agentsLeg(main: string): Promise<AgentsReport> {
   const { backends } = await collectAgentBackends(main, loadAgentEnv(main))
   const regBackends = new Set(
     Object.values(readAgentRegistry(main)).map((e) => e.backend)
@@ -182,76 +200,99 @@ async function resumePass(main: string, dry: boolean): Promise<ResumeReport> {
       }
     }
   }
+  return agents
+}
 
-  // 6 — worktrees: uncommitted work the restart stranded
-  const worktrees = dirtyWorktrees(main)
+function watchLines(w: WatchReport, dry: boolean): string[] {
+  const lines: string[] = []
+  for (const r of w.rearmed) {
+    lines.push(
+      `resume: watch ${w.link(r.pr)} — ` +
+        (dry ? 'would respawn a watcher' : `watcher up (pid ${r.pid})`)
+    )
+  }
+  for (const s of w.settled) {
+    lines.push(`resume: watch ${w.link(s.pr)} — settled — marker swept`)
+  }
+  for (const k of w.kept) {
+    lines.push(`resume: watch ${w.link(k.pr)} — kept — ${k.reason}`)
+  }
+  return lines
+}
 
-  return { dryRun: dry, sweep, watch, daemon, loop: { holder, deadRuns }, agents, worktrees }
+function daemonLine(d: ResumeReport['daemon']): string | null {
+  switch (d.kind) {
+    case 'live':
+      return `resume: daemon — already supervising (pid ${d.pid})`
+    case 'unarmed':
+      return null
+    case 'would-respawn':
+      return `resume: daemon — would revive (every ${d.everySec}s)`
+    case 'respawned':
+      return `resume: daemon — revived (pid ${d.pid}, every ${d.everySec}s)`
+  }
+}
+
+function loopLine(l: LoopReport, dry: boolean): string | null {
+  const dead = l.holder.pid !== null && !l.holder.alive
+  if (!dead && l.deadRuns.length === 0) {
+    return null
+  }
+  const bits: string[] = []
+  if (dead) {
+    bits.push(`supervisor dead (was pid ${l.holder.pid})`)
+  }
+  if (l.deadRuns.length > 0) {
+    bits.push(
+      `${l.deadRuns.length} dead run record(s)` +
+        (dry ? '' : ' reaped') +
+        `: ${l.deadRuns.map((r) => r.slug).join(', ')}`
+    )
+  }
+  return `resume: loop — ${bits.join('; ')} — restart with \`bro flow loop\``
+}
+
+function agentsLine(a: AgentsReport): string | null {
+  if (a.dead.length === 0 && a.degraded.length === 0) {
+    return null
+  }
+  const ids = a.dead.map((d) => `${d.id}:${d.state}`).join(', ')
+  const dead =
+    a.dead.length === 0
+      ? 'no dead registry entries'
+      : `${a.dead.length} dead registry entr${a.dead.length === 1 ? 'y' : 'ies'} (${ids}) — \`bro fleet agents prune\` sweeps, \`bro fleet agents up <step>\` respawns`
+  const deg = a.degraded.length === 0 ? '' : `; degraded: ${a.degraded.join('; ')}`
+  return `resume: agents — ${dead}${deg}`
+}
+
+function worktreeLine(ws: ResumeReport['worktrees']): string | null {
+  if (ws.length === 0) {
+    return null
+  }
+  return (
+    `resume: worktrees — ${ws.length} dirty tree(s): ` +
+    ws.map((w) => `${basename(w.path)} (${w.dirty} files)`).join(', ')
+  )
 }
 
 function reportLines(rep: ResumeReport): string[] {
   const lines: string[] = []
-  const dry = rep.dryRun
   // janitorLine already inflects the verb — "janitor: would reap …" in
   // dry-run — the sweep line passes through as-is
-  if (rep.sweep !== null && rep.sweep.didWork) {
+  if (rep.sweep?.didWork === true) {
     lines.push(`resume: sweep — ${rep.sweep.line}`)
   }
-  for (const r of rep.watch.rearmed) {
-    lines.push(
-      `resume: watch ${rep.watch.link(r.pr)} — ` +
-        (dry ? 'would respawn a watcher' : `watcher up (pid ${r.pid})`)
-    )
-  }
-  for (const s of rep.watch.settled) {
-    lines.push(`resume: watch ${rep.watch.link(s.pr)} — settled — marker swept`)
-  }
-  for (const k of rep.watch.kept) {
-    lines.push(`resume: watch ${rep.watch.link(k.pr)} — kept — ${k.reason}`)
-  }
-  switch (rep.daemon.kind) {
-    case 'live':
-      lines.push(`resume: daemon — already supervising (pid ${rep.daemon.pid})`)
-      break
-    case 'unarmed':
-      break
-    case 'would-respawn':
-      lines.push(`resume: daemon — would revive (every ${rep.daemon.everySec}s)`)
-      break
-    case 'respawned':
-      lines.push(`resume: daemon — revived (pid ${rep.daemon.pid}, every ${rep.daemon.everySec}s)`)
-      break
-  }
-  const loopDead = rep.loop.holder.pid !== null && !rep.loop.holder.alive
-  if (loopDead || rep.loop.deadRuns.length > 0) {
-    const bits: string[] = []
-    if (loopDead) {
-      bits.push(`supervisor dead (was pid ${rep.loop.holder.pid})`)
+  lines.push(...watchLines(rep.watch, rep.dryRun))
+  const rest = [
+    daemonLine(rep.daemon),
+    loopLine(rep.loop, rep.dryRun),
+    agentsLine(rep.agents),
+    worktreeLine(rep.worktrees),
+  ]
+  for (const l of rest) {
+    if (l !== null) {
+      lines.push(l)
     }
-    if (rep.loop.deadRuns.length > 0) {
-      bits.push(
-        `${rep.loop.deadRuns.length} dead run record(s)` +
-          (dry ? '' : ' reaped') +
-          `: ${rep.loop.deadRuns.map((r) => r.slug).join(', ')}`
-      )
-    }
-    lines.push(`resume: loop — ${bits.join('; ')} — restart with \`bro flow loop\``)
-  }
-  if (rep.agents.dead.length > 0 || rep.agents.degraded.length > 0) {
-    const dead = rep.agents.dead.map((a) => `${a.id}:${a.state}`).join(', ')
-    lines.push(
-      `resume: agents — ` +
-        (rep.agents.dead.length > 0
-          ? `${rep.agents.dead.length} dead registry entr${rep.agents.dead.length === 1 ? 'y' : 'ies'} (${dead}) — \`bro fleet agents prune\` sweeps, \`bro fleet agents up <step>\` respawns`
-          : 'no dead registry entries') +
-        (rep.agents.degraded.length > 0 ? `; degraded: ${rep.agents.degraded.join('; ')}` : '')
-    )
-  }
-  if (rep.worktrees.length > 0) {
-    lines.push(
-      `resume: worktrees — ${rep.worktrees.length} dirty tree(s): ` +
-        rep.worktrees.map((w) => `${basename(w.path)} (${w.dirty} files)`).join(', ')
-    )
   }
   if (lines.length === 0) {
     lines.push('resume: nothing to resume — every recorded process is alive')
